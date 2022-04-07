@@ -1,0 +1,11 @@
+name: genome-loader
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.7.*
+  - h5py
+  - pysam
+  - numpy
+  - pandas

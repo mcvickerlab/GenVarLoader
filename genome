@@ -1,0 +1,103 @@
+#!/usr/bin/env python
+
+from pathlib import Path
+import sys
+import argparse
+
+
+#TODO MAIN EXECUTABLE
+def parse_write(args):
+    from write_h5 import write_genome_h5
+
+    write_genome_h5(args.input, args.directory, h5_name=args.name, chrom_list=args.chroms)
+
+
+def parse_haplotypes(args):
+    from allele_ops import write_hap_h5
+
+    write_hap_h5(args.input, args.genotypes, args.sample,
+     args.directory, h5_name=args.name, chrom_list=args.chroms)
+
+
+
+def validate_out(args):
+
+    if args.output:
+        args.directory = str(Path(args.output).parent)
+        args.name = str(Path(args.output).name)
+
+    elif not args.name:
+        args.name = f"{Path(args.input).stem.split('.')[0]}.h5"
+
+    # Validate file extension
+    valid_suffixes = [".h5", ".hdf5", ".hdf", ".he5"]
+    if "".join(Path(args.name).suffixes).lower() not in valid_suffixes:
+        args.name = f"{Path(args.name).stem.split('.')[0]}.h5"
+
+    
+    return args
+
+
+def parse_cmd():
+    parent_parser = argparse.ArgumentParser(add_help=False)
+
+    out_parser = parent_parser.add_mutually_exclusive_group(required=True)
+    out_parser.add_argument("-o", "--output", help="Output h5 file and path")
+    out_parser.add_argument("-d", "--directory", help="Output directory")
+
+    parent_parser.add_argument("-n", "--name",
+     help="Output file if --directory given, ignored if using --output flag. Defaults to input name")
+
+    parser = argparse.ArgumentParser()
+
+    # Subparser options
+    subparser = parser.add_subparsers(dest="command")
+
+    # Parser for writing H5
+    write_parser = subparser.add_parser("write", parents=[parent_parser])
+    write_parser.add_argument("input", help="Sequence data to write to H5")
+
+    write_parser.add_argument("-c", "--chroms", "--contigs", nargs="*",
+     help="Chromosomes to write. Writes all by default")
+    
+    # Parser for writing haplotypes
+    hap_parser = subparser.add_parser("haplotypes", parents=[parent_parser])
+    hap_parser.add_argument("input", help="Onehot-Encoded HDF5 Genome")
+    hap_parser.add_argument("-g", "--genotypes", required=True, help="Genotype VCF File")
+    hap_parser.add_argument("-s", "--sample", required=True, help="Sample name in VCF")
+
+    hap_parser.add_argument("-c", "--chroms", "--contigs", nargs="*",
+     help="Chromosomes to write. Writes all by default")
+
+    args = parser.parse_args()
+
+    # Validate arguments
+    args = validate_out(args)
+
+    return args
+
+
+def run(args):
+    command = args.command
+
+    if command == "write":
+        parse_write(args)
+    
+    elif command == "haplotypes":
+        parse_haplotypes(args)
+
+
+def main():
+    root_dir = Path(__file__).parent
+    sys.path.append(str(root_dir / "src"))
+
+    args = parse_cmd()
+
+    print(args)
+    print()
+
+    run(args)
+
+
+if __name__ == '__main__':
+    main()
