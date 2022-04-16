@@ -1,11 +1,10 @@
 import timeit
-from pathlib import Path
 
 import h5py
 import numpy as np
 import pandas as pd
 
-from pysam import VariantFile, FastaFile
+from pysam import FastaFile
 
 
 def array_to_onehot(seq_array, base_list):
@@ -70,9 +69,9 @@ def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None):
             
             onehot_dict[chrom] = encode_sequence(seq_array, encode_spec)
             
-            print(f"Encoded {chrom} in {timeit.default_timer() - start_chrom} seconds!")
+            print(f"Encoded {chrom} in {timeit.default_timer() - start_chrom:.2f} seconds!")
                 
-    print(f"Finished in {timeit.default_timer() - start_time} seconds!")
+    print(f"Finished in {timeit.default_timer() - start_time:.2f} seconds!")
     return onehot_dict
 
 
@@ -100,8 +99,8 @@ def encode_from_h5(in_h5, chrom_list=None, encode_spec=None):
             
             onehot_dict[chrom] = encode_sequence(file[chrom]["sequence"][:], encode_spec)
             
-            print(f"Encoded {chrom} in {timeit.default_timer() - start_chrom} seconds!")
+            print(f"Encoded {chrom} in {timeit.default_timer() - start_chrom:.2f} seconds!")
 
-        print(f"Finished in {timeit.default_timer() - start_time} seconds!")
+        print(f"Finished in {timeit.default_timer() - start_time:.2f} seconds!")
         return onehot_dict
 

@@ -1,5 +1,4 @@
 import timeit
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -40,7 +39,7 @@ def get_chrom_hap(seq_matrix, snp_df, chrom, allele_dict):
     seq_matrix[pos_array, p1_array] = 1
     p2_matrix[pos_array, p2_array] = 1
     
-    print(f"Created {chrom} data in {timeit.default_timer() - start_hap} seconds!")
+    print(f"Created {chrom} data in {timeit.default_timer() - start_hap:.2f} seconds!")
     return seq_matrix, p2_matrix
 
 
@@ -65,7 +64,7 @@ def get_encoded_haps(onehot_dict, in_vcf, sample, chrom_list=None, encode_spec=N
 
         else:
             print(f"{chrom} not found in onehot data!")
-    print(f"Processed haplotype data in {timeit.default_timer() - start_time} seconds!")
+    print(f"Processed haplotype data in {timeit.default_timer() - start_time:.2f} seconds!")
     
     return hap1_dict, hap2_dict
 

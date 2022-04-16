@@ -5,16 +5,28 @@ import sys
 import argparse
 
 
-#TODO MAIN EXECUTABLE
+# TODO MAIN EXECUTABLE
 def parse_writefasta(args):
     from write_h5 import write_genome_seq, write_encoded_genome
 
     if args.encode:
         write_encoded_genome(args.input, args.directory, h5_name=args.name,
-         chrom_list=args.chroms, encode_spec=args.spec)
+                             chrom_list=args.chroms, encode_spec=args.spec)
     else:
         write_genome_seq(args.input, args.directory,
-         h5_name=args.name, chrom_list=args.chroms)
+                         h5_name=args.name, chrom_list=args.chroms)
+
+
+def parse_writedepth(args):
+    from write_h5 import write_read_depth
+    write_read_depth(args.input, args.directory, h5_name=args.name,
+                     chrom_list=args.chroms, chrom_lens=args.lens)
+
+
+def parse_writecoverage(args):
+    from write_h5 import write_allele_coverage
+    write_allele_coverage(args.input, args.directory,
+                          h5_name=args.name, chrom_list=args.chroms)
 
 
 def validate_args(args):
@@ -31,17 +43,27 @@ def validate_args(args):
     if "".join(Path(args.name).suffixes).lower() not in valid_suffixes:
         args.name = f"{Path(args.name).stem.split('.')[0]}.h5"
 
+    # Validate writefasta
     if args.command == "writefasta":
         if args.spec:
 
             if not args.encode:
                 return f"Encoding specification given without --encode flag!"
-            
+
             if not (args.spec).isalpha():
                 return f"Spec: '{args.spec}' contains non-characters!"
 
             if len(set(args.spec)) != len(args.spec):
                 return f"Spec: '{args.spec}' can't contain duplicate characters!"
+
+    # Validate writedepth
+    if args.command == "writedepth":
+
+        if args.lens:
+            if not args.chroms:
+                print("WARNING: Lengths ignored, provided w/o chroms")
+            elif len(args.chroms) != len(args.lens):
+                return f"Number of chroms({len(args.chroms)}) and lengths don't match({len(args.lens)})"
 
     return args
 
@@ -54,21 +76,40 @@ def parse_cmd():
     out_parser.add_argument("-d", "--directory", help="Output directory")
 
     parent_parser.add_argument("-n", "--name",
-     help="Output file if --directory given, ignored if using --output flag. Defaults to input name")
+                               help="Output file if --directory given, ignored if using --output flag. Defaults to input name")
 
     parser = argparse.ArgumentParser()
 
     # Subparser options
     subparser = parser.add_subparsers(dest="command")
 
-    # Parser for writing H5
-    writefa_parser = subparser.add_parser("writefasta", parents=[parent_parser])
+    # Parser for writing fasta to H5
+    writefa_parser = subparser.add_parser(
+        "writefasta", parents=[parent_parser])
     writefa_parser.add_argument("input", help="Fasta file to write to H5")
 
-    writefa_parser.add_argument("-c", "--chroms", "--contigs", nargs="*", help="Chromosomes to write. Writes all by default")
-    writefa_parser.add_argument("-e", "--encode", "-onehot", action="store_true", help="Write onehot-encoded genome")
+    writefa_parser.add_argument("-c", "--chroms", "--contigs",
+                                nargs="*", help="Chromosomes to write. Writes all by default")
+    writefa_parser.add_argument("-e", "--encode", "-onehot",
+                                action="store_true", help="Write onehot-encoded genome")
     writefa_parser.add_argument("-s", "--spec", "--order", type=str,
-     help="Ordered string of non-repeating chars. Denotes encoded bases and order (ie: ACGT, Default: ACGTN)")
+                                help="Ordered string of non-repeating chars. Denotes encoded bases and order (ie: ACGT, Default: ACGTN)")
+
+    # Parsers for writing BAM to H5
+    depth_parser = subparser.add_parser("writedepth", parents=[parent_parser])
+    depth_parser.add_argument("input", help="BAM file to write to H5")
+
+    depth_parser.add_argument("-c", "--chroms", "--contigs", nargs="*",
+                              help="Chromosomes to write. Writes all by default")
+    depth_parser.add_argument("-l", "--lens", "--lengths", "--chromlens", type=int,
+                              nargs="*", help="Lengths of provided chroms (Auto retrieved if not provided)")
+
+    cover_parser = subparser.add_parser(
+        "writecoverage", parents=[parent_parser])
+    cover_parser.add_argument("input", help="BAM file to write to H5")
+
+    cover_parser.add_argument("-c", "--chroms", "--contigs", nargs="*",
+                              help="Chromosomes to write. Writes all by default")
 
     args = parser.parse_args()
 
@@ -86,8 +127,11 @@ def parse_cmd():
 def run(args):
     command = args.command
 
-    if command == "writefasta":
-        parse_writefasta(args)
+    func_dict = {"writefasta": parse_writefasta,
+                 "writedepth": parse_writedepth,
+                 "writecoverage": parse_writecoverage}
+
+    func_dict[command](args)
 
 
 def main():
