@@ -9,6 +9,20 @@ from pysam.libcalignmentfile import AlignmentFile
 
 
 def get_read_depth(in_bam, chrom_list=None, chrom_lens=None):
+    """Retrieve read depths from a BAM file
+
+    :param in_bam: BAM file to find read depths for
+    :type in_bam: str
+    :param chrom_list: Chromosomes to parse, defaults to ALL chroms
+    :type chrom_list: list of str, optional
+    :param chrom_lens: (Manual input not recommended!)
+                        Lengths of chroms given in same order of chrom_list,
+                        defaults to AUTO for chroms in chrom_list
+    :type chrom_lens: list of int, optional
+    :return: Dictionary with keys: [chrom] and array(0-based) 
+                                    with read depth per pos
+    :rtype: dict of np.ndarray
+    """
     start_time = timeit.default_timer()
 
     depth_dict = {}
@@ -59,6 +73,16 @@ def get_read_depth(in_bam, chrom_list=None, chrom_lens=None):
 
 
 def get_allele_coverage(in_bam, chrom_list=None):
+    """Retrieve per-allele coverage from BAM file
+
+    :param in_bam: BAM file to find read depths for
+    :type in_bam: str
+    :param chrom_list: Chromosomes to parse, defaults to ALL chroms
+    :type chrom_list: list of str, optional
+    :return: Dictionary with keys: [chrom] and 4xN matrix with row order A, C, G, T 
+             containing allelic coverage per pos(0-based)
+    :rtype: dict of np.ndarray
+    """
     start_time = timeit.default_timer()
 
     coverage_dict = {}

@@ -7,6 +7,18 @@ from pysam import VariantFile
 
 
 def load_vcf(in_vcf, chrom=None, sample=None):
+    """Retrieve SNP's from VCF as dataframe with columns: 'chrom', 'start', 'stop', 'ref', 'alt'
+    (If sample is given with phased VCF also includes columns 'phase1' and 'phase2')
+
+    :param in_vcf: VCF file to retrieve SNP's
+    :type in_vcf: str
+    :param chrom: Chromosomes to parse, defaults to ALL chroms
+    :type chrom: list of str, optional
+    :param sample: name in VCF to retrieve genotypes, defaults to None
+    :type sample: str, optional
+    :return: Dataframe containing SNP or SNP+GT data
+    :rtype: pd.DataFrame
+    """
 
     if sample:
         with VariantFile(in_vcf, "r") as vcf:

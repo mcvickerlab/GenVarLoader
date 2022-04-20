@@ -8,6 +8,9 @@ from pysam import FastaFile
 
 
 def array_to_onehot(seq_array, base_list):
+    """
+    HELPER CALLED BY encode_sequence()
+    """
     seq_array[np.isin(seq_array,
                       [b"A", b"C", b"G", b"T"], invert=True)] = b"N"  # Convert ambiguous
 
@@ -16,6 +19,9 @@ def array_to_onehot(seq_array, base_list):
 
 
 def parse_encode_list(encode_spec):
+    """
+    HELPER CALLED BY encode_sequence()
+    """
     if not encode_spec:
         encode_spec = [b"A", b"C", b"G", b"T", b"N"]
 
@@ -32,6 +38,15 @@ def parse_encode_list(encode_spec):
 
 
 def encode_sequence(seq_data, encode_spec=None):
+    """Encodes sequence data into one-hot encoded format
+
+    :param seq_data: Sequence data to encode
+    :type seq_data: str or numpy char-array
+    :param encode_spec: Bases and order to encode, defaults to 'ACGTN'
+    :type encode_spec: str or list of bases(str), optional
+    :return: One-Hot encoded sequence
+    :rtype: np.ndarray
+    """
 
     # Process sequence input
     if isinstance(seq_data, str):  # sequence input as string
@@ -50,6 +65,17 @@ def encode_sequence(seq_data, encode_spec=None):
 
 
 def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None):
+    """Create one-hot encoded data directly from fasta file
+
+    :param in_fasta: Fasta file to encode
+    :type in_fasta: str
+    :param chrom_list: Chromosomes to encode, defaults to ALL chroms
+    :type chrom_list: list of str, optional
+    :param encode_spec: Bases and order to encode, defaults to 'ACGTN'
+    :type encode_spec: str or list of bases(str), optional
+    :return: Dictionary with keys: [chrom] and one-hot encoded data
+    :rtype: dict of np.ndarray
+    """
 
     onehot_dict = {}
     start_time = timeit.default_timer()
@@ -78,6 +104,17 @@ def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None):
 
 
 def encode_from_h5(in_h5, chrom_list=None, encode_spec=None):
+    """Create one-hot encoded data from char-array encoded H5
+
+    :param in_h5: Char-Encoded H5 created using 'writefasta' command
+    :type in_h5: str
+    :param chrom_list: Chromosomes to encode, defaults to ALL chroms
+    :type chrom_list: list of str, optional
+    :param encode_spec: Bases and order to encode, defaults to 'ACGTN'
+    :type encode_spec: str or list of bases(str), optional
+    :return: Dictionary with keys: [chrom] and one-hot encoded data
+    :rtype: dict of np.ndarray
+    """
 
     if not h5py.is_hdf5(in_h5):
         raise ValueError("File is not valid HDF5")

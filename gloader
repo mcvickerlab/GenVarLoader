@@ -90,7 +90,7 @@ def parse_cmd():
 
     writefa_parser.add_argument("-c", "--chroms", "--contigs",
                                 nargs="*", help="Chromosomes to write. Writes all by default")
-    writefa_parser.add_argument("-e", "--encode", "-onehot",
+    writefa_parser.add_argument("-e", "--encode", "--onehot",
                                 action="store_true", help="Write onehot-encoded genome")
     writefa_parser.add_argument("-s", "--spec", "--order", type=str,
                                 help="Ordered string of non-repeating chars. Denotes encoded bases and order (ie: ACGT, Default: ACGTN)")

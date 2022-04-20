@@ -7,6 +7,9 @@ from load_data import load_vcf
 
 
 def parse_encode_dict(encode_spec):
+    """
+    HELPER CALLED BY get_encoded_haps()
+    """
     if not encode_spec:
         encode_spec = {"A": 0, "C": 1, "G": 2, "T": 3, "N": 4}
 
@@ -20,6 +23,9 @@ def parse_encode_dict(encode_spec):
 
 
 def get_chrom_hap(seq_matrix, snp_df, chrom, allele_dict):
+    """HELPER CALLED BY get_encoded_haps()
+    parses haplotypes per chromosome
+    """
     start_hap = timeit.default_timer()
 
     pos_df = snp_df.replace({"ref": allele_dict, "alt": allele_dict})
@@ -47,6 +53,22 @@ def get_chrom_hap(seq_matrix, snp_df, chrom, allele_dict):
 
 
 def get_encoded_haps(onehot_dict, in_vcf, sample, chrom_list=None, encode_spec=None):
+    """Uses snps from phased vcf-file to create individual haplotypes.
+    Creates one-hot encoded haplotypes from one-hot encoded data.
+
+    :param onehot_dict: onehot-dict from encode_from_fasta() or encode_from_h5()
+    :type onehot_dict: dict of np.ndarray
+    :param in_vcf: Phased-VCF file with samples and genotypes
+    :type in_vcf: str
+    :param sample: name in VCF, haplotypes created for this sample
+    :type sample: str
+    :param chrom_list: chroms to create encoded haps, defaults to onehot_dict.keys()
+    :type chrom_list: list of str, optional
+    :param encode_spec: Encode Spec of input data, defaults to 'ACGTN'
+    :type encode_spec: str or list of bases(str), optional
+    :return: tuple containing two dictionaries with one-hot encoded haplotypes
+    :rtype: dict of np.ndarray, dict of np.ndarray
+    """
     start_time = timeit.default_timer()
 
     encode_spec = parse_encode_dict(encode_spec)  # Process encode spec as dict
