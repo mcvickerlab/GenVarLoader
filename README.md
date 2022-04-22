@@ -23,10 +23,13 @@ conda env create -f environment.yml
     - [writedepth](#writedepth)
     - [writecoverage](#writecoverage)
 - [Python Functions](#python-functions)
-    - [encode_data.py](#encodedatapy)
-    - [get_encoded.py](#getencodedpy)
-    - [get_data.py](#getdatapy)
-    - [load_data.py](#loaddatapy)
+    - [encode_data.py](#encode_datapy)
+    - [get_encoded.py](#get_encodedpy)
+    - [get_data.py](#get_datapy)
+    - [load_data.py](#load_datapy)
+    - [load_h5.py](#load_h5py)
+
+&nbsp;
 
 ---
 
@@ -124,24 +127,30 @@ Specific argument level usage can be found as docstrings within scripts (Located
 
 &nbsp;
 ## encode_data.py
-Contains functions for creating one-hot encoded data
+Contains functions for creating one-hot encoded data.
 - **encode_sequence**: Encodes input data into one-hot encoded format
 - **encode_from_fasta**: Create one-hot encoded data directly from FASTA
 - **encode_from_h5**: Create one-hot encoded data from char-array encoded H5
 
 &nbsp;
 ## get_encoded.py
-Contains functions for loading, and transforming one-hot encoded data
+Contains functions for loading, and transforming one-hot encoded data.
 - **get_encoded_haps**: Creates one-hot encoded haplotypes from one-hot encoded data
 
 &nbsp;
 ## get_data.py
-Functions that retrieves non-encoded data from files
+Functions that retrieves non-encoded data from files.
 - **get_read_depth**: Retrieve read depths from a BAM file
 - **get_allele_coverage**: Retrieve per-allele coverage from BAM file
 
 &nbsp;
 ## load_data.py
-Functions that read non-encoded data from files
+Functions that read non-encoded data from files.
 - **load_vcf**: Read VCF and load SNP's/Genotypes into dataframe
 
+&nbsp;
+## load_h5.py
+Functions that load H5 data to python objects.
+- **load_onehot_h5**: Load onehot encoded genome from H5 to dictionary
+- **load_depth_h5**: Load read depths from H5 to dictionary
+- **load_coverage_h5**: Load allele coverage from H5 to dictionary
