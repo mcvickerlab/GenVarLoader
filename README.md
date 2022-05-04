@@ -16,6 +16,11 @@ Recommended installation through conda, and given environment
 conda env create -f environment.yml
 ```
 
+Then add the package to your path i.e. in your `.bashrc`:
+```bash
+export PATH=${PATH:+${PATH}:}/path/to/genome-loader
+```
+
 &nbsp;
 ## Table of Contents
 - [HDF5 Writers](#hdf5-writers)
