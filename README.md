@@ -18,7 +18,7 @@ conda env create -f environment.yml
 
 Then add the package to your path i.e. in your `.bashrc`:
 ```bash
-export PATH=${PATH:+${PATH}:}/path/to/genome-loader
+export PYTHONPATH=${PYTHONPATH:+${PYTHONPATH}:}/path/to/genome-loader
 ```
 
 &nbsp;
