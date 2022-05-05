@@ -3,7 +3,7 @@ import timeit
 import numpy as np
 import pandas as pd
 
-from load_data import load_vcf
+from .load_data import load_vcf
 
 
 def parse_encode_dict(encode_spec):

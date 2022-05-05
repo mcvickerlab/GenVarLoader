@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 from pysam import FastaFile
 
-from encode_data import parse_encode_list, encode_from_fasta
-from get_data import get_read_depth, get_allele_coverage
+from .encode_data import parse_encode_list, encode_from_fasta
+from .get_data import get_read_depth, get_allele_coverage
 
 # FASTA to H5 Writers
 def write_genome_seq(in_fasta, out_dir, h5_name=None, chrom_list=None):
