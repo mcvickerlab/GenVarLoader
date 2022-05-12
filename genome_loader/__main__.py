@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 from pathlib import Path
 from typing import List, Optional
 import typer
@@ -45,7 +43,7 @@ def writefasta(
         if len(set(spec)) != len(spec):
             raise ValueError(f"Spec: '{spec}' can't contain duplicate characters!")
 
-    from genome_loader.write_h5 import write_genome_seq, write_encoded_genome
+    from .write_h5 import write_genome_seq, write_encoded_genome
 
     if encode:
         write_encoded_genome(
@@ -92,7 +90,7 @@ def writedepth(
                 f"Number of chroms({len(chroms)}) and lengths don't match({len(lens)})"
             )
 
-    from genome_loader.write_h5 import write_read_depth
+    from .write_h5 import write_read_depth
 
     write_read_depth(
         str(input), str(directory), h5_name=name, chrom_list=chroms, chrom_lens=lens
@@ -116,7 +114,7 @@ def writecoverage(
     directory = output.parent
     name = output.name
 
-    from genome_loader.write_h5 import write_allele_coverage
+    from .write_h5 import write_allele_coverage
 
     write_allele_coverage(str(input), str(directory), h5_name=name, chrom_list=chroms)
 
