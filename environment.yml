@@ -9,3 +9,4 @@ dependencies:
   - pysam
   - numpy
   - pandas
+  - typer
