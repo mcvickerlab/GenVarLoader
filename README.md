@@ -8,6 +8,7 @@ Pipeline for efficient genomic data processing.
 - pysam
 - numpy
 - pandas
+- typer
 
 &nbsp;
 ## Installation
@@ -25,7 +26,7 @@ export PYTHONPATH=${PYTHONPATH:+${PYTHONPATH}:}/path/to/genome-loader
 ## Table of Contents
 - [HDF5 Writers](#hdf5-writers)
     - [writefasta](#writefasta)
-    - [writedepth](#writedepth)
+    - [writefrag](#writefrag)
     - [writecoverage](#writecoverage)
 - [Python Functions](#python-functions)
     - [encode_data.py](#encode_datapy)
@@ -72,19 +73,22 @@ gloader writefasta [FASTA] --output/--directory [OUT] {OPTIONS}
 - -n/--name: Output file if --directory given, ignored if using --output flag. Defaults to input fasta name
 
 &nbsp;
-## writedepth
-Writes BAM read depth into HDF5 file.
+## writefrag
+Writes BAM ATAC fragment depth into HDF5 file.
 
 &nbsp;
 **File Format**
 - Group: `[chrom]`
 - Dataset: `"depth"` - 0-based array with depth per position
-- Attributes: `"id"`- dataset name associated with file
+- Attributes:
+    - `"id"` - dataset name associated with file
+    - `"count_method"` - method used to count fragments
+
 
 &nbsp;
 **Usage**
 ```shell script
-gloader writedepth [BAM] --output/--directory [OUT] {OPTIONS}
+gloader writefrag [BAM] --output/--directory [OUT] {OPTIONS}
 ```
 
 **Required Arguments**
@@ -96,6 +100,11 @@ gloader writedepth [BAM] --output/--directory [OUT] {OPTIONS}
 - -c/--chroms: Chromosomes to write (Default: ALL)
 - -l/--lens: Lengths of provided chroms (Auto retrieved if not provided)
 - -n/--name: Output file if --directory given, ignored if using --output flag. Defaults to input fasta name
+- --ignore_offset: Don't offset Tn5 cut sites (+4 bp on + strand, -5 bp on - strand, 0-based)
+- --method: Method used to count fragment. Choice of `"cutsite"`|`"midpoint"`|`"fragment"` (Default: `"cutsite"`)
+    - `cutsite`: Count both Tn5 cut sites
+    - `midpoint`: Count the midpoint between Tn5 cut sites
+    - `fragment`: Count all positions between Tn5 cut sites
 
 &nbsp;
 ## writecoverage

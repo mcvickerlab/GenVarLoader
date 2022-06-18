@@ -43,7 +43,7 @@ def writefasta(
         if len(set(spec)) != len(spec):
             raise ValueError(f"Spec: '{spec}' can't contain duplicate characters!")
 
-    from .write_h5 import write_genome_seq, write_encoded_genome
+    from genome_loader.write_h5 import write_genome_seq, write_encoded_genome
 
     if encode:
         write_encoded_genome(
@@ -58,7 +58,7 @@ def writefasta(
 
 
 @app.command()
-def writedepth(
+def writefrag(
     output: Path = typer.Option(..., "-o", "--output", help="Output h5 file and path"),
     input: Path = typer.Argument(..., help="BAM file to write to H5"),
     chroms: Optional[List[str]] = typer.Option(
@@ -76,6 +76,9 @@ def writedepth(
         "--chromlens",
         help="Lengths of provided chroms (Auto retrieved if not provided)",
     ),
+    ignore_offset: bool = typer.Option(False, "--ignore_offset", help="Don't offset tn5 cutsites"),
+    count_method: str = typer.Option("cutsite", "--method", help="Counting method, Choice of 'cutsite', 'midpoint, 'fragment'")
+    
 ):
     if output.suffix not in {".h5", ".hdf5", ".hdf", ".he5"}:
         output.suffix = ".h5"
@@ -84,16 +87,27 @@ def writedepth(
 
     if lens:
         if not chroms:
-            print("WARNING: Lengths ignored, provided w/o chroms")
+            typer.echo("WARNING: Lengths ignored, provided w/o chroms")
         elif len(chroms) != len(lens):
-            return (
-                f"Number of chroms({len(chroms)}) and lengths don't match({len(lens)})"
-            )
+            typer.echo(f"Number of chroms({len(chroms)}) and lengths don't match({len(lens)})")
+            raise typer.Exit(code=1)
+    
+    if ignore_offset:
+        offset_tn5=False
+    else:
+        offset_tn5=True
 
-    from .write_h5 import write_read_depth
+    # Check for valid input
+    if count_method not in {"cutsite", "midpoint", "fragment"}:
+        typer.echo("Please input valid count method! ('cutsite', 'midpoint, 'fragment')")
+        raise typer.Exit(code=1)
 
-    write_read_depth(
-        str(input), str(directory), h5_name=name, chrom_list=chroms, chrom_lens=lens
+    from genome_loader.write_h5 import write_frag_depth
+
+    write_frag_depth(
+        str(input), str(directory), h5_name=name,
+        chrom_list=chroms, chrom_lens=lens,
+        offset_tn5=offset_tn5, count_method=count_method
     )
 
 
@@ -114,7 +128,7 @@ def writecoverage(
     directory = output.parent
     name = output.name
 
-    from .write_h5 import write_allele_coverage
+    from genome_loader.write_h5 import write_allele_coverage
 
     write_allele_coverage(str(input), str(directory), h5_name=name, chrom_list=chroms)
 

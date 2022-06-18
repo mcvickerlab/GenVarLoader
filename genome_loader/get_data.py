@@ -8,67 +8,86 @@ import pysam
 from pysam.libcalignmentfile import AlignmentFile
 
 
-def get_read_depth(in_bam, chrom_list=None, chrom_lens=None):
-    """Retrieve read depths from a BAM file
+# NEW METHOD TO REPLACE get_read_depth
+def get_frag_depth(
+    in_bam, 
+    chrom_list=None, chrom_lens=None, 
+    offset_tn5=True, count_method="cutsite"):
 
-    :param in_bam: BAM file to find read depths for
-    :type in_bam: str
-    :param chrom_list: Chromosomes to parse, defaults to ALL chroms
-    :type chrom_list: list of str, optional
-    :param chrom_lens: (Manual input not recommended!)
-                        Lengths of chroms given in same order of chrom_list,
-                        defaults to AUTO for chroms in chrom_list
-    :type chrom_lens: list of int, optional
-    :return: Dictionary with keys: [chrom] and array(0-based) 
-                                    with read depth per pos
-    :rtype: dict of np.ndarray
-    """
     start_time = timeit.default_timer()
-
+    
     depth_dict = {}
-    # Check if inputs valid
-    if not chrom_list or not chrom_lens:
-        with AlignmentFile(in_bam, "r") as bam:
+    
+    with AlignmentFile(in_bam, "r") as bam:
+
+        # Check valid chrom list and lengths
+        if not chrom_list or not chrom_lens:
             if not chrom_list:
                 chrom_list = list(bam.header.references)
-
-            chrom_lens = {chrom: bam.header.get_reference_length(chrom)
+            
+            chrom_lens = {chrom:bam.header.get_reference_length(chrom)
                           for chrom in chrom_list}
 
-    elif not isinstance(chrom_lens, dict):
-        chrom_lens = {chrom: clen for chrom,
-                      clen in zip(chrom_list, chrom_lens)}
-
-    # Create temp file for stdout processing
-    with tempfile.NamedTemporaryFile() as temp_file:
-
+        elif not isinstance(chrom_lens, dict):
+            chrom_lens = {chrom:clen for chrom, clen in zip(chrom_list, chrom_lens)}
+        
+        # Parse through chroms
         for chrom in chrom_list:
             start_chrom = timeit.default_timer()
 
-            pysam.depth("-r", chrom, "-o", temp_file.name,
-                        in_bam, catch_stdout=False)
+            curr_len = chrom_lens[chrom]
+            out_array = np.zeros(curr_len, dtype=np.uint16)
+            
+            read_cache = {}
 
-            depth_df = pd.read_csv(temp_file.name, sep="\t", header=None,
-                                   names=["chrom", "pos", "count"], usecols=["pos", "count"],
-                                   dtype={"pos": np.uint32, "count": np.uint16})
+            for read in bam.fetch(chrom):
 
-            pos_array = depth_df["pos"].to_numpy(copy=False)
-            count_array = depth_df["count"].to_numpy(copy=False)
+                if not read.is_proper_pair or read.is_secondary:
+                    continue
 
-            pos_array -= 1  # convert to 0 base index
-            count_array[np.where(count_array > 255)] = 255  # fit within 1 byte
+                if read.query_name not in read_cache:
+                    read_cache[read.query_name] = read
+                    continue
 
-            # make output array
-            out_array = np.zeros(chrom_lens[chrom], dtype=np.uint8)
-            out_array[pos_array] += count_array
+                # Forward and Reverse w/o r1 and r2
+                if read.is_reverse:
+                    forward_read = read_cache.pop(read.query_name)
+                    reverse_read = read
+                else:
+                    forward_read = read
+                    reverse_read = read_cache.pop(read.query_name)
 
+                # Shift read if accounting for offset
+                if offset_tn5:
+                    forward_start = forward_read.reference_start + 4
+                    reverse_end = reverse_read.reference_end - 5 # 0 based, 1 past aligned
+                else:
+                    forward_start = forward_read.reference_start
+                    reverse_end = reverse_read.reference_end
+                
+                # Check count method
+                if count_method == "cutsite":
+                    # Add cut sites to out_array
+                    out_array[[forward_start, (reverse_end-1)]] += 1
+                elif count_method == "midpoint":
+                    # Add midpoint to out_array
+                    out_array[int((forward_start+(reverse_end-1))/2)] += 1
+                elif count_method == "fragment":
+                    # Add range to out array
+                    out_array[forward_start:reverse_end] += 1
+                else:
+                    # Default method, currently cutsite
+                    out_array[forward_start:reverse_end] += 1 
+            
+            # Find int8 overflows
+            out_array[np.where(out_array > 255)] = 255
+            out_array = out_array.astype(np.uint8)
+            
             depth_dict[chrom] = out_array
+            
+            print(f"Counted {chrom} fragments in {timeit.default_timer() - start_chrom} seconds!")
 
-            print(
-                f"Counted {chrom} read-depth in {timeit.default_timer() - start_chrom:.2f} seconds!")
-
-    print(
-        f"Processed read-depth data in {timeit.default_timer() - start_time:.2f} seconds!")
+    print(f"Processed fragment data in {timeit.default_timer() - start_time} seconds!")
     return depth_dict
 
 

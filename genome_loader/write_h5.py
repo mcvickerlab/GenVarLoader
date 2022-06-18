@@ -7,7 +7,7 @@ import pandas as pd
 from pysam import FastaFile
 
 from .encode_data import parse_encode_list, encode_from_fasta
-from .get_data import get_read_depth, get_allele_coverage
+from .get_data import get_frag_depth, get_allele_coverage
 
 # FASTA to H5 Writers
 def write_genome_seq(in_fasta, out_dir, h5_name=None, chrom_list=None):
@@ -72,30 +72,36 @@ def write_encoded_genome(in_fasta, out_dir, h5_name=None, chrom_list=None, encod
 
 
 # BAM to H5 Writers
-def write_read_depth(in_bam, out_dir, h5_name=None, chrom_list=None, chrom_lens=None):
+
+# NEW METHOD TO REPLACE get_read_depth
+def write_frag_depth(
+    in_bam, out_dir, h5_name=None, 
+    chrom_list=None, chrom_lens=None, 
+    offset_tn5=True, count_method="cutsite"):
+
 
     if h5_name:
         out_h5 = str(Path(out_dir) / h5_name)
     else:
-        out_h5 = str(Path(out_dir) / "read_depths.h5")
-
+        out_h5 = str(Path(out_dir) / "frag_depths.h5")
+    
     # Get data using read depth function
-    depth_dict = get_read_depth(
-        in_bam, chrom_list=chrom_list, chrom_lens=chrom_lens)
-
+    depth_dict = get_frag_depth(in_bam, chrom_list=chrom_list,
+                                chrom_lens=chrom_lens, offset_tn5=offset_tn5,
+                                count_method=count_method)
+    
     start_write = timeit.default_timer()
     with h5py.File(out_h5, "w") as h5_file:
-
+        
         for chrom, depth_array in depth_dict.items():
             chrom_group = h5_file.require_group(chrom)
-            chrom_group.create_dataset(
-                "depth", data=depth_array, compression="gzip")
+            chrom_group.create_dataset("depth", data=depth_array, compression="gzip")
 
         h5_file.attrs["id"] = "depth"
-
-    print(
-        f"Finished writing in {timeit.default_timer() - start_write:.2f} seconds!")
-    print(f"Read-Depths written to {out_h5}")
+        h5_file.attrs["count_method"] = count_method
+        
+    print(f"Finished writing in {timeit.default_timer() - start_write} seconds!")
+    print(f"Frag-Depths written to {out_h5}")
 
 
 def write_allele_coverage(in_bam, out_dir, h5_name=None, chrom_list=None):
