@@ -8,7 +8,6 @@ Pipeline for efficient genomic data processing.
 - pysam
 - numpy
 - pandas
-- typer
 
 &nbsp;
 ## Installation
@@ -137,7 +136,7 @@ gloader writecoverage [BAM] --output/--directory [OUT] {OPTIONS}
 ## **Python Functions**
 Python functions for directly loading and parsing genome data.
 
-Specific argument level usage can be found as docstrings within scripts (Located in `src/`).
+Specific argument level usage can be found as docstrings within scripts (Located in `genome_loader/`).
 
 &nbsp;
 ## encode_data.py
@@ -154,7 +153,7 @@ Contains functions for loading, and transforming one-hot encoded data.
 &nbsp;
 ## get_data.py
 Functions that retrieves non-encoded data from files.
-- **get_read_depth**: Retrieve read depths from a BAM file
+- **get_frag_depth**: Retrieve fragment depths from a BAM file
 - **get_allele_coverage**: Retrieve per-allele coverage from BAM file
 
 &nbsp;

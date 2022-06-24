@@ -1,139 +1,153 @@
 from pathlib import Path
-from typing import List, Optional
-import typer
 import sys
+import argparse
 
-app = typer.Typer()
-
-
-@app.command()
-def writefasta(
-    output: Path = typer.Option(..., "-o", "--output", help="Output h5 file and path"),
-    input: Path = typer.Argument(..., help="Fasta file to write to H5"),
-    spec: Optional[str] = typer.Option(
-        ...,
-        "-s",
-        "--spec",
-        "--order",
-        help="Ordered string of non-repeating chars. Denotes encoded bases and order (ie: ACGT, Default: ACGTN)",
-    ),
-    chroms: Optional[List[str]] = typer.Option(
-        None,
-        "-c",
-        "--chroms",
-        "--contigs",
-        help="Chromosomes to write. Writes all by default",
-    ),
-    encode: bool = typer.Option(
-        False, "--encode/ ", "-e/ ", "--onehot/ ", help="Write onehot-encoded genome"
-    ),
-):
-    if output.suffix not in {".h5", ".hdf5", ".hdf", ".he5"}:
-        output.suffix = ".h5"
-    directory = output.parent
-    name = output.name
-
-    if spec:
-        if not encode:
-            raise ValueError(f"Encoding specification given without --encode flag!")
-
-        if not spec.isalpha():
-            raise ValueError(f"Spec: '{spec}' contains non-characters!")
-
-        if len(set(spec)) != len(spec):
-            raise ValueError(f"Spec: '{spec}' can't contain duplicate characters!")
-
+def parse_writefasta(args):
     from genome_loader.write_h5 import write_genome_seq, write_encoded_genome
 
-    if encode:
-        write_encoded_genome(
-            str(input),
-            str(directory),
-            h5_name=name,
-            chrom_list=chroms,
-            encode_spec=spec,
-        )
+    if args.encode:
+        write_encoded_genome(args.input, args.directory, h5_name=args.name,
+                             chrom_list=args.chroms, encode_spec=args.spec)
     else:
-        write_genome_seq(str(input), str(directory), h5_name=name, chrom_list=chroms)
+        write_genome_seq(args.input, args.directory,
+                         h5_name=args.name, chrom_list=args.chroms)
 
 
-@app.command()
-def writefrag(
-    output: Path = typer.Option(..., "-o", "--output", help="Output h5 file and path"),
-    input: Path = typer.Argument(..., help="BAM file to write to H5"),
-    chroms: Optional[List[str]] = typer.Option(
-        None,
-        "-c",
-        "--chroms",
-        "--contigs",
-        help="Chromosomes to write. Writes all by default",
-    ),
-    lens: Optional[List[int]] = typer.Option(
-        None,
-        "-l",
-        "--lens",
-        "--lengths",
-        "--chromlens",
-        help="Lengths of provided chroms (Auto retrieved if not provided)",
-    ),
-    ignore_offset: bool = typer.Option(False, "--ignore_offset", help="Don't offset tn5 cutsites"),
-    count_method: str = typer.Option("cutsite", "--method", help="Counting method, Choice of 'cutsite', 'midpoint, 'fragment'")
-    
-):
-    if output.suffix not in {".h5", ".hdf5", ".hdf", ".he5"}:
-        output.suffix = ".h5"
-    directory = output.parent
-    name = output.name
-
-    if lens:
-        if not chroms:
-            typer.echo("WARNING: Lengths ignored, provided w/o chroms")
-        elif len(chroms) != len(lens):
-            typer.echo(f"Number of chroms({len(chroms)}) and lengths don't match({len(lens)})")
-            raise typer.Exit(code=1)
-    
-    if ignore_offset:
-        offset_tn5=False
-    else:
-        offset_tn5=True
-
-    # Check for valid input
-    if count_method not in {"cutsite", "midpoint", "fragment"}:
-        typer.echo("Please input valid count method! ('cutsite', 'midpoint, 'fragment')")
-        raise typer.Exit(code=1)
-
+def parse_writefrag(args):
     from genome_loader.write_h5 import write_frag_depth
+    offset_tn5 = not args.ignore_offset # Negate args.ignore_offset
 
-    write_frag_depth(
-        str(input), str(directory), h5_name=name,
-        chrom_list=chroms, chrom_lens=lens,
-        offset_tn5=offset_tn5, count_method=count_method
-    )
+    write_frag_depth(args.input, args.directory,
+                     h5_name=args.name, chrom_list=args.chroms, 
+                     chrom_lens=args.lens, offset_tn5=offset_tn5, 
+                     count_method=args.method)
 
 
-@app.command()
-def writecoverage(
-    output: Path = typer.Option(..., "-o", "--output", help="Output h5 file and path"),
-    input: Path = typer.Argument(..., help="BAM file to write to H5"),
-    chroms: Optional[List[str]] = typer.Option(
-        None,
-        "-c",
-        "--chroms",
-        "--contigs",
-        help="Chromosomes to write. Writes all by default",
-    ),
-):
-    if output.suffix not in {".h5", ".hdf5", ".hdf", ".he5"}:
-        output.suffix = ".h5"
-    directory = output.parent
-    name = output.name
-
+def parse_writecoverage(args):
     from genome_loader.write_h5 import write_allele_coverage
+    write_allele_coverage(args.input, args.directory,
+                          h5_name=args.name, chrom_list=args.chroms)
 
-    write_allele_coverage(str(input), str(directory), h5_name=name, chrom_list=chroms)
+
+def validate_args(args):
+
+    if args.output:
+        args.directory = str(Path(args.output).parent)
+        args.name = str(Path(args.output).name)
+
+    elif not args.name:
+        args.name = f"{Path(args.input).stem.split('.')[0]}.h5"
+
+    # Validate file extension
+    valid_suffixes = [".h5", ".hdf5", ".hdf", ".he5"]
+    if "".join(Path(args.name).suffixes).lower() not in valid_suffixes:
+        args.name = f"{Path(args.name).stem.split('.')[0]}.h5"
+
+    # Validate writefasta
+    if args.command == "writefasta":
+        if args.spec:
+
+            if not args.encode:
+                return f"Encoding specification given without --encode flag!"
+
+            if not (args.spec).isalpha():
+                return f"Spec: '{args.spec}' contains non-characters!"
+
+            if len(set(args.spec)) != len(args.spec):
+                return f"Spec: '{args.spec}' can't contain duplicate characters!"
+
+    # Validate writefrag
+    if args.command == "writefrag":
+
+        if args.lens:
+            if not args.chroms:
+                print("WARNING: Lengths ignored, provided w/o chroms")
+            elif len(args.chroms) != len(args.lens):
+                return f"Number of chroms({len(args.chroms)}) and lengths don't match({len(args.lens)})"
+
+    return args
 
 
-if __name__ == "__main__":
+def parse_cmd():
+    parent_parser = argparse.ArgumentParser(add_help=False)
+
+    out_parser = parent_parser.add_mutually_exclusive_group(required=True)
+    out_parser.add_argument("-o", "--output", help="Output h5 file and path")
+    out_parser.add_argument("-d", "--directory", help="Output directory")
+
+    parent_parser.add_argument("-n", "--name",
+                               help="Output file if --directory given, ignored if using --output flag. Defaults to input name")
+
+    parser = argparse.ArgumentParser()
+
+    # Subparser options
+    subparser = parser.add_subparsers(dest="command")
+
+    # Parser for writing fasta to H5
+    writefa_parser = subparser.add_parser(
+        "writefasta", parents=[parent_parser])
+    writefa_parser.add_argument("input", help="Fasta file to write to H5")
+
+    writefa_parser.add_argument("-c", "--chroms", "--contigs",
+                                nargs="*", help="Chromosomes to write. Writes all by default")
+    writefa_parser.add_argument("-e", "--encode", "--onehot",
+                                action="store_true", help="Write onehot-encoded genome")
+    writefa_parser.add_argument("-s", "--spec", "--order", type=str,
+                                help="Ordered string of non-repeating chars. Denotes encoded bases and order (ie: ACGT, Default: ACGTN)")
+
+    # Parsers for writing BAM to H5
+    frag_parser = subparser.add_parser("writefrag", parents=[parent_parser])
+    frag_parser.add_argument("input", help="BAM file to write to H5")
+
+    frag_parser.add_argument("-c", "--chroms", "--contigs", nargs="*",
+                             help="Chromosomes to write. Writes all by default")
+    frag_parser.add_argument("-l", "--lens", "--lengths", "--chromlens", type=int,
+                             nargs="*", help="Lengths of provided chroms (Auto retrieved if not provided)")
+    frag_parser.add_argument("--ignore_offset", action='store_true',
+                             help="Don't offset tn5 cutsites")
+    frag_parser.add_argument("-m", "--method", "--count_method", type=str,
+                             choices=["cutsite", "midpoint", "fragment"], default="cutsite",
+                             help="Counting method, Choose from 'cutsite', 'midpoint, 'fragment'")
+
+    cover_parser = subparser.add_parser("writecoverage", parents=[parent_parser])
+    cover_parser.add_argument("input", help="BAM file to write to H5")
+    cover_parser.add_argument("-c", "--chroms", "--contigs", nargs="*",
+                              help="Chromosomes to write. Writes all by default")
+
+    args = parser.parse_args()
+
+    # Validate arguments
+    validate_out = validate_args(args)
+
+    if isinstance(validate_out, str):
+        parser.error(validate_out)
+    else:
+        args = validate_out
+
+    return args
+
+
+def run(args):
+    command = args.command
+
+    func_dict = {"writefasta": parse_writefasta,
+                 "writefrag": parse_writefrag,
+                 "writecoverage": parse_writecoverage}
+
+    func_dict[command](args)
+
+
+def main():
     root_dir = Path(__file__).parent
-    sys.path.append(str(root_dir.joinpath("genome_loader")))
-    app()
+    sys.path.append(str(root_dir / "src"))
+
+    args = parse_cmd()
+
+    # print(args) # Show Input values
+    # print()
+
+    run(args)
+
+
+if __name__ == '__main__':
+    main()

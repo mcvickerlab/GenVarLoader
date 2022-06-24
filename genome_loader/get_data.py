@@ -1,10 +1,6 @@
 import timeit
-import tempfile
 
 import numpy as np
-import pandas as pd
-
-import pysam
 from pysam.libcalignmentfile import AlignmentFile
 
 
