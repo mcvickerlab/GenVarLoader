@@ -139,7 +139,7 @@ def run(args):
 
 def main():
     root_dir = Path(__file__).parent
-    sys.path.append(str(root_dir / "src"))
+    sys.path.append(str(root_dir / "genome_loader"))
 
     args = parse_cmd()
 
