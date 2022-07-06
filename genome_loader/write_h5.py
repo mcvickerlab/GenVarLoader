@@ -43,7 +43,7 @@ def write_genome_seq(in_fasta, out_dir, h5_name=None, chrom_list=None):
     print(f"Genome character-arrays written to {out_h5}")
 
 
-def write_encoded_genome(in_fasta, out_dir, h5_name=None, chrom_list=None, encode_spec=None):
+def write_encoded_genome(in_fasta, out_dir, h5_name=None, chrom_list=None, encode_spec=None, ignore_case=True):
 
     if h5_name:
         out_h5 = str(Path(out_dir) / h5_name)
@@ -52,7 +52,8 @@ def write_encoded_genome(in_fasta, out_dir, h5_name=None, chrom_list=None, encod
 
     # Get data using encoding function
     onehot_dict = encode_from_fasta(
-        in_fasta, chrom_list=chrom_list, encode_spec=encode_spec)
+        in_fasta, chrom_list=chrom_list,
+        encode_spec=encode_spec, ignore_case=ignore_case)
 
     start_write = timeit.default_timer()
     with h5py.File(out_h5, "w") as h5_file:
@@ -100,7 +101,7 @@ def write_frag_depth(
         h5_file.attrs["id"] = "depth"
         h5_file.attrs["count_method"] = count_method
         
-    print(f"Finished writing in {timeit.default_timer() - start_write} seconds!")
+    print(f"Finished writing in {timeit.default_timer() - start_write:.2f} seconds!")
     print(f"Frag-Depths written to {out_h5}")
 
 

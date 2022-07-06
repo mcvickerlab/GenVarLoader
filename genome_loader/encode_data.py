@@ -37,25 +37,34 @@ def parse_encode_list(encode_spec):
     return encode_spec
 
 
-def encode_sequence(seq_data, encode_spec=None):
+def encode_sequence(seq_data, encode_spec=None, ignore_case=True):
     """Encodes sequence data into one-hot encoded format
 
     :param seq_data: Sequence data to encode
     :type seq_data: str or numpy char-array
     :param encode_spec: Bases and order to encode, defaults to 'ACGTN'
     :type encode_spec: str or list of bases(str), optional
+    :param ignore_case: Convert lowercase bases to upper, default True
+    :type ignore_case: bool, optional
     :return: One-Hot encoded sequence
     :rtype: np.ndarray
     """
 
     # Process sequence input
     if isinstance(seq_data, str):  # sequence input as string
+        if ignore_case:
+            seq_data = seq_data.upper()
+
         seq_data = np.fromiter(seq_data, count=len(seq_data), dtype="|S1")
 
     elif isinstance(seq_data, np.ndarray):  # seq data is numpy array
         if seq_data.dtype != "|S1":
             seq_data = seq_data.astype("|S1")
 
+        if ignore_case:
+            # Much faster to convert upper as string
+            seq_data = np.char.upper(seq_data)
+        
     else:
         raise TypeError("Please input as string or numpy array!")
 
@@ -64,7 +73,7 @@ def encode_sequence(seq_data, encode_spec=None):
     return array_to_onehot(seq_data, encode_spec)
 
 
-def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None):
+def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None, ignore_case=True):
     """Create one-hot encoded data directly from fasta file
 
     :param in_fasta: Fasta file to encode
@@ -73,6 +82,8 @@ def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None):
     :type chrom_list: list of str, optional
     :param encode_spec: Bases and order to encode, defaults to 'ACGTN'
     :type encode_spec: str or list of bases(str), optional
+    :param ignore_case: Convert lowercase bases to upper, default True
+    :type ignore_case: bool, optional
     :return: Dictionary with keys: [chrom] and one-hot encoded data
     :rtype: dict of np.ndarray
     """
@@ -90,11 +101,13 @@ def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None):
         for chrom in chrom_list:
             start_chrom = timeit.default_timer()
 
-            seq_array = np.fromiter(fasta.fetch(chrom),
-                                    count=fasta.get_reference_length(chrom),
-                                    dtype="|S1")
-
-            onehot_dict[chrom] = encode_sequence(seq_array, encode_spec)
+            # Update to ignore lowercase as string
+            if ignore_case:
+                fasta_seq = fasta.fetch(chrom).upper()
+            else:
+                fasta_seq = fasta.fetch(chrom)
+            
+            onehot_dict[chrom] = encode_sequence(fasta_seq, encode_spec, ignore_case=False)
 
             print(
                 f"Encoded {chrom} in {timeit.default_timer() - start_chrom:.2f} seconds!")
