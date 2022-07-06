@@ -33,6 +33,8 @@ def write_genome_seq(in_fasta, out_dir, h5_name=None, chrom_list=None):
             chrom_group = h5_file.require_group(chrom)
             chrom_group.create_dataset(
                 "sequence", data=seq_array, compression="gzip")
+            
+            h5_file[chrom].attrs["length"] = seq_array.shape[0]
 
             print(
                 f"Created {chrom} data in {timeit.default_timer() - start_chrom:.2f} seconds!")
@@ -62,6 +64,8 @@ def write_encoded_genome(in_fasta, out_dir, h5_name=None, chrom_list=None, encod
             chrom_group = h5_file.require_group(chrom)
             chrom_group.create_dataset(
                 "onehot", data=onehot, compression="gzip")
+
+            h5_file[chrom].attrs["length"] = onehot.shape[0]
 
         h5_file.attrs["id"] = "onehot"
         h5_file.attrs["encode_spec"] = [base.decode()
@@ -98,6 +102,8 @@ def write_frag_depth(
             chrom_group = h5_file.require_group(chrom)
             chrom_group.create_dataset("depth", data=depth_array, compression="gzip")
 
+            h5_file[chrom].attrs["length"] = depth_array.shape[0]
+
         h5_file.attrs["id"] = "depth"
         h5_file.attrs["count_method"] = count_method
         
@@ -122,6 +128,8 @@ def write_allele_coverage(in_bam, out_dir, h5_name=None, chrom_list=None):
             chrom_group = h5_file.require_group(chrom)
             chrom_group.create_dataset(
                 "coverage", data=cover_matrix, compression="gzip")
+            
+            h5_file[chrom].attrs["length"] = cover_matrix.shape[1]
 
         h5_file.attrs["id"] = "coverage"
 
