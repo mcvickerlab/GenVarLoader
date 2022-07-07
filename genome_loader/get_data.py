@@ -81,9 +81,9 @@ def get_frag_depth(
             
             depth_dict[chrom] = out_array
             
-            print(f"Counted {chrom} fragments in {timeit.default_timer() - start_chrom} seconds!")
+            print(f"Counted {chrom} fragments in {timeit.default_timer() - start_chrom:.2f} seconds!")
 
-    print(f"Processed fragment data in {timeit.default_timer() - start_time} seconds!")
+    print(f"Processed fragment data in {timeit.default_timer() - start_time:.2f} seconds!")
     return depth_dict
 
 

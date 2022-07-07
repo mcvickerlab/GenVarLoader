@@ -97,14 +97,20 @@ def write_frag_depth(
     
     start_write = timeit.default_timer()
     with h5py.File(out_h5, "w") as h5_file:
-        
+
+        total_frags = 0
         for chrom, depth_array in depth_dict.items():
             chrom_group = h5_file.require_group(chrom)
             chrom_group.create_dataset("depth", data=depth_array, compression="gzip")
 
             h5_file[chrom].attrs["length"] = depth_array.shape[0]
 
+            chrom_sum = int(np.sum(depth_array))
+            h5_file[chrom].attrs["sum"] = chrom_sum
+            total_frags += chrom_sum
+
         h5_file.attrs["id"] = "depth"
+        h5_file.attrs["total_sum"] = total_frags
         h5_file.attrs["count_method"] = count_method
         
     print(f"Finished writing in {timeit.default_timer() - start_write:.2f} seconds!")
