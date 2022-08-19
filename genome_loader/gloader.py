@@ -397,19 +397,35 @@ class GenomeLoader:
             Shape: (regions)
         length : uint32
             Length of all regions. A scalar value.
-        samples : Sequence[str], default None
+        samples : list[str], ndarray[str], default None
             A list of unique samples (no duplicates!).
 
         Returns
         -------
         Union[NDArray[np.bytes_], NDArray[np.uint8]]
             Array of sequences.
+
+        Examples
+        --------
+        >>> gl = GenomeLoader(ref_file_ohe_acgtn, vcf_file)
+        >>> chroms = np.array(['21', '20', '20'])
+        >>> starts = np.arange(3, dtype='u4')
+        >>> length = np.uint32(5)
+        >>> ref_seqs = gl.sel(chroms, starts, length)
+        >>> ref_seqs.shape
+        (3, 5, 5)
+        >>> samples = ['OCI-AML5', 'NCI-H660']
+        >>> consensus_seqs = gl.sel(chroms, starts, length, samples)
+        >>> consensus_seqs.shape
+        (3, 5, 4, 2, 5)
         """
         # input normalization and validation
-        length = np.uint32(length)  # type: ignore
         if starts.dtype.type != np.uint32:
             starts = starts.astype("u4")
             warnings.warn("Starts dtype was not uint32, casting.")
+        if not isinstance(length, np.uint32):
+            length = np.uint32(length)  # type: ignore
+            warnings.warn("Length dtype was not np.uint32, casting.")
         starts = starts - np.uint32(
             1
         )  # VCF positions are 1-indexed but h5 genome is 0-indexed
