@@ -1,9 +1,10 @@
-from pathlib import Path
-import sys
 import argparse
+import sys
+from pathlib import Path
+
 
 def parse_writefasta(args):
-    from genome_loader.write_h5 import write_genome_seq, write_encoded_genome
+    from genome_loader.write_h5 import write_encoded_genome, write_genome_seq
 
     if args.encode:
         write_encoded_genome(args.input, args.directory, h5_name=args.name,

@@ -1,0 +1,6 @@
+{
+    "embedding": "onehot",
+    "length": 5,
+    "ref_genome": "/cellar/users/dlaub/.local/pypkg/genome-loader/genome_loader/tests/data/grch38.20.21.ohe.ACGTN.h5",
+    "vcf": "/cellar/users/dlaub/.local/pypkg/genome-loader/genome_loader/tests/data/ccle_snp_wes.reduced.zarr"
+}

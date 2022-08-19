@@ -43,8 +43,8 @@ def get_chrom_hap(seq_matrix, snp_df, chrom, allele_dict):
     # Set positions to 0
     seq_matrix[pos_array] = 0
     p2_matrix = seq_matrix.copy()
-
-    seq_matrix[pos_array, p1_array] = 1
+    
+    seq_matrix[pos_array, p1_array] = 1 
     p2_matrix[pos_array, p2_array] = 1
 
     print(

@@ -1,0 +1,32 @@
+name: genome-loader
+channels:
+  - bioconda
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python>=3.7.*
+  - numpy
+  - pandas
+  - h5py
+  - sgkit
+  - bioconda::pysam
+  - bioconda::cyvcf2 # needed to read VCF with sgkit
+  - numba
+  - dask
+  - xarray
+  - zarr
+  # dev
+  - git
+  - pytest
+  - pytest-cases
+  - pytest-cov
+  - isort
+  - black
+  - mypy
+  - pre-commit
+  - conda-lock
+  - pipreqs
+platforms:
+  - linux-64
+  - osx-64
+category: dev
