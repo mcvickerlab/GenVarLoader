@@ -9,27 +9,41 @@ def parse_writefasta(args):
     from genome_loader.write_h5 import write_encoded_genome, write_genome_seq
 
     if args.encode:
-        write_encoded_genome(args.input, args.directory, h5_name=args.name,
-                             chrom_list=args.chroms, encode_spec=args.spec)
+        write_encoded_genome(
+            args.input,
+            args.directory,
+            h5_name=args.name,
+            chrom_list=args.chroms,
+            encode_spec=args.spec,
+        )
     else:
-        write_genome_seq(args.input, args.directory,
-                         h5_name=args.name, chrom_list=args.chroms)
+        write_genome_seq(
+            args.input, args.directory, h5_name=args.name, chrom_list=args.chroms
+        )
 
 
 def parse_writefrag(args):
     from genome_loader.write_h5 import write_frag_depth
-    offset_tn5 = not args.ignore_offset # Negate args.ignore_offset
 
-    write_frag_depth(args.input, args.directory,
-                     h5_name=args.name, chrom_list=args.chroms, 
-                     chrom_lens=args.lens, offset_tn5=offset_tn5, 
-                     count_method=args.method)
+    offset_tn5 = not args.ignore_offset  # Negate args.ignore_offset
+
+    write_frag_depth(
+        args.input,
+        args.directory,
+        h5_name=args.name,
+        chrom_list=args.chroms,
+        chrom_lens=args.lens,
+        offset_tn5=offset_tn5,
+        count_method=args.method,
+    )
 
 
 def parse_writecoverage(args):
     from genome_loader.write_h5 import write_allele_coverage
-    write_allele_coverage(args.input, args.directory,
-                          h5_name=args.name, chrom_list=args.chroms)
+
+    write_allele_coverage(
+        args.input, args.directory, h5_name=args.name, chrom_list=args.chroms
+    )
 
 
 def validate_args(args):
@@ -78,8 +92,11 @@ def parse_cmd():
     out_parser.add_argument("-o", "--output", help="Output h5 file and path")
     out_parser.add_argument("-d", "--directory", help="Output directory")
 
-    parent_parser.add_argument("-n", "--name",
-                               help="Output file if --directory given, ignored if using --output flag. Defaults to input name")
+    parent_parser.add_argument(
+        "-n",
+        "--name",
+        help="Output file if --directory given, ignored if using --output flag. Defaults to input name",
+    )
 
     parser = argparse.ArgumentParser()
 
@@ -87,35 +104,73 @@ def parse_cmd():
     subparser = parser.add_subparsers(dest="command")
 
     # Parser for writing fasta to H5
-    writefa_parser = subparser.add_parser(
-        "writefasta", parents=[parent_parser])
+    writefa_parser = subparser.add_parser("writefasta", parents=[parent_parser])
     writefa_parser.add_argument("input", help="Fasta file to write to H5")
 
-    writefa_parser.add_argument("-c", "--chroms", "--contigs",
-                                nargs="*", help="Chromosomes to write. Writes all by default")
-    writefa_parser.add_argument("-e", "--encode", "--onehot",
-                                action="store_true", help="Write onehot-encoded genome")
-    writefa_parser.add_argument("-s", "--spec", "--order", type=str,
-                                help="Ordered string of non-repeating chars. Denotes encoded bases and order (ie: ACGT, Default: ACGTN)")
+    writefa_parser.add_argument(
+        "-c",
+        "--chroms",
+        "--contigs",
+        nargs="*",
+        help="Chromosomes to write. Writes all by default",
+    )
+    writefa_parser.add_argument(
+        "-e",
+        "--encode",
+        "--onehot",
+        action="store_true",
+        help="Write onehot-encoded genome",
+    )
+    writefa_parser.add_argument(
+        "-s",
+        "--spec",
+        "--order",
+        type=str,
+        help="Ordered string of non-repeating chars. Denotes encoded bases and order (ie: ACGT, Default: ACGTN)",
+    )
 
     # Parsers for writing BAM to H5
     frag_parser = subparser.add_parser("writefrag", parents=[parent_parser])
     frag_parser.add_argument("input", help="BAM file to write to H5")
 
-    frag_parser.add_argument("-c", "--chroms", "--contigs", nargs="*",
-                             help="Chromosomes to write. Writes all by default")
-    frag_parser.add_argument("-l", "--lens", "--lengths", "--chromlens", type=int,
-                             nargs="*", help="Lengths of provided chroms (Auto retrieved if not provided)")
-    frag_parser.add_argument("--ignore_offset", action='store_true',
-                             help="Don't offset tn5 cutsites")
-    frag_parser.add_argument("-m", "--method", "--count_method", type=str,
-                             choices=["cutsite", "midpoint", "fragment"], default="cutsite",
-                             help="Counting method, Choose from 'cutsite', 'midpoint, 'fragment'")
+    frag_parser.add_argument(
+        "-c",
+        "--chroms",
+        "--contigs",
+        nargs="*",
+        help="Chromosomes to write. Writes all by default",
+    )
+    frag_parser.add_argument(
+        "-l",
+        "--lens",
+        "--lengths",
+        "--chromlens",
+        type=int,
+        nargs="*",
+        help="Lengths of provided chroms (Auto retrieved if not provided)",
+    )
+    frag_parser.add_argument(
+        "--ignore_offset", action="store_true", help="Don't offset tn5 cutsites"
+    )
+    frag_parser.add_argument(
+        "-m",
+        "--method",
+        "--count_method",
+        type=str,
+        choices=["cutsite", "midpoint", "fragment"],
+        default="cutsite",
+        help="Counting method, Choose from 'cutsite', 'midpoint, 'fragment'",
+    )
 
     cover_parser = subparser.add_parser("writecoverage", parents=[parent_parser])
     cover_parser.add_argument("input", help="BAM file to write to H5")
-    cover_parser.add_argument("-c", "--chroms", "--contigs", nargs="*",
-                              help="Chromosomes to write. Writes all by default")
+    cover_parser.add_argument(
+        "-c",
+        "--chroms",
+        "--contigs",
+        nargs="*",
+        help="Chromosomes to write. Writes all by default",
+    )
 
     args = parser.parse_args()
 
@@ -133,9 +188,11 @@ def parse_cmd():
 def run(args):
     command = args.command
 
-    func_dict = {"writefasta": parse_writefasta,
-                 "writefrag": parse_writefrag,
-                 "writecoverage": parse_writecoverage}
+    func_dict = {
+        "writefasta": parse_writefasta,
+        "writefrag": parse_writefrag,
+        "writecoverage": parse_writecoverage,
+    }
 
     func_dict[command](args)
 
@@ -152,5 +209,5 @@ def main():
     run(args)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

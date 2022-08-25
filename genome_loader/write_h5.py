@@ -3,7 +3,6 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-import pandas as pd
 from pysam import FastaFile
 
 from .encode_data import encode_from_fasta, parse_encode_list

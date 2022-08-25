@@ -1,5 +1,6 @@
-import h5py
 from pathlib import Path
+
+import h5py
 
 ref_h5 = Path(
     "/cellar/shared/carterlab/genomes/homo_sapiens/ensembl_grch38.p13_v107/grch38_ACGTN.h5"

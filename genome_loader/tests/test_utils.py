@@ -1,7 +1,16 @@
 import numpy as np
+import polars as pl
 import pytest
-from genome_loader.utils import bytes_to_ohe, ohe_to_bytes, read_bed2
+import zarr
 from pytest_cases import fixture, parametrize, parametrize_with_cases
+
+from genome_loader.utils import (
+    bytes_to_ohe,
+    df_to_zarr,
+    ohe_to_bytes,
+    read_bed,
+    zarr_to_df,
+)
 
 
 def alpha_acgt():
@@ -27,14 +36,30 @@ def test_bytes_to_ohe_and_back(byte_arr_and_alphabet):
 
 @fixture
 def bed_file():
-    return "test.bed"
+    return "data/test.bed"
 
 
-def test_read_bed2(bed_file):
-    bed = read_bed2(bed_file)
-    assert (
-        bed["chrom"].to_numpy() == np.array(["21", "20", "20"], dtype=np.dtype("U"))
-    ).all()
-    assert (
-        bed["start"].to_numpy() == np.array([10414881, 96319, 279175], dtype=np.uint64)
-    ).all()
+def test_read_bed(bed_file):
+    bed = read_bed(bed_file)
+    pl.testing.assert_series_equal(
+        bed["chrom"],
+        pl.Series("chrom", np.array(["21", "20", "20"], dtype=np.dtype("U"))),
+    )
+    pl.testing.assert_series_equal(
+        bed["start"],
+        pl.Series("start", np.array([10414881, 96319, 279175], dtype=np.int32)),
+    )
+
+
+@fixture
+def zarr_file():
+    return "data/test.zarr"
+
+
+def test_df_zarr_serialization(bed_file, zarr_file):
+    df = read_bed(bed_file)
+    z = zarr.open(zarr_file, "w")
+    df_to_zarr(df, z.create_group("bed"))
+
+    df_out = zarr_to_df(z["bed"])
+    pl.testing.assert_frame_equal(df, df_out)

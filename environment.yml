@@ -7,6 +7,8 @@ dependencies:
   - python>=3.7.*
   - numpy
   - pandas
+  - polars
+  - pyarrow
   - h5py
   - sgkit
   - bioconda::pysam

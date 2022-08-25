@@ -10,19 +10,25 @@ import dask.array as da
 import h5py
 import numba
 import numpy as np
-import pandas as pd
+import polars as pl
 import sgkit as sg
 import xarray as xr
 import zarr
-import numcodecs
 from numcodecs import Blosc
 from numcodecs.abc import Codec
 from numpy.typing import NDArray
 
-from .utils import read_bed2
-
-PathType = Union[str, Path]
-IndexType = Union[int, slice, NDArray[np.int_], NDArray[np.uint]]
+from .utils import (
+    DNA_COMPLEMENT,
+    IndexType,
+    PathType,
+    df_to_zarr,
+    get_complement_idx,
+    read_bed,
+    rev_comp_byte,
+    rev_comp_ohe,
+    zarr_to_df,
+)
 
 
 class FixedLengthConsensus:
@@ -33,7 +39,7 @@ class FixedLengthConsensus:
     Attributes
     ----------
     regions : zarr.Array
-    bed : pandas.DataFrame
+    bed : polars.DataFrame
     embedding : str
     length : np.uint32
     samples : ndarray[str]
@@ -47,9 +53,13 @@ class FixedLengthConsensus:
     ├── regions: (regions length samples ploidy [alphabet]), uint8
     │       Shape depends on store's embedding and whether it contains consensus sequences.
     │       See the `samples` and `vcf` groups and the `alphabet` attribute.
-    ├── chroms: (regions), np.dtype('U')
-    ├── starts: (regions), uint8
-    ├── samples: An array of samples, str
+    ├── bed: Group
+    │   ├── chrom: (regions), np.dtype('U')
+    │   ├── start: (regions), uint8
+    │   ├── strand: (regions), np.dtype('U')
+    │   └── [other]: (regions)
+    │           Any other columns included in the bed file
+    ├── samples: Array of samples, str
     ├── [alphabet]: If onehot encoded, the alphabet used, np.dtype('|S1')
     └── attrs
         ├── ref_genome: str, Path
@@ -69,13 +79,13 @@ class FixedLengthConsensus:
             Zarr store
         """
         self._file: zarr.Group = zarr.open(zarr_file)
+
         self.regions: zarr.Array = self._file["regions"]
-        chrom = pd.Series(self._file["chroms"][:], dtype="category", name="chrom")
-        start = pd.Series(self._file["starts"][:], dtype=np.uint32, name="start")
-        self.bed = pd.concat([chrom, start], axis=1)
+        self.bed = zarr_to_df(self._file["bed"]).with_row_count("index")
+        self.samples: NDArray[np.str_] = self._file["samples"][:]
+
         self.embedding: str = self._file.attrs["embedding"]
         self.length: np.uint32 = self._file.attrs["length"]
-        self.samples: NDArray[np.str_] = self._file["samples"][:]
         self.ref_genome_path: PathType = self._file.attrs["ref_genome"]
         self.vcf_path: PathType = self._file.attrs["vcf"]
 
@@ -102,7 +112,8 @@ class FixedLengthConsensus:
         ref_file : PathType
             reference genome file
         bed_file : PathType
-            BED2 file defining the chromosome and start of each region
+            BED-like file defining at minimum the chromosome, start, and strand of each region.
+            Must have a header defining column names.
         length : int
             length of all regions
         out_file : PathType
@@ -119,7 +130,6 @@ class FixedLengthConsensus:
         Returns
         -------
         FixedLengthConsensus
-            an instance of FixedLengthConsensus
 
         """
         gl = GenomeLoader(ref_file, vcf_file)
@@ -130,19 +140,12 @@ class FixedLengthConsensus:
         z.attrs["vcf"] = str(vcf_file)
         z.attrs["length"] = np.uint32(length)
 
-        bed = read_bed2(bed_file)
-        chrom = bed["chrom"].to_numpy().astype("U")
-        z.create_dataset(
-            "chroms",
-            data=chrom,
-            compressor=compressor,
-            filters=[
-                numcodecs.Categorize(
-                    bed["chrom"].cat.categories, chrom.dtype, astype="u2"
-                )
-            ],
-        )
-        z.create_dataset("starts", data=bed["start"].to_numpy(), compressor=compressor)
+        bed = read_bed(bed_file)
+        df_to_zarr(bed, z.create_group("bed"), compressor)
+
+        chroms: NDArray[np.str_] = bed["chrom"].to_numpy().astype("U")
+        starts: NDArray[np.int32] = bed["start"].to_numpy()
+        strands: NDArray[np.str_] = bed["strand"].to_numpy().astype("U")
 
         if gl.embedding == "sequence":
             rep_size = 1
@@ -172,31 +175,35 @@ class FixedLengthConsensus:
             chunks=chunks,
         )
         # ignores memory requirements of overhead and intermediates
+        # most memory overhead is probably from loading spanning region of each ref chromosome
+        # TODO: chunk by samples and/or haplotypes if bytes_per_region > max_memory
         if max_memory is not None:
             bytes_per_region = np.prod(
                 region_shape[1:]
-            )  # all representations are 1 byte
+            )  # all representations are 1 byte (e.g. S1 or uint8)
             regs_per_chunk = max_memory // bytes_per_region
             n_chunks, final_chunk = divmod(len(bed), regs_per_chunk)
             for i in range(n_chunks):
                 start_idx = i * regs_per_chunk
                 end_idx = start_idx + regs_per_chunk
-                chroms = bed.loc[start_idx:end_idx, "chrom"].to_numpy()
-                starts = bed.loc[start_idx:end_idx, "start"].to_numpy()
                 z["regions"][start_idx:end_idx] = gl.sel(
-                    chroms, starts, np.uint32(length), samples
+                    chroms[start_idx:end_idx],
+                    starts[start_idx:end_idx],
+                    np.uint32(length),
+                    samples,
+                    strands,
                 )
             if final_chunk > 0:
                 start_idx = i * regs_per_chunk
                 end_idx = start_idx + final_chunk
-                chroms = bed.loc[start_idx:end_idx, "chrom"].to_numpy()
-                starts = bed.loc[start_idx:end_idx, "start"].to_numpy()
                 z["regions"][start_idx:end_idx] = gl.sel(
-                    chroms, starts, np.uint32(length), samples
+                    chroms[start_idx:end_idx],
+                    starts[start_idx:end_idx],
+                    np.uint32(length),
+                    samples,
+                    strands,
                 )
         else:
-            chroms = bed["chrom"].to_numpy()
-            starts = bed["start"].to_numpy()
             z["regions"] = gl.sel(chroms, starts, np.uint32(length), samples)
 
         return cls(out_file)
@@ -205,13 +212,14 @@ class FixedLengthConsensus:
         self,
         chroms: Optional[NDArray[np.str_]] = None,
         starts: Optional[NDArray[np.uint32]] = None,
+        strands: Optional[NDArray[np.str_]] = None,
         region_idx: Optional[IndexType] = None,
         samples: Optional[Union[list[str], NDArray[np.str_], IndexType]] = None,
         haplotype_idx: Optional[IndexType] = None,
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
         """Select regions, samples, and haplotypes.
 
-        Must provide exclusively either (`chroms` and `starts`) or `regions` (i.e. region indices) or none of them,
+        Must provide exclusively either (`chroms`, `starts`, and `strands`) or `regions` (i.e. region indices) or none of them,
         which will select all regions. Regions will correspond to the BED2 file (`self.bed`).
         If no samples or haplotypes are provided, selects all of them.
         All indices must be 0-indexed i.e. the first haplotype is index 0.
@@ -220,16 +228,18 @@ class FixedLengthConsensus:
 
         Parameters
         ----------
-        chroms : ndarray[str], optional
-            array of chromosomes, defaults to None
-        starts : ndarray[int], optional
-            array of start indices, defaults to None
+        chroms : ndarray[str], defaults to None
+            Array of chromosomes
+        starts : ndarray[int], defaults to None
+            Array of start indices
+        strands : ndarray[str], defaults to None
+            Array of strands ("+" or "-"). Negative strands are reverse complemented.
         region_idx : int, slice, ndarray[int], optional
-            index of bed regions (0-indexed) to select, defaults to all regions
+            Index of bed regions (0-indexed) to select, defaults to all regions
         samples : int, slice, ndarray[int], list[str], ndarray[str], optional
-            indices or a list of samples, defaults to all samples
+            Indices or a list of samples, defaults to all samples
         haplotype_idx : int, slice, ndarray[int], optional
-            index of haplotypes (0-indexed), defaults to all haplotypes
+            Index of haplotypes (0-indexed), defaults to all haplotypes
 
         Returns
         -------
@@ -252,19 +262,34 @@ class FixedLengthConsensus:
 
         """
 
-        if chroms is not None and starts is None:
-            raise ValueError("Got chroms but no starts.")
-        elif chroms is None and starts is not None:
-            raise ValueError("Got starts but no chroms.")
-        elif chroms is not None and starts is not None and region_idx is not None:
+        coord_is_none = {
+            "chroms": chroms is None,
+            "starts": starts is None,
+            "strands": strands is None,
+        }
+        present_coords = [coord for coord, none in coord_is_none.items() if not none]
+        missing_coords = [coord for coord, none in coord_is_none.items() if none]
+        if present_coords and missing_coords:
+            raise ValueError(f"Got {present_coords} but not {missing_coords}")
+        elif not missing_coords and region_idx is not None:
             raise ValueError(
-                "Got both (chroms, starts) and region_idx, specify just one of the two."
+                "Got both (chroms, starts, strands) and region_idx, specify just one of the two."
             )
-        elif chroms is None and starts is None and region_idx is None:
+        elif not present_coords and region_idx is None:
             region_idx = slice(None)
-        elif chroms is not None and starts is not None:
-            q = pd.DataFrame([chroms, starts], columns=["chrom", "start"])
-            region_idx = self.bed.merge(q, on=["chrom", "start"]).index.to_numpy()
+        elif not missing_coords:
+            with pl.StringCache():
+                chroms = pl.Series("chrom", chroms, dtype=pl.Categorical)  # type: ignore
+                starts = pl.Series("start", starts, dtype=pl.Int32)  # type: ignore
+                strands = pl.Series("strand", strands, dtype=pl.Categorical)  # type: ignore
+                q = pl.DataFrame([chroms, starts, strands])
+                region_idx = (
+                    self.bed.with_columns(
+                        pl.col(["chrom", "strand"]).cast(pl.Categorical)
+                    )
+                    .join(q, on=["chrom", "start", "strand"])
+                    .index.to_numpy()
+                )
             if len(region_idx) != len(chroms):  # type: ignore
                 raise ValueError(
                     "Got query regions that are not represented in the file."
@@ -344,6 +369,7 @@ class GenomeLoader:
                     warnings.warn(
                         "N is not in the reference genome alphabet so unknown genotypes will default to match the reference."
                     )
+                self.complement_idx = get_complement_idx(DNA_COMPLEMENT, self.spec)  # type: ignore
 
     def _open(self):
         return h5py.File(self.ref_genome_path)
@@ -376,12 +402,14 @@ class GenomeLoader:
     def sel(
         self,
         chroms: NDArray[np.str_],
-        starts: NDArray[np.uint32],
+        starts: NDArray[np.int32],
         length: np.uint32,
         samples: Optional[Union[list[str], NDArray[np.str_]]] = None,
+        strands: Optional[NDArray[np.str_]] = None,
         sorted_chroms: bool = False,
+        pad_val: Union[bytes, str] = b"N",
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
-        """Select sequences from genome using uniform length bed coordinates.
+        """Select regions from genome using uniform length bed coordinates.
 
         The type of embedding depends on the HDF5 genome e.g. sequence (bytes), onehot. See `self.embedding`.
         Pass `sample` to get consensus (variant-aware) haplotype sequences, otherwise reference sequence is returned.
@@ -399,11 +427,19 @@ class GenomeLoader:
             Length of all regions. A scalar value.
         samples : list[str], ndarray[str], default None
             A list of unique samples (no duplicates!).
+        strands: ndarray[str], default None
+            Strand of query regions, if negative stranded will return reverse complement.
+            If None, assumes all regions are on positive strand.
+        sorted_chroms : bool, default False
+            Whether query chromosomes are already sorted.
+        pad_val : str, default "N"
+            A single character to pad out-of-bound regions by.
+
 
         Returns
         -------
         Union[NDArray[np.bytes_], NDArray[np.uint8]]
-            Array of sequences.
+            Array of regions.
 
         Examples
         --------
@@ -419,32 +455,66 @@ class GenomeLoader:
         >>> consensus_seqs.shape
         (3, 5, 4, 2, 5)
         """
-        # input normalization and validation
-        if starts.dtype.type != np.uint32:
-            starts = starts.astype("u4")
-            warnings.warn("Starts dtype was not uint32, casting.")
+        # input normalization
+        if starts.dtype.type != np.int32:
+            starts = starts.astype("i4")
+            warnings.warn("Starts dtype was not int32, casting.")
         if not isinstance(length, np.uint32):
             length = np.uint32(length)  # type: ignore
             warnings.warn("Length dtype was not np.uint32, casting.")
-        starts = starts - np.uint32(
-            1
-        )  # VCF positions are 1-indexed but h5 genome is 0-indexed
         ends = starts + length
-        with self._open() as ref_genome:
-            self._sel_validate_ref_genome_args(chroms, starts, ends, length, ref_genome)
-            if samples is not None:
-                self._sel_validate_sample_args(samples)
-                sample_idx = self._sel_sample_idx(samples)
-                val_embeddings = {"sequence", "onehot"}
-                if self.embedding not in val_embeddings:
-                    raise ValueError(
-                        f"Invalid embedding for getting variant-aware sequence, must be one of: {val_embeddings}"
-                    )
+
+        # get pad value
+        pad_val = bytes(pad_val)  # type: ignore
+        if self.embedding == "sequence":
+            pad_arr = np.array([pad_val], dtype="|S1")
+        elif self.embedding == "onehot":
+            pad_arr = np.zeros_like(self.spec, dtype="u1")  # type: ignore
+            if pad_val not in self.spec:  # type: ignore
+                warnings.warn("Pad value is not in spec, will pad with 0 vector.")
             else:
-                sample_idx = None
-            return self._sel_slice(
-                chroms, starts, ends, length, ref_genome, sample_idx, sorted_chroms
+                pad_arr[self.spec == pad_val] = np.uint8(1)
+            pad_arr = pad_arr[None, :]
+
+        self._sel_validate_ref_genome_args(chroms, length)
+
+        # validate samples and get sample_idx
+        if samples is not None:
+            self._sel_validate_sample_args(samples)
+            sample_idx = self._sel_sample_idx(samples)
+            valid_embeddings = {"sequence", "onehot"}
+            if self.embedding not in valid_embeddings:
+                raise ValueError(
+                    f"Invalid embedding for getting variant-aware sequence, must be one of: {valid_embeddings}"
+                )
+        else:
+            sample_idx = None
+
+        with self._open() as ref_genome:
+
+            out = self._sel_slice(
+                chroms,
+                starts,
+                ends,
+                length,
+                ref_genome,
+                pad_arr,
+                sample_idx,
+                sorted_chroms,
             )
+
+            # reverse complement regions on negative strand
+            if strands is not None:
+                if self.embedding == "sequence":
+                    out[strands == "-"] = rev_comp_byte(
+                        out[strands == "-"], DNA_COMPLEMENT
+                    )
+                elif self.embedding == "onehot":
+                    out[strands == "-"] = rev_comp_ohe(
+                        out[strands == "-"], self.complement_idx
+                    )
+
+            return out
 
     def _sel_sample_idx(self, samples: Union[list[str], NDArray[np.str_]]):
         _, s_id_idx, s_query_idx = np.intersect1d(self._vcf.sample_id, samples, assume_unique=True, return_indices=True)  # type: ignore
@@ -453,20 +523,12 @@ class GenomeLoader:
     def _sel_validate_ref_genome_args(
         self,
         chroms: NDArray[np.str_],
-        starts: NDArray[np.uint32],
-        ends: NDArray[np.uint32],
         length: np.uint32,
-        ref_genome: h5py.File,
     ):
         if length < 1:
             raise ValueError("Length must be greater than 0.")
-        if (starts < 0).any():
-            raise IndexError("Region has start < 0.")
         if not np.isin(chroms, self.contigs).all():
             raise ValueError("Chromosome not in reference genome.")
-        for chrom in chroms:
-            if (ends[chroms == chrom] > ref_genome[chrom].attrs["length"]).any():
-                raise IndexError("Region goes outside bounds of contig.")
 
     def _sel_validate_sample_args(self, samples: Union[list[str], NDArray[np.str_]]):
         if len(set(samples)) != len(samples):
@@ -479,10 +541,11 @@ class GenomeLoader:
     def _sel_slice(
         self,
         chroms: NDArray[np.str_],
-        starts: NDArray[np.uint32],
-        ends: NDArray[np.uint32],
+        starts: NDArray[np.int32],
+        ends: NDArray[np.int32],
         length: np.uint32,
         ref_genome: h5py.File,
+        pad_arr: Union[NDArray[np.bytes_], NDArray[np.uint8]],
         sample_idx: Optional[NDArray[np.uint32]] = None,
         sorted_chroms: bool = False,
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
@@ -501,17 +564,21 @@ class GenomeLoader:
         for chrom in np.unique(chroms):  # guaranteed to proceed in a sorted order
             chrom_starts = starts[chroms == chrom]
             chrom_ends = ends[chroms == chrom]
+            ref_chrom, ref_start, rel_starts = self._sel_padded_min_ref_chrom(
+                ref_genome[chrom], chrom_starts, chrom_ends, pad_arr
+            )
             if sample_idx is not None:
                 chrom_out = self._sel_slice_chrom_genos(
-                    sample_idx, chrom, chrom_starts, chrom_ends, length, ref_genome
+                    sample_idx,
+                    self._sel_contig_idx(chrom),
+                    chrom_starts,
+                    chrom_ends,
+                    length,
+                    ref_chrom,
+                    ref_start,
+                    rel_starts,
                 )
             else:
-                # get minimal range of reference to give to numba
-                # note ref is 0-indexed but coordinates 1-indexed
-                ref_start = chrom_starts.min()
-                ref_end = chrom_ends.max()
-                ref_chrom = ref_genome[chrom][self.embedding][ref_start:ref_end]
-                rel_starts = chrom_starts - ref_start
                 coords = (
                     np.tile(np.arange(length, dtype=np.uint32), (len(chrom_starts), 1))
                     + rel_starts[:, None]
@@ -527,31 +594,59 @@ class GenomeLoader:
             out = sorted_out
         return out
 
+    def _sel_padded_min_ref_chrom(
+        self,
+        ref_chrom_h5: h5py.Group,
+        starts: NDArray[np.int32],
+        ends: NDArray[np.int32],
+        pad_arr: Union[NDArray[np.bytes_], NDArray[np.uint8]],
+    ):
+        ref_start: np.int32 = starts.min()
+        ref_end: np.int32 = ends.max()
+        rel_starts: NDArray[np.int32] = starts - ref_start  # type: ignore
+
+        # pad for out-of-bound
+        chrom_length = ref_chrom_h5.attrs["length"]
+        n_past_chrom = max(ref_end - chrom_length, 0)
+        n_before_chrom = max(-ref_start, 0)  # type: ignore
+        real_ref_end: int = np.clip(
+            ref_end, a_min=None, a_max=ref_chrom_h5.attrs["length"]
+        )
+        real_ref_start: int = np.clip(ref_start, a_min=0, a_max=None)  # type: ignore
+        # ref_chrom shape: (length) or (length alphabet)
+        # pad_val shape: (1) or (alphabet)
+        ref_chrom: Union[NDArray[np.bytes_], NDArray[np.uint8]]
+        ref_chrom = ref_chrom_h5[self.embedding][real_ref_start:real_ref_end]
+        ref_chrom = np.concatenate(
+            [
+                pad_arr.repeat(n_before_chrom, 0),
+                ref_chrom,
+                pad_arr.repeat(n_past_chrom, 0),
+            ],
+            axis=0,
+        )
+        return ref_chrom, ref_start, rel_starts
+
     def _sel_slice_chrom_genos(
         self,
         sample_idx: NDArray[np.uint32],
-        chrom: str,
-        starts: NDArray[np.uint32],
-        ends: NDArray[np.uint32],
+        contig_idx: NDArray,
+        starts: NDArray[np.int32],
+        ends: NDArray[np.int32],
         length: np.uint32,
-        ref_genome: h5py.File,
+        ref_chrom: Union[NDArray[np.bytes_], NDArray[np.uint8]],
+        ref_start: np.int32,
+        rel_starts: NDArray[np.int32],
     ):
-        contig_idx = self._sel_contig_idx(chrom)
         genos, variants_per_region, variant_idx = self._sel_genos_bytes(
             contig_idx, sample_idx, starts, ends
         )
         offsets = np.array(
             [0, *variants_per_region.cumsum(), genos.shape[0]], dtype="u4"
         )
-        var_pos = self._vcf.variant_position[variant_idx].astype("u4").to_numpy()  # type: ignore
+        var_pos: NDArray[np.uint32] = self._vcf.variant_position[variant_idx].astype("u4").to_numpy()  # type: ignore
 
-        # load minimal range of reference in memory to give to numba
-        ref_start = starts.min()
-        ref_end = ends.max()
-        rel_starts = starts - ref_start
         if self.embedding == "sequence":
-            ref_chrom = ref_genome[chrom][self.embedding][ref_start:ref_end]
-            # TODO: maybe need to cast to bytes from int8
             out = _sel_helper_bytes(
                 rel_starts,
                 length,
@@ -563,18 +658,17 @@ class GenomeLoader:
             )
             return out.view("|S1")
         elif self.embedding == "onehot":
-            ohe_ref_chrom = ref_genome[chrom][self.embedding][ref_start:ref_end]
             for i, nuc in enumerate(self.spec):  # type: ignore
                 genos[genos == nuc] = i
             genos = genos.astype("u1")
-            ohe_genos = np.eye(5, dtype="u1")[genos]
+            ohe_genos: NDArray[np.uint8] = np.eye(5, dtype="u1")[genos]
             return _sel_helper_ohe(
                 rel_starts,
                 length,
                 offsets,
                 ohe_genos,
                 var_pos,
-                ohe_ref_chrom,
+                ref_chrom,
                 ref_start,
             )
 
@@ -587,8 +681,8 @@ class GenomeLoader:
         self,
         contig_idx: NDArray[np.uint32],
         sample_idx: NDArray[np.uint32],
-        starts: NDArray[np.uint32],
-        ends: NDArray[np.uint32],
+        starts: NDArray[np.int32],
+        ends: NDArray[np.int32],
     ) -> tuple[NDArray[np.bytes_], NDArray[np.uint32], NDArray[np.uint32]]:
         """Get genotypes of given samples within the specified coordinates as bytes (e.g. nucleotides)."""
 
@@ -628,12 +722,18 @@ class GenomeLoader:
 
 
 @numba.njit(
-    "u1[:, :, :, :, :](u4[:], u4, u4[:], u1[:, :, :, :], u4[:], u1[:, :], u4)",
+    "u1[:, :, :, :, :](i4[:], u4, u4[:], u1[:, :, :, :], u4[:], u1[:, :], i4)",
     parallel=True,
     nogil=True,
 )
 def _sel_helper_ohe(
-    rel_starts, length, offsets, ohe_genos, var_pos, ohe_ref_chrom, ref_start
+    rel_starts: NDArray[np.int32],
+    length: np.uint32,
+    offsets: NDArray[np.uint32],
+    ohe_genos: NDArray[np.uint8],
+    var_pos: NDArray[np.uint32],
+    ohe_ref_chrom: NDArray[np.uint8],
+    ref_start: NDArray[np.int32],
 ) -> NDArray[np.uint8]:
     """Iterate over OHE variant regions and put each into the OHE reference.
     Since each can have a different # of variants this is not broadcastable.
@@ -658,14 +758,19 @@ def _sel_helper_ohe(
     return out
 
 
-# TODO: maybe need to cast to bytes from int8
 @numba.njit(
-    "char[:, :, :, :](u4[:], u4, u4[:], char[:, :, :], u4[:], char[:], u4)",
+    "char[:, :, :, :](i4[:], u4, u4[:], char[:, :, :], u4[:], char[:], i4)",
     parallel=True,
     nogil=True,
 )
 def _sel_helper_bytes(
-    rel_starts, length, offsets, genos, var_pos, ref_chrom, ref_start
+    rel_starts: NDArray[np.int32],
+    length: NDArray[np.uint32],
+    offsets: NDArray[np.uint32],
+    genos: NDArray[np.int8],
+    var_pos: NDArray[np.uint32],
+    ref_chrom: NDArray[np.int8],
+    ref_start: NDArray[np.int32],
 ) -> NDArray[np.int8]:
     """Iterate over byte variant regions and put each into the byte reference.
     Since each can have a different # of variants this is not broadcastable.

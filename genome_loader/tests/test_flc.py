@@ -3,10 +3,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from genome_loader.gloader import FixedLengthConsensus
-from genome_loader.utils import ohe_to_bytes
 from pysam import FastaFile
 from pytest_cases import fixture, parametrize, parametrize_with_cases
+
+from genome_loader.gloader import FixedLengthConsensus
+from genome_loader.utils import ohe_to_bytes
 
 
 @fixture
@@ -70,7 +71,7 @@ def flc(ref_file, vcf_file, bed_file, out_file, length, samples):
 @parametrize("samples", [None, ["OCI-AML5"], ["OCI-AML5", "NCI-H660"]])
 def test_flc_sel(flc: FixedLengthConsensus, length, samples: list[str], wdir):
     flc_seqs = ohe_to_bytes(flc.sel(samples=samples), flc.alphabet).astype("U")  # type: ignore
-    chroms = flc.bed["chrom"].to_numpy()
+    chroms = flc.bed["chrom"].to_numpy().astype("U")
     starts = flc.bed["start"].to_numpy()
     if samples is None:
         samples = flc.samples
@@ -81,6 +82,6 @@ def test_flc_sel(flc: FixedLengthConsensus, length, samples: list[str], wdir):
         )
         for i, (chrom, start) in enumerate(zip(chroms, starts)):
             with FastaFile(str(bcftools_consensus)) as f:
-                bcf_cons = f.fetch(region=f"{chrom}:{start}-{start+length-np.uint(1)}")
+                bcf_cons = f.fetch(chrom, start, start + length)
             # flc_seqs: (regions length samples ploidy)
             assert bcf_cons == "".join(flc_seqs[i, :, s_idx, h_idx])

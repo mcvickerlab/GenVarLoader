@@ -5,17 +5,18 @@ from typing import Optional, Sequence
 
 import numpy as np
 import pytest
-from genome_loader.gloader import GenomeLoader
-from genome_loader.utils import ohe_to_bytes
 from numpy.typing import NDArray
 from pysam import FastaFile
 from pytest_cases import fixture, parametrize_with_cases
+
+from genome_loader.gloader import GenomeLoader
+from genome_loader.utils import ohe_to_bytes
 
 
 @dataclass
 class GLSelArgs:
     chroms: NDArray[np.str_]
-    starts: NDArray[np.uint64]
+    starts: NDArray[np.int32]
     length: np.uint64
     samples: Optional[Sequence[str]] = None
     sorted_chroms: bool = False
@@ -28,7 +29,7 @@ class GLSelArgs:
 def gl_sel_one_chrom_ref():
     return GLSelArgs(
         np.array(["20", "20"]),
-        np.array([96319, 279175], dtype="u4"),
+        np.array([96319, 279175], dtype="i4"),
         np.uint64(5),
         None,
         False,
@@ -38,7 +39,7 @@ def gl_sel_one_chrom_ref():
 def gl_sel_two_chrom_ref():
     return GLSelArgs(
         np.array(["21", "20", "20"]),
-        np.array([10414881, 96319, 279175], dtype="u4"),
+        np.array([10414881, 96319, 279175], dtype="i4"),
         np.uint64(5),
         None,
         False,
@@ -48,7 +49,7 @@ def gl_sel_two_chrom_ref():
 def gl_sel_1_region_1_samp():
     return GLSelArgs(
         np.array(["20"]),
-        np.array([96319], dtype="u4"),
+        np.array([96319], dtype="i4"),
         np.uint64(5),
         ["OCI-AML5"],
         False,
@@ -58,7 +59,7 @@ def gl_sel_1_region_1_samp():
 def gl_sel_1_chrom_1_samp():
     return GLSelArgs(
         np.array(["20", "20"]),
-        np.array([96319, 279175], dtype="u4"),
+        np.array([96319, 279175], dtype="i4"),
         np.uint64(5),
         ["OCI-AML5"],
         False,
@@ -68,7 +69,7 @@ def gl_sel_1_chrom_1_samp():
 def gl_sel_1_chrom_2_samp():
     return GLSelArgs(
         np.array(["20", "20"]),
-        np.array([96319, 279175], dtype="u4"),
+        np.array([96319, 279175], dtype="i4"),
         np.uint64(5),
         ["OCI-AML5", "NCI-H660"],
         False,
@@ -78,7 +79,7 @@ def gl_sel_1_chrom_2_samp():
 def gl_sel_2_chrom_2_samp():
     return GLSelArgs(
         np.array(["21", "20", "20"]),
-        np.array([10414881, 96319, 279175], dtype="u4"),
+        np.array([10414881, 96319, 279175], dtype="i4"),
         np.uint64(5),
         ["OCI-AML5", "NCI-H660"],
         False,
@@ -127,7 +128,7 @@ def test_gloader_sel(gloader: GenomeLoader, gl_sel_args: GLSelArgs, wdir):
         ref = wdir.joinpath("data", "fasta", "grch38.20.21.fa.gz")
         for i, (chrom, start) in enumerate(zip(chroms, starts)):
             with FastaFile(str(ref)) as f:
-                ref_seq = f.fetch(region=f"{chrom}:{start}-{start+length-np.uint(1)}")
+                ref_seq = f.fetch(chrom, start, start + length)
                 # gl_seqs: (regions length)
                 assert ref_seq == "".join(gl_seqs[i])
     else:
@@ -139,8 +140,6 @@ def test_gloader_sel(gloader: GenomeLoader, gl_sel_args: GLSelArgs, wdir):
             )
             for i, (chrom, start) in enumerate(zip(chroms, starts)):
                 with FastaFile(str(bcftools_consensus)) as f:
-                    bcf_cons = f.fetch(
-                        region=f"{chrom}:{start}-{start+length-np.uint(1)}"
-                    )
+                    bcf_cons = f.fetch(chrom, start, start + length)
                 # gl_seqs: (regions length samples ploidy)
                 assert bcf_cons == "".join(gl_seqs[i, :, s_idx, h_idx])
