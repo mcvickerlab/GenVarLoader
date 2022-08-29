@@ -24,6 +24,7 @@ from .utils import (
     PathType,
     df_to_zarr,
     get_complement_idx,
+    order_as,
     read_bed,
     rev_comp_byte,
     rev_comp_ohe,
@@ -95,31 +96,27 @@ class FixedLengthConsensus:
     @classmethod
     def from_ref_vcf_bed(
         cls,
-        ref_file: PathType,
-        vcf_file: PathType,
-        bed_file: PathType,
+        gen_ldr: GenomeLoader,
         out_file: PathType,
+        bed_file: PathType,
         length: int,
         samples: Optional[list[str]] = None,
         max_memory: Optional[int] = None,
         compressor: Codec = Blosc("lz4", shuffle=-1),
     ) -> FixedLengthConsensus:
-        """Construct FixedLengthConsensus from a reference.h5, vcf.zarr, and BED2 file.
+        """Construct FixedLengthConsensus from a GenomeLoader and BED-like file.
         Will write the regions to a Zarr store specified by `out_file`.
 
         Parameters
         ----------
-        ref_file : PathType
-            reference genome file
+        gen_ldr : GenomeLoader
+        out_file : PathType
+            path to write Zarr store
         bed_file : PathType
             BED-like file defining at minimum the chromosome, start, and strand of each region.
             Must have a header defining column names.
         length : int
             length of all regions
-        out_file : PathType
-            path to output Zarr store
-        vcf_file : PathType
-            VCF file
         samples : Optional[list[str]], optional
             list of samples to get consensus regions for, otherwise gets all, defaults to None
         max_memory : int, optional
@@ -132,81 +129,9 @@ class FixedLengthConsensus:
         FixedLengthConsensus
 
         """
-        gl = GenomeLoader(ref_file, vcf_file)
-
-        z: zarr.Group = zarr.open(out_file, "w")
-        z.attrs["embedding"] = gl.embedding
-        z.attrs["ref_genome"] = str(ref_file)
-        z.attrs["vcf"] = str(vcf_file)
-        z.attrs["length"] = np.uint32(length)
-
-        bed = read_bed(bed_file)
-        df_to_zarr(bed, z.create_group("bed"), compressor)
-
-        chroms: NDArray[np.str_] = bed["chrom"].to_numpy().astype("U")
-        starts: NDArray[np.int32] = bed["start"].to_numpy()
-        strands: NDArray[np.str_] = bed["strand"].to_numpy().astype("U")
-
-        if gl.embedding == "sequence":
-            rep_size = 1
-            region_dtype = np.dtype("S1")
-        elif gl.embedding == "onehot":
-            z.create_dataset("alphabet", data=gl.spec)  # type: ignore
-            rep_size = len(gl.spec)  # type: ignore
-            region_dtype = np.dtype("u1")
-
-        if samples is None:
-            samples = gl._vcf.sample_id.to_numpy()  # type: ignore
-        z.create_dataset("samples", data=np.array(samples), dtype=str)
-        region_shape: tuple = (len(bed), length, len(samples), 2, rep_size)
-        chunks: tuple = (
-            None,
-            1,
-            None,
-            None,
-            1,
-        )  # will almost always be accessing full length and full encoding
-
-        z.create_dataset(
-            "regions",
-            shape=region_shape,
-            dtype=region_dtype,
-            compressor=compressor,
-            chunks=chunks,
+        return gen_ldr.write_fixedlengthconsensus(
+            out_file, bed_file, length, samples, max_memory, compressor
         )
-        # ignores memory requirements of overhead and intermediates
-        # most memory overhead is probably from loading spanning region of each ref chromosome
-        # TODO: chunk by samples and/or haplotypes if bytes_per_region > max_memory
-        if max_memory is not None:
-            bytes_per_region = np.prod(
-                region_shape[1:]
-            )  # all representations are 1 byte (e.g. S1 or uint8)
-            regs_per_chunk = max_memory // bytes_per_region
-            n_chunks, final_chunk = divmod(len(bed), regs_per_chunk)
-            for i in range(n_chunks):
-                start_idx = i * regs_per_chunk
-                end_idx = start_idx + regs_per_chunk
-                z["regions"][start_idx:end_idx] = gl.sel(
-                    chroms[start_idx:end_idx],
-                    starts[start_idx:end_idx],
-                    np.uint32(length),
-                    samples,
-                    strands,
-                )
-            if final_chunk > 0:
-                start_idx = i * regs_per_chunk
-                end_idx = start_idx + final_chunk
-                z["regions"][start_idx:end_idx] = gl.sel(
-                    chroms[start_idx:end_idx],
-                    starts[start_idx:end_idx],
-                    np.uint32(length),
-                    samples,
-                    strands,
-                )
-        else:
-            z["regions"] = gl.sel(chroms, starts, np.uint32(length), samples)
-
-        return cls(out_file)
 
     def sel(
         self,
@@ -290,7 +215,7 @@ class FixedLengthConsensus:
                     .join(q, on=["chrom", "start", "strand"])
                     .index.to_numpy()
                 )
-            if len(region_idx) != len(chroms):  # type: ignore
+            if len(region_idx) != len(q):  # type: ignore
                 raise ValueError(
                     "Got query regions that are not represented in the file."
                 )
@@ -299,21 +224,17 @@ class FixedLengthConsensus:
         sample_idx: IndexType
         if samples is None:
             sample_idx = slice(None)
-        elif isinstance(samples, list):
-            _, self_idx, query_idx = np.intersect1d(
-                self.samples, samples, return_indices=True, assume_unique=True
-            )
-            sample_idx = self_idx[query_idx]
-        elif isinstance(samples, np.ndarray):
-            if samples.dtype.kind == "U":
-                _, self_idx, query_idx = np.intersect1d(  # type: ignore
-                    self.samples, samples, return_indices=True, assume_unique=True
+        else:
+            if not np.isin(samples, self.samples).all():
+                raise ValueError(
+                    "Got samples that are not in this FixedLengthConsensus."
                 )
-                sample_idx = self_idx[query_idx]
+            if isinstance(samples, list) or (
+                isinstance(samples, np.ndarray) and samples.dtype.kind == "U"
+            ):
+                sample_idx = order_as(self.samples, samples)  # type: ignore
             else:
                 sample_idx = samples  # type: ignore
-        else:
-            sample_idx = samples
 
         if haplotype_idx is None:
             haplotype_idx = slice(None)
@@ -351,15 +272,24 @@ class GenomeLoader:
             if vcf_zarr is not None:
                 self.vcf_path = vcf_zarr
                 self._vcf: Optional[xr.Dataset] = sg.load_dataset(Path(vcf_zarr))
-                self._cast_vcf_objects_to_bytes()
-                self._0_idx_vcf_positions()
-                var_contigs = da.array(self._vcf.attrs["contigs"])[
-                    self._vcf.variant_contig
-                ]
-                if not da.isin(var_contigs, self.contigs).all().compute():
+
+                *_, ref_contigs_as_vcf_contig_idx = np.intersect1d(
+                    self.contigs, self._vcf.attrs["contigs"]
+                )
+                ref_contigs_as_vcf_contig_idx = ref_contigs_as_vcf_contig_idx.astype(
+                    self._vcf["variant_contig"].dtype
+                )
+                if not (
+                    da.isin(self._vcf["variant_contig"], ref_contigs_as_vcf_contig_idx)
+                    .all()
+                    .compute()
+                ):
                     raise ValueError(
                         "VCF has contigs that are not in reference genome."
                     )
+
+                self._cast_vcf_objects_to_bytes()
+                self._0_idx_vcf_positions()
             else:
                 self._vcf = None
 
@@ -407,7 +337,7 @@ class GenomeLoader:
         samples: Optional[Union[list[str], NDArray[np.str_]]] = None,
         strands: Optional[NDArray[np.str_]] = None,
         sorted_chroms: bool = False,
-        pad_val: Union[bytes, str] = b"N",
+        pad_val: Union[bytes, str] = "N",
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
         """Select regions from genome using uniform length bed coordinates.
 
@@ -481,7 +411,7 @@ class GenomeLoader:
         # validate samples and get sample_idx
         if samples is not None:
             self._sel_validate_sample_args(samples)
-            sample_idx = self._sel_sample_idx(samples)
+            sample_idx = order_as(self._vcf["sample_id"], samples)  # type: ignore
             valid_embeddings = {"sequence", "onehot"}
             if self.embedding not in valid_embeddings:
                 raise ValueError(
@@ -515,10 +445,6 @@ class GenomeLoader:
                     )
 
             return out
-
-    def _sel_sample_idx(self, samples: Union[list[str], NDArray[np.str_]]):
-        _, s_id_idx, s_query_idx = np.intersect1d(self._vcf.sample_id, samples, assume_unique=True, return_indices=True)  # type: ignore
-        return s_id_idx[s_query_idx]
 
     def _sel_validate_ref_genome_args(
         self,
@@ -720,10 +646,119 @@ class GenomeLoader:
         # (v s p), (r), (v)
         return genos, variants_per_region, variant_idx
 
+    def write_fixedlengthconsensus(
+        self,
+        out_file: PathType,
+        bed_file: PathType,
+        length: int,
+        samples: Optional[list[str]] = None,
+        max_memory: Optional[int] = None,
+        compressor: Codec = Blosc("lz4", shuffle=-1),
+    ) -> FixedLengthConsensus:
+        """Construct FixedLengthConsensus from a BED-like file.
+        Will write the regions to a Zarr store specified by `out_file`.
+
+        Parameters
+        ----------
+        out_file : PathType
+            path to write Zarr store
+        bed_file : PathType
+            BED-like file defining at minimum the chromosome, start, and strand of each region.
+            Must have a header defining column names.
+        length : int
+            length of all regions
+        samples : Optional[list[str]], optional
+            list of samples to get consensus regions for, otherwise gets all, defaults to None
+        max_memory : int, optional
+            approximate maximum memory to use in bytes, doesn't account for overhead or intermediate objects, defaults to -1
+        compressor : Codec, optional
+            compressor to use when writing Zarr, defaults to Blosc("lz4", shuffle=-1)
+
+        Returns
+        -------
+        FixedLengthConsensus
+        """
+
+        z: zarr.Group = zarr.open(out_file, "w")
+        z.attrs["embedding"] = self.embedding
+        z.attrs["ref_genome"] = str(self.ref_genome_path)
+        if self.vcf_path is None:
+            raise ValueError("GenomeLoader must have a VCF.")
+        z.attrs["vcf"] = str(self.vcf_path)
+        z.attrs["length"] = np.uint32(length)
+
+        bed = read_bed(bed_file)
+        df_to_zarr(bed, z.create_group("bed"), compressor)
+
+        chroms: NDArray[np.str_] = bed["chrom"].to_numpy().astype("U")
+        starts: NDArray[np.int32] = bed["start"].to_numpy()
+        strands: NDArray[np.str_] = bed["strand"].to_numpy().astype("U")
+
+        if self.embedding == "sequence":
+            rep_size = 1
+            region_dtype = np.dtype("S1")
+        elif self.embedding == "onehot":
+            z.create_dataset("alphabet", data=self.spec)  # type: ignore
+            rep_size = len(self.spec)  # type: ignore
+            region_dtype = np.dtype("u1")
+
+        if samples is None:
+            samples = gl._vcf["sample_id"].to_numpy()  # type: ignore
+        z.create_dataset("samples", data=np.array(samples), dtype=str)
+        region_shape: tuple = (len(bed), length, len(samples), 2, rep_size)
+        chunks: tuple = (
+            None,
+            1,
+            None,
+            None,
+            1,
+        )  # will almost always be accessing full length and full encoding
+
+        z.create_dataset(
+            "regions",
+            shape=region_shape,
+            dtype=region_dtype,
+            compressor=compressor,
+            chunks=chunks,
+        )
+        # ignores memory requirements of overhead and intermediates
+        # most memory overhead is probably from loading spanning region of each ref chromosome
+        # TODO: chunk by samples and/or haplotypes if bytes_per_region > max_memory
+        if max_memory is not None:
+            bytes_per_region = np.prod(
+                region_shape[1:]
+            )  # all representations are 1 byte (e.g. S1 or uint8)
+            regs_per_chunk = max_memory // bytes_per_region
+            n_chunks, final_chunk = divmod(len(bed), regs_per_chunk)
+            for i in range(n_chunks):
+                start_idx = i * regs_per_chunk
+                end_idx = start_idx + regs_per_chunk
+                z["regions"][start_idx:end_idx] = self.sel(
+                    chroms[start_idx:end_idx],
+                    starts[start_idx:end_idx],
+                    np.uint32(length),
+                    samples,
+                    strands,
+                )
+            if final_chunk > 0:
+                start_idx = i * regs_per_chunk
+                end_idx = start_idx + final_chunk
+                z["regions"][start_idx:end_idx] = self.sel(
+                    chroms[start_idx:end_idx],
+                    starts[start_idx:end_idx],
+                    np.uint32(length),
+                    samples,
+                    strands,
+                )
+        else:
+            z["regions"] = self.sel(chroms, starts, np.uint32(length), samples)
+
+        return FixedLengthConsensus(out_file)
+
 
 @numba.njit(
     "u1[:, :, :, :, :](i4[:], u4, u4[:], u1[:, :, :, :], u4[:], u1[:, :], i4)",
-    parallel=True,
+    # parallel=True,
     nogil=True,
 )
 def _sel_helper_ohe(
@@ -760,7 +795,7 @@ def _sel_helper_ohe(
 
 @numba.njit(
     "char[:, :, :, :](i4[:], u4, u4[:], char[:, :, :], u4[:], char[:], i4)",
-    parallel=True,
+    # parallel=True,
     nogil=True,
 )
 def _sel_helper_bytes(

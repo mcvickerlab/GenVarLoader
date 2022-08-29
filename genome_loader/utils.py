@@ -7,7 +7,7 @@ import polars as pl
 import zarr
 from numcodecs import Blosc, Categorize
 from numcodecs.abc import Codec
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 
 PathType = Union[str, Path]
 IndexType = Union[int, slice, NDArray[np.int_], NDArray[np.uint]]
@@ -92,17 +92,18 @@ def zarr_to_df(z: zarr.Group) -> pl.DataFrame:
     return pl.DataFrame(series_ls).select(z.attrs["columns"])
 
 
+def order_as(a1: ArrayLike, a2: ArrayLike) -> NDArray[np.uint32]:
+    """Get indices that would order ar1 as ar2, assuming all elements of a1 are in a2."""
+    idx1, idx2 = np.intersect1d(a1, a2, assume_unique=True, return_indices=True)
+    return idx1[idx2].astype("u4")
+
+
 def get_complement_idx(
     comp_dict: dict[bytes, bytes], alphabet: NDArray[np.bytes_]
 ) -> NDArray[np.uint32]:
     """Get index to reorder alphabet that would give the complement."""
-    _, k_idx, q_idx = np.intersect1d(
-        [comp_dict[nuc] for nuc in alphabet],
-        alphabet,
-        assume_unique=True,
-        return_indices=True,
-    )
-    return k_idx[q_idx].astype("u4")
+    idx = order_as([comp_dict[nuc] for nuc in alphabet], alphabet)
+    return idx.astype("u4")
 
 
 def rev_comp_byte(byte_arr: NDArray[np.bytes_], complement_map: dict[bytes, bytes]):
