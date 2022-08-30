@@ -1,0 +1,11 @@
+[tool.isort]
+profile = "black"
+
+[tool.mypy]
+plugins = "numpy.typing.mypy_plugin"
+
+[tool.pytest.ini_options]
+addopts = "-v"
+filterwarnings = [
+    'ignore:.*the `scipy\.stats\.stats` namespace is deprecated.*:DeprecationWarning'
+]

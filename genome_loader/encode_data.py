@@ -1,26 +1,45 @@
 import timeit
+from typing import List
 
 import h5py
 import numpy as np
 import pandas as pd
-
 from pysam import FastaFile
 
 
-def array_to_onehot(seq_array, base_list):
-    """
-    HELPER CALLED BY encode_sequence()
-    """
-    seq_array[np.isin(seq_array,
-                      [b"A", b"C", b"G", b"T"], invert=True)] = b"N"  # Convert ambiguous
+def _array_to_onehot(seq_array: np.ndarray, base_list: List[bytes]):
+    """HELPER CALLED BY encode_sequence()
 
-    return pd.get_dummies(seq_array).reindex(
-        columns=base_list, fill_value=0).to_numpy()
+    :param seq_array: _description_
+    :type seq_array: np.ndarray
+    :param base_list: _description_
+    :type base_list: _type_
+    :return: _description_
+    :rtype: _type_
+    """ """HELPER CALLED BY encode_sequence()
+
+    :param seq_array: _description_
+    :type seq_array: _type_
+    :param base_list: _description_
+    :type base_list: _type_
+    :return: _description_
+    :rtype: _type_
+    """
+    seq_array[
+        np.isin(seq_array, [b"A", b"C", b"G", b"T"], invert=True)
+    ] = b"N"  # Convert ambiguous
+
+    return pd.get_dummies(seq_array).reindex(columns=base_list, fill_value=0).to_numpy()
 
 
 def parse_encode_list(encode_spec):
-    """
-    HELPER CALLED BY encode_sequence()
+    """HELPER CALLED BY encode_sequence()
+
+    :param encode_spec: _description_
+    :type encode_spec: _type_
+    :raises TypeError: _description_
+    :return: _description_
+    :rtype: _type_
     """
     if not encode_spec:
         encode_spec = [b"A", b"C", b"G", b"T", b"N"]
@@ -64,13 +83,13 @@ def encode_sequence(seq_data, encode_spec=None, ignore_case=True):
         if ignore_case:
             # Much faster to convert upper as string
             seq_data = np.char.upper(seq_data)
-        
+
     else:
         raise TypeError("Please input as string or numpy array!")
 
     encode_spec = parse_encode_list(encode_spec)
 
-    return array_to_onehot(seq_data, encode_spec)
+    return _array_to_onehot(seq_data, encode_spec)
 
 
 def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None, ignore_case=True):
@@ -91,7 +110,8 @@ def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None, ignore_case=T
     onehot_dict = {}
     start_time = timeit.default_timer()
     print(
-        f"Encoding w. Specs: {[base.decode() for base in parse_encode_list(encode_spec)]}")
+        f"Encoding w. Specs: {[base.decode() for base in parse_encode_list(encode_spec)]}"
+    )
 
     with FastaFile(in_fasta) as fasta:
 
@@ -106,11 +126,14 @@ def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None, ignore_case=T
                 fasta_seq = fasta.fetch(chrom).upper()
             else:
                 fasta_seq = fasta.fetch(chrom)
-            
-            onehot_dict[chrom] = encode_sequence(fasta_seq, encode_spec, ignore_case=False)
+
+            onehot_dict[chrom] = encode_sequence(
+                fasta_seq, encode_spec, ignore_case=False
+            )
 
             print(
-                f"Encoded {chrom} in {timeit.default_timer() - start_chrom:.2f} seconds!")
+                f"Encoded {chrom} in {timeit.default_timer() - start_chrom:.2f} seconds!"
+            )
 
     print(f"Finished in {timeit.default_timer() - start_time:.2f} seconds!")
     return onehot_dict
@@ -135,7 +158,8 @@ def encode_from_h5(in_h5, chrom_list=None, encode_spec=None):
     onehot_dict = {}
     start_time = timeit.default_timer()
     print(
-        f"Encoding w. Specs: {[base.decode() for base in parse_encode_list(encode_spec)]}")
+        f"Encoding w. Specs: {[base.decode() for base in parse_encode_list(encode_spec)]}"
+    )
 
     with h5py.File(in_h5, "r") as file:
 
@@ -151,11 +175,12 @@ def encode_from_h5(in_h5, chrom_list=None, encode_spec=None):
             start_chrom = timeit.default_timer()
 
             onehot_dict[chrom] = encode_sequence(
-                file[chrom]["sequence"][:], encode_spec)
+                file[chrom]["sequence"][:], encode_spec
+            )
 
             print(
-                f"Encoded {chrom} in {timeit.default_timer() - start_chrom:.2f} seconds!")
+                f"Encoded {chrom} in {timeit.default_timer() - start_chrom:.2f} seconds!"
+            )
 
-        print(
-            f"Finished in {timeit.default_timer() - start_time:.2f} seconds!")
+        print(f"Finished in {timeit.default_timer() - start_time:.2f} seconds!")
         return onehot_dict

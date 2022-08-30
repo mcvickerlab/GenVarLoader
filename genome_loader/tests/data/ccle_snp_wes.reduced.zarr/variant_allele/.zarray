@@ -1,0 +1,26 @@
+{
+    "chunks": [
+        10000,
+        4
+    ],
+    "compressor": {
+        "blocksize": 0,
+        "clevel": 7,
+        "cname": "zstd",
+        "id": "blosc",
+        "shuffle": -1
+    },
+    "dtype": "|O",
+    "fill_value": null,
+    "filters": [
+        {
+            "id": "vlen-utf8"
+        }
+    ],
+    "order": "C",
+    "shape": [
+        22569,
+        4
+    ],
+    "zarr_format": 2
+}

@@ -5,7 +5,18 @@ channels:
   - defaults
 dependencies:
   - python>=3.7.*
-  - h5py
-  - pysam
   - numpy
   - pandas
+  - polars
+  - pyarrow
+  - h5py
+  - sgkit
+  - bioconda::pysam
+  - bioconda::cyvcf2 # needed to read VCF with sgkit
+  - numba
+  - dask
+  - xarray
+  - zarr
+platforms:
+  - linux-64
+  - osx-64

@@ -1,13 +1,13 @@
-from pathlib import Path
 import timeit
+from pathlib import Path
 
 import h5py
 import numpy as np
-import pandas as pd
 from pysam import FastaFile
 
-from .encode_data import parse_encode_list, encode_from_fasta
-from .get_data import get_frag_depth, get_allele_coverage
+from .encode_data import encode_from_fasta, parse_encode_list
+from .get_data import get_allele_coverage, get_frag_depth
+
 
 # FASTA to H5 Writers
 def write_genome_seq(in_fasta, out_dir, h5_name=None, chrom_list=None):
@@ -26,18 +26,18 @@ def write_genome_seq(in_fasta, out_dir, h5_name=None, chrom_list=None):
         for chrom in chrom_list:
             start_chrom = timeit.default_timer()
 
-            seq_array = np.fromiter(fasta.fetch(chrom),
-                                    count=fasta.get_reference_length(chrom),
-                                    dtype="|S1")
+            seq_array = np.fromiter(
+                fasta.fetch(chrom), count=fasta.get_reference_length(chrom), dtype="|S1"
+            )
 
             chrom_group = h5_file.require_group(chrom)
-            chrom_group.create_dataset(
-                "sequence", data=seq_array, compression="gzip")
-            
+            chrom_group.create_dataset("sequence", data=seq_array, compression="gzip")
+
             h5_file[chrom].attrs["length"] = seq_array.shape[0]
 
             print(
-                f"Created {chrom} data in {timeit.default_timer() - start_chrom:.2f} seconds!")
+                f"Created {chrom} data in {timeit.default_timer() - start_chrom:.2f} seconds!"
+            )
 
         h5_file.attrs["id"] = "sequence"
 
@@ -45,7 +45,9 @@ def write_genome_seq(in_fasta, out_dir, h5_name=None, chrom_list=None):
     print(f"Genome character-arrays written to {out_h5}")
 
 
-def write_encoded_genome(in_fasta, out_dir, h5_name=None, chrom_list=None, encode_spec=None, ignore_case=True):
+def write_encoded_genome(
+    in_fasta, out_dir, h5_name=None, chrom_list=None, encode_spec=None, ignore_case=True
+):
 
     if h5_name:
         out_h5 = str(Path(out_dir) / h5_name)
@@ -54,25 +56,27 @@ def write_encoded_genome(in_fasta, out_dir, h5_name=None, chrom_list=None, encod
 
     # Get data using encoding function
     onehot_dict = encode_from_fasta(
-        in_fasta, chrom_list=chrom_list,
-        encode_spec=encode_spec, ignore_case=ignore_case)
+        in_fasta,
+        chrom_list=chrom_list,
+        encode_spec=encode_spec,
+        ignore_case=ignore_case,
+    )
 
     start_write = timeit.default_timer()
     with h5py.File(out_h5, "w") as h5_file:
 
         for chrom, onehot in onehot_dict.items():
             chrom_group = h5_file.require_group(chrom)
-            chrom_group.create_dataset(
-                "onehot", data=onehot, compression="gzip")
+            chrom_group.create_dataset("onehot", data=onehot, compression="gzip")
 
             h5_file[chrom].attrs["length"] = onehot.shape[0]
 
         h5_file.attrs["id"] = "onehot"
-        h5_file.attrs["encode_spec"] = [base.decode()
-                                        for base in parse_encode_list(encode_spec)]
+        h5_file.attrs["encode_spec"] = [
+            base.decode() for base in parse_encode_list(encode_spec)
+        ]
 
-    print(
-        f"Finished writing in {timeit.default_timer() - start_write:.2f} seconds!")
+    print(f"Finished writing in {timeit.default_timer() - start_write:.2f} seconds!")
     print(f"One-Hot encoded genome written to {out_h5}")
 
 
@@ -80,21 +84,29 @@ def write_encoded_genome(in_fasta, out_dir, h5_name=None, chrom_list=None, encod
 
 # NEW METHOD TO REPLACE get_read_depth
 def write_frag_depth(
-    in_bam, out_dir, h5_name=None, 
-    chrom_list=None, chrom_lens=None, 
-    offset_tn5=True, count_method="cutsite"):
-
+    in_bam,
+    out_dir,
+    h5_name=None,
+    chrom_list=None,
+    chrom_lens=None,
+    offset_tn5=True,
+    count_method="cutsite",
+):
 
     if h5_name:
         out_h5 = str(Path(out_dir) / h5_name)
     else:
         out_h5 = str(Path(out_dir) / "frag_depths.h5")
-    
+
     # Get data using read depth function
-    depth_dict = get_frag_depth(in_bam, chrom_list=chrom_list,
-                                chrom_lens=chrom_lens, offset_tn5=offset_tn5,
-                                count_method=count_method)
-    
+    depth_dict = get_frag_depth(
+        in_bam,
+        chrom_list=chrom_list,
+        chrom_lens=chrom_lens,
+        offset_tn5=offset_tn5,
+        count_method=count_method,
+    )
+
     start_write = timeit.default_timer()
     with h5py.File(out_h5, "w") as h5_file:
 
@@ -112,7 +124,7 @@ def write_frag_depth(
         h5_file.attrs["id"] = "depth"
         h5_file.attrs["total_sum"] = total_frags
         h5_file.attrs["count_method"] = count_method
-        
+
     print(f"Finished writing in {timeit.default_timer() - start_write:.2f} seconds!")
     print(f"Frag-Depths written to {out_h5}")
 
@@ -133,12 +145,12 @@ def write_allele_coverage(in_bam, out_dir, h5_name=None, chrom_list=None):
         for chrom, cover_matrix in coverage_dict.items():
             chrom_group = h5_file.require_group(chrom)
             chrom_group.create_dataset(
-                "coverage", data=cover_matrix, compression="gzip")
-            
+                "coverage", data=cover_matrix, compression="gzip"
+            )
+
             h5_file[chrom].attrs["length"] = cover_matrix.shape[1]
 
         h5_file.attrs["id"] = "coverage"
 
-    print(
-        f"Finished writing in {timeit.default_timer() - start_write:.2f} seconds!")
+    print(f"Finished writing in {timeit.default_timer() - start_write:.2f} seconds!")
     print(f"Allele Coverage written to {out_h5}")
