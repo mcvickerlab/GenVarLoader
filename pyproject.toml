@@ -9,3 +9,8 @@ addopts = "-v"
 filterwarnings = [
     'ignore:.*the `scipy\.stats\.stats` namespace is deprecated.*:DeprecationWarning'
 ]
+markers = [
+    "encode_spec",
+    "encode_sequence",
+    "encode_fasta"
+]

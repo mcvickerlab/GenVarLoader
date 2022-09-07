@@ -9,6 +9,7 @@ dependencies:
   - h5py
   - numba
   - pandas
+  - typer
   - polars
   - pyarrow
   - sgkit

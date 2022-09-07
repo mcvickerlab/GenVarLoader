@@ -16,14 +16,6 @@ def _array_to_onehot(seq_array: np.ndarray, base_list: List[bytes]):
     :type base_list: _type_
     :return: _description_
     :rtype: _type_
-    """ """HELPER CALLED BY encode_sequence()
-
-    :param seq_array: _description_
-    :type seq_array: _type_
-    :param base_list: _description_
-    :type base_list: _type_
-    :return: _description_
-    :rtype: _type_
     """
     seq_array[
         np.isin(seq_array, [b"A", b"C", b"G", b"T"], invert=True)
