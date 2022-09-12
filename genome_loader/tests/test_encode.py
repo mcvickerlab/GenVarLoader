@@ -7,17 +7,16 @@ import pytest
 from pytest_cases import fixture, parametrize, parametrize_with_cases
 
 
-from genome_loader.encode_data import parse_encode_list, encode_sequence, encode_from_fasta
+from genome_loader.encode_data import parse_encode_spec, encode_sequence, encode_from_fasta
 
 
-# Test parse specs
 @pytest.mark.encode_spec
 @pytest.mark.parametrize("spec_input, expected_spec",
-                         [(None, [b"A", b"C", b"G", b"T", b"N"]),
-                          (["T", "G", "A", "C"], [b"T", b"G", b"A", b"C"]),
-                          ("CGNAT", [b"C", b"G", b"N", b"A", b"T"])])
+                         [(None, {"A": 0, "C": 1, "G": 2, "T": 3, "N": 4}),
+                          (["T", "G", "A", "C"], {"T": 0, "G": 1, "A": 2, "C": 3}),
+                          ("CGNAT", {"C": 0, "G": 1, "N": 2, "A": 3, "T": 4})])
 def test_parse_encode_list(spec_input, expected_spec):
-    assert parse_encode_list(spec_input) == expected_spec
+    assert parse_encode_spec(spec_input) == expected_spec
 
 
 # Test parse encode
@@ -45,23 +44,50 @@ def acgtn_ohe_only_n():
         [0, 0, 0, 0, 1], 
         [0, 0, 0, 0, 1]])
 
+def acgt_ohe_default_cols():
+    return np.array([
+        [1, 0, 0, 0, 0], 
+        [0, 1, 0, 0, 0], 
+        [0, 0, 1, 0, 0], 
+        [0, 0, 0, 1, 0]])
+
+
 @pytest.mark.encode_sequence
 @pytest.mark.parametrize(
-    "in_seq, out_ohe, encode_spec, ignore_case", [
-        ("ACGTN", acgtn_ohe(), None, False),
-        ("aCgTN", acgtn_ohe(), None, True), 
-        ("ACGTN", acgtn_ohe_no_n(), "ACGT", False),
-        ("AcGtN", acgtn_ohe_no_n(), "ACGT", True),
-        ("acgtN", acgtn_ohe_only_n(), "ACGTN", False),
-        (np.array(["A", "C", "G", "T", "N"]), acgtn_ohe(), None, False),
-        (np.array(["a", "c", "g", "t", "N"]), acgtn_ohe_no_n(), "ACGT", True)
+    "in_seq, encoded_bases, encode_spec, ignore_case, out_ohe", [
+        ("ACGTN", None, None, False, acgtn_ohe()),
+        ("aCgTN", None, None, True, acgtn_ohe()), 
+        ("ACGTN", None, "ACGT", False, acgtn_ohe_no_n()),
+        ("AcGtN", None, "ACGT", True, acgtn_ohe_no_n()),
+        ("acgtN", None, "ACGTN", False, acgtn_ohe_only_n()),
+        ("ACGT", None, None, True, acgt_ohe_default_cols()), 
+        (np.array(["A", "C", "G", "T", "N"]), None, None, False, acgtn_ohe()),
+        (np.array(["a", "c", "g", "t", "N"]), None, "ACGT", True, acgtn_ohe_no_n())
       ])
-def test_encode_sequence(in_seq, out_ohe, encode_spec, ignore_case):
-    assert np.array_equal(encode_sequence(in_seq, encode_spec=encode_spec, ignore_case=ignore_case), out_ohe)
+def test_encode_sequence_pandas(in_seq, encoded_bases, encode_spec, ignore_case, out_ohe):
+    assert np.array_equal(
+        encode_sequence(in_seq, encoded_bases=encoded_bases, encode_spec=encode_spec, ignore_case=ignore_case, engine="pandas"), 
+        out_ohe)
+
+
+#TODO WRITE TESTS FOR BOTH PANDAS AND POLAR ENCODING ENGINES/ as well as parity check
+@pytest.mark.encode_sequence
+@pytest.mark.parametrize(
+    "in_seq, encoded_bases, encode_spec, ignore_case, out_ohe", [
+        ("ACGTN", None, None, False, acgtn_ohe()),
+        ("aCgTN", None, None, True, acgtn_ohe()),
+        ("ACGTN", None, "ACGT", False, acgtn_ohe_no_n()),
+        ("AcGtN", None, "ACGT", True, acgtn_ohe_no_n()),
+        ("acgtN", None, "ACGTN", False, acgtn_ohe_only_n()),
+        ("ACGT", None, None, True, acgt_ohe_default_cols()),
+      ])
+def test_encode_sequence_polars(in_seq, encoded_bases, encode_spec, ignore_case, out_ohe):
+    assert np.array_equal(
+        encode_sequence(in_seq, encoded_bases=encoded_bases, encode_spec=encode_spec, ignore_case=ignore_case, engine="polars"), 
+        out_ohe)
 
 
 # Test Encode from FASTA
-# NEED TO CHANGE THIS TO OHE
 def grch38_20_59997_60002():
     # NNNTG
     return np.array([
