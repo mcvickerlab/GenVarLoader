@@ -38,11 +38,11 @@ def seq_to_onehot(seq_data, encoded_bases=None, out_spec=None):
     dummy_df = pl.Series(name="seq", values=seq_data, dtype=pl.Utf8).to_frame().lazy().with_column(
         pl.when(pl.col("seq").is_in(encoded_bases)).then(pl.col("seq")).otherwise("N").alias("seq")
     ).collect().to_dummies()
-    
+
     # Process cols to rename and spec
     rename_cols = {base:base.rsplit("_")[-1] for base in dummy_df.columns}
     missing_cols = [base for base in out_spec if base not in rename_cols.values()]
-    
+
     if missing_cols:
         dummy_df = dummy_df.with_columns(
             [pl.lit(0, dtype=pl.UInt8).alias(base) for base in missing_cols])
@@ -189,7 +189,7 @@ def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None, ignore_case=T
                 fasta_seq = fasta.fetch(chrom)
 
             onehot_dict[chrom] = encode_sequence(
-                fasta_seq, encode_spec, ignore_case=False, engine="polars"
+                fasta_seq, encode_spec=encode_spec, ignore_case=ignore_case, engine="polars"
             )
 
             print(
@@ -236,7 +236,7 @@ def encode_from_h5(in_h5, chrom_list=None, encode_spec=None):
             start_chrom = timeit.default_timer()
 
             onehot_dict[chrom] = encode_sequence(
-                file[chrom]["sequence"][:], encode_spec
+                file[chrom]["sequence"][:], encode_spec=encode_spec
             )
 
             print(

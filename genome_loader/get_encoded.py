@@ -3,23 +3,8 @@ import timeit
 import numpy as np
 import pandas as pd
 
+from .encode_data import parse_encode_spec
 from .load_data import load_vcf
-
-
-def parse_encode_dict(encode_spec):
-    """
-    HELPER CALLED BY get_encoded_haps()
-    """
-    if not encode_spec:
-        encode_spec = {"A": 0, "C": 1, "G": 2, "T": 3, "N": 4}
-
-    elif isinstance(encode_spec, (list, tuple, str)):
-        encode_spec = {base: i for i, base in enumerate(encode_spec)}
-
-    elif not isinstance(encode_spec, dict):
-        raise TypeError("Please input as dict, list or string!")
-
-    return encode_spec
 
 
 def get_chrom_hap(seq_matrix, snp_df, chrom, allele_dict):
@@ -68,7 +53,7 @@ def get_encoded_haps(onehot_dict, in_vcf, sample, chrom_list=None, encode_spec=N
     """
     start_time = timeit.default_timer()
 
-    encode_spec = parse_encode_dict(encode_spec)  # Process encode spec as dict
+    encode_spec = parse_encode_spec(encode_spec)  # Process encode spec as dict
 
     if not chrom_list:
         chrom_list = list(onehot_dict.keys())
@@ -80,7 +65,7 @@ def get_encoded_haps(onehot_dict, in_vcf, sample, chrom_list=None, encode_spec=N
             snp_df = load_vcf(in_vcf, chrom=chrom, sample=sample)
 
             hap1_matrix, hap2_matrix = get_chrom_hap(
-                onehot_dict[chrom], snp_df, chrom=chrom, allele_dict=encode_spec
+                onehot_dict[chrom].copy(), snp_df, chrom=chrom, allele_dict=encode_spec
             )
             hap1_dict[chrom] = hap1_matrix
             hap2_dict[chrom] = hap2_matrix

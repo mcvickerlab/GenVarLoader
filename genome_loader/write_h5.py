@@ -5,9 +5,11 @@ import h5py
 import numpy as np
 from pysam import FastaFile
 
-from .encode_data import encode_from_fasta, parse_encode_list
+from .encode_data import encode_from_fasta, parse_encode_spec
 from .get_data import get_allele_coverage, get_frag_depth
 
+
+# TODO UPDATE WITH NEW ENCODING ENGINES
 
 # FASTA to H5 Writers
 def write_genome_seq(in_fasta, out_dir, h5_name=None, chrom_list=None):
@@ -72,9 +74,7 @@ def write_encoded_genome(
             h5_file[chrom].attrs["length"] = onehot.shape[0]
 
         h5_file.attrs["id"] = "onehot"
-        h5_file.attrs["encode_spec"] = [
-            base.decode() for base in parse_encode_list(encode_spec)
-        ]
+        h5_file.attrs["encode_spec"] = parse_encode_spec(encode_spec)
 
     print(f"Finished writing in {timeit.default_timer() - start_write:.2f} seconds!")
     print(f"One-Hot encoded genome written to {out_h5}")
