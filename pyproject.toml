@@ -12,5 +12,8 @@ filterwarnings = [
 markers = [
     "encode_spec",
     "encode_sequence",
-    "encode_fasta"
+    "encode_fasta",
+    "exceptions",
+    "validate_chroms",
+    "encode_haps"
 ]
