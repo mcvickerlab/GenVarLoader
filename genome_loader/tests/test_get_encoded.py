@@ -31,13 +31,6 @@ def snp_df_no_prefix(snp_df):
     return no_prefix
 
 
-@pytest.fixture(scope="module")
-def encode_dict_grch38():
-    data_path = Path(__file__).parent / "data"
-    fasta_file = str(data_path / "fasta" / "grch38.20.21.fa.gz")
-    return encode_from_fasta(fasta_file, chrom_list=["20"])
-
-
 def acgtn_ohe():
     return np.array([
         [1, 0, 0, 0, 0], 
@@ -142,6 +135,19 @@ def test_validate_skip_chroms(snp_df):
 
 
 # TEST HAPLOTYPE GENERATION
+@pytest.fixture(scope="module")
+def encode_dict_grch38():
+    data_path = Path(__file__).parent / "data"
+    fasta_file = str(data_path / "fasta" / "grch38.20.21.fa.gz")
+    return encode_from_fasta(fasta_file, chrom_list=["20"])
+
+
+@pytest.fixture(scope="module")
+def encode_dict_grch38_no_n():
+    data_path = Path(__file__).parent / "data"
+    fasta_file = str(data_path / "fasta" / "grch38.20.21.fa.gz")
+    return encode_from_fasta(fasta_file, chrom_list=["20"], encode_spec="ACGT")
+
 @pytest.mark.encode_haps
 def test_hap_encoding_sample(encode_dict_grch38, vcf_file, snp_df):
 
@@ -173,3 +179,129 @@ def test_hap_encoding_sample(encode_dict_grch38, vcf_file, snp_df):
     # Check manual against encoded_haps
     assert np.array_equal(hap1_seq, hap1["20"][sample_locs]) and np.array_equal(hap2_seq, hap2["20"][sample_locs])
 
+
+# TESTS FOR remove_ambiguous / N HANDLING
+@pytest.fixture()
+def vcf_with_ns():
+    data_path = Path(__file__).parent / "data"
+    return str(data_path / "vcf" / "NA12878_chr20_with_Ns.vcf.gz")
+
+
+@pytest.fixture(scope="module")
+def snp_df_with_ns():
+    data_path = Path(__file__).parent / "data"
+    n_vcf_file = str(data_path / "vcf" / "NA12878_chr20_with_Ns.vcf.gz")
+    return load_vcf(n_vcf_file, sample="NA12878")
+
+
+def n_vcf_starts():
+    return np.array([
+        7373672, 18616601, 19084614, 22196219, 26102638,
+        30668586, 31394973, 34136538, 45760706, 49323597,
+        50225789, 50706183, 52906392, 53363556, 55707141
+        ])
+
+
+def n_vcf_og_seq():
+    return np.array([
+        [0, 1, 0, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], 
+        [0, 1, 0, 0, 0], [0, 0, 1, 0, 0], [0, 1, 0, 0, 0], 
+        [0, 0, 1, 0, 0], [0, 1, 0, 0, 0], [1, 0, 0, 0, 0], 
+        [0, 1, 0, 0, 0], [0, 0, 1, 0, 0], [0, 0, 0, 1, 0], 
+        [1, 0, 0, 0, 0], [0, 1, 0, 0, 0], [1, 0, 0, 0, 0]
+        ])
+
+
+def n_phase1_idx():
+    return np.array([4, 0, 4, 2, 0, 1, 0, 3, 0, 3, 2, 0, 4, 1, 4])
+
+
+def n_phase2_idx():
+    return np.array([4, 0, 0, 1, 4, 0, 0, 3, 0, 3, 4, 3, 0, 0, 4])
+
+
+@pytest.mark.encode_ambiguity
+def test_hap_remove_ambiguity(encode_dict_grch38, vcf_with_ns):
+
+    # Create Data to test
+    test_dict1, test_dict2 = get_encoded_haps(encode_dict_grch38, vcf_with_ns, "NA12878",
+     remove_ambiguity=True)
+    
+    test_hap1 = test_dict1["20"][n_vcf_starts()]
+    test_hap2 = test_dict2["20"][n_vcf_starts()]
+
+    # Manually create haps
+    hap1 = n_vcf_og_seq()
+    hap2 = n_vcf_og_seq()
+
+    # Create idx data to change
+    non_n_rows = np.arange(1, 14, 2)
+    non_n_phase1_idx = n_phase1_idx()[1::2]
+    non_n_phase2_idx = n_phase2_idx()[1::2]
+
+    # Update hap1
+    hap1[1::2] = 0
+    hap1[non_n_rows, non_n_phase1_idx] = 1
+
+    # Update hap2
+    hap2[1::2] = 0
+    hap2[non_n_rows, non_n_phase2_idx] = 1
+
+    assert np.array_equal(hap1, test_hap1) and np.array_equal(hap2, test_hap2)
+
+
+@pytest.mark.encode_ambiguity
+def test_hap_keep_ambiguity(encode_dict_grch38, vcf_with_ns):
+
+    # Create Data to test
+    test_dict1, test_dict2 = get_encoded_haps(encode_dict_grch38, vcf_with_ns, "NA12878",
+     remove_ambiguity=False)
+    
+    test_hap1 = test_dict1["20"][n_vcf_starts()]
+    test_hap2 = test_dict2["20"][n_vcf_starts()]
+
+    # Manually create haps
+    hap1 = n_vcf_og_seq()
+    hap2 = n_vcf_og_seq()
+
+    # Update hap1
+    hap1[:] = 0
+    hap1[np.arange(0, 15), n_phase1_idx()] = 1
+
+    # Update hap2
+    hap2[:] = 0
+    hap2[np.arange(0, 15), n_phase2_idx()] = 1
+
+    assert np.array_equal(hap1, test_hap1) and np.array_equal(hap2, test_hap2)
+
+
+@pytest.mark.encode_ambiguity
+def test_hap_ambiguity_acgt_spec(encode_dict_grch38_no_n, vcf_with_ns):
+
+    # Create Data to test
+    test_dict1, test_dict2 = get_encoded_haps(
+        encode_dict_grch38_no_n, vcf_with_ns, "NA12878", 
+        encode_spec="ACGT", remove_ambiguity=False)
+    
+    test_hap1 = test_dict1["20"][n_vcf_starts()]
+    test_hap2 = test_dict2["20"][n_vcf_starts()]
+
+    # Manually create haps
+    hap1 = n_vcf_og_seq()[:, :-1]
+    hap2 = n_vcf_og_seq()[:, :-1]
+
+    # Create idx data to change
+    non_n_rows = np.arange(1, 14, 2)
+    non_n_phase1_idx = n_phase1_idx()[1::2]
+    non_n_phase2_idx = n_phase2_idx()[1::2]
+
+    # Update hap1
+    hap1[1::2] = 0
+    hap1[non_n_rows, non_n_phase1_idx] = 1
+
+    # Update hap2
+    hap2[1::2] = 0
+    hap2[non_n_rows, non_n_phase2_idx] = 1
+
+    assert np.array_equal(hap1, test_hap1) and np.array_equal(hap2, test_hap2)
+    

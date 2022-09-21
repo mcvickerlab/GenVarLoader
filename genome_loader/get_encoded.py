@@ -62,7 +62,6 @@ def validate_snp_chroms(snp_df, bam_chroms):
     return snp_df
 
 
-
 def get_chrom_hap(seq_matrix, snp_df, chrom, allele_dict):
     """HELPER CALLED BY get_encoded_haps()
     parses haplotypes per chromosome
@@ -137,4 +136,3 @@ def get_encoded_haps(onehot_dict, in_vcf, sample, chrom_list=None, encode_spec=N
 
     print(f"Processed haplotype data in {timeit.default_timer() - start_time:.2f} seconds!")
     return hap1_dict, hap2_dict
-

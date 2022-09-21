@@ -15,5 +15,6 @@ markers = [
     "encode_fasta",
     "exceptions",
     "validate_chroms",
-    "encode_haps"
+    "encode_haps",
+    "encode_ambiguity"
 ]
