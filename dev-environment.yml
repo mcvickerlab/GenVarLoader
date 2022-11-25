@@ -23,6 +23,7 @@ dependencies:
   # dev
   - black
   - conda-lock
+  - gh
   - git
   - icecream
   - isort

@@ -21,8 +21,8 @@ metadata:
   - url: nodefaults
     used_env_vars: []
   content_hash:
-    linux-64: 1359cff8ce707f2255d83b7701dae1331ce4d22ca3b75400f8505a93d3519250
-    osx-64: b71a6a1475adc77c250e151a64a3e76a0c158c2c8d095c1840cce0313a63a03b
+    linux-64: 2b2457b64256525d5b078df542280e8b8bf95592440d26c959e650e20174f21d
+    osx-64: c5ec3bcf9824e4f41e449239ae274f8d9a2e9bb0ceed914765499899ac6405e0
   platforms:
   - linux-64
   - osx-64
@@ -53,6 +53,17 @@ package:
   platform: linux-64
   url: https://conda.anaconda.org/conda-forge/linux-64/ca-certificates-2022.9.24-ha878542_0.tar.bz2
   version: 2022.9.24
+- category: dev
+  dependencies: {}
+  hash:
+    md5: f67596da474049fe56745fcdf7e90a16
+    sha256: 8041c7faa12401d62231c31ef3dbaf4599556a7f4a3acafea60d16804533df7e
+  manager: conda
+  name: gh
+  optional: true
+  platform: linux-64
+  url: https://conda.anaconda.org/conda-forge/linux-64/gh-2.20.2-ha8f183a_0.tar.bz2
+  version: 2.20.2
 - category: dev
   dependencies: {}
   hash:
@@ -3626,6 +3637,17 @@ package:
   platform: osx-64
   url: https://conda.anaconda.org/conda-forge/osx-64/ca-certificates-2022.9.24-h033912b_0.tar.bz2
   version: 2022.9.24
+- category: dev
+  dependencies: {}
+  hash:
+    md5: 261e9d03c0d6a1bb98d48da77bde48ab
+    sha256: 6bacc5adaadfcdd57b52adff8a7a7469a9a01f640c4bf71dbebcbd3dbb617aac
+  manager: conda
+  name: gh
+  optional: true
+  platform: osx-64
+  url: https://conda.anaconda.org/conda-forge/osx-64/gh-2.20.2-h990441c_0.tar.bz2
+  version: 2.20.2
 - category: dev
   dependencies: {}
   hash:
