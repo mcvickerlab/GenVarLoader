@@ -4,31 +4,34 @@ channels:
   - conda-forge
   - nodefaults
 dependencies:
-  - python>=3.7.*
+  - bioconda::cyvcf2 # needed to read VCF with sgkit
   - dask
+  - einops
   - h5py
   - numba
+  - numpy
   - pandas
-  - typer
   - polars
   - pyarrow
+  - bioconda::pysam
+  - python>=3.7.*
   - sgkit
+  - tqdm
+  - typer
   - xarray
   - zarr
-  - bioconda::pysam
-  - bioconda::cyvcf2 # needed to read VCF with sgkit
   # dev
+  - black
+  - conda-lock
   - git
+  - icecream
+  - isort
+  - mypy
+  - pipreqs
+  - pre-commit
   - pytest
   - pytest-cases
   - pytest-cov
-  - isort
-  - black
-  - mypy
-  - pre-commit
-  - conda-lock
-  - pipreqs
-  - icecream
 platforms:
   - linux-64
   - osx-64

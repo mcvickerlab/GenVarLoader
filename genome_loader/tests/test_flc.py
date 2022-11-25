@@ -6,7 +6,7 @@ import pytest
 from pysam import FastaFile
 from pytest_cases import fixture, parametrize, parametrize_with_cases
 
-from genome_loader.gloader import FixedLengthConsensus
+from genome_loader.gloader.consensus import FixedLengthConsensus
 from genome_loader.utils import ohe_to_bytes
 
 

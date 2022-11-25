@@ -40,7 +40,7 @@ def bed_file():
 
 
 def test_read_bed(bed_file):
-    bed = read_bed(bed_file)
+    bed = read_bed(bed_file).collect()
     pl.testing.assert_series_equal(
         bed["chrom"],
         pl.Series("chrom", np.array(["21", "20", "20"], dtype=np.dtype("U"))),
@@ -57,7 +57,7 @@ def zarr_file():
 
 
 def test_df_zarr_serialization(bed_file, zarr_file):
-    df = read_bed(bed_file)
+    df = read_bed(bed_file).collect()
     z = zarr.open(zarr_file, "w")
     df_to_zarr(df, z.create_group("bed"))
 

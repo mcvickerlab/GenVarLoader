@@ -1,7 +1,8 @@
 from pathlib import Path
 from textwrap import dedent
-from typing import Union
+from typing import Optional, Union
 
+import numba
 import numpy as np
 import polars as pl
 import zarr
@@ -10,29 +11,31 @@ from numcodecs.abc import Codec
 from numpy.typing import ArrayLike, NDArray
 
 PathType = Union[str, Path]
-IndexType = Union[int, slice, NDArray[np.int_], NDArray[np.uint]]
+IndexType = Union[int, slice, list[int], NDArray[np.int_], NDArray[np.uint]]
 
-_DNA = [nuc.encode() for nuc in "ACGTacgtN"]
-_DNA_COMP = [nuc.encode() for nuc in "CATGcatgN"]
+_DNA = [nuc.encode() for nuc in "ACacgtGTN"]
+_DNA_COMP = [nuc.encode() for nuc in "TGtgcaCAN"]
 DNA_COMPLEMENT = dict(zip(_DNA, _DNA_COMP))
-_RNA = [nuc.encode() for nuc in "ACGUacguN"]
-_RNA_COMP = [nuc.encode() for nuc in "CAUGcaugN"]
+_RNA = [nuc.encode() for nuc in "ACacguGUN"]
+_RNA_COMP = [nuc.encode() for nuc in "UGugcaCAN"]
 RNA_COMPLEMENT = dict(zip(_RNA, _RNA_COMP))
 
 
 def bytes_to_ohe(
-    arr: NDArray[np.byte], alphabet: NDArray[np.byte]
+    arr: NDArray[np.bytes_], alphabet: NDArray[np.bytes_]
 ) -> NDArray[np.uint8]:
     alphabet_size = len(alphabet)
     idx = np.empty_like(arr, dtype="u8")
     for i, char in enumerate(alphabet):
         idx[arr == char] = np.uint64(i)
+    # out shape: (length alphabet)
     return np.eye(alphabet_size, dtype="u1")[idx]
 
 
 def ohe_to_bytes(
-    ohe_arr: NDArray[np.uint8], alphabet: NDArray[np.byte], ohe_axis=-1
-) -> NDArray[np.byte]:
+    ohe_arr: NDArray[np.uint8], alphabet: NDArray[np.bytes_], ohe_axis=-1
+) -> NDArray[np.bytes_]:
+    # ohe_arr shape: (... alphabet)
     idx = ohe_arr.nonzero()[-1]
     if ohe_axis < 0:
         ohe_axis_idx = len(ohe_arr.shape) + ohe_axis
@@ -43,17 +46,27 @@ def ohe_to_bytes(
     return alphabet[idx].reshape(shape)
 
 
-def read_bed(bed_file: PathType):
-    """Read a BED-like file as a polars.DataFrame. Must have a header and
+def read_bed(
+    bed_file: PathType, region_idx: Optional[IndexType] = None
+) -> pl.LazyFrame:
+    """Read a BED-like file as a polars.LazyFrame. Must have a header and
     at minimum have columns named "chrom" and "start". If column "strand" not provided,
     it will be added assuming all regions are on positive strand."""
-    bed = pl.read_csv(
+    bed = pl.scan_csv(
         bed_file,
         sep="\t",
         dtype={"chrom": pl.Utf8, "start": pl.Int32, "strand": pl.Utf8},
     )
+    if region_idx is not None:
+        bed = bed.with_row_count("index")
+        if isinstance(region_idx, slice):
+            region_idx = np.arange(
+                region_idx.start, region_idx.stop, region_idx.step, dtype="u4"
+            )
+        region_srs = pl.DataFrame(region_idx, columns=["index"])  # type: ignore
+        bed = bed.join(region_srs.lazy(), on="index").drop("index")  # type: ignore
     if "strand" not in bed.columns:
-        bed = bed.with_columns(pl.lit(np.repeat("+", len(bed))).alias("strand"))
+        bed = bed.with_columns(pl.lit("+").alias("strand"))
     return bed
 
 
@@ -94,7 +107,7 @@ def zarr_to_df(z: zarr.Group) -> pl.DataFrame:
 
 def order_as(a1: ArrayLike, a2: ArrayLike) -> NDArray[np.uint32]:
     """Get indices that would order ar1 as ar2, assuming all elements of a1 are in a2."""
-    idx1, idx2 = np.intersect1d(a1, a2, assume_unique=True, return_indices=True)
+    _, idx1, idx2 = np.intersect1d(a1, a2, assume_unique=True, return_indices=True)
     return idx1[idx2].astype("u4")
 
 
@@ -103,10 +116,12 @@ def get_complement_idx(
 ) -> NDArray[np.uint32]:
     """Get index to reorder alphabet that would give the complement."""
     idx = order_as([comp_dict[nuc] for nuc in alphabet], alphabet)
-    return idx.astype("u4")
+    return idx
 
 
-def rev_comp_byte(byte_arr: NDArray[np.bytes_], complement_map: dict[bytes, bytes]):
+def rev_comp_byte(
+    byte_arr: NDArray[np.bytes_], complement_map: dict[bytes, bytes]
+) -> NDArray[np.bytes_]:
     """Get reverse complement of byte (string) array.
 
     Parameters
@@ -122,23 +137,13 @@ def rev_comp_byte(byte_arr: NDArray[np.bytes_], complement_map: dict[bytes, byte
     return out
 
 
-def rev_comp_ohe(
-    ohe_arr: NDArray[np.uint8], complement_idx: NDArray[np.uint32]
-) -> NDArray[np.uint8]:
-    """Get reverse complement of onehot or probabilistic encoded array.
-
-    Parameters
-    ----------
-    ohe_arr : ndarray[uint8]
-        Array of shape (regions length [samples] [ploidy] alphabet) to complement.
-    complement_idx : ndarray[uint32]
-        Index specifying how to reorder elements of alphabet to get complement.
-    """
-    if len(ohe_arr.shape) == 3:
-        return ohe_arr[:, ::-1, complement_idx]
-    elif len(ohe_arr.shape) == 5:
-        return ohe_arr[:, ::-1, :, :, complement_idx]
-    else:
-        raise ValueError(
-            f"Input array has unexpected shape: {ohe_arr.shape}. Expected either 3-d or 5-d array."
+def rev_comp_ohe(ohe_arr: NDArray[np.uint8], has_N: bool) -> NDArray[np.uint8]:
+    if has_N:
+        np.concatenate(
+            [np.flip(ohe_arr[..., :-1], -1), ohe_arr[..., -1][..., None]],
+            axis=-1,
+            out=ohe_arr,
         )
+    else:
+        ohe_arr = np.flip(ohe_arr, -1)
+    return np.flip(ohe_arr, 0)

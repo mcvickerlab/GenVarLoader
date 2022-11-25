@@ -1,8 +1,9 @@
 # Extra
-sbox/
+sbox*
 archive/
 test.bed.flc.zarr
 test.zarr
+examples/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
