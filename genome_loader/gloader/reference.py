@@ -20,7 +20,6 @@ from genome_loader.utils import (
     rev_comp_ohe,
 )
 
-
 logger = logging.getLogger(__name__)
 
 

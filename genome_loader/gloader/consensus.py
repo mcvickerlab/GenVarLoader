@@ -31,8 +31,7 @@ from genome_loader.utils import (
     rev_comp_byte,
     rev_comp_ohe,
     zarr_to_df,
-)        
-
+)
 
 logger = logging.getLogger(__name__)
 

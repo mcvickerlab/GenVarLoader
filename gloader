@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 
+import sys
 from pathlib import Path
 from typing import List, Optional
+
 import typer
-import sys
 
 app = typer.Typer()
 
@@ -44,11 +45,11 @@ def writefasta(
 
         if len(set(spec)) != len(spec):
             raise ValueError(f"Spec: '{spec}' can't contain duplicate characters!")
-    
+
     if (chroms is not None) and (len(chroms) == 1):
         chroms = chroms[0].split()
-    
-    from genome_loader.write_h5 import write_genome_seq, write_encoded_genome
+
+    from genome_loader.write_h5 import write_encoded_genome, write_genome_seq
 
     if encode:
         write_encoded_genome(
@@ -81,9 +82,14 @@ def writefrag(
         "--chromlens",
         help="Lengths of provided chroms (Auto retrieved if not provided)",
     ),
-    ignore_offset: bool = typer.Option(False, "--ignore_offset", help="Don't offset tn5 cutsites"),
-    count_method: str = typer.Option("cutsite", "--method", help="Counting method, Choice of 'cutsite', 'midpoint, 'fragment'")
-    
+    ignore_offset: bool = typer.Option(
+        False, "--ignore_offset", help="Don't offset tn5 cutsites"
+    ),
+    count_method: str = typer.Option(
+        "cutsite",
+        "--method",
+        help="Counting method, Choice of 'cutsite', 'midpoint, 'fragment'",
+    ),
 ):
     if output.suffix not in {".h5", ".hdf5", ".hdf", ".he5"}:
         output.suffix = ".h5"
@@ -97,31 +103,39 @@ def writefrag(
 
         if len(lens) == 1:
             lens = lens[0].split()
-        
+
         lens = [int(i) for i in lens]
 
         if not chroms:
             typer.echo("WARNING: Lengths ignored, provided w/o chroms")
         elif len(chroms) != len(lens):
-            typer.echo(f"Number of chroms({len(chroms)}) and lengths don't match({len(lens)})")
+            typer.echo(
+                f"Number of chroms({len(chroms)}) and lengths don't match({len(lens)})"
+            )
             raise typer.Exit(code=1)
-    
+
     if ignore_offset:
-        offset_tn5=False
+        offset_tn5 = False
     else:
-        offset_tn5=True
+        offset_tn5 = True
 
     # Check for valid input
     if count_method not in {"cutsite", "midpoint", "fragment"}:
-        typer.echo("Please input valid count method! ('cutsite', 'midpoint, 'fragment')")
+        typer.echo(
+            "Please input valid count method! ('cutsite', 'midpoint, 'fragment')"
+        )
         raise typer.Exit(code=1)
-    
+
     from genome_loader.write_h5 import write_frag_depth
 
     write_frag_depth(
-        str(input), str(directory), h5_name=name,
-        chrom_list=chroms, chrom_lens=lens,
-        offset_tn5=offset_tn5, count_method=count_method
+        str(input),
+        str(directory),
+        h5_name=name,
+        chrom_list=chroms,
+        chrom_lens=lens,
+        offset_tn5=offset_tn5,
+        count_method=count_method,
     )
 
 
@@ -144,7 +158,7 @@ def writecoverage(
 
     if (chroms is not None) and (len(chroms) == 1):
         chroms = chroms[0].split()
-    
+
     from genome_loader.write_h5 import write_allele_coverage
 
     write_allele_coverage(str(input), str(directory), h5_name=name, chrom_list=chroms)

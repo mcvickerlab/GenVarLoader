@@ -28,25 +28,35 @@ def seq_to_onehot(seq_data, encoded_bases=None, out_spec=None):
 
     if encoded_bases is None:
         encoded_bases = ["A", "C", "G", "T", "N"]
-    
+
     if out_spec is None:
         out_spec = encoded_bases
     else:
         out_spec = [base for base, idx in sorted(out_spec.items(), key=lambda x: x[1])]
-    
-    
-    dummy_df = pl.Series(name="seq", values=seq_data, dtype=pl.Utf8).to_frame().lazy().with_column(
-        pl.when(pl.col("seq").is_in(encoded_bases)).then(pl.col("seq")).otherwise("N").alias("seq")
-    ).collect().to_dummies()
+
+    dummy_df = (
+        pl.Series(name="seq", values=seq_data, dtype=pl.Utf8)
+        .to_frame()
+        .lazy()
+        .with_column(
+            pl.when(pl.col("seq").is_in(encoded_bases))
+            .then(pl.col("seq"))
+            .otherwise("N")
+            .alias("seq")
+        )
+        .collect()
+        .to_dummies()
+    )
 
     # Process cols to rename and spec
-    rename_cols = {base:base.rsplit("_")[-1] for base in dummy_df.columns}
+    rename_cols = {base: base.rsplit("_")[-1] for base in dummy_df.columns}
     missing_cols = [base for base in out_spec if base not in rename_cols.values()]
 
     if missing_cols:
         dummy_df = dummy_df.with_columns(
-            [pl.lit(0, dtype=pl.UInt8).alias(base) for base in missing_cols])
-    
+            [pl.lit(0, dtype=pl.UInt8).alias(base) for base in missing_cols]
+        )
+
     return dummy_df.rename(rename_cols).select(out_spec).to_numpy()
 
 
@@ -70,16 +80,20 @@ def array_to_onehot(seq_array, encoded_bases=None, out_spec=None):
 
     if encoded_bases is None:
         encoded_bases = ["A", "C", "G", "T", "N"]
-    
-    encoded_bases = [base.encode() for base in encoded_bases] # encode to bytes
-    
+
+    encoded_bases = [base.encode() for base in encoded_bases]  # encode to bytes
+
     if out_spec is None:
         out_spec = encoded_bases
     else:
         # Convert spec dict of base, idx to ordered byte list
-        out_spec = [base.encode() for base, idx in sorted(out_spec.items(), key=lambda x: x[1])]
+        out_spec = [
+            base.encode() for base, idx in sorted(out_spec.items(), key=lambda x: x[1])
+        ]
 
-    seq_array[np.isin(seq_array, encoded_bases, invert=True)] = b"N"  # Convert ambiguous
+    seq_array[
+        np.isin(seq_array, encoded_bases, invert=True)
+    ] = b"N"  # Convert ambiguous
 
     return pd.get_dummies(seq_array).reindex(columns=out_spec, fill_value=0).to_numpy()
 
@@ -100,7 +114,9 @@ def parse_encode_spec(encode_spec):
     return encode_spec
 
 
-def encode_sequence(seq_data, encoded_bases=None, encode_spec=None, ignore_case=True, engine=None):
+def encode_sequence(
+    seq_data, encoded_bases=None, encode_spec=None, ignore_case=True, engine=None
+):
     """Encodes sequence data into one-hot encoded format
 
     :param seq_data: Sequence data to encode
@@ -111,7 +127,7 @@ def encode_sequence(seq_data, encoded_bases=None, encode_spec=None, ignore_case=
     :type encoded_bases: list of str, optional
     :param encode_spec: Base order and shape of output columns.
         Bases in encode_spec DO NOT need to match encode_bases.
-        Encoded matrix will always be shaped according to encode_spec, 
+        Encoded matrix will always be shaped according to encode_spec,
         regardless of whether or not base is found, defaults to 'ACGTN' (5 col matrix)
     :type encode_spec: dict with base, pos [str, int], str, or list of bases(str), optional
     :param ignore_case: Convert lowercase bases to upper, default True
@@ -126,7 +142,7 @@ def encode_sequence(seq_data, encoded_bases=None, encode_spec=None, ignore_case=
     if isinstance(seq_data, str):  # sequence input as string
         if ignore_case:
             seq_data = seq_data.upper()
-        
+
         if engine != "polars":
             seq_data = np.fromiter(seq_data, count=len(seq_data), dtype="|S1")
 
@@ -137,8 +153,8 @@ def encode_sequence(seq_data, encoded_bases=None, encode_spec=None, ignore_case=
         if ignore_case:
             # Much faster to convert upper as string
             seq_data = np.char.upper(seq_data)
-        
-        engine = "pandas" # array input not supported in polars
+
+        engine = "pandas"  # array input not supported in polars
 
     else:
         raise TypeError("Please input as string or numpy array!")
@@ -146,10 +162,14 @@ def encode_sequence(seq_data, encoded_bases=None, encode_spec=None, ignore_case=
     encode_spec = parse_encode_spec(encode_spec)
 
     if engine == "polars":
-        ohe_sequence = seq_to_onehot(seq_data, encoded_bases=encoded_bases, out_spec=encode_spec)
+        ohe_sequence = seq_to_onehot(
+            seq_data, encoded_bases=encoded_bases, out_spec=encode_spec
+        )
     else:
-        ohe_sequence = array_to_onehot(seq_data, encoded_bases=encoded_bases, out_spec=encode_spec)
-    
+        ohe_sequence = array_to_onehot(
+            seq_data, encoded_bases=encoded_bases, out_spec=encode_spec
+        )
+
     return ohe_sequence
 
 
@@ -170,9 +190,7 @@ def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None, ignore_case=T
 
     onehot_dict = {}
     start_time = timeit.default_timer()
-    print(
-        f"Encoding w. Specs: {parse_encode_spec(encode_spec)}"
-    )
+    print(f"Encoding w. Specs: {parse_encode_spec(encode_spec)}")
 
     with FastaFile(in_fasta) as fasta:
 
@@ -189,7 +207,10 @@ def encode_from_fasta(in_fasta, chrom_list=None, encode_spec=None, ignore_case=T
                 fasta_seq = fasta.fetch(chrom)
 
             onehot_dict[chrom] = encode_sequence(
-                fasta_seq, encode_spec=encode_spec, ignore_case=ignore_case, engine="polars"
+                fasta_seq,
+                encode_spec=encode_spec,
+                ignore_case=ignore_case,
+                engine="polars",
             )
 
             print(
@@ -218,9 +239,7 @@ def encode_from_h5(in_h5, chrom_list=None, encode_spec=None):
 
     onehot_dict = {}
     start_time = timeit.default_timer()
-    print(
-        f"Encoding w. Specs: {parse_encode_spec(encode_spec)}"
-    )
+    print(f"Encoding w. Specs: {parse_encode_spec(encode_spec)}")
 
     with h5py.File(in_h5, "r") as file:
 

@@ -8,7 +8,6 @@ from pysam import FastaFile
 from .encode_data import encode_from_fasta, parse_encode_spec
 from .get_data import get_allele_coverage, get_frag_depth
 
-
 # TODO UPDATE WITH NEW ENCODING ENGINES
 
 # FASTA to H5 Writers
