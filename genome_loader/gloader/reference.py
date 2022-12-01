@@ -21,6 +21,9 @@ from genome_loader.utils import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class ReferenceGenomeLoader:
     """A reference genome."""
 
@@ -36,7 +39,7 @@ class ReferenceGenomeLoader:
 
         with self._open() as ref_genome:
             self.embedding: str = ref_genome.attrs["id"]
-            logging.info(f"Genome is {self.embedding} embedded.")
+            logger.info(f"Genome is {self.embedding} embedded.")
             self._ref_dtype = ref_genome[next(iter(ref_genome.keys()))][
                 self.embedding
             ].dtype
@@ -145,7 +148,7 @@ class ReferenceGenomeLoader:
                 pad_arr[self.spec == pad_val] = np.uint8(1)
             pad_arr = pad_arr[None, :]
 
-        logging.info("Validating ref genome args")
+        logger.info("Validating ref genome args")
         self._sel_validate_ref_genome_args(chroms, length)
 
         if strands is None:
@@ -155,7 +158,7 @@ class ReferenceGenomeLoader:
             strands_flags[strands == "-"] = np.int8(-1)
 
         with self._open() as ref_genome:
-            logging.info("Slicing GenomeLoader")
+            logger.info("Slicing GenomeLoader")
             out = self._sel_slice(
                 chroms,
                 starts,
@@ -202,9 +205,9 @@ class ReferenceGenomeLoader:
             starts = starts[sort_idx]
             ends = ends[sort_idx]
         out_ls = []  # will be sorted if input chroms are sorted
-        logging.info(f"Unique chroms: {np.unique(chroms)}")
+        logger.info(f"Unique chroms: {np.unique(chroms)}")
         for chrom in np.unique(chroms):  # guaranteed to proceed in a sorted order
-            logging.info(f"Slicing chrom: {chrom}")
+            logger.info(f"Slicing chrom: {chrom}")
             chrom_starts = starts[chroms == chrom]
             chrom_ends = ends[chroms == chrom]
             ref_chrom, ref_start, rel_starts = self._sel_padded_min_ref_chrom(
@@ -224,7 +227,7 @@ class ReferenceGenomeLoader:
         else:
             out = sorted_out
 
-        logging.info("Reverse complementing")
+        logger.info("Reverse complementing")
         if self.embedding == "sequence":
             out[strands_flags == -1] = rev_comp_byte(
                 out[strands_flags == -1], DNA_COMPLEMENT

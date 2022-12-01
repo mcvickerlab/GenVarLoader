@@ -34,6 +34,9 @@ from genome_loader.utils import (
 )        
 
 
+logger = logging.getLogger(__name__)
+
+
 class ConsensusGenomeLoader:
     """A reference genome with optional VCF for getting consensus sequences."""
 
@@ -50,7 +53,7 @@ class ConsensusGenomeLoader:
 
         with self._open() as ref_genome:
             self.embedding: str = ref_genome.attrs["id"]
-            logging.info(f"Genome is {self.embedding} embedded.")
+            logger.info(f"Genome is {self.embedding} embedded.")
             self._ref_dtype = ref_genome[next(iter(ref_genome.keys()))][
                 self.embedding
             ].dtype
@@ -212,12 +215,12 @@ class ConsensusGenomeLoader:
                 pad_arr[self.spec == pad_val] = np.uint8(1)
             pad_arr = pad_arr[None, :]
 
-        logging.info("Validating ref genome args")
+        logger.info("Validating ref genome args")
         self._sel_validate_ref_genome_args(contigs, length)
 
         # validate samples and get sample_idx
         if samples is not None:
-            logging.info("Validating sample args")
+            logger.info("Validating sample args")
             if isinstance(samples, np.ndarray) and samples.dtype.kind == "u":
                 if not np.isin(samples, np.arange(self._vcf.dims["samples"])).all():
                     raise ValueError("Got sample indices not in the VCF.")
@@ -251,7 +254,7 @@ class ConsensusGenomeLoader:
         with self._open() as ref_genome, dask.config.set(
             **{"array.slicing.split_large_chunks": True}
         ):
-            logging.info("Slicing GenomeLoader")
+            logger.info("Slicing GenomeLoader")
             out = self._sel_slice(
                 contigs,
                 starts,
@@ -308,10 +311,10 @@ class ConsensusGenomeLoader:
             starts = starts[sort_idx]
             ends = ends[sort_idx]
         out_ls = []  # will be sorted if input contigs are sorted
-        logging.info(f"Unique contigs: {np.unique(contigs)}")
+        logger.info(f"Unique contigs: {np.unique(contigs)}")
         chrom: str
         for chrom in np.unique(contigs):  # guaranteed to proceed in a sorted order
-            logging.info(f"Slicing chrom: {chrom}")
+            logger.info(f"Slicing chrom: {chrom}")
             chrom_starts = starts[contigs == chrom]
             chrom_ends = ends[contigs == chrom]
             ref_chrom, ref_start, rel_starts = self._sel_padded_min_ref_chrom(
@@ -338,7 +341,7 @@ class ConsensusGenomeLoader:
         else:
             out = sorted_out
 
-        logging.info("Reverse complementing")
+        logger.info("Reverse complementing")
         if self.embedding == "sequence":
             out[strands_flags == -1] = rev_comp_byte(
                 out[strands_flags == -1], DNA_COMPLEMENT
@@ -405,7 +408,7 @@ class ConsensusGenomeLoader:
         )
         del variants_per_region
         if self.embedding == "sequence":
-            logging.info("Calling numba helper")
+            logger.info("Calling numba helper")
             out = _sel_bytes_helper(
                 rel_starts,
                 length,
@@ -422,7 +425,7 @@ class ConsensusGenomeLoader:
             genos = genos.astype("u1")
             # (s p v a)
             ohe_genos: NDArray[np.uint8] = np.eye(5, dtype="u1")[genos]
-            logging.info("Calling numba helper")
+            logger.info("Calling numba helper")
             out = _sel_ohe_helper(
                 rel_starts, length, offsets, ohe_genos, var_pos, ref_chrom, ref_start
             )
@@ -437,7 +440,7 @@ class ConsensusGenomeLoader:
         ploid_idx: NDArray[np.uint32],
     ) -> tuple[NDArray[np.bytes_], NDArray[np.int32], NDArray[np.int32]]:
         """Get genotypes of given samples within the specified coordinates as bytes (e.g. nucleotides)."""
-        logging.info("Slicing sample genotypes")
+        logger.info("Slicing sample genotypes")
 
         unknown_to_N_flag = False
         if self.embedding == "sequence":
@@ -824,17 +827,17 @@ class FixedLengthConsensus:
 
         # raise NotImplementedError("Writing Zarr to file is intractably slow since it hasn't been parallelized yet.")
 
-        logging.info("Opening Zarr store.")
+        logger.info("Opening Zarr store.")
         z: zarr.Group = zarr.group(out_file, overwrite=True)
         z.attrs["embedding"] = gl.embedding
         z.attrs["ref_genome"] = str(gl.ref_genome_path)
         z.attrs["vcf"] = str(gl.vcf_path)
         z.attrs["length"] = np.uint32(length)
 
-        logging.info("Reading BED-like file.")
+        logger.info("Reading BED-like file.")
         bed: pl.DataFrame = read_bed(bed_file, region_idx).collect()
 
-        logging.info("Writing BED-like file.")
+        logger.info("Writing BED-like file.")
         df_to_zarr(bed, z.require_group("bed", overwrite=True), compressor)
 
         chroms: NDArray[np.str_] = bed["chrom"].to_numpy().astype("U")
@@ -913,7 +916,7 @@ class FixedLengthConsensus:
                         pad_val,
                         ploid_idx,
                     )
-                    logging.info("Writing chunk to file.")
+                    logger.info("Writing chunk to file.")
                     da.from_array(out, chunks=(1, *chunks[1:])).to_zarr(
                         z_regions, region=slice(start_idx, end_idx)
                     )
@@ -941,7 +944,7 @@ class FixedLengthConsensus:
                 pad_val,
                 ploid_idx,
             )
-            logging.info("Writing regions to file.")
+            logger.info("Writing regions to file.")
             da.from_array(out, chunks=chunks).to_zarr(z_regions)
 
         return FixedLengthConsensus(out_file)
