@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import warnings
+from math import ceil
 from pathlib import Path
 from textwrap import dedent
-from typing import Dict, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 import dask
 import dask.array as da
@@ -13,6 +14,7 @@ import h5py
 import numba
 import numpy as np
 import polars as pl
+import tensorstore as ts
 import xarray as xr
 import zarr
 from numcodecs import Blosc
@@ -823,11 +825,10 @@ class FixedLengthConsensus:
         -------
         FixedLengthConsensus
         """
-
-        # raise NotImplementedError("Writing Zarr to file is intractably slow since it hasn't been parallelized yet.")
+        _out_file = Path(out_file)
 
         logger.info("Opening Zarr store.")
-        z: zarr.Group = zarr.group(out_file, overwrite=True)
+        z: zarr.Group = zarr.group(_out_file, overwrite=True)
         z.attrs["embedding"] = gl.embedding
         z.attrs["ref_genome"] = str(gl.ref_genome_path)
         z.attrs["vcf"] = str(gl.vcf_path)
@@ -865,74 +866,33 @@ class FixedLengthConsensus:
                 length,
                 len(gl.spec),
             )
-        tot_bytes = np.prod(regions_shape) * region_dtype.itemsize
+        tot_bytes: int = np.prod(regions_shape) * region_dtype.itemsize
+        n_regions, n_samples, n_ploid, *_ = regions_shape
 
         # ignores memory requirements of overhead and intermediates
-        # most memory overhead is probably from loading spanning region of each ref chromosome
-        # TODO: chunk by samples and/or haplotypes if bytes_per_region > max_memory
-        if max_memory is not None:
-            if tot_bytes // len(bed) < max_memory:
-                chunk_by = "region"
-                bytes_per_chunk = tot_bytes // len(bed)
-            # elif tot_bytes//(len(bed)*len(samples)) < max_memory:
-            #     chunk_by = 'region_sample'
-            #     bytes_per_chunk = tot_bytes//(len(bed)*len(samples))
-            # elif tot_bytes//(len(bed)*len(samples)*2) < max_memory:
-            #     chunk_by = 'region_sample_ploidy'
-            #     bytes_per_chunk = tot_bytes//(len(bed)*len(samples)*2)
-            else:
-                raise NotImplementedError("Chunking by samples or haplotypes.")
-                raise ValueError(
-                    f"Max memory specified ({max_memory}) is insufficient to construct a consensus for a single (region + sample + haplotype)."
-                )
-            regs_per_chunk = max_memory // bytes_per_chunk
-            n_chunks = int(-(-len(bed) // regs_per_chunk))  # ceil
-            if gl.embedding == "sequence":
-                chunks: tuple = (n_chunks, 1, None, None)
-            elif gl.embedding == "onehot":
-                chunks = (n_chunks, 1, 1, None, None)
-            z_regions: zarr.Array = z.create_dataset(
-                "regions",
+        if max_memory is None:
+            chunks: List[Optional[int]] = [
+                ceil(n_regions / 100),
+                ceil(n_samples / 100),
+                n_ploid,
+                None,
+            ]
+
+            if gl.embedding == "onehot":  # assume byte sequence otherwise
+                chunks.append(None)
+
+            z_regions = ts.open(
+                {
+                    "driver": "zarr",
+                    "kvstore": {"driver": "file", "path": str(_out_file / "regions")},
+                },
+                create=True,
+                delete_existing=True,
                 shape=regions_shape,
                 dtype=region_dtype,
-                compressor=compressor,
-                chunks=chunks,
-            )
-            with tqdm(
-                total=len(bed),
-                unit="regions",
-            ) as pbar:
-                start_idx = 0
-                while start_idx < len(bed):
-                    end_idx = min(start_idx + regs_per_chunk, len(bed))
-                    out = gl.sel(
-                        chroms[start_idx:end_idx],
-                        starts[start_idx:end_idx],
-                        np.uint32(length),
-                        samples,
-                        strands,
-                        sorted_contigs,
-                        pad_val,
-                        ploid_idx,
-                    )
-                    logger.info("Writing chunk to file.")
-                    da.from_array(out, chunks=(1, *chunks[1:])).to_zarr(
-                        z_regions, region=slice(start_idx, end_idx)
-                    )
-                    pbar.update(end_idx - start_idx)
-                    start_idx = end_idx
-        else:
-            if gl.embedding == "sequence":
-                chunks = (1, 1, None, None)
-            elif gl.embedding == "onehot":
-                chunks = (1, 1, 1, None, None)
-            z_regions = z.create_dataset(
-                "regions",
-                shape=regions_shape,
-                dtype=region_dtype,
-                compressor=compressor,
-                chunks=chunks,
-            )
+                chunk_layout=ts.ChunkLayout(chunk_shape=chunks),
+            ).result()
+
             out = gl.sel(
                 chroms,
                 starts,
@@ -944,7 +904,89 @@ class FixedLengthConsensus:
                 ploid_idx,
             )
             logger.info("Writing regions to file.")
-            da.from_array(out, chunks=chunks).to_zarr(z_regions)
+            z_regions[:] = out
+        else:
+            if tot_bytes // n_regions < max_memory:
+                chunk_by: Literal["region", "region & sample"] = "region"
+                bytes_per_region = tot_bytes / n_regions
+                regs_per_chunk = max_memory / bytes_per_region
+                r_chunks = ceil(n_regions / regs_per_chunk)
+                chunks = [r_chunks, ceil(n_samples / 100), n_ploid, None]
+            elif tot_bytes // (n_regions * n_samples) < max_memory:
+                chunk_by = "region & sample"
+                bytes_per_region_sample = tot_bytes / (n_regions * n_samples)
+                samples_per_chunk = max_memory / bytes_per_region_sample
+                s_chunks = ceil(n_samples / samples_per_chunk)
+                chunks = [ceil(n_regions / 100), s_chunks, n_ploid, None]
+            else:
+                raise ValueError(
+                    f"Increase max_memory. Max memory specified ({max_memory}) is insufficient to construct a consensus sequence for a single region & sample."
+                )
+
+            if gl.embedding == "onehot":  # assume byte sequence otherwise
+                chunks.append(None)
+
+            z_regions = ts.open(
+                {
+                    "driver": "zarr",
+                    "kvstore": {"driver": "file", "path": str(_out_file / "regions")},
+                },
+                create=True,
+                delete_existing=True,
+                shape=regions_shape,
+                dtype=region_dtype,
+                chunk_layout=ts.ChunkLayout(chunk_shape=chunks),
+            ).result()
+
+            if chunk_by == "region":
+                with tqdm(
+                    total=n_regions,
+                    unit="region",
+                ) as pbar:
+                    start_idx = 0
+                    while start_idx < n_regions:
+                        end_idx = min(start_idx + n_regions // r_chunks, n_regions)
+                        out = gl.sel(
+                            chroms[start_idx:end_idx],
+                            starts[start_idx:end_idx],
+                            np.uint32(length),
+                            samples,
+                            strands,
+                            sorted_contigs,
+                            pad_val,
+                            ploid_idx,
+                        )
+                        logger.info("Writing chunk to file.")
+                        z_regions[start_idx:end_idx] = out
+                        pbar.update(end_idx - start_idx)
+                        start_idx = end_idx
+            else:
+                with tqdm(
+                    total=n_regions * n_samples,
+                    unit="region/sample",
+                ) as pbar:
+                    region_idx = 0
+                    while region_idx < n_regions:
+                        sample_start_idx = 0
+                        while sample_start_idx < n_samples:
+                            sample_end_idx = min(
+                                sample_start_idx + n_samples // s_chunks, n_samples
+                            )
+                            out = gl.sel(
+                                chroms[region_idx],
+                                starts[region_idx],
+                                np.uint32(length),
+                                samples[sample_start_idx:sample_end_idx],
+                                strands,
+                                sorted_contigs,
+                                pad_val,
+                                ploid_idx,
+                            )
+                            logger.info("Writing chunk to file.")
+                            z_regions[region_idx:end_idx] = out
+                            pbar.update(sample_end_idx - sample_start_idx)
+                            sample_end_idx = sample_start_idx
+                        region_idx += 1
 
         return FixedLengthConsensus(out_file)
 
