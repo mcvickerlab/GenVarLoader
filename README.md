@@ -2,17 +2,14 @@
 Pipeline for efficient genomic data processing.
 
 ## Installation
-Recommended installation with conda/mamba and [conda-lock](https://github.com/conda-incubator/conda-lock):
+Recommended installation with conda/mamba:
 ```bash
-# if you do not have conda-lock already, install it
-conda install -n base -c conda-forge conda-lock
-
-conda-lock install -n genome-loader conda-lock.yml
+mamba env create -n genome-loader -f environment.yml
 ```
 
 If you want to use the PyTorch datasets, samplers, and other data-oriented classes, install from `torch.conda-lock.yml` (PyTorch dependency is not included):
 ```bash
-conda-lock install -n genome-loader torch.conda-lock.yml
+mamba env create -n genome-loader torch-environment.yml
 ```
 
 A PyTorch dependency is not included since it requires (special instructions)[https://pytorch.org/get-started/locally/].
