@@ -1,0 +1,29 @@
+name: genome-loader
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - bioconda::cyvcf2 # needed to read VCF with sgkit
+  - dask
+  - einops
+  - h5py
+  - numba
+  - numpy
+  - pandas
+  - polars
+  - pyarrow
+  - bioconda::pysam
+  - python>=3.7.*
+  - sgkit
+  - tqdm
+  - typer
+  - xarray
+  - zarr
+  # torch dependencies
+  - pip
+  - pytorch-lightning
+  - pip:
+    - tensorstore
+platforms:
+  - linux-64
+  - osx-64
