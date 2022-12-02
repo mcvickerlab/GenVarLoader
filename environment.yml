@@ -2,7 +2,6 @@ name: genome-loader
 channels:
   - bioconda
   - conda-forge
-  - nodefaults
 dependencies:
   - bioconda::cyvcf2 # needed to read VCF with sgkit
   - dask

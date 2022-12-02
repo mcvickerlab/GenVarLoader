@@ -2,7 +2,6 @@ name: genome-loader
 channels:
   - bioconda
   - conda-forge
-  - nodefaults
 dependencies:
   - bioconda::cyvcf2 # needed to read VCF with sgkit
   - dask
@@ -20,19 +19,26 @@ dependencies:
   - typer
   - xarray
   - zarr
-  # dev
+  # torch dependencies
+  - pytorch::pytorch
+  - pytorch::cpuonly
+  - pytorch::torchvision
+  - pytorch-lightning
+  # dev dependencies
   - black
-  - conda-lock
   - gh
   - git
   - icecream
   - isort
   - mypy
+  - pip
   - pipreqs
   - pre-commit
   - pytest
   - pytest-cases
   - pytest-cov
+  - pip:
+    - tensorstore
 platforms:
   - linux-64
   - osx-64

@@ -1,22 +1,23 @@
 # genome-loader
 Pipeline for efficient genomic data processing.
 
-&nbsp;
-## Requirements
-- Python >= 3.7
-- h5py
-- pysam
-- numpy
-- pandas
-
-&nbsp;
 ## Installation
-Recommended installation through conda, and given environment
-```shell script
-conda env create -f environment.yml
+Recommended installation with conda/mamba and [conda-lock](https://github.com/conda-incubator/conda-lock):
+```bash
+# if you do not have conda-lock already, install it
+conda install -n base -c conda-forge conda-lock
+
+conda-lock install -n genome-loader conda-lock.yml
 ```
 
-Then add the package to your path i.e. in your `.bashrc`:
+If you want to use the PyTorch datasets, samplers, and other data-oriented classes, install from `torch.conda-lock.yml` (PyTorch dependency is not included):
+```bash
+conda-lock install -n genome-loader torch.conda-lock.yml
+```
+
+A PyTorch dependency is not included since it requires (special instructions)[https://pytorch.org/get-started/locally/].
+
+Then, add the package to your Python path e.g. add this line to your `.bashrc`:
 ```bash
 export PYTHONPATH=${PYTHONPATH:+${PYTHONPATH}:}/path/to/genome-loader
 ```
