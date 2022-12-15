@@ -535,7 +535,7 @@ class ConsensusGenomeLoader:
             Must have a header defining column names.
         length : int
             length of all regions
-        region_idx : int, slice, list[int], ndarray[int]
+        region_idx : int, slice, list[int], ndarray[int], default None
             index of regions from bed_file to write i.e. select a subset of regions
         samples : list[str], ndarray[str | uint32], default None
             An array of unique sample names. If integers, will select by index. If None, gets all.
@@ -553,14 +553,17 @@ class ConsensusGenomeLoader:
         """
         if isinstance(bed, str) or isinstance(bed, Path):
             _bed: pl.DataFrame = read_bed(bed, region_idx).collect()
-        else:
-            if region_idx is None:
-                region_idx = np.arange(len(bed))
+        elif isinstance(bed, pl.DataFrame) and region_idx is not None:
+            if isinstance(region_idx, slice):
+                region_idx = np.arange(
+                    region_idx.start, region_idx.stop, region_idx.step, dtype="u4"
+                )
+            _region_idx = pl.Series("index", region_idx, dtype=pl.UInt32).to_frame()
             _bed = (
-                bed.with_row_count("index")
-                .join(pl.DataFrame(region_idx, columns=["index"]), on="index")
-                .drop("index")
+                bed.with_row_count("index").join(_region_idx, on="index").drop("index")
             )
+        else:
+            _bed = bed
 
         chroms: NDArray[np.str_] = _bed["chrom"].to_numpy().astype("U")
         starts: NDArray[np.int32] = _bed["start"].to_numpy()

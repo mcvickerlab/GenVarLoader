@@ -8,6 +8,8 @@ from genome_loader.utils import PathType
 
 
 class GenomeLoader(Protocol):
+    """Protocol defining behavior of genome loaders."""
+
     embedding: str
     ref_genome_path: PathType
     contigs: NDArray[np.str_]
@@ -15,12 +17,12 @@ class GenomeLoader(Protocol):
 
     @abstractmethod
     def __init__(self) -> None:
-        pass
+        ...
 
     @abstractmethod
-    def sel(self):
-        pass
+    def sel(self) -> NDArray:
+        ...
 
     @abstractmethod
-    def sel_from_bed(self):
-        pass
+    def sel_from_bed(self) -> NDArray:
+        ...

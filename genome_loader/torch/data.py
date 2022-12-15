@@ -8,10 +8,12 @@ import einops as ein
 import numpy as np
 import pytorch_lightning as pl
 import torch
+from numpy.typing import NDArray
 from pytorch_lightning.callbacks import BasePredictionWriter
 from torch import nn
 from torch.utils.data import BatchSampler, Dataset, Sampler
 from torchvision.transforms import Compose
+from tqdm import tqdm
 
 from genome_loader.gloader import GenomeLoader
 from genome_loader.gloader.consensus import ConsensusGenomeLoader
@@ -24,12 +26,17 @@ class ConsensusGLDataset(Dataset):
         gl: ConsensusGenomeLoader,
         bed_file: PathType,
         length: int,
+        region_idx: Optional[IndexType] = None,
+        samples: Optional[
+            Union[List[str], NDArray[np.str_], NDArray[np.uint32]]
+        ] = None,
+        ploid_idx: Optional[NDArray[np.uint32]] = None,
         pad_val: Union[bytes, str] = "N",
-        transforms: Optional[List[Callable]] = None,
+        transforms: Optional[List[Callable[[torch.Tensor], torch.Tensor]]] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
         """A GenomeLoader dataset of consensus sequences i.e. after putting variants
-        into a reference sequence.
+        into a reference sequence. Returns a tensor flattened over regions, samples, and ploidy.
 
         This class should be used exclusively with `NDimSampler` or other samplers
         that can yield 3-tuples. This does not implement the typical interface for
@@ -38,22 +45,39 @@ class ConsensusGLDataset(Dataset):
         """
         super().__init__()
         self.gl = gl
-        self.bed = read_bed(bed_file).collect()
+        self.bed = read_bed(bed_file, region_idx).collect()
         self.length = length
+        if samples is None:
+            self.samples: Union[NDArray[np.str_], NDArray[np.uint32]] = self.gl._vcf[
+                "samples"
+            ].to_numpy()
+        elif isinstance(samples, list):
+            self.samples = np.asarray(samples)
+        else:
+            self.samples = samples
+        self.ploid_idx: NDArray[np.uint32] = (
+            np.arange(self.gl._vcf.dims["ploidy"], dtype="u4")
+            if ploid_idx is None
+            else ploid_idx
+        )
         self.n_regions = len(self.bed)
-        self.n_samples = self.gl._vcf.dims["samples"]
-        self.n_ploidy = self.gl._vcf.dims["ploidy"]
+        self.n_samples = len(self.samples)
+        self.n_ploidy = len(self.ploid_idx)
         self.pad_val = pad_val
         self.transforms = Compose(transforms if transforms is not None else [])
-        self.dtype = dtype if dtype is not None else torch.float32
+        self._dtype = dtype if dtype is not None else torch.float32
 
     def __len__(self):
         return self.n_regions * self.n_samples * self.n_ploidy
 
     def __getitem__(
-        self, index: Tuple[IndexType, IndexType, IndexType]
+        self, index: Tuple[List[int], List[int], List[int]]
     ) -> torch.Tensor:
-        region_idx, sample_idx, ploid_idx = map(partial(np.asarray, dtype="u4"), index)
+        region_idx, _sample_idx, _ploid_idx = index
+        sample_idx: Union[NDArray[np.str_], NDArray[np.uint32]] = self.samples[
+            _sample_idx
+        ]
+        ploid_idx: NDArray[np.uint32] = self.ploid_idx[_ploid_idx]
         sequences = torch.from_numpy(
             self.gl.sel_from_bed(
                 self.bed, self.length, region_idx, sample_idx, ploid_idx, self.pad_val
@@ -74,11 +98,16 @@ class ConsensusGLDataset(Dataset):
         return msg
 
     @property
-    def shape(self):
+    def shape(self) -> Tuple[int, ...]:
         shape = [self.n_regions, self.n_samples, self.n_ploidy, self.length]
         if self.gl.spec is not None:
             shape.append(len(self.gl.spec))
         return tuple(shape)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """Returns the PyTorch datatype that this dataset outputs."""
+        return self._dtype
 
 
 class GLDropN(nn.Module):
@@ -88,7 +117,7 @@ class GLDropN(nn.Module):
         if b"N" not in gl.spec:  # type: ignore
             raise ValueError("N is not part of the genome loader's alphabet.")
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):
         return x[..., :-1]
 
 
@@ -100,7 +129,19 @@ class NDimSampler(Sampler):
         samplers: Union[str, Sampler, List[Union[str, Sampler]]] = "RandomSampler",
         drop_last: bool = False,
     ) -> None:
-        """A PyTorch `Sampler` that samples over each dimension.
+        """A PyTorch `Sampler` for orthogonal indexing over multiple dimensions.
+
+        Parameters
+        ----------
+        dataset_shape : tuple[int]
+            Shape of the dataset.
+        batch_shape : tuple[int | None]
+            Shape of the batch dimension (which can be multi-dimensional).
+        samplers : str | Sampler | list[str | Sampler]
+            Samplers to use for each dimension (if multiple are provided).
+            If one is provided, uses it for all dimensions.
+        drop_last : bool
+            Drop the last batch if it's not full. Default False
 
         Notes
         -----
@@ -132,33 +173,6 @@ class NDimSampler(Sampler):
 
         self.dataset_shape = dataset_shape
 
-        def normalize_samplers(
-            samplers: Union[str, Sampler, List[Union[str, Sampler]]]
-        ):
-            if not isinstance(samplers, list):
-                if isinstance(samplers, str):
-                    _samplers: List[Sampler] = [
-                        getattr(import_module("torch.utils.data"), samplers)
-                    ] * len(dataset_shape)
-                else:
-                    _samplers = [samplers] * len(dataset_shape)
-            else:
-                _samplers = []
-                for sampler in samplers:
-                    if isinstance(sampler, str):
-                        _samplers.append(
-                            getattr(import_module("torch.utils.data"), sampler)
-                        )
-                    else:
-                        _samplers.append(sampler)
-            return _samplers
-
-        self.inner_samplers = normalize_samplers(samplers)
-        if len(self.inner_samplers) != len(self.dataset_shape):
-            raise ValueError(
-                "Must have as many samplers as there are dimensions in the dataset."
-            )
-
         def normalize_batch_shape(batch_shape: Tuple[Union[int, None], ...]):
             _batch_shape: List[int] = []
             if len(batch_shape) > len(self.dataset_shape):
@@ -178,6 +192,33 @@ class NDimSampler(Sampler):
 
         self.batch_shape = normalize_batch_shape(batch_shape)
 
+        def normalize_samplers(
+            samplers: Union[str, Sampler, List[Union[str, Sampler]]]
+        ):
+            if not isinstance(samplers, list):
+                if isinstance(samplers, str):
+                    _samplers: List[Sampler] = [
+                        getattr(import_module("torch.utils.data"), samplers)
+                    ] * len(self.batch_shape)
+                else:
+                    _samplers = [samplers] * len(self.batch_shape)
+            else:
+                _samplers = []
+                for sampler in samplers:
+                    if isinstance(sampler, str):
+                        _samplers.append(
+                            getattr(import_module("torch.utils.data"), sampler)
+                        )
+                    else:
+                        _samplers.append(sampler)
+            return _samplers
+
+        self.inner_samplers = normalize_samplers(samplers)
+        if len(self.inner_samplers) != len(self.batch_shape):
+            raise ValueError(
+                "Must have as many samplers as there are dimensions in the batch."
+            )
+
         self.batch_samplers: List[BatchSampler] = []
         for length, batch_size, sampler in zip(
             self.dataset_shape, self.batch_shape, self.inner_samplers
@@ -185,7 +226,6 @@ class NDimSampler(Sampler):
             self.batch_samplers.append(
                 BatchSampler(sampler(torch.arange(length)), batch_size, drop_last)
             )
-
         self.batch_size: int = np.prod(self.batch_shape)
 
     def __iter__(self):
@@ -196,11 +236,12 @@ class NDimSampler(Sampler):
 
 
 class PredictToTensorStore(BasePredictionWriter):
-    # TODO: add check that TensorStore is compatible with reshaped model output
     def __init__(
         self,
         ts_store,
+        dataset_sample_dims: Optional[Tuple[int, ...]] = None,
         batch_reshape: Optional[Tuple[int, ...]] = None,
+        progress: bool = False,
         write_interval: str = "batch",
     ) -> None:
         """Save model outputs to a TensorStore.
@@ -211,12 +252,25 @@ class PredictToTensorStore(BasePredictionWriter):
         ----------
         ts_store : tensorstore.TensorStore
             A synchronous TensorStore.
+        dataset_sample_dims : Tuple[int, ...]
+            Axes of the TensorStore that correspond to sample dimensions. i.e. the dimensions
+            that are part of the batch dimension for the model.
+            Suppose you have a dataset where the dimensions are (individual timepoint feature).
+            This is fed to a model that takes a single (feature) vector such that one sample
+            is a single individual, at a single timepoint. Then, dataset_sample_dims should be
+            (0, 1) since dimensions 0 and 1 are sampled over.
         batch_reshape : Tuple[int, ...]
             Batch (i.e. first) dimension of model output will be reshaped to this shape.
+        progress : bool
+            Whether to provide a progress bar.
+        write_interval : str
+            How often to write predictions. Default "batch".
         """
         super().__init__(write_interval)
         self.ts_store = ts_store
-        self.dataset_shape = self.ts_store.shape
+        self.dataset_shape: Tuple[int, ...] = self.ts_store.shape
+        self.dataset_sample_dims = dataset_sample_dims
+        self.progress = progress
         self.batch_reshape = batch_reshape
         if self.batch_reshape is not None:
             if len(self.batch_reshape) > len(self.dataset_shape):
@@ -239,8 +293,17 @@ class PredictToTensorStore(BasePredictionWriter):
             self._reshape_str = f"({b_dim_str}) ... -> {b_dim_str} ..."
             self._reshape_dict = dict(zip(b_dims, self.batch_reshape))
 
-    def check_shapes(self, ts_store, batch_reshape):
-        pass
+    def on_predict_start(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
+        if self.progress:
+            if self.dataset_sample_dims is not None:
+                n_samples = np.prod(
+                    [self.dataset_shape[dim] for dim in self.dataset_sample_dims]
+                )
+                self.pbar = tqdm(total=n_samples)
+            else:
+                self.pbar = tqdm()
 
     def write_on_batch_end(
         self,
@@ -260,3 +323,27 @@ class PredictToTensorStore(BasePredictionWriter):
         else:
             start = batch_idx * len(prediction)
             self.ts_store[start : start + len(prediction)] = prediction
+
+        if hasattr(self, "pbar"):
+            self.pbar.update(len(prediction))
+
+    def on_predict_end(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
+        if hasattr(self, "pbar"):
+            self.pbar.close()
+
+    def on_keyboard_interrupt(
+        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule"
+    ) -> None:
+        if hasattr(self, "pbar"):
+            self.pbar.close()
+
+    def on_exception(
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        exception: BaseException,
+    ) -> None:
+        if hasattr(self, "pbar"):
+            self.pbar.close()
