@@ -1,15 +1,8 @@
 import logging
 from pathlib import Path
-from subprocess import CalledProcessError, run
-from textwrap import dedent
-from typing import Optional, Union
+from typing import Union
 
-import numba
 import numpy as np
-import polars as pl
-import zarr
-from numcodecs import Blosc, Categorize
-from numcodecs.abc import Codec
 from numpy.typing import ArrayLike, NDArray
 
 PathType = Union[str, Path]
@@ -56,74 +49,15 @@ def ohe_to_bytes(
     return alphabet[idx].reshape(shape)
 
 
-def read_bed(
-    bed_file: PathType, region_idx: Optional[IndexType] = None
-) -> pl.LazyFrame:
-    """Read a BED-like file as a polars.LazyFrame. Must have a header and
-    at minimum have columns named "chrom" and "start". If column "strand" not provided,
-    it will be added assuming all regions are on positive strand."""
-    bed = pl.scan_csv(
-        bed_file,
-        sep="\t",
-        dtypes={"chrom": pl.Utf8, "start": pl.Int32, "strand": pl.Utf8},
-    )
-    if region_idx is not None:
-        bed = bed.with_row_count("index")
-        if isinstance(region_idx, slice):
-            region_idx = np.arange(
-                region_idx.start, region_idx.stop, region_idx.step, dtype="u4"
-            )
-        region_srs = pl.DataFrame(region_idx, columns=["index"])  # type: ignore
-        bed = bed.join(region_srs.lazy(), on="index").drop("index")  # type: ignore
-    if "strand" not in bed.columns:
-        bed = bed.with_columns(pl.lit("+").alias("strand"))
-    return bed
-
-
-def df_to_zarr(
-    df: pl.DataFrame, z: zarr.Group, compressor: Codec = Blosc("lz4", shuffle=-1)
-):
-    """Write all columns of a DataFrame to a Zarr group."""
-    z.attrs["columns"] = df.columns  # to maintain order
-    for col in df.get_columns():
-        filters = []
-        if col.dtype in {pl.List, pl.Struct, pl.Date, pl.Datetime, pl.Time, pl.Object}:
-            msg = f"""
-                DataFrame has dtypes incompatible with Zarr.
-                Column name: {col.name}
-                Column dtype: {col.dtype}
-                """
-            raise TypeError(dedent(msg).strip())
-        elif col.dtype == pl.Utf8:
-            data = col.to_numpy().astype("U")
-            uniq = np.unique(data)
-            # heuristic for choosing whether to categorize
-            if len(uniq) < np.sqrt(np.prod(data.shape)):
-                nbytes = int(-(-len(uniq) // 8))  # ceil
-                filters.append(Categorize(uniq, data.dtype, astype=f"u{nbytes}"))
-        else:
-            data = col.to_numpy()
-        z.create_dataset(col.name, data=data, filters=filters, compressor=compressor)
-
-
-def zarr_to_df(z: zarr.Group) -> pl.DataFrame:
-    series_ls: list[pl.Series] = []
-    name: str
-    col: zarr.Array
-    for name, col in z.arrays():
-        series_ls.append(pl.Series(name, col[:]))
-    return pl.DataFrame(series_ls).select(z.attrs["columns"])
-
-
-def order_as(a1: ArrayLike, a2: ArrayLike) -> NDArray[np.uint32]:
+def order_as(a1: ArrayLike, a2: ArrayLike) -> NDArray[np.integer]:
     """Get indices that would order ar1 as ar2, assuming all elements of a1 are in a2."""
     _, idx1, idx2 = np.intersect1d(a1, a2, assume_unique=True, return_indices=True)
-    return idx1[idx2].astype("u4")
+    return idx1[idx2]
 
 
 def get_complement_idx(
     comp_dict: dict[bytes, bytes], alphabet: NDArray[np.bytes_]
-) -> NDArray[np.uint32]:
+) -> NDArray[np.integer]:
     """Get index to reorder alphabet that would give the complement."""
     idx = order_as([comp_dict[nuc] for nuc in alphabet], alphabet)
     return idx
@@ -159,23 +93,3 @@ def rev_comp_ohe(ohe_arr: NDArray[np.uint8], has_N: bool) -> NDArray[np.uint8]:
     else:
         ohe_arr = np.flip(ohe_arr, -1)
     return np.flip(ohe_arr, -2)
-
-
-def run_shell(args, **kwargs):
-    try:
-        status = run(dedent(args).strip(), check=True, shell=True, **kwargs)
-    except CalledProcessError as e:
-        logging.error(e.stdout)
-        logging.error(e.stderr)
-        raise e
-    return status
-
-
-def validate_sample_sheet(sample_sheet: pl.DataFrame, required_columns: list[str]):
-    missing_columns = [
-        col for col in required_columns if col not in sample_sheet.columns
-    ]
-    if len(missing_columns) > 0:
-        raise ValueError("Sample sheet is missing required columns:", missing_columns)
-    if sample_sheet.select(pl.col(required_columns).is_null()).to_numpy().any():
-        raise ValueError("Sample sheet contains missing values.")

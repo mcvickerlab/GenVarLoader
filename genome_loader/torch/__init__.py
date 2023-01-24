@@ -7,26 +7,27 @@ import warnings
 from abc import abstractmethod
 from typing import Protocol, Type
 
-import polars as pl
+import pandas as pd
 
+from genome_loader.gloader.experimental import Queries
 from genome_loader.utils import PathType
 
 from .data import ConsensusGLDataset, GLDropN, NDimSampler, PredictToTensorStore
 
-INVALID_POLARS_TO_TORCH_TYPES: list[Type[pl.DataType]] = [
-    pl.Utf8,
-    pl.Object,
-    pl.List,
-    pl.Date,
-    pl.Datetime,
-    pl.Time,
-    pl.Categorical,
-    pl.Null,
-]
+# INVALID_POLARS_TO_TORCH_TYPES: list[Type[pl.DataType]] = [
+#     pl.Utf8,
+#     pl.Object,
+#     pl.List,
+#     pl.Date,
+#     pl.Datetime,
+#     pl.Time,
+#     pl.Categorical,
+#     pl.Null,
+# ]
 
 
-def parse_queries(queries: PathType):
-    _queries = pl.read_csv(queries, dtypes={"contig": pl.Utf8})
+def parse_queries(queries_path: PathType) -> Queries:
+    _queries = pd.read_csv(queries_path, dtypes={"contig": pl.Utf8})
     required_cols = ["contig", "start", "strand", "sample", "ploid_idx"]
     missing_cols = [col for col in required_cols if col not in _queries.columns]
     if len(missing_cols) > 0:
@@ -48,6 +49,5 @@ def parse_queries(queries: PathType):
 
 
 class TorchCollator(Protocol):
-    @abstractmethod
     def __call__(self, batch_indices: list[int]) -> dict[str, torch.Tensor]:
         ...

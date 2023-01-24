@@ -1,13 +1,14 @@
 from abc import ABC, abstractmethod
+from enum import Enum
 from pathlib import Path
-from typing import Literal, Union
+from typing import Union
 
-import h5py
 import numpy as np
-from natsort import index_natsorted
+import xarray as xr
 from numpy.typing import NDArray
 from pysam import FastaFile
 
+from genome_loader.loaders import Queries
 from genome_loader.utils import (
     ALPHABETS,
     DNA_COMPLEMENT,
@@ -18,36 +19,31 @@ from genome_loader.utils import (
 
 
 class Sequence(ABC):
-    ENCODING = Literal["bytes", "onehot"]
+    class Encoding(Enum):
+        BYTES = "bytes"
+        ONEHOT = "onehot"
 
     path: Path
-    encoding: ENCODING
 
     @abstractmethod
     def sel(
-        self,
-        contigs: NDArray[np.str_],
-        starts: NDArray[np.integer],
-        length: int,
-        strands: NDArray[np.str_],
-        sorted: bool = False,
+        self, queries: Queries, length: int, **kwargs
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
         """Load sequences matching query intervals.
 
         Query intervals can go beyond the range of contigs and will be padded with 'N' where
-        there is no underlying sequence to fetch. In other words, if an interval has a
+        there is no underlying sequence to fetch. For example, if an interval has a
         negative start, there will be 'N' added to the start of the returned sequence.
 
         Parameters
         ----------
-        contigs : NDArray[np.str_]
-            Contig of each interval.
-        starts : NDArray[np.integer]
-            Start of each interval.
+        queries: Queries
+            Query intervals.
         length : int
             Length of all intervals.
-        strands : NDArray[np.str_]
-            Strand of each interval, '+' or '-'. Minus strands are reverse complemented.
+        **kwargs : dict, optional
+            sorted : bool, whether the queries are sorted or not
+            encoding : 'bytes' or 'onehot', how to encode the sequences
 
         Returns
         -------
@@ -59,29 +55,31 @@ class Sequence(ABC):
 
 
 class FastaSequence(Sequence):
-    def __init__(self, fasta: PathType, encoding: Sequence.ENCODING) -> None:
+    def __init__(self, fasta_path: PathType) -> None:
         """Load sequences from a fasta as NumPy arrays.
 
         Parameters
         ----------
-        fasta : str, Path
-        encoding : 'bytes' or 'onehot'
-            Return sequence arrays as bytes or one hot encoded (uint8).
+        fasta_path : str, Path
         """
-        self.path = Path(fasta)
-        self.encoding = encoding
-        self.fasta = FastaFile(str(fasta))
-        self._dtype = np.uint8 if encoding == "onehot" else "|S1"
+        self.path = Path(fasta_path)
+        self.fasta = FastaFile(str(fasta_path))
 
-    def sel(self, contigs, starts, length, strands, sorted=False) -> NDArray:
-        seqs = np.empty((len(contigs), length), dtype=self._dtype)  # type: ignore
+    def sel(self, queries: Queries, length: int, **kwargs) -> NDArray:
+        sorted = kwargs.get("sorted", False)
+        encoding = Sequence.Encoding(kwargs.get("encoding"))
+        dtype = np.uint8 if encoding == "onehot" else "|S1"
+        seqs = np.empty((len(queries), length), dtype=dtype)  # type: ignore
 
         # go in sorted order to minimize file seeking
-        regions = np.char.add(contigs, starts.astype("U"))
-        sorter = index_natsorted(regions)
-        for i in sorter:
-            contig = contigs[i]
-            start = starts[i]
+        if not sorted:
+            _queries = queries.sort_values(["contig", "start"])
+        else:
+            _queries = queries
+        for tup in _queries.itertuples():
+            i = tup.Index
+            contig = tup.contig
+            start = tup.start
             end = start + length
             prepend = min(start, 0)
             if prepend > 0:
@@ -95,12 +93,12 @@ class FastaSequence(Sequence):
             )
             seqs[i] = seq
 
-        rev_comp_idx = np.nonzero(strands == "-")[0]
+        rev_comp_idx = np.flatnonzero(queries.strand == "-")
         if len(rev_comp_idx) > 0:
             seqs[rev_comp_idx] = rev_comp_byte(
                 seqs[rev_comp_idx], complement_map=DNA_COMPLEMENT
             )
-        if self.encoding == "onehot":
+        if encoding is Sequence.Encoding.ONEHOT:
             seqs = bytes_to_ohe(seqs, alphabet=ALPHABETS["DNA"])
 
         return seqs
@@ -112,23 +110,22 @@ class FastaSequence(Sequence):
         self.fasta.close()
 
 
-class H5Sequence(Sequence):
-    def __init__(self, h5: PathType) -> None:
-        self.path = Path(h5)
+class ZarrSequence(Sequence):
+    def __init__(self, zarr_path: PathType) -> None:
+        self.path = Path(zarr_path)
+        self.zarr = xr.open_dataset()
 
-    def _open(self):
-        """Only use this as a context manager."""
-        return h5py.File(self.path)
-
-    def sel(self, contigs, starts, length, strands, sorted=False) -> NDArray:
+    def sel(
+        self, queries: Queries, length: int, **kwargs
+    ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
         raise NotImplementedError
 
 
 def ref_loader_factory(ref_path: PathType) -> Sequence:
     _ref_path = Path(ref_path)
     if ".fa" in _ref_path.name:
-        return FastaSequence(_ref_path, encoding="bytes")
-    elif ".h5" in _ref_path.name:
-        return H5Sequence(_ref_path)
+        return FastaSequence(_ref_path)
+    elif ".zarr" in _ref_path.name:
+        return ZarrSequence(_ref_path)
     else:
         raise ValueError("File extension for reference is neither FASTA nor HDF5.")

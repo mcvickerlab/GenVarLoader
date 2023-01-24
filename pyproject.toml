@@ -2,7 +2,7 @@
 profile = "black"
 
 [tool.mypy]
-plugins = "numpy.typing.mypy_plugin"
+plugins = ["numpy.typing.mypy_plugin", "pandera.mypy"]
 
 [tool.pytest.ini_options]
 addopts = "-v"

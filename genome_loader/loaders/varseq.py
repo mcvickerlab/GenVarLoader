@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import gc
-from typing import Union
+from typing import Union, cast
 
 import numba
 import numpy as np
-import numpy_indexed as npi
-import polars as pl
 from numpy.typing import NDArray
 
+from genome_loader.gloader.experimental import Queries
 from genome_loader.gloader.experimental.sequence import FastaSequence, Sequence
 from genome_loader.gloader.experimental.variants import Variants, VCFVariants
 from genome_loader.utils import (
@@ -21,50 +20,41 @@ from genome_loader.utils import (
     validate_sample_sheet,
 )
 
-try:
-    import torch
-except ImportError as e:
-    _TORCH_AVAILABLE = False
-else:
-    _TORCH_AVAILABLE = True
-
-if _TORCH_AVAILABLE:
-    from genome_loader.torch import parse_queries
-
 
 class VarSequence:
-    def __init__(self, sequence: Sequence, variants: Variants) -> None:
+    def __init__(
+        self,
+        sequence: Sequence,
+        variants: Variants,
+        missing_value: Variants.MISSING_VALUE = "reference",
+    ) -> None:
         self.sequence = sequence
         self.variants = variants
+        self.missing_value = missing_value
 
     def sel(
         self,
-        contigs: NDArray[np.str_],
-        starts: NDArray[np.integer],
+        queries: Queries,
         length: int,
-        strands: NDArray[np.str_],
-        samples: NDArray[np.str_],
-        ploid_idx: NDArray[np.integer],
-        missing_value: Variants.MISSING_VALUE = "reference",
-        sorted=False,
+        **kwargs,
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
+        sorted = kwargs.get("sorted", False)
         # apply variants to sequences to reduce how much data is moving around
         # S1 is the same size as uint8
         old_encoding = self.sequence.encoding
         self.sequence.encoding = "bytes"
+        positive_stranded_queries = cast(Queries, queries.assign(strand="+"))
 
-        seqs = self.sequence.sel(
-            contigs, starts, length, np.full_like(strands, "+"), sorted
-        )
+        seqs = self.sequence.sel(positive_stranded_queries, length, sorted=sorted)
         res = self.variants.sel(
-            contigs, starts, length, samples, ploid_idx, missing_value, sorted
+            queries, length, missing_value=self.missing_value, sorted=sorted
         )
 
         if res is not None:
             variants, positions, offsets = res
-            apply_variants(seqs, starts, variants, positions, offsets)
+            apply_variants(seqs, queries.start.to_numpy(), variants, positions, offsets)
 
-        rev_comp_idx = np.nonzero(strands == "-")[0]
+        rev_comp_idx = np.flatnonzero(queries.strand == "-")
         if len(rev_comp_idx) > 0:
             seqs[rev_comp_idx] = rev_comp_byte(
                 seqs[rev_comp_idx], complement_map=DNA_COMPLEMENT
@@ -139,7 +129,8 @@ def apply_variants(
         seqs[i, i_pos] = i_vars
 
 
-class FastaVarSequence:
+# TODO: fix this so this works lol, important for benchmarking
+'''class FastaVarSequence:
     def __init__(self, sample_sheet: PathType, encoding: Sequence.ENCODING) -> None:
         """Loader for obtaining variant sequences from fasta files that already have
         the variant sequences.
@@ -244,3 +235,4 @@ class FastaVarSequence:
             }
             out.update(other_cols)
             return out
+'''
