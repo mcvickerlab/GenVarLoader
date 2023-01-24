@@ -246,18 +246,16 @@ class ReferenceGenomeLoader:
         ends: NDArray[np.int32],
         pad_arr: Union[NDArray[np.bytes_], NDArray[np.uint8]],
     ):
-        ref_start: np.int32 = starts.min()
-        ref_end: np.int32 = ends.max()
+        ref_start: int = starts.min()
+        ref_end: int = ends.max()
         rel_starts: NDArray[np.int32] = starts - ref_start
 
         # pad for out-of-bound
-        chrom_length = ref_chrom_h5.attrs["length"]
-        n_past_chrom = np.maximum(ref_end - chrom_length, 0)
-        n_before_chrom = np.maximum(-ref_start, 0)
-        real_ref_end: int = np.clip(
-            ref_end, a_min=None, a_max=ref_chrom_h5.attrs["length"]
-        )
-        real_ref_start: int = np.clip(ref_start, a_min=0, a_max=None)
+        chrom_length: int = ref_chrom_h5.attrs["length"]
+        n_past_chrom = max(ref_end - chrom_length, 0)
+        n_before_chrom = max(-ref_start, 0)
+        real_ref_end = min(ref_end, chrom_length)
+        real_ref_start = max(ref_start, 0)
         # ref_chrom shape: (length) or (length alphabet)
         # pad_val shape: (1) or (alphabet)
         ref_chrom: Union[NDArray[np.bytes_], NDArray[np.uint8]]

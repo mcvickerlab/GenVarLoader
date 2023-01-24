@@ -1,4 +1,3 @@
-from abc import abstractmethod
 from typing import Optional, Protocol
 
 import numpy as np
@@ -15,14 +14,8 @@ class GenomeLoader(Protocol):
     contigs: NDArray[np.str_]
     spec: Optional[NDArray[np.bytes_]] = None
 
-    @abstractmethod
-    def __init__(self) -> None:
-        ...
-
-    @abstractmethod
     def sel(self) -> NDArray:
         ...
 
-    @abstractmethod
     def sel_from_bed(self) -> NDArray:
         ...

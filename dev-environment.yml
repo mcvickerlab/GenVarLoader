@@ -7,10 +7,12 @@ dependencies:
   - dask
   - einops
   - h5py
+  - natsort
   - numba
+  - numcodecs
   - numpy
   - pandas
-  - polars
+  - polars>=0.15.13
   - pyarrow
   - bioconda::pysam
   - python>=3.7.*
@@ -19,7 +21,9 @@ dependencies:
   - typer
   - xarray
   - zarr
-  # torch dependencies
+  # preprocessing
+  - biconda::gffutils
+  # torch
   - pytorch::pytorch
   - pytorch::cpuonly
   - pytorch::torchvision
@@ -34,10 +38,11 @@ dependencies:
   - pip
   - pipreqs
   - pre-commit
-  - py-spy
   - pytest
   - pytest-cases
   - pytest-cov
+  - jupyter
+  - jupyterlab
   - pip:
     - tensorstore
 platforms:

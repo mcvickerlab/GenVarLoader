@@ -7,10 +7,12 @@ dependencies:
   - dask
   - einops
   - h5py
+  - natsort
   - numba
+  - numcodecs
   - numpy
   - pandas
-  - polars
+  - polars>=0.15.13
   - pyarrow
   - bioconda::pysam
   - python>=3.7.*

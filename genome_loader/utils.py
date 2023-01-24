@@ -1,4 +1,6 @@
+import logging
 from pathlib import Path
+from subprocess import CalledProcessError, run
 from textwrap import dedent
 from typing import Optional, Union
 
@@ -19,6 +21,14 @@ DNA_COMPLEMENT = dict(zip(_DNA, _DNA_COMP))
 _RNA = [nuc.encode() for nuc in "ACacguGUN"]
 _RNA_COMP = [nuc.encode() for nuc in "UGugcaCAN"]
 RNA_COMPLEMENT = dict(zip(_RNA, _RNA_COMP))
+
+ALPHABETS: dict[str, NDArray[np.bytes_]] = {
+    "DNA": np.array(_DNA),
+    "RNA": np.array(_RNA),
+}
+
+
+logger = logging.getLogger(__name__)
 
 
 def bytes_to_ohe(
@@ -55,7 +65,7 @@ def read_bed(
     bed = pl.scan_csv(
         bed_file,
         sep="\t",
-        dtype={"chrom": pl.Utf8, "start": pl.Int32, "strand": pl.Utf8},
+        dtypes={"chrom": pl.Utf8, "start": pl.Int32, "strand": pl.Utf8},
     )
     if region_idx is not None:
         bed = bed.with_row_count("index")
@@ -127,14 +137,16 @@ def rev_comp_byte(
     Parameters
     ----------
     byte_arr : ndarray[bytes]
-        Array of shape (regions length [samples] [ploidy] alphabet) to complement.
+        Array of shape (regions [samples] [ploidy] length) to complement.
     complement_map : dict[bytes, bytes]
         Dictionary mapping nucleotides to their complements.
     """
     out = np.empty_like(byte_arr)
     for nuc, comp in complement_map.items():
+        if nuc == b"N":
+            continue
         out[byte_arr == nuc] = comp
-    return out
+    return out[..., ::-1]
 
 
 def rev_comp_ohe(ohe_arr: NDArray[np.uint8], has_N: bool) -> NDArray[np.uint8]:
@@ -146,4 +158,24 @@ def rev_comp_ohe(ohe_arr: NDArray[np.uint8], has_N: bool) -> NDArray[np.uint8]:
         )
     else:
         ohe_arr = np.flip(ohe_arr, -1)
-    return np.flip(ohe_arr, 0)
+    return np.flip(ohe_arr, -2)
+
+
+def run_shell(args, **kwargs):
+    try:
+        status = run(dedent(args).strip(), check=True, shell=True, **kwargs)
+    except CalledProcessError as e:
+        logging.error(e.stdout)
+        logging.error(e.stderr)
+        raise e
+    return status
+
+
+def validate_sample_sheet(sample_sheet: pl.DataFrame, required_columns: list[str]):
+    missing_columns = [
+        col for col in required_columns if col not in sample_sheet.columns
+    ]
+    if len(missing_columns) > 0:
+        raise ValueError("Sample sheet is missing required columns:", missing_columns)
+    if sample_sheet.select(pl.col(required_columns).is_null()).to_numpy().any():
+        raise ValueError("Sample sheet contains missing values.")
