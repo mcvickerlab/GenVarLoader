@@ -1,5 +1,7 @@
 import logging
 from pathlib import Path
+from subprocess import CalledProcessError, run
+from textwrap import dedent
 from typing import Union
 
 import numpy as np
@@ -43,9 +45,9 @@ def ohe_to_bytes(
     if ohe_axis < 0:
         ohe_axis_idx = len(ohe_arr.shape) + ohe_axis
     else:
-        ohe_axis_idx = ohe_axis_idx
-    shape = tuple(d for i, d in enumerate(ohe_arr.shape) if i != ohe_axis_idx)
-    # (regs length samples ploidy)
+        ohe_axis_idx = ohe_axis
+    shape = tuple(dim for i, dim in enumerate(ohe_arr.shape) if i != ohe_axis_idx)
+    # (regs samples ploidy length)
     return alphabet[idx].reshape(shape)
 
 
@@ -93,3 +95,13 @@ def rev_comp_ohe(ohe_arr: NDArray[np.uint8], has_N: bool) -> NDArray[np.uint8]:
     else:
         ohe_arr = np.flip(ohe_arr, -1)
     return np.flip(ohe_arr, -2)
+
+
+def run_shell(cmd: str, **kwargs):
+    try:
+        status = run(dedent(cmd).strip(), check=True, shell=True, **kwargs)
+    except CalledProcessError as e:
+        logging.error(e.stdout)
+        logging.error(e.stderr)
+        raise e
+    return status

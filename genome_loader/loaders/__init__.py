@@ -23,7 +23,7 @@ else:
 
 # Add a new data type that is guaranteed to have naturally ordered categories
 @pandas_engine.Engine.register_dtype  # type: ignore[arg-type]
-@pa.dtypes.immutable
+@pa.dtypes.immutable  # type: ignore
 class NatOrderCategory(pandas_engine.Category):
     """Naturally ordered categorical data. This means, for example,
     that '1' < '2' < '15' < 'X' rather than '1' < '15' < '2' < 'X'.
