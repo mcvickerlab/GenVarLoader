@@ -1,8 +1,3 @@
-# TODO: reimplement writing depth
-# For backward compatibility:
-# Raw depth
-# Tn5 fragments
-
 import gc
 from enum import Enum
 from pathlib import Path
