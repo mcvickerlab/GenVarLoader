@@ -141,7 +141,7 @@ class Variants:
             sorted : bool
                 Whether the queries are sorted by sample and ploid_idx.
             missing_value : 'reference' or 'N'
-                What the replace missing values with (reference allele or 'N').
+                What to replace missing values with (reference allele or N).
 
         Returns
         -------

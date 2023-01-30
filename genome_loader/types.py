@@ -5,14 +5,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 
-class LoggingLevel(str, Enum):
-    CRITICAL = "CRITICAL"
-    ERROR = "ERROR"
-    WARNING = "WARNING"
-    INFO = "INFO"
-    DEBUG = "DEBUG"
-
-
 class SequenceAlphabet:
     def __init__(self, alphabet: str, complement: str) -> None:
         """Parse and validate sequence alphabets.

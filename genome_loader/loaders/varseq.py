@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import gc
 from typing import Union, cast
 
@@ -7,18 +5,11 @@ import numba
 import numpy as np
 from numpy.typing import NDArray
 
-from genome_loader.gloader.experimental import Queries
-from genome_loader.gloader.experimental.sequence import FastaSequence, Sequence
-from genome_loader.gloader.experimental.variants import Variants, VCFVariants
-from genome_loader.utils import (
-    ALPHABETS,
-    DNA_COMPLEMENT,
-    PathType,
-    bytes_to_ohe,
-    rev_comp_byte,
-    run_shell,
-    validate_sample_sheet,
-)
+from genome_loader.loaders.sequence import Sequence
+from genome_loader.loaders.types import Queries
+from genome_loader.loaders.variants import Variants
+from genome_loader.types import SequenceEncoding
+from genome_loader.utils import ALPHABETS, DNA_COMPLEMENT, bytes_to_ohe, rev_comp_byte
 
 
 class VarSequence:
@@ -26,7 +17,7 @@ class VarSequence:
         self,
         sequence: Sequence,
         variants: Variants,
-        missing_value: Variants.MISSING_VALUE = "reference",
+        missing_value: Variants.MissingValue = Variants.MissingValue.REFERENCE,
     ) -> None:
         self.sequence = sequence
         self.variants = variants
@@ -38,14 +29,32 @@ class VarSequence:
         length: int,
         **kwargs,
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
+        """Get sequences with sample's variants applied to them.
+
+        Parameters
+        ----------
+        queries : Queries
+        length : int
+        **kwargs : dict
+            sorted : bool, default False
+            encoding : 'bytes' or 'onehot', required
+                How to encode the sequences.
+
+        Returns
+        -------
+        seqs : ndarray[bytes | uint8]
+            Sequences with variants applied to them.
+        """
         sorted = kwargs.get("sorted", False)
-        # apply variants to sequences to reduce how much data is moving around
-        # S1 is the same size as uint8
-        old_encoding = self.sequence.encoding
-        self.sequence.encoding = "bytes"
+        encoding = SequenceEncoding(kwargs.get("encoding"))
         positive_stranded_queries = cast(Queries, queries.assign(strand="+"))
 
-        seqs = self.sequence.sel(positive_stranded_queries, length, sorted=sorted)
+        # apply variants as bytes to reduce how much data is moving around
+        # S1 is the same size as uint8
+        seqs = cast(
+            NDArray[np.bytes_],
+            self.sequence.sel(positive_stranded_queries, length, encoding="bytes"),
+        )
         res = self.variants.sel(
             queries, length, missing_value=self.missing_value, sorted=sorted
         )
@@ -54,20 +63,20 @@ class VarSequence:
             variants, positions, offsets = res
             apply_variants(seqs, queries.start.to_numpy(), variants, positions, offsets)
 
-        rev_comp_idx = np.flatnonzero(queries.strand == "-")
-        if len(rev_comp_idx) > 0:
-            seqs[rev_comp_idx] = rev_comp_byte(
-                seqs[rev_comp_idx], complement_map=DNA_COMPLEMENT
+        to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").values)
+        if to_rev_comp.any():
+            seqs[to_rev_comp] = rev_comp_byte(
+                seqs[to_rev_comp], complement_map=DNA_COMPLEMENT
             )
 
-        if old_encoding == "onehot":
+        if encoding is SequenceEncoding.ONEHOT:
             seqs = bytes_to_ohe(seqs, alphabet=ALPHABETS["DNA"])  # type: ignore
 
-        self.sequence.encoding = old_encoding
         gc.collect()
         return seqs
 
-    def sel_pyfaidx(self, contigs, starts, length, strands, samples, ploid_idx):
+    # TODO: finish/fix or deprecate
+    """ def sel_pyfaidx(self, contigs, starts, length, strands, samples, ploid_idx):
         # TODO: use pyfaidx.FastaVariant here
         # Mostly for benchmarking, I expect it to be slow since it iterates through each
         # allele of each sample and haplotype in a Python for loop
@@ -106,7 +115,7 @@ class VarSequence:
         if self.sequence.encoding == "onehot":
             seqs = bytes_to_ohe(seqs, alphabet=ALPHABETS["DNA"])
 
-        return seqs
+        return seqs """
 
 
 @numba.njit(nogil=True, parallel=True)
@@ -129,7 +138,7 @@ def apply_variants(
         seqs[i, i_pos] = i_vars
 
 
-# TODO: fix this so this works lol, important for benchmarking
+# TODO: fix this so it works lol, important for benchmarking
 '''class FastaVarSequence:
     def __init__(self, sample_sheet: PathType, encoding: Sequence.ENCODING) -> None:
         """Loader for obtaining variant sequences from fasta files that already have

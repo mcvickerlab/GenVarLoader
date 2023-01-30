@@ -8,8 +8,8 @@ from typing import Optional
 
 import typer
 
-from genome_loader.types import ALPHABETS, LoggingLevel, SequenceEncoding
-from genome_loader.writers.sequence import fasta_to_zarr
+from genome_loader.cli import LoggingLevel
+from genome_loader.types import ALPHABETS, SequenceEncoding
 
 Alphabet = Enum("Alphabet", dict(zip(ALPHABETS.keys(), ALPHABETS.keys())))
 
@@ -35,9 +35,11 @@ def fasta_to_zarr_cli(
         "--ignore-case",
         help="Ignore the case of FASTA sequences and treat everything as uppercase.",
     ),
-    compression_level: int = typer.Option(0, min=0, max=9),
+    compression_level: int = typer.Option(5, min=0, max=9),
     logging_level: LoggingLevel = typer.Option("INFO", case_sensitive=False),
 ):
+    from genome_loader.writers.sequence import fasta_to_zarr
+
     logging.basicConfig(stream=sys.stdout, level=logging_level.value)
     logging.captureWarnings(True)
 

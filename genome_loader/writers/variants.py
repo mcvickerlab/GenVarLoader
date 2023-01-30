@@ -1,10 +1,8 @@
 from pathlib import Path
 from typing import List
 
-import typer
 
-
-def main(
+def vcfs_merge_filter_to_zarr(
     out_merged: Path,
     out_zarr: Path,
     reference: Path,
@@ -15,6 +13,7 @@ def main(
     import logging
     import sys
 
+    from dask.distributed import Client, LocalCluster
     from sgkit.io.vcf import vcf_to_zarr
 
     from genome_loader.utils import run_shell
@@ -47,8 +46,8 @@ def main(
     status = run_shell(f"bcftools index --threads {n_threads} {out_merged}")
 
     logging.info("Converting merged VCF to Zarr.")
-    vcf_to_zarr(out_merged, out_zarr)
 
+    cluster = LocalCluster(n_workers=n_threads // 2, threads_per_worker=1)
+    client = Client(cluster)
 
-if __name__ == "__main__":
-    typer.run(main)
+    vcf_to_zarr(out_merged, out_zarr, chunk_width=100)
