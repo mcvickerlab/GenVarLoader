@@ -5,8 +5,9 @@ import h5py
 import numpy as np
 from pysam import FastaFile
 
+from genome_loader.writers.coverage import coverage, tn5_coverage
+
 from .encode_data import encode_from_fasta, parse_encode_spec
-from .get_data import get_allele_coverage, get_frag_depth
 
 # TODO UPDATE WITH NEW ENCODING ENGINES
 
@@ -98,10 +99,10 @@ def write_frag_depth(
         out_h5 = str(Path(out_dir) / "frag_depths.h5")
 
     # Get data using read depth function
-    depth_dict = get_frag_depth(
+    depth_dict = tn5_coverage(
         in_bam,
-        chrom_list=chrom_list,
-        chrom_lens=chrom_lens,
+        contigs=chrom_list,
+        contig_lens=chrom_lens,
         offset_tn5=offset_tn5,
         count_method=count_method,
     )
@@ -136,7 +137,7 @@ def write_allele_coverage(in_bam, out_dir, h5_name=None, chrom_list=None):
         out_h5 = str(Path(out_dir) / "allele_coverage.h5")
 
     # Get data using allele coverage function
-    coverage_dict = get_allele_coverage(in_bam, chrom_list=chrom_list)
+    coverage_dict = coverage(in_bam, contigs=chrom_list)
 
     start_write = timeit.default_timer()
     with h5py.File(out_h5, "w") as h5_file:

@@ -1,8 +1,11 @@
 from enum import Enum
-from typing import cast
+from pathlib import Path
+from typing import Union, cast
 
 import numpy as np
 from numpy.typing import NDArray
+
+PathType = Union[str, Path]
 
 
 class SequenceAlphabet:

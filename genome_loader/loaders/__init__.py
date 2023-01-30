@@ -4,7 +4,7 @@ from typing import Dict, Protocol, Union, cast
 from numpy.typing import NDArray
 
 from genome_loader.loaders.types import Queries
-from genome_loader.utils import PathType
+from genome_loader.types import PathType
 
 try:
     from genome_loader.torch import TorchCollator

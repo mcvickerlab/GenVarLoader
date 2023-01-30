@@ -10,15 +10,8 @@ from pysam import FastaFile
 
 from genome_loader.loaders import Queries
 from genome_loader.loaders.utils import ts_open_zarr
-from genome_loader.types import SequenceEncoding
-from genome_loader.utils import (
-    ALPHABETS,
-    DNA_COMPLEMENT,
-    PathType,
-    bytes_to_ohe,
-    rev_comp_byte,
-    rev_comp_ohe,
-)
+from genome_loader.types import ALPHABETS, SequenceEncoding
+from genome_loader.utils import PathType, bytes_to_ohe, rev_comp_byte, rev_comp_ohe
 
 
 class Sequence(ABC):
@@ -96,7 +89,7 @@ class FastaSequence(Sequence):
         rev_comp_idx = np.flatnonzero(queries.strand == "-")
         if len(rev_comp_idx) > 0:
             seqs[rev_comp_idx] = rev_comp_byte(
-                seqs[rev_comp_idx], complement_map=DNA_COMPLEMENT
+                seqs[rev_comp_idx], alphabet=ALPHABETS["DNA"]
             )
         if encoding is SequenceEncoding.ONEHOT:
             seqs = bytes_to_ohe(seqs, alphabet=ALPHABETS["DNA"])
@@ -268,7 +261,7 @@ class ZarrSequence(Sequence):
         # reverse complement negative stranded queries
         to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").values)
         if encoding is SequenceEncoding.BYTES and to_rev_comp.any():
-            out[to_rev_comp] = rev_comp_byte(out[to_rev_comp], DNA_COMPLEMENT)
+            out[to_rev_comp] = rev_comp_byte(out[to_rev_comp], ALPHABETS["DNA"])
         elif encoding is SequenceEncoding.ONEHOT:
             out[to_rev_comp] = rev_comp_ohe(out[to_rev_comp], has_N=True)
 

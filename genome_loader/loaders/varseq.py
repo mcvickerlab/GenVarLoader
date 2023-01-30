@@ -8,8 +8,8 @@ from numpy.typing import NDArray
 from genome_loader.loaders.sequence import Sequence
 from genome_loader.loaders.types import Queries
 from genome_loader.loaders.variants import Variants
-from genome_loader.types import SequenceEncoding
-from genome_loader.utils import ALPHABETS, DNA_COMPLEMENT, bytes_to_ohe, rev_comp_byte
+from genome_loader.types import ALPHABETS, SequenceEncoding
+from genome_loader.utils import bytes_to_ohe, rev_comp_byte
 
 
 class VarSequence:
@@ -66,7 +66,7 @@ class VarSequence:
         to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").values)
         if to_rev_comp.any():
             seqs[to_rev_comp] = rev_comp_byte(
-                seqs[to_rev_comp], complement_map=DNA_COMPLEMENT
+                seqs[to_rev_comp], alphabet=ALPHABETS["DNA"]
             )
 
         if encoding is SequenceEncoding.ONEHOT:

@@ -18,7 +18,11 @@ def vcfs_merge_filter_to_zarr(
 
     from genome_loader.utils import run_shell
 
-    logging.basicConfig(stream=sys.stdout, level="INFO")
+    logging.basicConfig(
+        stream=sys.stdout,
+        level="INFO",
+        format="%(levelname)s:%(name)s:%(asctime)s:%(message)s",
+    )
 
     if out_merged.exists():
         raise ValueError("Merged VCF already exists.")

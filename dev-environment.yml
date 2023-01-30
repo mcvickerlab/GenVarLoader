@@ -3,6 +3,7 @@ channels:
   - bioconda
   - conda-forge
 dependencies:
+  - biconda::bcftools
   - bioconda::cyvcf2 # needed to read VCF with sgkit
   - dask
   - einops

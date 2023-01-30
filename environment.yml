@@ -3,6 +3,7 @@ channels:
   - bioconda
   - conda-forge
 dependencies:
+  - biconda::bcftools
   - bioconda::cyvcf2 # needed to read VCF with sgkit
   - dask
   - einops
@@ -21,6 +22,8 @@ dependencies:
   - typer
   - xarray
   - zarr
+  - pip:
+    - tensorstore
 platforms:
   - linux-64
   - osx-64

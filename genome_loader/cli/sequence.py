@@ -40,7 +40,11 @@ def fasta_to_zarr_cli(
 ):
     from genome_loader.writers.sequence import fasta_to_zarr
 
-    logging.basicConfig(stream=sys.stdout, level=logging_level.value)
+    logging.basicConfig(
+        stream=sys.stdout,
+        level=logging_level.value,
+        format="%(levelname)s:%(name)s:%(asctime)s:%(message)s",
+    )
     logging.captureWarnings(True)
 
     if not fasta_path.exists():
