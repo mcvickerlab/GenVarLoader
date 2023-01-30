@@ -1,4 +1,3 @@
-import gc
 from typing import Union, cast
 
 import numba
@@ -72,7 +71,6 @@ class VarSequence:
         if encoding is SequenceEncoding.ONEHOT:
             seqs = bytes_to_ohe(seqs, alphabet=ALPHABETS["DNA"])  # type: ignore
 
-        gc.collect()
         return seqs
 
     # TODO: finish/fix or deprecate

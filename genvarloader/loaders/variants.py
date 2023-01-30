@@ -1,5 +1,3 @@
-import gc
-from abc import ABC, abstractmethod
 from enum import Enum
 from functools import reduce
 from pathlib import Path
@@ -11,7 +9,7 @@ import xarray as xr
 from numpy.typing import NDArray
 
 from genvarloader.loaders import Queries
-from genvarloader.utils import PathType
+from genvarloader.types import PathType
 
 
 class Variants:

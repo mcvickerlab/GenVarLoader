@@ -11,18 +11,11 @@ def vcfs_merge_filter_to_zarr(
     vcfs: List[Path],
 ):
     import logging
-    import sys
 
     from dask.distributed import Client, LocalCluster
     from sgkit.io.vcf import vcf_to_zarr
 
     from genvarloader.utils import run_shell
-
-    logging.basicConfig(
-        stream=sys.stdout,
-        level="INFO",
-        format="%(levelname)s:%(name)s:%(asctime)s:%(message)s",
-    )
 
     if out_merged.exists():
         raise ValueError("Merged VCF already exists.")

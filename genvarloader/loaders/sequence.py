@@ -10,7 +10,7 @@ from pysam import FastaFile
 
 from genvarloader.loaders import Queries
 from genvarloader.loaders.utils import ts_open_zarr
-from genvarloader.types import ALPHABETS, PathType, SequenceEncoding
+from genvarloader.types import ALPHABETS, PathType, SequenceAlphabet, SequenceEncoding
 from genvarloader.utils import bytes_to_ohe, rev_comp_byte, rev_comp_ohe
 
 
@@ -61,7 +61,7 @@ class FastaSequence(Sequence):
     def sel(self, queries: Queries, length: int, **kwargs) -> NDArray:
         sorted = kwargs.get("sorted", False)
         encoding = SequenceEncoding(kwargs.get("encoding"))
-        dtype = np.uint8 if encoding == "onehot" else "|S1"
+        dtype = np.uint8 if encoding is SequenceEncoding.ONEHOT else "|S1"
         seqs = np.empty((len(queries), length), dtype=dtype)  # type: ignore
 
         # go in sorted order to minimize file seeking
@@ -86,10 +86,10 @@ class FastaSequence(Sequence):
             )
             seqs[i] = seq
 
-        rev_comp_idx = np.flatnonzero(queries.strand == "-")
-        if len(rev_comp_idx) > 0:
-            seqs[rev_comp_idx] = rev_comp_byte(
-                seqs[rev_comp_idx], alphabet=ALPHABETS["DNA"]
+        to_rev_comp = queries.strand == "-"
+        if len(to_rev_comp) > 0:
+            seqs[to_rev_comp] = rev_comp_byte(
+                seqs[to_rev_comp], alphabet=ALPHABETS["DNA"]
             )
         if encoding is SequenceEncoding.ONEHOT:
             seqs = bytes_to_ohe(seqs, alphabet=ALPHABETS["DNA"])
@@ -192,10 +192,9 @@ class ZarrSequence(Sequence):
             if enc in {e.value for e in SequenceEncoding}
         }
         self.contig_lengths: Dict[str, int] = root.attrs["contig_lengths"]
-        if SequenceEncoding.ONEHOT in self.encodings:
-            self.alphabet = np.frombuffer(
-                root.attrs["alphabet"].encode("ascii"), dtype="|S1"
-            )
+        self.alphabet = SequenceAlphabet(
+            root.attrs["alphabet"], root.attrs["alphabet"][:-1][::-1] + "N"
+        )
 
         self.tstores: Dict[str, Any] = {}
 
@@ -224,9 +223,9 @@ class ZarrSequence(Sequence):
             dtype = "|S1"
             pad_arr = np.array(b"N")
         elif encoding is SequenceEncoding.ONEHOT:
-            out_shape.append(len(self.alphabet))
+            out_shape.append(len(self.alphabet.array))
             dtype = "u1"
-            pad_arr = np.zeros(len(self.alphabet), dtype=dtype)
+            pad_arr = np.zeros(len(self.alphabet.array), dtype=dtype)
             pad_arr[self.alphabet == b"N"] = 1
 
         queries["end"] = queries.start + length

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Dict, List, cast
 import pandas as pd
 
 from genvarloader.loaders.types import Queries, QueriesSchema
-from genvarloader.utils import PathType
+from genvarloader.types import PathType
 
 if TYPE_CHECKING:
     from genvarloader.loaders import GenVarLoader

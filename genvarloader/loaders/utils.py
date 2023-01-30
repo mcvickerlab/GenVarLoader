@@ -1,6 +1,6 @@
 import tensorstore as ts
 
-from genvarloader.utils import PathType
+from genvarloader.types import PathType
 
 
 def ts_open_zarr(path: PathType):
