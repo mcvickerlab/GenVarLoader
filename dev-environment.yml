@@ -13,6 +13,7 @@ dependencies:
   - numcodecs
   - numpy
   - pandas
+  - pandera
   - polars>=0.15.13
   - pyarrow
   - bioconda::pysam

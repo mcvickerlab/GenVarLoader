@@ -9,8 +9,8 @@ import zarr
 from numcodecs import Blosc
 from pysam import FastaFile
 
-from genvarloader.types import SequenceAlphabet, SequenceEncoding
-from genvarloader.utils import PathType, bytes_to_ohe
+from genvarloader.types import PathType, SequenceAlphabet, SequenceEncoding
+from genvarloader.utils import bytes_to_ohe
 
 
 def fasta_to_zarr(
@@ -22,10 +22,13 @@ def fasta_to_zarr(
     ignore_case: bool = False,
     compression_level: int = 0,
 ):
+
     if not isinstance(encodings, set):
         encodings = {encodings}
     if len(encodings) == 0:
         raise ValueError("Need at least one encoding.")
+
+    logging.info("Starting to write Zarr from FASTA.")
 
     zrr = zarr.open_group(str(out_path))
     for encoding in encodings:
@@ -59,15 +62,13 @@ def fasta_to_zarr(
                 zrr["bytes"].create_dataset(  # type: ignore
                     contig,
                     data=seq_arr.view("u1"),
-                    chunks=(math.ceil(len(seq) / int(1e6))),
                     compressor=compressor,
                 )
             if SequenceEncoding.ONEHOT in encodings:
-                ohe_arr = bytes_to_ohe(seq_arr, alphabet.array)
+                ohe_arr = bytes_to_ohe(seq_arr, alphabet)
                 zrr["onehot"].create_dataset(  # type: ignore
                     contig,
                     data=ohe_arr,
-                    chunks=(math.ceil(len(seq) / int(1e6)), None),
                     compressor=compressor,
                 )
                 del ohe_arr

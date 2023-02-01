@@ -4,6 +4,7 @@ archive/
 test.bed.flc.zarr
 test.zarr
 examples/
+genvarloader/tests/data/grch38.20.21.zarr
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

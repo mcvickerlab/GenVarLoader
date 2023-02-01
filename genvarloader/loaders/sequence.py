@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 from pysam import FastaFile
 
 from genvarloader.loaders import Queries
-from genvarloader.loaders.utils import ts_open_zarr
+from genvarloader.loaders.utils import ts_readonly_zarr
 from genvarloader.types import ALPHABETS, PathType, SequenceAlphabet, SequenceEncoding
 from genvarloader.utils import bytes_to_ohe, rev_comp_byte, rev_comp_ohe
 
@@ -191,7 +191,7 @@ class ZarrSequence(Sequence):
             for enc in root.group_keys()
             if enc in {e.value for e in SequenceEncoding}
         }
-        self.contig_lengths: Dict[str, int] = root.attrs["contig_lengths"]
+        self.contig_lengths: Dict[str, int] = root.attrs["lengths"]
         self.alphabet = SequenceAlphabet(
             root.attrs["alphabet"], root.attrs["alphabet"][:-1][::-1] + "N"
         )
@@ -200,9 +200,9 @@ class ZarrSequence(Sequence):
 
         def add_array_to_tstores(p: str, val: Union[zarr.Group, zarr.Array]):
             if isinstance(val, zarr.Array):
-                self.tstores[p] = ts_open_zarr(self.path / p)
+                self.tstores[p] = ts_readonly_zarr(self.path / p)
 
-        root.visit(add_array_to_tstores)
+        root.visititems(add_array_to_tstores)
 
     def sel(
         self, queries: Queries, length: int, **kwargs
@@ -213,6 +213,10 @@ class ZarrSequence(Sequence):
     async def async_sel(
         self, queries: Queries, length: int, **kwargs
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
+        if "strand" not in queries:
+            queries["strand"] = "+"
+            queries["strand"] = queries.strand.astype("category")
+
         # get encoding
         encoding = SequenceEncoding(kwargs.get("encoding"))
         if encoding not in self.encodings:
@@ -232,11 +236,13 @@ class ZarrSequence(Sequence):
         # map negative starts to 0
         queries["in_start"] = queries.start.clip(lower=0)
         # map ends > contig length to contig length
-        queries["contig_length"] = queries.contig.replace(self.contig_lengths)
+        queries["contig_length"] = queries.contig.replace(self.contig_lengths).astype(
+            int
+        )
         queries["in_end"] = np.minimum(queries.end, queries.contig_length)
         # get start, end index in output array
         queries["out_start"] = queries.in_start - queries.start
-        queries["out_end"] = queries.in_end - queries.end
+        queries["out_end"] = queries.in_end - queries.in_start
 
         def get_read(query):
             contig = query.contig

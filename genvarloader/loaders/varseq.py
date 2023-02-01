@@ -1,12 +1,14 @@
+import asyncio
 from typing import Union, cast
 
 import numba
 import numpy as np
 from numpy.typing import NDArray
 
+from genvarloader.loaders import AsyncLoader
 from genvarloader.loaders.sequence import Sequence
 from genvarloader.loaders.types import Queries
-from genvarloader.loaders.variants import Variants
+from genvarloader.loaders.variants import MissingValue, Variants
 from genvarloader.types import ALPHABETS, SequenceEncoding
 from genvarloader.utils import bytes_to_ohe, rev_comp_byte
 
@@ -16,7 +18,7 @@ class VarSequence:
         self,
         sequence: Sequence,
         variants: Variants,
-        missing_value: Variants.MissingValue = Variants.MissingValue.REFERENCE,
+        missing_value: MissingValue = MissingValue.REFERENCE,
     ) -> None:
         self.sequence = sequence
         self.variants = variants
@@ -44,6 +46,10 @@ class VarSequence:
         seqs : ndarray[bytes | uint8]
             Sequences with variants applied to them.
         """
+        if "strand" not in queries:
+            queries["strand"] = "+"
+            queries["strand"] = queries.strand.astype("category")
+
         sorted = kwargs.get("sorted", False)
         encoding = SequenceEncoding(kwargs.get("encoding"))
         positive_stranded_queries = cast(Queries, queries.assign(strand="+"))
@@ -133,7 +139,102 @@ def apply_variants(
     for i in numba.prange(len(seqs)):
         i_vars = variants[offsets[i] : offsets[i + 1]]
         i_pos = positions[offsets[i] : offsets[i + 1]] - starts[i]
-        seqs[i, i_pos] = i_vars
+        seq = seqs[i]
+        seq[i_pos] = i_vars
+
+
+class AsyncVarSequence:
+    def __init__(
+        self,
+        sequence: AsyncLoader,
+        variants: Variants,
+        missing_value: MissingValue = MissingValue.REFERENCE,
+    ) -> None:
+        self.sequence = sequence
+        self.variants = variants
+        self.missing_value = missing_value
+
+    def sel(
+        self,
+        queries: Queries,
+        length: int,
+        **kwargs,
+    ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
+        """Get sequences with sample's variants applied to them.
+
+        Parameters
+        ----------
+        queries : Queries
+        length : int
+        **kwargs : dict
+            sorted : bool, default False
+            encoding : 'bytes' or 'onehot', required
+                How to encode the sequences.
+
+        Returns
+        -------
+        seqs : ndarray[bytes | uint8]
+            Sequences with variants applied to them.
+        """
+        seqs = asyncio.run(self.async_sel(queries, length, **kwargs))
+        return seqs
+
+    async def async_sel(
+        self,
+        queries: Queries,
+        length: int,
+        **kwargs,
+    ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
+        """Get sequences with sample's variants applied to them.
+
+        Parameters
+        ----------
+        queries : Queries
+        length : int
+        **kwargs : dict
+            sorted : bool, default False
+            encoding : 'bytes' or 'onehot', required
+                How to encode the sequences.
+
+        Returns
+        -------
+        seqs : ndarray[bytes | uint8]
+            Sequences with variants applied to them.
+        """
+        if "strand" not in queries:
+            queries["strand"] = "+"
+            queries["strand"] = queries.strand.astype("category")
+
+        sorted = kwargs.get("sorted", False)
+        encoding = SequenceEncoding(kwargs.get("encoding"))
+        positive_stranded_queries = cast(Queries, queries.assign(strand="+"))
+
+        # apply variants as bytes to reduce how much data is moving around
+        # S1 is the same size as uint8
+        seqs = cast(
+            NDArray[np.bytes_],
+            await self.sequence.async_sel(
+                positive_stranded_queries, length, encoding="bytes"
+            ),
+        )
+        res = self.variants.sel(
+            queries, length, missing_value=self.missing_value, sorted=sorted
+        )
+
+        if res is not None:
+            variants, positions, offsets = res
+            apply_variants(seqs, queries.start.to_numpy(), variants, positions, offsets)
+
+        to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").values)
+        if to_rev_comp.any():
+            seqs[to_rev_comp] = rev_comp_byte(
+                seqs[to_rev_comp], alphabet=ALPHABETS["DNA"]
+            )
+
+        if encoding is SequenceEncoding.ONEHOT:
+            seqs = bytes_to_ohe(seqs, alphabet=ALPHABETS["DNA"])  # type: ignore
+
+        return seqs
 
 
 # TODO: fix this so it works lol, important for benchmarking

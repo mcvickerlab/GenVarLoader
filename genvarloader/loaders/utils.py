@@ -3,7 +3,7 @@ import tensorstore as ts
 from genvarloader.types import PathType
 
 
-def ts_open_zarr(path: PathType):
+def ts_readonly_zarr(path: PathType):
     return ts.open(  # type: ignore
         {"driver": "zarr", "kvstore": {"driver": "file", "path": str(path)}},
         read=True,

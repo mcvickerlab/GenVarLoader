@@ -7,7 +7,7 @@ import zarr
 from numpy.typing import NDArray
 
 from genvarloader.loaders.types import Queries
-from genvarloader.loaders.utils import ts_open_zarr
+from genvarloader.loaders.utils import ts_readonly_zarr
 from genvarloader.types import PathType
 
 
@@ -25,7 +25,7 @@ class Coverage:
 
         def add_array_to_tstores(p: str, val: Union[zarr.Group, zarr.Array]):
             if isinstance(val, zarr.Array):
-                self.tstores[p] = ts_open_zarr(self.path / p)
+                self.tstores[p] = ts_readonly_zarr(self.path / p)
 
         root.visit(add_array_to_tstores)
 

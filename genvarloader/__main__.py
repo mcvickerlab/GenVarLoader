@@ -1,12 +1,26 @@
+import logging
+import sys
+
 import typer
 
-from genvarloader.cli import coverage
+from genvarloader.cli import LoggingLevel, coverage
 from genvarloader.cli.sequence import fasta_to_zarr_cli
 from genvarloader.cli.variants import vcfs_merge_filter_to_zarr
 
 app = typer.Typer(
     name="GenVarLoader", help="""Write files to "GenVarLoader-ready" data structures."""
 )
+
+
+@app.callback()
+def main(logging_level: LoggingLevel = typer.Option("INFO")):
+    logging.basicConfig(
+        stream=sys.stdout,
+        level=logging_level.value,
+        format="%(levelname)s:%(name)s:%(asctime)s:%(message)s",
+    )
+    logging.captureWarnings(True)
+
 
 fasta_to_zarr_cli = app.command("fasta")(fasta_to_zarr_cli)
 vcfs_merge_filter_to_zarr = app.command("vcf")(vcfs_merge_filter_to_zarr)

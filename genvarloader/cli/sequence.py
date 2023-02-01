@@ -1,5 +1,3 @@
-import logging
-import sys
 import warnings
 from enum import Enum
 from pathlib import Path
@@ -36,16 +34,8 @@ def fasta_to_zarr_cli(
         help="Ignore the case of FASTA sequences and treat everything as uppercase.",
     ),
     compression_level: int = typer.Option(5, min=0, max=9),
-    logging_level: LoggingLevel = typer.Option("INFO", case_sensitive=False),
 ):
     from genvarloader.writers.sequence import fasta_to_zarr
-
-    logging.basicConfig(
-        stream=sys.stdout,
-        level=logging_level.value,
-        format="%(levelname)s:%(name)s:%(asctime)s:%(message)s",
-    )
-    logging.captureWarnings(True)
 
     if not fasta_path.exists():
         raise ValueError("FASTA not found.")
