@@ -127,7 +127,7 @@ def coverage(in_bam: Path, out_zarr: Path, contigs: Optional[List[str]] = None):
     ----------
     in_bam : Path, BAM file to find read depths for
     out_zarr : Path, Zarr file to write depth
-    contigs: list[str]
+    contigs : list[str]
         contigs to parse, defaults to ALL contigs
     """
     start_time = perf_counter()

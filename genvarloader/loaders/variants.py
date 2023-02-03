@@ -1,6 +1,6 @@
 from enum import Enum
 from pathlib import Path
-from typing import Optional, cast
+from typing import List, Optional, cast
 
 import numpy as np
 import pandas as pd
@@ -192,9 +192,9 @@ class Variants:
         _queries = queries.assign(sample_idx=sample_idx, contig_idx=contig_idx)
 
         # get variants, their positions, and how many are in each query
-        variant_ls: list[xr.DataArray] = []
-        position_ls: list[xr.DataArray] = []
-        count_ls: list[NDArray[np.unsignedinteger]] = []
+        variant_ls: List[xr.DataArray] = []
+        position_ls: List[xr.DataArray] = []
+        count_ls: List[NDArray[np.unsignedinteger]] = []
         if not sorted:
             idx_ls = []
         for name, group in _queries.groupby(["sample_idx", "ploid_idx"]):

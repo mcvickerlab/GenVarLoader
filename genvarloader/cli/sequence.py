@@ -6,7 +6,6 @@ from typing import Optional
 
 import typer
 
-from genvarloader.cli import LoggingLevel
 from genvarloader.types import ALPHABETS, SequenceEncoding
 
 Alphabet = Enum("Alphabet", dict(zip(ALPHABETS.keys(), ALPHABETS.keys())))

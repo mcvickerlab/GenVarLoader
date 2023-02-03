@@ -1,22 +1,31 @@
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 
 from genvarloader.types import Tn5CountMethod
-from genvarloader.writers.coverage import coverage, tn5_coverage
+from genvarloader.writers import coverage
 
 app = typer.Typer()
 
-coverage = app.command("depth-only")(coverage)
+
+@app.command()
+def depth_only(
+    in_bam: Path,
+    out_zarr: Path,
+    contigs: Optional[List[str]] = typer.Argument(
+        None, help="If None, write all contigs."
+    ),
+):
+    coverage.coverage(in_bam, out_zarr, contigs)
 
 
 @app.command()
 def tn5(
     in_bam: Path,
     out_zarr: Path,
-    contigs: Optional[str] = typer.Argument(
-        None, help="Comma separated list of contigs to write, defaults to all contigs."
+    contigs: Optional[List[str]] = typer.Argument(
+        None, help="Contigs to write, defaults to all contigs."
     ),
     offset_tn5: bool = typer.Option(
         True, help="Whether to offset read lengths for Tn5."
@@ -26,8 +35,4 @@ def tn5(
     ),
 ):
     """Write Tn5 coverage from BAM to Zarr"""
-    if contigs is not None:
-        _contigs = contigs.split(",")
-    else:
-        _contigs = contigs
-    tn5_coverage(in_bam, out_zarr, _contigs, None, offset_tn5, count_method)
+    coverage.tn5_coverage(in_bam, out_zarr, contigs, None, offset_tn5, count_method)
