@@ -4,7 +4,6 @@ from typing import List, Optional
 import typer
 
 from genvarloader.types import Tn5CountMethod
-from genvarloader.writers import coverage
 
 app = typer.Typer()
 
@@ -17,7 +16,9 @@ def depth_only(
         None, help="If None, write all contigs."
     ),
 ):
-    coverage.coverage(in_bam, out_zarr, contigs)
+    from genvarloader.writers.coverage import coverage
+
+    coverage(in_bam, out_zarr, contigs)
 
 
 @app.command()
@@ -35,4 +36,6 @@ def tn5(
     ),
 ):
     """Write Tn5 coverage from BAM to Zarr"""
-    coverage.tn5_coverage(in_bam, out_zarr, contigs, None, offset_tn5, count_method)
+    from genvarloader.writers.coverage import tn5_coverage
+
+    tn5_coverage(in_bam, out_zarr, contigs, None, offset_tn5, count_method)
