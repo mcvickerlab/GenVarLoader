@@ -25,7 +25,7 @@ class Coverage:
 
         def add_array_to_tstores(p: str, val: Union[zarr.Group, zarr.Array]):
             if isinstance(val, zarr.Array):
-                self.tstores[p] = ts_readonly_zarr(self.path / p)
+                self.tstores[p] = ts_readonly_zarr(self.path / p).result()
 
         root.visit(add_array_to_tstores)
 

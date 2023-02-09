@@ -36,6 +36,7 @@ dependencies:
   - git
   - icecream
   - isort
+  - memray
   - mypy
   - pip
   - pipreqs

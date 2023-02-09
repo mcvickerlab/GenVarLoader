@@ -1,7 +1,7 @@
 import asyncio
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, Union, cast
+from typing import Any, Dict, Optional, Union, cast
 
 import numpy as np
 import zarr
@@ -34,7 +34,7 @@ class Sequence(ABC):
             Query intervals.
         length : int
             Length of all intervals.
-        **kwargs : dict, optional
+        **kwargs : dict
             encoding : 'bytes' or 'onehot', required
                 How to encode the sequences.
 
@@ -57,40 +57,44 @@ class FastaSequence(Sequence):
         """
         self.path = Path(fasta_path)
         self.fasta = FastaFile(str(fasta_path))
+        self.contig_lengths = {
+            c: self.fasta.get_reference_length(c) for c in self.fasta.references
+        }
 
     def sel(self, queries: Queries, length: int, **kwargs) -> NDArray:
         sorted = kwargs.get("sorted", False)
         encoding = SequenceEncoding(kwargs.get("encoding"))
-        dtype = np.uint8 if encoding is SequenceEncoding.ONEHOT else "|S1"
-        seqs = np.empty((len(queries), length), dtype=dtype)  # type: ignore
+        seqs = cast(NDArray[np.bytes_], np.full_like((len(queries), length), b"N"))
+
+        queries["end"] = queries.start + length
+        # map negative starts to 0
+        queries["in_start"] = queries.start.clip(lower=0)
+        # map ends > contig length to contig length
+        queries["contig_length"] = queries.contig.replace(self.contig_lengths).astype(
+            int
+        )
+        queries["in_end"] = np.minimum(queries.end, queries.contig_length)
+        # get start, end index in output array
+        queries["out_start"] = queries.in_start - queries.start
+        queries["out_end"] = queries.in_end - queries.in_start
 
         # go in sorted order to minimize file seeking
         if not sorted:
             _queries = queries.sort_values(["contig", "start"])
         else:
             _queries = queries
-        for tup in _queries.itertuples():
-            i = tup.Index
-            contig = tup.contig
-            start = tup.start
-            end = start + length
-            prepend = min(start, 0)
-            if prepend > 0:
-                start = 0
-            append = max(end - self.fasta.get_reference_length(contig), 0)
-            if append > 0:
-                end = self.fasta.get_reference_length(contig)
-            seq = np.full_like(seqs[0], b"N")
-            seq[prepend : length - append] = np.frombuffer(
-                self.fasta.fetch(contig, start, end).encode(), "S1"
+        for q in _queries.itertuples():
+            i = q.Index
+            seqs[i, q.out_start : q.out_end] = np.frombuffer(
+                self.fasta.fetch(q.contig, q.in_start, q.in_end).encode(), "S1"
             )
-            seqs[i] = seq
 
-        to_rev_comp = queries.strand == "-"
-        if len(to_rev_comp) > 0:
+        to_rev_comp = cast(NDArray[np.bool_], (queries.strand == "-").values)
+        if to_rev_comp.any():
             seqs[to_rev_comp] = rev_comp_byte(
                 seqs[to_rev_comp], alphabet=ALPHABETS["DNA"]
             )
+
         if encoding is SequenceEncoding.ONEHOT:
             seqs = bytes_to_ohe(seqs, alphabet=ALPHABETS["DNA"])
 
@@ -103,76 +107,8 @@ class FastaSequence(Sequence):
         self.fasta.close()
 
 
-# TODO: deprecate
-""" class H5Sequence(Sequence):
-    
-    embedding: str
-    contigs: NDArray[np.str_]
-    spec: Optional[NDArray[np.bytes_]]
-    
-    def __init__(self, h5_path: PathType) -> None:
-        self.path = Path(h5_path)
-        
-        # get info from h5
-        with self._open() as f:
-            self.embedding = f.attrs['id']
-            self.spec = cast(type(self.spec), f.attrs.get('encode_spec', None))
-            if self.spec is not None:
-                self.spec = self.spec.astype('S')
-                self._assert_reverse_is_complement(self.spec, DNA_COMPLEMENT)
-            self.contigs: NDArray[np.str_] = np.array(list(f.keys()), dtype="U")
-            self._dtype = f[self.contigs[0]][self.embedding].dtype
-        
-        # get encoding
-        self.encoding = self.Encoding.ONEHOT if self.embedding == 'onehot' else self.Encoding.BYTES
-        
-        # get padding value for out of bounds queries
-        pad_char = b'N'
-        if self.encoding is self.Encoding.BYTES:
-            self.pad_arr = np.array([pad_char], dtype=self._dtype)
-        elif self.embedding is self.Encoding.ONEHOT:
-            pad_arr = np.zeros_like(self.spec, dtype=self._dtype)
-            if pad_char not in self.spec:
-                warnings.warn("'N' is not in spec, will pad with 0 vector.")
-            else:
-                pad_arr[self.spec == pad_char] = 1
-            self.pad_arr = pad_arr[None, :]
-    
-    def _open(self):
-        return h5py.File(self.path)
-    
-    def _assert_reverse_is_complement(
-        self, alphabet: NDArray[np.bytes_], complement_map: Dict[bytes, bytes]
-    ):
-        _alphabet = alphabet[:-1] if b"N" in alphabet else alphabet
-        rev_alpha = _alphabet[::-1]
-        for a, r in zip(_alphabet, rev_alpha):
-            if complement_map[a] != r:
-                raise ValueError("Reverse of alphabet does not yield the complement.")
-
-    def sel(self, queries: Queries, length: int, **kwargs) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
-        sorted = kwargs.get("sorted", False)
-        queries = cast(Queries, queries.reset_index(drop=True))
-        queries['end'] = queries.start + length
-        # queries['ref_start'] = 
-        # queries['ref_end'] = 
-        
-        shape = [len(queries), length]
-        out = np.tile(self.pad_arr, (len(queries), length, 1))
-        with self._open() as f:
-            for contig, group in queries.groupby('contig'):
-                idx = group.index.values
-                coords = (
-                    np.tile(np.arange(length, dtype=np.uint32), (len(group), 1))
-                    + rel_starts[:, None]
-                )
-                out[idx] = f[contig][coords]
-                
-        raise NotImplementedError """
-
-
 class ZarrSequence(Sequence):
-    def __init__(self, zarr_path: PathType):
+    def __init__(self, zarr_path: PathType, ts_kwargs: Optional[Dict[str, Any]] = None):
         """Load sequences from a Zarr file.
 
         Note: this class assumes any one hot encoded sequences use an alphabet that
@@ -183,13 +119,16 @@ class ZarrSequence(Sequence):
         Parameters
         ----------
         zarr_path : PathType
+        ts_kwargs : dict[str, any]
+            Keyword arguments to pass to tensorstore.open(). Useful e.g. to specify a shared cache pool across
+            loaders.
         """
         self.path = Path(zarr_path)
         root = zarr.open_group(self.path, mode="r")
         self.encodings = {
             SequenceEncoding(enc)
             for enc in root.group_keys()
-            if enc in {e.value for e in SequenceEncoding}
+            if enc in set(SequenceEncoding)
         }
         self.contig_lengths: Dict[str, int] = root.attrs["lengths"]
         self.alphabet = SequenceAlphabet(
@@ -197,10 +136,12 @@ class ZarrSequence(Sequence):
         )
 
         self.tstores: Dict[str, Any] = {}
+        if ts_kwargs is None:
+            ts_kwargs = {}
 
         def add_array_to_tstores(p: str, val: Union[zarr.Group, zarr.Array]):
             if isinstance(val, zarr.Array):
-                self.tstores[p] = ts_readonly_zarr(self.path / p)
+                self.tstores[p] = ts_readonly_zarr(self.path / p, **ts_kwargs).result()
 
         root.visititems(add_array_to_tstores)
 
@@ -264,20 +205,10 @@ class ZarrSequence(Sequence):
             out[i, query.out_start : query.out_end] = read
 
         # reverse complement negative stranded queries
-        to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").values)
+        to_rev_comp = cast(NDArray[np.bool_], (queries.strand == "-").values)
         if encoding is SequenceEncoding.BYTES and to_rev_comp.any():
             out[to_rev_comp] = rev_comp_byte(out[to_rev_comp], ALPHABETS["DNA"])
         elif encoding is SequenceEncoding.ONEHOT:
             out[to_rev_comp] = rev_comp_ohe(out[to_rev_comp], has_N=True)
 
         return out
-
-
-def ref_loader_factory(ref_path: PathType) -> Sequence:
-    _ref_path = Path(ref_path)
-    if ".fa" in _ref_path.name:
-        return FastaSequence(_ref_path)
-    elif ".zarr" in _ref_path.name:
-        return ZarrSequence(_ref_path)
-    else:
-        raise ValueError("File extension for reference is neither FASTA nor HDF5.")

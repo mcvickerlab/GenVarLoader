@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from genvarloader.loaders import GenVarLoader
 
 
-def parse_queries(queries_path: PathType) -> Queries:
+def read_queries(queries_path: PathType) -> Queries:
     queries = cast(
         Queries,
         QueriesSchema.to_schema().validate(
@@ -32,15 +32,15 @@ class TorchCollator:
         self, genvarloader: "GenVarLoader", queries_path: PathType, length: int
     ) -> None:
         self.gvl = genvarloader
-        self.queries = parse_queries(queries_path)
+        self.queries = read_queries(queries_path)
         self.length = length
 
         if "index" in self.gvl.loaders:
             raise RuntimeError(
                 """
-                GenVarLoader has as loader named 'index' which causes a naming
+                GenVarLoader has a loader named 'index' which causes a naming
                 conflict since the collator needs to use a key called 'index'
-                to store batch indices. Create a new GenVarLoader that doesn't
+                to provide batch indices. Create a new GenVarLoader that doesn't
                 have any loaders named 'index'.
                 """
             )

@@ -5,6 +5,7 @@ from typing import Optional, Protocol, Tuple, TypeVar
 import numpy as np
 import pandas as pd
 import pandera as pa
+import zarr
 from natsort import natsorted
 from numpy.typing import NDArray
 from pandera.engines import pandas_engine
@@ -73,21 +74,6 @@ class _VCFTSDataset:
     call_genotype: _TStore[np.int8]  # (v s p)
     variant_allele: _TStore[np.uint8]  # (v a)
     variant_contig: _TStore[np.int16]  # (v)
-    variant_position: _TStore[np.int32]  # (v)
+    variant_position: zarr.Group  # (v)
     contigs: NDArray[np.object_]  # (c)
     contig_offsets: _TStore[np.integer]  # (c)
-
-    def sel(self, variants, ploidy) -> Self:
-        """NOTE: subsetting invalidates the contig_offsets!"""
-        call_genotype = self.call_genotype[variants, ploidy]
-        variant_allele = self.variant_allele[variants]
-        variant_contig = self.variant_contig[variants]
-        variant_position = self.variant_position[variants]
-        return _VCFTSDataset(
-            call_genotype,
-            variant_allele,
-            variant_contig,
-            variant_position,
-            self.contigs,
-            self.contig_offsets,
-        )

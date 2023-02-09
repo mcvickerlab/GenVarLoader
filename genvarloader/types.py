@@ -12,7 +12,7 @@ class SequenceAlphabet:
     def __init__(self, alphabet: str, complement: str) -> None:
         """Parse and validate sequence alphabets.
 
-        All alphabets must:
+        Nucleic acid alphabets must:
         1. Include N at the end.
         2. Be complemented by being reversed (without N).
             For example, `reverse(ACGT) = complement(ACGT) = TGCA`
