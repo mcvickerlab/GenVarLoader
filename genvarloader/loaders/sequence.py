@@ -1,53 +1,19 @@
 import asyncio
-from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, Optional, Union, cast
+from typing import Any, Dict, Optional, Set, Union, cast
 
 import numpy as np
 import zarr
 from numpy.typing import NDArray
 from pysam import FastaFile
 
-from genvarloader.loaders import Queries
+from genvarloader.loaders.types import Queries, _TStore
 from genvarloader.loaders.utils import ts_readonly_zarr
 from genvarloader.types import ALPHABETS, PathType, SequenceAlphabet, SequenceEncoding
 from genvarloader.utils import bytes_to_ohe, rev_comp_byte, rev_comp_ohe
 
 
-class Sequence(ABC):
-
-    path: Path
-
-    @abstractmethod
-    def sel(
-        self, queries: Queries, length: int, **kwargs
-    ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
-        """Load sequences matching query intervals.
-
-        Query intervals can go beyond the range of contigs and will be padded with 'N' where
-        there is no underlying sequence to fetch. For example, if an interval has a
-        negative start, there will be 'N' added to the start of the returned sequence.
-
-        Parameters
-        ----------
-        queries: Queries
-            Query intervals.
-        length : int
-            Length of all intervals.
-        **kwargs : dict
-            encoding : 'bytes' or 'onehot', required
-                How to encode the sequences.
-
-        Returns
-        -------
-        seqs : ndarray[bytes or uint8]
-            Sequences for each interval. Has shape (intervals length [alphabet])
-            where the final dimension is only present if one hot encoding.
-        """
-        raise NotImplementedError
-
-
-class FastaSequence(Sequence):
+class FastaSequence:
     def __init__(self, fasta_path: PathType) -> None:
         """Load sequences from a fasta as NumPy arrays.
 
@@ -64,7 +30,6 @@ class FastaSequence(Sequence):
     def sel(self, queries: Queries, length: int, **kwargs) -> NDArray:
         sorted = kwargs.get("sorted", False)
         encoding = SequenceEncoding(kwargs.get("encoding"))
-        seqs = cast(NDArray[np.bytes_], np.full_like((len(queries), length), b"N"))
 
         queries["end"] = queries.start + length
         # map negative starts to 0
@@ -83,6 +48,8 @@ class FastaSequence(Sequence):
             _queries = queries.sort_values(["contig", "start"])
         else:
             _queries = queries
+
+        seqs = cast(NDArray[np.bytes_], np.full_like((len(queries), length), b"N"))
         for q in _queries.itertuples():
             i = q.Index
             seqs[i, q.out_start : q.out_end] = np.frombuffer(
@@ -107,7 +74,13 @@ class FastaSequence(Sequence):
         self.fasta.close()
 
 
-class ZarrSequence(Sequence):
+class Sequence:
+    path: Path
+    encodings: Set[SequenceEncoding]
+    contig_lengths: Dict[str, int]
+    alphabet: SequenceAlphabet
+    tstores: Dict[str, _TStore]
+
     def __init__(self, zarr_path: PathType, ts_kwargs: Optional[Dict[str, Any]] = None):
         """Load sequences from a Zarr file.
 
@@ -135,7 +108,7 @@ class ZarrSequence(Sequence):
             root.attrs["alphabet"], root.attrs["alphabet"][:-1][::-1] + "N"
         )
 
-        self.tstores: Dict[str, Any] = {}
+        self.tstores = {}
         if ts_kwargs is None:
             ts_kwargs = {}
 
@@ -154,9 +127,19 @@ class ZarrSequence(Sequence):
     async def async_sel(
         self, queries: Queries, length: int, **kwargs
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
+        queries = cast(Queries, queries.reset_index(drop=True))
         if "strand" not in queries:
             queries["strand"] = "+"
             queries["strand"] = queries.strand.astype("category")
+
+        query_contigs_not_in_sequence = np.setdiff1d(
+            queries.contig.unique(), list(self.contig_lengths.keys())
+        )
+        if len(query_contigs_not_in_sequence) > 0:
+            raise ValueError(
+                "Got contigs that aren't available in the sequence file:",
+                query_contigs_not_in_sequence,
+            )
 
         # get encoding
         encoding = SequenceEncoding(kwargs.get("encoding"))

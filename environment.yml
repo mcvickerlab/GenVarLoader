@@ -9,6 +9,7 @@ dependencies:
   - einops
   - h5py
   - natsort
+  - nest-asyncio
   - numba
   - numcodecs
   - numpy

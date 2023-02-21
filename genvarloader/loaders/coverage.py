@@ -1,12 +1,12 @@
 import asyncio
 from pathlib import Path
-from typing import Any, Dict, Union, cast
+from typing import Dict, Union, cast
 
 import numpy as np
 import zarr
 from numpy.typing import NDArray
 
-from genvarloader.loaders.types import Queries
+from genvarloader.loaders.types import Queries, _TStore
 from genvarloader.loaders.utils import ts_readonly_zarr
 from genvarloader.types import PathType
 
@@ -21,7 +21,7 @@ class Coverage:
         self.contig_lengths: Dict[str, int] = root.attrs["contig_lengths"]
 
         # Iterate over arrays under the group and grab them as TensorStores
-        self.tstores: Dict[str, Any] = {}
+        self.tstores: Dict[str, _TStore] = {}
 
         def add_array_to_tstores(p: str, val: Union[zarr.Group, zarr.Array]):
             if isinstance(val, zarr.Array):
@@ -55,7 +55,9 @@ class Coverage:
         # map negative starts to 0
         queries["in_start"] = queries.start.clip(lower=0)
         # map ends > contig length to contig length
-        queries["contig_length"] = queries.contig.replace(self.contig_lengths)
+        queries["contig_length"] = queries.contig.replace(self.contig_lengths).astype(
+            int
+        )
         queries["in_end"] = np.minimum(queries.end, queries.contig_length)
         # get start, end index in output array
         queries["out_start"] = queries.in_start - queries.start

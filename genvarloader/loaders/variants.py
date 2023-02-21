@@ -4,13 +4,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, cast
 
 import numpy as np
-import tensorstore as ts
 import zarr
 from numpy.typing import NDArray
 from typing_extensions import Self
 
-from genvarloader.loaders import Queries
-from genvarloader.loaders.types import _TStore, _VCFTSDataset
+from genvarloader.loaders.types import Queries, _TStore, _VCFTSDataset
 from genvarloader.loaders.utils import ts_readonly_zarr
 from genvarloader.types import PathType
 
@@ -147,7 +145,12 @@ class Variants:
         >>> variants.contigs_to_contig_idxs(['X', 'X', 'X'])
         (array([1]), array([1, 1, 1]))
         """
-        idx = np.flatnonzero(self.datasets[sample].contigs == contig)[0]
+        _idx = np.flatnonzero(self.datasets[sample].contigs == contig)
+        if len(_idx) == 0:
+            raise RuntimeError(
+                f"Query contig {contig} not in variant file for sample {sample}."
+            )
+        idx = _idx[0]
         return idx
 
     def sel(
@@ -155,7 +158,7 @@ class Variants:
         queries: Queries,
         length: int,
         **kwargs,
-    ) -> Optional[tuple[NDArray[np.bytes_], NDArray[np.int32], NDArray[np.integer]]]:
+    ) -> Dict[str, NDArray]:
         """Get the variants for specified regions, if any, otherwise return None.
 
         Parameters
@@ -184,7 +187,7 @@ class Variants:
         queries: Queries,
         length: int,
         **kwargs,
-    ) -> Optional[tuple[NDArray[np.bytes_], NDArray[np.int32], NDArray[np.integer]]]:
+    ) -> Dict[str, NDArray]:
         """Get the variants for specified regions, if any, otherwise return None.
 
         Parameters
@@ -210,51 +213,60 @@ class Variants:
                 "Variants appears to be uninitialized. Did you remember to use Variants.create(...)?"
             )
         # get variants, their positions, and how many are in each query
-        _queries = queries.reset_index(drop=True)
-        groups = _queries.groupby(["contig", "sample"], sort=False)
-        idx_ls = []
+        queries = cast(Queries, queries.reset_index(drop=True))
+        groups = queries.groupby(["contig", "sample"], sort=False)
 
-        variant_ls: List[Future[NDArray[np.uint8]]] = []
-        position_ls: List[NDArray[np.int32]] = []
-        count_ls: List[NDArray[np.integer]] = []
-        # NOTE: groupby preserves within-group order
+        allele_ls = []
+        position_ls = []
+        idx_ls = []
+        count_ls = []
+        count_idx_ls = []
+        # # NOTE: groupby preserves within-group order
         for (contig, sample), group in groups:
             c_idx = self.contig_to_contig_idx(contig, sample)
             s = group.start.to_numpy()
             e = s + length
 
-            v_idx, p_idx, c_s_cnt, c_s_var_pos = self._intervals_to_idx_and_pos(
-                c_idx, s, e, sample, group.ploid_idx.values
-            )  # type: ignore
+            a_idx, p_idx, c_s_counts, c_s_positions = self._intervals_to_idx_and_pos(
+                c_idx, s, e, sample, group.ploid_idx.values  # type: ignore
+            )
 
-            allele_idx = self.datasets[sample].call_genotype[v_idx, p_idx]
-            c_s_vars = self.datasets[sample].variant_allele[v_idx, allele_idx].read()
+            allele_idx = self.datasets[sample].call_genotype[a_idx, p_idx]
+            c_s_alleles = self.datasets[sample].variant_allele[a_idx, allele_idx].read()
 
-            variant_ls.append(c_s_vars)
-            position_ls.append(c_s_var_pos)
-            count_ls.append(c_s_cnt)
-            idx_ls.append(group.index.values)
+            allele_ls.append(c_s_alleles)
+            position_ls.append(c_s_positions)
+            idx_ls.append(group.index.values.repeat(c_s_counts))
+            count_ls.append(c_s_counts)
+            count_idx_ls.append(group.index.values)
 
         # get counts
-        variant_cnts = np.concatenate(count_ls)
-        if variant_cnts.sum() == 0:
-            return None
+        counts = np.concatenate(count_ls)
+        if counts.sum() == 0:
+            return {
+                "alleles": np.array([]),
+                "positions": np.array([]),
+                "offsets": np.zeros(len(queries) + 1, "i4"),
+            }
 
         # get variants, positions and resort
+        count_idx = np.concatenate(count_idx_ls)
+        count_resorter = np.argsort(count_idx)
+        counts = cast(NDArray[np.integer], counts[count_resorter])
+
         idx = np.concatenate(idx_ls)
-        resorter = np.argsort(idx)
-        variant_cnts = cast(NDArray[np.integer], variant_cnts[resorter])
-        _variants = await asyncio.gather(*variant_ls)
-        variants = cast(
-            NDArray[np.bytes_], np.concatenate(_variants).view("|S1")[resorter]
+        resorter = np.argsort(idx, kind="stable")
+        _alleles = await asyncio.gather(*allele_ls)
+        alleles = cast(
+            NDArray[np.bytes_], np.concatenate(_alleles).view("|S1")[resorter]
         )
         positions = cast(NDArray[np.int32], np.concatenate(position_ls)[resorter])
 
         # get offsets
-        offsets = np.zeros(len(variant_cnts) + 1, dtype=variant_cnts.dtype)
-        variant_cnts.cumsum(out=offsets[1:])
+        offsets = np.zeros(len(counts) + 1, dtype=counts.dtype)
+        counts.cumsum(out=offsets[1:])
 
-        return variants, positions, offsets
+        return {"alleles": alleles, "positions": positions, "offsets": offsets}
 
     def _intervals_to_idx_and_pos(
         self,
@@ -272,7 +284,7 @@ class Variants:
             return (
                 np.array([], np.int32),
                 np.array([], ploid_idx.dtype),
-                np.array([], np.int32),
+                np.full_like(starts, 0, np.int32),
                 np.array([], np.int32),
             )
         c_pos = cast(NDArray[np.int32], c_pos[:])
@@ -280,9 +292,9 @@ class Variants:
         # NOTE: VCF is 1-indexed and queries are 0-indexed, adjust
         c_pos -= 1
         s_e_idx = c_start + np.searchsorted(c_pos, np.concatenate([starts, ends]))
-        start_idxs, end_idxs = s_e_idx[: len(starts)], s_e_idx[len(starts) :]
+        start_idxs, end_idxs = np.split(s_e_idx, (len(starts),))
         cnts = end_idxs - start_idxs
-        v_idx = np.concatenate([np.r_[s:e] for s, e in zip(start_idxs, end_idxs)])
+        v_idx = np.concatenate([np.arange(s, e) for s, e in zip(start_idxs, end_idxs)])
         p_idx = np.repeat(ploid_idx, cnts)
         v_pos = c_pos[v_idx - c_start]
         return v_idx, p_idx, cnts, v_pos

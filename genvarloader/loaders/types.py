@@ -1,6 +1,6 @@
 from asyncio import Future
 from dataclasses import dataclass
-from typing import Optional, Protocol, Tuple, TypeVar
+from typing import Dict, Optional, Protocol, Tuple, TypeVar, Union
 
 import numpy as np
 import pandas as pd
@@ -39,12 +39,27 @@ class QueriesSchema(pa.SchemaModel):
 
 Queries = DataFrame[QueriesSchema]
 
+LoaderOutput = Union[NDArray, Dict[str, NDArray]]
+
+
+class Loader(Protocol):
+    def sel(self, queries: Queries, length: int, **kwargs) -> LoaderOutput:
+        ...
+
+
+class AsyncLoader(Protocol):
+    def sel(self, queries: Queries, length: int, **kwargs) -> LoaderOutput:
+        ...
+
+    async def async_sel(self, queries: Queries, length: int, **kwargs) -> LoaderOutput:
+        ...
+
 
 # non-user facing, just for type checking TensorStore
-T = TypeVar("T", bound=np.generic)
+_T = TypeVar("_T", bound=np.generic)
 
 
-class _TStore(Protocol[T]):
+class _TStore(Protocol[_T]):
     def __getitem__(self, idx) -> Self:
         ...
 
@@ -57,13 +72,13 @@ class _TStore(Protocol[T]):
         ...
 
     @property
-    def dtype(self) -> T:
+    def dtype(self) -> _T:
         ...
 
     def astype(self, dtype) -> Self:
         ...
 
-    def read(self) -> Future[NDArray[T]]:
+    def read(self) -> Future[NDArray[_T]]:
         ...
 
 
