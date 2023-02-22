@@ -1,8 +1,10 @@
 import gc
-from enum import Enum
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, cast
 
 import numpy as np
 import zarr
@@ -132,7 +134,7 @@ def coverage(in_bam: Path, out_zarr: Path, contigs: Optional[List[str]] = None):
     """
     start_time = perf_counter()
 
-    z = zarr.open_group(str(out_zarr))
+    z = zarr.open_group(out_zarr)
     cover = z.create_group("coverage")
     with AlignmentFile(str(in_bam), "r") as bam:
 
@@ -156,3 +158,61 @@ def coverage(in_bam: Path, out_zarr: Path, contigs: Optional[List[str]] = None):
             )
 
     print(f"Processed allele coverage in {perf_counter() - start_time:.2f} seconds!")
+
+
+@dataclass
+class SampleInfo:
+    sample_name: str
+    sample_idx: int
+    bam_path: Path
+
+
+def _coverage(
+    sample_info: SampleInfo, out_zarr: zarr.Group, contigs: Optional[List[str]]
+):
+
+    raise NotImplementedError
+
+
+def multi_sample_coverage(
+    in_bams: Dict[str, Path],
+    out_zarr: Path,
+    contigs: Optional[List[str]] = None,
+    n_workers=None,
+    overwrite=False,
+):
+    z = zarr.open_group(out_zarr)
+
+    samples = list(in_bams.keys())
+    existing_samples = cast(List[str], z.attrs.get("samples", []))
+    old_samples = [s for s in samples if s in set(existing_samples)]
+    new_samples = [s for s in samples if s not in set(existing_samples)]
+
+    if len(new_samples) == 0 and not overwrite:
+        return
+    elif len(old_samples) > 0 and not overwrite:
+        raise ValueError(
+            "Got samples that are already in the output zarr:", old_samples
+        )
+    else:
+        total_samples = existing_samples + new_samples
+        z.attrs["samples"] = total_samples
+
+    if overwrite:
+        samples_to_write = in_bams
+    else:
+        samples_to_write = {s: p for s, p in in_bams.items() if s in new_samples}
+
+    *_, sample_idx = np.intersect1d(
+        list(samples_to_write.keys()), total_samples, return_indices=True
+    )
+
+    sample_infos = [
+        SampleInfo(s, i, p) for (s, p), i in zip(samples_to_write.items(), sample_idx)
+    ]
+
+    with ProcessPoolExecutor(n_workers) as exe:
+        fn = partial(_coverage, out_zarr=z, contigs=contigs)
+        _ = exe.map(fn, sample_infos)
+
+    raise NotImplementedError

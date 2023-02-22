@@ -17,6 +17,11 @@ collate_fn = gvloader.get_torch_collator(length, sel_kwargs)
 ds = gvl_torch.QueriesDataset(queries)
 sampler = gvloader.get_sorted_query_sampler(queries, batch_size=8)
 dl = DataLoader(ds, batch_sampler=sampler, collate_fn=collate_fn)
+next(iter(dl))
+{
+    'varseq': # tensor with shape (8 600)
+    'coverage': # tensor with shape (8 600)
+}
 ```
 
 Writing queries to disk and reading those instead, faster for variant sequences and transformed data.
@@ -34,11 +39,11 @@ gvloader.write_queries('out.zarr', queries, length, sel_kwargs)
 
 collate_fn = gvl_torch.ZarrCollator('out.zarr')
 # remember: batched sampling must be enabled so the collate function is used
-dl = DataLoader(list(range(len(queries))), batch_size=5, collate_fn=collate_fn)
+dl = DataLoader(collate_fn.index, batch_size=8, collate_fn=collate_fn)
 next(iter(dl))
 {
-    'varseq': # tensor with shape (5 600)
-    'coverage': # tensor with shape (5 600)
+    'varseq': # tensor with shape (8 600)
+    'coverage': # tensor with shape (8 600)
 }
 ```
 """
@@ -133,6 +138,11 @@ class ZarrCollator:
         group_arrays = [torch.as_tensor(a) for a in group_arrays]
         out = dict(zip(self.groups.keys(), group_arrays))
         return out
+
+    @property
+    def index(self):
+        tstore = next(iter(self.groups.values()))
+        return np.arange(tstore.shape[0])
 
 
 class SortedQuerySampler(Sampler):
