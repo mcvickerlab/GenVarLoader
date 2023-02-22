@@ -12,7 +12,7 @@ If you want to use the PyTorch datasets, samplers, and other data-oriented class
 mamba env create -n genome-loader torch-environment.yml
 ```
 
-A PyTorch dependency is not included since it requires (special instructions)[https://pytorch.org/get-started/locally/].
+A PyTorch dependency is not included since it requires [special instructions](https://pytorch.org/get-started/locally/).
 
 Then, add the package to your Python path e.g. add this line to your `.bashrc`:
 ```bash
