@@ -1,10 +1,13 @@
-import shutil
+import re
 from pathlib import Path
 from subprocess import CalledProcessError
-from typing import Optional, cast
+from typing import List, Optional, cast
 
+import dask
+import joblib
 import numpy as np
 import zarr
+from dask.delayed import delayed
 from dask.distributed import Client, LocalCluster
 from numpy.typing import NDArray
 from sgkit.io.vcf import vcf_to_zarr
@@ -12,9 +15,39 @@ from sgkit.io.vcf import vcf_to_zarr
 from genvarloader.utils import run_shell
 
 
+def filt_vcfs(
+    vcf_dir: Path,
+    out_dir: Path,
+    reference: Optional[Path],
+    rename_contigs: Optional[Path],
+    n_jobs: int,
+    overwrite: bool = False,
+):
+    if not vcf_dir.is_dir():
+        raise ValueError
+    if not out_dir.is_dir():
+        raise ValueError
+
+    vcfs: List[Path] = (
+        list(vcf_dir.glob("*.vcf"))
+        + list(vcf_dir.glob("*.vcf.gz"))
+        + list(vcf_dir.glob("*.bcf"))
+    )
+    vcf_name = re.compile(r"(.*)\.(?:vcf|vcf\.gz|bcf)")
+    vcf_names: List[str] = [vcf_name.match(vcf.name).group(1) for vcf in vcfs]  # type: ignore
+    out_vcfs = [out_dir / f"{name}.bcf" for name in vcf_names]
+
+    with joblib.Parallel(n_jobs, prefer="threads") as exe:
+        tasks = [
+            joblib.delayed(filt(vcf, out_vcf, reference, rename_contigs, overwrite))
+            for vcf, out_vcf in zip(vcfs, out_vcfs)
+        ]
+        _ = exe(tasks)
+
+
 def filt(
     vcf: Path,
-    out_vcf: Optional[Path],
+    out_vcf: Path,
     reference: Optional[Path],
     rename_contigs: Optional[Path],
     n_threads: int,
@@ -22,7 +55,7 @@ def filt(
 ):
     if out_vcf is None:
         raise ValueError("Need an output VCF.")
-    if not overwrite and out_vcf.exists:
+    if not overwrite and out_vcf.exists():
         raise ValueError("Output VCF already exists.")
 
     # check that bcftools is installed
@@ -46,22 +79,49 @@ def filt(
     status = run_shell(cmd)
 
 
-def write_zarr(
-    vcf: Optional[Path],
-    out_zarr: Path,
-    n_threads: int,
+def write_zarrs(
+    vcf_dir: Path,
+    zarr_dir: Path,
+    n_jobs: int,
     overwrite: bool = False,
     variants_per_chunk: int = int(1e4),
 ):
+    if not vcf_dir.is_dir():
+        raise ValueError
+    if not zarr_dir.is_dir():
+        raise ValueError
+
+    cluster = LocalCluster(n_workers=n_jobs // 2, threads_per_worker=1)
+    client = Client(cluster)
+
+    vcfs: List[Path] = (
+        list(vcf_dir.glob("*.vcf"))
+        + list(vcf_dir.glob("*.vcf.gz"))
+        + list(vcf_dir.glob("*.bcf"))
+    )
+    vcf_name = re.compile(r"(.*)\.(?:vcf|vcf\.gz|bcf)")
+    vcf_names: List[str] = [vcf_name.match(vcf.name).group(1) for vcf in vcfs]  # type: ignore
+    zarrs = [zarr_dir / f"{name}.zarr" for name in vcf_names]
+
+    tasks = [
+        delayed(write_zarr)(vcf, zarr, overwrite, variants_per_chunk)
+        for vcf, zarr in zip(vcfs, zarrs)
+    ]
+    dask.compute(tasks)  # type: ignore
+
+
+def write_zarr(
+    vcf: Path,
+    out_zarr: Path,
+    overwrite: bool = False,
+    variants_per_chunk: int = int(1e4),
+) -> None:
     """Write a VCF to a Zarr file. Note that this currently breaks compatibility with sgkit because TensorStore
     does not support filters nor object/byte arrays."""
     if vcf is None:
         raise ValueError("Need an input VCF.")
     if not overwrite and out_zarr.exists():
         raise ValueError("Zarr already exists.")
-
-    cluster = LocalCluster(n_workers=n_threads // 2, threads_per_worker=1)
-    client = Client(cluster)
 
     vcf_to_zarr(vcf, out_zarr, chunk_length=variants_per_chunk)
 

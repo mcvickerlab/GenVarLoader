@@ -7,17 +7,17 @@ app = typer.Typer()
 
 
 @app.command()
-def write_zarr(
-    vcf: Path,
-    out_zarr: Path,
-    n_threads: int = typer.Option(1, min=1),
+def write_zarrs(
+    vcf_dir: Path,
+    zarr_dir: Path,
+    n_jobs: int = typer.Option(1, min=1),
     overwrite: bool = typer.Option(
         False, help="Whether to overwrite existing output files."
     ),
     filter: bool = typer.Option(
         False, help="Whether to filter the input VCF for SNPs before writing to Zarr."
     ),
-    out_vcf: Optional[Path] = typer.Option(
+    out_vcf_dir: Optional[Path] = typer.Option(
         None, help="Required if filtering. Output VCF."
     ),
     reference: Optional[Path] = typer.Option(None, help="Ignored if not filtering."),
@@ -28,17 +28,19 @@ def write_zarr(
 ):
     import logging
 
-    from genvarloader.writers.variants import filt, write_zarr
+    from genvarloader.writers.variants import filt_vcfs, write_zarrs
 
-    if filter:
+    if filter and out_vcf_dir is None:
+        raise ValueError("Need an output VCF directory if filtering.")
+    elif filter and out_vcf_dir is not None:
         logging.info("Filtering VCF.")
-        filt(vcf, out_vcf, reference, rename_contigs, n_threads, overwrite)
+        filt_vcfs(vcf_dir, out_vcf_dir, reference, rename_contigs, n_jobs, overwrite)
 
         logging.info("Converting VCF to Zarr.")
-        write_zarr(out_vcf, out_zarr, n_threads, overwrite)
+        write_zarrs(out_vcf_dir, zarr_dir, n_jobs, overwrite)
     else:
         logging.info("Converting VCF to Zarr.")
-        write_zarr(vcf, out_zarr, n_threads, overwrite)
+        write_zarrs(vcf_dir, zarr_dir, n_jobs, overwrite)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,10 @@ from genvarloader.types import ALPHABETS, SequenceEncoding
 Alphabet = Enum("Alphabet", dict(zip(ALPHABETS.keys(), ALPHABETS.keys())))
 
 
+app = typer.Typer()
+
+
+@app.command()
 def fasta_to_zarr_cli(
     fasta_path: Path,
     out_path: Path,
@@ -64,4 +68,4 @@ def fasta_to_zarr_cli(
 
 
 if __name__ == "__main__":
-    typer.run(fasta_to_zarr_cli)
+    app()
