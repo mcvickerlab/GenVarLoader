@@ -8,6 +8,7 @@ dependencies:
   - dask
   - einops
   - h5py
+  - joblib
   - natsort
   - nest-asyncio
   - numba
