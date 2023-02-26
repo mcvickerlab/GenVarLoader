@@ -81,7 +81,7 @@ def wdir():
 
 @fixture
 def var_loader():
-    return Variants(
+    return Variants.create(
         {
             "OCI-AML5": "/cellar/users/dlaub/repos/genome-loader/sbox/CDS-OJhAUD_cnn_filtered.zarr",
             "NCI-H660": "/cellar/users/dlaub/repos/genome-loader/sbox/CDS-oZPNvc_cnn_filtered.zarr",
@@ -93,7 +93,7 @@ def var_loader():
 def test_ss_var_loader(var_loader: Variants, sel_args: Dict, wdir: Path):
     res = var_loader.sel(**sel_args)
     vcf = VCF(str(wdir / "data" / "ccle_snp_wes.reduced.bcf"))
-    if res is None:
+    if res["variants"].size == 0:
         for query in sel_args["queries"].itertuples():
             region_string = (
                 f"{query.contig}:{query.start+1}-{query.start + sel_args['length']}"
@@ -108,9 +108,8 @@ def test_ss_var_loader(var_loader: Variants, sel_args: Dict, wdir: Path):
                 known_allele_count += 1
             assert known_allele_count == 0
     else:
-        variants, positions, offsets = res
-        gvl_vars = np.split(variants, offsets[1:])
-        gvl_poss = np.split(positions, offsets[1:])
+        gvl_vars = np.split(res["variants"], res["offsets"][1:])
+        gvl_poss = np.split(res["positions"], res["offsets"][1:])
 
         for query, gvl_var, gvl_pos in zip(
             sel_args["queries"].itertuples(), gvl_vars, gvl_poss

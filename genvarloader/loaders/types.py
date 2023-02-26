@@ -1,3 +1,4 @@
+import asyncio
 from asyncio import Future
 from dataclasses import dataclass
 from typing import Dict, Optional, Protocol, Tuple, TypeVar, Union
@@ -49,7 +50,8 @@ class Loader(Protocol):
 
 class AsyncLoader(Protocol):
     def sel(self, queries: Queries, length: int, **kwargs) -> LoaderOutput:
-        ...
+        out = asyncio.run(self.async_sel(queries, length, **kwargs))
+        return out
 
     async def async_sel(self, queries: Queries, length: int, **kwargs) -> LoaderOutput:
         ...

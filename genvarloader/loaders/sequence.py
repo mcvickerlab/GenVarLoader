@@ -190,7 +190,7 @@ class Sequence:
         # reverse complement negative stranded queries
         to_rev_comp = cast(NDArray[np.bool_], (queries.strand == "-").values)
         if encoding is SequenceEncoding.BYTES and to_rev_comp.any():
-            out[to_rev_comp] = rev_comp_byte(out[to_rev_comp], ALPHABETS["DNA"])
+            out[to_rev_comp] = rev_comp_byte(out[to_rev_comp], self.alphabet)
         elif encoding is SequenceEncoding.ONEHOT:
             out[to_rev_comp] = rev_comp_ohe(out[to_rev_comp], has_N=True)
 

@@ -214,7 +214,7 @@ class Variants:
             )
         # get variants, their positions, and how many are in each query
         queries = cast(Queries, queries.reset_index(drop=True))
-        groups = queries.groupby(["contig", "sample"], sort=False)
+        groups = queries.groupby(["sample", "contig"], sort=False)
 
         allele_ls = []
         position_ls = []
@@ -222,7 +222,7 @@ class Variants:
         count_ls = []
         count_idx_ls = []
         # # NOTE: groupby preserves within-group order
-        for (contig, sample), group in groups:
+        for (sample, contig), group in groups:
             c_idx = self.contig_to_contig_idx(contig, sample)
             s = group.start.to_numpy()
             e = s + length

@@ -1,14 +1,15 @@
 import asyncio
-from typing import Dict, Optional, Tuple, Union, cast
+from typing import Dict, Union, cast
 
 import numba
 import numpy as np
 from numpy.typing import NDArray
+from pyfaidx import Fasta, FastaVariant
 
 from genvarloader.loaders.sequence import Sequence
 from genvarloader.loaders.types import Queries
 from genvarloader.loaders.variants import Variants
-from genvarloader.types import ALPHABETS, SequenceEncoding
+from genvarloader.types import ALPHABETS, PathType, SequenceEncoding
 from genvarloader.utils import bytes_to_ohe, rev_comp_byte
 
 
@@ -133,6 +134,43 @@ class VarSequence:
         return seqs
 
 
-# TODO: implement for benchmarking
 class _PyfaidxVarSequence:
-    raise NotImplementedError
+    """Always returns byte arrays."""
+
+    def __init__(self, reference_path: PathType, vcfs: Dict[str, PathType]) -> None:
+        self.reference = str(reference_path)
+        self.vcfs = {k: str(v) for k, v in vcfs.items()}
+        with Fasta(self.reference) as ref:
+            self.contig_lengths: Dict[str, int] = {k: len(v) for k, v in ref}
+
+    def sel(self, queries: Queries, length: int, **kwargs) -> NDArray[np.bytes_]:
+        if "strand" not in queries:
+            queries["strand"] = "+"
+            queries["strand"] = queries.strand.astype("category")
+
+        queries["end"] = queries.start + length
+        # map negative starts to 0
+        queries["in_start"] = queries.start.clip(lower=0)
+        # map ends > contig length to contig length
+        queries["contig_length"] = queries.contig.replace(self.contig_lengths).astype(
+            int
+        )
+        queries["in_end"] = np.minimum(queries.end, queries.contig_length)
+        # get start, end index in output array
+        queries["out_start"] = queries.in_start - queries.start
+        queries["out_end"] = queries.in_end - queries.in_start
+
+        groups = queries.groupby("sample", sort=False)
+        out = np.full((len(queries), length), np.array(b"N"), dtype="|S1")  # type: ignore
+        for sample, group in groups:
+            with FastaVariant(self.reference, self.vcfs[sample]) as f:  # type: ignore
+                for query in group.itertuples(index=True):
+                    out[query[0], query.out_start : query.out_end] = f[query.contig][
+                        query.in_start : query.in_end
+                    ]
+
+        # reverse complement negative stranded queries
+        to_rev_comp = cast(NDArray[np.bool_], (queries.strand == "-").values)
+        out[to_rev_comp] = rev_comp_byte(out[to_rev_comp], ALPHABETS["DNA"])
+
+        return out
