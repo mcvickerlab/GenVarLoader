@@ -141,7 +141,7 @@ class _PyfaidxVarSequence:
         self.reference = str(reference_path)
         self.vcfs = {k: str(v) for k, v in vcfs.items()}
         with Fasta(self.reference) as ref:
-            self.contig_lengths: Dict[str, int] = {k: len(v) for k, v in ref}
+            self.contig_lengths: Dict[str, int] = {k: len(v) for k, v in ref.items()}
 
     def sel(self, queries: Queries, length: int, **kwargs) -> NDArray[np.bytes_]:
         if "strand" not in queries:
@@ -163,11 +163,12 @@ class _PyfaidxVarSequence:
         groups = queries.groupby("sample", sort=False)
         out = np.full((len(queries), length), np.array(b"N"), dtype="|S1")  # type: ignore
         for sample, group in groups:
-            with FastaVariant(self.reference, self.vcfs[sample]) as f:  # type: ignore
+            with FastaVariant(self.reference, self.vcfs[sample], het=True, hom=True) as f:  # type: ignore
                 for query in group.itertuples(index=True):
-                    out[query[0], query.out_start : query.out_end] = f[query.contig][
-                        query.in_start : query.in_end
-                    ]
+                    string_out = f[query.contig][query.in_start : query.in_end].seq
+                    out[query[0], query.out_start : query.out_end] = np.frombuffer(
+                        string_out, dtype="|S1"
+                    )
 
         # reverse complement negative stranded queries
         to_rev_comp = cast(NDArray[np.bool_], (queries.strand == "-").values)

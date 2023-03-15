@@ -33,13 +33,13 @@ def write_zarrs(
     if filter and out_vcf_dir is None:
         raise ValueError("Need an output VCF directory if filtering.")
     elif filter and out_vcf_dir is not None:
-        logging.info("Filtering VCF.")
+        logging.info("Filtering VCFs.")
         filt_vcfs(vcf_dir, out_vcf_dir, reference, rename_contigs, n_jobs, overwrite)
 
-        logging.info("Converting VCF to Zarr.")
+        logging.info("Converting VCFs to Zarr.")
         write_zarrs(out_vcf_dir, zarr_dir, n_jobs, overwrite)
     else:
-        logging.info("Converting VCF to Zarr.")
+        logging.info("Converting VCFs to Zarr.")
         write_zarrs(vcf_dir, zarr_dir, n_jobs, overwrite)
 
 

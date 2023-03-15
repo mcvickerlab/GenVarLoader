@@ -64,16 +64,17 @@ def filt(
     except CalledProcessError:
         raise RuntimeError("Filtering requires bcftools to be installed.")
 
-    cmd = (
-        f"""bcftools filter -i 'TYPE="snp" | TYPE="mnp"' -O b --threads {n_threads} {vcf} \\\n"""
-        f"""| bcftools filter -e 'ALT="*"' -O b --threads {n_threads} \\\n"""
-        f"""| bcftools norm -a -O b --threads {n_threads} \\\n"""
+    cmd = ""
+    if rename_contigs is not None:
+        cmd += f"| bcftools annotate --rename-chr {rename_contigs} -O u --threads {n_threads} \\\n"
+    if reference is not None:
+        cmd += f"| bcftools norm -f {reference} -O u --threads {n_threads} \\\n"
+    cmd += (
+        f"""bcftools filter -i 'TYPE="snp" | TYPE="mnp"' -O u --threads {n_threads} {vcf} \\\n"""
+        f"""| bcftools filter -e 'ALT="*"' -O u --threads {n_threads} \\\n"""
+        f"""| bcftools norm -a -O u --threads {n_threads} \\\n"""
         f"""| bcftools norm -d none -O b --threads {n_threads} \\\n"""
     )
-    if rename_contigs is not None:
-        cmd += f"| bcftools annotate --rename-chr {rename_contigs} -O b --threads {n_threads} \\\n"
-    if reference is not None:
-        cmd += f"| bcftools norm -f {reference} -O b --threads {n_threads} \\\n"
     cmd += f">{'|' if overwrite else ''} {out_vcf}"
 
     status = run_shell(cmd)

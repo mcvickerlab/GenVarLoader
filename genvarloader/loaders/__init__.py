@@ -28,7 +28,7 @@ class GenVarLoader:
     def __init__(
         self,
         loaders: Dict[str, Union[Loader, AsyncLoader]],
-        transforms: Optional[Dict[str, Callable[[LoaderOutput], LoaderOutput]]],
+        transforms: Optional[Dict[str, Callable[[LoaderOutput], LoaderOutput]]] = None,
     ) -> None:
         """Wrap multiple loaders to call them all at once with queries and bundle their outputs into a dictionary.
 

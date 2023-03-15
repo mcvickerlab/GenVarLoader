@@ -216,11 +216,11 @@ class Variants:
         queries = cast(Queries, queries.reset_index(drop=True))
         groups = queries.groupby(["sample", "contig"], sort=False)
 
-        allele_ls = []
-        position_ls = []
-        idx_ls = []
-        count_ls = []
-        count_idx_ls = []
+        allele_ls: List[Future[NDArray]] = []
+        position_ls: List[NDArray[np.int32]] = []
+        idx_ls: List[NDArray[np.integer]] = []
+        count_ls: List[NDArray[np.integer]] = []
+        count_idx_ls: List[NDArray[np.integer]] = []
         # # NOTE: groupby preserves within-group order
         for (sample, contig), group in groups:
             c_idx = self.contig_to_contig_idx(contig, sample)
