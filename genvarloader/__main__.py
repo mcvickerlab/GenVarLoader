@@ -7,7 +7,7 @@ import typer
 
 from genvarloader.cli import LoggingLevel, coverage
 from genvarloader.cli.sequence import fasta_to_zarr_cli
-from genvarloader.cli.variants import write_zarrs
+from genvarloader.cli.variants import write_vcf_to_zarr
 
 app = typer.Typer(
     name="GenVarLoader", help="""Write files to "GenVarLoader-ready" data structures."""
@@ -25,7 +25,7 @@ def main(logging_level: LoggingLevel = typer.Option("INFO")):
 
 
 fasta_to_zarr_cli = app.command("fasta")(fasta_to_zarr_cli)
-write_zarr = app.command("vcf")(write_zarrs)
+write_zarr = app.command("vcf")(write_vcf_to_zarr)
 app.add_typer(coverage.app, name="coverage")
 
 if __name__ == "__main__":

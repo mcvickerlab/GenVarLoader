@@ -58,10 +58,10 @@ class AsyncLoader(Protocol):
 
 
 # non-user facing, just for type checking TensorStore
-_T = TypeVar("_T", bound=np.generic)
+_DTYPE = TypeVar("_DTYPE", bound=np.generic)
 
 
-class _TStore(Protocol[_T]):
+class _TStore(Protocol[_DTYPE]):
     def __getitem__(self, idx) -> Self:
         ...
 
@@ -74,13 +74,13 @@ class _TStore(Protocol[_T]):
         ...
 
     @property
-    def dtype(self) -> _T:
+    def dtype(self) -> _DTYPE:
         ...
 
     def astype(self, dtype) -> Self:
         ...
 
-    def read(self) -> Future[NDArray[_T]]:
+    def read(self) -> Future[NDArray[_DTYPE]]:
         ...
 
 

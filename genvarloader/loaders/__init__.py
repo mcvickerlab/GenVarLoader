@@ -1,5 +1,3 @@
-__all__ = ["Coverage", "Sequence", "Variants", "VarSequence", "read_queries"]
-
 import asyncio
 from typing import Any, Callable, Dict, List, Optional, Union, cast
 
@@ -8,9 +6,9 @@ import zarr
 from numpy.typing import NDArray
 from typing_extensions import assert_never
 
-from genvarloader.loaders.coverage import Coverage
+from genvarloader.loaders.coverage import Coverage, bin_coverage
 from genvarloader.loaders.sequence import Sequence
-from genvarloader.loaders.types import AsyncLoader, Loader, LoaderOutput, Queries
+from genvarloader.loaders.types import AsyncLoader, Loader, Queries
 from genvarloader.loaders.utils import read_queries
 from genvarloader.loaders.variants import Variants
 from genvarloader.loaders.varseq import VarSequence
@@ -24,11 +22,21 @@ else:
     _TORCH_AVAILABLE = True
 
 
+__all__ = [
+    "Coverage",
+    "Sequence",
+    "Variants",
+    "VarSequence",
+    "read_queries",
+    "bin_coverage",
+]
+
+
 class GenVarLoader:
     def __init__(
         self,
         loaders: Dict[str, Union[Loader, AsyncLoader]],
-        transforms: Optional[Dict[str, Callable[[LoaderOutput], LoaderOutput]]] = None,
+        transforms: Optional[Dict[str, Callable[[NDArray], NDArray]]] = None,
     ) -> None:
         """Wrap multiple loaders to call them all at once with queries and bundle their outputs into a dictionary.
 
@@ -106,7 +114,6 @@ class GenVarLoader:
         out: Dict[str, NDArray] = {}
         for name, loader in self.sync_loaders.items():
             val = loader.sel(queries, length, **kwargs)
-            val = val if name not in self.transforms else self.transforms[name](val)
             if isinstance(val, np.ndarray):
                 out[name] = val
             elif isinstance(val, dict):
@@ -122,15 +129,19 @@ class GenVarLoader:
             ]
         )
 
-        # fill output dictionary with async output
+        # add async output to output dictionary
         for name, val in zip(self.async_loaders.keys(), out_ls):
-            val = val if name not in self.transforms else self.transforms[name](val)
             if isinstance(val, np.ndarray):
                 out[name] = val
             elif isinstance(val, dict):
                 out.update({f"{name}_{k}": v for k, v in val.items()})
             else:
                 assert_never(val)
+
+        # apply transforms to output
+        for name, val in out.items():
+            if name in self.transforms:
+                out[name] = self.transforms[name](val)
 
         return out
 

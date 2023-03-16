@@ -288,9 +288,9 @@ class Variants:
                 np.array([], np.int32),
             )
         c_pos = cast(NDArray[np.int32], c_pos[:])
-        c_start = self.datasets[sample].contig_offsets[contig_idx].read().result()
         # NOTE: VCF is 1-indexed and queries are 0-indexed, adjust
         c_pos -= 1
+        c_start = self.datasets[sample].contig_offsets[contig_idx].read().result()
         s_e_idx = c_start + np.searchsorted(c_pos, np.concatenate([starts, ends]))
         start_idxs, end_idxs = np.split(s_e_idx, (len(starts),))
         cnts = end_idxs - start_idxs

@@ -16,9 +16,9 @@ app = typer.Typer()
 
 @app.command()
 def fasta_to_zarr_cli(
-    fasta_path: Path,
-    out_path: Path,
-    alphabet: Alphabet,  # type: ignore | dynamic Enum
+    fasta_path: Path = typer.Argument(..., resolve_path=True),
+    out_path: Path = typer.Argument(..., resolve_path=True),
+    alphabet: Alphabet = typer.Argument(...),  # type: ignore | dynamic Enum
     encodings: str = typer.Argument(
         ...,
         help=dedent(

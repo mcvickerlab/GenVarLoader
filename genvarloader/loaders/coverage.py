@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from typing import Dict, Union, cast
+from typing import Dict, List, TypeVar, Union, cast
 
 import numpy as np
 import zarr
@@ -29,17 +29,30 @@ class Coverage:
 
         root.visit(add_array_to_tstores)
 
-        # Expect shape to be (length) or (length alphabet) depending on whether
+        # Expect shape to be (samples length) or (samples length alphabet) depending on whether
         # specific nucleotides are counted. We get nucleotide counts when using
         # `genvarloader coverage depth-only`
         # aka `pysam.bam.AlignmentFile::count_coverage`
         # which uses an alphabet of 'ACGT'.
         for name, arr in root.arrays():
-            if isinstance(arr, zarr.Array) and len(arr.shape) == 2:
-                self.acgt_counts = True
+            if isinstance(arr, zarr.Array) and len(arr.shape) == 3:
+                self.ohe_counts = True
             else:
-                self.acgt_counts = False
+                self.ohe_counts = False
             break
+
+        self.samples = np.array(root.attrs["samples"])
+        self._argsort_samples = self.samples.argsort()
+        self._sorted_samples = self.samples[self._argsort_samples]
+        self.feature = root.attrs["feature"]
+        self.attrs = {
+            k: v
+            for k, v in root.attrs.items()
+            if k not in ["samples", "features", "contig_lengths"]
+        }
+
+    def samples_to_sample_idx(self, samples: NDArray) -> NDArray[np.intp]:
+        return self._argsort_samples[np.searchsorted(self._sorted_samples, samples)]
 
     def sel(self, queries: Queries, length: int, **kwargs) -> NDArray[np.uint8]:
         out = asyncio.run(self.async_sel(queries, length, **kwargs))
@@ -62,13 +75,17 @@ class Coverage:
         # get start, end index in output array
         queries["out_start"] = queries.in_start - queries.start
         queries["out_end"] = queries.in_end - queries.end
+        queries["sample_idx"] = self.samples_to_sample_idx(queries["sample"].values)  # type: ignore
 
         def get_read(query):
             contig = query.contig
-            return self.tstores[contig][query.in_start : query.in_end].read()
+            sample_idx = query.sample_idx
+            return self.tstores[contig][
+                sample_idx, query.in_start : query.in_end
+            ].read()
 
         # (q l [a])
-        reads = await asyncio.gather(
+        reads: List[NDArray] = await asyncio.gather(
             *[get_read(query) for query in queries.itertuples()]
         )
 
@@ -80,10 +97,38 @@ class Coverage:
 
         # reverse complement negative stranded queries
         to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").values)
-        if self.acgt_counts:
+        if self.ohe_counts:
             axes = (-2, -1)  # (l a)
         else:
             axes = -1  # (l)
         out[to_rev_comp] = np.flip(out[to_rev_comp], axis=axes)
 
         return out
+
+
+DTYPE = TypeVar("DTYPE", bound=np.generic)
+
+
+def bin_coverage(coverage_array: NDArray[DTYPE], bin_width: int) -> NDArray[DTYPE]:
+    """Bin coverage by summing over non-overlapping windows.
+
+    Parameters
+    ----------
+    coverage_array : ndarray
+    bin_width : int
+        Width of the windows to sum over. Must be an even divisor of the length
+        of the coverage array. If not, raises an error. The length dimension is
+        assumed to be the second dimension.
+
+    Returns
+    -------
+    binned_coverage : ndarray
+    """
+    # coverage array (sample length [alphabet])
+    length = coverage_array.shape[1]
+    if length % bin_width != 0:
+        raise ValueError("Bin width must evenly divide length.")
+    binned_coverage = np.add.reduceat(
+        coverage_array, np.arange(0, length, bin_width), axis=1
+    )
+    return binned_coverage

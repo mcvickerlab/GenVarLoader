@@ -1,4 +1,5 @@
 import re
+from itertools import chain
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, cast
@@ -14,35 +15,34 @@ from sgkit.io.vcf import vcf_to_zarr
 
 from genvarloader.utils import run_shell
 
+# def filt_vcfs(
+#     vcf_dir: Path,
+#     out_dir: Path,
+#     reference: Optional[Path],
+#     rename_contigs: Optional[Path],
+#     n_jobs: int,
+#     overwrite: bool = False,
+# ):
+#     if not vcf_dir.is_dir():
+#         raise ValueError
+#     if not out_dir.is_dir():
+#         raise ValueError
 
-def filt_vcfs(
-    vcf_dir: Path,
-    out_dir: Path,
-    reference: Optional[Path],
-    rename_contigs: Optional[Path],
-    n_jobs: int,
-    overwrite: bool = False,
-):
-    if not vcf_dir.is_dir():
-        raise ValueError
-    if not out_dir.is_dir():
-        raise ValueError
+#     vcfs: List[Path] = (
+#         list(vcf_dir.glob("*.vcf"))
+#         + list(vcf_dir.glob("*.vcf.gz"))
+#         + list(vcf_dir.glob("*.bcf"))
+#     )
+#     vcf_name = re.compile(r"(.*)\.(?:vcf|vcf\.gz|bcf)")
+#     vcf_names: List[str] = [vcf_name.match(vcf.name).group(1) for vcf in vcfs]  # type: ignore
+#     out_vcfs = [out_dir / f"{name}.bcf" for name in vcf_names]
 
-    vcfs: List[Path] = (
-        list(vcf_dir.glob("*.vcf"))
-        + list(vcf_dir.glob("*.vcf.gz"))
-        + list(vcf_dir.glob("*.bcf"))
-    )
-    vcf_name = re.compile(r"(.*)\.(?:vcf|vcf\.gz|bcf)")
-    vcf_names: List[str] = [vcf_name.match(vcf.name).group(1) for vcf in vcfs]  # type: ignore
-    out_vcfs = [out_dir / f"{name}.bcf" for name in vcf_names]
-
-    with joblib.Parallel(n_jobs, prefer="threads") as exe:
-        tasks = [
-            joblib.delayed(filt(vcf, out_vcf, reference, rename_contigs, overwrite))
-            for vcf, out_vcf in zip(vcfs, out_vcfs)
-        ]
-        _ = exe(tasks)
+#     with joblib.Parallel(n_jobs, prefer="threads") as exe:
+#         tasks = [
+#             joblib.delayed(filt(vcf, out_vcf, reference, rename_contigs, overwrite))
+#             for vcf, out_vcf in zip(vcfs, out_vcfs)
+#         ]
+#         _ = exe(tasks)
 
 
 def filt(
@@ -80,35 +80,36 @@ def filt(
     status = run_shell(cmd)
 
 
-def write_zarrs(
-    vcf_dir: Path,
-    zarr_dir: Path,
-    n_jobs: int,
-    overwrite: bool = False,
-    variants_per_chunk: int = int(1e4),
-):
-    if not vcf_dir.is_dir():
-        raise ValueError
-    if not zarr_dir.is_dir():
-        raise ValueError
+# When writing WGS this hangs due to unmanaged memory issues.
+# def write_zarrs(
+#     vcf_dir: Path,
+#     zarr_dir: Path,
+#     n_jobs: int,
+#     overwrite: bool = False,
+#     variants_per_chunk: int = int(1e4),
+# ):
+#     if not vcf_dir.is_dir():
+#         raise ValueError('Path to VCF directory is a file or does not exist.')
+#     if not zarr_dir.is_dir():
+#         raise ValueError('Path to Zarr directory is a file or does not exist.')
 
-    cluster = LocalCluster(n_workers=n_jobs // 2, threads_per_worker=1)
-    client = Client(cluster)
+#     cluster = LocalCluster(n_workers=n_jobs // 2, threads_per_worker=1)
+#     client = Client(cluster)
 
-    vcfs: List[Path] = (
-        list(vcf_dir.glob("*.vcf"))
-        + list(vcf_dir.glob("*.vcf.gz"))
-        + list(vcf_dir.glob("*.bcf"))
-    )
-    vcf_name = re.compile(r"(.*)\.(?:vcf|vcf\.gz|bcf)")
-    vcf_names: List[str] = [vcf_name.match(vcf.name).group(1) for vcf in vcfs]  # type: ignore
-    zarrs = [zarr_dir / f"{name}.zarr" for name in vcf_names]
+#     vcfs: List[Path] = list(chain(
+#             vcf_dir.glob("*.vcf"),
+#             vcf_dir.glob("*.vcf.gz"),
+#             vcf_dir.glob("*.bcf")
+#         ))
+#     vcf_name = re.compile(r"(.*)\.(?:vcf|vcf\.gz|bcf)")
+#     vcf_names: List[str] = [vcf_name.match(vcf.name).group(1) for vcf in vcfs]  # type: ignore
+#     zarrs = [zarr_dir / f"{name}.zarr" for name in vcf_names]
 
-    tasks = [
-        delayed(write_zarr)(vcf, zarr, overwrite, variants_per_chunk)
-        for vcf, zarr in zip(vcfs, zarrs)
-    ]
-    dask.compute(tasks)  # type: ignore
+#     tasks = [
+#         delayed(write_zarr)(vcf, zarr, overwrite, variants_per_chunk)
+#         for vcf, zarr in zip(vcfs, zarrs)
+#     ]
+#     dask.compute(tasks)  # type: ignore
 
 
 def write_zarr(
@@ -130,16 +131,28 @@ def write_zarr(
 
     # add contig offsets to reduce initialization time
     v_contig = cast(NDArray, z["variant_contig"][:])
-    contig_offsets = np.searchsorted(v_contig, np.arange(len(z.attrs["contigs"])))
+
+    # NOTE: this will break if the contigs in z.attrs['contigs'] that have no variants
+    # are not exclusively after contigs that have variants.
+    # e.g. contigs = ['1', 'CHR_X_FJ', '2'] and the alt contig 'CHR_X_FJ' has no variants
+    # This is because when we go to read the data in genvarloader/loaders/variants.py,
+    # the contig_idx will be wrong: contig_offsets[2] would not exist.
+    # However, this significantly reduces the on-disk size (e.g. 2x less for WES)
+    _, contig_offsets = np.unique(v_contig, return_index=True)
     z.create_dataset(
-        "contig_offsets", data=contig_offsets, compressor=None, chunks=1, overwrite=True
+        "contig_offsets",
+        data=contig_offsets,
+        compressor=False,
+        chunks=1,
+        overwrite=overwrite,
     )
 
     gvl_groups = {
         "variant_allele",
         "variant_contig",
         "variant_position",
-        "call_genotype" "contig_offsets",
+        "call_genotype",
+        "contig_offsets",
     }
 
     def edit(name, val):
@@ -152,7 +165,7 @@ def write_zarr(
                 chunks=val.chunks,
                 compressor=val.compressor,
                 filters=None,
-                overwrite=True,
+                overwrite=overwrite,
             )
         elif name == "call_genotype":
             chunks = [c for c, d in zip(val.chunks, val.shape) if d != 1]
@@ -162,12 +175,12 @@ def write_zarr(
                 chunks=chunks,
                 compressor=val.compressor,
                 filters=None,
-                overwrite=True,
+                overwrite=overwrite,
             )
         elif name == "variant_position":
             positions = val[:]
             c_pos = np.split(positions, contig_offsets[1:])
-            g = z.create_group(name, overwrite=True)
+            g = z.create_group(name, overwrite=overwrite)
             for i, pos in enumerate(c_pos):
                 if len(pos) > 0:
                     g.create_dataset(
@@ -176,7 +189,7 @@ def write_zarr(
                         chunks=False,
                         compressor=val.compressor,
                         filters=None,
-                        overwrite=True,
+                        overwrite=overwrite,
                     )
         elif name in gvl_groups and val.filters is not None:
             z.create_dataset(
@@ -185,7 +198,11 @@ def write_zarr(
                 chunks=val.chunks,
                 compressor=val.compressor,
                 filters=None,
-                overwrite=True,
+                overwrite=overwrite,
             )
 
     z.visititems(edit)
+
+    to_del = [g for g in z.keys() if g not in gvl_groups]
+    for g in to_del:
+        del z[g]

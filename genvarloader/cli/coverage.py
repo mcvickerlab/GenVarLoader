@@ -37,9 +37,10 @@ def read_in_bams(in_bams: Path):
 def depth_only(
     in_bams: Path = typer.Argument(
         ...,
+        resolve_path=True,
         help="A CSV/TSV where the first column is the sample name and the second column is the path to that sample's BAM.",
     ),
-    out_zarr: Path = typer.Argument(...),
+    out_zarr: Path = typer.Argument(..., resolve_path=True),
     contigs: Optional[List[str]] = typer.Argument(
         None, help="If None, write all contigs."
     ),
@@ -62,9 +63,10 @@ def depth_only(
 def tn5(
     in_bams: Path = typer.Argument(
         ...,
+        resolve_path=True,
         help="A CSV/TSV where the first column is the sample name and the second column is the path to that sample's BAM.",
     ),
-    out_zarr: Path = typer.Argument(...),
+    out_zarr: Path = typer.Argument(..., resolve_path=True),
     contigs: Optional[List[str]] = typer.Argument(
         None, help="Contigs to write, defaults to all contigs."
     ),

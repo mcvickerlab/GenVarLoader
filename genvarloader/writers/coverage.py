@@ -73,7 +73,7 @@ def init_zarr(
 
 
 def coverage(
-    idx: int, bam_path: Path, out_zarr: zarr.Group, contigs: Optional[List[str]]
+    sample_idx: int, bam_path: Path, out_zarr: zarr.Group, contigs: Optional[List[str]]
 ) -> None:
     with AlignmentFile(str(bam_path), "r") as bam:
         if not contigs:
@@ -89,7 +89,7 @@ def coverage(
             cover_array[cover_array > 255] = 255
             cover_array = cover_array.astype(np.uint8)
 
-            out_zarr[contig][idx] = cover_array
+            out_zarr[contig][sample_idx] = cover_array
 
             del cover_array
             gc.collect()
@@ -102,18 +102,18 @@ def write_coverages(
     n_jobs=None,
     overwrite=False,
 ):
-    extra_attrs = {}
+    extra_attrs = {"feature": "depth"}
     root, sample_idx, samples_to_write = init_zarr(
         in_bams, out_zarr, contigs, overwrite, extra_attrs
     )
 
-    with joblib.Parallel(n_jobs, prefer="threads") as exe:
-        writer = joblib.delayed(coverage)
-        tasks = [
-            writer(idx, bam_path, out_zarr=root, contigs=contigs)
-            for idx, bam_path in zip(sample_idx, samples_to_write)
-        ]
-        exe(tasks)
+    writer = joblib.delayed(coverage)
+    tasks = [
+        writer(s_idx, bam_path, out_zarr=root, contigs=contigs)
+        for s_idx, bam_path in zip(sample_idx, samples_to_write)
+    ]
+
+    joblib.Parallel(n_jobs, prefer="threads")(tasks)
 
 
 def tn5_coverage(
@@ -200,23 +200,27 @@ def write_tn5_coverages(
     count_method: Union[Tn5CountMethod, str] = Tn5CountMethod.CUTSITE,
 ):
     count_method = Tn5CountMethod(count_method)
-    extra_attrs = {"offset_tn5": offset_tn5, "count_method": count_method}
+    extra_attrs = {
+        "feature": "tn5",
+        "offset_tn5": offset_tn5,
+        "count_method": count_method.value,
+    }
 
     root, sample_idx, samples_to_write = init_zarr(
         in_bams, out_zarr, contigs, overwrite, extra_attrs
     )
 
-    with joblib.Parallel(n_jobs, prefer="threads") as exe:
-        writer = joblib.delayed(tn5_coverage)
-        tasks = [
-            writer(
-                idx,
-                bam_path,
-                out_zarr=root,
-                contigs=contigs,
-                offset_tn5=offset_tn5,
-                count_method=count_method,
-            )
-            for idx, bam_path in zip(sample_idx, samples_to_write)
-        ]
-        exe(tasks)
+    writer = joblib.delayed(tn5_coverage)
+    tasks = [
+        writer(
+            s_idx,
+            bam_path,
+            out_zarr=root,
+            contigs=contigs,
+            offset_tn5=offset_tn5,
+            count_method=count_method,
+        )
+        for s_idx, bam_path in zip(sample_idx, samples_to_write)
+    ]
+
+    joblib.Parallel(n_jobs, prefer="threads")(tasks)
