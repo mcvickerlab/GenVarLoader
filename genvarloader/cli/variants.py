@@ -57,10 +57,10 @@ def write_vcf_to_zarr(
         filt(vcf, out_vcf, reference, rename_contigs, n_jobs, overwrite)
 
         logging.info("Converting VCFs to Zarr.")
-        write_zarr(out_vcf, zarr, overwrite)
+        write_zarr(out_vcf, zarr, n_jobs, overwrite)
     else:
         logging.info("Converting VCFs to Zarr.")
-        write_zarr(vcf, zarr, overwrite)
+        write_zarr(vcf, zarr, n_jobs, overwrite)
 
 
 if __name__ == "__main__":

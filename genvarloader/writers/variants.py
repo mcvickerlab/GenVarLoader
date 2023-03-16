@@ -115,6 +115,7 @@ def filt(
 def write_zarr(
     vcf: Path,
     out_zarr: Path,
+    n_jobs: int,
     overwrite: bool = False,
     variants_per_chunk: int = int(1e4),
 ) -> None:
@@ -124,6 +125,9 @@ def write_zarr(
         raise ValueError("Need an input VCF.")
     if not overwrite and out_zarr.exists():
         raise ValueError("Zarr already exists.")
+
+    cluster = LocalCluster(n_workers=n_jobs // 2, threads_per_worker=1)
+    client = Client(cluster)
 
     vcf_to_zarr(vcf, out_zarr, chunk_length=variants_per_chunk)
 
