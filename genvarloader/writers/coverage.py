@@ -1,31 +1,74 @@
 import gc
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import joblib
 import numpy as np
 import zarr
+from numpy.typing import NDArray
 from pysam import AlignmentFile
 from typing_extensions import assert_never
 
 from genvarloader.types import Tn5CountMethod
 
 
-def init_zarr(
+def _init_zarr(
     in_bams: Dict[str, Path],
     out_zarr: Path,
-    contigs: Optional[List[str]],
-    overwrite: bool,
-    extra_attrs: Dict[str, Any],
-):
+    feature: Optional[str] = None,
+    contigs: Optional[List[str]] = None,
+    overwrite: bool = False,
+    extra_attrs: Optional[Dict[str, Any]] = None,
+) -> Tuple[zarr.Group, NDArray, List[Path]]:
+    """Initialize a coverage zarr file.
+
+    Parameters
+    ----------
+    in_bams : Dict[str, Path]
+        A dictionary mapping sample names to their BAM files.
+    out_zarr : Path
+        Path to coverage Zarr.
+    feature : str
+        What feature should be written if writing a new coverage Zarr.
+    contigs : Optional[List[str]], optional
+        Which contigs to write, by default None
+    overwrite : bool, optional
+        Whether to overwrite an existing coverage Zarr, by default False
+    extra_attrs : Optional[Dict[str, Any]], optional
+
+    Returns
+    -------
+    root : zarr.Group
+        Root of the zarr store.
+    sample_idx : ndarray
+        Indices of the samples to write. May be non-trivial if overwriting samples.
+    samples_to_write : list[Path]
+        Paths for samples to write, in the order they are appended to the Zarr store.
+    """
     store_existed = out_zarr.exists()
     root = zarr.open_group(out_zarr)
+
+    # add feature attribute
+    if store_existed:
+        feature = root.attrs["feature"]
+    elif feature is None:
+        raise ValueError("Need to specify feature to initialize a Zarr from scratch.")
+    else:
+        root.attrs["feature"] = feature
+
+    # add extra attributes
+    if extra_attrs is None:
+        extra_attrs = {}
     root.attrs.update(**extra_attrs)
 
-    samples = list(in_bams.keys())
-    existing_samples = cast(List[str], root.attrs.get("samples", []))
-    old_samples = [s for s in samples if s in set(existing_samples)]
-    new_samples = [s for s in samples if s not in set(existing_samples)]
+    # figure out what samples we're adding
+    samples = np.array(list(in_bams.keys()))
+    existing_samples = np.array(root.attrs.get("samples", []))
+    if len(np.unique(samples)) != len(samples):
+        raise ValueError("Got duplicate samples")
+    in_existing = np.isin(samples, existing_samples, assume_unique=True)
+    old_samples = samples[in_existing]
+    new_samples = samples[~in_existing]
 
     if len(new_samples) == 0 and not overwrite:
         return root, np.array([], "u1"), []
@@ -34,10 +77,11 @@ def init_zarr(
             "Got samples that are already in the output zarr:", old_samples
         )
     else:
-        total_samples = existing_samples + new_samples
-        root.attrs["samples"] = total_samples
+        total_samples = np.concatenate([existing_samples, new_samples])
+        root.attrs["samples"] = total_samples.tolist()
 
     if not store_existed:
+        # initialize Zarr for the first time, get contig lengths and create arrays
         with AlignmentFile(str(in_bams[new_samples[0]])) as bam:
             if contigs is None:
                 contigs = list(bam.references)
@@ -48,11 +92,15 @@ def init_zarr(
             root.require_dataset(
                 c,
                 shape=(len(new_samples), c_len),
+                dtype="u2",
                 chunks=(1, int(1e6)),
                 compressor=zarr.Blosc(cname="zstd", clevel=7, shuffle=-1),
             )
+        root.require_dataset(
+            "read_count", shape=len(new_samples), dtype="u8", chunks=1, compressor=None
+        )
     elif len(new_samples) > 0:
-
+        # already existed and we need to add new samples
         def resize_to_fit_new_samples(arr: Union[zarr.Group, zarr.Array]):
             if isinstance(arr, zarr.Array):
                 new_shape = (len(total_samples), *arr.shape[1:])
@@ -65,11 +113,11 @@ def init_zarr(
     else:
         samples_to_write = {s: p for s, p in in_bams.items() if s in new_samples}
 
-    *_, sample_idx = np.intersect1d(
-        list(samples_to_write.keys()), total_samples, return_indices=True
+    samples_to_write_idx = np.flatnonzero(
+        np.isin(total_samples, list(samples_to_write.keys()), assume_unique=True)
     )
 
-    return root, sample_idx, list(samples_to_write.values())
+    return root, samples_to_write_idx, list(samples_to_write.values())
 
 
 def coverage(
@@ -86,25 +134,25 @@ def coverage(
                 )
 
             cover_array = np.array(bam.count_coverage(contig), dtype=np.uint16)
-            cover_array[cover_array > 255] = 255
-            cover_array = cover_array.astype(np.uint8)
 
             out_zarr[contig][sample_idx] = cover_array
 
             del cover_array
             gc.collect()
 
+        out_zarr["read_count"][sample_idx] = bam.count(read_callback="all")
+
 
 def write_coverages(
     in_bams: Dict[str, Path],
     out_zarr: Path,
     contigs: Optional[List[str]] = None,
-    n_jobs=None,
     overwrite=False,
+    n_jobs=None,
 ):
-    extra_attrs = {"feature": "depth"}
-    root, sample_idx, samples_to_write = init_zarr(
-        in_bams, out_zarr, contigs, overwrite, extra_attrs
+    feature = "depth"
+    root, sample_idx, samples_to_write = _init_zarr(
+        in_bams, out_zarr, feature, contigs, overwrite
     )
 
     writer = joblib.delayed(coverage)
@@ -117,7 +165,7 @@ def write_coverages(
 
 
 def tn5_coverage(
-    idx: int,
+    sample_idx: int,
     bam_path: Path,
     out_zarr: zarr.Group,
     contigs: Optional[List[str]],
@@ -180,14 +228,12 @@ def tn5_coverage(
                 else:
                     assert_never(count_method)
 
-            # Find int8 overflows
-            out_array[out_array > 255] = 255
-            out_array = out_array.astype(np.uint8)
-
-            out_zarr[contig][idx] = out_array
+            out_zarr[contig][sample_idx] = out_array
 
             del out_array
             gc.collect()
+
+        out_zarr["read_count"][sample_idx] = bam.count(read_callback="all")
 
 
 def write_tn5_coverages(
@@ -199,15 +245,15 @@ def write_tn5_coverages(
     offset_tn5=True,
     count_method: Union[Tn5CountMethod, str] = Tn5CountMethod.CUTSITE,
 ):
+    feature = "tn5"
     count_method = Tn5CountMethod(count_method)
     extra_attrs = {
-        "feature": "tn5",
         "offset_tn5": offset_tn5,
         "count_method": count_method.value,
     }
 
-    root, sample_idx, samples_to_write = init_zarr(
-        in_bams, out_zarr, contigs, overwrite, extra_attrs
+    root, sample_idx, samples_to_write = _init_zarr(
+        in_bams, out_zarr, feature, contigs, overwrite, extra_attrs
     )
 
     writer = joblib.delayed(tn5_coverage)

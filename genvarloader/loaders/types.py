@@ -1,4 +1,5 @@
 import asyncio
+import enum
 from asyncio import Future
 from dataclasses import dataclass
 from typing import Dict, Optional, Protocol, Tuple, TypeVar, Union
