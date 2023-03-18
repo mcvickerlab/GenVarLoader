@@ -197,8 +197,8 @@ class Sequence:
         # map negative starts to 0
         queries["in_start"] = queries.start.clip(lower=0)
         # map ends > contig length to contig length
-        queries["contig_length"] = queries.contig.replace(self.contig_lengths).astype(
-            int
+        queries["contig_length"] = queries.contig.replace(self.contig_lengths).to_numpy(
+            np.int64
         )
         queries["in_end"] = np.minimum(queries.end, queries.contig_length)
         # get start, end index in output array

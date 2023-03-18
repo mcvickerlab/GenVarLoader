@@ -75,19 +75,17 @@ def read_narrowpeak_as_queries(
     narrowpeak_path: PathType,
     length: int,
     samples: Optional[List[str]] = None,
-    ploid_idx: Optional[List[int]] = None,
 ) -> Queries:
-    """Convert a narrow peak file to a queries file, optionally adding samples and ploid indices.
+    """Convert a narrow peak file to a queries file, optionally adding samples.
+
+    NOTE: unmarked strands "." will be converted to be positive strands "+"
 
     Parameters
     ----------
     narrowpeak_path : str or Path
     length : int
         Length of desired queries.
-    qvalue_cutoff: float, optional
-        Ignore any peaks with a q-value greater than this cutoff.
     samples : list[str], optional
-    ploid_idx : list[int], optional
 
     Returns
     -------
@@ -96,14 +94,13 @@ def read_narrowpeak_as_queries(
     queries = read_narrowpeak(narrowpeak_path)
     # peak loc = start + peak offset
     # query start = peak loc - ceil(length / 2)
-    queries["start"] = queries["start"] + queries["peak"] - np.ceil(length / 2)
-    queries = queries[["contig", "start", "strand"]]
+    queries["start"] = (
+        queries["start"] + queries["peak"] - np.ceil(length / 2)
+    ).astype(int)
+    queries = queries[["contig", "start", "strand"]].replace({"strand": {".": "+"}})
     if samples is not None:
         sample_df = pd.DataFrame({"sample": samples})
         queries = queries.merge(sample_df, how="cross")
-    if ploid_idx is not None:
-        ploid_idx_df = pd.DataFrame({"ploid_idx": ploid_idx})
-        queries = queries.merge(ploid_idx_df, how="cross")
     queries = QueriesSchema.validate(queries)
     queries = cast(Queries, queries)
     return queries

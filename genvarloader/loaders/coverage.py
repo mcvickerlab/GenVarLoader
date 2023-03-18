@@ -14,7 +14,9 @@ from genvarloader.types import PathType
 _NORMALIZATION_METHODS = ["cpm"]
 
 
-def cpm_normalization(counts: NDArray, total_counts: NDArray) -> NDArray:
+def cpm_normalization(
+    counts: NDArray[np.uint16], total_counts: NDArray[np.uint64]
+) -> NDArray[np.float64]:
     # (samples length [alphabet]) / (samples 1 [1])
     n_new_axes = len(counts.shape) - 1
     norm_counts = (
@@ -41,7 +43,7 @@ class Coverage:
             if isinstance(val, zarr.Array):
                 self.tstores[p] = ts_readonly_zarr(self.path / p).result()
 
-        root.visit(add_array_to_tstores)
+        root.visititems(add_array_to_tstores)
 
         # Expect shape to be (samples length [alphabet]). We get nucleotide counts when using
         # `genvarloader coverage depth-only` aka `pysam.bam.AlignmentFile::count_coverage`
@@ -69,7 +71,7 @@ class Coverage:
 
     def sel(
         self, queries: Queries, length: int, **kwargs
-    ) -> NDArray[Union[np.uint8, np.float64]]:
+    ) -> NDArray[Union[np.uint16, np.float64]]:
         """Select coverage from a coverage Zarr i.e. read depth per base pair.
 
         Parameters
@@ -91,7 +93,7 @@ class Coverage:
 
     async def async_sel(
         self, queries: Queries, length: int, **kwargs
-    ) -> NDArray[Union[np.uint8, np.float64]]:
+    ) -> NDArray[Union[np.uint16, np.float64]]:
         """Select coverage from a coverage Zarr i.e. read depth per base pair.
 
         Parameters
@@ -105,23 +107,25 @@ class Coverage:
 
         Returns
         -------
-        ndarray[uint8 | float64]
+        ndarray[uint16 | float64]
             Coverage for the queries, perhaps normalized.
         """
 
         out_shape = [len(queries), length]
 
+        queries = cast(Queries, queries.reset_index(drop=True))
+
         queries["end"] = queries.start + length
         # map negative starts to 0
         queries["in_start"] = queries.start.clip(lower=0)
         # map ends > contig length to contig length
-        queries["contig_length"] = queries.contig.replace(self.contig_lengths).astype(
-            int
+        queries["contig_length"] = queries.contig.replace(self.contig_lengths).to_numpy(
+            np.int64
         )
         queries["in_end"] = np.minimum(queries.end, queries.contig_length)
         # get start, end index in output array
         queries["out_start"] = queries.in_start - queries.start
-        queries["out_end"] = queries.in_end - queries.end
+        queries["out_end"] = queries.in_end - queries.in_start
         queries["sample_idx"] = self.samples_to_sample_idx(queries["sample"].values)  # type: ignore
 
         def get_read(query):
@@ -137,7 +141,7 @@ class Coverage:
         )
 
         # init array that will pad out-of-bound sequences
-        out = cast(NDArray[np.uint8], np.zeros(out_shape, "u1"))
+        out = np.zeros(out_shape, np.uint16)
         for i, (read, query) in enumerate(zip(reads, queries.itertuples())):
             # (1 l [a]) = (l [a])
             out[i, query.out_start : query.out_end] = read

@@ -28,6 +28,7 @@ __all__ = [
     "Sequence",
     "Variants",
     "VarSequence",
+    "Queries",
     "bin_coverage",
     "read_queries",
     "read_narrowpeak_as_queries",
