@@ -47,6 +47,7 @@ dependencies:
   - pytest-cov
   - jupyter
   - jupyterlab
+  - tiledb::tiledbvcf-py
   - pip:
     - tensorstore
 platforms:
