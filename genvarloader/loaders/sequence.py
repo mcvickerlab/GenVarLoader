@@ -121,12 +121,44 @@ class Sequence:
     def sel(
         self, queries: Queries, length: int, **kwargs
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
+        """Select query sequences.
+
+        NOTE: Must provide the keyword argument `encoding`.
+
+        Parameters
+        ----------
+        queries : Queries
+        length : int
+        **kwargs
+            encoding : str
+                Either "bytes" or "onehot"
+
+        Returns
+        -------
+        sequence : ndarray
+        """
         out = asyncio.run(self.async_sel(queries, length, **kwargs))
         return out
 
     async def async_sel(
         self, queries: Queries, length: int, **kwargs
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
+        """Select query sequences.
+
+        NOTE: Must provide the keyword argument `encoding`.
+
+        Parameters
+        ----------
+        queries : Queries
+        length : int
+        **kwargs
+            encoding : str
+                Required. Either "bytes" or "onehot".
+
+        Returns
+        -------
+        sequence : ndarray
+        """
         queries = cast(Queries, queries.reset_index(drop=True))
         if "strand" not in queries:
             queries["strand"] = "+"
@@ -142,7 +174,12 @@ class Sequence:
             )
 
         # get encoding
-        encoding = SequenceEncoding(kwargs.get("encoding"))
+        _enc = kwargs.get("encoding", None)
+        if _enc is None or _enc not in list(SequenceEncoding):
+            raise ValueError(
+                f'The keyword argument "encoding" must be either "bytes" or "onehot", not {_enc}.'
+            )
+        encoding = SequenceEncoding(_enc)
         if encoding not in self.encodings:
             raise ValueError(f"Encoding '{encoding}' not found in Zarr.")
 

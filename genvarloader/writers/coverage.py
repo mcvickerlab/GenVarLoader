@@ -1,4 +1,5 @@
 import gc
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -17,8 +18,9 @@ def _init_zarr(
     out_zarr: Path,
     feature: Optional[str] = None,
     contigs: Optional[List[str]] = None,
-    overwrite: bool = False,
+    overwrite_samples: bool = False,
     extra_attrs: Optional[Dict[str, Any]] = None,
+    n_threads: Optional[int] = None,
 ) -> Tuple[zarr.Group, NDArray, List[Path]]:
     """Initialize a coverage zarr file.
 
@@ -45,6 +47,10 @@ def _init_zarr(
     samples_to_write : list[Path]
         Paths for samples to write, in the order they are appended to the Zarr store.
     """
+
+    if n_threads is None:
+        n_threads = 1
+
     store_existed = out_zarr.exists()
     root = zarr.open_group(out_zarr)
 
@@ -63,6 +69,8 @@ def _init_zarr(
 
     # figure out what samples we're adding
     samples = np.array(list(in_bams.keys()))
+    logging.info(f"Got samples: {' '.join(samples)}")
+
     existing_samples = np.array(root.attrs.get("samples", []))
     if len(np.unique(samples)) != len(samples):
         raise ValueError("Got duplicate samples")
@@ -70,9 +78,9 @@ def _init_zarr(
     old_samples = samples[in_existing]
     new_samples = samples[~in_existing]
 
-    if len(new_samples) == 0 and not overwrite:
+    if len(new_samples) == 0 and not overwrite_samples:
         return root, np.array([], "u1"), []
-    elif len(old_samples) > 0 and not overwrite:
+    elif len(old_samples) > 0 and not overwrite_samples:
         raise ValueError(
             "Got samples that are already in the output zarr:", old_samples
         )
@@ -82,7 +90,7 @@ def _init_zarr(
 
     if not store_existed:
         # initialize Zarr for the first time, get contig lengths and create arrays
-        with AlignmentFile(str(in_bams[new_samples[0]])) as bam:
+        with AlignmentFile(str(in_bams[new_samples[0]]), threads=n_threads) as bam:
             if contigs is None:
                 contigs = list(bam.references)
             contig_lens = [bam.get_reference_length(c) for c in contigs]
@@ -108,10 +116,12 @@ def _init_zarr(
 
         root.visitvalues(resize_to_fit_new_samples)
 
-    if overwrite:
+    if overwrite_samples:
         samples_to_write = in_bams
     else:
         samples_to_write = {s: p for s, p in in_bams.items() if s in new_samples}
+
+    logging.info(f"Samples to write: {' '.join(samples_to_write.keys())}")
 
     samples_to_write_idx = np.flatnonzero(
         np.isin(total_samples, list(samples_to_write.keys()), assume_unique=True)
@@ -127,32 +137,33 @@ def coverage(
         if not contigs:
             contigs = list(bam.header.references)
 
+        out_zarr["read_count"][sample_idx] = bam.count(read_callback="all")
+
         for contig in contigs:
-            if bam.get_reference_length(contig) != len(out_zarr[contig]):
+            if bam.get_reference_length(contig) != out_zarr[contig].shape[1]:
                 raise RuntimeError(
                     f"Length of contig {contig} in BAM != length of contig in Zarr store."
                 )
 
-            cover_array = np.array(bam.count_coverage(contig), dtype=np.uint16)
+            acgt_covers = bam.count_coverage(contig)
+            cover_array = np.stack(acgt_covers, axis=1).sum(1).astype(np.uint16)
 
             out_zarr[contig][sample_idx] = cover_array
 
             del cover_array
             gc.collect()
 
-        out_zarr["read_count"][sample_idx] = bam.count(read_callback="all")
-
 
 def write_coverages(
     in_bams: Dict[str, Path],
     out_zarr: Path,
     contigs: Optional[List[str]] = None,
-    overwrite=False,
+    overwrite_samples=False,
     n_jobs=None,
 ):
     feature = "depth"
     root, sample_idx, samples_to_write = _init_zarr(
-        in_bams, out_zarr, feature, contigs, overwrite
+        in_bams, out_zarr, feature, contigs, overwrite_samples, n_threads=n_jobs
     )
 
     writer = joblib.delayed(coverage)
@@ -177,10 +188,12 @@ def tn5_coverage(
         if contigs is None:
             contigs = list(bam.references)
 
+        out_zarr["read_count"][sample_idx] = bam.count(read_callback="all")
+
         # Parse through chroms
         for contig in contigs:
             curr_len = bam.get_reference_length(contig)
-            if curr_len != len(out_zarr[contig]):
+            if curr_len != out_zarr[contig].shape[1]:
                 raise RuntimeError(
                     f"Length of contig {contig} in BAM != length of contig in Zarr store."
                 )
@@ -233,15 +246,13 @@ def tn5_coverage(
             del out_array
             gc.collect()
 
-        out_zarr["read_count"][sample_idx] = bam.count(read_callback="all")
-
 
 def write_tn5_coverages(
     in_bams: Dict[str, Path],
     out_zarr: Path,
     contigs: Optional[List[str]] = None,
     n_jobs=None,
-    overwrite=False,
+    overwrite_samples=False,
     offset_tn5=True,
     count_method: Union[Tn5CountMethod, str] = Tn5CountMethod.CUTSITE,
 ):
@@ -253,7 +264,13 @@ def write_tn5_coverages(
     }
 
     root, sample_idx, samples_to_write = _init_zarr(
-        in_bams, out_zarr, feature, contigs, overwrite, extra_attrs
+        in_bams,
+        out_zarr,
+        feature,
+        contigs,
+        overwrite_samples,
+        extra_attrs,
+        n_threads=n_jobs,
     )
 
     writer = joblib.delayed(tn5_coverage)
@@ -268,5 +285,8 @@ def write_tn5_coverages(
         )
         for s_idx, bam_path in zip(sample_idx, samples_to_write)
     ]
+
+    if n_jobs is None:
+        n_jobs = -2  # use all but 1 CPU
 
     joblib.Parallel(n_jobs, prefer="threads")(tasks)

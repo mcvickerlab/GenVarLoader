@@ -1,3 +1,6 @@
+"""CLI wrappers around writers."""
+
+
 from enum import Enum
 
 

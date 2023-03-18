@@ -1,5 +1,5 @@
 import asyncio
-from typing import Dict, Union, cast
+from typing import Dict, Set, Union, cast
 
 import numba
 import numpy as np
@@ -9,7 +9,7 @@ from pyfaidx import Fasta, FastaVariant
 from genvarloader.loaders.sequence import Sequence
 from genvarloader.loaders.types import Queries
 from genvarloader.loaders.variants import Variants
-from genvarloader.types import ALPHABETS, PathType, SequenceEncoding
+from genvarloader.types import ALPHABETS, PathType, SequenceAlphabet, SequenceEncoding
 from genvarloader.utils import bytes_to_ohe, rev_comp_byte
 
 
@@ -36,6 +36,11 @@ def apply_variants(
 
 
 class VarSequence:
+    sequence: Sequence
+    variants: Variants
+    encodings: Set[SequenceEncoding]
+    alphabet: SequenceAlphabet
+
     def __init__(
         self,
         sequence: Sequence,
@@ -43,6 +48,8 @@ class VarSequence:
     ) -> None:
         self.sequence = sequence
         self.variants = variants
+        self.encodings = self.sequence.encodings
+        self.alphabet = self.sequence.alphabet
 
     def sel(
         self,
