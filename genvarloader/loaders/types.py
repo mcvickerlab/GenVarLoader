@@ -93,5 +93,6 @@ class _VCFTSDataset:
     variant_allele: _TStore[np.uint8]  # (v a)
     variant_contig: _TStore[np.int16]  # (v)
     variant_position: zarr.Group  # (v)
-    contigs: NDArray[np.object_]  # (c)
     contig_offsets: _TStore[np.integer]  # (c)
+    contig_idx: Dict[str, int]
+    contig_offset_idx: Dict[str, int]

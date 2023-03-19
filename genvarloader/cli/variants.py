@@ -33,10 +33,7 @@ def write_vcf_to_zarr(
         help="Ignored if not filtering. File for renaming contigs, e.g. if the VCF has different contig names than the reference genome. See `bcftools annotate --rename-chrs` (https://samtools.github.io/bcftools/bcftools.html#annotate).",
     ),
 ):
-    """Write VCFs to Zarr files.
-
-    NOTE: This may raise "tornado.iostream.StreamClosedError: Stream is closed" -- this can be safely ignored.
-    """
+    """Write a single-sample VCF to a Zarr."""
     import logging
     import re
 

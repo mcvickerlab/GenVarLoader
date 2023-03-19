@@ -136,13 +136,7 @@ def write_zarr(
     # add contig offsets to reduce initialization time
     v_contig = cast(NDArray, z["variant_contig"][:])
 
-    # NOTE: this will break if the contigs in z.attrs['contigs'] that have no variants
-    # are not exclusively after contigs that have variants.
-    # e.g. contigs = ['1', 'CHR_X_FJ', '2'] and the alt contig 'CHR_X_FJ' has no variants
-    # This is because when we go to read the data in genvarloader/loaders/variants.py,
-    # the contig_idx will be wrong: contig_offsets[2] would not exist.
-    # However, this significantly reduces the on-disk size (e.g. 2x less for WES)
-    _, contig_offsets = np.unique(v_contig, return_index=True)
+    contigs_with_variants, contig_offsets = np.unique(v_contig, return_index=True)
     z.create_dataset(
         "contig_offsets",
         data=contig_offsets,
@@ -150,8 +144,14 @@ def write_zarr(
         chunks=1,
         overwrite=overwrite,
     )
+    contigs = cast(List[str], z.attrs["contigs"])
+    contig_idx = dict(zip(contigs, range(len(contigs))))
+    z.attrs["contig_idx"] = contig_idx
+    z.attrs["contig_offset_idx"] = dict(
+        zip(contigs_with_variants, range(len(contigs_with_variants)))
+    )
 
-    gvl_groups = {
+    gvl_keys = {
         "variant_allele",
         "variant_contig",
         "variant_position",
@@ -195,7 +195,7 @@ def write_zarr(
                         filters=None,
                         overwrite=overwrite,
                     )
-        elif name in gvl_groups and val.filters is not None:
+        elif name in gvl_keys and val.filters is not None:
             z.create_dataset(
                 name,
                 data=val[:],
@@ -207,6 +207,6 @@ def write_zarr(
 
     z.visititems(edit)
 
-    to_del = [g for g in z.keys() if g not in gvl_groups]
+    to_del = [g for g in z.keys() if g not in gvl_keys]
     for g in to_del:
         del z[g]

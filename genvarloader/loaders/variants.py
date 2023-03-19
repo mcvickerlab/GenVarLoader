@@ -1,7 +1,7 @@
 import asyncio
 from asyncio import Future
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Union, cast
 
 import numpy as np
 import polars as pl
@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 from typing_extensions import Self
 
 from genvarloader.loaders.types import (
+    AsyncLoader,
     Loader,
     LoaderOutput,
     Queries,
@@ -21,7 +22,7 @@ from genvarloader.loaders.utils import ts_readonly_zarr
 from genvarloader.types import PathType
 
 
-class Variants:
+class Variants(AsyncLoader):
     """Loader for getting variants from Zarrs by querying specific regions and samples.
 
     NOTE:
@@ -29,7 +30,7 @@ class Variants:
     - Doesn't use standard initialization i.e. `Variants(...)`
         Instead, use `Variants.create(...)` or the async version, `Variants.async_create(...)`
         to get an initialized instance. This is to support async (faster) initialization. If
-        using this in a Jupyter notebook, you'll have to use `Variants.async_create(...)` since
+        using this in a Jupyter notebook, you'll need to call `nest_asyncio.apply()` since
         Jupyter runs an async loop.
     """
 
@@ -109,7 +110,8 @@ class Variants:
 
         gvl_array_futures: List[Future[List[_TStore]]] = []
         variant_positions: List[zarr.Group] = []
-        contigs_ls: List[NDArray[np.object_]] = []
+        contig_idxs: List[Dict[str, int]] = []
+        contig_offset_idxs: List[Dict[str, int]] = []
 
         for path in map(Path, paths):
             z = zarr.open_group(path, "r")
@@ -125,41 +127,24 @@ class Variants:
 
             gvl_array_futures.append(asyncio.gather(*arrays))
 
-            contigs_ls.append(np.array(z.attrs["contigs"], dtype=object))
+            contig_idxs.append(z.attrs["contig_idx"])
+            contig_offset_idxs.append(z.attrs["contig_offset_idx"])
 
         gvl_arrays: List[List[_TStore]] = await asyncio.gather(*gvl_array_futures)
 
         self.datasets = {}
-        for sample_id, gvl_arr, var_pos, contigs in zip(
-            sample_ids, gvl_arrays, variant_positions, contigs_ls
+        for sample_id, gvl_arr, var_pos, contig_idx, contig_offset_idx in zip(
+            sample_ids, gvl_arrays, variant_positions, contig_idxs, contig_offset_idxs
         ):
             ds_kwargs = dict(zip(gvl_array_names, gvl_arr))
             ds_kwargs["variant_position"] = var_pos
-            ds_kwargs["contigs"] = contigs
+            ds_kwargs["contig_idx"] = contig_idx
+            ds_kwargs["contig_offset_idx"] = contig_offset_idx
             ds = _VCFTSDataset(**ds_kwargs)
             self.datasets[sample_id] = ds
 
         self.paths = {s: p for s, p in zip(sample_ids, map(Path, paths))}
         return self
-
-    def contig_to_contig_idx(self, contig: str, sample: str) -> int:
-        """Get the unique contig indices and array of mapped contig indices i.e. those used in the sgkit VCF Dataset.
-
-        Example
-        -------
-        >>> variants = Variants('my/variants.zarr')
-        >>> variants.attrs['contigs']
-        array(['1', 'X'], dtype=object)
-        >>> variants.contigs_to_contig_idxs(['X', 'X', 'X'])
-        (array([1]), array([1, 1, 1]))
-        """
-        _idx = np.flatnonzero(self.datasets[sample].contigs == contig)
-        if len(_idx) == 0:
-            raise RuntimeError(
-                f"Query contig {contig} not in variant file for sample {sample}."
-            )
-        idx = _idx[0]
-        return idx
 
     def sel(
         self,
@@ -229,14 +214,15 @@ class Variants:
         idx_ls: List[NDArray[np.integer]] = []
         count_ls: List[NDArray[np.integer]] = []
         count_idx_ls: List[NDArray[np.integer]] = []
-        # # NOTE: groupby preserves within-group order
+        # NOTE: groupby preserves within-group order
+        sample: str
+        contig: str
         for (sample, contig), group in groups:
-            c_idx = self.contig_to_contig_idx(contig, sample)
             s = group.start.to_numpy()
             e = s + length
 
             a_idx, p_idx, c_s_counts, c_s_positions = self._intervals_to_idx_and_pos(
-                c_idx, s, e, sample, group.ploid_idx.values  # type: ignore
+                contig, s, e, sample, group.ploid_idx.to_numpy()
             )
 
             allele_idx = self.datasets[sample].call_genotype[a_idx, p_idx]
@@ -278,7 +264,7 @@ class Variants:
 
     def _intervals_to_idx_and_pos(
         self,
-        contig_idx: int,
+        contig: str,
         starts: NDArray[np.integer],
         ends: NDArray[np.integer],
         sample: str,
@@ -286,8 +272,8 @@ class Variants:
     ) -> Tuple[
         NDArray[np.integer], NDArray[np.integer], NDArray[np.integer], NDArray[np.int32]
     ]:
-
-        c_pos = self.datasets[sample].variant_position.get(contig_idx, None)
+        c_idx = self.datasets[sample].contig_idx[contig]
+        c_pos = self.datasets[sample].variant_position.get(c_idx, None)
         if c_pos is None:
             return (
                 np.array([], np.int32),
@@ -298,7 +284,8 @@ class Variants:
         c_pos = cast(NDArray[np.int32], c_pos[:])
         # NOTE: VCF is 1-indexed and queries are 0-indexed, adjust
         c_pos -= 1
-        c_start = self.datasets[sample].contig_offsets[contig_idx].read().result()
+        c_offset_idx = self.datasets[sample].contig_offset_idx[contig]
+        c_start = self.datasets[sample].contig_offsets[c_offset_idx].read().result()
         s_e_idx = c_start + np.searchsorted(c_pos, np.concatenate([starts, ends]))
         start_idxs, end_idxs = np.split(s_e_idx, (len(starts),))
         cnts = end_idxs - start_idxs
