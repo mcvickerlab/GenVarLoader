@@ -1,3 +1,19 @@
+"""Load & work with coverage data.
+
+On-disk format for coverage data:
+
+/
+├── <contig 1> (samples length) uint16
+├── <contig 2> (samples length) uint16
+├── <contig ...> (samples length) uint16
+├── read_count (samples) uint64
+└── attrs (dictionary)
+   ├── feature (str) what feature is this? depth? tn5? some other per-base feature?
+   ├── samples (list[str])
+   ├── contig_lengths (dict[str, int])
+   └── ... extra items that may be relevant for a given feature
+"""
+
 import asyncio
 from pathlib import Path
 from typing import Dict, List, Union, cast
@@ -17,11 +33,8 @@ _NORMALIZATION_METHODS = ["cpm"]
 def cpm_normalization(
     counts: NDArray[np.uint16], total_counts: NDArray[np.uint64]
 ) -> NDArray[np.float64]:
-    # (samples length [alphabet]) / (samples 1 [1])
-    n_new_axes = len(counts.shape) - 1
-    norm_counts = (
-        counts * 1e6 / ein.rearrange(total_counts, "s -> s" + " 1" * n_new_axes)
-    )
+    # (samples length) / (samples 1)
+    norm_counts = counts * 1e6 / total_counts[:, None]
     return norm_counts
 
 
@@ -40,20 +53,10 @@ class Coverage:
         self.tstores: Dict[str, _TStore] = {}
 
         def add_array_to_tstores(p: str, val: Union[zarr.Group, zarr.Array]):
-            if isinstance(val, zarr.Array):
+            if isinstance(val, zarr.Array) and p != "read_count":
                 self.tstores[p] = ts_readonly_zarr(self.path / p).result()
 
         root.visititems(add_array_to_tstores)
-
-        # Expect shape to be (samples length [alphabet]). We get nucleotide counts when using
-        # `genvarloader coverage depth-only` aka `pysam.bam.AlignmentFile::count_coverage`
-        # which uses an alphabet of 'ACGT'.
-        for name, arr in root.arrays():
-            if isinstance(arr, zarr.Array) and len(arr.shape) == 3:
-                self.ohe_counts = True
-            else:
-                self.ohe_counts = False
-            break
 
         self._root = root
         self.samples = np.array(root.attrs["samples"])
@@ -135,7 +138,7 @@ class Coverage:
                 sample_idx, query.in_start : query.in_end
             ].read()
 
-        # (q l [a])
+        # (q l)
         reads: List[NDArray] = await asyncio.gather(
             *[get_read(query) for query in queries.itertuples()]
         )
@@ -143,7 +146,7 @@ class Coverage:
         # init array that will pad out-of-bound sequences
         out = np.zeros(out_shape, np.uint16)
         for i, (read, query) in enumerate(zip(reads, queries.itertuples())):
-            # (1 l [a]) = (l [a])
+            # (1 l) = (l)
             out[i, query.out_start : query.out_end] = read
 
         # normalize counts
@@ -154,18 +157,15 @@ class Coverage:
                 _NORMALIZATION_METHODS,
             )
         elif normalization == "cpm":
+            # total counts for each sample, respecting duplicate samples in query
             total_counts = cast(
                 NDArray, self._root["read_count"][queries["sample_idx"].to_numpy()]
             )
             out = cpm_normalization(counts=out, total_counts=total_counts)
 
-        # reverse complement negative stranded queries
+        # reverse negative stranded queries
         to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").values)
-        if self.ohe_counts:
-            axes = (-2, -1)  # (l a)
-        else:
-            axes = -1  # (l)
-        out[to_rev_comp] = np.flip(out[to_rev_comp], axis=axes)
+        out[to_rev_comp] = np.flip(out[to_rev_comp], axis=-1)
 
         return out
 

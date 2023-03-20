@@ -1,77 +1,32 @@
 import re
 from pathlib import Path
-from typing import Dict
 
+import hypothesis.extra.pandas as st_pd
+import hypothesis.strategies as st
 import numpy as np
 from cyvcf2 import VCF
-from pytest_cases import fixture, parametrize_with_cases
+from hypothesis import given
+from pytest_cases import fixture
 
 import genvarloader
-from genvarloader.loaders.types import Queries
-from genvarloader.loaders.variants import Variants
+import genvarloader.loaders as gvl
 
 
-def sel_args_1_region_1_samp():
-    queries = Queries(
-        {"contig": ["20"], "start": [96319], "sample": ["OCI-AML5"], "ploid_idx": [1]}
+def strategy_variants_queries(variants: gvl.Variants):
+    longest_contig = int(250e6)
+    contigs = [str(i) for i in range(1, 23)] + ["X", "Y"]
+    contig = st_pd.column(name="contig", elements=st.sampled_from(contigs))
+    start = st_pd.column(name="start", elements=st.integers(0, longest_contig + 1))
+    sample = st_pd.column(
+        name="sample", elements=st.sampled_from(list(variants.samples))
     )
-    length = 5
-    sorted = False
-    missing_value = "reference"
-    return dict(
-        queries=queries, length=length, sorted=sorted, missing_value=missing_value
-    )
+    ploid_idx = st_pd.column(name="ploid_idx", elements=st.integers(0, 1))
+    df = st_pd.data_frames(columns=[contig, start, sample, ploid_idx])
+    return df.map(gvl.Queries)
 
 
-def sel_args_1_chrom_1_samp():
-    queries = Queries(
-        {
-            "contig": ["20", "20"],
-            "start": [96319, 279175],
-            "sample": ["OCI-AML5", "OCI-AML5"],
-            "ploid_idx": [1, 0],
-        }
-    )
-    length = 5
-    sorted = False
-    missing_value = "reference"
-    return dict(
-        queries=queries, length=length, sorted=sorted, missing_value=missing_value
-    )
-
-
-def sel_args_1_chrom_2_samp():
-    queries = Queries(
-        {
-            "contig": ["20", "20"],
-            "start": [96319, 279175],
-            "sample": ["OCI-AML5", "NCI-H660"],
-            "ploid_idx": [1, 0],
-        }
-    )
-    length = 5
-    sorted = False
-    missing_value = "reference"
-    return dict(
-        queries=queries, length=length, sorted=sorted, missing_value=missing_value
-    )
-
-
-def sel_args_2_chrom_2_samp():
-    queries = Queries(
-        {
-            "contig": ["21", "20", "20"],
-            "start": [10414881, 96319, 279175],
-            "sample": ["OCI-AML5", "NCI-H660", "NCI-H660"],
-            "ploid_idx": [1, 0, 1],
-        }
-    )
-    length = 5
-    sorted = False
-    missing_value = "reference"
-    return dict(
-        queries=queries, length=length, sorted=sorted, missing_value=missing_value
-    )
+def strategy_length():
+    return st.integers(600, 1200).filter(lambda x: x % 2 == 0)
 
 
 @fixture
@@ -80,8 +35,8 @@ def wdir():
 
 
 @fixture
-def var_loader():
-    return Variants.create(
+def variants():
+    return gvl.Variants.create(
         {
             "OCI-AML5": "/cellar/users/dlaub/repos/genome-loader/sbox/CDS-OJhAUD_cnn_filtered.zarr",
             "NCI-H660": "/cellar/users/dlaub/repos/genome-loader/sbox/CDS-oZPNvc_cnn_filtered.zarr",
@@ -89,43 +44,41 @@ def var_loader():
     )
 
 
-@parametrize_with_cases("sel_args", cases=".", prefix="sel_args_")
-def test_ss_var_loader(var_loader: Variants, sel_args: Dict, wdir: Path):
-    res = var_loader.sel(**sel_args)
+@given(queries=strategy_variants_queries(variants()), length=strategy_length())
+def test_variants(
+    variants: gvl.Variants, queries: gvl.Queries, length: int, wdir: Path
+):
+    res = variants.sel(queries, length)
     vcf = VCF(str(wdir / "data" / "ccle_snp_wes.reduced.bcf"))
-    if res["variants"].size == 0:
-        for query in sel_args["queries"].itertuples():
-            region_string = (
-                f"{query.contig}:{query.start+1}-{query.start + sel_args['length']}"
-            )
+    if res["alleles"].size == 0:
+        for query in queries.itertuples():
+            region_string = f"{query.contig}:{query.start+1}-{query.start + length}"
             sample_idx = vcf.samples.index(query.sample)
             known_allele_count = 0
-            for variant in vcf(region_string):
-                geno_string = variant.gt_bases[sample_idx]
+            for record in vcf(region_string):
+                geno_string = record.gt_bases[sample_idx]
                 geno = re.split(r"/|\|", geno_string)[query.ploid_idx].encode("ascii")
                 if geno == b".":
                     continue
                 known_allele_count += 1
             assert known_allele_count == 0
     else:
-        gvl_vars = np.split(res["variants"], res["offsets"][1:])
-        gvl_poss = np.split(res["positions"], res["offsets"][1:])
+        gvl_alleles = np.split(res["alleles"], res["offsets"][1:])
+        gvl_positions = np.split(res["positions"], res["offsets"][1:])
 
         for query, gvl_var, gvl_pos in zip(
-            sel_args["queries"].itertuples(), gvl_vars, gvl_poss
+            queries.itertuples(), gvl_alleles, gvl_positions
         ):
             sample_idx = vcf.samples.index(query.sample)
-            region_string = (
-                f"{query.contig}:{query.start+1}-{query.start + sel_args['length']}"
-            )
+            region_string = f"{query.contig}:{query.start+1}-{query.start + length}"
             _vcf_var = []
             _vcf_pos = []
-            for variant in vcf(region_string):
-                geno_string = variant.gt_bases[sample_idx]
+            for record in vcf(region_string):
+                geno_string = record.gt_bases[sample_idx]
                 geno = re.split(r"/|\|", geno_string)[query.ploid_idx].encode("ascii")
                 if geno == b".":
                     continue
-                pos = variant.POS - 1  # we use 0-indexed positions
+                pos = record.POS - 1  # we use 0-indexed positions
                 _vcf_var.append(geno)
                 _vcf_pos.append(pos)
             vcf_var = np.array(_vcf_var, dtype="|S1")

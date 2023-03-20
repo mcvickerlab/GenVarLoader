@@ -36,114 +36,83 @@ class Variants(AsyncLoader):
 
     paths: Dict[str, Path]
     datasets: Dict[str, _VCFTSDataset]
+    samples: List[str]
 
     def __init__(self) -> None:
         """Variants uses async initialization. Use Variants.create or Variants.async_create to
         create an instance."""
-        pass
+        self._initialized = False
 
     @classmethod
     def create(
         cls,
-        zarrs: Union[Iterable[PathType], Dict[str, PathType]],
-        ts_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Self:
-        """Create a Variants instance.
-
-        Parameters
-        ----------
-        zarrs : iterable[path] or dict[str, path]
-            A list of (or dictionary from sample IDs to) Zarr file paths that store VCFs for each sample.
-            Whether a list or dict is used changes how queries can be made, since the sample IDs in the query
-            will be matched against sample names in the loader. If using a list, sample IDs will be discovered
-            from the Zarr files. Otherwise, they will be whatever sample ID is provided in the dictionary.
-
-        Returns
-        -------
-        self : Variants
-        """
-        self = asyncio.run(cls.async_create(zarrs, ts_kwargs))
-        return self
-
-    @classmethod
-    async def async_create(
-        cls,
-        zarrs: Union[Iterable[PathType], Dict[str, PathType]],
+        zarrs: Iterable[PathType],
+        sample_ids: Optional[List[str]] = None,
         ts_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Self:
         """Create a Variants instance asynchronously.
 
         Parameters
         ----------
-        zarrs : iterable[path] or dict[str, path]
-            A list of (or dictionary from sample IDs to) Zarr file paths that store VCFs for each sample.
-            Whether a list or dict is used changes how queries can be made, since the sample IDs in the query
-            will be matched against sample names in the loader. If using a list, sample IDs will be discovered
-            from the Zarr files. Otherwise, they will be whatever sample ID is provided in the dictionary.
+        zarrs : iterable[path]
+            A list of file paths to Variant Zarrs.
+        sample_ids : list[str], optional
+            A list of sample IDs corresponding to each Variant Zarr. If none given,
+            sample IDs will be taken from the Variant Zarrs.
         ts_kwargs : dict[str, any]
-            Keyword arguments to pass to tensorstore.open(). Useful e.g. to specify a shared cache pool across
-            loaders.
+            Keyword arguments to pass to tensorstore.open(). Useful to specify a shared cache pool across
+            loaders, for example.
 
         Returns
         -------
         self : Variants
         """
+
+        self = asyncio.run(cls.async_create(zarrs, sample_ids, ts_kwargs))
+        return self
+
+    @classmethod
+    async def async_create(
+        cls,
+        zarrs: Iterable[PathType],
+        sample_ids: Optional[List[str]] = None,
+        ts_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Self:
+        """Create a Variants instance asynchronously.
+
+        Parameters
+        ----------
+        zarrs : iterable[path]
+            A list of file paths to Variant Zarrs.
+        sample_ids : list[str], optional
+            A list of sample IDs corresponding to each Variant Zarr. If none given,
+            sample IDs will be taken from the Variant Zarrs.
+        ts_kwargs : dict[str, any]
+            Keyword arguments to pass to tensorstore.open(). Useful to specify a shared cache pool across
+            loaders, for example.
+
+        Returns
+        -------
+        self : Variants
+        """
+
         self = cls()
-        if isinstance(zarrs, dict):
-            set_sample_ids = False
-            sample_ids = list(map(str, zarrs.keys()))
-            paths = zarrs.values()
-        else:
-            set_sample_ids = True
-            sample_ids = []
-            paths = zarrs
+        paths = list(map(Path, zarrs))
 
         if ts_kwargs is None:
             ts_kwargs = {}
 
-        gvl_array_names = {
-            "call_genotype",
-            "contig_offsets",
-            "variant_allele",
-            "variant_contig",
-        }
+        dataset_coros = [_VCFTSDataset.create(path, ts_kwargs) for path in paths]
+        datasets: List[_VCFTSDataset] = await asyncio.gather(*dataset_coros)
 
-        gvl_array_futures: List[Future[List[_TStore]]] = []
-        variant_positions: List[zarr.Group] = []
-        contig_idxs: List[Dict[str, int]] = []
-        contig_offset_idxs: List[Dict[str, int]] = []
+        if sample_ids is None:
+            sample_ids = [d.sample_id for d in datasets]
 
-        for path in map(Path, paths):
-            z = zarr.open_group(path, "r")
+        self.datasets = dict(zip(sample_ids, datasets))
+        self.paths = {s: p for s, p in zip(sample_ids, paths)}
+        self.samples = list(self.datasets.keys())
+        self._initialized = True
 
-            arrays = [
-                ts_readonly_zarr(path.resolve() / n, **ts_kwargs)
-                for n in gvl_array_names
-            ]
-            variant_positions.append(z["variant_position"])  # type: ignore
-
-            if set_sample_ids:
-                sample_ids.append(cast(str, z["sample_id"][0]))
-
-            gvl_array_futures.append(asyncio.gather(*arrays))
-
-            contig_idxs.append(z.attrs["contig_idx"])
-            contig_offset_idxs.append(z.attrs["contig_offset_idx"])
-
-        gvl_arrays: List[List[_TStore]] = await asyncio.gather(*gvl_array_futures)
-
-        self.datasets = {}
-        for sample_id, gvl_arr, var_pos, contig_idx, contig_offset_idx in zip(
-            sample_ids, gvl_arrays, variant_positions, contig_idxs, contig_offset_idxs
-        ):
-            ds_kwargs = dict(zip(gvl_array_names, gvl_arr))
-            ds_kwargs["variant_position"] = var_pos
-            ds_kwargs["contig_idx"] = contig_idx
-            ds_kwargs["contig_offset_idx"] = contig_offset_idx
-            ds = _VCFTSDataset(**ds_kwargs)
-            self.datasets[sample_id] = ds
-
-        self.paths = {s: p for s, p in zip(sample_ids, map(Path, paths))}
         return self
 
     def sel(
@@ -201,9 +170,9 @@ class Variants(AsyncLoader):
             For example, the first query's variants can be obtained as:
             >>> first_query_vars = variants[offsets[0] : region_offsets[1]]
         """
-        if not hasattr(self, "datasets"):
+        if not self._initialized:
             raise RuntimeError(
-                "Variants appears to be uninitialized. Did you remember to use Variants.create(...)?"
+                "This Variants instance is uninitialized. Did you remember to use Variants.create(...)?"
             )
         # get variants, their positions, and how many are in each query
         queries = cast(Queries, queries.reset_index(drop=True))

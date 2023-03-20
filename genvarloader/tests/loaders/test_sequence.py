@@ -1,62 +1,14 @@
 from pathlib import Path
 from typing import Dict
 
+import hypothesis.extra.pandas as st_pd
+import hypothesis.strategies as st
+from hypothesis import given
 from pysam import FastaFile
-from pytest_cases import fixture, parametrize_with_cases
+from pytest_cases import fixture
 
 import genvarloader
-from genvarloader.loaders.sequence import ZarrSequence
-from genvarloader.loaders.types import Queries
-
-
-def sel_args_1_region_1_samp():
-    queries = Queries({"contig": ["20"], "start": [96319], "sample": ["OCI-AML5"]})
-    length = 5
-    sorted = False
-    encoding = "bytes"
-    return dict(queries=queries, length=length, sorted=sorted, encoding=encoding)
-
-
-def sel_args_1_chrom_1_samp():
-    queries = Queries(
-        {
-            "contig": ["20", "20"],
-            "start": [96319, 279175],
-            "sample": ["OCI-AML5", "OCI-AML5"],
-        }
-    )
-    length = 5
-    sorted = False
-    encoding = "bytes"
-    return dict(queries=queries, length=length, sorted=sorted, encoding=encoding)
-
-
-def sel_args_1_chrom_2_samp():
-    queries = Queries(
-        {
-            "contig": ["20", "20"],
-            "start": [96319, 279175],
-            "sample": ["OCI-AML5", "NCI-H660"],
-        }
-    )
-    length = 5
-    sorted = False
-    encoding = "bytes"
-    return dict(queries=queries, length=length, sorted=sorted, encoding=encoding)
-
-
-def sel_args_2_chrom_2_samp():
-    queries = Queries(
-        {
-            "contig": ["21", "20", "20"],
-            "start": [10414881, 96319, 279175],
-            "sample": ["OCI-AML5", "NCI-H660", "NCI-H660"],
-        }
-    )
-    length = 5
-    sorted = False
-    encoding = "bytes"
-    return dict(queries=queries, length=length, sorted=sorted, encoding=encoding)
+import genvarloader.loaders as gvl
 
 
 @fixture
@@ -65,15 +17,28 @@ def wdir():
 
 
 @fixture
-def zarr_sequence():
-    return ZarrSequence(
-        "/cellar/users/dlaub/repos/genome-loader/genvarloader/tests/data/grch38.20.21.zarr"
+def sequence(wdir: Path):
+    return gvl.Sequence(wdir / "data" / "grch38.20.21.zarr")
+
+
+def strategy_sequence_queries(sequence: gvl.Sequence):
+    longest_contig = max(sequence.contig_lengths.values())
+    contig = st_pd.column(
+        name="contig", elements=st.sampled_from(list(sequence.tstores.keys()))
     )
+    start = st_pd.column(name="start", elements=st.integers(0, longest_contig + 1))
+    strand = st_pd.column(name="strand", elements=st.sampled_from(["+", "-"]))
+    df = st_pd.data_frames(columns=[contig, start, strand])
+    return df.map(gvl.Queries)
 
 
-@parametrize_with_cases("sel_args", cases=".", prefix="sel_args_")
-def test_zarrsequence(zarr_sequence: ZarrSequence, sel_args: Dict, wdir: Path):
-    seqs = zarr_sequence.sel(**sel_args).astype("U")
+def strategy_length():
+    return st.integers(600, 1200).filter(lambda x: x % 2 == 0)
+
+
+@given(queries=strategy_sequence_queries(sequence(wdir())))
+def test_zarrsequence(sequence: gvl.Sequence, sel_args: Dict, wdir: Path):
+    seqs = sequence.sel(**sel_args).astype("U")
     ref_fasta = wdir / "data" / "fasta" / "grch38.20.21.fa.gz"
 
     for seq, query in zip(seqs, sel_args["queries"].itertuples()):

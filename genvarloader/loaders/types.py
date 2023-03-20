@@ -2,7 +2,8 @@ import asyncio
 import enum
 from asyncio import Future
 from dataclasses import dataclass
-from typing import Dict, Optional, Protocol, Tuple, TypeVar, Union
+from pathlib import Path
+from typing import Dict, Optional, Protocol, Tuple, TypeVar, Union, cast
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,8 @@ from numpy.typing import NDArray
 from pandera.engines import pandas_engine
 from pandera.typing import DataFrame, Series
 from typing_extensions import Self
+
+from genvarloader.loaders.utils import ts_readonly_zarr
 
 
 # Register pandera dtype that is guaranteed to have naturally ordered categories
@@ -85,10 +88,10 @@ class _TStore(Protocol[_DTYPE]):
         ...
 
 
-@dataclass
 class _VCFTSDataset:
     """An sgkit Zarr dataset for a single sample using TensorStore for I/O."""
 
+    sample_id: str
     call_genotype: _TStore[np.int8]  # (v s p)
     variant_allele: _TStore[np.uint8]  # (v a)
     variant_contig: _TStore[np.int16]  # (v)
@@ -96,3 +99,41 @@ class _VCFTSDataset:
     contig_offsets: _TStore[np.integer]  # (c)
     contig_idx: Dict[str, int]
     contig_offset_idx: Dict[str, int]
+
+    def __init__(self) -> None:
+        self._initalized = False
+
+    @classmethod
+    async def create(cls, path: Path, ts_kwargs: Dict):
+        self = cls()
+
+        z = zarr.open_group(path, "r")
+
+        self.sample_id = cast(str, z["sample_id"][0])
+
+        # We have to eagerly read all the positions for a contig downstream
+        # so there's no need to make tensorstores here.
+        self.variant_position = cast(zarr.Group, z["variant_position"])
+
+        # open tensorstores
+        gvl_array_names = {
+            "call_genotype",
+            "contig_offsets",
+            "variant_allele",
+            "variant_contig",
+        }
+        arrays = [
+            ts_readonly_zarr(path.resolve() / n, **ts_kwargs) for n in gvl_array_names
+        ]
+        gvl_arrays = await asyncio.gather(*arrays)
+        self.call_genotype = gvl_arrays[0]
+        self.contig_offsets = gvl_arrays[1]
+        self.variant_allele = gvl_arrays[2]
+        self.variant_contig = gvl_arrays[3]
+
+        self.contig_idx = z.attrs["contig_idx"]
+        self.contig_offset_idx = z.attrs["contig_offset_idx"]
+
+        self._initalized = True
+
+        return self
