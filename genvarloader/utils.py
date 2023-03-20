@@ -11,12 +11,9 @@ from genvarloader.types import SequenceAlphabet
 def bytes_to_ohe(
     arr: NDArray[np.bytes_], alphabet: SequenceAlphabet
 ) -> NDArray[np.uint8]:
-    alphabet_size = len(alphabet.array)
-    idx = np.empty_like(arr, dtype="u8")
-    for i, char in enumerate(alphabet.array):
-        idx[arr == char] = np.uint64(i)
-    # out shape: (length alphabet)
-    return np.eye(alphabet_size, dtype="u1")[idx]
+    idx = alphabet.sorter[np.searchsorted(alphabet.array[alphabet.sorter], arr)]
+    ohe = np.eye(len(alphabet.array), dtype=np.uint8)[idx]
+    return ohe
 
 
 def ohe_to_bytes(

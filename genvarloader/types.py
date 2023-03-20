@@ -32,6 +32,7 @@ class SequenceAlphabet:
         self.complement_map_bytes = {
             k.encode(): v.encode() for k, v in self.complement_map.items()
         }
+        self.sorter = np.argsort(self.array)
         self.validate()
 
     def validate(self):

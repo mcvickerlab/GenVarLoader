@@ -2,125 +2,62 @@ import re
 from pathlib import Path
 from typing import Dict
 
+import hypothesis.extra.pandas as st_pd
+import hypothesis.strategies as st
 import numpy as np
 from cyvcf2 import VCF
-from pytest_cases import fixture, parametrize_with_cases
+from hypothesis import given
+from pytest_cases import fixture
 
 import genvarloader
-from genvarloader.loaders.types import Queries
-from genvarloader.loaders.variants import Variants
-
-
-def sel_args_1_region_1_samp():
-    queries = Queries(
-        {"contig": ["20"], "start": [96319], "sample": ["OCI-AML5"], "ploid_idx": [1]}
-    )
-    length = 5
-    sorted = False
-    missing_value = "reference"
-    return dict(
-        queries=queries, length=length, sorted=sorted, missing_value=missing_value
-    )
-
-
-def sel_args_1_chrom_1_samp():
-    queries = Queries(
-        {
-            "contig": ["20", "20"],
-            "start": [96319, 279175],
-            "sample": ["OCI-AML5", "OCI-AML5"],
-            "ploid_idx": [1, 0],
-        }
-    )
-    length = 5
-    sorted = False
-    missing_value = "reference"
-    return dict(
-        queries=queries, length=length, sorted=sorted, missing_value=missing_value
-    )
-
-
-def sel_args_1_chrom_2_samp():
-    queries = Queries(
-        {
-            "contig": ["20", "20"],
-            "start": [96319, 279175],
-            "sample": ["OCI-AML5", "NCI-H660"],
-            "ploid_idx": [1, 0],
-        }
-    )
-    length = 5
-    sorted = False
-    missing_value = "reference"
-    return dict(
-        queries=queries, length=length, sorted=sorted, missing_value=missing_value
-    )
-
-
-def sel_args_2_chrom_2_samp():
-    queries = Queries(
-        {
-            "contig": ["21", "20", "20"],
-            "start": [10414881, 96319, 279175],
-            "sample": ["OCI-AML5", "NCI-H660", "NCI-H660"],
-            "ploid_idx": [1, 0, 1],
-        }
-    )
-    length = 5
-    sorted = False
-    missing_value = "reference"
-    return dict(
-        queries=queries, length=length, sorted=sorted, missing_value=missing_value
-    )
+import genvarloader.loaders as gvl
 
 
 @fixture
-def wdir():
-    return Path(genvarloader.__file__).parent / "tests"
+def data_dir():
+    return Path(genvarloader.__file__).parent / "tests" / "data"
 
 
 @fixture
-def var_loader():
-    return Variants(
-        "/cellar/users/dlaub/repos/genome-loader/genvarloader/tests/data/ccle_snp_wes.reduced.zarr"
+def sequence(data_dir: Path):
+    return gvl.Sequence(data_dir / "grch38.20.21.zarr")
+
+
+@fixture
+def variants(data_dir: Path):
+    zarrs = [
+        data_dir / "CDS-OJhAUD_cnn_filtered.zarr",
+        data_dir / "CDS-oZPNvc_cnn_filtered.zarr",
+    ]
+    sample_ids = ["OCI-AML5", "NCI-H660"]
+    return gvl.Variants.create(zarrs=zarrs, sample_ids=sample_ids)
+
+
+@fixture
+def varseq(sequence: gvl.Sequence, variants: gvl.Variants):
+    return gvl.VarSequence(sequence, variants)
+
+
+def strategy_varseq_query(varseq: gvl.VarSequence):
+    longest_contig = max(varseq.sequence.contig_lengths.values())
+    contig = st_pd.column(
+        name="contig", elements=st.sampled_from(list(varseq.sequence.tstores.keys()))  # type: ignore
     )
+    start = st_pd.column(name="start", elements=st.integers(0, longest_contig + 1))  # type: ignore
+    strand = st_pd.column(name="strand", elements=st.sampled_from(["+", "-"]))  # type: ignore
+    sample = st_pd.column(
+        name="sample", elements=st.sampled_from(list(varseq.variants.samples))  # type: ignore
+    )
+    ploid_idx = st_pd.column(name="ploid_idx", elements=st.integers(0, 1))  # type: ignore
+    df = st_pd.data_frames(columns=[contig, start, strand, sample, ploid_idx])
+    return df.map(gvl.Queries)
 
 
-@parametrize_with_cases("sel_args", cases=".", prefix="sel_args_")
-def test_zarrsequence(var_loader: Variants, sel_args: Dict, wdir: Path):
-    res = var_loader.sel(**sel_args)
-    vcf = VCF(str(wdir / "data" / "ccle_snp_wes.reduced.bcf"))
-    if res is None:
-        for query in sel_args["queries"].itertuples():
-            region_string = (
-                f"{query.contig}:{query.start+1}-{query.start + sel_args['length']}"
-            )
-            assert len(list(vcf(region_string))) == 0
-    else:
-        variants, positions, offsets = res
-        gvl_vars = np.split(variants, offsets[1:-1])
-        gvl_poss = np.split(positions, offsets[1:-1])
-
-        for query, gvl_var, gvl_pos in zip(
-            sel_args["queries"].itertuples(), gvl_vars, gvl_poss
-        ):
-            sample_idx = vcf.samples.index(query.sample)
-            region_string = (
-                f"{query.contig}:{query.start+1}-{query.start + sel_args['length']}"
-            )
-            _vcf_var = []
-            _vcf_pos = []
-            for variant in vcf(region_string):
-                geno_string = variant.gt_bases[sample_idx]
-                geno = re.split(r"/|\|", geno_string)[query.ploid_idx].encode("ascii")
-                if geno == b"." and sel_args["missing_value"] == "reference":
-                    geno = variant.REF.encode("ascii")
-                elif geno == b"." and sel_args["missing_value"] == "N":
-                    geno = b"N"
-                pos = variant.POS - 1  # we use 0-indexed positions
-                _vcf_var.append(geno)
-                _vcf_pos.append(pos)
-            vcf_var = np.array(_vcf_var)
-            vcf_pos = np.array(_vcf_pos)
-            np.testing.assert_equal(gvl_var, vcf_var)
-            np.testing.assert_equal(gvl_pos, vcf_pos)
+@given(
+    queries=strategy_varseq_query(varseq(sequence(data_dir()), variants(data_dir()))),
+    length=st.integers(600, 1200),
+)
+def test_varseq(
+    varseq: gvl.VarSequence, queries: gvl.Queries, length: int, data_dir: Path
+):
+    raise NotImplementedError

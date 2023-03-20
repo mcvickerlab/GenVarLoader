@@ -12,45 +12,47 @@ import genvarloader.loaders as gvl
 
 
 @fixture
-def wdir():
-    return Path(genvarloader.__file__).parent / "tests"
+def data_dir():
+    return Path(genvarloader.__file__).parent / "tests" / "data"
 
 
-def strategy_coverage_query(coverage: gvl.Coverage):
+@fixture
+def coverage(data_dir: Path):
+    return gvl.Coverage(data_dir / "coverage.zarr")
+
+
+def strategy_coverage_queries(coverage: gvl.Coverage):
     longest_contig = max(coverage.contig_lengths.values())
     contig = st_pd.column(
-        name="contig", elements=st.sampled_from(list(coverage.tstores.keys()))
+        name="contig", elements=st.sampled_from(list(coverage.tstores.keys()))  # type: ignore
     )
-    start = st_pd.column(name="start", elements=st.integers(0, longest_contig + 1))
-    strand = st_pd.column(name="strand", elements=st.sampled_from(["+", "-"]))
+    start = st_pd.column(name="start", elements=st.integers(0, longest_contig + 1))  # type: ignore
+    strand = st_pd.column(name="strand", elements=st.sampled_from(["+", "-"]))  # type: ignore
     sample = st_pd.column(
-        name="sample", elements=st.sampled_from(list(coverage.samples))
+        name="sample", elements=st.sampled_from(list(coverage.samples))  # type: ignore
     )
-    ploid_idx = st_pd.column(name="ploid_idx", elements=st.integers(0, 1))
+    ploid_idx = st_pd.column(name="ploid_idx", elements=st.integers(0, 1))  # type: ignore
     df = st_pd.data_frames(columns=[contig, start, strand, sample, ploid_idx])
     return df.map(gvl.Queries)
 
 
-def strategy_length():
-    return st.integers(600, 1200).filter(lambda x: x % 2 == 0)
-
-
-@fixture
-def coverage(wdir: Path):
-    return gvl.Coverage(wdir / "data" / "coverage.zarr")
-
-
-@given(queries=strategy_coverage_query(coverage(wdir())), length=strategy_length())
+@given(
+    queries=strategy_coverage_queries(coverage(data_dir())),
+    length=st.integers(600, 1200),
+)
 def test_coverage(
-    coverage: gvl.Coverage, queries: gvl.Queries, length: int, wdir: Path
+    coverage: gvl.Coverage, queries: gvl.Queries, length: int, data_dir: Path
 ):
-    # (n l)
-    covs = coverage.sel(queries, length)
-    with pysam.AlignmentFile(str(wdir / "data" / "coverage.bam")) as bam:
-        for i, query in enumerate(queries.itertuples()):
-            end = query.start + length
-            bam_cov = np.stack(
-                bam.count_coverage(query.contig, query.start, end, read_callback="all"),
-                axis=1,
-            ).sum(1)
-            assert np.testing.assert_equal(covs[i], bam_cov)
+    for (sample, sample_queries) in queries.groupby("sample"):
+        # (n l)
+        covs = coverage.sel(sample_queries, length)  # type: ignore
+        with pysam.AlignmentFile(str(data_dir / f"{sample}.bam")) as bam:
+            for i, query in enumerate(sample_queries.itertuples()):
+                end = query.start + length
+                bam_cov = np.stack(
+                    bam.count_coverage(
+                        query.contig, query.start, end, read_callback="all"
+                    ),
+                    axis=1,
+                ).sum(1)
+                assert np.testing.assert_equal(covs[i], bam_cov)

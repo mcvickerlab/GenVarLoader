@@ -12,39 +12,39 @@ import genvarloader.loaders as gvl
 
 
 @fixture
-def wdir():
-    return Path(genvarloader.__file__).parent / "tests"
+def data_dir():
+    return Path(genvarloader.__file__).parent / "tests" / "data"
 
 
 @fixture
-def sequence(wdir: Path):
-    return gvl.Sequence(wdir / "data" / "grch38.20.21.zarr")
+def sequence(dat_dir: Path):
+    return gvl.Sequence(dat_dir / "grch38.20.21.zarr")
 
 
 def strategy_sequence_queries(sequence: gvl.Sequence):
     longest_contig = max(sequence.contig_lengths.values())
     contig = st_pd.column(
-        name="contig", elements=st.sampled_from(list(sequence.tstores.keys()))
+        name="contig", elements=st.sampled_from(list(sequence.tstores.keys()))  # type: ignore
     )
-    start = st_pd.column(name="start", elements=st.integers(0, longest_contig + 1))
-    strand = st_pd.column(name="strand", elements=st.sampled_from(["+", "-"]))
+    start = st_pd.column(name="start", elements=st.integers(0, longest_contig + 1))  # type: ignore
+    strand = st_pd.column(name="strand", elements=st.sampled_from(["+", "-"]))  # type: ignore
     df = st_pd.data_frames(columns=[contig, start, strand])
     return df.map(gvl.Queries)
 
 
-def strategy_length():
-    return st.integers(600, 1200).filter(lambda x: x % 2 == 0)
+@given(
+    queries=strategy_sequence_queries(sequence(data_dir())),
+    length=st.integers(600, 1200),
+)
+def test_sequence(
+    sequence: gvl.Sequence, queries: gvl.Queries, length: int, data_dir: Path
+):
+    seqs = sequence.sel(queries, length, encoding="bytes").astype("U")
+    ref_fasta = data_dir / "fasta" / "grch38.20.21.fa.gz"
 
-
-@given(queries=strategy_sequence_queries(sequence(wdir())))
-def test_zarrsequence(sequence: gvl.Sequence, sel_args: Dict, wdir: Path):
-    seqs = sequence.sel(**sel_args).astype("U")
-    ref_fasta = wdir / "data" / "fasta" / "grch38.20.21.fa.gz"
-
-    for seq, query in zip(seqs, sel_args["queries"].itertuples()):
+    for seq, query in zip(seqs, queries.itertuples()):
         contig = query.contig
         start = query.start
-        length = sel_args["length"]
         with FastaFile(str(ref_fasta)) as f:
             ref_seq = f.fetch(contig, start, start + length)
         assert ref_seq == "".join(seq)

@@ -12,44 +12,43 @@ import genvarloader
 import genvarloader.loaders as gvl
 
 
+@fixture
+def data_dir():
+    return Path(genvarloader.__file__).parent / "tests" / "data"
+
+
+@fixture
+def variants(data_dir: Path):
+    zarrs = [
+        data_dir / "CDS-OJhAUD_cnn_filtered.zarr",
+        data_dir / "CDS-oZPNvc_cnn_filtered.zarr",
+    ]
+    sample_ids = ["OCI-AML5", "NCI-H660"]
+    return gvl.Variants.create(zarrs=zarrs, sample_ids=sample_ids)
+
+
 def strategy_variants_queries(variants: gvl.Variants):
     longest_contig = int(250e6)
     contigs = [str(i) for i in range(1, 23)] + ["X", "Y"]
-    contig = st_pd.column(name="contig", elements=st.sampled_from(contigs))
-    start = st_pd.column(name="start", elements=st.integers(0, longest_contig + 1))
+    contig = st_pd.column(name="contig", elements=st.sampled_from(contigs))  # type: ignore
+    start = st_pd.column(name="start", elements=st.integers(0, longest_contig + 1))  # type: ignore
     sample = st_pd.column(
-        name="sample", elements=st.sampled_from(list(variants.samples))
+        name="sample", elements=st.sampled_from(list(variants.samples))  # type: ignore
     )
-    ploid_idx = st_pd.column(name="ploid_idx", elements=st.integers(0, 1))
+    ploid_idx = st_pd.column(name="ploid_idx", elements=st.integers(0, 1))  # type: ignore
     df = st_pd.data_frames(columns=[contig, start, sample, ploid_idx])
     return df.map(gvl.Queries)
 
 
-def strategy_length():
-    return st.integers(600, 1200).filter(lambda x: x % 2 == 0)
-
-
-@fixture
-def wdir():
-    return Path(genvarloader.__file__).parent / "tests"
-
-
-@fixture
-def variants():
-    return gvl.Variants.create(
-        {
-            "OCI-AML5": "/cellar/users/dlaub/repos/genome-loader/sbox/CDS-OJhAUD_cnn_filtered.zarr",
-            "NCI-H660": "/cellar/users/dlaub/repos/genome-loader/sbox/CDS-oZPNvc_cnn_filtered.zarr",
-        }
-    )
-
-
-@given(queries=strategy_variants_queries(variants()), length=strategy_length())
+@given(
+    queries=strategy_variants_queries(variants(data_dir())),
+    length=st.integers(600, 1200),
+)
 def test_variants(
-    variants: gvl.Variants, queries: gvl.Queries, length: int, wdir: Path
+    variants: gvl.Variants, queries: gvl.Queries, length: int, data_dir: Path
 ):
     res = variants.sel(queries, length)
-    vcf = VCF(str(wdir / "data" / "ccle_snp_wes.reduced.bcf"))
+    vcf = VCF(str(data_dir / "ccle_snp_wes.reduced.bcf"))
     if res["alleles"].size == 0:
         for query in queries.itertuples():
             region_string = f"{query.contig}:{query.start+1}-{query.start + length}"
