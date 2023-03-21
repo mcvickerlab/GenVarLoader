@@ -4,7 +4,7 @@ archive/
 test.bed.flc.zarr
 test.zarr
 examples/
-genvarloader/tests/data/grch38.20.21.zarr
+genvarloader/tests/data/*
 results/
 
 # Byte-compiled / optimized / DLL files
