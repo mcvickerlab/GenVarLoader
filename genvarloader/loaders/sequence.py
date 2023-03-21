@@ -97,7 +97,7 @@ class Sequence:
             loaders.
         """
         self.path = Path(zarr_path)
-        root = zarr.open_group(self.path, mode="r")
+        root = cast(zarr.Group, zarr.open_consolidated(str(self.path), mode="r"))
         self.encodings = {
             SequenceEncoding(enc)
             for enc in root.group_keys()

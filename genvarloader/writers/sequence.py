@@ -78,4 +78,6 @@ def fasta_to_zarr(
             )
             gc.collect()
 
+    zarr.consolidate_metadata(str(out_path))
+
     logging.info(f"Finished in {perf_counter() - t_start_io:.2f} seconds.")

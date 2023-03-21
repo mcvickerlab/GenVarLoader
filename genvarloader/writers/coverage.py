@@ -174,6 +174,8 @@ def write_coverages(
 
     joblib.Parallel(n_jobs, prefer="threads")(tasks)
 
+    zarr.consolidate_metadata(str(out_zarr))
+
 
 def tn5_coverage(
     sample_idx: int,
@@ -290,3 +292,5 @@ def write_tn5_coverages(
         n_jobs = -2  # use all but 1 CPU
 
     joblib.Parallel(n_jobs, prefer="threads")(tasks)
+
+    zarr.consolidate_metadata(str(out_zarr))

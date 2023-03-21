@@ -107,7 +107,7 @@ class _VCFTSDataset:
     async def create(cls, path: Path, ts_kwargs: Dict):
         self = cls()
 
-        z = zarr.open_group(path, "r")
+        z = cast(zarr.Group, zarr.open_consolidated(str(path), mode="r"))
 
         self.sample_id = cast(str, z["sample_id"][0])
 

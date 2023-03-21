@@ -210,3 +210,5 @@ def write_zarr(
     to_del = [g for g in z.keys() if g not in gvl_keys]
     for g in to_del:
         del z[g]
+
+    zarr.consolidate_metadata(str(out_zarr))

@@ -45,7 +45,7 @@ class Coverage:
 
     def __init__(self, zarr_path: PathType) -> None:
         self.path = Path(zarr_path)
-        root = zarr.open_group(self.path, mode="r")
+        root = cast(zarr.Group, zarr.open_consolidated(str(self.path), mode="r"))
 
         self.contig_lengths: Dict[str, int] = root.attrs["contig_lengths"]
 
