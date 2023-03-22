@@ -55,18 +55,18 @@ def read_narrowpeak(narrowpeak_path: PathType) -> pd.DataFrame:
         header=None,
         skiprows=lambda x: x in ["track", "browser"],
         names=[
-            "contig",
-            "start",
-            "end",
+            "chrom",
+            "chromStart",
+            "chromEnd",
             "name",
             "score",
             "strand",
-            "signalval",
-            "pval",
-            "qval",
+            "signalValue",
+            "pValue",
+            "qValue",
             "peak",
         ],
-        dtype={"contig": str},
+        dtype={"chrom": str},
     )
     return narrowpeaks
 
@@ -76,9 +76,7 @@ def read_narrowpeak_as_queries(
     length: int,
     samples: Optional[List[str]] = None,
 ) -> Queries:
-    """Convert a narrow peak file to a queries file, optionally adding samples.
-
-    NOTE: unmarked strands "." will be converted to be positive strands "+"
+    """Read a .narrowPeak file as queries centered around peaks, optionally adding samples.
 
     Parameters
     ----------
@@ -94,10 +92,71 @@ def read_narrowpeak_as_queries(
     queries = read_narrowpeak(narrowpeak_path)
     # peak loc = start + peak offset
     # query start = peak loc - ceil(length / 2)
-    queries["start"] = (
-        queries["start"] + queries["peak"] - np.ceil(length / 2)
+    queries["chromStart"] = (
+        queries["chromStart"] + queries["peak"] - np.ceil(length / 2)
     ).astype(int)
-    queries = queries[["contig", "start", "strand"]].replace({"strand": {".": "+"}})
+    queries = queries[["chrom", "chromStart", "strand"]].rename(
+        columns={"chrom": "contig", "chromStart": "start"}
+    )
+    if samples is not None:
+        sample_df = pd.DataFrame({"sample": samples})
+        queries = queries.merge(sample_df, how="cross")
+    queries = QueriesSchema.validate(queries)
+    queries = cast(Queries, queries)
+    return queries
+
+
+def read_broadpeak(broadpeak_path: PathType):
+    broadpeaks = pd.read_csv(
+        broadpeak_path,
+        sep="\t",
+        header=None,
+        skiprows=lambda x: x in ["track", "browser"],
+        names=[
+            "chrom",
+            "chromStart",
+            "chromEnd",
+            "name",
+            "score",
+            "strand",
+            "signalValue",
+            "pValue",
+            "qValue",
+        ],
+        dtype={"chrom": str},
+    )
+    return broadpeaks
+
+
+def read_broadpeak_as_queries(
+    broadpeak_path: PathType,
+    length: int,
+    samples: Optional[List[str]] = None,
+) -> Queries:
+    """Read a .broadPeak file as queries centered around them, optionally adding samples.
+
+    Parameters
+    ----------
+    narrowpeak_path : str or Path
+    length : int
+        Length of desired queries.
+    samples : list[str], optional
+
+    Returns
+    -------
+    queries : Queries
+    """
+    queries = read_broadpeak(broadpeak_path)
+    # midpoint = (start + end) / 2
+    # query start = midpoint - length / 2
+    queries["chromStart"] = (
+        ((queries["chromStart"] + queries["chromEnd"]) / 2 - length / 2)
+        .round()
+        .astype(int)
+    )
+    queries = queries[["chrom", "chromStart", "strand"]].rename(
+        columns={"chrom": "contig", "chromStart": "start"}
+    )
     if samples is not None:
         sample_df = pd.DataFrame({"sample": samples})
         queries = queries.merge(sample_df, how="cross")

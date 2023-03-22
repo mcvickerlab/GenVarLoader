@@ -225,7 +225,7 @@ class Sequence:
             out[i, query.out_start : query.out_end] = read
 
         # reverse complement negative stranded queries
-        to_rev_comp = cast(NDArray[np.bool_], (queries.strand == "-").values)
+        to_rev_comp = cast(NDArray[np.bool_], (queries.strand == "-").to_numpy())
         if encoding is SequenceEncoding.BYTES and to_rev_comp.any():
             out[to_rev_comp] = rev_comp_byte(out[to_rev_comp], self.alphabet)
         elif encoding is SequenceEncoding.ONEHOT:

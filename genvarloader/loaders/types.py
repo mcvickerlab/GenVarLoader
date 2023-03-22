@@ -37,7 +37,7 @@ class NatOrderCategory(pandas_engine.Category):
 class QueriesSchema(pa.SchemaModel):
     contig: Series[NatOrderCategory] = pa.Field(coerce=True)  # type: ignore
     start: Series[pa.Int]
-    strand: Optional[Series[pa.Category]] = pa.Field(coerce=True, isin=["+", "-"])
+    strand: Optional[Series[pa.Category]] = pa.Field(coerce=True, isin=["+", "-", "."])
     sample: Optional[Series[pa.Category]] = pa.Field(coerce=True)
     ploid_idx: Optional[Series[pa.Int]] = pa.Field(ge=0)
 

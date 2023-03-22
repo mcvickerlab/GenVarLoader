@@ -23,11 +23,11 @@ def variants(data_dir: Path):
         data_dir / "CDS-RL1iWJ.zarr",
         data_dir / "CDS-69IkMA.zarr",
     ]
-    sample_ids = ["OCI-AML5", "NCI-H660"]
-    return gvl.Variants.create(zarrs=zarrs, sample_ids=sample_ids)
+    return gvl.Variants.create(zarrs=zarrs)
 
 
 def strategy_variants_queries(variants: gvl.Variants):
+    # we don't store contig lengths in variant files, so band-aid for now is to use longest contig in humans
     longest_contig = int(250e6)
     contigs = [str(i) for i in range(1, 23)] + ["X", "Y"]
     contig = st_pd.column(name="contig", elements=st.sampled_from(contigs))  # type: ignore

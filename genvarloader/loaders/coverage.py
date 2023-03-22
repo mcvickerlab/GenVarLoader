@@ -164,7 +164,7 @@ class Coverage:
             out = cpm_normalization(counts=out, total_counts=total_counts)
 
         # reverse negative stranded queries
-        to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").values)
+        to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").to_numpy())
         out[to_rev_comp] = np.flip(out[to_rev_comp], axis=-1)
 
         return out
