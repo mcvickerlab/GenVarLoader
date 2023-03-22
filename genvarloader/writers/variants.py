@@ -122,12 +122,13 @@ def write_zarr(
     does not support filters nor object/byte arrays."""
     if vcf is None:
         raise ValueError("Need an input VCF.")
-    if not overwrite and out_zarr.exists():
-        raise ValueError("Zarr already exists.")
 
     if out_zarr.is_dir():
-        vcf_stem = re.sub(r"(\.vcf|\.vcf\.gz|\.bcf)$", "", str(vcf))
+        vcf_stem = re.sub(r"(\.vcf|\.vcf\.gz|\.bcf)$", "", str(vcf.name))
         out_zarr = out_zarr / f"{vcf_stem}.zarr"
+
+    if not overwrite and out_zarr.exists():
+        raise ValueError("Zarr already exists.")
 
     cluster = LocalCluster(n_workers=n_jobs // 2, threads_per_worker=1)
     client = Client(cluster)
