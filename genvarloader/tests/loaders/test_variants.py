@@ -20,8 +20,8 @@ def data_dir():
 @fixture
 def variants(data_dir: Path):
     zarrs = [
-        data_dir / "CDS-OJhAUD_cnn_filtered.zarr",
-        data_dir / "CDS-oZPNvc_cnn_filtered.zarr",
+        data_dir / "CDS-RL1iWJ.zarr",
+        data_dir / "CDS-69IkMA.zarr",
     ]
     sample_ids = ["OCI-AML5", "NCI-H660"]
     return gvl.Variants.create(zarrs=zarrs, sample_ids=sample_ids)

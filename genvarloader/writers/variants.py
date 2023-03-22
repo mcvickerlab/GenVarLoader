@@ -4,11 +4,9 @@ from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, cast
 
-import dask
-import joblib
+import cyvcf2
 import numpy as np
 import zarr
-from dask.delayed import delayed
 from dask.distributed import Client, LocalCluster
 from numpy.typing import NDArray
 from sgkit.io.vcf import vcf_to_zarr
@@ -130,6 +128,13 @@ def write_zarr(
     if not overwrite and out_zarr.exists():
         raise ValueError("Zarr already exists.")
 
+    # check that VCF has just one sample
+    _vcf = cyvcf2.VCF(vcf)
+    if len(_vcf.samples) > 1:
+        raise ValueError("VCF has more than one sample.")
+    _vcf.close()
+    del _vcf
+
     cluster = LocalCluster(n_workers=n_jobs // 2, threads_per_worker=1)
     client = Client(cluster)
 
@@ -139,7 +144,6 @@ def write_zarr(
 
     # add contig offsets to reduce initialization time
     v_contig = cast(NDArray, z["variant_contig"][:])
-
     contigs_with_variants, contig_offsets = np.unique(v_contig, return_index=True)
     z.create_dataset(
         "contig_offsets",
@@ -148,13 +152,24 @@ def write_zarr(
         chunks=1,
         overwrite=overwrite,
     )
+
+    # set attributes
     contigs = cast(List[str], z.attrs["contigs"])
     contig_idx = dict(zip(contigs, range(len(contigs))))
-    z.attrs["contig_idx"] = contig_idx
-    z.attrs["contig_offset_idx"] = dict(
+    contig_offset_idx = dict(
         zip(contigs_with_variants.astype(str), range(len(contigs_with_variants)))
     )
+    new_attrs = {
+        "contig_idx": contig_idx,
+        "contig_offset_idx": contig_offset_idx,
+        "sample_id": z["sample_id"][0],
+    }
+    keys = z.attrs.keys()
+    for k in keys:
+        del z.attrs[k]
+    z.attrs.update(new_attrs)
 
+    # edit arrays/groups
     gvl_keys = {
         "variant_allele",
         "variant_contig",

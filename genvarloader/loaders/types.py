@@ -109,7 +109,7 @@ class _VCFTSDataset:
 
         z = cast(zarr.Group, zarr.open_consolidated(str(path), mode="r"))
 
-        self.sample_id = cast(str, z["sample_id"][0])
+        self.sample_id = cast(str, z.attrs["sample_id"])
 
         # We have to eagerly read all the positions for a contig downstream
         # so there's no need to make tensorstores here.
