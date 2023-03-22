@@ -24,9 +24,9 @@ from genvarloader.utils import run_shell
 #     overwrite: bool = False,
 # ):
 #     if not vcf_dir.is_dir():
-#         raise ValueError
+#         raise ValueError('Path to VCF directory is a file or does not exist.')
 #     if not out_dir.is_dir():
-#         raise ValueError
+#         raise ValueError('Path to output directory is a file or does not exist.')
 
 #     vcfs: List[Path] = (
 #         list(vcf_dir.glob("*.vcf"))
@@ -60,7 +60,7 @@ def filt(
 
     # check that bcftools is installed
     try:
-        status = run_shell("type bcftools")
+        status = run_shell("which bcftools")
     except CalledProcessError:
         raise RuntimeError("Filtering requires bcftools to be installed.")
 
@@ -80,7 +80,6 @@ def filt(
     status = run_shell(cmd)
 
 
-# When writing WGS this hangs due to unmanaged memory issues.
 # def write_zarrs(
 #     vcf_dir: Path,
 #     zarr_dir: Path,
@@ -126,6 +125,10 @@ def write_zarr(
     if not overwrite and out_zarr.exists():
         raise ValueError("Zarr already exists.")
 
+    if out_zarr.is_dir():
+        vcf_stem = re.sub(r"(\.vcf|\.vcf\.gz|\.bcf)$", "", str(vcf))
+        out_zarr = out_zarr / f"{vcf_stem}.zarr"
+
     cluster = LocalCluster(n_workers=n_jobs // 2, threads_per_worker=1)
     client = Client(cluster)
 
@@ -148,7 +151,7 @@ def write_zarr(
     contig_idx = dict(zip(contigs, range(len(contigs))))
     z.attrs["contig_idx"] = contig_idx
     z.attrs["contig_offset_idx"] = dict(
-        zip(contigs_with_variants, range(len(contigs_with_variants)))
+        zip(contigs_with_variants.astype(str), range(len(contigs_with_variants)))
     )
 
     gvl_keys = {

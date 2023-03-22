@@ -38,6 +38,7 @@ def fasta_to_zarr_cli(
     ),
     compression_level: int = typer.Option(5, min=0, max=9),
 ):
+    """Write a FASTA file to Zarr."""
     from genvarloader.writers.sequence import fasta_to_zarr
 
     if not fasta_path.exists():

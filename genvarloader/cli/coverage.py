@@ -8,7 +8,7 @@ import typer
 
 from genvarloader.types import Tn5CountMethod
 
-app = typer.Typer()
+app = typer.Typer(help="Write BAM files to Zarr using various read counting methods.")
 
 
 def read_in_bams(in_bams: Path):
@@ -48,10 +48,13 @@ def depth_only(
     ),
     n_jobs: Optional[int] = typer.Option(None, min=1),
 ):
-    """Write plain depth to a coverage Zarr.
+    """Write plain depth from BAM to Zarr. If the Zarr already exists, this will add samples, possibly overwriting.
 
     NOTE: this is relatively memory intensive and requires at least 80x bytes of memory than the longest contig processed PER JOB.
     For example, for the human genome the longest contig is chromosome 1 at ~250 mb -> each job needs upwards of 10 GB of RAM."""
+
+    # This is memory intensive because of how pysam.AlignmentFile.count_coverage is implemented.
+
     from genvarloader.writers.coverage import write_coverages
 
     if n_jobs is None:
@@ -100,7 +103,7 @@ def tn5(
         "cutsite", help="What to count for coverage."
     ),
 ):
-    """Write Tn5 coverage from BAM to Zarr"""
+    """Write Tn5 depth from BAM to Zarr. If the Zarr already exists, this will add samples, possibly overwriting."""
     from genvarloader.writers.coverage import write_tn5_coverages
 
     _in_bams = read_in_bams(in_bams)
