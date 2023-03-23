@@ -3,11 +3,11 @@ from typing import Dict, Set, Union, cast
 
 import numba
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 from pyfaidx import Fasta, FastaVariant
 
 from genvarloader.loaders.sequence import Sequence
-from genvarloader.loaders.types import Queries
 from genvarloader.loaders.variants import Variants
 from genvarloader.types import ALPHABETS, PathType, SequenceAlphabet, SequenceEncoding
 from genvarloader.utils import bytes_to_ohe, rev_comp_byte
@@ -53,7 +53,7 @@ class VarSequence:
 
     def sel(
         self,
-        queries: Queries,
+        queries: pd.DataFrame,
         length: int,
         **kwargs,
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
@@ -61,7 +61,7 @@ class VarSequence:
 
         Parameters
         ----------
-        queries : Queries
+        queries : pd.DataFrame
         length : int
         **kwargs : dict
             encoding : 'bytes' or 'onehot', required
@@ -77,7 +77,7 @@ class VarSequence:
 
     async def async_sel(
         self,
-        queries: Queries,
+        queries: pd.DataFrame,
         length: int,
         **kwargs,
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
@@ -85,7 +85,7 @@ class VarSequence:
 
         Parameters
         ----------
-        queries : Queries
+        queries : pd.DataFrame
         length : int
         **kwargs : dict
             sorted : bool, default False
@@ -102,7 +102,7 @@ class VarSequence:
             queries["strand"] = queries.strand.astype("category")
 
         encoding = SequenceEncoding(kwargs.get("encoding"))
-        positive_stranded_queries = cast(Queries, queries.assign(strand="+"))
+        positive_stranded_queries = queries.assign(strand="+")
         positive_stranded_queries["strand"] = positive_stranded_queries.strand.astype(
             "category"
         )
@@ -150,7 +150,7 @@ class _PyfaidxVarSequence:
         with Fasta(self.reference) as ref:
             self.contig_lengths: Dict[str, int] = {k: len(v) for k, v in ref.items()}
 
-    def sel(self, queries: Queries, length: int, **kwargs) -> NDArray[np.bytes_]:
+    def sel(self, queries: pd.DataFrame, length: int, **kwargs) -> NDArray[np.bytes_]:
         if "strand" not in queries:
             queries["strand"] = "+"
             queries["strand"] = queries.strand.astype("category")

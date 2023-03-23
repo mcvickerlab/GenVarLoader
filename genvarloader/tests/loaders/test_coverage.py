@@ -3,6 +3,7 @@ from pathlib import Path
 import hypothesis.extra.pandas as st_pd
 import hypothesis.strategies as st
 import numpy as np
+import pandas as pd
 import pysam
 from hypothesis import given
 from pytest_cases import fixture
@@ -41,7 +42,7 @@ def strategy_coverage_queries(coverage: gvl.Coverage):
     length=st.integers(600, 1200),
 )
 def test_coverage(
-    coverage: gvl.Coverage, queries: gvl.Queries, length: int, data_dir: Path
+    coverage: gvl.Coverage, queries: pd.DataFrame, length: int, data_dir: Path
 ):
     for (sample, sample_queries) in queries.groupby("sample"):
         # (n l)

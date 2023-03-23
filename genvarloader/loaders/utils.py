@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import tensorstore as ts
 
-from genvarloader.loaders.types import Queries, QueriesSchema, _TStore
+from genvarloader.loaders.types import Queries, _TStore
 from genvarloader.types import PathType
 
 
@@ -23,7 +23,7 @@ def ts_readonly_zarr(path: PathType, **kwargs) -> Future[_TStore]:
     )
 
 
-def read_queries(queries_path: PathType) -> Queries:
+def read_queries(queries_path: PathType) -> pd.DataFrame:
     """Read queries from a file. Can be a CSV, TSV, or Apache feather file. Raises an error otherwise.
 
     Parameters
@@ -43,8 +43,7 @@ def read_queries(queries_path: PathType) -> Queries:
 
     # read and validate
     queries = cast(pd.DataFrame, read_fn(queries_path))
-    queries = QueriesSchema.validate(queries)
-    queries = cast(Queries, queries)
+    queries = Queries(queries)
     return queries
 
 
@@ -75,7 +74,7 @@ def read_narrowpeak_as_queries(
     narrowpeak_path: PathType,
     length: int,
     samples: Optional[List[str]] = None,
-) -> Queries:
+) -> pd.DataFrame:
     """Read a .narrowPeak file as queries centered around peaks, optionally adding samples.
 
     Parameters
@@ -87,7 +86,7 @@ def read_narrowpeak_as_queries(
 
     Returns
     -------
-    queries : Queries
+    queries : pd.DataFrame
     """
     queries = read_narrowpeak(narrowpeak_path)
     # peak loc = start + peak offset
@@ -101,8 +100,7 @@ def read_narrowpeak_as_queries(
     if samples is not None:
         sample_df = pd.DataFrame({"sample": samples})
         queries = queries.merge(sample_df, how="cross")
-    queries = QueriesSchema.validate(queries)
-    queries = cast(Queries, queries)
+    queries = Queries(queries)
     return queries
 
 
@@ -132,7 +130,7 @@ def read_broadpeak_as_queries(
     broadpeak_path: PathType,
     length: int,
     samples: Optional[List[str]] = None,
-) -> Queries:
+) -> pd.DataFrame:
     """Read a .broadPeak file as queries centered around them, optionally adding samples.
 
     Parameters
@@ -144,7 +142,7 @@ def read_broadpeak_as_queries(
 
     Returns
     -------
-    queries : Queries
+    queries : pd.DataFrame
     """
     queries = read_broadpeak(broadpeak_path)
     # midpoint = (start + end) / 2
@@ -160,6 +158,5 @@ def read_broadpeak_as_queries(
     if samples is not None:
         sample_df = pd.DataFrame({"sample": samples})
         queries = queries.merge(sample_df, how="cross")
-    queries = QueriesSchema.validate(queries)
-    queries = cast(Queries, queries)
+    queries = Queries(queries)
     return queries

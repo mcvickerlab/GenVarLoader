@@ -10,7 +10,11 @@ from typing_extensions import assert_never
 from genvarloader.loaders.coverage import Coverage, bin_coverage
 from genvarloader.loaders.sequence import Sequence
 from genvarloader.loaders.types import AsyncLoader, Loader, Queries
-from genvarloader.loaders.utils import read_narrowpeak_as_queries, read_queries
+from genvarloader.loaders.utils import (
+    read_broadpeak_as_queries,
+    read_narrowpeak_as_queries,
+    read_queries,
+)
 from genvarloader.loaders.variants import Variants
 from genvarloader.loaders.varseq import VarSequence
 from genvarloader.types import PathType
@@ -32,6 +36,7 @@ __all__ = [
     "bin_coverage",
     "read_queries",
     "read_narrowpeak_as_queries",
+    "read_broadpeak_as_queries",
 ]
 
 
@@ -105,12 +110,12 @@ class GenVarLoader:
         }
         self.transforms = {} if transforms is None else transforms
 
-    def sel(self, queries: Queries, length: int, **kwargs) -> Dict[str, NDArray]:
+    def sel(self, queries: pd.DataFrame, length: int, **kwargs) -> Dict[str, NDArray]:
         out = asyncio.run(self.async_sel(queries, length, **kwargs))
         return out
 
     async def async_sel(
-        self, queries: Queries, length: int, **kwargs
+        self, queries: pd.DataFrame, length: int, **kwargs
     ) -> Dict[str, NDArray]:
 
         # get sync output
@@ -189,7 +194,7 @@ class GenVarLoader:
     def write_queries(
         self,
         out_path: PathType,
-        queries: Queries,
+        queries: pd.DataFrame,
         length: int,
         sel_kwargs: Optional[Dict[str, Any]] = None,
         batch_size=1028,
@@ -237,7 +242,7 @@ class GenVarLoader:
         )
         if end_equal_sized_batches != len(queries):
             batches.append(queries.iloc[end_equal_sized_batches:])  # type: ignore
-        batches = cast(List[Queries], batches)
+        batches = cast(List[pd.DataFrame], batches)
 
         # write batches
         out_zarr = zarr.open_group(str(out_path))
@@ -251,7 +256,7 @@ class GenVarLoader:
     def write_queries_to_anndata(
         self,
         out_path: PathType,
-        queries: Queries,
+        queries: pd.DataFrame,
         length: int,
         X_feature: str,
         ohe: bool = True,
@@ -376,7 +381,7 @@ class GenVarLoader:
         )
         if end_equal_sized_batches != len(queries):
             batches.append(queries.iloc[end_equal_sized_batches:])  # type: ignore
-        batches = cast(List[Queries], batches)
+        batches = cast(List[pd.DataFrame], batches)
 
         # write batches
         for batch in batches:

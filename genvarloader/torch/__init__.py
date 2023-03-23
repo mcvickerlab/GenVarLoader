@@ -73,10 +73,10 @@ __all__ = ["TorchCollator", "ZarrCollator", "QueriesDataset", "SortedQuerySample
 
 
 class QueriesDataset(Dataset):
-    def __init__(self, queries: Queries) -> None:
-        self.queries = queries
+    def __init__(self, queries: pd.DataFrame) -> None:
+        self.queries = Queries(queries)
 
-    def __getitem__(self, index) -> Queries:
+    def __getitem__(self, index) -> pd.DataFrame:
         return self.queries.iloc[index]
 
     def __len__(self):
@@ -104,7 +104,7 @@ class TorchCollator:
                 """
             )
 
-    def __call__(self, queries: Queries) -> Dict[str, torch.Tensor]:
+    def __call__(self, queries: pd.DataFrame) -> Dict[str, torch.Tensor]:
         _out = self.gvl.sel(queries, self.length, **self.sel_kwargs)
         out = {k: torch.as_tensor(v) for k, v in _out.items()}
         out["index"] = torch.as_tensor(queries.index.values)
@@ -148,7 +148,7 @@ class ZarrCollator:
 class SortedQuerySampler(Sampler):
     def __init__(
         self,
-        queries: Queries,
+        queries: pd.DataFrame,
         batch_size: int = 1,
         sort_order: Optional[List[str]] = None,
         seed: Optional[int] = None,
@@ -178,11 +178,8 @@ class SortedQuerySampler(Sampler):
             )
 
         # shuffle queries
-        queries = cast(
-            Queries,
-            queries.groupby(sort_order, sort=True).sample(
-                frac=1, replace=False, random_state=seed
-            ),
+        queries = queries.groupby(sort_order, sort=True).sample(
+            frac=1, replace=False, random_state=seed
         )
 
         # split batches
@@ -194,9 +191,9 @@ class SortedQuerySampler(Sampler):
         if end_equal_sized_batches != len(queries):
             batches.append(queries.iloc[end_equal_sized_batches:])  # type: ignore
 
-        self.batches = cast(List[Queries], batches)
+        self.batches = cast(List[pd.DataFrame], batches)
 
-    def __iter__(self) -> Generator[Queries, None, None]:
+    def __iter__(self) -> Generator[pd.DataFrame, None, None]:
         for batch in self.batches:
             yield batch
 

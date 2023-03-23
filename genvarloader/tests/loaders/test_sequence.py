@@ -1,11 +1,8 @@
 from pathlib import Path
-from typing import Dict
 
-import hypothesis.extra.pandas as st_pd
-import hypothesis.strategies as st
-from hypothesis import given
+import pandas as pd
 from pysam import FastaFile
-from pytest_cases import fixture
+from pytest_cases import fixture, parametrize_with_cases
 
 import genvarloader
 import genvarloader.loaders as gvl
@@ -21,23 +18,72 @@ def sequence(dat_dir: Path):
     return gvl.Sequence(dat_dir / "grch38.20.21.zarr")
 
 
-def strategy_sequence_queries(sequence: gvl.Sequence):
-    longest_contig = max(sequence.contig_lengths.values())
-    contig = st_pd.column(
-        name="contig", elements=st.sampled_from(list(sequence.tstores.keys()))  # type: ignore
+def queries_multiple_contigs(sequence: gvl.Sequence):
+    contigs = list(sequence.contig_lengths.keys())
+    multiple_contigs = gvl.Queries(
+        {
+            "contig": contigs[:2],
+            "start": [0, 0],
+            "strand": ["+", "+"],
+        }
     )
-    start = st_pd.column(name="start", elements=st.integers(0, longest_contig + 1))  # type: ignore
-    strand = st_pd.column(name="strand", elements=st.sampled_from(["+", "-"]))  # type: ignore
-    df = st_pd.data_frames(columns=[contig, start, strand])
-    return df.map(gvl.Queries)
+    return multiple_contigs
 
 
-@given(
-    queries=strategy_sequence_queries(sequence(data_dir())),
-    length=st.integers(600, 1200),
-)
+def queries_rev_comp(sequence: gvl.Sequence):
+    contigs = list(sequence.contig_lengths.keys())
+    rev_comp = gvl.Queries(
+        {
+            "contig": [contigs[0]],
+            "start": [0],
+            "strand": ["-"],
+        }
+    )
+    return rev_comp
+
+
+def queries_negative_start(sequence: gvl.Sequence):
+    contigs = list(sequence.contig_lengths.keys())
+    negative_start = gvl.Queries(
+        {
+            "contig": [contigs[0]],
+            "start": [-1],
+            "strand": ["+"],
+        }
+    )
+    return negative_start
+
+
+def queries_out_of_bounds_end(sequence: gvl.Sequence):
+    contigs = list(sequence.contig_lengths.keys())
+    longest_contig = max(sequence.contig_lengths.values())
+    out_of_bounds_end = gvl.Queries(
+        {
+            "contig": [contigs[0]],
+            "start": [longest_contig + 1],
+            "strand": ["+"],
+        }
+    )
+    return out_of_bounds_end
+
+
+def queries_all(sequence: gvl.Sequence):
+    contigs = list(sequence.contig_lengths.keys())
+    longest_contig = max(sequence.contig_lengths.values())
+    q_all = gvl.Queries(
+        {
+            "contig": contigs[:3],
+            "start": [0, -1, longest_contig + 1],
+            "strand": ["+", "-", "."],
+        }
+    )
+    return q_all
+
+
+@parametrize_with_cases("queries", prefix="queries_")
+@parametrize_with_cases("length", [1, 600])
 def test_sequence(
-    sequence: gvl.Sequence, queries: gvl.Queries, length: int, data_dir: Path
+    sequence: gvl.Sequence, queries: pd.DataFrame, length: int, data_dir: Path
 ):
     seqs = sequence.sel(queries, length, encoding="bytes").astype("U")
     ref_fasta = data_dir / "fasta" / "grch38.20.21.fa.gz"

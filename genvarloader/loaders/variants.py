@@ -1,25 +1,70 @@
 import asyncio
 from asyncio import Future
 from pathlib import Path
-from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
 
 import numpy as np
+import pandas as pd
 import polars as pl
 import tiledbvcf
 import zarr
 from numpy.typing import NDArray
 from typing_extensions import Self
 
-from genvarloader.loaders.types import (
-    AsyncLoader,
-    Loader,
-    LoaderOutput,
-    Queries,
-    _TStore,
-    _VCFTSDataset,
-)
+from genvarloader.loaders.types import AsyncLoader, Loader, LoaderOutput, _TStore
 from genvarloader.loaders.utils import ts_readonly_zarr
 from genvarloader.types import PathType
+
+
+class _VCFTSDataset:
+    """A Zarr dataset for a single sample using TensorStore for I/O."""
+
+    sample_id: str
+    call_genotype: _TStore[np.int8]  # (v s p)
+    variant_allele: _TStore[np.uint8]  # (v a)
+    variant_contig: _TStore[np.int16]  # (v)
+    variant_position: zarr.Group  # (v)
+    contig_offsets: _TStore[np.integer]  # (c)
+    contig_idx: Dict[str, int]
+    contig_offset_idx: Dict[str, int]
+
+    def __init__(self) -> None:
+        self._initalized = False
+
+    @classmethod
+    async def create(cls, path: Path, ts_kwargs: Dict):
+        self = cls()
+
+        z = cast(zarr.Group, zarr.open_consolidated(str(path), mode="r"))
+
+        self.sample_id = cast(str, z.attrs["sample_id"])
+
+        # We have to eagerly read all the positions for a contig downstream
+        # so there's no need to make tensorstores here.
+        self.variant_position = cast(zarr.Group, z["variant_position"])
+
+        # open tensorstores
+        gvl_array_names = {
+            "call_genotype",
+            "contig_offsets",
+            "variant_allele",
+            "variant_contig",
+        }
+        arrays = [
+            ts_readonly_zarr(path.resolve() / n, **ts_kwargs) for n in gvl_array_names
+        ]
+        gvl_arrays = await asyncio.gather(*arrays)
+        self.call_genotype = gvl_arrays[0]
+        self.contig_offsets = gvl_arrays[1]
+        self.variant_allele = gvl_arrays[2]
+        self.variant_contig = gvl_arrays[3]
+
+        self.contig_idx = z.attrs["contig_idx"]
+        self.contig_offset_idx = z.attrs["contig_offset_idx"]
+
+        self._initalized = True
+
+        return self
 
 
 class Variants(AsyncLoader):
@@ -117,7 +162,7 @@ class Variants(AsyncLoader):
 
     def sel(
         self,
-        queries: Queries,
+        queries: pd.DataFrame,
         length: int,
         **kwargs,
     ) -> Dict[str, NDArray]:
@@ -125,7 +170,7 @@ class Variants(AsyncLoader):
 
         Parameters
         ----------
-        queries : Queries
+        queries : pd.DataFrame
             Must have the following columns: contig, start, sample, ploid_idx
         length: int
         **kwargs : dict, optional
@@ -146,7 +191,7 @@ class Variants(AsyncLoader):
 
     async def async_sel(
         self,
-        queries: Queries,
+        queries: pd.DataFrame,
         length: int,
         **kwargs,
     ) -> Dict[str, NDArray]:
@@ -154,7 +199,7 @@ class Variants(AsyncLoader):
 
         Parameters
         ----------
-        queries : Queries
+        queries : pd.DataFrame
             Must have the following columns: contig, start, sample, ploid_idx
         length: int
         **kwargs : dict, optional
@@ -175,7 +220,7 @@ class Variants(AsyncLoader):
                 "This Variants instance is uninitialized. Did you remember to use Variants.create(...)?"
             )
         # get variants, their positions, and how many are in each query
-        queries = cast(Queries, queries.reset_index(drop=True))
+        queries = cast(pd.DataFrame, queries.reset_index(drop=True))
         groups = queries.groupby(["sample", "contig"], sort=False)
 
         allele_ls: List[Future[NDArray]] = []
@@ -272,7 +317,7 @@ class TileDBVariants(Loader):
         self.path = Path(tdb_path)
         self.dataset = tiledbvcf.Dataset(tdb_path)
 
-    def sel(self, queries: Queries, length: int, **kwargs) -> LoaderOutput:
+    def sel(self, queries: pd.DataFrame, length: int, **kwargs) -> LoaderOutput:
         pl_queries = (
             pl.from_pandas(queries)
             .with_columns(

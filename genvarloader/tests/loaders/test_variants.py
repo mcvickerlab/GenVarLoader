@@ -1,12 +1,10 @@
 import re
 from pathlib import Path
 
-import hypothesis.extra.pandas as st_pd
-import hypothesis.strategies as st
 import numpy as np
+import pandas as pd
 from cyvcf2 import VCF
-from hypothesis import given
-from pytest_cases import fixture
+from pytest_cases import fixture, parametrize, parametrize_with_cases
 
 import genvarloader
 import genvarloader.loaders as gvl
@@ -26,26 +24,70 @@ def variants(data_dir: Path):
     return gvl.Variants.create(zarrs=zarrs)
 
 
-def strategy_variants_queries(variants: gvl.Variants):
-    # we don't store contig lengths in variant files, so band-aid for now is to use longest contig in humans
-    longest_contig = int(250e6)
-    contigs = [str(i) for i in range(1, 23)] + ["X", "Y"]
-    contig = st_pd.column(name="contig", elements=st.sampled_from(contigs))  # type: ignore
-    start = st_pd.column(name="start", elements=st.integers(0, longest_contig + 1))  # type: ignore
-    sample = st_pd.column(
-        name="sample", elements=st.sampled_from(list(variants.samples))  # type: ignore
+def queries_hom_alt():
+    # 20:276086 = T->A
+    # 21:10592359 = A->G
+    queries = gvl.Queries(
+        {
+            "contig": ["20", "20", "20", "20", "21", "21", "21", "21"],
+            "start": [
+                276085,
+                276085,
+                276085,
+                276085,
+                10592358,
+                10592358,
+                10592358,
+                10592358,
+            ],  # note this is 0-indexed, VCF is 1-indexed
+            "sample": [
+                "NCI-H660",
+                "NCI-H660",
+                "OCI-AML5",
+                "OCI-AML5",
+                "NCI-H660",
+                "NCI-H660",
+                "OCI-AML5",
+                "OCI-AML5",
+            ],
+            "ploid_idx": [0, 1, 0, 1, 0, 1, 0, 1],
+        }
     )
-    ploid_idx = st_pd.column(name="ploid_idx", elements=st.integers(0, 1))  # type: ignore
-    df = st_pd.data_frames(columns=[contig, start, sample, ploid_idx])
-    return df.map(gvl.Queries)
+    return queries
 
 
-@given(
-    queries=strategy_variants_queries(variants(data_dir())),
-    length=st.integers(600, 1200),
-)
+def queries_hom_ref():
+    hom_alt = queries_hom_alt()
+    hom_ref = hom_alt.assign(
+        start=hom_alt["start"] - 1
+    )  # confirmed that there are no SNPs here
+    return hom_ref
+
+
+def queries_hom_alt_hom_ref():
+    both = pd.concat([queries_hom_alt(), queries_hom_ref()], ignore_index=True)
+    return both
+
+
+def queries_nonexistent_sample():
+    nonexistent_sample = queries_hom_alt().assign(sample="definitely_not_a_sample")
+    return nonexistent_sample
+
+
+def queries_negative_start():
+    negative_start = queries_hom_alt().assign(start=-1)
+    return negative_start
+
+
+def queries_out_of_bounds_end():
+    out_of_bounds_end = queries_hom_alt().assign(start=int(250e6))
+    return out_of_bounds_end
+
+
+@parametrize_with_cases("queries", prefix="queries_")
+@parametrize(length=[1])
 def test_variants(
-    variants: gvl.Variants, queries: gvl.Queries, length: int, data_dir: Path
+    variants: gvl.Variants, queries: pd.DataFrame, length: int, data_dir: Path
 ):
     res = variants.sel(queries, length)
     vcf = VCF(str(data_dir / "ccle_snp_wes.reduced.bcf"))

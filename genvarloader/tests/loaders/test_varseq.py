@@ -5,6 +5,7 @@ from typing import Dict
 import hypothesis.extra.pandas as st_pd
 import hypothesis.strategies as st
 import numpy as np
+import pandas as pd
 from cyvcf2 import VCF
 from hypothesis import given
 from pytest_cases import fixture
@@ -58,6 +59,6 @@ def strategy_varseq_query(varseq: gvl.VarSequence):
     length=st.integers(600, 1200),
 )
 def test_varseq(
-    varseq: gvl.VarSequence, queries: gvl.Queries, length: int, data_dir: Path
+    varseq: gvl.VarSequence, queries: pd.DataFrame, length: int, data_dir: Path
 ):
     raise NotImplementedError

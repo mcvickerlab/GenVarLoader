@@ -18,12 +18,12 @@ import asyncio
 from pathlib import Path
 from typing import Dict, List, Union, cast
 
-import einops as ein
 import numpy as np
+import pandas as pd
 import zarr
 from numpy.typing import NDArray
 
-from genvarloader.loaders.types import Queries, _TStore
+from genvarloader.loaders.types import _TStore
 from genvarloader.loaders.utils import ts_readonly_zarr
 from genvarloader.types import PathType
 
@@ -73,13 +73,13 @@ class Coverage:
         return self._argsort_samples[np.searchsorted(self._sorted_samples, samples)]
 
     def sel(
-        self, queries: Queries, length: int, **kwargs
+        self, queries: pd.DataFrame, length: int, **kwargs
     ) -> NDArray[Union[np.uint16, np.float64]]:
         """Select coverage from a coverage Zarr i.e. read depth per base pair.
 
         Parameters
         ----------
-        queries : Queries
+        queries : pd.DataFrame
         length : int
         **kwargs
             normalization : str
@@ -95,13 +95,13 @@ class Coverage:
         return out
 
     async def async_sel(
-        self, queries: Queries, length: int, **kwargs
+        self, queries: pd.DataFrame, length: int, **kwargs
     ) -> NDArray[Union[np.uint16, np.float64]]:
         """Select coverage from a coverage Zarr i.e. read depth per base pair.
 
         Parameters
         ----------
-        queries : Queries
+        queries : pd.DataFrame
         length : int
         **kwargs
             normalization : str
@@ -116,7 +116,7 @@ class Coverage:
 
         out_shape = [len(queries), length]
 
-        queries = cast(Queries, queries.reset_index(drop=True))
+        queries = queries.reset_index(drop=True)
 
         queries["end"] = queries.start + length
         # map negative starts to 0

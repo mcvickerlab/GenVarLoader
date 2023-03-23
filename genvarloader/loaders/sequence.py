@@ -3,11 +3,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Set, Union, cast
 
 import numpy as np
+import pandas as pd
 import zarr
 from numpy.typing import NDArray
 from pysam import FastaFile
 
-from genvarloader.loaders.types import Queries, _TStore
+from genvarloader.loaders.types import _TStore
 from genvarloader.loaders.utils import ts_readonly_zarr
 from genvarloader.types import ALPHABETS, PathType, SequenceAlphabet, SequenceEncoding
 from genvarloader.utils import bytes_to_ohe, rev_comp_byte, rev_comp_ohe
@@ -27,7 +28,7 @@ class FastaSequence:
             c: self.fasta.get_reference_length(c) for c in self.fasta.references
         }
 
-    def sel(self, queries: Queries, length: int, **kwargs) -> NDArray:
+    def sel(self, queries: pd.DataFrame, length: int, **kwargs) -> NDArray:
         sorted = kwargs.get("sorted", False)
         encoding = SequenceEncoding(kwargs.get("encoding"))
 
@@ -119,7 +120,7 @@ class Sequence:
         root.visititems(add_array_to_tstores)
 
     def sel(
-        self, queries: Queries, length: int, **kwargs
+        self, queries: pd.DataFrame, length: int, **kwargs
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
         """Select query sequences.
 
@@ -127,7 +128,7 @@ class Sequence:
 
         Parameters
         ----------
-        queries : Queries
+        queries : pd.DataFrame
         length : int
         **kwargs
             encoding : str
@@ -141,7 +142,7 @@ class Sequence:
         return out
 
     async def async_sel(
-        self, queries: Queries, length: int, **kwargs
+        self, queries: pd.DataFrame, length: int, **kwargs
     ) -> Union[NDArray[np.bytes_], NDArray[np.uint8]]:
         """Select query sequences.
 
@@ -159,7 +160,7 @@ class Sequence:
         -------
         sequence : ndarray
         """
-        queries = cast(Queries, queries.reset_index(drop=True))
+        queries = queries.reset_index(drop=True)
         if "strand" not in queries:
             queries["strand"] = "+"
             queries["strand"] = queries.strand.astype("category")
