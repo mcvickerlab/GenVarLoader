@@ -24,7 +24,7 @@ import zarr
 from numpy.typing import NDArray
 
 from genvarloader.loaders.types import _TStore
-from genvarloader.loaders.utils import ts_readonly_zarr
+from genvarloader.loaders.utils import _ts_readonly_zarr
 from genvarloader.types import PathType
 
 _NORMALIZATION_METHODS = ["cpm"]
@@ -54,7 +54,7 @@ class Coverage:
 
         def add_array_to_tstores(p: str, val: Union[zarr.Group, zarr.Array]):
             if isinstance(val, zarr.Array) and p != "read_count":
-                self.tstores[p] = ts_readonly_zarr(self.path / p).result()
+                self.tstores[p] = _ts_readonly_zarr(self.path / p).result()
 
         root.visititems(add_array_to_tstores)
 
@@ -164,8 +164,9 @@ class Coverage:
             out = cpm_normalization(counts=out, total_counts=total_counts)
 
         # reverse negative stranded queries
-        to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").to_numpy())
-        out[to_rev_comp] = np.flip(out[to_rev_comp], axis=-1)
+        if "strand" in queries:
+            to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").to_numpy())
+            out[to_rev_comp] = np.flip(out[to_rev_comp], axis=-1)
 
         return out
 

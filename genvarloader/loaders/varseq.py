@@ -97,10 +97,6 @@ class VarSequence:
         seqs : ndarray[bytes | uint8]
             Sequences with variants applied to them.
         """
-        if "strand" not in queries:
-            queries["strand"] = "+"
-            queries["strand"] = queries.strand.astype("category")
-
         encoding = SequenceEncoding(kwargs.get("encoding"))
         positive_stranded_queries = queries.assign(strand="+")
         positive_stranded_queries["strand"] = positive_stranded_queries.strand.astype(
@@ -129,11 +125,12 @@ class VarSequence:
                 res["offsets"],
             )
 
-        to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").values)
-        if to_rev_comp.any():
-            seqs[to_rev_comp] = rev_comp_byte(
-                seqs[to_rev_comp], alphabet=ALPHABETS["DNA"]
-            )
+        if "strand" in queries:
+            to_rev_comp = cast(NDArray[np.bool_], (queries["strand"] == "-").to_numpy())
+            if to_rev_comp.any():
+                seqs[to_rev_comp] = rev_comp_byte(
+                    seqs[to_rev_comp], alphabet=ALPHABETS["DNA"]
+                )
 
         if encoding is SequenceEncoding.ONEHOT:
             seqs = cast(NDArray[np.uint8], bytes_to_ohe(seqs, alphabet=ALPHABETS["DNA"]))  # type: ignore

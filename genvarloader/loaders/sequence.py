@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 from pysam import FastaFile
 
 from genvarloader.loaders.types import _TStore
-from genvarloader.loaders.utils import ts_readonly_zarr
+from genvarloader.loaders.utils import _ts_readonly_zarr
 from genvarloader.types import ALPHABETS, PathType, SequenceAlphabet, SequenceEncoding
 from genvarloader.utils import bytes_to_ohe, rev_comp_byte, rev_comp_ohe
 
@@ -57,11 +57,12 @@ class FastaSequence:
                 self.fasta.fetch(q.contig, q.in_start, q.in_end).encode(), "S1"
             )
 
-        to_rev_comp = cast(NDArray[np.bool_], (queries.strand == "-").values)
-        if to_rev_comp.any():
-            seqs[to_rev_comp] = rev_comp_byte(
-                seqs[to_rev_comp], alphabet=ALPHABETS["DNA"]
-            )
+        if "strand" in queries:
+            to_rev_comp = cast(NDArray[np.bool_], (queries.strand == "-").values)
+            if to_rev_comp.any():
+                seqs[to_rev_comp] = rev_comp_byte(
+                    seqs[to_rev_comp], alphabet=ALPHABETS["DNA"]
+                )
 
         if encoding is SequenceEncoding.ONEHOT:
             seqs = bytes_to_ohe(seqs, alphabet=ALPHABETS["DNA"])
@@ -115,7 +116,7 @@ class Sequence:
 
         def add_array_to_tstores(p: str, val: Union[zarr.Group, zarr.Array]):
             if isinstance(val, zarr.Array):
-                self.tstores[p] = ts_readonly_zarr(self.path / p, **ts_kwargs).result()
+                self.tstores[p] = _ts_readonly_zarr(self.path / p, **ts_kwargs).result()
 
         root.visititems(add_array_to_tstores)
 
@@ -161,9 +162,6 @@ class Sequence:
         sequence : ndarray
         """
         queries = queries.reset_index(drop=True)
-        if "strand" not in queries:
-            queries["strand"] = "+"
-            queries["strand"] = queries.strand.astype("category")
 
         query_contigs_not_in_sequence = np.setdiff1d(
             queries.contig.unique(), list(self.contig_lengths.keys())
@@ -226,10 +224,11 @@ class Sequence:
             out[i, query.out_start : query.out_end] = read
 
         # reverse complement negative stranded queries
-        to_rev_comp = cast(NDArray[np.bool_], (queries.strand == "-").to_numpy())
-        if encoding is SequenceEncoding.BYTES and to_rev_comp.any():
-            out[to_rev_comp] = rev_comp_byte(out[to_rev_comp], self.alphabet)
-        elif encoding is SequenceEncoding.ONEHOT:
-            out[to_rev_comp] = rev_comp_ohe(out[to_rev_comp], has_N=True)
+        if "strand" in queries:
+            to_rev_comp = cast(NDArray[np.bool_], (queries.strand == "-").to_numpy())
+            if encoding is SequenceEncoding.BYTES and to_rev_comp.any():
+                out[to_rev_comp] = rev_comp_byte(out[to_rev_comp], self.alphabet)
+            elif encoding is SequenceEncoding.ONEHOT and to_rev_comp.any():
+                out[to_rev_comp] = rev_comp_ohe(out[to_rev_comp], has_N=True)
 
         return out

@@ -26,7 +26,6 @@ except ImportError as e:
 else:
     _TORCH_AVAILABLE = True
 
-
 __all__ = [
     "Coverage",
     "Sequence",

@@ -16,7 +16,6 @@ dependencies:
   - numpy
   - pandas
   - pandera
-  - polars>=0.15.13
   - pyarrow
   - bioconda::pysam
   - python>=3.7.*

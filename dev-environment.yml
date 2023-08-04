@@ -16,7 +16,6 @@ dependencies:
   - numpy
   - pandas
   - pandera
-  - polars>=0.15.13
   - pyarrow
   - bioconda::pysam
   - python>=3.7.*
@@ -34,19 +33,22 @@ dependencies:
   - black
   - gh
   - git
-  - hypothesis
   - icecream
   - isort
   - memray
   - mypy
   - pip
   - pipreqs
+  - polars>=0.15.13
   - pre-commit
+  - py-spy
   - pytest
   - pytest-cases
   - pytest-cov
   - jupyter
   - jupyterlab
+  - sphinx
+  - sphinx-book-theme
   - tiledb::tiledbvcf-py
   - pip:
     - tensorstore

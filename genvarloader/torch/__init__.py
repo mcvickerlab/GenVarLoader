@@ -63,7 +63,7 @@ import zarr
 from torch.utils.data import Dataset, Sampler
 
 from genvarloader.loaders.types import Queries
-from genvarloader.loaders.utils import ts_readonly_zarr
+from genvarloader.loaders.utils import _ts_readonly_zarr
 from genvarloader.types import PathType
 
 if TYPE_CHECKING:
@@ -123,7 +123,7 @@ class ZarrCollator:
             groups = list(zarr.open_group(zarr_path).array_keys())  # type: ignore
             groups = cast(List[str], groups)
         self.groups = {
-            g: ts_readonly_zarr(Path(zarr_path) / g, **ts_kwargs).result()
+            g: _ts_readonly_zarr(Path(zarr_path) / g, **ts_kwargs).result()
             for g in groups
         }
 

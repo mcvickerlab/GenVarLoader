@@ -11,7 +11,7 @@ from genvarloader.loaders.types import Queries, _TStore
 from genvarloader.types import PathType
 
 
-def ts_readonly_zarr(path: PathType, **kwargs) -> Future[_TStore]:
+def _ts_readonly_zarr(path: PathType, **kwargs) -> Future[_TStore]:
     return ts.open(  # type: ignore
         {"driver": "zarr", "kvstore": {"driver": "file", "path": str(path)}},
         read=True,
@@ -24,7 +24,7 @@ def ts_readonly_zarr(path: PathType, **kwargs) -> Future[_TStore]:
 
 
 def read_queries(queries_path: PathType) -> pd.DataFrame:
-    """Read queries from a file. Can be a CSV, TSV, or Apache feather file. Raises an error otherwise.
+    """Read and validate queries from a file. Can be a CSV, TSV, or Apache feather file. Raises an error otherwise.
 
     Parameters
     ----------
@@ -75,7 +75,7 @@ def read_narrowpeak_as_queries(
     length: int,
     samples: Optional[List[str]] = None,
 ) -> pd.DataFrame:
-    """Read a .narrowPeak file as queries centered around peaks, optionally adding samples.
+    """Read a .narrowPeak file as validated queries centered around peaks, optionally adding samples.
 
     Parameters
     ----------
@@ -131,7 +131,7 @@ def read_broadpeak_as_queries(
     length: int,
     samples: Optional[List[str]] = None,
 ) -> pd.DataFrame:
-    """Read a .broadPeak file as queries centered around them, optionally adding samples.
+    """Read a .broadPeak file as validated queries centered around them, optionally adding samples.
 
     Parameters
     ----------

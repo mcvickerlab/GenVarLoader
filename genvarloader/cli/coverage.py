@@ -2,7 +2,7 @@ import logging
 from datetime import timedelta
 from pathlib import Path
 from time import perf_counter
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import typer
 
@@ -29,7 +29,7 @@ def read_in_bams(in_bams: Path):
 
 
 @app.command()
-def depth_only(
+def only_depth(
     in_bams: Path = typer.Argument(
         ...,
         resolve_path=True,

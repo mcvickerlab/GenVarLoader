@@ -1,19 +1,19 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest_cases as pt
 from pysam import FastaFile
-from pytest_cases import fixture, parametrize_with_cases
 
 import genvarloader
 import genvarloader.loaders as gvl
 
 
-@fixture
+@pt.fixture
 def data_dir():
     return Path(genvarloader.__file__).parent / "tests" / "data"
 
 
-@fixture
+@pt.fixture
 def sequence(dat_dir: Path):
     return gvl.Sequence(dat_dir / "grch38.20.21.zarr")
 
@@ -80,11 +80,17 @@ def queries_all(sequence: gvl.Sequence):
     return q_all
 
 
-@parametrize_with_cases("queries", prefix="queries_")
-@parametrize_with_cases("length", [1, 600])
+@pt.parametrize_with_cases("queries", prefix="queries_")
+@pt.parametrize_with_cases("length", [1, 600])
 def test_sequence(
-    sequence: gvl.Sequence, queries: pd.DataFrame, length: int, data_dir: Path
+    sequence: gvl.Sequence,
+    queries: pd.DataFrame,
+    length: int,
+    data_dir: Path,
+    current_cases,
 ):
+    queries_id, queries_fn, queries_params = current_cases["queries"]
+    xfail = pt.matches_tag_query(queries_fn, has_tag="xfail")
     seqs = sequence.sel(queries, length, encoding="bytes").astype("U")
     ref_fasta = data_dir / "fasta" / "grch38.20.21.fa.gz"
 

@@ -6,25 +6,25 @@ import hypothesis.extra.pandas as st_pd
 import hypothesis.strategies as st
 import numpy as np
 import pandas as pd
+import pytest_cases as pt
 from cyvcf2 import VCF
 from hypothesis import given
-from pytest_cases import fixture
 
 import genvarloader
 import genvarloader.loaders as gvl
 
 
-@fixture
+@pt.fixture
 def data_dir():
     return Path(genvarloader.__file__).parent / "tests" / "data"
 
 
-@fixture
+@pt.fixture
 def sequence(data_dir: Path):
     return gvl.Sequence(data_dir / "grch38.20.21.zarr")
 
 
-@fixture
+@pt.fixture
 def variants(data_dir: Path):
     zarrs = [
         data_dir / "CDS-OJhAUD_cnn_filtered.zarr",
@@ -34,7 +34,7 @@ def variants(data_dir: Path):
     return gvl.Variants.create(zarrs=zarrs, sample_ids=sample_ids)
 
 
-@fixture
+@pt.fixture
 def varseq(sequence: gvl.Sequence, variants: gvl.Variants):
     return gvl.VarSequence(sequence, variants)
 

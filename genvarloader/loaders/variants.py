@@ -5,14 +5,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
 
 import numpy as np
 import pandas as pd
-import polars as pl
-import tiledbvcf
 import zarr
 from numpy.typing import NDArray
 from typing_extensions import Self
 
-from genvarloader.loaders.types import AsyncLoader, Loader, LoaderOutput, _TStore
-from genvarloader.loaders.utils import ts_readonly_zarr
+from genvarloader.loaders.types import AsyncLoader, _TStore
+from genvarloader.loaders.utils import _ts_readonly_zarr
 from genvarloader.types import PathType
 
 
@@ -51,7 +49,7 @@ class _VCFTSDataset:
             "variant_contig",
         }
         arrays = [
-            ts_readonly_zarr(path.resolve() / n, **ts_kwargs) for n in gvl_array_names
+            _ts_readonly_zarr(path.resolve() / n, **ts_kwargs) for n in gvl_array_names
         ]
         gvl_arrays = await asyncio.gather(*arrays)
         self.call_genotype = gvl_arrays[0]
@@ -309,79 +307,80 @@ class Variants(AsyncLoader):
         return v_idx, p_idx, cnts, v_pos
 
 
-class TileDBVariants(Loader):
-    path: Path
-    dataset: tiledbvcf.Dataset
+# deprecated, slow for GVL use case
+# class TileDBVariants(Loader):
+#     path: Path
+#     dataset: tiledbvcf.Dataset
 
-    def __init__(self, tdb_path: PathType) -> None:
-        self.path = Path(tdb_path)
-        self.dataset = tiledbvcf.Dataset(tdb_path)
+#     def __init__(self, tdb_path: PathType) -> None:
+#         self.path = Path(tdb_path)
+#         self.dataset = tiledbvcf.Dataset(tdb_path)
 
-    def sel(self, queries: pd.DataFrame, length: int, **kwargs) -> LoaderOutput:
-        pl_queries = (
-            pl.from_pandas(queries)
-            .with_columns(
-                pl.col(pl.Int64).cast(pl.Int32), pl.col(pl.Categorical).cast(pl.Utf8)
-            )
-            .with_row_count()
-        )
+#     def sel(self, queries: pd.DataFrame, length: int, **kwargs) -> LoaderOutput:
+#         pl_queries = (
+#             pl.from_pandas(queries)
+#             .with_columns(
+#                 pl.col(pl.Int64).cast(pl.Int32), pl.col(pl.Categorical).cast(pl.Utf8)
+#             )
+#             .with_row_count()
+#         )
 
-        # get the unique region strings from the queries
-        regions = (
-            pl_queries.lazy()
-            .select("contig", "start")
-            .unique()
-            .with_columns(
-                pl.col("start").clip_min(0) + 1,
-                (pl.col("start").clip_min(0) + length).alias("end"),
-            )
-            .select(
-                pl.concat_str(
-                    ["contig", pl.lit(":"), "start", pl.lit("-"), "end"]
-                ).alias("region")
-            )
-            .collect()["region"]
-            .to_numpy()
-        )
+#         # get the unique region strings from the queries
+#         regions = (
+#             pl_queries.lazy()
+#             .select("contig", "start")
+#             .unique()
+#             .with_columns(
+#                 pl.col("start").clip_min(0) + 1,
+#                 (pl.col("start").clip_min(0) + length).alias("end"),
+#             )
+#             .select(
+#                 pl.concat_str(
+#                     ["contig", pl.lit(":"), "start", pl.lit("-"), "end"]
+#                 ).alias("region")
+#             )
+#             .collect()["region"]
+#             .to_numpy()
+#         )
 
-        # get the unique samples from the queries
-        samples = pl_queries["sample"].unique()
+#         # get the unique samples from the queries
+#         samples = pl_queries["sample"].unique()
 
-        var_data = cast(
-            pl.DataFrame,
-            pl.from_arrow(
-                self.dataset.read_arrow(
-                    attrs=[
-                        "contig",
-                        "pos_start",
-                        "alleles",
-                        "sample_name",
-                        "query_bed_start",
-                    ],
-                    samples=samples,
-                    regions=regions,
-                )
-            ),
-        )
+#         var_data = cast(
+#             pl.DataFrame,
+#             pl.from_arrow(
+#                 self.dataset.read_arrow(
+#                     attrs=[
+#                         "contig",
+#                         "pos_start",
+#                         "alleles",
+#                         "sample_name",
+#                         "query_bed_start",
+#                     ],
+#                     samples=samples,
+#                     regions=regions,
+#                 )
+#             ),
+#         )
 
-        joined = (
-            var_data
-            # join against queries to get alleles & postiions for each query
-            .join(
-                pl_queries,
-                left_on=["contig", "query_bed_start", "sample_name"],
-                right_on=["contig", "start", "sample"],
-            ).with_columns(
-                # pick out the allele of interest for each query
-                pl.col("alleles").arr.get(pl.col("ploid_idx"))
-            )
-        )
+#         joined = (
+#             var_data
+#             # join against queries to get alleles & postiions for each query
+#             .join(
+#                 pl_queries,
+#                 left_on=["contig", "query_bed_start", "sample_name"],
+#                 right_on=["contig", "start", "sample"],
+#             ).with_columns(
+#                 # pick out the allele of interest for each query
+#                 pl.col("alleles").arr.get(pl.col("ploid_idx"))
+#             )
+#         )
 
-        # get alleles, positions, and offsets
-        alleles = joined["alleles"].to_numpy().astype("|S1")
-        positions = joined["pos_start"].to_numpy()
-        counts = joined.groupby(["row_nr"]).count()["count"].to_numpy()
-        offsets = np.zeros(len(counts) + 1, dtype=counts.dtype)
-        counts.cumsum(out=offsets[1:])
+#         # get alleles, positions, and offsets
+#         alleles = joined["alleles"].to_numpy().astype("|S1")
+#         positions = joined["pos_start"].to_numpy()
+#         counts = joined.groupby(["row_nr"]).count()["count"].to_numpy()
+#         offsets = np.zeros(len(counts) + 1, dtype=counts.dtype)
+#         counts.cumsum(out=offsets[1:])
 
-        return {"alleles": alleles, "positions": positions, "offsets": offsets}
+#         return {"alleles": alleles, "positions": positions, "offsets": offsets}

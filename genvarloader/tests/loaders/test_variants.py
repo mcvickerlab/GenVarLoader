@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest_cases as pt
 from cyvcf2 import VCF
 from pytest_cases import fixture, parametrize, parametrize_with_cases
 
@@ -10,12 +11,12 @@ import genvarloader
 import genvarloader.loaders as gvl
 
 
-@fixture
+@pt.fixture
 def data_dir():
     return Path(genvarloader.__file__).parent / "tests" / "data"
 
 
-@fixture
+@pt.fixture
 def variants(data_dir: Path):
     zarrs = [
         data_dir / "CDS-RL1iWJ.zarr",
@@ -69,6 +70,7 @@ def queries_hom_alt_hom_ref():
     return both
 
 
+@pt.case(tags="xfail")
 def queries_nonexistent_sample():
     nonexistent_sample = queries_hom_alt().assign(sample="definitely_not_a_sample")
     return nonexistent_sample
@@ -84,11 +86,17 @@ def queries_out_of_bounds_end():
     return out_of_bounds_end
 
 
-@parametrize_with_cases("queries", prefix="queries_")
-@parametrize(length=[1])
+@pt.parametrize_with_cases("queries", prefix="queries_")
+@pt.parametrize_with_cases("length", [1])
 def test_variants(
-    variants: gvl.Variants, queries: pd.DataFrame, length: int, data_dir: Path
+    variants: gvl.Variants,
+    queries: pd.DataFrame,
+    length: int,
+    data_dir: Path,
+    current_cases,
 ):
+    queries_id, queries_fn, queries_params = current_cases["queries"]
+    xfail = pt.matches_tag_query(queries_fn, has_tag="xfail")
     res = variants.sel(queries, length)
     vcf = VCF(str(data_dir / "ccle_snp_wes.reduced.bcf"))
     if res["alleles"].size == 0:

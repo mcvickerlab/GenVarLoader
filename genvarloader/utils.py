@@ -56,6 +56,7 @@ def rev_comp_byte(
     complement_map : dict[bytes, bytes]
         Dictionary mapping nucleotides to their complements.
     """
+    # NOTE: a vectorized implementation is not faster for even IUPAC DNA/RNA
     out = np.empty_like(byte_arr)
     for nuc, comp in alphabet.complement_map_bytes.items():
         if nuc == b"N":
