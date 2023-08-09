@@ -22,7 +22,6 @@ def fasta_to_zarr(
     ignore_case: bool = False,
     compression_level: int = 0,
 ):
-
     if not isinstance(encodings, set):
         encodings = {encodings}
     if len(encodings) == 0:
@@ -37,7 +36,6 @@ def fasta_to_zarr(
     compressor = Blosc(clevel=compression_level)
 
     with FastaFile(str(fasta_path)) as fasta:
-
         # check contigs and write their lengths
         contigs_available = fasta.references
         if contigs is None:

@@ -157,7 +157,6 @@ def encode_dict_grch38_no_n():
 
 @pytest.mark.encode_haps
 def test_hap_encoding_sample(encode_dict_grch38, vcf_file, snp_df):
-
     # Create Haplotype Encoding to be tested
     hap1, hap2 = get_encoded_haps(
         encode_dict_grch38, vcf_file, "NA12878", chrom_list="chr20"
@@ -265,7 +264,6 @@ def n_phase2_idx():
 
 @pytest.mark.encode_ambiguity
 def test_hap_remove_ambiguity(encode_dict_grch38, vcf_with_ns):
-
     # Create Data to test
     test_dict1, test_dict2 = get_encoded_haps(
         encode_dict_grch38, vcf_with_ns, "NA12878", remove_ambiguity=True
@@ -296,7 +294,6 @@ def test_hap_remove_ambiguity(encode_dict_grch38, vcf_with_ns):
 
 @pytest.mark.encode_ambiguity
 def test_hap_keep_ambiguity(encode_dict_grch38, vcf_with_ns):
-
     # Create Data to test
     test_dict1, test_dict2 = get_encoded_haps(
         encode_dict_grch38, vcf_with_ns, "NA12878", remove_ambiguity=False
@@ -322,7 +319,6 @@ def test_hap_keep_ambiguity(encode_dict_grch38, vcf_with_ns):
 
 @pytest.mark.encode_ambiguity
 def test_hap_ambiguity_acgt_spec(encode_dict_grch38_no_n, vcf_with_ns):
-
     # Create Data to test
     test_dict1, test_dict2 = get_encoded_haps(
         encode_dict_grch38_no_n,

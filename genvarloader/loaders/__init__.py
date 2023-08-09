@@ -116,7 +116,6 @@ class GenVarLoader:
     async def async_sel(
         self, queries: pd.DataFrame, length: int, **kwargs
     ) -> Dict[str, NDArray]:
-
         # get sync output
         out: Dict[str, NDArray] = {}
         for name, loader in self.sync_loaders.items():

@@ -186,7 +186,6 @@ def tn5_coverage(
     count_method: Tn5CountMethod,
 ):
     with AlignmentFile(str(bam_path), "r") as bam:
-
         if contigs is None:
             contigs = list(bam.references)
 
@@ -205,7 +204,6 @@ def tn5_coverage(
             read_cache: Dict[str, Any] = {}
 
             for read in bam.fetch(contig):
-
                 if not read.is_proper_pair or read.is_secondary:
                     continue
 

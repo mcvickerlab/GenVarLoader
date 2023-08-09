@@ -1,15 +1,22 @@
-from abc import ABC, abstractmethod
-from typing import Tuple
+from typing import Optional, Protocol, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
 
 
-class Reader(ABC):
+class Reader(Protocol):
     name: str
-    dtype: np.dtype
-    instance_shape: Tuple[int, ...]
+    bytes_per_length: int
 
-    @abstractmethod
     def read(self, contig: str, start: int, end: int) -> NDArray:
+        ...
+
+
+class Variants(Protocol):
+    n_samples: int
+    ploidy: int
+
+    def read(
+        self, contig: str, start: int, end: int
+    ) -> Optional[Tuple[NDArray[np.uint32], NDArray[np.intp], NDArray[np.bytes_]]]:
         ...

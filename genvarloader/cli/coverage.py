@@ -51,7 +51,8 @@ def only_depth(
     """Write plain depth from BAMs to Zarr. If the Zarr already exists, this will add samples, possibly overwriting.
 
     NOTE: this is relatively memory intensive and requires at least 80x bytes of memory than the longest contig processed PER JOB.
-    For example, for the human genome the longest contig is chromosome 1 at ~250 mb -> each job needs upwards of 10 GB of RAM."""
+    For example, for the human genome the longest contig is chromosome 1 at ~250 mb -> each job needs upwards of 10 GB of RAM.
+    """
 
     # This is memory intensive because of how pysam.AlignmentFile.count_coverage is implemented.
 

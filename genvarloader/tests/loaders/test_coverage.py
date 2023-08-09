@@ -66,7 +66,7 @@ def test_coverage(
 ):
     queries_id, queries_fn, queries_params = current_cases["queries"]
     xfail = pt.matches_tag_query(queries_fn, has_tag="xfail")
-    for (sample, sample_queries) in queries.groupby("sample"):
+    for sample, sample_queries in queries.groupby("sample"):
         # (n l)
         covs = coverage.sel(sample_queries, length)  # type: ignore
         with pysam.AlignmentFile(str(data_dir / f"{sample}.bam")) as bam:
