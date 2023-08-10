@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Optional, Protocol, Tuple
 
 import numpy as np
@@ -9,6 +10,11 @@ class Reader(Protocol):
     bytes_per_length: int
 
     def read(self, contig: str, start: int, end: int) -> NDArray:
+        ...
+
+
+class ToZarr(Protocol):
+    def to_zarr(self, store: Path):
         ...
 
 

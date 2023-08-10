@@ -6,7 +6,7 @@ import polars as pl
 from natsort import natsorted
 from numpy.typing import NDArray
 
-from .numba import gufunc_multi_slice
+from .numba import gufunc_multi_slice, partition_regions
 from .types import Reader
 from .util import _set_uniform_length_around_center, read_bedlike
 
@@ -142,13 +142,26 @@ class GVL:
         # use polars.DataFrame.partition_by
         # partition regions to maximize size of in-memory buffer
         # but still respect contig boundaries
-        max_mem = max_memory_gb / 2
+        max_mem = max_memory_gb / 2 * 1e9
         batch_mem = self.bytes_per_length * batch_size * fixed_length / 1e9
-        max_partition_length = int(
-            (max_mem - batch_mem) * 1e9 / self.bytes_per_length
-        )  # noqa
+        max_mem -= batch_mem * 2
+        if max_mem < 0:
+            min_mem = batch_mem * 4 / 1e9
+            raise ValueError(
+                f"Insufficient memory to process data. At least {min_mem:.3f} GB is needed."
+            )
+        max_length = int(max_mem / self.bytes_per_length)
         contig_partitions = bed.partition_by("chrom")
-        partitions = []
+        partitions: List[pl.DataFrame] = []
         for c_part in contig_partitions:
-            pass
+            c_part = c_part.with_columns(
+                partition=pl.lit(
+                    partition_regions(
+                        c_part["chromStart"].to_numpy(),
+                        c_part["chromStart"].to_numpy(),
+                        max_length,
+                    )
+                )
+            )
+            partitions.extend(c_part.partition_by("partition", include_key=False))
         return partitions
