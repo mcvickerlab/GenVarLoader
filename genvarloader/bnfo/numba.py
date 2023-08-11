@@ -5,27 +5,28 @@ import numpy as np
 from numpy.typing import NDArray
 
 
-@nb.guvectorize("(n),(),()->(n)", target="parallel", cache=True)
+@nb.guvectorize("(n),(),(),(l)->(l)", target="parallel", cache=True)
 def gufunc_multi_slice(
     arr: NDArray,
     start: Union[int, NDArray[np.integer]],
-    length: int,
+    placeholder: NDArray,
     res: Optional[NDArray] = None,
 ) -> NDArray:  # type: ignore
-    res[:length] = arr[start : start + length]  # type: ignore
+    length = len(placeholder)
+    res[:] = arr[start : start + length]  # type: ignore
 
 
 @nb.njit(nogil=True, cache=True)
 def partition_regions(
-    start: NDArray[np.int64], end: NDArray[np.int64], max_length: int
+    starts: NDArray[np.int64], ends: NDArray[np.int64], max_length: int
 ):
-    partitions = np.zeros_like(start)
+    partitions = np.zeros_like(starts)
     partition = 0
-    curr_length = end[0] - start[0]
+    curr_length = ends[0] - starts[0]
     for i in range(1, len(partitions)):
-        curr_length += end[i] - end[i - 1]
+        curr_length += ends[i] - ends[i - 1]
         if curr_length > max_length:
             partition += 1
-            curr_length = end[i] - start[i]
+            curr_length = ends[i] - starts[i]
         partitions[i] = partition
     return partitions

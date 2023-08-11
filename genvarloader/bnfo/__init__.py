@@ -6,9 +6,15 @@ import polars as pl
 from natsort import natsorted
 from numpy.typing import NDArray
 
+from .bigwig import BigWig
+from .fasta import Fasta
+from .fasta_variants import FastaVariants
 from .numba import gufunc_multi_slice, partition_regions
+from .tiledb_vcf import TileDB_VCF
 from .types import Reader
 from .util import _set_uniform_length_around_center, read_bedlike
+
+__all__ = ["BigWig", "Fasta", "TileDB_VCF", "FastaVariants"]
 
 
 class GVL:
@@ -35,7 +41,12 @@ class GVL:
         fixed_length: int,
         batch_size: int,
         max_memory_gb: float,
-        transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
+        buffer_transform: Optional[
+            Callable[[Dict[str, NDArray]], Dict[str, NDArray]]
+        ] = None,
+        batch_transform: Optional[
+            Callable[[Dict[str, NDArray]], Dict[str, NDArray]]
+        ] = None,
         shuffle: bool = False,
         seed: Optional[int] = None,
         return_tuples: bool = False,
@@ -80,6 +91,9 @@ class GVL:
             starts_slice = slice(0, len_batch_slice)
 
             buffers = {r.name: r.read(contig, start, end) for r in self.readers}
+            if buffer_transform is not None:
+                buffers = buffer_transform(buffers)
+
             if batch is None:
                 batch = {
                     name: np.empty_like(
@@ -94,6 +108,7 @@ class GVL:
                 starts = rng.permutation(starts)
 
             len_unused_buffer = n_regions
+            length_placeholder = np.arange(length)
 
             while len_unused_buffer > 0:
                 # Consider deferring multi slice implementation to the readers since the
@@ -106,8 +121,8 @@ class GVL:
                 # potentially improve the speed/memory trade-off.
                 for name in batch:
                     batch[name][batch_slice] = gufunc_multi_slice(
-                        buffers[name], starts[starts_slice], length
-                    )[..., :length]
+                        buffers[name], starts[starts_slice], length_placeholder
+                    )
 
                 len_unused_buffer = len_unused_buffer - starts_slice.stop
 
@@ -116,8 +131,8 @@ class GVL:
                     # full batch or take what's left in the buffer
                     new_stop = min(batch_size, len_unused_buffer)
                     batch_slice = slice(0, new_stop)
-                    if transform is not None:
-                        batch = transform(batch)
+                    if batch_transform is not None:
+                        batch = batch_transform(batch)
                     if return_tuples:
                         yield tuple(batch.values())
                     else:
@@ -158,7 +173,7 @@ class GVL:
                 partition=pl.lit(
                     partition_regions(
                         c_part["chromStart"].to_numpy(),
-                        c_part["chromStart"].to_numpy(),
+                        c_part["chromEnd"].to_numpy(),
                         max_length,
                     )
                 )
