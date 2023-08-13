@@ -1,5 +1,6 @@
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union, cast
 
 import numpy as np
 import polars as pl
@@ -9,7 +10,7 @@ from numpy.typing import NDArray
 from .bigwig import BigWig
 from .fasta import Fasta
 from .fasta_variants import FastaVariants
-from .numba import gufunc_multi_slice, partition_regions
+from .numba import multi_slice, partition_regions
 from .tiledb_vcf import TileDB_VCF
 from .types import Reader
 from .util import _set_uniform_length_around_center, read_bedlike
@@ -33,10 +34,23 @@ class GVL:
 
     def __init__(self, *readers: Reader) -> None:
         self.readers = readers
-        self.bytes_per_length = sum(r.bytes_per_length for r in self.readers)
+        self.sizes = self.readers[0].sizes
+        self.itemsizes: Dict[str, int] = defaultdict(int)
+        for r in self.readers[1:]:
+            for dim, size in r.sizes.items():
+                if dim not in self.sizes:
+                    self.sizes[dim] = size
+                elif self.sizes[dim] != size:
+                    raise ValueError(
+                        f"""Readers have inconsistent dimension sizes.
+                        Sizes: {[r.sizes for r in self.readers]}
+                        """
+                    )
+                self.itemsizes[dim] += r.dtype.itemsize
 
     def iter_batches(
         self,
+        batch_dims: List[str],
         bed: Union[pl.DataFrame, str, Path],
         fixed_length: int,
         batch_size: int,
@@ -55,6 +69,29 @@ class GVL:
 
         if isinstance(bed, (str, Path)):
             bed = read_bedlike(bed)
+
+        # need to accomodate memory budget
+        # partition batch dims in order of appearance
+        #
+
+        int(max_memory_gb * 1e9)
+        dim_idxs = {}
+        # largest
+        for dim in batch_dims:
+            dim_idxs[dim] = np.arange(self.sizes[dim], dtype=np.uint32)
+
+        dim_idxs = {
+            dim: np.arange(size, dtype=np.uint32)
+            for dim, size in self.sizes.items()
+            if dim in batch_dims
+        }
+        if shuffle:
+            dim_idxs = {
+                dim: cast(NDArray[np.uint32], rng.permutation(idx))
+                for dim, idx in dim_idxs.items()
+            }
+        {dim: self.itemsizes[dim] * self.sizes[dim] for dim in batch_dims}
+        {dim: slice(size) for dim, size in self.sizes.items() if dim in batch_dims}
 
         with pl.StringCache():
             pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
@@ -102,13 +139,14 @@ class GVL:
                     for name, buff in buffers.items()
                 }
 
-            starts = (partition["chromStart"] - start).to_numpy()
-            length = end - start
+            starts = cast(
+                NDArray[np.int32], (partition["chromStart"] - start).to_numpy()
+            )
             if shuffle:
                 starts = rng.permutation(starts)
 
             len_unused_buffer = n_regions
-            length_placeholder = np.arange(length)
+            np.arange(fixed_length, dtype="u4")
 
             while len_unused_buffer > 0:
                 # Consider deferring multi slice implementation to the readers since the
@@ -120,9 +158,14 @@ class GVL:
                 # applying Reader to do something that isn't multi-slicing and
                 # potentially improve the speed/memory trade-off.
                 for name in batch:
-                    batch[name][batch_slice] = gufunc_multi_slice(
-                        buffers[name], starts[starts_slice], length_placeholder
-                    )
+                    if buffers[name].dtype.type == np.bytes_:
+                        batch[name][batch_slice] = multi_slice(
+                            buffers[name].view("u1"), starts[starts_slice], fixed_length
+                        ).view("S1")
+                    else:
+                        batch[name][batch_slice] = multi_slice(
+                            buffers[name], starts[starts_slice], fixed_length
+                        )
 
                 len_unused_buffer = len_unused_buffer - starts_slice.stop
 

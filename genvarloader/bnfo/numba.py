@@ -1,19 +1,18 @@
-from typing import Optional, Union
-
 import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
 
-@nb.guvectorize("(n),(),(),(l)->(l)", target="parallel", cache=True)
-def gufunc_multi_slice(
+@nb.njit(nogil=True, parallel=True, cache=True)
+def multi_slice(
     arr: NDArray,
-    start: Union[int, NDArray[np.integer]],
-    placeholder: NDArray,
-    res: Optional[NDArray] = None,
+    starts: NDArray[np.integer],
+    length: int,
 ) -> NDArray:  # type: ignore
-    length = len(placeholder)
-    res[:] = arr[start : start + length]  # type: ignore
+    out = np.empty(shape=(len(starts), *arr.shape[:-1], length), dtype=arr.dtype)
+    for i in nb.prange(len(starts)):
+        out[i] = arr[..., starts[i] : starts[i] + length]
+    return out
 
 
 @nb.njit(nogil=True, cache=True)
