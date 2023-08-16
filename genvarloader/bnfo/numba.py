@@ -4,6 +4,14 @@ from numpy.typing import NDArray
 
 
 @nb.njit(nogil=True, parallel=True, cache=True)
+def build_length_indices(starts: NDArray[np.integer], length: int):
+    out = np.empty(shape=(len(starts), length), dtype=np.int32)
+    for i in nb.prange(len(starts)):
+        out[i] = np.arange(starts[i], starts[i] + length)
+    return out
+
+
+@nb.njit(nogil=True, parallel=True, cache=True)
 def multi_slice(
     arr: NDArray,
     starts: NDArray[np.integer],

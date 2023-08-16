@@ -1,5 +1,6 @@
 import numba as nb
 import numpy as np
+import xarray as xr
 from numpy.typing import NDArray
 
 from .fasta import Fasta
@@ -37,19 +38,22 @@ class FastaVariants(Reader):
         self.fasta = fasta
         self.variants = variants
         self.dtype = np.dtype("S1")
-        self.sizes = {"sample": self.variants.n_samples, "ploidy": self.variants.ploidy}
-        self.bytes_per_length = variants.n_samples * variants.ploidy
+        self.sizes = {"sample": self.variants.n_samples, "ploid": self.variants.ploidy}
+        self.indexes = {
+            "sample": np.asarray(self.variants.samples),
+            "ploid": np.arange(self.variants.ploidy, dtype=np.uint32),
+        }
 
-    def read(self, contig: str, start: int, end: int, **kwargs) -> NDArray[np.bytes_]:
-        ref = self.fasta.read(contig, start, end)
+    def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
+        ref = self.fasta.read(contig, start, end).to_numpy()
         seqs = np.tile(ref, (self.variants.n_samples, self.variants.ploidy, 1))
         result = self.variants.read(contig, start, end, **kwargs)
 
         if result is None:
-            return seqs
+            return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
 
         offsets, positions, alleles = result
         positions = positions - start
 
         apply_variants(seqs.view("u1"), offsets, positions, alleles.view("u1"))
-        return seqs.view("S1")
+        return xr.DataArray(seqs.view("S1"), dims=["sample", "ploid", "length"])

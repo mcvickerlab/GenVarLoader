@@ -3,7 +3,7 @@ from typing import Union
 
 import numpy as np
 import pysam
-from numpy.typing import NDArray
+import xarray as xr
 
 from .types import Reader
 
@@ -14,8 +14,9 @@ class Fasta(Reader):
         self.path = path
         self.dtype = np.dtype("S1")
         self.sizes = {}
+        self.indexes = {}
 
-    def read(self, contig: str, start: int, end: int, **kwargs) -> NDArray[np.bytes_]:
+    def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
         with pysam.FastaFile(str(self.path)) as f:
             seq = f.fetch(contig, start, end)
-            return np.frombuffer(seq.encode("ascii"), "S1")
+            return xr.DataArray(np.frombuffer(seq.encode("ascii"), "S1"), dims="length")

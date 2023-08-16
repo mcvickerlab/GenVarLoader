@@ -1,16 +1,30 @@
 from collections import defaultdict
+from copy import deepcopy
+from itertools import accumulate, chain, repeat
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 import numpy as np
 import polars as pl
+import xarray as xr
 from natsort import natsorted
 from numpy.typing import NDArray
 
 from .bigwig import BigWig
 from .fasta import Fasta
 from .fasta_variants import FastaVariants
-from .numba import multi_slice, partition_regions
+from .numba import build_length_indices, partition_regions
 from .tiledb_vcf import TileDB_VCF
 from .types import Reader
 from .util import _set_uniform_length_around_center, read_bedlike
@@ -34,181 +48,225 @@ class GVL:
 
     def __init__(self, *readers: Reader) -> None:
         self.readers = readers
-        self.sizes = self.readers[0].sizes
+        self.sizes: Dict[str, int] = {}
         self.itemsizes: Dict[str, int] = defaultdict(int)
-        for r in self.readers[1:]:
+        self.indexes: Dict[str, NDArray] = {}
+        for r in self.readers:
             for dim, size in r.sizes.items():
                 if dim not in self.sizes:
                     self.sizes[dim] = size
                 elif self.sizes[dim] != size:
                     raise ValueError(
-                        f"""Readers have inconsistent dimension sizes.
+                        f"""Readers have inconsistent dimension sizes, at least for dimension {dim}
                         Sizes: {[r.sizes for r in self.readers]}
                         """
                     )
+
+                if dim not in self.indexes:
+                    self.indexes[dim] = r.indexes[dim]
+                elif self.indexes[dim] != r.indexes[dim]:
+                    raise ValueError(
+                        f"""Readers have inconsistent indexes, at least for dimension {dim}
+                        Indexes: {[r.sizes for r in self.readers]}
+                        """
+                    )
+
                 self.itemsizes[dim] += r.dtype.itemsize
 
     def iter_batches(
         self,
-        batch_dims: List[str],
         bed: Union[pl.DataFrame, str, Path],
         fixed_length: int,
         batch_size: int,
         max_memory_gb: float,
-        buffer_transform: Optional[
-            Callable[[Dict[str, NDArray]], Dict[str, NDArray]]
-        ] = None,
-        batch_transform: Optional[
-            Callable[[Dict[str, NDArray]], Dict[str, NDArray]]
-        ] = None,
+        batch_dims: Optional[List[str]] = None,
+        transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
         shuffle: bool = False,
         seed: Optional[int] = None,
         return_tuples: bool = False,
     ) -> Generator[Union[Dict[str, Any], Tuple[Any]], None, None]:
-        rng = np.random.default_rng(seed)
-
         if isinstance(bed, (str, Path)):
             bed = read_bedlike(bed)
 
-        # need to accomodate memory budget
-        # partition batch dims in order of appearance
-        #
+        if batch_dims is None:
+            batch_dims = []
+        elif missing_dims := (set(batch_dims) - set(self.sizes.keys())):
+            raise ValueError(
+                f"Got batch dimensions that are not available from the readers: {missing_dims}"
+            )
 
-        int(max_memory_gb * 1e9)
-        dim_idxs = {}
-        # largest
-        for dim in batch_dims:
-            dim_idxs[dim] = np.arange(self.sizes[dim], dtype=np.uint32)
+        rng = np.random.default_rng(seed)
 
-        dim_idxs = {
-            dim: np.arange(size, dtype=np.uint32)
-            for dim, size in self.sizes.items()
-            if dim in batch_dims
-        }
-        if shuffle:
-            dim_idxs = {
-                dim: cast(NDArray[np.uint32], rng.permutation(idx))
-                for dim, idx in dim_idxs.items()
-            }
-        {dim: self.itemsizes[dim] * self.sizes[dim] for dim in batch_dims}
-        {dim: slice(size) for dim, size in self.sizes.items() if dim in batch_dims}
+        max_length = cast(
+            int,
+            bed.groupby("chrom")
+            .agg(
+                (pl.col("chromEnd").max() - pl.col("chromStart")).min().alias("length")
+            )["length"]
+            .max(),
+        )
+
+        batch_mem = fixed_length * self.mem_per_length(
+            {k: v for k, v in self.sizes.items() if k not in batch_dims}
+        )
+        FUDGE_FACTOR = 2
+        max_mem = int((max_memory_gb * 1e9 - batch_mem) / FUDGE_FACTOR)
+
+        buffer_sizes = self.set_buffer_sizes(max_mem, max_length, batch_dims)
+
+        max_length = max_mem // self.mem_per_length(buffer_sizes)
+        if max_length == 0:
+            min_mem = (
+                (self.mem_per_length(buffer_sizes) + batch_mem) * FUDGE_FACTOR / 1e9
+            )
+            raise ValueError(
+                f"Not enough memory to process dataset. Minimum memory needed: {min_mem:.4f} GB."
+            )
 
         with pl.StringCache():
             pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
             bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
         bed = _set_uniform_length_around_center(bed, fixed_length)
-        partitioned_bed = self.partition_bed(
-            bed, fixed_length, batch_size, max_memory_gb
-        )
+        partitioned_bed = self.partition_bed(bed, max_length)
 
-        starts_slice = slice(0, 0)
         batch_slice = slice(0, 0)
+        dim_slices = {d: slice(0, v) for d, v in buffer_sizes.items()}
 
-        batch = None
+        if shuffle:
+            indexes = {d: rng.permutation(idx) for d, idx in self.indexes.items()}
+        else:
+            indexes = self.indexes
+
+        partial_batches = []
 
         for partition in partitioned_bed:
             n_regions = len(partition)
+            instances_in_partition = n_regions * np.prod(
+                [self.sizes[d] for d in batch_dims]
+            )
+            instances_yielded = 0
+
             contig: str
             start: int
             end: int
-            contig, start, end = (
-                partition.select(
-                    pl.col("chrom").first(),
-                    pl.col("chromStart").min(),
-                    pl.col("chromEnd").max(),
-                )
-                .to_numpy()
-                .squeeze()
-            )
+            contig, start, end = partition.select(
+                pl.col("chrom").first(),
+                pl.col("chromStart").min(),
+                pl.col("chromEnd").max(),
+            ).row(0)
 
-            # fill batch or take what's in buffer
-            new_stop = min(batch_size, batch_slice.stop + n_regions)
+            buffer = self.get_buffer(indexes, dim_slices, contig, start, end)
+            buffer_idx = self.get_buffer_idx(partition, start, buffer)
+            if shuffle:
+                buffer_idx = rng.permutation(buffer_idx)
+            instances_in_buffer = len(buffer_idx)
+
+            new_stop = min(batch_size, batch_slice.stop + instances_in_buffer)
             batch_slice = slice(batch_slice.stop, new_stop)
             len_batch_slice = batch_slice.stop - batch_slice.start
-            starts_slice = slice(0, len_batch_slice)
+            buffer_idx_slice = slice(0, len_batch_slice)
 
-            buffers = {r.name: r.read(contig, start, end) for r in self.readers}
-            if buffer_transform is not None:
-                buffers = buffer_transform(buffers)
-
-            if batch is None:
-                batch = {
-                    name: np.empty_like(
-                        buff, shape=(batch_size, *buff.shape[:-1], fixed_length)
-                    )
-                    for name, buff in buffers.items()
-                }
-
-            starts = cast(
-                NDArray[np.int32], (partition["chromStart"] - start).to_numpy()
-            )
-            if shuffle:
-                starts = rng.permutation(starts)
-
-            len_unused_buffer = n_regions
-            np.arange(fixed_length, dtype="u4")
-
-            while len_unused_buffer > 0:
-                # Consider deferring multi slice implementation to the readers since the
-                # length axis might depend on the modality? This may necessitate an
-                # inefficient implementation to coax all arrays to have the length axis
-                # in the right place so that broadcasting always works here. Or, having
-                # to add a length_axis property for each reader, which seems
-                # unnecessarily awkward too. Deferring would also allow a variant
-                # applying Reader to do something that isn't multi-slicing and
-                # potentially improve the speed/memory trade-off.
-                for name in batch:
-                    if buffers[name].dtype.type == np.bytes_:
-                        batch[name][batch_slice] = multi_slice(
-                            buffers[name].view("u1"), starts[starts_slice], fixed_length
-                        ).view("S1")
-                    else:
-                        batch[name][batch_slice] = multi_slice(
-                            buffers[name], starts[starts_slice], fixed_length
+            while instances_yielded < instances_in_partition:
+                idx = buffer_idx[buffer_idx_slice]
+                if len(batch_dims) > 0:
+                    selector = {
+                        d: xr.DataArray(col, dims="batch")
+                        for d, col in zip(
+                            batch_dims, np.hsplit(idx[:, 1:], len(batch_dims))
                         )
+                    }
+                else:
+                    selector = {}
+                selector["length"] = xr.DataArray(
+                    build_length_indices(idx[:, 0], fixed_length),
+                    dims=["batch", "length"],
+                )
 
-                len_unused_buffer = len_unused_buffer - starts_slice.stop
+                batch: xr.Dataset
+                if batch_slice.start == 0 and batch_slice.stop == batch_size:
+                    batch = buffer.isel(selector, missing_dims="ignore")
+                else:
+                    partial_batches.append(buffer.isel(selector, missing_dims="ignore"))
+                    if batch_slice.stop == batch_size:
+                        batch = xr.concat(partial_batches, dim="batch")
+
+                instances_yielded += batch_slice.stop - batch_slice.start
+
+                if buffer_idx_slice.stop == instances_in_buffer:
+                    dim_slices = {
+                        d: slice(s.stop, s.stop + v)
+                        for (d, s), v in zip(dim_slices.items(), buffer_sizes.values())
+                    }
+                    buffer = self.get_buffer(indexes, dim_slices, contig, start, end)
+                    buffer_idx = self.get_buffer_idx(partition, start, buffer)
+                    if shuffle:
+                        buffer_idx = rng.permutation(buffer_idx)
+                    instances_in_buffer = len(buffer_idx)
+
+                new_stop = min(buffer_idx_slice.stop + batch_size, instances_in_buffer)
+                buffer_idx_slice = slice(buffer_idx_slice.stop, new_stop)
+
+                len_unused_buffer = instances_in_buffer - buffer_idx_slice.stop
 
                 # ready to yield batch
                 if batch_slice.stop == batch_size:
                     # full batch or take what's left in the buffer
                     new_stop = min(batch_size, len_unused_buffer)
                     batch_slice = slice(0, new_stop)
-                    if batch_transform is not None:
-                        batch = batch_transform(batch)
+                    out = {
+                        name: arr.to_numpy() for name, arr in batch.data_vars.items()
+                    }
+                    if transform is not None:
+                        out = transform(out)
                     if return_tuples:
-                        yield tuple(batch.values())
+                        yield tuple(out.values())
                     else:
-                        yield batch
+                        yield out
                 # not ready and more data in buffer
                 else:
                     # fill batch or take what's left in the buffer
                     new_stop = min(batch_size, batch_slice.stop + len_unused_buffer)
                     batch_slice = slice(batch_slice.stop, new_stop)
 
-                len_batch_slice = batch_slice.stop - batch_slice.start
-                new_stop = min(n_regions, starts_slice.stop + len_batch_slice)
-                starts_slice = slice(starts_slice.stop, new_stop)
+    def mem_per_length(self, sizes: Dict[str, int]):
+        mpl = sum(sizes[dim] * self.itemsizes[dim] for dim in sizes)
+        mpl = max(1, mpl)
+        return mpl
+
+    def set_buffer_sizes(self, max_mem: int, max_length: int, batch_dims: List[str]):
+        buffer_sizes = deepcopy(self.sizes)
+        if max_mem < max_length * self.mem_per_length(self.sizes):
+            for dim in batch_dims:
+                buffer_sizes.pop(dim)
+                size = int(
+                    (max_mem / max_length - self.mem_per_length(buffer_sizes))
+                    / self.itemsizes[dim]
+                )
+                if size > 0:
+                    buffer_sizes[dim] = size
+                    break
+                elif size == 0:
+                    buffer_sizes[dim] = 1
+        return buffer_sizes
 
     def partition_bed(
         self,
         bed: pl.DataFrame,
-        fixed_length: int,
-        batch_size: int,
-        max_memory_gb: float,
+        max_length: int,
     ) -> List[pl.DataFrame]:
-        # use polars.DataFrame.partition_by
-        # partition regions to maximize size of in-memory buffer
-        # but still respect contig boundaries
-        max_mem = max_memory_gb / 2 * 1e9
-        batch_mem = self.bytes_per_length * batch_size * fixed_length / 1e9
-        max_mem -= batch_mem * 2
-        if max_mem < 0:
-            min_mem = batch_mem * 4 / 1e9
-            raise ValueError(
-                f"Insufficient memory to process data. At least {min_mem:.3f} GB is needed."
-            )
-        max_length = int(max_mem / self.bytes_per_length)
+        """Partition regions of a BED file such that the overlap of each partition never
+        exceeds the max length.
+
+        Parameters
+        ----------
+        bed : pl.DataFrame
+        max_length : int
+
+        Returns
+        -------
+        List[pl.DataFrame]
+            Partitions of the BED.
+        """
         contig_partitions = bed.partition_by("chrom")
         partitions: List[pl.DataFrame] = []
         for c_part in contig_partitions:
@@ -223,3 +281,44 @@ class GVL:
             )
             partitions.extend(c_part.partition_by("partition", include_key=False))
         return partitions
+
+    def get_buffer(
+        self,
+        indexes: Dict[str, NDArray],
+        dim_slices: Dict[str, slice],
+        contig: str,
+        start: int,
+        end: int,
+    ):
+        read_kwargs = {d: indexes[d][s] for d, s in dim_slices.items()}
+        buffer = xr.Dataset(
+            {r.name: r.read(contig, start, end, **read_kwargs) for r in self.readers}
+        )
+        return buffer
+
+    def get_buffer_idx(self, partition, start, buffer):
+        starts = cast(NDArray[np.int32], (partition["chromStart"] - start).to_numpy())
+        buffer_indexes = [
+            starts,
+            *(np.arange(s, dtype=np.int32) for s in buffer.sizes.values()),
+        ]
+        buffer_idx = _cartesian_product(buffer_indexes)
+        return buffer_idx
+
+
+def _cartesian_product(arrays: Sequence[NDArray]) -> NDArray:
+    """Get the cartesian product of multiple arrays such that each entry corresponds to
+    a unique combination of the input arrays' values.
+    """
+    # https://stackoverflow.com/a/49445693
+    la = len(arrays)
+    shape = *map(len, arrays), la
+    dtype = np.result_type(*arrays)
+    arr = np.empty(shape, dtype=dtype)
+    arrs = (*accumulate(chain((arr,), repeat(0, la - 1)), np.ndarray.__getitem__),)
+    idx = slice(None), *repeat(None, la - 1)
+    for i in range(la - 1, 0, -1):
+        arrs[i][..., i] = arrays[i][idx[: la - i]]
+        arrs[i - 1][1:] = arrs[i]
+    arr[..., 0] = arrays[0][idx]
+    return arr.reshape(-1, la)

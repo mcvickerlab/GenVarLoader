@@ -27,7 +27,7 @@ class TileDB_VCF(Variants):
     ) -> Optional[Tuple[NDArray[np.uint32], NDArray[np.int32], NDArray[np.bytes_]]]:
         region = f"{contig}:{start+1}-{end}"
 
-        samples: List[str]
+        samples: Iterable[str]
         samples = kwargs.get("samples", self.samples)
 
         ploid: Iterable[int]
@@ -55,7 +55,9 @@ class TileDB_VCF(Variants):
             .drop("row_nr")
         )
 
-        alleles = (pl.col("alleles").list.get(p).alias(f"allele_{p}") for p in ploid)
+        alleles = (
+            pl.col("alleles").list.get(int(p)).alias(f"allele_{p}") for p in ploid
+        )
         with pl.StringCache():
             pl.Series(samples, dtype=pl.Categorical)
             df = (

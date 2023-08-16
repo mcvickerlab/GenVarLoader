@@ -28,7 +28,7 @@ def read_bedlike(path: Union[str, Path]) -> pl.DataFrame:
 
     Returns
     -------
-    pandas.DataFrame
+    polars.DataFrame
     """
     path = Path(path)
     if ".bed" in path.suffixes:

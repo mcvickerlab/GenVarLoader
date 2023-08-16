@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Tuple
 
 import numpy as np
+import xarray as xr
 from numpy.typing import NDArray
 
 
@@ -21,8 +22,9 @@ class Reader(Protocol):
     name: str
     dtype: np.dtype
     sizes: Dict[str, int]
+    indexes: Dict[str, NDArray]
 
-    def read(self, contig: str, start: int, end: int, **kwargs) -> NDArray:
+    def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
         """Read data corresponding to given genomic coordinates. The output shape will
         have length as the final axis i.e. (..., length).
 
@@ -81,7 +83,7 @@ class Variants(Protocol):
         end : int
             End coordinate, 0-based exclusive.
         **kwargs
-            Additional keyword arguments. May include `samples: list[str]` and
+            Additional keyword arguments. May include `samples: Iterable[str]` and
             `ploid: Iterable[int]` to specify samples and ploid numbers.
 
         Returns
