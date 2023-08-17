@@ -1,3 +1,4 @@
+import random
 from collections import defaultdict
 from copy import deepcopy
 from itertools import accumulate, chain, repeat
@@ -13,6 +14,7 @@ from typing import (
     Tuple,
     Union,
     cast,
+    overload,
 )
 
 import numpy as np
@@ -73,6 +75,7 @@ class GVL:
 
                 self.itemsizes[dim] += r.dtype.itemsize
 
+    @overload
     def iter_batches(
         self,
         bed: Union[pl.DataFrame, str, Path],
@@ -84,6 +87,36 @@ class GVL:
         shuffle: bool = False,
         seed: Optional[int] = None,
         return_tuples: bool = False,
+    ) -> Generator[Dict[str, Any], None, None]:
+        ...
+
+    @overload
+    def iter_batches(
+        self,
+        bed: Union[pl.DataFrame, str, Path],
+        fixed_length: int,
+        batch_size: int,
+        max_memory_gb: float,
+        batch_dims: Optional[List[str]] = None,
+        transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
+        shuffle: bool = False,
+        seed: Optional[int] = None,
+        return_tuples: bool = True,
+    ) -> Generator[Tuple[Any], None, None]:
+        ...
+
+    def iter_batches(
+        self,
+        bed: Union[pl.DataFrame, str, Path],
+        fixed_length: int,
+        batch_size: int,
+        max_memory_gb: float,
+        batch_dims: Optional[List[str]] = None,
+        transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
+        shuffle: bool = False,
+        seed: Optional[int] = None,
+        return_tuples: bool = False,
+        return_index: bool = False,
     ) -> Generator[Union[Dict[str, Any], Tuple[Any]], None, None]:
         if isinstance(bed, (str, Path)):
             bed = read_bedlike(bed)
@@ -128,6 +161,8 @@ class GVL:
             bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
         bed = _set_uniform_length_around_center(bed, fixed_length)
         partitioned_bed = self.partition_bed(bed, max_length)
+        if shuffle:
+            random.shuffle(partitioned_bed, rng.random)
 
         batch_slice = slice(0, 0)
         dim_slices = {d: slice(0, v) for d, v in buffer_sizes.items()}
@@ -142,7 +177,7 @@ class GVL:
         for partition in partitioned_bed:
             n_regions = len(partition)
             instances_in_partition = n_regions * np.prod(
-                [self.sizes[d] for d in batch_dims]
+                [self.sizes[d] for d in batch_dims], dtype=int
             )
             instances_yielded = 0
 
@@ -155,18 +190,29 @@ class GVL:
                 pl.col("chromEnd").max(),
             ).row(0)
 
-            buffer = self.get_buffer(indexes, dim_slices, contig, start, end)
-            buffer_idx = self.get_buffer_idx(partition, start, buffer)
-            if shuffle:
-                buffer_idx = rng.permutation(buffer_idx)
-            instances_in_buffer = len(buffer_idx)
-
-            new_stop = min(batch_size, batch_slice.stop + instances_in_buffer)
-            batch_slice = slice(batch_slice.stop, new_stop)
-            len_batch_slice = batch_slice.stop - batch_slice.start
-            buffer_idx_slice = slice(0, len_batch_slice)
+            instances_in_buffer = 0
+            buffer_idx_slice = slice(0, 0)
+            len_unused_buffer = 0
 
             while instances_yielded < instances_in_partition:
+                if len_unused_buffer == 0:
+                    buffer = self.get_buffer(indexes, dim_slices, contig, start, end)
+                    buffer_idx = self.get_buffer_idx(
+                        partition, start, buffer, batch_dims
+                    )
+                    if shuffle:
+                        buffer_idx = rng.permutation(buffer_idx)
+                    dim_slices = {
+                        d: slice(s.stop, s.stop + v)
+                        for (d, s), v in zip(dim_slices.items(), buffer_sizes.values())
+                    }
+                    instances_in_buffer = len(buffer_idx)
+                    new_stop = min(batch_size, batch_slice.stop + instances_in_buffer)
+                    batch_slice = slice(batch_slice.stop, new_stop)
+                    len_batch_slice = batch_slice.stop - batch_slice.start
+                    buffer_idx_slice = slice(0, len_batch_slice)
+
+                # guaranteed to init buffer_idx based on init of len_unused_buffer
                 idx = buffer_idx[buffer_idx_slice]
                 if len(batch_dims) > 0:
                     selector = {
@@ -183,6 +229,7 @@ class GVL:
                 )
 
                 batch: xr.Dataset
+                # guaranteed to init buffer based on init of len_unused_buffer
                 if batch_slice.start == 0 and batch_slice.stop == batch_size:
                     batch = buffer.isel(selector, missing_dims="ignore")
                 else:
@@ -190,43 +237,39 @@ class GVL:
                     if batch_slice.stop == batch_size:
                         batch = xr.concat(partial_batches, dim="batch")
 
-                instances_yielded += batch_slice.stop - batch_slice.start
-
-                if buffer_idx_slice.stop == instances_in_buffer:
-                    dim_slices = {
-                        d: slice(s.stop, s.stop + v)
-                        for (d, s), v in zip(dim_slices.items(), buffer_sizes.values())
-                    }
-                    buffer = self.get_buffer(indexes, dim_slices, contig, start, end)
-                    buffer_idx = self.get_buffer_idx(partition, start, buffer)
-                    if shuffle:
-                        buffer_idx = rng.permutation(buffer_idx)
-                    instances_in_buffer = len(buffer_idx)
-
-                new_stop = min(buffer_idx_slice.stop + batch_size, instances_in_buffer)
-                buffer_idx_slice = slice(buffer_idx_slice.stop, new_stop)
-
                 len_unused_buffer = instances_in_buffer - buffer_idx_slice.stop
 
                 # ready to yield batch
                 if batch_slice.stop == batch_size:
-                    # full batch or take what's left in the buffer
-                    new_stop = min(batch_size, len_unused_buffer)
-                    batch_slice = slice(0, new_stop)
+                    batch = batch.transpose("batch", ...)
                     out = {
                         name: arr.to_numpy() for name, arr in batch.data_vars.items()
                     }
+                    # TODO check this works
+                    if return_index:
+                        out["index"] = idx + np.array(
+                            [s.start for s in dim_slices.values()]
+                        )
                     if transform is not None:
                         out = transform(out)
                     if return_tuples:
                         yield tuple(out.values())
                     else:
                         yield out
+
+                    instances_yielded += batch_slice.stop - batch_slice.start
+
+                    # full batch or take what's left in the buffer
+                    new_stop = min(batch_size, len_unused_buffer)
+                    batch_slice = slice(0, new_stop)
                 # not ready and more data in buffer
                 else:
                     # fill batch or take what's left in the buffer
                     new_stop = min(batch_size, batch_slice.stop + len_unused_buffer)
                     batch_slice = slice(batch_slice.stop, new_stop)
+
+                new_stop = min(buffer_idx_slice.stop + batch_size, instances_in_buffer)
+                buffer_idx_slice = slice(buffer_idx_slice.stop, new_stop)
 
     def mem_per_length(self, sizes: Dict[str, int]):
         mpl = sum(sizes[dim] * self.itemsizes[dim] for dim in sizes)
@@ -296,11 +339,15 @@ class GVL:
         )
         return buffer
 
-    def get_buffer_idx(self, partition, start, buffer):
+    def get_buffer_idx(self, partition, start, buffer, batch_dims):
         starts = cast(NDArray[np.int32], (partition["chromStart"] - start).to_numpy())
         buffer_indexes = [
             starts,
-            *(np.arange(s, dtype=np.int32) for s in buffer.sizes.values()),
+            *(
+                np.arange(size, dtype=np.int32)
+                for name, size in buffer.sizes.items()
+                if name in batch_dims
+            ),
         ]
         buffer_idx = _cartesian_product(buffer_indexes)
         return buffer_idx

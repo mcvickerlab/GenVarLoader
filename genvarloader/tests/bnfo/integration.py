@@ -18,5 +18,5 @@ bed = pl.DataFrame(
 
 gvloader = GVL(varseq)
 dl = gvloader.iter_batches(bed, fixed_length=3, batch_size=1, max_memory_gb=2)
-batch = next(dl)
-batch["varseq"]
+for batch in dl:
+    print(batch["varseq"])
