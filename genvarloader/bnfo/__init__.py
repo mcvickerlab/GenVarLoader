@@ -164,6 +164,10 @@ class GVL:
             pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
             bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
         self.bed = _set_uniform_length_around_center(bed, fixed_length)
+
+        # TODO check if any regions are out-of-bounds and any readers have padding disabled
+        # if so, raise an error
+
         self.partitioned_bed = self.partition_bed(self.bed, max_length)
         self.n_instances: int = self.bed.height * np.prod(
             [self.sizes[d] for d in self.batch_dims], dtype=int
@@ -184,15 +188,6 @@ class GVL:
 
         batch_slice = slice(0, 0)
 
-        # Better to use slices on batch dimensions in case one of the readers is a
-        # chunked array format. This will reduce the amount of chunks hit on read() if
-        # the chunk size is > 1. This is in contrast to having a range index that can be
-        # randomly permuted. Because readers are not constrained to be chunked arrays we
-        # also cannot randomly select chunks.
-        # TODO allow randomization of dim_slices (i.e. random order of slices)
-        # ? how to change order of batch dims? Needs to be done on reader/format side?
-        dim_slices = {str(d): slice(0, 0) for d in self.buffer_sizes}
-
         if self.shuffle:
             indexes = {d: self.rng.permutation(idx) for d, idx in self.indexes.items()}
         else:
@@ -203,6 +198,15 @@ class GVL:
         total_yielded = 0
 
         for partition in self.partitioned_bed:
+            # Better to use slices on batch dimensions in case one of the readers is a
+            # chunked array format. This will reduce the amount of chunks hit on read() if
+            # the chunk size is > 1. This is in contrast to having a range index that can be
+            # randomly permuted. Because readers are not constrained to be chunked arrays we
+            # also cannot randomly select chunks.
+            # TODO allow randomization of dim_slices (i.e. random order of slices)
+            # ? how to change order of batch dims? Needs to be done on reader/format side?
+            dim_slices = {str(d): slice(0, 0) for d in self.buffer_sizes}
+
             n_regions = len(partition)
             instances_in_partition = n_regions * np.prod(
                 [self.sizes[d] for d in self.batch_dims], dtype=int
@@ -388,8 +392,8 @@ class GVL:
         ]
         buffer_idx = _cartesian_product(buffer_indexes)
         # columns: starts, region_idx, dim1_idx, dim2_idx, ...
-        region_idx = partition["region_idx"].to_numpy()[buffer_idx[:, 0]][:, None]
         starts = (partition["chromStart"].to_numpy() - start)[buffer_idx[:, 0]][:, None]
+        region_idx = partition["region_idx"].to_numpy()[buffer_idx[:, 0]][:, None]
         return np.hstack([starts, region_idx, buffer_idx[:, 1:]])
 
     def process_batch(

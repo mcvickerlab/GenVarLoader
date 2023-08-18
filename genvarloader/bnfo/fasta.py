@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import dask.array as da
 import numpy as np
@@ -10,13 +10,35 @@ from .types import Reader
 
 
 class Fasta(Reader):
-    def __init__(self, name: str, path: Union[str, Path]) -> None:
+    def __init__(
+        self, name: str, path: Union[str, Path], pad: Optional[str] = None
+    ) -> None:
         self.virtual_data = xr.DataArray(da.empty(0, dtype="S1"), name=name, dims="")
         self.path = path
+        if pad is not None:
+            if len(pad) > 1:
+                raise ValueError("Pad value must be a single character.")
+            self.pad = pad.encode("ascii")
+        else:
+            self.pad = pad
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
+        pad_left = -min(0, start)
+        if pad_left > 0 and self.pad is None:
+            raise ValueError("Padding is disabled and start is < 0.")
+
         with pysam.FastaFile(str(self.path)) as f:
-            # TODO handle start < 0 and end > len(contig)
-            # option to make this an error or to pad the sequence
-            seq = f.fetch(contig, start, end)
-            return xr.DataArray(np.frombuffer(seq.encode("ascii"), "S1"), dims="length")
+            pad_right = max(0, end - f.get_reference_length(contig))
+            if pad_right > 0 and self.pad is None:
+                raise ValueError("Padding is disabled and end is > contig length.")
+
+            # pysam behavior
+            # start < 0 => error
+            # end > contig length => truncate
+            seq = f.fetch(contig, max(0, start), end)
+
+        seq = np.frombuffer(seq.encode("ascii"), "S1")
+        pad_left = np.full(pad_left, self.pad)
+        pad_right = np.full(pad_right, self.pad)
+        seq = np.concatenate([pad_left, seq, pad_right])
+        return xr.DataArray(seq, dims="length")
