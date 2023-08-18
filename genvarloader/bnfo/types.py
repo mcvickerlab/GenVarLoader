@@ -11,7 +11,7 @@ class Reader(Protocol):
 
     Attributes
     ----------
-    _data : xr.DataArray
+    virtual_data : xr.DataArray
         Virtual data describing the type and dimensions of the data yielded by this
         reader. This data includes all dimensions except the length dimension since
         this is determined by the length of the genomic range passed to read().

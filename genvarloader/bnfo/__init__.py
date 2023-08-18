@@ -32,7 +32,7 @@ from .tiledb_vcf import TileDB_VCF
 from .types import Reader
 from .util import _set_uniform_length_around_center, read_bedlike
 
-__all__ = ["BigWig", "Fasta", "TileDB_VCF", "FastaVariants"]
+__all__ = ["BigWig", "Fasta", "TileDB_VCF", "FastaVariants", "GVL"]
 
 
 # TODO async reads
