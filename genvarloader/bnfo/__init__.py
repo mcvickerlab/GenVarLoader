@@ -35,6 +35,10 @@ from .util import _set_uniform_length_around_center, read_bedlike
 __all__ = ["BigWig", "Fasta", "TileDB_VCF", "FastaVariants"]
 
 
+# TODO async reads
+# have two buffers, one for reading data and for yielding batches
+# note: this will half the memory budget for buffers
+# use ray for concurrent work so it's aware of other concurrent readers
 class GVL:
     """GenVarLoader
 
@@ -96,7 +100,8 @@ class GVL:
         return_index : bool, optional
             Whether to include an array of the indexes in the batch, by default False
         drop_last : bool, optional
-            Whether to drop the last batch if the number of instances are not evenly divisible by the batch size.
+            Whether to drop the last batch if the number of instances are not evenly
+            divisible by the batch size.
         """
 
         if not isinstance(readers, Iterable):
@@ -178,9 +183,13 @@ class GVL:
         self.rng = np.random.default_rng(seed)
         self.return_tuples = return_tuples
         self.return_index = return_index
+        self.drop_last = drop_last
 
     def __len__(self):
-        return -(-self.n_instances // self.batch_size)  # ceil
+        if not self.drop_last:
+            return -(-self.n_instances // self.batch_size)  # ceil
+        else:
+            return self.n_instances // self.batch_size
 
     def __iter__(self) -> Generator[Union[Dict[str, Any], Tuple[Any]], None, None]:
         if self.shuffle:
@@ -288,8 +297,11 @@ class GVL:
                     # full batch or take what's left in the buffer
                     new_stop = min(self.batch_size, len_unused_buffer)
                     batch_slice = slice(0, new_stop)
-                # batch incomplete and no more data
+                # final batch incomplete
                 elif total_yielded + batch_slice.stop == self.n_instances:
+                    if self.drop_last:
+                        raise StopIteration
+
                     batch = batch.isel(batch=slice(0, batch_slice.stop))
 
                     yield self.process_batch(batch, batch_idx, dim_slices)
