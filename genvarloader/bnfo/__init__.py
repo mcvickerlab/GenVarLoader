@@ -1,6 +1,5 @@
 import random
 from collections import defaultdict
-from copy import deepcopy
 from itertools import accumulate, chain, repeat
 from pathlib import Path
 from typing import (
@@ -8,13 +7,15 @@ from typing import (
     Callable,
     Dict,
     Generator,
+    Hashable,
+    Iterable,
     List,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
     Union,
     cast,
-    overload,
 )
 
 import numpy as np
@@ -48,65 +49,9 @@ class GVL:
     whereas the batches are materialized from the buffer.
     """
 
-    def __init__(self, *readers: Reader) -> None:
-        self.readers = readers
-        self.sizes: Dict[str, int] = {}
-        self.itemsizes: Dict[str, int] = defaultdict(int)
-        self.indexes: Dict[str, NDArray] = {}
-        for r in self.readers:
-            for dim, size in r.sizes.items():
-                if dim not in self.sizes:
-                    self.sizes[dim] = size
-                elif self.sizes[dim] != size:
-                    raise ValueError(
-                        f"""Readers have inconsistent dimension sizes, at least for dimension {dim}
-                        Sizes: {[r.sizes for r in self.readers]}
-                        """
-                    )
-
-                if dim not in self.indexes:
-                    self.indexes[dim] = r.indexes[dim]
-                elif self.indexes[dim] != r.indexes[dim]:
-                    raise ValueError(
-                        f"""Readers have inconsistent indexes, at least for dimension {dim}
-                        Indexes: {[r.sizes for r in self.readers]}
-                        """
-                    )
-
-                self.itemsizes[dim] += r.dtype.itemsize
-
-    @overload
-    def iter_batches(
+    def __init__(
         self,
-        bed: Union[pl.DataFrame, str, Path],
-        fixed_length: int,
-        batch_size: int,
-        max_memory_gb: float,
-        batch_dims: Optional[List[str]] = None,
-        transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
-        shuffle: bool = False,
-        seed: Optional[int] = None,
-        return_tuples: bool = False,
-    ) -> Generator[Dict[str, Any], None, None]:
-        ...
-
-    @overload
-    def iter_batches(
-        self,
-        bed: Union[pl.DataFrame, str, Path],
-        fixed_length: int,
-        batch_size: int,
-        max_memory_gb: float,
-        batch_dims: Optional[List[str]] = None,
-        transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
-        shuffle: bool = False,
-        seed: Optional[int] = None,
-        return_tuples: bool = True,
-    ) -> Generator[Tuple[Any], None, None]:
-        ...
-
-    def iter_batches(
-        self,
+        readers: Union[Reader, Iterable[Reader]],
         bed: Union[pl.DataFrame, str, Path],
         fixed_length: int,
         batch_size: int,
@@ -117,9 +62,65 @@ class GVL:
         seed: Optional[int] = None,
         return_tuples: bool = False,
         return_index: bool = False,
-    ) -> Generator[Union[Dict[str, Any], Tuple[Any]], None, None]:
+        drop_last: bool = False,
+    ) -> None:
+        """GenVarLoader
+
+        Parameters
+        ----------
+        readers : Reader, Iterable[Reader]
+            Reader or iterable or readers. These all implement the read() method which
+            returns data corresponding to a genomic range.
+        bed : pl.DataFrame, str, Path
+            BED3+ file.
+        fixed_length : int
+            Length of regions of interest to output. Will be centered at coordinates in
+            bed file.
+        batch_size : int
+            Number of instances in the batch.
+        max_memory_gb : float
+            Maximum memory to use in GB.
+        batch_dims : List[str], optional
+            Dimensions that can be included in the batch dimension, by default None
+        transform : (Dict[str, NDArray]) -> Dict[str, NDArray], optional
+            Function to call on each batch before yielding, by default None. This
+            function should accept a dictionary of NumPy arrays and return a dictionary
+            of NumPy arrays.
+        shuffle : bool, optional
+            Whether to shuffle with respect to regions of interest and batch dimensions,
+            by default False
+        seed : int, optional
+            Seed for shuffling, by default None
+        return_tuples : bool, optional
+            Whether to return a tuple instead of a dictionary, by default False
+        return_index : bool, optional
+            Whether to include an array of the indexes in the batch, by default False
+        drop_last : bool, optional
+            Whether to drop the last batch if the number of instances are not evenly divisible by the batch size.
+        """
+
+        if not isinstance(readers, Iterable):
+            readers = [readers]
+        self.readers = readers
+        self.virtual_data: xr.Dataset = xr.merge(
+            [r.virtual_data for r in self.readers], join="exact"
+        )
+        self.sizes = dict(self.virtual_data.sizes)
+        self.sizes.pop("", None)
+        self.itemsizes: Mapping[Hashable, int] = defaultdict(int)
+        self.indexes = self.virtual_data.coords
+        for arr in self.virtual_data.data_vars.values():
+            for dim in arr.dims:
+                if dim == "":
+                    continue
+                self.itemsizes[dim] += arr.dtype.itemsize
+
         if isinstance(bed, (str, Path)):
             bed = read_bedlike(bed)
+        bed = bed.with_row_count("region_idx")
+
+        self.fixed_length = fixed_length
+        self.batch_size = batch_size
 
         if batch_dims is None:
             batch_dims = []
@@ -127,8 +128,7 @@ class GVL:
             raise ValueError(
                 f"Got batch dimensions that are not available from the readers: {missing_dims}"
             )
-
-        rng = np.random.default_rng(seed)
+        self.batch_dims = batch_dims
 
         max_length = cast(
             int,
@@ -143,14 +143,18 @@ class GVL:
             {k: v for k, v in self.sizes.items() if k not in batch_dims}
         )
         FUDGE_FACTOR = 2
-        max_mem = int((max_memory_gb * 1e9 - batch_mem) / FUDGE_FACTOR)
+        max_mem = int(
+            (max_memory_gb * 1e9 - batch_mem - bed.estimated_size()) / FUDGE_FACTOR
+        )
 
-        buffer_sizes = self.set_buffer_sizes(max_mem, max_length, batch_dims)
+        self.buffer_sizes = self.set_buffer_sizes(max_mem, max_length, batch_dims)
 
-        max_length = max_mem // self.mem_per_length(buffer_sizes)
+        max_length = max_mem // self.mem_per_length(self.buffer_sizes)
         if max_length == 0:
             min_mem = (
-                (self.mem_per_length(buffer_sizes) + batch_mem) * FUDGE_FACTOR / 1e9
+                (self.mem_per_length(self.buffer_sizes) + batch_mem)
+                * FUDGE_FACTOR
+                / 1e9
             )
             raise ValueError(
                 f"Not enough memory to process dataset. Minimum memory needed: {min_mem:.4f} GB."
@@ -159,25 +163,49 @@ class GVL:
         with pl.StringCache():
             pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
             bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
-        bed = _set_uniform_length_around_center(bed, fixed_length)
-        partitioned_bed = self.partition_bed(bed, max_length)
-        if shuffle:
-            random.shuffle(partitioned_bed, rng.random)
+        self.bed = _set_uniform_length_around_center(bed, fixed_length)
+        self.partitioned_bed = self.partition_bed(self.bed, max_length)
+        self.n_instances: int = self.bed.height * np.prod(
+            [self.sizes[d] for d in self.batch_dims], dtype=int
+        )
+
+        self.transform = transform
+        self.shuffle = shuffle
+        self.rng = np.random.default_rng(seed)
+        self.return_tuples = return_tuples
+        self.return_index = return_index
+
+    def __len__(self):
+        return -(-self.n_instances // self.batch_size)  # ceil
+
+    def __iter__(self) -> Generator[Union[Dict[str, Any], Tuple[Any]], None, None]:
+        if self.shuffle:
+            random.shuffle(self.partitioned_bed, self.rng.random)
 
         batch_slice = slice(0, 0)
-        dim_slices = {d: slice(0, v) for d, v in buffer_sizes.items()}
 
-        if shuffle:
-            indexes = {d: rng.permutation(idx) for d, idx in self.indexes.items()}
+        # Better to use slices on batch dimensions in case one of the readers is a
+        # chunked array format. This will reduce the amount of chunks hit on read() if
+        # the chunk size is > 1. This is in contrast to having a range index that can be
+        # randomly permuted. Because readers are not constrained to be chunked arrays we
+        # also cannot randomly select chunks.
+        # TODO allow randomization of dim_slices (i.e. random order of slices)
+        # ? how to change order of batch dims? Needs to be done on reader/format side?
+        dim_slices = {str(d): slice(0, 0) for d in self.buffer_sizes}
+
+        if self.shuffle:
+            indexes = {d: self.rng.permutation(idx) for d, idx in self.indexes.items()}
         else:
             indexes = self.indexes
 
         partial_batches = []
+        partial_indices = []
+        total_yielded = 0
 
-        for partition in partitioned_bed:
+        for partition in self.partitioned_bed:
             n_regions = len(partition)
             instances_in_partition = n_regions * np.prod(
-                [self.sizes[d] for d in batch_dims], dtype=int
+                [self.sizes[d] for d in self.batch_dims], dtype=int
             )
             instances_yielded = 0
 
@@ -196,88 +224,94 @@ class GVL:
 
             while instances_yielded < instances_in_partition:
                 if len_unused_buffer == 0:
-                    buffer = self.get_buffer(indexes, dim_slices, contig, start, end)
-                    buffer_idx = self.get_buffer_idx(
-                        partition, start, buffer, batch_dims
-                    )
-                    if shuffle:
-                        buffer_idx = rng.permutation(buffer_idx)
                     dim_slices = {
                         d: slice(s.stop, s.stop + v)
-                        for (d, s), v in zip(dim_slices.items(), buffer_sizes.values())
+                        for (d, s), v in zip(
+                            dim_slices.items(), self.buffer_sizes.values()
+                        )
                     }
+                    buffer = self.get_buffer(indexes, dim_slices, contig, start, end)
+                    # columns: starts, region_idx, dim1_idx, dim2_idx, ...
+                    buffer_idx = self.get_buffer_idx(partition, start, buffer)
+                    if self.shuffle:
+                        buffer_idx = self.rng.permutation(buffer_idx)
                     instances_in_buffer = len(buffer_idx)
-                    new_stop = min(batch_size, batch_slice.stop + instances_in_buffer)
+                    new_stop = min(
+                        self.batch_size, batch_slice.stop + instances_in_buffer
+                    )
                     batch_slice = slice(batch_slice.stop, new_stop)
                     len_batch_slice = batch_slice.stop - batch_slice.start
                     buffer_idx_slice = slice(0, len_batch_slice)
 
                 # guaranteed to init buffer_idx based on init of len_unused_buffer
                 idx = buffer_idx[buffer_idx_slice]
-                if len(batch_dims) > 0:
+                if len(self.batch_dims) > 0:
                     selector = {
-                        d: xr.DataArray(col, dims="batch")
+                        d: xr.DataArray(col.squeeze(-1), dims="batch")
                         for d, col in zip(
-                            batch_dims, np.hsplit(idx[:, 1:], len(batch_dims))
+                            self.batch_dims, np.hsplit(idx[:, 2:], len(self.batch_dims))
                         )
                     }
                 else:
                     selector = {}
                 selector["length"] = xr.DataArray(
-                    build_length_indices(idx[:, 0], fixed_length),
+                    build_length_indices(idx[:, 0], self.fixed_length),
                     dims=["batch", "length"],
                 )
 
                 batch: xr.Dataset
                 # guaranteed to init buffer based on init of len_unused_buffer
-                if batch_slice.start == 0 and batch_slice.stop == batch_size:
+                if batch_slice.start == 0 and batch_slice.stop == self.batch_size:
                     batch = buffer.isel(selector, missing_dims="ignore")
+                    batch_idx = idx.copy()
                 else:
                     partial_batches.append(buffer.isel(selector, missing_dims="ignore"))
-                    if batch_slice.stop == batch_size:
+                    partial_indices.append(idx)
+                    if batch_slice.stop == self.batch_size:
                         batch = xr.concat(partial_batches, dim="batch")
+                        batch_idx = np.concatenate(partial_indices, 0)
 
                 len_unused_buffer = instances_in_buffer - buffer_idx_slice.stop
 
-                # ready to yield batch
-                if batch_slice.stop == batch_size:
-                    batch = batch.transpose("batch", ...)
-                    out = {
-                        name: arr.to_numpy() for name, arr in batch.data_vars.items()
-                    }
-                    # TODO check this works
-                    if return_index:
-                        out["index"] = idx + np.array(
-                            [s.start for s in dim_slices.values()]
-                        )
-                    if transform is not None:
-                        out = transform(out)
-                    if return_tuples:
-                        yield tuple(out.values())
-                    else:
-                        yield out
+                # full batch
+                if batch_slice.stop == self.batch_size:
 
-                    instances_yielded += batch_slice.stop - batch_slice.start
+                    yield self.process_batch(batch, batch_idx, dim_slices)
+
+                    instances_yielded += self.batch_size
+                    total_yielded += self.batch_size
 
                     # full batch or take what's left in the buffer
-                    new_stop = min(batch_size, len_unused_buffer)
+                    new_stop = min(self.batch_size, len_unused_buffer)
                     batch_slice = slice(0, new_stop)
-                # not ready and more data in buffer
+                # batch incomplete and no more data
+                elif total_yielded + batch_slice.stop == self.n_instances:
+                    batch = batch.isel(batch=slice(0, batch_slice.stop))
+
+                    yield self.process_batch(batch, batch_idx, dim_slices)
+
+                    instances_yielded += batch_slice.stop
+                    total_yielded += batch_slice.stop
+                # batch incomplete and more data in buffer
                 else:
                     # fill batch or take what's left in the buffer
-                    new_stop = min(batch_size, batch_slice.stop + len_unused_buffer)
+                    new_stop = min(
+                        self.batch_size, batch_slice.stop + len_unused_buffer
+                    )
                     batch_slice = slice(batch_slice.stop, new_stop)
 
-                new_stop = min(buffer_idx_slice.stop + batch_size, instances_in_buffer)
+                new_stop = min(
+                    buffer_idx_slice.stop + self.batch_size, instances_in_buffer
+                )
                 buffer_idx_slice = slice(buffer_idx_slice.stop, new_stop)
 
-    def mem_per_length(self, sizes: Dict[str, int]):
+    def mem_per_length(self, sizes: Mapping[Hashable, int]):
         mpl = sum(sizes[dim] * self.itemsizes[dim] for dim in sizes)
         mpl = max(1, mpl)
         return mpl
 
     def set_buffer_sizes(self, max_mem: int, max_length: int, batch_dims: List[str]):
-        buffer_sizes = deepcopy(self.sizes)
+        buffer_sizes = dict(self.sizes)
         if max_mem < max_length * self.mem_per_length(self.sizes):
             for dim in batch_dims:
                 buffer_sizes.pop(dim)
@@ -327,30 +361,59 @@ class GVL:
 
     def get_buffer(
         self,
-        indexes: Dict[str, NDArray],
-        dim_slices: Dict[str, slice],
+        indexes: Mapping[Hashable, NDArray],
+        dim_slices: Mapping[str, slice],
         contig: str,
         start: int,
         end: int,
     ):
         read_kwargs = {d: indexes[d][s] for d, s in dim_slices.items()}
         buffer = xr.Dataset(
-            {r.name: r.read(contig, start, end, **read_kwargs) for r in self.readers}
+            {
+                r.virtual_data.name: r.read(contig, start, end, **read_kwargs)
+                for r in self.readers
+            }
         )
         return buffer
 
-    def get_buffer_idx(self, partition, start, buffer, batch_dims):
-        starts = cast(NDArray[np.int32], (partition["chromStart"] - start).to_numpy())
+    def get_buffer_idx(self, partition, start, buffer) -> NDArray[np.integer]:
+        row_idx = partition.with_row_count()["row_nr"].to_numpy()
         buffer_indexes = [
-            starts,
+            row_idx,
             *(
                 np.arange(size, dtype=np.int32)
                 for name, size in buffer.sizes.items()
-                if name in batch_dims
+                if name in self.batch_dims
             ),
         ]
         buffer_idx = _cartesian_product(buffer_indexes)
-        return buffer_idx
+        # columns: starts, region_idx, dim1_idx, dim2_idx, ...
+        region_idx = partition["region_idx"].to_numpy()[buffer_idx[:, 0]][:, None]
+        starts = (partition["chromStart"].to_numpy() - start)[buffer_idx[:, 0]][:, None]
+        return np.hstack([starts, region_idx, buffer_idx[:, 1:]])
+
+    def process_batch(
+        self, batch: xr.Dataset, batch_idx: NDArray, dim_slices: Dict[str, slice]
+    ):
+        batch = batch.transpose("batch", ...)
+        out = {name: arr.to_numpy() for name, arr in batch.data_vars.items()}
+
+        if self.return_index:
+            # cols: region_idx, dim1_idx, dim2_idx, ...
+            out_idx = batch_idx[:, 1:]
+            if len(self.batch_dims) > 0:
+                out_idx[:, 1:] += np.array(
+                    [dim_slices[d].start for d in self.batch_dims]
+                )
+            out["index"] = out_idx
+
+        if self.transform is not None:
+            out = self.transform(out)
+
+        if self.return_tuples:
+            out = tuple(out.values())
+
+        return out
 
 
 def _cartesian_product(arrays: Sequence[NDArray]) -> NDArray:

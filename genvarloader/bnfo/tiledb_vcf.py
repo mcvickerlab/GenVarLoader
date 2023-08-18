@@ -25,7 +25,6 @@ class TileDB_VCF(Variants):
     def read(
         self, contig: str, start: int, end: int, **kwargs
     ) -> Optional[Tuple[NDArray[np.uint32], NDArray[np.int32], NDArray[np.bytes_]]]:
-        region = f"{contig}:{start+1}-{end}"
 
         samples: Iterable[str]
         samples = kwargs.get("samples", self.samples)
@@ -33,6 +32,7 @@ class TileDB_VCF(Variants):
         ploid: Iterable[int]
         ploid = kwargs.get("ploid", range(self.ploidy))
 
+        region = f"{contig}:{start+1}-{end}"
         df = self.ds.read_arrow(
             ["pos_start", "alleles", "fmt_GT", "sample_name"],
             regions=[region],
@@ -65,6 +65,7 @@ class TileDB_VCF(Variants):
                 .with_columns(*alleles)
                 .drop("alleles")
             )
+
         counts = (
             df.select(pl.col("sample_name").rle())
             .unnest("sample_name")["lengths"]

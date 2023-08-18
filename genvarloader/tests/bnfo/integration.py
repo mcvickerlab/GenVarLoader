@@ -1,4 +1,5 @@
 import polars as pl
+from tqdm.auto import tqdm
 
 from genvarloader.bnfo import GVL, Fasta, FastaVariants, TileDB_VCF
 
@@ -8,15 +9,21 @@ fasta = Fasta("seq", ref)
 tdb = TileDB_VCF(vcf, 2, samples=["OCI-AML5"])
 varseq = FastaVariants("varseq", fasta, tdb)
 
-bed = pl.DataFrame(
-    {
-        "chrom": ["chr20", "chr20"],
-        "chromStart": [96320, 158814],
-        "chromEnd": [96321, 158815],
-    }
+bed = (
+    pl.from_arrow(tdb.ds.read_arrow(regions=["chr20:1-99999999"]))
+    .select("contig", "pos_start")
+    .unique()
+    .with_columns(chromEnd=pl.col("pos_start") + 1)
+    .rename({"contig": "chrom", "pos_start": "chromStart"})
 )
 
-gvloader = GVL(varseq)
-dl = gvloader.iter_batches(bed, fixed_length=3, batch_size=1, max_memory_gb=2)
-for batch in dl:
+gvloader = GVL(
+    varseq,
+    bed=bed,
+    fixed_length=int(1e4),
+    batch_size=4,
+    max_memory_gb=2,
+    batch_dims=["sample"],
+)
+for batch in tqdm(gvloader, total=len(gvloader)):
     print(batch["varseq"])

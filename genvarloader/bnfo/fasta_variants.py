@@ -1,3 +1,4 @@
+import dask.array as da
 import numba as nb
 import numpy as np
 import xarray as xr
@@ -34,15 +35,16 @@ def apply_variants(
 
 class FastaVariants(Reader):
     def __init__(self, name: str, fasta: Fasta, variants: Variants) -> None:
-        self.name = name
         self.fasta = fasta
         self.variants = variants
-        self.dtype = np.dtype("S1")
-        self.sizes = {"sample": self.variants.n_samples, "ploid": self.variants.ploidy}
-        self.indexes = {
-            "sample": np.asarray(self.variants.samples),
-            "ploid": np.arange(self.variants.ploidy, dtype=np.uint32),
-        }
+        self.virtual_data = xr.DataArray(
+            da.empty((self.variants.n_samples, self.variants.ploidy), dtype="S1"),
+            name=name,
+            coords={
+                "sample": np.asarray(self.variants.samples),
+                "ploid": np.arange(self.variants.ploidy, dtype=np.uint32),
+            },
+        )
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
         ref = self.fasta.read(contig, start, end).to_numpy()

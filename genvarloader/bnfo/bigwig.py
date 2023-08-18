@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import List, Sequence, Union
 
+import dask.array as da
 import numpy as np
 import pyBigWig
 import ray
@@ -18,12 +19,13 @@ class BigWig(Reader):
         dtype: Union[str, np.dtype],
         null_value: int = 0,
     ) -> None:
-        self.name = name
+        self.virtual_data = xr.DataArray(
+            da.empty(len(samples), dtype=dtype),
+            name=name,
+            coords={"sample": np.asarray(samples)},
+        )
         self.paths = paths
         self.samples = samples
-        self.dtype = np.dtype(dtype)
-        self.sizes = {"sample": len(samples)}
-        self.indexes = {"sample": np.asarray(samples)}
         self.null_value = null_value
         ray.init()
 
@@ -37,7 +39,7 @@ class BigWig(Reader):
         paths = np.asarray(self.paths)[sample_idxs]
 
         length = end - start
-        out = np.empty((len(samples), length), dtype=self.dtype)
+        out = np.empty((len(samples), length), dtype=self.virtual_data.dtype)
         shared_out = ray.put(out)
         futures = [
             read_one_bigwig.remote(

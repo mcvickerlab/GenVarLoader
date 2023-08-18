@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol, Tuple
+from typing import List, Optional, Protocol, Tuple
 
 import numpy as np
 import xarray as xr
@@ -11,18 +11,13 @@ class Reader(Protocol):
 
     Attributes
     ----------
-    name : str
-        Name of the reader.
-    dtype : np.dtype
-        Data type of the arrays returned by the read() method.
-    sizes : Dict[str, int]
-        Dictionary mapping non-length dimension names to their sizes, in order.
+    _data : xr.DataArray
+        Virtual data describing the type and dimensions of the data yielded by this
+        reader. This data includes all dimensions except the length dimension since
+        this is determined by the length of the genomic range passed to read().
     """
 
-    name: str
-    dtype: np.dtype
-    sizes: Dict[str, int]
-    indexes: Dict[str, NDArray]
+    virtual_data: xr.DataArray
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
         """Read data corresponding to given genomic coordinates. The output shape will
