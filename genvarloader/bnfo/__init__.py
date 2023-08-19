@@ -3,17 +3,14 @@ from collections import defaultdict
 from itertools import accumulate, chain, repeat
 from pathlib import Path
 from typing import (
-    Any,
     Callable,
     Dict,
-    Generator,
     Hashable,
     Iterable,
     List,
     Mapping,
     Optional,
     Sequence,
-    Tuple,
     Union,
     cast,
 )
@@ -39,6 +36,7 @@ __all__ = ["BigWig", "Fasta", "TileDB_VCF", "FastaVariants", "GVL"]
 # have two buffers, one for reading data and for yielding batches
 # note: this will half the memory budget for buffers
 # use ray for concurrent work so it's aware of other concurrent readers
+# TODO weighted upsampling
 class GVL:
     """GenVarLoader
 
@@ -191,21 +189,24 @@ class GVL:
         else:
             return self.n_instances // self.batch_size
 
-    def __iter__(self) -> Generator[Union[Dict[str, Any], Tuple[Any]], None, None]:
+    def __iter__(self):
         if self.shuffle:
             random.shuffle(self.partitioned_bed, self.rng.random)
 
-        batch_slice = slice(0, 0)
+        self.batch_slice = slice(0, 0)
 
         if self.shuffle:
-            indexes = {d: self.rng.permutation(idx) for d, idx in self.indexes.items()}
-        else:
-            indexes = self.indexes
+            self.indexes = {
+                d: self.rng.permutation(idx) for d, idx in self.indexes.items()
+            }
 
-        partial_batches = []
-        partial_indices = []
-        total_yielded = 0
+        self.partial_batches = []
+        self.partial_indices = []
+        self.total_yielded = 0
 
+        return self
+
+    def __next__(self):
         for partition in self.partitioned_bed:
             # Better to use slices on batch dimensions in case one of the readers is a
             # chunked array format. This will reduce the amount of chunks hit on read() if
@@ -243,17 +244,19 @@ class GVL:
                             dim_slices.items(), self.buffer_sizes.values()
                         )
                     }
-                    buffer = self.get_buffer(indexes, dim_slices, contig, start, end)
+                    buffer = self.get_buffer(
+                        self.indexes, dim_slices, contig, start, end
+                    )
                     # columns: starts, region_idx, dim1_idx, dim2_idx, ...
                     buffer_idx = self.get_buffer_idx(partition, start, buffer)
                     if self.shuffle:
                         buffer_idx = self.rng.permutation(buffer_idx)
                     instances_in_buffer = len(buffer_idx)
                     new_stop = min(
-                        self.batch_size, batch_slice.stop + instances_in_buffer
+                        self.batch_size, self.batch_slice.stop + instances_in_buffer
                     )
-                    batch_slice = slice(batch_slice.stop, new_stop)
-                    len_batch_slice = batch_slice.stop - batch_slice.start
+                    self.batch_slice = slice(self.batch_slice.stop, new_stop)
+                    len_batch_slice = self.batch_slice.stop - self.batch_slice.start
                     buffer_idx_slice = slice(0, len_batch_slice)
 
                 # guaranteed to init buffer_idx based on init of len_unused_buffer
@@ -274,47 +277,52 @@ class GVL:
 
                 batch: xr.Dataset
                 # guaranteed to init buffer based on init of len_unused_buffer
-                if batch_slice.start == 0 and batch_slice.stop == self.batch_size:
+                if (
+                    self.batch_slice.start == 0
+                    and self.batch_slice.stop == self.batch_size
+                ):
                     batch = buffer.isel(selector, missing_dims="ignore")
                     batch_idx = idx.copy()
                 else:
-                    partial_batches.append(buffer.isel(selector, missing_dims="ignore"))
-                    partial_indices.append(idx)
-                    if batch_slice.stop == self.batch_size:
-                        batch = xr.concat(partial_batches, dim="batch")
-                        batch_idx = np.concatenate(partial_indices, 0)
+                    self.partial_batches.append(
+                        buffer.isel(selector, missing_dims="ignore")
+                    )
+                    self.partial_indices.append(idx)
+                    if self.batch_slice.stop == self.batch_size:
+                        batch = xr.concat(self.partial_batches, dim="batch")
+                        batch_idx = np.concatenate(self.partial_indices, 0)
 
                 len_unused_buffer = instances_in_buffer - buffer_idx_slice.stop
 
                 # full batch
-                if batch_slice.stop == self.batch_size:
+                if self.batch_slice.stop == self.batch_size:
 
                     yield self.process_batch(batch, batch_idx, dim_slices)
 
                     instances_yielded += self.batch_size
-                    total_yielded += self.batch_size
+                    self.total_yielded += self.batch_size
 
                     # full batch or take what's left in the buffer
                     new_stop = min(self.batch_size, len_unused_buffer)
-                    batch_slice = slice(0, new_stop)
+                    self.batch_slice = slice(0, new_stop)
                 # final batch incomplete
-                elif total_yielded + batch_slice.stop == self.n_instances:
+                elif self.total_yielded + self.batch_slice.stop == self.n_instances:
                     if self.drop_last:
                         raise StopIteration
 
-                    batch = batch.isel(batch=slice(0, batch_slice.stop))
+                    batch = batch.isel(batch=slice(0, self.batch_slice.stop))
 
                     yield self.process_batch(batch, batch_idx, dim_slices)
 
-                    instances_yielded += batch_slice.stop
-                    total_yielded += batch_slice.stop
+                    instances_yielded += self.batch_slice.stop
+                    self.total_yielded += self.batch_slice.stop
                 # batch incomplete and more data in buffer
                 else:
                     # fill batch or take what's left in the buffer
                     new_stop = min(
-                        self.batch_size, batch_slice.stop + len_unused_buffer
+                        self.batch_size, self.batch_slice.stop + len_unused_buffer
                     )
-                    batch_slice = slice(batch_slice.stop, new_stop)
+                    self.batch_slice = slice(self.batch_slice.stop, new_stop)
 
                 new_stop = min(
                     buffer_idx_slice.stop + self.batch_size, instances_in_buffer
