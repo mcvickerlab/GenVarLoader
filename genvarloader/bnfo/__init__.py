@@ -32,6 +32,21 @@ from .util import _set_uniform_length_around_center, read_bedlike
 __all__ = ["BigWig", "Fasta", "TileDB_VCF", "FastaVariants", "GVL"]
 
 
+def view_virtual_data(readers: Union[Reader, Iterable[Reader]]):
+    """View the virtual data corresponding from multiple readers. This is useful to
+    inspect what non-length dimensions will be exist when constructing a GVL loader
+    from them.
+
+    Parameters
+    ----------
+    readers : Reader, Iterable[Reader]
+        Readers to inspect.
+    """
+    if not isinstance(readers, Iterable):
+        readers = [readers]
+    return xr.merge([r.virtual_data for r in readers], join="exact")
+
+
 # TODO async reads
 # have two buffers, one for reading data and for yielding batches
 # note: this will half the memory budget for buffers
@@ -61,6 +76,7 @@ class GVL:
         batch_dims: Optional[List[str]] = None,
         transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
         shuffle: bool = False,
+        weights: Optional[Dict[str, NDArray]] = None,
         seed: Optional[int] = None,
         return_tuples: bool = False,
         return_index: bool = False,
@@ -91,6 +107,10 @@ class GVL:
         shuffle : bool, optional
             Whether to shuffle with respect to regions of interest and batch dimensions,
             by default False
+        weights : Dict[str, NDArray], optional
+            Dictionary mapping dimensions to weights. The "region" dimension corresponds
+            to each region in the BED file and is always available, whereas others
+            correspond to non-length dimensions seen in the virtual data.
         seed : int, optional
             Seed for shuffling, by default None
         return_tuples : bool, optional
@@ -105,7 +125,7 @@ class GVL:
         if not isinstance(readers, Iterable):
             readers = [readers]
         self.readers = readers
-        self.virtual_data: xr.Dataset = xr.merge(
+        self.virtual_data = xr.merge(
             [r.virtual_data for r in self.readers], join="exact"
         )
         self.sizes = dict(self.virtual_data.sizes)
@@ -127,12 +147,22 @@ class GVL:
 
         if batch_dims is None:
             batch_dims = []
-        elif missing_dims := (set(batch_dims) - set(self.sizes.keys())):
+        elif missing_dims := (set(batch_dims) - set(self.virtual_data.dims)):
             raise ValueError(
                 f"Got batch dimensions that are not available from the readers: {missing_dims}"
             )
         self.batch_dims = batch_dims
 
+        if weights is not None:
+            if extra_weights := set(weights.keys()) - set(self.virtual_data.dims):
+                raise ValueError(
+                    f"Got weights for dimensions that are not available from the readers: {extra_weights}"
+                )
+            if extra_weights := set(weights.keys()) - set(batch_dims):
+                raise ValueError(
+                    f"Got weights for dimensions that are not batch dimensions: {extra_weights}"
+                )
+        self.weights = weights
         max_length = cast(
             int,
             bed.groupby("chrom")
@@ -169,7 +199,7 @@ class GVL:
         self.bed = _set_uniform_length_around_center(bed, fixed_length)
 
         # TODO check if any regions are out-of-bounds and any readers have padding disabled
-        # if so, raise an error
+        # if so, raise an error. Otherwise, readers will catch the error downstream.
 
         self.partitioned_bed = self.partition_bed(self.bed, max_length)
         self.n_instances: int = self.bed.height * np.prod(
@@ -190,6 +220,9 @@ class GVL:
             return self.n_instances // self.batch_size
 
     def __iter__(self):
+        return self.iter_batches()
+
+    def iter_batches(self):
         if self.shuffle:
             random.shuffle(self.partitioned_bed, self.rng.random)
 
@@ -204,9 +237,6 @@ class GVL:
         self.partial_indices = []
         self.total_yielded = 0
 
-        return self
-
-    def __next__(self):
         for partition in self.partitioned_bed:
             # Better to use slices on batch dimensions in case one of the readers is a
             # chunked array format. This will reduce the amount of chunks hit on read() if
@@ -214,7 +244,9 @@ class GVL:
             # randomly permuted. Because readers are not constrained to be chunked arrays we
             # also cannot randomly select chunks.
             # TODO allow randomization of dim_slices (i.e. random order of slices)
-            # ? how to change order of batch dims? Needs to be done on reader/format side?
+            # Order of batch dims should be handled on reader side and done in-memory
+            # ! this could cause issues for chunked arrays formats if the requested
+            # ! samples all live in different chunks
             dim_slices = {str(d): slice(0, 0) for d in self.buffer_sizes}
 
             n_regions = len(partition)
@@ -249,8 +281,11 @@ class GVL:
                     )
                     # columns: starts, region_idx, dim1_idx, dim2_idx, ...
                     buffer_idx = self.get_buffer_idx(partition, start, buffer)
+                    buffer_idx = self.resample_buffer_idx(buffer_idx)
+
                     if self.shuffle:
                         buffer_idx = self.rng.permutation(buffer_idx)
+
                     instances_in_buffer = len(buffer_idx)
                     new_stop = min(
                         self.batch_size, self.batch_slice.stop + instances_in_buffer
@@ -308,7 +343,7 @@ class GVL:
                 # final batch incomplete
                 elif self.total_yielded + self.batch_slice.stop == self.n_instances:
                     if self.drop_last:
-                        raise StopIteration
+                        return
 
                     batch = batch.isel(batch=slice(0, self.batch_slice.stop))
 
@@ -415,6 +450,18 @@ class GVL:
         starts = (partition["chromStart"].to_numpy() - start)[buffer_idx[:, 0]][:, None]
         region_idx = partition["region_idx"].to_numpy()[buffer_idx[:, 0]][:, None]
         return np.hstack([starts, region_idx, buffer_idx[:, 1:]])
+
+    def resample_buffer_idx(self, buffer_idx: NDArray):
+        if self.weights is None:
+            return buffer_idx
+        idx_weights = np.ones(len(buffer_idx))
+        # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
+        for i, d in enumerate(self.batch_dims):
+            w = self.weights.get(d, None)
+            if w is not None:
+                idx_weights *= w[buffer_idx[:, i + 2]]
+        idx_weights = np.rint(idx_weights)
+        return buffer_idx.repeat(idx_weights)
 
     def process_batch(
         self, batch: xr.Dataset, batch_idx: NDArray, dim_slices: Dict[str, slice]
