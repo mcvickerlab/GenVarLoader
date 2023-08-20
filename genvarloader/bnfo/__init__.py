@@ -29,7 +29,7 @@ from .tiledb_vcf import TileDB_VCF
 from .types import Reader
 from .util import _set_uniform_length_around_center, read_bedlike
 
-__all__ = ["BigWig", "Fasta", "TileDB_VCF", "FastaVariants", "GVL"]
+__all__ = ["BigWig", "Fasta", "TileDB_VCF", "FastaVariants", "GVL", "view_virtual_data"]
 
 
 def view_virtual_data(readers: Union[Reader, Iterable[Reader]]):
