@@ -281,7 +281,8 @@ class GVL:
                     )
                     # columns: starts, region_idx, dim1_idx, dim2_idx, ...
                     buffer_idx = self.get_buffer_idx(partition, start, buffer)
-                    buffer_idx = self.resample_buffer_idx(buffer_idx)
+                    if self.weights is not None:
+                        buffer_idx = self.resample_buffer_idx(buffer_idx)
 
                     if self.shuffle:
                         buffer_idx = self.rng.permutation(buffer_idx)
@@ -311,21 +312,24 @@ class GVL:
                 )
 
                 batch: xr.Dataset
-                # guaranteed to init buffer based on init of len_unused_buffer
                 if (
                     self.batch_slice.start == 0
                     and self.batch_slice.stop == self.batch_size
                 ):
+                    # guaranteed to init buffer based on init of len_unused_buffer
                     batch = buffer.isel(selector, missing_dims="ignore")
                     batch_idx = idx.copy()
                 else:
+                    # guaranteed to init buffer based on init of len_unused_buffer
                     self.partial_batches.append(
                         buffer.isel(selector, missing_dims="ignore")
                     )
                     self.partial_indices.append(idx)
                     if self.batch_slice.stop == self.batch_size:
                         batch = xr.concat(self.partial_batches, dim="batch")
-                        batch_idx = np.concatenate(self.partial_indices, 0)
+                        batch_idx = np.concatenate(self.partial_indices)
+                        self.partial_batches = []
+                        self.partial_indices = []
 
                 len_unused_buffer = instances_in_buffer - buffer_idx_slice.stop
 
@@ -345,7 +349,9 @@ class GVL:
                     if self.drop_last:
                         return
 
-                    batch = batch.isel(batch=slice(0, self.batch_slice.stop))
+                    # final incomplete batch is always a partial batch
+                    batch = xr.concat(self.partial_batches, dim="batch")
+                    batch_idx = np.concatenate(self.partial_indices, 0)
 
                     yield self.process_batch(batch, batch_idx, dim_slices)
 
@@ -452,15 +458,13 @@ class GVL:
         return np.hstack([starts, region_idx, buffer_idx[:, 1:]])
 
     def resample_buffer_idx(self, buffer_idx: NDArray):
-        if self.weights is None:
-            return buffer_idx
         idx_weights = np.ones(len(buffer_idx))
         # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
         for i, d in enumerate(self.batch_dims):
             w = self.weights.get(d, None)
             if w is not None:
                 idx_weights *= w[buffer_idx[:, i + 2]]
-        idx_weights = np.rint(idx_weights)
+        idx_weights = np.round(idx_weights).astype(int)
         return buffer_idx.repeat(idx_weights)
 
     def process_batch(
