@@ -10,7 +10,17 @@ from .types import Reader
 class Zarr(Reader):
     def __init__(self, name: str, path: Union[str, Path]) -> None:
         """Read data from an XArray-compliant Zarr store. Should have contigs as
-        separate arrays and a list of contigs as an attribute.
+        separate arrays, a list of contigs as an attribute, and `length` as a dimension.
+        For example:
+
+        ```plain
+        ./
+        ├── chr1
+        ├── chr2
+        ├── ...
+        └── attrs (dict)
+            └── contigs (list[str])
+        ```
 
         Parameters
         ----------
