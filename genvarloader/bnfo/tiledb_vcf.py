@@ -13,6 +13,17 @@ class TileDB_VCF(Variants):
     def __init__(
         self, path: Union[str, Path], ploidy: int, samples: Optional[List[str]] = None
     ) -> None:
+        """Read variants from a TileDB-VCF store.
+
+        Parameters
+        ----------
+        path : Union[str, Path]
+            Path to the TileDB-VCF store.
+        ploidy : int
+            Ploidy of the genotypes, e.g. humans are diploid so ploidy = 2.
+        samples : Optional[List[str]], optional
+            Names of the samples to read, by default all samples available are read.
+        """
         self.path = path
         self.ds = tiledbvcf.Dataset(str(path))
         self.ploidy = ploidy
@@ -25,7 +36,6 @@ class TileDB_VCF(Variants):
     def read(
         self, contig: str, start: int, end: int, **kwargs
     ) -> Optional[Tuple[NDArray[np.uint32], NDArray[np.int32], NDArray[np.bytes_]]]:
-
         samples: Iterable[str]
         samples = kwargs.get("samples", self.samples)
 

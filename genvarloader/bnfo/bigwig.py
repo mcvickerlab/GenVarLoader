@@ -6,6 +6,7 @@ import numpy as np
 import pyBigWig
 import ray
 import xarray as xr
+from numpy.typing import NDArray
 
 from .types import Reader
 
@@ -14,11 +15,37 @@ class BigWig(Reader):
     def __init__(
         self,
         name: str,
-        paths: List[Path],
-        samples: List[str],
+        paths: Union[Path, List[Path]],
+        samples: Union[str, List[str]],
         dtype: Union[str, np.dtype],
-        null_value: int = 0,
+        null_value: float = 0.0,
     ) -> None:
+        """Read values from bigWig, bigBed, or Wig files. Enable parallel processing
+        by initializing a Ray cluster with the appropriate resources. For example, to
+        process up to 4 files in parallel, initialize a Ray cluster with 4 cpus by
+        calling `ray.init(num_cpus=4)` before using `read()`.
+
+
+        Parameters
+        ----------
+        name : str
+            Name of the reader, for example `'coverage'`.
+        paths : List[Path]
+            Paths to the bigWig files.
+        samples : List[str]
+            Sample names for each bigWig file.
+        dtype : Union[str, np.dtype]
+            Data type for the output values. BigWig stores all values as float and this
+            will be converted to `dtype`, truncating values if necessary.
+        null_value : float, optional
+            Value for data that is not represented by any interval in the BigWig, by
+            default 0.0.
+        """
+        if isinstance(paths, Path):
+            paths = [paths]
+        if isinstance(samples, str):
+            samples = [samples]
+
         self.virtual_data = xr.DataArray(
             da.empty(len(samples), dtype=dtype),
             name=name,
@@ -51,13 +78,21 @@ class BigWig(Reader):
         return xr.DataArray(out, dims=["sample", "length"])
 
 
-@ray.remote
-def read_one_bigwig(null_value, sample_idx, path, contig, start, end, out):
+@ray.remote(num_cpus=1)
+def read_one_bigwig(
+    null_value: float,
+    sample_idx: int,
+    path: Path,
+    contig: str,
+    start: int,
+    end: int,
+    out: NDArray,
+):
     with pyBigWig.open(str(path)) as bw:
         in_bounds_start = max(0, start)
-        in_bounds_end = min(bw.chroms()[contig], end)
+        in_bounds_end = min(bw.chroms(contig), end)
         vals = bw.values(contig, in_bounds_start, in_bounds_end, numpy=True)
         vals[np.isnan(vals)] = null_value
         relative_start = in_bounds_start - start
         relative_end = in_bounds_end - start
-        out[sample_idx, relative_start:relative_end] = vals
+        out[sample_idx, relative_start:relative_end] = vals.astype(out.dtype)

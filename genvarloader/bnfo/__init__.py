@@ -47,11 +47,11 @@ def view_virtual_data(readers: Union[Reader, Iterable[Reader]]):
     return xr.merge([r.virtual_data for r in readers], join="exact")
 
 
+# TODO test weighted upsampling
 # TODO async reads
 # have two buffers, one for reading data and for yielding batches
 # note: this will half the memory budget for buffers
 # use ray for concurrent work so it's aware of other concurrent readers
-# TODO weighted upsampling
 class GVL:
     """GenVarLoader
 
@@ -335,7 +335,6 @@ class GVL:
 
                 # full batch
                 if self.batch_slice.stop == self.batch_size:
-
                     yield self.process_batch(batch, batch_idx, dim_slices)
 
                     instances_yielded += self.batch_size

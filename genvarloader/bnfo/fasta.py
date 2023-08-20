@@ -13,6 +13,23 @@ class Fasta(Reader):
     def __init__(
         self, name: str, path: Union[str, Path], pad: Optional[str] = None
     ) -> None:
+        """Read sequences from a FASTA file.
+
+        Parameters
+        ----------
+        name : str
+            Name of the reader, for example `'seq'`.
+        path : Union[str, Path]
+            Path to the FASTA file.
+        pad : Optional[str], optional
+            A single character which, if passed, will pad out-of-bound ranges with this
+            value. By default no padding is done and out-of-bound ranges raise an error.
+
+        Raises
+        ------
+        ValueError
+            If pad value is not a single character.
+        """
         self.virtual_data = xr.DataArray(da.empty(0, dtype="S1"), name=name, dims="")
         self.path = path
         if pad is not None:

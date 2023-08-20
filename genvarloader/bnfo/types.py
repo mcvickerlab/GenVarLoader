@@ -7,7 +7,7 @@ from numpy.typing import NDArray
 
 
 class Reader(Protocol):
-    """Protocol for classes that implement the read() method.
+    """Implements the read() method.
 
     Attributes
     ----------
