@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Sequence, Union
+from typing import Any, Dict, Optional, Sequence, Union, cast
 
 import dask.array as da
 import numba as nb
@@ -25,11 +25,12 @@ class RLE_Table(Reader):
         samples: Optional[Sequence[str]] = None,
         validate=True,
         zero_indexed=True,
+        lazy=True,
+        **table_reader_kwargs,
     ):
         """Read values from a run-length encoded (RLE) table. This corresponds to the
         UCSC BED5+ format, where sample names are found in the `name` column and values
-        for each interval are in the `score` column. Note this currently keeps the table
-        in-memory but is very fast.
+        for each interval are in the `score` column.
 
         Parameters
         ----------
@@ -44,10 +45,29 @@ class RLE_Table(Reader):
             Whether to validate the RLE table, by default True.
         zero_indexed : bool, optional
             Whether the coordinates are 0-indexed, by default True
+        lazy : bool, optional
+            Whether to hold the table in-memory or query it lazily, leaving it on-disk
+            to reduce memory usage at the cost of query speed.
+        **table_reader_kwargs
+            Passed to the table reader function (either pl.scan_csv or pl.scan_ipc).
         """
 
         if isinstance(table, (str, Path)):
-            _table = pl.scan_csv(table)
+            table = Path(table)
+            suffixes = set(table.suffixes)
+            reader_kwargs: Dict[str, Any] = {}
+            reader_kwargs.update(table_reader_kwargs)
+            if ".csv" in suffixes:
+                reader_kwargs["separator"] = ","
+                reader = pl.scan_csv
+            elif {".txt", ".tsv"} & suffixes:
+                reader_kwargs["separator"] = "\t"
+                reader = pl.scan_csv
+            elif {".fth", ".feather", ".ipc", ".arrow"} & suffixes:
+                reader = pl.scan_ipc
+            else:
+                raise ValueError(f"Table has unrecognized file extension: {table.name}")
+            _table = reader(table, **reader_kwargs)
         else:
             _table = table.lazy()
 
@@ -58,28 +78,28 @@ class RLE_Table(Reader):
             _table = validate_rle_table(_table).lazy()
 
         if samples is not None:
-            _table = _table.filter(pl.col("name").is_in(samples))
-            with pl.StringCache():
-                pl.Series(samples, dtype=pl.Categorical)
-                _table = _table.sort(
-                    pl.col("name").cast(pl.Categorical), "chromStart", "chromEnd"
-                )
-
-        _table = _table.collect()
-        _samples = _table["name"].unique(maintain_order=True)
+            _samples = np.asarray(samples)
+            _table = _table.filter(pl.col("name").is_in(_samples))
+        else:
+            _samples = (
+                _table.select(pl.col("name").unique(maintain_order=True))
+                .collect()["name"]
+                .to_numpy()
+            )
 
         self.name = name
-        self.table = _table
+        self.table = _table if lazy else _table.collect()
         self.virtual_data = xr.DataArray(
             da.empty(len(_samples), dtype=np.float64),
             name=name,
             dims="sample",
-            coords={"sample": _samples.to_numpy()},
+            coords={"sample": _samples},
         )
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
-        samples = kwargs.get("samples", None)
+        samples = cast(Optional[Sequence[str]], kwargs.get("samples", None))
         if samples is None:
+            samples = self.virtual_data["sample"].to_numpy()
             n_samples = self.virtual_data.sizes["sample"]
         else:
             n_samples = len(samples)
@@ -87,7 +107,7 @@ class RLE_Table(Reader):
         length = end - start
 
         q = self.table.lazy().filter(
-            (pl.col("contig") == contig)
+            (pl.col("chrom") == contig)
             & (pl.col("chromStart") < end)
             & (pl.col("chromEnd") > start)
         )
@@ -99,18 +119,20 @@ class RLE_Table(Reader):
                 pl.Series(samples, dtype=pl.Categorical)
                 q = q.sort(
                     pl.col("name").cast(pl.Categorical), "chromStart", "chromEnd"
-                )
+                ).collect()
+        else:
+            with pl.StringCache():
+                pl.Series(samples, dtype=pl.Categorical)
+                q = q.sort(
+                    pl.col("name").cast(pl.Categorical), "chromStart", "chromEnd"
+                ).collect()
 
-        cols = (
-            q.select(
-                pl.col("name").rle_id(),
-                pl.col("chromStart") - start,
-                pl.col("chromEnd") - start,
-                "value",
-            )
-            .collect()
-            .get_columns()
-        )
+        cols = q.select(
+            pl.col("name").rle_id(),
+            pl.col("chromStart") - start,
+            pl.col("chromEnd") - start,
+            "score",
+        ).get_columns()
 
         out = np.zeros(shape=(n_samples, length), dtype=np.float64)
         sample_idx, starts, ends, vals = [c.to_numpy() for c in cols]
@@ -135,12 +157,13 @@ def validate_rle_table(df: pl.LazyFrame):
             {missing_cols}"""
         )
 
-    dtypes = {c: dt for c, dt in df.schema.items() if c in schema.keys()}
-    if sum(schema[c] != df.schema[c] for c in schema.keys()) > 0:
+    mismatched_dtypes = {
+        c: (dt1, df.schema[c]) for c, dt1 in schema.items() if dt1 != df.schema[c]
+    }
+    if len(mismatched_dtypes) > 0:
         raise ValueError(
-            f"""RLE table has incorrect dtypes.\n
-            Expected: {schema}\n
-            Received: {dtypes}"""
+            f"""RLE table has incorrect dtypes.
+            Mismatched dtypes (expected, seen): {mismatched_dtypes}"""
         )
 
     _df = df.collect()
@@ -152,6 +175,10 @@ def validate_rle_table(df: pl.LazyFrame):
         raise ValueError(
             f"Table has null values. Number of nulls per column:\n{null_count}"
         )
+
+    duplicated = _df.is_duplicated()
+    if duplicated.any():
+        raise ValueError(f"Table has {duplicated.sum()} duplicate entries.")
 
     overlaps = (
         _df.lazy()

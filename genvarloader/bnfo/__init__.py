@@ -134,6 +134,7 @@ class GVL:
         if not isinstance(readers, Iterable):
             readers = [readers]
         self.readers = readers
+        # TODO handle order of indices
         self.virtual_data = xr.merge(
             [r.virtual_data for r in self.readers], join="exact"
         )
