@@ -58,15 +58,15 @@ class RLE_Table(Reader):
             _table = validate_rle_table(_table).lazy()
 
         if samples is not None:
-            _table = _table.filter(pl.col("sample").is_in(samples))
+            _table = _table.filter(pl.col("name").is_in(samples))
             with pl.StringCache():
                 pl.Series(samples, dtype=pl.Categorical)
                 _table = _table.sort(
-                    pl.col("sample").cast(pl.Categorical), "chromStart", "end"
+                    pl.col("name").cast(pl.Categorical), "chromStart", "chromEnd"
                 )
 
         _table = _table.collect()
-        _samples = _table["sample"].unique(maintain_order=True)
+        _samples = _table["name"].unique(maintain_order=True)
 
         self.name = name
         self.table = _table
@@ -88,21 +88,24 @@ class RLE_Table(Reader):
 
         q = self.table.lazy().filter(
             (pl.col("contig") == contig)
-            & ((pl.col("chromStart") < end) | (pl.col("end") > start))
+            & (pl.col("chromStart") < end)
+            & (pl.col("chromEnd") > start)
         )
 
         # get samples in order requested
         if samples is not None:
-            q = q.filter(pl.col("sample").is_in(samples))
+            q = q.filter(pl.col("name").is_in(samples))
             with pl.StringCache():
                 pl.Series(samples, dtype=pl.Categorical)
-                q = q.sort(pl.col("sample").cast(pl.Categorical), "chromStart", "end")
+                q = q.sort(
+                    pl.col("name").cast(pl.Categorical), "chromStart", "chromEnd"
+                )
 
         cols = (
             q.select(
-                pl.col("sample").rle_id(),
+                pl.col("name").rle_id(),
                 pl.col("chromStart") - start,
-                pl.col("end") - start,
+                pl.col("chromEnd") - start,
                 "value",
             )
             .collect()
@@ -153,7 +156,7 @@ def validate_rle_table(df: pl.LazyFrame):
     overlaps = (
         _df.lazy()
         .sort("chromStart", "chromEnd")
-        .groupby("sample", "chrom")
+        .groupby("name", "chrom")
         .agg(
             pl.col("chromStart", "chromEnd"),
             (
@@ -163,7 +166,7 @@ def validate_rle_table(df: pl.LazyFrame):
         )
         .explode("chromStart", "chromEnd", "overlapping")
         .filter(pl.col("overlapping") | pl.col("overlapping").shift(1))
-        .sort("sample", "chrom", "chromStart", "chromEnd")
+        .sort("name", "chrom", "chromStart", "chromEnd")
         .collect()
     )
     if overlaps.height > 0:
