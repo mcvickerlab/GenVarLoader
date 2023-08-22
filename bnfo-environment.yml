@@ -5,7 +5,7 @@ channels:
 dependencies:
   - bcftools
   - dask
-  - h5py
+  - joblib
   - natsort
   - numba
   - numpy
@@ -13,12 +13,9 @@ dependencies:
   - pybigwig
   - pysam
   - python>=3.8.*
-  - ray-core
   - tiledb::tiledbvcf-py
   - tqdm
   - xarray
   - zarr
-  - pip:
-    - tensorstore
 platforms:
   - linux-64
