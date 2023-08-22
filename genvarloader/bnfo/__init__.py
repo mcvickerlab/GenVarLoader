@@ -25,6 +25,7 @@ from .bigwig import BigWig
 from .fasta import Fasta
 from .fasta_variants import FastaVariants
 from .numba import build_length_indices, partition_regions
+from .pgen import Pgen
 from .rle_table import RLE_Table
 from .tiledb_vcf import TileDB_VCF
 from .types import Reader
@@ -36,6 +37,7 @@ __all__ = [
     "TileDB_VCF",
     "FastaVariants",
     "RLE_Table",
+    "Pgen",
     "GVL",
     "view_virtual_data",
 ]

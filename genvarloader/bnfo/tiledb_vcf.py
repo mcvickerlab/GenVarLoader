@@ -1,12 +1,12 @@
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple, Union, cast
+from typing import Iterable, List, Optional, Union, cast
 
 import numpy as np
 import polars as pl
 import tiledbvcf
 from numpy.typing import NDArray
 
-from .types import Variants
+from .types import SparseAlleles, Variants
 
 
 class TileDB_VCF(Variants):
@@ -35,7 +35,7 @@ class TileDB_VCF(Variants):
 
     def read(
         self, contig: str, start: int, end: int, **kwargs
-    ) -> Optional[Tuple[NDArray[np.uint32], NDArray[np.int32], NDArray[np.bytes_]]]:
+    ) -> Optional[SparseAlleles]:
         samples: Iterable[str]
         samples = kwargs.get("samples", self.samples)
 
@@ -51,7 +51,7 @@ class TileDB_VCF(Variants):
         df = cast(pl.DataFrame, pl.from_arrow(df))
 
         if df.height == 0:
-            return None
+            return
 
         df = (
             df.filter(~pl.col("fmt_GT").list.contains(-1))
@@ -91,4 +91,4 @@ class TileDB_VCF(Variants):
         # offsets (samples + 1)
         # positions (variants)
         # alleles (ploid, variants)
-        return offsets, positions, alleles
+        return SparseAlleles(offsets, positions, alleles)

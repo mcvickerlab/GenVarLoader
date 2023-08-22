@@ -5,7 +5,7 @@ import xarray as xr
 from numpy.typing import NDArray
 
 from .fasta import Fasta
-from .types import Reader, Variants
+from .types import DenseAlleles, Reader, SparseAlleles, Variants
 
 
 @nb.njit(
@@ -27,10 +27,10 @@ def apply_variants(
     for sample_idx in nb.prange(len(offsets) - 1):
         start = offsets[sample_idx]
         end = offsets[sample_idx + 1]
-        sample_pos = positions[start:end]
-        sample_alel = alleles[:, start:end]
+        sample_positions = positions[start:end]
+        sample_alleles = alleles[:, start:end]
         sample_seq = seqs[sample_idx]
-        sample_seq[:, sample_pos] = sample_alel
+        sample_seq[:, sample_positions] = sample_alleles
 
 
 class FastaVariants(Reader):
@@ -47,15 +47,20 @@ class FastaVariants(Reader):
         )
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
-        ref = self.fasta.read(contig, start, end).to_numpy()
+        ref: NDArray[np.bytes_] = self.fasta.read(contig, start, end).to_numpy()
         seqs = np.tile(ref, (self.variants.n_samples, self.variants.ploidy, 1))
         result = self.variants.read(contig, start, end, **kwargs)
 
         if result is None:
             return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
+        elif isinstance(result, SparseAlleles):
+            apply_variants(
+                seqs.view(np.uint8),
+                result.offsets,
+                result.positions - start,
+                result.alleles.view(np.uint8),
+            )
+        elif isinstance(result, DenseAlleles):
+            seqs[..., result.positions - start] = result.alleles
 
-        offsets, positions, alleles = result
-        positions = positions - start
-
-        apply_variants(seqs.view("u1"), offsets, positions, alleles.view("u1"))
         return xr.DataArray(seqs.view("S1"), dims=["sample", "ploid", "length"])

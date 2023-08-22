@@ -9,6 +9,7 @@ dependencies:
   - natsort
   - numba
   - numpy
+  - pgenlib
   - pyarrow
   - pybigwig
   - pysam
