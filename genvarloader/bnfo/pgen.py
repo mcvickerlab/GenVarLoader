@@ -2,17 +2,26 @@ from pathlib import Path
 from typing import List, Optional, Union
 
 import numpy as np
-import pgenlib
 import polars as pl
 from numpy.typing import NDArray
 
 from .types import DenseAlleles, Variants
+
+try:
+    import pgenlib
+
+    PGENLIB_INSTALLED = True
+except ImportError:
+    PGENLIB_INSTALLED = False
 
 
 class Pgen(Variants):
     def __init__(
         self, path: Union[str, Path], samples: Optional[List[str]] = None
     ) -> None:
+        if not PGENLIB_INSTALLED:
+            raise ImportError("Pgenlib must be installed to read PGEN files.")
+
         # pgen is exclusively diploid
         self.ploidy = 2
 

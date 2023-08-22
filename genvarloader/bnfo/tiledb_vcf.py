@@ -3,10 +3,16 @@ from typing import Iterable, List, Optional, Union, cast
 
 import numpy as np
 import polars as pl
-import tiledbvcf
 from numpy.typing import NDArray
 
 from .types import SparseAlleles, Variants
+
+try:
+    import tiledbvcf
+
+    TILEDBVCF_INSTALLED = True
+except ImportError:
+    TILEDBVCF_INSTALLED = False
 
 
 class TileDB_VCF(Variants):
@@ -24,6 +30,11 @@ class TileDB_VCF(Variants):
         samples : Optional[List[str]], optional
             Names of the samples to read, by default all samples available are read.
         """
+        if not TILEDBVCF_INSTALLED:
+            raise ImportError(
+                "TileDB-VCF must be installed to read TileDB-VCF datasets."
+            )
+
         self.path = path
         self.ds = tiledbvcf.Dataset(str(path))
         self.ploidy = ploidy
