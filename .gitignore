@@ -8,6 +8,7 @@ genvarloader/tests/data/*
 results/
 .uuid
 docs/
+requirements.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

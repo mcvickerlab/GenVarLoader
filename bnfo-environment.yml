@@ -3,19 +3,20 @@ channels:
   - bioconda
   - conda-forge
 dependencies:
-  - bcftools
+  - attrs
+  # - cyvcf2 # optional
   - dask
   - joblib
   - natsort
   - numba
   - numpy
-  - pgenlib
+  - pandera
+  # - pgenlib # optional
   - pyarrow
   - pybigwig
   - pysam
   - python>=3.8.*
-  - tiledb::tiledbvcf-py
-  - tqdm
+  # - tiledb::tiledbvcf-py # optional
   - xarray
   - zarr
 platforms:

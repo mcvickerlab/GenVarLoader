@@ -440,7 +440,8 @@ class GVL:
         idx_weights = np.ones(len(buffer_idx))
         # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
         for i, d in enumerate(self.batch_dims):
-            w = self.weights.get(d, None)
+            # caller responsible for weights existing
+            w = self.weights.get(d, None)  # type: ignore[reportOptionalMemberAccess]
             if w is not None:
                 idx_weights *= w[buffer_idx[:, i + 2]]
         idx_weights = np.round(idx_weights).astype(int)
