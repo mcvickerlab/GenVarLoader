@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import pandera as pa
 import pandera.typing as pat
@@ -38,10 +38,13 @@ def read_bedlike(path: Union[str, Path]) -> pl.DataFrame:
     elif ".broadPeak" in path.suffixes:
         return _read_broadpeak(path)
     else:
-        raise ValueError(
-            f"""Unrecognized file extension: {''.join(path.suffixes)}. Expected one of 
-            .bed, .narrowPeak, or .broadPeak"""
-        )
+        try:
+            return _read_bed_table(path)
+        except ValueError:
+            raise ValueError(
+                f"""Unrecognized file extension: {''.join(path.suffixes)}. Expected one 
+                of .bed, .narrowPeak, .broadPeak, or a table file (e.g. .csv, .tsv)"""
+            )
 
 
 class BEDSchema(pa.DataFrameModel):
@@ -91,6 +94,28 @@ def _read_bed(bed_path: Union[str, Path]):
         dtypes={"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8},
         null_values=".",
     ).to_pandas()
+    bed = BEDSchema.to_schema()(bed)
+    return pl.from_pandas(bed)
+
+
+def _read_bed_table(table: Union[str, Path], **table_reader_kwargs):
+    table = Path(table)
+    suffixes = set(table.suffixes)
+    reader_kwargs: Dict[str, Any] = {}
+    reader_kwargs.update(table_reader_kwargs)
+    if ".csv" in suffixes:
+        reader_kwargs["separator"] = ","
+        reader_kwargs["dtypes"] = {"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8}
+        reader = pl.scan_csv
+    elif {".txt", ".tsv"} & suffixes:
+        reader_kwargs["separator"] = "\t"
+        reader_kwargs["dtypes"] = {"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8}
+        reader = pl.scan_csv
+    elif {".fth", ".feather", ".ipc", ".arrow"} & suffixes:
+        reader = pl.scan_ipc
+    else:
+        raise ValueError(f"Table has unrecognized file extension: {table.name}")
+    bed = reader(table, **reader_kwargs).collect().to_pandas()
     bed = BEDSchema.to_schema()(bed)
     return pl.from_pandas(bed)
 

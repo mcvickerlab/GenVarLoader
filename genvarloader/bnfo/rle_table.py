@@ -36,7 +36,7 @@ class RLE_Table(Reader):
         ----------
         name : str
             Name of the reader.
-        df : Union[str, Path, pl.DataFrame]
+        table : Union[str, Path, pl.DataFrame]
             DataFrame, or path to one, in the UCSC BED5+ format.
         samples : Sequence[str], optional
             Names of samples to potentially include in calls to `read()`. By default all
@@ -47,7 +47,8 @@ class RLE_Table(Reader):
             Whether the coordinates are 0-indexed, by default True
         lazy : bool, optional
             Whether to hold the table in-memory or query it lazily, leaving it on-disk
-            to reduce memory usage at the cost of query speed.
+            to reduce memory usage at the cost of query speed. Ignored if `table` is a
+            DataFrame.
         **table_reader_kwargs
             Passed to the table reader function (either pl.scan_csv or pl.scan_ipc).
         """
@@ -71,6 +72,9 @@ class RLE_Table(Reader):
         else:
             _table = table.lazy()
 
+        if not lazy:
+            _table = _table.collect()
+
         if not zero_indexed:
             _table = _table.with_columns(pl.col("chromStart") - 1)
 
@@ -78,17 +82,18 @@ class RLE_Table(Reader):
             _table = validate_rle_table(_table).lazy()
 
         if samples is not None:
-            _samples = np.asarray(samples)
+            _samples = np.asarray(samples).astype(str)
             _table = _table.filter(pl.col("name").is_in(_samples))
         else:
             _samples = (
-                _table.select(pl.col("name").unique(maintain_order=True))
+                _table.lazy()
+                .select(pl.col("name").unique(maintain_order=True))
                 .collect()["name"]
                 .to_numpy()
             )
 
         self.name = name
-        self.table = _table if lazy else _table.collect()
+        self.table = _table
         self.virtual_data = xr.DataArray(
             da.empty(len(_samples), dtype=np.float64),
             name=name,
@@ -141,7 +146,9 @@ class RLE_Table(Reader):
         return xr.DataArray(out, dims=["sample", "length"], coords={"sample": samples})
 
 
-def validate_rle_table(df: pl.LazyFrame):
+def validate_rle_table(df: Union[pl.DataFrame, pl.LazyFrame]):
+    _df = df.lazy()
+
     schema = {
         "chrom": pl.Utf8,
         "chromStart": pl.Int64,
@@ -150,7 +157,7 @@ def validate_rle_table(df: pl.LazyFrame):
         "score": pl.Float64,
     }
 
-    missing_cols = set(schema.keys()) - set(df.columns)
+    missing_cols = set(schema.keys()) - set(_df.columns)
     if len(missing_cols) > 0:
         raise ValueError(
             f"""RLE table is missing (or has misnamed) expected columns:
@@ -158,7 +165,7 @@ def validate_rle_table(df: pl.LazyFrame):
         )
 
     mismatched_dtypes = {
-        c: (dt1, df.schema[c]) for c, dt1 in schema.items() if dt1 != df.schema[c]
+        c: (dt1, _df.schema[c]) for c, dt1 in schema.items() if dt1 != _df.schema[c]
     }
     if len(mismatched_dtypes) > 0:
         raise ValueError(
@@ -166,7 +173,7 @@ def validate_rle_table(df: pl.LazyFrame):
             Mismatched dtypes (expected, seen): {mismatched_dtypes}"""
         )
 
-    _df = df.collect()
+    _df = _df.collect()
     if _df.height == 0:
         raise ValueError("No entries in table.")
 

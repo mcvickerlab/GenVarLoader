@@ -1,5 +1,3 @@
-from typing import Iterable, Union
-
 import xarray as xr
 
 from .bigwig import BigWig
@@ -23,16 +21,14 @@ __all__ = [
 ]
 
 
-def view_virtual_data(readers: Union[Reader, Iterable[Reader]]):
+def view_virtual_data(*readers: Reader):
     """View the virtual data corresponding from multiple readers. This is useful to
     inspect what non-length dimensions will be exist when constructing a GVL loader
     from them.
 
     Parameters
     ----------
-    readers : Reader, Iterable[Reader]
+    *readers : Reader
         Readers to inspect.
     """
-    if not isinstance(readers, Iterable):
-        readers = [readers]
     return xr.merge([r.virtual_data for r in readers], join="exact")

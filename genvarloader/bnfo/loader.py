@@ -1,3 +1,4 @@
+import gc
 import random
 from collections import defaultdict
 from itertools import accumulate, chain, repeat
@@ -155,7 +156,7 @@ class GVL:
         batch_mem = fixed_length * self.mem_per_length(
             {k: v for k, v in self.sizes.items() if k not in batch_dims}
         )
-        FUDGE_FACTOR = 2
+        FUDGE_FACTOR = 6
         max_mem = int(
             (max_memory_gb * 1e9 - batch_mem - bed.estimated_size()) / FUDGE_FACTOR
         )
@@ -274,6 +275,7 @@ class GVL:
                     self.batch_slice = slice(self.batch_slice.stop, new_stop)
                     len_batch_slice = self.batch_slice.stop - self.batch_slice.start
                     buffer_idx_slice = slice(0, len_batch_slice)
+                    gc.collect()
 
                 # guaranteed to init buffer_idx based on init of len_unused_buffer
                 idx = buffer_idx[buffer_idx_slice]
@@ -287,7 +289,7 @@ class GVL:
                 else:
                     selector = {}
                 selector["length"] = xr.DataArray(
-                    build_length_indices(idx[:, 0], self.fixed_length),
+                    idx[:, 0, None] + np.arange(self.fixed_length),
                     dims=["batch", "length"],
                 )
 
@@ -485,14 +487,6 @@ def partition_regions(
             curr_length = ends[i] - starts[i]
         partitions[i] = partition
     return partitions
-
-
-@nb.njit(nogil=True, parallel=True, cache=True)
-def build_length_indices(starts: NDArray[np.integer], length: int):
-    out = np.empty(shape=(len(starts), length), dtype=np.int32)
-    for i in nb.prange(len(starts)):
-        out[i] = np.arange(starts[i], starts[i] + length)
-    return out
 
 
 def _cartesian_product(arrays: Sequence[NDArray]) -> NDArray:

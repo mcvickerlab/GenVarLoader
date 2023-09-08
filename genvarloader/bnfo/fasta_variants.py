@@ -48,8 +48,8 @@ class FastaVariants(Reader):
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
         ref: NDArray[np.bytes_] = self.fasta.read(contig, start, end).to_numpy()
-        seqs = np.tile(ref, (self.variants.n_samples, self.variants.ploidy, 1))
         result = self.variants.read(contig, start, end, **kwargs)
+        seqs = np.tile(ref, (self.variants.n_samples, self.variants.ploidy, 1))
 
         if result is None:
             return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
