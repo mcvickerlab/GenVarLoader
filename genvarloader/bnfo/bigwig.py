@@ -61,7 +61,7 @@ class BigWig(Reader):
         self.n_jobs = n_jobs
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
-        samples = kwargs.get("samples", None)
+        samples = kwargs.get("sample", None)
 
         if samples is not None:
             _, _, sample_idxs = np.intersect1d(

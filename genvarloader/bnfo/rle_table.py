@@ -102,7 +102,7 @@ class RLE_Table(Reader):
         )
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
-        samples = cast(Optional[Sequence[str]], kwargs.get("samples", None))
+        samples = cast(Optional[Sequence[str]], kwargs.get("sample", None))
         if samples is None:
             samples = self.virtual_data["sample"].to_numpy()
             n_samples = self.virtual_data.sizes["sample"]

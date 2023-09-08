@@ -40,6 +40,29 @@ class Fasta(Reader):
             self.pad = pad
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
+        """Read a sequence from a FASTA file.
+
+        Parameters
+        ----------
+        contig : str
+            Name of the contig/chromosome.
+        start : int
+            Start coordinate, 0-based.
+        end : int
+            End coordinate, 0-based exclusive.
+        **kwargs
+            Not used.
+
+        Returns
+        -------
+        xr.DataArray
+            Sequence from FASTA file.
+
+        Raises
+        ------
+        ValueError
+            Coordinates are out-of-bounds and pad value is not set.
+        """
         pad_left = -min(0, start)
         if pad_left > 0 and self.pad is None:
             raise ValueError("Padding is disabled and start is < 0.")

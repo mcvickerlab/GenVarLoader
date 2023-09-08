@@ -43,7 +43,7 @@ class VCF(Variants):
     def read(
         self, contig: str, start: int, end: int, **kwargs
     ) -> Optional[DenseAlleles]:
-        samples = kwargs.get("samples", None)
+        samples = kwargs.get("sample", None)
 
         if samples is not None:
             raise NotImplementedError

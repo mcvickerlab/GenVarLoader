@@ -60,26 +60,21 @@ class Pgen(Variants):
         # (v p)
         self.alleles: NDArray[np.bytes_] = np.asarray([v[2:] for v in variant_ids])
 
-    def _pgen(self, samples: Optional[List[str]] = None):
-        if samples is not None:
-            _samples, sample_idx, _ = np.intersect1d(
-                self.samples, samples, return_indices=True
-            )
-            if len(_samples) == len(samples):
-                raise ValueError("Got samples that are not in the pgen file.")
-            sample_idx = self.sample_idx[sample_idx]
-        else:
-            sample_idx = self.sample_idx
+    def _pgen(self, sample_idx: Optional[NDArray[np.uint32]]):
+        if sample_idx is not None:
+            sample_idx = np.sort(sample_idx)
         return pgenlib.PgenReader(bytes(self.pgen_path), sample_subset=sample_idx)
 
     def read(
         self, contig: str, start: int, end: int, **kwargs
     ) -> Optional[DenseAlleles]:
-        samples = kwargs.get("samples", None)
+        samples = kwargs.get("sample", None)
         if samples is None:
             n_samples = self.n_samples
+            pgen_idx, query_idx = None, None
         else:
             n_samples = len(samples)
+            pgen_idx, query_idx = self.get_sample_idx(samples)
 
         # get variant positions and indices
         c_idx = self.contig_idx[contig]
@@ -91,7 +86,7 @@ class Pgen(Variants):
         positions = positions[s_idx:e_idx]
 
         # get alleles
-        with self._pgen(samples) as f:
+        with self._pgen(pgen_idx) as f:
             # (v s*2)
             genotypes = np.empty(
                 (e_idx - s_idx, n_samples * self.ploidy), dtype=np.int32
@@ -104,5 +99,20 @@ class Pgen(Variants):
         genotypes = np.stack([genotypes[::2], genotypes[1::2]], 1)
         # (s 2 v)
         alleles = self.alleles[np.arange(s_idx, e_idx), genotypes]
+        if query_idx is not None:
+            alleles = alleles[query_idx]
 
         return DenseAlleles(positions, alleles)
+
+    def get_sample_idx(self, samples):
+        _samples, _pgen_idx, query_idx = np.intersect1d(
+            self.samples, samples, return_indices=True
+        )
+        if len(_samples) != len(samples):
+            unrecognized_samples = set(samples) - set(_samples)
+            raise ValueError(
+                f"""Got samples that are not in the pgen file: 
+                {unrecognized_samples}."""
+            )
+        pgen_idx: NDArray[np.uint32] = self.sample_idx[_pgen_idx]
+        return pgen_idx, query_idx

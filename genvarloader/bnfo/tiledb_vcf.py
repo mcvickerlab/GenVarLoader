@@ -48,10 +48,14 @@ class TileDB_VCF(Variants):
         self, contig: str, start: int, end: int, **kwargs
     ) -> Optional[SparseAlleles]:
         samples: Iterable[str]
-        samples = kwargs.get("samples", self.samples)
+        samples = kwargs.get("sample", None)
+        if samples is None:
+            samples = self.samples
 
         ploid: Iterable[int]
-        ploid = kwargs.get("ploid", range(self.ploidy))
+        ploid = kwargs.get("ploid", None)
+        if ploid is None:
+            ploid = range(self.ploidy)
 
         region = f"{contig}:{start+1}-{end}"
         df = self.ds.read_arrow(

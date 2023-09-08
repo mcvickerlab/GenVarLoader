@@ -1,6 +1,7 @@
 import gc
 import random
 from collections import defaultdict
+from copy import deepcopy
 from itertools import accumulate, chain, repeat
 from pathlib import Path
 from typing import (
@@ -62,6 +63,7 @@ class GVL:
         return_tuples: bool = False,
         return_index: bool = False,
         drop_last: bool = False,
+        num_workers: int = 2,
     ) -> None:
         """GenVarLoader
 
@@ -106,14 +108,13 @@ class GVL:
         if not isinstance(readers, Iterable):
             readers = [readers]
         self.readers = readers
-        # TODO handle order of indices
         self.virtual_data = xr.merge(
             [r.virtual_data for r in self.readers], join="exact"
         )
         self.sizes = dict(self.virtual_data.sizes)
         self.sizes.pop("", None)
         self.itemsizes: Mapping[Hashable, int] = defaultdict(int)
-        self.indexes = self.virtual_data.coords
+        self.indexes = {k: a.values for k, a in self.virtual_data.coords.items()}
         for arr in self.virtual_data.data_vars.values():
             for dim in arr.dims:
                 if dim == "":
@@ -260,14 +261,12 @@ class GVL:
             while instances_yielded < instances_in_partition:
                 if len_unused_buffer == 0:
                     dim_slices = {
-                        d: slice(s.stop, s.stop + v)
-                        for (d, s), v in zip(
+                        d: slice(s.stop, s.stop + size)
+                        for (d, s), size in zip(
                             dim_slices.items(), self.buffer_sizes.values()
                         )
                     }
-                    buffer = self.get_buffer(
-                        self.indexes, dim_slices, contig, start, end
-                    )
+                    buffer = self.get_buffer(dim_slices, contig, start, end)
                     # columns: starts, region_idx, dim1_idx, dim2_idx, ...
                     buffer_idx = self.get_buffer_idx(partition, start, buffer)
                     if self.weights is not None:
@@ -277,6 +276,7 @@ class GVL:
                         buffer_idx = self.rng.permutation(buffer_idx)
 
                     instances_in_buffer = len(buffer_idx)
+                    len_unused_buffer = instances_in_buffer
                     new_stop = min(
                         self.batch_size, self.batch_slice.stop + instances_in_buffer
                     )
@@ -305,8 +305,6 @@ class GVL:
                         batch_idx = np.concatenate(self.partial_indices)
                         self.partial_batches = []
                         self.partial_indices = []
-
-                len_unused_buffer = instances_in_buffer - buffer_idx_slice.stop
 
                 # full batch
                 if self.batch_slice.stop == self.batch_size:
@@ -339,6 +337,7 @@ class GVL:
                     )
                     self.batch_slice = slice(self.batch_slice.stop, new_stop)
 
+                len_unused_buffer -= len(idx)
                 new_stop = min(
                     buffer_idx_slice.stop + self.batch_size, instances_in_buffer
                 )
@@ -349,8 +348,10 @@ class GVL:
         mpl = max(1, mpl)
         return mpl
 
-    def set_buffer_sizes(self, max_mem: int, max_length: int, batch_dims: List[str]):
-        buffer_sizes = dict(self.sizes)
+    def set_buffer_sizes(
+        self, max_mem: int, max_length: int, batch_dims: List[str]
+    ) -> Dict[Hashable, int]:
+        buffer_sizes = deepcopy(self.sizes)
         if max_mem < max_length * self.mem_per_length(self.sizes):
             for dim in batch_dims:
                 buffer_sizes.pop(dim)
@@ -360,6 +361,7 @@ class GVL:
                 )
                 if size > 0:
                     buffer_sizes[dim] = size
+                    # reducing this dim is enough to get a buffer that fits into memory
                     break
                 elif size == 0:
                     buffer_sizes[dim] = 1
@@ -400,13 +402,12 @@ class GVL:
 
     def get_buffer(
         self,
-        indexes: Mapping[Hashable, NDArray],
         dim_slices: Mapping[str, slice],
         contig: str,
         start: int,
         end: int,
     ):
-        read_kwargs = {d: indexes[d][s] for d, s in dim_slices.items()}
+        read_kwargs = {d: self.indexes[d][s] for d, s in dim_slices.items()}
         buffer = xr.Dataset(
             {
                 r.virtual_data.name: r.read(contig, start, end, **read_kwargs)
@@ -470,6 +471,11 @@ class GVL:
         buffer: xr.Dataset,
         idx: NDArray[np.integer],
     ):
+        """Despite this unvectorized implementation, it is in fact faster than both a
+        numba implementation (perhaps due to small batch sizes) and using fancy indexing
+        (with or without xarray.Dataset.isel). This may be faster without vectorization
+        because it avoids fancy indexing in the length dimension.
+        """
         out: Dict[Hashable, Tuple[List[str], NDArray]] = {}
         for k, a in buffer.data_vars.items():
             dims = ["batch", *self.non_batch_dims, "length"]

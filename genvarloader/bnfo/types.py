@@ -118,8 +118,8 @@ class Variants(Protocol):
         end : int
             End coordinate, 0-based exclusive.
         **kwargs
-            Additional keyword arguments. May include `samples: Iterable[str]` and
-            `ploid: Iterable[int]` to specify samples and ploid numbers.
+            Additional keyword arguments. May include `sample: Iterable[str]` and
+            `ploid: Iterable[int]` to specify sample names and ploid numbers.
 
         Returns
         -------

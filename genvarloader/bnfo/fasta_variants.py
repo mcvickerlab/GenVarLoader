@@ -47,9 +47,40 @@ class FastaVariants(Reader):
         )
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
+        """_summary_
+
+        Parameters
+        ----------
+        contig : str
+            _description_
+        start : int
+            _description_
+        end : int
+            _description_
+        **kwargs
+            Additional keyword arguments. May include `samples: Iterable[str]` and
+            `ploid: Iterable[int]` to specify samples and ploid numbers.
+
+        Returns
+        -------
+        xr.DataArray
+            _description_
+        """
+        samples = kwargs.get("sample", None)
+        if samples is None:
+            n_samples = self.variants.n_samples
+        else:
+            n_samples = len(samples)
+
+        ploid = kwargs.get("ploid", None)
+        if ploid is None:
+            ploid = self.variants.ploidy
+        else:
+            ploid = len(ploid)
+
         ref: NDArray[np.bytes_] = self.fasta.read(contig, start, end).to_numpy()
         result = self.variants.read(contig, start, end, **kwargs)
-        seqs = np.tile(ref, (self.variants.n_samples, self.variants.ploidy, 1))
+        seqs = np.tile(ref, (n_samples, ploid, 1))
 
         if result is None:
             return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
