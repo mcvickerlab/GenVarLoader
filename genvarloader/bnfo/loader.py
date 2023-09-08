@@ -12,6 +12,7 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    Tuple,
     Union,
     cast,
 )
@@ -24,7 +25,7 @@ from natsort import natsorted
 from numpy.typing import NDArray
 
 from .types import Reader
-from .util import _set_uniform_length_around_center, read_bedlike
+from .util import _set_fixed_length_around_center, read_bedlike
 
 
 # TODO test weighted upsampling
@@ -133,6 +134,14 @@ class GVL:
                 f"Got batch dimensions that are not available from the readers: {missing_dims}"
             )
         self.batch_dims = batch_dims
+        self.non_batch_dims = [d for d in self.sizes.keys() if d not in batch_dims]
+        self.non_batch_dim_shape: Dict[Hashable, List[int]] = {}
+        self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
+        for k, a in self.virtual_data.data_vars.items():
+            self.non_batch_dim_shape[k] = [a.sizes[d] for d in self.non_batch_dims]
+            # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
+            idx_cols = [i for i, d in enumerate(self.batch_dims) if d in a.sizes]
+            self.buffer_idx_cols[k] = np.array(idx_cols, dtype=int) + 2
 
         if weights is not None:
             if extra_weights := set(weights.keys()) - set(self.virtual_data.dims):
@@ -177,8 +186,7 @@ class GVL:
         with pl.StringCache():
             pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
             bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
-        self.bed = _set_uniform_length_around_center(bed, fixed_length)
-
+        self.bed = _set_fixed_length_around_center(bed, fixed_length)
         # TODO check if any regions are out-of-bounds and any readers have padding disabled
         # if so, raise an error. Otherwise, readers will catch the error downstream.
 
@@ -279,19 +287,6 @@ class GVL:
 
                 # guaranteed to init buffer_idx based on init of len_unused_buffer
                 idx = buffer_idx[buffer_idx_slice]
-                if len(self.batch_dims) > 0:
-                    selector = {
-                        d: xr.DataArray(col.squeeze(-1), dims="batch")
-                        for d, col in zip(
-                            self.batch_dims, np.hsplit(idx[:, 2:], len(self.batch_dims))
-                        )
-                    }
-                else:
-                    selector = {}
-                selector["length"] = xr.DataArray(
-                    idx[:, 0, None] + np.arange(self.fixed_length),
-                    dims=["batch", "length"],
-                )
 
                 batch: xr.Dataset
                 if (
@@ -299,13 +294,11 @@ class GVL:
                     and self.batch_slice.stop == self.batch_size
                 ):
                     # guaranteed to init buffer based on init of len_unused_buffer
-                    batch = buffer.isel(selector, missing_dims="ignore")
+                    batch = self.select_from_buffer(buffer, idx)
                     batch_idx = idx.copy()
                 else:
                     # guaranteed to init buffer based on init of len_unused_buffer
-                    self.partial_batches.append(
-                        buffer.isel(selector, missing_dims="ignore")
-                    )
+                    self.partial_batches.append(self.select_from_buffer(buffer, idx))
                     self.partial_indices.append(idx)
                     if self.batch_slice.stop == self.batch_size:
                         batch = xr.concat(self.partial_batches, dim="batch")
@@ -453,7 +446,7 @@ class GVL:
         self, batch: xr.Dataset, batch_idx: NDArray, dim_slices: Dict[str, slice]
     ):
         batch = batch.transpose("batch", ...)
-        out = {name: arr.to_numpy() for name, arr in batch.data_vars.items()}
+        out = {name: arr.values for name, arr in batch.data_vars.items()}
 
         if self.return_index:
             # cols: region_idx, dim1_idx, dim2_idx, ...
@@ -471,6 +464,41 @@ class GVL:
             out = tuple(out.values())
 
         return out
+
+    def select_from_buffer(
+        self,
+        buffer: xr.Dataset,
+        idx: NDArray[np.integer],
+    ):
+        out: Dict[Hashable, Tuple[List[str], NDArray]] = {}
+        for k, a in buffer.data_vars.items():
+            dims = ["batch", *self.non_batch_dims, "length"]
+            out[k] = (
+                dims,
+                np.empty_like(
+                    a.values,
+                    shape=(len(idx), *self.non_batch_dim_shape[k], self.fixed_length),
+                ),
+            )
+            self.select_from_buffer_array(
+                a.values, idx, self.buffer_idx_cols[k], out[k][1]
+            )
+        return xr.Dataset(out)
+
+    def select_from_buffer_array(
+        self,
+        arr: NDArray,
+        idx: NDArray[np.integer],
+        idx_cols: NDArray[np.integer],
+        out: NDArray,
+    ):
+        # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
+        for i in range(len(idx)):
+            _idx: NDArray[np.integer] = idx[i]
+            indexer = [slice(None)] * arr.ndim
+            indexer[: len(idx_cols)] = _idx[idx_cols]
+            indexer[-1] = slice(_idx[0], _idx[0] + self.fixed_length)
+            out[i] = arr[tuple(indexer)]
 
 
 @nb.njit(nogil=True, cache=True)

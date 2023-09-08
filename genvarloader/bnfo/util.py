@@ -6,14 +6,14 @@ import pandera.typing as pat
 import polars as pl
 
 
-def _set_uniform_length_around_center(bed: pl.DataFrame, length: int):
+def _set_fixed_length_around_center(bed: pl.DataFrame, length: int):
     if "peak" in bed.columns:
         center = pl.col("chromStart") + pl.col("peak")
     else:
         center = (pl.col("chromStart") + pl.col("chromEnd")) / 2
     bed = bed.with_columns(
         chromStart=(center - length / 2).round(0).cast(pl.Int64),
-        chromEnd=pl.col("chromStart") + length,
+        chromEnd=(center + length / 2).round(0).cast(pl.Int64),
     )
     return bed
 
