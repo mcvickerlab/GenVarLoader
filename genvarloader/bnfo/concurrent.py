@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 import random
 from collections import defaultdict, deque
-from concurrent.futures import Future, ProcessPoolExecutor
 from copy import deepcopy
+from itertools import cycle
 from pathlib import Path
 from typing import (
     Callable,
     Dict,
+    Generator,
     Hashable,
     Iterable,
     List,
@@ -19,19 +22,19 @@ from typing import (
 import numba as nb
 import numpy as np
 import polars as pl
+import ray
 import xarray as xr
+from attrs import define
 from natsort import natsorted
 from numpy.typing import NDArray
 
 from .types import Reader
 from .util import _cartesian_product, _set_fixed_length_around_center, read_bedlike
 
+DataVarsLike = Dict[Hashable, Tuple[Tuple[Hashable, ...], NDArray]]
+
 
 # TODO test weighted upsampling
-# TODO async reads
-# have two buffers, one for reading data and for yielding batches
-# note: this will half the memory budget for buffers
-# use asyncio, concurrent readers must use asyncio compatible futures and coroutines
 class GVL:
     """GenVarLoader
 
@@ -104,6 +107,8 @@ class GVL:
         num_workers : int, optional
             How many workers to use for concurrent I/O, default 2.
         """
+        if not ray.is_initialized():
+            ray.init()
 
         if not isinstance(readers, Iterable):
             readers = [readers]
@@ -164,6 +169,9 @@ class GVL:
         )
 
         self.num_workers = num_workers
+        self.actors = cycle(
+            BufferActor.remote(*self.readers) for _ in range(self.num_workers - 1)
+        )
 
         batch_mem = fixed_length * self.mem_per_length(
             {k: v for k, v in self.sizes.items() if k not in batch_dims}
@@ -230,130 +238,73 @@ class GVL:
         self.partial_indices = []
         self.total_yielded = 0
 
-        exc = ProcessPoolExecutor(max_workers=self.num_workers)
+        buffers = self.buffers()
+        buffer = next(buffers)
 
-        # get buffer tasks
-        buffer_tasks: deque[Tuple] = deque([])
-        for partition in self.partitioned_bed:
-            dim_slices = {str(d): slice(0, 0) for d in self.buffer_sizes}
+        for buffer in buffers:
 
-            n_regions = len(partition)
-            instances_in_partition = n_regions * np.prod(
-                [self.sizes[d] for d in self.batch_dims], dtype=int
-            )
-            instances_in_partition_tasks = 0
+            new_stop = min(self.batch_size, self.batch_slice.stop + len(buffer))
+            self.batch_slice = slice(self.batch_slice.stop, new_stop)
+            len_batch_slice = self.batch_slice.stop - self.batch_slice.start
+            buffer.idx_slice = slice(0, len_batch_slice)
 
-            contig: str
-            start: int
-            end: int
-            contig, start, end = partition.select(
-                pl.col("chrom").first(),
-                pl.col("chromStart").min(),
-                pl.col("chromEnd").max(),
-            ).row(0)
+            while buffer.len_unused_buffer > 0:
+                idx = buffer.buffer_idx[buffer.idx_slice]
 
-            while instances_in_partition_tasks < instances_in_partition:
-                dim_slices = self.increment_dim_slices(dim_slices)
-                read_kwargs = {d: self.indexes[d][s] for d, s in dim_slices.items()}
-                buffer_len = n_regions * np.prod(
-                    [len(a) for a in read_kwargs.values()], dtype=int
-                )
-                instances_in_partition_tasks += buffer_len
-                buffer_tasks.append(
-                    (
-                        Buffer,
-                        self.readers,
-                        self.batch_dims,
-                        partition,
-                        contig,
-                        start,
-                        end,
-                        dim_slices,
-                        read_kwargs,
-                        self.weights,
-                        self.shuffle,
-                        self.rng.integers(np.iinfo(np.int64).max),
+                batch: xr.Dataset
+                if (
+                    self.batch_slice.start == 0
+                    and self.batch_slice.stop == self.batch_size
+                ):
+
+                    batch = self.select_from_buffer(buffer.buffer, idx)
+                    batch_idx = idx.copy()
+                else:
+                    self.partial_batches.append(
+                        self.select_from_buffer(buffer.buffer, idx)
                     )
-                )
+                    self.partial_indices.append(idx)
+                    if self.batch_slice.stop == self.batch_size:
+                        batch = xr.concat(self.partial_batches, dim="batch")
+                        batch_idx = np.concatenate(self.partial_indices)
+                        self.partial_batches = []
+                        self.partial_indices = []
 
-        buffers: deque[Future[Buffer]] = deque([])
-        buffers.extend(
-            [exc.submit(*buffer_tasks.popleft()) for _ in range(self.num_workers)]
-        )
-        buffer = buffers.popleft().result()
-        buffers.append(exc.submit(*buffer_tasks.popleft()))
-
-        # get batches
-        while True:
-            # current buffer is exhausted and no more buffers
-            if buffer.len_unused_buffer == 0 and len(buffers) == 0:
-                break
-            # current buffer is exhausted and more buffers
-            elif buffer.len_unused_buffer == 0:
-                # more buffer tasks, so submit another
-                if len(buffer_tasks) > 0:
-                    buffers.append(exc.submit(*buffer_tasks.popleft()))
-
-                buffer = buffers.popleft().result()
-
-                new_stop = min(self.batch_size, self.batch_slice.stop + len(buffer))
-                self.batch_slice = slice(self.batch_slice.stop, new_stop)
-                len_batch_slice = self.batch_slice.stop - self.batch_slice.start
-                buffer.idx_slice = slice(0, len_batch_slice)
-
-            # guaranteed to init buffer_idx based on init of len_unused_buffer
-            idx = buffer.buffer_idx[buffer.idx_slice]
-
-            batch: xr.Dataset
-            if self.batch_slice.start == 0 and self.batch_slice.stop == self.batch_size:
-
-                batch = self.select_from_buffer(buffer.buffer, idx)
-                batch_idx = idx.copy()
-            else:
-                self.partial_batches.append(self.select_from_buffer(buffer.buffer, idx))
-                self.partial_indices.append(idx)
+                # full batch
                 if self.batch_slice.stop == self.batch_size:
+                    yield self.process_batch(batch, batch_idx, buffer.dim_slices)  # type: ignore
+
+                    self.total_yielded += self.batch_size
+
+                    # full batch or take what's left in the buffer
+                    new_stop = min(self.batch_size, buffer.len_unused_buffer)
+                    self.batch_slice = slice(0, new_stop)
+                # final batch incomplete
+                elif self.total_yielded + self.batch_slice.stop == self.n_instances:
+                    if self.drop_last:
+                        return
+
+                    # final incomplete batch is always a partial batch
                     batch = xr.concat(self.partial_batches, dim="batch")
-                    batch_idx = np.concatenate(self.partial_indices)
-                    self.partial_batches = []
-                    self.partial_indices = []
+                    batch_idx = np.concatenate(self.partial_indices, 0)
 
-            # full batch
-            if self.batch_slice.stop == self.batch_size:
-                yield self.process_batch(batch, batch_idx, buffer.dim_slices)  # type: ignore
+                    yield self.process_batch(batch, batch_idx, buffer.dim_slices)
 
-                self.total_yielded += self.batch_size
+                    self.total_yielded += self.batch_slice.stop
+                # batch incomplete and more data in buffer
+                else:
+                    # fill batch or take what's left in the buffer
+                    new_stop = min(
+                        self.batch_size,
+                        self.batch_slice.stop + buffer.len_unused_buffer,
+                    )
+                    self.batch_slice = slice(self.batch_slice.stop, new_stop)
 
-                # full batch or take what's left in the buffer
-                new_stop = min(self.batch_size, buffer.len_unused_buffer)
-                self.batch_slice = slice(0, new_stop)
-            # final batch incomplete
-            elif self.total_yielded + self.batch_slice.stop == self.n_instances:
-                if self.drop_last:
-                    return
-
-                # final incomplete batch is always a partial batch
-                batch = xr.concat(self.partial_batches, dim="batch")
-                batch_idx = np.concatenate(self.partial_indices, 0)
-
-                yield self.process_batch(batch, batch_idx, buffer.dim_slices)
-
-                self.total_yielded += self.batch_slice.stop
-            # batch incomplete and more data in buffer
-            else:
-                # fill batch or take what's left in the buffer
+                buffer.len_unused_buffer -= len(idx)
                 new_stop = min(
-                    self.batch_size, self.batch_slice.stop + buffer.len_unused_buffer
+                    buffer.idx_slice.stop + self.batch_size, buffer.instances_in_buffer
                 )
-                self.batch_slice = slice(self.batch_slice.stop, new_stop)
-
-            buffer.len_unused_buffer -= len(idx)
-            new_stop = min(
-                buffer.idx_slice.stop + self.batch_size, buffer.instances_in_buffer
-            )
-            buffer.idx_slice = slice(buffer.idx_slice.stop, new_stop)
-
-        exc.shutdown()
+                buffer.idx_slice = slice(buffer.idx_slice.stop, new_stop)
 
     def mem_per_length(self, sizes: Mapping[Hashable, int]):
         mpl = sum(sizes[dim] * self.itemsizes[dim] for dim in sizes)
@@ -419,33 +370,60 @@ class GVL:
         }
         return dim_slices
 
-    def get_buffer(
-        self,
-        read_kwargs: Dict[str, NDArray],
-        contig: str,
-        start: int,
-        end: int,
-    ):
-        buffer = xr.Dataset(
-            {
-                r.virtual_data.name: r.read(contig, start, end, **read_kwargs)
-                for r in self.readers
-            }
-        )
-        return buffer
+    def buffers(self) -> Generator[Buffer, None, None]:
+        buffers: deque[LazyBuffer] = deque([])
+        for partition in self.partitioned_bed:
+            dim_slices = {str(d): slice(0, 0) for d in self.buffer_sizes}
+
+            n_regions = len(partition)
+            instances_in_partition = n_regions * np.prod(
+                [self.sizes[d] for d in self.batch_dims], dtype=int
+            )
+            instances_in_partition_tasks = 0
+
+            contig: str
+            start: int
+            end: int
+            contig, start, end = partition.select(
+                pl.col("chrom").first(),
+                pl.col("chromStart").min(),
+                pl.col("chromEnd").max(),
+            ).row(0)
+
+            while instances_in_partition_tasks < instances_in_partition:
+                dim_slices = self.increment_dim_slices(dim_slices)
+                read_kwargs = {d: self.indexes[d][s] for d, s in dim_slices.items()}
+                buffer_len = n_regions * np.prod(
+                    [len(a) for a in read_kwargs.values()], dtype=int
+                )
+                instances_in_partition_tasks += buffer_len
+                buffer = next(self.actors).read(contig, start, end, **read_kwargs)
+                buffer_idx = self.get_buffer_idx(partition, start, read_kwargs)
+                if self.weights is not None:
+                    buffer_idx = self.resample_buffer_idx(buffer_idx)
+                if self.shuffle:
+                    buffer_idx = self.rng.permutation(buffer_idx)
+                buffers.append(LazyBuffer(buffer, buffer_idx, dim_slices))
+                if len(buffers) == self.num_workers - 1:
+                    yield buffers.popleft().result()
+
+        while len(buffers) > 0:
+            yield buffers.popleft().result()
 
     def get_buffer_idx(
-        self, partition: pl.DataFrame, start: int, buffer: xr.Dataset
+        self,
+        partition: pl.DataFrame,
+        start: int,
+        read_kwargs: Dict[str, NDArray[np.int64]],
     ) -> NDArray[np.integer]:
         row_idx = partition.with_row_count()["row_nr"].to_numpy()
-        buffer_indexes = [
-            row_idx,
-            *(
-                np.arange(size, dtype=np.int32)
-                for name, size in buffer.sizes.items()
-                if name in self.batch_dims
-            ),
-        ]
+        buffer_indexes = [row_idx]
+        for dim in self.batch_dims:
+            if dim in read_kwargs:
+                size = len(read_kwargs[dim])
+            else:
+                size = self.sizes[dim]
+            buffer_indexes.append(np.arange(size))
         buffer_idx = _cartesian_product(buffer_indexes)
         # columns: starts, region_idx, dim1_idx, dim2_idx, ...
         starts = (partition["chromStart"].to_numpy() - start)[buffer_idx[:, 0]][:, None]
@@ -543,47 +521,45 @@ def partition_regions(
     return partitions
 
 
-class Buffer:
-    buffer: xr.Dataset
+@define
+class LazyBuffer:
+    buffer: ray.ObjectRef[DataVarsLike]
     buffer_idx: NDArray[np.integer]
-    instances_in_buffer: int
-    len_unused_buffer: int
-    idx_slice: slice
     dim_slices: Dict[str, slice]
 
     def __init__(
         self,
-        readers: Iterable[Reader],
-        batch_dims: List[str],
-        partition: pl.DataFrame,
-        contig: str,
-        start: int,
-        end: int,
+        buffer,
+        buffer_idx,
         dim_slices: Dict[str, slice],
-        read_kwargs: Dict[str, NDArray],
-        weights,
-        shuffle: bool,
-        seed: Optional[int] = None,
+    ) -> None:
+        self.buffer = buffer
+        self.buffer_idx = buffer_idx
+        self.dim_slices = dim_slices
+
+    def result(self):
+        buffer = xr.Dataset(ray.get(self.buffer))
+        return Buffer(buffer, self.buffer_idx, self.dim_slices)
+
+
+@define
+class Buffer:
+    buffer: xr.Dataset
+    buffer_idx: NDArray[np.integer]
+    dim_slices: Dict[str, slice]
+    instances_in_buffer: int
+    len_unused_buffer: int
+    idx_slice: slice
+
+    def __init__(
+        self,
+        buffer,
+        buffer_idx,
+        dim_slices: Dict[str, slice],
     ) -> None:
         self.dim_slices = dim_slices
-        self.buffer = xr.Dataset(
-            {
-                r.virtual_data.name: r.read(contig, start, end, **read_kwargs)
-                for r in readers
-            }
-        )
-        # columns: starts, region_idx, dim1_idx, dim2_idx, ...
-        self.buffer_idx = self.get_buffer_idx(partition, start, self.buffer, batch_dims)
-
-        if weights is not None:
-            self.buffer_idx = self.resample_buffer_idx(
-                self.buffer_idx, batch_dims, weights
-            )
-
-        if shuffle:
-            rng = np.random.default_rng(seed)
-            self.buffer_idx = rng.permutation(self.buffer_idx)
-
+        self.buffer = buffer
+        self.buffer_idx = buffer_idx
         self.instances_in_buffer = len(self.buffer_idx)
         self.len_unused_buffer = self.instances_in_buffer
         self.idx_slice = slice(0, 0)
@@ -591,35 +567,15 @@ class Buffer:
     def __len__(self):
         return self.instances_in_buffer
 
-    def get_buffer_idx(
-        self,
-        partition: pl.DataFrame,
-        start: int,
-        buffer: xr.Dataset,
-        batch_dims: List[str],
-    ) -> NDArray[np.integer]:
-        row_idx = partition.with_row_count()["row_nr"].to_numpy()
-        buffer_indexes = [
-            row_idx,
-            *(
-                np.arange(size, dtype=np.int32)
-                for name, size in buffer.sizes.items()
-                if name in batch_dims
-            ),
-        ]
-        buffer_idx = _cartesian_product(buffer_indexes)
-        # columns: starts, region_idx, dim1_idx, dim2_idx, ...
-        starts = (partition["chromStart"].to_numpy() - start)[buffer_idx[:, 0]][:, None]
-        region_idx = partition["region_idx"].to_numpy()[buffer_idx[:, 0]][:, None]
-        return np.hstack([starts, region_idx, buffer_idx[:, 1:]])
 
-    def resample_buffer_idx(self, buffer_idx: NDArray, batch_dims: List[str], weights):
-        idx_weights = np.ones(len(buffer_idx))
-        # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
-        for i, d in enumerate(batch_dims):
-            # caller responsible for weights existing
-            w = weights.get(d, None)  # type: ignore[reportOptionalMemberAccess]
-            if w is not None:
-                idx_weights *= w[buffer_idx[:, i + 2]]
-        idx_weights = np.round(idx_weights).astype(int)
-        return buffer_idx.repeat(idx_weights)
+@ray.remote()
+class BufferActor:
+    def __init__(self, *readers: Reader) -> None:
+        self.readers = readers
+
+    def read(self, contig: str, start: int, end: int, **kwargs) -> DataVarsLike:
+        out = {
+            r.virtual_data.name: r.read(contig, start, end, **kwargs)
+            for r in self.readers
+        }
+        return {name: (a.dims, a.values) for name, a in out.items()}
