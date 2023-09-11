@@ -28,10 +28,6 @@ from .util import _cartesian_product, _set_fixed_length_around_center, read_bedl
 
 
 # TODO test weighted upsampling
-# TODO async reads
-# have two buffers, one for reading data and for yielding batches
-# note: this will half the memory budget for buffers
-# use asyncio, concurrent readers must use asyncio compatible futures and coroutines
 class GVL:
     """GenVarLoader
 

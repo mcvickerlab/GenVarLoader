@@ -105,10 +105,13 @@ class GVL:
             Whether to drop the last batch if the number of instances are not evenly
             divisible by the batch size.
         num_workers : int, optional
-            How many workers to use for concurrent I/O, default 2.
+            How many workers to use for concurrent I/O, default 2. Recommended to set
+            this to the number of processors available.
         """
+        self.num_workers = num_workers
+
         if not ray.is_initialized():
-            ray.init()
+            ray.init(num_cpus=self.num_workers - 1)
 
         if not isinstance(readers, Iterable):
             readers = [readers]
@@ -168,7 +171,6 @@ class GVL:
             .max(),
         )
 
-        self.num_workers = num_workers
         self.actors = cycle(
             BufferActor.remote(*self.readers) for _ in range(self.num_workers - 1)
         )
@@ -397,7 +399,9 @@ class GVL:
                     [len(a) for a in read_kwargs.values()], dtype=int
                 )
                 instances_in_partition_tasks += buffer_len
-                buffer = next(self.actors).read(contig, start, end, **read_kwargs)
+                buffer = next(self.actors).read.remote(
+                    contig, start, end, **read_kwargs
+                )
                 buffer_idx = self.get_buffer_idx(partition, start, read_kwargs)
                 if self.weights is not None:
                     buffer_idx = self.resample_buffer_idx(buffer_idx)
@@ -568,7 +572,7 @@ class Buffer:
         return self.instances_in_buffer
 
 
-@ray.remote()
+@ray.remote
 class BufferActor:
     def __init__(self, *readers: Reader) -> None:
         self.readers = readers
