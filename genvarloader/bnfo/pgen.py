@@ -44,10 +44,10 @@ class Pgen(Variants):
             self.sample_idx = np.arange(len(psam_samples), dtype=np.uint32)
         self.n_samples = len(self.samples)
 
-        pvar = pgenlib.PvarReader(bytes(path.with_suffix(".pvar")))
-        variant_ids = [
-            pvar.get_variant_id(i).split(b":") for i in range(pvar.get_variant_ct())
-        ]
+        with pgenlib.PvarReader(bytes(path.with_suffix(".pvar"))) as pvar:
+            variant_ids = [
+                pvar.get_variant_id(i).split(b":") for i in range(pvar.get_variant_ct())
+            ]
         contigs = pl.Series([v[0] for v in variant_ids]).cast(pl.Utf8).set_sorted()
         offsets = contigs.unique_counts().to_numpy()
         self.contig_idx = {

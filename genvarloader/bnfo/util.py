@@ -1,9 +1,12 @@
+from itertools import accumulate, chain, repeat
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Sequence, Union
 
+import numpy as np
 import pandera as pa
 import pandera.typing as pat
 import polars as pl
+from numpy.typing import NDArray
 
 
 def _set_fixed_length_around_center(bed: pl.DataFrame, length: int):
@@ -206,3 +209,21 @@ def _read_broadpeak(broadpeak_path: Union[str, Path]):
     ).to_pandas()
     broadpeaks = BroadPeakSchema.to_schema()(broadpeaks)
     return pl.from_pandas(broadpeaks)
+
+
+def _cartesian_product(arrays: Sequence[NDArray]) -> NDArray:
+    """Get the cartesian product of multiple arrays such that each entry corresponds to
+    a unique combination of the input arrays' values.
+    """
+    # https://stackoverflow.com/a/49445693
+    la = len(arrays)
+    shape = *map(len, arrays), la
+    dtype = np.result_type(*arrays)
+    arr = np.empty(shape, dtype=dtype)
+    arrs = (*accumulate(chain((arr,), repeat(0, la - 1)), np.ndarray.__getitem__),)
+    idx = slice(None), *repeat(None, la - 1)
+    for i in range(la - 1, 0, -1):
+        arrs[i][..., i] = arrays[i][idx[: la - i]]
+        arrs[i - 1][1:] = arrs[i]
+    arr[..., 0] = arrays[0][idx]
+    return arr.reshape(-1, la)
