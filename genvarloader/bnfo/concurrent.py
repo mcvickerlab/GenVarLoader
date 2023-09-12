@@ -30,7 +30,7 @@ def partition_regions(
 
 @define
 class LazyBuffer:
-    buffer: ray.ObjectRef[DataVarsLike]
+    buffer: ray.ObjectRef
     buffer_idx: NDArray[np.integer]
     dim_slices: Dict[str, slice]
 
