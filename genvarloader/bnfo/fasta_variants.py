@@ -7,7 +7,7 @@ import xarray as xr
 from numpy.typing import NDArray
 
 from .fasta import Fasta
-from .types import DenseGenotypes, Reader, Variants, VLenAlleles
+from .types import DenseGenotypes, Reader, Variants
 
 
 class FastaVariants(Reader):
@@ -69,13 +69,16 @@ class FastaVariants(Reader):
                 contig, start, variants.max_end
             ).to_numpy()
             seqs = np.empty((n_samples, ploid, end - start), dtype=ref.dtype)
-            apply_variants_with_indels(
+            shifts = sample_shifts(variants.genotypes, variants.sizes)
+            construct_haplotypes_with_indels(
                 seqs.view(np.uint8),
                 ref.view(np.uint8),
+                shifts,
                 variants.positions - start,
                 variants.sizes,
                 variants.genotypes,
-                variants.alt,
+                variants.alt.offsets,
+                variants.alt.alleles.view(np.uint8),
             )
         else:
             # SparseAlleles
@@ -109,24 +112,28 @@ def apply_variants(
         sample_seq[:, sample_positions] = sample_alleles
 
 
+def sample_shifts(genotypes, sizes, seed: Optional[int] = None):
+    rng = np.random.default_rng(seed)
+    diffs = np.where(genotypes == 1, sizes, 0).cumsum(-1, dtype=np.int32)
+    shifts = rng.integers(0, diffs[..., -1].clip(0) + 1, dtype=np.int32)
+    return shifts
+
+
 @nb.njit(nogil=True)
-def apply_variants_with_indels(
+def construct_haplotypes_with_indels(
     out: NDArray[np.uint8],
     ref: NDArray[np.uint8],
+    shifts: NDArray[np.int32],
     rel_positions: NDArray[np.int32],
     sizes: NDArray[np.int32],
     genotypes: NDArray[np.int8],
-    alt: VLenAlleles,
-    seed: Optional[int] = None,
+    alt_offsets: NDArray[np.uint32],
+    alt_alleles: NDArray[np.uint8],
 ):
     n_samples = out.shape[0]
     ploidy = out.shape[1]
     fixed_length = out.shape[-1]
     n_variants = len(rel_positions)
-
-    diffs = np.where(genotypes == 1, sizes, 0).cumsum(-1, dtype=np.int32)
-    rng = np.random.default_rng(seed)
-    shifts = rng.integers(0, diffs[..., -1].clip(0) + 1, dtype=np.int32)
 
     for sample in nb.prange(n_samples):
         for hap in nb.prange(ploidy):
@@ -158,7 +165,7 @@ def apply_variants_with_indels(
                 # i.e. put it into same coordinate system as ref_idx
                 v_rel_pos = rel_positions[variant]
                 v_diff = sizes[variant]
-                allele = alt[variant]
+                allele = alt_alleles[alt_offsets[variant] : alt_offsets[variant + 1]]
                 v_len = len(allele)
 
                 # handle shift
