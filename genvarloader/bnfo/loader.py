@@ -1,12 +1,10 @@
 import random
-from collections import defaultdict, deque
+from collections import defaultdict
 from copy import deepcopy
-from itertools import cycle
 from pathlib import Path
 from typing import (
     Callable,
     Dict,
-    Generator,
     Hashable,
     Iterable,
     List,
@@ -25,25 +23,20 @@ import xarray as xr
 from natsort import natsorted
 from numpy.typing import NDArray
 
-from .concurrent import Buffer, BufferActor, LazyBuffer
+from .concurrent import Buffer, BufferMeta, DataVarsLike, ReaderActor
 from .types import Reader
 from .util import _cartesian_product, _set_fixed_length_around_center, read_bedlike
 
+try:
+    import torch
+    from torch.utils.data import DataLoader, IterableDataset
+
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
 
 class GVL:
-    """GenVarLoader
-
-    Idea behind this implementation is to efficiently materialize sequences from long,
-    overlapping ROIs. The algorithm is roughly:
-    1. Partition the ROIs to maximize the size of the union of ROIs while respecting
-    memory limits. Note any union of ROIs must be on the same contig. Buffer this
-    union of ROIs in memory.
-    2. Materialize batches of subsequences, i.e. the ROIs, by slicing the buffer. This
-    keeps memory usage to a minimum since we only need enough for the buffer + a single
-    batch. This should be fast because the buffer is the only part that uses file I/O
-    whereas the batches are materialized from the buffer.
-    """
-
     def __init__(
         self,
         readers: Union[Reader, Iterable[Reader]],
@@ -166,9 +159,10 @@ class GVL:
             .max(),
         )
 
-        self.actors = cycle(
-            BufferActor.remote(*self.readers) for _ in range(self.num_workers - 1)
-        )
+        self.actors: List[ReaderActor] = [
+            ReaderActor.remote(*self.readers, actor_idx=i)
+            for i in range(self.num_workers - 1)  # keep 1 cpu for main process
+        ]
 
         batch_mem = fixed_length * self.mem_per_length(
             {k: v for k, v in self.sizes.items() if k not in batch_dims}
@@ -212,96 +206,11 @@ class GVL:
         self.drop_last = drop_last
 
     def __len__(self):
+        """Number of batches."""
         if not self.drop_last:
             return -(-self.n_instances // self.batch_size)  # ceil
         else:
             return self.n_instances // self.batch_size
-
-    def __iter__(self):
-        return self.iter_batches()
-
-    def iter_batches(self):
-        if self.shuffle:
-            random.shuffle(self.partitioned_bed, self.rng.random)
-
-        self.batch_slice = slice(0, 0)
-
-        if self.shuffle:
-            self.indexes = {
-                d: self.rng.permutation(idx) for d, idx in self.indexes.items()
-            }
-
-        self.partial_batches = []
-        self.partial_indices = []
-        self.total_yielded = 0
-
-        buffers = self.buffers()
-        buffer = next(buffers)
-
-        for buffer in buffers:
-
-            new_stop = min(self.batch_size, self.batch_slice.stop + len(buffer))
-            self.batch_slice = slice(self.batch_slice.stop, new_stop)
-            len_batch_slice = self.batch_slice.stop - self.batch_slice.start
-            buffer.idx_slice = slice(0, len_batch_slice)
-
-            while buffer.len_unused_buffer > 0:
-                idx = buffer.buffer_idx[buffer.idx_slice]
-
-                batch: xr.Dataset
-                if (
-                    self.batch_slice.start == 0
-                    and self.batch_slice.stop == self.batch_size
-                ):
-
-                    batch = self.select_from_buffer(buffer.buffer, idx)
-                    batch_idx = idx.copy()
-                else:
-                    self.partial_batches.append(
-                        self.select_from_buffer(buffer.buffer, idx)
-                    )
-                    self.partial_indices.append(idx)
-                    if self.batch_slice.stop == self.batch_size:
-                        batch = xr.concat(self.partial_batches, dim="batch")
-                        batch_idx = np.concatenate(self.partial_indices)
-                        self.partial_batches = []
-                        self.partial_indices = []
-
-                # full batch
-                if self.batch_slice.stop == self.batch_size:
-                    yield self.process_batch(batch, batch_idx, buffer.dim_slices)  # type: ignore
-
-                    self.total_yielded += self.batch_size
-
-                    # full batch or take what's left in the buffer
-                    new_stop = min(self.batch_size, buffer.len_unused_buffer)
-                    self.batch_slice = slice(0, new_stop)
-                # final batch incomplete
-                elif self.total_yielded + self.batch_slice.stop == self.n_instances:
-                    if self.drop_last:
-                        return
-
-                    # final incomplete batch is always a partial batch
-                    batch = xr.concat(self.partial_batches, dim="batch")
-                    batch_idx = np.concatenate(self.partial_indices, 0)
-
-                    yield self.process_batch(batch, batch_idx, buffer.dim_slices)
-
-                    self.total_yielded += self.batch_slice.stop
-                # batch incomplete and more data in buffer
-                else:
-                    # fill batch or take what's left in the buffer
-                    new_stop = min(
-                        self.batch_size,
-                        self.batch_slice.stop + buffer.len_unused_buffer,
-                    )
-                    self.batch_slice = slice(self.batch_slice.stop, new_stop)
-
-                buffer.len_unused_buffer -= len(idx)
-                new_stop = min(
-                    buffer.idx_slice.stop + self.batch_size, buffer.instances_in_buffer
-                )
-                buffer.idx_slice = slice(buffer.idx_slice.stop, new_stop)
 
     def mem_per_length(self, sizes: Mapping[Hashable, int]):
         mpl = sum(sizes[dim] * self.itemsizes[dim] for dim in sizes)
@@ -360,54 +269,95 @@ class GVL:
             partitions.extend(c_part.partition_by("partition", include_key=False))
         return partitions
 
+    def __iter__(self):
+        return self.iter_batches()
+
+    def iter_batches(self):
+        if self.shuffle:
+            random.shuffle(self.partitioned_bed, self.rng.random)
+
+        self.batch_slice = slice(0, 0)
+
+        if self.shuffle:
+            self.indexes = {
+                d: self.rng.permutation(idx) for d, idx in self.indexes.items()
+            }
+
+        self.partial_batches = []
+        self.partial_indices = []
+        self.total_yielded = 0
+
+        buffers = Buffers(self)
+
+        for buffer in buffers:
+            new_stop = min(self.batch_size, self.batch_slice.stop + len(buffer))
+            self.batch_slice = slice(self.batch_slice.stop, new_stop)
+            len_batch_slice = self.batch_slice.stop - self.batch_slice.start
+            buffer.idx_slice = slice(0, len_batch_slice)
+
+            while buffer.len_unused_buffer > 0:
+                idx = buffer.buffer_idx[buffer.idx_slice]
+
+                batch: xr.Dataset
+                if (
+                    self.batch_slice.start == 0
+                    and self.batch_slice.stop == self.batch_size
+                ):
+                    batch = self.select_from_buffer(buffer.buffer, idx)
+                    batch_idx = idx.copy()
+                else:
+                    self.partial_batches.append(
+                        self.select_from_buffer(buffer.buffer, idx)
+                    )
+                    self.partial_indices.append(idx)
+                    if self.batch_slice.stop == self.batch_size:
+                        batch = xr.concat(self.partial_batches, dim="batch")
+                        batch_idx = np.concatenate(self.partial_indices)
+                        self.partial_batches = []
+                        self.partial_indices = []
+
+                # full batch
+                if self.batch_slice.stop == self.batch_size:
+                    yield self.process_batch(batch, batch_idx, buffer.dim_slices)  # type: ignore
+
+                    self.total_yielded += self.batch_size
+
+                    # full batch or take what's left in the buffer
+                    new_stop = min(self.batch_size, buffer.len_unused_buffer)
+                    self.batch_slice = slice(0, new_stop)
+                # final batch incomplete
+                elif self.total_yielded + self.batch_slice.stop == self.n_instances:
+                    if self.drop_last:
+                        return
+
+                    # final incomplete batch is always a partial batch
+                    batch = xr.concat(self.partial_batches, dim="batch")
+                    batch_idx = np.concatenate(self.partial_indices, 0)
+
+                    yield self.process_batch(batch, batch_idx, buffer.dim_slices)
+
+                    self.total_yielded += self.batch_slice.stop
+                # batch incomplete and more data in buffer
+                else:
+                    # fill batch or take what's left in the buffer
+                    new_stop = min(
+                        self.batch_size,
+                        self.batch_slice.stop + buffer.len_unused_buffer,
+                    )
+                    self.batch_slice = slice(self.batch_slice.stop, new_stop)
+
+                buffer.len_unused_buffer -= len(idx)
+                new_stop = min(
+                    buffer.idx_slice.stop + self.batch_size, buffer.instances_in_buffer
+                )
+                buffer.idx_slice = slice(buffer.idx_slice.stop, new_stop)
+
     def increment_dim_slices(self, dim_slices: Dict[str, slice]):
         dim_slices = {
             d: slice(s.stop, s.stop + size)
             for (d, s), size in zip(dim_slices.items(), self.buffer_sizes.values())
         }
         return dim_slices
-
-    def buffers(self) -> Generator[Buffer, None, None]:
-        buffers: deque[LazyBuffer] = deque([])
-        for partition in self.partitioned_bed:
-            dim_slices = {str(d): slice(0, 0) for d in self.buffer_sizes}
-
-            n_regions = len(partition)
-            instances_in_partition = n_regions * np.prod(
-                [self.sizes[d] for d in self.batch_dims], dtype=int
-            )
-            instances_in_partition_tasks = 0
-
-            contig: str
-            start: int
-            end: int
-            contig, start, end = partition.select(
-                pl.col("chrom").first(),
-                pl.col("chromStart").min(),
-                pl.col("chromEnd").max(),
-            ).row(0)
-
-            while instances_in_partition_tasks < instances_in_partition:
-                dim_slices = self.increment_dim_slices(dim_slices)
-                read_kwargs = {d: self.indexes[d][s] for d, s in dim_slices.items()}
-                buffer_len = n_regions * np.prod(
-                    [len(a) for a in read_kwargs.values()], dtype=int
-                )
-                instances_in_partition_tasks += buffer_len
-                buffer = next(self.actors).read.remote(  # type: ignore
-                    contig, start, end, **read_kwargs
-                )
-                buffer_idx = self.get_buffer_idx(partition, start, read_kwargs)
-                if self.weights is not None:
-                    buffer_idx = self.resample_buffer_idx(buffer_idx)
-                if self.shuffle:
-                    buffer_idx = self.rng.permutation(buffer_idx)
-                buffers.append(LazyBuffer(buffer, buffer_idx, dim_slices))
-                if len(buffers) == self.num_workers - 1:
-                    yield buffers.popleft().result()
-
-        while len(buffers) > 0:
-            yield buffers.popleft().result()
 
     def get_buffer_idx(
         self,
@@ -425,8 +375,8 @@ class GVL:
             buffer_indexes.append(np.arange(size))
         buffer_idx = _cartesian_product(buffer_indexes)
         # columns: starts, region_idx, dim1_idx, dim2_idx, ...
-        starts = (partition["chromStart"].to_numpy() - start)[buffer_idx[:, 0]][:, None]
-        region_idx = partition["region_idx"].to_numpy()[buffer_idx[:, 0]][:, None]
+        starts = (partition["chromStart"].to_numpy() - start)[buffer_idx[:, 0], None]
+        region_idx = partition["region_idx"].to_numpy()[buffer_idx[:, 0], None]
         return np.hstack([starts, region_idx, buffer_idx[:, 1:]])
 
     def resample_buffer_idx(self, buffer_idx: NDArray):
@@ -503,6 +453,13 @@ class GVL:
             indexer[-1] = slice(_idx[0], _idx[0] + self.fixed_length)
             out[i] = arr[tuple(indexer)]
 
+    def torch_dataloader(self):
+        if not TORCH_AVAILABLE:
+            raise ImportError("Pytorch must be installed to get a Pytorch DataLoader.")
+        dataset = GVLDataset(self)
+        dataloader = DataLoader(dataset, batch_size=None)
+        return dataloader
+
 
 @nb.njit(nogil=True, cache=True)
 def partition_regions(
@@ -518,3 +475,91 @@ def partition_regions(
             curr_length = ends[i] - starts[i]
         partitions[i] = partition
     return partitions
+
+
+class Buffers:
+    def __init__(self, gvl: GVL) -> None:
+        self.gvl = gvl
+
+    def __iter__(self):
+        self.ready_actor_idxs = list(range(len(self.gvl.actors)))
+        self.buffer_submitter = self.submit_buffer_tasks()
+        self.buffer_futures, self.buffer_meta = next(self.buffer_submitter)
+        self.buffers: List[Buffer] = []
+        return self
+
+    def __next__(self):
+        if len(self.buffers) == 0:
+            buffers, self.buffer_futures = ray.wait(self.buffer_futures)
+            buffers = cast(List[Tuple[DataVarsLike, int]], ray.get(buffers))
+            self.buffers = [
+                self.buffer_meta[actor_idx].to_buffer(buffer)
+                for buffer, actor_idx in buffers
+            ]
+            self.ready_actor_idxs.extend([actor_idx for _, actor_idx in buffers])
+            buffer_futures, self.buffer_meta = next(self.buffer_submitter)
+            self.buffer_futures.extend(buffer_futures)
+
+        return self.buffers.pop()
+
+    def submit_buffer_tasks(self):
+        buffer_futures: List[ray.ObjectRef[Buffer]] = []
+        buffer_meta: List[Optional[BufferMeta]] = [None] * len(self.gvl.actors)
+        for partition in self.gvl.partitioned_bed:
+            dim_slices = {str(d): slice(0, 0) for d in self.gvl.buffer_sizes}
+
+            n_regions = len(partition)
+            instances_in_partition = n_regions * np.prod(
+                [self.gvl.sizes[d] for d in self.gvl.batch_dims], dtype=int
+            )
+            instances_in_partition_tasks = 0
+
+            contig: str
+            start: int
+            end: int
+            contig, start, end = partition.select(
+                pl.col("chrom").first(),
+                pl.col("chromStart").min(),
+                pl.col("chromEnd").max(),
+            ).row(0)
+
+            while instances_in_partition_tasks < instances_in_partition:
+                if len(self.ready_actor_idxs) == 0:
+                    yield buffer_futures, buffer_meta
+                    buffer_futures = []
+
+                dim_slices = self.gvl.increment_dim_slices(dim_slices)
+                read_kwargs = {d: self.gvl.indexes[d][s] for d, s in dim_slices.items()}
+                buffer_len = n_regions * np.prod(
+                    [len(a) for a in read_kwargs.values()], dtype=int
+                )
+                instances_in_partition_tasks += buffer_len
+                buffer_idx = self.gvl.get_buffer_idx(partition, start, read_kwargs)
+                if self.gvl.weights is not None:
+                    buffer_idx = self.gvl.resample_buffer_idx(buffer_idx)
+                if self.gvl.shuffle:
+                    buffer_idx = self.gvl.rng.permutation(buffer_idx)
+                ready_actor_idx = self.ready_actor_idxs.pop()
+                buffer = self.gvl.actors[ready_actor_idx].read.remote(  # type: ignore
+                    contig, start, end, **read_kwargs
+                )
+                buffer_meta[ready_actor_idx] = BufferMeta(
+                    buffer_idx, dim_slices, ready_actor_idx
+                )
+                buffer_futures.append(buffer)
+
+        if len(buffer_futures) > 0:
+            yield buffer_futures, buffer_meta
+
+
+if TORCH_AVAILABLE:
+
+    class GVLDataset(IterableDataset):
+        def __init__(self, gvl: GVL):
+            self.gvl = gvl
+
+        def __len__(self):
+            return len(self.gvl)
+
+        def __iter__(self):
+            return iter(self.gvl)

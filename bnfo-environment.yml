@@ -11,7 +11,8 @@ dependencies:
   - numba
   - numpy
   - pandera
-  # - pgenlib # optional
+  - polars>=0.19.3
+  - pgenlib # optional
   - pyarrow
   - pybigwig
   - pysam

@@ -49,7 +49,7 @@ next(iter(dl))
 """
 
 try:
-    import torch
+    import pytorch
 except ImportError:
     raise ImportError("The `torch` submodule requires PyTorch.")
 
@@ -104,10 +104,10 @@ class TorchCollator:
                 """
             )
 
-    def __call__(self, queries: pd.DataFrame) -> Dict[str, torch.Tensor]:
+    def __call__(self, queries: pd.DataFrame) -> Dict[str, pytorch.Tensor]:
         _out = self.gvl.sel(queries, self.length, **self.sel_kwargs)
-        out = {k: torch.as_tensor(v) for k, v in _out.items()}
-        out["index"] = torch.as_tensor(queries.index.values)
+        out = {k: pytorch.as_tensor(v) for k, v in _out.items()}
+        out["index"] = pytorch.as_tensor(queries.index.values)
         return out
 
 
@@ -127,15 +127,15 @@ class ZarrCollator:
             for g in groups
         }
 
-    def __call__(self, indices=List[int]) -> Dict[str, torch.Tensor]:
+    def __call__(self, indices=List[int]) -> Dict[str, pytorch.Tensor]:
         out = asyncio.run(self.async_call(indices))
         return out
 
-    async def async_call(self, indices=List[int]) -> Dict[str, torch.Tensor]:
+    async def async_call(self, indices=List[int]) -> Dict[str, pytorch.Tensor]:
         group_arrays = await asyncio.gather(
             *[ts[indices].read() for ts in self.groups.values()]
         )
-        group_arrays = [torch.as_tensor(a) for a in group_arrays]
+        group_arrays = [pytorch.as_tensor(a) for a in group_arrays]
         out = dict(zip(self.groups.keys(), group_arrays))
         return out
 

@@ -1,7 +1,8 @@
 from pathlib import Path
-from typing import Optional, Protocol, Sequence, Union
+from typing import Optional, Protocol, Sequence, Union, overload
 
 import numpy as np
+import polars as pl
 import xarray as xr
 from attrs import define
 from numpy.typing import NDArray
@@ -60,8 +61,60 @@ class ToZarr(Protocol):
 
 
 @define
+class VLenAlleles:
+    offsets: NDArray[np.uint32]
+    alleles: NDArray[np.bytes_]
+
+    @overload
+    def __getitem__(self, idx: int) -> NDArray[np.bytes_]:
+        ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> "VLenAlleles":
+        ...
+
+    def __getitem__(self, idx: Union[int, slice]):
+        if isinstance(idx, int):
+            return self.get_idx(idx)
+        elif isinstance(idx, slice):
+            return self.get_slice(idx)
+
+    def get_idx(self, idx: int):
+        if idx >= len(self) or idx < -len(self):
+            raise IndexError("Index out of range.")
+        if idx < 0:
+            idx = len(self) + idx
+        return self.alleles[self.offsets[idx] : self.offsets[idx + 1]]
+
+    def get_slice(self, slc: slice):
+        start, stop = slc.start, slc.stop
+        if start >= len(self):
+            return VLenAlleles(np.empty(0, np.uint32), np.empty(0, "|S1"))
+        if start is None:
+            start = 0
+        if stop is not None:
+            stop += 1
+        new_offsets = self.offsets[start:stop] - self.offsets[start]
+        start, stop = new_offsets[0], new_offsets[-1]
+        new_alleles = self.alleles[start:stop]
+        return VLenAlleles(new_offsets, new_alleles)
+
+    def __len__(self):
+        return len(self.offsets) - 1
+
+    @classmethod
+    def from_polars(cls, alleles: pl.Series):
+        offsets = np.zeros(alleles.len() + 1, np.uint32)
+        offsets[1:] = alleles.str.lengths().cumsum().to_numpy()
+        flat_alleles = np.frombuffer(
+            alleles.str.concat("").to_numpy()[0].encode(), "S1"
+        )
+        return cls(offsets, flat_alleles)
+
+
+@define
 class SparseAlleles:
-    """Sparse/ragged array of alleles.
+    """Sparse/ragged array of single base pair alleles.
 
     Attributes
     ----------
@@ -96,8 +149,36 @@ class DenseAlleles:
     alleles: NDArray[np.bytes_]
 
 
+@define
+class DenseGenotypes:
+    """Dense array(s) of genotypes.
+
+    Attributes
+    ----------
+    positions : NDArray[np.int32]
+        Shape: (variants)
+    ref : VLenAlleles
+        Shape: (variants). REF alleles.
+    alt : VLenAlleles
+        Shape: (variants). ALT alleles.
+    genotypes : NDArray[np.int8]
+        Shape: (samples, ploid, variants)
+    max_end : int
+        End of reference to ensure enough is available to pad fixed length haplotypes.
+    """
+
+    positions: NDArray[np.int32]
+    sizes: NDArray[np.int32]
+    ref: VLenAlleles
+    alt: VLenAlleles
+    genotypes: NDArray[np.int8]
+    max_end: int
+
+
 class Variants(Protocol):
-    """Implements the read() method for returning variants from a given genomic range."""
+    """
+    Implements the read() method for returning variants from a given genomic range.
+    """
 
     samples: Union[Sequence[str], NDArray[np.str_]]
     n_samples: int
@@ -105,7 +186,7 @@ class Variants(Protocol):
 
     def read(
         self, contig: str, start: int, end: int, **kwargs
-    ) -> Optional[Union[SparseAlleles, DenseAlleles]]:
+    ) -> Optional[Union[SparseAlleles, DenseGenotypes]]:
         """Read variants found in the given genomic coordinates, optionally for specific
         samples and ploid numbers.
 
@@ -123,7 +204,7 @@ class Variants(Protocol):
 
         Returns
         -------
-        If no variants are in the region specified, returns None. Otherwise, either
-        SparseAlleles or DenseAlleles depending on the implementation.
+        If no variants are in the region specified, returns None. Otherwise, returns
+        either SparseAlleles or DenseGenotypes depending on the file format.
         """
         ...

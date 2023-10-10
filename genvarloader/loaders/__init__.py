@@ -20,7 +20,7 @@ from genvarloader.loaders.varseq import VarSequence
 from genvarloader.types import PathType
 
 try:
-    from genvarloader.torch import SortedQuerySampler, TorchCollator
+    from genvarloader.pytorch import SortedQuerySampler, TorchCollator
 except ImportError as e:
     _TORCH_AVAILABLE = False
 else:
