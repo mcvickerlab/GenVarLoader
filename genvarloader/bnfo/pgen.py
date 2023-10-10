@@ -77,7 +77,8 @@ class Pgen(Variants):
             dtypes={"#CHROM": pl.Utf8, "POS": pl.Int32},
         ).with_columns(
             ILEN=(
-                pl.col("ALT").str.lengths().cast(pl.Int32) - pl.col("REF").str.lengths()
+                pl.col("ALT").str.lengths().cast(pl.Int32)
+                - pl.col("REF").str.lengths().cast(pl.Int32)
             )
         )
 
