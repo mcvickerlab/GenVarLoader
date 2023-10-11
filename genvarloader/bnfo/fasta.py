@@ -78,7 +78,13 @@ class Fasta(Reader):
             seq = f.fetch(contig, max(0, start), end)
 
         seq = np.frombuffer(seq.encode("ascii"), "S1")
-        pad_left = np.full(pad_left, self.pad)
-        pad_right = np.full(pad_right, self.pad)
-        seq = np.concatenate([pad_left, seq, pad_right])
+        padded_seq = []
+        if pad_left > 0:
+            pad_left = np.full(pad_left, self.pad)
+            padded_seq.append(pad_left)
+        padded_seq.append(seq)
+        if pad_right > 0:
+            pad_right = np.full(pad_right, self.pad)
+            padded_seq.append(pad_right)
+        seq = np.concatenate(padded_seq)
         return xr.DataArray(seq, dims="length")

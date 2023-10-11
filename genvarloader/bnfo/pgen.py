@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Union, cast
+from typing import Dict, List, Optional, Union
 
 import numba as nb
 import numpy as np
@@ -76,10 +76,11 @@ class Pgen(Variants):
             skip_rows=skip_rows,
             dtypes={"#CHROM": pl.Utf8, "POS": pl.Int32},
         ).with_columns(
+            POS=pl.col("POS") - 1,
             ILEN=(
                 pl.col("ALT").str.lengths().cast(pl.Int32)
                 - pl.col("REF").str.lengths().cast(pl.Int32)
-            )
+            ),
         )
 
         if (pvar["ALT"].str.contains(",")).any():
@@ -91,12 +92,12 @@ class Pgen(Variants):
             )
 
         contigs = pvar["#CHROM"].set_sorted()
-        offsets = cast(NDArray[np.uint32], contigs.unique_counts().to_numpy())
         self.contig_idx: Dict[str, int] = {
             c: i for i, c in enumerate(contigs.unique(maintain_order=True))
         }
         # (c+1)
-        self.contig_offsets = np.concatenate([np.array([0], dtype=np.uint32), offsets])
+        self.contig_offsets = np.zeros(len(self.contig_idx) + 1, dtype=np.uint32)
+        self.contig_offsets[1:] = contigs.unique_counts().cumsum().to_numpy()
         # (v)
         self.positions: NDArray[np.int32] = pvar["POS"].to_numpy()
         # (v 2), assumes only 1 REF and 1 ALT, no multi-allelics, only SNPs
@@ -123,22 +124,24 @@ class Pgen(Variants):
         # get variant positions and indices
         c_idx = self.contig_idx[contig]
         c_slice = slice(self.contig_offsets[c_idx], self.contig_offsets[c_idx + 1])
-        positions = self.positions[c_slice]
-        s_idx, e_idx = np.searchsorted(positions, [start, end])
 
-        end_of_var_before_start = positions[s_idx - 1] - self.sizes[s_idx - 1]
-        if s_idx > 0 and end_of_var_before_start > start:
+        s_idx, e_idx = (
+            np.searchsorted(self.positions[c_slice], [start, end]) + c_slice.start
+        )
+
+        end_of_var_before_start = self.positions[s_idx - 1] - self.sizes[s_idx - 1]
+        if s_idx > c_slice.start and end_of_var_before_start > start:
             s_idx -= 1
 
         if s_idx == e_idx:
             return
 
         q_sizes = self.sizes[s_idx:e_idx].copy()
-        if positions[s_idx] < start:
+        if self.positions[s_idx] < start:
             q_sizes[0] = start - end_of_var_before_start
-        max_end = max(end, positions[e_idx - 1] - self.sizes[e_idx - 1]) - q_sizes.sum(
-            where=q_sizes < 0
-        )
+        max_end = max(
+            end, self.positions[e_idx - 1] - self.sizes[e_idx - 1]
+        ) - q_sizes.sum(where=q_sizes < 0)
 
         # get alleles
         with self._pgen(pgen_idx) as f:
@@ -148,7 +151,6 @@ class Pgen(Variants):
             )
             f.read_alleles_range(s_idx, e_idx, genotypes)
 
-        positions = positions[s_idx:e_idx]
         # (s*2 v)
         genotypes = genotypes.swapaxes(0, 1)
         # (s 2 v)
@@ -160,7 +162,7 @@ class Pgen(Variants):
             genotypes = genotypes[query_idx]
 
         return DenseGenotypes(
-            positions,
+            self.positions[s_idx:e_idx],
             q_sizes,
             self.ref[s_idx:e_idx],
             self.alt[s_idx:e_idx],

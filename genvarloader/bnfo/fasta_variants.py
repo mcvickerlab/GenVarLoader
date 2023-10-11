@@ -119,7 +119,7 @@ def sample_shifts(genotypes, sizes, seed: Optional[int] = None):
     return shifts
 
 
-@nb.njit(nogil=True, cache=True)
+@nb.njit(nogil=True, cache=True, parallel=True)
 def construct_haplotypes_with_indels(
     out: NDArray[np.uint8],
     ref: NDArray[np.uint8],
@@ -132,7 +132,7 @@ def construct_haplotypes_with_indels(
 ):
     n_samples = out.shape[0]
     ploidy = out.shape[1]
-    fixed_length = out.shape[-1]
+    length = out.shape[-1]
     n_variants = len(rel_positions)
 
     for sample in nb.prange(n_samples):
@@ -197,12 +197,12 @@ def construct_haplotypes_with_indels(
                 out[sample, hap, out_idx : out_idx + ref_len] = ref[ref_idx:v_rel_pos]
                 out_idx += ref_len
 
-                # handle insertions + substitions
+                # insertions + substitions
                 # for deletions we simply write reference up to the variant (above)
                 # and increment the ref_idx (below)
                 # add variant
-                if v_diff > 0:
-                    writable_length = min(v_len, fixed_length - out_idx)
+                if v_diff >= 0:
+                    writable_length = min(v_len, length - out_idx)
                     out[sample, hap, out_idx : out_idx + v_len] = allele[
                         :writable_length
                     ]
@@ -212,10 +212,10 @@ def construct_haplotypes_with_indels(
                 # normalized VCF
                 ref_idx = v_rel_pos + 1
 
-                if out_idx >= fixed_length:
+                if out_idx >= length:
                     break
 
             # fill rest with reference sequence
-            unfilled_length = fixed_length - out_idx
+            unfilled_length = length - out_idx
             if unfilled_length > 0:
                 out[sample, hap, out_idx:] = ref[ref_idx : ref_idx + unfilled_length]
