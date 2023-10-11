@@ -28,8 +28,7 @@ from .types import Reader
 from .util import _cartesian_product, _set_fixed_length_around_center, read_bedlike
 
 try:
-    import torch
-    from torch.utils.data import DataLoader, IterableDataset
+    import torch  # noqa
 
     TORCH_AVAILABLE = True
 except ImportError:
@@ -97,6 +96,15 @@ class GVL:
             this to the number of processors available.
         """
         self.num_workers = num_workers
+        self.fixed_length = fixed_length
+        self.transform = transform
+        self.shuffle = shuffle
+        self.rng = np.random.default_rng(seed)
+        self.return_tuples = return_tuples
+        self.return_index = return_index
+        self.drop_last = drop_last
+        self.batch_size = batch_size
+        self.max_memory_gb = max_memory_gb
 
         if not ray.is_initialized():
             ray.init(num_cpus=self.num_workers - 1)
@@ -104,6 +112,12 @@ class GVL:
         if not isinstance(readers, Iterable):
             readers = [readers]
         self.readers = readers
+
+        self.actors: List[ReaderActor] = [
+            ReaderActor.remote(*self.readers, actor_idx=i)
+            for i in range(self.num_workers - 1)  # keep 1 cpu for main process
+        ]
+
         self.virtual_data = xr.merge(
             [r.virtual_data for r in self.readers], join="exact"
         )
@@ -120,18 +134,22 @@ class GVL:
         if isinstance(bed, (str, Path)):
             bed = read_bedlike(bed)
         bed = bed.with_row_count("region_idx")
-
-        self.fixed_length = fixed_length
-        self.batch_size = batch_size
+        with pl.StringCache():
+            pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
+            bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
+        self.bed = _set_fixed_length_around_center(bed, fixed_length)
+        # TODO check if any regions are out-of-bounds and any readers have padding disabled
+        # if so, raise an error. Otherwise, readers will catch the error downstream.
 
         if batch_dims is None:
             batch_dims = []
-        elif missing_dims := (set(batch_dims) - set(self.virtual_data.dims)):  # type: ignore
+        self.batch_dims = batch_dims
+
+        if missing_dims := (set(self.batch_dims) - set(self.virtual_data.dims)):  # type: ignore
             raise ValueError(
                 f"Got batch dimensions that are not available from the readers: {missing_dims}"
             )
-        self.batch_dims = batch_dims
-        self.non_batch_dims = [d for d in self.sizes.keys() if d not in batch_dims]
+        self.non_batch_dims = [d for d in self.sizes.keys() if d not in self.batch_dims]
         self.non_batch_dim_shape: Dict[Hashable, List[int]] = {}
         self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
         for k, a in self.virtual_data.data_vars.items():
@@ -140,70 +158,139 @@ class GVL:
             idx_cols = [i for i, d in enumerate(self.batch_dims, 2) if d in a.sizes]
             self.buffer_idx_cols[k] = np.array(idx_cols, dtype=int)
 
+        self.max_length = self.get_max_length()
+        self.partitioned_bed = self.partition_bed(self.bed, self.max_length)
+        self.n_instances: int = self.bed.height * np.prod(
+            [self.sizes[d] for d in self.batch_dims], dtype=int
+        )
+
         if weights is not None:
             if extra_weights := set(weights.keys()) - set(self.virtual_data.dims):  # type: ignore
                 raise ValueError(
                     f"Got weights for dimensions that are not available from the readers: {extra_weights}"
                 )
-            if extra_weights := set(weights.keys()) - set(batch_dims):
+            if extra_weights := set(weights.keys()) - set(self.batch_dims):
                 raise ValueError(
                     f"Got weights for dimensions that are not batch dimensions: {extra_weights}"
                 )
         self.weights = weights
-        max_length = cast(
-            int,
-            bed.groupby("chrom")
-            .agg(
-                (pl.col("chromEnd").max() - pl.col("chromStart")).min().alias("length")
-            )["length"]
-            .max(),
-        )
 
-        self.actors: List[ReaderActor] = [
-            ReaderActor.remote(*self.readers, actor_idx=i)
-            for i in range(self.num_workers - 1)  # keep 1 cpu for main process
-        ]
+    def set(
+        self,
+        bed: Optional[Union[pl.DataFrame, str, Path]] = None,
+        fixed_length: Optional[int] = None,
+        batch_size: Optional[int] = None,
+        max_memory_gb: Optional[float] = None,
+        batch_dims: Optional[List[str]] = None,
+        transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
+        shuffle: bool = False,
+        weights: Optional[Dict[str, NDArray]] = None,
+        seed: Optional[int] = None,
+        return_tuples: bool = False,
+        return_index: bool = False,
+        drop_last: bool = False,
+    ):
+        """Update any parameters that don't require re-initializing Ray Actors. If you
+        need to change readers or the number of workers, init a new GVL.
 
-        batch_mem = fixed_length * self.mem_per_length(
-            {k: v for k, v in self.sizes.items() if k not in batch_dims}
-        )
-        FUDGE_FACTOR = 6
-        max_mem = int(
-            (max_memory_gb * 1e9 / self.num_workers - batch_mem - bed.estimated_size())
-            / FUDGE_FACTOR
-        )
+        Parameters
+        ----------
+        bed : pl.DataFrame, str, Path
+            BED3+ file.
+        fixed_length : int
+            Length of regions of interest to output. Will be centered at coordinates in
+            bed file.
+        batch_size : int
+            Number of instances in the batch.
+        max_memory_gb : float
+            Maximum memory to use in GB.
+        batch_dims : List[str], optional
+            Dimensions that can be included in the batch dimension, by default None
+        transform : (Dict[str, NDArray]) -> Dict[str, NDArray], optional
+            Function to call on each batch before yielding, by default None. This
+            function should accept a dictionary of NumPy arrays and return a dictionary
+            of NumPy arrays.
+        shuffle : bool, optional
+            Whether to shuffle with respect to regions of interest and batch dimensions,
+            by default False
+        weights : Dict[str, NDArray], optional
+            Dictionary mapping dimensions to weights. The "region" dimension corresponds
+            to each region in the BED file and is always available, whereas others
+            correspond to non-length dimensions seen in the virtual data.
+        seed : int, optional
+            Seed for shuffling, by default None
+        return_tuples : bool, optional
+            Whether to return a tuple instead of a dictionary, by default False
+        return_index : bool, optional
+            Whether to include an array of the indexes in the batch, by default False
+        drop_last : bool, optional
+            Whether to drop the last batch if the number of instances are not evenly
+            divisible by the batch size.
+        """
+        if transform is not None:
+            self.transform = transform
+        if shuffle is not None:
+            self.shuffle = shuffle
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
+        if return_tuples is not None:
+            self.return_tuples = return_tuples
+        if return_index is not None:
+            self.return_index = return_index
+        if drop_last is not None:
+            self.drop_last = drop_last
+        if fixed_length is not None:
+            self.fixed_length = fixed_length
+        if max_memory_gb is not None:
+            self.max_memory_gb = max_memory_gb
 
-        self.buffer_sizes = self.set_buffer_sizes(max_mem, max_length, batch_dims)
+        if bed is not None:
+            if isinstance(bed, (str, Path)):
+                bed = read_bedlike(bed)
+            bed = bed.with_row_count("region_idx")
 
-        max_length = max_mem // self.mem_per_length(self.buffer_sizes)
-        if max_length == 0:
-            min_mem = (
-                (self.mem_per_length(self.buffer_sizes) + batch_mem)
-                * FUDGE_FACTOR
-                / 1e9
+            with pl.StringCache():
+                pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
+                bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
+            self.bed = _set_fixed_length_around_center(bed, self.fixed_length)
+
+        if batch_dims is not None:
+            self.batch_dims = batch_dims
+            if missing_dims := (set(self.batch_dims) - set(self.virtual_data.dims)):  # type: ignore
+                raise ValueError(
+                    f"Got batch dimensions that are not available from the readers: {missing_dims}"
+                )
+            self.non_batch_dims = [
+                d for d in self.sizes.keys() if d not in self.batch_dims
+            ]
+            self.non_batch_dim_shape: Dict[Hashable, List[int]] = {}
+            self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
+            for k, a in self.virtual_data.data_vars.items():
+                self.non_batch_dim_shape[k] = [a.sizes[d] for d in self.non_batch_dims]
+                # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
+                idx_cols = [i for i, d in enumerate(self.batch_dims, 2) if d in a.sizes]
+                self.buffer_idx_cols[k] = np.array(idx_cols, dtype=int)
+
+        if None not in (fixed_length, bed, max_memory_gb, batch_dims):
+            self.max_length = self.get_max_length()
+            self.partitioned_bed = self.partition_bed(self.bed, self.max_length)
+            self.n_instances: int = self.bed.height * np.prod(
+                [self.sizes[d] for d in self.batch_dims], dtype=int
             )
-            raise ValueError(
-                f"Not enough memory to process dataset. Minimum memory needed: {min_mem:.4f} GB."
-            )
 
-        with pl.StringCache():
-            pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
-            bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
-        self.bed = _set_fixed_length_around_center(bed, fixed_length)
-        # TODO check if any regions are out-of-bounds and any readers have padding disabled
-        # if so, raise an error. Otherwise, readers will catch the error downstream.
+        if batch_size is not None:
+            self.batch_size = batch_size
 
-        self.partitioned_bed = self.partition_bed(self.bed, max_length)
-        self.n_instances: int = self.bed.height * np.prod(
-            [self.sizes[d] for d in self.batch_dims], dtype=int
-        )
-
-        self.transform = transform
-        self.shuffle = shuffle
-        self.rng = np.random.default_rng(seed)
-        self.return_tuples = return_tuples
-        self.return_index = return_index
-        self.drop_last = drop_last
+        if weights is not None:
+            if extra_weights := set(weights.keys()) - set(self.virtual_data.dims):  # type: ignore
+                raise ValueError(
+                    f"Got weights for dimensions that are not available from the readers: {extra_weights}"
+                )
+            if extra_weights := set(weights.keys()) - set(self.batch_dims):
+                raise ValueError(
+                    f"Got weights for dimensions that are not batch dimensions: {extra_weights}"
+                )
+            self.weights = weights
 
     def __len__(self):
         """Number of batches."""
@@ -217,7 +304,36 @@ class GVL:
         mpl = max(1, mpl)
         return mpl
 
-    def set_buffer_sizes(
+    def get_max_length(self):
+        max_length = self.fixed_length
+        batch_mem = self.fixed_length * self.mem_per_length(
+            {k: v for k, v in self.sizes.items() if k not in self.batch_dims}
+        )
+        FUDGE_FACTOR = 6
+        max_mem = int(
+            (
+                self.max_memory_gb * 1e9 / self.num_workers
+                - batch_mem
+                - self.bed.estimated_size()
+            )
+            / FUDGE_FACTOR
+        )
+
+        self.buffer_sizes = self.get_buffer_sizes(max_mem, max_length, self.batch_dims)
+
+        max_length = max_mem // self.mem_per_length(self.buffer_sizes)
+        if max_length == 0:
+            min_mem = (
+                (self.mem_per_length(self.buffer_sizes) + batch_mem)
+                * FUDGE_FACTOR
+                / 1e9
+            )
+            raise ValueError(
+                f"Not enough memory to process dataset. Minimum memory needed: {min_mem:.4f} GB."
+            )
+        return max_length
+
+    def get_buffer_sizes(
         self, max_mem: int, max_length: int, batch_dims: List[str]
     ) -> Dict[Hashable, int]:
         buffer_sizes = deepcopy(self.sizes)
@@ -456,6 +572,8 @@ class GVL:
     def torch_dataloader(self):
         if not TORCH_AVAILABLE:
             raise ImportError("Pytorch must be installed to get a Pytorch DataLoader.")
+        from torch.utils.data import DataLoader
+
         dataset = GVLDataset(self)
         dataloader = DataLoader(dataset, batch_size=None)
         return dataloader
@@ -493,7 +611,9 @@ class Buffers:
             buffers, self.buffer_futures = ray.wait(self.buffer_futures)
             buffers = cast(List[Tuple[DataVarsLike, int]], ray.get(buffers))
             self.buffers = [
-                self.buffer_meta[actor_idx].to_buffer(buffer)
+                self.buffer_meta[actor_idx].to_buffer(
+                    buffer
+                )  # pyright: ignore[reportOptionalMemberAccess]; we always have at least 1 buffer
                 for buffer, actor_idx in buffers
             ]
             self.ready_actor_idxs.extend([actor_idx for _, actor_idx in buffers])
@@ -553,6 +673,7 @@ class Buffers:
 
 
 if TORCH_AVAILABLE:
+    from torch.utils.data import IterableDataset
 
     class GVLDataset(IterableDataset):
         def __init__(self, gvl: GVL):
@@ -563,3 +684,72 @@ if TORCH_AVAILABLE:
 
         def __iter__(self):
             return iter(self.gvl)
+
+        def set(
+            self,
+            bed: Optional[Union[pl.DataFrame, str, Path]] = None,
+            fixed_length: Optional[int] = None,
+            batch_size: Optional[int] = None,
+            max_memory_gb: Optional[float] = None,
+            batch_dims: Optional[List[str]] = None,
+            transform: Optional[
+                Callable[[Dict[str, NDArray]], Dict[str, NDArray]]
+            ] = None,
+            shuffle: bool = False,
+            weights: Optional[Dict[str, NDArray]] = None,
+            seed: Optional[int] = None,
+            return_tuples: bool = False,
+            return_index: bool = False,
+            drop_last: bool = False,
+        ):
+            """Update any parameters that don't require re-initializing Ray Actors. If
+            you need to change readers or the number of workers, init a new GVL.
+
+            Parameters
+            ----------
+            bed : pl.DataFrame, str, Path
+                BED3+ file.
+            fixed_length : int
+                Length of regions of interest to output. Will be centered at coordinates in
+                bed file.
+            batch_size : int
+                Number of instances in the batch.
+            max_memory_gb : float
+                Maximum memory to use in GB.
+            batch_dims : List[str], optional
+                Dimensions that can be included in the batch dimension, by default None
+            transform : (Dict[str, NDArray]) -> Dict[str, NDArray], optional
+                Function to call on each batch before yielding, by default None. This
+                function should accept a dictionary of NumPy arrays and return a dictionary
+                of NumPy arrays.
+            shuffle : bool, optional
+                Whether to shuffle with respect to regions of interest and batch dimensions,
+                by default False
+            weights : Dict[str, NDArray], optional
+                Dictionary mapping dimensions to weights. The "region" dimension corresponds
+                to each region in the BED file and is always available, whereas others
+                correspond to non-length dimensions seen in the virtual data.
+            seed : int, optional
+                Seed for shuffling, by default None
+            return_tuples : bool, optional
+                Whether to return a tuple instead of a dictionary, by default False
+            return_index : bool, optional
+                Whether to include an array of the indexes in the batch, by default False
+            drop_last : bool, optional
+                Whether to drop the last batch if the number of instances are not evenly
+                divisible by the batch size.
+            """
+            self.gvl.set(
+                bed,
+                fixed_length,
+                batch_size,
+                max_memory_gb,
+                batch_dims,
+                transform,
+                shuffle,
+                weights,
+                seed,
+                return_tuples,
+                return_index,
+                drop_last,
+            )

@@ -22,11 +22,7 @@ class BigWig(Reader):
         null_value: Union[int, float] = 0,
         n_jobs: int = 1,
     ) -> None:
-        """Read values from bigWig, bigBed, or Wig files. Enable parallel processing
-        by initializing a Ray cluster with the appropriate resources. For example, to
-        process up to 4 files in parallel, initialize a Ray cluster with 4 cpus by
-        calling `ray.init(num_cpus=4)` before using `read()`.
-
+        """Read values from bigWig, bigBed, or Wig files.
 
         Parameters
         ----------
