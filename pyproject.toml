@@ -4,6 +4,7 @@ version = "0.0.1"
 description = ""
 authors = ["David Laub <dlaub@ucsd.edu>", "Aaron Ho <aho@salk.edu>"]
 readme = "README.md"
+exclude = ["genvarloader/tests"]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.13"
