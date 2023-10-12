@@ -1,4 +1,3 @@
-import random
 from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
@@ -111,7 +110,7 @@ class GVL:
 
         if not isinstance(readers, Iterable):
             readers = [readers]
-        self.readers = readers
+        self.readers = {r.virtual_data.name: r for r in readers}
 
         self.actors: List[ReaderActor] = [
             ReaderActor.remote(*self.readers, actor_idx=i)
@@ -119,7 +118,7 @@ class GVL:
         ]
 
         self.virtual_data = xr.merge(
-            [r.virtual_data for r in self.readers], join="exact"
+            [r.virtual_data for r in self.readers.values()], join="exact"
         )
         self.sizes = dict(self.virtual_data.sizes)
         self.sizes.pop("", None)
@@ -390,7 +389,7 @@ class GVL:
 
     def iter_batches(self):
         if self.shuffle:
-            random.shuffle(self.partitioned_bed, self.rng.random)
+            self.rng.shuffle(self.partitioned_bed)
 
         self.batch_slice = slice(0, 0)
 
@@ -611,9 +610,11 @@ class Buffers:
             buffers, self.buffer_futures = ray.wait(self.buffer_futures)
             buffers = cast(List[Tuple[DataVarsLike, int]], ray.get(buffers))
             self.buffers = [
-                self.buffer_meta[actor_idx].to_buffer(
+                self.buffer_meta[
+                    actor_idx
+                ].to_buffer(  # pyright: ignore[reportOptionalMemberAccess]; we always have at least 1 buffer
                     buffer
-                )  # pyright: ignore[reportOptionalMemberAccess]; we always have at least 1 buffer
+                )
                 for buffer, actor_idx in buffers
             ]
             self.ready_actor_idxs.extend([actor_idx for _, actor_idx in buffers])
