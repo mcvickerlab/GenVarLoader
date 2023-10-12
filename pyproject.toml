@@ -1,12 +1,13 @@
 [tool.poetry]
 name = "genvarloader"
 version = "0.0.1"
-description = ""
+description = "Pipeline for efficient genomic data processing."
 authors = ["David Laub <dlaub@ucsd.edu>", "Aaron Ho <aho@salk.edu>"]
 readme = "README.md"
+repository = "https://github.com/mcvickerlab/genome-loader"
 
 [tool.poetry.dependencies]
-python = ">=3.9,<3.13"
+python = "^3.9"
 loguru = "^0.7.2"
 attrs = "^23.1.0"
 dask = {extras = ["array"], version = "^2023.9.3"}
