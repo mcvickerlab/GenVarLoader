@@ -3,29 +3,23 @@ channels:
   - bioconda
   - conda-forge
 dependencies:
-  - bcftools
-  - cyvcf2 # needed to read VCF with sgkit
+  - attrs
+  # - cyvcf2 # optional
   - dask
-  - einops
-  - h5py
   - joblib
   - natsort
-  - nest-asyncio
   - numba
-  - numcodecs
   - numpy
-  - pandas
   - pandera
+  - polars>=0.19.3
+  - pgenlib # optional
+  - poetry
   - pyarrow
+  - pybigwig
   - pysam
-  - python>=3.7.*
-  - sgkit
-  - tqdm
-  - typer
+  - python>=3.8.*
+  - ray-default
+  # - tiledb::tiledbvcf-py # optional
   - xarray
-  - zarr
-  - pip:
-    - tensorstore
 platforms:
   - linux-64
-  - osx-64
