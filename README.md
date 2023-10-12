@@ -1,167 +1,43 @@
-# genome-loader
-Pipeline for efficient genomic data processing.
+# GenVarLoader
+GenVarLoader aims to enable training sequence models on 10's to 100's of thousands of individuals' personalized genomes.
 
 ## Installation
-Recommended installation with conda/mamba:
-```bash
-mamba env create -n genome-loader -f environment.yml
-```
-
-If you want to use the PyTorch datasets, samplers, and other data-oriented classes, install from `torch.conda-lock.yml` (PyTorch dependency is not included):
-```bash
-mamba env create -n genome-loader torch-environment.yml
-```
+`pip install genvarloader`
 
 A PyTorch dependency is not included since it requires [special instructions](https://pytorch.org/get-started/locally/).
 
-Then, add the package to your Python path e.g. add this line to your `.bashrc`:
-```bash
-export PYTHONPATH=${PYTHONPATH:+${PYTHONPATH}:}/path/to/genome-loader
+## Quick Start
+```python
+import genvarloader as gvl
+
+reference = 'reference.fasta'
+variants = 'variants.pgen' # highly recommended to convert VCFs to PGEN
+regions_of_interest = 'regions.bed'
 ```
-
-&nbsp;
-## Table of Contents
-- [HDF5 Writers](#hdf5-writers)
-    - [writefasta](#writefasta)
-    - [writefrag](#writefrag)
-    - [writecoverage](#writecoverage)
-- [Python Functions](#python-functions)
-    - [encode_data.py](#encode_datapy)
-    - [get_encoded.py](#get_encodedpy)
-    - [get_data.py](#get_datapy)
-    - [load_data.py](#load_datapy)
-    - [load_h5.py](#load_h5py)
-
-&nbsp;
-
----
-
-&nbsp;
-## **HDF5 Writers**
-Command line tools for writing genome data to HDF5 format
-
-&nbsp;
-## writefasta
-Converts Fasta file into char-array(default) or one-hot encoded HDF5 file.
-
-&nbsp;
-**File Format**
-- Group: `[chrom]`
-- Dataset: `"sequence"` if char array, `"onehot"` if one-hot encoded
-- Attributes: `"id"`- dataset name associated with file
-
-&nbsp;
-**Usage**
-```shell script
-gloader writefasta [FASTA] --output/--directory [OUT] {OPTIONS}
+Create readers for each file providing sequence data:
+```python
+ref = gvl.Fasta(name='ref', path=reference, pad='N')
+var = gvl.Pgen(variants)
+varseq = gvl.FastaVariants(name='varseq', fasta=ref, variants=var)
 ```
+Put them together and get a `torch.DataLoader`:
+```python
+gvloader = gvl.GVL(
+    readers=varseq,
+    bed=regions_of_interest,
+    fixed_length=1000,
+    batch_size=16,
+    max_memory_gb=8,
+    batch_dims=['sample', 'ploid'],
+    shuffle=True,
+    num_workers=2
+)
 
-**Required Arguments**
-- FASTA: Positional argument, fasta file to write to hdf5
-- -o/--output: Full path and file name of output (NOTE: Cannot use both -o and -d flags)
-- -d/--directory: Directory to write hdf5 output
-
-**One-Hot Encoding Arguments**
-- -e/--encode: Flag that denotes output in one-hot encoding
-- -s/--spec: Ordered string of non-repeating chars. Denotes encoded bases and order ie: "ACGT" (Default: "ACGTN")
-
-**Optional Arguments**
-- -c/--chroms: Chromosomes to write (Default: ALL)
-- -n/--name: Output file if --directory given, ignored if using --output flag. Defaults to input fasta name
-
-&nbsp;
-## writefrag
-Writes BAM ATAC fragment depth into HDF5 file.
-
-&nbsp;
-**File Format**
-- Group: `[chrom]`
-- Dataset: `"depth"` - 0-based array with depth per position
-- Attributes:
-    - `"id"` - dataset name associated with file
-    - `"count_method"` - method used to count fragments
-
-
-&nbsp;
-**Usage**
-```shell script
-gloader writefrag [BAM] --output/--directory [OUT] {OPTIONS}
+dataloader = gvloader.torch_dataloader()
 ```
-
-**Required Arguments**
-- BAM: Positional argument, BAM file to parse and write to H5
-- -o/--output: Full path and file name of output (NOTE: Cannot use both -o and -d flags)
-- -d/--directory: Directory to write hdf5 output
-
-**Optional Arguments**
-- -c/--chroms: Chromosomes to write (Default: ALL)
-- -l/--lens: Lengths of provided chroms (Auto retrieved if not provided)
-- -n/--name: Output file if --directory given, ignored if using --output flag. Defaults to input fasta name
-- --ignore_offset: Don't offset Tn5 cut sites (+4 bp on + strand, -5 bp on - strand, 0-based)
-- --method: Method used to count fragment. Choice of `"cutsite"`|`"midpoint"`|`"fragment"` (Default: `"cutsite"`)
-    - `cutsite`: Count both Tn5 cut sites
-    - `midpoint`: Count the midpoint between Tn5 cut sites
-    - `fragment`: Count all positions between Tn5 cut sites
-
-&nbsp;
-## writecoverage
-Writes BAM allelic coverage into HDF5 file.
-
-&nbsp;
-**File Format**
-- Group: `[chrom]`
-- Dataset: `"coverage"` - 4 x N Matrix ordered A, C, G, T showing per allele coverage per position (0-based)
-- Attributes: `"id"`- dataset name associated with file
-
-&nbsp;
-**Usage**
-```shell script
-gloader writecoverage [BAM] --output/--directory [OUT] {OPTIONS}
+And now you're ready to use the `dataloader` however you need to:
+```python
+# implement your training loop
+for batch in dataloader:
+    ...
 ```
-
-**Required Arguments**
-- BAM: Positional argument, BAM file to parse and write to H5
-- -o/--output: Full path and file name of output (NOTE: Cannot use both -o and -d flags)
-- -d/--directory: Directory to write hdf5 output
-
-**Optional Arguments**
-- -c/--chroms: Chromosomes to write (Default: ALL)
-- -n/--name: Output file if --directory given, ignored if using --output flag. Defaults to input fasta name
-
----
-
-&nbsp;
-## **Python Functions**
-Python functions for directly loading and parsing genome data.
-
-Specific argument level usage can be found as docstrings within scripts (Located in `genome_loader/`).
-
-&nbsp;
-## encode_data.py
-Contains functions for creating one-hot encoded data.
-- **encode_sequence**: Encodes input data into one-hot encoded format
-- **encode_from_fasta**: Create one-hot encoded data directly from FASTA
-- **encode_from_h5**: Create one-hot encoded data from char-array encoded H5
-
-&nbsp;
-## get_encoded.py
-Contains functions for loading, and transforming one-hot encoded data.
-- **get_encoded_haps**: Creates one-hot encoded haplotypes from one-hot encoded data
-
-&nbsp;
-## get_data.py
-Functions that retrieves non-encoded data from files.
-- **get_frag_depth**: Retrieve fragment depths from a BAM file
-- **get_allele_coverage**: Retrieve per-allele coverage from BAM file
-
-&nbsp;
-## load_data.py
-Functions that read non-encoded data from files.
-- **load_vcf**: Read VCF and load SNP's/Genotypes into dataframe
-
-&nbsp;
-## load_h5.py
-Functions that load H5 data to python objects.
-- **load_onehot_h5**: Load onehot encoded genome from H5 to dictionary
-- **load_depth_h5**: Load read depths from H5 to dictionary
-- **load_coverage_h5**: Load allele coverage from H5 to dictionary
