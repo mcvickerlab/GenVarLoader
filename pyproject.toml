@@ -4,7 +4,6 @@ version = "0.0.1"
 description = ""
 authors = ["David Laub <dlaub@ucsd.edu>", "Aaron Ho <aho@salk.edu>"]
 readme = "README.md"
-exclude = ["genvarloader/tests"]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.13"
@@ -40,3 +39,7 @@ profile = "black"
 
 [tool.mypy]
 plugins = ["numpy.typing.mypy_plugin", "pandera.mypy"]
+
+[build-system]
+requires = ["poetry-core>=1.7.0"]
+build-backend = "poetry.core.masonry.api"
