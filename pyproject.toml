@@ -5,6 +5,7 @@ description = "Pipeline for efficient genomic data processing."
 authors = ["David Laub <dlaub@ucsd.edu>", "Aaron Ho <aho@salk.edu>"]
 readme = "README.md"
 repository = "https://github.com/mcvickerlab/genome-loader"
+license = "MIT"
 
 [tool.poetry.dependencies]
 python = "^3.9"
