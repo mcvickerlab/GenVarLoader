@@ -87,16 +87,18 @@ class VLenAlleles:
         return self.alleles[self.offsets[idx] : self.offsets[idx + 1]]
 
     def get_slice(self, slc: slice):
+        start: Optional[int]
+        stop: Optional[int]
         start, stop = slc.start, slc.stop
-        if start >= len(self):
-            return VLenAlleles(np.empty(0, np.uint32), np.empty(0, "|S1"))
         if start is None:
             start = 0
+        if start >= len(self) or (stop is not None and stop >= start):
+            return VLenAlleles(np.empty(0, np.uint32), np.empty(0, "|S1"))
         if stop is not None:
             stop += 1
         new_offsets = self.offsets[start:stop] - self.offsets[start]
-        start, stop = new_offsets[0], new_offsets[-1]
-        new_alleles = self.alleles[start:stop]
+        _start, _stop = new_offsets[0], new_offsets[-1]
+        new_alleles = self.alleles[_start:_stop]
         return VLenAlleles(new_offsets, new_alleles)
 
     def __len__(self):
