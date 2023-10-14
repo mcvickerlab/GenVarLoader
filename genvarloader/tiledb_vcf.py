@@ -43,6 +43,7 @@ class TileDB_VCF(Variants):
         else:
             self.samples = samples
         self.n_samples = len(self.samples)
+        self.contig_starts_with_chr = None
 
     def read(
         self, contig: str, start: int, end: int, **kwargs
@@ -64,6 +65,26 @@ class TileDB_VCF(Variants):
             samples=samples,
         )
         df = cast(pl.DataFrame, pl.from_arrow(df))
+
+        # infer contig prefix
+        if self.contig_starts_with_chr is None and df.height > 0:
+            self.contig_starts_with_chr = self.infer_contig_prefix([contig])
+        elif self.contig_starts_with_chr is None and df.height == 0:
+            if contig.startswith("chr"):
+                contig = contig[3:]
+                starts_with_chr = False
+            else:
+                contig = "chr" + contig
+                starts_with_chr = True
+            region = f"{contig}:{start+1}-{end}"
+            df = self.ds.read_arrow(
+                ["pos_start", "alleles", "fmt_GT", "sample_name"],
+                regions=[region],
+                samples=samples,
+            )
+            df = cast(pl.DataFrame, pl.from_arrow(df))
+            if df.height > 0:
+                self.contig_starts_with_chr = starts_with_chr
 
         if df.height == 0:
             return

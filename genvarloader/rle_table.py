@@ -100,6 +100,8 @@ class RLE_Table(Reader):
             dims="sample",
             coords={"sample": _samples},
         )
+        contigs = self.table.lazy().select(pl.col("chrom").unique()).collect()["chrom"]
+        self.contig_starts_with_chr = self.infer_contig_prefix(contigs)
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
         samples = cast(Optional[Sequence[str]], kwargs.get("sample", None))
@@ -109,6 +111,7 @@ class RLE_Table(Reader):
         else:
             n_samples = len(samples)
 
+        contig = self.normalize_contig_name(contig)
         length = end - start
 
         q = self.table.lazy().filter(

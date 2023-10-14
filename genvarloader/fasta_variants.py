@@ -1,9 +1,11 @@
+from pathlib import Path
 from typing import Optional
 
 import dask.array as da
 import numba as nb
 import numpy as np
 import xarray as xr
+from loguru import logger
 from numpy.typing import NDArray
 
 from .fasta import Fasta
@@ -22,6 +24,16 @@ class FastaVariants(Reader):
                 "ploid": np.arange(self.variants.ploidy, dtype=np.uint32),
             },
         )
+        self.contig_starts_with_chr = None
+        if self.fasta.contig_starts_with_chr != self.variants.contig_starts_with_chr:
+            logger.warning(
+                f"""Reference sequence and variant files have different contig naming 
+                conventions. This may indicate that the variants were not aligned to 
+                the reference being used to construct haplotypes. The reference file 
+                {Path(self.fasta.path).stem}
+                {"" if self.fasta.contig_starts_with_chr else "does not"}
+                start with "chr" whereas the variant file is the opposite."""
+            )
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
         """Read a variant sequence corresponding to a genomic range, sample, and ploid.

@@ -104,6 +104,7 @@ class Pgen(Variants):
         self.ref = VLenAlleles.from_polars(pvar["REF"])
         self.alt = VLenAlleles.from_polars(pvar["ALT"])
         self.sizes: NDArray[np.int32] = pvar["ILEN"].to_numpy()
+        self.contig_starts_with_chr = self.infer_contig_prefix(self.contig_idx)
 
     def _pgen(self, sample_idx: Optional[NDArray[np.uint32]]):
         if sample_idx is not None:
@@ -120,6 +121,8 @@ class Pgen(Variants):
         else:
             n_samples = len(samples)
             pgen_idx, query_idx = self.get_sample_idx(samples)
+
+        contig = self.normalize_contig_name(contig)
 
         # get variant positions and indices
         c_idx = self.contig_idx[contig]

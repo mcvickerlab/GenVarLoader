@@ -18,12 +18,10 @@ from .fasta_variants import FastaVariants
 from .loader import GVL
 from .pgen import Pgen
 from .rle_table import RLE_Table
-from .tiledb_vcf import TileDB_VCF
 from .types import Reader, Variants
 
 __all__ = [
     "Fasta",
-    "TileDB_VCF",
     "FastaVariants",
     "RLE_Table",
     "Pgen",

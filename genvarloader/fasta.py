@@ -39,6 +39,14 @@ class Fasta(Reader):
         else:
             self.pad = pad
 
+        with self._open() as f:
+            self.contigs = {c: f.get_reference_length(c) for c in f.references}
+
+        self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
+
+    def _open(self):
+        return pysam.FastaFile(str(self.path))
+
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
         """Read a sequence from a FASTA file.
 
@@ -63,11 +71,13 @@ class Fasta(Reader):
         ValueError
             Coordinates are out-of-bounds and pad value is not set.
         """
+        contig = self.normalize_contig_name(contig)
+
         pad_left = -min(0, start)
         if pad_left > 0 and self.pad is None:
             raise ValueError("Padding is disabled and start is < 0.")
 
-        with pysam.FastaFile(str(self.path)) as f:
+        with self._open() as f:
             pad_right = max(0, end - f.get_reference_length(contig))
             if pad_right > 0 and self.pad is None:
                 raise ValueError("Padding is disabled and end is > contig length.")

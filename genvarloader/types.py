@@ -1,10 +1,11 @@
 from pathlib import Path
-from typing import Optional, Protocol, Sequence, Union, overload
+from typing import Iterable, Optional, Protocol, Sequence, Union, overload
 
 import numpy as np
 import polars as pl
 import xarray as xr
 from attrs import define
+from loguru import logger
 from numpy.typing import NDArray
 
 
@@ -16,10 +17,15 @@ class Reader(Protocol):
     virtual_data : xr.DataArray
         Virtual data describing the type and dimensions of the data yielded by this
         reader. This data includes all dimensions except the length dimension since
-        this is determined by the length of the genomic range passed to read().
+        this is determined by the length of the genomic range passed to `read()`.
+    contig_starts_with_chr : str, optional
+        Whether the contigs start with "chr" or not. Queries to `read()` will
+        normalize the contig name to add or remove this prefix to match what the
+        underlying file uses.
     """
 
     virtual_data: xr.DataArray
+    contig_starts_with_chr: Optional[bool]
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
         """Read data corresponding to given genomic coordinates. The output shape will
@@ -44,6 +50,40 @@ class Reader(Protocol):
             length axis i.e. has length == end - start.
         """
         ...
+
+    def infer_contig_prefix(self, contigs: Iterable[str]) -> bool:
+        n_chr_start = sum(1 for c in contigs if c.startswith("chr"))
+        if n_chr_start > 0:
+            contig_starts_with_chr = True
+        else:
+            contig_starts_with_chr = False
+        return contig_starts_with_chr
+
+    def normalize_contig_name(self, contig: str) -> str:
+        """Normalize the contig name to adhere to the convention of the underlying file.
+        i.e. remove or add "chr" to the contig name.
+
+        Parameters
+        ----------
+        contig : str
+
+        Returns
+        -------
+        str
+            Normalized contig name.
+        """
+        if self.contig_starts_with_chr is None:
+            logger.warning(
+                """Attempted to normalize a contig name for a reader that has no 
+                convention for contig names. Returning contig name as is.
+                """
+            )
+            return contig
+        elif self.contig_starts_with_chr and not contig.startswith("chr"):
+            contig = "chr" + contig
+        elif not self.contig_starts_with_chr and contig.startswith("chr"):
+            contig = contig[3:]
+        return contig
 
 
 class ToZarr(Protocol):
@@ -185,6 +225,7 @@ class Variants(Protocol):
     samples: Union[Sequence[str], NDArray[np.str_]]
     n_samples: int
     ploidy: int
+    contig_starts_with_chr: Optional[bool]
 
     def read(
         self, contig: str, start: int, end: int, **kwargs
@@ -210,3 +251,37 @@ class Variants(Protocol):
         either SparseAlleles or DenseGenotypes depending on the file format.
         """
         ...
+
+    def infer_contig_prefix(self, contigs: Iterable[str]) -> bool:
+        n_chr_start = sum(1 for c in contigs if c.startswith("chr"))
+        if n_chr_start > 0:
+            contig_starts_with_chr = True
+        else:
+            contig_starts_with_chr = False
+        return contig_starts_with_chr
+
+    def normalize_contig_name(self, contig: str) -> str:
+        """Normalize the contig name to adhere to the convention of the variant's
+        underlying file. i.e. remove or add "chr" to the contig name.
+
+        Parameters
+        ----------
+        contig : str
+
+        Returns
+        -------
+        str
+            Normalized contig name.
+        """
+        if self.contig_starts_with_chr is None:
+            logger.warning(
+                """Attempted to normalize a contig name for a reader that has no 
+                convention for contig names. Returning contig name as is.
+                """
+            )
+            return contig
+        elif self.contig_starts_with_chr and not contig.startswith("chr"):
+            contig = "chr" + contig
+        elif not self.contig_starts_with_chr and contig.startswith("chr"):
+            contig = contig[3:]
+        return contig
