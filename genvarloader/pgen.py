@@ -63,33 +63,39 @@ class Pgen(Variants):
             self.samples = psam_samples
             self.sample_idx = np.arange(len(psam_samples), dtype=np.uint32)
         self.n_samples = len(self.samples)
+        
+        pvar_arrow_path = path.with_suffix('.gvl.arrow')
+        if pvar_arrow_path.exists():
+            pvar = pl.read_ipc(pvar_arrow_path)
+        else:
+            pvar_path = path.with_suffix(".pvar")
+            with open(pvar_path, "r") as f:
+                skip_rows = 0
+                while f.readline().startswith("##"):
+                    skip_rows += 1
 
-        pvar_path = path.with_suffix(".pvar")
-        with open(pvar_path, "r") as f:
-            skip_rows = 0
-            while f.readline().startswith("##"):
-                skip_rows += 1
-
-        pvar = pl.read_csv(
-            pvar_path,
-            separator="\t",
-            skip_rows=skip_rows,
-            dtypes={"#CHROM": pl.Utf8, "POS": pl.Int32},
-        ).with_columns(
-            POS=pl.col("POS") - 1,
-            ILEN=(
-                pl.col("ALT").str.lengths().cast(pl.Int32)
-                - pl.col("REF").str.lengths().cast(pl.Int32)
-            ),
-        )
-
-        if (pvar["ALT"].str.contains(",")).any():
-            raise RuntimeError(
-                f"""PGEN file {path} contains multi-allelic variants which are not yet 
-                supported by GenVarLoader. Split your multi-allelic variants with 
-                `bcftools norm -a --atom-overlaps . -m - <file.vcf>` then remake the 
-                PGEN file with the `--vcf-half-call r` option."""
+            pvar = pl.read_csv(
+                pvar_path,
+                separator="\t",
+                skip_rows=skip_rows,
+                dtypes={"#CHROM": pl.Utf8, "POS": pl.Int32},
+            ).with_columns(
+                POS=pl.col("POS") - 1,
+                ILEN=(
+                    pl.col("ALT").str.lengths().cast(pl.Int32)
+                    - pl.col("REF").str.lengths().cast(pl.Int32)
+                ),
             )
+
+            if (pvar["ALT"].str.contains(",")).any():
+                raise RuntimeError(
+                    f"""PGEN file {path} contains multi-allelic variants which are not yet 
+                    supported by GenVarLoader. Split your multi-allelic variants with 
+                    `bcftools norm -a --atom-overlaps . -m - <file.vcf>` then remake the 
+                    PGEN file with the `--vcf-half-call r` option."""
+                )
+            
+            pvar.write_ipc(pvar_arrow_path)
 
         contigs = pvar["#CHROM"].set_sorted()
         self.contig_idx: Dict[str, int] = {

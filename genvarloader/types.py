@@ -113,13 +113,13 @@ class VLenAlleles:
     def __getitem__(self, idx: slice) -> "VLenAlleles":
         ...
 
-    def __getitem__(self, idx: Union[int, slice]):
-        if isinstance(idx, int):
+    def __getitem__(self, idx: Union[int, slice, np.integer]):
+        if isinstance(idx, (int, np.integer)):
             return self.get_idx(idx)
         elif isinstance(idx, slice):
             return self.get_slice(idx)
 
-    def get_idx(self, idx: int):
+    def get_idx(self, idx: Union[int, np.integer]):
         if idx >= len(self) or idx < -len(self):
             raise IndexError("Index out of range.")
         if idx < 0:
@@ -132,7 +132,7 @@ class VLenAlleles:
         start, stop = slc.start, slc.stop
         if start is None:
             start = 0
-        if start >= len(self) or (stop is not None and stop >= start):
+        if start >= len(self) or (stop is not None and stop <= start):
             return VLenAlleles(np.empty(0, np.uint32), np.empty(0, "|S1"))
         if stop is not None:
             stop += 1
