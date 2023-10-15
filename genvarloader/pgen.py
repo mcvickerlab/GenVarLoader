@@ -55,7 +55,7 @@ class Pgen(Variants):
             _samples, sample_idx, _ = np.intersect1d(
                 psam_samples, samples, return_indices=True
             )
-            if len(_samples) == len(samples):
+            if len(_samples) != len(samples):
                 raise ValueError("Got samples that are not in the pgen file.")
             self.samples = _samples
             self.sample_idx = sample_idx.astype(np.uint32)
