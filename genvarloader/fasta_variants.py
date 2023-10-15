@@ -1,4 +1,4 @@
-from pathlib import Path
+from textwrap import dedent
 from typing import Optional
 
 import dask.array as da
@@ -27,12 +27,14 @@ class FastaVariants(Reader):
         self.contig_starts_with_chr = None
         if self.fasta.contig_starts_with_chr != self.variants.contig_starts_with_chr:
             logger.warning(
-                f"""Reference sequence and variant files have different contig naming 
-                conventions. This may indicate that the variants were not aligned to 
-                the reference being used to construct haplotypes. The reference file 
-                {Path(self.fasta.path).stem}
-                {"" if self.fasta.contig_starts_with_chr else "does not"}
-                start with "chr" whereas the variant file is the opposite."""
+                dedent(
+                    f"""Reference sequence and variant files have different contig naming 
+                conventions. Contig names in queries will be normalized so that they 
+                will still run, but this may indicate that the variants were not aligned
+                to the reference being used to construct haplotypes. The reference 
+                file's contigs {"" if self.fasta.contig_starts_with_chr else "don't"}
+                start with "chr" whereas the variant file's are the opposite."""
+                )
             )
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
@@ -97,31 +99,6 @@ class FastaVariants(Reader):
             raise NotImplementedError
 
         return xr.DataArray(seqs.view("S1"), dims=["sample", "ploid", "length"])
-
-
-@nb.njit(
-    "(u1[:, :, :], u4[:], i4[:], u1[:, :])",
-    nogil=True,
-    parallel=True,
-    cache=True,
-)
-def apply_variants(
-    seqs: NDArray[np.uint8],
-    offsets: NDArray[np.uint32],
-    positions: NDArray[np.int32],
-    alleles: NDArray[np.uint8],
-):
-    # seqs (s, p, l)
-    # offsets (s+1)
-    # positions (v)
-    # alleles (p, v)
-    for sample_idx in nb.prange(len(offsets) - 1):
-        start = offsets[sample_idx]
-        end = offsets[sample_idx + 1]
-        sample_positions = positions[start:end]
-        sample_alleles = alleles[:, start:end]
-        sample_seq = seqs[sample_idx]
-        sample_seq[:, sample_positions] = sample_alleles
 
 
 def sample_shifts(genotypes, sizes, seed: Optional[int] = None):
@@ -231,3 +208,28 @@ def construct_haplotypes_with_indels(
             unfilled_length = length - out_idx
             if unfilled_length > 0:
                 out[sample, hap, out_idx:] = ref[ref_idx : ref_idx + unfilled_length]
+
+
+@nb.njit(
+    "(u1[:, :, :], u4[:], i4[:], u1[:, :])",
+    nogil=True,
+    parallel=True,
+    cache=True,
+)
+def apply_variants(
+    seqs: NDArray[np.uint8],
+    offsets: NDArray[np.uint32],
+    positions: NDArray[np.int32],
+    alleles: NDArray[np.uint8],
+):
+    # seqs (s, p, l)
+    # offsets (s+1)
+    # positions (v)
+    # alleles (p, v)
+    for sample_idx in nb.prange(len(offsets) - 1):
+        start = offsets[sample_idx]
+        end = offsets[sample_idx + 1]
+        sample_positions = positions[start:end]
+        sample_alleles = alleles[:, start:end]
+        sample_seq = seqs[sample_idx]
+        sample_seq[:, sample_positions] = sample_alleles
