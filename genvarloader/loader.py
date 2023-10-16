@@ -113,7 +113,7 @@ class GVL:
         self.readers = {r.virtual_data.name: r for r in readers}
 
         self.actors: List[ReaderActor] = [
-            ReaderActor.remote(*self.readers, actor_idx=i)
+            ReaderActor.remote(*self.readers.values(), actor_idx=i)
             for i in range(self.num_workers - 1)  # keep 1 cpu for main process
         ]
 

@@ -31,6 +31,11 @@ class Pgen(Variants):
             Path to any of the PGEN files (.pgen, .pvar, .psam) or their prefix.
         samples : Optional[List[str]], optional
             Which samples to include, by default all samples.
+
+        Notes
+        -----
+        Writes a copy of the .pvar file as an Arrow file (.gvl.arrow) to speed up
+        loading (by 25x or more for larger files.)
         """
         if not PGENLIB_INSTALLED:
             raise ImportError("Pgenlib must be installed to read PGEN files.")
@@ -63,8 +68,8 @@ class Pgen(Variants):
             self.samples = psam_samples
             self.sample_idx = np.arange(len(psam_samples), dtype=np.uint32)
         self.n_samples = len(self.samples)
-        
-        pvar_arrow_path = path.with_suffix('.gvl.arrow')
+
+        pvar_arrow_path = path.with_suffix(".gvl.arrow")
         if pvar_arrow_path.exists():
             pvar = pl.read_ipc(pvar_arrow_path)
         else:
@@ -89,12 +94,12 @@ class Pgen(Variants):
 
             if (pvar["ALT"].str.contains(",")).any():
                 raise RuntimeError(
-                    f"""PGEN file {path} contains multi-allelic variants which are not yet 
-                    supported by GenVarLoader. Split your multi-allelic variants with 
-                    `bcftools norm -a --atom-overlaps . -m - <file.vcf>` then remake the 
-                    PGEN file with the `--vcf-half-call r` option."""
+                    f"""PGEN file {path} contains multi-allelic variants which are not 
+                    yet supported by GenVarLoader. Split your multi-allelic variants 
+                    with `bcftools norm -a --atom-overlaps . -m - <file.vcf>` then 
+                    remake the PGEN file with the `--vcf-half-call r` option."""
                 )
-            
+
             pvar.write_ipc(pvar_arrow_path)
 
         contigs = pvar["#CHROM"].set_sorted()
@@ -109,7 +114,7 @@ class Pgen(Variants):
         # (v 2), assumes only 1 REF and 1 ALT, no multi-allelics, only SNPs
         self.ref = VLenAlleles.from_polars(pvar["REF"])
         self.alt = VLenAlleles.from_polars(pvar["ALT"])
-        self.sizes: NDArray[np.int32] = pvar["ILEN"].to_numpy()
+        self.size_diffs: NDArray[np.int32] = pvar["ILEN"].to_numpy()
         self.contig_starts_with_chr = self.infer_contig_prefix(self.contig_idx)
 
     def _pgen(self, sample_idx: Optional[NDArray[np.uint32]]):
@@ -138,18 +143,18 @@ class Pgen(Variants):
             np.searchsorted(self.positions[c_slice], [start, end]) + c_slice.start
         )
 
-        end_of_var_before_start = self.positions[s_idx - 1] - self.sizes[s_idx - 1]
-        if s_idx > c_slice.start and end_of_var_before_start > start:
-            s_idx -= 1
-
         if s_idx == e_idx:
             return
 
-        q_sizes = self.sizes[s_idx:e_idx].copy()
+        end_of_var_before_start = self.positions[s_idx - 1] - self.size_diffs[s_idx - 1]
+        if s_idx > c_slice.start and end_of_var_before_start > start:
+            s_idx -= 1
+
+        q_sizes = self.size_diffs[s_idx:e_idx].copy()
         if self.positions[s_idx] < start:
             q_sizes[0] = start - end_of_var_before_start
         max_end = max(
-            end, self.positions[e_idx - 1] - self.sizes[e_idx - 1]
+            end, self.positions[e_idx - 1] - self.size_diffs[e_idx - 1]
         ) - q_sizes.sum(where=q_sizes < 0)
 
         # get alleles

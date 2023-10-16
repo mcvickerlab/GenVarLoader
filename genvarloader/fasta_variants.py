@@ -13,7 +13,9 @@ from .types import DenseGenotypes, Reader, Variants
 
 
 class FastaVariants(Reader):
-    def __init__(self, name: str, fasta: Fasta, variants: Variants) -> None:
+    def __init__(
+        self, name: str, fasta: Fasta, variants: Variants, seed: Optional[int] = None
+    ) -> None:
         self.fasta = fasta
         self.variants = variants
         self.virtual_data = xr.DataArray(
@@ -28,14 +30,19 @@ class FastaVariants(Reader):
         if self.fasta.contig_starts_with_chr != self.variants.contig_starts_with_chr:
             logger.warning(
                 dedent(
-                    f"""Reference sequence and variant files have different contig naming 
-                conventions. Contig names in queries will be normalized so that they 
+                    f"""
+                Reference sequence and variant files have different contig naming
+                conventions. Contig names in queries will be normalized so that they
                 will still run, but this may indicate that the variants were not aligned
-                to the reference being used to construct haplotypes. The reference 
-                file's contigs {"" if self.fasta.contig_starts_with_chr else "don't"}
-                start with "chr" whereas the variant file's are the opposite."""
+                to the reference being used to construct haplotypes. The reference
+                file's contigs{"" if self.fasta.contig_starts_with_chr else " don't"}
+                start with "chr" whereas the variant file's are the opposite.
+                """
                 )
+                .replace("\n", " ")
+                .strip()
             )
+        self.rng = np.random.default_rng(seed)
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
         """Read a variant sequence corresponding to a genomic range, sample, and ploid.
@@ -50,7 +57,8 @@ class FastaVariants(Reader):
             End coordinate, 0-based exclusive.
         **kwargs
             Additional keyword arguments. May include `sample: Iterable[str]` and
-            `ploid: Iterable[int]` to specify samples and ploid numbers.
+            `ploid: Iterable[int]` to specify samples and ploid numbers. May include
+            `seed` for deterministic shifting of haplotypes longer than the query.
 
         Returns
         -------
@@ -69,6 +77,10 @@ class FastaVariants(Reader):
         else:
             ploid = len(ploid)
 
+        seed = kwargs.get("seed", None)
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
+
         variants = self.variants.read(contig, start, end, **kwargs)
 
         if variants is None:
@@ -83,7 +95,7 @@ class FastaVariants(Reader):
                 contig, start, variants.max_end
             ).to_numpy()
             seqs = np.empty((n_samples, ploid, end - start), dtype=ref.dtype)
-            shifts = sample_shifts(variants.genotypes, variants.sizes)
+            shifts = self.sample_shifts(variants.genotypes, variants.sizes)
             construct_haplotypes_with_indels(
                 seqs.view(np.uint8),
                 ref.view(np.uint8),
@@ -100,15 +112,14 @@ class FastaVariants(Reader):
 
         return xr.DataArray(seqs.view("S1"), dims=["sample", "ploid", "length"])
 
-
-def sample_shifts(genotypes, sizes, seed: Optional[int] = None):
-    rng = np.random.default_rng(seed)
-    diffs = np.where(genotypes == 1, sizes, 0).cumsum(-1, dtype=np.int32)
-    shifts = rng.integers(0, diffs[..., -1].clip(0) + 1, dtype=np.int32)
-    return shifts
+    def sample_shifts(self, genotypes, sizes):
+        diffs = np.where(genotypes == 1, sizes, 0).cumsum(-1, dtype=np.int32)
+        shifts = self.rng.integers(0, diffs[..., -1].clip(0) + 1, dtype=np.int32)
+        return shifts
 
 
-@nb.njit(nogil=True, cache=True, parallel=True)
+# @nb.njit(nogil=True, cache=True, parallel=True)
+# @nb.jit(nopython=False)
 def construct_haplotypes_with_indels(
     out: NDArray[np.uint8],
     ref: NDArray[np.uint8],
@@ -139,8 +150,11 @@ def construct_haplotypes_with_indels(
             v_rel_pos = rel_positions[0]
             v_diff = sizes[0]
             if v_rel_pos < 0 and genotypes[sample, hap, 0] == 1:
-                ref_idx = v_rel_pos - v_diff + 1
-                # first variant index for this sample, haplotype
+                # diff of v(-1) has been normalized to consider where ref is
+                # otherwise, ref_idx = v_rel_pos - v_diff + 1
+                # e.g. a -10 diff became -3 if v_rel_pos = -7
+                ref_idx = -v_diff + 1
+                # increment the variant index
                 start_idx = 1
             else:
                 start_idx = 0
@@ -183,23 +197,25 @@ def construct_haplotypes_with_indels(
 
                 # add reference sequence
                 ref_len = v_rel_pos - ref_idx
-                out[sample, hap, out_idx : out_idx + ref_len] = ref[ref_idx:v_rel_pos]
+                writable_length = min(ref_len, length - out_idx)
+                out[sample, hap, out_idx : out_idx + writable_length] = ref[
+                    ref_idx : ref_idx + writable_length
+                ]
                 out_idx += ref_len
 
                 # insertions + substitions
-                # for deletions we simply write reference up to the variant (above)
-                # and increment the ref_idx (below)
-                # add variant
-                if v_diff >= 0:
-                    writable_length = min(v_len, length - out_idx)
-                    out[sample, hap, out_idx : out_idx + v_len] = allele[
-                        :writable_length
-                    ]
-                    out_idx += v_len
-
-                # non-deletion ALT alleles always replace 1 nt of reference for a
+                writable_length = min(v_len, length - out_idx)
+                out[sample, hap, out_idx : out_idx + writable_length] = allele[
+                    :writable_length
+                ]
+                out_idx += v_len
+                # +1 because ALT alleles always replace 1 nt of reference for a 
                 # normalized VCF
                 ref_idx = v_rel_pos + 1
+                
+                # deletions, move ref to end of deletion
+                if v_diff < 0:
+                    ref_idx -= v_diff
 
                 if out_idx >= length:
                     break
