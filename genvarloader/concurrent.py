@@ -39,7 +39,7 @@ class Buffer:
     idx_slice: slice
 
     def __init__(
-        self, buffer, buffer_idx, dim_slices: Dict[str, slice], actor_idx: int
+        self, buffer: xr.Dataset, buffer_idx: NDArray[np.integer], dim_slices: Dict[str, slice], actor_idx: int
     ) -> None:
         self.dim_slices = dim_slices
         self.buffer = buffer

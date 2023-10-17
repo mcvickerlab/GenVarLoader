@@ -27,7 +27,7 @@ class Reader(Protocol):
     virtual_data: xr.DataArray
     contig_starts_with_chr: Optional[bool]
 
-    def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
+    def read(self, contig: str, start: int, end: int, out: Optional[NDArray] = None, **kwargs) -> xr.DataArray:
         """Read data corresponding to given genomic coordinates. The output shape will
         have length as the final axis i.e. (..., length).
 
@@ -39,13 +39,15 @@ class Reader(Protocol):
             Start coordinate, 0-based.
         end : int
             End coordinate, 0-based exclusive.
+        out : NDArray, optional
+            Array to put the result into. Otherwise allocates one.
         **kwargs
             Additional keyword arguments. For example, which samples or ploid numbers to
             return.
 
         Returns
         -------
-        NDArray
+        xarray.DataArray
             Data corresponding to the given genomic coordinates. The final axis is the
             length axis i.e. has length == end - start.
         """

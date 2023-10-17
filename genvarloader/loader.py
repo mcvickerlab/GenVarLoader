@@ -22,7 +22,7 @@ import xarray as xr
 from natsort import natsorted
 from numpy.typing import NDArray
 
-from .concurrent import Buffer, BufferMeta, DataVarsLike, ReaderActor
+from .concurrent import Buffer, BufferMeta, DataVarsLike
 from .types import Reader
 from .util import _cartesian_product, _set_fixed_length_around_center, read_bedlike
 
@@ -112,11 +112,6 @@ class GVL:
             readers = [readers]
         self.readers = {r.virtual_data.name: r for r in readers}
 
-        self.actors: List[ReaderActor] = [
-            ReaderActor.remote(*self.readers.values(), actor_idx=i)
-            for i in range(self.num_workers - 1)  # keep 1 cpu for main process
-        ]
-
         self.virtual_data = xr.merge(
             [r.virtual_data for r in self.readers.values()], join="exact"
         )
@@ -137,8 +132,9 @@ class GVL:
             pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
             bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
         self.bed = _set_fixed_length_around_center(bed, fixed_length)
-        # TODO check if any regions are out-of-bounds and any readers have padding disabled
-        # if so, raise an error. Otherwise, readers will catch the error downstream.
+        # TODO check if any regions are out-of-bounds and any readers have padding 
+        # disabled. If so, raise an error. Otherwise, readers will catch the error 
+        # downstream.
 
         if batch_dims is None:
             batch_dims = []
@@ -190,7 +186,9 @@ class GVL:
         drop_last: bool = False,
     ):
         """Update any parameters that don't require re-initializing Ray Actors. If you
-        need to change readers or the number of workers, init a new GVL.
+        need to change readers or the number of workers, init a new GVL. Note: do NOT 
+        use this during iteration (i.e. during an epoch), or things will break. This is 
+        meant to be used in between iteration (i.e. between epochs).
 
         Parameters
         ----------
@@ -304,6 +302,7 @@ class GVL:
         return mpl
 
     def get_max_length(self):
+        """Get the maximum length """
         max_length = self.fixed_length
         batch_mem = self.fixed_length * self.mem_per_length(
             {k: v for k, v in self.sizes.items() if k not in self.batch_dims}
@@ -335,6 +334,8 @@ class GVL:
     def get_buffer_sizes(
         self, max_mem: int, max_length: int, batch_dims: List[str]
     ) -> Dict[Hashable, int]:
+        """Get the size of batch dimensions such that the largest buffer (i.e. with max 
+        length) will fit into memory."""
         buffer_sizes = deepcopy(self.sizes)
         if max_mem < max_length * self.mem_per_length(self.sizes):
             for dim in batch_dims:
@@ -402,7 +403,7 @@ class GVL:
         self.partial_indices = []
         self.total_yielded = 0
 
-        buffers = ConcurrentBuffers(self)
+        buffers = SyncBuffers(self)
 
         for buffer in buffers:
             new_stop = min(self.batch_size, self.batch_slice.stop + len(buffer))
@@ -592,6 +593,79 @@ def partition_regions(
             curr_length = ends[i] - starts[i]
         partitions[i] = partition
     return partitions
+
+
+class SyncBuffers:
+    def __init__(self, gvl: GVL) -> None:
+        self.gvl = gvl
+        
+    def __iter__(self):
+        buffer: Dict[Hashable, Tuple[Tuple[Hashable, ...], NDArray]] = {}
+        for name, reader in self.gvl.readers.items():
+            shape: List[int] = []
+            for dim in reader.virtual_data.dims:
+                size = self.gvl.buffer_sizes.get(dim, None)
+                if size is not None:
+                    shape.append(size)
+            dtype = reader.virtual_data.dtype
+            shape.append(self.gvl.max_length)
+            dims = reader.virtual_data.dims + ('length',)
+            buffer[name] = (dims, np.empty(shape, dtype=dtype))
+        self.buffer = buffer
+        self.buffer_generator = self.generate_buffers()
+        return self
+    
+    def __next__(self):
+        return next(self.buffer_generator)
+    
+    def generate_buffers(self):
+        for partition in self.gvl.partitioned_bed:
+            dim_slices = {str(d): slice(0, 0) for d in self.gvl.buffer_sizes}
+
+            n_regions = len(partition)
+            instances_in_partition = n_regions * np.prod(
+                [self.gvl.sizes[d] for d in self.gvl.batch_dims], dtype=int
+            )
+            instances_in_partition_tasks = 0
+
+            contig: str
+            start: int
+            end: int
+            contig, start, end = partition.select(
+                pl.col("chrom").first(),
+                pl.col("chromStart").min(),
+                pl.col("chromEnd").max(),
+            ).row(0)
+
+            while instances_in_partition_tasks < instances_in_partition:
+                dim_slices = self.gvl.increment_dim_slices(dim_slices)
+                read_kwargs = {d: self.gvl.indexes[d][s] for d, s in dim_slices.items()}
+                buffer_len = n_regions * np.prod(
+                    [len(a) for a in read_kwargs.values()], dtype=int
+                )
+                instances_in_partition_tasks += buffer_len
+                
+                buffer_idx = self.gvl.get_buffer_idx(partition, start, read_kwargs)
+                
+                if self.gvl.weights is not None:
+                    buffer_idx = self.gvl.resample_buffer_idx(buffer_idx)
+                
+                if self.gvl.shuffle:
+                    buffer_idx = self.gvl.rng.permutation(buffer_idx)
+                
+                dim_lengths = {
+                    dim: slc.stop - slc.start for dim, slc in dim_slices.items()
+                }
+                sliced_buffer: Dict[Hashable, NDArray] = {}
+                for name, (dims, arr) in self.buffer.items():
+                    slices: List[slice] = []
+                    for dim in dims:
+                        slices.append(slice(None, dim_lengths[dim]))  # pyright: ignore[reportGeneralTypeIssues]
+                    slices.append(slice(None, end - start))
+                    _slices = tuple(slices)
+                    sliced_buffer[name] = arr[_slices]
+                buffer = xr.Dataset({name: r.read(contig, start, end, out=sliced_buffer[name]) for name, r in self.gvl.readers.items()})
+                yield Buffer(buffer, buffer_idx, dim_slices, -1)
 
 
 class ConcurrentBuffers:

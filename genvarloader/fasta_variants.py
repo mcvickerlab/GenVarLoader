@@ -7,9 +7,10 @@ import numpy as np
 import xarray as xr
 from loguru import logger
 from numpy.typing import NDArray
+from typing_extensions import assert_never
 
 from .fasta import Fasta
-from .types import DenseGenotypes, Reader, Variants
+from .types import DenseGenotypes, Reader, SparseAlleles, Variants
 
 
 class FastaVariants(Reader):
@@ -44,7 +45,7 @@ class FastaVariants(Reader):
             )
         self.rng = np.random.default_rng(seed)
 
-    def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
+    def read(self, contig: str, start: int, end: int, out: Optional[NDArray[np.bytes_]] = None, **kwargs) -> xr.DataArray:
         """Read a variant sequence corresponding to a genomic range, sample, and ploid.
 
         Parameters
@@ -55,6 +56,8 @@ class FastaVariants(Reader):
             Start coordinate, 0-based.
         end : int
             End coordinate, 0-based exclusive.
+        out : NDArray, optional
+            Array to put the result into. Otherwise allocates one.
         **kwargs
             Additional keyword arguments. May include `sample: Iterable[str]` and
             `ploid: Iterable[int]` to specify samples and ploid numbers. May include
@@ -86,15 +89,21 @@ class FastaVariants(Reader):
         if variants is None:
             ref: NDArray[np.bytes_] = self.fasta.read(contig, start, end).to_numpy()
 
-            # this is faster than np.tile ¯\_(ツ)_/¯
-            seqs = np.empty((n_samples, ploid, len(ref)), dtype=ref.dtype)
+            if out is None:
+                # this is faster than np.tile ¯\_(ツ)_/¯
+                seqs = np.empty((n_samples, ploid, len(ref)), dtype=ref.dtype)
+            else:
+                seqs = out
             seqs[...] = ref
             return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
         elif isinstance(variants, DenseGenotypes):
             ref: NDArray[np.bytes_] = self.fasta.read(
                 contig, start, variants.max_end
             ).to_numpy()
-            seqs = np.empty((n_samples, ploid, end - start), dtype=ref.dtype)
+            if out is None:
+                seqs = np.empty((n_samples, ploid, end - start), dtype=ref.dtype)
+            else:
+                seqs = out
             shifts = self.sample_shifts(variants.genotypes, variants.sizes)
             construct_haplotypes_with_indels(
                 seqs.view(np.uint8),
@@ -106,9 +115,10 @@ class FastaVariants(Reader):
                 variants.alt.offsets,
                 variants.alt.alleles.view(np.uint8),
             )
-        else:
-            # SparseAlleles
+        elif isinstance(variants, SparseAlleles):
             raise NotImplementedError
+        else:
+            assert_never(variants)
 
         return xr.DataArray(seqs.view("S1"), dims=["sample", "ploid", "length"])
 
