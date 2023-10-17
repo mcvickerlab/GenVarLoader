@@ -45,7 +45,14 @@ class FastaVariants(Reader):
             )
         self.rng = np.random.default_rng(seed)
 
-    def read(self, contig: str, start: int, end: int, out: Optional[NDArray[np.bytes_]] = None, **kwargs) -> xr.DataArray:
+    def read(
+        self,
+        contig: str,
+        start: int,
+        end: int,
+        out: Optional[NDArray[np.bytes_]] = None,
+        **kwargs,
+    ) -> xr.DataArray:
         """Read a variant sequence corresponding to a genomic range, sample, and ploid.
 
         Parameters
@@ -129,6 +136,7 @@ class FastaVariants(Reader):
 
 
 @nb.njit(nogil=True, cache=True, parallel=True)
+# @nb.jit(nopython=False)
 def construct_haplotypes_with_indels(
     out: NDArray[np.uint8],
     ref: NDArray[np.uint8],
@@ -176,14 +184,14 @@ def construct_haplotypes_with_indels(
                 # position of variant relative to ref from fetch(contig, start, q_end)
                 # i.e. put it into same coordinate system as ref_idx
                 v_rel_pos = rel_positions[variant]
-                
+
                 # overlapping variants
-                # v_rel_pos is only < ref_idx if we see an ALT at a given position more 
-                # than once. We'll do what bcftools consensus does and only use the 
+                # v_rel_pos < ref_idx only if we see an ALT at a given position a second
+                # time or more. We'll do what bcftools consensus does and only use the
                 # first ALT variant we find.
                 if v_rel_pos < ref_idx:
                     continue
-                
+
                 v_diff = sizes[variant]
                 allele = alt_alleles[alt_offsets[variant] : alt_offsets[variant + 1]]
                 v_len = len(allele)
@@ -191,50 +199,56 @@ def construct_haplotypes_with_indels(
                 # handle shift
                 if shifted < shift:
                     ref_shift_dist = v_rel_pos - ref_idx
+                    # not enough distance to finish the shift even with the variant
+                    if shifted + ref_shift_dist + v_len < shift:
+                        ref_idx = v_rel_pos + 1
+                        shifted += ref_shift_dist + v_len
+                        continue
                     # enough distance between ref_idx and variant to finish shift
-                    if shifted + ref_shift_dist >= shift:
+                    elif shifted + ref_shift_dist >= shift:
                         ref_idx += shift - shifted
                         shifted = shift
                         # can still use the variant and whatever ref is left between
                         # ref_idx and the variant
-                    # not enough distance to finish the shift even with the variant
-                    elif shifted + ref_shift_dist + v_len < shift:
-                        ref_idx = v_rel_pos + 1
-                        shifted += ref_shift_dist + v_len
-                        continue
                     # ref + (some of) variant is enough to finish shift
                     else:
-                        # how much left to shift - amount of ref we can use
-                        allele_start_idx = shift - shifted - ref_shift_dist
-                        allele = allele[allele_start_idx:]
-                        v_len = len(allele)
                         # adjust ref_idx so that no reference is written
                         ref_idx = v_rel_pos
                         shifted = shift
+                        # how much left to shift - amount of ref we can use
+                        allele_start_idx = shift - shifted - ref_shift_dist
+                        # NEED THIS CHECK! otherwise parallel=True can cause a SystemError!
+                        # parallel jit cannot handle changes in array dimension
+                        # without this, allele can change from a 1D array to a 0D array.
+                        if allele_start_idx == v_len:
+                            continue
+                        allele = allele[allele_start_idx:]
+                        v_len = len(allele)
 
                 # add reference sequence
                 ref_len = v_rel_pos - ref_idx
-                
-                writable_length = min(ref_len, length - out_idx)
-                out[sample, hap, out_idx : out_idx + writable_length] = ref[
-                    ref_idx : ref_idx + writable_length
+                if out_idx + ref_len >= length:
+                    # ref will get written by final clause
+                    break
+                out[sample, hap, out_idx : out_idx + ref_len] = ref[
+                    ref_idx : ref_idx + ref_len
                 ]
                 out_idx += ref_len
-
+                
                 # insertions + substitions
                 writable_length = min(v_len, length - out_idx)
                 out[sample, hap, out_idx : out_idx + writable_length] = allele[
                     :writable_length
                 ]
-                out_idx += v_len
-                # +1 because ALT alleles always replace 1 nt of reference for a 
+                out_idx += writable_length
+                # +1 because ALT alleles always replace 1 nt of reference for a
                 # normalized VCF
                 ref_idx = v_rel_pos + 1
-                
+
                 # deletions, move ref to end of deletion
                 if v_diff < 0:
                     ref_idx -= v_diff
-
+                    
                 if out_idx >= length:
                     break
 
