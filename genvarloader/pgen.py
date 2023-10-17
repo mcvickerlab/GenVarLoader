@@ -83,6 +83,7 @@ class Pgen(Variants):
                 pvar_path,
                 separator="\t",
                 skip_rows=skip_rows,
+                columns=['#CHROM', 'POS', 'REF', 'ALT']
                 dtypes={"#CHROM": pl.Utf8, "POS": pl.Int32},
             ).with_columns(
                 POS=pl.col("POS") - 1,

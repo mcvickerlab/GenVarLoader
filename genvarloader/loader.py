@@ -402,7 +402,7 @@ class GVL:
         self.partial_indices = []
         self.total_yielded = 0
 
-        buffers = Buffers(self)
+        buffers = ConcurrentBuffers(self)
 
         for buffer in buffers:
             new_stop = min(self.batch_size, self.batch_slice.stop + len(buffer))
@@ -594,7 +594,7 @@ def partition_regions(
     return partitions
 
 
-class Buffers:
+class ConcurrentBuffers:
     def __init__(self, gvl: GVL) -> None:
         self.gvl = gvl
 

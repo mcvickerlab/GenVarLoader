@@ -167,6 +167,14 @@ def construct_haplotypes_with_indels(
                 # position of variant relative to ref from fetch(contig, start, q_end)
                 # i.e. put it into same coordinate system as ref_idx
                 v_rel_pos = rel_positions[variant]
+                
+                # overlapping variants
+                # v_rel_pos is only < ref_idx if we see an ALT at a given position more 
+                # than once. We'll do what bcftools consensus does and only use the 
+                # first ALT variant we find.
+                if v_rel_pos < ref_idx:
+                    continue
+                
                 v_diff = sizes[variant]
                 allele = alt_alleles[alt_offsets[variant] : alt_offsets[variant + 1]]
                 v_len = len(allele)
@@ -197,6 +205,7 @@ def construct_haplotypes_with_indels(
 
                 # add reference sequence
                 ref_len = v_rel_pos - ref_idx
+                
                 writable_length = min(ref_len, length - out_idx)
                 out[sample, hap, out_idx : out_idx + writable_length] = ref[
                     ref_idx : ref_idx + writable_length
