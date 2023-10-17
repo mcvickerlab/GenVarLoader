@@ -22,7 +22,7 @@ import xarray as xr
 from natsort import natsorted
 from numpy.typing import NDArray
 
-from .concurrent import Buffer, BufferMeta, DataVarsLike
+from .concurrent import Buffer, BufferMeta, DataVarsLike, ReaderActor
 from .types import Reader
 from .util import _cartesian_product, _set_fixed_length_around_center, read_bedlike
 
@@ -50,7 +50,7 @@ class GVL:
         return_tuples: bool = False,
         return_index: bool = False,
         drop_last: bool = False,
-        num_workers: int = 2,
+        num_workers: int = 1,
     ) -> None:
         """GenVarLoader
 
@@ -91,8 +91,7 @@ class GVL:
             Whether to drop the last batch if the number of instances are not evenly
             divisible by the batch size.
         num_workers : int, optional
-            How many workers to use for concurrent I/O, default 2. Recommended to set
-            this to the number of processors available.
+            How many workers to use, default 1.
         """
         self.num_workers = num_workers
         self.fixed_length = fixed_length
@@ -111,6 +110,12 @@ class GVL:
         if not isinstance(readers, Iterable):
             readers = [readers]
         self.readers = {r.virtual_data.name: r for r in readers}
+        
+        if self.num_workers >= 2:
+            self.actors: List[ReaderActor] = [
+                ReaderActor.remote(*self.readers.values(), actor_idx=i)
+                for i in range(self.num_workers - 1)  # keep 1 cpu for main process
+            ]
 
         self.virtual_data = xr.merge(
             [r.virtual_data for r in self.readers.values()], join="exact"
@@ -403,7 +408,10 @@ class GVL:
         self.partial_indices = []
         self.total_yielded = 0
 
-        buffers = SyncBuffers(self)
+        if self.num_workers > 1:
+            buffers = ConcurrentBuffers(self)
+        else:
+            buffers = SyncBuffers(self)
 
         for buffer in buffers:
             new_stop = min(self.batch_size, self.batch_slice.stop + len(buffer))
@@ -604,13 +612,13 @@ class SyncBuffers:
         for name, reader in self.gvl.readers.items():
             shape: List[int] = []
             for dim in reader.virtual_data.dims:
+                # Not all dims are batch dims, so some will be missing from buffer_sizes
                 size = self.gvl.buffer_sizes.get(dim, None)
                 if size is not None:
                     shape.append(size)
             dtype = reader.virtual_data.dtype
             shape.append(self.gvl.max_length)
-            dims = reader.virtual_data.dims + ('length',)
-            buffer[name] = (dims, np.empty(shape, dtype=dtype))
+            buffer[name] = (reader.virtual_data.dims, np.empty(shape, dtype=dtype))
         self.buffer = buffer
         self.buffer_generator = self.generate_buffers()
         return self
@@ -660,6 +668,8 @@ class SyncBuffers:
                 for name, (dims, arr) in self.buffer.items():
                     slices: List[slice] = []
                     for dim in dims:
+                        # No chance of KeyError here because dims are exclusively 
+                        # batch_dims, which are checked for compat at GVL init
                         slices.append(slice(None, dim_lengths[dim]))  # pyright: ignore[reportGeneralTypeIssues]
                     slices.append(slice(None, end - start))
                     _slices = tuple(slices)
