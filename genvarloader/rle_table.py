@@ -95,7 +95,7 @@ class RLE_Table(Reader):
         self.name = name
         self.table = _table
         self.virtual_data = xr.DataArray(
-            da.empty(len(_samples), dtype=np.float64),
+            da.empty(len(_samples), dtype=np.float64),  # pyright: ignore[reportPrivateImportUsage]
             name=name,
             dims="sample",
             coords={"sample": _samples},

@@ -671,8 +671,8 @@ class SyncBuffers:
                         # No chance of KeyError here because dims are exclusively
                         # batch_dims, which are checked for compat at GVL init
                         slices.append(
-                            slice(None, dim_lengths[dim])
-                        )  # pyright: ignore[reportGeneralTypeIssues]
+                            slice(None, dim_lengths[dim])  # pyright: ignore[reportGeneralTypeIssues]
+                        )
                     slices.append(slice(None, end - start))
                     _slices = tuple(slices)
                     sliced_buffer[name] = arr[_slices]

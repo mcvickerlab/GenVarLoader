@@ -30,7 +30,7 @@ class Fasta(Reader):
         ValueError
             If pad value is not a single character.
         """
-        self.virtual_data = xr.DataArray(da.empty(0, dtype="S1"), name=name, dims="")
+        self.virtual_data = xr.DataArray(da.empty(0, dtype="S1"), name=name, dims="")  # pyright: ignore[reportPrivateImportUsage]
         self.path = path
         if pad is not None:
             if len(pad) > 1:

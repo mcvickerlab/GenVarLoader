@@ -20,7 +20,7 @@ class FastaVariants(Reader):
         self.fasta = fasta
         self.variants = variants
         self.virtual_data = xr.DataArray(
-            da.empty((self.variants.n_samples, self.variants.ploidy), dtype="S1"),
+            da.empty((self.variants.n_samples, self.variants.ploidy), dtype="S1"),  # pyright: ignore[reportPrivateImportUsage]
             name=name,
             coords={
                 "sample": np.asarray(self.variants.samples),
