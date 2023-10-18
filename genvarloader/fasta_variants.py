@@ -66,9 +66,13 @@ class FastaVariants(Reader):
         out : NDArray, optional
             Array to put the result into. Otherwise allocates one.
         **kwargs
-            Additional keyword arguments. May include `sample: Iterable[str]` and
-            `ploid: Iterable[int]` to specify samples and ploid numbers. May include
-            `seed` for deterministic shifting of haplotypes longer than the query.
+            Additional keyword arguments. May optionally include...
+        sample : Iterable[str]
+            Specify samples.
+        ploid : Iterable[int]
+            Specify ploid numbers.
+        seed : int
+            For deterministic shifting of haplotypes longer than the query.
 
         Returns
         -------
@@ -101,6 +105,7 @@ class FastaVariants(Reader):
                 seqs = np.empty((n_samples, ploid, len(ref)), dtype=ref.dtype)
             else:
                 seqs = out
+                
             seqs[...] = ref
             return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
         elif isinstance(variants, DenseGenotypes):
@@ -136,7 +141,6 @@ class FastaVariants(Reader):
 
 
 @nb.njit(nogil=True, cache=True, parallel=True)
-# @nb.jit(nopython=False)
 def construct_haplotypes_with_indels(
     out: NDArray[np.uint8],
     ref: NDArray[np.uint8],
