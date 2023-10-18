@@ -593,13 +593,15 @@ def partition_regions(
 ):
     partitions = np.zeros_like(starts)
     partition = 0
+    last_end = ends[0]
     curr_length = ends[0] - starts[0]
     for i in range(1, len(partitions)):
         curr_length += ends[i] - ends[i - 1]
-        if curr_length > max_length:
+        if curr_length > max_length or starts[i] > last_end:
             partition += 1
             curr_length = ends[i] - starts[i]
         partitions[i] = partition
+        last_end = ends[i]
     return partitions
 
 
