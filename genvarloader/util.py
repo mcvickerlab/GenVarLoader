@@ -227,3 +227,19 @@ def _cartesian_product(arrays: Sequence[NDArray]) -> NDArray:
         arrs[i - 1][1:] = arrs[i]
     arr[..., 0] = arrays[0][idx]
     return arr.reshape(-1, la)
+
+
+def get_rel_starts(starts: NDArray[np.int64], ends: NDArray[np.int64]):
+    rel_starts = np.concatenate([[0], (ends - starts).cumsum()[:-1]])
+    return rel_starts
+
+
+def splice_subarrays(arr: NDArray, starts: NDArray[np.int64], ends: NDArray[np.int64]):
+    start = starts.min()
+    rel_starts = get_rel_starts(starts, ends)
+    total_length = (ends - starts).sum()
+    out = np.empty(total_length, dtype=arr.dtype)
+    for rel_start, s, e in zip(rel_starts, starts - start, ends - start):
+        length = e - s
+        out[rel_start : rel_start + length] = arr[s:e]
+    return out

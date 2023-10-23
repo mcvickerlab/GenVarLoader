@@ -41,7 +41,9 @@ class Zarr(Reader):
             d: c for d, c in self.ds.coords.items() if not str(d).endswith("length")
         }
         self.virtual_data = xr.DataArray(
-            da.empty(shape=shape, dtype=self.ds.dtypes[contigs[0]]),  # pyright: ignore[reportPrivateImportUsage]
+            da.empty(
+                shape=shape, dtype=self.ds.dtypes[contigs[0]]
+            ),  # pyright: ignore[reportPrivateImportUsage]
             dims=dims,
             coords=coords,
         )

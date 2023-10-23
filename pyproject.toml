@@ -21,7 +21,6 @@ pgenlib = "^0.90.1"
 ray = "^2.7.1"
 xarray = "^2023.9.0"
 pysam = "^0.22.0"
-pybigwig = "^0.3.22"
 pyarrow = "^13.0.0"
 
 [tool.poetry.group.dev.dependencies]

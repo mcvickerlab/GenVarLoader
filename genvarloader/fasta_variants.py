@@ -11,6 +11,7 @@ from typing_extensions import assert_never
 
 from .fasta import Fasta
 from .types import DenseGenotypes, Reader, SparseAlleles, Variants
+from .util import get_rel_starts
 
 
 class FastaVariants(Reader):
@@ -20,7 +21,9 @@ class FastaVariants(Reader):
         self.fasta = fasta
         self.variants = variants
         self.virtual_data = xr.DataArray(
-            da.empty((self.variants.n_samples, self.variants.ploidy), dtype="S1"),  # pyright: ignore[reportPrivateImportUsage]
+            da.empty(
+                (self.variants.n_samples, self.variants.ploidy), dtype="S1"
+            ),  # pyright: ignore[reportPrivateImportUsage]
             name=name,
             coords={
                 "sample": np.asarray(self.variants.samples),
@@ -48,8 +51,8 @@ class FastaVariants(Reader):
     def read(
         self,
         contig: str,
-        start: int,
-        end: int,
+        starts: NDArray[np.int64],
+        ends: NDArray[np.int64],
         out: Optional[NDArray[np.bytes_]] = None,
         **kwargs,
     ) -> xr.DataArray:
@@ -59,20 +62,23 @@ class FastaVariants(Reader):
         ----------
         contig : str
             Name of the contig/chromosome.
-        start : int
-            Start coordinate, 0-based.
-        end : int
-            End coordinate, 0-based exclusive.
+        starts : NDArray[int32]
+            Start coordinates, 0-based.
+        ends : NDArray[int32]
+            End coordinates, 0-based exclusive.
         out : NDArray, optional
             Array to put the result into. Otherwise allocates one.
         **kwargs
-            Additional keyword arguments. May optionally include...
-        sample : Iterable[str]
-            Specify samples.
-        ploid : Iterable[int]
-            Specify ploid numbers.
-        seed : int
-            For deterministic shifting of haplotypes longer than the query.
+            ! Must include...
+            target_length : int
+                Desired length of reconstructed haplotypes.
+            ? May optionally include...
+            sample : Iterable[str]
+                Specify samples.
+            ploid : Iterable[int]
+                Specify ploid numbers.
+            seed : int
+                For deterministic shifting of haplotypes longer than the query.
 
         Returns
         -------
@@ -95,48 +101,60 @@ class FastaVariants(Reader):
         if seed is not None:
             self.rng = np.random.default_rng(seed)
 
-        variants = self.variants.read(contig, start, end, **kwargs)
-
-        if variants is None:
-            ref: NDArray[np.bytes_] = self.fasta.read(contig, start, end).to_numpy()
-
-            if out is None:
-                # this is faster than np.tile ¯\_(ツ)_/¯
-                seqs = np.empty((n_samples, ploid, len(ref)), dtype=ref.dtype)
-            else:
-                seqs = out
-                
-            seqs[...] = ref
-            return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
-        elif isinstance(variants, DenseGenotypes):
-            ref: NDArray[np.bytes_] = self.fasta.read(
-                contig, start, variants.max_end
-            ).to_numpy()
-            if out is None:
-                seqs = np.empty((n_samples, ploid, end - start), dtype=ref.dtype)
-            else:
-                seqs = out
-            shifts = self.sample_shifts(variants.genotypes, variants.sizes)
-            construct_haplotypes_with_indels(
-                seqs.view(np.uint8),
-                ref.view(np.uint8),
-                shifts,
-                variants.positions - start,
-                variants.sizes,
-                variants.genotypes,
-                variants.alt.offsets,
-                variants.alt.alleles.view(np.uint8),
+        try:
+            target_length = kwargs.pop("target_length")
+        except KeyError:
+            raise RuntimeError(
+                "target_length is a required keyword argument for FastaVariants.read()."
             )
-        elif isinstance(variants, SparseAlleles):
-            raise NotImplementedError
+
+        variants, max_ends = self.variants.read_for_haplotype_construction(
+            contig, starts, ends, target_length, **kwargs
+        )
+
+        lengths = ends - starts
+        rel_starts = get_rel_starts(starts, ends)
+
+        ref: NDArray[np.bytes_] = self.fasta.read(contig, starts, max_ends).to_numpy()
+        ref_lengths = max_ends - starts
+        ref_rel_starts = get_rel_starts(starts, max_ends)
+
+        if out is None:
+            # alloc then fill is faster than np.tile ¯\_(ツ)_/¯
+            seqs = np.empty((n_samples, ploid, lengths.sum()), dtype=ref.dtype)
         else:
-            assert_never(variants)
+            seqs = out
+
+        for variant, start, length, rel_start, ref_length, ref_rel_start in zip(
+            variants, starts, lengths, rel_starts, ref_lengths, ref_rel_starts
+        ):
+            subseq = seqs[..., rel_start : rel_start + length]
+            # subref can be longer than subseq
+            subref = ref[ref_rel_start : ref_rel_start + ref_length]
+            if variant is None:
+                subseq[...] = subref[:length]
+            elif isinstance(variant, DenseGenotypes):
+                shifts = self.sample_shifts(variant.genotypes, variant.size_diffs)
+                construct_haplotypes_with_indels(
+                    subseq.view(np.uint8),
+                    subref.view(np.uint8),
+                    shifts,
+                    variant.positions - start,
+                    variant.size_diffs,
+                    variant.genotypes,
+                    variant.alt.offsets,
+                    variant.alt.alleles.view(np.uint8),
+                )
+            elif isinstance(variant, SparseAlleles):
+                raise NotImplementedError
+            else:
+                assert_never(variant)
 
         return xr.DataArray(seqs.view("S1"), dims=["sample", "ploid", "length"])
 
-    def sample_shifts(self, genotypes, sizes):
-        diffs = np.where(genotypes == 1, sizes, 0).cumsum(-1, dtype=np.int32)
-        shifts = self.rng.integers(0, diffs[..., -1].clip(0) + 1, dtype=np.int32)
+    def sample_shifts(self, genotypes: NDArray[np.int8], sizes: NDArray[np.int32]):
+        diffs = np.where(genotypes == 1, sizes, 0).sum(-1, dtype=np.int32).clip(0)
+        shifts = self.rng.integers(0, diffs + 1, dtype=np.int32)
         return shifts
 
 
@@ -174,7 +192,7 @@ def construct_haplotypes_with_indels(
                 # diff of v(-1) has been normalized to consider where ref is
                 # otherwise, ref_idx = v_rel_pos - v_diff + 1
                 # e.g. a -10 diff became -3 if v_rel_pos = -7
-                ref_idx = -v_diff + 1
+                ref_idx = v_rel_pos - v_diff + 1
                 # increment the variant index
                 start_idx = 1
             else:
@@ -222,7 +240,7 @@ def construct_haplotypes_with_indels(
                         # how much left to shift - amount of ref we can use
                         allele_start_idx = shift - shifted - ref_shift_dist
                         # NEED THIS CHECK! otherwise parallel=True can cause a SystemError!
-                        # parallel jit cannot handle changes in array dimension
+                        # parallel jit cannot handle changes in array dimension.
                         # without this, allele can change from a 1D array to a 0D array.
                         if allele_start_idx == v_len:
                             continue
@@ -238,7 +256,7 @@ def construct_haplotypes_with_indels(
                     ref_idx : ref_idx + ref_len
                 ]
                 out_idx += ref_len
-                
+
                 # insertions + substitions
                 writable_length = min(v_len, length - out_idx)
                 out[sample, hap, out_idx : out_idx + writable_length] = allele[
@@ -252,7 +270,7 @@ def construct_haplotypes_with_indels(
                 # deletions, move ref to end of deletion
                 if v_diff < 0:
                     ref_idx -= v_diff
-                    
+
                 if out_idx >= length:
                     break
 

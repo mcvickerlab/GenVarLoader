@@ -95,7 +95,9 @@ class RLE_Table(Reader):
         self.name = name
         self.table = _table
         self.virtual_data = xr.DataArray(
-            da.empty(len(_samples), dtype=np.float64),  # pyright: ignore[reportPrivateImportUsage]
+            da.empty(
+                len(_samples), dtype=np.float64
+            ),  # pyright: ignore[reportPrivateImportUsage]
             name=name,
             dims="sample",
             coords={"sample": _samples},
@@ -117,7 +119,7 @@ class RLE_Table(Reader):
         q = self.table.lazy().filter(
             (pl.col("chrom") == contig)
             & (pl.col("chromStart") < end)
-            & (pl.col("chromEnd") > start)
+            & (pl.col("chromEnd") >= start)
         )
 
         # get samples in order requested

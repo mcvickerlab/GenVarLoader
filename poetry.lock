@@ -1375,21 +1375,6 @@ files = [
 numpy = ">=1.16.6"
 
 [[package]]
-name = "pybigwig"
-version = "0.3.22"
-description = "A package for accessing bigWig files using libBigWig"
-optional = false
-python-versions = ">=3.7"
-files = [
-    {file = "pyBigWig-0.3.22-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:55031f67de6b117d49ba191738ea9707239bdacbd623a046e03917913257ac29"},
-    {file = "pyBigWig-0.3.22-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:bc8eb9f312b7ba99f90b490bcc0341f317549c2ef0bb65cd94c20241cbe67981"},
-    {file = "pyBigWig-0.3.22-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:647ae8b613d6dfc691cadd61703f81fdf3c685177c7e2e3e730c4f9c0d6f93c6"},
-    {file = "pyBigWig-0.3.22-cp38-cp38-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:5b653a085d829d02154a68c438df2b5f2b0e560f06dab55cd191e7b3ca7982f2"},
-    {file = "pyBigWig-0.3.22-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:85d740f7e9148d21c1150c0c822600751573a62ccc7ea037495e915434ebefa7"},
-    {file = "pyBigWig-0.3.22.tar.gz", hash = "sha256:5d4426f754bd7b7f6dc21d6c3f93b58a96a65b6eb2e578ae03b31a71272d2243"},
-]
-
-[[package]]
 name = "pydantic"
 version = "2.4.2"
 description = "Data validation using Python type hints"
@@ -2198,4 +2183,4 @@ testing = ["big-O", "jaraco.functools", "jaraco.itertools", "more-itertools", "p
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.9"
-content-hash = "b8098699a597f094fbb89f5c5d5e0e1dd35a3a97d8023a19045fc5c3f4682719"
+content-hash = "dbf14cc0a2130d5b15f2b2ee8d17843303b5d34f52770f56a220a123e62dbca9"

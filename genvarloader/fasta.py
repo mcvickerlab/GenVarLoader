@@ -5,8 +5,10 @@ import dask.array as da
 import numpy as np
 import pysam
 import xarray as xr
+from numpy.typing import NDArray
 
 from .types import Reader
+from .util import splice_subarrays
 
 
 class Fasta(Reader):
@@ -30,7 +32,9 @@ class Fasta(Reader):
         ValueError
             If pad value is not a single character.
         """
-        self.virtual_data = xr.DataArray(da.empty(0, dtype="S1"), name=name, dims="")  # pyright: ignore[reportPrivateImportUsage]
+        self.virtual_data = xr.DataArray(
+            da.empty(0, dtype="S1"), name=name, dims=""
+        )  # pyright: ignore[reportPrivateImportUsage]
         self.path = path
         if pad is not None:
             if len(pad) > 1:
@@ -47,17 +51,24 @@ class Fasta(Reader):
     def _open(self):
         return pysam.FastaFile(str(self.path))
 
-    def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
+    def read(
+        self,
+        contig: str,
+        starts: NDArray[np.int64],
+        ends: NDArray[np.int64],
+        out: Optional[NDArray] = None,
+        **kwargs
+    ) -> xr.DataArray:
         """Read a sequence from a FASTA file.
 
         Parameters
         ----------
         contig : str
             Name of the contig/chromosome.
-        start : int
-            Start coordinate, 0-based.
-        end : int
-            End coordinate, 0-based exclusive.
+        starts : NDArray[np.int64]
+            Start coordinates, 0-based.
+        ends : NDArray[np.int64]
+            End coordinates, 0-based exclusive.
         **kwargs
             Not used.
 
@@ -73,9 +84,12 @@ class Fasta(Reader):
         """
         contig = self.normalize_contig_name(contig)
 
+        start = starts.min()
+        end = ends.max()
+
         pad_left = -min(0, start)
         if pad_left > 0 and self.pad is None:
-            raise ValueError("Padding is disabled and start is < 0.")
+            raise ValueError("Padding is disabled and a start is < 0.")
 
         with self._open() as f:
             pad_right = max(0, end - f.get_reference_length(contig))
@@ -97,4 +111,7 @@ class Fasta(Reader):
             pad_right = np.full(pad_right, self.pad)
             padded_seq.append(pad_right)
         seq = np.concatenate(padded_seq)
-        return xr.DataArray(seq, dims="length")
+        
+        out = splice_subarrays(seq, starts, ends)
+        
+        return xr.DataArray(out, dims="length")

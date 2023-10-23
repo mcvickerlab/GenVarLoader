@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Iterable, Optional, Protocol, Sequence, Union, overload
+from typing import Iterable, List, Optional, Protocol, Sequence, Tuple, Union, overload
 
 import numpy as np
 import polars as pl
@@ -28,19 +28,24 @@ class Reader(Protocol):
     contig_starts_with_chr: Optional[bool]
 
     def read(
-        self, contig: str, start: int, end: int, out: Optional[NDArray] = None, **kwargs
+        self,
+        contig: str,
+        starts: NDArray[np.int64],
+        ends: NDArray[np.int64],
+        out: Optional[NDArray] = None,
+        **kwargs
     ) -> xr.DataArray:
         """Read data corresponding to given genomic coordinates. The output shape will
-        have length as the final axis i.e. (..., length).
+        have length as the final dimension/axis i.e. (..., length).
 
         Parameters
         ----------
         contig : str
             Name of the contig/chromosome.
-        start : int
-            Start coordinate, 0-based.
-        end : int
-            End coordinate, 0-based exclusive.
+        starts : NDArray[int32]
+            Start coordinates, 0-based.
+        ends : NDArray[int32]
+            End coordinates, 0-based exclusive.
         out : NDArray, optional
             Array to put the result into. Otherwise allocates one.
         **kwargs
@@ -52,6 +57,13 @@ class Reader(Protocol):
         xarray.DataArray
             Data corresponding to the given genomic coordinates. The final axis is the
             length axis i.e. has length == end - start.
+
+        Notes
+        -----
+        Each call to `read` should correspond to a single disk access for each file
+        represented by the Reader by reading from min(starts) to max(ends).
+        When multiple regions are provided (i.e. multiple starts and ends) they should
+        be concatenated together in the output array along the length dimension.
         """
         ...
 
@@ -106,6 +118,24 @@ class ToZarr(Protocol):
 
 @define
 class VLenAlleles:
+    """Variable length alleles.
+    
+    Create VLenAlleles from a polars Series of strings:
+    >>> alleles = VLenAlleles.from_polars(pl.Series(["A", "AC", "G"]))
+    
+    Create VLenAlleles from offsets and alleles:
+    >>> offsets = np.array([0, 1, 3, 4], np.uint32)
+    >>> alleles = np.frombuffer(b"AACG", "|S1")
+    >>> alleles = VLenAlleles(offsets, alleles)
+    
+    Get a single allele:
+    >>> alleles[0]
+    b'A'
+    
+    Get a slice of alleles:
+    >>> alleles[1:]
+    VLenAlleles(offsets=array([0, 2, 3]), alleles=array([b'AC', b'G'], dtype='|S1'))
+    """
     offsets: NDArray[np.uint32]
     alleles: NDArray[np.bytes_]
 
@@ -180,22 +210,6 @@ class SparseAlleles:
 
 
 @define
-class DenseAlleles:
-    """Dense array of alleles.
-
-    Attributes
-    ----------
-    positions : NDArray[np.int32]
-        Shape: (variants). 0-based position of each variant.
-    alleles : NDArray[np.bytes_]
-        Shape: (samples, ploid, variants). Alleles found at each variant.
-    """
-
-    positions: NDArray[np.int32]
-    alleles: NDArray[np.bytes_]
-
-
-@define
 class DenseGenotypes:
     """Dense array(s) of genotypes.
 
@@ -203,6 +217,8 @@ class DenseGenotypes:
     ----------
     positions : NDArray[np.int32]
         Shape: (variants)
+    size_diffs : NDArray[np.int32]
+        Shape : (variants). Difference in length between the REF and the ALT alleles.
     ref : VLenAlleles
         Shape: (variants). REF alleles.
     alt : VLenAlleles
@@ -214,11 +230,10 @@ class DenseGenotypes:
     """
 
     positions: NDArray[np.int32]
-    sizes: NDArray[np.int32]
+    size_diffs: NDArray[np.int32]
     ref: VLenAlleles
     alt: VLenAlleles
     genotypes: NDArray[np.int8]
-    max_end: int
 
 
 class Variants(Protocol):
@@ -232,8 +247,8 @@ class Variants(Protocol):
     contig_starts_with_chr: Optional[bool]
 
     def read(
-        self, contig: str, start: int, end: int, **kwargs
-    ) -> Optional[Union[SparseAlleles, DenseGenotypes]]:
+        self, contig: str, starts: NDArray[np.int64], ends: NDArray[np.int64], **kwargs
+    ) -> Union[Optional[SparseAlleles], List[Optional[DenseGenotypes]]]:
         """Read variants found in the given genomic coordinates, optionally for specific
         samples and ploid numbers.
 
@@ -241,18 +256,51 @@ class Variants(Protocol):
         ----------
         contig : str
             Name of the contig/chromosome.
-        start : int
-            Start coordinate, 0-based.
-        end : int
-            End coordinate, 0-based exclusive.
+        starts : NDArray[int32]
+            Start coordinates, 0-based.
+        ends : int, NDArray[int32]
+            End coordinates, 0-based exclusive.
         **kwargs
             Additional keyword arguments. May include `sample: Iterable[str]` and
             `ploid: Iterable[int]` to specify sample names and ploid numbers.
 
         Returns
         -------
-        If no variants are in the region specified, returns None. Otherwise, returns
-        either SparseAlleles or DenseGenotypes depending on the file format.
+        Returns a list of optional DenseGenotypes, one for each query region.
+        """
+        ...
+
+    def read_for_haplotype_construction(
+        self,
+        contig: str,
+        starts: NDArray[np.int64],
+        ends: NDArray[np.int64],
+        target_length: int,
+        **kwargs
+    ) -> Tuple[List[Optional[DenseGenotypes]], NDArray[np.int64]]:
+        """Read variants sufficient to reconstruct haplotypes of a target length spanning
+        the given genomic coordinates. This may necessitate returning variants beyond the
+        ranges themselves, since deletions shrink the sequence and require information
+        about variants past the end of the query regions.
+
+        Parameters
+        ----------
+        contig : str
+            Name of the contig/chromosome.
+        starts : NDArray[int32]
+            Start coordinates, 0-based.
+        ends : int, NDArray[int32]
+            End coordinates, 0-based exclusive.
+        target_length : int
+            Target length of the reconstructed haplotypes.
+
+        Returns
+        -------
+        List[Optional[DenseGenotypes]]
+            Genotypes for each query region.
+        NDArray[np.int64]
+            New ends for querying the reference genome such that enough sequence is available
+            to get haplotypes of `target_length`.
         """
         ...
 
