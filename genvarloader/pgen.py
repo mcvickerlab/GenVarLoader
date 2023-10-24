@@ -276,6 +276,10 @@ class Pgen(Variants):
         
         min_s_idx = s_idxs.min()
         max_e_idx = e_idxs.max()
+        
+        # no variants in query regions
+        if max_e_idx <= min_s_idx:
+            return out, ends
 
         # get alleles
         genotypes = np.empty(
