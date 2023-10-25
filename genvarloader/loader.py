@@ -40,6 +40,10 @@ except ImportError:
 
 
 class GVL:
+    # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
+    BUFFER_IDX_START_COL = 0
+    BUFFER_IDX_MIN_DIM_COL = 2
+
     def __init__(
         self,
         readers: Union[Reader, Iterable[Reader]],
@@ -156,7 +160,11 @@ class GVL:
         for k, a in self.virtual_data.data_vars.items():
             self.non_batch_dim_shape[k] = [a.sizes[d] for d in self.non_batch_dims]
             # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
-            idx_cols = [i for i, d in enumerate(self.batch_dims, 2) if d in a.sizes]
+            idx_cols = [
+                i
+                for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL)
+                if d in a.sizes
+            ]
             self.buffer_idx_cols[k] = np.array(idx_cols, dtype=int)
 
         if isinstance(bed, (str, Path)):
@@ -303,7 +311,11 @@ class GVL:
             for k, a in self.virtual_data.data_vars.items():
                 self.non_batch_dim_shape[k] = [a.sizes[d] for d in self.non_batch_dims]
                 # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
-                idx_cols = [i for i, d in enumerate(self.batch_dims, 2) if d in a.sizes]
+                idx_cols = [
+                    i
+                    for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL)
+                    if d in a.sizes
+                ]
                 self.buffer_idx_cols[k] = np.array(idx_cols, dtype=int)
 
         if None not in (fixed_length, bed, max_memory_gb, batch_dims):
@@ -540,7 +552,7 @@ class GVL:
                 size = self.sizes[dim]
             buffer_indexes.append(np.arange(size))
         buffer_idx = _cartesian_product(buffer_indexes)
-        # columns: starts, region_idx, dim1_idx, dim2_idx, ...
+        # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
         rel_starts = get_rel_starts(partition["chromStart"].to_numpy(), merged_starts)[
             buffer_idx[:, 0], None
         ]
@@ -550,11 +562,11 @@ class GVL:
     def resample_buffer_idx(self, buffer_idx: NDArray):
         idx_weights = np.ones(len(buffer_idx))
         # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
-        for i, d in enumerate(self.batch_dims):
+        for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL):
             # caller responsible for weights existing
             w = self.weights.get(d, None)  # type: ignore[reportOptionalMemberAccess]
             if w is not None:
-                idx_weights *= w[buffer_idx[:, i + 2]]
+                idx_weights *= w[buffer_idx[:, i]]
         idx_weights = np.round(idx_weights).astype(int)
         return buffer_idx.repeat(idx_weights)
 
@@ -579,8 +591,13 @@ class GVL:
                 ),
             )
             self.select_from_buffer_array(
-                a.values, idx, self.buffer_idx_cols[k], out[k][1]
+                a.values,
+                idx,
+                self.buffer_idx_cols[k],
+                out[k][1],
+                self.BUFFER_IDX_START_COL,
             )
+        # TODO slowest part of this function is the creation of the Dataset
         return xr.Dataset(out)
 
     def select_from_buffer_array(
@@ -589,13 +606,14 @@ class GVL:
         idx: NDArray[np.integer],
         idx_cols: NDArray[np.integer],
         out: NDArray,
+        start_col: int,
     ):
         # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
         for i in range(len(idx)):
             _idx: NDArray[np.integer] = idx[i]
             indexer = [slice(None)] * arr.ndim
             indexer[: len(idx_cols)] = _idx[idx_cols]
-            indexer[-1] = slice(_idx[0], _idx[0] + self.fixed_length)
+            indexer[-1] = slice(_idx[start_col], _idx[start_col] + self.fixed_length)
             out[i] = arr[tuple(indexer)]
 
     def process_batch(
@@ -748,6 +766,7 @@ class SyncBuffers:
                             contig,
                             merged_starts,
                             merged_ends,
+                            strands=None,
                             out=sliced_buffer[name],
                             **read_kwargs,
                         )

@@ -1,6 +1,5 @@
 from typing import Dict, Hashable, Tuple
 
-import numba as nb
 import numpy as np
 import ray
 import xarray as xr
@@ -10,22 +9,6 @@ from numpy.typing import NDArray
 from .types import Reader
 
 DataVarsLike = Dict[Hashable, Tuple[Tuple[Hashable, ...], NDArray]]
-
-
-@nb.njit(nogil=True, cache=True)
-def partition_regions(
-    starts: NDArray[np.int64], ends: NDArray[np.int64], max_length: int
-):
-    partitions = np.zeros_like(starts)
-    partition = 0
-    curr_length = ends[0] - starts[0]
-    for i in range(1, len(partitions)):
-        curr_length += ends[i] - ends[i - 1]
-        if curr_length > max_length:
-            partition += 1
-            curr_length = ends[i] - starts[i]
-        partitions[i] = partition
-    return partitions
 
 
 @define
@@ -77,10 +60,10 @@ class ReaderActor:
 
     @ray.method(num_returns=1)
     def read(
-        self, contig: str, start: int, end: int, **kwargs
+        self, contig: str, starts: NDArray[np.int64], ends: NDArray[np.int64], **kwargs
     ) -> Tuple[DataVarsLike, int]:
         buffer = {
-            r.virtual_data.name: r.read(contig, start, end, **kwargs)
+            r.virtual_data.name: r.read(contig, starts, ends, strands=None, **kwargs)
             for r in self.readers
         }
         buffer = {name: (arr.dims, arr.to_numpy()) for name, arr in buffer.items()}
