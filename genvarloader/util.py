@@ -1,6 +1,6 @@
 from itertools import accumulate, chain, repeat
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Optional, Sequence, TypeVar, Union
 
 import numpy as np
 import pandera as pa
@@ -234,7 +234,33 @@ def get_rel_starts(starts: NDArray[np.int64], ends: NDArray[np.int64]):
     return rel_starts
 
 
-def splice_subarrays(arr: NDArray, starts: NDArray[np.int64], ends: NDArray[np.int64]):
+T = TypeVar("T", bound=np.generic)
+
+
+def splice_subarrays(
+    arr: NDArray[T], starts: NDArray[np.int64], ends: NDArray[np.int64]
+) -> NDArray[T]:
+    """Splice subarrays from a larger array and reverse-complement them.
+
+    Parameters
+    ----------
+    arr : NDArray
+        Array to splice from.
+    starts : NDArray[np.int64]
+        Start coordinates, 0-based.
+    ends : NDArray[np.int64]
+        End coordinates, 0-based exclusive.
+    strands : NDArray[np.int8]
+        Strand of each query region. 1 for forward, -1 for reverse. If None, defaults
+        to forward strand.
+    rc_fn : Callable[[NDArray], NDArray]
+        Function to reverse-complement the subarrays.
+
+    Returns
+    -------
+    out : NDArray
+        Spliced and reverse-complemented array.
+    """
     start = starts.min()
     rel_starts = get_rel_starts(starts, ends)
     total_length = (ends - starts).sum()
@@ -242,4 +268,87 @@ def splice_subarrays(arr: NDArray, starts: NDArray[np.int64], ends: NDArray[np.i
     for rel_start, s, e in zip(rel_starts, starts - start, ends - start):
         length = e - s
         out[rel_start : rel_start + length] = arr[s:e]
+    return out
+
+
+def splice_and_rc_subarrays(
+    arr: NDArray[T],
+    starts: NDArray[np.int64],
+    ends: NDArray[np.int64],
+    strands: NDArray[np.int8],
+    rc_fn: Callable[[NDArray[T]], NDArray[T]],
+) -> NDArray[T]:
+    """Splice subarrays from a larger array and reverse-complement them.
+
+    Parameters
+    ----------
+    arr : NDArray
+        Array to splice from.
+    starts : NDArray[np.int64]
+        Start coordinates, 0-based.
+    ends : NDArray[np.int64]
+        End coordinates, 0-based exclusive.
+    strands : NDArray[np.int8]
+        Strand of each query region. 1 for forward, -1 for reverse. If None, defaults
+        to forward strand.
+    rc_fn : Callable[[NDArray], NDArray]
+        Function to reverse-complement the subarrays.
+
+    Returns
+    -------
+    out : NDArray
+        Spliced and reverse-complemented array.
+    """
+    start = starts.min()
+    rel_starts = get_rel_starts(starts, ends)
+    total_length = (ends - starts).sum()
+    out = np.empty(total_length, dtype=arr.dtype)
+    for rel_start, s, e, strand in zip(
+        rel_starts, starts - start, ends - start, strands
+    ):
+        length = e - s
+        if strand == 1:
+            subarr = arr[s:e]
+        else:
+            subarr = rc_fn(arr[s:e])
+        out[rel_start : rel_start + length] = subarr
+    return out
+
+
+def splice_and_rev_subarrays(
+    arr: NDArray[T],
+    starts: NDArray[np.int64],
+    ends: NDArray[np.int64],
+    strands: NDArray[np.int8],
+) -> NDArray[T]:
+    """
+    Splices and reverses subarrays of a given array based on the start and end indices
+    and strand orientation.
+
+    Parameters
+    ----------
+    arr : NDArray
+        Array to splice from.
+    starts : NDArray[np.int64]
+        Start coordinates, 0-based.
+    ends : NDArray[np.int64]
+        End coordinates, 0-based exclusive.
+    strands : NDArray[np.int8]
+        Strand of each query region. 1 for forward, -1 for reverse. If None, defaults
+        to forward strand.
+
+    Returns
+    -------
+    out : NDArray
+        Spliced and reversed array.
+    """
+    start = starts.min()
+    rel_starts = get_rel_starts(starts, ends)
+    total_length = (ends - starts).sum()
+    out = np.empty(total_length, dtype=arr.dtype)
+    for rel_start, s, e, strand in zip(
+        rel_starts, starts - start, ends - start, strands
+    ):
+        length = e - s
+        out[rel_start : rel_start + length] = arr[s:e:strand]
     return out

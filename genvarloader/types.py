@@ -32,6 +32,7 @@ class Reader(Protocol):
         contig: str,
         starts: NDArray[np.int64],
         ends: NDArray[np.int64],
+        strands: Optional[NDArray[np.int8]] = None,
         out: Optional[NDArray] = None,
         **kwargs
     ) -> xr.DataArray:
@@ -46,6 +47,9 @@ class Reader(Protocol):
             Start coordinates, 0-based.
         ends : NDArray[int32]
             End coordinates, 0-based exclusive.
+        strands : NDArray[int8], optional
+            Strand of each query region. 1 for forward, -1 for reverse. If None,
+            defaults to forward strand.
         out : NDArray, optional
             Array to put the result into. Otherwise allocates one.
         **kwargs
@@ -119,23 +123,24 @@ class ToZarr(Protocol):
 @define
 class VLenAlleles:
     """Variable length alleles.
-    
+
     Create VLenAlleles from a polars Series of strings:
     >>> alleles = VLenAlleles.from_polars(pl.Series(["A", "AC", "G"]))
-    
+
     Create VLenAlleles from offsets and alleles:
     >>> offsets = np.array([0, 1, 3, 4], np.uint32)
     >>> alleles = np.frombuffer(b"AACG", "|S1")
     >>> alleles = VLenAlleles(offsets, alleles)
-    
+
     Get a single allele:
     >>> alleles[0]
     b'A'
-    
+
     Get a slice of alleles:
     >>> alleles[1:]
     VLenAlleles(offsets=array([0, 2, 3]), alleles=array([b'AC', b'G'], dtype='|S1'))
     """
+
     offsets: NDArray[np.uint32]
     alleles: NDArray[np.bytes_]
 
@@ -278,10 +283,10 @@ class Variants(Protocol):
         target_length: int,
         **kwargs
     ) -> Tuple[List[Optional[DenseGenotypes]], NDArray[np.int64]]:
-        """Read variants sufficient to reconstruct haplotypes of a target length spanning
-        the given genomic coordinates. This may necessitate returning variants beyond the
-        ranges themselves, since deletions shrink the sequence and require information
-        about variants past the end of the query regions.
+        """Read variants sufficient to reconstruct haplotypes of a target length
+        spanning the given genomic coordinates. This may necessitate returning variants
+        beyond the ranges themselves, since deletions shrink the sequence and require
+        information about variants past the end of the query regions.
 
         Parameters
         ----------
@@ -299,8 +304,8 @@ class Variants(Protocol):
         List[Optional[DenseGenotypes]]
             Genotypes for each query region.
         NDArray[np.int64]
-            New ends for querying the reference genome such that enough sequence is available
-            to get haplotypes of `target_length`.
+            New ends for querying the reference genome such that enough sequence is
+            available to get haplotypes of `target_length`.
         """
         ...
 

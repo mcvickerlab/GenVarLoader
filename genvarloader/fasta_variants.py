@@ -1,9 +1,11 @@
+from itertools import cycle
 from textwrap import dedent
 from typing import Optional
 
 import dask.array as da
 import numba as nb
 import numpy as np
+import seqpro as sp
 import xarray as xr
 from loguru import logger
 from numpy.typing import NDArray
@@ -16,14 +18,18 @@ from .util import get_rel_starts
 
 class FastaVariants(Reader):
     def __init__(
-        self, name: str, fasta: Fasta, variants: Variants, seed: Optional[int] = None
+        self,
+        name: str,
+        reference: Fasta,
+        variants: Variants,
+        seed: Optional[int] = None,
     ) -> None:
-        self.fasta = fasta
+        self.reference = reference
         self.variants = variants
         self.virtual_data = xr.DataArray(
-            da.empty(
+            da.empty(  # pyright: ignore[reportPrivateImportUsage]
                 (self.variants.n_samples, self.variants.ploidy), dtype="S1"
-            ),  # pyright: ignore[reportPrivateImportUsage]
+            ),
             name=name,
             coords={
                 "sample": np.asarray(self.variants.samples),
@@ -31,7 +37,10 @@ class FastaVariants(Reader):
             },
         )
         self.contig_starts_with_chr = None
-        if self.fasta.contig_starts_with_chr != self.variants.contig_starts_with_chr:
+        if (
+            self.reference.contig_starts_with_chr
+            != self.variants.contig_starts_with_chr
+        ):
             logger.warning(
                 dedent(
                     f"""
@@ -39,7 +48,7 @@ class FastaVariants(Reader):
                 conventions. Contig names in queries will be normalized so that they
                 will still run, but this may indicate that the variants were not aligned
                 to the reference being used to construct haplotypes. The reference
-                file's contigs{"" if self.fasta.contig_starts_with_chr else " don't"}
+                file's contigs{"" if self.reference.contig_starts_with_chr else " don't"}
                 start with "chr" whereas the variant file's are the opposite.
                 """
                 )
@@ -53,6 +62,7 @@ class FastaVariants(Reader):
         contig: str,
         starts: NDArray[np.int64],
         ends: NDArray[np.int64],
+        strands: Optional[NDArray[np.int8]] = None,
         out: Optional[NDArray[np.bytes_]] = None,
         **kwargs,
     ) -> xr.DataArray:
@@ -66,6 +76,9 @@ class FastaVariants(Reader):
             Start coordinates, 0-based.
         ends : NDArray[int32]
             End coordinates, 0-based exclusive.
+        strands : NDArray[int8], optional
+            Strand of each query region. 1 for forward, -1 for reverse. If None,
+            defaults to forward strand.
         out : NDArray, optional
             Array to put the result into. Otherwise allocates one.
         **kwargs
@@ -85,6 +98,11 @@ class FastaVariants(Reader):
         xr.DataArray
             Variant sequences, dimensions: (sample, ploid, length)
         """
+        if strands is None:
+            _strands = cycle([None])
+        else:
+            _strands = strands
+
         samples = kwargs.get("sample", None)
         if samples is None:
             n_samples = self.variants.n_samples
@@ -115,7 +133,9 @@ class FastaVariants(Reader):
         lengths = ends - starts
         rel_starts = get_rel_starts(starts, ends)
 
-        ref: NDArray[np.bytes_] = self.fasta.read(contig, starts, max_ends).to_numpy()
+        ref: NDArray[np.bytes_] = self.reference.read(
+            contig, starts, max_ends
+        ).to_numpy()
         ref_lengths = max_ends - starts
         ref_rel_starts = get_rel_starts(starts, max_ends)
 
@@ -125,8 +145,8 @@ class FastaVariants(Reader):
         else:
             seqs = out
 
-        for variant, start, length, rel_start, ref_length, ref_rel_start in zip(
-            variants, starts, lengths, rel_starts, ref_lengths, ref_rel_starts
+        for variant, start, length, rel_start, ref_length, ref_rel_start, strand in zip(
+            variants, starts, lengths, rel_starts, ref_lengths, ref_rel_starts, _strands
         ):
             subseq = seqs[..., rel_start : rel_start + length]
             # subref can be longer than subseq
@@ -145,6 +165,8 @@ class FastaVariants(Reader):
                     variant.alt.offsets,
                     variant.alt.alleles.view(np.uint8),
                 )
+                if strand == -1:
+                    subseq[...] = sp.alphabets.DNA.reverse_complement(subseq)
             elif isinstance(variant, SparseAlleles):
                 raise NotImplementedError
             else:
@@ -239,9 +261,10 @@ def construct_haplotypes_with_indels(
                         shifted = shift
                         # how much left to shift - amount of ref we can use
                         allele_start_idx = shift - shifted - ref_shift_dist
-                        # NEED THIS CHECK! otherwise parallel=True can cause a SystemError!
-                        # parallel jit cannot handle changes in array dimension.
-                        # without this, allele can change from a 1D array to a 0D array.
+                        #! without if statement, parallel=True can cause a SystemError!
+                        # * parallel jit cannot handle changes in array dimension.
+                        # * without this, allele can change from a 1D array to a 0D
+                        # * array.
                         if allele_start_idx == v_len:
                             continue
                         allele = allele[allele_start_idx:]

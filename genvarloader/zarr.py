@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Union
+from typing import List, Union
 
 import dask.array as da
 import xarray as xr
@@ -29,10 +29,9 @@ class Zarr(Reader):
         path : Path
             Path to the store.
         """
-        self.name = name
         self.path = path
         self.ds = xr.open_zarr(path, mask_and_scale=False, concat_characters=False)
-        contigs = self.ds.attrs["contigs"]
+        contigs: List[str] = self.ds.attrs["contigs"]
         shape = tuple(
             s for d, s in self.ds.sizes.items() if not str(d).endswith("length")
         )
@@ -41,12 +40,15 @@ class Zarr(Reader):
             d: c for d, c in self.ds.coords.items() if not str(d).endswith("length")
         }
         self.virtual_data = xr.DataArray(
-            da.empty(
+            da.empty(  # pyright: ignore[reportPrivateImportUsage]
                 shape=shape, dtype=self.ds.dtypes[contigs[0]]
-            ),  # pyright: ignore[reportPrivateImportUsage]
+            ),
+            name=name,
             dims=dims,
             coords=coords,
         )
+        self.contigs = contigs
+        self.contig_starts_with_chr = self.infer_contig_prefix(contigs)
 
     def read(self, contig: str, start: int, end: int) -> xr.DataArray:
         return self.ds[contig].isel(length=slice(start, end)).compute()

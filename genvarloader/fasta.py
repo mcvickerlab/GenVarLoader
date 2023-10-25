@@ -1,14 +1,15 @@
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, cast
 
 import dask.array as da
 import numpy as np
 import pysam
+import seqpro as sp
 import xarray as xr
 from numpy.typing import NDArray
 
 from .types import Reader
-from .util import splice_subarrays
+from .util import splice_and_rc_subarrays, splice_subarrays
 
 
 class Fasta(Reader):
@@ -33,8 +34,10 @@ class Fasta(Reader):
             If pad value is not a single character.
         """
         self.virtual_data = xr.DataArray(
-            da.empty(0, dtype="S1"), name=name, dims=""
-        )  # pyright: ignore[reportPrivateImportUsage]
+            da.empty(0, dtype="S1"),
+            name=name,
+            dims="",  # pyright: ignore[reportPrivateImportUsage]
+        )
         self.path = path
         if pad is not None:
             if len(pad) > 1:
@@ -56,6 +59,7 @@ class Fasta(Reader):
         contig: str,
         starts: NDArray[np.int64],
         ends: NDArray[np.int64],
+        strands: Optional[NDArray[np.int8]] = None,
         out: Optional[NDArray] = None,
         **kwargs
     ) -> xr.DataArray:
@@ -69,6 +73,11 @@ class Fasta(Reader):
             Start coordinates, 0-based.
         ends : NDArray[np.int64]
             End coordinates, 0-based exclusive.
+        strands : NDArray[int8], optional
+            Strand of each query region. 1 for forward, -1 for reverse. If None, defaults
+            to forward strand.
+        out : NDArray, optional
+            Array to put the result into. Otherwise allocates one.
         **kwargs
             Not used.
 
@@ -110,8 +119,12 @@ class Fasta(Reader):
         if pad_right > 0:
             pad_right = np.full(pad_right, self.pad)
             padded_seq.append(pad_right)
-        seq = np.concatenate(padded_seq)
-        
-        out = splice_subarrays(seq, starts, ends)
-        
+        seq = cast(NDArray[np.bytes_], np.concatenate(padded_seq))
+
+        if strands is None:
+            out = splice_subarrays(seq, starts, ends)
+        else:
+            rc_fn = sp.alphabets.DNA.reverse_complement
+            out = splice_and_rc_subarrays(seq, starts, ends, strands, rc_fn)
+
         return xr.DataArray(out, dims="length")
