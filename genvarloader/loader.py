@@ -56,6 +56,7 @@ class GVL:
         return_index: bool = False,
         drop_last: bool = False,
         num_workers: int = 1,
+        jitter_bed: Optional[int] = None,
     ) -> None:
         """GenVarLoader
 
@@ -99,6 +100,8 @@ class GVL:
             divisible by the batch size.
         num_workers : int, optional
             How many workers to use, default 1.
+        jitter_bed : int, optional
+            Jitter the regions in the BED file by up to this many nucleotides.
         """
         self.num_workers = num_workers
         self.fixed_length = fixed_length
@@ -110,6 +113,7 @@ class GVL:
         self.drop_last = drop_last
         self.batch_size = batch_size
         self.max_memory_gb = max_memory_gb
+        self.jitter_bed = jitter_bed
 
         if not ray.is_initialized() and self.num_workers > 1:
             ray.init(num_cpus=self.num_workers - 1)
@@ -137,17 +141,6 @@ class GVL:
                     continue
                 self.itemsizes[dim] += arr.dtype.itemsize
 
-        if isinstance(bed, (str, Path)):
-            bed = read_bedlike(bed)
-        bed = bed.with_row_count("region_idx")
-        with pl.StringCache():
-            pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
-            bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
-        self.bed = _set_fixed_length_around_center(bed, fixed_length)
-        # TODO check if any regions are out-of-bounds and any readers have padding
-        # disabled. If so, raise an error. Otherwise, readers will catch the error
-        # downstream.
-
         if batch_dims is None:
             batch_dims = []
         self.batch_dims = batch_dims
@@ -156,6 +149,7 @@ class GVL:
             raise ValueError(
                 f"Got batch dimensions that are not available from the readers: {missing_dims}"
             )
+
         self.non_batch_dims = [d for d in self.sizes.keys() if d not in self.batch_dims]
         self.non_batch_dim_shape: Dict[Hashable, List[int]] = {}
         self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
@@ -165,11 +159,33 @@ class GVL:
             idx_cols = [i for i, d in enumerate(self.batch_dims, 2) if d in a.sizes]
             self.buffer_idx_cols[k] = np.array(idx_cols, dtype=int)
 
-        self.max_length = self.get_max_length()
-        self.partitioned_bed = self.partition_bed(self.bed, self.max_length)
+        if isinstance(bed, (str, Path)):
+            bed = read_bedlike(bed)
+
+        bed = bed.with_row_count("region_idx")
+        with pl.StringCache():
+            pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
+            bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
+        self.bed = _set_fixed_length_around_center(bed, fixed_length)
+        # TODO check if any regions are out-of-bounds and any readers have padding
+        # disabled. If so, raise an error. Otherwise, readers will catch the error
+        # downstream.
+
         self.n_instances: int = self.bed.height * np.prod(
             [self.sizes[d] for d in self.batch_dims], dtype=int
         )
+
+        if self.jitter_bed is not None:
+            shifts = self.rng.integers(
+                -self.jitter_bed, self.jitter_bed + 1, size=len(self.bed)
+            )
+            bed = self.bed.with_columns(
+                pl.col("chromStart") + shifts,
+                pl.col("chromEnd") + shifts,
+            )
+
+        self.max_length = self.get_max_length()
+        self.partitioned_bed = self.partition_bed(bed, self.max_length)
 
         if weights is not None:
             if extra_weights := set(weights.keys()) - set(self.virtual_data.dims):  # type: ignore
@@ -196,6 +212,7 @@ class GVL:
         return_tuples: bool = False,
         return_index: bool = False,
         drop_last: bool = False,
+        jitter_bed: Optional[int] = None,
     ):
         """Update any parameters that don't require re-initializing Ray Actors. If you
         need to change readers or the number of workers, init a new GVL. Note: do NOT
@@ -235,7 +252,15 @@ class GVL:
         drop_last : bool, optional
             Whether to drop the last batch if the number of instances are not evenly
             divisible by the batch size.
+        jitter_bed : int, optional
+            Jitter the regions in the BED file by up to this many nucleotides.
         """
+        if fixed_length is not None:
+            self.fixed_length = fixed_length
+        if batch_size is not None:
+            self.batch_size = batch_size
+        if max_memory_gb is not None:
+            self.max_memory_gb = max_memory_gb
         if transform is not None:
             self.transform = transform
         if shuffle is not None:
@@ -248,20 +273,21 @@ class GVL:
             self.return_index = return_index
         if drop_last is not None:
             self.drop_last = drop_last
-        if fixed_length is not None:
-            self.fixed_length = fixed_length
-        if max_memory_gb is not None:
-            self.max_memory_gb = max_memory_gb
+        if jitter_bed is not None:
+            self.jitter_bed = jitter_bed
 
         if bed is not None:
             if isinstance(bed, (str, Path)):
-                bed = read_bedlike(bed)
+                bed = read_bedlike(bed).with_columns(
+                    pl.col("strand").map_dict({"-": -1, "+": 1}, return_dtype=pl.Int8)
+                )
             bed = bed.with_row_count("region_idx")
 
             with pl.StringCache():
                 pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
                 bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
-            self.bed = _set_fixed_length_around_center(bed, self.fixed_length)
+            bed = _set_fixed_length_around_center(bed, self.fixed_length)
+            self.bed = bed
 
         if batch_dims is not None:
             self.batch_dims = batch_dims
@@ -281,14 +307,13 @@ class GVL:
                 self.buffer_idx_cols[k] = np.array(idx_cols, dtype=int)
 
         if None not in (fixed_length, bed, max_memory_gb, batch_dims):
+            # don't need to check jitter_bed here because it's jittered at each call
+            # to __iter__
             self.max_length = self.get_max_length()
             self.partitioned_bed = self.partition_bed(self.bed, self.max_length)
             self.n_instances: int = self.bed.height * np.prod(
                 [self.sizes[d] for d in self.batch_dims], dtype=int
             )
-
-        if batch_size is not None:
-            self.batch_size = batch_size
 
         if weights is not None:
             if extra_weights := set(weights.keys()) - set(self.virtual_data.dims):  # type: ignore
@@ -401,6 +426,16 @@ class GVL:
         return self.iter_batches()
 
     def iter_batches(self):
+        if self.jitter_bed is not None:
+            shifts = self.rng.integers(
+                -self.jitter_bed, self.jitter_bed + 1, size=len(self.bed)
+            )
+            bed = self.bed.with_columns(
+                pl.col("chromStart") + shifts,
+                pl.col("chromEnd") + shifts,
+            )
+            self.partitioned_bed = self.partition_bed(bed, self.max_length)
+
         if self.shuffle:
             self.rng.shuffle(self.partitioned_bed)
 
@@ -835,6 +870,7 @@ if TORCH_AVAILABLE:
             return_tuples: bool = False,
             return_index: bool = False,
             drop_last: bool = False,
+            jitter_bed: Optional[int] = None,
         ):
             """Update any parameters that don't require re-initializing Ray Actors. If
             you need to change readers or the number of workers, init a new GVL.
@@ -872,6 +908,8 @@ if TORCH_AVAILABLE:
             drop_last : bool, optional
                 Whether to drop the last batch if the number of instances are not evenly
                 divisible by the batch size.
+            jitter_bed : int, optional
+                Jitter the regions in the BED file by up to this many nucleotides.
             """
             self.gvl.set(
                 bed,
@@ -886,4 +924,5 @@ if TORCH_AVAILABLE:
                 return_tuples,
                 return_index,
                 drop_last,
+                jitter_bed,
             )
