@@ -35,6 +35,7 @@ black = "^23.9.1"
 pytest-cases = "^3.8.0"
 pytest-cov = "^4.1.0"
 ruff = "^0.0.292"
+pre-commit = "^3.5.0"
 
 [tool.isort]
 profile = "black"
@@ -43,5 +44,5 @@ profile = "black"
 plugins = ["numpy.typing.mypy_plugin", "pandera.mypy"]
 
 [build-system]
-requires = ["poetry-core>=1.7.0"]
+requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
