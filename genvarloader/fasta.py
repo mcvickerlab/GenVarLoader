@@ -9,12 +9,16 @@ import xarray as xr
 from numpy.typing import NDArray
 
 from .types import Reader
-from .util import splice_and_rc_subarrays, splice_subarrays
+from .util import splice_subarrays
 
 
 class Fasta(Reader):
     def __init__(
-        self, name: str, path: Union[str, Path], pad: Optional[str] = None
+        self,
+        name: str,
+        path: Union[str, Path],
+        pad: Optional[str] = None,
+        alphabet: Optional[Union[str, sp.NucleotideAlphabet, sp.AminoAlphabet]] = None,
     ) -> None:
         """Read sequences from a FASTA file.
 
@@ -34,9 +38,9 @@ class Fasta(Reader):
             If pad value is not a single character.
         """
         self.virtual_data = xr.DataArray(
-            da.empty(0, dtype="S1"),
+            da.empty(0, dtype="S1"),  # pyright: ignore[reportPrivateImportUsage]
             name=name,
-            dims="",  # pyright: ignore[reportPrivateImportUsage]
+            dims="",
         )
         self.path = path
         if pad is not None:
@@ -49,6 +53,25 @@ class Fasta(Reader):
         with self._open() as f:
             self.contigs = {c: f.get_reference_length(c) for c in f.references}
 
+        if alphabet is None:
+            self.alphabet = sp.alphabets.DNA
+            self.rev_strand_fn = self.alphabet.reverse_complement
+        elif isinstance(alphabet, str):
+            try:
+                self.alphabet = getattr(sp.alphabets, alphabet)
+            except AttributeError:
+                raise ValueError(f"Alphabet {alphabet} not found.")
+        elif isinstance(alphabet, sp.NucleotideAlphabet):
+            self.alphabet = alphabet
+            self.rev_strand_fn = self.alphabet.reverse_complement
+        elif isinstance(alphabet, sp.AminoAlphabet):
+            self.alphabet = alphabet
+
+            def rev_strand_fn(a: NDArray[np.bytes_]):
+                return a[::-1]
+
+            self.rev_strand_fn = rev_strand_fn
+
         self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
 
     def _open(self):
@@ -59,9 +82,8 @@ class Fasta(Reader):
         contig: str,
         starts: NDArray[np.int64],
         ends: NDArray[np.int64],
-        strands: Optional[NDArray[np.int8]] = None,
         out: Optional[NDArray] = None,
-        **kwargs
+        **kwargs,
     ) -> xr.DataArray:
         """Read a sequence from a FASTA file.
 
@@ -73,9 +95,6 @@ class Fasta(Reader):
             Start coordinates, 0-based.
         ends : NDArray[np.int64]
             End coordinates, 0-based exclusive.
-        strands : NDArray[int8], optional
-            Strand of each query region. 1 for forward, -1 for reverse. If None, defaults
-            to forward strand.
         out : NDArray, optional
             Array to put the result into. Otherwise allocates one.
         **kwargs
@@ -121,10 +140,6 @@ class Fasta(Reader):
             padded_seq.append(pad_right)
         seq = cast(NDArray[np.bytes_], np.concatenate(padded_seq))
 
-        if strands is None:
-            out = splice_subarrays(seq, starts, ends)
-        else:
-            rc_fn = sp.alphabets.DNA.reverse_complement
-            out = splice_and_rc_subarrays(seq, starts, ends, strands, rc_fn)
+        out = splice_subarrays(seq, starts, ends)
 
         return xr.DataArray(out, dims="length")

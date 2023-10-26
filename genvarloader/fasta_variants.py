@@ -1,11 +1,9 @@
-from itertools import cycle
 from textwrap import dedent
 from typing import Optional
 
 import dask.array as da
 import numba as nb
 import numpy as np
-import seqpro as sp
 import xarray as xr
 from loguru import logger
 from numpy.typing import NDArray
@@ -56,13 +54,13 @@ class FastaVariants(Reader):
                 .strip()
             )
         self.rng = np.random.default_rng(seed)
+        self.rev_strand_fn = self.reference.rev_strand_fn
 
     def read(
         self,
         contig: str,
         starts: NDArray[np.int64],
         ends: NDArray[np.int64],
-        strands: Optional[NDArray[np.int8]] = None,
         out: Optional[NDArray[np.bytes_]] = None,
         **kwargs,
     ) -> xr.DataArray:
@@ -76,9 +74,6 @@ class FastaVariants(Reader):
             Start coordinates, 0-based.
         ends : NDArray[int32]
             End coordinates, 0-based exclusive.
-        strands : NDArray[int8], optional
-            Strand of each query region. 1 for forward, -1 for reverse. If None,
-            defaults to forward strand.
         out : NDArray, optional
             Array to put the result into. Otherwise allocates one.
         **kwargs
@@ -98,11 +93,6 @@ class FastaVariants(Reader):
         xr.DataArray
             Variant sequences, dimensions: (sample, ploid, length)
         """
-        if strands is None:
-            _strands = cycle([None])
-        else:
-            _strands = strands
-
         samples = kwargs.get("sample", None)
         if samples is None:
             n_samples = self.variants.n_samples
@@ -145,8 +135,8 @@ class FastaVariants(Reader):
         else:
             seqs = out
 
-        for variant, start, length, rel_start, ref_length, ref_rel_start, strand in zip(
-            variants, starts, lengths, rel_starts, ref_lengths, ref_rel_starts, _strands
+        for variant, start, length, rel_start, ref_length, ref_rel_start in zip(
+            variants, starts, lengths, rel_starts, ref_lengths, ref_rel_starts
         ):
             subseq = seqs[..., rel_start : rel_start + length]
             # subref can be longer than subseq
@@ -165,8 +155,6 @@ class FastaVariants(Reader):
                     variant.alt.offsets,
                     variant.alt.alleles.view(np.uint8),
                 )
-                if strand == -1:
-                    subseq[...] = sp.alphabets.DNA.reverse_complement(subseq)
             elif isinstance(variant, SparseAlleles):
                 raise NotImplementedError
             else:

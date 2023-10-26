@@ -1,5 +1,15 @@
 from pathlib import Path
-from typing import Iterable, List, Optional, Protocol, Sequence, Tuple, Union, overload
+from typing import (
+    Callable,
+    Iterable,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    Union,
+    overload,
+)
 
 import numpy as np
 import polars as pl
@@ -22,17 +32,20 @@ class Reader(Protocol):
         Whether the contigs start with "chr" or not. Queries to `read()` will
         normalize the contig name to add or remove this prefix to match what the
         underlying file uses.
+    rev_strand_fn : Callable[[NDArray], NDArray]
+        Function to reverse (and potentially complement) data for a genomic region. This
+        is used when the strand is negative.
     """
 
     virtual_data: xr.DataArray
     contig_starts_with_chr: Optional[bool]
+    rev_strand_fn: Callable[[NDArray], NDArray]
 
     def read(
         self,
         contig: str,
         starts: NDArray[np.int64],
         ends: NDArray[np.int64],
-        strands: Optional[NDArray[np.int8]] = None,
         out: Optional[NDArray] = None,
         **kwargs
     ) -> xr.DataArray:
@@ -47,9 +60,6 @@ class Reader(Protocol):
             Start coordinates, 0-based.
         ends : NDArray[int32]
             End coordinates, 0-based exclusive.
-        strands : NDArray[int8], optional
-            Strand of each query region. 1 for forward, -1 for reverse. If None,
-            defaults to forward strand.
         out : NDArray, optional
             Array to put the result into. Otherwise allocates one.
         **kwargs

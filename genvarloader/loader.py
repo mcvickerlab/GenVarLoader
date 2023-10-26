@@ -40,9 +40,11 @@ except ImportError:
 
 
 class GVL:
-    # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
+    # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
     BUFFER_IDX_START_COL = 0
-    BUFFER_IDX_MIN_DIM_COL = 2
+    BUFFER_IDX_STRAND_COL = 1
+    BUFFER_IDX_REGION_COL = 2
+    BUFFER_IDX_MIN_DIM_COL = 3
 
     def __init__(
         self,
@@ -159,7 +161,7 @@ class GVL:
         self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
         for k, a in self.virtual_data.data_vars.items():
             self.non_batch_dim_shape[k] = [a.sizes[d] for d in self.non_batch_dims]
-            # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
+            # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
             idx_cols = [
                 i
                 for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL)
@@ -168,7 +170,9 @@ class GVL:
             self.buffer_idx_cols[k] = np.array(idx_cols, dtype=int)
 
         if isinstance(bed, (str, Path)):
-            bed = read_bedlike(bed)
+            bed = read_bedlike(bed).with_columns(
+                pl.col("strand").map_dict({"-": -1, "+": 1}, return_dtype=pl.Int8)
+            )
 
         bed = bed.with_row_count("region_idx")
         with pl.StringCache():
@@ -310,7 +314,7 @@ class GVL:
             self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
             for k, a in self.virtual_data.data_vars.items():
                 self.non_batch_dim_shape[k] = [a.sizes[d] for d in self.non_batch_dims]
-                # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
+                # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
                 idx_cols = [
                     i
                     for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL)
@@ -556,12 +560,13 @@ class GVL:
         rel_starts = get_rel_starts(partition["chromStart"].to_numpy(), merged_starts)[
             buffer_idx[:, 0], None
         ]
+        strands = partition["strand"].to_numpy()
         region_idx = partition["region_idx"].to_numpy()[buffer_idx[:, 0], None]
-        return np.hstack([rel_starts, region_idx, buffer_idx[:, 1:]])
+        return np.hstack([rel_starts, strands, region_idx, buffer_idx[:, 1:]])
 
     def resample_buffer_idx(self, buffer_idx: NDArray):
         idx_weights = np.ones(len(buffer_idx))
-        # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
+        # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
         for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL):
             # caller responsible for weights existing
             w = self.weights.get(d, None)  # type: ignore[reportOptionalMemberAccess]
@@ -581,21 +586,28 @@ class GVL:
         because it avoids fancy indexing in the length dimension.
         """
         out: Dict[Hashable, Tuple[List[str], NDArray]] = {}
-        for k, a in buffer.data_vars.items():
+        for name, reader in self.readers.items():
+            a = buffer[name]
             dims = ["batch", *self.non_batch_dims, "length"]
-            out[k] = (
+            out[name] = (
                 dims,
                 np.empty_like(
                     a.values,
-                    shape=(len(idx), *self.non_batch_dim_shape[k], self.fixed_length),
+                    shape=(
+                        len(idx),
+                        *self.non_batch_dim_shape[name],
+                        self.fixed_length,
+                    ),
                 ),
             )
             self.select_from_buffer_array(
                 a.values,
                 idx,
-                self.buffer_idx_cols[k],
-                out[k][1],
+                self.buffer_idx_cols[name],
+                out[name][1],
                 self.BUFFER_IDX_START_COL,
+                self.BUFFER_IDX_STRAND_COL,
+                reader.rev_strand_fn,
             )
         # TODO slowest part of this function is the creation of the Dataset
         return xr.Dataset(out)
@@ -607,6 +619,8 @@ class GVL:
         idx_cols: NDArray[np.integer],
         out: NDArray,
         start_col: int,
+        strand_col: int,
+        rev_strand_fn: Callable[[NDArray], NDArray],
     ):
         # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
         for i in range(len(idx)):
@@ -614,7 +628,10 @@ class GVL:
             indexer = [slice(None)] * arr.ndim
             indexer[: len(idx_cols)] = _idx[idx_cols]
             indexer[-1] = slice(_idx[start_col], _idx[start_col] + self.fixed_length)
-            out[i] = arr[tuple(indexer)]
+            subarr = arr[tuple(indexer)]
+            if _idx[strand_col] == -1:
+                subarr = rev_strand_fn(subarr)
+            out[i] = subarr
 
     def process_batch(
         self, batch: xr.Dataset, batch_idx: NDArray, dim_slices: Dict[str, slice]
@@ -766,7 +783,6 @@ class SyncBuffers:
                             contig,
                             merged_starts,
                             merged_ends,
-                            strands=None,
                             out=sliced_buffer[name],
                             **read_kwargs,
                         )
