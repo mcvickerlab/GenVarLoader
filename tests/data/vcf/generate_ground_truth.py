@@ -23,9 +23,10 @@ def main(
         typer.Argument(
             help=dedent(
                 """
-        Prefix for files. There should be a file named <name>.vcf and then this
-        script will generate <name>.bed and <name>_<sample>_nr<row_nr>_h<hap#>.fa files.
-        """
+            Prefix for files. There should be a file named <name>.vcf and then this
+            script will generate <name>.bed and <name>_<sample>_nr<row_nr>_h<hap_nr>.fa
+            files.
+            """
             )
         ),
     ],

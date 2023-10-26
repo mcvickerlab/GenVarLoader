@@ -20,10 +20,34 @@ class FastaVariants(Reader):
         name: str,
         reference: Fasta,
         variants: Variants,
+        jitter_long: bool = True,
         seed: Optional[int] = None,
     ) -> None:
+        """
+        Initialize a `FastaVariants` reader.
+
+        Args:
+            name : str
+                Name of the `FastaVariants` reader.
+            reference : Fasta
+                `Fasta` reader for reading the reference genome.
+            variants : Variants
+                `Variants` reader for reading variants.
+            jitter_long : bool
+                Whether to jitter haplotypes that are longer than query regions. If
+                False, then haplotypes longer than query regions will always be
+                right truncated.
+            seed : int, optional
+                Seed for jittering.
+
+        Returns:
+            None
+        """
         self.reference = reference
         self.variants = variants
+        self.jitter_long = jitter_long
+        self.contig_starts_with_chr = None
+
         self.virtual_data = xr.DataArray(
             da.empty(  # pyright: ignore[reportPrivateImportUsage]
                 (self.variants.n_samples, self.variants.ploidy), dtype="S1"
@@ -34,7 +58,7 @@ class FastaVariants(Reader):
                 "ploid": np.arange(self.variants.ploidy, dtype=np.uint32),
             },
         )
-        self.contig_starts_with_chr = None
+
         if (
             self.reference.contig_starts_with_chr
             != self.variants.contig_starts_with_chr
@@ -53,6 +77,7 @@ class FastaVariants(Reader):
                 .replace("\n", " ")
                 .strip()
             )
+
         self.rng = np.random.default_rng(seed)
         self.rev_strand_fn = self.reference.rev_strand_fn
 
@@ -144,7 +169,10 @@ class FastaVariants(Reader):
             if variant is None:
                 subseq[...] = subref[:length]
             elif isinstance(variant, DenseGenotypes):
-                shifts = self.sample_shifts(variant.genotypes, variant.size_diffs)
+                if self.jitter_long:
+                    shifts = self.sample_shifts(variant.genotypes, variant.size_diffs)
+                else:
+                    shifts = np.zeros((n_samples, ploid), dtype=np.int32)
                 construct_haplotypes_with_indels(
                     subseq.view(np.uint8),
                     subref.view(np.uint8),
@@ -162,9 +190,11 @@ class FastaVariants(Reader):
 
         return xr.DataArray(seqs.view("S1"), dims=["sample", "ploid", "length"])
 
-    def sample_shifts(self, genotypes: NDArray[np.int8], sizes: NDArray[np.int32]):
-        diffs = np.where(genotypes == 1, sizes, 0).sum(-1, dtype=np.int32).clip(0)
-        shifts = self.rng.integers(0, diffs + 1, dtype=np.int32)
+    def sample_shifts(self, genotypes: NDArray[np.int8], size_diffs: NDArray[np.int32]):
+        total_diffs = (
+            np.where(genotypes == 1, size_diffs, 0).sum(-1, dtype=np.int32).clip(0)
+        )
+        shifts = self.rng.integers(0, total_diffs + 1, dtype=np.int32)
         return shifts
 
 
