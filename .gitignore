@@ -4,7 +4,6 @@ archive/
 test.bed.flc.zarr
 test.zarr
 examples/
-genvarloader/tests/data/*
 results/
 .uuid
 docs/

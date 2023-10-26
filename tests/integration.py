@@ -1,7 +1,7 @@
 import polars as pl
 from tqdm.auto import tqdm
 
-from genvarloader.bnfo import GVL, Fasta, FastaVariants, TileDB_VCF
+from genvarloader import GVL, Fasta, FastaVariants, TileDB_VCF
 
 ref = "/cellar/users/dlaub/projects/ML4GLand/SeqData/data/vcf/Homo_sapiens_assembly38.fasta.gz"
 vcf = "/cellar/users/dlaub/projects/ML4GLand/SeqData/data/vcf/ccle.tdb"

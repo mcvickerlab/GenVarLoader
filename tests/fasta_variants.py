@@ -6,7 +6,7 @@ import polars as pl
 import pysam
 from pytest_cases import parametrize, parametrize_with_cases
 
-import genvarloader.bnfo as gvl
+import genvarloader as gvl
 
 
 def varseq_fasta_pgen():
