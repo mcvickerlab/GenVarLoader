@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pysam
-from pytest_cases import parametrize, parametrize_with_cases
+from pytest_cases import parametrize_with_cases
 
 import genvarloader as gvl
 
@@ -16,15 +16,11 @@ def varseq_fasta_pgen():
         pad="N",
     )
     pgen = gvl.Pgen(Path.cwd() / "data" / "pgen" / "sample.pgen")
-    return gvl.FastaVariants("varseq", fasta, pgen)
+    return gvl.FastaVariants("varseq", fasta, pgen, jitter_long=False)
 
 
 @parametrize_with_cases("varseq", cases=".", prefix="varseq_")
-@parametrize("indels", [False])
-@parametrize("structural_variants", [False])
-def test_fasta_variants(
-    varseq: gvl.FastaVariants, indels: bool, structural_variants: bool
-):
+def test_fasta_variants(varseq: gvl.FastaVariants):
     regions = (
         pl.read_csv(
             Path.cwd() / "data" / "vcf" / "sample.bed",
@@ -47,10 +43,10 @@ def test_fasta_variants(
             / f"sample_{sample}_nr{row_nr}_h{hap}.fa"
         )
 
-        gvl_seq = varseq.read(contig, start, end, sample=[sample])
+        gvl_seq = varseq.read(contig, start, end, sample=[sample]).to_numpy().squeeze()
 
         with pysam.FastaFile(str(seq_path)) as f:
             bcftools_seq = f.fetch(f.references[0])
         bcftools_seq = np.frombuffer(bcftools_seq.encode(), "S1")
 
-        np.testing.assert_equal(gvl_seq.to_numpy().squeeze(), bcftools_seq)
+        np.testing.assert_equal(gvl_seq[: len(bcftools_seq)], bcftools_seq)

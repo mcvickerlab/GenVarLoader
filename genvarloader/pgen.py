@@ -162,8 +162,15 @@ class Pgen(Variants):
 
         contig = self.normalize_contig_name(contig)
 
+        out: List[Optional[DenseGenotypes]] = [None] * len(starts)
+
         # get variant positions and indices
-        c_idx = self.contig_idx[contig]
+        c_idx = self.contig_idx.get(contig, None)
+
+        # contig is not present in PGEN, has no variants
+        if c_idx is None:
+            return out
+
         c_slice = slice(self.contig_offsets[c_idx], self.contig_offsets[c_idx + 1])
         end_c_slice = slice(
             self.end_contig_offsets[c_idx], self.end_contig_offsets[c_idx + 1]
@@ -179,8 +186,6 @@ class Pgen(Variants):
 
         min_s_idx = s_idxs.min()
         max_e_idx = e_idxs.max()
-
-        out: List[Optional[DenseGenotypes]] = [None] * len(starts)
 
         if min_s_idx == max_e_idx:
             return out
@@ -262,14 +267,19 @@ class Pgen(Variants):
 
         contig = self.normalize_contig_name(contig)
 
+        out: List[Optional[DenseGenotypes]] = [None] * len(starts)
+
         # get variant positions and indices
-        c_idx = self.contig_idx[contig]
+        c_idx = self.contig_idx.get(contig, None)
+
+        # contig is not present in PGEN, has no variants
+        if c_idx is None:
+            return out
+
         c_slice = slice(self.contig_offsets[c_idx], self.contig_offsets[c_idx + 1])
         end_c_slice = slice(
             self.end_contig_offsets[c_idx], self.end_contig_offsets[c_idx + 1]
         )
-
-        out: List[Optional[DenseGenotypes]] = [None] * len(starts)
 
         # no variants in contig
         if c_slice.start == c_slice.stop:

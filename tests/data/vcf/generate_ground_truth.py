@@ -58,7 +58,6 @@ def main(
     t0 = perf_counter()
 
     SEQ_LEN = 10
-    INDEL_LEN = 50
 
     out_dir = out_dir.resolve()
     shutil.rmtree(out_dir)
@@ -69,24 +68,6 @@ def main(
 
     with open(vcf_path, "r") as f:
         vcf = f.read().encode()
-    if not indels:
-        logger.info("Ignoring indels.")
-        remove_indel_cmd = [
-            "bcftools",
-            "view",
-            "-e",
-            f"ILEN>{-INDEL_LEN} && ILEN<{INDEL_LEN}",
-        ]
-        vcf = run_shell(remove_indel_cmd, input=vcf).stdout
-    if not structural_variants:
-        logger.info("Ignoring structural variants.")
-        remove_sv_cmd = [
-            "bcftools",
-            "view",
-            "-e",
-            f"ILEN<={-INDEL_LEN} || ILEN>={INDEL_LEN}",
-        ]
-        vcf = run_shell(remove_sv_cmd, input=vcf).stdout
     if not multiallelic:
         logger.info("Splitting multiallelic variants.")
         split_multiallelics_cmd = [
@@ -101,6 +82,24 @@ def main(
             "-",
         ]
         vcf = run_shell(split_multiallelics_cmd, input=vcf).stdout
+    if not indels:
+        logger.info("Ignoring indels.")
+        remove_indel_cmd = [
+            "bcftools",
+            "view",
+            "-e",
+            "ILEN!=0",
+        ]
+        vcf = run_shell(remove_indel_cmd, input=vcf).stdout
+    if not structural_variants:
+        logger.info("Ignoring structural variants.")
+        remove_sv_cmd = [
+            "bcftools",
+            "view",
+            "-e",
+            'TYPE="OTHER"',
+        ]
+        vcf = run_shell(remove_sv_cmd, input=vcf).stdout
     with open(filtered_vcf, "w+t") as f:
         f.write(vcf.decode())
 

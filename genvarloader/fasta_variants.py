@@ -26,22 +26,20 @@ class FastaVariants(Reader):
         """
         Initialize a `FastaVariants` reader.
 
-        Args:
-            name : str
-                Name of the `FastaVariants` reader.
-            reference : Fasta
-                `Fasta` reader for reading the reference genome.
-            variants : Variants
-                `Variants` reader for reading variants.
-            jitter_long : bool
-                Whether to jitter haplotypes that are longer than query regions. If
-                False, then haplotypes longer than query regions will always be
-                right truncated.
-            seed : int, optional
-                Seed for jittering.
-
-        Returns:
-            None
+        Parameters
+        ----------
+        name : str
+            Name of the `FastaVariants` reader.
+        reference : Fasta
+            `Fasta` reader for reading the reference genome.
+        variants : Variants
+            `Variants` reader for reading variants.
+        jitter_long : bool
+            Whether to jitter haplotypes that are longer than query regions. If
+            False, then haplotypes longer than query regions will always be
+            right truncated.
+        seed : int, optional
+            Seed for jittering.
         """
         self.reference = reference
         self.variants = variants
