@@ -46,3 +46,10 @@ plugins = ["numpy.typing.mypy_plugin", "pandera.mypy"]
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::DeprecationWarning:ray.*",
+    "ignore::DeprecationWarning:pkg_resources.*",
+    "ignore::DeprecationWarning:jupyter_client.*",
+]

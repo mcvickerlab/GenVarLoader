@@ -185,9 +185,10 @@ class VLenAlleles:
             return VLenAlleles(np.empty(0, np.uint32), np.empty(0, "|S1"))
         if stop is not None:
             stop += 1
-        new_offsets = self.offsets[start:stop] - self.offsets[start]
+        new_offsets = self.offsets[start:stop].copy()
         _start, _stop = new_offsets[0], new_offsets[-1]
         new_alleles = self.alleles[_start:_stop]
+        new_offsets -= self.offsets[start]
         return VLenAlleles(new_offsets, new_alleles)
 
     def __len__(self):
@@ -196,7 +197,7 @@ class VLenAlleles:
     @classmethod
     def from_polars(cls, alleles: pl.Series):
         offsets = np.zeros(alleles.len() + 1, np.uint32)
-        offsets[1:] = alleles.str.lengths().cumsum().to_numpy()
+        offsets[1:] = alleles.str.len_bytes().cumsum().to_numpy()
         flat_alleles = np.frombuffer(
             alleles.str.concat("").to_numpy()[0].encode(), "S1"
         )

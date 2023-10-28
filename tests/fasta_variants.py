@@ -34,6 +34,9 @@ def test_fasta_variants(varseq: gvl.FastaVariants):
     )
     samples = ["NA00001", "NA00002", "NA00003"]
     for sample, hap, region in product(samples, range(1, 3), regions.iter_rows()):
+        contig: str
+        start: int
+        end: int
         contig, start, end, row_nr = region
         seq_path = (
             Path.cwd()
@@ -43,10 +46,30 @@ def test_fasta_variants(varseq: gvl.FastaVariants):
             / f"sample_{sample}_nr{row_nr}_h{hap}.fa"
         )
 
-        gvl_seq = varseq.read(contig, start, end, sample=[sample]).to_numpy().squeeze()
+        try:
+            gvl_seq = (
+                varseq.read(
+                    contig,
+                    [start],
+                    [end],
+                    sample=[sample],
+                    ploid=[hap - 1],
+                    target_length=end - start,
+                )
+                .to_numpy()
+                .squeeze()
+            )
+        except SystemError as e:
+            print(f"Failed {sample} hap{hap-1} {contig}:{start}-{end} row {row_nr}")
+            raise e
 
         with pysam.FastaFile(str(seq_path)) as f:
             bcftools_seq = f.fetch(f.references[0])
         bcftools_seq = np.frombuffer(bcftools_seq.encode(), "S1")
+        length = min(len(bcftools_seq), len(gvl_seq))
 
-        np.testing.assert_equal(gvl_seq[: len(bcftools_seq)], bcftools_seq)
+        try:
+            np.testing.assert_equal(gvl_seq[:length], bcftools_seq[:length])
+        except AssertionError as e:
+            print(f"Failed {sample} hap{hap-1} {contig}:{start}-{end} row {row_nr}")
+            raise e

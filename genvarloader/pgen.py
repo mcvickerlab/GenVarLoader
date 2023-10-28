@@ -69,14 +69,18 @@ class Pgen(Variants):
             self.sample_idx = np.arange(len(psam_samples), dtype=np.uint32)
         self.n_samples = len(self.samples)
 
-        pvar_arrow_path = path.with_suffix(".gvl.arrow")
         pvar_path = path.with_suffix(".pvar")
+        pvar_arrow_path = path.with_suffix(".gvl.arrow")
+        ends_arrow_path = path.with_suffix(".ends.gvl.arrow")
         # exists and was modified more recently than .pvar
         if (
             pvar_arrow_path.exists()
             and pvar_arrow_path.stat().st_mtime > pvar_path.stat().st_mtime
+            and ends_arrow_path.exists()
+            and ends_arrow_path.stat().st_mtime > pvar_path.stat().st_mtime
         ):
             pvar = pl.read_ipc(pvar_arrow_path)
+            ends = pl.read_ipc(ends_arrow_path)
         else:
             with open(pvar_path, "r") as f:
                 skip_rows = 0
@@ -89,12 +93,6 @@ class Pgen(Variants):
                 skip_rows=skip_rows,
                 columns=["#CHROM", "POS", "REF", "ALT"],
                 dtypes={"#CHROM": pl.Utf8, "POS": pl.Int32},
-            ).with_columns(
-                POS=pl.col("POS") - 1,
-                ILEN=(
-                    pl.col("ALT").str.lengths().cast(pl.Int32)
-                    - pl.col("REF").str.lengths().cast(pl.Int32)
-                ),
             )
 
             if (pvar["ALT"].str.contains(",")).any():
@@ -105,7 +103,49 @@ class Pgen(Variants):
                     remake the PGEN file with the `--vcf-half-call r` option."""
                 )
 
+            pvar = pvar.with_columns(
+                POS=pl.col("POS") - 1,
+                ILEN=(
+                    pl.col("ALT").str.len_bytes().cast(pl.Int32)
+                    - pl.col("REF").str.len_bytes().cast(pl.Int32)
+                ),
+            )
+
+            # ends in reference coordiantes, 0-based **inclusive**
+            # end_to_var_idx is a mapping from variants sorted by end to the earliest
+            # positioned variant that has an end >= the end of the variant at that index
+            # e.g. if the v0 has end 200, and v1 has end 100, then ends would be sorted
+            # as [v1, v0] and end_to_var_idx[0] = 1 and end_to_var_idx[1] = 1
+            ends = (
+                pvar.with_row_count("VAR_IDX")
+                .with_columns(
+                    END=pl.col("POS") - pl.col("ILEN").clip_max(0)  #! end-inclusive
+                )
+                # variants are sorted by pos
+                .filter(pl.col("POS") == pl.col("POS").min().over("#CHROM", "END"))
+                .select("#CHROM", "END", "VAR_IDX")
+            )
+            ends = (
+                ends.sort("#CHROM", "END")
+                .group_by("#CHROM", maintain_order=True)
+                .agg(
+                    pl.all().sort_by("END"),
+                )
+                .explode(pl.exclude("#CHROM"))
+                .group_by("#CHROM", maintain_order=True)
+                .agg(
+                    pl.all(),
+                    pl.col("VAR_IDX")
+                    .reverse()
+                    .rolling_min(ends.height, min_periods=1)
+                    .reverse()
+                    .alias("END_TO_VAR_IDX"),
+                )
+                .explode(pl.exclude("#CHROM"))
+                .select("END", "END_TO_VAR_IDX")
+            )
             pvar.write_ipc(pvar_arrow_path)
+            ends.write_ipc(ends_arrow_path)
 
         contigs = pvar["#CHROM"].set_sorted()
         self.contig_idx: Dict[str, int] = {
@@ -120,26 +160,11 @@ class Pgen(Variants):
         self.ref = VLenAlleles.from_polars(pvar["REF"])
         self.alt = VLenAlleles.from_polars(pvar["ALT"])
         self.size_diffs: NDArray[np.int32] = pvar["ILEN"].to_numpy()
-
-        # ends in reference coordiantes, 0-based exclusive
-        for_ends = (
-            pvar.with_row_count("var_nr")
-            .with_columns(
-                END=pl.col("POS") - pl.col("ILEN").clip_max(0) + 1  # 1 nt of ref
-            )
-            # variants are sorted by pos
-            .filter(pl.col("POS") == pl.col("POS").min().over("#CHROM", "END"))
-            .group_by("#CHROM", maintain_order=True)
-            .agg(pl.all().sort_by("END"))
-            .explode(pl.exclude("#CHROM"))
-        )
-        self.ends = for_ends["END"].to_numpy()
-        self.end_nr = np.empty(len(self.ends) + 1, dtype=np.uint32)
-        self.end_nr[-1] = pvar.height
-        self.end_nr[:-1] = for_ends["var_nr"].cast(pl.UInt32).to_numpy()
+        self.ends = ends["END"].to_numpy()
+        self.end_to_var_idx = ends["END_TO_VAR_IDX"].to_numpy()
         self.end_contig_offsets = np.zeros(len(self.contig_idx) + 1, dtype=np.uint32)
         self.end_contig_offsets[1:] = (
-            for_ends["#CHROM"].set_sorted().unique_counts().cumsum().to_numpy()
+            pvar["#CHROM"].set_sorted().unique_counts().cumsum().to_numpy()
         )
 
         self.contig_starts_with_chr = self.infer_contig_prefix(self.contig_idx.keys())
@@ -177,11 +202,8 @@ class Pgen(Variants):
         )
 
         # add c_slice.start to account for the contig offset
-        _s_idxs = (
-            np.searchsorted(self.ends[end_c_slice], starts, side="right")
-            + end_c_slice.start
-        )
-        s_idxs = self.end_nr[_s_idxs]
+        _s_idxs = np.searchsorted(self.ends[end_c_slice], starts) + end_c_slice.start
+        s_idxs = self.end_to_var_idx[_s_idxs]
         e_idxs = np.searchsorted(self.positions[c_slice], ends) + c_slice.start
 
         min_s_idx = s_idxs.min()
@@ -265,6 +287,16 @@ class Pgen(Variants):
             n_samples = len(samples)
             pgen_idx, query_idx = self.get_sample_idx(samples)
 
+        ploid = kwargs.get("ploid", None)
+        if ploid is None:
+            ploid = np.arange(self.ploidy)
+        else:
+            ploid = np.asarray(ploid)
+
+        starts, ends = np.asarray(starts, dtype=np.int64), np.asarray(
+            ends, dtype=np.int64
+        )
+
         contig = self.normalize_contig_name(contig)
 
         out: List[Optional[DenseGenotypes]] = [None] * len(starts)
@@ -274,25 +306,26 @@ class Pgen(Variants):
 
         # contig is not present in PGEN, has no variants
         if c_idx is None:
-            return out
+            return out, ends
 
         c_slice = slice(self.contig_offsets[c_idx], self.contig_offsets[c_idx + 1])
-        end_c_slice = slice(
-            self.end_contig_offsets[c_idx], self.end_contig_offsets[c_idx + 1]
-        )
 
         # no variants in contig
         if c_slice.start == c_slice.stop:
             return out, ends
 
+        end_c_slice = slice(
+            self.end_contig_offsets[c_idx], self.end_contig_offsets[c_idx + 1]
+        )
+
         effective_starts = ends - target_length
         # idxs are relative to unique contig ends
         _eff_s_idxs = (
-            np.searchsorted(self.ends[end_c_slice], effective_starts, side="right")
+            np.searchsorted(self.ends[end_c_slice], effective_starts)
             + end_c_slice.start
         )
-        # idxs are relative to contig variants
-        eff_s_idxs = self.end_nr[_eff_s_idxs] - c_slice.start
+        # make idxs relative to contig variants
+        eff_s_idxs = self.end_to_var_idx[_eff_s_idxs] - c_slice.start
 
         max_ends, e_idxs = get_ends_and_idxs(
             effective_starts,
@@ -301,15 +334,14 @@ class Pgen(Variants):
             self.size_diffs[c_slice],
             target_length,
         )
+        # make idxs absolute
+        e_idxs += c_slice.start
 
         # idxs are relative to unique ends
-        _s_idxs = (
-            np.searchsorted(self.ends[end_c_slice], starts, side="right")
-            + end_c_slice.start
-        )
+        _s_idxs = np.searchsorted(self.ends[end_c_slice], starts) + end_c_slice.start
         # turn into variant indices, self.ends is sorted by chrom->end, whereas variants
         # are sorted by chrom->start
-        s_idxs = self.end_nr[_s_idxs]
+        s_idxs = self.end_to_var_idx[_s_idxs]
 
         min_s_idx = s_idxs.min()
         max_e_idx = e_idxs.max()
@@ -347,7 +379,7 @@ class Pgen(Variants):
                     size_diffs=self.size_diffs[s_idx:e_idx],
                     ref=self.ref[s_idx:e_idx],
                     alt=self.alt[s_idx:e_idx],
-                    genotypes=genotypes[..., rel_s_idx:rel_e_idx],
+                    genotypes=genotypes[:, ploid, rel_s_idx:rel_e_idx],
                 )
 
         return (out, max_ends)
@@ -379,7 +411,7 @@ def get_ends_and_idxs(
     end_idxs = start_idxs.copy()
 
     if len(positions) == 1:
-        del_pos = positions[0]
+        var_pos = positions[0]
         var_diff = size_diffs[0]
         max_ends[:] = starts + target_length
         if var_diff < 0:
@@ -409,54 +441,52 @@ def get_ends_and_idxs(
             continue
 
         for var_idx in range(start_idxs[i], len(positions)):
+            var_pos = positions[var_idx]
             var_diff = size_diffs[var_idx]
-            del_pos = positions[var_idx]
             # pos + 1 nt of ref - var_diff (neg for dels)
-            del_end = del_pos + 1 - var_diff
+            var_end = var_pos + 1 - var_diff
 
-            if del_pos < start:
+            if var_pos < start:
                 # could get a del_end <= start because variants are sorted by
                 # pos->ends. even tho start_idx is the first end to span start,
                 # variants that do not span start can come after it
-                var_diff = min(0, start - del_end)
+                var_diff = min(0, start - var_end)
 
-            # not a del
-            if var_diff >= 0:
-                continue
-
-            # split multiallelic, use the largest del at the site
-            # they are sorted so the last one is largest
-            if del_pos == prev_del_pos:
-                prev_del_diff = var_diff
-                prev_del_pos = del_pos
-                prev_del_end = del_end
-            # overlapping deletion
-            elif del_pos < prev_del_end:
-                # ignore del if it's larger (i.e. shorter)
-                if var_diff >= prev_del_diff:
-                    continue
-                # use this deletion instead
-                else:
+            if var_diff < 0:
+                # split multiallelic, use the largest del at the site
+                # they are sorted so the last one is largest
+                if var_pos == prev_del_pos:
                     prev_del_diff = var_diff
-                    prev_del_pos = del_pos
-                    prev_del_end = del_end
-            # prev_del is the largest del from the prev position
-            elif del_pos >= prev_del_end:
-                # increment total_del by var_diff (negative for dels)
-                total_del -= prev_del_diff
-                # update prev_del
-                prev_del_diff = var_diff
-                prev_del_pos = del_pos
-                prev_del_end = del_end
+                    prev_del_pos = var_pos
+                    prev_del_end = var_end
+                # overlapping deletion
+                elif var_pos < prev_del_end:
+                    # ignore del if it's larger (i.e. shorter)
+                    if var_diff >= prev_del_diff:
+                        continue
+                    # use this deletion instead
+                    else:
+                        prev_del_diff = var_diff
+                        prev_del_pos = var_pos
+                        prev_del_end = var_end
+                # prev_del is the largest del from the prev position
+                elif var_pos >= prev_del_end:
+                    # increment total_del by var_diff (negative for dels)
+                    total_del -= prev_del_diff
+                    # update prev_del
+                    prev_del_diff = var_diff
+                    prev_del_pos = var_pos
+                    prev_del_end = var_end
 
-            ref_pos = prev_del_end
-            length = ref_pos - start - total_del
-            if length >= target_length:
-                break
-
-        # no deletions
-        if prev_del_diff >= 0:
-            continue
+                length = var_pos - start - total_del
+                if length >= target_length:
+                    break
+            else:
+                length = var_pos - start - total_del
+                if length > target_length:
+                    # stop at this variant
+                    var_idx -= 1
+                    break
 
         total_del -= prev_del_diff
         ref_pos = prev_del_end
@@ -467,126 +497,3 @@ def get_ends_and_idxs(
         end_idxs[i] = var_idx + 1
 
     return max_ends, end_idxs
-
-
-@nb.njit(nogil=True)
-def group_duplicates(positions: NDArray[np.int32]):
-    """Get the start:end indices of duplicate positions"""
-    n = len(positions)
-
-    # Initialize an array to store the groups
-    groups = np.empty(n + 1, dtype=np.int32)
-
-    # Initialize variables
-    current_group = 0
-    current_value = positions[0]
-
-    # Iterate through the array to find groups
-    groups[0] = 0
-    for i in range(1, n):
-        if positions[i] != current_value:
-            current_group += 1
-            groups[current_group] = i
-            current_value = positions[i]
-
-    # Set the end of the last group
-    groups[current_group + 1] = n
-
-    # (v+1) i32
-    return groups[: current_group + 2]
-
-
-@nb.njit(nogil=True)
-def genos_to_alleles(
-    groups: NDArray[np.int32],
-    alleles: NDArray[np.uint8],
-    genotypes: NDArray[np.int8],
-):
-    # groups (v+1) i32
-    # positions (v) i32
-    # alleles (v p) u8
-    # genotypes (s p v) i8
-    n_variants = len(groups) - 1
-    n_samples = len(genotypes)
-    ploidy = 2
-    UNKNOWN = -9
-
-    out_alleles = np.empty((n_samples, ploidy, n_variants), np.uint8)
-
-    for sample in nb.prange(n_samples):
-        for variant in nb.prange(n_variants):
-            # groups of duplicate positions are defined by start : end indices
-            # provided in dup_groups
-            start_idx, end_idx = groups[variant], groups[variant + 1]
-            n_dups = end_idx - start_idx
-
-            # (p n_dups)
-            variant_geno = genotypes[sample, :, start_idx:end_idx]
-
-            # (p)
-            variant_alleles = out_alleles[sample, :, variant]
-
-            # A biallelic variant
-            if n_dups == 1:
-                biallelic(ploidy, alleles, start_idx, variant_geno, variant_alleles)
-                continue
-
-            # Handle half-calls, caused by splitting multiallelic variants
-            is_half_call = ~(variant_geno == UNKNOWN).any()
-            if is_half_call:
-                # merge alt alleles into a single allele, ignoring unknowns
-                # assumes each haplotypes has exactly one occurrence of an ALT allele
-                half_call(
-                    ploidy, n_dups, variant_geno, alleles, start_idx, variant_alleles
-                )
-                continue
-
-            # A normal variant that happens to overlap with a split multiallelic
-            # Catch case where sample has no genotype at the site
-            overlap_split_multiallelic(
-                n_dups, ploidy, variant_geno, alleles, start_idx, variant_alleles
-            )
-
-    return out_alleles
-
-
-@nb.njit(nogil=True)
-def biallelic(ploidy, alleles, start_idx, variant_geno, variant_alleles):
-    UNKNOWN = -9
-    for hap in nb.prange(ploidy):
-        geno = variant_geno[hap, 0]
-        if geno == UNKNOWN:
-            variant_alleles[hap] = 0
-        else:
-            variant_alleles[hap] = alleles[start_idx, geno]
-
-
-@nb.njit(nogil=True)
-def half_call(ploidy, n_dups, variant_geno, alleles, start_idx, variant_alleles):
-    for hap in nb.prange(ploidy):
-        for i in nb.prange(n_dups):
-            if variant_geno[hap, i] == 1:
-                variant_alleles[hap] = alleles[start_idx + i, 1]
-
-
-@nb.njit(nogil=True)
-def overlap_split_multiallelic(
-    n_dups, ploidy, variant_geno, alleles, start_idx, variant_alleles
-):
-    UNKNOWN = -9
-    genotyped_idx = np.int16(-1)
-    for i in nb.prange(n_dups):
-        n_unknown = np.uint8(0)
-        for hap in nb.prange(ploidy):
-            if variant_geno[hap, i] != UNKNOWN:
-                n_unknown += 1
-        if n_unknown == ploidy:
-            genotyped_idx = i
-    if genotyped_idx == -1:
-        for hap in nb.prange(ploidy):
-            variant_alleles[hap] = alleles[start_idx, 0]
-    else:
-        for hap in nb.prange(ploidy):
-            variant_alleles[hap] = alleles[
-                start_idx + genotyped_idx, variant_geno[hap, genotyped_idx]
-            ]

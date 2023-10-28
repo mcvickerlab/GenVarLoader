@@ -39,7 +39,7 @@ def main(
         ),
     ],
     out_dir: Path,
-    indels: Annotated[bool, typer.Option(help="Whether to include indels.")] = False,
+    indels: Annotated[bool, typer.Option(help="Whether to include indels.")] = True,
     structural_variants: Annotated[
         bool, typer.Option(help="Whether to include structural variants.")
     ] = False,
@@ -54,6 +54,7 @@ def main(
     import polars as pl
     import polars.selectors as cs
     from loguru import logger
+    from tqdm.auto import tqdm
 
     t0 = perf_counter()
 
@@ -88,7 +89,7 @@ def main(
             "bcftools",
             "view",
             "-e",
-            "ILEN!=0",
+            'TYPE="indel"',
         ]
         vcf = run_shell(remove_indel_cmd, input=vcf).stdout
     if not structural_variants:
@@ -155,7 +156,7 @@ def main(
         )
         .rename({"#CHROM": "CHROM"})
         .with_columns(
-            start=pl.col("POS") - SEQ_LEN // 2, end=pl.col("POS") + SEQ_LEN // 2 + 1
+            start=pl.col("POS") - SEQ_LEN // 2, end=pl.col("POS") + -(-SEQ_LEN // 2)
         )
         .with_row_count()
     )
@@ -169,6 +170,7 @@ def main(
     )
 
     logger.info("Generating consensus sequences.")
+    pbar = tqdm(total=bed.height * len(samples) * 2)
     for row in bed.select("row_nr", "CHROM", "start", "end").iter_rows():
         row_nr, chrom, start, end = row
         subseq_cmd = [
@@ -193,6 +195,9 @@ def main(
                 ]
                 seq = run_shell(subseq_cmd)
                 run_shell(consensus_cmd, input=seq.stdout)
+                index_cmd = ["samtools", "faidx", str(out_fasta)]
+                run_shell(index_cmd)
+                pbar.update()
 
     logger.info(f"Finished in {perf_counter() - t0} seconds.")
 

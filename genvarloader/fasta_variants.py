@@ -139,6 +139,10 @@ class FastaVariants(Reader):
                 "target_length is a required keyword argument for FastaVariants.read()."
             )
 
+        starts, ends = np.asarray(starts, dtype=np.int64), np.asarray(
+            ends, dtype=np.int64
+        )
+
         variants, max_ends = self.variants.read_for_haplotype_construction(
             contig, starts, ends, target_length, **kwargs
         )
@@ -196,7 +200,7 @@ class FastaVariants(Reader):
         return shifts
 
 
-@nb.njit(nogil=True, cache=True, parallel=True)
+# @nb.njit(nogil=True, cache=True, parallel=True)
 def construct_haplotypes_with_indels(
     out: NDArray[np.uint8],
     ref: NDArray[np.uint8],
