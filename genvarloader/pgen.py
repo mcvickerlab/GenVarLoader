@@ -363,7 +363,7 @@ class Pgen(Variants):
         e_idxs += self.contig_offsets[contig]
 
         _s_idxs = np.searchsorted(self.ends[contig], starts)
-        s_idxs = self.end_to_var_idx[_s_idxs]
+        s_idxs = self.end_to_var_idx[contig][_s_idxs]
 
         min_s_idx = s_idxs.min()
         max_e_idx = e_idxs.max()
