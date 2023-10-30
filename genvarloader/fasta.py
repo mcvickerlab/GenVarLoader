@@ -31,6 +31,8 @@ class Fasta(Reader):
         pad : Optional[str], optional
             A single character which, if passed, will pad out-of-bound ranges with this
             value. By default no padding is done and out-of-bound ranges raise an error.
+        alphabet : str, sp.NucleotideAlphabet, sp.AminoAlphabet, optional
+            Alphabet to use for the sequences. If not passed, defaults to DNA.
 
         Raises
         ------
@@ -57,6 +59,7 @@ class Fasta(Reader):
             self.alphabet = sp.alphabets.DNA
             self.rev_strand_fn = self.alphabet.reverse_complement
         elif isinstance(alphabet, str):
+            alphabet = alphabet.upper()
             try:
                 self.alphabet = getattr(sp.alphabets, alphabet)
             except AttributeError:

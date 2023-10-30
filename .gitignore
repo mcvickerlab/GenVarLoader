@@ -9,6 +9,8 @@ results/
 .uuid
 docs/
 requirements.txt
+notebooks/
+scripts/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
