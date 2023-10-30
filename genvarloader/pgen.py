@@ -18,7 +18,9 @@ except ImportError:
 
 class Pgen(Variants):
     def __init__(
-        self, path: Union[str, Path], samples: Optional[List[str]] = None
+        self,
+        paths: Union[str, Path, Dict[str, Union[str, Path]]],
+        samples: Optional[List[str]] = None,
     ) -> None:
         """Reads genotypes from PGEN files. Currently does not support multi-allelic
         sites, but does support **split** multi-allelic sites. This can be done by
@@ -45,16 +47,26 @@ class Pgen(Variants):
         # unknown genotypes are set to -9
         self.UNKNOWN = -9
 
-        path = Path(path)
-        self.pgen_path = path.with_suffix(".pgen")
+        if isinstance(paths, (str, Path)):
+            _paths = Path(paths)
+            self.pgen_paths = {"_all": _paths.with_suffix(".pgen")}
+            self.split_by_contig = False
+        elif isinstance(paths, dict):
+            _paths = {
+                contig: Path(path).with_suffix(".pgen")
+                for contig, path in paths.items()
+            }
+            self.pgen_paths = _paths
+            self.split_by_contig = True
+        _first_path = self.pgen_paths[next(iter(self.pgen_paths))]
 
         try:
             psam_samples = pl.read_csv(
-                path.with_suffix(".psam"), separator="\t", columns=["IID"]
+                _first_path.with_suffix(".psam"), separator="\t", columns=["IID"]
             )["IID"].to_numpy()
         except pl.ColumnNotFoundError:
             psam_samples = pl.read_csv(
-                path.with_suffix(".psam"), separator="\t", columns=["#IID"]
+                _first_path.with_suffix(".psam"), separator="\t", columns=["#IID"]
             )["#IID"].to_numpy()
         if samples is not None:
             _samples, sample_idx, _ = np.intersect1d(
@@ -69,110 +81,135 @@ class Pgen(Variants):
             self.sample_idx = np.arange(len(psam_samples), dtype=np.uint32)
         self.n_samples = len(self.samples)
 
-        pvar_path = path.with_suffix(".pvar")
-        pvar_arrow_path = path.with_suffix(".gvl.arrow")
-        ends_arrow_path = path.with_suffix(".ends.gvl.arrow")
-        # exists and was modified more recently than .pvar
-        if (
-            pvar_arrow_path.exists()
-            and pvar_arrow_path.stat().st_mtime > pvar_path.stat().st_mtime
-            and ends_arrow_path.exists()
-            and ends_arrow_path.stat().st_mtime > pvar_path.stat().st_mtime
-        ):
-            pvar = pl.read_ipc(pvar_arrow_path)
-            ends = pl.read_ipc(ends_arrow_path)
-        else:
-            with open(pvar_path, "r") as f:
-                skip_rows = 0
-                while f.readline().startswith("##"):
-                    skip_rows += 1
-
-            pvar = pl.read_csv(
-                pvar_path,
-                separator="\t",
-                skip_rows=skip_rows,
-                columns=["#CHROM", "POS", "REF", "ALT"],
-                dtypes={"#CHROM": pl.Utf8, "POS": pl.Int32},
-            )
-
-            if (pvar["ALT"].str.contains(",")).any():
-                raise RuntimeError(
-                    f"""PGEN file {path} contains multi-allelic variants which are not 
-                    yet supported by GenVarLoader. Split your multi-allelic variants 
-                    with `bcftools norm -a --atom-overlaps . -m - <file.vcf>` then 
-                    remake the PGEN file with the `--vcf-half-call r` option."""
-                )
-
-            pvar = pvar.with_columns(
-                POS=pl.col("POS") - 1,
-                ILEN=(
-                    pl.col("ALT").str.len_bytes().cast(pl.Int32)
-                    - pl.col("REF").str.len_bytes().cast(pl.Int32)
-                ),
-            )
-
-            # ends in reference coordiantes, 0-based **inclusive**
-            # end_to_var_idx is a mapping from variants sorted by end to the earliest
-            # positioned variant that has an end >= the end of the variant at that index
-            # e.g. if the v0 has end 200, and v1 has end 100, then ends would be sorted
-            # as [v1, v0] and end_to_var_idx[0] = 1 and end_to_var_idx[1] = 1
-            ends = (
-                pvar.with_row_count("VAR_IDX")
-                .with_columns(
-                    END=pl.col("POS") - pl.col("ILEN").clip_max(0)  #! end-inclusive
-                )
-                # variants are sorted by pos
-                .filter(pl.col("POS") == pl.col("POS").min().over("#CHROM", "END"))
-                .select("#CHROM", "END", "VAR_IDX")
-            )
-            ends = (
-                ends.sort("#CHROM", "END")
-                .group_by("#CHROM", maintain_order=True)
-                .agg(
-                    pl.all().sort_by("END"),
-                )
-                .explode(pl.exclude("#CHROM"))
-                .group_by("#CHROM", maintain_order=True)
-                .agg(
-                    pl.all(),
-                    pl.col("VAR_IDX")
-                    .reverse()
-                    .rolling_min(ends.height, min_periods=1)
-                    .reverse()
-                    .alias("END_TO_VAR_IDX"),
-                )
-                .explode(pl.exclude("#CHROM"))
-                .select("END", "END_TO_VAR_IDX")
-            )
-            pvar.write_ipc(pvar_arrow_path)
-            ends.write_ipc(ends_arrow_path)
-
-        contigs = pvar["#CHROM"].set_sorted()
-        self.contig_idx: Dict[str, int] = {
-            c: i for i, c in enumerate(contigs.unique(maintain_order=True))
-        }
-        # (c+1)
-        self.contig_offsets = np.zeros(len(self.contig_idx) + 1, dtype=np.uint32)
-        self.contig_offsets[1:] = contigs.unique_counts().cumsum().to_numpy()
-        # (v)
-        self.positions: NDArray[np.int32] = pvar["POS"].to_numpy()
+        self.positions: Dict[str, NDArray[np.int32]] = {}
+        self.size_diffs: Dict[str, NDArray[np.int32]] = {}
+        self.ends: Dict[str, NDArray[np.int32]] = {}
+        # end_to_var_idx maps from relative end idxs to absolute variant idxs
+        self.end_to_var_idx: Dict[str, NDArray[np.int32]] = {}
         # no multi-allelics
-        self.ref = VLenAlleles.from_polars(pvar["REF"])
-        self.alt = VLenAlleles.from_polars(pvar["ALT"])
-        self.size_diffs: NDArray[np.int32] = pvar["ILEN"].to_numpy()
-        self.ends = ends["END"].to_numpy()
-        self.end_to_var_idx = ends["END_TO_VAR_IDX"].to_numpy()
-        self.end_contig_offsets = np.zeros(len(self.contig_idx) + 1, dtype=np.uint32)
-        self.end_contig_offsets[1:] = (
-            pvar["#CHROM"].set_sorted().unique_counts().cumsum().to_numpy()
-        )
+        self.ref: Dict[str, VLenAlleles] = {}
+        self.alt: Dict[str, VLenAlleles] = {}
 
-        self.contig_starts_with_chr = self.infer_contig_prefix(self.contig_idx.keys())
+        self.contig_offsets: Dict[str, int] = {}
+
+        for contig, path in self.pgen_paths.items():
+            pvar_path = path.with_suffix(".pvar")
+            pvar_arrow_path = path.with_suffix(".gvl.arrow")
+            ends_arrow_path = path.with_suffix(".ends.gvl.arrow")
+            # exists and was modified more recently than .pvar
+            if (
+                pvar_arrow_path.exists()
+                and pvar_arrow_path.stat().st_mtime > pvar_path.stat().st_mtime
+                and ends_arrow_path.exists()
+                and ends_arrow_path.stat().st_mtime > pvar_path.stat().st_mtime
+            ):
+                pvar = pl.read_ipc(pvar_arrow_path)
+                ends = pl.read_ipc(ends_arrow_path)
+            else:
+                with open(pvar_path, "r") as f:
+                    skip_rows = 0
+                    while f.readline().startswith("##"):
+                        skip_rows += 1
+
+                pvar = pl.read_csv(
+                    pvar_path,
+                    separator="\t",
+                    skip_rows=skip_rows,
+                    columns=["#CHROM", "POS", "REF", "ALT"],
+                    dtypes={"#CHROM": pl.Utf8, "POS": pl.Int32},
+                )
+
+                if (pvar["ALT"].str.contains(",")).any():
+                    raise RuntimeError(
+                        f"""PGEN file {path} contains multi-allelic variants which are 
+                        not yet supported by GenVarLoader. Split your multi-allelic 
+                        variants with `bcftools norm -a --atom-overlaps . -m - 
+                        <file.vcf>` then remake the PGEN file with the `--vcf-half-call 
+                        r` option."""
+                    )
+
+                pvar = pvar.with_columns(
+                    POS=pl.col("POS") - 1,
+                    ILEN=(
+                        pl.col("ALT").str.len_bytes().cast(pl.Int32)
+                        - pl.col("REF").str.len_bytes().cast(pl.Int32)
+                    ),
+                )
+
+                # ends in reference coordiantes, 0-based **inclusive**
+                # end_to_var_idx is a mapping from variants sorted by end to the
+                # earliest positioned variant that has an end >= the end of the variant
+                # at that index e.g. if the v0 has end 200, and v1 has end 100, then \
+                # ends would be sorted as [v1, v0] and end_to_var_idx[0] = 1 and
+                # end_to_var_idx[1] = 1
+                ends = (
+                    pvar.with_row_count("VAR_IDX")
+                    .with_columns(
+                        END=pl.col("POS") - pl.col("ILEN").clip_max(0)  #! end-inclusive
+                    )
+                    # variants are sorted by pos
+                    .filter(pl.col("POS") == pl.col("POS").min().over("#CHROM", "END"))
+                    .select("#CHROM", "END", "VAR_IDX")
+                )
+                ends = (
+                    ends.sort("#CHROM", "END")
+                    .group_by("#CHROM", maintain_order=True)
+                    .agg(
+                        pl.all().sort_by("END"),
+                    )
+                    .explode(pl.exclude("#CHROM"))
+                    .group_by("#CHROM", maintain_order=True)
+                    .agg(
+                        pl.all(),
+                        pl.col("VAR_IDX")
+                        .reverse()
+                        .rolling_min(ends.height, min_periods=1)
+                        .reverse()
+                        .alias("END_TO_VAR_IDX"),
+                    )
+                    .explode(pl.exclude("#CHROM"))
+                    .select("END", "END_TO_VAR_IDX")
+                )
+                pvar.write_ipc(pvar_arrow_path)
+                ends.write_ipc(ends_arrow_path)
+
+            if contig == "_all":
+                last_offset = 0
+                for _contig, partition in pvar.partition_by(
+                    "#CHROM", maintain_order=True, as_dict=True
+                ).items():
+                    self.contig_offsets[_contig] = last_offset + partition.height
+                    last_offset = self.contig_offsets[_contig]
+                    self.positions[_contig] = partition["POS"].to_numpy()
+                    # no multi-allelics
+                    self.ref[_contig] = VLenAlleles.from_polars(partition["REF"])
+                    self.alt[_contig] = VLenAlleles.from_polars(partition["ALT"])
+                    self.size_diffs[_contig] = partition["ILEN"].to_numpy()
+
+                for _contig, partition in ends.partition_by(
+                    "#CHROM", as_dict=True
+                ).items():
+                    self.ends[_contig] = partition["END"].to_numpy()
+                    self.end_to_var_idx[_contig] = partition[
+                        "END_TO_VAR_IDX"
+                    ].to_numpy()
+            else:
+                self.contig_offsets[contig] = 0
+                self.end_contig_offsets[contig] = 0
+                self.positions[contig] = pvar["POS"].to_numpy()
+                self.size_diffs[contig] = pvar["ILEN"].to_numpy()
+                self.ends[contig] = ends["END"].to_numpy()
+                self.end_to_var_idx[contig] = ends["END_TO_VAR_IDX"].to_numpy()
+                # no multi-allelics
+                self.ref[contig] = VLenAlleles.from_polars(pvar["REF"])
+                self.alt[contig] = VLenAlleles.from_polars(pvar["ALT"])
+
+        self.contigs = list(self.contig_offsets.keys())
 
     def _pgen(self, sample_idx: Optional[NDArray[np.uint32]]):
         if sample_idx is not None:
             sample_idx = np.sort(sample_idx)
-        return pgenlib.PgenReader(bytes(self.pgen_path), sample_subset=sample_idx)
+        return pgenlib.PgenReader(bytes(self.pgen_paths), sample_subset=sample_idx)
 
     def read(
         self, contig: str, starts: NDArray[np.int64], ends: NDArray[np.int64], **kwargs
@@ -189,22 +226,15 @@ class Pgen(Variants):
 
         out: List[Optional[DenseGenotypes]] = [None] * len(starts)
 
-        # get variant positions and indices
-        c_idx = self.contig_idx.get(contig, None)
-
         # contig is not present in PGEN, has no variants
-        if c_idx is None:
+        if contig not in self.contigs:
             return out
 
-        c_slice = slice(self.contig_offsets[c_idx], self.contig_offsets[c_idx + 1])
-        end_c_slice = slice(
-            self.end_contig_offsets[c_idx], self.end_contig_offsets[c_idx + 1]
+        _s_idxs = np.searchsorted(self.ends[contig], starts)
+        s_idxs = self.end_to_var_idx[_s_idxs] + self.contig_offsets[contig]
+        e_idxs = (
+            np.searchsorted(self.positions[contig], ends) + self.contig_offsets[contig]
         )
-
-        # add c_slice.start to account for the contig offset
-        _s_idxs = np.searchsorted(self.ends[end_c_slice], starts) + end_c_slice.start
-        s_idxs = self.end_to_var_idx[_s_idxs]
-        e_idxs = np.searchsorted(self.positions[c_slice], ends) + c_slice.start
 
         min_s_idx = s_idxs.min()
         max_e_idx = e_idxs.max()
@@ -301,46 +331,26 @@ class Pgen(Variants):
 
         out: List[Optional[DenseGenotypes]] = [None] * len(starts)
 
-        # get variant positions and indices
-        c_idx = self.contig_idx.get(contig, None)
-
         # contig is not present in PGEN, has no variants
-        if c_idx is None:
+        if contig not in self.contigs:
             return out, ends
-
-        c_slice = slice(self.contig_offsets[c_idx], self.contig_offsets[c_idx + 1])
-
-        # no variants in contig
-        if c_slice.start == c_slice.stop:
-            return out, ends
-
-        end_c_slice = slice(
-            self.end_contig_offsets[c_idx], self.end_contig_offsets[c_idx + 1]
-        )
 
         effective_starts = ends - target_length
-        # idxs are relative to unique contig ends
-        _eff_s_idxs = (
-            np.searchsorted(self.ends[end_c_slice], effective_starts)
-            + end_c_slice.start
-        )
-        # make idxs relative to contig variants
-        eff_s_idxs = self.end_to_var_idx[_eff_s_idxs] - c_slice.start
+        _eff_s_idxs = np.searchsorted(self.ends[contig], effective_starts)
+        # idx absolute -> subtract offset -> relative
+        eff_s_idxs = self.end_to_var_idx[_eff_s_idxs] - self.contig_offsets[contig]
 
         max_ends, e_idxs = get_ends_and_idxs(
             effective_starts,
             eff_s_idxs,
-            self.positions[c_slice],
-            self.size_diffs[c_slice],
+            self.positions[contig],
+            self.size_diffs[contig],
             target_length,
         )
         # make idxs absolute
-        e_idxs += c_slice.start
+        e_idxs += self.contig_offsets[contig]
 
-        # idxs are relative to unique ends
-        _s_idxs = np.searchsorted(self.ends[end_c_slice], starts) + end_c_slice.start
-        # turn into variant indices, self.ends is sorted by chrom->end, whereas variants
-        # are sorted by chrom->start
+        _s_idxs = np.searchsorted(self.ends[contig], starts)
         s_idxs = self.end_to_var_idx[_s_idxs]
 
         min_s_idx = s_idxs.min()
@@ -398,7 +408,6 @@ class Pgen(Variants):
         return pgen_idx, query_idx
 
 
-# note this operates on a contigs relative idxs, positions, and size_diffs
 @nb.njit(nogil=True, cache=True)
 def get_ends_and_idxs(
     starts: NDArray[np.int64],
@@ -407,6 +416,7 @@ def get_ends_and_idxs(
     size_diffs: NDArray[np.int32],
     target_length: int,
 ) -> Tuple[NDArray[np.int64], NDArray[np.uint32]]:
+    """Note: this operates on relative idxs."""
     max_ends = starts + target_length
     end_idxs = start_idxs.copy()
 
