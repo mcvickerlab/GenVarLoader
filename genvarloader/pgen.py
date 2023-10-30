@@ -68,6 +68,7 @@ class Pgen(Variants):
             psam_samples = pl.read_csv(
                 _first_path.with_suffix(".psam"), separator="\t", columns=["#IID"]
             )["#IID"].to_numpy()
+
         if samples is not None:
             _samples, sample_idx, _ = np.intersect1d(
                 psam_samples, samples, return_indices=True
@@ -79,6 +80,7 @@ class Pgen(Variants):
         else:
             self.samples = psam_samples
             self.sample_idx = np.arange(len(psam_samples), dtype=np.uint32)
+
         self.n_samples = len(self.samples)
 
         self.positions: Dict[str, NDArray[np.int32]] = {}
@@ -195,7 +197,6 @@ class Pgen(Variants):
                     ].to_numpy()
             else:
                 self.contig_offsets[contig] = 0
-                self.end_contig_offsets[contig] = 0
                 self.positions[contig] = pvar["POS"].to_numpy()
                 self.size_diffs[contig] = pvar["ILEN"].to_numpy()
                 self.ends[contig] = ends["END"].to_numpy()
@@ -205,11 +206,14 @@ class Pgen(Variants):
                 self.alt[contig] = VLenAlleles.from_polars(pvar["ALT"])
 
         self.contigs = list(self.contig_offsets.keys())
+        self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
 
-    def _pgen(self, sample_idx: Optional[NDArray[np.uint32]]):
+    def _pgen(self, contig: str, sample_idx: Optional[NDArray[np.uint32]]):
         if sample_idx is not None:
             sample_idx = np.sort(sample_idx)
-        return pgenlib.PgenReader(bytes(self.pgen_paths), sample_subset=sample_idx)
+        return pgenlib.PgenReader(
+            bytes(self.pgen_paths[contig]), sample_subset=sample_idx
+        )
 
     def read(
         self, contig: str, starts: NDArray[np.int64], ends: NDArray[np.int64], **kwargs
@@ -217,7 +221,7 @@ class Pgen(Variants):
         samples = kwargs.get("sample", None)
         if samples is None:
             n_samples = self.n_samples
-            pgen_idx, query_idx = None, None
+            pgen_idx, query_idx = self.sample_idx, None
         else:
             n_samples = len(samples)
             pgen_idx, query_idx = self.get_sample_idx(samples)
@@ -231,11 +235,13 @@ class Pgen(Variants):
             return out
 
         _s_idxs = np.searchsorted(self.ends[contig], starts)
-        s_idxs = self.end_to_var_idx[_s_idxs] + self.contig_offsets[contig]
+        # absolute idxs
+        s_idxs = self.end_to_var_idx[contig][_s_idxs] + self.contig_offsets[contig]
         e_idxs = (
             np.searchsorted(self.positions[contig], ends) + self.contig_offsets[contig]
         )
 
+        # absolute idxs
         min_s_idx = s_idxs.min()
         max_e_idx = e_idxs.max()
 
@@ -246,7 +252,7 @@ class Pgen(Variants):
         genotypes = np.empty(
             (max_e_idx - min_s_idx, n_samples * self.ploidy), dtype=np.int32
         )
-        with self._pgen(pgen_idx) as f:
+        with self._pgen(contig, pgen_idx) as f:
             # (v s*2)
             f.read_alleles_range(min_s_idx, max_e_idx, genotypes)
 
@@ -260,17 +266,21 @@ class Pgen(Variants):
         if query_idx is not None:
             genotypes = genotypes[query_idx]
 
-        for i, (min_s_idx, max_e_idx) in enumerate(zip(s_idxs, e_idxs)):
-            rel_s_idx = min_s_idx - min_s_idx
-            rel_e_idx = max_e_idx - min_s_idx
-            if min_s_idx == max_e_idx:
+        # contig relative idxs
+        rel_s_idxs = s_idxs - self.contig_offsets[contig]
+        rel_e_idxs = e_idxs - self.contig_offsets[contig]
+        for i, (s_idx, e_idx) in enumerate(zip(rel_s_idxs, rel_e_idxs)):
+            # genotype query relative idxs
+            rel_s_idx = 0
+            rel_e_idx = e_idx - s_idx
+            if s_idx == e_idx:
                 out[i] = None
             else:
                 out[i] = DenseGenotypes(
-                    positions=self.positions[min_s_idx:max_e_idx],
-                    size_diffs=self.size_diffs[min_s_idx:max_e_idx],
-                    ref=self.ref[min_s_idx:max_e_idx],
-                    alt=self.alt[min_s_idx:max_e_idx],
+                    positions=self.positions[contig][s_idx:e_idx],
+                    size_diffs=self.size_diffs[contig][s_idx:e_idx],
+                    ref=self.ref[contig][s_idx:e_idx],
+                    alt=self.alt[contig][s_idx:e_idx],
                     genotypes=genotypes[..., rel_s_idx:rel_e_idx],
                 )
 
@@ -312,7 +322,7 @@ class Pgen(Variants):
         samples = kwargs.get("sample", None)
         if samples is None:
             n_samples = self.n_samples
-            pgen_idx, query_idx = None, None
+            pgen_idx, query_idx = self.sample_idx, None
         else:
             n_samples = len(samples)
             pgen_idx, query_idx = self.get_sample_idx(samples)
@@ -338,7 +348,9 @@ class Pgen(Variants):
         effective_starts = ends - target_length
         _eff_s_idxs = np.searchsorted(self.ends[contig], effective_starts)
         # idx absolute -> subtract offset -> relative
-        eff_s_idxs = self.end_to_var_idx[_eff_s_idxs] - self.contig_offsets[contig]
+        eff_s_idxs = (
+            self.end_to_var_idx[contig][_eff_s_idxs] - self.contig_offsets[contig]
+        )
 
         max_ends, e_idxs = get_ends_and_idxs(
             effective_starts,
@@ -364,7 +376,7 @@ class Pgen(Variants):
         genotypes = np.empty(
             (max_e_idx - min_s_idx, n_samples * self.ploidy), dtype=np.int32
         )
-        with self._pgen(pgen_idx) as f:
+        with self._pgen(contig, pgen_idx) as f:
             # (v s*2)
             f.read_alleles_range(min_s_idx, max_e_idx, genotypes)
 
@@ -385,10 +397,10 @@ class Pgen(Variants):
                 out[i] = None
             else:
                 out[i] = DenseGenotypes(
-                    positions=self.positions[s_idx:e_idx],
-                    size_diffs=self.size_diffs[s_idx:e_idx],
-                    ref=self.ref[s_idx:e_idx],
-                    alt=self.alt[s_idx:e_idx],
+                    positions=self.positions[contig][s_idx:e_idx],
+                    size_diffs=self.size_diffs[contig][s_idx:e_idx],
+                    ref=self.ref[contig][s_idx:e_idx],
+                    alt=self.alt[contig][s_idx:e_idx],
                     genotypes=genotypes[:, ploid, rel_s_idx:rel_e_idx],
                 )
 

@@ -57,18 +57,18 @@ class Fasta(Reader):
 
         if alphabet is None:
             self.alphabet = sp.alphabets.DNA
-            self.rev_strand_fn = self.alphabet.reverse_complement
         elif isinstance(alphabet, str):
             alphabet = alphabet.upper()
             try:
                 self.alphabet = getattr(sp.alphabets, alphabet)
             except AttributeError:
                 raise ValueError(f"Alphabet {alphabet} not found.")
-        elif isinstance(alphabet, sp.NucleotideAlphabet):
+        else:
             self.alphabet = alphabet
+
+        if isinstance(self.alphabet, sp.NucleotideAlphabet):
             self.rev_strand_fn = self.alphabet.reverse_complement
-        elif isinstance(alphabet, sp.AminoAlphabet):
-            self.alphabet = alphabet
+        elif isinstance(self.alphabet, sp.AminoAlphabet):
 
             def rev_strand_fn(a: NDArray[np.bytes_]):
                 return a[::-1]
