@@ -345,25 +345,25 @@ class Pgen(Variants):
         if contig not in self.contigs:
             return out, ends
 
-        effective_starts = ends - target_length
-        _eff_s_idxs = np.searchsorted(self.ends[contig], effective_starts)
-        # idx absolute -> subtract offset -> relative
-        eff_s_idxs = (
-            self.end_to_var_idx[contig][_eff_s_idxs] - self.contig_offsets[contig]
-        )
-
-        max_ends, e_idxs = get_ends_and_idxs(
-            effective_starts,
-            eff_s_idxs,
-            self.positions[contig],
-            self.size_diffs[contig],
-            target_length,
-        )
-        # make idxs absolute
-        e_idxs += self.contig_offsets[contig]
+        # effective_starts = ends - target_length
+        # _eff_s_idxs = np.searchsorted(self.ends[contig], effective_starts)
+        # # idx absolute -> subtract offset -> relative
+        # eff_s_idxs = (
+        #     self.end_to_var_idx[contig][_eff_s_idxs] - self.contig_offsets[contig]
+        # )
 
         _s_idxs = np.searchsorted(self.ends[contig], starts)
         s_idxs = self.end_to_var_idx[contig][_s_idxs]
+
+        max_ends, e_idxs = get_ends_and_idxs(
+            starts,
+            s_idxs - self.contig_offsets[contig],
+            self.positions[contig],
+            self.size_diffs[contig],
+            ends - starts,
+        )
+        # make idxs absolute
+        e_idxs += self.contig_offsets[contig]
 
         min_s_idx = s_idxs.min()
         max_e_idx = e_idxs.max()
@@ -426,16 +426,16 @@ def get_ends_and_idxs(
     start_idxs: NDArray[np.uint32],
     positions: NDArray[np.int32],
     size_diffs: NDArray[np.int32],
-    target_length: int,
+    target_lengths: NDArray[np.integer],
 ) -> Tuple[NDArray[np.int64], NDArray[np.uint32]]:
     """Note: this operates on relative idxs."""
-    max_ends = starts + target_length
+    max_ends = starts + target_lengths
     end_idxs = start_idxs.copy()
 
     if len(positions) == 1:
         var_pos = positions[0]
         var_diff = size_diffs[0]
-        max_ends[:] = starts + target_length
+        max_ends[:] = starts + target_lengths
         if var_diff < 0:
             max_ends -= var_diff
         end_idxs[:] = start_idxs + 1
@@ -448,6 +448,7 @@ def get_ends_and_idxs(
         ref_pos = start
         length = 0
         var_idx = start_idxs[i]
+        target_length = target_lengths[i]
 
         # no variants
         if var_idx >= len(positions):
