@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "genvarloader"
-version = "0.1.1"
+version = "0.1.2"
 description = "Pipeline for efficient genomic data processing."
 authors = ["David Laub <dlaub@ucsd.edu>", "Aaron Ho <aho@salk.edu>"]
 readme = "README.md"
