@@ -200,7 +200,7 @@ class FastaVariants(Reader):
         return shifts
 
 
-# @nb.njit(nogil=True, cache=True, parallel=True)
+@nb.njit(nogil=True, cache=True, parallel=True)
 def construct_haplotypes_with_indels(
     out: NDArray[np.uint8],
     ref: NDArray[np.uint8],

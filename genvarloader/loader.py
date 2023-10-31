@@ -1,9 +1,11 @@
 from collections import defaultdict
 from copy import deepcopy
+from itertools import product
 from pathlib import Path
 from typing import (
     Callable,
     Dict,
+    Generator,
     Hashable,
     Iterable,
     List,
@@ -19,6 +21,7 @@ import numpy as np
 import polars as pl
 import ray
 import xarray as xr
+from more_itertools import chunked
 from natsort import natsorted
 from numpy.typing import NDArray
 
@@ -510,7 +513,7 @@ class GVL:
 
                 # full batch
                 if self.batch_slice.stop == self.batch_size:
-                    yield self.process_batch(batch, batch_idx, buffer.dim_slices)  # type: ignore
+                    yield self.process_batch(batch, batch_idx, buffer.dim_idxs)
 
                     self.total_yielded += self.batch_size
 
@@ -526,7 +529,7 @@ class GVL:
                     batch = xr.concat(self.partial_batches, dim="batch")
                     batch_idx = np.concatenate(self.partial_indices, 0)
 
-                    yield self.process_batch(batch, batch_idx, buffer.dim_slices)
+                    yield self.process_batch(batch, batch_idx, buffer.dim_idxs)
 
                     self.total_yielded += self.batch_slice.stop
                 # batch incomplete and more data in buffer
@@ -543,6 +546,20 @@ class GVL:
                     buffer.idx_slice.stop + self.batch_size, buffer.instances_in_buffer
                 )
                 buffer.idx_slice = slice(buffer.idx_slice.stop, new_stop)
+
+    def dim_idxs_generator(self) -> Generator[Dict[Hashable, List[int]], None, None]:
+        """Yields dictionaries of dims->indices"""
+        if self.shuffle:
+            idxs = {
+                d: self.rng.permutation(len(idx)) for d, idx in self.indexes.items()
+            }
+        else:
+            idxs = {d: np.arange(len(idx)) for d, idx in self.indexes.items()}
+        batcher = product(
+            *(chunked(idxs[dim], size) for dim, size in self.buffer_sizes.items())
+        )
+        for buffer_dim_idxs in batcher:
+            yield dict(zip(self.buffer_sizes.keys(), buffer_dim_idxs))
 
     def increment_dim_slices(self, dim_slices: Dict[str, slice]):
         dim_slices = {
@@ -570,8 +587,9 @@ class GVL:
         rel_starts = get_rel_starts(partition["chromStart"].to_numpy(), merged_starts)[
             buffer_idx[:, 0], None
         ]
-        strands = partition["strand"].to_numpy()
+        strands = partition["strand"].to_numpy()[buffer_idx[:, 0], None]
         region_idx = partition["region_idx"].to_numpy()[buffer_idx[:, 0], None]
+        # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
         return np.hstack([rel_starts, strands, region_idx, buffer_idx[:, 1:]])
 
     def resample_buffer_idx(self, buffer_idx: NDArray):
@@ -579,7 +597,7 @@ class GVL:
         # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
         for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL):
             # caller responsible for weights existing
-            w = self.weights.get(d, None)  # type: ignore[reportOptionalMemberAccess]
+            w = self.weights.get(d, None)  # pyright: ignore[reportOptionalMemberAccess]
             if w is not None:
                 idx_weights *= w[buffer_idx[:, i]]
         idx_weights = np.round(idx_weights).astype(int)
@@ -632,7 +650,7 @@ class GVL:
         strand_col: int,
         rev_strand_fn: Callable[[NDArray], NDArray],
     ):
-        # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
+        # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
         for i in range(len(idx)):
             _idx: NDArray[np.integer] = idx[i]
             indexer = [slice(None)] * arr.ndim
@@ -644,19 +662,19 @@ class GVL:
             out[i] = subarr
 
     def process_batch(
-        self, batch: xr.Dataset, batch_idx: NDArray, dim_slices: Dict[str, slice]
+        self, batch: xr.Dataset, batch_idx: NDArray, dim_idxs: Dict[Hashable, List[int]]
     ):
         batch = batch.transpose("batch", ...)
         out = {name: arr.values for name, arr in batch.data_vars.items()}
 
         if self.return_index:
-            # cols: region_idx, dim1_idx, dim2_idx, ...
-            out_idx = batch_idx[:, 1:]
-            if len(self.batch_dims) > 0:
-                out_idx[:, 1:] += np.array(
-                    [dim_slices[d].start for d in self.batch_dims]
-                )
-            out["index"] = out_idx
+            # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
+            out["index"] = np.array(
+                [
+                    dim_idxs[d][batch_idx[:, i]]
+                    for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL)
+                ]
+            )
 
         if self.transform is not None:
             out = self.transform(out)
@@ -730,8 +748,6 @@ class SyncBuffers:
             buffer[name] = (reader.virtual_data.dims, np.empty(shape, dtype=dtype))
 
         for partition in self.gvl.partitioned_bed:
-            dim_slices = {str(d): slice(0, 0) for d in self.gvl.buffer_sizes}
-
             n_regions = len(partition)
             instances_in_partition = n_regions * np.prod(
                 [self.gvl.sizes[d] for d in self.gvl.batch_dims], dtype=int
@@ -747,10 +763,13 @@ class SyncBuffers:
             merged_starts, merged_ends = merge_overlapping_regions(
                 partition["chromStart"].to_numpy(), partition["chromEnd"].to_numpy()
             )
+            dim_idxs_gen = self.gvl.dim_idxs_generator()
 
             while instances_in_partition_tasks < instances_in_partition:
-                dim_slices = self.gvl.increment_dim_slices(dim_slices)
-                read_kwargs = {d: self.gvl.indexes[d][s] for d, s in dim_slices.items()}
+                dim_idxs = next(dim_idxs_gen)
+                read_kwargs = {
+                    dim: self.gvl.indexes[dim][idx] for dim, idx in dim_idxs.items()
+                }
                 buffer_len = n_regions * np.prod(
                     [len(a) for a in read_kwargs.values()], dtype=int
                 )
@@ -767,23 +786,13 @@ class SyncBuffers:
                 if self.gvl.shuffle:
                     buffer_idx = self.gvl.rng.permutation(buffer_idx)
 
-                dim_lengths = {
-                    dim: slc.stop - slc.start for dim, slc in dim_slices.items()
-                }
                 sliced_buffer: Dict[Hashable, NDArray] = {}
                 for name, (dims, arr) in buffer.items():
                     slices: List[slice] = []
                     for dim in dims:
                         # No chance of KeyError here because dims are exclusively
                         # batch_dims, which are checked for compat at GVL init
-                        slices.append(
-                            slice(
-                                None,
-                                dim_lengths[
-                                    dim
-                                ],  # pyright: ignore[reportGeneralTypeIssues]
-                            )
-                        )
+                        slices.append(slice(None, len(read_kwargs[dim])))
                     slices.append(slice(None, end - start))
                     _slices = tuple(slices)
                     sliced_buffer[name] = arr[_slices]
@@ -799,7 +808,7 @@ class SyncBuffers:
                         for name, r in self.gvl.readers.items()
                     }
                 )
-                yield Buffer(_buffer, buffer_idx, dim_slices, -1)
+                yield Buffer(_buffer, buffer_idx, dim_idxs, -1)
 
 
 class ConcurrentBuffers:
@@ -835,7 +844,7 @@ class ConcurrentBuffers:
         buffer_futures: List[ray.ObjectRef[Buffer]] = []
         buffer_meta: List[Optional[BufferMeta]] = [None] * len(self.gvl.actors)
         for partition in self.gvl.partitioned_bed:
-            dim_slices = {str(d): slice(0, 0) for d in self.gvl.buffer_sizes}
+            {str(d): slice(0, 0) for d in self.gvl.buffer_sizes}
 
             n_regions = len(partition)
             instances_in_partition = n_regions * np.prod(
@@ -854,14 +863,17 @@ class ConcurrentBuffers:
             merged_starts, merged_ends = merge_overlapping_regions(
                 partition["chromStart"].to_numpy(), partition["chromEnd"].to_numpy()
             )
+            dim_idxs_gen = self.gvl.dim_idxs_generator()
 
             while instances_in_partition_tasks < instances_in_partition:
                 if len(self.ready_actor_idxs) == 0:
                     yield buffer_futures, buffer_meta
                     buffer_futures = []
 
-                dim_slices = self.gvl.increment_dim_slices(dim_slices)
-                read_kwargs = {d: self.gvl.indexes[d][s] for d, s in dim_slices.items()}
+                dim_idxs = next(dim_idxs_gen)
+                read_kwargs = {
+                    dim: self.gvl.indexes[dim][idx] for dim, idx in dim_idxs.items()
+                }
                 buffer_len = n_regions * np.prod(
                     [len(a) for a in read_kwargs.values()], dtype=int
                 )
@@ -874,11 +886,12 @@ class ConcurrentBuffers:
                 if self.gvl.shuffle:
                     buffer_idx = self.gvl.rng.permutation(buffer_idx)
                 ready_actor_idx = self.ready_actor_idxs.pop()
+                read_kwargs["target_length"] = self.gvl.fixed_length
                 buffer = self.gvl.actors[ready_actor_idx].read.remote(  # type: ignore
                     contig, merged_starts, merged_ends, **read_kwargs
                 )
                 buffer_meta[ready_actor_idx] = BufferMeta(
-                    buffer_idx, dim_slices, ready_actor_idx
+                    buffer_idx, dim_idxs, ready_actor_idx
                 )
                 buffer_futures.append(buffer)
 

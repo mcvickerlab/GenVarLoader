@@ -1,4 +1,4 @@
-from typing import Dict, Hashable, Tuple
+from typing import Dict, Hashable, List, Tuple
 
 import numpy as np
 import ray
@@ -15,7 +15,7 @@ DataVarsLike = Dict[Hashable, Tuple[Tuple[Hashable, ...], NDArray]]
 class Buffer:
     buffer: xr.Dataset
     buffer_idx: NDArray[np.integer]
-    dim_slices: Dict[str, slice]
+    dim_idxs: Dict[Hashable, List[int]]
     actor_idx: int
     instances_in_buffer: int
     len_unused_buffer: int
@@ -25,10 +25,10 @@ class Buffer:
         self,
         buffer: xr.Dataset,
         buffer_idx: NDArray[np.integer],
-        dim_slices: Dict[str, slice],
+        dim_idxs: Dict[Hashable, List[int]],
         actor_idx: int,
     ) -> None:
-        self.dim_slices = dim_slices
+        self.dim_idxs = dim_idxs
         self.buffer = buffer
         self.buffer_idx = buffer_idx
         self.instances_in_buffer = len(self.buffer_idx)
@@ -43,12 +43,12 @@ class Buffer:
 @define
 class BufferMeta:
     buffer_idx: NDArray[np.integer]
-    dim_slices: Dict[str, slice]
+    dim_idxs: Dict[Hashable, List[int]]
     actor_idx: int
 
     def to_buffer(self, buffer: DataVarsLike):
         return Buffer(
-            xr.Dataset(buffer), self.buffer_idx, self.dim_slices, self.actor_idx
+            xr.Dataset(buffer), self.buffer_idx, self.dim_idxs, self.actor_idx
         )
 
 
