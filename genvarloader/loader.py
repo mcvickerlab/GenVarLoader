@@ -27,12 +27,7 @@ from numpy.typing import NDArray
 
 from .concurrent import Buffer, BufferMeta, DataVarsLike, ReaderActor
 from .types import Reader
-from .util import (
-    _cartesian_product,
-    _set_fixed_length_around_center,
-    get_rel_starts,
-    read_bedlike,
-)
+from .util import _cartesian_product, _set_fixed_length_around_center, read_bedlike
 
 try:
     import torch  # noqa
@@ -584,9 +579,11 @@ class GVL:
             buffer_indexes.append(np.arange(size))
         buffer_idx = _cartesian_product(buffer_indexes)
         # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
-        rel_starts = get_rel_starts(partition["chromStart"].to_numpy(), merged_starts)[
-            buffer_idx[:, 0], None
-        ]
+        starts = partition["chromStart"].to_numpy()[buffer_idx[:, 0]]
+        rel_starts = (
+            starts
+            - (np.diff(starts, prepend=starts[0]) - self.fixed_length).clip(0).cumsum()
+        )[:, None]
         strands = partition["strand"].to_numpy()[buffer_idx[:, 0], None]
         region_idx = partition["region_idx"].to_numpy()[buffer_idx[:, 0], None]
         # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
