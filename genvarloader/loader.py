@@ -722,7 +722,7 @@ def merge_overlapping_regions(starts: NDArray[np.int64], ends: NDArray[np.int64]
     return merged_starts[: region_idx + 1], merged_ends[: region_idx + 1]
 
 
-@nb.njit(nogil=True)
+@nb.njit(nogil=True, cache=True)
 def get_relative_starts(
     starts: NDArray[np.int64], merged_starts: NDArray[np.int64], length: int
 ):
