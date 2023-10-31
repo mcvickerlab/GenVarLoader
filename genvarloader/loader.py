@@ -579,11 +579,9 @@ class GVL:
             buffer_indexes.append(np.arange(size))
         buffer_idx = _cartesian_product(buffer_indexes)
         # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
-        starts = partition["chromStart"].to_numpy()[buffer_idx[:, 0]]
-        rel_starts = (
-            starts
-            - (np.diff(starts, prepend=starts[0]) - self.fixed_length).clip(0).cumsum()
-        )[:, None]
+        rel_starts = get_relative_starts(
+            partition["chromStart"].to_numpy(), merged_starts, self.fixed_length
+        )[buffer_idx[:, 0], None]
         strands = partition["strand"].to_numpy()[buffer_idx[:, 0], None]
         region_idx = partition["region_idx"].to_numpy()[buffer_idx[:, 0], None]
         # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
@@ -722,6 +720,31 @@ def merge_overlapping_regions(starts: NDArray[np.int64], ends: NDArray[np.int64]
             merged_starts[region_idx] = starts[i]
             merged_ends[region_idx] = ends[i]
     return merged_starts[: region_idx + 1], merged_ends[: region_idx + 1]
+
+
+@nb.njit(nogil=True)
+def get_relative_starts(
+    starts: NDArray[np.int64], merged_starts: NDArray[np.int64], length: int
+):
+    rel_starts = np.empty(len(starts), dtype=np.int64)
+    region_idx = 0
+    region_rel_start = 0
+
+    for i in range(len(starts)):
+        start = starts[i]
+
+        if (
+            region_idx != len(merged_starts) - 1
+            and start >= merged_starts[region_idx + 1]
+        ):
+            region_idx += 1
+            rel_starts[i] = rel_starts[i - 1] + length
+            region_rel_start = rel_starts[i]
+        else:
+            merged_start = merged_starts[region_idx]
+            rel_starts[i] = start - merged_start + region_rel_start
+
+    return rel_starts
 
 
 class SyncBuffers:
