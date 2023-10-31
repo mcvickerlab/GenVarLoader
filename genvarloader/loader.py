@@ -170,9 +170,13 @@ class GVL:
             self.buffer_idx_cols[k] = np.array(idx_cols, dtype=int)
 
         if isinstance(bed, (str, Path)):
-            bed = read_bedlike(bed).with_columns(
-                pl.col("strand").map_dict({"-": -1, "+": 1}, return_dtype=pl.Int8)
-            )
+            bed = read_bedlike(bed)
+            if "strand" in bed:
+                bed = bed.with_columns(
+                    pl.col("strand").map_dict({"-": -1, "+": 1}, return_dtype=pl.Int8)
+                )
+            else:
+                bed = bed.with_columns(strand=pl.lit(1, dtype=pl.Int8))
 
         bed = bed.with_row_count("region_idx")
         with pl.StringCache():
@@ -290,9 +294,15 @@ class GVL:
 
         if bed is not None:
             if isinstance(bed, (str, Path)):
-                bed = read_bedlike(bed).with_columns(
-                    pl.col("strand").map_dict({"-": -1, "+": 1}, return_dtype=pl.Int8)
-                )
+                bed = read_bedlike(bed)
+                if "strand" in bed:
+                    bed = bed.with_columns(
+                        pl.col("strand").map_dict(
+                            {"-": -1, "+": 1}, return_dtype=pl.Int8
+                        )
+                    )
+                else:
+                    bed = bed.with_columns(strand=pl.lit(1, dtype=pl.Int8))
             bed = bed.with_row_count("region_idx")
 
             with pl.StringCache():
