@@ -169,18 +169,19 @@ class GVL:
 
         if isinstance(bed, (str, Path)):
             bed = read_bedlike(bed)
-            if "strand" in bed:
-                bed = bed.with_columns(
-                    pl.col("strand").map_dict({"-": -1, "+": 1}, return_dtype=pl.Int8)
-                )
-            else:
-                bed = bed.with_columns(strand=pl.lit(1, dtype=pl.Int8))
+
+        if "strand" in bed:
+            bed = bed.with_columns(
+                pl.col("strand").map_dict({"-": -1, "+": 1}, return_dtype=pl.Int8)
+            )
+        else:
+            bed = bed.with_columns(strand=pl.lit(1, dtype=pl.Int8))
 
         bed = bed.with_row_count("region_idx")
         with pl.StringCache():
             pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
             bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
-        self.bed = _set_fixed_length_around_center(bed, fixed_length)
+        self.bed = _set_fixed_length_around_center(bed, self.fixed_length)
         # TODO check if any regions are out-of-bounds and any readers have padding
         # disabled. If so, raise an error. Otherwise, readers will catch the error
         # downstream.
@@ -189,17 +190,8 @@ class GVL:
             [self.sizes[d] for d in self.batch_dims], dtype=int
         )
 
-        if self.jitter_bed is not None:
-            shifts = self.rng.integers(
-                -self.jitter_bed, self.jitter_bed + 1, size=len(self.bed)
-            )
-            bed = self.bed.with_columns(
-                pl.col("chromStart") + shifts,
-                pl.col("chromEnd") + shifts,
-            )
-
         self.max_length = self.get_max_length()
-        self.partitioned_bed = self.partition_bed(bed, self.max_length)
+        self.partitioned_bed = self.partition_bed(self.bed, self.max_length)
 
         if weights is not None:
             if extra_weights := set(weights.keys()) - set(self.virtual_data.dims):  # type: ignore
@@ -293,14 +285,14 @@ class GVL:
         if bed is not None:
             if isinstance(bed, (str, Path)):
                 bed = read_bedlike(bed)
-                if "strand" in bed:
-                    bed = bed.with_columns(
-                        pl.col("strand").map_dict(
-                            {"-": -1, "+": 1}, return_dtype=pl.Int8
-                        )
-                    )
-                else:
-                    bed = bed.with_columns(strand=pl.lit(1, dtype=pl.Int8))
+
+            if "strand" in bed:
+                bed = bed.with_columns(
+                    pl.col("strand").map_dict({"-": -1, "+": 1}, return_dtype=pl.Int8)
+                )
+            else:
+                bed = bed.with_columns(strand=pl.lit(1, dtype=pl.Int8))
+
             bed = bed.with_row_count("region_idx")
 
             with pl.StringCache():
@@ -555,13 +547,6 @@ class GVL:
         )
         for buffer_dim_idxs in batcher:
             yield dict(zip(self.buffer_sizes.keys(), buffer_dim_idxs))
-
-    def increment_dim_slices(self, dim_slices: Dict[str, slice]):
-        dim_slices = {
-            d: slice(s.stop, s.stop + size)
-            for (d, s), size in zip(dim_slices.items(), self.buffer_sizes.values())
-        }
-        return dim_slices
 
     def get_buffer_idx(
         self,

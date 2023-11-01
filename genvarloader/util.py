@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 
 
 def _set_fixed_length_around_center(bed: pl.DataFrame, length: int):
-    if "peak" in bed.columns:
+    if "peak" in bed:
         center = pl.col("chromStart") + pl.col("peak")
     else:
         center = (pl.col("chromStart") + pl.col("chromEnd")) / 2

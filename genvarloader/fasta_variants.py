@@ -190,7 +190,7 @@ class FastaVariants(Reader):
             else:
                 assert_never(variant)
 
-        return xr.DataArray(seqs.view("S1"), dims=["sample", "ploid", "length"])
+        return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
 
     def sample_shifts(self, genotypes: NDArray[np.int8], size_diffs: NDArray[np.int32]):
         total_diffs = (
