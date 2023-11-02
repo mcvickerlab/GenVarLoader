@@ -37,6 +37,9 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 
+BatchDict = Dict[Hashable, Tuple[List[Hashable], NDArray]]
+
+
 class GVL:
     # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
     BUFFER_IDX_START_COL = 0
@@ -157,15 +160,15 @@ class GVL:
         self.non_batch_dims = [d for d in self.sizes.keys() if d not in self.batch_dims]
         self.non_batch_dim_shape: Dict[Hashable, List[int]] = {}
         self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
-        for k, a in self.virtual_data.data_vars.items():
-            self.non_batch_dim_shape[k] = [a.sizes[d] for d in self.non_batch_dims]
+        for name, a in self.virtual_data.data_vars.items():
+            self.non_batch_dim_shape[name] = [a.sizes[d] for d in self.non_batch_dims]
             # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
             idx_cols = [
-                i
-                for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL)
-                if d in a.sizes
+                self.batch_dims.index(d) + self.BUFFER_IDX_MIN_DIM_COL
+                for d in a.dims
+                if d in self.batch_dims
             ]
-            self.buffer_idx_cols[k] = np.array(idx_cols, dtype=int)
+            self.buffer_idx_cols[name] = np.array(idx_cols, dtype=int)
 
         if isinstance(bed, (str, Path)):
             bed = read_bedlike(bed)
@@ -312,15 +315,17 @@ class GVL:
             ]
             self.non_batch_dim_shape: Dict[Hashable, List[int]] = {}
             self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
-            for k, a in self.virtual_data.data_vars.items():
-                self.non_batch_dim_shape[k] = [a.sizes[d] for d in self.non_batch_dims]
+            for name, a in self.virtual_data.data_vars.items():
+                self.non_batch_dim_shape[name] = [
+                    a.sizes[d] for d in self.non_batch_dims
+                ]
                 # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
                 idx_cols = [
                     i
                     for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL)
                     if d in a.sizes
                 ]
-                self.buffer_idx_cols[k] = np.array(idx_cols, dtype=int)
+                self.buffer_idx_cols[name] = np.array(idx_cols, dtype=int)
 
         if None not in (fixed_length, bed, max_memory_gb, batch_dims):
             # don't need to check jitter_bed here because it's jittered at each call
@@ -462,8 +467,9 @@ class GVL:
                 d: self.rng.permutation(idx) for d, idx in self.indexes.items()
             }
 
-        self.partial_batches = []
-        self.partial_indices = []
+        batch: BatchDict
+        self.partial_batches: List[BatchDict] = []
+        self.partial_indices: List[NDArray[np.integer]] = []
         self.total_yielded = 0
 
         if self.num_workers > 1:
@@ -480,7 +486,6 @@ class GVL:
             while buffer.len_unused_buffer > 0:
                 idx = buffer.buffer_idx[buffer.idx_slice]
 
-                batch: xr.Dataset
                 if (
                     self.batch_slice.start == 0
                     and self.batch_slice.stop == self.batch_size
@@ -493,14 +498,18 @@ class GVL:
                     )
                     self.partial_indices.append(idx)
                     if self.batch_slice.stop == self.batch_size:
-                        batch = xr.concat(self.partial_batches, dim="batch")
+                        batch = self.concat_batches(self.partial_batches)
                         batch_idx = np.concatenate(self.partial_indices)
                         self.partial_batches = []
                         self.partial_indices = []
 
                 # full batch
                 if self.batch_slice.stop == self.batch_size:
-                    yield self.process_batch(batch, batch_idx, buffer.dim_idxs)
+                    yield self.process_batch(
+                        batch,
+                        batch_idx,
+                        buffer.dim_idxs,  # pyright: ignore[reportUnboundVariable]
+                    )
 
                     self.total_yielded += self.batch_size
 
@@ -513,7 +522,7 @@ class GVL:
                         return
 
                     # final incomplete batch is always a partial batch
-                    batch = xr.concat(self.partial_batches, dim="batch")
+                    batch = self.concat_batches(self.partial_batches)
                     batch_idx = np.concatenate(self.partial_indices, 0)
 
                     yield self.process_batch(batch, batch_idx, buffer.dim_idxs)
@@ -587,13 +596,13 @@ class GVL:
         self,
         buffer: xr.Dataset,
         idx: NDArray[np.integer],
-    ):
+    ) -> BatchDict:
         """Despite this unvectorized implementation, it is in fact faster than both a
         numba implementation (perhaps due to small batch sizes) and using fancy indexing
         (with or without xarray.Dataset.isel). This may be faster without vectorization
         because it avoids fancy indexing in the length dimension.
         """
-        out: Dict[Hashable, Tuple[List[str], NDArray]] = {}
+        out: BatchDict = {}
         for name, reader in self.readers.items():
             a = buffer[name]
             dims = ["batch", *self.non_batch_dims, "length"]
@@ -618,7 +627,7 @@ class GVL:
                 reader.rev_strand_fn,
             )
         # TODO slowest part of this function is the creation of the Dataset
-        return xr.Dataset(out)
+        return out
 
     def select_from_buffer_array(
         self,
@@ -641,11 +650,22 @@ class GVL:
                 subarr = rev_strand_fn(subarr)
             out[i] = subarr
 
+    def concat_batches(self, batches: List[BatchDict]) -> BatchDict:
+        out: BatchDict = {}
+        for name, (dims, _) in batches[0].items():
+            out[name] = dims, np.concatenate(
+                [batch[name][1] for batch in batches], axis=0
+            )
+
+        return out
+
     def process_batch(
-        self, batch: xr.Dataset, batch_idx: NDArray, dim_idxs: Dict[Hashable, List[int]]
+        self,
+        batch: BatchDict,
+        batch_idx: NDArray,
+        dim_idxs: Dict[Hashable, List[int]],
     ):
-        batch = batch.transpose("batch", ...)
-        out = {name: arr.values for name, arr in batch.data_vars.items()}
+        out = {name: arr for name, (dim, arr) in batch.items()}
 
         if self.return_index:
             # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...

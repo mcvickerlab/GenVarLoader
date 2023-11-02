@@ -154,8 +154,7 @@ class Pgen(Variants):
                     .select("#CHROM", "END", "VAR_IDX")
                 )
                 ends = (
-                    ends.sort("#CHROM", "END")
-                    .group_by("#CHROM", maintain_order=True)
+                    ends.group_by("#CHROM", maintain_order=True)
                     .agg(
                         pl.all().sort_by("END"),
                     )
@@ -170,7 +169,7 @@ class Pgen(Variants):
                         .alias("END_TO_VAR_IDX"),
                     )
                     .explode(pl.exclude("#CHROM"))
-                    .select("END", "END_TO_VAR_IDX")
+                    .select("#CHROM", "END", "END_TO_VAR_IDX")
                 )
                 pvar.write_ipc(pvar_arrow_path)
                 ends.write_ipc(ends_arrow_path)
@@ -195,6 +194,10 @@ class Pgen(Variants):
                     self.end_to_var_idx[_contig] = partition[
                         "END_TO_VAR_IDX"
                     ].to_numpy()
+
+                # make all contigs map to the same pgen file
+                pgen_path = self.pgen_paths["_all"]
+                self.pgen_paths = {contig: pgen_path for contig in self.contig_offsets}
             else:
                 self.contig_offsets[contig] = 0
                 self.positions[contig] = pvar["POS"].to_numpy()

@@ -321,28 +321,3 @@ def construct_haplotypes_with_indels(
             unfilled_length = length - out_idx
             if unfilled_length > 0:
                 out[sample, hap, out_idx:] = ref[ref_idx : ref_idx + unfilled_length]
-
-
-@nb.njit(
-    "(u1[:, :, :], u4[:], i4[:], u1[:, :])",
-    nogil=True,
-    parallel=True,
-    cache=True,
-)
-def apply_variants(
-    seqs: NDArray[np.uint8],
-    offsets: NDArray[np.uint32],
-    positions: NDArray[np.int32],
-    alleles: NDArray[np.uint8],
-):
-    # seqs (s, p, l)
-    # offsets (s+1)
-    # positions (v)
-    # alleles (p, v)
-    for sample_idx in nb.prange(len(offsets) - 1):
-        start = offsets[sample_idx]
-        end = offsets[sample_idx + 1]
-        sample_positions = positions[start:end]
-        sample_alleles = alleles[:, start:end]
-        sample_seq = seqs[sample_idx]
-        sample_seq[:, sample_positions] = sample_alleles
