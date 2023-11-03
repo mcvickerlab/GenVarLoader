@@ -55,7 +55,9 @@ class GVL:
         batch_size: int,
         max_memory_gb: float,
         batch_dims: Optional[List[str]] = None,
-        transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
+        transform: Optional[
+            Callable[[Dict[Hashable, NDArray]], Dict[Hashable, NDArray]]
+        ] = None,
         shuffle: bool = False,
         weights: Optional[Dict[str, NDArray]] = None,
         seed: Optional[int] = None,
@@ -214,7 +216,9 @@ class GVL:
         batch_size: Optional[int] = None,
         max_memory_gb: Optional[float] = None,
         batch_dims: Optional[List[str]] = None,
-        transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
+        transform: Optional[
+            Callable[[Dict[Hashable, NDArray]], Dict[Hashable, NDArray]]
+        ] = None,
         shuffle: bool = False,
         weights: Optional[Dict[str, NDArray]] = None,
         seed: Optional[int] = None,
@@ -561,7 +565,7 @@ class GVL:
         self,
         partition: pl.DataFrame,
         merged_starts: NDArray[np.int64],
-        read_kwargs: Dict[str, NDArray[np.int64]],
+        read_kwargs: Dict[Hashable, NDArray[np.int64]],
     ) -> NDArray[np.integer]:
         row_idx = partition.with_row_count()["row_nr"].to_numpy()
         buffer_indexes = [row_idx]
@@ -698,6 +702,22 @@ class GVL:
 def partition_regions(
     starts: NDArray[np.int64], ends: NDArray[np.int64], max_length: int
 ):
+    """
+    Partitions regions based on their lengths and distances between them.
+
+    Parameters
+    ----------
+    starts : numpy.ndarray
+        Start positions for each region.
+    ends : numpy.ndarray
+        End positions for each region.
+    max_length : int
+        Maximum length of each partition.
+
+    Returns
+    -------
+    numpy.ndarray : Array of partition numbers for each region.
+    """
     partitions = np.zeros_like(starts)
     partition = 0
     curr_length = ends[0] - starts[0]
@@ -945,7 +965,7 @@ if TORCH_AVAILABLE:
             max_memory_gb: Optional[float] = None,
             batch_dims: Optional[List[str]] = None,
             transform: Optional[
-                Callable[[Dict[str, NDArray]], Dict[str, NDArray]]
+                Callable[[Dict[Hashable, NDArray]], Dict[Hashable, NDArray]]
             ] = None,
             shuffle: bool = False,
             weights: Optional[Dict[str, NDArray]] = None,

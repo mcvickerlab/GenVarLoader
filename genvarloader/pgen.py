@@ -348,13 +348,6 @@ class Pgen(Variants):
         if contig not in self.contigs:
             return out, ends
 
-        # effective_starts = ends - target_length
-        # _eff_s_idxs = np.searchsorted(self.ends[contig], effective_starts)
-        # # idx absolute -> subtract offset -> relative
-        # eff_s_idxs = (
-        #     self.end_to_var_idx[contig][_eff_s_idxs] - self.contig_offsets[contig]
-        # )
-
         _s_idxs = np.searchsorted(self.ends[contig], starts)
         s_idxs = self.end_to_var_idx[contig][_s_idxs]
 
@@ -368,43 +361,33 @@ class Pgen(Variants):
         # make idxs absolute
         e_idxs += self.contig_offsets[contig]
 
-        min_s_idx = s_idxs.min()
-        max_e_idx = e_idxs.max()
-
-        # no variants in query regions
-        if max_e_idx <= min_s_idx:
-            return out, ends
-
-        # get alleles
-        genotypes = np.empty(
-            (max_e_idx - min_s_idx, n_samples * self.ploidy), dtype=np.int32
-        )
         with self._pgen(contig, pgen_idx) as f:
-            # (v s*2)
-            f.read_alleles_range(min_s_idx, max_e_idx, genotypes)
+            for i, (s_idx, e_idx) in enumerate(zip(s_idxs, e_idxs)):
+                # no variants in query regions
+                if s_idx == e_idx:
+                    out[i] = None
+                    continue
 
-        genotypes = genotypes.astype(np.int8)
-        # (s*2 v)
-        genotypes = genotypes.swapaxes(0, 1)
-        # (s 2 v)
-        genotypes = np.stack([genotypes[::2], genotypes[1::2]], axis=1)
+                genotypes = np.empty(
+                    (e_idx - s_idx, n_samples * self.ploidy), dtype=np.int32
+                )
+                f.read_alleles_range(s_idx, e_idx, genotypes)
+                genotypes = genotypes.astype(np.int8)
+                # (s*2 v)
+                genotypes = genotypes.swapaxes(0, 1)
+                # (s 2 v)
+                genotypes = np.stack([genotypes[::2], genotypes[1::2]], axis=1)
 
-        # re-order samples to be in query order
-        if query_idx is not None:
-            genotypes = genotypes[query_idx]
+                # re-order samples to be in query order
+                if query_idx is not None:
+                    genotypes = genotypes[query_idx]
 
-        for i, (s_idx, e_idx) in enumerate(zip(s_idxs, e_idxs)):
-            rel_s_idx = s_idx - min_s_idx
-            rel_e_idx = e_idx - min_s_idx
-            if s_idx == e_idx:
-                out[i] = None
-            else:
                 out[i] = DenseGenotypes(
                     positions=self.positions[contig][s_idx:e_idx],
                     size_diffs=self.size_diffs[contig][s_idx:e_idx],
                     ref=self.ref[contig][s_idx:e_idx],
                     alt=self.alt[contig][s_idx:e_idx],
-                    genotypes=genotypes[:, ploid, rel_s_idx:rel_e_idx],
+                    genotypes=genotypes[:, ploid],
                 )
 
         return (out, max_ends)
