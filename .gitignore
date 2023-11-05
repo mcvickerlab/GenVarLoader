@@ -1,3 +1,17 @@
+# Extra
+sbox*
+archive/
+test.bed.flc.zarr
+test.zarr
+tests/data/fasta
+examples/
+results/
+.uuid
+docs/
+requirements.txt
+notebooks/
+scripts/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -124,6 +138,7 @@ venv.bak/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+.mypy.ini
 
 # Pyre type checker
 .pyre/

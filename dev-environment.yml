@@ -13,7 +13,6 @@ dependencies:
   - pandera
   - polars>=0.19.3
   - pgenlib # optional
-  - poetry
   - pyarrow
   - pybigwig
   - pysam
@@ -21,5 +20,27 @@ dependencies:
   - ray-default
   # - tiledb::tiledbvcf-py # optional
   - xarray
+  - zarr
+  # dev dependencies
+  - black
+  - gh
+  - git
+  - icecream
+  - isort
+  - memray
+  - mypy
+  - pip
+  - pipreqs
+  - pre-commit
+  - py-spy
+  - pytest
+  - pytest-cases
+  - pytest-cov
+  - jupyter
+  - jupyterlab
+  - ruff
+  - sphinx
+  - sphinx-book-theme
 platforms:
   - linux-64
+category: dev
