@@ -267,7 +267,7 @@ def splice_subarrays(
     out = np.empty(total_length, dtype=arr.dtype)
     for rel_start, s, e in zip(rel_starts, starts - start, ends - start):
         length = e - s
-        out[rel_start : rel_start + length] = arr[s:e]
+        out[..., rel_start : rel_start + length] = arr[..., s:e]
     return out
 
 
@@ -308,10 +308,10 @@ def splice_and_rc_subarrays(
     ):
         length = e - s
         if strand == 1:
-            subarr = arr[s:e]
+            subarr = arr[..., s:e]
         else:
-            subarr = rc_fn(arr[s:e])
-        out[rel_start : rel_start + length] = subarr
+            subarr = rc_fn(arr[..., s:e])
+        out[..., rel_start : rel_start + length] = subarr
     return out
 
 
@@ -350,5 +350,5 @@ def splice_and_rev_subarrays(
         rel_starts, starts - start, ends - start, strands
     ):
         length = e - s
-        out[rel_start : rel_start + length] = arr[s:e:strand]
+        out[..., rel_start : rel_start + length] = arr[..., s:e:strand]
     return out
