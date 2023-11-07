@@ -21,6 +21,7 @@ import numpy as np
 import polars as pl
 import ray
 import xarray as xr
+from loguru import logger
 from more_itertools import chunked
 from natsort import natsorted
 from numpy.typing import NDArray
@@ -38,6 +39,29 @@ except ImportError:
 
 
 BatchDict = Dict[Hashable, Tuple[List[Hashable], NDArray]]
+
+
+def view_virtual_data(*readers: Reader):
+    """View the virtual data corresponding from multiple readers. This is useful to
+    inspect what non-length dimensions will be exist when constructing a GVL loader
+    from them.
+
+    Parameters
+    ----------
+    *readers : Reader
+        Readers to inspect.
+    """
+    virtual_data = xr.merge([r.virtual_data for r in readers], join="inner")
+    for dim, size in virtual_data.sizes.items():
+        for reader in readers:
+            if (
+                dim in reader.virtual_data.data_vars
+                and size != reader.virtual_data.sizes[dim]
+            ):
+                logger.warning(
+                    f"Dimension {dim} has different sizes between readers. Values in this dimension that are not present in all readers will not be included."
+                )
+    return virtual_data
 
 
 class GVL:
@@ -137,9 +161,7 @@ class GVL:
                 for i in range(self.num_workers - 1)  # keep 1 cpu for main process
             ]
 
-        self.virtual_data = xr.merge(
-            [r.virtual_data for r in self.readers.values()], join="exact"
-        )
+        self.virtual_data = view_virtual_data(*self.readers.values())
         self.sizes = dict(self.virtual_data.sizes)
         self.sizes.pop("", None)
         self.itemsizes: Mapping[Hashable, int] = defaultdict(int)

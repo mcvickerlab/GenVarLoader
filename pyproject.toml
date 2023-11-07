@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "genvarloader"
-version = "0.1.8"
+version = "0.0.0"  # managed by poetry-dynamic-versioning
 description = "Pipeline for efficient genomic data processing."
 authors = ["David Laub <dlaub@ucsd.edu>", "Aaron Ho <aho@salk.edu>"]
 readme = "README.md"
@@ -38,6 +38,10 @@ pytest-cov = "^4.1.0"
 ruff = "^0.0.292"
 pre-commit = "^3.5.0"
 
+[tool.poetry-dynamic-versioning]
+enable = true
+vcs = "git"
+
 [tool.isort]
 profile = "black"
 
@@ -45,8 +49,8 @@ profile = "black"
 plugins = ["numpy.typing.mypy_plugin", "pandera.mypy"]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core>=1.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
+build-backend = "poetry_dynamic_versioning.backend"
 
 [tool.pytest.ini_options]
 filterwarnings = [
