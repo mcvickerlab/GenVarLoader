@@ -18,7 +18,7 @@ from .pgen import Pgen
 from .rle_table import RLE_Table
 from .types import Reader, Variants
 
-__version__ = "0.1.8"
+__version__ = "0.0.0"
 
 __all__ = [
     "Fasta",
