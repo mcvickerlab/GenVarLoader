@@ -55,7 +55,7 @@ def view_virtual_data(*readers: Reader):
     for dim, size in virtual_data.sizes.items():
         for reader in readers:
             if (
-                dim in reader.virtual_data.data_vars
+                dim in reader.virtual_data.dims
                 and size != reader.virtual_data.sizes[dim]
             ):
                 logger.warning(
@@ -178,7 +178,7 @@ class GVL:
 
         if missing_dims := (set(self.batch_dims) - set(self.virtual_data.dims)):  # type: ignore
             raise ValueError(
-                f"Got batch dimensions that are not available from the readers: {missing_dims}"
+                f"Got batch dimensions that are not available in any reader: {missing_dims}"
             )
 
         self.non_batch_dims = [d for d in self.sizes.keys() if d not in self.batch_dims]
