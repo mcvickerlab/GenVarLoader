@@ -18,7 +18,7 @@ from .pgen import Pgen
 from .rle_table import RLE_Table
 from .types import Reader, Variants
 
-__version__ = "0.0.0"
+__version__ = "0.0.0"  # managed by poetry-dynamic-versioning
 
 __all__ = [
     "Fasta",
