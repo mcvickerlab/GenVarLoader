@@ -11,14 +11,14 @@ batch. This should be fast because the buffer is the only part that uses file I/
 whereas the batches are materialized from the buffer.
 """
 
-import xarray as xr
-
 from .fasta import Fasta
 from .fasta_variants import FastaVariants
-from .loader import GVL
+from .loader import GVL, view_virtual_data
 from .pgen import Pgen
 from .rle_table import RLE_Table
 from .types import Reader, Variants
+
+__version__ = "0.1.8"
 
 __all__ = [
     "Fasta",
@@ -30,16 +30,3 @@ __all__ = [
     "Reader",
     "Variants",
 ]
-
-
-def view_virtual_data(*readers: Reader):
-    """View the virtual data corresponding from multiple readers. This is useful to
-    inspect what non-length dimensions will be exist when constructing a GVL loader
-    from them.
-
-    Parameters
-    ----------
-    *readers : Reader
-        Readers to inspect.
-    """
-    return xr.merge([r.virtual_data for r in readers], join="exact")
