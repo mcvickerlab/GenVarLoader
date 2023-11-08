@@ -875,7 +875,7 @@ class SyncBuffers:
                             contig,
                             merged_starts,
                             merged_ends,
-                            out=sliced_buffer[name],
+                            # out=sliced_buffer[name],
                             **read_kwargs,
                         )
                         for name, r in self.gvl.readers.items()
