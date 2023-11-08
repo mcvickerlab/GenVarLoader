@@ -264,7 +264,8 @@ def splice_subarrays(
     start = starts.min()
     rel_starts = get_rel_starts(starts, ends)
     total_length = (ends - starts).sum()
-    out = np.empty(total_length, dtype=arr.dtype)
+    shape = arr.shape[:-1] + (total_length,)
+    out = np.empty(shape, dtype=arr.dtype)
     for rel_start, s, e in zip(rel_starts, starts - start, ends - start):
         length = e - s
         out[..., rel_start : rel_start + length] = arr[..., s:e]
@@ -302,7 +303,8 @@ def splice_and_rc_subarrays(
     start = starts.min()
     rel_starts = get_rel_starts(starts, ends)
     total_length = (ends - starts).sum()
-    out = np.empty(total_length, dtype=arr.dtype)
+    shape = arr.shape[:-1] + (total_length,)
+    out = np.empty(shape, dtype=arr.dtype)
     for rel_start, s, e, strand in zip(
         rel_starts, starts - start, ends - start, strands
     ):
@@ -345,7 +347,8 @@ def splice_and_rev_subarrays(
     start = starts.min()
     rel_starts = get_rel_starts(starts, ends)
     total_length = (ends - starts).sum()
-    out = np.empty(total_length, dtype=arr.dtype)
+    shape = arr.shape[:-1] + (total_length,)
+    out = np.empty(shape, dtype=arr.dtype)
     for rel_start, s, e, strand in zip(
         rel_starts, starts - start, ends - start, strands
     ):

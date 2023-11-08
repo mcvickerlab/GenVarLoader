@@ -55,7 +55,7 @@ def view_virtual_data(*readers: Reader):
     for dim, size in virtual_data.sizes.items():
         for reader in readers:
             if (
-                dim in reader.virtual_data.data_vars
+                dim in reader.virtual_data.dims
                 and size != reader.virtual_data.sizes[dim]
             ):
                 logger.warning(
@@ -178,14 +178,16 @@ class GVL:
 
         if missing_dims := (set(self.batch_dims) - set(self.virtual_data.dims)):  # type: ignore
             raise ValueError(
-                f"Got batch dimensions that are not available from the readers: {missing_dims}"
+                f"Got batch dimensions that are not available in any reader: {missing_dims}"
             )
 
         self.non_batch_dims = [d for d in self.sizes.keys() if d not in self.batch_dims]
         self.non_batch_dim_shape: Dict[Hashable, List[int]] = {}
         self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
         for name, a in self.virtual_data.data_vars.items():
-            self.non_batch_dim_shape[name] = [a.sizes[d] for d in self.non_batch_dims]
+            self.non_batch_dim_shape[name] = [
+                a.sizes[d] for d in self.non_batch_dims if d in a.dims
+            ]
             # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
             idx_cols = [
                 self.batch_dims.index(d) + self.BUFFER_IDX_MIN_DIM_COL
@@ -712,7 +714,13 @@ class GVL:
 
     def torch_dataloader(self):
         if not TORCH_AVAILABLE:
-            raise ImportError("Pytorch must be installed to get a Pytorch DataLoader.")
+            raise ImportError(
+                """
+                PyTorch is not included as a genvarloader dependency and must be 
+                manually installed to get a Pytorch DataLoader. PyTorch has special 
+                installation instructions, see: https://pytorch.org/get-started/locally/
+                """
+            )
         from torch.utils.data import DataLoader
 
         dataset = GVLDataset(self)
@@ -822,14 +830,14 @@ class SyncBuffers:
             instances_in_partition_tasks = 0
 
             contig: str
-            contig, start, end = partition.select(
-                pl.col("chrom").first(),
-                pl.col("chromStart").min(),
-                pl.col("chromEnd").max(),
-            ).row(0)
-            merged_starts, merged_ends = merge_overlapping_regions(
-                partition["chromStart"].to_numpy(), partition["chromEnd"].to_numpy()
-            )
+            contig = partition.select("chrom").row(0)[0]
+            starts, ends = [
+                c.to_numpy()
+                for c in partition.select("chromStart", "chromEnd").get_columns()
+            ]
+            merged_starts, merged_ends = merge_overlapping_regions(starts, ends)
+            lengths = merged_ends - merged_starts
+            total_length = lengths.sum()
             dim_idxs_gen = self.gvl.dim_idxs_generator()
 
             while instances_in_partition_tasks < instances_in_partition:
@@ -859,8 +867,8 @@ class SyncBuffers:
                     for dim in dims:
                         # No chance of KeyError here because dims are exclusively
                         # batch_dims, which are checked for compat at GVL init
-                        slices.append(slice(None, len(read_kwargs[dim])))
-                    slices.append(slice(None, end - start))
+                        slices.append(slice(0, len(read_kwargs[dim])))
+                    slices.append(slice(0, total_length))
                     _slices = tuple(slices)
                     sliced_buffer[name] = arr[_slices]
                 _buffer = xr.Dataset(

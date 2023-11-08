@@ -148,6 +148,7 @@ class FastaVariants(Reader):
         )
 
         lengths = ends - starts
+        total_length = lengths.sum()
         rel_starts = get_rel_starts(starts, ends)
 
         ref: NDArray[np.bytes_] = self.reference.read(
@@ -158,7 +159,7 @@ class FastaVariants(Reader):
 
         if out is None:
             # alloc then fill is faster than np.tile ¯\_(ツ)_/¯
-            seqs = np.empty((n_samples, ploid, lengths.sum()), dtype=ref.dtype)
+            seqs = np.empty((n_samples, ploid, total_length), dtype=ref.dtype)
         else:
             seqs = out
 
