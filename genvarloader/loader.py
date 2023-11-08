@@ -712,7 +712,13 @@ class GVL:
 
     def torch_dataloader(self):
         if not TORCH_AVAILABLE:
-            raise ImportError("Pytorch must be installed to get a Pytorch DataLoader.")
+            raise ImportError(
+                """
+                PyTorch is not included as a genvarloader dependency and must be 
+                manually installed to get a Pytorch DataLoader. PyTorch has special 
+                installation instructions, see: https://pytorch.org/get-started/locally/
+                """
+            )
         from torch.utils.data import DataLoader
 
         dataset = GVLDataset(self)
@@ -822,14 +828,14 @@ class SyncBuffers:
             instances_in_partition_tasks = 0
 
             contig: str
-            contig, start, end = partition.select(
-                pl.col("chrom").first(),
-                pl.col("chromStart").min(),
-                pl.col("chromEnd").max(),
-            ).row(0)
-            merged_starts, merged_ends = merge_overlapping_regions(
-                partition["chromStart"].to_numpy(), partition["chromEnd"].to_numpy()
-            )
+            contig = partition.select("chrom").row(0)[0]
+            starts, ends = [
+                c.to_numpy()
+                for c in partition.select("chromStart", "chromEnd").get_columns()
+            ]
+            merged_starts, merged_ends = merge_overlapping_regions(starts, ends)
+            lengths = ends - starts
+            total_length = lengths.sum()
             dim_idxs_gen = self.gvl.dim_idxs_generator()
 
             while instances_in_partition_tasks < instances_in_partition:
@@ -860,7 +866,7 @@ class SyncBuffers:
                         # No chance of KeyError here because dims are exclusively
                         # batch_dims, which are checked for compat at GVL init
                         slices.append(slice(None, len(read_kwargs[dim])))
-                    slices.append(slice(None, end - start))
+                    slices.append(slice(None, total_length))
                     _slices = tuple(slices)
                     sliced_buffer[name] = arr[_slices]
                 _buffer = xr.Dataset(
