@@ -865,8 +865,8 @@ class SyncBuffers:
                     for dim in dims:
                         # No chance of KeyError here because dims are exclusively
                         # batch_dims, which are checked for compat at GVL init
-                        slices.append(slice(None, len(read_kwargs[dim])))
-                    slices.append(slice(None, total_length))
+                        slices.append(slice(0, len(read_kwargs[dim])))
+                    slices.append(slice(0, total_length))
                     _slices = tuple(slices)
                     sliced_buffer[name] = arr[_slices]
                 _buffer = xr.Dataset(
