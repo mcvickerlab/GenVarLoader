@@ -834,7 +834,7 @@ class SyncBuffers:
                 for c in partition.select("chromStart", "chromEnd").get_columns()
             ]
             merged_starts, merged_ends = merge_overlapping_regions(starts, ends)
-            lengths = ends - starts
+            lengths = merged_ends - merged_starts
             total_length = lengths.sum()
             dim_idxs_gen = self.gvl.dim_idxs_generator()
 
