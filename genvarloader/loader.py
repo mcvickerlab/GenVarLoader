@@ -185,7 +185,9 @@ class GVL:
         self.non_batch_dim_shape: Dict[Hashable, List[int]] = {}
         self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
         for name, a in self.virtual_data.data_vars.items():
-            self.non_batch_dim_shape[name] = [a.sizes[d] for d in self.non_batch_dims]
+            self.non_batch_dim_shape[name] = [
+                a.sizes[d] for d in self.non_batch_dims if d in a.dims
+            ]
             # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
             idx_cols = [
                 self.batch_dims.index(d) + self.BUFFER_IDX_MIN_DIM_COL
