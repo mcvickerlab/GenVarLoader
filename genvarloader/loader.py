@@ -668,15 +668,13 @@ class GVL:
         rev_strand_fn: Callable[[NDArray], NDArray],
     ):
         # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
-        for i in range(len(idx)):
-            _idx: NDArray[np.integer] = idx[i]
-            indexer = [slice(None)] * arr.ndim
-            indexer[: len(idx_cols)] = _idx[idx_cols]
-            indexer[-1] = slice(_idx[start_col], _idx[start_col] + self.fixed_length)
-            subarr = arr[tuple(indexer)]
-            if _idx[strand_col] == -1:
-                subarr = rev_strand_fn(subarr)
-            out[i] = subarr
+        view = np.lib.stride_tricks.sliding_window_view(arr, self.fixed_length, axis=-1)
+        idx_cols = idx_cols.tolist() + [start_col]
+        indexer = [idx[:, c] for c in idx_cols]
+        out[:] = view[tuple(indexer)]
+        rev_strand = idx[:, strand_col] == -1
+        if (rev_strand).any():
+            out[rev_strand] = rev_strand_fn(out[rev_strand])
 
     def concat_batches(self, batches: List[BatchDict]) -> BatchDict:
         out: BatchDict = {}

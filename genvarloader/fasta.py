@@ -1,3 +1,4 @@
+from functools import partial
 from pathlib import Path
 from typing import Optional, Union, cast
 
@@ -67,7 +68,9 @@ class Fasta(Reader):
             self.alphabet = alphabet
 
         if isinstance(self.alphabet, sp.NucleotideAlphabet):
-            self.rev_strand_fn = self.alphabet.reverse_complement
+            self.rev_strand_fn = partial(
+                self.alphabet.reverse_complement, length_axis=-1
+            )
         elif isinstance(self.alphabet, sp.AminoAlphabet):
 
             def rev_strand_fn(a: NDArray[np.bytes_]):
