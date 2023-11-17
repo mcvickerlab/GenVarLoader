@@ -15,6 +15,8 @@ from .util import get_rel_starts
 
 
 class FastaVariants(Reader):
+    dtype = np.dtype("S1")
+
     def __init__(
         self,
         name: str,
@@ -46,15 +48,19 @@ class FastaVariants(Reader):
         self.jitter_long = jitter_long
         self.contig_starts_with_chr = None
 
+        self.name = name
+        self.coords = {
+            "sample": np.asarray(self.variants.samples),
+            "ploid": np.arange(self.variants.ploidy, dtype=np.uint32),
+        }
+        self.sizes = {k: len(v) for k, v in self.coords.items()}
+
         self.virtual_data = xr.DataArray(
             da.empty(  # pyright: ignore[reportPrivateImportUsage]
                 (self.variants.n_samples, self.variants.ploidy), dtype="S1"
             ),
             name=name,
-            coords={
-                "sample": np.asarray(self.variants.samples),
-                "ploid": np.arange(self.variants.ploidy, dtype=np.uint32),
-            },
+            coords=self.coords,
         )
 
         if (

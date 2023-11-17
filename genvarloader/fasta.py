@@ -2,24 +2,29 @@ from functools import partial
 from pathlib import Path
 from typing import Optional, Union, cast
 
-import dask.array as da
 import numpy as np
 import pysam
 import seqpro as sp
 import xarray as xr
 from numpy.typing import NDArray
+from typing_extensions import assert_never
 
 from .types import Reader
 from .util import splice_subarrays
 
 
 class Fasta(Reader):
+    dtype = np.dtype("S1")
+    sizes = {}
+    coords = {}
+
     def __init__(
         self,
         name: str,
         path: Union[str, Path],
         pad: Optional[str] = None,
         alphabet: Optional[Union[str, sp.NucleotideAlphabet, sp.AminoAlphabet]] = None,
+        in_memory=False,
     ) -> None:
         """Read sequences from a FASTA file.
 
@@ -40,11 +45,7 @@ class Fasta(Reader):
         ValueError
             If pad value is not a single character.
         """
-        self.virtual_data = xr.DataArray(
-            da.empty(0, dtype="S1"),  # pyright: ignore[reportPrivateImportUsage]
-            name=name,
-            dims="",
-        )
+        self.name = name
         self.path = path
         if pad is not None:
             if len(pad) > 1:
@@ -61,7 +62,10 @@ class Fasta(Reader):
         elif isinstance(alphabet, str):
             alphabet = alphabet.upper()
             try:
-                self.alphabet = getattr(sp.alphabets, alphabet)
+                self.alphabet = cast(
+                    Union[sp.NucleotideAlphabet, sp.AminoAlphabet],
+                    getattr(sp.alphabets, alphabet),
+                )
             except AttributeError:
                 raise ValueError(f"Alphabet {alphabet} not found.")
         else:
@@ -77,8 +81,20 @@ class Fasta(Reader):
                 return a[::-1]
 
             self.rev_strand_fn = rev_strand_fn
+        else:
+            assert_never(self.alphabet)
 
         self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
+
+        if in_memory:
+            self.sequences = self._load_all_contigs()
+        else:
+            self.sequences = None
+
+    def _load_all_contigs(self) -> dict[str, NDArray[np.bytes_]]:
+        """Load all contigs into memory."""
+        with self._open() as f:
+            return {c: np.frombuffer(c.encode("ascii"), "S1") for c in f.references}
 
     def _open(self):
         return pysam.FastaFile(str(self.path))
@@ -125,17 +141,27 @@ class Fasta(Reader):
         if pad_left > 0 and self.pad is None:
             raise ValueError("Padding is disabled and a start is < 0.")
 
-        with self._open() as f:
-            pad_right = max(0, end - f.get_reference_length(contig))
+        if self.sequences is None:
+            with self._open() as f:
+                pad_right = max(0, end - f.get_reference_length(contig))
+                if pad_right > 0 and self.pad is None:
+                    raise ValueError("Padding is disabled and end is > contig length.")
+
+                # pysam behavior
+                # start < 0 => error
+                # end > contig length => truncate
+                seq = f.fetch(contig, max(0, start), end)
+
+            seq = np.frombuffer(seq.encode("ascii"), "S1")
+        else:
+            # numpy slice behavior
+            # start < 0 => wrap around
+            # end > contig length => truncate
+            pad_right = max(0, end - len(self.sequences[contig]))
             if pad_right > 0 and self.pad is None:
                 raise ValueError("Padding is disabled and end is > contig length.")
+            seq = self.sequences[contig][max(0, start) : end]
 
-            # pysam behavior
-            # start < 0 => error
-            # end > contig length => truncate
-            seq = f.fetch(contig, max(0, start), end)
-
-        seq = np.frombuffer(seq.encode("ascii"), "S1")
         padded_seq = []
         if pad_left > 0:
             pad_left = np.full(pad_left, self.pad)

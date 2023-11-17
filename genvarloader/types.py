@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import (
     Callable,
+    Dict,
+    Hashable,
     Iterable,
     List,
     Optional,
@@ -37,7 +39,10 @@ class Reader(Protocol):
         is used when the strand is negative.
     """
 
-    virtual_data: xr.DataArray
+    name: str
+    dtype: np.dtype
+    sizes: Dict[Hashable, int]
+    coords: Dict[Hashable, NDArray]
     contig_starts_with_chr: Optional[bool]
     rev_strand_fn: Callable[[NDArray], NDArray]
 

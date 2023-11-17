@@ -16,12 +16,12 @@ from typing import (
     cast,
 )
 
+import dask.array as da
 import numba as nb
 import numpy as np
 import polars as pl
 import ray
 import xarray as xr
-from loguru import logger
 from more_itertools import chunked
 from natsort import natsorted
 from numpy.typing import NDArray
@@ -31,7 +31,7 @@ from .types import Reader
 from .util import _cartesian_product, _set_fixed_length_around_center, read_bedlike
 
 try:
-    import torch  # noqa
+    import torch  # noqa: F401
 
     TORCH_AVAILABLE = True
 except ImportError:
@@ -41,26 +41,18 @@ except ImportError:
 BatchDict = Dict[Hashable, Tuple[List[Hashable], NDArray]]
 
 
-def view_virtual_data(*readers: Reader):
-    """View the virtual data corresponding from multiple readers. This is useful to
-    inspect what non-length dimensions will be exist when constructing a GVL loader
-    from them.
-
-    Parameters
-    ----------
-    *readers : Reader
-        Readers to inspect.
-    """
-    virtual_data = xr.merge([r.virtual_data for r in readers], join="inner")
-    for dim, size in virtual_data.sizes.items():
-        for reader in readers:
-            if (
-                dim in reader.virtual_data.dims
-                and size != reader.virtual_data.sizes[dim]
-            ):
-                logger.warning(
-                    f"Dimension {dim} has different sizes between readers. Values in this dimension that are not present in all readers will not be included."
-                )
+def construct_virtual_data(*readers: Reader, fixed_length: int) -> xr.Dataset:
+    arrays = {}
+    for reader in readers:
+        dims = list(reader.sizes) + ["length"]
+        shape = [size for size in reader.sizes.values()] + [fixed_length]
+        arrays[reader.name] = xr.DataArray(
+            da.empty(shape, dtype=reader.dtype),
+            dims=dims,
+            coords=reader.coords,
+            name=reader.name,
+        )
+    virtual_data = xr.Dataset(arrays)
     return virtual_data
 
 
@@ -153,7 +145,7 @@ class GVL:
 
         if not isinstance(readers, Iterable):
             readers = [readers]
-        self.readers = {r.virtual_data.name: r for r in readers}
+        self.readers = {r.name: r for r in readers}
 
         if self.num_workers >= 2:
             self.actors: List[ReaderActor] = [
@@ -161,14 +153,21 @@ class GVL:
                 for i in range(self.num_workers - 1)  # keep 1 cpu for main process
             ]
 
-        self.virtual_data = view_virtual_data(*self.readers.values())
+        self.virtual_data = construct_virtual_data(
+            *readers, fixed_length=self.fixed_length
+        )
+        # sizes does not include the length dimension
         self.sizes = dict(self.virtual_data.sizes)
-        self.sizes.pop("", None)
+        del self.sizes["length"]
+        # dimension -> sum of itemsizes across readers with that dimension
         self.itemsizes: Mapping[Hashable, int] = defaultdict(int)
+        # indexes does not include the length dimension
         self.indexes = {k: a.values for k, a in self.virtual_data.coords.items()}
+        if "length" in self.indexes:
+            del self.indexes["length"]
         for arr in self.virtual_data.data_vars.values():
             for dim in arr.dims:
-                if dim == "":
+                if dim == "length":
                     continue
                 self.itemsizes[dim] += arr.dtype.itemsize
 
@@ -176,7 +175,7 @@ class GVL:
             batch_dims = []
         self.batch_dims = batch_dims
 
-        if missing_dims := (set(self.batch_dims) - set(self.virtual_data.dims)):  # type: ignore
+        if missing_dims := (set(self.batch_dims) - set(self.sizes)):  # type: ignore
             raise ValueError(
                 f"Got batch dimensions that are not available in any reader: {missing_dims}"
             )
@@ -377,10 +376,19 @@ class GVL:
 
     def __len__(self):
         """Number of batches."""
+        # TODO: every buffer can be a different size, so this is not accurate
+        # Must compute whether each buffer would need to drop the last batch or not
         if not self.drop_last:
-            return -(-self.n_instances // self.batch_size)  # ceil
+            return self.n_instances // self.batch_size + self.get_n_buffers()
         else:
             return self.n_instances // self.batch_size
+
+    def get_n_buffers(self) -> int:
+        buffers_per_batch_dim = [
+            int(-(-self.sizes[dim] // self.buffer_sizes[dim]))
+            for dim in self.batch_dims
+        ]
+        return len(self.partitioned_bed) * np.prod(buffers_per_batch_dim, dtype=int)
 
     def mem_per_length(self, sizes: Mapping[Hashable, int]):
         mpl = sum(sizes[dim] * self.itemsizes[dim] for dim in sizes)
@@ -650,8 +658,6 @@ class GVL:
                 idx,
                 self.buffer_idx_cols[name],
                 out[name][1],
-                self.BUFFER_IDX_START_COL,
-                self.BUFFER_IDX_STRAND_COL,
                 reader.rev_strand_fn,
             )
         # TODO slowest part of this function is the creation of the Dataset
@@ -663,16 +669,14 @@ class GVL:
         idx: NDArray[np.integer],
         idx_cols: NDArray[np.integer],
         out: NDArray,
-        start_col: int,
-        strand_col: int,
         rev_strand_fn: Callable[[NDArray], NDArray],
     ):
         # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
         view = np.lib.stride_tricks.sliding_window_view(arr, self.fixed_length, axis=-1)
-        idx_cols = idx_cols.tolist() + [start_col]
+        idx_cols = idx_cols.tolist() + [self.BUFFER_IDX_START_COL]
         indexer = [idx[:, c] for c in idx_cols]
         out[:] = view[tuple(indexer)]
-        rev_strand = idx[:, strand_col] == -1
+        rev_strand = idx[:, self.BUFFER_IDX_STRAND_COL] == -1
         if (rev_strand).any():
             out[rev_strand] = rev_strand_fn(out[rev_strand])
 
@@ -810,15 +814,16 @@ class SyncBuffers:
     def generate_buffers(self):
         buffer: Dict[Hashable, Tuple[Tuple[Hashable, ...], NDArray]] = {}
         for name, reader in self.gvl.readers.items():
+            dims: Tuple[Hashable, ...] = tuple(reader.sizes)
             shape: List[int] = []
-            for dim in reader.virtual_data.dims:
+            for dim in dims:
                 # Not all dims are batch dims, so some will be missing from buffer_sizes
                 size = self.gvl.buffer_sizes.get(dim, None)
                 if size is not None:
                     shape.append(size)
-            dtype = reader.virtual_data.dtype
+            dtype = reader.dtype
             shape.append(self.gvl.max_length)
-            buffer[name] = (reader.virtual_data.dims, np.empty(shape, dtype=dtype))
+            buffer[name] = (dims, np.empty(shape, dtype=dtype))
 
         for partition in self.gvl.partitioned_bed:
             n_regions = len(partition)

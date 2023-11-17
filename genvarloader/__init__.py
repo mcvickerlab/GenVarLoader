@@ -13,7 +13,7 @@ whereas the batches are materialized from the buffer.
 
 from .fasta import Fasta
 from .fasta_variants import FastaVariants
-from .loader import GVL, view_virtual_data
+from .loader import GVL, construct_virtual_data
 from .pgen import Pgen
 from .rle_table import RLE_Table
 from .types import Reader, Variants
@@ -26,7 +26,7 @@ __all__ = [
     "RLE_Table",
     "Pgen",
     "GVL",
-    "view_virtual_data",
+    "construct_virtual_data",
     "Reader",
     "Variants",
 ]
