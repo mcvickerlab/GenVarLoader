@@ -250,11 +250,6 @@ def splice_subarrays(
         Start coordinates, 0-based.
     ends : NDArray[np.int64]
         End coordinates, 0-based exclusive.
-    strands : NDArray[np.int8]
-        Strand of each query region. 1 for forward, -1 for reverse. If None, defaults
-        to forward strand.
-    rc_fn : Callable[[NDArray], NDArray]
-        Function to reverse-complement the subarrays.
 
     Returns
     -------
