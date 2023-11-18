@@ -62,6 +62,7 @@ class GVL:
     BUFFER_IDX_STRAND_COL = 1
     BUFFER_IDX_REGION_COL = 2
     BUFFER_IDX_MIN_DIM_COL = 3
+    FUDGE_FACTOR = 6
 
     def __init__(
         self,
@@ -146,6 +147,9 @@ class GVL:
         if not isinstance(readers, Iterable):
             readers = [readers]
         self.readers = {r.name: r for r in readers}
+
+        # TODO raise warning if readers have different contig prefixes
+        # can check via Reader.contig_starts_with_chr
 
         if self.num_workers >= 2:
             self.actors: List[ReaderActor] = [
@@ -376,19 +380,10 @@ class GVL:
 
     def __len__(self):
         """Number of batches."""
-        # TODO: every buffer can be a different size, so this is not accurate
-        # Must compute whether each buffer would need to drop the last batch or not
-        if not self.drop_last:
-            return self.n_instances // self.batch_size + self.get_n_buffers()
-        else:
+        if self.drop_last:
             return self.n_instances // self.batch_size
-
-    def get_n_buffers(self) -> int:
-        buffers_per_batch_dim = [
-            int(-(-self.sizes[dim] // self.buffer_sizes[dim]))
-            for dim in self.batch_dims
-        ]
-        return len(self.partitioned_bed) * np.prod(buffers_per_batch_dim, dtype=int)
+        else:
+            return -(-self.n_instances // self.batch_size)
 
     def mem_per_length(self, sizes: Mapping[Hashable, int]):
         mpl = sum(sizes[dim] * self.itemsizes[dim] for dim in sizes)
@@ -401,14 +396,13 @@ class GVL:
         batch_mem = self.fixed_length * self.mem_per_length(
             {k: v for k, v in self.sizes.items() if k not in self.batch_dims}
         )
-        FUDGE_FACTOR = 6
         max_mem = int(
             (
                 self.max_memory_gb * 1e9 / self.num_workers
                 - batch_mem
                 - self.bed.estimated_size()
             )
-            / FUDGE_FACTOR
+            / self.FUDGE_FACTOR
         )
 
         self.buffer_sizes = self.get_buffer_sizes(max_mem, max_length, self.batch_dims)
@@ -417,7 +411,7 @@ class GVL:
         if max_length == 0:
             min_mem = (
                 (self.mem_per_length(self.buffer_sizes) + batch_mem)
-                * FUDGE_FACTOR
+                * self.FUDGE_FACTOR
                 / 1e9
             )
             raise ValueError(
@@ -495,15 +489,12 @@ class GVL:
 
         if self.shuffle:
             self.rng.shuffle(self.partitioned_bed)
-
-        self.batch_slice = slice(0, 0)
-
-        if self.shuffle:
             self.indexes = {
                 d: self.rng.permutation(idx) for d, idx in self.indexes.items()
             }
 
         batch: BatchDict
+        batch_slice = slice(0, 0)
         self.partial_batches: List[BatchDict] = []
         self.partial_indices: List[NDArray[np.integer]] = []
         self.total_yielded = 0
@@ -514,70 +505,58 @@ class GVL:
             buffers = SyncBuffers(self)
 
         for buffer in buffers:
-            new_stop = min(self.batch_size, self.batch_slice.stop + len(buffer))
-            self.batch_slice = slice(self.batch_slice.stop, new_stop)
-            len_batch_slice = self.batch_slice.stop - self.batch_slice.start
-            buffer.idx_slice = slice(0, len_batch_slice)
-
             while buffer.len_unused_buffer > 0:
+                new_stop = min(
+                    self.batch_size, batch_slice.stop + buffer.len_unused_buffer
+                )
+                batch_slice = slice(batch_slice.stop, new_stop)
+
+                len_buffer_to_batch = batch_slice.stop - batch_slice.start
+                new_stop = min(len(buffer), buffer.idx_slice.stop + len_buffer_to_batch)
+                buffer.idx_slice = slice(buffer.idx_slice.stop, new_stop)
+
                 idx = buffer.buffer_idx[buffer.idx_slice]
 
-                if (
-                    self.batch_slice.start == 0
-                    and self.batch_slice.stop == self.batch_size
-                ):
+                # copy data from buffer into batch
+                # full batch
+                if batch_slice.start == 0 and batch_slice.stop == self.batch_size:
                     batch = self.select_from_buffer(buffer.buffer, idx)
                     batch_idx = idx.copy()
+                # partial batch
                 else:
                     self.partial_batches.append(
                         self.select_from_buffer(buffer.buffer, idx)
                     )
                     self.partial_indices.append(idx)
-                    if self.batch_slice.stop == self.batch_size:
+
+                buffer.len_unused_buffer -= len_buffer_to_batch
+
+                # full batch
+                if batch_slice.stop == self.batch_size:
+                    if len(self.partial_batches) > 0:
                         batch = self.concat_batches(self.partial_batches)
-                        batch_idx = np.concatenate(self.partial_indices)
+                        batch_idx = np.concatenate(self.partial_indices, axis=0)
                         self.partial_batches = []
                         self.partial_indices = []
 
-                # full batch
-                if self.batch_slice.stop == self.batch_size:
                     yield self.process_batch(
                         batch,
                         batch_idx,
-                        buffer.dim_idxs,  # pyright: ignore[reportUnboundVariable]
+                        buffer.dim_idxs,
                     )
 
                     self.total_yielded += self.batch_size
+                    batch_slice = slice(0, 0)
 
-                    # full batch or take what's left in the buffer
-                    new_stop = min(self.batch_size, buffer.len_unused_buffer)
-                    self.batch_slice = slice(0, new_stop)
-                # final batch incomplete
-                elif self.total_yielded + self.batch_slice.stop == self.n_instances:
-                    if self.drop_last:
-                        return
+        # final batch incomplete
+        if not self.drop_last and self.total_yielded < self.n_instances:
+            # final incomplete batch is always a partial batch
+            batch = self.concat_batches(self.partial_batches)
+            batch_idx = np.concatenate(self.partial_indices, axis=0)
 
-                    # final incomplete batch is always a partial batch
-                    batch = self.concat_batches(self.partial_batches)
-                    batch_idx = np.concatenate(self.partial_indices, 0)
+            yield self.process_batch(batch, batch_idx, buffer.dim_idxs)
 
-                    yield self.process_batch(batch, batch_idx, buffer.dim_idxs)
-
-                    self.total_yielded += self.batch_slice.stop
-                # batch incomplete and more data in buffer
-                else:
-                    # fill batch or take what's left in the buffer
-                    new_stop = min(
-                        self.batch_size,
-                        self.batch_slice.stop + buffer.len_unused_buffer,
-                    )
-                    self.batch_slice = slice(self.batch_slice.stop, new_stop)
-
-                buffer.len_unused_buffer -= len(idx)
-                new_stop = min(
-                    buffer.idx_slice.stop + self.batch_size, buffer.instances_in_buffer
-                )
-                buffer.idx_slice = slice(buffer.idx_slice.stop, new_stop)
+            self.total_yielded += batch_slice.stop
 
     def dim_idxs_generator(self) -> Generator[Dict[Hashable, List[int]], None, None]:
         """Yields dictionaries of dims->indices"""
@@ -633,11 +612,6 @@ class GVL:
         buffer: xr.Dataset,
         idx: NDArray[np.integer],
     ) -> BatchDict:
-        """Despite this unvectorized implementation, it is in fact faster than both a
-        numba implementation (perhaps due to small batch sizes) and using fancy indexing
-        (with or without xarray.Dataset.isel). This may be faster without vectorization
-        because it avoids fancy indexing in the length dimension.
-        """
         out: BatchDict = {}
         for name, reader in self.readers.items():
             a = buffer[name]
@@ -660,7 +634,6 @@ class GVL:
                 out[name][1],
                 reader.rev_strand_fn,
             )
-        # TODO slowest part of this function is the creation of the Dataset
         return out
 
     def select_from_buffer_array(
@@ -686,7 +659,6 @@ class GVL:
             out[name] = dims, np.concatenate(
                 [batch[name][1] for batch in batches], axis=0
             )
-
         return out
 
     def process_batch(

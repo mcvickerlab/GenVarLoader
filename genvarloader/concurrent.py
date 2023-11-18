@@ -8,7 +8,7 @@ from numpy.typing import NDArray
 
 from .types import Reader
 
-DataVarsLike = Dict[Hashable, Tuple[Tuple[Hashable, ...], NDArray]]
+DataVarsLike = Dict[str, Tuple[Tuple[Hashable, ...], NDArray]]
 
 
 @define
@@ -63,7 +63,7 @@ class ReaderActor:
         self, contig: str, starts: NDArray[np.int64], ends: NDArray[np.int64], **kwargs
     ) -> Tuple[DataVarsLike, int]:
         buffer = {
-            r.virtual_data.name: r.read(contig, starts, ends, strands=None, **kwargs)
+            r.name: r.read(contig, starts, ends, strands=None, **kwargs)
             for r in self.readers
         }
         buffer = {name: (arr.dims, arr.to_numpy()) for name, arr in buffer.items()}
