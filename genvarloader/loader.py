@@ -686,6 +686,17 @@ class GVL:
 
         return out
 
+    def torch_dataset(self):
+        if not TORCH_AVAILABLE:
+            raise ImportError(
+                """
+                PyTorch is not included as a genvarloader dependency and must be 
+                manually installed to get a Pytorch Dataset. PyTorch has special 
+                installation instructions, see: https://pytorch.org/get-started/locally/
+                """
+            )
+        return GVLDataset(self)
+
     def torch_dataloader(self):
         if not TORCH_AVAILABLE:
             raise ImportError(
@@ -695,11 +706,7 @@ class GVL:
                 installation instructions, see: https://pytorch.org/get-started/locally/
                 """
             )
-        from torch.utils.data import DataLoader
-
-        dataset = GVLDataset(self)
-        dataloader = DataLoader(dataset, batch_size=None)
-        return dataloader
+        return self.torch_dataset().torch_dataloader()
 
 
 @nb.njit(nogil=True, cache=True)
@@ -950,7 +957,7 @@ class ConcurrentBuffers:
 
 
 if TORCH_AVAILABLE:
-    from torch.utils.data import IterableDataset
+    from torch.utils.data import DataLoader, IterableDataset
 
     class GVLDataset(IterableDataset):
         def __init__(self, gvl: GVL):
@@ -961,6 +968,9 @@ if TORCH_AVAILABLE:
 
         def __iter__(self):
             return iter(self.gvl)
+
+        def torch_dataloader(self):
+            return DataLoader(self, batch_size=None)
 
         def set(
             self,
