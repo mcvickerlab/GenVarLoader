@@ -94,7 +94,9 @@ class Fasta(Reader):
     def _load_all_contigs(self) -> dict[str, NDArray[np.bytes_]]:
         """Load all contigs into memory."""
         with self._open() as f:
-            return {c: np.frombuffer(c.encode("ascii"), "S1") for c in f.references}
+            return {
+                c: np.frombuffer(f.fetch(c).encode("ascii"), "S1") for c in f.references
+            }
 
     def _open(self):
         return pysam.FastaFile(str(self.path))
