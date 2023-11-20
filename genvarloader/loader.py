@@ -9,6 +9,7 @@ from typing import (
     Hashable,
     Iterable,
     List,
+    Literal,
     Mapping,
     Optional,
     Tuple,
@@ -78,7 +79,7 @@ class GVL:
         shuffle: bool = False,
         weights: Optional[Dict[str, NDArray]] = None,
         seed: Optional[int] = None,
-        return_tuples: bool = False,
+        return_tuples: Union[List[str], Literal[False]] = False,
         return_index: bool = False,
         drop_last: bool = False,
         num_workers: int = 1,
@@ -115,8 +116,9 @@ class GVL:
             correspond to non-length dimensions seen in the virtual data.
         seed : int, optional
             Seed for shuffling, by default None
-        return_tuples : bool, optional
-            Whether to return a tuple instead of a dictionary, by default False
+        return_tuples : list[str] or False
+            Whether to return a tuple instead of a dictionary, by default False.
+            Outputs will be in the order specified by what is passed.
         return_index : bool, optional
             Whether to include an array of the indexes in the batch, by default False.
             Indices will be available from the "index" key or will be the last item in
@@ -249,7 +251,7 @@ class GVL:
         shuffle: bool = False,
         weights: Optional[Dict[str, NDArray]] = None,
         seed: Optional[int] = None,
-        return_tuples: bool = False,
+        return_tuples: Optional[Union[List[str], Literal[False]]] = None,
         return_index: bool = False,
         drop_last: bool = False,
         jitter_bed: Optional[int] = None,
@@ -285,8 +287,9 @@ class GVL:
             correspond to non-length dimensions seen in the virtual data.
         seed : int, optional
             Seed for shuffling, by default None
-        return_tuples : bool, optional
-            Whether to return a tuple instead of a dictionary, by default False
+        return_tuples : list[str] or False
+            Whether to return a tuple instead of a dictionary, by default False.
+            Outputs will be in the order specified by what is passed.
         return_index : bool, optional
             Whether to include an array of the indexes in the batch, by default False
         drop_last : bool, optional
@@ -383,6 +386,7 @@ class GVL:
         if self.drop_last:
             return self.n_instances // self.batch_size
         else:
+            # ceil
             return -(-self.n_instances // self.batch_size)
 
     def mem_per_length(self, sizes: Mapping[Hashable, int]):
@@ -672,7 +676,8 @@ class GVL:
         if self.return_index:
             # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
             out["index"] = np.array(
-                [
+                [batch_idx[:, self.BUFFER_IDX_REGION_COL]]
+                + [
                     dim_idxs[d][batch_idx[:, i]]
                     for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL)
                 ]
@@ -682,7 +687,7 @@ class GVL:
             out = self.transform(out)
 
         if self.return_tuples:
-            out = tuple(out.values())
+            out = tuple(out[name] for name in self.return_tuples)  # type: ignore return_tuples is never True
 
         return out
 
@@ -985,7 +990,7 @@ if TORCH_AVAILABLE:
             shuffle: bool = False,
             weights: Optional[Dict[str, NDArray]] = None,
             seed: Optional[int] = None,
-            return_tuples: bool = False,
+            return_tuples: Union[List[str], Literal[False]] = False,
             return_index: bool = False,
             drop_last: bool = False,
             jitter_bed: Optional[int] = None,
