@@ -23,15 +23,24 @@ class Pgen(Variants):
         samples: Optional[List[str]] = None,
     ) -> None:
         """Reads genotypes from PGEN files. Currently does not support multi-allelic
-        sites, but does support **split** multi-allelic sites. This can be done by
-        running `bcftools norm -a --atom-overlaps . -m - <file.vcf>` and creating the
-        PGEN with the `--vcf-half-call r` option.
+        sites, but does support *split* multi-allelic sites. This can be done by
+        running `bcftools norm -a --atom-overlaps . -m - <file.vcf> -f <ref.fa>` and 
+        creating the PGEN with the `--vcf-half-call r` option. All together:
+        ```bash
+        bcftools norm \\
+            -a --atom-overlaps . -m - \\
+            -f '<ref.fa>' -O b -o '<norm.bcf>' \\
+            '<file.bcf>'
+        plink2 --make-pgen --bcf '<norm.bcf>' \\
+            --vcf-half-call r --out '<prefix>'
+        ```
 
         Parameters
         ----------
-        path : Union[str, Path]
-            Path to any of the PGEN files (.pgen, .pvar, .psam) or their prefix.
-        samples : Optional[List[str]], optional
+        path : str | Path | Dict[str, str | Path]
+            Path to any of the PGEN files (.pgen, .pvar, .psam) or their prefix. Or, a 
+            dictionary mapping contig names to the PGEN file for that contig.
+        samples : List[str], optional
             Which samples to include, by default all samples.
 
         Notes
