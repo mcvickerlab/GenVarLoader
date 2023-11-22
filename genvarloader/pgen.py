@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Mapping, Optional, Tuple, Union
 
 import numba as nb
 import numpy as np
@@ -19,7 +19,7 @@ except ImportError:
 class Pgen(Variants):
     def __init__(
         self,
-        paths: Union[str, Path, Dict[str, Union[str, Path]]],
+        paths: Union[str, Path, Mapping[str, Union[str, Path]]],
         samples: Optional[List[str]] = None,
     ) -> None:
         """Reads genotypes from PGEN files. Currently does not support multi-allelic
