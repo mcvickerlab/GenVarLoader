@@ -648,14 +648,32 @@ class GVL:
         out: NDArray,
         rev_strand_fn: Callable[[NDArray], NDArray],
     ):
-        # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
-        view = np.lib.stride_tricks.sliding_window_view(arr, self.fixed_length, axis=-1)
-        idx_cols = idx_cols.tolist() + [self.BUFFER_IDX_START_COL]
-        indexer = [idx[:, c] for c in idx_cols]
-        out[:] = view[tuple(indexer)]
-        rev_strand = idx[:, self.BUFFER_IDX_STRAND_COL] == -1
-        if (rev_strand).any():
-            out[rev_strand] = rev_strand_fn(out[rev_strand])
+        _idx_cols: List[int] = idx_cols.tolist()
+        # use vectorized indexing for large batch sizes
+        if len(idx) > 32:
+            # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
+            _idx_cols.append(self.BUFFER_IDX_START_COL)
+            indexer = [idx[:, c] for c in _idx_cols]
+            view = np.lib.stride_tricks.sliding_window_view(
+                arr, self.fixed_length, axis=-1
+            )
+            out[:] = view[tuple(indexer)]
+            rev_strand = idx[:, self.BUFFER_IDX_STRAND_COL] == -1
+            if (rev_strand).any():
+                out[rev_strand] = rev_strand_fn(out[rev_strand])
+        else:
+            for i in range(len(idx)):
+                _idx: NDArray[np.integer] = idx[i]
+                indexer = [slice(None)] * arr.ndim
+                indexer[: len(idx_cols)] = _idx[idx_cols]
+                indexer[-1] = slice(
+                    _idx[self.BUFFER_IDX_START_COL],
+                    _idx[self.BUFFER_IDX_START_COL] + self.fixed_length,
+                )
+                subarr = arr[tuple(indexer)]
+                if _idx[self.BUFFER_IDX_STRAND_COL] == -1:
+                    subarr = rev_strand_fn(subarr)
+                out[i] = subarr
 
     def concat_batches(self, batches: List[BatchDict]) -> BatchDict:
         out: BatchDict = {}
