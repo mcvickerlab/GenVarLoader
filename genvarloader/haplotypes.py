@@ -1,4 +1,4 @@
-from typing import Iterable, List, Optional, Sequence, TypeVar, Union
+from typing import Iterable, List, Optional, Sequence, Union
 
 import numba as nb
 import numpy as np
@@ -109,16 +109,10 @@ class Haplotypes:
         reader_lengths = max_ends - starts
         reader_rel_starts = get_rel_starts(starts, max_ends)
 
-        diffs: List[Optional[NDArray[np.int32]]] = []
-        for variant in variants:
-            if variant is not None:
-                diffs.append(np.where(variant.genotypes == 1, variant.size_diffs, 0))
-            else:
-                diffs.append(None)
-
         if self.jitter_long:
             shifts = [
-                None if diff is None else self.sample_shifts(diff) for diff in diffs
+                None if variant is None else self.sample_shifts(variant)
+                for variant in variants
             ]
         else:
             shifts = [None] * len(variants)
@@ -165,8 +159,12 @@ class Haplotypes:
 
         return _out
 
-    def sample_shifts(self, diffs: NDArray[np.int32]) -> NDArray[np.int32]:
-        total_diffs = diffs.sum(-1, dtype=np.int32).clip(0)
+    def sample_shifts(self, variants: DenseGenotypes):
+        total_diffs = (
+            np.where(variants.genotypes == 1, variants.size_diffs, 0)
+            .sum(-1, dtype=np.int32)
+            .clip(0)
+        )
         shifts = self.rng.integers(0, total_diffs + 1, dtype=np.int32)
         return shifts
 
@@ -341,16 +339,13 @@ def construct_haplotypes_with_indels(
                 out[sample, hap, out_idx:] = ref[ref_idx : ref_idx + unfilled_length]
 
 
-DTYPE = TypeVar("DTYPE", bound=np.generic)
-
-
 def realign(
     track: xr.DataArray,
     variants: List[Optional[DenseGenotypes]],
     starts: NDArray[np.int64],
     track_lengths: NDArray[np.int64],
     track_rel_starts: NDArray[np.int64],
-    out: Optional[NDArray[DTYPE]],
+    out: Optional[NDArray],
     ploid: int,
     total_length: int,
     lengths: NDArray[np.int64],
@@ -401,8 +396,8 @@ def realign(
 
 @nb.njit(nogil=True, cache=True, parallel=True)
 def realign_track_to_haplotype(
-    out: NDArray[DTYPE],
-    track: NDArray[DTYPE],
+    out: NDArray,
+    track: NDArray,
     shifts: NDArray[np.int32],
     rel_positions: NDArray[np.int32],
     sizes: NDArray[np.int32],
