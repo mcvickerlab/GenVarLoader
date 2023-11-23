@@ -229,7 +229,9 @@ def _cartesian_product(arrays: Sequence[NDArray]) -> NDArray:
     return arr.reshape(-1, la)
 
 
-def get_rel_starts(starts: NDArray[np.int64], ends: NDArray[np.int64]):
+def get_rel_starts(
+    starts: NDArray[np.int64], ends: NDArray[np.int64]
+) -> NDArray[np.int64]:
     rel_starts = np.concatenate([[0], (ends - starts).cumsum()[:-1]])
     return rel_starts
 

@@ -1,7 +1,6 @@
 from textwrap import dedent
 from typing import Optional
 
-import dask.array as da
 import numba as nb
 import numpy as np
 import xarray as xr
@@ -54,14 +53,6 @@ class FastaVariants(Reader):
             "ploid": np.arange(self.variants.ploidy, dtype=np.uint32),
         }
         self.sizes = {k: len(v) for k, v in self.coords.items()}
-
-        self.virtual_data = xr.DataArray(
-            da.empty(  # pyright: ignore[reportPrivateImportUsage]
-                (self.variants.n_samples, self.variants.ploidy), dtype="S1"
-            ),
-            name=name,
-            coords=self.coords,
-        )
 
         if (
             self.reference.contig_starts_with_chr

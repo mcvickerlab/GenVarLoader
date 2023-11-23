@@ -303,7 +303,6 @@ class Pgen(Variants):
         contig: str,
         starts: NDArray[np.int64],
         ends: NDArray[np.int64],
-        target_length: int,
         **kwargs,
     ) -> Tuple[List[Optional[DenseGenotypes]], NDArray[np.int64]]:
         """Read genotypes for haplotype construction. This is a special case of `read` 
@@ -320,16 +319,17 @@ class Pgen(Variants):
             Start coordinates, 0-based.
         ends : int, NDArray[int32]
             End coordinates, 0-based exclusive.
-        target_length : int
-            Target length of the reconstructed haplotypes.
+        **kwargs
+            Additional keyword arguments. May include `sample: Iterable[str]` and
+            `ploid: Iterable[int]` to specify sample names and ploid numbers.
 
         Returns
         -------
-        List[Optional[DenseGenotypes]]
+        variants : List[Optional[DenseGenotypes]]
             Genotypes for each query region.
-        NDArray[np.int64]
+        max_ends : NDArray[np.int64]
             New ends for querying the reference genome such that enough sequence is 
-            available to get haplotypes of `target_length`.
+            available to get haplotypes for each region.
         """ """"""
         samples = kwargs.get("sample", None)
         if samples is None:

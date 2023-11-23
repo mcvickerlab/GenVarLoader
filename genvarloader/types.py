@@ -26,10 +26,14 @@ class Reader(Protocol):
 
     Attributes
     ----------
-    virtual_data : xr.DataArray
-        Virtual data describing the type and dimensions of the data yielded by this
-        reader. This data includes all dimensions except the length dimension since
-        this is determined by the length of the genomic range passed to `read()`.
+    name : str
+        Name of the reader.
+    dtype : np.dtype
+        Data type of the data returned by `read()`.
+    sizes : Dict[Hashable, int]
+        Sizes of the dimensions of the data returned by `read()`.
+    coords : Dict[Hashable, NDArray]
+        Coordinates of the data returned by `read()`.
     contig_starts_with_chr : str, optional
         Whether the contigs start with "chr" or not. Queries to `read()` will
         normalize the contig name to add or remove this prefix to match what the
@@ -292,12 +296,7 @@ class Variants(Protocol):
         ...
 
     def read_for_haplotype_construction(
-        self,
-        contig: str,
-        starts: NDArray[np.int64],
-        ends: NDArray[np.int64],
-        target_length: int,
-        **kwargs
+        self, contig: str, starts: NDArray[np.int64], ends: NDArray[np.int64], **kwargs
     ) -> Tuple[List[Optional[DenseGenotypes]], NDArray[np.int64]]:
         """Read variants sufficient to reconstruct haplotypes of a target length
         spanning the given genomic coordinates. This may necessitate returning variants
@@ -312,16 +311,17 @@ class Variants(Protocol):
             Start coordinates, 0-based.
         ends : int, NDArray[int32]
             End coordinates, 0-based exclusive.
-        target_length : int
-            Target length of the reconstructed haplotypes.
+        **kwargs
+            Additional keyword arguments. May include `sample: Iterable[str]` and
+            `ploid: Iterable[int]` to specify sample names and ploid numbers.
 
         Returns
         -------
-        List[Optional[DenseGenotypes]]
+        variants : List[Optional[DenseGenotypes]]
             Genotypes for each query region.
-        NDArray[np.int64]
+        max_ends : NDArray[np.int64]
             New ends for querying the reference genome such that enough sequence is
-            available to get haplotypes of `target_length`.
+            available to get haplotypes for each region.
         """
         ...
 

@@ -12,6 +12,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
     Union,
     cast,
@@ -28,6 +29,7 @@ from natsort import natsorted
 from numpy.typing import NDArray
 
 from .concurrent import Buffer, BufferMeta, DataVarsLike, ReaderActor
+from .haplotypes import Haplotypes
 from .types import Reader
 from .util import _cartesian_product, _set_fixed_length_around_center, read_bedlike
 
@@ -67,7 +69,7 @@ class GVL:
 
     def __init__(
         self,
-        readers: Union[Reader, Iterable[Reader]],
+        readers: Union[Reader, Haplotypes, Sequence[Union[Reader, Haplotypes]]],
         bed: Union[pl.DataFrame, str, Path],
         fixed_length: int,
         batch_size: int,
@@ -148,19 +150,25 @@ class GVL:
 
         if not isinstance(readers, Iterable):
             readers = [readers]
-        self.readers = {r.name: r for r in readers}
+        self.readers = readers
+        self.unnested_readers: Dict[str, Reader] = {}
+        for r in readers:
+            if isinstance(r, Haplotypes):
+                self.unnested_readers.update({_r.name: _r for _r in r.readers})
+            else:
+                self.unnested_readers[r.name] = r
 
         # TODO raise warning if readers have different contig prefixes
         # can check via Reader.contig_starts_with_chr
 
         if self.num_workers >= 2:
             self.actors: List[ReaderActor] = [
-                ReaderActor.remote(*self.readers.values(), actor_idx=i)
+                ReaderActor.remote(*self.readers, actor_idx=i)
                 for i in range(self.num_workers - 1)  # keep 1 cpu for main process
             ]
 
         self.virtual_data = construct_virtual_data(
-            *readers, fixed_length=self.fixed_length
+            *self.unnested_readers.values(), fixed_length=self.fixed_length
         )
         # sizes does not include the length dimension
         self.sizes = dict(self.virtual_data.sizes)
@@ -617,7 +625,7 @@ class GVL:
         idx: NDArray[np.integer],
     ) -> BatchDict:
         out: BatchDict = {}
-        for name, reader in self.readers.items():
+        for name, reader in self.unnested_readers.items():
             a = buffer[name]
             dims = ["batch", *self.non_batch_dims, "length"]
             out[name] = (
@@ -814,8 +822,8 @@ class SyncBuffers:
         return self.generate_buffers()
 
     def generate_buffers(self):
-        buffer: Dict[Hashable, Tuple[Tuple[Hashable, ...], NDArray]] = {}
-        for name, reader in self.gvl.readers.items():
+        buffer: Dict[str, NDArray] = {}
+        for name, reader in self.gvl.unnested_readers.items():
             dims: Tuple[Hashable, ...] = tuple(reader.sizes)
             shape: List[int] = []
             for dim in dims:
@@ -825,7 +833,7 @@ class SyncBuffers:
                     shape.append(size)
             dtype = reader.dtype
             shape.append(self.gvl.max_length)
-            buffer[name] = (dims, np.empty(shape, dtype=dtype))
+            buffer[name] = np.empty(shape, dtype=dtype)
 
         for partition in self.gvl.partitioned_bed:
             n_regions = len(partition)
@@ -866,29 +874,43 @@ class SyncBuffers:
                 if self.gvl.shuffle:
                     buffer_idx = self.gvl.rng.permutation(buffer_idx)
 
-                sliced_buffer: Dict[Hashable, NDArray] = {}
-                for name, (dims, arr) in buffer.items():
-                    slices: List[slice] = []
-                    for dim in dims:
-                        # No chance of KeyError here because dims are exclusively
-                        # batch_dims, which are checked for compat at GVL init
-                        slices.append(slice(0, len(read_kwargs[dim])))
-                    slices.append(slice(0, total_length))
-                    _slices = tuple(slices)
-                    sliced_buffer[name] = arr[_slices]
-                _buffer = xr.Dataset(
-                    {
-                        name: r.read(
+                _buffer_dict = {}
+                slices: Dict[Hashable, slice] = {}
+                for dim in self.gvl.batch_dims:
+                    slices[dim] = slice(0, len(read_kwargs[dim]))
+                slices["length"] = slice(0, total_length)
+                for reader in self.gvl.readers:
+                    if isinstance(reader, Haplotypes):
+                        out = {}
+                        for r in reader.readers:
+                            _slices = tuple(slices[dim] for dim in r.sizes) + (
+                                slices["length"],
+                            )
+                            out[r.name] = buffer[r.name][_slices]
+                        data = reader.read(
                             contig,
                             merged_starts,
                             merged_ends,
-                            out=sliced_buffer[name],
+                            out=out,
                             **read_kwargs,
                         )
-                        for name, r in self.gvl.readers.items()
-                    }
-                )
-                yield Buffer(_buffer, buffer_idx, dim_idxs, -1)
+                        _buffer_dict.update(data)
+                    else:
+                        _slices = tuple(slices[dim] for dim in reader.sizes) + (
+                            slices["length"],
+                        )
+                        out = buffer[reader.name][_slices]
+                        data = reader.read(
+                            contig,
+                            merged_starts,
+                            merged_ends,
+                            out=out,
+                            **read_kwargs,
+                        )
+                        _buffer_dict[reader.name] = data
+
+                out_buffer = xr.Dataset(_buffer_dict)
+                yield Buffer(out_buffer, buffer_idx, dim_idxs, -1)
 
 
 class ConcurrentBuffers:
