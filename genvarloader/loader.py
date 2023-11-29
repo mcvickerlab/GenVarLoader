@@ -64,6 +64,7 @@ class GVL:
     BUFFER_IDX_REGION_COL = 2
     BUFFER_IDX_MIN_DIM_COL = 3
     FUDGE_FACTOR = 6
+    LENGTH_AXIS = -1
 
     def __init__(
         self,
@@ -171,7 +172,7 @@ class GVL:
         self.indexes = {k: a.values for k, a in self.virtual_data.coords.items()}
         if "length" in self.indexes:
             del self.indexes["length"]
-        for arr in self.virtual_data.data_vars.values():
+        for arr in self.virtual_data.values():
             for dim in arr.dims:
                 if dim == "length":
                     continue
@@ -188,8 +189,14 @@ class GVL:
 
         self.non_batch_dims = [d for d in self.sizes.keys() if d not in self.batch_dims]
         self.non_batch_dim_shape: Dict[Hashable, List[int]] = {}
+        # Mapping from array name to axis number in the buffer index column
         self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
-        for name, a in self.virtual_data.data_vars.items():
+        # Mapping from array name to axes in the buffer corresponding to each idx col
+        self.buffer_idx_col_axes: Dict[Hashable, NDArray[np.integer]] = {}
+        # Mapping from array name to the axis number of the batch dimension after
+        # vectorized indexing of the buffer to get a batch
+        self.buffer_batch_axis: Dict[Hashable, int] = {}
+        for name, a in self.virtual_data.items():
             self.non_batch_dim_shape[name] = [
                 a.sizes[d] for d in self.non_batch_dims if d in a.dims
             ]
@@ -200,6 +207,21 @@ class GVL:
                 if d in self.batch_dims
             ]
             self.buffer_idx_cols[name] = np.array(idx_cols, dtype=int)
+
+            idx_col_axes = [i for i, d in enumerate(a.dims) if d in self.batch_dims]
+            self.buffer_idx_col_axes[name] = np.array(idx_col_axes, dtype=int)
+
+            if len(idx_col_axes) == 0:
+                # after vectorized indexing with no batch dims, the batch axis is the
+                # length axis
+                self.buffer_batch_axis[name] = a.get_axis_num("length")
+            else:
+                # otherwise, it will be the smallest axis
+                self.buffer_batch_axis[name] = (
+                    min(idx_col_axes)
+                    if np.all(np.diff(idx_col_axes + [a.get_axis_num("length")]) == 1)
+                    else 0
+                )
 
         if isinstance(bed, (str, Path)):
             bed = read_bedlike(bed)
@@ -349,17 +371,35 @@ class GVL:
             ]
             self.non_batch_dim_shape: Dict[Hashable, List[int]] = {}
             self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
-            for name, a in self.virtual_data.data_vars.items():
+            self.buffer_idx_col_axes: Dict[Hashable, NDArray[np.integer]] = {}
+            for name, a in self.virtual_data.items():
                 self.non_batch_dim_shape[name] = [
                     a.sizes[d] for d in self.non_batch_dims
                 ]
                 # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
                 idx_cols = [
-                    i
-                    for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL)
-                    if d in a.sizes
+                    self.batch_dims.index(d) + self.BUFFER_IDX_MIN_DIM_COL
+                    for d in a.dims
+                    if d in self.batch_dims
                 ]
                 self.buffer_idx_cols[name] = np.array(idx_cols, dtype=int)
+
+                idx_col_axes = [i for i, d in enumerate(a.dims) if d in self.batch_dims]
+                self.buffer_idx_col_axes[name] = np.array(idx_col_axes, dtype=int)
+
+                if len(idx_col_axes) == 0:
+                    # after vectorized indexing with no batch dims, the batch axis is the
+                    # length axis
+                    self.buffer_batch_axis[name] = a.get_axis_num("length")
+                else:
+                    # otherwise, it will be the smallest axis
+                    self.buffer_batch_axis[name] = (
+                        min(idx_col_axes)
+                        if np.all(
+                            np.diff(idx_col_axes + [a.get_axis_num("length")]) == 1
+                        )
+                        else 0
+                    )
 
         if None not in (fixed_length, bed, max_memory_gb, batch_dims):
             # don't need to check jitter_bed here because it's jittered at each call
@@ -635,6 +675,8 @@ class GVL:
                 a.values,
                 idx,
                 self.buffer_idx_cols[name],
+                self.buffer_idx_col_axes[name],
+                self.buffer_batch_axis[name],
                 out[name][1],
                 reader.rev_strand_fn,
             )
@@ -645,6 +687,8 @@ class GVL:
         arr: NDArray,
         idx: NDArray[np.integer],
         idx_cols: NDArray[np.integer],
+        idx_col_axes: NDArray[np.integer],
+        batch_axis: int,
         out: NDArray,
         rev_strand_fn: Callable[[NDArray], NDArray],
     ):
@@ -652,12 +696,17 @@ class GVL:
         # use vectorized indexing for large batch sizes
         if len(idx) > 32:
             # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
-            _idx_cols.append(self.BUFFER_IDX_START_COL)
-            indexer = [idx[:, c] for c in _idx_cols]
+            indexer: List[Union[slice, NDArray]] = [slice(None)] * arr.ndim
+            for axis, col in zip(idx_col_axes, _idx_cols):
+                indexer[axis] = idx[:, col]
+            indexer[self.LENGTH_AXIS] = idx[:, self.BUFFER_IDX_START_COL]
             view = np.lib.stride_tricks.sliding_window_view(
-                arr, self.fixed_length, axis=-1
+                arr, self.fixed_length, axis=self.LENGTH_AXIS
             )
-            out[:] = view[tuple(indexer)]
+            # shape: (..., batch, ..., fixed_length)
+            batch = view[tuple(indexer)]
+            # shape: (batch, ..., fixed_length)
+            out[:] = np.moveaxis(batch, batch_axis, 0)
             rev_strand = idx[:, self.BUFFER_IDX_STRAND_COL] == -1
             if (rev_strand).any():
                 out[rev_strand] = rev_strand_fn(out[rev_strand])
@@ -665,11 +714,13 @@ class GVL:
             for i in range(len(idx)):
                 _idx: NDArray[np.integer] = idx[i]
                 indexer = [slice(None)] * arr.ndim
-                indexer[: len(idx_cols)] = _idx[idx_cols]
-                indexer[-1] = slice(
+                for axis, col in zip(idx_col_axes, _idx_cols):
+                    indexer[axis] = _idx[col]
+                indexer[self.LENGTH_AXIS] = slice(
                     _idx[self.BUFFER_IDX_START_COL],
                     _idx[self.BUFFER_IDX_START_COL] + self.fixed_length,
                 )
+                # shape: (..., fixed_length)
                 subarr = arr[tuple(indexer)]
                 if _idx[self.BUFFER_IDX_STRAND_COL] == -1:
                     subarr = rev_strand_fn(subarr)
