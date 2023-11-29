@@ -49,7 +49,7 @@ class Haplotypes:
         out: Optional[Dict[str, Optional[NDArray]]] = None,
         **kwargs,
     ) -> Dict[str, xr.DataArray]:
-        """Read a variant sequence corresponding to a genomic range, sample, and ploid.
+        """Read data corresponding to a genomic range, sample, and ploid.
 
         Parameters
         ----------
