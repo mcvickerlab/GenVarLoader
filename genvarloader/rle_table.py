@@ -18,6 +18,8 @@ def assign_vals(out, sample_idx, starts, ends, vals):
 
 
 class RLE_Table(Reader):
+    chunked = False
+
     def __init__(
         self,
         name: str,

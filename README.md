@@ -14,6 +14,8 @@ GenVarLoader provides a fast, memory efficient data loader for training sequence
 
 A PyTorch dependency is not included since it requires [special instructions](https://pytorch.org/get-started/locally/).
 
+An optional dependency is [TensorStore](https://github.com/google/tensorstore)(version >=0.1.50) for writing genotypes as a Zarr store and using TensorStore for I/O. This dramatically speeds up dataloading performance when training a model on genetic variation, for which approximately uniform random sampling across the genome is required. Standard bioinformatics variant formats like VCF, BCF, and PGEN unfortunately do not have a data layout conducive for this. TensorStore is not included as a dependency due a dependency conflict that, within the scope of GenVarLoader, does not cause any issues. GenVarLoader is developed with Poetry and I am waiting for the [ability to override/ignore sub-dependencies](https://github.com/python-poetry/poetry/issues/697) to include TensorStore as an explicit dependency.
+
 ## Quick Start
 
 ```python

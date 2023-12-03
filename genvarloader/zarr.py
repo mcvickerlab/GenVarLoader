@@ -8,6 +8,8 @@ from .types import Reader
 
 
 class Zarr(Reader):
+    chunked = True
+
     def __init__(self, name: str, path: Union[str, Path]) -> None:
         """Read data from an XArray-compliant Zarr store. Should have contigs as
         separate arrays, a list of contigs as an attribute, and `length` as a dimension.

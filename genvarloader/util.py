@@ -6,7 +6,28 @@ import numpy as np
 import pandera as pa
 import pandera.typing as pat
 import polars as pl
+from natsort import natsorted
 from numpy.typing import NDArray
+
+
+def process_bed(bed: Union[str, Path, pl.DataFrame], fixed_length: int):
+    if isinstance(bed, (str, Path)):
+        bed = read_bedlike(bed)
+
+    if "strand" in bed and bed["strand"].dtype == pl.Utf8:
+        bed = bed.with_columns(
+            pl.col("strand").replace({"-": -1, "+": 1}, return_dtype=pl.Int8)
+        )
+    else:
+        bed = bed.with_columns(strand=pl.lit(1, dtype=pl.Int8))
+
+    if "region_idx" not in bed:
+        bed = bed.with_row_count("region_idx")
+
+    with pl.StringCache():
+        pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
+        bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
+    return _set_fixed_length_around_center(bed, fixed_length)
 
 
 def _set_fixed_length_around_center(bed: pl.DataFrame, length: int):
@@ -240,7 +261,7 @@ T = TypeVar("T", bound=np.generic)
 def splice_subarrays(
     arr: NDArray[T], starts: NDArray[np.int64], ends: NDArray[np.int64]
 ) -> NDArray[T]:
-    """Splice subarrays from a larger array and reverse-complement them.
+    """Splice subarrays from a larger array.
 
     Parameters
     ----------
@@ -254,7 +275,7 @@ def splice_subarrays(
     Returns
     -------
     out : NDArray
-        Spliced and reverse-complemented array.
+        Spliced array.
     """
     start = starts.min()
     rel_starts = get_rel_starts(starts, ends)

@@ -12,6 +12,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
     Union,
     cast,
@@ -23,13 +24,13 @@ import numpy as np
 import polars as pl
 import ray
 import xarray as xr
-from more_itertools import chunked
-from natsort import natsorted
+from attrs import define
+from more_itertools import chunked, interleave_longest
 from numpy.typing import NDArray
 
 from .concurrent import Buffer, BufferMeta, DataVarsLike, ReaderActor
 from .types import Reader
-from .util import _cartesian_product, _set_fixed_length_around_center, read_bedlike
+from .util import _cartesian_product, process_bed
 
 try:
     import torch  # noqa: F401
@@ -48,7 +49,9 @@ def construct_virtual_data(*readers: Reader, fixed_length: int) -> xr.Dataset:
         dims = list(reader.sizes) + ["length"]
         shape = [size for size in reader.sizes.values()] + [fixed_length]
         arrays[reader.name] = xr.DataArray(
-            da.empty(shape, dtype=reader.dtype),
+            da.empty(  # pyright: ignore[reportPrivateImportUsage]
+                shape, dtype=reader.dtype
+            ),
             dims=dims,
             coords=reader.coords,
             name=reader.name,
@@ -65,10 +68,11 @@ class GVL:
     BUFFER_IDX_MIN_DIM_COL = 3
     FUDGE_FACTOR = 6
     LENGTH_AXIS = -1
+    MIN_BATCH_DIM_SIZES = {"sample": 100, "ploid": 2}
 
     def __init__(
         self,
-        readers: Union[Reader, Iterable[Reader]],
+        readers: Union[Reader, Sequence[Reader]],
         bed: Union[pl.DataFrame, str, Path],
         fixed_length: int,
         batch_size: int,
@@ -85,6 +89,7 @@ class GVL:
         drop_last: bool = False,
         num_workers: int = 1,
         jitter_bed: Optional[int] = None,
+        min_batch_dim_sizes: Optional[Dict[str, int]] = None,
     ) -> None:
         """GenVarLoader
 
@@ -131,6 +136,25 @@ class GVL:
             How many workers to use, default 1.
         jitter_bed : int, optional
             Jitter the regions in the BED file by up to this many nucleotides.
+        min_batch_dim_sizes : Dict[str, int], optional
+            Minimum size of each batch dimension. If None and shuffle = False, batch
+            sizes are set to be as large as possible to maximize performance, otherwise
+            heuristic defaults are used. Limiting the minimum size of a batch dimension
+            is important for training to reduce correlation across batch dimensions.
+            This is due to the buffering strategy used by GVL that dramatically improves
+            performance vs. naively accessing the disk for every batch of data. For
+            example, suppose you are training on a dataset of 10,000 diploid
+            individuals. With no constraints on batch dimension size and sufficient
+            memory, GVL would buffer all 10,000 individuals for a potentially small
+            number of regions. This means a model would only see a small amount of
+            sequence diversity for 20,000 instances before seeing new regions of the
+            genome. This can decrease final model performance and cause large changes in
+            training loss when new buffers are loaded (i.e. new regions of the genome
+            are seen). TL;DR for best dataloading performance, min_batch_dim_sizes needs
+            to be as large as possible. But for best training performance,
+            min_batch_dim_sizes need to be small enough to reduce correlation across
+            batch dimensions. Choosing min_batch_dim_sizes is a tradeoff between these
+            two goals and ultimately must be done empirically.
         """
         self.num_workers = num_workers
         self.fixed_length = fixed_length
@@ -143,25 +167,28 @@ class GVL:
         self.batch_size = batch_size
         self.max_memory_gb = max_memory_gb
         self.jitter_bed = jitter_bed
+        self.min_batch_dim_sizes = min_batch_dim_sizes
 
         if not ray.is_initialized() and self.num_workers > 1:
             ray.init(num_cpus=self.num_workers - 1)
 
         if not isinstance(readers, Iterable):
             readers = [readers]
-        self.readers = {r.name: r for r in readers}
+        self.readers = readers
+        self.unnested_readers: Dict[str, Reader] = {r.name: r for r in self.readers}
+        self.any_chunked = any(r.chunked for r in self.readers)
 
         # TODO raise warning if readers have different contig prefixes
         # can check via Reader.contig_starts_with_chr
 
         if self.num_workers >= 2:
             self.actors: List[ReaderActor] = [
-                ReaderActor.remote(*self.readers.values(), actor_idx=i)
+                ReaderActor.remote(*self.readers, actor_idx=i)
                 for i in range(self.num_workers - 1)  # keep 1 cpu for main process
             ]
 
         self.virtual_data = construct_virtual_data(
-            *readers, fixed_length=self.fixed_length
+            *self.unnested_readers.values(), fixed_length=self.fixed_length
         )
         # sizes does not include the length dimension
         self.sizes = dict(self.virtual_data.sizes)
@@ -214,7 +241,11 @@ class GVL:
             if len(idx_col_axes) == 0:
                 # after vectorized indexing with no batch dims, the batch axis is the
                 # length axis
-                self.buffer_batch_axis[name] = a.get_axis_num("length")
+                self.buffer_batch_axis[
+                    name
+                ] = a.get_axis_num(  # pyright: ignore[reportGeneralTypeIssues]
+                    "length"
+                )
             else:
                 # otherwise, it will be the smallest axis
                 self.buffer_batch_axis[name] = (
@@ -223,24 +254,10 @@ class GVL:
                     else 0
                 )
 
-        if isinstance(bed, (str, Path)):
-            bed = read_bedlike(bed)
-
-        if "strand" in bed:
-            bed = bed.with_columns(
-                pl.col("strand").map_dict({"-": -1, "+": 1}, return_dtype=pl.Int8)
-            )
-        else:
-            bed = bed.with_columns(strand=pl.lit(1, dtype=pl.Int8))
-
-        bed = bed.with_row_count("region_idx")
-        with pl.StringCache():
-            pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
-            bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
-        self.bed = _set_fixed_length_around_center(bed, self.fixed_length)
         # TODO check if any regions are out-of-bounds and any readers have padding
         # disabled. If so, raise an error. Otherwise, readers will catch the error
         # downstream.
+        self.bed = process_bed(bed, self.fixed_length)
 
         self.n_instances: int = self.bed.height * np.prod(
             [self.sizes[d] for d in self.batch_dims], dtype=int
@@ -277,6 +294,7 @@ class GVL:
         return_index: bool = False,
         drop_last: bool = False,
         jitter_bed: Optional[int] = None,
+        min_batch_dim_sizes: Optional[Dict[str, int]] = None,
     ):
         """Update any parameters that don't require re-initializing Ray Actors. If you
         need to change readers or the number of workers, init a new GVL. Note: do NOT
@@ -319,6 +337,25 @@ class GVL:
             divisible by the batch size.
         jitter_bed : int, optional
             Jitter the regions in the BED file by up to this many nucleotides.
+        min_batch_dim_sizes : Dict[str, int], optional
+            Minimum size of each batch dimension. If None and shuffle = False, batch
+            sizes are set to be as large as possible to maximize performance, otherwise
+            heuristic defaults are used. Limiting the minimum size of a batch dimension
+            is important for training to reduce correlation across batch dimensions.
+            This is due to the buffering strategy used by GVL that dramatically improves
+            performance vs. naively accessing the disk for every batch of data. For
+            example, suppose you are training on a dataset of 10,000 diploid
+            individuals. With no constraints on batch dimension size and sufficient
+            memory, GVL would buffer all 10,000 individuals for a potentially small
+            number of regions. This means a model would only see a small amount of
+            sequence diversity for 20,000 instances before seeing new regions of the
+            genome. This can decrease final model performance and cause large changes in
+            training loss when new buffers are loaded (i.e. new regions of the genome
+            are seen). TL;DR for best dataloading performance, min_batch_dim_sizes needs
+            to be as large as possible. But for best training performance,
+            min_batch_dim_sizes need to be small enough to reduce correlation across
+            batch dimensions. Choosing min_batch_dim_sizes is a tradeoff between these
+            two goals and ultimately must be done empirically.
         """
         if fixed_length is not None:
             self.fixed_length = fixed_length
@@ -340,25 +377,11 @@ class GVL:
             self.drop_last = drop_last
         if jitter_bed is not None:
             self.jitter_bed = jitter_bed
+        if min_batch_dim_sizes is not None:
+            self.min_batch_dim_sizes = min_batch_dim_sizes
 
         if bed is not None:
-            if isinstance(bed, (str, Path)):
-                bed = read_bedlike(bed)
-
-            if "strand" in bed:
-                bed = bed.with_columns(
-                    pl.col("strand").map_dict({"-": -1, "+": 1}, return_dtype=pl.Int8)
-                )
-            else:
-                bed = bed.with_columns(strand=pl.lit(1, dtype=pl.Int8))
-
-            bed = bed.with_row_count("region_idx")
-
-            with pl.StringCache():
-                pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
-                bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
-            bed = _set_fixed_length_around_center(bed, self.fixed_length)
-            self.bed = bed
+            self.bed = process_bed(bed, self.fixed_length)
 
         if batch_dims is not None:
             self.batch_dims = batch_dims
@@ -390,7 +413,11 @@ class GVL:
                 if len(idx_col_axes) == 0:
                     # after vectorized indexing with no batch dims, the batch axis is the
                     # length axis
-                    self.buffer_batch_axis[name] = a.get_axis_num("length")
+                    self.buffer_batch_axis[
+                        name
+                    ] = a.get_axis_num(  # pyright: ignore[reportGeneralTypeIssues]
+                        "length"
+                    )
                 else:
                     # otherwise, it will be the smallest axis
                     self.buffer_batch_axis[name] = (
@@ -401,7 +428,13 @@ class GVL:
                         else 0
                     )
 
-        if None not in (fixed_length, bed, max_memory_gb, batch_dims):
+        if None not in (
+            fixed_length,
+            bed,
+            max_memory_gb,
+            batch_dims,
+            min_batch_dim_sizes,
+        ):
             # don't need to check jitter_bed here because it's jittered at each call
             # to __iter__
             self.max_length = self.get_max_length()
@@ -436,7 +469,6 @@ class GVL:
 
     def get_max_length(self):
         """Get the maximum length"""
-        max_length = self.fixed_length
         batch_mem = self.fixed_length * self.mem_per_length(
             {k: v for k, v in self.sizes.items() if k not in self.batch_dims}
         )
@@ -449,8 +481,24 @@ class GVL:
             / self.FUDGE_FACTOR
         )
 
-        self.buffer_sizes = self.get_buffer_sizes(max_mem, max_length, self.batch_dims)
+        if self.shuffle:
+            # assume training and need to ~uniformly sample across genomes
+            # before sampling across batch dimensions
+            # longest possible length, will minimize batch dim sizes
+            max_length = 0
+            for partition in self.bed.partition_by("chrom"):
+                merged_starts, merged_ends = merge_overlapping_regions(
+                    partition["chromStart"].to_numpy(), partition["chromEnd"].to_numpy()
+                )
+                max_length = max(max_length, (merged_ends - merged_starts).sum())
+        else:
+            # assume not training, so sampling does not matter, just maximize
+            # throughput
+            # shortest possible length, will maximize batch dim sizes
+            max_length = self.fixed_length
+        self.buffer_sizes = self.get_buffer_sizes(max_mem, max_length)
 
+        # longest possible length that will fit into memory given buffer sizes
         max_length = max_mem // self.mem_per_length(self.buffer_sizes)
         if max_length == 0:
             min_mem = (
@@ -463,32 +511,29 @@ class GVL:
             )
         return max_length
 
-    def get_buffer_sizes(
-        self, max_mem: int, max_length: int, batch_dims: List[str]
-    ) -> Dict[Hashable, int]:
+    def get_buffer_sizes(self, max_mem: int, max_length: int) -> Dict[Hashable, int]:
         """Get the size of batch dimensions such that the largest buffer (i.e. with max
         length) will fit into memory."""
         buffer_sizes = deepcopy(self.sizes)
-        if max_mem < max_length * self.mem_per_length(self.sizes):
-            for dim in batch_dims:
-                buffer_sizes.pop(dim)
-                size = int(
-                    (max_mem / max_length - self.mem_per_length(buffer_sizes))
-                    / self.itemsizes[dim]
-                )
-                if size > 0:
-                    buffer_sizes[dim] = size
-                    # reducing this dim is enough to get a buffer that fits into memory
-                    break
-                elif size == 0:
-                    buffer_sizes[dim] = 1
+        for dim in self.batch_dims:
+            del buffer_sizes[dim]
+            size = int(
+                (max_mem / max_length - self.mem_per_length(buffer_sizes))
+                / self.itemsizes[dim]
+            )
+            size = np.clip(size, 1, self.sizes[dim])
+            if self.shuffle and self.min_batch_dim_sizes is None:
+                size = max(size, self.MIN_BATCH_DIM_SIZES.get(dim, size))
+            elif self.shuffle and self.min_batch_dim_sizes is not None:
+                size = max(size, self.min_batch_dim_sizes.get(dim, size))
+            buffer_sizes[dim] = size
         return buffer_sizes
 
     def partition_bed(
         self,
         bed: pl.DataFrame,
         max_length: int,
-    ) -> List[pl.DataFrame]:
+    ) -> List["PartitionOfRegions"]:
         """Partition regions of a BED file such that the overlap of each partition never
         exceeds the max length.
 
@@ -503,7 +548,12 @@ class GVL:
             Partitions of the BED.
         """
         contig_partitions = bed.partition_by("chrom")
-        partitions: List[pl.DataFrame] = []
+        partitions: List[PartitionOfRegions] = []
+        dim_idxs = [dim_idx for dim_idx in self.dim_idxs_generator()]
+
+        if self.shuffle:
+            self.rng.shuffle(dim_idxs)  # pyright: ignore[reportGeneralTypeIssues]
+
         for c_part in contig_partitions:
             c_part = c_part.with_columns(
                 partition=pl.lit(
@@ -514,7 +564,11 @@ class GVL:
                     )
                 )
             )
-            partitions.extend(c_part.partition_by("partition", include_key=False))
+            _partitions = [
+                PartitionOfRegions(_part, dim_idxs)
+                for _part in c_part.partition_by("partition", include_key=False)
+            ]
+            partitions.extend(_partitions)
         return partitions
 
     def __iter__(self):
@@ -532,7 +586,9 @@ class GVL:
             self.partitioned_bed = self.partition_bed(bed, self.max_length)
 
         if self.shuffle:
-            self.rng.shuffle(self.partitioned_bed)
+            self.rng.shuffle(
+                self.partitioned_bed  # pyright: ignore[reportGeneralTypeIssues]
+            )
             self.indexes = {
                 d: self.rng.permutation(idx) for d, idx in self.indexes.items()
             }
@@ -584,8 +640,8 @@ class GVL:
                         self.partial_indices = []
 
                     yield self.process_batch(
-                        batch,
-                        batch_idx,
+                        batch,  # pyright: ignore[reportUnboundVariable]
+                        batch_idx,  # pyright: ignore[reportUnboundVariable]
                         buffer.dim_idxs,
                     )
 
@@ -598,13 +654,22 @@ class GVL:
             batch = self.concat_batches(self.partial_batches)
             batch_idx = np.concatenate(self.partial_indices, axis=0)
 
-            yield self.process_batch(batch, batch_idx, buffer.dim_idxs)
+            yield self.process_batch(
+                batch,
+                batch_idx,
+                buffer.dim_idxs,  # pyright: ignore[reportUnboundVariable]
+            )
 
             self.total_yielded += batch_slice.stop
 
     def dim_idxs_generator(self) -> Generator[Dict[Hashable, List[int]], None, None]:
         """Yields dictionaries of dims->indices"""
-        if self.shuffle:
+        # Chunked formats require access patterns such that data locality is respected
+        # i.e. data must be accessed that is close to each other in on disk.
+        # Without precise knowledge of the chunk boundaries of underlying every reader,
+        # the best we can do is to simply ensure every data access is from contiguous
+        # data.
+        if self.shuffle and not self.any_chunked:
             idxs = {
                 d: self.rng.permutation(len(idx)) for d, idx in self.indexes.items()
             }
@@ -657,7 +722,7 @@ class GVL:
         idx: NDArray[np.integer],
     ) -> BatchDict:
         out: BatchDict = {}
-        for name, reader in self.readers.items():
+        for name, reader in self.unnested_readers.items():
             a = buffer[name]
             dims = ["batch", *self.non_batch_dims, "length"]
             out[name] = (
@@ -817,6 +882,22 @@ def partition_regions(
 
 @nb.njit(nogil=True, cache=True)
 def merge_overlapping_regions(starts: NDArray[np.int64], ends: NDArray[np.int64]):
+    """Merge overlapping regions, assuming they are sorted by start position.
+
+    Parameters
+    ----------
+    starts : NDArray[np.int64]
+        Start positions for each region.
+    ends : NDArray[np.int64]
+        End positions for each region.
+
+    Returns
+    -------
+    merged_starts : NDArray[np.int64]
+        Start positions for each merged region.
+    merged_ends : NDArray[np.int64]
+        End positions for each merged region.
+    """
     merged_starts = np.empty_like(starts)
     merged_ends = np.empty_like(ends)
     region_idx = 0
@@ -857,6 +938,25 @@ def get_relative_starts(
     return rel_starts
 
 
+@define
+class PartitionOfRegions:
+    partition: pl.DataFrame
+    dim_idxs: List[Dict[Hashable, List[int]]]
+    counter: int = -1
+
+    def __iter__(self):
+        return self
+
+    def __len__(self):
+        return len(self.dim_idxs)
+
+    def __next__(self):
+        self.counter += 1
+        if self.counter == len(self):
+            raise StopIteration
+        return self.partition, self.dim_idxs[self.counter]
+
+
 class SyncBuffers:
     def __init__(self, gvl: GVL) -> None:
         self.gvl = gvl
@@ -865,8 +965,8 @@ class SyncBuffers:
         return self.generate_buffers()
 
     def generate_buffers(self):
-        buffer: Dict[Hashable, Tuple[Tuple[Hashable, ...], NDArray]] = {}
-        for name, reader in self.gvl.readers.items():
+        buffer: Dict[str, NDArray] = {}
+        for name, reader in self.gvl.unnested_readers.items():
             dims: Tuple[Hashable, ...] = tuple(reader.sizes)
             shape: List[int] = []
             for dim in dims:
@@ -876,15 +976,9 @@ class SyncBuffers:
                     shape.append(size)
             dtype = reader.dtype
             shape.append(self.gvl.max_length)
-            buffer[name] = (dims, np.empty(shape, dtype=dtype))
+            buffer[name] = np.empty(shape, dtype=dtype)
 
-        for partition in self.gvl.partitioned_bed:
-            n_regions = len(partition)
-            instances_in_partition = n_regions * np.prod(
-                [self.gvl.sizes[d] for d in self.gvl.batch_dims], dtype=int
-            )
-            instances_in_partition_tasks = 0
-
+        for partition, dim_idxs in interleave_longest(*self.gvl.partitioned_bed):
             contig: str
             contig = partition.select("chrom").row(0)[0]
             starts, ends = [
@@ -894,52 +988,40 @@ class SyncBuffers:
             merged_starts, merged_ends = merge_overlapping_regions(starts, ends)
             lengths = merged_ends - merged_starts
             total_length = lengths.sum()
-            dim_idxs_gen = self.gvl.dim_idxs_generator()
 
-            while instances_in_partition_tasks < instances_in_partition:
-                dim_idxs = next(dim_idxs_gen)
-                read_kwargs = {
-                    dim: self.gvl.indexes[dim][idx] for dim, idx in dim_idxs.items()
-                }
-                buffer_len = n_regions * np.prod(
-                    [len(a) for a in read_kwargs.values()], dtype=int
+            read_kwargs = {
+                dim: self.gvl.indexes[dim][idx] for dim, idx in dim_idxs.items()
+            }
+
+            buffer_idx = self.gvl.get_buffer_idx(partition, merged_starts, read_kwargs)
+
+            if self.gvl.weights is not None:
+                buffer_idx = self.gvl.resample_buffer_idx(buffer_idx)
+
+            if self.gvl.shuffle:
+                buffer_idx = self.gvl.rng.permutation(buffer_idx)
+
+            _buffer_dict = {}
+            slices: Dict[Hashable, slice] = {}
+            for dim in self.gvl.batch_dims:
+                slices[dim] = slice(0, len(read_kwargs[dim]))
+            slices["length"] = slice(0, total_length)
+            for reader in self.gvl.readers:
+                _slices = tuple(slices[dim] for dim in reader.sizes) + (
+                    slices["length"],
                 )
-                instances_in_partition_tasks += buffer_len
-
-                buffer_idx = self.gvl.get_buffer_idx(
-                    partition, merged_starts, read_kwargs
+                out = buffer[reader.name][_slices]
+                data = reader.read(
+                    contig,
+                    merged_starts,
+                    merged_ends,
+                    out=out,
+                    **read_kwargs,  # pyright: ignore[reportGeneralTypeIssues]
                 )
-                read_kwargs["target_length"] = self.gvl.fixed_length
+                _buffer_dict[reader.name] = data
 
-                if self.gvl.weights is not None:
-                    buffer_idx = self.gvl.resample_buffer_idx(buffer_idx)
-
-                if self.gvl.shuffle:
-                    buffer_idx = self.gvl.rng.permutation(buffer_idx)
-
-                sliced_buffer: Dict[Hashable, NDArray] = {}
-                for name, (dims, arr) in buffer.items():
-                    slices: List[slice] = []
-                    for dim in dims:
-                        # No chance of KeyError here because dims are exclusively
-                        # batch_dims, which are checked for compat at GVL init
-                        slices.append(slice(0, len(read_kwargs[dim])))
-                    slices.append(slice(0, total_length))
-                    _slices = tuple(slices)
-                    sliced_buffer[name] = arr[_slices]
-                _buffer = xr.Dataset(
-                    {
-                        name: r.read(
-                            contig,
-                            merged_starts,
-                            merged_ends,
-                            out=sliced_buffer[name],
-                            **read_kwargs,
-                        )
-                        for name, r in self.gvl.readers.items()
-                    }
-                )
-                yield Buffer(_buffer, buffer_idx, dim_idxs, -1)
+            out_buffer = xr.Dataset(_buffer_dict)
+            yield Buffer(out_buffer, buffer_idx, dim_idxs, -1)
 
 
 class ConcurrentBuffers:
@@ -974,57 +1056,33 @@ class ConcurrentBuffers:
     def submit_buffer_tasks(self):
         buffer_futures: List[ray.ObjectRef[Buffer]] = []
         buffer_meta: List[Optional[BufferMeta]] = [None] * len(self.gvl.actors)
-        for partition in self.gvl.partitioned_bed:
-            {str(d): slice(0, 0) for d in self.gvl.buffer_sizes}
-
-            n_regions = len(partition)
-            instances_in_partition = n_regions * np.prod(
-                [self.gvl.sizes[d] for d in self.gvl.batch_dims], dtype=int
-            )
-            instances_in_partition_tasks = 0
-
+        for partition, dim_idxs in interleave_longest(*self.gvl.partitioned_bed):
             contig: str
-            start: int
-            end: int
-            contig, start, end = partition.select(
-                pl.col("chrom").first(),
-                pl.col("chromStart").min(),
-                pl.col("chromEnd").max(),
-            ).row(0)
+            contig = partition.select("chrom").row(0)[0]
             merged_starts, merged_ends = merge_overlapping_regions(
                 partition["chromStart"].to_numpy(), partition["chromEnd"].to_numpy()
             )
-            dim_idxs_gen = self.gvl.dim_idxs_generator()
 
-            while instances_in_partition_tasks < instances_in_partition:
-                if len(self.ready_actor_idxs) == 0:
-                    yield buffer_futures, buffer_meta
-                    buffer_futures = []
+            if len(self.ready_actor_idxs) == 0:
+                yield buffer_futures, buffer_meta
+                buffer_futures = []
 
-                dim_idxs = next(dim_idxs_gen)
-                read_kwargs = {
-                    dim: self.gvl.indexes[dim][idx] for dim, idx in dim_idxs.items()
-                }
-                buffer_len = n_regions * np.prod(
-                    [len(a) for a in read_kwargs.values()], dtype=int
-                )
-                instances_in_partition_tasks += buffer_len
-                buffer_idx = self.gvl.get_buffer_idx(
-                    partition, merged_starts, read_kwargs
-                )
-                if self.gvl.weights is not None:
-                    buffer_idx = self.gvl.resample_buffer_idx(buffer_idx)
-                if self.gvl.shuffle:
-                    buffer_idx = self.gvl.rng.permutation(buffer_idx)
-                ready_actor_idx = self.ready_actor_idxs.pop()
-                read_kwargs["target_length"] = self.gvl.fixed_length
-                buffer = self.gvl.actors[ready_actor_idx].read.remote(  # type: ignore
-                    contig, merged_starts, merged_ends, **read_kwargs
-                )
-                buffer_meta[ready_actor_idx] = BufferMeta(
-                    buffer_idx, dim_idxs, ready_actor_idx
-                )
-                buffer_futures.append(buffer)
+            read_kwargs = {
+                dim: self.gvl.indexes[dim][idx] for dim, idx in dim_idxs.items()
+            }
+            buffer_idx = self.gvl.get_buffer_idx(partition, merged_starts, read_kwargs)
+            if self.gvl.weights is not None:
+                buffer_idx = self.gvl.resample_buffer_idx(buffer_idx)
+            if self.gvl.shuffle:
+                buffer_idx = self.gvl.rng.permutation(buffer_idx)
+            ready_actor_idx = self.ready_actor_idxs.pop()
+            buffer = self.gvl.actors[ready_actor_idx].read.remote(  # type: ignore
+                contig, merged_starts, merged_ends, **read_kwargs
+            )
+            buffer_meta[ready_actor_idx] = BufferMeta(
+                buffer_idx, dim_idxs, ready_actor_idx
+            )
+            buffer_futures.append(buffer)
 
         if len(buffer_futures) > 0:
             yield buffer_futures, buffer_meta
