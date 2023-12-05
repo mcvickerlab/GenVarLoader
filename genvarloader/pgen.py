@@ -119,9 +119,14 @@ class Pgen(Variants):
         self.v_diffs: Dict[str, NDArray[np.int32]] = {}
         # sorted ends
         self.v_ends: Dict[str, NDArray[np.int32]] = {}
-        # end_idx_to_start_idx maps from relative end idxs to relative variant idxs
-        # such that self.v_ends[]
-        self.end_idx_to_start_idx: Dict[str, NDArray[np.int32]] = {}
+        # s2e_sorter is the argsort for v_ends sorted by starts such that
+        # v_ends = ends[s2e_sorter] is sorted by ends
+        # it can also map relative end idxs to relative start idxs so that
+        # a search indices from v_ends can be mapped to indices in v_starts e.g.
+        # v_starts[s2e_sorter[searchsorted(v_ends[s2e_sorter], query)]] is the start
+        # corresponding to the variant closest to the query
+        self.s2e_sorter: Dict[str, NDArray[np.int32]] = {}
+        self.max_del: Dict[str, NDArray[np.int32]] = {}
         # no multi-allelics
         self.ref: Dict[str, VLenAlleles] = {}
         self.alt: Dict[str, VLenAlleles] = {}
@@ -195,6 +200,28 @@ class Pgen(Variants):
                     .agg(pl.all().sort_by("END"), VAR_IDX=pl.col("END").arg_sort())
                     .explode(pl.exclude("#CHROM"))
                 )
+
+                for_max_dels = ends.join(
+                    pvar.with_row_count("VAR_IDX"), on="VAR_IDX"
+                ).sort("END")
+                max_dels = np.empty(for_max_dels.height, dtype=np.int32)
+                last_idx = 0
+                for _, part in for_max_dels.group_by("#CHROM", maintain_order=True):
+                    nearest_non_overlapping = (
+                        np.searchsorted(
+                            part["END"].to_numpy(), part["POS"].to_numpy(), side="right"
+                        )
+                        - 1
+                    )
+                    max_deletion_lengths = weighted_activity_selection(
+                        s2e_sorter=part["VAR_IDX"].to_numpy(),
+                        weights=part["ILEN"].to_numpy(),
+                        q=nearest_non_overlapping,
+                    )
+                    max_dels[last_idx : last_idx + part.height] = max_deletion_lengths
+                    last_idx += part.height
+                ends = ends.with_columns(MAX_DEL=max_dels)
+
                 pvar.write_ipc(pvar_arrow_path)
                 ends.write_ipc(ends_arrow_path)
 
@@ -215,7 +242,8 @@ class Pgen(Variants):
                     "#CHROM", as_dict=True
                 ).items():
                     self.v_ends[_contig] = partition["END"].to_numpy()
-                    self.end_idx_to_start_idx[_contig] = partition["VAR_IDX"].to_numpy()
+                    self.s2e_sorter[_contig] = partition["VAR_IDX"].to_numpy()
+                    self.max_del[_contig] = partition["MAX_DEL"].to_numpy()
 
                 # make all contigs map to the same pgen file
                 pgen_path = self.pgen_paths["_all"]
@@ -225,22 +253,16 @@ class Pgen(Variants):
                 self.v_starts[contig] = pvar["POS"].to_numpy()
                 self.v_diffs[contig] = pvar["ILEN"].to_numpy()
                 self.v_ends[contig] = ends["END"].to_numpy()
-                self.end_idx_to_start_idx[contig] = ends["VAR_IDX"].to_numpy()
+                # given an array sorted by starts, this will sort it by ends
+                self.s2e_sorter[contig] = ends["VAR_IDX"].to_numpy()
+                self.max_del[contig] = ends["MAX_DEL"].to_numpy()
+
                 # no multi-allelics
                 self.ref[contig] = VLenAlleles.from_polars(pvar["REF"])
                 self.alt[contig] = VLenAlleles.from_polars(pvar["ALT"])
 
         self.contigs = list(self.contig_offsets.keys())
         self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
-
-        # q_j = largest index i < j such that variant i is non-overlapping with j
-        self.nearest_non_overlapping = {
-            c: (
-                np.searchsorted(self.v_ends[c], self.v_starts[c], side="right") - 1
-            ).astype(np.int32)
-            for c in self.contigs
-        }
-
         self.n_variants = sum(len(p) for p in self.v_starts.values())
 
         if n5_store is not False:
@@ -379,9 +401,7 @@ class Pgen(Variants):
         no_variant_mask = _s_idxs == len(self.v_ends[contig])
         _s_idxs = np.where(no_variant_mask, -1, _s_idxs)
         # make idxs absolute
-        s_idxs = (
-            self.end_idx_to_start_idx[contig][_s_idxs] + self.contig_offsets[contig]
-        )
+        s_idxs = self.s2e_sorter[contig][_s_idxs] + self.contig_offsets[contig]
         e_idxs = (
             np.searchsorted(self.v_starts[contig], ends) + self.contig_offsets[contig]
         )
@@ -497,30 +517,25 @@ class Pgen(Variants):
             return None, ends
 
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
-        no_variant_mask = _s_idxs == len(self.v_ends[contig])
-        _s_idxs = np.where(no_variant_mask, -1, _s_idxs)
-        s_idxs = self.end_idx_to_start_idx[contig][_s_idxs]
-        e_idxs = np.searchsorted(self.v_starts[contig], ends)
-        e_idxs[no_variant_mask] = s_idxs[no_variant_mask]
+        has_var = _s_idxs < len(self.v_ends[contig])
 
-        max_deletion_lengths = weighted_activity_selection(
-            r_start_idxs=s_idxs,
-            r_end_idxs=e_idxs,
-            e_idx_to_s_idx=self.end_idx_to_start_idx[contig],
-            size_diffs=self.v_diffs[contig],
-            nearest_non_overlapping=self.nearest_non_overlapping[contig],
-        )
-        max_ends = ends + max_deletion_lengths
+        # (v r)
+        max_del = self.max_del[contig][:, None] - self.max_del[contig][_s_idxs - 1]
+        # (r)
+        e_idxs = np.searchsorted(self.v_ends[contig] - max_del, ends)
+        # (r)
+        max_ends = max_del[e_idxs, np.arange(len(e_idxs))] + ends
 
-        e_idxs = np.searchsorted(self.v_starts[contig], max_ends)
+        _s_idxs = np.where(~has_var, -1, _s_idxs)
+        s_idxs = _s_idxs[self.e_idx_to_min_span_s_idx[contig]]
 
         # make idxs absolute
         s_idxs += self.contig_offsets[contig]
         e_idxs += self.contig_offsets[contig]
-        e_idxs[no_variant_mask] = s_idxs[no_variant_mask]
+        e_idxs[~has_var] = s_idxs[~has_var]
 
         if s_idxs.min() == e_idxs.max():
-            return None, max_ends
+            return None, ends
 
         v_idxs = np.concatenate(
             [np.arange(s, e, dtype=np.uint32) for s, e in zip(s_idxs, e_idxs)]
@@ -591,7 +606,7 @@ class Pgen(Variants):
             offsets=offsets,
         )
 
-        return (out, max_ends)
+        return (out, max_ends.astype(np.int64))
 
     def get_sample_idx(self, samples):
         _samples, _pgen_idx, query_idx = np.intersect1d(
@@ -609,12 +624,10 @@ class Pgen(Variants):
 
 @nb.njit(nogil=True, cache=True)
 def weighted_activity_selection(
-    r_start_idxs: NDArray[np.int32],
-    r_end_idxs: NDArray[np.int32],
-    e_idx_to_s_idx: NDArray[np.int32],
-    size_diffs: NDArray[np.int32],
-    nearest_non_overlapping: NDArray[np.int32],
-) -> NDArray[np.int64]:
+    s2e_sorter: NDArray[np.int32],
+    weights: NDArray[np.int32],
+    q: NDArray[np.intp],
+) -> NDArray[np.int32]:
     """Implementation of the [weighted activity selection problem](https://en.wikipedia.org/wiki/Activity_selection_problem)
     to compute the maximum length of deletions that can occur for each region. This is
     used to adjust the end coordinates for reference sequence queries and include all
@@ -622,12 +635,6 @@ def weighted_activity_selection(
 
     Parameters
     ----------
-    r_start_idxs : NDArray[np.int32]
-        Shape: (n_regions). The index of sorted_ends that is the first variant spanning
-        the region of interest.
-    r_end_idxs : NDArray[np.int32]
-        Shape: (n_regions). The index of sorted_ends that is the last variant spanning
-        the region of interest.
     e_idx_to_s_idx : NDArray[np.int32]
         Shape: (n_variants). The index of the variant in `v_starts` such that the start
         positions of `v_ends[i]` is `v_starts[e_idx_to_s_idx[i]]`.
@@ -650,42 +657,42 @@ def weighted_activity_selection(
     to an activity with weight equal to the length of the deletion. The goal is to
     compute the maximum total weight of deletions for each query region.
 
-    For right padding, we also need the final variant index (non-inclusive) that needs
-    to be included to span the target length of each region and right pad sequences
-    shorter than the query. Unfortunately, right padding can be arbitrarily long, so we
-    make the choice to only include variants from expanding the query region by the max
-    deletion length and then can right pad the sequence to the target length downstream
-    when constructing haplotypes. This is a heuristic that should work well for most
-    cases, but may not work well for very long deletions or queries near the end of a
-    contig. However, genetic variation in telomeric regions is not well captured by most
-    sequencing technologies anyway, so this should not be a problem in practice.
-
     Psuedocode from (Princeton slides)[https://www.cs.princeton.edu/~wayne/cs423/lectures/dynamic-programming-4up.pdf]:
     Given starts s_1, ..., s_n, ends e_1, ..., e_n, and weights w_1, ..., w_n.
     Note that ends are sorted, e_1 <= ... <= e_n.
     Let q_j = largest index i < j such that activity i is compatible with j
-    i.e. q_j = argmax(e < s_j)
     Let opt(j) = value of solution to the problem consisting of activities 1 to j
     Then,
     opt(0) = 0
     else
     opt(j) = max(w_j + opt(q_j), opt(j - 1))
+
+    Also, note that opt(j) for a subset of activities [i, j) can be computed as
+    if i == 0:
+        opt(j) = opt(j)
+    else:
+        opt(j) = opt(j) - opt(i-1)
+    This follows from the optimality equation for weighted activity selection by
+    effectively setting opt(i-1) = 0, since opt(i-1) would be 0 when solving for the
+    subset.
+
+    For right padding, we also need the final variant index (non-inclusive) that needs
+    to be included to span the target length of each region and right pad sequences
+    shorter than the query. Given the maximum length of deletions possible for every
+    variant on the chromosome, we can compute length is needed to reach the
+    target lengths by:
+    1. get query ends: q_ends = v_ends + max_deletion_lengths
+    2. sort q_ends
+    3. for each query region, find the largest q_end such that q_ends <= end
+    4. use this q_end as the new end for the query region
     """
-    n_regions = len(r_start_idxs)
-    max_deletion_lengths = np.empty(n_regions, dtype=np.int64)
-    for i in nb.prange(n_regions):
-        n_vars = r_end_idxs[i] - r_start_idxs[i]
-        _e_idx_to_s_idx = e_idx_to_s_idx[r_start_idxs[i] : r_end_idxs[i]]
-        _size_diffs = size_diffs[_e_idx_to_s_idx]
-        _q = nearest_non_overlapping[_e_idx_to_s_idx]
+    _w = weights[s2e_sorter]
+    _q = q[s2e_sorter]
 
-        opt = np.empty(n_vars, dtype=np.int32)
-        for j in range(n_vars):
-            v = opt[_q[j]] + _size_diffs[j]
-            if j == 0:
-                opt[j] = min(v, 0)
-            else:
-                opt[j] = min(v, opt[j - 1])
-        max_deletion_lengths[i] = -opt[-1]
+    n_vars = len(weights)
+    opt = np.empty(n_vars, dtype=np.int32)
+    opt[0] = max(opt[_q[0]] + _w[0], 0)
+    for j in range(1, n_vars):
+        opt[j] = max(opt[_q[j]] + _w[j], opt[j - 1])
 
-    return max_deletion_lengths
+    return opt

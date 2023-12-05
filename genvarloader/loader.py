@@ -1,5 +1,6 @@
 from collections import defaultdict
 from copy import deepcopy
+from enum import Enum
 from itertools import product
 from pathlib import Path
 from typing import (
@@ -43,11 +44,13 @@ except ImportError:
 BatchDict = Dict[Hashable, Tuple[List[Hashable], NDArray]]
 
 
-def construct_virtual_data(*readers: Reader, fixed_length: int) -> xr.Dataset:
+def construct_virtual_data(
+    *readers: Reader, n_regions: int, fixed_length: int
+) -> xr.Dataset:
     arrays = {}
     for reader in readers:
-        dims = list(reader.sizes) + ["length"]
-        shape = [size for size in reader.sizes.values()] + [fixed_length]
+        dims = ["region"] + list(reader.sizes) + ["length"]
+        shape = [n_regions] + [size for size in reader.sizes.values()] + [fixed_length]
         arrays[reader.name] = xr.DataArray(
             da.empty(  # pyright: ignore[reportPrivateImportUsage]
                 shape, dtype=reader.dtype
@@ -70,6 +73,11 @@ class GVL:
     LENGTH_AXIS = -1
     MIN_BATCH_DIM_SIZES = {"sample": 100, "ploid": 2}
 
+    class Framework(str, Enum):
+        TORCH = "torch"
+        TF = "tf"
+        JAX = "jax"
+
     def __init__(
         self,
         readers: Union[Reader, Sequence[Reader]],
@@ -90,6 +98,7 @@ class GVL:
         num_workers: int = 1,
         jitter_bed: Optional[int] = None,
         min_batch_dim_sizes: Optional[Dict[str, int]] = None,
+        distributed: Optional[Union[str, Framework]] = None,
     ) -> None:
         """GenVarLoader
 
@@ -168,6 +177,24 @@ class GVL:
         self.max_memory_gb = max_memory_gb
         self.jitter_bed = jitter_bed
         self.min_batch_dim_sizes = min_batch_dim_sizes
+        if distributed is not None:
+            self.distributed = self.Framework(distributed)
+        else:
+            self.distributed = None
+
+        if self.distributed is self.Framework.TORCH and not TORCH_AVAILABLE:
+            raise ImportError(
+                """PyTorch is not installed and is required for distributed training.
+                See https://pytorch.org/get-started/locally/ for installation
+                instructions.
+                """
+            )
+        elif self.distributed is not None:
+            raise NotImplementedError(
+                """Distributed training is not yet implemented for frameworks other than
+                PyTorch.
+                """
+            )
 
         if not ray.is_initialized() and self.num_workers > 1:
             ray.init(num_cpus=self.num_workers - 1)
@@ -187,9 +214,42 @@ class GVL:
                 for i in range(self.num_workers - 1)  # keep 1 cpu for main process
             ]
 
+        # TODO check if any regions are out-of-bounds and any readers have padding
+        # disabled. If so, raise an error. Otherwise, readers will catch the error
+        # downstream.
+        self.bed = process_bed(bed, self.fixed_length)
+
         self.virtual_data = construct_virtual_data(
-            *self.unnested_readers.values(), fixed_length=self.fixed_length
+            *self.unnested_readers.values(),
+            n_regions=self.bed.height,
+            fixed_length=self.fixed_length,
         )
+
+        if self.distributed is self.Framework.TORCH:
+            import torch.distributed
+
+            if not torch.distributed.is_initialized():
+                raise RuntimeError(
+                    """
+                    Got distributed training enabled but not running in a distributed
+                    environment.
+                    """
+                )
+
+            n_subsets = torch.distributed.get_world_size()
+            i = torch.distributed.get_rank()
+            subset_len = round(self.bed.height / n_subsets)
+            slice_start = i * subset_len
+
+            if i + 1 < n_subsets:
+                slice_stop = (i + 1) * subset_len
+            else:
+                slice_stop = self.bed.height
+            region_slice = slice(slice_start, slice_stop)
+
+            self.bed = self.bed[region_slice]
+            self.virtual_data = self.virtual_data.isel(region=region_slice)
+
         # sizes does not include the length dimension
         self.sizes = dict(self.virtual_data.sizes)
         del self.sizes["length"]
@@ -253,11 +313,6 @@ class GVL:
                     if np.all(np.diff(idx_col_axes + [a.get_axis_num("length")]) == 1)
                     else 0
                 )
-
-        # TODO check if any regions are out-of-bounds and any readers have padding
-        # disabled. If so, raise an error. Otherwise, readers will catch the error
-        # downstream.
-        self.bed = process_bed(bed, self.fixed_length)
 
         self.n_instances: int = self.bed.height * np.prod(
             [self.sizes[d] for d in self.batch_dims], dtype=int
