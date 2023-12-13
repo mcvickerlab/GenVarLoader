@@ -1,10 +1,11 @@
-import time
+import gc
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple, Union, cast
+from typing import Dict, List, Mapping, Optional, Protocol, Tuple, Union, cast
 
 import numba as nb
 import numpy as np
 import polars as pl
+from loguru import logger
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
@@ -24,13 +25,26 @@ try:
 except ImportError:
     TENSORSTORE_INSTALLED = False
 
+try:
+    import zarr
+    from numcodecs.blosc import Blosc
+
+    ZARR_INSTALLED = True
+except ImportError:
+    ZARR_INSTALLED = False
+
 
 class Pgen(Variants):
+    # pgenlib is exclusively diploid
+    ploidy = 2
+    # unknown genotypes are set to -9
+    UNKNOWN = -9
+
     def __init__(
         self,
         paths: Union[str, Path, Mapping[str, Union[str, Path]]],
         samples: Optional[List[str]] = None,
-        n5_store: Union[str, Path, bool] = False,
+        caches: Optional[Union[str, Path, Mapping[str, Union[str, Path]]]] = None,
     ) -> None:
         """Reads genotypes from PGEN files. Currently does not support multi-allelic
         sites, but does support *split* multi-allelic sites. This can be done by
@@ -58,10 +72,10 @@ class Pgen(Variants):
             dictionary mapping contig names to the PGEN file for that contig.
         samples : List[str], optional
             Which samples to include, by default all samples.
-        n5_store : Union[str, Path, bool], optional
-            Whether to cache a Zarr store of the genotypes, writing one if it does not
-            exist. By default False. Can also provide a file path, otherwise defaults to
-            the same path as the PGEN file(s) with the extension `.geno.zarr`.
+        caches : str | Path | Mapping[str, str | Path], optional
+            Where to cache genotypes, writing them if they do not exist. By default
+            uses the PGEN file which is slow for training. Recommended cache type is N5,
+            by using the .n5 file extension on cache paths.
 
         Notes
         -----
@@ -72,23 +86,18 @@ class Pgen(Variants):
         if not PGENLIB_INSTALLED:
             raise ImportError("Pgenlib must be installed to read PGEN files.")
 
-        # pgenlib is exclusively diploid
-        self.ploidy = 2
-        # unknown genotypes are set to -9
-        self.UNKNOWN = -9
-
         if isinstance(paths, (str, Path)):
             _paths = Path(paths)
-            self.pgen_paths = {"_all": _paths.with_suffix(".pgen")}
+            pgen_paths = {"_all": _paths.with_suffix(".pgen")}
             self.split_by_contig = False
-        elif isinstance(paths, dict):
+        elif isinstance(paths, Mapping):
             _paths = {
                 contig: Path(path).with_suffix(".pgen")
                 for contig, path in paths.items()
             }
-            self.pgen_paths = _paths
+            pgen_paths = _paths
             self.split_by_contig = True
-        _first_path = self.pgen_paths[next(iter(self.pgen_paths))]
+        _first_path = pgen_paths[next(iter(pgen_paths))]
 
         try:
             psam_samples = pl.read_csv(
@@ -126,14 +135,15 @@ class Pgen(Variants):
         # v_starts[s2e_sorter[searchsorted(v_ends[s2e_sorter], query)]] is the start
         # corresponding to the variant closest to the query
         self.s2e_sorter: Dict[str, NDArray[np.int32]] = {}
-        self.max_del: Dict[str, NDArray[np.int32]] = {}
+        self.e2s_idx: Dict[str, NDArray[np.int32]] = {}
+        self.max_del_q: Dict[str, NDArray[np.int32]] = {}
         # no multi-allelics
         self.ref: Dict[str, VLenAlleles] = {}
         self.alt: Dict[str, VLenAlleles] = {}
 
         self.contig_offsets: Dict[str, int] = {}
 
-        for contig, path in self.pgen_paths.items():
+        for contig, path in pgen_paths.items():
             pvar_path = path.with_suffix(".pvar")
             pvar_arrow_path = path.with_suffix(".gvl.arrow")
             ends_arrow_path = path.with_suffix(".ends.gvl.arrow")
@@ -154,11 +164,16 @@ class Pgen(Variants):
                 pvar = pl.read_ipc(pvar_arrow_path)
                 ends = pl.read_ipc(ends_arrow_path)
             else:
+                logger.info(
+                    "Did not find existing .gvl.arrow files, creating them. This may take several minutes."  # noqa: E501
+                )
+
                 with open(pvar_path, "r") as f:
                     skip_rows = 0
                     while f.readline().startswith("##"):
                         skip_rows += 1
 
+                logger.info("Reading .pvar file...")
                 pvar = pl.read_csv(
                     pvar_path,
                     separator="\t",
@@ -166,18 +181,21 @@ class Pgen(Variants):
                     columns=["#CHROM", "POS", "REF", "ALT"],
                     dtypes={"#CHROM": pl.Utf8, "POS": pl.Int32},
                 )
+                logger.info("Finished reading .pvar file.")
 
                 if (pvar["ALT"].str.contains(",")).any():
                     raise RuntimeError(
                         f"""PGEN file {path} contains multi-allelic variants which are 
                         not yet supported by GenVarLoader. Split your multi-allelic 
-                        variants with `bcftools norm -a --atom-overlaps . -m - 
-                        <file.vcf>` then remake the PGEN file with the `--vcf-half-call 
-                        r` option."""
+                        variants with `bcftools norm -f <reference.fa> -a
+                        --atom-overlaps . -m - <file.vcf>` then remake the PGEN file
+                        with the `--vcf-half-call r` option."""
                     )
 
+                logger.info("Writing .gvl.arrow files...")
+
                 pvar = pvar.with_columns(
-                    POS=pl.col("POS") - 1,
+                    POS=pl.col("POS") - 1,  # change to 0-indexed
                     ILEN=(
                         pl.col("ALT").str.len_bytes().cast(pl.Int32)
                         - pl.col("REF").str.len_bytes().cast(pl.Int32)
@@ -196,34 +214,44 @@ class Pgen(Variants):
                         END=pl.col("POS")
                         - pl.col("ILEN").clip_max(0),  #! end-inclusive
                     )
+                    .with_row_count("VAR_IDX")
                     .group_by("#CHROM", maintain_order=True)
-                    .agg(pl.all().sort_by("END"), VAR_IDX=pl.col("END").arg_sort())
+                    .agg(
+                        pl.all(),
+                        pl.col("VAR_IDX")
+                        .reverse()
+                        .rolling_min(pvar.height, min_periods=1)
+                        .reverse()
+                        .alias("E2S_IDX"),
+                    )
+                    .explode(pl.exclude("#CHROM"))
+                    .select("#CHROM", "END", "VAR_IDX", "E2S_IDX")
+                    .group_by("#CHROM", maintain_order=True)
+                    .agg(pl.all().sort_by("END"))
                     .explode(pl.exclude("#CHROM"))
                 )
 
-                for_max_dels = ends.join(
-                    pvar.with_row_count("VAR_IDX"), on="VAR_IDX"
-                ).sort("END")
-                max_dels = np.empty(for_max_dels.height, dtype=np.int32)
+                for_max_dels = ends.join(pvar.with_row_count("VAR_IDX"), on="VAR_IDX")
+                max_del_q = np.empty(for_max_dels.height, dtype=np.int32)
                 last_idx = 0
                 for _, part in for_max_dels.group_by("#CHROM", maintain_order=True):
-                    nearest_non_overlapping = (
-                        np.searchsorted(
-                            part["END"].to_numpy(), part["POS"].to_numpy(), side="right"
-                        )
-                        - 1
-                    )
-                    max_deletion_lengths = weighted_activity_selection(
-                        s2e_sorter=part["VAR_IDX"].to_numpy(),
-                        weights=part["ILEN"].to_numpy(),
-                        q=nearest_non_overlapping,
-                    )
-                    max_dels[last_idx : last_idx + part.height] = max_deletion_lengths
+                    part = part.sort("END")
+                    _starts = part["POS"].to_numpy()
+                    _ends = part["END"].to_numpy()
+                    was_ends = np.empty(len(_ends) + 1, dtype=_ends.dtype)
+                    was_ends[0] = 0
+                    was_ends[1:] = _ends
+                    q = np.searchsorted(was_ends, _starts, side="right") - 1
+                    max_del_q[last_idx : last_idx + part.height] = q
                     last_idx += part.height
-                ends = ends.with_columns(MAX_DEL=max_dels)
+                ends = ends.with_columns(MD_Q=max_del_q)
 
                 pvar.write_ipc(pvar_arrow_path)
-                ends.write_ipc(ends_arrow_path)
+                ends.select("#CHROM", "END", "MD_Q", "VAR_IDX", "E2S_IDX").write_ipc(
+                    ends_arrow_path
+                )
+
+                logger.info("Finished writing .gvl.arrow files.")
 
             if contig == "_all":
                 last_end = 0
@@ -242,20 +270,19 @@ class Pgen(Variants):
                     "#CHROM", as_dict=True
                 ).items():
                     self.v_ends[_contig] = partition["END"].to_numpy()
-                    self.s2e_sorter[_contig] = partition["VAR_IDX"].to_numpy()
-                    self.max_del[_contig] = partition["MAX_DEL"].to_numpy()
+                    self.e2s_idx[_contig] = partition["E2S_IDX"].to_numpy()
+                    self.max_del_q[_contig] = partition["MD_Q"].to_numpy()
 
                 # make all contigs map to the same pgen file
-                pgen_path = self.pgen_paths["_all"]
-                self.pgen_paths = {contig: pgen_path for contig in self.contig_offsets}
+                pgen_path = pgen_paths["_all"]
+                pgen_paths = {contig: pgen_path for contig in self.contig_offsets}
             else:
                 self.contig_offsets[contig] = 0
                 self.v_starts[contig] = pvar["POS"].to_numpy()
                 self.v_diffs[contig] = pvar["ILEN"].to_numpy()
                 self.v_ends[contig] = ends["END"].to_numpy()
-                # given an array sorted by starts, this will sort it by ends
-                self.s2e_sorter[contig] = ends["VAR_IDX"].to_numpy()
-                self.max_del[contig] = ends["MAX_DEL"].to_numpy()
+                self.e2s_idx[contig] = ends["E2S_IDX"].to_numpy()
+                self.max_del_q[contig] = ends["MD_Q"].to_numpy()
 
                 # no multi-allelics
                 self.ref[contig] = VLenAlleles.from_polars(pvar["REF"])
@@ -265,93 +292,48 @@ class Pgen(Variants):
         self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
         self.n_variants = sum(len(p) for p in self.v_starts.values())
 
-        if n5_store is not False:
-            if not TENSORSTORE_INSTALLED:
-                raise ImportError("Tensorstore must be installed to cache genotypes.")
-
-            if n5_store is True:
-                a_pgen_path = next(iter(self.pgen_paths.values()))
-                cache_path = a_pgen_path.with_suffix(".geno.n5")
+        if caches is not None:
+            if isinstance(caches, (str, Path)):
+                caches = {c: Path(caches) for c in self.contigs}
             else:
-                cache_path = Path(n5_store)
+                caches = {c: Path(p) for c, p in caches.items()}
 
-            if not cache_path.exists():
-                self.tstore = self._write_cache(cache_path)
-            else:
-                self.tstore = self._open_cache(cache_path)
-            self.chunked = True
-        else:
-            self.tstore = None
-            self.chunked = False
+            cache_type = next(iter(caches.values())).suffix[1:]
+            write_caches = any(not p.exists() for p in caches.values())
 
-    def _pgen(self, contig: str, sample_idx: Optional[NDArray[np.uint32]]):
-        if sample_idx is not None:
-            sample_idx = np.sort(sample_idx)
-        return pgenlib.PgenReader(
-            bytes(self.pgen_paths[contig]), sample_subset=sample_idx
-        )
-
-    def _write_cache(self, cache_path: Path):
-        ts_open_kwargs = {
-            "spec": {
-                "driver": "n5",
-                "kvstore": {"driver": "file", "path": str(cache_path)},
-            },
-            "dtype": np.int8,
-            "shape": (self.n_samples, self.ploidy, self.n_variants),
-            "write": True,
-            "create": True,
-            "chunk_layout": ts.ChunkLayout(  # pyright: ignore[reportGeneralTypeIssues]
-                chunk_shape=(100, self.ploidy, int(1e5))
-            ),
-        }
-
-        ts_handle = ts.open(  # pyright: ignore[reportGeneralTypeIssues]
-            **ts_open_kwargs
-        ).result()
-
-        # write all genotypes to cache in chunks of up to 1 GB of memory, using up to
-        # (8 + 1) * chunk size = 9 GB working space
-        chunksize = int(1e9)
-        var_per_chunk = chunksize // (self.n_samples * self.ploidy)
-        for c, c_offset in self.contig_offsets.items():
-            with self._pgen(c, None) as f:
-                n_vars = len(self.v_starts[c])
-                idxs = np.arange(0, n_vars + var_per_chunk, var_per_chunk)
-                idxs[-1] = min(idxs[-1], n_vars)
-                pbar = tqdm(zip(idxs[:-1], idxs[1:]), total=len(idxs) - 1)
-                for s_idx, e_idx in pbar:
-                    pbar.set_description(f"Reading {c}:{s_idx}-{e_idx}")
-                    genotypes = np.empty(
-                        (self.n_samples * self.ploidy, var_per_chunk), dtype=np.int32
+            if cache_type in ("n5", "zarr"):
+                if write_caches:
+                    pgen_genos = _PgenGenos(pgen_paths, self.n_samples, self.n_variants)
+                    self.genotypes = _TStoreGenos.from_genos(
+                        pgen_genos,
+                        self.n_samples,
+                        self.n_variants,
+                        self.ploidy,
+                        self.contig_offsets,
+                        {c: len(p) for c, p in self.v_starts.items()},
+                        caches,
                     )
-                    f.read_alleles_range(s_idx, e_idx, genotypes, hap_maj=1)
-                    pbar.set_description(f"Writing {c}:{s_idx}-{e_idx}")
-                    ts_handle[..., s_idx + c_offset : e_idx + c_offset].write(
-                        genotypes.astype(np.int8).reshape(
-                            self.n_samples, self.ploidy, -1
-                        )
-                    ).result()
-                    pbar.set_description(f"Sleeping {c}:{s_idx}-{e_idx}")
-                    time.sleep(10)
+                else:
+                    self.genotypes = _TStoreGenos(caches)
+            elif cache_type == "memmap":
+                self.genotypes = _MemmapGenos()
+            else:
+                raise ValueError(
+                    "Couldn't infer file type from cache's file extension."
+                )
+        else:
+            self.genotypes = _PgenGenos(pgen_paths, self.n_samples, self.n_variants)
 
-        return ts_handle
-
-    def _open_cache(self, cache_path: Path):
-        ts_open_kwargs = {
-            "spec": {
-                "driver": "n5",
-                "kvstore": {"driver": "file", "path": str(cache_path)},
-            },
-            "open": True,
-            "read": True,
-            "dtype": np.int8,
-            "shape": (self.n_samples, self.ploidy, self.n_variants),
-        }
-
-        return ts.open(  # pyright: ignore[reportGeneralTypeIssues]
-            **ts_open_kwargs
-        ).result()
+        self.chunked = self.genotypes.chunked
+        self.nbytes = (
+            sum(a.nbytes for a in self.v_diffs.values())
+            + sum(a.nbytes for a in self.v_starts.values())
+            + sum(a.nbytes for a in self.v_ends.values())
+            + sum(a.nbytes for a in self.e2s_idx.values())
+            + sum(a.nbytes for a in self.max_del_q.values())
+            + sum(a.nbytes for a in self.ref.values())
+            + sum(a.nbytes for a in self.alt.values())
+        )
 
     def read(
         self, contig: str, starts: NDArray[np.int64], ends: NDArray[np.int64], **kwargs
@@ -374,10 +356,9 @@ class Pgen(Variants):
         """
         samples = kwargs.get("sample", None)
         if samples is None:
-            n_samples = self.n_samples
             pgen_idx, query_idx = self.sample_idx, None
         else:
-            n_samples = len(samples)
+            len(samples)
             pgen_idx, query_idx = self.get_sample_idx(samples)
 
         ploid = kwargs.get("ploid", None)
@@ -401,7 +382,7 @@ class Pgen(Variants):
         no_variant_mask = _s_idxs == len(self.v_ends[contig])
         _s_idxs = np.where(no_variant_mask, -1, _s_idxs)
         # make idxs absolute
-        s_idxs = self.s2e_sorter[contig][_s_idxs] + self.contig_offsets[contig]
+        s_idxs = self.e2s_idx[contig][_s_idxs] + self.contig_offsets[contig]
         e_idxs = (
             np.searchsorted(self.v_starts[contig], ends) + self.contig_offsets[contig]
         )
@@ -410,7 +391,7 @@ class Pgen(Variants):
         if s_idxs.min() == e_idxs.max():
             return None
 
-        v_idxs = np.concatenate(
+        np.concatenate(
             [np.arange(s, e, dtype=np.uint32) for s, e in zip(s_idxs, e_idxs)]
         )
         n_var_per_region = e_idxs - s_idxs
@@ -434,22 +415,7 @@ class Pgen(Variants):
             *(self.alt[contig][s:e] for s, e, in zip(rel_s_idxs, rel_e_idxs))
         )
 
-        # get alleles
-        # (s*2, v)
-        genotypes = np.empty((n_samples * self.ploidy, len(v_idxs)), dtype=np.int32)
-        with self._pgen(contig, pgen_idx) as f:
-            f.read_alleles_list(
-                variant_idxs=v_idxs, allele_int32_out=genotypes, hap_maj=1
-            )
-
-        # (s, 2, v)
-        genotypes = genotypes.astype(np.int8).reshape(n_samples, self.ploidy, -1)
-
-        # re-order samples to be in query order
-        if query_idx is not None:
-            genotypes = genotypes[query_idx]
-
-        genotypes = genotypes[:, ploid]
+        genotypes = self.genotypes.read(contig, s_idxs, e_idxs, pgen_idx, ploid)
 
         out = DenseGenotypes(
             positions=positions,
@@ -494,10 +460,9 @@ class Pgen(Variants):
         """
         samples = kwargs.get("sample", None)
         if samples is None:
-            n_samples = self.n_samples
             pgen_idx, query_idx = self.sample_idx, None
         else:
-            n_samples = len(samples)
+            len(samples)
             pgen_idx, query_idx = self.get_sample_idx(samples)
 
         ploid = kwargs.get("ploid", None)
@@ -518,26 +483,28 @@ class Pgen(Variants):
 
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
         has_var = _s_idxs < len(self.v_ends[contig])
-
-        # (v r)
-        max_del = self.max_del[contig][:, None] - self.max_del[contig][_s_idxs - 1]
-        # (r)
-        e_idxs = np.searchsorted(self.v_ends[contig] - max_del, ends)
-        # (r)
-        max_ends = max_del[e_idxs, np.arange(len(e_idxs))] + ends
-
         _s_idxs = np.where(~has_var, -1, _s_idxs)
-        s_idxs = _s_idxs[self.e_idx_to_min_span_s_idx[contig]]
+
+        max_ends, _e_idxs = weighted_activity_selection(
+            self.v_diffs[contig],
+            self.max_del_q[contig],
+            _s_idxs,
+            self.v_ends[contig],
+            ends - starts,
+        )
+
+        s_idxs = self.e2s_idx[contig][_s_idxs]
+        e_idxs = self.e2s_idx[contig][_e_idxs]
+        # e_idxs[~has_var] = s_idxs[~has_var]
 
         # make idxs absolute
         s_idxs += self.contig_offsets[contig]
         e_idxs += self.contig_offsets[contig]
-        e_idxs[~has_var] = s_idxs[~has_var]
 
         if s_idxs.min() == e_idxs.max():
             return None, ends
 
-        v_idxs = np.concatenate(
+        np.concatenate(
             [np.arange(s, e, dtype=np.uint32) for s, e in zip(s_idxs, e_idxs)]
         )
         n_var_per_region = e_idxs - s_idxs
@@ -561,48 +528,14 @@ class Pgen(Variants):
             *(self.alt[contig][s:e] for s, e, in zip(rel_s_idxs, rel_e_idxs))
         )
 
-        if self.tstore is None:
-            # get alleles
-            # (s*2, v)
-            genotypes = np.empty((n_samples * self.ploidy, len(v_idxs)), dtype=np.int32)
-            with self._pgen(contig, pgen_idx) as f:
-                f.read_alleles_list(
-                    variant_idxs=v_idxs, allele_int32_out=genotypes, hap_maj=1
-                )
-
-            # (s, 2, v)
-            genotypes = genotypes.astype(np.int8).reshape(n_samples, self.ploidy, -1)
-
-            # re-order samples to be in query order
-            if query_idx is not None:
-                genotypes = genotypes[query_idx]
-        else:
-            # let tensorstore have the full query available to hopefully parallelize
-            # reading variable length slices of genotypes
-            sub_genos = [None] * len(s_idxs)
-            for i, (s_idx, e_idx) in enumerate(zip(s_idxs, e_idxs)):
-                # no variants in query regions
-                if s_idx == e_idx:
-                    continue
-                sub_genos.append(self.tstore[..., s_idx:e_idx])
-
-            genotypes = ts.concat(  # pyright: ignore[reportGeneralTypeIssues]
-                sub_genos, axis=-1
-            )[
-                ts.d[0].translate_to[0]  # pyright: ignore[reportGeneralTypeIssues]
-            ]
-
-            if query_idx is not None:
-                genotypes = genotypes[query_idx]
-
-            genotypes = cast(NDArray[np.int8], genotypes.result())
+        genotypes = self.genotypes.read(contig, s_idxs, e_idxs, pgen_idx, ploid)
 
         out = DenseGenotypes(
             positions=positions,
             size_diffs=size_diffs,
             ref=ref,
             alt=alt,
-            genotypes=genotypes[:, ploid],
+            genotypes=genotypes,
             offsets=offsets,
         )
 
@@ -622,12 +555,381 @@ class Pgen(Variants):
         return pgen_idx, query_idx
 
 
+class _Genotypes(Protocol):
+    chunked: bool
+
+    def read(
+        self,
+        contig: str,
+        start_idxs: NDArray[np.integer],
+        end_idxs: NDArray[np.integer],
+        sample_idx: Optional[NDArray[np.integer]],
+        haplotype_idx: Optional[NDArray[np.integer]],
+    ) -> NDArray[np.int8]:
+        """Read genotypes from a contig from index i to j, 0-based exclusive.
+
+        Parameters
+        ----------
+        contig : str
+            Name of the contig/chromosome.
+        start_idxs : NDArray[np.intp]
+            Start indices, 0-based.
+        end_idxs : NDArray[np.intp]
+            End indices, 0-based exclusive.
+        sample_idx : NDArray[np.intp], optional
+            Indices of the samples to include. Must be unique.
+        haplotype_idx : NDArray[np.intp], optional
+            Indices of the haplotypes to include. Must be unique.
+
+        Returns
+        -------
+        genotypes : NDArray[np.int8]
+            Shape: (samples ploidy variants). Genotypes for each query region.
+        """
+        ...
+
+
+class _PgenGenos(_Genotypes):
+    chunked = False
+    paths: Dict[str, Path]
+    PLOIDY = 2
+
+    def __init__(self, paths: Dict[str, Path], n_samples: int, n_variants: int) -> None:
+        self.paths = paths
+        self.n_samples = n_samples
+        self.n_variants = n_variants
+
+    def _pgen(self, contig: str, sample_idx: Optional[NDArray[np.uint32]]):
+        return pgenlib.PgenReader(bytes(self.paths[contig]), sample_subset=sample_idx)
+
+    def read(
+        self,
+        contig: str,
+        start_idxs: NDArray[np.integer],
+        end_idxs: NDArray[np.integer],
+        sample_idx: Optional[NDArray[np.integer]],
+        haplotype_idx: Optional[NDArray[np.integer]],
+    ) -> NDArray[np.int8]:
+        if sample_idx is None:
+            n_samples = self.n_samples
+            pgen_idx = None
+            sample_sorter = None
+        else:
+            n_samples = len(sample_idx)
+            sample_sorter = np.argsort(sample_idx)
+            pgen_idx = sample_idx[sample_sorter].astype(np.uint32)
+
+        n_vars = (end_idxs - start_idxs).sum()
+        genotypes = np.empty((n_samples * self.PLOIDY, n_vars), dtype=np.int32)
+
+        with self._pgen(contig, pgen_idx) as f:
+            for i, (s, e) in enumerate(zip(start_idxs, end_idxs)):
+                rel_s = s - start_idxs[i]
+                rel_e = e - start_idxs[i]
+                f.read_alleles_range(
+                    s, e, allele_int32_out=genotypes[..., rel_s:rel_e], hap_maj=1
+                )
+
+        # (s, 2, v)
+        genotypes = genotypes.reshape(n_samples, self.PLOIDY, -1)
+
+        if haplotype_idx is not None:
+            genotypes = genotypes[:, haplotype_idx]
+
+        genotypes = genotypes.astype(np.int8)
+
+        # re-order samples to be in query order
+        if sample_sorter is not None and np.arange(n_samples) != sample_sorter:
+            genotypes = genotypes[sample_sorter]
+
+        return genotypes
+
+
+class _TStoreGenos(_Genotypes):
+    chunked = True
+
+    def __init__(self, paths: Dict[str, Path]) -> None:
+        if not TENSORSTORE_INSTALLED:
+            raise ImportError(
+                "Tensorstore must be installed to use chunked array caches like Zarr and N5."  # noqa: E501
+            )
+        self.paths = paths
+        first_path = next(iter(paths.values()))
+        if all(first_path == p for p in paths.values()):
+            tstore = self._open_tstore(next(iter(paths)))
+            self.tstores = {contig: tstore for contig in paths}
+        else:
+            self.tstores = {contig: self._open_tstore(contig) for contig in paths}
+
+    @classmethod
+    def from_genos(
+        cls,
+        genotypes: _Genotypes,
+        n_samples: int,
+        n_variants: int,
+        ploidy: int,
+        contig_offsets: Dict[str, int],
+        n_var_per_contig: Dict[str, int],
+        cache_paths: Dict[str, Path],
+        mem=int(1e9),
+        chunk_shape=None,
+    ) -> "_TStoreGenos":
+        if chunk_shape is None:
+            chunk_shape = (100, ploidy, int(1e5))
+
+        if not TENSORSTORE_INSTALLED:
+            raise ImportError(
+                "Tensorstore must be installed to use chunked array caches like Zarr and N5."  # noqa: E501
+            )
+
+        first_path = next(iter(cache_paths.values()))
+        one_tstore = all(first_path == p for p in cache_paths.values())
+        if one_tstore:
+            driver = first_path.suffix[1:]
+            ts_open_kwargs = {
+                "spec": {
+                    "driver": driver,
+                    "kvstore": {"driver": "file", "path": str(first_path)},
+                },
+                "dtype": np.int8,
+                "shape": (n_samples, ploidy, n_variants),
+                "create": True,
+                "delete_existing": True,
+                "chunk_layout": ts.ChunkLayout(  # pyright: ignore[reportGeneralTypeIssues]
+                    chunk_shape=chunk_shape
+                ),
+            }
+            ts_handle = ts.open(  # pyright: ignore[reportGeneralTypeIssues]
+                **ts_open_kwargs
+            ).result()
+
+        c_n_variants = np.array(list(n_var_per_contig.values()))
+        var_per_chunk = mem // (n_samples * ploidy)
+        for (contig, path), c_n_vars in zip(cache_paths.items(), c_n_variants):
+            c_offset = contig_offsets[contig]
+            driver = path.suffix[1:]
+
+            if not one_tstore:
+                ts_open_kwargs = {
+                    "spec": {
+                        "driver": driver,
+                        "kvstore": {"driver": "file", "path": str(path)},
+                    },
+                    "dtype": np.int8,
+                    "shape": (n_samples, ploidy, c_n_vars),
+                    "create": True,
+                    "delete_existing": True,
+                    "chunk_layout": ts.ChunkLayout(  # pyright: ignore[reportGeneralTypeIssues]
+                        chunk_shape=chunk_shape
+                    ),
+                }
+                ts_handle = ts.open(  # pyright: ignore[reportGeneralTypeIssues]
+                    **ts_open_kwargs
+                ).result()
+
+            # write all genotypes to cache in chunks of up to 1 GB of memory, using up
+            # to (8 + 1) * chunk size = 9 GB working space
+            # [c_offset, c_offset + c_n_vars)
+            # for contig files, c_offset always = 0
+            # for one file, c_offset = cumsum of previous offsets
+            # c_n_vars is the number of variants in the contig
+            idxs = np.arange(
+                c_offset, c_offset + c_n_vars + var_per_chunk, var_per_chunk
+            )
+            idxs[-1] = c_offset + c_n_vars
+            for s_idx, e_idx in tqdm(
+                zip(idxs[:-1], idxs[1:]),
+                total=len(idxs) - 1,
+                desc=f"Writing contig {contig} to cache.",
+            ):
+                genos = genotypes.read(
+                    contig, np.array([s_idx]), np.array([e_idx]), None, None
+                )
+                ts_handle[
+                    :, :, s_idx:e_idx
+                ] = genos  # pyright: ignore[reportUnboundVariable]
+                gc.collect()
+
+        return cls(cache_paths)
+
+    def _open_tstore(self, contig: str):
+        ts_open_kwargs = {
+            "spec": {
+                "driver": "n5",
+                "kvstore": {"driver": "file", "path": str(self.paths[contig])},
+            },
+            "open": True,
+            "read": True,
+        }
+
+        return ts.open(  # pyright: ignore[reportGeneralTypeIssues]
+            **ts_open_kwargs
+        ).result()
+
+    def read(
+        self,
+        contig: str,
+        start_idxs: NDArray[np.integer],
+        end_idxs: NDArray[np.integer],
+        sample_idx: Optional[NDArray[np.integer]],
+        haplotype_idx: Optional[NDArray[np.integer]],
+    ) -> NDArray[np.int8]:
+        # let tensorstore have the full query available to hopefully parallelize
+        # reading variable length slices of genotypes
+        sub_genos = [None] * len(start_idxs)
+        _tstore = self.tstores[contig]
+
+        if sample_idx is not None:
+            _tstore = _tstore[sample_idx]
+        if haplotype_idx is not None:
+            _tstore = _tstore[:, haplotype_idx]
+
+        for i, (s_idx, e_idx) in enumerate(zip(start_idxs, end_idxs)):
+            # no variants in query regions
+            if s_idx == e_idx:
+                continue
+            sub_genos.append(_tstore[..., s_idx:e_idx])
+
+        genotypes = ts.concat(  # pyright: ignore[reportGeneralTypeIssues]
+            sub_genos, axis=-1
+        )[
+            ts.d[0].translate_to[0]  # pyright: ignore[reportGeneralTypeIssues]
+        ]
+
+        genotypes = cast(NDArray[np.int8], genotypes.result())
+
+        return genotypes
+
+
+class _ZarrGenos(_Genotypes):
+    chunked = True
+
+    def __init__(self, paths: Dict[str, Path]) -> None:
+        if not ZARR_INSTALLED:
+            raise ImportError(
+                "Zarr must be installed to use zarr-python to I/O Zarr stores."
+            )
+
+        self.paths = paths
+        first_path = next(iter(paths.values()))
+        if all(first_path == p for p in paths.values()):
+            z_handle = self._open_store(next(iter(paths)))
+            self.stores = {contig: z_handle for contig in paths}
+        else:
+            self.stores = {contig: self._open_store(contig) for contig in paths}
+
+    def _open_store(self, contig: str):
+        z_handle = zarr.open_array(
+            store=str(self.paths[contig]),
+            mode="r",
+        )
+        return z_handle
+
+    def read(
+        self,
+        contig: str,
+        start_idxs: NDArray[np.integer],
+        end_idxs: NDArray[np.integer],
+        sample_idx: Optional[NDArray[np.integer]],
+        haplotype_idx: Optional[NDArray[np.integer]],
+    ) -> NDArray[np.int8]:
+        raise NotImplementedError
+
+    @classmethod
+    def from_genos(
+        cls,
+        genotypes: _Genotypes,
+        n_samples: int,
+        n_variants: int,
+        ploidy: int,
+        contig_offsets: Dict[str, int],
+        n_var_per_contig: Dict[str, int],
+        cache_paths: Dict[str, Path],
+        mem=int(1e9),
+        chunk_shape=None,
+    ) -> "_ZarrGenos":
+        if not ZARR_INSTALLED:
+            raise ImportError(
+                "Zarr must be installed to use zarr-python to write Zarr stores."
+            )
+
+        if chunk_shape is None:
+            chunk_shape = (100, ploidy, int(1e5))
+
+        first_path = next(iter(cache_paths.values()))
+        one_store = all(first_path == p for p in cache_paths.values())
+        if one_store:
+            z_handle = zarr.open_array(
+                store=str(first_path),
+                dtype=np.int8,
+                shape=(n_samples, ploidy, n_variants),
+                mode="w",
+                chunks=chunk_shape,  # pyright: ignore[reportGeneralTypeIssues]
+                compressor=Blosc(shuffle=2),
+            )
+
+        c_n_variants = np.array(list(n_var_per_contig.values()))
+        var_per_chunk = mem // (n_samples * ploidy)
+        for (contig, path), c_n_vars in zip(cache_paths.items(), c_n_variants):
+            c_offset = contig_offsets[contig]
+            if not one_store:
+                z_handle = zarr.open_array(
+                    store=str(path),
+                    dtype=np.int8,
+                    shape=(n_samples, ploidy, c_n_vars),
+                    mode="w",
+                    chunks=chunk_shape,  # pyright: ignore[reportGeneralTypeIssues]
+                    compressor=Blosc(shuffle=2),
+                )
+
+            # [c_offset, c_offset + c_n_vars)
+            # for contig files, c_offset always = 0
+            # for one file, c_offset = cumsum of previous offsets
+            # c_n_vars is the number of variants in the contig
+            idxs = np.arange(
+                c_offset, c_offset + c_n_vars + var_per_chunk, var_per_chunk
+            )
+            idxs[-1] = c_offset + c_n_vars
+            for s_idx, e_idx in tqdm(
+                zip(idxs[:-1], idxs[1:]),
+                total=len(idxs) - 1,
+                desc=f"Writing contig {contig} to cache.",
+            ):
+                genos = genotypes.read(
+                    contig, np.array([s_idx]), np.array([e_idx]), None, None
+                )
+                z_handle[
+                    :, :, s_idx:e_idx
+                ] = genos  # pyright: ignore[reportUnboundVariable]
+
+        return cls(cache_paths)
+
+
+class _MemmapGenos(_Genotypes):
+    chunked = False
+
+    def __init__(self) -> None:
+        raise NotImplementedError
+
+    def read(
+        self,
+        contig: str,
+        start_idxs: NDArray[np.integer],
+        end_idxs: NDArray[np.integer],
+        sample_idx: Optional[NDArray[np.integer]],
+        haplotype_idx: Optional[NDArray[np.integer]],
+    ) -> NDArray[np.int8]:
+        raise NotImplementedError
+
+
 @nb.njit(nogil=True, cache=True)
 def weighted_activity_selection(
-    s2e_sorter: NDArray[np.int32],
-    weights: NDArray[np.int32],
-    q: NDArray[np.intp],
-) -> NDArray[np.int32]:
+    v_diffs: NDArray[np.int32],
+    nearest_nonoverlapping: NDArray[np.intp],
+    start_idxs: NDArray[np.intp],
+    v_ends: NDArray[np.int32],
+    r_lengths: NDArray[np.int64],
+) -> Tuple[NDArray[np.int32], NDArray[np.intp]]:
     """Implementation of the [weighted activity selection problem](https://en.wikipedia.org/wiki/Activity_selection_problem)
     to compute the maximum length of deletions that can occur for each region. This is
     used to adjust the end coordinates for reference sequence queries and include all
@@ -635,21 +937,25 @@ def weighted_activity_selection(
 
     Parameters
     ----------
-    e_idx_to_s_idx : NDArray[np.int32]
-        Shape: (n_variants). The index of the variant in `v_starts` such that the start
-        positions of `v_ends[i]` is `v_starts[e_idx_to_s_idx[i]]`.
-    size_diffs : NDArray[np.int32]
-        Shape: (n_variants). The difference in length between the ref and alt alleles.
-        Sorted by start position.
-    nearest_non_overlapping : NDArray[np.int32]
-        Shape: (n_variants). The largest index `i < j` such that
-        `v_ends[i] < v_starts[e_idx_to_s_idx][j]`.
+    v_diffs : NDArray[np.int64]
+        Shape: (variants). Difference in length between ref and alt.
+    nearest_nonoverlapping : NDArray[np.intp]
+        Shape: (variants). Nearest variant i such that i < j and variants are
+        non-overlapping, nearest_nonoverlapping[j] = i.
+    start_idxs : NDArray[np.intp]
+        Shape: (regions). Start indices of query regions.
+    v_ends : NDArray[np.int64]
+        Shape: (variants). End coordinates of variants, 0-based inclusive.
+    r_lengths : NDArray[np.int64]
+        Shape: (regions). Lengths of query regions.
 
     Returns
     -------
-    max_deletion_lengths : NDArray[np.int64]
-        Shape: (n_regions). The maximum length of deletions that can occur in each
-        region.
+    max_ends : NDArray[np.int32]
+        Shape: (regions). Maximum end coordinate for each query region.
+    end_idxs : NDArray[np.intp]
+        Shape: (regions). Index of the variant with the maximum end coordinate for each
+        query region.
 
     Notes
     -----
@@ -658,41 +964,43 @@ def weighted_activity_selection(
     compute the maximum total weight of deletions for each query region.
 
     Psuedocode from (Princeton slides)[https://www.cs.princeton.edu/~wayne/cs423/lectures/dynamic-programming-4up.pdf]:
-    Given starts s_1, ..., s_n, ends e_1, ..., e_n, and weights w_1, ..., w_n.
-    Note that ends are sorted, e_1 <= ... <= e_n.
-    Let q_j = largest index i < j such that activity i is compatible with j
+    Given starts :math: `s_1, ..., s_n`, ends :math: `e_1, ..., e_n`, and weights
+    :math: `w_1, ..., w_n`.
+    Note that ends are sorted, :math: `e_1 <= ... <= e_n`.
+    Let :math: `q_j` = largest index :math: `i < j` such that activity :math: `i` is
+    compatible with :math: `j`.
     Let opt(j) = value of solution to the problem consisting of activities 1 to j
     Then,
-    opt(0) = 0
-    else
-    opt(j) = max(w_j + opt(q_j), opt(j - 1))
-
-    Also, note that opt(j) for a subset of activities [i, j) can be computed as
-    if i == 0:
-        opt(j) = opt(j)
-    else:
-        opt(j) = opt(j) - opt(i-1)
-    This follows from the optimality equation for weighted activity selection by
-    effectively setting opt(i-1) = 0, since opt(i-1) would be 0 when solving for the
-    subset.
-
-    For right padding, we also need the final variant index (non-inclusive) that needs
-    to be included to span the target length of each region and right pad sequences
-    shorter than the query. Given the maximum length of deletions possible for every
-    variant on the chromosome, we can compute length is needed to reach the
-    target lengths by:
-    1. get query ends: q_ends = v_ends + max_deletion_lengths
-    2. sort q_ends
-    3. for each query region, find the largest q_end such that q_ends <= end
-    4. use this q_end as the new end for the query region
+        opt(0) = 0
+    and
+        opt(j) = max(w_j + opt(q_j), opt(j - 1))
     """
-    _w = weights[s2e_sorter]
-    _q = q[s2e_sorter]
 
-    n_vars = len(weights)
-    opt = np.empty(n_vars, dtype=np.int32)
-    opt[0] = max(opt[_q[0]] + _w[0], 0)
-    for j in range(1, n_vars):
-        opt[j] = max(opt[_q[j]] + _w[j], opt[j - 1])
+    max_ends = np.empty(len(start_idxs), dtype=np.int32)
+    end_idxs = np.empty(len(start_idxs), dtype=np.intp)
+    for r in nb.prange(len(start_idxs)):
+        s = start_idxs[r]
+        w = -v_diffs[s:]  # flip sign so deletions have positive weight
+        n_vars = len(w)
 
-    return opt
+        if n_vars == 0:
+            max_ends[r] = r_lengths[r]
+            end_idxs[r] = s
+            continue
+
+        # to adjust q from [0, j) to [i, j)
+        # (q[i:] - i).clip(0)
+        q = (nearest_nonoverlapping[s:] - s).clip(0)
+
+        # max_del and j are effectively 1-indexed, everything else is 0-indexed
+        max_del = np.empty(n_vars + 1, dtype=np.int32)
+        max_del[0] = 0
+        for j in range(1, n_vars + 1):
+            max_del[j] = max(max_del[q[j - 1]] + w[j - 1], max_del[j - 1])
+            max_end = v_ends[s + j - 1] - max_del[j] + 1  # v_ends is end-inclusive
+            if max_end >= r_lengths[r]:
+                max_ends[r] = max_end
+                end_idxs[r] = s + j - 1
+                break
+
+    return max_ends, end_idxs

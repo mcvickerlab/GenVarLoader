@@ -19,7 +19,6 @@ from typing import (
     cast,
 )
 
-import dask.array as da
 import numba as nb
 import numpy as np
 import polars as pl
@@ -31,7 +30,7 @@ from numpy.typing import NDArray
 
 from .concurrent import Buffer, BufferMeta, DataVarsLike, ReaderActor
 from .types import Reader
-from .util import _cartesian_product, process_bed
+from .util import _cartesian_product, construct_virtual_data, process_bed
 
 try:
     import torch  # noqa: F401
@@ -42,25 +41,6 @@ except ImportError:
 
 
 BatchDict = Dict[Hashable, Tuple[List[Hashable], NDArray]]
-
-
-def construct_virtual_data(
-    *readers: Reader, n_regions: int, fixed_length: int
-) -> xr.Dataset:
-    arrays = {}
-    for reader in readers:
-        dims = ["region"] + list(reader.sizes) + ["length"]
-        shape = [n_regions] + [size for size in reader.sizes.values()] + [fixed_length]
-        arrays[reader.name] = xr.DataArray(
-            da.empty(  # pyright: ignore[reportPrivateImportUsage]
-                shape, dtype=reader.dtype
-            ),
-            dims=dims,
-            coords=reader.coords,
-            name=reader.name,
-        )
-    virtual_data = xr.Dataset(arrays)
-    return virtual_data
 
 
 class GVL:

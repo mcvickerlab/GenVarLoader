@@ -206,6 +206,10 @@ class VLenAlleles:
         """Number of alleles."""
         return len(self.offsets) - 1
 
+    @property
+    def nbytes(self):
+        return self.offsets.nbytes + self.alleles.nbytes
+
     @classmethod
     def from_polars(cls, alleles: pl.Series):
         offsets = np.r_[np.uint32(0), alleles.str.len_bytes().cum_sum().to_numpy()]
