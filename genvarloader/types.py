@@ -17,7 +17,7 @@ import polars as pl
 import xarray as xr
 from attrs import define
 from loguru import logger
-from numpy.typing import NDArray
+from numpy.typing import DTypeLike, NDArray
 
 
 class Reader(Protocol):
@@ -25,21 +25,28 @@ class Reader(Protocol):
 
     Attributes
     ----------
-    virtual_data : xr.DataArray
-        Virtual data describing the type and dimensions of the data yielded by this
-        reader. This data includes all dimensions except the length dimension since
-        this is determined by the length of the genomic range passed to `read()`.
-    contig_starts_with_chr : str, optional
+    name : str
+        Name of the reader, corresponding to the name of the DataArrays it returns.
+    dtype : np.dtype
+        Data type of what the reader returns.
+    sizes : Dict[Hashable, int]
+        Sizes of the dimensions/axes of what the reader returns.
+    coords : Dict[Hashable, NDArray]
+        Coordinates of what the reader returns, i.e. dimension labels.
+    contig_starts_with_chr : bool, optional
         Whether the contigs start with "chr" or not. Queries to `read()` will
         normalize the contig name to add or remove this prefix to match what the
         underlying file uses.
     rev_strand_fn : Callable[[NDArray], NDArray]
         Function to reverse (and potentially complement) data for a genomic region. This
         is used when the strand is negative.
+    chunked : bool
+        Whether the reader acts like a chunked array store, in which sequential reads
+        are far more performant than random access.
     """
 
     name: str
-    dtype: np.dtype
+    dtype: DTypeLike
     sizes: Dict[Hashable, int]
     coords: Dict[Hashable, NDArray]
     contig_starts_with_chr: Optional[bool]

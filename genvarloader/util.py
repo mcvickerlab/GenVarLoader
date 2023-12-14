@@ -1,6 +1,6 @@
 from itertools import accumulate, chain, repeat
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Sequence, TypeVar, Union
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence, TypeVar, Union
 
 import dask.array as da
 import numpy as np
@@ -63,6 +63,18 @@ def _set_fixed_length_around_center(bed: pl.DataFrame, length: int):
         chromEnd=(center + length / 2).round(0).cast(pl.Int64),
     )
     return bed
+
+
+def random_chain(*iterables: Iterable, seed: Optional[int] = None):
+    """Chain iterables, randomly sampling from each until they are all exhausted."""
+    rng = np.random.default_rng(seed)
+    iterators = {i: iter(it) for i, it in enumerate(iterables)}
+    while iterators:
+        i = rng.integers(len(iterators))
+        try:
+            yield next(iterators[i])
+        except StopIteration:
+            del iterators[i]
 
 
 def read_bedlike(path: Union[str, Path]) -> pl.DataFrame:
