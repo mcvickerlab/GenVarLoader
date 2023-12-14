@@ -232,13 +232,12 @@ class GVL:
 
         # sizes does not include the length dimension
         self.sizes = dict(self.virtual_data.sizes)
+        del self.sizes["region"]
         del self.sizes["length"]
         # dimension -> sum of itemsizes across readers with that dimension
         self.itemsizes: Mapping[Hashable, int] = defaultdict(int)
         # indexes does not include the length dimension
         self.indexes = {k: a.values for k, a in self.virtual_data.coords.items()}
-        if "length" in self.indexes:
-            del self.indexes["length"]
         for arr in self.virtual_data.values():
             for dim in arr.dims:
                 if dim == "length":

@@ -1,8 +1,9 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 
 import numpy as np
 import polars as pl
+from numpy.typing import NDArray
 from torch.utils.data import Dataset
 
 from .types import Reader
@@ -16,9 +17,11 @@ class GVLDataset(Dataset):
         bed: Union[pl.DataFrame, str, Path],
         fixed_length: int,
         batch_dims: Optional[List[str]] = None,
+        transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
     ):
         self.readers = readers
         self.fixed_length = fixed_length
+        self.transform = transform
         self.bed = process_bed(bed, fixed_length)
         self.virtual_data = construct_virtual_data(
             *readers, n_regions=self.bed.height, fixed_length=fixed_length
@@ -47,4 +50,6 @@ class GVLDataset(Dataset):
             r.name: r.read(contig, start, end, **read_kwargs).to_numpy()
             for r in self.readers
         }
+        if self.transform is not None:
+            batch = self.transform(batch)
         return batch
