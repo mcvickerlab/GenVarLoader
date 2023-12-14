@@ -91,7 +91,7 @@ class Fasta(Reader):
 
         self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
 
-        self.handle = None
+        self.handle: Optional[pysam.FastaFile] = None
 
         if in_memory:
             self.sequences = self._load_all_contigs()
@@ -111,6 +111,7 @@ class Fasta(Reader):
     def close(self):
         if self.handle is not None:
             self.handle.close()
+        self.handle = None
 
     def read(
         self,
