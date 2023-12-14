@@ -84,7 +84,7 @@ def random_chain(
     rng = np.random.default_rng(seed)
     iterators = {i: iter(it) for i, it in enumerate(iterables)}
     while iterators:
-        i = rng.integers(len(iterators))
+        i = rng.choice(list(iterators.keys()))
         try:
             yield next(iterators[i])
         except StopIteration:
