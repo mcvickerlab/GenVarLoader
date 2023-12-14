@@ -575,6 +575,9 @@ class GVL:
         return self.iter_batches()
 
     def iter_batches(self):
+        for partreg in self.partitioned_bed:
+            partreg._reset_counter()
+
         if self.jitter_bed is not None:
             shifts = self.rng.integers(
                 -self.jitter_bed, self.jitter_bed + 1, size=len(self.bed)
@@ -955,6 +958,9 @@ class PartitionOfRegions:
         if self.counter == len(self):
             raise StopIteration
         return self.partition, self.dim_idxs[self.counter]
+
+    def _reset_counter(self):
+        self.counter = -1
 
 
 class SyncBuffers:
