@@ -91,6 +91,8 @@ class Fasta(Reader):
 
         self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
 
+        self.handle = None
+
         if in_memory:
             self.sequences = self._load_all_contigs()
         else:
@@ -105,6 +107,10 @@ class Fasta(Reader):
 
     def _open(self):
         return pysam.FastaFile(str(self.path))
+
+    def close(self):
+        if self.handle is not None:
+            self.handle.close()
 
     def read(
         self,
@@ -158,15 +164,17 @@ class Fasta(Reader):
             raise NoPadError("Padding is disabled and a start is < 0.")
 
         if self.sequences is None:
-            with self._open() as f:
-                pad_right = max(0, end - f.get_reference_length(contig))
-                if pad_right > 0 and self.pad is None:
-                    raise NoPadError("Padding is disabled and end is > contig length.")
+            if self.handle is None:
+                self.handle = self._open()
 
-                # pysam behavior
-                # start < 0 => error
-                # end > contig length => truncate
-                seq = f.fetch(contig, max(0, start), end)
+            pad_right = max(0, end - self.handle.get_reference_length(contig))
+            if pad_right > 0 and self.pad is None:
+                raise NoPadError("Padding is disabled and end is > contig length.")
+
+            # pysam behavior
+            # start < 0 => error
+            # end > contig length => truncate
+            seq = self.handle.fetch(contig, max(0, start), end)
 
             seq = np.frombuffer(seq.encode("ascii"), "S1")
         else:
