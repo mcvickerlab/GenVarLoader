@@ -1,6 +1,5 @@
 from collections import defaultdict
 from copy import deepcopy
-from enum import Enum
 from itertools import product
 from pathlib import Path
 from typing import (
@@ -34,6 +33,7 @@ from .util import _cartesian_product, construct_virtual_data, process_bed
 
 try:
     import torch  # noqa: F401
+    import torch.distributed
 
     TORCH_AVAILABLE = True
 except ImportError:
@@ -52,11 +52,6 @@ class GVL:
     FUDGE_FACTOR = 6
     LENGTH_AXIS = -1
     MIN_BATCH_DIM_SIZES = {"sample": 100, "ploid": 2}
-
-    class Framework(str, Enum):
-        TORCH = "torch"
-        TF = "tf"
-        JAX = "jax"
 
     def __init__(
         self,
@@ -78,7 +73,6 @@ class GVL:
         num_workers: int = 1,
         jitter_bed: Optional[int] = None,
         min_batch_dim_sizes: Optional[Dict[str, int]] = None,
-        distributed: Optional[Union[str, Framework]] = None,
     ) -> None:
         """GenVarLoader
 
@@ -157,24 +151,6 @@ class GVL:
         self.max_memory_gb = max_memory_gb
         self.jitter_bed = jitter_bed
         self.min_batch_dim_sizes = min_batch_dim_sizes
-        if distributed is not None:
-            self.distributed = self.Framework(distributed)
-        else:
-            self.distributed = None
-
-        if self.distributed is self.Framework.TORCH and not TORCH_AVAILABLE:
-            raise ImportError(
-                """PyTorch is not installed and is required for distributed training.
-                See https://pytorch.org/get-started/locally/ for installation
-                instructions.
-                """
-            )
-        elif self.distributed is not None:
-            raise NotImplementedError(
-                """Distributed training is not yet implemented for frameworks other than
-                PyTorch.
-                """
-            )
 
         if not ray.is_initialized() and self.num_workers > 1:
             ray.init(num_cpus=self.num_workers - 1)
@@ -205,17 +181,7 @@ class GVL:
             fixed_length=self.fixed_length,
         )
 
-        if self.distributed is self.Framework.TORCH:
-            import torch.distributed
-
-            if not torch.distributed.is_initialized():
-                raise RuntimeError(
-                    """
-                    Got distributed training enabled but not running in a distributed
-                    environment.
-                    """
-                )
-
+        if TORCH_AVAILABLE and torch.distributed.is_initialized():
             n_subsets = torch.distributed.get_world_size()
             i = torch.distributed.get_rank()
             subset_len = round(self.bed.height / n_subsets)
