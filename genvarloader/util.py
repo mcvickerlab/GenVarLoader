@@ -1,6 +1,16 @@
 from itertools import accumulate, chain, repeat
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Sequence, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    Iterable,
+    Optional,
+    Sequence,
+    TypeVar,
+    Union,
+)
 
 import dask.array as da
 import numpy as np
@@ -12,6 +22,8 @@ from natsort import natsorted
 from numpy.typing import NDArray
 
 from .types import Reader
+
+T = TypeVar("T")
 
 
 def construct_virtual_data(
@@ -65,7 +77,9 @@ def _set_fixed_length_around_center(bed: pl.DataFrame, length: int):
     return bed
 
 
-def random_chain(*iterables: Iterable, seed: Optional[int] = None):
+def random_chain(
+    *iterables: Iterable[T], seed: Optional[int] = None
+) -> Generator[T, None, None]:
     """Chain iterables, randomly sampling from each until they are all exhausted."""
     rng = np.random.default_rng(seed)
     iterators = {i: iter(it) for i, it in enumerate(iterables)}
