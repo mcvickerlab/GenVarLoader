@@ -125,7 +125,7 @@ def test_ins(pgen: gvl.Pgen):
     np.testing.assert_equal(gvl_hap_geno.alt.offsets, true_alt_offsets)
     np.testing.assert_equal(gvl_hap_geno.genotypes, true_geno)
     np.testing.assert_equal(gvl_hap_geno.offsets, true_offsets)
-    # np.testing.assert_equal(max_ends, np.array([1010696 + 10], np.int64))
+    np.testing.assert_equal(max_ends, end)
 
 
 def test_split_snp(pgen: gvl.Pgen):
@@ -160,4 +160,5 @@ def test_split_snp(pgen: gvl.Pgen):
 
 
 if __name__ == "__main__":
-    test_ins(pgen())
+    # test_del(pgen())
+    test_split_snp(pgen())

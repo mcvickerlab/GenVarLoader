@@ -122,24 +122,21 @@ class Pgen(Variants):
 
         self.n_samples = len(self.samples)
 
-        # sorted starts
+        ## sorted by starts ##
         self.v_starts: Dict[str, NDArray[np.int32]] = {}
         # difference in length between ref and alt, sorted by start
         self.v_diffs: Dict[str, NDArray[np.int32]] = {}
-        # sorted ends
-        self.v_ends: Dict[str, NDArray[np.int32]] = {}
-        # s2e_sorter is the argsort for v_ends sorted by starts such that
-        # v_ends = ends[s2e_sorter] is sorted by ends
-        # it can also map relative end idxs to relative start idxs so that
-        # a search indices from v_ends can be mapped to indices in v_starts e.g.
-        # v_starts[s2e_sorter[searchsorted(v_ends[s2e_sorter], query)]] is the start
-        # corresponding to the variant closest to the query
-        self.s2e_sorter: Dict[str, NDArray[np.int32]] = {}
-        self.e2s_idx: Dict[str, NDArray[np.int32]] = {}
-        self.max_del_q: Dict[str, NDArray[np.int32]] = {}
         # no multi-allelics
         self.ref: Dict[str, VLenAlleles] = {}
         self.alt: Dict[str, VLenAlleles] = {}
+        ######################
+
+        ## sorted by ends ##
+        self.v_ends: Dict[str, NDArray[np.int32]] = {}
+        self.v_diffs_sorted_by_ends: Dict[str, NDArray[np.int32]] = {}
+        self.e2s_idx: Dict[str, NDArray[np.int32]] = {}
+        self.max_del_q: Dict[str, NDArray[np.int32]] = {}
+        ####################
 
         self.contig_offsets: Dict[str, int] = {}
 
@@ -195,7 +192,7 @@ class Pgen(Variants):
                 logger.info("Writing .gvl.arrow files...")
 
                 pvar = pvar.with_columns(
-                    POS=pl.col("POS") - 1,  # change to 0-indexed
+                    POS=pl.col("POS") - 1,  #! change to 0-indexed
                     ILEN=(
                         pl.col("ALT").str.len_bytes().cast(pl.Int32)
                         - pl.col("REF").str.len_bytes().cast(pl.Int32)
@@ -211,27 +208,29 @@ class Pgen(Variants):
                 ends = (
                     pvar.select(
                         "#CHROM",
+                        "ILEN",
                         END=pl.col("POS")
-                        - pl.col("ILEN").clip_max(0),  #! end-inclusive
+                        - pl.col("ILEN").clip(upper_bound=0),  #! end-inclusive
                     )
                     .with_row_count("VAR_IDX")
                     .group_by("#CHROM", maintain_order=True)
                     .agg(
-                        pl.all(),
-                        pl.col("VAR_IDX")
+                        pl.all().sort_by("END"),
+                        # make E2S_IDX relative to each contig
+                        pl.int_range(0, pl.count(), dtype=pl.UInt32)
+                        .sort_by("END")
                         .reverse()
                         .rolling_min(pvar.height, min_periods=1)
                         .reverse()
                         .alias("E2S_IDX"),
                     )
                     .explode(pl.exclude("#CHROM"))
-                    .select("#CHROM", "END", "VAR_IDX", "E2S_IDX")
-                    .group_by("#CHROM", maintain_order=True)
-                    .agg(pl.all().sort_by("END"))
-                    .explode(pl.exclude("#CHROM"))
+                    .select("#CHROM", "END", "ILEN", "VAR_IDX", "E2S_IDX")
                 )
 
-                for_max_dels = ends.join(pvar.with_row_count("VAR_IDX"), on="VAR_IDX")
+                for_max_dels = ends.join(
+                    pvar.select("POS").with_row_count("VAR_IDX"), on="VAR_IDX"
+                )
                 max_del_q = np.empty(for_max_dels.height, dtype=np.int32)
                 last_idx = 0
                 for _, part in for_max_dels.group_by("#CHROM", maintain_order=True):
@@ -240,14 +239,15 @@ class Pgen(Variants):
                     _ends = part["END"].to_numpy()
                     was_ends = np.empty(len(_ends) + 1, dtype=_ends.dtype)
                     was_ends[0] = 0
-                    was_ends[1:] = _ends
+                    #! convert to end-exclusive, + 1
+                    was_ends[1:] = _ends + 1
                     q = np.searchsorted(was_ends, _starts, side="right") - 1
                     max_del_q[last_idx : last_idx + part.height] = q
                     last_idx += part.height
                 ends = ends.with_columns(MD_Q=max_del_q)
 
                 pvar.write_ipc(pvar_arrow_path)
-                ends.select("#CHROM", "END", "MD_Q", "VAR_IDX", "E2S_IDX").write_ipc(
+                ends.select("#CHROM", "END", "MD_Q", "ILEN", "E2S_IDX").write_ipc(
                     ends_arrow_path
                 )
 
@@ -270,7 +270,12 @@ class Pgen(Variants):
                     "#CHROM", as_dict=True
                 ).items():
                     self.v_ends[_contig] = partition["END"].to_numpy()
-                    self.e2s_idx[_contig] = partition["E2S_IDX"].to_numpy()
+                    self.v_diffs_sorted_by_ends[_contig] = partition["ILEN"].to_numpy()
+                    self.e2s_idx[_contig] = np.empty(
+                        partition.height + 1, dtype=np.uint32
+                    )
+                    self.e2s_idx[_contig][:-1] = partition["E2S_IDX"].to_numpy()
+                    self.e2s_idx[_contig][-1] = partition.height
                     self.max_del_q[_contig] = partition["MD_Q"].to_numpy()
 
                 # make all contigs map to the same pgen file
@@ -281,7 +286,10 @@ class Pgen(Variants):
                 self.v_starts[contig] = pvar["POS"].to_numpy()
                 self.v_diffs[contig] = pvar["ILEN"].to_numpy()
                 self.v_ends[contig] = ends["END"].to_numpy()
-                self.e2s_idx[contig] = ends["E2S_IDX"].to_numpy()
+                self.v_diffs_sorted_by_ends[contig] = ends["ILEN"].to_numpy()
+                self.e2s_idx[contig] = np.empty(ends.height + 1, dtype=np.uint32)
+                self.e2s_idx[contig][:-1] = ends["E2S_IDX"].to_numpy()
+                self.e2s_idx[contig][-1] = ends.height
                 self.max_del_q[contig] = ends["MD_Q"].to_numpy()
 
                 # no multi-allelics
@@ -379,25 +387,19 @@ class Pgen(Variants):
             return None
 
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
-        no_variant_mask = _s_idxs == len(self.v_ends[contig])
-        _s_idxs = np.where(no_variant_mask, -1, _s_idxs)
         # make idxs absolute
         s_idxs = self.e2s_idx[contig][_s_idxs] + self.contig_offsets[contig]
         e_idxs = (
             np.searchsorted(self.v_starts[contig], ends) + self.contig_offsets[contig]
         )
-        e_idxs[no_variant_mask] = s_idxs[no_variant_mask]
 
         if s_idxs.min() == e_idxs.max():
             return None
 
-        np.concatenate(
-            [np.arange(s, e, dtype=np.uint32) for s, e in zip(s_idxs, e_idxs)]
-        )
         n_var_per_region = e_idxs - s_idxs
         offsets = np.empty(len(n_var_per_region) + 1, dtype=np.uint32)
         offsets[0] = 0
-        np.cumsum(n_var_per_region, out=offsets[1:])
+        offsets[1:] = np.cumsum(n_var_per_region)
 
         rel_s_idxs = s_idxs - self.contig_offsets[contig]
         rel_e_idxs = e_idxs - self.contig_offsets[contig]
@@ -471,9 +473,7 @@ class Pgen(Variants):
         else:
             ploid = np.asarray(ploid)
 
-        starts, ends = np.asarray(starts, dtype=np.int64), np.asarray(
-            ends, dtype=np.int64
-        )
+        starts, ends = np.atleast_1d(starts), np.atleast_1d(ends)
 
         contig = self.normalize_contig_name(contig)
 
@@ -482,20 +482,17 @@ class Pgen(Variants):
             return None, ends
 
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
-        has_var = _s_idxs < len(self.v_ends[contig])
-        _s_idxs = np.where(~has_var, -1, _s_idxs)
 
-        max_ends, _e_idxs = weighted_activity_selection(
-            self.v_diffs[contig],
+        max_ends, _e_idxs = get_max_ends_and_idxs(
+            self.v_ends[contig],
+            self.v_diffs_sorted_by_ends[contig],
             self.max_del_q[contig],
             _s_idxs,
-            self.v_ends[contig],
-            ends - starts,
+            ends,
         )
 
         s_idxs = self.e2s_idx[contig][_s_idxs]
         e_idxs = self.e2s_idx[contig][_e_idxs]
-        # e_idxs[~has_var] = s_idxs[~has_var]
 
         # make idxs absolute
         s_idxs += self.contig_offsets[contig]
@@ -624,6 +621,8 @@ class _PgenGenos(_Genotypes):
 
         with self._pgen(contig, pgen_idx) as f:
             for i, (s, e) in enumerate(zip(start_idxs, end_idxs)):
+                if s == e:
+                    continue
                 rel_s = s - start_idxs[i]
                 rel_e = e - start_idxs[i]
                 f.read_alleles_range(
@@ -639,7 +638,7 @@ class _PgenGenos(_Genotypes):
         genotypes = genotypes.astype(np.int8)
 
         # re-order samples to be in query order
-        if sample_sorter is not None and np.arange(n_samples) != sample_sorter:
+        if sample_sorter is not None and (np.arange(n_samples) != sample_sorter).any():
             genotypes = genotypes[sample_sorter]
 
         return genotypes
@@ -745,9 +744,9 @@ class _TStoreGenos(_Genotypes):
                 genos = genotypes.read(
                     contig, np.array([s_idx]), np.array([e_idx]), None, None
                 )
-                ts_handle[
+                ts_handle[  # pyright: ignore[reportUnboundVariable]
                     :, :, s_idx:e_idx
-                ] = genos  # pyright: ignore[reportUnboundVariable]
+                ] = genos
                 gc.collect()
 
         return cls(cache_paths)
@@ -784,11 +783,11 @@ class _TStoreGenos(_Genotypes):
         if haplotype_idx is not None:
             _tstore = _tstore[:, haplotype_idx]
 
-        for i, (s_idx, e_idx) in enumerate(zip(start_idxs, end_idxs)):
+        for i, (s, e) in enumerate(zip(start_idxs, end_idxs)):
             # no variants in query regions
-            if s_idx == e_idx:
+            if s == e:
                 continue
-            sub_genos.append(_tstore[..., s_idx:e_idx])
+            sub_genos.append(_tstore[..., s:e])
 
         genotypes = ts.concat(  # pyright: ignore[reportGeneralTypeIssues]
             sub_genos, axis=-1
@@ -898,9 +897,9 @@ class _ZarrGenos(_Genotypes):
                 genos = genotypes.read(
                     contig, np.array([s_idx]), np.array([e_idx]), None, None
                 )
-                z_handle[
+                z_handle[  # pyright: ignore[reportUnboundVariable]
                     :, :, s_idx:e_idx
-                ] = genos  # pyright: ignore[reportUnboundVariable]
+                ] = genos
 
         return cls(cache_paths)
 
@@ -922,14 +921,41 @@ class _MemmapGenos(_Genotypes):
         raise NotImplementedError
 
 
-@nb.njit(nogil=True, cache=True)
-def weighted_activity_selection(
+# @nb.njit(nogil=True, cache=True)
+def get_max_ends_and_idxs(
+    v_ends: NDArray[np.int32],
     v_diffs: NDArray[np.int32],
     nearest_nonoverlapping: NDArray[np.intp],
     start_idxs: NDArray[np.intp],
-    v_ends: NDArray[np.int32],
-    r_lengths: NDArray[np.int64],
+    query_ends: NDArray[np.int64],
 ) -> Tuple[NDArray[np.int32], NDArray[np.intp]]:
+    max_ends = np.empty(len(start_idxs), dtype=np.int32)
+    end_idxs = np.empty(len(start_idxs), dtype=np.intp)
+    for r in nb.prange(len(start_idxs)):
+        s = start_idxs[r]
+        if s == len(v_ends):  # no variants in this region
+            max_ends[r] = query_ends[r]
+            end_idxs[r] = s
+            continue
+
+        w = -v_diffs[s:]  # flip sign so deletions have positive weight
+
+        # to adjust q from [0, j) to [i, j)
+        # (q[i:] - i).clip(0)
+        q = (nearest_nonoverlapping[s:] - s).clip(0)
+        max_end, end_idx = weighted_activity_selection(v_ends[s:], w, q, query_ends[r])
+        max_ends[r] = max_end
+        end_idxs[r] = s + end_idx
+    return max_ends, end_idxs
+
+
+# @nb.njit(nogil=True, cache=True)
+def weighted_activity_selection(
+    v_ends: NDArray[np.int32],
+    w: NDArray[np.int32],
+    q: NDArray[np.intp],
+    query_end: int,
+) -> Tuple[int, int]:
     """Implementation of the [weighted activity selection problem](https://en.wikipedia.org/wiki/Activity_selection_problem)
     to compute the maximum length of deletions that can occur for each region. This is
     used to adjust the end coordinates for reference sequence queries and include all
@@ -937,17 +963,14 @@ def weighted_activity_selection(
 
     Parameters
     ----------
-    v_diffs : NDArray[np.int64]
-        Shape: (variants). Difference in length between ref and alt.
-    nearest_nonoverlapping : NDArray[np.intp]
-        Shape: (variants). Nearest variant i such that i < j and variants are
-        non-overlapping, nearest_nonoverlapping[j] = i.
-    start_idxs : NDArray[np.intp]
-        Shape: (regions). Start indices of query regions.
     v_ends : NDArray[np.int64]
         Shape: (variants). End coordinates of variants, 0-based inclusive.
-    r_lengths : NDArray[np.int64]
-        Shape: (regions). Lengths of query regions.
+    w : NDArray[np.int64]
+        Shape: (variants). Weights of activities (i.e. deletion lengths).
+    q : NDArray[np.intp]
+        Shape: (variants). Nearest variant i such that i < j and variants are non-overlapping, q[j] = i.
+    query_end : int
+        Shape: (regions). End of query region.
 
     Returns
     -------
@@ -975,32 +998,17 @@ def weighted_activity_selection(
     and
         opt(j) = max(w_j + opt(q_j), opt(j - 1))
     """
-
-    max_ends = np.empty(len(start_idxs), dtype=np.int32)
-    end_idxs = np.empty(len(start_idxs), dtype=np.intp)
-    for r in nb.prange(len(start_idxs)):
-        s = start_idxs[r]
-        w = -v_diffs[s:]  # flip sign so deletions have positive weight
-        n_vars = len(w)
-
-        if n_vars == 0:
-            max_ends[r] = r_lengths[r]
-            end_idxs[r] = s
-            continue
-
-        # to adjust q from [0, j) to [i, j)
-        # (q[i:] - i).clip(0)
-        q = (nearest_nonoverlapping[s:] - s).clip(0)
-
-        # max_del and j are effectively 1-indexed, everything else is 0-indexed
-        max_del = np.empty(n_vars + 1, dtype=np.int32)
-        max_del[0] = 0
-        for j in range(1, n_vars + 1):
-            max_del[j] = max(max_del[q[j - 1]] + w[j - 1], max_del[j - 1])
-            max_end = v_ends[s + j - 1] - max_del[j] + 1  # v_ends is end-inclusive
-            if max_end >= r_lengths[r]:
-                max_ends[r] = max_end
-                end_idxs[r] = s + j - 1
-                break
-
-    return max_ends, end_idxs
+    n_vars = len(w)
+    max_del = np.empty(n_vars + 1, dtype=np.int32)
+    max_del[0] = 0
+    for j in range(1, n_vars + 1):
+        max_del[j] = max(max_del[q[j - 1]] + w[j - 1], max_del[j - 1])
+        v_del_end = v_ends[j - 1] - max_del[j] + 1  # + 1, v_ends is end-inclusive
+        # if:
+        # this variant more than satisfies query length
+        # last variant doesn't span v_del_end
+        if v_del_end > query_end and j > 1 and v_ends[j - 2] <= v_del_end:
+            # then add the max deletion length up to but not including this variant
+            # to the query end, and return the index of this variant for slicing
+            return query_end + max_del[j - 1], j - 1
+    return query_end + max_del[-1], n_vars
