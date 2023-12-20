@@ -547,28 +547,32 @@ class GVL:
         List[pl.DataFrame]
             Partitions of the BED.
         """
-        contig_partitions = bed.partition_by("chrom")
-        partitions: List[PartitionOfRegions] = []
         dim_idxs = [dim_idx for dim_idx in self.dim_idxs_generator()]
 
         if self.shuffle:
             self.rng.shuffle(dim_idxs)  # pyright: ignore[reportGeneralTypeIssues]
 
-        for c_part in contig_partitions:
-            c_part = c_part.with_columns(
-                partition=pl.lit(
-                    partition_regions(
-                        c_part["chromStart"].to_numpy(),
-                        c_part["chromEnd"].to_numpy(),
-                        max_length,
-                    )
-                )
-            )
-            _partitions = [
-                PartitionOfRegions(_part, dim_idxs)
-                for _part in c_part.partition_by("partition", include_key=False)
-            ]
-            partitions.extend(_partitions)
+        offsets = np.empty(bed["chrom"].n_unique() + 1, dtype=np.uint32)
+        offsets[0] = 0
+        offsets[1:] = (
+            bed.group_by("chrom", maintain_order=True)
+            .count()["count"]
+            .cum_sum()
+            .to_numpy()
+        )
+        partitions = partition_regions(
+            bed["chromStart"].to_numpy(),
+            bed["chromEnd"].to_numpy(),
+            offsets,
+            max_length,
+        )
+        partitions = bed.with_columns(partition=pl.lit(partitions)).partition_by(
+            "chrom", "partition"
+        )
+        partitions = [
+            PartitionOfRegions(part.drop("partition"), dim_idxs) for part in partitions
+        ]
+
         return partitions
 
     def __iter__(self):
@@ -797,8 +801,9 @@ class GVL:
     def concat_batches(self, batches: List[BatchDict]) -> BatchDict:
         out: BatchDict = {}
         for name, (dims, _) in batches[0].items():
-            out[name] = dims, np.concatenate(
-                [batch[name][1] for batch in batches], axis=0
+            out[name] = (
+                dims,
+                np.concatenate([batch[name][1] for batch in batches], axis=0),
             )
         return out
 
@@ -851,9 +856,47 @@ class GVL:
         return self.torch_dataset().torch_dataloader()
 
 
-@nb.njit(nogil=True, cache=True)
+@nb.njit(parallel=True, nogil=True, cache=True)
 def partition_regions(
-    starts: NDArray[np.int64], ends: NDArray[np.int64], max_length: int
+    starts: NDArray[np.int64],
+    ends: NDArray[np.int64],
+    offsets: NDArray[np.uint32],
+    max_length: int,
+):
+    """
+    Partitions regions based on their lengths and distances between them.
+
+    Parameters
+    ----------
+    starts : numpy.ndarray
+        Start positions for each region.
+    ends : numpy.ndarray
+        End positions for each region.
+    offsets : numpy.ndarray
+        Offsets for each region.
+    max_length : int
+        Maximum length of each partition.
+
+    Returns
+    -------
+    numpy.ndarray : Array of partition numbers for each region.
+    """
+    partitions = np.zeros_like(starts, dtype=np.uint32)
+    for i in nb.prange(len(offsets) - 1):
+        s = offsets[i]
+        e = offsets[i + 1]
+        partition_regions_one_contig(
+            starts[s:e], ends[s:e], max_length, out=partitions[s:e]
+        )
+    return partitions
+
+
+@nb.njit(nogil=True, cache=True)
+def partition_regions_one_contig(
+    starts: NDArray[np.int64],
+    ends: NDArray[np.int64],
+    max_length: int,
+    out: NDArray[np.uint32],
 ):
     """
     Partitions regions based on their lengths and distances between them.
@@ -871,16 +914,15 @@ def partition_regions(
     -------
     numpy.ndarray : Array of partition numbers for each region.
     """
-    partitions = np.zeros_like(starts)
     partition = 0
     curr_length = ends[0] - starts[0]
-    for i in range(1, len(partitions)):
+    for i in range(1, len(starts)):
         curr_length += min(ends[i] - ends[i - 1], ends[i] - starts[i])
         if curr_length > max_length:
             partition += 1
             curr_length = ends[i] - starts[i]
-        partitions[i] = partition
-    return partitions
+        out[i] = partition
+    return out
 
 
 @nb.njit(nogil=True, cache=True)
