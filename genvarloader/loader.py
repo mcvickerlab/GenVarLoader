@@ -1161,7 +1161,7 @@ if TORCH_AVAILABLE:
             return_tuples: Union[List[str], Literal[False]] = False,
             return_index: bool = False,
             drop_last: bool = False,
-            jitter_bed: Optional[int] = None,
+            min_batch_dim_sizes: Optional[Dict[str, int]] = None,
         ):
             """Update any parameters that don't require re-initializing Ray Actors. If
             you need to change readers or the number of workers, init a new GVL.
@@ -1199,8 +1199,25 @@ if TORCH_AVAILABLE:
             drop_last : bool, optional
                 Whether to drop the last batch if the number of instances are not evenly
                 divisible by the batch size.
-            jitter_bed : int, optional
-                Jitter the regions in the BED file by up to this many nucleotides.
+            min_batch_dim_sizes : Dict[str, int], optional
+                Minimum size of each batch dimension. If None and shuffle = False, batch
+                sizes are set to be as large as possible to maximize performance, otherwise
+                heuristic defaults are used. Limiting the minimum size of a batch dimension
+                is important for training to reduce correlation across batch dimensions.
+                This is due to the buffering strategy used by GVL that dramatically improves
+                performance vs. naively accessing the disk for every batch of data. For
+                example, suppose you are training on a dataset of 10,000 diploid
+                individuals. With no constraints on batch dimension size and sufficient
+                memory, GVL would buffer all 10,000 individuals for a potentially small
+                number of regions. This means a model would only see a small amount of
+                sequence diversity for 20,000 instances before seeing new regions of the
+                genome. This can decrease final model performance and cause large changes in
+                training loss when new buffers are loaded (i.e. new regions of the genome
+                are seen). TL;DR for best dataloading performance, min_batch_dim_sizes needs
+                to be as large as possible. But for best training performance,
+                min_batch_dim_sizes need to be small enough to reduce correlation across
+                batch dimensions. Choosing min_batch_dim_sizes is a tradeoff between these
+                two goals and ultimately must be done empirically.
             """
             self.gvl.set(
                 bed,
@@ -1215,5 +1232,5 @@ if TORCH_AVAILABLE:
                 return_tuples,
                 return_index,
                 drop_last,
-                jitter_bed,
+                min_batch_dim_sizes,
             )
