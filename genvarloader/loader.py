@@ -484,12 +484,26 @@ class GVL:
             # assume training and need to ~uniformly sample across genomes
             # before sampling across batch dimensions
             # longest possible length, will minimize batch dim sizes
-            max_length = 0
-            for partition in self.bed.partition_by("chrom"):
-                merged_starts, merged_ends = merge_overlapping_regions(
-                    partition["chromStart"].to_numpy(), partition["chromEnd"].to_numpy()
-                )
-                max_length = max(max_length, (merged_ends - merged_starts).sum())
+            offsets = np.empty(self.bed["chrom"].n_unique() + 1, dtype=np.uint32)
+            offsets[0] = 0
+            offsets[1:] = (
+                self.bed.group_by("chrom", maintain_order=True)
+                .count()["count"]
+                .cum_sum()
+                .to_numpy()
+            )
+            max_length = max_length_of_regions(
+                self.bed["chromStart"].to_numpy(),
+                self.bed["chromEnd"].to_numpy(),
+                offsets,
+            )
+
+            # max_length = 0
+            # for partition in self.bed.partition_by("chrom"):
+            #     merged_starts, merged_ends = merge_overlapping_regions_one_contig(
+            #         partition["chromStart"].to_numpy(), partition["chromEnd"].to_numpy()
+            #     )
+            #     max_length = max(max_length, (merged_ends - merged_starts).sum())
         else:
             # assume not training, so sampling does not matter, just maximize
             # throughput
@@ -568,9 +582,7 @@ class GVL:
         partitions = bed.with_columns(partition=pl.lit(partitions)).partition_by(
             "chrom", "partition"
         )
-        partitions = [
-            PartitionOfRegions(part.drop("partition"), dim_idxs) for part in partitions
-        ]
+        partitions = [PartitionOfRegions(part, dim_idxs) for part in partitions]
 
         return partitions
 
@@ -918,8 +930,39 @@ def partition_regions_one_contig(
     return out
 
 
+@nb.njit(parallel=True, nogil=True, cache=True)
+def max_length_of_regions(starts, ends, offsets):
+    """
+    Merge overlapping regions, assuming they are sorted by start position.
+
+    Parameters
+    ----------
+    starts : numpy.ndarray
+        Start positions for each region.
+    ends : numpy.ndarray
+        End positions for each region.
+    offsets : numpy.ndarray
+        Offsets for each region.
+
+    Returns
+    -------
+    max_length : int
+    """
+    max_lengths = np.zeros(len(offsets) - 1, dtype=np.int64)
+    for i in nb.prange(len(offsets) - 1):
+        s = offsets[i]
+        e = offsets[i + 1]
+        merged_starts, merged_ends = merge_overlapping_regions_one_contig(
+            starts[s:e], ends[s:e]
+        )
+        max_lengths[i] = (merged_ends - merged_starts).sum()
+    return max_lengths.max()
+
+
 @nb.njit(nogil=True, cache=True)
-def merge_overlapping_regions(starts: NDArray[np.int64], ends: NDArray[np.int64]):
+def merge_overlapping_regions_one_contig(
+    starts: NDArray[np.int64], ends: NDArray[np.int64]
+):
     """Merge overlapping regions, assuming they are sorted by start position.
 
     Parameters
@@ -1026,7 +1069,9 @@ class SyncBuffers:
                 c.to_numpy()
                 for c in partition.select("chromStart", "chromEnd").get_columns()
             ]
-            merged_starts, merged_ends = merge_overlapping_regions(starts, ends)
+            merged_starts, merged_ends = merge_overlapping_regions_one_contig(
+                starts, ends
+            )
             lengths = merged_ends - merged_starts
             total_length = lengths.sum()
 
@@ -1100,7 +1145,7 @@ class ConcurrentBuffers:
         for partition, dim_idxs in interleave_longest(*self.gvl.partitioned_bed):
             contig: str
             contig = partition.select("chrom").row(0)[0]
-            merged_starts, merged_ends = merge_overlapping_regions(
+            merged_starts, merged_ends = merge_overlapping_regions_one_contig(
                 partition["chromStart"].to_numpy(), partition["chromEnd"].to_numpy()
             )
 

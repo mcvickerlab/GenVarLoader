@@ -18,7 +18,6 @@ import pandera as pa
 import pandera.typing as pat
 import polars as pl
 import xarray as xr
-from natsort import natsorted
 from numpy.typing import NDArray
 
 from .types import Reader
@@ -59,9 +58,8 @@ def process_bed(bed: Union[str, Path, pl.DataFrame], fixed_length: int):
     if "region_idx" not in bed:
         bed = bed.with_row_count("region_idx")
 
-    with pl.StringCache():
-        pl.Series(natsorted(bed["chrom"].unique()), dtype=pl.Categorical)
-        bed = bed.sort(pl.col("chrom").cast(pl.Categorical), "chromStart")
+    bed = bed.sort("chrom", "chromStart")
+
     return _set_fixed_length_around_center(bed, fixed_length)
 
 
