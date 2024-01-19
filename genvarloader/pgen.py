@@ -921,7 +921,7 @@ class _MemmapGenos(_Genotypes):
         raise NotImplementedError
 
 
-# @nb.njit(nogil=True, cache=True)
+@nb.njit(nogil=True, cache=True)
 def get_max_ends_and_idxs(
     v_ends: NDArray[np.int32],
     v_diffs: NDArray[np.int32],
@@ -949,7 +949,7 @@ def get_max_ends_and_idxs(
     return max_ends, end_idxs
 
 
-# @nb.njit(nogil=True, cache=True)
+@nb.njit(nogil=True, cache=True)
 def weighted_activity_selection(
     v_ends: NDArray[np.int32],
     w: NDArray[np.int32],

@@ -15,19 +15,17 @@ from typing import (
     Sequence,
     Tuple,
     Union,
-    cast,
 )
 
 import numba as nb
 import numpy as np
 import polars as pl
-import ray
 import xarray as xr
 from attrs import define
 from more_itertools import chunked, interleave_longest
 from numpy.typing import NDArray
 
-from .concurrent import Buffer, BufferMeta, DataVarsLike, ReaderActor
+from .concurrent import Buffer
 from .haplotypes import Haplotypes
 from .types import Reader
 from .util import _cartesian_product, construct_virtual_data, process_bed
@@ -71,7 +69,6 @@ class GVL:
         return_tuples: Union[List[str], Literal[False]] = False,
         return_index: bool = False,
         drop_last: bool = False,
-        num_workers: int = 1,
         jitter_bed: Optional[int] = None,
         min_batch_dim_sizes: Optional[Dict[str, int]] = None,
     ) -> None:
@@ -116,8 +113,6 @@ class GVL:
         drop_last : bool, optional
             Whether to drop the last batch if the number of instances are not evenly
             divisible by the batch size.
-        num_workers : int, optional
-            How many workers to use, default 1.
         jitter_bed : int, optional
             Jitter the regions in the BED file by up to this many nucleotides.
         min_batch_dim_sizes : Dict[str, int], optional
@@ -140,7 +135,6 @@ class GVL:
             batch dimensions. Choosing min_batch_dim_sizes is a tradeoff between these
             two goals and ultimately must be done empirically.
         """
-        self.num_workers = num_workers
         self.fixed_length = fixed_length
         self.transform = transform
         self.shuffle = shuffle
@@ -153,9 +147,6 @@ class GVL:
         self.jitter_bed = jitter_bed
         self.min_batch_dim_sizes = min_batch_dim_sizes
 
-        if not ray.is_initialized() and self.num_workers > 1:
-            ray.init(num_cpus=self.num_workers - 1)
-
         if not isinstance(readers, Iterable):
             readers = [readers]
         self.readers = readers
@@ -165,15 +156,10 @@ class GVL:
                 self.unnested_readers.update({_r.name: _r for _r in r.readers})
             else:
                 self.unnested_readers[r.name] = r
+        self.any_chunked = any(r.chunked for r in self.readers)
 
         # TODO raise warning if readers have different contig prefixes
         # can check via Reader.contig_starts_with_chr
-
-        if self.num_workers >= 2:
-            self.actors: List[ReaderActor] = [
-                ReaderActor.remote(*self.readers, actor_idx=i)
-                for i in range(self.num_workers - 1)  # keep 1 cpu for main process
-            ]
 
         # TODO check if any regions are out-of-bounds and any readers have padding
         # disabled. If so, raise an error. Otherwise, readers will catch the error
@@ -477,11 +463,7 @@ class GVL:
             {k: v for k, v in self.sizes.items() if k not in self.batch_dims}
         )
         max_mem = int(
-            (
-                self.max_memory_gb * 1e9 / self.num_workers
-                - batch_mem
-                - self.bed.estimated_size()
-            )
+            (self.max_memory_gb * 1e9 - batch_mem - self.bed.estimated_size())
             / self.FUDGE_FACTOR
         )
 
@@ -612,10 +594,7 @@ class GVL:
         self.partial_indices: List[NDArray[np.integer]] = []
         self.total_yielded = 0
 
-        if self.num_workers > 1:
-            buffers = ConcurrentBuffers(self)
-        else:
-            buffers = SyncBuffers(self)
+        buffers = SyncBuffers(self)
 
         for buffer in buffers:
             while buffer.len_unused_buffer > 0:
@@ -1067,12 +1046,6 @@ class SyncBuffers:
             shape.append(self.gvl.max_length)
             buffer[name] = np.empty(shape, dtype=dtype)
 
-        for partition in self.gvl.partitioned_bed:
-            n_regions = len(partition)
-            n_regions * np.prod(
-                [self.gvl.sizes[d] for d in self.gvl.batch_dims], dtype=int
-            )
-
         for partition, dim_idxs in interleave_longest(*self.gvl.partitioned_bed):
             contig: str
             contig = partition.select("chrom").row(0)[0]
@@ -1103,127 +1076,39 @@ class SyncBuffers:
             for dim in self.gvl.batch_dims:
                 slices[dim] = slice(0, len(read_kwargs[dim]))
             slices["length"] = slice(0, total_length)
+
             for reader in self.gvl.readers:
-                _slices = tuple(slices[dim] for dim in reader.sizes) + (
-                    slices["length"],
-                )
-                out = buffer[reader.name][_slices]
-                data = reader.read(
-                    contig,
-                    merged_starts,
-                    merged_ends,
-                    out=out,
-                    **read_kwargs,  # pyright: ignore[reportGeneralTypeIssues]
-                )
-                _buffer_dict[reader.name] = data
-
-                if self.gvl.weights is not None:
-                    buffer_idx = self.gvl.resample_buffer_idx(buffer_idx)
-
-                if self.gvl.shuffle:
-                    buffer_idx = self.gvl.rng.permutation(buffer_idx)
-
-                _buffer_dict = {}
-                slices: Dict[Hashable, slice] = {}
-                for dim in self.gvl.batch_dims:
-                    slices[dim] = slice(0, len(read_kwargs[dim]))
-                slices["length"] = slice(0, total_length)
-                for reader in self.gvl.readers:
-                    if isinstance(reader, Haplotypes):
-                        out = {}
-                        for r in reader.readers:
-                            _slices = tuple(slices[dim] for dim in r.sizes) + (
-                                slices["length"],
-                            )
-                            out[r.name] = buffer[r.name][_slices]
-                        data = reader.read(
-                            contig,
-                            merged_starts,
-                            merged_ends,
-                            out=out,
-                            **read_kwargs,
-                        )
-                        _buffer_dict.update(data)
-                    else:
-                        _slices = tuple(slices[dim] for dim in reader.sizes) + (
+                if isinstance(reader, Haplotypes):
+                    out = {}
+                    for r in reader.readers:
+                        _slices = tuple(slices[dim] for dim in r.sizes) + (
                             slices["length"],
                         )
-                        out = buffer[reader.name][_slices]
-                        data = reader.read(
-                            contig,
-                            merged_starts,
-                            merged_ends,
-                            out=out,
-                            **read_kwargs,
-                        )
-                        _buffer_dict[reader.name] = data
+                        out[r.name] = buffer[r.name][_slices]
+                    data = reader.read(
+                        contig,
+                        merged_starts,
+                        merged_ends,
+                        out=out,
+                        **read_kwargs,
+                    )
+                    _buffer_dict.update(data)
+                else:
+                    _slices = tuple(slices[dim] for dim in reader.sizes) + (
+                        slices["length"],
+                    )
+                    out = buffer[reader.name][_slices]
+                    data = reader.read(
+                        contig,
+                        merged_starts,
+                        merged_ends,
+                        out=out,
+                        **read_kwargs,
+                    )
+                    _buffer_dict[reader.name] = data
 
-                out_buffer = xr.Dataset(_buffer_dict)
-                yield Buffer(out_buffer, buffer_idx, dim_idxs, -1)
-
-
-class ConcurrentBuffers:
-    def __init__(self, gvl: GVL) -> None:
-        self.gvl = gvl
-
-    def __iter__(self):
-        self.ready_actor_idxs = list(range(len(self.gvl.actors)))
-        self.buffer_submitter = self.submit_buffer_tasks()
-        self.buffer_futures, self.buffer_meta = next(self.buffer_submitter)
-        self.buffers: List[Buffer] = []
-        return self
-
-    def __next__(self):
-        if len(self.buffers) == 0:
-            buffers, self.buffer_futures = ray.wait(self.buffer_futures)
-            buffers = cast(List[Tuple[DataVarsLike, int]], ray.get(buffers))
-            self.buffers = [
-                self.buffer_meta[
-                    actor_idx
-                ].to_buffer(  # pyright: ignore[reportOptionalMemberAccess]; we always have at least 1 buffer
-                    buffer
-                )
-                for buffer, actor_idx in buffers
-            ]
-            self.ready_actor_idxs.extend([actor_idx for _, actor_idx in buffers])
-            buffer_futures, self.buffer_meta = next(self.buffer_submitter)
-            self.buffer_futures.extend(buffer_futures)
-
-        return self.buffers.pop()
-
-    def submit_buffer_tasks(self):
-        buffer_futures: List[ray.ObjectRef[Buffer]] = []
-        buffer_meta: List[Optional[BufferMeta]] = [None] * len(self.gvl.actors)
-        for partition, dim_idxs in interleave_longest(*self.gvl.partitioned_bed):
-            contig: str
-            contig = partition.select("chrom").row(0)[0]
-            merged_starts, merged_ends = merge_overlapping_regions_one_contig(
-                partition["chromStart"].to_numpy(), partition["chromEnd"].to_numpy()
-            )
-
-            if len(self.ready_actor_idxs) == 0:
-                yield buffer_futures, buffer_meta
-                buffer_futures = []
-
-            read_kwargs = {
-                dim: self.gvl.indexes[dim][idx] for dim, idx in dim_idxs.items()
-            }
-            buffer_idx = self.gvl.get_buffer_idx(partition, merged_starts, read_kwargs)
-            if self.gvl.weights is not None:
-                buffer_idx = self.gvl.resample_buffer_idx(buffer_idx)
-            if self.gvl.shuffle:
-                buffer_idx = self.gvl.rng.permutation(buffer_idx)
-            ready_actor_idx = self.ready_actor_idxs.pop()
-            buffer = self.gvl.actors[ready_actor_idx].read.remote(  # type: ignore
-                contig, merged_starts, merged_ends, **read_kwargs
-            )
-            buffer_meta[ready_actor_idx] = BufferMeta(
-                buffer_idx, dim_idxs, ready_actor_idx
-            )
-            buffer_futures.append(buffer)
-
-        if len(buffer_futures) > 0:
-            yield buffer_futures, buffer_meta
+            out_buffer = xr.Dataset(_buffer_dict)
+            yield Buffer(out_buffer, buffer_idx, dim_idxs, -1)
 
 
 if TORCH_AVAILABLE:
