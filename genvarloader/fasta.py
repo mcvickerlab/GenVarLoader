@@ -6,17 +6,22 @@ import numpy as np
 import pysam
 import seqpro as sp
 import xarray as xr
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from typing_extensions import assert_never
 
 from .types import Reader
 from .util import splice_subarrays
 
 
+class NoPadError(Exception):
+    pass
+
+
 class Fasta(Reader):
     dtype = np.dtype("S1")
     sizes = {}
     coords = {}
+    chunked = False
 
     def __init__(
         self,
@@ -86,6 +91,8 @@ class Fasta(Reader):
 
         self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
 
+        self.handle: Optional[pysam.FastaFile] = None
+
         if in_memory:
             self.sequences = self._load_all_contigs()
         else:
@@ -101,11 +108,16 @@ class Fasta(Reader):
     def _open(self):
         return pysam.FastaFile(str(self.path))
 
+    def close(self):
+        if self.handle is not None:
+            self.handle.close()
+        self.handle = None
+
     def read(
         self,
         contig: str,
-        starts: NDArray[np.int64],
-        ends: NDArray[np.int64],
+        starts: ArrayLike,
+        ends: ArrayLike,
         out: Optional[NDArray] = None,
         **kwargs,
     ) -> xr.DataArray:
@@ -136,23 +148,34 @@ class Fasta(Reader):
         """
         contig = self.normalize_contig_name(contig)
 
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int64))
+        ends = np.atleast_1d(np.asarray(ends, dtype=np.int64))
+
+        if starts.ndim > 1 or ends.ndim > 1:
+            raise ValueError("Starts and ends must be coercible to 1D arrays.")
+
+        if len(starts) != len(ends):
+            raise ValueError("Starts and ends must be the same length.")
+
         start = starts.min()
         end = ends.max()
 
         pad_left = -min(0, start)
         if pad_left > 0 and self.pad is None:
-            raise ValueError("Padding is disabled and a start is < 0.")
+            raise NoPadError("Padding is disabled and a start is < 0.")
 
         if self.sequences is None:
-            with self._open() as f:
-                pad_right = max(0, end - f.get_reference_length(contig))
-                if pad_right > 0 and self.pad is None:
-                    raise ValueError("Padding is disabled and end is > contig length.")
+            if self.handle is None:
+                self.handle = self._open()
 
-                # pysam behavior
-                # start < 0 => error
-                # end > contig length => truncate
-                seq = f.fetch(contig, max(0, start), end)
+            pad_right = max(0, end - self.handle.get_reference_length(contig))
+            if pad_right > 0 and self.pad is None:
+                raise NoPadError("Padding is disabled and end is > contig length.")
+
+            # pysam behavior
+            # start < 0 => error
+            # end > contig length => truncate
+            seq = self.handle.fetch(contig, max(0, start), end)
 
             seq = np.frombuffer(seq.encode("ascii"), "S1")
         else:
@@ -161,7 +184,7 @@ class Fasta(Reader):
             # end > contig length => truncate
             pad_right = max(0, end - len(self.sequences[contig]))
             if pad_right > 0 and self.pad is None:
-                raise ValueError("Padding is disabled and end is > contig length.")
+                raise NoPadError("Padding is disabled and end is > contig length.")
             seq = self.sequences[contig][max(0, start) : end]
 
         padded_seq = []

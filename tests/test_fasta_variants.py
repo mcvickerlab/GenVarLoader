@@ -12,10 +12,13 @@ import genvarloader as gvl
 def varseq_fasta_pgen():
     fasta = gvl.Fasta(
         "seq",
-        Path.cwd() / "data" / "fasta" / "Homo_sapiens.GRCh38.dna.toplevel.fa.gz",
+        Path(__file__).parent
+        / "data"
+        / "fasta"
+        / "Homo_sapiens.GRCh38.dna.toplevel.fa.gz",
         pad="N",
     )
-    pgen = gvl.Pgen(Path.cwd() / "data" / "pgen" / "sample.pgen")
+    pgen = gvl.Pgen(Path(__file__).parent / "data" / "pgen" / "sample.pgen")
     return gvl.FastaVariants("varseq", fasta, pgen, jitter_long=False)
 
 
@@ -23,7 +26,7 @@ def varseq_fasta_pgen():
 def test_fasta_variants(varseq: gvl.FastaVariants):
     regions = (
         pl.read_csv(
-            Path.cwd() / "data" / "vcf" / "sample.bed",
+            Path(__file__).parent / "data" / "vcf" / "sample.bed",
             separator="\t",
             has_header=False,
             new_columns=["contig", "start", "end"],
@@ -39,7 +42,7 @@ def test_fasta_variants(varseq: gvl.FastaVariants):
         end: int
         contig, start, end, row_nr = region
         seq_path = (
-            Path.cwd()
+            Path(__file__).parent
             / "data"
             / "vcf"
             / "consensus"
@@ -50,8 +53,8 @@ def test_fasta_variants(varseq: gvl.FastaVariants):
             gvl_seq = (
                 varseq.read(
                     contig,
-                    [start],
-                    [end],
+                    np.array([start], dtype=np.int64),
+                    np.array([end], dtype=np.int64),
                     sample=[sample],
                     ploid=[hap - 1],
                     target_length=end - start,
@@ -65,11 +68,16 @@ def test_fasta_variants(varseq: gvl.FastaVariants):
 
         with pysam.FastaFile(str(seq_path)) as f:
             bcftools_seq = f.fetch(f.references[0])
-        bcftools_seq = np.frombuffer(bcftools_seq.encode(), "S1")
+        bcftools_seq = np.frombuffer(bcftools_seq.encode(), "S1")[: end - start]
         length = min(len(bcftools_seq), len(gvl_seq))
 
         try:
+            assert len(gvl_seq) >= len(bcftools_seq)
             np.testing.assert_equal(gvl_seq[:length], bcftools_seq[:length])
         except AssertionError as e:
             print(f"Failed {sample} hap{hap-1} {contig}:{start}-{end} row {row_nr}")
             raise e
+
+
+if __name__ == "__main__":
+    test_fasta_variants(varseq_fasta_pgen())

@@ -1,12 +1,66 @@
 from itertools import accumulate, chain, repeat
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Sequence, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    Iterable,
+    Optional,
+    Sequence,
+    TypeVar,
+    Union,
+)
 
+import dask.array as da
 import numpy as np
 import pandera as pa
 import pandera.typing as pat
 import polars as pl
+import xarray as xr
 from numpy.typing import NDArray
+
+from .types import Reader
+
+T = TypeVar("T")
+
+
+def construct_virtual_data(
+    *readers: Reader, n_regions: int, fixed_length: int
+) -> xr.Dataset:
+    arrays = {}
+    for reader in readers:
+        dims = ["region"] + list(reader.sizes) + ["length"]
+        shape = [n_regions] + [size for size in reader.sizes.values()] + [fixed_length]
+        arrays[reader.name] = xr.DataArray(
+            da.empty(  # pyright: ignore[reportPrivateImportUsage]
+                shape, dtype=reader.dtype
+            ),
+            dims=dims,
+            coords=reader.coords,
+            name=reader.name,
+        )
+    virtual_data = xr.Dataset(arrays)
+    return virtual_data
+
+
+def process_bed(bed: Union[str, Path, pl.DataFrame], fixed_length: int):
+    if isinstance(bed, (str, Path)):
+        bed = read_bedlike(bed)
+
+    if "strand" in bed and bed["strand"].dtype == pl.Utf8:
+        bed = bed.with_columns(
+            pl.col("strand").replace({"-": -1, "+": 1}, return_dtype=pl.Int8)
+        )
+    else:
+        bed = bed.with_columns(strand=pl.lit(1, dtype=pl.Int8))
+
+    if "region_idx" not in bed:
+        bed = bed.with_row_count("region_idx")
+
+    bed = bed.sort("chrom", "chromStart")
+
+    return _set_fixed_length_around_center(bed, fixed_length)
 
 
 def _set_fixed_length_around_center(bed: pl.DataFrame, length: int):
@@ -19,6 +73,20 @@ def _set_fixed_length_around_center(bed: pl.DataFrame, length: int):
         chromEnd=(center + length / 2).round(0).cast(pl.Int64),
     )
     return bed
+
+
+def random_chain(
+    *iterables: Iterable[T], seed: Optional[int] = None
+) -> Generator[T, None, None]:
+    """Chain iterables, randomly sampling from each until they are all exhausted."""
+    rng = np.random.default_rng(seed)
+    iterators = {i: iter(it) for i, it in enumerate(iterables)}
+    while iterators:
+        i = rng.choice(list(iterators.keys()))
+        try:
+            yield next(iterators[i])
+        except StopIteration:
+            del iterators[i]
 
 
 def read_bedlike(path: Union[str, Path]) -> pl.DataFrame:
@@ -242,7 +310,7 @@ T = TypeVar("T", bound=np.generic)
 def splice_subarrays(
     arr: NDArray[T], starts: NDArray[np.int64], ends: NDArray[np.int64]
 ) -> NDArray[T]:
-    """Splice subarrays from a larger array and reverse-complement them.
+    """Splice subarrays from a larger array.
 
     Parameters
     ----------
@@ -256,7 +324,7 @@ def splice_subarrays(
     Returns
     -------
     out : NDArray
-        Spliced and reverse-complemented array.
+        Spliced array.
     """
     start = starts.min()
     rel_starts = get_rel_starts(starts, ends)

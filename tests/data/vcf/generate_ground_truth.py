@@ -56,6 +56,14 @@ def main(
     from loguru import logger
     from tqdm.auto import tqdm
 
+    logger.add(Path(__file__).parent / "generate_ground_truth.log", level="INFO")
+
+    logger.info(
+        f"""Running command:
+        generate_ground_truth.py {name} {reference} {out_dir} --indels {indels} --structural-variants {structural_variants} --multiallelic {multiallelic}
+        """
+    )
+
     t0 = perf_counter()
 
     SEQ_LEN = 10
@@ -63,7 +71,7 @@ def main(
     out_dir = out_dir.resolve()
     shutil.rmtree(out_dir)
     out_dir.mkdir(0o777, parents=True, exist_ok=True)
-    prefix = Path.cwd() / name
+    prefix = Path(__file__).parent / name
     vcf_path = str(prefix.with_suffix(".vcf"))
     filtered_vcf = Path.cwd() / f"filtered_{name}.vcf"
 
@@ -137,7 +145,7 @@ def main(
         pl.read_csv(
             filtered_vcf,
             separator="\t",
-            comment_char="#",
+            comment_prefix="#",
             has_header=False,
             new_columns=[
                 "#CHROM",
@@ -165,7 +173,7 @@ def main(
     logger.info("Generating BED file.")
     (
         bed.select("CHROM", "start", "end").write_csv(
-            prefix.with_suffix(".bed"), has_header=False, separator="\t"
+            prefix.with_suffix(".bed"), include_header=False, separator="\t"
         )
     )
 

@@ -4,7 +4,6 @@ from typing import (
     Dict,
     Hashable,
     Iterable,
-    List,
     Optional,
     Protocol,
     Sequence,
@@ -18,7 +17,7 @@ import polars as pl
 import xarray as xr
 from attrs import define
 from loguru import logger
-from numpy.typing import NDArray
+from numpy.typing import DTypeLike, NDArray
 
 
 class Reader(Protocol):
@@ -27,28 +26,32 @@ class Reader(Protocol):
     Attributes
     ----------
     name : str
-        Name of the reader.
+        Name of the reader, corresponding to the name of the DataArrays it returns.
     dtype : np.dtype
-        Data type of the data returned by `read()`.
+        Data type of what the reader returns.
     sizes : Dict[Hashable, int]
-        Sizes of the dimensions of the data returned by `read()`.
+        Sizes of the dimensions/axes of what the reader returns.
     coords : Dict[Hashable, NDArray]
-        Coordinates of the data returned by `read()`.
-    contig_starts_with_chr : str, optional
+        Coordinates of what the reader returns, i.e. dimension labels.
+    contig_starts_with_chr : bool, optional
         Whether the contigs start with "chr" or not. Queries to `read()` will
         normalize the contig name to add or remove this prefix to match what the
         underlying file uses.
     rev_strand_fn : Callable[[NDArray], NDArray]
         Function to reverse (and potentially complement) data for a genomic region. This
         is used when the strand is negative.
+    chunked : bool
+        Whether the reader acts like a chunked array store, in which sequential reads
+        are far more performant than random access.
     """
 
     name: str
-    dtype: np.dtype
+    dtype: DTypeLike
     sizes: Dict[Hashable, int]
     coords: Dict[Hashable, NDArray]
     contig_starts_with_chr: Optional[bool]
     rev_strand_fn: Callable[[NDArray], NDArray]
+    chunked: bool
 
     def read(
         self,
@@ -65,9 +68,9 @@ class Reader(Protocol):
         ----------
         contig : str
             Name of the contig/chromosome.
-        starts : NDArray[int32]
+        starts : NDArray[int64]
             Start coordinates, 0-based.
-        ends : NDArray[int32]
+        ends : NDArray[int64]
             End coordinates, 0-based exclusive.
         out : NDArray, optional
             Array to put the result into. Otherwise allocates one.
@@ -79,12 +82,10 @@ class Reader(Protocol):
         -------
         xarray.DataArray
             Data corresponding to the given genomic coordinates. The final axis is the
-            length axis i.e. has length == end - start.
+            length axis i.e. has length == (ends - starts).sum().
 
         Notes
         -----
-        Each call to `read` should correspond to a single disk access for each file
-        represented by the Reader by reading from min(starts) to max(ends).
         When multiple regions are provided (i.e. multiple starts and ends) they should
         be concatenated together in the output array along the length dimension.
         """
@@ -190,10 +191,18 @@ class VLenAlleles:
         start, stop = slc.start, slc.stop
         if start is None:
             start = 0
+        elif start < 0:
+            start += len(self)
+
+        # handle empty result
         if start >= len(self) or (stop is not None and stop <= start):
             return VLenAlleles(np.empty(0, np.uint32), np.empty(0, "|S1"))
-        if stop is not None:
-            stop += 1
+
+        if stop is None:
+            stop = len(self)
+        elif stop < 0:
+            stop += len(self)
+        stop += 1
         new_offsets = self.offsets[start:stop].copy()
         _start, _stop = new_offsets[0], new_offsets[-1]
         new_alleles = self.alleles[_start:_stop]
@@ -201,16 +210,42 @@ class VLenAlleles:
         return VLenAlleles(new_offsets, new_alleles)
 
     def __len__(self):
+        """Number of alleles."""
         return len(self.offsets) - 1
+
+    @property
+    def nbytes(self):
+        return self.offsets.nbytes + self.alleles.nbytes
 
     @classmethod
     def from_polars(cls, alleles: pl.Series):
-        offsets = np.zeros(alleles.len() + 1, np.uint32)
-        offsets[1:] = alleles.str.len_bytes().cumsum().to_numpy()
+        offsets = np.r_[np.uint32(0), alleles.str.len_bytes().cum_sum().to_numpy()]
         flat_alleles = np.frombuffer(
             alleles.str.concat("").to_numpy()[0].encode(), "S1"
         )
         return cls(offsets, flat_alleles)
+
+    @staticmethod
+    def concat(*vlen_alleles: "VLenAlleles"):
+        if len(vlen_alleles) == 0:
+            return VLenAlleles(np.array([0], np.uint32), np.array([], "|S1"))
+        elif len(vlen_alleles) == 1:
+            return vlen_alleles[0]
+
+        offset_ends = np.array([v.offsets[-1] for v in vlen_alleles[:-1]]).cumsum(
+            dtype=np.uint32
+        )
+        offsets = np.concatenate(
+            [
+                vlen_alleles[0].offsets,
+                *(
+                    v.offsets + last_offset_end
+                    for v, last_offset_end in zip(vlen_alleles[1:], offset_ends)
+                ),
+            ]
+        )
+        alleles = np.concatenate([v.alleles for v in vlen_alleles])
+        return VLenAlleles(offsets, alleles)
 
 
 @define
@@ -250,8 +285,10 @@ class DenseGenotypes:
         Shape: (variants). ALT alleles.
     genotypes : NDArray[np.int8]
         Shape: (samples, ploid, variants)
-    max_end : int
-        End of reference to ensure enough is available to pad fixed length haplotypes.
+    offsets : NDArray[np.uint32], optional
+        Shape: (regions + 1). Offsets for the index boundaries of each region such
+        that variants for region `i` are `positions[offsets[i] : offsets[i+1]]`,
+        `size_diffs[offsets[i] : offsets[i+1]]`, ..., etc.
     """
 
     positions: NDArray[np.int32]
@@ -259,6 +296,7 @@ class DenseGenotypes:
     ref: VLenAlleles
     alt: VLenAlleles
     genotypes: NDArray[np.int8]
+    offsets: NDArray[np.uint32]
 
 
 class Variants(Protocol):
@@ -270,10 +308,11 @@ class Variants(Protocol):
     n_samples: int
     ploidy: int
     contig_starts_with_chr: Optional[bool]
+    chunked: bool
 
     def read(
         self, contig: str, starts: NDArray[np.int64], ends: NDArray[np.int64], **kwargs
-    ) -> Union[Optional[SparseAlleles], List[Optional[DenseGenotypes]]]:
+    ) -> Union[Optional[SparseAlleles], Optional[DenseGenotypes]]:
         """Read variants found in the given genomic coordinates, optionally for specific
         samples and ploid numbers.
 
@@ -291,17 +330,19 @@ class Variants(Protocol):
 
         Returns
         -------
-        Returns a list of optional DenseGenotypes, one for each query region.
+        Optional[DenseGenotypes]
+            Genotypes for each query region.
         """
         ...
 
     def read_for_haplotype_construction(
         self, contig: str, starts: NDArray[np.int64], ends: NDArray[np.int64], **kwargs
-    ) -> Tuple[List[Optional[DenseGenotypes]], NDArray[np.int64]]:
-        """Read variants sufficient to reconstruct haplotypes of a target length
-        spanning the given genomic coordinates. This may necessitate returning variants
-        beyond the ranges themselves, since deletions shrink the sequence and require
-        information about variants past the end of the query regions.
+    ) -> Tuple[Optional[DenseGenotypes], NDArray[np.int64]]:
+        """Read genotypes for haplotype construction. This is a special case of `read`
+        where variants past (i.e. downstream of) the query regions can be included to
+        ensure that haplotypes of desired length can be constructed. This is necessary
+        because deletions can shorten the haplotype, so variants downstream of `end` may
+        be needed to add more sequence to the haplotype.
 
         Parameters
         ----------
@@ -311,9 +352,6 @@ class Variants(Protocol):
             Start coordinates, 0-based.
         ends : int, NDArray[int32]
             End coordinates, 0-based exclusive.
-        **kwargs
-            Additional keyword arguments. May include `sample: Iterable[str]` and
-            `ploid: Iterable[int]` to specify sample names and ploid numbers.
 
         Returns
         -------

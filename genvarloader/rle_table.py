@@ -1,11 +1,11 @@
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Union, cast
 
-import dask.array as da
 import numba as nb
 import numpy as np
 import polars as pl
 import xarray as xr
+from numpy.typing import NDArray
 
 from .types import Reader
 
@@ -18,6 +18,8 @@ def assign_vals(out, sample_idx, starts, ends, vals):
 
 
 class RLE_Table(Reader):
+    chunked = False
+
     def __init__(
         self,
         name: str,
@@ -94,22 +96,20 @@ class RLE_Table(Reader):
 
         self.name = name
         self.table = _table
-        self.virtual_data = xr.DataArray(
-            da.empty(  # pyright: ignore[reportPrivateImportUsage]
-                len(_samples), dtype=np.float64
-            ),
-            name=name,
-            dims="sample",
-            coords={"sample": _samples},
-        )
+        self.dtype = _table.lazy().select("score").head(1).collect().to_numpy().dtype
+        self.coords = {"sample": _samples}
+        self.sizes = {"sample": len(_samples)}
         contigs = self.table.lazy().select(pl.col("chrom").unique()).collect()["chrom"]
         self.contig_starts_with_chr = self.infer_contig_prefix(contigs)
+
+    def rev_strand_fn(self, arr: NDArray):
+        return arr[..., ::-1]
 
     def read(self, contig: str, start: int, end: int, **kwargs) -> xr.DataArray:
         samples = cast(Optional[Sequence[str]], kwargs.get("sample", None))
         if samples is None:
-            samples = self.virtual_data["sample"].to_numpy()
-            n_samples = self.virtual_data.sizes["sample"]
+            samples = self.coords["sample"]
+            n_samples = self.sizes["sample"]
         else:
             n_samples = len(samples)
 
