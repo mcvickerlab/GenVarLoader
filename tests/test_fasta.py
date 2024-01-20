@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from pysam import FastaFile
 from pytest_cases import fixture
 
 import genvarloader as gvl
@@ -20,14 +21,19 @@ def fasta_path():
 
 def test_pad_right(fasta_path):
     fasta = gvl.Fasta("ref", fasta_path, pad="N")
-    end_of_contig_1 = 248956422
     contig = "1"
-    start = end_of_contig_1 - 5
-    end = start + 10
+    with FastaFile(fasta_path) as f:
+        end_of_contig = f.get_reference_length(contig)
+        start = end_of_contig - 5
+        end = start + 10
+        desired = np.full(end - start, b"N", "S1")
+        desired[:5] = np.frombuffer(
+            f.fetch(contig, start, start + 5).encode("ascii"), "S1"
+        )
+
     seq = fasta.read(contig, start, end).to_numpy()
 
-    assert len(seq) == 10
-    np.testing.assert_equal(seq[5:], np.full(5, b"N", dtype="S1"))
+    np.testing.assert_equal(seq, desired)
 
 
 def test_pad_left(fasta_path):
@@ -36,9 +42,11 @@ def test_pad_left(fasta_path):
     start = -5
     end = start + 10
     seq = fasta.read(contig, start, end).to_numpy()
+    with FastaFile(fasta_path) as f:
+        desired = np.full(end - start, b"N", "S1")
+        desired[5:] = np.frombuffer(f.fetch(contig, 0, end).encode("ascii"), "S1")
 
-    assert len(seq) == 10
-    np.testing.assert_equal(seq[:5], np.full(5, b"N", dtype="S1"))
+    np.testing.assert_equal(seq, desired)
 
 
 def test_no_pad(fasta_path):
