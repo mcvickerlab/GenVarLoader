@@ -6,6 +6,7 @@ import xarray as xr
 from numpy.typing import NDArray
 from typing_extensions import assert_never
 
+from .fasta import Fasta
 from .types import DenseGenotypes, Dict, Reader, Variants
 from .util import get_rel_starts
 
@@ -14,7 +15,7 @@ class Haplotypes:
     def __init__(
         self,
         variants: Variants,
-        reference: Optional[Reader] = None,
+        reference: Optional[Fasta] = None,
         tracks: Optional[Union[Reader, Iterable[Reader]]] = None,
         jitter_long: bool = True,
         seed: Optional[int] = None,
@@ -34,6 +35,9 @@ class Haplotypes:
 
         if reference is not None:
             self.readers.append(reference)
+            if reference.pad is None:
+                raise ValueError("Reference must have a pad character.")
+            self.pad = np.uint8(ord(reference.pad))
 
         if tracks is not None:
             self.readers.extend(tracks)
@@ -98,9 +102,8 @@ class Haplotypes:
         if seed is not None:
             self.rng = np.random.default_rng(seed)
 
-        starts, ends = np.asarray(starts, dtype=np.int64), np.asarray(
-            ends, dtype=np.int64
-        )
+        starts = np.asarray(starts, dtype=np.int64)
+        ends = np.asarray(ends, dtype=np.int64)
 
         variants, max_ends = self.variants.read_for_haplotype_construction(
             contig, starts, ends, **kwargs
@@ -142,7 +145,7 @@ class Haplotypes:
                     lengths=lengths,
                     rel_starts=rel_starts,
                     shifts=shifts,
-                    pad_char=np.uint8(ord(self.reference.pad_char)),
+                    pad_char=self.pad,
                 )
 
             if self.tracks is not None:
