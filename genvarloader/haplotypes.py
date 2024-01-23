@@ -393,10 +393,11 @@ def realign(
     rel_starts: NDArray[np.int64],
     shifts: NDArray[np.int32],
 ) -> xr.DataArray:
-    if "ploid" not in track.sizes:
+    if "ploid" not in track.dims:
         final_out_dim_order = track.dims[:-1] + ("ploid", "length")
-        track = track.transpose(..., "sample", "length")
-        _track = track.values.repeat(ploid, axis=-2)
+        _track = np.broadcast_to(
+            track.values[..., None, :], (*track.shape[:-1], ploid, track.shape[-1])
+        )
     else:
         final_out_dim_order = track.dims
         track = track.transpose(..., "sample", "ploid", "length")
@@ -431,9 +432,9 @@ def realign(
 
 @nb.njit(nogil=True, cache=True, parallel=True)
 def realign_track_to_haplotype(
-    out: NDArray,
-    track: NDArray,
-    shifts: NDArray[np.int32],
+    out: NDArray,  # (..., s p o_len)
+    track: NDArray,  # (..., s p t_len) t_len >= o_len
+    shifts: NDArray[np.int32],  # (s p r)
     positions: NDArray[np.int32],  # (v)
     sizes: NDArray[np.int32],  # (v)
     genotypes: NDArray[np.int8],  # (s p v)
