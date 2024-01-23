@@ -2,7 +2,6 @@ from pathlib import Path
 from typing import (
     Callable,
     Dict,
-    Hashable,
     Iterable,
     Optional,
     Protocol,
@@ -47,8 +46,8 @@ class Reader(Protocol):
 
     name: str
     dtype: DTypeLike
-    sizes: Dict[Hashable, int]
-    coords: Dict[Hashable, NDArray]
+    sizes: Dict[str, int]
+    coords: Dict[str, NDArray]
     contig_starts_with_chr: Optional[bool]
     rev_strand_fn: Callable[[NDArray], NDArray]
     chunked: bool

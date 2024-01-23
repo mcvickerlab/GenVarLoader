@@ -13,9 +13,9 @@ whereas the batches are materialized from the buffer.
 
 from .fasta import Fasta
 from .fasta_variants import FastaVariants
+from .intervals import Intervals
 from .loader import GVL, construct_virtual_data
 from .pgen import Pgen
-from .rle_table import RLE_Table
 from .types import Reader, Variants
 
 __version__ = "0.0.0"  # managed by poetry-dynamic-versioning
@@ -23,7 +23,7 @@ __version__ = "0.0.0"  # managed by poetry-dynamic-versioning
 __all__ = [
     "Fasta",
     "FastaVariants",
-    "RLE_Table",
+    "Intervals",
     "Pgen",
     "GVL",
     "construct_virtual_data",
