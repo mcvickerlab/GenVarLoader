@@ -1093,9 +1093,9 @@ class SyncBuffers:
                 slices[dim] = slice(0, len(read_kwargs[dim]))
             slices["length"] = slice(0, total_length)
             for reader in self.gvl.readers:
-                _slices = tuple(slices[dim] for dim in reader.sizes) + (
-                    slices["length"],
-                )
+                _slices = tuple(
+                    slices[dim] for dim in reader.sizes if dim in slices
+                ) + (slices["length"],)
                 out = buffer[reader.name][_slices]
                 data = reader.read(
                     contig,
