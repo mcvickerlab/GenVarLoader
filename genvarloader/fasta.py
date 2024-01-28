@@ -5,11 +5,11 @@ from typing import Optional, Union, cast
 import numpy as np
 import pysam
 import seqpro as sp
-import xarray as xr
 from numpy.typing import ArrayLike, NDArray
 from typing_extensions import assert_never
 
 from .types import Reader
+from .util import get_rel_starts
 
 
 class NoPadError(Exception):
@@ -122,7 +122,7 @@ class Fasta(Reader):
         ends: ArrayLike,
         out: Optional[NDArray] = None,
         **kwargs,
-    ) -> xr.DataArray:
+    ) -> NDArray[np.bytes_]:
         """Read a sequence from a FASTA file.
 
         Parameters
@@ -177,7 +177,7 @@ class Fasta(Reader):
         else:
             out = np.full(lengths.sum(), self.pad, dtype="S1")
 
-        rel_starts = np.cumsum(np.concatenate([[0], lengths[:-1]]))
+        rel_starts = get_rel_starts(starts, ends)
         rel_ends = rel_starts + lengths - right_pads
         rel_starts += left_pads
 
@@ -198,4 +198,4 @@ class Fasta(Reader):
                 seq = self.sequences[contig][q_start, q_end]
                 out[rel_start:rel_end] = seq
 
-        return xr.DataArray(out, dims="length")
+        return out

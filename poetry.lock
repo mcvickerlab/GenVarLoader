@@ -1530,6 +1530,19 @@ files = [
 numpy = ">=1.16.6"
 
 [[package]]
+name = "pyd4"
+version = "0.3.9"
+description = ""
+optional = false
+python-versions = "*"
+files = [
+    {file = "pyd4-0.3.9.tar.gz", hash = "sha256:52021139315c65d63b68cc1805a107971ba70aee600e324c9565da1b69318c36"},
+]
+
+[package.dependencies]
+numpy = "*"
+
+[[package]]
 name = "pydantic"
 version = "2.5.2"
 description = "Data validation using Python type hints"
@@ -2394,4 +2407,4 @@ testing = ["big-O", "jaraco.functools", "jaraco.itertools", "more-itertools", "p
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.9"
-content-hash = "a1e724ac9208e201eb7e49b270c1419f862331d5c41b0509149e641e1b6f748c"
+content-hash = "66199f48af1af4546e6a611e8e6ea5376ab525001a1da404a324d6e17236d50a"

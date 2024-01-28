@@ -13,7 +13,6 @@ from typing import (
 
 import numpy as np
 import polars as pl
-import xarray as xr
 from attrs import define
 from loguru import logger
 from numpy.typing import DTypeLike, NDArray
@@ -59,7 +58,7 @@ class Reader(Protocol):
         ends: NDArray[np.int64],
         out: Optional[NDArray] = None,
         **kwargs
-    ) -> xr.DataArray:
+    ) -> NDArray:
         """Read data corresponding to given genomic coordinates. The output shape will
         have length as the final dimension/axis i.e. (..., length).
 
