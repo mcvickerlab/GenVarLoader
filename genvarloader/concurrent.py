@@ -19,7 +19,8 @@ class Buffer:
     actor_idx: int
 
     def __attrs_post_init__(self):
-        self.len_unused_buffer = self.instances_in_buffer
+        self.instances_in_buffer = len(self)
+        self.len_unused_buffer = len(self)
         self.idx_slice = slice(0, 0)
 
     def __len__(self):
