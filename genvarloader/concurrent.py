@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import ray
 import xarray as xr
-from attrs import define
+from attrs import define, field
 from numpy.typing import NDArray
 
 from .types import Reader
@@ -17,6 +17,9 @@ class Buffer:
     buffer_idx: NDArray[np.integer]
     dim_idxs: Dict[str, List[int]]
     actor_idx: int
+    instances_in_buffer: int = field(init=False)
+    len_unused_buffer: int = field(init=False)
+    idx_slice: slice = field(init=False)
 
     def __attrs_post_init__(self):
         self.instances_in_buffer = len(self)
