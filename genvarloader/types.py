@@ -90,6 +90,11 @@ class Reader(Protocol):
         ...
 
     def infer_contig_prefix(self, contigs: Iterable[str]) -> bool:
+        try:
+            next(iter(contigs))
+        except StopIteration:
+            raise ValueError("No contigs provided.")
+
         n_chr_start = sum(1 for c in contigs if c.startswith("chr"))
         if n_chr_start > 0:
             contig_starts_with_chr = True

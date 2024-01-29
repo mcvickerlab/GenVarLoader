@@ -1,6 +1,6 @@
 from functools import partial
 from pathlib import Path
-from typing import Optional, Union, cast
+from typing import Dict, Optional, Union, cast
 
 import numpy as np
 import pysam
@@ -51,12 +51,12 @@ class Fasta(Reader):
         """
         self.name = name
         self.path = path
-        if pad is not None:
+        if pad is None:
+            self.pad = pad
+        else:
             if len(pad) > 1:
                 raise ValueError("Pad value must be a single character.")
             self.pad = pad.encode("ascii")
-        else:
-            self.pad = pad
 
         with self._open() as f:
             self.contigs = {c: f.get_reference_length(c) for c in f.references}
@@ -84,23 +84,23 @@ class Fasta(Reader):
             def rev_strand_fn(a: NDArray[np.bytes_]):
                 return a[::-1]
 
-            self.rev_strand_fn = rev_strand_fn
+            self.rev_strand_fn = rev_strand_fn  # type: ignore[assignment]
         else:
             assert_never(self.alphabet)
-
-        self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
 
         with self._open() as f:
             self.contigs = {c: f.get_reference_length(c) for c in f.references}
 
+        self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
+
         self.handle: Optional[pysam.FastaFile] = None
 
-        if in_memory:
-            self.sequences = self._load_all_contigs()
-        else:
+        if not in_memory:
             self.sequences = None
+        else:
+            self.sequences = self._load_all_contigs()
 
-    def _load_all_contigs(self) -> dict[str, NDArray[np.bytes_]]:
+    def _load_all_contigs(self) -> Dict[str, NDArray[np.bytes_]]:
         """Load all contigs into memory."""
         with self._open() as f:
             return {
