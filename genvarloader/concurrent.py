@@ -56,5 +56,5 @@ class ReaderActor:
             r.name: r.read(contig, starts, ends, strands=None, **kwargs)
             for r in self.readers
         }
-        buffer = {name: (arr.dims, arr.to_numpy()) for name, arr in buffer.items()}
+        buffer = {name: (arr.dims, arr) for name, arr in buffer.items()}
         return buffer, self.actor_idx
