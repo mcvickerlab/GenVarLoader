@@ -10,17 +10,20 @@ from genvarloader.loader import BatchDict
 def varseq_fasta_pgen():
     fasta = gvl.Fasta(
         "seq",
-        Path.cwd() / "data" / "fasta" / "Homo_sapiens.GRCh38.dna.toplevel.fa.gz",
+        Path(__file__).parent
+        / "data"
+        / "fasta"
+        / "Homo_sapiens.GRCh38.dna.toplevel.fa.gz",
         pad="N",
     )
-    pgen = gvl.Pgen(Path.cwd() / "data" / "pgen" / "sample.pgen")
+    pgen = gvl.Pgen(Path(__file__).parent / "data" / "pgen" / "sample.pgen")
     return gvl.FastaVariants("varseq", fasta, pgen, jitter_long=False)
 
 
-def test_concat_batches():
+def test_concat_batches() -> None:
     varseq = varseq_fasta_pgen()
     bed = pl.read_csv(
-        Path.cwd() / "data" / "vcf" / "sample.bed",
+        Path(__file__).parent / "data" / "vcf" / "sample.bed",
         separator="\t",
         has_header=False,
         new_columns=["chrom", "chromStart", "chromEnd"],

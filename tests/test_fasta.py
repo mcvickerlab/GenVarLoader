@@ -31,7 +31,7 @@ def test_pad_right(fasta_path):
             f.fetch(contig, start, start + 5).encode("ascii"), "S1"
         )
 
-    seq = fasta.read(contig, start, end).to_numpy()
+    seq = fasta.read(contig, start, end)
 
     np.testing.assert_equal(seq, desired)
 
@@ -41,7 +41,7 @@ def test_pad_left(fasta_path):
     contig = "1"
     start = -5
     end = start + 10
-    seq = fasta.read(contig, start, end).to_numpy()
+    seq = fasta.read(contig, start, end)
     with FastaFile(fasta_path) as f:
         desired = np.full(end - start, b"N", "S1")
         desired[5:] = np.frombuffer(f.fetch(contig, 0, end).encode("ascii"), "S1")
@@ -56,10 +56,10 @@ def test_no_pad(fasta_path):
     start = end_of_contig_1 - 5
     end = start + 10
     with pytest.raises(NoPadError):
-        fasta.read(contig, start, end).to_numpy()
+        fasta.read(contig, start, end)
 
     contig = "1"
     start = -5
     end = start + 10
     with pytest.raises(NoPadError):
-        fasta.read(contig, start, end).to_numpy()
+        fasta.read(contig, start, end)
