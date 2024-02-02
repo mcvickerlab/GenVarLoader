@@ -148,7 +148,9 @@ class Fasta(Reader):
         ValueError
             Coordinates are out-of-bounds and pad value is not set.
         """
-        contig = self.normalize_contig_name(contig)
+        contig = self.normalize_contig_name(contig, self.contigs.keys())
+        if contig is None:
+            raise RuntimeError("Contig not found in FASTA file.")
         contig_len = self.contigs[contig]
 
         starts = np.atleast_1d(np.asarray(starts, dtype=np.int64))

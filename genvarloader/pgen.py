@@ -380,10 +380,9 @@ class Pgen(Variants):
             np.asarray(ends, dtype=np.int64),
         )
 
-        contig = self.normalize_contig_name(contig)
-
+        contig = self.normalize_contig_name(contig, self.contigs)
         # contig is not present in PGEN, has no variants
-        if contig not in self.contigs:
+        if contig is None:
             return None
 
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
@@ -475,10 +474,10 @@ class Pgen(Variants):
 
         starts, ends = np.atleast_1d(starts), np.atleast_1d(ends)
 
-        contig = self.normalize_contig_name(contig)
+        contig = self.normalize_contig_name(contig, self.contigs)
 
         # contig is not present in PGEN, has no variants
-        if contig not in self.contigs:
+        if contig is None:
             return None, ends
 
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)

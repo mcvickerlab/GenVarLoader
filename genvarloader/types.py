@@ -14,7 +14,6 @@ from typing import (
 import numpy as np
 import polars as pl
 from attrs import define
-from loguru import logger
 from numpy.typing import DTypeLike, NDArray
 
 
@@ -57,7 +56,7 @@ class Reader(Protocol):
         starts: NDArray[np.int64],
         ends: NDArray[np.int64],
         out: Optional[NDArray] = None,
-        **kwargs
+        **kwargs,
     ) -> NDArray:
         """Read data corresponding to given genomic coordinates. The output shape will
         have length as the final dimension/axis i.e. (..., length).
@@ -95,14 +94,9 @@ class Reader(Protocol):
         except StopIteration:
             raise ValueError("No contigs provided.")
 
-        n_chr_start = sum(1 for c in contigs if c.startswith("chr"))
-        if n_chr_start > 0:
-            contig_starts_with_chr = True
-        else:
-            contig_starts_with_chr = False
-        return contig_starts_with_chr
+        return any(c.startswith("chr") for c in contigs)
 
-    def normalize_contig_name(self, contig: str) -> str:
+    def normalize_contig_name(self, contig: str, contigs: Iterable[str]) -> str:
         """Normalize the contig name to adhere to the convention of the underlying file.
         i.e. remove or add "chr" to the contig name.
 
@@ -115,18 +109,11 @@ class Reader(Protocol):
         str
             Normalized contig name.
         """
-        if self.contig_starts_with_chr is None:
-            logger.warning(
-                """Attempted to normalize a contig name for a reader that has no 
-                convention for contig names. Returning contig name as is.
-                """
-            )
-            return contig
-        elif self.contig_starts_with_chr and not contig.startswith("chr"):
-            contig = "chr" + contig
-        elif not self.contig_starts_with_chr and contig.startswith("chr"):
-            contig = contig[3:]
-        return contig
+        for c in contigs:
+            # exact match, remove chr, add chr
+            if contig == c or contig[3:] == c or f"chr{contig}" == c:
+                return c
+        raise ValueError(f"Contig {contig} not found in {contigs}.")
 
 
 class ToZarr(Protocol):
@@ -367,16 +354,18 @@ class Variants(Protocol):
         ...
 
     def infer_contig_prefix(self, contigs: Iterable[str]) -> bool:
-        n_chr_start = sum(1 for c in contigs if c.startswith("chr"))
-        if n_chr_start > 0:
-            contig_starts_with_chr = True
-        else:
-            contig_starts_with_chr = False
-        return contig_starts_with_chr
+        try:
+            next(iter(contigs))
+        except StopIteration:
+            raise ValueError("No contigs provided.")
 
-    def normalize_contig_name(self, contig: str) -> str:
-        """Normalize the contig name to adhere to the convention of the variant's
-        underlying file. i.e. remove or add "chr" to the contig name.
+        return any(c.startswith("chr") for c in contigs)
+
+    def normalize_contig_name(
+        self, contig: str, contigs: Iterable[str]
+    ) -> Optional[str]:
+        """Normalize the contig name to adhere to the convention of the underlying file.
+        i.e. remove or add "chr" to the contig name.
 
         Parameters
         ----------
@@ -387,15 +376,8 @@ class Variants(Protocol):
         str
             Normalized contig name.
         """
-        if self.contig_starts_with_chr is None:
-            logger.warning(
-                """Attempted to normalize a contig name for a reader that has no 
-                convention for contig names. Returning contig name as is.
-                """
-            )
-            return contig
-        elif self.contig_starts_with_chr and not contig.startswith("chr"):
-            contig = "chr" + contig
-        elif not self.contig_starts_with_chr and contig.startswith("chr"):
-            contig = contig[3:]
-        return contig
+        for c in contigs:
+            # exact match, remove chr, add chr
+            if contig == c or contig[3:] == c or f"chr{contig}" == c:
+                return c
+        return None

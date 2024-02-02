@@ -192,7 +192,7 @@ class FastaVariants(Reader):
                 ref_lengths,
                 np.uint8(
                     # pad existing is checked on init
-                    ord(self.reference.pad)  # pyright: ignore[reportGeneralTypeIssues]
+                    ord(self.reference.pad)  # type: ignore[arg-type]
                 ),
             )
         elif isinstance(variants, SparseAlleles):
