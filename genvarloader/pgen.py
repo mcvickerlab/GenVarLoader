@@ -380,10 +380,9 @@ class Pgen(Variants):
             np.asarray(ends, dtype=np.int64),
         )
 
-        contig = self.normalize_contig_name(contig)
-
+        contig = self.normalize_contig_name(contig, self.contigs)
         # contig is not present in PGEN, has no variants
-        if contig not in self.contigs:
+        if contig is None:
             return None
 
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
@@ -475,10 +474,10 @@ class Pgen(Variants):
 
         starts, ends = np.atleast_1d(starts), np.atleast_1d(ends)
 
-        contig = self.normalize_contig_name(contig)
+        contig = self.normalize_contig_name(contig, self.contigs)
 
         # contig is not present in PGEN, has no variants
-        if contig not in self.contigs:
+        if contig is None:
             return None, ends
 
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
@@ -617,7 +616,9 @@ class _PgenGenos(_Genotypes):
             pgen_idx = sample_idx[sample_sorter].astype(np.uint32)
 
         n_vars = (end_idxs - start_idxs).sum()
-        genotypes = np.empty((n_samples * self.PLOIDY, n_vars), dtype=np.int32)
+        genotypes: NDArray[np.int32] = np.empty(
+            (n_samples * self.PLOIDY, n_vars), dtype=np.int32
+        )
 
         with self._pgen(contig, pgen_idx) as f:
             for i, (s, e) in enumerate(zip(start_idxs, end_idxs)):
@@ -929,8 +930,8 @@ def get_max_ends_and_idxs(
     start_idxs: NDArray[np.intp],
     query_ends: NDArray[np.int64],
 ) -> Tuple[NDArray[np.int32], NDArray[np.intp]]:
-    max_ends = np.empty(len(start_idxs), dtype=np.int32)
-    end_idxs = np.empty(len(start_idxs), dtype=np.intp)
+    max_ends: NDArray[np.int32] = np.empty(len(start_idxs), dtype=np.int32)
+    end_idxs: NDArray[np.intp] = np.empty(len(start_idxs), dtype=np.intp)
     for r in nb.prange(len(start_idxs)):
         s = start_idxs[r]
         if s == len(v_ends):  # no variants in this region
@@ -999,7 +1000,7 @@ def weighted_activity_selection(
         opt(j) = max(w_j + opt(q_j), opt(j - 1))
     """
     n_vars = len(w)
-    max_del = np.empty(n_vars + 1, dtype=np.int32)
+    max_del: NDArray[np.int32] = np.empty(n_vars + 1, dtype=np.int32)
     max_del[0] = 0
     for j in range(1, n_vars + 1):
         max_del[j] = max(max_del[q[j - 1]] + w[j - 1], max_del[j - 1])

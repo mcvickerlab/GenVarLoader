@@ -98,7 +98,7 @@ class FastaVariants(Reader):
         ends: NDArray[np.int64],
         out: Optional[NDArray[np.bytes_]] = None,
         **kwargs,
-    ) -> xr.DataArray:
+    ) -> NDArray[np.bytes_]:
         """Read a variant sequence corresponding to a genomic range, sample, and ploid.
 
         Parameters
@@ -153,9 +153,7 @@ class FastaVariants(Reader):
         total_length = lengths.sum()
         rel_starts = get_rel_starts(starts, ends)
 
-        ref: NDArray[np.bytes_] = self.reference.read(
-            contig, starts, max_ends
-        ).to_numpy()
+        ref = self.reference.read(contig, starts, max_ends)
         ref_lengths = max_ends - starts
         ref_rel_starts = get_rel_starts(starts, max_ends)
 
@@ -167,7 +165,7 @@ class FastaVariants(Reader):
 
         if variants is None:
             seqs[...] = ref
-            return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
+            return seqs
 
         if isinstance(variants, DenseGenotypes):
             if self.jitter_long:
@@ -194,7 +192,7 @@ class FastaVariants(Reader):
                 ref_lengths,
                 np.uint8(
                     # pad existing is checked on init
-                    ord(self.reference.pad)  # pyright: ignore[reportGeneralTypeIssues]
+                    ord(self.reference.pad)  # type: ignore[arg-type]
                 ),
             )
         elif isinstance(variants, SparseAlleles):
@@ -202,7 +200,7 @@ class FastaVariants(Reader):
         else:
             assert_never(variants)
 
-        return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
+        return seqs
 
     def sample_shifts(
         self,

@@ -183,7 +183,7 @@ def _read_bed_table(table: Union[str, Path], **table_reader_kwargs):
         reader_kwargs["dtypes"] = {"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8}
         reader = pl.scan_csv
     elif {".fth", ".feather", ".ipc", ".arrow"} & suffixes:
-        reader = pl.scan_ipc
+        reader = pl.scan_ipc  # type : ignore[assignment]
     else:
         raise ValueError(f"Table has unrecognized file extension: {table.name}")
     bed = reader(table, **reader_kwargs).collect().to_pandas()
@@ -297,8 +297,12 @@ def _cartesian_product(arrays: Sequence[NDArray]) -> NDArray:
     return arr.reshape(-1, la)
 
 
-def get_rel_starts(starts: NDArray[np.int64], ends: NDArray[np.int64]):
-    rel_starts = np.concatenate([[0], (ends - starts).cumsum()[:-1]])
+def get_rel_starts(
+    starts: NDArray[np.int64], ends: NDArray[np.int64]
+) -> NDArray[np.int64]:
+    rel_starts: NDArray[np.int64] = np.concatenate(
+        [[0], (ends - starts).cumsum()[:-1]], dtype=np.int64
+    )
     return rel_starts
 
 

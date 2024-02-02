@@ -1,16 +1,15 @@
 from functools import partial
 from pathlib import Path
-from typing import Optional, Union, cast
+from typing import Dict, Optional, Union, cast
 
 import numpy as np
 import pysam
 import seqpro as sp
-import xarray as xr
 from numpy.typing import ArrayLike, NDArray
 from typing_extensions import assert_never
 
 from .types import Reader
-from .util import splice_subarrays
+from .util import get_rel_starts
 
 
 class NoPadError(Exception):
@@ -52,12 +51,12 @@ class Fasta(Reader):
         """
         self.name = name
         self.path = path
-        if pad is not None:
+        if pad is None:
+            self.pad = pad
+        else:
             if len(pad) > 1:
                 raise ValueError("Pad value must be a single character.")
             self.pad = pad.encode("ascii")
-        else:
-            self.pad = pad
 
         with self._open() as f:
             self.contigs = {c: f.get_reference_length(c) for c in f.references}
@@ -85,20 +84,23 @@ class Fasta(Reader):
             def rev_strand_fn(a: NDArray[np.bytes_]):
                 return a[::-1]
 
-            self.rev_strand_fn = rev_strand_fn
+            self.rev_strand_fn = rev_strand_fn  # type: ignore[assignment]
         else:
             assert_never(self.alphabet)
+
+        with self._open() as f:
+            self.contigs = {c: f.get_reference_length(c) for c in f.references}
 
         self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
 
         self.handle: Optional[pysam.FastaFile] = None
 
-        if in_memory:
-            self.sequences = self._load_all_contigs()
-        else:
+        if not in_memory:
             self.sequences = None
+        else:
+            self.sequences = self._load_all_contigs()
 
-    def _load_all_contigs(self) -> dict[str, NDArray[np.bytes_]]:
+    def _load_all_contigs(self) -> Dict[str, NDArray[np.bytes_]]:
         """Load all contigs into memory."""
         with self._open() as f:
             return {
@@ -120,7 +122,7 @@ class Fasta(Reader):
         ends: ArrayLike,
         out: Optional[NDArray] = None,
         **kwargs,
-    ) -> xr.DataArray:
+    ) -> NDArray[np.bytes_]:
         """Read a sequence from a FASTA file.
 
         Parameters
@@ -146,7 +148,10 @@ class Fasta(Reader):
         ValueError
             Coordinates are out-of-bounds and pad value is not set.
         """
-        contig = self.normalize_contig_name(contig)
+        contig = self.normalize_contig_name(contig, self.contigs.keys())
+        if contig is None:
+            raise RuntimeError("Contig not found in FASTA file.")
+        contig_len = self.contigs[contig]
 
         starts = np.atleast_1d(np.asarray(starts, dtype=np.int64))
         ends = np.atleast_1d(np.asarray(ends, dtype=np.int64))
@@ -157,46 +162,42 @@ class Fasta(Reader):
         if len(starts) != len(ends):
             raise ValueError("Starts and ends must be the same length.")
 
-        start = starts.min()
-        end = ends.max()
+        lengths = ends - starts
 
-        pad_left = -min(0, start)
-        if pad_left > 0 and self.pad is None:
-            raise NoPadError("Padding is disabled and a start is < 0.")
+        q_starts = np.maximum(0, starts)
+        q_ends = np.minimum(self.contigs[contig], ends)
+
+        left_pads = -np.minimum(0, starts)
+        right_pads = np.maximum(0, ends - contig_len)
+
+        if self.pad is None:
+            if (left_pads > 0).any():
+                raise NoPadError("Padding is disabled and a start is < 0.")
+            if (right_pads > 0).any():
+                raise NoPadError("Padding is disabled and an end is > contig length.")
+            out = np.empty(lengths.sum(), dtype="S1")
+        else:
+            out = np.full(lengths.sum(), self.pad, dtype="S1")
+
+        rel_starts = get_rel_starts(starts, ends)
+        rel_ends = rel_starts + lengths - right_pads
+        rel_starts += left_pads
 
         if self.sequences is None:
             if self.handle is None:
                 self.handle = self._open()
 
-            pad_right = max(0, end - self.handle.get_reference_length(contig))
-            if pad_right > 0 and self.pad is None:
-                raise NoPadError("Padding is disabled and end is > contig length.")
-
-            # pysam behavior
-            # start < 0 => error
-            # end > contig length => truncate
-            seq = self.handle.fetch(contig, max(0, start), end)
-
-            seq = np.frombuffer(seq.encode("ascii"), "S1")
+            for q_start, q_end, rel_start, rel_end in zip(
+                q_starts, q_ends, rel_starts, rel_ends
+            ):
+                seq = self.handle.fetch(contig, q_start, q_end)
+                seq = np.frombuffer(seq.encode("ascii"), "S1")
+                out[rel_start:rel_end] = seq
         else:
-            # numpy slice behavior
-            # start < 0 => wrap around
-            # end > contig length => truncate
-            pad_right = max(0, end - len(self.sequences[contig]))
-            if pad_right > 0 and self.pad is None:
-                raise NoPadError("Padding is disabled and end is > contig length.")
-            seq = self.sequences[contig][max(0, start) : end]
+            for q_start, q_end, rel_start, rel_end in zip(
+                q_starts, q_ends, rel_starts, rel_ends
+            ):
+                seq = self.sequences[contig][q_start, q_end]
+                out[rel_start:rel_end] = seq
 
-        padded_seq = []
-        if pad_left > 0:
-            pad_left = np.full(pad_left, self.pad)
-            padded_seq.append(pad_left)
-        padded_seq.append(seq)
-        if pad_right > 0:
-            pad_right = np.full(pad_right, self.pad)
-            padded_seq.append(pad_right)
-        seq = cast(NDArray[np.bytes_], np.concatenate(padded_seq))
-
-        out = splice_subarrays(seq, starts, ends)
-
-        return xr.DataArray(out, dims="length")
+        return out
