@@ -57,13 +57,13 @@ class FastaVariants(Reader):
         self.name = name
         self.coords = {
             "sample": np.asarray(self.variants.samples),
-            "ploid": np.arange(self.variants.ploidy, dtype=np.uint32),
+            "ploid": np.arange(self.variants.PLOIDY, dtype=np.uint32),
         }
         self.sizes = {k: len(v) for k, v in self.coords.items()}
 
         self.virtual_data = xr.DataArray(
             da.empty(  # pyright: ignore[reportPrivateImportUsage]
-                (self.variants.n_samples, self.variants.ploidy), dtype="S1"
+                (self.variants.n_samples, self.variants.PLOIDY), dtype="S1"
             ),
             name=name,
             coords=self.coords,
@@ -133,7 +133,7 @@ class FastaVariants(Reader):
 
         ploid = kwargs.get("ploid", None)
         if ploid is None:
-            ploid = self.variants.ploidy
+            ploid = self.variants.PLOIDY
         else:
             ploid = len(ploid)
 
