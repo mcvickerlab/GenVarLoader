@@ -62,7 +62,9 @@ class Fasta(Reader):
             self.contigs = {c: f.get_reference_length(c) for c in f.references}
 
         if alphabet is None:
-            self.alphabet = sp.alphabets.DNA
+            self.alphabet: Union[
+                sp.NucleotideAlphabet, sp.AminoAlphabet
+            ] = sp.alphabets.DNA
         elif isinstance(alphabet, str):
             alphabet = alphabet.upper()
             try:
@@ -88,19 +90,20 @@ class Fasta(Reader):
         else:
             assert_never(self.alphabet)
 
-        with self._open() as f:
-            self.contigs = {c: f.get_reference_length(c) for c in f.references}
-
-        self.contig_starts_with_chr = self.infer_contig_prefix(self.contigs)
+        self.contigs = self._get_contig_lengths()
 
         self.handle: Optional[pysam.FastaFile] = None
 
         if not in_memory:
             self.sequences = None
         else:
-            self.sequences = self._load_all_contigs()
+            self.sequences = self._get_all_contigs()
 
-    def _load_all_contigs(self) -> Dict[str, NDArray[np.bytes_]]:
+    def _get_contig_lengths(self) -> Dict[str, int]:
+        with self._open() as f:
+            return {c: f.get_reference_length(c) for c in f.references}
+
+    def _get_all_contigs(self) -> Dict[str, NDArray[np.bytes_]]:
         """Load all contigs into memory."""
         with self._open() as f:
             return {
@@ -197,7 +200,7 @@ class Fasta(Reader):
             for q_start, q_end, rel_start, rel_end in zip(
                 q_starts, q_ends, rel_starts, rel_ends
             ):
-                seq = self.sequences[contig][q_start, q_end]
+                seq = self.sequences[contig][q_start:q_end]
                 out[rel_start:rel_end] = seq
 
         return out

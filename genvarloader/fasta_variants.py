@@ -1,11 +1,7 @@
-from textwrap import dedent
 from typing import Optional
 
-import dask.array as da
 import numba as nb
 import numpy as np
-import xarray as xr
-from loguru import logger
 from numpy.typing import NDArray
 from typing_extensions import assert_never
 
@@ -47,7 +43,6 @@ class FastaVariants(Reader):
         self.variants = variants
         self.chunked = self.reference.chunked or self.variants.chunked
         self.jitter_long = jitter_long
-        self.contig_starts_with_chr = None
 
         if self.reference.pad is None:
             raise ValueError(
@@ -60,34 +55,6 @@ class FastaVariants(Reader):
             "ploid": np.arange(self.variants.PLOIDY, dtype=np.uint32),
         }
         self.sizes = {k: len(v) for k, v in self.coords.items()}
-
-        self.virtual_data = xr.DataArray(
-            da.empty(  # pyright: ignore[reportPrivateImportUsage]
-                (self.variants.n_samples, self.variants.PLOIDY), dtype="S1"
-            ),
-            name=name,
-            coords=self.coords,
-        )
-
-        if (
-            self.reference.contig_starts_with_chr
-            != self.variants.contig_starts_with_chr
-        ):
-            logger.warning(
-                dedent(
-                    f"""
-                Reference sequence and variant files have different contig naming
-                conventions. Contig names in queries will be normalized so that they
-                will still run, but this may indicate that the variants were not aligned
-                to the reference being used to construct haplotypes. The reference
-                file's contigs{"" if self.reference.contig_starts_with_chr else " don't"}
-                start with "chr" whereas the variant file's are the opposite.
-                """
-                )
-                .replace("\n", " ")
-                .strip()
-            )
-
         self.rng = np.random.default_rng(seed)
         self.rev_strand_fn = self.reference.rev_strand_fn
 
@@ -141,9 +108,8 @@ class FastaVariants(Reader):
         if seed is not None:
             self.rng = np.random.default_rng(seed)
 
-        starts, ends = np.asarray(starts, dtype=np.int64), np.asarray(
-            ends, dtype=np.int64
-        )
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int64))
+        ends = np.atleast_1d(np.asarray(ends, dtype=np.int64))
 
         variants, max_ends = self.variants.read_for_haplotype_construction(
             contig, starts, ends, **kwargs

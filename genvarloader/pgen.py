@@ -376,8 +376,8 @@ class Pgen(Variants):
             ploid = np.asarray(ploid)
 
         starts, ends = (
-            np.asarray(starts, dtype=np.int64),
-            np.asarray(ends, dtype=np.int64),
+            np.atleast_1d(np.asarray(starts, dtype=np.int64)),
+            np.atleast_1d(np.asarray(ends, dtype=np.int64)),
         )
 
         contig = self.normalize_contig_name(contig, self.contigs)

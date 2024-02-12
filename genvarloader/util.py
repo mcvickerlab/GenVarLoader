@@ -306,12 +306,12 @@ def get_rel_starts(
     return rel_starts
 
 
-T = TypeVar("T", bound=np.generic)
+DTYPE = TypeVar("DTYPE", bound=np.generic)
 
 
 def splice_subarrays(
-    arr: NDArray[T], starts: NDArray[np.int64], ends: NDArray[np.int64]
-) -> NDArray[T]:
+    arr: NDArray[DTYPE], starts: NDArray[np.int64], ends: NDArray[np.int64]
+) -> NDArray[DTYPE]:
     """Splice subarrays from a larger array.
 
     Parameters
@@ -340,12 +340,12 @@ def splice_subarrays(
 
 
 def splice_and_rc_subarrays(
-    arr: NDArray[T],
+    arr: NDArray[DTYPE],
     starts: NDArray[np.int64],
     ends: NDArray[np.int64],
     strands: NDArray[np.int8],
-    rc_fn: Callable[[NDArray[T]], NDArray[T]],
-) -> NDArray[T]:
+    rc_fn: Callable[[NDArray[DTYPE]], NDArray[DTYPE]],
+) -> NDArray[DTYPE]:
     """Splice subarrays from a larger array and reverse-complement them.
 
     Parameters
@@ -385,11 +385,11 @@ def splice_and_rc_subarrays(
 
 
 def splice_and_rev_subarrays(
-    arr: NDArray[T],
+    arr: NDArray[DTYPE],
     starts: NDArray[np.int64],
     ends: NDArray[np.int64],
     strands: NDArray[np.int8],
-) -> NDArray[T]:
+) -> NDArray[DTYPE]:
     """
     Splices and reverses subarrays of a given array based on the start and end indices
     and strand orientation.
