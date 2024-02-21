@@ -594,6 +594,7 @@ class _PgenGenos(_Genotypes):
         self.paths = paths
         self.n_samples = n_samples
         self.n_variants = n_variants
+        self.handle = None
 
     def _pgen(self, contig: str, sample_idx: Optional[NDArray[np.uint32]]):
         return pgenlib.PgenReader(bytes(self.paths[contig]), sample_subset=sample_idx)
@@ -606,26 +607,30 @@ class _PgenGenos(_Genotypes):
         sample_idx: Optional[NDArray[np.integer]],
         haplotype_idx: Optional[NDArray[np.integer]],
     ) -> NDArray[np.int8]:
+        if self.handle is None:
+            self.handle = self._pgen(contig, None)
+
         if sample_idx is None:
             n_samples = self.n_samples
             pgen_idx = None
             sample_sorter = None
         else:
-            n_samples = len(sample_idx)
+            n_samples = len(sample_idx)  # noqa: F841
             sample_sorter = np.argsort(sample_idx)
-            pgen_idx = sample_idx[sample_sorter].astype(np.uint32)
+            pgen_idx = sample_idx[sample_sorter].astype(np.uint32)  # noqa: F841
 
         n_vars = (end_idxs - start_idxs).sum()
         # (v s*2)
-        genotypes = np.empty((n_vars, n_samples * self.PLOIDY), dtype=np.int32)
+        genotypes = np.empty((n_vars, self.n_samples * self.PLOIDY), dtype=np.int32)
 
-        with self._pgen(contig, pgen_idx) as f:
-            for i, (s, e) in enumerate(zip(start_idxs, end_idxs)):
-                if s == e:
-                    continue
-                rel_s = s - start_idxs[i]
-                rel_e = e - start_idxs[i]
-                f.read_alleles_range(s, e, allele_int32_out=genotypes[rel_s:rel_e])
+        for i, (s, e) in enumerate(zip(start_idxs, end_idxs)):
+            if s == e:
+                continue
+            rel_s = s - start_idxs[i]
+            rel_e = e - start_idxs[i]
+            self.handle.read_alleles_range(
+                s, e, allele_int32_out=genotypes[rel_s:rel_e]
+            )
 
         # (v s*2)
         genotypes = genotypes.astype(np.int8)
@@ -634,12 +639,15 @@ class _PgenGenos(_Genotypes):
         # (s 2 v)
         genotypes = np.stack([genotypes[::2], genotypes[1::2]], axis=1)
 
+        if sample_idx is not None:
+            genotypes = genotypes[sample_idx]
+
         if haplotype_idx is not None:
             genotypes = genotypes[:, haplotype_idx]
 
         # re-order samples to be in query order
-        if sample_sorter is not None and (np.arange(n_samples) != sample_sorter).any():
-            genotypes = genotypes[sample_sorter]
+        # if sample_sorter is not None and (np.arange(n_samples) != sample_sorter).any():
+        #     genotypes = genotypes[sample_sorter]
 
         return genotypes
 
