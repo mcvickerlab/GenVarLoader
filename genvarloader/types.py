@@ -46,7 +46,6 @@ class Reader(Protocol):
     dtype: DTypeLike
     sizes: Dict[str, int]
     coords: Dict[str, NDArray]
-    contig_starts_with_chr: Optional[bool]
     rev_strand_fn: Callable[[NDArray], NDArray]
     chunked: bool
 
@@ -87,14 +86,6 @@ class Reader(Protocol):
         be concatenated together in the output array along the length dimension.
         """
         ...
-
-    def infer_contig_prefix(self, contigs: Iterable[str]) -> bool:
-        try:
-            next(iter(contigs))
-        except StopIteration:
-            raise ValueError("No contigs provided.")
-
-        return any(c.startswith("chr") for c in contigs)
 
     def normalize_contig_name(self, contig: str, contigs: Iterable[str]) -> str:
         """Normalize the contig name to adhere to the convention of the underlying file.
