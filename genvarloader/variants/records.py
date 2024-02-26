@@ -8,7 +8,7 @@ import numpy as np
 import polars as pl
 from attrs import define
 from loguru import logger
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from typing_extensions import Self
 
 from genvarloader.types import VLenAlleles
@@ -369,9 +369,12 @@ class Records:
     def vars_in_range(
         self,
         contig: str,
-        starts: NDArray[np.int64],
-        ends: NDArray[np.int64],
+        starts: ArrayLike,
+        ends: ArrayLike,
     ) -> Optional[RecordInfo]:
+        starts = np.atleast_1d(np.asarray(starts, dtype=int))
+        ends = np.atleast_1d(np.asarray(ends, dtype=int))
+
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
         print(_s_idxs)
         # make idxs absolute
@@ -417,9 +420,12 @@ class Records:
     def vars_in_range_for_haplotype_construction(
         self,
         contig: str,
-        starts: NDArray[np.int64],
-        ends: NDArray[np.int64],
+        starts: ArrayLike,
+        ends: ArrayLike,
     ) -> Tuple[Optional[RecordInfo], NDArray[np.int32]]:
+        starts = np.atleast_1d(np.asarray(starts, dtype=int))
+        ends = np.atleast_1d(np.asarray(ends, dtype=int))
+
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
 
         max_ends, _e_idxs = get_max_ends_and_idxs(

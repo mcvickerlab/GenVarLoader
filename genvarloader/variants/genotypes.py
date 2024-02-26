@@ -460,7 +460,9 @@ class VCFGenos(Genotypes):
     chunked = False
     ploidy = 2
 
-    def __init__(self, vcfs: Union[Path, Dict[str, Path]]) -> None:
+    def __init__(
+        self, vcfs: Union[Path, Dict[str, Path]], contig_offsets: Dict[str, int]
+    ) -> None:
         if not CYVCF2_INSTALLED:
             raise ImportError(
                 "cyvcf2 must be installed to use VCF files for genotypes."
@@ -476,15 +478,19 @@ class VCFGenos(Genotypes):
                 samples = np.array(cyvcf2.VCF(str(p)).samples)
         self.samples = samples  # type: ignore
         self.handles: Optional[Dict[str, cyvcf2.VCF]] = None
+        self.contig_offsets = contig_offsets
 
     def read(
         self,
         contig: str,
-        start_idxs: NDArray[np.integer],
-        end_idxs: NDArray[np.integer],
-        sample_idx: Optional[NDArray[np.integer]] = None,
-        haplotype_idx: Optional[NDArray[np.integer]] = None,
+        start_idxs: ArrayLike,
+        end_idxs: ArrayLike,
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
     ) -> NDArray[np.int8]:
+        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=int))
+        end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=int))
+
         if self.handles is None and "_all" not in self.paths:
             self.handles = {
                 c: cyvcf2.VCF(str(p), lazy=True) for c, p in self.paths.items()
@@ -496,12 +502,12 @@ class VCFGenos(Genotypes):
         if sample_idx is None:
             _sample_idx = slice(None)
         else:
-            _sample_idx = sample_idx
+            _sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=int))
 
         if haplotype_idx is None:
             _haplotype_idx = slice(None)
         else:
-            _haplotype_idx = haplotype_idx
+            _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=int))
 
         # (s p v)
         genos = np.empty(
@@ -509,7 +515,8 @@ class VCFGenos(Genotypes):
             dtype=np.int8,
         )
         geno_idx = 0
-        for i, v in enumerate(self.handles[contig](contig)):
+        offset = self.contig_offsets[contig]
+        for i, v in enumerate(self.handles[contig](contig), start=offset):
             for s_idx, e_idx in zip(start_idxs, end_idxs):
                 if i >= s_idx and i < e_idx:
                     # (s p) = (s p)

@@ -47,7 +47,7 @@ class Variants:
         try:
             genotypes = ZarrGenos(vcf)
         except FileNotFoundError:
-            genotypes = VCFGenos(vcf)
+            genotypes = VCFGenos(vcf, records.contig_offsets)
 
         return cls(records, genotypes)
 
@@ -67,8 +67,8 @@ class Variants:
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-        samples: Optional[ArrayLike] = None,
-        ploidies: Optional[ArrayLike] = None,
+        sample: Optional[ArrayLike] = None,
+        ploid: Optional[ArrayLike] = None,
     ):
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
@@ -77,25 +77,25 @@ class Variants:
         if recs is None:
             return None
 
-        if samples is not None:
-            samples = np.atleast_1d(np.asarray(samples, dtype=str))
+        if sample is not None:
+            sample = np.atleast_1d(np.asarray(sample, dtype=str))
             geno_sample_idxs, sample_idxs = np.intersect1d(
-                self.genotypes.samples, samples, return_indices=True
+                self.genotypes.samples, sample, return_indices=True
             )[1:]
-            if len(sample_idxs) != len(samples):
+            if len(sample_idxs) != len(sample):
                 raise ValueError("Some samples were not found")
         else:
             geno_sample_idxs = None
 
-        if ploidies is not None:
-            ploidies = np.atleast_1d(np.asarray(ploidies, dtype=int))
+        if ploid is not None:
+            ploid = np.atleast_1d(np.asarray(ploid, dtype=int))
 
         # (s p v)
         genos = self.genotypes.read(
-            contig, recs.start_idxs, recs.end_idxs, geno_sample_idxs, ploidies
+            contig, recs.start_idxs, recs.end_idxs, geno_sample_idxs, ploid
         )
 
-        if samples is not None:
+        if sample is not None:
             genos = genos[sample_idxs]
 
         return DenseGenotypes(
@@ -112,8 +112,8 @@ class Variants:
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-        samples: Optional[ArrayLike] = None,
-        ploidies: Optional[ArrayLike] = None,
+        sample: Optional[ArrayLike] = None,
+        ploid: Optional[ArrayLike] = None,
     ):
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
@@ -124,25 +124,25 @@ class Variants:
         if recs is None:
             return None
 
-        if samples is not None:
-            samples = np.atleast_1d(np.asarray(samples, dtype=str))
+        if sample is not None:
+            sample = np.atleast_1d(np.asarray(sample, dtype=str))
             geno_sample_idxs, sample_idxs = np.intersect1d(
-                self.genotypes.samples, samples, return_indices=True
+                self.genotypes.samples, sample, return_indices=True
             )[1:]
-            if len(sample_idxs) != len(samples):
+            if len(sample_idxs) != len(sample):
                 raise ValueError("Some samples were not found")
         else:
             geno_sample_idxs = None
 
-        if ploidies is not None:
-            ploidies = np.atleast_1d(np.asarray(ploidies, dtype=int))
+        if ploid is not None:
+            ploid = np.atleast_1d(np.asarray(ploid, dtype=int))
 
         # (s p v)
         genos = self.genotypes.read(
-            contig, recs.start_idxs, recs.end_idxs, geno_sample_idxs, ploidies
+            contig, recs.start_idxs, recs.end_idxs, geno_sample_idxs, ploid
         )
 
-        if samples is not None:
+        if sample is not None:
             genos = genos[sample_idxs]
 
         return (
