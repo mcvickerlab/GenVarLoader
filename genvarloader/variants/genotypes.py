@@ -20,9 +20,9 @@ try:
     import tensorstore as ts
     import zarr
 
-    TENSORSTORE_INSTALLED = True
+    ZARR_TENSORSTORE_INSTALLED = True
 except ImportError:
-    TENSORSTORE_INSTALLED = False
+    ZARR_TENSORSTORE_INSTALLED = False
 
 try:
     import cyvcf2
@@ -173,9 +173,9 @@ class ZarrGenos(Genotypes, FromRecsGenos):
     driver = "zarr"
 
     def __init__(self, paths: Union[Path, Dict[str, Path]]) -> None:
-        if not TENSORSTORE_INSTALLED:
+        if not ZARR_TENSORSTORE_INSTALLED:
             raise ImportError(
-                "Tensorstore must be installed to use chunked array caches like Zarr and N5."  # noqa: E501
+                "Zarr and TensorStore must be installed to use chunked array caches like Zarr and N5."
             )
         if isinstance(paths, Path):
             paths = {"_all": paths}
@@ -225,9 +225,9 @@ class ZarrGenos(Genotypes, FromRecsGenos):
         overwrite: bool = False,
         chunk_shape=None,
     ) -> Self:
-        if not TENSORSTORE_INSTALLED:
+        if not ZARR_TENSORSTORE_INSTALLED:
             raise ImportError(
-                "Tensorstore must be installed to use chunked array caches like Zarr and N5."  # noqa: E501
+                "Zarr and TensorStore must be installed to use chunked array caches like Zarr and N5."
             )
 
         n_samples = len(genotypes.samples)

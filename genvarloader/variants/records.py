@@ -376,7 +376,6 @@ class Records:
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
-        print(_s_idxs)
         # make idxs absolute
         s_idxs = self.e2s_idx[contig][_s_idxs] + self.contig_offsets[contig]
         e_idxs = (
