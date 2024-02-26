@@ -22,7 +22,7 @@ class VCF(Variants):
     ) -> None:
         if not CYVCF2_INSTALLED:
             raise ImportError("cyvcf2 must be installed to read VCF.")
-        self.PLOIDY = 2
+        self.ploidy = 2
 
         self.path = Path(path)
         if not self.path.exists():

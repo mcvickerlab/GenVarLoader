@@ -52,7 +52,7 @@ class FastaVariants(Reader):
         self.name = name
         self.coords = {
             "sample": np.asarray(self.variants.samples),
-            "ploid": np.arange(self.variants.PLOIDY, dtype=np.uint32),
+            "ploid": np.arange(self.variants.ploidy, dtype=np.uint32),
         }
         self.sizes = {k: len(v) for k, v in self.coords.items()}
         self.rng = np.random.default_rng(seed)
@@ -100,7 +100,7 @@ class FastaVariants(Reader):
 
         ploid = kwargs.get("ploid", None)
         if ploid is None:
-            ploid = self.variants.PLOIDY
+            ploid = self.variants.ploidy
         else:
             ploid = len(ploid)
 
@@ -276,22 +276,26 @@ def construct_haplotypes(
                     # handle shift
                     if shifted < shift:
                         ref_shift_dist = v_rel_pos - ref_idx
-                        # not enough distance to finish the shift even with the variant
+                        # if not enough distance to finish the shift even with the variant
                         if shifted + ref_shift_dist + v_len < shift:
+                            # consume ref up to the end of the variant
                             ref_idx = v_rel_pos + 1
+                            # add the length of skipped ref and size of the variant to the shift
                             shifted += ref_shift_dist + v_len
+                            # skip the variant
                             continue
                         # enough distance between ref_idx and variant to finish shift
                         elif shifted + ref_shift_dist >= shift:
+                            # consume ref until shift is finished
                             ref_idx += shift - shifted
                             shifted = shift
                             # can still use the variant and whatever ref is left between
                             # ref_idx and the variant
                         # ref + (some of) variant is enough to finish shift
                         else:
-                            # adjust ref_idx so that no reference is written
+                            # consume ref up to beginning of variant
+                            # ref_idx will be moved to end of variant after using the variant
                             ref_idx = v_rel_pos
-                            shifted = shift
                             # how much left to shift - amount of ref we can use
                             allele_start_idx = shift - shifted - ref_shift_dist
                             #! without if statement, parallel=True can cause a SystemError!
@@ -302,6 +306,8 @@ def construct_haplotypes(
                                 continue
                             allele = allele[allele_start_idx:]
                             v_len = len(allele)
+                            # done shifting
+                            shifted = shift
 
                     # add reference sequence
                     ref_len = v_rel_pos - ref_idx

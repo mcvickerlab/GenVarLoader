@@ -287,7 +287,7 @@ class Variants(Protocol):
 
     samples: Union[Sequence[str], NDArray[np.str_]]
     n_samples: int
-    PLOIDY: int
+    ploidy: int
     contig_starts_with_chr: Optional[bool]
     chunked: bool
 

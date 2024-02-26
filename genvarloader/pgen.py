@@ -316,7 +316,7 @@ class Pgen(Variants):
                         pgen_genos,
                         self.n_samples,
                         self.n_variants,
-                        self.PLOIDY,
+                        self.ploidy,
                         self.contig_offsets,
                         {c: len(p) for c, p in self.v_starts.items()},
                         caches,
@@ -331,6 +331,8 @@ class Pgen(Variants):
                 )
         else:
             self.genotypes = _PgenGenos(pgen_paths, self.n_samples, self.n_variants)
+
+        self.ploidy = self.genotypes.ploidy
 
         self.chunked = self.genotypes.chunked
         self.nbytes = (
@@ -371,7 +373,7 @@ class Pgen(Variants):
 
         ploid = kwargs.get("ploid", None)
         if ploid is None:
-            ploid = np.arange(self.PLOIDY)
+            ploid = np.arange(self.ploidy)
         else:
             ploid = np.asarray(ploid)
 
@@ -468,7 +470,7 @@ class Pgen(Variants):
 
         ploid = kwargs.get("ploid", None)
         if ploid is None:
-            ploid = np.arange(self.PLOIDY)
+            ploid = np.arange(self.ploidy)
         else:
             ploid = np.asarray(ploid)
 
@@ -553,6 +555,7 @@ class Pgen(Variants):
 
 class _Genotypes(Protocol):
     chunked: bool
+    ploidy = 2
 
     def read(
         self,
@@ -588,7 +591,6 @@ class _Genotypes(Protocol):
 class _PgenGenos(_Genotypes):
     chunked = False
     paths: Dict[str, Path]
-    PLOIDY = 2
 
     def __init__(self, paths: Dict[str, Path], n_samples: int, n_variants: int) -> None:
         self.paths = paths
@@ -621,7 +623,7 @@ class _PgenGenos(_Genotypes):
 
         n_vars = (end_idxs - start_idxs).sum()
         # (v s*2)
-        genotypes = np.empty((n_vars, self.n_samples * self.PLOIDY), dtype=np.int32)
+        genotypes = np.empty((n_vars, self.n_samples * self.ploidy), dtype=np.int32)
 
         for i, (s, e) in enumerate(zip(start_idxs, end_idxs)):
             if s == e:
@@ -929,7 +931,7 @@ class _MemmapGenos(_Genotypes):
         raise NotImplementedError
 
 
-# @nb.njit(nogil=True, cache=True)
+@nb.njit(nogil=True, cache=True)
 def get_max_ends_and_idxs(
     v_ends: NDArray[np.int32],
     v_diffs: NDArray[np.int32],
@@ -957,7 +959,7 @@ def get_max_ends_and_idxs(
     return max_ends, end_idxs
 
 
-# @nb.njit(nogil=True, cache=True)
+@nb.njit(nogil=True, cache=True)
 def weighted_activity_selection(
     v_ends: NDArray[np.int32],
     w: NDArray[np.int32],

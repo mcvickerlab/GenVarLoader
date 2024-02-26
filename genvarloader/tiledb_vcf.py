@@ -37,7 +37,7 @@ class TileDB_VCF(Variants):
 
         self.path = path
         self.ds = tiledbvcf.Dataset(str(path))
-        self.PLOIDY = ploidy
+        self.ploidy = ploidy
         if samples is None:
             self.samples = self.ds.samples()
         else:
@@ -56,7 +56,7 @@ class TileDB_VCF(Variants):
         ploid: Iterable[int]
         ploid = kwargs.get("ploid", None)
         if ploid is None:
-            ploid = range(self.PLOIDY)
+            ploid = range(self.ploidy)
 
         region = f"{contig}:{start+1}-{end}"
         df = self.ds.read_arrow(

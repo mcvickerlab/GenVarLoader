@@ -266,6 +266,23 @@ files = [
 ]
 
 [[package]]
+name = "coloredlogs"
+version = "15.0.1"
+description = "Colored terminal output for Python's logging module"
+optional = false
+python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*, !=3.4.*"
+files = [
+    {file = "coloredlogs-15.0.1-py2.py3-none-any.whl", hash = "sha256:612ee75c546f53e92e70049c9dbfcc18c935a2b9a53b66085ce9ef6a6e5c0934"},
+    {file = "coloredlogs-15.0.1.tar.gz", hash = "sha256:7c991aa71a4577af2f82600d8f8f3a89f936baeaf9b50a9c197da014e5bf16b0"},
+]
+
+[package.dependencies]
+humanfriendly = ">=9.1"
+
+[package.extras]
+cron = ["capturer (>=2.4)"]
+
+[[package]]
 name = "coverage"
 version = "7.4.1"
 description = "Code coverage measurement for Python"
@@ -331,6 +348,53 @@ tomli = {version = "*", optional = true, markers = "python_full_version <= \"3.1
 
 [package.extras]
 toml = ["tomli"]
+
+[[package]]
+name = "cyvcf2"
+version = "0.30.28"
+description = "fast vcf parsing with cython + htslib"
+optional = false
+python-versions = ">=3.7"
+files = [
+    {file = "cyvcf2-0.30.28-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:7dcdfd5b4b82023427b61225798be00d6c90b66a7f77a3bbd6d5ae1a905eefa0"},
+    {file = "cyvcf2-0.30.28-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:733308af4ac102eb83e1fba4377913f65abd2d617545d97d7421f9cc22338bd6"},
+    {file = "cyvcf2-0.30.28-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:adc5707e782b113d1cc2ffaaa74d62fb931f666d38eea2ad10c84f0ebe906fcf"},
+    {file = "cyvcf2-0.30.28-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:a005b09cac63176350e4eeee1fa9a1f3629b74153008071b2c6334d0f8a2c819"},
+    {file = "cyvcf2-0.30.28-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:301bc554bf46c6f231e5d919c58515b90148975ce75f866870f88b8e4ebeb596"},
+    {file = "cyvcf2-0.30.28-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:f1e0854bbbbc9f37dccd050177dde5a2b690e0442913d7d28e3a1baa8a246da8"},
+    {file = "cyvcf2-0.30.28-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:1ae399ed29550c501255dd898b7d0b700d52c0415389110b2525e7b5951de4bb"},
+    {file = "cyvcf2-0.30.28-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2811b46153c6d9719c4d4f8109c21722ae47797998ff5a42fbf20150535a2e0c"},
+    {file = "cyvcf2-0.30.28-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:c14e87e3d6d6f6031f10fd31850e3a87b85f15811a52d1f670f507348408ea37"},
+    {file = "cyvcf2-0.30.28-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:35142b59571f7b93db0bf239c025f5fa784cab512b027060311c5e665982df95"},
+    {file = "cyvcf2-0.30.28-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:c8d4e043d070699e2217ec696867b63dd79512020e38e90395cf6d28d2236e48"},
+    {file = "cyvcf2-0.30.28-cp312-cp312-macosx_10_9_x86_64.whl", hash = "sha256:3e40524c86a9f3fbcbf2f4f883c2597722cbae167e61cc90860a9e28c72f1a9a"},
+    {file = "cyvcf2-0.30.28-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:a16b32e455f5b1df74df786322ed2dfc88ef7dd0bb605aefdd542b894f9457d6"},
+    {file = "cyvcf2-0.30.28-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d6e07f4c8651e708a9cdc0cced6e0b0ec149b25a3fba95fe8e98e2cf70dd4da1"},
+    {file = "cyvcf2-0.30.28-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:33d3d572bfa632dccf86a2906f5c099a09f1490fcf39589d9d83ef0bca1a7dd9"},
+    {file = "cyvcf2-0.30.28-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:e55a76c061f07804915b221b9ba53633e8c7188d7016ee22853b296db94882bd"},
+    {file = "cyvcf2-0.30.28-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:588c1446d95fcff5cca1e39e78b222f9c308c62124abf456298e7ea6b0147e1f"},
+    {file = "cyvcf2-0.30.28-cp37-cp37m-macosx_10_9_x86_64.whl", hash = "sha256:1fe7a433f87e7d8d6c2e1395ce4c3b2e93f828e51da6f3e486e4b92cb3a7dd61"},
+    {file = "cyvcf2-0.30.28-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6e70fe62f9d34ea4e6eb28c356f6afb421d54892d8638f1695c3b600c0195ae1"},
+    {file = "cyvcf2-0.30.28-cp37-cp37m-manylinux_2_28_aarch64.whl", hash = "sha256:a650c40f52f72189b731f57b28bc39d4f13dc27f5c9b8bf28e26f00bea650b2d"},
+    {file = "cyvcf2-0.30.28-cp38-cp38-macosx_10_9_x86_64.whl", hash = "sha256:9f6918bf1a13826f4373cd2a4cd1258f19626c1882adc3a05572dc84841ef46d"},
+    {file = "cyvcf2-0.30.28-cp38-cp38-macosx_11_0_arm64.whl", hash = "sha256:18c76fc172fc4d818323fbc94fdb5bc4a8e4403620e5e67ed1cf05d5d192eac9"},
+    {file = "cyvcf2-0.30.28-cp38-cp38-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1755d04a2532943e28044313fd493873ae622505ddb2bf70afe129b12408e2ee"},
+    {file = "cyvcf2-0.30.28-cp38-cp38-manylinux_2_28_aarch64.whl", hash = "sha256:7ef138c805da7f43ca74de007c907160d77ff99a34e6099f7c83061b47ed11f6"},
+    {file = "cyvcf2-0.30.28-cp39-cp39-macosx_10_9_x86_64.whl", hash = "sha256:85ceb8e8ffb5c0b81213ca699f3be2b3110c9c521d77d634fa01dfe8f3e68764"},
+    {file = "cyvcf2-0.30.28-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:4f7fcb09d6767e8c685b4a9846806a80ba39256d50eb9397dd2b50fbc5c4b7a2"},
+    {file = "cyvcf2-0.30.28-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:03776122b76eada97533b17db0b5cd50397b0d245534eaff0055885a4c47706f"},
+    {file = "cyvcf2-0.30.28-cp39-cp39-manylinux_2_28_aarch64.whl", hash = "sha256:6f04671a9d9b8763150a6b31b6b26629dbd8f610df9f71a95dee0cf57c2141f8"},
+    {file = "cyvcf2-0.30.28-cp39-cp39-musllinux_1_2_x86_64.whl", hash = "sha256:2aba7819c015d6dded96ec127cca90f72dc875ed771d25d0e3a60863647ba672"},
+    {file = "cyvcf2-0.30.28-pp310-pypy310_pp73-macosx_10_9_x86_64.whl", hash = "sha256:84c69419035a69630c29dd5dba8a4ae7bf9b239e55088340223ca1a702340c38"},
+    {file = "cyvcf2-0.30.28-pp310-pypy310_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:91c81385c45c21734cc6c78514e720a8ec0d327e4de3a3e6a12c7c13c5d61cc2"},
+    {file = "cyvcf2-0.30.28-pp310-pypy310_pp73-manylinux_2_28_aarch64.whl", hash = "sha256:1c73e47d645f3328bfbb7fc03b6830b9adf59b346ce7efb669bb87ecfc513f50"},
+    {file = "cyvcf2-0.30.28.tar.gz", hash = "sha256:dde7771570e210df9ca6d21c171a8aa376f191966826241fdcdf960befb9cc0f"},
+]
+
+[package.dependencies]
+click = "*"
+coloredlogs = "*"
+numpy = "*"
 
 [[package]]
 name = "dask"
@@ -551,6 +615,20 @@ sftp = ["paramiko"]
 smb = ["smbprotocol"]
 ssh = ["paramiko"]
 tqdm = ["tqdm"]
+
+[[package]]
+name = "humanfriendly"
+version = "10.0"
+description = "Human friendly output for text interfaces using Python"
+optional = false
+python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*, !=3.4.*"
+files = [
+    {file = "humanfriendly-10.0-py2.py3-none-any.whl", hash = "sha256:1697e1a8a8f550fd43c2865cd84542fc175a61dcb779b6fee18cf6b6ccba1477"},
+    {file = "humanfriendly-10.0.tar.gz", hash = "sha256:6b0b831ce8f15f7300721aa49829fc4e83921a9a301cc7f606be6686a2288ddc"},
+]
+
+[package.dependencies]
+pyreadline3 = {version = "*", markers = "sys_platform == \"win32\" and python_version >= \"3.8\""}
 
 [[package]]
 name = "icecream"
@@ -965,6 +1043,43 @@ dev = ["Cython", "IPython", "asv", "black", "bump2version", "check-manifest", "f
 docs = ["IPython", "bump2version", "furo", "sphinx", "sphinx-argparse", "towncrier"]
 lint = ["black", "check-manifest", "flake8", "isort", "mypy"]
 test = ["Cython", "greenlet", "ipython", "pytest", "pytest-cov", "pytest-textual-snapshot", "setuptools"]
+
+[[package]]
+name = "ml-dtypes"
+version = "0.3.2"
+description = ""
+optional = false
+python-versions = ">=3.9"
+files = [
+    {file = "ml_dtypes-0.3.2-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:7afde548890a92b41c0fed3a6c525f1200a5727205f73dc21181a2726571bb53"},
+    {file = "ml_dtypes-0.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:d1a746fe5fb9cd974a91070174258f0be129c592b93f9ce7df6cc336416c3fbd"},
+    {file = "ml_dtypes-0.3.2-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:961134ea44c7b8ca63eda902a44b58cd8bd670e21d62e255c81fba0a8e70d9b7"},
+    {file = "ml_dtypes-0.3.2-cp310-cp310-win_amd64.whl", hash = "sha256:6b35c4e8ca957c877ac35c79ffa77724ecc3702a1e4b18b08306c03feae597bb"},
+    {file = "ml_dtypes-0.3.2-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:763697ab8a88d47443997a7cdf3aac7340049aed45f7521f6b0ec8a0594821fe"},
+    {file = "ml_dtypes-0.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:b89b194e9501a92d289c1ffd411380baf5daafb9818109a4f49b0a1b6dce4462"},
+    {file = "ml_dtypes-0.3.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2c34f2ba9660b21fe1034b608308a01be82bbef2a92fb8199f24dc6bad0d5226"},
+    {file = "ml_dtypes-0.3.2-cp311-cp311-win_amd64.whl", hash = "sha256:6604877d567a29bfe7cc02969ae0f2425260e5335505cf5e7fefc3e5465f5655"},
+    {file = "ml_dtypes-0.3.2-cp312-cp312-macosx_10_9_universal2.whl", hash = "sha256:93b78f53431c93953f7850bb1b925a17f0ab5d97527e38a7e865b5b4bc5cfc18"},
+    {file = "ml_dtypes-0.3.2-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:3a17ef2322e60858d93584e9c52a5be7dd6236b056b7fa1ec57f1bb6ba043e33"},
+    {file = "ml_dtypes-0.3.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e8505946df1665db01332d885c2020b4cb9e84a8b1241eb4ba69d59591f65855"},
+    {file = "ml_dtypes-0.3.2-cp312-cp312-win_amd64.whl", hash = "sha256:f47619d978ab1ae7dfdc4052ea97c636c6263e1f19bd1be0e42c346b98d15ff4"},
+    {file = "ml_dtypes-0.3.2-cp39-cp39-macosx_10_9_universal2.whl", hash = "sha256:c7b3fb3d4f6b39bcd4f6c4b98f406291f0d681a895490ee29a0f95bab850d53c"},
+    {file = "ml_dtypes-0.3.2-cp39-cp39-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:7a4c3fcbf86fa52d0204f07cfd23947ef05b4ad743a1a988e163caa34a201e5e"},
+    {file = "ml_dtypes-0.3.2-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:91f8783fd1f2c23fd3b9ee5ad66b785dafa58ba3cdb050c4458021fa4d1eb226"},
+    {file = "ml_dtypes-0.3.2-cp39-cp39-win_amd64.whl", hash = "sha256:7ba8e1fafc7fff3e643f453bffa7d082df1678a73286ce8187d3e825e776eb94"},
+    {file = "ml_dtypes-0.3.2.tar.gz", hash = "sha256:533059bc5f1764fac071ef54598db358c167c51a718f68f5bb55e3dee79d2967"},
+]
+
+[package.dependencies]
+numpy = [
+    {version = ">1.20", markers = "python_version < \"3.10\""},
+    {version = ">=1.26.0", markers = "python_version >= \"3.12\""},
+    {version = ">=1.23.3", markers = "python_version >= \"3.11\" and python_version < \"3.12\""},
+    {version = ">=1.21.2", markers = "python_version >= \"3.10\" and python_version < \"3.11\""},
+]
+
+[package.extras]
+dev = ["absl-py", "pyink", "pylint (>=2.6.0)", "pytest", "pytest-xdist"]
 
 [[package]]
 name = "more-itertools"
@@ -1655,6 +1770,17 @@ plugins = ["importlib-metadata"]
 windows-terminal = ["colorama (>=0.4.6)"]
 
 [[package]]
+name = "pyreadline3"
+version = "3.4.1"
+description = "A python implementation of GNU readline."
+optional = false
+python-versions = "*"
+files = [
+    {file = "pyreadline3-3.4.1-py3-none-any.whl", hash = "sha256:b0efb6516fd4fb07b45949053826a62fa4cb353db5be2bbb4a7aa1fdd1e345fb"},
+    {file = "pyreadline3-3.4.1.tar.gz", hash = "sha256:6f3d1f7b8a31ba32b73917cefc1f28cc660562f39aea8646d30bd6eff21f7bae"},
+]
+
+[[package]]
 name = "pysam"
 version = "0.22.0"
 description = "Package for reading, manipulating, and writing genomic data"
@@ -2120,6 +2246,36 @@ files = [
 ]
 
 [[package]]
+name = "tensorstore"
+version = "0.1.54"
+description = "Read and write large, multi-dimensional arrays"
+optional = false
+python-versions = ">=3.9"
+files = [
+    {file = "tensorstore-0.1.54-cp310-cp310-macosx_10_14_x86_64.whl", hash = "sha256:54dbc2d5de635ff55c4dd1e85eb8d326ed7c0c90489ab8e9dbbc93ad70f4ebf6"},
+    {file = "tensorstore-0.1.54-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:3d62cec4f3257e7e1d60220d6b1a604cf1e6d2f4684407669a3baa4c53b81f47"},
+    {file = "tensorstore-0.1.54-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7f5e0e9a81b41cba6c7462b57531855e3c0be320ae05b071b220206f04ab3b99"},
+    {file = "tensorstore-0.1.54-cp310-cp310-win_amd64.whl", hash = "sha256:2ccfc236cab7d5d7c0fdd6a1e13fbe9e5aa69a8dd0c472f479dd2b8c4c66f563"},
+    {file = "tensorstore-0.1.54-cp311-cp311-macosx_10_14_x86_64.whl", hash = "sha256:d2c032e5eb31ab0835fc21c74f5134274fe6d1f147917e1571876e4aa011d206"},
+    {file = "tensorstore-0.1.54-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:bcf6925cc1b1793d888d6c81f3f2bafe8b78352c792a5e77cc519b4fc8fd9482"},
+    {file = "tensorstore-0.1.54-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:dab3fb3fca3ec23f43d502641fc7ce3f40bdb864eca63b2b10a5a6592014f00b"},
+    {file = "tensorstore-0.1.54-cp311-cp311-win_amd64.whl", hash = "sha256:ba5d560d321ad353af866910bcdfb396ccd822b89d50e3275a22193dcbd6e35b"},
+    {file = "tensorstore-0.1.54-cp312-cp312-macosx_10_14_x86_64.whl", hash = "sha256:608212a855808f0f55a3cb66a562514632023df9df26e11c8497803102e17303"},
+    {file = "tensorstore-0.1.54-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:02077de82f9a388badc831b8bef0242f82ce47830076130e0f947bc2db88ecc1"},
+    {file = "tensorstore-0.1.54-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:5e19ef2c20e7139a5ba3f33b3170ff1418d2cffec01b46f16b0428b66984894e"},
+    {file = "tensorstore-0.1.54-cp312-cp312-win_amd64.whl", hash = "sha256:68dc970e7f69f46d4b7bcbbcb924e0c5ad71e9a2f16481679430edb1deb65fb0"},
+    {file = "tensorstore-0.1.54-cp39-cp39-macosx_10_14_x86_64.whl", hash = "sha256:70de04ad2177fb771f17db1a61cc1ed3295147676021cb3d63649b8a9faf2f45"},
+    {file = "tensorstore-0.1.54-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:954f321049ae0fd97904b76f2b8fc49257a04fa5813c8ca4b5aafa92567e743e"},
+    {file = "tensorstore-0.1.54-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:30ddc9c99b34afe3d64e4c2585238ace9d8a9e1818a9ffcdce356e4e20e98648"},
+    {file = "tensorstore-0.1.54-cp39-cp39-win_amd64.whl", hash = "sha256:9b0501b40107c0bec29c48ce926353eee92b2b6d3b5d5bce0983c35de007eaaf"},
+    {file = "tensorstore-0.1.54.tar.gz", hash = "sha256:e1a9dcb0be7c828f752375409537d4b39c658dd6c6a0873fe21a24a556ec0e2a"},
+]
+
+[package.dependencies]
+ml-dtypes = ">=0.3.1"
+numpy = ">=1.16.0"
+
+[[package]]
 name = "textual"
 version = "0.48.2"
 description = "Modern Text User Interface framework"
@@ -2410,4 +2566,4 @@ testing = ["big-O", "jaraco.functools", "jaraco.itertools", "more-itertools", "p
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.9"
-content-hash = "577eb845617c8f4bb5784cb8569e2d539775669d73589a6af98f2e40e401843a"
+content-hash = "6573ee0d7789f3ee063448f2bc8801df3e4836f2bacc3772dd0035843f4dc71e"
