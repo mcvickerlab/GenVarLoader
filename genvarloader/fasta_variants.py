@@ -2,11 +2,10 @@ from typing import Optional
 
 import numba as nb
 import numpy as np
-from numpy.typing import NDArray
-from typing_extensions import assert_never
+from numpy.typing import ArrayLike, NDArray
 
 from .fasta import Fasta
-from .types import DenseGenotypes, Reader, SparseAlleles, Variants
+from .types import Reader, Variants
 from .util import get_rel_starts
 
 
@@ -61,8 +60,8 @@ class FastaVariants(Reader):
     def read(
         self,
         contig: str,
-        starts: NDArray[np.int64],
-        ends: NDArray[np.int64],
+        starts: ArrayLike,
+        ends: ArrayLike,
         out: Optional[NDArray[np.bytes_]] = None,
         **kwargs,
     ) -> NDArray[np.bytes_]:
@@ -133,38 +132,33 @@ class FastaVariants(Reader):
             seqs[...] = ref
             return seqs
 
-        if isinstance(variants, DenseGenotypes):
-            if self.jitter_long:
-                shifts = self.sample_shifts(
-                    variants.genotypes, variants.size_diffs, variants.offsets
-                )
-            else:
-                shifts = np.zeros((n_samples, ploid, len(starts)), dtype=np.int32)
-
-            construct_haplotypes(
-                seqs.view(np.uint8),
-                ref.view(np.uint8),
-                shifts,
-                variants.positions,
-                variants.size_diffs,
-                variants.genotypes,
-                variants.alt.offsets,
-                variants.alt.alleles.view(np.uint8),
-                variants.offsets,
-                starts,
-                rel_starts,
-                lengths,
-                ref_rel_starts,
-                ref_lengths,
-                np.uint8(
-                    # pad existing is checked on init
-                    ord(self.reference.pad)  # type: ignore[arg-type]
-                ),
+        if self.jitter_long:
+            shifts = self.sample_shifts(
+                variants.genotypes, variants.size_diffs, variants.offsets
             )
-        elif isinstance(variants, SparseAlleles):
-            raise NotImplementedError
         else:
-            assert_never(variants)
+            shifts = np.zeros((n_samples, ploid, len(starts)), dtype=np.int32)
+
+        construct_haplotypes(
+            seqs.view(np.uint8),
+            ref.view(np.uint8),
+            shifts,
+            variants.positions,
+            variants.size_diffs,
+            variants.genotypes,
+            variants.alt.offsets,
+            variants.alt.alleles.view(np.uint8),
+            variants.offsets,
+            starts,
+            rel_starts,
+            lengths,
+            ref_rel_starts,
+            ref_lengths,
+            np.uint8(
+                # pad existing is checked on init
+                ord(self.reference.pad)  # type: ignore[arg-type]
+            ),
+        )
 
         return seqs
 

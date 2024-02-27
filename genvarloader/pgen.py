@@ -6,7 +6,7 @@ import numba as nb
 import numpy as np
 import polars as pl
 from loguru import logger
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
 
 from .types import DenseGenotypes, Variants, VLenAlleles
@@ -346,7 +346,7 @@ class Pgen(Variants):
         )
 
     def read(
-        self, contig: str, starts: NDArray[np.int64], ends: NDArray[np.int64], **kwargs
+        self, contig: str, starts: ArrayLike, ends: ArrayLike, **kwargs
     ) -> Optional[DenseGenotypes]:
         """Read genotypes that overlap the query regions.
 
@@ -434,8 +434,8 @@ class Pgen(Variants):
     def read_for_haplotype_construction(
         self,
         contig: str,
-        starts: NDArray[np.int64],
-        ends: NDArray[np.int64],
+        starts: ArrayLike,
+        ends: ArrayLike,
         **kwargs,
     ) -> Tuple[Optional[DenseGenotypes], NDArray[np.int64]]:
         """Read genotypes for haplotype construction. This is a special case of `read`

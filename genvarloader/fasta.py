@@ -123,7 +123,6 @@ class Fasta(Reader):
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-        out: Optional[NDArray] = None,
         **kwargs,
     ) -> NDArray[np.bytes_]:
         """Read a sequence from a FASTA file.
@@ -132,12 +131,10 @@ class Fasta(Reader):
         ----------
         contig : str
             Name of the contig/chromosome.
-        starts : NDArray[np.int64]
+        starts : ArrayLike
             Start coordinates, 0-based.
-        ends : NDArray[np.int64]
+        ends : ArrayLike
             End coordinates, 0-based exclusive.
-        out : NDArray, optional
-            Array to put the result into. Otherwise allocates one.
         **kwargs
             Not used.
 

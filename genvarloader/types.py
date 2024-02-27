@@ -14,7 +14,7 @@ from typing import (
 import numpy as np
 import polars as pl
 from attrs import define
-from numpy.typing import DTypeLike, NDArray
+from numpy.typing import ArrayLike, DTypeLike, NDArray
 
 
 class Reader(Protocol):
@@ -52,9 +52,8 @@ class Reader(Protocol):
     def read(
         self,
         contig: str,
-        starts: NDArray[np.int64],
-        ends: NDArray[np.int64],
-        out: Optional[NDArray] = None,
+        starts: ArrayLike,
+        ends: ArrayLike,
         **kwargs,
     ) -> NDArray:
         """Read data corresponding to given genomic coordinates. The output shape will
@@ -64,19 +63,17 @@ class Reader(Protocol):
         ----------
         contig : str
             Name of the contig/chromosome.
-        starts : NDArray[int64]
+        starts : ArrayLike
             Start coordinates, 0-based.
-        ends : NDArray[int64]
+        ends : ArrayLike
             End coordinates, 0-based exclusive.
-        out : NDArray, optional
-            Array to put the result into. Otherwise allocates one.
         **kwargs
             Additional keyword arguments. For example, which samples or ploid numbers to
             return.
 
         Returns
         -------
-        xarray.DataArray
+        NDArray
             Data corresponding to the given genomic coordinates. The final axis is the
             length axis i.e. has length == (ends - starts).sum().
 
@@ -230,27 +227,6 @@ class VLenAlleles:
 
 
 @define
-class SparseAlleles:
-    """Sparse/ragged array of single base pair alleles.
-
-    Attributes
-    ----------
-    offsets : NDArray[np.uint32]
-        Shape: (samples + 1). Offsets for the index boundaries of each sample such
-        that variants for sample `i` are `positions[offsets[i] : offsets[i+1]]` and
-        `alleles[..., offsets[i] : offsets[i+1]]`.
-    positions : NDArray[np.int32]
-        Shape: (variants). 0-based position of each variant.
-    alleles : NDArray[np.bytes_]
-        Shape: (ploid, variants). Alleles found at each variant.
-    """
-
-    offsets: NDArray[np.uint32]
-    positions: NDArray[np.int32]
-    alleles: NDArray[np.bytes_]
-
-
-@define
 class DenseGenotypes:
     """Dense array(s) of genotypes.
 
@@ -292,8 +268,8 @@ class Variants(Protocol):
     chunked: bool
 
     def read(
-        self, contig: str, starts: NDArray[np.int64], ends: NDArray[np.int64], **kwargs
-    ) -> Union[Optional[SparseAlleles], Optional[DenseGenotypes]]:
+        self, contig: str, starts: ArrayLike, ends: ArrayLike, **kwargs
+    ) -> Optional[DenseGenotypes]:
         """Read variants found in the given genomic coordinates, optionally for specific
         samples and ploid numbers.
 
@@ -301,9 +277,9 @@ class Variants(Protocol):
         ----------
         contig : str
             Name of the contig/chromosome.
-        starts : NDArray[int32]
+        starts : ArrayLike
             Start coordinates, 0-based.
-        ends : int, NDArray[int32]
+        ends : int, ArrayLike
             End coordinates, 0-based exclusive.
         **kwargs
             Additional keyword arguments. May include `sample: Iterable[str]` and
@@ -317,7 +293,7 @@ class Variants(Protocol):
         ...
 
     def read_for_haplotype_construction(
-        self, contig: str, starts: NDArray[np.int64], ends: NDArray[np.int64], **kwargs
+        self, contig: str, starts: ArrayLike, ends: ArrayLike, **kwargs
     ) -> Tuple[Optional[DenseGenotypes], NDArray[np.int64]]:
         """Read genotypes for haplotype construction. This is a special case of `read`
         where variants past (i.e. downstream of) the query regions can be included to
@@ -329,9 +305,9 @@ class Variants(Protocol):
         ----------
         contig : str
             Name of the contig/chromosome.
-        starts : NDArray[int32]
+        starts : ArrayLike
             Start coordinates, 0-based.
-        ends : int, NDArray[int32]
+        ends : int, ArrayLike
             End coordinates, 0-based exclusive.
 
         Returns
