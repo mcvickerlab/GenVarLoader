@@ -1,10 +1,7 @@
-from textwrap import dedent
 from typing import Optional
 
 import numba as nb
 import numpy as np
-import xarray as xr
-from loguru import logger
 from numpy.typing import NDArray
 from typing_extensions import assert_never
 
@@ -46,7 +43,6 @@ class FastaVariants(Reader):
         self.variants = variants
         self.chunked = self.reference.chunked or self.variants.chunked
         self.jitter_long = jitter_long
-        self.contig_starts_with_chr = None
 
         if self.reference.pad is None:
             raise ValueError(
@@ -59,26 +55,6 @@ class FastaVariants(Reader):
             "ploid": np.arange(self.variants.ploidy, dtype=np.uint32),
         }
         self.sizes = {k: len(v) for k, v in self.coords.items()}
-
-        if (
-            self.reference.contig_starts_with_chr
-            != self.variants.contig_starts_with_chr
-        ):
-            logger.warning(
-                dedent(
-                    f"""
-                Reference sequence and variant files have different contig naming
-                conventions. Contig names in queries will be normalized so that they
-                will still run, but this may indicate that the variants were not aligned
-                to the reference being used to construct haplotypes. The reference
-                file's contigs{"" if self.reference.contig_starts_with_chr else " don't"}
-                start with "chr" whereas the variant file's are the opposite.
-                """
-                )
-                .replace("\n", " ")
-                .strip()
-            )
-
         self.rng = np.random.default_rng(seed)
         self.rev_strand_fn = self.reference.rev_strand_fn
 
@@ -89,7 +65,7 @@ class FastaVariants(Reader):
         ends: NDArray[np.int64],
         out: Optional[NDArray[np.bytes_]] = None,
         **kwargs,
-    ) -> xr.DataArray:
+    ) -> NDArray[np.bytes_]:
         """Read a variant sequence corresponding to a genomic range, sample, and ploid.
 
         Parameters
@@ -132,9 +108,8 @@ class FastaVariants(Reader):
         if seed is not None:
             self.rng = np.random.default_rng(seed)
 
-        starts, ends = np.asarray(starts, dtype=np.int64), np.asarray(
-            ends, dtype=np.int64
-        )
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int64))
+        ends = np.atleast_1d(np.asarray(ends, dtype=np.int64))
 
         variants, max_ends = self.variants.read_for_haplotype_construction(
             contig, starts, ends, **kwargs
@@ -144,9 +119,7 @@ class FastaVariants(Reader):
         total_length = lengths.sum()
         rel_starts = get_rel_starts(starts, ends)
 
-        ref: NDArray[np.bytes_] = self.reference.read(
-            contig, starts, max_ends
-        ).to_numpy()
+        ref = self.reference.read(contig, starts, max_ends)
         ref_lengths = max_ends - starts
         ref_rel_starts = get_rel_starts(starts, max_ends)
 
@@ -158,7 +131,7 @@ class FastaVariants(Reader):
 
         if variants is None:
             seqs[...] = ref
-            return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
+            return seqs
 
         if isinstance(variants, DenseGenotypes):
             if self.jitter_long:
@@ -185,7 +158,7 @@ class FastaVariants(Reader):
                 ref_lengths,
                 np.uint8(
                     # pad existing is checked on init
-                    ord(self.reference.pad)  # pyright: ignore[reportGeneralTypeIssues]
+                    ord(self.reference.pad)  # type: ignore[arg-type]
                 ),
             )
         elif isinstance(variants, SparseAlleles):
@@ -193,7 +166,7 @@ class FastaVariants(Reader):
         else:
             assert_never(variants)
 
-        return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
+        return seqs
 
     def sample_shifts(
         self,
@@ -303,22 +276,26 @@ def construct_haplotypes(
                     # handle shift
                     if shifted < shift:
                         ref_shift_dist = v_rel_pos - ref_idx
-                        # not enough distance to finish the shift even with the variant
+                        # if not enough distance to finish the shift even with the variant
                         if shifted + ref_shift_dist + v_len < shift:
+                            # consume ref up to the end of the variant
                             ref_idx = v_rel_pos + 1
+                            # add the length of skipped ref and size of the variant to the shift
                             shifted += ref_shift_dist + v_len
+                            # skip the variant
                             continue
                         # enough distance between ref_idx and variant to finish shift
                         elif shifted + ref_shift_dist >= shift:
+                            # consume ref until shift is finished
                             ref_idx += shift - shifted
                             shifted = shift
                             # can still use the variant and whatever ref is left between
                             # ref_idx and the variant
                         # ref + (some of) variant is enough to finish shift
                         else:
-                            # adjust ref_idx so that no reference is written
+                            # consume ref up to beginning of variant
+                            # ref_idx will be moved to end of variant after using the variant
                             ref_idx = v_rel_pos
-                            shifted = shift
                             # how much left to shift - amount of ref we can use
                             allele_start_idx = shift - shifted - ref_shift_dist
                             #! without if statement, parallel=True can cause a SystemError!
@@ -329,6 +306,8 @@ def construct_haplotypes(
                                 continue
                             allele = allele[allele_start_idx:]
                             v_len = len(allele)
+                            # done shifting
+                            shifted = shift
 
                     # add reference sequence
                     ref_len = v_rel_pos - ref_idx

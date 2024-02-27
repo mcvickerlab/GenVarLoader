@@ -183,7 +183,7 @@ def _read_bed_table(table: Union[str, Path], **table_reader_kwargs):
         reader_kwargs["dtypes"] = {"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8}
         reader = pl.scan_csv
     elif {".fth", ".feather", ".ipc", ".arrow"} & suffixes:
-        reader = pl.scan_ipc
+        reader = pl.scan_ipc  # type : ignore[assignment]
     else:
         raise ValueError(f"Table has unrecognized file extension: {table.name}")
     bed = reader(table, **reader_kwargs).collect().to_pandas()
@@ -300,16 +300,18 @@ def _cartesian_product(arrays: Sequence[NDArray]) -> NDArray:
 def get_rel_starts(
     starts: NDArray[np.int64], ends: NDArray[np.int64]
 ) -> NDArray[np.int64]:
-    rel_starts = np.concatenate([[0], (ends - starts).cumsum()[:-1]])
+    rel_starts: NDArray[np.int64] = np.concatenate(
+        [[0], (ends - starts).cumsum()[:-1]], dtype=np.int64
+    )
     return rel_starts
 
 
-T = TypeVar("T", bound=np.generic)
+DTYPE = TypeVar("DTYPE", bound=np.generic)
 
 
 def splice_subarrays(
-    arr: NDArray[T], starts: NDArray[np.int64], ends: NDArray[np.int64]
-) -> NDArray[T]:
+    arr: NDArray[DTYPE], starts: NDArray[np.int64], ends: NDArray[np.int64]
+) -> NDArray[DTYPE]:
     """Splice subarrays from a larger array.
 
     Parameters
@@ -338,12 +340,12 @@ def splice_subarrays(
 
 
 def splice_and_rc_subarrays(
-    arr: NDArray[T],
+    arr: NDArray[DTYPE],
     starts: NDArray[np.int64],
     ends: NDArray[np.int64],
     strands: NDArray[np.int8],
-    rc_fn: Callable[[NDArray[T]], NDArray[T]],
-) -> NDArray[T]:
+    rc_fn: Callable[[NDArray[DTYPE]], NDArray[DTYPE]],
+) -> NDArray[DTYPE]:
     """Splice subarrays from a larger array and reverse-complement them.
 
     Parameters
@@ -383,11 +385,11 @@ def splice_and_rc_subarrays(
 
 
 def splice_and_rev_subarrays(
-    arr: NDArray[T],
+    arr: NDArray[DTYPE],
     starts: NDArray[np.int64],
     ends: NDArray[np.int64],
     strands: NDArray[np.int8],
-) -> NDArray[T]:
+) -> NDArray[DTYPE]:
     """
     Splices and reverses subarrays of a given array based on the start and end indices
     and strand orientation.

@@ -6,7 +6,6 @@ from typing import (
     Callable,
     Dict,
     Generator,
-    Hashable,
     Iterable,
     List,
     Literal,
@@ -28,7 +27,12 @@ from numpy.typing import NDArray
 from .concurrent import Buffer
 from .haplotypes import Haplotypes
 from .types import Reader
-from .util import _cartesian_product, construct_virtual_data, process_bed
+from .util import (
+    _cartesian_product,
+    construct_virtual_data,
+    get_rel_starts,
+    process_bed,
+)
 
 try:
     import torch  # noqa: F401
@@ -39,7 +43,7 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 
-BatchDict = Dict[Hashable, Tuple[List[Hashable], NDArray]]
+BatchDict = Dict[str, Tuple[List[str], NDArray]]
 
 
 class GVL:
@@ -60,9 +64,7 @@ class GVL:
         batch_size: int,
         max_memory_gb: float,
         batch_dims: Optional[List[str]] = None,
-        transform: Optional[
-            Callable[[Dict[Hashable, NDArray]], Dict[Hashable, NDArray]]
-        ] = None,
+        transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
         shuffle: bool = False,
         weights: Optional[Dict[str, NDArray]] = None,
         seed: Optional[int] = None,
@@ -191,18 +193,18 @@ class GVL:
             self.virtual_data = self.virtual_data.isel(region=region_slice)
 
         # sizes does not include the length dimension
-        self.sizes = dict(self.virtual_data.sizes)
+        self.sizes = cast(Dict[str, int], dict(self.virtual_data.sizes))
         del self.sizes["region"]
         del self.sizes["length"]
         # dimension -> sum of itemsizes across readers with that dimension
-        self.itemsizes: Mapping[Hashable, int] = defaultdict(int)
+        self.itemsizes: Mapping[str, int] = defaultdict(int)
         # indexes does not include the length dimension
         self.indexes = {k: a.values for k, a in self.virtual_data.coords.items()}
         for arr in self.virtual_data.values():
             for dim in arr.dims:
                 if dim == "length":
                     continue
-                self.itemsizes[dim] += arr.dtype.itemsize
+                self.itemsizes[cast(str, dim)] += arr.dtype.itemsize
 
         if batch_dims is None:
             batch_dims = []
@@ -214,21 +216,22 @@ class GVL:
             )
 
         self.non_batch_dims = [d for d in self.sizes.keys() if d not in self.batch_dims]
-        self.non_batch_dim_shape: Dict[Hashable, List[int]] = {}
+        self.non_batch_dim_shape: Dict[str, List[int]] = {}
         # Mapping from array name to axis number in the buffer index column
-        self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
+        self.buffer_idx_cols: Dict[str, NDArray[np.integer]] = {}
         # Mapping from array name to axes in the buffer corresponding to each idx col
-        self.buffer_idx_col_axes: Dict[Hashable, NDArray[np.integer]] = {}
+        self.buffer_idx_col_axes: Dict[str, NDArray[np.integer]] = {}
         # Mapping from array name to the axis number of the batch dimension after
         # vectorized indexing of the buffer to get a batch
-        self.buffer_batch_axis: Dict[Hashable, int] = {}
+        self.buffer_batch_axis: Dict[str, int] = {}
         for name, a in self.virtual_data.items():
+            name = cast(str, name)
             self.non_batch_dim_shape[name] = [
                 a.sizes[d] for d in self.non_batch_dims if d in a.dims
             ]
             # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
             idx_cols = [
-                self.batch_dims.index(d) + self.BUFFER_IDX_MIN_DIM_COL
+                self.batch_dims.index(cast(str, d)) + self.BUFFER_IDX_MIN_DIM_COL
                 for d in a.dims
                 if d in self.batch_dims
             ]
@@ -242,7 +245,7 @@ class GVL:
                 # length axis
                 self.buffer_batch_axis[
                     name
-                ] = a.get_axis_num(  # pyright: ignore[reportGeneralTypeIssues]
+                ] = a.get_axis_num(  # type: ignore[assignment]
                     "length"
                 )
             else:
@@ -278,9 +281,7 @@ class GVL:
         batch_size: Optional[int] = None,
         max_memory_gb: Optional[float] = None,
         batch_dims: Optional[List[str]] = None,
-        transform: Optional[
-            Callable[[Dict[Hashable, NDArray]], Dict[Hashable, NDArray]]
-        ] = None,
+        transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
         shuffle: bool = False,
         weights: Optional[Dict[str, NDArray]] = None,
         seed: Optional[int] = None,
@@ -384,16 +385,17 @@ class GVL:
             self.non_batch_dims = [
                 d for d in self.sizes.keys() if d not in self.batch_dims
             ]
-            self.non_batch_dim_shape: Dict[Hashable, List[int]] = {}
-            self.buffer_idx_cols: Dict[Hashable, NDArray[np.integer]] = {}
-            self.buffer_idx_col_axes: Dict[Hashable, NDArray[np.integer]] = {}
+            self.non_batch_dim_shape = {}
+            self.buffer_idx_cols = {}
+            self.buffer_idx_col_axes = {}
             for name, a in self.virtual_data.items():
+                name = cast(str, name)
                 self.non_batch_dim_shape[name] = [
                     a.sizes[d] for d in self.non_batch_dims
                 ]
                 # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
                 idx_cols = [
-                    self.batch_dims.index(d) + self.BUFFER_IDX_MIN_DIM_COL
+                    self.batch_dims.index(cast(str, d)) + self.BUFFER_IDX_MIN_DIM_COL
                     for d in a.dims
                     if d in self.batch_dims
                 ]
@@ -407,7 +409,7 @@ class GVL:
                     # length axis
                     self.buffer_batch_axis[
                         name
-                    ] = a.get_axis_num(  # pyright: ignore[reportGeneralTypeIssues]
+                    ] = a.get_axis_num(  # type: ignore[assignment]
                         "length"
                     )
                 else:
@@ -429,7 +431,7 @@ class GVL:
         ):
             self.max_length = self.get_max_length()
             self.partitioned_bed = self.partition_bed(self.bed, self.max_length)
-            self.n_instances: int = self.bed.height * np.prod(
+            self.n_instances = self.bed.height * np.prod(
                 [self.sizes[d] for d in self.batch_dims], dtype=int
             )
 
@@ -452,7 +454,7 @@ class GVL:
             # ceil
             return -(-self.n_instances // self.batch_size)
 
-    def mem_per_length(self, sizes: Mapping[Hashable, int]):
+    def mem_per_length(self, sizes: Mapping[str, int]):
         mpl = sum(sizes[dim] * self.itemsizes[dim] for dim in sizes)
         mpl = max(1, mpl)
         return mpl
@@ -511,7 +513,7 @@ class GVL:
             )
         return max_length
 
-    def get_buffer_sizes(self, max_mem: int, max_length: int) -> Dict[Hashable, int]:
+    def get_buffer_sizes(self, max_mem: int, max_length: int) -> Dict[str, int]:
         """Get the size of batch dimensions such that the largest buffer (i.e. with max
         length) will fit into memory."""
         buffer_sizes = deepcopy(self.sizes)
@@ -550,9 +552,11 @@ class GVL:
         dim_idxs = [dim_idx for dim_idx in self.dim_idxs_generator()]
 
         if self.shuffle:
-            self.rng.shuffle(dim_idxs)  # pyright: ignore[reportGeneralTypeIssues]
+            self.rng.shuffle(dim_idxs)  # type: ignore[arg-type]
 
-        offsets = np.empty(bed["chrom"].n_unique() + 1, dtype=np.uint32)
+        offsets: NDArray[np.uint32] = np.empty(
+            bed["chrom"].n_unique() + 1, dtype=np.uint32
+        )
         offsets[0] = 0
         offsets[1:] = (
             bed.group_by("chrom", maintain_order=True)
@@ -576,14 +580,14 @@ class GVL:
     def __iter__(self):
         return self.iter_batches()
 
-    def iter_batches(self):
+    def iter_batches(
+        self,
+    ) -> Generator[Union[Tuple[NDArray, ...], Dict[str, NDArray]], None, None]:
         for partreg in self.partitioned_bed:
             partreg._reset_counter()
 
         if self.shuffle:
-            self.rng.shuffle(
-                self.partitioned_bed  # pyright: ignore[reportGeneralTypeIssues]
-            )
+            self.rng.shuffle(self.partitioned_bed)  # type: ignore[arg-type]
             self.indexes = {
                 d: self.rng.permutation(idx) for d, idx in self.indexes.items()
             }
@@ -654,7 +658,7 @@ class GVL:
 
             self.total_yielded += batch_slice.stop
 
-    def dim_idxs_generator(self) -> Generator[Dict[Hashable, List[int]], None, None]:
+    def dim_idxs_generator(self) -> Generator[Dict[str, List[int]], None, None]:
         """Yields dictionaries of dims->indices"""
         # Chunked formats require access patterns such that data locality is respected
         # i.e. data must be accessed that is close to each other in on disk.
@@ -677,7 +681,7 @@ class GVL:
         self,
         partition: pl.DataFrame,
         merged_starts: NDArray[np.int64],
-        read_kwargs: Dict[Hashable, NDArray[np.int64]],
+        read_kwargs: Dict[str, NDArray[np.int64]],
     ) -> NDArray[np.integer]:
         row_idx = partition.with_row_count()["row_nr"].to_numpy()
         buffer_indexes = [row_idx]
@@ -689,8 +693,8 @@ class GVL:
             buffer_indexes.append(np.arange(size))
         buffer_idx = _cartesian_product(buffer_indexes)
         # buffer_idx columns: starts, region_idx, dim1_idx, dim2_idx, ...
-        rel_starts = get_relative_starts(
-            partition["chromStart"].to_numpy(), merged_starts, self.fixed_length
+        rel_starts = get_rel_starts(
+            partition["chromStart"].to_numpy(), partition["chromEnd"].to_numpy()
         )[buffer_idx[:, 0], None]
         if self.jitter_bed is not None:
             rel_starts += self.rng.integers(
@@ -706,11 +710,11 @@ class GVL:
         # buffer_idx columns: starts, strands, region_idx, dim1_idx, dim2_idx, ...
         for i, d in enumerate(self.batch_dims, self.BUFFER_IDX_MIN_DIM_COL):
             # caller responsible for weights existing
-            w = self.weights.get(d, None)  # pyright: ignore[reportOptionalMemberAccess]
+            w = self.weights.get(d, None)  # type: ignore[union-attr]
             if w is not None:
                 idx_weights *= w[buffer_idx[:, i]]
         idx_weights = np.round(idx_weights).astype(int)
-        return buffer_idx.repeat(idx_weights)
+        return buffer_idx.repeat(idx_weights)  # type: ignore[arg-type]
 
     def select_from_buffer(
         self,
@@ -800,7 +804,7 @@ class GVL:
         self,
         batch: BatchDict,
         batch_idx: NDArray,
-        dim_idxs: Dict[Hashable, List[int]],
+        dim_idxs: Dict[str, List[int]],
     ):
         out = {name: arr for name, (dim, arr) in batch.items()}
 
@@ -818,7 +822,7 @@ class GVL:
             out = self.transform(out)
 
         if self.return_tuples:
-            out = tuple(out[name] for name in self.return_tuples)  # type: ignore return_tuples is never True
+            out = tuple(out[name] for name in self.return_tuples)  # type: ignore[assignment]
 
         return out
 
@@ -870,7 +874,7 @@ def partition_regions(
     -------
     numpy.ndarray : Array of partition numbers for each region.
     """
-    partitions = np.zeros_like(starts, dtype=np.uint32)
+    partitions: NDArray[np.uint32] = np.zeros_like(starts, dtype=np.uint32)
     for i in nb.prange(len(offsets) - 1):
         s = offsets[i]
         e = offsets[i + 1]
@@ -978,35 +982,10 @@ def merge_overlapping_regions_one_contig(
     return merged_starts[: region_idx + 1], merged_ends[: region_idx + 1]
 
 
-@nb.njit(nogil=True, cache=True)
-def get_relative_starts(
-    starts: NDArray[np.int64], merged_starts: NDArray[np.int64], length: int
-):
-    rel_starts = np.empty(len(starts), dtype=np.int64)
-    region_idx = 0
-    region_rel_start = 0
-
-    for i in range(len(starts)):
-        start = starts[i]
-
-        if (
-            region_idx != len(merged_starts) - 1
-            and start >= merged_starts[region_idx + 1]
-        ):
-            region_idx += 1
-            rel_starts[i] = rel_starts[i - 1] + length
-            region_rel_start = rel_starts[i]
-        else:
-            merged_start = merged_starts[region_idx]
-            rel_starts[i] = start - merged_start + region_rel_start
-
-    return rel_starts
-
-
 @define
 class PartitionOfRegions:
     partition: pl.DataFrame
-    dim_idxs: List[Dict[Hashable, List[int]]]
+    dim_idxs: List[Dict[str, List[int]]]
     counter: int = -1
 
     def __iter__(self):
@@ -1032,22 +1011,9 @@ class SyncBuffers:
     def __iter__(self):
         return self.generate_buffers()
 
-    def generate_buffers(self):
-        buffer: Dict[str, NDArray] = {}
-        for name, reader in self.gvl.unnested_readers.items():
-            dims: Tuple[Hashable, ...] = tuple(reader.sizes)
-            shape: List[int] = []
-            for dim in dims:
-                # Not all dims are batch dims, so some will be missing from buffer_sizes
-                size = self.gvl.buffer_sizes.get(dim, None)
-                if size is not None:
-                    shape.append(size)
-            dtype = reader.dtype
-            shape.append(self.gvl.max_length)
-            buffer[name] = np.empty(shape, dtype=dtype)
-
+    def generate_buffers(self) -> Generator[Buffer, None, None]:
         for partition, dim_idxs in interleave_longest(*self.gvl.partitioned_bed):
-            contig: str
+            # contig: str
             contig = partition.select("chrom").row(0)[0]
             starts, ends = [
                 c.to_numpy()
@@ -1056,8 +1022,6 @@ class SyncBuffers:
             merged_starts, merged_ends = merge_overlapping_regions_one_contig(
                 starts, ends
             )
-            lengths = merged_ends - merged_starts
-            total_length = lengths.sum()
 
             read_kwargs = {
                 dim: self.gvl.indexes[dim][idx] for dim, idx in dim_idxs.items()
@@ -1071,41 +1035,24 @@ class SyncBuffers:
             if self.gvl.shuffle:
                 buffer_idx = self.gvl.rng.permutation(buffer_idx)
 
-            _buffer_dict = {}
-            slices: Dict[Hashable, slice] = {}
-            for dim in self.gvl.batch_dims:
-                slices[dim] = slice(0, len(read_kwargs[dim]))
-            slices["length"] = slice(0, total_length)
-
+            _buffer_dict: Dict[str, Tuple[Tuple[str, ...], NDArray]] = {}
             for reader in self.gvl.readers:
                 if isinstance(reader, Haplotypes):
-                    out = {}
-                    for r in reader.readers:
-                        _slices = tuple(slices[dim] for dim in r.sizes) + (
-                            slices["length"],
-                        )
-                        out[r.name] = buffer[r.name][_slices]
                     data = reader.read(
                         contig,
                         merged_starts,
                         merged_ends,
-                        out=out,
                         **read_kwargs,
                     )
                     _buffer_dict.update(data)
                 else:
-                    _slices = tuple(slices[dim] for dim in reader.sizes) + (
-                        slices["length"],
-                    )
-                    out = buffer[reader.name][_slices]
                     data = reader.read(
                         contig,
                         merged_starts,
                         merged_ends,
-                        out=out,
                         **read_kwargs,
                     )
-                    _buffer_dict[reader.name] = data
+                    _buffer_dict[reader.name] = ((*reader.sizes.keys(), "length"), data)
 
             out_buffer = xr.Dataset(_buffer_dict)
             yield Buffer(out_buffer, buffer_idx, dim_idxs, -1)
@@ -1135,7 +1082,7 @@ if TORCH_AVAILABLE:
             max_memory_gb: Optional[float] = None,
             batch_dims: Optional[List[str]] = None,
             transform: Optional[
-                Callable[[Dict[Hashable, NDArray]], Dict[Hashable, NDArray]]
+                Callable[[Dict[str, NDArray]], Dict[str, NDArray]]
             ] = None,
             shuffle: bool = False,
             weights: Optional[Dict[str, NDArray]] = None,

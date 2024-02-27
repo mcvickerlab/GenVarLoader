@@ -22,6 +22,21 @@ def varseq_fasta_pgen():
     return gvl.FastaVariants("varseq", fasta, pgen, jitter_long=False)
 
 
+def varseq_fasta_zarr():
+    fasta = gvl.Fasta(
+        "seq",
+        Path(__file__).parent
+        / "data"
+        / "fasta"
+        / "Homo_sapiens.GRCh38.dna.toplevel.fa.gz",
+        pad="N",
+    )
+    var = gvl.variants.Variants.from_vcf(
+        Path(__file__).parent / "data" / "vcf" / "filtered_sample.vcf.gz"
+    )
+    return gvl.FastaVariants("varseq", fasta, var, jitter_long=False)
+
+
 @parametrize_with_cases("varseq", cases=".", prefix="varseq_")
 def test_fasta_variants(varseq: gvl.FastaVariants):
     regions = (
@@ -50,18 +65,13 @@ def test_fasta_variants(varseq: gvl.FastaVariants):
         )
 
         try:
-            gvl_seq = (
-                varseq.read(
-                    contig,
-                    np.array([start], dtype=np.int64),
-                    np.array([end], dtype=np.int64),
-                    sample=[sample],
-                    ploid=[hap - 1],
-                    target_length=end - start,
-                )
-                .to_numpy()
-                .squeeze()
-            )
+            gvl_seq = varseq.read(
+                contig,
+                np.array([start], dtype=np.int64),
+                np.array([end], dtype=np.int64),
+                sample=[sample],
+                ploid=[hap - 1],
+            ).squeeze()
         except SystemError as e:
             print(f"Failed {sample} hap{hap-1} {contig}:{start}-{end} row {row_nr}")
             raise e

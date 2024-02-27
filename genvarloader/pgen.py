@@ -36,7 +36,7 @@ except ImportError:
 
 class Pgen(Variants):
     # pgenlib is exclusively diploid
-    ploidy = 2
+    PLOIDY = 2
     # unknown genotypes are set to -9
     UNKNOWN = -9
 
@@ -332,6 +332,8 @@ class Pgen(Variants):
         else:
             self.genotypes = _PgenGenos(pgen_paths, self.n_samples, self.n_variants)
 
+        self.ploidy = self.genotypes.ploidy
+
         self.chunked = self.genotypes.chunked
         self.nbytes = (
             sum(a.nbytes for a in self.v_diffs.values())
@@ -376,14 +378,13 @@ class Pgen(Variants):
             ploid = np.asarray(ploid)
 
         starts, ends = (
-            np.asarray(starts, dtype=np.int64),
-            np.asarray(ends, dtype=np.int64),
+            np.atleast_1d(np.asarray(starts, dtype=np.int64)),
+            np.atleast_1d(np.asarray(ends, dtype=np.int64)),
         )
 
-        contig = self.normalize_contig_name(contig)
-
+        contig = self.normalize_contig_name(contig, self.contigs)
         # contig is not present in PGEN, has no variants
-        if contig not in self.contigs:
+        if contig is None:
             return None
 
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
@@ -405,16 +406,16 @@ class Pgen(Variants):
         rel_e_idxs = e_idxs - self.contig_offsets[contig]
 
         positions = np.concatenate(
-            [self.v_starts[contig][s:e] for s, e, in zip(rel_s_idxs, rel_e_idxs)]
+            [self.v_starts[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
         )
         size_diffs = np.concatenate(
-            [self.v_diffs[contig][s:e] for s, e, in zip(rel_s_idxs, rel_e_idxs)]
+            [self.v_diffs[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
         )
         ref = VLenAlleles.concat(
-            *(self.ref[contig][s:e] for s, e, in zip(rel_s_idxs, rel_e_idxs))
+            *(self.ref[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
         )
         alt = VLenAlleles.concat(
-            *(self.alt[contig][s:e] for s, e, in zip(rel_s_idxs, rel_e_idxs))
+            *(self.alt[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
         )
 
         genotypes = self.genotypes.read(contig, s_idxs, e_idxs, pgen_idx, ploid)
@@ -475,10 +476,10 @@ class Pgen(Variants):
 
         starts, ends = np.atleast_1d(starts), np.atleast_1d(ends)
 
-        contig = self.normalize_contig_name(contig)
+        contig = self.normalize_contig_name(contig, self.contigs)
 
         # contig is not present in PGEN, has no variants
-        if contig not in self.contigs:
+        if contig is None:
             return None, ends
 
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
@@ -513,16 +514,16 @@ class Pgen(Variants):
         rel_e_idxs = e_idxs - self.contig_offsets[contig]
 
         positions = np.concatenate(
-            [self.v_starts[contig][s:e] for s, e, in zip(rel_s_idxs, rel_e_idxs)]
+            [self.v_starts[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
         )
         size_diffs = np.concatenate(
-            [self.v_diffs[contig][s:e] for s, e, in zip(rel_s_idxs, rel_e_idxs)]
+            [self.v_diffs[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
         )
         ref = VLenAlleles.concat(
-            *(self.ref[contig][s:e] for s, e, in zip(rel_s_idxs, rel_e_idxs))
+            *(self.ref[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
         )
         alt = VLenAlleles.concat(
-            *(self.alt[contig][s:e] for s, e, in zip(rel_s_idxs, rel_e_idxs))
+            *(self.alt[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
         )
 
         genotypes = self.genotypes.read(contig, s_idxs, e_idxs, pgen_idx, ploid)
@@ -554,6 +555,7 @@ class Pgen(Variants):
 
 class _Genotypes(Protocol):
     chunked: bool
+    ploidy = 2
 
     def read(
         self,
@@ -589,12 +591,12 @@ class _Genotypes(Protocol):
 class _PgenGenos(_Genotypes):
     chunked = False
     paths: Dict[str, Path]
-    PLOIDY = 2
 
     def __init__(self, paths: Dict[str, Path], n_samples: int, n_variants: int) -> None:
         self.paths = paths
         self.n_samples = n_samples
         self.n_variants = n_variants
+        self.handle = None
 
     def _pgen(self, contig: str, sample_idx: Optional[NDArray[np.uint32]]):
         return pgenlib.PgenReader(bytes(self.paths[contig]), sample_subset=sample_idx)
@@ -607,39 +609,47 @@ class _PgenGenos(_Genotypes):
         sample_idx: Optional[NDArray[np.integer]],
         haplotype_idx: Optional[NDArray[np.integer]],
     ) -> NDArray[np.int8]:
+        if self.handle is None:
+            self.handle = self._pgen(contig, None)
+
         if sample_idx is None:
             n_samples = self.n_samples
             pgen_idx = None
             sample_sorter = None
         else:
-            n_samples = len(sample_idx)
+            n_samples = len(sample_idx)  # noqa: F841
             sample_sorter = np.argsort(sample_idx)
-            pgen_idx = sample_idx[sample_sorter].astype(np.uint32)
+            pgen_idx = sample_idx[sample_sorter].astype(np.uint32)  # noqa: F841
 
         n_vars = (end_idxs - start_idxs).sum()
-        genotypes = np.empty((n_samples * self.PLOIDY, n_vars), dtype=np.int32)
+        # (v s*2)
+        genotypes = np.empty((n_vars, self.n_samples * self.ploidy), dtype=np.int32)
 
-        with self._pgen(contig, pgen_idx) as f:
-            for i, (s, e) in enumerate(zip(start_idxs, end_idxs)):
-                if s == e:
-                    continue
-                rel_s = s - start_idxs[i]
-                rel_e = e - start_idxs[i]
-                f.read_alleles_range(
-                    s, e, allele_int32_out=genotypes[..., rel_s:rel_e], hap_maj=1
-                )
+        for i, (s, e) in enumerate(zip(start_idxs, end_idxs)):
+            if s == e:
+                continue
+            rel_s = s - start_idxs[i]
+            rel_e = e - start_idxs[i]
+            self.handle.read_alleles_range(
+                s, e, allele_int32_out=genotypes[rel_s:rel_e]
+            )
 
-        # (s, 2, v)
-        genotypes = genotypes.reshape(n_samples, self.PLOIDY, -1)
+        # (v s*2)
+        genotypes = genotypes.astype(np.int8)
+        # (s*2 v)
+        genotypes = genotypes.swapaxes(0, 1)
+        # (s 2 v)
+        genotypes = np.stack([genotypes[::2], genotypes[1::2]], axis=1)
+
+        if sample_idx is not None:
+            genotypes = genotypes[sample_idx]
 
         if haplotype_idx is not None:
             genotypes = genotypes[:, haplotype_idx]
 
-        genotypes = genotypes.astype(np.int8)
-
         # re-order samples to be in query order
-        if sample_sorter is not None and (np.arange(n_samples) != sample_sorter).any():
-            genotypes = genotypes[sample_sorter]
+        # if sample_sorter is not None and (np.arange(n_samples) != sample_sorter).any():
+        #     genotypes = genotypes[sample_sorter]
 
         return genotypes
 
@@ -929,8 +939,8 @@ def get_max_ends_and_idxs(
     start_idxs: NDArray[np.intp],
     query_ends: NDArray[np.int64],
 ) -> Tuple[NDArray[np.int32], NDArray[np.intp]]:
-    max_ends = np.empty(len(start_idxs), dtype=np.int32)
-    end_idxs = np.empty(len(start_idxs), dtype=np.intp)
+    max_ends: NDArray[np.int32] = np.empty(len(start_idxs), dtype=np.int32)
+    end_idxs: NDArray[np.intp] = np.empty(len(start_idxs), dtype=np.intp)
     for r in nb.prange(len(start_idxs)):
         s = start_idxs[r]
         if s == len(v_ends):  # no variants in this region
@@ -999,7 +1009,7 @@ def weighted_activity_selection(
         opt(j) = max(w_j + opt(q_j), opt(j - 1))
     """
     n_vars = len(w)
-    max_del = np.empty(n_vars + 1, dtype=np.int32)
+    max_del: NDArray[np.int32] = np.empty(n_vars + 1, dtype=np.int32)
     max_del[0] = 0
     for j in range(1, n_vars + 1):
         max_del[j] = max(max_del[q[j - 1]] + w[j - 1], max_del[j - 1])
