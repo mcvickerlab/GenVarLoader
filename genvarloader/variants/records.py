@@ -126,7 +126,16 @@ class Records:
             chroms[i] = v.CHROM
             positions[i] = v.POS
             refs[i] = v.REF
-            alts[i] = v.ALT[0]
+            # TODO: punt multi-allelics. also punt missing ALT?
+            alt = v.ALT
+            if len(alt) != 1:
+                raise RuntimeError(
+                    f"""VCF file {vcf_path} contains multi-allelic or overlappings
+                    variants which are not yet supported by GenVarLoader. Normalize 
+                    the VCF with `bcftools norm -f <reference.fa>
+                    -a --atom-overlaps . -m - <file.vcf>`"""
+                )
+            alts[i] = alt[0]
         return pl.DataFrame(
             {
                 "#CHROM": chroms.astype(str),
