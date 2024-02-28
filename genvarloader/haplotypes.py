@@ -146,8 +146,8 @@ class Haplotypes:
 
         reader_lengths = max_ends - starts
         reader_rel_starts = get_rel_starts(
-            starts, max_ends
-        )  # pyright: ignore[reportArgumentType]
+            starts, max_ends  # pyright: ignore[reportArgumentType]
+        )
 
         if variants is None:
             out = {}

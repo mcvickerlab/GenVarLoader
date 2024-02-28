@@ -126,7 +126,9 @@ class Variants:
         sample: Optional[ArrayLike] = None,
         ploid: Optional[ArrayLike] = None,
     ):
-        contig = normalize_contig_name(contig, self.records.contigs)
+        contig = normalize_contig_name(
+            contig, self.records.contigs
+        )  # pyright: ignore[reportAssignmentType]
         if contig is None:
             return None
 
@@ -176,7 +178,9 @@ class Variants:
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
-        contig = normalize_contig_name(contig, self.records.contigs)
+        contig = normalize_contig_name(
+            contig, self.records.contigs
+        )  # pyright: ignore[reportAssignmentType]
         if contig is None:
             return None, ends.astype(np.int32)
 
