@@ -1,12 +1,13 @@
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Union, cast
 
 import numpy as np
+import pyd4
 from numpy import int64
-from numpy.typing import NDArray
-from pyd4 import D4File, D4Matrix
+from numpy.typing import ArrayLike, NDArray
 
 from .types import Reader
+from .util import get_rel_starts
 
 
 class D4(Reader):
@@ -15,34 +16,49 @@ class D4(Reader):
 
     def __init__(self, name: str, path: Union[str, Path]) -> None:
         self.name = name
-        self.d4 = D4File(str(path))
+        self.path = path
+        matrix = pyd4.D4File(str(path)).open_all_tracks()
+        self.sample_names = cast(List[str], matrix.track_names)
+        self.tracks = None
+        self.contigs = matrix.tracks[0].chrom_names()
 
-        # self.sizes = ...
-        # self.coords = ...
-
-        # self.contig_starts_with_chr = ...
+        self.sizes = {"sample": len(self.sample_names)}
+        self.coords = {"sample": self.sample_names}
 
     def rev_strand_fn(self, x):
         return x[..., ::-1]
 
-    def open_tracks(self, tracks: List[str]):
-        return D4Matrix(
-            [
-                D4File(self.d4.get_track_specifier(track_label))
-                for track_label in tracks
-            ],
-            track_names=tracks,
-        )
-
     def read(
         self,
         contig: str,
-        starts: NDArray[int64],
-        ends: NDArray[int64],
-        out: Optional[NDArray] = None,
+        starts: ArrayLike,
+        ends: ArrayLike,
         **kwargs,
-    ) -> NDArray:
-        regions = [(contig, start, end) for start, end in zip(starts, ends)]
-        np.concatenate(self.d4.load_to_np(regions), axis=-1)
+    ) -> NDArray[np.int32]:
+        contig = self.normalize_contig_name(contig, self.contigs)
+        if contig is None:
+            raise ValueError(f"Contig {contig} not found in D4 file.")
 
-        raise NotImplementedError
+        samples = kwargs.get("sample", self.sample_names)
+        if missing := set(samples).difference(self.sample_names):
+            raise ValueError(f"Samples {missing} not found in D4 file.")
+
+        starts = np.atleast_1d(np.asarray(starts, dtype=int64))
+        ends = np.atleast_1d(np.asarray(ends, dtype=int64))
+
+        if self.tracks is None:
+            self.tracks = dict(
+                zip(
+                    self.sample_names,
+                    pyd4.D4File(str(self.path)).open_all_tracks().tracks,
+                )
+            )
+
+        values = np.empty((len(samples), len(starts)), dtype=np.int32)
+        rel_starts = get_rel_starts(starts, ends)
+        rel_ends = rel_starts + (ends - starts)
+        for s, e, r_s, r_e in enumerate(zip(starts, ends, rel_starts, rel_ends)):
+            for i, sample in enumerate(samples):
+                values[i, r_s:r_e] = self.tracks[sample][contig, s, e]
+
+        return values

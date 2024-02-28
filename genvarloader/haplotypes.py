@@ -1,17 +1,53 @@
-from typing import Iterable, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Union
 
 import numba as nb
 import numpy as np
 import xarray as xr
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from typing_extensions import assert_never
 
 from .fasta import Fasta
-from .types import DenseGenotypes, Dict, Reader, Variants
+from .types import Reader
 from .util import get_rel_starts
+from .variants import DenseGenotypes, Variants
 
 
 class Haplotypes:
+    """Construct haplotypes from a reference and tracks of variants.
+
+    Parameters
+    ----------
+    variants : Variants
+        Variants to use for constructing haplotypes.
+    reference : Optional[Fasta], optional
+        Reference genome, by default None.
+    tracks : Optional[Union[Reader, Iterable[Reader]]], optional
+        Tracks of variants, by default None.
+    jitter_long : bool, optional
+        Whether to jitter long haplotypes, by default True.
+    seed : Optional[int], optional
+        Seed for deterministic shifting of haplotypes longer than the query, by default None.
+
+    Examples
+    --------
+    Construct haplotypes from a reference and a track of variants.
+
+    >>> import genvarloader as gvl
+    >>> variants = gvl.Variants.from_vcf("variants.vcf")
+    >>> reference = gvl.Fasta("seq", "reference.fa")
+    >>> tracks = gvl.BigWigs("depth", {"sample1": "sample1.bw", "sample2": "sample2.bw"})
+    >>> haplotypes = gvl.Haplotypes(variants, reference, tracks)
+    >>> contig = "chr1"
+    >>> starts = [0, 100, 200]
+    >>> ends = [100, 200, 300]
+    >>> data = haplotypes.read(contig, starts, ends)
+    >>> data
+    {
+        'seq': <NDArray (sample, ploid, length)>,
+        'depth': <NDArray (sample, ploid, length)>
+    }
+    """
+
     def __init__(
         self,
         variants: Variants,
@@ -23,7 +59,7 @@ class Haplotypes:
         self.variants = variants
         self.reference = reference
         self.jitter_long = jitter_long
-        self.seed = seed
+        self.rng = np.random.default_rng(seed)
 
         if tracks is None:
             tracks = []
@@ -52,23 +88,20 @@ class Haplotypes:
     def read(
         self,
         contig: str,
-        starts: NDArray[np.int64],
-        ends: NDArray[np.int64],
-        out: Optional[Dict[str, Optional[NDArray]]] = None,
+        starts: ArrayLike,
+        ends: ArrayLike,
         **kwargs,
-    ) -> Dict[str, xr.DataArray]:
+    ) -> Dict[str, NDArray]:
         """Read data corresponding to a genomic range, sample, and ploid.
 
         Parameters
         ----------
         contig : str
             Name of the contig/chromosome.
-        starts : NDArray[int32]
+        starts : ArrayLike
             Start coordinates, 0-based.
-        ends : NDArray[int32]
+        ends : ArrayLike
             End coordinates, 0-based exclusive.
-        out : NDArray, optional
-            Array to put the result into. Otherwise allocates one.
         **kwargs
             May include...
             sample : Iterable[str]
@@ -80,12 +113,10 @@ class Haplotypes:
 
         Returns
         -------
-        xr.DataArray
-            Variant sequences, dimensions: (sample, ploid, length)
+        Dict[str, NDArray]
+            Variant sequences and re-aligned tracks, each with dimensions: (sample, ploid, length)
+            Keys correspond to the names of the readers.
         """
-        if out is None:
-            out = {reader.name: None for reader in self.readers}
-
         samples = kwargs.get("sample", None)
         if samples is None:
             n_samples = self.variants.n_samples
@@ -102,8 +133,8 @@ class Haplotypes:
         if seed is not None:
             self.rng = np.random.default_rng(seed)
 
-        starts = np.asarray(starts, dtype=np.int64)
-        ends = np.asarray(ends, dtype=np.int64)
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int64))
+        ends = np.atleast_1d(np.asarray(ends, dtype=np.int64))
 
         variants, max_ends = self.variants.read_for_haplotype_construction(
             contig, starts, ends, **kwargs
@@ -138,7 +169,6 @@ class Haplotypes:
                     starts=starts,
                     ref_lengths=reader_lengths,
                     ref_rel_starts=reader_rel_starts,
-                    out=out[self.reference.name],
                     n_samples=n_samples,
                     ploid=ploid,
                     total_length=total_length,
@@ -158,7 +188,6 @@ class Haplotypes:
                         starts=starts,
                         track_lengths=reader_lengths,
                         track_rel_starts=reader_rel_starts,
-                        out=out[reader.name],
                         ploid=ploid,
                         total_length=total_length,
                         lengths=lengths,

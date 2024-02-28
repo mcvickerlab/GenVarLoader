@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 from textwrap import dedent
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union, overload
 
 import numba as nb
 import numpy as np
@@ -11,14 +11,120 @@ from loguru import logger
 from numpy.typing import ArrayLike, NDArray
 from typing_extensions import Self
 
-from genvarloader.types import VLenAlleles
-
 try:
     import cyvcf2
 
     CYVCF2_INSTALLED = True
 except ImportError:
     CYVCF2_INSTALLED = False
+
+
+@define
+class VLenAlleles:
+    """Variable length alleles.
+
+    Create VLenAlleles from a polars Series of strings:
+    >>> alleles = VLenAlleles.from_polars(pl.Series(["A", "AC", "G"]))
+
+    Create VLenAlleles from offsets and alleles:
+    >>> offsets = np.array([0, 1, 3, 4], np.uint32)
+    >>> alleles = np.frombuffer(b"AACG", "|S1")
+    >>> alleles = VLenAlleles(offsets, alleles)
+
+    Get a single allele:
+    >>> alleles[0]
+    b'A'
+
+    Get a slice of alleles:
+    >>> alleles[1:]
+    VLenAlleles(offsets=array([0, 2, 3]), alleles=array([b'AC', b'G'], dtype='|S1'))
+    """
+
+    offsets: NDArray[np.uint32]
+    alleles: NDArray[np.bytes_]
+
+    @overload
+    def __getitem__(self, idx: int) -> NDArray[np.bytes_]:
+        ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> "VLenAlleles":
+        ...
+
+    def __getitem__(self, idx: Union[int, slice, np.integer]):
+        if isinstance(idx, (int, np.integer)):
+            return self.get_idx(idx)
+        elif isinstance(idx, slice):
+            return self.get_slice(idx)
+
+    def get_idx(self, idx: Union[int, np.integer]):
+        if idx >= len(self) or idx < -len(self):
+            raise IndexError("Index out of range.")
+        if idx < 0:
+            idx = len(self) + idx
+        return self.alleles[self.offsets[idx] : self.offsets[idx + 1]]
+
+    def get_slice(self, slc: slice):
+        start: Optional[int]
+        stop: Optional[int]
+        start, stop = slc.start, slc.stop
+        if start is None:
+            start = 0
+        elif start < 0:
+            start += len(self)
+
+        # handle empty result
+        if start >= len(self) or (stop is not None and stop <= start):
+            return VLenAlleles(np.empty(0, np.uint32), np.empty(0, "|S1"))
+
+        if stop is None:
+            stop = len(self)
+        elif stop < 0:
+            stop += len(self)
+        stop += 1
+        new_offsets = self.offsets[start:stop].copy()
+        _start, _stop = new_offsets[0], new_offsets[-1]
+        new_alleles = self.alleles[_start:_stop]
+        new_offsets -= self.offsets[start]
+        return VLenAlleles(new_offsets, new_alleles)
+
+    def __len__(self):
+        """Number of alleles."""
+        return len(self.offsets) - 1
+
+    @property
+    def nbytes(self):
+        return self.offsets.nbytes + self.alleles.nbytes
+
+    @classmethod
+    def from_polars(cls, alleles: pl.Series):
+        offsets = np.r_[np.uint32(0), alleles.str.len_bytes().cum_sum().to_numpy()]
+        flat_alleles = np.frombuffer(
+            alleles.str.concat("").to_numpy()[0].encode(), "S1"
+        )
+        return cls(offsets, flat_alleles)
+
+    @staticmethod
+    def concat(*vlen_alleles: "VLenAlleles"):
+        if len(vlen_alleles) == 0:
+            return VLenAlleles(np.array([0], np.uint32), np.array([], "|S1"))
+        elif len(vlen_alleles) == 1:
+            return vlen_alleles[0]
+
+        offset_ends = np.array([v.offsets[-1] for v in vlen_alleles[:-1]]).cumsum(
+            dtype=np.uint32
+        )
+        offsets = np.concatenate(
+            [
+                vlen_alleles[0].offsets,
+                *(
+                    v.offsets + last_offset_end
+                    for v, last_offset_end in zip(vlen_alleles[1:], offset_ends)
+                ),
+            ]
+        )
+        alleles = np.concatenate([v.alleles for v in vlen_alleles])
+        return VLenAlleles(offsets, alleles)
 
 
 @define
@@ -381,6 +487,10 @@ class Records:
         starts: ArrayLike,
         ends: ArrayLike,
     ) -> Optional[RecordInfo]:
+        contig = self.normalize_contig_name(contig, self.contigs)
+        if contig is None:
+            return None
+
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
@@ -431,6 +541,10 @@ class Records:
         starts: ArrayLike,
         ends: ArrayLike,
     ) -> Tuple[Optional[RecordInfo], NDArray[np.int32]]:
+        contig = self.normalize_contig_name(contig, self.contigs)
+        if contig is None:
+            return None, ends
+
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
@@ -489,6 +603,27 @@ class Records:
         )
 
         return v_info, max_ends
+
+    def normalize_contig_name(
+        self, contig: str, contigs: Iterable[str]
+    ) -> Optional[str]:
+        """Normalize the contig name to adhere to the convention of the underlying file.
+        i.e. remove or add "chr" to the contig name.
+
+        Parameters
+        ----------
+        contig : str
+
+        Returns
+        -------
+        str
+            Normalized contig name.
+        """
+        for c in contigs:
+            # exact match, remove chr, add chr
+            if contig == c or contig[3:] == c or f"chr{contig}" == c:
+                return c
+        return None
 
     def __repr__(self):
         return dedent(

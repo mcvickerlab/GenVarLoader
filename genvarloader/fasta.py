@@ -140,7 +140,7 @@ class Fasta(Reader):
 
         Returns
         -------
-        xr.DataArray
+        NDArray[np.bytes_]
             Sequence from FASTA file.
 
         Raises
@@ -201,3 +201,6 @@ class Fasta(Reader):
                 out[rel_start:rel_end] = seq
 
         return out
+
+    def __del__(self) -> None:
+        self.close()

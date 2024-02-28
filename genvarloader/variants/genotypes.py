@@ -167,6 +167,10 @@ class PgenGenos(Genotypes):
 
         return genotypes
 
+    def __del__(self) -> None:
+        if self.handle is not None:
+            self.handle.close()
+
 
 class ZarrGenos(Genotypes, FromRecsGenos):
     chunked = True
@@ -530,3 +534,8 @@ class VCFGenos(Genotypes):
         genos[genos == -1] = -9
 
         return genos
+
+    def __del__(self) -> None:
+        if self.handles is not None:
+            for handle in self.handles.values():
+                handle.close()

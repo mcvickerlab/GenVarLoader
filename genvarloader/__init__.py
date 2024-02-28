@@ -11,27 +11,25 @@ batch. This should be fast because the buffer is the only part that uses file I/
 whereas the batches are materialized from the buffer.
 """
 
-from . import variants
+from .d4 import D4
 from .fasta import Fasta
-from .fasta_variants import FastaVariants
+from .haplotypes import Haplotypes
 from .intervals import Intervals
 from .loader import GVL, construct_virtual_data
-from .pgen import Pgen
-from .types import Reader, Variants
+from .types import Reader
 from .variants import MemmapGenos, PgenGenos, Records, VCFGenos, ZarrGenos
 
 __version__ = "0.0.0"  # managed by poetry-dynamic-versioning
 
 __all__ = [
+    "Haplotypes",
     "Fasta",
-    "FastaVariants",
     "Intervals",
-    "Pgen",
     "GVL",
+    "D4",
     "construct_virtual_data",
     "Reader",
     "Variants",
-    "variants",
     "PgenGenos",
     "ZarrGenos",
     "MemmapGenos",

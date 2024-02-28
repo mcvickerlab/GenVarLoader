@@ -3,11 +3,10 @@ from typing import Dict, Optional, Union
 
 import numpy as np
 from attrs import define
-from numpy.typing import ArrayLike
+from numpy.typing import ArrayLike, NDArray
 
-from ..types import DenseGenotypes
 from .genotypes import Genotypes, MemmapGenos, PgenGenos, VCFGenos, ZarrGenos
-from .records import Records
+from .records import Records, VLenAlleles
 
 __all__ = [
     "PgenGenos",
@@ -17,6 +16,36 @@ __all__ = [
     "Variants",
     "Records",
 ]
+
+
+@define
+class DenseGenotypes:
+    """Dense array(s) of genotypes.
+
+    Attributes
+    ----------
+    positions : NDArray[np.int32]
+        Shape: (variants)
+    size_diffs : NDArray[np.int32]
+        Shape : (variants). Difference in length between the REF and the ALT alleles.
+    ref : VLenAlleles
+        Shape: (variants). REF alleles.
+    alt : VLenAlleles
+        Shape: (variants). ALT alleles.
+    genotypes : NDArray[np.int8]
+        Shape: (samples, ploid, variants)
+    offsets : NDArray[np.uint32], optional
+        Shape: (regions + 1). Offsets for the index boundaries of each region such
+        that variants for region `i` are `positions[offsets[i] : offsets[i+1]]`,
+        `size_diffs[offsets[i] : offsets[i+1]]`, ..., etc.
+    """
+
+    positions: NDArray[np.int32]
+    size_diffs: NDArray[np.int32]
+    ref: VLenAlleles
+    alt: VLenAlleles
+    genotypes: NDArray[np.int8]
+    offsets: NDArray[np.uint32]
 
 
 @define
