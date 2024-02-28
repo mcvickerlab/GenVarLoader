@@ -23,7 +23,7 @@ class D4(Reader):
         self.contigs = matrix.tracks[0].chrom_names()
 
         self.sizes = {"sample": len(self.sample_names)}
-        self.coords = {"sample": self.sample_names}
+        self.coords = {"sample": np.asarray(self.sample_names)}
 
     def rev_strand_fn(self, x):
         return x[..., ::-1]
@@ -54,10 +54,10 @@ class D4(Reader):
                 )
             )
 
-        values = np.empty((len(samples), len(starts)), dtype=np.int32)
+        values = np.empty((len(samples), (ends - starts).sum()), dtype=np.int32)
         rel_starts = get_rel_starts(starts, ends)
         rel_ends = rel_starts + (ends - starts)
-        for s, e, r_s, r_e in enumerate(zip(starts, ends, rel_starts, rel_ends)):
+        for s, e, r_s, r_e in zip(starts, ends, rel_starts, rel_ends):
             for i, sample in enumerate(samples):
                 values[i, r_s:r_e] = self.tracks[sample][contig, s, e]
 

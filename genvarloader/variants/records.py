@@ -164,14 +164,14 @@ class Records:
         return sum(len(v) for v in self.v_starts.values())
 
     @classmethod
-    def from_vcf(cls, vcf: Union[Path, Dict[str, Path]]) -> Self:
+    def from_vcf(cls, vcf: Union[str, Path, Dict[str, Path]]) -> Self:
         if not CYVCF2_INSTALLED:
             raise ImportError(
                 "cyvcf2 is not installed. Please install it with `pip install cyvcf2`"
             )
 
-        if isinstance(vcf, Path):
-            vcf = {"_all": vcf}
+        if isinstance(vcf, (str, Path)):
+            vcf = {"_all": Path(vcf)}
 
         if "_all" in vcf:
             multi_contig_source = True
@@ -252,9 +252,9 @@ class Records:
         )
 
     @classmethod
-    def from_pvar(cls, pvar: Union[Path, Dict[str, Path]]) -> Self:
-        if isinstance(pvar, Path):
-            pvar = {"_all": pvar}
+    def from_pvar(cls, pvar: Union[str, Path, Dict[str, Path]]) -> Self:
+        if isinstance(pvar, (str, Path)):
+            pvar = {"_all": Path(pvar)}
 
         if "_all" in pvar:
             multi_contig_source = True
@@ -338,9 +338,9 @@ class Records:
         return True
 
     @classmethod
-    def from_gvl_arrow(cls, arrow: Union[Path, Dict[str, Path]]) -> Self:
-        if isinstance(arrow, Path):
-            arrow = {"_all": arrow}
+    def from_gvl_arrow(cls, arrow: Union[str, Path, Dict[str, Path]]) -> Self:
+        if isinstance(arrow, (str, Path)):
+            arrow = {"_all": Path(arrow)}
 
         if "_all" in arrow:
             multi_contig_source = True
@@ -487,10 +487,6 @@ class Records:
         starts: ArrayLike,
         ends: ArrayLike,
     ) -> Optional[RecordInfo]:
-        contig = self.normalize_contig_name(contig, self.contigs)
-        if contig is None:
-            return None
-
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
@@ -541,10 +537,6 @@ class Records:
         starts: ArrayLike,
         ends: ArrayLike,
     ) -> Tuple[Optional[RecordInfo], NDArray[np.int32]]:
-        contig = self.normalize_contig_name(contig, self.contigs)
-        if contig is None:
-            return None, ends
-
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 

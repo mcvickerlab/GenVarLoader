@@ -5,6 +5,7 @@ import pyBigWig
 from numpy.typing import ArrayLike, NDArray
 
 from .types import Reader
+from .util import get_rel_starts
 
 
 class BigWigs(Reader):
@@ -23,7 +24,7 @@ class BigWigs(Reader):
         self.name = name
         self.paths = paths
         self.readers = None
-        self.samples = list(self.readers.keys())
+        self.samples = list(self.paths)
 
     def read(
         self,
@@ -51,22 +52,28 @@ class BigWigs(Reader):
         NDArray
             Shape: (samples length). Data corresponding to the given genomic coordinates and samples.
         """
+        if self.readers is None:
+            self.readers = {s: pyBigWig.open(p, "r") for s, p in self.paths.items()}
+
         samples = kwargs.get("sample", self.samples)
         if isinstance(samples, str):
             samples = [samples]
         if not set(samples).issubset(self.samples):
             raise ValueError(f"Sample {samples} not found in bigWig paths.")
 
-        if self.readers is None:
-            self.readers = {s: pyBigWig.open(p, "r") for s, p in self.paths.items()}
+        starts = np.atleast_1d(np.asarray(starts, dtype=int))
+        ends = np.atleast_1d(np.asarray(ends, dtype=int))
+        rel_starts = get_rel_starts(starts, ends)
+        rel_ends = rel_starts + (ends - starts)
 
-        values = [
-            self.readers[s].values(contig, starts, ends, numpy=True) for s in samples
-        ]
-        values = np.stack(values, axis=0)
-        values[np.isnan(values)] = 0
+        out = np.empty((len(samples), (ends - starts).sum()), dtype=np.float32)
+        for s, e, r_s, r_e in zip(starts, ends, rel_starts, rel_ends):
+            for i, sample in enumerate(samples):
+                out[i, r_s:r_e] = self.readers[sample].values(contig, s, e, numpy=True)
 
-        return values
+        out[np.isnan(out)] = 0
+
+        return out
 
     def __del__(self) -> None:
         if self.readers is not None:

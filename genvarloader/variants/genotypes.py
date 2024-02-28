@@ -91,11 +91,16 @@ class PgenGenos(Genotypes):
     chunked = False
     ploidy = 2
 
-    def __init__(self, paths: Dict[str, Path], sample_names: NDArray[np.str_]) -> None:
+    def __init__(
+        self, paths: Union[str, Path, Dict[str, Path]], sample_names: NDArray[np.str_]
+    ) -> None:
         if not PGENLIB_INSTALLED:
             raise ImportError(
                 "pgenlib must be installed to use PGEN files for genotypes."
             )
+        if isinstance(paths, (str, Path)):
+            paths = {"_all": Path(paths)}
+
         if len(paths) == 0:
             raise ValueError("No paths provided.")
         n_samples = None
@@ -125,15 +130,6 @@ class PgenGenos(Genotypes):
     ) -> NDArray[np.int8]:
         if self.handle is None:
             self.handle = self._pgen(contig, None)
-
-        if sample_idx is None:
-            n_samples = self.n_samples
-            pgen_idx = None
-            sample_sorter = None
-        else:
-            n_samples = len(sample_idx)  # noqa: F841
-            sample_sorter = np.argsort(sample_idx)
-            pgen_idx = sample_idx[sample_sorter].astype(np.uint32)  # noqa: F841
 
         n_vars = (end_idxs - start_idxs).sum()
         # (v s*2)
@@ -176,13 +172,13 @@ class ZarrGenos(Genotypes, FromRecsGenos):
     chunked = True
     driver = "zarr"
 
-    def __init__(self, paths: Union[Path, Dict[str, Path]]) -> None:
+    def __init__(self, paths: Union[str, Path, Dict[str, Path]]) -> None:
         if not ZARR_TENSORSTORE_INSTALLED:
             raise ImportError(
                 "Zarr and TensorStore must be installed to use chunked array caches like Zarr and N5."
             )
-        if isinstance(paths, Path):
-            paths = {"_all": paths}
+        if isinstance(paths, (str, Path)):
+            paths = {"_all": Path(paths)}
 
         if "_all" in paths:
             one_source = True
@@ -465,14 +461,16 @@ class VCFGenos(Genotypes):
     ploidy = 2
 
     def __init__(
-        self, vcfs: Union[Path, Dict[str, Path]], contig_offsets: Dict[str, int]
+        self, vcfs: Union[str, Path, Dict[str, Path]], contig_offsets: Dict[str, int]
     ) -> None:
         if not CYVCF2_INSTALLED:
             raise ImportError(
                 "cyvcf2 must be installed to use VCF files for genotypes."
             )
-        if isinstance(vcfs, Path):
-            vcfs = {"_all": vcfs}
+
+        if isinstance(vcfs, (str, Path)):
+            vcfs = {"_all": Path(vcfs)}
+
         self.paths = vcfs
         samples = None
         for p in self.paths.values():

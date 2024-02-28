@@ -422,3 +422,23 @@ def splice_and_rev_subarrays(
         length = e - s
         out[..., rel_start : rel_start + length] = arr[..., s:e:strand]
     return out
+
+
+def normalize_contig_name(contig: str, contigs: Iterable[str]) -> Optional[str]:
+    """Normalize the contig name to adhere to the convention of the underlying file.
+    i.e. remove or add "chr" to the contig name.
+
+    Parameters
+    ----------
+    contig : str
+
+    Returns
+    -------
+    str
+        Normalized contig name.
+    """
+    for c in contigs:
+        # exact match, remove chr, add chr
+        if contig == c or contig[3:] == c or f"chr{contig}" == c:
+            return c
+    return None

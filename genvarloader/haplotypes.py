@@ -2,7 +2,7 @@ from typing import Dict, Iterable, List, Optional, Union
 
 import numba as nb
 import numpy as np
-import xarray as xr
+from einops import rearrange
 from numpy.typing import ArrayLike, NDArray
 from typing_extensions import assert_never
 
@@ -145,25 +145,34 @@ class Haplotypes:
         rel_starts = get_rel_starts(starts, ends)
 
         reader_lengths = max_ends - starts
-        reader_rel_starts = get_rel_starts(starts, max_ends)
+        reader_rel_starts = get_rel_starts(
+            starts, max_ends
+        )  # pyright: ignore[reportArgumentType]
 
         if variants is None:
-            _out = {
-                r.name: r.read(contig, starts, max_ends, **kwargs) for r in self.readers
-            }
+            out = {}
+            for r in self.readers:
+                data = r.read(contig, starts, max_ends, **kwargs)
+                if isinstance(r, Fasta):
+                    # (l) -> (s p l)
+                    data = np.broadcast_to(data, (n_samples, ploid, len(data)))
+                else:
+                    # (... s? p? l) -> (... s p l)
+                    broadcast_track_to_haps(r.sizes, data, n_samples, ploid)
+                out[r.name] = data
         else:
-            _out: Dict[str, xr.DataArray] = {}
+            out: Dict[str, NDArray] = {}
             if self.jitter_long:
+                # (s p r)
                 shifts = self.sample_shifts(variants)
             else:
+                # (s p r)
                 shifts = np.zeros((n_samples, ploid, len(starts)), dtype=np.int32)
 
             if self.reference is not None:
                 # ref shape: (length,)
-                ref: NDArray[np.bytes_] = self.reference.read(
-                    contig, starts, max_ends
-                ).to_numpy()
-                _out[self.reference.name] = ref_to_haplotypes(
+                ref: NDArray[np.bytes_] = self.reference.read(contig, starts, max_ends)
+                out[self.reference.name] = ref_to_haplotypes(
                     reference=ref,
                     variants=variants,
                     starts=starts,
@@ -176,33 +185,51 @@ class Haplotypes:
                     rel_starts=rel_starts,
                     shifts=shifts,
                     pad_char=self.pad,
+                    out=None,
                 )
 
             if self.tracks is not None:
                 for reader in self.tracks:
                     # track shape: (..., length) and in ... is 'sample' and maybe 'ploid'
                     track = reader.read(contig, starts, max_ends, **kwargs)
-                    _out[reader.name] = realign(
+                    track = broadcast_track_to_haps(
+                        reader.sizes, track, n_samples, ploid
+                    )
+                    track = realign(
                         track=track,
                         variants=variants,
                         starts=starts,
                         track_lengths=reader_lengths,
                         track_rel_starts=reader_rel_starts,
-                        ploid=ploid,
                         total_length=total_length,
                         lengths=lengths,
                         rel_starts=rel_starts,
                         shifts=shifts,
+                        out=None,
                     )
+                    if "sample" in reader.sizes:
+                        sample_dim_idx = list(reader.sizes).index("sample")
+                        track = track.swapaxes(-3, sample_dim_idx)
+                    if "ploid" in reader.sizes:
+                        ploid_dim_idx = list(reader.sizes).index("ploid")
+                        track = track.swapaxes(-2, ploid_dim_idx)
+                    out[reader.name] = track
 
-        return _out
+        return out
 
     def sample_shifts(self, variants: DenseGenotypes) -> NDArray[np.int32]:
-        total_diffs = (
-            np.where(variants.genotypes == 1, variants.size_diffs, 0)
-            .sum(-1, dtype=np.int32)
-            .clip(0)
-        )
+        genotypes = variants.genotypes
+        size_diffs = variants.size_diffs
+        offsets = variants.offsets
+        # (s p v)
+        diffs = np.where(genotypes == 1, size_diffs, 0)
+        # (s p r+1) -> (s p r)
+        if offsets[-1] == diffs.shape[-1]:
+            total_diffs = np.add.reduceat(diffs, offsets[:-1], axis=-1).clip(0)
+        else:
+            total_diffs = np.add.reduceat(diffs, offsets, axis=-1)[..., :-1].clip(0)
+        no_vars = offsets[1:] == offsets[:-1]
+        total_diffs[..., no_vars] = 0
         shifts = self.rng.integers(0, total_diffs + 1, dtype=np.int32)
         return shifts
 
@@ -213,7 +240,6 @@ def ref_to_haplotypes(
     starts: NDArray[np.int64],
     ref_lengths: NDArray[np.int64],
     ref_rel_starts: NDArray[np.int64],
-    out: Optional[NDArray[np.bytes_]],
     n_samples: int,
     ploid: int,
     total_length: int,
@@ -221,7 +247,8 @@ def ref_to_haplotypes(
     rel_starts: NDArray[np.int64],
     shifts: NDArray[np.int32],
     pad_char: np.uint8,
-):
+    out: Optional[NDArray[np.bytes_]] = None,
+) -> NDArray:
     if out is None:
         # alloc then fill is faster than np.tile ¯\_(ツ)_/¯
         seqs = np.empty((n_samples, ploid, total_length), dtype=reference.dtype)
@@ -251,7 +278,7 @@ def ref_to_haplotypes(
     else:
         assert_never(variants)
 
-    return xr.DataArray(seqs, dims=["sample", "ploid", "length"])
+    return seqs
 
 
 @nb.njit(nogil=True, cache=True, parallel=True)
@@ -288,12 +315,14 @@ def construct_haplotypes(
         if n_variants == 0:
             _out[...] = _ref[:]
             continue
-        _shifts = shifts[..., r_s:r_e]
+        # (s p r) -> (s p)
+        _shifts = shifts[..., region]
         _positions = positions[r_s:r_e] - starts[region]
         _sizes = sizes[r_s:r_e]
         _genos = genotypes[..., r_s:r_e]
         _alt_offsets = alt_offsets[r_s : r_e + 1]
         _alt_alleles = alt_alleles[_alt_offsets[0] : _alt_offsets[-1]]
+
         for sample in nb.prange(n_samples):
             for hap in nb.prange(ploidy):
                 # where to get next reference subsequence
@@ -301,7 +330,7 @@ def construct_haplotypes(
                 # where to put next subsequence
                 out_idx = 0
                 # total amount to shift by
-                shift = _shifts[sample, hap, 0]
+                shift = _shifts[sample, hap]
                 # how much we've shifted
                 shifted = 0
 
@@ -345,8 +374,11 @@ def construct_haplotypes(
                         ref_shift_dist = v_rel_pos - ref_idx
                         # not enough distance to finish the shift even with the variant
                         if shifted + ref_shift_dist + v_len < shift:
+                            # consume ref up to the end of the variant
                             ref_idx = v_rel_pos + 1
+                            # add the length of skipped ref and size of the variant to the shift
                             shifted += ref_shift_dist + v_len
+                            # skip the variant
                             continue
                         # enough distance between ref_idx and variant to finish shift
                         elif shifted + ref_shift_dist >= shift:
@@ -356,9 +388,9 @@ def construct_haplotypes(
                             # ref_idx and the variant
                         # ref + (some of) variant is enough to finish shift
                         else:
-                            # adjust ref_idx so that no reference is written
+                            # consume ref up to beginning of variant
+                            # ref_idx will be moved to end of variant after using the variant
                             ref_idx = v_rel_pos
-                            shifted = shift
                             # how much left to shift - amount of ref we can use
                             allele_start_idx = shift - shifted - ref_shift_dist
                             #! without if statement, parallel=True can cause a SystemError!
@@ -369,6 +401,8 @@ def construct_haplotypes(
                                 continue
                             allele = allele[allele_start_idx:]
                             v_len = len(allele)
+                            # done shifting
+                            shifted = shift
 
                     # add reference sequence
                     ref_len = v_rel_pos - ref_idx
@@ -409,38 +443,48 @@ def construct_haplotypes(
                         _out[sample, hap, out_end_idx:] = pad_char
 
 
+def broadcast_track_to_haps(
+    dim_sizes: Dict[str, int], track: NDArray, n_samples: int, ploid: int
+):
+    # tracks may have sample and ploid dimensions and others as well
+    # if they do not have sample or ploid dimensions, then
+    # they must be broadcasted
+    # (... l) -> (... s p l)
+    in_dims = " ".join(dim_sizes.keys())
+    sample_entry = "sample" if "sample" in dim_sizes else "1"
+    ploid_entry = "ploid" if "ploid" in dim_sizes else "1"
+    out_dims = " ".join(
+        [d for d in dim_sizes.keys() if d not in ("sample", "ploid")]
+        + [sample_entry, ploid_entry, "length"]
+    )
+    track = rearrange(track, f"{in_dims} length -> {out_dims}")
+    track = np.broadcast_to(
+        track, (*track.shape[:-3], n_samples, ploid, track.shape[-1])
+    )
+    return track
+
+
 def realign(
-    track: xr.DataArray,
-    variants: Optional[DenseGenotypes],
+    track: NDArray,  # (... s p l)
+    variants: DenseGenotypes,
     starts: NDArray[np.int64],
     track_lengths: NDArray[np.int64],
     track_rel_starts: NDArray[np.int64],
-    out: Optional[NDArray],
-    ploid: int,
     total_length: int,
     lengths: NDArray[np.int64],
     rel_starts: NDArray[np.int64],
     shifts: NDArray[np.int32],
-) -> xr.DataArray:
-    if "ploid" not in track.dims:
-        final_out_dim_order = track.dims[:-1] + ("ploid", "length")
-        _track = np.broadcast_to(
-            track.values[..., None, :], (*track.shape[:-1], ploid, track.shape[-1])
-        )
-    else:
-        final_out_dim_order = track.dims
-        track = track.transpose(..., "sample", "ploid", "length")
-        _track = track.values
-
+    out: Optional[NDArray] = None,
+) -> NDArray:  # (... s p l)
     if out is None:
-        out = np.empty((*_track.shape[:-1], total_length), dtype=track.dtype)
+        out = np.empty((*track.shape[:-1], total_length), dtype=track.dtype)
 
     if variants is None:
-        out[:] = _track
+        out[:] = track
     elif isinstance(variants, DenseGenotypes):
         realign_track_to_haplotype(
             out,
-            _track,
+            track,
             shifts,
             variants.positions,
             variants.size_diffs,
@@ -455,8 +499,7 @@ def realign(
     else:
         assert_never(variants)
 
-    _out = xr.DataArray(out, dims=track.dims, coords=track.coords, name=track.name)
-    return _out.transpose(*final_out_dim_order)
+    return out
 
 
 @nb.njit(nogil=True, cache=True, parallel=True)
@@ -490,7 +533,8 @@ def realign_track_to_haplotype(
         if n_variants == 0:
             _out[...] = _track[:]
             continue
-        _shifts = shifts[..., r_s:r_e]
+        # (s p r) -> (s p)
+        _shifts = shifts[..., region]
         _positions = positions[r_s:r_e] - starts[region]
         _sizes = sizes[r_s:r_e]
         _genos = genotypes[..., r_s:r_e]
@@ -560,12 +604,13 @@ def realign_track_to_haplotype(
                         else:
                             # adjust ref_idx so that no reference is written
                             track_idx = v_rel_pos
-                            shifted = shift
                             # how much left to shift - amount of ref we can use
                             allele_start_idx = shift - shifted - ref_shift_dist
                             if allele_start_idx == v_len:
                                 continue
                             v_len -= allele_start_idx
+                            # done shifting
+                            shifted = shift
 
                     # add reference sequence
                     track_len = v_rel_pos - track_idx
