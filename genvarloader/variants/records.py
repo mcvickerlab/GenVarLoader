@@ -347,10 +347,19 @@ class Records:
         else:
             multi_contig_source = False
 
-        arrow_paths = {c: p for c, p in arrow.items()}
+        arrow_paths: Dict[str, Path] = {}
+        for c, p in arrow.items():
+            if p.suffix == ".gvl":
+                arrow_paths[c] = p.with_suffix(".gvl.arrow")
+            elif p.suffixes[-2:] == [".gvl", ".arrow"]:
+                arrow_paths[c] = p
+            else:
+                raise ValueError(
+                    f"Arrow file {p} does not have the .gvl suffix. Please provide the correct path."
+                )
 
         if multi_contig_source:
-            path = arrow["_all"]
+            path = arrow_paths["_all"]
             start_dfs = pl.read_ipc(path).partition_by("#CHROM", as_dict=True)
             end_dfs = pl.read_ipc(
                 path.parent / path.name.replace(".gvl.arrow", ".ends.gvl.arrow")

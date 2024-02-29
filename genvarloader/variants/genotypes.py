@@ -356,20 +356,20 @@ class ZarrGenos(Genotypes, FromRecsGenos):
         # let tensorstore have the full query available to hopefully parallelize
         # reading variable length slices of genotypes
         sub_genos = [None] * len(start_idxs)
-        _tstore = self.tstores[contig]
+        tstore = self.tstores[contig]
 
         if sample_idx is not None:
             sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=int))
-            _tstore = _tstore[sample_idx]
+            tstore = tstore[sample_idx]
         if haplotype_idx is not None:
             haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=int))
-            _tstore = _tstore[:, haplotype_idx]
+            tstore = tstore[:, haplotype_idx]
 
         for i, (s, e) in enumerate(zip(start_idxs, end_idxs)):
             # no variants in query regions
             if s == e:
                 continue
-            sub_genos[i] = _tstore[..., s:e]
+            sub_genos[i] = tstore[..., s:e]
 
         genotypes = ts.concat(  # pyright: ignore[reportAttributeAccessIssue]
             sub_genos, axis=-1

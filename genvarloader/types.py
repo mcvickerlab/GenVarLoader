@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Protocol
+from typing import Callable, Dict, Mapping, Protocol
 
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
@@ -31,6 +31,7 @@ class Reader(Protocol):
 
     name: str
     dtype: DTypeLike
+    contigs: Mapping[str, int]
     sizes: Dict[str, int]
     coords: Dict[str, NDArray]
     rev_strand_fn: Callable[[NDArray], NDArray]
@@ -70,25 +71,6 @@ class Reader(Protocol):
         be concatenated together in the output array along the length dimension.
         """
         ...
-
-    def normalize_contig_name(self, contig: str, contigs: Iterable[str]) -> str:
-        """Normalize the contig name to adhere to the convention of the underlying file.
-        i.e. remove or add "chr" to the contig name.
-
-        Parameters
-        ----------
-        contig : str
-
-        Returns
-        -------
-        str
-            Normalized contig name.
-        """
-        for c in contigs:
-            # exact match, remove chr, add chr
-            if contig == c or contig[3:] == c or f"chr{contig}" == c:
-                return c
-        raise ValueError(f"Contig {contig} not found in {contigs}.")
 
 
 class ToZarr(Protocol):

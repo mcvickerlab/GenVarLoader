@@ -77,9 +77,6 @@ class Variants:
 
     @classmethod
     def from_vcf(cls, vcf: Union[str, Path, Dict[str, Path]], use_cache: bool = True):
-        if isinstance(vcf, str):
-            vcf = Path(vcf)
-
         records = Records.from_vcf(vcf)
 
         if use_cache:
@@ -90,6 +87,23 @@ class Variants:
         else:
             genotypes = VCFGenos(vcf, records.contig_offsets)
 
+        return cls(records, genotypes)
+
+    @classmethod
+    def from_gvl(cls, path: Union[str, Path, Dict[str, Path]]):
+        """Construct a Variants object from GVL files. The path(s) must end with `.gvl`.
+
+        Parameters
+        ----------
+        path : Union[str, Path, Dict[str, Path]]
+            Path to the GVL file(s).
+
+        Returns
+        -------
+        Variants
+        """
+        records = Records.from_gvl_arrow(path)
+        genotypes = ZarrGenos(path)
         return cls(records, genotypes)
 
     # TODO: read sample names from .psam file by using #IID or IID column. Implement a .psam reader.

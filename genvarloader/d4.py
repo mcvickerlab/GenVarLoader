@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Union, cast
+from typing import Dict, List, Union, cast
 
 import numpy as np
 import pyd4
@@ -7,7 +7,7 @@ from numpy import int64
 from numpy.typing import ArrayLike, NDArray
 
 from .types import Reader
-from .util import get_rel_starts
+from .util import get_rel_starts, normalize_contig_name
 
 
 class D4(Reader):
@@ -20,8 +20,7 @@ class D4(Reader):
         matrix = pyd4.D4File(str(path)).open_all_tracks()
         self.sample_names = cast(List[str], matrix.track_names)
         self.tracks = None
-        self.contigs = matrix.tracks[0].chrom_names()
-
+        self.contigs: Dict[str, int] = dict(matrix.tracks[0].chroms())
         self.sizes = {"sample": len(self.sample_names)}
         self.coords = {"sample": np.asarray(self.sample_names)}
 
@@ -35,7 +34,9 @@ class D4(Reader):
         ends: ArrayLike,
         **kwargs,
     ) -> NDArray[np.int32]:
-        contig = self.normalize_contig_name(contig, self.contigs)
+        contig = normalize_contig_name(
+            contig, self.contigs
+        )  # pyright: ignore[reportAssignmentType]
         if contig is None:
             raise ValueError(f"Contig {contig} not found in D4 file.")
 

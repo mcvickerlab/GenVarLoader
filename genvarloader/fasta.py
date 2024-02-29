@@ -9,7 +9,7 @@ from numpy.typing import ArrayLike, NDArray
 from typing_extensions import assert_never
 
 from .types import Reader
-from .util import get_rel_starts
+from .util import get_rel_starts, normalize_contig_name
 
 
 class NoPadError(Exception):
@@ -148,7 +148,9 @@ class Fasta(Reader):
         ValueError
             Coordinates are out-of-bounds and pad value is not set.
         """
-        contig = self.normalize_contig_name(contig, self.contigs.keys())
+        contig = normalize_contig_name(
+            contig, self.contigs
+        )  # pyright: ignore[reportAssignmentType]
         if contig is None:
             raise RuntimeError("Contig not found in FASTA file.")
         contig_len = self.contigs[contig]
@@ -201,6 +203,3 @@ class Fasta(Reader):
                 out[rel_start:rel_end] = seq
 
         return out
-
-    def __del__(self) -> None:
-        self.close()

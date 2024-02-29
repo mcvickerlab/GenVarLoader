@@ -18,6 +18,7 @@ from .intervals import Intervals
 from .loader import GVL, construct_virtual_data
 from .types import Reader
 from .variants import MemmapGenos, PgenGenos, Records, Variants, VCFGenos, ZarrGenos
+from .zarr import ZarrTracks
 
 __version__ = "0.0.0"  # managed by poetry-dynamic-versioning
 
@@ -35,4 +36,5 @@ __all__ = [
     "MemmapGenos",
     "VCFGenos",
     "Records",
+    "ZarrTracks",
 ]

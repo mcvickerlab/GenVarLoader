@@ -9,6 +9,7 @@ from .util import get_rel_starts
 
 
 class BigWigs(Reader):
+    dtype: np.float32  # pyBigWig always returns f32
     chunked = False
 
     def __init__(self, name: str, paths: Dict[str, str]) -> None:
@@ -25,6 +26,13 @@ class BigWigs(Reader):
         self.paths = paths
         self.readers = None
         self.samples = list(self.paths)
+        self.coords = {"sample": np.asarray(self.samples)}
+        self.sizes = {"sample": len(self.samples)}
+        f = pyBigWig.open(next(iter((self.paths.values()))), "r")
+        self.contigs: Dict[str, int] = {
+            contig: int(length) for contig, length in f.chroms().items()
+        }
+        f.close()
 
     def read(
         self,
@@ -74,8 +82,3 @@ class BigWigs(Reader):
         out[np.isnan(out)] = 0
 
         return out
-
-    def __del__(self) -> None:
-        if self.readers is not None:
-            for reader in self.readers.values():
-                reader.close()
