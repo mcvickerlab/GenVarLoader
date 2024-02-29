@@ -34,6 +34,9 @@ class BigWigs(Reader):
         }
         f.close()
 
+    def rev_strand_fn(self, x):
+        return x[..., ::-1]
+
     def read(
         self,
         contig: str,
