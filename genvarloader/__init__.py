@@ -11,7 +11,6 @@ batch. This should be fast because the buffer is the only part that uses file I/
 whereas the batches are materialized from the buffer.
 """
 
-from .d4 import D4
 from .fasta import Fasta
 from .haplotypes import Haplotypes
 from .intervals import Intervals
@@ -27,7 +26,6 @@ __all__ = [
     "Fasta",
     "Intervals",
     "GVL",
-    "D4",
     "construct_virtual_data",
     "Reader",
     "Variants",
