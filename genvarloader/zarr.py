@@ -17,6 +17,13 @@ except ImportError:
     ZARR_TENSORSTORE_INSTALLED = False
 
 
+"""
+Implementation note regarding using tensorstore with num_workers > 0
+https://github.com/google/tensorstore/issues/61
+TL;DR TensorStore is not Send.
+"""
+
+
 class ZarrTracks(Reader):
     chunked = True
 

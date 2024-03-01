@@ -177,6 +177,13 @@ class PgenGenos(Genotypes):
             self.handle.close()
 
 
+"""
+Implementation note regarding using tensorstore with num_workers > 0
+https://github.com/google/tensorstore/issues/61
+TL;DR TensorStore is not Send.
+"""
+
+
 class ZarrGenos(Genotypes, FromRecsGenos):
     chunked = True
     driver = "zarr"
@@ -189,11 +196,6 @@ class ZarrGenos(Genotypes, FromRecsGenos):
         if isinstance(paths, (str, Path)):
             paths = {"_all": Path(paths)}
 
-        if "_all" in paths:
-            one_source = True
-        else:
-            one_source = False
-
         if not all(p.suffix == ".zarr" for p in paths.values()):
             paths = self.convert_paths_to_zarr(paths)
             if not all(p.exists() for p in paths.values()):
@@ -201,17 +203,12 @@ class ZarrGenos(Genotypes, FromRecsGenos):
 
         self.paths = paths
 
-        first_path = next(iter(paths.values()))
-        if one_source:
-            tstore = self._open_tstore(next(iter(paths)))
-            contigs = zarr.open_array(first_path).attrs["contigs"]
-            self.tstores = {c: tstore for c in contigs}
-        else:
-            self.tstores = {contig: self._open_tstore(contig) for contig in paths}
-
-        self.samples = np.asarray(zarr.open_array(first_path).attrs["samples"])
+        first_path = next(iter(self.paths.values()))
+        z = zarr.open_array(first_path)
+        self.samples = np.asarray(z.attrs["samples"])
         # (s p v)
-        self.ploidy = self.tstores[next(iter(self.tstores))].shape[1]
+        self.ploidy = z.shape[1]
+        self.tstores = None
 
     @staticmethod
     def convert_paths_to_zarr(paths: Dict[str, Path]) -> Dict[str, Path]:
@@ -342,6 +339,20 @@ class ZarrGenos(Genotypes, FromRecsGenos):
 
         return cls(paths)
 
+    def _init_tstores(self):
+        if "_all" in self.paths:
+            one_source = True
+        else:
+            one_source = False
+
+        first_path = next(iter(self.paths.values()))
+        if one_source:
+            tstore = self._open_tstore(next(iter(self.paths)))
+            contigs = zarr.open_array(first_path).attrs["contigs"]
+            return {c: tstore for c in contigs}
+        else:
+            return {contig: self._open_tstore(contig) for contig in self.paths}
+
     def _open_tstore(self, contig: str):
         ts_open_kwargs = {
             "spec": {
@@ -364,6 +375,9 @@ class ZarrGenos(Genotypes, FromRecsGenos):
         sample_idx: Optional[ArrayLike] = None,
         haplotype_idx: Optional[ArrayLike] = None,
     ) -> NDArray[np.int8]:
+        if self.tstores is None:
+            self.tstores = self._init_tstores()
+
         start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=int))
         end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=int))
 
