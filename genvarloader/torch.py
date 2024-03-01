@@ -47,9 +47,25 @@ class GVLDataset(Dataset):
             for d in self.batch_dims[1:]
         }
         batch = {
-            r.name: r.read(contig, start, end, **read_kwargs).to_numpy()
-            for r in self.readers
+            r.name: r.read(contig, start, end, **read_kwargs) for r in self.readers
         }
         if self.transform is not None:
             batch = self.transform(batch)
         return batch
+
+
+# class ZarrSampler(Sampler):
+#     def __init__(self, bed: pl.DataFrame, dim_sizes: Dict[str, int], chunk_shape: Tuple[int, ...], batch_size: int):
+
+#         contigs = np.asarray(contigs)
+#         contig_offsets = np.unique(contigs, return_counts=True)
+#         self.data_by_contig = {
+
+#         }
+#         self.chunk_shape = chunk_shape
+
+#     def __iter__(self):
+#         return iter(range(len(self.dataset)))
+
+#     def __len__(self):
+#         return len(self.dataset)

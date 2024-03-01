@@ -1,11 +1,13 @@
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol, Union, cast
+from typing import Dict, List, Optional, Protocol, Tuple, Union, cast
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
 from typing_extensions import Self
+
+from genvarloader.util import get_rel_starts
 
 from .records import Records
 
@@ -33,7 +35,6 @@ except ImportError:
 
 
 class Genotypes(Protocol):
-    paths: Dict[str, Path]
     chunked: bool
     samples: NDArray[np.str_]
     ploidy: int
@@ -41,10 +42,10 @@ class Genotypes(Protocol):
     def read(
         self,
         contig: str,
-        start_idxs: NDArray[np.int32],
-        end_idxs: NDArray[np.int32],
-        sample_idx: Optional[NDArray[np.intp]] = None,
-        haplotype_idx: Optional[NDArray[np.intp]] = None,
+        start_idxs: ArrayLike,
+        end_idxs: ArrayLike,
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
     ) -> NDArray[np.int8]:
         """Read genotypes from a contig from index i to j, 0-based exclusive.
 
@@ -123,13 +124,16 @@ class PgenGenos(Genotypes):
     def read(
         self,
         contig: str,
-        start_idxs: NDArray[np.integer],
-        end_idxs: NDArray[np.integer],
-        sample_idx: Optional[NDArray[np.integer]] = None,
-        haplotype_idx: Optional[NDArray[np.integer]] = None,
+        start_idxs: ArrayLike,
+        end_idxs: ArrayLike,
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
     ) -> NDArray[np.int8]:
         if self.handle is None:
             self.handle = self._pgen(contig, None)
+
+        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
+        end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.int32))
 
         n_vars = (end_idxs - start_idxs).sum()
         # (v s*2)
@@ -152,11 +156,16 @@ class PgenGenos(Genotypes):
         genotypes = np.stack([genotypes[::2], genotypes[1::2]], axis=1)
 
         if sample_idx is not None:
-            genotypes = genotypes[sample_idx]
+            _sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=int))
+        else:
+            _sample_idx = slice(None)
 
         if haplotype_idx is not None:
-            genotypes = genotypes[:, haplotype_idx]
+            _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=int))
+        else:
+            _haplotype_idx = slice(None)
 
+        genotypes = genotypes[_sample_idx, _haplotype_idx]
         # re-order samples to be in query order
         # if sample_sorter is not None and (np.arange(n_samples) != sample_sorter).any():
         #     genotypes = genotypes[sample_sorter]
@@ -220,10 +229,10 @@ class ZarrGenos(Genotypes, FromRecsGenos):
         cls,
         records: Records,
         genotypes: Genotypes,
-        paths: Optional[Dict[str, Path]] = None,
+        paths: Optional[Union[str, Path, Dict[str, Path]]] = None,
         mem=int(1e9),
         overwrite: bool = False,
-        chunk_shape=None,
+        chunk_shape: Optional[Tuple[int, int, int]] = None,
     ) -> Self:
         if not ZARR_TENSORSTORE_INSTALLED:
             raise ImportError(
@@ -237,16 +246,21 @@ class ZarrGenos(Genotypes, FromRecsGenos):
         n_var_per_contig = {c: len(a) for c, a in records.v_starts.items()}
 
         if chunk_shape is None:
-            chunk_shape = (100, ploidy, int(1e5))
+            chunk_shape = (20, ploidy, int(5e4))
 
         if paths is None:
+            geno_paths = getattr(genotypes, "paths", None)
+            if geno_paths is None:
+                raise ValueError("No paths provided and no paths attribute found.")
             # suffix, possibly with .gz
             # examples: .pgen, .vcf, .vcf.gz, .bcf
             extension = re.compile(r"\.\w+(\.gz)?$")
             paths = {
                 c: p.parent / extension.sub(".gvl.genos.zarr", p.name)
-                for c, p in genotypes.paths.items()
+                for c, p in geno_paths.items()
             }
+        elif isinstance(paths, (str, Path)):
+            paths = {"_all": Path(paths)}
 
         if not overwrite and any(p.exists() for p in paths.values()):
             raise FileExistsError("Zarr file(s) already exist.")
@@ -257,8 +271,9 @@ class ZarrGenos(Genotypes, FromRecsGenos):
             one_source = False
 
         first_path = next(iter(paths.values()))
-        c_n_variants = np.array(list(n_var_per_contig.values()))
+        c_n_variants = np.array(list(n_var_per_contig.values()), dtype=np.int32)
         var_per_chunk = mem // (n_samples * ploidy)
+        n_chunks = sum(np.ceil(c_n_variants / var_per_chunk).astype(int))
         if one_source:
             n_variants = sum(n_var_per_contig.values())
             ts_open_kwargs = {
@@ -281,50 +296,49 @@ class ZarrGenos(Genotypes, FromRecsGenos):
             arr.attrs["contigs"] = records.contigs
             arr.attrs["samples"] = genotypes.samples.tolist()
 
-        for contig, c_n_vars in zip(contigs, c_n_variants):
-            c_offset = contig_offsets[contig]
+        with tqdm(total=n_chunks, unit="chunk") as pbar:
+            for contig, c_n_vars in zip(contigs, c_n_variants):
+                pbar.set_description(f"Writing contig {contig}")
+                c_offset = contig_offsets[contig]
 
-            if not one_source:
-                path = genotypes.paths[contig]
-                ts_open_kwargs = {
-                    "spec": {
-                        "driver": cls.driver,
-                        "kvstore": {"driver": "file", "path": str(path)},
-                    },
-                    "dtype": np.int8,
-                    "shape": (n_samples, ploidy, c_n_vars),
-                    "create": True,
-                    "delete_existing": True,
-                    "chunk_layout": ts.ChunkLayout(  # pyright: ignore[reportAttributeAccessIssue]
-                        chunk_shape=chunk_shape
-                    ),
-                }
-                ts_handle = ts.open(  # pyright: ignore[reportAttributeAccessIssue]
-                    **ts_open_kwargs
-                ).result()
-                arr = zarr.open_array(path)
-                arr.attrs["contigs"] = [contig]
-                arr.attrs["samples"] = genotypes.samples.tolist()
+                if not one_source:
+                    path = paths[contig]
+                    ts_open_kwargs = {
+                        "spec": {
+                            "driver": cls.driver,
+                            "kvstore": {"driver": "file", "path": str(path)},
+                        },
+                        "dtype": np.int8,
+                        "shape": (n_samples, ploidy, c_n_vars),
+                        "create": True,
+                        "delete_existing": True,
+                        "chunk_layout": ts.ChunkLayout(  # pyright: ignore[reportAttributeAccessIssue]
+                            chunk_shape=chunk_shape
+                        ),
+                    }
+                    ts_handle = ts.open(  # pyright: ignore[reportAttributeAccessIssue]
+                        **ts_open_kwargs
+                    ).result()
+                    arr = zarr.open_array(path)
+                    arr.attrs["contigs"] = [contig]
+                    arr.attrs["samples"] = genotypes.samples.tolist()
 
-            # write all genotypes to cache in chunks of up to 1 GB of memory, using up
-            # to (8 + 1) * chunk size = 9 GB working space
-            # [c_offset, c_offset + c_n_vars)
-            # for contig files, c_offset always = 0
-            # for one file, c_offset = cumsum of previous offsets
-            # c_n_vars is the number of variants in the contig
-            idxs = np.arange(
-                c_offset, c_offset + c_n_vars + var_per_chunk, var_per_chunk
-            )
-            idxs[-1] = c_offset + c_n_vars
-            for s_idx, e_idx in tqdm(
-                zip(idxs[:-1], idxs[1:]),
-                total=len(idxs) - 1,
-                desc=f"Writing contig {contig}",
-            ):
-                genos = genotypes.read(contig, np.array([s_idx]), np.array([e_idx]))
-                ts_handle[  # pyright: ignore[reportUnboundVariable]
-                    :, :, s_idx:e_idx
-                ] = genos
+                # write all genotypes to cache in chunks of up to 1 GB of memory, using up
+                # to (8 + 1) * chunk size = 9 GB working space
+                # [c_offset, c_offset + c_n_vars)
+                # for contig files, c_offset always = 0
+                # for one file, c_offset = cumsum of previous offsets
+                # c_n_vars is the number of variants in the contig
+                idxs = np.arange(
+                    c_offset, c_offset + c_n_vars + var_per_chunk, var_per_chunk
+                )
+                idxs[-1] = c_offset + c_n_vars
+                for s_idx, e_idx in zip(idxs[:-1], idxs[1:]):
+                    genos = genotypes.read(contig, np.array([s_idx]), np.array([e_idx]))
+                    ts_handle[  # pyright: ignore[reportUnboundVariable]
+                        :, :, s_idx:e_idx
+                    ] = genos
+                    pbar.update()
 
         return cls(paths)
 
@@ -382,6 +396,69 @@ class ZarrGenos(Genotypes, FromRecsGenos):
         return genotypes
 
 
+class NumpyGenos(Genotypes, FromRecsGenos):
+    chunked = False
+
+    def __init__(
+        self,
+        arrays: Dict[str, NDArray[np.int8]],
+        contig_offsets: Dict[str, int],
+        samples: ArrayLike,
+    ) -> None:
+        self.contigs = list(arrays)
+        self.arrays = arrays
+        self.samples = np.array(samples, dtype=np.str_)
+        self.ploidy = arrays[self.contigs[0]].shape[1]
+        self.contig_offsets = contig_offsets
+
+    def read(
+        self,
+        contig: str,
+        start_idxs: ArrayLike,
+        end_idxs: ArrayLike,
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
+    ) -> NDArray[np.int8]:
+        offset = self.contig_offsets[contig]
+        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=int)) - offset
+        end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=int)) - offset
+
+        if sample_idx is None:
+            _sample_idx = slice(None)
+            n_samples = len(self.samples)
+        else:
+            _sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=int))
+            n_samples = len(_sample_idx)
+
+        if haplotype_idx is None:
+            _haplotype_idx = slice(None)
+            ploidy = self.ploidy
+        else:
+            _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=int))
+            ploidy = len(_haplotype_idx)
+
+        genos = np.empty(
+            (n_samples, ploidy, (end_idxs - start_idxs).sum()),
+            dtype=np.int8,
+        )
+        rel_starts = get_rel_starts(start_idxs, end_idxs)
+        rel_ends = rel_starts + (end_idxs - start_idxs)
+        for s, e, r_s, r_e in zip(start_idxs, end_idxs, rel_starts, rel_ends):
+            if s == e:
+                continue
+            genos[..., r_s:r_e] = self.arrays[contig][_sample_idx, _haplotype_idx, s:e]
+
+        return genos
+
+    @classmethod
+    def from_recs_genos(cls, records: Records, genotypes: Genotypes) -> Self:
+        arrays = {}
+        for contig in records.contigs:
+            n_variants = len(records.v_starts[contig])
+            arrays[contig] = genotypes.read(contig, 0, n_variants)
+        return cls(arrays, records.contig_offsets, genotypes.samples)
+
+
 class MemmapGenos(Genotypes, FromRecsGenos):
     chunked = False
 
@@ -396,10 +473,10 @@ class MemmapGenos(Genotypes, FromRecsGenos):
     def read(
         self,
         contig: str,
-        start_idxs: NDArray[np.integer],
-        end_idxs: NDArray[np.integer],
-        sample_idx: Optional[NDArray[np.integer]] = None,
-        haplotype_idx: Optional[NDArray[np.integer]] = None,
+        start_idxs: ArrayLike,
+        end_idxs: ArrayLike,
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
     ) -> NDArray[np.int8]:
         raise NotImplementedError
         if sample_idx is None:

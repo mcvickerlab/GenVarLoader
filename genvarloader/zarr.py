@@ -31,10 +31,15 @@ class ZarrTracks(Reader):
         z = zarr.open_group(self.path, mode="r")
         self.contigs = cast(Dict[str, int], z.attrs["contigs"])
         self.sizes = cast(Dict[str, int], z.attrs["sizes"])
+        self.coords = {d: np.asarray(z.attrs[d]) for d in self.sizes}
         self.samples = cast(Optional[List[str]], z.attrs.get("samples", None))
         self.ploidy = cast(Optional[int], z.attrs.get("ploidy", None))
+        self.dtype = z[next(iter(self.contigs))].dtype
         # each is (s? p? l)
         self.tstores: Optional[Dict[str, Any]] = None
+
+    def rev_strand_fn(self, x):
+        return x[..., ::-1]
 
     @classmethod
     def from_reader(

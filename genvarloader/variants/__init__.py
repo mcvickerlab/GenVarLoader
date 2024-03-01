@@ -6,13 +6,21 @@ from attrs import define
 from numpy.typing import ArrayLike, NDArray
 
 from ..util import normalize_contig_name
-from .genotypes import Genotypes, MemmapGenos, PgenGenos, VCFGenos, ZarrGenos
+from .genotypes import (
+    Genotypes,
+    MemmapGenos,
+    NumpyGenos,
+    PgenGenos,
+    VCFGenos,
+    ZarrGenos,
+)
 from .records import Records, VLenAlleles
 
 __all__ = [
     "PgenGenos",
     "ZarrGenos",
     "MemmapGenos",
+    "NumpyGenos",
     "VCFGenos",
     "Variants",
     "Records",
@@ -76,7 +84,12 @@ class Variants:
         return self.genotypes.ploidy
 
     @classmethod
-    def from_vcf(cls, vcf: Union[str, Path, Dict[str, Path]], use_cache: bool = True):
+    def from_vcf(
+        cls,
+        vcf: Union[str, Path, Dict[str, Path]],
+        use_cache: bool = True,
+        chunk_shape: Optional[Tuple[int, int, int]] = None,
+    ):
         records = Records.from_vcf(vcf)
 
         if use_cache:
@@ -84,9 +97,11 @@ class Variants:
                 genotypes = ZarrGenos(vcf)
             except FileNotFoundError:
                 genotypes = VCFGenos(vcf, records.contig_offsets)
+                genotypes = ZarrGenos.from_recs_genos(
+                    records, genotypes, chunk_shape=chunk_shape
+                )
         else:
             genotypes = VCFGenos(vcf, records.contig_offsets)
-
         return cls(records, genotypes)
 
     @classmethod
@@ -122,6 +137,12 @@ class Variants:
         sample_names = np.atleast_1d(np.asarray(sample_names))
         genotypes = PgenGenos(pgen, sample_names)
         return cls(records, genotypes)
+
+    def in_memory(self):
+        if not isinstance(self.genotypes, NumpyGenos):
+            genotypes = NumpyGenos.from_recs_genos(self.records, self.genotypes)
+            return self.__class__(self.records, genotypes)
+        return self
 
     def subset_samples(self, samples: ArrayLike):
         samples = np.atleast_1d(np.asarray(samples, dtype=str))
