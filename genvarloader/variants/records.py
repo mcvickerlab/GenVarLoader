@@ -202,7 +202,7 @@ class Records:
                 path.parent / vcf_suffix.sub(".gvl.arrow", path.name)
             )
             pl.concat(end_dfs.values()).write_ipc(
-                path.parent / vcf_suffix.sub(".ends.gvl.arrow", path.name)
+                path.parent / vcf_suffix.sub(".gvl.ends.arrow", path.name)
             )
         else:
             for s_df, e_df, path in zip(
@@ -210,7 +210,7 @@ class Records:
             ):
                 s_df.write_ipc(path.parent / vcf_suffix.sub(".gvl.arrow", path.name))
                 e_df.write_ipc(
-                    path.parent / vcf_suffix.sub(".ends.gvl.arrow", path.name)
+                    path.parent / vcf_suffix.sub(".gvl.ends.arrow", path.name)
                 )
 
         return cls.from_var_df(start_dfs, end_dfs)
@@ -279,13 +279,13 @@ class Records:
         if multi_contig_source:
             path = pvar["_all"]
             pl.concat(start_dfs.values()).write_ipc(path.with_suffix(".gvl.arrow"))
-            pl.concat(end_dfs.values()).write_ipc(path.with_suffix(".ends.gvl.arrow"))
+            pl.concat(end_dfs.values()).write_ipc(path.with_suffix(".gvl.ends.arrow"))
         else:
             for s_df, e_df, path in zip(
                 start_dfs.values(), end_dfs.values(), pvar.values()
             ):
                 s_df.write_ipc(path.with_suffix(".gvl.arrow"))
-                e_df.write_ipc(path.with_suffix(".ends.gvl.arrow"))
+                e_df.write_ipc(path.with_suffix(".gvl.ends.arrow"))
 
         return cls.from_var_df(start_dfs, end_dfs)
 
@@ -362,7 +362,7 @@ class Records:
             path = arrow_paths["_all"]
             start_dfs = pl.read_ipc(path).partition_by("#CHROM", as_dict=True)
             end_dfs = pl.read_ipc(
-                path.parent / path.name.replace(".gvl.arrow", ".ends.gvl.arrow")
+                path.parent / path.name.replace(".gvl.arrow", ".gvl.ends.arrow")
             ).partition_by("#CHROM", as_dict=True)
         else:
             start_dfs: Dict[str, pl.DataFrame] = {}
@@ -370,7 +370,7 @@ class Records:
             for contig, path in arrow_paths.items():
                 start_dfs[contig] = pl.read_ipc(path)
                 end_dfs[contig] = pl.read_ipc(
-                    path.parent / path.name.replace(".gvl.arrow", ".ends.gvl.arrow")
+                    path.parent / path.name.replace(".gvl.arrow", ".gvl.ends.arrow")
                 )
 
         return cls.from_var_df(start_dfs, end_dfs)
