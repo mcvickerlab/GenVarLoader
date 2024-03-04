@@ -217,6 +217,16 @@ class Haplotypes:
 
         return out
 
+    def vidx(
+        self,
+        contigs: ArrayLike,
+        starts: ArrayLike,
+        length: ArrayLike,
+        samples: ArrayLike,
+        ploidies: ArrayLike,
+    ):
+        pass
+
     def sample_shifts(self, variants: DenseGenotypes) -> NDArray[np.int32]:
         genotypes = variants.genotypes
         size_diffs = variants.size_diffs

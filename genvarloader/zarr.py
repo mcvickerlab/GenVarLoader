@@ -1,3 +1,4 @@
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
@@ -169,6 +170,92 @@ class ZarrTracks(Reader):
                 continue
             # (s? p? l)
             sub_values[i] = tstore[..., s:e]
+
+        values = ts.concat(  # pyright: ignore[reportAttributeAccessIssue]
+            sub_values, axis=-1
+        )[
+            ts.d[0].translate_to[0]  # pyright: ignore[reportAttributeAccessIssue]
+        ]
+
+        values = cast(NDArray, values.read().result())
+
+        return values
+
+    def vidx(
+        self,
+        contigs: ArrayLike,
+        starts: ArrayLike,
+        length: int,
+        samples: Optional[ArrayLike] = None,
+        ploidy: Optional[ArrayLike] = None,
+        **kwargs,
+    ) -> NDArray:
+        if self.tstores is None:
+            self.tstores = {contig: self._tstore(contig) for contig in self.contigs}
+
+        contigs = np.array(
+            [
+                normalize_contig_name(c, self.contigs)
+                for c in np.atleast_1d(np.asarray(contigs))
+            ]
+        )
+        if (contigs == None).any():  # noqa: E711
+            raise ValueError("Some contigs not found")
+
+        if samples is not None:
+            if self.samples is None:
+                raise ValueError("No sample information available")
+
+            unique_samples, inverse = np.unique(samples, return_inverse=True)
+            if missing := set(unique_samples).difference(self.samples):
+                raise ValueError(f"Samples {missing} were not found")
+
+            key_idx, query_idx = np.intersect1d(
+                self.samples, unique_samples, return_indices=True, assume_unique=True
+            )[1:]
+            sample_idx = key_idx[query_idx[inverse]]
+        else:
+            if self.samples is None:
+                sample_idx = [None]
+            else:
+                sample_idx = [slice(None)]
+
+        if ploidy is not None:
+            if self.ploidy is None:
+                raise ValueError("No ploidy information available")
+
+            haplotype_idx = np.asarray(ploidy, dtype=int)
+            if (haplotype_idx >= self.ploidy).any():
+                raise ValueError("Ploidies requested exceed maximum ploidy")
+        else:
+            if self.ploidy is None:
+                haplotype_idx = [None]
+            else:
+                haplotype_idx = [slice(None)]
+
+        starts = np.atleast_1d(np.asarray(starts, dtype=int))
+        ends = starts + length
+
+        sub_values = [None] * len(starts)
+        for i, (c, s, e, sp, h) in enumerate(
+            zip_longest(contigs, starts, ends, sample_idx, haplotype_idx)
+        ):
+            # no variants in query regions
+            if s == e:
+                continue
+            tstore = self.tstores[c]
+            # (s? p? l)
+            if sp is None and h is None:
+                # (l)
+                sub_values[i] = tstore[s:e]
+            elif sp is None:
+                # (p l)
+                sub_values[i] = tstore[h, s:e]
+            elif h is None:
+                # (s p l)
+                sub_values[i] = tstore[sp, s:e]
+            else:
+                sub_values[i] = tstore[sp, h, s:e]
 
         values = ts.concat(  # pyright: ignore[reportAttributeAccessIssue]
             sub_values, axis=-1

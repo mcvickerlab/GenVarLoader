@@ -12,6 +12,7 @@ from .genotypes import (
     NumpyGenos,
     PgenGenos,
     VCFGenos,
+    VIdxGenos,
     ZarrGenos,
 )
 from .records import Records, VLenAlleles
@@ -245,6 +246,92 @@ class Variants:
 
         if sample is not None:
             genos = genos[sample_idxs]
+
+        return (
+            DenseGenotypes(
+                recs.positions,
+                recs.size_diffs,
+                recs.refs,
+                recs.alts,
+                genos,
+                recs.offsets,
+            ),
+            max_ends,
+        )
+
+    def vidx(
+        self,
+        contigs: ArrayLike,
+        starts: ArrayLike,
+        length: int,
+        samples: ArrayLike,
+        ploidies: ArrayLike,
+    ):
+        if not isinstance(self.genotypes, VIdxGenos):
+            raise ValueError(
+                f"Genotypes {self.genotypes} does not support vectorized indexing."
+            )
+
+        contigs = np.atleast_1d(np.asarray(contigs, dtype=str))
+        starts = np.atleast_1d(np.asarray(starts, dtype=int))
+        samples = np.atleast_1d(np.asarray(samples, dtype=str))
+        ploidies = np.atleast_1d(np.asarray(ploidies, dtype=int))
+
+        recs = self.records.vidx_vars_in_range(contigs, starts, length)
+        if recs is None:
+            return None
+
+        genos = self.genotypes.vidx(
+            contigs, recs.start_idxs, recs.end_idxs, samples, ploidies
+        )
+
+        return DenseGenotypes(
+            recs.positions,
+            recs.size_diffs,
+            recs.refs,
+            recs.alts,
+            genos,
+            recs.offsets,
+        )
+
+    def vidx_for_haplotype_construction(
+        self,
+        contigs: ArrayLike,
+        starts: ArrayLike,
+        length: int,
+        samples: ArrayLike,
+        ploidies: ArrayLike,
+    ):
+        if not isinstance(self.genotypes, VIdxGenos):
+            raise ValueError(
+                f"Genotypes {self.genotypes} does not support vectorized indexing."
+            )
+
+        contigs = np.atleast_1d(np.asarray(contigs, dtype=np.str_))
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
+        samples = np.atleast_1d(np.asarray(samples, dtype=np.str_))
+        ploidies = np.atleast_1d(np.asarray(ploidies, dtype=np.intp))
+
+        recs, max_ends = self.records.vidx_vars_in_range_for_haplotype_construction(
+            contigs, starts, length
+        )
+        if recs is None:
+            return None, max_ends
+
+        unique_samples, inverse = np.unique(samples, return_inverse=True)
+        if missing := set(unique_samples).difference(self.samples):
+            raise ValueError(f"Samples {missing} were not found")
+        key_idx, query_idx = np.intersect1d(
+            self.samples, unique_samples, return_indices=True, assume_unique=True
+        )[1:]
+        sample_idx = key_idx[query_idx[inverse]]
+
+        if (ploidies >= self.ploidy).any():
+            raise ValueError("Ploidies requested exceed maximum ploidy")
+
+        genos = self.genotypes.vidx(
+            contigs, recs.start_idxs, recs.end_idxs, sample_idx, ploidies
+        )
 
         return (
             DenseGenotypes(

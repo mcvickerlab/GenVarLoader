@@ -44,8 +44,8 @@ class Reader(Protocol):
         ends: ArrayLike,
         **kwargs,
     ) -> NDArray:
-        """Read data corresponding to given genomic coordinates. The output shape will
-        have length as the final dimension/axis i.e. (..., length).
+        """Read data corresponding to given genomic coordinates, akin to orthogonal indexing.
+        The output shape will have length as the final dimension/axis i.e. (..., length).
 
         Parameters
         ----------
@@ -70,6 +70,12 @@ class Reader(Protocol):
         When multiple regions are provided (i.e. multiple starts and ends) they should
         be concatenated together in the output array along the length dimension.
         """
+        ...
+
+    def vidx(
+        self, contigs: ArrayLike, starts: ArrayLike, length: int, **kwargs
+    ) -> NDArray:
+        """Read data akin to vectorized indexing. Output shape will be (queries, length)."""
         ...
 
 

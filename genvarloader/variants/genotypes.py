@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol, Tuple, Union, cast
+from typing import Dict, List, Optional, Protocol, Tuple, Union, cast, runtime_checkable
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -85,6 +85,22 @@ class FromRecsGenos(Protocol):
         overwrite: bool = False,
         **kwargs,
     ) -> Self:
+        ...
+
+
+@runtime_checkable
+class VIdxGenos(Protocol):
+    """Vectorized indexing for genotypes."""
+
+    def vidx(
+        self,
+        contigs: ArrayLike,
+        start_idxs: ArrayLike,
+        end_idxs: ArrayLike,
+        sample_idxs: ArrayLike,
+        haplotype_idxs: ArrayLike,
+    ) -> NDArray[np.int8]:
+        """Read data akin to vectorized indexing. Output shape will be (n_variants,)."""
         ...
 
 
@@ -184,7 +200,7 @@ TL;DR TensorStore is not Send.
 """
 
 
-class ZarrGenos(Genotypes, FromRecsGenos):
+class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
     chunked = True
     driver = "zarr"
 
@@ -409,6 +425,39 @@ class ZarrGenos(Genotypes, FromRecsGenos):
 
         return genotypes
 
+    def vidx(
+        self,
+        contigs: ArrayLike,
+        start_idxs: ArrayLike,
+        end_idxs: ArrayLike,
+        sample_idxs: ArrayLike,
+        haplotype_idxs: ArrayLike,
+    ) -> NDArray[np.int8]:
+        if self.tstores is None:
+            self.tstores = self._init_tstores()
+
+        contigs = np.atleast_1d(np.asarray(contigs, dtype=np.str_))
+        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.intp))
+        end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.intp))
+        sample_idxs = np.atleast_1d(np.asarray(sample_idxs, dtype=np.intp))
+        haplotype_idxs = np.atleast_1d(np.asarray(haplotype_idxs, dtype=np.intp))
+
+        sub_genos = [None] * len(contigs)
+        for i, (c, s, e, sp, h) in enumerate(
+            zip(contigs, start_idxs, end_idxs, sample_idxs, haplotype_idxs)
+        ):
+            tstore = self.tstores[c]
+            sub_genos[i] = tstore[sp, h, s:e]
+        genotypes = ts.concat(  # pyright: ignore[reportAttributeAccessIssue]
+            sub_genos, axis=-1
+        )[
+            ts.d[0].translate_to[0]  # pyright: ignore[reportAttributeAccessIssue]
+        ]
+
+        genotypes = cast(NDArray[np.int8], genotypes.read().result())
+
+        return genotypes
+
 
 class NumpyGenos(Genotypes, FromRecsGenos):
     chunked = False
@@ -463,6 +512,38 @@ class NumpyGenos(Genotypes, FromRecsGenos):
             genos[..., r_s:r_e] = self.arrays[contig][_sample_idx, _haplotype_idx, s:e]
 
         return genos
+
+    def __getitem__(
+        self,
+        contigs: ArrayLike,
+        start_idxs: ArrayLike,
+        end_idxs: ArrayLike,
+        sample_idxs: ArrayLike,
+        haplotype_idxs: ArrayLike,
+    ) -> NDArray[np.int8]:
+        contigs = np.atleast_1d(np.asarray(contigs, dtype=np.str_))
+        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.intp))
+        end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.intp))
+        sample_idxs = np.atleast_1d(np.asarray(sample_idxs, dtype=np.intp))
+        haplotype_idxs = np.atleast_1d(np.asarray(haplotype_idxs, dtype=np.intp))
+
+        genotypes = np.empty((end_idxs - start_idxs).sum(), dtype=np.int8)
+        rel_starts = get_rel_starts(start_idxs, end_idxs)
+        rel_ends = rel_starts + (end_idxs - start_idxs)
+        for c, s, e, sp, h, r_s, r_e in zip(
+            contigs,
+            start_idxs,
+            end_idxs,
+            sample_idxs,
+            haplotype_idxs,
+            rel_starts,
+            rel_ends,
+        ):
+            arr = self.arrays[c]
+            offset = self.contig_offsets[c]
+            genotypes[r_s:r_e] = arr[sp, h, s - offset : e - offset]
+
+        return genotypes
 
     @classmethod
     def from_recs_genos(cls, records: Records, genotypes: Genotypes) -> Self:

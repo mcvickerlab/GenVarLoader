@@ -203,3 +203,36 @@ class Fasta(Reader):
                 out[rel_start:rel_end] = seq
 
         return out
+
+    def vidx(
+        self, contigs: ArrayLike, starts: ArrayLike, length: int, **kwargs
+    ) -> NDArray[np.bytes_]:
+        # TODO: check that all queries are within bounds if pad is None
+
+        unique_contigs, c_idx = np.unique(contigs, return_inverse=True)
+        renamed_contigs = np.array(
+            [normalize_contig_name(c, self.contigs) for c in unique_contigs]
+        )
+        if (renamed_contigs == None).any():  # noqa: E711
+            raise RuntimeError("Contig not found in FASTA file.")
+        contigs = renamed_contigs[c_idx]
+
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int64))
+        ends = starts + length
+
+        if self.pad is None:
+            out = np.empty((len(starts), length), dtype="S1")
+        else:
+            out = np.full((len(starts), length), self.pad, dtype="S1")
+
+        for i, (c, s, e) in enumerate(zip(contigs, starts, ends)):
+            if self.sequences is None:
+                if self.handle is None:
+                    self.handle = self._open()
+                seq = self.handle.fetch(c, s, e)
+                seq = np.frombuffer(seq.encode("ascii"), "S1")
+            else:
+                seq = self.sequences[c][s:e]
+            out[i] = seq
+
+        return out
