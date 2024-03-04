@@ -189,6 +189,7 @@ class Records:
         if multi_contig_source:
             start_df = cls.read_vcf(vcf["_all"])
             start_dfs = start_df.partition_by("#CHROM", as_dict=True)
+            del start_df
         else:
             start_dfs: Dict[str, pl.DataFrame] = {}
             for contig, path in vcf.items():
@@ -229,6 +230,10 @@ class Records:
         refs = np.empty(n_variants, dtype=np.object_)
         alts = np.empty(n_variants, dtype=np.object_)
         for i, v in enumerate(vcf):
+            if not v.is_snp and not v.is_indel:
+                raise RuntimeError(
+                    f"VCF file {vcf_path} contains non-SNP, non-INDEL variants which are not supported by GenVarLoader."
+                )
             chroms[i] = v.CHROM
             positions[i] = v.POS
             refs[i] = v.REF

@@ -91,6 +91,20 @@ class Variants:
         use_cache: bool = True,
         chunk_shape: Optional[Tuple[int, int, int]] = None,
     ):
+        """Currently does not support multi-allelic sites, but does support *split*
+        multi-allelic sites. Note that SVs and "other" variants are also not supported.
+        VCFs can be prepared by running:
+        ```bash
+        bcftools view -i 'TYPE="snp" || TYPE="indel"' <file.bcf> \\
+        | bcftools norm \\
+            -a \\
+            --atom-overlaps . \\
+            -m - \\
+            -f <ref.fa> \\
+            -O b \\
+            -o <norm.bcf>
+        ```
+        """
         records = Records.from_vcf(vcf)
 
         if use_cache:
@@ -127,6 +141,24 @@ class Variants:
     def from_pgen(
         cls, pgen: Union[str, Path, Dict[str, Path]], sample_names: ArrayLike
     ):
+        """Currently does not support multi-allelic sites, but does support *split*
+        multi-allelic sites. Note that SVs and "other" variants are also not supported.
+        A PGEN can be prepared from a VCF by running:
+        ```bash
+        bcftools view -i 'TYPE="snp" || TYPE="indel"' <file.bcf> \\
+        | bcftools norm \\
+            -a \\
+            --atom-overlaps . \\
+            -m - \\
+            -f <ref.fa> \\
+            -O b \\
+            -o <norm.bcf> \\
+        plink2 --make-pgen \\
+            --bcf <norm.bcf> \\
+            --vcf-half-call r \\
+            --out <prefix>
+        ```
+        """
         if isinstance(pgen, str):
             pgen = Path(pgen)
 
