@@ -35,7 +35,7 @@ except ImportError:
 
 
 class Genotypes(Protocol):
-    chunked: bool
+    chunks: Optional[Tuple[int, ...]]
     samples: NDArray[np.str_]
     ploidy: int
 
@@ -89,7 +89,7 @@ class FromRecsGenos(Protocol):
 
 
 class PgenGenos(Genotypes):
-    chunked = False
+    chunks = None
     ploidy = 2
 
     def __init__(
@@ -185,7 +185,6 @@ TL;DR TensorStore is not Send.
 
 
 class ZarrGenos(Genotypes, FromRecsGenos):
-    chunked = True
     driver = "zarr"
 
     def __init__(self, paths: Union[str, Path, Dict[str, Path]]) -> None:
@@ -206,6 +205,7 @@ class ZarrGenos(Genotypes, FromRecsGenos):
         first_path = next(iter(self.paths.values()))
         z = zarr.open_array(first_path)
         self.samples = np.asarray(z.attrs["samples"])
+        self.chunks = z.chunks
         # (s p v)
         self.ploidy = z.shape[1]
         self.tstores = None
@@ -411,7 +411,7 @@ class ZarrGenos(Genotypes, FromRecsGenos):
 
 
 class NumpyGenos(Genotypes, FromRecsGenos):
-    chunked = False
+    chunks = None
 
     def __init__(
         self,
@@ -474,7 +474,7 @@ class NumpyGenos(Genotypes, FromRecsGenos):
 
 
 class MemmapGenos(Genotypes, FromRecsGenos):
-    chunked = False
+    chunks = None
 
     def __init__(self, memmaps: Dict[str, Path]) -> None:
         # TODO: need to store sample names as associated metadata
@@ -548,8 +548,8 @@ class MemmapGenos(Genotypes, FromRecsGenos):
 
 
 class VCFGenos(Genotypes):
-    chunked = False
-    ploidy = 2
+    chunks = None
+    ploidy = 2  # only support bi-allelic, so multi-allelics must be split
 
     def __init__(
         self, vcfs: Union[str, Path, Dict[str, Path]], contig_offsets: Dict[str, int]

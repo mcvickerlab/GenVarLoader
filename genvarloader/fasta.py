@@ -20,7 +20,7 @@ class Fasta(Reader):
     dtype = np.dtype("S1")
     sizes = {}
     coords = {}
-    chunked = False
+    chunks = None
 
     def __init__(
         self,

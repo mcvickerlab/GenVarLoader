@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Callable, Dict, Mapping, Protocol
+from typing import Callable, Dict, Mapping, Optional, Protocol, Tuple
 
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
@@ -24,9 +24,9 @@ class Reader(Protocol):
     rev_strand_fn : Callable[[NDArray], NDArray]
         Function to reverse (and potentially complement) data for a genomic region. This
         is used when the strand is negative.
-    chunked : bool
-        Whether the reader acts like a chunked array store, in which sequential reads
-        are far more performant than random access.
+    chunks : Optional[Tuple[int, ...]]
+        Chunk sizes for the data underlying the reader, if applicable. This is used to optimize
+        parallel reads and writes.
     """
 
     name: str
@@ -35,7 +35,7 @@ class Reader(Protocol):
     sizes: Dict[str, int]
     coords: Dict[str, NDArray]
     rev_strand_fn: Callable[[NDArray], NDArray]
-    chunked: bool
+    chunks: Optional[Tuple[int, ...]]
 
     def read(
         self,

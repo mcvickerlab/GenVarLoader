@@ -25,8 +25,6 @@ TL;DR TensorStore is not Send.
 
 
 class ZarrTracks(Reader):
-    chunked = True
-
     def __init__(self, name: str, path: Union[str, Path]):
         if not ZARR_TENSORSTORE_INSTALLED:
             raise ImportError(
@@ -41,7 +39,9 @@ class ZarrTracks(Reader):
         self.coords = {d: np.asarray(z.attrs[d]) for d in self.sizes}
         self.samples = cast(Optional[List[str]], z.attrs.get("samples", None))
         self.ploidy = cast(Optional[int], z.attrs.get("ploidy", None))
-        self.dtype = z[next(iter(self.contigs))].dtype
+        first_contig = next(iter(self.contigs))
+        self.chunks = z[first_contig].chunks
+        self.dtype = z[first_contig].dtype
         # each is (s? p? l)
         self.tstores: Optional[Dict[str, Any]] = None
 

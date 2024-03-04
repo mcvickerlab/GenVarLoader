@@ -10,7 +10,7 @@ from .util import get_rel_starts
 
 class BigWigs(Reader):
     dtype: np.float32  # pyBigWig always returns f32
-    chunked = False
+    chunks = None
 
     def __init__(self, name: str, paths: Dict[str, str]) -> None:
         """Read data from bigWig files.
@@ -24,7 +24,7 @@ class BigWigs(Reader):
         """
         self.name = name
         self.paths = paths
-        self.readers = None
+        self.handles = None
         self.samples = list(self.paths)
         self.coords = {"sample": np.asarray(self.samples)}
         self.sizes = {"sample": len(self.samples)}
@@ -63,8 +63,8 @@ class BigWigs(Reader):
         NDArray
             Shape: (samples length). Data corresponding to the given genomic coordinates and samples.
         """
-        if self.readers is None:
-            self.readers = {s: pyBigWig.open(p, "r") for s, p in self.paths.items()}
+        if self.handles is None:
+            self.handles = {s: pyBigWig.open(p, "r") for s, p in self.paths.items()}
 
         samples = kwargs.get("sample", self.samples)
         if isinstance(samples, str):
@@ -80,7 +80,7 @@ class BigWigs(Reader):
         out = np.empty((len(samples), (ends - starts).sum()), dtype=np.float32)
         for s, e, r_s, r_e in zip(starts, ends, rel_starts, rel_ends):
             for i, sample in enumerate(samples):
-                out[i, r_s:r_e] = self.readers[sample].values(contig, s, e, numpy=True)
+                out[i, r_s:r_e] = self.handles[sample].values(contig, s, e, numpy=True)
 
         out[np.isnan(out)] = 0
 

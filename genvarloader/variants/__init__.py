@@ -65,7 +65,7 @@ class Variants:
 
     @property
     def chunked(self):
-        return self.genotypes.chunked
+        return self.genotypes.chunks
 
     @property
     def samples(self):

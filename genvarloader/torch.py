@@ -1,13 +1,16 @@
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
 import polars as pl
 from numpy.typing import NDArray
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
-from .types import Reader
 from .util import construct_virtual_data, process_bed
+
+if TYPE_CHECKING:
+    from .haplotypes import Haplotypes
+    from .types import Reader
 
 
 class GVLDataset(Dataset):
@@ -54,18 +57,65 @@ class GVLDataset(Dataset):
         return batch
 
 
-# class ZarrSampler(Sampler):
-#     def __init__(self, bed: pl.DataFrame, dim_sizes: Dict[str, int], chunk_shape: Tuple[int, ...], batch_size: int):
+class ZarrBatchSampler(Sampler[List[int]]):
+    def __init__(
+        self,
+        bed: pl.DataFrame,
+        readers: List[Union[Reader, Haplotypes]],
+        length: int,
+        batch_size: int,
+        cache_pool: int,
+    ):
+        """Batch sampler for Zarr-backed datasets that will respect chunk boundaries.
 
-#         contigs = np.asarray(contigs)
-#         contig_offsets = np.unique(contigs, return_counts=True)
-#         self.data_by_contig = {
+        Parameters
+        ----------
+        bed : pl.DataFrame
+            _description_
+        dim_sizes : Dict[str, int]
+            _description_
+        chunk_shape : Tuple[int, ...]
+            _description_
+        batch_size : int
+            _description_
+        cache_pool : size in bytes of in-memory LRU cache for chunks
+        """
 
-#         }
-#         self.chunk_shape = chunk_shape
+        """
+        Implementation
+        --------------
+        1. Infer grid of chunks
+        2. Sample chunks that fit into cache_pool
+        3. Sample indices from chunks
+        4. If chunks exhausted, repeat 2-3 until batch_size is reached
+        """
+        self.bed = bed
+        self.batch_size = batch_size
+        self.cache_pool = cache_pool
 
-#     def __iter__(self):
-#         return iter(range(len(self.dataset)))
+        self.readers: List[Reader] = []
+        for r in readers:
+            if isinstance(r, Haplotypes):
+                self.readers.extend(r.readers)
+            else:
+                self.readers.append(r)
+        self.vdata = construct_virtual_data(
+            *self.readers, n_regions=bed.height, fixed_length=length
+        )
 
-#     def __len__(self):
-#         return len(self.dataset)
+    def __iter__(self) -> Iterator[List[int]]:
+        self.chunk_ptrs(self.dataset_shape, self.chunk_shape)
+
+    def chunk_ptrs(self, dataset_shape: Tuple[int, ...], chunk_shape: Tuple[int, ...]):
+        chunk_grid = np.ceil(np.array(dataset_shape) / np.array(chunk_shape)).astype(
+            np.int32
+        )
+        chunk_multi_ptrs = (
+            np.mgrid[tuple(slice(d) for d in chunk_grid)].T.reshape(-1, len(chunk_grid))
+            * chunk_shape
+        )
+        chunk_ptrs = np.ravel_multi_index(chunk_multi_ptrs.T, dataset_shape)
+        return chunk_ptrs
+
+    def __len__(self):
+        return len(self.dataset)

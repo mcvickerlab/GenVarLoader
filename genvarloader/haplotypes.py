@@ -78,7 +78,7 @@ class Haplotypes:
         if tracks is not None:
             self.readers.extend(tracks)
 
-        self.chunked = any(r.chunked for r in self.readers)
+        self.chunked = any(r.chunks for r in self.readers)
 
         if len(self.readers) == 0:
             raise ValueError(

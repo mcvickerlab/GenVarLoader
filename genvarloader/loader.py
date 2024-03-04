@@ -158,7 +158,7 @@ class GVL:
                 self.unnested_readers.update({_r.name: _r for _r in r.readers})
             else:
                 self.unnested_readers[r.name] = r
-        self.any_chunked = any(r.chunked for r in self.readers)
+        self.any_chunked = any(r.chunks for r in self.readers)
 
         # TODO raise warning if readers have different contig prefixes
         # can check via Reader.contig_starts_with_chr
