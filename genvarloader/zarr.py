@@ -67,8 +67,9 @@ class ZarrTracks(Reader):
             z.attrs["ploidy"] = reader.sizes["ploidy"]
         with tqdm(total=len(reader.contigs)) as pbar:
             for contig, e in reader.contigs.items():
-                pbar.set_description(f"Writing {contig}")
+                pbar.set_description(f"Reading {contig}")
                 data = reader.read(contig, 0, e)
+                pbar.set_description(f"Writing {contig}")
                 if chunk_shape is None:
                     chunk_layout = (
                         ts.ChunkLayout(  # pyright: ignore[reportAttributeAccessIssue]
