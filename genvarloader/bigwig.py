@@ -1,11 +1,11 @@
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 import pyBigWig
 from numpy.typing import ArrayLike, NDArray
 
 from .types import Reader
-from .util import get_rel_starts
+from .util import get_rel_starts, normalize_contig_name
 
 
 class BigWigs(Reader):
@@ -28,11 +28,19 @@ class BigWigs(Reader):
         self.samples = list(self.paths)
         self.coords = {"sample": np.asarray(self.samples)}
         self.sizes = {"sample": len(self.samples)}
-        f = pyBigWig.open(next(iter((self.paths.values()))), "r")
-        self.contigs: Dict[str, int] = {
-            contig: int(length) for contig, length in f.chroms().items()
-        }
-        f.close()
+        contigs: Optional[Dict[str, int]] = None
+        for path in self.paths.values():
+            with pyBigWig.open(path, "r") as f:
+                if contigs is None:
+                    contigs = {
+                        contig: int(length) for contig, length in f.chroms().items()
+                    }
+                else:
+                    common_contigs = contigs.keys() & f.chroms()
+                    contigs = {k: v for k, v in contigs.items() if k in common_contigs}
+        if contigs is None:
+            raise ValueError("No bigWig files provided.")
+        self.contigs: Dict[str, int] = contigs
 
     def rev_strand_fn(self, x):
         return x[..., ::-1]
@@ -63,6 +71,12 @@ class BigWigs(Reader):
         NDArray
             Shape: (samples length). Data corresponding to the given genomic coordinates and samples.
         """
+        _contig = normalize_contig_name(contig, self.contigs)
+        if _contig is None:
+            raise ValueError(f"Contig {contig} not found.")
+        else:
+            contig = _contig
+
         if self.readers is None:
             self.readers = {s: pyBigWig.open(p, "r") for s, p in self.paths.items()}
 

@@ -90,6 +90,9 @@ class Haplotypes:
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
+        sample: Optional[ArrayLike] = None,
+        ploid: Optional[ArrayLike] = None,
+        seed: Optional[int] = None,
         **kwargs,
     ) -> Dict[str, NDArray]:
         """Read data corresponding to a genomic range, sample, and ploid.
@@ -117,19 +120,19 @@ class Haplotypes:
             Variant sequences and re-aligned tracks, each with dimensions: (sample, ploid, length)
             Keys correspond to the names of the readers.
         """
-        samples = kwargs.get("sample", None)
+        samples = sample
         if samples is None:
             n_samples = self.variants.n_samples
         else:
+            samples = np.atleast_1d(np.asarray(samples, dtype=np.str_))
             n_samples = len(samples)
 
-        ploid = kwargs.get("ploid", None)
         if ploid is None:
             ploid = self.variants.ploidy
         else:
+            ploid = np.atleast_1d(np.asarray(ploid, dtype=np.intp))
             ploid = len(ploid)
 
-        seed = kwargs.get("seed", None)
         if seed is not None:
             self.rng = np.random.default_rng(seed)
 
@@ -137,7 +140,7 @@ class Haplotypes:
         ends = np.atleast_1d(np.asarray(ends, dtype=np.int64))
 
         variants, max_ends = self.variants.read_for_haplotype_construction(
-            contig, starts, ends, **kwargs
+            contig, starts, ends, samples, np.arange(ploid, dtype=np.intp)
         )
 
         lengths = ends - starts
@@ -221,11 +224,102 @@ class Haplotypes:
         self,
         contigs: ArrayLike,
         starts: ArrayLike,
-        length: ArrayLike,
+        length: int,
         samples: ArrayLike,
         ploidies: ArrayLike,
+        seed: Optional[int] = None,
     ):
-        pass
+        if not all(hasattr(r, "vidx") for r in self.readers):
+            raise ValueError("All readers must support vectorized indexing.")
+
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
+
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int64))
+        ends = starts + length
+        samples = np.atleast_1d(np.asarray(samples, dtype=np.str_))
+        ploidies = np.atleast_1d(np.asarray(ploidies, dtype=np.intp))
+
+        variants, max_ends = self.variants.vidx_for_haplotype_construction(
+            contigs, starts, length, samples, ploidies
+        )
+
+        lengths = ends - starts
+        total_length = lengths.sum()
+        rel_starts = get_rel_starts(starts, ends)
+
+        reader_lengths = max_ends - starts
+        reader_rel_starts = get_rel_starts(
+            starts, max_ends  # pyright: ignore[reportArgumentType]
+        )
+
+        if variants is None:
+            out = {}
+            for r in self.readers:
+                data = r.read(contig, starts, max_ends, **kwargs)
+                if isinstance(r, Fasta):
+                    # (l) -> (s p l)
+                    data = np.broadcast_to(data, (n_samples, ploid, len(data)))
+                else:
+                    # (... s? p? l) -> (... s p l)
+                    broadcast_track_to_haps(r.sizes, data, n_samples, ploid)
+                out[r.name] = data
+        else:
+            out: Dict[str, NDArray] = {}
+            if self.jitter_long:
+                # (s p r)
+                shifts = self.sample_shifts(variants)
+            else:
+                # (s p r)
+                shifts = np.zeros((n_samples, ploid, len(starts)), dtype=np.int32)
+
+            if self.reference is not None:
+                # ref shape: (length,)
+                ref: NDArray[np.bytes_] = self.reference.read(contigs, starts, max_ends)
+                out[self.reference.name] = ref_to_haplotypes(
+                    reference=ref,
+                    variants=variants,
+                    starts=starts,
+                    ref_lengths=reader_lengths,
+                    ref_rel_starts=reader_rel_starts,
+                    n_samples=n_samples,
+                    ploid=ploid,
+                    total_length=total_length,
+                    lengths=lengths,
+                    rel_starts=rel_starts,
+                    shifts=shifts,
+                    pad_char=self.pad,
+                    out=None,
+                )
+
+            if self.tracks is not None:
+                for reader in self.tracks:
+                    # track shape: (..., length) and in ... is 'sample' and maybe 'ploid'
+                    track = reader.read(contig, starts, max_ends, **kwargs)
+                    track = broadcast_track_to_haps(
+                        reader.sizes, track, n_samples, ploid
+                    )
+                    track = realign(
+                        track=track,
+                        variants=variants,
+                        starts=starts,
+                        track_lengths=reader_lengths,
+                        track_rel_starts=reader_rel_starts,
+                        total_length=total_length,
+                        lengths=lengths,
+                        rel_starts=rel_starts,
+                        shifts=shifts,
+                        out=None,
+                    )
+                    if "sample" in reader.sizes:
+                        sample_dim_idx = list(reader.sizes).index("sample")
+                        track = track.swapaxes(-3, sample_dim_idx)
+                    if "ploid" in reader.sizes:
+                        ploid_dim_idx = list(reader.sizes).index("ploid")
+                        track = track.swapaxes(-2, ploid_dim_idx)
+                    out[reader.name] = track
+
+        return out
 
     def sample_shifts(self, variants: DenseGenotypes) -> NDArray[np.int32]:
         genotypes = variants.genotypes

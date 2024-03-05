@@ -21,7 +21,6 @@ __all__ = [
     "PgenGenos",
     "ZarrGenos",
     "MemmapGenos",
-    "NumpyGenos",
     "VCFGenos",
     "Variants",
     "Records",
@@ -246,11 +245,13 @@ class Variants:
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
-        contig = normalize_contig_name(
+        _contig = normalize_contig_name(
             contig, self.records.contigs
         )  # pyright: ignore[reportAssignmentType]
-        if contig is None:
+        if _contig is None:
             return None, ends.astype(np.int32)
+        else:
+            contig = _contig
 
         recs, max_ends = self.records.vars_in_range_for_haplotype_construction(
             contig, starts, ends

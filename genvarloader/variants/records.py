@@ -225,10 +225,10 @@ class Records:
 
         vcf = cyvcf2.VCF(str(vcf_path))
         n_variants = vcf.num_records
-        chroms = np.empty(n_variants, dtype=np.object_)
+        chroms = [None] * n_variants
         positions = np.empty(n_variants, dtype=np.int32)
-        refs = np.empty(n_variants, dtype=np.object_)
-        alts = np.empty(n_variants, dtype=np.object_)
+        refs = [None] * n_variants
+        alts = [None] * n_variants
         for i, v in enumerate(vcf):
             if not v.is_snp and not v.is_indel:
                 raise RuntimeError(
@@ -249,10 +249,10 @@ class Records:
             alts[i] = alt[0]
         return pl.DataFrame(
             {
-                "#CHROM": chroms.astype(str),
+                "#CHROM": chroms,
                 "POS": positions,
-                "REF": refs.astype(str),
-                "ALT": alts.astype(str),
+                "REF": refs,
+                "ALT": alts,
             }
         )
 
