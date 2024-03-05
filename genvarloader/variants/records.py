@@ -229,16 +229,16 @@ class Records:
         positions = np.empty(n_variants, dtype=np.int32)
         refs = [None] * n_variants
         alts = [None] * n_variants
+        non_snp_non_indel = False
         for i, v in enumerate(vcf):
             if not v.is_snp and not v.is_indel:
-                raise RuntimeError(
-                    f"VCF file {vcf_path} contains non-SNP, non-INDEL variants which are not supported by GenVarLoader."
-                )
+                non_snp_non_indel = True
+                continue
             chroms[i] = v.CHROM
             positions[i] = v.POS
             refs[i] = v.REF
-            # TODO: punt multi-allelics. also punt missing ALT?
             alt = v.ALT
+            # TODO: punt multi-allelics. also punt missing ALT?
             if len(alt) != 1:
                 raise RuntimeError(
                     f"""VCF file {vcf_path} contains multi-allelic or overlappings
@@ -247,6 +247,11 @@ class Records:
                     -a --atom-overlaps . -m - <file.vcf>`"""
                 )
             alts[i] = alt[0]
+        if non_snp_non_indel:
+            logger.warning(
+                f"""VCF file {vcf_path} contains non-SNP and non-INDEL variants. 
+                These variants will be ignored."""
+            )
         return pl.DataFrame(
             {
                 "#CHROM": chroms,
