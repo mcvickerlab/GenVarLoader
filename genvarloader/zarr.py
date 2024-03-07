@@ -36,7 +36,7 @@ class ZarrTracks(Reader):
 
         self.name = name
         self.path = Path(path)
-        z = zarr.open_group(self.path, mode="r")
+        z = zarr.open_group(self.path, mode="r")  # pyright: ignore
         self.contigs = cast(Dict[str, int], z.attrs["contigs"])
         self.sizes = cast(Dict[str, int], z.attrs["sizes"])
         self.coords = {d: np.asarray(z.attrs[d]) for d in self.sizes}
@@ -58,7 +58,7 @@ class ZarrTracks(Reader):
     ):
         if isinstance(path, str):
             path = Path(path)
-        z = zarr.open_group(path)
+        z = zarr.open_group(path)  # pyright: ignore[reportPossiblyUnboundVariable]
         z.attrs["contigs"] = reader.contigs
         z.attrs["sizes"] = reader.sizes
         if "sample" in reader.coords:
@@ -71,18 +71,14 @@ class ZarrTracks(Reader):
                 data = reader.read(contig, 0, e)
                 pbar.set_description(f"Writing {contig}")
                 if chunk_shape is None:
-                    chunk_layout = (
-                        ts.ChunkLayout(  # pyright: ignore[reportAttributeAccessIssue]
-                            chunk_shape=(20,) * len(reader.sizes) + (int(5e4),)
-                        )
+                    chunk_layout = ts.ChunkLayout(  # pyright: ignore
+                        chunk_shape=(20,) * len(reader.sizes) + (int(5e4),)
                     )
                 else:
-                    chunk_layout = (
-                        ts.ChunkLayout(  # pyright: ignore[reportAttributeAccessIssue]
-                            chunk_shape=chunk_shape
-                        )
+                    chunk_layout = ts.ChunkLayout(  # pyright: ignore
+                        chunk_shape=chunk_shape
                     )
-                tstore = ts.open(  # pyright: ignore[reportAttributeAccessIssue]
+                tstore = ts.open(  # pyright: ignore
                     {
                         "driver": "zarr",
                         "kvstore": {"driver": "file", "path": str(path / contig)},
@@ -105,12 +101,12 @@ class ZarrTracks(Reader):
                 ).result()
                 tstore.write(data).result()
                 pbar.update()
-        zarr.consolidate_metadata(str(path))  # pyright: ignore[reportArgumentType]
+        zarr.consolidate_metadata(str(path))  # pyright: ignore
 
         return cls(reader.name, path)
 
     def _tstore(self, contig: str):
-        tstore = ts.open(  # pyright: ignore[reportAttributeAccessIssue]
+        tstore = ts.open(  # pyright: ignore
             {
                 "driver": "zarr",
                 "kvstore": {"driver": "file", "path": str(self.path / contig)},
@@ -138,12 +134,13 @@ class ZarrTracks(Reader):
                 samples = None
             elif missing := set(samples).difference(self.samples):
                 raise ValueError(f"Samples {missing} were not found")
-            key_idx, query_idx = np.intersect1d(
-                self.samples, samples, return_indices=True
-            )[1:]
-            sample_idx = key_idx[query_idx]
-            # (s p? l)
-            tstore = tstore[sample_idx]
+            else:
+                key_idx, query_idx = np.intersect1d(
+                    self.samples, samples, return_indices=True
+                )[1:]
+                sample_idx = key_idx[query_idx]
+                # (s p? l)
+                tstore = tstore[sample_idx]
 
         ploidy = cast(Optional[ArrayLike], kwargs.get("ploid", None))
         if ploidy is not None:
@@ -172,10 +169,8 @@ class ZarrTracks(Reader):
             # (s? p? l)
             sub_values[i] = tstore[..., s:e]
 
-        values = ts.concat(  # pyright: ignore[reportAttributeAccessIssue]
-            sub_values, axis=-1
-        )[
-            ts.d[0].translate_to[0]  # pyright: ignore[reportAttributeAccessIssue]
+        values = ts.concat(sub_values, axis=-1)[  # pyright: ignore  # pyright: ignore
+            ts.d[0].translate_to[0]  # pyright: ignore
         ]
 
         values = cast(NDArray, values.read().result())
@@ -258,10 +253,8 @@ class ZarrTracks(Reader):
             else:
                 sub_values[i] = tstore[sp, h, s:e]
 
-        values = ts.concat(  # pyright: ignore[reportAttributeAccessIssue]
-            sub_values, axis=-1
-        )[
-            ts.d[0].translate_to[0]  # pyright: ignore[reportAttributeAccessIssue]
+        values = ts.concat(sub_values, axis=-1)[  # pyright: ignore
+            ts.d[0].translate_to[0]  # pyright: ignore
         ]
 
         values = cast(NDArray, values.read().result())

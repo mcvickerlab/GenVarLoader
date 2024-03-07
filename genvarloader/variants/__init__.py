@@ -215,7 +215,7 @@ class Variants:
             if len(sample_idxs) != len(sample):
                 raise ValueError("Some samples were not found")
         else:
-            geno_sample_idxs = self._sample_idxs
+            sample_idxs = None
 
         if ploid is not None:
             ploid = np.atleast_1d(np.asarray(ploid, dtype=int))
@@ -264,21 +264,19 @@ class Variants:
             geno_sample_idxs, sample_idxs = np.intersect1d(
                 self.genotypes.samples, sample, return_indices=True
             )[1:]
+            sample_idxs = geno_sample_idxs[sample_idxs]
             if len(sample_idxs) != len(sample):
                 raise ValueError("Some samples were not found")
         else:
-            geno_sample_idxs = None
+            sample_idxs = None
 
         if ploid is not None:
             ploid = np.atleast_1d(np.asarray(ploid, dtype=int))
 
         # (s p v)
         genos = self.genotypes.read(
-            contig, recs.start_idxs, recs.end_idxs, geno_sample_idxs, ploid
+            contig, recs.start_idxs, recs.end_idxs, sample_idxs, ploid
         )
-
-        if sample is not None:
-            genos = genos[sample_idxs]
 
         return (
             DenseGenotypes(

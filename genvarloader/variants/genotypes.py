@@ -126,8 +126,12 @@ class PgenGenos(Genotypes):
             if not p.exists():
                 raise FileNotFoundError(f"PGEN file {p} not found.")
             if n_samples is None:
-                n_samples = pgenlib.PgenReader(bytes(p)).get_raw_sample_ct()
-            n_variants += pgenlib.PgenReader(bytes(p)).get_variant_ct()
+                n_samples = pgenlib.PgenReader(
+                    bytes(p)
+                ).get_raw_sample_ct()  # pyright: ignore[reportPossiblyUnboundVariable]
+            n_variants += pgenlib.PgenReader(
+                bytes(p)
+            ).get_variant_ct()  # pyright: ignore[reportPossiblyUnboundVariable]
         self.paths = paths
         self.n_samples: int = n_samples  # type: ignore
         self.n_variants = n_variants
@@ -135,7 +139,9 @@ class PgenGenos(Genotypes):
         self.handle = None
 
     def _pgen(self, contig: str, sample_idx: Optional[NDArray[np.uint32]]):
-        return pgenlib.PgenReader(bytes(self.paths[contig]), sample_subset=sample_idx)
+        return pgenlib.PgenReader(
+            bytes(self.paths[contig]), sample_subset=sample_idx
+        )  # pyright: ignore[reportPossiblyUnboundVariable]
 
     def read(
         self,
@@ -172,12 +178,12 @@ class PgenGenos(Genotypes):
         genotypes = np.stack([genotypes[::2], genotypes[1::2]], axis=1)
 
         if sample_idx is not None:
-            _sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=int))
+            _sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=np.intp))
         else:
             _sample_idx = slice(None)
 
         if haplotype_idx is not None:
-            _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=int))
+            _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=np.intp))
         else:
             _haplotype_idx = slice(None)
 
@@ -220,7 +226,9 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
         self.paths = paths
 
         first_path = next(iter(self.paths.values()))
-        z = zarr.open_array(first_path)
+        z = zarr.open_array(
+            first_path
+        )  # pyright: ignore[reportPossiblyUnboundVariable]
         self.samples = np.asarray(z.attrs["samples"])
         # (s p v)
         self.ploidy = z.shape[1]
@@ -259,7 +267,7 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
         n_var_per_contig = {c: len(a) for c, a in records.v_starts.items()}
 
         if chunk_shape is None:
-            chunk_shape = (20, ploidy, int(5e4))
+            chunk_shape = (10, ploidy, int(5e4))
 
         if paths is None:
             geno_paths = getattr(genotypes, "paths", None)
@@ -298,14 +306,16 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
                 "shape": (n_samples, ploidy, n_variants),
                 "create": True,
                 "delete_existing": True,
-                "chunk_layout": ts.ChunkLayout(  # pyright: ignore[reportAttributeAccessIssue]
+                "chunk_layout": ts.ChunkLayout(  # pyright: ignore[reportPossiblyUnboundVariable,reportAttributeAccessIssue]
                     chunk_shape=chunk_shape
                 ),
             }
-            ts_handle = ts.open(  # pyright: ignore[reportAttributeAccessIssue]
+            ts_handle = ts.open(  # pyright: ignore[reportPossiblyUnboundVariable,reportAttributeAccessIssue]
                 **ts_open_kwargs
             ).result()
-            arr = zarr.open_array(first_path)
+            arr = zarr.open_array(
+                first_path
+            )  # pyright: ignore[reportPossiblyUnboundVariable]
             arr.attrs["contigs"] = records.contigs
             arr.attrs["samples"] = genotypes.samples.tolist()
 
@@ -325,14 +335,16 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
                         "shape": (n_samples, ploidy, c_n_vars),
                         "create": True,
                         "delete_existing": True,
-                        "chunk_layout": ts.ChunkLayout(  # pyright: ignore[reportAttributeAccessIssue]
+                        "chunk_layout": ts.ChunkLayout(  # pyright: ignore[reportPossiblyUnboundVariable,reportAttributeAccessIssue]
                             chunk_shape=chunk_shape
                         ),
                     }
-                    ts_handle = ts.open(  # pyright: ignore[reportAttributeAccessIssue]
+                    ts_handle = ts.open(  # pyright: ignore[reportPossiblyUnboundVariable,reportAttributeAccessIssue]
                         **ts_open_kwargs
                     ).result()
-                    arr = zarr.open_array(path)
+                    arr = zarr.open_array(
+                        path
+                    )  # pyright: ignore[reportPossiblyUnboundVariable]
                     arr.attrs["contigs"] = [contig]
                     arr.attrs["samples"] = genotypes.samples.tolist()
 
@@ -349,7 +361,7 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
                 for s_idx, e_idx in zip(idxs[:-1], idxs[1:]):
                     genos = genotypes.read(contig, np.array([s_idx]), np.array([e_idx]))
                     pbar.set_description(f"Writing contig {contig}")
-                    ts_handle[  # pyright: ignore[reportUnboundVariable]
+                    ts_handle[  # pyright: ignore[reportPossiblyUnboundVariable]
                         :, :, s_idx:e_idx
                     ] = genos
                     pbar.update()
@@ -365,7 +377,9 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
         first_path = next(iter(self.paths.values()))
         if one_source:
             tstore = self._open_tstore(next(iter(self.paths)))
-            contigs = zarr.open_array(first_path).attrs["contigs"]
+            contigs = zarr.open_array(first_path).attrs[
+                "contigs"
+            ]  # pyright: ignore[reportPossiblyUnboundVariable]
             return {c: tstore for c in contigs}
         else:
             return {contig: self._open_tstore(contig) for contig in self.paths}
@@ -380,7 +394,7 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
             "read": True,
         }
 
-        return ts.open(  # pyright: ignore[reportAttributeAccessIssue]
+        return ts.open(  # pyright: ignore[reportPossiblyUnboundVariable,reportAttributeAccessIssue]
             **ts_open_kwargs
         ).result()
 
@@ -416,10 +430,12 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
                 continue
             sub_genos[i] = tstore[..., s:e]
 
-        genotypes = ts.concat(  # pyright: ignore[reportAttributeAccessIssue]
+        genotypes = ts.concat(  # pyright: ignore[reportPossiblyUnboundVariable,reportAttributeAccessIssue]
             sub_genos, axis=-1
         )[
-            ts.d[0].translate_to[0]  # pyright: ignore[reportAttributeAccessIssue]
+            ts.d[0].translate_to[
+                0
+            ]  # pyright: ignore[reportPossiblyUnboundVariable,reportAttributeAccessIssue]
         ]
 
         genotypes = cast(NDArray[np.int8], genotypes.read().result())
@@ -449,10 +465,12 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
         ):
             tstore = self.tstores[c]
             sub_genos[i] = tstore[sp, h, s:e]
-        genotypes = ts.concat(  # pyright: ignore[reportAttributeAccessIssue]
+        genotypes = ts.concat(  # pyright: ignore[reportPossiblyUnboundVariable,reportAttributeAccessIssue]
             sub_genos, axis=-1
         )[
-            ts.d[0].translate_to[0]  # pyright: ignore[reportAttributeAccessIssue]
+            ts.d[0].translate_to[
+                0
+            ]  # pyright: ignore[reportPossiblyUnboundVariable,reportAttributeAccessIssue]
         ]
 
         genotypes = cast(NDArray[np.int8], genotypes.read().result())
@@ -650,9 +668,13 @@ class VCFGenos(Genotypes):
             if not p.exists():
                 raise FileNotFoundError(f"VCF file {p} not found.")
             if samples is None:
-                samples = np.array(cyvcf2.VCF(str(p)).samples)
+                samples = np.array(
+                    cyvcf2.VCF(str(p)).samples
+                )  # pyright: ignore[reportPossiblyUnboundVariable]
         self.samples = samples  # type: ignore
-        self.handles: Optional[Dict[str, cyvcf2.VCF]] = None
+        self.handles: Optional[
+            Dict[str, cyvcf2.VCF]
+        ] = None  # pyright: ignore[reportPossiblyUnboundVariable]
         self.contig_offsets = contig_offsets
 
     def read(
@@ -668,10 +690,15 @@ class VCFGenos(Genotypes):
 
         if self.handles is None and "_all" not in self.paths:
             self.handles = {
-                c: cyvcf2.VCF(str(p), lazy=True) for c, p in self.paths.items()
+                c: cyvcf2.VCF(
+                    str(p), lazy=True
+                )  # pyright: ignore[reportPossiblyUnboundVariable]
+                for c, p in self.paths.items()
             }
         elif self.handles is None:
-            handle = cyvcf2.VCF(str(next(iter(self.paths.values()))), lazy=True)
+            handle = cyvcf2.VCF(
+                str(next(iter(self.paths.values()))), lazy=True
+            )  # pyright: ignore[reportPossiblyUnboundVariable]
             self.handles = {c: handle for c in handle.seqnames}
 
         if sample_idx is None:

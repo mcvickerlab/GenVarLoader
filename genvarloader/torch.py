@@ -4,13 +4,19 @@ from typing import Callable, Dict, List, Optional, Union
 import numpy as np
 import polars as pl
 from numpy.typing import NDArray
-from torch.utils.data import Dataset
 
 from .types import Reader
 from .util import construct_virtual_data, process_bed
 
+try:
+    from torch.utils.data import Dataset
 
-class GVLDataset(Dataset):
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+
+class GVLDataset(Dataset):  # pyright: ignore[reportPossiblyUnboundVariable]
     def __init__(
         self,
         *readers: Reader,
@@ -19,6 +25,10 @@ class GVLDataset(Dataset):
         batch_dims: Optional[List[str]] = None,
         transform: Optional[Callable[[Dict[str, NDArray]], Dict[str, NDArray]]] = None,
     ):
+        if not TORCH_AVAILABLE:
+            raise ImportError(
+                "Could not import PyTorch. Please install PyTorch to use torch features."
+            )
         self.readers = readers
         self.fixed_length = fixed_length
         self.transform = transform

@@ -14,6 +14,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    cast,
 )
 
 import numba as nb
@@ -177,9 +178,15 @@ class GVL:
             fixed_length=self.fixed_length,
         )
 
-        if TORCH_AVAILABLE and torch.distributed.is_initialized():
-            n_subsets = torch.distributed.get_world_size()
-            i = torch.distributed.get_rank()
+        if (
+            TORCH_AVAILABLE and torch.distributed.is_initialized()
+        ):  # pyright: ignore[reportPossiblyUnboundVariable]
+            n_subsets = (
+                torch.distributed.get_world_size()
+            )  # pyright: ignore[reportPossiblyUnboundVariable]
+            i = (
+                torch.distributed.get_rank()
+            )  # pyright: ignore[reportPossiblyUnboundVariable]
             subset_len = round(self.bed.height / n_subsets)
             slice_start = i * subset_len
 
@@ -243,9 +250,7 @@ class GVL:
             if len(idx_col_axes) == 0:
                 # after vectorized indexing with no batch dims, the batch axis is the
                 # length axis
-                self.buffer_batch_axis[
-                    name
-                ] = a.get_axis_num(  # type: ignore[assignment]
+                self.buffer_batch_axis[name] = a.get_axis_num(  # type: ignore[assignment]
                     "length"
                 )
             else:
@@ -407,9 +412,7 @@ class GVL:
                 if len(idx_col_axes) == 0:
                     # after vectorized indexing with no batch dims, the batch axis is the
                     # length axis
-                    self.buffer_batch_axis[
-                        name
-                    ] = a.get_axis_num(  # type: ignore[assignment]
+                    self.buffer_batch_axis[name] = a.get_axis_num(  # type: ignore[assignment]
                         "length"
                     )
                 else:
@@ -636,8 +639,8 @@ class GVL:
                         self.partial_indices = []
 
                     yield self.process_batch(
-                        batch,  # pyright: ignore[reportUnboundVariable]
-                        batch_idx,  # pyright: ignore[reportUnboundVariable]
+                        batch,  # pyright: ignore[reportPossiblyUnboundVariable]
+                        batch_idx,  # pyright: ignore[reportPossiblyUnboundVariable]
                         buffer.dim_idxs,
                     )
 
@@ -653,7 +656,7 @@ class GVL:
             yield self.process_batch(
                 batch,
                 batch_idx,
-                buffer.dim_idxs,  # pyright: ignore[reportUnboundVariable]
+                buffer.dim_idxs,  # pyright: ignore[reportPossiblyUnboundVariable]
             )
 
             self.total_yielded += batch_slice.stop

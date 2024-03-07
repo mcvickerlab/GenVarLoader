@@ -224,7 +224,9 @@ class Records:
                 "cyvcf2 is not installed. Please install it with `pip install cyvcf2`"
             )
 
-        vcf = cyvcf2.VCF(str(vcf_path))
+        vcf = cyvcf2.VCF(
+            str(vcf_path)
+        )  # pyright: ignore[reportPossiblyUnboundVariable]
         n_variants = vcf.num_records
         chroms = [None] * n_variants
         positions = np.empty(n_variants, dtype=np.int32)
@@ -832,8 +834,11 @@ def weighted_activity_selection(
         Shape: (variants). Weights of activities (i.e. deletion lengths).
     q : NDArray[np.intp]
         Shape: (variants). Nearest variant i such that i < j and variants are non-overlapping, q[j] = i.
+        Note this should not yet be adjusted for the start_index.
+    start_index : int
+        Index of the first variant overlapping the query region.
     query_end : int
-        Shape: (regions). End of query region.
+        End of query region.
 
     Returns
     -------
