@@ -311,7 +311,7 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
 
         with tqdm(total=n_chunks, unit="chunk") as pbar:
             for contig, c_n_vars in zip(contigs, c_n_variants):
-                pbar.set_description(f"Writing contig {contig}")
+                pbar.set_description(f"Reading contig {contig}")
                 c_offset = contig_offsets[contig]
 
                 if not one_source:
@@ -348,6 +348,7 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
                 idxs[-1] = c_offset + c_n_vars
                 for s_idx, e_idx in zip(idxs[:-1], idxs[1:]):
                     genos = genotypes.read(contig, np.array([s_idx]), np.array([e_idx]))
+                    pbar.set_description(f"Writing contig {contig}")
                     ts_handle[  # pyright: ignore[reportUnboundVariable]
                         :, :, s_idx:e_idx
                     ] = genos
