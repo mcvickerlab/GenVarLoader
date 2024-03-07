@@ -149,13 +149,21 @@ class Haplotypes:
 
         reader_lengths = max_ends - starts
         reader_rel_starts = get_rel_starts(
-            starts, max_ends  # pyright: ignore[reportArgumentType]
+            starts,
+            max_ends,  # pyright: ignore[reportArgumentType]
         )
 
         if variants is None:
             out = {}
             for r in self.readers:
-                data = r.read(contig, starts, max_ends, **kwargs)
+                data = r.read(
+                    contig,
+                    starts,
+                    max_ends,
+                    sample=samples,
+                    ploid=np.arange(ploid, dtype=np.intp),
+                    **kwargs,
+                )
                 if isinstance(r, Fasta):
                     # (l) -> (s p l)
                     data = np.broadcast_to(data, (n_samples, ploid, len(data)))
@@ -194,7 +202,14 @@ class Haplotypes:
             if self.tracks is not None:
                 for reader in self.tracks:
                     # track shape: (..., length) and in ... is 'sample' and maybe 'ploid'
-                    track = reader.read(contig, starts, max_ends, **kwargs)
+                    track = reader.read(
+                        contig,
+                        starts,
+                        max_ends,
+                        sample=samples,
+                        ploid=np.arange(ploid, dtype=np.intp),
+                        **kwargs,
+                    )
                     track = broadcast_track_to_haps(
                         reader.sizes, track, n_samples, ploid
                     )
@@ -250,7 +265,8 @@ class Haplotypes:
 
         reader_lengths = max_ends - starts
         reader_rel_starts = get_rel_starts(
-            starts, max_ends  # pyright: ignore[reportArgumentType]
+            starts,
+            max_ends,  # pyright: ignore[reportArgumentType]
         )
 
         if variants is None:

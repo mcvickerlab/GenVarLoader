@@ -9,6 +9,7 @@ import polars as pl
 from attrs import define
 from loguru import logger
 from numpy.typing import ArrayLike, NDArray
+from tqdm.auto import tqdm
 from typing_extensions import Self
 
 try:
@@ -230,23 +231,25 @@ class Records:
         refs = [None] * n_variants
         alts = [None] * n_variants
         non_snp_non_indel = False
-        for i, v in enumerate(vcf):
-            if not v.is_snp and not v.is_indel:
-                non_snp_non_indel = True
-                continue
-            chroms[i] = v.CHROM
-            positions[i] = v.POS
-            refs[i] = v.REF
-            alt = v.ALT
-            # TODO: punt multi-allelics. also punt missing ALT?
-            if len(alt) != 1:
-                raise RuntimeError(
-                    f"""VCF file {vcf_path} contains multi-allelic or overlappings
-                    variants which are not yet supported by GenVarLoader. Normalize 
-                    the VCF with `bcftools norm -f <reference.fa>
-                    -a --atom-overlaps . -m - <file.vcf>`"""
-                )
-            alts[i] = alt[0]
+        with tqdm(total=n_variants, desc=f"Reading {vcf_path.name}") as pbar:
+            for i, v in enumerate(vcf):
+                if not v.is_snp and not v.is_indel:
+                    non_snp_non_indel = True
+                    continue
+                chroms[i] = v.CHROM
+                positions[i] = v.POS
+                refs[i] = v.REF
+                alt = v.ALT
+                # TODO: punt multi-allelics. also punt missing ALT?
+                if len(alt) != 1:
+                    raise RuntimeError(
+                        f"""VCF file {vcf_path} contains multi-allelic or overlappings
+                        variants which are not yet supported by GenVarLoader. Normalize 
+                        the VCF with `bcftools norm -f <reference.fa>
+                        -a --atom-overlaps . -m - <file.vcf>`"""
+                    )
+                alts[i] = alt[0]
+                pbar.update()
         if non_snp_non_indel:
             logger.warning(
                 f"""VCF file {vcf_path} contains non-SNP and non-INDEL variants. 

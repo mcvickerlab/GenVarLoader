@@ -40,8 +40,8 @@ class ZarrTracks(Reader):
         self.contigs = cast(Dict[str, int], z.attrs["contigs"])
         self.sizes = cast(Dict[str, int], z.attrs["sizes"])
         self.coords = {d: np.asarray(z.attrs[d]) for d in self.sizes}
-        self.samples = cast(Optional[List[str]], z.attrs.get("samples", None))
-        self.ploidy = cast(Optional[int], z.attrs.get("ploidy", None))
+        self.samples = cast(Optional[List[str]], z.attrs.get("sample", None))
+        self.ploidy = cast(Optional[int], z.attrs.get("ploid", None))
         self.dtype = z[next(iter(self.contigs))].dtype
         # each is (s? p? l)
         self.tstores: Optional[Dict[str, Any]] = None
@@ -62,9 +62,9 @@ class ZarrTracks(Reader):
         z.attrs["contigs"] = reader.contigs
         z.attrs["sizes"] = reader.sizes
         if "sample" in reader.coords:
-            z.attrs["samples"] = reader.coords["sample"].tolist()
-        if "ploidy" in reader.sizes:
-            z.attrs["ploidy"] = reader.sizes["ploidy"]
+            z.attrs["sample"] = reader.coords["sample"].tolist()
+        if "ploid" in reader.sizes:
+            z.attrs["ploid"] = reader.sizes["ploidy"]
         with tqdm(total=len(reader.contigs)) as pbar:
             for contig, e in reader.contigs.items():
                 pbar.set_description(f"Reading {contig}")
@@ -132,10 +132,10 @@ class ZarrTracks(Reader):
             raise ValueError(f"Contig {contig} not found")
 
         tstore = self.tstores[contig]
-        samples = cast(Optional[List[str]], kwargs.get("samples", self.samples))
+        samples = cast(Optional[List[str]], kwargs.get("sample", self.samples))
         if samples is not None:
             if self.samples is None:
-                raise ValueError("No sample information available")
+                samples = None
             elif missing := set(samples).difference(self.samples):
                 raise ValueError(f"Samples {missing} were not found")
             key_idx, query_idx = np.intersect1d(
@@ -145,10 +145,10 @@ class ZarrTracks(Reader):
             # (s p? l)
             tstore = tstore[sample_idx]
 
-        ploidy = cast(Optional[ArrayLike], kwargs.get("ploidy", None))
+        ploidy = cast(Optional[ArrayLike], kwargs.get("ploid", None))
         if ploidy is not None:
             if self.ploidy is None:
-                raise ValueError("No ploidy information available")
+                ploidy = None
             else:
                 haplotype_idx = np.asarray(ploidy, dtype=int)
                 if (haplotype_idx >= self.ploidy).any():
