@@ -784,6 +784,11 @@ def get_max_ends_and_idxs(
     start_idxs: NDArray[np.intp],
     query_ends: NDArray[np.int64],
 ) -> Tuple[NDArray[np.int32], NDArray[np.intp]]:
+    """Time: O(q * v) where q is number of query regions and v is the number of variants
+    (mostly limited to those in the query regions thanks to early exit criteria).
+    Importantly, this algorithm does not scale (directly) with the number of samples. However, more samples
+    from sequencing experiemnts will increase the number of unique variants sub-linearly.
+    """
     max_ends: NDArray[np.int32] = np.empty(len(start_idxs), dtype=np.int32)
     end_idxs: NDArray[np.intp] = np.empty(len(start_idxs), dtype=np.intp)
     for r in nb.prange(len(start_idxs)):
@@ -797,8 +802,10 @@ def get_max_ends_and_idxs(
 
         # to adjust q from [0, j) to [i, j)
         # (q[i:] - i).clip(0)
-        q = (nearest_nonoverlapping[s:] - s).clip(0)
-        max_end, end_idx = weighted_activity_selection(v_ends[s:], w, q, query_ends[r])
+        q = nearest_nonoverlapping[s:]
+        max_end, end_idx = weighted_activity_selection(
+            v_ends[s:], w, q, s, query_ends[r]
+        )
         max_ends[r] = max_end
         end_idxs[r] = s + end_idx
     return max_ends, end_idxs
@@ -809,6 +816,7 @@ def weighted_activity_selection(
     v_ends: NDArray[np.int32],
     w: NDArray[np.int32],
     q: NDArray[np.intp],
+    start_index: int,
     query_end: int,
 ) -> Tuple[int, int]:
     """Implementation of the [weighted activity selection problem](https://en.wikipedia.org/wiki/Activity_selection_problem)
@@ -857,7 +865,8 @@ def weighted_activity_selection(
     max_del: NDArray[np.int32] = np.empty(n_vars + 1, dtype=np.int32)
     max_del[0] = 0
     for j in range(1, n_vars + 1):
-        max_del[j] = max(max_del[q[j - 1]] + w[j - 1], max_del[j - 1])
+        _q = max(q[j - 1] - start_index, 0)
+        max_del[j] = max(max_del[_q] + w[j - 1], max_del[j - 1])
         v_del_end = v_ends[j - 1] - max_del[j] + 1  # + 1, v_ends is end-inclusive
         # if:
         # this variant more than satisfies query length
