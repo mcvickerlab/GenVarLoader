@@ -55,7 +55,7 @@ profile = "black"
 plugins = ["numpy.typing.mypy_plugin", "pandera.mypy"]
 
 [tool.ruff]
-ignore = ["E501"]
+lint.ignore = ["E501"]
 
 [tool.pyright]
 exclude = ["archive/", "results/", "**/data", "scripts/", "dist/", "docs/"]
