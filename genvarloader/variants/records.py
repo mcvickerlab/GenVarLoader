@@ -45,12 +45,10 @@ class VLenAlleles:
     alleles: NDArray[np.bytes_]
 
     @overload
-    def __getitem__(self, idx: int) -> NDArray[np.bytes_]:
-        ...
+    def __getitem__(self, idx: int) -> NDArray[np.bytes_]: ...
 
     @overload
-    def __getitem__(self, idx: slice) -> "VLenAlleles":
-        ...
+    def __getitem__(self, idx: slice) -> "VLenAlleles": ...
 
     def __getitem__(self, idx: Union[int, slice, np.integer]):
         if isinstance(idx, (int, np.integer)):
@@ -224,16 +222,16 @@ class Records:
                 "cyvcf2 is not installed. Please install it with `pip install cyvcf2`"
             )
 
-        vcf = cyvcf2.VCF(
-            str(vcf_path)
-        )  # pyright: ignore[reportPossiblyUnboundVariable]
+        vcf = cyvcf2.VCF(str(vcf_path))  # pyright: ignore
         n_variants = vcf.num_records
         chroms = [None] * n_variants
         positions = np.empty(n_variants, dtype=np.int32)
         refs = [None] * n_variants
         alts = [None] * n_variants
         non_snp_non_indel = False
-        with tqdm(total=n_variants, desc=f"Reading {vcf_path.name}") as pbar:
+        with tqdm(
+            total=n_variants, desc=f"Scanning variants from {vcf_path.name}"
+        ) as pbar:
             for i, v in enumerate(vcf):
                 if not v.is_snp and not v.is_indel:
                     non_snp_non_indel = True
@@ -633,12 +631,8 @@ class Records:
 
         positions = np.empty(n_queries, np.int32)
         size_diffs = np.empty(n_queries, np.int32)
-        refs: List[VLenAlleles] = [
-            None
-        ] * n_queries  # pyright: ignore[reportAssignmentType]
-        alts: List[VLenAlleles] = [
-            None
-        ] * n_queries  # pyright: ignore[reportAssignmentType]
+        refs: List[VLenAlleles] = [None] * n_queries  # pyright: ignore[reportAssignmentType]
+        alts: List[VLenAlleles] = [None] * n_queries  # pyright: ignore[reportAssignmentType]
         start_idxs = np.empty(n_queries, np.int32)
         end_idxs = np.empty(n_queries, np.int32)
 
@@ -690,12 +684,8 @@ class Records:
 
         positions = np.empty(n_queries, np.int32)
         size_diffs = np.empty(n_queries, np.int32)
-        refs: List[VLenAlleles] = [
-            None
-        ] * n_queries  # pyright: ignore[reportAssignmentType]
-        alts: List[VLenAlleles] = [
-            None
-        ] * n_queries  # pyright: ignore[reportAssignmentType]
+        refs: List[VLenAlleles] = [None] * n_queries  # pyright: ignore[reportAssignmentType]
+        alts: List[VLenAlleles] = [None] * n_queries  # pyright: ignore[reportAssignmentType]
         start_idxs = np.empty(n_queries, np.int32)
         end_idxs = np.empty(n_queries, np.int32)
 
