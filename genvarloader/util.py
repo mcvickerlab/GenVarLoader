@@ -67,10 +67,12 @@ def _set_fixed_length_around_center(bed: pl.DataFrame, length: int):
     if "peak" in bed:
         center = pl.col("chromStart") + pl.col("peak")
     else:
-        center = (pl.col("chromStart") + pl.col("chromEnd")) / 2
+        center = (pl.col("chromStart") + pl.col("chromEnd")) // 2
+    left = length // 2
+    right = length - left
     bed = bed.with_columns(
-        chromStart=(center - length / 2).round(0).cast(pl.Int64),
-        chromEnd=(center + length / 2).round(0).cast(pl.Int64),
+        chromStart=(center - left).cast(pl.Int64),
+        chromEnd=(center + right).cast(pl.Int64),
     )
     return bed
 
