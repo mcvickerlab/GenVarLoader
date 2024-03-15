@@ -694,7 +694,7 @@ class Records:
         for contig in unique_contigs:
             idx = np.nonzero(contigs == contig)[0]
 
-            _s_idxs = np.searchsorted(self.v_ends[contig], starts)
+            _s_idxs = np.searchsorted(self.v_ends[contig], starts[idx])
             _max_ends, _e_idxs = get_max_ends_and_idxs(
                 self.v_ends[contig],
                 self.v_diffs_sorted_by_ends[contig],
