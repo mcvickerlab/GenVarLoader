@@ -66,8 +66,9 @@ class ZarrTracks(Reader):
         n_chunks = len(reader.contigs)
 
         if "sample" in reader.sizes:
-            n_chunks *= 10
-            z.attrs["sample"] = reader.coords["sample"].tolist()
+            samples = reader.coords["sample"].tolist()
+            n_chunks *= len(samples) // 10 + 1
+            z.attrs["sample"] = samples
         if "ploid" in reader.sizes:
             z.attrs["ploid"] = reader.sizes["ploidy"]
 
