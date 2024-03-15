@@ -425,39 +425,6 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
 
         return genotypes
 
-    def vidx(
-        self,
-        contigs: ArrayLike,
-        start_idxs: ArrayLike,
-        end_idxs: ArrayLike,
-        sample_idxs: ArrayLike,
-        haplotype_idxs: ArrayLike,
-    ) -> NDArray[np.int8]:
-        if self.tstores is None:
-            self.tstores = self._init_tstores()
-
-        contigs = np.atleast_1d(np.asarray(contigs, dtype=np.str_))
-        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.intp))
-        end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.intp))
-        sample_idxs = np.atleast_1d(np.asarray(sample_idxs, dtype=np.intp))
-        haplotype_idxs = np.atleast_1d(np.asarray(haplotype_idxs, dtype=np.intp))
-
-        sub_genos = [None] * len(contigs)
-        for i, (c, s, e, sp, h) in enumerate(
-            zip(contigs, start_idxs, end_idxs, sample_idxs, haplotype_idxs)
-        ):
-            tstore = self.tstores[c]
-            sub_genos[i] = tstore[sp, h, s:e]
-        genotypes = ts.concat(  # pyright: ignore[reportPossiblyUnboundVariable,reportAttributeAccessIssue]
-            sub_genos, axis=-1
-        )[
-            ts.d[0].translate_to[0]  # pyright: ignore[reportPossiblyUnboundVariable,reportAttributeAccessIssue]
-        ]
-
-        genotypes = cast(NDArray[np.int8], genotypes.read().result())
-
-        return genotypes
-
 
 class NumpyGenos(Genotypes, FromRecsGenos):
     chunked = False
