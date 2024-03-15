@@ -1,8 +1,10 @@
+from functools import partial
 from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import numpy as np
+from more_itertools import batched
 from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
 
@@ -61,24 +63,30 @@ class ZarrTracks(Reader):
         z = zarr.open_group(path)  # pyright: ignore[reportPossiblyUnboundVariable]
         z.attrs["contigs"] = reader.contigs
         z.attrs["sizes"] = reader.sizes
-        if "sample" in reader.coords:
+        n_chunks = len(reader.contigs)
+
+        if "sample" in reader.sizes:
+            n_chunks *= 10
             z.attrs["sample"] = reader.coords["sample"].tolist()
         if "ploid" in reader.sizes:
             z.attrs["ploid"] = reader.sizes["ploidy"]
-        with tqdm(total=len(reader.contigs)) as pbar:
+
+        if chunk_shape is None:
+            if "sample" in reader.sizes and "ploid" in reader.sizes:
+                chunk_shape = (10, reader.sizes["ploid"], int(5e5))
+            elif "sample" in reader.sizes:
+                chunk_shape = (20, int(5e5))
+            elif "ploidy" in reader.sizes:
+                chunk_shape = (2, int(5e5))
+
+        chunk_layout = ts.ChunkLayout(  # pyright: ignore
+            chunk_shape=chunk_shape
+        )
+
+        with tqdm(total=n_chunks) as pbar:
             for contig, e in reader.contigs.items():
-                pbar.set_description(f"Reading {contig}")
-                data = reader.read(contig, 0, e)
-                pbar.set_description(f"Writing {contig}")
-                if chunk_shape is None:
-                    chunk_layout = ts.ChunkLayout(  # pyright: ignore
-                        chunk_shape=(20,) * len(reader.sizes) + (int(5e4),)
-                    )
-                else:
-                    chunk_layout = ts.ChunkLayout(  # pyright: ignore
-                        chunk_shape=chunk_shape
-                    )
-                tstore = ts.open(  # pyright: ignore
+                ts_open = partial(
+                    ts.open,
                     {
                         "driver": "zarr",
                         "kvstore": {"driver": "file", "path": str(path / contig)},
@@ -95,12 +103,38 @@ class ZarrTracks(Reader):
                     write=True,
                     create=True,
                     delete_existing=True,
-                    dtype=data.dtype,
                     chunk_layout=chunk_layout,
-                    shape=data.shape,
-                ).result()
-                tstore.write(data).result()
-                pbar.update()
+                )
+                tstore = None
+                if "sample" in reader.sizes:
+                    for b_idx, samples in enumerate(
+                        batched(reader.coords["sample"], 10)
+                    ):
+                        pbar.set_description(f"Reading {contig}")
+                        data = reader.read(contig, 0, e, sample=samples)
+
+                        if tstore is None:
+                            tstore = ts_open(
+                                dtype=data.dtype, shape=data.shape
+                            ).result()
+
+                        pbar.set_description(f"Writing {contig}")
+                        start = b_idx * 10
+                        stop = b_idx * 10 + len(samples)
+                        tstore[start:stop].write(data).result()
+
+                        pbar.update()
+                else:
+                    pbar.set_description(f"Reading {contig}")
+                    data = reader.read(contig, 0, e)
+
+                    if tstore is None:
+                        tstore = ts_open(dtype=data.dtype, shape=data.shape).result()
+
+                    pbar.set_description(f"Writing {contig}")
+                    tstore.write(data).result()
+
+                    pbar.update()
         zarr.consolidate_metadata(str(path))  # pyright: ignore
 
         return cls(reader.name, path)
@@ -121,9 +155,7 @@ class ZarrTracks(Reader):
         if self.tstores is None:
             self.tstores = {contig: self._tstore(contig) for contig in self.contigs}
 
-        contig = normalize_contig_name(
-            contig, self.contigs
-        )  # pyright: ignore[reportAssignmentType]
+        contig = normalize_contig_name(contig, self.contigs)  # pyright: ignore[reportAssignmentType]
         if contig is None:
             raise ValueError(f"Contig {contig} not found")
 
