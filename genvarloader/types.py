@@ -72,12 +72,6 @@ class Reader(Protocol):
         """
         ...
 
-    def vidx(
-        self, contigs: ArrayLike, starts: ArrayLike, length: int, **kwargs
-    ) -> NDArray:
-        """Read data akin to vectorized indexing. Output shape will be (queries, length)."""
-        ...
-
 
 class ToZarr(Protocol):
     """Implements the to_zarr() method."""

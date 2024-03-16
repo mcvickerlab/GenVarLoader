@@ -652,20 +652,32 @@ class VCFGenos(Genotypes):
             _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=int))
 
         # (s p v)
+        n_variants = (end_idxs - start_idxs).sum()
         genos = np.empty(
-            (len(self.samples), self.ploidy, (end_idxs - start_idxs).sum()),
+            (len(self.samples), self.ploidy, n_variants),
             dtype=np.int8,
         )
-        geno_idx = 0
+
+        if genos.size == 0:
+            return genos
+
+        # (n_queries)
+        geno_idxs = get_rel_starts(start_idxs, end_idxs)
+        finish_idxs = np.empty_like(geno_idxs)
+        finish_idxs[:-1] = geno_idxs[1:]
+        finish_idxs[-1] = n_variants
         offset = self.contig_offsets[contig]
         for i, v in enumerate(self.handles[contig](contig), start=offset):
-            for s_idx, e_idx in zip(start_idxs, end_idxs):
-                if i >= s_idx and i < e_idx:
-                    # (s p) = (s p)
-                    genos[..., geno_idx] = v.genotype.array()[:, :2]
-                    geno_idx += 1
-                if i >= e_idx:
-                    break
+            # (n_queries)
+            overlapping_query_intervals = (i >= start_idxs) & (i < end_idxs)
+            if overlapping_query_intervals.any():
+                # (n_valid)
+                place_idx = geno_idxs[overlapping_query_intervals]
+                # increment idxs for next iteration
+                geno_idxs[overlapping_query_intervals] += 1
+                genos[..., place_idx] = v.genotype.array()[:, :2, None]
+            if (geno_idxs == finish_idxs).all():
+                break
 
         genos = genos[_sample_idx, _haplotype_idx]
         # cyvcf2 encoding: 0, 1, -1 => gvl/pgen encoding: 0, 1, -9
