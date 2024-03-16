@@ -16,8 +16,10 @@ from .fasta import Fasta
 from .haplotypes import Haplotypes
 from .intervals import Intervals
 from .loader import GVL, construct_virtual_data
+from .open import open_ds
 from .types import Reader
 from .variants import MemmapGenos, PgenGenos, Records, Variants, VCFGenos, ZarrGenos
+from .write import write
 from .zarr import ZarrTracks
 
 __version__ = "0.0.0"  # managed by poetry-dynamic-versioning
@@ -37,4 +39,6 @@ __all__ = [
     "VCFGenos",
     "Records",
     "ZarrTracks",
+    "write",
+    "open_ds",
 ]

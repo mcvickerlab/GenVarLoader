@@ -50,7 +50,7 @@ class VLenAlleles:
     @overload
     def __getitem__(self, idx: slice) -> "VLenAlleles": ...
 
-    def __getitem__(self, idx: Union[int, slice, np.integer]):
+    def __getitem__(self, idx: Union[int, np.integer, slice]):
         if isinstance(idx, (int, np.integer)):
             return self.get_idx(idx)
         elif isinstance(idx, slice):
@@ -128,13 +128,13 @@ class VLenAlleles:
 
 @define
 class RecordInfo:
-    positions: NDArray[np.int32]
-    size_diffs: NDArray[np.int32]
+    positions: NDArray[np.int32]  # (n_variants)
+    size_diffs: NDArray[np.int32]  # (n_variants)
     refs: VLenAlleles
     alts: VLenAlleles
-    start_idxs: NDArray[np.int32]
-    end_idxs: NDArray[np.int32]
-    offsets: NDArray[np.uint32]
+    start_idxs: NDArray[np.int32]  # (n_queries)
+    end_idxs: NDArray[np.int32]  # (n_queries)
+    offsets: NDArray[np.uint32]  # (n_queries + 1)
 
 
 @define
@@ -508,7 +508,7 @@ class Records:
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-    ) -> Optional[RecordInfo]:
+    ) -> RecordInfo:
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
@@ -520,7 +520,15 @@ class Records:
         )
 
         if s_idxs.min() == e_idxs.max():
-            return None
+            return RecordInfo(
+                positions=np.empty(0, dtype=np.int32),
+                size_diffs=np.empty(0, dtype=np.int32),
+                refs=VLenAlleles(np.zeros(1, np.uint32), np.empty(0, "|S1")),
+                alts=VLenAlleles(np.zeros(1, np.uint32), np.empty(0, "|S1")),
+                start_idxs=np.empty(0, dtype=np.int32),
+                end_idxs=np.empty(0, dtype=np.int32),
+                offsets=np.zeros(1, np.uint32),
+            )
 
         n_var_per_region = e_idxs - s_idxs
         offsets = np.empty(len(n_var_per_region) + 1, dtype=np.uint32)
@@ -558,9 +566,10 @@ class Records:
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-    ) -> Tuple[Optional[RecordInfo], NDArray[np.int32]]:
+    ) -> Tuple[RecordInfo, NDArray[np.int32]]:
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
+        n_queries = len(starts)
 
         _s_idxs = np.searchsorted(self.v_ends[contig], starts)
 
@@ -580,15 +589,23 @@ class Records:
         e_idxs += self.contig_offsets[contig]
 
         if s_idxs.min() == e_idxs.max():
-            return None, ends.astype(np.int32)
+            recs = RecordInfo(
+                positions=np.empty(0, dtype=np.int32),
+                size_diffs=np.empty(0, dtype=np.int32),
+                refs=VLenAlleles(np.zeros(1, np.uint32), np.empty(0, "|S1")),
+                alts=VLenAlleles(np.zeros(1, np.uint32), np.empty(0, "|S1")),
+                start_idxs=np.empty(0, dtype=np.int32),
+                end_idxs=np.empty(0, dtype=np.int32),
+                offsets=np.zeros(1, np.uint32),
+            )
+            return recs, ends.astype(np.int32)
 
         np.concatenate(
             [np.arange(s, e, dtype=np.uint32) for s, e in zip(s_idxs, e_idxs)]
         )
-        n_var_per_region = e_idxs - s_idxs
-        offsets = np.empty(len(n_var_per_region) + 1, dtype=np.uint32)
+        offsets = np.empty(n_queries + 1, dtype=np.uint32)
         offsets[0] = 0
-        np.cumsum(n_var_per_region, out=offsets[1:])
+        np.cumsum(e_idxs - s_idxs, out=offsets[1:])
 
         rel_s_idxs = s_idxs - self.contig_offsets[contig]
         rel_e_idxs = e_idxs - self.contig_offsets[contig]

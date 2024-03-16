@@ -193,9 +193,7 @@ class Variants:
         sample: Optional[ArrayLike] = None,
         ploid: Optional[ArrayLike] = None,
     ):
-        contig = normalize_contig_name(
-            contig, self.records.contigs
-        )  # pyright: ignore[reportAssignmentType]
+        contig = normalize_contig_name(contig, self.records.contigs)  # pyright: ignore[reportAssignmentType]
         if contig is None:
             return None
 
@@ -203,7 +201,7 @@ class Variants:
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
         recs = self.records.vars_in_range(contig, starts, ends)
-        if recs is None:
+        if recs.start_idxs.size == 0:
             return None
 
         if sample is not None:
@@ -245,9 +243,7 @@ class Variants:
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
-        _contig = normalize_contig_name(
-            contig, self.records.contigs
-        )  # pyright: ignore[reportAssignmentType]
+        _contig = normalize_contig_name(contig, self.records.contigs)  # pyright: ignore[reportAssignmentType]
         if _contig is None:
             return None, ends.astype(np.int32)
         else:
