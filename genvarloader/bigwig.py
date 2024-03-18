@@ -120,15 +120,21 @@ class BigWigs(Reader):
         starts = np.maximum(0, starts)
         ends = np.minimum(ends, self.contigs[contig])
 
-        def task(contig: str, starts, ends, path: str):
+        def task(contig: str, starts: NDArray, ends: NDArray, path: str):
             intervals_ls: List[Tuple[int, int, float]] = []
             # (n_queries)
             n_per_query = np.empty(len(starts), np.uint32)
             with pyBigWig.open(path, "r") as f:
                 for i, (s, e) in enumerate(zip(starts, ends)):
-                    _intervals = f.intervals(contig, s, e)
-                    intervals_ls.extend(_intervals)
-                    n_per_query[i] = len(_intervals)
+                    _intervals = cast(
+                        Optional[Tuple[Tuple[int, int, float], ...]],
+                        f.intervals(contig, s, e),
+                    )
+                    if _intervals is not None:
+                        intervals_ls.extend(_intervals)
+                        n_per_query[i] = len(_intervals)
+                    else:
+                        n_per_query[i] = 0
             # (n_intervals, 2)
             intervals = np.array([i[:2] for i in intervals_ls], np.uint32)
             # (n_intervals)

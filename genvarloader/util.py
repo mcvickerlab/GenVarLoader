@@ -60,10 +60,10 @@ def process_bed(bed: Union[str, Path, pl.DataFrame], fixed_length: int):
 
     bed = bed.sort("chrom", "chromStart")
 
-    return _set_fixed_length_around_center(bed, fixed_length)
+    return with_length(bed, fixed_length)
 
 
-def _set_fixed_length_around_center(bed: pl.DataFrame, length: int):
+def with_length(bed: pl.DataFrame, length: int):
     if "peak" in bed:
         center = pl.col("chromStart") + pl.col("peak")
     else:
