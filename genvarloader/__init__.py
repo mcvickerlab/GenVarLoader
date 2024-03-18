@@ -16,8 +16,9 @@ from .fasta import Fasta
 from .haplotypes import Haplotypes
 from .intervals import Intervals
 from .loader import GVL, construct_virtual_data
-from .open import open_ds
+from .open import GVLDataset
 from .types import Reader
+from .util import read_bedlike
 from .variants import MemmapGenos, PgenGenos, Records, Variants, VCFGenos, ZarrGenos
 from .write import write
 from .zarr import ZarrTracks
@@ -40,5 +41,6 @@ __all__ = [
     "Records",
     "ZarrTracks",
     "write",
-    "open_ds",
+    "GVLDataset",
+    "read_bedlike",
 ]

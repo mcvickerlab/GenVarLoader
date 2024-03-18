@@ -1,6 +1,6 @@
 from functools import partial
 from pathlib import Path
-from typing import Dict, Optional, Union, cast
+from typing import Dict, Iterable, Optional, Union, cast
 
 import numpy as np
 import pysam
@@ -97,18 +97,16 @@ class Fasta(Reader):
         if not in_memory:
             self.sequences = None
         else:
-            self.sequences = self._get_all_contigs()
+            self.sequences = self._get_contigs(self.contigs)
 
     def _get_contig_lengths(self) -> Dict[str, int]:
         with self._open() as f:
             return {c: f.get_reference_length(c) for c in f.references}
 
-    def _get_all_contigs(self) -> Dict[str, NDArray[np.bytes_]]:
-        """Load all contigs into memory."""
+    def _get_contigs(self, contigs: Iterable[str]) -> Dict[str, NDArray[np.bytes_]]:
+        """Load contigs into memory."""
         with self._open() as f:
-            return {
-                c: np.frombuffer(f.fetch(c).encode("ascii"), "S1") for c in f.references
-            }
+            return {c: np.frombuffer(f.fetch(c).encode("ascii"), "S1") for c in contigs}
 
     def _open(self):
         return pysam.FastaFile(str(self.path))
