@@ -163,9 +163,7 @@ class GVLDataset:
             """
         ).strip()
 
-    def __getitem__(
-        self, s_r_idx: Tuple[Idx, Idx]
-    ) -> Union[NDArray, Tuple[NDArray, NDArray]]:
+    def __getitem__(self, idx: Idx) -> Union[NDArray, Tuple[NDArray, NDArray]]:
         """Get a batch of haplotypes and tracks or intervals and tracks.
 
         Parameters
@@ -173,40 +171,22 @@ class GVLDataset:
         s_r_idx : Tuple[Idx, Idx]
             Tuple of sample and region indices, in that order.
         """
-        s_idx, r_idx = s_r_idx
-
-        if (isinstance(s_idx, int) and not isinstance(r_idx, int)) or (
-            not isinstance(s_idx, int) and isinstance(r_idx, int)
-        ):
-            raise NotImplementedError("Broadcasting indices is not yet supported.")
-        elif isinstance(s_idx, slice) and isinstance(r_idx, slice):
-            s_idx = np.arange(self.n_samples, dtype=np.uintp)[s_idx]
-            r_idx = np.arange(self.n_regions, dtype=np.uintp)[r_idx]
-            squeeze = False
-        elif isinstance(s_idx, int) and isinstance(r_idx, int):
-            s_idx = [s_idx]
-            r_idx = [r_idx]
+        squeeze = False
+        if isinstance(idx, (int, np.integer)):
+            _idx = [idx]
             squeeze = True
-        elif (
-            isinstance(s_idx, np.ndarray)
-            and s_idx.ndim == 0
-            and isinstance(r_idx, np.ndarray)
-            and r_idx.ndim == 0
-        ):
-            s_idx = np.atleast_1d(s_idx)
-            r_idx = np.atleast_1d(r_idx)
-            squeeze = True
+        elif isinstance(idx, slice):
+            _idx = np.arange(self.n_samples * self.n_regions, dtype=np.uintp)[idx]
         else:
-            squeeze = False
-
-        s_idx, r_idx = cast(ListIdx, s_idx), cast(ListIdx, r_idx)
+            _idx = idx
+        _idx = cast(ListIdx, _idx)
 
         if self.genotypes is None and self.has_genos:
             self.init_genotypes()
         if self.intervals is None and self.has_itvs:
             self.init_intervals()
 
-        ds_idx = np.ravel_multi_index((s_idx, r_idx), self.shape)
+        s_idx, r_idx = np.unravel_index(_idx, self.shape)
         regions = self.regions[r_idx]
 
         if self.state is self.State.HAPS_ITVS:
@@ -217,7 +197,7 @@ class GVLDataset:
             haps, shifts = self.get_haplotypes_and_shifts(
                 s_idx, r_idx, self.genotypes, regions
             )
-            tracks = self.get_hap_tracks(ds_idx, self.intervals, regions, shifts)
+            tracks = self.get_hap_tracks(_idx, self.intervals, regions, shifts)
 
             if self.max_jitter > 0:
                 seed = self.rng.integers(np.iinfo(np.intp).max, dtype=np.intp)
@@ -274,7 +254,7 @@ class GVLDataset:
                 self.pad_char,
             ).view("S1")
 
-            tracks = self.get_tracks(ds_idx, self.intervals, regions)
+            tracks = self.get_tracks(_idx, self.intervals, regions)
             if self.max_jitter > 0:
                 seed = self.rng.integers(np.iinfo(np.intp).max, dtype=np.intp)
                 ref, tracks = sp.jitter(
@@ -297,7 +277,7 @@ class GVLDataset:
             if TYPE_CHECKING:
                 assert self.intervals is not None
 
-            tracks = self.get_tracks(ds_idx, self.intervals, regions)
+            tracks = self.get_tracks(_idx, self.intervals, regions)
             if self.max_jitter > 0:
                 seed = self.rng.integers(np.iinfo(np.intp).max, dtype=np.intp)
                 tracks = sp.jitter(
