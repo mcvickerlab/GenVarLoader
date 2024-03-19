@@ -17,8 +17,9 @@ from .haplotypes import Haplotypes
 from .intervals import Intervals
 from .loader import GVL, construct_virtual_data
 from .open import GVLDataset
+from .torch import get_dataloader, get_sampler
 from .types import Reader
-from .util import read_bedlike
+from .util import read_bedlike, with_length
 from .variants import MemmapGenos, PgenGenos, Records, Variants, VCFGenos, ZarrGenos
 from .write import write
 from .zarr import ZarrTracks
@@ -43,4 +44,7 @@ __all__ = [
     "write",
     "GVLDataset",
     "read_bedlike",
+    "with_length",
+    "get_dataloader",
+    "get_sampler",
 ]

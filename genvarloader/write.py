@@ -11,8 +11,9 @@ from loguru import logger
 from tqdm.auto import tqdm
 
 from .bigwig import BigWigs
-from .util import read_bedlike, with_length
+from .util import normalize_contig_name, read_bedlike, with_length
 from .variants import Variants
+from .variants.records import EMPTY_RECORD_INFO
 
 
 def write(
@@ -69,11 +70,11 @@ def prep_bed(
     max_jitter: Optional[int] = None,
 ) -> Tuple[pl.DataFrame, List[str], int]:
     if isinstance(bed, (str, Path)):
-        bed = (
-            read_bedlike(bed)
-            .select("chrom", "chromStart", "chromEnd")
-            .sort("chrom", "chromStart", "chromEnd")
-        )
+        bed = read_bedlike(bed)
+
+    bed = bed.select("chrom", "chromStart", "chromEnd").sort(
+        "chrom", "chromStart", "chromEnd"
+    )
 
     if length is None:
         length = cast(
@@ -137,23 +138,31 @@ def write_variants(
     pbar = tqdm(total=bed["chrom"].n_unique())
     all_max_ends = []
     for contig, part in bed.partition_by(
-        "chrom", as_dict=True, include_key=False
+        "chrom", as_dict=True, include_key=False, maintain_order=True
     ).items():
         pbar.set_description(f"Writing genotypes for {contig}")
         starts = part["chromStart"].to_numpy()
         ends = part["chromEnd"].to_numpy()
-        len(starts)
 
-        records, max_ends = variants.records.vars_in_range_for_haplotype_construction(
-            contig, starts, ends
-        )
+        _contig = normalize_contig_name(contig, variants.records.contigs)
+        if _contig is None:
+            records = EMPTY_RECORD_INFO
+            max_ends = ends.astype(np.int32)
+            genos = np.empty((0, variants.ploidy), np.int8)
+        else:
+            (
+                records,
+                max_ends,
+            ) = variants.records.vars_in_range_for_haplotype_construction(
+                _contig, starts, ends
+            )
+            genos = variants.genotypes.read(
+                _contig, records.start_idxs, records.end_idxs, sample_idx=sample_idx
+            )
+            genos = rearrange(genos, "s p v -> (s v) p")
+
         all_max_ends.append(max_ends)
         n_variants += len(records.positions)
-
-        genos = variants.genotypes.read(
-            contig, records.start_idxs, records.end_idxs, sample_idx=sample_idx
-        )
-        genos = rearrange(genos, "s p v -> (s v) p")
 
         out = np.memmap(
             path / "genotypes" / "genotypes.npy",
@@ -232,7 +241,7 @@ def write_bigwigs(
     n_intervals = 0
     pbar = tqdm(total=bed["chrom"].n_unique())
     for contig, part in bed.partition_by(
-        "chrom", as_dict=True, include_key=False
+        "chrom", as_dict=True, include_key=False, maintain_order=True
     ).items():
         pbar.set_description(f"Writing intervals for {contig}")
         starts = part["chromStart"].to_numpy()
