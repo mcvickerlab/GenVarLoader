@@ -12,6 +12,8 @@ from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
 from typing_extensions import Self
 
+from ..util import normalize_contig_name
+
 try:
     import cyvcf2
 
@@ -135,6 +137,17 @@ class RecordInfo:
     start_idxs: NDArray[np.int32]  # (n_queries)
     end_idxs: NDArray[np.int32]  # (n_queries)
     offsets: NDArray[np.uint32]  # (n_queries + 1)
+
+
+EMPTY_RECORD_INFO = RecordInfo(
+    positions=np.empty(0, dtype=np.int32),
+    size_diffs=np.empty(0, dtype=np.int32),
+    refs=VLenAlleles(np.zeros(1, np.uint32), np.empty(0, "|S1")),
+    alts=VLenAlleles(np.zeros(1, np.uint32), np.empty(0, "|S1")),
+    start_idxs=np.empty(0, dtype=np.int32),
+    end_idxs=np.empty(0, dtype=np.int32),
+    offsets=np.zeros(1, np.uint32),
+)
 
 
 @define
@@ -509,46 +522,42 @@ class Records:
         starts: ArrayLike,
         ends: ArrayLike,
     ) -> RecordInfo:
+        _contig = normalize_contig_name(contig, self.contigs)
+        if _contig is None:
+            return EMPTY_RECORD_INFO
+
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
-        _s_idxs = np.searchsorted(self.v_ends[contig], starts)
+        _s_idxs = np.searchsorted(self.v_ends[_contig], starts)
         # make idxs absolute
-        s_idxs = self.e2s_idx[contig][_s_idxs] + self.contig_offsets[contig]
+        s_idxs = self.e2s_idx[_contig][_s_idxs] + self.contig_offsets[_contig]
         e_idxs = (
-            np.searchsorted(self.v_starts[contig], ends) + self.contig_offsets[contig]
+            np.searchsorted(self.v_starts[_contig], ends) + self.contig_offsets[_contig]
         )
 
         if s_idxs.min() == e_idxs.max():
-            return RecordInfo(
-                positions=np.empty(0, dtype=np.int32),
-                size_diffs=np.empty(0, dtype=np.int32),
-                refs=VLenAlleles(np.zeros(1, np.uint32), np.empty(0, "|S1")),
-                alts=VLenAlleles(np.zeros(1, np.uint32), np.empty(0, "|S1")),
-                start_idxs=np.empty(0, dtype=np.int32),
-                end_idxs=np.empty(0, dtype=np.int32),
-                offsets=np.zeros(1, np.uint32),
-            )
+            return EMPTY_RECORD_INFO
 
         n_var_per_region = e_idxs - s_idxs
         offsets = np.empty(len(n_var_per_region) + 1, dtype=np.uint32)
         offsets[0] = 0
         offsets[1:] = np.cumsum(n_var_per_region)
 
-        rel_s_idxs = s_idxs - self.contig_offsets[contig]
-        rel_e_idxs = e_idxs - self.contig_offsets[contig]
+        rel_s_idxs = s_idxs - self.contig_offsets[_contig]
+        rel_e_idxs = e_idxs - self.contig_offsets[_contig]
 
         positions = np.concatenate(
-            [self.v_starts[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
+            [self.v_starts[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
         )
         size_diffs = np.concatenate(
-            [self.v_diffs[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
+            [self.v_diffs[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
         )
         ref = VLenAlleles.concat(
-            *(self.ref[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
+            *(self.ref[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
         )
         alt = VLenAlleles.concat(
-            *(self.alt[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
+            *(self.alt[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
         )
 
         return RecordInfo(
@@ -567,38 +576,33 @@ class Records:
         starts: ArrayLike,
         ends: ArrayLike,
     ) -> Tuple[RecordInfo, NDArray[np.int32]]:
-        starts = np.atleast_1d(np.asarray(starts, dtype=int))
-        ends = np.atleast_1d(np.asarray(ends, dtype=int))
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
+        ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
         n_queries = len(starts)
 
-        _s_idxs = np.searchsorted(self.v_ends[contig], starts)
+        _contig = normalize_contig_name(contig, self.contigs)
+        if _contig is None:
+            return EMPTY_RECORD_INFO, ends
+
+        _s_idxs = np.searchsorted(self.v_ends[_contig], starts)
 
         max_ends, _e_idxs = get_max_ends_and_idxs(
-            self.v_ends[contig],
-            self.v_diffs_sorted_by_ends[contig],
-            self.max_del_q[contig],
+            self.v_ends[_contig],
+            self.v_diffs_sorted_by_ends[_contig],
+            self.max_del_q[_contig],
             _s_idxs,
             ends,
         )
 
-        s_idxs = self.e2s_idx[contig][_s_idxs]
-        e_idxs = self.e2s_idx[contig][_e_idxs]
+        s_idxs = self.e2s_idx[_contig][_s_idxs]
+        e_idxs = self.e2s_idx[_contig][_e_idxs]
 
         # make idxs absolute
-        s_idxs += self.contig_offsets[contig]
-        e_idxs += self.contig_offsets[contig]
+        s_idxs += self.contig_offsets[_contig]
+        e_idxs += self.contig_offsets[_contig]
 
         if s_idxs.min() == e_idxs.max():
-            recs = RecordInfo(
-                positions=np.empty(0, dtype=np.int32),
-                size_diffs=np.empty(0, dtype=np.int32),
-                refs=VLenAlleles(np.zeros(1, np.uint32), np.empty(0, "|S1")),
-                alts=VLenAlleles(np.zeros(1, np.uint32), np.empty(0, "|S1")),
-                start_idxs=np.empty(0, dtype=np.int32),
-                end_idxs=np.empty(0, dtype=np.int32),
-                offsets=np.zeros(1, np.uint32),
-            )
-            return recs, ends.astype(np.int32)
+            return EMPTY_RECORD_INFO, ends
 
         np.concatenate(
             [np.arange(s, e, dtype=np.uint32) for s, e in zip(s_idxs, e_idxs)]
@@ -607,20 +611,20 @@ class Records:
         offsets[0] = 0
         np.cumsum(e_idxs - s_idxs, out=offsets[1:])
 
-        rel_s_idxs = s_idxs - self.contig_offsets[contig]
-        rel_e_idxs = e_idxs - self.contig_offsets[contig]
+        rel_s_idxs = s_idxs - self.contig_offsets[_contig]
+        rel_e_idxs = e_idxs - self.contig_offsets[_contig]
 
         positions = np.concatenate(
-            [self.v_starts[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
+            [self.v_starts[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
         )
         size_diffs = np.concatenate(
-            [self.v_diffs[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
+            [self.v_diffs[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
         )
         ref = VLenAlleles.concat(
-            *(self.ref[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
+            *(self.ref[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
         )
         alt = VLenAlleles.concat(
-            *(self.alt[contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
+            *(self.alt[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
         )
 
         v_info = RecordInfo(

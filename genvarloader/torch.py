@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Union
 
 import numpy as np
 import polars as pl
@@ -9,14 +9,15 @@ from .types import Reader
 from .util import construct_virtual_data, process_bed
 
 try:
-    from torch.utils.data import Dataset
+    import torch
+    import torch.utils.data as td
 
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
 
 
-class GVLDataset(Dataset):  # pyright: ignore[reportPossiblyUnboundVariable]
+class GVLDataset(td.Dataset):  # pyright: ignore[reportPossiblyUnboundVariable]
     def __init__(
         self,
         *readers: Reader,
@@ -64,18 +65,51 @@ class GVLDataset(Dataset):  # pyright: ignore[reportPossiblyUnboundVariable]
         return batch
 
 
-# class ZarrSampler(Sampler):
-#     def __init__(self, bed: pl.DataFrame, dim_sizes: Dict[str, int], chunk_shape: Tuple[int, ...], batch_size: int):
+def get_dataloader(
+    dataset: Sequence,
+    batch_size: int = 1,
+    shuffle: bool = False,
+    sampler: Optional[Union[td.Sampler, Iterable]] = None,  # type: ignore
+    num_workers: int = 0,
+    collate_fn: Optional[Callable] = None,
+    pin_memory: bool = False,
+    drop_last: bool = False,
+    timeout: float = 0,
+    worker_init_fn: Optional[Callable] = None,
+    multiprocessing_context: Optional[Callable] = None,
+    generator: Optional[torch.Generator] = None,  # type: ignore
+    *,
+    prefetch_factor: Optional[int] = None,
+    persistent_workers: bool = False,
+    pin_memory_device: str = "",
+):
+    if sampler is None:
+        sampler = get_sampler(len(dataset), batch_size, shuffle, drop_last)
 
-#         contigs = np.asarray(contigs)
-#         contig_offsets = np.unique(contigs, return_counts=True)
-#         self.data_by_contig = {
+    return td.DataLoader(  # type: ignore
+        dataset,  # type: ignore
+        batch_size=None,
+        sampler=sampler,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        pin_memory=pin_memory,
+        drop_last=drop_last,
+        timeout=timeout,
+        worker_init_fn=worker_init_fn,
+        multiprocessing_context=multiprocessing_context,
+        generator=generator,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=persistent_workers,
+        pin_memory_device=pin_memory_device,
+    )
 
-#         }
-#         self.chunk_shape = chunk_shape
 
-#     def __iter__(self):
-#         return iter(range(len(self.dataset)))
+def get_sampler(
+    ds_len: int, batch_size: int, shuffle: bool = False, drop_last: bool = False
+):
+    if shuffle:
+        inner_sampler = td.RandomSampler(np.arange(ds_len))  # type: ignore
+    else:
+        inner_sampler = td.SequentialSampler(np.arange(ds_len))  # type: ignore
 
-#     def __len__(self):
-#         return len(self.dataset)
+    return td.BatchSampler(inner_sampler, batch_size, drop_last)  # type: ignore
