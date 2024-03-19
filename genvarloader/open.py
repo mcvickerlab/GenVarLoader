@@ -901,7 +901,7 @@ def adjust_multi_index(
     for idx, skip in zip(idxs, skip_idxs):
         idx = np.asarray(idx)
         if len(skip) > 0:
-            idx += (idx >= skip[:, None]).sum(1)
+            idx += (idx >= skip[:, None]).sum(0)
         adjusted_idxs.append(idx.squeeze())
     return tuple(adjusted_idxs)
 
