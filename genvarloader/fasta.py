@@ -106,7 +106,10 @@ class Fasta(Reader):
     def _get_contigs(self, contigs: Iterable[str]) -> Dict[str, NDArray[np.bytes_]]:
         """Load contigs into memory."""
         with self._open() as f:
-            return {c: np.frombuffer(f.fetch(c).encode("ascii"), "S1") for c in contigs}
+            return {
+                c: np.frombuffer(f.fetch(c).encode("ascii").upper(), "S1")
+                for c in contigs
+            }
 
     def _open(self):
         return pysam.FastaFile(str(self.path))
@@ -191,7 +194,7 @@ class Fasta(Reader):
                 q_starts, q_ends, rel_starts, rel_ends
             ):
                 seq = self.handle.fetch(contig, q_start, q_end)
-                seq = np.frombuffer(seq.encode("ascii"), "S1")
+                seq = np.frombuffer(seq.encode("ascii").upper(), "S1")
                 out[rel_start:rel_end] = seq
         else:
             for q_start, q_end, rel_start, rel_end in zip(
