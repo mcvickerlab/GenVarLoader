@@ -116,13 +116,14 @@ class Dataset:
     intervals: Optional["Intervals"] = None
     transform: Optional[Callable] = None
     _idx_map: Optional[NDArray[np.intp]] = None
+    _jitter: Optional[int] = None
+    return_indices: bool = False
 
     @classmethod
     def open(
         cls,
         path: Union[str, Path],
         reference: Optional[Union[str, Path]] = None,
-        seed: Optional[int] = None,
     ):
         path = Path(path)
         if not path.exists():
@@ -139,7 +140,7 @@ class Dataset:
         n_variants = int(metadata.get("n_variants", 0))
         n_intervals = int(metadata.get("n_intervals", 0))
         max_jitter = int(metadata.get("max_jitter", 0))
-        rng = np.random.default_rng(seed)
+        rng = np.random.default_rng()
 
         if reference is None and n_variants > 0:
             raise ValueError(
@@ -203,6 +204,32 @@ class Dataset:
 
         return dataset
 
+    @classmethod
+    def open_with_settings(
+        cls,
+        path: Union[str, Path],
+        reference: Optional[Union[str, Path]] = None,
+        samples: Optional[Sequence[str]] = None,
+        regions: Optional[Union[str, Path, pl.DataFrame]] = None,
+        sequence_mode: Optional[Literal["reference", "haplotypes"]] = None,
+        track_mode: Optional[bool] = None,
+        transform: Optional[Callable] = None,
+        seed: Optional[int] = None,
+        jitter: Optional[int] = None,
+        return_indices: Optional[bool] = None,
+    ):
+        ds = cls.open(path, reference).with_settings(
+            samples=samples,
+            regions=regions,
+            sequence_mode=sequence_mode,
+            track_mode=track_mode,
+            transform=transform,
+            seed=seed,
+            jitter=jitter,
+            return_indices=return_indices,
+        )
+        return ds
+
     @property
     def has_reference(self) -> bool:
         return self.reference is not None
@@ -237,6 +264,17 @@ class Dataset:
     def shape(self):
         """Return the shape of the dataset. (n_samples, n_regions)"""
         return self.n_samples, self.n_regions
+
+    @property
+    def jitter(self):
+        if self._jitter is None:
+            return self.max_jitter
+        else:
+            return self._jitter
+
+    @property
+    def output_length(self):
+        return self.region_length - 2 * self.jitter
 
     @property
     def _full_shape(self):
@@ -327,11 +365,54 @@ class Dataset:
     def without_tracks(self):
         return replace(self, track_mode=False)
 
-    def with_transform(self, transform: Callable) -> "Dataset":
+    def with_transform(self, transform: Callable):
         return replace(self, transform=transform)
 
-    def with_seed(self, seed: int):
+    def with_seed(self, seed: Optional[int]):
         return replace(self, rng=np.random.default_rng(seed))
+
+    def with_jitter(self, jitter: int):
+        if jitter < 0:
+            raise ValueError("Jitter must be a non-negative integer.")
+        elif jitter > self.max_jitter:
+            raise ValueError(
+                f"Jitter must be less than or equal to the maximum jitter of the dataset ({self.max_jitter})."
+            )
+        return replace(self, _jitter=jitter)
+
+    def with_indices(self):
+        return replace(self, return_indices=True)
+
+    def with_settings(
+        self,
+        samples: Optional[Sequence[str]] = None,
+        regions: Optional[Union[str, Path, pl.DataFrame]] = None,
+        sequence_mode: Optional[Literal["reference", "haplotypes"]] = None,
+        track_mode: Optional[bool] = None,
+        transform: Optional[Callable] = None,
+        seed: Optional[int] = None,
+        jitter: Optional[int] = None,
+        return_indices: Optional[bool] = None,
+    ):
+        ds = self
+        if samples is not None or regions is not None:
+            ds = ds.subset_to(samples, regions)
+        if sequence_mode is not None:
+            ds = ds.with_sequence_mode(sequence_mode)
+        if track_mode is not None:
+            if track_mode:
+                ds = ds.with_tracks()
+            else:
+                ds = ds.without_tracks()
+        if transform is not None:
+            ds = ds.with_transform(transform)
+        if seed is not None:
+            ds = ds.with_seed(seed)
+        if jitter is not None:
+            ds = ds.with_jitter(jitter)
+        if return_indices is not None:
+            ds = ds.with_indices()
+        return ds
 
     def to_dataset(self):
         if not TORCH_AVAILABLE:
@@ -461,8 +542,15 @@ class Dataset:
                 assert self.intervals is not None
             out.append(self.get_tracks(_idx, self.intervals, regions, shifts))
 
+        if self.jitter > 0:
+            start = self.rng.integers(0, self.jitter)
+            out = [o[..., start : start + self.output_length] for o in out]
+
         if squeeze:
             out = [o.squeeze() for o in out]
+
+        if self.return_indices:
+            out.extend((_idx, s_idx, r_idx))
 
         if self.transform is not None:
             out = self.transform(*out)
