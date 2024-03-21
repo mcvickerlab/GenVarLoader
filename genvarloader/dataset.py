@@ -1,13 +1,14 @@
 import json
-from enum import Enum, auto
+from dataclasses import dataclass, replace
 from pathlib import Path
 from textwrap import dedent
 from typing import (
     TYPE_CHECKING,
-    Any,
     Callable,
     Dict,
+    Iterable,
     List,
+    Literal,
     Optional,
     Sequence,
     Tuple,
@@ -18,289 +19,466 @@ from typing import (
 import numba as nb
 import numpy as np
 import polars as pl
-import seqpro as sp
 from attrs import define
 from loguru import logger
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 
 from .fasta import Fasta
-from .util import normalize_contig_name
+from .torch import get_dataloader
+from .util import normalize_contig_name, read_bedlike, with_length
 from .variants import VLenAlleles
+
+try:
+    import torch
+    import torch.utils.data as td
+
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
 Idx = Union[int, np.integer, Sequence[int], NDArray[np.integer], slice]
 ListIdx = Union[Sequence[int], NDArray[np.integer]]
 
 
-class GVLDataset:
-    class State(Enum):
-        HAPS_ITVS = auto()
-        REF_ITVS = auto()
-        HAPS = auto()
-        ITVS = auto()
+@define
+class _Reference:
+    reference: NDArray[np.uint8]
+    contigs: List[str]
+    offsets: NDArray[np.uint64]
+    pad_char: int
 
-    def __init__(
-        self,
+    @classmethod
+    def from_path_and_contigs(cls, fasta: Union[str, Path], contigs: List[str]):
+        _fasta = Fasta("ref", fasta, "N")
+        contigs = cast(
+            List[str],
+            [normalize_contig_name(c, _fasta.contigs) for c in contigs],
+        )
+        _fasta.sequences = _fasta._get_contigs(contigs)
+        if TYPE_CHECKING:
+            assert _fasta.sequences is not None
+            assert _fasta.pad is not None
+        refs: List[NDArray[np.bytes_]] = []
+        next_offset = 0
+        _ref_offsets: Dict[str, int] = {}
+        for contig in contigs:
+            arr = _fasta.sequences[contig]
+            refs.append(arr)
+            _ref_offsets[contig] = next_offset
+            next_offset += len(arr)
+        reference = np.concatenate(refs).view(np.uint8)
+        pad_char = ord(_fasta.pad)
+        if any(c is None for c in contigs):
+            raise ValueError("Contig names in metadata do not match reference.")
+        ref_offsets = np.empty(len(contigs) + 1, np.uint64)
+        ref_offsets[:-1] = np.array([_ref_offsets[c] for c in contigs], dtype=np.uint64)
+        ref_offsets[-1] = len(reference)
+        return cls(reference, contigs, ref_offsets, pad_char)
+
+
+@define
+class _Variants:
+    positions: NDArray[np.int32]
+    sizes: NDArray[np.int32]
+    alts: VLenAlleles
+
+    @classmethod
+    def from_dataframe(cls, variants: Union[str, Path, pl.DataFrame]):
+        if isinstance(variants, (str, Path)):
+            variants = pl.read_ipc(variants)
+        return cls(
+            variants["POS"].to_numpy(),
+            variants["ILEN"].to_numpy(),
+            VLenAlleles.from_polars(variants["ALT"]),
+        )
+
+
+@dataclass(slots=True)
+class Dataset:
+    path: Path
+    max_jitter: int
+    n_variants: int
+    n_intervals: int
+    region_length: int
+    contigs: List[str]
+    _samples: NDArray[np.str_]
+    _regions: NDArray[np.int32]
+    rng: np.random.Generator
+    sample_idxs: NDArray[np.intp]
+    region_idxs: NDArray[np.intp]
+    ploidy: Optional[int] = None
+    reference: Optional[_Reference] = None
+    variants: Optional[_Variants] = None
+    has_intervals: bool = False
+    sequence_mode: Optional[Literal["reference", "haplotypes"]] = None
+    track_mode: bool = False
+    genotypes: Optional["Genotypes"] = None
+    intervals: Optional["Intervals"] = None
+    transform: Optional[Callable] = None
+    _idx_map: Optional[NDArray[np.intp]] = None
+
+    @classmethod
+    def open(
+        cls,
         path: Union[str, Path],
         reference: Optional[Union[str, Path]] = None,
         seed: Optional[int] = None,
-        transform: Optional[Callable] = None,
-        ignore_haplotypes: bool = False,
-        ignore_tracks: bool = False,
     ):
-        self.path = Path(path)
-        if not self.path.exists():
-            raise FileNotFoundError(f"{self.path} does not exist.")
-        self.samples: NDArray[np.str_] = np.load(self.path / "samples.npy")
-        self.regions: NDArray[np.int32] = np.load(self.path / "regions.npy")
-        self.n_samples = len(self.samples)
-        self.n_regions = len(self.regions)
-        self.transform = transform
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"{path} does not exist.")
+        samples: NDArray[np.str_] = np.load(path / "samples.npy")
+        regions: NDArray[np.int32] = np.load(path / "regions.npy")
 
-        with open(self.path / "metadata.json") as f:
+        with open(path / "metadata.json") as f:
             metadata = json.load(f)
 
-        self.region_length = int(metadata["region_length"])
-        self.ploidy = int(metadata["ploidy"])
-        self.n_variants = int(metadata.get("n_variants", 0))
-        self.n_intervals = int(metadata.get("n_intervals", 0))
-        self.max_jitter = int(metadata.get("max_jitter", 0))
-        self.rng = np.random.default_rng(seed)
+        contigs = metadata["contigs"]
+        region_length = int(metadata["region_length"])
+        ploidy = int(metadata.get("ploidy", 0))
+        n_variants = int(metadata.get("n_variants", 0))
+        n_intervals = int(metadata.get("n_intervals", 0))
+        max_jitter = int(metadata.get("max_jitter", 0))
+        rng = np.random.default_rng(seed)
 
-        logger.info(f"\n{repr(self)}")
-
-        self.has_ref = False
-        self.has_genos = False
-        self.has_itvs = False
-
-        if reference is None and self.n_variants > 0:
+        if reference is None and n_variants > 0:
             raise ValueError(
                 "Genotypes found but no reference genome provided. This is required to reconstruct haplotypes."
             )
         elif reference is not None:
-            logger.info("Loading reference genome into memory.")
-            self.init_reference(reference, metadata)
-            self.has_ref = True
-
-        if self.n_variants > 0:
-            if ignore_haplotypes:
-                logger.info("Ignoring existing haplotypes.")
-            else:
-                # initialize variant records
-                variants = pl.read_ipc(self.path / "variants.arrow")
-                self.variant_positions = variants["POS"].to_numpy()
-                self.variant_sizes = variants["ILEN"].to_numpy()
-                self.alts = VLenAlleles.from_polars(variants["ALT"])
-                self.has_genos = True
-
-        if self.n_intervals > 0:
-            if ignore_tracks:
-                logger.info("Ignoring existing tracks.")
-            else:
-                self.has_itvs = True
-
-        self.genotypes = None
-        self.intervals = None
-
-        if self.has_ref and self.has_genos and self.has_itvs:
-            self.state = self.State.HAPS_ITVS
-        elif self.has_ref and self.has_genos:
-            self.state = self.State.HAPS
-        elif self.has_ref and self.has_itvs:
-            self.state = self.State.REF_ITVS
-        elif self.has_itvs:
-            self.state = self.State.ITVS
-        else:
-            raise ValueError(
-                "No genotypes or intervals found. At least one of these must be present."
+            logger.info(
+                "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
             )
+            _reference = _Reference.from_path_and_contigs(reference, contigs)
+            has_reference = True
+        else:
+            _reference = None
+            has_reference = False
 
-    def init_reference(self, reference: Union[str, Path], metadata: Dict[str, Any]):
-        fasta = Fasta("ref", reference, "N")
-        fasta.sequences = fasta._get_contigs(metadata["contigs"])
-        if TYPE_CHECKING:
-            assert fasta.sequences is not None
-            assert fasta.pad is not None
-        refs: List[NDArray[np.bytes_]] = []
-        next_offset = 0
-        ref_offsets: Dict[str, int] = {}
-        for contig in metadata["contigs"]:
-            arr = fasta.sequences[contig]
-            refs.append(arr)
-            ref_offsets[contig] = next_offset
-            next_offset += len(arr)
-        self.reference = np.concatenate(refs).view(np.uint8)
-        self.pad_char = ord(fasta.pad)
-        self.contigs = cast(
-            List[str],
-            [normalize_contig_name(c, fasta.contigs) for c in metadata["contigs"]],
-        )  # type: ignore
-        if any(c is None for c in self.contigs):
-            raise ValueError("Contig names in metadata do not match reference.")
-        self.ref_offsets = np.empty(len(self.contigs) + 1, np.uint64)
-        self.ref_offsets[:-1] = np.array(
-            [ref_offsets[c] for c in self.contigs], dtype=np.uint64
+        if n_variants > 0:
+            variants = _Variants.from_dataframe(path / "variants.arrow")
+            has_genotypes = True
+        else:
+            variants = None
+            has_genotypes = False
+
+        if n_intervals > 0:
+            has_intervals = True
+        else:
+            has_intervals = False
+
+        if has_reference and has_genotypes:
+            sequence_mode = "haplotypes"
+        elif has_reference:
+            sequence_mode = "reference"
+        else:
+            sequence_mode = None
+
+        if has_intervals:
+            track_mode = True
+        else:
+            track_mode = False
+
+        dataset = cls(
+            path=path,
+            max_jitter=max_jitter,
+            n_variants=n_variants,
+            n_intervals=n_intervals,
+            region_length=region_length,
+            contigs=contigs,
+            _samples=samples,
+            _regions=regions,
+            rng=rng,
+            sample_idxs=np.arange(len(samples), dtype=np.intp),
+            region_idxs=np.arange(len(regions), dtype=np.intp),
+            ploidy=ploidy,
+            reference=_reference,
+            variants=variants,
+            has_intervals=has_intervals,
+            sequence_mode=sequence_mode,
+            track_mode=track_mode,
         )
-        self.ref_offsets[-1] = len(self.reference)
+
+        logger.info(f"\n{str(dataset)}")
+
+        return dataset
+
+    @property
+    def has_reference(self) -> bool:
+        return self.reference is not None
+
+    @property
+    def has_genotypes(self) -> bool:
+        return self.variants is not None
+
+    @property
+    def samples(self):
+        if self._idx_map is None:
+            return self._samples
+        else:
+            return self._samples[self.sample_idxs]
+
+    @property
+    def regions(self):
+        if self._idx_map is None:
+            return self._regions
+        else:
+            return self._regions[self.region_idxs]
+
+    @property
+    def n_samples(self):
+        return len(self.sample_idxs)
+
+    @property
+    def n_regions(self):
+        return len(self.region_idxs)
 
     @property
     def shape(self):
         """Return the shape of the dataset. (n_samples, n_regions)"""
         return self.n_samples, self.n_regions
 
+    @property
+    def _full_shape(self):
+        """Return the full shape of the dataset, ignoring any subsetting. (n_samples, n_regions)"""
+        return len(self._samples), len(self._regions)
+
     def __len__(self) -> int:
         return self.n_samples * self.n_regions
 
-    def __repr__(self) -> str:
+    def subset_to(
+        self,
+        samples: Optional[Sequence[str]] = None,
+        regions: Optional[Union[str, Path, pl.DataFrame]] = None,
+    ):
+        if regions is None and samples is None:
+            return self
+
+        if samples is not None:
+            _samples = set(samples)
+            if missing := _samples.difference(self._samples):
+                raise ValueError(f"Samples {missing} not found in the dataset")
+            sample_idxs = np.array(
+                [i for i, s in enumerate(self.samples) if s in _samples], np.intp
+            )
+            if self._idx_map is not None:
+                sample_idxs = self.sample_idxs[sample_idxs]
+        else:
+            sample_idxs = self.sample_idxs
+
+        if regions is not None:
+            if isinstance(regions, (str, Path)):
+                regions = read_bedlike(regions)
+            regions = with_length(regions, self.region_length)
+            available_regions = self.get_bed()
+            n_query_regions = regions.height
+            region_idxs = (
+                available_regions.with_row_count()
+                .join(regions, on=["chrom", "chromStart", "chromEnd"])
+                .get_column("row_nr")
+                .sort()
+                .to_numpy()
+            )
+            n_available_regions = len(region_idxs)
+            if n_query_regions != len(region_idxs):
+                raise ValueError(
+                    f"Only {n_available_regions}/{n_query_regions} requested regions exist in the dataset."
+                )
+            if self._idx_map is not None:
+                region_idxs = self.region_idxs[region_idxs]
+        else:
+            region_idxs = self.region_idxs
+
+        idx_map = subset_to_full_raveled_mapping(
+            self._full_shape,
+            sample_idxs,
+            region_idxs,
+        )
+
+        return replace(
+            self, sample_idxs=sample_idxs, region_idxs=region_idxs, _idx_map=idx_map
+        )
+
+    def to_full_dataset(self):
+        sample_idxs = np.arange(len(self._samples), dtype=np.intp)
+        region_idxs = np.arange(len(self._regions), dtype=np.intp)
+        return replace(
+            self, sample_idxs=sample_idxs, region_idxs=region_idxs, _idx_map=None
+        )
+
+    def with_sequence_mode(self, mode: Optional[Literal["reference", "haplotypes"]]):
+        if mode == "haplotypes" and not self.has_genotypes:
+            raise ValueError(
+                "No genotypes found. Cannot be set to yield haplotypes since genotypes are required to yield haplotypes."
+            )
+        if mode == "reference" and not self.has_reference:
+            raise ValueError(
+                "No reference found. Cannot be set to yield reference sequences since reference is required to yield reference sequences."
+            )
+        return replace(self, sequence_mode=mode)
+
+    def with_tracks(self):
+        if not self.has_intervals:
+            raise ValueError(
+                "No intervals found. Cannot be set to yield tracks since intervals are required to yield tracks."
+            )
+        return replace(self, track_mode=True)
+
+    def without_tracks(self):
+        return replace(self, track_mode=False)
+
+    def with_transform(self, transform: Callable) -> "Dataset":
+        return replace(self, transform=transform)
+
+    def to_dataset(self):
+        if not TORCH_AVAILABLE:
+            raise ImportError(
+                "Could not import PyTorch. Please install PyTorch to use torch features."
+            )
+
+        return TorchDataset(self)
+
+    def to_dataloader(
+        self,
+        batch_size: int = 1,
+        shuffle: bool = False,
+        sampler: Optional[Union[td.Sampler, Iterable]] = None,  # type: ignore
+        num_workers: int = 0,
+        collate_fn: Optional[Callable] = None,
+        pin_memory: bool = False,
+        drop_last: bool = False,
+        timeout: float = 0,
+        worker_init_fn: Optional[Callable] = None,
+        multiprocessing_context: Optional[Callable] = None,
+        generator: Optional[torch.Generator] = None,  # type: ignore
+        *,
+        prefetch_factor: Optional[int] = None,
+        persistent_workers: bool = False,
+        pin_memory_device: str = "",
+    ):
+        if not TORCH_AVAILABLE:
+            raise ImportError(
+                "Could not import PyTorch. Please install PyTorch to use torch features."
+            )
+
+        return get_dataloader(
+            dataset=self.to_dataset(),
+            batch_size=batch_size,
+            shuffle=shuffle,
+            sampler=sampler,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=pin_memory,
+            drop_last=drop_last,
+            timeout=timeout,
+            worker_init_fn=worker_init_fn,
+            multiprocessing_context=multiprocessing_context,
+            generator=generator,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+            pin_memory_device=pin_memory_device,
+        )
+
+    def __str__(self) -> str:
         return dedent(
             f"""
             GVL store {self.path.name}
             Original region length: {self.region_length - 2*self.max_jitter:,}
             Max jitter: {self.max_jitter:,}
-            # of regions: {self.n_regions:,}
             # of samples: {self.n_samples:,}
+            # of regions: {self.n_regions:,}
             Has genotypes: {self.n_variants > 0}
-            Has intervals: {self.n_intervals > 0}\
+            Has intervals: {self.n_intervals > 0}
+            Is subset: {self._idx_map is not None}\
             """
         ).strip()
+
+    def __repr__(self) -> str:
+        return str(self)
 
     def __getitem__(self, idx: Idx) -> Union[NDArray, Tuple[NDArray, NDArray]]:
         """Get a batch of haplotypes and tracks or intervals and tracks.
 
         Parameters
         ----------
-        s_r_idx : Tuple[Idx, Idx]
-            Tuple of sample and region indices, in that order.
+        idx: Idx
+            The index or indices to get. If a single index is provided, the output will be squeezed.
         """
-        squeeze = False
+        if self.genotypes is None and self.sequence_mode == "haplotypes":
+            self.init_genotypes()
+        if self.intervals is None and self.track_mode:
+            self.init_intervals()
+
         if isinstance(idx, (int, np.integer)):
             _idx = [idx]
             squeeze = True
         elif isinstance(idx, slice):
             _idx = np.arange(self.n_samples * self.n_regions, dtype=np.uintp)[idx]
+            squeeze = False
         else:
             _idx = idx
-        _idx = cast(ListIdx, _idx)
+            squeeze = False
 
-        if self.genotypes is None and self.has_genos:
-            self.init_genotypes()
-        if self.intervals is None and self.has_itvs:
-            self.init_intervals()
+        _idx = np.asarray(_idx, dtype=np.intp)
+        _idx[_idx < 0] += len(self)
+        if self._idx_map is not None:
+            _idx = self._idx_map[_idx]
+        s_idx, r_idx = np.unravel_index(_idx, self._full_shape)
 
-        s_idx, r_idx = np.unravel_index(_idx, self.shape)
-        regions = self.regions[r_idx]
+        regions = self._regions[r_idx]
 
-        if self.state is self.State.HAPS_ITVS:
+        out: List[NDArray] = []
+
+        if self.sequence_mode == "haplotypes":
             if TYPE_CHECKING:
                 assert self.genotypes is not None
-                assert self.intervals is not None
+                assert self.variants is not None
 
-            haps, shifts = self.get_haplotypes_and_shifts(
-                s_idx, r_idx, self.genotypes, regions
-            )
-            tracks = self.get_hap_tracks(_idx, self.intervals, regions, shifts)
-
-            if self.max_jitter > 0:
-                seed = self.rng.integers(np.iinfo(np.intp).max, dtype=np.intp)
-                haps, tracks = sp.jitter(
-                    haps,
-                    tracks,
-                    max_jitter=self.max_jitter,
-                    length_axis=-1,
-                    jitter_axes=(0, 1),
-                    seed=seed,
-                )
-
-            if squeeze:
-                haps, tracks = haps.squeeze(0), tracks.squeeze(0)
-
-            if self.transform is not None:
-                haps, tracks = self.transform(haps, tracks)
-
-            return haps, tracks
-        elif self.state is self.State.HAPS:
+            genos = self.genotypes[s_idx, r_idx]
+            shifts = self.get_shifts(genos, self.variants.sizes)
+            out.append(self.get_haplotypes(genos, regions, shifts))
+        elif self.sequence_mode == "reference":
             if TYPE_CHECKING:
-                assert self.genotypes is not None
-
-            # (n_regions, region_length)
-            haps, shifts = self.get_haplotypes_and_shifts(
-                s_idx, r_idx, self.genotypes, regions
+                assert self.reference is not None
+            shifts = None
+            out.append(
+                get_reference(
+                    regions,
+                    self.reference.reference,
+                    self.reference.offsets,
+                    self.region_length,
+                    self.reference.pad_char,
+                ).view("S1")
             )
-            if self.max_jitter > 0:
-                seed = self.rng.integers(np.iinfo(np.intp).max, dtype=np.intp)
-                haps = sp.jitter(
-                    haps,
-                    max_jitter=self.max_jitter,
-                    length_axis=-1,
-                    jitter_axes=(0, 1),
-                    seed=seed,
-                )[0]
-
-            if squeeze:
-                haps = haps.squeeze(0)
-
-            if self.transform is not None:
-                haps = self.transform(haps)
-
-            return haps
-        elif self.state is self.State.REF_ITVS:
-            if TYPE_CHECKING:
-                assert self.intervals is not None
-
-            ref = get_reference(
-                regions,
-                self.reference,
-                self.ref_offsets,
-                self.region_length,
-                self.pad_char,
-            ).view("S1")
-
-            tracks = self.get_tracks(_idx, self.intervals, regions)
-            if self.max_jitter > 0:
-                seed = self.rng.integers(np.iinfo(np.intp).max, dtype=np.intp)
-                ref, tracks = sp.jitter(
-                    ref,
-                    tracks,
-                    max_jitter=self.max_jitter,
-                    length_axis=-1,
-                    jitter_axes=0,
-                    seed=seed,
-                )
-
-            if squeeze:
-                ref, tracks = ref.squeeze(0), tracks.squeeze(0)
-
-            if self.transform is not None:
-                ref, tracks = self.transform(ref, tracks)
-
-            return ref, tracks
         else:
+            shifts = None
+
+        if self.track_mode:
             if TYPE_CHECKING:
                 assert self.intervals is not None
+            out.append(self.get_tracks(_idx, self.intervals, regions, shifts))
 
-            tracks = self.get_tracks(_idx, self.intervals, regions)
-            if self.max_jitter > 0:
-                seed = self.rng.integers(np.iinfo(np.intp).max, dtype=np.intp)
-                tracks = sp.jitter(
-                    tracks,
-                    max_jitter=self.max_jitter,
-                    length_axis=-1,
-                    jitter_axes=0,
-                    seed=seed,
-                )[0]
+        if squeeze:
+            out = [o.squeeze() for o in out]
 
-            if squeeze:
-                tracks = tracks.squeeze(0)
+        if self.transform is not None:
+            out = self.transform(*out)
 
-            if self.transform is not None:
-                tracks = self.transform(tracks)
+        if len(out) == 1:
+            _out = out[0]
+        else:
+            _out = out
 
-            return tracks
+        return _out  # type: ignore
 
     def init_genotypes(self):
+        if TYPE_CHECKING:
+            assert self.ploidy is not None
+        n_samples = len(self._samples)
         self.genotypes = Genotypes(
             np.memmap(
                 self.path / "genotypes" / "genotypes.npy",
-                shape=(self.n_variants * self.n_samples, self.ploidy),
+                shape=(self.n_variants * n_samples, self.ploidy),
                 dtype=np.int8,
                 mode="r",
             ),
@@ -312,7 +490,7 @@ class GVLDataset:
             np.memmap(
                 self.path / "genotypes" / "offsets.npy", dtype=np.uint32, mode="r"
             ),
-            self.n_samples,
+            n_samples,
         )
 
     def init_intervals(self):
@@ -335,19 +513,22 @@ class GVLDataset:
             ),
         )
 
-    def get_haplotypes_and_shifts(
+    def get_shifts(self, genos: "Genotypes", variant_sizes: NDArray[np.int32]):
+        diffs = get_diffs(genos.first_v_idxs, genos.offsets, genos.genos, variant_sizes)
+        shifts = self.rng.integers(0, diffs + 1, dtype=np.uint32)
+        return shifts
+
+    def get_haplotypes(
         self,
-        s_idx: ListIdx,
-        r_idx: ListIdx,
         genos: "Genotypes",
         regions: NDArray[np.int32],
+        shifts: NDArray[np.uint32],
     ):
-        genos = genos[s_idx, r_idx]
+        if TYPE_CHECKING:
+            assert self.reference is not None
+            assert self.variants is not None
+            assert self.ploidy is not None
 
-        diffs = get_diffs(
-            genos.first_v_idxs, genos.offsets, genos.genos, self.variant_sizes
-        )
-        shifts = self.rng.integers(0, diffs + 1, dtype=np.uint32)
         haps = np.empty((len(regions), self.ploidy, self.region_length), np.uint8)
         reconstruct_haplotypes(
             haps,
@@ -356,45 +537,41 @@ class GVLDataset:
             genos.first_v_idxs,
             genos.offsets,
             genos.genos,
-            self.variant_positions,
-            self.variant_sizes,
-            self.alts.alleles.view(np.uint8),
-            self.alts.offsets,
-            self.reference,
-            self.ref_offsets,
-            self.pad_char,
+            self.variants.positions,
+            self.variants.sizes,
+            self.variants.alts.alleles.view(np.uint8),
+            self.variants.alts.offsets,
+            self.reference.reference,
+            self.reference.offsets,
+            self.reference.pad_char,
         )
-        return haps.view("S1"), shifts
+        return haps.view("S1")
 
     def get_tracks(
-        self, ds_idx: ListIdx, intervals: "Intervals", regions: NDArray[np.int32]
-    ):
-        intervals = intervals[ds_idx]
-        values = intervals_to_values(
-            regions,
-            intervals.intervals,
-            intervals.values,
-            intervals.offsets,
-            self.region_length,
-        )
-        return values
-
-    def get_hap_tracks(
         self,
         ds_idx: ListIdx,
         intervals: "Intervals",
         regions: NDArray[np.int32],
-        shifts: NDArray[np.uint32],
+        shifts: Optional[NDArray[np.uint32]] = None,
     ):
         intervals = intervals[ds_idx]
-        values = intervals_to_hap_values(
-            regions,
-            shifts,
-            intervals.intervals,
-            intervals.values,
-            intervals.offsets,
-            self.region_length,
-        )
+        if shifts is not None:
+            values = intervals_to_hap_values(
+                regions,
+                shifts,
+                intervals.intervals,
+                intervals.values,
+                intervals.offsets,
+                self.region_length,
+            )
+        else:
+            values = intervals_to_values(
+                regions,
+                intervals.intervals,
+                intervals.values,
+                intervals.offsets,
+                self.region_length,
+            )
         return values
 
     def get_bed(self):
@@ -894,16 +1071,21 @@ def intervals_to_hap_values(
     return out
 
 
-def adjust_multi_index(
-    idxs: Tuple[ListIdx, ...], skip_idxs: Tuple[NDArray[np.integer], ...]
+def subset_to_full_raveled_mapping(
+    full_shape: Tuple[int, int], ax1_indices: ArrayLike, ax2_indices: ArrayLike
 ):
-    adjusted_idxs: List[NDArray[np.integer]] = []
-    for idx, skip in zip(idxs, skip_idxs):
-        idx = np.asarray(idx)
-        if len(skip) > 0:
-            idx += (idx >= skip[:, None]).sum(0)
-        adjusted_idxs.append(idx.squeeze())
-    return tuple(adjusted_idxs)
+    # Generate a grid of indices for the subset array
+    row_indices, col_indices = np.meshgrid(ax1_indices, ax2_indices, indexing="ij")
+
+    # Flatten the grid to get all combinations of row and column indices in the subset
+    row_indices_flat = row_indices.ravel()
+    col_indices_flat = col_indices.ravel()
+
+    # Convert these subset indices to linear indices in the context of the full array
+    # This leverages the fact that the linear index in a 2D array is given by: index = row * num_columns + column
+    full_array_linear_indices = row_indices_flat * full_shape[1] + col_indices_flat
+
+    return full_array_linear_indices
 
 
 def regions_to_bed(regions: NDArray, contigs: Sequence[str]) -> pl.DataFrame:
@@ -927,3 +1109,21 @@ def regions_to_bed(regions: NDArray, contigs: Sequence[str]) -> pl.DataFrame:
     cmap = dict(enumerate(contigs))
     bed = bed.with_columns(pl.col("chrom").replace(cmap, return_dtype=pl.Utf8))
     return bed
+
+
+@define
+class TorchDataset(td.Dataset):  # type: ignore
+    dataset: Dataset
+
+    def __attrs_pre_init__(self):
+        if not TORCH_AVAILABLE:
+            raise ImportError(
+                "Could not import PyTorch. Please install PyTorch to use torch features."
+            )
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, idx: Idx) -> Union[NDArray, Tuple[NDArray, NDArray]]:
+        batch = self.dataset[idx]
+        return batch

@@ -12,15 +12,14 @@ whereas the batches are materialized from the buffer.
 """
 
 from .bigwig import BigWigs
+from .dataset import Dataset
 from .fasta import Fasta
 from .haplotypes import Haplotypes
 from .intervals import Intervals
 from .loader import GVL, construct_virtual_data
-from .open import GVLDataset
 from .torch import get_dataloader, get_sampler
-from .types import Reader
 from .util import read_bedlike, with_length
-from .variants import MemmapGenos, PgenGenos, Records, Variants, VCFGenos, ZarrGenos
+from .variants import Variants
 from .write import write
 from .zarr import ZarrTracks
 
@@ -33,16 +32,10 @@ __all__ = [
     "BigWigs",
     "GVL",
     "construct_virtual_data",
-    "Reader",
     "Variants",
-    "PgenGenos",
-    "ZarrGenos",
-    "MemmapGenos",
-    "VCFGenos",
-    "Records",
     "ZarrTracks",
     "write",
-    "GVLDataset",
+    "Dataset",
     "read_bedlike",
     "with_length",
     "get_dataloader",
