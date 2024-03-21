@@ -330,6 +330,9 @@ class Dataset:
     def with_transform(self, transform: Callable) -> "Dataset":
         return replace(self, transform=transform)
 
+    def with_seed(self, seed: int):
+        return replace(self, rng=np.random.default_rng(seed))
+
     def to_dataset(self):
         if not TORCH_AVAILABLE:
             raise ImportError(
