@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Callable, Dict, Iterable, List, Optional, Union
 
 import numpy as np
 import polars as pl
@@ -66,7 +66,7 @@ class GVLDataset(td.Dataset):  # pyright: ignore[reportPossiblyUnboundVariable]
 
 
 def get_dataloader(
-    dataset: Sequence,
+    dataset: td.Dataset,  # type: ignore
     batch_size: int = 1,
     shuffle: bool = False,
     sampler: Optional[Union[td.Sampler, Iterable]] = None,  # type: ignore
@@ -84,10 +84,10 @@ def get_dataloader(
     pin_memory_device: str = "",
 ):
     if sampler is None:
-        sampler = get_sampler(len(dataset), batch_size, shuffle, drop_last)
+        sampler = get_sampler(len(dataset), batch_size, shuffle, drop_last)  # type: ignore
 
     return td.DataLoader(  # type: ignore
-        dataset,  # type: ignore
+        dataset,
         batch_size=None,
         sampler=sampler,
         num_workers=num_workers,
