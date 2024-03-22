@@ -543,7 +543,9 @@ class Dataset:
             out.append(self.get_tracks(_idx, self.intervals, regions, shifts))
 
         if self.jitter > 0:
-            start = self.rng.integers(0, self.jitter)
+            start = self.rng.integers(
+                self.max_jitter - self.jitter, self.max_jitter + 1
+            )
             out = [o[..., start : start + self.output_length] for o in out]
 
         if squeeze:

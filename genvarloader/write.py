@@ -59,7 +59,11 @@ def write(
 
     if vcf is not None:
         bed, ploidy, n_variants, samples = write_variants(
-            path, bed, vcf, variants, samples
+            path,
+            bed,
+            vcf,
+            variants,  # type: ignore
+            samples,
         )
         metadata["ploidy"] = ploidy
         metadata["n_variants"] = n_variants
