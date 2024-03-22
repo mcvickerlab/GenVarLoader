@@ -52,8 +52,8 @@ def main(
     """
     import polars as pl
 
-    from .bigwig import BigWigs
-    from .write import write
+    from genvarloader.bigwig import BigWigs
+    from genvarloader.write import write
 
     if bigwig_table is not None:
         if bigwig_table.suffix == ".csv":
