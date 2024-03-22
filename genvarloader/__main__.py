@@ -17,11 +17,11 @@ def main(
     ],
     bed: Annotated[Path, Argument(..., help="Path to the BED file.")],
     vcf: Annotated[Optional[Path], Option(help="Path to the VCF file.")] = None,
-    bigwig_samples: Annotated[
-        Optional[str], Option(help="Comma-separated list of BigWig samples.")
-    ] = None,
-    bigwig_paths: Annotated[
-        Optional[str], Option(help="Comma-separated list of BigWig paths.")
+    bigwig_table: Annotated[
+        Optional[Path],
+        Option(
+            help='CSV or TSV with columns "sample" and "path" mapping each sample to its BigWig.'
+        ),
     ] = None,
     samples: Annotated[
         Optional[str],
@@ -50,21 +50,19 @@ def main(
     If a VCF and BigWigs are provided, the samples will be subset to the intersection of the samples in the VCF and BigWigs.
     If a list of specific samples are provided via --samples, that subset will take precedence.
     """
+    import polars as pl
+
     from .bigwig import BigWigs
     from .write import write
 
-    if bigwig_samples is not None and bigwig_paths is None:
-        raise ValueError(
-            "If BigWig samples are provided, BigWig paths must also be provided."
-        )
-    elif bigwig_samples is None and bigwig_paths is not None:
-        raise ValueError(
-            "If BigWig paths is provided, BigWig samples must also be provided."
-        )
-    elif bigwig_samples is not None and bigwig_paths is not None:
-        bw_samples = bigwig_samples.split(",")
-        bw_paths = bigwig_paths.split(",")
-        bws = dict(zip(bw_samples, bw_paths))
+    if bigwig_table is not None:
+        if bigwig_table.suffix == ".csv":
+            df = pl.read_csv(bigwig_table)
+        elif bigwig_table.suffix == ".tsv":
+            df = pl.read_csv(bigwig_table, separator="\t")
+        else:
+            raise ValueError("BigWig table must be a CSV or TSV file.")
+        bws = dict(zip(df["sample"], df["path"]))
         bigwigs = BigWigs("bws", bws)
     else:
         bigwigs = None
