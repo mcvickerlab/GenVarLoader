@@ -50,20 +50,12 @@ def main(
     If a VCF and BigWigs are provided, the samples will be subset to the intersection of the samples in the VCF and BigWigs.
     If a list of specific samples are provided via --samples, that subset will take precedence.
     """
-    import polars as pl
 
     from genvarloader.bigwig import BigWigs
     from genvarloader.write import write
 
     if bigwig_table is not None:
-        if bigwig_table.suffix == ".csv":
-            df = pl.read_csv(bigwig_table)
-        elif bigwig_table.suffix == ".tsv":
-            df = pl.read_csv(bigwig_table, separator="\t")
-        else:
-            raise ValueError("BigWig table must be a CSV or TSV file.")
-        bws = dict(zip(df["sample"], df["path"]))
-        bigwigs = BigWigs("bws", bws)
+        bigwigs = BigWigs.from_table("bws", bigwig_table)
     else:
         bigwigs = None
 

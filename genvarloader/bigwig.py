@@ -1,7 +1,9 @@
-from typing import Dict, List, Optional, Tuple, cast
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union, cast
 
 import joblib
 import numpy as np
+import polars as pl
 import pyBigWig
 from attrs import define
 from numpy.typing import ArrayLike, NDArray
@@ -43,6 +45,28 @@ class BigWigs(Reader):
         if contigs is None:
             raise ValueError("No bigWig files provided.")
         self.contigs: Dict[str, int] = contigs
+
+    @classmethod
+    def from_table(cls, name: str, table: Union[str, Path, pl.DataFrame]):
+        """Read data from bigWig files.
+
+        Parameters
+        ----------
+        name : str
+            Name of the reader, for example `'signal'`.
+        table : Union[str, Path, pl.DataFrame]
+            Path to a table or a DataFrame containing sample names and paths to bigWig files for those samples.
+        """
+        if isinstance(table, (str, Path)):
+            table = Path(table)
+            if table.suffix == ".csv":
+                table = pl.read_csv(table)
+            elif table.suffix == ".tsv" or table.suffix == ".txt":
+                table = pl.read_tsv(table)
+            else:
+                raise ValueError("Table should be a csv or tsv file.")
+        paths = dict(zip(table["sample"], table["path"]))
+        return cls(name, paths)
 
     def rev_strand_fn(self, x):
         return x[..., ::-1]
