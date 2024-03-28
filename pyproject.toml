@@ -8,7 +8,7 @@ repository = "https://github.com/mcvickerlab/genome-loader"
 license = "MIT"
 
 [tool.poetry.scripts]
-genvarloader = 'genvarloader.cli:app'
+genvarloader = 'cli:app'
 
 [tool.poetry.dependencies]
 python = "^3.9"
