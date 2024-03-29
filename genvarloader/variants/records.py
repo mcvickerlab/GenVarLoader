@@ -130,6 +130,34 @@ class VLenAlleles:
 
 @define
 class RecordInfo:
+    """Information about sets of records corresponding to range queries.
+
+    Attributes
+    ----------
+    positions : NDArray[np.int32]
+        Shape: (n_variants)
+        Positions of variants.
+    size_diffs : NDArray[np.int32]
+        Shape: (n_variants)
+        Difference in length between ref and alt.
+    refs : VLenAlleles
+        Effective shape: (n_variants)
+        Reference alleles.
+    alts : VLenAlleles
+        Effective shape: (n_variants)
+        Alternate alleles.
+    start_idxs : NDArray[np.int32]
+        Shape: (n_queries)
+        Start indices of the records for each query.
+    end_idxs : NDArray[np.int32]
+        Shape: (n_queries)
+        End indices of the records for each query.
+    offsets : NDArray[np.uint32]
+        Shape: (n_queries + 1).
+        Offsets for the records such that records[offsets[i]:offsets[i+1]] are the records
+        for the i-th query.
+    """
+
     positions: NDArray[np.int32]  # (n_variants)
     size_diffs: NDArray[np.int32]  # (n_variants)
     refs: VLenAlleles
@@ -138,16 +166,21 @@ class RecordInfo:
     end_idxs: NDArray[np.int32]  # (n_queries)
     offsets: NDArray[np.uint32]  # (n_queries + 1)
 
-
-EMPTY_RECORD_INFO = RecordInfo(
-    positions=np.empty(0, dtype=np.int32),
-    size_diffs=np.empty(0, dtype=np.int32),
-    refs=VLenAlleles(np.zeros(1, np.uint32), np.empty(0, "|S1")),
-    alts=VLenAlleles(np.zeros(1, np.uint32), np.empty(0, "|S1")),
-    start_idxs=np.empty(0, dtype=np.int32),
-    end_idxs=np.empty(0, dtype=np.int32),
-    offsets=np.zeros(1, np.uint32),
-)
+    @classmethod
+    def empty(cls, n_queries: int):
+        return cls(
+            positions=np.empty(n_queries, np.int32),
+            size_diffs=np.empty(n_queries, np.int32),
+            refs=VLenAlleles(
+                np.zeros(n_queries + 1, np.uint32), np.empty(n_queries, "S1")
+            ),
+            alts=VLenAlleles(
+                np.zeros(n_queries + 1, np.uint32), np.empty(n_queries, "S1")
+            ),
+            start_idxs=np.empty(n_queries, np.int32),
+            end_idxs=np.empty(n_queries, np.int32),
+            offsets=np.zeros(n_queries + 1, np.uint32),
+        )
 
 
 @define
@@ -253,7 +286,7 @@ class Records:
                 positions[i] = v.POS
                 refs[i] = v.REF
                 alt = v.ALT
-                # TODO: punt multi-allelics. also punt missing ALT?
+                # TODO: punt multi-allelics. also punt missing ALT (aka the * allele)?
                 if len(alt) != 1:
                     raise RuntimeError(
                         f"""VCF file {vcf_path} contains multi-allelic or overlappings
@@ -522,9 +555,11 @@ class Records:
         starts: ArrayLike,
         ends: ArrayLike,
     ) -> RecordInfo:
+        n_queries = len(starts)
+
         _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:
-            return EMPTY_RECORD_INFO
+            return RecordInfo.empty(n_queries)
 
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
@@ -537,7 +572,7 @@ class Records:
         )
 
         if s_idxs.min() == e_idxs.max():
-            return EMPTY_RECORD_INFO
+            return RecordInfo.empty(n_queries)
 
         n_var_per_region = e_idxs - s_idxs
         offsets = np.empty(len(n_var_per_region) + 1, dtype=np.uint32)
@@ -582,7 +617,7 @@ class Records:
 
         _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:
-            return EMPTY_RECORD_INFO, ends
+            return RecordInfo.empty(n_queries), ends
 
         _s_idxs = np.searchsorted(self.v_ends[_contig], starts)
 
@@ -602,7 +637,7 @@ class Records:
         e_idxs += self.contig_offsets[_contig]
 
         if s_idxs.min() == e_idxs.max():
-            return EMPTY_RECORD_INFO, ends
+            return RecordInfo.empty(n_queries), ends
 
         np.concatenate(
             [np.arange(s, e, dtype=np.uint32) for s, e in zip(s_idxs, e_idxs)]
