@@ -6,16 +6,15 @@ from typer import Argument, Option, Typer
 app = Typer(rich_markup_mode="rich")
 
 
-@app.command()
+@app.command(no_args_is_help=True)
 def main(
     path: Annotated[
         Path,
         Argument(
-            ...,
-            help="Path to the output directory, using the .gvl extension for clarity is encouraged.",
+            help="Path to the output directory, using the .gvl extension for clarity is encouraged."
         ),
     ],
-    bed: Annotated[Path, Argument(..., help="Path to the BED file.")],
+    bed: Annotated[Path, Argument(help="Path to the BED file.")],
     vcf: Annotated[Optional[Path], Option(help="Path to the VCF file.")] = None,
     bigwig_table: Annotated[
         Optional[Path],
@@ -30,15 +29,19 @@ def main(
     length: Annotated[
         Optional[int],
         Option(
-            help="Length of the sequences. If not provided, will default to maximum length seen in the BED file.",
+            help="Length of the sequences. If not provided, will default to maximum length seen in the BED file."
         ),
     ] = None,
     max_jitter: Annotated[
         int,
         Option(
-            help="Maximum jitter to allow. Permitted by expanding the region length by 2 * max jitter.",
+            help="Maximum jitter to allow. Permitted by expanding the region length by 2 * max jitter."
         ),
     ] = 0,
+    overwrite: Annotated[
+        bool,
+        Option(help="Overwrite the output directory if it exists."),
+    ] = False,
 ):
     """Write a GenVarLoader dataset from a BED3+ file and a VCF file and/or BigWig files.
 
@@ -50,6 +53,10 @@ def main(
     If a VCF and BigWigs are provided, the samples will be subset to the intersection of the samples in the VCF and BigWigs.
     If a list of specific samples are provided via --samples, that subset will take precedence.
     """
+    if path.exists() and not overwrite:
+        raise FileExistsError(
+            f"Output directory {path} already exists. Use --overwrite to overwrite."
+        )
 
     from genvarloader.bigwig import BigWigs
     from genvarloader.write import write
