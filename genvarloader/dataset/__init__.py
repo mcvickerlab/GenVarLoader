@@ -197,19 +197,21 @@ class Dataset:
         reference: Optional[Union[str, Path]] = None,
         samples: Optional[Sequence[str]] = None,
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
-        sequence_mode: Optional[Literal["reference", "haplotypes"]] = None,
-        track_mode: Optional[bool] = None,
+        return_sequences: Optional[Literal[False, "reference", "haplotypes"]] = None,
+        return_tracks: Optional[bool] = None,
         transform: Optional[Callable] = None,
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
         transformed_intervals: Optional[str] = None,
     ):
+        if return_sequences is False:
+            reference = None
         ds = cls.open(path, reference).with_settings(
             samples=samples,
             regions=regions,
-            return_sequences=sequence_mode,
-            return_tracks=track_mode,
+            return_sequences=return_sequences,
+            return_tracks=return_tracks,
             transform=transform,
             seed=seed,
             jitter=jitter,
