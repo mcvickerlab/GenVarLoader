@@ -28,6 +28,8 @@ def write(
     if vcf is None and bigwigs is None:
         raise ValueError("At least one of `vcf` or `bigwigs` must be provided.")
 
+    logger.info(f"Writing to {path}")
+
     metadata = {}
     path = Path(path)
     if path.exists():
@@ -41,23 +43,33 @@ def write(
     if max_jitter is not None:
         metadata["max_jitter"] = max_jitter
 
-    available_samples = set()
+    available_samples = None
     if vcf is not None:
-        logger.info("Writing genotypes.")
         vcf = Path(vcf)
         variants = Variants.from_vcf(vcf, use_cache=False)
-        available_samples.update(variants.samples)
+        if available_samples is None:
+            available_samples = set(variants.samples)
+        else:
+            available_samples &= variants.samples
 
     if bigwigs is not None:
-        available_samples.update(bigwigs.samples)
+        if available_samples is None:
+            available_samples = set(bigwigs.samples)
+        else:
+            available_samples &= bigwigs.samples
 
     if samples is not None:
         _samples = set(samples)
         if missing := (_samples - available_samples):
             raise ValueError(f"Samples {missing} not found in VCF or BigWigs.")
         samples = list(_samples)
+    else:
+        samples = list(available_samples)
+
+    logger.info(f"Using samples: {samples}")
 
     if vcf is not None:
+        logger.info("Writing genotypes.")
         bed, ploidy, n_variants, samples = write_variants(
             path,
             bed,
