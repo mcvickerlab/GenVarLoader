@@ -59,7 +59,7 @@ def main(
         )
 
     from genvarloader.bigwig import BigWigs
-    from genvarloader.write import write
+    from genvarloader.dataset.write import write
 
     if bigwig_table is not None:
         bigwigs = BigWigs.from_table("bws", bigwig_table)
