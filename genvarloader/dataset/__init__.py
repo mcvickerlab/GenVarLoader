@@ -1,5 +1,4 @@
 import json
-from dataclasses import dataclass, replace
 from pathlib import Path
 from textwrap import dedent
 from typing import (
@@ -17,7 +16,7 @@ from typing import (
 import numba as nb
 import numpy as np
 import polars as pl
-from attrs import define
+from attrs import define, evolve
 from loguru import logger
 from numpy.typing import NDArray
 
@@ -58,7 +57,7 @@ class _Variants:
         )
 
 
-@dataclass(slots=True)
+@define(frozen=True)
 class Dataset:
     """A dataset of genotypes, reference sequences, and intervals. Note: this class is not meant to be instantiated directly.
     Use the `open` or `open_with_settings` class methods to create a dataset after writing the data with genvarloader.write()
@@ -76,12 +75,12 @@ class Dataset:
     rng: np.random.Generator
     sample_idxs: NDArray[np.intp]
     region_idxs: NDArray[np.intp]
+    return_sequences: Literal[False, "reference", "haplotypes"]
     ploidy: Optional[int] = None
     reference: Optional[Reference] = None
     variants: Optional[_Variants] = None
     has_intervals: bool = False
-    sequence_mode: Optional[Literal["reference", "haplotypes"]] = None
-    track_mode: bool = False
+    return_tracks: bool = False
     genotypes: Optional["Genotypes"] = None
     intervals: Optional["Intervals"] = None
     transform: Optional[Callable] = None
@@ -124,8 +123,12 @@ class Dataset:
 
         if reference is None and n_variants > 0:
             logger.warning(
-                """Genotypes found but no reference genome provided. This is required to reconstruct haplotypes.
-                No reference or haplotype sequences can be returned by this dataset instance."""
+                dedent(
+                    """
+                    Genotypes found but no reference genome provided. This is required to reconstruct haplotypes.
+                    No reference or haplotype sequences can be returned by this dataset instance.
+                    """
+                )
             )
             _reference = None
             has_reference = False
@@ -152,16 +155,16 @@ class Dataset:
             has_intervals = False
 
         if has_reference and has_genotypes:
-            sequence_mode = "haplotypes"
+            return_sequences = "haplotypes"
         elif has_reference:
-            sequence_mode = "reference"
+            return_sequences = "reference"
         else:
-            sequence_mode = None
+            return_sequences = False
 
         if has_intervals:
-            track_mode = True
+            return_tracks = True
         else:
-            track_mode = False
+            return_tracks = False
 
         dataset = cls(
             path=path,
@@ -179,8 +182,8 @@ class Dataset:
             reference=_reference,
             variants=variants,
             has_intervals=has_intervals,
-            sequence_mode=sequence_mode,
-            track_mode=track_mode,
+            return_sequences=return_sequences,
+            return_tracks=return_tracks,
         )
 
         logger.info(f"\n{str(dataset)}")
@@ -205,8 +208,8 @@ class Dataset:
         ds = cls.open(path, reference).with_settings(
             samples=samples,
             regions=regions,
-            sequence_mode=sequence_mode,
-            track_mode=track_mode,
+            return_sequences=sequence_mode,
+            return_tracks=track_mode,
             transform=transform,
             seed=seed,
             jitter=jitter,
@@ -281,7 +284,7 @@ class Dataset:
         self,
         name: str,
         transform: Callable[
-            [pl.DataFrame, NDArray[np.uint32], NDArray[np.uint32], NDArray[np.float32]],
+            [pl.DataFrame, NDArray[np.intp], NDArray[np.uint32], NDArray[np.float32]],
             NDArray[np.float32],
         ],
     ):
@@ -316,11 +319,11 @@ class Dataset:
         max_intervals_per_batch = 89478485  # 2**30 / (2*4) positions / (4) values
         split_indices = (
             np.diff(
-                (self.intervals.offsets[1:] % max_intervals_per_batch).astype(np.int32)
+                (all_intervals.offsets[1:] % max_intervals_per_batch).astype(np.int32)
             )
             < 0
         ).nonzero()[0] + 1
-        split_indices = np.r_[0, split_indices, len(self.intervals.offsets) - 1]
+        split_indices = np.r_[0, split_indices, len(all_intervals.offsets) - 1]
         last_offset = 0
         for offset_s, offset_e in zip(split_indices[:-1], split_indices[1:]):
             s_idxs, r_idxs = np.unravel_index(
@@ -395,14 +398,14 @@ class Dataset:
             region_idxs,
         )
 
-        return replace(
+        return evolve(
             self, sample_idxs=sample_idxs, region_idxs=region_idxs, _idx_map=idx_map
         )
 
     def to_full_dataset(self):
         sample_idxs = np.arange(len(self._samples), dtype=np.intp)
         region_idxs = np.arange(len(self._regions), dtype=np.intp)
-        return replace(
+        return evolve(
             self, sample_idxs=sample_idxs, region_idxs=region_idxs, _idx_map=None
         )
 
@@ -410,8 +413,8 @@ class Dataset:
         self,
         samples: Optional[Sequence[str]] = None,
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
-        sequence_mode: Optional[Literal[False, "reference", "haplotypes"]] = None,
-        track_mode: Optional[bool] = None,
+        return_sequences: Optional[Literal[False, "reference", "haplotypes"]] = None,
+        return_tracks: Optional[bool] = None,
         transform: Optional[Callable] = None,
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
@@ -442,39 +445,37 @@ class Dataset:
             The transformed intervals to set, by default None
         """
         ds = self
-        to_replace = {}
+        to_evolve = {}
 
         if samples is not None or regions is not None:
             ds = ds.subset_to(samples, regions)
 
-        if sequence_mode is not None:
-            if sequence_mode == "haplotypes" and not self.has_genotypes:
+        if return_sequences is not None:
+            if return_sequences == "haplotypes" and not self.has_genotypes:
                 raise ValueError(
                     "No genotypes found. Cannot be set to yield haplotypes since genotypes are required to yield haplotypes."
                 )
-            if sequence_mode == "reference" and not self.has_reference:
+            if return_sequences == "reference" and not self.has_reference:
                 raise ValueError(
                     "No reference found. Cannot be set to yield reference sequences since reference is required to yield reference sequences."
                 )
-            if sequence_mode is False:
-                sequence_mode = None
-            to_replace["sequence_mode"] = sequence_mode
+            to_evolve["return_sequences"] = return_sequences
 
-        if track_mode is not None:
-            if track_mode:
+        if return_tracks is not None:
+            if return_tracks:
                 if not self.has_intervals:
                     raise ValueError(
                         "No intervals found. Cannot be set to yield tracks since intervals are required to yield tracks."
                     )
-                to_replace["track_mode"] = True
+                to_evolve["return_tracks"] = True
             else:
-                to_replace["track_mode"] = False
+                to_evolve["return_tracks"] = False
 
         if transform is not None:
-            to_replace["transform"] = transform
+            to_evolve["transform"] = transform
 
         if seed is not None:
-            to_replace["rng"] = np.random.default_rng(seed)
+            to_evolve["rng"] = np.random.default_rng(seed)
 
         if jitter is not None:
             if jitter < 0:
@@ -483,10 +484,10 @@ class Dataset:
                 raise ValueError(
                     f"Jitter must be less than or equal to the maximum jitter of the dataset ({self.max_jitter})."
                 )
-            to_replace["_jitter"] = jitter
+            to_evolve["_jitter"] = jitter
 
         if return_indices is not None:
-            to_replace["return_indices"] = return_indices
+            to_evolve["return_indices"] = return_indices
 
         if transformed_intervals is not None:
             if self.available_transformed_intervals is None:
@@ -497,9 +498,9 @@ class Dataset:
                 raise ValueError(
                     f"Transformed intervals {transformed_intervals} not found. Available transformed intervals: {self.available_transformed_intervals}"
                 )
-            to_replace["transformed_intervals"] = transformed_intervals
+            to_evolve["transformed_intervals"] = transformed_intervals
 
-        return replace(ds, **to_replace)
+        return evolve(ds, **to_evolve)
 
     def to_dataset(self):
         """Convert the dataset to a map-style PyTorch Dataset."""
@@ -570,11 +571,24 @@ class Dataset:
             The indices of the regions to select.
         """
         if isinstance(samples, slice):
-            samples = np.r_[samples]
-        if isinstance(regions, slice):
-            regions = np.r_[regions]
+            if samples.stop is None:
+                samples = slice(samples.start, len(self._samples))
+            _samples = np.arange(
+                samples.start, samples.stop, samples.step, dtype=np.intp
+            )
+        else:
+            _samples = samples
 
-        ds_idxs = np.ravel_multi_index((samples, regions), self.shape)
+        if isinstance(regions, slice):
+            if regions.stop is None:
+                regions = slice(regions.start, len(self._regions))
+            _regions = np.arange(
+                regions.start, regions.stop, regions.step, dtype=np.intp
+            )
+        else:
+            _regions = regions
+
+        ds_idxs = np.ravel_multi_index((_samples, _regions), self.shape)
         return self[ds_idxs]
 
     def sel(self, samples: List[str], regions: pl.DataFrame):
@@ -612,10 +626,12 @@ class Dataset:
         idx: Idx
             The index or indices to get. If a single index is provided, the output will be squeezed.
         """
-        if self.genotypes is None and self.sequence_mode == "haplotypes":
-            self.genotypes = self.init_genotypes()
-        if self.intervals is None and self.track_mode:
-            self.intervals = self.init_intervals(self.transformed_intervals)
+        to_evolve = {}
+        if self.genotypes is None and self.return_sequences == "haplotypes":
+            to_evolve["genotypes"] = self.init_genotypes()
+        if self.intervals is None and self.return_tracks:
+            to_evolve["intervals"] = self.init_intervals(self.transformed_intervals)
+        self = evolve(self, **to_evolve)
 
         if isinstance(idx, (int, np.integer)):
             _idx = [idx]
@@ -639,7 +655,7 @@ class Dataset:
 
         out: List[NDArray] = []
 
-        if self.sequence_mode == "haplotypes":
+        if self.return_sequences == "haplotypes":
             if TYPE_CHECKING:
                 assert self.genotypes is not None
                 assert self.variants is not None
@@ -647,7 +663,7 @@ class Dataset:
             genos = self.genotypes[s_idx, r_idx]
             shifts = self.get_shifts(genos, self.variants.sizes)
             out.append(self.get_haplotypes(genos, regions, shifts))
-        elif self.sequence_mode == "reference":
+        elif self.return_sequences == "reference":
             if TYPE_CHECKING:
                 assert self.reference is not None
             shifts = None
@@ -663,9 +679,7 @@ class Dataset:
         else:
             shifts = None
 
-        if self.track_mode:
-            if TYPE_CHECKING:
-                assert self.intervals is not None
+        if self.return_tracks:
             out.append(self.get_tracks(_idx, r_idx, shifts))
 
         if self.jitter > 0:
@@ -780,6 +794,9 @@ class Dataset:
         r_idx: NDArray[np.intp],
         shifts: Optional[NDArray[np.uint32]] = None,
     ):
+        if TYPE_CHECKING:
+            assert self.intervals is not None
+
         if shifts is not None:
             values = intervals_to_hap_values(
                 ds_idx,

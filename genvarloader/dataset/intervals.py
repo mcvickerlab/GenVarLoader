@@ -18,29 +18,6 @@ class Intervals:
     def __len__(self) -> int:
         return len(self.offsets) - 1
 
-    def __getitem__(self, ds_idx: ListIdx) -> "Intervals":
-        intervals = []
-        values = []
-        offsets = np.empty(len(ds_idx) + 1, dtype=np.uint32)
-        offsets[0] = 0
-        for output_idx, i in enumerate(ds_idx, 1):
-            s, e = self.offsets[i], self.offsets[i + 1]
-            offsets[output_idx] = e - s
-            if e > s:
-                intervals.append(self.intervals[s:e])
-                values.append(self.values[s:e])
-
-        if len(intervals) == 0:
-            intervals = np.empty((0, 2), dtype=self.intervals.dtype)
-            values = np.empty(0, dtype=self.values.dtype)
-        else:
-            intervals = np.concatenate(intervals)
-            values = np.concatenate(values)
-
-        offsets = offsets.cumsum(dtype=np.uint32)
-
-        return Intervals(intervals, values, offsets)
-
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def intervals_to_values(
