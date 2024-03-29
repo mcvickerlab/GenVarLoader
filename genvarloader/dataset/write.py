@@ -9,6 +9,7 @@ import polars as pl
 from einops import rearrange
 from loguru import logger
 from tqdm.auto import tqdm
+from typing_extensions import assert_never
 
 from ..bigwig import BigWigs
 from ..util import normalize_contig_name, read_bedlike, with_length
@@ -47,16 +48,35 @@ def write(
     if vcf is not None:
         vcf = Path(vcf)
         variants = Variants.from_vcf(vcf, use_cache=False)
+
+        if unavailable_contigs := set(contigs) - {
+            normalize_contig_name(c, contigs) for c in variants.records.contigs
+        }:
+            logger.warning(
+                f"Contigs in queries {unavailable_contigs} are not found in the VCF."
+            )
+
         if available_samples is None:
             available_samples = set(variants.samples)
         else:
             available_samples &= set(variants.samples)
 
     if bigwigs is not None:
+        if unavailable_contigs := set(contigs) - set(
+            normalize_contig_name(c, contigs) for c in bigwigs.contigs
+        ):
+            logger.warning(
+                f"Contigs in queries {unavailable_contigs} are not found in the BigWigs."
+            )
+
         if available_samples is None:
             available_samples = set(bigwigs.samples)
         else:
             available_samples &= set(bigwigs.samples)
+
+    if available_samples is None:
+        # this should be unreachable since we check that at least one of vcf or bigwigs is provided
+        assert_never(available_samples)  # type: ignore
 
     if samples is not None:
         _samples = set(samples)
