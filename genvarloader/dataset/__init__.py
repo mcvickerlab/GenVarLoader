@@ -123,8 +123,9 @@ class Dataset:
         rng = np.random.default_rng()
 
         if reference is None and n_variants > 0:
-            raise ValueError(
-                "Genotypes found but no reference genome provided. This is required to reconstruct haplotypes."
+            logger.warning(
+                """Genotypes found but no reference genome provided. This is required to reconstruct haplotypes.
+                No reference or haplotype sequences can be returned by this dataset instance."""
             )
         elif reference is not None:
             logger.info(
