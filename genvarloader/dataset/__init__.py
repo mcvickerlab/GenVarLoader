@@ -127,6 +127,8 @@ class Dataset:
                 """Genotypes found but no reference genome provided. This is required to reconstruct haplotypes.
                 No reference or haplotype sequences can be returned by this dataset instance."""
             )
+            _reference = None
+            has_reference = False
         elif reference is not None:
             logger.info(
                 "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
