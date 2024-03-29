@@ -50,13 +50,13 @@ def write(
         if available_samples is None:
             available_samples = set(variants.samples)
         else:
-            available_samples &= variants.samples
+            available_samples &= set(variants.samples)
 
     if bigwigs is not None:
         if available_samples is None:
             available_samples = set(bigwigs.samples)
         else:
-            available_samples &= bigwigs.samples
+            available_samples &= set(bigwigs.samples)
 
     if samples is not None:
         _samples = set(samples)
