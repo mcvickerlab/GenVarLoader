@@ -407,7 +407,7 @@ class Dataset:
         self,
         samples: Optional[Sequence[str]] = None,
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
-        sequence_mode: Optional[Literal["reference", "haplotypes"]] = None,
+        sequence_mode: Optional[Literal[False, "reference", "haplotypes"]] = None,
         track_mode: Optional[bool] = None,
         transform: Optional[Callable] = None,
         seed: Optional[int] = None,
@@ -424,7 +424,7 @@ class Dataset:
         regions : Optional[Union[str, Path, pl.DataFrame]], optional
             The regions to subset to, by default None
         sequence_mode : Optional[Literal["reference", "haplotypes"]], optional
-            The sequence mode to set, by default None
+            The sequence mode to set, by default None. Set this to False to disable returning sequences entirely.
         track_mode : Optional[bool], optional
             The track mode to set, by default None
         transform : Optional[Callable], optional
@@ -453,6 +453,8 @@ class Dataset:
                 raise ValueError(
                     "No reference found. Cannot be set to yield reference sequences since reference is required to yield reference sequences."
                 )
+            if sequence_mode is False:
+                sequence_mode = None
             to_replace["sequence_mode"] = sequence_mode
 
         if track_mode is not None:
@@ -661,7 +663,7 @@ class Dataset:
         if self.track_mode:
             if TYPE_CHECKING:
                 assert self.intervals is not None
-            out.append(self.get_tracks(_idx, self.intervals, regions, shifts))
+            out.append(self.get_tracks(_idx, r_idx, shifts))
 
         if self.jitter > 0:
             start = self.rng.integers(
@@ -771,27 +773,29 @@ class Dataset:
 
     def get_tracks(
         self,
-        ds_idx: ListIdx,
-        intervals: "Intervals",
-        regions: NDArray[np.int32],
+        ds_idx: NDArray[np.intp],
+        r_idx: NDArray[np.intp],
         shifts: Optional[NDArray[np.uint32]] = None,
     ):
-        intervals = intervals[ds_idx]
         if shifts is not None:
             values = intervals_to_hap_values(
-                regions,
+                ds_idx,
+                r_idx,
+                self.regions,
                 shifts,
-                intervals.intervals,
-                intervals.values,
-                intervals.offsets,
+                self.intervals.intervals,
+                self.intervals.values,
+                self.intervals.offsets,
                 self.region_length,
             )
         else:
             values = intervals_to_values(
-                regions,
-                intervals.intervals,
-                intervals.values,
-                intervals.offsets,
+                ds_idx,
+                r_idx,
+                self.regions,
+                self.intervals.intervals,
+                self.intervals.values,
+                self.intervals.offsets,
                 self.region_length,
             )
         return values

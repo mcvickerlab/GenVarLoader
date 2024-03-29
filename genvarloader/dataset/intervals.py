@@ -44,6 +44,8 @@ class Intervals:
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def intervals_to_values(
+    interval_idxs: NDArray[np.intp],
+    region_idxs: NDArray[np.intp],
     regions: NDArray[np.int32],
     intervals: NDArray[np.uint32],
     values: NDArray[np.float32],
@@ -57,32 +59,35 @@ def intervals_to_values(
     regions : NDArray[np.int32]
         Shape = (n_queries, 3) Regions for each query.
     intervals : NDArray[np.uint32]
-        Shape = (n_intervals, 2) Intervals.
+        Shape = (n_intervals, 2) Intervals, each is (start, end).
     values : NDArray[np.float32]
-        Shape = (n_intervals,) Values.
+        Shape = (n_intervals) Values.
     offsets : NDArray[np.uint32]
-        Shape = (n_queries + 1,) Offsets into intervals and values.
+        Shape = (n_queries + 1) Offsets into intervals and values.
     query_length : int
         Length of each query.
     """
-    n_regions = len(regions)
-    out = np.zeros((n_regions, query_length), np.float32)
-    for region in nb.prange(n_regions):
-        q_s = regions[region, 1]
-        o_s, o_e = offsets[region], offsets[region + 1]
+    n_queries = len(interval_idxs)
+    out = np.zeros((n_queries, query_length), np.float32)
+    for query in nb.prange(n_queries):
+        interval_idx = interval_idxs[query]
+        o_s, o_e = offsets[interval_idx], offsets[interval_idx + 1]
         n_intervals = o_e - o_s
         if n_intervals == 0:
-            out[region] = 0
+            out[query] = 0
             continue
 
+        q_s = regions[region_idxs[query], 1]
         for interval in nb.prange(o_s, o_e):
-            i_s, i_e = intervals[interval] - q_s
-            out[region, i_s:i_e] = values[interval]
+            start, end = intervals[interval] - q_s
+            out[query, start:end] = values[interval]
     return out
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def intervals_to_hap_values(
+    interval_idxs: NDArray[np.intp],
+    region_idxs: NDArray[np.intp],
     regions: NDArray[np.int32],
     shifts: NDArray[np.uint32],
     intervals: NDArray[np.uint32],
@@ -107,18 +112,18 @@ def intervals_to_hap_values(
     query_length : int
         Length of each query.
     """
-    n_queries = len(regions)
+    n_queries = len(interval_idxs)
     ploidy = shifts.shape[1]
     out = np.zeros((n_queries, ploidy, query_length), np.float32)
     for query in nb.prange(n_queries):
-        q_s = regions[query, 1]
-        o_s, o_e = offsets[query], offsets[query + 1]
+        interval_idx = interval_idxs[query]
+        o_s, o_e = offsets[interval_idx], offsets[interval_idx + 1]
         n_intervals = o_e - o_s
-
         if n_intervals == 0:
             out[query] = 0
             continue
 
+        q_s = regions[region_idxs[query], 1]
         for hap in nb.prange(ploidy):
             shift = shifts[query, hap]
             for interval in nb.prange(o_s, o_e):

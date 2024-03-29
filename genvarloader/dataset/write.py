@@ -10,10 +10,10 @@ from einops import rearrange
 from loguru import logger
 from tqdm.auto import tqdm
 
-from .bigwig import BigWigs
-from .util import normalize_contig_name, read_bedlike, with_length
-from .variants import Variants
-from .variants.records import RecordInfo
+from ..bigwig import BigWigs
+from ..util import normalize_contig_name, read_bedlike, with_length
+from ..variants import Variants
+from ..variants.records import RecordInfo
 
 
 def write(
