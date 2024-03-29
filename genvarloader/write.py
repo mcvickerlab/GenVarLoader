@@ -66,7 +66,7 @@ def write(
     else:
         samples = list(available_samples)
 
-    logger.info(f"Using samples: {samples}")
+    logger.info(f"Using {len(samples)} samples: {samples}")
 
     if vcf is not None:
         logger.info("Writing genotypes.")
