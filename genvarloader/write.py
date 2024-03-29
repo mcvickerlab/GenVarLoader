@@ -13,7 +13,7 @@ from tqdm.auto import tqdm
 from .bigwig import BigWigs
 from .util import normalize_contig_name, read_bedlike, with_length
 from .variants import Variants
-from .variants.records import EMPTY_RECORD_INFO
+from .variants.records import RecordInfo
 
 
 def write(
@@ -172,10 +172,11 @@ def write_variants(
         pbar.set_description(f"Writing genotypes for {contig}")
         starts = part["chromStart"].to_numpy()
         ends = part["chromEnd"].to_numpy()
+        n_regions = part.height
 
         _contig = normalize_contig_name(contig, variants.records.contigs)
         if _contig is None:
-            records = EMPTY_RECORD_INFO
+            records = RecordInfo.empty(n_regions)
             max_ends = ends.astype(np.int32)
             genos = np.empty((0, variants.ploidy), np.int8)
         else:
@@ -201,9 +202,8 @@ def write_variants(
             offset=memmap_offsets["genotypes"],
         )
         out[:] = genos[:]
-
         out.flush()
-        memmap_offsets["genotypes"] += genos.nbytes
+        memmap_offsets["genotypes"] += out.nbytes
 
         out = np.memmap(
             path / "genotypes" / "first_variant_idxs.npy",
@@ -214,7 +214,7 @@ def write_variants(
         )
         out[:] = records.start_idxs[:]
         out.flush()
-        memmap_offsets["fv_idxs"] += records.start_idxs.nbytes
+        memmap_offsets["fv_idxs"] += out.nbytes
 
         offsets = records.offsets.copy()
         offsets += last_offset
@@ -228,7 +228,7 @@ def write_variants(
         )
         out[:] = offsets[:-1]
         out.flush()
-        memmap_offsets["offsets"] += offsets[:-1].nbytes
+        memmap_offsets["offsets"] += out.nbytes
         pbar.update()
     pbar.close()
 
