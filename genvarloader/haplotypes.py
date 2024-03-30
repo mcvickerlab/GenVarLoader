@@ -8,7 +8,7 @@ from typing_extensions import assert_never
 
 from .fasta import Fasta
 from .types import Reader
-from .util import get_rel_starts
+from .utils import get_rel_starts
 from .variants import DenseGenotypes, Variants
 
 

@@ -1,6 +1,6 @@
 import numpy as np
 
-from genvarloader.util import splice_subarrays
+from genvarloader.utils import splice_subarrays
 
 
 def test_splice_subarrays():

@@ -28,7 +28,7 @@ from numpy.typing import NDArray
 from .concurrent import Buffer
 from .haplotypes import Haplotypes
 from .types import Reader
-from .util import (
+from .utils import (
     _cartesian_product,
     construct_virtual_data,
     get_rel_starts,
@@ -178,15 +178,9 @@ class GVL:
             fixed_length=self.fixed_length,
         )
 
-        if (
-            TORCH_AVAILABLE and torch.distributed.is_initialized()
-        ):  # pyright: ignore[reportPossiblyUnboundVariable]
-            n_subsets = (
-                torch.distributed.get_world_size()
-            )  # pyright: ignore[reportPossiblyUnboundVariable]
-            i = (
-                torch.distributed.get_rank()
-            )  # pyright: ignore[reportPossiblyUnboundVariable]
+        if TORCH_AVAILABLE and torch.distributed.is_initialized():  # pyright: ignore[reportPossiblyUnboundVariable]
+            n_subsets = torch.distributed.get_world_size()  # pyright: ignore[reportPossiblyUnboundVariable]
+            i = torch.distributed.get_rank()  # pyright: ignore[reportPossiblyUnboundVariable]
             subset_len = round(self.bed.height / n_subsets)
             slice_start = i * subset_len
 

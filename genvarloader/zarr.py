@@ -9,7 +9,7 @@ from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
 
 from .types import Reader
-from .util import normalize_contig_name
+from .utils import normalize_contig_name
 
 try:
     import tensorstore as ts

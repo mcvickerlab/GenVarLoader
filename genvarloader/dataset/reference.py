@@ -13,7 +13,7 @@ from attrs import define
 from numpy.typing import NDArray
 
 from ..fasta import Fasta
-from ..util import normalize_contig_name
+from ..utils import normalize_contig_name
 
 Idx = Union[int, np.integer, Sequence[int], NDArray[np.integer], slice]
 ListIdx = Union[Sequence[int], NDArray[np.integer]]
