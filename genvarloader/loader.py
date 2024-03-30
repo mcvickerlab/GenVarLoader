@@ -17,6 +17,7 @@ from typing import (
     cast,
 )
 
+import dask.array as da
 import numba as nb
 import numpy as np
 import polars as pl
@@ -30,7 +31,6 @@ from .haplotypes import Haplotypes
 from .types import Reader
 from .utils import (
     _cartesian_product,
-    construct_virtual_data,
     get_rel_starts,
     process_bed,
 )
@@ -45,6 +45,25 @@ except ImportError:
 
 
 BatchDict = Dict[str, Tuple[List[str], NDArray]]
+
+
+def construct_virtual_data(
+    *readers: Reader, n_regions: int, fixed_length: int
+) -> xr.Dataset:
+    arrays = {}
+    for reader in readers:
+        dims = ["region"] + list(reader.sizes) + ["length"]
+        shape = [n_regions] + [size for size in reader.sizes.values()] + [fixed_length]
+        arrays[reader.name] = xr.DataArray(
+            da.empty(  # pyright: ignore[reportPrivateImportUsage]
+                shape, dtype=reader.dtype
+            ),
+            dims=dims,
+            coords=reader.coords,
+            name=reader.name,
+        )
+    virtual_data = xr.Dataset(arrays)
+    return virtual_data
 
 
 class GVL:

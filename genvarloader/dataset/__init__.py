@@ -838,8 +838,10 @@ class Dataset:
         return values
 
     def get_bed(self):
+        """Get a polars DataFrame of the regions in the dataset, corresponding to the full length
+        used when writing the dataset. In other words, each region will have length
+        output_length + 2 * max_jitter."""
         bed = regions_to_bed(self.regions, self.contigs)
-        bed = bed.with_columns(chromEnd=pl.col("chromStart") + self.region_length)
         return bed
 
 
