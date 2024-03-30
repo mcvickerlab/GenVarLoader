@@ -281,17 +281,17 @@ class Dataset:
 
     @property
     def haplotypes(self):
-        """Return the dataset with haplotypes enabled and tracks disabled."""
+        """Dataset that only returns haplotypes, if available."""
         return self.with_settings(return_sequences="haplotypes", return_tracks=False)
 
     @property
     def reference(self):
-        """Return the dataset with reference sequences enabled and tracks disabled."""
+        """Dataset that only returns reference sequences, if available."""
         return self.with_settings(return_sequences="reference", return_tracks=False)
 
     @property
     def tracks(self):
-        """Return the dataset with tracks enabled and sequences disabled."""
+        """Dataset that only returns tracks, if available."""
         return self.with_settings(return_sequences=False, return_tracks=True)
 
     def __len__(self) -> int:
