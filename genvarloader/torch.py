@@ -1,8 +1,10 @@
 from pathlib import Path
+from textwrap import dedent
 from typing import Callable, Dict, Iterable, List, Optional, Union
 
 import numpy as np
 import polars as pl
+from loguru import logger
 from numpy.typing import NDArray
 
 from .types import Reader
@@ -83,6 +85,16 @@ def get_dataloader(
     persistent_workers: bool = False,
     pin_memory_device: str = "",
 ):
+    if num_workers > 1:
+        logger.warning(
+            dedent(
+                """
+                It is recommended to use num_workers <= 1 with GenVarLoader since it leverages
+                extensive multithreading which has lower overhead than multiprocessing.
+                """
+            )
+        )
+
     if sampler is None:
         sampler = get_sampler(len(dataset), batch_size, shuffle, drop_last)  # type: ignore
 
