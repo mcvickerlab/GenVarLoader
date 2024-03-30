@@ -12,7 +12,7 @@ from tqdm.auto import tqdm
 from typing_extensions import assert_never
 
 from ..bigwig import BigWigs
-from ..util import normalize_contig_name, read_bedlike, with_length
+from ..utils import normalize_contig_name, read_bedlike, with_length
 from ..variants import Variants
 from ..variants.records import RecordInfo
 

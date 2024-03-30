@@ -7,7 +7,7 @@ from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
 from typing_extensions import Self
 
-from genvarloader.util import get_rel_starts
+from genvarloader.utils import get_rel_starts
 
 from .records import Records
 

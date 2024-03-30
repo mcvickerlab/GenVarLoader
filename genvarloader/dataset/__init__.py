@@ -21,7 +21,7 @@ from loguru import logger
 from numpy.typing import NDArray
 
 from ..torch import get_dataloader
-from ..util import read_bedlike, with_length
+from ..utils import read_bedlike, with_length
 from ..variants import VLenAlleles
 from .genotypes import Genotypes, get_diffs, padded_slice, reconstruct_haplotypes
 from .intervals import Intervals, intervals_to_hap_values, intervals_to_values

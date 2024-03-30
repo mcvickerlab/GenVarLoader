@@ -5,7 +5,7 @@ import numpy as np
 from attrs import define
 from numpy.typing import ArrayLike, NDArray
 
-from ..util import normalize_contig_name
+from ..utils import normalize_contig_name
 from .genotypes import (
     Genotypes,
     MemmapGenos,

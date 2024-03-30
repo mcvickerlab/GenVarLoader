@@ -9,7 +9,7 @@ from attrs import define
 from numpy.typing import ArrayLike, NDArray
 
 from .types import Reader
-from .util import get_rel_starts, normalize_contig_name
+from .utils import get_rel_starts, normalize_contig_name
 
 
 class BigWigs(Reader):
