@@ -12,36 +12,13 @@ from typing import (
     Union,
 )
 
-import dask.array as da
 import numpy as np
 import pandera as pa
 import pandera.typing as pat
 import polars as pl
-import xarray as xr
 from numpy.typing import NDArray
 
-from .types import Reader
-
 T = TypeVar("T")
-
-
-def construct_virtual_data(
-    *readers: Reader, n_regions: int, fixed_length: int
-) -> xr.Dataset:
-    arrays = {}
-    for reader in readers:
-        dims = ["region"] + list(reader.sizes) + ["length"]
-        shape = [n_regions] + [size for size in reader.sizes.values()] + [fixed_length]
-        arrays[reader.name] = xr.DataArray(
-            da.empty(  # pyright: ignore[reportPrivateImportUsage]
-                shape, dtype=reader.dtype
-            ),
-            dims=dims,
-            coords=reader.coords,
-            name=reader.name,
-        )
-    virtual_data = xr.Dataset(arrays)
-    return virtual_data
 
 
 def process_bed(bed: Union[str, Path, pl.DataFrame], fixed_length: int):
