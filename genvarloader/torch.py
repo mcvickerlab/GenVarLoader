@@ -7,8 +7,9 @@ import polars as pl
 from loguru import logger
 from numpy.typing import NDArray
 
+from .loader import construct_virtual_data
 from .types import Reader
-from .utils import construct_virtual_data, process_bed
+from .utils import process_bed
 
 try:
     import torch
