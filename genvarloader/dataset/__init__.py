@@ -77,12 +77,12 @@ class Dataset:
     region_idxs: NDArray[np.intp]
     return_sequences: Literal[False, "reference", "haplotypes"]
     ploidy: Optional[int] = None
-    reference: Optional[Reference] = None
-    variants: Optional[_Variants] = None
+    _reference: Optional[Reference] = None
+    _variants: Optional[_Variants] = None
     has_intervals: bool = False
     return_tracks: bool = False
-    genotypes: Optional["Genotypes"] = None
-    intervals: Optional["Intervals"] = None
+    _genotypes: Optional["Genotypes"] = None
+    _intervals: Optional["Intervals"] = None
     transform: Optional[Callable] = None
     _idx_map: Optional[NDArray[np.intp]] = None
     _jitter: Optional[int] = None
@@ -179,8 +179,8 @@ class Dataset:
             sample_idxs=np.arange(len(samples), dtype=np.intp),
             region_idxs=np.arange(len(regions), dtype=np.intp),
             ploidy=ploidy,
-            reference=_reference,
-            variants=variants,
+            _reference=_reference,
+            _variants=variants,
             has_intervals=has_intervals,
             return_sequences=return_sequences,
             return_tracks=return_tracks,
@@ -222,11 +222,11 @@ class Dataset:
 
     @property
     def has_reference(self) -> bool:
-        return self.reference is not None
+        return self._reference is not None
 
     @property
     def has_genotypes(self) -> bool:
-        return self.variants is not None
+        return self._variants is not None
 
     @property
     def samples(self):
@@ -279,6 +279,21 @@ class Dataset:
             avail = [p.stem[:-1] for p in (self.path / "intervals").glob("*_.npy")]
         return avail
 
+    @property
+    def haplotypes(self):
+        """Return the dataset with haplotypes enabled and tracks disabled."""
+        return self.with_settings(return_sequences="haplotypes", return_tracks=False)
+
+    @property
+    def reference(self):
+        """Return the dataset with reference sequences enabled and tracks disabled."""
+        return self.with_settings(return_sequences="reference", return_tracks=False)
+
+    @property
+    def tracks(self):
+        """Return the dataset with tracks enabled and sequences disabled."""
+        return self.with_settings(return_sequences=False, return_tracks=True)
+
     def __len__(self) -> int:
         return self.n_samples * self.n_regions
 
@@ -310,10 +325,10 @@ class Dataset:
                 "No intervals found. Cannot add transformed intervals since intervals are required to add transformed intervals."
             )
 
-        if self.intervals is None:
+        if self._intervals is None:
             all_intervals = self.init_intervals()
         else:
-            all_intervals = self.intervals
+            all_intervals = self._intervals
 
         # limit memory usage to 1 GB per partition
         # 2 uint32 for positions, 1 float32 for value
@@ -629,9 +644,9 @@ class Dataset:
             The index or indices to get. If a single index is provided, the output will be squeezed.
         """
         to_evolve = {}
-        if self.genotypes is None and self.return_sequences == "haplotypes":
+        if self._genotypes is None and self.return_sequences == "haplotypes":
             to_evolve["genotypes"] = self.init_genotypes()
-        if self.intervals is None and self.return_tracks:
+        if self._intervals is None and self.return_tracks:
             to_evolve["intervals"] = self.init_intervals(self.transformed_intervals)
         self = evolve(self, **to_evolve)
 
@@ -659,23 +674,23 @@ class Dataset:
 
         if self.return_sequences == "haplotypes":
             if TYPE_CHECKING:
-                assert self.genotypes is not None
-                assert self.variants is not None
+                assert self._genotypes is not None
+                assert self._variants is not None
 
-            genos = self.genotypes[s_idx, r_idx]
-            shifts = self.get_shifts(genos, self.variants.sizes)
+            genos = self._genotypes[s_idx, r_idx]
+            shifts = self.get_shifts(genos, self._variants.sizes)
             out.append(self.get_haplotypes(genos, regions, shifts))
         elif self.return_sequences == "reference":
             if TYPE_CHECKING:
-                assert self.reference is not None
+                assert self._reference is not None
             shifts = None
             out.append(
                 get_reference(
                     regions,
-                    self.reference.reference,
-                    self.reference.offsets,
+                    self._reference.reference,
+                    self._reference.offsets,
                     self.region_length,
-                    self.reference.pad_char,
+                    self._reference.pad_char,
                 ).view("S1")
             )
         else:
@@ -768,8 +783,8 @@ class Dataset:
         shifts: NDArray[np.uint32],
     ):
         if TYPE_CHECKING:
-            assert self.reference is not None
-            assert self.variants is not None
+            assert self._reference is not None
+            assert self._variants is not None
             assert self.ploidy is not None
 
         haps = np.empty((len(regions), self.ploidy, self.region_length), np.uint8)
@@ -780,13 +795,13 @@ class Dataset:
             genos.first_v_idxs,
             genos.offsets,
             genos.genos,
-            self.variants.positions,
-            self.variants.sizes,
-            self.variants.alts.alleles.view(np.uint8),
-            self.variants.alts.offsets,
-            self.reference.reference,
-            self.reference.offsets,
-            self.reference.pad_char,
+            self._variants.positions,
+            self._variants.sizes,
+            self._variants.alts.alleles.view(np.uint8),
+            self._variants.alts.offsets,
+            self._reference.reference,
+            self._reference.offsets,
+            self._reference.pad_char,
         )
         return haps.view("S1")
 
@@ -797,7 +812,7 @@ class Dataset:
         shifts: Optional[NDArray[np.uint32]] = None,
     ):
         if TYPE_CHECKING:
-            assert self.intervals is not None
+            assert self._intervals is not None
 
         if shifts is not None:
             values = intervals_to_hap_values(
@@ -805,9 +820,9 @@ class Dataset:
                 r_idx,
                 self.regions,
                 shifts,
-                self.intervals.intervals,
-                self.intervals.values,
-                self.intervals.offsets,
+                self._intervals.intervals,
+                self._intervals.values,
+                self._intervals.offsets,
                 self.region_length,
             )
         else:
@@ -815,9 +830,9 @@ class Dataset:
                 ds_idx,
                 r_idx,
                 self.regions,
-                self.intervals.intervals,
-                self.intervals.values,
-                self.intervals.offsets,
+                self._intervals.intervals,
+                self._intervals.values,
+                self._intervals.offsets,
                 self.region_length,
             )
         return values
