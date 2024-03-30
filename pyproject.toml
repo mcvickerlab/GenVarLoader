@@ -49,9 +49,6 @@ pre-commit = "^3.5.0"
 enable = true
 vcs = "git"
 
-[tool.isort]
-profile = "black"
-
 [tool.mypy]
 plugins = ["numpy.typing.mypy_plugin", "pandera.mypy"]
 
