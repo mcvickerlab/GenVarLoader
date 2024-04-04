@@ -19,21 +19,26 @@ import numba as nb
 import numpy as np
 import polars as pl
 from attrs import define, evolve, field
+from einops import repeat
 from loguru import logger
 from numpy.typing import NDArray
 
 from ..torch import get_dataloader
-from ..utils import read_bedlike, with_length
+from ..utils import n_elements_to_offsets, read_bedlike, with_length
 from ..variants import VLenAlleles
 from .genotypes import (
-    DenseGenotypes,
-    get_diffs,
+    SparseGenotypes,
+    get_diffs_sparse,
     padded_slice,
-    reconstruct_haplotypes_from_dense,
+    reconstruct_haplotypes_from_sparse,
 )
 from .intervals import Intervals, intervals_to_tracks
 from .reference import Reference
-from .tracks import GenomeTrack, shift_and_realign_tracks  # noqa: F401
+from .tracks import (  # noqa: F401
+    GenomeTrack,
+    shift_and_realign_tracks,
+    shift_and_realign_tracks_sparse,
+)
 from .utils import regions_to_bed, subset_to_full_raveled_mapping
 
 try:
@@ -89,8 +94,8 @@ class Dataset:
     _variants: Optional[_Variants] = None
     has_intervals: bool = False
     return_tracks: bool = False
-    _genotypes: Optional["DenseGenotypes"] = None
-    _intervals: Optional["Intervals"] = None
+    _genotypes: Optional[SparseGenotypes] = None
+    _intervals: Optional[Intervals] = None
     transform: Optional[Callable] = None
     _idx_map: Optional[NDArray[np.intp]] = None
     _jitter: Optional[int] = None
@@ -684,8 +689,6 @@ class Dataset:
             _idx = self._idx_map[_idx]
         s_idx, r_idx = np.unravel_index(_idx, self._full_shape)
 
-        regions = self._regions[r_idx]
-
         out: List[NDArray] = []
 
         if self.return_sequences == "haplotypes":
@@ -693,16 +696,21 @@ class Dataset:
                 assert self._genotypes is not None
                 assert self._variants is not None
 
-            genos = self._genotypes[s_idx, r_idx]
-            shifts = self.get_shifts(genos, self._variants.sizes)
-            out.append(self.get_haplotypes(genos, regions, shifts))
+            offset_idxs = self.get_geno_offset_idxs(s_idx, r_idx)
+
+            # (b p)
+            shifts = self.get_shifts(offset_idxs)
+            # (b p l)
+            out.append(self.get_haplotypes(offset_idxs, r_idx, shifts))
         elif self.return_sequences == "reference":
             if TYPE_CHECKING:
                 assert self._reference is not None
             shifts = None
+            offset_idxs = None
             out.append(
                 get_reference(
-                    regions,
+                    r_idx,
+                    self._regions,
                     self._reference.reference,
                     self._reference.offsets,
                     self.region_length,
@@ -711,18 +719,25 @@ class Dataset:
             )
         else:
             shifts = None
+            offset_idxs = None
 
         if self.return_tracks:
-            out.append(self.get_tracks(_idx, r_idx, shifts))
+            # (b p l)
+            out.append(self.get_tracks(_idx, r_idx, shifts, offset_idxs))
 
         if self.jitter > 0:
             start = self.rng.integers(
                 self.max_jitter - self.jitter, self.max_jitter + 1
             )
+            # [(b p l-2*j) ...]
             out = [o[..., start : start + self.output_length] for o in out]
 
         if squeeze:
+            # (1 p l) -> (p l)
             out = [o.squeeze() for o in out]
+
+        if len(self._genome_tracks) > 0:
+            out.extend(self.get_genome_tracks(r_idx, shifts))
 
         if self.return_indices:
             out.extend((_idx, s_idx, r_idx))
@@ -740,23 +755,18 @@ class Dataset:
     def init_genotypes(self):
         if TYPE_CHECKING:
             assert self.ploidy is not None
-        n_samples = len(self._samples)
-        genotypes = DenseGenotypes(
+        genotypes = SparseGenotypes(
             np.memmap(
-                self.path / "genotypes" / "genotypes.npy",
-                shape=(self.n_variants * n_samples, self.ploidy),
-                dtype=np.int8,
-                mode="r",
-            ),
-            np.memmap(
-                self.path / "genotypes" / "first_variant_idxs.npy",
-                dtype=np.uint32,
+                self.path / "genotypes" / "variant_idxs.npy",
+                dtype=np.int32,
                 mode="r",
             ),
             np.memmap(
                 self.path / "genotypes" / "offsets.npy", dtype=np.uint32, mode="r"
             ),
-            n_samples,
+            len(self._samples),
+            self.ploidy,
+            len(self._regions),
         )
         return genotypes
 
@@ -787,30 +797,59 @@ class Dataset:
 
         return intervals
 
-    def get_shifts(self, genos: "DenseGenotypes", variant_sizes: NDArray[np.int32]):
-        diffs = get_diffs(genos.first_v_idxs, genos.offsets, genos.genos, variant_sizes)
-        shifts = self.rng.integers(0, diffs + 1, dtype=np.uint32)
+    def get_shifts(self, offset_idxs: NDArray[np.intp]):
+        if TYPE_CHECKING:
+            assert self._genotypes is not None
+            assert self._variants is not None
+        # (b p)
+        diffs = get_diffs_sparse(
+            offset_idxs,
+            self._genotypes.variant_idxs,
+            self._genotypes.offsets,
+            self._variants.sizes,
+        )
+        # (b p)
+        shifts = self.rng.integers(0, diffs + 1, dtype=np.int32)
         return shifts
+
+    def get_geno_offset_idxs(
+        self, sample_idxs: NDArray[np.intp], region_idxs: NDArray[np.intp]
+    ):
+        if TYPE_CHECKING:
+            assert self._genotypes is not None
+            assert self.ploidy is not None
+
+        n_queries = len(sample_idxs)
+        si = repeat(sample_idxs, "n -> (n p)", p=self.ploidy)
+        pi = repeat(np.arange(self.ploidy), "p -> (n p)", n=n_queries)
+        ri = repeat(region_idxs, "n -> (n p)", p=self.ploidy)
+        idx = (si, pi, ri)
+        offset_idxs = np.ravel_multi_index(
+            idx, self._genotypes.effective_shape
+        ).reshape(n_queries, self.ploidy)
+        return offset_idxs
 
     def get_haplotypes(
         self,
-        genos: "DenseGenotypes",
-        regions: NDArray[np.int32],
-        shifts: NDArray[np.uint32],
+        offset_idxs: NDArray[np.intp],
+        region_idxs: NDArray[np.intp],
+        shifts: NDArray[np.int32],
     ):
         if TYPE_CHECKING:
+            assert self._genotypes is not None
             assert self._reference is not None
             assert self._variants is not None
             assert self.ploidy is not None
 
-        haps = np.empty((len(regions), self.ploidy, self.region_length), np.uint8)
-        reconstruct_haplotypes_from_dense(
+        n_queries = len(region_idxs)
+        haps = np.empty((n_queries, self.ploidy, self.region_length), np.uint8)
+        reconstruct_haplotypes_from_sparse(
+            offset_idxs,
             haps,
-            regions,
+            self.regions[region_idxs],
             shifts,
-            genos.first_v_idxs,
-            genos.offsets,
-            genos.genos,
+            self._genotypes.offsets,
+            self._genotypes.variant_idxs,
             self._variants.positions,
             self._variants.sizes,
             self._variants.alts.alleles.view(np.uint8),
@@ -825,41 +864,96 @@ class Dataset:
         self,
         ds_idx: NDArray[np.intp],
         r_idx: NDArray[np.intp],
-        shifts: Optional[NDArray[np.uint32]] = None,
-        genos: Optional["DenseGenotypes"] = None,
+        shifts: Optional[NDArray[np.int32]] = None,
+        offset_idxs: Optional[NDArray[np.intp]] = None,
     ):
         if TYPE_CHECKING:
             assert self._intervals is not None
 
+        regions = self._regions[r_idx]
+        # (b*l) ragged
         tracks = intervals_to_tracks(
             ds_idx,
-            r_idx,
-            self.regions,
+            regions,
             self._intervals.intervals,
             self._intervals.values,
             self._intervals.offsets,
-            self.region_length,
         )
+        length_per_region = regions[:, 2] - regions[:, 1]
+        track_offsets = n_elements_to_offsets(length_per_region)
 
-        if shifts is not None and genos is not None:
+        if shifts is not None and offset_idxs is not None:
             if TYPE_CHECKING:
                 assert self.ploidy is not None
                 assert self._variants is not None
+                assert self._genotypes is not None
 
             out = np.empty((len(r_idx), self.ploidy, self.region_length), np.float32)
-            tracks = shift_and_realign_tracks(
-                regions=self.regions[r_idx],
+            shift_and_realign_tracks_sparse(
+                offset_idxs=offset_idxs,
+                variant_idxs=self._genotypes.variant_idxs,
+                offsets=self._genotypes.offsets,
+                regions=regions,
                 positions=self._variants.positions,
                 sizes=self._variants.sizes,
-                first_v_idxs=genos.first_v_idxs,
-                offsets=genos.offsets,
-                genos=genos.genos,
                 shifts=shifts,
                 tracks=tracks,
+                track_offsets=track_offsets,
                 out=out,
             )
+            tracks = out
+        else:
+            tracks = tracks.reshape(len(r_idx), self.region_length)
 
         return tracks
+
+    def get_genome_tracks(
+        self,
+        r_idx: NDArray[np.intp],
+        shifts: Optional[NDArray[np.int32]] = None,
+        offset_idxs: Optional[NDArray[np.intp]] = None,
+    ):
+        out = []
+        regions = self._regions[r_idx]
+        length_per_region = regions[:, 2] - regions[:, 1]
+        total_length = length_per_region.sum()
+        track_offsets = n_elements_to_offsets(length_per_region)
+
+        for track_name, track in self._genome_tracks.items():
+            tracks = np.empty(total_length, np.float32)
+            for i in range(len(r_idx)):
+                region = regions[i]
+                c_idx = region[0]
+                start, end = region[1:]
+                c_s, c_e = track.contig_offsets[c_idx]
+                tracks[track_offsets[i] : track_offsets[i + 1]] = padded_slice(
+                    track.track[c_s:c_e], start, end, 0
+                )
+
+            if shifts is not None and offset_idxs is not None:
+                if TYPE_CHECKING:
+                    assert self.ploidy is not None
+                    assert self._variants is not None
+                    assert self._genotypes is not None
+
+                _out = np.empty(
+                    (len(r_idx), self.ploidy, self.region_length), np.float32
+                )
+                shift_and_realign_tracks_sparse(
+                    offset_idxs=offset_idxs,
+                    variant_idxs=self._genotypes.variant_idxs,
+                    offsets=self._genotypes.offsets,
+                    regions=regions,
+                    positions=self._variants.positions,
+                    sizes=self._variants.sizes,
+                    shifts=shifts,
+                    tracks=tracks,
+                    track_offsets=track_offsets,
+                    out=_out,
+                )
+                track = out
+            out.append(track)
+        return out
 
     def get_bed(self):
         """Get a polars DataFrame of the regions in the dataset, corresponding to the coordinates
@@ -881,6 +975,7 @@ class Dataset:
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def get_reference(
+    r_idxs: NDArray[np.int32],
     regions: NDArray[np.int32],
     reference: NDArray[np.uint8],
     ref_offsets: NDArray[np.uint64],
@@ -889,7 +984,7 @@ def get_reference(
 ) -> NDArray[np.uint8]:
     out = np.empty((len(regions), region_length), np.uint8)
     for region in nb.prange(len(regions)):
-        q = regions[region]
+        q = regions[r_idxs[region]]
         c_idx = q[0]
         c_s = ref_offsets[c_idx]
         c_e = ref_offsets[c_idx + 1]

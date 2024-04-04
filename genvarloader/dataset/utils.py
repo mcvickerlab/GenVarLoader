@@ -7,7 +7,7 @@ from numpy.typing import ArrayLike, NDArray
 
 
 @nb.njit(nogil=True, cache=True)
-def padded_slice(arr: NDArray, start: int, stop: int, pad_char: int):
+def padded_slice(arr: NDArray, start: int, stop: int, pad_val: int):
     pad_left = -min(0, start)
     pad_right = max(0, stop - len(arr))
 
@@ -19,16 +19,16 @@ def padded_slice(arr: NDArray, start: int, stop: int, pad_char: int):
 
     if pad_left > 0 and pad_right > 0:
         out_stop = len(out) - pad_right
-        out[:pad_left] = pad_char
+        out[:pad_left] = pad_val
         out[pad_left:out_stop] = arr[:]
-        out[out_stop:] = pad_char
+        out[out_stop:] = pad_val
     elif pad_left > 0:
-        out[:pad_left] = pad_char
+        out[:pad_left] = pad_val
         out[pad_left:] = arr[:stop]
     elif pad_right > 0:
         out_stop = len(out) - pad_right
         out[:out_stop] = arr[start:]
-        out[out_stop:] = pad_char
+        out[out_stop:] = pad_val
 
     return out
 
