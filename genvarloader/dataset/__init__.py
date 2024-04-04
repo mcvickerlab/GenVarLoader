@@ -25,7 +25,12 @@ from numpy.typing import NDArray
 from ..torch import get_dataloader
 from ..utils import read_bedlike, with_length
 from ..variants import VLenAlleles
-from .genotypes import DenseGenotypes, get_diffs, padded_slice, reconstruct_haplotypes
+from .genotypes import (
+    DenseGenotypes,
+    get_diffs,
+    padded_slice,
+    reconstruct_haplotypes_from_dense,
+)
 from .intervals import Intervals, intervals_to_tracks
 from .reference import Reference
 from .tracks import GenomeTrack, shift_and_realign_tracks  # noqa: F401
@@ -799,7 +804,7 @@ class Dataset:
             assert self.ploidy is not None
 
         haps = np.empty((len(regions), self.ploidy, self.region_length), np.uint8)
-        reconstruct_haplotypes(
+        reconstruct_haplotypes_from_dense(
             haps,
             regions,
             shifts,
