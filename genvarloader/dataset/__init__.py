@@ -3,7 +3,9 @@ from pathlib import Path
 from textwrap import dedent
 from typing import (
     TYPE_CHECKING,
+    Any,
     Callable,
+    Dict,
     Iterable,
     List,
     Literal,
@@ -16,16 +18,17 @@ from typing import (
 import numba as nb
 import numpy as np
 import polars as pl
-from attrs import define, evolve
+from attrs import define, evolve, field
 from loguru import logger
 from numpy.typing import NDArray
 
 from ..torch import get_dataloader
 from ..utils import read_bedlike, with_length
 from ..variants import VLenAlleles
-from .genotypes import Genotypes, get_diffs, padded_slice, reconstruct_haplotypes
-from .intervals import Intervals, intervals_to_hap_values, intervals_to_values
+from .genotypes import DenseGenotypes, get_diffs, padded_slice, reconstruct_haplotypes
+from .intervals import Intervals, intervals_to_tracks
 from .reference import Reference
+from .tracks import GenomeTrack, shift_and_realign_tracks  # noqa: F401
 from .utils import regions_to_bed, subset_to_full_raveled_mapping
 
 try:
@@ -81,13 +84,15 @@ class Dataset:
     _variants: Optional[_Variants] = None
     has_intervals: bool = False
     return_tracks: bool = False
-    _genotypes: Optional["Genotypes"] = None
+    _genotypes: Optional["DenseGenotypes"] = None
     _intervals: Optional["Intervals"] = None
     transform: Optional[Callable] = None
     _idx_map: Optional[NDArray[np.intp]] = None
     _jitter: Optional[int] = None
     return_indices: bool = False
     transformed_intervals: Optional[str] = None
+    _track_transform: Optional[Callable] = None
+    _genome_tracks: Dict[str, GenomeTrack] = field(factory=dict)
 
     @classmethod
     def open(
@@ -204,6 +209,7 @@ class Dataset:
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
         transformed_intervals: Optional[str] = None,
+        extra_tracks: Optional[Dict[str, GenomeTrack]] = None,
     ):
         if return_sequences is False:
             reference = None
@@ -217,6 +223,7 @@ class Dataset:
             jitter=jitter,
             return_indices=return_indices,
             transformed_intervals=transformed_intervals,
+            extra_tracks=extra_tracks,
         )
         return ds
 
@@ -272,14 +279,6 @@ class Dataset:
         return len(self._samples), len(self._regions)
 
     @property
-    def available_transformed_intervals(self):
-        if not self.has_intervals:
-            avail = None
-        else:
-            avail = [p.stem[:-1] for p in (self.path / "intervals").glob("*_.npy")]
-        return avail
-
-    @property
     def haplotypes(self):
         """Dataset that only returns haplotypes, if available."""
         return self.with_settings(return_sequences="haplotypes", return_tracks=False)
@@ -297,6 +296,14 @@ class Dataset:
     def __len__(self) -> int:
         return self.n_samples * self.n_regions
 
+    @property
+    def available_transformed_intervals(self):
+        if not self.has_intervals:
+            avail = None
+        else:
+            avail = [p.stem[:-1] for p in (self.path / "intervals").glob("*_.npy")]
+        return avail
+
     def add_transformed_intervals(
         self,
         name: str,
@@ -304,6 +311,7 @@ class Dataset:
             [pl.DataFrame, NDArray[np.intp], NDArray[np.uint32], NDArray[np.float32]],
             NDArray[np.float32],
         ],
+        max_mem: int = 2**30,
     ):
         """Add transformed interval data to the dataset, writing them to disk with the given name.
 
@@ -330,10 +338,9 @@ class Dataset:
         else:
             all_intervals = self._intervals
 
-        # limit memory usage to 1 GB per partition
         # 2 uint32 for positions, 1 float32 for value
         regions = self.get_bed()
-        max_intervals_per_batch = 89478485  # 2**30 / (2*4) positions / (4) values
+        max_intervals_per_batch = max_mem / (2 * 4) / 4
         split_indices = (
             np.diff(
                 (all_intervals.offsets[1:] % max_intervals_per_batch).astype(np.int32)
@@ -437,6 +444,7 @@ class Dataset:
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
         transformed_intervals: Optional[str] = None,
+        extra_tracks: Optional[Dict[str, GenomeTrack]] = None,
     ):
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -462,7 +470,7 @@ class Dataset:
             The transformed intervals to set, by default None
         """
         ds = self
-        to_evolve = {}
+        to_evolve: Dict[str, Any] = {}
 
         if samples is not None or regions is not None:
             ds = ds.subset_to(samples, regions)
@@ -516,6 +524,9 @@ class Dataset:
                     f"Transformed intervals {transformed_intervals} not found. Available transformed intervals: {self.available_transformed_intervals}"
                 )
             to_evolve["transformed_intervals"] = transformed_intervals
+
+        if extra_tracks is not None:
+            to_evolve["_genome_tracks"] = extra_tracks
 
         return evolve(ds, **to_evolve)
 
@@ -635,7 +646,7 @@ class Dataset:
         ds_idxs = np.ravel_multi_index((sample_idxs, region_idxs), self.shape)
         return self[ds_idxs]
 
-    def __getitem__(self, idx: Idx) -> Union[NDArray, Tuple[NDArray, NDArray]]:
+    def __getitem__(self, idx: Idx) -> Union[NDArray, Tuple[NDArray, ...]]:
         """Get a batch of haplotypes and tracks or intervals and tracks.
 
         Parameters
@@ -725,7 +736,7 @@ class Dataset:
         if TYPE_CHECKING:
             assert self.ploidy is not None
         n_samples = len(self._samples)
-        genotypes = Genotypes(
+        genotypes = DenseGenotypes(
             np.memmap(
                 self.path / "genotypes" / "genotypes.npy",
                 shape=(self.n_variants * n_samples, self.ploidy),
@@ -771,14 +782,14 @@ class Dataset:
 
         return intervals
 
-    def get_shifts(self, genos: "Genotypes", variant_sizes: NDArray[np.int32]):
+    def get_shifts(self, genos: "DenseGenotypes", variant_sizes: NDArray[np.int32]):
         diffs = get_diffs(genos.first_v_idxs, genos.offsets, genos.genos, variant_sizes)
         shifts = self.rng.integers(0, diffs + 1, dtype=np.uint32)
         return shifts
 
     def get_haplotypes(
         self,
-        genos: "Genotypes",
+        genos: "DenseGenotypes",
         regions: NDArray[np.int32],
         shifts: NDArray[np.uint32],
     ):
@@ -810,38 +821,56 @@ class Dataset:
         ds_idx: NDArray[np.intp],
         r_idx: NDArray[np.intp],
         shifts: Optional[NDArray[np.uint32]] = None,
+        genos: Optional["DenseGenotypes"] = None,
     ):
         if TYPE_CHECKING:
             assert self._intervals is not None
 
-        if shifts is not None:
-            values = intervals_to_hap_values(
-                ds_idx,
-                r_idx,
-                self.regions,
-                shifts,
-                self._intervals.intervals,
-                self._intervals.values,
-                self._intervals.offsets,
-                self.region_length,
+        tracks = intervals_to_tracks(
+            ds_idx,
+            r_idx,
+            self.regions,
+            self._intervals.intervals,
+            self._intervals.values,
+            self._intervals.offsets,
+            self.region_length,
+        )
+
+        if shifts is not None and genos is not None:
+            if TYPE_CHECKING:
+                assert self.ploidy is not None
+                assert self._variants is not None
+
+            out = np.empty((len(r_idx), self.ploidy, self.region_length), np.float32)
+            tracks = shift_and_realign_tracks(
+                regions=self.regions[r_idx],
+                positions=self._variants.positions,
+                sizes=self._variants.sizes,
+                first_v_idxs=genos.first_v_idxs,
+                offsets=genos.offsets,
+                genos=genos.genos,
+                shifts=shifts,
+                tracks=tracks,
+                out=out,
             )
-        else:
-            values = intervals_to_values(
-                ds_idx,
-                r_idx,
-                self.regions,
-                self._intervals.intervals,
-                self._intervals.values,
-                self._intervals.offsets,
-                self.region_length,
-            )
-        return values
+
+        return tracks
 
     def get_bed(self):
-        """Get a polars DataFrame of the regions in the dataset, corresponding to the full length
-        used when writing the dataset. In other words, each region will have length
-        output_length + 2 * max_jitter."""
+        """Get a polars DataFrame of the regions in the dataset, corresponding to the coordinates
+        used when writing the dataset. In other words, each region will have length output_length
+        + 2 * max_jitter."""
         bed = regions_to_bed(self.regions, self.contigs)
+        # Need to do this because the regions file currently maps to the maximum length required
+        # based on all possible indels, so some regions have length > output_length + 2 * max_jitter.
+        # TODO: future implementation that doesn't use max deletion length will not need to do this
+        # that implementation will just use the actual deletion length and has access to the entire reference
+        # genome since it's being kept in-memory
+        # likewise, the intervals corresponding to everything needed will be pre-computed and available
+        # important not to prune the intervals though since a "reference" mode should be supported too
+        # this also means the intervals -> values function will need to be updated to handle this and
+        # only use the intervals that are necessary
+        bed = bed.with_columns(chromEnd=pl.col("chromStart") + self.region_length)
         return bed
 
 
@@ -878,6 +907,6 @@ class TorchDataset(td.Dataset):  # type: ignore
     def __len__(self) -> int:
         return len(self.dataset)
 
-    def __getitem__(self, idx: Idx) -> Union[NDArray, Tuple[NDArray, NDArray]]:
+    def __getitem__(self, idx: Idx) -> Union[NDArray, Tuple[NDArray, ...]]:
         batch = self.dataset[idx]
         return batch

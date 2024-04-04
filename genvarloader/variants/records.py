@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 from textwrap import dedent
-from typing import Dict, Iterable, List, Optional, Tuple, Union, overload
+from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union, overload
 
 import numba as nb
 import numpy as np
@@ -10,9 +10,9 @@ from attrs import define
 from loguru import logger
 from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
-from typing_extensions import Self
+from typing_extensions import Self, assert_never
 
-from ..utils import normalize_contig_name
+from ..utils import n_elements_to_offsets, normalize_contig_name, offsets_to_n_elements
 
 try:
     import cyvcf2
@@ -112,18 +112,10 @@ class VLenAlleles:
         elif len(vlen_alleles) == 1:
             return vlen_alleles[0]
 
-        offset_ends = np.array([v.offsets[-1] for v in vlen_alleles[:-1]]).cumsum(
-            dtype=np.uint32
+        nuc_per_allele = np.concatenate(
+            [offsets_to_n_elements(v.offsets) for v in vlen_alleles]
         )
-        offsets = np.concatenate(
-            [
-                vlen_alleles[0].offsets,
-                *(
-                    v.offsets + last_offset_end
-                    for v, last_offset_end in zip(vlen_alleles[1:], offset_ends)
-                ),
-            ]
-        )
+        offsets = n_elements_to_offsets(nuc_per_allele, np.uint32)
         alleles = np.concatenate([v.alleles for v in vlen_alleles])
         return VLenAlleles(offsets, alleles)
 
@@ -166,6 +158,10 @@ class RecordInfo:
     end_idxs: NDArray[np.int32]  # (n_queries)
     offsets: NDArray[np.uint32]  # (n_queries + 1)
 
+    @property
+    def n_queries(self):
+        return len(self.start_idxs)
+
     @classmethod
     def empty(cls, n_queries: int):
         return cls(
@@ -180,6 +176,40 @@ class RecordInfo:
             start_idxs=np.empty(n_queries, np.int32),
             end_idxs=np.empty(n_queries, np.int32),
             offsets=np.zeros(n_queries + 1, np.uint32),
+        )
+
+    @staticmethod
+    def concat(
+        *record_infos: "RecordInfo", how: Literal["separate", "merge"] = "separate"
+    ):
+        if len(record_infos) == 0:
+            return RecordInfo.empty(0)
+        elif len(record_infos) == 1:
+            return record_infos[0]
+
+        positions = np.concatenate([r.positions for r in record_infos])
+        size_diffs = np.concatenate([r.size_diffs for r in record_infos])
+        refs = VLenAlleles.concat(*(r.refs for r in record_infos))
+        alts = VLenAlleles.concat(*(r.alts for r in record_infos))
+        start_idxs = np.concatenate([r.start_idxs for r in record_infos])
+        end_idxs = np.concatenate([r.end_idxs for r in record_infos])
+        v_per_query = np.concatenate(
+            [offsets_to_n_elements(r.offsets) for r in record_infos]
+        )
+        if how == "separate":
+            offsets = n_elements_to_offsets(v_per_query, np.uint32)
+        elif how == "merge":
+            offsets = np.array([0, v_per_query.sum()], np.uint32)
+        else:
+            assert_never(how)
+        return RecordInfo(
+            positions=positions,
+            size_diffs=size_diffs,
+            refs=refs,
+            alts=alts,
+            start_idxs=start_idxs,
+            end_idxs=end_idxs,
+            offsets=offsets,
         )
 
 
@@ -555,14 +585,13 @@ class Records:
         starts: ArrayLike,
         ends: ArrayLike,
     ) -> RecordInfo:
+        starts = np.atleast_1d(np.asarray(starts, dtype=int))
+        ends = np.atleast_1d(np.asarray(ends, dtype=int))
         n_queries = len(starts)
 
         _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:
             return RecordInfo.empty(n_queries)
-
-        starts = np.atleast_1d(np.asarray(starts, dtype=int))
-        ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
         _s_idxs = np.searchsorted(self.v_ends[_contig], starts)
         # make idxs absolute

@@ -421,3 +421,26 @@ def normalize_contig_name(contig: str, contigs: Iterable[str]) -> Optional[str]:
         if contig == c or contig[3:] == c or f"chr{contig}" == c:
             return c
     return None
+
+
+ITYPE = TypeVar("ITYPE", bound=np.integer)
+
+
+def offsets_to_n_elements(offsets: NDArray[ITYPE]) -> NDArray[ITYPE]:
+    """Converts offsets to the number of elements in each group.
+
+    Notes
+    -----
+    This function will silently fail with wraparound values if the offsets are
+    not sorted in ascending order."""
+    return np.diff(offsets)
+
+
+def n_elements_to_offsets(
+    n_elements: NDArray[np.integer], dtype: type[ITYPE] = np.int32
+) -> NDArray[ITYPE]:
+    """Converts the number of elements in each group to offsets."""
+    offsets = np.empty(len(n_elements) + 1, dtype=dtype)
+    offsets[0] = 0
+    np.cumsum(n_elements, out=offsets[1:])
+    return offsets

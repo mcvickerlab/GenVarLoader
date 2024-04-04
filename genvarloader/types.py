@@ -1,7 +1,11 @@
 from pathlib import Path
-from typing import Callable, Dict, Mapping, Protocol
+from typing import Callable, Dict, Generic, Mapping, Protocol, Tuple, TypeVar
 
+import numpy as np
+from attrs import define
 from numpy.typing import ArrayLike, DTypeLike, NDArray
+
+DTYPE = TypeVar("DTYPE", bound=np.generic)
 
 
 class Reader(Protocol):
@@ -85,3 +89,57 @@ class ToZarr(Protocol):
             Directory to write the Zarr store.
         """
         ...
+
+
+@define
+class Ragged2D(Generic[DTYPE]):
+    data: NDArray[DTYPE]
+    offsets: NDArray[np.uintp]
+
+    @property
+    def __len__(self):
+        return len(self.offsets) - 1
+
+    @classmethod
+    def empty(cls, n_entries: int):
+        return cls(
+            np.empty(0, dtype=np.float32), np.zeros(n_entries + 1, dtype=np.uintp)
+        )
+
+
+@define
+class Ragged3D(Generic[DTYPE]):
+    data: NDArray[DTYPE]
+    offsets: NDArray[np.uintp]
+    nonragged_shape: Tuple[int, int]
+
+    @property
+    def __len__(self):
+        return int(np.prod(self.nonragged_shape))
+
+    @classmethod
+    def empty(cls, n_entries: int, dtype: type[DTYPE]):
+        return cls(
+            np.empty(0, dtype=dtype),
+            np.zeros(n_entries + 1, dtype=np.uintp),
+            (0, 0),
+        )
+
+
+@define
+class RaggedND(Generic[DTYPE]):
+    data: NDArray[DTYPE]
+    offsets: NDArray[np.uintp]
+    nonragged_shape: Tuple[int, ...]
+
+    @property
+    def __len__(self):
+        return int(np.prod(self.nonragged_shape))
+
+    @classmethod
+    def empty(cls, n_entries: int, n_dim: int, dtype: type[DTYPE]):
+        return cls(
+            np.empty(0, dtype=dtype),
+            np.zeros(n_entries + 1, dtype=np.uintp),
+            (0,) * n_dim,
+        )
