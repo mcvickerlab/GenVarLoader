@@ -12,7 +12,6 @@ from tqdm.auto import tqdm
 from ..bigwig import BigWigs
 from ..utils import normalize_contig_name, read_bedlike, with_length
 from ..variants import Variants
-from ..variants.records import RecordInfo
 from .genotypes import SparseGenotypes
 
 
@@ -78,10 +77,12 @@ def write(
         samples = list(available_samples)
 
     logger.info(f"Using {len(samples)} samples: {samples}")
+    metadata["n_samples"] = len(samples)
+    metadata["n_regions"] = bed.height
 
     if vcf is not None:
         logger.info("Writing genotypes.")
-        bed, ploidy, n_variants, samples = write_variants(
+        bed = write_variants(
             path,
             bed,
             vcf,
@@ -89,8 +90,7 @@ def write(
             region_length,
             samples,
         )
-        metadata["ploidy"] = ploidy
-        metadata["n_variants"] = n_variants
+        metadata["ploidy"] = variants.ploidy  # type: ignore
 
     write_regions(path, bed, contigs)
 
@@ -148,7 +148,7 @@ def write_variants(
     variants: Variants,
     region_length: int,
     samples: Optional[List[str]] = None,
-) -> Tuple[pl.DataFrame, int, int, List[str]]:
+):
     if samples is None:
         len(variants.samples)
         sample_idx = None
@@ -170,107 +170,86 @@ def write_variants(
 
     (path / "genotypes").mkdir(parents=True, exist_ok=True)
 
-    genotype_memmap_offsets = 0
     v_idx_memmap_offsets = 0
     offset_memmap_offsets = 0
     last_offset = 0
-    n_variants = 0
-    pbar = tqdm(total=bed["chrom"].n_unique())
-    all_max_ends = []
-    for contig, part in bed.partition_by(
-        "chrom", as_dict=True, include_key=False, maintain_order=True
-    ).items():
-        pbar.set_description(f"Writing genotypes for {contig}")
-        starts = part["chromStart"].to_numpy()
-        ends = part["chromEnd"].to_numpy()
-        n_regions = part.height
+    max_ends = np.empty(bed.height, dtype=np.int32)
+    last_max_end_idx = 0
+    with tqdm(total=bed["chrom"].n_unique()) as pbar:
+        for contig, part in bed.partition_by(
+            "chrom", as_dict=True, include_key=False, maintain_order=True
+        ).items():
+            pbar.set_description(f"Reading genotypes for {contig}")
+            starts = part["chromStart"].to_numpy()
+            ends = part["chromEnd"].to_numpy()
+            n_regions = part.height
 
-        _contig = normalize_contig_name(contig, variants.records.contigs)
-        if _contig is None:
-            records = RecordInfo.empty(n_regions)
-            max_ends = ends.astype(np.int32)
-            genos = np.empty((0, variants.ploidy), np.int8)
-        else:
-            multiplier = 1.5
-            contig_records = []
-            contig_genos = []
-            for region in range(n_regions):
-                start = starts[region]
-                end = ends[region]
-                r_records = []
-                r_genos = []
+            _contig = normalize_contig_name(contig, variants.records.contigs)
+            if _contig is None:
+                genos = SparseGenotypes.empty(len(_samples), variants.ploidy, n_regions)
+            else:
+                multiplier = 2
                 while True:
-                    records = variants.records.vars_in_range(_contig, start, end)
+                    records = variants.records.vars_in_range(_contig, starts, ends)
                     genos = variants.genotypes.read(
                         _contig,
                         records.start_idxs,
                         records.end_idxs,
                         sample_idx=sample_idx,
                     )
-                    # (s p v) -> (s p)
-                    ilen = np.where(genos == 1, records.size_diffs, 0).sum(-1)
-                    effective_length = end - starts[region] + ilen
+                    # (s p v)
+                    ilens = np.where(genos == 1, records.size_diffs, 0)
+                    # (s p r)
+                    ilens = np.add.reduceat(ilens, records.offsets[:-1], axis=-1)
+                    # (s p r)
+                    effective_length = ends - starts + ilens
+                    # (s p r)
                     missing_length = region_length - effective_length
-                    r_records.append(records)
-                    r_genos.append(genos)
                     if np.all(missing_length <= 0):
                         break
-                    start = end
-                    end += multiplier * missing_length.max()
-                records = RecordInfo.concat(*r_records, how="merge")
-                genos = np.concatenate(r_genos, axis=-1)
-                contig_records.append(records)
-                contig_genos.append(genos)
-            records = RecordInfo.concat(*contig_records)
-            genos = np.concatenate(contig_genos, axis=-1)
+                    # (r)
+                    ends += multiplier * missing_length.max((0, 1))
 
-        genos = SparseGenotypes.from_dense_with_length(
-            genos,
-            records.start_idxs,
-            records.offsets.astype(np.int32),
-            records.size_diffs,
-            records.positions,
-            starts,
-            region_length,
-        )
+                pbar.set_description(f"Sparsifying genotypes for {contig}")
+                genos, c_max_ends = SparseGenotypes.from_dense_with_length(
+                    genos,
+                    # make indices relative to the contig
+                    records.start_idxs - variants.records.contig_offsets[_contig],
+                    records.offsets.astype(np.int32),
+                    variants.records.v_diffs[_contig],
+                    variants.records.v_starts[_contig],
+                    starts,
+                    region_length,
+                )
+                max_ends[last_max_end_idx : last_max_end_idx + n_regions] = c_max_ends
+                last_max_end_idx += n_regions
 
-        out = np.memmap(
-            path / "genotypes" / "genotypes.npy",
-            dtype=genos.genos.dtype,
-            mode="w+" if genotype_memmap_offsets == 0 else "r+",
-            shape=genos.genos.shape,
-            offset=genotype_memmap_offsets,
-        )
-        out[:] = genos.genos[:]
-        out.flush()
-        genotype_memmap_offsets += out.nbytes
+            pbar.set_description(f"Writing genotypes for {contig}")
+            out = np.memmap(
+                path / "genotypes" / "variant_idxs.npy",
+                dtype=genos.variant_idxs.dtype,
+                mode="w+" if v_idx_memmap_offsets == 0 else "r+",
+                shape=genos.variant_idxs.shape,
+                offset=v_idx_memmap_offsets,
+            )
+            out[:] = genos.variant_idxs[:]
+            out.flush()
+            v_idx_memmap_offsets += out.nbytes
 
-        out = np.memmap(
-            path / "genotypes" / "variant_idxs.npy",
-            dtype=genos.variant_idxs.dtype,
-            mode="w+" if v_idx_memmap_offsets == 0 else "r+",
-            shape=genos.variant_idxs.shape,
-            offset=v_idx_memmap_offsets,
-        )
-        out[:] = genos.variant_idxs[:]
-        out.flush()
-        v_idx_memmap_offsets += out.nbytes
-
-        offsets = genos.offsets.copy()
-        offsets += last_offset
-        last_offset = offsets[-1]
-        out = np.memmap(
-            path / "genotypes" / "offsets.npy",
-            dtype=offsets.dtype,
-            mode="w+" if offset_memmap_offsets == 0 else "r+",
-            shape=len(offsets) - 1,
-            offset=offset_memmap_offsets,
-        )
-        out[:] = offsets[:-1]
-        out.flush()
-        offset_memmap_offsets += out.nbytes
-        pbar.update()
-    pbar.close()
+            offsets = genos.offsets.copy()
+            offsets += last_offset
+            last_offset = offsets[-1]
+            out = np.memmap(
+                path / "genotypes" / "offsets.npy",
+                dtype=offsets.dtype,
+                mode="w+" if offset_memmap_offsets == 0 else "r+",
+                shape=len(offsets) - 1,
+                offset=offset_memmap_offsets,
+            )
+            out[:] = offsets[:-1]
+            out.flush()
+            offset_memmap_offsets += out.nbytes
+            pbar.update()
 
     out = np.memmap(
         path / "genotypes" / "offsets.npy",
@@ -282,10 +261,8 @@ def write_variants(
     out[-1] = offsets[-1]  # type: ignore
     out.flush()
 
-    max_ends = np.concatenate(all_max_ends)
     bed = bed.with_columns(chromEnd=pl.lit(max_ends))
-
-    return bed, variants.ploidy, int(n_variants), _samples
+    return bed
 
 
 def write_bigwigs(
