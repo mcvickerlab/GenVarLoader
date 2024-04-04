@@ -22,12 +22,10 @@ class Intervals:
 @nb.njit(parallel=True, nogil=True, cache=True)
 def intervals_to_tracks(
     interval_idxs: NDArray[np.intp],
-    region_idxs: NDArray[np.intp],
     regions: NDArray[np.int32],
     intervals: NDArray[np.uint32],
     values: NDArray[np.float32],
     offsets: NDArray[np.uint32],
-    query_length: int,
     out: Optional[NDArray[np.float32]] = None,
 ) -> NDArray[np.float32]:
     """Convert intervals to tracks at base-pair resolution.
@@ -48,11 +46,15 @@ def intervals_to_tracks(
     Returns
     -------
     out : NDArray[np.float32]
-        Shape = (n_queries, query_length) Tracks.
+        Shape = (n_queries*query_length) Ragged array of tracks.
     """
     n_queries = len(interval_idxs)
+    length_per_query = regions[:, 2] - regions[:, 1]
+    out_idxs = np.empty(n_queries, np.intp)
+    out_idxs[0] = 0
+    out_idxs[1:] = length_per_query[:-1].cumsum()
     if out is None:
-        out = np.zeros((n_queries, query_length), np.float32)
+        out = np.zeros(length_per_query.sum(), np.float32)
     for query in nb.prange(n_queries):
         interval_idx = interval_idxs[query]
         o_s, o_e = offsets[interval_idx], offsets[interval_idx + 1]
@@ -61,10 +63,13 @@ def intervals_to_tracks(
             out[query] = 0
             continue
 
-        q_s = regions[region_idxs[query], 1]
+        q_s = regions[query, 1]
+        query_length = length_per_query[query]
+        out_idx = out_idxs[query]
+        _out = out[out_idx : out_idx + query_length]
         for interval in nb.prange(o_s, o_e):
             start, end = intervals[interval] - q_s
             if start > query_length:
                 break
-            out[query, start:end] = values[interval]
+            _out[start:end] = values[interval]
     return out
