@@ -4,11 +4,11 @@ import numpy as np
 from numpy.typing import NDArray
 from pytest_cases import fixture
 
-from genvarloader.dataset.intervals import intervals_to_values
+from genvarloader.dataset.intervals import intervals_to_tracks
 
 
 @fixture
-def intervals():
+def intervals_and_values():
     """Return intervals and values. After decompressing, should yield:
     [1, 1, 1, 0, 2, 0, 0, 3, 3, 3]
     """
@@ -17,15 +17,18 @@ def intervals():
     return intervals, values
 
 
-def test_intervals_to_values(intervals: Tuple[NDArray[np.uint32], NDArray[np.float32]]):
+def test_intervals_to_values(
+    intervals_and_values: Tuple[NDArray[np.uint32], NDArray[np.float32]],
+):
     """Test intervals_to_values."""
+    intervals, values = intervals_and_values
     interval_idxs = np.array([0], dtype=np.intp)
     region_idxs = np.array([0], dtype=np.intp)
     regions = np.array([[0, 0, 10]], dtype=np.int32)
     offsets = np.array([0, 3], dtype=np.uint32)
     query_length = 10
-    out = intervals_to_values(
-        interval_idxs, region_idxs, regions, *intervals, offsets, query_length
+    out = intervals_to_tracks(
+        interval_idxs, region_idxs, regions, intervals, values, offsets, query_length
     )
     desired = np.array([[1, 1, 1, 0, 2, 0, 0, 3, 3, 3]], dtype=np.float32)
     np.testing.assert_array_equal(out, desired)

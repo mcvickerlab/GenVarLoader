@@ -39,6 +39,10 @@ class Genotypes(Protocol):
     samples: NDArray[np.str_]
     ploidy: int
 
+    @property
+    def n_samples(self) -> int:
+        return len(self.samples)
+
     def read(
         self,
         contig: str,
@@ -69,9 +73,15 @@ class Genotypes(Protocol):
         """
         ...
 
-    @property
-    def n_samples(self) -> int:
-        return len(self.samples)
+    def read_for_length(
+        self,
+        contig: str,
+        start_idxs: ArrayLike,
+        length: int,
+        ilens: NDArray[np.int32],
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
+    ): ...
 
 
 class FromRecsGenos(Protocol):
@@ -186,6 +196,17 @@ class PgenGenos(Genotypes):
         #     genotypes = genotypes[sample_sorter]
 
         return genotypes
+
+    def read_for_length(
+        self,
+        contig: str,
+        start_idxs: ArrayLike,
+        length: int,
+        ilens: NDArray[np.int32],
+        sample_idx: ArrayLike | None = None,
+        haplotype_idx: ArrayLike | None = None,
+    ):
+        raise NotImplementedError
 
     def __del__(self) -> None:
         if self.handle is not None:
@@ -425,6 +446,17 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
 
         return genotypes
 
+    def read_for_length(
+        self,
+        contig: str,
+        start_idxs: ArrayLike,
+        length: int,
+        ilens: NDArray[np.int32],
+        sample_idx: ArrayLike | None = None,
+        haplotype_idx: ArrayLike | None = None,
+    ):
+        raise NotImplementedError
+
 
 class NumpyGenos(Genotypes, FromRecsGenos):
     chunked = False
@@ -479,6 +511,17 @@ class NumpyGenos(Genotypes, FromRecsGenos):
             genos[..., r_s:r_e] = self.arrays[contig][_sample_idx, _haplotype_idx, s:e]
 
         return genos
+
+    def read_for_length(
+        self,
+        contig: str,
+        start_idxs: ArrayLike,
+        length: int,
+        ilens: NDArray[np.int32],
+        sample_idx: ArrayLike | None = None,
+        haplotype_idx: ArrayLike | None = None,
+    ):
+        raise NotImplementedError
 
     def __getitem__(
         self,
@@ -558,6 +601,17 @@ class MemmapGenos(Genotypes, FromRecsGenos):
         genos = np.concatenate(genos_ls, axis=-1)
         return genos
 
+    def read_for_length(
+        self,
+        contig: str,
+        start_idxs: ArrayLike,
+        length: int,
+        ilens: NDArray[np.int32],
+        sample_idx: ArrayLike | None = None,
+        haplotype_idx: ArrayLike | None = None,
+    ):
+        raise NotImplementedError
+
     @classmethod
     def from_recs_genos(
         cls,
@@ -616,9 +670,9 @@ class VCFGenos(Genotypes):
             if not p.exists():
                 raise FileNotFoundError(f"VCF file {p} not found.")
             if samples is None:
-                samples = np.array(cyvcf2.VCF(str(p)).samples)  # pyright: ignore
+                samples = np.array(cyvcf2.VCF(str(p)).samples)  # type: ignore
         self.samples = samples  # type: ignore
-        self.handles: Optional[Dict[str, cyvcf2.VCF]] = None  # pyright: ignore
+        self.handles: Optional[Dict[str, "cyvcf2.VCF"]] = None
         self.contig_offsets = contig_offsets
 
     def read(
@@ -634,11 +688,11 @@ class VCFGenos(Genotypes):
 
         if self.handles is None and "_all" not in self.paths:
             self.handles = {
-                c: cyvcf2.VCF(str(p), lazy=True)  # pyright: ignore
+                c: cyvcf2.VCF(str(p), lazy=True)  # type: ignore
                 for c, p in self.paths.items()
             }
         elif self.handles is None:
-            handle = cyvcf2.VCF(str(next(iter(self.paths.values()))), lazy=True)  # pyright: ignore
+            handle = cyvcf2.VCF(str(next(iter(self.paths.values()))), lazy=True)  # type: ignore
             self.handles = {c: handle for c in handle.seqnames}
 
         if sample_idx is None:
@@ -684,6 +738,72 @@ class VCFGenos(Genotypes):
         genos[genos == -1] = -9
 
         return genos
+
+    def read_for_length(
+        self,
+        contig: str,
+        start_idxs: Optional[ArrayLike],
+        init_end_idxs: Optional[ArrayLike],
+        length: int,
+        ilens: NDArray[np.int32],
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
+    ):
+        raise NotImplementedError
+        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
+        init_end_idxs = np.atleast_1d(np.asarray(init_end_idxs, dtype=np.int32))
+
+        if self.handles is None:
+            self.handles = self.init_handles()
+
+        if sample_idx is None:
+            _sample_idx = slice(None)
+        else:
+            _sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=int))
+
+        if haplotype_idx is None:
+            _haplotype_idx = slice(None)
+        else:
+            _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=int))
+
+        n_variants = (init_end_idxs - start_idxs).sum()
+        genos = np.empty(
+            (len(self.samples), self.ploidy, n_variants),
+            dtype=np.int8,
+        )
+
+        if genos.size == 0:
+            return genos
+
+        geno_idxs = get_rel_starts(start_idxs, init_end_idxs)
+        finish_idxs = np.empty_like(geno_idxs)
+        finish_idxs[:-1] = geno_idxs[1:]
+        finish_idxs[-1] = n_variants
+        offset = self.contig_offsets[contig]
+        for i, v in enumerate(self.handles[contig](contig), start=offset):
+            # (n_queries)
+            overlapping_query_intervals = (i >= start_idxs) & (i < init_end_idxs)
+            if overlapping_query_intervals.any():
+                # (n_valid)
+                place_idx = geno_idxs[overlapping_query_intervals]
+                # increment idxs for next iteration
+                geno_idxs[overlapping_query_intervals] += 1
+                genos[..., place_idx] = v.genotype.array()[:, :2, None]
+            if (geno_idxs == finish_idxs).all():
+                break
+
+    def init_handles(self) -> Dict[str, "cyvcf2.VCF"]:
+        if self.handles is None and "_all" not in self.paths:
+            handles = {
+                c: cyvcf2.VCF(str(p), lazy=True)  # pyright: ignore
+                for c, p in self.paths.items()
+            }
+        elif self.handles is None:
+            handle = cyvcf2.VCF(str(next(iter(self.paths.values()))), lazy=True)  # pyright: ignore
+            handles = {c: handle for c in handle.seqnames}
+        else:
+            handles = self.handles
+        return handles
 
     def __del__(self) -> None:
         if self.handles is not None:

@@ -1,19 +1,21 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union, cast
+from typing import Callable, Dict, List, Optional, Tuple, Union, cast
 
 import joblib
+import numba as nb
 import numpy as np
 import polars as pl
 import pyBigWig
 from attrs import define
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import ArrayLike, DTypeLike, NDArray
+from tqdm.auto import tqdm
 
 from .types import Reader
-from .utils import get_rel_starts, normalize_contig_name
+from .utils import get_rel_starts, n_elements_to_offsets, normalize_contig_name
 
 
 class BigWigs(Reader):
-    dtype: np.float32  # pyBigWig always returns f32
+    dtype = np.float32  # pyBigWig always returns f32
     chunked = False
 
     def __init__(self, name: str, paths: Dict[str, str]) -> None:
@@ -62,7 +64,7 @@ class BigWigs(Reader):
             if table.suffix == ".csv":
                 table = pl.read_csv(table)
             elif table.suffix == ".tsv" or table.suffix == ".txt":
-                table = pl.read_tsv(table)
+                table = pl.read_csv(table, separator="\t")
             else:
                 raise ValueError("Table should be a csv or tsv file.")
         paths = dict(zip(table["sample"], table["path"]))
@@ -126,16 +128,27 @@ class BigWigs(Reader):
 
         return out
 
-    def intervals(self, contig: str, starts: ArrayLike, ends: ArrayLike, **kwargs):
+    def intervals(
+        self,
+        contig: str,
+        starts: ArrayLike,
+        ends: ArrayLike,
+        sample: Optional[Union[str, List[str]]] = None,
+        **kwargs,
+    ):
         _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:
             raise ValueError(f"Contig {contig} not found.")
         else:
             contig = _contig
 
-        samples = kwargs.get("sample", self.samples)
-        if isinstance(samples, str):
-            samples = [samples]
+        if sample is None:
+            samples = self.samples
+        elif isinstance(sample, str):
+            samples = [sample]
+        else:
+            samples = sample
+
         if not set(samples).issubset(self.samples):
             raise ValueError(f"Sample {samples} not found in bigWig paths.")
 
@@ -159,11 +172,13 @@ class BigWigs(Reader):
                         n_per_query[i] = len(_intervals)
                     else:
                         n_per_query[i] = 0
+            if len(intervals_ls) == 0:
+                return Intervals.empty(len(starts), len(samples))
             # (n_intervals, 2)
             intervals = np.array([i[:2] for i in intervals_ls], np.uint32)
             # (n_intervals)
             values = np.array([i[2] for i in intervals_ls], np.float32)
-            return Intervals(intervals, values, n_per_query)
+            return Intervals(intervals, values, n_per_query, 1)
 
         with joblib.Parallel(n_jobs=-1) as parallel:
             result = cast(
@@ -177,11 +192,142 @@ class BigWigs(Reader):
         intervals = np.concatenate([i.intervals for i in result])
         values = np.concatenate([i.values for i in result])
         n_per_query = np.concatenate([i.n_per_query for i in result])
-        return Intervals(intervals, values, n_per_query)
+        return Intervals(intervals, values, n_per_query, len(result))
+
+    def agg(
+        self,
+        path: Union[str, Path],
+        transform: Callable[[NDArray[np.float32]], NDArray],
+        out_dtype: DTypeLike,
+        out_shape: Optional[Union[int, Tuple[int, ...]]] = None,
+        max_mem: int = 2**30,  # 1 GiB
+        overwrite: bool = False,
+    ):
+        """Aggregates the data across samples at base-pair resolution using the given transformation
+        and writes the result to a directory of memory mapped arrays.
+
+        Parameters
+        ----------
+        path : str, Path
+            Directory to save the aggregated data. By convention, should end with `.agg.gvl`.
+        transform : Callable
+            Transformation to apply to the tracks. Will be given an array of shape (samples, length).
+        out_dtype : DTypeLike
+            Data type of the output tracks.
+        out_shape : int, tuple[int, ...], optional
+            Shape of the output tracks, not including the length dimension. Default is no extra dimensions.
+        max_mem : int, optional
+            Maximum memory to use for reading intervals. Default is 1 GiB.
+
+        Examples
+        --------
+        >>> bw = BigWigs(...)
+        >>> bw.agg("mean.agg.gvl", partial(np.mean, axis=0), np.float32)
+        """
+
+        if isinstance(path, str):
+            path = Path(path)
+
+        if out_shape is None:
+            out_shape = ()
+        elif isinstance(out_shape, int):
+            out_shape = (out_shape,)
+
+        # dtype is always f32, 4 bytes per base per sample
+        bytes_per_base = 4 * len(self.samples)
+        length_per_chunk = max_mem // bytes_per_base
+        # ceil division
+        n_chunks = sum(
+            -(-length // length_per_chunk) for length in self.contigs.values()
+        )
+
+        path.mkdir(parents=True, exist_ok=True)
+        if overwrite:
+            for f in path.iterdir():
+                f.unlink()
+
+        with tqdm(total=n_chunks) as pbar:
+            for contig, length in self.contigs.items():
+                pbar.set_description(f"Reading intervals {contig}")
+                agg = np.empty((*out_shape, length), out_dtype)
+                for start in range(0, length, length_per_chunk):
+                    end = min(start + length_per_chunk, length)
+                    intervals = self.intervals(contig, start, end)
+                    offsets = n_elements_to_offsets(intervals.n_per_query)
+                    pbar.set_description(f"Processing intervals {contig}")
+                    tracks = intervals_to_tracks(
+                        start,
+                        end,
+                        intervals.intervals,
+                        intervals.values,
+                        offsets,
+                        intervals.n_samples,
+                    )
+                    agg[start:end] = transform(tracks)
+                    pbar.update()
+                np.save(path / f"{contig}.npy", agg)
 
 
 @define
 class Intervals:
     intervals: NDArray[np.uint32]  # (n_intervals, 2)
     values: NDArray[np.float32]  # (n_intervals)
-    n_per_query: NDArray[np.uint32]  # (n_queries)
+    n_per_query: NDArray[np.uint32]  # (n_samples * n_queries)
+    n_samples: int
+
+    @classmethod
+    def empty(cls, n_queries: int, n_samples: int):
+        return cls(
+            np.empty((0, 2), np.uint32),
+            np.empty(0, np.float32),
+            np.zeros(n_samples * n_queries + 1, np.uint32),
+            n_samples,
+        )
+
+
+@nb.njit(parallel=True, nogil=True, cache=True)
+def intervals_to_tracks(
+    start: int,
+    end: int,
+    intervals: NDArray[np.uint32],
+    values: NDArray[np.float32],
+    offsets: NDArray[np.intp],
+    n_samples: int,
+) -> NDArray[np.float32]:
+    """Convert intervals for a single query to tracks at base-pair resolution.
+
+    Parameters
+    ----------
+    start : int
+        Start position of query.
+    end : int
+        End position of query.
+    intervals : NDArray[np.uint32]
+        Shape = (n_intervals, 2) Sorted intervals, each is (start, end).
+    values : NDArray[np.float32]
+        Shape = (n_intervals) Values.
+    offsets : NDArray[np.uint32]
+        Shape = (n_samples + 1) Offsets into intervals and values.
+    n_samples : int
+        Number of samples.
+
+    Returns
+    -------
+    NDArray[np.float32]
+        Shape = (n_samples, length) Tracks.
+    """
+    length = end - start
+    out = np.empty((n_samples, length), np.float32)
+
+    for sample in nb.prange(n_samples):
+        o_s, o_e = offsets[sample], offsets[sample + 1]
+        if o_e - o_s == 0:
+            out[sample] = 0
+            continue
+
+        for interval in nb.prange(o_s, o_e):
+            out_s, out_e = intervals[interval] - start
+            if out_s > length:
+                break
+            out[sample, out_s:out_e] = values[interval]
+    return out
