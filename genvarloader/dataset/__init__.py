@@ -34,11 +34,7 @@ from .genotypes import (
 )
 from .intervals import Intervals, intervals_to_tracks
 from .reference import Reference
-from .tracks import (  # noqa: F401
-    GenomeTrack,
-    shift_and_realign_tracks,
-    shift_and_realign_tracks_sparse,
-)
+from .tracks import GenomeTrack, shift_and_realign_tracks_sparse
 from .utils import regions_to_bed, subset_to_full_raveled_mapping
 
 try:
@@ -454,7 +450,7 @@ class Dataset:
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
         transformed_intervals: Optional[str] = None,
-        extra_tracks: Optional[Dict[str, GenomeTrack]] = None,
+        extra_tracks: Optional[Dict[str, Union[str, Path, GenomeTrack]]] = None,
     ):
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -478,6 +474,8 @@ class Dataset:
             Whether to return indices, by default None
         transformed_intervals : Optional[str], optional
             The transformed intervals to set, by default None
+        extra_tracks : Optional[Dict[str, GenomeTrack]], optional
+            The extra tracks to set, by default None
         """
         ds = self
         to_evolve: Dict[str, Any] = {}
@@ -536,7 +534,13 @@ class Dataset:
             to_evolve["transformed_intervals"] = transformed_intervals
 
         if extra_tracks is not None:
-            to_evolve["_genome_tracks"] = extra_tracks
+            _extra_tracks = {
+                name: GenomeTrack.from_path(track)
+                if not isinstance(track, GenomeTrack)
+                else track
+                for name, track in extra_tracks.items()
+            }
+            to_evolve["_genome_tracks"] = _extra_tracks
 
         return evolve(ds, **to_evolve)
 
