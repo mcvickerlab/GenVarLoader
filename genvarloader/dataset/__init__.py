@@ -215,7 +215,7 @@ class Dataset:
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
         transformed_intervals: Optional[str] = None,
-        extra_tracks: Optional[Dict[str, GenomeTrack]] = None,
+        extra_tracks: Optional[Dict[str, Union[str, Path, GenomeTrack]]] = None,
     ):
         if return_sequences is False:
             reference = None
