@@ -19,13 +19,16 @@ def write(
     path: Union[str, Path],
     bed: Union[str, Path, pl.DataFrame],
     vcf: Optional[Union[str, Path]] = None,
-    bigwigs: Optional[BigWigs] = None,
+    bigwigs: Optional[Union[BigWigs, List[BigWigs]]] = None,
     samples: Optional[List[str]] = None,
     length: Optional[int] = None,
     max_jitter: Optional[int] = None,
 ):
     if vcf is None and bigwigs is None:
         raise ValueError("At least one of `vcf` or `bigwigs` must be provided.")
+
+    if isinstance(bigwigs, BigWigs):
+        bigwigs = [bigwigs]
 
     logger.info(f"Writing to {path}")
 
@@ -57,14 +60,17 @@ def write(
         all_samples.extend(variants.samples)
 
     if bigwigs is not None:
-        if unavailable_contigs := set(contigs) - set(
-            normalize_contig_name(c, contigs) for c in bigwigs.contigs
-        ):
+        unavail = []
+        for bw in bigwigs:
+            if unavailable_contigs := set(contigs) - set(
+                normalize_contig_name(c, contigs) for c in bw.contigs
+            ):
+                unavail.append(unavailable_contigs)
+            all_samples.extend(bw.samples)
+        if unavail:
             logger.warning(
-                f"Contigs in queries {unavailable_contigs} are not found in the BigWigs."
+                f"Contigs in queries {set(unavail)} are not found in the BigWigs."
             )
-
-        all_samples.extend(bigwigs.samples)
 
     available_samples = set(all_samples)
 
@@ -96,8 +102,8 @@ def write(
 
     if bigwigs is not None:
         logger.info("Writing BigWig intervals.")
-        n_intervals = write_bigwigs(path, bed, bigwigs, samples)
-        metadata["n_intervals"] = n_intervals
+        for bw in bigwigs:
+            write_bigwigs(path, bed, bw, samples)
 
     with open(path / "metadata.json", "w") as f:
         json.dump(metadata, f)
@@ -166,7 +172,7 @@ def write_variants(
 
     gvl_arrow = re.sub(r"\.[bv]cf(\.gz)?$", ".gvl.arrow", vcf.name)
     recs = pl.read_ipc(vcf.parent / gvl_arrow)
-    recs.select("POS", "ALT", "ILEN").write_ipc(path / "variants.arrow")
+    recs.select("POS", "ALT", "ILEN").write_ipc(path / "genotypes" / "variants.arrow")
 
     (path / "genotypes").mkdir(parents=True, exist_ok=True)
 
@@ -276,7 +282,8 @@ def write_bigwigs(
         _samples = samples
     np.save(path / "samples.npy", _samples)
 
-    (path / "intervals").mkdir(parents=True, exist_ok=True)
+    out_dir = path / "intervals" / bigwigs.name
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     memmap_offsets = {
         "intervals": 0,
@@ -297,7 +304,7 @@ def write_bigwigs(
         n_intervals += len(intervals.intervals)
 
         out = np.memmap(
-            path / "intervals" / "intervals.npy",
+            out_dir / "intervals.npy",
             dtype=intervals.intervals.dtype,
             mode="w+" if memmap_offsets["intervals"] == 0 else "r+",
             shape=intervals.intervals.shape,
@@ -308,7 +315,7 @@ def write_bigwigs(
         memmap_offsets["intervals"] += intervals.intervals.nbytes
 
         out = np.memmap(
-            path / "intervals" / "values.npy",
+            out_dir / "values.npy",
             dtype=intervals.values.dtype,
             mode="w+" if memmap_offsets["values"] == 0 else "r+",
             shape=intervals.values.shape,
@@ -324,7 +331,7 @@ def write_bigwigs(
         offsets += last_offset
         last_offset = offsets[-1]
         out = np.memmap(
-            path / "intervals" / "offsets.npy",
+            out_dir / "offsets.npy",
             dtype=offsets.dtype,
             mode="w+" if memmap_offsets["offsets"] == 0 else "r+",
             shape=len(offsets) - 1,

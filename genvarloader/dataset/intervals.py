@@ -1,12 +1,9 @@
-from typing import Optional, Sequence, Union
+from typing import Optional
 
 import numba as nb
 import numpy as np
 from attrs import define
 from numpy.typing import NDArray
-
-Idx = Union[int, np.integer, Sequence[int], NDArray[np.integer], slice]
-ListIdx = Union[Sequence[int], NDArray[np.integer]]
 
 
 @define

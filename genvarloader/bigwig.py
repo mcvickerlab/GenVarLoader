@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union, cast
 
@@ -233,6 +234,8 @@ class BigWigs(Reader):
         elif isinstance(out_shape, int):
             out_shape = (out_shape,)
 
+        out_dtype = np.dtype(out_dtype)
+
         # dtype is always f32, 4 bytes per base per sample
         bytes_per_base = 4 * len(self.samples)
         length_per_chunk = max_mem // bytes_per_base
@@ -246,6 +249,15 @@ class BigWigs(Reader):
             for f in path.iterdir():
                 f.unlink()
 
+        with open(path / "metadata.json") as f:
+            metadata = {
+                "contigs": self.contigs,
+                "non_length_shape": out_shape,
+                "dtype": str(out_dtype),
+            }
+            json.dump(metadata, f)
+
+        last_offset = 0
         with tqdm(total=n_chunks) as pbar:
             for contig, length in self.contigs.items():
                 pbar.set_description(f"Reading intervals {contig}")
@@ -265,7 +277,15 @@ class BigWigs(Reader):
                     )
                     agg[start:end] = transform(tracks)
                     pbar.update()
-                np.save(path / f"{contig}.npy", agg)
+                out = np.memmap(
+                    path / "track.npy",
+                    dtype=agg.dtype,
+                    mode="w+" if last_offset == 0 else "r+",
+                    offset=last_offset,
+                    shape=agg.shape,
+                )
+                out[:] = agg[:]
+                last_offset += out.nbytes
 
 
 @define

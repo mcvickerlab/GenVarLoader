@@ -24,6 +24,7 @@ from loguru import logger
 from numpy.typing import NDArray
 
 from ..torch import get_dataloader
+from ..types import Idx
 from ..utils import n_elements_to_offsets, read_bedlike, with_length
 from ..variants import VLenAlleles
 from .genotypes import (
@@ -45,9 +46,6 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
-Idx = Union[int, np.integer, Sequence[int], NDArray[np.integer], slice]
-ListIdx = Union[Sequence[int], NDArray[np.integer]]
-
 
 @define
 class _Variants:
@@ -56,7 +54,7 @@ class _Variants:
     alts: VLenAlleles
 
     @classmethod
-    def from_dataframe(cls, variants: Union[str, Path, pl.DataFrame]):
+    def from_table(cls, variants: Union[str, Path, pl.DataFrame]):
         if isinstance(variants, (str, Path)):
             variants = pl.read_ipc(variants)
         return cls(
@@ -75,8 +73,6 @@ class Dataset:
 
     path: Path
     max_jitter: int
-    n_variants: int
-    n_intervals: int
     region_length: int
     contigs: List[str]
     _samples: NDArray[np.str_]
@@ -85,18 +81,17 @@ class Dataset:
     sample_idxs: NDArray[np.intp]
     region_idxs: NDArray[np.intp]
     return_sequences: Literal[False, "reference", "haplotypes"]
+    return_tracks: Union[Literal[False], List[str]]
     ploidy: Optional[int] = None
     _reference: Optional[Reference] = None
     _variants: Optional[_Variants] = None
-    has_intervals: bool = False
-    return_tracks: bool = False
+    _interval_meta: Optional[Dict[str, List[str]]] = None
     _genotypes: Optional[SparseGenotypes] = None
-    _intervals: Optional[Intervals] = None
+    _intervals: Optional[Dict[str, Intervals]] = None
     transform: Optional[Callable] = None
     _idx_map: Optional[NDArray[np.intp]] = None
     _jitter: Optional[int] = None
     return_indices: bool = False
-    transformed_intervals: Optional[str] = None
     _track_transform: Optional[Callable] = None
     _genome_tracks: Dict[str, GenomeTrack] = field(factory=dict)
 
@@ -121,18 +116,19 @@ class Dataset:
         samples: NDArray[np.str_] = np.load(path / "samples.npy")
         regions: NDArray[np.int32] = np.load(path / "regions.npy")
 
+        has_intervals = (path / "intervals").exists()
+        has_genotypes = (path / "genotypes").exists()
+
         with open(path / "metadata.json") as f:
             metadata = json.load(f)
 
         contigs = metadata["contigs"]
         region_length = int(metadata["region_length"])
         ploidy = int(metadata.get("ploidy", 0))
-        n_variants = int(metadata.get("n_variants", 0))
-        n_intervals = int(metadata.get("n_intervals", 0))
         max_jitter = int(metadata.get("max_jitter", 0))
         rng = np.random.default_rng()
 
-        if reference is None and n_variants > 0:
+        if reference is None and has_genotypes:
             logger.warning(
                 dedent(
                     """
@@ -153,17 +149,20 @@ class Dataset:
             _reference = None
             has_reference = False
 
-        if n_variants > 0:
-            variants = _Variants.from_dataframe(path / "variants.arrow")
-            has_genotypes = True
+        if has_genotypes:
+            variants = _Variants.from_table(path / "genotypes" / "variants.arrow")
         else:
             variants = None
-            has_genotypes = False
 
-        if n_intervals > 0:
-            has_intervals = True
+        if has_intervals:
+            intervals = {
+                p.name: list(t.name[:-5] for t in p.glob("_*.npy"))
+                for p in (path / "intervals").iterdir()
+            }
+            return_tracks = list(intervals)
         else:
-            has_intervals = False
+            intervals = None
+            return_tracks = False
 
         if has_reference and has_genotypes:
             return_sequences = "haplotypes"
@@ -172,16 +171,9 @@ class Dataset:
         else:
             return_sequences = False
 
-        if has_intervals:
-            return_tracks = True
-        else:
-            return_tracks = False
-
         dataset = cls(
             path=path,
             max_jitter=max_jitter,
-            n_variants=n_variants,
-            n_intervals=n_intervals,
             region_length=region_length,
             contigs=contigs,
             _samples=samples,
@@ -192,7 +184,7 @@ class Dataset:
             ploidy=ploidy,
             _reference=_reference,
             _variants=variants,
-            has_intervals=has_intervals,
+            _interval_meta=intervals,
             return_sequences=return_sequences,
             return_tracks=return_tracks,
         )
@@ -209,12 +201,11 @@ class Dataset:
         samples: Optional[Sequence[str]] = None,
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
         return_sequences: Optional[Literal[False, "reference", "haplotypes"]] = None,
-        return_tracks: Optional[bool] = None,
+        return_tracks: Optional[Union[Literal[False], List[str]]] = None,
         transform: Optional[Callable] = None,
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
-        transformed_intervals: Optional[str] = None,
         extra_tracks: Optional[Dict[str, Union[str, Path, GenomeTrack]]] = None,
     ):
         if return_sequences is False:
@@ -228,7 +219,6 @@ class Dataset:
             seed=seed,
             jitter=jitter,
             return_indices=return_indices,
-            transformed_intervals=transformed_intervals,
             extra_tracks=extra_tracks,
         )
         return ds
@@ -240,6 +230,21 @@ class Dataset:
     @property
     def has_genotypes(self) -> bool:
         return self._variants is not None
+
+    @property
+    def has_intervals(self) -> bool:
+        return self._interval_meta is not None
+
+    @property
+    def available_tracks(self) -> List[str]:
+        if self._interval_meta is None:
+            return []
+        else:
+            avail = []
+            for name, transforms in self._interval_meta.items():
+                avail.append(name)
+                avail.extend([f"{name}:{transform}" for transform in transforms])
+            return avail
 
     @property
     def samples(self):
@@ -294,34 +299,38 @@ class Dataset:
         """Dataset that only returns reference sequences, if available."""
         return self.with_settings(return_sequences="reference", return_tracks=False)
 
-    @property
-    def tracks(self):
+    def tracks(self, *tracks: str):
         """Dataset that only returns tracks, if available."""
-        return self.with_settings(return_sequences=False, return_tracks=True)
+        return self.with_settings(return_sequences=False, return_tracks=list(tracks))
 
     def __len__(self) -> int:
         return self.n_samples * self.n_regions
 
     @property
-    def available_transformed_intervals(self):
-        if not self.has_intervals:
-            avail = None
+    def available_transformed_tracks(self):
+        if self._interval_meta is None:
+            avail = []
         else:
-            avail = [p.stem[:-1] for p in (self.path / "intervals").glob("*_.npy")]
+            avail = [
+                f"{name}:{transform}"
+                for name, transforms in self._interval_meta.items()
+                for transform in transforms
+            ]
         return avail
 
-    def add_transformed_intervals(
+    def write_transformed_intervals(
         self,
         name: str,
+        track: str,
         transform: Callable[
             [pl.DataFrame, NDArray[np.intp], NDArray[np.uint32], NDArray[np.float32]],
             NDArray[np.float32],
         ],
         max_mem: int = 2**30,
     ):
-        """Add transformed interval data to the dataset, writing them to disk with the given name.
+        """Write transformed interval data.
 
-        Note: only transformations that would modify non-zero values of tracks are applicable. For example, if the intent
+        Note: only transformations that do not modify zero-values of tracks are applicable. For example, if the intent
         is to add a constant to a track, this would not be applicable since zero values are not stored in the intervals, and
         thus would not be transformed.
 
@@ -340,9 +349,9 @@ class Dataset:
             )
 
         if self._intervals is None:
-            all_intervals = self.init_intervals()
+            all_intervals = self.init_intervals()[track]
         else:
-            all_intervals = self._intervals
+            all_intervals = self._intervals[track]
 
         # 2 uint32 for positions, 1 float32 for value
         regions = self.get_bed()
@@ -369,7 +378,7 @@ class Dataset:
                 regions[r_idxs], s_idxs, intervals, values
             )
             out = np.memmap(
-                self.path / "intervals" / f"{name}_.npy",
+                self.path / "intervals" / track / f"_{name}.npy",
                 dtype=np.float32,
                 mode="w+",
                 shape=len(transformed_intervals),
@@ -444,12 +453,11 @@ class Dataset:
         samples: Optional[Sequence[str]] = None,
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
         return_sequences: Optional[Literal[False, "reference", "haplotypes"]] = None,
-        return_tracks: Optional[bool] = None,
+        return_tracks: Optional[Union[Literal[False], List[str]]] = None,
         transform: Optional[Callable] = None,
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
-        transformed_intervals: Optional[str] = None,
         extra_tracks: Optional[Dict[str, Union[str, Path, GenomeTrack]]] = None,
     ):
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
@@ -460,10 +468,10 @@ class Dataset:
             The samples to subset to, by default None
         regions : Optional[Union[str, Path, pl.DataFrame]], optional
             The regions to subset to, by default None
-        sequence_mode : Optional[Literal["reference", "haplotypes"]], optional
-            The sequence mode to set, by default None. Set this to False to disable returning sequences entirely.
-        track_mode : Optional[bool], optional
-            The track mode to set, by default None
+        return_sequences : Optional[Literal[False, "reference", "haplotypes"]], optional
+            The sequence type to return. Set this to False to disable returning sequences entirely.
+        return_tracks : Optional[Union[Literal[False], List[str]]], optional
+            The tracks to return, by default None. Set this to False to disable returning tracks entirely.
         transform : Optional[Callable], optional
             The transform to set, by default None
         seed : Optional[int], optional
@@ -495,14 +503,16 @@ class Dataset:
             to_evolve["return_sequences"] = return_sequences
 
         if return_tracks is not None:
-            if return_tracks:
-                if not self.has_intervals:
-                    raise ValueError(
-                        "No intervals found. Cannot be set to yield tracks since intervals are required to yield tracks."
-                    )
-                to_evolve["return_tracks"] = True
-            else:
+            if return_tracks is False:
                 to_evolve["return_tracks"] = False
+            else:
+                if missing := set(return_tracks).difference(
+                    self.available_tracks + self.available_transformed_tracks
+                ):
+                    raise ValueError(
+                        f"Intervals {missing} not found. Available intervals: {self.available_tracks + self.available_transformed_tracks}"
+                    )
+                to_evolve["return_tracks"] = return_tracks
 
         if transform is not None:
             to_evolve["transform"] = transform
@@ -522,20 +532,9 @@ class Dataset:
         if return_indices is not None:
             to_evolve["return_indices"] = return_indices
 
-        if transformed_intervals is not None:
-            if self.available_transformed_intervals is None:
-                raise ValueError(
-                    "No transformed intervals available. Use the add_transformed_intervals method to add transformed intervals."
-                )
-            elif transformed_intervals not in self.available_transformed_intervals:
-                raise ValueError(
-                    f"Transformed intervals {transformed_intervals} not found. Available transformed intervals: {self.available_transformed_intervals}"
-                )
-            to_evolve["transformed_intervals"] = transformed_intervals
-
         if extra_tracks is not None:
             _extra_tracks = {
-                name: GenomeTrack.from_path(track)
+                name: GenomeTrack.from_path(track).order_offsets_like(self.contigs)
                 if not isinstance(track, GenomeTrack)
                 else track
                 for name, track in extra_tracks.items()
@@ -589,13 +588,13 @@ class Dataset:
         return dedent(
             f"""
             GVL store {self.path.name}
+            Is subset: {self._idx_map is not None}
             Original region length: {self.region_length - 2*self.max_jitter:,}
             Max jitter: {self.max_jitter:,}
             # of samples: {self.n_samples:,}
             # of regions: {self.n_regions:,}
-            Has genotypes: {self.n_variants > 0}
-            Has intervals: {self.n_intervals > 0}
-            Is subset: {self._idx_map is not None}\
+            Has genotypes: {self.has_genotypes}
+            Has tracks: {self.available_tracks}\
             """
         ).strip()
 
@@ -672,7 +671,7 @@ class Dataset:
         if self._genotypes is None and self.return_sequences == "haplotypes":
             to_evolve["genotypes"] = self.init_genotypes()
         if self._intervals is None and self.return_tracks:
-            to_evolve["intervals"] = self.init_intervals(self.transformed_intervals)
+            to_evolve["intervals"] = self.init_intervals()
         self = evolve(self, **to_evolve)
 
         if isinstance(idx, (int, np.integer)):
@@ -726,8 +725,8 @@ class Dataset:
             offset_idxs = None
 
         if self.return_tracks:
-            # (b p l)
-            out.append(self.get_tracks(_idx, r_idx, shifts, offset_idxs))
+            # [(b p l) ...]
+            out.extend(self.get_tracks(_idx, r_idx, shifts, offset_idxs))
 
         if self.jitter > 0:
             start = self.rng.integers(
@@ -749,12 +748,12 @@ class Dataset:
         if self.transform is not None:
             out = self.transform(*out)
 
-        if len(out) == 1:
-            _out = out[0]
-        else:
-            _out = out
+        _out = tuple(out)
 
-        return _out  # type: ignore
+        if len(out) == 1:
+            _out = _out[0]
+
+        return _out
 
     def init_genotypes(self):
         if TYPE_CHECKING:
@@ -774,30 +773,36 @@ class Dataset:
         )
         return genotypes
 
-    def init_intervals(self, transform: Optional[str] = None):
-        if transform is None:
-            values_file = "values.npy"
-        else:
-            values_file = f"{transform}_.npy"
+    def init_intervals(self):
+        if TYPE_CHECKING:
+            assert self._interval_meta is not None
+            assert self.return_tracks is not False
 
-        intervals = Intervals(
-            np.memmap(
-                self.path / "intervals" / "intervals.npy",
-                shape=(self.n_intervals, 2),
-                dtype=np.uint32,
-                mode="r",
-            ),
-            np.memmap(
-                self.path / "intervals" / values_file,
-                dtype=np.float32,
-                mode="r",
-            ),
-            np.memmap(
-                self.path / "intervals" / "offsets.npy",
-                dtype=np.uint32,
-                mode="r",
-            ),
-        )
+        intervals: Dict[str, Intervals] = {}
+        for name in self.return_tracks:
+            if ":" in name:
+                base, transform = name.split(":")
+                values_file = f"_{transform}.npy"
+            else:
+                base = name
+                values_file = "values.npy"
+            intervals[name] = Intervals(
+                np.memmap(
+                    self.path / "intervals" / base / "intervals.npy",
+                    dtype=np.uint32,
+                    mode="r",
+                ).reshape(-1, 2),
+                np.memmap(
+                    self.path / "intervals" / base / values_file,
+                    dtype=np.float32,
+                    mode="r",
+                ),
+                np.memmap(
+                    self.path / "intervals" / base / "offsets.npy",
+                    dtype=np.uint32,
+                    mode="r",
+                ),
+            )
 
         return intervals
 
@@ -872,42 +877,56 @@ class Dataset:
         offset_idxs: Optional[NDArray[np.intp]] = None,
     ):
         if TYPE_CHECKING:
+            assert self.return_tracks is not False
             assert self._intervals is not None
 
         regions = self._regions[r_idx]
-        # (b*l) ragged
-        tracks = intervals_to_tracks(
-            ds_idx,
-            regions,
-            self._intervals.intervals,
-            self._intervals.values,
-            self._intervals.offsets,
-        )
-        length_per_region = regions[:, 2] - regions[:, 1]
-        track_offsets = n_elements_to_offsets(length_per_region)
+        if shifts is None and offset_idxs is not None:
+            # no shifts -> don't need to consider max ends, can use uniform region length
+            regions[:, 2] = regions[:, 1] + self.region_length
 
-        if shifts is not None and offset_idxs is not None:
-            if TYPE_CHECKING:
-                assert self.ploidy is not None
-                assert self._variants is not None
-                assert self._genotypes is not None
-
-            out = np.empty((len(r_idx), self.ploidy, self.region_length), np.float32)
-            shift_and_realign_tracks_sparse(
-                offset_idxs=offset_idxs,
-                variant_idxs=self._genotypes.variant_idxs,
-                offsets=self._genotypes.offsets,
-                regions=regions,
-                positions=self._variants.positions,
-                sizes=self._variants.sizes,
-                shifts=shifts,
-                tracks=tracks,
-                track_offsets=track_offsets,
-                out=out,
+        tracks: List[NDArray[np.float32]] = []
+        for name in self.return_tracks:
+            intervals = self._intervals[name]
+            # (b*l) ragged
+            _tracks = intervals_to_tracks(
+                ds_idx,
+                regions,
+                intervals.intervals,
+                intervals.values,
+                intervals.offsets,
             )
-            tracks = out
-        else:
-            tracks = tracks.reshape(len(r_idx), self.region_length)
+
+            if shifts is not None and offset_idxs is not None:
+                if TYPE_CHECKING:
+                    assert self.ploidy is not None
+                    assert self._variants is not None
+                    assert self._genotypes is not None
+
+                length_per_region = regions[:, 2] - regions[:, 1]
+                track_offsets = n_elements_to_offsets(length_per_region)
+
+                out = np.empty(
+                    (len(r_idx), self.ploidy, self.region_length), np.float32
+                )
+                shift_and_realign_tracks_sparse(
+                    offset_idxs=offset_idxs,
+                    variant_idxs=self._genotypes.variant_idxs,
+                    offsets=self._genotypes.offsets,
+                    regions=regions,
+                    positions=self._variants.positions,
+                    sizes=self._variants.sizes,
+                    shifts=shifts,
+                    tracks=_tracks,
+                    track_offsets=track_offsets,
+                    out=out,
+                )
+                _tracks = out
+            else:
+                # (b*l) ragged -> (b l)
+                _tracks = _tracks.reshape(len(r_idx), self.region_length)
+
+            tracks.append(_tracks)
 
         return tracks
 
