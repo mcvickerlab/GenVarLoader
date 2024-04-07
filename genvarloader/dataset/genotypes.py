@@ -1,15 +1,13 @@
-from typing import Sequence, Tuple, Union
+from typing import Tuple
 
 import numba as nb
 import numpy as np
 from attrs import define
 from numpy.typing import NDArray
 
+from ..types import ListIdx
 from ..utils import n_elements_to_offsets
 from .utils import padded_slice
-
-Idx = Union[int, np.integer, Sequence[int], NDArray[np.integer], slice]
-ListIdx = Union[Sequence[int], NDArray[np.integer]]
 
 
 @define

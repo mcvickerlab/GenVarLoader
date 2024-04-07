@@ -12,18 +12,61 @@ from ..utils import n_elements_to_offsets
 
 @define
 class GenomeTrack:
+    """
+    Represents a genome-wide track at base-pair resolution.
+
+    Attributes
+    ----------
+    track : ndarray
+        Track data.
+    contigs : dict[str, int]
+        A dictionary mapping contig names to their length.
+    contig_offsets : ndarray
+        The offsets for each contig in the genome track data.
+    """
+
     track: NDArray
     contigs: Dict[str, int]
+    _contig_offsets: NDArray[np.int32]
     contig_offsets: NDArray[np.int32]
 
+    def order_offsets_like(self, contigs: list[str]):
+        common, _, order = np.intersect1d(
+            contigs, list(self.contigs.keys()), return_indices=True
+        )
+        if len(common) != len(contigs):
+            raise ValueError("Not all contigs requested are in the track.")
+        self.contig_offsets = self._contig_offsets[order]
+        return self
+
     @classmethod
-    def from_path(cls, path: Union[str, Path]):
+    def from_path(cls, path: Union[str, Path]) -> "GenomeTrack":
+        """
+        Create a GenomeTrack from the specified path.
+
+        Parameters
+        ----------
+        path : Union[str, Path]
+            The path to the track data.
+
+        Returns
+        -------
+        track : GenomeTrack
+            A GenomeTrack object.
+
+        """
         path = Path(path)
         with open(path / "metadata.json") as f:
-            contigs = json.load(f)
+            metadata = json.load(f)
+            contigs = metadata["contigs"]
+            non_length_shape = metadata["non_length_shape"]
+            dtype = np.dtype(metadata["dtype"])
+
         contig_offsets = n_elements_to_offsets(contigs.values())
-        track = np.load(path / "track.npy", mmap_mode="r")
-        return cls(track, contigs, contig_offsets)
+        track = np.memmap(path / "track.npy", mode="r", dtype=dtype).reshape(
+            *non_length_shape, -1
+        )
+        return cls(track, contigs, contig_offsets, contig_offsets)
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
