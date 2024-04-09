@@ -23,6 +23,7 @@ def write(
     samples: Optional[List[str]] = None,
     length: Optional[int] = None,
     max_jitter: Optional[int] = None,
+    overwrite: bool = False,
 ):
     if vcf is None and bigwigs is None:
         raise ValueError("At least one of `vcf` or `bigwigs` must be provided.")
@@ -34,9 +35,11 @@ def write(
 
     metadata = {}
     path = Path(path)
-    if path.exists():
+    if path.exists() and overwrite:
         logger.info("Found existing GVL store, overwriting.")
         shutil.rmtree(path)
+    elif path.exists() and not overwrite:
+        raise FileExistsError(f"{path} already exists.")
     path.mkdir(parents=True, exist_ok=True)
 
     bed, contigs, region_length = prep_bed(bed, length, max_jitter)
