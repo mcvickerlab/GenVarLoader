@@ -426,7 +426,7 @@ def normalize_contig_name(contig: str, contigs: Iterable[str]) -> Optional[str]:
 ITYPE = TypeVar("ITYPE", bound=np.integer)
 
 
-def offsets_to_n_elements(offsets: NDArray[ITYPE]) -> NDArray[ITYPE]:
+def offsets_to_lengths(offsets: NDArray[ITYPE]) -> NDArray[ITYPE]:
     """Converts offsets to the number of elements in each group.
 
     Notes
@@ -436,11 +436,11 @@ def offsets_to_n_elements(offsets: NDArray[ITYPE]) -> NDArray[ITYPE]:
     return np.diff(offsets)
 
 
-def n_elements_to_offsets(
-    n_elements: NDArray[np.integer], dtype: type[ITYPE] = np.int32
+def lengths_to_offsets(
+    lengths: NDArray[np.integer], dtype: type[ITYPE] = np.int32
 ) -> NDArray[ITYPE]:
     """Converts the number of elements in each group to offsets."""
-    offsets = np.empty(len(n_elements) + 1, dtype=dtype)
+    offsets = np.empty(len(lengths) + 1, dtype=dtype)
     offsets[0] = 0
-    np.cumsum(n_elements, out=offsets[1:])
+    np.cumsum(lengths, out=offsets[1:])
     return offsets

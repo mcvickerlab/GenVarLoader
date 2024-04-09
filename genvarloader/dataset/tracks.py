@@ -7,7 +7,7 @@ import numpy as np
 from attrs import define
 from numpy.typing import NDArray
 
-from ..utils import n_elements_to_offsets
+from ..utils import lengths_to_offsets
 
 
 @define
@@ -27,8 +27,8 @@ class GenomeTrack:
 
     track: NDArray
     contigs: Dict[str, int]
-    _contig_offsets: NDArray[np.int32]
     contig_offsets: NDArray[np.int32]
+    raw_contig_offsets: NDArray[np.int32]
 
     def order_offsets_like(self, contigs: list[str]):
         common, _, order = np.intersect1d(
@@ -36,7 +36,7 @@ class GenomeTrack:
         )
         if len(common) != len(contigs):
             raise ValueError("Not all contigs requested are in the track.")
-        self.contig_offsets = self._contig_offsets[order]
+        self.contig_offsets = self.raw_contig_offsets[order]
         return self
 
     @classmethod
@@ -62,7 +62,7 @@ class GenomeTrack:
             non_length_shape = metadata["non_length_shape"]
             dtype = np.dtype(metadata["dtype"])
 
-        contig_offsets = n_elements_to_offsets(contigs.values())
+        contig_offsets = lengths_to_offsets(contigs.values())
         track = np.memmap(path / "track.npy", mode="r", dtype=dtype).reshape(
             *non_length_shape, -1
         )

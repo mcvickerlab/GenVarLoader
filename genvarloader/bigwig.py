@@ -7,12 +7,11 @@ import numba as nb
 import numpy as np
 import polars as pl
 import pyBigWig
-from attrs import define
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 from tqdm.auto import tqdm
 
-from .types import Reader
-from .utils import get_rel_starts, n_elements_to_offsets, normalize_contig_name
+from .types import INTERVAL_DTYPE, RaggedIntervals, Reader
+from .utils import get_rel_starts, normalize_contig_name
 
 
 class BigWigs(Reader):
@@ -136,7 +135,7 @@ class BigWigs(Reader):
         ends: ArrayLike,
         sample: Optional[Union[str, List[str]]] = None,
         **kwargs,
-    ):
+    ) -> RaggedIntervals:
         _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:
             raise ValueError(f"Contig {contig} not found.")
@@ -161,7 +160,7 @@ class BigWigs(Reader):
         def task(contig: str, starts: NDArray, ends: NDArray, path: str):
             intervals_ls: List[Tuple[int, int, float]] = []
             # (n_queries)
-            n_per_query = np.empty(len(starts), np.uint32)
+            n_per_query = np.empty(len(starts), np.int32)
             with pyBigWig.open(path, "r") as f:
                 for i, (s, e) in enumerate(zip(starts, ends)):
                     _intervals = cast(
@@ -174,26 +173,21 @@ class BigWigs(Reader):
                     else:
                         n_per_query[i] = 0
             if len(intervals_ls) == 0:
-                return Intervals.empty(len(starts), len(samples))
+                return RaggedIntervals.empty(len(starts), INTERVAL_DTYPE)  # type: ignore
             # (n_intervals, 2)
-            intervals = np.array([i[:2] for i in intervals_ls], np.uint32)
-            # (n_intervals)
-            values = np.array([i[2] for i in intervals_ls], np.float32)
-            return Intervals(intervals, values, n_per_query, 1)
+            intervals = np.array(intervals_ls, INTERVAL_DTYPE)
+            return RaggedIntervals.from_lengths(intervals, n_per_query)
 
         with joblib.Parallel(n_jobs=-1) as parallel:
             result = cast(
-                List[Intervals],
+                List[RaggedIntervals],
                 parallel(
                     joblib.delayed(task)(contig, starts, ends, self.paths[sample])
                     for sample in samples
                 ),
             )
 
-        intervals = np.concatenate([i.intervals for i in result])
-        values = np.concatenate([i.values for i in result])
-        n_per_query = np.concatenate([i.n_per_query for i in result])
-        return Intervals(intervals, values, n_per_query, len(result))
+        return RaggedIntervals.stack(*result)
 
     def agg(
         self,
@@ -264,16 +258,15 @@ class BigWigs(Reader):
                 agg = np.empty((*out_shape, length), out_dtype)
                 for start in range(0, length, length_per_chunk):
                     end = min(start + length_per_chunk, length)
+                    # (samples 1)
                     intervals = self.intervals(contig, start, end)
-                    offsets = n_elements_to_offsets(intervals.n_per_query)
                     pbar.set_description(f"Processing intervals {contig}")
                     tracks = intervals_to_tracks(
                         start,
                         end,
-                        intervals.intervals,
-                        intervals.values,
-                        offsets,
-                        intervals.n_samples,
+                        intervals.data,
+                        intervals.offsets,
+                        intervals.shape[0],  # type: ignore
                     )
                     agg[start:end] = transform(tracks)
                     pbar.update()
@@ -288,29 +281,11 @@ class BigWigs(Reader):
                 last_offset += out.nbytes
 
 
-@define
-class Intervals:
-    intervals: NDArray[np.uint32]  # (n_intervals, 2)
-    values: NDArray[np.float32]  # (n_intervals)
-    n_per_query: NDArray[np.uint32]  # (n_samples * n_queries)
-    n_samples: int
-
-    @classmethod
-    def empty(cls, n_queries: int, n_samples: int):
-        return cls(
-            np.empty((0, 2), np.uint32),
-            np.empty(0, np.float32),
-            np.zeros(n_samples * n_queries + 1, np.uint32),
-            n_samples,
-        )
-
-
 @nb.njit(parallel=True, nogil=True, cache=True)
 def intervals_to_tracks(
     start: int,
     end: int,
-    intervals: NDArray[np.uint32],
-    values: NDArray[np.float32],
+    intervals: NDArray[np.void],  # structured dtype (start, end, value)
     offsets: NDArray[np.intp],
     n_samples: int,
 ) -> NDArray[np.float32]:
@@ -322,13 +297,11 @@ def intervals_to_tracks(
         Start position of query.
     end : int
         End position of query.
-    intervals : NDArray[np.uint32]
-        Shape = (n_intervals, 2) Sorted intervals, each is (start, end).
-    values : NDArray[np.float32]
-        Shape = (n_intervals) Values.
+    intervals : NDArray[np.void]
+        Shape = (n_intervals) Sorted intervals, each is (start, end, value) as a structured dtype.
     offsets : NDArray[np.uint32]
-        Shape = (n_samples + 1) Offsets into intervals and values.
-    n_samples : int
+        Shape = (n_samples + 1) Offsets into intervals.
+    shape : int
         Number of samples.
 
     Returns
@@ -346,8 +319,9 @@ def intervals_to_tracks(
             continue
 
         for interval in nb.prange(o_s, o_e):
-            out_s, out_e = intervals[interval] - start
+            out_s = intervals[interval].start - start
+            out_e = intervals[interval].end - start
             if out_s > length:
                 break
-            out[sample, out_s:out_e] = values[interval]
+            out[sample, out_s:out_e] = intervals[interval].value
     return out

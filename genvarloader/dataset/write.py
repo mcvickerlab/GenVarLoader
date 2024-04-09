@@ -285,11 +285,8 @@ def write_bigwigs(
     out_dir = path / "intervals" / bigwigs.name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    memmap_offsets = {
-        "intervals": 0,
-        "values": 0,
-        "offsets": 0,
-    }
+    interval_offset = 0
+    offset_offset = 0
     last_offset = 0
     n_intervals = 0
     pbar = tqdm(total=bed["chrom"].n_unique())
@@ -301,56 +298,43 @@ def write_bigwigs(
         ends = part["chromEnd"].to_numpy()
 
         intervals = bigwigs.intervals(contig, starts, ends, sample=_samples)
-        n_intervals += len(intervals.intervals)
+        n_intervals += len(intervals.data)
 
         out = np.memmap(
-            out_dir / "intervals.npy",
-            dtype=intervals.intervals.dtype,
-            mode="w+" if memmap_offsets["intervals"] == 0 else "r+",
-            shape=intervals.intervals.shape,
-            offset=memmap_offsets["intervals"],
+            out_dir / "coords.npy",
+            dtype=intervals.data.dtype,
+            mode="w+" if interval_offset == 0 else "r+",
+            shape=intervals.data.shape,
+            offset=interval_offset,
         )
-        out[:] = intervals.intervals[:]
+        out[:] = intervals.data[:]
         out.flush()
-        memmap_offsets["intervals"] += intervals.intervals.nbytes
+        interval_offset += out.nbytes
 
-        out = np.memmap(
-            out_dir / "values.npy",
-            dtype=intervals.values.dtype,
-            mode="w+" if memmap_offsets["values"] == 0 else "r+",
-            shape=intervals.values.shape,
-            offset=memmap_offsets["values"],
-        )
-        out[:] = intervals.values[:]
-        out.flush()
-        memmap_offsets["values"] += intervals.values.nbytes
-
-        offsets = np.empty(len(intervals.n_per_query) + 1, dtype=np.uint32)
-        offsets[0] = 0
-        intervals.n_per_query.cumsum(out=offsets[1:])
+        offsets = intervals.offsets
         offsets += last_offset
         last_offset = offsets[-1]
         out = np.memmap(
             out_dir / "offsets.npy",
             dtype=offsets.dtype,
-            mode="w+" if memmap_offsets["offsets"] == 0 else "r+",
+            mode="w+" if offset_offset == 0 else "r+",
             shape=len(offsets) - 1,
-            offset=memmap_offsets["offsets"],
+            offset=offset_offset,
         )
         out[:] = offsets[:-1]
         out.flush()
-        memmap_offsets["offsets"] += offsets[:-1].nbytes
+        offset_offset += out.nbytes
         pbar.update()
     pbar.close()
 
     out = np.memmap(
-        path / "intervals" / "offsets.npy",
-        dtype=np.uint32,
+        out_dir / "offsets.npy",
+        dtype=offsets.dtype,  # type: ignore
         mode="r+",
         shape=1,
-        offset=memmap_offsets["offsets"],
+        offset=offset_offset,
     )
-    out[-1] = n_intervals
+    out[-1] = offsets[-1]  # type: ignore
     out.flush()
 
     return n_intervals

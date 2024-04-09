@@ -6,7 +6,7 @@ from attrs import define
 from numpy.typing import NDArray
 
 from ..types import ListIdx
-from ..utils import n_elements_to_offsets
+from ..utils import lengths_to_offsets
 from .utils import padded_slice
 
 
@@ -166,7 +166,7 @@ class SparseGenotypes:
         alt = is_alt.nonzero()
         variant_idxs = dense_v_idxs[alt[2]]
         n_per_spr = np.add.reduceat(is_alt, offsets[:-1], axis=-1).ravel()
-        offsets = n_elements_to_offsets(n_per_spr, np.int32)
+        offsets = lengths_to_offsets(n_per_spr, np.int32)
         return cls(
             variant_idxs,
             offsets,
@@ -228,7 +228,7 @@ class SparseGenotypes:
         keep_idxs = keep.nonzero()
         variant_idxs = dense_v_idxs[keep_idxs[2]]
         n_per_spr = np.add.reduceat(keep, offsets[:-1], axis=-1).ravel()
-        offsets = n_elements_to_offsets(n_per_spr, np.int32)
+        offsets = lengths_to_offsets(n_per_spr, np.int32)
         # (r)
         largest_v_idxs_per_region = variant_idxs[
             offsets[1:].reshape(n_samples, ploidy, n_regions) - 1
