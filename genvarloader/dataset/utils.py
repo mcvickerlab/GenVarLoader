@@ -71,3 +71,30 @@ def regions_to_bed(regions: NDArray, contigs: Sequence[str]) -> pl.DataFrame:
     cmap = dict(enumerate(contigs))
     bed = bed.with_columns(pl.col("chrom").replace(cmap, return_dtype=pl.Utf8))
     return bed
+
+
+@nb.njit(nogil=True, cache=True)
+def splits_sum_le_value(arr: NDArray[np.number], max_value: float) -> NDArray[np.intp]:
+    """Split an array into contiguous sections where the sum is less than or equal to a value.
+
+    Parameters
+    ----------
+    arr : NDArray[np.number]
+        Array to split.
+    max_value : float
+        Maximum value.
+
+    Returns
+    -------
+    NDArray[np.int32]
+        Split indices.
+    """
+    indices = [0]
+    current_sum = 0
+    for idx, value in enumerate(arr):
+        current_sum += value
+        if current_sum > max_value:
+            indices.append(idx)
+            current_sum = value
+    indices.append(len(arr))
+    return np.array(indices, np.intp)

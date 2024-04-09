@@ -18,14 +18,15 @@ from typing import (
 import numba as nb
 import numpy as np
 import polars as pl
-from attrs import define, evolve, field
+from attrs import define, evolve
 from einops import repeat
 from loguru import logger
 from numpy.typing import NDArray
+from tqdm.auto import tqdm
 
 from ..torch import get_dataloader
-from ..types import Idx
-from ..utils import n_elements_to_offsets, read_bedlike, with_length
+from ..types import INTERVAL_DTYPE, Idx, Ragged, RaggedIntervals
+from ..utils import lengths_to_offsets, read_bedlike, with_length
 from ..variants import VLenAlleles
 from .genotypes import (
     SparseGenotypes,
@@ -33,10 +34,10 @@ from .genotypes import (
     padded_slice,
     reconstruct_haplotypes_from_sparse,
 )
-from .intervals import Intervals, intervals_to_tracks
+from .intervals import intervals_to_tracks, tracks_to_intervals
 from .reference import Reference
-from .tracks import GenomeTrack, shift_and_realign_tracks_sparse
-from .utils import regions_to_bed, subset_to_full_raveled_mapping
+from .tracks import shift_and_realign_tracks_sparse
+from .utils import regions_to_bed, splits_sum_le_value, subset_to_full_raveled_mapping
 
 try:
     import torch
@@ -67,33 +68,31 @@ class _Variants:
 @define(frozen=True)
 class Dataset:
     """A dataset of genotypes, reference sequences, and intervals. Note: this class is not meant to be instantiated directly.
-    Use the `open` or `open_with_settings` class methods to create a dataset after writing the data with genvarloader.write()
+    Use the `open` or `open_with_settings` class methods to create a dataset after writing the data with `genvarloader.write()`
     or the genvarloader CLI.
     """
 
     path: Path
     max_jitter: int
+    jitter: int
     region_length: int
     contigs: List[str]
-    _samples: NDArray[np.str_]
-    _regions: NDArray[np.int32]
+    full_samples: NDArray[np.str_]
+    full_regions: NDArray[np.int32]
     rng: np.random.Generator
     sample_idxs: NDArray[np.intp]
     region_idxs: NDArray[np.intp]
     return_sequences: Literal[False, "reference", "haplotypes"]
     return_tracks: Union[Literal[False], List[str]]
     ploidy: Optional[int] = None
-    _reference: Optional[Reference] = None
-    _variants: Optional[_Variants] = None
-    _interval_meta: Optional[Dict[str, List[str]]] = None
-    _genotypes: Optional[SparseGenotypes] = None
-    _intervals: Optional[Dict[str, Intervals]] = None
+    reference: Optional[Reference] = None
+    variants: Optional[_Variants] = None
+    interval_meta: Optional[Dict[str, List[str]]] = None
+    genotypes: Optional[SparseGenotypes] = None
+    intervals: Optional[Dict[str, RaggedIntervals]] = None
     transform: Optional[Callable] = None
-    _idx_map: Optional[NDArray[np.intp]] = None
-    _jitter: Optional[int] = None
+    idx_map: Optional[NDArray[np.intp]] = None
     return_indices: bool = False
-    _track_transform: Optional[Callable] = None
-    _genome_tracks: Dict[str, GenomeTrack] = field(factory=dict)
 
     @classmethod
     def open(
@@ -174,17 +173,18 @@ class Dataset:
         dataset = cls(
             path=path,
             max_jitter=max_jitter,
+            jitter=max_jitter,
             region_length=region_length,
             contigs=contigs,
-            _samples=samples,
-            _regions=regions,
+            full_samples=samples,
+            full_regions=regions,
             rng=rng,
             sample_idxs=np.arange(len(samples), dtype=np.intp),
             region_idxs=np.arange(len(regions), dtype=np.intp),
             ploidy=ploidy,
-            _reference=_reference,
-            _variants=variants,
-            _interval_meta=intervals,
+            reference=_reference,
+            variants=variants,
+            interval_meta=intervals,
             return_sequences=return_sequences,
             return_tracks=return_tracks,
         )
@@ -206,7 +206,6 @@ class Dataset:
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
-        extra_tracks: Optional[Dict[str, Union[str, Path, GenomeTrack]]] = None,
     ):
         if return_sequences is False:
             reference = None
@@ -219,46 +218,45 @@ class Dataset:
             seed=seed,
             jitter=jitter,
             return_indices=return_indices,
-            extra_tracks=extra_tracks,
         )
         return ds
 
     @property
     def has_reference(self) -> bool:
-        return self._reference is not None
+        return self.reference is not None
 
     @property
     def has_genotypes(self) -> bool:
-        return self._variants is not None
+        return self.variants is not None
 
     @property
     def has_intervals(self) -> bool:
-        return self._interval_meta is not None
+        return self.interval_meta is not None
 
     @property
     def available_tracks(self) -> List[str]:
-        if self._interval_meta is None:
+        if self.interval_meta is None:
             return []
         else:
             avail = []
-            for name, transforms in self._interval_meta.items():
+            for name, transforms in self.interval_meta.items():
                 avail.append(name)
                 avail.extend([f"{name}:{transform}" for transform in transforms])
             return avail
 
     @property
     def samples(self):
-        if self._idx_map is None:
-            return self._samples
+        if self.idx_map is None:
+            return self.full_samples
         else:
-            return self._samples[self.sample_idxs]
+            return self.full_samples[self.sample_idxs]
 
     @property
     def regions(self):
-        if self._idx_map is None:
-            return self._regions
+        if self.idx_map is None:
+            return self.full_regions
         else:
-            return self._regions[self.region_idxs]
+            return self.full_regions[self.region_idxs]
 
     @property
     def n_samples(self):
@@ -274,119 +272,156 @@ class Dataset:
         return self.n_samples, self.n_regions
 
     @property
-    def jitter(self):
-        if self._jitter is None:
-            return self.max_jitter
-        else:
-            return self._jitter
-
-    @property
     def output_length(self):
         return self.region_length - 2 * self.jitter
 
     @property
-    def _full_shape(self):
+    def full_shape(self):
         """Return the full shape of the dataset, ignoring any subsetting. (n_samples, n_regions)"""
-        return len(self._samples), len(self._regions)
-
-    @property
-    def haplotypes(self):
-        """Dataset that only returns haplotypes, if available."""
-        return self.with_settings(return_sequences="haplotypes", return_tracks=False)
-
-    @property
-    def reference(self):
-        """Dataset that only returns reference sequences, if available."""
-        return self.with_settings(return_sequences="reference", return_tracks=False)
-
-    def tracks(self, *tracks: str):
-        """Dataset that only returns tracks, if available."""
-        return self.with_settings(return_sequences=False, return_tracks=list(tracks))
+        return len(self.full_samples), len(self.full_regions)
 
     def __len__(self) -> int:
         return self.n_samples * self.n_regions
 
     @property
     def available_transformed_tracks(self):
-        if self._interval_meta is None:
+        if self.interval_meta is None:
             avail = []
         else:
             avail = [
                 f"{name}:{transform}"
-                for name, transforms in self._interval_meta.items()
+                for name, transforms in self.interval_meta.items()
                 for transform in transforms
             ]
         return avail
 
-    def write_transformed_intervals(
+    def write_transformed_tracks(
         self,
-        name: str,
-        track: str,
+        new_track: str,
+        existing_track: str,
         transform: Callable[
-            [pl.DataFrame, NDArray[np.intp], NDArray[np.uint32], NDArray[np.float32]],
-            NDArray[np.float32],
+            [NDArray[np.intp], NDArray[np.intp], NDArray[np.intp], Ragged[np.float32]],
+            Ragged[np.float32],
         ],
         max_mem: int = 2**30,
+        overwrite: bool = False,
     ):
-        """Write transformed interval data.
-
-        Note: only transformations that do not modify zero-values of tracks are applicable. For example, if the intent
-        is to add a constant to a track, this would not be applicable since zero values are not stored in the intervals, and
-        thus would not be transformed.
+        """Write transformed tracks to the dataset.
 
         Parameters
         ----------
-        name : str
-            The name of the transformed intervals.
-        transform : Callable
-            A function that takes a DataFrame of regions, sample indices, interval starts and
-            ends, and values and returns new values.
+        new_track : str
+            The name of the new track.
+        existing_track : str
+            The name of the existing track to transform.
+        transform
+            A function to apply to the existing track to get a new, transformed track.
+            This will be done in chunks such that the tracks provided will not exceed `max_mem`.
+            The arguments given to the transform will be the regions for each track in the chunk as a polars
+            DataFrame, the sample indices for each track in the chunk, and the tracks themselves.
+            Note that the tracks will be a :class:`Ragged` array with shape (regions, samples)
+            since regions may be different lengths to accomodate indels. This function should then
+            return the transformed tracks as a :class:`Ragged` array with the same shape and lengths.
+        max_mem : int, optional
+            The maximum memory to use in bytes, by default `2**30`
+        overwrite : bool, optional
+            Whether to overwrite the existing track, by default False
         """
+        if new_track == existing_track:
+            raise ValueError(
+                "New track name must be different from existing track name."
+            )
 
         if not self.has_intervals:
             raise ValueError(
                 "No intervals found. Cannot add transformed intervals since intervals are required to add transformed intervals."
             )
 
-        if self._intervals is None:
-            all_intervals = self.init_intervals()[track]
-        else:
-            all_intervals = self._intervals[track]
+        out_dir = self.path / "intervals" / new_track
 
-        # 2 uint32 for positions, 1 float32 for value
-        regions = self.get_bed()
-        max_intervals_per_batch = max_mem / (2 * 4) / 4
-        split_indices = (
-            np.diff(
-                (all_intervals.offsets[1:] % max_intervals_per_batch).astype(np.int32)
+        if out_dir.exists() and not overwrite:
+            raise FileExistsError(
+                f"{out_dir} already exists. Set overwrite=True to overwrite."
             )
-            < 0
-        ).nonzero()[0] + 1
-        split_indices = np.r_[0, split_indices, len(all_intervals.offsets) - 1]
+        elif out_dir.exists() and overwrite:
+            # according to GVL file format, should only have intervals.npy and offsets.npy in here
+            for p in out_dir.iterdir():
+                p.unlink()
+            out_dir.rmdir()
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.intervals is None:
+            intervals = self.init_intervals()[existing_track]
+        else:
+            intervals = self.intervals[existing_track]
+
+        lengths = self.full_regions[:, 2] - self.full_regions[:, 1]
+        # for each region:
+        # bytes = 4 bytes / bp * bp / sample * samples
+        mem_per_region = 4 * lengths * len(self.full_samples)
+        splits = splits_sum_le_value(mem_per_region, max_mem)
+        memmap_intervals_offset = 0
+        memmap_offsets_offset = 0
         last_offset = 0
-        for offset_s, offset_e in zip(split_indices[:-1], split_indices[1:]):
-            s_idxs, r_idxs = np.unravel_index(
-                np.arange(offset_s, offset_e, dtype=np.intp), self._full_shape
-            )
-            interval_s, interval_e = (
-                all_intervals.offsets[offset_s],
-                all_intervals.offsets[offset_e],
-            )
-            intervals = all_intervals.intervals[interval_s:interval_e]
-            values = all_intervals.values[interval_s:interval_e]
-            transformed_intervals = transform(
-                regions[r_idxs], s_idxs, intervals, values
-            )
-            out = np.memmap(
-                self.path / "intervals" / track / f"_{name}.npy",
-                dtype=np.float32,
-                mode="w+",
-                shape=len(transformed_intervals),
-                offset=last_offset,
-            )
-            out[:] = transformed_intervals
-            out.flush()
-            last_offset += out.nbytes
+        with tqdm(total=len(splits) - 1, desc="Writing transformed tracks") as pbar:
+            for offset_s, offset_e in zip(splits[:-1], splits[1:]):
+                r_idx = np.arange(offset_s, offset_e, dtype=np.intp)
+                s_idx = np.arange(len(self.full_samples), dtype=np.intp)
+                r_idx = repeat(r_idx, "r -> (r s)", s=len(s_idx))
+                s_idx = repeat(s_idx, "s -> (r s)", r=len(r_idx))
+                ds_idx = np.ravel_multi_index((s_idx, r_idx), self.full_shape)
+
+                # implicit layout is (regions, samples) so samples are local and computing statistics fast
+                tracks = intervals_to_tracks(
+                    ds_idx,
+                    self.full_regions[r_idx],
+                    intervals.data,
+                    intervals.offsets,
+                )
+                chunk_lengths = lengths[r_idx]
+                tracks = Ragged.from_lengths(tracks, chunk_lengths)
+
+                transformed_tracks = transform(ds_idx, r_idx, s_idx, tracks)
+
+                itvs, interval_offsets = tracks_to_intervals(
+                    r_idx, self.full_regions, transformed_tracks.data
+                )
+
+                out = np.memmap(
+                    out_dir / "intervals.npy",
+                    dtype=itvs.dtype,
+                    mode="w+" if memmap_intervals_offset == 0 else "r+",
+                    shape=itvs.shape,
+                    offset=memmap_intervals_offset,
+                )
+                out[:] = itvs[:]
+                out.flush()
+                memmap_intervals_offset += out.nbytes
+
+                interval_offsets += last_offset
+                last_offset = interval_offsets[-1]
+                out = np.memmap(
+                    out_dir / "offsets.npy",
+                    dtype=interval_offsets.dtype,
+                    mode="w+" if memmap_offsets_offset == 0 else "r+",
+                    shape=len(interval_offsets) - 1,
+                    offset=memmap_offsets_offset,
+                )
+                out[:] = interval_offsets[:]
+                out.flush()
+                memmap_offsets_offset += out.nbytes
+                pbar.update()
+
+        out = np.memmap(
+            out_dir / "offsets.npy",
+            dtype=interval_offsets.dtype,  # type: ignore
+            mode="r+",
+            shape=1,
+            offset=memmap_offsets_offset,
+        )
+        out[-1] = interval_offsets[-1]  # type: ignore
+        out.flush()
 
     def subset_to(
         self,
@@ -398,12 +433,12 @@ class Dataset:
 
         if samples is not None:
             _samples = set(samples)
-            if missing := _samples.difference(self._samples):
+            if missing := _samples.difference(self.full_samples):
                 raise ValueError(f"Samples {missing} not found in the dataset")
             sample_idxs = np.array(
                 [i for i, s in enumerate(self.samples) if s in _samples], np.intp
             )
-            if self._idx_map is not None:
+            if self.idx_map is not None:
                 sample_idxs = self.sample_idxs[sample_idxs]
         else:
             sample_idxs = self.sample_idxs
@@ -426,26 +461,26 @@ class Dataset:
                 raise ValueError(
                     f"Only {n_available_regions}/{n_query_regions} requested regions exist in the dataset."
                 )
-            if self._idx_map is not None:
+            if self.idx_map is not None:
                 region_idxs = self.region_idxs[region_idxs]
         else:
             region_idxs = self.region_idxs
 
         idx_map = subset_to_full_raveled_mapping(
-            self._full_shape,
+            self.full_shape,
             sample_idxs,
             region_idxs,
         )
 
         return evolve(
-            self, sample_idxs=sample_idxs, region_idxs=region_idxs, _idx_map=idx_map
+            self, sample_idxs=sample_idxs, region_idxs=region_idxs, idx_map=idx_map
         )
 
     def to_full_dataset(self):
-        sample_idxs = np.arange(len(self._samples), dtype=np.intp)
-        region_idxs = np.arange(len(self._regions), dtype=np.intp)
+        sample_idxs = np.arange(len(self.full_samples), dtype=np.intp)
+        region_idxs = np.arange(len(self.full_regions), dtype=np.intp)
         return evolve(
-            self, sample_idxs=sample_idxs, region_idxs=region_idxs, _idx_map=None
+            self, sample_idxs=sample_idxs, region_idxs=region_idxs, idx_map=None
         )
 
     def with_settings(
@@ -458,7 +493,6 @@ class Dataset:
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
-        extra_tracks: Optional[Dict[str, Union[str, Path, GenomeTrack]]] = None,
     ):
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -527,19 +561,10 @@ class Dataset:
                 raise ValueError(
                     f"Jitter must be less than or equal to the maximum jitter of the dataset ({self.max_jitter})."
                 )
-            to_evolve["_jitter"] = jitter
+            to_evolve["jitter"] = jitter
 
         if return_indices is not None:
             to_evolve["return_indices"] = return_indices
-
-        if extra_tracks is not None:
-            _extra_tracks = {
-                name: GenomeTrack.from_path(track).order_offsets_like(self.contigs)
-                if not isinstance(track, GenomeTrack)
-                else track
-                for name, track in extra_tracks.items()
-            }
-            to_evolve["_genome_tracks"] = _extra_tracks
 
         return evolve(ds, **to_evolve)
 
@@ -588,7 +613,7 @@ class Dataset:
         return dedent(
             f"""
             GVL store {self.path.name}
-            Is subset: {self._idx_map is not None}
+            Is subset: {self.idx_map is not None}
             Original region length: {self.region_length - 2*self.max_jitter:,}
             Max jitter: {self.max_jitter:,}
             # of samples: {self.n_samples:,}
@@ -613,7 +638,7 @@ class Dataset:
         """
         if isinstance(samples, slice):
             if samples.stop is None:
-                samples = slice(samples.start, len(self._samples))
+                samples = slice(samples.start, len(self.full_samples))
             _samples = np.arange(
                 samples.start, samples.stop, samples.step, dtype=np.intp
             )
@@ -622,7 +647,7 @@ class Dataset:
 
         if isinstance(regions, slice):
             if regions.stop is None:
-                regions = slice(regions.start, len(self._regions))
+                regions = slice(regions.start, len(self.full_regions))
             _regions = np.arange(
                 regions.start, regions.stop, regions.step, dtype=np.intp
             )
@@ -642,7 +667,7 @@ class Dataset:
         regions : pl.DataFrame
             The regions to select.
         """
-        s_to_i = dict(zip(self._samples, range(len(self._samples))))
+        s_to_i = dict(zip(self.full_samples, range(len(self.full_samples))))
         sample_idxs = np.array([s_to_i[s] for s in samples], np.intp)
         region_idxs = (
             with_length(regions, self.region_length)
@@ -668,9 +693,9 @@ class Dataset:
             The index or indices to get. If a single index is provided, the output will be squeezed.
         """
         to_evolve = {}
-        if self._genotypes is None and self.return_sequences == "haplotypes":
+        if self.genotypes is None and self.return_sequences == "haplotypes":
             to_evolve["genotypes"] = self.init_genotypes()
-        if self._intervals is None and self.return_tracks:
+        if self.intervals is None and self.return_tracks:
             to_evolve["intervals"] = self.init_intervals()
         self = evolve(self, **to_evolve)
 
@@ -688,16 +713,16 @@ class Dataset:
 
         _idx = np.asarray(_idx, dtype=np.intp)
         _idx[_idx < 0] += len(self)
-        if self._idx_map is not None:
-            _idx = self._idx_map[_idx]
-        s_idx, r_idx = np.unravel_index(_idx, self._full_shape)
+        if self.idx_map is not None:
+            _idx = self.idx_map[_idx]
+        s_idx, r_idx = np.unravel_index(_idx, self.full_shape)
 
         out: List[NDArray] = []
 
         if self.return_sequences == "haplotypes":
             if TYPE_CHECKING:
-                assert self._genotypes is not None
-                assert self._variants is not None
+                assert self.genotypes is not None
+                assert self.variants is not None
 
             offset_idxs = self.get_geno_offset_idxs(s_idx, r_idx)
 
@@ -707,17 +732,17 @@ class Dataset:
             out.append(self.get_haplotypes(offset_idxs, r_idx, shifts))
         elif self.return_sequences == "reference":
             if TYPE_CHECKING:
-                assert self._reference is not None
+                assert self.reference is not None
             shifts = None
             offset_idxs = None
             out.append(
                 get_reference(
                     r_idx,
-                    self._regions,
-                    self._reference.reference,
-                    self._reference.offsets,
+                    self.full_regions,
+                    self.reference.reference,
+                    self.reference.offsets,
                     self.region_length,
-                    self._reference.pad_char,
+                    self.reference.pad_char,
                 ).view("S1")
             )
         else:
@@ -738,9 +763,6 @@ class Dataset:
         if squeeze:
             # (1 p l) -> (p l)
             out = [o.squeeze() for o in out]
-
-        if len(self._genome_tracks) > 0:
-            out.extend(self.get_genome_tracks(r_idx, shifts))
 
         if self.return_indices:
             out.extend((_idx, s_idx, r_idx))
@@ -767,55 +789,45 @@ class Dataset:
             np.memmap(
                 self.path / "genotypes" / "offsets.npy", dtype=np.uint32, mode="r"
             ),
-            len(self._samples),
+            len(self.full_samples),
             self.ploidy,
-            len(self._regions),
+            len(self.full_regions),
         )
         return genotypes
 
     def init_intervals(self):
         if TYPE_CHECKING:
-            assert self._interval_meta is not None
+            assert self.interval_meta is not None
             assert self.return_tracks is not False
 
-        intervals: Dict[str, Intervals] = {}
-        for name in self.return_tracks:
-            if ":" in name:
-                base, transform = name.split(":")
-                values_file = f"_{transform}.npy"
-            else:
-                base = name
-                values_file = "values.npy"
-            intervals[name] = Intervals(
-                np.memmap(
-                    self.path / "intervals" / base / "intervals.npy",
-                    dtype=np.uint32,
-                    mode="r",
-                ).reshape(-1, 2),
-                np.memmap(
-                    self.path / "intervals" / base / values_file,
-                    dtype=np.float32,
-                    mode="r",
-                ),
-                np.memmap(
-                    self.path / "intervals" / base / "offsets.npy",
-                    dtype=np.uint32,
-                    mode="r",
-                ),
+        intervals: Dict[str, RaggedIntervals] = {}
+        for track in self.return_tracks:
+            itvs = np.memmap(
+                self.path / "intervals" / track / "intervals.npy",
+                dtype=INTERVAL_DTYPE,
+                mode="r",
+            )
+            offsets = np.memmap(
+                self.path / "intervals" / track / "offsets.npy",
+                dtype=np.int32,
+                mode="r",
+            )
+            intervals[track] = RaggedIntervals.from_offsets(
+                itvs, self.full_shape, offsets
             )
 
         return intervals
 
     def get_shifts(self, offset_idxs: NDArray[np.intp]):
         if TYPE_CHECKING:
-            assert self._genotypes is not None
-            assert self._variants is not None
+            assert self.genotypes is not None
+            assert self.variants is not None
         # (b p)
         diffs = get_diffs_sparse(
             offset_idxs,
-            self._genotypes.variant_idxs,
-            self._genotypes.offsets,
-            self._variants.sizes,
+            self.genotypes.variant_idxs,
+            self.genotypes.offsets,
+            self.variants.sizes,
         )
         # (b p)
         shifts = self.rng.integers(0, diffs + 1, dtype=np.int32)
@@ -825,7 +837,7 @@ class Dataset:
         self, sample_idxs: NDArray[np.intp], region_idxs: NDArray[np.intp]
     ):
         if TYPE_CHECKING:
-            assert self._genotypes is not None
+            assert self.genotypes is not None
             assert self.ploidy is not None
 
         n_queries = len(sample_idxs)
@@ -833,9 +845,9 @@ class Dataset:
         pi = repeat(np.arange(self.ploidy), "p -> (n p)", n=n_queries)
         ri = repeat(region_idxs, "n -> (n p)", p=self.ploidy)
         idx = (si, pi, ri)
-        offset_idxs = np.ravel_multi_index(
-            idx, self._genotypes.effective_shape
-        ).reshape(n_queries, self.ploidy)
+        offset_idxs = np.ravel_multi_index(idx, self.genotypes.effective_shape).reshape(
+            n_queries, self.ploidy
+        )
         return offset_idxs
 
     def get_haplotypes(
@@ -845,9 +857,9 @@ class Dataset:
         shifts: NDArray[np.int32],
     ):
         if TYPE_CHECKING:
-            assert self._genotypes is not None
-            assert self._reference is not None
-            assert self._variants is not None
+            assert self.genotypes is not None
+            assert self.reference is not None
+            assert self.variants is not None
             assert self.ploidy is not None
 
         n_queries = len(region_idxs)
@@ -857,15 +869,15 @@ class Dataset:
             haps,
             self.regions[region_idxs],
             shifts,
-            self._genotypes.offsets,
-            self._genotypes.variant_idxs,
-            self._variants.positions,
-            self._variants.sizes,
-            self._variants.alts.alleles.view(np.uint8),
-            self._variants.alts.offsets,
-            self._reference.reference,
-            self._reference.offsets,
-            self._reference.pad_char,
+            self.genotypes.offsets,
+            self.genotypes.variant_idxs,
+            self.variants.positions,
+            self.variants.sizes,
+            self.variants.alts.alleles.view(np.uint8),
+            self.variants.alts.offsets,
+            self.reference.reference,
+            self.reference.offsets,
+            self.reference.pad_char,
         )
         return haps.view("S1")
 
@@ -878,44 +890,43 @@ class Dataset:
     ):
         if TYPE_CHECKING:
             assert self.return_tracks is not False
-            assert self._intervals is not None
+            assert self.intervals is not None
 
-        regions = self._regions[r_idx]
+        regions = self.full_regions[r_idx]
         if shifts is None and offset_idxs is not None:
             # no shifts -> don't need to consider max ends, can use uniform region length
             regions[:, 2] = regions[:, 1] + self.region_length
 
         tracks: List[NDArray[np.float32]] = []
         for name in self.return_tracks:
-            intervals = self._intervals[name]
+            intervals = self.intervals[name]
             # (b*l) ragged
             _tracks = intervals_to_tracks(
                 ds_idx,
                 regions,
-                intervals.intervals,
-                intervals.values,
+                intervals.data,
                 intervals.offsets,
             )
 
             if shifts is not None and offset_idxs is not None:
                 if TYPE_CHECKING:
                     assert self.ploidy is not None
-                    assert self._variants is not None
-                    assert self._genotypes is not None
+                    assert self.variants is not None
+                    assert self.genotypes is not None
 
                 length_per_region = regions[:, 2] - regions[:, 1]
-                track_offsets = n_elements_to_offsets(length_per_region)
+                track_offsets = lengths_to_offsets(length_per_region)
 
                 out = np.empty(
                     (len(r_idx), self.ploidy, self.region_length), np.float32
                 )
                 shift_and_realign_tracks_sparse(
                     offset_idxs=offset_idxs,
-                    variant_idxs=self._genotypes.variant_idxs,
-                    offsets=self._genotypes.offsets,
+                    variant_idxs=self.genotypes.variant_idxs,
+                    offsets=self.genotypes.offsets,
                     regions=regions,
-                    positions=self._variants.positions,
-                    sizes=self._variants.sizes,
+                    positions=self.variants.positions,
+                    sizes=self.variants.sizes,
                     shifts=shifts,
                     tracks=_tracks,
                     track_offsets=track_offsets,
@@ -929,54 +940,6 @@ class Dataset:
             tracks.append(_tracks)
 
         return tracks
-
-    def get_genome_tracks(
-        self,
-        r_idx: NDArray[np.intp],
-        shifts: Optional[NDArray[np.int32]] = None,
-        offset_idxs: Optional[NDArray[np.intp]] = None,
-    ):
-        out = []
-        regions = self._regions[r_idx]
-        length_per_region = regions[:, 2] - regions[:, 1]
-        total_length = length_per_region.sum()
-        track_offsets = n_elements_to_offsets(length_per_region)
-
-        for track_name, track in self._genome_tracks.items():
-            tracks = np.empty(total_length, np.float32)
-            for i in range(len(r_idx)):
-                region = regions[i]
-                c_idx = region[0]
-                start, end = region[1:]
-                c_s, c_e = track.contig_offsets[c_idx]
-                tracks[track_offsets[i] : track_offsets[i + 1]] = padded_slice(
-                    track.track[c_s:c_e], start, end, 0
-                )
-
-            if shifts is not None and offset_idxs is not None:
-                if TYPE_CHECKING:
-                    assert self.ploidy is not None
-                    assert self._variants is not None
-                    assert self._genotypes is not None
-
-                _out = np.empty(
-                    (len(r_idx), self.ploidy, self.region_length), np.float32
-                )
-                shift_and_realign_tracks_sparse(
-                    offset_idxs=offset_idxs,
-                    variant_idxs=self._genotypes.variant_idxs,
-                    offsets=self._genotypes.offsets,
-                    regions=regions,
-                    positions=self._variants.positions,
-                    sizes=self._variants.sizes,
-                    shifts=shifts,
-                    tracks=tracks,
-                    track_offsets=track_offsets,
-                    out=_out,
-                )
-                track = out
-            out.append(track)
-        return out
 
     def get_bed(self):
         """Get a polars DataFrame of the regions in the dataset, corresponding to the coordinates

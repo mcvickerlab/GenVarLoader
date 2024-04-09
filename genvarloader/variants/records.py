@@ -12,7 +12,7 @@ from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
 from typing_extensions import Self, assert_never
 
-from ..utils import n_elements_to_offsets, normalize_contig_name, offsets_to_n_elements
+from ..utils import lengths_to_offsets, normalize_contig_name, offsets_to_lengths
 
 try:
     import cyvcf2
@@ -113,9 +113,9 @@ class VLenAlleles:
             return vlen_alleles[0]
 
         nuc_per_allele = np.concatenate(
-            [offsets_to_n_elements(v.offsets) for v in vlen_alleles]
+            [offsets_to_lengths(v.offsets) for v in vlen_alleles]
         )
-        offsets = n_elements_to_offsets(nuc_per_allele, np.uint32)
+        offsets = lengths_to_offsets(nuc_per_allele, np.uint32)
         alleles = np.concatenate([v.alleles for v in vlen_alleles])
         return VLenAlleles(offsets, alleles)
 
@@ -194,10 +194,10 @@ class RecordInfo:
         start_idxs = np.concatenate([r.start_idxs for r in record_infos])
         end_idxs = np.concatenate([r.end_idxs for r in record_infos])
         v_per_query = np.concatenate(
-            [offsets_to_n_elements(r.offsets) for r in record_infos]
+            [offsets_to_lengths(r.offsets) for r in record_infos]
         )
         if how == "separate":
-            offsets = n_elements_to_offsets(v_per_query, np.uint32)
+            offsets = lengths_to_offsets(v_per_query, np.uint32)
         elif how == "merge":
             offsets = np.array([0, v_per_query.sum()], np.uint32)
         else:

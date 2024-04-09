@@ -12,6 +12,7 @@ requirements.txt
 notebooks/
 scripts/
 .ruff_cache/
+.benchmarks/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
