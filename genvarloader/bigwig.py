@@ -1,13 +1,12 @@
-import json
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union, cast
+from typing import Dict, List, Optional, Tuple, Union, cast
 
 import joblib
 import numba as nb
 import numpy as np
 import polars as pl
 import pyBigWig
-from numpy.typing import ArrayLike, DTypeLike, NDArray
+from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
 
 from .types import INTERVAL_DTYPE, RaggedIntervals, Reader
@@ -73,6 +72,12 @@ class BigWigs(Reader):
     def rev_strand_fn(self, x):
         return x[..., ::-1]
 
+    def close(self):
+        if self.readers is not None:
+            for reader in self.readers.values():
+                reader.close()
+            self.readers = None
+
     def read(
         self,
         contig: str,
@@ -124,7 +129,7 @@ class BigWigs(Reader):
             for i, sample in enumerate(samples):
                 out[i, r_s:r_e] = self.readers[sample].values(contig, s, e, numpy=True)
 
-        out[np.isnan(out)] = 0
+        out = np.nan_to_num(out, copy=False)
 
         return out
 
@@ -134,6 +139,7 @@ class BigWigs(Reader):
         starts: ArrayLike,
         ends: ArrayLike,
         sample: Optional[Union[str, List[str]]] = None,
+        progress: bool = False,
         **kwargs,
     ) -> RaggedIntervals:
         _contig = normalize_contig_name(contig, self.contigs)
@@ -152,133 +158,54 @@ class BigWigs(Reader):
         if not set(samples).issubset(self.samples):
             raise ValueError(f"Sample {samples} not found in bigWig paths.")
 
-        starts = np.atleast_1d(np.asarray(starts, dtype=int))
-        ends = np.atleast_1d(np.asarray(ends, dtype=int))
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
+        ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
         starts = np.maximum(0, starts)
         ends = np.minimum(ends, self.contigs[contig])
 
-        def task(contig: str, starts: NDArray, ends: NDArray, path: str):
-            intervals_ls: List[Tuple[int, int, float]] = []
-            # (n_queries)
-            n_per_query = np.empty(len(starts), np.int32)
-            with pyBigWig.open(path, "r") as f:
-                for i, (s, e) in enumerate(zip(starts, ends)):
-                    _intervals = cast(
-                        Optional[Tuple[Tuple[int, int, float], ...]],
-                        f.intervals(contig, s, e),
-                    )
-                    if _intervals is not None:
-                        intervals_ls.extend(_intervals)
-                        n_per_query[i] = len(_intervals)
-                    else:
-                        n_per_query[i] = 0
-            if len(intervals_ls) == 0:
-                return RaggedIntervals.empty(len(starts), INTERVAL_DTYPE)  # type: ignore
-            # (n_intervals, 2)
-            intervals = np.array(intervals_ls, INTERVAL_DTYPE)
-            return RaggedIntervals.from_lengths(intervals, n_per_query)
-
-        with joblib.Parallel(n_jobs=-1) as parallel:
-            result = cast(
-                List[RaggedIntervals],
-                parallel(
+        if progress:
+            with joblib.Parallel(n_jobs=-1, return_as="generator") as parallel:
+                gen = parallel(
                     joblib.delayed(task)(contig, starts, ends, self.paths[sample])
                     for sample in samples
-                ),
-            )
+                )
+                result = cast(
+                    List[RaggedIntervals],
+                    [r for r in tqdm(gen, total=len(samples), unit="sample")],
+                )
+        else:
+            with joblib.Parallel(n_jobs=-1, backend="multiprocessing") as parallel:
+                result = cast(
+                    List[RaggedIntervals],
+                    parallel(
+                        joblib.delayed(task)(contig, starts, ends, self.paths[sample])
+                        for sample in samples
+                    ),
+                )
 
         return RaggedIntervals.stack(*result)
 
-    def agg(
-        self,
-        path: Union[str, Path],
-        transform: Callable[[NDArray[np.float32]], NDArray],
-        out_dtype: DTypeLike,
-        out_shape: Optional[Union[int, Tuple[int, ...]]] = None,
-        max_mem: int = 2**30,  # 1 GiB
-        overwrite: bool = False,
-    ):
-        """Aggregates the data across samples at base-pair resolution using the given transformation
-        and writes the result to a directory of memory mapped arrays.
 
-        Parameters
-        ----------
-        path : str, Path
-            Directory to save the aggregated data. By convention, should end with `.agg.gvl`.
-        transform : Callable
-            Transformation to apply to the tracks. Will be given an array of shape (samples, length).
-        out_dtype : DTypeLike
-            Data type of the output tracks.
-        out_shape : int, tuple[int, ...], optional
-            Shape of the output tracks, not including the length dimension. Default is no extra dimensions.
-        max_mem : int, optional
-            Maximum memory to use for reading intervals. Default is 1 GiB.
-
-        Examples
-        --------
-        >>> bw = BigWigs(...)
-        >>> bw.agg("mean.agg.gvl", partial(np.mean, axis=0), np.float32)
-        """
-
-        if isinstance(path, str):
-            path = Path(path)
-
-        if out_shape is None:
-            out_shape = ()
-        elif isinstance(out_shape, int):
-            out_shape = (out_shape,)
-
-        out_dtype = np.dtype(out_dtype)
-
-        # dtype is always f32, 4 bytes per base per sample
-        bytes_per_base = 4 * len(self.samples)
-        length_per_chunk = max_mem // bytes_per_base
-        # ceil division
-        n_chunks = sum(
-            -(-length // length_per_chunk) for length in self.contigs.values()
-        )
-
-        path.mkdir(parents=True, exist_ok=True)
-        if overwrite:
-            for f in path.iterdir():
-                f.unlink()
-
-        with open(path / "metadata.json") as f:
-            metadata = {
-                "contigs": self.contigs,
-                "non_length_shape": out_shape,
-                "dtype": str(out_dtype),
-            }
-            json.dump(metadata, f)
-
-        last_offset = 0
-        with tqdm(total=n_chunks) as pbar:
-            for contig, length in self.contigs.items():
-                pbar.set_description(f"Reading intervals {contig}")
-                agg = np.empty((*out_shape, length), out_dtype)
-                for start in range(0, length, length_per_chunk):
-                    end = min(start + length_per_chunk, length)
-                    # (samples 1)
-                    intervals = self.intervals(contig, start, end)
-                    pbar.set_description(f"Processing intervals {contig}")
-                    tracks = intervals_to_tracks(
-                        start,
-                        end,
-                        intervals.data,
-                        intervals.offsets,
-                        intervals.shape[0],  # type: ignore
-                    )
-                    agg[start:end] = transform(tracks)
-                    pbar.update()
-                out = np.memmap(
-                    path / "track.npy",
-                    dtype=agg.dtype,
-                    mode="w+" if last_offset == 0 else "r+",
-                    offset=last_offset,
-                    shape=agg.shape,
-                )
-                out[:] = agg[:]
-                last_offset += out.nbytes
+def task(contig: str, starts: NDArray, ends: NDArray, path: str):
+    intervals_ls: List[Tuple[int, int, float]] = []
+    # (n_queries)
+    n_per_query = np.empty(len(starts), np.int32)
+    with pyBigWig.open(path, "r") as f:
+        for i, (s, e) in enumerate(zip(starts, ends)):
+            _intervals = cast(
+                Optional[Tuple[Tuple[int, int, float], ...]],
+                f.intervals(contig, s, e),
+            )
+            if _intervals is not None:
+                intervals_ls.extend(_intervals)
+                n_per_query[i] = len(_intervals)
+            else:
+                n_per_query[i] = 0
+    if len(intervals_ls) == 0:
+        return RaggedIntervals.empty(len(starts), INTERVAL_DTYPE)  # type: ignore
+    # (n_intervals)
+    intervals = np.array(intervals_ls, INTERVAL_DTYPE)
+    return RaggedIntervals.from_lengths(intervals, n_per_query)
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)

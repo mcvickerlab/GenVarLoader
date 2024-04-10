@@ -670,10 +670,18 @@ class VCFGenos(Genotypes):
             if not p.exists():
                 raise FileNotFoundError(f"VCF file {p} not found.")
             if samples is None:
-                samples = np.array(cyvcf2.VCF(str(p)).samples)  # type: ignore
+                f = cyvcf2.VCF(str(p))  # type: ignore
+                samples = np.array(f.samples)
+                f.close()
+                del f
         self.samples = samples  # type: ignore
         self.handles: Optional[Dict[str, "cyvcf2.VCF"]] = None
         self.contig_offsets = contig_offsets
+
+    def close(self):
+        if self.handles is not None:
+            for handle in self.handles.values():
+                handle.close()
 
     def read(
         self,
@@ -692,7 +700,8 @@ class VCFGenos(Genotypes):
                 for c, p in self.paths.items()
             }
         elif self.handles is None:
-            handle = cyvcf2.VCF(str(next(iter(self.paths.values()))), lazy=True)  # type: ignore
+            first_path = next(iter(self.paths.values()))
+            handle = cyvcf2.VCF(str(first_path), lazy=True)  # type: ignore
             self.handles = {c: handle for c in handle.seqnames}
 
         if sample_idx is None:

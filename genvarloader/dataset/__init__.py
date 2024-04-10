@@ -77,17 +77,17 @@ class Dataset:
     jitter: int
     region_length: int
     contigs: List[str]
-    full_samples: NDArray[np.str_]
+    full_samples: List[str]
     full_regions: NDArray[np.int32]
     rng: np.random.Generator
     sample_idxs: NDArray[np.intp]
     region_idxs: NDArray[np.intp]
     return_sequences: Literal[False, "reference", "haplotypes"]
     return_tracks: Union[Literal[False], List[str]]
+    available_tracks: List[str]
     ploidy: Optional[int] = None
     reference: Optional[Reference] = None
     variants: Optional[_Variants] = None
-    interval_meta: Optional[Dict[str, List[str]]] = None
     genotypes: Optional[SparseGenotypes] = None
     intervals: Optional[Dict[str, RaggedIntervals]] = None
     transform: Optional[Callable] = None
@@ -112,7 +112,6 @@ class Dataset:
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"{path} does not exist.")
-        samples: NDArray[np.str_] = np.load(path / "samples.npy")
         regions: NDArray[np.int32] = np.load(path / "regions.npy")
 
         has_intervals = (path / "intervals").exists()
@@ -121,10 +120,11 @@ class Dataset:
         with open(path / "metadata.json") as f:
             metadata = json.load(f)
 
-        contigs = metadata["contigs"]
-        region_length = int(metadata["region_length"])
-        ploidy = int(metadata.get("ploidy", 0))
-        max_jitter = int(metadata.get("max_jitter", 0))
+        samples: List[str] = metadata["samples"]
+        contigs: List[str] = metadata["contigs"]
+        region_length: int = metadata["region_length"]
+        ploidy: int = metadata.get("ploidy", 0)
+        max_jitter: int = metadata.get("max_jitter", 0)
         rng = np.random.default_rng()
 
         if reference is None and has_genotypes:
@@ -154,13 +154,16 @@ class Dataset:
             variants = None
 
         if has_intervals:
-            intervals = {
-                p.name: list(t.name[:-5] for t in p.glob("_*.npy"))
-                for p in (path / "intervals").iterdir()
-            }
-            return_tracks = list(intervals)
+            tracks: List[str] = []
+            for p in (path / "intervals").iterdir():
+                if len(list(p.iterdir())) == 0:
+                    p.rmdir()
+                else:
+                    tracks.append(p.name)
+            tracks.sort()
+            return_tracks = tracks
         else:
-            intervals = None
+            tracks = []
             return_tracks = False
 
         if has_reference and has_genotypes:
@@ -184,7 +187,7 @@ class Dataset:
             ploidy=ploidy,
             reference=_reference,
             variants=variants,
-            interval_meta=intervals,
+            available_tracks=tracks,
             return_sequences=return_sequences,
             return_tracks=return_tracks,
         )
@@ -201,7 +204,7 @@ class Dataset:
         samples: Optional[Sequence[str]] = None,
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
         return_sequences: Optional[Literal[False, "reference", "haplotypes"]] = None,
-        return_tracks: Optional[Union[Literal[False], List[str]]] = None,
+        return_tracks: Optional[Union[Literal[False], str, List[str]]] = None,
         transform: Optional[Callable] = None,
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
@@ -231,18 +234,7 @@ class Dataset:
 
     @property
     def has_intervals(self) -> bool:
-        return self.interval_meta is not None
-
-    @property
-    def available_tracks(self) -> List[str]:
-        if self.interval_meta is None:
-            return []
-        else:
-            avail = []
-            for name, transforms in self.interval_meta.items():
-                avail.append(name)
-                avail.extend([f"{name}:{transform}" for transform in transforms])
-            return avail
+        return len(self.available_tracks) > 0
 
     @property
     def samples(self):
@@ -282,18 +274,6 @@ class Dataset:
 
     def __len__(self) -> int:
         return self.n_samples * self.n_regions
-
-    @property
-    def available_transformed_tracks(self):
-        if self.interval_meta is None:
-            avail = []
-        else:
-            avail = [
-                f"{name}:{transform}"
-                for name, transforms in self.interval_meta.items()
-                for transform in transforms
-            ]
-        return avail
 
     def write_transformed_tracks(
         self,
@@ -337,6 +317,11 @@ class Dataset:
                 "No intervals found. Cannot add transformed intervals since intervals are required to add transformed intervals."
             )
 
+        if self.intervals is None:
+            intervals = self.init_intervals()[existing_track]
+        else:
+            intervals = self.intervals[existing_track]
+
         out_dir = self.path / "intervals" / new_track
 
         if out_dir.exists() and not overwrite:
@@ -351,11 +336,6 @@ class Dataset:
 
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.intervals is None:
-            intervals = self.init_intervals()[existing_track]
-        else:
-            intervals = self.intervals[existing_track]
-
         lengths = self.full_regions[:, 2] - self.full_regions[:, 1]
         # for each region:
         # bytes = 4 bytes / bp * bp / sample * samples
@@ -364,12 +344,14 @@ class Dataset:
         memmap_intervals_offset = 0
         memmap_offsets_offset = 0
         last_offset = 0
+        n_s = len(self.full_samples)
         with tqdm(total=len(splits) - 1, desc="Writing transformed tracks") as pbar:
             for offset_s, offset_e in zip(splits[:-1], splits[1:]):
                 r_idx = np.arange(offset_s, offset_e, dtype=np.intp)
-                s_idx = np.arange(len(self.full_samples), dtype=np.intp)
-                r_idx = repeat(r_idx, "r -> (r s)", s=len(s_idx))
-                s_idx = repeat(s_idx, "s -> (r s)", r=len(r_idx))
+                n_r = len(r_idx)
+                s_idx = np.arange(n_s, dtype=np.intp)
+                r_idx = repeat(r_idx, "r -> (r s)", s=n_s)
+                s_idx = repeat(s_idx, "s -> (r s)", r=n_r)
                 ds_idx = np.ravel_multi_index((s_idx, r_idx), self.full_shape)
 
                 # implicit layout is (regions, samples) so samples are local and computing statistics fast
@@ -408,7 +390,7 @@ class Dataset:
                     shape=len(interval_offsets) - 1,
                     offset=memmap_offsets_offset,
                 )
-                out[:] = interval_offsets[:]
+                out[:] = interval_offsets[:-1]
                 out.flush()
                 memmap_offsets_offset += out.nbytes
                 pbar.update()
@@ -488,7 +470,7 @@ class Dataset:
         samples: Optional[Sequence[str]] = None,
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
         return_sequences: Optional[Literal[False, "reference", "haplotypes"]] = None,
-        return_tracks: Optional[Union[Literal[False], List[str]]] = None,
+        return_tracks: Optional[Union[Literal[False], str, List[str]]] = None,
         transform: Optional[Callable] = None,
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
@@ -540,11 +522,11 @@ class Dataset:
             if return_tracks is False:
                 to_evolve["return_tracks"] = False
             else:
-                if missing := set(return_tracks).difference(
-                    self.available_tracks + self.available_transformed_tracks
-                ):
+                if isinstance(return_tracks, str):
+                    return_tracks = [return_tracks]
+                if missing := set(return_tracks).difference(self.available_tracks):
                     raise ValueError(
-                        f"Intervals {missing} not found. Available intervals: {self.available_tracks + self.available_transformed_tracks}"
+                        f"Intervals {missing} not found. Available intervals: {self.available_tracks}"
                     )
                 to_evolve["return_tracks"] = return_tracks
 
@@ -692,12 +674,12 @@ class Dataset:
         idx: Idx
             The index or indices to get. If a single index is provided, the output will be squeezed.
         """
-        to_evolve = {}
+        # Since Dataset is a frozen class, we need to use object.__setattr__ to set the attributes
+        # per attrs docs (https://www.attrs.org/en/stable/init.html#post-init)
         if self.genotypes is None and self.return_sequences == "haplotypes":
-            to_evolve["genotypes"] = self.init_genotypes()
+            object.__setattr__(self, "genotypes", self.init_genotypes())
         if self.intervals is None and self.return_tracks:
-            to_evolve["intervals"] = self.init_intervals()
-        self = evolve(self, **to_evolve)
+            object.__setattr__(self, "intervals", self.init_intervals())
 
         if isinstance(idx, (int, np.integer)):
             _idx = [idx]
@@ -797,7 +779,6 @@ class Dataset:
 
     def init_intervals(self):
         if TYPE_CHECKING:
-            assert self.interval_meta is not None
             assert self.return_tracks is not False
 
         intervals: Dict[str, RaggedIntervals] = {}
@@ -892,6 +873,7 @@ class Dataset:
             assert self.return_tracks is not False
             assert self.intervals is not None
 
+        # makes a copy so safe to mutate below
         regions = self.full_regions[r_idx]
         if shifts is None and offset_idxs is not None:
             # no shifts -> don't need to consider max ends, can use uniform region length

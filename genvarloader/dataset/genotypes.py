@@ -225,7 +225,9 @@ class SparseGenotypes:
             starts,
             length,
         )
+        # tuple s, p, v
         keep_idxs = keep.nonzero()
+        # (v)
         variant_idxs = dense_v_idxs[keep_idxs[2]]
         n_per_spr = np.add.reduceat(keep, offsets[:-1], axis=-1).ravel()
         offsets = lengths_to_offsets(n_per_spr, np.int32)
