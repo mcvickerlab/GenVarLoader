@@ -1,17 +1,20 @@
+import gc
 import json
 import re
 import shutil
 from pathlib import Path
-from typing import List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union, cast
 
 import numpy as np
 import polars as pl
 from loguru import logger
+from natsort import natsorted
 from tqdm.auto import tqdm
 
 from ..bigwig import BigWigs
 from ..utils import normalize_contig_name, read_bedlike, with_length
 from ..variants import Variants
+from ..variants.genotypes import VCFGenos
 from .genotypes import SparseGenotypes
 
 
@@ -61,6 +64,8 @@ def write(
             )
 
         all_samples.extend(variants.samples)
+    else:
+        variants = None
 
     if bigwigs is not None:
         unavail = []
@@ -85,21 +90,30 @@ def write(
     else:
         samples = list(available_samples)
 
-    logger.info(f"Using {len(samples)} samples: {samples}")
+    logger.info(f"Using {len(samples)} samples.")
+    metadata["samples"] = samples
     metadata["n_samples"] = len(samples)
     metadata["n_regions"] = bed.height
 
     if vcf is not None:
+        if TYPE_CHECKING:
+            assert variants is not None
+
         logger.info("Writing genotypes.")
         bed = write_variants(
             path,
             bed,
             vcf,
-            variants,  # type: ignore
+            variants,
             region_length,
             samples,
         )
-        metadata["ploidy"] = variants.ploidy  # type: ignore
+        if isinstance(variants.genotypes, VCFGenos):
+            variants.genotypes.close()
+        metadata["ploidy"] = variants.ploidy
+        # clean up to free memory
+        del variants
+        gc.collect()
 
     write_regions(path, bed, contigs)
 
@@ -122,9 +136,11 @@ def prep_bed(
     if isinstance(bed, (str, Path)):
         bed = read_bedlike(bed)
 
-    bed = bed.select("chrom", "chromStart", "chromEnd").sort(
-        "chrom", "chromStart", "chromEnd"
-    )
+    contigs = natsorted(bed["chrom"].unique(maintain_order=True).to_list())
+    bed = bed.select("chrom", "chromStart", "chromEnd")
+    with pl.StringCache():
+        pl.Series(contigs, dtype=pl.Categorical)
+        bed = bed.sort(pl.col("chrom").cast(pl.Categorical), pl.col("chromStart"))
 
     if length is None:
         length = cast(
@@ -135,7 +151,6 @@ def prep_bed(
         length += 2 * max_jitter
 
     bed = with_length(bed, length)
-    contigs = bed["chrom"].unique(maintain_order=True).to_list()
 
     return bed, contigs, length
 
@@ -171,13 +186,14 @@ def write_variants(
         sample_idx = key_idx[query_idx]
         len(sample_idx)
         _samples = samples
-    np.save(path / "samples.npy", _samples)
 
     gvl_arrow = re.sub(r"\.[bv]cf(\.gz)?$", ".gvl.arrow", vcf.name)
     recs = pl.read_ipc(vcf.parent / gvl_arrow)
-    recs.select("POS", "ALT", "ILEN").write_ipc(path / "genotypes" / "variants.arrow")
 
-    (path / "genotypes").mkdir(parents=True, exist_ok=True)
+    out_dir = path / "genotypes"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    recs.select("POS", "ALT", "ILEN").write_ipc(out_dir / "variants.arrow")
 
     v_idx_memmap_offsets = 0
     offset_memmap_offsets = 0
@@ -188,7 +204,9 @@ def write_variants(
         for contig, part in bed.partition_by(
             "chrom", as_dict=True, include_key=False, maintain_order=True
         ).items():
-            pbar.set_description(f"Reading genotypes for {contig}")
+            pbar.set_description(
+                f"Reading genotypes for {part.height} regions on {contig}"
+            )
             starts = part["chromStart"].to_numpy()
             ends = part["chromEnd"].to_numpy()
             n_regions = part.height
@@ -219,7 +237,9 @@ def write_variants(
                     # (r)
                     ends += multiplier * missing_length.max((0, 1))
 
-                pbar.set_description(f"Sparsifying genotypes for {contig}")
+                pbar.set_description(
+                    f"Sparsifying genotypes for {part.height} regions on {contig}"
+                )
                 genos, c_max_ends = SparseGenotypes.from_dense_with_length(
                     genos,
                     # make indices relative to the contig
@@ -233,9 +253,11 @@ def write_variants(
                 max_ends[last_max_end_idx : last_max_end_idx + n_regions] = c_max_ends
                 last_max_end_idx += n_regions
 
-            pbar.set_description(f"Writing genotypes for {contig}")
+            pbar.set_description(
+                f"Writing genotypes for {part.height} regions on {contig}"
+            )
             out = np.memmap(
-                path / "genotypes" / "variant_idxs.npy",
+                out_dir / "variant_idxs.npy",
                 dtype=genos.variant_idxs.dtype,
                 mode="w+" if v_idx_memmap_offsets == 0 else "r+",
                 shape=genos.variant_idxs.shape,
@@ -249,7 +271,7 @@ def write_variants(
             offsets += last_offset
             last_offset = offsets[-1]
             out = np.memmap(
-                path / "genotypes" / "offsets.npy",
+                out_dir / "offsets.npy",
                 dtype=offsets.dtype,
                 mode="w+" if offset_memmap_offsets == 0 else "r+",
                 shape=len(offsets) - 1,
@@ -261,7 +283,7 @@ def write_variants(
             pbar.update()
 
     out = np.memmap(
-        path / "genotypes" / "offsets.npy",
+        out_dir / "offsets.npy",
         dtype=offsets.dtype,  # type: ignore
         mode="r+",
         shape=1,
@@ -283,7 +305,6 @@ def write_bigwigs(
         if missing := (set(samples) - set(bigwigs.samples)):
             raise ValueError(f"Samples {missing} not found in bigwigs.")
         _samples = samples
-    np.save(path / "samples.npy", _samples)
 
     out_dir = path / "intervals" / bigwigs.name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -296,15 +317,19 @@ def write_bigwigs(
     for contig, part in bed.partition_by(
         "chrom", as_dict=True, include_key=False, maintain_order=True
     ).items():
-        pbar.set_description(f"Writing intervals for {contig}")
+        pbar.set_description(f"Reading intervals for {part.height} regions on {contig}")
         starts = part["chromStart"].to_numpy()
         ends = part["chromEnd"].to_numpy()
 
-        intervals = bigwigs.intervals(contig, starts, ends, sample=_samples)
-        n_intervals += len(intervals.data)
+        bigwigs.close()
+        intervals = bigwigs.intervals(
+            contig, starts, ends, sample=_samples, progress=False
+        )
 
+        pbar.set_description(f"Writing intervals for {part.height} regions on {contig}")
+        n_intervals += len(intervals.data)
         out = np.memmap(
-            out_dir / "coords.npy",
+            out_dir / "intervals.npy",
             dtype=intervals.data.dtype,
             mode="w+" if interval_offset == 0 else "r+",
             shape=intervals.data.shape,

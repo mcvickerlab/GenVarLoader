@@ -150,7 +150,7 @@ class Ragged(Generic[RDTYPE]):
                 np.prod(self.shape, dtype=np.int32) + 1, dtype=np.int32
             )
             self.maybe_offsets[0] = 0
-            np.cumsum(self.lengths, out=self.maybe_offsets[1:])
+            np.cumsum(self.lengths.ravel(), out=self.maybe_offsets[1:])
         return self.maybe_offsets
 
     @property
@@ -195,11 +195,7 @@ class Ragged(Generic[RDTYPE]):
         lengths
             Lengths of each element in the ragged array.
         """
-        _lengths = lengths.ravel()
-        offsets = np.empty(len(_lengths) + 1, dtype=np.int32)
-        offsets[0] = 0
-        np.cumsum(_lengths, out=offsets[1:])
-        return cls(data, lengths.shape, maybe_lengths=_lengths)
+        return cls(data, lengths.shape, maybe_lengths=lengths)
 
     @classmethod
     def empty(
@@ -247,132 +243,6 @@ class Ragged(Generic[RDTYPE]):
         data = np.concatenate([a.data for a in arrays])
         lengths = np.stack([a.lengths for a in arrays], axis=0)
         return Ragged.from_lengths(data, lengths)
-
-
-# @define
-# class RaggedIntervals:
-#     """Ragged array of intervals with non-length dimensions.
-
-#     Attributes
-#     ----------
-#     coords : ndarray
-#         A 1D array of the coordinates.
-#     values : ndarray
-#         A 1D array of the values.
-#     shape : tuple[int, ...]
-#         Shape of the ragged array, excluding the length dimension. For example, if
-#         the shape is (2, 3), then the j, k-th element can be mapped to an index for
-#         offsets with `i = np.ravel_multi_index((j, k), shape)`. The number of ragged
-#         elements should correspond to the product of the shape.
-#     offsets : ndarray[int32]
-#         1D array of offsets into the data array to get corresponding elements. The i-th element
-#         is accessible as `data[offsets[i]:offsets[i+1]]`.
-#     lengths : ndarray[int32]
-#         ND array of lengths of each element in the ragged array, has same shape as the ragged array.
-#     """
-
-#     coords: NDArray[np.int32]
-#     values: NDArray[np.float32]
-#     shape: Tuple[int, ...]
-#     maybe_offsets: Optional[NDArray[np.int32]] = None
-#     maybe_lengths: Optional[NDArray[np.int32]] = None
-
-#     def __attrs_post_init__(self):
-#         if self.shape == ():
-#             raise ValueError("Must have at least one interval.")
-#         if self.maybe_offsets is None and self.maybe_lengths is None:
-#             raise ValueError("Either offsets or lengths must be provided.")
-
-#     def __len__(self):
-#         return self.shape[0]
-
-#     @property
-#     def offsets(self) -> NDArray[np.int32]:
-#         """Offsets into the data array to get corresponding elements. The i-th element
-#         is accessible as `data[offsets[i]:offsets[i+1]]`."""
-#         if self.maybe_offsets is None:
-#             self.maybe_offsets = np.empty(
-#                 np.prod(self.shape, dtype=np.int32) + 1, dtype=np.int32
-#             )
-#             self.maybe_offsets[0] = 0
-#             np.cumsum(self.lengths, out=self.maybe_offsets[1:])
-#         return self.maybe_offsets
-
-#     @property
-#     def lengths(self) -> NDArray[np.int32]:
-#         """Lengths of each element in the ragged array."""
-#         if self.maybe_lengths is None:
-#             self.maybe_lengths = np.diff(self.offsets).reshape(self.shape)
-#         return self.maybe_lengths
-
-#     @classmethod
-#     def from_offsets(
-#         cls,
-#         coords: NDArray[np.int32],
-#         values: NDArray[np.float32],
-#         shape: Tuple[int, ...],
-#         offsets: NDArray[np.int32],
-#     ) -> "RaggedIntervals":
-#         """Create Intervals from coordinates, values, shape, and offsets.
-
-#         Parameters
-#         ----------
-#         coords
-#             1D array of coordinates.
-#         values
-#             1D array of values.
-#         shape
-#             Shape of the Intervals, excluding the length dimension.
-#         offsets
-#             Offsets into the data to get corresponding intervals.
-#         """
-#         return cls(coords, values, shape, maybe_offsets=offsets)
-
-#     @classmethod
-#     def from_lengths(
-#         cls,
-#         coords: NDArray[np.int32],
-#         values: NDArray[np.float32],
-#         lengths: NDArray[np.int32],
-#     ) -> "RaggedIntervals":
-#         """Create a Ragged array from data and lengths. The lengths array should have
-#         the intended shape of the Ragged array.
-
-#         Parameters
-#         ----------
-#         data
-#             1D data array.
-#         lengths
-#             Lengths of each element in the ragged array.
-#         """
-#         return cls(coords, values, lengths.shape, maybe_lengths=lengths)
-
-#     @classmethod
-#     def empty(cls, shape: Union[int, Tuple[int, ...]]) -> "RaggedIntervals":
-#         """Create an empty Ragged array."""
-#         if shape == ():
-#             raise ValueError("Ragged array must have at least one element.")
-
-#         if isinstance(shape, int):
-#             shape = (shape,)
-
-#         return cls(
-#             np.empty(0, np.int32),
-#             np.empty(0, np.float32),
-#             shape,
-#             maybe_offsets=np.empty(np.prod(shape, dtype=np.int32) + 1, dtype=np.int32),
-#         )
-
-#     @staticmethod
-#     def stack(*arrays: "RaggedIntervals") -> "RaggedIntervals":
-#         """Stack multiple ragged arrays along a new first axis."""
-#         if len(set(a.shape for a in arrays)) != 1:
-#             raise ValueError("All arrays must have the same shape.")
-
-#         coords = np.concatenate([a.coords for a in arrays])
-#         values = np.concatenate([a.values for a in arrays])
-#         lengths = np.stack([a.lengths for a in arrays], axis=0)
-#         return RaggedIntervals.from_lengths(coords, values, lengths)
 
 
 INTERVAL_DTYPE = np.dtype(

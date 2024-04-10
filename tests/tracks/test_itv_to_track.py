@@ -25,12 +25,12 @@ def case_simple():
             [0, 3],
             [3, 4],
             [4, 5],
-            [5, 7],
-            [7, 10],
+            [5, 9],
+            [9, 10],
         ],
         dtype=np.int32,
     )
-    values = np.array([1.0, 0, 2.0, 0, 3.0], dtype=np.float32)
+    values = np.array([1, 0, 2, 0, 3], dtype=np.float32)
     intervals = np.empty(5, dtype=INTERVAL_DTYPE)
     intervals["start"] = coordinates[:, 0]
     intervals["end"] = coordinates[:, 1]
@@ -41,13 +41,12 @@ def case_simple():
     interval_idx = np.array([0], dtype=np.intp)
     region_idx = np.array([0], dtype=np.intp)
     regions = np.array([[0, 0, 10]], dtype=np.int32)  # coordinates 0:0-10
-    track = np.array([1, 1, 1, 0, 2, 0, 0, 3, 3, 3], dtype=np.float32)
+    track = np.array([1, 1, 1, 0, 2, 0, 0, 0, 0, 3], dtype=np.float32)
     return Case(interval_idx, region_idx, regions, intervals, track)
 
 
 @parametrize_with_cases("case", cases=".")
 def test_intervals_to_tracks(case: Case):
-    """Test intervals_to_values."""
     intervals = case.intervals
     out = intervals_to_tracks(
         case.interval_idx, case.regions, intervals.data, intervals.offsets
@@ -57,7 +56,6 @@ def test_intervals_to_tracks(case: Case):
 
 @parametrize_with_cases("case", cases=".")
 def test_tracks_to_intervals(case: Case):
-    """Test tracks_to_intervals."""
     intervals, offsets = tracks_to_intervals(case.region_idx, case.regions, case.track)
     intervals = RaggedIntervals.from_offsets(intervals, 1, offsets)
     np.testing.assert_array_equal(intervals.data, case.intervals.data)

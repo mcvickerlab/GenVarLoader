@@ -142,10 +142,14 @@ def _scanned_mask(track: NDArray[np.float32], out: NDArray[np.int32]):
 def _compact_mask(
     scanned_backward_mask: NDArray[np.int32],
 ):
-    compacted_backward_mask = np.empty(scanned_backward_mask[-1] + 1, np.int32)
-    compacted_backward_mask[0] = 0
-    compacted_backward_mask[-1] = len(scanned_backward_mask)
-    for i in nb.prange(len(scanned_backward_mask) - 1):
-        if scanned_backward_mask[i] != scanned_backward_mask[i - 1]:
+    n_elems = len(scanned_backward_mask)
+    n_runs = scanned_backward_mask[-1]
+    compacted_backward_mask = np.empty(n_runs + 1, np.int32)
+    compacted_backward_mask[-1] = n_elems
+    for i in nb.prange(n_elems):
+        if i == 0:
+            compacted_backward_mask[i] = 0
+        # 0 < i < n_elems - 1
+        elif scanned_backward_mask[i] != scanned_backward_mask[i - 1]:
             compacted_backward_mask[scanned_backward_mask[i] - 1] = i
     return compacted_backward_mask
