@@ -338,39 +338,45 @@ class Dataset:
 
         lengths = self.full_regions[:, 2] - self.full_regions[:, 1]
         # for each region:
-        # bytes = 4 bytes / bp * bp / sample * samples
-        mem_per_region = 4 * lengths * len(self.full_samples)
+        # bytes = (4 bytes / bp) * (bp / sample) * samples
+        n_samples = len(self.full_samples)
+        mem_per_region = 4 * lengths * n_samples
         splits = splits_sum_le_value(mem_per_region, max_mem)
+        print(splits, len(self.full_regions))
         memmap_intervals_offset = 0
         memmap_offsets_offset = 0
         last_offset = 0
-        n_s = len(self.full_samples)
         with tqdm(total=len(splits) - 1) as pbar:
             for offset_s, offset_e in zip(splits[:-1], splits[1:]):
                 r_idx = np.arange(offset_s, offset_e, dtype=np.intp)
-                n_r = len(r_idx)
-                s_idx = np.arange(n_s, dtype=np.intp)
-                r_idx = repeat(r_idx, "r -> (r s)", s=n_s)
-                s_idx = repeat(s_idx, "s -> (r s)", r=n_r)
+                n_regions = len(r_idx)
+                s_idx = np.arange(n_samples, dtype=np.intp)
+                r_idx = repeat(r_idx, "r -> (r s)", s=n_samples)
+                s_idx = repeat(s_idx, "s -> (r s)", r=n_regions)
                 ds_idx = np.ravel_multi_index((s_idx, r_idx), self.full_shape)
 
                 pbar.set_description("Writing (decompressing)")
+                regions = self.full_regions[r_idx]
                 # layout is (regions, samples) so all samples are local for statistics
                 tracks = intervals_to_tracks(
                     ds_idx,
-                    self.full_regions[r_idx],
+                    regions,
                     intervals.data,
                     intervals.offsets,
                 )
-                chunk_lengths = lengths[r_idx]
-                tracks = Ragged.from_lengths(tracks, chunk_lengths)
+                track_lengths = lengths[r_idx]
+                tracks = Ragged.from_lengths(tracks, track_lengths)
 
                 pbar.set_description("Writing (transforming)")
                 transformed_tracks = transform(ds_idx, r_idx, s_idx, tracks)
+                np.testing.assert_equal(tracks.shape, transformed_tracks.shape)
 
                 pbar.set_description("Writing (compressing)")
                 itvs, interval_offsets = tracks_to_intervals(
-                    r_idx, self.full_regions, transformed_tracks.data
+                    regions, transformed_tracks.data
+                )
+                np.testing.assert_equal(
+                    len(interval_offsets), n_regions * n_samples + 1
                 )
 
                 out = np.memmap(
