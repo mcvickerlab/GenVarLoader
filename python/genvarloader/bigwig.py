@@ -1,14 +1,13 @@
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, cast
 
-import joblib
 import numba as nb
 import numpy as np
 import polars as pl
 import pyBigWig
 from numpy.typing import ArrayLike, NDArray
-from tqdm.auto import tqdm
 
+from .genvarloader import intervals as bw_intervals
 from .types import INTERVAL_DTYPE, RaggedIntervals, Reader
 from .utils import get_rel_starts, normalize_contig_name
 
@@ -160,30 +159,20 @@ class BigWigs(Reader):
 
         starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
         ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
-        starts = np.maximum(0, starts)
-        ends = np.minimum(ends, self.contigs[contig])
+        paths = [self.paths[s] for s in samples]
 
-        if progress:
-            with joblib.Parallel(n_jobs=-1, return_as="generator") as parallel:
-                gen = parallel(
-                    joblib.delayed(task)(contig, starts, ends, self.paths[sample])
-                    for sample in samples
-                )
-                result = cast(
-                    List[RaggedIntervals],
-                    [r for r in tqdm(gen, total=len(samples), unit="sample")],
-                )
-        else:
-            with joblib.Parallel(n_jobs=-1, backend="multiprocessing") as parallel:
-                result = cast(
-                    List[RaggedIntervals],
-                    parallel(
-                        joblib.delayed(task)(contig, starts, ends, self.paths[sample])
-                        for sample in samples
-                    ),
-                )
+        coordinates, values, n_per_query = bw_intervals(paths, contig, starts, ends)
 
-        return RaggedIntervals.stack(*result)
+        coordinates = coordinates.astype(np.int32)
+
+        intervals = np.empty(len(coordinates), dtype=INTERVAL_DTYPE)
+        intervals["start"] = coordinates[:, 0]
+        intervals["end"] = coordinates[:, 1]
+        intervals["value"] = values
+
+        intervals = RaggedIntervals.from_lengths(intervals, n_per_query)
+
+        return intervals
 
 
 def task(contig: str, starts: NDArray, ends: NDArray, path: str):
@@ -191,6 +180,7 @@ def task(contig: str, starts: NDArray, ends: NDArray, path: str):
     # (n_queries)
     n_per_query = np.empty(len(starts), np.int32)
     with pyBigWig.open(path, "r") as f:
+        print("opened bw")
         for i, (s, e) in enumerate(zip(starts, ends)):
             _intervals = cast(
                 Optional[Tuple[Tuple[int, int, float], ...]],
@@ -201,6 +191,9 @@ def task(contig: str, starts: NDArray, ends: NDArray, path: str):
                 n_per_query[i] = len(_intervals)
             else:
                 n_per_query[i] = 0
+            if i % 10000 == 0:
+                print(i)
+        print("read itvs")
     if len(intervals_ls) == 0:
         return RaggedIntervals.empty(len(starts), INTERVAL_DTYPE)  # type: ignore
     # (n_intervals)
