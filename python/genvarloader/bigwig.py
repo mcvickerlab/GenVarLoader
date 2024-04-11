@@ -1,7 +1,6 @@
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-import numba as nb
 import numpy as np
 import polars as pl
 import pyBigWig
@@ -160,6 +159,7 @@ class BigWigs(Reader):
         ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
         paths = [self.paths[s] for s in samples]
 
+        # (intervals, 2) (intervals) (regions, samples)
         coordinates, values, n_per_query = bw_intervals(paths, contig, starts, ends)
 
         coordinates = coordinates.astype(np.int32)
@@ -172,49 +172,3 @@ class BigWigs(Reader):
         intervals = RaggedIntervals.from_lengths(intervals, n_per_query)
 
         return intervals
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def intervals_to_tracks(
-    start: int,
-    end: int,
-    intervals: NDArray[np.void],  # structured dtype (start, end, value)
-    offsets: NDArray[np.intp],
-    n_samples: int,
-) -> NDArray[np.float32]:
-    """Convert intervals for a single query to tracks at base-pair resolution.
-
-    Parameters
-    ----------
-    start : int
-        Start position of query.
-    end : int
-        End position of query.
-    intervals : NDArray[np.void]
-        Shape = (n_intervals) Sorted intervals, each is (start, end, value) as a structured dtype.
-    offsets : NDArray[np.uint32]
-        Shape = (n_samples + 1) Offsets into intervals.
-    shape : int
-        Number of samples.
-
-    Returns
-    -------
-    NDArray[np.float32]
-        Shape = (n_samples, length) Tracks.
-    """
-    length = end - start
-    out = np.empty((n_samples, length), np.float32)
-
-    for sample in nb.prange(n_samples):
-        o_s, o_e = offsets[sample], offsets[sample + 1]
-        if o_e - o_s == 0:
-            out[sample] = 0
-            continue
-
-        for interval in nb.prange(o_s, o_e):
-            out_s = intervals[interval].start - start
-            out_e = intervals[interval].end - start
-            if out_s > length:
-                break
-            out[sample, out_s:out_e] = intervals[interval].value
-    return out

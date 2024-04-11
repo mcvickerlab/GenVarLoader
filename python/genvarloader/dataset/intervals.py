@@ -7,7 +7,7 @@ from ..types import INTERVAL_DTYPE
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def intervals_to_tracks(
-    interval_idxs: NDArray[np.intp],
+    offset_idxs: NDArray[np.intp],
     regions: NDArray[np.int32],
     intervals: NDArray[np.void],
     offsets: NDArray[np.int32],
@@ -17,22 +17,19 @@ def intervals_to_tracks(
     Parameters
     ----------
     interval_idxs : NDArray[np.intp]
-        Shape = (n_queries) Indexes into intervals and values.
+        Shape = (n_queries) Indexes into offsets.
     regions : NDArray[np.int32]
         Shape = (n_queries, 3) Regions for each query.
-    intervals : NDArray[np.int32]
-        Shape = (n_intervals, 2) Sorted intervals, each is (start, end).
-    values : NDArray[np.float32]
-        Shape = (n_intervals) Values.
+    intervals : NDArray[np.void]
+        Shape = (n_intervals) Sorted intervals, each is (start, end, value).
     offsets : NDArray[np.uint32]
-        Shape = (n_queries + 1) Offsets into intervals and values.
-    query_length : int
-        Length of each query.
+        Shape = (n_interval_sets + 1) Offsets into intervals and values.
+        For a GVL Dataset, n_interval_sets = n_samples * n_regions with that layout.
 
     Returns
     -------
     out : NDArray[np.float32]
-        Shape = (n_queries*query_length) Ragged array of tracks.
+        Shape = (n_queries) Ragged array of tracks.
     """
     n_queries = regions.shape[0]
     length_per_query = regions[:, 2] - regions[:, 1]
@@ -41,8 +38,8 @@ def intervals_to_tracks(
     out_idxs[1:] = length_per_query[:-1].cumsum()
     out = np.zeros(length_per_query.sum(), np.float32)
     for query in nb.prange(n_queries):
-        interval_idx = interval_idxs[query]
-        o_s, o_e = offsets[interval_idx], offsets[interval_idx + 1]
+        idx = offset_idxs[query]
+        o_s, o_e = offsets[idx], offsets[idx + 1]
         n_intervals = o_e - o_s
         q_s = regions[query, 1]
         query_length = length_per_query[query]
@@ -55,7 +52,7 @@ def intervals_to_tracks(
         for interval in nb.prange(o_s, o_e):
             itv = intervals[interval]
             start, end = itv.start - q_s, itv.end - q_s
-            if start > query_length:
+            if start >= query_length:
                 break
             _out[start:end] = itv.value
     return out

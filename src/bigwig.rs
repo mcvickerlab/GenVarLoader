@@ -1,9 +1,10 @@
 use anyhow::Result;
-use bigtools::BigWigRead;
-use itertools::{multiunzip, Itertools};
+use bigtools::{BigWigRead, Value};
+use itertools::Itertools;
 use ndarray::prelude::*;
 use ndarray::stack;
 use rayon::prelude::*;
+use std::mem::MaybeUninit;
 use std::path::PathBuf;
 
 pub fn intervals(
@@ -12,77 +13,101 @@ pub fn intervals(
     starts: ArrayView1<i32>,
     ends: ArrayView1<i32>,
 ) -> Result<(Array2<u32>, Array1<f32>, Array2<i32>)> {
-    // (samples) of tuple (s e v n)
-    // (s e v n) are each vec with len regions
-    let mut intervals_queries = Vec::with_capacity(paths.len());
+    let n_samples = paths.len();
+    let n_regions = starts.len();
+
+    // layouts are (samples, regions)
+    let mut n_per_region_sample = Array2::<i32>::uninit((n_samples, n_regions));
+    let n_per_region_sample_slice = n_per_region_sample.as_slice_mut().unwrap();
+
+    let mut i_starts = vec![Vec::<u32>::new(); n_samples * n_regions];
+    let mut i_ends = vec![Vec::<u32>::new(); n_samples * n_regions];
+    let mut values = vec![Vec::<f32>::new(); n_samples * n_regions];
+
     paths
         .par_iter()
-        .map(|path| {
-            let mut bw = BigWigRead::open_file(path.to_str().expect("Path is not"))
+        .zip(n_per_region_sample_slice.par_chunks_exact_mut(n_regions))
+        .zip(i_starts.par_chunks_exact_mut(n_regions))
+        .zip(i_ends.par_chunks_exact_mut(n_regions))
+        .zip(values.par_chunks_exact_mut(n_regions))
+        .for_each(|((((path, n_slice), i_s_slice), i_e_slice), i_v_slice)| {
+            let mut bw = BigWigRead::open_file(path.to_str().expect("Path is not unicode"))
                 .expect("Error opening file");
 
-            let max_len = bw
+            let (max_len, contig) = bw
                 .chroms()
                 .iter()
                 .filter_map(|chrom| {
-                    if chrom.name == contig {
-                        Some(chrom.length)
-                    } else if chrom.name == format!("chr{}", contig) {
-                        Some(chrom.length)
+                    if chrom.name == contig || chrom.name == format!("chr{contig}") {
+                        Some((chrom.length, chrom.name.clone()))
                     } else {
                         None
                     }
                 })
-                .next()
-                .expect("Contig not found");
+                .exactly_one()
+                .expect("Contig not found or multiple contigs match");
 
-            let (intervals, n_per_region): (Vec<Vec<(u32, u32, f32)>>, Vec<i32>) = starts
+            starts
+                .as_slice()
+                .expect("Starts array is not contiguous")
                 .iter()
-                .zip(ends.iter())
-                .map(|(&start, &end)| {
-                    let start = start.max(0) as u32;
-                    let end = (end as u32).min(max_len);
-                    let itvs = bw
-                        .get_interval(contig, start, end)
-                        .expect("Error starting interval reading")
-                        .into_iter()
-                        .filter_map_ok(|itv| Some((itv.start, itv.end, itv.value)))
-                        .collect::<Result<Vec<_>, _>>()
-                        .expect("Error reading intervals");
+                .zip(ends.as_slice().expect("Ends array is not contiguous"))
+                .zip(n_slice.iter_mut())
+                .zip(i_s_slice.iter_mut())
+                .zip(i_e_slice.iter_mut())
+                .zip(i_v_slice.iter_mut())
+                .for_each(|(((((&r_start, &r_end), n), s), e), v)| {
+                    let r_start = r_start.max(0) as u32;
+                    let r_end = (r_end as u32).min(max_len);
 
-                    let n = itvs.len() as i32;
-                    (itvs, n)
+                    *n = MaybeUninit::new(
+                        bw.get_interval(contig.as_str(), r_start, r_end)
+                            .expect("Error starting interval reading")
+                            .into_iter()
+                            .try_fold(0, |acc, itv| {
+                                itv.map(|Value { start, end, value }| {
+                                    s.push(start - 1);  // Wiggle is 1-indexed, but we want 0-based coordinates
+                                    e.push(end);
+                                    v.push(value);
+                                    acc + 1
+                                })
+                            })
+                            .expect("Error reading intervals"),
+                    );
                 })
-                .unzip();
+        });
 
-            let (i_s, i_e, vals): (Vec<u32>, Vec<u32>, Vec<f32>) =
-                multiunzip(intervals.into_iter().flatten().map(|(a, b, c)| (a, b, c)));
+    let i_starts = interleave_and_flatten_vec_of_vec(i_starts, n_samples, n_regions);
+    let i_ends = interleave_and_flatten_vec_of_vec(i_ends, n_samples, n_regions);
+    let values = interleave_and_flatten_vec_of_vec(values, n_samples, n_regions);
 
-            (i_s, i_e, vals, n_per_region)
-        })
-        .collect_into_vec(&mut intervals_queries);
-
-    let (i_starts, i_ends, values, n_per_query): (
-        Vec<Vec<u32>>,
-        Vec<Vec<u32>>,
-        Vec<Vec<f32>>,
-        Vec<Vec<i32>>,
-    ) = multiunzip(
-        intervals_queries
-            .into_iter()
-            .map(|(a, b, c, d)| (a, b, c, d)),
-    );
-
-    let i_starts = Array1::from(i_starts.into_iter().flatten().collect::<Vec<_>>());
-    let i_ends = Array1::from(i_ends.into_iter().flatten().collect::<Vec<_>>());
     let coords = stack(Axis(1), &[i_starts.view(), i_ends.view()])
         .expect("Different number of starts and ends");
 
-    let values = values.into_iter().flatten().collect::<Vec<_>>();
+    unsafe {
+        let n_per_region_sample = n_per_region_sample
+            .assume_init()
+            .t()
+            .as_standard_layout()
+            .to_owned();
+        Ok((coords, values, n_per_region_sample))
+    }
+}
 
-    let n_per_query = n_per_query.into_iter().flatten().collect::<Vec<_>>();
-    let n_per_query = Array2::from_shape_vec((paths.len(), starts.len()), n_per_query)
-        .expect("Wrong number of queries");
-
-    Ok((coords, values.into(), n_per_query))
+fn interleave_and_flatten_vec_of_vec<T: Clone + Send>(
+    v: Vec<Vec<T>>,
+    n_samples: usize,
+    n_regions: usize,
+) -> Array1<T> {
+    Array1::from(
+        Array2::from_shape_vec((n_samples, n_regions), v)
+            .unwrap()
+            .t()
+            .as_standard_layout()
+            .to_owned()
+            .into_raw_vec()
+            .into_par_iter()
+            .flatten()
+            .collect::<Vec<_>>(),
+    )
 }
