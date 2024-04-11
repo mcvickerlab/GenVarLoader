@@ -3,6 +3,7 @@ from typing import Tuple
 import numba as nb
 import numpy as np
 from attrs import define
+from einops import rearrange
 from numpy.typing import NDArray
 
 from ..types import ListIdx
@@ -92,18 +93,18 @@ class SparseGenotypes:
     sample, ploid, and region may have a different number of variants, since unknown and REF genotypes are not stored. The
     variant indices are aligned to the genotypes. Physically, the genotypes and variant indices are stored as 1D arrays.
     Then, each sample and region's info can be sliced out using the offsets:
-    >>> i = np.ravel_multi_index((s, p, r), (n_samples, ploidy, n_regions))
+    >>> i = np.ravel_multi_index((r, p, s), (n_regions, ploidy, n_samples))
     >>> genos[offsets[i]:offsets[i+1]]
     >>> variant_idxs[offsets[i]:offsets[i+1]]
 
     Attributes
     ----------
     genos : NDArray[np.int8]
-        Shape = (samples * ploidy * variants) Genotypes.
+        Shape = (variants * samples * ploidy) Genotypes.
     variant_idxs : NDArray[np.int32]
-        Shape = (samples * ploidy * variants) Variant indices.
+        Shape = (variants * samples * ploidy) Variant indices.
     offsets : NDArray[np.int32]
-        Shape = (samples * ploidy * regions + 1) Offsets into genos.
+        Shape = (regions * ploidy * samples + 1) Offsets into genos.
     n_samples : int
         Number of samples.
     ploidy : int
@@ -112,31 +113,31 @@ class SparseGenotypes:
         Number of regions.
     """
 
-    variant_idxs: NDArray[np.int32]  # (samples * ploidy * variants)
-    offsets: NDArray[np.int32]  # (samples * ploidy * regions + 1)
+    variant_idxs: NDArray[np.int32]  # (variants * samples * ploidy)
+    offsets: NDArray[np.int32]  # (regions * samples * ploidy + 1)
+    n_regions: int
     n_samples: int
     ploidy: int
-    n_regions: int
 
     @property
     def effective_shape(self):
-        return (self.n_samples, self.ploidy, self.n_regions)
+        return (self.n_regions, self.n_samples, self.ploidy)
 
     @classmethod
-    def empty(cls, n_samples: int, ploidy: int, n_regions: int):
+    def empty(cls, n_regions: int, n_samples: int, ploidy: int):
         """Create an empty sparse genotypes object."""
         return cls(
             np.empty(0, np.int32),
-            np.zeros(n_samples * ploidy * n_regions + 1, np.int32),
+            np.zeros(n_regions * n_samples * ploidy + 1, np.int32),
+            n_regions,
             n_samples,
             ploidy,
-            n_regions,
         )
 
-    def vars(self, sample: int, ploidy: int, region: int):
+    def vars(self, region: int, sample: int, ploidy: int):
         """Get variant indices for a given sample and region."""
         i = np.ravel_multi_index(
-            (sample, ploidy, region), (self.n_samples, self.ploidy, self.n_regions)
+            (region, sample, ploidy), (self.n_regions, self.n_samples, self.ploidy)
         )
         vars = self.variant_idxs[self.offsets[i] : self.offsets[i + 1]]
         return vars
@@ -159,20 +160,23 @@ class SparseGenotypes:
         offsets : NDArray[np.uint32]
             Shape = (regions + 1) Offsets into genos.
         """
+        # (v s p)
+        genos = rearrange(genos, "s p v -> v s p")
+        # (r)
         n_per_region = np.diff(offsets)
         dense_v_idxs = first_v_idxs_to_all_v_idxs(first_v_idxs, n_per_region)
-        # (s p v)
+        # (v s p)
         is_alt = genos == 1
         alt = is_alt.nonzero()
-        variant_idxs = dense_v_idxs[alt[2]]
-        n_per_spr = np.add.reduceat(is_alt, offsets[:-1], axis=-1).ravel()
+        variant_idxs = dense_v_idxs[alt[0]]
+        n_per_spr = np.add.reduceat(is_alt, offsets[:-1], axis=0).ravel()
         offsets = lengths_to_offsets(n_per_spr, np.int32)
         return cls(
             variant_idxs,
             offsets,
-            genos.shape[0],
-            genos.shape[1],
             len(first_v_idxs),
+            genos.shape[1],
+            genos.shape[2],
         )
 
     @classmethod
@@ -191,7 +195,7 @@ class SparseGenotypes:
         Parameters
         ----------
         genos : NDArray[np.int8]
-            Shape = (sample, ploidy, variants) Genotypes.
+            Shape = (variants, sample, ploidy) Genotypes.
         first_v_idxs : NDArray[np.uint32]
             Shape = (regions) First variant index for each region.
         offsets : NDArray[np.uint32]
@@ -205,21 +209,18 @@ class SparseGenotypes:
         length : int
             Length of the output haplotypes.
         """
-        genos.shape[0]
-        genos.shape[1]
-        len(first_v_idxs)
         n_per_region = np.diff(offsets)
         # (v)
         dense_v_idxs = first_v_idxs_to_all_v_idxs(first_v_idxs, n_per_region)
-        # (s p v)
-        spv_ilens = np.where(genos == 1, ilens[dense_v_idxs], 0)
-        # (s p v)
-        cum_ilens = spv_ilens.cumsum(-1)
-        # (s p r)
-        cum_r_ilens = np.add.reduceat(spv_ilens, offsets[:-1], axis=-1).cumsum(-1)
+        # (v s p)
+        spv_ilens = np.where(genos == 1, ilens[dense_v_idxs, None, None], 0)
+        # (v s p)
+        cum_ilens = spv_ilens.cumsum(0)
+        # (r s p)
+        cum_r_ilens = np.add.reduceat(spv_ilens, offsets[:-1], axis=0).cumsum(0)
         # (r)
         del spv_ilens
-        # (s p v)
+        # (v s p)
         keep = keep_genotypes(
             genos,
             cum_ilens,
@@ -230,35 +231,24 @@ class SparseGenotypes:
             starts,
             length,
         )
-        max_ends = starts + length - cum_r_ilens[-1, -1].clip(max=0)
+        # (r)
+        max_ends = starts + length - cum_r_ilens[:, -1, -1].clip(max=0)
         del cum_ilens, cum_r_ilens
-        # tuple s, p, v
+        # tuple v s p
         keep_idxs = keep.nonzero()
-        # (v) layout (s p r)
-        variant_idxs = dense_v_idxs[keep_idxs[2]]
-        # (s p r) -> (s*p*r)
-        n_per_spr = np.add.reduceat(keep, offsets[:-1], axis=-1).ravel()
+        # (v) layout (r s p)
+        variant_idxs = dense_v_idxs[keep_idxs[0]]
+        # (r s p) -> (r*s*p)
+        n_per_spr = np.add.reduceat(keep, offsets[:-1], axis=0).ravel()
         offsets = lengths_to_offsets(n_per_spr, np.int32)
         sparse_genos = cls(
             variant_idxs,
             offsets,
-            genos.shape[0],
-            genos.shape[1],
             len(first_v_idxs),
+            genos.shape[1],
+            genos.shape[2],
         )
         return sparse_genos, max_ends
-
-
-def max_deletions(alt_ilens, n_samples, ploidy, n_regions, offsets):
-    max_dels = np.zeros(n_regions, np.int32)
-    for region in nb.prange(n_regions):
-        md = max_dels[region]
-        for sample in nb.prange(n_samples):
-            for ploid in nb.prange(ploidy):
-                offset_idx = sample * ploidy * n_regions + ploid * n_regions + region
-                o_s, o_e = offsets[offset_idx], offsets[offset_idx + 1]
-                md = max(alt_ilens[o_s:o_e].sum(), md)
-    return max_dels
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
@@ -277,26 +267,26 @@ def keep_genotypes(
     Parameters
     ----------
     genos : NDArray[np.int8]
-        Shape = (n_samples, ploidy, n_variants) Genotypes.
+        Shape = (variants, samples, ploidy) Genotypes.
     cum_ilens : NDArray[np.int32]
-        Shape = (n_samples, ploidy, n_variants) Cumulative lengths of haplotypes.
+        Shape = (variants, samples, ploidy) Cumulative lengths of haplotypes.
     cum_r_ilens : NDArray[np.int32]
-        Shape = (n_samples, ploidy, n_regions) Cumulative lengths of regions.
+        Shape = (regions, samples, ploidy) Cumulative lengths of regions.
     offsets : NDArray[np.int32]
-        Shape = (n_regions + 1) Offsets into genos.
+        Shape = (regions + 1) Offsets into genos.
     first_v_idxs : NDArray[np.int32]
-        Shape = (n_regions,) First variant index for each region.
+        Shape = (regions) First variant index for each region.
     positions : NDArray[np.int32]
-        Shape = (total_variants,) Positions of variants.
+        Shape = (total_variants) Positions of variants.
     starts : NDArray[np.int32]
-        Shape = (n_regions,) Start of query regions.
+        Shape = (regions) Start of query regions.
     length : int
         Length of haplotypes.
     """
-    n_samples = cum_ilens.shape[0]
-    ploidy = cum_ilens.shape[1]
+    n_samples = genos.shape[1]
+    ploidy = genos.shape[2]
     n_regions = len(starts)
-    keep = np.empty_like(cum_ilens, np.bool_)
+    keep = np.empty_like(genos, np.bool_)
     for sample in nb.prange(n_samples):
         for ploid in nb.prange(ploidy):
             for region in nb.prange(n_regions):
@@ -309,16 +299,20 @@ def keep_genotypes(
                     v_idx = first_v_idxs[region] + variant - o_s
                     rel_pos = positions[v_idx] - r_start
                     cum_ilen = (
-                        cum_ilens[sample, ploid, variant]
-                        - cum_r_ilens[sample, ploid, region]
+                        cum_ilens[
+                            variant,
+                            sample,
+                            ploid,
+                        ]
+                        - cum_r_ilens[region, sample, ploid]
                     )
                     if (
                         rel_pos + cum_ilen < length
-                        and genos[sample, ploid, variant] == 1
+                        and genos[variant, sample, ploid] == 1
                     ):
-                        keep[sample, ploid, variant] = True
+                        keep[variant, sample, ploid] = True
                     else:
-                        keep[sample, ploid, variant] = False
+                        keep[variant, sample, ploid] = False
     return keep
 
 

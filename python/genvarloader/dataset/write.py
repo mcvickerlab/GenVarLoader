@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union, cast
 
 import numpy as np
 import polars as pl
+from einops import rearrange
 from loguru import logger
 from natsort import natsorted
 from tqdm.auto import tqdm
@@ -90,6 +91,8 @@ def write(
     else:
         samples = list(available_samples)
 
+    samples.sort()
+
     logger.info(f"Using {len(samples)} samples.")
     metadata["samples"] = samples
     metadata["n_samples"] = len(samples)
@@ -111,7 +114,7 @@ def write(
         if isinstance(variants.genotypes, VCFGenos):
             variants.genotypes.close()
         metadata["ploidy"] = variants.ploidy
-        # clean up to free memory
+        # free memory
         del variants
         gc.collect()
 
@@ -136,7 +139,10 @@ def prep_bed(
     if isinstance(bed, (str, Path)):
         bed = read_bedlike(bed)
 
-    contigs = natsorted(bed["chrom"].unique(maintain_order=True).to_list())
+    if bed.height == 0:
+        raise ValueError("No regions found in the BED file.")
+
+    contigs = natsorted(bed["chrom"].unique().to_list())
     bed = bed.select("chrom", "chromStart", "chromEnd")
     with pl.StringCache():
         pl.Series(contigs, dtype=pl.Categorical)
@@ -224,18 +230,20 @@ def write_variants(
                         records.end_idxs,
                         sample_idx=sample_idx,
                     )
-                    # (s p v)
-                    ilens = np.where(genos == 1, records.size_diffs, 0)
-                    # (s p r)
-                    ilens = np.add.reduceat(ilens, records.offsets[:-1], axis=-1)
-                    # (s p r)
-                    effective_length = ends - starts + ilens
-                    # (s p r)
+                    # (v s p)
+                    genos = rearrange(genos, "s p v -> v s p")
+                    # (v s p)
+                    ilens = np.where(genos == 1, records.size_diffs[:, None, None], 0)
+                    # (r s p)
+                    ilens = np.add.reduceat(ilens, records.offsets[:-1], axis=0)
+                    # (r s p)
+                    effective_length = (ends - starts)[:, None, None] + ilens
+                    # (r s p)
                     missing_length = region_length - effective_length
                     if np.all(missing_length <= 0):
                         break
                     # (r)
-                    ends += multiplier * missing_length.max((0, 1))
+                    ends += multiplier * missing_length.max((1, 2))
 
                 pbar.set_description(
                     f"Sparsifying genotypes for {part.height} regions on {contig}"
@@ -267,7 +275,7 @@ def write_variants(
             out.flush()
             v_idx_memmap_offsets += out.nbytes
 
-            offsets = genos.offsets.copy()
+            offsets = genos.offsets
             offsets += last_offset
             last_offset = offsets[-1]
             out = np.memmap(
