@@ -198,12 +198,16 @@ class SparseGenotypes:
             Shape = (regions + 1) Offsets into genos.
         ilens : NDArray[np.int32]
             Shape = (variants) ILEN of all unique variants.
+        positions : NDArray[np.int32]
+            Shape = (total_variants) Positions of variants.
+        starts : NDArray[np.int32]
+            Shape = (regions) Start of query regions.
         length : int
             Length of the output haplotypes.
         """
-        n_samples = genos.shape[0]
-        ploidy = genos.shape[1]
-        n_regions = len(first_v_idxs)
+        genos.shape[0]
+        genos.shape[1]
+        len(first_v_idxs)
         n_per_region = np.diff(offsets)
         # (v)
         dense_v_idxs = first_v_idxs_to_all_v_idxs(first_v_idxs, n_per_region)
@@ -213,6 +217,7 @@ class SparseGenotypes:
         cum_ilens = spv_ilens.cumsum(-1)
         # (s p r)
         cum_r_ilens = np.add.reduceat(spv_ilens, offsets[:-1], axis=-1).cumsum(-1)
+        # (r)
         del spv_ilens
         # (s p v)
         keep = keep_genotypes(
@@ -225,19 +230,15 @@ class SparseGenotypes:
             starts,
             length,
         )
+        max_ends = starts + length - cum_r_ilens[-1, -1].clip(max=0)
+        del cum_ilens, cum_r_ilens
         # tuple s, p, v
         keep_idxs = keep.nonzero()
-        # (v)
+        # (v) layout (s p r)
         variant_idxs = dense_v_idxs[keep_idxs[2]]
+        # (s p r) -> (s*p*r)
         n_per_spr = np.add.reduceat(keep, offsets[:-1], axis=-1).ravel()
         offsets = lengths_to_offsets(n_per_spr, np.int32)
-        # (r)
-        largest_v_idxs_per_region = variant_idxs[
-            offsets[1:].reshape(n_samples, ploidy, n_regions) - 1
-        ].max((0, 1))
-        max_ends = positions[largest_v_idxs_per_region] - ilens[
-            largest_v_idxs_per_region
-        ].clip(max=0)
         sparse_genos = cls(
             variant_idxs,
             offsets,
@@ -246,6 +247,18 @@ class SparseGenotypes:
             len(first_v_idxs),
         )
         return sparse_genos, max_ends
+
+
+def max_deletions(alt_ilens, n_samples, ploidy, n_regions, offsets):
+    max_dels = np.zeros(n_regions, np.int32)
+    for region in nb.prange(n_regions):
+        md = max_dels[region]
+        for sample in nb.prange(n_samples):
+            for ploid in nb.prange(ploidy):
+                offset_idx = sample * ploidy * n_regions + ploid * n_regions + region
+                o_s, o_e = offsets[offset_idx], offsets[offset_idx + 1]
+                md = max(alt_ilens[o_s:o_e].sum(), md)
+    return max_dels
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)

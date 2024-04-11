@@ -9,7 +9,6 @@ from .bigwig import BigWigs
 from .dataset import Dataset
 from .dataset.write import write
 from .fasta import Fasta
-from .genvarloader import intervals as bw_intervals
 from .haplotypes import Haplotypes
 from .intervals import Intervals
 from .loader import GVL, construct_virtual_data
@@ -37,5 +36,4 @@ __all__ = [
     "get_dataloader",
     "get_sampler",
     "Ragged",
-    "bw_intervals",
 ]
