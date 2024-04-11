@@ -618,7 +618,7 @@ class Dataset:
         return str(self)
 
     def isel(self, samples: Idx, regions: Idx):
-        """Select a subset of samples and regions from the dataset.
+        """Eagerly select a subset of samples and regions from the dataset.
 
         Parameters
         ----------
@@ -649,7 +649,7 @@ class Dataset:
         return self[ds_idxs]
 
     def sel(self, samples: List[str], regions: pl.DataFrame):
-        """Select a subset of samples and regions from the dataset.
+        """Eagerly select a subset of samples and regions from the dataset.
 
         Parameters
         ----------
@@ -791,7 +791,7 @@ class Dataset:
             assert self.return_tracks is not False
 
         intervals: Dict[str, RaggedIntervals] = {}
-        for track in self.return_tracks:
+        for track in self.available_tracks:
             itvs = np.memmap(
                 self.path / "intervals" / track / "intervals.npy",
                 dtype=INTERVAL_DTYPE,
