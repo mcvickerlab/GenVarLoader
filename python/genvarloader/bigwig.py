@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union, cast
+from typing import Dict, List, Optional, Union
 
 import numba as nb
 import numpy as np
@@ -138,7 +138,6 @@ class BigWigs(Reader):
         starts: ArrayLike,
         ends: ArrayLike,
         sample: Optional[Union[str, List[str]]] = None,
-        progress: bool = False,
         **kwargs,
     ) -> RaggedIntervals:
         _contig = normalize_contig_name(contig, self.contigs)
@@ -173,32 +172,6 @@ class BigWigs(Reader):
         intervals = RaggedIntervals.from_lengths(intervals, n_per_query)
 
         return intervals
-
-
-def task(contig: str, starts: NDArray, ends: NDArray, path: str):
-    intervals_ls: List[Tuple[int, int, float]] = []
-    # (n_queries)
-    n_per_query = np.empty(len(starts), np.int32)
-    with pyBigWig.open(path, "r") as f:
-        print("opened bw")
-        for i, (s, e) in enumerate(zip(starts, ends)):
-            _intervals = cast(
-                Optional[Tuple[Tuple[int, int, float], ...]],
-                f.intervals(contig, s, e),
-            )
-            if _intervals is not None:
-                intervals_ls.extend(_intervals)
-                n_per_query[i] = len(_intervals)
-            else:
-                n_per_query[i] = 0
-            if i % 10000 == 0:
-                print(i)
-        print("read itvs")
-    if len(intervals_ls) == 0:
-        return RaggedIntervals.empty(len(starts), INTERVAL_DTYPE)  # type: ignore
-    # (n_intervals)
-    intervals = np.array(intervals_ls, INTERVAL_DTYPE)
-    return RaggedIntervals.from_lengths(intervals, n_per_query)
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)

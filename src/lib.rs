@@ -31,9 +31,6 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// n_per_query : NDArray[int32]
 ///     Shape = (samples, regions) Number of intervals per query.
 #[pyfunction]
-#[pyo3(
-    text_signature = "(paths: str | Path, contig: str, starts: NDArray[int32], ends: NDArray[int32])"
-)]
 fn intervals<'py>(
     py: Python<'py>,
     paths: Vec<PathBuf>,
