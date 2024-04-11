@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union, cast
 
+import joblib
 import numpy as np
 import polars as pl
 from loguru import logger
@@ -322,9 +323,10 @@ def write_bigwigs(
         ends = part["chromEnd"].to_numpy()
 
         bigwigs.close()
-        intervals = bigwigs.intervals(
-            contig, starts, ends, sample=_samples, progress=False
-        )
+        with joblib.parallel_config(backend="loky"):
+            intervals = bigwigs.intervals(
+                contig, starts, ends, sample=_samples, progress=True
+            )
 
         pbar.set_description(f"Writing intervals for {part.height} regions on {contig}")
         n_intervals += len(intervals.data)

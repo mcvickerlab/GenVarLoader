@@ -345,7 +345,7 @@ class Dataset:
         memmap_offsets_offset = 0
         last_offset = 0
         n_s = len(self.full_samples)
-        with tqdm(total=len(splits) - 1, desc="Writing transformed tracks") as pbar:
+        with tqdm(total=len(splits) - 1) as pbar:
             for offset_s, offset_e in zip(splits[:-1], splits[1:]):
                 r_idx = np.arange(offset_s, offset_e, dtype=np.intp)
                 n_r = len(r_idx)
@@ -354,7 +354,8 @@ class Dataset:
                 s_idx = repeat(s_idx, "s -> (r s)", r=n_r)
                 ds_idx = np.ravel_multi_index((s_idx, r_idx), self.full_shape)
 
-                # implicit layout is (regions, samples) so samples are local and computing statistics fast
+                pbar.set_description("Writing (decompressing)")
+                # layout is (regions, samples) so all samples are local for statistics
                 tracks = intervals_to_tracks(
                     ds_idx,
                     self.full_regions[r_idx],
@@ -364,8 +365,10 @@ class Dataset:
                 chunk_lengths = lengths[r_idx]
                 tracks = Ragged.from_lengths(tracks, chunk_lengths)
 
+                pbar.set_description("Writing (transforming)")
                 transformed_tracks = transform(ds_idx, r_idx, s_idx, tracks)
 
+                pbar.set_description("Writing (compressing)")
                 itvs, interval_offsets = tracks_to_intervals(
                     r_idx, self.full_regions, transformed_tracks.data
                 )
