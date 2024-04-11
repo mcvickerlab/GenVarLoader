@@ -63,7 +63,6 @@ def intervals_to_tracks(
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def tracks_to_intervals(
-    region_idx: NDArray[np.intp],
     regions: NDArray[np.int32],
     tracks: NDArray[np.float32],
 ):
@@ -96,9 +95,7 @@ def tracks_to_intervals(
     track_offsets[0] = 0
     track_offsets[1:] = length_per_query.cumsum()
 
-    interval_offsets = np.empty(n_queries + 1, np.int32)
-    interval_offsets[0] = 0
-    n_intervals = 0
+    n_intervals = np.empty(n_queries, np.int32)
     scanned_masks = np.empty_like(tracks, np.int32)
     for query in nb.prange(n_queries):
         track = tracks[track_offsets[query] : track_offsets[query + 1]]
@@ -106,12 +103,15 @@ def tracks_to_intervals(
             track_offsets[query] : track_offsets[query + 1]
         ]
         _scanned_mask(track, scanned_backward_mask)
-        n_intervals += scanned_backward_mask[-1]
-        interval_offsets[query + 1] = n_intervals
+        n_intervals[query] = scanned_backward_mask[-1]
 
-    all_intervals = np.empty(n_intervals, INTERVAL_DTYPE)
+    interval_offsets = np.empty(n_queries + 1, np.int32)
+    interval_offsets[0] = 0
+    interval_offsets[1:] = n_intervals.cumsum()
+
+    all_intervals = np.empty(interval_offsets[-1], INTERVAL_DTYPE)
     for query in nb.prange(n_queries):
-        start = regions[region_idx[query], 1]
+        start = regions[query, 1]
         scanned_backward_mask = scanned_masks[
             track_offsets[query] : track_offsets[query + 1]
         ]
