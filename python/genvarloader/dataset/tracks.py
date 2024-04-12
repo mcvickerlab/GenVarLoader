@@ -1,72 +1,6 @@
-import json
-from pathlib import Path
-from typing import Dict, Union
-
 import numba as nb
 import numpy as np
-from attrs import define
 from numpy.typing import NDArray
-
-from ..utils import lengths_to_offsets
-
-
-@define
-class GenomeTrack:
-    """
-    Represents a genome-wide track at base-pair resolution.
-
-    Attributes
-    ----------
-    track : ndarray
-        Track data.
-    contigs : dict[str, int]
-        A dictionary mapping contig names to their length.
-    contig_offsets : ndarray
-        The offsets for each contig in the genome track data.
-    """
-
-    track: NDArray
-    contigs: Dict[str, int]
-    contig_offsets: NDArray[np.int32]
-    raw_contig_offsets: NDArray[np.int32]
-
-    def order_offsets_like(self, contigs: list[str]):
-        common, _, order = np.intersect1d(
-            contigs, list(self.contigs.keys()), return_indices=True
-        )
-        if len(common) != len(contigs):
-            raise ValueError("Not all contigs requested are in the track.")
-        self.contig_offsets = self.raw_contig_offsets[order]
-        return self
-
-    @classmethod
-    def from_path(cls, path: Union[str, Path]) -> "GenomeTrack":
-        """
-        Create a GenomeTrack from the specified path.
-
-        Parameters
-        ----------
-        path : Union[str, Path]
-            The path to the track data.
-
-        Returns
-        -------
-        track : GenomeTrack
-            A GenomeTrack object.
-
-        """
-        path = Path(path)
-        with open(path / "metadata.json") as f:
-            metadata = json.load(f)
-            contigs = metadata["contigs"]
-            non_length_shape = metadata["non_length_shape"]
-            dtype = np.dtype(metadata["dtype"])
-
-        contig_offsets = lengths_to_offsets(contigs.values())
-        track = np.memmap(path / "track.npy", mode="r", dtype=dtype).reshape(
-            *non_length_shape, -1
-        )
-        return cls(track, contigs, contig_offsets, contig_offsets)
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
@@ -280,7 +214,7 @@ def shift_and_realign_track(
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def shift_and_realign_tracks_sparse(
-    offset_idxs: NDArray[np.intp],
+    offset_idx: NDArray[np.intp],
     variant_idxs: NDArray[np.int32],
     offsets: NDArray[np.int32],
     regions: NDArray[np.int32],
@@ -295,7 +229,7 @@ def shift_and_realign_tracks_sparse(
 
     Parameters
     ----------
-    offset_idxs : NDArray[np.intp]
+    offset_idx : NDArray[np.intp]
         Shape = (regions, ploidy) Indices into offsets for each region.
     variant_idxs : NDArray[np.int32]
         Shape = (variants) Indices of variants.
@@ -324,7 +258,7 @@ def shift_and_realign_tracks_sparse(
         query_s = regions[query, 1]
 
         for hap in nb.prange(ploidy):
-            o_idx = offset_idxs[query, hap]
+            o_idx = offset_idx[query, hap]
             _out = out[query, hap]
             _shifts = shifts[query, hap]
 

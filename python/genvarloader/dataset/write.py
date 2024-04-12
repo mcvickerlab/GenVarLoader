@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union, cast
 
 import numpy as np
 import polars as pl
-from einops import rearrange
 from loguru import logger
 from natsort import natsorted
 from tqdm.auto import tqdm
@@ -219,44 +218,44 @@ def write_variants(
 
             _contig = normalize_contig_name(contig, variants.records.contigs)
             if _contig is None:
-                genos = SparseGenotypes.empty(len(_samples), variants.ploidy, n_regions)
+                genos = SparseGenotypes.empty(n_regions, len(_samples), variants.ploidy)
             else:
                 multiplier = 2
                 while True:
                     records = variants.records.vars_in_range(_contig, starts, ends)
+                    # (s p v)
                     genos = variants.genotypes.read(
                         _contig,
                         records.start_idxs,
                         records.end_idxs,
                         sample_idx=sample_idx,
                     )
-                    # (v s p)
-                    genos = rearrange(genos, "s p v -> v s p")
-                    # (v s p)
-                    ilens = np.where(genos == 1, records.size_diffs[:, None, None], 0)
-                    # (r s p)
-                    ilens = np.add.reduceat(ilens, records.offsets[:-1], axis=0)
-                    # (r s p)
-                    effective_length = (ends - starts)[:, None, None] + ilens
-                    # (r s p)
+                    # (s p v)
+                    ilens = np.where(genos == 1, records.size_diffs, 0)
+                    # (s p r)
+                    ilens = np.add.reduceat(ilens, records.offsets[:-1], axis=-1)
+                    # (s p r)
+                    effective_length = (ends - starts) + ilens
+                    # (s p r)
                     missing_length = region_length - effective_length
                     if np.all(missing_length <= 0):
                         break
                     # (r)
-                    ends += multiplier * missing_length.max((1, 2))
+                    ends += multiplier * missing_length.max((0, 1))
 
                 pbar.set_description(
                     f"Sparsifying genotypes for {part.height} regions on {contig}"
                 )
                 genos, c_max_ends = SparseGenotypes.from_dense_with_length(
-                    genos,
+                    genos=genos,
                     # make indices relative to the contig
-                    records.start_idxs - variants.records.contig_offsets[_contig],
-                    records.offsets.astype(np.int32),
-                    variants.records.v_diffs[_contig],
-                    variants.records.v_starts[_contig],
-                    starts,
-                    region_length,
+                    first_v_idxs=records.start_idxs
+                    - variants.records.contig_offsets[_contig],
+                    offsets=records.offsets.astype(np.int32),
+                    ilens=variants.records.v_diffs[_contig],
+                    positions=variants.records.v_starts[_contig],
+                    starts=starts,
+                    length=region_length,
                 )
                 max_ends[last_max_end_idx : last_max_end_idx + n_regions] = c_max_ends
                 last_max_end_idx += n_regions

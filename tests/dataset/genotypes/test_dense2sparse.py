@@ -1,12 +1,13 @@
+from typing import Tuple
+
 import numpy as np
 from einops import repeat
-from pytest_cases import fixture
-
 from genvarloader.dataset.genotypes import DenseGenotypes, SparseGenotypes
+from pytest_cases import fixture
 
 
 @fixture
-def dense_genos() -> DenseGenotypes:
+def genos():
     n_samples = 2
     genos = np.array(
         [
@@ -16,36 +17,52 @@ def dense_genos() -> DenseGenotypes:
         ],
         np.int8,
     )
-    genos = repeat(genos, "v p -> (s v) p", s=n_samples)
+    genos = repeat(genos, "v p -> s p v", s=n_samples)
     first_v_idxs = np.array([0], np.uint32)
     offsets = np.array([0, 3], np.uint32)
-    return DenseGenotypes(
+
+    sparse_v_idxs = np.array([2, 1, 2, 1], np.int32)
+    sparse_offsets = np.array([0, 1, 2, 3, 4], np.int32)
+    dense = DenseGenotypes(
         genos=genos, first_v_idxs=first_v_idxs, offsets=offsets, n_samples=n_samples
     )
-
-
-def test_dense2sparse(dense_genos: DenseGenotypes):
-    n_samples = dense_genos.n_samples
-    desired_genos = np.array(
-        [
-            [0, 1],
-            [1, -9],
-        ],
-        np.int8,
-    )
-    desired_genos = repeat(desired_genos, "v p -> (s v) p", s=n_samples)
-    desired = SparseGenotypes(
-        genos=desired_genos,
-        variant_idxs=np.array([1, 2, 1, 2], np.uintp),
-        offsets=np.array([0, 2, 4], np.uintp),
-        n_samples=n_samples,
+    sparse = SparseGenotypes(
+        variant_idxs=sparse_v_idxs,
+        offsets=sparse_offsets,
         n_regions=1,
+        n_samples=n_samples,
+        ploidy=2,
     )
+    return dense, sparse
 
-    actual = dense_genos.to_sparse()
 
-    np.testing.assert_equal(actual.genos, desired.genos)
+def test_from_dense(genos: Tuple[DenseGenotypes, SparseGenotypes]):
+    dense, desired = genos
+
+    actual = SparseGenotypes.from_dense(dense.genos, dense.first_v_idxs, dense.offsets)
+
     np.testing.assert_equal(actual.variant_idxs, desired.variant_idxs)
     np.testing.assert_equal(actual.offsets, desired.offsets)
-    assert actual.n_samples == desired.n_samples
-    assert actual.n_regions == desired.n_regions
+
+
+def test_from_dense_with_length(genos: Tuple[DenseGenotypes, SparseGenotypes]):
+    dense, desired = genos
+    ilens = np.array([0, 0, -3], np.int32)
+    positions = np.array([0, 1, 2], np.int32)
+    starts = np.array([0], np.int32)
+    length = 3
+    desired_max_ends = np.array([6], np.int32)
+
+    actual, max_ends = SparseGenotypes.from_dense_with_length(
+        dense.genos,
+        dense.first_v_idxs,
+        dense.offsets,
+        ilens,
+        positions,
+        starts,
+        length,
+    )
+
+    np.testing.assert_equal(actual.variant_idxs, desired.variant_idxs)
+    np.testing.assert_equal(actual.offsets, desired.offsets)
+    np.testing.assert_equal(max_ends, desired_max_ends)

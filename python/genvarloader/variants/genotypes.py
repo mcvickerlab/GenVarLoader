@@ -714,8 +714,8 @@ class VCFGenos(Genotypes):
         else:
             _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=int))
 
-        # (s p v)
         n_variants = (end_idxs - start_idxs).sum()
+        # (s p v)
         genos = np.empty(
             (len(self.samples), self.ploidy, n_variants),
             dtype=np.int8,
@@ -736,9 +736,9 @@ class VCFGenos(Genotypes):
             if overlapping_query_intervals.any():
                 # (n_valid)
                 place_idx = geno_idxs[overlapping_query_intervals]
+                genos[..., place_idx] = v.genotype.array()[:, :2, None]
                 # increment idxs for next iteration
                 geno_idxs[overlapping_query_intervals] += 1
-                genos[..., place_idx] = v.genotype.array()[:, :2, None]
             if (geno_idxs == finish_idxs).all():
                 break
 
