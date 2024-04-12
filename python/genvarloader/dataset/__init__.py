@@ -681,7 +681,7 @@ class Dataset:
         ds_idxs = np.ravel_multi_index((region_idxs, sample_idxs), self.shape)
         return self[ds_idxs]
 
-    def __getitem__(self, idx: Idx) -> Union[NDArray, Tuple[NDArray, ...]]:
+    def __getitem__(self, idx: Idx) -> Union[NDArray, Tuple[NDArray, ...], Any]:
         """Get a batch of haplotypes and tracks or intervals and tracks.
 
         Parameters
@@ -761,13 +761,16 @@ class Dataset:
         if self.return_indices:
             out.extend((_idx, s_idx, r_idx))
 
-        if self.transform is not None:
-            out = self.transform(*out)
-
         _out = tuple(out)
 
         if len(out) == 1:
             _out = _out[0]
+
+        if self.transform is not None:
+            if isinstance(_out, tuple):
+                _out = self.transform(*_out)
+            else:
+                _out = self.transform(_out)
 
         return _out
 

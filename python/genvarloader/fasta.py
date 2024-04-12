@@ -1,3 +1,4 @@
+import re
 from functools import partial
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Union, cast
@@ -28,7 +29,8 @@ class Fasta(Reader):
         path: Union[str, Path],
         pad: Optional[str] = None,
         alphabet: Optional[Union[str, sp.NucleotideAlphabet, sp.AminoAlphabet]] = None,
-        in_memory=False,
+        in_memory: bool = False,
+        cache: bool = False,
     ) -> None:
         """Read sequences from a FASTA file.
 
@@ -43,6 +45,13 @@ class Fasta(Reader):
             value. By default no padding is done and out-of-bound ranges raise an error.
         alphabet : str, sp.NucleotideAlphabet, sp.AminoAlphabet, optional
             Alphabet to use for the sequences. If not passed, defaults to DNA.
+        in_memory : bool, optional
+            Whether to load the sequences into memory. If `True`, the sequences will be
+            loaded into memory and the FASTA file will be closed. If `False`, the sequences
+            will be read from the FASTA file on demand. Defaults to `False`.
+        cache : bool, optional
+            Whether to cache the sequences to disk. If `True`, the sequences will be written
+            to disk in a `.fa.gvl` file. Defaults to `False`. Only used if `in_memory` is `True`.
 
         Raises
         ------
@@ -50,7 +59,7 @@ class Fasta(Reader):
             If pad value is not a single character.
         """
         self.name = name
-        self.path = path
+        self.path = Path(path)
         if pad is None:
             self.pad = pad
         else:
@@ -93,23 +102,56 @@ class Fasta(Reader):
         self.contigs = self._get_contig_lengths()
 
         self.handle: Optional[pysam.FastaFile] = None
+        fa_extension = re.compile(r"\.(fa|fna|fasta)(\.gz)?$")
+        self.cache_path = Path(fa_extension.sub(".fa.gvl", str(self.path)))
 
         if not in_memory:
             self.sequences = None
         else:
-            self.sequences = self._get_contigs(self.contigs)
+            if cache:
+                if not self.cache_path.exists():
+                    self._write_to_cache()
+                self.sequences = self._get_sequences(self.contigs)
+            else:
+                self.sequences = self._get_sequences(self.contigs)
 
     def _get_contig_lengths(self) -> Dict[str, int]:
         with self._open() as f:
             return {c: f.get_reference_length(c) for c in f.references}
 
-    def _get_contigs(self, contigs: Iterable[str]) -> Dict[str, NDArray[np.bytes_]]:
+    def _get_sequences(
+        self, contigs: Iterable[str], from_fasta=False
+    ) -> Dict[str, NDArray[np.bytes_]]:
         """Load contigs into memory."""
-        with self._open() as f:
-            return {
-                c: np.frombuffer(f.fetch(c).encode("ascii").upper(), "S1")
-                for c in contigs
-            }
+        if from_fasta:
+            with self._open() as f:
+                sequences = {
+                    c: np.frombuffer(f.fetch(c).encode("ascii").upper(), "S1")
+                    for c in contigs
+                }
+        elif self.cache_path.exists():
+            sequences: Dict[str, NDArray[np.bytes_]] = {}
+            for contig in contigs:
+                sequences[contig] = np.load(self.cache_path / f"{contig}.npy")
+        else:
+            with self._open() as f:
+                sequences = {
+                    c: np.frombuffer(f.fetch(c).encode("ascii").upper(), "S1")
+                    for c in contigs
+                }
+        return sequences
+
+    def _write_to_cache(self):
+        """Write contigs to cache."""
+        self.cache_path.mkdir(parents=True, exist_ok=True)
+
+        if self.sequences is None:
+            sequences = self._get_sequences(self.contigs, from_fasta=True)
+        else:
+            sequences = self.sequences
+
+        for contig, seq in sequences.items():
+            np.save(self.cache_path / f"{contig}.npy", seq)
 
     def _open(self):
         return pysam.FastaFile(str(self.path))
