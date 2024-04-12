@@ -25,11 +25,15 @@ class Reference:
     @classmethod
     def from_path_and_contigs(cls, fasta: Union[str, Path], contigs: List[str]):
         _fasta = Fasta("ref", fasta, "N")
+
+        if not _fasta.cache_path.exists():
+            _fasta._write_to_cache()
+
         contigs = cast(
             List[str],
             [normalize_contig_name(c, _fasta.contigs) for c in contigs],
         )
-        _fasta.sequences = _fasta._get_contigs(contigs)
+        _fasta.sequences = _fasta._get_sequences(contigs)
         if TYPE_CHECKING:
             assert _fasta.sequences is not None
             assert _fasta.pad is not None
