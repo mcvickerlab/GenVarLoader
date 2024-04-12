@@ -326,43 +326,43 @@ class Dataset:
         return len(self.available_tracks) > 0
 
     @property
-    def samples(self):
+    def samples(self) -> List[str]:
         if self.idx_map is None:
             return self.full_samples
         else:
-            return self.full_samples[self.sample_idxs]
+            return [self.full_samples[i] for i in self.sample_idxs]
 
     @property
-    def regions(self):
+    def regions(self) -> NDArray[np.int32]:
         if self.idx_map is None:
             return self.full_regions
         else:
             return self.full_regions[self.region_idxs]
 
     @property
-    def n_samples(self):
+    def n_samples(self) -> int:
         return len(self.sample_idxs)
 
     @property
-    def n_regions(self):
+    def n_regions(self) -> int:
         return len(self.region_idxs)
 
     @property
-    def shape(self):
+    def output_length(self) -> int:
+        return self.region_length - 2 * self.jitter
+
+    @property
+    def shape(self) -> Tuple[int, int]:
         """Return the shape of the dataset. (n_samples, n_regions)"""
         return self.n_regions, self.n_samples
 
     @property
-    def output_length(self):
-        return self.region_length - 2 * self.jitter
-
-    @property
-    def full_shape(self):
+    def full_shape(self) -> Tuple[int, int]:
         """Return the full shape of the dataset, ignoring any subsetting. (n_samples, n_regions)"""
         return len(self.full_regions), len(self.full_samples)
 
     def __len__(self) -> int:
-        return self.n_samples * self.n_regions
+        return int(np.prod(self.shape))
 
     def write_transformed_tracks(
         self,
@@ -721,17 +721,15 @@ class Dataset:
                 assert self.genotypes is not None
                 assert self.variants is not None
 
-            offset_idxs = self.get_geno_offset_idxs(s_idx, r_idx)
-
+            geno_offset_idx = self.get_geno_offset_idx(r_idx, s_idx)
             # (b p)
-            shifts = self.get_shifts(offset_idxs)
+            shifts = self.get_shifts(geno_offset_idx)
             # (b p l)
-            out.append(self.get_haplotypes(offset_idxs, r_idx, shifts))
+            out.append(self.get_haplotypes(geno_offset_idx, r_idx, shifts))
         elif self.sequence_type == "reference":
             if TYPE_CHECKING:
                 assert self.reference is not None
             shifts = None
-            offset_idxs = None
             out.append(
                 get_reference(
                     r_idx,
@@ -744,11 +742,10 @@ class Dataset:
             )
         else:
             shifts = None
-            offset_idxs = None
 
         if self.active_tracks:
             # [(b p l) ...]
-            out.extend(self.get_tracks(_idx, r_idx, shifts, offset_idxs))
+            out.extend(self.get_tracks(_idx, r_idx, shifts))
 
         if self.jitter > 0:
             start = self.rng.integers(
@@ -786,9 +783,9 @@ class Dataset:
             np.memmap(
                 self.path / "genotypes" / "offsets.npy", dtype=np.uint32, mode="r"
             ),
+            len(self.full_regions),
             len(self.full_samples),
             self.ploidy,
-            len(self.full_regions),
         )
         return genotypes
 
@@ -819,13 +816,22 @@ class Dataset:
 
         return intervals
 
-    def get_shifts(self, offset_idxs: NDArray[np.intp]):
+    def get_geno_offset_idx(self, region_idx, sample_idx):
+        if TYPE_CHECKING:
+            assert self.genotypes is not None
+            assert self.ploidy is not None
+        ploid_idx = np.arange(self.ploidy, dtype=np.intp)
+        rsp_idx = (region_idx[:, None], sample_idx[:, None], ploid_idx)
+        geno_offset_idx = np.ravel_multi_index(rsp_idx, self.genotypes.effective_shape)
+        return geno_offset_idx
+
+    def get_shifts(self, geno_offset_idx: NDArray[np.intp]):
         if TYPE_CHECKING:
             assert self.genotypes is not None
             assert self.variants is not None
         # (b p)
         diffs = get_diffs_sparse(
-            offset_idxs,
+            geno_offset_idx,
             self.genotypes.variant_idxs,
             self.genotypes.offsets,
             self.variants.sizes,
@@ -834,27 +840,10 @@ class Dataset:
         shifts = self.rng.integers(0, diffs + 1, dtype=np.int32)
         return shifts
 
-    def get_geno_offset_idxs(
-        self, sample_idxs: NDArray[np.intp], region_idxs: NDArray[np.intp]
-    ):
-        if TYPE_CHECKING:
-            assert self.genotypes is not None
-            assert self.ploidy is not None
-
-        n_queries = len(sample_idxs)
-        si = repeat(sample_idxs, "n -> (n p)", p=self.ploidy)
-        pi = repeat(np.arange(self.ploidy), "p -> (n p)", n=n_queries)
-        ri = repeat(region_idxs, "n -> (n p)", p=self.ploidy)
-        idx = (ri, si, pi)
-        offset_idxs = np.ravel_multi_index(idx, self.genotypes.effective_shape).reshape(
-            n_queries, self.ploidy
-        )
-        return offset_idxs
-
     def get_haplotypes(
         self,
-        offset_idxs: NDArray[np.intp],
-        region_idxs: NDArray[np.intp],
+        geno_offset_idx: NDArray[np.intp],
+        region_idx: NDArray[np.intp],
         shifts: NDArray[np.int32],
     ):
         if TYPE_CHECKING:
@@ -863,12 +852,12 @@ class Dataset:
             assert self.variants is not None
             assert self.ploidy is not None
 
-        n_queries = len(region_idxs)
+        n_queries = len(region_idx)
         haps = np.empty((n_queries, self.ploidy, self.region_length), np.uint8)
         reconstruct_haplotypes_from_sparse(
-            offset_idxs,
+            geno_offset_idx,
             haps,
-            self.regions[region_idxs],
+            self.regions[region_idx],
             shifts,
             self.genotypes.offsets,
             self.genotypes.variant_idxs,
@@ -884,18 +873,18 @@ class Dataset:
 
     def get_tracks(
         self,
-        ds_idx: NDArray[np.intp],
-        r_idx: NDArray[np.intp],
+        dataset_idx: NDArray[np.intp],
+        region_idx: NDArray[np.intp],
         shifts: Optional[NDArray[np.int32]] = None,
-        offset_idxs: Optional[NDArray[np.intp]] = None,
+        geno_offset_idx: Optional[NDArray[np.intp]] = None,
     ):
         if TYPE_CHECKING:
             assert self.active_tracks is not None
             assert self.intervals is not None
 
         # makes a copy so safe to mutate below
-        regions = self.full_regions[r_idx]
-        if shifts is None and offset_idxs is not None:
+        regions = self.full_regions[region_idx]
+        if shifts is None:
             # no shifts -> don't need to consider max ends, can use uniform region length
             regions[:, 2] = regions[:, 1] + self.region_length
 
@@ -904,13 +893,13 @@ class Dataset:
             intervals = self.intervals[name]
             # (b*l) ragged
             _tracks = intervals_to_tracks(
-                ds_idx,
+                dataset_idx,
                 regions,
                 intervals.data,
                 intervals.offsets,
             )
 
-            if shifts is not None and offset_idxs is not None:
+            if shifts is not None and geno_offset_idx is not None:
                 if TYPE_CHECKING:
                     assert self.ploidy is not None
                     assert self.variants is not None
@@ -920,10 +909,10 @@ class Dataset:
                 track_offsets = lengths_to_offsets(length_per_region)
 
                 out = np.empty(
-                    (len(r_idx), self.ploidy, self.region_length), np.float32
+                    (len(region_idx), self.ploidy, self.region_length), np.float32
                 )
                 shift_and_realign_tracks_sparse(
-                    offset_idxs=offset_idxs,
+                    offset_idx=geno_offset_idx,
                     variant_idxs=self.genotypes.variant_idxs,
                     offsets=self.genotypes.offsets,
                     regions=regions,
@@ -937,7 +926,7 @@ class Dataset:
                 _tracks = out
             else:
                 # (b*l) ragged -> (b l)
-                _tracks = _tracks.reshape(len(r_idx), self.region_length)
+                _tracks = _tracks.reshape(len(region_idx), self.region_length)
 
             tracks.append(_tracks)
 
