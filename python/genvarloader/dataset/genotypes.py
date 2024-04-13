@@ -165,7 +165,6 @@ class SparseGenotypes:
         # (s p v)
         keep = genos == 1
         n_per_rsp = get_n_per_rsp(keep, offsets, n_regions)
-        print(n_per_rsp)
         sparse_offsets = lengths_to_offsets(n_per_rsp.ravel(), np.int32)
         variant_idxs = keep_mask_to_rsp_v_idx(
             keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples, ploidy
@@ -335,11 +334,11 @@ def keep_mask_to_rsp_v_idx(
         fvi = first_v_idxs[r]
         o_s, o_e = offsets[r], offsets[r + 1]
         n_variants = o_e - o_s
+        if n_variants == 0:
+            continue
         for s in nb.prange(n_samples):
             for p in nb.prange(ploidy):
                 out_start = sparse_offsets[r * n_samples * ploidy + s * ploidy + p]
-                if n_variants == 0:
-                    continue
                 out_step = 0
                 for v in range(n_variants):
                     if keep[s, p, o_s + v]:

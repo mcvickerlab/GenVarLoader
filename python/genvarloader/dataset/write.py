@@ -257,6 +257,8 @@ def write_variants(
                     starts=starts,
                     length=region_length,
                 )
+                # make indices absolute
+                genos.variant_idxs += variants.records.contig_offsets[_contig]
                 max_ends[last_max_end_idx : last_max_end_idx + n_regions] = c_max_ends
                 last_max_end_idx += n_regions
 
