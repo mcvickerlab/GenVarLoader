@@ -212,7 +212,7 @@ def shift_and_realign_track(
             out[out_end_idx:] = 0
 
 
-@nb.njit(parallel=True, nogil=True, cache=True)
+# @nb.njit(parallel=True, nogil=True, cache=True)
 def shift_and_realign_tracks_sparse(
     offset_idx: NDArray[np.intp],
     variant_idxs: NDArray[np.int32],
@@ -275,7 +275,7 @@ def shift_and_realign_tracks_sparse(
             )
 
 
-@nb.njit(nogil=True, cache=True)
+# @nb.njit(nogil=True, cache=True)
 def shift_and_realign_track_sparse(
     offset_idx: int,
     variant_idxs: NDArray[np.int32],
@@ -345,8 +345,11 @@ def shift_and_realign_track_sparse(
             continue
 
         v_diff = sizes[variant]
-        v_len = max(0, v_diff + 1)
-        value = track[..., v_rel_pos]
+        # ok to do this before shift because there must be at least one nonzero diff if shift > 0
+        if v_diff == 0:
+            continue
+        v_len = max(1, v_diff + 1)
+        value = track[v_rel_pos]
 
         # handle shift
         if shifted < shift:

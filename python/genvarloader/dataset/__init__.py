@@ -729,6 +729,7 @@ class Dataset:
         elif self.sequence_type == "reference":
             if TYPE_CHECKING:
                 assert self.reference is not None
+            geno_offset_idx = None
             shifts = None
             out.append(
                 get_reference(
@@ -741,11 +742,12 @@ class Dataset:
                 ).view("S1")
             )
         else:
+            geno_offset_idx = None
             shifts = None
 
         if self.active_tracks:
             # [(b p l) ...]
-            out.extend(self.get_tracks(_idx, r_idx, shifts))
+            out.extend(self.get_tracks(_idx, r_idx, shifts, geno_offset_idx))
 
         if self.jitter > 0:
             start = self.rng.integers(
