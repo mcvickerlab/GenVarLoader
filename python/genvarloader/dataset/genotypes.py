@@ -836,8 +836,6 @@ def reconstruct_haplotype_from_sparse(
         # position of variant relative to ref from fetch(contig, start, q_end)
         # i.e. has been put into same coordinate system as ref_idx
         v_rel_pos = positions[variant] - ref_start
-        if v_rel_pos > len(ref):
-            raise RuntimeError(variant, ref_start, positions[variant])
 
         # overlapping variants
         # v_rel_pos < ref_idx only if we see an ALT at a given position a second
