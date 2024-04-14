@@ -33,20 +33,13 @@ def padded_slice(arr: NDArray, start: int, stop: int, pad_val: int):
     return out
 
 
-def subset_to_full_raveled_mapping(
-    full_shape: Tuple[int, int], ax1_indices: ArrayLike, ax2_indices: ArrayLike
+def oidx_to_raveled_idx(
+    row_idx: ArrayLike, col_idx: ArrayLike, full_shape: Tuple[int, int]
 ):
-    # Generate a grid of indices for the subset array
-    row_indices, col_indices = np.meshgrid(ax1_indices, ax2_indices, indexing="ij")
-
-    # Flatten the grid to get all combinations of row and column indices in the subset
-    row_indices_flat = row_indices.ravel()
-    col_indices_flat = col_indices.ravel()
-
-    # Convert these subset indices to linear indices in the context of the full array
-    # This leverages the fact that the linear index in a 2D array is given by: index = row * num_columns + column
-    full_array_linear_indices = row_indices_flat * full_shape[1] + col_indices_flat
-
+    full_array_linear_indices = np.ravel_multi_index(
+        np.ix_(row_idx, col_idx),  # type: ignore
+        full_shape,
+    ).ravel()
     return full_array_linear_indices
 
 

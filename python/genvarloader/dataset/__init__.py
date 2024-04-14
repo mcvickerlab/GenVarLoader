@@ -38,7 +38,7 @@ from .genotypes import (
 from .intervals import intervals_to_tracks, tracks_to_intervals
 from .reference import Reference
 from .tracks import shift_and_realign_tracks_sparse
-from .utils import regions_to_bed, splits_sum_le_value, subset_to_full_raveled_mapping
+from .utils import oidx_to_raveled_idx, regions_to_bed, splits_sum_le_value
 
 try:
     import torch
@@ -231,7 +231,7 @@ class Dataset:
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
         return_sequences: Optional[Literal[False, "reference", "haplotypes"]] = None,
         return_tracks: Optional[Union[Literal[False], str, List[str]]] = None,
-        transform: Optional[Callable] = None,
+        transform: Optional[Union[Literal[False], Callable]] = None,
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
@@ -265,7 +265,7 @@ class Dataset:
         to_evolve: Dict[str, Any] = {}
 
         if samples is not None or regions is not None:
-            ds = ds.subset_to(samples, regions)
+            ds = ds.subset_to(regions=regions, samples=samples)
 
         if return_sequences is not None:
             if return_sequences == "haplotypes" and not self.has_genotypes:
@@ -294,6 +294,8 @@ class Dataset:
                 to_evolve["active_tracks"] = return_tracks
 
         if transform is not None:
+            if transform is False:
+                transform = None
             to_evolve["transform"] = transform
 
         if seed is not None:
@@ -504,8 +506,8 @@ class Dataset:
 
     def subset_to(
         self,
-        samples: Optional[Sequence[str]] = None,
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
+        samples: Optional[Sequence[str]] = None,
     ):
         if regions is None and samples is None:
             return self
@@ -515,10 +517,8 @@ class Dataset:
             if missing := _samples.difference(self.full_samples):
                 raise ValueError(f"Samples {missing} not found in the dataset")
             sample_idxs = np.array(
-                [i for i, s in enumerate(self.samples) if s in _samples], np.intp
+                [i for i, s in enumerate(self.full_samples) if s in _samples], np.intp
             )
-            if self.idx_map is not None:
-                sample_idxs = self.sample_idxs[sample_idxs]
         else:
             sample_idxs = self.sample_idxs
 
@@ -540,15 +540,13 @@ class Dataset:
                 raise ValueError(
                     f"Only {n_available_regions}/{n_query_regions} requested regions exist in the dataset."
                 )
-            if self.idx_map is not None:
-                region_idxs = self.region_idxs[region_idxs]
         else:
             region_idxs = self.region_idxs
 
-        idx_map = subset_to_full_raveled_mapping(
+        idx_map = oidx_to_raveled_idx(
+            row_idx=region_idxs,
+            col_idx=sample_idxs,
             full_shape=self.full_shape,
-            ax1_indices=region_idxs,
-            ax2_indices=sample_idxs,
         )
 
         return evolve(
