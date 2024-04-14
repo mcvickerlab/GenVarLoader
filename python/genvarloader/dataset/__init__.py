@@ -358,7 +358,7 @@ class Dataset:
 
     @property
     def full_shape(self) -> Tuple[int, int]:
-        """Return the full shape of the dataset, ignoring any subsetting. (n_samples, n_regions)"""
+        """Return the full shape of the dataset, ignoring any subsetting. (n_regions, n_samples)"""
         return len(self.full_regions), len(self.full_samples)
 
     def __len__(self) -> int:
@@ -546,9 +546,9 @@ class Dataset:
             region_idxs = self.region_idxs
 
         idx_map = subset_to_full_raveled_mapping(
-            self.full_shape,
-            sample_idxs,
-            region_idxs,
+            full_shape=self.full_shape,
+            ax1_indices=region_idxs,
+            ax2_indices=sample_idxs,
         )
 
         return evolve(
@@ -862,7 +862,7 @@ class Dataset:
         reconstruct_haplotypes_from_sparse(
             geno_offset_idx,
             haps,
-            self.regions[region_idx],
+            self.full_regions[region_idx],
             shifts,
             self.genotypes.offsets,
             self.genotypes.variant_idxs,
@@ -941,7 +941,7 @@ class Dataset:
         """Get a polars DataFrame of the regions in the dataset, corresponding to the coordinates
         used when writing the dataset. In other words, each region will have length
         `ds.output_length + 2 * ds.max_jitter`."""
-        bed = regions_to_bed(self.regions, self.contigs)
+        bed = regions_to_bed(self.full_regions, self.contigs)
         bed = bed.with_columns(chromEnd=pl.col("chromStart") + self.region_length)
         return bed
 
