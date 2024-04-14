@@ -203,8 +203,8 @@ class PgenGenos(Genotypes):
         start_idxs: ArrayLike,
         length: int,
         ilens: NDArray[np.int32],
-        sample_idx: ArrayLike | None = None,
-        haplotype_idx: ArrayLike | None = None,
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
     ):
         raise NotImplementedError
 
@@ -452,8 +452,8 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
         start_idxs: ArrayLike,
         length: int,
         ilens: NDArray[np.int32],
-        sample_idx: ArrayLike | None = None,
-        haplotype_idx: ArrayLike | None = None,
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
     ):
         raise NotImplementedError
 
@@ -518,8 +518,8 @@ class NumpyGenos(Genotypes, FromRecsGenos):
         start_idxs: ArrayLike,
         length: int,
         ilens: NDArray[np.int32],
-        sample_idx: ArrayLike | None = None,
-        haplotype_idx: ArrayLike | None = None,
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
     ):
         raise NotImplementedError
 
@@ -607,8 +607,8 @@ class MemmapGenos(Genotypes, FromRecsGenos):
         start_idxs: ArrayLike,
         length: int,
         ilens: NDArray[np.int32],
-        sample_idx: ArrayLike | None = None,
-        haplotype_idx: ArrayLike | None = None,
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
     ):
         raise NotImplementedError
 
