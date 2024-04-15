@@ -19,6 +19,7 @@ from typing import (
 import numba as nb
 import numpy as np
 import polars as pl
+import seqpro as sp
 from attrs import define, evolve
 from einops import repeat
 from loguru import logger
@@ -711,6 +712,7 @@ class Dataset:
         if self.idx_map is not None:
             _idx = self.idx_map[_idx]
         r_idx, s_idx = np.unravel_index(_idx, self.full_shape)
+        to_rc = self.full_regions[r_idx, 3] == -1
 
         out: List[NDArray] = []
 
@@ -723,29 +725,34 @@ class Dataset:
             # (b p)
             shifts = self.get_shifts(geno_offset_idx)
             # (b p l)
-            out.append(self.get_haplotypes(geno_offset_idx, r_idx, shifts))
+            haps = self.get_haplotypes(geno_offset_idx, r_idx, shifts)
+            haps[to_rc] = sp.DNA.reverse_complement(haps, -1)
+            out.append(haps)
         elif self.sequence_type == "reference":
             if TYPE_CHECKING:
                 assert self.reference is not None
             geno_offset_idx = None
             shifts = None
-            out.append(
-                get_reference(
-                    r_idx,
-                    self.full_regions,
-                    self.reference.reference,
-                    self.reference.offsets,
-                    self.region_length,
-                    self.reference.pad_char,
-                ).view("S1")
-            )
+            ref = get_reference(
+                r_idx,
+                self.full_regions,
+                self.reference.reference,
+                self.reference.offsets,
+                self.region_length,
+                self.reference.pad_char,
+            ).view("S1")
+            ref[to_rc] = sp.DNA.reverse_complement(ref, -1)
+            out.append(ref)
         else:
             geno_offset_idx = None
             shifts = None
 
         if self.active_tracks:
             # [(b p l) ...]
-            out.extend(self.get_tracks(_idx, r_idx, shifts, geno_offset_idx))
+            tracks = self.get_tracks(_idx, r_idx, shifts, geno_offset_idx)
+            for t in tracks:
+                t[to_rc] = t[to_rc, ..., ::-1]
+            out.extend(tracks)
 
         if self.jitter > 0:
             start = self.rng.integers(
@@ -848,7 +855,7 @@ class Dataset:
         geno_offset_idx: NDArray[np.intp],
         region_idx: NDArray[np.intp],
         shifts: NDArray[np.int32],
-    ):
+    ) -> NDArray[np.bytes_]:
         if TYPE_CHECKING:
             assert self.genotypes is not None
             assert self.reference is not None
@@ -885,7 +892,7 @@ class Dataset:
             assert self.active_tracks is not None
             assert self.intervals is not None
 
-        # makes a copy so safe to mutate below
+        # fancy indexing makes a copy so safe to mutate
         regions = self.full_regions[region_idx]
         if shifts is None:
             # no shifts -> don't need to consider max ends, can use uniform region length

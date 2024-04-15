@@ -43,7 +43,7 @@ def oidx_to_raveled_idx(
     return full_array_linear_indices
 
 
-def regions_to_bed(regions: NDArray, contigs: Sequence[str]) -> pl.DataFrame:
+def regions_to_bed(regions: NDArray[np.int32], contigs: Sequence[str]) -> pl.DataFrame:
     """Convert regions to a BED3 DataFrame.
 
     Parameters
@@ -58,11 +58,14 @@ def regions_to_bed(regions: NDArray, contigs: Sequence[str]) -> pl.DataFrame:
     pl.DataFrame
         Bed DataFrame.
     """
-    bed = pl.DataFrame(
-        regions, schema=["chrom", "chromStart", "chromEnd"]
-    ).with_columns(pl.all().cast(pl.Int64))
+    cols = ["chrom", "chromStart", "chromEnd", "strand"]
+    bed = pl.DataFrame(regions, schema=cols)
     cmap = dict(enumerate(contigs))
-    bed = bed.with_columns(pl.col("chrom").replace(cmap, return_dtype=pl.Utf8))
+    bed = bed.with_columns(
+        pl.col("chrom").replace(cmap, return_dtype=pl.Utf8),
+        pl.col("strand").replace({1: "+", -1: "-"}, return_dtype=pl.Utf8),
+        pl.col("chromStart", "chromEnd").cast(pl.Int64),
+    ).select(*cols)
     return bed
 
 

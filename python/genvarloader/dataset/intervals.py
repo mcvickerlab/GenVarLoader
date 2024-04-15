@@ -1,5 +1,6 @@
 import numba as nb
 import numpy as np
+import taichi as ti
 from numpy.typing import NDArray
 
 from ..types import INTERVAL_DTYPE
@@ -150,3 +151,45 @@ def _compact_mask(
         elif scanned_backward_mask[i] != scanned_backward_mask[i - 1]:
             compacted_backward_mask[scanned_backward_mask[i] - 1] = i
     return compacted_backward_mask
+
+
+@ti.dataclass
+class _Interval:
+    start: ti.i32
+    end: ti.i32
+    value: ti.f32
+
+
+@ti.kernel
+def ti_intervals_to_tracks(
+    interval_idxs: ti.types.ndarray(ti.i32, shape=1),  # type: ignore
+    interval_idx_to_offset: ti.types.ndarray(ti.i32, ndim=1),  # type: ignore
+    offset_idxs: ti.types.ndarray(ti.i32, ndim=1),  # type: ignore
+    regions: ti.types.ndarray(ti.i32, ndim=2),  # type: ignore
+    intervals: ti.template(),  # type: ignore
+    out: ti.types.ndarray(ti.f32, ndim=1),  # type: ignore
+    out_offsets: ti.types.ndarray(ti.i32, ndim=1),  # type: ignore
+):
+    """Decompress intervals to tracks at base-pair resolution.
+
+    Parameters
+    ----------
+    interval_to_offset : NDArray[int32]
+        Mapping from
+    """
+    for i in interval_idxs:
+        interval = interval_idxs[i]
+        query = interval_idx_to_offset[i]
+        offset_idxs[query]
+
+        q_s = regions[query, 1]
+        query_length = regions[query, 2] - regions[query, 1]
+        out_idx = out_offsets[query]
+        _out = out[out_idx : out_idx + query_length]
+
+        itv = intervals[interval]
+        start, end = itv.start - q_s, itv.end - q_s
+        if start >= query_length:
+            continue
+        for i in range(start, end):
+            _out[i] = itv.value
