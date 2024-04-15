@@ -693,7 +693,7 @@ def reconstruct_haplotypes_from_sparse(
     out : NDArray[np.uint8]
         Shape = (n_regions, ploidy, out_length) Output array.
     regions : NDArray[np.int32]
-        Shape = (n_regions, 3) Regions to reconstruct haplotypes.
+        Shape = (n_regions, 4) Regions to reconstruct haplotypes.
     shifts : NDArray[np.uint32]
         Shape = (n_regions, ploidy) Shifts for each region.
     offsets : NDArray[np.uint32]

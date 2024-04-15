@@ -142,7 +142,13 @@ def prep_bed(
         raise ValueError("No regions found in the BED file.")
 
     contigs = natsorted(bed["chrom"].unique().to_list())
-    bed = bed.select("chrom", "chromStart", "chromEnd")
+    if "strand" not in bed:
+        bed = bed.with_columns(strand=pl.lit(1, pl.Int32))
+    else:
+        bed = bed.with_columns(
+            pl.col("strand").replace({"+": 1, "-": -1}, return_dtype=pl.Int32)
+        )
+    bed = bed.select("chrom", "chromStart", "chromEnd", "strand")
     with pl.StringCache():
         pl.Series(contigs, dtype=pl.Categorical)
         bed = bed.sort(pl.col("chrom").cast(pl.Categorical), pl.col("chromStart"))
