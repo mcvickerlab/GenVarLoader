@@ -1,7 +1,12 @@
 import numpy as np
+import taichi
 from attrs import define
 from einops import repeat
-from genvarloader.dataset.intervals import intervals_to_tracks, tracks_to_intervals
+from genvarloader.dataset.intervals import (
+    intervals_to_tracks,
+    ti_intervals_to_tracks,
+    tracks_to_intervals,
+)
 from genvarloader.types import INTERVAL_DTYPE, RaggedIntervals
 from numpy.typing import NDArray
 from pytest_cases import parametrize_with_cases
@@ -99,3 +104,13 @@ def test_tracks_to_intervals(case: Case):
     intervals = RaggedIntervals.from_offsets(intervals, 1, offsets)
     np.testing.assert_array_equal(intervals.data, case.intervals.data)
     np.testing.assert_array_equal(intervals.offsets, case.intervals.offsets)
+
+
+@parametrize_with_cases("case", cases=".")
+def test_ti_intervals_to_tracks(case: Case):
+    taichi.init(taichi.gpu)
+    intervals = case.intervals
+    out = ti_intervals_to_tracks(
+        case.interval_idx, case.regions, intervals.data, intervals.offsets
+    )
+    np.testing.assert_array_equal(out, case.track)
