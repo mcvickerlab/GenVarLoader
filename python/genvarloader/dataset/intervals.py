@@ -1,3 +1,5 @@
+from typing import cast
+
 import numba as nb
 import numpy as np
 import taichi as ti
@@ -153,6 +155,46 @@ def _compact_mask(
     return compacted_backward_mask
 
 
+def ti_intervals_to_tracks(
+    offset_idxs: NDArray[np.intp],
+    regions: NDArray[np.int32],
+    intervals: NDArray[np.void],
+    offsets: NDArray[np.int32],
+) -> NDArray[np.float32]:
+    """Convert intervals to tracks at base-pair resolution.
+
+    Parameters
+    ----------
+    offset_idxs : NDArray[np.intp]
+        Shape = (n_queries) Indexes into offsets.
+    regions : NDArray[np.int32]
+        Shape = (n_queries, 3) Regions for each query.
+    intervals : NDArray[np.void]
+        Shape = (n_intervals) Sorted intervals, each is (start, end, value).
+    offsets : NDArray[np.uint32]
+        Shape = (n_interval_sets + 1) Offsets into intervals and values.
+        For a GVL Dataset, n_interval_sets = n_samples * n_regions with that layout.
+
+    Returns
+    -------
+    out : NDArray[np.float32]
+        Shape = (n_queries) Ragged array of tracks.
+    """
+    # (intervals) (intervals) (queries+1)
+    itv_subset, itv_idx_to_query_idx, track_offsets = _prep_for_kernel(
+        offset_idxs, regions, intervals, offsets
+    )
+
+    ti_itvs = _Interval.field(shape=len(itv_subset))
+    ti_itvs.from_numpy(itv_subset)
+
+    tracks = ti.field(ti.f32, shape=track_offsets[-1])
+
+    _i2t_kernel(ti_itvs, itv_idx_to_query_idx, regions, tracks, track_offsets)
+
+    return cast(NDArray[np.float32], tracks.to_numpy(np.float32))
+
+
 @ti.dataclass
 class _Interval:
     start: ti.i32
@@ -160,15 +202,47 @@ class _Interval:
     value: ti.f32
 
 
+@nb.njit(parallel=True, nogil=True, cache=True)
+def _prep_for_kernel(
+    offset_idxs: NDArray[np.intp],
+    regions: NDArray[np.int32],
+    intervals: NDArray[np.void],
+    offsets: NDArray[np.int32],
+):
+    n_queries = len(offset_idxs)
+
+    lengths = regions[:, 2] - regions[:, 1]
+    track_offsets = np.empty(n_queries + 1, np.int32)
+    track_offsets[0] = 0
+    # (q-1) = (q-1)
+    track_offsets[1:] = lengths.cumsum()
+
+    n_per_query = np.empty(n_queries, np.int32)
+    for i in nb.prange(n_queries):
+        s, e = offsets[i], offsets[i + 1]
+        n_per_query[i] = e - s
+
+    out_offsets = np.empty(n_queries + 1, np.int32)
+    out_offsets[0] = 0
+    out_offsets[1:] = n_per_query.cumsum()
+    n_intervals = out_offsets[-1]
+    itv_subset = np.empty(n_intervals, INTERVAL_DTYPE)
+    itv_idx_to_query_idx = np.empty(n_intervals, np.int32)
+    for i in nb.prange(n_queries):
+        s, e = offsets[i], offsets[i + 1]
+        out_s = out_offsets[i]
+        itv_subset[out_s : out_s + e - s] = intervals[s:e]
+        itv_idx_to_query_idx[out_s : out_s + e - s] = i
+    return itv_subset, itv_idx_to_query_idx, track_offsets
+
+
 @ti.kernel
-def ti_intervals_to_tracks(
-    interval_idxs: ti.types.ndarray(ti.i32, shape=1),  # type: ignore
-    interval_idx_to_offset: ti.types.ndarray(ti.i32, ndim=1),  # type: ignore
-    offset_idxs: ti.types.ndarray(ti.i32, ndim=1),  # type: ignore
-    regions: ti.types.ndarray(ti.i32, ndim=2),  # type: ignore
+def _i2t_kernel(
     intervals: ti.template(),  # type: ignore
-    out: ti.types.ndarray(ti.f32, ndim=1),  # type: ignore
-    out_offsets: ti.types.ndarray(ti.i32, ndim=1),  # type: ignore
+    interval_idx_to_query_idx: ti.types.ndarray(ti.i32, ndim=1),  # type: ignore
+    regions: ti.types.ndarray(ti.i32, ndim=2),  # type: ignore
+    tracks: ti.template(),  # type: ignore
+    track_offsets: ti.types.ndarray(ti.i32, ndim=1),  # type: ignore
 ):
     """Decompress intervals to tracks at base-pair resolution.
 
@@ -177,19 +251,19 @@ def ti_intervals_to_tracks(
     interval_to_offset : NDArray[int32]
         Mapping from
     """
-    for i in interval_idxs:
-        interval = interval_idxs[i]
-        query = interval_idx_to_offset[i]
-        offset_idxs[query]
+    for i in intervals:
+        itv = intervals[i]
+
+        query = interval_idx_to_query_idx[i]
 
         q_s = regions[query, 1]
-        query_length = regions[query, 2] - regions[query, 1]
-        out_idx = out_offsets[query]
-        _out = out[out_idx : out_idx + query_length]
+        q_e = regions[query, 2]
+        query_length = q_e - q_s
 
-        itv = intervals[interval]
+        out_s = track_offsets[query]
+
         start, end = itv.start - q_s, itv.end - q_s
         if start >= query_length:
             continue
-        for i in range(start, end):
-            _out[i] = itv.value
+        for p in range(start, end):
+            tracks[out_s + p] = itv.value
