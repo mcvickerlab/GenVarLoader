@@ -713,6 +713,7 @@ class Dataset:
             _idx = self.idx_map[_idx]
         r_idx, s_idx = np.unravel_index(_idx, self.full_shape)
         to_rc = self.full_regions[r_idx, 3] == -1
+        should_rc = to_rc.any()
 
         out: List[NDArray] = []
 
@@ -726,7 +727,8 @@ class Dataset:
             shifts = self.get_shifts(geno_offset_idx)
             # (b p l)
             haps = self.get_haplotypes(geno_offset_idx, r_idx, shifts)
-            haps[to_rc] = sp.DNA.reverse_complement(haps, -1)
+            if should_rc:
+                haps[to_rc] = sp.DNA.reverse_complement(haps[to_rc], -1)
             out.append(haps)
         elif self.sequence_type == "reference":
             if TYPE_CHECKING:
@@ -741,7 +743,8 @@ class Dataset:
                 self.region_length,
                 self.reference.pad_char,
             ).view("S1")
-            ref[to_rc] = sp.DNA.reverse_complement(ref, -1)
+            if should_rc:
+                ref[to_rc] = sp.DNA.reverse_complement(ref[to_rc], -1)
             out.append(ref)
         else:
             geno_offset_idx = None
@@ -750,8 +753,9 @@ class Dataset:
         if self.active_tracks:
             # [(b p l) ...]
             tracks = self.get_tracks(_idx, r_idx, shifts, geno_offset_idx)
-            for t in tracks:
-                t[to_rc] = t[to_rc, ..., ::-1]
+            if should_rc:
+                for t in tracks:
+                    t[to_rc] = t[to_rc, ..., ::-1]
             out.extend(tracks)
 
         if self.jitter > 0:
@@ -949,6 +953,10 @@ class Dataset:
         bed = regions_to_bed(self.full_regions, self.contigs)
         bed = bed.with_columns(chromEnd=pl.col("chromStart") + self.region_length)
         return bed
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
