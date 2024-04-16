@@ -13,6 +13,7 @@ notebooks/
 scripts/
 .ruff_cache/
 .benchmarks/
+.custom_benchmarks/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

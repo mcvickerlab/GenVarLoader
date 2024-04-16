@@ -40,15 +40,15 @@ def nonoverlapping_intervals(
     rng = np.random.default_rng(seed)
 
     gap_lengths = nonnegative_integers_with_sum(n, max_gap_length, rng)
-    length = gap_lengths + min_width
+    lengths = gap_lengths + min_width
 
-    min_starts = np.full_like(length, low)
-    min_starts[1:] += length[:-1].cumsum()
+    min_starts = np.full_like(lengths, low)
+    min_starts[1:] += lengths[:-1].cumsum()
 
     starts = rng.integers(min_starts, min_starts + gap_lengths + 1, dtype=np.int32)
 
     min_ends = np.maximum(starts + min_width, min_starts + gap_lengths)
-    max_ends = min_starts + length + 1
+    max_ends = min_starts + lengths + 1
     ends = rng.integers(min_ends, max_ends, dtype=np.int32)
 
     if max_width is not None:
