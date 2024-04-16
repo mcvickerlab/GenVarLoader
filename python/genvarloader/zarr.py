@@ -116,7 +116,8 @@ class ZarrTracks(Reader):
 
                         if tstore is None:
                             tstore = ts_open(
-                                dtype=data.dtype, shape=data.shape
+                                dtype=data.dtype,
+                                shape=(reader.sizes["sample"], *data.shape[1:]),
                             ).result()
 
                         pbar.set_description(f"Writing {contig}")
