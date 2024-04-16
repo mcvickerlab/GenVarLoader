@@ -171,7 +171,7 @@ def ti_intervals_to_tracks(
         Shape = (n_queries, 3) Regions for each query.
     intervals : NDArray[np.void]
         Shape = (n_intervals) Sorted intervals, each is (start, end, value).
-    offsets : NDArray[np.uint32]
+    offsets : NDArray[np.int32]
         Shape = (n_interval_sets + 1) Offsets into intervals and values.
         For a GVL Dataset, n_interval_sets = n_samples * n_regions with that layout.
 
@@ -248,8 +248,16 @@ def _i2t_kernel(
 
     Parameters
     ----------
-    interval_to_offset : NDArray[int32]
-        Mapping from
+    intervals
+        Shape = (n_intervals) Sorted intervals, each is (start, end, value).
+    interval_idx_to_query_idx : NDArray[np.int32]
+        Shape = (n_intervals) Maps intervals to queries.
+    regions : NDArray[np.int32]
+        Shape = (n_queries, 4) Regions for each query.
+    tracks
+        Shape = (n_queries*query_length) Ragged array of tracks.
+    track_offsets : NDArray[np.int32]
+        Shape = (n_queries + 1) Offsets into intervals and values.
     """
     for i in intervals:
         itv = intervals[i]
