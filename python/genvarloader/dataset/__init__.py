@@ -97,7 +97,7 @@ class Dataset:
     return_indices: bool = False
 
     @classmethod
-    def open(
+    def _open(
         cls,
         path: Union[str, Path],
         reference: Optional[Union[str, Path]] = None,
@@ -199,7 +199,7 @@ class Dataset:
         return dataset
 
     @classmethod
-    def open_with_settings(
+    def open(
         cls,
         path: Union[str, Path],
         reference: Optional[Union[str, Path]] = None,
@@ -207,14 +207,39 @@ class Dataset:
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
         return_sequences: Optional[Literal[False, "reference", "haplotypes"]] = None,
         return_tracks: Optional[Union[Literal[False], str, List[str]]] = None,
-        transform: Optional[Callable] = None,
+        transform: Optional[Union[Literal[False], Callable]] = None,
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
     ):
+        """Open a dataset from a path. If no reference genome is provided, the dataset can only yield tracks.
+
+        Parameters
+        ----------
+        path : Union[str, Path]
+            The path to the dataset.
+        reference : Optional[Union[str, Path]], optional
+            The path to the reference genome, by default None
+        samples : Optional[Sequence[str]], optional
+            The samples to subset to, by default None
+        regions : Optional[Union[str, Path, pl.DataFrame]], optional
+            The regions to subset to, by default None
+        return_sequences : Optional[Literal[False, "reference", "haplotypes"]], optional
+            The sequence type to return. Set this to False to disable returning sequences entirely.
+        return_tracks : Optional[Union[Literal[False], str, List[str]]], optional
+            The tracks to return, by default None. Set this to False to disable returning tracks entirely.
+        transform : Optional[Union[Literal[False], Callable]], optional
+            The transform to set, by default None
+        seed : Optional[int], optional
+            The seed to set, by default None
+        jitter : Optional[int], optional
+            The jitter to set, by default None
+        return_indices : Optional[bool], optional
+            Whether to return indices, by default None
+        """
         if return_sequences is False:
             reference = None
-        ds = cls.open(path, reference).with_settings(
+        ds = cls._open(path, reference).with_settings(
             samples=samples,
             regions=regions,
             return_sequences=return_sequences,

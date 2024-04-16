@@ -102,7 +102,7 @@ class Fasta(Reader):
         self.contigs = self._get_contig_lengths()
 
         self.handle: Optional[pysam.FastaFile] = None
-        fa_extension = re.compile(r"\.(fa|fna|fasta)(\.gz)?$")
+        fa_extension = re.compile(r"\.(fa|fna|fasta)(\.b?gz)?$")
         self.cache_path = Path(fa_extension.sub(".fa.gvl", str(self.path)))
 
         if not in_memory:
