@@ -12,10 +12,10 @@ from natsort import natsorted
 from tqdm.auto import tqdm
 
 from ..bigwig import BigWigs
-from ..utils import normalize_contig_name, read_bedlike, with_length
+from ..utils import lengths_to_offsets, normalize_contig_name, read_bedlike, with_length
 from ..variants import Variants
 from ..variants.genotypes import VCFGenos
-from .genotypes import SparseGenotypes
+from .genotypes import SparseGenotypes, get_haplotype_ilens
 
 
 def write(
@@ -169,9 +169,9 @@ def prep_bed(
 def write_regions(path: Path, bed: pl.DataFrame, contigs: List[str]):
     with pl.StringCache():
         pl.Series(contigs, dtype=pl.Categorical)
-        regions = bed.with_columns(pl.col("chrom").cast(pl.Categorical)).with_columns(
-            pl.all().cast(pl.Int32)
-        )
+        regions = bed.with_columns(
+            pl.col("chrom").cast(pl.Categorical).to_physical()
+        ).with_columns(pl.all().cast(pl.Int32))
     regions = regions.to_numpy()
     np.save(path / "regions.npy", regions)
 
@@ -184,6 +184,9 @@ def write_variants(
     region_length: int,
     samples: Optional[List[str]] = None,
 ):
+    if TYPE_CHECKING:
+        assert isinstance(variants.genotypes, VCFGenos)
+
     if samples is None:
         len(variants.samples)
         sample_idx = None
@@ -219,50 +222,59 @@ def write_variants(
                 f"Reading genotypes for {part.height} regions on {contig}"
             )
             starts = part["chromStart"].to_numpy()
-            ends = part["chromEnd"].to_numpy()
+            ends = part["chromEnd"].to_numpy(writable=True)
             n_regions = part.height
 
             _contig = normalize_contig_name(contig, variants.records.contigs)
             if _contig is None:
-                genos = SparseGenotypes.empty(n_regions, len(_samples), variants.ploidy)
+                genos = SparseGenotypes.empty(
+                    n_regions=n_regions, n_samples=len(_samples), ploidy=variants.ploidy
+                )
             else:
-                multiplier = 2
+                multiplier = 0.1
+                ends += np.ceil(region_length * multiplier).astype(np.int32)
                 while True:
-                    records = variants.records.vars_in_range(_contig, starts, ends)
+                    rel_s_idx = variants.records.find_relative_start_idx(
+                        _contig, starts
+                    )
+                    rel_e_idx = variants.records.find_relative_end_idx(_contig, ends)
+
+                    s_idx = variants.records.contig_offsets[_contig] + rel_s_idx
+                    e_idx = variants.records.contig_offsets[_contig] + rel_e_idx
                     # (s p v)
                     genos = variants.genotypes.read(
-                        _contig,
-                        records.start_idxs,
-                        records.end_idxs,
-                        sample_idx=sample_idx,
+                        _contig, s_idx, e_idx, sample_idx=sample_idx
                     )
-                    # (s p v)
-                    ilens = np.where(genos == 1, records.size_diffs, 0)
+                    n_per_region = e_idx - s_idx
+                    offsets = lengths_to_offsets(n_per_region)
+
                     # (s p r)
-                    ilens = np.add.reduceat(ilens, records.offsets[:-1], axis=-1)
+                    _, haplotype_ilens = get_haplotype_ilens(
+                        genos, rel_s_idx, offsets, variants.records.v_diffs[_contig]
+                    )
+                    haplotype_lengths = ends - starts + haplotype_ilens
                     # (s p r)
-                    effective_length = (ends - starts) + ilens
-                    # (s p r)
-                    missing_length = region_length - effective_length
+                    missing_length = region_length - haplotype_lengths
                     if np.all(missing_length <= 0):
                         break
                     # (r)
-                    ends += multiplier * missing_length.max((0, 1))
+                    ends += np.ceil(
+                        (1 + multiplier) * missing_length.max((0, 1))
+                    ).astype(np.int32)
 
                 pbar.set_description(
                     f"Sparsifying genotypes for {part.height} regions on {contig}"
                 )
                 genos, c_max_ends = SparseGenotypes.from_dense_with_length(
                     genos=genos,
-                    # make indices relative to the contig
-                    first_v_idxs=records.start_idxs
-                    - variants.records.contig_offsets[_contig],
-                    offsets=records.offsets.astype(np.int32),
+                    first_v_idxs=rel_s_idx,
+                    offsets=lengths_to_offsets(e_idx - s_idx),
                     ilens=variants.records.v_diffs[_contig],
                     positions=variants.records.v_starts[_contig],
                     starts=starts,
                     length=region_length,
                 )
+
                 # make indices absolute
                 genos.variant_idxs += variants.records.contig_offsets[_contig]
                 max_ends[last_max_end_idx : last_max_end_idx + n_regions] = c_max_ends

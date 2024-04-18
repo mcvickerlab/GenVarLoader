@@ -5,6 +5,8 @@ import numpy as np
 import polars as pl
 from numpy.typing import ArrayLike, NDArray
 
+from ..utils import DTYPE
+
 
 @nb.njit(nogil=True, cache=True)
 def padded_slice(arr: NDArray, start: int, stop: int, pad_val: int):
@@ -94,3 +96,38 @@ def splits_sum_le_value(arr: NDArray[np.number], max_value: float) -> NDArray[np
             current_sum = value
     indices.append(len(arr))
     return np.array(indices, np.intp)
+
+
+def reduceat_offsets(
+    ufunc: np.ufunc, arr: NDArray[DTYPE], offsets: NDArray[np.integer], axis: int = 0
+) -> NDArray[DTYPE]:
+    """Reduce an array at offsets.
+
+    Parameters
+    ----------
+    ufunc : np.ufunc
+        Ufunc.
+    arr : NDArray[np.number]
+        Array to reduce.
+    offsets : NDArray[np.int32]
+        Offsets.
+    axis : int, optional
+        Axis, by default 0.
+
+    Returns
+    -------
+    out_array
+        Reduced array.
+    """
+    n_reductions = len(offsets) - 1
+    if axis < 0:
+        axis = arr.ndim + axis
+    out_arr = np.empty(
+        (*arr.shape[:axis], n_reductions, *arr.shape[axis + 1 :]), arr.dtype
+    )
+    arr = arr.swapaxes(axis, -1)
+    out_arr = out_arr.swapaxes(axis, -1)
+    no_var_idx = np.searchsorted(offsets, offsets[-1])
+    out_arr[..., :no_var_idx] = ufunc.reduceat(arr, offsets[:no_var_idx], axis=-1)
+    out_arr[..., no_var_idx:] = ufunc.identity
+    return out_arr.swapaxes(axis, -1)

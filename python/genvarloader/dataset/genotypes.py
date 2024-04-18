@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, cast
 
 import numba as nb
 import numpy as np
@@ -7,7 +7,7 @@ from numpy.typing import NDArray
 
 from ..types import ListIdx
 from ..utils import lengths_to_offsets
-from .utils import padded_slice
+from .utils import padded_slice, reduceat_offsets
 
 
 @define
@@ -141,6 +141,27 @@ class SparseGenotypes:
         vars = self.variant_idxs[self.offsets[i] : self.offsets[i + 1]]
         return vars
 
+    def concat(*genos: "SparseGenotypes") -> "SparseGenotypes":
+        """Concatenate sparse genotypes."""
+
+        if not all(g.n_samples == genos[0].n_samples for g in genos):
+            raise ValueError("All genotypes must have the same number of samples.")
+        if not all(g.ploidy == genos[0].ploidy for g in genos):
+            raise ValueError("All genotypes must have the same ploidy.")
+
+        total_n_regions = sum(g.n_regions for g in genos)
+        variant_idxs = np.concatenate([g.variant_idxs for g in genos])
+        offsets = lengths_to_offsets(
+            np.concatenate([np.diff(g.offsets) for g in genos])
+        )
+        return SparseGenotypes(
+            variant_idxs=variant_idxs,
+            offsets=offsets,
+            n_regions=total_n_regions,
+            n_samples=genos[0].n_samples,
+            ploidy=genos[0].ploidy,
+        )
+
     @classmethod
     def from_dense(
         cls,
@@ -199,9 +220,9 @@ class SparseGenotypes:
         offsets : NDArray[np.uint32]
             Shape = (regions + 1) Offsets into genos.
         ilens : NDArray[np.int32]
-            Shape = (variants) ILEN of all unique variants.
+            Shape = (total_variants) ILEN of all unique variants.
         positions : NDArray[np.int32]
-            Shape = (total_variants) Positions of variants.
+            Shape = (total_variants) Positions of unique variants.
         starts : NDArray[np.int32]
             Shape = (regions) Start of query regions.
         length : int
@@ -210,15 +231,10 @@ class SparseGenotypes:
         n_regions = len(first_v_idxs)
         n_samples = genos.shape[0]
         ploidy = genos.shape[1]
-        n_per_region = np.diff(offsets)
-        # (v)
-        dense_v_idxs = first_v_idxs_to_all_v_idxs(first_v_idxs, n_per_region)
-        # (s p v)
-        spv_ilens = np.where(genos == 1, ilens[dense_v_idxs], 0)
+        # (s p v), (s p r)
+        spv_ilens, r_ilens = get_haplotype_ilens(genos, first_v_idxs, offsets, ilens)
         # (s p v)
         cum_ilens = spv_ilens.cumsum(-1)
-        # (s p r)
-        r_ilens = np.add.reduceat(spv_ilens, offsets[:-1], axis=-1)
         cum_r_ilens = r_ilens.cumsum(-1)
         # (r)
         del spv_ilens
@@ -234,7 +250,7 @@ class SparseGenotypes:
             length,
         )
         # (r)
-        max_ends = starts + length - r_ilens.min((0, 1)).clip(max=0)
+        max_ends: NDArray[np.int32] = starts + length - r_ilens.min((0, 1)).clip(max=0)
         del cum_ilens, cum_r_ilens, r_ilens
         # tuple s p v
         n_per_rsp = get_n_per_rsp(keep, offsets, n_regions)
@@ -250,6 +266,22 @@ class SparseGenotypes:
             ploidy=ploidy,
         )
         return sparse_genos, max_ends
+
+
+def get_haplotype_ilens(
+    genos: NDArray[np.int8],
+    first_v_idxs: NDArray[np.int32],
+    offsets: NDArray[np.int32],
+    ilens: NDArray[np.int32],
+):
+    n_per_region = np.diff(offsets)
+    # (v)
+    dense_v_idxs = first_v_idxs_to_all_v_idxs(first_v_idxs, n_per_region)
+    # (s p v)
+    spv_ilens = cast(NDArray[np.int32], np.where(genos == 1, ilens[dense_v_idxs], 0))
+    # (s p r)
+    r_ilens = reduceat_offsets(np.add, spv_ilens, offsets, -1)
+    return spv_ilens, r_ilens
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)

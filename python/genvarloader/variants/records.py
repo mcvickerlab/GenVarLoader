@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 from textwrap import dedent
-from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union, overload
+from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union, cast, overload
 
 import numba as nb
 import numpy as np
@@ -30,7 +30,7 @@ class VLenAlleles:
     >>> alleles = VLenAlleles.from_polars(pl.Series(["A", "AC", "G"]))
 
     Create VLenAlleles from offsets and alleles:
-    >>> offsets = np.array([0, 1, 3, 4], np.uint32)
+    >>> offsets = np.array([0, 1, 3, 4], np.uint64)
     >>> alleles = np.frombuffer(b"AACG", "|S1")
     >>> alleles = VLenAlleles(offsets, alleles)
 
@@ -43,7 +43,7 @@ class VLenAlleles:
     VLenAlleles(offsets=array([0, 2, 3]), alleles=array([b'AC', b'G'], dtype='|S1'))
     """
 
-    offsets: NDArray[np.uint32]
+    offsets: NDArray[np.uint64]
     alleles: NDArray[np.bytes_]
 
     @overload
@@ -76,7 +76,7 @@ class VLenAlleles:
 
         # handle empty result
         if start >= len(self) or (stop is not None and stop <= start):
-            return VLenAlleles(np.empty(0, np.uint32), np.empty(0, "|S1"))
+            return VLenAlleles(np.empty(0, np.uint64), np.empty(0, "|S1"))
 
         if stop is None:
             stop = len(self)
@@ -99,7 +99,9 @@ class VLenAlleles:
 
     @classmethod
     def from_polars(cls, alleles: pl.Series):
-        offsets = np.r_[np.uint32(0), alleles.str.len_bytes().cum_sum().to_numpy()]
+        offsets = np.empty(len(alleles) + 1, np.uint64)
+        offsets[0] = 0
+        offsets[1:] = alleles.str.len_bytes().cast(pl.UInt64).cum_sum().to_numpy()
         flat_alleles = np.frombuffer(
             alleles.str.concat("").to_numpy()[0].encode(), "S1"
         )
@@ -108,14 +110,14 @@ class VLenAlleles:
     @staticmethod
     def concat(*vlen_alleles: "VLenAlleles"):
         if len(vlen_alleles) == 0:
-            return VLenAlleles(np.array([0], np.uint32), np.array([], "|S1"))
+            return VLenAlleles(np.array([0], np.uint64), np.array([], "|S1"))
         elif len(vlen_alleles) == 1:
             return vlen_alleles[0]
 
         nuc_per_allele = np.concatenate(
             [offsets_to_lengths(v.offsets) for v in vlen_alleles]
         )
-        offsets = lengths_to_offsets(nuc_per_allele, np.uint32)
+        offsets = lengths_to_offsets(nuc_per_allele, np.uint64)
         alleles = np.concatenate([v.alleles for v in vlen_alleles])
         return VLenAlleles(offsets, alleles)
 
@@ -144,7 +146,7 @@ class RecordInfo:
     end_idxs : NDArray[np.int32]
         Shape: (n_queries)
         End indices of the records for each query.
-    offsets : NDArray[np.uint32]
+    offsets : NDArray[np.int32]
         Shape: (n_queries + 1).
         Offsets for the records such that records[offsets[i]:offsets[i+1]] are the records
         for the i-th query.
@@ -156,7 +158,7 @@ class RecordInfo:
     alts: VLenAlleles
     start_idxs: NDArray[np.int32]  # (n_queries)
     end_idxs: NDArray[np.int32]  # (n_queries)
-    offsets: NDArray[np.uint32]  # (n_queries + 1)
+    offsets: NDArray[np.int32]  # (n_queries + 1)
 
     @property
     def n_queries(self):
@@ -168,14 +170,14 @@ class RecordInfo:
             positions=np.empty(n_queries, np.int32),
             size_diffs=np.empty(n_queries, np.int32),
             refs=VLenAlleles(
-                np.zeros(n_queries + 1, np.uint32), np.empty(n_queries, "S1")
+                np.zeros(n_queries + 1, np.uint64), np.empty(n_queries, "S1")
             ),
             alts=VLenAlleles(
-                np.zeros(n_queries + 1, np.uint32), np.empty(n_queries, "S1")
+                np.zeros(n_queries + 1, np.uint64), np.empty(n_queries, "S1")
             ),
             start_idxs=np.empty(n_queries, np.int32),
             end_idxs=np.empty(n_queries, np.int32),
-            offsets=np.zeros(n_queries + 1, np.uint32),
+            offsets=np.zeros(n_queries + 1, np.int32),
         )
 
     @staticmethod
@@ -197,9 +199,9 @@ class RecordInfo:
             [offsets_to_lengths(r.offsets) for r in record_infos]
         )
         if how == "separate":
-            offsets = lengths_to_offsets(v_per_query, np.uint32)
+            offsets = lengths_to_offsets(v_per_query)
         elif how == "merge":
-            offsets = np.array([0, v_per_query.sum()], np.uint32)
+            offsets = np.array([0, v_per_query.sum()], np.int32)
         else:
             assert_never(how)
         return RecordInfo(
@@ -278,7 +280,7 @@ class Records:
                 path.parent / vcf_suffix.sub(".gvl.arrow", path.name)
             )
             pl.concat(end_dfs.values()).write_ipc(
-                path.parent / vcf_suffix.sub(".gvl.ends.arrow", path.name)
+                path.parent / vcf_suffix.sub(".ends.gvl.arrow", path.name)
             )
         else:
             for s_df, e_df, path in zip(
@@ -286,7 +288,7 @@ class Records:
             ):
                 s_df.write_ipc(path.parent / vcf_suffix.sub(".gvl.arrow", path.name))
                 e_df.write_ipc(
-                    path.parent / vcf_suffix.sub(".gvl.ends.arrow", path.name)
+                    path.parent / vcf_suffix.sub(".ends.gvl.arrow", path.name)
                 )
 
         return cls.from_var_df(start_dfs, end_dfs)
@@ -299,23 +301,29 @@ class Records:
             )
 
         vcf = cyvcf2.VCF(str(vcf_path))  # pyright: ignore
-        n_variants = vcf.num_records
-        chroms = [None] * n_variants
+        n_variants = cast(int, vcf.num_records)
+        chroms: List[Optional[str]] = [None] * n_variants
         positions = np.empty(n_variants, dtype=np.int32)
-        refs = [None] * n_variants
-        alts = [None] * n_variants
-        non_snp_non_indel = False
+        refs: List[Optional[str]] = [None] * n_variants
+        alts: List[Optional[str]] = [None] * n_variants
+        sv_or_unknown = False
         with tqdm(
             total=n_variants, desc=f"Scanning variants from {vcf_path.name}"
         ) as pbar:
             for i, v in enumerate(vcf):
-                if not v.is_snp and not v.is_indel:
-                    non_snp_non_indel = True
-                    continue
-                chroms[i] = v.CHROM
-                positions[i] = v.POS
-                refs[i] = v.REF
-                alt = v.ALT
+                chroms[i] = cast(str, v.CHROM)
+                positions[i] = cast(int, v.POS)  # 1-indexed
+                if v.is_sv or v.var_type == "unknown":
+                    if not sv_or_unknown:
+                        logger.warning(
+                            f"VCF file {vcf_path} contains structural or unknown variants. These variants will be ignored."
+                        )
+                        sv_or_unknown = True
+                    # use placeholder that makes ilen = 0 so it doesn't affect anything downstream
+                    alt = "N" * len(v.REF)
+                else:
+                    alt = cast(List[str], v.ALT)
+                refs[i] = cast(str, v.REF)
                 # TODO: punt multi-allelics. also punt missing ALT (aka the * allele)?
                 if len(alt) != 1:
                     raise RuntimeError(
@@ -326,11 +334,6 @@ class Records:
                     )
                 alts[i] = alt[0]
                 pbar.update()
-        if non_snp_non_indel:
-            logger.warning(
-                f"""VCF file {vcf_path} contains non-SNP and non-INDEL variants. 
-                These variants will be ignored."""
-            )
         return pl.DataFrame(
             {
                 "#CHROM": chroms,
@@ -368,13 +371,13 @@ class Records:
         if multi_contig_source:
             path = pvar["_all"]
             pl.concat(start_dfs.values()).write_ipc(path.with_suffix(".gvl.arrow"))
-            pl.concat(end_dfs.values()).write_ipc(path.with_suffix(".gvl.ends.arrow"))
+            pl.concat(end_dfs.values()).write_ipc(path.with_suffix(".ends.gvl.arrow"))
         else:
             for s_df, e_df, path in zip(
                 start_dfs.values(), end_dfs.values(), pvar.values()
             ):
                 s_df.write_ipc(path.with_suffix(".gvl.arrow"))
-                e_df.write_ipc(path.with_suffix(".gvl.ends.arrow"))
+                e_df.write_ipc(path.with_suffix(".ends.gvl.arrow"))
 
         return cls.from_var_df(start_dfs, end_dfs)
 
@@ -451,7 +454,7 @@ class Records:
             path = arrow_paths["_all"]
             start_dfs = pl.read_ipc(path).partition_by("#CHROM", as_dict=True)
             end_dfs = pl.read_ipc(
-                path.parent / path.name.replace(".gvl.arrow", ".gvl.ends.arrow")
+                path.parent / path.name.replace(".gvl.arrow", ".ends.gvl.arrow")
             ).partition_by("#CHROM", as_dict=True)
         else:
             start_dfs: Dict[str, pl.DataFrame] = {}
@@ -459,7 +462,7 @@ class Records:
             for contig, path in arrow_paths.items():
                 start_dfs[contig] = pl.read_ipc(path)
                 end_dfs[contig] = pl.read_ipc(
-                    path.parent / path.name.replace(".gvl.arrow", ".gvl.ends.arrow")
+                    path.parent / path.name.replace(".gvl.arrow", ".ends.gvl.arrow")
                 )
 
         return cls.from_var_df(start_dfs, end_dfs)
@@ -500,7 +503,7 @@ class Records:
                 .select(
                     pl.all().sort_by("END"),
                     # make E2S_IDX relative to each contig
-                    pl.int_range(0, pl.count(), dtype=pl.UInt32)
+                    pl.int_range(0, pl.count(), dtype=pl.Int32)
                     .sort_by("END")
                     .reverse()
                     .rolling_min(df.height, min_periods=1)
@@ -557,7 +560,7 @@ class Records:
             v_diffs[contig] = s_df["ILEN"].to_numpy()
             v_ends[contig] = e_df["END"].to_numpy()
             v_diffs_sorted_by_ends[contig] = e_df["ILEN"].to_numpy()
-            e2s_idx[contig] = np.empty(e_df.height + 1, dtype=np.uint32)
+            e2s_idx[contig] = np.empty(e_df.height + 1, dtype=np.int32)
             e2s_idx[contig][:-1] = e_df["E2S_IDX"].to_numpy()
             e2s_idx[contig][-1] = e_df.height
             max_del_q[contig] = e_df["MD_Q"].to_numpy()
@@ -585,31 +588,26 @@ class Records:
         starts: ArrayLike,
         ends: ArrayLike,
     ) -> RecordInfo:
-        starts = np.atleast_1d(np.asarray(starts, dtype=int))
-        ends = np.atleast_1d(np.asarray(ends, dtype=int))
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
+        ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
         n_queries = len(starts)
 
         _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:
             return RecordInfo.empty(n_queries)
 
-        _s_idxs = np.searchsorted(self.v_ends[_contig], starts)
-        # make idxs absolute
-        s_idxs = self.e2s_idx[_contig][_s_idxs] + self.contig_offsets[_contig]
-        e_idxs = (
-            np.searchsorted(self.v_starts[_contig], ends) + self.contig_offsets[_contig]
-        )
+        rel_s_idxs = self.find_relative_start_idx(_contig, starts)
+        rel_e_idxs = self.find_relative_end_idx(_contig, ends)
 
-        if s_idxs.min() == e_idxs.max():
+        if rel_s_idxs.min() == rel_e_idxs.max():
             return RecordInfo.empty(n_queries)
 
-        n_var_per_region = e_idxs - s_idxs
-        offsets = np.empty(len(n_var_per_region) + 1, dtype=np.uint32)
-        offsets[0] = 0
-        offsets[1:] = np.cumsum(n_var_per_region)
+        n_var_per_region = rel_e_idxs - rel_s_idxs
+        offsets = lengths_to_offsets(n_var_per_region)
 
-        rel_s_idxs = s_idxs - self.contig_offsets[_contig]
-        rel_e_idxs = e_idxs - self.contig_offsets[_contig]
+        # make idxs absolute
+        s_idxs = rel_s_idxs + self.contig_offsets[_contig]
+        e_idxs = rel_e_idxs + self.contig_offsets[_contig]
 
         positions = np.concatenate(
             [self.v_starts[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
@@ -633,6 +631,19 @@ class Records:
             end_idxs=e_idxs,
             offsets=offsets,
         )
+
+    def find_relative_start_idx(
+        self, contig: str, starts: NDArray[np.int32]
+    ) -> NDArray[np.int32]:
+        s_idx_by_end = np.searchsorted(self.v_ends[contig], starts)
+        rel_s_idx = self.e2s_idx[contig][s_idx_by_end]
+        return rel_s_idx
+
+    def find_relative_end_idx(
+        self, contig: str, ends: NDArray[np.int32]
+    ) -> NDArray[np.int32]:
+        rel_e_idx = np.searchsorted(self.v_starts[contig], ends)
+        return rel_e_idx
 
     def vars_in_range_for_haplotype_construction(
         self,
@@ -668,10 +679,7 @@ class Records:
         if s_idxs.min() == e_idxs.max():
             return RecordInfo.empty(n_queries), ends
 
-        np.concatenate(
-            [np.arange(s, e, dtype=np.uint32) for s, e in zip(s_idxs, e_idxs)]
-        )
-        offsets = np.empty(n_queries + 1, dtype=np.uint32)
+        offsets = np.empty(n_queries + 1, dtype=np.int32)
         offsets[0] = 0
         np.cumsum(e_idxs - s_idxs, out=offsets[1:])
 
