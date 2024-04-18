@@ -87,7 +87,7 @@ class Variants:
     def from_vcf(
         cls,
         vcf: Union[str, Path, Dict[str, Path]],
-        use_cache: bool = True,
+        use_cache: bool = False,
         chunk_shape: Optional[Tuple[int, int, int]] = None,
     ):
         """Currently does not support multi-allelic sites, but does support *split*

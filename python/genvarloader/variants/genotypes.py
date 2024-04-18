@@ -73,12 +73,23 @@ class Genotypes(Protocol):
         """
         ...
 
-    def read_for_length(
+    def read_for_length_sparse(
         self,
         contig: str,
         start_idxs: ArrayLike,
         length: int,
         ilens: NDArray[np.int32],
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
+    ): ...
+
+
+class ReadByCoordinates(Protocol):
+    def read_by_coordinates(
+        self,
+        contig: str,
+        starts: ArrayLike,
+        ends: ArrayLike,
         sample_idx: Optional[ArrayLike] = None,
         haplotype_idx: Optional[ArrayLike] = None,
     ): ...
@@ -197,7 +208,7 @@ class PgenGenos(Genotypes):
 
         return genotypes
 
-    def read_for_length(
+    def read_for_length_sparse(
         self,
         contig: str,
         start_idxs: ArrayLike,
@@ -446,7 +457,7 @@ class ZarrGenos(Genotypes, FromRecsGenos, VIdxGenos):
 
         return genotypes
 
-    def read_for_length(
+    def read_for_length_sparse(
         self,
         contig: str,
         start_idxs: ArrayLike,
@@ -512,7 +523,7 @@ class NumpyGenos(Genotypes, FromRecsGenos):
 
         return genos
 
-    def read_for_length(
+    def read_for_length_sparse(
         self,
         contig: str,
         start_idxs: ArrayLike,
@@ -601,7 +612,7 @@ class MemmapGenos(Genotypes, FromRecsGenos):
         genos = np.concatenate(genos_ls, axis=-1)
         return genos
 
-    def read_for_length(
+    def read_for_length_sparse(
         self,
         contig: str,
         start_idxs: ArrayLike,
@@ -691,8 +702,8 @@ class VCFGenos(Genotypes):
         sample_idx: Optional[ArrayLike] = None,
         haplotype_idx: Optional[ArrayLike] = None,
     ) -> NDArray[np.int8]:
-        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=int))
-        end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=int))
+        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
+        end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.int32))
 
         if self.handles is None and "_all" not in self.paths:
             self.handles = {
@@ -707,12 +718,12 @@ class VCFGenos(Genotypes):
         if sample_idx is None:
             _sample_idx = slice(None)
         else:
-            _sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=int))
+            _sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=np.int32))
 
         if haplotype_idx is None:
             _haplotype_idx = slice(None)
         else:
-            _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=int))
+            _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=np.int32))
 
         n_variants = (end_idxs - start_idxs).sum()
         # (s p v)
@@ -734,9 +745,11 @@ class VCFGenos(Genotypes):
             # (n_queries)
             overlapping_query_intervals = (i >= start_idxs) & (i < end_idxs)
             if overlapping_query_intervals.any():
+                if v.is_sv or v.var_type == "unknown":
+                    continue
                 # (n_valid)
                 place_idx = geno_idxs[overlapping_query_intervals]
-                genos[..., place_idx] = v.genotype.array()[:, :2, None]
+                genos[..., place_idx] = v.genotype.array()[:, : self.ploidy, None]
                 # increment idxs for next iteration
                 geno_idxs[overlapping_query_intervals] += 1
             if (geno_idxs == finish_idxs).all():
@@ -747,59 +760,6 @@ class VCFGenos(Genotypes):
         genos[genos == -1] = -9
 
         return genos
-
-    def read_for_length(
-        self,
-        contig: str,
-        start_idxs: Optional[ArrayLike],
-        init_end_idxs: Optional[ArrayLike],
-        length: int,
-        ilens: NDArray[np.int32],
-        sample_idx: Optional[ArrayLike] = None,
-        haplotype_idx: Optional[ArrayLike] = None,
-    ):
-        raise NotImplementedError
-        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
-        init_end_idxs = np.atleast_1d(np.asarray(init_end_idxs, dtype=np.int32))
-
-        if self.handles is None:
-            self.handles = self.init_handles()
-
-        if sample_idx is None:
-            _sample_idx = slice(None)
-        else:
-            _sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=int))
-
-        if haplotype_idx is None:
-            _haplotype_idx = slice(None)
-        else:
-            _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=int))
-
-        n_variants = (init_end_idxs - start_idxs).sum()
-        genos = np.empty(
-            (len(self.samples), self.ploidy, n_variants),
-            dtype=np.int8,
-        )
-
-        if genos.size == 0:
-            return genos
-
-        geno_idxs = get_rel_starts(start_idxs, init_end_idxs)
-        finish_idxs = np.empty_like(geno_idxs)
-        finish_idxs[:-1] = geno_idxs[1:]
-        finish_idxs[-1] = n_variants
-        offset = self.contig_offsets[contig]
-        for i, v in enumerate(self.handles[contig](contig), start=offset):
-            # (n_queries)
-            overlapping_query_intervals = (i >= start_idxs) & (i < init_end_idxs)
-            if overlapping_query_intervals.any():
-                # (n_valid)
-                place_idx = geno_idxs[overlapping_query_intervals]
-                # increment idxs for next iteration
-                geno_idxs[overlapping_query_intervals] += 1
-                genos[..., place_idx] = v.genotype.array()[:, :2, None]
-            if (geno_idxs == finish_idxs).all():
-                break
 
     def init_handles(self) -> Dict[str, "cyvcf2.VCF"]:
         if self.handles is None and "_all" not in self.paths:
