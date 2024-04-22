@@ -274,6 +274,7 @@ def get_haplotype_ilens(
     offsets: NDArray[np.int32],
     ilens: NDArray[np.int32],
 ):
+    # (r)
     n_per_region = np.diff(offsets)
     # (v)
     dense_v_idxs = first_v_idxs_to_all_v_idxs(first_v_idxs, n_per_region)

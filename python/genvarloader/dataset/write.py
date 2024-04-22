@@ -3,12 +3,13 @@ import json
 import re
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, cast
 
 import numpy as np
 import polars as pl
 from loguru import logger
 from natsort import natsorted
+from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
 from ..bigwig import BigWigs
@@ -16,19 +17,23 @@ from ..utils import lengths_to_offsets, normalize_contig_name, read_bedlike, wit
 from ..variants import Variants
 from ..variants.genotypes import VCFGenos
 from .genotypes import SparseGenotypes, get_haplotype_ilens
+from .utils import splits_sum_le_value
+
+EXTEND_END_MULTIPLIER = 1.2
 
 
 def write(
     path: Union[str, Path],
     bed: Union[str, Path, pl.DataFrame],
-    vcf: Optional[Union[str, Path]] = None,
+    variants: Optional[Union[str, Path]] = None,
     bigwigs: Optional[Union[BigWigs, List[BigWigs]]] = None,
     samples: Optional[List[str]] = None,
     length: Optional[int] = None,
     max_jitter: Optional[int] = None,
     overwrite: bool = False,
+    max_mem: int = 4 * 2**30,
 ):
-    if vcf is None and bigwigs is None:
+    if variants is None and bigwigs is None:
         raise ValueError("At least one of `vcf` or `bigwigs` must be provided.")
 
     if isinstance(bigwigs, BigWigs):
@@ -52,9 +57,9 @@ def write(
         metadata["max_jitter"] = max_jitter
 
     all_samples: List[str] = []
-    if vcf is not None:
-        vcf = Path(vcf)
-        variants = Variants.from_vcf(vcf, use_cache=False)
+    if variants is not None:
+        variants = Path(variants)
+        variants = Variants.from_file(variants)
 
         if unavailable_contigs := set(contigs) - {
             normalize_contig_name(c, contigs) for c in variants.records.contigs
@@ -97,7 +102,7 @@ def write(
     metadata["n_samples"] = len(samples)
     metadata["n_regions"] = bed.height
 
-    if vcf is not None:
+    if variants is not None:
         if TYPE_CHECKING:
             assert variants is not None
 
@@ -105,10 +110,11 @@ def write(
         bed = write_variants(
             path,
             bed,
-            vcf,
+            variants,
             variants,
             region_length,
             samples,
+            max_mem,
         )
         if isinstance(variants.genotypes, VCFGenos):
             variants.genotypes.close()
@@ -183,10 +189,8 @@ def write_variants(
     variants: Variants,
     region_length: int,
     samples: Optional[List[str]] = None,
+    max_mem: int = 4 * 2**30,
 ):
-    if TYPE_CHECKING:
-        assert isinstance(variants.genotypes, VCFGenos)
-
     if samples is None:
         len(variants.samples)
         sample_idx = None
@@ -209,118 +213,191 @@ def write_variants(
 
     recs.select("POS", "ALT", "ILEN").write_ipc(out_dir / "variants.arrow")
 
+    rel_start_idxs: Dict[str, NDArray[np.int32]] = {}
+    rel_end_idxs: Dict[str, NDArray[np.int32]] = {}
+    chunk_offsets: Dict[str, NDArray[np.intp]] = {}
+    n_chunks = 0
+    for contig, part in bed.partition_by(
+        "chrom", as_dict=True, include_key=False, maintain_order=True
+    ).items():
+        _contig = normalize_contig_name(contig, variants.records.contigs)
+        if _contig is not None:
+            starts = part["chromStart"].to_numpy()
+            ends = starts + round(region_length * EXTEND_END_MULTIPLIER)
+            rel_s_idxs = variants.records.find_relative_start_idx(_contig, starts)
+            rel_e_idxs = variants.records.find_relative_end_idx(_contig, ends)
+            mem_per_r = (rel_e_idxs - rel_s_idxs) * variants.ploidy * len(_samples)
+            offsets = splits_sum_le_value(mem_per_r, max_mem)
+            rel_start_idxs[contig] = rel_s_idxs
+            rel_end_idxs[contig] = rel_e_idxs
+            chunk_offsets[contig] = offsets
+            n_chunks += len(offsets) - 1
+        else:
+            rel_start_idxs[contig] = np.zeros(part.height, dtype=np.int32)
+            rel_end_idxs[contig] = np.zeros(part.height, dtype=np.int32)
+            chunk_offsets[contig] = np.array([0, part.height], dtype=np.intp)
+
     v_idx_memmap_offsets = 0
     offset_memmap_offsets = 0
     last_offset = 0
     max_ends = np.empty(bed.height, dtype=np.int32)
     last_max_end_idx = 0
-    with tqdm(total=bed["chrom"].n_unique()) as pbar:
+    with tqdm(total=n_chunks) as pbar:
         for contig, part in bed.partition_by(
             "chrom", as_dict=True, include_key=False, maintain_order=True
         ).items():
-            pbar.set_description(
-                f"Reading genotypes for {part.height} regions on {contig}"
-            )
-            starts = part["chromStart"].to_numpy()
-            ends = part["chromEnd"].to_numpy(writable=True)
-            n_regions = part.height
-
-            _contig = normalize_contig_name(contig, variants.records.contigs)
-            if _contig is None:
-                genos = SparseGenotypes.empty(
-                    n_regions=n_regions, n_samples=len(_samples), ploidy=variants.ploidy
-                )
-            else:
-                multiplier = 0.1
-                ends += np.ceil(region_length * multiplier).astype(np.int32)
-                while True:
-                    rel_s_idx = variants.records.find_relative_start_idx(
-                        _contig, starts
-                    )
-                    rel_e_idx = variants.records.find_relative_end_idx(_contig, ends)
-
-                    s_idx = variants.records.contig_offsets[_contig] + rel_s_idx
-                    e_idx = variants.records.contig_offsets[_contig] + rel_e_idx
-                    # (s p v)
-                    genos = variants.genotypes.read(
-                        _contig, s_idx, e_idx, sample_idx=sample_idx
-                    )
-                    n_per_region = e_idx - s_idx
-                    offsets = lengths_to_offsets(n_per_region)
-
-                    # (s p r)
-                    _, haplotype_ilens = get_haplotype_ilens(
-                        genos, rel_s_idx, offsets, variants.records.v_diffs[_contig]
-                    )
-                    haplotype_lengths = ends - starts + haplotype_ilens
-                    # (s p r)
-                    missing_length = region_length - haplotype_lengths
-                    if np.all(missing_length <= 0):
-                        break
-                    # (r)
-                    ends += np.ceil(
-                        (1 + multiplier) * missing_length.max((0, 1))
-                    ).astype(np.int32)
-
+            c_offsets = chunk_offsets[contig]
+            for o_s, o_e in zip(c_offsets[:-1], c_offsets[1:]):
+                rel_s_idxs = rel_start_idxs[contig][o_s:o_e]
+                rel_e_idxs = rel_end_idxs[contig][o_s:o_e]
+                starts = part[o_s:o_e, "chromStart"].to_numpy()
+                ends = part[o_s:o_e, "chromEnd"].to_numpy(writable=True)
+                n_regions = len(rel_s_idxs)
                 pbar.set_description(
-                    f"Sparsifying genotypes for {part.height} regions on {contig}"
-                )
-                genos, c_max_ends = SparseGenotypes.from_dense_with_length(
-                    genos=genos,
-                    first_v_idxs=rel_s_idx,
-                    offsets=lengths_to_offsets(e_idx - s_idx),
-                    ilens=variants.records.v_diffs[_contig],
-                    positions=variants.records.v_starts[_contig],
-                    starts=starts,
-                    length=region_length,
+                    f"Reading genotypes for {n_regions} regions on {contig}"
                 )
 
-                # make indices absolute
-                genos.variant_idxs += variants.records.contig_offsets[_contig]
-                max_ends[last_max_end_idx : last_max_end_idx + n_regions] = c_max_ends
+                _contig = normalize_contig_name(contig, variants.records.contigs)
+
+                genos, chunk_max_ends = read_variants_chunk(
+                    _contig,
+                    starts,
+                    ends,
+                    rel_s_idxs,
+                    rel_e_idxs,
+                    variants,
+                    region_length,
+                    _samples,
+                    sample_idx,
+                )
+
+                if _contig is not None:
+                    # make indices absolute
+                    genos.variant_idxs += variants.records.contig_offsets[_contig]
+                max_ends[last_max_end_idx : last_max_end_idx + n_regions] = (
+                    chunk_max_ends
+                )
                 last_max_end_idx += n_regions
 
-            pbar.set_description(
-                f"Writing genotypes for {part.height} regions on {contig}"
-            )
-            out = np.memmap(
-                out_dir / "variant_idxs.npy",
-                dtype=genos.variant_idxs.dtype,
-                mode="w+" if v_idx_memmap_offsets == 0 else "r+",
-                shape=genos.variant_idxs.shape,
-                offset=v_idx_memmap_offsets,
-            )
-            out[:] = genos.variant_idxs[:]
-            out.flush()
-            v_idx_memmap_offsets += out.nbytes
-
-            offsets = genos.offsets
-            offsets += last_offset
-            last_offset = offsets[-1]
-            out = np.memmap(
-                out_dir / "offsets.npy",
-                dtype=offsets.dtype,
-                mode="w+" if offset_memmap_offsets == 0 else "r+",
-                shape=len(offsets) - 1,
-                offset=offset_memmap_offsets,
-            )
-            out[:] = offsets[:-1]
-            out.flush()
-            offset_memmap_offsets += out.nbytes
-            pbar.update()
+                pbar.set_description(
+                    f"Writing genotypes for {part.height} regions on {contig}"
+                )
+                (
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
+                ) = write_variants_chunk(
+                    out_dir,
+                    genos,
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
+                )
+                pbar.update()
 
     out = np.memmap(
         out_dir / "offsets.npy",
-        dtype=offsets.dtype,  # type: ignore
+        dtype=np.int32,
         mode="r+",
         shape=1,
         offset=offset_memmap_offsets,
     )
-    out[-1] = offsets[-1]  # type: ignore
+    out[-1] = last_offset
     out.flush()
 
     bed = bed.with_columns(chromEnd=pl.lit(max_ends))
     return bed
+
+
+def read_variants_chunk(
+    contig: Optional[str],
+    starts: NDArray[np.int32],
+    ends: NDArray[np.int32],
+    rel_s_idx: NDArray[np.int32],
+    rel_e_idx: NDArray[np.int32],
+    variants: Variants,
+    region_length: int,
+    samples: List[str],
+    sample_idx: Optional[NDArray[np.intp]],
+):
+    if contig is None:
+        genos = SparseGenotypes.empty(
+            n_regions=len(rel_s_idx), n_samples=len(samples), ploidy=variants.ploidy
+        )
+        chunk_max_ends = ends
+    else:
+        first = True
+        while True:
+            if not first:
+                rel_e_idx = variants.records.find_relative_end_idx(contig, ends)
+            s_idx = variants.records.contig_offsets[contig] + rel_s_idx
+            e_idx = variants.records.contig_offsets[contig] + rel_e_idx
+            # (s p v)
+            genos = variants.genotypes.read(contig, s_idx, e_idx, sample_idx=sample_idx)
+            n_per_region = e_idx - s_idx
+            offsets = lengths_to_offsets(n_per_region)
+
+            # (s p r)
+            _, haplotype_ilens = get_haplotype_ilens(
+                genos, rel_s_idx, offsets, variants.records.v_diffs[contig]
+            )
+            haplotype_lengths = rel_e_idx - rel_s_idx + haplotype_ilens
+            # (s p r)
+            missing_length = region_length - haplotype_lengths
+            if np.all(missing_length <= 0):
+                break
+            # (r)
+            ends += np.ceil(EXTEND_END_MULTIPLIER * missing_length.max((0, 1))).astype(
+                np.int32
+            )
+
+        genos, chunk_max_ends = SparseGenotypes.from_dense_with_length(
+            genos=genos,
+            first_v_idxs=rel_s_idx,
+            offsets=lengths_to_offsets(e_idx - s_idx),
+            ilens=variants.records.v_diffs[contig],
+            positions=variants.records.v_starts[contig],
+            starts=starts,
+            length=region_length,
+        )
+
+        # make indices absolute
+        genos.variant_idxs += variants.records.contig_offsets[contig]
+    return genos, chunk_max_ends
+
+
+def write_variants_chunk(
+    out_dir: Path,
+    genos: SparseGenotypes,
+    v_idx_memmap_offset: int,
+    offsets_memmap_offset: int,
+    last_offset: int,
+):
+    out = np.memmap(
+        out_dir / "variant_idxs.npy",
+        dtype=genos.variant_idxs.dtype,
+        mode="w+" if v_idx_memmap_offset == 0 else "r+",
+        shape=genos.variant_idxs.shape,
+        offset=v_idx_memmap_offset,
+    )
+    out[:] = genos.variant_idxs[:]
+    out.flush()
+    v_idx_memmap_offset += out.nbytes
+
+    offsets = genos.offsets
+    offsets += last_offset
+    last_offset = offsets[-1]
+    out = np.memmap(
+        out_dir / "offsets.npy",
+        dtype=offsets.dtype,
+        mode="w+" if offsets_memmap_offset == 0 else "r+",
+        shape=len(offsets) - 1,
+        offset=offsets_memmap_offset,
+    )
+    out[:] = offsets[:-1]
+    out.flush()
+    offsets_memmap_offset += out.nbytes
+    return v_idx_memmap_offset, offsets_memmap_offset, last_offset
 
 
 def write_bigwigs(

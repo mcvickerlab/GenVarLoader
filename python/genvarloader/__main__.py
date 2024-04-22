@@ -15,7 +15,9 @@ def main(
         ),
     ],
     bed: Annotated[Path, Argument(help="Path to the BED file.")],
-    vcf: Annotated[Optional[Path], Option(help="Path to the VCF file.")] = None,
+    variants: Annotated[
+        Optional[Path], Option(help="Path to variants file, either VCF or PGEN.")
+    ] = None,
     bigwig_table: Annotated[
         Optional[Path],
         Option(
@@ -42,6 +44,12 @@ def main(
         bool,
         Option(help="Overwrite the output directory if it exists."),
     ] = False,
+    max_memory: Annotated[
+        int,
+        Option(
+            help="Hint for maximum memory to use. Actual usage will be marginally higher than this. Default is 4 GiB."
+        ),
+    ] = 4 * 2**30,
 ):
     """Write a GenVarLoader dataset from a BED3+ file and a VCF file and/or BigWig files.
 
@@ -71,7 +79,17 @@ def main(
     else:
         _samples = None
 
-    write(path, bed, vcf, bigwigs, _samples, length, max_jitter)
+    write(
+        path=path,
+        bed=bed,
+        variants=variants,
+        bigwigs=bigwigs,
+        samples=_samples,
+        length=length,
+        max_jitter=max_jitter,
+        overwrite=overwrite,
+        max_mem=max_memory,
+    )
 
 
 if __name__ == "__main__":
