@@ -280,7 +280,7 @@ class Records:
                 path.parent / vcf_suffix.sub(".gvl.arrow", path.name)
             )
             pl.concat(end_dfs.values()).write_ipc(
-                path.parent / vcf_suffix.sub(".ends.gvl.arrow", path.name)
+                path.parent / vcf_suffix.sub(".gvl.ends.arrow", path.name)
             )
         else:
             for s_df, e_df, path in zip(
@@ -288,7 +288,7 @@ class Records:
             ):
                 s_df.write_ipc(path.parent / vcf_suffix.sub(".gvl.arrow", path.name))
                 e_df.write_ipc(
-                    path.parent / vcf_suffix.sub(".ends.gvl.arrow", path.name)
+                    path.parent / vcf_suffix.sub(".gvl.ends.arrow", path.name)
                 )
 
         return cls.from_var_df(start_dfs, end_dfs)
@@ -371,13 +371,13 @@ class Records:
         if multi_contig_source:
             path = pvar["_all"]
             pl.concat(start_dfs.values()).write_ipc(path.with_suffix(".gvl.arrow"))
-            pl.concat(end_dfs.values()).write_ipc(path.with_suffix(".ends.gvl.arrow"))
+            pl.concat(end_dfs.values()).write_ipc(path.with_suffix(".gvl.ends.arrow"))
         else:
             for s_df, e_df, path in zip(
                 start_dfs.values(), end_dfs.values(), pvar.values()
             ):
                 s_df.write_ipc(path.with_suffix(".gvl.arrow"))
-                e_df.write_ipc(path.with_suffix(".ends.gvl.arrow"))
+                e_df.write_ipc(path.with_suffix(".gvl.ends.arrow"))
 
         return cls.from_var_df(start_dfs, end_dfs)
 
@@ -412,7 +412,7 @@ class Records:
         sources: Union[Path, Dict[str, Path]], arrow: Union[Path, Dict[str, Path]]
     ) -> bool:
         # TODO: check if files were created after the last breaking change to the gvl.arrow format
-        # check if the files exist
+        # check if the files exist and are more recent than the sources
         if isinstance(arrow, Path):
             assert isinstance(sources, Path)
             if not arrow.exists():
@@ -454,7 +454,7 @@ class Records:
             path = arrow_paths["_all"]
             start_dfs = pl.read_ipc(path).partition_by("#CHROM", as_dict=True)
             end_dfs = pl.read_ipc(
-                path.parent / path.name.replace(".gvl.arrow", ".ends.gvl.arrow")
+                path.parent / path.name.replace(".gvl.arrow", ".gvl.ends.arrow")
             ).partition_by("#CHROM", as_dict=True)
         else:
             start_dfs: Dict[str, pl.DataFrame] = {}
@@ -462,7 +462,7 @@ class Records:
             for contig, path in arrow_paths.items():
                 start_dfs[contig] = pl.read_ipc(path)
                 end_dfs[contig] = pl.read_ipc(
-                    path.parent / path.name.replace(".gvl.arrow", ".ends.gvl.arrow")
+                    path.parent / path.name.replace(".gvl.arrow", ".gvl.ends.arrow")
                 )
 
         return cls.from_var_df(start_dfs, end_dfs)
@@ -522,7 +522,7 @@ class Records:
             #! convert to end-exclusive, + 1
             was_ends[1:] = _ends + 1
             md_q = np.searchsorted(was_ends, _starts, side="right") - 1
-            ends = ends.with_columns(MD_Q=md_q).select(
+            ends = ends.with_columns(MD_Q=md_q).select(  # type: ignore
                 "#CHROM", "END", "MD_Q", "ILEN", "E2S_IDX"
             )
 

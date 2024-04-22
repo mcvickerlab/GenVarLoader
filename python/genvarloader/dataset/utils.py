@@ -73,7 +73,8 @@ def regions_to_bed(regions: NDArray[np.int32], contigs: Sequence[str]) -> pl.Dat
 
 @nb.njit(nogil=True, cache=True)
 def splits_sum_le_value(arr: NDArray[np.number], max_value: float) -> NDArray[np.intp]:
-    """Split an array into contiguous sections where the sum is less than or equal to a value.
+    """Get index offsets for groups that sum to no more than a value.
+    Note that values greater than the maximum will be kept in their own group.
 
     Parameters
     ----------
@@ -84,8 +85,14 @@ def splits_sum_le_value(arr: NDArray[np.number], max_value: float) -> NDArray[np
 
     Returns
     -------
-    NDArray[np.int32]
+    NDArray[np.intp]
         Split indices.
+
+    Examples
+    --------
+    >>> splits_sum_le_value(np.array([5, 5, 11, 9, 2, 7]), 10)
+    # (5 5) (11) (9) (2 7)
+    array([0, 2, 3, 4, 6])
     """
     indices = [0]
     current_sum = 0
@@ -120,14 +127,24 @@ def reduceat_offsets(
         Reduced array.
     """
     n_reductions = len(offsets) - 1
+
     if axis < 0:
         axis = arr.ndim + axis
+
+    no_var_idx = np.searchsorted(offsets, offsets[-1])
+
+    # ensure arr and out are aligned and of same dtype to (hopefully) avoid a copy
+    # https://numpy.org/doc/stable/dev/internals.code-explanations.html#reduceat
     out_arr = np.empty(
         (*arr.shape[:axis], n_reductions, *arr.shape[axis + 1 :]), arr.dtype
     )
-    arr = arr.swapaxes(axis, -1)
-    out_arr = out_arr.swapaxes(axis, -1)
-    no_var_idx = np.searchsorted(offsets, offsets[-1])
-    out_arr[..., :no_var_idx] = ufunc.reduceat(arr, offsets[:no_var_idx], axis=-1)
-    out_arr[..., no_var_idx:] = ufunc.identity
+    indices = [slice(None)] * arr.ndim
+    indices[axis] = slice(None, no_var_idx)
+    indices = tuple(indices)
+    ufunc.reduceat(arr, offsets[:no_var_idx], axis=axis, out=out_arr[indices])
+
+    identity_indices = [slice(None)] * arr.ndim
+    identity_indices[axis] = slice(no_var_idx, None)
+    identity_indices = tuple(identity_indices)
+    out_arr[identity_indices] = ufunc.identity
     return out_arr.swapaxes(axis, -1)
