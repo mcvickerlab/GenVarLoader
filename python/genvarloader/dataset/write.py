@@ -1,9 +1,8 @@
 import gc
 import json
-import re
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, cast
+from typing import Dict, List, Optional, Tuple, Union, cast
 
 import numpy as np
 import polars as pl
@@ -25,7 +24,7 @@ EXTEND_END_MULTIPLIER = 1.2
 def write(
     path: Union[str, Path],
     bed: Union[str, Path, pl.DataFrame],
-    variants: Optional[Union[str, Path]] = None,
+    variants: Optional[Union[str, Path, Variants]] = None,
     bigwigs: Optional[Union[BigWigs, List[BigWigs]]] = None,
     samples: Optional[List[str]] = None,
     length: Optional[int] = None,
@@ -58,8 +57,8 @@ def write(
 
     all_samples: List[str] = []
     if variants is not None:
-        variants = Path(variants)
-        variants = Variants.from_file(variants)
+        if isinstance(variants, (str, Path)):
+            variants = Variants.from_file(variants)
 
         if unavailable_contigs := set(contigs) - {
             normalize_contig_name(c, contigs) for c in variants.records.contigs
@@ -69,8 +68,6 @@ def write(
             )
 
         all_samples.extend(variants.samples)
-    else:
-        variants = None
 
     if bigwigs is not None:
         unavail = []
@@ -103,14 +100,10 @@ def write(
     metadata["n_regions"] = bed.height
 
     if variants is not None:
-        if TYPE_CHECKING:
-            assert variants is not None
-
         logger.info("Writing genotypes.")
         bed = write_variants(
             path,
             bed,
-            variants,
             variants,
             region_length,
             samples,
@@ -185,7 +178,6 @@ def write_regions(path: Path, bed: pl.DataFrame, contigs: List[str]):
 def write_variants(
     path: Path,
     bed: pl.DataFrame,
-    vcf: Path,
     variants: Variants,
     region_length: int,
     samples: Optional[List[str]] = None,
@@ -205,13 +197,16 @@ def write_variants(
         len(sample_idx)
         _samples = samples
 
-    gvl_arrow = re.sub(r"\.[bv]cf(\.gz)?$", ".gvl.arrow", vcf.name)
-    recs = pl.read_ipc(vcf.parent / gvl_arrow)
-
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    recs.select("POS", "ALT", "ILEN").write_ipc(out_dir / "variants.arrow")
+    pl.DataFrame(
+        {
+            "POS": np.concatenate(list(variants.records.v_starts.values())),
+            "ALT": pl.concat([a.to_polars() for a in variants.records.alt.values()]),
+            "ILEN": np.concatenate(list(variants.records.v_diffs.values())),
+        }
+    ).write_ipc(out_dir / "variants.arrow")
 
     rel_start_idxs: Dict[str, NDArray[np.int32]] = {}
     rel_end_idxs: Dict[str, NDArray[np.int32]] = {}

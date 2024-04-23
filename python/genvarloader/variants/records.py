@@ -6,6 +6,7 @@ from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union, cast, 
 import numba as nb
 import numpy as np
 import polars as pl
+import pyarrow as pa
 from attrs import define
 from loguru import logger
 from numpy.typing import ArrayLike, NDArray
@@ -43,7 +44,7 @@ class VLenAlleles:
     VLenAlleles(offsets=array([0, 2, 3]), alleles=array([b'AC', b'G'], dtype='|S1'))
     """
 
-    offsets: NDArray[np.uint64]
+    offsets: NDArray[np.int64]
     alleles: NDArray[np.bytes_]
 
     @overload
@@ -99,25 +100,34 @@ class VLenAlleles:
 
     @classmethod
     def from_polars(cls, alleles: pl.Series):
-        offsets = np.empty(len(alleles) + 1, np.uint64)
+        offsets = np.empty(len(alleles) + 1, np.int64)
         offsets[0] = 0
-        offsets[1:] = alleles.str.len_bytes().cast(pl.UInt64).cum_sum().to_numpy()
+        offsets[1:] = alleles.str.len_bytes().cast(pl.Int64).cum_sum().to_numpy()
         flat_alleles = np.frombuffer(
             alleles.str.concat("").to_numpy()[0].encode(), "S1"
         )
         return cls(offsets, flat_alleles)
 
+    def to_polars(self):
+        n_alleles = len(self)
+        offset_buffer = pa.py_buffer(self.offsets)
+        allele_buffer = pa.py_buffer(self.alleles)
+        string_arr = pa.LargeStringArray.from_buffers(
+            n_alleles, offset_buffer, allele_buffer
+        )
+        return pl.Series(string_arr)
+
     @staticmethod
     def concat(*vlen_alleles: "VLenAlleles"):
         if len(vlen_alleles) == 0:
-            return VLenAlleles(np.array([0], np.uint64), np.array([], "|S1"))
+            return VLenAlleles(np.array([0], np.int64), np.array([], "|S1"))
         elif len(vlen_alleles) == 1:
             return vlen_alleles[0]
 
         nuc_per_allele = np.concatenate(
             [offsets_to_lengths(v.offsets) for v in vlen_alleles]
         )
-        offsets = lengths_to_offsets(nuc_per_allele, np.uint64)
+        offsets = lengths_to_offsets(nuc_per_allele, np.int64)
         alleles = np.concatenate([v.alleles for v in vlen_alleles])
         return VLenAlleles(offsets, alleles)
 
@@ -265,7 +275,9 @@ class Records:
 
         if multi_contig_source:
             start_df = cls.read_vcf(vcf["_all"])
-            start_dfs = start_df.partition_by("#CHROM", as_dict=True)
+            start_dfs = start_df.partition_by(
+                "#CHROM", as_dict=True, maintain_order=True
+            )
             del start_df
         else:
             start_dfs: Dict[str, pl.DataFrame] = {}
@@ -324,7 +336,7 @@ class Records:
                 else:
                     alt = cast(List[str], v.ALT)
                 refs[i] = cast(str, v.REF)
-                # TODO: punt multi-allelics. also punt missing ALT (aka the * allele)?
+                # TODO: multi-allelics. Also, missing ALT (aka the * allele)?
                 if len(alt) != 1:
                     raise RuntimeError(
                         f"""VCF file {vcf_path} contains multi-allelic or overlappings
@@ -360,7 +372,9 @@ class Records:
 
         if multi_contig_source:
             start_df = cls.read_pvar(pvar["_all"])
-            start_dfs = start_df.partition_by("#CHROM", as_dict=True)
+            start_dfs = start_df.partition_by(
+                "#CHROM", as_dict=True, maintain_order=True
+            )
         else:
             start_dfs: Dict[str, pl.DataFrame] = {}
             for contig, path in pvar.items():
