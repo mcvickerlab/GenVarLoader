@@ -15,10 +15,11 @@ from ..bigwig import BigWigs
 from ..utils import lengths_to_offsets, normalize_contig_name, read_bedlike, with_length
 from ..variants import Variants
 from ..variants.genotypes import VCFGenos
-from .genotypes import SparseGenotypes, get_haplotype_ilens
+from .genotypes import SparseGenotypes, get_haplotype_region_ilens
 from .utils import splits_sum_le_value
 
-EXTEND_END_MULTIPLIER = 1.2
+INITIAL_END_EXTENSION = 1000
+EXTEND_END_MULTIPLIER = 1.1
 
 
 def write(
@@ -38,7 +39,7 @@ def write(
     if isinstance(bigwigs, BigWigs):
         bigwigs = [bigwigs]
 
-    logger.info(f"Writing to {path}")
+    logger.info(f"Writing dataset to {path}")
 
     metadata = {}
     path = Path(path)
@@ -218,10 +219,15 @@ def write_variants(
         _contig = normalize_contig_name(contig, variants.records.contigs)
         if _contig is not None:
             starts = part["chromStart"].to_numpy()
-            ends = starts + round(region_length * EXTEND_END_MULTIPLIER)
+            ends = starts + region_length + INITIAL_END_EXTENSION
             rel_s_idxs = variants.records.find_relative_start_idx(_contig, starts)
             rel_e_idxs = variants.records.find_relative_end_idx(_contig, ends)
-            mem_per_r = (rel_e_idxs - rel_s_idxs) * variants.ploidy * len(_samples)
+
+            # variants * ploidy * samples * (1 byte per genotype + 4 bytes per ilen)
+            # + 1 region * ploidy * samples * (4 bytes per ilen)
+            n_variants = rel_e_idxs - rel_s_idxs
+            n_regions = len(starts)
+            mem_per_r = (n_variants * 5 + 4) * len(_samples) * variants.ploidy
             offsets = splits_sum_le_value(mem_per_r, max_mem)
             rel_start_idxs[contig] = rel_s_idxs
             rel_end_idxs[contig] = rel_e_idxs
@@ -246,10 +252,10 @@ def write_variants(
                 rel_s_idxs = rel_start_idxs[contig][o_s:o_e]
                 rel_e_idxs = rel_end_idxs[contig][o_s:o_e]
                 starts = part[o_s:o_e, "chromStart"].to_numpy()
-                ends = part[o_s:o_e, "chromEnd"].to_numpy(writable=True)
+                ends = starts + region_length + INITIAL_END_EXTENSION
                 n_regions = len(rel_s_idxs)
                 pbar.set_description(
-                    f"Reading genotypes for {n_regions} regions on {contig}"
+                    f"Reading genotypes for {n_regions} regions on chromosome {contig}"
                 )
 
                 _contig = normalize_contig_name(contig, variants.records.contigs)
@@ -266,16 +272,13 @@ def write_variants(
                     sample_idx,
                 )
 
-                if _contig is not None:
-                    # make indices absolute
-                    genos.variant_idxs += variants.records.contig_offsets[_contig]
                 max_ends[last_max_end_idx : last_max_end_idx + n_regions] = (
                     chunk_max_ends
                 )
                 last_max_end_idx += n_regions
 
                 pbar.set_description(
-                    f"Writing genotypes for {part.height} regions on {contig}"
+                    f"Writing genotypes for {n_regions} regions on chromosome {contig}"
                 )
                 (
                     v_idx_memmap_offsets,
@@ -323,33 +326,41 @@ def read_variants_chunk(
     else:
         first = True
         while True:
+            logger.debug(f"region length {ends[0] - starts[0]}")
             if not first:
                 rel_e_idx = variants.records.find_relative_end_idx(contig, ends)
             s_idx = variants.records.contig_offsets[contig] + rel_s_idx
             e_idx = variants.records.contig_offsets[contig] + rel_e_idx
             # (s p v)
+            logger.debug("read genotypes")
             genos = variants.genotypes.read(contig, s_idx, e_idx, sample_idx=sample_idx)
             n_per_region = e_idx - s_idx
             offsets = lengths_to_offsets(n_per_region)
 
+            logger.debug("get haplotype region ilens")
             # (s p r)
-            _, haplotype_ilens = get_haplotype_ilens(
+            haplotype_ilens = get_haplotype_region_ilens(
                 genos, rel_s_idx, offsets, variants.records.v_diffs[contig]
             )
-            haplotype_lengths = rel_e_idx - rel_s_idx + haplotype_ilens
+            haplotype_lengths = ends - starts + haplotype_ilens
+            logger.debug(f"average haplotype length {haplotype_lengths.mean()}")
             # (s p r)
             missing_length = region_length - haplotype_lengths
+            logger.debug(f"max missing length {missing_length.max()}")
+
             if np.all(missing_length <= 0):
                 break
-            # (r)
-            ends += np.ceil(EXTEND_END_MULTIPLIER * missing_length.max((0, 1))).astype(
-                np.int32
-            )
 
+            # (r)
+            ends += np.ceil(
+                EXTEND_END_MULTIPLIER * missing_length.max((0, 1)).clip(min=0)
+            ).astype(np.int32)
+
+        logger.debug("sparsify genotypes")
         genos, chunk_max_ends = SparseGenotypes.from_dense_with_length(
             genos=genos,
             first_v_idxs=rel_s_idx,
-            offsets=lengths_to_offsets(e_idx - s_idx),
+            offsets=offsets,
             ilens=variants.records.v_diffs[contig],
             positions=variants.records.v_starts[contig],
             starts=starts,

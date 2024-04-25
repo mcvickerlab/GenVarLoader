@@ -70,19 +70,19 @@ class DenseGenotypes:
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
-def first_v_idxs_to_all_v_idxs(first_variant_indices, n_per_region):
+def first_v_idxs_to_all_v_idxs(first_variant_indices: NDArray, n_per_region: NDArray):
     """Convert first variant indices to variant indices."""
     out = np.empty(n_per_region.sum(), dtype=np.int32)
     out_start = np.empty_like(n_per_region)
     out_start[0] = 0
     out_start[1:] = n_per_region[:-1].cumsum()
     for i in nb.prange(len(first_variant_indices)):
-        _f = first_variant_indices[i]
-        _n = n_per_region[i]
-        if _n == 0:
+        f = first_variant_indices[i]
+        n = n_per_region[i]
+        if n == 0:
             continue
-        _o_s = out_start[i]
-        out[_o_s : _o_s + _n] = np.arange(_f, _f + _n, dtype=np.int32)
+        o_s = out_start[i]
+        out[o_s : o_s + n] = np.arange(f, f + n, dtype=np.int32)
     return out
 
 
@@ -231,27 +231,18 @@ class SparseGenotypes:
         n_regions = len(first_v_idxs)
         n_samples = genos.shape[0]
         ploidy = genos.shape[1]
-        # (s p v), (s p r)
-        spv_ilens, r_ilens = get_haplotype_ilens(genos, first_v_idxs, offsets, ilens)
         # (s p v)
-        cum_ilens = spv_ilens.cumsum(-1)
-        cum_r_ilens = r_ilens.cumsum(-1)
-        # (r)
-        del spv_ilens
-        # (s p v)
-        keep = get_keep_mask_for_length(
+        keep, min_ilens = get_keep_mask_for_length(
             genos,
-            cum_ilens,
-            cum_r_ilens,
             offsets,
             first_v_idxs,
             positions,
+            ilens,
             starts,
             length,
         )
         # (r)
-        max_ends: NDArray[np.int32] = starts + length - r_ilens.min((0, 1)).clip(max=0)
-        del cum_ilens, cum_r_ilens, r_ilens
+        max_ends: NDArray[np.int32] = starts + length - min_ilens.clip(max=0)
         # tuple s p v
         n_per_rsp = get_n_per_rsp(keep, offsets, n_regions)
         sparse_offsets = lengths_to_offsets(n_per_rsp.ravel(), np.int32)
@@ -286,13 +277,37 @@ def get_haplotype_ilens(
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
+def get_haplotype_region_ilens(
+    genos: NDArray[np.int8],
+    first_v_idxs: NDArray[np.int32],
+    offsets: NDArray[np.int32],
+    ilens: NDArray[np.int32],
+):
+    n_regions = len(first_v_idxs)
+    n_samples = genos.shape[0]
+    ploidy = genos.shape[1]
+    r_ilens = np.empty((n_samples, ploidy, n_regions), np.int32)
+    for r in nb.prange(n_regions):
+        o_s, o_e = offsets[r], offsets[r + 1]
+        n_v = o_e - o_s
+        if n_v == 0:
+            continue
+        fvi = first_v_idxs[r]
+        for s in nb.prange(n_samples):
+            for p in nb.prange(ploidy):
+                r_ilens[s, p, r] = np.where(
+                    genos[s, p, o_s:o_e] == 1, ilens[fvi : fvi + n_v], 0
+                ).sum()
+    return r_ilens
+
+
+@nb.njit(parallel=True, nogil=True, cache=True)
 def get_keep_mask_for_length(
     genos: NDArray[np.int8],
-    cum_ilens: NDArray[np.int32],
-    cum_r_ilens: NDArray[np.int32],
     offsets: NDArray[np.int32],
     first_v_idxs: NDArray[np.int32],
     positions: NDArray[np.int32],
+    ilens: NDArray[np.int32],
     starts: NDArray[np.int32],
     length: int,
 ):
@@ -321,23 +336,27 @@ def get_keep_mask_for_length(
     ploidy = genos.shape[1]
     n_regions = len(starts)
     keep = np.empty_like(genos, np.bool_)
-    for s in nb.prange(n_samples):
-        for p in nb.prange(ploidy):
-            for r in nb.prange(n_regions):
-                o_s, o_e = offsets[r], offsets[r + 1]
-                n_variants = o_e - o_s
-                if n_variants == 0:
-                    continue
-                r_start = starts[r]
-                for v in nb.prange(o_s, o_e):
+    min_ilens = np.empty(n_regions, np.int32)
+    for r in nb.prange(n_regions):
+        o_s, o_e = offsets[r], offsets[r + 1]
+        n_variants = o_e - o_s
+        if n_variants == 0:
+            continue
+        r_start = starts[r]
+        for s in nb.prange(n_samples):
+            for p in nb.prange(ploidy):
+                cum_ilen = 0
+                for v in range(o_s, o_e):
                     v_idx = first_v_idxs[r] + v - o_s
                     rel_pos = positions[v_idx] - r_start
-                    cum_ilen = cum_ilens[s, p, v] - cum_r_ilens[s, p, r]
-                    if rel_pos + cum_ilen < length and genos[s, p, v] == 1:
+                    ilen = ilens[v_idx]
+                    if rel_pos + cum_ilen + ilen < length and genos[s, p, v] == 1:
+                        cum_ilen += ilen
                         keep[s, p, v] = True
                     else:
                         keep[s, p, v] = False
-    return keep
+                min_ilens[r] = min(min_ilens[r], cum_ilen)
+    return keep, min_ilens
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
@@ -352,7 +371,7 @@ def get_n_per_rsp(keep: NDArray[np.bool_], offsets: NDArray[np.int32], n_regions
     return n_per_rsp
 
 
-@nb.njit(parallel=False, nogil=True, cache=True)
+@nb.njit(parallel=True, nogil=True, cache=True)
 def keep_mask_to_rsp_v_idx(
     keep: NDArray[np.bool_],  # (s p v)
     first_v_idxs: NDArray[np.int32],  # (r)
