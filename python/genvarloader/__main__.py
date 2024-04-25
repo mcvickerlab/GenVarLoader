@@ -1,9 +1,18 @@
+from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
 
 from typer import Argument, Option, Typer
 
 app = Typer(rich_markup_mode="rich")
+
+
+class LOG_LEVEL(str, Enum):
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
 
 
 @app.command(no_args_is_help=True)
@@ -45,11 +54,17 @@ def main(
         Option(help="Overwrite the output directory if it exists."),
     ] = False,
     max_memory: Annotated[
-        int,
+        str,
         Option(
-            help="Hint for maximum memory to use. Actual usage will be marginally higher than this. Default is 4 GiB."
+            help="Hint for maximum memory to use. Can be a number or use suffixes M and G to specify units. Actual usage will be marginally higher than this. Default is 4 GiB."
         ),
-    ] = 4 * 2**30,
+    ] = "4G",
+    log_level: Annotated[
+        LOG_LEVEL,
+        Option(
+            help="Log level to use. One of DEBUG, INFO, WARNING, ERROR, CRITICAL. Default is INFO."
+        ),
+    ] = LOG_LEVEL.INFO,
 ):
     """Write a GenVarLoader dataset from a BED3+ file and a VCF file and/or BigWig files.
 
@@ -66,6 +81,10 @@ def main(
             f"Output directory {path} already exists. Use --overwrite to overwrite."
         )
 
+    import sys
+
+    from loguru import logger
+
     from genvarloader.bigwig import BigWigs
     from genvarloader.dataset.write import write
 
@@ -79,6 +98,16 @@ def main(
     else:
         _samples = None
 
+    if max_memory[-1] == "M":
+        _max_memory = int(max_memory[:-1]) * 1024**2
+    elif max_memory[-1] == "G":
+        _max_memory = int(max_memory[:-1]) * 1024**3
+    else:
+        _max_memory = int(max_memory)
+
+    logger.remove()
+    logger.add(sink=sys.stderr, level=log_level.value)
+
     write(
         path=path,
         bed=bed,
@@ -88,7 +117,7 @@ def main(
         length=length,
         max_jitter=max_jitter,
         overwrite=overwrite,
-        max_mem=max_memory,
+        max_mem=_max_memory,
     )
 
 
