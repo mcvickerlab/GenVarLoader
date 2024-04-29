@@ -53,10 +53,6 @@ dev = [
     "filelock>=3.13.1"
 ]
 
-[tool.poetry-dynamic-versioning]
-enable = true
-vcs = "git"
-
 [tool.mypy]
 plugins = ["numpy.typing.mypy_plugin", "pandera.mypy"]
 
