@@ -1,6 +1,6 @@
 [project]
 name = "genvarloader"
-version = "0.3.1"
+version = "0.3.2"
 description = "Pipeline for efficient genomic data processing."
 authors = [
     { name = "David Laub", email = "dlaub@ucsd.edu" },
