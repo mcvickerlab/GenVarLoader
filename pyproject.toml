@@ -50,7 +50,7 @@ dev = [
     "ruff>=0.0.292",
     "pre-commit>=3.5.0",
     "pytest-benchmark>=4.0.0",
-    "filelock>=3.13.1"
+    "filelock>=3.13.1",
 ]
 
 [tool.mypy]
