@@ -876,7 +876,7 @@ class Dataset:
             self.variants.sizes,
         )
         # (b p)
-        shifts = self.rng.integers(0, diffs + 1, dtype=np.int32)
+        shifts = self.rng.integers(0, -diffs.clip(max=0) + 1, dtype=np.int32)
         return shifts
 
     def get_haplotypes(
