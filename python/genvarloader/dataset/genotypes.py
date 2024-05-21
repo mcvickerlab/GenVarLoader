@@ -781,8 +781,7 @@ def reconstruct_haplotypes_from_sparse(
         c_s = ref_offsets[c_idx]
         c_e = ref_offsets[c_idx + 1]
         ref_s = q[1]
-        ref_e = q[2]
-        _ref = padded_slice(ref[c_s:c_e], ref_s, ref_e, pad_char)
+        _ref = ref[c_s:c_e]
 
         for hap in nb.prange(ploidy):
             o_idx = offset_idx[query, hap]
@@ -815,8 +814,8 @@ def reconstruct_haplotype_from_sparse(
     shift: int,
     alt_alleles: NDArray[np.uint8],  # full set
     alt_offsets: NDArray[np.uintp],  # full set
-    ref: NDArray[np.uint8],
-    ref_start: int,
+    ref: NDArray[np.uint8],  # full contig
+    ref_start: int,  # may be negative
     out: NDArray[np.uint8],
     pad_char: int,
 ):
@@ -845,9 +844,9 @@ def reconstruct_haplotype_from_sparse(
     alt_offsets : NDArray[np.uintp]
         Shape = (total_variants + 1) Offsets of ALT alleles.
     ref : NDArray[np.uint8]
-        Shape = (ref_length) Reference sequence. ref_length >= out_length
+        Shape = (ref_length) Reference sequence for the whole contig. ref_length >= out_length
     ref_start : int
-        Start position of reference sequence.
+        Start position of reference sequence, may be negative.
     out : NDArray[np.uint8]
         Shape = (out_length) Output array.
     pad_char : int
@@ -861,7 +860,7 @@ def reconstruct_haplotype_from_sparse(
         return
 
     # where to get next reference subsequence
-    ref_idx = 0
+    ref_idx = ref_start
     # where to put next subsequence
     out_idx = 0
     # total amount to shift by
@@ -941,6 +940,12 @@ def reconstruct_haplotype_from_sparse(
             # ref will get written by final clause
             # handles case where extraneous variants downstream of the haplotype were provided
             break
+        if ref_idx < 0:
+            pad_len = -ref_idx
+            out[out_idx : out_idx + pad_len] = pad_char
+            out_idx += pad_len
+            ref_idx = 0
+            ref_len -= pad_len
         out[out_idx : out_idx + ref_len] = ref[ref_idx : ref_idx + ref_len]
         out_idx += ref_len
 
