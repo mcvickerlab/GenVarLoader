@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
 
@@ -66,7 +67,9 @@ class Variants:
         elif isinstance(path, dict):
             first_path = next(iter(path.values()))
 
-        if first_path.suffix == ".vcf":
+        vcf_suffix = re.compile(r"\.[vb]cf(\.gz)?$")
+
+        if vcf_suffix.search(first_path.suffix):
             return cls.from_vcf(path)
         elif first_path.suffix == ".pgen":
             return cls.from_pgen(path)

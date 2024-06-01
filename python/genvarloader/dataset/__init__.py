@@ -1018,6 +1018,21 @@ class TorchDataset(td.Dataset):  # type: ignore
     def __len__(self) -> int:
         return len(self.dataset)
 
-    def __getitem__(self, idx: Idx) -> Union[NDArray, Tuple[NDArray, ...]]:
+    def __getitem__(
+        self, idx: Idx
+    ) -> Union["torch.Tensor", Tuple["torch.Tensor", ...], Any]:
         batch = self.dataset[idx]
+        if isinstance(batch, np.ndarray):
+            batch = _tensor_from_maybe_bytes(batch)
+        elif isinstance(batch, tuple):
+            batch = tuple(_tensor_from_maybe_bytes(b) for b in batch)
         return batch
+
+
+def _tensor_from_maybe_bytes(array: NDArray) -> "torch.Tensor":
+    if TYPE_CHECKING:
+        import torch
+
+    if array.dtype == np.bytes_:
+        array = array.view(np.uint8)
+    return torch.from_numpy(array)

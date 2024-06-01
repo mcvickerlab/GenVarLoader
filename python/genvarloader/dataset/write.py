@@ -117,6 +117,7 @@ def write(
         del variants
         gc.collect()
 
+    logger.info("Writing regions.")
     write_regions(path, bed, contigs)
 
     if bigwigs is not None:
@@ -311,16 +312,16 @@ def read_variants_chunk(
     contig: Optional[str],
     starts: NDArray[np.int32],
     ends: NDArray[np.int32],
-    rel_s_idx: NDArray[np.int32],
-    rel_e_idx: NDArray[np.int32],
+    rel_s_idxs: NDArray[np.int32],
+    rel_e_idxs: NDArray[np.int32],
     variants: Variants,
     region_length: int,
     samples: List[str],
-    sample_idx: Optional[NDArray[np.intp]],
+    sample_idxs: Optional[NDArray[np.intp]],
 ):
     if contig is None:
         genos = SparseGenotypes.empty(
-            n_regions=len(rel_s_idx), n_samples=len(samples), ploidy=variants.ploidy
+            n_regions=len(rel_s_idxs), n_samples=len(samples), ploidy=variants.ploidy
         )
         chunk_max_ends = ends
     else:
@@ -328,19 +329,21 @@ def read_variants_chunk(
         while True:
             logger.debug(f"region length {ends[0] - starts[0]}")
             if not first:
-                rel_e_idx = variants.records.find_relative_end_idx(contig, ends)
-            s_idx = variants.records.contig_offsets[contig] + rel_s_idx
-            e_idx = variants.records.contig_offsets[contig] + rel_e_idx
+                rel_e_idxs = variants.records.find_relative_end_idx(contig, ends)
+            s_idx = variants.records.contig_offsets[contig] + rel_s_idxs
+            e_idx = variants.records.contig_offsets[contig] + rel_e_idxs
             # (s p v)
             logger.debug("read genotypes")
-            genos = variants.genotypes.read(contig, s_idx, e_idx, sample_idx=sample_idx)
+            genos = variants.genotypes.read(
+                contig, s_idx, e_idx, sample_idx=sample_idxs
+            )
             n_per_region = e_idx - s_idx
             offsets = lengths_to_offsets(n_per_region)
 
             logger.debug("get haplotype region ilens")
             # (s p r)
             haplotype_ilens = get_haplotype_region_ilens(
-                genos, rel_s_idx, offsets, variants.records.v_diffs[contig]
+                genos, rel_s_idxs, offsets, variants.records.v_diffs[contig]
             )
             haplotype_lengths = ends - starts + haplotype_ilens
             logger.debug(f"average haplotype length {haplotype_lengths.mean()}")
@@ -359,13 +362,15 @@ def read_variants_chunk(
         logger.debug("sparsify genotypes")
         genos, chunk_max_ends = SparseGenotypes.from_dense_with_length(
             genos=genos,
-            first_v_idxs=rel_s_idx,
+            first_v_idxs=rel_s_idxs,
             offsets=offsets,
             ilens=variants.records.v_diffs[contig],
             positions=variants.records.v_starts[contig],
             starts=starts,
             length=region_length,
         )
+        logger.debug(f"maximum needed length {(chunk_max_ends - starts).max()}")
+        logger.debug(f"minimum needed length {(chunk_max_ends - starts).min()}")
 
         # make indices absolute
         genos.variant_idxs += variants.records.contig_offsets[contig]

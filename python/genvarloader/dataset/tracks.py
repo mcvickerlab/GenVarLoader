@@ -308,7 +308,8 @@ def shift_and_realign_track_sparse(
     length = len(out)
     n_variants = len(_variant_idxs)
     if n_variants == 0:
-        out[:] = track[:length]
+        # track must have length >= max(shif0)t + length
+        out[:] = track[shift : shift + length]
         return
     # where to get next reference subsequence
     track_idx = 0
@@ -317,25 +318,18 @@ def shift_and_realign_track_sparse(
     # how much we've shifted
     shifted = 0
 
-    # first variant is a DEL spanning start
-    v_rel_pos = positions[_variant_idxs[0]] - query_start
-    v_diff = sizes[_variant_idxs[0]]
-    if v_rel_pos < 0:
-        # diff of v(-1) has been normalized to consider where ref is
-        # otherwise, ref_idx = v_rel_pos - v_diff + 1
-        # e.g. a -10 diff became -3 if v_rel_pos = -7
-        track_idx = v_rel_pos - v_diff + 1
-        # increment the variant index
-        start_idx = 1
-    else:
-        start_idx = 0
-
-    for v in range(start_idx, n_variants):
+    for v in range(n_variants):
         variant: np.int32 = _variant_idxs[v]
 
         # position of variant relative to ref from fetch(contig, start, q_end)
         # i.e. has been put into same coordinate system as ref_idx
         v_rel_pos = positions[variant] - query_start
+        v_diff = sizes[variant]
+
+        # first variant is a DEL spanning start
+        if v == 0 and v_rel_pos < 0 and v_diff < 0:
+            track_idx = v_rel_pos - v_diff + 1
+            continue
 
         # overlapping variants
         # v_rel_pos < ref_idx only if we see an ALT at a given position a second
@@ -344,8 +338,7 @@ def shift_and_realign_track_sparse(
         if v_rel_pos < track_idx:
             continue
 
-        v_diff = sizes[variant]
-        # ok to do this before shift because there must be at least one nonzero diff if shift > 0
+        # ok to do this before shift because there must be at least one positive diff since 0 < shift < sum(v_diff)
         if v_diff == 0:
             continue
         v_len = max(1, v_diff + 1)
@@ -394,7 +387,7 @@ def shift_and_realign_track_sparse(
         out[out_idx : out_idx + track_len] = track[track_idx : track_idx + track_len]
         out_idx += track_len
 
-        # insertions + substitions
+        # insertions (substitutions are skipped above)
         writable_length = min(v_len, length - out_idx)
         out[out_idx : out_idx + writable_length] = value
         out_idx += writable_length
@@ -402,7 +395,7 @@ def shift_and_realign_track_sparse(
         # normalized VCF
         track_idx = v_rel_pos + 1
 
-        # deletions, move ref to end of deletion
+        # deletions, move track to end of deletion
         if v_diff < 0:
             track_idx -= v_diff
 
