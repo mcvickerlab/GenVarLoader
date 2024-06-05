@@ -103,7 +103,7 @@ class SparseGenotypes:
     variant_idxs : NDArray[np.int32]
         Shape = (variants * samples * ploidy) Variant indices.
     offsets : NDArray[np.int32]
-        Shape = (regions * ploidy * samples + 1) Offsets into genos.
+        Shape = (regions * samples * ploidy + 1) Offsets into genos.
     n_samples : int
         Number of samples.
     ploidy : int
@@ -269,7 +269,7 @@ def get_haplotype_region_ilens(
     n_regions = len(first_v_idxs)
     n_samples = genos.shape[0]
     ploidy = genos.shape[1]
-    r_ilens = np.empty((n_samples, ploidy, n_regions), np.int32)
+    r_ilens = np.zeros((n_samples, ploidy, n_regions), np.int32)
     for r in nb.prange(n_regions):
         o_s, o_e = offsets[r], offsets[r + 1]
         n_v = o_e - o_s
@@ -716,7 +716,7 @@ def reconstruct_haplotypes_from_sparse(
     positions: NDArray[np.int32],
     sizes: NDArray[np.int32],
     alt_alleles: NDArray[np.uint8],
-    alt_offsets: NDArray[np.uintp],
+    alt_offsets: NDArray[np.int64],
     ref: NDArray[np.uint8],
     ref_offsets: NDArray[np.uint64],
     pad_char: int,
@@ -798,7 +798,7 @@ def reconstruct_haplotype_from_sparse(
     sizes: NDArray[np.int32],
     shift: int,
     alt_alleles: NDArray[np.uint8],  # full set
-    alt_offsets: NDArray[np.uintp],  # full set
+    alt_offsets: NDArray[np.int64],  # full set
     ref: NDArray[np.uint8],  # full contig
     ref_start: int,  # may be negative
     out: NDArray[np.uint8],

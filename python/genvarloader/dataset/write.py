@@ -2,7 +2,7 @@ import gc
 import json
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union, cast
+from typing import Dict, List, Optional, Set, Tuple, Union, cast
 
 import numpy as np
 import polars as pl
@@ -56,7 +56,7 @@ def write(
     if max_jitter is not None:
         metadata["max_jitter"] = max_jitter
 
-    all_samples: List[str] = []
+    available_samples: Optional[Set[str]] = None
     if variants is not None:
         if isinstance(variants, (str, Path)):
             variants = Variants.from_file(variants)
@@ -68,7 +68,8 @@ def write(
                 f"Contigs in queries {unavailable_contigs} are not found in the VCF."
             )
 
-        all_samples.extend(variants.samples)
+        if available_samples is None:
+            available_samples = set(variants.samples)
 
     if bigwigs is not None:
         unavail = []
@@ -77,13 +78,19 @@ def write(
                 normalize_contig_name(c, contigs) for c in bw.contigs
             ):
                 unavail.append(unavailable_contigs)
-            all_samples.extend(bw.samples)
+            if available_samples is None:
+                available_samples = set(bw.samples)
+            else:
+                available_samples.intersection_update(bw.samples)
         if unavail:
             logger.warning(
                 f"Contigs in queries {set(unavail)} are not found in the BigWigs."
             )
 
-    available_samples = set(all_samples)
+    if available_samples is None:
+        raise ValueError(
+            "No samples available across all variant file(s) and/or BigWigs."
+        )
 
     if samples is not None:
         _samples = set(samples)
@@ -229,6 +236,16 @@ def write_variants(
             n_variants = rel_e_idxs - rel_s_idxs
             n_regions = len(starts)
             mem_per_r = (n_variants * 5 + 4) * len(_samples) * variants.ploidy
+            if np.any(mem_per_r > max_mem):
+                # TODO subset by samples as well
+                # sketch:
+                # 1. for 1 region, read subset of variants -> SparseGenotypes
+                # 2. repeat 1 for next subset of variants
+                raise ValueError(
+                    f"""Memory usage per region exceeds maximum of {max_mem / 1e9} GB.
+                    Largest amount needed for a single region is {mem_per_r.max() / 1e9} GB, set
+                    `max_mem` to this value or higher."""
+                )
             offsets = splits_sum_le_value(mem_per_r, max_mem)
             rel_start_idxs[contig] = rel_s_idxs
             rel_end_idxs[contig] = rel_e_idxs

@@ -38,6 +38,7 @@ from .genotypes import (
 )
 from .intervals import intervals_to_tracks, tracks_to_intervals
 from .reference import Reference
+from .torch import TorchDataset
 from .tracks import shift_and_realign_tracks_sparse
 from .utils import oidx_to_raveled_idx, regions_to_bed, splits_sum_le_value
 
@@ -130,14 +131,6 @@ class Dataset:
         rng = np.random.default_rng()
 
         if reference is None and has_genotypes:
-            logger.warning(
-                dedent(
-                    """
-                    Genotypes found but no reference genome provided. This is required to reconstruct haplotypes.
-                    No reference or haplotype sequences can be returned by this dataset instance.
-                    """
-                )
-            )
             _reference = None
             has_reference = False
         elif reference is not None:
@@ -238,8 +231,11 @@ class Dataset:
             Whether to return indices, by default None
         """
         if return_sequences is False:
-            reference = None
-        ds = cls._open(path, reference).with_settings(
+            _reference = None
+        else:
+            _reference = reference
+
+        ds = cls._open(path, _reference).with_settings(
             samples=samples,
             regions=regions,
             return_sequences=return_sequences,
@@ -249,6 +245,17 @@ class Dataset:
             jitter=jitter,
             return_indices=return_indices,
         )
+
+        if reference is None and ds.has_genotypes:
+            logger.warning(
+                dedent(
+                    """
+                    Genotypes found but no reference genome provided. This is required to reconstruct haplotypes.
+                    No reference or haplotype sequences can be returned by this dataset instance.
+                    """
+                ).strip()
+            )
+
         return ds
 
     def with_settings(
@@ -1003,36 +1010,3 @@ def get_reference(
         end = q[2]
         out[region] = padded_slice(reference[c_s:c_e], start, end, pad_char)
     return out
-
-
-@define
-class TorchDataset(td.Dataset):  # type: ignore
-    dataset: Dataset
-
-    def __attrs_pre_init__(self):
-        if not TORCH_AVAILABLE:
-            raise ImportError(
-                "Could not import PyTorch. Please install PyTorch to use torch features."
-            )
-
-    def __len__(self) -> int:
-        return len(self.dataset)
-
-    def __getitem__(
-        self, idx: Idx
-    ) -> Union["torch.Tensor", Tuple["torch.Tensor", ...], Any]:
-        batch = self.dataset[idx]
-        if isinstance(batch, np.ndarray):
-            batch = _tensor_from_maybe_bytes(batch)
-        elif isinstance(batch, tuple):
-            batch = tuple(_tensor_from_maybe_bytes(b) for b in batch)
-        return batch
-
-
-def _tensor_from_maybe_bytes(array: NDArray) -> "torch.Tensor":
-    if TYPE_CHECKING:
-        import torch
-
-    if array.dtype == np.bytes_:
-        array = array.view(np.uint8)
-    return torch.from_numpy(array)
