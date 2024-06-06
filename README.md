@@ -98,10 +98,10 @@ total_counts = np.load('total_counts.npy')  # shape: (samples) float32
 means = np.empty((train_dataset.n_regions, train_dataset.region_length), np.float32)
 stds = np.empty_like(means)
 just_tracks = train_dataset.with_settings(return_sequences=False, jitter=0)
-for i in range(len(means)):
-    cpm = np.log1p(just_tracks[i, :] / total_counts[:, None])
-    means[i] = cpm.mean(0)
-    stds[i] = cpm.std(0)
+for region in range(len(means)):
+    cpm = np.log1p(just_tracks[region, :] / total_counts[:, None] * 1e6)
+    means[region] = cpm.mean(0)
+    stds[region] = cpm.std(0)
 
 # Define our transformation
 def z_log_cpm(dataset_indices, region_indices, sample_indices, tracks: gvl.Ragged[np.float32]):
@@ -113,7 +113,7 @@ def z_log_cpm(dataset_indices, region_indices, sample_indices, tracks: gvl.Ragge
     # In that case, we could do the transformation with a Numba compiled function instead.
 
     # original tracks -> log(CPM + 1) -> z-score
-    _tracks = np.log1p(_tracks / total_counts[sample_indices, None])
+    _tracks = np.log1p(_tracks / total_counts[sample_indices, None] * 1e6)
     _tracks = (_tracks - means[region_indices]) / stds[region_indices]
 
     return gvl.Ragged.from_offsets(_tracks.ravel(), tracks.shape, tracks.offsets)
