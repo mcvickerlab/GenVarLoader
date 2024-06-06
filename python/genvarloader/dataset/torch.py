@@ -16,8 +16,12 @@ except ImportError:
 else:
     _TORCH_AVAILABLE = True
 
+if TYPE_CHECKING:
+    import torch
+    import torch.utils.data as td
 
-class TorchDataset(td.Dataset):  # type: ignore
+
+class TorchDataset(td.Dataset):
     def __init__(self, dataset: "Dataset"):
         if not _TORCH_AVAILABLE:
             raise ImportError(
@@ -47,4 +51,4 @@ def _tensor_from_maybe_bytes(array: NDArray) -> "torch.Tensor":
 
     if array.dtype.type == np.bytes_:
         array = array.view(np.uint8)
-    return torch.from_numpy(array)  # type: ignore
+    return torch.from_numpy(array)

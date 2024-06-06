@@ -1,60 +1,132 @@
 # GenVarLoader
-GenVarLoader provides a fast, memory efficient data loader for training sequence models on genetic variation. For example, this can be used to train a DNA language model on human genetic variation (e.g. [Nucleotide Transformer](https://www.biorxiv.org/content/10.1101/2023.01.11.523679)).
+GenVarLoader provides a fast, memory efficient data loader for training sequence models on genetic variation. For example, this can be used to train a DNA language model on human genetic variation (e.g. [Nucleotide Transformer](https://www.biorxiv.org/content/10.1101/2023.01.11.523679)) or train sequence to function models with genetic variation (e.g. [BigRNA](https://www.biorxiv.org/content/10.1101/2023.09.20.558508v1)).
 
 ## Features
-- Respects memory budget
-- Supports insertions and deletions
-- Scales to 100,000s of individuals
-- Fast!
-- Extensible to new file formats (drop a feature request!)
-- Coming soon: re-aligning tracks (e.g. expression, chromatin accessibility) to genetic variation (e.g. [BigRNA](https://www.biorxiv.org/content/10.1101/2023.09.20.558508))
+- Avoids writing any sequences to disk
+- Generates haplotypes up to 1,000 times faster than reading a FASTA file
+- Generates tracks up to 450 times faster than reading a BigWig
+- Supports indels and re-aligns tracks to haplotypes that have them
+- Extensible to new file formats: drop a feature request! Currently supports VCF, PGEN, and BigWig
 
-## Installation
-`pip install genvarloader`
+## Tutorial
 
-A PyTorch dependency is not included since it requires [special instructions](https://pytorch.org/get-started/locally/).
+### Installation
 
-An optional dependency is [TensorStore](https://github.com/google/tensorstore)(version >=0.1.50) for writing genotypes as a Zarr store and using TensorStore for I/O. This dramatically speeds up dataloading performance when training a model on genetic variation, for which approximately uniform random sampling across the genome is required. Standard bioinformatics variant formats like VCF, BCF, and PGEN unfortunately do not have a data layout conducive for this. TensorStore is not included as a dependency due a dependency conflict that, within the scope of GenVarLoader, does not cause any issues. GenVarLoader is developed with Poetry and I am waiting for the [ability to override/ignore sub-dependencies](https://github.com/python-poetry/poetry/issues/697) to include TensorStore as an explicit dependency.
+```bash
+pip install genvarloader
+```
 
-## Quick Start
+A PyTorch dependency is not included since it may require [special instructions](https://pytorch.org/get-started/locally/).
+
+### Write a `gvl.Dataset`
+
+GenVarLoader has both a CLI and Python API for writing datasets. The Python API provides some extra flexibility, for example for a multi-task objective.
+
+```bash
+genvarloader cool_dataset.gvl interesting_regions.bed --variants cool_variants.vcf --bigwig-table samples_to_bigwigs.csv --length 2048 --max-jitter 128
+```
+
+Where `samples_to_bigwigs.csv` has columns `sample` and `path` mapping each sample to its BigWig.
+
+This could equivalently be done in Python as:
 
 ```python
 import genvarloader as gvl
 
-ref_fasta = 'reference.fasta'
-variants = 'variants.pgen' # highly recommended to convert VCFs to PGEN
-regions_of_interest = 'regions.bed'
-```
-
-Create readers for each file providing sequence data:
-
-```python
-ref = gvl.Fasta(name='ref', path=ref_fasta, pad='N')
-var = gvl.Pgen(variants)
-varseq = gvl.FastaVariants(name='varseq', reference=ref, variants=var)
-```
-
-Put them together and get a `torch.DataLoader`:
-
-```python
-gvloader = gvl.GVL(
-    readers=varseq,
-    bed=regions_of_interest,
-    fixed_length=1000,
-    batch_size=16,
-    max_memory_gb=8,
-    batch_dims=['sample', 'ploid'],
-    shuffle=True,
+gvl.write(
+    path="cool_dataset.gvl",
+    bed="interesting_regions.bed",
+    variants="cool_variants.vcf",
+    bigwigs=gvl.BigWigs.from_table("bigwig", "samples_to_bigwigs.csv"),
+    length=2048,
+    max_jitter=128,
 )
-
-dataloader = gvloader.torch_dataloader()
-
 ```
 
-And now you're ready to use the `dataloader` however you need to:
+### Open a `gvl.Dataset` and get a PyTorch DataLoader
 
 ```python
-# implement your training loop
-for batch in dataloader:
+import genvarloader as gvl
+
+dataset = gvl.Dataset.open(path="cool_dataset.gvl", reference="hg38.fa")
+train_dataset = dataset.subset_to(regions=train_regions, samples=train_samples)
+train_dataloader = train_dataset.to_dataloader(batch_size=32, shuffle=True, num_workers=1)
+
+# use it in your training loop
+for haplotypes, tracks in train_dataloader:
     ...
 ```
+
+### Inspect specific instances
+
+```python
+dataset[99]  # 100-th instance of the raveled dataset
+dataset[0, 9]  # first region, 10th sample
+dataset.isel(regions=0, samples=9)
+dataset.sel(regions=dataset.get_bed()[0], samples=dataset.samples[9])
+dataset[:10]  # first 10 instances
+dataset[:10, :5]  # first 10 regions and 5 samples
+```
+
+### Transform the data on-the-fly
+
+```python
+import seqpro as sp
+from einops import rearrange
+
+def transform(haplotypes, tracks):
+    ohe = sp.DNA.ohe(haplotypes)
+    ohe = rearrange(ohe, "batch length alphabet -> batch alphabet length")
+    return ohe, tracks
+
+transformed_dataset = dataset.with_settings(transform=transform)
+```
+
+### Pre-computing transformed tracks
+
+Suppose we want to return tracks that are the z-scored, log(CPM + 1) version of the original. Sometimes it is better to write this to disk to avoid having to recompute it during training or inference.
+
+```python
+import numpy as np
+
+# We'll assume we already have an array of total counts for each sample.
+# This usually can't be derived from a gvl.Dataset since it only has data for specific regions.
+total_counts = np.load('total_counts.npy')  # shape: (samples) float32
+
+# We'll compute the mean and std log(CPM + 1) using the training split
+means = np.empty((train_dataset.n_regions, train_dataset.region_length), np.float32)
+stds = np.empty_like(means)
+just_tracks = train_dataset.with_settings(return_sequences=False, jitter=0)
+for i in range(len(means)):
+    cpm = np.log1p(just_tracks[i, :] / total_counts[:, None])
+    means[i] = cpm.mean(0)
+    stds[i] = cpm.std(0)
+
+# Define our transformation
+def z_log_cpm(dataset_indices, region_indices, sample_indices, tracks: gvl.Ragged[np.float32]):
+    # In the event that the dataset only has SNPs, the full length tracks will all be the same length.
+    # So, we can reshape the ragged data into a regular array.
+    _tracks = tracks.data.reshape(-1, dataset.region_length)
+    
+    # Otherwise, we would have to leave `tracks`as a gvl.Ragged array to accommodate different lengths.
+    # In that case, we could do the transformation with a Numba compiled function instead.
+
+    # original tracks -> log(CPM + 1) -> z-score
+    _tracks = np.log1p(_tracks / total_counts[sample_indices, None])
+    _tracks = (_tracks - means[region_indices]) / stds[region_indices]
+
+    return gvl.Ragged.from_offsets(_tracks.ravel(), tracks.shape, tracks.offsets)
+
+# This can take about as long as writing the original tracks or longer, depending on the transformation.
+dataset_with_zlogcpm = dataset.write_transformed_track("z-log-cpm", "bigwig", transform=z_log_cpm)
+
+# The dataset now has both tracks available, "bigwig" and "z-log-cpm", and we can choose to return either one or both.
+haps_and_zlogcpm = dataset_with_zlogcpm.with_settings(return_tracks="z-log-cpm")
+
+# If we re-opened the dataset after running this then we could write...
+dataset = gvl.Dataset.open("cool_dataset.gvl", "hg38.fa", return_tracks="z-log-cpm")
+```
+
+## Performance tips
+- GenVarLoader uses multithreading extensively, so it's best to use 0 or 1 workers with your PyTorch `DataLoader`.
+- A GenVarLoader `Dataset` is most efficient when given batches of indices, rather than one at a time. PyTorch `DataLoader` by default uses one index at a time, so if you want to use a ***custom*** PyTorch `Sampler` you should wrap it with a PyTorch `BatchSampler` before passing it to `Dataset.to_dataloader()`.

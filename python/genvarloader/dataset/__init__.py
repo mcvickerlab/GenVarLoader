@@ -73,6 +73,74 @@ class Dataset:
     """A dataset of genotypes, reference sequences, and intervals. Note: this class is not meant to be instantiated directly.
     Use the `open` or `open_with_settings` class methods to create a dataset after writing the data with `genvarloader.write()`
     or the genvarloader CLI.
+
+    Attributes
+    ----------
+    path : Path
+        The path to the dataset.
+    max_jitter : int
+        The maximum jitter allowable by the underlying data written to disk.
+    jitter : int
+        The current jitter.
+    region_length : int
+        The length of the regions in the dataset corresponding to what was written to disk (i.e. output_length + 2 * max_jitter).
+    contigs : List[str]
+        The unique contigs in the dataset.
+    full_samples : List[str]
+        The full list of samples in the dataset.
+    full_regions : NDArray[np.int32]
+        The full regions in the dataset.
+    rng : np.random.Generator
+        The random number generator used for jittering and shifting haplotypes that are longer than the output length.
+    sample_idxs : NDArray[np.intp]
+        The indices of the samples to subset to.
+    region_idxs : NDArray[np.intp]
+        The indices of the regions to subset to.
+    sequence_type : Optional[Literal["reference", "haplotypes"]]
+        The type of sequence to return.
+    active_tracks : Optional[List[str]]
+        The active tracks to return.
+    available_tracks : List[str]
+        The available tracks in the dataset.
+    ploidy : Optional[int]
+        The ploidy of the dataset.
+    reference : Optional[Reference]
+        The reference genome. This is kept in memory.
+    variants : Optional[_Variants]
+        The variant sites in the dataset. This is kept in memory.
+    genotypes : Optional[SparseGenotypes]
+        The genotypes in the dataset. This is memory mapped.
+    intervals : Optional[Dict[str, RaggedIntervals]]
+        The intervals in the dataset. This is memory mapped.
+    transform : Optional[Callable]
+        The transform to apply to the data.
+    idx_map : Optional[NDArray[np.intp]]
+        The map from the full dataset to the subset dataset.
+    return_indices : bool
+        Whether to return indices.
+
+    Properties
+    ----------
+    has_reference : bool
+        Whether the dataset has a reference genome.
+    has_genotypes : bool
+        Whether the dataset has genotypes.
+    has_intervals : bool
+        Whether the dataset has intervals.
+    samples : List[str]
+        The samples in the dataset.
+    regions : NDArray[np.int32]
+        The regions in the dataset.
+    n_samples : int
+        The number of samples in the dataset.
+    n_regions : int
+        The number of regions in the dataset.
+    output_length : int
+        The length of the output sequence.
+    shape : Tuple[int, int]
+        The shape of the (possibly subset) dataset.
+    full_shape : Tuple[int, int]
+        The full shape of the dataset.
     """
 
     path: Path
@@ -260,8 +328,8 @@ class Dataset:
 
     def with_settings(
         self,
-        samples: Optional[Sequence[str]] = None,
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
+        samples: Optional[Sequence[str]] = None,
         return_sequences: Optional[Literal[False, "reference", "haplotypes"]] = None,
         return_tracks: Optional[Union[Literal[False], str, List[str]]] = None,
         transform: Optional[Union[Literal[False], Callable]] = None,
@@ -273,10 +341,10 @@ class Dataset:
 
         Parameters
         ----------
-        samples : Optional[Sequence[str]], optional
-            The samples to subset to, by default None
         regions : Optional[Union[str, Path, pl.DataFrame]], optional
             The regions to subset to, by default None
+        samples : Optional[Sequence[str]], optional
+            The samples to subset to, by default None
         return_sequences : Optional[Literal[False, "reference", "haplotypes"]], optional
             The sequence type to return. Set this to False to disable returning sequences entirely.
         return_tracks : Optional[Union[Literal[False], List[str]]], optional
@@ -314,6 +382,9 @@ class Dataset:
             else:
                 to_evolve["sequence_type"] = return_sequences
 
+            # reset after changing sequence type
+            to_evolve["genotypes"] = None
+
         if return_tracks is not None:
             if return_tracks is False:
                 to_evolve["active_tracks"] = None
@@ -325,6 +396,9 @@ class Dataset:
                         f"Intervals {missing} not found. Available intervals: {self.available_tracks}"
                     )
                 to_evolve["active_tracks"] = return_tracks
+
+            # reset after changing active tracks
+            to_evolve["intervals"] = None
 
         if transform is not None:
             if transform is False:
@@ -399,7 +473,7 @@ class Dataset:
     def __len__(self) -> int:
         return int(np.prod(self.shape))
 
-    def write_transformed_tracks(
+    def write_transformed_track(
         self,
         new_track: str,
         existing_track: str,
@@ -536,6 +610,8 @@ class Dataset:
         )
         out[-1] = interval_offsets[-1]  # type: ignore
         out.flush()
+
+        return evolve(self, active_tracks=self.available_tracks + [new_track])
 
     def subset_to(
         self,
@@ -685,16 +761,42 @@ class Dataset:
         ds_idxs = np.ravel_multi_index((_regions, _samples), self.shape)
         return self[ds_idxs]
 
-    def sel(self, regions: pl.DataFrame, samples: List[str]):
+    def sel(
+        self,
+        regions: Union[str, Tuple[str, int, int], pl.DataFrame],
+        samples: Union[str, List[str]],
+    ):
         """Eagerly select a subset of samples and regions from the dataset.
 
         Parameters
         ----------
-        samples : List[str]
-            The names of the samples to select.
-        regions : pl.DataFrame
+        regions : str, Tuple[str, int, int], pl.DataFrame
             The regions to select.
+        samples : str, List[str]
+            The names of the samples to select.
         """
+        if isinstance(regions, str):
+            try:
+                idx = regions.rindex(":")
+                contig = regions[:idx]
+                start, end = map(int, regions[idx + 1 :].split("-"))
+                regions = contig, start, end
+            except ValueError:
+                raise ValueError("Invalid region format. Must be chrom:start-end.")
+
+        if isinstance(regions, tuple):
+            contig, start, end = regions
+            regions = pl.DataFrame(
+                {
+                    "chrom": [contig],
+                    "chromStart": [start],
+                    "chromEnd": [end],
+                }
+            )
+
+        if isinstance(samples, str):
+            samples = [samples]
+
         s_to_i = dict(zip(self.full_samples, range(len(self.full_samples))))
         sample_idxs = np.array([s_to_i[s] for s in samples], np.intp)
         region_idxs = (
@@ -712,7 +814,9 @@ class Dataset:
         ds_idxs = np.ravel_multi_index((region_idxs, sample_idxs), self.shape)
         return self[ds_idxs]
 
-    def __getitem__(self, idx: Idx) -> Union[NDArray, Tuple[NDArray, ...], Any]:
+    def __getitem__(
+        self, idx: Union[Idx, Tuple[Idx, Idx]]
+    ) -> Union[NDArray, Tuple[NDArray, ...], Any]:
         """Get a batch of haplotypes and tracks or intervals and tracks.
 
         Parameters
@@ -720,6 +824,9 @@ class Dataset:
         idx: Idx
             The index or indices to get. If a single index is provided, the output will be squeezed.
         """
+        if isinstance(idx, tuple):
+            self.isel(*idx)
+
         # Since Dataset is a frozen class, we need to use object.__setattr__ to set the attributes
         # per attrs docs (https://www.attrs.org/en/stable/init.html#post-init)
         if self.genotypes is None and self.sequence_type == "haplotypes":
