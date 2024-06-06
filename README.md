@@ -49,7 +49,8 @@ gvl.write(
 import genvarloader as gvl
 
 dataset = gvl.Dataset.open(path="cool_dataset.gvl", reference="hg38.fa")
-train_dataset = dataset.subset_to(regions=train_regions, samples=train_samples)
+train_samples = ["David", "Aaron"]
+train_dataset = dataset.subset_to(regions="train_regions.bed", samples=train_samples)
 train_dataloader = train_dataset.to_dataloader(batch_size=32, shuffle=True, num_workers=1)
 
 # use it in your training loop
