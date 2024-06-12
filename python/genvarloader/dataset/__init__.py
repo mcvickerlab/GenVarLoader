@@ -501,7 +501,7 @@ class Dataset:
             since regions may be different lengths to accomodate indels. This function should then
             return the transformed tracks as a :class:`Ragged` array with the same shape and lengths.
         max_mem : int, optional
-            The maximum memory to use in bytes, by default `2**30`
+            The maximum memory to use in bytes, by default 1 GiB (2**30 bytes)
         overwrite : bool, optional
             Whether to overwrite the existing track, by default False
         """
@@ -1107,8 +1107,8 @@ def get_reference(
     region_length: int,
     pad_char: int,
 ) -> NDArray[np.uint8]:
-    out = np.empty((len(regions), region_length), np.uint8)
-    for region in nb.prange(len(regions)):
+    out = np.empty((len(r_idxs), region_length), np.uint8)
+    for region in nb.prange(len(r_idxs)):
         q = regions[r_idxs[region]]
         c_idx = q[0]
         c_s = ref_offsets[c_idx]
