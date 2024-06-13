@@ -1,34 +1,29 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol, Union
+from typing import Any, Dict, List, Optional, Protocol, Union
 
+import cyvcf2
+import joblib
 import numpy as np
+import pgenlib
 from numpy.typing import ArrayLike, NDArray
 
 from genvarloader.utils import get_rel_starts
-
-try:
-    import pgenlib
-
-    PGENLIB_INSTALLED = True
-except ImportError:
-    PGENLIB_INSTALLED = False
-
-try:
-    import cyvcf2
-
-    CYVCF2_INSTALLED = True
-except ImportError:
-    CYVCF2_INSTALLED = False
 
 
 class Genotypes(Protocol):
     chunked: bool
     samples: NDArray[np.str_]
     ploidy: int
+    handles: Optional[Dict[str, Any]]
 
     @property
     def n_samples(self) -> int:
         return len(self.samples)
+
+    def close(self):
+        """Close any open file handles and set handles to None. Should be a no-op if
+        the handles are already closed or the interface does not use handles."""
+        ...
 
     def read(
         self,
@@ -60,6 +55,30 @@ class Genotypes(Protocol):
         """
         ...
 
+    def multiprocess_read(
+        self,
+        contig: str,
+        start_idxs: ArrayLike,
+        end_idxs: ArrayLike,
+        sample_idx: Optional[ArrayLike] = None,
+        haplotype_idx: Optional[ArrayLike] = None,
+        n_jobs: int = 1,
+    ):
+        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
+        end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.int32))
+        starts = np.array_split(start_idxs, n_jobs)
+        ends = np.array_split(end_idxs, n_jobs)
+
+        self.close()  # close any open handles so they aren't pickled and cause an error
+        tasks = [
+            joblib.delayed(self.read)(contig, s, e, sample_idx, haplotype_idx)
+            for s, e in zip(starts, ends)
+        ]
+        with joblib.Parallel(n_jobs=n_jobs) as parallel:
+            split_genos = list(parallel(tasks))
+        genos = np.concatenate(split_genos, axis=-1)
+        return genos
+
 
 class PgenGenos(Genotypes):
     chunked = False
@@ -71,10 +90,6 @@ class PgenGenos(Genotypes):
         sample_names: NDArray[np.str_],
         contigs: List[str],
     ) -> None:
-        if not PGENLIB_INSTALLED:
-            raise ImportError(
-                "pgenlib must be installed to use PGEN files for genotypes."
-            )
         if isinstance(paths, (str, Path)):
             paths = {"_all": Path(paths)}
 
@@ -97,6 +112,12 @@ class PgenGenos(Genotypes):
     def _pgen(self, contig: str, sample_idx: Optional[NDArray[np.uint32]]):
         return pgenlib.PgenReader(bytes(self.paths[contig]), sample_subset=sample_idx)  # type: ignore
 
+    def close(self):
+        if self.handles is not None:
+            for handle in self.handles.values():
+                handle.close()
+        self.handles = None
+
     def read(
         self,
         contig: str,
@@ -114,15 +135,18 @@ class PgenGenos(Genotypes):
         start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
         end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.int32))
 
-        n_vars = (end_idxs - start_idxs).sum()
+        vars_per_region = end_idxs - start_idxs
+        n_vars = vars_per_region.sum()
+        rel_start_idxs = get_rel_starts(start_idxs, end_idxs)
+        rel_end_idxs = rel_start_idxs + vars_per_region
         # (v s*2)
         genotypes = np.empty((n_vars, self.n_samples * self.ploidy), dtype=np.int32)
 
-        for i, (s, e) in enumerate(zip(start_idxs, end_idxs)):
+        for s, e, rel_s, rel_e in zip(
+            start_idxs, end_idxs, rel_start_idxs, rel_end_idxs
+        ):
             if s == e:
                 continue
-            rel_s = s - start_idxs[i]
-            rel_e = e - start_idxs[i]
             self.handles[contig].read_alleles_range(
                 s, e, allele_int32_out=genotypes[rel_s:rel_e]
             )
@@ -159,11 +183,6 @@ class VCFGenos(Genotypes):
     def __init__(
         self, vcfs: Union[str, Path, Dict[str, Path]], contig_offsets: Dict[str, int]
     ) -> None:
-        if not CYVCF2_INSTALLED:
-            raise ImportError(
-                "cyvcf2 must be installed to use VCF files for genotypes."
-            )
-
         if isinstance(vcfs, (str, Path)):
             vcfs = {"_all": Path(vcfs)}
 
@@ -185,6 +204,7 @@ class VCFGenos(Genotypes):
         if self.handles is not None:
             for handle in self.handles.values():
                 handle.close()
+        self.handles = None
 
     def read(
         self,

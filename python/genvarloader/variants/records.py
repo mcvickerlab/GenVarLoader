@@ -396,7 +396,7 @@ class Records:
         return cls.from_var_df(start_dfs, end_dfs)
 
     @staticmethod
-    def read_pvar(pvar_path: Path):
+    def read_pvar(pvar_path: Path) -> pl.DataFrame:
         with open(pvar_path, "r") as f:
             skip_rows = 0
             while f.readline().startswith("##"):

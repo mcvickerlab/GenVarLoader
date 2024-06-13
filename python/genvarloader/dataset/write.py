@@ -1,5 +1,6 @@
 import gc
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Union, cast
@@ -351,8 +352,12 @@ def read_variants_chunk(
             e_idx = variants.records.contig_offsets[contig] + rel_e_idxs
             # (s p v)
             logger.debug("read genotypes")
-            genos = variants.genotypes.read(
-                contig, s_idx, e_idx, sample_idx=sample_idxs
+            genos = variants.genotypes.multiprocess_read(
+                contig,
+                s_idx,
+                e_idx,
+                sample_idx=sample_idxs,
+                n_jobs=len(os.sched_getaffinity(0)),
             )
             n_per_region = e_idx - s_idx
             offsets = lengths_to_offsets(n_per_region)
