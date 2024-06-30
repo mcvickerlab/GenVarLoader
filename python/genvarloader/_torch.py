@@ -20,10 +20,10 @@ __all__ = []
 
 
 def get_dataloader(
-    dataset: td.Dataset,
+    dataset: "td.Dataset",
     batch_size: int = 1,
     shuffle: bool = False,
-    sampler: Optional[Union[td.Sampler, Iterable]] = None,
+    sampler: Optional[Union["td.Sampler", Iterable]] = None,
     num_workers: int = 0,
     collate_fn: Optional[Callable] = None,
     pin_memory: bool = False,
