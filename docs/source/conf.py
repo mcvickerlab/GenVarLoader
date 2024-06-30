@@ -58,6 +58,7 @@ html_theme_options = {
     "use_repository_button": True,
 }
 html_logo = "_static/gvl_logo.png"
+html_favicon = "_static/favicon.ico"
 html_title = f"GenVarLoader v{version}"
 html_sidebars = {
     "**": [
