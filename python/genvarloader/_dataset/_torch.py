@@ -21,9 +21,6 @@ if TYPE_CHECKING:
     import torch.utils.data as td
 
 
-__all__ = []
-
-
 class TorchDataset(td.Dataset):
     def __init__(self, dataset: "Dataset"):
         if not _TORCH_AVAILABLE:
