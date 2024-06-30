@@ -31,9 +31,6 @@ depedencies = [
     "einops>=0.7.0",
     "typer>=0.11.0",
     "tbb>=2021.12.0",
-    "sphinx>=7.3",
-    "sphinx-book-theme>=1.1",
-    "myst-parser>=3",
 ]
 
 [project.scripts]
