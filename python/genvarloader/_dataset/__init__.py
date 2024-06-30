@@ -38,7 +38,6 @@ from ._genotypes import (
 )
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._reference import Reference
-from ._torch import TorchDataset
 from ._tracks import shift_and_realign_tracks_sparse
 from ._utils import oidx_to_raveled_idx, regions_to_bed, splits_sum_le_value
 
@@ -46,9 +45,17 @@ try:
     import torch
     import torch.utils.data as td
 
+    from ._torch import TorchDataset
+
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+
+if TYPE_CHECKING:
+    import torch
+    import torch.utils.data as td
+
+    from ._torch import TorchDataset
 
 
 @define
@@ -644,6 +651,10 @@ class Dataset:
 
     def to_dataset(self) -> "td.Dataset":
         """Convert the dataset to a map-style PyTorch Dataset."""
+        if not TORCH_AVAILABLE:
+            raise ImportError(
+                "Could not import PyTorch. Please install PyTorch to use torch features."
+            )
         return TorchDataset(self)
 
     def to_dataloader(

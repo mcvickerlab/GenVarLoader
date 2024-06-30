@@ -1,15 +1,31 @@
-```{toctree}
-:maxdepth: 2
-:caption: Contents:
-```
+:::{toctree}
+:hidden: true
 
-<p align="center">
-    <img src=_static/GVL%20Logo.png width="200">
-</p>
+modules
+:::
 
-```{image} https://badge.fury.io/py/genvarloader.svg
+# GenVarLoader
+
+:::{image} _static/gvl_logo.png
+:alt: GenVarLoader logo
+:align: center
+:width: 200
+:::
+
+:::{image} https://badge.fury.io/py/genvarloader.svg
 :alt: PyPI version
 :target: https://badge.fury.io/py/genvarloader
+:class: inline-link
+:::
+
+```{image} https://readthedocs.org/projects/genvarloader/badge/?version=latest
+:alt: Documentation Status
+:target: https://genvarloader.readthedocs.io/en/latest/?badge=latest
+:class: inline-link
+```
+
+```{image} https://img.shields.io/pypi/dm/genvarloader
+:alt: PyPI - Downloads
 :class: inline-link
 ```
 \

@@ -34,7 +34,7 @@ autodoc_type_aliases = {"ArrayLike": "ArrayLike"}
 autodoc_default_options = {"private-members": False}
 autodoc_member_order = "bysource"
 
-myst_enable_extensions = ["colon_fence"]
+myst_enable_extensions = ["colon_fence", "html_image"]
 
 templates_path = ["_templates"]
 exclude_patterns = []
@@ -53,8 +53,17 @@ intersphinx_mapping = {
 html_theme = "sphinx_book_theme"
 html_static_path = ["_static"]
 html_theme_options = {
+    "home_page_in_toc": True,
     "repository_url": "https://github.com/mcvickerlab/GenVarLoader",
     "use_repository_button": True,
 }
-html_logo = "_static/GVL Logo.png"
+html_logo = "_static/gvl_logo.png"
 html_title = f"GenVarLoader v{version}"
+html_sidebars = {
+    "**": [
+        "navbar-logo.html",
+        "icon-links.html",
+        "search-button-field.html",
+        "sbt-sidebar-nav.html",
+    ]
+}

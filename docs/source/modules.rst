@@ -1,4 +1,4 @@
-genvarloader
+API Reference
 ============
 
 .. toctree::

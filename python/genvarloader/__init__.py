@@ -14,9 +14,9 @@ __version__ = importlib.metadata.version("genvarloader")
 
 __all__ = [
     "write",
-    "Dataset",
     "read_bedlike",
     "with_length",
+    "Dataset",
     "Ragged",
     "Fasta",
     "BigWigs",

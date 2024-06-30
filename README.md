@@ -1,4 +1,4 @@
-<img src=docs/source/_static/GVL%20Logo.png width="200">
+<img src=docs/source/_static/gvl_logo.png width="200">
 
 GenVarLoader provides a fast, memory efficient data loader for training sequence models on genetic variation. For example, this can be used to train a DNA language model on human genetic variation (e.g. [Nucleotide Transformer](https://www.biorxiv.org/content/10.1101/2023.01.11.523679)) or train sequence to function models with genetic variation (e.g. [BigRNA](https://www.biorxiv.org/content/10.1101/2023.09.20.558508v1)).
 
