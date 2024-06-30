@@ -12,12 +12,20 @@ from natsort import natsorted
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
-from ..bigwig import BigWigs
-from ..utils import lengths_to_offsets, normalize_contig_name, read_bedlike, with_length
-from ..variants import Variants
-from ..variants.genotypes import VCFGenos
-from .genotypes import SparseGenotypes, get_haplotype_region_ilens
-from .utils import splits_sum_le_value
+from .._bigwig import BigWigs
+from .._utils import (
+    _lengths_to_offsets,
+    _normalize_contig_name,
+    read_bedlike,
+    with_length,
+)
+from .._variants import Variants
+from .._variants._genotypes import VCFGenos
+from ._genotypes import SparseGenotypes, get_haplotype_region_ilens
+from ._utils import splits_sum_le_value
+
+__all__ = ["write"]
+
 
 INITIAL_END_EXTENSION = 1000
 EXTEND_END_MULTIPLIER = 1.1
@@ -34,6 +42,29 @@ def write(
     overwrite: bool = False,
     max_mem: int = 4 * 2**30,
 ):
+    """Write a GVL dataset.
+
+    Parameters
+    ----------
+    path : Union[str, Path]
+        Path to write the dataset to.
+    bed : Union[str, Path, pl.DataFrame]
+        BED-like file or DataFrame containing regions to query.
+    variants : Optional[Union[str, Path, Variants]], optional
+        VCF, PGEN, or Variants object containing genotypes, by default None
+    bigwigs : Optional[Union[BigWigs, List[BigWigs]]], optional
+        BigWigs object or list of BigWigs objects containing intervals, by default None
+    samples : Optional[List[str]], optional
+        Samples to include in the dataset, by default None
+    length : Optional[int], optional
+        Length of the regions to query, by default None
+    max_jitter : Optional[int], optional
+        Maximum jitter to add to the regions, by default None
+    overwrite : bool, optional
+        Whether to overwrite an existing dataset, by default False
+    max_mem : int, optional
+        Maximum memory to use per region, by default 4 GiB (4 * 2**30 bytes)
+    """
     if variants is None and bigwigs is None:
         raise ValueError("At least one of `vcf` or `bigwigs` must be provided.")
 
@@ -51,7 +82,7 @@ def write(
         raise FileExistsError(f"{path} already exists.")
     path.mkdir(parents=True, exist_ok=True)
 
-    bed, contigs, region_length = prep_bed(bed, length, max_jitter)
+    bed, contigs, region_length = _prep_bed(bed, length, max_jitter)
     metadata["region_length"] = region_length
     metadata["contigs"] = contigs
     if max_jitter is not None:
@@ -63,7 +94,7 @@ def write(
             variants = Variants.from_file(variants)
 
         if unavailable_contigs := set(contigs) - {
-            normalize_contig_name(c, contigs) for c in variants.records.contigs
+            _normalize_contig_name(c, contigs) for c in variants.records.contigs
         }:
             logger.warning(
                 f"Contigs in queries {unavailable_contigs} are not found in the VCF."
@@ -76,7 +107,7 @@ def write(
         unavail = []
         for bw in bigwigs:
             if unavailable_contigs := set(contigs) - set(
-                normalize_contig_name(c, contigs) for c in bw.contigs
+                _normalize_contig_name(c, contigs) for c in bw.contigs
             ):
                 unavail.append(unavailable_contigs)
             if available_samples is None:
@@ -110,7 +141,7 @@ def write(
 
     if variants is not None:
         logger.info("Writing genotypes.")
-        bed = write_variants(
+        bed = _write_variants(
             path,
             bed,
             variants,
@@ -126,12 +157,12 @@ def write(
         gc.collect()
 
     logger.info("Writing regions.")
-    write_regions(path, bed, contigs)
+    _write_regions(path, bed, contigs)
 
     if bigwigs is not None:
         logger.info("Writing BigWig intervals.")
         for bw in bigwigs:
-            write_bigwigs(path, bed, bw, samples)
+            _write_bigwigs(path, bed, bw, samples)
 
     with open(path / "metadata.json", "w") as f:
         json.dump(metadata, f)
@@ -139,7 +170,7 @@ def write(
     logger.info("Finished writing.")
 
 
-def prep_bed(
+def _prep_bed(
     bed: Union[str, Path, pl.DataFrame],
     length: Optional[int] = None,
     max_jitter: Optional[int] = None,
@@ -175,7 +206,7 @@ def prep_bed(
     return bed, contigs, length
 
 
-def write_regions(path: Path, bed: pl.DataFrame, contigs: List[str]):
+def _write_regions(path: Path, bed: pl.DataFrame, contigs: List[str]):
     with pl.StringCache():
         pl.Series(contigs, dtype=pl.Categorical)
         regions = bed.with_columns(
@@ -185,7 +216,7 @@ def write_regions(path: Path, bed: pl.DataFrame, contigs: List[str]):
     np.save(path / "regions.npy", regions)
 
 
-def write_variants(
+def _write_variants(
     path: Path,
     bed: pl.DataFrame,
     variants: Variants,
@@ -225,7 +256,7 @@ def write_variants(
     for contig, part in bed.partition_by(
         "chrom", as_dict=True, include_key=False, maintain_order=True
     ).items():
-        _contig = normalize_contig_name(contig, variants.records.contigs)
+        _contig = _normalize_contig_name(contig, variants.records.contigs)
         if _contig is not None:
             starts = part["chromStart"].to_numpy()
             ends = starts + region_length + INITIAL_END_EXTENSION
@@ -277,9 +308,9 @@ def write_variants(
                     f"Reading genotypes for {n_regions} regions on chromosome {contig}"
                 )
 
-                _contig = normalize_contig_name(contig, variants.records.contigs)
+                _contig = _normalize_contig_name(contig, variants.records.contigs)
 
-                genos, chunk_max_ends = read_variants_chunk(
+                genos, chunk_max_ends = _read_variants_chunk(
                     _contig,
                     starts,
                     ends,
@@ -303,7 +334,7 @@ def write_variants(
                     v_idx_memmap_offsets,
                     offset_memmap_offsets,
                     last_offset,
-                ) = write_variants_chunk(
+                ) = _write_variants_chunk(
                     out_dir,
                     genos,
                     v_idx_memmap_offsets,
@@ -326,7 +357,7 @@ def write_variants(
     return bed
 
 
-def read_variants_chunk(
+def _read_variants_chunk(
     contig: Optional[str],
     starts: NDArray[np.int32],
     ends: NDArray[np.int32],
@@ -360,7 +391,7 @@ def read_variants_chunk(
                 n_jobs=len(os.sched_getaffinity(0)),
             )
             n_per_region = e_idx - s_idx
-            offsets = lengths_to_offsets(n_per_region)
+            offsets = _lengths_to_offsets(n_per_region)
 
             logger.debug("get haplotype region ilens")
             # (s p r)
@@ -399,7 +430,7 @@ def read_variants_chunk(
     return genos, chunk_max_ends
 
 
-def write_variants_chunk(
+def _write_variants_chunk(
     out_dir: Path,
     genos: SparseGenotypes,
     v_idx_memmap_offset: int,
@@ -433,7 +464,7 @@ def write_variants_chunk(
     return v_idx_memmap_offset, offsets_memmap_offset, last_offset
 
 
-def write_bigwigs(
+def _write_bigwigs(
     path: Path, bed: pl.DataFrame, bigwigs: BigWigs, samples: Optional[List[str]]
 ) -> int:
     if samples is None:

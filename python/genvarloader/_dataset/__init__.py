@@ -26,21 +26,21 @@ from loguru import logger
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
-from ..torch import get_dataloader
-from ..types import INTERVAL_DTYPE, Idx, Ragged, RaggedIntervals
-from ..utils import lengths_to_offsets, read_bedlike, with_length
-from ..variants import VLenAlleles
-from .genotypes import (
+from .._torch import get_dataloader
+from .._types import INTERVAL_DTYPE, Idx, Ragged, RaggedIntervals
+from .._utils import _lengths_to_offsets, read_bedlike, with_length
+from .._variants._records import VLenAlleles
+from ._genotypes import (
     SparseGenotypes,
     get_diffs_sparse,
     padded_slice,
     reconstruct_haplotypes_from_sparse,
 )
-from .intervals import intervals_to_tracks, tracks_to_intervals
-from .reference import Reference
-from .torch import TorchDataset
-from .tracks import shift_and_realign_tracks_sparse
-from .utils import oidx_to_raveled_idx, regions_to_bed, splits_sum_le_value
+from ._intervals import intervals_to_tracks, tracks_to_intervals
+from ._reference import Reference
+from ._torch import TorchDataset
+from ._tracks import shift_and_realign_tracks_sparse
+from ._utils import oidx_to_raveled_idx, regions_to_bed, splits_sum_le_value
 
 try:
     import torch
@@ -71,106 +71,16 @@ class _Variants:
 @define(frozen=True)
 class Dataset:
     """A dataset of genotypes, reference sequences, and intervals. Note: this class is not meant to be instantiated directly.
-    Use the `open` or `open_with_settings` class methods to create a dataset after writing the data with `genvarloader.write()`
+    Use the :py:meth:`Dataset.open` class method to create a dataset after writing the data with :py:func:`genvarloader.write()`
     or the genvarloader CLI.
-
-    Attributes
-    ----------
-    path : Path
-        The path to the dataset.
-    max_jitter : int
-        The maximum jitter allowable by the underlying data written to disk.
-    jitter : int
-        The current jitter.
-    region_length : int
-        The length of the regions in the dataset corresponding to what was written to disk (i.e. output_length + 2 * max_jitter).
-    contigs : List[str]
-        The unique contigs in the dataset.
-    full_samples : List[str]
-        The full list of samples in the dataset.
-    full_regions : NDArray[np.int32]
-        The full regions in the dataset.
-    rng : np.random.Generator
-        The random number generator used for jittering and shifting haplotypes that are longer than the output length.
-    sample_idxs : NDArray[np.intp]
-        The indices of the samples to subset to.
-    region_idxs : NDArray[np.intp]
-        The indices of the regions to subset to.
-    sequence_type : Optional[Literal["reference", "haplotypes"]]
-        The type of sequence to return.
-    active_tracks : Optional[List[str]]
-        The active tracks to return.
-    available_tracks : List[str]
-        The available tracks in the dataset.
-    ploidy : Optional[int]
-        The ploidy of the dataset.
-    reference : Optional[Reference]
-        The reference genome. This is kept in memory.
-    variants : Optional[_Variants]
-        The variant sites in the dataset. This is kept in memory.
-    genotypes : Optional[SparseGenotypes]
-        The genotypes in the dataset. This is memory mapped.
-    intervals : Optional[Dict[str, RaggedIntervals]]
-        The intervals in the dataset. This is memory mapped.
-    transform : Optional[Callable]
-        The transform to apply to the data.
-    idx_map : Optional[NDArray[np.intp]]
-        The map from the full dataset to the subset dataset.
-    return_indices : bool
-        Whether to return indices.
-
-    Properties
-    ----------
-    has_reference : bool
-        Whether the dataset has a reference genome.
-    has_genotypes : bool
-        Whether the dataset has genotypes.
-    has_intervals : bool
-        Whether the dataset has intervals.
-    samples : List[str]
-        The samples in the dataset.
-    regions : NDArray[np.int32]
-        The regions in the dataset.
-    n_samples : int
-        The number of samples in the dataset.
-    n_regions : int
-        The number of regions in the dataset.
-    output_length : int
-        The length of the output sequence.
-    shape : Tuple[int, int]
-        The shape of the (possibly subset) dataset.
-    full_shape : Tuple[int, int]
-        The full shape of the dataset.
     """
-
-    path: Path
-    max_jitter: int
-    jitter: int
-    region_length: int
-    contigs: List[str]
-    full_samples: List[str]
-    full_regions: NDArray[np.int32]
-    rng: np.random.Generator
-    sample_idxs: NDArray[np.intp]
-    region_idxs: NDArray[np.intp]
-    sequence_type: Optional[Literal["reference", "haplotypes"]]
-    active_tracks: Optional[List[str]]
-    available_tracks: List[str]
-    ploidy: Optional[int] = None
-    reference: Optional[Reference] = None
-    variants: Optional[_Variants] = None
-    genotypes: Optional[SparseGenotypes] = None
-    intervals: Optional[Dict[str, RaggedIntervals]] = None
-    transform: Optional[Callable] = None
-    idx_map: Optional[NDArray[np.intp]] = None
-    return_indices: bool = False
 
     @classmethod
     def _open(
         cls,
         path: Union[str, Path],
         reference: Optional[Union[str, Path]] = None,
-    ):
+    ) -> "Dataset":
         """Open a dataset from a path. If no reference genome is provided, the dataset can only yield tracks.
 
         Parameters
@@ -272,7 +182,7 @@ class Dataset:
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
-    ):
+    ) -> "Dataset":
         """Open a dataset from a path. If no reference genome is provided, the dataset can only yield tracks.
 
         Parameters
@@ -336,7 +246,7 @@ class Dataset:
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
-    ):
+    ) -> "Dataset":
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
         Parameters
@@ -422,6 +332,69 @@ class Dataset:
 
         return evolve(ds, **to_evolve)
 
+    path: Path
+    """The path to the dataset."""
+
+    max_jitter: int
+    """The maximum jitter allowable by the underlying data written to disk."""
+
+    jitter: int
+    """The current jitter."""
+
+    region_length: int
+    """The length of the regions in the dataset corresponding to what was written to disk (i.e. output_length + 2 * max_jitter)."""
+
+    contigs: List[str]
+    """The unique contigs in the dataset."""
+
+    full_samples: List[str]
+    """The full list of samples in the dataset."""
+
+    full_regions: NDArray[np.int32]
+    """The full regions in the dataset."""
+
+    rng: np.random.Generator
+    """The random number generator used for jittering and shifting haplotypes that are longer than the output length."""
+
+    sample_idxs: NDArray[np.intp]
+    """The indices of the samples to subset to."""
+
+    region_idxs: NDArray[np.intp]
+    """The indices of the regions to subset to."""
+
+    sequence_type: Optional[Literal["reference", "haplotypes"]]
+    """The type of sequence to return."""
+
+    active_tracks: Optional[List[str]]
+    """The active tracks to return."""
+
+    available_tracks: List[str]
+    """The available tracks in the dataset."""
+
+    ploidy: Optional[int] = None
+    """The ploidy of the dataset."""
+
+    reference: Optional[Reference] = None
+    """The reference genome. This is kept in memory."""
+
+    variants: Optional[_Variants] = None
+    """The variant sites in the dataset. This is kept in memory."""
+
+    genotypes: Optional[SparseGenotypes] = None
+    """The genotypes in the dataset. This is memory mapped."""
+
+    intervals: Optional[Dict[str, RaggedIntervals]] = None
+    """The intervals in the dataset. This is memory mapped."""
+
+    transform: Optional[Callable] = None
+    """The transform to apply to the data."""
+
+    idx_map: Optional[NDArray[np.intp]] = None
+    """The map from the full dataset to the subset dataset."""
+
+    return_indices: bool = False
+    """Whether to return indices."""
+
     @property
     def has_reference(self) -> bool:
         return self.reference is not None
@@ -483,7 +456,7 @@ class Dataset:
         ],
         max_mem: int = 2**30,
         overwrite: bool = False,
-    ):
+    ) -> "Dataset":
         """Write transformed tracks to the dataset.
 
         Parameters
@@ -494,7 +467,7 @@ class Dataset:
             The name of the existing track to transform.
         transform
             A function to apply to the existing track to get a new, transformed track.
-            This will be done in chunks such that the tracks provided will not exceed `max_mem`.
+            This will be done in chunks such that the tracks provided will not exceed :code:`max_mem`.
             The arguments given to the transform will be the regions for each track in the chunk as a polars
             DataFrame, the sample indices for each track in the chunk, and the tracks themselves.
             Note that the tracks will be a :class:`Ragged` array with shape (regions, samples)
@@ -516,7 +489,7 @@ class Dataset:
             )
 
         if self.intervals is None:
-            intervals = self.init_intervals(existing_track)[existing_track]
+            intervals = self._init_intervals(existing_track)[existing_track]
         else:
             intervals = self.intervals[existing_track]
 
@@ -617,7 +590,7 @@ class Dataset:
         self,
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
         samples: Optional[Sequence[str]] = None,
-    ):
+    ) -> "Dataset":
         if regions is None and samples is None:
             return self
 
@@ -662,14 +635,14 @@ class Dataset:
             self, sample_idxs=sample_idxs, region_idxs=region_idxs, idx_map=idx_map
         )
 
-    def to_full_dataset(self):
+    def to_full_dataset(self) -> "Dataset":
         sample_idxs = np.arange(len(self.full_samples), dtype=np.intp)
         region_idxs = np.arange(len(self.full_regions), dtype=np.intp)
         return evolve(
             self, sample_idxs=sample_idxs, region_idxs=region_idxs, idx_map=None
         )
 
-    def to_dataset(self):
+    def to_dataset(self) -> "td.Dataset":
         """Convert the dataset to a map-style PyTorch Dataset."""
         return TorchDataset(self)
 
@@ -690,7 +663,7 @@ class Dataset:
         prefetch_factor: Optional[int] = None,
         persistent_workers: bool = False,
         pin_memory_device: str = "",
-    ):
+    ) -> "td.DataLoader":
         """Convert the dataset to a PyTorch DataLoader."""
         return get_dataloader(
             dataset=self.to_dataset(),
@@ -727,7 +700,9 @@ class Dataset:
     def __repr__(self) -> str:
         return str(self)
 
-    def isel(self, regions: Idx, samples: Idx):
+    def isel(
+        self, regions: Idx, samples: Idx
+    ) -> Union[NDArray, Tuple[NDArray, ...], Any]:
         """Eagerly select a subset of samples and regions from the dataset.
 
         Parameters
@@ -765,7 +740,7 @@ class Dataset:
         self,
         regions: Union[str, Tuple[str, int, int], pl.DataFrame],
         samples: Union[str, List[str]],
-    ):
+    ) -> Union[NDArray, Tuple[NDArray, ...], Any]:
         """Eagerly select a subset of samples and regions from the dataset.
 
         Parameters
@@ -830,9 +805,9 @@ class Dataset:
         # Since Dataset is a frozen class, we need to use object.__setattr__ to set the attributes
         # per attrs docs (https://www.attrs.org/en/stable/init.html#post-init)
         if self.genotypes is None and self.sequence_type == "haplotypes":
-            object.__setattr__(self, "genotypes", self.init_genotypes())
+            object.__setattr__(self, "genotypes", self._init_genotypes())
         if self.intervals is None and self.active_tracks:
-            object.__setattr__(self, "intervals", self.init_intervals())
+            object.__setattr__(self, "intervals", self._init_intervals())
 
         if isinstance(idx, (int, np.integer)):
             _idx = [idx]
@@ -861,11 +836,11 @@ class Dataset:
                 assert self.genotypes is not None
                 assert self.variants is not None
 
-            geno_offset_idx = self.get_geno_offset_idx(r_idx, s_idx)
+            geno_offset_idx = self._get_geno_offset_idx(r_idx, s_idx)
             # (b p)
-            shifts = self.get_shifts(geno_offset_idx)
+            shifts = self._get_shifts(geno_offset_idx)
             # (b p l)
-            haps = self.get_haplotypes(geno_offset_idx, r_idx, shifts)
+            haps = self._get_haplotypes(geno_offset_idx, r_idx, shifts)
             if should_rc:
                 haps[to_rc] = sp.DNA.reverse_complement(haps[to_rc], -1)
             out.append(haps)
@@ -874,7 +849,7 @@ class Dataset:
                 assert self.reference is not None
             geno_offset_idx = None
             shifts = None
-            ref = get_reference(
+            ref = _get_reference(
                 r_idx,
                 self.full_regions,
                 self.reference.reference,
@@ -891,7 +866,7 @@ class Dataset:
 
         if self.active_tracks:
             # [(b p l) ...]
-            tracks = self.get_tracks(_idx, r_idx, shifts, geno_offset_idx)
+            tracks = self._get_tracks(_idx, r_idx, shifts, geno_offset_idx)
             if should_rc:
                 for t in tracks:
                     t[to_rc] = t[to_rc, ..., ::-1]
@@ -924,7 +899,7 @@ class Dataset:
 
         return _out
 
-    def init_genotypes(self):
+    def _init_genotypes(self):
         if TYPE_CHECKING:
             assert self.ploidy is not None
         genotypes = SparseGenotypes(
@@ -942,7 +917,7 @@ class Dataset:
         )
         return genotypes
 
-    def init_intervals(self, tracks: Optional[Union[str, List[str]]] = None):
+    def _init_intervals(self, tracks: Optional[Union[str, List[str]]] = None):
         if TYPE_CHECKING:
             assert self.active_tracks is not False
 
@@ -969,7 +944,7 @@ class Dataset:
 
         return intervals
 
-    def get_geno_offset_idx(self, region_idx, sample_idx):
+    def _get_geno_offset_idx(self, region_idx, sample_idx):
         if TYPE_CHECKING:
             assert self.genotypes is not None
             assert self.ploidy is not None
@@ -978,7 +953,7 @@ class Dataset:
         geno_offset_idx = np.ravel_multi_index(rsp_idx, self.genotypes.effective_shape)
         return geno_offset_idx
 
-    def get_shifts(self, geno_offset_idx: NDArray[np.intp]):
+    def _get_shifts(self, geno_offset_idx: NDArray[np.intp]):
         if TYPE_CHECKING:
             assert self.genotypes is not None
             assert self.variants is not None
@@ -993,7 +968,7 @@ class Dataset:
         shifts = self.rng.integers(0, -diffs.clip(max=0) + 1, dtype=np.int32)
         return shifts
 
-    def get_haplotypes(
+    def _get_haplotypes(
         self,
         geno_offset_idx: NDArray[np.intp],
         region_idx: NDArray[np.intp],
@@ -1024,7 +999,7 @@ class Dataset:
         )
         return haps.view("S1")
 
-    def get_tracks(
+    def _get_tracks(
         self,
         dataset_idx: NDArray[np.intp],
         region_idx: NDArray[np.intp],
@@ -1059,7 +1034,7 @@ class Dataset:
                     assert self.genotypes is not None
 
                 length_per_region = regions[:, 2] - regions[:, 1]
-                track_offsets = lengths_to_offsets(length_per_region)
+                track_offsets = _lengths_to_offsets(length_per_region)
 
                 out = np.empty(
                     (len(region_idx), self.ploidy, self.region_length), np.float32
@@ -1085,10 +1060,10 @@ class Dataset:
 
         return tracks
 
-    def get_bed(self):
-        """Get a polars DataFrame of the regions in the dataset, corresponding to the coordinates
+    def get_bed(self) -> pl.DataFrame:
+        """Get a polars.DataFrame of the regions in the dataset, corresponding to the coordinates
         used when writing the dataset. In other words, each region will have length
-        `ds.output_length + 2 * ds.max_jitter`."""
+        :code:`self.output_length + 2 * self.max_jitter`."""
         bed = regions_to_bed(self.full_regions, self.contigs)
         bed = bed.with_columns(chromEnd=pl.col("chromStart") + self.region_length)
         return bed
@@ -1099,7 +1074,7 @@ class Dataset:
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
-def get_reference(
+def _get_reference(
     r_idxs: NDArray[np.int32],
     regions: NDArray[np.int32],
     reference: NDArray[np.uint8],

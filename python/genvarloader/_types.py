@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 from typing import (
     Callable,
@@ -16,43 +18,32 @@ import numpy as np
 from attrs import define
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
+__all__ = ["Reader", "Ragged"]
+
+
 DTYPE = TypeVar("DTYPE", bound=np.generic)
 Idx = Union[int, np.integer, Sequence[int], NDArray[np.integer], slice]
 ListIdx = Union[Sequence[int], NDArray[np.integer]]
 
 
 class Reader(Protocol):
-    """Implements the read() method for returning data aligned to genomic coordinates.
-
-    Attributes
-    ----------
-    name : str
-        Name of the reader, corresponding to the name of the DataArrays it returns.
-    dtype : np.dtype
-        Data type of what the reader returns.
-    sizes : Dict[Hashable, int]
-        Sizes of the dimensions/axes of what the reader returns.
-    coords : Dict[Hashable, NDArray]
-        Coordinates of what the reader returns, i.e. dimension labels.
-    contig_starts_with_chr : bool, optional
-        Whether the contigs start with "chr" or not. Queries to `read()` will
-        normalize the contig name to add or remove this prefix to match what the
-        underlying file uses.
-    rev_strand_fn : Callable[[NDArray], NDArray]
-        Function to reverse (and potentially complement) data for a genomic region. This
-        is used when the strand is negative.
-    chunked : bool
-        Whether the reader acts like a chunked array store, in which sequential reads
-        are far more performant than random access.
-    """
+    """Implements the read() method for returning data aligned to genomic coordinates."""
 
     name: str
+    """Name of the reader, corresponding to the name of the DataArrays it returns."""
     dtype: DTypeLike
+    """Data type of what the reader returns."""
     contigs: Mapping[str, int]
     sizes: Dict[str, int]
+    """Sizes of the dimensions/axes of what the reader returns."""
     coords: Dict[str, NDArray]
+    """Coordinates of what the reader returns, i.e. dimension labels."""
     rev_strand_fn: Callable[[NDArray], NDArray]
+    """Function to reverse (and potentially complement) data for a genomic region. This
+        is used when the strand is negative."""
     chunked: bool
+    """Whether the reader acts like a chunked array store, in which sequential reads
+        are far more performant than random access."""
 
     def read(
         self,
@@ -90,7 +81,7 @@ class Reader(Protocol):
         ...
 
 
-class ToZarr(Protocol):
+class _ToZarr(Protocol):
     """Implements the to_zarr() method."""
 
     def to_zarr(self, store: Path):
@@ -109,26 +100,15 @@ RDTYPE = TypeVar("RDTYPE", bound=np.generic, contravariant=True)
 
 @define
 class Ragged(Generic[RDTYPE]):
-    """Ragged array with non-length dimensions.
-
-    Attributes
-    ----------
-    data : ndarray
-        A 1D array of the data.
-    shape : tuple[int, ...]
-        Shape of the ragged array, excluding the length dimension. For example, if
-        the shape is (2, 3), then the j, k-th element can be mapped to an index for
-        offsets with `i = np.ravel_multi_index((j, k), shape)`. The number of ragged
-        elements should correspond to the product of the shape.
-    offsets : ndarray[int32]
-        1D array of offsets into the data array to get corresponding elements. The i-th element
-        is accessible as `data[offsets[i]:offsets[i+1]]`.
-    lengths : ndarray[int32]
-        ND array of lengths of each element in the ragged array, has same shape as the ragged array.
-    """
+    """Ragged array with non-length dimensions."""
 
     data: NDArray[RDTYPE]
+    """A 1D array of the data."""
     shape: Tuple[int, ...]
+    """Shape of the ragged array, excluding the length dimension. For example, if
+        the shape is (2, 3), then the j, k-th element can be mapped to an index for
+        offsets with `i = np.ravel_multi_index((j, k), shape)`. The number of ragged
+        elements should correspond to the product of the shape."""
     maybe_offsets: Optional[NDArray[np.int32]] = None
     maybe_lengths: Optional[NDArray[np.int32]] = None
 
@@ -172,9 +152,10 @@ class Ragged(Generic[RDTYPE]):
 
         Parameters
         ----------
-        data
+        data : NDArray[DTYPE]
             1D data array.
-        offsets
+        shape : Union[int, Tuple[int, ...]]
+        offsets : NDArray[np.int32]
             Offsets into the data array to get corresponding elements.
         """
         if isinstance(shape, int):
@@ -190,9 +171,9 @@ class Ragged(Generic[RDTYPE]):
 
         Parameters
         ----------
-        data
+        data : NDArray[DTYPE]
             1D data array.
-        lengths
+        lengths : NDArray[np.int32]
             Lengths of each element in the ragged array.
         """
         return cls(data, lengths.shape, maybe_lengths=lengths)

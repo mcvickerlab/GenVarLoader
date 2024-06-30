@@ -8,9 +8,10 @@ from more_itertools import batched
 from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
 
-from .types import Reader
-from .utils import normalize_contig_name
+from ._types import Reader
+from ._utils import _normalize_contig_name
 
+__all__ = []
 try:
     import tensorstore as ts
     import zarr
@@ -157,7 +158,7 @@ class ZarrTracks(Reader):
         if self.tstores is None:
             self.tstores = {contig: self._tstore(contig) for contig in self.contigs}
 
-        contig = normalize_contig_name(contig, self.contigs)  # pyright: ignore[reportAssignmentType]
+        contig = _normalize_contig_name(contig, self.contigs)  # pyright: ignore[reportAssignmentType]
         if contig is None:
             raise ValueError(f"Contig {contig} not found")
 
@@ -225,7 +226,7 @@ class ZarrTracks(Reader):
 
         contigs = np.array(
             [
-                normalize_contig_name(c, self.contigs)
+                _normalize_contig_name(c, self.contigs)
                 for c in np.atleast_1d(np.asarray(contigs))
             ]
         )

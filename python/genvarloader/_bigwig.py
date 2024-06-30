@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -6,9 +8,11 @@ import polars as pl
 import pyBigWig
 from numpy.typing import ArrayLike, NDArray
 
+from ._types import INTERVAL_DTYPE, RaggedIntervals, Reader
+from ._utils import _get_rel_starts, _normalize_contig_name
 from .genvarloader import intervals as bw_intervals
-from .types import INTERVAL_DTYPE, RaggedIntervals, Reader
-from .utils import get_rel_starts, normalize_contig_name
+
+__all__ = []
 
 
 class BigWigs(Reader):
@@ -102,7 +106,7 @@ class BigWigs(Reader):
         NDArray
             Shape: (samples length). Data corresponding to the given genomic coordinates and samples.
         """
-        _contig = normalize_contig_name(contig, self.contigs)
+        _contig = _normalize_contig_name(contig, self.contigs)
         if _contig is None:
             raise ValueError(f"Contig {contig} not found.")
         else:
@@ -119,7 +123,7 @@ class BigWigs(Reader):
 
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
-        rel_starts = get_rel_starts(starts, ends)
+        rel_starts = _get_rel_starts(starts, ends)
         rel_ends = rel_starts + (ends - starts)
 
         out = np.empty((len(samples), (ends - starts).sum()), dtype=np.float32)
@@ -139,7 +143,7 @@ class BigWigs(Reader):
         sample: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> RaggedIntervals:
-        _contig = normalize_contig_name(contig, self.contigs)
+        _contig = _normalize_contig_name(contig, self.contigs)
         if _contig is None:
             raise ValueError(f"Contig {contig} not found.")
         else:

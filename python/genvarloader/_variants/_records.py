@@ -13,7 +13,7 @@ from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
 from typing_extensions import Self, assert_never
 
-from ..utils import lengths_to_offsets, normalize_contig_name, offsets_to_lengths
+from .._utils import _lengths_to_offsets, _normalize_contig_name, _offsets_to_lengths
 
 try:
     import cyvcf2
@@ -21,6 +21,8 @@ try:
     CYVCF2_INSTALLED = True
 except ImportError:
     CYVCF2_INSTALLED = False
+
+__all__ = []
 
 
 @define
@@ -125,9 +127,9 @@ class VLenAlleles:
             return vlen_alleles[0]
 
         nuc_per_allele = np.concatenate(
-            [offsets_to_lengths(v.offsets) for v in vlen_alleles]
+            [_offsets_to_lengths(v.offsets) for v in vlen_alleles]
         )
-        offsets = lengths_to_offsets(nuc_per_allele, np.int64)
+        offsets = _lengths_to_offsets(nuc_per_allele, np.int64)
         alleles = np.concatenate([v.alleles for v in vlen_alleles])
         return VLenAlleles(offsets, alleles)
 
@@ -206,10 +208,10 @@ class RecordInfo:
         start_idxs = np.concatenate([r.start_idxs for r in record_infos])
         end_idxs = np.concatenate([r.end_idxs for r in record_infos])
         v_per_query = np.concatenate(
-            [offsets_to_lengths(r.offsets) for r in record_infos]
+            [_offsets_to_lengths(r.offsets) for r in record_infos]
         )
         if how == "separate":
-            offsets = lengths_to_offsets(v_per_query)
+            offsets = _lengths_to_offsets(v_per_query)
         elif how == "merge":
             offsets = np.array([0, v_per_query.sum()], np.int32)
         else:
@@ -606,7 +608,7 @@ class Records:
         ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
         n_queries = len(starts)
 
-        _contig = normalize_contig_name(contig, self.contigs)
+        _contig = _normalize_contig_name(contig, self.contigs)
         if _contig is None:
             return RecordInfo.empty(n_queries)
 
@@ -617,7 +619,7 @@ class Records:
             return RecordInfo.empty(n_queries)
 
         n_var_per_region = rel_e_idxs - rel_s_idxs
-        offsets = lengths_to_offsets(n_var_per_region)
+        offsets = _lengths_to_offsets(n_var_per_region)
 
         # make idxs absolute
         s_idxs = rel_s_idxs + self.contig_offsets[_contig]
@@ -669,7 +671,7 @@ class Records:
         ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
         n_queries = len(starts)
 
-        _contig = normalize_contig_name(contig, self.contigs)
+        _contig = _normalize_contig_name(contig, self.contigs)
         if _contig is None:
             return RecordInfo.empty(n_queries), ends
 

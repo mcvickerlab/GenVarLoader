@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from functools import partial
 from pathlib import Path
@@ -9,8 +11,10 @@ import seqpro as sp
 from numpy.typing import ArrayLike, NDArray
 from typing_extensions import assert_never
 
-from .types import Reader
-from .utils import get_rel_starts, normalize_contig_name
+from ._types import Reader
+from ._utils import _get_rel_starts, _normalize_contig_name
+
+__all__ = ["Fasta", "NoPadError"]
 
 
 class NoPadError(Exception):
@@ -19,9 +23,13 @@ class NoPadError(Exception):
 
 class Fasta(Reader):
     dtype = np.dtype("S1")
+    """Data type of the sequences."""
     sizes = {}
+    """Sizes of non-sequence length dimensions."""
     coords = {}
+    """Coordinates of non-sequence length dimensions."""
     chunked = False
+    """Whether the reader represents a chunked file format."""
 
     def __init__(
         self,
@@ -191,7 +199,7 @@ class Fasta(Reader):
         ValueError
             Coordinates are out-of-bounds and pad value is not set.
         """
-        _contig = normalize_contig_name(contig, self.contigs)
+        _contig = _normalize_contig_name(contig, self.contigs)
         if _contig is None:
             raise ValueError(f"Contig {contig} not found.")
         else:
@@ -224,7 +232,7 @@ class Fasta(Reader):
         else:
             out = np.full(lengths.sum(), self.pad, dtype="S1")
 
-        rel_starts = get_rel_starts(starts, ends)
+        rel_starts = _get_rel_starts(starts, ends)
         rel_ends = rel_starts + lengths - right_pads
         rel_starts += left_pads
 
