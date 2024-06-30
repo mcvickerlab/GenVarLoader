@@ -48,10 +48,8 @@ dev = [
     "pre-commit>=3.5.0",
     "pytest-benchmark>=4.0.0",
     "filelock>=3.13.1",
-    "sphinx",
-    "sphinx-book-theme",
-    "myst-parser",
 ]
+docs = ["sphinx", "sphinx-book-theme", "myst-parser"]
 
 [tool.mypy]
 plugins = ["numpy.typing.mypy_plugin", "pandera.mypy"]
