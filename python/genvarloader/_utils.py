@@ -2,7 +2,6 @@ from itertools import accumulate, chain, repeat
 from pathlib import Path
 from typing import (
     Any,
-    Callable,
     Dict,
     Generator,
     Iterable,
@@ -18,10 +17,15 @@ import pandera.typing as pat
 import polars as pl
 from numpy.typing import NDArray
 
+__all__ = [
+    "read_bedlike",
+    "with_length",
+]
+
 T = TypeVar("T")
 
 
-def process_bed(bed: Union[str, Path, pl.DataFrame], fixed_length: int):
+def _process_bed(bed: Union[str, Path, pl.DataFrame], fixed_length: int):
     if isinstance(bed, (str, Path)):
         bed = read_bedlike(bed)
 
@@ -54,7 +58,7 @@ def with_length(bed: pl.DataFrame, length: int):
     return bed
 
 
-def random_chain(
+def _random_chain(
     *iterables: Iterable[T], seed: Optional[int] = None
 ) -> Generator[T, None, None]:
     """Chain iterables, randomly sampling from each until they are all exhausted."""
@@ -69,7 +73,7 @@ def random_chain(
 
 
 def read_bedlike(path: Union[str, Path]) -> pl.DataFrame:
-    """Reads a bed-like (BED3+) file as a pandas DataFrame. The file type is inferred
+    """Reads a bed-like (BED3+) file as a polars DataFrame. The file type is inferred
     from the file extension.
 
     Parameters
@@ -97,7 +101,7 @@ def read_bedlike(path: Union[str, Path]) -> pl.DataFrame:
             )
 
 
-class BEDSchema(pa.DataFrameModel):
+class _BEDSchema(pa.DataFrameModel):
     chrom: pat.Series[str]
     chromStart: pat.Series[int]
     chromEnd: pat.Series[int]
@@ -144,7 +148,7 @@ def _read_bed(bed_path: Union[str, Path]):
         dtypes={"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8},
         null_values=".",
     ).to_pandas()
-    bed = BEDSchema.to_schema()(bed)
+    bed = _BEDSchema.to_schema()(bed)
     return pl.from_pandas(bed)
 
 
@@ -166,11 +170,11 @@ def _read_bed_table(table: Union[str, Path], **table_reader_kwargs):
     else:
         raise ValueError(f"Table has unrecognized file extension: {table.name}")
     bed = reader(table, **reader_kwargs).collect().to_pandas()
-    bed = BEDSchema.to_schema()(bed)
+    bed = _BEDSchema.to_schema()(bed)
     return pl.from_pandas(bed)
 
 
-class NarrowPeakSchema(pa.DataFrameModel):
+class _NarrowPeakSchema(pa.DataFrameModel):
     chrom: pat.Series[str]
     chromStart: pat.Series[int]
     chromEnd: pat.Series[int]
@@ -211,11 +215,11 @@ def _read_narrowpeak(narrowpeak_path: Union[str, Path]):
         dtypes={"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8},
         null_values=".",
     ).to_pandas()
-    narrowpeaks = NarrowPeakSchema.to_schema()(narrowpeaks)
+    narrowpeaks = _NarrowPeakSchema.to_schema()(narrowpeaks)
     return pl.from_pandas(narrowpeaks)
 
 
-class BroadPeakSchema(pa.DataFrameModel):
+class _BroadPeakSchema(pa.DataFrameModel):
     chrom: pat.Series[str]
     chromStart: pat.Series[int]
     chromEnd: pat.Series[int]
@@ -254,7 +258,7 @@ def _read_broadpeak(broadpeak_path: Union[str, Path]):
         dtypes={"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8},
         null_values=".",
     ).to_pandas()
-    broadpeaks = BroadPeakSchema.to_schema()(broadpeaks)
+    broadpeaks = _BroadPeakSchema.to_schema()(broadpeaks)
     return pl.from_pandas(broadpeaks)
 
 
@@ -276,7 +280,7 @@ def _cartesian_product(arrays: Sequence[NDArray]) -> NDArray:
     return arr.reshape(-1, la)
 
 
-def get_rel_starts(
+def _get_rel_starts(
     starts: NDArray[np.int64], ends: NDArray[np.int64]
 ) -> NDArray[np.int64]:
     rel_starts: NDArray[np.int64] = np.concatenate(
@@ -288,122 +292,7 @@ def get_rel_starts(
 DTYPE = TypeVar("DTYPE", bound=np.generic)
 
 
-def splice_subarrays(
-    arr: NDArray[DTYPE], starts: NDArray[np.int64], ends: NDArray[np.int64]
-) -> NDArray[DTYPE]:
-    """Splice subarrays from a larger array.
-
-    Parameters
-    ----------
-    arr : NDArray
-        Array to splice from.
-    starts : NDArray[np.int64]
-        Start coordinates, 0-based.
-    ends : NDArray[np.int64]
-        End coordinates, 0-based exclusive.
-
-    Returns
-    -------
-    out : NDArray
-        Spliced array.
-    """
-    start = starts.min()
-    rel_starts = get_rel_starts(starts, ends)
-    total_length = (ends - starts).sum()
-    shape = arr.shape[:-1] + (total_length,)
-    out = np.empty(shape, dtype=arr.dtype)
-    for rel_start, s, e in zip(rel_starts, starts - start, ends - start):
-        length = e - s
-        out[..., rel_start : rel_start + length] = arr[..., s:e]
-    return out
-
-
-def splice_and_rc_subarrays(
-    arr: NDArray[DTYPE],
-    starts: NDArray[np.int64],
-    ends: NDArray[np.int64],
-    strands: NDArray[np.int8],
-    rc_fn: Callable[[NDArray[DTYPE]], NDArray[DTYPE]],
-) -> NDArray[DTYPE]:
-    """Splice subarrays from a larger array and reverse-complement them.
-
-    Parameters
-    ----------
-    arr : NDArray
-        Array to splice from.
-    starts : NDArray[np.int64]
-        Start coordinates, 0-based.
-    ends : NDArray[np.int64]
-        End coordinates, 0-based exclusive.
-    strands : NDArray[np.int8]
-        Strand of each query region. 1 for forward, -1 for reverse. If None, defaults
-        to forward strand.
-    rc_fn : Callable[[NDArray], NDArray]
-        Function to reverse-complement the subarrays.
-
-    Returns
-    -------
-    out : NDArray
-        Spliced and reverse-complemented array.
-    """
-    start = starts.min()
-    rel_starts = get_rel_starts(starts, ends)
-    total_length = (ends - starts).sum()
-    shape = arr.shape[:-1] + (total_length,)
-    out = np.empty(shape, dtype=arr.dtype)
-    for rel_start, s, e, strand in zip(
-        rel_starts, starts - start, ends - start, strands
-    ):
-        length = e - s
-        if strand == 1:
-            subarr = arr[..., s:e]
-        else:
-            subarr = rc_fn(arr[..., s:e])
-        out[..., rel_start : rel_start + length] = subarr
-    return out
-
-
-def splice_and_rev_subarrays(
-    arr: NDArray[DTYPE],
-    starts: NDArray[np.int64],
-    ends: NDArray[np.int64],
-    strands: NDArray[np.int8],
-) -> NDArray[DTYPE]:
-    """
-    Splices and reverses subarrays of a given array based on the start and end indices
-    and strand orientation.
-
-    Parameters
-    ----------
-    arr : NDArray
-        Array to splice from.
-    starts : NDArray[np.int64]
-        Start coordinates, 0-based.
-    ends : NDArray[np.int64]
-        End coordinates, 0-based exclusive.
-    strands : NDArray[np.int8]
-        Strand of each query region. 1 for forward, -1 for reverse. If None, defaults
-        to forward strand.
-
-    Returns
-    -------
-    out : NDArray
-        Spliced and reversed array.
-    """
-    start = starts.min()
-    rel_starts = get_rel_starts(starts, ends)
-    total_length = (ends - starts).sum()
-    shape = arr.shape[:-1] + (total_length,)
-    out = np.empty(shape, dtype=arr.dtype)
-    for rel_start, s, e, strand in zip(
-        rel_starts, starts - start, ends - start, strands
-    ):
-        length = e - s
-        out[..., rel_start : rel_start + length] = arr[..., s:e:strand]
-    return out
-
-
-def normalize_contig_name(contig: str, contigs: Iterable[str]) -> Optional[str]:
+def _normalize_contig_name(contig: str, contigs: Iterable[str]) -> Optional[str]:
     """Normalize the contig name to adhere to the convention of the underlying file.
     i.e. remove or add "chr" to the contig name.
 
@@ -426,7 +315,7 @@ def normalize_contig_name(contig: str, contigs: Iterable[str]) -> Optional[str]:
 ITYPE = TypeVar("ITYPE", bound=np.integer)
 
 
-def offsets_to_lengths(offsets: NDArray[ITYPE]) -> NDArray[ITYPE]:
+def _offsets_to_lengths(offsets: NDArray[ITYPE]) -> NDArray[ITYPE]:
     """Converts offsets to the number of elements in each group.
 
     Notes
@@ -436,7 +325,7 @@ def offsets_to_lengths(offsets: NDArray[ITYPE]) -> NDArray[ITYPE]:
     return np.diff(offsets)
 
 
-def lengths_to_offsets(
+def _lengths_to_offsets(
     lengths: NDArray[np.integer], dtype: type[ITYPE] = np.int32
 ) -> NDArray[ITYPE]:
     """Converts the number of elements in each group to offsets."""

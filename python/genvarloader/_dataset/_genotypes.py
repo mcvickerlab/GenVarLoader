@@ -5,9 +5,11 @@ import numpy as np
 from attrs import define
 from numpy.typing import NDArray
 
-from ..types import ListIdx
-from ..utils import lengths_to_offsets
-from .utils import padded_slice
+from .._types import ListIdx
+from .._utils import _lengths_to_offsets
+from ._utils import padded_slice
+
+__all__ = []
 
 
 @define
@@ -151,7 +153,7 @@ class SparseGenotypes:
 
         total_n_regions = sum(g.n_regions for g in genos)
         variant_idxs = np.concatenate([g.variant_idxs for g in genos])
-        offsets = lengths_to_offsets(
+        offsets = _lengths_to_offsets(
             np.concatenate([np.diff(g.offsets) for g in genos])
         )
         return SparseGenotypes(
@@ -186,7 +188,7 @@ class SparseGenotypes:
         # (s p v)
         keep = genos == 1
         n_per_rsp = get_n_per_rsp(keep, offsets, n_regions)
-        sparse_offsets = lengths_to_offsets(n_per_rsp.ravel(), np.int32)
+        sparse_offsets = _lengths_to_offsets(n_per_rsp.ravel(), np.int32)
         variant_idxs = keep_mask_to_rsp_v_idx(
             keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples, ploidy
         )
@@ -245,7 +247,7 @@ class SparseGenotypes:
         max_ends: NDArray[np.int32] = starts + length - min_ilens.clip(max=0)
         # (r s p)
         n_per_rsp = get_n_per_rsp(keep, offsets, n_regions)
-        sparse_offsets = lengths_to_offsets(n_per_rsp.ravel(), np.int32)
+        sparse_offsets = _lengths_to_offsets(n_per_rsp.ravel(), np.int32)
         variant_idxs = keep_mask_to_rsp_v_idx(
             keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples, ploidy
         )

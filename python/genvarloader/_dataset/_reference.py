@@ -11,8 +11,10 @@ import numpy as np
 from attrs import define
 from numpy.typing import NDArray
 
-from ..fasta import Fasta
-from ..utils import normalize_contig_name
+from .._fasta import Fasta
+from .._utils import _normalize_contig_name
+
+__all__ = []
 
 
 @define
@@ -31,7 +33,7 @@ class Reference:
 
         contigs = cast(
             List[str],
-            [normalize_contig_name(c, _fasta.contigs) for c in contigs],
+            [_normalize_contig_name(c, _fasta.contigs) for c in contigs],
         )
         _fasta.sequences = _fasta._get_sequences(contigs)
         if TYPE_CHECKING:

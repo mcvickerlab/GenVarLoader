@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
@@ -7,50 +9,35 @@ import polars as pl
 from attrs import define
 from numpy.typing import ArrayLike, NDArray
 
-from ..utils import normalize_contig_name
-from .genotypes import (
+from .._utils import _normalize_contig_name
+from ._genotypes import (
     Genotypes,
     PgenGenos,
     VCFGenos,
 )
-from .records import Records, VLenAlleles
+from ._records import Records, VLenAlleles
 
-__all__ = [
-    "PgenGenos",
-    "VCFGenos",
-    "Variants",
-    "Records",
-]
+__all__ = []
 
 
 @define
 class DenseGenotypes:
-    """Dense array(s) of genotypes.
-
-    Attributes
-    ----------
-    positions : NDArray[np.int32]
-        Shape: (variants)
-    size_diffs : NDArray[np.int32]
-        Shape : (variants). Difference in length between the REF and the ALT alleles.
-    ref : VLenAlleles
-        Shape: (variants). REF alleles.
-    alt : VLenAlleles
-        Shape: (variants). ALT alleles.
-    genotypes : NDArray[np.int8]
-        Shape: (samples, ploid, variants)
-    offsets : NDArray[np.int32], optional
-        Shape: (regions + 1). Offsets for the index boundaries of each region such
-        that variants for region `i` are `positions[offsets[i] : offsets[i+1]]`,
-        `size_diffs[offsets[i] : offsets[i+1]]`, ..., etc.
-    """
+    """Dense array(s) of genotypes."""
 
     positions: NDArray[np.int32]
+    """Shape: (variants)"""
     size_diffs: NDArray[np.int32]
+    """Shape : (variants). Difference in length between the REF and the ALT alleles."""
     ref: VLenAlleles
+    """Shape: (variants). REF alleles."""
     alt: VLenAlleles
+    """Shape: (variants). ALT alleles."""
     genotypes: NDArray[np.int8]
+    """Shape: (samples, ploid, variants)"""
     offsets: NDArray[np.int32]
+    """Shape: (regions + 1). Offsets for the index boundaries of each region such
+        that variants for region `i` are `positions[offsets[i] : offsets[i+1]]`,
+        `size_diffs[offsets[i] : offsets[i+1]]`, ..., etc."""
 
 
 @define
@@ -77,23 +64,23 @@ class Variants:
             raise ValueError("Unsupported file type.")
 
     @property
-    def chunked(self):
+    def chunked(self) -> bool:
         return self.genotypes.chunked
 
     @property
-    def samples(self):
+    def samples(self) -> NDArray[np.str_]:
         if self._sample_idxs is None:
             return self.genotypes.samples
         return self.genotypes.samples[self._sample_idxs]
 
     @property
-    def n_samples(self):
+    def n_samples(self) -> int:
         if self._sample_idxs is None:
             return self.genotypes.n_samples
         return len(self._sample_idxs)
 
     @property
-    def ploidy(self):
+    def ploidy(self) -> int:
         return self.genotypes.ploidy
 
     @classmethod
@@ -101,16 +88,18 @@ class Variants:
         """Currently does not support multi-allelic sites, but does support *split*
         multi-allelic sites. Note that SVs and "other" variants are also not supported.
         VCFs can be prepared by running:
-        ```bash
-        bcftools view -i 'TYPE="snp" || TYPE="indel"' <file.bcf> \\
-        | bcftools norm \\
+
+        .. code-block:: bash
+
+            bcftools view -i 'TYPE="snp" || TYPE="indel"' <file.bcf> \\
+            | bcftools norm \\
             -a \\
             --atom-overlaps . \\
             -m - \\
             -f <ref.fa> \\
             -O b \\
             -o <norm.bcf>
-        ```
+        
         """
         records = Records.from_vcf(vcf)
 
@@ -122,20 +111,23 @@ class Variants:
         """Currently does not support multi-allelic sites, but does support *split*
         multi-allelic sites. Note that SVs and "other" variants are also not supported.
         A PGEN can be prepared from a VCF by running:
-        ```bash
-        bcftools view -i 'TYPE="snp" || TYPE="indel"' <file.bcf> \\
-        | bcftools norm \\
+
+        .. code-block:: bash
+
+            bcftools view -i 'TYPE="snp" || TYPE="indel"' <file.bcf> \\
+            | bcftools norm \\
             -a \\
             --atom-overlaps . \\
             -m - \\
             -f <ref.fa> \\
             -O b \\
-            -o <norm.bcf> \\
-        plink2 --make-pgen \\
+            -o <norm.bcf>
+
+            plink2 --make-pgen \\
             --bcf <norm.bcf> \\
             --vcf-half-call r \\
             --out <prefix>
-        ```
+        
         """
         if isinstance(pgen, str):
             pgen = Path(pgen)
@@ -199,7 +191,7 @@ class Variants:
         sample: Optional[ArrayLike] = None,
         ploid: Optional[ArrayLike] = None,
     ):
-        contig = normalize_contig_name(contig, self.records.contigs)  # pyright: ignore[reportAssignmentType]
+        contig = _normalize_contig_name(contig, self.records.contigs)  # pyright: ignore[reportAssignmentType]
         if contig is None:
             return None
 
@@ -249,7 +241,7 @@ class Variants:
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
-        _contig = normalize_contig_name(contig, self.records.contigs)  # pyright: ignore[reportAssignmentType]
+        _contig = _normalize_contig_name(contig, self.records.contigs)  # pyright: ignore[reportAssignmentType]
         if _contig is None:
             return None, ends.astype(np.int32)
         else:

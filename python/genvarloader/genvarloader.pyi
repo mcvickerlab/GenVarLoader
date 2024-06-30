@@ -4,6 +4,8 @@ from typing import Sequence, Tuple, Union
 import numpy as np
 from numpy.typing import NDArray
 
+__all__ = []
+
 def intervals(
     paths: Sequence[Union[str, Path]],
     contig: str,

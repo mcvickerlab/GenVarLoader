@@ -4,6 +4,9 @@ from typing import Annotated, Optional
 
 from typer import Argument, Option, Typer
 
+__all__ = []
+
+
 app = Typer(rich_markup_mode="rich")
 
 

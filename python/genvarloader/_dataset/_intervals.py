@@ -2,7 +2,9 @@ import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
-from ..types import INTERVAL_DTYPE
+from .._types import INTERVAL_DTYPE
+
+__all__ = []
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)

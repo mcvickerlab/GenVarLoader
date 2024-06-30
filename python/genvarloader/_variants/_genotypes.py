@@ -7,7 +7,9 @@ import numpy as np
 import pgenlib
 from numpy.typing import ArrayLike, NDArray
 
-from genvarloader.utils import get_rel_starts
+from .._utils import _get_rel_starts
+
+__all__ = []
 
 
 class Genotypes(Protocol):
@@ -76,7 +78,7 @@ class Genotypes(Protocol):
         ]
         with joblib.Parallel(n_jobs=n_jobs) as parallel:
             split_genos = list(parallel(tasks))
-        genos = np.concatenate(split_genos, axis=-1)
+        genos = np.concatenate(split_genos, axis=-1)  # type: ignore
         return genos
 
 
@@ -137,7 +139,7 @@ class PgenGenos(Genotypes):
 
         vars_per_region = end_idxs - start_idxs
         n_vars = vars_per_region.sum()
-        rel_start_idxs = get_rel_starts(start_idxs, end_idxs)
+        rel_start_idxs = _get_rel_starts(start_idxs, end_idxs)
         rel_end_idxs = rel_start_idxs + vars_per_region
         # (v s*2)
         genotypes = np.empty((n_vars, self.n_samples * self.ploidy), dtype=np.int32)
@@ -248,7 +250,7 @@ class VCFGenos(Genotypes):
             return genos
 
         # (n_queries)
-        geno_idxs = get_rel_starts(start_idxs, end_idxs)
+        geno_idxs = _get_rel_starts(start_idxs, end_idxs)
         finish_idxs = np.empty_like(geno_idxs)
         finish_idxs[:-1] = geno_idxs[1:]
         finish_idxs[-1] = n_variants

@@ -7,7 +7,6 @@ tests/data/fasta
 examples/
 results/
 .uuid
-docs/
 requirements.txt
 notebooks/
 scripts/

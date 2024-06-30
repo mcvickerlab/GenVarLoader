@@ -3,10 +3,10 @@ from typing import TYPE_CHECKING, Any, Tuple, Union
 import numpy as np
 from numpy.typing import NDArray
 
-from ..types import Idx
+from .._types import Idx
 
 if TYPE_CHECKING:
-    from ..dataset import Dataset
+    from . import Dataset
 
 try:
     import torch
@@ -19,6 +19,9 @@ else:
 if TYPE_CHECKING:
     import torch
     import torch.utils.data as td
+
+
+__all__ = []
 
 
 class TorchDataset(td.Dataset):
