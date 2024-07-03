@@ -26,7 +26,11 @@ extensions = [
     "myst_parser",
 ]
 
-napoleon_type_aliases = {"ArrayLike": ":term:`array_like`", "NDArray": "ndarray"}
+napoleon_use_param = True
+napoleon_type_aliases = {
+    "ArrayLike": ":term:`array_like`",
+    "NDArray": ":ref:`NDArray <numpy.typing.NDArray>`",
+}
 napoleon_use_rtype = True
 
 autodoc_typehints = "both"

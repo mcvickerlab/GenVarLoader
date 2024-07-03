@@ -8,7 +8,7 @@ from ._dataset._write import write
 from ._fasta import Fasta
 from ._types import Ragged
 from ._utils import read_bedlike, with_length
-from ._variants import Variants
+from ._variants import DenseGenotypes, Variants
 
 __version__ = importlib.metadata.version("genvarloader")
 
@@ -21,4 +21,5 @@ __all__ = [
     "Fasta",
     "BigWigs",
     "Variants",
+    "DenseGenotypes",
 ]

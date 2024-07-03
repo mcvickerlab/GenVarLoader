@@ -103,7 +103,7 @@ class BigWigs(Reader):
 
         Returns
         -------
-        NDArray
+        NDArray[float32]
             Shape: (samples length). Data corresponding to the given genomic coordinates and samples.
         """
         _contig = _normalize_contig_name(contig, self.contigs)

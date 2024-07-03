@@ -42,12 +42,23 @@ class DenseGenotypes:
 
 @define
 class Variants:
+    """Variant records and genotypes. Should not be directly instantiated, use
+    :meth:`from_file` instead."""
+
     records: Records
     genotypes: Genotypes
     _sample_idxs: Optional[NDArray[np.intp]] = None
 
     @classmethod
-    def from_file(cls, path: Union[str, Path, Dict[str, Path]]):
+    def from_file(cls, path: Union[str, Path, Dict[str, Path]]) -> "Variants":
+        """Create a Variants instances from a VCF or PGEN file(s). If a dictionary is provided, the keys should be
+        contig names and the values should be paths to the corresponding VCF or PGEN.
+
+        Parameters
+        ----------
+        path : Union[str, Path, Dict[str, Path]]
+            Path to a VCF or PGEN file or a mapping from contig names to paths.
+        """
         if isinstance(path, (str, Path)):
             path = Path(path)
             first_path = path
@@ -84,7 +95,7 @@ class Variants:
         return self.genotypes.ploidy
 
     @classmethod
-    def from_vcf(cls, vcf: Union[str, Path, Dict[str, Path]]):
+    def from_vcf(cls, vcf: Union[str, Path, Dict[str, Path]]) -> "Variants":
         """Currently does not support multi-allelic sites, but does support *split*
         multi-allelic sites. Note that SVs and "other" variants are also not supported.
         VCFs can be prepared by running:
@@ -107,7 +118,7 @@ class Variants:
         return cls(records, genotypes)
 
     @classmethod
-    def from_pgen(cls, pgen: Union[str, Path, Dict[str, Path]]):
+    def from_pgen(cls, pgen: Union[str, Path, Dict[str, Path]]) -> "Variants":
         """Currently does not support multi-allelic sites, but does support *split*
         multi-allelic sites. Note that SVs and "other" variants are also not supported.
         A PGEN can be prepared from a VCF by running:
@@ -190,7 +201,7 @@ class Variants:
         ends: ArrayLike,
         sample: Optional[ArrayLike] = None,
         ploid: Optional[ArrayLike] = None,
-    ):
+    ) -> Optional[DenseGenotypes]:
         contig = _normalize_contig_name(contig, self.records.contigs)  # pyright: ignore[reportAssignmentType]
         if contig is None:
             return None
