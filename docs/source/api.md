@@ -1,10 +1,8 @@
-genvarloader package
-====================
+# API Reference
 
-Module contents
----------------
-
+```{eval-rst}
 .. automodule:: genvarloader
    :members:
    :undoc-members:
    :show-inheritance:
+```

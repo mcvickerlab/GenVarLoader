@@ -1,7 +1,7 @@
 :::{toctree}
 :hidden: true
 
-modules
+api
 :::
 
 # GenVarLoader
