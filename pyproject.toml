@@ -10,7 +10,7 @@ readme = "README.md"
 repository = "https://github.com/mcvickerlab/GenVarLoader"
 license = { file = "LICENSE.txt" }
 requires-python = ">=3.9"
-depedencies = [
+dependencies = [
     "loguru>=0.7.2",
     "attrs>=23.1.0",
     "natsort>=8.4.0",
@@ -19,8 +19,8 @@ depedencies = [
     "pandera>=0.18",
     "pgenlib>=0.90.1",
     "pysam>=0.22.0",
-    "pyarrow",
-    "more-itertools",
+    "pyarrow>=16.1",
+    "more-itertools>=10.3",
     "tqdm>=4.66.3",
     "seqpro>=0.1.11",
     "tensorstore>=0.1.54",
@@ -71,5 +71,5 @@ filterwarnings = [
 ]
 
 [build-system]
-requires = ["maturin>=1.4,<2.0"]
+requires = ["maturin>=1.6,<2.0"]
 build-backend = "maturin"

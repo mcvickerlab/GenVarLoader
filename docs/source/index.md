@@ -1,26 +1,26 @@
-:::{toctree}
+```{toctree}
 :hidden: true
 
 api
-:::
+```
 
 # GenVarLoader
 
-:::{image} _static/gvl_logo.png
+```{image} _static/gvl_logo.png
 :alt: GenVarLoader logo
 :align: center
 :width: 200
-:::
+```
 
-:::{image} https://badge.fury.io/py/genvarloader.svg
+```{image} https://badge.fury.io/py/genvarloader.svg
 :alt: PyPI version
 :target: https://badge.fury.io/py/genvarloader
 :class: inline-link
-:::
+```
 
 ```{image} https://readthedocs.org/projects/genvarloader/badge/?version=latest
 :alt: Documentation Status
-:target: https://genvarloader.readthedocs.io/en/latest/?badge=latest
+:target: https://genvarloader.readthedocs.io/en/latest/index.html
 :class: inline-link
 ```
 
@@ -28,7 +28,8 @@ api
 :alt: PyPI - Downloads
 :class: inline-link
 ```
-\
+
+
 GenVarLoader provides a fast, memory efficient data loader for training sequence models on genetic variation. For example, this can be used to train a DNA language model on human genetic variation (e.g. [Nucleotide Transformer](https://www.biorxiv.org/content/10.1101/2023.01.11.523679)) or train sequence to function models with genetic variation (e.g. [BigRNA](https://www.biorxiv.org/content/10.1101/2023.09.20.558508v1)).
 
 ## Features

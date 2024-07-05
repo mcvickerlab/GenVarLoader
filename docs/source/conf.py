@@ -38,7 +38,7 @@ autodoc_type_aliases = {"ArrayLike": "ArrayLike"}
 autodoc_default_options = {"private-members": False}
 autodoc_member_order = "bysource"
 
-myst_enable_extensions = ["colon_fence", "html_image"]
+myst_enable_extensions = ["colon_fence"]
 
 templates_path = ["_templates"]
 exclude_patterns = []
@@ -60,6 +60,8 @@ html_theme_options = {
     "home_page_in_toc": True,
     "repository_url": "https://github.com/mcvickerlab/GenVarLoader",
     "use_repository_button": True,
+    "pygments_light_style": "tango",
+    "pygments_dark_style": "material",
 }
 html_logo = "_static/gvl_logo.png"
 html_favicon = "_static/favicon.ico"
