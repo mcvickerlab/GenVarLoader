@@ -253,9 +253,10 @@ def _write_variants(
     rel_end_idxs: Dict[str, NDArray[np.int32]] = {}
     chunk_offsets: Dict[str, NDArray[np.intp]] = {}
     n_chunks = 0
-    for contig, part in bed.partition_by(
+    for (contig,), part in bed.partition_by(
         "chrom", as_dict=True, include_key=False, maintain_order=True
     ).items():
+        contig = cast(str, contig)
         _contig = _normalize_contig_name(contig, variants.records.contigs)
         if _contig is not None:
             starts = part["chromStart"].to_numpy()
@@ -294,9 +295,10 @@ def _write_variants(
     max_ends = np.empty(bed.height, dtype=np.int32)
     last_max_end_idx = 0
     with tqdm(total=n_chunks) as pbar:
-        for contig, part in bed.partition_by(
+        for (contig,), part in bed.partition_by(
             "chrom", as_dict=True, include_key=False, maintain_order=True
         ).items():
+            contig = cast(str, contig)
             c_offsets = chunk_offsets[contig]
             for o_s, o_e in zip(c_offsets[:-1], c_offsets[1:]):
                 rel_s_idxs = rel_start_idxs[contig][o_s:o_e]
@@ -482,9 +484,10 @@ def _write_bigwigs(
     last_offset = 0
     n_intervals = 0
     pbar = tqdm(total=bed["chrom"].n_unique())
-    for contig, part in bed.partition_by(
+    for (contig,), part in bed.partition_by(
         "chrom", as_dict=True, include_key=False, maintain_order=True
     ).items():
+        contig = cast(str, contig)
         pbar.set_description(f"Reading intervals for {part.height} regions on {contig}")
         starts = part["chromStart"].to_numpy()
         ends = part["chromEnd"].to_numpy()
