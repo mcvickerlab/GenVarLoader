@@ -158,7 +158,7 @@ class Variants:
                 has_header=False,
                 skip_rows=1,
                 new_columns=cols,
-                dtypes={
+                schema_overrides={
                     "FID": pl.Utf8,
                     "IID": pl.Utf8,
                     "SID": pl.Utf8,

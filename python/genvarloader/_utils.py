@@ -145,7 +145,7 @@ def _read_bed(bed_path: Union[str, Path]):
         has_header=False,
         skip_rows=skip_rows,
         new_columns=bed_cols[:n_cols],
-        dtypes={"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8},
+        schema_overrides={"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8},
         null_values=".",
     ).to_pandas()
     bed = _BEDSchema.to_schema()(bed)
@@ -212,7 +212,7 @@ def _read_narrowpeak(narrowpeak_path: Union[str, Path]):
             "qValue",
             "peak",
         ],
-        dtypes={"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8},
+        schema_overrides={"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8},
         null_values=".",
     ).to_pandas()
     narrowpeaks = _NarrowPeakSchema.to_schema()(narrowpeaks)
@@ -255,7 +255,7 @@ def _read_broadpeak(broadpeak_path: Union[str, Path]):
             "pValue",
             "qValue",
         ],
-        dtypes={"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8},
+        schema_overrides={"chrom": pl.Utf8, "name": pl.Utf8, "strand": pl.Utf8},
         null_values=".",
     ).to_pandas()
     broadpeaks = _BroadPeakSchema.to_schema()(broadpeaks)

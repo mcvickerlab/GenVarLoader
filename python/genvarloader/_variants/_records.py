@@ -416,7 +416,7 @@ class Records:
             separator="\t",
             skip_rows=skip_rows,
             columns=["#CHROM", "POS", "REF", "ALT"],
-            dtypes={"#CHROM": pl.Utf8, "POS": pl.Int32},
+            schema_overrides={"#CHROM": pl.Utf8, "POS": pl.Int32},
         )
         logger.info("Finished reading .pvar file.")
         if (pvar["ALT"].str.contains(",")).any():
