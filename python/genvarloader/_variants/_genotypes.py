@@ -65,7 +65,29 @@ class Genotypes(Protocol):
         sample_idx: Optional[ArrayLike] = None,
         haplotype_idx: Optional[ArrayLike] = None,
         n_jobs: int = 1,
-    ):
+    ) -> NDArray[np.int8]:
+        """Read genotypes in parallel from a contig from index i to j, 0-based exclusive.
+
+        Parameters
+        ----------
+        contig : str
+            Name of the contig/chromosome.
+        start_idxs : NDArray[np.intp]
+            Start indices, 0-based.
+        end_idxs : NDArray[np.intp]
+            End indices, 0-based exclusive.
+        sample_idx : NDArray[np.intp], optional
+            Indices of the samples to include. Must be unique.
+        haplotype_idx : NDArray[np.intp], optional
+            Indices of the haplotypes to include. Must be unique.
+        n_jobs : int, optional
+            Number of jobs to run in parallel.
+
+        Returns
+        -------
+        genotypes : NDArray[np.int8]
+            Shape: (samples ploidy variants). Genotypes for each query region.
+        """
         start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
         end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.int32))
         starts = np.array_split(start_idxs, n_jobs)

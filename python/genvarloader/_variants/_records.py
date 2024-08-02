@@ -1,4 +1,5 @@
 import re
+import subprocess
 from pathlib import Path
 from textwrap import dedent
 from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union, cast, overload
@@ -231,11 +232,15 @@ class RecordInfo:
 class Records:
     contigs: List[str]
     contig_offsets: Dict[str, int]
+    """Offsets for each contig corresponding to the underlying file(s). Thus, if a single file backs
+    a Records instance, then the contig offsets will be non-zero and correspond to the first variant
+    that is on that contig. If contig-specific files back the Records instance, then the contig offsets
+    will all be zero."""
 
-    ## sorted by starts ##
     v_starts: Dict[str, NDArray[np.int32]]
-    # difference in length between ref and alt, sorted by start
+    """0-based positions of variants, sorted by start."""
     v_diffs: Dict[str, NDArray[np.int32]]
+    """Difference in length |REF| - |ALT|, sorted by start"""
     # no multi-allelics
     ref: Dict[str, VLenAlleles]
     alt: Dict[str, VLenAlleles]
@@ -243,9 +248,14 @@ class Records:
 
     ## sorted by ends ##
     v_ends: Dict[str, NDArray[np.int32]]
+    """0-based, end *inclusive* ends of variants, sorted by end."""
     e2s_idx: Dict[str, NDArray[np.int32]]
+    """End to start index (sorted by starts). After searching for overlapping variants with Records.v_ends,
+    this maps the found indices to indices of variants sorted by starts."""
     v_diffs_sorted_by_ends: Dict[str, NDArray[np.int32]]
+    """Difference in length |REF| - |ALT|, sorted by end."""
     max_del_q: Dict[str, NDArray[np.intp]]
+    """Pending deprecation. Maximum possible deletion length for a query including variants from index 0 to i."""
     ####################
 
     @property
@@ -254,11 +264,6 @@ class Records:
 
     @classmethod
     def from_vcf(cls, vcf: Union[str, Path, Dict[str, Path]]) -> Self:
-        if not CYVCF2_INSTALLED:
-            raise ImportError(
-                "cyvcf2 is not installed. Please install it with `pip install cyvcf2`"
-            )
-
         if isinstance(vcf, (str, Path)):
             vcf = {"_all": Path(vcf)}
 
@@ -318,7 +323,21 @@ class Records:
             )
 
         vcf = cyvcf2.VCF(str(vcf_path))  # pyright: ignore
-        n_variants = cast(int, vcf.num_records)
+        try:
+            n_variants = cast(int, vcf.num_records)
+        except ValueError as no_idx_err:
+            logger.info(f"VCF file {vcf_path} appears to be unindexed, indexing...")
+            try:
+                subprocess.run(
+                    ["bcftools", "index", vcf_path], check=True, capture_output=True
+                )
+            except subprocess.CalledProcessError as bcftools_err:
+                logger.error(f"Failed to index VCF file {vcf_path}.")
+                logger.error(f"stdout:\n{bcftools_err.stdout.decode()}")
+                logger.error(f"stderr:\n{bcftools_err.stderr.decode()}")
+                raise bcftools_err from no_idx_err
+            vcf = cyvcf2.VCF(str(vcf_path))  # pyright: ignore
+            n_variants = cast(int, vcf.num_records)
         chroms: List[Optional[str]] = [None] * n_variants
         positions = np.empty(n_variants, dtype=np.int32)
         refs: List[Optional[str]] = [None] * n_variants
@@ -619,20 +638,19 @@ class Records:
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-    ) -> RecordInfo:
+    ) -> Optional[RecordInfo]:
         starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
         ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
-        n_queries = len(starts)
 
         _contig = _normalize_contig_name(contig, self.contigs)
         if _contig is None:
-            return RecordInfo.empty(n_queries)
+            return
 
         rel_s_idxs = self.find_relative_start_idx(_contig, starts)
         rel_e_idxs = self.find_relative_end_idx(_contig, ends)
 
         if rel_s_idxs.min() == rel_e_idxs.max():
-            return RecordInfo.empty(n_queries)
+            return
 
         n_var_per_region = rel_e_idxs - rel_s_idxs
         offsets = _lengths_to_offsets(n_var_per_region)
@@ -682,14 +700,14 @@ class Records:
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-    ) -> Tuple[RecordInfo, NDArray[np.int32]]:
+    ) -> Tuple[Optional[RecordInfo], NDArray[np.int32]]:
         starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
         ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
         n_queries = len(starts)
 
         _contig = _normalize_contig_name(contig, self.contigs)
         if _contig is None:
-            return RecordInfo.empty(n_queries), ends
+            return None, ends
 
         _s_idxs = np.searchsorted(self.v_ends[_contig], starts)
 
@@ -709,7 +727,7 @@ class Records:
         e_idxs += self.contig_offsets[_contig]
 
         if s_idxs.min() == e_idxs.max():
-            return RecordInfo.empty(n_queries), ends
+            return None, ends
 
         offsets = np.empty(n_queries + 1, dtype=np.int32)
         offsets[0] = 0

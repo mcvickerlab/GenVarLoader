@@ -210,8 +210,8 @@ class Variants:
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 
         recs = self.records.vars_in_range(contig, starts, ends)
-        if recs.start_idxs.size == 0:
-            return None
+        if recs is None:
+            return
 
         if sample is not None:
             sample = np.atleast_1d(np.asarray(sample, dtype=str))
