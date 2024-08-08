@@ -59,6 +59,7 @@ class BigWigs(Reader):
             Name of the reader, for example `'signal'`.
         table : Union[str, Path, pl.DataFrame]
             Path to a table or a DataFrame containing sample names and paths to bigWig files for those samples.
+            It must have columns "sample" and "path".
         """
         if isinstance(table, (str, Path)):
             table = Path(table)

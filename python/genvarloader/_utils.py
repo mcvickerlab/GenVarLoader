@@ -326,7 +326,7 @@ def _offsets_to_lengths(offsets: NDArray[ITYPE]) -> NDArray[ITYPE]:
 
 
 def _lengths_to_offsets(
-    lengths: NDArray[np.integer], dtype: type[ITYPE] = np.int32
+    lengths: NDArray[np.integer], dtype: type[ITYPE] = np.int64
 ) -> NDArray[ITYPE]:
     """Converts the number of elements in each group to offsets."""
     offsets = np.empty(len(lengths) + 1, dtype=dtype)

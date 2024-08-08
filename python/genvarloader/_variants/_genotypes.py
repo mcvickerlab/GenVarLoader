@@ -99,7 +99,7 @@ class Genotypes(Protocol):
             for s, e in zip(starts, ends)
         ]
         with joblib.Parallel(n_jobs=n_jobs) as parallel:
-            split_genos = list(parallel(tasks))
+            split_genos = parallel(tasks)
         genos = np.concatenate(split_genos, axis=-1)  # type: ignore
         return genos
 
@@ -132,6 +132,7 @@ class PgenGenos(Genotypes):
         self.samples = sample_names
         self.contigs = contigs
         self.handles: Optional[Dict[str, "pgenlib.PgenReader"]] = None
+        self.current_sample_idx: Optional[NDArray[np.uint32]] = None
 
     def _pgen(self, contig: str, sample_idx: Optional[NDArray[np.uint32]]):
         return pgenlib.PgenReader(bytes(self.paths[contig]), sample_subset=sample_idx)  # type: ignore
@@ -141,6 +142,7 @@ class PgenGenos(Genotypes):
             for handle in self.handles.values():
                 handle.close()
         self.handles = None
+        self.current_sample_idx = None
 
     def read(
         self,
@@ -150,11 +152,33 @@ class PgenGenos(Genotypes):
         sample_idx: Optional[ArrayLike] = None,
         haplotype_idx: Optional[ArrayLike] = None,
     ) -> NDArray[np.int8]:
-        if self.handles is None and "_all" in self.paths:
-            handle = self._pgen("_all", None)
+        changed_sample_idx = False
+        if sample_idx is not None:
+            _sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=np.uint32))
+            sample_sorter = np.argsort(_sample_idx)
+            if self.current_sample_idx is None:
+                self.current_sample_idx = _sample_idx[sample_sorter]
+                changed_sample_idx = True
+            elif np.array_equal(_sample_idx, self.current_sample_idx):
+                sample_sorter = slice(None)
+        else:
+            self.current_sample_idx = np.arange(self.n_samples, dtype=np.uint32)
+            sample_sorter = slice(None)
+
+        if haplotype_idx is not None:
+            _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=np.intp))
+            if np.array_equal(haplotype_idx, np.arange(self.ploidy)):
+                _haplotype_idx = slice(None)
+        else:
+            _haplotype_idx = slice(None)
+
+        if self.handles is None or changed_sample_idx and "_all" in self.paths:
+            handle = self._pgen("_all", self.current_sample_idx)
             self.handles = {c: handle for c in self.contigs}
-        elif self.handles is None:
-            self.handles = {c: self._pgen(c, None) for c in self.contigs}
+        elif self.handles is None or changed_sample_idx:
+            self.handles = {
+                c: self._pgen(c, self.current_sample_idx) for c in self.contigs
+            }
 
         start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
         end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.int32))
@@ -164,7 +188,9 @@ class PgenGenos(Genotypes):
         rel_start_idxs = _get_rel_starts(start_idxs, end_idxs)
         rel_end_idxs = rel_start_idxs + vars_per_region
         # (v s*2)
-        genotypes = np.empty((n_vars, self.n_samples * self.ploidy), dtype=np.int32)
+        genotypes = np.empty(
+            (n_vars, len(self.current_sample_idx) * self.ploidy), dtype=np.int32
+        )
 
         for s, e, rel_s, rel_e in zip(
             start_idxs, end_idxs, rel_start_idxs, rel_end_idxs
@@ -182,20 +208,7 @@ class PgenGenos(Genotypes):
         # (s 2 v)
         genotypes = np.stack([genotypes[::2], genotypes[1::2]], axis=1)
 
-        if sample_idx is not None:
-            _sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=np.intp))
-        else:
-            _sample_idx = slice(None)
-
-        if haplotype_idx is not None:
-            _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=np.intp))
-        else:
-            _haplotype_idx = slice(None)
-
-        genotypes = genotypes[_sample_idx, _haplotype_idx]
-        # re-order samples to be in query order
-        # if sample_sorter is not None and (np.arange(n_samples) != sample_sorter).any():
-        #     genotypes = genotypes[sample_sorter]
+        genotypes = genotypes[sample_sorter, _haplotype_idx]
 
         return genotypes
 

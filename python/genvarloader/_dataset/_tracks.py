@@ -218,13 +218,13 @@ def shift_and_realign_track(
 def shift_and_realign_tracks_sparse(
     offset_idx: NDArray[np.intp],
     variant_idxs: NDArray[np.int32],
-    offsets: NDArray[np.int32],
+    offsets: NDArray[np.int64],
     regions: NDArray[np.int32],
     positions: NDArray[np.int32],
     sizes: NDArray[np.int32],
     shifts: NDArray[np.int32],
     tracks: NDArray[np.float32],
-    track_offsets: NDArray[np.int32],
+    track_offsets: NDArray[np.int64],
     out: NDArray[np.float32],
 ):
     """Shift and realign tracks to correspond to haplotypes.
@@ -243,11 +243,11 @@ def shift_and_realign_tracks_sparse(
         Shape = (total_variants) Positions of variants.
     sizes : NDArray[np.int32]
         Shape = (total_variants) Sizes of variants.
-    shifts : NDArray[np.uint32]
+    shifts : NDArray[np.int32]
         Shape = (regions, ploidy) Shifts for each haplotype.
-    tracks : NDArray[np.uint32]
+    tracks : NDArray[np.float32]
         Shape = (total_length) Tracks.
-    track_offsets : NDArray[np.int32]
+    track_offsets : NDArray[np.int64]
         Shape = (regions + 1) Offsets into tracks.
     out : NDArray[np.float32]
         Shape = (regions, ploidy, length) Shifted and re-aligned tracks.
@@ -281,7 +281,7 @@ def shift_and_realign_tracks_sparse(
 def shift_and_realign_track_sparse(
     offset_idx: int,
     variant_idxs: NDArray[np.int32],
-    offsets: NDArray[np.int32],
+    offsets: NDArray[np.int64],
     positions: NDArray[np.int32],
     sizes: NDArray[np.int32],
     shift: int,

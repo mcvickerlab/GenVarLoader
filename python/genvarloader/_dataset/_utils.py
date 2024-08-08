@@ -66,10 +66,10 @@ def regions_to_bed(regions: NDArray[np.int32], contigs: Sequence[str]) -> pl.Dat
     bed = pl.DataFrame(regions, schema=cols)
     cmap = dict(enumerate(contigs))
     bed = bed.with_columns(
-        pl.col("chrom").replace(cmap, return_dtype=pl.Utf8),
-        pl.col("strand").replace({1: "+", -1: "-"}, return_dtype=pl.Utf8),
+        pl.col("chrom").replace_strict(cmap, return_dtype=pl.Utf8),
         pl.col("chromStart", "chromEnd").cast(pl.Int64),
-    ).select(*cols)
+        pl.col("strand").replace_strict({1: "+", -1: "-"}, return_dtype=pl.Utf8),
+    ).select(cols)
     return bed
 
 

@@ -109,7 +109,7 @@ class Ragged(Generic[RDTYPE]):
         the shape is (2, 3), then the j, k-th element can be mapped to an index for
         offsets with `i = np.ravel_multi_index((j, k), shape)`. The number of ragged
         elements should correspond to the product of the shape."""
-    maybe_offsets: Optional[NDArray[np.int32]] = None
+    maybe_offsets: Optional[NDArray[np.int64]] = None
     maybe_lengths: Optional[NDArray[np.int32]] = None
 
     def __attrs_post_init__(self):
@@ -122,12 +122,12 @@ class Ragged(Generic[RDTYPE]):
         return self.shape[0]
 
     @property
-    def offsets(self) -> NDArray[np.int32]:
+    def offsets(self) -> NDArray[np.int64]:
         """Offsets into the data array to get corresponding elements. The i-th element
         is accessible as `data[offsets[i]:offsets[i+1]]`."""
         if self.maybe_offsets is None:
             self.maybe_offsets = np.empty(
-                np.prod(self.shape, dtype=np.int32) + 1, dtype=np.int32
+                np.prod(self.shape, dtype=np.int64) + 1, dtype=np.int64
             )
             self.maybe_offsets[0] = 0
             np.cumsum(self.lengths.ravel(), out=self.maybe_offsets[1:])
@@ -135,7 +135,7 @@ class Ragged(Generic[RDTYPE]):
 
     @property
     def lengths(self) -> NDArray[np.int32]:
-        """Lengths of each element in the ragged array."""
+        """Array with appropriate shape containing lengths of each element in the ragged array."""
         if self.maybe_lengths is None:
             self.maybe_lengths = np.diff(self.offsets).reshape(self.shape)
         return self.maybe_lengths
@@ -145,7 +145,7 @@ class Ragged(Generic[RDTYPE]):
         cls,
         data: NDArray[DTYPE],
         shape: Union[int, Tuple[int, ...]],
-        offsets: NDArray[np.int32],
+        offsets: NDArray[np.int64],
     ) -> "Ragged[DTYPE]":
         """Create a Ragged array from data and offsets. The offsets array should have
         the intended shape of the Ragged array.
@@ -192,7 +192,7 @@ class Ragged(Generic[RDTYPE]):
         return cls(
             np.empty(0, dtype=dtype),
             shape,
-            maybe_offsets=np.empty(np.prod(shape, dtype=np.int32) + 1, dtype=np.int32),
+            maybe_offsets=np.empty(np.prod(shape, dtype=np.int64) + 1, dtype=np.int64),
         )
 
     @staticmethod

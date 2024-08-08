@@ -88,8 +88,8 @@ def main(
 
     from loguru import logger
 
-    from genvarloader.bigwig import BigWigs
-    from genvarloader.dataset.write import write
+    from genvarloader._bigwig import BigWigs
+    from genvarloader._dataset._write import write
 
     if bigwig_table is not None:
         bigwigs = BigWigs.from_table("bws", bigwig_table)

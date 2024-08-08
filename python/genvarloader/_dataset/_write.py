@@ -347,7 +347,7 @@ def _write_variants(
 
     out = np.memmap(
         out_dir / "offsets.npy",
-        dtype=np.int32,
+        dtype=np.int64,
         mode="r+",
         shape=1,
         offset=offset_memmap_offsets,

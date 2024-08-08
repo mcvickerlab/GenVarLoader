@@ -233,12 +233,8 @@ class Dataset:
 
         if reference is None and ds.has_genotypes:
             logger.warning(
-                dedent(
-                    """
-                    Genotypes found but no reference genome provided. This is required to reconstruct haplotypes.
-                    No reference or haplotype sequences can be returned by this dataset instance.
-                    """
-                ).strip()
+                "Genotypes found but no reference genome provided. This is required to reconstruct haplotypes."
+                " No reference or haplotype sequences can be returned by this dataset instance."
             )
 
         return ds
@@ -475,11 +471,11 @@ class Dataset:
         transform
             A function to apply to the existing track to get a new, transformed track.
             This will be done in chunks such that the tracks provided will not exceed :code:`max_mem`.
-            The arguments given to the transform will be the regions for each track in the chunk as a polars
-            DataFrame, the sample indices for each track in the chunk, and the tracks themselves.
-            Note that the tracks will be a :class:`Ragged` array with shape (regions, samples)
-            since regions may be different lengths to accomodate indels. This function should then
-            return the transformed tracks as a :class:`Ragged` array with the same shape and lengths.
+            The arguments given to the transform will be the dataset indices, region indices, and
+            sample indices as numpy arrays and the tracks themselves as a :class:`Ragged` array with
+            shape (regions, samples). The tracks must be a :class:`Ragged` array since regions may be
+            different lengths to accomodate indels. This function should then return the transformed
+            tracks as a :class:`Ragged` array with the same shape and lengths.
         max_mem : int, optional
             The maximum memory to use in bytes, by default 1 GiB (2**30 bytes)
         overwrite : bool, optional
@@ -504,7 +500,7 @@ class Dataset:
 
         if out_dir.exists() and not overwrite:
             raise FileExistsError(
-                f"{out_dir} already exists. Set overwrite=True to overwrite."
+                f"Track at {out_dir} already exists. Set overwrite=True to overwrite."
             )
         elif out_dir.exists() and overwrite:
             # according to GVL file format, should only have intervals.npy and offsets.npy in here
@@ -541,8 +537,8 @@ class Dataset:
                     intervals.data,
                     intervals.offsets,
                 )
-                track_lengths = lengths[r_idx].reshape(n_regions, n_samples)
-                tracks = Ragged.from_lengths(tracks, track_lengths)
+                offsets = _lengths_to_offsets(regions[:, 2] - regions[:, 1], np.int64)
+                tracks = Ragged.from_offsets(tracks, (n_regions, n_samples), offsets)
 
                 pbar.set_description("Writing (transforming)")
                 transformed_tracks = transform(ds_idx, r_idx, s_idx, tracks)
@@ -550,7 +546,7 @@ class Dataset:
 
                 pbar.set_description("Writing (compressing)")
                 itvs, interval_offsets = tracks_to_intervals(
-                    regions, transformed_tracks.data
+                    regions, transformed_tracks.data, transformed_tracks.offsets
                 )
                 np.testing.assert_equal(
                     len(interval_offsets), n_regions * n_samples + 1
@@ -583,12 +579,12 @@ class Dataset:
 
         out = np.memmap(
             out_dir / "offsets.npy",
-            dtype=interval_offsets.dtype,  # type: ignore
+            dtype=np.int64,
             mode="r+",
             shape=1,
             offset=memmap_offsets_offset,
         )
-        out[-1] = interval_offsets[-1]  # type: ignore
+        out[-1] = last_offset
         out.flush()
 
         return evolve(self, active_tracks=self.available_tracks + [new_track])
@@ -598,6 +594,7 @@ class Dataset:
         regions: Optional[Union[str, Path, pl.DataFrame]] = None,
         samples: Optional[Sequence[str]] = None,
     ) -> "Dataset":
+        """Subset the dataset to specific regions and/or samples."""
         if regions is None and samples is None:
             return self
 
@@ -920,7 +917,7 @@ class Dataset:
                 mode="r",
             ),
             np.memmap(
-                self.path / "genotypes" / "offsets.npy", dtype=np.uint32, mode="r"
+                self.path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
             ),
             len(self.full_regions),
             len(self.full_samples),
@@ -946,7 +943,7 @@ class Dataset:
             )
             offsets = np.memmap(
                 self.path / "intervals" / track / "offsets.npy",
-                dtype=np.int32,
+                dtype=np.int64,
                 mode="r",
             )
             intervals[track] = RaggedIntervals.from_offsets(
@@ -1024,7 +1021,6 @@ class Dataset:
         # fancy indexing makes a copy so safe to mutate
         regions = self.full_regions[region_idx]
         if shifts is None:
-            # no shifts -> don't need to consider max ends, can use uniform region length
             regions[:, 2] = regions[:, 1] + self.region_length
 
         tracks: List[NDArray[np.float32]] = []
@@ -1037,15 +1033,13 @@ class Dataset:
                 intervals.data,
                 intervals.offsets,
             )
+            track_offsets = _lengths_to_offsets(regions[:, 2] - regions[:, 1], np.int64)
 
             if shifts is not None and geno_offset_idx is not None:
                 if TYPE_CHECKING:
                     assert self.ploidy is not None
                     assert self.variants is not None
                     assert self.genotypes is not None
-
-                length_per_region = regions[:, 2] - regions[:, 1]
-                track_offsets = _lengths_to_offsets(length_per_region)
 
                 out = np.empty(
                     (len(region_idx), self.ploidy, self.region_length), np.float32

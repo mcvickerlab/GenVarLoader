@@ -27,7 +27,7 @@ class DenseGenotypes:
         Shape = (n_samples * n_variants, ploidy) Genotypes.
     first_v_idxs : NDArray[np.uint32]
         Shape = (n_regions,) First variant index for each region.
-    offsets : NDArray[np.uint32]
+    offsets : NDArray[np.int64]
         Shape = (n_regions + 1,) Offsets into genos.
     n_samples : int
         Number of samples.
@@ -35,7 +35,7 @@ class DenseGenotypes:
 
     genos: NDArray[np.int8]  # (n_samples * n_variants, ploidy)
     first_v_idxs: NDArray[np.int32]  # (n_regions)
-    offsets: NDArray[np.int32]  # (n_regions + 1)
+    offsets: NDArray[np.int64]  # (n_regions + 1)
     n_samples: int
 
     @property
@@ -115,7 +115,7 @@ class SparseGenotypes:
     """
 
     variant_idxs: NDArray[np.int32]  # (variants * samples * ploidy)
-    offsets: NDArray[np.int32]  # (regions * samples * ploidy + 1)
+    offsets: NDArray[np.int64]  # (regions * samples * ploidy + 1)
     n_regions: int
     n_samples: int
     ploidy: int
@@ -169,7 +169,7 @@ class SparseGenotypes:
         cls,
         genos: NDArray[np.int8],
         first_v_idxs: NDArray[np.int32],
-        offsets: NDArray[np.int32],
+        offsets: NDArray[np.int64],
     ):
         """Convert dense genotypes to sparse genotypes.
 
@@ -188,7 +188,7 @@ class SparseGenotypes:
         # (s p v)
         keep = genos == 1
         n_per_rsp = get_n_per_rsp(keep, offsets, n_regions)
-        sparse_offsets = _lengths_to_offsets(n_per_rsp.ravel(), np.int32)
+        sparse_offsets = _lengths_to_offsets(n_per_rsp.ravel(), np.int64)
         variant_idxs = keep_mask_to_rsp_v_idx(
             keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples, ploidy
         )
@@ -205,7 +205,7 @@ class SparseGenotypes:
         cls,
         genos: NDArray[np.int8],
         first_v_idxs: NDArray[np.int32],
-        offsets: NDArray[np.int32],
+        offsets: NDArray[np.int64],
         ilens: NDArray[np.int32],
         positions: NDArray[np.int32],
         starts: NDArray[np.int32],
@@ -247,7 +247,7 @@ class SparseGenotypes:
         max_ends: NDArray[np.int32] = starts + length - min_ilens.clip(max=0)
         # (r s p)
         n_per_rsp = get_n_per_rsp(keep, offsets, n_regions)
-        sparse_offsets = _lengths_to_offsets(n_per_rsp.ravel(), np.int32)
+        sparse_offsets = _lengths_to_offsets(n_per_rsp.ravel(), np.int64)
         variant_idxs = keep_mask_to_rsp_v_idx(
             keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples, ploidy
         )
@@ -265,7 +265,7 @@ class SparseGenotypes:
 def get_haplotype_region_ilens(
     genos: NDArray[np.int8],
     first_v_idxs: NDArray[np.int32],
-    offsets: NDArray[np.int32],
+    offsets: NDArray[np.int64],
     ilens: NDArray[np.int32],
 ):
     n_regions = len(first_v_idxs)
@@ -289,7 +289,7 @@ def get_haplotype_region_ilens(
 @nb.njit(parallel=True, nogil=True, cache=True)
 def get_keep_mask_for_length(
     genos: NDArray[np.int8],
-    offsets: NDArray[np.int32],
+    offsets: NDArray[np.int64],
     first_v_idxs: NDArray[np.int32],
     positions: NDArray[np.int32],
     ilens: NDArray[np.int32],
@@ -347,7 +347,7 @@ def get_keep_mask_for_length(
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
-def get_n_per_rsp(keep: NDArray[np.bool_], offsets: NDArray[np.int32], n_regions: int):
+def get_n_per_rsp(keep: NDArray[np.bool_], offsets: NDArray[np.int64], n_regions: int):
     n_samples, ploidy, _ = keep.shape
     n_per_rsp = np.empty((n_regions, n_samples, ploidy), np.int32)
     for r in nb.prange(n_regions):
@@ -362,8 +362,8 @@ def get_n_per_rsp(keep: NDArray[np.bool_], offsets: NDArray[np.int32], n_regions
 def keep_mask_to_rsp_v_idx(
     keep: NDArray[np.bool_],  # (s p v)
     first_v_idxs: NDArray[np.int32],  # (r)
-    offsets: NDArray[np.int32],  # (r + 1)
-    sparse_offsets: NDArray[np.int32],  # (r*s*p + 1)
+    offsets: NDArray[np.int64],  # (r + 1)
+    sparse_offsets: NDArray[np.int64],  # (r*s*p + 1)
     n_regions,
     n_samples,
     ploidy,
@@ -432,7 +432,7 @@ def get_diffs(
 def get_diffs_sparse(
     offset_idx: NDArray[np.intp],
     sparse_genos: NDArray[np.int32],
-    offsets: NDArray[np.int32],
+    offsets: NDArray[np.int64],
     size_diffs: NDArray[np.int32],
 ):
     """Get difference in length wrt reference genome for given genotypes.
@@ -713,7 +713,7 @@ def reconstruct_haplotypes_from_sparse(
     out: NDArray[np.uint8],
     regions: NDArray[np.int32],
     shifts: NDArray[np.int32],
-    offsets: NDArray[np.int32],
+    offsets: NDArray[np.int64],
     sparse_genos: NDArray[np.int32],
     positions: NDArray[np.int32],
     sizes: NDArray[np.int32],
@@ -795,7 +795,7 @@ def reconstruct_haplotypes_from_sparse(
 def reconstruct_haplotype_from_sparse(
     offset_idx: int,
     variant_idxs: NDArray[np.int32],
-    offsets: NDArray[np.int32],
+    offsets: NDArray[np.int64],
     positions: NDArray[np.int32],
     sizes: NDArray[np.int32],
     shift: int,
