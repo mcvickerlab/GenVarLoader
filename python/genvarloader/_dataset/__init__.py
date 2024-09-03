@@ -587,7 +587,7 @@ class Dataset:
         out[-1] = last_offset
         out.flush()
 
-        return evolve(self, active_tracks=self.available_tracks + [new_track])
+        return evolve(self, available_tracks=self.available_tracks + [new_track])
 
     def subset_to(
         self,
