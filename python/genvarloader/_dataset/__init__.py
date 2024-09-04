@@ -260,9 +260,9 @@ class Dataset:
             The samples to subset to, by default None
         return_sequences : Optional[Literal[False, "reference", "haplotypes"]], optional
             The sequence type to return. Set this to False to disable returning sequences entirely.
-        return_tracks : Optional[Union[Literal[False], List[str]]], optional
+        return_tracks : Optional[Union[Literal[False], List[str], str]], optional
             The tracks to return, by default None. Set this to False to disable returning tracks entirely.
-        transform : Optional[Callable], optional
+        transform : Optional[Union[Literal[False], Callable]], optional
             The transform to set, by default None
         seed : Optional[int], optional
             The seed to set, by default None
@@ -270,10 +270,6 @@ class Dataset:
             The jitter to set, by default None
         return_indices : Optional[bool], optional
             Whether to return indices, by default None
-        transformed_intervals : Optional[str], optional
-            The transformed intervals to set, by default None
-        extra_tracks : Optional[Dict[str, GenomeTrack]], optional
-            The extra tracks to set, by default None
         """
         ds = self
         to_evolve: Dict[str, Any] = {}

@@ -1,8 +1,8 @@
 ```{toctree}
 :hidden: true
 
-api
 geuvadis
+api
 ```
 
 # GenVarLoader
