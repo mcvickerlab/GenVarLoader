@@ -4,6 +4,7 @@ GenVarLoader provides a fast, memory efficient data loader for training sequence
 
 ## Features
 - Avoids writing any sequences to disk
+- Works with datasets that are larger than RAM
 - Generates haplotypes up to 1,000 times faster than reading a FASTA file
 - Generates tracks up to 450 times faster than reading a BigWig
 - Supports indels and re-aligns tracks to haplotypes that have them
