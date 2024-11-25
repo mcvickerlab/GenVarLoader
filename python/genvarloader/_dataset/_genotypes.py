@@ -135,6 +135,10 @@ class SparseGenotypes:
             ploidy,
         )
 
+    @property
+    def is_empty(self) -> bool:
+        return len(self.variant_idxs) == 0
+
     def vars(self, region: int, sample: int, ploidy: int):
         """Get variant indices for a given sample and region."""
         i = np.ravel_multi_index(

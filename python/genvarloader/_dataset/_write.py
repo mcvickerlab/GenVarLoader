@@ -20,7 +20,7 @@ from .._utils import (
     with_length,
 )
 from .._variants import Variants
-from .._variants._genotypes import VCFGenos
+from .._variants._genotypes import PgenGenos, VCFGenos
 from ._genotypes import SparseGenotypes, get_haplotype_region_ilens
 from ._utils import splits_sum_le_value
 
@@ -264,11 +264,25 @@ def _write_variants(
             rel_s_idxs = variants.records.find_relative_start_idx(_contig, starts)
             rel_e_idxs = variants.records.find_relative_end_idx(_contig, ends)
 
-            # variants * ploidy * samples * (1 byte per genotype + 4 bytes per ilen)
+            # variants * ploidy * samples * (4 bytes per genotype + 4 bytes per ilen)
+            # up to 4 bytes due to pgenlib reading as i32, then reduced 1 byte
+            # cyvcf2 reads slower, but genotypes are cast to i8 per variant
             # + 1 region * ploidy * samples * (4 bytes per ilen)
             n_variants = rel_e_idxs - rel_s_idxs
             n_regions = len(starts)
-            mem_per_r = (n_variants * 5 + 4) * len(_samples) * variants.ploidy
+            if isinstance(variants.genotypes, VCFGenos):
+                bytes_per_variant = 1
+            elif isinstance(variants.genotypes, PgenGenos):
+                bytes_per_variant = 4
+            else:
+                # NOTE: this should never run unless user provides a custom genotype reader
+                # in that case this is a safe-ish upper bound
+                bytes_per_variant = 4
+            mem_per_r = (
+                (n_variants * (bytes_per_variant + 4) + 4)
+                * len(_samples)
+                * variants.ploidy
+            )
             if np.any(mem_per_r > max_mem):
                 # TODO subset by samples as well
                 # sketch:
@@ -383,6 +397,17 @@ def _read_variants_chunk(
                 rel_e_idxs = variants.records.find_relative_end_idx(contig, ends)
             s_idx = variants.records.contig_offsets[contig] + rel_s_idxs
             e_idx = variants.records.contig_offsets[contig] + rel_e_idxs
+            n_per_region = e_idx - s_idx
+            if n_per_region.sum() == 0:
+                genos = SparseGenotypes.empty(
+                    n_regions=len(rel_s_idxs),
+                    n_samples=len(samples),
+                    ploidy=variants.ploidy,
+                )
+                chunk_max_ends = ends
+                return genos, chunk_max_ends
+            offsets = _lengths_to_offsets(n_per_region)
+
             # (s p v)
             logger.debug("read genotypes")
             genos = variants.genotypes.multiprocess_read(
@@ -392,8 +417,6 @@ def _read_variants_chunk(
                 sample_idx=sample_idxs,
                 n_jobs=len(os.sched_getaffinity(0)),
             )
-            n_per_region = e_idx - s_idx
-            offsets = _lengths_to_offsets(n_per_region)
 
             logger.debug("get haplotype region ilens")
             # (s p r)
@@ -401,6 +424,7 @@ def _read_variants_chunk(
                 genos, rel_s_idxs, offsets, variants.records.v_diffs[contig]
             )
             haplotype_lengths = ends - starts + haplotype_ilens
+            del haplotype_ilens
             logger.debug(f"average haplotype length {haplotype_lengths.mean()}")
             # (s p r)
             missing_length = region_length - haplotype_lengths
@@ -409,10 +433,10 @@ def _read_variants_chunk(
             if np.all(missing_length <= 0):
                 break
 
-            # (r)
-            ends += np.ceil(
-                EXTEND_END_MULTIPLIER * missing_length.max((0, 1)).clip(min=0)
-            ).astype(np.int32)
+        # (r)
+        ends += np.ceil(
+            EXTEND_END_MULTIPLIER * missing_length.max((0, 1)).clip(min=0)
+        ).astype(np.int32)
 
         logger.debug("sparsify genotypes")
         genos, chunk_max_ends = SparseGenotypes.from_dense_with_length(
@@ -439,16 +463,17 @@ def _write_variants_chunk(
     offsets_memmap_offset: int,
     last_offset: int,
 ):
-    out = np.memmap(
-        out_dir / "variant_idxs.npy",
-        dtype=genos.variant_idxs.dtype,
-        mode="w+" if v_idx_memmap_offset == 0 else "r+",
-        shape=genos.variant_idxs.shape,
-        offset=v_idx_memmap_offset,
-    )
-    out[:] = genos.variant_idxs[:]
-    out.flush()
-    v_idx_memmap_offset += out.nbytes
+    if not genos.is_empty:
+        out = np.memmap(
+            out_dir / "variant_idxs.npy",
+            dtype=genos.variant_idxs.dtype,
+            mode="w+" if v_idx_memmap_offset == 0 else "r+",
+            shape=genos.variant_idxs.shape,
+            offset=v_idx_memmap_offset,
+        )
+        out[:] = genos.variant_idxs[:]
+        out.flush()
+        v_idx_memmap_offset += out.nbytes
 
     offsets = genos.offsets
     offsets += last_offset

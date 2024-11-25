@@ -159,7 +159,7 @@ class PgenGenos(Genotypes):
             if self.current_sample_idx is None:
                 self.current_sample_idx = _sample_idx[sample_sorter]
                 changed_sample_idx = True
-            elif np.array_equal(_sample_idx, self.current_sample_idx):
+            elif np.array_equal(_sample_idx[sample_sorter], self.current_sample_idx):
                 sample_sorter = slice(None)
         else:
             self.current_sample_idx = np.arange(self.n_samples, dtype=np.uint32)

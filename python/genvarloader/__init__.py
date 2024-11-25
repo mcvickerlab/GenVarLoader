@@ -2,6 +2,8 @@
 
 import importlib.metadata
 
+from loguru import logger
+
 from ._bigwig import BigWigs
 from ._dataset import Dataset
 from ._dataset._write import write
@@ -23,3 +25,6 @@ __all__ = [
     "Variants",
     "DenseGenotypes",
 ]
+
+
+logger.disable("genvarloader")

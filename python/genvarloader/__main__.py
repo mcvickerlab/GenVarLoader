@@ -109,7 +109,8 @@ def main(
         _max_memory = int(max_memory)
 
     logger.remove()
-    logger.add(sink=sys.stderr, level=log_level.value)
+    logger.add(sys.stderr, level=log_level.value)
+    logger.enable("genvarloader")
 
     write(
         path=path,
