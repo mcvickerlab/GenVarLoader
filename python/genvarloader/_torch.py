@@ -87,53 +87,55 @@ def get_sampler(
     return td.BatchSampler(inner_sampler, batch_size, drop_last)
 
 
-class StratifiedSampler(td.Sampler):
-    """Stratified sampler for GVL datasets. This ensures that each batch has the most diversity of samples possible.
+if _TORCH_AVAILABLE:
 
-    Parameters
-    ----------
-    n_regions : int
-        Number of regions.
-    n_samples : int
-        Number of samples.
-    shuffle : bool, optional
-        Whether to shuffle the dataset, by default False.
-    seed : int, optional
-        Random seed, by default None.
+    class StratifiedSampler(td.Sampler):
+        """Stratified sampler for GVL datasets. This ensures that each batch has the most diversity of samples possible.
 
-    Examples
-    --------
-    >>> n_regions = 10
-    >>> n_samples = 100
-    >>> batch_size = 7
-    >>> sampler = torch.utils.data.BatchSampler(
-            gvl.StratifiedSampler(n_regions, n_samples),
-            batch_size,
-            drop_last=True,
-        )
-    >>> dl = ds.to_dataloader(sampler=sampler)
-    """
+        Parameters
+        ----------
+        n_regions : int
+            Number of regions.
+        n_samples : int
+            Number of samples.
+        shuffle : bool, optional
+            Whether to shuffle the dataset, by default False.
+        seed : int, optional
+            Random seed, by default None.
 
-    def __init__(
-        self,
-        n_regions: int,
-        n_samples: int,
-        shuffle: bool = False,
-        seed: Optional[int] = None,
-    ):
-        rng = np.random.default_rng(seed)
-        if shuffle:
-            r_idx = rng.permutation(n_regions)
-            s_idx = rng.permutation(n_samples)
-        else:
-            r_idx = np.arange(n_regions)
-            s_idx = np.arange(n_samples)
-        self.ds_idx = np.ravel_multi_index(
-            (r_idx[:, None], s_idx), (n_regions, n_samples)
-        ).ravel()
+        Examples
+        --------
+        >>> n_regions = 10
+        >>> n_samples = 100
+        >>> batch_size = 7
+        >>> sampler = torch.utils.data.BatchSampler(
+                gvl.StratifiedSampler(n_regions, n_samples),
+                batch_size,
+                drop_last=True,
+            )
+        >>> dl = ds.to_dataloader(sampler=sampler)
+        """
 
-    def __len__(self):
-        return len(self.ds_idx)
+        def __init__(
+            self,
+            n_regions: int,
+            n_samples: int,
+            shuffle: bool = False,
+            seed: Optional[int] = None,
+        ):
+            rng = np.random.default_rng(seed)
+            if shuffle:
+                r_idx = rng.permutation(n_regions)
+                s_idx = rng.permutation(n_samples)
+            else:
+                r_idx = np.arange(n_regions)
+                s_idx = np.arange(n_samples)
+            self.ds_idx = np.ravel_multi_index(
+                (r_idx[:, None], s_idx), (n_regions, n_samples)
+            ).ravel()
 
-    def __iter__(self):
-        return iter(self.ds_idx)
+        def __len__(self):
+            return len(self.ds_idx)
+
+        def __iter__(self):
+            return iter(self.ds_idx)
