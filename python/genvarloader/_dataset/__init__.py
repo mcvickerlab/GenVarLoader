@@ -654,7 +654,7 @@ class Dataset:
         self,
         batch_size: int = 1,
         shuffle: bool = False,
-        sampler: Optional[Union[td.Sampler, Iterable]] = None,  # type: ignore
+        sampler: Optional[Union["td.Sampler", Iterable]] = None,  # type: ignore
         num_workers: int = 0,
         collate_fn: Optional[Callable] = None,
         pin_memory: bool = False,
@@ -662,7 +662,7 @@ class Dataset:
         timeout: float = 0,
         worker_init_fn: Optional[Callable] = None,
         multiprocessing_context: Optional[Callable] = None,
-        generator: Optional[torch.Generator] = None,  # type: ignore
+        generator: Optional["torch.Generator"] = None,  # type: ignore
         *,
         prefetch_factor: Optional[int] = None,
         persistent_workers: bool = False,
