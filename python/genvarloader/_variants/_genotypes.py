@@ -122,7 +122,7 @@ class Genotypes(Protocol):
         sample_idx: Optional[ArrayLike] = None,
         haplotype_idx: Optional[ArrayLike] = None,
         n_jobs: int = 1,
-    ) -> NDArray[np.int8]:
+    ) -> Tuple[NDArray[np.int8], NDArray[np.float32]]:
         """Read genotypes in parallel from a contig from index i to j, 0-based exclusive.
 
         Parameters

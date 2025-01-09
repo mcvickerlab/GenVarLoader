@@ -32,9 +32,11 @@ from .._utils import _lengths_to_offsets, read_bedlike, with_length
 from .._variants._records import VLenAlleles
 from ._genotypes import (
     SparseGenotypes,
+    SparseSomaticGenotypes,
     get_diffs_sparse,
     padded_slice,
     reconstruct_haplotypes_from_sparse,
+    reconstruct_haplotypes_from_sparse_somatic,
 )
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._reference import Reference
@@ -906,19 +908,36 @@ class Dataset:
     def _init_genotypes(self):
         if TYPE_CHECKING:
             assert self.ploidy is not None
-        genotypes = SparseGenotypes(
-            np.memmap(
-                self.path / "genotypes" / "variant_idxs.npy",
-                dtype=np.int32,
-                mode="r",
-            ),
-            np.memmap(
-                self.path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
-            ),
-            len(self.full_regions),
-            len(self.full_samples),
-            self.ploidy,
-        )
+        if (self.path / "genotypes" / "dosages.npy").exists():
+            genotypes = SparseSomaticGenotypes(
+                np.memmap(
+                    self.path / "genotypes" / "variant_idxs.npy",
+                    dtype=np.int32,
+                    mode="r",
+                ),
+                np.memmap(
+                    self.path / "genotypes" / "dosages.npy", dtype=np.float32, mode="r"
+                ),
+                np.memmap(
+                    self.path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
+                ),
+                len(self.full_regions),
+                len(self.full_samples),
+            )
+        else:
+            genotypes = SparseGenotypes(
+                np.memmap(
+                    self.path / "genotypes" / "variant_idxs.npy",
+                    dtype=np.int32,
+                    mode="r",
+                ),
+                np.memmap(
+                    self.path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
+                ),
+                len(self.full_regions),
+                len(self.full_samples),
+                self.ploidy,
+            )
         return genotypes
 
     def _init_intervals(self, tracks: Optional[Union[str, List[str]]] = None):
@@ -986,21 +1005,39 @@ class Dataset:
 
         n_queries = len(region_idx)
         haps = np.empty((n_queries, self.ploidy, self.region_length), np.uint8)
-        reconstruct_haplotypes_from_sparse(
-            geno_offset_idx,
-            haps,
-            self.full_regions[region_idx],
-            shifts,
-            self.genotypes.offsets,
-            self.genotypes.variant_idxs,
-            self.variants.positions,
-            self.variants.sizes,
-            self.variants.alts.alleles.view(np.uint8),
-            self.variants.alts.offsets,
-            self.reference.reference,
-            self.reference.offsets,
-            self.reference.pad_char,
-        )
+        if isinstance(self.genotypes, SparseGenotypes):
+            reconstruct_haplotypes_from_sparse(
+                geno_offset_idx,
+                haps,
+                self.full_regions[region_idx],
+                shifts,
+                self.genotypes.offsets,
+                self.genotypes.variant_idxs,
+                self.variants.positions,
+                self.variants.sizes,
+                self.variants.alts.alleles.view(np.uint8),
+                self.variants.alts.offsets,
+                self.reference.reference,
+                self.reference.offsets,
+                self.reference.pad_char,
+            )
+        else:
+            reconstruct_haplotypes_from_sparse_somatic(
+                geno_offset_idx,
+                haps,
+                self.full_regions[region_idx],
+                shifts,
+                self.genotypes.offsets,
+                self.genotypes.variant_idxs,
+                self.variants.positions,
+                self.variants.sizes,
+                self.variants.alts.alleles.view(np.uint8),
+                self.variants.alts.offsets,
+                self.reference.reference,
+                self.reference.offsets,
+                self.reference.pad_char,
+                self.genotypes.dosages,
+            )
         return haps.view("S1")
 
     def _get_tracks(

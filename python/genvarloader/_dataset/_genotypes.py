@@ -409,21 +409,21 @@ class SparseSomaticGenotypes:
     ----------
     variant_idxs : NDArray[np.int32]
         Shape = (variants * samples) Variant indices.
+    dosage : Optional[NDArray[np.float32]]
+        SHape = (variants * samples) Dosages e.g. VAF.
     offsets : NDArray[np.int32]
         Shape = (regions * samples * ploidy + 1) Offsets into genos.
     n_samples : int
         Number of samples.
     n_regions : int
         Number of regions.
-    dosage : Optional[NDArray[np.float32]]
-        SHape = (variants * samples) Dosages e.g. VAF.
     """
 
     variant_idxs: NDArray[np.int32]  # (variants * samples)
+    dosages: NDArray[np.float32]  # (variants * samples)
     offsets: NDArray[np.int64]  # (regions * samples + 1)
     n_regions: int
     n_samples: int
-    dosage: Optional[NDArray[np.float32]] = None  # (variants * samples)
 
     @property
     def effective_shape(self):
@@ -435,6 +435,7 @@ class SparseSomaticGenotypes:
         return cls(
             np.empty(0, np.int32),
             np.zeros(n_regions * n_samples + 1, np.int32),
+            np.empty(0, np.float32),
             n_regions,
             n_samples,
         )
@@ -461,21 +462,14 @@ class SparseSomaticGenotypes:
             np.concatenate([np.diff(g.offsets) for g in genos])
         )
 
-        if any(g.dosage is None for g in genos) and any(
-            g.dosage is not None for g in genos
-        ):
-            raise ValueError("All genotypes must have dosages or not have dosages.")
-        elif all(g.dosage is not None for g in genos):
-            dosages = np.concatenate([g.dosage for g in genos if g.dosage is not None])
-        else:
-            dosages = None
+        dosages = np.concatenate([g.dosages for g in genos if g.dosages is not None])
 
         return SparseSomaticGenotypes(
             variant_idxs=variant_idxs,
             offsets=offsets,
             n_regions=total_n_regions,
             n_samples=genos[0].n_samples,
-            dosage=dosages,
+            dosages=dosages,
         )
 
     @classmethod
@@ -484,7 +478,7 @@ class SparseSomaticGenotypes:
         genos: NDArray[np.int8],
         first_v_idxs: NDArray[np.int32],
         offsets: NDArray[np.int64],
-        dosages: Optional[NDArray[np.float32]] = None,
+        dosages: NDArray[np.float32],
     ):
         """Convert dense genotypes to sparse genotypes.
 
@@ -509,15 +503,14 @@ class SparseSomaticGenotypes:
         variant_idxs = keep_mask_to_rs_v_idx(
             keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples
         )
-        if dosages is not None:
-            # (s v) -> region/variant-major, flattened
-            dosages = dosages.T[keep.T]
+        # (s v) -> region/variant-major, flattened
+        dosages = dosages.T[keep.T]
         return cls(
             variant_idxs=variant_idxs,
+            dosages=dosages,
             offsets=sparse_offsets,
             n_regions=n_regions,
             n_samples=n_samples,
-            dosage=dosages,
         )
 
     @classmethod
@@ -530,7 +523,7 @@ class SparseSomaticGenotypes:
         positions: NDArray[np.int32],
         starts: NDArray[np.int32],
         length: int,
-        dosages: Optional[NDArray[np.float32]] = None,
+        dosages: NDArray[np.float32],
     ):
         """Convert dense genotypes to sparse genotypes.
 
@@ -550,7 +543,7 @@ class SparseSomaticGenotypes:
             Shape = (regions) Start of query regions.
         length : int
             Length of the output haplotypes.
-        dosages : Optional[NDArray[np.float32]]
+        dosages : NDArray[np.float32]
             Shape = (sample, variants) Dosages.
         """
         n_regions = len(first_v_idxs)
@@ -574,15 +567,14 @@ class SparseSomaticGenotypes:
         variant_idxs = keep_mask_to_rs_v_idx(
             keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples
         )
-        if dosages is not None:
-            # (s v) -> region/variant-major, flattened
-            dosages = dosages.T[keep.T]
+        # (s v) -> region/variant-major, flattened
+        dosages = dosages.T[keep.T]
         sparse_genos = cls(
             variant_idxs=variant_idxs,
+            dosages=dosages,
             offsets=sparse_offsets,
             n_regions=n_regions,
             n_samples=n_samples,
-            dosage=dosages,
         )
         return sparse_genos, max_ends
 
@@ -1045,9 +1037,9 @@ def reconstruct_haplotypes_from_sparse_somatic(
     ref_offsets: NDArray[np.uint64],
     pad_char: int,
     dosages: NDArray[np.float32],
-    seed: Optional[int] = None,
 ):
-    """Reconstruct haplotypes from reference sequence and variants.
+    """Reconstruct haplotypes from reference sequence and unphased variants. Note this is
+    non-deterministic due to parallel execution, regardless of seeding.
 
     Parameters
     ----------
@@ -1079,10 +1071,7 @@ def reconstruct_haplotypes_from_sparse_somatic(
         Padding character.
     dosages : NDArray[np.float32]
         Shape = (variants) Dosages.
-    seed : Optional[int]
-        Random seed.
     """
-    random.seed(seed)
     n_regions = out.shape[0]
     ploidy = out.shape[1]
     groups = np.empty_like(sparse_genos, np.uint32)
@@ -1093,7 +1082,7 @@ def reconstruct_haplotypes_from_sparse_somatic(
         c_idx = q[0]
         c_s = ref_offsets[c_idx]
         c_e = ref_offsets[c_idx + 1]
-        ref_start = q[1]
+        ref_start: int = q[1]
         _reference = ref[c_s:c_e]
 
         for hap in nb.prange(ploidy):
@@ -1108,7 +1097,7 @@ def reconstruct_haplotypes_from_sparse_somatic(
             qh_ends = ends[o_s:o_e]
 
             keep = mark_keep_variants(
-                qh_genos, qh_dosages, positions, alt_offsets, qh_groups, qh_ends
+                qh_genos, qh_dosages, positions, sizes, ref_start, qh_groups, qh_ends
             )
 
             reconstruct_haplotype_from_sparse(
@@ -1190,9 +1179,9 @@ def reconstruct_haplotype_from_sparse(
         if keep is not None and not keep[v]:
             continue
 
-        variant: np.int32 = _variant_idxs[v]
-        v_pos = positions[variant]
-        v_diff = sizes[variant]
+        v_idx: np.int32 = _variant_idxs[v]
+        v_pos = positions[v_idx]
+        v_diff = sizes[v_idx]
 
         # if first variant is a DEL spanning start of query
         if v == 0 and v_pos < ref_start and v_diff < 0:
@@ -1206,7 +1195,7 @@ def reconstruct_haplotype_from_sparse(
         if v_pos < ref_idx:
             continue
 
-        allele = alt_alleles[alt_offsets[variant] : alt_offsets[variant + 1]]
+        allele = alt_alleles[alt_offsets[v_idx] : alt_offsets[v_idx + 1]]
         v_len = len(allele)
 
         # handle shift
@@ -1295,7 +1284,7 @@ def reconstruct_haplotype_from_sparse(
             out[out_end_idx:] = pad_char
 
 
-UNSEEN_VARIANT = 2**32
+UNSEEN_VARIANT = 4294967296  # 2**32
 
 
 @nb.njit(nogil=True, cache=True)
@@ -1303,24 +1292,36 @@ def mark_keep_variants(
     variant_idxs: NDArray[np.int32],  # (v)
     dosages: NDArray[np.float32],  # (v)
     positions: NDArray[np.int32],  # (total variants)
-    alt_offsets: NDArray[np.int64],  # (total variants + 1)
+    sizes: NDArray[np.int32],  # (total variants)
+    ref_start: int,
     groups: NDArray[np.uint32],  # (v)
-    ends: NDArray[np.uint32],  # (g)
-):
+    ref_ends: NDArray[np.uint32],  # (g)
+    w_lens: NDArray[np.uint32],  # (g)
+    target_len: int,
+) -> NDArray[np.bool_]:
     n_variants = len(variant_idxs)
     groups[1:] = UNSEEN_VARIANT
+    # first variant is guaranteed to span ref_start or start past it
     groups[0] = 0
-    ends[0] = positions[0] + alt_offsets[1] - alt_offsets[0]
+    ref_ends[0] = positions[0] - min(0, sizes[0]) + 1  # +1 for end-exclusive
+    w_lens[0] = max(0, sizes[0]) + 1  # +1 as sizes is ILEN
     n_groups = 1
 
     # Assign variants to groups
+    # once the total written length is >= length, stop to skip unneeded variants
     for v in range(1, n_variants):
         n_compat = 0
-        v_idx = variant_idxs[v]
-        v_end = positions[v_idx] + alt_offsets[v_idx + 1] - alt_offsets[v_idx]
+        v_idx: int = variant_idxs[v]
+        v_pos = positions[v_idx]
+        v_ref_end = v_pos + min(0, sizes[v_idx]) + 1
+
+        if v_ref_end <= ref_start:
+            # leave the group as unseen so it will be skipped
+            continue
+
         for g in range(n_groups):
             # variant compatible with group
-            if ends[g] <= positions[v_idx]:
+            if ref_ends[g] <= v_pos:
                 n_compat += 1
 
                 # unseen variant, assign it to first compatible group
@@ -1337,20 +1338,25 @@ def mark_keep_variants(
             groups[v] = n_groups
 
         # update end position of group
-        ends[groups[v]] = v_end
+        # added write length = ref distance + length of variant
+        w_lens[groups[v]] += v_ref_end - ref_ends[groups[v]] + max(0, sizes[v_idx])
+        ref_ends[groups[v]] = v_ref_end
 
-    # Choose a group proportional to total dosage normalized by length
-    # Group 0 is always kept
-    cum_prop = np.empty(n_groups - 1, np.float32)
-    for g in range(1, n_groups - 1):
-        lengths = (
-            positions[groups == g]
-            + alt_offsets[groups == g + 1]
-            - alt_offsets[groups == g]
-        )
-        cum_prop[g] = (dosages[groups == g] / lengths).sum()
+        if (w_lens[:n_groups] >= target_len).all():
+            break
+
+    # Choose a group proportional to total dosage normalized by reference length
+    cum_prop = np.empty(n_groups, np.float32)
+    for g in range(n_groups):
+        v_starts = positions[variant_idxs[groups == g]]
+        v_ends = v_starts - np.minimum(0, sizes[variant_idxs[groups == g]]) + 1
+        # TODO: v_end could be outside the region of interest, but ref_end is unknown here
+        ref_lengths = v_ends - np.maximum(v_starts, ref_start)
+        # if ref_end known, could use this instead
+        # lengths = np.minimum(v_ends, ref_end) - np.maximum(v_starts, ref_start)
+        cum_prop[g] = (dosages[groups == g] / ref_lengths).sum()
     cum_prop = cum_prop.cumsum()
     cum_prop /= cum_prop[-1]
     keep_group = (random.random() < cum_prop).sum()
 
-    return (groups == keep_group) | (groups == 0)
+    return groups == keep_group

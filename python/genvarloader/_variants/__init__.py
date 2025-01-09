@@ -47,10 +47,17 @@ class Variants:
 
     records: Records
     genotypes: Genotypes
+    phased: bool
+    dosage_field: Optional[str] = None
     _sample_idxs: Optional[NDArray[np.intp]] = None
 
     @classmethod
-    def from_file(cls, path: Union[str, Path, Dict[str, Path]]) -> "Variants":
+    def from_file(
+        cls,
+        path: Union[str, Path, Dict[str, Path]],
+        phased=True,
+        dosage_field: Optional[str] = None,
+    ) -> "Variants":
         """Create a Variants instances from a VCF or PGEN file(s). If a dictionary is provided, the keys should be
         contig names and the values should be paths to the corresponding VCF or PGEN.
 
@@ -58,7 +65,15 @@ class Variants:
         ----------
         path : Union[str, Path, Dict[str, Path]]
             Path to a VCF or PGEN file or a mapping from contig names to paths.
+        phased : bool
+            Whether the genotypes should be treated as phased.
+        dosage_field : Optional[str]
+            The name of the dosage field in the VCF file. This is currently only applicable and required for
+            unphased genotypes.
         """
+        if not phased and dosage_field is None:
+            raise ValueError("Dosage field is required for unphased genotypes.")
+
         if isinstance(path, (str, Path)):
             path = Path(path)
             first_path = path
@@ -68,9 +83,9 @@ class Variants:
         vcf_suffix = re.compile(r"\.[vb]cf(\.gz)?$")
 
         if vcf_suffix.search(first_path.suffix):
-            return cls.from_vcf(path)
+            return cls.from_vcf(path, phased, dosage_field)
         elif first_path.suffix == ".pgen":
-            return cls.from_pgen(path)
+            return cls.from_pgen(path, phased)
         else:
             raise ValueError("Unsupported file type.")
 
@@ -95,7 +110,9 @@ class Variants:
         return self.genotypes.ploidy
 
     @classmethod
-    def from_vcf(cls, vcf: Union[str, Path, Dict[str, Path]]) -> "Variants":
+    def from_vcf(
+        cls, vcf: Union[str, Path, Dict[str, Path]], phased: bool, dosage: Optional[str]
+    ) -> "Variants":
         """Currently does not support multi-allelic sites, but does support *split*
         multi-allelic sites. Note that SVs and "other" variants are also not supported.
         VCFs can be prepared by running:
@@ -115,10 +132,12 @@ class Variants:
         records = Records.from_vcf(vcf)
 
         genotypes = VCFGenos(vcf, records.contig_offsets)
-        return cls(records, genotypes)
+        return cls(records, genotypes, phased, dosage)
 
     @classmethod
-    def from_pgen(cls, pgen: Union[str, Path, Dict[str, Path]]) -> "Variants":
+    def from_pgen(
+        cls, pgen: Union[str, Path, Dict[str, Path]], phased: bool
+    ) -> "Variants":
         """Currently does not support multi-allelic sites, but does support *split*
         multi-allelic sites. Note that SVs and "other" variants are also not supported.
         A PGEN can be prepared from a VCF by running:
@@ -183,7 +202,7 @@ class Variants:
         )
 
         genotypes = PgenGenos(pgen, samples, records.contigs)
-        return cls(records, genotypes)
+        return cls(records, genotypes, phased)
 
     def subset_samples(self, samples: ArrayLike):
         samples = np.atleast_1d(np.asarray(samples, dtype=str))

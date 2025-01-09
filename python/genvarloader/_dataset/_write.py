@@ -21,7 +21,11 @@ from .._utils import (
 )
 from .._variants import Variants
 from .._variants._genotypes import PgenGenos, VCFGenos
-from ._genotypes import SparseGenotypes, get_haplotype_region_ilens
+from ._genotypes import (
+    SparseGenotypes,
+    SparseSomaticGenotypes,
+    get_haplotype_region_ilens,
+)
 from ._utils import splits_sum_le_value
 
 __all__ = ["write"]
@@ -41,6 +45,8 @@ def write(
     max_jitter: Optional[int] = None,
     overwrite: bool = False,
     max_mem: int = 4 * 2**30,
+    phased: bool = True,
+    dosage_field: Optional[str] = None,
 ):
     """Write a GVL dataset.
 
@@ -64,6 +70,10 @@ def write(
         Whether to overwrite an existing dataset, by default False
     max_mem : int, optional
         Maximum memory to use per region, by default 4 GiB (4 * 2**30 bytes)
+    phased : bool, optional
+        Whether to treat the genotypes as phased, by default True
+    dosage_field : Optional[str], optional
+        Field in the VCF to use as dosage, by default None
     """
     if variants is None and bigwigs is None:
         raise ValueError("At least one of `vcf` or `bigwigs` must be provided.")
@@ -91,7 +101,7 @@ def write(
     available_samples: Optional[Set[str]] = None
     if variants is not None:
         if isinstance(variants, (str, Path)):
-            variants = Variants.from_file(variants)
+            variants = Variants.from_file(variants, phased, dosage_field)
 
         if unavailable_contigs := set(contigs) - {
             _normalize_contig_name(c, contigs) for c in variants.records.contigs
@@ -278,11 +288,14 @@ def _write_variants(
                 # NOTE: this should never run unless user provides a custom genotype reader
                 # in that case this is a safe-ish upper bound
                 bytes_per_variant = 4
-            mem_per_r = (
-                (n_variants * (bytes_per_variant + 4) + 4)
-                * len(_samples)
-                * variants.ploidy
-            )
+
+            if not variants.phased:
+                bytes_per_variant += 4  # dosage is float 32
+
+            mem_per_r = (n_variants * (bytes_per_variant + 4) + 4) * len(_samples)
+            if variants.phased:
+                mem_per_r *= variants.ploidy
+
             if np.any(mem_per_r > max_mem):
                 # TODO subset by samples as well
                 # sketch:
@@ -293,6 +306,7 @@ def _write_variants(
                     Largest amount needed for a single region is {mem_per_r.max() / 1e9} GB, set
                     `max_mem` to this value or higher."""
                 )
+
             offsets = splits_sum_le_value(mem_per_r, max_mem)
             rel_start_idxs[contig] = rel_s_idxs
             rel_end_idxs[contig] = rel_e_idxs
@@ -304,6 +318,7 @@ def _write_variants(
             chunk_offsets[contig] = np.array([0, part.height], dtype=np.intp)
 
     v_idx_memmap_offsets = 0
+    dosage_memmap_offsets = 0
     offset_memmap_offsets = 0
     last_offset = 0
     max_ends = np.empty(bed.height, dtype=np.int32)
@@ -346,17 +361,32 @@ def _write_variants(
                 pbar.set_description(
                     f"Writing genotypes for {n_regions} regions on chromosome {contig}"
                 )
-                (
-                    v_idx_memmap_offsets,
-                    offset_memmap_offsets,
-                    last_offset,
-                ) = _write_variants_chunk(
-                    out_dir,
-                    genos,
-                    v_idx_memmap_offsets,
-                    offset_memmap_offsets,
-                    last_offset,
-                )
+                if isinstance(genos, SparseGenotypes):
+                    (
+                        v_idx_memmap_offsets,
+                        offset_memmap_offsets,
+                        last_offset,
+                    ) = _write_phased_variants_chunk(
+                        out_dir,
+                        genos,
+                        v_idx_memmap_offsets,
+                        offset_memmap_offsets,
+                        last_offset,
+                    )
+                else:
+                    (
+                        v_idx_memmap_offsets,
+                        dosage_memmap_offsets,
+                        offset_memmap_offsets,
+                        last_offset,
+                    ) = _write_somatic_variants_chunk(
+                        out_dir,
+                        genos,
+                        v_idx_memmap_offsets,
+                        dosage_memmap_offsets,
+                        offset_memmap_offsets,
+                        last_offset,
+                    )
                 pbar.update()
 
     out = np.memmap(
@@ -385,31 +415,48 @@ def _read_variants_chunk(
     sample_idxs: Optional[NDArray[np.intp]],
 ):
     if contig is None:
-        genos = SparseGenotypes.empty(
-            n_regions=len(rel_s_idxs), n_samples=len(samples), ploidy=variants.ploidy
-        )
+        if variants.phased:
+            genos = SparseGenotypes.empty(
+                n_regions=len(rel_s_idxs),
+                n_samples=len(samples),
+                ploidy=variants.ploidy,
+            )
+        else:
+            genos = SparseSomaticGenotypes.empty(
+                n_regions=len(rel_s_idxs), n_samples=len(samples)
+            )
+
         chunk_max_ends = ends
-    else:
-        first = True
-        while True:
-            logger.debug(f"region length {ends[0] - starts[0]}")
-            if not first:
-                rel_e_idxs = variants.records.find_relative_end_idx(contig, ends)
-            s_idx = variants.records.contig_offsets[contig] + rel_s_idxs
-            e_idx = variants.records.contig_offsets[contig] + rel_e_idxs
-            n_per_region = e_idx - s_idx
-            if n_per_region.sum() == 0:
+        return genos, chunk_max_ends
+
+    first = True
+    while True:
+        logger.debug(f"region length {ends[0] - starts[0]}")
+        if not first:
+            rel_e_idxs = variants.records.find_relative_end_idx(contig, ends)
+        s_idx = variants.records.contig_offsets[contig] + rel_s_idxs
+        e_idx = variants.records.contig_offsets[contig] + rel_e_idxs
+        n_per_region = e_idx - s_idx
+
+        if n_per_region.sum() == 0:
+            if variants.phased:
                 genos = SparseGenotypes.empty(
                     n_regions=len(rel_s_idxs),
                     n_samples=len(samples),
                     ploidy=variants.ploidy,
                 )
-                chunk_max_ends = ends
-                return genos, chunk_max_ends
-            offsets = _lengths_to_offsets(n_per_region)
+            else:
+                genos = SparseSomaticGenotypes.empty(
+                    n_regions=len(rel_s_idxs), n_samples=len(samples)
+                )
+            chunk_max_ends = ends
+            return genos, chunk_max_ends
 
-            # (s p v)
-            logger.debug("read genotypes")
+        offsets = _lengths_to_offsets(n_per_region)
+
+        # (s p v)
+        logger.debug("read genotypes")
+        if variants.phased:
             genos = variants.genotypes.multiprocess_read(
                 contig,
                 s_idx,
@@ -417,28 +464,39 @@ def _read_variants_chunk(
                 sample_idx=sample_idxs,
                 n_jobs=len(os.sched_getaffinity(0)),
             )
-
-            logger.debug("get haplotype region ilens")
-            # (s p r)
-            haplotype_ilens = get_haplotype_region_ilens(
-                genos, rel_s_idxs, offsets, variants.records.v_diffs[contig]
+        else:
+            assert variants.dosage_field is not None
+            genos, dosages = variants.genotypes.multiprocess_read_genos_and_dosages(
+                contig,
+                s_idx,
+                e_idx,
+                variants.dosage_field,
+                sample_idx=sample_idxs,
+                n_jobs=len(os.sched_getaffinity(0)),
             )
-            haplotype_lengths = ends - starts + haplotype_ilens
-            del haplotype_ilens
-            logger.debug(f"average haplotype length {haplotype_lengths.mean()}")
-            # (s p r)
-            missing_length = region_length - haplotype_lengths
-            logger.debug(f"max missing length {missing_length.max()}")
 
-            if np.all(missing_length <= 0):
-                break
+        logger.debug("get haplotype region ilens")
+        # (s p r)
+        haplotype_ilens = get_haplotype_region_ilens(
+            genos, rel_s_idxs, offsets, variants.records.v_diffs[contig]
+        )
+        haplotype_lengths = ends - starts + haplotype_ilens
+        del haplotype_ilens
+        logger.debug(f"average haplotype length {haplotype_lengths.mean()}")
+        # (s p r)
+        missing_length = region_length - haplotype_lengths
+        logger.debug(f"max missing length {missing_length.max()}")
 
-        # (r)
-        ends += np.ceil(
-            EXTEND_END_MULTIPLIER * missing_length.max((0, 1)).clip(min=0)
-        ).astype(np.int32)
+        if np.all(missing_length <= 0):
+            break
 
-        logger.debug("sparsify genotypes")
+    # (r)
+    ends += np.ceil(
+        EXTEND_END_MULTIPLIER * missing_length.max((0, 1)).clip(min=0)
+    ).astype(np.int32)
+
+    logger.debug("sparsify genotypes")
+    if variants.phased:
         genos, chunk_max_ends = SparseGenotypes.from_dense_with_length(
             genos=genos,
             first_v_idxs=rel_s_idxs,
@@ -448,15 +506,27 @@ def _read_variants_chunk(
             starts=starts,
             length=region_length,
         )
-        logger.debug(f"maximum needed length {(chunk_max_ends - starts).max()}")
-        logger.debug(f"minimum needed length {(chunk_max_ends - starts).min()}")
+    else:
+        genos, chunk_max_ends = SparseSomaticGenotypes.from_dense_with_length(
+            genos=genos,
+            first_v_idxs=rel_s_idxs,
+            offsets=offsets,
+            ilens=variants.records.v_diffs[contig],
+            positions=variants.records.v_starts[contig],
+            starts=starts,
+            length=region_length,
+            dosages=dosages,  # type: ignore | guaranteed bound by read_genos_and_dosages
+        )
+    logger.debug(f"maximum needed length {(chunk_max_ends - starts).max()}")
+    logger.debug(f"minimum needed length {(chunk_max_ends - starts).min()}")
 
-        # make indices absolute
-        genos.variant_idxs += variants.records.contig_offsets[contig]
+    # make indices absolute
+    genos.variant_idxs += variants.records.contig_offsets[contig]
+
     return genos, chunk_max_ends
 
 
-def _write_variants_chunk(
+def _write_phased_variants_chunk(
     out_dir: Path,
     genos: SparseGenotypes,
     v_idx_memmap_offset: int,
@@ -489,6 +559,53 @@ def _write_variants_chunk(
     out.flush()
     offsets_memmap_offset += out.nbytes
     return v_idx_memmap_offset, offsets_memmap_offset, last_offset
+
+
+def _write_somatic_variants_chunk(
+    out_dir: Path,
+    genos: SparseSomaticGenotypes,
+    v_idx_memmap_offset: int,
+    dosage_memmap_offset: int,
+    offsets_memmap_offset: int,
+    last_offset: int,
+):
+    if not genos.is_empty:
+        out = np.memmap(
+            out_dir / "variant_idxs.npy",
+            dtype=genos.variant_idxs.dtype,
+            mode="w+" if v_idx_memmap_offset == 0 else "r+",
+            shape=genos.variant_idxs.shape,
+            offset=v_idx_memmap_offset,
+        )
+        out[:] = genos.variant_idxs[:]
+        out.flush()
+        v_idx_memmap_offset += out.nbytes
+
+        out = np.memmap(
+            out_dir / "dosages.npy",
+            dtype=genos.dosages.dtype,
+            mode="w+" if v_idx_memmap_offset == 0 else "r+",
+            shape=genos.dosages.shape,
+            offset=v_idx_memmap_offset,
+        )
+        out[:] = genos.dosages[:]
+        out.flush()
+        dosage_memmap_offset += out.nbytes
+
+    offsets = genos.offsets
+    offsets += last_offset
+    last_offset = offsets[-1]
+    out = np.memmap(
+        out_dir / "offsets.npy",
+        dtype=offsets.dtype,
+        mode="w+" if offsets_memmap_offset == 0 else "r+",
+        shape=len(offsets) - 1,
+        offset=offsets_memmap_offset,
+    )
+    out[:] = offsets[:-1]
+    out.flush()
+    offsets_memmap_offset += out.nbytes
+    return v_idx_memmap_offset, dosage_memmap_offset, offsets_memmap_offset, last_offset
 
 
 def _write_bigwigs(
