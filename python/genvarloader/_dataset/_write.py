@@ -69,7 +69,8 @@ def write(
     samples : Optional[List[str]], optional
         Samples to include in the dataset, by default None
     length : Optional[int], optional
-        Length of the regions to query, by default None
+        Length of the regions to query, by default None. Provided regions will be expanded or contracted
+        to this length + 2 x `max_jitter` with the center of the region remaining the same.
     max_jitter : Optional[int], optional
         Maximum jitter to add to the regions, by default None
     overwrite : bool, optional
@@ -109,7 +110,15 @@ def write(
         raise FileExistsError(f"{path} already exists.")
     path.mkdir(parents=True, exist_ok=True)
 
-    bed, contigs, region_length = _prep_bed(bed, length, max_jitter)
+    if isinstance(bed, (str, Path)):
+        bed = read_bedlike(bed)
+
+    gvl_bed, contigs, region_length, src_to_sorted_idx = _prep_bed(
+        bed, length, max_jitter
+    )
+    bed.with_columns(region_idx=pl.lit(src_to_sorted_idx)).write_ipc(
+        path / "input_regions.arrow"
+    )
     metadata["region_length"] = region_length
     metadata["contigs"] = contigs
     if max_jitter is not None:
@@ -169,13 +178,13 @@ def write(
     logger.info(f"Using {len(samples)} samples.")
     metadata["samples"] = samples
     metadata["n_samples"] = len(samples)
-    metadata["n_regions"] = bed.height
+    metadata["n_regions"] = gvl_bed.height
 
     if variants is not None:
         logger.info("Writing genotypes.")
-        bed = _write_variants(
+        gvl_bed = _write_variants(
             path,
-            bed,
+            gvl_bed,
             variants,
             region_length,
             samples,
@@ -190,12 +199,12 @@ def write(
         gc.collect()
 
     logger.info("Writing regions.")
-    _write_regions(path, bed, contigs)
+    _write_regions(path, gvl_bed, contigs)
 
     if bigwigs is not None:
         logger.info("Writing BigWig intervals.")
         for bw in bigwigs:
-            _write_bigwigs(path, bed, bw, samples)
+            _write_bigwigs(path, gvl_bed, bw, samples)
 
     with open(path / "metadata.json", "w") as f:
         json.dump(metadata, f)
@@ -205,13 +214,10 @@ def write(
 
 
 def _prep_bed(
-    bed: Union[str, Path, pl.DataFrame],
+    bed: pl.DataFrame,
     length: Optional[int] = None,
     max_jitter: Optional[int] = None,
-) -> Tuple[pl.DataFrame, List[str], int]:
-    if isinstance(bed, (str, Path)):
-        bed = read_bedlike(bed)
-
+) -> Tuple[pl.DataFrame, List[str], int, NDArray[np.intp]]:
     if bed.height == 0:
         raise ValueError("No regions found in the BED file.")
 
@@ -225,7 +231,12 @@ def _prep_bed(
     bed = bed.select("chrom", "chromStart", "chromEnd", "strand")
     with pl.StringCache():
         pl.Series(contigs, dtype=pl.Categorical)
-        bed = bed.sort(pl.col("chrom").cast(pl.Categorical), pl.col("chromStart"))
+        bed = bed.with_row_index().sort(
+            pl.col("chrom").cast(pl.Categorical), pl.col("chromStart")
+        )
+
+    original_idx_to_sorted_idx = np.argsort(bed["index"])
+    bed = bed.drop("index")
 
     if length is None:
         length = cast(
@@ -237,7 +248,7 @@ def _prep_bed(
 
     bed = with_length(bed, length)
 
-    return bed, contigs, length
+    return bed, contigs, length, original_idx_to_sorted_idx
 
 
 def _write_regions(path: Path, bed: pl.DataFrame, contigs: List[str]):

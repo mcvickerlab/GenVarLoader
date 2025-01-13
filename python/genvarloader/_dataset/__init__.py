@@ -739,10 +739,10 @@ class Dataset:
 
         Parameters
         ----------
-        samples : ListIdx
-            The indices of the samples to select.
-        regions : ListIdx
+        regions : Idx
             The indices of the regions to select.
+        samples : Idx
+            The indices of the samples to select.
         """
         if isinstance(regions, slice):
             start = 0 if regions.start is None else regions.start
