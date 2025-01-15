@@ -410,7 +410,7 @@ class SparseSomaticGenotypes:
     variant_idxs : NDArray[np.int32]
         Shape = (variants * samples) Variant indices.
     dosage : Optional[NDArray[np.float32]]
-        SHape = (variants * samples) Dosages e.g. VAF.
+        Shape = (variants * samples) Dosages e.g. VAF.
     offsets : NDArray[np.int32]
         Shape = (regions * samples * ploidy + 1) Offsets into genos.
     n_samples : int
@@ -480,7 +480,8 @@ class SparseSomaticGenotypes:
         offsets: NDArray[np.int64],
         dosages: NDArray[np.float32],
     ):
-        """Convert dense genotypes to sparse genotypes.
+        """Convert dense genotypes to sparse genotypes. Genotypes will be considered ALT if any allele is ALT.
+        e.g. 0/1 -> 1, 1/1 -> 1, 0/0 -> 0, 0/2 -> 1.
 
         Parameters
         ----------
