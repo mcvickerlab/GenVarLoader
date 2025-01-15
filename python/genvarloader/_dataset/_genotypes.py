@@ -890,9 +890,9 @@ def reconstruct_haplotype_from_dense(
                 ref_idx = v_rel_pos
                 # how much left to shift - amount of ref we can use
                 allele_start_idx = shift - shifted - ref_shift_dist
-                #! without if statement, parallel=True can cause a SystemError!
-                # * parallel jit cannot handle changes in array dimension.
-                # * without this, allele can change from a 1D array to a 0D
+                #! without this check, parallel jit can cause a SystemError!
+                # * specifically cannot handle changes in array dimensionality.
+                # * without this check, allele can change from a 1D array to a 0D
                 # * array.
                 if allele_start_idx == v_len:
                     continue
@@ -1074,8 +1074,10 @@ def reconstruct_haplotypes_from_sparse_somatic(
     """
     n_regions = out.shape[0]
     ploidy = out.shape[1]
+    target_len = out.shape[2]
     groups = np.empty_like(sparse_genos, np.uint32)
     ends = np.empty_like(sparse_genos, np.uint32)
+    write_lens = np.empty_like(sparse_genos, np.uint32)
 
     for query in nb.prange(n_regions):
         q = regions[query]
@@ -1095,9 +1097,18 @@ def reconstruct_haplotypes_from_sparse_somatic(
             qh_dosages = dosages[o_s:o_e]
             qh_groups = groups[o_s:o_e]
             qh_ends = ends[o_s:o_e]
+            qh_w_lens = write_lens[o_s:o_e]
 
             keep = mark_keep_variants(
-                qh_genos, qh_dosages, positions, sizes, ref_start, qh_groups, qh_ends
+                qh_genos,
+                qh_dosages,
+                positions,
+                sizes,
+                ref_start,
+                qh_groups,
+                qh_ends,
+                qh_w_lens,
+                target_len,
             )
 
             reconstruct_haplotype_from_sparse(
@@ -1284,7 +1295,7 @@ def reconstruct_haplotype_from_sparse(
             out[out_end_idx:] = pad_char
 
 
-UNSEEN_VARIANT = 4294967296  # 2**32
+UNSEEN_VARIANT = np.iinfo(np.uint32).max
 
 
 @nb.njit(nogil=True, cache=True)
@@ -1296,32 +1307,36 @@ def mark_keep_variants(
     ref_start: int,
     groups: NDArray[np.uint32],  # (v)
     ref_ends: NDArray[np.uint32],  # (g)
-    w_lens: NDArray[np.uint32],  # (g)
+    write_lens: NDArray[np.uint32],  # (g)
     target_len: int,
 ) -> NDArray[np.bool_]:
-    n_variants = len(variant_idxs)
-    groups[1:] = UNSEEN_VARIANT
-    # first variant is guaranteed to span ref_start or start past it
-    groups[0] = 0
-    ref_ends[0] = positions[0] - min(0, sizes[0]) + 1  # +1 for end-exclusive
-    w_lens[0] = max(0, sizes[0]) + 1  # +1 as sizes is ILEN
-    n_groups = 1
+    groups[:] = UNSEEN_VARIANT
+    ref_ends[:] = ref_start
+    write_lens[:] = 0
+    n_groups = 0
 
     # Assign variants to groups
-    # once the total written length is >= length, stop to skip unneeded variants
-    for v in range(1, n_variants):
+    # stop once the total written length for all groups is >= length
+    for v in range(len(variant_idxs)):
         n_compat = 0
         v_idx: int = variant_idxs[v]
         v_pos = positions[v_idx]
-        v_ref_end = v_pos + min(0, sizes[v_idx]) + 1
+        v_ref_end = v_pos - min(0, sizes[v_idx]) + 1
 
         if v_ref_end <= ref_start:
-            # leave the group as unseen so it will be skipped
+            # keep the variant as unseen -> skipped
             continue
 
+        # choose group for variant
         for g in range(n_groups):
             # variant compatible with group
-            if ref_ends[g] <= v_pos:
+            missing_len = target_len - write_lens[g]
+            if ref_ends[g] <= v_pos and missing_len > 0:
+                if missing_len <= v_pos - ref_ends[g]:
+                    write_lens[g] = target_len
+                    ref_ends[g] += missing_len
+                    continue
+
                 n_compat += 1
 
                 # unseen variant, assign it to first compatible group
@@ -1332,31 +1347,47 @@ def mark_keep_variants(
                 elif random.random() < 1 / n_compat:
                     groups[v] = g
 
-        # variant not compatible with any group, make new group
-        if groups[v] == UNSEEN_VARIANT:
-            n_groups += 1
-            groups[v] = n_groups
-
-        # update end position of group
-        # added write length = ref distance + length of variant
-        w_lens[groups[v]] += v_ref_end - ref_ends[groups[v]] + max(0, sizes[v_idx])
-        ref_ends[groups[v]] = v_ref_end
-
-        if (w_lens[:n_groups] >= target_len).all():
+        if n_groups > 0 and (write_lens[:n_groups] >= target_len).all():
             break
 
-    # Choose a group proportional to total dosage normalized by reference length
-    cum_prop = np.empty(n_groups, np.float32)
+        # variant not compatible with any group or there are no groups, make new group
+        if groups[v] == UNSEEN_VARIANT:
+            n_groups += 1
+            groups[v] = n_groups - 1
+
+        # finished with variant assignment
+
+        # update group info
+        # writable length = length of variant + dist from last v_ref_end or the missing length, whichever is smaller
+        v_group = groups[v]
+        v_write_len = v_pos - ref_ends[v_group] + max(0, sizes[v_idx]) + 1
+        missing_len = target_len - write_lens[v_group]
+        writable_len = min(v_write_len, missing_len)
+        write_lens[v_group] += writable_len
+        ref_ends[v_group] = v_ref_end
+
+        if (write_lens[:n_groups] >= target_len).all():
+            break
+
+    # If not all groups have write_len = target_len after seeing all variants,
+    # that's ok since this won't affect the group selection process in the next step.
+
+    if n_groups == 1:
+        return groups == 0
+    # Choose a group proportional to total dosage normalized by reference length.
+    # This is because variants with long ref len will prevent other variants from
+    # being assigned to the same group, reducing the potential total dosage of the
+    # group.f
+    cum_prop = write_lens[:n_groups].view(
+        np.float32
+    )  # reinterpret this memory to avoid allocation
     for g in range(n_groups):
         v_starts = positions[variant_idxs[groups == g]]
         v_ends = v_starts - np.minimum(0, sizes[variant_idxs[groups == g]]) + 1
-        # TODO: v_end could be outside the region of interest, but ref_end is unknown here
-        ref_lengths = v_ends - np.maximum(v_starts, ref_start)
-        # if ref_end known, could use this instead
-        # lengths = np.minimum(v_ends, ref_end) - np.maximum(v_starts, ref_start)
+        ref_lengths = np.minimum(v_ends, ref_ends[g]) - np.maximum(v_starts, ref_start)
         cum_prop[g] = (dosages[groups == g] / ref_lengths).sum()
     cum_prop = cum_prop.cumsum()
     cum_prop /= cum_prop[-1]
-    keep_group = (random.random() < cum_prop).sum()
+    keep_group = (random.random() <= cum_prop).sum() - 1
 
     return groups == keep_group

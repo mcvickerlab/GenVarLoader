@@ -879,11 +879,15 @@ class Dataset:
             out.extend(tracks)
 
         if self.jitter > 0:
-            start = self.rng.integers(
-                self.max_jitter - self.jitter, self.max_jitter + 1
+            out = list(
+                sp.jitter(
+                    *out,
+                    max_jitter=self.jitter,
+                    length_axis=-1,
+                    jitter_axes=0,
+                    seed=self.rng,
+                )
             )
-            # [(b p l-2*j) ...]
-            out = [o[..., start : start + self.output_length] for o in out]
 
         if squeeze:
             # (1 p l) -> (p l)
