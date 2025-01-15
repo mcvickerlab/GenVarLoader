@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
 
@@ -16,6 +15,7 @@ from ._genotypes import (
     VCFGenos,
 )
 from ._records import Records, VLenAlleles
+from ._utils import path_is_pgen, path_is_vcf
 
 __all__ = []
 
@@ -80,12 +80,10 @@ class Variants:
         elif isinstance(path, dict):
             first_path = next(iter(path.values()))
 
-        vcf_suffix = re.compile(r"\.[vb]cf(\.gz)?$")
-
-        if vcf_suffix.search(first_path.suffix):
-            return cls.from_vcf(path, phased, dosage_field)
-        elif first_path.suffix == ".pgen":
-            return cls.from_pgen(path, phased)
+        if path_is_vcf(first_path):
+            return cls.from_vcf(path)
+        elif path_is_pgen(first_path):
+            return cls.from_pgen(path)
         else:
             raise ValueError("Unsupported file type.")
 
