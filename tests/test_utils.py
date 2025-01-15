@@ -1,6 +1,5 @@
 import numpy as np
-
-from genvarloader.dataset.utils import splits_sum_le_value
+from genvarloader._dataset._utils import splits_sum_le_value
 
 
 def test_splits_sum_le_value():

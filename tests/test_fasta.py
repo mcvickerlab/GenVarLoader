@@ -1,12 +1,11 @@
 from pathlib import Path
 
+import genvarloader as gvl
 import numpy as np
 import pytest
+from genvarloader._fasta import NoPadError
 from pysam import FastaFile
 from pytest_cases import fixture
-
-import genvarloader as gvl
-from genvarloader.fasta import NoPadError
 
 
 @fixture
