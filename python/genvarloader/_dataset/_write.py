@@ -100,6 +100,11 @@ def write(
 
     available_samples: Optional[Set[str]] = None
     if variants is not None:
+        if isinstance(variants, Variants) and phased != variants.phased:
+            raise ValueError(
+                f"Phased argument ({phased}) does not match phased status of Variants object ({variants.phased})."
+            )
+
         if isinstance(variants, (str, Path)):
             variants = Variants.from_file(variants, phased, dosage_field)
 
