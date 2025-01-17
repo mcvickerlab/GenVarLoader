@@ -9,6 +9,11 @@ from numpy.typing import ArrayLike, NDArray
 
 from .._utils import _get_rel_starts
 
+
+class DosageFieldError(Exception):
+    """Exception raised when the dosage field is not found in the VCF record."""
+
+
 __all__ = []
 
 
@@ -498,8 +503,14 @@ class VCFGenos(Genotypes):
                 # (n_valid)
                 place_idx = geno_idxs[overlapping_query_intervals]
                 genos[..., place_idx] = v.genotype.array()[:, : self.ploidy, None]
-                # (s, 1) -> (s)
-                dosages[:, place_idx] = v.format(dosage_field).squeeze()
+                # (s, 1, 1) or (s, 1)?
+                d = v.format(dosage_field)
+                if d is None:
+                    raise DosageFieldError(
+                        f"Dosage field '{dosage_field}' not found for record {repr(v)}"
+                    )
+                # (s, 1, 1) or (s, 1)? -> (s, 1)
+                dosages[:, place_idx] = d.squeeze()[:, None]
                 # increment idxs for next iteration
                 geno_idxs[overlapping_query_intervals] += 1
             if (geno_idxs == finish_idxs).all():

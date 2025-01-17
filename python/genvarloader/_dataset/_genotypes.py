@@ -427,7 +427,9 @@ class SparseSomaticGenotypes:
 
     @property
     def effective_shape(self):
-        return (self.n_regions, self.n_samples)
+        """Effective shape of the sparse genotypes (n_regions, n_samples, ploidy)
+        where ploidy is always represented as 1. The ploidy is treated as 1 to be consistent with."""
+        return (self.n_regions, self.n_samples, 1)
 
     @classmethod
     def empty(cls, n_regions: int, n_samples: int):
@@ -444,7 +446,7 @@ class SparseSomaticGenotypes:
     def is_empty(self) -> bool:
         return len(self.variant_idxs) == 0
 
-    def vars(self, region: int, sample: int, ploidy: int):
+    def vars(self, region: int, sample: int):
         """Get variant indices for a given sample and region."""
         i = np.ravel_multi_index((region, sample), (self.n_regions, self.n_samples))
         vars = self.variant_idxs[self.offsets[i] : self.offsets[i + 1]]
@@ -665,6 +667,7 @@ def get_diffs_sparse(
     sparse_genos: NDArray[np.int32],
     offsets: NDArray[np.int64],
     size_diffs: NDArray[np.int32],
+    keep: Optional[NDArray[np.bool_]] = None,
 ):
     """Get difference in length wrt reference genome for given genotypes.
 
@@ -678,6 +681,8 @@ def get_diffs_sparse(
         Shape = (regions*samples*ploidy + 1) Offsets into sparse genotypes.
     size_diffs : NDArray[np.int32]
         Shape = (total_variants) Size of all unique variants.
+    keep : Optional[NDArray[np.bool_]]
+        Shape = (variants*samples*ploidy) Keep mask for genotypes.
     """
     n_queries, ploidy = offset_idx.shape
     diffs = np.empty((n_queries, ploidy), np.int32)
@@ -690,6 +695,8 @@ def get_diffs_sparse(
                 diffs[query, hap] = 0
             else:
                 v_idxs = sparse_genos[o_s:o_e]
+                if keep is not None:
+                    v_idxs = v_idxs[keep[o_s:o_e]]
                 diffs[query, hap] = size_diffs[v_idxs].sum()
     return diffs
 
@@ -1037,7 +1044,7 @@ def reconstruct_haplotypes_from_sparse_somatic(
     ref: NDArray[np.uint8],
     ref_offsets: NDArray[np.uint64],
     pad_char: int,
-    dosages: NDArray[np.float32],
+    keep: NDArray[np.bool_],
 ):
     """Reconstruct haplotypes from reference sequence and unphased variants. Note this is
     non-deterministic due to parallel execution, regardless of seeding.
@@ -1072,13 +1079,10 @@ def reconstruct_haplotypes_from_sparse_somatic(
         Padding character.
     dosages : NDArray[np.float32]
         Shape = (variants) Dosages.
+    keep: NDArray[np.bool_]
     """
     n_regions = out.shape[0]
     ploidy = out.shape[1]
-    target_len = out.shape[2]
-    groups = np.empty_like(sparse_genos, np.uint32)
-    ends = np.empty_like(sparse_genos, np.uint32)
-    write_lens = np.empty_like(sparse_genos, np.uint32)
 
     for query in nb.prange(n_regions):
         q = regions[query]
@@ -1094,23 +1098,7 @@ def reconstruct_haplotypes_from_sparse_somatic(
             shift = shifts[query, hap]
 
             o_s, o_e = offsets[o_idx], offsets[o_idx + 1]
-            qh_genos = sparse_genos[o_s:o_e]
-            qh_dosages = dosages[o_s:o_e]
-            qh_groups = groups[o_s:o_e]
-            qh_ends = ends[o_s:o_e]
-            qh_w_lens = write_lens[o_s:o_e]
-
-            keep = mark_keep_variants(
-                qh_genos,
-                qh_dosages,
-                positions,
-                sizes,
-                ref_start,
-                qh_groups,
-                qh_ends,
-                qh_w_lens,
-                target_len,
-            )
+            qh_keep = keep[o_s:o_e]
 
             reconstruct_haplotype_from_sparse(
                 o_idx,
@@ -1125,7 +1113,7 @@ def reconstruct_haplotypes_from_sparse_somatic(
                 ref_start + shift,  # shift ref_start as well
                 _out,
                 pad_char,
-                keep,
+                qh_keep,
             )
 
 
@@ -1299,8 +1287,54 @@ def reconstruct_haplotype_from_sparse(
 UNSEEN_VARIANT = np.iinfo(np.uint32).max
 
 
-@nb.njit(nogil=True, cache=True)
+@nb.njit(parallel=True, nogil=True, cache=True)
 def mark_keep_variants(
+    offset_idxs: NDArray[np.intp],
+    regions: NDArray[np.int32],
+    offsets: NDArray[np.int64],
+    sparse_genos: NDArray[np.int32],
+    positions: NDArray[np.int32],
+    sizes: NDArray[np.int32],
+    dosages: NDArray[np.float32],
+    ploidy: int,
+    target_len: int,
+    deterministic: bool,
+) -> NDArray[np.bool_]:
+    n_regions = len(regions)
+    groups = np.empty_like(sparse_genos, np.uint32)
+    ends = np.empty_like(sparse_genos, np.uint32)
+    write_lens = np.empty_like(sparse_genos, np.uint32)
+    keep = np.empty_like(sparse_genos, np.bool_)
+
+    for query in nb.prange(n_regions):
+        ref_start: int = regions[query, 1]
+        for hap in nb.prange(ploidy):
+            o_idx = offset_idxs[query, hap]
+            o_s, o_e = offsets[o_idx], offsets[o_idx + 1]
+            qh_genos = sparse_genos[o_s:o_e]
+            qh_dosages = dosages[o_s:o_e]
+            qh_groups = groups[o_s:o_e]
+            qh_ends = ends[o_s:o_e]
+            qh_w_lens = write_lens[o_s:o_e]
+            qh_keep = keep[o_s:o_e]
+
+            qh_keep[:] = _mark_keep_variants(
+                qh_genos,
+                qh_dosages,
+                positions,
+                sizes,
+                ref_start,
+                qh_groups,
+                qh_ends,
+                qh_w_lens,
+                target_len,
+                deterministic,
+            )
+    return keep
+
+
+@nb.njit(nogil=True, cache=True)
+def _mark_keep_variants(
     variant_idxs: NDArray[np.int32],  # (v)
     dosages: NDArray[np.float32],  # (v)
     positions: NDArray[np.int32],  # (total variants)
@@ -1310,7 +1344,12 @@ def mark_keep_variants(
     ref_ends: NDArray[np.uint32],  # (g)
     write_lens: NDArray[np.uint32],  # (g)
     target_len: int,
+    deterministic: bool,
 ) -> NDArray[np.bool_]:
+    # no variants
+    if len(variant_idxs) == 0:
+        return np.ones(0, np.bool_)
+
     groups[:] = UNSEEN_VARIANT
     ref_ends[:] = ref_start
     write_lens[:] = 0
@@ -1345,7 +1384,7 @@ def mark_keep_variants(
                     groups[v] = g
                 # otherwise randomly assign variant to compatible group
                 # 1/n_compat chance ensures uniform choice across groups
-                elif random.random() < 1 / n_compat:
+                elif not deterministic and random.random() < 1 / n_compat:
                     groups[v] = g
 
         if n_groups > 0 and (write_lens[:n_groups] >= target_len).all():
@@ -1375,6 +1414,7 @@ def mark_keep_variants(
 
     if n_groups == 1:
         return groups == 0
+
     # Choose a group proportional to total dosage normalized by reference length.
     # This is because variants with long ref len will prevent other variants from
     # being assigned to the same group, reducing the potential total dosage of the
@@ -1387,8 +1427,11 @@ def mark_keep_variants(
         v_ends = v_starts - np.minimum(0, sizes[variant_idxs[groups == g]]) + 1
         ref_lengths = np.minimum(v_ends, ref_ends[g]) - np.maximum(v_starts, ref_start)
         cum_prop[g] = (dosages[groups == g] / ref_lengths).sum()
-    cum_prop = cum_prop.cumsum()
-    cum_prop /= cum_prop[-1]
-    keep_group = (random.random() <= cum_prop).sum() - 1
+    if deterministic:
+        keep_group = cum_prop.argmax()
+    else:
+        cum_prop = cum_prop.cumsum()
+        cum_prop /= cum_prop[-1]
+        keep_group = (random.random() <= cum_prop).sum() - 1
 
     return groups == keep_group

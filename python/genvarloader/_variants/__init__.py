@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
 
+import cyvcf2
 import numpy as np
 import polars as pl
 from attrs import define
@@ -10,6 +11,7 @@ from numpy.typing import ArrayLike, NDArray
 
 from .._utils import _normalize_contig_name
 from ._genotypes import (
+    DosageFieldError,
     Genotypes,
     PgenGenos,
     VCFGenos,
@@ -34,7 +36,7 @@ class DenseGenotypes:
     """Shape: (variants). ALT alleles."""
     genotypes: NDArray[np.int8]
     """Shape: (samples, ploid, variants)"""
-    offsets: NDArray[np.int32]
+    offsets: NDArray[np.int64]
     """Shape: (regions + 1). Offsets for the index boundaries of each region such
         that variants for region `i` are `positions[offsets[i] : offsets[i+1]]`,
         `size_diffs[offsets[i] : offsets[i+1]]`, ..., etc."""
@@ -71,9 +73,6 @@ class Variants:
             The name of the dosage field in the VCF file. This is currently only applicable and required for
             unphased genotypes.
         """
-        if not phased and dosage_field is None:
-            raise ValueError("Dosage field is required for unphased genotypes.")
-
         if isinstance(path, (str, Path)):
             path = Path(path)
             first_path = path
@@ -81,9 +80,9 @@ class Variants:
             first_path = next(iter(path.values()))
 
         if path_is_vcf(first_path):
-            return cls.from_vcf(path)
+            return cls.from_vcf(path, phased, dosage_field)
         elif path_is_pgen(first_path):
-            return cls.from_pgen(path)
+            return cls.from_pgen(path, phased)
         else:
             raise ValueError("Unsupported file type.")
 
@@ -105,11 +104,17 @@ class Variants:
 
     @property
     def ploidy(self) -> int:
-        return self.genotypes.ploidy
+        if self.phased:
+            return self.genotypes.ploidy
+        else:
+            return 1
 
     @classmethod
     def from_vcf(
-        cls, vcf: Union[str, Path, Dict[str, Path]], phased: bool, dosage: Optional[str]
+        cls,
+        vcf: Union[str, Path, Dict[str, Path]],
+        phased: bool,
+        dosage_field: Optional[str],
     ) -> "Variants":
         """Currently does not support multi-allelic sites, but does support *split*
         multi-allelic sites. Note that SVs and "other" variants are also not supported.
@@ -127,10 +132,27 @@ class Variants:
             -o <norm.bcf>
         
         """
+        if not phased and dosage_field is None:
+            raise ValueError("Dosage field is required for unphased genotypes.")
+
+        elif not phased and dosage_field is not None:
+            _vcf = cyvcf2.VCF(vcf)
+            try:
+                dosage_field_info = _vcf.get_header_type(dosage_field)
+            except KeyError:
+                raise DosageFieldError(
+                    f"Dosage field '{dosage_field}' not found in VCF header."
+                )
+
+            if dosage_field_info["Number"] not in {"1", "A"}:
+                raise DosageFieldError(
+                    f"Dosage field '{dosage_field}' must have Number equal to '1' or 'A'."
+                )
+
         records = Records.from_vcf(vcf)
 
         genotypes = VCFGenos(vcf, records.contig_offsets)
-        return cls(records, genotypes, phased, dosage)
+        return cls(records, genotypes, phased, dosage_field)
 
     @classmethod
     def from_pgen(

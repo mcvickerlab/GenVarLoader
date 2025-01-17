@@ -2,6 +2,7 @@ import gc
 import json
 import os
 import shutil
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Union, cast
 
@@ -57,7 +58,12 @@ def write(
     bed : Union[str, Path, pl.DataFrame]
         BED-like file or DataFrame containing regions to query.
     variants : Optional[Union[str, Path, Variants]], optional
-        VCF, PGEN, or Variants object containing genotypes, by default None
+        VCF, PGEN, or :py:class:`Variants` instances containing genotypes, by default None. All variants must be
+        left-aligned, bi-allelic, and atomized. Multi-allelic variants can be included by splitting
+        them into bi-allelic half-calls. For VCFs, the [bcftools norm](https://samtools.github.io/bcftools/bcftools.html#norm)
+        command can do all of this normalization. Likewise, see the [PLINK2 documentation](https://www.cog-genomics.org/plink/2.0)
+        for more PGEN files. Commands of interest include --make-bpgen for splitting variants,
+        --normalize for left-aligning and atomizing overlapping variants, and --ref-from-fa for REF allele correction.
     bigwigs : Optional[Union[BigWigs, List[BigWigs]]], optional
         BigWigs object or list of BigWigs objects containing intervals, by default None
     samples : Optional[List[str]], optional
@@ -71,10 +77,21 @@ def write(
     max_mem : int, optional
         Maximum memory to use per region, by default 4 GiB (4 * 2**30 bytes)
     phased : bool, optional
-        Whether to treat the genotypes as phased, by default True
+        Whether to treat the genotypes as phased, by default True. If phased=False and using a VCF,
+        a dosage FORMAT field must be provided and must have Number = '1' or 'A' in the VCF header.
+        All variants that overlap with the BED regions must also have this field present or else
+        the write will fail partway and raise a :py:class:`~genvarloader._variants._genotypes.DosageFieldError`.
+        For PGEN files, if dosages are not present the write will silently fail with all missing dosages.
+        Ostensibly, there is a flag in PGEN files for whether dosages are present. However, the Python
+        interface to PGEN, pgenlib, does not currently expose a way to check this flag. Thus, a workaround
+        is to use [plink2 --pgen-info](https://www.cog-genomics.org/plink/2.0/basic_stats#pgen_info) to check
+        if dosages are present before you write the dataset.
     dosage_field : Optional[str], optional
-        Field in the VCF to use as dosage, by default None
+        Field in the VCF to use as dosage, by default None. Ignored if phased=True.
     """
+    # ignore polars warning about os.fork which is caused by using joblib's loky backend
+    warnings.simplefilter("ignore", RuntimeWarning)
+
     if variants is None and bigwigs is None:
         raise ValueError("At least one of `vcf` or `bigwigs` must be provided.")
 
@@ -167,6 +184,7 @@ def write(
         if isinstance(variants.genotypes, VCFGenos):
             variants.genotypes.close()
         metadata["ploidy"] = variants.ploidy
+        metadata["phased"] = phased
         # free memory
         del variants
         gc.collect()
@@ -183,6 +201,7 @@ def write(
         json.dump(metadata, f)
 
     logger.info("Finished writing.")
+    warnings.simplefilter("default")
 
 
 def _prep_bed(
@@ -302,7 +321,7 @@ def _write_variants(
                 mem_per_r *= variants.ploidy
 
             if np.any(mem_per_r > max_mem):
-                # TODO subset by samples as well
+                # TODO subset by samples as well if needed
                 # sketch:
                 # 1. for 1 region, read subset of variants -> SparseGenotypes
                 # 2. repeat 1 for next subset of variants
@@ -471,13 +490,13 @@ def _read_variants_chunk(
             )
         else:
             assert variants.dosage_field is not None
-            genos, dosages = variants.genotypes.multiprocess_read_genos_and_dosages(
+            genos, dosages = variants.genotypes.read_genos_and_dosages(
                 contig,
                 s_idx,
                 e_idx,
                 variants.dosage_field,
                 sample_idx=sample_idxs,
-                n_jobs=len(os.sched_getaffinity(0)),
+                # n_jobs=len(os.sched_getaffinity(0)),
             )
 
         logger.debug("get haplotype region ilens")
@@ -589,9 +608,9 @@ def _write_somatic_variants_chunk(
         out = np.memmap(
             out_dir / "dosages.npy",
             dtype=genos.dosages.dtype,
-            mode="w+" if v_idx_memmap_offset == 0 else "r+",
+            mode="w+" if dosage_memmap_offset == 0 else "r+",
             shape=genos.dosages.shape,
-            offset=v_idx_memmap_offset,
+            offset=dosage_memmap_offset,
         )
         out[:] = genos.dosages[:]
         out.flush()

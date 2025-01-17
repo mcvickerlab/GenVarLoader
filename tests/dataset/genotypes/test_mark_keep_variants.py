@@ -2,7 +2,7 @@ import random
 
 import numba as nb
 import numpy as np
-from genvarloader._dataset._genotypes import mark_keep_variants
+from genvarloader._dataset._genotypes import _mark_keep_variants
 from numpy.typing import NDArray
 from pytest_cases import parametrize_with_cases
 
@@ -111,7 +111,7 @@ def test_mark_keep_variants(
     write_lens = np.empty(n_variants, np.uint32)
 
     _seed(0)
-    actual = mark_keep_variants(
+    actual = _mark_keep_variants(
         variant_idxs,
         dosages,
         positions,

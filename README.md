@@ -1,6 +1,12 @@
+[![PyPI version](https://badge.fury.io/py/genvarloader.svg)](https://badge.fury.io/py/genvarloader.svg)
+[![Documentation Status](https://readthedocs.org/projects/genvarloader/badge/?version=latest)](https://readthedocs.org/projects/genvarloader/badge/?version=latest)
+[![Downloads](https://static.pepy.tech/badge/genvarloader)](https://pepy.tech/project/genvarloader)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/genvarloader)](https://img.shields.io/pypi/dm/genvarloader)
+[![GitHub stars](https://badgen.net/github/stars/mcvickerlab/GenVarLoader)](https://GitHub.com/Naereen/mcvickerlab/GenVarLoader)
+
 <img src=docs/source/_static/gvl_logo.png width="200">
 
-GenVarLoader provides a fast, memory efficient data loader for training sequence models on genetic variation. For example, this can be used to train a DNA language model on human genetic variation (e.g. [Nucleotide Transformer](https://www.biorxiv.org/content/10.1101/2023.01.11.523679)) or train sequence to function models with genetic variation (e.g. [BigRNA](https://www.biorxiv.org/content/10.1101/2023.09.20.558508v1)).
+GenVarLoader provides a fast, memory efficient data loader for training sequence models on genetic variation. For example, this can be used to train a DNA language model on human genetic variation (e.g. [Nucleotide Transformer](https://www.biorxiv.org/content/10.1101/2023.01.11.523679)) or train sequence to function models with genetic variation (e.g. [BigRNA](https://www.biorxiv.org/content/10.1101/2023.09.20.558508v1)). Documentation is available at [genvarloader.readthedocs.io](https://genvarloader.readthedocs.io/en/latest/).
 
 ## Features
 - Avoids writing any sequences to disk
