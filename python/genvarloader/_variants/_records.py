@@ -171,7 +171,7 @@ class RecordInfo:
     alts: VLenAlleles
     start_idxs: NDArray[np.int32]  # (n_queries)
     end_idxs: NDArray[np.int32]  # (n_queries)
-    offsets: NDArray[np.int32]  # (n_queries + 1)
+    offsets: NDArray[np.int64]  # (n_queries + 1)
 
     @property
     def n_queries(self):
@@ -214,7 +214,7 @@ class RecordInfo:
         if how == "separate":
             offsets = _lengths_to_offsets(v_per_query)
         elif how == "merge":
-            offsets = np.array([0, v_per_query.sum()], np.int32)
+            offsets = np.array([0, v_per_query.sum()], np.int64)
         else:
             assert_never(how)
         return RecordInfo(
@@ -729,7 +729,7 @@ class Records:
         if s_idxs.min() == e_idxs.max():
             return None, ends
 
-        offsets = np.empty(n_queries + 1, dtype=np.int32)
+        offsets = np.empty(n_queries + 1, dtype=np.int64)
         offsets[0] = 0
         np.cumsum(e_idxs - s_idxs, out=offsets[1:])
 

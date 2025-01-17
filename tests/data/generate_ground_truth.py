@@ -51,6 +51,7 @@ def main(
     import shutil
     from time import perf_counter
 
+    import genvarloader as gvl
     import polars as pl
     import polars.selectors as cs
     from loguru import logger
@@ -68,12 +69,13 @@ def main(
 
     SEQ_LEN = 10
 
+    wdir = Path(__file__).resolve().parent
     out_dir = out_dir.resolve()
     shutil.rmtree(out_dir)
     out_dir.mkdir(0o777, parents=True, exist_ok=True)
     prefix = Path(__file__).parent / name
     vcf_path = str(prefix.with_suffix(".vcf"))
-    filtered_vcf = Path.cwd() / f"filtered_{name}.vcf"
+    filtered_vcf = Path.cwd() / "vcf" / f"filtered_{name}.vcf"
 
     with open(vcf_path, "r") as f:
         vcf = f.read().encode()
@@ -133,11 +135,12 @@ def main(
             "plink2",
             "--vcf",
             str(filtered_vcf),
+            "dosage=VAF",
             "--make-pgen",
             "--vcf-half-call",
             "r",
             "--out",
-            str(Path.cwd().parent / "pgen" / "sample"),
+            str(Path.cwd() / "pgen" / "sample"),
         ]
     )
 
@@ -206,6 +209,26 @@ def main(
                 index_cmd = ["samtools", "faidx", str(out_fasta)]
                 run_shell(index_cmd)
                 pbar.update()
+
+    logger.info("Generating phased and unphased datasets.")
+    bed = wdir / "vcf" / f"{name}.bed"
+    gvl.write(
+        path=wdir / "phased_dataset.gvl",
+        bed=bed,
+        variants=wdir / "vcf" / f"filtered_{name}.vcf.gz",
+        length=SEQ_LEN,
+        overwrite=True,
+        phased=True,
+    )
+    gvl.write(
+        path=wdir / "phased_dataset.gvl",
+        bed=bed,
+        variants=wdir / "vcf" / f"filtered_{name}.vcf.gz",
+        length=SEQ_LEN,
+        overwrite=True,
+        phased=False,
+        dosage_field="VAF",
+    )
 
     logger.info(f"Finished in {perf_counter() - t0} seconds.")
 

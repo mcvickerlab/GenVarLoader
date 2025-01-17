@@ -9,6 +9,7 @@ import numpy as np
 import pysam
 import seqpro as sp
 from numpy.typing import ArrayLike, NDArray
+from tqdm import tqdm
 from typing_extensions import assert_never
 
 from ._types import Reader
@@ -131,35 +132,38 @@ class Fasta(Reader):
         self, contigs: Iterable[str], from_fasta=False
     ) -> Dict[str, NDArray[np.bytes_]]:
         """Load contigs into memory."""
-        if from_fasta:
+        sequences: Dict[str, NDArray[np.bytes_]] = {}
+        if from_fasta or not self.cache_path.exists():
             with self._open() as f:
-                sequences = {
-                    c: np.frombuffer(f.fetch(c).encode("ascii").upper(), "S1")
-                    for c in contigs
-                }
+                pbar = tqdm(total=len(self.contigs))
+                for c in contigs:
+                    pbar.set_description(f"Reading contig {c}")
+                    sequences[c] = np.frombuffer(
+                        f.fetch(c).encode("ascii").upper(), "S1"
+                    )
+                    pbar.update()
+                pbar.close()
         elif self.cache_path.exists():
-            sequences: Dict[str, NDArray[np.bytes_]] = {}
             for contig in contigs:
                 sequences[contig] = np.load(self.cache_path / f"{contig}.npy")
-        else:
-            with self._open() as f:
-                sequences = {
-                    c: np.frombuffer(f.fetch(c).encode("ascii").upper(), "S1")
-                    for c in contigs
-                }
         return sequences
 
     def _write_to_cache(self):
         """Write contigs to cache."""
         self.cache_path.mkdir(parents=True, exist_ok=True)
 
-        if self.sequences is None:
-            sequences = self._get_sequences(self.contigs, from_fasta=True)
-        else:
-            sequences = self.sequences
-
-        for contig, seq in sequences.items():
-            np.save(self.cache_path / f"{contig}.npy", seq)
+        with self._open() as f:
+            pbar = tqdm(total=len(self.contigs))
+            for c in self.contigs:
+                if self.sequences is None:
+                    pbar.set_description(f"Reading contig {c}")
+                    seq = np.frombuffer(f.fetch(c).encode("ascii").upper(), "S1")
+                else:
+                    seq = self.sequences[c]
+                pbar.set_description(f"Writing contig {c}")
+                np.save(self.cache_path / f"{c}.npy", seq)
+                pbar.update()
+            pbar.close()
 
     def _open(self):
         return pysam.FastaFile(str(self.path))
