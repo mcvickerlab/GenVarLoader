@@ -9,7 +9,7 @@ __all__ = []
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def intervals_to_tracks(
-    offset_idxs: NDArray[np.intp],
+    offset_idxs: NDArray[np.integer],
     regions: NDArray[np.int32],
     intervals: NDArray[np.void],
     offsets: NDArray[np.int64],

@@ -113,10 +113,10 @@ def write(
     if isinstance(bed, (str, Path)):
         bed = read_bedlike(bed)
 
-    gvl_bed, contigs, region_length, src_to_sorted_idx = _prep_bed(
+    gvl_bed, contigs, region_length, src_to_sorted_idx_map = _prep_bed(
         bed, length, max_jitter
     )
-    bed.with_columns(region_idx=pl.lit(src_to_sorted_idx)).write_ipc(
+    bed.with_columns(r_idx_map=pl.lit(src_to_sorted_idx_map)).write_ipc(
         path / "input_regions.arrow"
     )
     metadata["region_length"] = region_length
@@ -235,7 +235,7 @@ def _prep_bed(
             pl.col("chrom").cast(pl.Categorical), pl.col("chromStart")
         )
 
-    original_idx_to_sorted_idx = np.argsort(bed["index"])
+    src_to_sorted_idx_map = np.argsort(bed["index"])
     bed = bed.drop("index")
 
     if length is None:
@@ -248,7 +248,7 @@ def _prep_bed(
 
     bed = with_length(bed, length)
 
-    return bed, contigs, length, original_idx_to_sorted_idx
+    return bed, contigs, length, src_to_sorted_idx_map
 
 
 def _write_regions(path: Path, bed: pl.DataFrame, contigs: List[str]):
@@ -501,13 +501,13 @@ def _read_variants_chunk(
             )
         else:
             assert variants.dosage_field is not None
-            genos, dosages = variants.genotypes.read_genos_and_dosages(
+            genos, dosages = variants.genotypes.multiprocess_read_genos_and_dosages(
                 contig,
                 s_idx,
                 e_idx,
                 variants.dosage_field,
                 sample_idx=sample_idxs,
-                # n_jobs=len(os.sched_getaffinity(0)),
+                n_jobs=len(os.sched_getaffinity(0)),
             )
 
         logger.debug("get haplotype region ilens")

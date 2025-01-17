@@ -105,6 +105,7 @@ class Genotypes(Protocol):
         """
         start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
         end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.int32))
+        n_jobs = min(n_jobs, len(start_idxs))
         starts = np.array_split(start_idxs, n_jobs)
         ends = np.array_split(end_idxs, n_jobs)
 
@@ -152,6 +153,7 @@ class Genotypes(Protocol):
         """
         start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
         end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.int32))
+        n_jobs = min(n_jobs, len(start_idxs))
         starts = np.array_split(start_idxs, n_jobs)
         ends = np.array_split(end_idxs, n_jobs)
 
@@ -164,10 +166,11 @@ class Genotypes(Protocol):
         ]
         with joblib.Parallel(n_jobs=n_jobs) as parallel:
             # (s p v), (s v)
-            split_genos, split_dosages = parallel(tasks)
+            results = parallel(tasks)
+        split_genos, split_dosages = zip(*results)
         genos = np.concatenate(split_genos, axis=-1)  # type: ignore
-        genos = np.concatenate(split_dosages, axis=-1)  # type: ignore
-        return genos
+        dosages = np.concatenate(split_dosages, axis=-1)  # type: ignore
+        return genos, dosages
 
 
 class PgenGenos(Genotypes):

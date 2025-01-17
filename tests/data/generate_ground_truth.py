@@ -5,6 +5,8 @@ from typing import Annotated, List
 
 import typer
 
+WDIR = Path(__file__).resolve().parent
+
 
 def run_shell(cmd: List[str], input=None):
     try:
@@ -27,18 +29,16 @@ def main(
             script will generate <name>.bed and <name>_<sample>_nr<row_nr>_h<hap_nr>.fa
             files.
             """
-            )
+            ),
         ),
-    ],
+    ] = "sample",
     reference: Annotated[
         Path,
         typer.Argument(
-            help="""
-        Path to reference genome.
-        """
+            help="Path to reference genome.",
         ),
-    ],
-    out_dir: Path,
+    ] = WDIR / "fasta" / "Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz",
+    out_dir: Path = WDIR / "consensus",
     indels: Annotated[bool, typer.Option(help="Whether to include indels.")] = True,
     structural_variants: Annotated[
         bool, typer.Option(help="Whether to include structural variants.")
@@ -71,11 +71,11 @@ def main(
 
     wdir = Path(__file__).resolve().parent
     out_dir = out_dir.resolve()
-    shutil.rmtree(out_dir)
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
     out_dir.mkdir(0o777, parents=True, exist_ok=True)
-    prefix = Path(__file__).parent / name
-    vcf_path = str(prefix.with_suffix(".vcf"))
-    filtered_vcf = Path.cwd() / "vcf" / f"filtered_{name}.vcf"
+    vcf_path = WDIR / "vcf" / f"{name}.vcf"
+    filtered_vcf = WDIR / "vcf" / f"filtered_{name}.vcf"
 
     with open(vcf_path, "r") as f:
         vcf = f.read().encode()
@@ -169,20 +169,20 @@ def main(
         .with_columns(
             start=pl.col("POS") - SEQ_LEN // 2, end=pl.col("POS") + -(-SEQ_LEN // 2)
         )
-        .with_row_count()
+        .with_row_index()
     )
 
     samples = bed.select(cs.matches(r"^NA\d{5}$")).columns
     logger.info("Generating BED file.")
     (
         bed.select("CHROM", "start", "end").write_csv(
-            prefix.with_suffix(".bed"), include_header=False, separator="\t"
+            WDIR / "vcf" / f"{name}.bed", include_header=False, separator="\t"
         )
     )
 
     logger.info("Generating consensus sequences.")
     pbar = tqdm(total=bed.height * len(samples) * 2)
-    for row in bed.select("row_nr", "CHROM", "start", "end").iter_rows():
+    for row in bed.select("index", "CHROM", "start", "end").iter_rows():
         row_nr, chrom, start, end = row
         subseq_cmd = [
             "samtools",
@@ -209,6 +209,7 @@ def main(
                 index_cmd = ["samtools", "faidx", str(out_fasta)]
                 run_shell(index_cmd)
                 pbar.update()
+    pbar.close()
 
     logger.info("Generating phased and unphased datasets.")
     bed = wdir / "vcf" / f"{name}.bed"
@@ -218,7 +219,6 @@ def main(
         variants=wdir / "vcf" / f"filtered_{name}.vcf.gz",
         length=SEQ_LEN,
         overwrite=True,
-        phased=True,
     )
     gvl.write(
         path=wdir / "phased_dataset.gvl",
