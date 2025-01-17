@@ -9,6 +9,7 @@ from typing import (
 
 import numpy as np
 from attrs import define
+from loguru import logger
 from numpy.typing import NDArray
 
 from .._fasta import Fasta
@@ -29,6 +30,7 @@ class Reference:
         _fasta = Fasta("ref", fasta, "N")
 
         if not _fasta.cache_path.exists():
+            logger.info("Memory-mapping FASTA file for faster access.")
             _fasta._write_to_cache()
 
         contigs = cast(

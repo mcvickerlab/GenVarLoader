@@ -1,4 +1,5 @@
-from typing import Tuple
+import random
+from typing import Optional, Tuple
 
 import numba as nb
 import numpy as np
@@ -25,7 +26,7 @@ class DenseGenotypes:
     ----------
     genos : NDArray[np.int8]
         Shape = (n_samples * n_variants, ploidy) Genotypes.
-    first_v_idxs : NDArray[np.uint32]
+    first_v_idxs : NDArray[np.int32]
         Shape = (n_regions,) First variant index for each region.
     offsets : NDArray[np.int64]
         Shape = (n_regions + 1,) Offsets into genos.
@@ -88,6 +89,31 @@ def first_v_idxs_to_all_v_idxs(first_variant_indices: NDArray, n_per_region: NDA
     return out
 
 
+@nb.njit(parallel=True, nogil=True, cache=True)
+def get_haplotype_region_ilens(
+    genos: NDArray[np.int8],
+    first_v_idxs: NDArray[np.int32],
+    offsets: NDArray[np.int64],
+    ilens: NDArray[np.int32],
+):
+    n_regions = len(first_v_idxs)
+    n_samples = genos.shape[0]
+    ploidy = genos.shape[1]
+    r_ilens = np.zeros((n_samples, ploidy, n_regions), np.int32)
+    for r in nb.prange(n_regions):
+        o_s, o_e = offsets[r], offsets[r + 1]
+        n_v = o_e - o_s
+        if n_v == 0:
+            continue
+        fvi = first_v_idxs[r]
+        for s in nb.prange(n_samples):
+            for p in nb.prange(ploidy):
+                r_ilens[s, p, r] = np.where(
+                    genos[s, p, o_s:o_e] == 1, ilens[fvi : fvi + n_v], 0
+                ).sum()
+    return r_ilens
+
+
 @define
 class SparseGenotypes:
     """Sparse genotypes corresponding to distinct regions. In this format, genotypes are stored as a ragged 3D array where each
@@ -95,13 +121,10 @@ class SparseGenotypes:
     variant indices are aligned to the genotypes. Physically, the genotypes and variant indices are stored as 1D arrays.
     Then, each sample and region's info can be sliced out using the offsets:
     >>> i = np.ravel_multi_index((r, p, s), (n_regions, ploidy, n_samples))
-    >>> genos[offsets[i]:offsets[i+1]]
     >>> variant_idxs[offsets[i]:offsets[i+1]]
 
     Attributes
     ----------
-    genos : NDArray[np.int8]
-        Shape = (variants * samples * ploidy) Genotypes.
     variant_idxs : NDArray[np.int32]
         Shape = (variants * samples * ploidy) Variant indices.
     offsets : NDArray[np.int32]
@@ -119,6 +142,7 @@ class SparseGenotypes:
     n_regions: int
     n_samples: int
     ploidy: int
+    dosage: Optional[NDArray[np.float32]] = None  # (variants * samples)
 
     @property
     def effective_shape(self):
@@ -174,6 +198,7 @@ class SparseGenotypes:
         genos: NDArray[np.int8],
         first_v_idxs: NDArray[np.int32],
         offsets: NDArray[np.int64],
+        dosages: Optional[NDArray[np.float32]] = None,
     ):
         """Convert dense genotypes to sparse genotypes.
 
@@ -185,6 +210,8 @@ class SparseGenotypes:
             Shape = (regions) First variant index for each region.
         offsets : NDArray[np.uint32]
             Shape = (regions + 1) Offsets into genos.
+        dosages : Optional[NDArray[np.float32]]
+            Shape = (sample, ploidy, variants) Dosages.
         """
         n_regions = len(first_v_idxs)
         n_samples = genos.shape[0]
@@ -196,12 +223,15 @@ class SparseGenotypes:
         variant_idxs = keep_mask_to_rsp_v_idx(
             keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples, ploidy
         )
+        if dosages is not None:
+            dosages = dosages[keep]
         return cls(
             variant_idxs=variant_idxs,
             offsets=sparse_offsets,
             n_regions=n_regions,
             n_samples=n_samples,
             ploidy=ploidy,
+            dosage=dosages,
         )
 
     @classmethod
@@ -263,31 +293,6 @@ class SparseGenotypes:
             ploidy=ploidy,
         )
         return sparse_genos, max_ends
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def get_haplotype_region_ilens(
-    genos: NDArray[np.int8],
-    first_v_idxs: NDArray[np.int32],
-    offsets: NDArray[np.int64],
-    ilens: NDArray[np.int32],
-):
-    n_regions = len(first_v_idxs)
-    n_samples = genos.shape[0]
-    ploidy = genos.shape[1]
-    r_ilens = np.zeros((n_samples, ploidy, n_regions), np.int32)
-    for r in nb.prange(n_regions):
-        o_s, o_e = offsets[r], offsets[r + 1]
-        n_v = o_e - o_s
-        if n_v == 0:
-            continue
-        fvi = first_v_idxs[r]
-        for s in nb.prange(n_samples):
-            for p in nb.prange(ploidy):
-                r_ilens[s, p, r] = np.where(
-                    genos[s, p, o_s:o_e] == 1, ilens[fvi : fvi + n_v], 0
-                ).sum()
-    return r_ilens
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
@@ -390,6 +395,230 @@ def keep_mask_to_rsp_v_idx(
     return variant_idxs
 
 
+@define
+class SparseSomaticGenotypes:
+    """Sparse, unphased, somatic genotypes corresponding to distinct regions. In this format, genotypes are stored as a ragged 2D array where each
+    sample and region may have a different number of variants, since unknown and REF genotypes are not stored. The
+    variant indices are aligned to the genotypes. Physically, the genotypes and variant indices are stored as 1D arrays.
+    Then, each sample and region's info can be sliced out using the offsets:
+    >>> i = np.ravel_multi_index((r, s), (n_regions, n_samples))
+    >>> variant_idxs[offsets[i]:offsets[i+1]]
+    >>> dosages[offsets[i]:offsets[i+1]]
+
+    Attributes
+    ----------
+    variant_idxs : NDArray[np.int32]
+        Shape = (variants * samples) Variant indices.
+    dosage : Optional[NDArray[np.float32]]
+        Shape = (variants * samples) Dosages e.g. VAF.
+    offsets : NDArray[np.int32]
+        Shape = (regions * samples * ploidy + 1) Offsets into genos.
+    n_samples : int
+        Number of samples.
+    n_regions : int
+        Number of regions.
+    """
+
+    variant_idxs: NDArray[np.int32]  # (variants * samples)
+    dosages: NDArray[np.float32]  # (variants * samples)
+    offsets: NDArray[np.int64]  # (regions * samples + 1)
+    n_regions: int
+    n_samples: int
+
+    @property
+    def effective_shape(self):
+        """Effective shape of the sparse genotypes (n_regions, n_samples, ploidy)
+        where ploidy is always represented as 1. The ploidy is treated as 1 to be consistent with."""
+        return (self.n_regions, self.n_samples, 1)
+
+    @classmethod
+    def empty(cls, n_regions: int, n_samples: int):
+        """Create an empty sparse genotypes object."""
+        return cls(
+            np.empty(0, np.int32),
+            np.zeros(n_regions * n_samples + 1, np.int32),
+            np.empty(0, np.float32),
+            n_regions,
+            n_samples,
+        )
+
+    @property
+    def is_empty(self) -> bool:
+        return len(self.variant_idxs) == 0
+
+    def vars(self, region: int, sample: int):
+        """Get variant indices for a given sample and region."""
+        i = np.ravel_multi_index((region, sample), (self.n_regions, self.n_samples))
+        vars = self.variant_idxs[self.offsets[i] : self.offsets[i + 1]]
+        return vars
+
+    def concat(*genos: "SparseSomaticGenotypes") -> "SparseSomaticGenotypes":
+        """Concatenate sparse genotypes."""
+
+        if not all(g.n_samples == genos[0].n_samples for g in genos):
+            raise ValueError("All genotypes must have the same number of samples.")
+
+        total_n_regions = sum(g.n_regions for g in genos)
+        variant_idxs = np.concatenate([g.variant_idxs for g in genos])
+        offsets = _lengths_to_offsets(
+            np.concatenate([np.diff(g.offsets) for g in genos])
+        )
+
+        dosages = np.concatenate([g.dosages for g in genos if g.dosages is not None])
+
+        return SparseSomaticGenotypes(
+            variant_idxs=variant_idxs,
+            offsets=offsets,
+            n_regions=total_n_regions,
+            n_samples=genos[0].n_samples,
+            dosages=dosages,
+        )
+
+    @classmethod
+    def from_dense(
+        cls,
+        genos: NDArray[np.int8],
+        first_v_idxs: NDArray[np.int32],
+        offsets: NDArray[np.int64],
+        dosages: NDArray[np.float32],
+    ):
+        """Convert dense genotypes to sparse genotypes. Genotypes will be considered ALT if any allele is ALT.
+        e.g. 0/1 -> 1, 1/1 -> 1, 0/0 -> 0, 0/2 -> 1.
+
+        Parameters
+        ----------
+        genos : NDArray[np.int8]
+            Shape = (sample, ploidy, variants) Genotypes.
+        first_v_idxs : NDArray[np.uint32]
+            Shape = (regions) First variant index for each region.
+        offsets : NDArray[np.uint32]
+            Shape = (regions + 1) Offsets into genos.
+        dosages : Optional[NDArray[np.float32]]
+            Shape = (sample, variants) Dosages.
+        """
+        n_regions = len(first_v_idxs)
+        n_samples = genos.shape[0]
+        # (s p v) -> (s v)
+        keep = (genos == 1).any(1)
+        # (r s)
+        n_per_rs = get_n_per_rs(keep, offsets, n_regions)
+        sparse_offsets = _lengths_to_offsets(n_per_rs.ravel(), np.int64)
+        variant_idxs = keep_mask_to_rs_v_idx(
+            keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples
+        )
+        # (s v) -> region/variant-major, flattened
+        dosages = dosages.T[keep.T]
+        return cls(
+            variant_idxs=variant_idxs,
+            dosages=dosages,
+            offsets=sparse_offsets,
+            n_regions=n_regions,
+            n_samples=n_samples,
+        )
+
+    @classmethod
+    def from_dense_with_length(
+        cls,
+        genos: NDArray[np.int8],
+        first_v_idxs: NDArray[np.int32],
+        offsets: NDArray[np.int64],
+        ilens: NDArray[np.int32],
+        positions: NDArray[np.int32],
+        starts: NDArray[np.int32],
+        length: int,
+        dosages: NDArray[np.float32],
+    ):
+        """Convert dense genotypes to sparse genotypes.
+
+        Parameters
+        ----------
+        genos : NDArray[np.int8]
+            Shape = (sample, ploidy, variants) Genotypes.
+        first_v_idxs : NDArray[np.uint32]
+            Shape = (regions) First variant index for each region.
+        offsets : NDArray[np.uint32]
+            Shape = (regions + 1) Offsets into genos.
+        ilens : NDArray[np.int32]
+            Shape = (total_variants) ILEN of all unique variants.
+        positions : NDArray[np.int32]
+            Shape = (total_variants) Positions of unique variants.
+        starts : NDArray[np.int32]
+            Shape = (regions) Start of query regions.
+        length : int
+            Length of the output haplotypes.
+        dosages : NDArray[np.float32]
+            Shape = (sample, variants) Dosages.
+        """
+        n_regions = len(first_v_idxs)
+        n_samples = genos.shape[0]
+        # (s p v)
+        keep, min_ilens = get_keep_mask_for_length(
+            genos,
+            offsets,
+            first_v_idxs,
+            positions,
+            ilens,
+            starts,
+            length,
+        )
+        keep = keep.any(1)
+        # (r)
+        max_ends: NDArray[np.int32] = starts + length - min_ilens.clip(max=0)
+        # (r s)
+        n_per_rs = get_n_per_rs(keep, offsets, n_regions)
+        sparse_offsets = _lengths_to_offsets(n_per_rs.ravel(), np.int64)
+        variant_idxs = keep_mask_to_rs_v_idx(
+            keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples
+        )
+        # (s v) -> region/variant-major, flattened
+        dosages = dosages.T[keep.T]
+        sparse_genos = cls(
+            variant_idxs=variant_idxs,
+            dosages=dosages,
+            offsets=sparse_offsets,
+            n_regions=n_regions,
+            n_samples=n_samples,
+        )
+        return sparse_genos, max_ends
+
+
+@nb.njit(parallel=True, nogil=True, cache=True)
+def get_n_per_rs(keep, offsets, n_regions):
+    n_samples, n_variants = keep.shape
+    n_per_rs = np.empty((n_regions, n_samples), np.int32)
+    for r in nb.prange(n_regions):
+        o_s, o_e = offsets[r], offsets[r + 1]
+        for s in nb.prange(n_samples):
+            n_per_rs[r, s] = keep[s, o_s:o_e].sum()
+    return n_per_rs
+
+
+@nb.njit(parallel=True, nogil=True, cache=True)
+def keep_mask_to_rs_v_idx(
+    keep,  # (s v)
+    first_v_idxs,  # (r)
+    offsets,  # (r + 1)
+    sparse_offsets,  # (r*s + 1)
+    n_regions,
+    n_samples,
+):
+    variant_idxs = np.empty(sparse_offsets[-1], np.int32)
+    for r in nb.prange(n_regions):
+        fvi = first_v_idxs[r]
+        o_s, o_e = offsets[r], offsets[r + 1]
+        n_variants = o_e - o_s
+        if n_variants == 0:
+            continue
+        for s in nb.prange(n_samples):
+            out_start = sparse_offsets[r * n_samples + s]
+            out_step = 0
+            for v in range(n_variants):
+                if keep[s, o_s + v]:
+                    variant_idxs[out_start + out_step] = fvi + v
+                    out_step += 1
+    return variant_idxs
+
+
 @nb.njit(parallel=True, nogil=True, cache=True)
 def get_diffs(
     first_v_idxs: NDArray[np.uint32],
@@ -438,6 +667,7 @@ def get_diffs_sparse(
     sparse_genos: NDArray[np.int32],
     offsets: NDArray[np.int64],
     size_diffs: NDArray[np.int32],
+    keep: Optional[NDArray[np.bool_]] = None,
 ):
     """Get difference in length wrt reference genome for given genotypes.
 
@@ -451,6 +681,8 @@ def get_diffs_sparse(
         Shape = (regions*samples*ploidy + 1) Offsets into sparse genotypes.
     size_diffs : NDArray[np.int32]
         Shape = (total_variants) Size of all unique variants.
+    keep : Optional[NDArray[np.bool_]]
+        Shape = (variants*samples*ploidy) Keep mask for genotypes.
     """
     n_queries, ploidy = offset_idx.shape
     diffs = np.empty((n_queries, ploidy), np.int32)
@@ -463,6 +695,8 @@ def get_diffs_sparse(
                 diffs[query, hap] = 0
             else:
                 v_idxs = sparse_genos[o_s:o_e]
+                if keep is not None:
+                    v_idxs = v_idxs[keep[o_s:o_e]]
                 diffs[query, hap] = size_diffs[v_idxs].sum()
     return diffs
 
@@ -664,9 +898,9 @@ def reconstruct_haplotype_from_dense(
                 ref_idx = v_rel_pos
                 # how much left to shift - amount of ref we can use
                 allele_start_idx = shift - shifted - ref_shift_dist
-                #! without if statement, parallel=True can cause a SystemError!
-                # * parallel jit cannot handle changes in array dimension.
-                # * without this, allele can change from a 1D array to a 0D
+                #! without this check, parallel jit can cause a SystemError!
+                # * specifically cannot handle changes in array dimensionality.
+                # * without this check, allele can change from a 1D array to a 0D
                 # * array.
                 if allele_start_idx == v_len:
                     continue
@@ -795,6 +1029,94 @@ def reconstruct_haplotypes_from_sparse(
             )
 
 
+@nb.njit(parallel=True, nogil=True, cache=True)
+def reconstruct_haplotypes_from_sparse_somatic(
+    offset_idxs: NDArray[np.intp],
+    out: NDArray[np.uint8],
+    regions: NDArray[np.int32],
+    shifts: NDArray[np.int32],
+    offsets: NDArray[np.int64],
+    sparse_genos: NDArray[np.int32],
+    positions: NDArray[np.int32],
+    sizes: NDArray[np.int32],
+    alt_alleles: NDArray[np.uint8],
+    alt_offsets: NDArray[np.int64],
+    ref: NDArray[np.uint8],
+    ref_offsets: NDArray[np.uint64],
+    pad_char: int,
+    keep: NDArray[np.bool_],
+):
+    """Reconstruct haplotypes from reference sequence and unphased variants. Note this is
+    non-deterministic due to parallel execution, regardless of seeding.
+
+    Parameters
+    ----------
+    offset_idxs: NDArray[np.intp]
+        Shape = (n_regions, ploidy) Indices for each region into offsets.
+    out : NDArray[np.uint8]
+        Shape = (n_regions, ploidy, out_length) Output array.
+    regions : NDArray[np.int32]
+        Shape = (n_regions, 4) Regions to reconstruct haplotypes.
+    shifts : NDArray[np.uint32]
+        Shape = (n_regions, ploidy) Shifts for each region.
+    offsets : NDArray[np.uint32]
+        Shape = (ploidy*n_regions + 1) Offsets into genos.
+    sparse_genos : NDArray[np.int32]
+        Shape = (variants) Sparse genotypes of variants i.e. variant indices for ALT genotypes.
+    positions : NDArray[np.int32]
+        Shape = (total_variants) Positions of variants.
+    sizes : NDArray[np.int32]
+        Shape = (total_variants) Sizes of variants.
+    alt_alleles : NDArray[np.uint8]
+        Shape = (total_alt_length) ALT alleles.
+    alt_offsets : NDArray[np.uintp]
+        Shape = (total_variants) Offsets of ALT alleles.
+    ref : NDArray[np.uint8]
+        Shape = (ref_length) Reference sequence.
+    ref_offsets : NDArray[np.uint64]
+        Shape = (n_contigs) Offsets of reference sequences.
+    pad_char : int
+        Padding character.
+    dosages : NDArray[np.float32]
+        Shape = (variants) Dosages.
+    keep: NDArray[np.bool_]
+    """
+    n_regions = out.shape[0]
+    ploidy = out.shape[1]
+
+    for query in nb.prange(n_regions):
+        q = regions[query]
+        c_idx = q[0]
+        c_s = ref_offsets[c_idx]
+        c_e = ref_offsets[c_idx + 1]
+        ref_start: int = q[1]
+        _reference = ref[c_s:c_e]
+
+        for hap in nb.prange(ploidy):
+            o_idx = offset_idxs[query, hap]
+            _out = out[query, hap]
+            shift = shifts[query, hap]
+
+            o_s, o_e = offsets[o_idx], offsets[o_idx + 1]
+            qh_keep = keep[o_s:o_e]
+
+            reconstruct_haplotype_from_sparse(
+                o_idx,
+                sparse_genos,
+                offsets,
+                positions,
+                sizes,
+                shift,
+                alt_alleles,
+                alt_offsets,
+                _reference,
+                ref_start + shift,  # shift ref_start as well
+                _out,
+                pad_char,
+                qh_keep,
+            )
+
+
 @nb.njit(nogil=True, cache=True)
 def reconstruct_haplotype_from_sparse(
     offset_idx: int,
@@ -809,6 +1131,7 @@ def reconstruct_haplotype_from_sparse(
     ref_start: int,  # may be negative
     out: NDArray[np.uint8],
     pad_char: int,
+    keep: Optional[NDArray[np.bool_]] = None,
 ):
     """Reconstruct a haplotype from reference sequence and variants.
 
@@ -819,7 +1142,7 @@ def reconstruct_haplotype_from_sparse(
     variant_idxs : int
         Index of alt variants for all samples and variants.
     offsets : NDArray[np.int32]
-        Shape = (samples*ploidy*regions + 1) Offsets into variant indices.
+        Shape = Offsets into variant indices.
     positions : NDArray[np.int32]
         Shape = (total_variants) Positions of variants.
     sizes : NDArray[np.int32]
@@ -838,6 +1161,8 @@ def reconstruct_haplotype_from_sparse(
         Shape = (out_length) Output array.
     pad_char : int
         Padding character.
+    keep: Optional[NDArray[np.bool_]]
+        Shape = (variants) Keep mask for genotypes.
     """
     _variant_idxs = variant_idxs[offsets[offset_idx] : offsets[offset_idx + 1]]
     length = len(out)
@@ -851,9 +1176,12 @@ def reconstruct_haplotype_from_sparse(
     shifted = 0
 
     for v in range(n_variants):
-        variant: np.int32 = _variant_idxs[v]
-        v_pos = positions[variant]
-        v_diff = sizes[variant]
+        if keep is not None and not keep[v]:
+            continue
+
+        v_idx: np.int32 = _variant_idxs[v]
+        v_pos = positions[v_idx]
+        v_diff = sizes[v_idx]
 
         # if first variant is a DEL spanning start of query
         if v == 0 and v_pos < ref_start and v_diff < 0:
@@ -867,7 +1195,7 @@ def reconstruct_haplotype_from_sparse(
         if v_pos < ref_idx:
             continue
 
-        allele = alt_alleles[alt_offsets[variant] : alt_offsets[variant + 1]]
+        allele = alt_alleles[alt_offsets[v_idx] : alt_offsets[v_idx + 1]]
         v_len = len(allele)
 
         # handle shift
@@ -954,3 +1282,156 @@ def reconstruct_haplotype_from_sparse(
 
         if out_end_idx < length:
             out[out_end_idx:] = pad_char
+
+
+UNSEEN_VARIANT = np.iinfo(np.uint32).max
+
+
+@nb.njit(parallel=True, nogil=True, cache=True)
+def mark_keep_variants(
+    offset_idxs: NDArray[np.intp],
+    regions: NDArray[np.int32],
+    offsets: NDArray[np.int64],
+    sparse_genos: NDArray[np.int32],
+    positions: NDArray[np.int32],
+    sizes: NDArray[np.int32],
+    dosages: NDArray[np.float32],
+    ploidy: int,
+    target_len: int,
+    deterministic: bool,
+) -> NDArray[np.bool_]:
+    n_regions = len(regions)
+    groups = np.empty_like(sparse_genos, np.uint32)
+    ends = np.empty_like(sparse_genos, np.uint32)
+    write_lens = np.empty_like(sparse_genos, np.uint32)
+    keep = np.empty_like(sparse_genos, np.bool_)
+
+    for query in nb.prange(n_regions):
+        ref_start: int = regions[query, 1]
+        for hap in nb.prange(ploidy):
+            o_idx = offset_idxs[query, hap]
+            o_s, o_e = offsets[o_idx], offsets[o_idx + 1]
+            qh_genos = sparse_genos[o_s:o_e]
+            qh_dosages = dosages[o_s:o_e]
+            qh_groups = groups[o_s:o_e]
+            qh_ends = ends[o_s:o_e]
+            qh_w_lens = write_lens[o_s:o_e]
+            qh_keep = keep[o_s:o_e]
+
+            qh_keep[:] = _mark_keep_variants(
+                qh_genos,
+                qh_dosages,
+                positions,
+                sizes,
+                ref_start,
+                qh_groups,
+                qh_ends,
+                qh_w_lens,
+                target_len,
+                deterministic,
+            )
+    return keep
+
+
+@nb.njit(nogil=True, cache=True)
+def _mark_keep_variants(
+    variant_idxs: NDArray[np.int32],  # (v)
+    dosages: NDArray[np.float32],  # (v)
+    positions: NDArray[np.int32],  # (total variants)
+    sizes: NDArray[np.int32],  # (total variants)
+    ref_start: int,
+    groups: NDArray[np.uint32],  # (v)
+    ref_ends: NDArray[np.uint32],  # (g)
+    write_lens: NDArray[np.uint32],  # (g)
+    target_len: int,
+    deterministic: bool,
+) -> NDArray[np.bool_]:
+    # no variants
+    if len(variant_idxs) == 0:
+        return np.ones(0, np.bool_)
+
+    groups[:] = UNSEEN_VARIANT
+    ref_ends[:] = ref_start
+    write_lens[:] = 0
+    n_groups = 0
+
+    # Assign variants to groups
+    # stop once the total written length for all groups is >= length
+    for v in range(len(variant_idxs)):
+        n_compat = 0
+        v_idx: int = variant_idxs[v]
+        v_pos = positions[v_idx]
+        v_ref_end = v_pos - min(0, sizes[v_idx]) + 1
+
+        if v_ref_end <= ref_start:
+            # keep the variant as unseen -> skipped
+            continue
+
+        # choose group for variant
+        for g in range(n_groups):
+            # variant compatible with group
+            missing_len = target_len - write_lens[g]
+            if ref_ends[g] <= v_pos and missing_len > 0:
+                if missing_len <= v_pos - ref_ends[g]:
+                    write_lens[g] = target_len
+                    ref_ends[g] += missing_len
+                    continue
+
+                n_compat += 1
+
+                # unseen variant, assign it to first compatible group
+                if groups[v] == UNSEEN_VARIANT:
+                    groups[v] = g
+                # otherwise randomly assign variant to compatible group
+                # 1/n_compat chance ensures uniform choice across groups
+                elif not deterministic and random.random() < 1 / n_compat:
+                    groups[v] = g
+
+        if n_groups > 0 and (write_lens[:n_groups] >= target_len).all():
+            break
+
+        # variant not compatible with any group or there are no groups, make new group
+        if groups[v] == UNSEEN_VARIANT:
+            n_groups += 1
+            groups[v] = n_groups - 1
+
+        # finished with variant assignment
+
+        # update group info
+        # writable length = length of variant + dist from last v_ref_end or the missing length, whichever is smaller
+        v_group = groups[v]
+        v_write_len = v_pos - ref_ends[v_group] + max(0, sizes[v_idx]) + 1
+        missing_len = target_len - write_lens[v_group]
+        writable_len = min(v_write_len, missing_len)
+        write_lens[v_group] += writable_len
+        ref_ends[v_group] = v_ref_end
+
+        if (write_lens[:n_groups] >= target_len).all():
+            break
+
+    # If not all groups have write_len = target_len after seeing all variants,
+    # that's ok since this won't affect the group selection process in the next step.
+
+    if n_groups == 1:
+        return groups == 0
+
+    # Choose a group proportional to total dosage normalized by reference length.
+    # This is because variants with long ref len will prevent other variants from
+    # being assigned to the same group, reducing the potential total dosage of the
+    # group.f
+    cum_prop = write_lens[:n_groups].view(
+        np.float32
+    )  # reinterpret this memory to avoid allocation
+    for g in range(n_groups):
+        v_starts = positions[variant_idxs[groups == g]]
+        v_ends = v_starts - np.minimum(0, sizes[variant_idxs[groups == g]]) + 1
+        ref_lengths = np.minimum(v_ends, ref_ends[g]) - np.maximum(v_starts, ref_start)
+        cum_prop[g] = (dosages[groups == g] / ref_lengths).sum()
+    if deterministic:
+        keep_group = cum_prop.argmax()
+    else:
+        cum_prop = cum_prop.cumsum()
+        cum_prop /= cum_prop[-1]
+        keep_group = (random.random() <= cum_prop).sum() - 1
+
+    return groups == keep_group

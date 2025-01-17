@@ -15,11 +15,11 @@
 ##FILTER=<ID=q10,Description="Quality below 10">
 ##ALT=<ID=DEL:ME:ALU,Description="Deletion of ALU element">
 ##ALT=<ID=CNV,Description="Copy number variable region">
-##bcftools_normVersion=1.16+htslib-1.16
-##bcftools_normCommand=norm -a --atom-overlaps . -f /cellar/shared/carterlab/genomes/homo_sapiens/ensembl_grch38.p13_v109/Homo_sapiens.GRCh38.dna.toplevel.fa.gz -m -; Date=Fri Oct 27 14:28:01 2023
-##bcftools_viewVersion=1.16+htslib-1.16
-##bcftools_viewCommand=view -e TYPE="OTHER"; Date=Fri Oct 27 14:28:01 2023
-##bcftools_viewCommand=view -O z -o /carter/users/dlaub/projects/genome-loader/tests/data/vcf/filtered_sample.vcf.gz /carter/users/dlaub/projects/genome-loader/tests/data/vcf/filtered_sample.vcf; Date=Fri Oct 27 14:28:01 2023
+##bcftools_normVersion=1.21+htslib-1.21
+##bcftools_normCommand=norm -a --atom-overlaps . -f /cellar/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.GRCh38.dna.toplevel.fa.gz -m -; Date=Wed Jan 15 15:21:24 2025
+##bcftools_viewVersion=1.21+htslib-1.21
+##bcftools_viewCommand=view -e TYPE="OTHER"; Date=Wed Jan 15 15:21:24 2025
+##bcftools_viewCommand=view -O z -o /carter/users/dlaub/projects/GenVarLoader/tests/data/vcf/filtered_sample.vcf.gz /carter/users/dlaub/projects/GenVarLoader/tests/data/vcf/filtered_sample.vcf; Date=Wed Jan 15 15:21:25 2025
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
 19	111	.	N	C	9.6	.	.
 19	1010695	.	CGAGACG	C	10	.	.

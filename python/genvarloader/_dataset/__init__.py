@@ -11,7 +11,6 @@ from typing import (
     Literal,
     Optional,
     Sequence,
-    Sized,
     Tuple,
     Union,
 )
@@ -32,9 +31,12 @@ from .._utils import _lengths_to_offsets, read_bedlike, with_length
 from .._variants._records import VLenAlleles
 from ._genotypes import (
     SparseGenotypes,
+    SparseSomaticGenotypes,
     get_diffs_sparse,
+    mark_keep_variants,
     padded_slice,
     reconstruct_haplotypes_from_sparse,
+    reconstruct_haplotypes_from_sparse_somatic,
 )
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._reference import Reference
@@ -86,7 +88,8 @@ class Dataset:
     def _open(
         cls,
         path: Union[str, Path],
-        reference: Optional[Union[str, Path]] = None,
+        reference: Optional[Union[str, Path]],
+        deterministic: bool,
     ) -> "Dataset":
         """Open a dataset from a path. If no reference genome is provided, the dataset can only yield tracks.
 
@@ -111,8 +114,9 @@ class Dataset:
         samples: List[str] = metadata["samples"]
         contigs: List[str] = metadata["contigs"]
         region_length: int = metadata["region_length"]
-        ploidy: int = metadata.get("ploidy", 0)
+        ploidy: Optional[int] = metadata.get("ploidy", None)
         max_jitter: int = metadata.get("max_jitter", 0)
+        phased: Optional[bool] = metadata.get("phased", None)
         rng = np.random.default_rng()
 
         if reference is None and has_genotypes:
@@ -162,6 +166,7 @@ class Dataset:
             full_samples=samples,
             full_regions=regions,
             rng=rng,
+            deterministic=deterministic,
             sample_idxs=np.arange(len(samples), dtype=np.intp),
             region_idxs=np.arange(len(regions), dtype=np.intp),
             ploidy=ploidy,
@@ -170,6 +175,7 @@ class Dataset:
             available_tracks=tracks,
             sequence_type=sequence_type,
             active_tracks=active_tracks,
+            phased=phased,
         )
 
         logger.info(f"\n{str(dataset)}")
@@ -189,6 +195,7 @@ class Dataset:
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
+        deterministic: bool = False,
     ) -> "Dataset":
         """Open a dataset from a path. If no reference genome is provided, the dataset can only yield tracks.
 
@@ -214,13 +221,18 @@ class Dataset:
             The jitter to set, by default None
         return_indices : Optional[bool], optional
             Whether to return indices, by default None
+        deterministic : bool, optional
+            Whether to use randomized or deterministic algorithms. If set to True, this will disable random
+            shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
+            and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
+            can be returned.
         """
         if return_sequences is False:
             _reference = None
         else:
             _reference = reference
 
-        ds = cls._open(path, _reference).with_settings(
+        ds = cls._open(path, _reference, deterministic).with_settings(
             samples=samples,
             regions=regions,
             return_sequences=return_sequences,
@@ -370,6 +382,12 @@ class Dataset:
     available_tracks: List[str]
     """The available tracks in the dataset."""
 
+    deterministic: bool
+    """Whether to use randomized or deterministic algorithms. If set to True, this will disable random
+    shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
+    and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
+    can be returned."""
+
     ploidy: Optional[int] = None
     """The ploidy of the dataset."""
 
@@ -379,7 +397,7 @@ class Dataset:
     variants: Optional[_Variants] = None
     """The variant sites in the dataset. This is kept in memory."""
 
-    genotypes: Optional[SparseGenotypes] = None
+    genotypes: Optional[Union[SparseGenotypes, SparseSomaticGenotypes]] = None
     """The genotypes in the dataset. This is memory mapped."""
 
     intervals: Optional[Dict[str, RaggedIntervals]] = None
@@ -393,6 +411,9 @@ class Dataset:
 
     return_indices: bool = False
     """Whether to return indices."""
+
+    phased: Optional[bool] = None
+    """Whether the genotypes are phased. Set to None if genotypes are not present."""
 
     @property
     def has_reference(self) -> bool:
@@ -688,6 +709,13 @@ class Dataset:
         )
 
     def __str__(self) -> str:
+        if not self.has_genotypes:
+            genotype_status = "None"
+        elif self.phased:
+            genotype_status = "Phased"
+        else:
+            genotype_status = "Unphased"
+
         return dedent(
             f"""
             GVL store {self.path.name}
@@ -696,8 +724,8 @@ class Dataset:
             # of samples: {self.n_samples:,}
             Original region length: {self.region_length - 2*self.max_jitter:,}
             Max jitter: {self.max_jitter:,}
-            Has genotypes: {self.has_genotypes}
-            Has tracks: {self.available_tracks}\
+            Genotypes available: {genotype_status}
+            Tracks available: {self.available_tracks}\
             """
         ).strip()
 
@@ -717,25 +745,30 @@ class Dataset:
             The indices of the regions to select.
         """
         if isinstance(regions, slice):
-            if regions.stop is None:
-                regions = slice(regions.start, len(self.full_regions))
-            _regions = np.arange(
-                regions.start, regions.stop, regions.step, dtype=np.intp
-            )
+            start = 0 if regions.start is None else regions.start
+            stop = len(self.regions) if regions.stop is None else regions.stop
+            _regions = np.arange(start, stop, regions.step, dtype=np.intp)
+        elif isinstance(regions, Sequence):
+            _regions = np.asarray(regions, np.intp)
         else:
             _regions = regions
 
         if isinstance(samples, slice):
-            if samples.stop is None:
-                samples = slice(samples.start, len(self.full_samples))
-            _samples = np.arange(
-                samples.start, samples.stop, samples.step, dtype=np.intp
-            )
+            start = 0 if samples.start is None else samples.start
+            stop = len(self.samples) if samples.stop is None else samples.stop
+            _samples = np.arange(start, stop, samples.step, dtype=np.intp)
+        elif isinstance(samples, Sequence):
+            _samples = np.asarray(samples, np.intp)
         else:
             _samples = samples
 
-        if (not isinstance(_samples, Sized)) != (not isinstance(_regions, Sized)):
-            _samples, _regions = np.broadcast_arrays(_samples, _regions)
+        if isinstance(_regions, (int, np.integer)) and _regions < 0:
+            _regions += self.n_regions
+        if isinstance(_samples, (int, np.integer)) and _samples < 0:
+            _samples += self.n_samples
+
+        if isinstance(_regions, np.ndarray) and isinstance(_samples, np.ndarray):
+            _regions = _regions[:, None]
 
         ds_idxs = np.ravel_multi_index((_regions, _samples), self.shape)
         return self[ds_idxs]
@@ -804,7 +837,7 @@ class Dataset:
             The index or indices to get. If a single index is provided, the output will be squeezed.
         """
         if isinstance(idx, tuple):
-            self.isel(*idx)
+            return self.isel(*idx)
 
         # Since Dataset is a frozen class, we need to use object.__setattr__ to set the attributes
         # per attrs docs (https://www.attrs.org/en/stable/init.html#post-init)
@@ -814,11 +847,14 @@ class Dataset:
             object.__setattr__(self, "intervals", self._init_intervals())
 
         if isinstance(idx, (int, np.integer)):
+            if idx < 0:
+                idx += len(self)
             _idx = [idx]
             squeeze = True
         elif isinstance(idx, slice):
-            if idx.stop is None:
-                idx = slice(idx.start, len(self))
+            start = 0 if idx.start is None else idx.start
+            stop = len(self) if idx.stop is None else idx.stop
+            idx = slice(start, stop, idx.step)
             _idx = np.r_[idx]
             squeeze = False
         else:
@@ -826,6 +862,13 @@ class Dataset:
             squeeze = False
 
         _idx = np.asarray(_idx, dtype=np.intp)
+
+        if _idx.ndim > 1:
+            out_reshape = _idx.shape
+            _idx = _idx.ravel()
+        else:
+            out_reshape = None
+
         _idx[_idx < 0] += len(self)
         if self.idx_map is not None:
             _idx = self.idx_map[_idx]
@@ -839,20 +882,46 @@ class Dataset:
             if TYPE_CHECKING:
                 assert self.genotypes is not None
                 assert self.variants is not None
+                assert self.ploidy is not None
 
             geno_offset_idx = self._get_geno_offset_idx(r_idx, s_idx)
-            # (b p)
-            shifts = self._get_shifts(geno_offset_idx)
+
+            if isinstance(self.genotypes, SparseSomaticGenotypes):
+                keep = mark_keep_variants(
+                    geno_offset_idx,
+                    self.full_regions[r_idx],
+                    self.genotypes.offsets,
+                    self.genotypes.variant_idxs,
+                    self.variants.positions,
+                    self.variants.sizes,
+                    self.genotypes.dosages,
+                    self.ploidy,
+                    self.output_length,
+                    self.deterministic,
+                )
+            else:
+                keep = None
+
+            if not self.deterministic:
+                # (b p)
+                shifts = self._get_shifts(geno_offset_idx, keep)
+            else:
+                # (b p)
+                shifts = np.zeros((len(geno_offset_idx), self.ploidy), dtype=np.int32)
             # (b p l)
-            haps = self._get_haplotypes(geno_offset_idx, r_idx, shifts)
+            haps = self._get_haplotypes(geno_offset_idx, r_idx, shifts, keep)
             if should_rc:
                 haps[to_rc] = sp.DNA.reverse_complement(haps[to_rc], -1)
+            if not self.phased:
+                # (b 1 l) -> (b l)
+                haps = haps.squeeze(1)
             out.append(haps)
         elif self.sequence_type == "reference":
             if TYPE_CHECKING:
                 assert self.reference is not None
             geno_offset_idx = None
             shifts = None
+            # (b l)
             ref = _get_reference(
                 r_idx,
                 self.full_regions,
@@ -877,11 +946,18 @@ class Dataset:
             out.extend(tracks)
 
         if self.jitter > 0:
-            start = self.rng.integers(
-                self.max_jitter - self.jitter, self.max_jitter + 1
+            out = list(
+                sp.jitter(
+                    *out,
+                    max_jitter=self.jitter,
+                    length_axis=-1,
+                    jitter_axes=0,
+                    seed=self.rng,
+                )
             )
-            # [(b p l-2*j) ...]
-            out = [o[..., start : start + self.output_length] for o in out]
+
+        if out_reshape is not None:
+            out = [o.reshape(out_reshape + o.shape[1:]) for o in out]
 
         if squeeze:
             # (1 p l) -> (p l)
@@ -906,19 +982,36 @@ class Dataset:
     def _init_genotypes(self):
         if TYPE_CHECKING:
             assert self.ploidy is not None
-        genotypes = SparseGenotypes(
-            np.memmap(
-                self.path / "genotypes" / "variant_idxs.npy",
-                dtype=np.int32,
-                mode="r",
-            ),
-            np.memmap(
-                self.path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
-            ),
-            len(self.full_regions),
-            len(self.full_samples),
-            self.ploidy,
-        )
+        if not self.phased:
+            genotypes = SparseSomaticGenotypes(
+                np.memmap(
+                    self.path / "genotypes" / "variant_idxs.npy",
+                    dtype=np.int32,
+                    mode="r",
+                ),
+                np.memmap(
+                    self.path / "genotypes" / "dosages.npy", dtype=np.float32, mode="r"
+                ),
+                np.memmap(
+                    self.path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
+                ),
+                len(self.full_regions),
+                len(self.full_samples),
+            )
+        else:
+            genotypes = SparseGenotypes(
+                np.memmap(
+                    self.path / "genotypes" / "variant_idxs.npy",
+                    dtype=np.int32,
+                    mode="r",
+                ),
+                np.memmap(
+                    self.path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
+                ),
+                len(self.full_regions),
+                len(self.full_samples),
+                self.ploidy,
+            )
         return genotypes
 
     def _init_intervals(self, tracks: Optional[Union[str, List[str]]] = None):
@@ -948,7 +1041,9 @@ class Dataset:
 
         return intervals
 
-    def _get_geno_offset_idx(self, region_idx, sample_idx):
+    def _get_geno_offset_idx(
+        self, region_idx: NDArray[np.intp], sample_idx: NDArray[np.intp]
+    ):
         if TYPE_CHECKING:
             assert self.genotypes is not None
             assert self.ploidy is not None
@@ -957,7 +1052,9 @@ class Dataset:
         geno_offset_idx = np.ravel_multi_index(rsp_idx, self.genotypes.effective_shape)
         return geno_offset_idx
 
-    def _get_shifts(self, geno_offset_idx: NDArray[np.intp]):
+    def _get_shifts(
+        self, geno_offset_idx: NDArray[np.intp], keep: Optional[NDArray[np.bool_]]
+    ):
         if TYPE_CHECKING:
             assert self.genotypes is not None
             assert self.variants is not None
@@ -967,6 +1064,7 @@ class Dataset:
             self.genotypes.variant_idxs,
             self.genotypes.offsets,
             self.variants.sizes,
+            keep,
         )
         # (b p)
         shifts = self.rng.integers(0, -diffs.clip(max=0) + 1, dtype=np.int32)
@@ -977,6 +1075,7 @@ class Dataset:
         geno_offset_idx: NDArray[np.intp],
         region_idx: NDArray[np.intp],
         shifts: NDArray[np.int32],
+        keep: Optional[NDArray[np.bool_]],
     ) -> NDArray[np.bytes_]:
         if TYPE_CHECKING:
             assert self.genotypes is not None
@@ -986,21 +1085,40 @@ class Dataset:
 
         n_queries = len(region_idx)
         haps = np.empty((n_queries, self.ploidy, self.region_length), np.uint8)
-        reconstruct_haplotypes_from_sparse(
-            geno_offset_idx,
-            haps,
-            self.full_regions[region_idx],
-            shifts,
-            self.genotypes.offsets,
-            self.genotypes.variant_idxs,
-            self.variants.positions,
-            self.variants.sizes,
-            self.variants.alts.alleles.view(np.uint8),
-            self.variants.alts.offsets,
-            self.reference.reference,
-            self.reference.offsets,
-            self.reference.pad_char,
-        )
+        if isinstance(self.genotypes, SparseGenotypes):
+            reconstruct_haplotypes_from_sparse(
+                geno_offset_idx,
+                haps,
+                self.full_regions[region_idx],
+                shifts,
+                self.genotypes.offsets,
+                self.genotypes.variant_idxs,
+                self.variants.positions,
+                self.variants.sizes,
+                self.variants.alts.alleles.view(np.uint8),
+                self.variants.alts.offsets,
+                self.reference.reference,
+                self.reference.offsets,
+                self.reference.pad_char,
+            )
+        else:
+            assert keep is not None
+            reconstruct_haplotypes_from_sparse_somatic(
+                geno_offset_idx,
+                haps,
+                self.full_regions[region_idx],
+                shifts,
+                self.genotypes.offsets,
+                self.genotypes.variant_idxs,
+                self.variants.positions,
+                self.variants.sizes,
+                self.variants.alts.alleles.view(np.uint8),
+                self.variants.alts.offsets,
+                self.reference.reference,
+                self.reference.offsets,
+                self.reference.pad_char,
+                keep,
+            )
         return haps.view("S1")
 
     def _get_tracks(
