@@ -5,6 +5,7 @@ import numpy as np
 import polars as pl
 from numpy.typing import ArrayLike, NDArray
 
+from .._types import Idx
 from .._utils import DTYPE
 
 __all__ = []
@@ -37,12 +38,32 @@ def padded_slice(arr: NDArray, start: int, stop: int, pad_val: int):
     return out
 
 
-def oidx_to_raveled_idx(
-    row_idx: ArrayLike, col_idx: ArrayLike, full_shape: Tuple[int, int]
-):
+def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.integer]:
+    """Convert an index-like object to an array of non-negative indices. Shapes of multi-dimensional
+    indices are preserved."""
+    if isinstance(idx, slice):
+        start = 0 if idx.start is None else idx.start
+        stop = max_len if idx.stop is None else idx.stop
+        _idx = np.arange(start, stop, idx.step, np.intp)
+    elif isinstance(idx, Sequence):
+        _idx = np.asarray(idx, np.intp)
+    else:
+        _idx = idx
+
+    # handle negative indices
+    if isinstance(_idx, (int, np.integer)):
+        _idx = np.array([_idx], np.intp)
+
+    _idx[_idx < 0] += max_len
+
+    return _idx
+
+
+def oidx_to_raveled_idx(row_idx: ArrayLike, col_idx: ArrayLike, shape: Tuple[int, int]):
+    row_idx = np.asarray(row_idx)
+    col_idx = np.asarray(col_idx)
     full_array_linear_indices = np.ravel_multi_index(
-        np.ix_(row_idx, col_idx),  # type: ignore
-        full_shape,
+        (row_idx[:, None], col_idx), shape
     ).ravel()
     return full_array_linear_indices
 

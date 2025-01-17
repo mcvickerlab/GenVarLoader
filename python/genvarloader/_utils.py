@@ -45,6 +45,8 @@ def _process_bed(bed: Union[str, Path, pl.DataFrame], fixed_length: int):
 
 
 def with_length(bed: pl.DataFrame, length: int):
+    """Expands the regions in a BED-like DataFrame to a fixed length centered around the
+    midpoint of the region or the "peak" column if it is present."""
     if "peak" in bed:
         center = pl.col("chromStart") + pl.col("peak")
     else:
