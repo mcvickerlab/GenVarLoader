@@ -6,7 +6,9 @@
 
 <img src=docs/source/_static/gvl_logo.png width="200">
 
-GenVarLoader provides a fast, memory efficient data loader for training sequence models on genetic variation. For example, this can be used to train a DNA language model on human genetic variation (e.g. [Nucleotide Transformer](https://www.biorxiv.org/content/10.1101/2023.01.11.523679)) or train sequence to function models with genetic variation (e.g. [BigRNA](https://www.biorxiv.org/content/10.1101/2023.09.20.558508v1)). Documentation is available at [genvarloader.readthedocs.io](https://genvarloader.readthedocs.io/en/latest/).
+[[Documentation](https://genvarloader.readthedocs.io/en/latest/)][[Preprint](https://www.biorxiv.org/content/10.1101/2025.01.15.633240v1)]
+
+GenVarLoader provides a fast, memory efficient data loader for training sequence models on genetic variation. For example, this can be used to train a DNA language model on human genetic variation (e.g. [Nucleotide Transformer](https://www.biorxiv.org/content/10.1101/2023.01.11.523679)) or train sequence to function models with genetic variation (e.g. [Celaj et al.](https://www.biorxiv.org/content/10.1101/2023.09.20.558508v1), [Drusinsky et al.](https://www.biorxiv.org/content/10.1101/2024.07.27.605449v1), [He et al.](https://www.biorxiv.org/content/10.1101/2024.10.15.618510v1), and [Rastogi et al.](https://www.biorxiv.org/content/10.1101/2024.09.23.614632v1)).
 
 ## Features
 - Avoids writing any sequences to disk
@@ -16,15 +18,15 @@ GenVarLoader provides a fast, memory efficient data loader for training sequence
 - Supports indels and re-aligns tracks to haplotypes that have them
 - Extensible to new file formats: drop a feature request! Currently supports VCF, PGEN, and BigWig
 
-## Tutorial
-
-### Installation
+## Installation
 
 ```bash
 pip install genvarloader
 ```
 
 A PyTorch dependency is not included since it may require [special instructions](https://pytorch.org/get-started/locally/).
+
+## Quick Start
 
 ### Write a `gvl.Dataset`
 
