@@ -53,42 +53,42 @@ def write(
 
     Parameters
     ----------
-    path : Union[str, Path]
+    path
         Path to write the dataset to.
-    bed : Union[str, Path, pl.DataFrame]
+    bed
         BED-like file or DataFrame containing regions to query.
-    variants : Optional[Union[str, Path, Variants]], optional
-        VCF, PGEN, or :py:class:`Variants` instances containing genotypes, by default None. All variants must be
+    variants
+        A VCF, PGEN, or :py:class:`Variants` instance. All variants must be
         left-aligned, bi-allelic, and atomized. Multi-allelic variants can be included by splitting
-        them into bi-allelic half-calls. For VCFs, the [bcftools norm](https://samtools.github.io/bcftools/bcftools.html#norm)
-        command can do all of this normalization. Likewise, see the [PLINK2 documentation](https://www.cog-genomics.org/plink/2.0)
+        them into bi-allelic half-calls. For VCFs, the `bcftools norm <https://samtools.github.io/bcftools/bcftools.html#norm>`_
+        command can do all of this normalization. Likewise, see the `PLINK2 documentation <https://www.cog-genomics.org/plink/2.0>`_
         for more PGEN files. Commands of interest include --make-bpgen for splitting variants,
         --normalize for left-aligning and atomizing overlapping variants, and --ref-from-fa for REF allele correction.
-    bigwigs : Optional[Union[BigWigs, List[BigWigs]]], optional
-        BigWigs object or list of BigWigs objects containing intervals, by default None
-    samples : Optional[List[str]], optional
-        Samples to include in the dataset, by default None
-    length : Optional[int], optional
-        Length of the regions to query, by default None. Provided regions will be expanded or contracted
+    bigwigs
+        BigWigs object or list of BigWigs objects containing intervals
+    samples
+        Samples to include in the dataset
+    length
+        Length of the regions to query. Provided regions will be expanded or contracted
         to this length + 2 x `max_jitter` with the center of the region remaining the same.
-    max_jitter : Optional[int], optional
-        Maximum jitter to add to the regions, by default None
-    overwrite : bool, optional
-        Whether to overwrite an existing dataset, by default False
-    max_mem : int, optional
-        Maximum memory to use per region, by default 4 GiB (4 * 2**30 bytes)
-    phased : bool, optional
-        Whether to treat the genotypes as phased, by default True. If phased=False and using a VCF,
+    max_jitter
+        Maximum jitter to add to the regions
+    overwrite
+        Whether to overwrite an existing datasete
+    max_mem
+        Maximum memory to use per regionB (4 * 2**30 bytes)
+    phased
+        Whether to treat the genotypes as phased. If phased=False and using a VCF,
         a dosage FORMAT field must be provided and must have Number = '1' or 'A' in the VCF header.
         All variants that overlap with the BED regions must also have this field present or else
         the write will fail partway and raise a :py:class:`~genvarloader._variants._genotypes.DosageFieldError`.
         For PGEN files, if dosages are not present the write will silently fail with all missing dosages.
         Ostensibly, there is a flag in PGEN files for whether dosages are present. However, the Python
         interface to PGEN, pgenlib, does not currently expose a way to check this flag. Thus, a workaround
-        is to use [plink2 --pgen-info](https://www.cog-genomics.org/plink/2.0/basic_stats#pgen_info) to check
+        is to use `plink2 --pgen-info <https://www.cog-genomics.org/plink/2.0/basic_stats#pgen_info>`_ to check
         if dosages are present before you write the dataset.
-    dosage_field : Optional[str], optional
-        Field in the VCF to use as dosage, by default None. Ignored if phased=True.
+    dosage_field
+        Field in the VCF to use as dosage. Ignored if phased=True.
     """
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)

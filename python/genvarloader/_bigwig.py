@@ -24,9 +24,9 @@ class BigWigs(Reader):
 
         Parameters
         ----------
-        name : str
+        name
             Name of the reader, for example `'signal'`.
-        paths : Dict[str, str]
+        paths
             Dictionary of sample names and paths to bigWig files for those samples.
         """
         self.name = name
@@ -55,9 +55,9 @@ class BigWigs(Reader):
 
         Parameters
         ----------
-        name : str
+        name
             Name of the reader, for example `'signal'`.
-        table : Union[str, Path, pl.DataFrame]
+        table
             Path to a table or a DataFrame containing sample names and paths to bigWig files for those samples.
             It must have columns "sample" and "path".
         """
@@ -93,18 +93,17 @@ class BigWigs(Reader):
 
         Parameters
         ----------
-        contig : str
+        contig
             Name of the contig/chromosome.
         starts : ArrayLike
             Start coordinates, 0-based.
         ends : ArrayLike
             End coordinates, 0-based, exclusive.
-        sample : ArrayLike
+        sample
             Name of the samples to read data from.
 
         Returns
         -------
-        NDArray[float32]
             Shape: (samples length). Data corresponding to the given genomic coordinates and samples.
         """
         _contig = _normalize_contig_name(contig, self.contigs)
@@ -144,6 +143,20 @@ class BigWigs(Reader):
         sample: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> RaggedIntervals:
+        """Read intervals corresponding to given genomic coordinates. The output data
+        will be a 2D Ragged array of :code:`struct{start, end, value}` with shape (regions, samples).
+
+        Parameters
+        ----------
+        contig
+            Name of the contig/chromosome.
+        starts : ArrayLike
+            Start coordinates, 0-based.
+        ends : ArrayLike
+            End coordinates, 0-based, exclusive.
+        sample
+            Name of the samples to read data from.
+        """
         _contig = _normalize_contig_name(contig, self.contigs)
         if _contig is None:
             raise ValueError(f"Contig {contig} not found.")

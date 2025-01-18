@@ -107,7 +107,7 @@ class Ragged(Generic[RDTYPE]):
     shape: Tuple[int, ...]
     """Shape of the ragged array, excluding the length dimension. For example, if
         the shape is (2, 3), then the j, k-th element can be mapped to an index for
-        offsets with `i = np.ravel_multi_index((j, k), shape)`. The number of ragged
+        offsets with :code:`i = np.ravel_multi_index((j, k), shape)`. The number of ragged
         elements should correspond to the product of the shape."""
     maybe_offsets: Optional[NDArray[np.int64]] = None
     maybe_lengths: Optional[NDArray[np.int32]] = None
@@ -124,7 +124,7 @@ class Ragged(Generic[RDTYPE]):
     @property
     def offsets(self) -> NDArray[np.int64]:
         """Offsets into the data array to get corresponding elements. The i-th element
-        is accessible as `data[offsets[i]:offsets[i+1]]`."""
+        is accessible as :code:`data[offsets[i]:offsets[i+1]]`."""
         if self.maybe_offsets is None:
             self.maybe_offsets = np.empty(
                 np.prod(self.shape, dtype=np.int64) + 1, dtype=np.int64
@@ -147,15 +147,15 @@ class Ragged(Generic[RDTYPE]):
         shape: Union[int, Tuple[int, ...]],
         offsets: NDArray[np.int64],
     ) -> "Ragged[DTYPE]":
-        """Create a Ragged array from data and offsets. The offsets array should have
-        the intended shape of the Ragged array.
+        """Create a Ragged array from data and offsets.
 
         Parameters
         ----------
-        data : NDArray[DTYPE]
+        data
             1D data array.
-        shape : Union[int, Tuple[int, ...]]
-        offsets : NDArray[np.int32]
+        shape
+            Shape of the ragged array, excluding the length dimension.
+        offsets
             Offsets into the data array to get corresponding elements.
         """
         if isinstance(shape, int):
@@ -171,9 +171,9 @@ class Ragged(Generic[RDTYPE]):
 
         Parameters
         ----------
-        data : NDArray[DTYPE]
+        data
             1D data array.
-        lengths : NDArray[np.int32]
+        lengths
             Lengths of each element in the ragged array.
         """
         return cls(data, lengths.shape, maybe_lengths=lengths)

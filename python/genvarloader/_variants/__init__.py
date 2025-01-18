@@ -6,7 +6,7 @@ from typing import Dict, Optional, Tuple, Union
 import cyvcf2
 import numpy as np
 import polars as pl
-from attrs import define
+from attrs import define, field
 from numpy.typing import ArrayLike, NDArray
 
 from .._utils import _normalize_contig_name
@@ -51,7 +51,7 @@ class Variants:
     genotypes: Genotypes
     phased: bool
     dosage_field: Optional[str] = None
-    _sample_idxs: Optional[NDArray[np.intp]] = None
+    _sample_idxs: Optional[NDArray[np.intp]] = field(default=None, alias="_sample_idxs")
 
     @classmethod
     def from_file(
@@ -65,11 +65,11 @@ class Variants:
 
         Parameters
         ----------
-        path : Union[str, Path, Dict[str, Path]]
+        path
             Path to a VCF or PGEN file or a mapping from contig names to paths.
-        phased : bool
+        phased
             Whether the genotypes should be treated as phased.
-        dosage_field : Optional[str]
+        dosage_field
             The name of the dosage field in the VCF file. This is currently only applicable and required for
             unphased genotypes.
         """
@@ -80,9 +80,9 @@ class Variants:
             first_path = next(iter(path.values()))
 
         if path_is_vcf(first_path):
-            return cls.from_vcf(path, phased, dosage_field)
+            return cls._from_vcf(path, phased, dosage_field)
         elif path_is_pgen(first_path):
-            return cls.from_pgen(path, phased)
+            return cls._from_pgen(path, phased)
         else:
             raise ValueError("Unsupported file type.")
 
@@ -110,7 +110,7 @@ class Variants:
             return 1
 
     @classmethod
-    def from_vcf(
+    def _from_vcf(
         cls,
         vcf: Union[str, Path, Dict[str, Path]],
         phased: bool,
@@ -155,7 +155,7 @@ class Variants:
         return cls(records, genotypes, phased, dosage_field)
 
     @classmethod
-    def from_pgen(
+    def _from_pgen(
         cls, pgen: Union[str, Path, Dict[str, Path]], phased: bool
     ) -> "Variants":
         """Currently does not support multi-allelic sites, but does support *split*
@@ -225,6 +225,12 @@ class Variants:
         return cls(records, genotypes, phased)
 
     def subset_samples(self, samples: ArrayLike):
+        """Subset the samples to be read from the genotypes.
+
+        Parameters
+        ----------
+        samples
+            List of sample names."""
         samples = np.atleast_1d(np.asarray(samples, dtype=str))
         geno_sample_idxs, sample_idxs = np.intersect1d(
             self.genotypes.samples, samples, return_indices=True
@@ -241,6 +247,21 @@ class Variants:
         sample: Optional[ArrayLike] = None,
         ploid: Optional[ArrayLike] = None,
     ) -> Optional[DenseGenotypes]:
+        """Read genotypes for a given contig and range of positions.
+
+        Parameters
+        ----------
+        contig
+            Name of the contig/chromosome.
+        starts
+            Start coordinates, 0-based.
+        ends
+            End coordinates, 0-based exclusive.
+        sample
+            List of sample names.
+        ploid
+            List of ploid numbers.
+        """
         contig = _normalize_contig_name(contig, self.records.contigs)  # pyright: ignore[reportAssignmentType]
         if contig is None:
             return None
@@ -288,6 +309,22 @@ class Variants:
         sample: Optional[ArrayLike] = None,
         ploid: Optional[ArrayLike] = None,
     ) -> Tuple[Optional[DenseGenotypes], NDArray[np.int32]]:
+        """Read genotypes for a given contig and range of positions. This method is intended for haplotype construction
+        and returns the maximum end position for each region.
+
+        Parameters
+        ----------
+        contig
+            Name of the contig/chromosome.
+        starts
+            Start coordinates, 0-based.
+        ends
+            End coordinates, 0-based exclusive.
+        sample
+            List of sample names.
+        ploid
+            List of ploid numbers.
+        """
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
 

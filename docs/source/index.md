@@ -40,9 +40,7 @@ GenVarLoader provides a fast, memory efficient data loader for training sequence
 - Supports indels and re-aligns tracks to haplotypes that have them
 - Extensible to new file formats: drop a feature request! Currently supports VCF, PGEN, and BigWig
 
-## Tutorial
-
-### Installation
+## Installation
 
 ```bash
 pip install genvarloader
@@ -50,7 +48,9 @@ pip install genvarloader
 
 A PyTorch dependency is not included since it may require [special instructions](https://pytorch.org/get-started/locally/).
 
-### Write a [`gvl.Dataset`](#genvarloader.Dataset)
+## Quick Start
+
+### Write a [`gvl.Dataset`](api.md#genvarloader.Dataset)
 
 GenVarLoader has both a CLI and Python API for writing datasets. The Python API provides some extra flexibility, for example for a multi-task objective.
 
@@ -75,7 +75,7 @@ gvl.write(
 )
 ```
 
-### Open a [`gvl.Dataset`](#genvarloader.Dataset) and get a PyTorch DataLoader
+### Open a [`gvl.Dataset`](api.md#genvarloader.Dataset) and get a PyTorch DataLoader
 
 ```python
 import genvarloader as gvl
@@ -161,13 +161,5 @@ dataset = gvl.Dataset.open("cool_dataset.gvl", "hg38.fa", return_tracks="z-log-c
 ```
 
 ## Performance tips
-- GenVarLoader uses multithreading extensively, so it's best to use 0 or 1 workers with your PyTorch `DataLoader`.
-- A GenVarLoader [`Dataset`](#genvarloader.Dataset) is most efficient when given batches of indices, rather than one at a time. PyTorch `DataLoader` by default uses one index at a time, so if you want to use a ***custom*** PyTorch `Sampler` you should wrap it with a PyTorch `BatchSampler` before passing it to `Dataset.to_dataloader()`.
-
-# Indices and tables
-
-[Index](#genindex)
-
-[Module Index](#modindex)
-
-[Search Page](#search)
+- GenVarLoader uses multithreading extensively, so it's best to use 0 or 1 workers with your [`DataLoader`](https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader).
+- A GenVarLoader [`Dataset`](api.md#genvarloader.Dataset) is most efficient when given batches of indices, rather than one at a time. By default, [`DataLoader`](https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader)s use one index at a time, so if you want to use a ***custom*** [`Sampler`](https://pytorch.org/docs/stable/data.html#torch.utils.data.Sampler) you should wrap it with a [`BatchSampler`](https://pytorch.org/docs/stable/data.html#torch.utils.data.BatchSampler) before passing it to [`Dataset.to_dataloader()`](api.md#genvarloader.Dataset.to_dataloader).

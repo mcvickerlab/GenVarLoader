@@ -21,6 +21,7 @@ tbb>=2021.12.0
 joblib>=1.3.2
 sphinx>=7.3
 sphinx-book-theme>=1.1
+sphinx-autodoc-typehints
 myst-parser>=3
 nbsphinx
 torch

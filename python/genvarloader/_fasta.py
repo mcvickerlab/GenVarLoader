@@ -195,7 +195,7 @@ class Fasta(Reader):
 
         Returns
         -------
-        NDArray[bytes_]
+        NDArray[np.bytes_]
             Shape: (length). Sequence corresponding to the given genomic coordinates.
 
         Raises
