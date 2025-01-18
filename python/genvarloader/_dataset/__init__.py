@@ -120,7 +120,7 @@ class Dataset:
     and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
     can be returned."""
 
-    input_regions: pl.DataFrame
+    _full_input_regions: pl.DataFrame = field(alias="_full_input_regions")
     """The input regions that were used to write the dataset with no modifications e.g. no length adjustments."""
 
     _idxer: DatasetIndexer = field(alias="_idxer")
@@ -190,6 +190,10 @@ class Dataset:
         return regions_to_bed(self._full_regions[self._idxer.region_idxs], self.contigs)
 
     @property
+    def input_regions(self) -> pl.DataFrame:
+        return self._full_input_regions[self._idxer.region_idxs]
+
+    @property
     def n_regions(self) -> int:
         """The number of regions in the dataset."""
         return self._idxer.n_regions
@@ -231,7 +235,13 @@ class Dataset:
             The path to the dataset.
         reference : Optional[Union[str, Path]], optional
             The path to the reference genome, by default None
+        deterministic : bool, optional
+            Whether to use randomized or deterministic algorithms. If set to True, this will disable random
+            shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
+            and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
+            can be returned.
         """
+
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"{path} does not exist.")
@@ -252,11 +262,11 @@ class Dataset:
 
         # read input regions and generate index map
         input_regions = pl.read_ipc(path / "input_regions.arrow")
-        r_idx_map = input_regions["idx_map"].to_numpy().astype(np.intp)
+        r_idx_map = input_regions["r_idx_map"].to_numpy().astype(np.intp)
         idx_map = oidx_to_raveled_idx(
             r_idx_map, np.arange(len(samples)), (len(regions), len(samples))
         )
-        input_regions = input_regions.drop("idx_map")
+        input_regions = input_regions.drop("r_idx_map")
 
         # initialize random number generator
         rng = np.random.default_rng()
@@ -309,7 +319,7 @@ class Dataset:
             jitter=max_jitter,
             region_length=region_length,
             contigs=contigs,
-            input_regions=input_regions,
+            _full_input_regions=input_regions,
             deterministic=deterministic,
             ploidy=ploidy,
             available_tracks=tracks,
@@ -367,6 +377,7 @@ class Dataset:
             and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
             can be returned.
         """
+
         if return_sequences is False:
             _reference = None
         else:
@@ -432,7 +443,7 @@ class Dataset:
                 to_evolve["sequence_type"] = return_sequences
 
             # reset after changing sequence type
-            to_evolve["genotypes"] = None
+            to_evolve["_genotypes"] = None
 
         if return_tracks is not None:
             if return_tracks is False:
@@ -802,14 +813,16 @@ class Dataset:
         # Since Dataset is a frozen class, we need to use object.__setattr__ to set the attributes
         # per attrs docs (https://www.attrs.org/en/stable/init.html#post-init)
         if self._genotypes is None and self.sequence_type == "haplotypes":
-            object.__setattr__(self, "genotypes", self._init_genotypes())
+            object.__setattr__(self, "_genotypes", self._init_genotypes())
         if self._intervals is None and self.active_tracks:
-            object.__setattr__(self, "intervals", self._init_intervals())
+            object.__setattr__(self, "_intervals", self._init_intervals())
 
         # check if need to squeeze batch dim at the end
         if isinstance(idx, (int, np.integer)):
+            idx = np.array([idx], np.intp)
             squeeze = True
         else:
+            idx = idx
             squeeze = False
 
         _idx = self._idxer[idx]
@@ -912,7 +925,7 @@ class Dataset:
             out = [o.squeeze(0) for o in out]
 
         if self.return_indices:
-            out.extend((_idx, s_idx, r_idx))
+            out.extend((_idx, r_idx, s_idx))
 
         _out = tuple(out)
 

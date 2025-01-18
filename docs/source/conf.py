@@ -64,6 +64,7 @@ html_theme_options = {
     "pygments_light_style": "tango",
     "pygments_dark_style": "material",
 }
+highlight_language = "python"
 html_logo = "_static/gvl_logo.png"
 html_favicon = "_static/favicon.ico"
 html_title = f"GenVarLoader v{version}"
