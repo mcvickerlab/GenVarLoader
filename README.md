@@ -1,5 +1,5 @@
-[![PyPI version](https://badge.fury.io/py/genvarloader.svg)](https://badge.fury.io/py/genvarloader.svg)
-[![Documentation Status](https://readthedocs.org/projects/genvarloader/badge/?version=latest)](https://readthedocs.org/projects/genvarloader/badge/?version=latest)
+[![PyPI version](https://badge.fury.io/py/genvarloader.svg)](https://pypi.org/project/genvarloader/)
+[![Documentation Status](https://readthedocs.org/projects/genvarloader/badge/?version=latest)](https://genvarloader.readthedocs.io)
 [![Downloads](https://static.pepy.tech/badge/genvarloader)](https://pepy.tech/project/genvarloader)
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/genvarloader)](https://img.shields.io/pypi/dm/genvarloader)
 [![GitHub stars](https://badgen.net/github/stars/mcvickerlab/GenVarLoader)](https://GitHub.com/Naereen/mcvickerlab/GenVarLoader)
