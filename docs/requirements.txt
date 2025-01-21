@@ -27,3 +27,4 @@ nbsphinx
 torch
 torchvision
 torchaudio
+ipython
