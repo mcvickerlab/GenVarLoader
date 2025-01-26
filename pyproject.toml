@@ -1,6 +1,6 @@
 [project]
 name = "genvarloader"
-version = "0.7.1"
+version = "0.7.2"
 description = "Pipeline for efficient genomic data processing."
 authors = [
     { name = "David Laub", email = "dlaub@ucsd.edu" },
@@ -56,6 +56,7 @@ dev = [
     "sphinx-book-theme>=1.1.3",
     "sphinx-autobuild>=2024.9.3",
     "sphinx-autodoc-typehints",
+    "patchelf"
 ]
 
 [tool.mypy]

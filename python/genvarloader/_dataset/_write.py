@@ -676,6 +676,7 @@ def _write_bigwigs(
 
             # (regions, samples)
             n_per_query = bigwigs.count_intervals(contig, starts, ends, sample=samples)
+            # (regions)
             mem_per_r = n_per_query.sum(1) * MEM_PER_INTERVAL
 
             if np.any(mem_per_r > max_mem):
