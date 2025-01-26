@@ -87,7 +87,7 @@ class _Variants:
 class Dataset:
     """A dataset of genotypes, reference sequences, and intervals. Note: this class is not meant to be instantiated directly.
     Use the :py:meth:`Dataset.open() <genvarloader.Dataset.open()>` method to open a dataset after writing the data with :py:func:`genvarloader.write()`
-    or the genvarloader CLI.
+    or the GenVarLoader CLI.
     """
 
     @classmethod
@@ -97,7 +97,7 @@ class Dataset:
         reference: Optional[Union[str, Path]] = None,
         return_sequences: Optional[Literal[False, "reference", "haplotypes"]] = None,
         return_tracks: Optional[Union[Literal[False], str, List[str]]] = None,
-        transform: Optional[Union[Literal[False], Callable]] = None,
+        transform: Optional[Callable] = None,
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
@@ -108,21 +108,31 @@ class Dataset:
         Parameters
         ----------
         path
-            The path to the dataset.
+            Path to a dataset.
         reference
-            The path to the reference genome, by default None
+            Path to a reference genome.
         return_sequences
-            The sequence type to return. Set this to False to disable returning sequences entirely.
+            The sequence type to return. Set this to :code:`False` to disable returning sequences. The default depends
+            on the presence of genotypes and reference genome. If genotypes are present and a reference genome is provided,
+            haplotypes will be returned. If only a reference genome is provided, reference sequences will be returned. Otherwise,
+            no DNA sequences will be returned.
         return_tracks
-            The tracks to return, by default None. Set this to False to disable returning tracks entirely.
+            The tracks to return. Set this to :code:`False` to disable returning tracks. By default all available tracks
+            are active and returned in sorted order by name.
         transform
-            The transform to set, by default None
+            A transform function to apply to data. The input should correspond to what is returned by the dataset without the
+            transform, and the output can be anything.
         seed
-            The seed to set, by default None
+            Random seed for any stochastic operations.
         jitter
-            The jitter to set, by default None
+            Amount of jitter to use, cannot be more than the maximum jitter of the dataset.
         return_indices
-            Whether to return indices, by default None
+            Whether to return indices. Three indices are returned for each instance corresponding to the dataset, region, and sample index.
+            For example, the indices for :code:`dataset[0]` might be :code:`(0, 0, 0)` and this would correspond to the first instance
+            that exists on disk, first input region, and first sample. Note that due to sorting regions during writing, the dataset index
+            may not correspond to the region and sample indices for a C-ordered :code:`(regions, samples)` matrix (e.g. :code:`(1, 0, 0)` is possible).
+            Enabling this is useful if you need to map any of the indices to data for particular regions or samples. For example, to use a read
+            depth normalization based on the total library size for a sample. Or during inference, to map predictions back to their regions and samples.
         deterministic
             Whether to use randomized or deterministic algorithms. If set to True, this will disable random
             shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
@@ -397,7 +407,9 @@ class Dataset:
         return evolve(self, _idxer=self._idxer.to_full_dataset())
 
     def to_dataset(self) -> "td.Dataset":
-        """Convert the dataset to a map-style PyTorch Dataset."""
+        """Convert the dataset to a map-style PyTorch :external+torch:class:`Dataset <torch.utils.data.Dataset>`.
+        Requires PyTorch to be installed.
+        """
         if not TORCH_AVAILABLE:
             raise ImportError(
                 "Could not import PyTorch. Please install PyTorch to use torch features."
@@ -422,7 +434,43 @@ class Dataset:
         persistent_workers: bool = False,
         pin_memory_device: str = "",
     ) -> "td.DataLoader":
-        """Convert the dataset to a PyTorch DataLoader."""
+        """Convert the dataset to a PyTorch :external+torch:class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
+        :external+torch:class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
+        Requires PyTorch to be installed.
+
+        Parameters
+        ----------
+        batch_size
+            How many samples per batch to load.
+        shuffle
+            Set to True to have the data reshuffled at every epoch.
+        sampler
+            Defines the strategy to draw samples from the dataset. Can be any :py:class:`Iterable <typing.Iterable>` with :code:`__len__` implemented. If specified, shuffle must not be specified.
+        num_workers
+            How many subprocesses to use for dataloading. :code:`0` means that the data will be loaded in the main process. For GenVarLoader, it is generally best to set this to 0 or 1 since almost everything in
+            GVL is multithreaded. However, if you are using a transform that is compute intensive and single threaded, there may
+            be a benefit to setting this > 1.
+        collate_fn
+            Merges a list of samples to form a mini-batch of Tensor(s).
+        pin_memory
+            If :code:`True`, the data loader will copy Tensors into device/CUDA pinned memory before returning them. If your data elements are a custom type, or your :code:`collate_fn` returns a batch that is a custom type, see the example below.
+        drop_last
+            Set to :code:`True` to drop the last incomplete batch, if the dataset size is not divisible by the batch size. If :code:`False` and the size of dataset is not divisible by the batch size, then the last batch will be smaller.
+        timeout
+            If positive, the timeout value for collecting a batch from workers. Should always be non-negative.
+        worker_init_fn
+            If not :code:`None`, this will be called on each worker subprocess with the worker id (an int in :code:`[0, num_workers - 1]`) as input, after seeding and before data loading.
+        multiprocessing_context
+            If :code:`None`, the default multiprocessing context of your operating system will be used.
+        generator
+            If not :code:`None`, this RNG will be used by RandomSampler to generate random indexes and multiprocessing to generate :code:`base_seed` for workers.
+        prefetch_factor
+            Number of batches loaded in advance by each worker. 2 means there will be a total of 2 * num_workers batches prefetched across all workers. (default value depends on the set value for num_workers. If value of num_workers=0 default is None. Otherwise, if value of num_workers > 0 default is 2).
+        persistent_workers
+            If :code:`True`, the data loader will not shut down the worker processes after a dataset has been consumed once. This allows to maintain the workers Dataset instances alive.
+        pin_memory_device
+            The device to :code:`pin_memory` to if :code:`pin_memory` is :code:`True`.
+        """
         return get_dataloader(
             dataset=self.to_dataset(),
             batch_size=batch_size,

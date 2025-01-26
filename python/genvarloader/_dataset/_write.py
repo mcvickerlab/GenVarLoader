@@ -62,21 +62,21 @@ def write(
         left-aligned, bi-allelic, and atomized. Multi-allelic variants can be included by splitting
         them into bi-allelic half-calls. For VCFs, the `bcftools norm <https://samtools.github.io/bcftools/bcftools.html#norm>`_
         command can do all of this normalization. Likewise, see the `PLINK2 documentation <https://www.cog-genomics.org/plink/2.0>`_
-        for more PGEN files. Commands of interest include --make-bpgen for splitting variants,
-        --normalize for left-aligning and atomizing overlapping variants, and --ref-from-fa for REF allele correction.
+        for PGEN files. Commands of interest include :code:`--make-bpgen` for splitting variants,
+        :code:`--normalize` for left-aligning and atomizing overlapping variants, and :code:`--ref-from-fa` for REF allele correction.
     bigwigs
         BigWigs object or list of BigWigs objects containing intervals
     samples
         Samples to include in the dataset
     length
         Length of the regions to query. Provided regions will be expanded or contracted
-        to this length + 2 x `max_jitter` with the center of the region remaining the same.
+        to this length + 2 x :code:`max_jitter` with the center of the region remaining the same.
     max_jitter
         Maximum jitter to add to the regions
     overwrite
         Whether to overwrite an existing datasete
     max_mem
-        Maximum memory to use per regionB (4 * 2**30 bytes)
+        Maximum memory to use in bytes.
     phased
         Whether to treat the genotypes as phased. If phased=False and using a VCF,
         a dosage FORMAT field must be provided and must have Number = '1' or 'A' in the VCF header.
@@ -88,7 +88,7 @@ def write(
         is to use `plink2 --pgen-info <https://www.cog-genomics.org/plink/2.0/basic_stats#pgen_info>`_ to check
         if dosages are present before you write the dataset.
     dosage_field
-        Field in the VCF to use as dosage. Ignored if phased=True.
+        Field in the VCF to use as dosage. Ignored if :code:`phased=True`.
     """
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
@@ -204,7 +204,7 @@ def write(
     if bigwigs is not None:
         logger.info("Writing BigWig intervals.")
         for bw in bigwigs:
-            _write_bigwigs(path, gvl_bed, bw, samples)
+            _write_bigwigs(path, gvl_bed, bw, samples, max_mem)
 
     with open(path / "metadata.json", "w") as f:
         json.dump(metadata, f)
@@ -336,10 +336,11 @@ def _write_variants(
                 # sketch:
                 # 1. for 1 region, read subset of variants -> SparseGenotypes
                 # 2. repeat 1 for next subset of variants
-                raise ValueError(
+                raise NotImplementedError(
                     f"""Memory usage per region exceeds maximum of {max_mem / 1e9} GB.
                     Largest amount needed for a single region is {mem_per_r.max() / 1e9} GB, set
-                    `max_mem` to this value or higher."""
+                    `max_mem` to this value or higher. Otherwise, chunking by region and sample is
+                    not yet implemented."""
                 )
 
             offsets = splits_sum_le_value(mem_per_r, max_mem)
@@ -644,8 +645,12 @@ def _write_somatic_variants_chunk(
 
 
 def _write_bigwigs(
-    path: Path, bed: pl.DataFrame, bigwigs: BigWigs, samples: Optional[List[str]]
-) -> int:
+    path: Path,
+    bed: pl.DataFrame,
+    bigwigs: BigWigs,
+    samples: Optional[List[str]],
+    max_mem: int,
+):
     if samples is None:
         _samples = cast(List[str], bigwigs.samples)
     else:
@@ -653,26 +658,72 @@ def _write_bigwigs(
             raise ValueError(f"Samples {missing} not found in bigwigs.")
         _samples = samples
 
+    MEM_PER_INTERVAL = (
+        12 * 2
+    )  # start u32, end u32, value f32, times 2 for intermediate copies
+    chunk_labels = np.empty(bed.height, np.uint32)
+    chunk_offsets: Dict[int, NDArray[np.int64]] = {}
+    n_chunks = 0
+    last_chunk_offset = 0
+    for (contig,), part in bed.partition_by(
+        "chrom", as_dict=True, include_key=False, maintain_order=True
+    ).items():
+        contig = cast(str, contig)
+        _contig = _normalize_contig_name(contig, bigwigs.contigs)
+        if _contig is not None:
+            starts = part["chromStart"].to_numpy()
+            ends = part["chromEnd"].to_numpy()
+
+            # (regions, samples)
+            n_per_query = bigwigs.count_intervals(contig, starts, ends, sample=samples)
+            mem_per_r = n_per_query.sum(1) * MEM_PER_INTERVAL
+
+            if np.any(mem_per_r > max_mem):
+                # TODO subset by samples as well if needed
+                raise NotImplementedError(
+                    f"""Memory usage per region exceeds maximum of {max_mem / 1e9} GB.
+                    Largest amount needed for a single region is {mem_per_r.max() / 1e9} GB, set
+                    `max_mem` to this value or higher. Otherwise, chunking by region and sample is
+                    not yet implemented."""
+                )
+
+            split_offsets = splits_sum_le_value(mem_per_r, max_mem)
+            split_lengths = np.diff(split_offsets)
+            for i in range(len(split_lengths)):
+                o_s, o_e = split_offsets[i], split_offsets[i + 1]
+                chunk_idx = n_chunks + i
+                chunk_offsets[chunk_idx] = _lengths_to_offsets(n_per_query[o_s:o_e])
+            n_chunks += len(split_lengths)
+            first_chunk_idx = n_chunks
+            last_chunk_idx = n_chunks + len(split_lengths)
+            _chunk_labels = np.arange(
+                first_chunk_idx, last_chunk_idx, dtype=np.uint32
+            ).repeat(split_lengths)
+            chunk_labels[last_chunk_offset : last_chunk_offset + len(_chunk_labels)] = (
+                _chunk_labels
+            )
+    bed = bed.with_columns(chunk=pl.lit(chunk_labels))
+
     out_dir = path / "intervals" / bigwigs.name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     interval_offset = 0
     offset_offset = 0
     last_offset = 0
-    n_intervals = 0
-    pbar = tqdm(total=bed["chrom"].n_unique())
-    for (contig,), part in bed.partition_by(
-        "chrom", as_dict=True, include_key=False, maintain_order=True
+    pbar = tqdm(total=bed["chunk"].n_unique())
+    for (chunk_idx,), part in bed.partition_by(
+        "chunk", as_dict=True, include_key=False, maintain_order=True
     ).items():
-        contig = cast(str, contig)
+        chunk_idx = cast(int, chunk_idx)
+        contig = cast(str, part[0, "chrom"])
         pbar.set_description(f"Reading intervals for {part.height} regions on {contig}")
         starts = part["chromStart"].to_numpy()
         ends = part["chromEnd"].to_numpy()
+        _offsets = chunk_offsets[chunk_idx]
 
-        intervals = bigwigs.intervals(contig, starts, ends, sample=_samples)
+        intervals = bigwigs.intervals(contig, starts, ends, _offsets, sample=_samples)
 
         pbar.set_description(f"Writing intervals for {part.height} regions on {contig}")
-        n_intervals += len(intervals.data)
         out = np.memmap(
             out_dir / "intervals.npy",
             dtype=intervals.data.dtype,
@@ -709,5 +760,3 @@ def _write_bigwigs(
     )
     out[-1] = offsets[-1]  # type: ignore
     out.flush()
-
-    return n_intervals
