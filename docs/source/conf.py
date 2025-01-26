@@ -12,8 +12,8 @@ project = "GenVarLoader"
 copyright = "2024, David Laub"
 author = "David Laub"
 release = genvarloader.__version__
-# short X.Y verison
-version = ".".join(release.split(".")[:2])
+# X.Y.Z verison
+version = ".".join(release.split(".")[:3])
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -56,6 +56,7 @@ napoleon_type_aliases = {
 napoleon_preprocess_types = True
 napoleon_use_rtype = True
 
+# autodoc typehints
 always_use_bar_unions = True
 simplify_optional_unions = True
 typehints_defaults = "comma"
@@ -69,19 +70,24 @@ nbsphinx_kernel_name = "python3"
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
 html_theme = "sphinx_book_theme"
-html_static_path = ["_static"]
-html_theme_options = {
-    "home_page_in_toc": True,
-    "repository_url": "https://github.com/mcvickerlab/GenVarLoader",
-    "use_repository_button": True,
-    "pygments_light_style": "tango",
-    "pygments_dark_style": "material",
-    "show_toc_level": 2,
-}
-highlight_language = "python"
+html_title = f"GenVarLoader v{version}"
 html_logo = "_static/gvl_logo.png"
 html_favicon = "_static/favicon.ico"
-html_title = f"GenVarLoader v{version}"
+html_static_path = ["_static"]
+html_theme_options = {
+    "repository_url": "https://github.com/mcvickerlab/GenVarLoader",
+    "repository_branch": "main",
+    "path_to_docs": "docs",
+    "use_fullscreen_button": True,
+    "use_issues_button": True,
+    "use_repository_button": True,
+    "use_source_button": True,
+    "pygments_light_style": "tango",
+    "pygments_dark_style": "material",
+    "home_page_in_toc": True,
+    "collapse_navigation": True,
+    "show_toc_level": 2,
+}
 html_sidebars = {
     "**": [
         "navbar-logo.html",

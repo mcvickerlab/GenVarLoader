@@ -25,13 +25,24 @@ api
 :class: inline-link
 ```
 
+```{image} https://static.pepy.tech/badge/genvarloader
+:alt: Downloads
+:class: inline-link
+```
+
 ```{image} https://img.shields.io/pypi/dm/genvarloader
 :alt: PyPI - Downloads
 :class: inline-link
 ```
 
+```{image} https://badgen.net/github/stars/mcvickerlab/GenVarLoader
+:alt: GitHub stars
+:class: inline-linke
+```
 
-GenVarLoader provides a fast, memory efficient data loader for training sequence models on genetic variation. For example, this can be used to train a DNA language model on human genetic variation (e.g. [Nucleotide Transformer](https://www.biorxiv.org/content/10.1101/2023.01.11.523679)) or train sequence to function models with genetic variation (e.g. [BigRNA](https://www.biorxiv.org/content/10.1101/2023.09.20.558508v1)).
+[[Preprint](https://www.biorxiv.org/content/10.1101/2025.01.15.633240v1)]
+
+GenVarLoader provides a fast, memory efficient data loader for training sequence models on genetic variation. For example, this can be used to train a DNA language model on human genetic variation (e.g. [Dalla-Torre et al.](https://www.biorxiv.org/content/10.1101/2023.01.11.523679)) or train sequence to function models with genetic variation (e.g. [Celaj et al.](https://www.biorxiv.org/content/10.1101/2023.09.20.558508v1), [Drusinsky et al.](https://www.biorxiv.org/content/10.1101/2024.07.27.605449v1), [He et al.](https://www.biorxiv.org/content/10.1101/2024.10.15.618510v1), and [Rastogi et al.](https://www.biorxiv.org/content/10.1101/2024.09.23.614632v1)).
 
 ## Features
 - Avoids writing any sequences to disk
@@ -96,7 +107,6 @@ for haplotypes, tracks in train_dataloader:
 dataset[99]  # 100-th instance of the raveled dataset
 dataset[0, 9]  # first region, 10th sample
 dataset.isel(regions=0, samples=9)
-dataset.sel(regions=dataset.get_bed()[0], samples=dataset.samples[9])
 dataset[:10]  # first 10 instances
 dataset[:10, :5]  # first 10 regions and 5 samples
 ```
