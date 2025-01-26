@@ -665,9 +665,11 @@ def _write_bigwigs(
     chunk_offsets: Dict[int, NDArray[np.int64]] = {}
     n_chunks = 0
     last_chunk_offset = 0
+    pbar = tqdm(total=bed["chrom"].n_unique())
     for (contig,), part in bed.partition_by(
         "chrom", as_dict=True, include_key=False, maintain_order=True
     ).items():
+        pbar.set_description(f"Calculating memory usage for {part.height} regions")
         contig = cast(str, contig)
         _contig = _normalize_contig_name(contig, bigwigs.contigs)
         if _contig is not None:
@@ -693,8 +695,9 @@ def _write_bigwigs(
             for i in range(len(split_lengths)):
                 o_s, o_e = split_offsets[i], split_offsets[i + 1]
                 chunk_idx = n_chunks + i
-                chunk_offsets[chunk_idx] = _lengths_to_offsets(n_per_query[o_s:o_e])
-            n_chunks += len(split_lengths)
+                chunk_offsets[chunk_idx] = _lengths_to_offsets(
+                    n_per_query[o_s:o_e].ravel()
+                )
             first_chunk_idx = n_chunks
             last_chunk_idx = n_chunks + len(split_lengths)
             _chunk_labels = np.arange(
@@ -703,6 +706,10 @@ def _write_bigwigs(
             chunk_labels[last_chunk_offset : last_chunk_offset + len(_chunk_labels)] = (
                 _chunk_labels
             )
+            n_chunks += len(split_lengths)
+            last_chunk_offset += len(_chunk_labels)
+        pbar.update()
+    pbar.close()
     bed = bed.with_columns(chunk=pl.lit(chunk_labels))
 
     out_dir = path / "intervals" / bigwigs.name

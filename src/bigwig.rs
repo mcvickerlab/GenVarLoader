@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bigtools::{BigWigRead, Value};
-use itertools::Itertools;
+use itertools::{izip, Itertools};
 use ndarray::prelude::*;
 use rayon::prelude::*;
 use std::mem::MaybeUninit;
@@ -68,7 +68,7 @@ pub fn count_intervals(
     }
 }
 
-pub fn intervals<'a>(
+pub fn intervals(
     paths: &Vec<PathBuf>,
     contig: &str,
     starts: ArrayView1<i32>,
@@ -83,31 +83,27 @@ pub fn intervals<'a>(
     let coords = Array2::<u32>::uninit((n_intervals, 2));
     let values = Array1::<f32>::uninit(n_intervals);
 
-    (
-        starts.as_slice().expect("Contiguous array"),
-        ends.as_slice().expect("Contiguous array"),
-    )
-        .into_par_iter()
-        .enumerate()
-        .for_each(|(r_idx, (&s, &e))| {
-            paths.iter().enumerate().for_each(|(s_idx, path)| {
+    paths.par_iter().enumerate().for_each(|(s_idx, path)| {
+        let mut bw = BigWigRead::open_file(path).expect("Error opening file");
+        let (max_len, contig) = bw
+            .chroms()
+            .iter()
+            .filter_map(|chrom| {
+                if chrom.name == contig || chrom.name == format!("chr{contig}") {
+                    Some((chrom.length, chrom.name.clone()))
+                } else {
+                    None
+                }
+            })
+            .exactly_one()
+            .expect("Contig not found or multiple contigs match");
+
+        izip!(starts, ends)
+            .enumerate()
+            .for_each(|(r_idx, (&s, &e))| {
                 let coords_ptr = coords.as_ptr() as *mut MaybeUninit<u32>;
                 let values_ptr = values.as_ptr() as *mut MaybeUninit<f32>;
                 let offset = offsets[r_idx * n_samples + s_idx] as usize;
-                let mut bw = BigWigRead::open_file(path).expect("Error opening file");
-
-                let (max_len, contig) = bw
-                    .chroms()
-                    .iter()
-                    .filter_map(|chrom| {
-                        if chrom.name == contig || chrom.name == format!("chr{contig}") {
-                            Some((chrom.length, chrom.name.clone()))
-                        } else {
-                            None
-                        }
-                    })
-                    .exactly_one()
-                    .expect("Contig not found or multiple contigs match");
 
                 let r_start = s.max(0) as u32;
                 let r_end = (e as u32).min(max_len);
@@ -129,7 +125,7 @@ pub fn intervals<'a>(
                         }
                     });
             })
-        });
+    });
 
     unsafe {
         let coords = coords.assume_init();
