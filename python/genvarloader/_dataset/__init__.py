@@ -453,10 +453,10 @@ class Dataset:
 
         if regions is not None:
             if isinstance(regions, pl.Series):
-                regions = regions.to_numpy()
-                if np.issubdtype(regions.dtype, np.bool_):
-                    regions = np.nonzero(regions)[0]
-                elif not np.issubdtype(regions.dtype, np.integer):
+                region_idxs = regions.to_numpy()
+                if np.issubdtype(region_idxs.dtype, np.bool_):
+                    region_idxs = np.nonzero(regions)[0]
+                elif not np.issubdtype(region_idxs.dtype, np.integer):
                     raise ValueError("`regions` must be index-like or a boolean mask.")
             else:
                 regions = cast(Idx, regions)  # how to narrow dtype? is this possible?
