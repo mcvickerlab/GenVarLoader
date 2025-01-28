@@ -1,11 +1,10 @@
 from pathlib import Path
 
-import genvarloader as gvl
 import numpy as np
 import pytest
-from genvarloader._fasta import NoPadError
+from genvarloader._fasta import Fasta, NoPadError
 from pysam import FastaFile
-from pytest_cases import fixture
+from pytest import fixture
 
 
 @fixture
@@ -14,12 +13,12 @@ def fasta_path():
         Path(__file__).parent
         / "data"
         / "fasta"
-        / "Homo_sapiens.GRCh38.dna.toplevel.fa.gz"
+        / "Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz"
     )
 
 
 def test_pad_right(fasta_path):
-    fasta = gvl.Fasta("ref", fasta_path, pad="N")
+    fasta = Fasta("ref", fasta_path, pad="N")
     contig = "1"
     with FastaFile(fasta_path) as f:
         end_of_contig = f.get_reference_length(contig)
@@ -36,7 +35,7 @@ def test_pad_right(fasta_path):
 
 
 def test_pad_left(fasta_path):
-    fasta = gvl.Fasta("ref", fasta_path, pad="N")
+    fasta = Fasta("ref", fasta_path, pad="N")
     contig = "1"
     start = -5
     end = start + 10
@@ -49,7 +48,7 @@ def test_pad_left(fasta_path):
 
 
 def test_no_pad(fasta_path):
-    fasta = gvl.Fasta("ref", fasta_path)
+    fasta = Fasta("ref", fasta_path)
     end_of_contig_1 = 248956422
     contig = "1"
     start = end_of_contig_1 - 5

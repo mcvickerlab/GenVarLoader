@@ -1,13 +1,8 @@
 import numpy as np
-import taichi
 from attrs import define
 from einops import repeat
-from genvarloader.dataset.intervals import (
-    intervals_to_tracks,
-    ti_intervals_to_tracks,
-    tracks_to_intervals,
-)
-from genvarloader.types import INTERVAL_DTYPE, RaggedIntervals
+from genvarloader._dataset._intervals import intervals_to_tracks, tracks_to_intervals
+from genvarloader._types import INTERVAL_DTYPE, RaggedIntervals
 from numpy.typing import NDArray
 from pytest_cases import parametrize_with_cases
 
@@ -18,6 +13,7 @@ class Case:
     regions: NDArray[np.int32]
     intervals: RaggedIntervals
     track: NDArray[np.float32]
+    t_offsets: NDArray[np.int64]
 
 
 def case_simple():
@@ -49,7 +45,8 @@ def case_simple():
     regions = np.array([[0, 0, 10]], dtype=np.int32)  # coordinates 0:0-10
 
     track = np.array([1, 1, 1, 0, 2, 0, 0, 0, 0, 3], dtype=np.float32)
-    return Case(interval_idx, regions, intervals, track)
+    t_offsets = np.array([0, len(track)], np.int64)
+    return Case(interval_idx, regions, intervals, track, t_offsets)
 
 
 def case_two_regions():
@@ -86,7 +83,8 @@ def case_two_regions():
 
     track = np.array([1, 1, 1, 0, 2, 0, 0, 0, 0, 3], dtype=np.float32)
     tracks = repeat(track, "n -> (r n)", r=2)
-    return Case(interval_idx, regions, intervals, tracks)
+    t_offsets = np.array([0, len(track), tracks.size], np.int64)
+    return Case(interval_idx, regions, intervals, tracks, t_offsets)
 
 
 @parametrize_with_cases("case", cases=".")
@@ -100,17 +98,7 @@ def test_intervals_to_tracks(case: Case):
 
 @parametrize_with_cases("case", cases=".")
 def test_tracks_to_intervals(case: Case):
-    intervals, offsets = tracks_to_intervals(case.regions, case.track)
+    intervals, offsets = tracks_to_intervals(case.regions, case.track, case.t_offsets)
     intervals = RaggedIntervals.from_offsets(intervals, 1, offsets)
     np.testing.assert_array_equal(intervals.data, case.intervals.data)
     np.testing.assert_array_equal(intervals.offsets, case.intervals.offsets)
-
-
-@parametrize_with_cases("case", cases=".")
-def test_ti_intervals_to_tracks(case: Case):
-    taichi.init(taichi.gpu)
-    intervals = case.intervals
-    out = ti_intervals_to_tracks(
-        case.interval_idx, case.regions, intervals.data, intervals.offsets
-    )
-    np.testing.assert_array_equal(out, case.track)
