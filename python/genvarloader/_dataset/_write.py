@@ -56,7 +56,9 @@ def write(
     path
         Path to write the dataset to.
     bed
-        BED-like file or DataFrame containing regions to query.
+        :func:`BED-like <genvarloader.read_bedlike()>` file or DataFrame of regions satisfying the BED3+ specification.
+        Specifically, it must have columns 'chrom', 'chromStart', and 'chromEnd'. If 'strand' is present, its values must be either '+' or '-'.
+        Negative stranded regions will be reverse complemented during sequence and/or track reconstruction.
     variants
         A VCF, PGEN, or :py:class:`Variants` instance. All variants must be
         left-aligned, bi-allelic, and atomized. Multi-allelic variants can be included by splitting
@@ -113,10 +115,10 @@ def write(
     if isinstance(bed, (str, Path)):
         bed = read_bedlike(bed)
 
-    gvl_bed, contigs, region_length, src_to_sorted_idx_map = _prep_bed(
+    gvl_bed, contigs, region_length, input_to_sorted_idx_map = _prep_bed(
         bed, length, max_jitter
     )
-    bed.with_columns(r_idx_map=pl.lit(src_to_sorted_idx_map)).write_ipc(
+    bed.with_columns(r_idx_map=pl.lit(input_to_sorted_idx_map)).write_ipc(
         path / "input_regions.arrow"
     )
     metadata["region_length"] = region_length
@@ -235,7 +237,7 @@ def _prep_bed(
             pl.col("chrom").cast(pl.Categorical), pl.col("chromStart")
         )
 
-    src_to_sorted_idx_map = np.argsort(bed["index"])
+    input_to_sorted_idx_map = np.argsort(bed["index"])
     bed = bed.drop("index")
 
     if length is None:
@@ -248,7 +250,7 @@ def _prep_bed(
 
     bed = with_length(bed, length)
 
-    return bed, contigs, length, src_to_sorted_idx_map
+    return bed, contigs, length, input_to_sorted_idx_map
 
 
 def _write_regions(path: Path, bed: pl.DataFrame, contigs: List[str]):
@@ -729,7 +731,9 @@ def _write_bigwigs(
         ends = part["chromEnd"].to_numpy()
         _offsets = chunk_offsets[chunk_idx]
 
-        intervals = bigwigs.intervals(contig, starts, ends, _offsets, sample=_samples)
+        intervals = bigwigs._intervals_from_offsets(
+            contig, starts, ends, _offsets, sample=_samples
+        )
 
         pbar.set_description(f"Writing intervals for {part.height} regions on {contig}")
         out = np.memmap(

@@ -1,1 +1,1 @@
-{"region_length": 10, "contigs": ["19", "20"], "samples": ["NA00001", "NA00002", "NA00003"], "n_samples": 3, "n_regions": 12, "ploidy": 1, "phased": false}
+{"region_length": 10, "contigs": ["19", "20"], "samples": ["NA00001", "NA00002", "NA00003"], "n_samples": 3, "n_regions": 12, "ploidy": 2, "phased": true}

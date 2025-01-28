@@ -221,7 +221,7 @@ def main(
         overwrite=True,
     )
     gvl.write(
-        path=wdir / "phased_dataset.gvl",
+        path=wdir / "unphased_dataset.gvl",
         bed=bed,
         variants=wdir / "vcf" / f"filtered_{name}.vcf.gz",
         length=SEQ_LEN,

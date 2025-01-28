@@ -72,13 +72,15 @@ fn intervals<'py>(
     ends: PyReadonlyArray1<i32>,
     offsets: PyReadonlyArray1<i64>,
 ) -> (Bound<'py, PyArray2<u32>>, Bound<'py, PyArray1<f32>>) {
-    let (itvs, vals) = bigwig::intervals(
-        &paths,
-        contig,
-        starts.as_array(),
-        ends.as_array(),
-        offsets.as_array(),
-    )
+    let (itvs, vals) = unsafe {
+        bigwig::intervals(
+            &paths,
+            contig,
+            starts.as_array(),
+            ends.as_array(),
+            offsets.as_array(),
+        )
+    }
     .unwrap();
     (itvs.into_pyarray(py), vals.into_pyarray(py))
 }

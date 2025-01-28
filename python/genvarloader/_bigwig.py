@@ -9,7 +9,7 @@ import pyBigWig
 from numpy.typing import ArrayLike, NDArray
 
 from ._types import INTERVAL_DTYPE, RaggedIntervals, Reader
-from ._utils import _get_rel_starts, _normalize_contig_name
+from ._utils import _get_rel_starts, _lengths_to_offsets, _normalize_contig_name
 from .genvarloader import (
     count_intervals as bw_count_intervals,
 )
@@ -148,6 +148,56 @@ class BigWigs(Reader):
         sample: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> NDArray[np.int32]:
+        """Count the number of intervals corresponding to given genomic coordinates.
+
+        Parameters
+        ----------
+        contig
+            Name of the contig/chromosome.
+        starts : ArrayLike
+            Start coordinates, 0-based.
+        ends : ArrayLike
+            End coordinates, 0-based, exclusive.
+        sample
+            Name of the samples to read data from.
+
+        Returns
+        -------
+            Shape: (regions, samples). Number of intervals that overlap with each region and sample.
+        """
+        _contig = _normalize_contig_name(contig, self.contigs)
+        if _contig is None:
+            raise ValueError(f"Contig {contig} not found.")
+        else:
+            contig = _contig
+
+        if sample is None:
+            samples = self.samples
+        elif isinstance(sample, str):
+            samples = [sample]
+        else:
+            samples = sample
+
+        if not set(samples).issubset(self.samples):
+            raise ValueError(f"Sample {samples} not found in bigWig paths.")
+
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
+        ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
+        paths = [self.paths[s] for s in samples]
+
+        # (regions, samples)
+        n_per_query = bw_count_intervals(paths, contig, starts, ends)
+
+        return n_per_query
+
+    def intervals(
+        self,
+        contig: str,
+        starts: ArrayLike,
+        ends: ArrayLike,
+        sample: Optional[Union[str, List[str]]] = None,
+        **kwargs,
+    ) -> RaggedIntervals:
         """Read intervals corresponding to given genomic coordinates. The output data
         will be a 2D Ragged array of :code:`struct{start, end, value}` with shape (regions, samples).
 
@@ -184,10 +234,13 @@ class BigWigs(Reader):
 
         # (regions, samples)
         n_per_query = bw_count_intervals(paths, contig, starts, ends)
+        offsets = _lengths_to_offsets(n_per_query.ravel())
 
-        return n_per_query
+        intervals = self._intervals_from_offsets(contig, starts, ends, offsets, sample)
 
-    def intervals(
+        return intervals
+
+    def _intervals_from_offsets(
         self,
         contig: str,
         starts: ArrayLike,
@@ -196,8 +249,10 @@ class BigWigs(Reader):
         sample: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> RaggedIntervals:
-        """Read intervals corresponding to given genomic coordinates. The output data
-        will be a 2D Ragged array of :code:`struct{start, end, value}` with shape (regions, samples).
+        """This function is unsafe! Reads intervals corresponding to given genomic coordinates
+        using provided offsets. If the offsets are incorrect this function is undefined behavior.
+        To ensure offsets are correct, use the count_intervals function (see :meth:`intervals()`).
+        The output data will be a 2D Ragged array of :code:`struct{start, end, value}` with shape (regions, samples).
 
         Parameters
         ----------
