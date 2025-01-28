@@ -366,7 +366,8 @@ class Dataset:
         regions: Optional[Union[Idx, NDArray[np.bool_], pl.Series]] = None,
         samples: Optional[Union[Idx, NDArray[np.bool_], Sequence[str]]] = None,
     ) -> "Dataset":
-        """Subset the dataset to specific regions and/or samples by index or a boolean mask.
+        """Subset the dataset to specific regions and/or samples by index or a boolean mask. If regions or samples
+        are not provided, the corresponding dimension will not be subset.
 
         Parameters
         ----------
