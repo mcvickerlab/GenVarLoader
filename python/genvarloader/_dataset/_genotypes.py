@@ -1361,6 +1361,7 @@ def _mark_keep_variants(
         n_compat = 0
         v_idx: int = variant_idxs[v]
         v_pos = positions[v_idx]
+        # the +1 assumes no MNPs, only SNPs and INDELs. Can relax this by passing in the alleles
         v_ref_end = v_pos - min(0, sizes[v_idx]) + 1
 
         if v_ref_end <= ref_start:
@@ -1400,7 +1401,17 @@ def _mark_keep_variants(
         # update group info
         # writable length = length of variant + dist from last v_ref_end or the missing length, whichever is smaller
         v_group = groups[v]
-        v_write_len = v_pos - ref_ends[v_group] + max(0, sizes[v_idx]) + 1
+        # max(v_pos, ref_start) addresses a spanning deletion from before ref_start
+        # likewise, (v_pos > ref_start) accounts for a spanning deletion that starts after ref_start
+        # spanning deletions will have a write_len of 0 unlike all other variants where we always write at least 1 nt
+        # Note that this also assumes no MNPs, only SNPs and INDELs. Can relax this by passing in the alleles similar
+        # to above.
+        v_write_len = (
+            max(v_pos, ref_start)
+            - ref_ends[v_group]
+            + max(0, sizes[v_idx])
+            + (v_pos > ref_start)
+        )
         missing_len = target_len - write_lens[v_group]
         writable_len = min(v_write_len, missing_len)
         write_lens[v_group] += writable_len

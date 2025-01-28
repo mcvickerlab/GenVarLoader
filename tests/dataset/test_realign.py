@@ -1,7 +1,7 @@
 # %%
 import numpy as np
-from genvarloader.dataset.genotypes import SparseGenotypes
-from genvarloader.dataset.tracks import shift_and_realign_track_sparse
+from genvarloader._dataset._genotypes import SparseGenotypes
+from genvarloader._dataset._tracks import shift_and_realign_track_sparse
 from pytest_cases import parametrize_with_cases
 
 
@@ -13,7 +13,7 @@ def case_snps():
     # (s p v)
     genos = np.array([[[0, 1]]], dtype=np.int8)
     first_v_idxs = np.array([0], dtype=np.int32)
-    offsets = np.array([0, 2], np.int32)
+    offsets = np.array([0, 2], np.int64)
 
     shift = 0
     track = np.arange(4, dtype=np.float32)
@@ -42,7 +42,7 @@ def case_indels():
     # (s p v) : (1 1 2)
     genos = np.array([[[1, 1]]], dtype=np.int8)
     first_v_idxs = np.array([0], dtype=np.int32)
-    offsets = np.array([0, 2], np.int32)
+    offsets = np.array([0, 2], np.int64)
 
     shift = 0
     track = np.arange(4, dtype=np.float32)
@@ -71,7 +71,7 @@ def case_spanning_del():
     # (s p v) : (1 1 2)
     genos = np.array([[[1]]], dtype=np.int8)
     first_v_idxs = np.array([0], dtype=np.int32)
-    offsets = np.array([0, 1], np.int32)
+    offsets = np.array([0, 1], np.int64)
 
     shift = 0
     track = np.arange(1, 6, dtype=np.float32)
@@ -102,7 +102,7 @@ def case_shift_ins():
     # (s p v) : (1 1 2)
     genos = np.array([[[1, 1]]], dtype=np.int8)
     first_v_idxs = np.array([0], dtype=np.int32)
-    offsets = np.array([0, 2], np.int32)
+    offsets = np.array([0, 2], np.int64)
 
     shift = 1
     track = np.arange(4, dtype=np.float32)
