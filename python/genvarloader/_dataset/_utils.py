@@ -42,9 +42,7 @@ def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.integer]:
     """Convert an index-like object to an array of non-negative indices. Shapes of multi-dimensional
     indices are preserved."""
     if isinstance(idx, slice):
-        start = 0 if idx.start is None else idx.start
-        stop = max_len if idx.stop is None else idx.stop
-        _idx = np.arange(start, stop, idx.step, np.intp)
+        _idx = np.arange(max_len)[idx]
     elif isinstance(idx, Sequence):
         _idx = np.asarray(idx, np.intp)
     else:
