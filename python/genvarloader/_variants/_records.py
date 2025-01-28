@@ -550,11 +550,11 @@ class Records:
                     END=pl.col("POS")
                     - pl.col("ILEN").clip(upper_bound=0),  #! end-inclusive
                 )
-                .with_row_count("VAR_IDX")
+                .with_row_index("VAR_IDX")
                 .select(
                     pl.all().sort_by("END"),
                     # make E2S_IDX relative to each contig
-                    pl.int_range(0, pl.count(), dtype=pl.Int32)
+                    pl.int_range(0, pl.len(), dtype=pl.Int32)
                     .sort_by("END")
                     .reverse()
                     .rolling_min(df.height, min_periods=1)
@@ -563,7 +563,7 @@ class Records:
                 )
                 .select("#CHROM", "END", "ILEN", "VAR_IDX", "E2S_IDX")
                 .sort("END")
-                .join(df.select("POS").with_row_count("VAR_IDX"), on="VAR_IDX")
+                .join(df.select("POS").with_row_index("VAR_IDX"), on="VAR_IDX")
             )
 
             _starts = ends["POS"].to_numpy()
