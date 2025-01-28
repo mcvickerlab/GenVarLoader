@@ -121,6 +121,7 @@ def test_mark_keep_variants(
         ends,
         write_lens,
         target_len,
+        deterministic=False,
     )
 
     np.testing.assert_array_equal(actual, desired)
