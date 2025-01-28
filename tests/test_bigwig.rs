@@ -58,7 +58,7 @@ fn test_intervals(
     )));
 
     let (coords, values) =
-        intervals(&bws, chrom, starts.view(), ends.view(), offsets.view()).unwrap();
+        unsafe { intervals(&bws, chrom, starts.view(), ends.view(), offsets.view()) }.unwrap();
 
     assert_eq!(coords, des_coords);
     assert_eq!(values, des_values);
