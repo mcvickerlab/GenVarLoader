@@ -12,23 +12,42 @@ from ._utils import idx_like_to_array, oidx_to_raveled_idx
 @define
 class DatasetIndexer:
     full_region_idxs: NDArray[np.integer]
+    """Full map from input region indices to on-disk region indices."""
     full_sample_idxs: NDArray[np.integer]
+    """Full map from input sample indices to on-disk sample indices."""
     idx_map: NDArray[np.integer]
-    n_regions: int
-    n_samples: int
+    """Map from input indices to on-disk dataset indices."""
+    region_subset_idxs: Optional[NDArray[np.integer]] = None
+    """Which input regions are included in the subset."""
+    sample_subset_idxs: Optional[NDArray[np.integer]] = None
+    """Which input samples are included in the subset."""
 
     @property
     def is_subset(self) -> bool:
-        return self.n_regions < len(self.full_region_idxs) or self.n_samples < len(
-            self.full_sample_idxs
+        return (
+            self.region_subset_idxs is not None or self.sample_subset_idxs is not None
         )
 
     @property
+    def n_regions(self) -> int:
+        if self.region_subset_idxs is None:
+            return len(self.full_region_idxs)
+        return len(self.region_subset_idxs)
+
+    @property
+    def n_samples(self) -> int:
+        if self.sample_subset_idxs is None:
+            return len(self.full_sample_idxs)
+        return len(self.sample_subset_idxs)
+
+    @property
     def region_idxs(self) -> NDArray[np.integer]:
+        """Map from input region indices to on-disk region indices."""
         return np.unravel_index(self.idx_map[:: self.n_samples], self.full_shape)[0]
 
     @property
     def sample_idxs(self) -> NDArray[np.integer]:
+        """Map from input sample indices to on-disk sample indices."""
         return np.unravel_index(self.idx_map[: self.n_samples], self.full_shape)[1]
 
     @property
@@ -75,8 +94,8 @@ class DatasetIndexer:
         return evolve(
             self,
             idx_map=idx_map,
-            n_regions=len(region_idxs),
-            n_samples=len(sample_idxs),
+            region_subset_idxs=region_idxs,
+            sample_subset_idxs=sample_idxs,
         )
 
     def to_full_dataset(self) -> Self:
@@ -84,5 +103,6 @@ class DatasetIndexer:
         idx_map = oidx_to_raveled_idx(
             self.full_region_idxs, self.full_sample_idxs, self.full_shape
         )
-        n_regions, n_samples = self.full_shape
-        return evolve(self, idx_map=idx_map, n_regions=n_regions, n_samples=n_samples)
+        return evolve(
+            self, idx_map=idx_map, region_subset_idxs=None, sample_subset_idxs=None
+        )

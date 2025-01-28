@@ -68,7 +68,11 @@ pub fn count_intervals(
     }
 }
 
-pub fn intervals(
+/// This is an UNSAFE function because it assumes the offsets exactly correspond to the intervals
+/// in the bigwig files. If arbitrary offsets are used, this function can cause data races or
+/// segfault by writing to unallocated memory. The only offsets that are valid are those from
+/// [`count_intervals`] for the exact same arguments sans `offsets`.
+pub unsafe fn intervals(
     paths: &Vec<PathBuf>,
     contig: &str,
     starts: ArrayView1<i32>,

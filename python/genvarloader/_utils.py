@@ -75,8 +75,11 @@ def _random_chain(
 
 
 def read_bedlike(path: Union[str, Path]) -> pl.DataFrame:
-    """Reads a bed-like (BED3+) file as a polars DataFrame. The file type is inferred
-    from the file extension.
+    """Reads a bed-like (i.e. `BED3+ <https://genome.ucsc.edu/FAQ/FAQformat.html#format1>`_) file as a
+    polars DataFrame. The file type is inferred from the file extension. "Bed-like" refers to files
+    with extension :code:`.bed`, :code:`.narrowPeak`, :code:`.broadPeak`, or otherwise a tabular (CSV, TSV, or feather/arrow)
+    file with at least the BED3 columns. For tabular data, extra columns that are not part of the BED
+    specification are allowed and kept in the resulting DataFrame.
 
     Parameters
     ----------

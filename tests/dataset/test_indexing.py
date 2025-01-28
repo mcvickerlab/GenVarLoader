@@ -14,7 +14,7 @@ def dsi():
     idx_map = np.ravel_multi_index(
         (r_idx[:, None], s_idx), (n_regions, n_samples)
     ).ravel()
-    return DatasetIndexer(r_idx, s_idx, idx_map, n_regions, n_samples)
+    return DatasetIndexer(r_idx, s_idx, idx_map)
 
 
 def case_1_region_all_samples():

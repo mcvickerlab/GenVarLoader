@@ -13,6 +13,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    cast,
 )
 
 import numba as nb
@@ -251,9 +252,7 @@ class Dataset:
         else:
             sequence_type = None
 
-        idxer = DatasetIndexer(
-            r_idx_map, np.arange(len(samples)), idx_map, len(regions), len(samples)
-        )
+        idxer = DatasetIndexer(r_idx_map, np.arange(len(samples)), idx_map)
 
         dataset = cls(
             path=path,
@@ -333,7 +332,7 @@ class Dataset:
                     return_tracks = [return_tracks]
                 if missing := set(return_tracks).difference(self.available_tracks):
                     raise ValueError(
-                        f"Intervals {missing} not found. Available intervals: {self.available_tracks}"
+                        f"Track(s) {missing} not found. Available track(s): {self.available_tracks}"
                     )
                 to_evolve["active_tracks"] = return_tracks
 
@@ -364,10 +363,10 @@ class Dataset:
 
     def subset_to(
         self,
-        regions: Optional[Idx] = None,
-        samples: Optional[Union[Idx, Sequence[str]]] = None,
+        regions: Optional[Union[Idx, NDArray[np.bool_], pl.Series]] = None,
+        samples: Optional[Union[Idx, NDArray[np.bool_], Sequence[str]]] = None,
     ) -> "Dataset":
-        """Subset the dataset to specific regions and/or samples.
+        """Subset the dataset to specific regions and/or samples by index or a boolean mask.
 
         Parameters
         ----------
@@ -375,6 +374,60 @@ class Dataset:
             The regions to subset to.
         samples
             The samples to subset to.
+
+        Examples
+        --------
+        Subsetting to the first 10 regions:
+
+        .. code-block:: python
+
+            ds.subset_to(slice(10))
+
+        Subsetting to the 2nd and 4th samples:
+
+        .. code-block:: python
+
+            ds.subset_to(samples=[1, 3])
+
+
+        Subsetting to chromosome 1, assuming it's labeled :code:`"chr1"`:
+
+        .. code-block:: python
+
+            r_idx = ds.input_regions["chrom"] == "chr1"
+            ds.subset_to(regions=r_idx)
+
+
+        Subsetting to regions labeled by a column "split", assuming "split" existed in the input regions:
+
+        .. code-block:: python
+
+            r_idx = ds.input_regions["split"] == "train"
+            ds.subset_to(regions=r_idx)
+
+
+        Subsetting to dataset regions that intersect with another set of regions (requires `PyRanges <https://github.com/pyranges/pyranges>`_):
+
+        .. code-block:: python
+
+            import pyranges as pr
+
+            regions = gvl.read_bedlike("regions.bed")
+            renamer = {
+                "chrom": "Chromosome",
+                "chromStart": "Start",
+                "chromEnd": "End",
+                "strand": "Strand"
+            }
+            regions_pr = pr.PyRanges(bed.rename(renamer, strict=False).to_pandas())
+            input_regions_pr = pr.PyRanges(
+                ds.input_regions
+                .with_row_index()
+                .rename(renamer, strict=False)
+                .to_pandas()
+            )
+            r_idx = input_regions_pr.overlap(regions_pr).df["index"].to_numpy()
+            ds.subset_to(regions=r_idx)
         """
         if regions is None and samples is None:
             return self
@@ -388,13 +441,26 @@ class Dataset:
                     [i for i, s in enumerate(self._full_samples) if s in _samples],
                     np.intp,
                 )
+            elif isinstance(samples, np.ndarray) and np.issubdtype(
+                samples.dtype, np.bool_
+            ):
+                sample_idxs = np.nonzero(samples)[0]
             else:
+                samples = cast(Idx, samples)  # how to narrow dtype? is this possible?
                 sample_idxs = idx_like_to_array(samples, self.n_samples)
         else:
             sample_idxs = self._idxer.sample_idxs
 
         if regions is not None:
-            region_idxs = idx_like_to_array(regions, self.n_regions)
+            if isinstance(regions, pl.Series):
+                regions = regions.to_numpy()
+                if np.issubdtype(regions.dtype, np.bool_):
+                    regions = np.nonzero(regions)[0]
+                elif not np.issubdtype(regions.dtype, np.integer):
+                    raise ValueError("`regions` must be index-like or a boolean mask.")
+            else:
+                regions = cast(Idx, regions)  # how to narrow dtype? is this possible?
+                region_idxs = idx_like_to_array(regions, self.n_regions)
         else:
             region_idxs = np.arange(self.n_regions, dtype=np.intp)
 
@@ -738,7 +804,7 @@ class Dataset:
     """The full list of samples in the dataset."""
 
     _full_regions: NDArray[np.int32] = field(alias="_full_regions")
-    """The full regions in the dataset, sorted by contig and start."""
+    """The full regions in the dataset, sorted by contig and start, as they are ordered on-disk."""
 
     _rng: np.random.Generator = field(alias="_rng")
     """The random number generator used for jittering and shifting haplotypes that are longer than the output length."""
@@ -773,34 +839,43 @@ class Dataset:
 
     @property
     def is_subset(self) -> bool:
+        """Whether the dataset is a subset."""
         return self._idxer.is_subset
 
     @property
     def has_reference(self) -> bool:
+        """Whether the dataset was provided a reference genome."""
         return self._reference is not None
 
     @property
     def has_genotypes(self) -> bool:
+        """Whether the dataset has genotypes."""
         return self._variants is not None
 
     @property
     def has_intervals(self) -> bool:
+        """Whether the dataset has intervals."""
         return len(self.available_tracks) > 0
 
     @property
     def samples(self) -> List[str]:
+        """The samples in the dataset."""
         if not self.is_subset:
             return self._full_samples
-        else:
-            return [self._full_samples[i] for i in self._idxer.sample_idxs]
+        return [self._full_samples[i] for i in self._idxer.sample_idxs]
 
     @property
     def regions(self) -> pl.DataFrame:
+        """The regions in the dataset."""
         return regions_to_bed(self._full_regions[self._idxer.region_idxs], self.contigs)
 
     @property
     def input_regions(self) -> pl.DataFrame:
-        return self._full_input_regions[self._idxer.region_idxs]
+        """The input regions in the dataset as they were provided to :func:`gvl.write() <genvarloader.write()>` i.e. with all BED columns plus any
+        extra columns that were present."""
+        if self._idxer.region_subset_idxs is None:
+            return self._full_input_regions
+        return self._full_input_regions[self._idxer.region_subset_idxs]
 
     @property
     def n_regions(self) -> int:
@@ -814,6 +889,7 @@ class Dataset:
 
     @property
     def output_length(self) -> int:
+        """The output length of the dataset."""
         return self.region_length - 2 * self.jitter
 
     @property
@@ -863,6 +939,11 @@ class Dataset:
         idx: Idx
             The index or indices to get. If a single index is provided, the output will be squeezed.
         """
+        if self.sequence_type is None and self.active_tracks is None:
+            raise ValueError(
+                "No sequences or tracks are available. Provide a reference genome or activate at least one track."
+            )
+
         if isinstance(idx, tuple):
             return self.isel(*idx)
 

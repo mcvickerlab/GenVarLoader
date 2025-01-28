@@ -60,7 +60,8 @@ import genvarloader as gvl
 
 dataset = gvl.Dataset.open(path="cool_dataset.gvl", reference="hg38.fa")
 train_samples = ["David", "Aaron"]
-train_dataset = dataset.subset_to(regions="train_regions.bed", samples=train_samples)
+# use first 10 regions for training
+train_dataset = dataset.subset_to(regions=slice(10), samples=train_samples)
 train_dataloader = train_dataset.to_dataloader(batch_size=32, shuffle=True, num_workers=1)
 
 # use it in your training loop
@@ -74,7 +75,6 @@ for haplotypes, tracks in train_dataloader:
 dataset[99]  # 100-th instance of the raveled dataset
 dataset[0, 9]  # first region, 10th sample
 dataset.isel(regions=0, samples=9)
-dataset.sel(regions=dataset.get_bed()[0], samples=dataset.samples[9])
 dataset[:10]  # first 10 instances
 dataset[:10, :5]  # first 10 regions and 5 samples
 ```
