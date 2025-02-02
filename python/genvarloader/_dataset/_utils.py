@@ -16,11 +16,11 @@ def padded_slice(arr: NDArray, start: int, stop: int, pad_val: int):
     pad_left = -min(0, start)
     pad_right = max(0, stop - len(arr))
 
-    if pad_left == 0 and pad_right == 0:
-        out = arr[start:stop]
-        return out
-
     out = np.empty(stop - start, arr.dtype)
+
+    if pad_left == 0 and pad_right == 0:
+        out[:] = arr[start:stop]
+        return out
 
     if pad_left > 0 and pad_right > 0:
         out_stop = len(out) - pad_right
