@@ -960,6 +960,8 @@ def reconstruct_haplotypes_from_sparse(
     ref: NDArray[np.uint8],
     ref_offsets: NDArray[np.uint64],
     pad_char: int,
+    annot_v_idxs: Optional[NDArray[np.int32]] = None,
+    annot_ref_pos: Optional[NDArray[np.int32]] = None,
 ):
     """Reconstruct haplotypes from reference sequence and variants.
 
@@ -991,12 +993,10 @@ def reconstruct_haplotypes_from_sparse(
         Shape = (n_contigs) Offsets of reference sequences.
     pad_char : int
         Padding character.
-    n_samples : int
-        Number of samples.
-    ploidy : int
-        Ploidy.
-    n_regions : int
-        Number of regions.
+    annot_v_idxs : Optional[NDArray[np.int32]]
+        Shape = (n_regions, ploidy, out_length) Variant indices for annotations.
+    annot_ref_pos : Optional[NDArray[np.int32]]
+        Shape = (n_regions, ploidy, out_length) Reference positions for annotations.
     """
     n_regions = out.shape[0]
     ploidy = out.shape[1]
@@ -1011,6 +1011,12 @@ def reconstruct_haplotypes_from_sparse(
         for hap in nb.prange(ploidy):
             o_idx = offset_idx[query, hap]
             _out = out[query, hap]
+            _annot_v_idxs = (
+                annot_v_idxs[query, hap] if annot_v_idxs is not None else None
+            )
+            _annot_ref_pos = (
+                annot_ref_pos[query, hap] if annot_ref_pos is not None else None
+            )
             shift = shifts[query, hap]
 
             reconstruct_haplotype_from_sparse(
@@ -1026,6 +1032,9 @@ def reconstruct_haplotypes_from_sparse(
                 ref_start + shift,  # shift ref_start as well
                 _out,
                 pad_char,
+                None,
+                _annot_v_idxs,
+                _annot_ref_pos,
             )
 
 
@@ -1045,6 +1054,8 @@ def reconstruct_haplotypes_from_sparse_somatic(
     ref_offsets: NDArray[np.uint64],
     pad_char: int,
     keep: NDArray[np.bool_],
+    annot_v_idxs: Optional[NDArray[np.int32]] = None,
+    annot_ref_pos: Optional[NDArray[np.int32]] = None,
 ):
     """Reconstruct haplotypes from reference sequence and unphased variants. Note this is
     non-deterministic due to parallel execution, regardless of seeding.
@@ -1080,6 +1091,11 @@ def reconstruct_haplotypes_from_sparse_somatic(
     dosages : NDArray[np.float32]
         Shape = (variants) Dosages.
     keep: NDArray[np.bool_]
+        Shape = (variants) Keep mask for genotypes.
+    annot_v_idxs : Optional[NDArray[np.int32]]
+        Shape = (n_regions, ploidy, out_length) Variant indices for annotations.
+    annot_ref_pos : Optional[NDArray[np.int32]]
+        Shape = (n_regions, ploidy, out_length) Reference positions for annotations.
     """
     n_regions = out.shape[0]
     ploidy = out.shape[1]
@@ -1095,6 +1111,12 @@ def reconstruct_haplotypes_from_sparse_somatic(
         for hap in nb.prange(ploidy):
             o_idx = offset_idxs[query, hap]
             _out = out[query, hap]
+            _annot_v_idxs = (
+                annot_v_idxs[query, hap] if annot_v_idxs is not None else None
+            )
+            _annot_ref_pos = (
+                annot_ref_pos[query, hap] if annot_ref_pos is not None else None
+            )
             shift = shifts[query, hap]
 
             o_s, o_e = offsets[o_idx], offsets[o_idx + 1]
@@ -1114,6 +1136,8 @@ def reconstruct_haplotypes_from_sparse_somatic(
                 _out,
                 pad_char,
                 qh_keep,
+                _annot_v_idxs,
+                _annot_ref_pos,
             )
 
 
@@ -1132,6 +1156,8 @@ def reconstruct_haplotype_from_sparse(
     out: NDArray[np.uint8],
     pad_char: int,
     keep: Optional[NDArray[np.bool_]] = None,
+    annot_v_idxs: Optional[NDArray[np.int32]] = None,
+    annot_ref_pos: Optional[NDArray[np.int32]] = None,
 ):
     """Reconstruct a haplotype from reference sequence and variants.
 
@@ -1163,6 +1189,10 @@ def reconstruct_haplotype_from_sparse(
         Padding character.
     keep: Optional[NDArray[np.bool_]]
         Shape = (variants) Keep mask for genotypes.
+    annot_v_idxs: Optional[NDArray[np.int32]]
+        Shape = (out_length) Variant indices for annotations.
+    annot_ref_pos: Optional[NDArray[np.int32]]
+        Shape = (out_length) Reference positions for annotations
     """
     _variant_idxs = variant_idxs[offsets[offset_idx] : offsets[offset_idx + 1]]
     length = len(out)
@@ -1243,15 +1273,29 @@ def reconstruct_haplotype_from_sparse(
         if ref_idx < 0:
             pad_len = -ref_idx
             out[out_idx : out_idx + pad_len] = pad_char
+            if annot_v_idxs is not None:
+                annot_v_idxs[out_idx : out_idx + pad_len] = -1
+            if annot_ref_pos is not None:
+                annot_ref_pos[out_idx : out_idx + pad_len] = -1
             out_idx += pad_len
             ref_idx = 0
             ref_len -= pad_len
         out[out_idx : out_idx + ref_len] = ref[ref_idx : ref_idx + ref_len]
+        if annot_v_idxs is not None:
+            annot_v_idxs[out_idx : out_idx + ref_len] = -1
+        if annot_ref_pos is not None:
+            annot_ref_pos[out_idx : out_idx + ref_len] = np.arange(
+                ref_idx, ref_idx + ref_len
+            )
         out_idx += ref_len
 
-        # insertions + substitions
+        # indels + substitions
         writable_length = min(v_len, length - out_idx)
         out[out_idx : out_idx + writable_length] = allele[:writable_length]
+        if annot_v_idxs is not None:
+            annot_v_idxs[out_idx : out_idx + writable_length] = v_idx
+        if annot_ref_pos is not None:
+            annot_ref_pos[out_idx : out_idx + writable_length] = v_pos
         out_idx += writable_length
         # +1 because ALT alleles always replace 1 nt of reference for a
         # normalized VCF
@@ -1272,16 +1316,30 @@ def reconstruct_haplotype_from_sparse(
         if ref_idx < 0:
             pad_len = -ref_idx
             out[out_idx : out_idx + pad_len] = pad_char
+            if annot_v_idxs is not None:
+                annot_v_idxs[out_idx : out_idx + pad_len] = -1
+            if annot_ref_pos is not None:
+                annot_ref_pos[out_idx : out_idx + pad_len] = -1
             out_idx += pad_len
             ref_idx = 0
 
+        # fill with reference sequence
         writable_ref = min(unfilled_length, len(ref) - ref_idx)
         out_end_idx = out_idx + writable_ref
         ref_end_idx = ref_idx + writable_ref
         out[out_idx:out_end_idx] = ref[ref_idx:ref_end_idx]
+        if annot_v_idxs is not None:
+            annot_v_idxs[out_idx:out_end_idx] = -1
+        if annot_ref_pos is not None:
+            annot_ref_pos[out_idx:out_end_idx] = np.arange(ref_idx, ref_end_idx)
 
+        # pad with N's
         if out_end_idx < length:
             out[out_end_idx:] = pad_char
+            if annot_v_idxs is not None:
+                annot_v_idxs[out_end_idx:] = -1
+            if annot_ref_pos is not None:
+                annot_ref_pos[out_end_idx:] = -1
 
 
 UNSEEN_VARIANT = np.iinfo(np.uint32).max

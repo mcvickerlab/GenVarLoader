@@ -86,9 +86,40 @@ class _Variants:
 
 @define(frozen=True)
 class Dataset:
-    """A dataset of genotypes, reference sequences, and intervals. Note: this class is not meant to be instantiated directly.
-    Use the :py:meth:`Dataset.open() <genvarloader.Dataset.open()>` method to open a dataset after writing the data with :py:func:`genvarloader.write()`
-    or the GenVarLoader CLI.
+    """A dataset of genotypes, reference sequences, and intervals.
+
+    .. note::
+
+        This class is not meant to be instantiated directly. Use the :py:meth:`Dataset.open() <genvarloader.Dataset.open()>`
+        method to open a dataset after writing the data with :py:func:`genvarloader.write()` or the GenVarLoader CLI.
+
+    GVL Datasets act like a set of lazy arrays that can be lazily subset or eagerly indexed similar to a NumPy array. They
+    have an effective shape of :code:`(n_regions, n_samples, output_length)`, but only the region and sample dimensions
+    can be indexed directly since the return value is typically a tuple of arrays.
+
+    **Eager indexing**
+
+    .. code-block:: python
+
+        dataset[99]  # 100-th instance of the raveled dataset
+        dataset[0, 9]  # first region, 10th sample
+        dataset.isel(regions=0, samples=9)  # equivalent to the above
+        dataset[:10]  # first 10 instances
+        dataset[:10, :5]  # first 10 regions and 5 samples
+        dataset[[3, 0, 1]]  # 4th, 1st, and 2nd instances
+        dataset[[2, 2], [0, 1]]  # 3rd region, 1st and 2nd samples
+
+    **Lazy indexing**
+
+    See :py:meth:`Dataset.subset_to() <genvarloader.Dataset.subset_to()>`. This is useful, for example, to create
+    splits for training, validation, and testing, or filter out regions or samples after writing a full dataset.
+
+    **Return values**
+
+    The return value depends on the :code:`Dataset` settings, namely :attr:`sequence_type <genvarloader.Dataset.sequence_type>`,
+    :attr:`active_tracks <genvarloader.Dataset.active_tracks>`, :attr:`return_annotations <genvarloader.Dataset.return_annotations>`,
+    :attr:`return_indices <genvarloader.Dataset.return_indices>`, and :attr:`transform <genvarloader.Dataset.transform>`. These can
+    all be modified after opening a :code:`Dataset` using :py:meth:`Dataset.with_settings() <genvarloader.Dataset.with_settings()>`.
     """
 
     @classmethod
@@ -103,6 +134,7 @@ class Dataset:
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
         deterministic: bool = False,
+        return_annotations: bool = False,
     ) -> "Dataset":
         """Open a dataset from a path. If no reference genome is provided, the dataset can only yield tracks.
 
@@ -139,6 +171,8 @@ class Dataset:
             shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
             and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
             can be returned.
+        return_annotations
+            Whether to return sequence annotations. See :attr:`Dataset.return_annotations <genvarloader.Dataset.return_annotations>` for more information.
         """
 
         if return_sequences is False:
@@ -153,6 +187,7 @@ class Dataset:
             seed=seed,
             jitter=jitter,
             return_indices=return_indices,
+            return_annotations=return_annotations,
         )
 
         if reference is None and ds.has_genotypes:
@@ -169,6 +204,7 @@ class Dataset:
         path: Union[str, Path],
         reference: Optional[Union[str, Path]],
         deterministic: bool,
+        return_annotations: bool = False,
     ) -> "Dataset":
         """Open a dataset from a path. If no reference genome is provided, the dataset can only yield tracks.
 
@@ -183,6 +219,8 @@ class Dataset:
             shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
             and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
             can be returned.
+        return_annotations : bool, default False
+            Whether to return sequence annotations.
         """
 
         path = Path(path)
@@ -265,6 +303,7 @@ class Dataset:
             ploidy=ploidy,
             available_tracks=tracks,
             sequence_type=sequence_type,
+            return_annotations=return_annotations,
             active_tracks=active_tracks,
             phased=phased,
             _full_samples=samples,
@@ -287,6 +326,7 @@ class Dataset:
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
+        return_annotations: Optional[bool] = None,
     ) -> "Dataset":
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -295,15 +335,17 @@ class Dataset:
         return_sequences
             The sequence type to return. Set this to False to disable returning sequences entirely.
         return_tracks
-            The tracks to return, by default None. Set this to False to disable returning tracks entirely.
+            The tracks to return. Set this to False to disable returning tracks entirely.
         transform
-            The transform to set, by default None
+            Transform to apply to data.
         seed
-            The seed to set, by default None
+            Random seed for non-deterministic operations e.g. jittering and shifting longer-than-requested haplotypes.
         jitter
-            The jitter to set, by default None
+            How much jitter to use. Must be non-negative and <= the :attr:`max_jitter <genvarloader.Dataset.max_jitter>` of the dataset.
         return_indices
-            Whether to return indices, by default None
+            Whether to return indices.
+        return_annotations
+            Whether to return sequence annotations. See :attr:`Dataset.return_annotations <genvarloader.Dataset.return_annotations>` for more information.
         """
         to_evolve: Dict[str, Any] = {}
 
@@ -358,6 +400,9 @@ class Dataset:
 
         if return_indices is not None:
             to_evolve["return_indices"] = return_indices
+
+        if return_annotations is not None:
+            to_evolve["return_annotations"] = return_annotations
 
         return evolve(self, **to_evolve)
 
@@ -513,10 +558,19 @@ class Dataset:
             Set to True to have the data reshuffled at every epoch.
         sampler
             Defines the strategy to draw samples from the dataset. Can be any :py:class:`Iterable <typing.Iterable>` with :code:`__len__` implemented. If specified, shuffle must not be specified.
+
+            .. important::
+                Do not provide a :external+torch:class:`BatchSampler <torch.utils.data.BatchSampler>` here. GVL Datasets use multithreading when indexed with batches of indices to avoid the overhead of multi-processing.
+                To leverage this, GVL will automatically wrap the :code:`sampler` with a :external+torch:class:`BatchSampler <torch.utils.data.BatchSampler>`
+                so that lists of indices are given to the GVL Dataset instead of one index at a time. See `this post <https://discuss.pytorch.org/t/dataloader-sample-by-slices-from-dataset/113005>`_
+                for more information.
         num_workers
-            How many subprocesses to use for dataloading. :code:`0` means that the data will be loaded in the main process. For GenVarLoader, it is generally best to set this to 0 or 1 since almost everything in
-            GVL is multithreaded. However, if you are using a transform that is compute intensive and single threaded, there may
-            be a benefit to setting this > 1.
+            How many subprocesses to use for dataloading. :code:`0` means that the data will be loaded in the main process.
+
+            .. tip::
+                For GenVarLoader, it is generally best to set this to 0 or 1 since almost everything in
+                GVL is multithreaded. However, if you are using a transform that is compute intensive and single threaded, there may
+                be a benefit to setting this > 1.
         collate_fn
             Merges a list of samples to form a mini-batch of Tensor(s).
         pin_memory
@@ -784,6 +838,42 @@ class Dataset:
     sequence_type: Optional[Literal["reference", "haplotypes"]]
     """The type of sequence to return."""
 
+    return_annotations: bool
+    """Whether to return sequence annotations for haplotypes. If :code:`True`, haplotypes will instead be returned as a dictionary
+    of the form:
+
+    .. code-block:: python
+    
+        {
+            "haplotypes": NDArray[np.bytes_],
+            "variant_indices": NDArray[np.int32],
+            "positions": NDArray[np.int32],
+        }
+    
+    where :code:`"haplotypes"` are the haplotypes as bytes/S1, and :code:`"variant_indices"` and :code:`"positions"` are
+    arrays with the same shape as :code:`"haplotypes"` that annotate every nucleotide with the variant index and
+    reference position it corresponds to. A variant index of -1 corresponds to a reference nucleotide, and a reference
+    position of -1 corresponds to padded nucleotides that were added for regions beyond the bounds of the reference genome.
+    i.e. if the region's start position is negative or the end position is beyond the end of the reference genome.
+
+    For example, a toy result for :code:`chr1:1-10` could be:
+
+    .. code-block:: text
+
+        haplotypes:        A C G  T ...  T T  A ...
+        variant_indices:  -1 3 3 -1 ... -1 4 -1 ...
+        positions:         1 2 2  3 ...  6 7  9 ...
+    
+    where variant 3 is a 1 bp :code:`CG` insertion and variant 4 is a 1 bp deletion :code:`T-`. Note that the first nucleotide
+    of every indel maps to a reference position since :func:`gvl.write() <genvarloader.write()>` expects that variants
+    are all left-aligned.
+
+    .. note::
+
+        If :attr:`Dataset.sequence_type <genvarloader.Dataset.sequence_type>` is set to :code:`"reference"` or no reference FASTA was
+        provided to :meth:`Dataset.open() <genvarloader.Dataset.open()>`, this will be ignored.
+    """
+
     active_tracks: Optional[List[str]]
     """The active tracks to return."""
 
@@ -933,7 +1023,7 @@ class Dataset:
     def __getitem__(
         self, idx: Union[Idx, Tuple[Idx, Idx]]
     ) -> Union[NDArray, Tuple[NDArray, ...], Any]:
-        """Get a batch of haplotypes and tracks or intervals and tracks.
+        """Reconstruct some haplotypes and/or tracks.
 
         Parameters
         ----------
@@ -963,6 +1053,7 @@ class Dataset:
             idx = idx
             squeeze = False
 
+        # map the input index to the on-disk index
         _idx = self._idxer[idx]
 
         if _idx.ndim > 1:
@@ -1008,13 +1099,17 @@ class Dataset:
                 # (b p)
                 shifts = np.zeros((len(geno_offset_idx), self.ploidy), dtype=np.int32)
             # (b p l)
-            haps = self._get_haplotypes(geno_offset_idx, r_idx, shifts, keep)
+            haps, maybe_annot_v_idx, maybe_annot_pos = self._get_haplotypes(
+                geno_offset_idx, r_idx, shifts, keep
+            )
             if should_rc:
                 haps[to_rc] = sp.DNA.reverse_complement(haps[to_rc], -1)
             if not self.phased:
                 # (b 1 l) -> (b l)
                 haps = haps.squeeze(1)
             out.append(haps)
+            if maybe_annot_v_idx is not None and maybe_annot_pos is not None:
+                out.extend((maybe_annot_v_idx, maybe_annot_pos))
         elif self.sequence_type == "reference":
             if TYPE_CHECKING:
                 assert self._reference is not None
@@ -1065,9 +1160,13 @@ class Dataset:
         if self.return_indices:
             out.extend((_idx, r_idx, s_idx))
 
-        _out = tuple(out)
+        if self.return_annotations:
+            seq_out = dict(zip(("haplotypes", "variant_indices", "positions"), out[:3]))
+            _out = (seq_out, *out[3:])
+        else:
+            _out = tuple(out)
 
-        if len(out) == 1:
+        if len(_out) == 1:
             _out = _out[0]
 
         if self.transform is not None:
@@ -1175,7 +1274,9 @@ class Dataset:
         region_idx: NDArray[np.intp],
         shifts: NDArray[np.int32],
         keep: Optional[NDArray[np.bool_]],
-    ) -> NDArray[np.bytes_]:
+    ) -> Tuple[
+        NDArray[np.bytes_], Optional[NDArray[np.int32]], Optional[NDArray[np.int32]]
+    ]:
         if TYPE_CHECKING:
             assert self._genotypes is not None
             assert self._reference is not None
@@ -1184,6 +1285,12 @@ class Dataset:
 
         n_queries = len(region_idx)
         haps = np.empty((n_queries, self.ploidy, self.region_length), np.uint8)
+        if self.return_annotations:
+            annot_v_idxs = np.empty_like(haps, np.int32)
+            annot_positions = np.empty_like(haps, np.int32)
+        else:
+            annot_v_idxs = None
+            annot_positions = None
         if isinstance(self._genotypes, SparseGenotypes):
             reconstruct_haplotypes_from_sparse(
                 geno_offset_idx,
@@ -1199,6 +1306,8 @@ class Dataset:
                 self._reference.reference,
                 self._reference.offsets,
                 self._reference.pad_char,
+                annot_v_idxs,
+                annot_positions,
             )
         else:
             assert keep is not None
@@ -1217,8 +1326,10 @@ class Dataset:
                 self._reference.offsets,
                 self._reference.pad_char,
                 keep,
+                annot_v_idxs,
+                annot_positions,
             )
-        return haps.view("S1")
+        return haps.view("S1"), annot_v_idxs, annot_positions
 
     def _get_tracks(
         self,
@@ -1299,6 +1410,6 @@ def _get_reference(
         c_s = ref_offsets[c_idx]
         c_e = ref_offsets[c_idx + 1]
         start = q[1]
-        end = q[2]
+        end = start + region_length
         out[region] = padded_slice(reference[c_s:c_e], start, end, pad_char)
     return out

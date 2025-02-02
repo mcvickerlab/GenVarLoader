@@ -18,11 +18,14 @@ def case_snps():
     offsets = np.array([0, 2], np.int64)
 
     shift = 0
-    alt_alleles = np.frombuffer(b"AT", dtype=np.uint8)
+    alt_alleles = np.frombuffer(b"A" + b"T", dtype=np.uint8)
     alt_offsets = np.array([0, 1, 2], dtype=np.uintp)
     ref = np.frombuffer(b"ACGG", dtype=np.uint8)
-    desired = np.frombuffer(b"CGT", dtype="S1")
     ref_start = 1
+
+    desired = np.frombuffer(b"CGT", dtype="S1")
+    annot_v_idxs = np.array([-1, -1, 1], dtype=np.int32)
+    annot_pos = np.array([1, 2, 3], dtype=np.int32)
 
     sparse_genos = SparseGenotypes.from_dense(
         genos=genos, first_v_idxs=first_v_idxs, offsets=offsets
@@ -36,8 +39,10 @@ def case_snps():
         alt_offsets,
         ref,
         sparse_genos,
-        desired,
         ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
     )
 
 
@@ -51,11 +56,14 @@ def case_indels():
     offsets = np.array([0, 2], np.int64)
 
     shift = 0
-    alt_alleles = np.frombuffer(b"GAT", dtype=np.uint8)
+    alt_alleles = np.frombuffer(b"G" + b"AT", dtype=np.uint8)
     alt_offsets = np.array([0, 1, 3], np.uintp)
     ref = np.frombuffer(b"ACGG", dtype=np.uint8)
-    desired = np.frombuffer(b"AGAT", dtype="S1")
     ref_start = 0
+
+    desired = np.frombuffer(b"AGAT", dtype="S1")
+    annot_v_idxs = np.array([-1, 0, 1, 1], dtype=np.int32)
+    annot_pos = np.array([0, 1, 3, 3], dtype=np.int32)
 
     sparse_genos = SparseGenotypes.from_dense(
         genos=genos, first_v_idxs=first_v_idxs, offsets=offsets
@@ -69,12 +77,14 @@ def case_indels():
         alt_offsets,
         ref,
         sparse_genos,
-        desired,
         ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
     )
 
 
-def case_spanning_del():
+def case_spanning_del_pad():
     positions = np.array([0], np.int32)
     sizes = np.array([-1], dtype=np.int32)
 
@@ -87,8 +97,11 @@ def case_spanning_del():
     alt_alleles = np.frombuffer(b"G", dtype=np.uint8)
     alt_offsets = np.array([0, 1], np.uintp)
     ref = np.frombuffer(b"ACGG", dtype=np.uint8)
-    desired = np.frombuffer(b"GGN", dtype="S1")
     ref_start = 1
+
+    desired = np.frombuffer(b"GGN", dtype="S1")
+    annot_v_idxs = np.array([-1, -1, -1], dtype=np.int32)
+    annot_pos = np.array([2, 3, -1], dtype=np.int32)
 
     sparse_genos = SparseGenotypes.from_dense(
         genos=genos, first_v_idxs=first_v_idxs, offsets=offsets
@@ -102,8 +115,10 @@ def case_spanning_del():
         alt_offsets,
         ref,
         sparse_genos,
-        desired,
         ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
     )
 
 
@@ -117,11 +132,14 @@ def case_shift_ins():
     offsets = np.array([0, 2], np.int64)
 
     shift = 1
-    alt_alleles = np.frombuffer(b"TCGA", dtype=np.uint8)
+    alt_alleles = np.frombuffer(b"TC" + b"GA", dtype=np.uint8)
     alt_offsets = np.array([0, 2, 4], np.uintp)
     ref = np.frombuffer(b"ACGG", dtype=np.uint8)
-    desired = np.frombuffer(b"TCGG", dtype="S1")
     ref_start = 0
+
+    desired = np.frombuffer(b"TCGG", dtype="S1")
+    annot_v_idxs = np.array([0, 0, -1, 1], dtype=np.int32)
+    annot_pos = np.array([1, 1, 2, 3], dtype=np.int32)
 
     sparse_genos = SparseGenotypes.from_dense(
         genos=genos, first_v_idxs=first_v_idxs, offsets=offsets
@@ -135,13 +153,15 @@ def case_shift_ins():
         alt_offsets,
         ref,
         sparse_genos,
-        desired,
         ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
     )
 
 
 @parametrize_with_cases(
-    "positions, sizes, shift, alt_alleles, alt_offsets, ref, sparse_genos, desired, ref_start",
+    "positions, sizes, shift, alt_alleles, alt_offsets, ref, sparse_genos, ref_start, desired, annot_v_idxs, annot_pos",
     cases=".",
 )
 def test_sparse(
@@ -152,11 +172,15 @@ def test_sparse(
     alt_offsets,
     ref,
     sparse_genos: SparseGenotypes,
-    desired,
     ref_start,
+    desired,
+    annot_v_idxs,
+    annot_pos,
 ):
     offset_idx = 0
     actual = np.empty(len(ref) - ref_start, np.uint8)
+    actual_annot_v_idxs = np.empty(len(ref) - ref_start, np.int32)
+    actual_annot_pos = np.empty(len(ref) - ref_start, np.int32)
     reconstruct_haplotype_from_sparse(
         offset_idx=offset_idx,
         variant_idxs=sparse_genos.variant_idxs,
@@ -170,13 +194,17 @@ def test_sparse(
         ref_start=ref_start,
         out=actual,
         pad_char=ord(b"N"),
+        annot_v_idxs=actual_annot_v_idxs,
+        annot_ref_pos=actual_annot_pos,
     )
 
     np.testing.assert_equal(actual.view("S1"), desired)
+    np.testing.assert_equal(actual_annot_v_idxs, annot_v_idxs)
+    np.testing.assert_equal(actual_annot_pos, annot_pos)
 
 
 # %%
 test_sparse(*case_snps())
 test_sparse(*case_indels())
-test_sparse(*case_spanning_del())
+test_sparse(*case_spanning_del_pad())
 test_sparse(*case_shift_ins())

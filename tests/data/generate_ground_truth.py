@@ -211,8 +211,9 @@ def main(
                 pbar.update()
     pbar.close()
 
-    logger.info("Generating phased and unphased datasets.")
     bed = wdir / "vcf" / f"{name}.bed"
+
+    logger.info("Generating phased dataset.")
     gvl.write(
         path=wdir / "phased_dataset.gvl",
         bed=bed,
@@ -220,6 +221,8 @@ def main(
         length=SEQ_LEN,
         overwrite=True,
     )
+
+    logger.info("Generating unphased dataset.")
     gvl.write(
         path=wdir / "unphased_dataset.gvl",
         bed=bed,
