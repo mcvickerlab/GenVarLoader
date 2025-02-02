@@ -787,7 +787,7 @@ class Records:
             f"""
             {self.__class__.__name__}
             contigs: {self.contigs}
-            n_variants: {self.n_variants})
+            n_variants: {self.n_variants}
             """
         ).strip()
 
