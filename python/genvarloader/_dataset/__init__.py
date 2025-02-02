@@ -868,6 +868,13 @@ class Dataset:
     of every indel maps to a reference position since :func:`gvl.write() <genvarloader.write()>` expects that variants
     are all left-aligned.
 
+    .. important::
+
+        The :code:`"variant_indices"` are numbered with respect to their chromosome. So a variant index of 0 corresponds to the first
+        variant on the haplotype's chromosome. Thus, if you want to map the variant index to a multi-chromosome VCF/PGEN, you will need to
+        add the number of variants on all chromosomes before the variant index to get the correct variant index in the VCF/PGEN. These values
+        are available in the dictionary `gvl.Variants.records.contig_offsets`.
+
     .. note::
 
         If :attr:`Dataset.sequence_type <genvarloader.Dataset.sequence_type>` is set to :code:`"reference"` or no reference FASTA was
