@@ -1018,7 +1018,7 @@ class Dataset:
             Is subset: {self.is_subset}
             # of regions: {self.n_regions:,}
             # of samples: {self.n_samples:,}
-            Original region length: {self.region_length - 2*self.max_jitter:,}
+            Original region length: {self.region_length - 2 * self.max_jitter:,}
             Max jitter: {self.max_jitter:,}
             Genotypes available: {genotype_status}
             Tracks available: {self.available_tracks}\
