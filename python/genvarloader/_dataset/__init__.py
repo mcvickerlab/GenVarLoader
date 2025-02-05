@@ -180,13 +180,14 @@ class Dataset:
         else:
             _reference = reference
 
-        ds = cls._open(path, _reference, deterministic).with_settings(
+        ds = cls._open(path, _reference).with_settings(
             return_sequences=return_sequences,
             return_tracks=return_tracks,
             transform=transform,
             seed=seed,
             jitter=jitter,
             return_indices=return_indices,
+            deterministic=deterministic,
             return_annotations=return_annotations,
         )
 
@@ -203,8 +204,6 @@ class Dataset:
         cls,
         path: Union[str, Path],
         reference: Optional[Union[str, Path]],
-        deterministic: bool,
-        return_annotations: bool = False,
     ) -> "Dataset":
         """Open a dataset from a path. If no reference genome is provided, the dataset can only yield tracks.
 
@@ -214,13 +213,6 @@ class Dataset:
             The path to the dataset.
         reference : Optional[Union[str, Path]], optional
             The path to the reference genome, by default None
-        deterministic : bool, optional
-            Whether to use randomized or deterministic algorithms. If set to True, this will disable random
-            shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
-            and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
-            can be returned.
-        return_annotations : bool, default False
-            Whether to return sequence annotations.
         """
 
         path = Path(path)
@@ -299,11 +291,11 @@ class Dataset:
             region_length=region_length,
             contigs=contigs,
             _full_input_regions=input_regions,
-            deterministic=deterministic,
+            deterministic=False,
             ploidy=ploidy,
             available_tracks=tracks,
             sequence_type=sequence_type,
-            return_annotations=return_annotations,
+            return_annotations=False,
             active_tracks=active_tracks,
             phased=phased,
             _full_samples=samples,
@@ -326,6 +318,7 @@ class Dataset:
         seed: Optional[int] = None,
         jitter: Optional[int] = None,
         return_indices: Optional[bool] = None,
+        deterministic: Optional[bool] = None,
         return_annotations: Optional[bool] = None,
     ) -> "Dataset":
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
@@ -344,6 +337,11 @@ class Dataset:
             How much jitter to use. Must be non-negative and <= the :attr:`max_jitter <genvarloader.Dataset.max_jitter>` of the dataset.
         return_indices
             Whether to return indices.
+        deterministic
+            Whether to use randomized or deterministic algorithms. If set to True, this will disable random
+            shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
+            and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
+            can be returned.
         return_annotations
             Whether to return sequence annotations. See :attr:`Dataset.return_annotations <genvarloader.Dataset.return_annotations>` for more information.
         """
@@ -400,6 +398,9 @@ class Dataset:
 
         if return_indices is not None:
             to_evolve["return_indices"] = return_indices
+
+        if deterministic is not None:
+            to_evolve["deterministic"] = deterministic
 
         if return_annotations is not None:
             to_evolve["return_annotations"] = return_annotations

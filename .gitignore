@@ -167,3 +167,7 @@ dmypy.json
 # already existing elements were commented out
 
 #/target
+
+# pixi environments
+.pixi
+*.egg-info
