@@ -98,7 +98,7 @@ def read_bedlike(path: Union[str, Path]) -> pl.DataFrame:
             return _read_bed_table(path)
         except ValueError:
             raise ValueError(
-                f"""Unrecognized file extension: {''.join(path.suffixes)}. Expected one 
+                f"""Unrecognized file extension: {"".join(path.suffixes)}. Expected one 
                 of .bed, .narrowPeak, .broadPeak, or a table file (e.g. .csv, .tsv)"""
             )
 
@@ -330,8 +330,8 @@ def _offsets_to_lengths(offsets: NDArray[ITYPE]) -> NDArray[ITYPE]:
 def _lengths_to_offsets(
     lengths: NDArray[np.integer], dtype: type[ITYPE] = np.int64
 ) -> NDArray[ITYPE]:
-    """Converts the number of elements in each group to offsets."""
-    offsets = np.empty(len(lengths) + 1, dtype=dtype)
+    """Converts the number of elements in each group to a 1D array of offsets."""
+    offsets = np.empty(lengths.size + 1, dtype=dtype)
     offsets[0] = 0
     np.cumsum(lengths, out=offsets[1:])
     return offsets

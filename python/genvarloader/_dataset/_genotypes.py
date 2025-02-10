@@ -668,6 +668,7 @@ def get_diffs_sparse(
     offsets: NDArray[np.int64],
     size_diffs: NDArray[np.int32],
     keep: Optional[NDArray[np.bool_]] = None,
+    keep_offsets: Optional[NDArray[np.int64]] = None,
 ):
     """Get difference in length wrt reference genome for given genotypes.
 
@@ -683,6 +684,8 @@ def get_diffs_sparse(
         Shape = (total_variants) Size of all unique variants.
     keep : Optional[NDArray[np.bool_]]
         Shape = (variants*samples*ploidy) Keep mask for genotypes.
+    keep_offsets : Optional[NDArray[np.int64]]
+        Shape = (regions*samples*ploidy + 1) Offsets into keep.
     """
     n_queries, ploidy = offset_idx.shape
     diffs = np.empty((n_queries, ploidy), np.int32)
@@ -695,8 +698,10 @@ def get_diffs_sparse(
                 diffs[query, hap] = 0
             else:
                 v_idxs = sparse_genos[o_s:o_e]
-                if keep is not None:
-                    v_idxs = v_idxs[keep[o_s:o_e]]
+                if keep is not None and keep_offsets is not None:
+                    k_idx = query * ploidy + hap
+                    qh_keep = keep[keep_offsets[k_idx] : keep_offsets[k_idx + 1]]
+                    v_idxs = v_idxs[qh_keep]
                 diffs[query, hap] = size_diffs[v_idxs].sum()
     return diffs
 
@@ -947,8 +952,9 @@ def reconstruct_haplotype_from_dense(
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def reconstruct_haplotypes_from_sparse(
-    offset_idx: NDArray[np.intp],
+    offset_idxs: NDArray[np.intp],
     out: NDArray[np.uint8],
+    out_offsets: NDArray[np.int64],
     regions: NDArray[np.int32],
     shifts: NDArray[np.int32],
     offsets: NDArray[np.int64],
@@ -960,6 +966,8 @@ def reconstruct_haplotypes_from_sparse(
     ref: NDArray[np.uint8],
     ref_offsets: NDArray[np.uint64],
     pad_char: int,
+    keep: Optional[NDArray[np.bool_]] = None,
+    keep_offsets: Optional[NDArray[np.int64]] = None,
     annot_v_idxs: Optional[NDArray[np.int32]] = None,
     annot_ref_pos: Optional[NDArray[np.int32]] = None,
 ):
@@ -970,7 +978,9 @@ def reconstruct_haplotypes_from_sparse(
     offset_idxs: NDArray[np.intp]
         Shape = (n_regions, ploidy) Indices for each region into offsets.
     out : NDArray[np.uint8]
-        Shape = (n_regions, ploidy, out_length) Output array.
+        Ragged array of shape = (n_regions, ploidy) to write haplotypes into.
+    out_offsets : NDArray[np.int64]
+        Shape = (n_regions*ploidy + 1) Offsets into out.
     regions : NDArray[np.int32]
         Shape = (n_regions, 4) Regions to reconstruct haplotypes.
     shifts : NDArray[np.uint32]
@@ -993,113 +1003,14 @@ def reconstruct_haplotypes_from_sparse(
         Shape = (n_contigs) Offsets of reference sequences.
     pad_char : int
         Padding character.
-    annot_v_idxs : Optional[NDArray[np.int32]]
-        Shape = (n_regions, ploidy, out_length) Variant indices for annotations.
-    annot_ref_pos : Optional[NDArray[np.int32]]
-        Shape = (n_regions, ploidy, out_length) Reference positions for annotations.
-    """
-    n_regions = out.shape[0]
-    ploidy = out.shape[1]
-    for query in nb.prange(n_regions):
-        q = regions[query]
-        c_idx = q[0]
-        c_s = ref_offsets[c_idx]
-        c_e = ref_offsets[c_idx + 1]
-        ref_start = q[1]
-        _reference = ref[c_s:c_e]
-
-        for hap in nb.prange(ploidy):
-            o_idx = offset_idx[query, hap]
-            _out = out[query, hap]
-            _annot_v_idxs = (
-                annot_v_idxs[query, hap] if annot_v_idxs is not None else None
-            )
-            _annot_ref_pos = (
-                annot_ref_pos[query, hap] if annot_ref_pos is not None else None
-            )
-            shift = shifts[query, hap]
-
-            reconstruct_haplotype_from_sparse(
-                o_idx,
-                sparse_genos,
-                offsets,
-                positions,
-                sizes,
-                shift,
-                alt_alleles,
-                alt_offsets,
-                _reference,
-                ref_start + shift,  # shift ref_start as well
-                _out,
-                pad_char,
-                None,
-                _annot_v_idxs,
-                _annot_ref_pos,
-            )
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def reconstruct_haplotypes_from_sparse_somatic(
-    offset_idxs: NDArray[np.intp],
-    out: NDArray[np.uint8],
-    regions: NDArray[np.int32],
-    shifts: NDArray[np.int32],
-    offsets: NDArray[np.int64],
-    sparse_genos: NDArray[np.int32],
-    positions: NDArray[np.int32],
-    sizes: NDArray[np.int32],
-    alt_alleles: NDArray[np.uint8],
-    alt_offsets: NDArray[np.int64],
-    ref: NDArray[np.uint8],
-    ref_offsets: NDArray[np.uint64],
-    pad_char: int,
-    keep: NDArray[np.bool_],
-    annot_v_idxs: Optional[NDArray[np.int32]] = None,
-    annot_ref_pos: Optional[NDArray[np.int32]] = None,
-):
-    """Reconstruct haplotypes from reference sequence and unphased variants. Note this is
-    non-deterministic due to parallel execution, regardless of seeding.
-
-    Parameters
-    ----------
-    offset_idxs: NDArray[np.intp]
-        Shape = (n_regions, ploidy) Indices for each region into offsets.
-    out : NDArray[np.uint8]
-        Shape = (n_regions, ploidy, out_length) Output array.
-    regions : NDArray[np.int32]
-        Shape = (n_regions, 4) Regions to reconstruct haplotypes.
-    shifts : NDArray[np.uint32]
-        Shape = (n_regions, ploidy) Shifts for each region.
-    offsets : NDArray[np.uint32]
-        Shape = (ploidy*n_regions + 1) Offsets into genos.
-    sparse_genos : NDArray[np.int32]
-        Shape = (variants) Sparse genotypes of variants i.e. variant indices for ALT genotypes.
-    positions : NDArray[np.int32]
-        Shape = (total_variants) Positions of variants.
-    sizes : NDArray[np.int32]
-        Shape = (total_variants) Sizes of variants.
-    alt_alleles : NDArray[np.uint8]
-        Shape = (total_alt_length) ALT alleles.
-    alt_offsets : NDArray[np.uintp]
-        Shape = (total_variants) Offsets of ALT alleles.
-    ref : NDArray[np.uint8]
-        Shape = (ref_length) Reference sequence.
-    ref_offsets : NDArray[np.uint64]
-        Shape = (n_contigs) Offsets of reference sequences.
-    pad_char : int
-        Padding character.
-    dosages : NDArray[np.float32]
-        Shape = (variants) Dosages.
-    keep: NDArray[np.bool_]
+    keep : Optional[NDArray[np.bool_]]
         Shape = (variants) Keep mask for genotypes.
     annot_v_idxs : Optional[NDArray[np.int32]]
-        Shape = (n_regions, ploidy, out_length) Variant indices for annotations.
+        Ragged array of shape (n_regions, ploidy). Variant indices for annotations.
     annot_ref_pos : Optional[NDArray[np.int32]]
-        Shape = (n_regions, ploidy, out_length) Reference positions for annotations.
+        Ragged array of shape (n_regions, ploidy). Reference positions for annotations.
     """
-    n_regions = out.shape[0]
-    ploidy = out.shape[1]
-
+    n_regions, ploidy = offset_idxs.shape
     for query in nb.prange(n_regions):
         q = regions[query]
         c_idx = q[0]
@@ -1109,18 +1020,27 @@ def reconstruct_haplotypes_from_sparse_somatic(
         _reference = ref[c_s:c_e]
 
         for hap in nb.prange(ploidy):
+            # index for full sparse genos
             o_idx = offset_idxs[query, hap]
-            _out = out[query, hap]
-            _annot_v_idxs = (
-                annot_v_idxs[query, hap] if annot_v_idxs is not None else None
-            )
-            _annot_ref_pos = (
-                annot_ref_pos[query, hap] if annot_ref_pos is not None else None
-            )
-            shift = shifts[query, hap]
 
-            o_s, o_e = offsets[o_idx], offsets[o_idx + 1]
-            qh_keep = keep[o_s:o_e]
+            # local index for subset of variants that are implied by offset_idxs
+            k_idx = query * ploidy + hap
+            if keep is not None and keep_offsets is not None:
+                qh_keep = keep[keep_offsets[k_idx] : keep_offsets[k_idx + 1]]
+            else:
+                qh_keep = None
+
+            # aligned to out sequence
+            out_s, out_e = out_offsets[k_idx], out_offsets[k_idx + 1]
+            qh_out = out[out_s:out_e]
+            qh_annot_v_idxs = (
+                annot_v_idxs[out_s:out_e] if annot_v_idxs is not None else None
+            )
+            qh_annot_ref_pos = (
+                annot_ref_pos[out_s:out_e] if annot_ref_pos is not None else None
+            )
+
+            qh_shift = shifts[query, hap]
 
             reconstruct_haplotype_from_sparse(
                 o_idx,
@@ -1128,16 +1048,16 @@ def reconstruct_haplotypes_from_sparse_somatic(
                 offsets,
                 positions,
                 sizes,
-                shift,
+                qh_shift,
                 alt_alleles,
                 alt_offsets,
                 _reference,
-                ref_start + shift,  # shift ref_start as well
-                _out,
+                ref_start + qh_shift,  # shift ref_start as well
+                qh_out,
                 pad_char,
                 qh_keep,
-                _annot_v_idxs,
-                _annot_ref_pos,
+                qh_annot_v_idxs,
+                qh_annot_ref_pos,
             )
 
 
@@ -1348,7 +1268,7 @@ UNSEEN_VARIANT = np.iinfo(np.uint32).max
 @nb.njit(parallel=True, nogil=True, cache=True)
 def mark_keep_variants(
     offset_idxs: NDArray[np.intp],
-    regions: NDArray[np.int32],
+    starts: NDArray[np.int32],
     offsets: NDArray[np.int64],
     sparse_genos: NDArray[np.int32],
     positions: NDArray[np.int32],
@@ -1357,24 +1277,38 @@ def mark_keep_variants(
     ploidy: int,
     target_len: int,
     deterministic: bool,
-) -> NDArray[np.bool_]:
-    n_regions = len(regions)
-    groups = np.empty_like(sparse_genos, np.uint32)
-    ends = np.empty_like(sparse_genos, np.uint32)
-    write_lens = np.empty_like(sparse_genos, np.uint32)
-    keep = np.empty_like(sparse_genos, np.bool_)
+) -> Tuple[NDArray[np.bool_], NDArray[np.int64]]:
+    n_regions = len(starts)
+    lengths = np.empty((n_regions, ploidy), np.int64)
+    for query in nb.prange(n_regions):
+        for hap in range(ploidy):
+            o_idx = offset_idxs[query, hap]
+            o_s, o_e = offsets[o_idx], offsets[o_idx + 1]
+            lengths[query, hap] = o_e - o_s
+
+    keep_offsets = np.empty(n_regions * ploidy + 1, np.int64)
+    keep_offsets[0] = 0
+    keep_offsets[1:] = lengths.cumsum()
+    n_variants = keep_offsets[-1]
+    groups = np.empty(n_variants, np.uint32)
+    ends = np.empty(n_variants, np.uint32)
+    write_lens = np.empty(n_variants, np.uint32)
+    keep = np.empty(n_variants, np.bool_)
 
     for query in nb.prange(n_regions):
-        ref_start: int = regions[query, 1]
+        ref_start: int = starts[query]
         for hap in nb.prange(ploidy):
             o_idx = offset_idxs[query, hap]
             o_s, o_e = offsets[o_idx], offsets[o_idx + 1]
             qh_genos = sparse_genos[o_s:o_e]
             qh_dosages = dosages[o_s:o_e]
-            qh_groups = groups[o_s:o_e]
-            qh_ends = ends[o_s:o_e]
-            qh_w_lens = write_lens[o_s:o_e]
-            qh_keep = keep[o_s:o_e]
+
+            k_idx = query * ploidy + hap
+            k_s, k_e = keep_offsets[k_idx], keep_offsets[k_idx + 1]
+            qh_groups = groups[k_s:k_e]
+            qh_ends = ends[k_s:k_e]
+            qh_w_lens = write_lens[k_s:k_e]
+            qh_keep = keep[k_s:k_e]
 
             qh_keep[:] = _mark_keep_variants(
                 qh_genos,
@@ -1388,7 +1322,7 @@ def mark_keep_variants(
                 target_len,
                 deterministic,
             )
-    return keep
+    return keep, keep_offsets
 
 
 @nb.njit(nogil=True, cache=True)

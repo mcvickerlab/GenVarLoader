@@ -15,8 +15,10 @@ class DatasetIndexer:
     """Full map from input region indices to on-disk region indices."""
     full_sample_idxs: NDArray[np.integer]
     """Full map from input sample indices to on-disk sample indices."""
-    idx_map: NDArray[np.integer]
+    i2d_map: NDArray[np.integer]
     """Map from input indices to on-disk dataset indices."""
+    d2i_map: NDArray[np.integer]
+    """Map from on-disk dataset indices to input indices."""
     region_subset_idxs: Optional[NDArray[np.integer]] = None
     """Which input regions are included in the subset."""
     sample_subset_idxs: Optional[NDArray[np.integer]] = None
@@ -43,12 +45,12 @@ class DatasetIndexer:
     @property
     def region_idxs(self) -> NDArray[np.integer]:
         """Map from input region indices to on-disk region indices."""
-        return np.unravel_index(self.idx_map[:: self.n_samples], self.full_shape)[0]
+        return np.unravel_index(self.i2d_map[:: self.n_samples], self.full_shape)[0]
 
     @property
     def sample_idxs(self) -> NDArray[np.integer]:
         """Map from input sample indices to on-disk sample indices."""
-        return np.unravel_index(self.idx_map[: self.n_samples], self.full_shape)[1]
+        return np.unravel_index(self.i2d_map[: self.n_samples], self.full_shape)[1]
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -59,10 +61,10 @@ class DatasetIndexer:
         return len(self.full_region_idxs), len(self.full_sample_idxs)
 
     def __getitem__(self, idx: Idx) -> NDArray[np.integer]:
-        return self.idx_map[idx]
+        return self.i2d_map[idx]
 
     def __len__(self):
-        return len(self.idx_map)
+        return len(self.i2d_map)
 
     def subset_to(
         self,
@@ -89,7 +91,7 @@ class DatasetIndexer:
             shape=self.shape,
         )
 
-        idx_map = self.idx_map[idx]
+        idx_map = self.i2d_map[idx]
 
         return evolve(
             self,
