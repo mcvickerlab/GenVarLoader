@@ -7,6 +7,8 @@ import numpy as np
 from attrs import define
 from numpy.typing import NDArray
 
+from ._types import Idx
+
 __all__ = ["Ragged", "RaggedIntervals", "INTERVAL_DTYPE", "pad_ragged"]
 
 DTYPE = TypeVar("DTYPE", bound=np.generic)
@@ -185,6 +187,12 @@ class Ragged(Generic[RDTYPE]):
         return (
             f"Ragged<shape={self.shape} dtype={self.data.dtype} size={self.data.size}>"
         )
+
+    def __getitem__(self, idx: Idx):
+        if isinstance(idx, (int, np.integer)):
+            return self.data[self.offsets[idx] : self.offsets[idx + 1]]
+        else:
+            raise NotImplementedError
 
 
 INTERVAL_DTYPE = np.dtype(

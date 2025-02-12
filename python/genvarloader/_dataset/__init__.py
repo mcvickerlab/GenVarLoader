@@ -922,7 +922,8 @@ class Dataset:
     """Whether the dataset returns :class:`~genvarloader.Ragged` arrays of personalized sequences and tracks. If True, each sequence
     in the :class:`~genvarloader.Ragged` arrays corresponds to the exact reference coordinates specified in the input regions, ignoring the `Dataset.output_length`.
     Because of indels, the lengths of the personalized data may vary relative to the reference coordinates. If True, this will also
-    ensure there is no random shifting of personalized data."""
+    ensure there is no random shifting of personalized data. Finally, if the output length given to :func:`gvl.write() <genvarloader.write()>`
+    was less than the length of any input region, variants that do not overlap with the """
 
     _full_input_bed: pl.DataFrame = field(alias="_full_input_bed")
     """The input BED that was used to write the dataset with no modifications e.g. no length adjustments."""
@@ -1133,17 +1134,24 @@ class Dataset:
 
             geno_offset_idx = self._get_geno_offset_idx(r_idx, s_idx)
 
-            if isinstance(self._genotypes, SparseSomaticGenotypes):
+            # (b)
+            lengths = repeat(regions[:, 2] - regions[:, 1], "b  -> b p", p=self.ploidy)
+            # may need to skip some variants if returning ragged data since
+            # the regions are different
+            if self.phased is False or self.ragged:
+                dosages: Optional[NDArray[np.float32]] = getattr(
+                    self._genotypes, "dosages", None
+                )
                 keep, keep_offsets = mark_keep_variants(
-                    offset_idxs=geno_offset_idx,
+                    geno_offset_idxs=geno_offset_idx,
                     starts=regions[:, 1],
                     offsets=self._genotypes.offsets,
                     sparse_genos=self._genotypes.variant_idxs,
                     positions=self._variants.positions,
                     sizes=self._variants.sizes,
-                    dosages=self._genotypes.dosages,
+                    dosages=dosages,
                     ploidy=self.ploidy,
-                    target_len=self.region_length,
+                    target_lengths=lengths,
                     deterministic=self.deterministic,
                 )
             else:
@@ -1152,23 +1160,24 @@ class Dataset:
 
             # (b p)
             diffs = get_diffs_sparse(
-                geno_offset_idx,
-                self._genotypes.variant_idxs,
-                self._genotypes.offsets,
-                self._variants.sizes,
-                keep,
-                keep_offsets,
+                geno_offset_idxs=geno_offset_idx,
+                geno_v_idxs=self._genotypes.variant_idxs,
+                geno_offsets=self._genotypes.offsets,
+                size_diffs=self._variants.sizes,
+                keep=keep,
+                keep_offsets=keep_offsets,
             )
 
-            if not self.deterministic:
-                # (b p)
-                shifts = self._rng.integers(0, -diffs.clip(max=0) + 1, dtype=np.int32)
-            else:
+            if self.deterministic or self.ragged:
                 # (b p)
                 shifts = np.zeros((len(geno_offset_idx), self.ploidy), dtype=np.int32)
+            else:
+                # if the haplotype is longer than the region, shift it randomly
+                # by up to the difference in length between the haplotype and the region
+                # (b p)
+                shifts = self._rng.integers(0, diffs.clip(min=0) + 1, dtype=np.int32)
 
             # (b, p)
-            lengths = np.tile(np.diff(regions[:, 1:], 1, 1), (1, self.ploidy))
             if self.ragged:
                 lengths += diffs
             # (b*p+1)
@@ -1177,7 +1186,7 @@ class Dataset:
             # (b p l), (b p l), (b p l)
             haps, maybe_annot_v_idx, maybe_annot_pos = self._get_haplotypes(
                 geno_offset_idx=geno_offset_idx,
-                region_idx=r_idx,
+                regions=regions,
                 out_offsets=out_offsets,
                 shifts=shifts,
                 keep=keep,
@@ -1390,7 +1399,7 @@ class Dataset:
     def _get_haplotypes(
         self,
         geno_offset_idx: NDArray[np.intp],
-        region_idx: NDArray[np.intp],
+        regions: NDArray[np.int32],
         out_offsets: NDArray[np.int64],
         shifts: NDArray[np.int32],
         keep: Optional[NDArray[np.bool_]],
@@ -1404,8 +1413,8 @@ class Dataset:
         ----------
         geno_offset_idx
             Shape: (queries). The genotype offset indices. i.e. the dataset indices.
-        region_idx
-            Shape: (queries). The region indices.
+        regions
+            Shape: (queries). The regions to reconstruct.
         out_offsets
             Shape: (queries+1). Offsets for haplotypes and annotations.
         shifts
@@ -1440,7 +1449,7 @@ class Dataset:
             offset_idxs=geno_offset_idx,
             out=haps.data,
             out_offsets=haps.offsets,
-            regions=self._full_regions[region_idx],
+            regions=regions,
             shifts=shifts,
             offsets=self._genotypes.offsets,
             sparse_genos=self._genotypes.variant_idxs,

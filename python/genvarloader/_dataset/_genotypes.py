@@ -663,9 +663,9 @@ def get_diffs(
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def get_diffs_sparse(
-    offset_idx: NDArray[np.intp],
-    sparse_genos: NDArray[np.int32],
-    offsets: NDArray[np.int64],
+    geno_offset_idxs: NDArray[np.intp],
+    geno_v_idxs: NDArray[np.int32],
+    geno_offsets: NDArray[np.int64],
     size_diffs: NDArray[np.int32],
     keep: Optional[NDArray[np.bool_]] = None,
     keep_offsets: Optional[NDArray[np.int64]] = None,
@@ -687,17 +687,17 @@ def get_diffs_sparse(
     keep_offsets : Optional[NDArray[np.int64]]
         Shape = (regions*samples*ploidy + 1) Offsets into keep.
     """
-    n_queries, ploidy = offset_idx.shape
+    n_queries, ploidy = geno_offset_idxs.shape
     diffs = np.empty((n_queries, ploidy), np.int32)
     for query in nb.prange(n_queries):
         for hap in nb.prange(ploidy):
-            o_idx = offset_idx[query, hap]
-            o_s, o_e = offsets[o_idx], offsets[o_idx + 1]
+            o_idx = geno_offset_idxs[query, hap]
+            o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
             n_variants = o_e - o_s
             if n_variants == 0:
                 diffs[query, hap] = 0
             else:
-                v_idxs = sparse_genos[o_s:o_e]
+                v_idxs = geno_v_idxs[o_s:o_e]
                 if keep is not None and keep_offsets is not None:
                     k_idx = query * ploidy + hap
                     qh_keep = keep[keep_offsets[k_idx] : keep_offsets[k_idx + 1]]
@@ -1267,7 +1267,7 @@ UNSEEN_VARIANT = np.iinfo(np.uint32).max
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def mark_keep_variants(
-    offset_idxs: NDArray[np.intp],
+    geno_offset_idxs: NDArray[np.intp],
     starts: NDArray[np.int32],
     offsets: NDArray[np.int64],
     sparse_genos: NDArray[np.int32],
@@ -1275,20 +1275,26 @@ def mark_keep_variants(
     sizes: NDArray[np.int32],
     dosages: NDArray[np.float32],
     ploidy: int,
-    target_len: int,
+    target_lengths: NDArray[np.int32],
     deterministic: bool,
 ) -> Tuple[NDArray[np.bool_], NDArray[np.int64]]:
+    """Mark variants to keep for each haplotype.
+
+    Parameters
+    ----------
+    """
     n_regions = len(starts)
+
     lengths = np.empty((n_regions, ploidy), np.int64)
     for query in nb.prange(n_regions):
         for hap in range(ploidy):
-            o_idx = offset_idxs[query, hap]
+            o_idx = geno_offset_idxs[query, hap]
             o_s, o_e = offsets[o_idx], offsets[o_idx + 1]
             lengths[query, hap] = o_e - o_s
-
     keep_offsets = np.empty(n_regions * ploidy + 1, np.int64)
     keep_offsets[0] = 0
     keep_offsets[1:] = lengths.cumsum()
+
     n_variants = keep_offsets[-1]
     groups = np.empty(n_variants, np.uint32)
     ends = np.empty(n_variants, np.uint32)
@@ -1298,7 +1304,7 @@ def mark_keep_variants(
     for query in nb.prange(n_regions):
         ref_start: int = starts[query]
         for hap in nb.prange(ploidy):
-            o_idx = offset_idxs[query, hap]
+            o_idx = geno_offset_idxs[query, hap]
             o_s, o_e = offsets[o_idx], offsets[o_idx + 1]
             qh_genos = sparse_genos[o_s:o_e]
             qh_dosages = dosages[o_s:o_e]
@@ -1319,7 +1325,7 @@ def mark_keep_variants(
                 qh_groups,
                 qh_ends,
                 qh_w_lens,
-                target_len,
+                target_lengths,
                 deterministic,
             )
     return keep, keep_offsets

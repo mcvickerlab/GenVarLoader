@@ -43,7 +43,7 @@ genvarloader = 'genvarloader.__main__:app'
 lint.ignore = ["E501"]
 
 [tool.pyright]
-exclude = ["archive/", "results/", "**/data", "scripts/", "dist/", "docs/"]
+inclue = ["python/", "tests/"]
 
 [tool.maturin]
 python-source = "python"

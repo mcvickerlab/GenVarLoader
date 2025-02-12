@@ -79,6 +79,15 @@ def main(
 
     with open(vcf_path, "r") as f:
         vcf = f.read().encode()
+    # left-align
+    norm_cmd = [
+        "bcftools",
+        "norm",
+        "-f",
+        str(reference),
+    ]
+    vcf = run_shell(norm_cmd, input=vcf).stdout
+
     if not multiallelic:
         logger.info("Splitting multiallelic variants.")
         split_multiallelics_cmd = [
@@ -135,12 +144,11 @@ def main(
             "plink2",
             "--vcf",
             str(filtered_vcf),
-            "dosage=VAF",
             "--make-pgen",
             "--vcf-half-call",
             "r",
             "--out",
-            str(Path.cwd() / "pgen" / "sample"),
+            str(Path.cwd() / "pgen" / f"filtered_{name}"),
         ]
     )
 
@@ -188,7 +196,7 @@ def main(
             "samtools",
             "faidx",
             str(reference),
-            f"{chrom}:{start+1}-{end}",
+            f"{chrom}:{start + 1}-{end}",
         ]
         for sample in samples:
             for hap in range(1, 3):
@@ -217,7 +225,7 @@ def main(
     gvl.write(
         path=wdir / "phased_dataset.gvl",
         bed=bed,
-        variants=wdir / "vcf" / f"filtered_{name}.vcf.gz",
+        variants=filtered_vcf,
         length=SEQ_LEN,
         overwrite=True,
     )
@@ -226,7 +234,7 @@ def main(
     gvl.write(
         path=wdir / "unphased_dataset.gvl",
         bed=bed,
-        variants=wdir / "vcf" / f"filtered_{name}.vcf.gz",
+        variants=filtered_vcf,
         length=SEQ_LEN,
         overwrite=True,
         phased=False,
