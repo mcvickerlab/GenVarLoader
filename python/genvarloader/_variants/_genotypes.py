@@ -270,12 +270,12 @@ class PgenGenos(Genotypes):
                 s, e, allele_int32_out=genotypes[rel_s:rel_e]
             )
 
-        # (v s*2)
-        genotypes = genotypes.astype(np.int8)
-        # (s*2 v)
-        genotypes = genotypes.swapaxes(0, 1)
-        # (s 2 v)
-        genotypes = np.stack([genotypes[::2], genotypes[1::2]], axis=1)
+        # (v s*2) -> (v s 2) -> (s 2 v)
+        genotypes = (
+            genotypes.astype(np.int8)
+            .reshape(n_vars, len(self.current_sample_idx), self.ploidy)
+            .transpose(1, 2, 0)
+        )
 
         genotypes = genotypes[sample_sorter, _haplotype_idx]
 
@@ -342,12 +342,12 @@ class PgenGenos(Genotypes):
             )
             self.handles[contig].read_dosages_range(s, e, dosages[rel_s:rel_e])
 
-        # (v s*2)
-        genotypes = genotypes.astype(np.int8)
-        # (s*2 v)
-        genotypes = genotypes.swapaxes(0, 1)
-        # (s 2 v)
-        genotypes = np.stack([genotypes[::2], genotypes[1::2]], axis=1)
+        # (v s*2) -> (v s 2) -> (s 2 v)
+        genotypes = (
+            genotypes.astype(np.int8)
+            .reshape(n_vars, len(self.current_sample_idx), self.ploidy)
+            .transpose(1, 2, 0)
+        )
 
         genotypes = genotypes[sample_sorter, _haplotype_idx]
 
