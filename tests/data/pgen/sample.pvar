@@ -16,10 +16,10 @@
 ##ALT=<ID=DEL:ME:ALU,Description="Deletion of ALU element">
 ##ALT=<ID=CNV,Description="Copy number variable region">
 ##bcftools_normVersion=1.21+htslib-1.21
-##bcftools_normCommand=norm -a --atom-overlaps . -f /carter/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz -m -; Date=Sat Feb  1 13:37:15 2025
+##bcftools_normCommand=norm -a --atom-overlaps . -f /carter/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz -m -; Date=Wed Feb 12 09:39:19 2025
 ##bcftools_viewVersion=1.21+htslib-1.21
-##bcftools_viewCommand=view -e TYPE="OTHER"; Date=Sat Feb  1 13:37:16 2025
-##bcftools_viewCommand=view -O z -o /carter/users/dlaub/projects/GenVarLoader/tests/data/vcf/filtered_sample.vcf.gz /carter/users/dlaub/projects/GenVarLoader/tests/data/vcf/filtered_sample.vcf; Date=Sat Feb  1 13:37:16 2025
+##bcftools_viewCommand=view -e TYPE="OTHER"; Date=Wed Feb 12 09:39:19 2025
+##bcftools_viewCommand=view -O z -o /carter/users/dlaub/projects/GenVarLoader/tests/data/vcf/filtered_sample.vcf.gz /carter/users/dlaub/projects/GenVarLoader/tests/data/vcf/filtered_sample.vcf; Date=Wed Feb 12 09:39:19 2025
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
 19	111	.	N	C	9.6	.	.
 19	1010695	.	CGAGACG	C	10	.	.
@@ -27,6 +27,10 @@
 19	1010696	.	GAGACGGGGCC	G	10	.	.
 19	1110696	.	A	AGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGAT	10	.	.
 19	1110696	.	A	G	10	.	.
+19	1210696	.	C	G	10	.	.
+19	1210696	.	C	G	10	.	.
+19	1210697	.	T	G	10	.	.
+19	1210697	.	T	A	10	.	.
 20	14370	rs6054257	N	A	29	PASS	NS=3;DP=14;AF=0.5;DB;H2
 20	17330	.	N	A	3	q10	NS=3;DP=11;AF=0.017
 20	1110696	rs6040355	G	A	67	PASS	NS=2;DP=10;AF=0.333,0.667;AA=T;DB

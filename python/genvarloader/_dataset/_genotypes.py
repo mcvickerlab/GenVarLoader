@@ -153,7 +153,7 @@ class SparseGenotypes:
         """Create an empty sparse genotypes object."""
         return cls(
             np.empty(0, np.int32),
-            np.zeros(n_regions * n_samples * ploidy + 1, np.int32),
+            np.zeros(n_regions * n_samples * ploidy + 1, np.int64),
             n_regions,
             n_samples,
             ploidy,
@@ -305,22 +305,20 @@ def get_keep_mask_for_length(
     starts: NDArray[np.int32],
     length: int,
 ):
-    """Will mark genotypes to keep based on being an ALT allele and being within the length of the haplotype.
+    """Mark genotypes to keep based on being an ALT allele and being within the length of the haplotype.
 
     Parameters
     ----------
     genos : NDArray[np.int8]
         Shape = (samples, ploidy, variants) Genotypes.
-    cum_ilens : NDArray[np.int32]
-        Shape = (samples, ploidy, variants) Cumulative lengths of haplotypes.
-    cum_r_ilens : NDArray[np.int32]
-        Shape = (samples, ploidy, regions) Cumulative lengths of regions.
     offsets : NDArray[np.int32]
         Shape = (regions + 1) Offsets into genos.
     first_v_idxs : NDArray[np.int32]
         Shape = (regions) First variant index for each region.
     positions : NDArray[np.int32]
         Shape = (total_variants) Positions of variants.
+    ilens : NDArray[np.int32]
+        Shape = (total_variants) ILEN of all unique variants.
     starts : NDArray[np.int32]
         Shape = (regions) Start of query regions.
     length : int
@@ -330,28 +328,59 @@ def get_keep_mask_for_length(
     ploidy = genos.shape[1]
     n_regions = len(starts)
     keep = np.empty_like(genos, np.bool_)
-    min_ilens = np.zeros(n_regions, np.int32)
+    out_ilens = np.zeros((n_regions, n_samples, ploidy), np.int32)
     for r in nb.prange(n_regions):
-        o_s, o_e = offsets[r], offsets[r + 1]
-        n_variants = o_e - o_s
+        v_s, v_e = offsets[r], offsets[r + 1]
+        n_variants = v_e - v_s
         if n_variants == 0:
             continue
-        r_start = starts[r]
-        _ilens = np.empty((n_samples, ploidy), np.int32)
+        ref_start = starts[r]
         for s in nb.prange(n_samples):
-            for p in nb.prange(ploidy):
+            for p in range(ploidy):
                 cum_ilen = 0
-                for v in range(o_s, o_e):
-                    v_idx = first_v_idxs[r] + v - o_s
-                    rel_pos = positions[v_idx] - r_start
-                    ilen = ilens[v_idx]
-                    if rel_pos + cum_ilen + ilen < length and genos[s, p, v] == 1:
-                        cum_ilen += ilen
-                        keep[s, p, v] = True
+                rel_ref_end = 0
+                cum_write_len = 0
+                for rel_v_idx in range(v_s, v_e):
+                    if genos[s, p, rel_v_idx] == 1:
+                        abs_v_idx = first_v_idxs[r] + rel_v_idx - v_s
+                        rel_pos = positions[abs_v_idx] - ref_start
+                        maybe_add_one = (
+                            rel_pos >= 0
+                        )  # length of alt allele is +1 only if rel_pos >= 0
+                        ilen: int = ilens[abs_v_idx]  # type: ignore
+
+                        # add dist from last variant to current variant
+                        cum_write_len += rel_pos - rel_ref_end
+
+                        # do we need this variant to reach the length?
+                        if cum_write_len < length:
+                            keep[s, p, rel_v_idx] = True
+
+                            # update rel_ref_end to end of variant
+                            v_rel_end = rel_pos - min(0, ilen) + maybe_add_one
+                            rel_ref_end = v_rel_end + maybe_add_one
+
+                            # update cum_write_len and cum_ilen
+                            missing_len = length - cum_write_len
+                            v_len = (
+                                max(rel_pos, 0)
+                                - rel_ref_end
+                                + max(0, ilen)
+                                + maybe_add_one
+                            )
+                            clip_right = max(0, v_len - missing_len)
+                            v_len -= clip_right
+                            cum_write_len += v_len
+                            cum_ilen += ilen - clip_right
                     else:
-                        keep[s, p, v] = False
-                _ilens[s, p] = cum_ilen
-        min_ilens[r] = _ilens.min()
+                        keep[s, p, rel_v_idx] = False
+                out_ilens[r, s, p] = cum_ilen
+
+    for r in nb.prange(n_regions):
+        for s in nb.prange(n_samples):
+            out_ilens[r, s, 0] = out_ilens[r, s, :].min()
+        out_ilens[r, 0, 0] = out_ilens[r, :, 0].min()
+    min_ilens = out_ilens[:, 0, 0]
     return keep, min_ilens
 
 
@@ -409,7 +438,7 @@ class SparseSomaticGenotypes:
     ----------
     variant_idxs : NDArray[np.int32]
         Shape = (variants * samples) Variant indices.
-    dosage : Optional[NDArray[np.float32]]
+    dosage : NDArray[np.float32]
         Shape = (variants * samples) Dosages e.g. VAF.
     offsets : NDArray[np.int32]
         Shape = (regions * samples * ploidy + 1) Offsets into genos.
@@ -436,8 +465,8 @@ class SparseSomaticGenotypes:
         """Create an empty sparse genotypes object."""
         return cls(
             np.empty(0, np.int32),
-            np.zeros(n_regions * n_samples + 1, np.int32),
             np.empty(0, np.float32),
+            np.zeros(n_regions * n_samples + 1, np.int64),
             n_regions,
             n_samples,
         )
@@ -1419,8 +1448,9 @@ def _mark_keep_variants(
         n_compat = 0
         v_idx: int = variant_idxs[v]
         v_pos = positions[v_idx]
+        maybe_add_one = int(v_pos >= ref_start)
         # the +1 assumes no MNPs, only SNPs and INDELs. Can relax this by passing in the alleles
-        v_ref_end = v_pos - min(0, sizes[v_idx]) + 1
+        v_ref_end = v_pos - min(0, sizes[v_idx]) + maybe_add_one
 
         if v_ref_end <= ref_start:
             # keep the variant as unseen -> skipped
@@ -1468,7 +1498,7 @@ def _mark_keep_variants(
             max(v_pos, ref_start)
             - ref_ends[v_group]
             + max(0, sizes[v_idx])
-            + (v_pos > ref_start)
+            + maybe_add_one
         )
         missing_len = target_len - write_lens[v_group]
         writable_len = min(v_write_len, missing_len)
@@ -1493,7 +1523,11 @@ def _mark_keep_variants(
     )  # reinterpret this memory to avoid allocation
     for g in range(n_groups):
         v_starts = positions[variant_idxs[groups == g]]
-        v_ends = v_starts - np.minimum(0, sizes[variant_idxs[groups == g]]) + 1
+        v_ends = (
+            v_starts
+            - np.minimum(0, sizes[variant_idxs[groups == g]])
+            + (v_starts >= ref_start)
+        )
         ref_lengths = np.minimum(v_ends, ref_ends[g]) - np.maximum(v_starts, ref_start)
         cum_prop[g] = (dosages[groups == g] / ref_lengths).sum()
     if deterministic:
