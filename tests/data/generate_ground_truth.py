@@ -6,6 +6,7 @@ from typing import Annotated, List
 import typer
 
 WDIR = Path(__file__).resolve().parent
+SEQ_LEN = 20
 
 
 def run_shell(cmd: List[str], input=None):
@@ -66,8 +67,6 @@ def main(
     )
 
     t0 = perf_counter()
-
-    SEQ_LEN = 10
 
     wdir = Path(__file__).resolve().parent
     out_dir = out_dir.resolve()
@@ -144,51 +143,61 @@ def main(
         ]
     )
 
+    bed = pl.read_csv(
+        filtered_vcf,
+        separator="\t",
+        comment_prefix="#",
+        has_header=False,
+        new_columns=[
+            "chrom",
+            "pos",
+            "ID",
+            "REF",
+            "ALT",
+            "QUAL",
+            "FILTER",
+            "INFO",
+            "FORMAT",
+            "NA00001",
+            "NA00002",
+            "NA00003",
+        ],
+    )
+    samples = bed.select(cs.matches(r"^NA\d{5}$")).columns
+
+    #! when writing the source VCF, make sure that the most distant variants within a group are not more than SEQ_LEN // 2 apart
+    #! also ensure that groups of variants are more than SEQ_LEN apart
+    #! otherwise, the logic below won't work
     bed = (
-        pl.read_csv(
-            filtered_vcf,
-            separator="\t",
-            comment_prefix="#",
-            has_header=False,
-            new_columns=[
-                "#CHROM",
-                "POS",
-                "ID",
-                "REF",
-                "ALT",
-                "QUAL",
-                "FILTER",
-                "INFO",
-                "FORMAT",
-                "NA00001",
-                "NA00002",
-                "NA00003",
-            ],
+        bed.with_columns(
+            (pl.col("pos").diff().fill_null(0) > SEQ_LEN).cum_sum().alias("group")
         )
-        .rename({"#CHROM": "CHROM"})
-        .with_columns(
-            start=pl.col("POS") - SEQ_LEN // 2, end=pl.col("POS") + -(-SEQ_LEN // 2)
+        .group_by("group")
+        .agg(
+            pl.col("chrom").first(),
+            start=pl.col("pos").min() - SEQ_LEN // 2,
+            end=pl.col("pos").min() + SEQ_LEN // 2,
         )
+        .drop("group")
         .with_row_index()
     )
 
-    samples = bed.select(cs.matches(r"^NA\d{5}$")).columns
     logger.info("Generating BED file.")
     (
-        bed.select("CHROM", "start", "end").write_csv(
+        bed.select("chrom", "start", "end").write_csv(
             WDIR / "vcf" / f"{name}.bed", include_header=False, separator="\t"
         )
     )
 
     logger.info("Generating consensus sequences.")
     pbar = tqdm(total=bed.height * len(samples) * 2)
-    for row in bed.select("index", "CHROM", "start", "end").iter_rows():
+    for row in bed.select("index", "chrom", "start", "end").iter_rows():
         row_nr, chrom, start, end = row
         subseq_cmd = [
             "samtools",
             "faidx",
             str(reference),
-            f"{chrom}:{start+1}-{end}",
+            f"{chrom}:{start + 1}-{end}",
         ]
         for sample in samples:
             for hap in range(1, 3):
