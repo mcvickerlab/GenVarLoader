@@ -1,3 +1,9 @@
+## v0.8.1 (2025-02-12)
+
+### Fix
+
+- incorrect mask from get_keep_mask_for_length (#37)
+
 ## v0.8.0 (2025-02-05)
 
 ### Feat
