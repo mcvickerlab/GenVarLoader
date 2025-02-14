@@ -5,14 +5,15 @@ import numpy as np
 from pytest_cases import fixture, parametrize_with_cases
 
 data_dir = Path(__file__).resolve().parents[1] / "data"
+ref = data_dir / "fasta" / "Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz"
 
 
 def ds_phased():
-    return data_dir / "phased_dataset.gvl"
+    return gvl.Dataset.open(data_dir / "phased_dataset.gvl", ref)
 
 
 def ds_unphased():
-    return data_dir / "unphased_dataset.gvl"
+    return gvl.Dataset.open(data_dir / "unphased_dataset.gvl", ref)
 
 
 def seqs_ref():
@@ -37,11 +38,9 @@ def bool_true():
 @parametrize_with_cases("return_indices", prefix="bool_", cases=".")
 @parametrize_with_cases("return_annotations", prefix="bool_", cases=".")
 def dataset(
-    ds_path: Path, return_sequences, return_indices: bool, return_annotations: bool
+    ds: gvl.Dataset, return_sequences, return_indices: bool, return_annotations: bool
 ):
-    return gvl.Dataset.open(
-        ds_path,
-        data_dir / "fasta" / "Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz",
+    return ds.with_settings(
         return_sequences=return_sequences,
         return_indices=return_indices,
         return_annotations=return_annotations,

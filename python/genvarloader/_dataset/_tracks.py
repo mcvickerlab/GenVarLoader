@@ -1,3 +1,5 @@
+from typing import Optional
+
 import numba as nb
 import numpy as np
 from numpy.typing import NDArray
@@ -218,7 +220,7 @@ def shift_and_realign_track(
 def shift_and_realign_tracks_sparse(
     offset_idx: NDArray[np.integer],
     variant_idxs: NDArray[np.int32],
-    offsets: NDArray[np.int64],
+    variant_offsets: NDArray[np.int64],
     regions: NDArray[np.int32],
     positions: NDArray[np.int32],
     sizes: NDArray[np.int32],
@@ -226,6 +228,9 @@ def shift_and_realign_tracks_sparse(
     tracks: NDArray[np.float32],
     track_offsets: NDArray[np.int64],
     out: NDArray[np.float32],
+    out_offsets: NDArray[np.int64],
+    keep: Optional[NDArray[np.bool_]] = None,
+    keep_offsets: Optional[NDArray[np.int64]] = None,
 ):
     """Shift and realign tracks to correspond to haplotypes.
 
@@ -250,30 +255,46 @@ def shift_and_realign_tracks_sparse(
     track_offsets : NDArray[np.int64]
         Shape = (regions + 1) Offsets into tracks.
     out : NDArray[np.float32]
-        Shape = (regions, ploidy, length) Shifted and re-aligned tracks.
+        Ragged array with shape (regions, ploidy). Shifted and re-aligned tracks.
+    out_offsets : NDArray[np.int64]
+        Shape = (regions*ploidy + 1) Offsets into out.
+    keep : Optional[NDArray[np.bool_]]
+        Shape = (variants) Keep mask for genotypes.
+    keep_offsets : Optional[NDArray[np.int64]]
+        Shape = (regions*ploidy + 1) Offsets into keep.
     """
     n_regions = len(regions)
     ploidy = out.shape[1]
     for query in nb.prange(n_regions):
         t_s, t_e = track_offsets[query], track_offsets[query + 1]
-        _track = tracks[t_s:t_e]
-        query_s = regions[query, 1]
+        q_track = tracks[t_s:t_e]
+        q_start = regions[query, 1]
 
         for hap in nb.prange(ploidy):
             o_idx = offset_idx[query, hap]
-            _out = out[query, hap]
-            _shifts = shifts[query, hap]
+
+            k_idx = query * ploidy + hap
+            if keep is not None and keep_offsets is not None:
+                k_s, k_e = keep_offsets[k_idx], keep_offsets[k_idx + 1]
+                qh_keep = keep[k_s:k_e]
+            else:
+                qh_keep = None
+
+            out_s, out_e = out_offsets[k_idx], out_offsets[k_idx + 1]
+            qh_out = out[out_s:out_e]
+            qh_shifts = shifts[query, hap]
 
             shift_and_realign_track_sparse(
                 o_idx,
                 variant_idxs,
-                offsets,
+                variant_offsets,
                 positions,
                 sizes,
-                _shifts,
-                _track,
-                query_s,
-                _out,
+                qh_shifts,
+                q_track,
+                q_start,
+                qh_out,
+                qh_keep,
             )
 
 
@@ -288,6 +309,7 @@ def shift_and_realign_track_sparse(
     track: NDArray[np.float32],
     query_start: int,
     out: NDArray[np.float32],
+    keep: Optional[NDArray[np.bool_]] = None,
 ):
     """Shift and realign a track to correspond to a haplotype.
 
@@ -305,6 +327,8 @@ def shift_and_realign_track_sparse(
         Shape = (length) Track.
     out : NDArray[np.uint8]
         Shape = (out_length) Shifted and re-aligned track.
+    keep : Optional[NDArray[np.bool_]]
+        Shape = (n_variants) Keep mask for genotypes.
     """
     _variant_idxs = variant_idxs[offsets[offset_idx] : offsets[offset_idx + 1]]
     length = len(out)
@@ -321,6 +345,9 @@ def shift_and_realign_track_sparse(
     shifted = 0
 
     for v in range(n_variants):
+        if keep is not None and not keep[v]:
+            continue
+
         variant: np.int32 = _variant_idxs[v]
 
         # position of variant relative to ref from fetch(contig, start, q_end)

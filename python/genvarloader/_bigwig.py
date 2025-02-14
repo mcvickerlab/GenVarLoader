@@ -8,14 +8,11 @@ import polars as pl
 import pyBigWig
 from numpy.typing import ArrayLike, NDArray
 
-from ._types import INTERVAL_DTYPE, RaggedIntervals, Reader
+from ._ragged import INTERVAL_DTYPE, RaggedIntervals
+from ._types import Reader
 from ._utils import _get_rel_starts, _lengths_to_offsets, _normalize_contig_name
-from .genvarloader import (
-    count_intervals as bw_count_intervals,
-)
-from .genvarloader import (
-    intervals as bw_intervals,
-)
+from .genvarloader import count_intervals as bw_count_intervals
+from .genvarloader import intervals as bw_intervals
 
 __all__ = []
 
