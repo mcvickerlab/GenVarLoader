@@ -14,6 +14,7 @@ scripts/
 .custom_benchmarks/
 benchmarking/
 genvarloader*.tar.gz
+.nfs*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -62,7 +62,7 @@ try:
     import torch
     import torch.utils.data as td
 
-    from ._torch import TorchDataset
+    from .._torch import TorchDataset
 
     TORCH_AVAILABLE = True
 except ImportError:
@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     import torch
     import torch.utils.data as td
 
-    from ._torch import TorchDataset
+    from .._torch import TorchDataset
 
 
 @define
@@ -435,7 +435,7 @@ class Dataset:
     def subset_to(
         self,
         regions: Optional[Union[Idx, NDArray[np.bool_], pl.Series]] = None,
-        samples: Optional[Union[Idx, NDArray[np.bool_], Sequence[str]]] = None,
+        samples: Optional[Union[Idx, NDArray[np.bool_], str, Sequence[str]]] = None,
     ) -> "Dataset":
         """Subset the dataset to specific regions and/or samples by index or a boolean mask. If regions or samples
         are not provided, the corresponding dimension will not be subset.
@@ -636,7 +636,9 @@ class Dataset:
             pin_memory_device=pin_memory_device,
         )
 
-    def isel(self, regions: Idx, samples: Idx) -> Any:
+    def isel(
+        self, regions: Idx, samples: Union[Idx, NDArray[np.bool_], str, Sequence[str]]
+    ) -> Any:
         """Eagerly select a subset of regions and samples from the dataset.
 
         Parameters
@@ -647,13 +649,29 @@ class Dataset:
             The indices of the samples to select.
         """
         _regions = idx_like_to_array(regions, self.n_regions)
-        _samples = idx_like_to_array(samples, self.n_samples)
+
+        if isinstance(samples, str):
+            samples = [samples]
+        if not isinstance(samples, (int, np.integer, slice)) and isinstance(
+            samples[0], str
+        ):
+            _samples = set(samples)
+            if missing := _samples.difference(self._full_samples):
+                raise ValueError(f"Samples {missing} not found in the dataset")
+            _samples = np.array(
+                [i for i, s in enumerate(self._full_samples) if s in _samples],
+                np.intp,
+            )
+        else:
+            # AFAIK there is no way to type narrow to this
+            samples = cast(Union[Idx, NDArray[np.bool_]], samples)
+            _samples = idx_like_to_array(samples, self.n_samples)
 
         if isinstance(_regions, np.ndarray) and isinstance(_samples, np.ndarray):
             _regions = _regions[:, None]
 
-        ds_idxs = np.ravel_multi_index((_regions, _samples), self.shape)
-        return self[ds_idxs]
+        ds_idx = np.ravel_multi_index((_regions, _samples), self.shape)
+        return self._getitem_raveled(ds_idx)
 
     def _sel(
         self,
@@ -701,8 +719,7 @@ class Dataset:
         if (n_missing := region_idxs.is_null().sum()) > 0:
             raise ValueError(f"{n_missing} regions not found in the dataset.")
         region_idxs = region_idxs.to_numpy()
-        ds_idxs = np.ravel_multi_index((region_idxs, sample_idxs), self.shape)
-        return self[ds_idxs]
+        return self[region_idxs, sample_idxs]
 
     def write_transformed_track(
         self,
@@ -1065,7 +1082,34 @@ class Dataset:
     def __repr__(self) -> str:
         return str(self)
 
-    def __getitem__(self, idx: Union[Idx, Tuple[Idx, Idx]]) -> Any:
+    def __getitem__(self, idx: Tuple[Idx, Union[Idx, str, Sequence[str]]]) -> Any:
+        regions, samples = idx
+        _regions = idx_like_to_array(regions, self.n_regions)
+
+        if isinstance(samples, str):
+            samples = [samples]
+        if not isinstance(samples, (int, np.integer, slice)) and isinstance(
+            samples[0], str
+        ):
+            _samples = set(samples)
+            if missing := _samples.difference(self._full_samples):
+                raise ValueError(f"Samples {missing} not found in the dataset")
+            _samples = np.array(
+                [i for i, s in enumerate(self._full_samples) if s in _samples],
+                np.intp,
+            )
+        else:
+            # AFAIK there is no way to type narrow to this
+            samples = cast(Union[Idx, NDArray[np.bool_]], samples)
+            _samples = idx_like_to_array(samples, self.n_samples)
+
+        if isinstance(_regions, np.ndarray) and isinstance(_samples, np.ndarray):
+            _regions = _regions[:, None]
+
+        ds_idx = np.ravel_multi_index((_regions, _samples), self.shape)
+        return self._getitem_raveled(ds_idx)
+
+    def _getitem_raveled(self, idx: Idx) -> Any:
         """Reconstruct some haplotypes and/or tracks.
 
         Parameters
@@ -1077,9 +1121,6 @@ class Dataset:
             raise ValueError(
                 "No sequences or tracks are available. Provide a reference genome or activate at least one track."
             )
-
-        if isinstance(idx, tuple):
-            return self.isel(*idx)
 
         # Since Dataset is a frozen class, we need to use object.__setattr__ to set the attributes
         # per attrs docs (https://www.attrs.org/en/stable/init.html#post-init)
@@ -1136,12 +1177,7 @@ class Dataset:
 
             # (b)
             lengths = repeat(regions[:, 2] - regions[:, 1], "b  -> b p", p=self.ploidy)
-            # may need to skip some variants if returning ragged data since
-            # the regions are different
-            if self.phased is False or self.ragged:
-                dosages: Optional[NDArray[np.float32]] = getattr(
-                    self._genotypes, "dosages", None
-                )
+            if isinstance(self._genotypes, SparseSomaticGenotypes):
                 keep, keep_offsets = mark_keep_variants(
                     geno_offset_idxs=geno_offset_idx,
                     starts=regions[:, 1],
@@ -1149,7 +1185,7 @@ class Dataset:
                     sparse_genos=self._genotypes.variant_idxs,
                     positions=self._variants.positions,
                     sizes=self._variants.sizes,
-                    dosages=dosages,
+                    dosages=self._genotypes.dosages,
                     ploidy=self.ploidy,
                     target_lengths=lengths,
                     deterministic=self.deterministic,
@@ -1554,7 +1590,7 @@ class Dataset:
 
     def __iter__(self):
         for i in range(len(self)):
-            yield self[i]
+            yield self._getitem_raveled(i)
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)

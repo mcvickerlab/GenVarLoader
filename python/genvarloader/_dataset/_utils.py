@@ -1,4 +1,4 @@
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, cast
 
 import numba as nb
 import numpy as np
@@ -38,11 +38,13 @@ def padded_slice(arr: NDArray, start: int, stop: int, pad_val: int):
     return out
 
 
-def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.integer]:
+def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.intp]:
     """Convert an index-like object to an array of non-negative indices. Shapes of multi-dimensional
     indices are preserved."""
     if isinstance(idx, slice):
-        _idx = np.arange(max_len)[idx]
+        _idx = np.arange(max_len, dtype=np.intp)[idx]
+    elif isinstance(idx, np.ndarray) and np.issubdtype(idx.dtype, np.bool_):
+        _idx = idx.nonzero()[0]
     elif isinstance(idx, Sequence):
         _idx = np.asarray(idx, np.intp)
     else:
@@ -51,6 +53,9 @@ def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.integer]:
     # handle negative indices
     if isinstance(_idx, (int, np.integer)):
         _idx = np.array([_idx], np.intp)
+
+    # unable to type narrow from NDArray[bool] since it's a generic type
+    _idx = cast(NDArray[np.intp], _idx)
 
     _idx[_idx < 0] += max_len
 

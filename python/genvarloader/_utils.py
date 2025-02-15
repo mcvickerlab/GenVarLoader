@@ -44,9 +44,23 @@ def _process_bed(bed: Union[str, Path, pl.DataFrame], fixed_length: int):
     return with_length(bed, fixed_length)
 
 
-def with_length(bed: pl.DataFrame, length: int):
-    """Expands the regions in a BED-like DataFrame to a fixed length centered around the
-    midpoint of the region or the "peak" column if it is present."""
+def with_length(bed: pl.DataFrame, length: int) -> pl.DataFrame:
+    """Expands or shrinks each region in a BED-like DataFrame to be fixed-length windows
+    centered around the midpoint of each region or the "peak" column if it is present.
+
+    .. important::
+
+        The "peak" column is described in the `narrowPeak <https://genome.ucsc.edu/FAQ/FAQformat.html#format12>`_
+        and `broadPeak <https://genome.ucsc.edu/FAQ/FAQformat.html#format13>`_ specifications. It is a 0-based
+        offset from chromStart, so be sure not to encode your "peak" column as an absolute position!
+
+    Parameters
+    ----------
+    bed
+        BED-like DataFrame with at least the columns "chrom", "chromStart", and "chromEnd".
+    length
+        Length of the fixed-length windows.
+    """
     if "peak" in bed:
         center = pl.col("chromStart") + pl.col("peak")
     else:

@@ -18,7 +18,9 @@ __all__ = ["Reader"]
 
 
 DTYPE = TypeVar("DTYPE", bound=np.generic)
-Idx = Union[int, np.integer, Sequence[int], NDArray[np.integer], slice]
+Idx = Union[
+    int, np.integer, Sequence[int], slice, NDArray[np.integer], NDArray[np.bool_]
+]
 ListIdx = Union[Sequence[int], NDArray[np.integer]]
 
 

@@ -168,7 +168,6 @@ class Ragged(Generic[RDTYPE]):
 
         Returns
         -------
-        NDArray
             Padded array with shape :code:`(*self.shape, self.lengths.max())`.
         """
         length = self.lengths.max()

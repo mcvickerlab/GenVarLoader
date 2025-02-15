@@ -243,7 +243,7 @@ class SparseGenotypes:
         ilens: NDArray[np.int32],
         positions: NDArray[np.int32],
         starts: NDArray[np.int32],
-        length: int,
+        lengths: NDArray[np.int32],
     ):
         """Convert dense genotypes to sparse genotypes.
 
@@ -261,8 +261,8 @@ class SparseGenotypes:
             Shape = (total_variants) Positions of unique variants.
         starts : NDArray[np.int32]
             Shape = (regions) Start of query regions.
-        length : int
-            Length of the output haplotypes.
+        lengths : NDArray[np.int32]
+            Shape = (regions) Lengths of the output haplotypes.
         """
         n_regions = len(first_v_idxs)
         n_samples = genos.shape[0]
@@ -275,10 +275,10 @@ class SparseGenotypes:
             positions,
             ilens,
             starts,
-            length,
+            lengths,
         )
         # (r)
-        max_ends: NDArray[np.int32] = starts + length - min_ilens.clip(max=0)
+        max_ends: NDArray[np.int32] = starts + lengths - min_ilens.clip(max=0)
         # (r s p)
         n_per_rsp = get_n_per_rsp(keep, offsets, n_regions)
         sparse_offsets = _lengths_to_offsets(n_per_rsp.ravel(), np.int64)
@@ -303,7 +303,7 @@ def get_keep_mask_for_length(
     positions: NDArray[np.int32],
     ilens: NDArray[np.int32],
     starts: NDArray[np.int32],
-    length: int,
+    lengths: NDArray[np.int32],
 ):
     """Will mark genotypes to keep based on being an ALT allele and being within the length of the haplotype.
 
@@ -323,8 +323,8 @@ def get_keep_mask_for_length(
         Shape = (total_variants) Positions of variants.
     starts : NDArray[np.int32]
         Shape = (regions) Start of query regions.
-    length : int
-        Length of haplotypes.
+    lengths : NDArray[np.int32]
+        Shape = (regions) Length of haplotypes.
     """
     n_samples = genos.shape[0]
     ploidy = genos.shape[1]
@@ -337,6 +337,7 @@ def get_keep_mask_for_length(
         if n_variants == 0:
             continue
         r_start = starts[r]
+        length = lengths[r]
         _ilens = np.empty((n_samples, ploidy), np.int32)
         for s in nb.prange(n_samples):
             for p in nb.prange(ploidy):

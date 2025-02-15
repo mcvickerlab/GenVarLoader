@@ -112,6 +112,22 @@ patchelf = "*"
 commitizen = "*"
 pytorch-cpu = ">=2,<3"
 
+[tool.pixi.feature.test-no-pytorch.dependencies]
+maturin = ">=1.6,<2"
+pytest = "*"
+memray = "*"
+py-spy = "*"
+icecream = "*"
+pytest-cases = "*"
+pytest-cov = "*"
+ruff = "*"
+pre-commit = "*"
+pytest-benchmark = "*"
+hypothesis = "*"
+filelock = "*"
+patchelf = "*"
+commitizen = "*"
+
 [tool.pixi.feature.docs.dependencies]
 sphinx = ">=7.4.7"
 myst-parser = "*"
@@ -136,6 +152,7 @@ python = "3.12.*"
 dev = { features = ["test", "docs"] }
 test = { features = ["test"] }
 docs = { features = ["docs"] }
+test-no-pytorch = { features = ["test-no-pytorch"] }
 test-py39 = { features = ["test", "py39"] }
 test-py310 = { features = ["test", "py310"] }
 test-py311 = { features = ["test", "py311"] }
