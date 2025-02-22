@@ -25,15 +25,17 @@
 ##ALT=<ID=DEL:ME:ALU,Description="Deletion of ALU element">
 ##ALT=<ID=CNV,Description="Copy number variable region">
 ##bcftools_normVersion=1.21+htslib-1.21
-##bcftools_normCommand=norm -a --atom-overlaps . -f /carter/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz -m -; Date=Wed Feb 12 09:39:19 2025
+##bcftools_normCommand=norm -f /carter/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz; Date=Thu Feb 20 17:05:59 2025
+##bcftools_normCommand=norm -a --atom-overlaps . -f /carter/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz -m -; Date=Thu Feb 20 17:05:59 2025
 ##bcftools_viewVersion=1.21+htslib-1.21
-##bcftools_viewCommand=view -e TYPE="OTHER"; Date=Wed Feb 12 09:39:19 2025
+##bcftools_viewCommand=view -e TYPE="OTHER"; Date=Thu Feb 20 17:05:59 2025
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	NA00001	NA00002	NA00003
 19	111	.	N	C	9.6	.	.	GT:VAF:HQ	0|0:.:10,15	0|0:.:10,10	0/1:0.3:3,3
 19	1010695	.	CGAGACG	C	10	.	.	GT:VAF:HQ	0|0:.:10,10	0|0:0.5:10,15	0/1:0.15:3,3
 19	1010696	.	GAGA	G	10	.	.	GT:VAF:HQ	1|0:0.3:10,10	0|0:0.1:10,15	0/0:.:3,3
 19	1010696	.	GAGACGGGGCC	G	10	.	.	GT:VAF:HQ	0|1:0.2:10,10	1|1:0.6:10,15	0/0:.:3,3
-19	1110696	.	A	AGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGATAGAT	10	.	.	GT:VAF:HQ	0|1:0.25:10,10	1|1:0.45:10,15	0/0:.:3,3
+19	1110696	.	A	ATT	10	.	.	GT:VAF:HQ	0|1:0.25:10,10	1|1:0.45:10,15	0/0:.:3,3
+19	1110696	.	A	T	10	.	.	GT:VAF:HQ	0|1:0.25:10,10	1|1:0.45:10,15	0/0:.:3,3
 19	1110696	.	A	G	10	.	.	GT:VAF:HQ	0|0:.:10,10	0|0:.:10,10	0/1:0.2:3,3
 19	1210696	.	C	G	10	.	.	GT:VAF:HQ	1|.:0.1:10,10	0/1:0.23:10,10	1|1:0.2:3,3
 19	1210696	.	C	G	10	.	.	GT:VAF:HQ	.|1:0.15:10,10	0|0:.:10,10	0/0:.:3,3

@@ -19,30 +19,29 @@ from typing import (
 import numba as nb
 import numpy as np
 import polars as pl
-import seqpro as sp
 from attrs import define, evolve, field
 from einops import repeat
 from loguru import logger
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
-from typing_extensions import assert_never
 
 from .._ragged import (
     INTERVAL_DTYPE,
     Ragged,
     RaggedIntervals,
+    _jitter,
     _reverse,
     _reverse_complement,
 )
 from .._torch import get_dataloader
 from .._types import Idx
-from .._utils import _lengths_to_offsets, with_length
+from .._utils import _lengths_to_offsets, idx_like_to_array, with_length
 from .._variants._records import VLenAlleles
 from ._genotypes import (
     SparseGenotypes,
     SparseSomaticGenotypes,
+    choose_unphased_variants,
     get_diffs_sparse,
-    mark_keep_variants,
     padded_slice,
     reconstruct_haplotypes_from_sparse,
 )
@@ -52,9 +51,7 @@ from ._reference import Reference
 from ._tracks import shift_and_realign_tracks_sparse
 from ._utils import (
     bed_to_regions,
-    idx_like_to_array,
     oidx_to_raveled_idx,
-    regions_to_bed,
     splits_sum_le_value,
 )
 
@@ -121,6 +118,8 @@ class Dataset:
 
     See :py:meth:`Dataset.subset_to() <genvarloader.Dataset.subset_to()>`. This is useful, for example, to create
     splits for training, validation, and testing, or filter out regions or samples after writing a full dataset.
+    This is also necessary if you intend to create a Pytorch :external+torch:class:`DataLoader <torch.utils.data.DataLoader>`
+    from the Dataset using :py:meth:`Dataset.to_dataloader() <genvarloader.Dataset.to_dataloader()>`.
 
     **Return values**
 
@@ -135,15 +134,15 @@ class Dataset:
         cls,
         path: Union[str, Path],
         reference: Optional[Union[str, Path]] = None,
+        output_length: Union[Literal["ragged", "variable"], int] = "ragged",
         return_sequences: Optional[Literal[False, "reference", "haplotypes"]] = None,
         return_tracks: Optional[Union[Literal[False], str, List[str]]] = None,
         transform: Optional[Callable] = None,
         seed: Optional[int] = None,
-        jitter: Optional[int] = None,
-        return_indices: Optional[bool] = None,
+        jitter: int = 0,
+        return_indices: bool = False,
         deterministic: bool = False,
         return_annotations: bool = False,
-        ragged: bool = False,
     ) -> "Dataset":
         """Open a dataset from a path. If no reference genome is provided, the dataset can only yield tracks.
 
@@ -182,8 +181,6 @@ class Dataset:
             can be returned.
         return_annotations
             Whether to return sequence annotations. See :attr:`Dataset.return_annotations <genvarloader.Dataset.return_annotations>` for more information.
-        ragged
-            Whether to return sequences and tracks as ragged arrays. See :attr:`Dataset.ragged <genvarloader.Dataset.ragged>` for more information.
         """
 
         if return_sequences is False:
@@ -192,6 +189,7 @@ class Dataset:
             _reference = reference
 
         ds = cls._open(path, _reference).with_settings(
+            output_length=output_length,
             return_sequences=return_sequences,
             return_tracks=return_tracks,
             transform=transform,
@@ -200,7 +198,6 @@ class Dataset:
             return_indices=return_indices,
             deterministic=deterministic,
             return_annotations=return_annotations,
-            ragged=ragged,
         )
 
         if reference is None and ds.has_genotypes:
@@ -230,7 +227,6 @@ class Dataset:
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"{path} does not exist.")
-        regions: NDArray[np.int32] = np.load(path / "regions.npy")
 
         has_intervals = (path / "intervals").exists()
         has_genotypes = (path / "genotypes").exists()
@@ -240,16 +236,24 @@ class Dataset:
             metadata = json.load(f)
         samples: List[str] = metadata["samples"]
         contigs: List[str] = metadata["contigs"]
-        region_length: int = metadata["region_length"]
         ploidy: Optional[int] = metadata.get("ploidy", None)
         max_jitter: int = metadata.get("max_jitter", 0)
         phased: Optional[bool] = metadata.get("phased", None)
 
         # read input regions and generate index map
-        input_bed = pl.read_ipc(path / "input_regions.arrow")
-        r_idx_map = input_bed["r_idx_map"].to_numpy().astype(np.intp)
-        input_bed = input_bed.drop("r_idx_map")
-        input_regions = bed_to_regions(input_bed, contigs)
+        bed = pl.read_ipc(path / "input_regions.arrow")
+        r_idx_map = bed["r_idx_map"].to_numpy().astype(np.intp)
+        bed = bed.drop("r_idx_map")
+        with pl.StringCache():
+            pl.Series(contigs, dtype=pl.Categorical)
+            sorted_bed = bed.sort(
+                pl.col("chrom").cast(pl.Categorical),
+                pl.col("chromStart"),
+                pl.col("chromEnd"),
+                maintain_order=True,
+            )
+        regions = bed_to_regions(sorted_bed, contigs)
+        jittered_regions = regions.copy()
         i2d_map = oidx_to_raveled_idx(
             r_idx_map, np.arange(len(samples)), (len(regions), len(samples))
         )
@@ -302,12 +306,13 @@ class Dataset:
 
         dataset = cls(
             path=path,
+            output_length="ragged",
             max_jitter=max_jitter,
-            jitter=max_jitter,
-            region_length=region_length,
+            jitter=0,
             contigs=contigs,
-            _full_input_bed=input_bed,
-            _full_input_regions=input_regions,
+            _full_bed=bed,
+            _full_regions=regions,
+            _jittered_regions=jittered_regions,
             deterministic=False,
             ploidy=ploidy,
             available_tracks=tracks,
@@ -315,9 +320,7 @@ class Dataset:
             return_annotations=False,
             active_tracks=active_tracks,
             phased=phased,
-            ragged=False,
             _full_samples=samples,
-            _full_regions=regions,
             _idxer=idxer,
             _rng=rng,
             _reference=_reference,
@@ -330,6 +333,7 @@ class Dataset:
 
     def with_settings(
         self,
+        output_length: Optional[Union[Literal["ragged", "variable"], int]] = None,
         return_sequences: Optional[Literal[False, "reference", "haplotypes"]] = None,
         return_tracks: Optional[Union[Literal[False], str, List[str]]] = None,
         transform: Optional[Union[Literal[False], Callable]] = None,
@@ -338,12 +342,14 @@ class Dataset:
         return_indices: Optional[bool] = None,
         deterministic: Optional[bool] = None,
         return_annotations: Optional[bool] = None,
-        ragged: Optional[bool] = None,
     ) -> "Dataset":
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
         Parameters
         ----------
+        output_length
+            The output length of the dataset. This can be set to "ragged" or "variable" to allow for variable length sequences.
+            If set to an integer, all sequences will be padded or truncated to this length.
         return_sequences
             The sequence type to return. Set this to False to disable returning sequences entirely.
         return_tracks
@@ -411,12 +417,43 @@ class Dataset:
 
         if jitter is not None:
             if jitter < 0:
-                raise ValueError("Jitter must be a non-negative integer.")
+                raise ValueError(f"Jitter ({jitter}) must be a non-negative integer.")
             elif jitter > self.max_jitter:
                 raise ValueError(
-                    f"Jitter must be less than or equal to the maximum jitter of the dataset ({self.max_jitter})."
+                    f"Jitter ({jitter}) must be less than or equal to the maximum jitter of the dataset ({self.max_jitter})."
                 )
-            to_evolve["jitter"] = jitter
+
+            if jitter != self.jitter:
+                jittered_regions = self._full_regions.copy()
+                jittered_regions[:, 1] -= jitter
+                jittered_regions[:, 2] += jitter
+
+                to_evolve["jitter"] = jitter
+                to_evolve["_jittered_regions"] = jittered_regions
+                to_evolve["_haplotype_lengths"] = None
+
+        if output_length is not None:
+            if isinstance(output_length, int):
+                if output_length < 1:
+                    raise ValueError(
+                        f"Output length ({output_length}) must be a positive integer."
+                    )
+                min_r_len: int = (
+                    self._full_regions[:, 2] - self._full_regions[:, 1]
+                ).min()
+                max_output_length = min_r_len + 2 * self.max_jitter
+
+                if jitter is not None:
+                    eff_length = output_length + 2 * jitter
+                else:
+                    eff_length = output_length + 2 * self.jitter
+
+                if eff_length > max_output_length:
+                    raise ValueError(
+                        f"Output length ({output_length}) + 2 * jitter ({jitter}) = ({eff_length}) must be less than or equal to the maximum output length of the dataset ({max_output_length})."
+                        f" The maximum output length is the minimum region length ({min_r_len}) + 2 * max_jitter ({self.max_jitter})."
+                    )
+            to_evolve["output_length"] = output_length
 
         if return_indices is not None:
             to_evolve["return_indices"] = return_indices
@@ -426,9 +463,6 @@ class Dataset:
 
         if return_annotations is not None:
             to_evolve["return_annotations"] = return_annotations
-
-        if ragged is not None:
-            to_evolve["ragged"] = ragged
 
         return evolve(self, **to_evolve)
 
@@ -521,7 +555,7 @@ class Dataset:
                 samples = cast(Idx, samples)  # how to narrow dtype? is this possible?
                 sample_idxs = idx_like_to_array(samples, self.n_samples)
         else:
-            sample_idxs = self._idxer.sample_idxs
+            sample_idxs = None
 
         if regions is not None:
             if isinstance(regions, pl.Series):
@@ -534,7 +568,7 @@ class Dataset:
                 regions = cast(Idx, regions)  # how to narrow dtype? is this possible?
                 region_idxs = idx_like_to_array(regions, self.n_regions)
         else:
-            region_idxs = np.arange(self.n_regions, dtype=np.intp)
+            region_idxs = None
 
         idxer = self._idxer.subset_to(regions=region_idxs, samples=sample_idxs)
 
@@ -551,6 +585,11 @@ class Dataset:
         if not TORCH_AVAILABLE:
             raise ImportError(
                 "Could not import PyTorch. Please install PyTorch to use torch features."
+            )
+        if self.output_length == "ragged":
+            raise ValueError(
+                """`output_length` is currently set to "ragged" and ragged output cannot be converted to PyTorch Tensors."""
+                """ Set `output_length` to "variable" or an integer."""
             )
         return TorchDataset(self)
 
@@ -636,43 +675,6 @@ class Dataset:
             pin_memory_device=pin_memory_device,
         )
 
-    def isel(
-        self, regions: Idx, samples: Union[Idx, NDArray[np.bool_], str, Sequence[str]]
-    ) -> Any:
-        """Eagerly select a subset of regions and samples from the dataset.
-
-        Parameters
-        ----------
-        regions
-            The indices of the regions to select.
-        samples
-            The indices of the samples to select.
-        """
-        _regions = idx_like_to_array(regions, self.n_regions)
-
-        if isinstance(samples, str):
-            samples = [samples]
-        if not isinstance(samples, (int, np.integer, slice)) and isinstance(
-            samples[0], str
-        ):
-            _samples = set(samples)
-            if missing := _samples.difference(self._full_samples):
-                raise ValueError(f"Samples {missing} not found in the dataset")
-            _samples = np.array(
-                [i for i, s in enumerate(self._full_samples) if s in _samples],
-                np.intp,
-            )
-        else:
-            # AFAIK there is no way to type narrow to this
-            samples = cast(Union[Idx, NDArray[np.bool_]], samples)
-            _samples = idx_like_to_array(samples, self.n_samples)
-
-        if isinstance(_regions, np.ndarray) and isinstance(_samples, np.ndarray):
-            _regions = _regions[:, None]
-
-        ds_idx = np.ravel_multi_index((_regions, _samples), self.shape)
-        return self._getitem_raveled(ds_idx)
-
     def _sel(
         self,
         regions: Union[str, Tuple[str, int, int], pl.DataFrame],
@@ -687,6 +689,7 @@ class Dataset:
         samples : str, List[str]
             The names of the samples to select.
         """
+        raise NotImplementedError
         if isinstance(regions, str):
             try:
                 split_idx = regions.rindex(":")
@@ -865,14 +868,15 @@ class Dataset:
     path: Path
     """The path to the dataset."""
 
+    output_length: Union[Literal["ragged", "variable"], int]
+    """The output length of the dataset. This can be set to :code:`"ragged"` or :code:`"variable"` to allow for variable length sequences.
+    If set to an integer, all sequences will be padded or truncated to this length."""
+
     max_jitter: int
     """The maximum jitter allowable by the underlying data written to disk."""
 
     jitter: int
     """The current jitter."""
-
-    region_length: int
-    """The length of the regions in the dataset corresponding to what was written to disk (i.e. output_length + 2 * max_jitter)."""
 
     contigs: List[str]
     """The unique contigs in the dataset."""
@@ -935,29 +939,19 @@ class Dataset:
     and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
     can be returned."""
 
-    ragged: bool
-    """Whether the dataset returns :class:`~genvarloader.Ragged` arrays of personalized sequences and tracks. If True, each sequence
-    in the :class:`~genvarloader.Ragged` arrays corresponds to the exact reference coordinates specified in the input regions, ignoring the `Dataset.output_length`.
-    Because of indels, the lengths of the personalized data may vary relative to the reference coordinates. If True, this will also
-    ensure there is no random shifting of personalized data. Finally, if the output length given to :func:`gvl.write() <genvarloader.write()>`
-    was less than the length of any input region, variants that do not overlap with the """
+    _full_bed: pl.DataFrame = field(alias="_full_bed")
+    """The BED DataFrame that was used to write the dataset including any non-BED columns."""
 
-    _full_input_bed: pl.DataFrame = field(alias="_full_input_bed")
-    """The input BED that was used to write the dataset with no modifications e.g. no length adjustments."""
+    _full_regions: NDArray[np.int32] = field(alias="_full_regions")
+    """Sorted regions, corresponding to order on disk."""
 
-    _full_input_regions: NDArray[np.int32] = field(alias="_full_input_regions")
-    """The input regions that were used to write the dataset with no modifications e.g. no length adjustments."""
+    _jittered_regions: NDArray[np.int32] = field(alias="_jittered_regions")
+    """Sorted regions extended by jitter in both directions."""
 
     _idxer: DatasetIndexer = field(alias="_idxer")
 
     _full_samples: List[str] = field(alias="_full_samples")
     """The full list of samples in the dataset."""
-
-    _full_regions: NDArray[np.int32] = field(alias="_full_regions")
-    """The full regions in the dataset, sorted by contig and start, as they are ordered on-disk. Compared to the input BED,
-    the start and end positions may have been expanded to `region_length`, with additional length to accomodate the largest
-    deletion of any haplotype in the dataset. The latter step is done to ensure that there is enough track length to accomodate
-    all haplotypes in the dataset."""
 
     _rng: np.random.Generator = field(alias="_rng")
     """The random number generator used for jittering and shifting haplotypes that are longer than the output length."""
@@ -984,6 +978,11 @@ class Dataset:
         default=None, alias="_genotypes"
     )
     """The genotypes in the dataset. This is memory mapped."""
+
+    _haplotype_ilens: Optional[NDArray[np.int32]] = field(
+        default=None, alias="_haplotype_lengths"
+    )
+    """Shape: (regions, samples, ploidy). Length of jitter-extended haplotypes, same order as on disk."""
 
     _intervals: Optional[Dict[str, RaggedIntervals]] = field(
         default=None, alias="_intervals"
@@ -1013,22 +1012,17 @@ class Dataset:
     @property
     def samples(self) -> List[str]:
         """The samples in the dataset."""
-        if not self.is_subset:
+        if self._idxer.sample_subset_idxs is None:
             return self._full_samples
-        return [self._full_samples[i] for i in self._idxer.sample_idxs]
+        return [self._full_samples[i] for i in self._idxer.sample_subset_idxs]
 
     @property
     def regions(self) -> pl.DataFrame:
-        """The regions in the dataset."""
-        return regions_to_bed(self._full_regions[self._idxer.region_idxs], self.contigs)
-
-    @property
-    def input_regions(self) -> pl.DataFrame:
         """The input regions in the dataset as they were provided to :func:`gvl.write() <genvarloader.write()>` i.e. with all BED columns plus any
         extra columns that were present."""
         if self._idxer.region_subset_idxs is None:
-            return self._full_input_bed
-        return self._full_input_bed[self._idxer.region_subset_idxs]
+            return self._full_bed
+        return self._full_bed[self._idxer.region_subset_idxs]
 
     @property
     def n_regions(self) -> int:
@@ -1041,11 +1035,6 @@ class Dataset:
         return self._idxer.n_samples
 
     @property
-    def output_length(self) -> int:
-        """The output length of the dataset."""
-        return self.region_length - 2 * self.jitter
-
-    @property
     def shape(self) -> Tuple[int, int]:
         """Return the shape of the dataset. (n_samples, n_regions)"""
         return self.n_regions, self.n_samples
@@ -1054,6 +1043,79 @@ class Dataset:
     def full_shape(self) -> Tuple[int, int]:
         """Return the full shape of the dataset, ignoring any subsetting. (n_regions, n_samples)"""
         return self._idxer.full_shape
+
+    @property
+    def haplotype_lengths(self) -> Optional[NDArray[np.int32]]:
+        """The lengths of the jitter-extended haplotypes. Shape: (regions, samples, ploidy). If the dataset is
+        not phased or not deterministic, this will return None because the haplotypes are not guaranteed to be
+        a consistent length due to randomness in what variants are used. Otherwise, this will return the
+        haplotype lengths."""
+        if not self.phased and not self.deterministic:
+            return None
+
+        if TYPE_CHECKING:
+            assert self.ploidy is not None
+
+        if self._haplotype_ilens is None:
+            object.__setattr__(
+                self, "_haplotype_ilens", self._compute_haplotype_ilens()
+            )
+            assert self._haplotype_ilens is not None
+
+        # (r s p)
+        r_idx, s_idx = np.unravel_index(self._idxer.i2d_map, self.full_shape)
+        hap_lens = (
+            self._jittered_regions[:, 2, None, None]
+            - self._jittered_regions[:, 1, None, None]
+            + self._haplotype_ilens
+        )[r_idx, s_idx].reshape(*self.shape, self.ploidy)
+        return hap_lens
+
+    def _compute_haplotype_ilens(self) -> NDArray[np.int32]:
+        if TYPE_CHECKING:
+            assert self._variants is not None
+            assert self.ploidy is not None
+
+        if self._genotypes is None:
+            object.__setattr__(self, "_genotypes", self._init_genotypes())
+            assert self._genotypes is not None
+
+        r_idx, s_idx = np.unravel_index(
+            np.arange(np.prod(self.full_shape)), self.full_shape
+        )
+        geno_offset_idxs = self._get_geno_offset_idx(r_idx, s_idx)
+        if isinstance(self._genotypes, SparseSomaticGenotypes):
+            keep, keep_offsets = choose_unphased_variants(
+                starts=self._jittered_regions[r_idx, 1],
+                ends=self._jittered_regions[r_idx, 2],
+                geno_offset_idxs=geno_offset_idxs,
+                geno_v_idxs=self._genotypes.variant_idxs,
+                geno_offsets=self._genotypes.offsets,
+                positions=self._variants.positions,
+                sizes=self._variants.sizes,
+                dosages=self._genotypes.dosages,
+                deterministic=self.deterministic,
+            )
+            hap_ilens = get_diffs_sparse(
+                geno_offset_idxs=geno_offset_idxs,
+                geno_v_idxs=self._genotypes.variant_idxs,
+                geno_offsets=self._genotypes.offsets,
+                size_diffs=self._variants.sizes,
+                keep=keep,
+                keep_offsets=keep_offsets,
+            )
+        else:
+            hap_ilens = get_diffs_sparse(
+                geno_offset_idxs=geno_offset_idxs,
+                geno_v_idxs=self._genotypes.variant_idxs,
+                geno_offsets=self._genotypes.offsets,
+                size_diffs=self._variants.sizes,
+                starts=self._jittered_regions[r_idx, 1],
+                ends=self._jittered_regions[r_idx, 2],
+                positions=self._variants.positions,
+            )
+
+        return hap_ilens.reshape(*self.full_shape, self.ploidy)
 
     def __len__(self) -> int:
         return int(np.prod(self.shape))
@@ -1072,7 +1134,6 @@ class Dataset:
             Is subset: {self.is_subset}
             # of regions: {self.n_regions:,}
             # of samples: {self.n_samples:,}
-            Original region length: {self.region_length - 2 * self.max_jitter:,}
             Max jitter: {self.max_jitter:,}
             Genotypes available: {genotype_status}
             Tracks available: {self.available_tracks}\
@@ -1082,8 +1143,18 @@ class Dataset:
     def __repr__(self) -> str:
         return str(self)
 
-    def __getitem__(self, idx: Tuple[Idx, Union[Idx, str, Sequence[str]]]) -> Any:
-        regions, samples = idx
+    def __getitem__(
+        self, idx: Union[Idx, Tuple[Idx], Tuple[Idx, Union[Idx, str, Sequence[str]]]]
+    ) -> Any:
+        if not isinstance(idx, tuple):
+            regions = idx
+            samples = slice(None)
+        elif len(idx) == 1:
+            regions = idx[0]
+            samples = slice(None)
+        else:
+            regions, samples = idx
+
         _regions = idx_like_to_array(regions, self.n_regions)
 
         if isinstance(samples, str):
@@ -1103,10 +1174,12 @@ class Dataset:
             samples = cast(Union[Idx, NDArray[np.bool_]], samples)
             _samples = idx_like_to_array(samples, self.n_samples)
 
-        if isinstance(_regions, np.ndarray) and isinstance(_samples, np.ndarray):
-            _regions = _regions[:, None]
+        # if isinstance(_regions, np.ndarray) and isinstance(_samples, np.ndarray):
+        #     _regions = _regions[:, None]
 
         ds_idx = np.ravel_multi_index((_regions, _samples), self.shape)
+        if len(ds_idx) == 1:
+            ds_idx = ds_idx[0]
         return self._getitem_raveled(ds_idx)
 
     def _getitem_raveled(self, idx: Idx) -> Any:
@@ -1126,6 +1199,10 @@ class Dataset:
         # per attrs docs (https://www.attrs.org/en/stable/init.html#post-init)
         if self._genotypes is None and self.sequence_type == "haplotypes":
             object.__setattr__(self, "_genotypes", self._init_genotypes())
+            if self._haplotype_ilens is None:
+                object.__setattr__(
+                    self, "_haplotype_ilens", self._compute_haplotype_ilens()
+                )
         if self._intervals is None and self.active_tracks:
             object.__setattr__(self, "_intervals", self._init_intervals())
 
@@ -1136,12 +1213,10 @@ class Dataset:
             squeeze = False
 
         idx = idx_like_to_array(idx, len(self))
+        batch_size = len(idx)
 
-        # map the possibly subset input index to:
-        # the on-disk index
+        # map the possibly subset input index to the on-disk index
         ds_idx = self._idxer[idx]
-        # the full input index
-        inp_idx = self._idxer.d2i_map[ds_idx]
 
         if ds_idx.ndim > 1:
             out_reshape = ds_idx.shape
@@ -1150,74 +1225,68 @@ class Dataset:
             out_reshape = None
 
         r_idx, s_idx = np.unravel_index(ds_idx, self.full_shape)
-        if self.ragged:
-            # (b)
-            ir_idx, is_idx = np.unravel_index(inp_idx, self.full_shape)
-            regions = self._full_input_regions[ir_idx, :3]
-        else:
-            regions = self._full_regions[r_idx, :3].copy()
-            regions[:, 2] = regions[:, 1] + self.region_length
 
         # contig, start, end, strand
         to_rc: NDArray[np.bool_] = self._full_regions[r_idx, 3] == -1
         should_rc = to_rc.any()
-
         ragged_out: List[Ragged] = []
+        # (b)
+        regions = self._jittered_regions[r_idx]
+        if isinstance(self.output_length, int):
+            regions[:, 2] = regions[:, 1] + self.output_length + 2 * self.jitter
+        # (b)
+        lengths = regions[:, 2] - regions[:, 1]
 
+        geno_offset_idx = None
+        shifts = None
+        keep = None
+        keep_offsets = None
+        hap_lengths = None
         if self.sequence_type == "haplotypes":
             if TYPE_CHECKING:
                 assert self._genotypes is not None
                 assert self._variants is not None
                 assert self.ploidy is not None
+                assert self._haplotype_ilens is not None
 
             # (b 1) for broadcasting against ploidy dimension
             to_rc = to_rc[:, None]
 
             geno_offset_idx = self._get_geno_offset_idx(r_idx, s_idx)
 
-            # (b)
-            lengths = repeat(regions[:, 2] - regions[:, 1], "b  -> b p", p=self.ploidy)
             if isinstance(self._genotypes, SparseSomaticGenotypes):
-                keep, keep_offsets = mark_keep_variants(
-                    geno_offset_idxs=geno_offset_idx,
+                keep, keep_offsets = choose_unphased_variants(
                     starts=regions[:, 1],
-                    offsets=self._genotypes.offsets,
-                    sparse_genos=self._genotypes.variant_idxs,
+                    ends=regions[:, 2],
+                    geno_offset_idxs=geno_offset_idx,
+                    geno_v_idxs=self._genotypes.variant_idxs,
+                    geno_offsets=self._genotypes.offsets,
                     positions=self._variants.positions,
                     sizes=self._variants.sizes,
                     dosages=self._genotypes.dosages,
-                    ploidy=self.ploidy,
-                    target_lengths=lengths,
                     deterministic=self.deterministic,
                 )
-            else:
-                keep = None
-                keep_offsets = None
 
             # (b p)
-            diffs = get_diffs_sparse(
-                geno_offset_idxs=geno_offset_idx,
-                geno_v_idxs=self._genotypes.variant_idxs,
-                geno_offsets=self._genotypes.offsets,
-                size_diffs=self._variants.sizes,
-                keep=keep,
-                keep_offsets=keep_offsets,
-            )
+            diffs = self._haplotype_ilens[r_idx, s_idx]
+            hap_lengths = lengths[:, None] + diffs
 
-            if self.deterministic or self.ragged:
+            if self.deterministic or isinstance(self.output_length, str):
                 # (b p)
-                shifts = np.zeros((len(geno_offset_idx), self.ploidy), dtype=np.int32)
+                shifts = np.zeros((batch_size, self.ploidy), dtype=np.int32)
             else:
                 # if the haplotype is longer than the region, shift it randomly
                 # by up to the difference in length between the haplotype and the region
                 # (b p)
                 shifts = self._rng.integers(0, diffs.clip(min=0) + 1, dtype=np.int32)
 
-            # (b, p)
-            if self.ragged:
-                lengths += diffs
+            if not isinstance(self.output_length, int):
+                # (b p)
+                out_lengths = hap_lengths
+            else:
+                out_lengths = repeat(lengths, "b -> b p", p=self.ploidy)
             # (b*p+1)
-            out_offsets = _lengths_to_offsets(lengths)
+            out_offsets = _lengths_to_offsets(out_lengths)
 
             # (b p l), (b p l), (b p l)
             haps, maybe_annot_v_idx, maybe_annot_pos = self._get_haplotypes(
@@ -1243,13 +1312,10 @@ class Dataset:
             if TYPE_CHECKING:
                 assert self._reference is not None
 
-            geno_offset_idx = None
-            diffs = None
-            shifts = None
             # (b+1)
-            out_offsets = _lengths_to_offsets(np.diff(regions[:, 1:], 1, 1))
+            out_offsets = _lengths_to_offsets(lengths)
 
-            # (b l)
+            # ragged (b)
             ref = _get_reference(
                 regions=regions,
                 out_offsets=out_offsets,
@@ -1257,62 +1323,81 @@ class Dataset:
                 ref_offsets=self._reference.offsets,
                 pad_char=self._reference.pad_char,
             ).view("S1")
-            ref = Ragged.from_offsets(ref, len(ds_idx), out_offsets)
+            ref = Ragged.from_offsets(ref, batch_size, out_offsets)
 
             if should_rc:
                 ref = _reverse_complement(ref, to_rc)
 
             ragged_out.append(ref)
-        elif self.sequence_type is None:
-            geno_offset_idx = None
-            diffs = None
-            shifts = None
-        else:
-            assert_never(self.sequence_type)
 
         if self.active_tracks is not None:
             # ploidy dim present if sequence_type == "haplotypes"
             # [(b [p] l) ...]
+            if hap_lengths is not None:
+                track_lengths = hap_lengths
+            else:
+                track_lengths = lengths
+
+            if not isinstance(self.output_length, int):
+                out_lengths = track_lengths
+            else:
+                out_lengths = repeat(lengths, "b -> b p", p=self.ploidy)
+
             tracks = self._get_tracks(
                 dataset_idx=ds_idx,
                 regions=regions,
+                out_lengths=out_lengths,  # (b [p])
+                track_lengths=track_lengths,  # (b [p])
                 geno_offset_idx=geno_offset_idx,
-                diffs=diffs,
                 shifts=shifts,
+                keep=keep,
+                keep_offsets=keep_offsets,
             )
             if should_rc:
                 for t in tracks:
                     _reverse(t, to_rc)
             ragged_out.extend(tracks)
 
-        # at this point all entires in `out` are Ragged arrays
+        if self.jitter > 0:
+            ragged_out = list(
+                _jitter(*ragged_out, max_jitter=self.jitter, seed=self._rng)
+            )
 
-        if self.ragged:
-            out: List[Any] = ragged_out
+        if self.output_length == "ragged":
+            out: Sequence[Union[Ragged, NDArray]] = ragged_out
+        elif self.output_length == "variable":
+            out = []
+
+            if self.sequence_type is not None:
+                assert self._reference is not None
+                pad_char = self._reference.pad_char
+                out.append(ragged_out[0].to_padded(pad_char))
+                n_seqs = 1
+
+                if self.return_annotations:
+                    out.append(ragged_out[1].to_padded(-1))
+                    out.append(ragged_out[2].to_padded(-1))
+                    n_seqs = 3
+            else:
+                n_seqs = 0
+
+            if self.active_tracks is not None:
+                # TODO: is 0 always the correct pad value for tracks?
+                # how to provide an API so user can specify?
+                out.extend(o.to_padded(0) for o in ragged_out[n_seqs:])
         else:
             # convert all ragged arrays to fixed length arrays, assuming they need no padding
             if self.sequence_type == "haplotypes" and self.phased:
                 if TYPE_CHECKING:
                     assert self.ploidy is not None
                 out = [
-                    a.data.reshape(len(ds_idx), self.ploidy, self.region_length)
+                    a.data.reshape(len(ds_idx), self.ploidy, self.output_length)
                     for a in ragged_out
                 ]
             else:
                 out = [
-                    a.data.reshape(len(ds_idx), self.region_length) for a in ragged_out
+                    a.data.reshape(len(ds_idx), self.output_length) for a in ragged_out
                 ]
-
-            if self.jitter > 0:
-                out = list(
-                    sp.jitter(
-                        *out,
-                        max_jitter=self.jitter,
-                        length_axis=-1,
-                        jitter_axes=0,
-                        seed=self._rng,
-                    )
-                )
 
         if out_reshape is not None:
             out = [o.reshape(out_reshape + o.shape[1:]) for o in out]
@@ -1322,7 +1407,9 @@ class Dataset:
             out = [o.squeeze(0) for o in out]
 
         if self.return_indices:
-            out.extend((ds_idx, r_idx, s_idx))
+            inp_idx = self._idxer.d2i_map[ds_idx]
+            inp_r_idx, inp_s_idx = np.unravel_index(inp_idx, self.full_shape)
+            out.extend((inp_r_idx, inp_s_idx))  # type: ignore
 
         if self.return_annotations:
             haps = dict(zip(("haplotypes", "variant_indices", "positions"), out[:3]))
@@ -1414,24 +1501,6 @@ class Dataset:
         geno_offset_idx = np.ravel_multi_index(rsp_idx, self._genotypes.effective_shape)
         return geno_offset_idx
 
-    def _get_shifts(
-        self, geno_offset_idx: NDArray[np.intp], keep: Optional[NDArray[np.bool_]]
-    ):
-        if TYPE_CHECKING:
-            assert self._genotypes is not None
-            assert self._variants is not None
-        # (b p)
-        diffs = get_diffs_sparse(
-            geno_offset_idx,
-            self._genotypes.variant_idxs,
-            self._genotypes.offsets,
-            self._variants.sizes,
-            keep,
-        )
-        # (b p)
-        shifts = self._rng.integers(0, -diffs.clip(max=0) + 1, dtype=np.int32)
-        return shifts
-
     def _get_haplotypes(
         self,
         geno_offset_idx: NDArray[np.intp],
@@ -1482,13 +1551,13 @@ class Dataset:
 
         # don't need to pass annot offsets because they are the same as haps offsets
         reconstruct_haplotypes_from_sparse(
-            offset_idxs=geno_offset_idx,
+            geno_offset_idxs=geno_offset_idx,
             out=haps.data,
             out_offsets=haps.offsets,
             regions=regions,
             shifts=shifts,
-            offsets=self._genotypes.offsets,
-            sparse_genos=self._genotypes.variant_idxs,
+            geno_offsets=self._genotypes.offsets,
+            geno_v_idxs=self._genotypes.variant_idxs,
             positions=self._variants.positions,
             sizes=self._variants.sizes,
             alt_alleles=self._variants.alts.alleles.view(np.uint8),
@@ -1516,8 +1585,9 @@ class Dataset:
         self,
         dataset_idx: NDArray[np.integer],
         regions: NDArray[np.int32],
+        out_lengths: NDArray[np.int32],
+        track_lengths: NDArray[np.int32],
         geno_offset_idx: Optional[NDArray[np.integer]] = None,
-        diffs: Optional[NDArray[np.int32]] = None,
         shifts: Optional[NDArray[np.int32]] = None,
         keep: Optional[NDArray[np.bool_]] = None,
         keep_offsets: Optional[NDArray[np.int64]] = None,
@@ -1525,21 +1595,6 @@ class Dataset:
         if TYPE_CHECKING:
             assert self.active_tracks is not None
             assert self._intervals is not None
-
-        # (b)
-        out_lengths = np.diff(regions[:, 1:], 1, 1)
-        # (b)
-        track_lengths = out_lengths
-        starts = regions[:, 1]
-
-        if diffs is not None:
-            if TYPE_CHECKING:
-                assert self.ploidy is not None
-            # (b p)
-            out_lengths = np.tile(out_lengths, (1, self.ploidy))
-            # (b p) adjust lengths to accomodate indels
-            track_lengths = track_lengths[:, None] - diffs
-            starts = np.repeat(starts, self.ploidy)
 
         out_offsets = _lengths_to_offsets(out_lengths)
         track_offsets = _lengths_to_offsets(track_lengths)
@@ -1550,7 +1605,7 @@ class Dataset:
             # (b [p] l) ragged
             _tracks = intervals_to_tracks(
                 offset_idxs=dataset_idx,
-                starts=starts,
+                starts=regions[:, 1],
                 out_offsets=track_offsets,
                 intervals=intervals.data,
                 itv_offsets=intervals.offsets,
@@ -1564,9 +1619,9 @@ class Dataset:
 
                 out = np.empty(out_offsets[-1], np.float32)
                 _tracks = shift_and_realign_tracks_sparse(
-                    offset_idx=geno_offset_idx,
-                    variant_idxs=self._genotypes.variant_idxs,
-                    variant_offsets=self._genotypes.offsets,
+                    geno_offset_idxs=geno_offset_idx,
+                    geno_v_idxs=self._genotypes.variant_idxs,
+                    geno_offsets=self._genotypes.offsets,
                     regions=regions,
                     positions=self._variants.positions,
                     sizes=self._variants.sizes,

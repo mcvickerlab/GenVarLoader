@@ -9,6 +9,7 @@ from typing import (
     Sequence,
     TypeVar,
     Union,
+    cast,
 )
 
 import numpy as np
@@ -16,6 +17,8 @@ import pandera as pa
 import pandera.typing as pat
 import polars as pl
 from numpy.typing import NDArray
+
+from ._types import Idx
 
 __all__ = [
     "read_bedlike",
@@ -349,3 +352,27 @@ def _lengths_to_offsets(
     offsets[0] = 0
     np.cumsum(lengths, out=offsets[1:])
     return offsets
+
+
+def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.intp]:
+    """Convert an index-like object to an array of non-negative indices. Shapes of multi-dimensional
+    indices are preserved."""
+    if isinstance(idx, slice):
+        _idx = np.arange(max_len, dtype=np.intp)[idx]
+    elif isinstance(idx, np.ndarray) and np.issubdtype(idx.dtype, np.bool_):
+        _idx = idx.nonzero()[0]
+    elif isinstance(idx, Sequence):
+        _idx = np.asarray(idx, np.intp)
+    else:
+        _idx = idx
+
+    # handle negative indices
+    if isinstance(_idx, (int, np.integer)):
+        _idx = np.array([_idx], np.intp)
+
+    # unable to type narrow from NDArray[bool] since it's a generic type
+    _idx = cast(NDArray[np.intp], _idx)
+
+    _idx[_idx < 0] += max_len
+
+    return _idx

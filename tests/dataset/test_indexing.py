@@ -1,20 +1,15 @@
 import numpy as np
 from genvarloader._dataset._indexing import DatasetIndexer
-from genvarloader._dataset._utils import idx_like_to_array
+from genvarloader._utils import idx_like_to_array
 from pytest_cases import fixture, parametrize_with_cases
 
 
 @fixture
 def dsi():
-    n_regions = 3
     n_samples = 2
     r_idx = np.array([1, 2, 0])
     s_idx = np.arange(n_samples)
-    # [2, 3, 4, 5, 0, 1]
-    idx_map = np.ravel_multi_index(
-        (r_idx[:, None], s_idx), (n_regions, n_samples)
-    ).ravel()
-    return DatasetIndexer(r_idx, s_idx, idx_map)
+    return DatasetIndexer.from_region_and_sample_idxs(r_idx, s_idx)
 
 
 def case_1_region_all_samples():
@@ -53,7 +48,7 @@ def case_2_regions_all_samples():
 
 
 @parametrize_with_cases("r_idx, s_idx, expected_idx_map", cases=".")
-def test_subset(dsi, r_idx, s_idx, expected_idx_map):
+def test_subset(dsi: DatasetIndexer, r_idx, s_idx, expected_idx_map):
     subset = dsi.subset_to(r_idx, s_idx)
     if r_idx is not None:
         r_idx = idx_like_to_array(r_idx, dsi.n_regions)
@@ -65,12 +60,12 @@ def test_subset(dsi, r_idx, s_idx, expected_idx_map):
         s_idx = np.arange(dsi.n_samples, dtype=np.intp)
     assert subset.n_regions == len(r_idx)
     assert subset.n_samples == len(s_idx)
-    np.testing.assert_equal(subset.idx_map, expected_idx_map)
+    np.testing.assert_equal(subset.i2d_map, expected_idx_map)
 
 
-def test_subset_to_full(dsi):
+def test_subset_to_full(dsi: DatasetIndexer):
     subset = dsi.subset_to([0, 2], [0])
     full = subset.to_full_dataset()
     assert full.n_regions == dsi.n_regions
     assert full.n_samples == dsi.n_samples
-    np.testing.assert_equal(full.idx_map, dsi.idx_map)
+    np.testing.assert_equal(full.i2d_map, dsi.i2d_map)

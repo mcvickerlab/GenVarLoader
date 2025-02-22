@@ -218,17 +218,17 @@ def shift_and_realign_track(
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def shift_and_realign_tracks_sparse(
-    offset_idx: NDArray[np.integer],
-    variant_idxs: NDArray[np.int32],
-    variant_offsets: NDArray[np.int64],
-    regions: NDArray[np.int32],
-    positions: NDArray[np.int32],
-    sizes: NDArray[np.int32],
-    shifts: NDArray[np.int32],
-    tracks: NDArray[np.float32],
-    track_offsets: NDArray[np.int64],
     out: NDArray[np.float32],
     out_offsets: NDArray[np.int64],
+    regions: NDArray[np.int32],
+    shifts: NDArray[np.int32],
+    geno_offset_idxs: NDArray[np.integer],
+    geno_v_idxs: NDArray[np.int32],
+    geno_offsets: NDArray[np.int64],
+    positions: NDArray[np.int32],
+    sizes: NDArray[np.int32],
+    tracks: NDArray[np.float32],
+    track_offsets: NDArray[np.int64],
     keep: Optional[NDArray[np.bool_]] = None,
     keep_offsets: Optional[NDArray[np.int64]] = None,
 ):
@@ -263,20 +263,19 @@ def shift_and_realign_tracks_sparse(
     keep_offsets : Optional[NDArray[np.int64]]
         Shape = (regions*ploidy + 1) Offsets into keep.
     """
-    n_regions = len(regions)
-    ploidy = out.shape[1]
+    n_regions, ploidy = geno_offset_idxs.shape
     for query in nb.prange(n_regions):
         t_s, t_e = track_offsets[query], track_offsets[query + 1]
         q_track = tracks[t_s:t_e]
+        # assumes start is never altered upstream by differing hap lengths
         q_start = regions[query, 1]
 
         for hap in nb.prange(ploidy):
-            o_idx = offset_idx[query, hap]
+            o_idx = geno_offset_idxs[query, hap]
 
             k_idx = query * ploidy + hap
             if keep is not None and keep_offsets is not None:
-                k_s, k_e = keep_offsets[k_idx], keep_offsets[k_idx + 1]
-                qh_keep = keep[k_s:k_e]
+                qh_keep = keep[keep_offsets[k_idx] : keep_offsets[k_idx + 1]]
             else:
                 qh_keep = None
 
@@ -285,24 +284,24 @@ def shift_and_realign_tracks_sparse(
             qh_shifts = shifts[query, hap]
 
             shift_and_realign_track_sparse(
-                o_idx,
-                variant_idxs,
-                variant_offsets,
-                positions,
-                sizes,
-                qh_shifts,
-                q_track,
-                q_start,
-                qh_out,
-                qh_keep,
+                offset_idx=o_idx,
+                geno_v_idxs=geno_v_idxs,
+                geno_offsets=geno_offsets,
+                positions=positions,
+                sizes=sizes,
+                shift=qh_shifts,
+                track=q_track,
+                query_start=q_start,
+                out=qh_out,
+                keep=qh_keep,
             )
 
 
 @nb.njit(nogil=True, cache=True)
 def shift_and_realign_track_sparse(
     offset_idx: int,
-    variant_idxs: NDArray[np.int32],
-    offsets: NDArray[np.int64],
+    geno_v_idxs: NDArray[np.int32],
+    geno_offsets: NDArray[np.int64],
     positions: NDArray[np.int32],
     sizes: NDArray[np.int32],
     shift: int,
@@ -330,16 +329,18 @@ def shift_and_realign_track_sparse(
     keep : Optional[NDArray[np.bool_]]
         Shape = (n_variants) Keep mask for genotypes.
     """
-    _variant_idxs = variant_idxs[offsets[offset_idx] : offsets[offset_idx + 1]]
+    _variant_idxs = geno_v_idxs[geno_offsets[offset_idx] : geno_offsets[offset_idx + 1]]
     length = len(out)
     n_variants = len(_variant_idxs)
+
     if n_variants == 0:
-        # track must have length >= max(shif0)t + length
-        out[:] = track[shift : shift + length]
+        # guaranteed to have shift = 0
+        out[:] = track[:length]
         return
-    # where to get next reference subsequence
+
+    # where to get next track value
     track_idx = 0
-    # where to put next subsequence
+    # where to put next value
     out_idx = 0
     # how much we've shifted
     shifted = 0
@@ -354,10 +355,12 @@ def shift_and_realign_track_sparse(
         # i.e. has been put into same coordinate system as ref_idx
         v_rel_pos = positions[variant] - query_start
         v_diff = sizes[variant]
+        # +1 assumes atomized variants, exactly 1 nt shared between REF and ALT
+        v_rel_end = v_rel_pos - min(0, v_diff) + 1
 
-        # first variant is a DEL spanning start
-        if v == 0 and v_rel_pos < 0 and v_diff < 0:
-            track_idx = v_rel_pos - v_diff + 1
+        # variant is a DEL spanning start
+        if v_diff < 0 and v_rel_pos < 0 and v_rel_end >= 0:
+            track_idx = v_rel_end
             continue
 
         # overlapping variants
@@ -367,10 +370,7 @@ def shift_and_realign_track_sparse(
         if v_rel_pos < track_idx:
             continue
 
-        # ok to do this before shift because there must be at least one positive diff since 0 < shift < sum(v_diff)
-        if v_diff == 0:
-            continue
-        v_len = max(1, v_diff + 1)
+        v_len = max(0, v_diff) + 1
         value = track[v_rel_pos]
 
         # handle shift
@@ -379,22 +379,20 @@ def shift_and_realign_track_sparse(
             # not enough distance to finish the shift even with the variant
             if shifted + ref_shift_dist + v_len < shift:
                 # consume ref up to the end of the variant
-                track_idx = v_rel_pos + 1
+                track_idx = v_rel_end
                 # add the length of skipped ref and size of the variant to the shift
                 shifted += ref_shift_dist + v_len
                 # skip the variant
                 continue
             # enough distance between ref_idx and variant to finish shift
             elif shifted + ref_shift_dist >= shift:
-                track_idx += shift - shifted
                 shifted = shift
+                track_idx += shift - shifted
                 # can still use the variant and whatever ref is left between
                 # ref_idx and the variant
             # ref + (some of) variant is enough to finish shift
             else:
-                # consume ref up to beginning of variant
-                # ref_idx will be moved to end of variant after using the variant
-                track_idx = v_rel_pos
+                shifted = shift
                 # how much left to shift - amount of ref we can use
                 allele_start_idx = shift - shifted - ref_shift_dist
                 #! without if statement, parallel=True can cause a SystemError!
@@ -402,10 +400,18 @@ def shift_and_realign_track_sparse(
                 # * without this, allele can change from a 1D array to a 0D
                 # * array.
                 if allele_start_idx == v_len:
+                    # consume track up to end of variant
+                    track_idx = v_rel_end
                     continue
+                # consume track up to start of variant
+                track_idx = v_rel_pos
+                # adjust variant length
                 v_len -= allele_start_idx
-                # done shifting
-                shifted = shift
+
+        # SNPs (but not MNPs because we don't have ALT length, MNPs are not atomic)
+        # skipped because for tracks they always match the reference
+        if v_diff == 0:
+            continue
 
         # add track values up to variant
         track_len = v_rel_pos - track_idx
@@ -416,17 +422,11 @@ def shift_and_realign_track_sparse(
         out[out_idx : out_idx + track_len] = track[track_idx : track_idx + track_len]
         out_idx += track_len
 
-        # insertions (substitutions are skipped above)
+        # indels (substitutions are skipped above and then handled by above clause)
         writable_length = min(v_len, length - out_idx)
         out[out_idx : out_idx + writable_length] = value
         out_idx += writable_length
-        # +1 because ALT alleles always replace 1 nt of reference for a
-        # normalized VCF
-        track_idx = v_rel_pos + 1
-
-        # deletions, move track to end of deletion
-        if v_diff < 0:
-            track_idx -= v_diff
+        track_idx = v_rel_end
 
         if out_idx >= length:
             break

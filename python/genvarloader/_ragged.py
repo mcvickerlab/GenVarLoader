@@ -8,6 +8,7 @@ from attrs import define
 from numpy.typing import NDArray
 
 from ._types import Idx
+from ._utils import _lengths_to_offsets, idx_like_to_array
 
 __all__ = ["Ragged", "RaggedIntervals", "INTERVAL_DTYPE", "pad_ragged"]
 
@@ -58,11 +59,7 @@ class Ragged(Generic[RDTYPE]):
         """Offsets into the data array to get corresponding elements. The i-th element
         is accessible as :code:`data[offsets[i]:offsets[i+1]]`."""
         if self.maybe_offsets is None:
-            self.maybe_offsets = np.empty(
-                np.prod(self.shape, dtype=np.int64) + 1, dtype=np.int64
-            )
-            self.maybe_offsets[0] = 0
-            np.cumsum(self.lengths.ravel(), out=self.maybe_offsets[1:])
+            self.maybe_offsets = _lengths_to_offsets(self.lengths)
         return self.maybe_offsets
 
     @property
@@ -75,10 +72,10 @@ class Ragged(Generic[RDTYPE]):
     @classmethod
     def from_offsets(
         cls,
-        data: NDArray[DTYPE],
+        data: NDArray[RDTYPE],
         shape: Union[int, Tuple[int, ...]],
         offsets: NDArray[np.int64],
-    ) -> "Ragged[DTYPE]":
+    ) -> "Ragged[RDTYPE]":
         """Create a Ragged array from data and offsets.
 
         Parameters
@@ -96,8 +93,8 @@ class Ragged(Generic[RDTYPE]):
 
     @classmethod
     def from_lengths(
-        cls, data: NDArray[DTYPE], lengths: NDArray[np.int32]
-    ) -> "Ragged[DTYPE]":
+        cls, data: NDArray[RDTYPE], lengths: NDArray[np.int32]
+    ) -> "Ragged[RDTYPE]":
         """Create a Ragged array from data and lengths. The lengths array should have
         the intended shape of the Ragged array.
 
@@ -112,8 +109,8 @@ class Ragged(Generic[RDTYPE]):
 
     @classmethod
     def empty(
-        cls, shape: Union[int, Tuple[int, ...]], dtype: type[DTYPE]
-    ) -> "Ragged[DTYPE]":
+        cls, shape: Union[int, Tuple[int, ...]], dtype: type[RDTYPE]
+    ) -> "Ragged[RDTYPE]":
         """Create an empty Ragged array."""
         if shape == ():
             raise ValueError("Ragged array must have at least one element.")
@@ -172,14 +169,40 @@ class Ragged(Generic[RDTYPE]):
         """
         length = self.lengths.max()
         shape = (*self.shape, length)
-        return pad_ragged(self.data, self.offsets, shape, pad_value)
+        if self.data.dtype.str == "|S1":
+            if isinstance(pad_value, (str, bytes)):
+                if len(pad_value) != 1:
+                    raise ValueError(
+                        "Tried padding an S1 array with a `pad_value` that is multiple characters."
+                    )
+                pad_value = np.uint8(ord(pad_value))
+            elif isinstance(pad_value, int):
+                if pad_value < 0 or pad_value > 255:
+                    raise ValueError(
+                        "Tried padding an S1 array with an integer `pad_value` outside the ASCII range."
+                    )
+                pad_value = np.uint8(pad_value)
+            else:
+                raise ValueError(
+                    "Tried padding an S1 array with a `pad_value` that isn't a string, byte, or integer."
+                )
+            padded = np.empty((np.prod(shape[:-1]), shape[-1]), dtype=np.uint8)
+            pad_ragged(self.data.view(np.uint8), self.offsets, pad_value, padded)
+            padded = padded.view(self.data.dtype).reshape(shape)
+        else:
+            padded = np.empty((np.prod(shape[:-1]), shape[-1]), dtype=self.data.dtype)
+            pad_ragged(self.data, self.offsets, pad_value, padded)
+            padded = padded.reshape(shape)
+
+        return padded
 
     def squeeze(self, axis: Union[int, Tuple[int, ...]] = -1) -> Ragged[RDTYPE]:
         """Squeeze the ragged array along the given non-ragged axis."""
-        return Ragged.from_lengths(self.data, np.squeeze(self.lengths, axis=axis))
+        return Ragged.from_lengths(self.data, self.lengths.squeeze(axis))
 
     def reshape(self, shape: Tuple[int, ...]) -> Ragged[RDTYPE]:
         """Reshape non-ragged axes."""
+        # this is correct because all reshaping operations preserve the layout i.e. raveled ordered
         return Ragged.from_lengths(self.data, self.lengths.reshape(shape))
 
     def __str__(self):
@@ -187,11 +210,21 @@ class Ragged(Generic[RDTYPE]):
             f"Ragged<shape={self.shape} dtype={self.data.dtype} size={self.data.size}>"
         )
 
-    def __getitem__(self, idx: Idx):
-        if isinstance(idx, (int, np.integer)):
-            return self.data[self.offsets[idx] : self.offsets[idx + 1]]
-        else:
-            raise NotImplementedError
+    def __getitem__(self, idx: Union[Idx, Tuple[Idx, ...]]):
+        if not isinstance(idx, tuple):
+            idx = (idx,)
+
+        if len(idx) < len(self.shape):
+            raise IndexError(
+                f"Too few indices for array: expected {len(self.shape)}, got {len(idx)}."
+            )
+
+        idx = tuple(
+            idx_like_to_array(_idx, self.shape[i]) for i, _idx in enumerate(idx)
+        )
+        idx = np.ravel_multi_index(idx, self.shape).squeeze()
+
+        return self.data[self.offsets[idx] : self.offsets[idx + 1]]
 
 
 INTERVAL_DTYPE = np.dtype(
@@ -204,16 +237,14 @@ RaggedIntervals = Ragged[np.void]
 def pad_ragged(
     data: NDArray[DTYPE],
     offsets: NDArray[np.integer],
-    shape: Tuple[int, ...],
     pad_value: DTYPE,
+    out: NDArray[DTYPE],
 ):
-    out = np.empty((np.prod(shape[:-1]), shape[-1]), dtype=data.dtype)
     for i in nb.prange(len(offsets) - 1):
         start, end = offsets[i], offsets[i + 1]
         entry_len = end - start
         out[i, :entry_len] = data[start:end]
         out[i, entry_len:] = pad_value
-    out = out.reshape(shape)
     return out
 
 
@@ -260,3 +291,90 @@ def _reverse(tracks: Ragged[np.float32], mask: NDArray[np.bool_]):
     """Reverses data along the ragged axis in-place."""
     _, mask = np.broadcast_arrays(tracks.lengths, mask)
     _reverse_helper(tracks.data.view(np.uint8), tracks.offsets, mask.ravel())
+
+
+def _jitter(
+    *arrays: Ragged,
+    max_jitter: int,
+    seed: Optional[Union[int, np.random.Generator]] = None,
+):
+    """Jitter the data along the ragged axis by up to `max_jitter`.
+
+    Assumes only the first axis is to be jittered. In other words, assumes that no user would want to
+    jitter independently across ploidy or tracks.
+    """
+    if not isinstance(seed, np.random.Generator):
+        seed = np.random.default_rng(seed)
+
+    batch_size = arrays[0].shape[0]
+
+    starts = seed.integers(0, 2 * max_jitter + 1, size=batch_size)
+    out_offsets = tuple(_lengths_to_offsets(a.lengths - 2 * max_jitter) for a in arrays)
+
+    jittered_data = _jitter_helper(
+        tuple(a.data for a in arrays),
+        tuple(a.offsets for a in arrays),
+        tuple(a.shape for a in arrays),
+        tuple(out_offsets),
+        starts,
+    )
+
+    out = tuple(
+        Ragged.from_offsets(jit_data, rag_arr.shape, out_offsets[i])
+        for i, (rag_arr, jit_data) in enumerate(zip(arrays, jittered_data))
+    )
+
+    return out
+
+
+@nb.njit(parallel=True, nogil=True, cache=True)
+def _jitter_helper(
+    data: Tuple[NDArray, ...],
+    offsets: Tuple[NDArray[np.int64], ...],
+    shapes: Tuple[Tuple[int, ...], ...],
+    out_offsets: Tuple[NDArray[np.int64], ...],
+    starts: NDArray[np.int64],
+) -> Tuple[NDArray, ...]:
+    """Helper to jitter ragged data. Ragged arrays should have shape (batch, ...).
+
+    Parameters
+    ----------
+    data
+        Tuple of ragged data arrays.
+    offsets
+        Tuple of offsets arrays.
+    out_offsets
+        Tuple of output offsets arrays.
+    starts
+        Shape: (batch). Array of starting points for jittering.
+    """
+    n_arrays = len(data)
+    batch_size = len(starts)
+    out_data = tuple(
+        np.empty(out_offsets[i][-1], dtype=d.dtype) for i, d in enumerate(data)
+    )
+    for arr in nb.prange(n_arrays):
+        arr_data = data[arr]
+        arr_offsets = offsets[arr]
+
+        out_arr_data = out_data[arr]
+        out_arr_offsets = out_offsets[arr]
+
+        arr_shape = shapes[arr]
+        n_per_batch = np.prod(arr_shape[1:])
+
+        for jit in nb.prange(batch_size):
+            idx_s = jit * n_per_batch
+            idx_e = (jit + 1) * n_per_batch
+
+            jit_s = starts[jit]
+
+            for row in nb.prange(idx_s, idx_e):
+                row_s = arr_offsets[row]
+                out_row_s, out_row_e = out_arr_offsets[row], out_arr_offsets[row + 1]
+                out_len = out_row_e - out_row_s
+                out_arr_data[out_row_s:out_row_e] = arr_data[
+                    row_s + jit_s : row_s + jit_s + out_len
+                ]
+
+    return out_data

@@ -141,8 +141,8 @@ def test_sparse(
     actual = np.empty(len(track) - query_start, np.float32)
     shift_and_realign_track_sparse(
         offset_idx=offset_idx,
-        variant_idxs=sparse_genos.variant_idxs,
-        offsets=sparse_genos.offsets,
+        geno_v_idxs=sparse_genos.variant_idxs,
+        geno_offsets=sparse_genos.offsets,
         positions=positions,
         sizes=sizes,
         shift=shift,
