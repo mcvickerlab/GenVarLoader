@@ -50,6 +50,7 @@ def main(
 ):
     """Generate ground truth variant sequences using `bcftools consensus`."""
     import shutil
+    import sys
     from time import perf_counter
 
     import genvarloader as gvl
@@ -58,7 +59,12 @@ def main(
     from loguru import logger
     from tqdm.auto import tqdm
 
-    logger.add(Path(__file__).parent / "generate_ground_truth.log", level="INFO")
+    log_file = Path(__file__).parent / "generate_ground_truth.log"
+    log_file.unlink()
+    logger.enable("genvarloader")
+    logger.remove(0)
+    logger.add(sys.stdout, level="INFO")
+    logger.add(log_file, level="DEBUG")
 
     logger.info(
         f"""Running command:
@@ -68,7 +74,6 @@ def main(
 
     t0 = perf_counter()
 
-    wdir = Path(__file__).resolve().parent
     out_dir = out_dir.resolve()
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -78,6 +83,17 @@ def main(
 
     with open(vcf_path, "r") as f:
         vcf = f.read().encode()
+    # left-align
+    norm_cmd = [
+        "bcftools",
+        "norm",
+        "-f",
+        str(reference),
+    ]
+    result = run_shell(norm_cmd, input=vcf)
+    logger.info(f"Left-alignment: {result.stderr.decode()}")
+    vcf = result.stdout
+
     if not multiallelic:
         logger.info("Splitting multiallelic variants.")
         split_multiallelics_cmd = [
@@ -91,7 +107,11 @@ def main(
             "-m",
             "-",
         ]
-        vcf = run_shell(split_multiallelics_cmd, input=vcf).stdout
+        result = run_shell(split_multiallelics_cmd, input=vcf)
+        logger.info(
+            f"Atomizing variants and splitting multiallelics: {result.stderr.decode()}"
+        )
+        vcf = result.stdout
     if not indels:
         logger.info("Ignoring indels.")
         remove_indel_cmd = [
@@ -134,12 +154,11 @@ def main(
             "plink2",
             "--vcf",
             str(filtered_vcf),
-            "dosage=VAF",
             "--make-pgen",
             "--vcf-half-call",
             "r",
             "--out",
-            str(Path.cwd() / "pgen" / "sample"),
+            str(WDIR / "pgen" / f"filtered_{name}"),
         ]
     )
 
@@ -169,16 +188,19 @@ def main(
     #! also ensure that groups of variants are more than SEQ_LEN apart
     #! otherwise, the logic below won't work
     bed = (
-        bed.with_columns(
-            (pl.col("pos").diff().fill_null(0) > SEQ_LEN).cum_sum().alias("group")
-        )
-        .group_by("group")
+        bed.group_by("chrom", maintain_order=True)
         .agg(
-            pl.col("chrom").first(),
+            "pos",
+            (pl.col("pos").diff().fill_null(0) > SEQ_LEN).cum_sum().alias("group"),
+        )
+        .explode("pos", "group")
+        .group_by("chrom", "group", maintain_order=True)
+        .agg(
             start=pl.col("pos").min() - SEQ_LEN // 2,
             end=pl.col("pos").min() + SEQ_LEN // 2,
         )
         .drop("group")
+        .sample(fraction=1, shuffle=True, seed=0)
         .with_row_index()
     )
 
@@ -200,13 +222,13 @@ def main(
             f"{chrom}:{start + 1}-{end}",
         ]
         for sample in samples:
-            for hap in range(1, 3):
+            for hap in range(2):
                 out_fasta = out_dir / f"{name}_{sample}_nr{row_nr}_h{hap}.fa"
                 consensus_cmd = [
                     "bcftools",
                     "consensus",
                     "-H",
-                    str(hap),
+                    str(hap + 1),
                     "-s",
                     sample,
                     "-o",
@@ -220,33 +242,27 @@ def main(
                 pbar.update()
     pbar.close()
 
-    bed = wdir / "vcf" / f"{name}.bed"
+    bed = WDIR / "vcf" / f"{name}.bed"
 
     logger.info("Generating phased dataset.")
     gvl.write(
-        path=wdir / "phased_dataset.gvl",
+        path=WDIR / "phased_dataset.gvl",
         bed=bed,
-        variants=wdir / "vcf" / f"filtered_{name}.vcf.gz",
-        length=SEQ_LEN,
+        variants=filtered_vcf,
         overwrite=True,
     )
 
     logger.info("Generating unphased dataset.")
     gvl.write(
-        path=wdir / "unphased_dataset.gvl",
+        path=WDIR / "unphased_dataset.gvl",
         bed=bed,
-        variants=wdir / "vcf" / f"filtered_{name}.vcf.gz",
-        length=SEQ_LEN,
+        variants=filtered_vcf,
         overwrite=True,
         phased=False,
         dosage_field="VAF",
     )
 
     logger.info(f"Finished in {perf_counter() - t0} seconds.")
-
-    # filtered_vcf.with_suffix('').unlink() # remove .vcf
-    # filtered_vcf.unlink() # remove .vcf.gz
-    # filtered_vcf.with_suffix('.gz.csi').unlink() # remove .vcf.gz.csi
 
 
 if __name__ == "__main__":

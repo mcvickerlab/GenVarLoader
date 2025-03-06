@@ -9,6 +9,7 @@ from typing import (
     Sequence,
     TypeVar,
     Union,
+    cast,
 )
 
 import numpy as np
@@ -16,6 +17,8 @@ import pandera as pa
 import pandera.typing as pat
 import polars as pl
 from numpy.typing import NDArray
+
+from ._types import Idx
 
 __all__ = [
     "read_bedlike",
@@ -44,9 +47,23 @@ def _process_bed(bed: Union[str, Path, pl.DataFrame], fixed_length: int):
     return with_length(bed, fixed_length)
 
 
-def with_length(bed: pl.DataFrame, length: int):
-    """Expands the regions in a BED-like DataFrame to a fixed length centered around the
-    midpoint of the region or the "peak" column if it is present."""
+def with_length(bed: pl.DataFrame, length: int) -> pl.DataFrame:
+    """Expands or shrinks each region in a BED-like DataFrame to be fixed-length windows
+    centered around the midpoint of each region or the "peak" column if it is present.
+
+    .. important::
+
+        The "peak" column is described in the `narrowPeak <https://genome.ucsc.edu/FAQ/FAQformat.html#format12>`_
+        and `broadPeak <https://genome.ucsc.edu/FAQ/FAQformat.html#format13>`_ specifications. It is a 0-based
+        offset from chromStart, so be sure not to encode your "peak" column as an absolute position!
+
+    Parameters
+    ----------
+    bed
+        BED-like DataFrame with at least the columns "chrom", "chromStart", and "chromEnd".
+    length
+        Length of the fixed-length windows.
+    """
     if "peak" in bed:
         center = pl.col("chromStart") + pl.col("peak")
     else:
@@ -98,7 +115,7 @@ def read_bedlike(path: Union[str, Path]) -> pl.DataFrame:
             return _read_bed_table(path)
         except ValueError:
             raise ValueError(
-                f"""Unrecognized file extension: {''.join(path.suffixes)}. Expected one 
+                f"""Unrecognized file extension: {"".join(path.suffixes)}. Expected one 
                 of .bed, .narrowPeak, .broadPeak, or a table file (e.g. .csv, .tsv)"""
             )
 
@@ -330,8 +347,32 @@ def _offsets_to_lengths(offsets: NDArray[ITYPE]) -> NDArray[ITYPE]:
 def _lengths_to_offsets(
     lengths: NDArray[np.integer], dtype: type[ITYPE] = np.int64
 ) -> NDArray[ITYPE]:
-    """Converts the number of elements in each group to offsets."""
-    offsets = np.empty(len(lengths) + 1, dtype=dtype)
+    """Converts the number of elements in each group to a 1D array of offsets."""
+    offsets = np.empty(lengths.size + 1, dtype=dtype)
     offsets[0] = 0
     np.cumsum(lengths, out=offsets[1:])
     return offsets
+
+
+def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.intp]:
+    """Convert an index-like object to an array of non-negative indices. Shapes of multi-dimensional
+    indices are preserved."""
+    if isinstance(idx, slice):
+        _idx = np.arange(max_len, dtype=np.intp)[idx]
+    elif isinstance(idx, np.ndarray) and np.issubdtype(idx.dtype, np.bool_):
+        _idx = idx.nonzero()[0]
+    elif isinstance(idx, Sequence):
+        _idx = np.asarray(idx, np.intp)
+    else:
+        _idx = idx
+
+    # handle negative indices
+    if isinstance(_idx, (int, np.integer)):
+        _idx = np.array([_idx], np.intp)
+
+    # unable to type narrow from NDArray[bool] since it's a generic type
+    _idx = cast(NDArray[np.intp], _idx)
+
+    _idx[_idx < 0] += max_len
+
+    return _idx

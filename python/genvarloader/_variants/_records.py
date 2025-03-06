@@ -80,7 +80,7 @@ class VLenAlleles:
 
         # handle empty result
         if start >= len(self) or (stop is not None and stop <= start):
-            return VLenAlleles(np.empty(0, np.uint64), np.empty(0, "|S1"))
+            return VLenAlleles(np.empty(0, np.int64), np.empty(0, "|S1"))
 
         if stop is None:
             stop = len(self)
@@ -183,14 +183,14 @@ class RecordInfo:
             positions=np.empty(n_queries, np.int32),
             size_diffs=np.empty(n_queries, np.int32),
             refs=VLenAlleles(
-                np.zeros(n_queries + 1, np.uint64), np.empty(n_queries, "S1")
+                np.zeros(n_queries + 1, np.int64), np.empty(n_queries, "S1")
             ),
             alts=VLenAlleles(
-                np.zeros(n_queries + 1, np.uint64), np.empty(n_queries, "S1")
+                np.zeros(n_queries + 1, np.int64), np.empty(n_queries, "S1")
             ),
             start_idxs=np.empty(n_queries, np.int32),
             end_idxs=np.empty(n_queries, np.int32),
-            offsets=np.zeros(n_queries + 1, np.int32),
+            offsets=np.zeros(n_queries + 1, np.int64),
         )
 
     @staticmethod

@@ -18,7 +18,6 @@ from .._utils import (
     _lengths_to_offsets,
     _normalize_contig_name,
     read_bedlike,
-    with_length,
 )
 from .._variants import Variants
 from .._variants._genotypes import PgenGenos, VCFGenos
@@ -42,7 +41,6 @@ def write(
     variants: Optional[Union[str, Path, Variants]] = None,
     bigwigs: Optional[Union[BigWigs, List[BigWigs]]] = None,
     samples: Optional[List[str]] = None,
-    length: Optional[int] = None,
     max_jitter: Optional[int] = None,
     overwrite: bool = False,
     max_mem: int = 4 * 2**30,
@@ -70,15 +68,12 @@ def write(
         BigWigs object or list of BigWigs objects containing intervals
     samples
         Samples to include in the dataset
-    length
-        Length of the regions to query. Provided regions will be expanded or contracted
-        to this length + 2 x :code:`max_jitter` with the center of the region remaining the same.
     max_jitter
         Maximum jitter to add to the regions
     overwrite
-        Whether to overwrite an existing datasete
+        Whether to overwrite an existing dataset
     max_mem
-        Maximum memory to use in bytes.
+        Approximate maximum memory to use in bytes. This is a soft limit and may be exceeded.
     phased
         Whether to treat the genotypes as phased. If phased=False and using a VCF,
         a dosage FORMAT field must be provided and must have Number = '1' or 'A' in the VCF header.
@@ -115,13 +110,10 @@ def write(
     if isinstance(bed, (str, Path)):
         bed = read_bedlike(bed)
 
-    gvl_bed, contigs, region_length, input_to_sorted_idx_map = _prep_bed(
-        bed, length, max_jitter
-    )
+    gvl_bed, contigs, input_to_sorted_idx_map = _prep_bed(bed, max_jitter)
     bed.with_columns(r_idx_map=pl.lit(input_to_sorted_idx_map)).write_ipc(
         path / "input_regions.arrow"
     )
-    metadata["region_length"] = region_length
     metadata["contigs"] = contigs
     if max_jitter is not None:
         metadata["max_jitter"] = max_jitter
@@ -188,7 +180,6 @@ def write(
             path,
             gvl_bed,
             variants,
-            region_length,
             samples,
             max_mem,
         )
@@ -200,7 +191,6 @@ def write(
         del variants
         gc.collect()
 
-    logger.info("Writing regions.")
     _write_regions(path, gvl_bed, contigs)
 
     if bigwigs is not None:
@@ -217,9 +207,8 @@ def write(
 
 def _prep_bed(
     bed: pl.DataFrame,
-    length: Optional[int] = None,
     max_jitter: Optional[int] = None,
-) -> Tuple[pl.DataFrame, List[str], int, NDArray[np.intp]]:
+) -> Tuple[pl.DataFrame, List[str], NDArray[np.intp]]:
     if bed.height == 0:
         raise ValueError("No regions found in the BED file.")
 
@@ -234,23 +223,22 @@ def _prep_bed(
     with pl.StringCache():
         pl.Series(contigs, dtype=pl.Categorical)
         bed = bed.with_row_index().sort(
-            pl.col("chrom").cast(pl.Categorical), pl.col("chromStart")
+            pl.col("chrom").cast(pl.Categorical),
+            pl.col("chromStart"),
+            pl.col("chromEnd"),
+            maintain_order=True,
         )
 
     input_to_sorted_idx_map = np.argsort(bed["index"])
     bed = bed.drop("index")
 
-    if length is None:
-        length = cast(
-            int, bed.select((pl.col("chromEnd") - pl.col("chromStart")).max()).item()
+    if max_jitter is not None:
+        bed = bed.with_columns(
+            chromStart=pl.col("chromStart") - max_jitter,
+            chromEnd=pl.col("chromEnd") + max_jitter,
         )
 
-    if max_jitter is not None:
-        length += 2 * max_jitter
-
-    bed = with_length(bed, length)
-
-    return bed, contigs, length, input_to_sorted_idx_map
+    return bed, contigs, input_to_sorted_idx_map
 
 
 def _write_regions(path: Path, bed: pl.DataFrame, contigs: List[str]):
@@ -267,7 +255,6 @@ def _write_variants(
     path: Path,
     bed: pl.DataFrame,
     variants: Variants,
-    region_length: int,
     samples: Optional[List[str]] = None,
     max_mem: int = 4 * 2**30,
 ):
@@ -307,7 +294,10 @@ def _write_variants(
         _contig = _normalize_contig_name(contig, variants.records.contigs)
         if _contig is not None:
             starts = part["chromStart"].to_numpy()
-            ends = starts + region_length + INITIAL_END_EXTENSION
+            # TODO: ends may be extended if haps are too short, causing mem usage to be higher
+            # AFAIK there is no fix for this with the current read/write scheme
+            # the per-file feature would eventually address this
+            ends = part["chromEnd"].to_numpy() + INITIAL_END_EXTENSION
             rel_s_idxs = variants.records.find_relative_start_idx(_contig, starts)
             rel_e_idxs = variants.records.find_relative_end_idx(_contig, ends)
 
@@ -371,7 +361,7 @@ def _write_variants(
                 rel_s_idxs = rel_start_idxs[contig][o_s:o_e]
                 rel_e_idxs = rel_end_idxs[contig][o_s:o_e]
                 starts = part[o_s:o_e, "chromStart"].to_numpy()
-                ends = starts + region_length + INITIAL_END_EXTENSION
+                ends = part[o_s:o_e, "chromEnd"].to_numpy()
                 n_regions = len(rel_s_idxs)
                 pbar.set_description(
                     f"Reading genotypes for {n_regions} regions on chromosome {contig}"
@@ -386,7 +376,6 @@ def _write_variants(
                     rel_s_idxs,
                     rel_e_idxs,
                     variants,
-                    region_length,
                     _samples,
                     sample_idx,
                 )
@@ -448,10 +437,12 @@ def _read_variants_chunk(
     rel_s_idxs: NDArray[np.int32],
     rel_e_idxs: NDArray[np.int32],
     variants: Variants,
-    region_length: int,
     samples: List[str],
     sample_idxs: Optional[NDArray[np.intp]],
-):
+) -> Tuple[Union[SparseGenotypes, SparseSomaticGenotypes], NDArray[np.int32]]:
+    desired_lengths = ends - starts
+    ends = ends + INITIAL_END_EXTENSION
+
     if contig is None:
         if variants.phased:
             genos = SparseGenotypes.empty(
@@ -469,7 +460,7 @@ def _read_variants_chunk(
 
     first = True
     while True:
-        logger.debug(f"region length {ends[0] - starts[0]}")
+        logger.debug(f"average region length {(ends - starts).mean()}")
         if not first:
             rel_e_idxs = variants.records.find_relative_end_idx(contig, ends)
         s_idx = variants.records.contig_offsets[contig] + rel_s_idxs
@@ -518,20 +509,21 @@ def _read_variants_chunk(
         haplotype_ilens = get_haplotype_region_ilens(
             genos, rel_s_idxs, offsets, variants.records.v_diffs[contig]
         )
+        # (s p r)
         haplotype_lengths = ends - starts + haplotype_ilens
         del haplotype_ilens
         logger.debug(f"average haplotype length {haplotype_lengths.mean()}")
         # (s p r)
-        missing_length = region_length - haplotype_lengths
-        logger.debug(f"max missing length {missing_length.max()}")
+        missing_lengths = desired_lengths - haplotype_lengths
+        logger.debug(f"max missing length {missing_lengths.max()}")
 
-        if np.all(missing_length <= 0):
+        if np.all(missing_lengths <= 0):
             break
 
-    # (r)
-    ends += np.ceil(
-        EXTEND_END_MULTIPLIER * missing_length.max((0, 1)).clip(min=0)
-    ).astype(np.int32)
+        # (r)
+        ends += np.ceil(
+            EXTEND_END_MULTIPLIER * missing_lengths.max((0, 1)).clip(min=0)
+        ).astype(np.int32)
 
     logger.debug("sparsify genotypes")
     if variants.phased:
@@ -542,7 +534,7 @@ def _read_variants_chunk(
             ilens=variants.records.v_diffs[contig],
             positions=variants.records.v_starts[contig],
             starts=starts,
-            length=region_length,
+            lengths=desired_lengths,
         )
     else:
         genos, chunk_max_ends = SparseSomaticGenotypes.from_dense_with_length(
@@ -552,7 +544,7 @@ def _read_variants_chunk(
             ilens=variants.records.v_diffs[contig],
             positions=variants.records.v_starts[contig],
             starts=starts,
-            length=region_length,
+            lengths=desired_lengths,
             dosages=dosages,  # type: ignore | guaranteed bound by read_genos_and_dosages
         )
     logger.debug(f"maximum needed length {(chunk_max_ends - starts).max()}")

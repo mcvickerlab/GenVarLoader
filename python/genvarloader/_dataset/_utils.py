@@ -5,7 +5,6 @@ import numpy as np
 import polars as pl
 from numpy.typing import ArrayLike, NDArray
 
-from .._types import Idx
 from .._utils import DTYPE
 
 __all__ = []
@@ -38,25 +37,6 @@ def padded_slice(arr: NDArray, start: int, stop: int, pad_val: int):
     return out
 
 
-def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.integer]:
-    """Convert an index-like object to an array of non-negative indices. Shapes of multi-dimensional
-    indices are preserved."""
-    if isinstance(idx, slice):
-        _idx = np.arange(max_len)[idx]
-    elif isinstance(idx, Sequence):
-        _idx = np.asarray(idx, np.intp)
-    else:
-        _idx = idx
-
-    # handle negative indices
-    if isinstance(_idx, (int, np.integer)):
-        _idx = np.array([_idx], np.intp)
-
-    _idx[_idx < 0] += max_len
-
-    return _idx
-
-
 def oidx_to_raveled_idx(row_idx: ArrayLike, col_idx: ArrayLike, shape: Tuple[int, int]):
     row_idx = np.asarray(row_idx)
     col_idx = np.asarray(col_idx)
@@ -67,7 +47,7 @@ def oidx_to_raveled_idx(row_idx: ArrayLike, col_idx: ArrayLike, shape: Tuple[int
 
 
 def regions_to_bed(regions: NDArray[np.int32], contigs: Sequence[str]) -> pl.DataFrame:
-    """Convert regions to a BED3 DataFrame.
+    """Convert GVL's internal representation of regions to a BED3 DataFrame.
 
     Parameters
     ----------
@@ -84,12 +64,43 @@ def regions_to_bed(regions: NDArray[np.int32], contigs: Sequence[str]) -> pl.Dat
     cols = ["chrom", "chromStart", "chromEnd", "strand"]
     bed = pl.DataFrame(regions, schema=cols)
     cmap = dict(enumerate(contigs))
-    bed = bed.with_columns(
+    bed = bed.select(
         pl.col("chrom").replace_strict(cmap, return_dtype=pl.Utf8),
         pl.col("chromStart", "chromEnd").cast(pl.Int64),
         pl.col("strand").replace_strict({1: "+", -1: "-"}, return_dtype=pl.Utf8),
-    ).select(cols)
+    )
     return bed
+
+
+def bed_to_regions(bed: pl.DataFrame, contigs: Sequence[str]) -> NDArray[np.int32]:
+    """Convert a BED3+ DataFrame to GVL's internal representation of regions.
+
+    Parameters
+    ----------
+    bed : pl.DataFrame
+        Bed DataFrame.
+    contigs : Sequence[str]
+        Contigs.
+
+    Returns
+    -------
+    NDArray[np.int32]
+        Regions.
+    """
+    cmap = {v: k for k, v in enumerate(contigs)}
+    cols = [
+        pl.col("chrom").replace_strict(cmap, return_dtype=pl.Int32),
+        pl.col("chromStart", "chromEnd").cast(pl.Int32),
+    ]
+
+    if "strand" in bed:
+        cols.append(
+            pl.col("strand").replace_strict({"+": 1, "-": -1}, return_dtype=pl.Int32)
+        )
+    else:
+        cols.append(pl.lit(1).cast(pl.Int32).alias("strand"))
+
+    return bed.select(cols).to_numpy()
 
 
 @nb.njit(nogil=True, cache=True)

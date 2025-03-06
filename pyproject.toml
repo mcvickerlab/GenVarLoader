@@ -29,6 +29,7 @@ dependencies = [
     "joblib",
     "pooch",
     "seqpro",
+    "awkward",
 ]
 
 [project.urls]
@@ -92,9 +93,24 @@ typer = "*"
 tbb = "*"
 joblib = "*"
 pooch = "*"
+awkward = "*"
+pip = "*"
 
 [tool.pixi.pypi-dependencies]
 genvarloader = { path = ".", editable = true }
+
+[tool.pixi.feature.pytorch-cpu.dependencies]
+pytorch-cpu = ">=2,<3"
+
+[tool.pixi.feature.pytorch-gpu.dependencies]
+pytorch-gpu = ">=2,<3"
+cuda-version = "12.1.*"
+
+[tool.pixi.feature.pytorch-gpu.system-requirements]
+cuda = "12.1"
+
+[tool.pixi.feature.basenji2.pypi-dependencies]
+basenji2-pytorch = ">=0.1.2"
 
 [tool.pixi.feature.test.dependencies]
 maturin = ">=1.6,<2"
@@ -111,12 +127,13 @@ hypothesis = "*"
 filelock = "*"
 patchelf = "*"
 commitizen = "*"
-pytorch-cpu = ">=2,<3"
 
 [tool.pixi.feature.docs.dependencies]
 sphinx = ">=7.4.7"
 myst-parser = "*"
 nbsphinx = "*"
+ipykernel = "*"
+ipywidgets = "*"
 sphinx-book-theme = "*"
 sphinx-autobuild = "*"
 sphinx-autodoc-typehints = "*"
@@ -134,10 +151,16 @@ python = "3.11.*"
 python = "3.12.*"
 
 [tool.pixi.environments]
-dev = { features = ["test", "docs"] }
-test = { features = ["test"] }
-docs = { features = ["docs"] }
-test-py39 = { features = ["test", "py39"] }
-test-py310 = { features = ["test", "py310"] }
-test-py311 = { features = ["test", "py311"] }
-test-py312 = { features = ["test", "py312"] }
+dev = { features = ["test", "docs", "pytorch-cpu", "basenji2"] }
+test = { features = ["test", "pytorch-cpu"] }
+docs = { features = ["docs", "pytorch-cpu", "basenji2"] }
+docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2"] }
+test-no-pytorch = { features = ["test"] }
+test-py39 = { features = ["test", "py39", "pytorch-cpu"] }
+test-py310 = { features = ["test", "py310", "pytorch-cpu"] }
+test-py311 = { features = ["test", "py311", "pytorch-cpu"] }
+test-py312 = { features = ["test", "py312", "pytorch-cpu"] }
+
+[tool.pixi.feature.docs.tasks]
+i-kernel = "ipython kernel install --user --name 'gvl-docs' --display-name 'GVL Docs'"
+i-kernel-gpu = "ipython kernel install --user --name 'gvl-docs-gpu' --display-name 'GVL Docs GPU'"

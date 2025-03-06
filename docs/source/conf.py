@@ -42,6 +42,7 @@ intersphinx_mapping = {
     "numpy": ("https://numpy.org/doc/stable/", None),
     "numba": ("https://numba.readthedocs.io/en/stable/", None),
     "torch": ("https://pytorch.org/docs/stable/", None),
+    "awkward": ("https://awkward-array.org/doc/main/", None),
 }
 
 napoleon_google_docstring = False
@@ -63,7 +64,7 @@ typehints_defaults = "comma"
 
 myst_enable_extensions = ["colon_fence", "deflist", "dollarmath", "amsmath"]
 
-nbsphinx_execute = "auto"
+nbsphinx_execute = "never"
 nbsphinx_kernel_name = "python3"
 
 # -- Options for HTML output -------------------------------------------------
@@ -71,7 +72,7 @@ nbsphinx_kernel_name = "python3"
 
 html_theme = "sphinx_book_theme"
 html_title = f"GenVarLoader v{version}"
-html_logo = "_static/gvl_logo.png"
+html_logo = "_static/gvl_logo.svg"
 html_favicon = "_static/favicon.ico"
 html_static_path = ["_static"]
 html_theme_options = {

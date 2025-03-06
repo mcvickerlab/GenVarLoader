@@ -1,8 +1,11 @@
 from textwrap import dedent
-from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Tuple, Union
 
 import numpy as np
 from loguru import logger
+from numpy.typing import NDArray
+
+from ._types import Idx
 
 try:
     import torch
@@ -14,7 +17,10 @@ except ImportError:
 
 
 if TYPE_CHECKING:
+    import torch
     import torch.utils.data as td
+
+    from . import Dataset
 
 
 def get_dataloader(
@@ -87,7 +93,39 @@ def get_sampler(
     return td.BatchSampler(inner_sampler, batch_size, drop_last)
 
 
+def _tensor_from_maybe_bytes(array: NDArray) -> "torch.Tensor":
+    if not _TORCH_AVAILABLE:
+        raise ImportError(
+            "Could not import PyTorch. Please install PyTorch to use torch features."
+        )
+
+    if array.dtype.type == np.bytes_:
+        array = array.view(np.uint8)
+    return torch.from_numpy(array)
+
+
 if _TORCH_AVAILABLE:
+
+    class TorchDataset(td.Dataset):
+        def __init__(self, dataset: "Dataset"):
+            if not _TORCH_AVAILABLE:
+                raise ImportError(
+                    "Could not import PyTorch. Please install PyTorch to use torch features."
+                )
+            self.dataset = dataset
+
+        def __len__(self) -> int:
+            return len(self.dataset)
+
+        def __getitem__(
+            self, idx: Idx
+        ) -> Union["torch.Tensor", Tuple["torch.Tensor", ...], Any]:
+            batch = self.dataset._getitem_raveled(idx)
+            if isinstance(batch, np.ndarray):
+                batch = _tensor_from_maybe_bytes(batch)
+            elif isinstance(batch, tuple):
+                batch = tuple(_tensor_from_maybe_bytes(b) for b in batch)
+            return batch
 
     class StratifiedSampler(td.Sampler):
         """Stratified sampler for GVL datasets. This ensures that each batch has the most diversity of samples possible.

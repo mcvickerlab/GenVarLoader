@@ -5,6 +5,10 @@
 
 .. autofunction:: write
 
+.. autofunction:: read_bedlike
+
+.. autofunction:: with_length
+
 .. autoclass:: Dataset
     :members:
     :exclude-members: __init__
@@ -17,9 +21,9 @@
     :members:
     :exclude-members: rev_strand_fn, chunked
 
-.. autofunction:: read_bedlike
-
 .. autoclass:: Ragged
     :members:
     :exclude-members: __init__
+
+.. autofunction:: get_dummy_dataset
 ```
