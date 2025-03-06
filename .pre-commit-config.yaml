@@ -1,18 +1,19 @@
 repos:
-- hooks:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v5.0.0
+  hooks:
   - id: check-merge-conflict
   - id: debug-statements
   - id: mixed-line-ending
   - id: check-case-conflict
   - id: check-yaml
-  repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: v5.0.0
-- hooks:
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.9.4
+  hooks:
   - id: ruff
   - id: ruff-format
-  repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.9.4
-- hooks:
+- repo: https://github.com/commitizen-tools/commitizen
+  rev: v4.4.1
+  hooks:
   - id: commitizen
-  repo: https://github.com/commitizen-tools/commitizen
-  rev: v4.1.1
+    stages: [commit-msg]
