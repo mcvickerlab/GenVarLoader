@@ -24,6 +24,7 @@ sphinx-book-theme>=1.1
 sphinx-autodoc-typehints
 myst-parser>=3
 nbsphinx
+ipywidgets
 torch
 torchvision
 torchaudio
