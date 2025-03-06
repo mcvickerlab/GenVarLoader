@@ -1,55 +1,52 @@
 ```{toctree}
 :hidden: true
 
+dataset
 geuvadis
+faq
 api
 ```
 
 # GenVarLoader
 
-```{image} _static/gvl_logo.png
-:alt: GenVarLoader logo
-:align: center
-:width: 200
-```
-
 ```{image} https://badge.fury.io/py/genvarloader.svg
 :alt: PyPI version
 :target: https://badge.fury.io/py/genvarloader
-:class: inline-link
 ```
 
 ```{image} https://readthedocs.org/projects/genvarloader/badge/?version=latest
 :alt: Documentation Status
 :target: https://genvarloader.readthedocs.io/en/latest/index.html
-:class: inline-link
 ```
 
 ```{image} https://static.pepy.tech/badge/genvarloader
 :alt: Downloads
-:class: inline-link
 ```
 
 ```{image} https://img.shields.io/pypi/dm/genvarloader
 :alt: PyPI - Downloads
-:class: inline-link
 ```
 
 ```{image} https://badgen.net/github/stars/mcvickerlab/GenVarLoader
 :alt: GitHub stars
-:class: inline-linke
 ```
 
-[[Preprint](https://www.biorxiv.org/content/10.1101/2025.01.15.633240v1)]
-
-GenVarLoader provides a fast, memory efficient data loader for training sequence models on genetic variation. For example, this can be used to train a DNA language model on human genetic variation (e.g. [Dalla-Torre et al.](https://www.biorxiv.org/content/10.1101/2023.01.11.523679)) or train sequence to function models with genetic variation (e.g. [Celaj et al.](https://www.biorxiv.org/content/10.1101/2023.09.20.558508v1), [Drusinsky et al.](https://www.biorxiv.org/content/10.1101/2024.07.27.605449v1), [He et al.](https://www.biorxiv.org/content/10.1101/2024.10.15.618510v1), and [Rastogi et al.](https://www.biorxiv.org/content/10.1101/2024.09.23.614632v1)).
+```{image} https://img.shields.io/badge/bioRxiv-2025.01.15.633240-b31b1b.svg
+:alt: bioRxiv link
+:target: https://www.biorxiv.org/content/10.1101/2025.01.15.633240
+```
 
 ## Features
-- Avoids writing any sequences to disk
-- Generates haplotypes up to 1,000 times faster than reading a FASTA file
-- Generates tracks up to 450 times faster than reading a BigWig
-- Supports indels and re-aligns tracks to haplotypes that have them
+
+GenVarLoader provides a fast, memory efficient data structure for training sequence models on genetic variation. For example, this can be used to train a DNA language model on human genetic variation (e.g. [Dalla-Torre et al.](https://www.biorxiv.org/content/10.1101/2023.01.11.523679)) or train sequence to function models with genetic variation (e.g. [Celaj et al.](https://www.biorxiv.org/content/10.1101/2023.09.20.558508v1), [Drusinsky et al.](https://www.biorxiv.org/content/10.1101/2024.07.27.605449v1), [He et al.](https://www.biorxiv.org/content/10.1101/2024.10.15.618510v1), and [Rastogi et al.](https://www.biorxiv.org/content/10.1101/2024.09.23.614632v1)).
+
+- Avoid writing any sequences to disk (can save >2,000x storage vs. writing personalized genomes with bcftools consensus)
+- Generate haplotypes up to 1,000 times faster than reading a FASTA file
+- Generate tracks up to 450 times faster than reading a BigWig
+- **Supports indels** and re-aligns tracks to haplotypes that have them
 - Extensible to new file formats: drop a feature request! Currently supports VCF, PGEN, and BigWig
+
+See our [preprint](https://www.biorxiv.org/content/10.1101/2025.01.15.633240) for benchmarking and implementation details.
 
 ## Installation
 
@@ -57,7 +54,7 @@ GenVarLoader provides a fast, memory efficient data loader for training sequence
 pip install genvarloader
 ```
 
-A PyTorch dependency is not included since it may require [special instructions](https://pytorch.org/get-started/locally/).
+A PyTorch dependency is **not** included since it may require [special instructions](https://pytorch.org/get-started/locally/).
 
 ## Quick Start
 
@@ -104,11 +101,9 @@ for haplotypes, tracks in train_dataloader:
 ### Inspect specific instances
 
 ```python
-dataset[99]  # 100-th instance of the raveled dataset
 dataset[0, 9]  # first region, 10th sample
-dataset.isel(regions=0, samples=9)
-dataset[:10]  # first 10 instances
-dataset[:10, :5]  # first 10 regions and 5 samples
+dataset[:10, 4]  # first 10 regions, 5th sample
+dataset[:10, :5]  # first 10 regions and first 5 samples
 ```
 
 ### Transform the data on-the-fly
@@ -119,57 +114,12 @@ from einops import rearrange
 
 def transform(haplotypes, tracks):
     ohe = sp.DNA.ohe(haplotypes)
-    ohe = rearrange(ohe, "batch length alphabet -> batch alphabet length")
+    ohe = rearrange(ohe, "... length alphabet -> ... alphabet length")
     return ohe, tracks
 
 transformed_dataset = dataset.with_settings(transform=transform)
 ```
 
-### Pre-computing transformed tracks
-
-Suppose we want to return tracks that are the z-scored, log(CPM + 1) version of the original. Sometimes it is better to write this to disk to avoid having to recompute it during training or inference.
-
-```python
-import numpy as np
-
-# We'll assume we already have an array of total counts for each sample.
-# This usually can't be derived from a gvl.Dataset since it only has data for specific regions.
-total_counts = np.load('total_counts.npy')  # shape: (samples) float32
-
-# We'll compute the mean and std log(CPM + 1) using the training split
-means = np.empty((train_dataset.n_regions, train_dataset.region_length), np.float32)
-stds = np.empty_like(means)
-just_tracks = train_dataset.with_settings(return_sequences=False, jitter=0)
-for region in range(len(means)):
-    cpm = np.log1p(just_tracks[region, :] / total_counts[:, None] * 1e6)
-    means[region] = cpm.mean(0)
-    stds[region] = cpm.std(0)
-
-# Define our transformation
-def z_log_cpm(dataset_indices, region_indices, sample_indices, tracks: gvl.Ragged[np.float32]):
-    # In the event that the dataset only has SNPs, the full length tracks will all be the same length.
-    # So, we can reshape the ragged data into a regular array.
-    _tracks = tracks.data.reshape(-1, dataset.region_length)
-    
-    # Otherwise, we would have to leave `tracks`as a gvl.Ragged array to accommodate different lengths.
-    # In that case, we could do the transformation with a Numba compiled function instead.
-
-    # original tracks -> log(CPM + 1) -> z-score
-    _tracks = np.log1p(_tracks / total_counts[sample_indices, None] * 1e6)
-    _tracks = (_tracks - means[region_indices]) / stds[region_indices]
-
-    return gvl.Ragged.from_offsets(_tracks.ravel(), tracks.shape, tracks.offsets)
-
-# This can take about as long as writing the original tracks or longer, depending on the transformation.
-dataset_with_zlogcpm = dataset.write_transformed_track("z-log-cpm", "bigwig", transform=z_log_cpm)
-
-# The dataset now has both tracks available, "bigwig" and "z-log-cpm", and we can choose to return either one or both.
-haps_and_zlogcpm = dataset_with_zlogcpm.with_settings(return_tracks="z-log-cpm")
-
-# If we re-opened the dataset after running this then we could write...
-dataset = gvl.Dataset.open("cool_dataset.gvl", "hg38.fa", return_tracks="z-log-cpm")
-```
-
 ## Performance tips
-- GenVarLoader uses multithreading extensively, so it's best to use 0 or 1 workers with your [`DataLoader`](https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader).
+- GenVarLoader uses multithreading extensively, so it's best to use `0` or `1` workers with your [`DataLoader`](https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader).
 - A GenVarLoader [`Dataset`](api.md#genvarloader.Dataset) is most efficient when given batches of indices, rather than one at a time. By default, [`DataLoader`](https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader)s use one index at a time, so if you want to use a ***custom*** [`Sampler`](https://pytorch.org/docs/stable/data.html#torch.utils.data.Sampler) you should wrap it with a [`BatchSampler`](https://pytorch.org/docs/stable/data.html#torch.utils.data.BatchSampler) before passing it to [`Dataset.to_dataloader()`](api.md#genvarloader.Dataset.to_dataloader).

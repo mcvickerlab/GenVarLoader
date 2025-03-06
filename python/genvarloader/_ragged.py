@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Generic, Optional, Tuple, TypeVar, Union
 
+import awkward as ak
 import numba as nb
 import numpy as np
 from attrs import define
+from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
+from awkward.index import Index64
 from numpy.typing import NDArray
 
 from ._types import Idx
@@ -196,7 +199,9 @@ class Ragged(Generic[RDTYPE]):
 
         return padded
 
-    def squeeze(self, axis: Union[int, Tuple[int, ...]] = -1) -> Ragged[RDTYPE]:
+    def squeeze(
+        self, axis: Optional[Union[int, Tuple[int, ...]]] = None
+    ) -> Ragged[RDTYPE]:
         """Squeeze the ragged array along the given non-ragged axis."""
         return Ragged.from_lengths(self.data, self.lengths.squeeze(axis))
 
@@ -226,6 +231,39 @@ class Ragged(Generic[RDTYPE]):
 
         return self.data[self.offsets[idx] : self.offsets[idx + 1]]
 
+    def to_awkward(self) -> ak.Array:
+        """Convert to an `Awkward <https://awkward-array.org/doc/main/>`_ array without copying. Note that this effectively
+        returns a view of the data, so modifying the data will modify the original array."""
+        layout = ListOffsetArray(
+            Index64(self.offsets),
+            NumpyArray(self.data),  # type: ignore | NDArray[RDTYPE] is ArrayLike
+        )
+
+        for size in reversed(self.shape[1:]):
+            layout = RegularArray(layout, size)
+
+        return ak.Array(layout)
+
+    @classmethod
+    def from_awkward(cls, awk: "ak.Array") -> "Ragged":
+        """Convert from an `Awkward <https://awkward-array.org/doc/main/>`_ array without copying. Note that this effectively
+        returns a view of the data, so modifying the data will modify the original array."""
+        # parse shape
+        shape_str = str(awk.type).split(" * ")
+        try:
+            shape = tuple(map(int, shape_str[:-2]))
+        except ValueError as err:
+            raise ValueError(
+                f"Only the final axis of an awkward array may be variable to convert to ragged, but got {awk.type}."
+            ) from err
+
+        # extract data and offsets
+        layout = awk.layout._offsets_and_flattened(0, -1)[1].content
+        data = np.asarray(layout.content.data)
+        offsets = np.asarray(layout.offsets.data)
+
+        return cls.from_offsets(data, shape, offsets)
+
 
 INTERVAL_DTYPE = np.dtype(
     [("start", np.int32), ("end", np.int32), ("value", np.float32)], align=True
@@ -248,7 +286,8 @@ def pad_ragged(
     return out
 
 
-COMPLEMENT_MAP = dict(zip(b"ACGT", b"TGCA"))
+NUCLEOTIDES = b"ACGT"
+COMPLEMENTS = b"TGCA"
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
@@ -261,7 +300,7 @@ def _rc_helper(
         _data = data[start:end]
         _out = out[start:end]
         if mask[i]:
-            for nuc, comp in COMPLEMENT_MAP.items():
+            for nuc, comp in zip(NUCLEOTIDES, COMPLEMENTS):
                 _out[_data == nuc] = comp
             _out[:] = _out[::-1]
         else:
@@ -282,9 +321,13 @@ def _reverse_helper(
     data: NDArray[np.uint8], offsets: NDArray[np.int64], mask: NDArray[np.bool_]
 ):
     for i in nb.prange(len(offsets) - 1):
-        start, end = offsets[i], offsets[i + 1]
         if mask[i]:
-            data[start:end] = data[start:end:-1]
+            start, end = offsets[i], offsets[i + 1]
+            if start > 0:
+                reverse_slice = slice(end - 1, start - 1, -1)
+            else:
+                reverse_slice = slice(end - 1, None, -1)
+            data[start:end] = data[reverse_slice]
 
 
 def _reverse(tracks: Ragged[np.float32], mask: NDArray[np.bool_]):

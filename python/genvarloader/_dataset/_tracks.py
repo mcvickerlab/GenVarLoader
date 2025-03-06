@@ -371,7 +371,6 @@ def shift_and_realign_track_sparse(
             continue
 
         v_len = max(0, v_diff) + 1
-        value = track[v_rel_pos]
 
         # handle shift
         if shifted < shift:
@@ -424,7 +423,7 @@ def shift_and_realign_track_sparse(
 
         # indels (substitutions are skipped above and then handled by above clause)
         writable_length = min(v_len, length - out_idx)
-        out[out_idx : out_idx + writable_length] = value
+        out[out_idx : out_idx + writable_length] = track[v_rel_pos]
         out_idx += writable_length
         track_idx = v_rel_end
 

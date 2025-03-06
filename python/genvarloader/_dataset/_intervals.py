@@ -14,7 +14,8 @@ def intervals_to_tracks(
     out_offsets: NDArray[np.int64],
     intervals: NDArray[np.void],
     itv_offsets: NDArray[np.int64],
-) -> NDArray[np.float32]:
+    out: NDArray[np.float32],
+):
     """Convert intervals to tracks at base-pair resolution.
     Assumptions:
     - intervals are sorted by start
@@ -43,7 +44,7 @@ def intervals_to_tracks(
         Shape = regionsries + 1) Offsets for ragged array of tracks.
     """
     n_queries = len(starts)
-    out = np.zeros(out_offsets[-1], np.float32)
+    out[:] = 0.0
     for query in nb.prange(n_queries):
         idx = offset_idxs[query]
         itv_s, itv_e = itv_offsets[idx], itv_offsets[idx + 1]
@@ -57,8 +58,8 @@ def intervals_to_tracks(
 
         query_start = starts[query]
 
-        #! a data race will occur if there are any overlapping intervals
-        for interval in nb.prange(itv_s, itv_e):
+        # if parallelized, a data race will occur if there are any overlapping intervals
+        for interval in range(itv_s, itv_e):
             itv = intervals[interval]
             #! assumes itv.start >= query_start
             start, end = itv.start - query_start, itv.end - query_start
@@ -66,8 +67,8 @@ def intervals_to_tracks(
                 _out[start:end] = itv.value
             else:
                 #! assumes intervals are sorted by start
+                # cannot break if parallelized
                 break
-    return out
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)

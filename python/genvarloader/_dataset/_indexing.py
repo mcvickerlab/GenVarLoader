@@ -110,12 +110,10 @@ class DatasetIndexer:
         )
 
         i2d_map = self.i2d_map[idx]
-        d2i_map = self.d2i_map[idx]
 
         return evolve(
             self,
             i2d_map=i2d_map,
-            d2i_map=d2i_map,
             region_subset_idxs=region_idxs,
             sample_subset_idxs=sample_idxs,
         )
@@ -125,13 +123,9 @@ class DatasetIndexer:
         i2d_map = oidx_to_raveled_idx(
             self.full_region_idxs, self.full_sample_idxs, self.full_shape
         )
-        d2i_map = oidx_to_raveled_idx(
-            np.argsort(self.full_region_idxs), self.full_sample_idxs, self.full_shape
-        )
         return evolve(
             self,
             i2d_map=i2d_map,
-            d2i_map=d2i_map,
             region_subset_idxs=None,
             sample_subset_idxs=None,
         )
