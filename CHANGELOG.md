@@ -1,3 +1,9 @@
+## v0.9.0 (2025-03-06)
+
+### Feat
+
+- option to return ragged data from gvl.Dataset. output_length is set dynamically. fix: hap reconstruction matches bcftools. change default for Dataset.deterministic from False to True. change track output from a list of arrays to having a track dimension i.e. from shape (b [p] l) to (b t [p] l). docs: add dataset.md, faq.md and overhaul geuvadis.ipynb to be simpler and reflect changes in API.
+
 ## v0.8.1 (2025-02-12)
 
 ### Fix
