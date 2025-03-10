@@ -4001,8 +4001,8 @@ packages:
   timestamp: 1738501352608
 - pypi: .
   name: genvarloader
-  version: 0.8.1
-  sha256: 7d1c5d88cf141cecb44a656194847a9d41811892c5a48add74dfa8aa1235e397
+  version: 0.9.0
+  sha256: 6a064fd259aa57f918ae459b1f4d58239c4ef0fad70cb7c44168a3c1dfa4cb02
   requires_dist:
   - numba>=0.58.1
   - loguru

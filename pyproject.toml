@@ -61,9 +61,14 @@ filterwarnings = [
 [tool.commitizen]
 name = "cz_conventional_commits"
 tag_format = "v$version"
+legacy_tag_formats = ["$version"]
 version_scheme = "semver2"
 version_provider = "pep621"
 update_changelog_on_bump = true
+changelog_file = 'docs/source/changelog.md'
+changlog_incremental = true
+changelog_start_rev = "v0.9.1"
+template = "docs/source/changelog.md.j2"
 major_version_zero = true
 
 [build-system]
