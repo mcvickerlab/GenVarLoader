@@ -528,18 +528,18 @@ class Dataset:
                 to_evolve["splice_info"] = None
             else:
                 if isinstance(splice_info, str):
-                    names, unsorter, idx, lengths = np.unique(
+                    names, sorter, idx, lengths = np.unique(
                         self.regions[splice_info],
                         return_index=True,
                         return_inverse=True,
                         return_counts=True,
                     )
-                    names = names[unsorter]
+                    names = names[np.argsort(sorter)]
                     index = Ragged.from_lengths(np.argsort(idx), lengths).to_awkward()[
-                        unsorter
+                        np.argsort(sorter)
                     ]
                 elif isinstance(splice_info, Tuple):
-                    names, unsorter, lengths = np.unique(
+                    names, sorter, lengths = np.unique(
                         self.regions[splice_info[0]],
                         return_index=True,
                         return_counts=True,
@@ -547,10 +547,12 @@ class Dataset:
                     data = (
                         self.regions[splice_info]
                         .with_row_index()
-                        .sort("names", "order")["index"]
+                        .sort(splice_info)["index"]
                         .to_numpy()
                     )
-                    index = Ragged.from_lengths(data, lengths).to_awkward()[unsorter]
+                    index = Ragged.from_lengths(data, lengths).to_awkward()[
+                        np.argsort(sorter)
+                    ]
                 elif isinstance(splice_info, dict):
                     names = np.array(list(splice_info.keys()))
                     index = ak.Array(splice_info.values())
@@ -1298,6 +1300,7 @@ class Dataset:
             return self._getitem_spliced(idx)
 
     def _getitem_spliced(self, idx: Idx) -> Any:
+        # TODO need to disable RC for unspliced components, and then RC after splicing
         assert self.splice_info is not None
         # TODO: need to assert no jitter and deterministic?
         # * In theory, this still "works" with jitter or non-determinism, but why would anyone want this? Would they want a different alg here?
@@ -1323,11 +1326,17 @@ class Dataset:
                 "Splicing is not yet implemented for subset datasets."
             )
         # TODO: probably doesn't work for indexing with an ndarray because of flattening, may need to reshape afterwards
-        splice_idx = self.splice_info.index[idx]
-        unspliced_idx: NDArray = ak.flatten(splice_idx, axis=None).to_numpy()
-        unspliced_idx.sort()
+        idx = idx_like_to_array(idx, len(self))
+        r_idx, s_idx = np.unravel_index(idx, self.full_shape)
+        splice_idx = self.splice_info.index[r_idx]
+        unspliced_idx: NDArray = np.sort(ak.flatten(splice_idx, axis=None).to_numpy())
 
-        batch = inner_ds._getitem_unspliced(unspliced_idx)
+        ds_idx = np.ravel_multi_index((unspliced_idx, s_idx), self.full_shape)
+        batch = inner_ds._getitem_unspliced(ds_idx)
+
+        if isinstance(batch, (Ragged, dict)):
+            batch = (batch,)
+
         ragged_out: List[Ragged] = []
         if self.sequence_type == "haplotypes":
             haps = batch[0]
@@ -1338,7 +1347,7 @@ class Dataset:
             new_lengths = np.add.reduceat(
                 haps.lengths,
                 _lengths_to_offsets(ak.count(splice_idx, -1).to_numpy())[:-1],
-                axis=0,
+                axis=0,  # this might not generalized to ndim indices
             )
             b, p = [
                 ak.flatten(a, axis=None).to_numpy()
@@ -1349,7 +1358,7 @@ class Dataset:
             ]
 
             haps = Ragged.from_lengths(
-                ak.flatten(haps.to_awkward()[b, p]).to_numpy(), new_lengths
+                ak.flatten(haps.to_awkward()[b, p]).to_numpy().view("S1"), new_lengths
             )
 
             ragged_out.append(haps)
@@ -1369,7 +1378,7 @@ class Dataset:
             new_lengths = np.add.reduceat(
                 tracks.lengths,
                 _lengths_to_offsets(ak.count(splice_idx, -1).to_numpy())[:-1],
-                axis=0,
+                axis=0,  # this might not generalized to ndim indices
             )
             b, t, p = [
                 ak.flatten(a, axis=None).to_numpy()
@@ -1415,7 +1424,7 @@ class Dataset:
             _out = tuple(out)
 
         # TODO: handle squeezing and reshaping for scalar and ndarray indices, respectively
-            
+
         if self.return_indices:
             # TODO
             raise NotImplementedError(
