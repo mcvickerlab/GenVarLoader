@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Generic, Optional, Tuple, TypeVar, Union
+from typing import Any, Generic, Optional, Tuple, TypeVar, Union, cast
 
 import awkward as ak
 import numba as nb
@@ -56,6 +56,14 @@ class Ragged(Generic[RDTYPE]):
 
     def __len__(self):
         return self.shape[0]
+
+    @property
+    def dtype(self) -> np.dtype[RDTYPE]:
+        """Data type of the ragged array."""
+        return self.data.dtype
+
+    def view(self, dtype: np.dtype):
+        return Ragged.from_offsets(self.data.view(dtype), self.shape, self.offsets)
 
     @property
     def offsets(self) -> NDArray[np.int64]:
@@ -233,10 +241,20 @@ class Ragged(Generic[RDTYPE]):
 
     def to_awkward(self) -> ak.Array:
         """Convert to an `Awkward <https://awkward-array.org/doc/main/>`_ array without copying. Note that this effectively
-        returns a view of the data, so modifying the data will modify the original array."""
+        returns a view of the data, so modifying the data will modify the original array.
+
+        .. note::
+            Sequence arrays (i.e. dtype of "S1") will return awkward arrays with dtype np.uint8 since strings are represented
+            in Awkward differently than in GVL such that it does not support "S1" data.
+
+        """
+        if self.dtype.type == np.bytes_:
+            data = self.data.view(np.uint8)
+        else:
+            data = self.data
         layout = ListOffsetArray(
             Index64(self.offsets),
-            NumpyArray(self.data),  # type: ignore | NDArray[RDTYPE] is ArrayLike
+            NumpyArray(data),  # type: ignore | NDArray[RDTYPE] is ArrayLike
         )
 
         for size in reversed(self.shape[1:]):
@@ -258,11 +276,21 @@ class Ragged(Generic[RDTYPE]):
             ) from err
 
         # extract data and offsets
-        layout = awk.layout._offsets_and_flattened(0, -1)[1].content
-        data = np.asarray(layout.content.data)
-        offsets = np.asarray(layout.offsets.data)
+        data = ak.flatten(awk, axis=None).to_numpy()
+        layout = awk.layout
+        while hasattr(layout, "content"):
+            if isinstance(layout, ListOffsetArray):
+                offsets = layout.offsets.data
+                offsets = cast(NDArray[np.int64], offsets)
+                rag = cls.from_offsets(data, shape, offsets)
+                break
+            else:
+                layout = layout.content
+        else:
+            lengths = ak.count(awk, axis=-1).to_numpy()
+            rag = cls.from_lengths(data, lengths)
 
-        return cls.from_offsets(data, shape, offsets)
+        return rag
 
 
 INTERVAL_DTYPE = np.dtype(

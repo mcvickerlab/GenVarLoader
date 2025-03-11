@@ -16,6 +16,7 @@ from typing import (
     cast,
 )
 
+import awkward as ak
 import numba as nb
 import numpy as np
 import polars as pl
@@ -24,6 +25,7 @@ from einops import repeat
 from loguru import logger
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
+from typing_extensions import assert_never
 
 from .._ragged import (
     INTERVAL_DTYPE,
@@ -85,6 +87,14 @@ class _Variants:
         )
 
 
+@define
+class SpliceInfo:
+    names: NDArray
+    """Unique identifier for each spliced element."""
+    index: ak.Array
+    """Mapping from each element's position in `names` to the indices of the regions that are spliced together to form it."""
+
+
 @define(frozen=True)
 class Dataset:
     """A dataset of genotypes, reference sequences, and intervals.
@@ -136,6 +146,9 @@ class Dataset:
         return_indices: bool = False,
         deterministic: bool = True,
         return_annotations: bool = False,
+        splice_info: Optional[
+            Union[str, Tuple[str, str], Dict[Any, NDArray[np.integer]]]
+        ] = None,
     ) -> "Dataset":
         """Open a dataset from a path. If no reference genome is provided, the dataset can only yield tracks.
 
@@ -191,6 +204,7 @@ class Dataset:
             return_indices=return_indices,
             deterministic=deterministic,
             return_annotations=return_annotations,
+            splice_info=splice_info,
         )
 
         if reference is None and ds.has_genotypes:
@@ -387,6 +401,9 @@ class Dataset:
         return_indices: Optional[bool] = None,
         deterministic: Optional[bool] = None,
         return_annotations: Optional[bool] = None,
+        splice_info: Optional[
+            Union[Literal[False], str, Tuple[str, str], Dict[Any, NDArray[np.integer]]]
+        ] = None,
     ) -> "Dataset":
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -415,9 +432,6 @@ class Dataset:
             can be returned.
         return_annotations
             Whether to return sequence annotations. See :attr:`Dataset.return_annotations <genvarloader.Dataset.return_annotations>` for more information.
-        ragged
-            Whether to return tracks as ragged arrays. This is useful for tracks that have variable lengths, such as indel tracks.
-            See :attr:`Dataset.ragged <genvarloader.Dataset.ragged>` for more information.
         """
         to_evolve: Dict[str, Any] = {}
 
@@ -508,6 +522,43 @@ class Dataset:
 
         if return_annotations is not None:
             to_evolve["return_annotations"] = return_annotations
+
+        if splice_info is not None:
+            if splice_info is False:
+                to_evolve["splice_info"] = None
+            else:
+                if isinstance(splice_info, str):
+                    names, unsorter, idx, lengths = np.unique(
+                        self.regions[splice_info],
+                        return_index=True,
+                        return_inverse=True,
+                        return_counts=True,
+                    )
+                    names = names[unsorter]
+                    index = Ragged.from_lengths(np.argsort(idx), lengths).to_awkward()[
+                        unsorter
+                    ]
+                elif isinstance(splice_info, Tuple):
+                    names, unsorter, lengths = np.unique(
+                        self.regions[splice_info[0]],
+                        return_index=True,
+                        return_counts=True,
+                    )
+                    data = (
+                        self.regions[splice_info]
+                        .with_row_index()
+                        .sort("names", "order")["index"]
+                        .to_numpy()
+                    )
+                    index = Ragged.from_lengths(data, lengths).to_awkward()[unsorter]
+                elif isinstance(splice_info, dict):
+                    names = np.array(list(splice_info.keys()))
+                    index = ak.Array(splice_info.values())
+                else:
+                    raise TypeError("Invalid splice_regions type.")
+
+                index = cast(ak.Array, index)
+                to_evolve["splice_info"] = SpliceInfo(names, index)
 
         return evolve(self, **to_evolve)
 
@@ -1025,6 +1076,9 @@ class Dataset:
     phased: Optional[bool] = None
     """Whether the genotypes are phased. Set to None if genotypes are not present."""
 
+    splice_info: Optional[SpliceInfo] = None
+    """The splice information for the dataset."""
+
     _reference: Optional[Reference] = field(default=None, alias="_reference")
     """The reference genome. This is kept in memory."""
 
@@ -1238,6 +1292,148 @@ class Dataset:
         return self._getitem_raveled(ravel_idx)
 
     def _getitem_raveled(self, idx: Idx) -> Any:
+        if self.splice_info is None:
+            return self._getitem_unspliced(idx)
+        else:
+            return self._getitem_spliced(idx)
+
+    def _getitem_spliced(self, idx: Idx) -> Any:
+        assert self.splice_info is not None
+        # TODO: need to assert no jitter and deterministic?
+        # * In theory, this still "works" with jitter or non-determinism, but why would anyone want this? Would they want a different alg here?
+        # * Potential issues:
+        # * Each each component of the spliced output will have different jitter
+        # * For non-determinism, each component will have different shifts & different unphased haplotypes chosen
+
+        if self.output_length == "variable":
+            inner_ds = self.with_settings(return_indices=False, output_length="ragged")
+            # need to wait to pad until after done splicing
+        elif self.output_length == "ragged":
+            inner_ds = self.with_settings(return_indices=False)
+        else:
+            raise RuntimeError(
+                "In general, splicing cannot be done with fixed length data because even if the length of each region's data"
+                " is fixed/constant, the number of elements in each spliced element is not fixed. Thus, the final length of the"
+                " spliced elements will be variable."
+            )
+
+        if self.is_subset:
+            # TODO: handle subset datasets
+            raise NotImplementedError(
+                "Splicing is not yet implemented for subset datasets."
+            )
+        # TODO: probably doesn't work for indexing with an ndarray because of flattening, may need to reshape afterwards
+        splice_idx = self.splice_info.index[idx]
+        unspliced_idx: NDArray = ak.flatten(splice_idx, axis=None).to_numpy()
+        unspliced_idx.sort()
+
+        batch = inner_ds._getitem_unspliced(unspliced_idx)
+        ragged_out: List[Ragged] = []
+        if self.sequence_type == "haplotypes":
+            haps = batch[0]
+
+            if self.return_annotations:
+                haps, annot_v_idx, annot_pos = haps.values()
+
+            new_lengths = np.add.reduceat(
+                haps.lengths,
+                _lengths_to_offsets(ak.count(splice_idx, -1).to_numpy())[:-1],
+                axis=0,
+            )
+            b, p = [
+                ak.flatten(a, axis=None).to_numpy()
+                for a in ak.broadcast_arrays(
+                    splice_idx[:, None],
+                    np.arange(len(splice_idx))[None, :],
+                )
+            ]
+
+            haps = Ragged.from_lengths(
+                ak.flatten(haps.to_awkward()[b, p]).to_numpy(), new_lengths
+            )
+
+            ragged_out.append(haps)
+            if self.return_annotations:
+                annot_v_idx = Ragged.from_lengths(
+                    ak.flatten(annot_v_idx.to_awkward()[b, p]).to_numpy(),
+                    new_lengths,
+                )
+                annot_pos = Ragged.from_lengths(
+                    ak.flatten(annot_pos.to_awkward()[b, p]).to_numpy(), new_lengths
+                )
+                ragged_out.extend((annot_v_idx, annot_pos))
+
+        if self.active_tracks is not None:
+            tracks = batch[1]
+            awk_tracks = tracks.to_awkward()
+            new_lengths = np.add.reduceat(
+                tracks.lengths,
+                _lengths_to_offsets(ak.count(splice_idx, -1).to_numpy())[:-1],
+                axis=0,
+            )
+            b, t, p = [
+                ak.flatten(a, axis=None).to_numpy()
+                for a in ak.broadcast_arrays(
+                    splice_idx[:, None, None],
+                    np.arange(len(splice_idx))[None, :, None],
+                    np.arange(len(splice_idx))[None, None, :],
+                )
+            ]
+            tracks = Ragged.from_lengths(
+                ak.flatten(awk_tracks[b, t, p]).to_numpy(), new_lengths
+            )
+            ragged_out.append(tracks)
+
+        if self.output_length == "ragged":
+            out: Sequence[Union[Ragged, NDArray]] = ragged_out
+        elif self.output_length == "variable":
+            out = []
+            if self.sequence_type is not None:
+                assert self._reference is not None
+                pad_char = self._reference.pad_char
+                out.append(ragged_out[0].to_padded(pad_char))
+                n_seqs = 1
+
+                if self.return_annotations:
+                    out.append(ragged_out[1].to_padded(-1))
+                    out.append(ragged_out[2].to_padded(-1))
+                    n_seqs = 3
+            else:
+                n_seqs = 0
+
+            if self.active_tracks is not None:
+                # TODO: is 0 always the correct pad value for tracks?
+                # how to provide an API so user can specify?
+                out.extend(o.to_padded(0) for o in ragged_out[n_seqs:])
+        else:
+            assert_never(self.output_length)  # type: ignore | we check this above
+
+        if self.return_annotations:
+            haps = dict(zip(("haplotypes", "variant_indices", "positions"), out[:3]))
+            _out = (haps, *out[3:])
+        else:
+            _out = tuple(out)
+
+        # TODO: handle squeezing and reshaping for scalar and ndarray indices, respectively
+            
+        if self.return_indices:
+            # TODO
+            raise NotImplementedError(
+                "return_indices is not yet implemented for spliced data"
+            )
+            inp_idx = self._idxer.d2i_map[ds_idx]
+            inp_r_idx, inp_s_idx = np.unravel_index(inp_idx, self.full_shape)
+            out.extend((inp_r_idx, inp_s_idx))  # type: ignore
+
+        if self.transform is not None:
+            if isinstance(_out, tuple):
+                _out = self.transform(*_out)
+            else:
+                _out = self.transform(_out)
+
+        return _out
+
+    def _getitem_unspliced(self, idx: Idx) -> Any:
         """Reconstruct some haplotypes and/or tracks.
 
         Parameters
@@ -1799,7 +1995,7 @@ class Dataset:
 
     def __iter__(self):
         for i in range(len(self)):
-            yield self._getitem_raveled(i)
+            yield self._getitem_unspliced(i)
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
