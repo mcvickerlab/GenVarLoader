@@ -30,6 +30,7 @@ dependencies = [
     "pooch",
     "seqpro",
     "awkward",
+    "pyranges",
 ]
 
 [project.urls]
@@ -94,6 +95,7 @@ tbb = "*"
 joblib = "*"
 pooch = "*"
 awkward = "*"
+pyranges = "*"
 pip = "*"
 
 [tool.pixi.pypi-dependencies]
