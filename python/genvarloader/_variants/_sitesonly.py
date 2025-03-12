@@ -3,7 +3,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
-    Optional,
     Protocol,
     Sequence,
     Tuple,
@@ -11,6 +10,7 @@ from typing import (
 )
 
 import cyvcf2
+import numba as nb
 import numpy as np
 import pandera as pa
 import polars as pl
@@ -37,19 +37,14 @@ class SitesOnly(Protocol):
 @define
 class SitesOnlyVCF(SitesOnly):
     path: Union[str, Path]
-    filter: Optional[Callable[[cyvcf2.Variant], bool]] = None
+    filter: Callable[[cyvcf2.Variant], bool] = field(default=lambda _: True)
     attributes: Sequence[str] = field(factory=list)
     info_fields: Sequence[str] = field(factory=list)
 
     def to_bedlike(self) -> pl.DataFrame:
         vcf = cyvcf2.VCF(str(self.path))
 
-        if self.filter is not None:
-            _vcf = filter(self.filter, vcf)
-        else:
-            _vcf = vcf
-
-        cols = ["chrom", "chromStart", "chromEnd", "REF", "ALT", "n_alt"]
+        cols = ["keep", "chrom", "chromStart", "chromEnd", "REF", "ALT", "n_alt"]
         if self.attributes:
             cols.extend(self.attributes)
         if self.info_fields:
@@ -62,10 +57,18 @@ class SitesOnlyVCF(SitesOnly):
                     # rearrange from tuples of variants to tuples of attributes
                     zip(
                         *(
-                            (v.CHROM, v.start, v.end, v.REF, v.ALT[0], len(v.ALT))
+                            (
+                                v.is_snp & self.filter(v),
+                                v.CHROM,
+                                v.start,
+                                v.end,
+                                v.REF,
+                                v.ALT[0],
+                                len(v.ALT),
+                            )
                             + tuple(getattr(v, attr) for attr in self.attributes)
                             + tuple(v.INFO[f] for f in self.info_fields)
-                            for v in _vcf
+                            for v in vcf
                         )
                     ),
                 )
@@ -77,6 +80,10 @@ class SitesOnlyVCF(SitesOnly):
                 "Some sites are multi-allelic; only the first will be used. To avoid this,"
                 " preprocess the VCF with `bcftools norm -a -m -` to atomize and split them."
             )
+
+        logger.info(f"Filter removed {(~df['keep']).sum()} of {len(df)} sites.")
+
+        df = df.filter("keep").drop("keep")
 
         vcf.close()
 
@@ -126,7 +133,10 @@ class DatasetWithSites:
     def shape(self) -> Tuple[int, int]:
         return self.n_rows, self.n_samples
 
-    def __init__(self, sites: SitesOnly, dataset: "Dataset"):
+    def __init__(self, sites: SitesOnly, dataset: "Dataset", max_variants_per_region=1):
+        if max_variants_per_region > 1:
+            raise NotImplementedError("max_variants_per_region > 1 not yet supported")
+
         self.sites = sites
         self.dataset = dataset.with_settings(
             return_sequences="haplotypes",
@@ -176,13 +186,50 @@ class DatasetWithSites:
         starts = sites["POS"].to_numpy()  # 0-based
         alts = VLenAlleles.from_polars(sites["ALT"])
 
-        haps, v_idxs, ref_coords = apply_site_only_variants(
+        haps, v_idxs, ref_coords, flags = apply_site_only_variants(
             haps=haps,
-            v_idx=v_idxs,
-            ref_coord=ref_coords,
+            v_idxs=v_idxs,
+            ref_coords=ref_coords,
             site_starts=starts,
-            alt_alleles=alts.alleles,
+            alt_alleles=alts.alleles.view(np.uint8),
             alt_offsets=alts.offsets,
         )
 
         return haps, v_idxs, ref_coords
+
+
+APPLIED = np.uint8(0)
+DELETED = np.uint8(1)
+EXISTED = np.uint8(2)
+
+
+# * fixed length
+def apply_site_only_variants(
+    haps: NDArray[np.uint8],  # (b p l)
+    v_idxs: NDArray[np.int32],  # (b p l)
+    ref_coords: NDArray[np.int32],  # (b p l)
+    site_starts: NDArray[np.int32],  # (b)
+    alt_alleles: NDArray[np.uint8],  # ragged (b)
+    alt_offsets: NDArray[np.int64],  # (b+1)
+) -> Tuple[NDArray[np.uint8], NDArray[np.int32], NDArray[np.int32], NDArray[np.uint8]]:
+    batch_size, ploidy, length = haps.shape
+    flags = np.empty((batch_size, ploidy), dtype=np.uint8)
+    for b in nb.prange(batch_size):
+        for p in nb.prange(ploidy):
+            bp_hap = haps[b, p]
+            bp_idx = v_idxs[b, p]
+            bp_ref_coord = ref_coords[b, p]
+            pos = site_starts[b]
+            alt = alt_alleles[alt_offsets[b] : alt_offsets[b + 1]]
+            rel_start = np.searchsorted(bp_ref_coord, pos)
+            rel_end = rel_start + len(alt)
+            if bp_ref_coord[rel_start] != pos:
+                flags[b, p] = DELETED
+                continue
+            if np.all(bp_hap[rel_start:rel_end] == alt):
+                flags[b, p] = EXISTED
+                continue
+            flags[b, p] = APPLIED
+            bp_hap[rel_start:rel_end] = alt
+            bp_idx[rel_start:rel_end] = -2
+    return haps, v_idxs, ref_coords, flags
