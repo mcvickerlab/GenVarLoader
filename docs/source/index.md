@@ -60,16 +60,6 @@ A PyTorch dependency is **not** included since it may require [special instructi
 
 ### Write a [`gvl.Dataset`](api.md#genvarloader.Dataset)
 
-GenVarLoader has both a CLI and Python API for writing datasets. The Python API provides some extra flexibility, for example for a multi-task objective.
-
-```bash
-genvarloader cool_dataset.gvl interesting_regions.bed --variants cool_variants.vcf --bigwig-table samples_to_bigwigs.csv --length 2048 --max-jitter 128
-```
-
-Where `samples_to_bigwigs.csv` has columns `sample` and `path` mapping each sample to its BigWig.
-
-This could equivalently be done in Python as:
-
 ```python
 import genvarloader as gvl
 
@@ -78,10 +68,11 @@ gvl.write(
     bed="interesting_regions.bed",
     variants="cool_variants.vcf",
     bigwigs=gvl.BigWigs.from_table("bigwig", "samples_to_bigwigs.csv"),
-    length=2048,
     max_jitter=128,
 )
 ```
+
+Where `samples_to_bigwigs.csv` has columns `sample` and `path` mapping each sample to its BigWig.
 
 ### Open a [`gvl.Dataset`](api.md#genvarloader.Dataset) and get a PyTorch DataLoader
 
