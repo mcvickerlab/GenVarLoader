@@ -161,6 +161,9 @@ test-py310 = { features = ["test", "py310", "pytorch-cpu"] }
 test-py311 = { features = ["test", "py311", "pytorch-cpu"] }
 test-py312 = { features = ["test", "py312", "pytorch-cpu"] }
 
+[tool.pixi.feature.test.tasks]
+pre-commit = "pre-commit install --hook-type commit-msg"
+
 [tool.pixi.feature.docs.tasks]
 i-kernel = "ipython kernel install --user --name 'gvl-docs' --display-name 'GVL Docs'"
 i-kernel-gpu = "ipython kernel install --user --name 'gvl-docs-gpu' --display-name 'GVL Docs GPU'"
