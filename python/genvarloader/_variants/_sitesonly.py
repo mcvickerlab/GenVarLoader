@@ -12,7 +12,7 @@ from typing import (
 import cyvcf2
 import numba as nb
 import numpy as np
-import pandera as pa
+import pandera.polars as pa
 import polars as pl
 from attrs import define, field
 from loguru import logger
@@ -214,6 +214,7 @@ def apply_site_only_variants(
 ) -> Tuple[NDArray[np.uint8], NDArray[np.int32], NDArray[np.int32], NDArray[np.uint8]]:
     batch_size, ploidy, length = haps.shape
     flags = np.empty((batch_size, ploidy), dtype=np.uint8)
+
     for b in nb.prange(batch_size):
         for p in nb.prange(ploidy):
             bp_hap = haps[b, p]
@@ -223,12 +224,15 @@ def apply_site_only_variants(
             alt = alt_alleles[alt_offsets[b] : alt_offsets[b + 1]]
             rel_start = np.searchsorted(bp_ref_coord, pos)
             rel_end = rel_start + len(alt)
+
             if bp_ref_coord[rel_start] != pos:
                 flags[b, p] = DELETED
                 continue
+
             if np.all(bp_hap[rel_start:rel_end] == alt):
                 flags[b, p] = EXISTED
                 continue
+
             flags[b, p] = APPLIED
             bp_hap[rel_start:rel_end] = alt
             bp_idx[rel_start:rel_end] = -2
