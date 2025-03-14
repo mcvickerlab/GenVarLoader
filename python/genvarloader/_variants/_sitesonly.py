@@ -203,7 +203,7 @@ DELETED = np.uint8(1)
 EXISTED = np.uint8(2)
 
 
-# * fixed length
+#* fixed length
 def apply_site_only_variants(
     haps: NDArray[np.uint8],  # (b p l)
     v_idxs: NDArray[np.int32],  # (b p l)

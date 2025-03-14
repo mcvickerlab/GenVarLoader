@@ -17,7 +17,6 @@ from typing import (
 import cyvcf2
 import numba as nb
 import numpy as np
-import pandera.polars as pap
 import polars as pl
 import pyarrow as pa
 from attrs import define
@@ -231,13 +230,6 @@ class RecordInfo:
             end_idxs=end_idxs,
             offsets=offsets,
         )
-
-
-class RecordSchema(pap.DataFrameModel):
-    CHROM: str = pap.Field(alias="#CHROM")
-    POS: int
-    REF: str
-    ALT: str
 
 
 @define
@@ -454,37 +446,6 @@ class Records:
                 with the `--vcf-half-call r` option."""
             )
         return pvar
-
-    @classmethod
-    def from_table(
-        cls, table: Union[pl.DataFrame, Dict[str, pl.DataFrame]]
-    ) -> "Records":
-        if isinstance(table, pl.DataFrame):
-            table = {"_all": table}
-
-        table = {c: df.pipe(RecordSchema.validate) for c, df in table.items()}
-
-        if "_all" in table:
-            multi_contig_source = True
-        else:
-            multi_contig_source = False
-
-        if multi_contig_source:
-            start_df = table["_all"]
-            start_dfs = {
-                cast(str, c[0]): df
-                for c, df in start_df.partition_by(
-                    "#CHROM", as_dict=True, maintain_order=True
-                ).items()
-            }
-        else:
-            start_dfs: Dict[str, pl.DataFrame] = {}
-            for contig, df in table.items():
-                start_dfs[contig] = df
-
-        start_dfs, end_dfs = cls.process_start_df(start_dfs)
-
-        return cls.from_var_df(start_dfs, end_dfs)
 
     @staticmethod
     def gvl_arrow_exists(
