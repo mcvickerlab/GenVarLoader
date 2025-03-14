@@ -308,7 +308,7 @@ class Variants:
         ends: ArrayLike,
         sample: Optional[ArrayLike] = None,
         ploid: Optional[ArrayLike] = None,
-    ) -> Tuple[Optional[DenseGenotypes], NDArray[np.int32]]:
+    ) -> Tuple[Optional[DenseGenotypes], NDArray[np.int64]]:
         """Read genotypes for a given contig and range of positions. This method is intended for haplotype construction
         and returns the maximum end position for each region.
 
@@ -330,7 +330,7 @@ class Variants:
 
         _contig = _normalize_contig_name(contig, self.records.contigs)  # pyright: ignore[reportAssignmentType]
         if _contig is None:
-            return None, ends.astype(np.int32)
+            return None, ends.astype(np.int64)
         else:
             contig = _contig
 

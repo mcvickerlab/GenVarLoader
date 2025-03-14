@@ -16,6 +16,7 @@ import numpy as np
 import pandera as pa
 import pandera.typing as pat
 import polars as pl
+import pyranges as pr
 from numpy.typing import NDArray
 
 from ._types import Idx
@@ -376,3 +377,24 @@ def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.intp]:
     _idx[_idx < 0] += max_len
 
     return _idx
+
+
+def bedlike_to_pyranges(bedlike: pl.DataFrame) -> pr.PyRanges:
+    """Convert a BED-like DataFrame to a PyRanges object.
+
+    Parameters
+    ----------
+    bedlike
+        BED-like DataFrame with at least the columns "chrom", "chromStart", and "chromEnd".
+    """
+    return pr.PyRanges(
+        bedlike.rename(
+            {
+                "chrom": "Chromosome",
+                "chromStart": "Start",
+                "chromEnd": "End",
+                "strand": "Strand",
+            },
+            strict=False,
+        ).to_pandas()
+    )
