@@ -12,6 +12,7 @@ from typing import (
 )
 
 import numpy as np
+from attrs import define
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
 __all__ = ["Reader"]
@@ -22,6 +23,31 @@ Idx = Union[
     int, np.integer, Sequence[int], slice, NDArray[np.integer], NDArray[np.bool_]
 ]
 ListIdx = Union[Sequence[int], NDArray[np.integer]]
+
+
+@define
+class AnnotatedHaps:
+    haps: NDArray[np.bytes_]
+    var_idxs: NDArray[np.int32]
+    ref_coords: NDArray[np.int32]
+
+    @property
+    def shape(self):
+        return self.haps.shape
+
+    def reshape(self, *shape: int | tuple[int, ...]):
+        return AnnotatedHaps(
+            self.haps.reshape(*shape),
+            self.var_idxs.reshape(*shape),
+            self.ref_coords.reshape(*shape),
+        )
+
+    def squeeze(self, axis: int | tuple[int, ...] | None = None) -> AnnotatedHaps:
+        return AnnotatedHaps(
+            self.haps.squeeze(axis),
+            self.var_idxs.squeeze(axis),
+            self.ref_coords.squeeze(axis),
+        )
 
 
 class Reader(Protocol):

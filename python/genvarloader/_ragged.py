@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Generic, Optional, Tuple, TypeVar, Union
+from typing import Any, Generic, Optional, Tuple, TypeGuard, TypeVar, Union
 
 import awkward as ak
 import numba as nb
@@ -10,13 +10,53 @@ from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
 from awkward.index import Index64
 from numpy.typing import NDArray
 
-from ._types import Idx
+from ._types import DTYPE, AnnotatedHaps, Idx
 from ._utils import _lengths_to_offsets, idx_like_to_array
 
 __all__ = ["Ragged", "RaggedIntervals", "INTERVAL_DTYPE", "pad_ragged"]
 
-DTYPE = TypeVar("DTYPE", bound=np.generic)
-RDTYPE = TypeVar("RDTYPE", bound=np.generic, contravariant=True)
+RDTYPE = TypeVar("RDTYPE", bound=np.generic)
+
+
+@define
+class RaggedAnnotatedHaps:
+    haps: Ragged[np.bytes_]
+    var_idxs: Ragged[np.int32]
+    ref_coords: Ragged[np.int32]
+
+    @property
+    def shape(self):
+        return self.haps.shape
+
+    def to_padded(self) -> AnnotatedHaps:
+        haps = self.haps.to_padded(b"N")
+        var_idxs = self.var_idxs.to_padded(-1)
+        ref_coords = self.ref_coords.to_padded(-1)
+        return AnnotatedHaps(haps, var_idxs, ref_coords)
+
+    def reshape(self, shape: tuple[int, ...]) -> RaggedAnnotatedHaps:
+        return RaggedAnnotatedHaps(
+            self.haps.reshape(shape),
+            self.var_idxs.reshape(shape),
+            self.ref_coords.reshape(shape),
+        )
+    
+    def squeeze(self, axis: int | tuple[int, ...] | None = None) -> RaggedAnnotatedHaps:
+        return RaggedAnnotatedHaps(
+            self.haps.squeeze(axis),
+            self.var_idxs.squeeze(axis),
+            self.ref_coords.squeeze(axis),
+        )
+
+    def to_fixed_shape(self, shape: tuple[int, ...]) -> AnnotatedHaps:
+        haps = self.haps.data.reshape(shape)
+        var_idxs = self.var_idxs.data.reshape(shape)
+        ref_coords = self.ref_coords.data.reshape(shape)
+        return AnnotatedHaps(haps, var_idxs, ref_coords)
+
+
+def is_rag_dtype(rag: Ragged, dtype: type[DTYPE]) -> TypeGuard[Ragged[DTYPE]]:
+    return np.issubdtype(rag.data.dtype, dtype)
 
 
 @define
@@ -72,13 +112,12 @@ class Ragged(Generic[RDTYPE]):
             self.maybe_lengths = np.diff(self.offsets).reshape(self.shape)
         return self.maybe_lengths
 
-    @classmethod
+    @staticmethod
     def from_offsets(
-        cls,
-        data: NDArray[RDTYPE],
+        data: NDArray[DTYPE],
         shape: Union[int, Tuple[int, ...]],
         offsets: NDArray[np.int64],
-    ) -> "Ragged[RDTYPE]":
+    ) -> "Ragged[DTYPE]":
         """Create a Ragged array from data and offsets.
 
         Parameters
@@ -92,12 +131,12 @@ class Ragged(Generic[RDTYPE]):
         """
         if isinstance(shape, int):
             shape = (shape,)
-        return cls(data, shape, maybe_offsets=offsets)
+        return Ragged(data, shape, maybe_offsets=offsets)
 
-    @classmethod
+    @staticmethod
     def from_lengths(
-        cls, data: NDArray[RDTYPE], lengths: NDArray[np.int32]
-    ) -> "Ragged[RDTYPE]":
+        data: NDArray[DTYPE], lengths: NDArray[np.int32]
+    ) -> "Ragged[DTYPE]":
         """Create a Ragged array from data and lengths. The lengths array should have
         the intended shape of the Ragged array.
 
@@ -108,24 +147,7 @@ class Ragged(Generic[RDTYPE]):
         lengths
             Lengths of each element in the ragged array.
         """
-        return cls(data, lengths.shape, maybe_lengths=lengths)
-
-    @classmethod
-    def empty(
-        cls, shape: Union[int, Tuple[int, ...]], dtype: type[RDTYPE]
-    ) -> "Ragged[RDTYPE]":
-        """Create an empty Ragged array."""
-        if shape == ():
-            raise ValueError("Ragged array must have at least one element.")
-
-        if isinstance(shape, int):
-            shape = (shape,)
-
-        return cls(
-            np.empty(0, dtype=dtype),
-            shape,
-            maybe_offsets=np.empty(np.prod(shape, dtype=np.int64) + 1, dtype=np.int64),
-        )
+        return Ragged(data, lengths.shape, maybe_lengths=lengths)
 
     @staticmethod
     def concat(*arrays: "Ragged[DTYPE]", axis: int) -> "Ragged[DTYPE]":
@@ -340,18 +362,19 @@ def _jitter(
     *arrays: Ragged,
     max_jitter: int,
     seed: Optional[Union[int, np.random.Generator]] = None,
+    starts: NDArray[np.int64] | None = None,
 ):
     """Jitter the data along the ragged axis by up to `max_jitter`.
 
     Assumes only the first axis is to be jittered. In other words, assumes that no user would want to
     jitter independently across ploidy or tracks.
     """
-    if not isinstance(seed, np.random.Generator):
-        seed = np.random.default_rng(seed)
-
     batch_size = arrays[0].shape[0]
 
-    starts = seed.integers(0, 2 * max_jitter + 1, size=batch_size)
+    if starts is None:
+        if not isinstance(seed, np.random.Generator):
+            seed = np.random.default_rng(seed)
+        starts = seed.integers(0, 2 * max_jitter + 1, size=batch_size)
     out_offsets = tuple(_lengths_to_offsets(a.lengths - 2 * max_jitter) for a in arrays)
 
     jittered_data = _jitter_helper(
