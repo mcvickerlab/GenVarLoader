@@ -240,7 +240,7 @@ class Dataset:
         bed = pl.read_ipc(path / "input_regions.arrow")
         r_idx_map = bed["r_idx_map"].to_numpy().astype(np.intp)
         idxer = DatasetIndexer.from_region_and_sample_idxs(
-            r_idx_map, np.arange(len(samples))
+            r_idx_map, np.arange(len(samples)), samples
         )
         bed = bed.drop("r_idx_map")
         with pl.StringCache():

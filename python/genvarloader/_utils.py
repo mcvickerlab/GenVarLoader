@@ -7,6 +7,7 @@ from typing import (
     Iterable,
     Optional,
     Sequence,
+    TypeGuard,
     TypeVar,
     Union,
     cast,
@@ -18,7 +19,7 @@ import pandera.typing as pat
 import polars as pl
 from numpy.typing import NDArray
 
-from ._types import Idx
+from ._types import DTYPE, Idx
 
 __all__ = [
     "read_bedlike",
@@ -26,6 +27,10 @@ __all__ = [
 ]
 
 T = TypeVar("T")
+
+
+def is_dtype(arr: NDArray, dtype: type[DTYPE]) -> TypeGuard[NDArray[DTYPE]]:
+    return np.issubdtype(arr.dtype, dtype)
 
 
 def _process_bed(bed: Union[str, Path, pl.DataFrame], fixed_length: int):

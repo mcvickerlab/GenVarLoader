@@ -1,4 +1,4 @@
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 import numpy as np
 from attrs import define, evolve
@@ -11,6 +11,7 @@ from ._utils import oidx_to_raveled_idx
 
 @define
 class DatasetIndexer:
+    full_samples: List[str]
     full_region_idxs: NDArray[np.integer]
     """Full map from input region indices to on-disk region indices."""
     full_sample_idxs: NDArray[np.integer]
@@ -26,12 +27,16 @@ class DatasetIndexer:
 
     @classmethod
     def from_region_and_sample_idxs(
-        cls, r_idxs: NDArray[np.integer], s_idxs: NDArray[np.integer]
+        cls,
+        r_idxs: NDArray[np.integer],
+        s_idxs: NDArray[np.integer],
+        samples: List[str],
     ):
         shape = len(r_idxs), len(s_idxs)
         i2d_map = oidx_to_raveled_idx(r_idxs, s_idxs, shape)
         d2i_map = oidx_to_raveled_idx(np.argsort(r_idxs), s_idxs, shape)
         return cls(
+            full_samples=samples,
             full_region_idxs=r_idxs,
             full_sample_idxs=s_idxs,
             i2d_map=i2d_map,
@@ -69,6 +74,12 @@ class DatasetIndexer:
             return np.unravel_index(self.i2d_map[: self.n_samples], self.full_shape)[1]
         else:
             return np.unravel_index(self.d2i_map[: self.n_samples], self.full_shape)[1]
+
+    @property
+    def samples(self) -> List[str]:
+        if self.sample_subset_idxs is None:
+            return self.full_samples
+        return [self.full_samples[i] for i in self.sample_subset_idxs]
 
     @property
     def shape(self) -> tuple[int, int]:

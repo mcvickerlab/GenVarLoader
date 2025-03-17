@@ -454,12 +454,13 @@ class SparseSomaticGenotypes:
     offsets: NDArray[np.int64]  # (regions * samples + 1)
     n_regions: int
     n_samples: int
+    ploidy = 1
 
     @property
     def effective_shape(self):
         """Effective shape of the sparse genotypes (n_regions, n_samples, ploidy)
         where ploidy is always represented as 1. The ploidy is treated as 1 to be consistent with."""
-        return (self.n_regions, self.n_samples, 1)
+        return (self.n_regions, self.n_samples, self.ploidy)
 
     @classmethod
     def empty(cls, n_regions: int, n_samples: int):
