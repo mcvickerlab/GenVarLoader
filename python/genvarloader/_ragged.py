@@ -10,10 +10,10 @@ from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
 from awkward.index import Index64
 from numpy.typing import NDArray
 
-from ._types import Idx
+from ._types import INTERVAL_DTYPE, Idx
 from ._utils import _lengths_to_offsets, idx_like_to_array
 
-__all__ = ["Ragged", "RaggedIntervals", "INTERVAL_DTYPE", "pad_ragged"]
+__all__ = ["Ragged", "RaggedIntervals", "pad_ragged"]
 
 DTYPE = TypeVar("DTYPE", bound=np.generic)
 RDTYPE = TypeVar("RDTYPE", bound=np.generic, contravariant=True)
@@ -265,12 +265,6 @@ class Ragged(Generic[RDTYPE]):
         return cls.from_offsets(data, shape, offsets)
 
 
-INTERVAL_DTYPE = np.dtype(
-    [("start", np.int32), ("end", np.int32), ("value", np.float32)], align=True
-)
-RaggedIntervals = Ragged[np.void]
-
-
 @nb.njit(parallel=True, nogil=True, cache=True)
 def pad_ragged(
     data: NDArray[DTYPE],
@@ -368,6 +362,9 @@ def _jitter(
     )
 
     return out
+
+
+RaggedIntervals = Ragged[INTERVAL_DTYPE.type]
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)

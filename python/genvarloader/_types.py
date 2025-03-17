@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import (
-    Callable,
     Dict,
     Mapping,
     Protocol,
@@ -18,6 +17,9 @@ __all__ = ["Reader"]
 
 
 DTYPE = TypeVar("DTYPE", bound=np.generic)
+INTERVAL_DTYPE = np.dtype(
+    [("start", np.int32), ("end", np.int32), ("value", np.float32)], align=True
+)
 Idx = Union[
     int, np.integer, Sequence[int], slice, NDArray[np.integer], NDArray[np.bool_]
 ]
@@ -36,9 +38,6 @@ class Reader(Protocol):
     """Sizes of the dimensions/axes of what the reader returns."""
     coords: Dict[str, NDArray]
     """Coordinates of what the reader returns, i.e. dimension labels."""
-    rev_strand_fn: Callable[[NDArray], NDArray]
-    """Function to reverse (and potentially complement) data for a genomic region. This
-        is used when the strand is negative."""
     chunked: bool
     """Whether the reader acts like a chunked array store, in which sequential reads
         are far more performant than random access."""
@@ -76,6 +75,12 @@ class Reader(Protocol):
         When multiple regions are provided (i.e. multiple starts and ends) they should
         be concatenated together in the output array along the length dimension.
         """
+        ...
+
+    @staticmethod
+    def rev_strand_fn(data: NDArray) -> NDArray:
+        """Function to reverse (and potentially complement) data for a genomic region. This
+        is used when the strand is negative."""
         ...
 
 

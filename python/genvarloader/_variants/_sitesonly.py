@@ -14,13 +14,14 @@ import numba as nb
 import numpy as np
 import pandera.polars as pa
 import polars as pl
+import seqpro as sp
 from attrs import define, field
 from loguru import logger
 from numpy.typing import NDArray
 
 from python.genvarloader._types import Idx
 
-from .._utils import bedlike_to_pyranges, idx_like_to_array
+from .._utils import idx_like_to_array
 from ._records import VLenAlleles
 
 if TYPE_CHECKING:
@@ -147,8 +148,8 @@ class DatasetWithSites:
             deterministic=True,
             jitter=0,
         )
-        ds_pyr = bedlike_to_pyranges(dataset.regions.with_row_index("ds_row"))
-        sites_pyr = bedlike_to_pyranges(sites.to_bedlike().with_row_index("site_row"))
+        ds_pyr = sp.bed.to_pyranges(dataset.regions.with_row_index("ds_row"))
+        sites_pyr = sp.bed.to_pyranges(sites.to_bedlike().with_row_index("site_row"))
         rows = (
             pl.from_pandas(ds_pyr.join(sites_pyr, suffix="_site").df)
             .rename(

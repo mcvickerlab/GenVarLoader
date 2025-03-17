@@ -26,7 +26,6 @@ from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
 from .._ragged import (
-    INTERVAL_DTYPE,
     Ragged,
     RaggedIntervals,
     _jitter,
@@ -34,7 +33,7 @@ from .._ragged import (
     _reverse_complement,
 )
 from .._torch import get_dataloader
-from .._types import Idx
+from .._types import INTERVAL_DTYPE, Idx
 from .._utils import _lengths_to_offsets, idx_like_to_array, with_length
 from .._variants._records import VLenAlleles
 from ._genotypes import (

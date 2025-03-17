@@ -8,8 +8,8 @@ import polars as pl
 import pyBigWig
 from numpy.typing import ArrayLike, NDArray
 
-from ._ragged import INTERVAL_DTYPE, RaggedIntervals
-from ._types import Reader
+from ._ragged import RaggedIntervals
+from ._types import INTERVAL_DTYPE, Reader
 from ._utils import _get_rel_starts, _lengths_to_offsets, _normalize_contig_name
 from .genvarloader import count_intervals as bw_count_intervals
 from .genvarloader import intervals as bw_intervals
@@ -49,7 +49,7 @@ class BigWigs(Reader):
                     contigs = {k: v for k, v in contigs.items() if k in common_contigs}
         if contigs is None:
             raise ValueError("No bigWig files provided.")
-        self.contigs: Dict[str, int] = contigs
+        self.contigs = contigs
 
     @classmethod
     def from_table(cls, name: str, table: Union[str, Path, pl.DataFrame]):
@@ -74,8 +74,9 @@ class BigWigs(Reader):
         paths = dict(zip(table["sample"], table["path"]))
         return cls(name, paths)
 
-    def rev_strand_fn(self, x):
-        return x[..., ::-1]
+    @staticmethod
+    def rev_strand_fn(data: NDArray[np.float32]) -> NDArray[np.float32]:
+        return data[..., ::-1]
 
     def close(self):
         if self.readers is not None:

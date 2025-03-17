@@ -2,7 +2,7 @@ import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
-from .._ragged import INTERVAL_DTYPE
+from .._types import INTERVAL_DTYPE
 
 __all__ = []
 
