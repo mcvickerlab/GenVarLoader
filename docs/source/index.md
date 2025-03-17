@@ -5,6 +5,7 @@ dataset
 geuvadis
 faq
 api
+changelog
 ```
 
 # GenVarLoader
