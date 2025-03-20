@@ -14,11 +14,15 @@ ref = "/cellar/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.G
 
 @pytest.fixture
 def dataset():
-    ds = gvl.Dataset.open(ds_path, ref, deterministic=True)
+    ds = (
+        gvl.Dataset.open(ds_path, ref, deterministic=True)
+        .with_output_length("ragged")
+        .with_seqs("haplotypes")
+    )
     return ds
 
 
-def test_ds_haps(dataset: gvl.Dataset):
+def test_ds_haps(dataset: gvl.RaggedDataset[gvl.Ragged[np.bytes_], None, None, None]):
     for region, sample in product(range(dataset.n_regions), dataset.samples):
         c, s, e = dataset.regions.select("chrom", "chromStart", "chromEnd").row(region)
         # ragged (p)

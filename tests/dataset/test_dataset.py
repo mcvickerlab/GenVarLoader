@@ -7,7 +7,6 @@ from pytest_cases import fixture, parametrize_with_cases
 data_dir = Path(__file__).resolve().parents[1] / "data"
 ref = data_dir / "fasta" / "Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz"
 
-
 def ds_phased():
     return gvl.Dataset.open(data_dir / "phased_dataset.gvl", ref)
 
@@ -24,6 +23,10 @@ def seqs_haps():
     return "haplotypes"
 
 
+def seqs_annot():
+    return "annotated"
+
+
 def bool_false():
     return False
 
@@ -33,18 +36,11 @@ def bool_true():
 
 
 @fixture(scope="session")
-@parametrize_with_cases("ds_path", prefix="ds_", cases=".")
-@parametrize_with_cases("return_sequences", prefix="seqs_", cases=".")
+@parametrize_with_cases("ds", prefix="ds_", cases=".")
+@parametrize_with_cases("seq_type", prefix="seqs_", cases=".")
 @parametrize_with_cases("return_indices", prefix="bool_", cases=".")
-@parametrize_with_cases("return_annotations", prefix="bool_", cases=".")
-def dataset(
-    ds: gvl.Dataset, return_sequences, return_indices: bool, return_annotations: bool
-):
-    return ds.with_settings(
-        return_sequences=return_sequences,
-        return_indices=return_indices,
-        return_annotations=return_annotations,
-    )
+def dataset(ds: gvl.Dataset, seq_type, return_indices: bool):
+    return ds.with_seqs(seq_type).with_indices(return_indices)
 
 
 def idx_scalar():

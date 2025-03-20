@@ -41,14 +41,13 @@ from ._genotypes import (
     SparseSomaticGenotypes,
     choose_unphased_variants,
     get_diffs_sparse,
-    padded_slice,
     reconstruct_haplotypes_from_sparse,
 )
 from ._indexing import DatasetIndexer
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._reference import Reference
 from ._tracks import shift_and_realign_tracks_sparse
-from ._utils import bed_to_regions, splits_sum_le_value
+from ._utils import bed_to_regions, padded_slice, splits_sum_le_value
 
 try:
     import torch
@@ -239,7 +238,7 @@ class Dataset:
         bed = pl.read_ipc(path / "input_regions.arrow")
         r_idx_map = bed["r_idx_map"].to_numpy().astype(np.intp)
         idxer = DatasetIndexer.from_region_and_sample_idxs(
-            r_idx_map, np.arange(len(samples))
+            r_idx_map, np.arange(len(samples)), samples
         )
         bed = bed.drop("r_idx_map")
         with pl.StringCache():

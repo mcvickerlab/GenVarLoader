@@ -39,3 +39,7 @@ This is not yet supported but on GVL's roadmap for the near future. Keep an eye 
 Example of spliced gvl.write() and enabling splicing
 
 Example of SeqPro translate for RNA and AA -->
+
+## Why aren't the methods `with_len()`, `with_seqs()`, etc. combined into `with_settings()`?
+
+These methods modify the type of output returned by a `gvl.Dataset`. In order to allow type checkers like mypy and pyright to know how these settings modify state, they are given their own methods. As a result, if you use a type checker, you will have access to an improved developer workflow with compile-time errors for many common issues. For example, using an incompatible transform or unpacking return values into the wrong number of arguments.

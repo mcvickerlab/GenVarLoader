@@ -3,7 +3,7 @@ import importlib.metadata
 from loguru import logger
 
 from ._bigwig import BigWigs
-from ._dataset import Dataset
+from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
 from ._dataset._write import write
 from ._dummy import get_dummy_dataset
 from ._ragged import Ragged
@@ -24,6 +24,8 @@ __all__ = [
     "get_dummy_dataset",
     "SitesOnlyTable",
     "SitesOnlyVCF",
+    "ArrayDataset",
+    "RaggedDataset",
 ]
 
 
