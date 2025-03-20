@@ -54,8 +54,8 @@ def case_snps():
     ilens = np.zeros(n_variants, np.int32)
     positions = np.arange(n_variants, dtype=np.int32)
     starts = np.arange(n_regions, dtype=np.int32)
-    length = 3
-    max_ends = np.array([length], np.int32)
+    lengths = np.full(n_regions, 3, np.int32)
+    max_ends = np.array([3], np.int32)
 
     return (
         dense,
@@ -64,7 +64,7 @@ def case_snps():
         ilens,
         positions,
         starts,
-        length,
+        lengths,
         max_ends,
         dosages,
     )
@@ -113,8 +113,8 @@ def case_indels():
     ilens = np.array([0, -2, 0, 2])
     positions = np.arange(n_variants, dtype=np.int32)
     starts = np.arange(n_regions, dtype=np.int32)
-    length = 4
-    max_ends = np.array([length], np.int32)
+    lengths = np.full(n_regions, 4, np.int32)
+    max_ends = np.array([4], np.int32)
 
     return (
         dense,
@@ -123,7 +123,7 @@ def case_indels():
         ilens,
         positions,
         starts,
-        length,
+        lengths,
         max_ends,
         dosages,
     )
@@ -152,7 +152,7 @@ def test_from_dense(
 
 
 @parametrize_with_cases(
-    "dense, sparse, sparse_somatic, ilens, positions, starts, length, max_ends, dosages",
+    "dense, sparse, sparse_somatic, ilens, positions, starts, lengths, max_ends, dosages",
     cases=".",
 )
 def test_from_dense_with_length(
@@ -162,7 +162,7 @@ def test_from_dense_with_length(
     ilens,
     positions,
     starts,
-    length,
+    lengths,
     max_ends,
     dosages,
 ):
@@ -176,7 +176,7 @@ def test_from_dense_with_length(
         ilens,
         positions,
         starts,
-        length,
+        lengths,
     )
 
     np.testing.assert_equal(actual.offsets, desired.offsets)
@@ -185,7 +185,7 @@ def test_from_dense_with_length(
 
 
 @parametrize_with_cases(
-    "dense, sparse, sparse_somatic, ilens, positions, starts, length, max_ends, dosages",
+    "dense, sparse, sparse_somatic, ilens, positions, starts, lengths, max_ends, dosages",
     cases=".",
 )
 def test_somatic_from_dense(
@@ -195,7 +195,7 @@ def test_somatic_from_dense(
     ilens,
     positions,
     starts,
-    length,
+    lengths,
     max_ends,
     dosages,
 ):
@@ -210,7 +210,7 @@ def test_somatic_from_dense(
 
 
 @parametrize_with_cases(
-    "dense, sparse, sparse_somatic, ilens, positions, starts, length, max_ends, dosages",
+    "dense, sparse, sparse_somatic, ilens, positions, starts, lengths, max_ends, dosages",
     cases=".",
 )
 def test_somatic_from_dense_with_length(
@@ -220,7 +220,7 @@ def test_somatic_from_dense_with_length(
     ilens,
     positions,
     starts,
-    length,
+    lengths,
     max_ends,
     dosages,
 ):
@@ -234,7 +234,7 @@ def test_somatic_from_dense_with_length(
         ilens,
         positions,
         starts,
-        length,
+        lengths,
         dosages,
     )
 
@@ -244,5 +244,5 @@ def test_somatic_from_dense_with_length(
 
 
 # %%
-test_from_dense_with_length(*case_snps())
-test_from_dense_with_length(*case_indels())
+# test_from_dense_with_length(*case_snps())
+# test_from_dense_with_length(*case_indels())

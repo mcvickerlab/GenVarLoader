@@ -106,6 +106,7 @@ def case_shift_ins():
 
     shift = 1
     track = np.arange(4, dtype=np.float32)
+    # 0 1 2 3 -> shift 1 2 3 4 -> insert 1 1 2 3 4 -> truncate 1 1 2 3
     desired = np.array([1, 1, 2, 3], np.float32)
     query_start = 0
 
@@ -155,7 +156,7 @@ def test_sparse(
 
 
 # %%
-test_sparse(*case_snps())
-test_sparse(*case_indels())
-test_sparse(*case_spanning_del())
-test_sparse(*case_shift_ins())
+# test_sparse(*case_snps())
+# test_sparse(*case_indels())
+# test_sparse(*case_spanning_del())
+# test_sparse(*case_shift_ins())

@@ -3,6 +3,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Dict,
     Iterable,
     Optional,
     Tuple,
@@ -114,7 +115,7 @@ def _tensor_from_maybe_bytes(array: NDArray) -> "torch.Tensor": ...
 def _tensor_from_maybe_bytes(array: AnnotatedHaps) -> dict[str, "torch.Tensor"]: ...
 def _tensor_from_maybe_bytes(
     array: NDArray | AnnotatedHaps,
-) -> "torch.Tensor" | dict[str, "torch.Tensor"]:
+) -> "torch.Tensor" | Dict[str, "torch.Tensor"]:
     if not _TORCH_AVAILABLE:
         raise ImportError(
             "Could not import PyTorch. Please install PyTorch to use torch features."

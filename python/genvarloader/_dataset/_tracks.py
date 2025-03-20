@@ -27,38 +27,38 @@ def shift_and_realign_tracks_sparse(
 
     Parameters
     ----------
-    offset_idx : NDArray[np.intp]
-        Shape = (regions, ploidy) Indices into offsets for each region.
-    variant_idxs : NDArray[np.int32]
-        Shape = (variants) Indices of variants.
-    offsets : NDArray[np.uint32]
-        Shape = (samples*ploidy*total_regions + 1) Offsets into variant idxs.
+    out : NDArray[np.float32]
+        Ragged array with shape (batch, ploidy). Shifted and re-aligned tracks.
+    out_offsets : NDArray[np.int64]
+        Shape = (batch*ploidy + 1) Offsets into out.
     regions : NDArray[np.int32]
-        Shape = (n_regions, 3) Regions, each is (contig_idx, start, end).
+        Shape = (batch, 3) Regions, each is (contig_idx, start, end).
+    shifts : NDArray[np.int32]
+        Shape = (batch, ploidy) Shifts for each haplotype.
+    geno_offset_idxs : NDArray[np.intp]
+        Shape = (batch, ploidy) Indices into offsets for each region.
+    geno_v_idxs : NDArray[np.int32]
+        Shape = (variants) Indices of variants.
+    geno_offsets : NDArray[np.uint32]
+        Shape = (tot_regions*samples*ploidy + 1) Offsets into variant idxs.
     positions : NDArray[np.int32]
         Shape = (total_variants) Positions of variants.
     sizes : NDArray[np.int32]
         Shape = (total_variants) Sizes of variants.
-    shifts : NDArray[np.int32]
-        Shape = (regions, ploidy) Shifts for each haplotype.
     tracks : NDArray[np.float32]
-        Shape = (total_length) Tracks.
+        Shape = (batch*ploidy*length) Tracks.
     track_offsets : NDArray[np.int64]
-        Shape = (regions + 1) Offsets into tracks.
-    out : NDArray[np.float32]
-        Ragged array with shape (regions, ploidy). Shifted and re-aligned tracks.
-    out_offsets : NDArray[np.int64]
-        Shape = (regions*ploidy + 1) Offsets into out.
+        Shape = (batch + 1) Offsets into tracks.
     keep : Optional[NDArray[np.bool_]]
-        Shape = (variants) Keep mask for genotypes.
+        Shape = (batch*ploidy*variants) Keep mask for genotypes.
     keep_offsets : Optional[NDArray[np.int64]]
-        Shape = (regions*ploidy + 1) Offsets into keep.
+        Shape = (batch*ploidy + 1) Offsets into keep.
     """
     n_regions, ploidy = geno_offset_idxs.shape
     for query in nb.prange(n_regions):
         t_s, t_e = track_offsets[query], track_offsets[query + 1]
         q_track = tracks[t_s:t_e]
-        # assumes start is never altered upstream by differing hap lengths
+        # assumes start is never altered upstream by differing hap lengths (true for left-aligned variants)
         q_start = regions[query, 1]
 
         for hap in nb.prange(ploidy):
@@ -105,7 +105,7 @@ def shift_and_realign_track_sparse(
 
     Parameters
     ----------
-    variant_idxs : NDArray[np.int32]
+    offset_idx : NDArray[np.int32]
         Shape = (n_variants) Genotypes of variants.
     positions : NDArray[np.int32]
         Shape = (total_variants) Positions of variants.
@@ -166,25 +166,21 @@ def shift_and_realign_track_sparse(
         # handle shift
         if shifted < shift:
             ref_shift_dist = v_rel_pos - track_idx
-            # not enough distance to finish the shift even with the variant
+            # need more than variant to finish shift
             if shifted + ref_shift_dist + v_len < shift:
-                # consume ref up to the end of the variant
-                track_idx = v_rel_end
-                # add the length of skipped ref and size of the variant to the shift
-                shifted += ref_shift_dist + v_len
                 # skip the variant
                 continue
-            # enough distance between ref_idx and variant to finish shift
+            # can finish shift without using variant
             elif shifted + ref_shift_dist >= shift:
-                shifted = shift
                 track_idx += shift - shifted
+                shifted = shift
                 # can still use the variant and whatever ref is left between
                 # ref_idx and the variant
             # ref + (some of) variant is enough to finish shift
             else:
-                shifted = shift
                 # how much left to shift - amount of ref we can use
                 allele_start_idx = shift - shifted - ref_shift_dist
+                shifted = shift
                 #! without if statement, parallel=True can cause a SystemError!
                 # * parallel jit cannot handle changes in array dimension.
                 # * without this, allele can change from a 1D array to a 0D
@@ -220,6 +216,12 @@ def shift_and_realign_track_sparse(
 
         if out_idx >= length:
             break
+
+    if shifted < shift:
+        # need to shift the rest of the track
+        track_idx += shift - shifted
+        track_idx = min(track_idx, len(track))
+        shifted = shift
 
     # fill rest with track and pad with 0
     unfilled_length = length - out_idx

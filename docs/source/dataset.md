@@ -30,7 +30,7 @@ Even though **all regions have a length of 3**, the personalized lengths can **d
 The [`Dataset.output_length`](api.md#genvarloader.Dataset.output_length) setting changes whether it returns ragged, variable, or fixed length data. For the ragged case, the data is returned exactly as it exists in the dataset. For example, suppose we define the personalized dataset from above:
 
 ```python
-ds = gvl.Dataset.open('personalized.gvl', reference='reference.fa')
+ds = gvl.get_dummy_dataset()
 ```
 
 ### Ragged
@@ -49,7 +49,7 @@ len(haps[2, 0])  # 4
 We can change the [`Dataset.output_length`](api.md#genvarloader.Dataset.output_length) to `"variable"` and each batch of data will be a NumPy array.
 
 ```python
-ds = ds.with_settings(output_length="variable")
+ds = ds.with_len("variable")
 haps = ds[0, :3]
 haps.shape  # (3, ploidy, 4)
 ```
@@ -69,7 +69,7 @@ The pad value depends on the data type, for sequences it is `b'N'` and for track
 Finally, we can also obtain fixed length NumPy arrays from a [`Dataset`](api.md#genvarloader.Dataset) by provided an integer:
 
 ```python
-ds = ds.with_settings(output_length=2)
+ds = ds.with_len(2)
 haps = ds[0, :3]
 haps.shape  # (3, ploidy, 2)
 ```

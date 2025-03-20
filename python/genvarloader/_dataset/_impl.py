@@ -54,29 +54,496 @@ _py_open = open
 
 @define(frozen=True)
 class Dataset:
-    output_length: Union[Literal["ragged", "variable"], int]
+    """A dataset of genotypes, reference sequences, and intervals.
+
+    .. note::
+
+        This class is not meant to be instantiated directly. Use the :py:meth:`Dataset.open() <genvarloader.Dataset.open()>`
+        method to open a dataset after writing the data with :py:func:`genvarloader.write()` or the GenVarLoader CLI.
+
+    GVL Datasets act like a collection of lazy ragged arrays that can be lazily subset or eagerly indexed as a 2D NumPy array. They
+    have an effective shape of :code:`(n_regions, n_samples, [tracks], [ploidy], output_length)`, but only the region and sample
+    dimensions can be indexed directly since the return value is generally a tuple of arrays.
+
+    **Eager indexing**
+
+    .. code-block:: python
+
+        dataset[0, 9]  # first region, 10th sample
+        dataset[:10]  # first 10 regions and all samples
+        dataset[:10, :5]  # first 10 regions and 5 samples
+        dataset[[2, 2], [0, 1]]  # 3rd region, 1st and 2nd samples
+
+    **Lazy indexing**
+
+    See :meth:`Dataset.subset_to() <Dataset.subset_to()>`. This is useful, for example, to create
+    splits for training, validation, and testing, or filter out regions or samples after writing a full dataset.
+    This is also necessary if you intend to create a Pytorch :external+torch:class:`DataLoader <torch.utils.data.DataLoader>`
+    from the Dataset using :meth:`Dataset.to_dataloader() <Dataset.to_dataloader()>`.
+
+    **Return values**
+
+    The return value depends on the :code:`Dataset` state, namely :attr:`sequence_type <Dataset.sequence_type>`,
+    :attr:`active_tracks <Dataset.active_tracks>`, :attr:`return_indices <Dataset.return_indices>`, and :attr:`transform <Dataset.transform>`.
+    These can all be modified after opening a :code:`Dataset` using the following methods:
+    - :meth:`Dataset.with_seqs() <Dataset.with_seqs()>`
+    - :meth:`Dataset.with_tracks() <Dataset.with_tracks()>`
+    - :meth:`Dataset.with_indices() <Dataset.with_indices()>`
+    - :meth:`Dataset.with_transform() <Dataset.with_transform()>`
+    """
+
+    @staticmethod
+    def open(
+        path: str | Path,
+        reference: str | Path | None = None,
+        jitter: int = 0,
+        rng: int | np.random.Generator | None = False,
+        deterministic: bool = True,
+        rc_neg: bool = True,
+    ) -> RaggedDataset[None, None, None, None]:
+        """Open a dataset from a path. If no reference genome is provided, the dataset cannot yield sequences.
+
+        Parameters
+        ----------
+        path
+            Path to a dataset.
+        reference
+            Path to a reference genome.
+        jitter
+            Amount of jitter to use, cannot be more than the maximum jitter of the dataset.
+        rng
+            Random seed or np.random.Generator for any stochastic operations.
+        deterministic
+            Whether to use randomized or deterministic algorithms. If set to True, this will disable random
+            shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
+            and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
+            can be returned.
+        rc_neg
+            Whether to reverse-complement sequences and reverse tracks on negative strands.
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"{path} does not exist.")
+
+        # read metadata
+        with _py_open(path / "metadata.json") as f:
+            metadata = json.load(f)
+        samples: List[str] = metadata["samples"]
+        contigs: List[str] = metadata["contigs"]
+        ploidy: Optional[int] = metadata.get("ploidy", None)
+        max_jitter: int = metadata.get("max_jitter", 0)
+        phased: Optional[bool] = metadata.get("phased", None)
+
+        # read input regions and generate index map
+        bed = pl.read_ipc(path / "input_regions.arrow")
+        r_idx_map = bed["r_idx_map"].to_numpy().astype(np.intp)
+        idxer = DatasetIndexer.from_region_and_sample_idxs(
+            r_idx_map, np.arange(len(samples)), samples
+        )
+        bed = bed.drop("r_idx_map")
+        with pl.StringCache():
+            pl.Series(contigs, dtype=pl.Categorical)
+            sorted_bed = bed.sort(
+                pl.col("chrom").cast(pl.Categorical),
+                pl.col("chromStart"),
+                pl.col("chromEnd"),
+                maintain_order=True,
+            )
+        regions = bed_to_regions(sorted_bed, contigs)
+
+        has_genotypes = (path / "genotypes").exists()
+        if has_genotypes:
+            if phased is None:
+                raise ValueError("Malformed dataset: found genotypes but not phase.")
+            if ploidy is None:
+                raise ValueError("Malformed dataset: found genotypes but not ploidy.")
+
+        has_intervals = (path / "intervals").exists()
+
+        match reference, has_genotypes, has_intervals:
+            case _, False, False:
+                raise RuntimeError(
+                    "Malformed dataset: neither genotypes nor intervals found."
+                )
+            case None, True, False:
+                raise RuntimeError(
+                    "No reference: dataset only has genotypes but no reference was given."
+                    " Resulting dataset would have nothing to return."
+                )
+            case None, _, True:
+                seqs = None
+                tracks = Tracks.from_path(path, regions, len(samples))
+                reconstructor = tracks
+            case reference, False, True:
+                logger.info(
+                    "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
+                )
+                _reference = Reference.from_path_and_contigs(reference, contigs)
+                seqs = Seqs(reference=_reference)
+                tracks = Tracks.from_path(path, regions, len(samples))
+                reconstructor = SeqsTracks(seqs=seqs, tracks=tracks)
+            case reference, True, False:
+                logger.info(
+                    "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
+                )
+                _reference = Reference.from_path_and_contigs(reference, contigs)
+                assert phased is not None
+                assert ploidy is not None
+                seqs = Haps.from_path(
+                    path,
+                    reference=_reference,
+                    phased=phased,
+                    regions=regions,
+                    samples=samples,
+                    ploidy=ploidy,
+                )
+                tracks = None
+                reconstructor = seqs
+            case reference, True, True:
+                logger.info(
+                    "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
+                )
+                _reference = Reference.from_path_and_contigs(reference, contigs)
+                assert phased is not None
+                assert ploidy is not None
+                seqs = Haps.from_path(
+                    path,
+                    reference=_reference,
+                    phased=phased,
+                    regions=regions,
+                    samples=samples,
+                    ploidy=ploidy,
+                )
+                tracks = Tracks.from_path(path, regions, len(samples))
+                reconstructor = HapsTracks(haps=seqs, tracks=tracks)
+            case reference, has_genotypes, has_intervals:
+                assert_never(reference)
+                assert_never(has_genotypes)
+                assert_never(has_intervals)
+
+        dataset = RaggedDataset(
+            path=path,
+            output_length="ragged",
+            max_jitter=max_jitter,
+            jitter=jitter,
+            contigs=contigs,
+            return_indices=False,
+            rc_neg=rc_neg,
+            transform=None,
+            deterministic=deterministic,
+            _idxer=idxer,
+            _full_bed=bed,
+            _full_regions=regions,
+            _jittered_regions=regions.copy(),
+            _seqs=seqs,
+            _tracks=tracks,
+            _recon=reconstructor,
+            _rng=np.random.default_rng(rng),
+        )
+
+        logger.info(f"Opened dataset:\n{dataset}")
+
+        return dataset
+
+    def with_settings(
+        self,
+        jitter: int | None = None,
+        rng: int | np.random.Generator | None = None,
+        deterministic: bool | None = None,
+        rc_neg: bool | None = None,
+    ) -> Dataset:
+        """Modify settings of the dataset, returning a new dataset without modifying the old one.
+
+        Parameters
+        ----------
+        jitter
+            How much jitter to use. Must be non-negative and <= the :attr:`max_jitter <genvarloader.Dataset.max_jitter>` of the dataset.
+        rng
+            Random seed or np.random.Generator for non-deterministic operations e.g. jittering and shifting longer-than-requested haplotypes.
+        deterministic
+            Whether to use randomized or deterministic algorithms. If set to True, this will disable random
+            shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
+            and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
+            can be returned.
+        rc_neg
+            Whether to reverse-complement sequences and reverse tracks on negative strands.
+        """
+        to_evolve = {}
+
+        if jitter is not None:
+            if jitter < 0:
+                raise ValueError(f"Jitter ({jitter}) must be a non-negative integer.")
+            elif jitter > self.max_jitter:
+                raise ValueError(
+                    f"Jitter ({jitter}) must be less than or equal to the maximum jitter of the dataset ({self.max_jitter})."
+                )
+
+            if jitter != self.jitter:
+                if isinstance(self.output_length, int):
+                    min_r_len: int = (
+                        self._full_regions[:, 2] - self._full_regions[:, 1]
+                    ).min()
+                    max_output_length = min_r_len + 2 * self.max_jitter
+                    eff_length = self.output_length + 2 * jitter
+
+                    if eff_length > max_output_length:
+                        raise ValueError(
+                            f"Jitter-expanded output length (out_len={self.output_length}) + 2 * ({jitter=}) = {eff_length} must be less"
+                            f" than or equal to the maximum output length of the dataset ({max_output_length})."
+                            f" The maximum output length is the minimum region length ({min_r_len}) + 2 * (max_jitter={self.max_jitter})."
+                        )
+                jittered_regions = self._full_regions.copy()
+                jittered_regions[:, 1] -= jitter
+                jittered_regions[:, 2] += jitter
+
+                to_evolve["jitter"] = jitter
+                to_evolve["_jittered_regions"] = jittered_regions
+
+        if rng is not None:
+            to_evolve["rng"] = np.random.default_rng(rng)
+
+        if deterministic is not None:
+            to_evolve["deterministic"] = deterministic
+
+        if rc_neg is not None:
+            to_evolve["rc_neg"] = rc_neg
+
+        return evolve(self, **to_evolve)
+
+    def with_len(
+        self, output_length: Literal["ragged", "variable"] | int
+    ) -> ArrayDataset | RaggedDataset:
+        """Modify the output length of the dataset, returning a new dataset without modifying the old one.
+
+        Parameters
+        ----------
+        output_length
+            The output length. Can be set to :code:`"ragged"` or :code:`"variable"` to allow for variable length sequences.
+            If set to an integer, all sequences will be padded or truncated to this length. See the
+            `online documentation <https://genvarloader.readthedocs.io/en/latest/dataset.html>`_ for more information.
+        """
+        if isinstance(output_length, int):
+            if output_length < 1:
+                raise ValueError(
+                    f"Output length ({output_length}) must be a positive integer."
+                )
+            min_r_len: int = (self._full_regions[:, 2] - self._full_regions[:, 1]).min()
+            max_output_length = min_r_len + 2 * self.max_jitter
+            eff_length = output_length + 2 * self.jitter
+
+            if eff_length > max_output_length:
+                raise ValueError(
+                    f"Jitter-expanded output length (out_len={self.output_length}) + 2 * ({self.jitter=}) = {eff_length} must be less"
+                    f" than or equal to the maximum output length of the dataset ({max_output_length})."
+                    f" The maximum output length is the minimum region length ({min_r_len}) + 2 * (max_jitter={self.max_jitter})."
+                )
+
+            return ArrayDataset(
+                path=self.path,
+                output_length=output_length,
+                max_jitter=self.max_jitter,
+                jitter=self.jitter,
+                contigs=self.contigs,
+                return_indices=self.return_indices,
+                rc_neg=self.rc_neg,
+                transform=self.transform,
+                deterministic=self.deterministic,
+                _idxer=self._idxer,
+                _full_bed=self._full_bed,
+                _full_regions=self._full_regions,
+                _jittered_regions=self._jittered_regions,
+                _seqs=self._seqs,
+                _tracks=self._tracks,
+                _recon=self._recon,
+                _rng=self._rng,
+            )
+        else:
+            return RaggedDataset(
+                path=self.path,
+                output_length=output_length,
+                max_jitter=self.max_jitter,
+                jitter=self.jitter,
+                contigs=self.contigs,
+                return_indices=self.return_indices,
+                rc_neg=self.rc_neg,
+                transform=self.transform,
+                deterministic=self.deterministic,
+                _idxer=self._idxer,
+                _full_bed=self._full_bed,
+                _full_regions=self._full_regions,
+                _jittered_regions=self._jittered_regions,
+                _seqs=self._seqs,
+                _tracks=self._tracks,
+                _recon=self._recon,
+                _rng=self._rng,
+            )
+
+    def with_indices(self, return_indices: bool):
+        """Whether to return indices, returning a new dataset without modifying the old one.
+        Set to :code:`True` to have the dataset return the row and sample indices of the non-subset dataset. This allows you to
+        combine arbitrary row- and sample-specific data with dataset output on-the-fly with a transform.
+
+        Parameters
+        ----------
+        return_indices
+            Whether to return indices.
+        """
+        return evolve(self, return_indices=return_indices)
+
+    def with_transform(self, transform: Callable | None):
+        """Modify the transform to apply to the dataset output, returning a new dataset without modifying the old one.
+        The transform should take input matching the output of the dataset and can return arbitrary output. In combination
+        with indices, this allows you to combine arbitrary row- and sample-specific data with dataset output on-the-fly.
+
+        .. note::
+            Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
+            dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
+
+        Parameters
+        ----------
+        transform
+            The transform to apply to the dataset.
+        """
+        return evolve(self, transform=transform)
+
+    def with_seqs(self, kind: Literal["reference", "haplotypes", "annotated"] | None):
+        """Return a new dataset with the specified sequence type. The sequence type can be one of the following:
+
+        - :code:`"reference"`: reference sequences.
+        - :code:`"haplotypes"`: personalized haplotype sequences.
+        - :code:`"annotated"`: annotated haplotype sequences, which includes personalized haplotypes along with annotations.
+
+        Annotated haplotypes are returned as the :class:`~genvarloader._types.AnnotatedHaps` class which is roughly:
+
+        .. code-block:: python
+
+            class AnnotatedHaps:
+                haps: NDArray[np.bytes_]
+                var_idxs: NDArray[np.int32]
+                ref_coords: NDArray[np.int32]
+
+        where :code:`haps` are the haplotypes as bytes/S1, and :code:`var_idxs` and :code:`ref_coords` are
+        arrays with the same shape as :code:`haps` that annotate every nucleotide with the variant index and
+        reference coordinate it corresponds to. A variant index of -1 corresponds to a reference nucleotide, and a reference
+        coordinate of -1 corresponds to padded nucleotides that were added for regions beyond the bounds of the reference genome.
+        i.e. if the region's start position is negative or the end position is beyond the end of the reference genome.
+
+        For example, a toy result for :code:`chr1:1-10` could be:
+
+        .. code-block:: text
+
+            haps:        A C G  T ...  T T  A ...
+            var_idxs:   -1 3 3 -1 ... -1 4 -1 ...
+            ref_coords:  1 2 2  3 ...  6 7  9 ...
+
+        where variant 3 is a 1 bp :code:`CG` insertion and variant 4 is a 1 bp deletion :code:`T-`. Note that the first nucleotide
+        of every indel maps to a reference position since :func:`gvl.write() <genvarloader.write()>` expects that variants
+        are all left-aligned.
+
+        .. important::
+
+            The :code:`var_idxs` are numbered with respect to the full set of variants even if the variants were extracted from per-chromosome VCFs/PGENs.
+            So a variant index of 0 corresponds to the first variant across all chromosomes. Thus, if you want to map the variant index to per-chromosome VCFs/PGENs, you will
+            need to subtract the number of variants on all other chromosomes before the variant index to get the correct variant index in the VCF/PGEN. Relevant values
+            can be obtained by instantiating a `gvl.Variants` class from the VCFs/PGENs and accessing the `Variants.records.contig_offsets` attribute.
+
+        Parameters
+        ----------
+        kind
+            The type of sequences to return. Can be one of :code:`"reference"`, :code:`"haplotypes"`, :code:`"annotated"` or :code:`None` to return no sequences.
+        """
+        match kind, self._seqs, self._tracks:
+            case None, _, None:
+                raise ValueError(
+                    "Dataset only has sequences available, so returning no sequences is not possible."
+                )
+            case None, _, tracks:
+                return evolve(self, _recon=tracks)
+            case "reference" | "haplotypes" | "annotated", None, _:
+                raise ValueError(
+                    "Dataset has no reference genome to reconstruct sequences from."
+                )
+            case "haplotypes" | "annotated", Seqs(), _:
+                raise ValueError(
+                    "Dataset has no genotypes to reconstruct haplotypes from."
+                )
+            case "reference", Seqs(reference=ref) | Haps(reference=ref), None:
+                seqs = Seqs(reference=ref)
+                return evolve(self, _recon=seqs)
+            case "reference", Seqs(reference=ref) | Haps(reference=ref), tracks:
+                seqs = Seqs(reference=ref)
+                return evolve(self, _recon=SeqsTracks(seqs=seqs, tracks=tracks))
+            case "haplotypes", Haps() as haps, None:
+                return evolve(self, _recon=haps.with_annot(False))
+            case "haplotypes", Haps() as haps, tracks:
+                return evolve(self, _recon=HapsTracks(haps.with_annot(False), tracks))
+            case "annotated", Haps() as haps, None:
+                return evolve(self, _recon=haps.with_annot(True))
+            case "annotated", Haps() as haps, tracks:
+                return evolve(self, _recon=HapsTracks(haps.with_annot(True), tracks))
+            case k, s, t:
+                assert_never(k), assert_never(s), assert_never(t)
+
+    def with_tracks(self, tracks: str | List[str] | None):
+        """Modify which tracks to return, returning a new dataset without modifying the old one.
+
+        Parameters
+        ----------
+        tracks
+            The tracks to return. Can be a (list of) track names or :code:`False` to return no tracks."""
+        match tracks, self._seqs, self._tracks:
+            case None, None, _:
+                raise ValueError(
+                    "Dataset only has tracks available, so returning no tracks is not possible."
+                )
+            case None, seqs, _:
+                return evolve(self, _recon=seqs)
+            case t, _, None:
+                raise ValueError("Dataset has no tracks.")
+            case t, None, tr:
+                return evolve(self, _recon=tr.with_tracks(t))
+            case t, Seqs() as seqs, tr:
+                return evolve(self, _recon=SeqsTracks(seqs, tr.with_tracks(t)))
+            case t, Haps() as haps, tr:
+                return evolve(
+                    self,
+                    _recon=HapsTracks(
+                        haps,  # type: ignore | pylance weirdly infers HapsTracks[RaggedAnnotatedHaps]
+                        tr.with_tracks(t),
+                    ),
+                )
+            case k, s, t:
+                assert_never(k), assert_never(s), assert_never(t)
+
+    path: Path
+    """Path to the dataset."""
+    output_length: Literal["ragged", "variable"] | int
     """The output length. Can be set to :code:`"ragged"` or :code:`"variable"` to allow for variable length sequences.
     If set to an integer, all sequences will be padded or truncated to this length. See the
     `online documentation <https://genvarloader.readthedocs.io/en/latest/dataset.html>`_ for more information."""
     max_jitter: int
     """Maximum jitter."""
     return_indices: bool
-    """Whether to return non-subset row and sample indices."""
+    """Whether to return row and sample indices corresponding to the full dataset (no subsetting)."""
     contigs: List[str]
     """List of unique contigs."""
     jitter: int
     """How much jitter to use."""
     deterministic: bool
-    """Whether to use randomized or deterministic algorithms. If set to True, this will disable random
-    shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
-    and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
-    can be returned."""
+    """Whether to use randomized or deterministic algorithms. If set to :code:`False`, this will enable random
+    shifting of longer-than-requested haplotypes and, for unphased variants, enable choosing sets of compatible variants proportional to their dosage;
+    otherwise the dataset will always apply compatible sets with the highest dosage.
+    
+    .. note::
+        This setting is independent of :attr:`~Dataset.jitter`, if you want no :attr:`~Dataset.jitter` you should set it to 0.
+    """
     rc_neg: bool
     """Whether to reverse-complement the sequences on negative strands."""
     transform: Callable | None
     """Tranform to apply to what the dataset would otherwise return on its own."""
     _full_bed: pl.DataFrame = field(alias="_full_bed")
     _full_regions: NDArray[np.int32] = field(alias="_full_regions")
+    """Unjittered, sorted regions matching order on-disk."""
     _jittered_regions: NDArray[np.int32] = field(alias="_jittered_regions")
     _idxer: DatasetIndexer = field(alias="_idxer")
     _seqs: Optional[Seqs | Haps[Ragged[np.bytes_]] | Haps[RaggedAnnotatedHaps]] = field(
@@ -139,341 +606,100 @@ class Dataset:
 
     @property
     def shape(self) -> Tuple[int, int]:
-        """Return the shape of the dataset. (n_samples, n_regions)"""
+        """Return the shape of the dataset. :code:`(n_samples, n_regions)`"""
         return self.n_regions, self.n_samples
 
     @property
     def full_shape(self) -> Tuple[int, int]:
-        """Return the full shape of the dataset, ignoring any subsetting. (n_regions, n_samples)"""
+        """Return the full shape of the dataset, ignoring any subsetting. :code:`(n_samples, n_regions)`"""
         return self._idxer.full_shape
 
     @property
-    def haplotype_lengths(self) -> NDArray[np.int32] | None:
-        """The lengths of the jitter-extended haplotypes. Shape: (regions, samples, ploidy). If the dataset is
-        not phased or not deterministic, this will return None because the haplotypes are not guaranteed to be
-        a consistent length due to randomness in what variants are used. Otherwise, this will return the
-        haplotype lengths."""
-        if not isinstance(self._seqs, Haps):
-            return None
+    def available_tracks(self) -> List[str] | None:
+        """The available tracks in the dataset."""
+        if self._tracks is None:
+            return
+        return list(self._tracks.intervals)
 
-        if (
-            not isinstance(self._seqs.genotypes, SparseGenotypes)
-            and not self.deterministic
-        ):
-            return None
+    @property
+    def active_tracks(self) -> List[str] | None:
+        """The active tracks in the dataset."""
+        if self._tracks is None:
+            return
+        return list(self._tracks.active_tracks)
 
-        # (r s p)
-        r_idx, s_idx = np.unravel_index(self._idxer.i2d_map, self.full_shape)
-        hap_lens = (
-            self._jittered_regions[:, 2, None, None]
-            - self._jittered_regions[:, 1, None, None]
-            + self._seqs.haplotype_ilens
-        )[r_idx, s_idx].reshape(*self.shape, self._seqs.genotypes.ploidy)
-        return hap_lens
+    @property
+    def _available_sequences(self) -> list[str] | None:
+        """The available sequences in the dataset."""
+        match self._seqs:
+            case None:
+                return None
+            case Seqs():
+                return ["reference"]
+            case Haps():
+                return ["reference", "haplotypes", "annotated"]
+            case s:
+                assert_never(s)
+
+    @property
+    def sequence_type(self) -> Literal["haplotypes", "reference", "annotated"] | None:
+        """The type of sequences in the dataset."""
+        match self._recon:
+            case Tracks():
+                return
+            case (Haps() as haps) | HapsTracks(haps=haps):
+                if haps.annotate:
+                    return "annotated"
+                return "haplotypes"
+            case Seqs() | SeqsTracks():
+                return "reference"
+            case r:
+                assert_never(r)
 
     def __len__(self):
         return self.n_regions * self.n_samples
 
     def __str__(self) -> str:
-        raise NotImplementedError
+        if self._available_sequences is None or self.sequence_type is None:
+            seq_type = "None"
+        else:
+            seqs = self._available_sequences
+            seqs[seqs.index(self.sequence_type)] = f"[{self.sequence_type}]"
+            seq_type = " ".join(seqs)
+
+        if self.available_tracks is None:
+            tracks = None
+        else:
+            tracks = f"{', '.join(self.available_tracks[:5])}"
+            if len(self.available_tracks) > 5:
+                tracks += f" + {len(self.available_tracks) - 5} more"
+
+        if self.active_tracks is None:
+            act_tracks = None
+        else:
+            act_tracks = f"{', '.join(self.active_tracks[:5])}"
+            if len(self.active_tracks) > 5:
+                act_tracks += f" + {len(self.active_tracks) - 5} more"
+        return (
+            f"GVL store at {self.path}\n"
+            f"Is subset: {self.is_subset}\n"
+            f"# of regions: {self.n_regions}\n"
+            f"# of samples: {self.n_samples}\n"
+            f"Output length: {self.output_length}\n"
+            f"Jitter: {self.jitter} (max: {self.max_jitter})\n"
+            f"Deterministic: {self.deterministic}\n"
+            f"Sequence type: {seq_type}\n"
+            f"Active tracks: {act_tracks}\n"
+            f"Tracks available: {tracks}\n"
+        )
 
     def __repr__(self) -> str:
         return str(self)
 
-    @staticmethod
-    def open(
-        path: str | Path,
-        reference: str | Path | None = None,
-        jitter: int = 0,
-        rng: int | np.random.Generator | None = False,
-        deterministic=False,
-        rc_neg: bool = True,
-    ) -> RaggedDataset[None, None, None, None]:
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"{path} does not exist.")
-
-        # read metadata
-        with _py_open(path / "metadata.json") as f:
-            metadata = json.load(f)
-        samples: List[str] = metadata["samples"]
-        contigs: List[str] = metadata["contigs"]
-        ploidy: Optional[int] = metadata.get("ploidy", None)
-        max_jitter: int = metadata.get("max_jitter", 0)
-        phased: Optional[bool] = metadata.get("phased", None)
-
-        # read input regions and generate index map
-        bed = pl.read_ipc(path / "input_regions.arrow")
-        r_idx_map = bed["r_idx_map"].to_numpy().astype(np.intp)
-        idxer = DatasetIndexer.from_region_and_sample_idxs(
-            r_idx_map, np.arange(len(samples)), samples
-        )
-        bed = bed.drop("r_idx_map")
-        with pl.StringCache():
-            pl.Series(contigs, dtype=pl.Categorical)
-            sorted_bed = bed.sort(
-                pl.col("chrom").cast(pl.Categorical),
-                pl.col("chromStart"),
-                pl.col("chromEnd"),
-                maintain_order=True,
-            )
-        regions = bed_to_regions(sorted_bed, contigs)
-
-        has_genotypes = (path / "genotypes").exists()
-        if has_genotypes:
-            if phased is None:
-                raise ValueError("Malformed dataset: found genotypes but not phase.")
-            if ploidy is None:
-                raise ValueError("Malformed dataset: found genotypes but not ploidy.")
-
-        has_intervals = (path / "intervals").exists()
-
-        if reference is not None and has_genotypes and has_intervals:
-            logger.info(
-                "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
-            )
-            _reference = Reference.from_path_and_contigs(reference, contigs)
-            assert phased is not None
-            assert ploidy is not None
-            seqs = Haps.from_path(
-                path,
-                reference=_reference,
-                phased=phased,
-                regions=regions,
-                samples=samples,
-                ploidy=ploidy,
-            )
-            tracks = Tracks.from_path(path, regions, samples)
-            reconstructor = HapsTracks(haps=seqs, tracks=tracks)
-        elif reference is not None and has_genotypes:
-            logger.info(
-                "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
-            )
-            _reference = Reference.from_path_and_contigs(reference, contigs)
-            assert phased is not None
-            assert ploidy is not None
-            seqs = Haps.from_path(
-                path,
-                reference=_reference,
-                phased=phased,
-                regions=regions,
-                samples=samples,
-                ploidy=ploidy,
-            )
-            tracks = None
-            reconstructor = seqs
-        elif reference is not None and has_intervals:
-            logger.info(
-                "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
-            )
-            _reference = Reference.from_path_and_contigs(reference, contigs)
-            seqs = Seqs(reference=_reference)
-            tracks = Tracks.from_path(path, regions, samples)
-            reconstructor = SeqsTracks(seqs=seqs, tracks=tracks)
-        elif has_intervals:
-            seqs = None
-            tracks = Tracks.from_path(path, regions, samples)
-            reconstructor = tracks
-        else:
-            raise RuntimeError("Malformed dataset: no genotypes or intervals found.")
-
-        dataset = RaggedDataset(
-            output_length="ragged",
-            max_jitter=max_jitter,
-            jitter=jitter,
-            contigs=contigs,
-            return_indices=False,
-            rc_neg=rc_neg,
-            transform=None,
-            deterministic=deterministic,
-            _idxer=idxer,
-            _full_bed=bed,
-            _full_regions=regions,
-            _jittered_regions=regions.copy(),
-            _seqs=seqs,
-            _tracks=tracks,
-            _recon=reconstructor,
-            _rng=np.random.default_rng(rng),
-        )
-
-        logger.info(f"Opened dataset:\n{dataset}")
-
-        return dataset
-
-    def with_settings(
-        self,
-        jitter: int | None = None,
-        rng: int | np.random.Generator | None = None,
-        deterministic: bool | None = None,
-        rc_neg: bool | None = None,
-    ) -> Dataset:
-        to_evolve = {}
-
-        if jitter is not None:
-            if jitter < 0:
-                raise ValueError(f"Jitter ({jitter}) must be a non-negative integer.")
-            elif jitter > self.max_jitter:
-                raise ValueError(
-                    f"Jitter ({jitter}) must be less than or equal to the maximum jitter of the dataset ({self.max_jitter})."
-                )
-
-            if jitter != self.jitter:
-                if isinstance(self.output_length, int):
-                    min_r_len: int = (
-                        self._full_regions[:, 2] - self._full_regions[:, 1]
-                    ).min()
-                    max_output_length = min_r_len + 2 * self.max_jitter
-                    eff_length = self.output_length + 2 * jitter
-
-                    if eff_length > max_output_length:
-                        raise ValueError(
-                            f"Jitter-expanded output length (out_len={self.output_length}) + 2 * ({jitter=}) = {eff_length} must be less"
-                            f" than or equal to the maximum output length of the dataset ({max_output_length})."
-                            f" The maximum output length is the minimum region length ({min_r_len}) + 2 * (max_jitter={self.max_jitter})."
-                        )
-                jittered_regions = self._full_regions.copy()
-                jittered_regions[:, 1] -= jitter
-                jittered_regions[:, 2] += jitter
-
-                to_evolve["jitter"] = jitter
-                to_evolve["_jittered_regions"] = jittered_regions
-
-        if rng is not None:
-            to_evolve["rng"] = np.random.default_rng(rng)
-
-        if deterministic is not None:
-            to_evolve["deterministic"] = deterministic
-
-        if rc_neg is not None:
-            to_evolve["rc_neg"] = rc_neg
-
-        return evolve(self, **to_evolve)
-
-    def with_output_length(
-        self, output_length: Literal["ragged", "variable"] | int
-    ) -> ArrayDataset | RaggedDataset:
-        if isinstance(output_length, int):
-            if output_length < 1:
-                raise ValueError(
-                    f"Output length ({output_length}) must be a positive integer."
-                )
-            min_r_len: int = (self._full_regions[:, 2] - self._full_regions[:, 1]).min()
-            max_output_length = min_r_len + 2 * self.max_jitter
-            eff_length = output_length + 2 * self.jitter
-
-            if eff_length > max_output_length:
-                raise ValueError(
-                    f"Jitter-expanded output length (out_len={self.output_length}) + 2 * ({self.jitter=}) = {eff_length} must be less"
-                    f" than or equal to the maximum output length of the dataset ({max_output_length})."
-                    f" The maximum output length is the minimum region length ({min_r_len}) + 2 * (max_jitter={self.max_jitter})."
-                )
-
-            return ArrayDataset(
-                output_length=output_length,
-                max_jitter=self.max_jitter,
-                jitter=self.jitter,
-                contigs=self.contigs,
-                return_indices=self.return_indices,
-                rc_neg=self.rc_neg,
-                transform=self.transform,
-                deterministic=self.deterministic,
-                _idxer=self._idxer,
-                _full_bed=self._full_bed,
-                _full_regions=self._full_regions,
-                _jittered_regions=self._jittered_regions,
-                _seqs=self._seqs,
-                _tracks=self._tracks,
-                _recon=self._recon,
-                _rng=self._rng,
-            )
-        else:
-            return RaggedDataset(
-                output_length=output_length,
-                max_jitter=self.max_jitter,
-                jitter=self.jitter,
-                contigs=self.contigs,
-                return_indices=self.return_indices,
-                rc_neg=self.rc_neg,
-                transform=self.transform,
-                deterministic=self.deterministic,
-                _idxer=self._idxer,
-                _full_bed=self._full_bed,
-                _full_regions=self._full_regions,
-                _jittered_regions=self._jittered_regions,
-                _seqs=self._seqs,
-                _tracks=self._tracks,
-                _recon=self._recon,
-                _rng=self._rng,
-            )
-
-    def with_indices(self, return_indices: bool):
-        return evolve(self, return_indices=return_indices)
-
-    def with_transform(self, transform: Callable | None):
-        return evolve(self, transform=transform)
-
-    def with_seqs(self, kind: Literal[False, "reference", "haplotypes", "annotated"]):
-        match kind, self._seqs, self._tracks:
-            case False, _, None:
-                raise ValueError(
-                    "Dataset only has sequences available, so returning no sequences is not possible."
-                )
-            case False, _, tracks:
-                return evolve(self, _recon=tracks)
-            case "reference" | "haplotypes" | "annotated", None, _:
-                raise ValueError(
-                    "Dataset has no reference genome to reconstruct sequences from."
-                )
-            case "haplotypes" | "annotated", Seqs(), _:
-                raise ValueError(
-                    "Dataset has no genotypes to reconstruct haplotypes from."
-                )
-            case "reference", Seqs(reference=ref) | Haps(reference=ref), None:
-                seqs = Seqs(reference=ref)
-                return evolve(self, _recon=seqs)
-            case "reference", Seqs(reference=ref) | Haps(reference=ref), tracks:
-                seqs = Seqs(reference=ref)
-                return evolve(self, _recon=SeqsTracks(seqs=seqs, tracks=tracks))
-            case "haplotypes", Haps() as haps, None:
-                return evolve(self, _recon=haps.with_annot(False))
-            case "haplotypes", Haps() as haps, tracks:
-                return evolve(self, _recon=HapsTracks(haps.with_annot(False), tracks))
-            case "annotated", Haps() as haps, None:
-                return evolve(self, _recon=haps.with_annot(True))
-            case "annotated", Haps() as haps, tracks:
-                return evolve(self, _recon=HapsTracks(haps.with_annot(True), tracks))
-            case k, s, t:
-                assert_never(k), assert_never(s), assert_never(t)
-
-    def with_tracks(self, tracks: Union[Literal[False], str, List[str]]):
-        match tracks, self._seqs, self._tracks:
-            case False, None, _:
-                raise ValueError(
-                    "Dataset only has tracks available, so returning no tracks is not possible."
-                )
-            case False, seqs, _:
-                return evolve(self, _recon=seqs)
-            case t, _, None:
-                raise ValueError("Dataset has no tracks.")
-            case t, None, tr:
-                return evolve(self, _recon=tr.with_tracks(t))
-            case t, Seqs() as seqs, tr:
-                return evolve(self, _recon=SeqsTracks(seqs, tr.with_tracks(t)))
-            case t, Haps() as haps, tr:
-                return evolve(
-                    self,
-                    _recon=HapsTracks(
-                        haps,  # type: ignore | pylance weirdly infers HapsTracks[RaggedAnnotatedHaps]
-                        tr.with_tracks(t),
-                    ),
-                )
-            case k, s, t:
-                assert_never(k), assert_never(s), assert_never(t)
-
     def subset_to(
         self,
-        regions: Idx | NDArray[np.bool_] | pl.Series | None = None,
-        samples: Idx | NDArray[np.bool_] | str | Sequence[str] | None = None,
+        regions: Idx | pl.Series | None = None,
+        samples: Idx | str | Sequence[str] | None = None,
     ) -> "Dataset":
         """Subset the dataset to specific regions and/or samples by index or a boolean mask. If regions or samples
         are not provided, the corresponding dimension will not be subset.
@@ -543,7 +769,17 @@ class Dataset:
             return self
 
         if samples is not None:
-            if isinstance(samples, (str, Sequence)):
+            if isinstance(samples, np.ndarray) and np.issubdtype(
+                samples.dtype, np.bool_
+            ):
+                sample_idx = np.nonzero(samples)[0]
+            elif isinstance(
+                samples, (int, np.integer, slice, np.ndarray)
+            ) or isinstance(samples[0], int):
+                sample_idx = idx_like_to_array(samples, self.n_samples)  # type: ignore
+            else:  # str | Sequence
+                if isinstance(samples, str):
+                    samples = [samples]
                 _samples = set(samples)
                 if missing := _samples.difference(self._idxer.full_samples):
                     raise ValueError(f"Samples {missing} not found in the dataset")
@@ -555,13 +791,6 @@ class Dataset:
                     ],
                     np.intp,
                 )
-            elif isinstance(samples, np.ndarray) and np.issubdtype(
-                samples.dtype, np.bool_
-            ):
-                sample_idx = np.nonzero(samples)[0]
-            else:
-                samples = cast(Idx, samples)  # how to narrow dtype? is this possible?
-                sample_idx = samples
         else:
             sample_idx = None
 
@@ -569,7 +798,7 @@ class Dataset:
             if isinstance(regions, pl.Series):
                 region_idxs = regions.to_numpy()
                 if np.issubdtype(region_idxs.dtype, np.bool_):
-                    region_idxs = np.nonzero(regions)[0]
+                    region_idxs = np.nonzero(region_idxs)[0]
                 elif not np.issubdtype(region_idxs.dtype, np.integer):
                     raise ValueError("`regions` must be index-like or a boolean mask.")
             else:
@@ -586,7 +815,110 @@ class Dataset:
         """Return a full sized dataset, undoing any subsetting."""
         return evolve(self, _idxer=self._idxer.to_full_dataset())
 
+    def haplotype_lengths(
+        self,
+        regions: Idx | None = None,
+        samples: Idx | str | Sequence[str] | None = None,
+    ) -> NDArray[np.int32] | None:
+        """The lengths of jitter-extended haplotypes for specified regions and samples. If the dataset is
+        not phased or not deterministic, this will return :code:`None` because the haplotypes are not guaranteed to be
+        a consistent length due to randomness in what variants are used.
+
+        Parameters
+        ----------
+        regions
+            Regions to compute haplotype lengths for.
+        samples
+            Samples to compute haplotype lengths for.
+        """
+        if (
+            not isinstance(self._seqs, Haps)
+            or not isinstance(self._seqs.genotypes, SparseGenotypes)
+            or not self.deterministic
+        ):
+            return None
+
+        if regions is None:
+            regions = slice(None)
+        if samples is None:
+            samples = slice(None)
+        idx = (regions, samples)
+
+        idx, squeeze, out_reshape = self._parse_getitem_idx(idx)
+
+        ds_idx = self._idxer[idx]
+        r_idx, _ = np.unravel_index(ds_idx, self.full_shape)
+
+        # (b)
+        regions = self._jittered_regions[r_idx]
+
+        # (b p)
+        hap_lens = (
+            regions[:, 2, None]  # (b 1)
+            - regions[:, 1, None]  # (b 1)
+            + self._seqs._haplotype_ilens(ds_idx, regions, self.deterministic)  # (b p)
+        )
+
+        if squeeze:
+            hap_lens = hap_lens.squeeze(0)
+
+        if out_reshape is not None:
+            hap_lens = hap_lens.reshape(*out_reshape, self._seqs.genotypes.ploidy)
+
+        return hap_lens
+
+    def write_transformed_track(
+        self,
+        new_track: str,
+        existing_track: str,
+        transform: Callable[
+            [NDArray[np.intp], NDArray[np.intp], Ragged[np.float32]],
+            Ragged[np.float32],
+        ],
+        max_mem: int = 2**30,
+        overwrite: bool = False,
+    ) -> ArrayDataset | RaggedDataset:
+        """Write transformed tracks to the dataset.
+
+        Parameters
+        ----------
+        new_track
+            The name of the new track.
+        existing_track
+            The name of the existing track to transform.
+        transform
+            A function to apply to the existing track to get a new, transformed track.
+            This will be done in chunks such that the tracks provided will not exceed :code:`max_mem`.
+            The arguments given to the transform will be the region and sample indices as numpy arrays
+            and the tracks themselves as a :class:`Ragged` array with
+            shape (regions, samples). The tracks must be a :class:`Ragged` array since regions may be
+            different lengths to accomodate indels. This function should then return the transformed
+            tracks as a :class:`Ragged` array with the same shape and lengths.
+        max_mem
+            The maximum memory to use in bytes, by default 1 GiB (2**30 bytes)
+        overwrite
+            Whether to overwrite the existing track, by default False
+        """
+        if self._tracks is None:
+            raise ValueError("Dataset has no tracks to transform.")
+
+        new_tracks = self._tracks.write_transformed_track(
+            new_track,
+            existing_track,
+            transform,
+            self.path,
+            self._full_regions,
+            self.max_jitter,
+            self._idxer,
+            self._seqs if isinstance(self._seqs, Haps) else None,
+            max_mem=max_mem,
+            overwrite=overwrite,
+        )
+
+        return evolve(self, _tracks=new_tracks)  # type: ignore
+
     def to_torch_dataset(self) -> "td.Dataset":
+        """Convert the dataset to a PyTorch :external+torch:class:`Dataset <torch.utils.data.Dataset>`. Requires PyTorch to be installed."""
         if self.output_length == "ragged":
             raise ValueError(
                 """`output_length` is currently set to "ragged" and ragged output cannot be converted to PyTorch Tensors."""
@@ -679,54 +1011,16 @@ class Dataset:
     def __getitem__(
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
     ) -> Any:
-        if not isinstance(idx, tuple):
-            regions = idx
-            samples = slice(None)
-        elif len(idx) == 1:
-            regions = idx[0]
-            samples = slice(None)
-        else:
-            regions, samples = idx
-
-        if isinstance(samples, str):
-            samples = [samples]
-
-        if not isinstance(samples, (int, np.integer, slice)) and isinstance(
-            samples[0], str
-        ):
-            _samples = set(samples)
-            if missing := _samples.difference(self._idxer.full_samples):
-                raise ValueError(f"Samples {missing} not found in the dataset")
-            samples = np.array(
-                [i for i, s in enumerate(self._idxer.full_samples) if s in _samples],
-                np.intp,
-            )
-        samples = cast(Idx, samples)  # above clause does this, but can't narrow type
-
-        if isinstance(regions, (int, np.integer)) and isinstance(
-            samples, (int, np.integer)
-        ):
-            squeeze = True
-        else:
-            squeeze = False
-
-        r_idx = idx_like_to_array(regions, self.n_regions)
-        s_idx = idx_like_to_array(samples, self.n_samples)
-        idx = np.ravel_multi_index((r_idx, s_idx), self.shape)
+        # (b)
+        idx, squeeze, out_reshape = self._parse_getitem_idx(idx)
 
         ds_idx = self._idxer[idx]
-
-        if ds_idx.ndim > 1:
-            out_reshape = ds_idx.shape
-            ds_idx = ds_idx.ravel()
-        else:
-            out_reshape = None
 
         r_idx, s_idx = np.unravel_index(ds_idx, self.full_shape)
         regions = self._jittered_regions[r_idx]
 
         recon = self._recon(
-            idx,
+            ds_idx,
             regions,
             self.output_length,
             self.jitter,
@@ -770,6 +1064,59 @@ class Dataset:
 
         return out
 
+    def _parse_getitem_idx(
+        self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
+    ) -> tuple[NDArray[np.integer], bool, tuple[int, ...] | None]:
+        if not isinstance(idx, tuple):
+            regions = idx
+            samples = slice(None)
+        elif len(idx) == 1:
+            regions = idx[0]
+            samples = slice(None)
+        else:
+            regions, samples = idx
+
+        if isinstance(samples, (int, np.integer, str)):
+            single_sample = True
+        else:
+            single_sample = False
+
+        if isinstance(samples, str):
+            samples = [samples]
+
+        if not isinstance(samples, (int, np.integer, slice)) and isinstance(
+            samples[0], str
+        ):
+            _samples = set(samples)
+            if missing := _samples.difference(self._idxer.full_samples):
+                raise ValueError(f"Samples {missing} not found in the dataset")
+            samples = np.array(
+                [i for i, s in enumerate(self._idxer.full_samples) if s in _samples],
+                np.intp,
+            )
+        samples = cast(Idx, samples)  # above clause does this, but can't narrow type
+
+        if isinstance(regions, (int, np.integer)) and single_sample:
+            squeeze = True
+        else:
+            squeeze = False
+
+        r_idx = idx_like_to_array(regions, self.n_regions)
+        s_idx = idx_like_to_array(samples, self.n_samples)
+        if r_idx.ndim > 1 or s_idx.ndim > 1:
+            r_idx, s_idx = np.broadcast_arrays(r_idx, s_idx)
+        elif len(r_idx) != len(s_idx):
+            r_idx, s_idx = np.meshgrid(r_idx, s_idx, indexing="ij")
+        idx = np.ravel_multi_index((r_idx, s_idx), self.shape)
+
+        if idx.ndim > 1:
+            out_reshape = idx.shape
+            idx = idx.ravel()
+        else:
+            out_reshape = None
+
+        return idx, squeeze, out_reshape
+
     @overload
     def _rc(self, rag: Ragged[DTYPE], to_rc: NDArray[np.bool_]) -> Ragged[DTYPE]: ...
     @overload
@@ -780,11 +1127,9 @@ class Dataset:
         self, rag: Ragged | RaggedAnnotatedHaps, to_rc: NDArray[np.bool_]
     ) -> Ragged | RaggedAnnotatedHaps:
         if isinstance(rag, Ragged):
+            to_rc = to_rc.reshape(to_rc.shape + ((1,) * (len(rag.shape) - 1)))
             if is_rag_dtype(rag, np.bytes_):
-                if len(rag.shape) == 2:
-                    rag = _reverse_complement(rag, to_rc[:, None])
-                else:
-                    rag = _reverse_complement(rag, to_rc)
+                rag = _reverse_complement(rag, to_rc)
             elif is_rag_dtype(rag, np.float32):
                 _reverse(rag, to_rc)
         elif isinstance(rag, RaggedAnnotatedHaps):
@@ -851,7 +1196,6 @@ class Dataset:
 
 
 T = TypeVar("T")
-
 SEQ = TypeVar("SEQ", None, NDArray[np.bytes_], AnnotatedHaps)
 RSEQ = TypeVar("RSEQ", None, Ragged[np.bytes_], RaggedAnnotatedHaps)
 TRK = TypeVar("TRK", None, NDArray[np.float32])
@@ -861,43 +1205,45 @@ TFM = TypeVar("TFM")
 
 
 class ArrayDataset(Dataset, Generic[SEQ, TRK, IDX, TFM]):
+    """Only for type checking purposes, you should never instantiate this class directly."""
+
     @overload
-    def with_output_length(
+    def with_len(
         self: ArrayDataset[NDArray[np.bytes_], None, IDX, TFM],
         output_length: Literal["ragged"],
     ) -> RaggedDataset[Ragged[np.bytes_], None, IDX, TFM]: ...
     @overload
-    def with_output_length(
+    def with_len(
         self: ArrayDataset[AnnotatedHaps, None, IDX, TFM],
         output_length: Literal["ragged"],
     ) -> RaggedDataset[RaggedAnnotatedHaps, None, IDX, TFM]: ...
     @overload
-    def with_output_length(
+    def with_len(
         self: ArrayDataset[None, NDArray[np.float32], IDX, TFM],
         output_length: Literal["ragged"],
     ) -> RaggedDataset[None, Ragged[np.float32], IDX, TFM]: ...
     @overload
-    def with_output_length(
+    def with_len(
         self: ArrayDataset[NDArray[np.bytes_], NDArray[np.float32], IDX, TFM],
         output_length: Literal["ragged"],
     ) -> RaggedDataset[Ragged[np.bytes_], Ragged[np.float32], IDX, TFM]: ...
     @overload
-    def with_output_length(
+    def with_len(
         self: ArrayDataset[AnnotatedHaps, NDArray[np.float32], IDX, TFM],
         output_length: Literal["ragged"],
     ) -> RaggedDataset[RaggedAnnotatedHaps, Ragged[np.float32], IDX, TFM]: ...
     @overload
-    def with_output_length(
+    def with_len(
         self,
         output_length: Union[Literal["variable"], int],
     ) -> ArrayDataset[SEQ, TRK, IDX, TFM]: ...
-    def with_output_length(
+    def with_len(
         self, output_length: Literal["ragged", "variable"] | int
     ) -> Union[RaggedDataset[RSEQ, RTRK, IDX, TFM], ArrayDataset[SEQ, TRK, IDX, TFM]]:
-        return super().with_output_length(output_length)
+        return super().with_len(output_length)
 
     @overload
-    def with_seqs(self, kind: Literal[False]) -> ArrayDataset[None, TRK, IDX, TFM]: ...
+    def with_seqs(self, kind: None) -> ArrayDataset[None, TRK, IDX, TFM]: ...
     @overload
     def with_seqs(
         self, kind: Literal["reference", "haplotypes"]
@@ -907,14 +1253,12 @@ class ArrayDataset(Dataset, Generic[SEQ, TRK, IDX, TFM]):
         self, kind: Literal["annotated"]
     ) -> ArrayDataset[AnnotatedHaps, TRK, IDX, TFM]: ...
     def with_seqs(
-        self, kind: Literal[False, "reference", "haplotypes", "annotated"]
+        self, kind: Literal["reference", "haplotypes", "annotated"] | None
     ) -> ArrayDataset:
         return super().with_seqs(kind)
 
     @overload
-    def with_tracks(
-        self, tracks: Literal[False]
-    ) -> ArrayDataset[SEQ, None, IDX, TFM]: ...
+    def with_tracks(self, tracks: None) -> ArrayDataset[SEQ, None, IDX, TFM]: ...
     @overload
     def with_tracks(
         self, tracks: str
@@ -923,9 +1267,7 @@ class ArrayDataset(Dataset, Generic[SEQ, TRK, IDX, TFM]):
     def with_tracks(
         self, tracks: List[str]
     ) -> ArrayDataset[SEQ, NDArray[np.float32], IDX, TFM]: ...
-    def with_tracks(
-        self, tracks: Union[Literal[False], str, List[str]]
-    ) -> ArrayDataset:
+    def with_tracks(self, tracks: str | List[str] | None) -> ArrayDataset:
         return super().with_tracks(tracks)
 
     @overload
@@ -1026,50 +1368,50 @@ class ArrayDataset(Dataset, Generic[SEQ, TRK, IDX, TFM]):
 
 
 class RaggedDataset(Dataset, Generic[RSEQ, RTRK, IDX, TFM]):
+    """Only for type checking purposes, you should never instantiate this class directly."""
+
     @overload
-    def with_output_length(
+    def with_len(
         self: RaggedDataset[Ragged[np.bytes_], None, IDX, TFM],
         output_length: Union[Literal["variable"], int],
     ) -> ArrayDataset[NDArray[np.bytes_], None, IDX, TFM]: ...
     @overload
-    def with_output_length(
+    def with_len(
         self: RaggedDataset[RaggedAnnotatedHaps, None, IDX, TFM],
         output_length: Union[Literal["variable"], int],
     ) -> ArrayDataset[AnnotatedHaps, None, IDX, TFM]: ...
     @overload
-    def with_output_length(
+    def with_len(
         self: RaggedDataset[None, Ragged[np.float32], IDX, TFM],
         output_length: Union[Literal["variable"], int],
     ) -> ArrayDataset[None, NDArray[np.float32], IDX, TFM]: ...
     @overload
-    def with_output_length(
+    def with_len(
         self: RaggedDataset[None, RTRK, IDX, TFM],
         output_length: Union[Literal["variable"], int],
     ) -> ArrayDataset[None, TRK, IDX, TFM]: ...
     @overload
-    def with_output_length(
+    def with_len(
         self: RaggedDataset[Ragged[np.bytes_], Ragged[np.float32], IDX, TFM],
         output_length: Union[Literal["variable"], int],
     ) -> ArrayDataset[NDArray[np.bytes_], NDArray[np.float32], IDX, TFM]: ...
     @overload
-    def with_output_length(
+    def with_len(
         self: RaggedDataset[RaggedAnnotatedHaps, Ragged[np.float32], IDX, TFM],
         output_length: Union[Literal["variable"], int],
     ) -> ArrayDataset[AnnotatedHaps, NDArray[np.float32], IDX, TFM]: ...
     @overload
-    def with_output_length(
+    def with_len(
         self,
         output_length: Literal["ragged"],
     ) -> RaggedDataset[RSEQ, RTRK, IDX, TFM]: ...
-    def with_output_length(
+    def with_len(
         self, output_length: Union[Literal["ragged", "variable"], int]
     ) -> Union[RaggedDataset[RSEQ, RTRK, IDX, TFM], ArrayDataset[SEQ, TRK, IDX, TFM]]:
-        return super().with_output_length(output_length)
+        return super().with_len(output_length)
 
     @overload
-    def with_seqs(
-        self, kind: Literal[False]
-    ) -> RaggedDataset[None, RTRK, IDX, TFM]: ...
+    def with_seqs(self, kind: None) -> RaggedDataset[None, RTRK, IDX, TFM]: ...
     @overload
     def with_seqs(
         self, kind: Literal["reference", "haplotypes"]
@@ -1079,14 +1421,12 @@ class RaggedDataset(Dataset, Generic[RSEQ, RTRK, IDX, TFM]):
         self, kind: Literal["annotated"]
     ) -> RaggedDataset[RaggedAnnotatedHaps, RTRK, IDX, TFM]: ...
     def with_seqs(
-        self, kind: Literal[False, "reference", "haplotypes", "annotated"]
+        self, kind: Literal["reference", "haplotypes", "annotated"] | None
     ) -> RaggedDataset:
         return super().with_seqs(kind)
 
     @overload
-    def with_tracks(
-        self, tracks: Literal[False]
-    ) -> RaggedDataset[RSEQ, None, IDX, TFM]: ...
+    def with_tracks(self, tracks: None) -> RaggedDataset[RSEQ, None, IDX, TFM]: ...
     @overload
     def with_tracks(
         self, tracks: str
@@ -1095,9 +1435,7 @@ class RaggedDataset(Dataset, Generic[RSEQ, RTRK, IDX, TFM]):
     def with_tracks(
         self, tracks: List[str]
     ) -> RaggedDataset[RSEQ, Ragged[np.float32], IDX, TFM]: ...
-    def with_tracks(
-        self, tracks: Union[Literal[False], str, List[str]]
-    ) -> RaggedDataset:
+    def with_tracks(self, tracks: str | List[str] | None) -> RaggedDataset:
         return super().with_tracks(tracks)
 
     @overload
