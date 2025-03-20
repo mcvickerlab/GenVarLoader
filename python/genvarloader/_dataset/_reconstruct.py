@@ -559,7 +559,6 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
             else:
                 available_tracks.append(p.name)
         available_tracks.sort()
-        active_tracks = available_tracks
         intervals: Optional[Dict[str, RaggedIntervals]] = {}
         for track in available_tracks:
             itvs = np.memmap(
@@ -575,7 +574,7 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
             intervals[track] = RaggedIntervals.from_offsets(
                 itvs, (len(regions), n_samples), offsets
             )
-        return cls(intervals, active_tracks)
+        return cls(intervals, available_tracks)
 
     def __call__(
         self,
@@ -839,7 +838,7 @@ class HapsTracks(Reconstructor[tuple[H, Ragged[np.float32]]]):
         lengths = regions[:, 2] - regions[:, 1]
 
         # ragged (b p l), (b p), (b p), (b*p*v), (b*p+1), (b p)
-        haps, geno_idx, shifts, diffs, hap_lengths, keep, keep_offsets  = (
+        haps, geno_idx, shifts, diffs, hap_lengths, keep, keep_offsets = (
             self.haps.get_haps_and_shifts(
                 idx=idx,
                 regions=regions,

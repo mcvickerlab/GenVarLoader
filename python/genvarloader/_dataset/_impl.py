@@ -92,6 +92,26 @@ class Dataset:
     - :meth:`Dataset.with_transform() <Dataset.with_transform()>`
     """
 
+    @overload
+    @staticmethod
+    def open(
+        path: str | Path,
+        reference: None = None,
+        jitter: int = 0,
+        rng: int | np.random.Generator | None = False,
+        deterministic: bool = True,
+        rc_neg: bool = True,
+    ) -> RaggedDataset[None, RTRK, None, None]: ...
+    @overload
+    @staticmethod
+    def open(
+        path: str | Path,
+        reference: str | Path,
+        jitter: int = 0,
+        rng: int | np.random.Generator | None = False,
+        deterministic: bool = True,
+        rc_neg: bool = True,
+    ) -> RaggedDataset[Ragged[np.bytes_], RTRK, None, None]: ...
     @staticmethod
     def open(
         path: str | Path,
@@ -100,8 +120,10 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
-    ) -> RaggedDataset[None, None, None, None]:
+    ) -> RaggedDataset[RSEQ, RTRK, None, None]:
         """Open a dataset from a path. If no reference genome is provided, the dataset cannot yield sequences.
+        Will initialize the dataset such that it will return tracks and haplotypes (reference sequences if no genotypes) if possible.
+        If tracks are available, they will be set to be returned in alphabetical order.
 
         Parameters
         ----------
@@ -173,6 +195,7 @@ class Dataset:
             case None, _, True:
                 seqs = None
                 tracks = Tracks.from_path(path, regions, len(samples))
+                tracks = tracks.with_tracks(list(tracks.intervals))
                 reconstructor = tracks
             case reference, False, True:
                 logger.info(
@@ -181,6 +204,7 @@ class Dataset:
                 _reference = Reference.from_path_and_contigs(reference, contigs)
                 seqs = Seqs(reference=_reference)
                 tracks = Tracks.from_path(path, regions, len(samples))
+                tracks = tracks.with_tracks(list(tracks.intervals))
                 reconstructor = SeqsTracks(seqs=seqs, tracks=tracks)
             case reference, True, False:
                 logger.info(
@@ -215,6 +239,7 @@ class Dataset:
                     ploidy=ploidy,
                 )
                 tracks = Tracks.from_path(path, regions, len(samples))
+                tracks = tracks.with_tracks(list(tracks.intervals))
                 reconstructor = HapsTracks(haps=seqs, tracks=tracks)
             case reference, has_genotypes, has_intervals:
                 assert_never(reference)
@@ -452,37 +477,56 @@ class Dataset:
         kind
             The type of sequences to return. Can be one of :code:`"reference"`, :code:`"haplotypes"`, :code:`"annotated"` or :code:`None` to return no sequences.
         """
-        match kind, self._seqs, self._tracks:
-            case None, _, None:
+        match kind, self._seqs, self._tracks, self._recon:
+            case None, _, None, _:
                 raise ValueError(
                     "Dataset only has sequences available, so returning no sequences is not possible."
                 )
-            case None, _, tracks:
-                return evolve(self, _recon=tracks)
-            case "reference" | "haplotypes" | "annotated", None, _:
+            case None, _, _, Haps() | Seqs():
+                raise RuntimeError(
+                    "Dataset is set to only return sequences, so setting sequence_type to None would"
+                    " result in a Dataset that cannot return anything."
+                )
+            case None, _, _, (Tracks() as t) | SeqsTracks(tracks=t) | HapsTracks(
+                tracks=t
+            ):
+                return evolve(self, _recon=t)
+            case "reference" | "haplotypes" | "annotated", None, _, _:
                 raise ValueError(
                     "Dataset has no reference genome to reconstruct sequences from."
                 )
-            case "haplotypes" | "annotated", Seqs(), _:
+            case "haplotypes" | "annotated", Seqs(), _, _:
                 raise ValueError(
                     "Dataset has no genotypes to reconstruct haplotypes from."
                 )
-            case "reference", Seqs(reference=ref) | Haps(reference=ref), None:
-                seqs = Seqs(reference=ref)
+            case "reference", _, _, Seqs(reference=r) | Haps(reference=r):
+                seqs = Seqs(reference=r)
                 return evolve(self, _recon=seqs)
-            case "reference", Seqs(reference=ref) | Haps(reference=ref), tracks:
+            case "reference", Seqs(reference=ref) | Haps(reference=ref), _, (
+                (Tracks() as tracks)
+                | SeqsTracks(tracks=tracks)
+                | HapsTracks(tracks=tracks)
+            ):
                 seqs = Seqs(reference=ref)
                 return evolve(self, _recon=SeqsTracks(seqs=seqs, tracks=tracks))
-            case "haplotypes", Haps() as haps, None:
+            case "haplotypes", Haps() as haps, _, Seqs() | Haps():
                 return evolve(self, _recon=haps.with_annot(False))
-            case "haplotypes", Haps() as haps, tracks:
+            case "haplotypes", Haps() as haps, _, (
+                (Tracks() as tracks)
+                | SeqsTracks(tracks=tracks)
+                | HapsTracks(tracks=tracks)
+            ):
                 return evolve(self, _recon=HapsTracks(haps.with_annot(False), tracks))
-            case "annotated", Haps() as haps, None:
+            case "annotated", Haps() as haps, _, Seqs() | Haps():
                 return evolve(self, _recon=haps.with_annot(True))
-            case "annotated", Haps() as haps, tracks:
+            case "annotated", Haps() as haps, _, (
+                (Tracks() as tracks)
+                | SeqsTracks(tracks=tracks)
+                | HapsTracks(tracks=tracks)
+            ):
                 return evolve(self, _recon=HapsTracks(haps.with_annot(True), tracks))
-            case k, s, t:
-                assert_never(k), assert_never(s), assert_never(t)
+            case k, s, t, r:
+                assert_never(k), assert_never(s), assert_never(t), assert_never(r)
 
     def with_tracks(self, tracks: str | List[str] | None):
         """Modify which tracks to return, returning a new dataset without modifying the old one.
@@ -491,20 +535,30 @@ class Dataset:
         ----------
         tracks
             The tracks to return. Can be a (list of) track names or :code:`False` to return no tracks."""
-        match tracks, self._seqs, self._tracks:
-            case None, None, _:
+        match tracks, self._seqs, self._tracks, self._recon:
+            case None, None, _, _:
                 raise ValueError(
-                    "Dataset only has tracks available, so returning no tracks is not possible."
+                    "Dataset only has tracks available, so returning no tracks would"
+                    " result in a Dataset that cannot return anything."
                 )
-            case None, seqs, _:
+            case None, Seqs() | Haps(), _, Tracks():
+                raise RuntimeError(
+                    "Dataset is set to only return tracks, so setting tracks to None would"
+                    " result in a Dataset that cannot return anything."
+                )
+            case None, _, _, ((Seqs() | Haps()) as seqs) | SeqsTracks(
+                seqs=seqs
+            ) | HapsTracks(haps=seqs):
                 return evolve(self, _recon=seqs)
-            case t, _, None:
-                raise ValueError("Dataset has no tracks.")
-            case t, None, tr:
+            case t, _, None, _:
+                raise ValueError(
+                    "Can't set dataset to return tracks because it has none to begin with."
+                )
+            case t, _, _, Tracks() as tr:
                 return evolve(self, _recon=tr.with_tracks(t))
-            case t, Seqs() as seqs, tr:
+            case t, _, tr, (Seqs() as seqs) | SeqsTracks(seqs=seqs):
                 return evolve(self, _recon=SeqsTracks(seqs, tr.with_tracks(t)))
-            case t, Haps() as haps, tr:
+            case t, _, tr, (Haps() as haps) | HapsTracks(haps=haps):
                 return evolve(
                     self,
                     _recon=HapsTracks(
@@ -512,8 +566,8 @@ class Dataset:
                         tr.with_tracks(t),
                     ),
                 )
-            case k, s, t:
-                assert_never(k), assert_never(s), assert_never(t)
+            case k, s, t, r:
+                assert_never(k), assert_never(s), assert_never(t), assert_never(r)
 
     path: Path
     """Path to the dataset."""
@@ -1200,7 +1254,7 @@ SEQ = TypeVar("SEQ", None, NDArray[np.bytes_], AnnotatedHaps)
 RSEQ = TypeVar("RSEQ", None, Ragged[np.bytes_], RaggedAnnotatedHaps)
 TRK = TypeVar("TRK", None, NDArray[np.float32])
 RTRK = TypeVar("RTRK", None, Ragged[np.float32])
-IDX = TypeVar("IDX", None, NDArray[np.integer])
+IDX = TypeVar("IDX", None, tuple[NDArray[np.integer], NDArray[np.integer]])
 TFM = TypeVar("TFM")
 
 
@@ -1277,7 +1331,7 @@ class ArrayDataset(Dataset, Generic[SEQ, TRK, IDX, TFM]):
     @overload
     def with_indices(
         self, return_indices: Literal[True]
-    ) -> ArrayDataset[SEQ, TRK, NDArray[np.integer], TFM]: ...
+    ) -> ArrayDataset[SEQ, TRK, tuple[NDArray[np.integer], NDArray[np.integer]], TFM]: ...
     def with_indices(self, return_indices: bool) -> ArrayDataset:
         return super().with_indices(return_indices)
 
@@ -1445,7 +1499,7 @@ class RaggedDataset(Dataset, Generic[RSEQ, RTRK, IDX, TFM]):
     @overload
     def with_indices(
         self, return_indices: Literal[True]
-    ) -> RaggedDataset[RSEQ, RTRK, NDArray[np.integer], TFM]: ...
+    ) -> RaggedDataset[RSEQ, RTRK, tuple[NDArray[np.integer], NDArray[np.integer]], TFM]: ...
     def with_indices(self, return_indices: bool) -> RaggedDataset:
         return super().with_indices(return_indices)
 
