@@ -9,7 +9,8 @@ def dsi():
     n_samples = 2
     r_idx = np.array([1, 2, 0])
     s_idx = np.arange(n_samples)
-    return DatasetIndexer.from_region_and_sample_idxs(r_idx, s_idx)
+    samples = ["Aang", "Katara"]
+    return DatasetIndexer.from_region_and_sample_idxs(r_idx, s_idx, samples)
 
 
 def case_1_region_all_samples():

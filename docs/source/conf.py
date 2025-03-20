@@ -87,7 +87,7 @@ html_theme_options = {
     "pygments_dark_style": "material",
     "home_page_in_toc": True,
     "collapse_navigation": True,
-    "show_toc_level": 2,
+    "show_toc_level": 3,
 }
 html_sidebars = {
     "**": [

@@ -371,13 +371,13 @@ def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.intp]:
     else:
         _idx = idx
 
-    # handle negative indices
     if isinstance(_idx, (int, np.integer)):
         _idx = np.array([_idx], np.intp)
 
     # unable to type narrow from NDArray[bool] since it's a generic type
     _idx = cast(NDArray[np.intp], _idx)
 
+    # handle negative indices
     _idx[_idx < 0] += max_len
 
     return _idx

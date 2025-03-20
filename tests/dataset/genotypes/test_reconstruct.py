@@ -183,8 +183,8 @@ def test_sparse(
     actual_annot_pos = np.empty(len(ref) - ref_start, np.int32)
     reconstruct_haplotype_from_sparse(
         offset_idx=offset_idx,
-        variant_idxs=sparse_genos.variant_idxs,
-        offsets=sparse_genos.offsets,
+        geno_v_idxs=sparse_genos.variant_idxs,
+        geno_offsets=sparse_genos.offsets,
         positions=positions,
         sizes=sizes,
         shift=shift,
@@ -204,7 +204,7 @@ def test_sparse(
 
 
 # %%
-test_sparse(*case_snps())
-test_sparse(*case_indels())
-test_sparse(*case_spanning_del_pad())
-test_sparse(*case_shift_ins())
+# test_sparse(*case_snps())
+# test_sparse(*case_indels())
+# test_sparse(*case_spanning_del_pad())
+# test_sparse(*case_shift_ins())

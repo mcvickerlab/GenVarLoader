@@ -42,14 +42,13 @@ from ._genotypes import (
     SparseSomaticGenotypes,
     choose_unphased_variants,
     get_diffs_sparse,
-    padded_slice,
     reconstruct_haplotypes_from_sparse,
 )
 from ._indexing import DatasetIndexer
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._reference import Reference
 from ._tracks import shift_and_realign_tracks_sparse
-from ._utils import bed_to_regions, splits_sum_le_value
+from ._utils import bed_to_regions, padded_slice, splits_sum_le_value
 
 try:
     import torch

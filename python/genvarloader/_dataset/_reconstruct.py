@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
+    Callable,
     Dict,
     List,
     Literal,
@@ -23,6 +23,7 @@ from attrs import define, evolve
 from einops import repeat
 from loguru import logger
 from numpy.typing import NDArray
+from tqdm.auto import tqdm
 
 from .._fasta import Fasta
 from .._ragged import (
@@ -40,9 +41,10 @@ from ._genotypes import (
     get_diffs_sparse,
     reconstruct_haplotypes_from_sparse,
 )
-from ._intervals import intervals_to_tracks
+from ._indexing import DatasetIndexer
+from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._tracks import shift_and_realign_tracks_sparse
-from ._utils import padded_slice
+from ._utils import padded_slice, splits_sum_le_value
 
 T = TypeVar("T", covariant=True)
 
@@ -110,7 +112,7 @@ class Reconstructor(Protocol[T]):
 
     def __call__(
         self,
-        idx: NDArray[np.intp],
+        idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
@@ -125,7 +127,7 @@ class Seqs(Reconstructor[Ragged[np.bytes_]]):
 
     def __call__(
         self,
-        idx: NDArray[np.intp],
+        idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
@@ -195,8 +197,6 @@ class Haps(Reconstructor[H]):
     """The variant sites in the dataset. This is kept in memory."""
     genotypes: Union[SparseGenotypes, SparseSomaticGenotypes]
     """Shape: (regions, samples, ploidy). The genotypes in the dataset. This is memory mapped."""
-    haplotype_ilens: NDArray[np.int32]
-    """Shape: (regions, samples, ploidy). Length of jitter-extended haplotypes, same order as on disk."""
     annotate: bool
 
     @classmethod
@@ -209,8 +209,6 @@ class Haps(Reconstructor[H]):
         samples: List[str],
         ploidy: int,
     ) -> Haps[Ragged[np.bytes_]]:
-        with open(path / "metadata.json") as f:
-            metadata = json.load(f)
         variants = _Variants.from_table(path / "genotypes" / "variants.arrow")
         if phased:
             genotypes = SparseGenotypes(
@@ -238,72 +236,60 @@ class Haps(Reconstructor[H]):
                 len(regions),
                 len(samples),
             )
-        haplotype_ilens = cls._compute_haplotype_ilens(
-            genotypes=genotypes,
-            variants=variants,
-            regions=regions,
-            jitter=metadata["max_jitter"],
-            rng=None,
-        )
         return cls(
             reference=reference,
             variants=variants,
             genotypes=genotypes,
-            haplotype_ilens=haplotype_ilens,
             annotate=False,
         )
 
-    @classmethod
-    def _compute_haplotype_ilens(
-        cls,
-        genotypes: Union[SparseGenotypes, SparseSomaticGenotypes],
-        variants: _Variants,
-        regions: NDArray[np.int32],
-        jitter: int,
-        rng: Optional[np.random.Generator],
+    def _haplotype_ilens(
+        self,
+        idx: NDArray[np.integer],
+        jittered_regions: NDArray[np.int32],
+        deterministic: bool,
+        keep: NDArray[np.bool_] | None = None,
+        keep_offsets: NDArray[np.int64] | None = None,
     ) -> NDArray[np.int32]:
-        # r s p
-        shape = genotypes.effective_shape[:2]
-        ds_idx = np.arange(np.prod(shape), dtype=np.intp)
-        r_idx, _ = np.unravel_index(ds_idx, shape)
-        geno_offset_idxs = cls.get_geno_offset_idx(ds_idx, genotypes)
+        """`idx` must be 1D."""
+        # (b p)
+        geno_offset_idxs = self.get_geno_offset_idx(idx, self.genotypes)
 
-        jittered_regions = regions.copy()
-        jittered_regions[:, 1] -= jitter
-        jittered_regions[:, 2] += jitter
-
-        if isinstance(genotypes, SparseSomaticGenotypes):
-            keep, keep_offsets = choose_unphased_variants(
-                starts=jittered_regions[r_idx, 1],
-                ends=jittered_regions[r_idx, 2],
-                geno_offset_idxs=geno_offset_idxs,
-                geno_v_idxs=genotypes.variant_idxs,
-                geno_offsets=genotypes.offsets,
-                positions=variants.positions,
-                sizes=variants.sizes,
-                dosages=genotypes.dosages,
-                deterministic=rng is None,
-            )
+        if isinstance(self.genotypes, SparseSomaticGenotypes):
+            if keep is None or keep_offsets is None:
+                keep, keep_offsets = choose_unphased_variants(
+                    starts=jittered_regions[:, 1],
+                    ends=jittered_regions[:, 2],
+                    geno_offset_idxs=geno_offset_idxs,
+                    geno_v_idxs=self.genotypes.variant_idxs,
+                    geno_offsets=self.genotypes.offsets,
+                    positions=self.variants.positions,
+                    sizes=self.variants.sizes,
+                    dosages=self.genotypes.dosages,
+                    deterministic=deterministic,
+                )
+            # (r s p)
             hap_ilens = get_diffs_sparse(
                 geno_offset_idxs=geno_offset_idxs,
-                geno_v_idxs=genotypes.variant_idxs,
-                geno_offsets=genotypes.offsets,
-                size_diffs=variants.sizes,
+                geno_v_idxs=self.genotypes.variant_idxs,
+                geno_offsets=self.genotypes.offsets,
+                size_diffs=self.variants.sizes,
                 keep=keep,
                 keep_offsets=keep_offsets,
             )
         else:
+            # (r s p)
             hap_ilens = get_diffs_sparse(
                 geno_offset_idxs=geno_offset_idxs,
-                geno_v_idxs=genotypes.variant_idxs,
-                geno_offsets=genotypes.offsets,
-                size_diffs=variants.sizes,
-                starts=jittered_regions[r_idx, 1],
-                ends=jittered_regions[r_idx, 2],
-                positions=variants.positions,
+                geno_v_idxs=self.genotypes.variant_idxs,
+                geno_offsets=self.genotypes.offsets,
+                size_diffs=self.variants.sizes,
+                starts=jittered_regions[:, 1],
+                ends=jittered_regions[:, 2],
+                positions=self.variants.positions,
             )
 
-        return hap_ilens.reshape(*shape, genotypes.ploidy)
+        return hap_ilens.reshape(-1, self.genotypes.ploidy)
 
     @overload
     def with_annot(self, annotations: Literal[False]) -> Haps[Ragged[np.bytes_]]: ...
@@ -311,11 +297,11 @@ class Haps(Reconstructor[H]):
     def with_annot(self, annotations: Literal[True]) -> Haps[RaggedAnnotatedHaps]: ...
 
     def with_annot(self, annotations: bool) -> Haps:
-        return evolve(self, _annotate=annotations)
+        return evolve(self, annotate=annotations)
 
     def __call__(
         self,
-        idx: NDArray[np.intp],
+        idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
@@ -332,7 +318,7 @@ class Haps(Reconstructor[H]):
 
     def get_haps_and_shifts(
         self,
-        idx: NDArray[np.intp],
+        idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
@@ -341,14 +327,14 @@ class Haps(Reconstructor[H]):
         H,
         NDArray[np.intp],
         NDArray[np.int32],
+        NDArray[np.int32],
+        NDArray[np.int32],
         Optional[NDArray[np.bool_]],
         Optional[NDArray[np.int64]],
-        NDArray[np.int32],
     ]:
         batch_size = len(idx)
         lengths = regions[:, 2] - regions[:, 1]
 
-        r_idx, s_idx = np.unravel_index(idx, self.genotypes.effective_shape[:2])
         geno_offset_idx = self.get_geno_offset_idx(idx, self.genotypes)
 
         if isinstance(self.genotypes, SparseSomaticGenotypes):
@@ -368,7 +354,7 @@ class Haps(Reconstructor[H]):
             keep_offsets = None
 
         # (b p)
-        diffs = self.haplotype_ilens[r_idx, s_idx]
+        diffs = self._haplotype_ilens(idx, regions, rng is None, keep, keep_offsets)
         hap_lengths = lengths[:, None] + diffs
 
         if rng is None or isinstance(output_length, str):
@@ -433,14 +419,16 @@ class Haps(Reconstructor[H]):
             out,  # type: ignore | pylance doesn't like this but it's correct behavior for the signature
             geno_offset_idx,
             shifts,
+            diffs,
+            hap_lengths,
             keep,
             keep_offsets,
-            hap_lengths,
         )
 
     @staticmethod
     def get_geno_offset_idx(
-        idx: NDArray[np.intp], genotypes: Union[SparseGenotypes, SparseSomaticGenotypes]
+        idx: NDArray[np.integer],
+        genotypes: Union[SparseGenotypes, SparseSomaticGenotypes],
     ) -> NDArray[np.intp]:
         r_idx, s_idx = np.unravel_index(idx, genotypes.effective_shape[:2])
         ploid_idx = np.arange(genotypes.ploidy, dtype=np.intp)
@@ -558,12 +546,12 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
     def with_tracks(self, tracks: str | List[str]) -> Tracks:
         if isinstance(tracks, str):
             tracks = [tracks]
-        if missing := list(set(self.intervals) - set(tracks)):
+        if missing := list(set(tracks) - set(self.intervals)):
             raise ValueError(f"Missing tracks: {missing}")
         return evolve(self, active_tracks=tracks)
 
     @classmethod
-    def from_path(cls, path: Path, regions: NDArray[np.int32], samples: List[str]):
+    def from_path(cls, path: Path, regions: NDArray[np.int32], n_samples: int):
         available_tracks: List[str] = []
         for p in (path / "intervals").iterdir():
             if len(list(p.iterdir())) == 0:
@@ -585,13 +573,13 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
                 mode="r",
             )
             intervals[track] = RaggedIntervals.from_offsets(
-                itvs, (len(regions), len(samples)), offsets
+                itvs, (len(regions), n_samples), offsets
             )
         return cls(intervals, active_tracks)
 
     def __call__(
         self,
-        idx: NDArray[np.intp],
+        idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
@@ -641,6 +629,156 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
 
         return tracks
 
+    def write_transformed_track(
+        self,
+        new_track: str,
+        existing_track: str,
+        transform: Callable[
+            [NDArray[np.intp], NDArray[np.intp], Ragged[np.float32]],
+            Ragged[np.float32],
+        ],
+        path: Path,
+        regions: NDArray[np.int32],
+        max_jitter: int,
+        idxer: DatasetIndexer,
+        haps: Haps | None = None,
+        max_mem: int = 2**30,
+        overwrite: bool = False,
+    ) -> Tracks:
+        if new_track == existing_track:
+            raise ValueError(
+                "New track name must be different from existing track name."
+            )
+
+        if existing_track not in self.intervals:
+            raise ValueError(
+                f"Requested existing track {existing_track} does not exist."
+            )
+
+        intervals = self.intervals[existing_track]
+
+        out_dir = path / "intervals" / new_track
+
+        if out_dir.exists() and not overwrite:
+            raise FileExistsError(
+                f"Track at {out_dir} already exists. Set overwrite=True to overwrite."
+            )
+        elif out_dir.exists() and overwrite:
+            # according to GVL file format, should only have intervals.npy and offsets.npy in here
+            for p in out_dir.iterdir():
+                p.unlink()
+            out_dir.rmdir()
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # (r)
+        n_regions, n_samples = idxer.full_shape
+        jittered_regions = regions.copy()
+        jittered_regions[:, 1] -= max_jitter
+        jittered_regions[:, 2] += max_jitter
+        r_idx = np.arange(n_regions)[:, None]
+        s_idx = np.arange(n_samples)
+        # (r s) -> (r*s)
+        ds_idx = np.ravel_multi_index((r_idx, s_idx), idxer.full_shape).ravel()
+        r_idx, s_idx = np.unravel_index(ds_idx, idxer.full_shape)
+        if haps is not None:
+            # extend ends by max hap diff to match write implementation
+            jittered_regions[:, 2] += (
+                haps._haplotype_ilens(ds_idx, jittered_regions, True)
+                .reshape(n_regions, n_samples, haps.genotypes.ploidy)
+                .max((1, 2))
+                .clip(min=0)
+            )
+        lengths = jittered_regions[:, 2] - jittered_regions[:, 1]
+        # for each region:
+        # bytes = (4 bytes / bp) * (bp / sample) * samples
+        n_regions, n_samples = intervals.shape
+        mem_per_region = 4 * lengths * n_samples
+        splits = splits_sum_le_value(mem_per_region, max_mem)
+        memmap_intervals_offset = 0
+        memmap_offsets_offset = 0
+        last_offset = 0
+        with tqdm(total=len(splits) - 1) as pbar:
+            for offset_s, offset_e in zip(splits[:-1], splits[1:]):
+                n_regions = int(offset_e - offset_s)
+                ir_idx = repeat(
+                    np.arange(offset_s, offset_e, dtype=np.intp),
+                    "r -> (r s)",
+                    s=n_samples,
+                )
+                is_idx = repeat(
+                    np.arange(n_samples, dtype=np.intp), "s -> (r s)", r=n_regions
+                )
+                ds_idx = np.ravel_multi_index((ir_idx, is_idx), idxer.full_shape)
+                ds_idx = idxer[ds_idx]
+                r_idx, s_idx = np.unravel_index(ds_idx, idxer.full_shape)
+
+                pbar.set_description("Writing (decompressing)")
+                # (r*s)
+                _regions = jittered_regions[r_idx]
+                # (r*s+1)
+                offsets = _lengths_to_offsets(_regions[:, 2] - _regions[:, 1])
+                # layout is (regions, samples) so all samples are local for statistics
+                tracks = np.empty(offsets[-1], np.float32)
+                intervals_to_tracks(
+                    offset_idxs=ds_idx,
+                    starts=_regions[:, 1],
+                    intervals=intervals.data,
+                    itv_offsets=intervals.offsets,
+                    out=tracks,
+                    out_offsets=offsets,
+                )
+                tracks = Ragged.from_offsets(tracks, (n_regions, n_samples), offsets)
+
+                pbar.set_description("Writing (transforming)")
+                transformed_tracks = transform(ir_idx, is_idx, tracks)
+                np.testing.assert_equal(tracks.shape, transformed_tracks.shape)
+
+                pbar.set_description("Writing (compressing)")
+                itvs, interval_offsets = tracks_to_intervals(
+                    _regions, transformed_tracks.data, transformed_tracks.offsets
+                )
+                np.testing.assert_equal(
+                    len(interval_offsets), n_regions * n_samples + 1
+                )
+
+                out = np.memmap(
+                    out_dir / "intervals.npy",
+                    dtype=itvs.dtype,
+                    mode="w+" if memmap_intervals_offset == 0 else "r+",
+                    shape=itvs.shape,
+                    offset=memmap_intervals_offset,
+                )
+                out[:] = itvs[:]
+                out.flush()
+                memmap_intervals_offset += out.nbytes
+
+                interval_offsets += last_offset
+                last_offset = interval_offsets[-1]
+                out = np.memmap(
+                    out_dir / "offsets.npy",
+                    dtype=interval_offsets.dtype,
+                    mode="w+" if memmap_offsets_offset == 0 else "r+",
+                    shape=len(interval_offsets) - 1,
+                    offset=memmap_offsets_offset,
+                )
+                out[:] = interval_offsets[:-1]
+                out.flush()
+                memmap_offsets_offset += out.nbytes
+                pbar.update()
+
+        out = np.memmap(
+            out_dir / "offsets.npy",
+            dtype=np.int64,
+            mode="r+",
+            shape=1,
+            offset=memmap_offsets_offset,
+        )
+        out[-1] = last_offset
+        out.flush()
+
+        return self.from_path(path, regions, n_samples).with_tracks(self.active_tracks)
+
 
 @define
 class SeqsTracks(Reconstructor[Tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
@@ -649,7 +787,7 @@ class SeqsTracks(Reconstructor[Tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
 
     def __call__(
         self,
-        idx: NDArray[np.intp],
+        idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
@@ -687,20 +825,21 @@ class HapsTracks(Reconstructor[tuple[H, Ragged[np.float32]]]):
     ) -> HapsTracks[RaggedAnnotatedHaps]: ...
 
     def with_annot(self, annotations: bool) -> HapsTracks:
-        haps = evolve(self.haps, _annotate=annotations)
+        haps = self.haps.with_annot(annotations)
         return evolve(self, haps=haps)
 
     def __call__(
         self,
-        idx: NDArray[np.intp],
-        regions: NDArray[np.int32],
+        idx: NDArray[np.integer],  # (b)
+        regions: NDArray[np.int32],  # (b 3)
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
         rng: Optional[np.random.Generator],
     ) -> Tuple[H, Ragged[np.float32]]:
         lengths = regions[:, 2] - regions[:, 1]
 
-        haps, geno_idx, shifts, keep, keep_offsets, hap_lengths = (
+        # ragged (b p l), (b p), (b p), (b*p*v), (b*p+1), (b p)
+        haps, geno_idx, shifts, diffs, hap_lengths, keep, keep_offsets  = (
             self.haps.get_haps_and_shifts(
                 idx=idx,
                 regions=regions,
@@ -710,23 +849,22 @@ class HapsTracks(Reconstructor[tuple[H, Ragged[np.float32]]]):
             )
         )
 
-        # (b p), (b)
-        # need at least length
-        track_lengths = np.maximum(hap_lengths, lengths[:, None])
-
-        if not isinstance(output_length, int):
-            # (b [p])
-            out_lengths = hap_lengths
+        if isinstance(output_length, int):
+            # (b p)
+            out_lengths = np.full_like(hap_lengths, output_length + 2 * jitter)
         else:
-            # (b [p])
-            out_lengths = np.full_like(track_lengths, output_length + 2 * jitter)
+            # (b p)
+            out_lengths = hap_lengths
 
-        # (b [p])
+        # (b) = lengths + max deletion length across ploidy
+        track_lengths = lengths - diffs.clip(max=0).min(1)
+
+        # (b*p+1)
         out_ofsts_per_t = _lengths_to_offsets(out_lengths)
+        # (b+1)
         track_ofsts_per_t = _lengths_to_offsets(track_lengths)
-        # caller accounts for ploidy
         n_per_track = out_ofsts_per_t[-1]
-        # ragged (b t [p] l)
+        # ragged (b t p l)
         out = np.empty(len(self.tracks.active_tracks) * n_per_track, np.float32)
         out_lens = repeat(out_lengths, "b p -> b t p", t=len(self.tracks.active_tracks))
         out_offsets = _lengths_to_offsets(out_lens)
@@ -734,32 +872,32 @@ class HapsTracks(Reconstructor[tuple[H, Ragged[np.float32]]]):
         for track_ofst, name in enumerate(self.tracks.active_tracks):
             intervals = self.tracks.intervals[name]
 
-            # (b p l) ragged
+            # ragged (b l)
             _tracks = np.empty(track_ofsts_per_t[-1], np.float32)
             intervals_to_tracks(
-                starts=regions[:, 1],
-                offset_idxs=idx,
-                intervals=intervals.data,
-                itv_offsets=intervals.offsets,
-                out=_tracks,
-                out_offsets=track_ofsts_per_t,
+                starts=regions[:, 1],  # (b)
+                offset_idxs=idx,  # (b)
+                intervals=intervals.data,  # (r*s*l)
+                itv_offsets=intervals.offsets,  # (r*s+1)
+                out=_tracks,  # (b*l)
+                out_offsets=track_ofsts_per_t,  # (b+1)
             )
 
             _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
             shift_and_realign_tracks_sparse(
-                geno_offset_idxs=geno_idx,
-                geno_v_idxs=self.haps.genotypes.variant_idxs,
-                geno_offsets=self.haps.genotypes.offsets,
-                regions=regions,
-                positions=self.haps.variants.positions,
-                sizes=self.haps.variants.sizes,
-                shifts=shifts,
-                tracks=_tracks,
-                track_offsets=track_ofsts_per_t,
-                out=_out,
-                out_offsets=out_ofsts_per_t,
-                keep=keep,
-                keep_offsets=keep_offsets,
+                out=_out,  # (b*p*l)
+                out_offsets=out_ofsts_per_t,  # (b*p+1)
+                regions=regions,  # (b, 3)
+                shifts=shifts,  # (b p)
+                geno_offset_idxs=geno_idx,  # (b p)
+                geno_v_idxs=self.haps.genotypes.variant_idxs,  # (r*s*p*v)
+                geno_offsets=self.haps.genotypes.offsets,  # (r*s*p+1)
+                positions=self.haps.variants.positions,  # (tot_v)
+                sizes=self.haps.variants.sizes,  # (tot_v)
+                tracks=_tracks,  # ragged (b l)
+                track_offsets=track_ofsts_per_t,  # (b+1)
+                keep=keep,  # (b*p*v)
+                keep_offsets=keep_offsets,  # (b*p+1)
             )
 
         out_shape = (

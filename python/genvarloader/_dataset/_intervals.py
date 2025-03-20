@@ -24,24 +24,24 @@ def intervals_to_tracks(
 
     Parameters
     ----------
-    interval_idxs : NDArray[np.intp]
-        Shape = (n_queries) Indexes into offsets.
-    regions : NDArray[np.int32]
-        Shape = (n_queries, 3) Regions for each query.
+    offset_idxs : NDArray[np.intp]
+        Shape = (batch) Indexes into offsets.
+    starts : NDArray[np.int32]
+        Shape = (batch) Starts for each query.
     out_offsets : NDArray[np.int64]
-        Shape = (n_queries + 1) Offsets into output tracks.
+        Shape = (batch + 1) Offsets into output tracks.
     intervals : NDArray[np.void]
-        Shape = (n_intervals) Sorted intervals, each is (start, end, value).
+        Ragged shape = (regions*samples*intervals) Sorted intervals with struct dtype: (start: i32, end: i32, value: f32).
     itv_offsets : NDArray[np.uint32]
-        Shape = (n_interval_sets + 1) Offsets into intervals and values.
+        Shape = (regions*samples + 1) Offsets into intervals and values.
         For a GVL Dataset, n_interval_sets = n_samples * n_regions with that layout.
 
     Returns
     -------
     data : NDArray[np.float32]
-        Shape = (n_queries) Values for ragged array of tracks.
+        Ragged shape = (batch*length) Values for ragged array of tracks.
     offsets : NDArray[np.int32]
-        Shape = regionsries + 1) Offsets for ragged array of tracks.
+        Shape = (batch + 1) Offsets for ragged array of tracks.
     """
     n_queries = len(starts)
     out[:] = 0.0

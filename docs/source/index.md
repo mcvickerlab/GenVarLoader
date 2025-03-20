@@ -2,6 +2,7 @@
 :hidden: true
 
 dataset
+write
 geuvadis
 faq
 api

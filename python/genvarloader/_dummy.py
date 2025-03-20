@@ -6,24 +6,21 @@ import seqpro as sp
 from einops import repeat
 from natsort import natsorted
 
-from ._dataset import (
-    Dataset,
-    DatasetIndexer,
-    RaggedIntervals,
-    Reference,
-    SparseGenotypes,
-    VLenAlleles,
-    _Variants,
-    tracks_to_intervals,
-)
+from ._dataset._genotypes import SparseGenotypes
+from ._dataset._impl import RaggedDataset
+from ._dataset._indexing import DatasetIndexer
+from ._dataset._intervals import tracks_to_intervals
+from ._dataset._reconstruct import Haps, HapsTracks, Reference, Tracks, _Variants
 from ._dataset._utils import bed_to_regions
+from ._ragged import Ragged, RaggedIntervals
 from ._utils import _lengths_to_offsets
+from ._variants._records import VLenAlleles
 
 
 def get_dummy_dataset():
     """Return a dummy :class:`Dataset <genvarloader.Dataset>`  with 4 regions, 4 samples, max jitter of 2, a reference genome of all :code:`"N"`, genotypes, and
     1 track "read-depth" where each track is :code:`[1, 2, 3, 4, 5, 6]` in the reference coordinate system, where :code:`3` is aligned
-    with each region's start coordinate.
+    with each region's start coordinate. Is initialized to return ragged haplotypes and tracks with no jitter and deterministic reconstruction algorithms.
     """
     max_jitter = 2
 
@@ -48,7 +45,7 @@ def get_dummy_dataset():
     r_idx_map = np.argsort(sorted_bed["index"])
     sorted_bed = sorted_bed.drop("index")
     dummy_idxer = DatasetIndexer.from_region_and_sample_idxs(
-        r_idx_map, np.arange(len(dummy_samples))
+        r_idx_map, np.arange(len(dummy_samples)), dummy_samples
     )
 
     dummy_regions = bed_to_regions(sorted_bed, dummy_contigs)
@@ -89,6 +86,8 @@ def get_dummy_dataset():
         ploidy=1,
     )
 
+    dummy_haps = Haps(dummy_ref, dummy_vars, dummy_genos, False)
+
     # (r s), want tracks of [1, 2, 3, 4, 5] for each region so that pad values of 0 are obvious
     track_regions = dummy_regions.copy()
     track_regions[:, 1] -= max_jitter
@@ -112,29 +111,30 @@ def get_dummy_dataset():
         )
     }
 
-    dummy_dataset = Dataset(
-        path=Path("dummy"),
-        _reference=dummy_ref,
-        _variants=dummy_vars,
-        _genotypes=dummy_genos,
-        _intervals=dummy_itvs,
-        sequence_type="haplotypes",
-        output_length="ragged",
-        jitter=0,
-        deterministic=True,
-        max_jitter=max_jitter,
-        return_annotations=False,
-        _idxer=dummy_idxer,
-        _rng=np.random.default_rng(),
-        _full_samples=dummy_samples,
-        _full_bed=dummy_bed,
-        _full_regions=dummy_regions,
-        _jittered_regions=dummy_regions.copy(),
-        active_tracks=["read-depth"],
-        available_tracks=["read-depth"],
-        phased=True,
-        contigs=dummy_contigs,
-        ploidy=1,
+    dummy_tracks = Tracks(dummy_itvs, ["read-depth"])
+
+    dummy_recon = HapsTracks(dummy_haps, dummy_tracks)
+
+    dummy_dataset: RaggedDataset[Ragged[np.bytes_], Ragged[np.float32], None, None] = (
+        RaggedDataset(
+            path=Path("dummy"),
+            output_length="ragged",
+            max_jitter=max_jitter,
+            return_indices=False,
+            contigs=dummy_contigs,
+            jitter=0,
+            deterministic=True,
+            rc_neg=True,
+            transform=None,
+            _full_bed=dummy_bed,
+            _full_regions=dummy_regions,
+            _jittered_regions=dummy_regions.copy(),
+            _idxer=dummy_idxer,
+            _seqs=dummy_haps,
+            _tracks=dummy_tracks,
+            _recon=dummy_recon,
+            _rng=np.random.default_rng(),
+        )
     )
 
     return dummy_dataset

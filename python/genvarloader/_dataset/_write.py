@@ -506,6 +506,7 @@ def _read_variants_chunk(
 
         logger.debug("get haplotype region ilens")
         # (s p r)
+        # TODO: this is wrong for somatic genotypes since choosing variants is done incorrectly
         haplotype_ilens = get_haplotype_region_ilens(
             genos, rel_s_idxs, offsets, variants.records.v_diffs[contig]
         )

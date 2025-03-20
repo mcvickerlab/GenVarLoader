@@ -40,7 +40,7 @@ class RaggedAnnotatedHaps:
             self.var_idxs.reshape(shape),
             self.ref_coords.reshape(shape),
         )
-    
+
     def squeeze(self, axis: int | tuple[int, ...] | None = None) -> RaggedAnnotatedHaps:
         return RaggedAnnotatedHaps(
             self.haps.squeeze(axis),
@@ -89,13 +89,17 @@ class Ragged(Generic[RDTYPE]):
     maybe_lengths: Optional[NDArray[np.int32]] = None
 
     def __attrs_post_init__(self):
-        if self.shape == ():
-            raise ValueError("Ragged array must have at least one element.")
         if self.maybe_offsets is None and self.maybe_lengths is None:
             raise ValueError("Either offsets or lengths must be provided.")
 
     def __len__(self):
         return self.shape[0]
+
+    def item(self):
+        a = self.squeeze()
+        if a.shape != ():
+            raise ValueError("Array has more than 1 ragged element.")
+        return a.data
 
     @property
     def offsets(self) -> NDArray[np.int64]:
