@@ -3,6 +3,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Optional,
     Protocol,
     Sequence,
     Tuple,
@@ -134,12 +135,22 @@ class DatasetWithSites:
     def shape(self) -> Tuple[int, int]:
         return self.n_rows, self.n_samples
 
-    def __init__(self, sites: SitesOnly, dataset: "Dataset", max_variants_per_region=1):
+    def __len__(self) -> int:
+        return self.n_rows * self.n_samples
+
+    def __init__(
+        self,
+        sites: SitesOnly,
+        dataset: "Dataset",
+        max_variants_per_region: int = 1,
+        output_length: Optional[int] = None,
+    ):
         if max_variants_per_region > 1:
             raise NotImplementedError("max_variants_per_region > 1 not yet supported")
 
         self.sites = sites
         self.dataset = dataset.with_settings(
+            output_length=output_length,
             return_sequences="haplotypes",
             return_annotations=True,
             return_tracks=False,
@@ -148,6 +159,10 @@ class DatasetWithSites:
             deterministic=True,
             jitter=0,
         )
+
+        if not isinstance(self.dataset.output_length, int):
+            raise ValueError("Dataset output_length must be an integer.")
+
         ds_pyr = sp.bed.to_pyranges(dataset.regions.with_row_index("ds_row"))
         sites_pyr = sp.bed.to_pyranges(sites.to_bedlike().with_row_index("site_row"))
         rows = (
@@ -179,7 +194,7 @@ class DatasetWithSites:
 
         ds_rows = self._row_map[rows, 0]
         haps = self.dataset[ds_rows, samples]
-        # (b p l), (b p l), (b p l), could be ragged, variable, or fixed length
+        # (b p l), (b p l), (b p l) must be fixed length
         haps, v_idxs, ref_coords = haps.values()
 
         rows = idx_like_to_array(rows, self.n_rows)
@@ -204,7 +219,8 @@ DELETED = np.uint8(1)
 EXISTED = np.uint8(2)
 
 
-#* fixed length
+# * fixed length
+@nb.njit(parallel=True, nogil=True, cache=True)
 def apply_site_only_variants(
     haps: NDArray[np.uint8],  # (b p l)
     v_idxs: NDArray[np.int32],  # (b p l)
