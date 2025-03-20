@@ -23,8 +23,9 @@ import polars as pl
 from attrs import define, evolve, field
 from loguru import logger
 from numpy.typing import NDArray
-from typing_extensions import NoReturn, assert_never
+from typing_extensions import NoReturn, Self, assert_never
 
+from .._fasta import Fasta
 from .._ragged import (
     Ragged,
     RaggedAnnotatedHaps,
@@ -35,7 +36,7 @@ from .._ragged import (
 )
 from .._torch import TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx
-from .._utils import idx_like_to_array
+from .._utils import _normalize_contig_name, idx_like_to_array
 from ._genotypes import SparseGenotypes
 from ._indexing import DatasetIndexer
 from ._reconstruct import Haps, HapsTracks, Reference, Seqs, SeqsTracks, Tracks
@@ -182,6 +183,20 @@ class Dataset:
 
         has_intervals = (path / "intervals").exists()
 
+        if reference is not None:
+            _fasta = Fasta("ref", reference, "N")
+            if missing := list(
+                c
+                for c, b in zip(
+                    contigs, _normalize_contig_name(contigs, _fasta.contigs)
+                )
+                if b is None
+            ):
+                raise RuntimeError(
+                    f"The dataset has regions on contigs {missing} that do not exist in the"
+                    ' reference (even after removing/adding the "chr" prefix).'
+                )
+
         match reference, has_genotypes, has_intervals:
             case _, False, False:
                 raise RuntimeError(
@@ -276,7 +291,7 @@ class Dataset:
         rng: int | np.random.Generator | None = None,
         deterministic: bool | None = None,
         rc_neg: bool | None = None,
-    ) -> Dataset:
+    ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
         Parameters
@@ -1331,7 +1346,9 @@ class ArrayDataset(Dataset, Generic[SEQ, TRK, IDX, TFM]):
     @overload
     def with_indices(
         self, return_indices: Literal[True]
-    ) -> ArrayDataset[SEQ, TRK, tuple[NDArray[np.integer], NDArray[np.integer]], TFM]: ...
+    ) -> ArrayDataset[
+        SEQ, TRK, tuple[NDArray[np.integer], NDArray[np.integer]], TFM
+    ]: ...
     def with_indices(self, return_indices: bool) -> ArrayDataset:
         return super().with_indices(return_indices)
 
@@ -1499,7 +1516,9 @@ class RaggedDataset(Dataset, Generic[RSEQ, RTRK, IDX, TFM]):
     @overload
     def with_indices(
         self, return_indices: Literal[True]
-    ) -> RaggedDataset[RSEQ, RTRK, tuple[NDArray[np.integer], NDArray[np.integer]], TFM]: ...
+    ) -> RaggedDataset[
+        RSEQ, RTRK, tuple[NDArray[np.integer], NDArray[np.integer]], TFM
+    ]: ...
     def with_indices(self, return_indices: bool) -> RaggedDataset:
         return super().with_indices(return_indices)
 

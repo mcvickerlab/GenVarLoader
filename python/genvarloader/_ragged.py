@@ -31,7 +31,7 @@ class RaggedAnnotatedHaps:
     def to_padded(self) -> AnnotatedHaps:
         haps = self.haps.to_padded(b"N")
         var_idxs = self.var_idxs.to_padded(-1)
-        ref_coords = self.ref_coords.to_padded(-1)
+        ref_coords = self.ref_coords.to_padded(np.iinfo(self.ref_coords.data.dtype).max)
         return AnnotatedHaps(haps, var_idxs, ref_coords)
 
     def reshape(self, shape: tuple[int, ...]) -> RaggedAnnotatedHaps:

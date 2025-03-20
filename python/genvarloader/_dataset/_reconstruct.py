@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING,
     Callable,
     Dict,
     List,
@@ -64,24 +63,22 @@ class Reference:
             logger.info("Memory-mapping FASTA file for faster access.")
             _fasta._write_to_cache()
 
-        contigs = cast(
-            List[str],
-            [_normalize_contig_name(c, _fasta.contigs) for c in contigs],
-        )
-        _fasta.sequences = _fasta._get_sequences(contigs)
-        if TYPE_CHECKING:
-            assert _fasta.sequences is not None
-            assert _fasta.pad is not None
+        contigs = [
+            c
+            for c in _normalize_contig_name(list(_fasta.contigs), contigs)
+            if c is not None
+        ]
+        sequences = _fasta._get_sequences(contigs)
         refs: List[NDArray[np.bytes_]] = []
         next_offset = 0
         _ref_offsets: Dict[str, int] = {}
         for contig in contigs:
-            arr = _fasta.sequences[contig]
+            arr = sequences[contig]
             refs.append(arr)
             _ref_offsets[contig] = next_offset
             next_offset += len(arr)
         reference = np.concatenate(refs).view(np.uint8)
-        pad_char = ord(_fasta.pad)
+        pad_char = ord("N")
         if any(c is None for c in contigs):
             raise ValueError("Contig names in metadata do not match reference.")
         ref_offsets = np.empty(len(contigs) + 1, np.uint64)

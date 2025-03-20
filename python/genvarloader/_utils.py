@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     Union,
     cast,
+    overload,
 )
 
 import numpy as np
@@ -139,7 +140,7 @@ class _BEDSchema(pa.DataFrameModel):
     blockSizes: Optional[pat.Series[str]] = pa.Field(nullable=True)
     blockStarts: Optional[pat.Series[str]] = pa.Field(nullable=True)
 
-    class Config:
+    class Config:  # type: ignore | pandera jankyness
         coerce = True
 
 
@@ -210,7 +211,7 @@ class _NarrowPeakSchema(pa.DataFrameModel):
     qValue: pat.Series[float] = pa.Field(nullable=True)
     peak: pat.Series[int] = pa.Field(nullable=True)
 
-    class Config:
+    class Config:  # type: ignore | pandera jankyness
         coerce = True
 
 
@@ -254,7 +255,7 @@ class _BroadPeakSchema(pa.DataFrameModel):
     pValue: pat.Series[float] = pa.Field(nullable=True)
     qValue: pat.Series[float] = pa.Field(nullable=True)
 
-    class Config:
+    class Config:  # type: ignore | pandera jankyness
         coerce = True
 
 
@@ -316,9 +317,16 @@ def _get_rel_starts(
 DTYPE = TypeVar("DTYPE", bound=np.generic)
 
 
-def _normalize_contig_name(contig: str, contigs: Iterable[str]) -> Optional[str]:
-    """Normalize the contig name to adhere to the convention of the underlying file.
-    i.e. remove or add "chr" to the contig name.
+@overload
+def _normalize_contig_name(contig: str, contigs: Iterable[str]) -> str | None: ...
+@overload
+def _normalize_contig_name(
+    contig: list[str], contigs: Iterable[str]
+) -> list[str | None]: ...
+def _normalize_contig_name(
+    contig: str | list[str], contigs: Iterable[str]
+) -> str | None | list[str | None]:
+    """Normalize the contig name to strip "chr" prefix and return the canonical contig name.
 
     Parameters
     ----------
@@ -329,11 +337,15 @@ def _normalize_contig_name(contig: str, contigs: Iterable[str]) -> Optional[str]
     str
         Normalized contig name.
     """
-    for c in contigs:
-        # exact match, remove chr, add chr
-        if contig == c or contig[3:] == c or f"chr{contig}" == c:
-            return c
-    return None
+    _contigs = (
+        {f"{c[3:]}" for c in contigs if c.startswith("chr")}
+        | {f"chr{c}" for c in contigs if not c.startswith("chr")}
+        | set(contigs)
+    )
+    if isinstance(contig, str):
+        return contig if contig in _contigs else None
+    else:
+        return [c if c in _contigs else None for c in contig]
 
 
 ITYPE = TypeVar("ITYPE", bound=np.integer)

@@ -1,13 +1,10 @@
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING,
-    Any,
     Callable,
-    Optional,
-    Protocol,
     Sequence,
     Tuple,
     Union,
+    cast,
 )
 
 import cyvcf2
@@ -16,109 +13,94 @@ import numpy as np
 import pandera.polars as pa
 import polars as pl
 import seqpro as sp
-from attrs import define, field
 from loguru import logger
 from numpy.typing import NDArray
 
-from python.genvarloader._types import Idx
-
+from .._dataset._impl import ArrayDataset
+from .._types import AnnotatedHaps, Idx
 from .._utils import idx_like_to_array
 from ._records import VLenAlleles
 
-if TYPE_CHECKING:
-    from .._dataset import Dataset
 
-
-FilterFn = Callable[[cyvcf2.Variant], bool]
-
-
-class SitesOnly(Protocol):
-    def to_bedlike(self) -> pl.DataFrame: ...
-
-
-@define
-class SitesOnlyVCF(SitesOnly):
-    path: Union[str, Path]
-    filter: Callable[[cyvcf2.Variant], bool] = field(default=lambda _: True)
-    attributes: Sequence[str] = field(factory=list)
-    info_fields: Sequence[str] = field(factory=list)
-
-    def to_bedlike(self) -> pl.DataFrame:
-        vcf = cyvcf2.VCF(str(self.path))
-
-        cols = ["keep", "chrom", "chromStart", "chromEnd", "REF", "ALT", "n_alt"]
-        if self.attributes:
-            cols.extend(self.attributes)
-        if self.info_fields:
-            cols.extend(self.info_fields)
-
-        df = pl.DataFrame(
-            dict(
-                zip(
-                    cols,
-                    # rearrange from tuples of variants to tuples of attributes
-                    zip(
-                        *(
-                            (
-                                v.is_snp & self.filter(v),
-                                v.CHROM,
-                                v.start,
-                                v.end,
-                                v.REF,
-                                v.ALT[0],
-                                len(v.ALT),
-                            )
-                            + tuple(getattr(v, attr) for attr in self.attributes)
-                            + tuple(v.INFO[f] for f in self.info_fields)
-                            for v in vcf
-                        )
-                    ),
-                )
-            )
-        )
-
-        if (df["n_alt"] > 1).any():
-            logger.warning(
-                "Some sites are multi-allelic; only the first will be used. To avoid this,"
-                " preprocess the VCF with `bcftools norm -a -m -` to atomize and split them."
-            )
-
-        logger.info(f"Filter removed {(~df['keep']).sum()} of {len(df)} sites.")
-
-        df = df.filter("keep").drop("keep")
-
-        vcf.close()
-
-        return df
-
-
-class SitesOnlySchema(pa.DataFrameModel):
+class SitesSchema(pa.DataFrameModel):
     CHROM: str = pa.Field(alias="#CHROM")
     POS: int
-    REF: str
     ALT: str
 
 
-class SitesOnlyTable(SitesOnly):
-    table: pl.LazyFrame
+def return_true(variant: cyvcf2.Variant) -> bool:
+    return True
 
-    def __init__(self, table: pl.LazyFrame):
-        self.table = table.pipe(SitesOnlySchema.validate)
 
-    def to_bedlike(self) -> pl.DataFrame:
-        df = (
-            self.table.with_columns(
-                chromEnd=pl.col("POS") + pl.col("ALT").str.len_bytes()
+def sites_vcf_to_table(
+    vcf: str | Path | cyvcf2.VCF,
+    filter: Callable[[cyvcf2.Variant], bool] = return_true,
+    attributes: Sequence[str] | None = None,
+    info_fields: Sequence[str] | None = None,
+) -> pl.DataFrame:
+    if isinstance(vcf, (str, Path)):
+        _vcf = cast(cyvcf2.VCF, cyvcf2.VCF(str(vcf)))
+    else:
+        _vcf = vcf
+
+    if attributes is None:
+        attributes = []
+    if info_fields is None:
+        info_fields = []
+
+    cols = ["keep", "chrom", "chromStart", "chromEnd", "REF", "ALT"]
+    if attributes:
+        cols.extend(attributes)
+    if info_fields:
+        cols.extend(info_fields)
+
+    df = pl.DataFrame(
+        dict(
+            zip(
+                cols,
+                # rearrange from tuples of variants to tuples of attributes
+                zip(
+                    *(
+                        (
+                            v.is_snp & filter(v),
+                            v.CHROM,
+                            v.start,
+                            v.end,
+                            v.REF,
+                            v.ALT,
+                        )
+                        + tuple(getattr(v, attr) for attr in attributes)
+                        + tuple(v.INFO[f] for f in info_fields)
+                        for v in _vcf
+                    )
+                ),
             )
-            .rename({"#CHROM": "chrom", "POS": "chromStart"})
-            .collect()
         )
-        return df
+    )
+
+    if (df["ALT"].list.len() > 1).any():
+        logger.warning(
+            "Some sites are multi-allelic; only the first will be used. To avoid this,"
+            " preprocess the VCF with `bcftools norm -a -m -` to atomize and split them."
+        )
+
+    logger.info(f"Filter removed {(~df['keep']).sum()} of {len(df)} sites.")
+
+    df = df.filter("keep").with_columns(pl.col("ALT").list.get(0)).drop("keep")
+
+    return df
+
+
+def _sites_table_to_bedlike(sites: pl.DataFrame) -> pl.DataFrame:
+    sites = sites.pipe(SitesSchema.validate)
+    return sites.with_columns(
+        chromEnd=pl.col("POS") + pl.col("ALT").str.len_bytes()
+    ).rename({"#CHROM": "chrom", "POS": "chromStart"})
 
 
 class DatasetWithSites:
-    sites: SitesOnly
-    dataset: "Dataset"
+    sites: pl.DataFrame
+    dataset: "ArrayDataset[AnnotatedHaps, None, None, None]"
     rows: pl.DataFrame
     _row_map: NDArray[np.uint32]
     """Map from row index to dataset row index and site row index."""
@@ -140,34 +122,33 @@ class DatasetWithSites:
 
     def __init__(
         self,
-        sites: SitesOnly,
-        dataset: "Dataset",
+        dataset: "ArrayDataset",
+        sites: pl.DataFrame,
         max_variants_per_region: int = 1,
-        output_length: Optional[int] = None,
     ):
         if max_variants_per_region > 1:
             raise NotImplementedError("max_variants_per_region > 1 not yet supported")
 
-        self.sites = sites
-        self.dataset = dataset.with_settings(
-            output_length=output_length,
-            return_sequences="haplotypes",
-            return_annotations=True,
-            return_tracks=False,
-            return_indices=False,
-            transform=False,
-            deterministic=True,
-            jitter=0,
+        self.sites = _sites_table_to_bedlike(sites)
+
+        if not isinstance(dataset.output_length, int):
+            raise ValueError("Dataset output_length must be fixed length (an integer).")
+
+        self.dataset = (
+            dataset.with_seqs("annotated")
+            .with_tracks(None)
+            .with_indices(False)
+            .with_transform(None)
+            .with_settings(deterministic=True, jitter=0)
         )
 
-        if not isinstance(self.dataset.output_length, int):
-            raise ValueError("Dataset output_length must be an integer.")
-
-        ds_pyr = sp.bed.to_pyranges(dataset.regions.with_row_index("ds_row"))
-        sites_pyr = sp.bed.to_pyranges(sites.to_bedlike().with_row_index("site_row"))
+        ds_pyr = sp.bed.to_pyranges(self.dataset.regions.with_row_index("ds_row"))
+        sites_pyr = sp.bed.to_pyranges(self.sites.with_row_index("site_row"))
+        rows = pl.from_pandas(ds_pyr.join(sites_pyr, suffix="_site").df)
+        if rows.height == 0:
+            raise RuntimeError("No overlap between dataset regions and sites.")
         rows = (
-            pl.from_pandas(ds_pyr.join(sites_pyr, suffix="_site").df)
-            .rename(
+            rows.rename(
                 {
                     "Chromosome": "chrom",
                     "Start": "chromStart",
@@ -178,11 +159,16 @@ class DatasetWithSites:
                 strict=False,
             )
             .drop("End_site")
+            .sort("site_row")
         )
         self.rows = rows.drop("ds_row", "site_row")
         self._row_map = rows.select("ds_row", "site_row").to_numpy()
 
-    def __getitem__(self, idx: Union[Idx, Tuple[Idx, Idx]]) -> Any:
+    def __getitem__(
+        self, idx: Union["Idx", Tuple["Idx", "Idx"]]
+    ) -> tuple["AnnotatedHaps", NDArray[np.uint8]]:
+        # TODO: handle reshaping and squeezing, allow indexing samples by str/Sequence[str]
+
         if not isinstance(idx, tuple):
             rows = idx
             samples = slice(None)
@@ -194,8 +180,6 @@ class DatasetWithSites:
 
         ds_rows = self._row_map[rows, 0]
         haps = self.dataset[ds_rows, samples]
-        # (b p l), (b p l), (b p l) must be fixed length
-        haps, v_idxs, ref_coords = haps.values()
 
         rows = idx_like_to_array(rows, self.n_rows)
         sites = self.rows[rows]
@@ -203,15 +187,21 @@ class DatasetWithSites:
         alts = VLenAlleles.from_polars(sites["ALT"])
 
         haps, v_idxs, ref_coords, flags = apply_site_only_variants(
-            haps=haps,
-            v_idxs=v_idxs,
-            ref_coords=ref_coords,
+            haps=haps.haps.view(np.uint8),  # (b p l)
+            v_idxs=haps.var_idxs,  # (b p l)
+            ref_coords=haps.ref_coords,  # (b p l)
             site_starts=starts,
             alt_alleles=alts.alleles.view(np.uint8),
             alt_offsets=alts.offsets,
         )
 
-        return haps, v_idxs, ref_coords
+        haps = AnnotatedHaps(
+            haps=haps.view("S1"),
+            var_idxs=v_idxs,
+            ref_coords=ref_coords,
+        )
+
+        return haps, flags
 
 
 APPLIED = np.uint8(0)
@@ -229,7 +219,7 @@ def apply_site_only_variants(
     alt_alleles: NDArray[np.uint8],  # ragged (b)
     alt_offsets: NDArray[np.int64],  # (b+1)
 ) -> Tuple[NDArray[np.uint8], NDArray[np.int32], NDArray[np.int32], NDArray[np.uint8]]:
-    batch_size, ploidy, length = haps.shape
+    batch_size, ploidy, _ = haps.shape
     flags = np.empty((batch_size, ploidy), dtype=np.uint8)
 
     for b in nb.prange(batch_size):
