@@ -21,12 +21,6 @@ from .._types import AnnotatedHaps, Idx
 from ._records import VLenAlleles
 
 
-class SitesSchema(pa.DataFrameModel):
-    CHROM: str = pa.Field(alias="#CHROM")
-    POS: int
-    ALT: str
-
-
 def return_true(variant: cyvcf2.Variant) -> bool:
     return True
 
@@ -88,6 +82,12 @@ def sites_vcf_to_table(
     df = df.filter("keep").with_columns(pl.col("ALT").list.get(0)).drop("keep")
 
     return df
+
+
+class SitesSchema(pa.DataFrameModel):
+    CHROM: str = pa.Field(alias="#CHROM")
+    POS: int
+    ALT: str
 
 
 def _sites_table_to_bedlike(sites: pl.DataFrame) -> pl.DataFrame:
@@ -217,7 +217,7 @@ DELETED = np.uint8(1)
 EXISTED = np.uint8(2)
 
 
-# * fixed length
+# * fixed length, SNPs only
 @nb.njit(parallel=True, nogil=True, cache=True)
 def apply_site_only_variants(
     haps: NDArray[np.uint8],  # (b p l)

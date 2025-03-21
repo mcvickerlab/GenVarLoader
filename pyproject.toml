@@ -30,7 +30,6 @@ dependencies = [
     "pooch",
     "seqpro>=0.2.0",
     "awkward",
-    "pyranges",
 ]
 
 [project.urls]
