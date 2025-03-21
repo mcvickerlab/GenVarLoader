@@ -3684,7 +3684,7 @@ packages:
 - pypi: .
   name: genvarloader
   version: 0.9.0
-  sha256: 8772b071dacd188e13b368e533e87abe59495233353e5ffdf689927efde4b5e7
+  sha256: 2900efeac4d41cab22462e5fd034cc478c5121f979f7a0d9589d3cd708a072f9
   requires_dist:
   - numba>=0.58.1
   - loguru
@@ -3707,7 +3707,6 @@ packages:
   - seqpro>=0.2.0
   - awkward
   - pyranges
-  - returns
   requires_python: '>=3.10'
   editable: true
 - conda: https://conda.anaconda.org/conda-forge/linux-64/gflags-2.2.2-h5888daf_1005.conda

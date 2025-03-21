@@ -1,4 +1,4 @@
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Sequence, cast
 
 import numpy as np
 from attrs import define, evolve
@@ -140,3 +140,56 @@ class DatasetIndexer:
             region_subset_idxs=None,
             sample_subset_idxs=None,
         )
+
+    def parse_idx(
+        self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
+    ) -> tuple[NDArray[np.integer], bool, tuple[int, ...] | None]:
+        if not isinstance(idx, tuple):
+            regions = idx
+            samples = slice(None)
+        elif len(idx) == 1:
+            regions = idx[0]
+            samples = slice(None)
+        else:
+            regions, samples = idx
+
+        if isinstance(samples, (int, np.integer, str)):
+            single_sample = True
+        else:
+            single_sample = False
+
+        if isinstance(samples, str):
+            samples = [samples]
+
+        if not isinstance(samples, (int, np.integer, slice)) and isinstance(
+            samples[0], str
+        ):
+            _samples = set(samples)
+            if missing := _samples.difference(self.full_samples):
+                raise ValueError(f"Samples {missing} not found in the dataset")
+            samples = np.array(
+                [i for i, s in enumerate(self.full_samples) if s in _samples],
+                np.intp,
+            )
+        samples = cast(Idx, samples)  # above clause does this, but can't narrow type
+
+        if isinstance(regions, (int, np.integer)) and single_sample:
+            squeeze = True
+        else:
+            squeeze = False
+
+        r_idx = idx_like_to_array(regions, self.n_regions)
+        s_idx = idx_like_to_array(samples, self.n_samples)
+        if r_idx.ndim > 1 or s_idx.ndim > 1:
+            r_idx, s_idx = np.broadcast_arrays(r_idx, s_idx)
+        elif len(r_idx) != len(s_idx):
+            r_idx, s_idx = np.meshgrid(r_idx, s_idx, indexing="ij")
+        idx = np.ravel_multi_index((r_idx, s_idx), self.shape)
+
+        if idx.ndim > 1:
+            out_reshape = idx.shape
+            idx = idx.ravel()
+        else:
+            out_reshape = None
+
+        return idx, squeeze, out_reshape

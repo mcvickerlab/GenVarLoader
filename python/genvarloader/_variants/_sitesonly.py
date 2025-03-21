@@ -3,7 +3,6 @@ from typing import (
     Callable,
     Sequence,
     Tuple,
-    Union,
     cast,
 )
 
@@ -17,8 +16,8 @@ from loguru import logger
 from numpy.typing import NDArray
 
 from .._dataset._impl import ArrayDataset
+from .._dataset._indexing import DatasetIndexer
 from .._types import AnnotatedHaps, Idx
-from .._utils import idx_like_to_array
 from ._records import VLenAlleles
 
 
@@ -104,18 +103,19 @@ class DatasetWithSites:
     rows: pl.DataFrame
     _row_map: NDArray[np.uint32]
     """Map from row index to dataset row index and site row index."""
+    _idxer: DatasetIndexer
 
     @property
     def n_rows(self) -> int:
-        return self.rows.height
+        return self._idxer.n_regions
 
     @property
     def n_samples(self) -> int:
-        return self.dataset.n_samples
+        return self._idxer.n_samples
 
     @property
     def shape(self) -> Tuple[int, int]:
-        return self.n_rows, self.n_samples
+        return self._idxer.shape
 
     def __len__(self) -> int:
         return self.n_rows * self.n_samples
@@ -129,12 +129,14 @@ class DatasetWithSites:
         if max_variants_per_region > 1:
             raise NotImplementedError("max_variants_per_region > 1 not yet supported")
 
-        self.sites = _sites_table_to_bedlike(sites)
+        if not isinstance(dataset, ArrayDataset):
+            raise ValueError(
+                'Dataset output_length must either be "variable" or a fixed length integer.'
+            )
 
-        if not isinstance(dataset.output_length, int):
-            raise ValueError("Dataset output_length must be fixed length (an integer).")
+        sites = _sites_table_to_bedlike(sites)
 
-        self.dataset = (
+        dataset = (
             dataset.with_seqs("annotated")
             .with_tracks(None)
             .with_indices(False)
@@ -142,11 +144,12 @@ class DatasetWithSites:
             .with_settings(deterministic=True, jitter=0)
         )
 
-        ds_pyr = sp.bed.to_pyranges(self.dataset.regions.with_row_index("ds_row"))
-        sites_pyr = sp.bed.to_pyranges(self.sites.with_row_index("site_row"))
+        ds_pyr = sp.bed.to_pyranges(dataset.regions.with_row_index("ds_row"))
+        sites_pyr = sp.bed.to_pyranges(sites.with_row_index("site_row"))
         rows = pl.from_pandas(ds_pyr.join(sites_pyr, suffix="_site").df)
         if rows.height == 0:
             raise RuntimeError("No overlap between dataset regions and sites.")
+
         rows = (
             rows.rename(
                 {
@@ -161,28 +164,25 @@ class DatasetWithSites:
             .drop("End_site")
             .sort("site_row")
         )
+        self.sites = sites
+        self.dataset = dataset
         self.rows = rows.drop("ds_row", "site_row")
         self._row_map = rows.select("ds_row", "site_row").to_numpy()
+        self._idxer = DatasetIndexer.from_region_and_sample_idxs(
+            np.arange(self.rows.height), np.arange(dataset.n_samples), dataset.samples
+        )
 
     def __getitem__(
-        self, idx: Union["Idx", Tuple["Idx", "Idx"]]
+        self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
     ) -> tuple["AnnotatedHaps", NDArray[np.uint8]]:
-        # TODO: handle reshaping and squeezing, allow indexing samples by str/Sequence[str]
+        idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
 
-        if not isinstance(idx, tuple):
-            rows = idx
-            samples = slice(None)
-        elif len(idx) == 1:
-            rows = idx[0]
-            samples = slice(None)
-        else:
-            rows, samples = idx
+        r_idx, s_idx = np.unravel_index(idx, self.shape)
 
-        ds_rows = self._row_map[rows, 0]
-        haps = self.dataset[ds_rows, samples]
+        ds_rows = self._row_map[r_idx, 0]
+        haps = self.dataset[ds_rows, s_idx]
 
-        rows = idx_like_to_array(rows, self.n_rows)
-        sites = self.rows[rows]
+        sites = self.rows[r_idx]
         starts = sites["POS"].to_numpy()  # 0-based
         alts = VLenAlleles.from_polars(sites["ALT"])
 
@@ -200,6 +200,14 @@ class DatasetWithSites:
             var_idxs=v_idxs,
             ref_coords=ref_coords,
         )
+
+        if squeeze:
+            haps = haps.squeeze(0)
+            flags = flags.squeeze(0)
+
+        if out_reshape is not None:
+            haps = haps.reshape(*out_reshape, 2, -1)
+            flags = flags.reshape(*out_reshape, 2)
 
         return haps, flags
 
