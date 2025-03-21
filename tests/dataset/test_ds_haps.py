@@ -16,7 +16,7 @@ ref = "/cellar/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.G
 def dataset():
     ds = (
         gvl.Dataset.open(ds_path, ref, deterministic=True)
-        .with_output_length("ragged")
+        .with_len("ragged")
         .with_seqs("haplotypes")
     )
     return ds

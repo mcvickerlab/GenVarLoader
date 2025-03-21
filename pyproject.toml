@@ -28,7 +28,7 @@ dependencies = [
     "tbb",
     "joblib",
     "pooch",
-    "seqpro",
+    "seqpro>=0.2.0",
     "awkward",
 ]
 
@@ -94,6 +94,7 @@ tbb = "*"
 joblib = "*"
 pooch = "*"
 awkward = "*"
+pyranges = ">=0.1.3"
 pip = "*"
 
 [tool.pixi.pypi-dependencies]

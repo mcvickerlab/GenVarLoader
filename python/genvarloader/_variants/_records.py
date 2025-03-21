@@ -2,8 +2,19 @@ import re
 import subprocess
 from pathlib import Path
 from textwrap import dedent
-from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union, cast, overload
+from typing import (
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+    overload,
+)
 
+import cyvcf2
 import numba as nb
 import numpy as np
 import polars as pl
@@ -12,16 +23,9 @@ from attrs import define
 from loguru import logger
 from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
-from typing_extensions import Self, assert_never
+from typing_extensions import assert_never
 
 from .._utils import _lengths_to_offsets, _normalize_contig_name, _offsets_to_lengths
-
-try:
-    import cyvcf2
-
-    CYVCF2_INSTALLED = True
-except ImportError:
-    CYVCF2_INSTALLED = False
 
 __all__ = []
 
@@ -263,7 +267,7 @@ class Records:
         return sum(len(v) for v in self.v_starts.values())
 
     @classmethod
-    def from_vcf(cls, vcf: Union[str, Path, Dict[str, Path]]) -> Self:
+    def from_vcf(cls, vcf: Union[str, Path, Dict[str, Path]]) -> "Records":
         if isinstance(vcf, (str, Path)):
             vcf = {"_all": Path(vcf)}
 
@@ -316,12 +320,7 @@ class Records:
         return cls.from_var_df(start_dfs, end_dfs)
 
     @staticmethod
-    def read_vcf(vcf_path: Path):
-        if not CYVCF2_INSTALLED:
-            raise ImportError(
-                "cyvcf2 is not installed. Please install it with `pip install cyvcf2`"
-            )
-
+    def read_vcf(vcf_path: Path) -> pl.DataFrame:
         vcf = cyvcf2.VCF(str(vcf_path))  # pyright: ignore
         try:
             n_variants = cast(int, vcf.num_records)
@@ -380,7 +379,7 @@ class Records:
         )
 
     @classmethod
-    def from_pvar(cls, pvar: Union[str, Path, Dict[str, Path]]) -> Self:
+    def from_pvar(cls, pvar: Union[str, Path, Dict[str, Path]]) -> "Records":
         if isinstance(pvar, (str, Path)):
             pvar = {"_all": Path(pvar)}
 
@@ -471,7 +470,7 @@ class Records:
         return True
 
     @classmethod
-    def from_gvl_arrow(cls, arrow: Union[str, Path, Dict[str, Path]]) -> Self:
+    def from_gvl_arrow(cls, arrow: Union[str, Path, Dict[str, Path]]) -> "Records":
         if isinstance(arrow, (str, Path)):
             arrow = {"_all": Path(arrow)}
 
@@ -557,7 +556,7 @@ class Records:
                     pl.int_range(0, pl.len(), dtype=pl.Int32)
                     .sort_by("END")
                     .reverse()
-                    .rolling_min(df.height, min_periods=1)
+                    .rolling_min(df.height, min_samples=1)
                     .reverse()
                     .alias("E2S_IDX"),
                 )
@@ -584,7 +583,7 @@ class Records:
     @classmethod
     def from_var_df(
         cls, start_dfs: Dict[str, pl.DataFrame], end_dfs: Dict[str, pl.DataFrame]
-    ) -> Self:
+    ) -> "Records":
         ## sorted by starts ##
         v_starts: Dict[str, NDArray[np.int32]] = {}
         # difference in length between ref and alt, sorted by start
@@ -700,9 +699,9 @@ class Records:
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-    ) -> Tuple[Optional[RecordInfo], NDArray[np.int32]]:
+    ) -> Tuple[Optional[RecordInfo], NDArray[np.int64]]:
         starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
-        ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
+        ends = np.atleast_1d(np.asarray(ends, dtype=np.int64))
         n_queries = len(starts)
 
         _contig = _normalize_contig_name(contig, self.contigs)
@@ -799,14 +798,14 @@ def get_max_ends_and_idxs(
     nearest_nonoverlapping: NDArray[np.intp],
     start_idxs: NDArray[np.intp],
     query_ends: NDArray[np.int64],
-) -> Tuple[NDArray[np.int32], NDArray[np.intp]]:
+) -> Tuple[NDArray[np.int64], NDArray[np.intp]]:
     """Time: O(q * v) where q is number of query regions and v is the number of variants
     (mostly limited to those in the query regions thanks to early exit criteria).
     Importantly, this algorithm does not scale (directly) with the number of samples. However, more samples
     from sequencing experiemnts will increase the number of unique variants sub-linearly.
     """
-    max_ends: NDArray[np.int32] = np.empty(len(start_idxs), dtype=np.int32)
-    end_idxs: NDArray[np.intp] = np.empty(len(start_idxs), dtype=np.intp)
+    max_ends = np.empty(len(start_idxs), dtype=np.int64)
+    end_idxs = np.empty(len(start_idxs), dtype=np.intp)
     for r in nb.prange(len(start_idxs)):
         s = start_idxs[r]
         if s == len(v_ends):  # no variants in this region
