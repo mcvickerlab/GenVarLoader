@@ -1,3 +1,20 @@
+## v0.10.1 (2025-03-25)
+
+### Fix
+
+- bump polars version, breaking changes upstream.
+
+## v0.10.0 (2025-03-21)
+
+### Feat
+
+- type-safe Dataset, passes all tests.
+- refactor Dataset implementation to be (almost) fully type-safe.
+
+### Fix
+
+- Dataset.open returns highest complexity ds by default (haps + all tracks, sorted).
+
 ## v0.9.0 (2025-03-06)
 
 ### Feat

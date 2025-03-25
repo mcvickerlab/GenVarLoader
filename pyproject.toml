@@ -1,6 +1,6 @@
 [project]
 name = "genvarloader"
-version = "0.9.0"
+version = "0.10.1"
 description = "Pipeline for efficient genomic data processing."
 authors = [
     { name = "David Laub", email = "dlaub@ucsd.edu" },
@@ -79,7 +79,7 @@ numba = ">=0.58.1"
 loguru = "*"
 attrs = "*"
 natsort = "*"
-polars = ">=1"
+polars = ">=1.22"
 pandera = "*"
 pgenlib = "*"
 pysam = "*"
