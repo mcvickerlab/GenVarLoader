@@ -1,3 +1,9 @@
+## v0.10.1 (2025-03-25)
+
+### Fix
+
+- bump polars version, breaking changes upstream.
+
 ## v0.10.0 (2025-03-21)
 
 ### Feat
