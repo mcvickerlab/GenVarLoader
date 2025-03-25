@@ -338,14 +338,14 @@ def _normalize_contig_name(
         Normalized contig name.
     """
     _contigs = (
-        {f"{c[3:]}" for c in contigs if c.startswith("chr")}
-        | {f"chr{c}" for c in contigs if not c.startswith("chr")}
-        | set(contigs)
+        {f"{c[3:]}": c for c in contigs if c.startswith("chr")}
+        | {f"chr{c}": c for c in contigs if not c.startswith("chr")}
+        | {c: c for c in contigs}
     )
     if isinstance(contig, str):
-        return contig if contig in _contigs else None
+        return _contigs.get(contig, None)
     else:
-        return [c if c in _contigs else None for c in contig]
+        return [_contigs.get(c, None) for c in contig]
 
 
 ITYPE = TypeVar("ITYPE", bound=np.integer)
