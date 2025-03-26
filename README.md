@@ -1,4 +1,4 @@
-<img src=docs/source/_static/gvl_logo.png width="200">
+<img src=docs/source/_static/gvl_logo.svg width="200">
 
 [![PyPI version](https://badge.fury.io/py/genvarloader.svg)](https://pypi.org/project/genvarloader/)
 [![Documentation Status](https://readthedocs.org/projects/genvarloader/badge/?version=latest)](https://genvarloader.readthedocs.io)

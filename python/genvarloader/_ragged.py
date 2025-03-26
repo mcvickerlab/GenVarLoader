@@ -10,10 +10,10 @@ from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
 from awkward.index import Index64
 from numpy.typing import NDArray
 
-from ._types import DTYPE, AnnotatedHaps, Idx
+from ._types import DTYPE, INTERVAL_DTYPE, AnnotatedHaps, Idx
 from ._utils import _lengths_to_offsets, idx_like_to_array
 
-__all__ = ["Ragged", "RaggedIntervals", "INTERVAL_DTYPE", "pad_ragged"]
+__all__ = ["Ragged", "RaggedIntervals", "pad_ragged"]
 
 RDTYPE = TypeVar("RDTYPE", bound=np.generic)
 
@@ -31,7 +31,7 @@ class RaggedAnnotatedHaps:
     def to_padded(self) -> AnnotatedHaps:
         haps = self.haps.to_padded(b"N")
         var_idxs = self.var_idxs.to_padded(-1)
-        ref_coords = self.ref_coords.to_padded(-1)
+        ref_coords = self.ref_coords.to_padded(np.iinfo(self.ref_coords.data.dtype).max)
         return AnnotatedHaps(haps, var_idxs, ref_coords)
 
     def reshape(self, shape: tuple[int, ...]) -> RaggedAnnotatedHaps:
@@ -291,12 +291,6 @@ class Ragged(Generic[RDTYPE]):
         return cls.from_offsets(data, shape, offsets)
 
 
-INTERVAL_DTYPE = np.dtype(
-    [("start", np.int32), ("end", np.int32), ("value", np.float32)], align=True
-)
-RaggedIntervals = Ragged[np.void]
-
-
 @nb.njit(parallel=True, nogil=True, cache=True)
 def pad_ragged(
     data: NDArray[DTYPE],
@@ -395,6 +389,9 @@ def _jitter(
     )
 
     return out
+
+
+RaggedIntervals = Ragged[INTERVAL_DTYPE.type]
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)

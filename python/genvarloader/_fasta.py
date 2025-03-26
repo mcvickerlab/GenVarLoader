@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from functools import partial
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Union, cast
 
@@ -37,7 +36,7 @@ class Fasta(Reader):
         name: str,
         path: Union[str, Path],
         pad: Optional[str] = None,
-        alphabet: Optional[Union[str, sp.NucleotideAlphabet, sp.AminoAlphabet]] = None,
+        alphabet: Optional[Union[str, sp.NucleotideAlphabet]] = None,
         in_memory: bool = False,
         cache: bool = False,
     ) -> None:
@@ -80,15 +79,12 @@ class Fasta(Reader):
             self.contigs = {c: f.get_reference_length(c) for c in f.references}
 
         if alphabet is None:
-            self.alphabet: Union[sp.NucleotideAlphabet, sp.AminoAlphabet] = (
-                sp.alphabets.DNA
-            )
+            self.alphabet: sp.NucleotideAlphabet = sp.alphabets.DNA
         elif isinstance(alphabet, str):
             alphabet = alphabet.upper()
             try:
                 self.alphabet = cast(
-                    Union[sp.NucleotideAlphabet, sp.AminoAlphabet],
-                    getattr(sp.alphabets, alphabet),
+                    sp.NucleotideAlphabet, getattr(sp.alphabets, alphabet)
                 )
             except AttributeError:
                 raise ValueError(f"Alphabet {alphabet} not found.")
@@ -96,18 +92,19 @@ class Fasta(Reader):
             self.alphabet = alphabet
 
         if isinstance(self.alphabet, sp.NucleotideAlphabet):
-            self.rev_strand_fn = partial(
-                self.alphabet.reverse_complement, length_axis=-1
-            )
+
+            def rev_strand_fn(data: NDArray[np.bytes_]) -> NDArray[np.bytes_]:
+                return self.alphabet.reverse_complement(data, length_axis=-1)
+
         elif isinstance(self.alphabet, sp.AminoAlphabet):
 
-            def rev_strand_fn(a: NDArray[np.bytes_]):
-                return a[::-1]
+            def rev_strand_fn(data: NDArray[np.bytes_]):
+                return data[::-1]
 
-            self.rev_strand_fn = rev_strand_fn  # type: ignore[assignment]
         else:
             assert_never(self.alphabet)
 
+        self.rev_strand_fn = rev_strand_fn
         self.contigs = self._get_contig_lengths()
 
         self.handle: Optional[pysam.FastaFile] = None
