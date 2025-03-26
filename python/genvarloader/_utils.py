@@ -326,16 +326,14 @@ def _normalize_contig_name(
 def _normalize_contig_name(
     contig: str | list[str], contigs: Iterable[str]
 ) -> str | None | list[str | None]:
-    """Normalize the contig name to strip "chr" prefix and return the canonical contig name.
+    """Normalize the contig name to match the naming scheme of `contigs`.
 
     Parameters
     ----------
     contig : str
-
-    Returns
-    -------
-    str
-        Normalized contig name.
+        Contig name to normalize.
+    contigs : Iterable[str]
+        Collection of contig names to normalize against.
     """
     _contigs = (
         {f"{c[3:]}": c for c in contigs if c.startswith("chr")}

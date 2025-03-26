@@ -65,7 +65,7 @@ class Reference:
 
         contigs = [
             c
-            for c in _normalize_contig_name(list(_fasta.contigs), contigs)
+            for c in _normalize_contig_name(contigs, list(_fasta.contigs))
             if c is not None
         ]
         sequences = _fasta._get_sequences(contigs)
