@@ -1,0 +1,25 @@
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=248956422>
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele Frequency">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+
+chr1	11000	rsMulti1	T	A,T	.	PASS	AF=0.2
+chr1	12000	rsMulti2	T	C,A	.	PASS	AF=0.2
+chr1	13000	rsMulti3	T	A,T	.	PASS	AF=0.2
+chr1	14000	rsMulti4	T	C,A	.	PASS	AF=0.2
+chr1	15000	rsMulti5	T	A,T	.	PASS	AF=0.2
+chr1	16000	rsMulti6	T	C,A	.	PASS	AF=0.2
+chr1	17000	rsMulti7	T	A,T	.	PASS	AF=0.2
+chr1	18000	rsMulti8	T	C,A	.	PASS	AF=0.2
+chr1	19000	rsMulti9	T	A,T	.	PASS	AF=0.2
+chr1	20000	rsMulti10	T	Na,G	.	PASS	AF=0.2
+chr1	21000	rsMulti11	T	A,T	.	PASS	AF=0.2
+chr1	22000	rsMulti12	T	C,A	.	PASS	AF=0.2
+chr1	23000	rsMulti13	T	A,T	.	PASS	AF=0.2
+chr1	24000	rsMulti14	T	C,A	.	PASS	AF=0.2
+chr1	25000	rsMulti15	T	"A,T"	.	PASS	AF=0.2
+chr1	26000	rsMulti16	T	C,A	.	PASS	AF=0.2
+chr1	27000	rsMulti17	T	A,T	.	PASS	AF=0.2
+chr1	28000	rsMulti18	T	C,A	.	PASS	AF=0.2
+chr1	29000	rsMulti19	T	A,T	.	PASS	AF=0.2
+chr1	30000	rsMulti20	T	C,A	.	PASS	AF=0.2
