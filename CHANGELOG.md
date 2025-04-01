@@ -1,3 +1,9 @@
+## v0.10.5 (2025-04-01)
+
+### Fix
+
+- (breaks experimental API) rename dosage to CCF and adjust alg to handle missing CCF from e.g. germline variants.
+
 ## v0.10.4 (2025-04-01)
 
 ### Fix
