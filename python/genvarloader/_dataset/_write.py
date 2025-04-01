@@ -1,6 +1,5 @@
 import gc
 import json
-import os
 import shutil
 import warnings
 from pathlib import Path
@@ -19,7 +18,7 @@ from .._utils import (
     _normalize_contig_name,
     read_bedlike,
 )
-from .._variants import Variants
+from .._variants import DenseGenosAndDosages, DenseGenotypes, Variants
 from .._variants._genotypes import PgenGenos, VCFGenos
 from ._genotypes import (
     SparseGenotypes,
@@ -458,57 +457,42 @@ def _read_variants_chunk(
         chunk_max_ends = ends
         return genos, chunk_max_ends
 
-    first = True
     while True:
         logger.debug(f"average region length {(ends - starts).mean()}")
-        if not first:
-            rel_e_idxs = variants.records.find_relative_end_idx(contig, ends)
-        s_idx = variants.records.contig_offsets[contig] + rel_s_idxs
-        e_idx = variants.records.contig_offsets[contig] + rel_e_idxs
-        n_per_region = e_idx - s_idx
 
-        if n_per_region.sum() == 0:
+        # (s p v)
+        logger.debug("read genotypes")
+        if variants.phased:
+            genos = cast(
+                DenseGenotypes | None,
+                variants._read(contig, starts, ends, sample=samples),
+            )
+        else:
+            assert variants.dosage_field is not None
+            genos = cast(
+                DenseGenosAndDosages | None,
+                variants._read(contig, starts, ends, sample=samples),
+            )
+
+        if genos is None:
             if variants.phased:
                 genos = SparseGenotypes.empty(
-                    n_regions=len(rel_s_idxs),
+                    n_regions=len(starts),
                     n_samples=len(samples),
                     ploidy=variants.ploidy,
                 )
             else:
                 genos = SparseSomaticGenotypes.empty(
-                    n_regions=len(rel_s_idxs), n_samples=len(samples)
+                    n_regions=len(starts), n_samples=len(samples)
                 )
             chunk_max_ends = ends
             return genos, chunk_max_ends
-
-        offsets = _lengths_to_offsets(n_per_region)
-
-        # (s p v)
-        logger.debug("read genotypes")
-        if variants.phased:
-            genos = variants.genotypes.multiprocess_read(
-                contig,
-                s_idx,
-                e_idx,
-                sample_idx=sample_idxs,
-                n_jobs=len(os.sched_getaffinity(0)),
-            )
-        else:
-            assert variants.dosage_field is not None
-            genos, dosages = variants.genotypes.multiprocess_read_genos_and_dosages(
-                contig,
-                s_idx,
-                e_idx,
-                variants.dosage_field,
-                sample_idx=sample_idxs,
-                n_jobs=len(os.sched_getaffinity(0)),
-            )
 
         logger.debug("get haplotype region ilens")
         # (s p r)
         # TODO: this is wrong for somatic genotypes since choosing variants is done incorrectly
         haplotype_ilens = get_haplotype_region_ilens(
-            genos, rel_s_idxs, offsets, variants.records.v_diffs[contig]
+            genos.genotypes, rel_s_idxs, genos.offsets, variants.records.v_diffs[contig]
         )
         # (s p r)
         haplotype_lengths = ends - starts + haplotype_ilens
@@ -529,9 +513,9 @@ def _read_variants_chunk(
     logger.debug("sparsify genotypes")
     if variants.phased:
         genos, chunk_max_ends = SparseGenotypes.from_dense_with_length(
-            genos=genos,
+            genos=genos.genotypes,
             first_v_idxs=rel_s_idxs,
-            offsets=offsets,
+            offsets=genos.offsets,
             ilens=variants.records.v_diffs[contig],
             positions=variants.records.v_starts[contig],
             starts=starts,
@@ -539,14 +523,14 @@ def _read_variants_chunk(
         )
     else:
         genos, chunk_max_ends = SparseSomaticGenotypes.from_dense_with_length(
-            genos=genos,
+            genos=genos.genotypes,
             first_v_idxs=rel_s_idxs,
-            offsets=offsets,
+            offsets=genos.offsets,
             ilens=variants.records.v_diffs[contig],
             positions=variants.records.v_starts[contig],
             starts=starts,
             lengths=desired_lengths,
-            dosages=dosages,  # type: ignore | guaranteed bound by read_genos_and_dosages
+            dosages=genos.dosages,  # type: ignore | guaranteed bound by read_genos_and_dosages
         )
     logger.debug(f"maximum needed length {(chunk_max_ends - starts).max()}")
     logger.debug(f"minimum needed length {(chunk_max_ends - starts).min()}")
