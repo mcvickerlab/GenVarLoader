@@ -168,7 +168,7 @@ class DatasetIndexer:
             or (isinstance(samples, np.ndarray) and is_dtype(samples, np.str_))
             or (
                 isinstance(samples, Sequence)
-                and isinstance(next(chain.from_iterable(samples)), str)
+                and isinstance(next(chain.from_iterable(samples)), str)  # type: ignore
             )
         ):
             s_idx = self.s2i_map.get(samples)

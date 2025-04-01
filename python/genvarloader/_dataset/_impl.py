@@ -898,9 +898,8 @@ class Dataset:
             samples = slice(None)
         idx = (regions, samples)
 
-        idx, squeeze, out_reshape = self._parse_getitem_idx(idx)
+        ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
 
-        ds_idx = self._idxer[idx]
         r_idx, _ = np.unravel_index(ds_idx, self.full_shape)
 
         # (b)

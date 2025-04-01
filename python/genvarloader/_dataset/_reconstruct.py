@@ -709,7 +709,7 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
                     np.arange(n_samples, dtype=np.intp), "s -> (r s)", r=n_regions
                 )
                 ds_idx = np.ravel_multi_index((ir_idx, is_idx), idxer.full_shape)
-                ds_idx = idxer[ds_idx]
+                ds_idx = idxer.i2d_map[ds_idx]
                 r_idx, s_idx = np.unravel_index(ds_idx, idxer.full_shape)
 
                 pbar.set_description("Writing (decompressing)")
