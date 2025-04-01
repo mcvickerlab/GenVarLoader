@@ -101,7 +101,7 @@ def getitem_reshape():
     return regions, samples, s_idx
 
 
-@pytest.mark.xfail(strict=True, raises=KeyError)
+@pytest.mark.xfail(strict=True, raises=KeyError, reason="Zuko is not in the dataset")
 def getitem_missing():
     regions = 0
     samples = ["Aang", "Zuko"]
