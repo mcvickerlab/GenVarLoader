@@ -2,9 +2,8 @@ import re
 import subprocess
 from pathlib import Path
 from textwrap import dedent
-from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union, cast, overload
+from typing import Dict, List, Literal, Optional, Union, cast, overload
 
-import numba as nb
 import numpy as np
 import polars as pl
 import pyarrow as pa
@@ -557,7 +556,7 @@ class Records:
                     pl.int_range(0, pl.len(), dtype=pl.Int32)
                     .sort_by("END")
                     .reverse()
-                    .rolling_min(df.height, min_periods=1)
+                    .rolling_min(df.height, min_samples=1)
                     .reverse()
                     .alias("E2S_IDX"),
                 )
@@ -638,7 +637,7 @@ class Records:
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-    ) -> Optional[RecordInfo]:
+    ) -> tuple[NDArray[np.int32], NDArray[np.int32]] | None:
         starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
         ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
 
@@ -652,35 +651,11 @@ class Records:
         if rel_s_idxs.min() == rel_e_idxs.max():
             return
 
-        n_var_per_region = rel_e_idxs - rel_s_idxs
-        offsets = _lengths_to_offsets(n_var_per_region)
-
         # make idxs absolute
         s_idxs = rel_s_idxs + self.contig_offsets[_contig]
         e_idxs = rel_e_idxs + self.contig_offsets[_contig]
 
-        positions = np.concatenate(
-            [self.v_starts[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
-        )
-        size_diffs = np.concatenate(
-            [self.v_diffs[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
-        )
-        ref = VLenAlleles.concat(
-            *(self.ref[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
-        )
-        alt = VLenAlleles.concat(
-            *(self.alt[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
-        )
-
-        return RecordInfo(
-            positions=positions,
-            size_diffs=size_diffs,
-            refs=ref,
-            alts=alt,
-            start_idxs=s_idxs,
-            end_idxs=e_idxs,
-            offsets=offsets,
-        )
+        return s_idxs, e_idxs
 
     def find_relative_start_idx(
         self, contig: str, starts: NDArray[np.int32]
@@ -695,93 +670,6 @@ class Records:
         rel_e_idx = np.searchsorted(self.v_starts[contig], ends)
         return rel_e_idx
 
-    def vars_in_range_for_haplotype_construction(
-        self,
-        contig: str,
-        starts: ArrayLike,
-        ends: ArrayLike,
-    ) -> Tuple[Optional[RecordInfo], NDArray[np.int32]]:
-        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
-        ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
-        n_queries = len(starts)
-
-        _contig = _normalize_contig_name(contig, self.contigs)
-        if _contig is None:
-            return None, ends
-
-        _s_idxs = np.searchsorted(self.v_ends[_contig], starts)
-
-        max_ends, _e_idxs = get_max_ends_and_idxs(
-            self.v_ends[_contig],
-            self.v_diffs_sorted_by_ends[_contig],
-            self.max_del_q[_contig],
-            _s_idxs,
-            ends,
-        )
-
-        s_idxs = self.e2s_idx[_contig][_s_idxs]
-        e_idxs = self.e2s_idx[_contig][_e_idxs]
-
-        # make idxs absolute
-        s_idxs += self.contig_offsets[_contig]
-        e_idxs += self.contig_offsets[_contig]
-
-        if s_idxs.min() == e_idxs.max():
-            return None, ends
-
-        offsets = np.empty(n_queries + 1, dtype=np.int64)
-        offsets[0] = 0
-        np.cumsum(e_idxs - s_idxs, out=offsets[1:])
-
-        rel_s_idxs = s_idxs - self.contig_offsets[_contig]
-        rel_e_idxs = e_idxs - self.contig_offsets[_contig]
-
-        positions = np.concatenate(
-            [self.v_starts[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
-        )
-        size_diffs = np.concatenate(
-            [self.v_diffs[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
-        )
-        ref = VLenAlleles.concat(
-            *(self.ref[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
-        )
-        alt = VLenAlleles.concat(
-            *(self.alt[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
-        )
-
-        v_info = RecordInfo(
-            positions=positions,
-            size_diffs=size_diffs,
-            refs=ref,
-            alts=alt,
-            start_idxs=s_idxs,
-            end_idxs=e_idxs,
-            offsets=offsets,
-        )
-
-        return v_info, max_ends
-
-    def normalize_contig_name(
-        self, contig: str, contigs: Iterable[str]
-    ) -> Optional[str]:
-        """Normalize the contig name to adhere to the convention of the underlying file.
-        i.e. remove or add "chr" to the contig name.
-
-        Parameters
-        ----------
-        contig : str
-
-        Returns
-        -------
-        str
-            Normalized contig name.
-        """
-        for c in contigs:
-            # exact match, remove chr, add chr
-            if contig == c or contig[3:] == c or f"chr{contig}" == c:
-                return c
-        return None
-
     def __repr__(self):
         return dedent(
             f"""
@@ -790,108 +678,3 @@ class Records:
             n_variants: {self.n_variants}
             """
         ).strip()
-
-
-@nb.njit(nogil=True, cache=True)
-def get_max_ends_and_idxs(
-    v_ends: NDArray[np.int32],
-    v_diffs: NDArray[np.int32],
-    nearest_nonoverlapping: NDArray[np.intp],
-    start_idxs: NDArray[np.intp],
-    query_ends: NDArray[np.int64],
-) -> Tuple[NDArray[np.int32], NDArray[np.intp]]:
-    """Time: O(q * v) where q is number of query regions and v is the number of variants
-    (mostly limited to those in the query regions thanks to early exit criteria).
-    Importantly, this algorithm does not scale (directly) with the number of samples. However, more samples
-    from sequencing experiemnts will increase the number of unique variants sub-linearly.
-    """
-    max_ends: NDArray[np.int32] = np.empty(len(start_idxs), dtype=np.int32)
-    end_idxs: NDArray[np.intp] = np.empty(len(start_idxs), dtype=np.intp)
-    for r in nb.prange(len(start_idxs)):
-        s = start_idxs[r]
-        if s == len(v_ends):  # no variants in this region
-            max_ends[r] = query_ends[r]
-            end_idxs[r] = s
-            continue
-
-        w = -v_diffs[s:]  # flip sign so deletions have positive weight
-
-        # to adjust q from [0, j) to [i, j)
-        # (q[i:] - i).clip(0)
-        q = nearest_nonoverlapping[s:]
-        max_end, end_idx = weighted_activity_selection(
-            v_ends[s:], w, q, s, query_ends[r]
-        )
-        max_ends[r] = max_end
-        end_idxs[r] = s + end_idx
-    return max_ends, end_idxs
-
-
-@nb.njit(nogil=True, cache=True)
-def weighted_activity_selection(
-    v_ends: NDArray[np.int32],
-    w: NDArray[np.int32],
-    q: NDArray[np.intp],
-    start_index: int,
-    query_end: int,
-) -> Tuple[int, int]:
-    """Implementation of the [weighted activity selection problem](https://en.wikipedia.org/wiki/Activity_selection_problem)
-    to compute the maximum length of deletions that can occur for each region. This is
-    used to adjust the end coordinates for reference sequence queries and include all
-    variants for that are needed for haplotype construction.
-
-    Parameters
-    ----------
-    v_ends : NDArray[np.int64]
-        Shape: (variants). End coordinates of variants, 0-based inclusive.
-    w : NDArray[np.int64]
-        Shape: (variants). Weights of activities (i.e. deletion lengths).
-    q : NDArray[np.intp]
-        Shape: (variants). Nearest variant i such that i < j and variants are non-overlapping, q[j] = i.
-        Note this should not yet be adjusted for the start_index.
-    start_index : int
-        Index of the first variant overlapping the query region.
-    query_end : int
-        End of query region.
-
-    Returns
-    -------
-    max_ends : NDArray[np.int32]
-        Shape: (regions). Maximum end coordinate for each query region.
-    end_idxs : NDArray[np.intp]
-        Shape: (regions). Index of the variant with the maximum end coordinate for each
-        query region.
-
-    Notes
-    -----
-    For the weighted activity selection problem, each deletion corresponds
-    to an activity with weight equal to the length of the deletion. The goal is to
-    compute the maximum total weight of deletions for each query region.
-
-    Psuedocode from (Princeton slides)[https://www.cs.princeton.edu/~wayne/cs423/lectures/dynamic-programming-4up.pdf]:
-    Given starts :math: `s_1, ..., s_n`, ends :math: `e_1, ..., e_n`, and weights
-    :math: `w_1, ..., w_n`.
-    Note that ends are sorted, :math: `e_1 <= ... <= e_n`.
-    Let :math: `q_j` = largest index :math: `i < j` such that activity :math: `i` is
-    compatible with :math: `j`.
-    Let opt(j) = value of solution to the problem consisting of activities 1 to j
-    Then,
-        opt(0) = 0
-    and
-        opt(j) = max(w_j + opt(q_j), opt(j - 1))
-    """
-    n_vars = len(w)
-    max_del: NDArray[np.int32] = np.empty(n_vars + 1, dtype=np.int32)
-    max_del[0] = 0
-    for j in range(1, n_vars + 1):
-        _q = max(q[j - 1] - start_index, 0)
-        max_del[j] = max(max_del[_q] + w[j - 1], max_del[j - 1])
-        v_del_end = v_ends[j - 1] - max_del[j] + 1  # + 1, v_ends is end-inclusive
-        # if:
-        # this variant more than satisfies query length
-        # last variant doesn't span v_del_end
-        if v_del_end > query_end and j > 1 and v_ends[j - 2] <= v_del_end:
-            # then add the max deletion length up to but not including this variant
-            # to the query end, and return the index of this variant for slicing
-            return query_end + max_del[j - 1], j - 1
-    return query_end + max_del[-1], n_vars
