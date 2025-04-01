@@ -138,7 +138,7 @@ class Dataset:
         deterministic
             Whether to use randomized or deterministic algorithms. If set to True, this will disable random
             shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
-            and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
+            and always apply the highest CCF group. Note that for unphased variants, this will mean not all possible haplotypes
             can be returned.
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
@@ -288,7 +288,7 @@ class Dataset:
         deterministic
             Whether to use randomized or deterministic algorithms. If set to True, this will disable random
             shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
-            and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
+            and always apply the highest CCF group. Note that for unphased variants, this will mean not all possible haplotypes
             can be returned.
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
@@ -585,8 +585,8 @@ class Dataset:
     """How much jitter to use."""
     deterministic: bool
     """Whether to use randomized or deterministic algorithms. If set to :code:`False`, this will enable random
-    shifting of longer-than-requested haplotypes and, for unphased variants, enable choosing sets of compatible variants proportional to their dosage;
-    otherwise the dataset will always apply compatible sets with the highest dosage.
+    shifting of longer-than-requested haplotypes and, for unphased variants, enable choosing sets of compatible variants proportional to their CCF;
+    otherwise the dataset will always apply compatible sets with the highest CCF.
     
     .. note::
         This setting is independent of :attr:`~Dataset.jitter`, if you want no :attr:`~Dataset.jitter` you should set it to 0.

@@ -18,7 +18,7 @@ from .._utils import (
     _normalize_contig_name,
     read_bedlike,
 )
-from .._variants import DenseGenosAndDosages, DenseGenotypes, Variants
+from .._variants import DenseGenosAndCCF, DenseGenotypes, Variants
 from .._variants._genotypes import PgenGenos, VCFGenos
 from ._genotypes import (
     SparseGenotypes,
@@ -44,7 +44,7 @@ def write(
     overwrite: bool = False,
     max_mem: int = 4 * 2**30,
     phased: bool = True,
-    dosage_field: Optional[str] = None,
+    ccf_field: Optional[str] = None,
 ):
     """Write a GVL dataset.
 
@@ -75,16 +75,12 @@ def write(
         Approximate maximum memory to use in bytes. This is a soft limit and may be exceeded.
     phased
         Whether to treat the genotypes as phased. If phased=False and using a VCF,
-        a dosage FORMAT field must be provided and must have Number = '1' or 'A' in the VCF header.
+        a CCF FORMAT field must be provided and must have Number = '1' or 'A' in the VCF header.
         All variants that overlap with the BED regions must also have this field present or else
-        the write will fail partway and raise a :py:class:`~genvarloader._variants._genotypes.DosageFieldError`.
-        For PGEN files, if dosages are not present the write will silently fail with all missing dosages.
-        Ostensibly, there is a flag in PGEN files for whether dosages are present. However, the Python
-        interface to PGEN, pgenlib, does not currently expose a way to check this flag. Thus, a workaround
-        is to use `plink2 --pgen-info <https://www.cog-genomics.org/plink/2.0/basic_stats#pgen_info>`_ to check
-        if dosages are present before you write the dataset.
-    dosage_field
-        Field in the VCF to use as dosage. Ignored if :code:`phased=True`.
+        the write will fail partway and raise a :py:class:`~genvarloader._variants._genotypes.CCFFieldError`.
+        PGEN files are currently not supported for unphased genotypes.
+    ccf_field
+        Field in the VCF to use as cancer cell fraction (CCF). Ignored if :code:`phased=True`.
     """
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
@@ -125,7 +121,7 @@ def write(
             )
 
         if isinstance(variants, (str, Path)):
-            variants = Variants.from_file(variants, phased, dosage_field)
+            variants = Variants.from_file(variants, phased, ccf_field)
 
         if unavailable_contigs := set(contigs) - {
             _normalize_contig_name(c, contigs) for c in variants.records.contigs
@@ -316,7 +312,7 @@ def _write_variants(
                 bytes_per_variant = 4
 
             if not variants.phased:
-                bytes_per_variant += 4  # dosage is float 32
+                bytes_per_variant += 4  # ccf is float 32
 
             mem_per_r = (n_variants * (bytes_per_variant + 4) + 4) * len(_samples)
             if variants.phased:
@@ -345,7 +341,7 @@ def _write_variants(
             chunk_offsets[contig] = np.array([0, part.height], dtype=np.intp)
 
     v_idx_memmap_offsets = 0
-    dosage_memmap_offsets = 0
+    ccf_memmap_offsets = 0
     offset_memmap_offsets = 0
     last_offset = 0
     max_ends = np.empty(bed.height, dtype=np.int32)
@@ -402,14 +398,14 @@ def _write_variants(
                 else:
                     (
                         v_idx_memmap_offsets,
-                        dosage_memmap_offsets,
+                        ccf_memmap_offsets,
                         offset_memmap_offsets,
                         last_offset,
                     ) = _write_somatic_variants_chunk(
                         out_dir,
                         genos,
                         v_idx_memmap_offsets,
-                        dosage_memmap_offsets,
+                        ccf_memmap_offsets,
                         offset_memmap_offsets,
                         last_offset,
                     )
@@ -468,9 +464,9 @@ def _read_variants_chunk(
                 variants._read(contig, starts, ends, sample=samples),
             )
         else:
-            assert variants.dosage_field is not None
+            assert variants.ccf_field is not None
             genos = cast(
-                DenseGenosAndDosages | None,
+                DenseGenosAndCCF | None,
                 variants._read(contig, starts, ends, sample=samples),
             )
 
@@ -530,7 +526,7 @@ def _read_variants_chunk(
             positions=variants.records.v_starts[contig],
             starts=starts,
             lengths=desired_lengths,
-            dosages=genos.dosages,  # type: ignore | guaranteed bound by read_genos_and_dosages
+            ccfs=genos.ccfs,  # type: ignore | guaranteed bound by read_genos_and_ccfs
         )
     logger.debug(f"maximum needed length {(chunk_max_ends - starts).max()}")
     logger.debug(f"minimum needed length {(chunk_max_ends - starts).min()}")
@@ -580,7 +576,7 @@ def _write_somatic_variants_chunk(
     out_dir: Path,
     genos: SparseSomaticGenotypes,
     v_idx_memmap_offset: int,
-    dosage_memmap_offset: int,
+    ccf_memmap_offset: int,
     offsets_memmap_offset: int,
     last_offset: int,
 ):
@@ -597,15 +593,15 @@ def _write_somatic_variants_chunk(
         v_idx_memmap_offset += out.nbytes
 
         out = np.memmap(
-            out_dir / "dosages.npy",
-            dtype=genos.dosages.dtype,
-            mode="w+" if dosage_memmap_offset == 0 else "r+",
-            shape=genos.dosages.shape,
-            offset=dosage_memmap_offset,
+            out_dir / "ccfs.npy",
+            dtype=genos.ccfs.dtype,
+            mode="w+" if ccf_memmap_offset == 0 else "r+",
+            shape=genos.ccfs.shape,
+            offset=ccf_memmap_offset,
         )
-        out[:] = genos.dosages[:]
+        out[:] = genos.ccfs[:]
         out.flush()
-        dosage_memmap_offset += out.nbytes
+        ccf_memmap_offset += out.nbytes
 
     offsets = genos.offsets
     offsets += last_offset
@@ -620,7 +616,7 @@ def _write_somatic_variants_chunk(
     out[:] = offsets[:-1]
     out.flush()
     offsets_memmap_offset += out.nbytes
-    return v_idx_memmap_offset, dosage_memmap_offset, offsets_memmap_offset, last_offset
+    return v_idx_memmap_offset, ccf_memmap_offset, offsets_memmap_offset, last_offset
 
 
 def _write_bigwigs(

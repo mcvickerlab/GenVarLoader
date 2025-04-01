@@ -230,7 +230,7 @@ class Haps(Reconstructor[H]):
                     mode="r",
                 ),
                 np.memmap(
-                    path / "genotypes" / "dosages.npy", dtype=np.float32, mode="r"
+                    path / "genotypes" / "ccfs.npy", dtype=np.float32, mode="r"
                 ),
                 np.memmap(path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"),
                 len(regions),
@@ -265,7 +265,7 @@ class Haps(Reconstructor[H]):
                     geno_offsets=self.genotypes.offsets,
                     positions=self.variants.positions,
                     sizes=self.variants.sizes,
-                    dosages=self.genotypes.dosages,
+                    ccfs=self.genotypes.ccfs,
                     deterministic=deterministic,
                 )
             # (r s p)
@@ -344,7 +344,7 @@ class Haps(Reconstructor[H]):
                 geno_offset_idxs=geno_offset_idx,
                 geno_v_idxs=self.genotypes.variant_idxs,
                 geno_offsets=self.genotypes.offsets,
-                dosages=self.genotypes.dosages,
+                ccfs=self.genotypes.ccfs,
                 positions=self.variants.positions,
                 sizes=self.variants.sizes,
                 deterministic=rng is None,

@@ -432,14 +432,14 @@ class SparseSomaticGenotypes:
     Then, each sample and region's info can be sliced out using the offsets:
     >>> i = np.ravel_multi_index((r, s), (n_regions, n_samples))
     >>> variant_idxs[offsets[i]:offsets[i+1]]
-    >>> dosages[offsets[i]:offsets[i+1]]
+    >>> ccfs[offsets[i]:offsets[i+1]]
 
     Attributes
     ----------
     variant_idxs : NDArray[np.int32]
         Shape = (variants * samples) Variant indices.
-    dosage : NDArray[np.float32]
-        Shape = (variants * samples) Dosages e.g. VAF.
+    ccfs : NDArray[np.float32]
+        Shape = (variants * samples) Cancer cell fractions (CCF).
     offsets : NDArray[np.int32]
         Shape = (regions * samples * ploidy + 1) Offsets into genos.
     n_samples : int
@@ -449,7 +449,7 @@ class SparseSomaticGenotypes:
     """
 
     variant_idxs: NDArray[np.int32]  # (variants * samples)
-    dosages: NDArray[np.float32]  # (variants * samples)
+    ccfs: NDArray[np.float32]  # (variants * samples)
     offsets: NDArray[np.int64]  # (regions * samples + 1)
     n_regions: int
     n_samples: int
@@ -494,14 +494,14 @@ class SparseSomaticGenotypes:
             np.concatenate([np.diff(g.offsets) for g in genos])
         )
 
-        dosages = np.concatenate([g.dosages for g in genos if g.dosages is not None])
+        ccfs = np.concatenate([g.ccfs for g in genos if g.ccfs is not None])
 
         return SparseSomaticGenotypes(
             variant_idxs=variant_idxs,
             offsets=offsets,
             n_regions=total_n_regions,
             n_samples=genos[0].n_samples,
-            dosages=dosages,
+            ccfs=ccfs,
         )
 
     @classmethod
@@ -510,7 +510,7 @@ class SparseSomaticGenotypes:
         genos: NDArray[np.int8],
         first_v_idxs: NDArray[np.int32],
         offsets: NDArray[np.int64],
-        dosages: NDArray[np.float32],
+        ccfs: NDArray[np.float32],
     ):
         """Convert dense genotypes to sparse genotypes. Genotypes will be considered ALT if any allele is ALT.
         e.g. 0/1 -> 1, 1/1 -> 1, 0/0 -> 0, 0/2 -> 1.
@@ -523,8 +523,8 @@ class SparseSomaticGenotypes:
             Shape = (regions) First variant index for each region.
         offsets : NDArray[np.uint32]
             Shape = (regions + 1) Offsets into genos.
-        dosages : Optional[NDArray[np.float32]]
-            Shape = (sample, variants) Dosages.
+        ccfs : Optional[NDArray[np.float32]]
+            Shape = (sample, variants) Cancer cell fractions (CCF).
         """
         n_regions = len(first_v_idxs)
         n_samples = genos.shape[0]
@@ -537,10 +537,10 @@ class SparseSomaticGenotypes:
             keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples
         )
         # (s v) -> region/variant-major, flattened
-        dosages = dosages.T[keep.T]
+        ccfs = ccfs.T[keep.T]
         return cls(
             variant_idxs=variant_idxs,
-            dosages=dosages,
+            ccfs=ccfs,
             offsets=sparse_offsets,
             n_regions=n_regions,
             n_samples=n_samples,
@@ -556,7 +556,7 @@ class SparseSomaticGenotypes:
         positions: NDArray[np.int32],
         starts: NDArray[np.int32],
         lengths: NDArray[np.int32],
-        dosages: NDArray[np.float32],
+        ccfs: NDArray[np.float32],
     ):
         """Convert dense genotypes to sparse genotypes.
 
@@ -576,8 +576,8 @@ class SparseSomaticGenotypes:
             Shape = (regions) Start of query regions.
         lengths : NDArray[np.int32]
             Shape = (regions) Desired lengths of the output haplotypes.
-        dosages : NDArray[np.float32]
-            Shape = (sample, variants) Dosages.
+        ccfs : NDArray[np.float32]
+            Shape = (sample, variants) Cancer cell fractions (CCF).
         """
         n_regions = len(first_v_idxs)
         n_samples = genos.shape[0]
@@ -601,10 +601,10 @@ class SparseSomaticGenotypes:
             keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples
         )
         # (s v) -> region/variant-major, flattened
-        dosages = dosages.T[keep.T]
+        ccfs = ccfs.T[keep.T]
         sparse_genos = cls(
             variant_idxs=variant_idxs,
-            dosages=dosages,
+            ccfs=ccfs,
             offsets=sparse_offsets,
             n_regions=n_regions,
             n_samples=n_samples,
@@ -1101,7 +1101,7 @@ def choose_unphased_variants(
     geno_offsets: NDArray[np.int64],
     positions: NDArray[np.int32],
     sizes: NDArray[np.int32],
-    dosages: NDArray[np.float32],
+    ccfs: NDArray[np.float32],
     deterministic: bool,
 ) -> Tuple[NDArray[np.bool_], NDArray[np.int64]]:
     """Mark variants to keep for each haplotype.
@@ -1120,8 +1120,8 @@ def choose_unphased_variants(
         Shape = (total_variants) Positions of variants.
     sizes : NDArray[np.int32]
         Shape = (total_variants) Sizes of variants.
-    dosages : NDArray[np.float32]
-        Shape = (total_variants) Dosages of variants.
+    ccfs : NDArray[np.float32]
+        Shape = (total_variants) Cancer cell fractions (CCF) of variants.
     ends : NDArray[np.int32]
         Shape = (n_regions) Ends for each region.
     deterministic : bool
@@ -1152,7 +1152,7 @@ def choose_unphased_variants(
             o_idx = geno_offset_idxs[query, hap]
             o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
             qh_genos = geno_v_idxs[o_s:o_e]
-            qh_dosages = dosages[o_s:o_e]
+            qh_ccf = ccfs[o_s:o_e]
 
             k_idx = query * ploidy + hap
             k_s, k_e = keep_offsets[k_idx], keep_offsets[k_idx + 1]
@@ -1165,7 +1165,7 @@ def choose_unphased_variants(
                 query_start=ref_start,
                 query_end=ref_end,
                 variant_idxs=qh_genos,
-                dosages=qh_dosages,
+                ccf=qh_ccf,
                 positions=positions,
                 sizes=sizes,
                 groups=qh_groups,
@@ -1181,7 +1181,7 @@ def _choose_unphased_variants(
     query_start: int,
     query_end: int,
     variant_idxs: NDArray[np.int32],  # (v)
-    dosages: NDArray[np.float32],  # (v)
+    ccf: NDArray[np.float32],  # (v)
     positions: NDArray[np.int32],  # (total variants)
     sizes: NDArray[np.int32],  # (total variants)
     groups: NDArray[np.uint32],  # (v)
@@ -1193,6 +1193,8 @@ def _choose_unphased_variants(
     if len(variant_idxs) == 0:
         return np.ones(0, np.bool_)
 
+    # treat missing CCF as 1.0
+    ccf = np.nan_to_num(ccf, True, 1.0)
     groups[:] = UNSEEN_VARIANT
     ref_ends[:] = query_start
     write_lens[:] = 0
@@ -1261,9 +1263,9 @@ def _choose_unphased_variants(
     if n_groups == 1:
         return groups == 0
 
-    # Choose a group proportional to total dosage normalized by reference length.
+    # Choose a group proportional to total ccf normalized by reference length.
     # This is because variants with long ref len will prevent other variants from
-    # being assigned to the same group, reducing the potential total dosage of the
+    # being assigned to the same group, reducing the potential total ccf of the
     # group.f
     cum_prop = write_lens[:n_groups].view(
         np.float32
@@ -1278,7 +1280,7 @@ def _choose_unphased_variants(
         ref_lengths = np.minimum(v_ends, ref_ends[g]) - np.maximum(
             v_starts, query_start
         )
-        cum_prop[g] = (dosages[groups == g] / ref_lengths).sum()
+        cum_prop[g] = (ccf[groups == g] / ref_lengths).sum()
     if deterministic:
         keep_group = cum_prop.argmax()
     else:
