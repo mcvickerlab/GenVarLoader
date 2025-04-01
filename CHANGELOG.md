@@ -1,3 +1,10 @@
+## v0.10.2 (2025-04-01)
+
+### Fix
+
+- pass relevant tests.
+- faster VCF reading.
+
 ## v0.10.1 (2025-03-25)
 
 ### Fix
