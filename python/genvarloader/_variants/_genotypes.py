@@ -11,8 +11,8 @@ from numpy.typing import ArrayLike, NDArray
 from .._utils import _get_rel_starts, _lengths_to_offsets
 
 
-class DosageFieldError(Exception):
-    """Exception raised when the dosage field is not found in the VCF record."""
+class CCFFieldError(Exception):
+    """Exception raised when the CCF field is not found in the VCF record."""
 
 
 __all__ = []
@@ -388,12 +388,12 @@ class VCFGenos:
 
         return genos
 
-    def read_genos_and_dosages(
+    def read_genos_and_ccfs(
         self,
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-        dosage_field: str,
+        ccf_field: str,
         sample_idx: Optional[ArrayLike] = None,
         haplotype_idx: Optional[ArrayLike] = None,
         n_variants: NDArray[np.int32] | None = None,
@@ -437,10 +437,10 @@ class VCFGenos:
         # (s p v)
         genos = np.empty((self.n_samples, self.ploidy, n_variants.sum()), dtype=np.int8)
         # (s v)
-        dosages = np.empty((self.n_samples, n_variants.sum()), dtype=np.float32)
+        ccfs = np.empty((self.n_samples, n_variants.sum()), dtype=np.float32)
 
         if genos.size == 0:
-            return genos, dosages
+            return genos, ccfs
 
         offsets = _lengths_to_offsets(n_variants)
         for s, e, o in zip(starts + 1, ends, offsets[:-1]):
@@ -448,21 +448,21 @@ class VCFGenos:
                 if v.is_snp or v.is_indel:
                     # (s p)
                     genos[..., i] = v.genotype.array()[:, : self.ploidy]
-                    d = v.format(dosage_field)
+                    d = v.format(ccf_field)
                     if d is None:
-                        raise DosageFieldError(
-                            f"Dosage field '{dosage_field}' not found for record {repr(v)}"
+                        raise CCFFieldError(
+                            f"CCF field '{ccf_field}' not found for record {repr(v)}"
                         )
                     # (s, 1, 1) or (s, 1)? -> (s)
-                    dosages[..., i] = d.squeeze()
+                    ccfs[..., i] = d.squeeze()
 
         genos = genos[_sample_idx, _haplotype_idx]
         # cyvcf2 encoding: 0, 1, -1 => gvl/pgen encoding: 0, 1, -9
         genos[genos == -1] = -9
 
-        dosages = dosages[_sample_idx]
+        ccfs = ccfs[_sample_idx]
 
-        return genos, dosages
+        return genos, ccfs
 
     def init_handles(self) -> Dict[str, "cyvcf2.VCF"]:
         if self.handles is None and "_all" not in self.paths:
