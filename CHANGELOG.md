@@ -1,3 +1,9 @@
+## v0.10.3 (2025-04-01)
+
+### Fix
+
+- shape of dataset return values.
+
 ## v0.10.2 (2025-04-01)
 
 ### Fix
