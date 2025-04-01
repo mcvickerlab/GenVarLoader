@@ -1,3 +1,9 @@
+## v0.10.4 (2025-04-01)
+
+### Fix
+
+- hotfix for indexer usage
+
 ## v0.10.3 (2025-04-01)
 
 ### Fix
