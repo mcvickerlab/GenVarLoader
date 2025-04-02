@@ -8,7 +8,6 @@ from numpy.typing import NDArray
 
 from .._types import ListIdx
 from .._utils import _lengths_to_offsets
-from ._utils import padded_slice
 
 __all__ = []
 
@@ -433,14 +432,14 @@ class SparseSomaticGenotypes:
     Then, each sample and region's info can be sliced out using the offsets:
     >>> i = np.ravel_multi_index((r, s), (n_regions, n_samples))
     >>> variant_idxs[offsets[i]:offsets[i+1]]
-    >>> dosages[offsets[i]:offsets[i+1]]
+    >>> ccfs[offsets[i]:offsets[i+1]]
 
     Attributes
     ----------
     variant_idxs : NDArray[np.int32]
         Shape = (variants * samples) Variant indices.
-    dosage : NDArray[np.float32]
-        Shape = (variants * samples) Dosages e.g. VAF.
+    ccfs : NDArray[np.float32]
+        Shape = (variants * samples) Cancer cell fractions (CCF).
     offsets : NDArray[np.int32]
         Shape = (regions * samples * ploidy + 1) Offsets into genos.
     n_samples : int
@@ -450,16 +449,17 @@ class SparseSomaticGenotypes:
     """
 
     variant_idxs: NDArray[np.int32]  # (variants * samples)
-    dosages: NDArray[np.float32]  # (variants * samples)
+    ccfs: NDArray[np.float32]  # (variants * samples)
     offsets: NDArray[np.int64]  # (regions * samples + 1)
     n_regions: int
     n_samples: int
+    ploidy = 1
 
     @property
     def effective_shape(self):
         """Effective shape of the sparse genotypes (n_regions, n_samples, ploidy)
         where ploidy is always represented as 1. The ploidy is treated as 1 to be consistent with."""
-        return (self.n_regions, self.n_samples, 1)
+        return (self.n_regions, self.n_samples, self.ploidy)
 
     @classmethod
     def empty(cls, n_regions: int, n_samples: int):
@@ -494,14 +494,14 @@ class SparseSomaticGenotypes:
             np.concatenate([np.diff(g.offsets) for g in genos])
         )
 
-        dosages = np.concatenate([g.dosages for g in genos if g.dosages is not None])
+        ccfs = np.concatenate([g.ccfs for g in genos if g.ccfs is not None])
 
         return SparseSomaticGenotypes(
             variant_idxs=variant_idxs,
             offsets=offsets,
             n_regions=total_n_regions,
             n_samples=genos[0].n_samples,
-            dosages=dosages,
+            ccfs=ccfs,
         )
 
     @classmethod
@@ -510,7 +510,7 @@ class SparseSomaticGenotypes:
         genos: NDArray[np.int8],
         first_v_idxs: NDArray[np.int32],
         offsets: NDArray[np.int64],
-        dosages: NDArray[np.float32],
+        ccfs: NDArray[np.float32],
     ):
         """Convert dense genotypes to sparse genotypes. Genotypes will be considered ALT if any allele is ALT.
         e.g. 0/1 -> 1, 1/1 -> 1, 0/0 -> 0, 0/2 -> 1.
@@ -523,8 +523,8 @@ class SparseSomaticGenotypes:
             Shape = (regions) First variant index for each region.
         offsets : NDArray[np.uint32]
             Shape = (regions + 1) Offsets into genos.
-        dosages : Optional[NDArray[np.float32]]
-            Shape = (sample, variants) Dosages.
+        ccfs : Optional[NDArray[np.float32]]
+            Shape = (sample, variants) Cancer cell fractions (CCF).
         """
         n_regions = len(first_v_idxs)
         n_samples = genos.shape[0]
@@ -537,10 +537,10 @@ class SparseSomaticGenotypes:
             keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples
         )
         # (s v) -> region/variant-major, flattened
-        dosages = dosages.T[keep.T]
+        ccfs = ccfs.T[keep.T]
         return cls(
             variant_idxs=variant_idxs,
-            dosages=dosages,
+            ccfs=ccfs,
             offsets=sparse_offsets,
             n_regions=n_regions,
             n_samples=n_samples,
@@ -556,7 +556,7 @@ class SparseSomaticGenotypes:
         positions: NDArray[np.int32],
         starts: NDArray[np.int32],
         lengths: NDArray[np.int32],
-        dosages: NDArray[np.float32],
+        ccfs: NDArray[np.float32],
     ):
         """Convert dense genotypes to sparse genotypes.
 
@@ -574,10 +574,10 @@ class SparseSomaticGenotypes:
             Shape = (total_variants) Positions of unique variants.
         starts : NDArray[np.int32]
             Shape = (regions) Start of query regions.
-        lengths : int
+        lengths : NDArray[np.int32]
             Shape = (regions) Desired lengths of the output haplotypes.
-        dosages : NDArray[np.float32]
-            Shape = (sample, variants) Dosages.
+        ccfs : NDArray[np.float32]
+            Shape = (sample, variants) Cancer cell fractions (CCF).
         """
         n_regions = len(first_v_idxs)
         n_samples = genos.shape[0]
@@ -601,10 +601,10 @@ class SparseSomaticGenotypes:
             keep, first_v_idxs, offsets, sparse_offsets, n_regions, n_samples
         )
         # (s v) -> region/variant-major, flattened
-        dosages = dosages.T[keep.T]
+        ccfs = ccfs.T[keep.T]
         sparse_genos = cls(
             variant_idxs=variant_idxs,
-            dosages=dosages,
+            ccfs=ccfs,
             offsets=sparse_offsets,
             n_regions=n_regions,
             n_samples=n_samples,
@@ -782,250 +782,6 @@ def get_diffs_sparse(
             else:
                 diffs[query, hap] = size_diffs[geno_v_idxs[o_s:o_e]].sum()
     return diffs
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def reconstruct_haplotypes_from_dense(
-    out: NDArray[np.uint8],
-    regions: NDArray[np.int32],
-    shifts: NDArray[np.uint32],
-    first_v_idxs: NDArray[np.uint32],
-    offsets: NDArray[np.uint32],
-    genos: NDArray[np.int8],
-    positions: NDArray[np.int32],
-    sizes: NDArray[np.int32],
-    alt_alleles: NDArray[np.uint8],
-    alt_offsets: NDArray[np.uintp],
-    ref: NDArray[np.uint8],
-    ref_offsets: NDArray[np.uint64],
-    pad_char: int,
-):
-    """Reconstruct haplotypes from reference sequence and variants.
-
-    Parameters
-    ----------
-    out : NDArray[np.uint8]
-        Shape = (n_regions, ploidy, out_length) Output array.
-    regions : NDArray[np.int32]
-        Shape = (n_regions, 3) Regions to reconstruct haplotypes.
-    shifts : NDArray[np.uint32]
-        Shape = (n_regions, ploidy) Shifts for each query.
-    first_v_idxs : NDArray[np.uint32]
-        Shape = (n_regions,) First variant index for each query.
-    offsets : NDArray[np.uint32]
-        Shape = (n_regions + 1,) Offsets into genos.
-    genos : NDArray[np.int8]
-        Shape = (n_variants, ploidy) Genotypes of variants.
-    positions : NDArray[np.int32]
-        Shape = (total_variants,) Positions of variants.
-    sizes : NDArray[np.int32]
-        Shape = (total_variants,) Sizes of variants.
-    alt_alleles : NDArray[np.uint8]
-        Shape = (total_alt_length,) ALT alleles.
-    alt_offsets : NDArray[np.uintp]
-        Shape = (total_variants,) Offsets of ALT alleles.
-    ref : NDArray[np.uint8]
-        Shape = (ref_length,) Reference sequence.
-    ref_offsets : NDArray[np.uint64]
-        Shape = (n_contigs,) Offsets of reference sequences.
-    pad_char : int
-        Padding character.
-    """
-    n_regions = len(first_v_idxs)
-    ploidy = genos.shape[1]
-    length = out.shape[2]
-    for query in nb.prange(n_regions):
-        _out = out[query]
-        q = regions[query]
-        _shifts = shifts[query]
-
-        c_idx = q[0]
-        c_s = ref_offsets[c_idx]
-        c_e = ref_offsets[c_idx + 1]
-        ref_s = q[1]
-        ref_e = q[2]
-        _ref = padded_slice(ref[c_s:c_e], ref_s, ref_e, pad_char)
-
-        o_s, o_e = offsets[query], offsets[query + 1]
-        n_variants = o_e - o_s
-
-        if n_variants == 0:
-            _out[:] = _ref[:length]
-            continue
-
-        _genos = genos[o_s:o_e]
-
-        v_s = first_v_idxs[query]
-        v_e = v_s + n_variants
-        # adjust positions to be relative to reference subsequence
-        _positions = positions[v_s:v_e] - ref_s
-        _sizes = sizes[v_s:v_e]
-        _alt_offsets = alt_offsets[v_s : v_e + 1].copy()
-        _alt_alleles = alt_alleles[_alt_offsets[0] : _alt_offsets[-1]]
-        _alt_offsets -= _alt_offsets[0]
-
-        for hap in nb.prange(ploidy):
-            reconstruct_haplotype_from_dense(
-                _positions,
-                _sizes,
-                _genos[:, hap],
-                _shifts[hap],
-                _alt_alleles,
-                _alt_offsets,
-                _ref,
-                _out[hap],
-                pad_char,
-            )
-
-
-@nb.njit(nogil=True, cache=True)
-def reconstruct_haplotype_from_dense(
-    positions: NDArray[np.int32],
-    sizes: NDArray[np.int32],
-    genos: NDArray[np.int8],
-    shift: int,
-    alt_alleles: NDArray[np.uint8],
-    alt_offsets: NDArray[np.uintp],
-    ref: NDArray[np.uint8],
-    out: NDArray[np.uint8],
-    pad_char: int,
-):
-    """Reconstruct a haplotype from reference sequence and variants.
-
-    Parameters
-    ----------
-    positions : NDArray[np.int32]
-        Shape = (n_variants) Positions of variants.
-    sizes : NDArray[np.int32]
-        Shape = (n_variants) Sizes of variants.
-    genos : NDArray[np.int8]
-        Shape = (n_variants) Genotypes of variants.
-    shift : int
-        Shift amount.
-    alt_alleles : NDArray[np.uint8]
-        Shape = (total_alt_length) ALT alleles.
-    alt_offsets : NDArray[np.uintp]
-        Shape = (n_variants) Offsets of ALT alleles.
-    ref : NDArray[np.uint8]
-        Shape = (ref_length) Reference sequence. ref_length >= out_length
-    out : NDArray[np.uint8]
-        Shape = (out_length) Output array.
-    pad_char : int
-        Padding character.
-    """
-    length = len(out)
-    n_variants = len(positions)
-    # where to get next reference subsequence
-    ref_idx = 0
-    # where to put next subsequence
-    out_idx = 0
-    # total amount to shift by
-    shift = shift
-    # how much we've shifted
-    shifted = 0
-
-    # first variant is a DEL spanning start
-    v_rel_pos = positions[0]
-    v_diff = sizes[0]
-    if v_rel_pos < 0 and genos[0] == 1:
-        # diff of v(-1) has been normalized to consider where ref is
-        # otherwise, ref_idx = v_rel_pos - v_diff + 1
-        # e.g. a -10 diff became -3 if v_rel_pos = -7
-        ref_idx = v_rel_pos - v_diff + 1
-        # increment the variant index
-        start_idx = 1
-    else:
-        start_idx = 0
-
-    for variant in range(start_idx, n_variants):
-        # UNKNOWN -9 or REF 0
-        if genos[variant] != 1:
-            continue
-
-        # position of variant relative to ref from fetch(contig, start, q_end)
-        # i.e. has been put into same coordinate system as ref_idx
-        v_rel_pos = positions[variant]
-
-        # overlapping variants
-        # v_rel_pos < ref_idx only if we see an ALT at a given position a second
-        # time or more. We'll do what bcftools consensus does and only use the
-        # first ALT variant we find.
-        if v_rel_pos < ref_idx:
-            continue
-
-        v_diff = sizes[variant]
-        allele = alt_alleles[alt_offsets[variant] : alt_offsets[variant + 1]]
-        v_len = len(allele)
-
-        # handle shift
-        if shifted < shift:
-            ref_shift_dist = v_rel_pos - ref_idx
-            # not enough distance to finish the shift even with the variant
-            if shifted + ref_shift_dist + v_len < shift:
-                # consume ref up to the end of the variant
-                ref_idx = v_rel_pos + 1
-                # add the length of skipped ref and size of the variant to the shift
-                shifted += ref_shift_dist + v_len
-                # skip the variant
-                continue
-            # enough distance between ref_idx and variant to finish shift
-            elif shifted + ref_shift_dist >= shift:
-                ref_idx += shift - shifted
-                shifted = shift
-                # can still use the variant and whatever ref is left between
-                # ref_idx and the variant
-            # ref + (some of) variant is enough to finish shift
-            else:
-                # consume ref up to beginning of variant
-                # ref_idx will be moved to end of variant after using the variant
-                ref_idx = v_rel_pos
-                # how much left to shift - amount of ref we can use
-                allele_start_idx = shift - shifted - ref_shift_dist
-                #! without this check, parallel jit can cause a SystemError!
-                # * specifically cannot handle changes in array dimensionality.
-                # * without this check, allele can change from a 1D array to a 0D
-                # * array.
-                if allele_start_idx == v_len:
-                    continue
-                allele = allele[allele_start_idx:]
-                v_len = len(allele)
-                # done shifting
-                shifted = shift
-
-        # add reference sequence
-        ref_len = v_rel_pos - ref_idx
-        if out_idx + ref_len >= length:
-            # ref will get written by final clause
-            # handles case where extraneous variants downstream of the haplotype were provided
-            break
-        out[out_idx : out_idx + ref_len] = ref[ref_idx : ref_idx + ref_len]
-        out_idx += ref_len
-
-        # insertions + substitions
-        writable_length = min(v_len, length - out_idx)
-        out[out_idx : out_idx + writable_length] = allele[:writable_length]
-        out_idx += writable_length
-        # +1 because ALT alleles always replace 1 nt of reference for a
-        # normalized VCF
-        ref_idx = v_rel_pos + 1
-
-        # deletions, move ref to end of deletion
-        if v_diff < 0:
-            ref_idx -= v_diff
-
-        if out_idx >= length:
-            break
-
-    # fill rest with reference sequence and pad with Ns
-    unfilled_length = length - out_idx
-    if unfilled_length > 0:
-        writable_ref = min(unfilled_length, len(ref) - ref_idx)
-        out_end_idx = out_idx + writable_ref
-        ref_end_idx = ref_idx + writable_ref
-        out[out_idx:out_end_idx] = ref[ref_idx:ref_end_idx]
-
-        if out_end_idx < length:
-            out[out_end_idx:] = pad_char
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
@@ -1245,23 +1001,19 @@ def reconstruct_haplotype_from_sparse(
             ref_shift_dist = v_pos - ref_idx
             # not enough distance to finish the shift even with the variant
             if shifted + ref_shift_dist + v_len < shift:
-                # consume ref up to the end of the variant
-                ref_idx = v_ref_end
-                # add the length of skipped ref and size of the variant to the shift
-                shifted += ref_shift_dist + v_len
                 # skip the variant
                 continue
             # enough distance between ref_idx and start of variant to finish shift
             elif shifted + ref_shift_dist >= shift:
-                shifted = shift
                 ref_idx += shift - shifted
+                shifted = shift
                 # can still use the variant and whatever ref is left between
                 # ref_idx and the variant
             # ref + all or some of variant is enough to finish shift
             else:
-                shifted = shift
                 # how much left to shift - amount of ref we can use
                 allele_start_idx = shift - shifted - ref_shift_dist
+                shifted = shift
                 #! without if statement, parallel=True can cause a SystemError!
                 # * parallel jit cannot handle changes in array dimension.
                 # * without this, allele can change from a 1D array to a 0D
@@ -1309,6 +1061,12 @@ def reconstruct_haplotype_from_sparse(
         if out_idx >= length:
             break
 
+    if shifted < shift:
+        # need to shift the rest of the track
+        ref_idx += shift - shifted
+        ref_idx = min(ref_idx, len(ref))
+        shifted = shift
+
     # fill rest with reference sequence and pad with Ns
     unfilled_length = length - out_idx
     if unfilled_length > 0:
@@ -1343,7 +1101,7 @@ def choose_unphased_variants(
     geno_offsets: NDArray[np.int64],
     positions: NDArray[np.int32],
     sizes: NDArray[np.int32],
-    dosages: NDArray[np.float32],
+    ccfs: NDArray[np.float32],
     deterministic: bool,
 ) -> Tuple[NDArray[np.bool_], NDArray[np.int64]]:
     """Mark variants to keep for each haplotype.
@@ -1362,8 +1120,8 @@ def choose_unphased_variants(
         Shape = (total_variants) Positions of variants.
     sizes : NDArray[np.int32]
         Shape = (total_variants) Sizes of variants.
-    dosages : NDArray[np.float32]
-        Shape = (total_variants) Dosages of variants.
+    ccfs : NDArray[np.float32]
+        Shape = (total_variants) Cancer cell fractions (CCF) of variants.
     ends : NDArray[np.int32]
         Shape = (n_regions) Ends for each region.
     deterministic : bool
@@ -1394,7 +1152,7 @@ def choose_unphased_variants(
             o_idx = geno_offset_idxs[query, hap]
             o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
             qh_genos = geno_v_idxs[o_s:o_e]
-            qh_dosages = dosages[o_s:o_e]
+            qh_ccf = ccfs[o_s:o_e]
 
             k_idx = query * ploidy + hap
             k_s, k_e = keep_offsets[k_idx], keep_offsets[k_idx + 1]
@@ -1407,7 +1165,7 @@ def choose_unphased_variants(
                 query_start=ref_start,
                 query_end=ref_end,
                 variant_idxs=qh_genos,
-                dosages=qh_dosages,
+                ccf=qh_ccf,
                 positions=positions,
                 sizes=sizes,
                 groups=qh_groups,
@@ -1423,7 +1181,7 @@ def _choose_unphased_variants(
     query_start: int,
     query_end: int,
     variant_idxs: NDArray[np.int32],  # (v)
-    dosages: NDArray[np.float32],  # (v)
+    ccf: NDArray[np.float32],  # (v)
     positions: NDArray[np.int32],  # (total variants)
     sizes: NDArray[np.int32],  # (total variants)
     groups: NDArray[np.uint32],  # (v)
@@ -1435,6 +1193,8 @@ def _choose_unphased_variants(
     if len(variant_idxs) == 0:
         return np.ones(0, np.bool_)
 
+    # treat missing CCF as 1.0
+    ccf = np.nan_to_num(ccf, True, 1.0)
     groups[:] = UNSEEN_VARIANT
     ref_ends[:] = query_start
     write_lens[:] = 0
@@ -1503,9 +1263,9 @@ def _choose_unphased_variants(
     if n_groups == 1:
         return groups == 0
 
-    # Choose a group proportional to total dosage normalized by reference length.
+    # Choose a group proportional to total ccf normalized by reference length.
     # This is because variants with long ref len will prevent other variants from
-    # being assigned to the same group, reducing the potential total dosage of the
+    # being assigned to the same group, reducing the potential total ccf of the
     # group.f
     cum_prop = write_lens[:n_groups].view(
         np.float32
@@ -1520,7 +1280,7 @@ def _choose_unphased_variants(
         ref_lengths = np.minimum(v_ends, ref_ends[g]) - np.maximum(
             v_starts, query_start
         )
-        cum_prop[g] = (dosages[groups == g] / ref_lengths).sum()
+        cum_prop[g] = (ccf[groups == g] / ref_lengths).sum()
     if deterministic:
         keep_group = cum_prop.argmax()
     else:

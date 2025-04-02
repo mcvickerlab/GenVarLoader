@@ -1,3 +1,45 @@
+## v0.10.5 (2025-04-01)
+
+### Fix
+
+- (breaks experimental API) rename dosage to CCF and adjust alg to handle missing CCF from e.g. germline variants.
+
+## v0.10.4 (2025-04-01)
+
+### Fix
+
+- hotfix for indexer usage
+
+## v0.10.3 (2025-04-01)
+
+### Fix
+
+- shape of dataset return values.
+
+## v0.10.2 (2025-04-01)
+
+### Fix
+
+- pass relevant tests.
+- faster VCF reading.
+
+## v0.10.1 (2025-03-25)
+
+### Fix
+
+- bump polars version, breaking changes upstream.
+
+## v0.10.0 (2025-03-21)
+
+### Feat
+
+- type-safe Dataset, passes all tests.
+- refactor Dataset implementation to be (almost) fully type-safe.
+
+### Fix
+
+- Dataset.open returns highest complexity ds by default (haps + all tracks, sorted).
+
 ## v0.9.0 (2025-03-06)
 
 This is a breaking change for GVL. Users should view the ["What's a `gvl.Dataset`?"](https://genvarloader.readthedocs.io/en/latest/dataset.html) page in the documentation for details, but major breaks include:

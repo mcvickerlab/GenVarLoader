@@ -1,11 +1,21 @@
 from textwrap import dedent
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Optional,
+    Tuple,
+    Union,
+    overload,
+)
 
 import numpy as np
 from loguru import logger
 from numpy.typing import NDArray
 
-from ._types import Idx
+from ._types import AnnotatedHaps
 
 try:
     import torch
@@ -20,7 +30,13 @@ if TYPE_CHECKING:
     import torch
     import torch.utils.data as td
 
-    from . import Dataset
+    from ._dataset._impl import Dataset
+
+
+def no_torch_error():
+    raise ImportError(
+        "PyTorch is not available. Please install PyTorch to use this function."
+    )
 
 
 def get_dataloader(
@@ -93,15 +109,27 @@ def get_sampler(
     return td.BatchSampler(inner_sampler, batch_size, drop_last)
 
 
-def _tensor_from_maybe_bytes(array: NDArray) -> "torch.Tensor":
+@overload
+def _tensor_from_maybe_bytes(array: NDArray) -> "torch.Tensor": ...
+@overload
+def _tensor_from_maybe_bytes(array: AnnotatedHaps) -> dict[str, "torch.Tensor"]: ...
+def _tensor_from_maybe_bytes(
+    array: NDArray | AnnotatedHaps,
+) -> "torch.Tensor" | Dict[str, "torch.Tensor"]:
     if not _TORCH_AVAILABLE:
         raise ImportError(
             "Could not import PyTorch. Please install PyTorch to use torch features."
         )
-
-    if array.dtype.type == np.bytes_:
-        array = array.view(np.uint8)
-    return torch.from_numpy(array)
+    if isinstance(array, AnnotatedHaps):
+        return {
+            "haps": _tensor_from_maybe_bytes(array.haps),
+            "var_idxs": _tensor_from_maybe_bytes(array.var_idxs),
+            "ref_coords": _tensor_from_maybe_bytes(array.ref_coords),
+        }
+    else:
+        if array.dtype.type == np.bytes_:
+            array = array.view(np.uint8)
+        return torch.from_numpy(array)
 
 
 if _TORCH_AVAILABLE:
@@ -118,9 +146,10 @@ if _TORCH_AVAILABLE:
             return len(self.dataset)
 
         def __getitem__(
-            self, idx: Idx
+            self, idx: int | list[int]
         ) -> Union["torch.Tensor", Tuple["torch.Tensor", ...], Any]:
-            batch = self.dataset._getitem_raveled(idx)
+            r_idx, s_idx = np.unravel_index(idx, self.dataset.shape)
+            batch = self.dataset[r_idx, s_idx]
             if isinstance(batch, np.ndarray):
                 batch = _tensor_from_maybe_bytes(batch)
             elif isinstance(batch, tuple):
@@ -177,3 +206,6 @@ if _TORCH_AVAILABLE:
 
         def __iter__(self):
             return iter(self.ds_idx)
+else:
+    TorchDataset = no_torch_error  # type: ignore
+    StratifiedSampler = no_torch_error  # type: ignore
