@@ -135,12 +135,20 @@ def _tensor_from_maybe_bytes(
 if _TORCH_AVAILABLE:
 
     class TorchDataset(td.Dataset):
-        def __init__(self, dataset: "Dataset"):
+        dataset: "Dataset"
+        include_indices: bool
+        transform: Callable | None
+
+        def __init__(
+            self, dataset: "Dataset", include_indices: bool, transform: Callable | None
+        ):
             if not _TORCH_AVAILABLE:
                 raise ImportError(
                     "Could not import PyTorch. Please install PyTorch to use torch features."
                 )
             self.dataset = dataset
+            self.include_indices = include_indices
+            self.transform = transform
 
         def __len__(self) -> int:
             return len(self.dataset)
@@ -150,10 +158,23 @@ if _TORCH_AVAILABLE:
         ) -> Union["torch.Tensor", Tuple["torch.Tensor", ...], Any]:
             r_idx, s_idx = np.unravel_index(idx, self.dataset.shape)
             batch = self.dataset[r_idx, s_idx]
-            if isinstance(batch, np.ndarray):
-                batch = _tensor_from_maybe_bytes(batch)
-            elif isinstance(batch, tuple):
-                batch = tuple(_tensor_from_maybe_bytes(b) for b in batch)
+
+            if not isinstance(batch, tuple):
+                batch = (batch,)
+                single_item = True
+            else:
+                single_item = False
+
+            if self.include_indices:
+                batch = (*batch, r_idx, s_idx)
+
+            if self.transform is not None:
+                batch = self.transform(*batch)
+
+            batch = tuple(_tensor_from_maybe_bytes(b) for b in batch)
+            if single_item:
+                batch = batch[0]
+
             return batch
 
     class StratifiedSampler(td.Sampler):
