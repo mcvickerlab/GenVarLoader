@@ -1152,7 +1152,7 @@ def choose_unphased_variants(
             o_idx = geno_offset_idxs[query, hap]
             o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
             qh_genos = geno_v_idxs[o_s:o_e]
-            qh_ccf = ccfs[o_s:o_e]
+            qh_ccfs = ccfs[o_s:o_e]
 
             k_idx = query * ploidy + hap
             k_s, k_e = keep_offsets[k_idx], keep_offsets[k_idx + 1]
@@ -1165,7 +1165,7 @@ def choose_unphased_variants(
                 query_start=ref_start,
                 query_end=ref_end,
                 variant_idxs=qh_genos,
-                ccf=qh_ccf,
+                ccfs=qh_ccfs,
                 positions=positions,
                 sizes=sizes,
                 groups=qh_groups,
@@ -1181,7 +1181,7 @@ def _choose_unphased_variants(
     query_start: int,
     query_end: int,
     variant_idxs: NDArray[np.int32],  # (v)
-    ccf: NDArray[np.float32],  # (v)
+    ccfs: NDArray[np.float32],  # (v)
     positions: NDArray[np.int32],  # (total variants)
     sizes: NDArray[np.int32],  # (total variants)
     groups: NDArray[np.uint32],  # (v)
@@ -1194,7 +1194,7 @@ def _choose_unphased_variants(
         return np.ones(0, np.bool_)
 
     # treat missing CCF as 1.0
-    ccf = np.nan_to_num(ccf, True, 1.0)
+    ccfs = np.nan_to_num(ccfs, True, 1.0)
     groups[:] = UNSEEN_VARIANT
     ref_ends[:] = query_start
     write_lens[:] = 0
@@ -1280,7 +1280,7 @@ def _choose_unphased_variants(
         ref_lengths = np.minimum(v_ends, ref_ends[g]) - np.maximum(
             v_starts, query_start
         )
-        cum_prop[g] = (ccf[groups == g] / ref_lengths).sum()
+        cum_prop[g] = (ccfs[groups == g] / ref_lengths).sum()
     if deterministic:
         keep_group = cum_prop.argmax()
     else:

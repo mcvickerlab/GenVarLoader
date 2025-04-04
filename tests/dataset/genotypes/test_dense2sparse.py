@@ -41,11 +41,11 @@ def case_snps():
     sparse_offsets = np.empty(n_regions * n_samples + 1, np.int64)
     sparse_offsets[0] = 0
     sparse_offsets[1:] = n_alt * np.arange(1, n_regions * n_samples + 1)
-    dosages = np.array([0, 0.5, -9.0], np.float32)
-    dosages = repeat(dosages, "v -> s v", s=n_samples)
+    ccfs = np.array([0, 0.5, -9.0], np.float32)
+    ccfs = repeat(ccfs, "v -> s v", s=n_samples)
     sparse_somatic = SparseSomaticGenotypes(
         variant_idxs=sparse_v_idxs,
-        dosages=dosages[:, [1]].T.ravel(),
+        ccfs=ccfs[:, [1]].T.ravel(),
         offsets=sparse_offsets,
         n_regions=n_regions,
         n_samples=n_samples,
@@ -66,7 +66,7 @@ def case_snps():
         starts,
         lengths,
         max_ends,
-        dosages,
+        ccfs,
     )
 
 
@@ -100,11 +100,11 @@ def case_indels():
     sparse_offsets = np.empty(n_regions * n_samples + 1, np.int64)
     sparse_offsets[0] = 0
     sparse_offsets[1:] = n_alt * np.arange(1, n_regions * n_samples + 1)
-    dosages = np.array([0, 0.5, -9.0, 0.4], np.float32)
-    dosages = repeat(dosages, "v -> s v", s=n_samples)
+    ccfs = np.array([0, 0.5, -9.0, 0.4], np.float32)
+    ccfs = repeat(ccfs, "v -> s v", s=n_samples)
     sparse_somatic = SparseSomaticGenotypes(
         variant_idxs=sparse_v_idxs,
-        dosages=dosages[:, [1, 3]].T.ravel(),
+        ccfs=ccfs[:, [1, 3]].T.ravel(),
         offsets=sparse_offsets,
         n_regions=n_regions,
         n_samples=n_samples,
@@ -125,7 +125,7 @@ def case_indels():
         starts,
         lengths,
         max_ends,
-        dosages,
+        ccfs,
     )
 
 
@@ -206,7 +206,7 @@ def test_somatic_from_dense(
 
     np.testing.assert_equal(actual.offsets, desired.offsets)
     np.testing.assert_equal(actual.variant_idxs, desired.variant_idxs)
-    np.testing.assert_equal(actual.dosages, desired.dosages)
+    np.testing.assert_equal(actual.ccfs, desired.ccfs)
 
 
 @parametrize_with_cases(

@@ -22,6 +22,7 @@ DTYPE = TypeVar("DTYPE", bound=np.generic)
 Idx = Union[
     int, np.integer, Sequence[int], slice, NDArray[np.integer], NDArray[np.bool_]
 ]
+StrIdx = Idx | str | Sequence[str]
 ListIdx = Union[Sequence[int], NDArray[np.integer]]
 
 

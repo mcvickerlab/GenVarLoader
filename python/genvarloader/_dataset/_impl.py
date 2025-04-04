@@ -1124,13 +1124,14 @@ class Dataset:
         self, rag: Ragged | RaggedAnnotatedHaps, to_rc: NDArray[np.bool_]
     ) -> Ragged | RaggedAnnotatedHaps:
         if isinstance(rag, Ragged):
-            to_rc = to_rc.reshape(to_rc.shape + ((1,) * (len(rag.shape) - 1)))
             if is_rag_dtype(rag, np.bytes_):
                 rag = _reverse_complement(rag, to_rc)
             elif is_rag_dtype(rag, np.float32):
                 _reverse(rag, to_rc)
         elif isinstance(rag, RaggedAnnotatedHaps):
-            rag.haps = _reverse_complement(rag.haps, to_rc[:, None])
+            rag.haps = _reverse_complement(rag.haps, to_rc)
+            _reverse(rag.var_idxs, to_rc)
+            _reverse(rag.ref_coords, to_rc)
         else:
             assert_never(rag)
         return rag

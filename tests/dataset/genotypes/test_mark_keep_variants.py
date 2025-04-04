@@ -9,7 +9,7 @@ from pytest_cases import parametrize_with_cases
 
 def case_snps():
     variant_idxs = np.array([0, 1, 2], np.int32)
-    dosages = np.array([0.3, 0.2, 0.1], np.float32)
+    ccfs = np.array([0.3, 0.2, 0.1], np.float32)
     positions = np.array([1, 2, 3], np.int32)
     sizes = np.array([0, 0, 0], np.int32)
     query_start = 0
@@ -17,12 +17,12 @@ def case_snps():
 
     desired = np.ones(3, np.bool_)
 
-    return variant_idxs, dosages, positions, sizes, query_start, query_end, desired
+    return variant_idxs, ccfs, positions, sizes, query_start, query_end, desired
 
 
 def case_extra_snps():
     variant_idxs = np.array([0, 1, 2], np.int32)
-    dosages = np.array([0.3, 0.2, 0.1], np.float32)
+    ccfs = np.array([0.3, 0.2, 0.1], np.float32)
     positions = np.array([1, 2, 3], np.int32)
     sizes = np.array([0, 0, 0], np.int32)
     query_start = 0
@@ -30,7 +30,7 @@ def case_extra_snps():
 
     desired = np.array([True, False, False], np.bool_)
 
-    return variant_idxs, dosages, positions, sizes, query_start, query_end, desired
+    return variant_idxs, ccfs, positions, sizes, query_start, query_end, desired
 
 
 def case_indels_0():
@@ -43,7 +43,7 @@ def case_indels_0():
     # r r r ii r r/s
 
     variant_idxs = np.array([0, 1, 2], np.int32)
-    dosages = np.array([0.3, 0.2, 0.1], np.float32)
+    ccfs = np.array([0.3, 0.2, 0.1], np.float32)
     positions = np.array([1, 3, 5], np.int32)
     sizes = np.array([-3, 1, 0], np.int32)
     query_start = 0
@@ -68,13 +68,13 @@ def case_indels_0():
         ref_lengths = np.minimum(v_ends, ref_ends[g]) - np.maximum(
             v_starts, query_start
         )
-        cum_prop[g] = (dosages[groups == g] / ref_lengths).sum()
+        cum_prop[g] = (ccfs[groups == g] / ref_lengths).sum()
     cum_prop = cum_prop.cumsum()
     cum_prop /= cum_prop[-1]
     keep_group = (rands[1] <= cum_prop).sum() - 1
     desired = groups == keep_group
 
-    return variant_idxs, dosages, positions, sizes, query_start, query_end, desired
+    return variant_idxs, ccfs, positions, sizes, query_start, query_end, desired
 
 
 def case_del_span_start():
@@ -83,7 +83,7 @@ def case_del_span_start():
     # . . - r s ...
 
     variant_idxs = np.array([0, 1, 2], np.int32)
-    dosages = np.array([0.3, 0.2, 0.1], np.float32)
+    ccfs = np.array([0.3, 0.2, 0.1], np.float32)
     positions = np.array([0, 1, 4], np.int32)
     sizes = np.array([-2, 0, 0], np.int32)
     query_start = 2
@@ -91,16 +91,16 @@ def case_del_span_start():
 
     desired = np.array([True, False, True], np.bool_)
 
-    return variant_idxs, dosages, positions, sizes, query_start, query_end, desired
+    return variant_idxs, ccfs, positions, sizes, query_start, query_end, desired
 
 
 @parametrize_with_cases(
-    "variant_idxs, dosages, positions, sizes, query_start, query_end, desired",
+    "variant_idxs, ccfs, positions, sizes, query_start, query_end, desired",
     cases=".",
 )
 def test_mark_keep_variants(
     variant_idxs: NDArray[np.int32],
-    dosages: NDArray[np.float32],
+    ccfs: NDArray[np.float32],
     positions: NDArray[np.int32],
     sizes: NDArray[np.int32],
     query_start: int,
@@ -116,7 +116,7 @@ def test_mark_keep_variants(
     _seed(0)
     actual = _choose_unphased_variants(
         variant_idxs=variant_idxs,
-        dosages=dosages,
+        ccfs=ccfs,
         positions=positions,
         sizes=sizes,
         query_start=query_start,

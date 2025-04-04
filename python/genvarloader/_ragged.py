@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Generic, Optional, Tuple, TypeGuard, TypeVar, Union
+from typing import Any, Generic, Optional, Tuple, TypeGuard, TypeVar, Union, cast
 
 import awkward as ak
 import numba as nb
@@ -281,7 +281,7 @@ class Ragged(Generic[RDTYPE]):
         """Convert from an `Awkward <https://awkward-array.org/doc/main/>`_ array without copying. Note that this effectively
         returns a view of the data, so modifying the data will modify the original array."""
         # parse shape
-        shape_str = str(awk.type).split(" * ")
+        shape_str = awk.typestr.split(" * ")
         try:
             shape = tuple(map(int, shape_str[:-2]))
         except ValueError as err:
@@ -290,11 +290,21 @@ class Ragged(Generic[RDTYPE]):
             ) from err
 
         # extract data and offsets
-        layout = awk.layout._offsets_and_flattened(0, -1)[1].content
-        data = np.asarray(layout.content.data)
-        offsets = np.asarray(layout.offsets.data)
+        data = ak.flatten(awk, axis=None).to_numpy()
+        layout = awk.layout
+        while hasattr(layout, "content"):
+            if isinstance(layout, ListOffsetArray):
+                offsets = layout.offsets.data
+                offsets = cast(NDArray[np.int64], offsets)
+                rag = cls.from_offsets(data, shape, offsets)
+                break
+            else:
+                layout = layout.content
+        else:
+            lengths = ak.count(awk, axis=-1).to_numpy()
+            rag = cls.from_lengths(data, lengths)
 
-        return cls.from_offsets(data, shape, offsets)
+        return rag
 
 
 INTERVAL_DTYPE = np.dtype(

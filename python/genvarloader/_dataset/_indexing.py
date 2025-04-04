@@ -1,13 +1,13 @@
-from itertools import chain
 from typing import List, Literal, Optional, Sequence, cast
 
 import numpy as np
 from attrs import define, evolve
 from hirola import HashTable
+from more_itertools import collapse
 from numpy.typing import NDArray
 
 from genvarloader._dataset._utils import oidx_to_raveled_idx
-from genvarloader._types import Idx
+from genvarloader._types import Idx, StrIdx
 from genvarloader._utils import idx_like_to_array, is_dtype
 
 
@@ -152,7 +152,7 @@ class DatasetIndexer:
         )
 
     def parse_idx(
-        self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
+        self, idx: Idx | tuple[Idx] | tuple[Idx, StrIdx]
     ) -> tuple[NDArray[np.integer], bool, tuple[int, ...] | None]:
         if not isinstance(idx, tuple):
             regions = idx
@@ -163,24 +163,7 @@ class DatasetIndexer:
         else:
             regions, samples = idx
 
-        if (
-            isinstance(samples, str)
-            or (isinstance(samples, np.ndarray) and is_dtype(samples, np.str_))
-            or (
-                isinstance(samples, Sequence)
-                and isinstance(next(chain.from_iterable(samples)), str)  # type: ignore
-            )
-        ):
-            s_idx = self.s2i_map.get(samples)
-            if (np.atleast_1d(s_idx) == -1).any():
-                raise KeyError(
-                    f"Some samples not found in dataset: {np.unique(np.array(samples)[s_idx == -1])}"
-                )
-        else:
-            s_idx = samples
-
-        s_idx = cast(Idx, s_idx)  # above clause does this, but can't narrow type
-
+        s_idx = s2i(samples, self.s2i_map)
         idx = self.i2d_map.reshape(self.shape)[regions, s_idx]
 
         out_reshape = None
@@ -193,3 +176,27 @@ class DatasetIndexer:
         idx = idx.ravel()
 
         return idx, squeeze, out_reshape
+
+    def s2i(self, samples: StrIdx) -> Idx:
+        """Convert sample names to sample indices."""
+        return s2i(samples, self.s2i_map)
+
+
+def s2i(str_idx: StrIdx, map: HashTable) -> Idx:
+    """Convert a string index to an integer index using a hirola.HashTable."""
+    if (
+        isinstance(str_idx, str)
+        or (isinstance(str_idx, np.ndarray) and is_dtype(str_idx, np.str_))
+        or (isinstance(str_idx, Sequence) and isinstance(next(collapse(str_idx)), str))
+    ):
+        idx = map.get(str_idx)
+        if (np.atleast_1d(idx) == -1).any():
+            raise KeyError(
+                f"Some keys not found in mapping: {np.unique(np.array(str_idx)[idx == -1])}"
+            )
+    else:
+        idx = str_idx
+
+    idx = cast(Idx, idx)  # above clause does this, but can't narrow type
+
+    return idx
