@@ -8,6 +8,7 @@ import numpy as np
 from attrs import define
 from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
 from awkward.index import Index64
+from einops import repeat
 from numpy.typing import NDArray
 
 from ._types import DTYPE, AnnotatedHaps, Idx
@@ -100,6 +101,11 @@ class Ragged(Generic[RDTYPE]):
         if a.shape != ():
             raise ValueError("Array has more than 1 ragged element.")
         return a.data
+
+    @property
+    def ndim(self) -> int:
+        """Number of dimensions of the ragged array."""
+        return len(self.shape)
 
     @property
     def offsets(self) -> NDArray[np.int64]:
@@ -320,7 +326,7 @@ COMPLEMENTS = b"TGCA"
 def _rc_helper(
     data: NDArray[np.uint8], offsets: NDArray[np.int64], mask: NDArray[np.bool_]
 ) -> NDArray[np.uint8]:
-    out = np.empty_like(data)
+    out = data.copy()
     for i in nb.prange(len(offsets) - 1):
         start, end = offsets[i], offsets[i + 1]
         _data = data[start:end]
@@ -337,29 +343,35 @@ def _rc_helper(
 def _reverse_complement(
     seqs: Ragged[np.bytes_], mask: NDArray[np.bool_]
 ) -> Ragged[np.bytes_]:
-    _, mask = np.broadcast_arrays(seqs.lengths, mask)
-    rc_seqs = _rc_helper(seqs.data.view(np.uint8), seqs.offsets, mask.ravel())
+    # (b [p] ~l), (b)
+    if seqs.ndim == 2:
+        ploidy = seqs.shape[1]
+        mask = repeat(mask, "b -> (b p)", p=ploidy)
+    rc_seqs = _rc_helper(seqs.data.view(np.uint8), seqs.offsets, mask)
     return Ragged.from_offsets(rc_seqs.view("S1"), seqs.shape, seqs.offsets)
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
-def _reverse_helper(
-    data: NDArray[np.uint8], offsets: NDArray[np.int64], mask: NDArray[np.bool_]
-):
+def _reverse_helper(data: NDArray, offsets: NDArray[np.int64], mask: NDArray[np.bool_]):
     for i in nb.prange(len(offsets) - 1):
         if mask[i]:
             start, end = offsets[i], offsets[i + 1]
             if start > 0:
-                reverse_slice = slice(end - 1, start - 1, -1)
+                data[start:end] = data[end - 1 : start - 1 : -1]
             else:
-                reverse_slice = slice(end - 1, None, -1)
-            data[start:end] = data[reverse_slice]
+                data[start:end] = data[end - 1 :: -1]
 
 
-def _reverse(tracks: Ragged[np.float32], mask: NDArray[np.bool_]):
+def _reverse(tracks: Ragged, mask: NDArray[np.bool_]):
     """Reverses data along the ragged axis in-place."""
-    _, mask = np.broadcast_arrays(tracks.lengths, mask)
-    _reverse_helper(tracks.data.view(np.uint8), tracks.offsets, mask.ravel())
+    # (b t [p] ~l), (b)
+    if tracks.ndim == 2:
+        n_tracks = tracks.shape[1]
+        mask = repeat(mask, "b -> (b t)", t=n_tracks)
+    elif tracks.ndim == 3:
+        n_tracks, ploidy = tracks.shape[1:]
+        mask = repeat(mask, "b -> (b t p)", t=n_tracks, p=ploidy)
+    _reverse_helper(tracks.data, tracks.offsets, mask)
 
 
 def _jitter(
