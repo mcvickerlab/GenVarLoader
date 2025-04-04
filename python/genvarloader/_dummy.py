@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import awkward as ak
 import numpy as np
 import polars as pl
 import seqpro as sp
@@ -8,7 +9,7 @@ from natsort import natsorted
 
 from ._dataset._genotypes import SparseGenotypes
 from ._dataset._impl import RaggedDataset
-from ._dataset._indexing import DatasetIndexer
+from ._dataset._indexing import DatasetIndexer, SpliceIndexer
 from ._dataset._intervals import tracks_to_intervals
 from ._dataset._reconstruct import Haps, HapsTracks, Reference, Tracks, _Variants
 from ._dataset._utils import bed_to_regions
@@ -17,7 +18,7 @@ from ._utils import _lengths_to_offsets
 from ._variants._records import VLenAlleles
 
 
-def get_dummy_dataset():
+def get_dummy_dataset(spliced: bool = False):
     """Return a dummy :class:`Dataset <genvarloader.Dataset>`  with 4 regions, 4 samples, max jitter of 2, a reference genome of all :code:`"N"`, genotypes, and
     1 track "read-depth" where each track is :code:`[1, 2, 3, 4, 5, 6]` in the reference coordinate system, where :code:`3` is aligned
     with each region's start coordinate. Is initialized to return ragged haplotypes and tracks with no jitter and deterministic reconstruction algorithms.
@@ -115,6 +116,18 @@ def get_dummy_dataset():
 
     dummy_recon = HapsTracks(dummy_haps, dummy_tracks)
 
+    if spliced:
+        names = ["tp53", "shh"]
+        sp_map = ak.Array(
+            [
+                [0, 1, 2],
+                [3],
+            ]
+        )
+        dummy_spi = SpliceIndexer(names, sp_map, dummy_idxer)
+    else:
+        dummy_spi = None
+
     dummy_dataset: RaggedDataset[Ragged[np.bytes_], Ragged[np.float32], None, None] = (
         RaggedDataset(
             path=Path("dummy"),
@@ -130,6 +143,7 @@ def get_dummy_dataset():
             _full_regions=dummy_regions,
             _jittered_regions=dummy_regions.copy(),
             _idxer=dummy_idxer,
+            _sp_idxer=dummy_spi,
             _seqs=dummy_haps,
             _tracks=dummy_tracks,
             _recon=dummy_recon,

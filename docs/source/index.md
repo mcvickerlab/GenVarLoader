@@ -6,6 +6,7 @@ write
 geuvadis
 faq
 api
+changelog
 ```
 
 # GenVarLoader

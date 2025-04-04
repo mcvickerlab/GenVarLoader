@@ -22,7 +22,7 @@ def dataset():
     return ds
 
 
-def test_ds_haps(dataset: gvl.RaggedDataset[gvl.Ragged[np.bytes_], None, None, None]):
+def test_ds_haps(dataset: gvl.RaggedDataset[gvl.Ragged[np.bytes_], None]):
     for region, sample in product(range(dataset.n_regions), dataset.samples):
         c, s, e = dataset.regions.select("chrom", "chromStart", "chromEnd").row(region)
         # ragged (p)
