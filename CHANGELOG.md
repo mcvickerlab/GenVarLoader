@@ -1,3 +1,9 @@
+## v0.10.6 (2025-04-04)
+
+### Fix
+
+- bug in rev and rev comp causing garbage output for negative stranded data.
+
 ## v0.10.5 (2025-04-01)
 
 ### Fix
