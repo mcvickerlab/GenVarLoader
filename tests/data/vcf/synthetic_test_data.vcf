@@ -1,0 +1,20 @@
+##fileformat=VCFv4.2
+##INFO=<ID=AF,Number=1,Type=Integer,Description="Allele Frequency">
+##INFO=<ID=AF,Number=1,Type=Float,Description="Allele Frequency">
+##INFO=<ID=PASS,Number=0,Type=Flag,Description="Variant passed filters">
+##INFO=<ID=GT,Number=1,Type=Character,Description="Genotype">
+##INFO=<ID=DBSNP,Number=1,Type=String,Description="dbSNP ID">
+#CHROM  POS     ID      REF     ALT     QUAL    FILTER  INFO
+chr1    101     .       A       G       .       PASS    AF=0;AF=0.02;PASS;GT=1
+chr1    102     .       G       GA      .       PASS    AF=1;PASS;GT=0
+chr1    103     .       GA      G       .       PASS    AF=1;PASS;GT=0
+chr1    104     .       AA      TT      .       PASS    AF=1;PASS;GT=0
+chr1    105     .       A       TT      .       PASS    AF=0;PASS;GT=0
+chr1    106     .       AA      T       .       PASS    AF=1;PASS;GT=0
+chr1    107     .       *       A       .       PASS    AF=0;PASS;GT=0
+chr1    108     .       G       <ID=DEL,Description="deletion"> . PASS    AF=1;PASS;GT=1
+chr1    109     .       A       G       .       PASS    AF=10;AF=0.10;PASS;GT=0
+chr1    110     .       A       G       .       PASS    AF=20;AF=0.20;PASS;GT=1;DBSNP="rs12345"
+chr1    111     .       G       A       .       PASS    AF=30;AF=0.30;PASS;GT=1;FAIL
+chr1    112     .       T       C       .       PASS    AF=40;AF=0.40;PASS;GT=1;DBSNP="rs67890"
+chr1    113     .       G       T       .       PASS    AF=50;AF=0.50;PASS;GT=1;DBSNP="rs23456";FAIL
