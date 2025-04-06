@@ -24,7 +24,7 @@ import polars as pl
 from attrs import define, evolve, field
 from loguru import logger
 from numpy.typing import NDArray
-from typing_extensions import NoReturn, assert_never
+from typing_extensions import NoReturn, Self, assert_never
 
 from .._ragged import (
     Ragged,
@@ -36,7 +36,7 @@ from .._ragged import (
 )
 from .._torch import TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx, StrIdx
-from .._utils import idx_like_to_array
+from .._utils import idx_like_to_array, is_dtype
 from ._genotypes import SparseGenotypes
 from ._indexing import DatasetIndexer, SpliceIndexer
 from ._reconstruct import Haps, HapsTracks, Reference, Seqs, SeqsTracks, Tracks
@@ -93,8 +93,8 @@ class Dataset:
     - :meth:`Dataset.with_transform() <Dataset.with_transform()>`
     """
 
-    @overload
     @staticmethod
+    @overload
     def open(
         path: str | Path,
         reference: None = None,
@@ -102,9 +102,14 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
+        splice_info: str
+        | tuple[str, str]
+        | dict[Any, NDArray[np.integer]]
+        | None = None,
+        var_filter: Literal["exonic"] | None = None,
     ) -> RaggedDataset[None, RTRK]: ...
-    @overload
     @staticmethod
+    @overload
     def open(
         path: str | Path,
         reference: str | Path,
@@ -112,6 +117,11 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
+        splice_info: str
+        | tuple[str, str]
+        | dict[Any, NDArray[np.integer]]
+        | None = None,
+        var_filter: Literal["exonic"] | None = None,
     ) -> RaggedDataset[Ragged[np.bytes_], RTRK]: ...
     @staticmethod
     def open(
@@ -123,8 +133,9 @@ class Dataset:
         rc_neg: bool = True,
         splice_info: str
         | tuple[str, str]
-        | dict[Any, NDArray[np.integer]]
+        | dict[str, NDArray[np.integer]]
         | None = None,
+        var_filter: Literal["exonic"] | None = None,
     ) -> RaggedDataset[RSEQ, RTRK]:
         """Open a dataset from a path. If no reference genome is provided, the dataset cannot yield sequences.
         Will initialize the dataset such that it will return tracks and haplotypes (reference sequences if no genotypes) if possible.
@@ -147,6 +158,13 @@ class Dataset:
             can be returned.
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
+        splice_info
+            A string or tuple of strings representing the splice information to use. If a string, it will be used as a column name.
+            If a tuple of strings, the first string will be used as a column name and the second string will be used as a value.
+            If a dictionary, the keys will be used as the splice information and the values will be used as the splice map.
+            If None, no splice information will be used.
+        var_filter
+            Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
         """
         path = Path(path)
         if not path.exists():
@@ -226,6 +244,7 @@ class Dataset:
                     samples=samples,
                     ploidy=ploidy,
                 )
+                seqs.filter = var_filter
                 tracks = None
                 reconstructor = seqs
             case reference, True, True:
@@ -243,6 +262,7 @@ class Dataset:
                     samples=samples,
                     ploidy=ploidy,
                 )
+                seqs.filter = var_filter
                 tracks = Tracks.from_path(path, regions, len(samples))
                 tracks = tracks.with_tracks(list(tracks.intervals))
                 reconstructor = HapsTracks(haps=seqs, tracks=tracks)
@@ -252,42 +272,11 @@ class Dataset:
                 assert_never(has_intervals)
 
         if splice_info is not None:
-            if isinstance(splice_info, str):
-                names, sorter, idx, lengths = np.unique(
-                    bed[splice_info],
-                    return_index=True,
-                    return_inverse=True,
-                    return_counts=True,
-                )
-                names = names[np.argsort(sorter)]
-                splice_map = Ragged.from_lengths(np.argsort(idx), lengths).to_awkward()[
-                    np.argsort(sorter)
-                ]
-            elif isinstance(splice_info, Tuple):
-                names, sorter, lengths = np.unique(
-                    bed[splice_info[0]],
-                    return_index=True,
-                    return_counts=True,
-                )
-                data = (
-                    bed[splice_info]
-                    .with_row_index()
-                    .sort(splice_info)["index"]
-                    .to_numpy()
-                )
-                splice_map = Ragged.from_lengths(data, lengths).to_awkward()[
-                    np.argsort(sorter)
-                ]
-            elif isinstance(splice_info, dict):
-                names = np.array(list(splice_info.keys()))
-                splice_map = ak.Array(splice_info.values())
-            else:
-                assert_never(splice_info)
-
-            splice_map = cast(ak.Array, splice_map)
-            sp_idxer = SpliceIndexer(names, splice_map, idxer)
+            sp_idxer = _parse_splice_info(splice_info, bed, idxer)
+            spliced_bed = _get_spliced_bed(sp_idxer, bed)
         else:
             sp_idxer = None
+            spliced_bed = None
 
         dataset = RaggedDataset(
             path=path,
@@ -302,6 +291,7 @@ class Dataset:
             _idxer=idxer,
             _sp_idxer=sp_idxer,
             _full_bed=bed,
+            _spliced_bed=spliced_bed,
             _full_regions=regions,
             _jittered_regions=regions.copy(),
             _seqs=seqs,
@@ -320,6 +310,12 @@ class Dataset:
         rng: int | np.random.Generator | None = None,
         deterministic: bool | None = None,
         rc_neg: bool | None = None,
+        splice_info: str
+        | tuple[str, str]
+        | dict[str, NDArray[np.integer]]
+        | Literal[False]
+        | None = None,
+        var_filter: Literal[False, "exonic"] | None = None,
     ) -> Dataset:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -336,6 +332,13 @@ class Dataset:
             can be returned.
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
+        splice_info
+            A string or tuple of strings representing the splice information to use. If a string, it will be used as a column name.
+            If a tuple of strings, the first string will be used as a column name and the second string will be used as a value.
+            If a dictionary, the keys will be used as the splice information and the values will be used as the splice map.
+            If False, no splice information will be used.
+        var_filter
+            Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
         """
         to_evolve = {}
 
@@ -376,6 +379,27 @@ class Dataset:
 
         if rc_neg is not None:
             to_evolve["rc_neg"] = rc_neg
+
+        if splice_info is not None:
+            if splice_info is False:
+                _splice_info = None
+            else:
+                _splice_info = _parse_splice_info(
+                    splice_info, self.regions, self._idxer
+                )
+            to_evolve["_sp_idxer"] = _splice_info
+
+        if var_filter is not None:
+            if not isinstance(self._seqs, Haps):
+                raise ValueError(
+                    "Filtering variants can only be done when the dataset has variants."
+                )
+
+            if var_filter is False:
+                var_filter = None
+
+            if var_filter != self._seqs.filter:
+                to_evolve["_seqs"] = evolve(self._seqs, filter=var_filter)
 
         return evolve(self, **to_evolve)
 
@@ -420,6 +444,7 @@ class Dataset:
                 _idxer=self._idxer,
                 _sp_idxer=self._sp_idxer,
                 _full_bed=self._full_bed,
+                _spliced_bed=self._spliced_bed,
                 _full_regions=self._full_regions,
                 _jittered_regions=self._jittered_regions,
                 _seqs=self._seqs,
@@ -441,6 +466,7 @@ class Dataset:
                 _idxer=self._idxer,
                 _sp_idxer=self._sp_idxer,
                 _full_bed=self._full_bed,
+                _spliced_bed=self._spliced_bed,
                 _full_regions=self._full_regions,
                 _jittered_regions=self._jittered_regions,
                 _seqs=self._seqs,
@@ -614,6 +640,7 @@ class Dataset:
     transform: Callable | None
     """Tranform to apply to what the dataset would otherwise return on its own."""
     _full_bed: pl.DataFrame = field(alias="_full_bed")
+    _spliced_bed: pl.DataFrame | None = field(alias="_spliced_bed")
     _full_regions: NDArray[np.int32] = field(alias="_full_regions")
     """Unjittered, sorted regions matching order on-disk."""
     _jittered_regions: NDArray[np.int32] = field(alias="_jittered_regions")
@@ -638,6 +665,11 @@ class Dataset:
     def is_subset(self) -> bool:
         """Whether the dataset is a subset."""
         return self._idxer.is_subset
+
+    @property
+    def is_spliced(self) -> bool:
+        """Whether the dataset is spliced."""
+        return self._sp_idxer is not None
 
     @property
     def has_reference(self) -> bool:
@@ -673,29 +705,45 @@ class Dataset:
         return self._idxer.n_regions
 
     @property
+    def spliced_regions(self) -> pl.DataFrame | None:
+        """The spliced regions in the dataset."""
+        if self._spliced_bed is None or self._sp_idxer is None:
+            raise ValueError("Dataset does not have splice information.")
+        if self._sp_idxer.row_subset_idxs is None:
+            return self._spliced_bed
+        else:
+            return self._spliced_bed[self._sp_idxer.row_subset_idxs]
+
+    @property
     def n_samples(self) -> int:
         """The number of samples in the dataset."""
         return self._idxer.n_samples
 
     @property
-    def shape(self) -> Tuple[int, int]:
-        """Return the shape of the dataset. :code:`(n_samples, n_regions)`"""
-        return self.n_regions, self.n_samples
+    def shape(self) -> tuple[int, int]:
+        """Return the shape of the dataset. :code:`(n_rows, n_samples)`"""
+        if self._sp_idxer is None:
+            return self._idxer.shape
+        else:
+            return self._sp_idxer.shape
 
     @property
-    def full_shape(self) -> Tuple[int, int]:
-        """Return the full shape of the dataset, ignoring any subsetting. :code:`(n_samples, n_regions)`"""
-        return self._idxer.full_shape
+    def full_shape(self) -> tuple[int, int]:
+        """Return the full shape of the dataset, ignoring any subsetting. :code:`(n_rows, n_samples)`"""
+        if self._sp_idxer is None:
+            return self._idxer.full_shape
+        else:
+            return self._sp_idxer.full_shape
 
     @property
-    def available_tracks(self) -> List[str] | None:
+    def available_tracks(self) -> list[str] | None:
         """The available tracks in the dataset."""
         if self._tracks is None:
             return
         return list(self._tracks.intervals)
 
     @property
-    def active_tracks(self) -> List[str] | None:
+    def active_tracks(self) -> list[str] | None:
         """The active tracks in the dataset."""
         if self._tracks is None:
             return
@@ -733,6 +781,8 @@ class Dataset:
         return self.n_regions * self.n_samples
 
     def __str__(self) -> str:
+        splice_status = "Spliced" if self.is_spliced else "Unspliced"
+
         if self._available_sequences is None or self.sequence_type is None:
             seq_type = "None"
         else:
@@ -754,7 +804,7 @@ class Dataset:
             if len(self.active_tracks) > 5:
                 act_tracks += f" + {len(self.active_tracks) - 5} more"
         return (
-            f"GVL store at {self.path}\n"
+            splice_status + f" GVL dataset at {self.path}\n"
             f"Is subset: {self.is_subset}\n"
             f"# of regions: {self.n_regions}\n"
             f"# of samples: {self.n_samples}\n"
@@ -773,7 +823,7 @@ class Dataset:
         self,
         regions: Idx | pl.Series | None = None,
         samples: Idx | str | Sequence[str] | None = None,
-    ) -> "Dataset":
+    ) -> Self:
         """Subset the dataset to specific regions and/or samples by index or a boolean mask. If regions or samples
         are not provided, the corresponding dimension will not be subset.
 
@@ -842,9 +892,7 @@ class Dataset:
             return self
 
         if samples is not None:
-            if isinstance(samples, np.ndarray) and np.issubdtype(
-                samples.dtype, np.bool_
-            ):
+            if isinstance(samples, np.ndarray) and is_dtype(samples, np.bool_):
                 sample_idx = np.nonzero(samples)[0]
             elif isinstance(
                 samples, (int, np.integer, slice, np.ndarray)
@@ -870,23 +918,35 @@ class Dataset:
         if regions is not None:
             if isinstance(regions, pl.Series):
                 region_idxs = regions.to_numpy()
-                if np.issubdtype(region_idxs.dtype, np.bool_):
+                if is_dtype(region_idxs, np.bool_):
                     region_idxs = np.nonzero(region_idxs)[0]
-                elif not np.issubdtype(region_idxs.dtype, np.integer):
+                elif not is_dtype(region_idxs, np.integer):
                     raise ValueError("`regions` must be index-like or a boolean mask.")
             else:
-                regions = cast(Idx, regions)  # how to narrow dtype? is this possible?
                 region_idxs = idx_like_to_array(regions, self.n_regions)
         else:
             region_idxs = None
 
-        idxer = self._idxer.subset_to(regions=region_idxs, samples=sample_idx)
+        if self._sp_idxer is None:
+            idxer = self._idxer.subset_to(regions=region_idxs, samples=sample_idx)
+            return evolve(self, _idxer=idxer)
+        else:
+            row_idxs = region_idxs
+            sp_idxer, sub_dsi = self._sp_idxer.subset_to(
+                rows=row_idxs, samples=sample_idx
+            )
+            return evolve(self, _idxer=sub_dsi, _sp_idxer=sp_idxer)
 
-        return evolve(self, _idxer=idxer)
-
-    def to_full_dataset(self) -> "Dataset":
+    def to_full_dataset(self) -> Self:
         """Return a full sized dataset, undoing any subsetting."""
-        return evolve(self, _idxer=self._idxer.to_full_dataset())
+        if self._sp_idxer is None:
+            return evolve(self, _idxer=self._idxer.to_full_dataset())
+        else:
+            return evolve(
+                self,
+                _idxer=self._idxer.to_full_dataset(),
+                _sp_idxer=self._sp_idxer.to_full_dataset(),
+            )
 
     def haplotype_lengths(
         self,
@@ -1214,6 +1274,97 @@ class Dataset:
                 recon = _rc(recon, to_rc)
 
         return recon, squeeze, out_reshape
+
+
+def _parse_splice_info(
+    splice_info: str | tuple[str, str] | dict[str, NDArray[np.integer]],
+    regions: pl.DataFrame,
+    idxer: DatasetIndexer,
+):
+    """Parse splice info into a SpliceIndexer.
+
+    Parameters
+    ----------
+    splice_info
+        The splice info to parse. Can be a string, a tuple of strings, or a dictionary.
+    regions
+        The regions to parse the splice info from.
+    idxer
+        The idxer to use to parse the splice info.
+    """
+    if isinstance(splice_info, str):
+        names, sorter, idx, lengths = np.unique(
+            regions[splice_info],
+            return_index=True,
+            return_inverse=True,
+            return_counts=True,
+        )
+        names = names[np.argsort(sorter)]
+        splice_map = Ragged.from_lengths(np.argsort(idx), lengths).to_awkward()[
+            np.argsort(sorter)
+        ]
+    elif isinstance(splice_info, tuple):
+        names, sorter, lengths = np.unique(
+            regions[splice_info[0]],
+            return_index=True,
+            return_counts=True,
+        )
+        data = (
+            regions[splice_info].with_row_index().sort(splice_info)["index"].to_numpy()
+        )
+        splice_map = Ragged.from_lengths(data, lengths).to_awkward()[np.argsort(sorter)]
+    elif isinstance(splice_info, dict):
+        names = list(splice_info.keys())
+        splice_map = ak.Array(splice_info.values())
+    else:
+        assert_never(splice_info)
+
+    splice_map = cast(ak.Array, splice_map)
+    sp_idxer = SpliceIndexer._init(names, splice_map, idxer)
+    return sp_idxer
+
+
+def _get_spliced_bed(spi: SpliceIndexer, full_bed: pl.DataFrame) -> pl.DataFrame:
+    idx = ak.flatten(spi.splice_map, None).to_numpy()
+    regs_per_row = ak.count(spi.splice_map, -1).to_numpy()
+    splice_ids = spi.rows.keys
+    if spi.row_subset_idxs is not None:
+        splice_ids = splice_ids[spi.row_subset_idxs]
+    splice_ids = splice_ids.repeat(regs_per_row)
+
+    uniq_cols = ["chrom"]
+    if "strand" in full_bed:
+        uniq_cols.append("strand")
+
+    spliced_bed = (
+        full_bed.with_row_index("regions")[idx]
+        .with_columns(splice_id=splice_ids)
+        .group_by("splice_id", maintain_order=True)
+        .agg(pl.exclude(uniq_cols), pl.col(uniq_cols).unique())
+    )
+
+    if (spliced_bed["chrom"].list.len() > 1).any():
+        raise ValueError(
+            "Some elements of spliced regions are on different chromosomes."
+        )
+
+    if "strand" in full_bed and (spliced_bed["strand"].list.len() > 1).any():
+        raise ValueError("Some elements of spliced regions are on different strands.")
+
+    important_cols = [
+        "splice_id",
+        "regions",
+        "chrom",
+        "chromStart",
+        "chromEnd",
+        "strand",
+    ]
+
+    spliced_bed = spliced_bed.with_columns(pl.col(uniq_cols).list.first()).select(
+        pl.col(important_cols), pl.exclude(important_cols)
+    )
+
+    return spliced_bed
 
 
 @overload

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import List, Literal, Optional, Sequence, cast
 
 import awkward as ak
@@ -187,6 +189,7 @@ class DatasetIndexer:
         return s2i(samples, self.s2i_map)
 
 
+@define
 class SpliceIndexer:
     rows: HashTable
     """Map from splice element names to row indices."""
@@ -197,27 +200,42 @@ class SpliceIndexer:
     dsi: DatasetIndexer
     i2d_map: ak.Array
     """Shape: (rows, samples, ~regions). Map from spliced row/sample indices to on-disk dataset indices."""
-    _shape_helper: NDArray[np.uint8]
+    row_subset_idxs: Optional[NDArray[np.intp]] = None
+    """Subset of row indices."""
 
-    def __init__(
-        self,
+    @classmethod
+    def _init(
+        cls,
         names: Sequence[str] | NDArray[np.str_],
         splice_map: ak.Array,
         dsi: DatasetIndexer,
-    ):
+    ) -> "SpliceIndexer":
         _names = np.array(names)
-        self.rows = HashTable(
+        rows = HashTable(
             max=len(names) * 2,  # type: ignore | 2x size for perf > mem
             dtype=_names.dtype,
         )
-        self.rows.add(_names)
-        self.splice_map = splice_map
-        self.full_splice_map = splice_map
-        self.dsi = dsi
-        self._shape_helper = np.empty((len(splice_map), dsi.n_samples), dtype=np.uint8)
-        self.i2d_map = self.get_i2d_map(splice_map, dsi)
+        rows.add(_names)
 
-    def get_i2d_map(self, splice_map: ak.Array, dsi: DatasetIndexer):
+        if (
+            ak.max(splice_map, None) >= dsi.n_regions
+            or ak.min(splice_map, None) < -dsi.n_regions
+        ):
+            raise ValueError(
+                "Found indices in the splice map that are out of bounds for the dataset."
+            )
+
+        return cls(
+            rows=rows,
+            splice_map=splice_map,
+            full_splice_map=splice_map,
+            dsi=dsi,
+            i2d_map=cls.get_i2d_map(splice_map, dsi),
+            row_subset_idxs=None,
+        )
+
+    @staticmethod
+    def get_i2d_map(splice_map: ak.Array, dsi: DatasetIndexer):
         regs_per_row = ak.count(splice_map, -1).to_numpy()
         row_offsets = _lengths_to_offsets(regs_per_row)
         s_idxs = (
@@ -245,6 +263,10 @@ class SpliceIndexer:
     def shape(self) -> tuple[int, int]:
         return self.n_rows, self.n_samples
 
+    @property
+    def full_shape(self) -> tuple[int, int]:
+        return len(self.full_splice_map), len(self.dsi.full_samples)
+
     def __len__(self):
         return self.n_rows * self.n_samples
 
@@ -252,10 +274,10 @@ class SpliceIndexer:
         self,
         rows: Optional[Idx] = None,
         samples: Optional[Idx] = None,
-    ) -> Self:
+    ) -> tuple[Self, DatasetIndexer]:
         """Subset to specific regions and/or samples."""
         if rows is None and samples is None:
-            return self
+            return self, self.dsi
 
         if rows is not None:
             row_idxs = idx_like_to_array(rows, self.n_rows)
@@ -266,13 +288,24 @@ class SpliceIndexer:
         # splice_map is to absolute indices so don't subset dsi regions
         sub_dsi = self.dsi.subset_to(samples=samples)
         i2d_map = self.get_i2d_map(splice_map, sub_dsi)
+        region_idxs = ak.flatten(splice_map, None).to_numpy()
+        eff_dsi = self.dsi.subset_to(regions=region_idxs, samples=samples)
 
-        return evolve(self, splice_map=splice_map, dsi=sub_dsi, i2d_map=i2d_map)
+        return evolve(
+            self,
+            splice_map=splice_map,
+            dsi=sub_dsi,
+            i2d_map=i2d_map,
+            row_subset_idxs=row_idxs,
+        ), eff_dsi
 
     def to_full_dataset(self) -> Self:
         """Return a full sized dataset, undoing any subsettting."""
         return evolve(
-            self, splice_map=self.full_splice_map, dsi=self.dsi.to_full_dataset()
+            self,
+            splice_map=self.full_splice_map,
+            dsi=self.dsi.to_full_dataset(),
+            row_subset_idxs=None,
         )
 
     def parse_idx(

@@ -8,7 +8,7 @@ from einops import repeat
 from natsort import natsorted
 
 from ._dataset._genotypes import SparseGenotypes
-from ._dataset._impl import RaggedDataset
+from ._dataset._impl import RaggedDataset, _get_spliced_bed
 from ._dataset._indexing import DatasetIndexer, SpliceIndexer
 from ._dataset._intervals import tracks_to_intervals
 from ._dataset._reconstruct import Haps, HapsTracks, Reference, Tracks, _Variants
@@ -22,6 +22,20 @@ def get_dummy_dataset(spliced: bool = False):
     """Return a dummy :class:`Dataset <genvarloader.Dataset>`  with 4 regions, 4 samples, max jitter of 2, a reference genome of all :code:`"N"`, genotypes, and
     1 track "read-depth" where each track is :code:`[1, 2, 3, 4, 5, 6]` in the reference coordinate system, where :code:`3` is aligned
     with each region's start coordinate. Is initialized to return ragged haplotypes and tracks with no jitter and deterministic reconstruction algorithms.
+
+    Parameters
+    ----------
+    spliced
+        If :code:`True`, the dataset will be setup for splicing with all regions moved to chromosome 1 and
+        a splice indexer with 2 genes, "tp53" and "shh", corresponding to regions:
+
+        .. code-block:: python
+
+            {
+                "tp53": [3, 0, 2],
+                "shh": [1],
+            }
+
     """
     max_jitter = 2
 
@@ -87,7 +101,7 @@ def get_dummy_dataset(spliced: bool = False):
         ploidy=1,
     )
 
-    dummy_haps = Haps(dummy_ref, dummy_vars, dummy_genos, False)
+    dummy_haps = Haps(dummy_ref, dummy_vars, dummy_genos, False, None)
 
     # (r s), want tracks of [1, 2, 3, 4, 5] for each region so that pad values of 0 are obvious
     track_regions = dummy_regions.copy()
@@ -120,35 +134,37 @@ def get_dummy_dataset(spliced: bool = False):
         names = ["tp53", "shh"]
         sp_map = ak.Array(
             [
-                [0, 1, 2],
-                [3],
+                [3, 0, 2],
+                [1],
             ]
         )
-        dummy_spi = SpliceIndexer(names, sp_map, dummy_idxer)
+        dummy_spi = SpliceIndexer._init(names, sp_map, dummy_idxer)
+        dummy_bed = dummy_bed.with_columns(chrom=pl.lit("chr1"))
+        sp_bed = _get_spliced_bed(dummy_spi, dummy_bed)
     else:
         dummy_spi = None
+        sp_bed = None
 
-    dummy_dataset: RaggedDataset[Ragged[np.bytes_], Ragged[np.float32], None, None] = (
-        RaggedDataset(
-            path=Path("dummy"),
-            output_length="ragged",
-            max_jitter=max_jitter,
-            return_indices=False,
-            contigs=dummy_contigs,
-            jitter=0,
-            deterministic=True,
-            rc_neg=True,
-            transform=None,
-            _full_bed=dummy_bed,
-            _full_regions=dummy_regions,
-            _jittered_regions=dummy_regions.copy(),
-            _idxer=dummy_idxer,
-            _sp_idxer=dummy_spi,
-            _seqs=dummy_haps,
-            _tracks=dummy_tracks,
-            _recon=dummy_recon,
-            _rng=np.random.default_rng(),
-        )
+    dummy_dataset: RaggedDataset[Ragged[np.bytes_], Ragged[np.float32]] = RaggedDataset(
+        path=Path("dummy"),
+        output_length="ragged",
+        max_jitter=max_jitter,
+        return_indices=False,
+        contigs=dummy_contigs,
+        jitter=0,
+        deterministic=True,
+        rc_neg=True,
+        transform=None,
+        _full_bed=dummy_bed,
+        _spliced_bed=sp_bed,
+        _full_regions=dummy_regions,
+        _jittered_regions=dummy_regions.copy(),
+        _idxer=dummy_idxer,
+        _sp_idxer=dummy_spi,
+        _seqs=dummy_haps,
+        _tracks=dummy_tracks,
+        _recon=dummy_recon,
+        _rng=np.random.default_rng(),
     )
 
     return dummy_dataset
