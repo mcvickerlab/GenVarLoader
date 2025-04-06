@@ -174,8 +174,12 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.6-ha6fb4c9_0.conda
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/88/b8/210d5cb1fa85c7675323aacbd52af11553dc190aad1c15584699f40797f1/ncls-0.0.68.tar.gz
+      - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0c/fe/ce252dce8e5dd7ae06fd2036b5a146c1200598346ee70cbeb0a44740aa6b/pysam-0.22.1-cp312-cp312-manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/81/61/a348d5e68cbf54da2422798105134d67189c158987a7edca1641b4375cf5/seqpro-0.1.16-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/6d/5b/c94b5c454664cf3588e9c61f9a2057a3328ab3f53f7bd971fb7b6429ab59/sorted_nearest-0.0.39.tar.gz
+      - pypi: https://files.pythonhosted.org/packages/40/44/4a5f08c96eb108af5cb50b41f76142f0afa346dfa99d5296fe7202a11854/tabulate-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/93/4b/2e29f4266be5a66f21fc2dadcde48f9acea86119d6fb1bb2d2a451222ff7/tbb-2022.0.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4d/6e/e9544e6ddb3640e92d9937689e9e33018503ddbc069eeb2e6a7581870591/tcmlib-1.2.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: .
@@ -506,9 +510,13 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/03/2c/ccad450dcae5d1ca85c817233801e5e72f3bb1cdbf8393beb4086ebbc96b/lightning_utilities-0.13.1-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/fc/19/30f84863a8f6a4b3ed4bf886a7261549c2189e938945711cfbd2cca386a3/ncls-0.0.68-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9f/9f/046a0a1008235f512077ea2edc96bb59365e3a2abd1b5f8de0dbeaf14b1c/pysam-0.22.1-cp310-cp310-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/02/df/0c7e4582b74264fe2179e78fcdeb9313f680d40ffe1dd4b078da5a2cbf82/pytorch_lightning-2.5.0.post0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/81/61/a348d5e68cbf54da2422798105134d67189c158987a7edca1641b4375cf5/seqpro-0.1.16-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/84/62/9df5b5ca5ec19126c89bbe53c7ffc318474603908c57438d73b5ff29b973/sorted_nearest-0.0.39-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/40/44/4a5f08c96eb108af5cb50b41f76142f0afa346dfa99d5296fe7202a11854/tabulate-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/93/4b/2e29f4266be5a66f21fc2dadcde48f9acea86119d6fb1bb2d2a451222ff7/tbb-2022.0.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4d/6e/e9544e6ddb3640e92d9937689e9e33018503ddbc069eeb2e6a7581870591/tcmlib-1.2.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/72/25/973bd6128381951b23cdcd8a9870c6dcfc5606cb864df8eabd82e529f9c1/torchinfo-1.8.0-py3-none-any.whl
@@ -789,9 +797,13 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/03/2c/ccad450dcae5d1ca85c817233801e5e72f3bb1cdbf8393beb4086ebbc96b/lightning_utilities-0.13.1-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/fc/19/30f84863a8f6a4b3ed4bf886a7261549c2189e938945711cfbd2cca386a3/ncls-0.0.68-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9f/9f/046a0a1008235f512077ea2edc96bb59365e3a2abd1b5f8de0dbeaf14b1c/pysam-0.22.1-cp310-cp310-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/02/df/0c7e4582b74264fe2179e78fcdeb9313f680d40ffe1dd4b078da5a2cbf82/pytorch_lightning-2.5.0.post0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/81/61/a348d5e68cbf54da2422798105134d67189c158987a7edca1641b4375cf5/seqpro-0.1.16-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/84/62/9df5b5ca5ec19126c89bbe53c7ffc318474603908c57438d73b5ff29b973/sorted_nearest-0.0.39-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/40/44/4a5f08c96eb108af5cb50b41f76142f0afa346dfa99d5296fe7202a11854/tabulate-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/93/4b/2e29f4266be5a66f21fc2dadcde48f9acea86119d6fb1bb2d2a451222ff7/tbb-2022.0.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4d/6e/e9544e6ddb3640e92d9937689e9e33018503ddbc069eeb2e6a7581870591/tcmlib-1.2.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/72/25/973bd6128381951b23cdcd8a9870c6dcfc5606cb864df8eabd82e529f9c1/torchinfo-1.8.0-py3-none-any.whl
@@ -1080,9 +1092,13 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/03/2c/ccad450dcae5d1ca85c817233801e5e72f3bb1cdbf8393beb4086ebbc96b/lightning_utilities-0.13.1-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/fc/19/30f84863a8f6a4b3ed4bf886a7261549c2189e938945711cfbd2cca386a3/ncls-0.0.68-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5a/45/38ae786fb646e5032a982029ad1c0964433e74b67e328d2c9d2fc6691639/pysam-0.23.0-cp310-cp310-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/02/df/0c7e4582b74264fe2179e78fcdeb9313f680d40ffe1dd4b078da5a2cbf82/pytorch_lightning-2.5.0.post0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/81/61/a348d5e68cbf54da2422798105134d67189c158987a7edca1641b4375cf5/seqpro-0.1.16-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/84/62/9df5b5ca5ec19126c89bbe53c7ffc318474603908c57438d73b5ff29b973/sorted_nearest-0.0.39-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/40/44/4a5f08c96eb108af5cb50b41f76142f0afa346dfa99d5296fe7202a11854/tabulate-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/93/4b/2e29f4266be5a66f21fc2dadcde48f9acea86119d6fb1bb2d2a451222ff7/tbb-2022.0.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4d/6e/e9544e6ddb3640e92d9937689e9e33018503ddbc069eeb2e6a7581870591/tcmlib-1.2.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/72/25/973bd6128381951b23cdcd8a9870c6dcfc5606cb864df8eabd82e529f9c1/torchinfo-1.8.0-py3-none-any.whl
@@ -1339,8 +1355,12 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.6-ha6fb4c9_0.conda
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/fc/19/30f84863a8f6a4b3ed4bf886a7261549c2189e938945711cfbd2cca386a3/ncls-0.0.68-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9f/9f/046a0a1008235f512077ea2edc96bb59365e3a2abd1b5f8de0dbeaf14b1c/pysam-0.22.1-cp310-cp310-manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/81/61/a348d5e68cbf54da2422798105134d67189c158987a7edca1641b4375cf5/seqpro-0.1.16-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/84/62/9df5b5ca5ec19126c89bbe53c7ffc318474603908c57438d73b5ff29b973/sorted_nearest-0.0.39-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/40/44/4a5f08c96eb108af5cb50b41f76142f0afa346dfa99d5296fe7202a11854/tabulate-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/93/4b/2e29f4266be5a66f21fc2dadcde48f9acea86119d6fb1bb2d2a451222ff7/tbb-2022.0.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4d/6e/e9544e6ddb3640e92d9937689e9e33018503ddbc069eeb2e6a7581870591/tcmlib-1.2.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: .
@@ -1582,8 +1602,12 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb8e6e7a_1.conda
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/fc/19/30f84863a8f6a4b3ed4bf886a7261549c2189e938945711cfbd2cca386a3/ncls-0.0.68-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5a/45/38ae786fb646e5032a982029ad1c0964433e74b67e328d2c9d2fc6691639/pysam-0.23.0-cp310-cp310-manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/81/61/a348d5e68cbf54da2422798105134d67189c158987a7edca1641b4375cf5/seqpro-0.1.16-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/84/62/9df5b5ca5ec19126c89bbe53c7ffc318474603908c57438d73b5ff29b973/sorted_nearest-0.0.39-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/40/44/4a5f08c96eb108af5cb50b41f76142f0afa346dfa99d5296fe7202a11854/tabulate-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/93/4b/2e29f4266be5a66f21fc2dadcde48f9acea86119d6fb1bb2d2a451222ff7/tbb-2022.0.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4d/6e/e9544e6ddb3640e92d9937689e9e33018503ddbc069eeb2e6a7581870591/tcmlib-1.2.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: .
@@ -1838,8 +1862,12 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.6-ha6fb4c9_0.conda
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/fc/19/30f84863a8f6a4b3ed4bf886a7261549c2189e938945711cfbd2cca386a3/ncls-0.0.68-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9f/9f/046a0a1008235f512077ea2edc96bb59365e3a2abd1b5f8de0dbeaf14b1c/pysam-0.22.1-cp310-cp310-manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/81/61/a348d5e68cbf54da2422798105134d67189c158987a7edca1641b4375cf5/seqpro-0.1.16-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/84/62/9df5b5ca5ec19126c89bbe53c7ffc318474603908c57438d73b5ff29b973/sorted_nearest-0.0.39-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/40/44/4a5f08c96eb108af5cb50b41f76142f0afa346dfa99d5296fe7202a11854/tabulate-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/93/4b/2e29f4266be5a66f21fc2dadcde48f9acea86119d6fb1bb2d2a451222ff7/tbb-2022.0.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4d/6e/e9544e6ddb3640e92d9937689e9e33018503ddbc069eeb2e6a7581870591/tcmlib-1.2.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: .
@@ -2095,8 +2123,12 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.6-ha6fb4c9_0.conda
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/bf/8e/1be8a0ec04091213f0f8f8a3ec87845f7352f6fe1e72181c1fe0ef88e620/ncls-0.0.68-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/3e/36/0d478e81f4687e87be1b1cdb3451d41c088669687f28c03ac60ffefb2f71/pysam-0.22.1-cp311-cp311-manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/81/61/a348d5e68cbf54da2422798105134d67189c158987a7edca1641b4375cf5/seqpro-0.1.16-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/eb/2f/73ef4ce1f1550537a69a7fce5f43ee5a90b3572a838100b5b0729211c9da/sorted_nearest-0.0.39-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/40/44/4a5f08c96eb108af5cb50b41f76142f0afa346dfa99d5296fe7202a11854/tabulate-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/93/4b/2e29f4266be5a66f21fc2dadcde48f9acea86119d6fb1bb2d2a451222ff7/tbb-2022.0.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4d/6e/e9544e6ddb3640e92d9937689e9e33018503ddbc069eeb2e6a7581870591/tcmlib-1.2.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: .
@@ -2352,8 +2384,12 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.6-ha6fb4c9_0.conda
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/88/b8/210d5cb1fa85c7675323aacbd52af11553dc190aad1c15584699f40797f1/ncls-0.0.68.tar.gz
+      - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0c/fe/ce252dce8e5dd7ae06fd2036b5a146c1200598346ee70cbeb0a44740aa6b/pysam-0.22.1-cp312-cp312-manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/81/61/a348d5e68cbf54da2422798105134d67189c158987a7edca1641b4375cf5/seqpro-0.1.16-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/6d/5b/c94b5c454664cf3588e9c61f9a2057a3328ab3f53f7bd971fb7b6429ab59/sorted_nearest-0.0.39.tar.gz
+      - pypi: https://files.pythonhosted.org/packages/40/44/4a5f08c96eb108af5cb50b41f76142f0afa346dfa99d5296fe7202a11854/tabulate-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/93/4b/2e29f4266be5a66f21fc2dadcde48f9acea86119d6fb1bb2d2a451222ff7/tbb-2022.0.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4d/6e/e9544e6ddb3640e92d9937689e9e33018503ddbc069eeb2e6a7581870591/tcmlib-1.2.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: .
@@ -3828,8 +3864,8 @@ packages:
   timestamp: 1738501352608
 - pypi: .
   name: genvarloader
-  version: 0.10.6
-  sha256: 865a0c13a67aa7168e59f0c81c13ed237870e3b7d1da57d6b8df746845ede9cc
+  version: 0.10.7
+  sha256: e822c43c186fc9f022ffb17bb0e64c9489e907e3409e7088b73e53b5e9409453
   requires_dist:
   - numba>=0.58.1
   - loguru
@@ -3849,7 +3885,7 @@ packages:
   - tbb
   - joblib
   - pooch
-  - seqpro
+  - seqpro>=0.2.0
   - awkward
   - hirola>=0.3,<0.4
   requires_python: '>=3.10'
@@ -7063,6 +7099,39 @@ packages:
   purls: []
   size: 184059581
   timestamp: 1738248470631
+- pypi: https://files.pythonhosted.org/packages/88/b8/210d5cb1fa85c7675323aacbd52af11553dc190aad1c15584699f40797f1/ncls-0.0.68.tar.gz
+  name: ncls
+  version: 0.0.68
+  sha256: 81aaa5abb123bb21797ed2f8ef921e20222db14a3ecbc61ccf447532f2b7ba93
+  requires_dist:
+  - numpy
+  - black ; extra == 'dev'
+  - bumpver ; extra == 'dev'
+  - isort ; extra == 'dev'
+  - pip-tools ; extra == 'dev'
+  - pytest ; extra == 'dev'
+- pypi: https://files.pythonhosted.org/packages/bf/8e/1be8a0ec04091213f0f8f8a3ec87845f7352f6fe1e72181c1fe0ef88e620/ncls-0.0.68-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+  name: ncls
+  version: 0.0.68
+  sha256: d82c099ff0bc57fe38c018bcab20f2e7da819f3cb5167d475e22f1bcd1bdeae8
+  requires_dist:
+  - numpy
+  - black ; extra == 'dev'
+  - bumpver ; extra == 'dev'
+  - isort ; extra == 'dev'
+  - pip-tools ; extra == 'dev'
+  - pytest ; extra == 'dev'
+- pypi: https://files.pythonhosted.org/packages/fc/19/30f84863a8f6a4b3ed4bf886a7261549c2189e938945711cfbd2cca386a3/ncls-0.0.68-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+  name: ncls
+  version: 0.0.68
+  sha256: f67cb6531e4044663d89d27ff7baf0cf69e253751663aac84798e282ce8cfdd2
+  requires_dist:
+  - numpy
+  - black ; extra == 'dev'
+  - bumpver ; extra == 'dev'
+  - isort ; extra == 'dev'
+  - pip-tools ; extra == 'dev'
+  - pytest ; extra == 'dev'
 - conda: https://conda.anaconda.org/conda-forge/linux-64/ncurses-6.5-h2d0b736_3.conda
   sha256: 3fde293232fa3fca98635e1167de6b7c7fda83caf24b9d6c91ec9eefb4f4d586
   md5: 47e340acb35de30501a76c7c799c41d7
@@ -8317,6 +8386,22 @@ packages:
   - pkg:pypi/pygments?source=hash-mapping
   size: 888600
   timestamp: 1736243563082
+- pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
+  name: pyranges
+  version: 0.1.4
+  sha256: 2bcf7de43137ee42ab009cedf40eff12ced26f7889c35c34dd3c848a7bf7fed7
+  requires_dist:
+  - pandas
+  - ncls>=0.0.63
+  - tabulate
+  - sorted-nearest>=0.0.33
+  - natsort
+  - black==24.4.2 ; extra == 'dev'
+  - bumpver ; extra == 'dev'
+  - isort==5.13.2 ; extra == 'dev'
+  - pip-tools ; extra == 'dev'
+  - pytest==7.4.3 ; extra == 'dev'
+  - mypy==1.8.0 ; extra == 'dev'
 - pypi: https://files.pythonhosted.org/packages/0c/fe/ce252dce8e5dd7ae06fd2036b5a146c1200598346ee70cbeb0a44740aa6b/pysam-0.22.1-cp312-cp312-manylinux_2_28_x86_64.whl
   name: pysam
   version: 0.22.1
@@ -9239,18 +9324,24 @@ packages:
   purls: []
   size: 353374
   timestamp: 1741231104518
-- pypi: https://files.pythonhosted.org/packages/81/61/a348d5e68cbf54da2422798105134d67189c158987a7edca1641b4375cf5/seqpro-0.1.16-cp39-abi3-manylinux_2_28_x86_64.whl
+- pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
   name: seqpro
-  version: 0.1.16
-  sha256: 212c2bfaa2ff70cb5e21192cab0fb75cd582a14990a861c8993a19dba9924bac
+  version: 0.2.0
+  sha256: 247bb319b9ca346fb01af709d33273a3d866b713694efb781173e88704b06382
   requires_dist:
   - numba>=0.58.1
   - numpy>=1.26.0
+  - polars>=1,<2
+  - pyranges>=0.1.3,<0.2
+  - pandera>=0.19
+  - pandas
+  - pyarrow
   - matplotlib ; extra == 'dev'
   - pytest<8 ; extra == 'dev'
   - pytest-cases ; extra == 'dev'
   - hypothesis ; extra == 'dev'
   - pytest-benchmark ; extra == 'dev'
+  - biopython ; extra == 'dev'
   requires_python: '>=3.9'
 - conda: https://conda.anaconda.org/conda-forge/noarch/setuptools-75.8.0-pyhff2d567_0.conda
   sha256: e0778e4f276e9a81b51c56f51ec22a27b4d8fc955abc0be77ad09ca9bea06bb9
@@ -9342,6 +9433,39 @@ packages:
   - pkg:pypi/snowballstemmer?source=hash-mapping
   size: 58824
   timestamp: 1637143137377
+- pypi: https://files.pythonhosted.org/packages/6d/5b/c94b5c454664cf3588e9c61f9a2057a3328ab3f53f7bd971fb7b6429ab59/sorted_nearest-0.0.39.tar.gz
+  name: sorted-nearest
+  version: 0.0.39
+  sha256: 16a51d5db87ae226b47ace43c176bb672477a1b7ba8052ea9291a6356c9c69b1
+  requires_dist:
+  - numpy
+  - black ; extra == 'dev'
+  - bumpver ; extra == 'dev'
+  - isort ; extra == 'dev'
+  - pip-tools ; extra == 'dev'
+  - pytest ; extra == 'dev'
+- pypi: https://files.pythonhosted.org/packages/84/62/9df5b5ca5ec19126c89bbe53c7ffc318474603908c57438d73b5ff29b973/sorted_nearest-0.0.39-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+  name: sorted-nearest
+  version: 0.0.39
+  sha256: 5c97d2088baffb19dcb0bf0a3921bf0b6ecd40157e24c0eabd881215994ee917
+  requires_dist:
+  - numpy
+  - black ; extra == 'dev'
+  - bumpver ; extra == 'dev'
+  - isort ; extra == 'dev'
+  - pip-tools ; extra == 'dev'
+  - pytest ; extra == 'dev'
+- pypi: https://files.pythonhosted.org/packages/eb/2f/73ef4ce1f1550537a69a7fce5f43ee5a90b3572a838100b5b0729211c9da/sorted_nearest-0.0.39-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+  name: sorted-nearest
+  version: 0.0.39
+  sha256: 0b64681f8e76fc687a2133233be262efecded92403318c040d688076f461e0a3
+  requires_dist:
+  - numpy
+  - black ; extra == 'dev'
+  - bumpver ; extra == 'dev'
+  - isort ; extra == 'dev'
+  - pip-tools ; extra == 'dev'
+  - pytest ; extra == 'dev'
 - conda: https://conda.anaconda.org/conda-forge/noarch/sortedcontainers-2.4.0-pyhd8ed1ab_1.conda
   sha256: d1e3e06b5cf26093047e63c8cc77b70d970411c5cbc0cb1fad461a8a8df599f7
   md5: 0401a17ae845fa72c7210e206ec5647d
@@ -9574,6 +9698,13 @@ packages:
   - pkg:pypi/sympy?source=hash-mapping
   size: 4523617
   timestamp: 1736248315124
+- pypi: https://files.pythonhosted.org/packages/40/44/4a5f08c96eb108af5cb50b41f76142f0afa346dfa99d5296fe7202a11854/tabulate-0.9.0-py3-none-any.whl
+  name: tabulate
+  version: 0.9.0
+  sha256: 024ca478df22e9340661486f85298cff5f6dcdba14f3813e8830015b9ed1948f
+  requires_dist:
+  - wcwidth ; extra == 'widechars'
+  requires_python: '>=3.7'
 - pypi: https://files.pythonhosted.org/packages/93/4b/2e29f4266be5a66f21fc2dadcde48f9acea86119d6fb1bb2d2a451222ff7/tbb-2022.0.0-py2.py3-none-manylinux_2_28_x86_64.whl
   name: tbb
   version: 2022.0.0

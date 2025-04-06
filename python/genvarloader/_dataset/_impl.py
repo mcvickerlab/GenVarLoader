@@ -20,14 +20,17 @@ from typing import (
 
 import numpy as np
 import polars as pl
+import seqpro as sp
 from attrs import define, evolve, field
 from loguru import logger
 from numpy.typing import NDArray
-from typing_extensions import NoReturn, assert_never
+from typing_extensions import NoReturn, Self, assert_never
 
 from .._ragged import (
+    INTERVAL_DTYPE,
     Ragged,
     RaggedAnnotatedHaps,
+    RaggedIntervals,
     _jitter,
     _reverse,
     _reverse_complement,
@@ -35,7 +38,7 @@ from .._ragged import (
 )
 from .._torch import TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx
-from .._utils import idx_like_to_array
+from .._utils import _lengths_to_offsets, _normalize_contig_name, idx_like_to_array
 from ._genotypes import SparseGenotypes
 from ._indexing import DatasetIndexer
 from ._reconstruct import Haps, HapsTracks, Reference, Seqs, SeqsTracks, Tracks
@@ -194,7 +197,7 @@ class Dataset:
                 )
             case None, _, True:
                 seqs = None
-                tracks = Tracks.from_path(path, regions, len(samples))
+                tracks = Tracks.from_path(path, len(regions), len(samples))
                 tracks = tracks.with_tracks(list(tracks.intervals))
                 reconstructor = tracks
             case reference, False, True:
@@ -203,7 +206,7 @@ class Dataset:
                 )
                 _reference = Reference.from_path_and_contigs(reference, contigs)
                 seqs = Seqs(reference=_reference)
-                tracks = Tracks.from_path(path, regions, len(samples))
+                tracks = Tracks.from_path(path, len(regions), len(samples))
                 tracks = tracks.with_tracks(list(tracks.intervals))
                 reconstructor = SeqsTracks(seqs=seqs, tracks=tracks)
             case reference, True, False:
@@ -238,7 +241,7 @@ class Dataset:
                     samples=samples,
                     ploidy=ploidy,
                 )
-                tracks = Tracks.from_path(path, regions, len(samples))
+                tracks = Tracks.from_path(path, len(regions), len(samples))
                 tracks = tracks.with_tracks(list(tracks.intervals))
                 reconstructor = HapsTracks(haps=seqs, tracks=tracks)
             case reference, has_genotypes, has_intervals:
@@ -970,6 +973,64 @@ class Dataset:
 
         return evolve(self, _tracks=new_tracks)  # type: ignore
 
+    def write_annot_tracks(self, tracks: dict[str, str | Path | pl.DataFrame]) -> Self:
+        """Write annotation tracks to the dataset.
+
+        Parameters
+        ----------
+        tracks
+            Paths to the annotation tracks (or literal tables) in BED-like format.
+            Keys should be the track names and values should be the paths to the BED files.
+
+            .. important::
+
+                Only supports BED files for now.
+        """
+        if self.available_tracks is not None and (
+            exists := set(tracks) & set(self.available_tracks)
+        ):
+            raise ValueError(f"Some tracks already exists in the dataset: {exists}")
+
+        for name, bedlike in tracks.items():
+            out_dir = self.path / "annot_intervals" / name
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            if isinstance(bedlike, str) or isinstance(bedlike, Path):
+                bedlike = sp.bed.read_bedlike(bedlike)
+
+            itvs = _annot_to_intervals(self._full_bed, bedlike)
+
+            out = np.memmap(
+                out_dir / "intervals.npy",
+                dtype=itvs.data.dtype,
+                mode="w+",
+                shape=itvs.data.shape,
+            )
+            out[:] = itvs.data[:]
+            out.flush()
+
+            out = np.memmap(
+                out_dir / "offsets.npy",
+                dtype=itvs.offsets.dtype,
+                mode="w+",
+                shape=len(itvs.offsets),
+            )
+            out[:] = itvs.offsets
+            out.flush()
+
+        ds_tracks = Tracks.from_path(self.path, *self.full_shape)
+        match self._recon:
+            case Seqs() | Haps():
+                recon = self._recon
+            case Tracks():
+                recon = ds_tracks
+            case SeqsTracks() | HapsTracks():
+                recon = evolve(self._recon, tracks=ds_tracks)
+            case r:
+                assert_never(r)
+
+        return evolve(self, _tracks=ds_tracks, _recon=recon)
+
     def to_torch_dataset(self) -> "td.Dataset":
         """Convert the dataset to a PyTorch :external+torch:class:`Dataset <torch.utils.data.Dataset>`. Requires PyTorch to be installed."""
         if self.output_length == "ragged":
@@ -1070,11 +1131,12 @@ class Dataset:
         regions = self._jittered_regions[r_idx]
 
         recon = self._recon(
-            ds_idx,
-            regions,
-            self.output_length,
-            self.jitter,
-            None if self.deterministic else self._rng,
+            idx=ds_idx,
+            r_idx=r_idx,
+            regions=regions,
+            output_length=self.output_length,
+            jitter=self.jitter,
+            rng=None if self.deterministic else self._rng,
         )
 
         if not isinstance(recon, tuple):
@@ -1191,6 +1253,35 @@ class Dataset:
             return rag.to_fixed_shape((*rag.shape, self.output_length))
         else:
             assert_never(rag)
+
+
+def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedIntervals:
+    # normalize contig names
+    reg_c = regions["chrom"].unique()
+    annot_c = annot["chrom"].unique()
+    renamer = (_normalize_contig_name(c, reg_c) for c in annot_c)
+    renamer = {c: new_c for c, new_c in zip(annot_c, renamer) if new_c is not None}
+    annot = annot.with_columns(chrom=pl.col("chrom").replace(renamer))
+
+    # find intersection
+    intersect = sp.bed.from_pyranges(
+        sp.bed.to_pyranges(annot).join(sp.bed.to_pyranges(regions.with_row_index()))
+    ).sort("index", "chrom", "chromStart")
+
+    # compute offsets, considering regions with no overlaps
+    i, nonzero_counts = np.unique(intersect["index"], return_counts=True)
+    counts = np.zeros(regions.height, dtype=np.int32)
+    counts[i] = nonzero_counts
+    offsets = _lengths_to_offsets(counts)
+
+    # convert to numpy intervals
+    itvs = np.empty(intersect.height, dtype=INTERVAL_DTYPE)
+    itvs["start"] = intersect["chromStart"].to_numpy()
+    itvs["end"] = intersect["chromEnd"].to_numpy()
+    itvs["value"] = intersect["score"].to_numpy()
+    itvs = RaggedIntervals.from_offsets(itvs, len(offsets) - 1, offsets)
+
+    return itvs
 
 
 T = TypeVar("T")
