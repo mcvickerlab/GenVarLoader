@@ -1585,22 +1585,22 @@ class ArrayDataset(Dataset, Generic[SEQ, TRK]):
     @overload
     def __getitem__(
         self: ArrayDataset[SEQ, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> SEQ: ...
     @overload
     def __getitem__(
         self: ArrayDataset[None, TRK],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> TRK: ...
     @overload
     def __getitem__(
         self: ArrayDataset[None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> NoReturn: ...
     @overload
     def __getitem__(
         self: ArrayDataset[SEQ, TRK],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> Tuple[SEQ, TRK]: ...
     def __getitem__(self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]) -> Any:
         return super().__getitem__(idx)
@@ -1678,22 +1678,22 @@ class RaggedDataset(Dataset, Generic[RSEQ, RTRK]):
     @overload
     def __getitem__(
         self: RaggedDataset[RSEQ, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> RSEQ: ...
     @overload
     def __getitem__(
         self: RaggedDataset[None, RTRK],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> RTRK: ...
     @overload
     def __getitem__(
         self: RaggedDataset[None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> NoReturn: ...
     @overload
     def __getitem__(
         self: RaggedDataset[RSEQ, RTRK],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> Tuple[RSEQ, RTRK]: ...
     def __getitem__(self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]) -> Any:
         return super().__getitem__(idx)
