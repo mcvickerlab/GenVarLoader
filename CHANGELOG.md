@@ -1,3 +1,10 @@
+## v0.10.8 (2025-04-08)
+
+### Fix
+
+- reverse helper wrong when parallel=True
+- reverse helper wrong when parallel=True
+
 ## v0.10.7 (2025-04-04)
 
 ### Fix
