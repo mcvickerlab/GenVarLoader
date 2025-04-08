@@ -553,30 +553,44 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
     active_tracks: dict[str, TrackType]
     available_tracks: dict[str, TrackType]
 
-    def with_tracks(self, tracks: str | Iterable[str]) -> Tracks:
+    def with_tracks(self, tracks: str | Iterable[str] | None) -> Tracks:
+        if tracks is None:
+            return evolve(self, active_tracks={})
+
         if isinstance(tracks, str):
-            tracks = [tracks]
-        if missing := list(set(tracks) - set(self.intervals)):
+            _tracks = [tracks]
+        else:
+            _tracks = tracks
+
+        if missing := list(set(_tracks) - set(self.intervals)):
             raise ValueError(f"Missing tracks: {missing}")
+
+        tracks = {t: self.available_tracks[t] for t in _tracks}
+
         return evolve(self, active_tracks=tracks)
 
     @classmethod
     def from_path(cls, path: Path, n_regions: int, n_samples: int):
+        strack_dir = path / "intervals"
+        atrack_dir = path / "annot_intervals"
+
         available_tracks: List[str] = []
-        for p in (path / "intervals").iterdir():
-            if len(list(p.iterdir())) == 0:
-                p.rmdir()
-            else:
-                available_tracks.append(p.name)
-        available_tracks.sort()
+        if strack_dir.exists():
+            for p in (path / "intervals").iterdir():
+                if len(list(p.iterdir())) == 0:
+                    p.rmdir()
+                else:
+                    available_tracks.append(p.name)
+            available_tracks.sort()
 
         available_annots: list[str] = []
-        for p in (path / "annot_intervals").iterdir():
-            if len(list(p.iterdir())) == 0:
-                p.rmdir()
-            else:
-                available_annots.append(p.name)
-        available_annots.sort()
+        if atrack_dir.exists():
+            for p in (path / "annot_intervals").iterdir():
+                if len(list(p.iterdir())) == 0:
+                    p.rmdir()
+                else:
+                    available_annots.append(p.name)
+            available_annots.sort()
 
         if name_clash := set(available_tracks) & set(available_annots):
             raise ValueError(

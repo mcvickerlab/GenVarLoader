@@ -549,26 +549,25 @@ class Dataset:
                     "Dataset is set to only return tracks, so setting tracks to None would"
                     " result in a Dataset that cannot return anything."
                 )
-            case None, _, _, ((Seqs() | Haps()) as seqs) | SeqsTracks(
-                seqs=seqs
-            ) | HapsTracks(haps=seqs):
-                return evolve(self, _recon=seqs)
             case t, _, None, _:
                 raise ValueError(
                     "Can't set dataset to return tracks because it has none to begin with."
                 )
-            case t, _, _, Tracks() as tr:
-                return evolve(self, _recon=tr.with_tracks(t))
+            case None, _, tr, ((Seqs() | Haps()) as seqs) | SeqsTracks(
+                seqs=seqs
+            ) | HapsTracks(haps=seqs):
+                return evolve(self, _tracks=tr.with_tracks(None), _recon=seqs)
             case t, _, tr, (Seqs() as seqs) | SeqsTracks(seqs=seqs):
-                return evolve(self, _recon=SeqsTracks(seqs, tr.with_tracks(t)))
-            case t, _, tr, (Haps() as haps) | HapsTracks(haps=haps):
-                return evolve(
-                    self,
-                    _recon=HapsTracks(
-                        haps,  # type: ignore | pylance weirdly infers HapsTracks[RaggedAnnotatedHaps]
-                        tr.with_tracks(t),
-                    ),
+                recon = SeqsTracks(seqs=seqs, tracks=tr.with_tracks(t))
+                return evolve(self, _tracks=tr.with_tracks(t), _recon=recon)
+            case t, _, tr, (Haps() as seqs) | HapsTracks(haps=seqs):
+                recon = HapsTracks(
+                    haps=seqs,  # type: ignore
+                    tracks=tr.with_tracks(t),
                 )
+                return evolve(self, _tracks=tr.with_tracks(t), _recon=recon)
+            case t, _, tr, Tracks() as r:
+                return evolve(self, _tracks=tr.with_tracks(t), _recon=r.with_tracks(t))
             case k, s, t, r:
                 assert_never(k), assert_never(s), assert_never(t), assert_never(r)
 
@@ -1018,14 +1017,16 @@ class Dataset:
             out[:] = itvs.offsets
             out.flush()
 
-        ds_tracks = Tracks.from_path(self.path, *self.full_shape)
+        ds_tracks = Tracks.from_path(self.path, *self.full_shape).with_tracks(None)
         match self._recon:
             case Seqs() | Haps():
                 recon = self._recon
-            case Tracks():
-                recon = ds_tracks
-            case SeqsTracks() | HapsTracks():
-                recon = evolve(self._recon, tracks=ds_tracks)
+            case Tracks() as r:
+                recon = ds_tracks.with_tracks(r.active_tracks)
+            case (SeqsTracks() | HapsTracks()) as r:
+                recon = evolve(
+                    self._recon, tracks=ds_tracks.with_tracks(r.tracks.active_tracks)
+                )
             case r:
                 assert_never(r)
 
