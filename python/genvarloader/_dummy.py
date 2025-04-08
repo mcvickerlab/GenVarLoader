@@ -10,7 +10,14 @@ from ._dataset._genotypes import SparseGenotypes
 from ._dataset._impl import RaggedDataset
 from ._dataset._indexing import DatasetIndexer
 from ._dataset._intervals import tracks_to_intervals
-from ._dataset._reconstruct import Haps, HapsTracks, Reference, Tracks, _Variants
+from ._dataset._reconstruct import (
+    Haps,
+    HapsTracks,
+    Reference,
+    Tracks,
+    TrackType,
+    _Variants,
+)
 from ._dataset._utils import bed_to_regions
 from ._ragged import Ragged, RaggedIntervals
 from ._utils import _lengths_to_offsets
@@ -111,7 +118,9 @@ def get_dummy_dataset():
         )
     }
 
-    dummy_tracks = Tracks(dummy_itvs, ["read-depth"])
+    avail_tracks = {"read-depth": TrackType.SAMPLE}
+
+    dummy_tracks = Tracks(dummy_itvs, avail_tracks, avail_tracks)
 
     dummy_recon = HapsTracks(dummy_haps, dummy_tracks)
 
