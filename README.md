@@ -31,4 +31,6 @@ A PyTorch dependency is **not** included since it may require [special instructi
 
 1. Clone the repo.
 2. Assuming you have [Pixi](https://pixi.sh/latest/), install pre-commit hooks `pixi run -e dev pre-commit`
-3. Use the appropriate Pixi environment for your needs. A decent catch-all is `dev` but you might need a different environment if using a GPU.
+3. Activate and use the appropriate Pixi environment for your needs. A decent catch-all is `dev` but you might need a different environment if using a GPU.
+
+All the tests are designed to use pytest and live under `tests/`. These tests ensure the code works as intended so they must all pass before any features are merged into `main` and subsequently released.

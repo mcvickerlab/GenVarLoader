@@ -361,15 +361,13 @@ def _reverse_complement(
     return Ragged.from_offsets(rc_seqs.view("S1"), seqs.shape, seqs.offsets)
 
 
-@nb.njit(parallel=True, nogil=True, cache=True)
+#! for whatever reason, this causes data corruption with parallel=True?!
+@nb.njit(nogil=True, cache=True)
 def _reverse_helper(data: NDArray, offsets: NDArray[np.int64], mask: NDArray[np.bool_]):
     for i in nb.prange(len(offsets) - 1):
         if mask[i]:
             start, end = offsets[i], offsets[i + 1]
-            if start > 0:
-                data[start:end] = data[end - 1 : start - 1 : -1]
-            else:
-                data[start:end] = data[end - 1 :: -1]
+            data[start:end] = np.flip(data[start:end])
 
 
 def _reverse(tracks: Ragged, mask: NDArray[np.bool_]):
