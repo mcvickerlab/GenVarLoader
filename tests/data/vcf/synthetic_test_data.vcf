@@ -1,20 +1,27 @@
 ##fileformat=VCFv4.2
-##INFO=<ID=AF,Number=1,Type=Integer,Description="Allele Frequency">
-##INFO=<ID=AF,Number=1,Type=Float,Description="Allele Frequency">
-##INFO=<ID=PASS,Number=0,Type=Flag,Description="Variant passed filters">
-##INFO=<ID=GT,Number=1,Type=Character,Description="Genotype">
-##INFO=<ID=DBSNP,Number=1,Type=String,Description="dbSNP ID">
-#CHROM  POS     ID      REF     ALT     QUAL    FILTER  INFO
-chr1    101     .       A       G       .       PASS    AF=0;AF=0.02;PASS;GT=1
-chr1    102     .       G       GA      .       PASS    AF=1;PASS;GT=0
-chr1    103     .       GA      G       .       PASS    AF=1;PASS;GT=0
-chr1    104     .       AA      TT      .       PASS    AF=1;PASS;GT=0
-chr1    105     .       A       TT      .       PASS    AF=0;PASS;GT=0
-chr1    106     .       AA      T       .       PASS    AF=1;PASS;GT=0
-chr1    107     .       *       A       .       PASS    AF=0;PASS;GT=0
-chr1    108     .       G       <ID=DEL,Description="deletion"> . PASS    AF=1;PASS;GT=1
-chr1    109     .       A       G       .       PASS    AF=10;AF=0.10;PASS;GT=0
-chr1    110     .       A       G       .       PASS    AF=20;AF=0.20;PASS;GT=1;DBSNP="rs12345"
-chr1    111     .       G       A       .       PASS    AF=30;AF=0.30;PASS;GT=1;FAIL
-chr1    112     .       T       C       .       PASS    AF=40;AF=0.40;PASS;GT=1;DBSNP="rs67890"
-chr1    113     .       G       T       .       PASS    AF=50;AF=0.50;PASS;GT=1;DBSNP="rs23456";FAIL
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele Frequency">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Read Depth">
+##INFO=<ID=GT,Number=G,Type=String,Description="Genotype">
+##INFO=<ID=DB,Number=0,Type=Flag,Description="dbSNP membership">
+##INFO=<ID=AC,Number=A,Type=Integer,Description="Allele Count">
+##INFO=<ID=DP4,Number=4,Type=Integer,Description="Read depth for each allele strand">
+##ALT=<ID=DEL,Description="Deletion relative to reference">
+##ALT=<ID=INS,Description="Insertion relative to reference">
+##ALT=<ID=DUP:TANDEM,Description="Tandem duplication relative to reference">
+##ALT=<ID=CNV,Description="Copy number variant">
+##ALT=<ID=*,Description="Missing allele due to upstream deletion">
+##contig=<ID=chr1,length=248956422>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	108	.	G	A	.	PASS	AF=0.2;DP=100;GT=0/1
+chr1	109	.	A	T	.	PASS	AF=0.3;DP=120;GT=1/1
+chr1	110	.	G	C	.	PASS	AF=0.5;DP=130;GT=0/0
+chr1	111	.	G	A	.	PASS	AF=0.4;DP=110;GT=1/0
+chr1	112	.	A	TT	.	PASS	AF=0.6;DP=140;GT=1/1
+chr1	113	.	G	C	.	PASS	AF=0.7;DP=150;GT=0/1
+chr1	114	.	AA	TT	.	PASS	AF=0.8;DP=160;GT=1/1
+chr1	115	.	G	<INS>	.	PASS	AF=0.9;DP=170;GT=0/0
+chr1	116	.	A	<DEL>	.	PASS	AF=0.1;DP=180;GT=1/1
+chr1	117	.	A	T	.	PASS	AF=0.3;DP=190;GT=0/0
+chr1	118	.	C	<DUP:TANDEM>	.	PASS	AF=0.5;DP=200;GT=1/1
+chr1	119	.	G	<CNV>	.	PASS	AF=0.2;DP=210;GT=1/0
+chr1	120	.	T	*	.	PASS	AF=0.6;DP=220;GT=0/0
