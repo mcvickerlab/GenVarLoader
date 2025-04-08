@@ -23,6 +23,7 @@ import numpy as np
 import polars as pl
 from attrs import define, evolve, field
 from loguru import logger
+from more_itertools import collapse
 from numpy.typing import NDArray
 from typing_extensions import NoReturn, Self, assert_never
 
@@ -159,10 +160,11 @@ class Dataset:
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
         splice_info
-            A string or tuple of strings representing the splice information to use. If a string, it will be used as a column name.
-            If a tuple of strings, the first string will be used as a column name and the second string will be used as a value.
-            If a dictionary, the keys will be used as the splice information and the values will be used as the splice map.
-            If None, no splice information will be used.
+            A string or tuple of strings representing the splice information to use.
+            If a string, it will be used as the transcript ID and the exons are expected to be in order.
+            If a tuple of strings, the first string will be used as the transcript ID and the second string will be used as the exon number.
+            If a dictionary, the keys will be used as the transcript ID and the values should be the row number for each exon, in order.
+            If False, splicing will be disabled.
         var_filter
             Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
         """
@@ -333,10 +335,11 @@ class Dataset:
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
         splice_info
-            A string or tuple of strings representing the splice information to use. If a string, it will be used as a column name.
-            If a tuple of strings, the first string will be used as a column name and the second string will be used as a value.
-            If a dictionary, the keys will be used as the splice information and the values will be used as the splice map.
-            If False, no splice information will be used.
+            A string or tuple of strings representing the splice information to use.
+            If a string, it will be used as the transcript ID and the exons are expected to be in order.
+            If a tuple of strings, the first string will be used as the transcript ID and the second string will be used as the exon number.
+            If a dictionary, the keys will be used as the transcript ID and the values should be the row number for each exon, in order.
+            If False, splicing will be disabled.
         var_filter
             Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
         """
@@ -957,6 +960,10 @@ class Dataset:
         not phased or not deterministic, this will return :code:`None` because the haplotypes are not guaranteed to be
         a consistent length due to randomness in what variants are used.
 
+        .. note::
+
+            Currently not implemented for spliced datasets.
+
         Parameters
         ----------
         regions
@@ -964,6 +971,11 @@ class Dataset:
         samples
             Samples to compute haplotype lengths for.
         """
+        if self._sp_idxer is not None:
+            raise NotImplementedError(
+                "Haplotype lengths are not yet implemented for spliced datasets."
+            )
+
         if (
             not isinstance(self._seqs, Haps)
             or not isinstance(self._seqs.genotypes, SparseGenotypes)
@@ -1168,8 +1180,22 @@ class Dataset:
             pin_memory_device=pin_memory_device,
         )
 
-    def __getitem__(self, idx: Idx | tuple[Idx] | tuple[Idx, StrIdx]) -> Any:
+    def __getitem__(self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]) -> Any:
         if self._sp_idxer is None:
+            if isinstance(idx, tuple):
+                r_idx = idx[0]
+            else:
+                r_idx = idx
+
+            if isinstance(r_idx, str) or (
+                isinstance(r_idx, Sequence) and isinstance(next(collapse(r_idx)), str)
+            ):
+                raise ValueError(
+                    "Unspliced datasets do not support string indexing over regions. Please use integer indexing."
+                )
+
+            idx = cast(Idx | tuple[Idx] | tuple[Idx, StrIdx], idx)
+
             recon, squeeze, out_reshape = self._getitem_unspliced(idx)
         else:
             recon, squeeze, out_reshape = self._getitem_spliced(idx, self._sp_idxer)
@@ -1251,7 +1277,7 @@ class Dataset:
 
         inner_ds = self.with_len("ragged")
         ds_idx, squeeze, out_reshape, reducer = splice_idxer.parse_idx(idx)
-        r_idx, _ = np.unravel_index(ds_idx, self.full_shape)
+        r_idx, _ = np.unravel_index(ds_idx, self._idxer.full_shape)
         regions = self._jittered_regions[r_idx]
 
         recon = inner_ds._recon(
@@ -1576,9 +1602,7 @@ class ArrayDataset(Dataset, Generic[SEQ, TRK]):
         self: ArrayDataset[SEQ, TRK],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
     ) -> Tuple[SEQ, TRK]: ...
-    def __getitem__(
-        self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
-    ) -> Any:
+    def __getitem__(self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]) -> Any:
         return super().__getitem__(idx)
 
 
@@ -1671,7 +1695,5 @@ class RaggedDataset(Dataset, Generic[RSEQ, RTRK]):
         self: RaggedDataset[RSEQ, RTRK],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
     ) -> Tuple[RSEQ, RTRK]: ...
-    def __getitem__(
-        self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
-    ) -> Any:
+    def __getitem__(self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]) -> Any:
         return super().__getitem__(idx)

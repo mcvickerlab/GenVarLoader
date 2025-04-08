@@ -405,9 +405,9 @@ def _spliced_i2d_map_helper(
     # (rows samples ~regions)
     out = np.empty(row_offsets[-1] * n_samples, dtype=np.int32)
     for row, r_idxs in enumerate(sp_map):
-        for r_idx in r_idxs:
+        for r, r_idx in enumerate(r_idxs):
             for s_idx in s_idxs:
-                out[
-                    row_offsets[row] * (n_samples - 1) + s_idx * (len(r_idxs)) + r_idx
-                ] = i2d_map[r_idx, s_idx]
+                out[row_offsets[row] * n_samples + s_idx * (len(r_idxs)) + r] = i2d_map[
+                    r_idx, s_idx
+                ]
     return out
