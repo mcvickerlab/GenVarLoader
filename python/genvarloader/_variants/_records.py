@@ -1,4 +1,3 @@
-import re
 import subprocess
 from pathlib import Path
 from textwrap import dedent
@@ -238,24 +237,15 @@ class Records:
 
     v_starts: Dict[str, NDArray[np.int32]]
     """0-based positions of variants, sorted by start."""
+    v_ends0: Dict[str, NDArray[np.int32]]
+    """0-based, end *inclusive* ends of variants, sorted by starts."""
+    end_sorter: Dict[str, NDArray[np.int64]]
+    """Sorts variants by end position."""
     v_diffs: Dict[str, NDArray[np.int32]]
     """Difference in length |REF| - |ALT|, sorted by start"""
     # no multi-allelics
     ref: Dict[str, VLenAlleles]
     alt: Dict[str, VLenAlleles]
-    ######################
-
-    ## sorted by ends ##
-    v_ends: Dict[str, NDArray[np.int32]]
-    """0-based, end *inclusive* ends of variants, sorted by end."""
-    e2s_idx: Dict[str, NDArray[np.int32]]
-    """End to start index (sorted by starts). After searching for overlapping variants with Records.v_ends,
-    this maps the found indices to indices of variants sorted by starts."""
-    v_diffs_sorted_by_ends: Dict[str, NDArray[np.int32]]
-    """Difference in length |REF| - |ALT|, sorted by end."""
-    max_del_q: Dict[str, NDArray[np.intp]]
-    """Pending deprecation. Maximum possible deletion length for a query including variants from index 0 to i."""
-    ####################
 
     @property
     def n_variants(self) -> int:
@@ -271,13 +261,12 @@ class Records:
         else:
             multi_contig_source = False
 
-        vcf_suffix = re.compile(r"\.[vb]cf(\.gz)?$")
-        arrow_paths = {
-            c: p.parent / vcf_suffix.sub(".gvl.arrow", p.name) for c, p in vcf.items()
-        }
+        arrow_paths = {c: Path(f"{p}.gvi") for c, p in vcf.items()}
 
-        if cls.gvl_arrow_exists(vcf, arrow_paths):
-            return cls.from_gvl_arrow(arrow_paths)
+        if cls.gvi_exists(vcf, arrow_paths):
+            return cls.from_gvi(arrow_paths)
+
+        logger.info("Indexing VCF since no GVL index found.")
 
         if multi_contig_source:
             start_df = cls.read_vcf(vcf["_all"])
@@ -293,26 +282,15 @@ class Records:
             for contig, path in vcf.items():
                 start_dfs[contig] = cls.read_vcf(path)
 
-        start_dfs, end_dfs = cls.process_start_df(start_dfs)
+        start_dfs = cls.process_start_df(start_dfs)
 
         if multi_contig_source:
-            path = vcf["_all"]
-            pl.concat(start_dfs.values()).write_ipc(
-                path.parent / vcf_suffix.sub(".gvl.arrow", path.name)
-            )
-            pl.concat(end_dfs.values()).write_ipc(
-                path.parent / vcf_suffix.sub(".gvl.ends.arrow", path.name)
-            )
+            pl.concat(start_dfs.values()).write_ipc(arrow_paths["_all"])
         else:
-            for s_df, e_df, path in zip(
-                start_dfs.values(), end_dfs.values(), vcf.values()
-            ):
-                s_df.write_ipc(path.parent / vcf_suffix.sub(".gvl.arrow", path.name))
-                e_df.write_ipc(
-                    path.parent / vcf_suffix.sub(".gvl.ends.arrow", path.name)
-                )
+            for s_df, gvi in zip(start_dfs.values(), arrow_paths.values()):
+                s_df.write_ipc(gvi)
 
-        return cls.from_var_df(start_dfs, end_dfs)
+        return cls.from_var_df(start_dfs)
 
     @staticmethod
     def read_vcf(vcf_path: Path):
@@ -351,7 +329,7 @@ class Records:
                 if v.is_sv or v.var_type == "unknown":
                     if not sv_or_unknown:
                         logger.warning(
-                            f"VCF file {vcf_path} contains structural or unknown variants. These variants will be ignored."
+                            f"VCF {vcf_path} contains structural or unknown variants. These will be ignored."
                         )
                         sv_or_unknown = True
                     # use placeholder that makes ilen = 0 so it doesn't affect anything downstream
@@ -362,10 +340,9 @@ class Records:
                 # TODO: multi-allelics. Also, missing ALT (aka the * allele)?
                 if len(alt) != 1:
                     raise RuntimeError(
-                        f"""VCF file {vcf_path} contains multi-allelic or overlappings
-                        variants which are not yet supported by GenVarLoader. Normalize 
-                        the VCF with `bcftools norm -f <reference.fa>
-                        -a --atom-overlaps . -m - <file.vcf>`"""
+                        f"VCF file {vcf_path} contains multi-allelic or overlappings variants"
+                        " which are not yet supported by GenVarLoader. Normalize the VCF with"
+                        " `bcftools norm -f <reference.fa> -a --atom-overlaps . -m - <file.vcf>`"
                     )
                 alts[i] = alt[0]
                 pbar.update()
@@ -388,10 +365,12 @@ class Records:
         else:
             multi_contig_source = False
 
-        arrow_paths = {c: p.with_suffix(".gvl.arrow") for c, p in pvar.items()}
+        arrow_paths = {c: Path(f"{p}.gvi") for c, p in pvar.items()}
 
-        if cls.gvl_arrow_exists(pvar, arrow_paths):
-            return cls.from_gvl_arrow(arrow_paths)
+        if cls.gvi_exists(pvar, arrow_paths):
+            return cls.from_gvi(arrow_paths)
+
+        logger.info("Indexing PVAR since no GVL index found.")
 
         if multi_contig_source:
             start_df = cls.read_pvar(pvar["_all"])
@@ -406,20 +385,15 @@ class Records:
             for contig, path in pvar.items():
                 start_dfs[contig] = cls.read_pvar(path)
 
-        start_dfs, end_dfs = cls.process_start_df(start_dfs)
+        start_dfs = cls.process_start_df(start_dfs)
 
         if multi_contig_source:
-            path = pvar["_all"]
-            pl.concat(start_dfs.values()).write_ipc(path.with_suffix(".gvl.arrow"))
-            pl.concat(end_dfs.values()).write_ipc(path.with_suffix(".gvl.ends.arrow"))
+            pl.concat(start_dfs.values()).write_ipc(arrow_paths["_all"])
         else:
-            for s_df, e_df, path in zip(
-                start_dfs.values(), end_dfs.values(), pvar.values()
-            ):
-                s_df.write_ipc(path.with_suffix(".gvl.arrow"))
-                e_df.write_ipc(path.with_suffix(".gvl.ends.arrow"))
+            for s_df, gvi in zip(start_dfs.values(), arrow_paths.values()):
+                s_df.write_ipc(gvi)
 
-        return cls.from_var_df(start_dfs, end_dfs)
+        return cls.from_var_df(start_dfs)
 
     @staticmethod
     def read_pvar(pvar_path: Path) -> pl.DataFrame:
@@ -448,7 +422,7 @@ class Records:
         return pvar
 
     @staticmethod
-    def gvl_arrow_exists(
+    def gvi_exists(
         sources: Union[Path, Dict[str, Path]], arrow: Union[Path, Dict[str, Path]]
     ) -> bool:
         # TODO: check if files were created after the last breaking change to the gvl.arrow format
@@ -470,52 +444,28 @@ class Records:
         return True
 
     @classmethod
-    def from_gvl_arrow(cls, arrow: Union[str, Path, Dict[str, Path]]) -> Self:
-        if isinstance(arrow, (str, Path)):
-            arrow = {"_all": Path(arrow)}
+    def from_gvi(cls, paths: Union[str, Path, Dict[str, Path]]) -> Self:
+        if isinstance(paths, (str, Path)):
+            paths = {"_all": Path(paths)}
 
-        if "_all" in arrow:
+        if "_all" in paths:
             multi_contig_source = True
         else:
             multi_contig_source = False
 
-        arrow_paths: Dict[str, Path] = {}
-        for c, p in arrow.items():
-            if p.suffix == ".gvl":
-                arrow_paths[c] = p.with_suffix(".gvl.arrow")
-            elif p.suffixes[-2:] == [".gvl", ".arrow"]:
-                arrow_paths[c] = p
-            else:
-                raise ValueError(
-                    f"Arrow file {p} does not have the .gvl suffix. Please provide the correct path."
-                )
-
         if multi_contig_source:
-            path = arrow_paths["_all"]
-            start_dfs = {
-                cast(str, c[0]): v
-                for c, v in pl.read_ipc(path)
-                .partition_by("#CHROM", as_dict=True)
-                .items()
-            }
-            end_dfs = {
-                cast(str, c[0]): v
-                for c, v in pl.read_ipc(
-                    path.parent / path.name.replace(".gvl.arrow", ".gvl.ends.arrow")
-                )
+            start_dfs: Dict[str, pl.DataFrame] = {
+                cast(str, c): v
+                for (c,), v in pl.read_ipc(paths["_all"])
                 .partition_by("#CHROM", as_dict=True)
                 .items()
             }
         else:
-            start_dfs: Dict[str, pl.DataFrame] = {}
-            end_dfs: Dict[str, pl.DataFrame] = {}
-            for contig, path in arrow_paths.items():
+            start_dfs = {}
+            for contig, path in paths.items():
                 start_dfs[contig] = pl.read_ipc(path)
-                end_dfs[contig] = pl.read_ipc(
-                    path.parent / path.name.replace(".gvl.arrow", ".gvl.ends.arrow")
-                )
 
-        return cls.from_var_df(start_dfs, end_dfs)
+        return cls.from_var_df(start_dfs)
 
     @staticmethod
     def process_start_df(start_dfs: Dict[str, pl.DataFrame]):
@@ -531,89 +481,43 @@ class Records:
         start_dfs : Dict[str, pl.DataFrame]
         end_dfs : Dict[str, pl.DataFrame]
         """
-        end_dfs: Dict[str, pl.DataFrame] = {}
         for contig, df in start_dfs.items():
-            df = df.with_columns(
-                POS=pl.col("POS") - 1,  #! change to 0-indexed
-                ILEN=(
-                    pl.col("ALT").str.len_bytes().cast(pl.Int32)
-                    - pl.col("REF").str.len_bytes().cast(pl.Int32)
-                ),
-            )
-            start_dfs[contig] = df
-
-            ends = (
-                df.select(
-                    "#CHROM",
-                    "ILEN",
+            start_dfs[contig] = (
+                df.with_columns(
+                    POS=pl.col("POS") - 1,  #! change to 0-indexed
+                    ILEN=(
+                        pl.col("ALT").str.len_bytes().cast(pl.Int32)
+                        - pl.col("REF").str.len_bytes().cast(pl.Int32)
+                    ),
+                )
+                .with_columns(
                     END=pl.col("POS")
                     - pl.col("ILEN").clip(upper_bound=0),  #! end-inclusive
                 )
-                .with_row_index("VAR_IDX")
-                .select(
-                    pl.all().sort_by("END"),
-                    # make E2S_IDX relative to each contig
-                    pl.int_range(0, pl.len(), dtype=pl.Int32)
-                    .sort_by("END")
-                    .reverse()
-                    .rolling_min(df.height, min_samples=1)
-                    .reverse()
-                    .alias("E2S_IDX"),
-                )
-                .select("#CHROM", "END", "ILEN", "VAR_IDX", "E2S_IDX")
-                .sort("END")
-                .join(df.select("POS").with_row_index("VAR_IDX"), on="VAR_IDX")
+                .with_columns(end_sorter=pl.col("END").arg_sort())
             )
 
-            _starts = ends["POS"].to_numpy()
-            _ends = ends["END"].to_numpy()
-            was_ends = np.empty(len(_ends) + 1, dtype=_ends.dtype)
-            was_ends[0] = 0
-            #! convert to end-exclusive, + 1
-            was_ends[1:] = _ends + 1
-            md_q = np.searchsorted(was_ends, _starts, side="right") - 1
-            ends = ends.with_columns(MD_Q=md_q).select(  # type: ignore
-                "#CHROM", "END", "MD_Q", "ILEN", "E2S_IDX"
-            )
-
-            end_dfs[contig] = ends
-
-        return start_dfs, end_dfs
+        return start_dfs
 
     @classmethod
-    def from_var_df(
-        cls, start_dfs: Dict[str, pl.DataFrame], end_dfs: Dict[str, pl.DataFrame]
-    ) -> Self:
-        ## sorted by starts ##
+    def from_var_df(cls, start_dfs: Dict[str, pl.DataFrame]) -> Self:
         v_starts: Dict[str, NDArray[np.int32]] = {}
-        # difference in length between ref and alt, sorted by start
+        v_ends: Dict[str, NDArray[np.int32]] = {}
+        end_sorter: Dict[str, NDArray[np.int64]] = {}
         v_diffs: Dict[str, NDArray[np.int32]] = {}
         # no multi-allelics
         ref: Dict[str, VLenAlleles] = {}
         alt: Dict[str, VLenAlleles] = {}
-        ######################
-
-        ## sorted by ends ##
-        v_ends: Dict[str, NDArray[np.int32]] = {}
-        v_diffs_sorted_by_ends: Dict[str, NDArray[np.int32]] = {}
-        e2s_idx: Dict[str, NDArray[np.int32]] = {}
-        max_del_q: Dict[str, NDArray[np.int32]] = {}
-        ####################
 
         contig_offset = 0
         contig_offsets: Dict[str, int] = {}
         for contig, s_df in start_dfs.items():
-            e_df = end_dfs[contig]
             contig_offsets[contig] = contig_offset
             contig_offset += s_df.height
             v_starts[contig] = s_df["POS"].to_numpy()
             v_diffs[contig] = s_df["ILEN"].to_numpy()
-            v_ends[contig] = e_df["END"].to_numpy()
-            v_diffs_sorted_by_ends[contig] = e_df["ILEN"].to_numpy()
-            e2s_idx[contig] = np.empty(e_df.height + 1, dtype=np.int32)
-            e2s_idx[contig][:-1] = e_df["E2S_IDX"].to_numpy()
-            e2s_idx[contig][-1] = e_df.height
-            max_del_q[contig] = e_df["MD_Q"].to_numpy()
+            v_ends[contig] = s_df["END"].to_numpy()
+            end_sorter[contig] = s_df["end_sorter"].to_numpy()
 
             # no multi-allelics
             ref[contig] = VLenAlleles.from_polars(s_df["REF"])
@@ -626,10 +530,8 @@ class Records:
             v_diffs=v_diffs,
             ref=ref,
             alt=alt,
-            v_ends=v_ends,
-            v_diffs_sorted_by_ends=v_diffs_sorted_by_ends,
-            e2s_idx=e2s_idx,
-            max_del_q=max_del_q,
+            v_ends0=v_ends,
+            end_sorter=end_sorter,
         )
 
     def vars_in_range(
@@ -659,9 +561,11 @@ class Records:
 
     def find_relative_start_idx(
         self, contig: str, starts: NDArray[np.int32]
-    ) -> NDArray[np.int32]:
-        s_idx_by_end = np.searchsorted(self.v_ends[contig], starts)
-        rel_s_idx = self.e2s_idx[contig][s_idx_by_end]
+    ) -> NDArray[np.int64]:
+        s_idx_by_end = np.searchsorted(
+            self.v_ends0[contig], starts, sorter=self.end_sorter[contig]
+        )
+        rel_s_idx = self.end_sorter[contig][s_idx_by_end]
         return rel_s_idx
 
     def find_relative_end_idx(
