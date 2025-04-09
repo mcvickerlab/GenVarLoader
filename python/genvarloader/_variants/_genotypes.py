@@ -326,12 +326,14 @@ class VCFGenos:
     def read(
         self,
         contig: str,
-        starts: ArrayLike,
-        ends: ArrayLike | None,
+        starts: ArrayLike | None = None,
+        ends: ArrayLike | None = None,
         sample_idx: Optional[ArrayLike] = None,
         haplotype_idx: Optional[ArrayLike] = None,
         n_variants: NDArray[np.int32] | None = None,
     ) -> NDArray[np.int8]:
+        if starts is None:
+            starts = 0
         starts = np.atleast_1d(np.asarray(starts, dtype=np.int32)) + 1  # vcf is 1-based
         if ends is not None:
             ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))

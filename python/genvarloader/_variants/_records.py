@@ -239,7 +239,7 @@ class Records:
     """0-based positions of variants, sorted by start."""
     v_ends0: Dict[str, NDArray[np.int32]]
     """0-based, end *inclusive* ends of variants, sorted by starts."""
-    end_sorter: Dict[str, NDArray[np.int64]]
+    end_sorter: Dict[str, NDArray[np.int32]]
     """Sorts variants by end position."""
     v_diffs: Dict[str, NDArray[np.int32]]
     """Difference in length |REF| - |ALT|, sorted by start"""
@@ -503,7 +503,7 @@ class Records:
     def from_var_df(cls, start_dfs: Dict[str, pl.DataFrame]) -> Self:
         v_starts: Dict[str, NDArray[np.int32]] = {}
         v_ends: Dict[str, NDArray[np.int32]] = {}
-        end_sorter: Dict[str, NDArray[np.int64]] = {}
+        end_sorter: Dict[str, NDArray[np.int32]] = {}
         v_diffs: Dict[str, NDArray[np.int32]] = {}
         # no multi-allelics
         ref: Dict[str, VLenAlleles] = {}
@@ -540,8 +540,8 @@ class Records:
         starts: ArrayLike,
         ends: ArrayLike,
     ) -> tuple[NDArray[np.int32], NDArray[np.int32]] | None:
-        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
-        ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
+        starts = np.atleast_1d(np.asarray(starts))
+        ends = np.atleast_1d(np.asarray(ends))
 
         _contig = _normalize_contig_name(contig, self.contigs)
         if _contig is None:
@@ -561,7 +561,7 @@ class Records:
 
     def find_relative_start_idx(
         self, contig: str, starts: NDArray[np.int32]
-    ) -> NDArray[np.int64]:
+    ) -> NDArray[np.int32]:
         s_idx_by_end = np.searchsorted(
             self.v_ends0[contig], starts, sorter=self.end_sorter[contig]
         )
