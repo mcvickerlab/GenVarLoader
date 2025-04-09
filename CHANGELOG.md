@@ -1,3 +1,13 @@
+## v0.11.0 (2025-04-09)
+
+### Feat
+
+- change format of variant file indices so they can be one file, change naming to add .gvi extension to source.
+
+### Refactor
+
+- let starts and ends be optional for variant queries
+
 ## v0.10.8 (2025-04-08)
 
 ### Fix
