@@ -9,7 +9,6 @@ import polars as pl
 from attrs import define, field
 from numpy.typing import ArrayLike, NDArray
 
-from .._ragged import Ragged
 from .._utils import _lengths_to_offsets, _normalize_contig_name
 from ._genotypes import CCFFieldError, PgenGenos, VCFGenos
 from ._records import Records
@@ -135,9 +134,7 @@ class Variants:
             try:
                 ccf_field_info = _vcf.get_header_type(ccf_field)
             except KeyError:
-                raise CCFFieldError(
-                    f"CCF field '{ccf_field}' not found in VCF header."
-                )
+                raise CCFFieldError(f"CCF field '{ccf_field}' not found in VCF header.")
 
             if ccf_field_info["Number"] not in {"1", "A"}:
                 raise CCFFieldError(
@@ -235,11 +232,11 @@ class Variants:
     def _read(
         self,
         contig: str,
-        starts: ArrayLike,
-        ends: ArrayLike,
+        starts: ArrayLike | None = None,
+        ends: ArrayLike | None = None,
         sample: Optional[ArrayLike] = None,
         ploid: Optional[ArrayLike] = None,
-    ) -> DenseGenotypes | tuple[DenseGenotypes, Ragged[np.float32]] | None:
+    ) -> DenseGenotypes | DenseGenosAndCCF | None:
         """Read genotypes for a given contig and range of positions.
 
         Parameters
@@ -258,6 +255,11 @@ class Variants:
         _contig = _normalize_contig_name(contig, self.records.contigs)
         if _contig is None:
             return None
+
+        if starts is None:
+            starts = 0
+        if ends is None:
+            ends = np.iinfo(np.int32).max
 
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
@@ -310,17 +312,6 @@ class Variants:
         offsets = _lengths_to_offsets(n_variants)
 
         if ccfs is None:
-            return DenseGenotypes(
-                s_idxs,
-                e_idxs,
-                genos,
-                offsets,
-            )
+            return DenseGenotypes(s_idxs, e_idxs, genos, offsets)
         else:
-            return DenseGenosAndCCF(
-                s_idxs,
-                e_idxs,
-                genos,
-                offsets,
-                ccfs,
-            )
+            return DenseGenosAndCCF(s_idxs, e_idxs, genos, offsets, ccfs)
