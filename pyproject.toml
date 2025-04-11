@@ -28,7 +28,7 @@ dependencies = [
     "tbb",
     "joblib",
     "pooch",
-    "seqpro",
+    "seqpro>=0.2.0",
     "awkward",
     "hirola>=0.3,<0.4",
 ]
