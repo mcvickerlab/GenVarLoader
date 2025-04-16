@@ -17,7 +17,7 @@ GenVarLoader provides a fast, memory efficient data structure for training seque
 - **Supports indels** and re-aligns tracks to haplotypes that have them
 - Extensible to new file formats: drop a feature request! Currently supports VCF, PGEN, and BigWig
 
-See our [preprint](https://www.biorxiv.org/content/10.1101/2025.01.15.633240) for benchmarking and implementation details.
+Documentation is available [here](https://genvarloader.readthedocs.io/). See our [preprint](https://www.biorxiv.org/content/10.1101/2025.01.15.633240) for benchmarking and implementation details.
 
 ## Installation
 
