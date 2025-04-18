@@ -1886,8 +1886,8 @@ packages:
   requires_python: '>=3.9'
 - pypi: .
   name: genvarloader
-  version: 0.11.0
-  sha256: fccf9d11a59a226ef7747f93f0ff04558d3f2a2b17b34a5b9d3d74618f414961
+  version: 0.12.0
+  sha256: 8f90c5fc2b3b543835e15bb6aee15574b364358146814e3279e8d3477eb1c8b2
   requires_dist:
   - numba>=0.58.1
   - loguru
