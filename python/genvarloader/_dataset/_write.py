@@ -22,12 +22,9 @@ from .._utils import (
     _normalize_contig_name,
     read_bedlike,
 )
-from .._variants import DenseGenosAndCCF, DenseGenotypes, Variants
-from .._variants._genotypes import PgenGenos, VCFGenos
 from ._genotypes import (
     SparseGenotypes,
     SparseSomaticGenotypes,
-    get_haplotype_region_ilens,
 )
 from ._utils import splits_sum_le_value
 
@@ -226,201 +223,16 @@ def _write_regions(path: Path, bed: pl.DataFrame, contigs: List[str]):
     np.save(path / "regions.npy", regions)
 
 
-def _write_variants(
-    path: Path,
-    bed: pl.DataFrame,
-    variants: Variants,
-    samples: Optional[List[str]] = None,
-    max_mem: int = 4 * 2**30,
-):
-    if samples is None:
-        len(variants.samples)
-        sample_idx = None
-        _samples = cast(List[str], variants.samples.tolist())
-    else:
-        _, key_idx, query_idx = np.intersect1d(
-            variants.samples, samples, return_indices=True
-        )
-        if missing := (set(samples) - set(variants.samples)):
-            raise ValueError(f"Samples {missing} not found in VCF.")
-        sample_idx = key_idx[query_idx]
-        len(sample_idx)
-        _samples = samples
-
-    out_dir = path / "genotypes"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    pl.DataFrame(
-        {
-            "POS": np.concatenate(list(variants.records.v_starts.values())),
-            "ALT": pl.concat([a.to_polars() for a in variants.records.alt.values()]),
-            "ILEN": np.concatenate(list(variants.records.v_diffs.values())),
-        }
-    ).write_ipc(out_dir / "variants.arrow")
-
-    rel_start_idxs: Dict[str, NDArray[np.int32]] = {}
-    rel_end_idxs: Dict[str, NDArray[np.int32]] = {}
-    chunk_offsets: Dict[str, NDArray[np.intp]] = {}
-    n_chunks = 0
-    for (contig,), part in bed.partition_by(
-        "chrom", as_dict=True, include_key=False, maintain_order=True
-    ).items():
-        contig = cast(str, contig)
-        _contig = _normalize_contig_name(contig, variants.records.contigs)
-        if _contig is not None:
-            starts = part["chromStart"].to_numpy()
-            # TODO: ends may be extended if haps are too short, causing mem usage to be higher
-            # AFAIK there is no fix for this with the current read/write scheme
-            # the per-file feature would eventually address this
-            ends = part["chromEnd"].to_numpy() + INITIAL_END_EXTENSION
-            rel_s_idxs = variants.records.find_relative_start_idx(_contig, starts)
-            rel_e_idxs = variants.records.find_relative_end_idx(_contig, ends)
-
-            # variants * ploidy * samples * (4 bytes per genotype + 4 bytes per ilen)
-            # up to 4 bytes due to pgenlib reading as i32, then reduced 1 byte
-            # cyvcf2 reads slower, but genotypes are cast to i8 per variant
-            # + 1 region * ploidy * samples * (4 bytes per ilen)
-            n_variants = rel_e_idxs - rel_s_idxs
-            n_regions = len(starts)
-            if isinstance(variants.genotypes, VCFGenos):
-                bytes_per_variant = 1
-            elif isinstance(variants.genotypes, PgenGenos):
-                bytes_per_variant = 4
-            else:
-                # NOTE: this should never run unless user provides a custom genotype reader
-                # in that case this is a safe-ish upper bound
-                bytes_per_variant = 4
-
-            if not variants.phased:
-                bytes_per_variant += 4  # ccf is float 32
-
-            mem_per_r = (n_variants * (bytes_per_variant + 4) + 4) * len(_samples)
-            if variants.phased:
-                mem_per_r *= variants.ploidy
-
-            if np.any(mem_per_r > max_mem):
-                # TODO subset by samples as well if needed
-                # sketch:
-                # 1. for 1 region, read subset of variants -> SparseGenotypes
-                # 2. repeat 1 for next subset of variants
-                raise NotImplementedError(
-                    f"""Memory usage per region exceeds maximum of {max_mem / 1e9} GB.
-                    Largest amount needed for a single region is {mem_per_r.max() / 1e9} GB, set
-                    `max_mem` to this value or higher. Otherwise, chunking by region and sample is
-                    not yet implemented."""
-                )
-
-            offsets = splits_sum_le_value(mem_per_r, max_mem)
-            rel_start_idxs[contig] = rel_s_idxs
-            rel_end_idxs[contig] = rel_e_idxs
-            chunk_offsets[contig] = offsets
-            n_chunks += len(offsets) - 1
-        else:
-            rel_start_idxs[contig] = np.zeros(part.height, dtype=np.int32)
-            rel_end_idxs[contig] = np.zeros(part.height, dtype=np.int32)
-            chunk_offsets[contig] = np.array([0, part.height], dtype=np.intp)
-
-    v_idx_memmap_offsets = 0
-    ccf_memmap_offsets = 0
-    offset_memmap_offsets = 0
-    last_offset = 0
-    max_ends = np.empty(bed.height, dtype=np.int32)
-    last_max_end_idx = 0
-    with tqdm(total=n_chunks) as pbar:
-        for (contig,), part in bed.partition_by(
-            "chrom", as_dict=True, include_key=False, maintain_order=True
-        ).items():
-            contig = cast(str, contig)
-            c_offsets = chunk_offsets[contig]
-            for o_s, o_e in zip(c_offsets[:-1], c_offsets[1:]):
-                rel_s_idxs = rel_start_idxs[contig][o_s:o_e]
-                rel_e_idxs = rel_end_idxs[contig][o_s:o_e]
-                starts = part[o_s:o_e, "chromStart"].to_numpy()
-                ends = part[o_s:o_e, "chromEnd"].to_numpy()
-                n_regions = len(rel_s_idxs)
-                pbar.set_description(
-                    f"Reading genotypes for {n_regions} regions on chromosome {contig}"
-                )
-
-                _contig = _normalize_contig_name(contig, variants.records.contigs)
-
-                genos, chunk_max_ends = _read_variants_chunk(
-                    _contig,
-                    starts,
-                    ends,
-                    rel_s_idxs,
-                    rel_e_idxs,
-                    variants,
-                    _samples,
-                    sample_idx,
-                )
-
-                max_ends[last_max_end_idx : last_max_end_idx + n_regions] = (
-                    chunk_max_ends
-                )
-                last_max_end_idx += n_regions
-
-                pbar.set_description(
-                    f"Writing genotypes for {n_regions} regions on chromosome {contig}"
-                )
-                if isinstance(genos, SparseGenotypes):
-                    (
-                        v_idx_memmap_offsets,
-                        offset_memmap_offsets,
-                        last_offset,
-                    ) = _write_phased_variants_chunk(
-                        out_dir,
-                        genos,
-                        v_idx_memmap_offsets,
-                        offset_memmap_offsets,
-                        last_offset,
-                    )
-                else:
-                    (
-                        v_idx_memmap_offsets,
-                        ccf_memmap_offsets,
-                        offset_memmap_offsets,
-                        last_offset,
-                    ) = _write_somatic_variants_chunk(
-                        out_dir,
-                        genos,
-                        v_idx_memmap_offsets,
-                        ccf_memmap_offsets,
-                        offset_memmap_offsets,
-                        last_offset,
-                    )
-                pbar.update()
-
-    out = np.memmap(
-        out_dir / "offsets.npy",
-        dtype=np.int64,
-        mode="r+",
-        shape=1,
-        offset=offset_memmap_offsets,
-    )
-    out[-1] = last_offset
-    out.flush()
-
-    bed = bed.with_columns(chromEnd=pl.lit(max_ends))
-    return bed
-
-
 def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if vcf._index is None:
         if not vcf._index_path().exists():
-            raise FileNotFoundError(
-                f"Genoray VCF index not found at {vcf._index_path()}. Please index the VCF file first, including"
-                " the appropriate attributes and INFO fields."
-            )
+            vcf._write_gvi_index(preset="genvarloader")
 
         if vcf._index_compat() != "genvarloader":
-            raise ValueError(
-                "Genoray VCF index is not compatible with GenVarLoader. Please re-index using the"
-                ' "genvarloader" preset.'
-            )
+            vcf._make_index_gvl_compat()
 
         vcf._load_index()
 
@@ -675,118 +487,6 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
 
     bed = bed.with_columns(chromEnd=pl.Series(max_ends))
     return bed
-
-
-def _read_variants_chunk(
-    contig: Optional[str],
-    starts: NDArray[np.int32],
-    ends: NDArray[np.int32],
-    rel_s_idxs: NDArray[np.int32],
-    rel_e_idxs: NDArray[np.int32],
-    variants: Variants,
-    samples: List[str],
-    sample_idxs: Optional[NDArray[np.intp]],
-) -> Tuple[Union[SparseGenotypes, SparseSomaticGenotypes], NDArray[np.int32]]:
-    desired_lengths = ends - starts
-    ends = ends + INITIAL_END_EXTENSION
-
-    if contig is None:
-        if variants.phased:
-            genos = SparseGenotypes.empty(
-                n_regions=len(rel_s_idxs),
-                n_samples=len(samples),
-                ploidy=variants.ploidy,
-            )
-        else:
-            genos = SparseSomaticGenotypes.empty(
-                n_regions=len(rel_s_idxs), n_samples=len(samples)
-            )
-
-        chunk_max_ends = ends
-        return genos, chunk_max_ends
-
-    while True:
-        logger.debug(f"average region length {(ends - starts).mean()}")
-
-        # (s p v)
-        logger.debug("read genotypes")
-        if variants.phased:
-            genos = cast(
-                DenseGenotypes | None,
-                variants._read(contig, starts, ends, sample=samples),
-            )
-        else:
-            assert variants.ccf_field is not None
-            genos = cast(
-                DenseGenosAndCCF | None,
-                variants._read(contig, starts, ends, sample=samples),
-            )
-
-        if genos is None:
-            if variants.phased:
-                genos = SparseGenotypes.empty(
-                    n_regions=len(starts),
-                    n_samples=len(samples),
-                    ploidy=variants.ploidy,
-                )
-            else:
-                genos = SparseSomaticGenotypes.empty(
-                    n_regions=len(starts), n_samples=len(samples)
-                )
-            chunk_max_ends = ends
-            return genos, chunk_max_ends
-
-        logger.debug("get haplotype region ilens")
-        # (s p r)
-        # TODO: this is wrong for somatic genotypes since choosing variants is done incorrectly
-        haplotype_ilens = get_haplotype_region_ilens(
-            genos.genotypes, rel_s_idxs, genos.offsets, variants.records.v_diffs[contig]
-        )
-        # (s p r)
-        haplotype_lengths = ends - starts + haplotype_ilens
-        del haplotype_ilens
-        logger.debug(f"average haplotype length {haplotype_lengths.mean()}")
-        # (s p r)
-        missing_lengths = desired_lengths - haplotype_lengths
-        logger.debug(f"max missing length {missing_lengths.max()}")
-
-        if np.all(missing_lengths <= 0):
-            break
-
-        # (r)
-        ends += np.ceil(
-            EXTEND_END_MULTIPLIER * missing_lengths.max((0, 1)).clip(min=0)
-        ).astype(np.int32)
-
-    logger.debug("sparsify genotypes")
-    if variants.phased:
-        genos, chunk_max_ends = SparseGenotypes.from_dense_with_length(
-            genos=genos.genotypes,
-            first_v_idxs=rel_s_idxs,
-            offsets=genos.offsets,
-            ilens=variants.records.v_diffs[contig],
-            positions=variants.records.v_starts[contig],
-            starts=starts,
-            lengths=desired_lengths,
-        )
-    else:
-        genos, chunk_max_ends = SparseSomaticGenotypes.from_dense_with_length(
-            genos=genos.genotypes,
-            first_v_idxs=rel_s_idxs,
-            offsets=genos.offsets,
-            ilens=variants.records.v_diffs[contig],
-            positions=variants.records.v_starts[contig],
-            starts=starts,
-            lengths=desired_lengths,
-            ccfs=genos.ccfs,  # type: ignore | guaranteed bound by read_genos_and_ccfs
-        )
-    logger.debug(f"maximum needed length {(chunk_max_ends - starts).max()}")
-    logger.debug(f"minimum needed length {(chunk_max_ends - starts).min()}")
-
-    # make indices absolute
-    genos.variant_idxs += variants.records.contig_offsets[contig]
-
-    return genos, chunk_max_ends
 
 
 def _write_phased_variants_chunk(
