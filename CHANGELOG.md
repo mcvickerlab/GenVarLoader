@@ -1,3 +1,11 @@
+## v0.12.0 (2025-04-18)
+
+### Feat
+
+- remove Variants from public API. lets variants be a path and automatically infer if it is a VCF or PGEN
+- automatically write or update genoray VCF index to be GVL compatible during write
+- use genoray for variant I/O
+
 ## v0.11.0 (2025-04-09)
 
 ### Feat
