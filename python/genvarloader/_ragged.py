@@ -134,7 +134,7 @@ class Ragged(Generic[RDTYPE]):
     @classmethod
     def from_offsets(
         cls,
-        data: NDArray[DTYPE],
+        data: NDArray[RDTYPE],
         shape: Union[int, Tuple[int, ...]],
         offsets: NDArray[np.int64],
     ) -> Self:
@@ -154,7 +154,7 @@ class Ragged(Generic[RDTYPE]):
         return cls(data, shape, maybe_offsets=offsets)
 
     @classmethod
-    def from_lengths(cls, data: NDArray[DTYPE], lengths: NDArray[np.int32]) -> Self:
+    def from_lengths(cls, data: NDArray[RDTYPE], lengths: NDArray[np.int32]) -> Self:
         """Create a Ragged array from data and lengths. The lengths array should have
         the intended shape of the Ragged array.
 
@@ -241,12 +241,12 @@ class Ragged(Generic[RDTYPE]):
 
     def squeeze(self, axis: Optional[Union[int, Tuple[int, ...]]] = None) -> Self:
         """Squeeze the ragged array along the given non-ragged axis."""
-        return Ragged.from_lengths(self.data, self.lengths.squeeze(axis))
+        return type(self).from_lengths(self.data, self.lengths.squeeze(axis))
 
     def reshape(self, shape: Tuple[int, ...]) -> Self:
         """Reshape non-ragged axes."""
         # this is correct because all reshaping operations preserve the layout i.e. raveled ordered
-        return Ragged.from_lengths(self.data, self.lengths.reshape(shape))
+        return type(self).from_lengths(self.data, self.lengths.reshape(shape))
 
     def __str__(self):
         return (

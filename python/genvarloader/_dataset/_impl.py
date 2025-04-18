@@ -385,12 +385,13 @@ class Dataset:
 
         if splice_info is not None:
             if splice_info is False:
-                _splice_info = None
+                sp_idxer = None
+                spliced_bed = None
             else:
-                _splice_info = _parse_splice_info(
-                    splice_info, self.regions, self._idxer
-                )
-            to_evolve["_sp_idxer"] = _splice_info
+                sp_idxer = _parse_splice_info(splice_info, self.regions, self._idxer)
+                spliced_bed = _get_spliced_bed(sp_idxer, self._full_bed)
+            to_evolve["_sp_idxer"] = sp_idxer
+            to_evolve["_spliced_bed"] = spliced_bed
 
         if var_filter is not None:
             if not isinstance(self._seqs, Haps):
