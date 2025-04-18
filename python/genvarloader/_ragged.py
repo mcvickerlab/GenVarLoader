@@ -10,6 +10,7 @@ from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
 from awkward.index import Index64
 from einops import repeat
 from numpy.typing import NDArray
+from typing_extensions import Self
 
 from ._types import DTYPE, AnnotatedHaps, Idx
 from ._utils import _lengths_to_offsets, idx_like_to_array
@@ -122,12 +123,13 @@ class Ragged(Generic[RDTYPE]):
             self.maybe_lengths = np.diff(self.offsets).reshape(self.shape)
         return self.maybe_lengths
 
-    @staticmethod
+    @classmethod
     def from_offsets(
+        cls,
         data: NDArray[DTYPE],
         shape: Union[int, Tuple[int, ...]],
         offsets: NDArray[np.int64],
-    ) -> "Ragged[DTYPE]":
+    ) -> Self:
         """Create a Ragged array from data and offsets.
 
         Parameters
@@ -141,12 +143,10 @@ class Ragged(Generic[RDTYPE]):
         """
         if isinstance(shape, int):
             shape = (shape,)
-        return Ragged(data, shape, maybe_offsets=offsets)
+        return cls(data, shape, maybe_offsets=offsets)
 
-    @staticmethod
-    def from_lengths(
-        data: NDArray[DTYPE], lengths: NDArray[np.int32]
-    ) -> "Ragged[DTYPE]":
+    @classmethod
+    def from_lengths(cls, data: NDArray[DTYPE], lengths: NDArray[np.int32]) -> Self:
         """Create a Ragged array from data and lengths. The lengths array should have
         the intended shape of the Ragged array.
 
@@ -157,7 +157,7 @@ class Ragged(Generic[RDTYPE]):
         lengths
             Lengths of each element in the ragged array.
         """
-        return Ragged(data, lengths.shape, maybe_lengths=lengths)
+        return cls(data, lengths.shape, maybe_lengths=lengths)
 
     @staticmethod
     def concat(*arrays: "Ragged[DTYPE]", axis: int) -> "Ragged[DTYPE]":
@@ -231,13 +231,11 @@ class Ragged(Generic[RDTYPE]):
 
         return padded
 
-    def squeeze(
-        self, axis: Optional[Union[int, Tuple[int, ...]]] = None
-    ) -> Ragged[RDTYPE]:
+    def squeeze(self, axis: Optional[Union[int, Tuple[int, ...]]] = None) -> Self:
         """Squeeze the ragged array along the given non-ragged axis."""
         return Ragged.from_lengths(self.data, self.lengths.squeeze(axis))
 
-    def reshape(self, shape: Tuple[int, ...]) -> Ragged[RDTYPE]:
+    def reshape(self, shape: Tuple[int, ...]) -> Self:
         """Reshape non-ragged axes."""
         # this is correct because all reshaping operations preserve the layout i.e. raveled ordered
         return Ragged.from_lengths(self.data, self.lengths.reshape(shape))
@@ -277,7 +275,7 @@ class Ragged(Generic[RDTYPE]):
         return ak.Array(layout)
 
     @classmethod
-    def from_awkward(cls, awk: "ak.Array") -> "Ragged":
+    def from_awkward(cls, awk: "ak.Array") -> Self:
         """Convert from an `Awkward <https://awkward-array.org/doc/main/>`_ array without copying. Note that this effectively
         returns a view of the data, so modifying the data will modify the original array."""
         # parse shape
