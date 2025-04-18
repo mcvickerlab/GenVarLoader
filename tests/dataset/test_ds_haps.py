@@ -7,9 +7,10 @@ import pysam
 import pytest
 import seqpro as sp
 
-cons_dir = Path("/cellar/users/dlaub/projects/GenVarLoader/tests/data/consensus")
-ds_path = "/carter/users/dlaub/projects/GenVarLoader/tests/data/phased_dataset.gvl"
-ref = "/cellar/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz"
+data_dir = Path(__file__).resolve().parents[1] / "data"
+ds_path = data_dir / "phased_dataset.gvl"
+ref = data_dir / "fasta" / "Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz"
+cons_dir = data_dir / "consensus"
 
 
 @pytest.fixture

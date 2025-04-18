@@ -213,17 +213,16 @@ class Haps(Reconstructor[H]):
     ) -> Haps[Ragged[np.bytes_]]:
         variants = _Variants.from_table(path / "genotypes" / "variants.arrow")
         if phased:
-            genotypes = SparseGenotypes(
-                np.memmap(
-                    path / "genotypes" / "variant_idxs.npy",
-                    dtype=np.int32,
-                    mode="r",
-                ),
-                np.memmap(path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"),
-                len(regions),
-                len(samples),
-                ploidy,
+            v_idxs = np.memmap(
+                path / "genotypes" / "variant_idxs.npy",
+                dtype=np.int32,
+                mode="r",
             )
+            offsets = np.memmap(
+                path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
+            )
+            shape = (len(regions), len(samples), ploidy)
+            genotypes = SparseGenotypes.from_offsets(v_idxs, shape, offsets)
         else:
             genotypes = SparseSomaticGenotypes(
                 np.memmap(
@@ -231,9 +230,7 @@ class Haps(Reconstructor[H]):
                     dtype=np.int32,
                     mode="r",
                 ),
-                np.memmap(
-                    path / "genotypes" / "ccfs.npy", dtype=np.float32, mode="r"
-                ),
+                np.memmap(path / "genotypes" / "ccfs.npy", dtype=np.float32, mode="r"),
                 np.memmap(path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"),
                 len(regions),
                 len(samples),

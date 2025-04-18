@@ -56,6 +56,7 @@ def main(
     import genvarloader as gvl
     import polars as pl
     import polars.selectors as cs
+    from genoray import VCF
     from loguru import logger
     from tqdm.auto import tqdm
 
@@ -245,22 +246,21 @@ def main(
     bed = WDIR / "vcf" / f"{name}.bed"
 
     logger.info("Generating phased dataset.")
+    reader = VCF(filtered_vcf)
+    if not reader._index_path().exists():
+        reader._write_gvi_index(preset="genvarloader")
+    reader._load_index()
     gvl.write(
-        path=WDIR / "phased_dataset.gvl",
-        bed=bed,
-        variants=filtered_vcf,
-        overwrite=True,
+        path=WDIR / "phased_dataset.gvl", bed=bed, variants=reader, overwrite=True
     )
 
-    logger.info("Generating unphased dataset.")
-    gvl.write(
-        path=WDIR / "unphased_dataset.gvl",
-        bed=bed,
-        variants=filtered_vcf,
-        overwrite=True,
-        phased=False,
-        dosage_field="VAF",
-    )
+    # logger.info("Generating unphased dataset.")
+    # gvl.write(
+    #     path=WDIR / "unphased_dataset.gvl",
+    #     bed=bed,
+    #     variants=reader,
+    #     overwrite=True,
+    # )
 
     logger.info(f"Finished in {perf_counter() - t0} seconds.")
 

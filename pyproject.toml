@@ -1,6 +1,6 @@
 [project]
 name = "genvarloader"
-version = "0.10.5"
+version = "0.12.0"
 description = "Pipeline for efficient genomic data processing."
 authors = [
     { name = "David Laub", email = "dlaub@ucsd.edu" },
@@ -8,29 +8,29 @@ authors = [
 ]
 readme = "README.md"
 license = { file = "LICENSE.txt" }
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13" # >= 3.13 blocked by cyvcf2
 dependencies = [
     "numba>=0.58.1",
     "loguru",
     "attrs",
     "natsort",
-    "polars>=1",
+    "polars>=1.26",
+    "cyvcf2",
     "pandera",
-    "pgenlib",
     "pysam",
     "pyarrow",
+    "pyranges",
     "more-itertools",
     "tqdm",
-    "cyvcf2",
     "pybigwig",
     "einops",
-    "typer",
     "tbb",
     "joblib",
     "pooch",
-    "seqpro",
+    "seqpro>=0.2.0",
     "awkward",
     "hirola>=0.3,<0.4",
+    "genoray>=0.5.0",
 ]
 
 [project.urls]
@@ -75,97 +75,3 @@ major_version_zero = true
 [build-system]
 requires = ["maturin>=1.6,<2.0"]
 build-backend = "maturin"
-
-[tool.pixi.project]
-channels = ["conda-forge", "bioconda"]
-platforms = ["linux-64"]
-
-[tool.pixi.dependencies]
-numba = ">=0.58.1"
-loguru = "*"
-attrs = "*"
-natsort = "*"
-polars = ">=1.22"
-pandera = "*"
-pgenlib = "*"
-pysam = "*"
-pyarrow = "*"
-more-itertools = "*"
-tqdm = "*"
-cyvcf2 = "*"
-pybigwig = "*"
-einops = "*"
-typer = "*"
-tbb = "*"
-joblib = "*"
-pooch = "*"
-awkward = "*"
-pip = "*"
-
-[tool.pixi.pypi-dependencies]
-genvarloader = { path = ".", editable = true }
-
-[tool.pixi.feature.pytorch-cpu.dependencies]
-pytorch-cpu = ">=2,<3"
-
-[tool.pixi.feature.pytorch-gpu.dependencies]
-pytorch-gpu = ">=2,<3"
-cuda-version = "12.1.*"
-
-[tool.pixi.feature.pytorch-gpu.system-requirements]
-cuda = "12.1"
-
-[tool.pixi.feature.basenji2.pypi-dependencies]
-basenji2-pytorch = ">=0.1.2"
-
-[tool.pixi.feature.test.dependencies]
-maturin = ">=1.6,<2"
-pytest = "*"
-memray = "*"
-py-spy = "*"
-icecream = "*"
-pytest-cases = "*"
-pytest-cov = "*"
-ruff = "*"
-pre-commit = "*"
-pytest-benchmark = "*"
-hypothesis = "*"
-filelock = "*"
-patchelf = "*"
-commitizen = "*"
-
-[tool.pixi.feature.docs.dependencies]
-sphinx = ">=7.4.7"
-myst-parser = "*"
-nbsphinx = "*"
-ipykernel = "*"
-ipywidgets = "*"
-sphinx-book-theme = "*"
-sphinx-autobuild = "*"
-sphinx-autodoc-typehints = "*"
-
-[tool.pixi.feature.py310.dependencies]
-python = "3.10.*"
-
-[tool.pixi.feature.py311.dependencies]
-python = "3.11.*"
-
-[tool.pixi.feature.py312.dependencies]
-python = "3.12.*"
-
-[tool.pixi.environments]
-dev = { features = ["test", "docs", "pytorch-cpu", "basenji2", "py310"] }
-test = { features = ["test", "pytorch-cpu", "py310"] }
-docs = { features = ["docs", "pytorch-cpu", "basenji2", "py310"] }
-docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py310"] }
-test-no-pytorch = { features = ["test", "py310"] }
-test-py310 = { features = ["test", "py310", "pytorch-cpu"] }
-test-py311 = { features = ["test", "py311", "pytorch-cpu"] }
-test-py312 = { features = ["test", "py312", "pytorch-cpu"] }
-
-[tool.pixi.feature.test.tasks]
-pre-commit = "pre-commit install --hook-type commit-msg"
-
-[tool.pixi.feature.docs.tasks]
-i-kernel = "ipython kernel install --user --name 'gvl-docs' --display-name 'GVL Docs'"
-i-kernel-gpu = "ipython kernel install --user --name 'gvl-docs-gpu' --display-name 'GVL Docs GPU'"
