@@ -12,7 +12,7 @@ def case_snps():
 
     # (s p v)
     genos = np.array([[[0, 1]]], dtype=np.int8)
-    first_v_idxs = np.array([0], dtype=np.int32)
+    var_idxs = np.array([0, 1], dtype=np.int32)
     offsets = np.array([0, 2], np.int64)
 
     shift = 0
@@ -21,7 +21,7 @@ def case_snps():
     query_start = 0
 
     sparse_genos = SparseGenotypes.from_dense(
-        genos=genos, first_v_idxs=first_v_idxs, offsets=offsets
+        genos=genos, var_idxs=var_idxs, offsets=offsets
     )
 
     return (
@@ -41,7 +41,7 @@ def case_indels():
 
     # (s p v) : (1 1 2)
     genos = np.array([[[1, 1]]], dtype=np.int8)
-    first_v_idxs = np.array([0], dtype=np.int32)
+    var_idxs = np.array([0, 1], dtype=np.int32)
     offsets = np.array([0, 2], np.int64)
 
     shift = 0
@@ -50,7 +50,7 @@ def case_indels():
     query_start = 0
 
     sparse_genos = SparseGenotypes.from_dense(
-        genos=genos, first_v_idxs=first_v_idxs, offsets=offsets
+        genos=genos, var_idxs=var_idxs, offsets=offsets
     )
 
     return (
@@ -70,7 +70,7 @@ def case_spanning_del():
 
     # (s p v) : (1 1 2)
     genos = np.array([[[1]]], dtype=np.int8)
-    first_v_idxs = np.array([0], dtype=np.int32)
+    var_idxs = np.array([0], dtype=np.int32)
     offsets = np.array([0, 1], np.int64)
 
     shift = 0
@@ -81,7 +81,7 @@ def case_spanning_del():
     query_start = 1
 
     sparse_genos = SparseGenotypes.from_dense(
-        genos=genos, first_v_idxs=first_v_idxs, offsets=offsets
+        genos=genos, var_idxs=var_idxs, offsets=offsets
     )
 
     return (
@@ -101,7 +101,7 @@ def case_shift_ins():
 
     # (s p v) : (1 1 2)
     genos = np.array([[[1, 1]]], dtype=np.int8)
-    first_v_idxs = np.array([0], dtype=np.int32)
+    var_idxs = np.array([0, 1], dtype=np.int32)
     offsets = np.array([0, 2], np.int64)
 
     shift = 1
@@ -111,7 +111,7 @@ def case_shift_ins():
     query_start = 0
 
     sparse_genos = SparseGenotypes.from_dense(
-        genos=genos, first_v_idxs=first_v_idxs, offsets=offsets
+        genos=genos, var_idxs=var_idxs, offsets=offsets
     )
 
     return (
