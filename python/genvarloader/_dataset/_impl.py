@@ -103,10 +103,7 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
-        splice_info: str
-        | tuple[str, str]
-        | dict[Any, NDArray[np.integer]]
-        | None = None,
+        splice_info: str | tuple[str, str] | None = None,
         var_filter: Literal["exonic"] | None = None,
     ) -> RaggedDataset[None, RTRK]: ...
     @staticmethod
@@ -118,10 +115,7 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
-        splice_info: str
-        | tuple[str, str]
-        | dict[Any, NDArray[np.integer]]
-        | None = None,
+        splice_info: str | tuple[str, str] | None = None,
         var_filter: Literal["exonic"] | None = None,
     ) -> RaggedDataset[Ragged[np.bytes_], RTRK]: ...
     @staticmethod
@@ -132,10 +126,7 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
-        splice_info: str
-        | tuple[str, str]
-        | dict[str, NDArray[np.integer]]
-        | None = None,
+        splice_info: str | tuple[str, str] | None = None,
         var_filter: Literal["exonic"] | None = None,
     ) -> RaggedDataset[RSEQ, RTRK]:
         """Open a dataset from a path. If no reference genome is provided, the dataset cannot yield sequences.
@@ -274,10 +265,9 @@ class Dataset:
                 assert_never(has_intervals)
 
         if splice_info is not None:
-            sp_idxer = _parse_splice_info(splice_info, bed, idxer)
-            spliced_bed = _get_spliced_bed(sp_idxer, bed)
+            splice_idxer, spliced_bed = _parse_splice_info(splice_info, bed, idxer)
         else:
-            sp_idxer = None
+            splice_idxer = None
             spliced_bed = None
 
         dataset = RaggedDataset(
@@ -291,7 +281,7 @@ class Dataset:
             transform=None,
             deterministic=deterministic,
             _idxer=idxer,
-            _sp_idxer=sp_idxer,
+            _sp_idxer=splice_idxer,
             _full_bed=bed,
             _spliced_bed=spliced_bed,
             _full_regions=regions,
@@ -312,11 +302,7 @@ class Dataset:
         rng: int | np.random.Generator | None = None,
         deterministic: bool | None = None,
         rc_neg: bool | None = None,
-        splice_info: str
-        | tuple[str, str]
-        | dict[str, NDArray[np.integer]]
-        | Literal[False]
-        | None = None,
+        splice_info: str | tuple[str, str] | Literal[False] | None = None,
         var_filter: Literal[False, "exonic"] | None = None,
     ) -> Dataset:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
@@ -385,12 +371,13 @@ class Dataset:
 
         if splice_info is not None:
             if splice_info is False:
-                sp_idxer = None
+                splice_idxer = None
                 spliced_bed = None
             else:
-                sp_idxer = _parse_splice_info(splice_info, self.regions, self._idxer)
-                spliced_bed = _get_spliced_bed(sp_idxer, self._full_bed)
-            to_evolve["_sp_idxer"] = sp_idxer
+                splice_idxer, spliced_bed = _parse_splice_info(
+                    splice_info, self._full_bed, self._idxer
+                )
+            to_evolve["_sp_idxer"] = splice_idxer
             to_evolve["_spliced_bed"] = spliced_bed
 
         if var_filter is not None:
@@ -1201,10 +1188,12 @@ class Dataset:
         else:
             recon, squeeze, out_reshape = self._getitem_spliced(idx, self._sp_idxer)
 
-        if not isinstance(recon, tuple):
-            out = [recon]
-        else:
+        if isinstance(recon, tuple):
+            unlist = False
             out = list(recon)
+        else:
+            unlist = True
+            out = [recon]
 
         if self.jitter > 0:
             out = _rag_jitter(out, self.jitter, self._rng)
@@ -1220,6 +1209,9 @@ class Dataset:
 
         if out_reshape is not None:
             out = [o.reshape(out_reshape + o.shape[1:]) for o in out]
+        
+        if unlist:
+            out = out[0]
 
         return out
 
@@ -1304,8 +1296,8 @@ class Dataset:
 
 
 def _parse_splice_info(
-    splice_info: str | tuple[str, str] | dict[str, NDArray[np.integer]],
-    regions: pl.DataFrame,
+    splice_info: str | tuple[str, str],
+    full_bed: pl.DataFrame,
     idxer: DatasetIndexer,
 ):
     """Parse splice info into a SpliceIndexer.
@@ -1320,35 +1312,39 @@ def _parse_splice_info(
         The idxer to use to parse the splice info.
     """
     if isinstance(splice_info, str):
-        names, sorter, idx, lengths = np.unique(
-            regions[splice_info],
-            return_index=True,
-            return_inverse=True,
-            return_counts=True,
+        sp_bed = (
+            full_bed.rename({splice_info: "splice_id"})
+            .with_row_index()
+            .group_by("splice_id", maintain_order=True)
+            .agg(pl.all())
         )
-        names = names[np.argsort(sorter)]
-        splice_map = Ragged.from_lengths(np.argsort(idx), lengths).to_awkward()[
-            np.argsort(sorter)
-        ]
+        names = sp_bed["splice_id"].to_list()
+        lengths = sp_bed["index"].list.len().to_numpy()
+        splice_map = Ragged.from_lengths(
+            sp_bed["index"].explode().to_numpy(), lengths
+        ).to_awkward()
     elif isinstance(splice_info, tuple):
-        names, sorter, lengths = np.unique(
-            regions[splice_info[0]],
-            return_index=True,
-            return_counts=True,
+        if len(splice_info) != 2:
+            raise ValueError(
+                "Splice info tuple must be of length 2, corresponding to columns names for splice IDs and element ordering."
+            )
+        sp_bed = (
+            full_bed.rename({splice_info[0]: "splice_id"})
+            .with_row_index()
+            .group_by("splice_id", maintain_order=True)
+            .agg(pl.all().sort_by(splice_info[1]))
         )
-        data = (
-            regions[splice_info].with_row_index().sort(splice_info)["index"].to_numpy()
-        )
-        splice_map = Ragged.from_lengths(data, lengths).to_awkward()[np.argsort(sorter)]
-    elif isinstance(splice_info, dict):
-        names = list(splice_info.keys())
-        splice_map = ak.Array(splice_info.values())
+        names = sp_bed["splice_id"].to_list()
+        lengths = sp_bed["index"].list.len().to_numpy()
+        splice_map = Ragged.from_lengths(
+            sp_bed["index"].explode().to_numpy(), lengths
+        ).to_awkward()
     else:
         assert_never(splice_info)
 
     splice_map = cast(ak.Array, splice_map)
     sp_idxer = SpliceIndexer._init(names, splice_map, idxer)
-    return sp_idxer
+    return sp_idxer, sp_bed
 
 
 def _get_spliced_bed(spi: SpliceIndexer, full_bed: pl.DataFrame) -> pl.DataFrame:
