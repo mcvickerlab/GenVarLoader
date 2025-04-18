@@ -17,11 +17,8 @@ from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
 from .._bigwig import BigWigs
-from .._utils import (
-    _lengths_to_offsets,
-    _normalize_contig_name,
-    read_bedlike,
-)
+from .._utils import _lengths_to_offsets, _normalize_contig_name, read_bedlike
+from .._variants._utils import path_is_pgen, path_is_vcf
 from ._genotypes import (
     SparseGenotypes,
     SparseSomaticGenotypes,
@@ -38,7 +35,7 @@ EXTEND_END_MULTIPLIER = 1.1
 def write(
     path: Union[str, Path],
     bed: Union[str, Path, pl.DataFrame],
-    variants: Reader | None = None,
+    variants: str | Path | Reader | None = None,
     bigwigs: Optional[Union[BigWigs, List[BigWigs]]] = None,
     samples: Optional[List[str]] = None,
     max_jitter: Optional[int] = None,
@@ -108,6 +105,19 @@ def write(
 
     available_samples: Optional[Set[str]] = None
     if variants is not None:
+        if isinstance(variants, (str, Path)):
+            variants = Path(variants)
+            if path_is_pgen(variants):
+                if variants.suffix == "":
+                    variants = variants.with_suffix(".pgen")
+                variants = PGEN(variants)
+            elif path_is_vcf(variants):
+                variants = VCF(variants)
+            else:
+                raise ValueError(
+                    f"File {variants} has an unrecognized file extension. Please provide either a VCF or PGEN file.`"
+                )
+
         if available_samples is None:
             available_samples = set(variants.available_samples)
 
