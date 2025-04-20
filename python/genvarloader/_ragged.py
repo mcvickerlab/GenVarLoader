@@ -113,7 +113,7 @@ class Ragged(Generic[RDTYPE]):
         """Number of dimensions of the ragged array."""
         return len(self.shape)
 
-    def view(self, dtype: np.dtype):
+    def view(self, dtype: type[DTYPE] | str) -> Ragged[DTYPE]:
         return Ragged.from_offsets(self.data.view(dtype), self.shape, self.offsets)
 
     @property

@@ -360,10 +360,10 @@ class SpliceIndexer:
         if not isinstance(lengths, np.integer):
             lengths = lengths.to_numpy()
         lengths = cast(NDArray[np.int64], lengths)
-        reducer = _lengths_to_offsets(lengths)[:-1]
+        offsets = _lengths_to_offsets(lengths)
         ds_idx = ak.flatten(ds_idx, None).to_numpy()
 
-        return ds_idx, squeeze, out_reshape, reducer
+        return ds_idx, squeeze, out_reshape, offsets
 
     def r2i(self, regions: StrIdx) -> Idx:
         """Convert region names to region indices."""

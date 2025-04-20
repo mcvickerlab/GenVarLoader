@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import awkward as ak
 import numpy as np
 import polars as pl
 import seqpro as sp
@@ -8,8 +7,8 @@ from einops import repeat
 from natsort import natsorted
 
 from ._dataset._genotypes import SparseGenotypes
-from ._dataset._impl import RaggedDataset, _get_spliced_bed
-from ._dataset._indexing import DatasetIndexer, SpliceIndexer
+from ._dataset._impl import RaggedDataset, _parse_splice_info
+from ._dataset._indexing import DatasetIndexer
 from ._dataset._intervals import tracks_to_intervals
 from ._dataset._reconstruct import Haps, HapsTracks, Reference, Tracks, _Variants
 from ._dataset._utils import bed_to_regions
@@ -48,6 +47,8 @@ def get_dummy_dataset(spliced: bool = False):
             "chromStart": [5, 13, 8, 2],
             "chromEnd": [8, 16, 11, 5],
             "strand": ["+", "-", "+", "+"],
+            "gene": ["tp53", "shh", "tp53", "tp53"],
+            "exon": [3, 1, 1, 2],
         }
     )
 
@@ -93,12 +94,10 @@ def get_dummy_dataset(spliced: bool = False):
         - 1  # idx within region
         + 4 * np.arange(4)[:, None]  # adjust by region/contig offset
     )
-    dummy_genos = SparseGenotypes(
-        variant_idxs=v_idxs.ravel(),
-        offsets=np.arange(0, 4 * 4 + 1, dtype=np.int64),  # every entry has 1 variant
-        n_regions=4,
-        n_samples=4,
-        ploidy=1,
+    dummy_genos = SparseGenotypes.from_offsets(
+        v_idxs.ravel(),
+        (4, 4, 1),
+        np.arange(0, 4 * 4 + 1, dtype=np.int64),  # every entry has 1 variant
     )
 
     dummy_haps = Haps(dummy_ref, dummy_vars, dummy_genos, False, None)
@@ -131,16 +130,8 @@ def get_dummy_dataset(spliced: bool = False):
     dummy_recon = HapsTracks(dummy_haps, dummy_tracks)
 
     if spliced:
-        names = ["tp53", "shh"]
-        sp_map = ak.Array(
-            [
-                [3, 0, 2],
-                [1],
-            ]
-        )
-        dummy_spi = SpliceIndexer._init(names, sp_map, dummy_idxer)
         dummy_bed = dummy_bed.with_columns(chrom=pl.lit("chr1"))
-        sp_bed = _get_spliced_bed(dummy_spi, dummy_bed)
+        dummy_spi, sp_bed = _parse_splice_info(("gene", "exon"), dummy_bed, dummy_idxer)
     else:
         dummy_spi = None
         sp_bed = None

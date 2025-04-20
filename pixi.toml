@@ -40,9 +40,9 @@ typer = "*"
 
 [pypi-dependencies]
 genvarloader = { path = ".", editable = true }
-seqpro = "==0.2.0"
+seqpro = "==0.2.4"
 hirola = "==0.3"
-genoray = "==0.5.0"
+genoray = "==0.5.1"
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"

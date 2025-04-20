@@ -19,6 +19,7 @@ from typing import (
 )
 
 import awkward as ak
+import numba as nb
 import numpy as np
 import polars as pl
 from attrs import define, evolve, field
@@ -37,7 +38,7 @@ from .._ragged import (
 )
 from .._torch import TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx, StrIdx
-from .._utils import idx_like_to_array, is_dtype
+from .._utils import _lengths_to_offsets, idx_like_to_array, is_dtype
 from ._genotypes import SparseGenotypes
 from ._indexing import DatasetIndexer, SpliceIndexer
 from ._reconstruct import Haps, HapsTracks, Reference, Seqs, SeqsTracks, Tracks
@@ -1209,7 +1210,7 @@ class Dataset:
 
         if out_reshape is not None:
             out = [o.reshape(out_reshape + o.shape[1:]) for o in out]
-        
+
         if unlist:
             out = out[0]
 
@@ -1269,23 +1270,21 @@ class Dataset:
             )
 
         inner_ds = self.with_len("ragged")
-        ds_idx, squeeze, out_reshape, reducer = splice_idxer.parse_idx(idx)
+        ds_idx, squeeze, out_reshape, offsets = splice_idxer.parse_idx(idx)
         r_idx, _ = np.unravel_index(ds_idx, self._idxer.full_shape)
         regions = self._jittered_regions[r_idx]
 
-        recon = inner_ds._recon(
-            ds_idx, regions, self.output_length, self.jitter, self._rng
-        )
+        recon = inner_ds._recon(ds_idx, regions, "ragged", self.jitter, self._rng)
 
         if isinstance(recon, tuple):
-            recon = tuple(_cat_length(r, reducer) for r in recon)
+            recon = tuple(_cat_length(r, offsets) for r in recon)
         else:
-            recon = _cat_length(recon, reducer)
+            recon = _cat_length(recon, offsets)
 
         if self.rc_neg:
             # (b)
             to_rc: NDArray[np.bool_] = np.logical_and.reduceat(
-                self._full_regions[r_idx, 3] == -1, reducer, axis=0
+                self._full_regions[r_idx, 3] == -1, offsets[:-1], axis=0
             )
             if isinstance(recon, tuple):
                 recon = tuple(_rc(r, to_rc) for r in recon)
@@ -1345,49 +1344,6 @@ def _parse_splice_info(
     splice_map = cast(ak.Array, splice_map)
     sp_idxer = SpliceIndexer._init(names, splice_map, idxer)
     return sp_idxer, sp_bed
-
-
-def _get_spliced_bed(spi: SpliceIndexer, full_bed: pl.DataFrame) -> pl.DataFrame:
-    idx = ak.flatten(spi.splice_map, None).to_numpy()
-    regs_per_row = ak.count(spi.splice_map, -1).to_numpy()
-    splice_ids = spi.rows.keys
-    if spi.row_subset_idxs is not None:
-        splice_ids = splice_ids[spi.row_subset_idxs]
-    splice_ids = splice_ids.repeat(regs_per_row)
-
-    uniq_cols = ["chrom"]
-    if "strand" in full_bed:
-        uniq_cols.append("strand")
-
-    spliced_bed = (
-        full_bed.with_row_index("regions")[idx]
-        .with_columns(splice_id=splice_ids)
-        .group_by("splice_id", maintain_order=True)
-        .agg(pl.exclude(uniq_cols), pl.col(uniq_cols).unique())
-    )
-
-    if (spliced_bed["chrom"].list.len() > 1).any():
-        raise ValueError(
-            "Some elements of spliced regions are on different chromosomes."
-        )
-
-    if "strand" in full_bed and (spliced_bed["strand"].list.len() > 1).any():
-        raise ValueError("Some elements of spliced regions are on different strands.")
-
-    important_cols = [
-        "splice_id",
-        "regions",
-        "chrom",
-        "chromStart",
-        "chromEnd",
-        "strand",
-    ]
-
-    spliced_bed = spliced_bed.with_columns(pl.col(uniq_cols).list.first()).select(
-        pl.col(important_cols), pl.exclude(important_cols)
-    )
-
-    return spliced_bed
 
 
 @overload
@@ -1488,25 +1444,63 @@ def _fix_len(
 
 
 @overload
-def _cat_length(rag: Ragged[DTYPE], reducer: NDArray[np.integer]) -> Ragged[DTYPE]: ...
+def _cat_length(rag: Ragged[DTYPE], offsets: NDArray[np.integer]) -> Ragged[DTYPE]: ...
 @overload
 def _cat_length(
-    rag: RaggedAnnotatedHaps, reducer: NDArray[np.integer]
+    rag: RaggedAnnotatedHaps, offsets: NDArray[np.integer]
 ) -> RaggedAnnotatedHaps: ...
 def _cat_length(
-    rag: Ragged | RaggedAnnotatedHaps, reducer: NDArray[np.integer]
+    rag: Ragged | RaggedAnnotatedHaps, offsets: NDArray[np.integer]
 ) -> Ragged | RaggedAnnotatedHaps:
     """Concatenate the lengths of the ragged data."""
     if isinstance(rag, Ragged):
-        lengths = np.add.reduceat(rag.lengths, reducer, axis=0)
-        return Ragged.from_lengths(rag.data, lengths)
+        cat = Ragged.from_awkward(ak.concatenate(rag.to_awkward(), -1))
+        if is_rag_dtype(rag, np.bytes_):
+            cat = cat.view("S1")
+        return cat
     elif isinstance(rag, RaggedAnnotatedHaps):
-        haps = _cat_length(rag.haps, reducer)
-        var_idxs = _cat_length(rag.var_idxs, reducer)
-        ref_coords = _cat_length(rag.ref_coords, reducer)
+        haps = _cat_length(rag.haps, offsets)
+        var_idxs = _cat_length(rag.var_idxs, offsets)
+        ref_coords = _cat_length(rag.ref_coords, offsets)
         return RaggedAnnotatedHaps(haps, var_idxs, ref_coords)
     else:
         assert_never(rag)
+
+
+# @nb.njit(parallel=True, nogil=True, cache=True)
+def _cat_helper(
+    data: NDArray[DTYPE],
+    lengths: NDArray[np.integer],
+    offsets: NDArray[np.integer],
+    splice_groups: NDArray[np.integer],
+) -> tuple[NDArray[DTYPE], NDArray[np.integer]]:
+    """Concatenate the data and offsets of the ragged data."""
+    # data could be
+    # ref: (b ~l)
+    # haps or annotations: (b p ~l)
+    # tracks: (b t ~l)
+    # hap_tracks: (b t p ~l)
+    in_strides = np.array(lengths.strides) // lengths.itemsize
+
+    # (s [t] [p] ~cat_length)
+    out_data = np.empty_like(data)
+    # (b [t] [p]) -> (s [t] [p])
+    out_lengths = np.add.reduceat(lengths, splice_groups[:-1], 0)
+    out_strides = np.array(out_lengths.strides) // out_lengths.itemsize
+    out_offsets = _lengths_to_offsets(out_lengths)
+
+    n_splice = len(splice_groups) - 1
+    if lengths.ndim == 1:
+        for s in nb.prange(n_splice):
+            s_s, s_e = splice_groups[s : s + 1]
+            o_s = out_offsets[s]
+            for b in range(s_s, s_e):
+                i_s, i_e = offsets[b], offsets[b + 1]
+                sub_o_s = o_s + (i_s - offsets[s_s])
+                sub_o_e = o_s + (i_e - offsets[s_s])
+                out_data[sub_o_s:sub_o_e] = data[i_s:i_e]
+
+    return out_data, out_offsets
 
 
 SEQ = TypeVar("SEQ", None, NDArray[np.bytes_], AnnotatedHaps)
