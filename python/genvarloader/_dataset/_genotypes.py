@@ -706,7 +706,10 @@ def get_diffs_sparse(
     for query in nb.prange(n_queries):
         for hap in nb.prange(ploidy):
             o_idx = geno_offset_idxs[query, hap]
-            o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
+            if geno_offset_idxs.ndim == 1:
+                o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
+            else:
+                o_s, o_e = geno_offsets[o_idx]
             n_variants = o_e - o_s
             if n_variants == 0:
                 diffs[query, hap] = 0
@@ -921,7 +924,11 @@ def reconstruct_haplotype_from_sparse(
     annot_ref_pos: Optional[NDArray[np.int32]]
         Shape = (out_length) Reference positions for annotations
     """
-    _variant_idxs = geno_v_idxs[geno_offsets[offset_idx] : geno_offsets[offset_idx + 1]]
+    if geno_offsets.ndim == 1:
+        o_s, o_e = geno_offsets[offset_idx], geno_offsets[offset_idx + 1]
+    else:
+        o_s, o_e = geno_offsets[offset_idx]
+    _variant_idxs = geno_v_idxs[o_s : o_e]
     length = len(out)
     n_variants = len(_variant_idxs)
 
@@ -1106,7 +1113,10 @@ def choose_unphased_variants(
     for query in nb.prange(n_regions):
         for hap in range(ploidy):
             o_idx = geno_offset_idxs[query, hap]
-            o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
+            if geno_offset_idxs.ndim == 1:
+                o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
+            else:
+                o_s, o_e = geno_offsets[o_idx]
             lengths[query, hap] = o_e - o_s
     keep_offsets = np.empty(n_regions * ploidy + 1, np.int64)
     keep_offsets[0] = 0
@@ -1123,7 +1133,10 @@ def choose_unphased_variants(
         ref_end: int = ends[query]
         for hap in nb.prange(ploidy):
             o_idx = geno_offset_idxs[query, hap]
-            o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
+            if geno_offset_idxs.ndim == 1:
+                o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
+            else:
+                o_s, o_e = geno_offsets[o_idx]
             qh_genos = geno_v_idxs[o_s:o_e]
             qh_ccfs = ccfs[o_s:o_e]
 
