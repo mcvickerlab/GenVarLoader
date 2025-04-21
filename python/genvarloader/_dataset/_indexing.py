@@ -98,8 +98,8 @@ class DatasetIndexer:
     @property
     def samples(self) -> List[str]:
         if self.sample_subset_idxs is None:
-            return self.full_samples.tolist()
-        return self.full_samples[self.sample_subset_idxs].tolist()
+            return self.full_samples.tolist()  # type: ignore
+        return self.full_samples[self.sample_subset_idxs].tolist()  # type: ignore
 
     @property
     def shape(self) -> tuple[int, int]:

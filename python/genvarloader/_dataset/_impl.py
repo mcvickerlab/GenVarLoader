@@ -19,10 +19,11 @@ from typing import (
 )
 
 import awkward as ak
-import numba as nb
 import numpy as np
 import polars as pl
 from attrs import define, evolve, field
+from awkward.contents import ListOffsetArray
+from awkward.index import Index64
 from loguru import logger
 from more_itertools import collapse
 from numpy.typing import NDArray
@@ -38,7 +39,7 @@ from .._ragged import (
 )
 from .._torch import TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx, StrIdx
-from .._utils import _lengths_to_offsets, idx_like_to_array, is_dtype
+from .._utils import idx_like_to_array, is_dtype
 from ._genotypes import SparseGenotypes
 from ._indexing import DatasetIndexer, SpliceIndexer
 from ._reconstruct import Haps, HapsTracks, Reference, Seqs, SeqsTracks, Tracks
@@ -775,11 +776,12 @@ class Dataset:
     def __str__(self) -> str:
         splice_status = "Spliced" if self.is_spliced else "Unspliced"
 
-        if self._available_sequences is None or self.sequence_type is None:
-            seq_type = "None"
+        if self._available_sequences is None:
+            seq_type = None
         else:
             seqs = self._available_sequences
-            seqs[seqs.index(self.sequence_type)] = f"[{self.sequence_type}]"
+            if self.sequence_type is not None:
+                seqs[seqs.index(self.sequence_type)] = f"[{self.sequence_type}]"
             seq_type = " ".join(seqs)
 
         if self.available_tracks is None:
@@ -1454,7 +1456,29 @@ def _cat_length(
 ) -> Ragged | RaggedAnnotatedHaps:
     """Concatenate the lengths of the ragged data."""
     if isinstance(rag, Ragged):
-        cat = Ragged.from_awkward(ak.concatenate(rag.to_awkward(), -1))
+        if rag.ndim == 1 or rag.shape[1:] == (1,) * (
+            rag.ndim - 1
+        ):  # (b [1] [1] ~l) => layout is correct
+            new_lengths = np.add.reduceat(rag.lengths, offsets[:-1], 0)
+            cat = Ragged.from_lengths(rag.data, new_lengths)
+        elif rag.ndim == 2:  # (b p ~l) or (b t ~l)
+            grouped = ak.Array(
+                ListOffsetArray(Index64(offsets), rag.to_awkward().layout)
+            )
+            cat = Ragged.from_awkward(
+                ak.concatenate(
+                    [
+                        ak.flatten(grouped[:, :, i], -1)[:, None]  # (g 1 ~l)
+                        for i in range(rag.shape[1])
+                    ],
+                    1,
+                )
+            )
+        elif rag.ndim == 3:  # hap tracks: (b t p ~l)
+            raise NotImplementedError("Splicing haplotype tracks.")
+        else:
+            raise RuntimeError("Should never see a 4+ dim ragged array.")
+
         if is_rag_dtype(rag, np.bytes_):
             cat = cat.view("S1")
         return cat
@@ -1465,42 +1489,6 @@ def _cat_length(
         return RaggedAnnotatedHaps(haps, var_idxs, ref_coords)
     else:
         assert_never(rag)
-
-
-# @nb.njit(parallel=True, nogil=True, cache=True)
-def _cat_helper(
-    data: NDArray[DTYPE],
-    lengths: NDArray[np.integer],
-    offsets: NDArray[np.integer],
-    splice_groups: NDArray[np.integer],
-) -> tuple[NDArray[DTYPE], NDArray[np.integer]]:
-    """Concatenate the data and offsets of the ragged data."""
-    # data could be
-    # ref: (b ~l)
-    # haps or annotations: (b p ~l)
-    # tracks: (b t ~l)
-    # hap_tracks: (b t p ~l)
-    in_strides = np.array(lengths.strides) // lengths.itemsize
-
-    # (s [t] [p] ~cat_length)
-    out_data = np.empty_like(data)
-    # (b [t] [p]) -> (s [t] [p])
-    out_lengths = np.add.reduceat(lengths, splice_groups[:-1], 0)
-    out_strides = np.array(out_lengths.strides) // out_lengths.itemsize
-    out_offsets = _lengths_to_offsets(out_lengths)
-
-    n_splice = len(splice_groups) - 1
-    if lengths.ndim == 1:
-        for s in nb.prange(n_splice):
-            s_s, s_e = splice_groups[s : s + 1]
-            o_s = out_offsets[s]
-            for b in range(s_s, s_e):
-                i_s, i_e = offsets[b], offsets[b + 1]
-                sub_o_s = o_s + (i_s - offsets[s_s])
-                sub_o_e = o_s + (i_e - offsets[s_s])
-                out_data[sub_o_s:sub_o_e] = data[i_s:i_e]
-
-    return out_data, out_offsets
 
 
 SEQ = TypeVar("SEQ", None, NDArray[np.bytes_], AnnotatedHaps)

@@ -6,7 +6,7 @@ import awkward as ak
 import numba as nb
 import numpy as np
 from attrs import define
-from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
+from awkward.contents import ListArray, ListOffsetArray, NumpyArray, RegularArray
 from awkward.index import Index64
 from einops import repeat
 from numpy.typing import NDArray
@@ -61,6 +61,9 @@ def is_rag_dtype(rag: Ragged, dtype: type[DTYPE]) -> TypeGuard[Ragged[DTYPE]]:
     return np.issubdtype(rag.data.dtype, dtype)
 
 
+OFFSET_TYPE = np.int64
+
+
 @define
 class Ragged(Generic[RDTYPE]):
     """Ragged array i.e. a rectilinear array where the final axis is ragged. Should not be initialized
@@ -87,7 +90,7 @@ class Ragged(Generic[RDTYPE]):
         the shape is (2, 3), then the j, k-th element can be mapped to an index for
         offsets with :code:`i = np.ravel_multi_index((j, k), shape)`. The number of ragged
         elements corresponds to the product of the shape."""
-    maybe_offsets: Optional[NDArray[np.int64]] = None
+    maybe_offsets: Optional[NDArray[OFFSET_TYPE]] = None
     maybe_lengths: Optional[NDArray[np.int32]] = None
 
     def __attrs_post_init__(self):
@@ -117,7 +120,7 @@ class Ragged(Generic[RDTYPE]):
         return Ragged.from_offsets(self.data.view(dtype), self.shape, self.offsets)
 
     @property
-    def offsets(self) -> NDArray[np.int64]:
+    def offsets(self) -> NDArray[OFFSET_TYPE]:
         """Offsets into the data array to get corresponding elements. The i-th element
         is accessible as :code:`data[offsets[i]:offsets[i+1]]`."""
         if self.maybe_offsets is None:
@@ -136,7 +139,7 @@ class Ragged(Generic[RDTYPE]):
         cls,
         data: NDArray[RDTYPE],
         shape: Union[int, Tuple[int, ...]],
-        offsets: NDArray[np.int64],
+        offsets: NDArray[OFFSET_TYPE],
     ) -> Self:
         """Create a Ragged array from data and offsets.
 
@@ -271,25 +274,21 @@ class Ragged(Generic[RDTYPE]):
 
     def to_awkward(self) -> ak.Array:
         """Convert to an `Awkward <https://awkward-array.org/doc/main/>`_ array without copying. Note that this effectively
-        returns a view of the data, so modifying the data will modify the original array.
-
-        .. note::
-            Sequence arrays (i.e. dtype of "S1") will return awkward arrays with dtype np.uint8 since strings are represented
-            in Awkward differently than in GVL such that it does not support "S1" data.
-
-        """
-        if self.dtype.type == np.bytes_:
-            data = self.data.view(np.uint8)
+        returns a view of the data, so modifying the data will modify the original array."""
+        if self.dtype.type == np.bytes_ and self.dtype.itemsize == 1:
+            data = NumpyArray(
+                self.data.view(np.uint8),  # type: ignore
+                parameters={"__array__": "char"},
+            )
         else:
-            data = self.data
+            data = NumpyArray(self.data)  # type: ignore
 
-        if self.shape == ():
-            return ak.Array(data)
-
-        layout = ListOffsetArray(
-            Index64(self.offsets),
-            NumpyArray(data),  # type: ignore | NDArray[RDTYPE] is ArrayLike
-        )
+        if self.offsets.ndim == 1:
+            layout = ListOffsetArray(Index64(self.offsets), data)
+        else:
+            layout = ListArray(
+                Index64(self.offsets[:, 0]), Index64(self.offsets[:, 1]), data
+            )
 
         for size in reversed(self.shape[1:]):
             layout = RegularArray(layout, size)
@@ -310,19 +309,43 @@ class Ragged(Generic[RDTYPE]):
             ) from err
 
         # extract data and offsets
-        data = ak.flatten(awk, axis=None).to_numpy()
         layout = awk.layout
+        offsets = None
         while hasattr(layout, "content"):
             if isinstance(layout, ListOffsetArray):
-                offsets = layout.offsets.data
-                offsets = cast(NDArray[np.int64], offsets)
-                rag = cls.from_offsets(data, shape, offsets)
+                offsets = np.asarray(layout.offsets.data, dtype=OFFSET_TYPE)
+                content = layout.content
+                break
+            elif isinstance(layout, ListArray):
+                starts = layout.starts.data
+                stops = layout.stops.data
+                offsets = cast(
+                    NDArray[OFFSET_TYPE],
+                    np.stack(
+                        [starts, stops],  # type: ignore
+                        axis=-1,
+                        dtype=OFFSET_TYPE,
+                    ),
+                )
+                content = layout.content
                 break
             else:
                 layout = layout.content
         else:
-            lengths = ak.count(awk, axis=-1).to_numpy()
-            rag = cls.from_lengths(data, lengths)
+            raise ValueError
+
+        if offsets is None:
+            raise ValueError
+
+        data = np.asarray(content.data)  # type: ignore
+        if content.parameter("__array__") == "char":
+            data = data.view("S1")
+
+        rag = cls.from_offsets(
+            data,  # type: ignore
+            shape,
+            offsets,
+        )
 
         return rag
 
@@ -340,8 +363,13 @@ def pad_ragged(
     pad_value: DTYPE,
     out: NDArray[DTYPE],
 ):
-    for i in nb.prange(len(offsets) - 1):
-        start, end = offsets[i], offsets[i + 1]
+    for i in nb.prange(len(offsets)):
+        if offsets.ndim == 1:
+            if i == len(offsets) - 1:
+                continue
+            start, end = offsets[i], offsets[i + 1]
+        else:
+            start, end = offsets[i, 0], offsets[i, 1]
         entry_len = end - start
         out[i, :entry_len] = data[start:end]
         out[i, entry_len:] = pad_value
@@ -354,11 +382,16 @@ COMPLEMENTS = b"TGCA"
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def _rc_helper(
-    data: NDArray[np.uint8], offsets: NDArray[np.int64], mask: NDArray[np.bool_]
+    data: NDArray[np.uint8], offsets: NDArray[OFFSET_TYPE], mask: NDArray[np.bool_]
 ) -> NDArray[np.uint8]:
     out = data.copy()
-    for i in nb.prange(len(offsets) - 1):
-        start, end = offsets[i], offsets[i + 1]
+    for i in nb.prange(len(offsets)):
+        if offsets.ndim == 1:
+            if i == len(offsets) - 1:
+                continue
+            start, end = offsets[i], offsets[i + 1]
+        else:
+            start, end = offsets[i, 0], offsets[i, 1]
         _data = data[start:end]
         _out = out[start:end]
         if mask[i]:
@@ -383,10 +416,17 @@ def _reverse_complement(
 
 #! for whatever reason, this causes data corruption with parallel=True?!
 @nb.njit(nogil=True, cache=True)
-def _reverse_helper(data: NDArray, offsets: NDArray[np.int64], mask: NDArray[np.bool_]):
-    for i in nb.prange(len(offsets) - 1):
+def _reverse_helper(
+    data: NDArray, offsets: NDArray[OFFSET_TYPE], mask: NDArray[np.bool_]
+):
+    for i in nb.prange(len(offsets)):
         if mask[i]:
-            start, end = offsets[i], offsets[i + 1]
+            if offsets.ndim == 1:
+                if i == len(offsets) - 1:
+                    continue
+                start, end = offsets[i], offsets[i + 1]
+            else:
+                start, end = offsets[i, 0], offsets[i, 1]
             data[start:end] = np.flip(data[start:end])
 
 
@@ -440,9 +480,9 @@ def _jitter(
 @nb.njit(parallel=True, nogil=True, cache=True)
 def _jitter_helper(
     data: Tuple[NDArray, ...],
-    offsets: Tuple[NDArray[np.int64], ...],
+    offsets: Tuple[NDArray[OFFSET_TYPE], ...],
     shapes: Tuple[Tuple[int, ...], ...],
-    out_offsets: Tuple[NDArray[np.int64], ...],
+    out_offsets: Tuple[NDArray[OFFSET_TYPE], ...],
     starts: NDArray[np.int64],
 ) -> Tuple[NDArray, ...]:
     """Helper to jitter ragged data. Ragged arrays should have shape (batch, ...).
@@ -481,7 +521,16 @@ def _jitter_helper(
 
             for row in nb.prange(idx_s, idx_e):
                 row_s = arr_offsets[row]
-                out_row_s, out_row_e = out_arr_offsets[row], out_arr_offsets[row + 1]
+                if out_arr_offsets.ndim == 1:
+                    out_row_s, out_row_e = (
+                        out_arr_offsets[row],
+                        out_arr_offsets[row + 1],
+                    )
+                else:
+                    out_row_s, out_row_e = (
+                        out_arr_offsets[row, 0],
+                        out_arr_offsets[row, 1],
+                    )
                 out_len = out_row_e - out_row_s
                 out_arr_data[out_row_s:out_row_e] = arr_data[
                     row_s + jit_s : row_s + jit_s + out_len
