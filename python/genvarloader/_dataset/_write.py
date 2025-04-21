@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Set, Tuple, Union, cast
 import awkward as ak
 import numpy as np
 import polars as pl
-from genoray import PGEN, VCF, Reader
+from genoray import PGEN, VCF, Reader, SparseVar
 from genoray._utils import parse_memory
 from loguru import logger
 from more_itertools import mark_ends
@@ -159,11 +159,14 @@ def write(
 
     if variants is not None:
         logger.info("Writing genotypes.")
-        variants.set_samples(samples)
         if isinstance(variants, VCF):
+            variants.set_samples(samples)
             gvl_bed = _write_from_vcf(path, gvl_bed, variants, max_mem)
         elif isinstance(variants, PGEN):
+            variants.set_samples(samples)
             gvl_bed = _write_from_pgen(path, gvl_bed, variants, max_mem)
+        elif isinstance(variants, SparseVar):
+            gvl_bed = _write_from_svar(path, gvl_bed, variants, samples)
         metadata["ploidy"] = variants.ploidy
         metadata["phased"] = True
         # free memory
@@ -239,10 +242,7 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
 
     if vcf._index is None:
         if not vcf._index_path().exists():
-            vcf._write_gvi_index(preset="genvarloader")
-
-        if vcf._index_compat() != "genvarloader":
-            vcf._make_index_gvl_compat()
+            vcf._write_gvi_index()
 
         vcf._load_index()
 
@@ -497,6 +497,56 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
 
     bed = bed.with_columns(chromEnd=pl.Series(max_ends))
     return bed
+
+
+def _write_from_svar(
+    path: Path, bed: pl.DataFrame, svar: SparseVar, samples: list[str]
+):
+    out_dir = path / "genotypes"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    offsets = np.memmap(
+        out_dir / "offsets.npy",
+        np.int64,
+        "w+",
+        shape=(bed.height, len(samples), svar.ploidy, 2),
+    )
+
+    with open(out_dir / "svar_meta.json", "w") as f:
+        json.dump({"shape": offsets.shape, "dtype": offsets.dtype.str}, f)
+
+    max_ends = np.empty(bed.height, np.int32)
+    region_offset = 0
+    for (c,), df in bed.partition_by(
+        "chrom", as_dict=True, maintain_order=True
+    ).items():
+        c = cast(str, c)
+        starts = df["chromStart"]
+        ends = df["chromEnd"]
+        # (r s p 2)
+        out = offsets[region_offset : region_offset + df.height]
+        svar._find_starts_ends_with_length(c, starts, ends, samples=samples, out=out)
+        region_offset += df.height
+
+        # compute max_ends for the bed
+        shape = (df.height, len(samples), svar.ploidy, 2)
+        # (r s p 2 ~v)
+        sp_genos = SparseGenotypes.from_offsets(
+            svar.genos.data, shape, out.reshape(-1, 2)
+        )
+        # (r s p 2)
+        # this is fine if there aren't any overlapping variants that could make a v_idx < -1
+        # have a further end than v_idx == -1
+        v_idxs = sp_genos.to_awkward()[..., -1].to_numpy()  # type: ignore
+        max_ends[region_offset : region_offset + df.height] = (
+            svar.granges.End.to_numpy()[v_idxs].max((1, 2, 3))
+        )
+
+    offsets.flush()
+
+    (out_dir / "link.svar").symlink_to(svar.path, True)
+
+    return bed.with_columns(chromEnd=pl.Series(max_ends))
 
 
 def _write_phased_variants_chunk(

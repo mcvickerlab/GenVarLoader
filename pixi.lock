@@ -236,13 +236,13 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb8e6e7a_2.conda
       - pypi: https://files.pythonhosted.org/packages/78/05/536d025b3e17cf938f836665dde32e86f65ee76acd0ae14e22bda6aee274/beartype-0.20.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/52/50/1d3b4a3c06fa113026337a10ea170503864f29716515d6a6aab09c7a1ea6/genoray-0.5.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/b7/57/b76283dde9c3e9c3fe8985f6d6b2d79ce3b65b54b190d09e696ba4b80b02/genoray-0.7.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/a9/a6/aa38bddc9f8d90e5ce14023f06ccbf642ab5d507da1ffafb031c0f332dc6/numerary-0.4.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/18/ec/5434c4a6012ef2ff12d0e71b6c341532686ee82d63e5101717abc24eb3f5/pgenlib-0.92.0.tar.gz
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/06/5c9ed34ec048e51e115cd1b3cf9d9c258e3c75b3105b42db11c0282536a3/pysam-0.23.0-cp312-cp312-manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/2c/b0/f719dc735e3c9c3ba410e057497cf78a315eb48d013b120666ea3623f9c8/seqpro-0.2.3-cp39-abi3-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/c6/64/3d24181aaea3fb892d4a46f8171845782ee364d60e9494426daf31d12f47/tbb-2022.1.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/06/bb/09a6dc2f1110b409d6d2f96429969d7466bde9bf4ad8b2e682d851ef104b/tcmlib-1.3.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: .
@@ -496,7 +496,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2d/ea/d6230cc9772edca0fd8c91638dc1c2e2def09b9a22cfabe6532906e96aea/basenji2_pytorch-0.1.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/78/05/536d025b3e17cf938f836665dde32e86f65ee76acd0ae14e22bda6aee274/beartype-0.20.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/52/50/1d3b4a3c06fa113026337a10ea170503864f29716515d6a6aab09c7a1ea6/genoray-0.5.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/b7/57/b76283dde9c3e9c3fe8985f6d6b2d79ce3b65b54b190d09e696ba4b80b02/genoray-0.7.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/1a/c1/31b3184cba7b257a4a3b5ca5b88b9204ccb7aa02fe3c992280899293ed54/lightning_utilities-0.14.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a9/a6/aa38bddc9f8d90e5ce14023f06ccbf642ab5d507da1ffafb031c0f332dc6/numerary-0.4.4-py3-none-any.whl
@@ -504,7 +504,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5a/45/38ae786fb646e5032a982029ad1c0964433e74b67e328d2c9d2fc6691639/pysam-0.23.0-cp310-cp310-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/82/ff/5701f79317a1a03e5ee8a1bf48e7273a8445162a2774e51fc06411a67c89/pytorch_lightning-2.5.1-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/2c/b0/f719dc735e3c9c3ba410e057497cf78a315eb48d013b120666ea3623f9c8/seqpro-0.2.3-cp39-abi3-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/c6/64/3d24181aaea3fb892d4a46f8171845782ee364d60e9494426daf31d12f47/tbb-2022.1.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/06/bb/09a6dc2f1110b409d6d2f96429969d7466bde9bf4ad8b2e682d851ef104b/tcmlib-1.3.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/72/25/973bd6128381951b23cdcd8a9870c6dcfc5606cb864df8eabd82e529f9c1/torchinfo-1.8.0-py3-none-any.whl
@@ -834,7 +834,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2d/ea/d6230cc9772edca0fd8c91638dc1c2e2def09b9a22cfabe6532906e96aea/basenji2_pytorch-0.1.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/78/05/536d025b3e17cf938f836665dde32e86f65ee76acd0ae14e22bda6aee274/beartype-0.20.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/52/50/1d3b4a3c06fa113026337a10ea170503864f29716515d6a6aab09c7a1ea6/genoray-0.5.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/b7/57/b76283dde9c3e9c3fe8985f6d6b2d79ce3b65b54b190d09e696ba4b80b02/genoray-0.7.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/1a/c1/31b3184cba7b257a4a3b5ca5b88b9204ccb7aa02fe3c992280899293ed54/lightning_utilities-0.14.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a9/a6/aa38bddc9f8d90e5ce14023f06ccbf642ab5d507da1ffafb031c0f332dc6/numerary-0.4.4-py3-none-any.whl
@@ -842,7 +842,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5a/45/38ae786fb646e5032a982029ad1c0964433e74b67e328d2c9d2fc6691639/pysam-0.23.0-cp310-cp310-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/82/ff/5701f79317a1a03e5ee8a1bf48e7273a8445162a2774e51fc06411a67c89/pytorch_lightning-2.5.1-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/2c/b0/f719dc735e3c9c3ba410e057497cf78a315eb48d013b120666ea3623f9c8/seqpro-0.2.3-cp39-abi3-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/c6/64/3d24181aaea3fb892d4a46f8171845782ee364d60e9494426daf31d12f47/tbb-2022.1.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/06/bb/09a6dc2f1110b409d6d2f96429969d7466bde9bf4ad8b2e682d851ef104b/tcmlib-1.3.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/72/25/973bd6128381951b23cdcd8a9870c6dcfc5606cb864df8eabd82e529f9c1/torchinfo-1.8.0-py3-none-any.whl
@@ -1866,28 +1866,33 @@ packages:
   - pkg:pypi/fsspec?source=compressed-mapping
   size: 142117
   timestamp: 1743437355974
-- pypi: https://files.pythonhosted.org/packages/52/50/1d3b4a3c06fa113026337a10ea170503864f29716515d6a6aab09c7a1ea6/genoray-0.5.0-py3-none-any.whl
+- pypi: https://files.pythonhosted.org/packages/b7/57/b76283dde9c3e9c3fe8985f6d6b2d79ce3b65b54b190d09e696ba4b80b02/genoray-0.7.0-py3-none-any.whl
   name: genoray
-  version: 0.5.0
-  sha256: 349f1f369eb2e4a50ff70807c90e61035cc3aea852869da4c69c7fd0f76efd4c
+  version: 0.7.0
+  sha256: b6b864441c847f685a990047a590ecfad04fdd37fd077bf4fb984ab4ed81e315
   requires_dist:
+  - attrs
+  - awkward
   - cyvcf2>=0.31.1
   - hirola>=0.3.0
+  - loguru>=0.7.0
   - more-itertools>=10
+  - numba
   - numpy>=1.26
   - pandas>=2.2.2
   - pgenlib>=0.92.0
   - phantom-types>=3
   - polars>=1.26
   - pyarrow>=16
-  - pyranges>=0.1.1
+  - pyranges>=0.1.3
+  - seqpro>=0.2.3
   - tqdm>=4.65
   - typing-extensions>=4.11
   requires_python: '>=3.9'
 - pypi: .
   name: genvarloader
-  version: 0.11.0
-  sha256: fccf9d11a59a226ef7747f93f0ff04558d3f2a2b17b34a5b9d3d74618f414961
+  version: 0.12.0
+  sha256: 29405e26f8098122a7c9cc90a1b51eea010b49740df55e984d642759336fde63
   requires_dist:
   - numba>=0.58.1
   - loguru
@@ -1906,10 +1911,10 @@ packages:
   - tbb
   - joblib
   - pooch
-  - seqpro>=0.2.0
+  - seqpro>=0.2.3
   - awkward
   - hirola>=0.3,<0.4
-  - genoray>=0.5.0
+  - genoray>=0.7.0
   requires_python: '>=3.10,<3.13'
   editable: true
 - conda: https://conda.anaconda.org/conda-forge/linux-64/gflags-2.2.2-h5888daf_1005.conda
@@ -5298,10 +5303,10 @@ packages:
   purls: []
   size: 352907
   timestamp: 1743805258946
-- pypi: https://files.pythonhosted.org/packages/44/6a/82bd7f3e99ce05c203983afa09256edcede7976450eff2640ce11673f71b/seqpro-0.2.0-cp39-abi3-manylinux_2_28_x86_64.whl
+- pypi: https://files.pythonhosted.org/packages/2c/b0/f719dc735e3c9c3ba410e057497cf78a315eb48d013b120666ea3623f9c8/seqpro-0.2.3-cp39-abi3-manylinux_2_28_x86_64.whl
   name: seqpro
-  version: 0.2.0
-  sha256: 247bb319b9ca346fb01af709d33273a3d866b713694efb781173e88704b06382
+  version: 0.2.3
+  sha256: 6f0ec116d42850e502026d060560430d0b1c4cc5bf941671e73aec3285a394f5
   requires_dist:
   - numba>=0.58.1
   - numpy>=1.26.0
@@ -5310,12 +5315,9 @@ packages:
   - pandera>=0.19
   - pandas
   - pyarrow
-  - matplotlib ; extra == 'dev'
-  - pytest<8 ; extra == 'dev'
-  - pytest-cases ; extra == 'dev'
-  - hypothesis ; extra == 'dev'
-  - pytest-benchmark ; extra == 'dev'
-  - biopython ; extra == 'dev'
+  - natsort
+  - setuptools>=70
+  - awkward>=2.5.0
   requires_python: '>=3.9'
 - conda: https://conda.anaconda.org/conda-forge/noarch/setuptools-75.8.2-pyhff2d567_0.conda
   sha256: 91d664ace7c22e787775069418daa9f232ee8bafdd0a6a080a5ed2395a6fa6b2
