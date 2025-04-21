@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -209,29 +210,61 @@ class Haps(Reconstructor[H]):
         samples: List[str],
         ploidy: int,
     ) -> Haps[Ragged[np.bytes_]]:
-        variants = _Variants.from_table(path / "genotypes" / "variants.arrow")
-        if phased:
-            v_idxs = np.memmap(
-                path / "genotypes" / "variant_idxs.npy",
-                dtype=np.int32,
-                mode="r",
-            )
-            offsets = np.memmap(
-                path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
-            )
-            shape = (len(regions), len(samples), ploidy)
-            genotypes = SparseGenotypes.from_offsets(v_idxs, shape, offsets)
-        else:
-            genotypes = SparseSomaticGenotypes(
-                np.memmap(
+        if not (path / "genotypes" / "svar_meta.json").exists():
+            variants = _Variants.from_table(path / "genotypes" / "variants.arrow")
+            if phased:
+                v_idxs = np.memmap(
                     path / "genotypes" / "variant_idxs.npy",
                     dtype=np.int32,
                     mode="r",
-                ),
-                np.memmap(path / "genotypes" / "ccfs.npy", dtype=np.float32, mode="r"),
-                np.memmap(path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"),
-                len(regions),
-                len(samples),
+                )
+                offsets = np.memmap(
+                    path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
+                )
+                shape = (len(regions), len(samples), ploidy)
+                genotypes = SparseGenotypes.from_offsets(v_idxs, shape, offsets)
+            else:
+                genotypes = SparseSomaticGenotypes(
+                    np.memmap(
+                        path / "genotypes" / "variant_idxs.npy",
+                        dtype=np.int32,
+                        mode="r",
+                    ),
+                    np.memmap(
+                        path / "genotypes" / "ccfs.npy", dtype=np.float32, mode="r"
+                    ),
+                    np.memmap(
+                        path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
+                    ),
+                    len(regions),
+                    len(samples),
+                )
+        else:
+            v_idxs = np.memmap(
+                path / "genotypes" / "link.svar" / "variant_idxs.npy",
+                dtype=np.int32,
+                mode="r",
+            )
+            with open(path / "genotypes" / "svar_meta.json") as f:
+                metadata = json.load(f)
+            # (r s p 2)
+            shape: tuple[int, ...] = metadata["shape"]
+            dtype: str = metadata["dtype"]
+            offsets = np.memmap(
+                path / "genotypes" / "offsets.npy", shape=shape, dtype=dtype, mode="r"
+            )
+            genotypes = SparseGenotypes.from_offsets(
+                v_idxs, shape[:-1], offsets.reshape(-1, 2)
+            )
+            svar_index = pl.read_ipc(
+                path / "genotypes" / "link.svar" / "index.arrow",
+                memory_map=False,
+                columns=["POS", "ILEN", "ALT"],
+            ).with_columns(pl.col("ILEN", "ALT").list.first())
+            variants = _Variants(
+                svar_index["POS"].to_numpy() - 1,
+                svar_index["ILEN"].to_numpy(),
+                VLenAlleles.from_polars(svar_index["ALT"]),
             )
         return cls(
             reference=reference,
