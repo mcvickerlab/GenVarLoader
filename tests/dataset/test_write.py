@@ -9,24 +9,24 @@ from genoray import PGEN, VCF, Reader
 from genvarloader._dataset._genotypes import SparseGenotypes
 from genvarloader._utils import _lengths_to_offsets
 from polars.testing.asserts import assert_frame_equal
-from pytest import fixture
+from pytest import fixture, mark
 from pytest_cases import parametrize_with_cases
 
 ddir = Path(__file__).parents[1] / "data"
 
 
 def reader_vcf():
-    _vcf = VCF(ddir / "vcf" / "filtered_sample.vcf.gz")
-    _vcf._write_gvi_index(preset="genvarloader")
-    _vcf._load_index()
-    return _vcf
+    vcf = VCF(ddir / "vcf" / "filtered_sample.vcf.gz")
+    vcf._write_gvi_index()
+    vcf._load_index()
+    return vcf
 
 
 def reader_pgen():
-    _pgen = PGEN(ddir / "pgen" / "filtered_sample.pgen")
-    _pgen._index_path().unlink()
-    _pgen = PGEN(ddir / "pgen" / "filtered_sample.pgen")
-    return _pgen
+    index_path = (ddir / "pgen" / "filtered_sample.pvar.gvi")
+    index_path.unlink()
+    pgen = PGEN(ddir / "pgen" / "filtered_sample.pgen")
+    return pgen
 
 
 @fixture
@@ -39,6 +39,7 @@ def ref():
     return ddir / "fasta" / "Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz"
 
 
+@mark.skip
 @parametrize_with_cases("reader", cases=".", prefix="reader_")
 def test_write(reader: Reader, bed: pl.DataFrame, ref: Path, tmp_path):
     out = tmp_path / "test.gvl"

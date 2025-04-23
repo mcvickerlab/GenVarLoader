@@ -4,25 +4,33 @@ from pathlib import Path
 import genvarloader as gvl
 import numpy as np
 import pysam
-import pytest
 import seqpro as sp
+from pytest_cases import parametrize_with_cases
 
 data_dir = Path(__file__).resolve().parents[1] / "data"
-ds_path = data_dir / "phased_dataset.gvl"
 ref = data_dir / "fasta" / "Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz"
 cons_dir = data_dir / "consensus"
 
 
-@pytest.fixture
-def dataset():
+def dataset_vcf():
     ds = (
-        gvl.Dataset.open(ds_path, ref, deterministic=True)
+        gvl.Dataset.open(data_dir / "phased_dataset.vcf.gvl", ref)
         .with_len("ragged")
         .with_seqs("haplotypes")
     )
     return ds
 
 
+def dataset_svar():
+    ds = (
+        gvl.Dataset.open(data_dir / "phased_dataset.svar.gvl", ref)
+        .with_len("ragged")
+        .with_seqs("haplotypes")
+    )
+    return ds
+
+
+@parametrize_with_cases("dataset", cases=".", prefix="dataset_")
 def test_ds_haps(dataset: gvl.RaggedDataset[gvl.Ragged[np.bytes_], None, None, None]):
     for region, sample in product(range(dataset.n_regions), dataset.samples):
         c, s, e = dataset.regions.select("chrom", "chromStart", "chromEnd").row(region)

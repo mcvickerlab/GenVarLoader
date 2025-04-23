@@ -58,6 +58,7 @@ filterwarnings = [
     "ignore::DeprecationWarning:pkg_resources.*",
     "ignore::DeprecationWarning:jupyter_client.*",
 ]
+markers = ["slow: mark test as slow (deselect with '-m \"not slow\"')"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
