@@ -1892,7 +1892,7 @@ packages:
 - pypi: .
   name: genvarloader
   version: 0.12.0
-  sha256: 29405e26f8098122a7c9cc90a1b51eea010b49740df55e984d642759336fde63
+  sha256: e547e134d9f5e5966cc728f918b5cf9a3b0943ee268461fc650cac7a9247b2a1
   requires_dist:
   - numba>=0.58.1
   - loguru
