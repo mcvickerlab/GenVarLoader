@@ -303,7 +303,7 @@ class Haps(Reconstructor[H]):
                 geno_offset_idxs=geno_offset_idxs,
                 geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
-                size_diffs=self.variants.sizes,
+                ilens=self.variants.sizes,
                 keep=keep,
                 keep_offsets=keep_offsets,
             )
@@ -313,10 +313,10 @@ class Haps(Reconstructor[H]):
                 geno_offset_idxs=geno_offset_idxs,
                 geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
-                size_diffs=self.variants.sizes,
-                starts=jittered_regions[:, 1],
-                ends=jittered_regions[:, 2],
-                positions=self.variants.positions,
+                ilens=self.variants.sizes,
+                q_starts=jittered_regions[:, 1],
+                q_ends=jittered_regions[:, 2],
+                v_starts=self.variants.positions,
             )
 
         return hap_ilens.reshape(-1, self.genotypes.shape[-1])

@@ -187,6 +187,7 @@ def main(
             "NA00002",
             "NA00003",
         ],
+        schema_overrides={"chrom": pl.Utf8},
     )
     samples = bed.select(cs.matches(r"^NA\d{5}$")).columns
 
@@ -207,8 +208,17 @@ def main(
         )
         .drop("group")
         .sample(fraction=1, shuffle=True, seed=0)
-        .with_row_index()
     )
+    # manual additions
+    # spanning del
+    rows = pl.DataFrame(
+        {
+            "chrom": ["19"],
+            "start": [1010696],
+            "end": [1010696 + SEQ_LEN],
+        }
+    )
+    bed = bed.vstack(rows).with_row_index()
 
     logger.info("Generating BED file.")
     (
