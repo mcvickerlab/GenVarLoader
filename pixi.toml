@@ -41,7 +41,7 @@ uv = "*"
 
 [pypi-dependencies]
 genvarloader = { path = ".", editable = true }
-seqpro = "==0.2.3"
+seqpro = { path = '/cellar/users/dlaub/projects/ML4GLand/SeqPro', editable = true }
 hirola = "==0.3"
 genoray = "==0.7.0"
 

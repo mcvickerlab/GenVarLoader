@@ -706,7 +706,7 @@ def get_diffs_sparse(
     for query in nb.prange(n_queries):
         for hap in nb.prange(ploidy):
             o_idx = geno_offset_idxs[query, hap]
-            if geno_offset_idxs.ndim == 1:
+            if geno_offsets.ndim == 1:
                 o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
             else:
                 o_s, o_e = geno_offsets[o_idx]
