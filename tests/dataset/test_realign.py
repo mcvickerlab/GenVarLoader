@@ -13,16 +13,13 @@ def case_snps():
     # (s p v)
     genos = np.array([[[0, 1]]], dtype=np.int8)
     var_idxs = np.array([0, 1], dtype=np.int32)
-    offsets = np.array([0, 2], np.int64)
 
     shift = 0
     track = np.arange(4, dtype=np.float32)
     desired = track.copy()
     query_start = 0
 
-    sparse_genos = SparseGenotypes.from_dense(
-        genos=genos, var_idxs=var_idxs, offsets=offsets
-    )
+    sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
 
     return (
         positions,
@@ -42,16 +39,13 @@ def case_indels():
     # (s p v) : (1 1 2)
     genos = np.array([[[1, 1]]], dtype=np.int8)
     var_idxs = np.array([0, 1], dtype=np.int32)
-    offsets = np.array([0, 2], np.int64)
 
     shift = 0
     track = np.arange(4, dtype=np.float32)
     desired = np.array([0, 1, 3, 3], np.float32)
     query_start = 0
 
-    sparse_genos = SparseGenotypes.from_dense(
-        genos=genos, var_idxs=var_idxs, offsets=offsets
-    )
+    sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
 
     return (
         positions,
@@ -71,7 +65,6 @@ def case_spanning_del():
     # (s p v) : (1 1 2)
     genos = np.array([[[1]]], dtype=np.int8)
     var_idxs = np.array([0], dtype=np.int32)
-    offsets = np.array([0, 1], np.int64)
 
     shift = 0
     track = np.arange(1, 6, dtype=np.float32)
@@ -80,9 +73,7 @@ def case_spanning_del():
     desired = track[1:]
     query_start = 1
 
-    sparse_genos = SparseGenotypes.from_dense(
-        genos=genos, var_idxs=var_idxs, offsets=offsets
-    )
+    sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
 
     return (
         positions,
@@ -102,7 +93,6 @@ def case_shift_ins():
     # (s p v) : (1 1 2)
     genos = np.array([[[1, 1]]], dtype=np.int8)
     var_idxs = np.array([0, 1], dtype=np.int32)
-    offsets = np.array([0, 2], np.int64)
 
     shift = 1
     track = np.arange(4, dtype=np.float32)
@@ -110,9 +100,7 @@ def case_shift_ins():
     desired = np.array([1, 1, 2, 3], np.float32)
     query_start = 0
 
-    sparse_genos = SparseGenotypes.from_dense(
-        genos=genos, var_idxs=var_idxs, offsets=offsets
-    )
+    sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
 
     return (
         positions,
@@ -142,7 +130,7 @@ def test_sparse(
     actual = np.empty(len(track) - query_start, np.float32)
     shift_and_realign_track_sparse(
         offset_idx=offset_idx,
-        geno_v_idxs=sparse_genos.variant_idxs,
+        geno_v_idxs=sparse_genos.data,
         geno_offsets=sparse_genos.offsets,
         positions=positions,
         sizes=sizes,

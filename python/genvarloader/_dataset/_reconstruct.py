@@ -291,7 +291,7 @@ class Haps(Reconstructor[H]):
                     starts=jittered_regions[:, 1],
                     ends=jittered_regions[:, 2],
                     geno_offset_idxs=geno_offset_idxs,
-                    geno_v_idxs=self.genotypes.variant_idxs,
+                    geno_v_idxs=self.genotypes.data,
                     geno_offsets=self.genotypes.offsets,
                     positions=self.variants.positions,
                     sizes=self.variants.sizes,
@@ -301,7 +301,7 @@ class Haps(Reconstructor[H]):
             # (r s p)
             hap_ilens = get_diffs_sparse(
                 geno_offset_idxs=geno_offset_idxs,
-                geno_v_idxs=self.genotypes.variant_idxs,
+                geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
                 size_diffs=self.variants.sizes,
                 keep=keep,
@@ -311,7 +311,7 @@ class Haps(Reconstructor[H]):
             # (r s p)
             hap_ilens = get_diffs_sparse(
                 geno_offset_idxs=geno_offset_idxs,
-                geno_v_idxs=self.genotypes.variant_idxs,
+                geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
                 size_diffs=self.variants.sizes,
                 starts=jittered_regions[:, 1],
@@ -319,7 +319,7 @@ class Haps(Reconstructor[H]):
                 positions=self.variants.positions,
             )
 
-        return hap_ilens.reshape(-1, self.genotypes.ploidy)
+        return hap_ilens.reshape(-1, self.genotypes.shape[-1])
 
     @overload
     def with_annot(self, annotations: Literal[False]) -> Haps[Ragged[np.bytes_]]: ...
@@ -372,7 +372,7 @@ class Haps(Reconstructor[H]):
                 starts=regions[:, 1],
                 ends=regions[:, 2],
                 geno_offset_idxs=geno_offset_idx,
-                geno_v_idxs=self.genotypes.variant_idxs,
+                geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
                 ccfs=self.genotypes.ccfs,
                 positions=self.variants.positions,
@@ -389,7 +389,7 @@ class Haps(Reconstructor[H]):
 
         if rng is None or isinstance(output_length, str):
             # (b p)
-            shifts = np.zeros((batch_size, self.genotypes.ploidy), dtype=np.int32)
+            shifts = np.zeros((batch_size, self.genotypes.shape[-1]), dtype=np.int32)
         else:
             # if the haplotype is longer than the region, shift it randomly
             # by up to:
@@ -407,7 +407,7 @@ class Haps(Reconstructor[H]):
             out_lengths = hap_lengths
         else:
             out_lengths = np.full(
-                (batch_size, self.genotypes.ploidy),
+                (batch_size, self.genotypes.shape[-1]),
                 output_length + 2 * jitter,
                 dtype=np.int32,
             )
@@ -460,10 +460,10 @@ class Haps(Reconstructor[H]):
         idx: NDArray[np.integer],
         genotypes: Union[SparseGenotypes, SparseSomaticGenotypes],
     ) -> NDArray[np.intp]:
-        r_idx, s_idx = np.unravel_index(idx, genotypes.effective_shape[:2])
-        ploid_idx = np.arange(genotypes.ploidy, dtype=np.intp)
+        r_idx, s_idx = np.unravel_index(idx, genotypes.shape[:2])
+        ploid_idx = np.arange(genotypes.shape[-1], dtype=np.intp)
         rsp_idx = (r_idx[:, None], s_idx[:, None], ploid_idx)
-        geno_offset_idx = np.ravel_multi_index(rsp_idx, genotypes.effective_shape)
+        geno_offset_idx = np.ravel_multi_index(rsp_idx, genotypes.shape)
         return geno_offset_idx
 
     @overload
@@ -540,7 +540,7 @@ class Haps(Reconstructor[H]):
             regions=regions,
             shifts=shifts,
             geno_offsets=self.genotypes.offsets,
-            geno_v_idxs=self.genotypes.variant_idxs,
+            geno_v_idxs=self.genotypes.data,
             positions=self.variants.positions,
             sizes=self.variants.sizes,
             alt_alleles=self.variants.alts.alleles.view(np.uint8),
@@ -714,7 +714,7 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
             # extend ends by max hap diff to match write implementation
             jittered_regions[:, 2] += (
                 haps._haplotype_ilens(ds_idx, jittered_regions, True)
-                .reshape(n_regions, n_samples, haps.genotypes.ploidy)
+                .reshape(n_regions, n_samples, haps.genotypes.shape[-1])
                 .max((1, 2))
                 .clip(min=0)
             )
@@ -919,7 +919,7 @@ class HapsTracks(Reconstructor[tuple[H, Ragged[np.float32]]]):
                 regions=regions,  # (b, 3)
                 shifts=shifts,  # (b p)
                 geno_offset_idxs=geno_idx,  # (b p)
-                geno_v_idxs=self.haps.genotypes.variant_idxs,  # (r*s*p*v)
+                geno_v_idxs=self.haps.genotypes.data,  # (r*s*p*v)
                 geno_offsets=self.haps.genotypes.offsets,  # (r*s*p+1)
                 positions=self.haps.variants.positions,  # (tot_v)
                 sizes=self.haps.variants.sizes,  # (tot_v)
@@ -932,7 +932,7 @@ class HapsTracks(Reconstructor[tuple[H, Ragged[np.float32]]]):
         out_shape = (
             len(idx),
             len(self.tracks.active_tracks),
-            self.haps.genotypes.ploidy,
+            self.haps.genotypes.shape[-1],
         )
 
         # ragged (b t [p] l)
