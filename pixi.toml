@@ -40,7 +40,7 @@ typer = "*"
 
 [pypi-dependencies]
 genvarloader = { path = ".", editable = true }
-seqpro = "==0.2.3"
+seqpro = { path = '/cellar/users/dlaub/projects/ML4GLand/SeqPro', editable = true }
 hirola = "==0.3"
 genoray = "==0.7.0"
 
@@ -84,6 +84,7 @@ docs = { features = ["docs", "pytorch-cpu", "basenji2", "py310"] }
 [tasks]
 pre-commit = "pre-commit install --hook-type commit-msg"
 gen = "python tests/data/generate_ground_truth.py"
+test = "pytest tests"
 
 [feature.docs.tasks]
 i-kernel = "ipython kernel install --user --name 'gvl-docs' --display-name 'GVL Docs'"
