@@ -669,12 +669,12 @@ def get_diffs_sparse(
     geno_offset_idxs: NDArray[np.intp],
     geno_v_idxs: NDArray[np.int32],
     geno_offsets: NDArray[np.int64],
-    size_diffs: NDArray[np.int32],
+    ilens: NDArray[np.int32],
     keep: Optional[NDArray[np.bool_]] = None,
     keep_offsets: Optional[NDArray[np.int64]] = None,
-    starts: Optional[NDArray[np.int32]] = None,
-    ends: Optional[NDArray[np.int32]] = None,
-    positions: Optional[NDArray[np.int32]] = None,
+    q_starts: Optional[NDArray[np.int32]] = None,
+    q_ends: Optional[NDArray[np.int32]] = None,
+    v_starts: Optional[NDArray[np.int32]] = None,
 ):
     """Get difference in length wrt reference genome for given genotypes.
 
@@ -688,17 +688,17 @@ def get_diffs_sparse(
         Shape = (variants*samples*ploidy) Sparse genotypes i.e. variant indices for ALT genotypes.
     geno_offsets : NDArray[np.int32]
         Shape = (regions*samples*ploidy + 1) Offsets into sparse genotypes.
-    size_diffs : NDArray[np.int32]
+    ilens : NDArray[np.int32]
         Shape = (total_variants) Size of all unique variants.
     keep : Optional[NDArray[np.bool_]]
         Shape = (variants*samples*ploidy) Keep mask for genotypes.
     keep_offsets : Optional[NDArray[np.int64]]
         Shape = (regions*samples*ploidy + 1) Offsets into keep.
-    starts : Optional[NDArray[np.int32]]
+    q_starts : Optional[NDArray[np.int32]]
         Shape = (regions) Start of query regions.
-    ends : Optional[NDArray[np.int32]]
+    q_ends : Optional[NDArray[np.int32]]
         Shape = (regions) End of query regions.
-    positions : Optional[NDArray[np.int32]]
+    v_starts : Optional[NDArray[np.int32]]
         Shape = (total_variants) Positions of unique variants.
     """
     n_queries, ploidy = geno_offset_idxs.shape
@@ -713,7 +713,7 @@ def get_diffs_sparse(
             n_variants = o_e - o_s
             if n_variants == 0:
                 diffs[query, hap] = 0
-            elif starts is not None and ends is not None and positions is not None:
+            elif q_starts is not None and q_ends is not None and v_starts is not None:
                 diffs[query, hap] = 0
                 for v in range(o_s, o_e):
                     if keep is not None and keep_offsets is not None:
@@ -723,16 +723,16 @@ def get_diffs_sparse(
                             continue
 
                     v_idx: int = geno_v_idxs[v]
-                    v_pos = positions[v_idx]
-                    v_diff = size_diffs[v_idx]
+                    v_start = v_starts[v_idx]
+                    v_ilen = ilens[v_idx]
                     # +1 assumes atomized variants
-                    v_end = v_pos - min(0, v_diff) + 1
+                    v_end = v_start - min(0, v_ilen) + 1
 
-                    if v_end <= starts[query]:
+                    if v_end <= q_starts[query]:
                         # variant doesn't span region
                         continue
 
-                    if v_pos >= ends[query]:
+                    if v_start >= q_ends[query]:
                         # variants are sorted by position so this variant and everything
                         # after will be outside the region
                         break
@@ -743,20 +743,21 @@ def get_diffs_sparse(
                     # DEL r - s - e - - : +max(0, 0 - 2) -> -1 + 0 = -1
                     # where r is region start, s is variant start, e is variant end (exclusive)
                     # count the "-" to get ilen
-                    if v_diff < 0:
-                        v_diff += max(0, starts[query] - v_pos)
+                    # but also atomic deletions include 1 bp of ref so add it back (- 1)
+                    if v_ilen < 0:
+                        v_ilen += max(0, q_starts[query] - v_start - 1)
                     # deletion may end after region
-                    v_diff += max(0, v_end - ends[query])
+                    v_ilen += max(0, v_end - q_ends[query])
 
-                    diffs[query, hap] += v_diff
+                    diffs[query, hap] += v_ilen
             elif keep is not None and keep_offsets is not None:
                 v_idxs = geno_v_idxs[o_s:o_e]
                 k_idx = query * ploidy + hap
                 qh_keep = keep[keep_offsets[k_idx] : keep_offsets[k_idx + 1]]
                 v_idxs = v_idxs[qh_keep]
-                diffs[query, hap] = size_diffs[v_idxs].sum()
+                diffs[query, hap] = ilens[v_idxs].sum()
             else:
-                diffs[query, hap] = size_diffs[geno_v_idxs[o_s:o_e]].sum()
+                diffs[query, hap] = ilens[geno_v_idxs[o_s:o_e]].sum()
     return diffs
 
 
