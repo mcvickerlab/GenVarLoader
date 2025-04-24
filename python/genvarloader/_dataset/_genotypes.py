@@ -761,7 +761,7 @@ def get_diffs_sparse(
     return diffs
 
 
-@nb.njit(parallel=True, nogil=True, cache=True)
+# @nb.njit(parallel=True, nogil=True, cache=True)
 def reconstruct_haplotypes_from_sparse(
     out: NDArray[np.uint8],
     out_offsets: NDArray[np.int64],
@@ -872,7 +872,7 @@ def reconstruct_haplotypes_from_sparse(
             )
 
 
-@nb.njit(nogil=True, cache=True)
+# @nb.njit(nogil=True, cache=True)
 def reconstruct_haplotype_from_sparse(
     offset_idx: int,
     geno_v_idxs: NDArray[np.int32],
@@ -1314,7 +1314,10 @@ def choose_exonic_variants(
     for query in nb.prange(n_regions):
         for hap in range(ploidy):
             o_idx = geno_offset_idxs[query, hap]
-            o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
+            if geno_offsets.ndim == 1:
+                o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
+            else:
+                o_s, o_e = geno_offsets[o_idx]
             lengths[query, hap] = o_e - o_s
     keep_offsets = np.empty(n_regions * ploidy + 1, np.int64)
     keep_offsets[0] = 0

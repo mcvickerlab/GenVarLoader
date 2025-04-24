@@ -316,7 +316,7 @@ class Haps(Reconstructor[H]):
                     starts=jittered_regions[:, 1],
                     ends=jittered_regions[:, 2],
                     geno_offset_idxs=geno_offset_idxs,
-                    geno_v_idxs=self.genotypes.variant_idxs,
+                    geno_v_idxs=self.genotypes.data,
                     geno_offsets=self.genotypes.offsets,
                     positions=self.variants.positions,
                     sizes=self.variants.sizes,
@@ -324,9 +324,9 @@ class Haps(Reconstructor[H]):
             # (r s p)
             hap_ilens = get_diffs_sparse(
                 geno_offset_idxs=geno_offset_idxs,
-                geno_v_idxs=self.genotypes.variant_idxs,
+                geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
-                size_diffs=self.variants.sizes,
+                ilens=self.variants.sizes,
                 keep=keep,
                 keep_offsets=keep_offsets,
             )
@@ -407,7 +407,7 @@ class Haps(Reconstructor[H]):
                 starts=regions[:, 1],
                 ends=regions[:, 2],
                 geno_offset_idxs=geno_offset_idx,
-                geno_v_idxs=self.genotypes.variant_idxs,
+                geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
                 positions=self.variants.positions,
                 sizes=self.variants.sizes,
@@ -521,7 +521,6 @@ class Haps(Reconstructor[H]):
         keep_offsets: Optional[NDArray[np.int64]],
         annotate: Literal[True],
     ) -> Tuple[Ragged[np.bytes_], Ragged[np.int32], Ragged[np.int32]]: ...
-
     def _get_haplotypes(
         self,
         geno_offset_idx: NDArray[np.intp],
