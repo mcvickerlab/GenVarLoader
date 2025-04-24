@@ -37,7 +37,7 @@ def case_simple():
     intervals["end"] = coordinates[:, 1]
     intervals["value"] = values
     intervals = RaggedIntervals.from_lengths(
-        intervals, np.array([n_intervals], np.int32)
+        intervals, np.array([n_intervals], np.uint32)
     )
 
     interval_idx = np.array([0], dtype=np.intp)
@@ -73,7 +73,7 @@ def case_two_regions():
     intervals = repeat(intervals, "n -> (r n)", r=2)
 
     intervals = RaggedIntervals.from_lengths(
-        intervals, np.array([n_intervals, n_intervals], np.int32)
+        intervals, np.array([n_intervals, n_intervals], np.uint32)
     )
 
     interval_idx = np.array([0, 1], dtype=np.intp)

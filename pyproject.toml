@@ -27,10 +27,10 @@ dependencies = [
     "tbb",
     "joblib",
     "pooch",
-    "seqpro>=0.2.4",
+    "seqpro>=0.2.3",
     "awkward",
     "hirola>=0.3,<0.4",
-    "genoray>=0.5.1",
+    "genoray>=0.7.0",
 ]
 
 [project.urls]
@@ -58,6 +58,7 @@ filterwarnings = [
     "ignore::DeprecationWarning:pkg_resources.*",
     "ignore::DeprecationWarning:jupyter_client.*",
 ]
+markers = ["slow: mark test as slow (deselect with '-m \"not slow\"')"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"

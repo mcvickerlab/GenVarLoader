@@ -8,7 +8,8 @@ from typing import Dict, List, Optional, Set, Tuple, Union, cast
 import awkward as ak
 import numpy as np
 import polars as pl
-from genoray import PGEN, VCF, Reader
+from genoray import PGEN, VCF, Reader, SparseVar
+from genoray._svar import V_IDX_TYPE, SparseGenotypes
 from genoray._utils import parse_memory
 from loguru import logger
 from more_itertools import mark_ends
@@ -19,10 +20,7 @@ from tqdm.auto import tqdm
 from .._bigwig import BigWigs
 from .._utils import _lengths_to_offsets, _normalize_contig_name, read_bedlike
 from .._variants._utils import path_is_pgen, path_is_vcf
-from ._genotypes import (
-    SparseGenotypes,
-    SparseSomaticGenotypes,
-)
+from ._genotypes import SparseSomaticGenotypes
 from ._utils import splits_sum_le_value
 
 __all__ = ["write"]
@@ -159,11 +157,14 @@ def write(
 
     if variants is not None:
         logger.info("Writing genotypes.")
-        variants.set_samples(samples)
         if isinstance(variants, VCF):
+            variants.set_samples(samples)
             gvl_bed = _write_from_vcf(path, gvl_bed, variants, max_mem)
         elif isinstance(variants, PGEN):
+            variants.set_samples(samples)
             gvl_bed = _write_from_pgen(path, gvl_bed, variants, max_mem)
+        elif isinstance(variants, SparseVar):
+            gvl_bed = _write_from_svar(path, gvl_bed, variants, samples)
         metadata["ploidy"] = variants.ploidy
         metadata["phased"] = True
         # free memory
@@ -239,10 +240,7 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
 
     if vcf._index is None:
         if not vcf._index_path().exists():
-            vcf._write_gvi_index(preset="genvarloader")
-
-        if vcf._index_compat() != "genvarloader":
-            vcf._make_index_gvl_compat()
+            vcf._write_gvi_index()
 
         vcf._load_index()
 
@@ -290,10 +288,11 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
             unextended_var_idxs[contig],
             ends,
         ):
+            var_idxs = var_idxs.astype(V_IDX_TYPE)
             if range_ is None:
                 max_ends.append(e)
                 sp_genos = SparseGenotypes.empty(
-                    n_regions=1, n_samples=vcf.n_samples, ploidy=vcf.ploidy
+                    (1, vcf.n_samples, vcf.ploidy), np.int32
                 )
                 (
                     v_idx_memmap_offsets,
@@ -320,8 +319,7 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
                     ext_idxs = np.arange(ext_s_idx, ext_s_idx + n_ext, dtype=np.int32)
                     chunk_idxs = np.concatenate([chunk_idxs, ext_idxs])
 
-                offsets = np.array([0, len(chunk_idxs)])
-                sp_genos = SparseGenotypes.from_dense(genos, chunk_idxs, offsets)
+                sp_genos = SparseGenotypes.from_dense(genos, chunk_idxs)
                 ls_sparse.append(sp_genos)
 
                 if is_last:
@@ -330,7 +328,7 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
             if len(ls_sparse) == 0:
                 max_ends.append(e)
                 sp_genos = SparseGenotypes.empty(
-                    n_regions=1, n_samples=vcf.n_samples, ploidy=vcf.ploidy
+                    (1, vcf.n_samples, vcf.ploidy), np.int32
                 )
                 (
                     v_idx_memmap_offsets,
@@ -415,7 +413,7 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
             if range_ is None:
                 max_ends.append(e)
                 sp_genos = SparseGenotypes.empty(
-                    n_regions=1, n_samples=pgen.n_samples, ploidy=pgen.ploidy
+                    (1, pgen.n_samples, pgen.ploidy), np.int32
                 )
                 (
                     v_idx_memmap_offsets,
@@ -433,11 +431,8 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
 
             ls_sparse: list[SparseGenotypes] = []
             for _, is_last, (genos, chunk_end, chunk_idxs) in mark_ends(range_):
-                n_variants = genos.shape[-1]
-                offsets = np.array([0, n_variants])
-                sp_genos = SparseGenotypes.from_dense(
-                    genos.astype(np.int8), chunk_idxs, offsets
-                )
+                chunk_idxs = chunk_idxs.astype(V_IDX_TYPE)
+                sp_genos = SparseGenotypes.from_dense(genos.astype(np.int8), chunk_idxs)
                 ls_sparse.append(sp_genos)
 
                 if is_last:
@@ -446,7 +441,7 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
             if len(ls_sparse) == 0:
                 max_ends.append(e)
                 sp_genos = SparseGenotypes.empty(
-                    n_regions=1, n_samples=pgen.n_samples, ploidy=pgen.ploidy
+                    (1, pgen.n_samples, pgen.ploidy), np.int32
                 )
                 (
                     v_idx_memmap_offsets,
@@ -499,6 +494,60 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
     return bed
 
 
+def _write_from_svar(
+    path: Path, bed: pl.DataFrame, svar: SparseVar, samples: list[str]
+):
+    out_dir = path / "genotypes"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    offsets = np.memmap(
+        out_dir / "offsets.npy",
+        np.int64,
+        "w+",
+        shape=(bed.height, len(samples), svar.ploidy, 2),
+    )
+
+    with open(out_dir / "svar_meta.json", "w") as f:
+        json.dump({"shape": offsets.shape, "dtype": offsets.dtype.str}, f)
+
+    v_ends = svar.granges.End
+    max_ends = np.empty(bed.height, np.int32)
+    contig_offset = 0
+    for (c,), df in bed.partition_by(
+        "chrom", as_dict=True, maintain_order=True
+    ).items():
+        c = cast(str, c)
+        # (r s p 2)
+        out = offsets[contig_offset : contig_offset + df.height]
+        svar._find_starts_ends_with_length(
+            c, df["chromStart"], df["chromEnd"], samples=samples, out=out
+        )
+
+        # compute max_ends for the bed
+        shape = (df.height, len(samples), svar.ploidy)
+        # (r s p ~v)
+        sp_genos = SparseGenotypes.from_offsets(
+            svar.genos.data, shape, out.reshape(-1, 2)
+        )
+        # this is fine if there aren't any overlapping variants that could make a v_idx < -1
+        # have a further end than v_idx == -1
+        # (r s p ~v) -> (r)
+        v_idxs = ak.max(sp_genos.to_awkward(), -1).to_numpy().max((1, 2))  # type: ignore
+        c_max_ends = max_ends[contig_offset : contig_offset + df.height]
+        if v_idxs.mask is np.ma.nomask:
+            c_max_ends[:] = v_ends[v_idxs.data]
+        else:
+            c_max_ends[~v_idxs.mask] = v_ends[v_idxs.data[~v_idxs.mask]]
+            c_max_ends[v_idxs.mask] = df.filter(v_idxs.mask)['chromEnd']
+        contig_offset += df.height
+
+    offsets.flush()
+
+    (out_dir / "link.svar").symlink_to(svar.path, True)
+
+    return bed.with_columns(chromEnd=pl.Series(max_ends))
+
+
 def _write_phased_variants_chunk(
     out_dir: Path,
     genos: SparseGenotypes,
@@ -509,12 +558,12 @@ def _write_phased_variants_chunk(
     if not genos.is_empty:
         out = np.memmap(
             out_dir / "variant_idxs.npy",
-            dtype=genos.variant_idxs.dtype,
+            dtype=genos.data.dtype,
             mode="w+" if v_idx_memmap_offset == 0 else "r+",
-            shape=genos.variant_idxs.shape,
+            shape=genos.data.shape,
             offset=v_idx_memmap_offset,
         )
-        out[:] = genos.variant_idxs[:]
+        out[:] = genos.data[:]
         out.flush()
         v_idx_memmap_offset += out.nbytes
 
@@ -545,12 +594,12 @@ def _write_somatic_variants_chunk(
     if not genos.is_empty:
         out = np.memmap(
             out_dir / "variant_idxs.npy",
-            dtype=genos.variant_idxs.dtype,
+            dtype=genos.data.dtype,
             mode="w+" if v_idx_memmap_offset == 0 else "r+",
-            shape=genos.variant_idxs.shape,
+            shape=genos.data.shape,
             offset=v_idx_memmap_offset,
         )
-        out[:] = genos.variant_idxs[:]
+        out[:] = genos.data[:]
         out.flush()
         v_idx_memmap_offset += out.nbytes
 
