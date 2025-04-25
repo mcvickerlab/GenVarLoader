@@ -41,7 +41,8 @@ uv = "*"
 
 [pypi-dependencies]
 hirola = "==0.3"
-seqpro = "==0.2.4"
+seqpro = "==0.3.0"
+genoray = "==0.7.1"
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"
@@ -81,13 +82,15 @@ docs = { features = ["docs", "pytorch-cpu", "basenji2", "py310"] }
 # docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py310"] }
 
 [tasks]
-install = "uv pip install -e /cellar/users/dlaub/projects/ML4GLand/SeqPro -e /cellar/users/dlaub/projects/genoray -e ."
+install-e = "uv pip install -e /cellar/users/dlaub/projects/ML4GLand/SeqPro -e /cellar/users/dlaub/projects/genoray -e ."
+install = "uv pip install -e ."
 pre-commit = "pre-commit install --hook-type commit-msg"
 gen = "python tests/data/generate_ground_truth.py"
 test = "pytest tests"
 
 [feature.docs.tasks]
-install = "uv pip install -e /cellar/users/dlaub/projects/ML4GLand/SeqPro -e /cellar/users/dlaub/projects/genoray -e ."
+install-e = "uv pip install -e /cellar/users/dlaub/projects/ML4GLand/SeqPro -e /cellar/users/dlaub/projects/genoray -e ."
+install = "uv pip install -e ."
 i-kernel = "ipython kernel install --user --name 'gvl-docs' --display-name 'GVL Docs'"
 i-kernel-gpu = "ipython kernel install --user --name 'gvl-docs-gpu' --display-name 'GVL Docs GPU'"
 doc = "cd docs && make clean && make html"

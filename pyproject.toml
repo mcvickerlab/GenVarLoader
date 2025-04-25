@@ -29,8 +29,8 @@ dependencies = [
     "pooch",
     "awkward",
     "hirola>=0.3,<0.4",
-    # "seqpro>=0.2.4",
-    # "genoray>=0.7.0",
+    "seqpro>=0.3.0",
+    "genoray>=0.7.1",
 ]
 
 [project.urls]
