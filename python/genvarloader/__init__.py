@@ -1,7 +1,5 @@
 import importlib.metadata
 
-from loguru import logger
-
 from ._bigwig import BigWigs
 from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
 from ._dataset._write import write
@@ -22,6 +20,3 @@ __all__ = [
     "ArrayDataset",
     "RaggedDataset",
 ]
-
-
-logger.disable("genvarloader")

@@ -272,6 +272,22 @@ class Dataset:
             splice_idxer = None
             spliced_bed = None
 
+        if seqs is not None:
+            contig_lengths = dict(
+                zip(seqs.reference.contigs, np.diff(seqs.reference.offsets))
+            )
+            out_of_bounds = bed.select(
+                (
+                    pl.col("chromStart") >= pl.col("chrom").replace_strict(contig_lengths)
+                ).any()
+            ).item()
+            if out_of_bounds:
+                logger.warning(
+                    "Some regions in the dataset have a start coordinate that is out"
+                    " of bounds for the reference genome provided. This may happen if"
+                    " the dataset's regions are for a different reference genome."
+                )
+
         dataset = RaggedDataset(
             path=path,
             output_length="ragged",
@@ -998,7 +1014,7 @@ class Dataset:
             hap_lens = hap_lens.squeeze(0)
 
         if out_reshape is not None:
-            hap_lens = hap_lens.reshape(*out_reshape, self._seqs.genotypes.ploidy)
+            hap_lens = hap_lens.reshape(*out_reshape, self._seqs.genotypes.shape[-1])
 
         return hap_lens
 

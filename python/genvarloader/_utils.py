@@ -1,6 +1,7 @@
 from itertools import accumulate, chain, repeat
 from pathlib import Path
 from typing import (
+    Any,
     Generator,
     Iterable,
     Optional,
@@ -26,8 +27,8 @@ __all__ = [
 T = TypeVar("T")
 
 
-def is_dtype(arr: NDArray, dtype: type[DTYPE]) -> TypeGuard[NDArray[DTYPE]]:
-    return np.issubdtype(arr.dtype, dtype)
+def is_dtype(arr: Any, dtype: type[DTYPE]) -> TypeGuard[NDArray[DTYPE]]:
+    return isinstance(arr, np.ndarray) and np.issubdtype(arr.dtype, dtype)
 
 
 def _process_bed(bed: Union[str, Path, pl.DataFrame], fixed_length: int):
@@ -141,10 +142,10 @@ def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.intp]:
     indices are preserved."""
     if isinstance(idx, slice):
         _idx = np.arange(max_len, dtype=np.intp)[idx]
-    elif isinstance(idx, np.ndarray) and np.issubdtype(idx.dtype, np.bool_):
+    elif is_dtype(idx, np.bool_):
         _idx = idx.nonzero()[0]
     elif isinstance(idx, Sequence):
-        _idx = np.asarray(idx, np.intp)
+        _idx = np.array(idx, np.intp)
     else:
         _idx = idx
 
