@@ -211,6 +211,7 @@ class Haps(Reconstructor[H]):
         ploidy: int,
     ) -> Haps[Ragged[np.bytes_]]:
         if not (path / "genotypes" / "svar_meta.json").exists():
+            logger.info("Loading variant data.")
             variants = _Variants.from_table(path / "genotypes" / "variants.arrow")
             if phased:
                 v_idxs = np.memmap(
@@ -256,11 +257,14 @@ class Haps(Reconstructor[H]):
             genotypes = SparseGenotypes.from_offsets(
                 v_idxs, shape[:-1], offsets.reshape(-1, 2)
             )
-            svar_index = pl.read_ipc(
-                path / "genotypes" / "link.svar" / "index.arrow",
-                memory_map=False,
-                columns=["POS", "ILEN", "ALT"],
-            ).with_columns(pl.col("ILEN", "ALT").list.first())
+            logger.info("Loading variant data.")
+            svar_index = (
+                pl.scan_ipc(
+                    path / "genotypes" / "link.svar" / "index.arrow", memory_map=False
+                )
+                .select("POS", pl.col("ILEN", "ALT").list.first())
+                .collect()
+            )
             variants = _Variants(
                 svar_index["POS"].to_numpy() - 1,
                 svar_index["ILEN"].to_numpy(),
