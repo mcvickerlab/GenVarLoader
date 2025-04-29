@@ -15,6 +15,7 @@ from loguru import logger
 from more_itertools import mark_ends
 from natsort import natsorted
 from numpy.typing import NDArray
+from seqpro._ragged import OFFSET_TYPE
 from tqdm.auto import tqdm
 
 from .._bigwig import BigWigs
@@ -290,6 +291,12 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
         ):
             var_idxs = var_idxs.astype(V_IDX_TYPE)
             if range_ is None:
+                logger.warning(
+                    "All regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                    " and source of variants. However, this can also be caused by a mismatch between the"
+                    " reference genome used for the BED file coordinates and the one used for the variants."
+                )
+
                 max_ends.append(e)
                 sp_genos = SparseGenotypes.empty(
                     (1, vcf.n_samples, vcf.ploidy), np.int32
@@ -347,6 +354,14 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
                 ).to_numpy()
                 # (r s p)
                 lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
+
+                if (lengths == 0).all((1, 2)).any():
+                    logger.warning(
+                        "Some regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                        " and source of variants. However, this can also be caused by a mismatch between the"
+                        " reference genome used for the BED file coordinates and the one used for the variants."
+                    )
+
                 sp_genos = SparseGenotypes.from_lengths(var_idxs, lengths)
                 (
                     v_idx_memmap_offsets,
@@ -411,6 +426,12 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
             pgen._chunk_ranges_with_length(contig, starts, ends, max_mem), ends
         ):
             if range_ is None:
+                logger.warning(
+                    "All regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                    " and source of variants. However, this can also be caused by a mismatch between the"
+                    " reference genome used for the BED file coordinates and the one used for the variants."
+                )
+
                 max_ends.append(e)
                 sp_genos = SparseGenotypes.empty(
                     (1, pgen.n_samples, pgen.ploidy), np.int32
@@ -464,6 +485,14 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
                 ).to_numpy()
                 # (r s p)
                 lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
+
+                if (lengths == 0).all((1, 2)).any():
+                    logger.warning(
+                        "Some regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                        " and source of variants. However, this can also be caused by a mismatch between the"
+                        " reference genome used for the BED file coordinates and the one used for the variants."
+                    )
+
                 sp_genos = SparseGenotypes.from_lengths(var_idxs, lengths)
 
                 (
@@ -513,15 +542,24 @@ def _write_from_svar(
     v_ends = svar.granges.End
     max_ends = np.empty(bed.height, np.int32)
     contig_offset = 0
+    pbar = tqdm(total=bed.height, unit=" region")
     for (c,), df in bed.partition_by(
         "chrom", as_dict=True, maintain_order=True
     ).items():
         c = cast(str, c)
+        pbar.set_description(f"Processing {df.height} regions on contig {c}")
         # (r s p 2)
         out = offsets[contig_offset : contig_offset + df.height]
         svar._find_starts_ends_with_length(
             c, df["chromStart"], df["chromEnd"], samples=samples, out=out
         )
+
+        if (out == np.iinfo(OFFSET_TYPE).max).all((1, 2, 3)).any():
+            logger.warning(
+                "Some regions have no variants for any sample. This could be expected depending on the region lengths"
+                " and source of variants. However, this can also be caused by a mismatch between the"
+                " reference genome used for the BED file coordinates and the one used for the variants."
+            )
 
         # compute max_ends for the bed
         shape = (df.height, len(samples), svar.ploidy)
@@ -538,9 +576,11 @@ def _write_from_svar(
             c_max_ends[:] = v_ends[v_idxs.data]
         else:
             c_max_ends[~v_idxs.mask] = v_ends[v_idxs.data[~v_idxs.mask]]
-            c_max_ends[v_idxs.mask] = df.filter(v_idxs.mask)['chromEnd']
+            c_max_ends[v_idxs.mask] = df.filter(v_idxs.mask)["chromEnd"]
         contig_offset += df.height
+        pbar.update(df.height)
 
+    pbar.close()
     offsets.flush()
 
     (out_dir / "link.svar").symlink_to(svar.path, True)

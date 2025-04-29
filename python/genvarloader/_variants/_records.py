@@ -105,7 +105,7 @@ class VLenAlleles:
         offsets[0] = 0
         offsets[1:] = alleles.str.len_bytes().cast(pl.Int64).cum_sum().to_numpy()
         flat_alleles = np.frombuffer(
-            alleles.str.concat("").to_numpy()[0].encode(), "S1"
+            alleles.str.join().to_numpy()[0].encode(), "S1"
         )
         return cls(offsets, flat_alleles)
 
