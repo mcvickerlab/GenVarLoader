@@ -38,9 +38,6 @@ source = "https://github.com/mcvickerlab/GenVarLoader"
 documentation = "https://genvarloader.readthedocs.io/en/stable/"
 issues = "https://github.com/mcvickerlab/GenVarLoader/issues"
 
-[project.scripts]
-genvarloader = 'genvarloader.__main__:app'
-
 [tool.ruff]
 lint.ignore = ["E501"]
 
