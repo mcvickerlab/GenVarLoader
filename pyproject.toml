@@ -59,7 +59,8 @@ markers = ["slow: mark test as slow (deselect with '-m \"not slow\"')"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-tag_format = "v$version"
+tag_format = "$version"
+legacy_tag_formats = ['v$version']
 version_scheme = "semver2"
 version_provider = "pep621"
 update_changelog_on_bump = true
