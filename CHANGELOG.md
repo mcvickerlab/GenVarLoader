@@ -1,3 +1,14 @@
+## v0.13.0 (2025-04-30)
+
+### Feat
+
+- SVAR support passes all tests
+
+### Fix
+
+- continue migrating to seqpro Ragged, enable logger at module level, add warnings about potential reference genome mismatches
+- add spanning dels to test and fix hap ilens for this case
+
 ## v0.12.0 (2025-04-18)
 
 ### Feat
