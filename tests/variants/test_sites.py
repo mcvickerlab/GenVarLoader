@@ -3,12 +3,10 @@ from typing import cast
 import genvarloader as gvl
 import numpy as np
 import polars as pl
+from genvarloader._variants._sitesonly import APPLIED, DELETED, EXISTED
 
 
 def test_sites():
-    APPLIED = 0
-    DELETED = 1
-    EXISTED = 2
     ds = gvl.get_dummy_dataset().with_len(4).subset_to(regions=0)
     sites = (
         pl.concat([ds.regions, ds.regions])
