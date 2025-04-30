@@ -570,7 +570,7 @@ class Haps(Reconstructor[H]):
 
 @define
 class Tracks(Reconstructor[Ragged[np.float32]]):
-    intervals: Dict[str, Ragged[np.void]]
+    intervals: Dict[str, RaggedIntervals]
     """The intervals in the dataset. This is memory mapped."""
     active_tracks: List[str]
 
@@ -590,7 +590,7 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
             else:
                 available_tracks.append(p.name)
         available_tracks.sort()
-        intervals: Optional[Dict[str, Ragged[np.void]]] = {}
+        intervals: Optional[Dict[str, RaggedIntervals]] = {}
         for track in available_tracks:
             itvs = np.memmap(
                 path / "intervals" / track / "intervals.npy",

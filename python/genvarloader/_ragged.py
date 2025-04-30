@@ -216,9 +216,6 @@ def _jitter(
     return out
 
 
-RaggedIntervals = Ragged[INTERVAL_DTYPE.type]
-
-
 @nb.njit(parallel=True, nogil=True, cache=True)
 def _jitter_helper(
     data: Tuple[NDArray, ...],
