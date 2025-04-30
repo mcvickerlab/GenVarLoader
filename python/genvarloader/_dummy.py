@@ -93,11 +93,12 @@ def get_dummy_dataset(spliced: bool = False):
         ]  # target lengths
         - 1  # idx within region
         + 4 * np.arange(4)[:, None]  # adjust by region/contig offset
-    ).astype(np.int32)
+    )
+    shape = (4, 4, 1)
     dummy_genos = SparseGenotypes.from_offsets(
-        v_idxs.ravel(),
-        (4, 4, 1),
-        np.arange(0, 4 * 4 + 1, dtype=np.int64),  # every entry has 1 variant
+        data=v_idxs.ravel(),
+        shape=shape,
+        offsets=np.arange(0, 4 * 4 + 1, dtype=np.int64),  # every entry has 1 variant
     )
 
     dummy_haps = Haps(dummy_ref, dummy_vars, dummy_genos, False, None)
