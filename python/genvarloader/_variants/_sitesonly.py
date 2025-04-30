@@ -1,10 +1,5 @@
 from pathlib import Path
-from typing import (
-    Callable,
-    Sequence,
-    Tuple,
-    cast,
-)
+from typing import Callable, Sequence, Tuple
 
 import cyvcf2
 import numba as nb
@@ -12,7 +7,7 @@ import numpy as np
 import pandera.polars as pa
 import polars as pl
 import seqpro as sp
-from loguru import logger
+from genoray import VCF
 from numpy.typing import NDArray
 
 from .._dataset._impl import ArrayDataset
@@ -21,71 +16,27 @@ from .._types import AnnotatedHaps, Idx
 from ._records import VLenAlleles
 
 
-def return_true(variant: cyvcf2.Variant) -> bool:
-    return True
-
-
 def sites_vcf_to_table(
     vcf: str | Path | cyvcf2.VCF,
-    filter: Callable[[cyvcf2.Variant], bool] = return_true,
-    attributes: Sequence[str] | None = None,
-    info_fields: Sequence[str] | None = None,
+    filter: Callable[[cyvcf2.Variant], bool] | None = None,
+    attributes: list[str] | None = None,
+    info_fields: list[str] | None = None,
 ) -> pl.DataFrame:
-    if isinstance(vcf, (str, Path)):
-        _vcf = cast(cyvcf2.VCF, cyvcf2.VCF(str(vcf)))
-    else:
-        _vcf = vcf
+    _vcf = VCF(vcf, filter)
 
+    min_attrs = ["CHROM", "POS", "ALT"]
     if attributes is None:
-        attributes = []
-    if info_fields is None:
-        info_fields = []
+        attributes = min_attrs
+    else:
+        attributes = min_attrs + [attr for attr in attributes if attr not in min_attrs]
 
-    cols = ["keep", "chrom", "chromStart", "chromEnd", "REF", "ALT"]
-    if attributes:
-        cols.extend(attributes)
-    if info_fields:
-        cols.extend(info_fields)
-
-    df = pl.DataFrame(
-        dict(
-            zip(
-                cols,
-                # rearrange from tuples of variants to tuples of attributes
-                zip(
-                    *(
-                        (
-                            v.is_snp & filter(v),
-                            v.CHROM,
-                            v.start,
-                            v.end,
-                            v.REF,
-                            v.ALT,
-                        )
-                        + tuple(getattr(v, attr) for attr in attributes)
-                        + tuple(v.INFO[f] for f in info_fields)
-                        for v in _vcf
-                    )
-                ),
-            )
-        )
-    )
-
-    if (df["ALT"].list.len() > 1).any():
-        logger.warning(
-            "Some sites are multi-allelic; only the first will be used. To avoid this,"
-            " preprocess the VCF with `bcftools norm -a -m -` to atomize and split them."
-        )
-
-    logger.info(f"Filter removed {(~df['keep']).sum()} of {len(df)} sites.")
-
-    df = df.filter("keep").with_columns(pl.col("ALT").list.get(0)).drop("keep")
+    df = _vcf.get_record_info(attrs=attributes, info=info_fields, progress=True)
 
     return df
 
 
 class SitesSchema(pa.DataFrameModel):
-    CHROM: str = pa.Field(alias="#CHROM")
+    CHROM: str
     POS: int
     ALT: str
 
@@ -93,8 +44,9 @@ class SitesSchema(pa.DataFrameModel):
 def _sites_table_to_bedlike(sites: pl.DataFrame) -> pl.DataFrame:
     sites = sites.pipe(SitesSchema.validate)
     return sites.with_columns(
-        chromEnd=pl.col("POS") + pl.col("ALT").str.len_bytes()
-    ).rename({"#CHROM": "chrom", "POS": "chromStart"})
+        chromStart=pl.col("POS") - 1,
+        chromEnd=pl.col("POS") + pl.col("ALT").str.len_bytes() - 1,
+    ).rename({"CHROM": "chrom", "POS": "chromStart"})
 
 
 class DatasetWithSites:
@@ -157,7 +109,7 @@ class DatasetWithSites:
                     "Start": "chromStart",
                     "End": "chromEnd",
                     "Strand": "strand",
-                    "Start_site": "POS",
+                    "Start_site": "POS0",
                 },
                 strict=False,
             )
@@ -183,7 +135,7 @@ class DatasetWithSites:
         haps = self.dataset[ds_rows, s_idx]
 
         sites = self.rows[r_idx]
-        starts = sites["POS"].to_numpy()  # 0-based
+        starts = sites["POS0"].to_numpy()  # 0-based
         alts = VLenAlleles.from_polars(sites["ALT"])
 
         haps, v_idxs, ref_coords, flags = apply_site_only_variants(
