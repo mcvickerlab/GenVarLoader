@@ -20,6 +20,15 @@ bcftools norm -f $reference \
     -O b -o $out $in
 ```
 
+Alternatively, if your data is already in the PGEN format you can use PLINK 2.0:
+
+```bash
+plink2 --make-bpgen --pfile $input --out $intermediate
+plink2 --make-pgen --normalize --ref-from-fa --fa reference.fa --bpfile $intermediate --out $normalized
+```
+
+See the PLINK 2.0 documentation for details.
+
 ### BigWig table
 
 To process BigWig data, GenVarLoader needs a mapping from sample names to BigWig file paths. This can be provided either as a dictionary using [`BigWig()`](api.md#genvarloader.BigWigs.__init__) or a table using [`BigWig.from_table()`](api.md#genvarloader.BigWigs.from_table). If using a table, it must at least contain the columns `sample` and `path`, for example:
@@ -42,7 +51,7 @@ Whether you're working with variants, BigWigs, or both, you will need regions of
 
 ## Writing data
 
-Once your data is prepared, you can use [`gvl.write()`](api.md#genvarloader.write) to convert the data for regions of interest to a format that `gvl.Dataset` can open. You can include up to one set of variants either as a single file or split by chromosome and any number of BigWig files. Some examples:
+Once your data is prepared, you can use [`gvl.write()`](api.md#genvarloader.write) to convert the data for regions of interest to a format that `gvl.Dataset` can open. You can include a single source of variants and/or any number of BigWig files. Some examples:
 
 ```python
 import genvarloader as gvl
@@ -50,9 +59,8 @@ import genvarloader as gvl
 gvl.write(
     path='1000_genomes_haplotypes.gvl',
     bed='tiling_windows.bed',
-    variants=gvl.Variants.from_file('all_chroms.bcf'),
-    # OR variants=gvl.Variants.from_file('all_chroms.pgen'),
-    # OR variants=gvl.Variants.from_file({'chr1': 'chr1.bcf', 'chr2': 'chr2.bcf', ...}),
+    variants='all_chroms.bcf',
+    # OR variants='all_chroms.pgen',
 )
 ```
 
@@ -62,7 +70,7 @@ This dataset would have haplotypes available for all samples in `all_chroms.bcf`
 gvl.write(
     path='1000_genomes_lncRNA.gvl',
     bed='lncRNA.bed',  # can be varying length regions
-    variants=gvl.Variants.from_file('all_chroms.bcf'),
+    variants='all_chroms.bcf',
     bigwigs=[
         gvl.BigWigs.from_table('pos', 'pos_strands.tsv'),
         gvl.BigWigs.from_table('neg', 'pos_strands.tsv'),

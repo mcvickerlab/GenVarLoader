@@ -35,6 +35,7 @@ from .._ragged import (
     _reverse,
     _reverse_complement,
     is_rag_dtype,
+    to_padded,
 )
 from .._torch import TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx
@@ -248,6 +249,22 @@ class Dataset:
                 assert_never(reference)
                 assert_never(has_genotypes)
                 assert_never(has_intervals)
+
+        if seqs is not None:
+            contig_lengths = dict(
+                zip(seqs.reference.contigs, np.diff(seqs.reference.offsets))
+            )
+            out_of_bounds = bed.select(
+                (
+                    pl.col("chromStart") >= pl.col("chrom").replace_strict(contig_lengths)
+                ).any()
+            ).item()
+            if out_of_bounds:
+                logger.warning(
+                    "Some regions in the dataset have a start coordinate that is out"
+                    " of bounds for the reference genome provided. This may happen if"
+                    " the dataset's regions are for a different reference genome."
+                )
 
         dataset = RaggedDataset(
             path=path,
@@ -918,7 +935,7 @@ class Dataset:
             hap_lens = hap_lens.squeeze(0)
 
         if out_reshape is not None:
-            hap_lens = hap_lens.reshape(*out_reshape, self._seqs.genotypes.ploidy)
+            hap_lens = hap_lens.reshape(*out_reshape, self._seqs.genotypes.shape[-1])
 
         return hap_lens
 
@@ -1230,9 +1247,9 @@ class Dataset:
     def _pad(self, rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
         if isinstance(rag, Ragged):
             if is_rag_dtype(rag, np.bytes_):
-                return rag.to_padded(b"N")
+                return to_padded(rag, b"N")
             elif is_rag_dtype(rag, np.float32):
-                return rag.to_padded(0)
+                return to_padded(rag, 0)
             else:
                 raise ValueError(f"Unsupported pad dtype: {rag.data.dtype}")
         elif isinstance(rag, RaggedAnnotatedHaps):

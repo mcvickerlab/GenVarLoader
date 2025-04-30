@@ -120,7 +120,11 @@ def shift_and_realign_track_sparse(
     keep : Optional[NDArray[np.bool_]]
         Shape = (n_variants) Keep mask for genotypes.
     """
-    _variant_idxs = geno_v_idxs[geno_offsets[offset_idx] : geno_offsets[offset_idx + 1]]
+    if geno_offsets.ndim == 1:
+        o_s, o_e = geno_offsets[offset_idx], geno_offsets[offset_idx + 1]
+    else:
+        o_s, o_e = geno_offsets[offset_idx]
+    _variant_idxs = geno_v_idxs[o_s:o_e]
     length = len(out)
     n_variants = len(_variant_idxs)
 

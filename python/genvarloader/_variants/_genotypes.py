@@ -326,14 +326,17 @@ class VCFGenos:
     def read(
         self,
         contig: str,
-        starts: ArrayLike,
-        ends: ArrayLike,
+        starts: ArrayLike | None = None,
+        ends: ArrayLike | None = None,
         sample_idx: Optional[ArrayLike] = None,
         haplotype_idx: Optional[ArrayLike] = None,
         n_variants: NDArray[np.int32] | None = None,
     ) -> NDArray[np.int8]:
-        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
-        ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
+        if starts is None:
+            starts = 0
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32)) + 1  # vcf is 1-based
+        if ends is not None:
+            ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
 
         if self.handles is None and "_all" not in self.paths:
             self.handles = {
@@ -357,15 +360,17 @@ class VCFGenos:
         else:
             _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=np.int32))
 
+        if ends is None:
+            coords = [f"{contig}:{s}" for s in starts]
+        else:
+            coords = [f"{contig}:{s}-{e}" for s, e in zip(starts, ends)]
+
         if n_variants is None:
             # (r)
             n_variants = np.array(
                 [
-                    sum(
-                        v.is_snp or v.is_indel
-                        for v in self.handles[contig](f"{contig}:{s}-{e}")
-                    )
-                    for s, e in zip(starts + 1, ends)  # vcf is 1-based
+                    sum(v.is_snp or v.is_indel for v in self.handles[contig](coord))
+                    for coord in coords
                 ]
             )
 
@@ -376,8 +381,8 @@ class VCFGenos:
             return genos
 
         offsets = _lengths_to_offsets(n_variants)
-        for s, e, o in zip(starts + 1, ends, offsets[:-1]):
-            for i, v in enumerate(self.handles[contig](f"{contig}:{s}-{e}"), start=o):
+        for coord, o in zip(coords, offsets[:-1]):
+            for i, v in enumerate(self.handles[contig](coord), start=o):
                 if v.is_snp or v.is_indel:
                     # (s p)
                     genos[..., i] = v.genotype.array()[:, : self.ploidy]

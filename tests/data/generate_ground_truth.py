@@ -56,6 +56,7 @@ def main(
     import genvarloader as gvl
     import polars as pl
     import polars.selectors as cs
+    from genoray import VCF, SparseVar
     from loguru import logger
     from tqdm.auto import tqdm
 
@@ -162,6 +163,11 @@ def main(
         ]
     )
 
+    logger.info("Generating SVAR file.")
+    SparseVar.from_vcf(
+        WDIR / "filtered.svar", VCF(filtered_vcf), "50mb", overwrite=True
+    )
+
     bed = pl.read_csv(
         filtered_vcf,
         separator="\t",
@@ -181,6 +187,7 @@ def main(
             "NA00002",
             "NA00003",
         ],
+        schema_overrides={"chrom": pl.Utf8},
     )
     samples = bed.select(cs.matches(r"^NA\d{5}$")).columns
 
@@ -201,8 +208,17 @@ def main(
         )
         .drop("group")
         .sample(fraction=1, shuffle=True, seed=0)
-        .with_row_index()
     )
+    # manual additions
+    # spanning del
+    rows = pl.DataFrame(
+        {
+            "chrom": ["19"],
+            "start": [1010696],
+            "end": [1010696 + SEQ_LEN],
+        }
+    )
+    bed = bed.vstack(rows).with_row_index()
 
     logger.info("Generating BED file.")
     (
@@ -244,23 +260,29 @@ def main(
 
     bed = WDIR / "vcf" / f"{name}.bed"
 
-    logger.info("Generating phased dataset.")
+    logger.info("Generating phased datasets.")
+    reader = VCF(filtered_vcf)
+    if not reader._index_path().exists():
+        reader._write_gvi_index()
+    reader._load_index()
     gvl.write(
-        path=WDIR / "phased_dataset.gvl",
+        path=WDIR / "phased_dataset.vcf.gvl", bed=bed, variants=reader, overwrite=True
+    )
+
+    gvl.write(
+        path=WDIR / "phased_dataset.svar.gvl",
         bed=bed,
-        variants=filtered_vcf,
+        variants=SparseVar(WDIR / "filtered.svar"),
         overwrite=True,
     )
 
-    logger.info("Generating unphased dataset.")
-    gvl.write(
-        path=WDIR / "unphased_dataset.gvl",
-        bed=bed,
-        variants=filtered_vcf,
-        overwrite=True,
-        phased=False,
-        dosage_field="VAF",
-    )
+    # logger.info("Generating unphased dataset.")
+    # gvl.write(
+    #     path=WDIR / "unphased_dataset.gvl",
+    #     bed=bed,
+    #     variants=reader,
+    #     overwrite=True,
+    # )
 
     logger.info(f"Finished in {perf_counter() - t0} seconds.")
 

@@ -4,7 +4,7 @@
 [![Documentation Status](https://readthedocs.org/projects/genvarloader/badge/?version=latest)](https://genvarloader.readthedocs.io)
 [![Downloads](https://static.pepy.tech/badge/genvarloader)](https://pepy.tech/project/genvarloader)
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/genvarloader)](https://img.shields.io/pypi/dm/genvarloader)
-[![GitHub stars](https://badgen.net/github/stars/mcvickerlab/GenVarLoader)](https://GitHub.com/Naereen/mcvickerlab/GenVarLoader)
+[![GitHub stars](https://badgen.net/github/stars/mcvickerlab/GenVarLoader)](https://github.com/mcvickerlab/GenVarLoader)
 [![bioRxiv](https://img.shields.io/badge/bioRxiv-2025.01.15.633240-b31b1b.svg)](https://www.biorxiv.org/content/10.1101/2025.01.15.633240)
 
 ## Features
@@ -17,7 +17,7 @@ GenVarLoader provides a fast, memory efficient data structure for training seque
 - **Supports indels** and re-aligns tracks to haplotypes that have them
 - Extensible to new file formats: drop a feature request! Currently supports VCF, PGEN, and BigWig
 
-See our [preprint](https://www.biorxiv.org/content/10.1101/2025.01.15.633240) for benchmarking and implementation details.
+Documentation is available [here](https://genvarloader.readthedocs.io/). See our [preprint](https://www.biorxiv.org/content/10.1101/2025.01.15.633240) for benchmarking and implementation details.
 
 ## Installation
 
