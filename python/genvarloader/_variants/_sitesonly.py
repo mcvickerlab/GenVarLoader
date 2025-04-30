@@ -43,10 +43,14 @@ class SitesSchema(pa.DataFrameModel):
 
 def _sites_table_to_bedlike(sites: pl.DataFrame) -> pl.DataFrame:
     sites = sites.pipe(SitesSchema.validate)
-    return sites.with_columns(
-        chromStart=pl.col("POS") - 1,
-        chromEnd=pl.col("POS") + pl.col("ALT").str.len_bytes() - 1,
-    ).rename({"CHROM": "chrom", "POS": "chromStart"})
+    return (
+        sites.with_columns(
+            chromStart=pl.col("POS") - 1,
+            chromEnd=pl.col("POS") + pl.col("ALT").str.len_bytes() - 1,
+        )
+        .drop("POS")
+        .rename({"CHROM": "chrom"})
+    )
 
 
 class DatasetWithSites:

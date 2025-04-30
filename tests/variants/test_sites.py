@@ -12,8 +12,8 @@ def test_sites():
     ds = gvl.get_dummy_dataset().with_len(4).subset_to(regions=0)
     sites = (
         pl.concat([ds.regions, ds.regions])
-        .with_columns(POS=pl.col("chromStart") + pl.arange(0, 2), ALT=pl.lit("T"))
-        .rename({"chrom": "#CHROM"})
+        .with_columns(POS=pl.col("chromStart") + pl.arange(1, 3), ALT=pl.lit("T"))
+        .rename({"chrom": "CHROM"})
         .drop("chromStart", "chromEnd")
     )
     dss = gvl.DatasetWithSites(ds, sites)
