@@ -20,7 +20,7 @@ rayon = "1.10.0"
 
 [dependencies.pyo3]
 version = "0.23.4"
-features = ["abi3-py39", "extension-module"]
+features = ["abi3-py310", "extension-module"]
 
 [dev-dependencies]
 rstest = "0.24.0"
