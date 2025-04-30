@@ -36,6 +36,7 @@ from .._ragged import (
     _reverse,
     _reverse_complement,
     is_rag_dtype,
+    to_padded,
 )
 from .._torch import TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx, StrIdx
@@ -1428,9 +1429,9 @@ def _pad(rag: RaggedAnnotatedHaps) -> AnnotatedHaps: ...
 def _pad(rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
     if isinstance(rag, Ragged):
         if is_rag_dtype(rag, np.bytes_):
-            return rag.to_padded(b"N")
+            return to_padded(rag, b"N")
         elif is_rag_dtype(rag, np.float32):
-            return rag.to_padded(0)
+            return to_padded(rag, 0)
         else:
             raise ValueError(f"Unsupported pad dtype: {rag.data.dtype}")
     elif isinstance(rag, RaggedAnnotatedHaps):
