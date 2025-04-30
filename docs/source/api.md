@@ -11,10 +11,6 @@
 
 .. autofunction:: with_length
 
-.. autoclass:: Variants
-    :members: from_file
-    :exclude-members: __new__, __init__
-
 .. autoclass:: BigWigs
     :members:
     :exclude-members: rev_strand_fn, chunked

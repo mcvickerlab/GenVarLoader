@@ -1,21 +1,8 @@
-import re
 import subprocess
 from pathlib import Path
 from textwrap import dedent
-from typing import (
-    Dict,
-    Iterable,
-    List,
-    Literal,
-    Optional,
-    Tuple,
-    Union,
-    cast,
-    overload,
-)
+from typing import Dict, List, Literal, Optional, Union, cast, overload
 
-import cyvcf2
-import numba as nb
 import numpy as np
 import polars as pl
 import pyarrow as pa
@@ -23,7 +10,7 @@ from attrs import define
 from loguru import logger
 from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
-from typing_extensions import assert_never
+from typing_extensions import Self, assert_never
 
 from .._utils import _lengths_to_offsets, _normalize_contig_name, _offsets_to_lengths
 
@@ -110,9 +97,7 @@ class VLenAlleles:
         offsets = np.empty(len(alleles) + 1, np.int64)
         offsets[0] = 0
         offsets[1:] = alleles.str.len_bytes().cast(pl.Int64).cum_sum().to_numpy()
-        flat_alleles = np.frombuffer(
-            alleles.str.concat("").to_numpy()[0].encode(), "S1"
-        )
+        flat_alleles = np.frombuffer(alleles.str.join().to_numpy()[0].encode(), "S1")
         return cls(offsets, flat_alleles)
 
     def to_polars(self):
@@ -243,24 +228,15 @@ class Records:
 
     v_starts: Dict[str, NDArray[np.int32]]
     """0-based positions of variants, sorted by start."""
+    v_ends0: Dict[str, NDArray[np.int32]]
+    """0-based, end *inclusive* ends of variants, sorted by starts."""
+    end_sorter: Dict[str, NDArray[np.int32]]
+    """Sorts variants by end position."""
     v_diffs: Dict[str, NDArray[np.int32]]
     """Difference in length |REF| - |ALT|, sorted by start"""
     # no multi-allelics
     ref: Dict[str, VLenAlleles]
     alt: Dict[str, VLenAlleles]
-    ######################
-
-    ## sorted by ends ##
-    v_ends: Dict[str, NDArray[np.int32]]
-    """0-based, end *inclusive* ends of variants, sorted by end."""
-    e2s_idx: Dict[str, NDArray[np.int32]]
-    """End to start index (sorted by starts). After searching for overlapping variants with Records.v_ends,
-    this maps the found indices to indices of variants sorted by starts."""
-    v_diffs_sorted_by_ends: Dict[str, NDArray[np.int32]]
-    """Difference in length |REF| - |ALT|, sorted by end."""
-    max_del_q: Dict[str, NDArray[np.intp]]
-    """Pending deprecation. Maximum possible deletion length for a query including variants from index 0 to i."""
-    ####################
 
     @property
     def n_variants(self) -> int:
@@ -276,13 +252,12 @@ class Records:
         else:
             multi_contig_source = False
 
-        vcf_suffix = re.compile(r"\.[vb]cf(\.gz)?$")
-        arrow_paths = {
-            c: p.parent / vcf_suffix.sub(".gvl.arrow", p.name) for c, p in vcf.items()
-        }
+        arrow_paths = {c: Path(f"{p}.gvi") for c, p in vcf.items()}
 
-        if cls.gvl_arrow_exists(vcf, arrow_paths):
-            return cls.from_gvl_arrow(arrow_paths)
+        if cls.gvi_exists(vcf, arrow_paths):
+            return cls.from_gvi(arrow_paths)
+
+        logger.info("Indexing VCF since no GVL index found.")
 
         if multi_contig_source:
             start_df = cls.read_vcf(vcf["_all"])
@@ -298,26 +273,15 @@ class Records:
             for contig, path in vcf.items():
                 start_dfs[contig] = cls.read_vcf(path)
 
-        start_dfs, end_dfs = cls.process_start_df(start_dfs)
+        start_dfs = cls.process_start_df(start_dfs)
 
         if multi_contig_source:
-            path = vcf["_all"]
-            pl.concat(start_dfs.values()).write_ipc(
-                path.parent / vcf_suffix.sub(".gvl.arrow", path.name)
-            )
-            pl.concat(end_dfs.values()).write_ipc(
-                path.parent / vcf_suffix.sub(".gvl.ends.arrow", path.name)
-            )
+            pl.concat(start_dfs.values()).write_ipc(arrow_paths["_all"])
         else:
-            for s_df, e_df, path in zip(
-                start_dfs.values(), end_dfs.values(), vcf.values()
-            ):
-                s_df.write_ipc(path.parent / vcf_suffix.sub(".gvl.arrow", path.name))
-                e_df.write_ipc(
-                    path.parent / vcf_suffix.sub(".gvl.ends.arrow", path.name)
-                )
+            for s_df, gvi in zip(start_dfs.values(), arrow_paths.values()):
+                s_df.write_ipc(gvi)
 
-        return cls.from_var_df(start_dfs, end_dfs)
+        return cls.from_var_df(start_dfs)
 
     @staticmethod
     def read_vcf(vcf_path: Path) -> pl.DataFrame:
@@ -351,7 +315,7 @@ class Records:
                 if v.is_sv or v.var_type == "unknown":
                     if not sv_or_unknown:
                         logger.warning(
-                            f"VCF file {vcf_path} contains structural or unknown variants. These variants will be ignored."
+                            f"VCF {vcf_path} contains structural or unknown variants. These will be ignored."
                         )
                         sv_or_unknown = True
                     # use placeholder that makes ilen = 0 so it doesn't affect anything downstream
@@ -362,10 +326,9 @@ class Records:
                 # TODO: multi-allelics. Also, missing ALT (aka the * allele)?
                 if len(alt) != 1:
                     raise RuntimeError(
-                        f"""VCF file {vcf_path} contains multi-allelic or overlappings
-                        variants which are not yet supported by GenVarLoader. Normalize 
-                        the VCF with `bcftools norm -f <reference.fa>
-                        -a --atom-overlaps . -m - <file.vcf>`"""
+                        f"VCF file {vcf_path} contains multi-allelic or overlappings variants"
+                        " which are not yet supported by GenVarLoader. Normalize the VCF with"
+                        " `bcftools norm -f <reference.fa> -a --atom-overlaps . -m - <file.vcf>`"
                     )
                 alts[i] = alt[0]
                 pbar.update()
@@ -388,10 +351,12 @@ class Records:
         else:
             multi_contig_source = False
 
-        arrow_paths = {c: p.with_suffix(".gvl.arrow") for c, p in pvar.items()}
+        arrow_paths = {c: Path(f"{p}.gvi") for c, p in pvar.items()}
 
-        if cls.gvl_arrow_exists(pvar, arrow_paths):
-            return cls.from_gvl_arrow(arrow_paths)
+        if cls.gvi_exists(pvar, arrow_paths):
+            return cls.from_gvi(arrow_paths)
+
+        logger.info("Indexing PVAR since no GVL index found.")
 
         if multi_contig_source:
             start_df = cls.read_pvar(pvar["_all"])
@@ -406,20 +371,15 @@ class Records:
             for contig, path in pvar.items():
                 start_dfs[contig] = cls.read_pvar(path)
 
-        start_dfs, end_dfs = cls.process_start_df(start_dfs)
+        start_dfs = cls.process_start_df(start_dfs)
 
         if multi_contig_source:
-            path = pvar["_all"]
-            pl.concat(start_dfs.values()).write_ipc(path.with_suffix(".gvl.arrow"))
-            pl.concat(end_dfs.values()).write_ipc(path.with_suffix(".gvl.ends.arrow"))
+            pl.concat(start_dfs.values()).write_ipc(arrow_paths["_all"])
         else:
-            for s_df, e_df, path in zip(
-                start_dfs.values(), end_dfs.values(), pvar.values()
-            ):
-                s_df.write_ipc(path.with_suffix(".gvl.arrow"))
-                e_df.write_ipc(path.with_suffix(".gvl.ends.arrow"))
+            for s_df, gvi in zip(start_dfs.values(), arrow_paths.values()):
+                s_df.write_ipc(gvi)
 
-        return cls.from_var_df(start_dfs, end_dfs)
+        return cls.from_var_df(start_dfs)
 
     @staticmethod
     def read_pvar(pvar_path: Path) -> pl.DataFrame:
@@ -448,7 +408,7 @@ class Records:
         return pvar
 
     @staticmethod
-    def gvl_arrow_exists(
+    def gvi_exists(
         sources: Union[Path, Dict[str, Path]], arrow: Union[Path, Dict[str, Path]]
     ) -> bool:
         # TODO: check if files were created after the last breaking change to the gvl.arrow format
@@ -470,52 +430,28 @@ class Records:
         return True
 
     @classmethod
-    def from_gvl_arrow(cls, arrow: Union[str, Path, Dict[str, Path]]) -> "Records":
-        if isinstance(arrow, (str, Path)):
-            arrow = {"_all": Path(arrow)}
+    def from_gvi(cls, paths: Union[str, Path, Dict[str, Path]]) -> Self:
+        if isinstance(paths, (str, Path)):
+            paths = {"_all": Path(paths)}
 
-        if "_all" in arrow:
+        if "_all" in paths:
             multi_contig_source = True
         else:
             multi_contig_source = False
 
-        arrow_paths: Dict[str, Path] = {}
-        for c, p in arrow.items():
-            if p.suffix == ".gvl":
-                arrow_paths[c] = p.with_suffix(".gvl.arrow")
-            elif p.suffixes[-2:] == [".gvl", ".arrow"]:
-                arrow_paths[c] = p
-            else:
-                raise ValueError(
-                    f"Arrow file {p} does not have the .gvl suffix. Please provide the correct path."
-                )
-
         if multi_contig_source:
-            path = arrow_paths["_all"]
-            start_dfs = {
-                cast(str, c[0]): v
-                for c, v in pl.read_ipc(path)
-                .partition_by("#CHROM", as_dict=True)
-                .items()
-            }
-            end_dfs = {
-                cast(str, c[0]): v
-                for c, v in pl.read_ipc(
-                    path.parent / path.name.replace(".gvl.arrow", ".gvl.ends.arrow")
-                )
+            start_dfs: Dict[str, pl.DataFrame] = {
+                cast(str, c): v
+                for (c,), v in pl.read_ipc(paths["_all"])
                 .partition_by("#CHROM", as_dict=True)
                 .items()
             }
         else:
-            start_dfs: Dict[str, pl.DataFrame] = {}
-            end_dfs: Dict[str, pl.DataFrame] = {}
-            for contig, path in arrow_paths.items():
+            start_dfs = {}
+            for contig, path in paths.items():
                 start_dfs[contig] = pl.read_ipc(path)
-                end_dfs[contig] = pl.read_ipc(
-                    path.parent / path.name.replace(".gvl.arrow", ".gvl.ends.arrow")
-                )
 
-        return cls.from_var_df(start_dfs, end_dfs)
+        return cls.from_var_df(start_dfs)
 
     @staticmethod
     def process_start_df(start_dfs: Dict[str, pl.DataFrame]):
@@ -531,89 +467,43 @@ class Records:
         start_dfs : Dict[str, pl.DataFrame]
         end_dfs : Dict[str, pl.DataFrame]
         """
-        end_dfs: Dict[str, pl.DataFrame] = {}
         for contig, df in start_dfs.items():
-            df = df.with_columns(
-                POS=pl.col("POS") - 1,  #! change to 0-indexed
-                ILEN=(
-                    pl.col("ALT").str.len_bytes().cast(pl.Int32)
-                    - pl.col("REF").str.len_bytes().cast(pl.Int32)
-                ),
-            )
-            start_dfs[contig] = df
-
-            ends = (
-                df.select(
-                    "#CHROM",
-                    "ILEN",
+            start_dfs[contig] = (
+                df.with_columns(
+                    POS=pl.col("POS") - 1,  #! change to 0-indexed
+                    ILEN=(
+                        pl.col("ALT").str.len_bytes().cast(pl.Int32)
+                        - pl.col("REF").str.len_bytes().cast(pl.Int32)
+                    ),
+                )
+                .with_columns(
                     END=pl.col("POS")
                     - pl.col("ILEN").clip(upper_bound=0),  #! end-inclusive
                 )
-                .with_row_index("VAR_IDX")
-                .select(
-                    pl.all().sort_by("END"),
-                    # make E2S_IDX relative to each contig
-                    pl.int_range(0, pl.len(), dtype=pl.Int32)
-                    .sort_by("END")
-                    .reverse()
-                    .rolling_min(df.height, min_samples=1)
-                    .reverse()
-                    .alias("E2S_IDX"),
-                )
-                .select("#CHROM", "END", "ILEN", "VAR_IDX", "E2S_IDX")
-                .sort("END")
-                .join(df.select("POS").with_row_index("VAR_IDX"), on="VAR_IDX")
+                .with_columns(end_sorter=pl.col("END").arg_sort())
             )
 
-            _starts = ends["POS"].to_numpy()
-            _ends = ends["END"].to_numpy()
-            was_ends = np.empty(len(_ends) + 1, dtype=_ends.dtype)
-            was_ends[0] = 0
-            #! convert to end-exclusive, + 1
-            was_ends[1:] = _ends + 1
-            md_q = np.searchsorted(was_ends, _starts, side="right") - 1
-            ends = ends.with_columns(MD_Q=md_q).select(  # type: ignore
-                "#CHROM", "END", "MD_Q", "ILEN", "E2S_IDX"
-            )
-
-            end_dfs[contig] = ends
-
-        return start_dfs, end_dfs
+        return start_dfs
 
     @classmethod
-    def from_var_df(
-        cls, start_dfs: Dict[str, pl.DataFrame], end_dfs: Dict[str, pl.DataFrame]
-    ) -> "Records":
-        ## sorted by starts ##
+    def from_var_df(cls, start_dfs: Dict[str, pl.DataFrame]) -> Self:
         v_starts: Dict[str, NDArray[np.int32]] = {}
-        # difference in length between ref and alt, sorted by start
+        v_ends: Dict[str, NDArray[np.int32]] = {}
+        end_sorter: Dict[str, NDArray[np.int32]] = {}
         v_diffs: Dict[str, NDArray[np.int32]] = {}
         # no multi-allelics
         ref: Dict[str, VLenAlleles] = {}
         alt: Dict[str, VLenAlleles] = {}
-        ######################
-
-        ## sorted by ends ##
-        v_ends: Dict[str, NDArray[np.int32]] = {}
-        v_diffs_sorted_by_ends: Dict[str, NDArray[np.int32]] = {}
-        e2s_idx: Dict[str, NDArray[np.int32]] = {}
-        max_del_q: Dict[str, NDArray[np.int32]] = {}
-        ####################
 
         contig_offset = 0
         contig_offsets: Dict[str, int] = {}
         for contig, s_df in start_dfs.items():
-            e_df = end_dfs[contig]
             contig_offsets[contig] = contig_offset
             contig_offset += s_df.height
             v_starts[contig] = s_df["POS"].to_numpy()
             v_diffs[contig] = s_df["ILEN"].to_numpy()
-            v_ends[contig] = e_df["END"].to_numpy()
-            v_diffs_sorted_by_ends[contig] = e_df["ILEN"].to_numpy()
-            e2s_idx[contig] = np.empty(e_df.height + 1, dtype=np.int32)
-            e2s_idx[contig][:-1] = e_df["E2S_IDX"].to_numpy()
-            e2s_idx[contig][-1] = e_df.height
-            max_del_q[contig] = e_df["MD_Q"].to_numpy()
+            v_ends[contig] = s_df["END"].to_numpy()
+            end_sorter[contig] = s_df["end_sorter"].to_numpy()
 
             # no multi-allelics
             ref[contig] = VLenAlleles.from_polars(s_df["REF"])
@@ -626,10 +516,8 @@ class Records:
             v_diffs=v_diffs,
             ref=ref,
             alt=alt,
-            v_ends=v_ends,
-            v_diffs_sorted_by_ends=v_diffs_sorted_by_ends,
-            e2s_idx=e2s_idx,
-            max_del_q=max_del_q,
+            v_ends0=v_ends,
+            end_sorter=end_sorter,
         )
 
     def vars_in_range(
@@ -637,9 +525,9 @@ class Records:
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-    ) -> Optional[RecordInfo]:
-        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
-        ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
+    ) -> tuple[NDArray[np.int32], NDArray[np.int32]] | None:
+        starts = np.atleast_1d(np.asarray(starts))
+        ends = np.atleast_1d(np.asarray(ends))
 
         _contig = _normalize_contig_name(contig, self.contigs)
         if _contig is None:
@@ -651,41 +539,19 @@ class Records:
         if rel_s_idxs.min() == rel_e_idxs.max():
             return
 
-        n_var_per_region = rel_e_idxs - rel_s_idxs
-        offsets = _lengths_to_offsets(n_var_per_region)
-
         # make idxs absolute
         s_idxs = rel_s_idxs + self.contig_offsets[_contig]
         e_idxs = rel_e_idxs + self.contig_offsets[_contig]
 
-        positions = np.concatenate(
-            [self.v_starts[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
-        )
-        size_diffs = np.concatenate(
-            [self.v_diffs[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
-        )
-        ref = VLenAlleles.concat(
-            *(self.ref[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
-        )
-        alt = VLenAlleles.concat(
-            *(self.alt[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
-        )
-
-        return RecordInfo(
-            positions=positions,
-            size_diffs=size_diffs,
-            refs=ref,
-            alts=alt,
-            start_idxs=s_idxs,
-            end_idxs=e_idxs,
-            offsets=offsets,
-        )
+        return s_idxs, e_idxs
 
     def find_relative_start_idx(
         self, contig: str, starts: NDArray[np.int32]
     ) -> NDArray[np.int32]:
-        s_idx_by_end = np.searchsorted(self.v_ends[contig], starts)
-        rel_s_idx = self.e2s_idx[contig][s_idx_by_end]
+        s_idx_by_end = np.searchsorted(
+            self.v_ends0[contig], starts, sorter=self.end_sorter[contig]
+        )
+        rel_s_idx = self.end_sorter[contig][s_idx_by_end]
         return rel_s_idx
 
     def find_relative_end_idx(
@@ -693,93 +559,6 @@ class Records:
     ) -> NDArray[np.int32]:
         rel_e_idx = np.searchsorted(self.v_starts[contig], ends)
         return rel_e_idx
-
-    def vars_in_range_for_haplotype_construction(
-        self,
-        contig: str,
-        starts: ArrayLike,
-        ends: ArrayLike,
-    ) -> Tuple[Optional[RecordInfo], NDArray[np.int64]]:
-        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
-        ends = np.atleast_1d(np.asarray(ends, dtype=np.int64))
-        n_queries = len(starts)
-
-        _contig = _normalize_contig_name(contig, self.contigs)
-        if _contig is None:
-            return None, ends
-
-        _s_idxs = np.searchsorted(self.v_ends[_contig], starts)
-
-        max_ends, _e_idxs = get_max_ends_and_idxs(
-            self.v_ends[_contig],
-            self.v_diffs_sorted_by_ends[_contig],
-            self.max_del_q[_contig],
-            _s_idxs,
-            ends,
-        )
-
-        s_idxs = self.e2s_idx[_contig][_s_idxs]
-        e_idxs = self.e2s_idx[_contig][_e_idxs]
-
-        # make idxs absolute
-        s_idxs += self.contig_offsets[_contig]
-        e_idxs += self.contig_offsets[_contig]
-
-        if s_idxs.min() == e_idxs.max():
-            return None, ends
-
-        offsets = np.empty(n_queries + 1, dtype=np.int64)
-        offsets[0] = 0
-        np.cumsum(e_idxs - s_idxs, out=offsets[1:])
-
-        rel_s_idxs = s_idxs - self.contig_offsets[_contig]
-        rel_e_idxs = e_idxs - self.contig_offsets[_contig]
-
-        positions = np.concatenate(
-            [self.v_starts[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
-        )
-        size_diffs = np.concatenate(
-            [self.v_diffs[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs)]
-        )
-        ref = VLenAlleles.concat(
-            *(self.ref[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
-        )
-        alt = VLenAlleles.concat(
-            *(self.alt[_contig][s:e] for s, e in zip(rel_s_idxs, rel_e_idxs))
-        )
-
-        v_info = RecordInfo(
-            positions=positions,
-            size_diffs=size_diffs,
-            refs=ref,
-            alts=alt,
-            start_idxs=s_idxs,
-            end_idxs=e_idxs,
-            offsets=offsets,
-        )
-
-        return v_info, max_ends
-
-    def normalize_contig_name(
-        self, contig: str, contigs: Iterable[str]
-    ) -> Optional[str]:
-        """Normalize the contig name to adhere to the convention of the underlying file.
-        i.e. remove or add "chr" to the contig name.
-
-        Parameters
-        ----------
-        contig : str
-
-        Returns
-        -------
-        str
-            Normalized contig name.
-        """
-        for c in contigs:
-            # exact match, remove chr, add chr
-            if contig == c or contig[3:] == c or f"chr{contig}" == c:
-                return c
-        return None
 
     def __repr__(self):
         return dedent(
@@ -789,108 +568,3 @@ class Records:
             n_variants: {self.n_variants}
             """
         ).strip()
-
-
-@nb.njit(nogil=True, cache=True)
-def get_max_ends_and_idxs(
-    v_ends: NDArray[np.int32],
-    v_diffs: NDArray[np.int32],
-    nearest_nonoverlapping: NDArray[np.intp],
-    start_idxs: NDArray[np.intp],
-    query_ends: NDArray[np.int64],
-) -> Tuple[NDArray[np.int64], NDArray[np.intp]]:
-    """Time: O(q * v) where q is number of query regions and v is the number of variants
-    (mostly limited to those in the query regions thanks to early exit criteria).
-    Importantly, this algorithm does not scale (directly) with the number of samples. However, more samples
-    from sequencing experiemnts will increase the number of unique variants sub-linearly.
-    """
-    max_ends = np.empty(len(start_idxs), dtype=np.int64)
-    end_idxs = np.empty(len(start_idxs), dtype=np.intp)
-    for r in nb.prange(len(start_idxs)):
-        s = start_idxs[r]
-        if s == len(v_ends):  # no variants in this region
-            max_ends[r] = query_ends[r]
-            end_idxs[r] = s
-            continue
-
-        w = -v_diffs[s:]  # flip sign so deletions have positive weight
-
-        # to adjust q from [0, j) to [i, j)
-        # (q[i:] - i).clip(0)
-        q = nearest_nonoverlapping[s:]
-        max_end, end_idx = weighted_activity_selection(
-            v_ends[s:], w, q, s, query_ends[r]
-        )
-        max_ends[r] = max_end
-        end_idxs[r] = s + end_idx
-    return max_ends, end_idxs
-
-
-@nb.njit(nogil=True, cache=True)
-def weighted_activity_selection(
-    v_ends: NDArray[np.int32],
-    w: NDArray[np.int32],
-    q: NDArray[np.intp],
-    start_index: int,
-    query_end: int,
-) -> Tuple[int, int]:
-    """Implementation of the [weighted activity selection problem](https://en.wikipedia.org/wiki/Activity_selection_problem)
-    to compute the maximum length of deletions that can occur for each region. This is
-    used to adjust the end coordinates for reference sequence queries and include all
-    variants for that are needed for haplotype construction.
-
-    Parameters
-    ----------
-    v_ends : NDArray[np.int64]
-        Shape: (variants). End coordinates of variants, 0-based inclusive.
-    w : NDArray[np.int64]
-        Shape: (variants). Weights of activities (i.e. deletion lengths).
-    q : NDArray[np.intp]
-        Shape: (variants). Nearest variant i such that i < j and variants are non-overlapping, q[j] = i.
-        Note this should not yet be adjusted for the start_index.
-    start_index : int
-        Index of the first variant overlapping the query region.
-    query_end : int
-        End of query region.
-
-    Returns
-    -------
-    max_ends : NDArray[np.int32]
-        Shape: (regions). Maximum end coordinate for each query region.
-    end_idxs : NDArray[np.intp]
-        Shape: (regions). Index of the variant with the maximum end coordinate for each
-        query region.
-
-    Notes
-    -----
-    For the weighted activity selection problem, each deletion corresponds
-    to an activity with weight equal to the length of the deletion. The goal is to
-    compute the maximum total weight of deletions for each query region.
-
-    Psuedocode from (Princeton slides)[https://www.cs.princeton.edu/~wayne/cs423/lectures/dynamic-programming-4up.pdf]:
-    Given starts :math: `s_1, ..., s_n`, ends :math: `e_1, ..., e_n`, and weights
-    :math: `w_1, ..., w_n`.
-    Note that ends are sorted, :math: `e_1 <= ... <= e_n`.
-    Let :math: `q_j` = largest index :math: `i < j` such that activity :math: `i` is
-    compatible with :math: `j`.
-    Let opt(j) = value of solution to the problem consisting of activities 1 to j
-    Then,
-        opt(0) = 0
-    and
-        opt(j) = max(w_j + opt(q_j), opt(j - 1))
-    """
-    n_vars = len(w)
-    max_del: NDArray[np.int32] = np.empty(n_vars + 1, dtype=np.int32)
-    max_del[0] = 0
-    for j in range(1, n_vars + 1):
-        _q = max(q[j - 1] - start_index, 0)
-        max_del[j] = max(max_del[_q] + w[j - 1], max_del[j - 1])
-        v_del_end = v_ends[j - 1] - max_del[j] + 1  # + 1, v_ends is end-inclusive
-        # if:
-        # this variant more than satisfies query length
-        # last variant doesn't span v_del_end
-        if v_del_end > query_end and j > 1 and v_ends[j - 2] <= v_del_end:
-            # then add the max deletion length up to but not including this variant
-            # to the query end, and return the index of this variant for slicing
-            return query_end + max_del[j - 1], j - 1
-    return query_end + max_del[-1], n_vars

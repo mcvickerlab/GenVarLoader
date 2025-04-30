@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from genvarloader._dataset._indexing import DatasetIndexer
 from genvarloader._utils import idx_like_to_array
 from pytest_cases import fixture, parametrize_with_cases
@@ -70,3 +71,52 @@ def test_subset_to_full(dsi: DatasetIndexer):
     assert full.n_regions == dsi.n_regions
     assert full.n_samples == dsi.n_samples
     np.testing.assert_equal(full.i2d_map, dsi.i2d_map)
+
+
+def getitem_squeeze():
+    regions = 0
+    samples = "Aang"
+    s_idx = 0
+    return regions, samples, s_idx
+
+
+def getitem_1d():
+    regions = 0
+    samples = ["Aang", "Katara"]
+    s_idx = [0, 1]
+    return regions, samples, s_idx
+
+
+def getitem_slice_scalar():
+    regions = slice(2)
+    samples = "Aang"
+    s_idx = 0
+    return regions, samples, s_idx
+
+
+def getitem_reshape():
+    regions = 0
+    samples = [["Aang", "Katara"], ["Katara", "Aang"]]
+    s_idx = [[0, 1], [1, 0]]
+    return regions, samples, s_idx
+
+
+@pytest.mark.xfail(strict=True, raises=KeyError, reason="Zuko is not in the dataset")
+def getitem_missing():
+    regions = 0
+    samples = ["Aang", "Zuko"]
+    s_idx = [0, -1]
+    return regions, samples, s_idx
+
+
+@parametrize_with_cases("regions, samples, s_idx", cases=".", prefix="getitem_")
+def test_getitem_shape(dsi: DatasetIndexer, regions, samples, s_idx):
+    idx, squeeze, reshape = dsi.parse_idx((regions, samples))
+    desired = dsi.i2d_map.reshape(dsi.shape)[regions, s_idx]
+
+    if reshape is not None:
+        assert desired.shape == reshape
+    elif squeeze:
+        assert idx.shape == (1,)
+
+    np.testing.assert_equal(idx, desired.ravel(), strict=True)

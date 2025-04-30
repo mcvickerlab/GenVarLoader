@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
 
@@ -7,11 +8,11 @@ import numpy as np
 import pgenlib
 from numpy.typing import ArrayLike, NDArray
 
-from .._utils import _get_rel_starts
+from .._utils import _get_rel_starts, _lengths_to_offsets
 
 
-class DosageFieldError(Exception):
-    """Exception raised when the dosage field is not found in the VCF record."""
+class CCFFieldError(Exception):
+    """Exception raised when the CCF field is not found in the VCF record."""
 
 
 __all__ = []
@@ -173,9 +174,14 @@ class Genotypes(Protocol):
         return genos, dosages
 
 
-class PgenGenos(Genotypes):
+class PgenGenos:
     chunked = False
     ploidy = 2
+    samples: NDArray[np.str_]
+
+    @property
+    def n_samples(self) -> int:
+        return len(self.samples)
 
     def __init__(
         self,
@@ -281,82 +287,15 @@ class PgenGenos(Genotypes):
 
         return genotypes
 
-    def read_genos_and_dosages(
-        self,
-        contig: str,
-        start_idxs: ArrayLike,
-        end_idxs: ArrayLike,
-        dosage_field: str,
-        sample_idx: Optional[ArrayLike] = None,
-        haplotype_idx: Optional[ArrayLike] = None,
-    ) -> Tuple[NDArray[np.int8], NDArray[np.float32]]:
-        changed_sample_idx = False
-        if sample_idx is not None:
-            _sample_idx = np.atleast_1d(np.asarray(sample_idx, dtype=np.uint32))
-            sample_sorter = np.argsort(_sample_idx)
-            if self.current_sample_idx is None:
-                self.current_sample_idx = _sample_idx[sample_sorter]
-                changed_sample_idx = True
-            elif np.array_equal(_sample_idx[sample_sorter], self.current_sample_idx):
-                sample_sorter = slice(None)
-        else:
-            self.current_sample_idx = np.arange(self.n_samples, dtype=np.uint32)
-            sample_sorter = slice(None)
 
-        if haplotype_idx is not None:
-            _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=np.intp))
-            if np.array_equal(haplotype_idx, np.arange(self.ploidy)):
-                _haplotype_idx = slice(None)
-        else:
-            _haplotype_idx = slice(None)
-
-        if self.handles is None or changed_sample_idx and "_all" in self.paths:
-            handle = self._pgen("_all", self.current_sample_idx)
-            self.handles = {c: handle for c in self.contigs}
-        elif self.handles is None or changed_sample_idx:
-            self.handles = {
-                c: self._pgen(c, self.current_sample_idx) for c in self.contigs
-            }
-
-        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
-        end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.int32))
-
-        vars_per_region = end_idxs - start_idxs
-        n_vars = vars_per_region.sum()
-        rel_start_idxs = _get_rel_starts(start_idxs, end_idxs)
-        rel_end_idxs = rel_start_idxs + vars_per_region
-        # (v s*2)
-        genotypes = np.empty(
-            (n_vars, len(self.current_sample_idx) * self.ploidy), dtype=np.int32
-        )
-        # (v s)
-        dosages = np.empty((n_vars, len(self.current_sample_idx)), dtype=np.float32)
-
-        for s, e, rel_s, rel_e in zip(
-            start_idxs, end_idxs, rel_start_idxs, rel_end_idxs
-        ):
-            if s == e:
-                continue
-            self.handles[contig].read_alleles_range(
-                s, e, allele_int32_out=genotypes[rel_s:rel_e]
-            )
-            self.handles[contig].read_dosages_range(s, e, dosages[rel_s:rel_e])
-
-        # (v s*2) -> (v s 2) -> (s 2 v)
-        genotypes = (
-            genotypes.astype(np.int8)
-            .reshape(n_vars, len(self.current_sample_idx), self.ploidy)
-            .transpose(1, 2, 0)
-        )
-
-        genotypes = genotypes[sample_sorter, _haplotype_idx]
-
-        return genotypes, dosages.T
-
-
-class VCFGenos(Genotypes):
+class VCFGenos:
     chunked = False
     ploidy = 2
+    samples: NDArray[np.str_]
+
+    @property
+    def n_samples(self) -> int:
+        return len(self.samples)
 
     def __init__(
         self, vcfs: Union[str, Path, Dict[str, Path]], contig_offsets: Dict[str, int]
@@ -387,22 +326,28 @@ class VCFGenos(Genotypes):
     def read(
         self,
         contig: str,
-        start_idxs: ArrayLike,
-        end_idxs: ArrayLike,
+        starts: ArrayLike | None = None,
+        ends: ArrayLike | None = None,
         sample_idx: Optional[ArrayLike] = None,
         haplotype_idx: Optional[ArrayLike] = None,
+        n_variants: NDArray[np.int32] | None = None,
     ) -> NDArray[np.int8]:
-        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
-        end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.int32))
+        if starts is None:
+            starts = 0
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32)) + 1  # vcf is 1-based
+        if ends is not None:
+            ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
 
         if self.handles is None and "_all" not in self.paths:
             self.handles = {
-                c: cyvcf2.VCF(str(p), lazy=True)  # type: ignore
+                c: cyvcf2.VCF(str(p), lazy=True, threads=len(os.sched_getaffinity(0)))  # type: ignore
                 for c, p in self.paths.items()
             }
         elif self.handles is None:
             first_path = next(iter(self.paths.values()))
-            handle = cyvcf2.VCF(str(first_path), lazy=True)  # type: ignore
+            handle = cyvcf2.VCF(
+                str(first_path), lazy=True, threads=len(os.sched_getaffinity(0))
+            )  # type: ignore
             self.handles = {c: handle for c in handle.seqnames}
 
         if sample_idx is None:
@@ -415,35 +360,32 @@ class VCFGenos(Genotypes):
         else:
             _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=np.int32))
 
-        n_variants = (end_idxs - start_idxs).sum()
+        if ends is None:
+            coords = [f"{contig}:{s}" for s in starts]
+        else:
+            coords = [f"{contig}:{s}-{e}" for s, e in zip(starts, ends)]
+
+        if n_variants is None:
+            # (r)
+            n_variants = np.array(
+                [
+                    sum(v.is_snp or v.is_indel for v in self.handles[contig](coord))
+                    for coord in coords
+                ]
+            )
+
         # (s p v)
-        genos = np.empty(
-            (len(self.samples), self.ploidy, n_variants),
-            dtype=np.int8,
-        )
+        genos = np.empty((self.n_samples, self.ploidy, n_variants.sum()), dtype=np.int8)
 
         if genos.size == 0:
             return genos
 
-        # (n_queries)
-        geno_idxs = _get_rel_starts(start_idxs, end_idxs)
-        finish_idxs = np.empty_like(geno_idxs)
-        finish_idxs[:-1] = geno_idxs[1:]
-        finish_idxs[-1] = n_variants
-        offset = self.contig_offsets[contig]
-        for i, v in enumerate(self.handles[contig](contig), start=offset):
-            # (n_queries)
-            overlapping_query_intervals = (i >= start_idxs) & (i < end_idxs)
-            if overlapping_query_intervals.any():
-                if v.is_sv or v.var_type == "unknown":
-                    continue
-                # (n_valid)
-                place_idx = geno_idxs[overlapping_query_intervals]
-                genos[..., place_idx] = v.genotype.array()[:, : self.ploidy, None]
-                # increment idxs for next iteration
-                geno_idxs[overlapping_query_intervals] += 1
-            if (geno_idxs == finish_idxs).all():
-                break
+        offsets = _lengths_to_offsets(n_variants)
+        for coord, o in zip(coords, offsets[:-1]):
+            for i, v in enumerate(self.handles[contig](coord), start=o):
+                if v.is_snp or v.is_indel:
+                    # (s p)
+                    genos[..., i] = v.genotype.array()[:, : self.ploidy]
 
         genos = genos[_sample_idx, _haplotype_idx]
         # cyvcf2 encoding: 0, 1, -1 => gvl/pgen encoding: 0, 1, -9
@@ -451,26 +393,29 @@ class VCFGenos(Genotypes):
 
         return genos
 
-    def read_genos_and_dosages(
+    def read_genos_and_ccfs(
         self,
         contig: str,
-        start_idxs: ArrayLike,
-        end_idxs: ArrayLike,
-        dosage_field: str,
+        starts: ArrayLike,
+        ends: ArrayLike,
+        ccf_field: str,
         sample_idx: Optional[ArrayLike] = None,
         haplotype_idx: Optional[ArrayLike] = None,
-    ) -> Tuple[NDArray[np.int8], NDArray[np.float32]]:
-        start_idxs = np.atleast_1d(np.asarray(start_idxs, dtype=np.int32))
-        end_idxs = np.atleast_1d(np.asarray(end_idxs, dtype=np.int32))
+        n_variants: NDArray[np.int32] | None = None,
+    ) -> tuple[NDArray[np.int8], NDArray[np.float32]]:
+        starts = np.atleast_1d(np.asarray(starts, dtype=np.int32))
+        ends = np.atleast_1d(np.asarray(ends, dtype=np.int32))
 
         if self.handles is None and "_all" not in self.paths:
             self.handles = {
-                c: cyvcf2.VCF(str(p), lazy=True)  # type: ignore
+                c: cyvcf2.VCF(str(p), lazy=True, threads=len(os.sched_getaffinity(0)))  # type: ignore
                 for c, p in self.paths.items()
             }
         elif self.handles is None:
             first_path = next(iter(self.paths.values()))
-            handle = cyvcf2.VCF(str(first_path), lazy=True)  # type: ignore
+            handle = cyvcf2.VCF(
+                str(first_path), lazy=True, threads=len(os.sched_getaffinity(0))
+            )  # type: ignore
             self.handles = {c: handle for c in handle.seqnames}
 
         if sample_idx is None:
@@ -483,47 +428,46 @@ class VCFGenos(Genotypes):
         else:
             _haplotype_idx = np.atleast_1d(np.asarray(haplotype_idx, dtype=np.int32))
 
-        n_variants = (end_idxs - start_idxs).sum()
-        # (s p v)
-        genos = np.empty((len(self.samples), self.ploidy, n_variants), dtype=np.int8)
-        dosages = np.empty((len(self.samples), n_variants), dtype=np.float32)
-
-        if n_variants == 0:
-            return genos, dosages
-
-        # (n_queries)
-        geno_idxs = _get_rel_starts(start_idxs, end_idxs)
-        finish_idxs = np.empty_like(geno_idxs)
-        finish_idxs[:-1] = geno_idxs[1:]
-        finish_idxs[-1] = n_variants
-        offset = self.contig_offsets[contig]
-        for i, v in enumerate(self.handles[contig](contig), start=offset):
-            # (n_queries)
-            overlapping_query_intervals = (i >= start_idxs) & (i < end_idxs)
-            if overlapping_query_intervals.any():
-                if v.is_sv or v.var_type == "unknown":
-                    continue
-                # (n_valid)
-                place_idx = geno_idxs[overlapping_query_intervals]
-                genos[..., place_idx] = v.genotype.array()[:, : self.ploidy, None]
-                # (s, 1, 1) or (s, 1)?
-                d = v.format(dosage_field)
-                if d is None:
-                    raise DosageFieldError(
-                        f"Dosage field '{dosage_field}' not found for record {repr(v)}"
+        if n_variants is None:
+            # (r)
+            n_variants = np.array(
+                [
+                    sum(
+                        v.is_snp or v.is_indel
+                        for v in self.handles[contig](f"{contig}:{s}-{e}")
                     )
-                # (s, 1, 1) or (s, 1)? -> (s, 1)
-                dosages[:, place_idx] = d.squeeze()[:, None]
-                # increment idxs for next iteration
-                geno_idxs[overlapping_query_intervals] += 1
-            if (geno_idxs == finish_idxs).all():
-                break
+                    for s, e in zip(starts + 1, ends)  # vcf is 1-based
+                ]
+            )
+        # (s p v)
+        genos = np.empty((self.n_samples, self.ploidy, n_variants.sum()), dtype=np.int8)
+        # (s v)
+        ccfs = np.empty((self.n_samples, n_variants.sum()), dtype=np.float32)
+
+        if genos.size == 0:
+            return genos, ccfs
+
+        offsets = _lengths_to_offsets(n_variants)
+        for s, e, o in zip(starts + 1, ends, offsets[:-1]):
+            for i, v in enumerate(self.handles[contig](f"{contig}:{s}-{e}"), start=o):
+                if v.is_snp or v.is_indel:
+                    # (s p)
+                    genos[..., i] = v.genotype.array()[:, : self.ploidy]
+                    d = v.format(ccf_field)
+                    if d is None:
+                        raise CCFFieldError(
+                            f"CCF field '{ccf_field}' not found for record {repr(v)}"
+                        )
+                    # (s, 1, 1) or (s, 1)? -> (s)
+                    ccfs[..., i] = d.squeeze()
 
         genos = genos[_sample_idx, _haplotype_idx]
         # cyvcf2 encoding: 0, 1, -1 => gvl/pgen encoding: 0, 1, -9
         genos[genos == -1] = -9
 
-        return genos, dosages
+        ccfs = ccfs[_sample_idx]
+
+        return genos, ccfs
 
     def init_handles(self) -> Dict[str, "cyvcf2.VCF"]:
         if self.handles is None and "_all" not in self.paths:

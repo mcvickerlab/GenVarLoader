@@ -25,10 +25,10 @@
 ##ALT=<ID=DEL:ME:ALU,Description="Deletion of ALU element">
 ##ALT=<ID=CNV,Description="Copy number variable region">
 ##bcftools_normVersion=1.21+htslib-1.21
-##bcftools_normCommand=norm -f /carter/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz; Date=Wed Mar 26 11:25:29 2025
-##bcftools_normCommand=norm -a --atom-overlaps . -f /carter/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz -m -; Date=Wed Mar 26 11:25:29 2025
+##bcftools_normCommand=norm -f /carter/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz; Date=Tue Apr 22 18:29:29 2025
+##bcftools_normCommand=norm -a --atom-overlaps . -f /carter/users/dlaub/projects/GenVarLoader/tests/data/fasta/Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz -m -; Date=Tue Apr 22 18:29:29 2025
 ##bcftools_viewVersion=1.21+htslib-1.21
-##bcftools_viewCommand=view -e TYPE="OTHER"; Date=Wed Mar 26 11:25:29 2025
+##bcftools_viewCommand=view -e TYPE="OTHER"; Date=Tue Apr 22 18:29:29 2025
 #CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	NA00001	NA00002	NA00003
 19	111	.	N	C	9.6	.	.	GT:VAF:HQ	0|0:.:10,15	0|0:.:10,10	0/1:0.3:3,3
 19	1010695	.	CGAGACG	C	10	.	.	GT:VAF:HQ	0|0:.:10,10	0|0:0.5:10,15	0/1:0.15:3,3

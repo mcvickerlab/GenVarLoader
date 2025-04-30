@@ -11,8 +11,8 @@ def ds_phased():
     return gvl.Dataset.open(data_dir / "phased_dataset.gvl", ref)
 
 
-def ds_unphased():
-    return gvl.Dataset.open(data_dir / "unphased_dataset.gvl", ref)
+# def ds_unphased():
+#     return gvl.Dataset.open(data_dir / "unphased_dataset.gvl", ref)
 
 
 def seqs_ref():

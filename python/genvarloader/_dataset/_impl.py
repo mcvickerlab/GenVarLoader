@@ -33,6 +33,7 @@ from .._ragged import (
     _reverse,
     _reverse_complement,
     is_rag_dtype,
+    to_padded,
 )
 from .._torch import TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx
@@ -139,7 +140,7 @@ class Dataset:
         deterministic
             Whether to use randomized or deterministic algorithms. If set to True, this will disable random
             shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
-            and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
+            and always apply the highest CCF group. Note that for unphased variants, this will mean not all possible haplotypes
             can be returned.
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
@@ -261,6 +262,22 @@ class Dataset:
                 assert_never(has_genotypes)
                 assert_never(has_intervals)
 
+        if seqs is not None:
+            contig_lengths = dict(
+                zip(seqs.reference.contigs, np.diff(seqs.reference.offsets))
+            )
+            out_of_bounds = bed.select(
+                (
+                    pl.col("chromStart") >= pl.col("chrom").replace_strict(contig_lengths)
+                ).any()
+            ).item()
+            if out_of_bounds:
+                logger.warning(
+                    "Some regions in the dataset have a start coordinate that is out"
+                    " of bounds for the reference genome provided. This may happen if"
+                    " the dataset's regions are for a different reference genome."
+                )
+
         dataset = RaggedDataset(
             path=path,
             output_length="ragged",
@@ -303,7 +320,7 @@ class Dataset:
         deterministic
             Whether to use randomized or deterministic algorithms. If set to True, this will disable random
             shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
-            and always apply the highest dosage group. Note that for unphased variants, this will mean not all possible haplotypes
+            and always apply the highest CCF group. Note that for unphased variants, this will mean not all possible haplotypes
             can be returned.
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
@@ -600,8 +617,8 @@ class Dataset:
     """How much jitter to use."""
     deterministic: bool
     """Whether to use randomized or deterministic algorithms. If set to :code:`False`, this will enable random
-    shifting of longer-than-requested haplotypes and, for unphased variants, enable choosing sets of compatible variants proportional to their dosage;
-    otherwise the dataset will always apply compatible sets with the highest dosage.
+    shifting of longer-than-requested haplotypes and, for unphased variants, enable choosing sets of compatible variants proportional to their CCF;
+    otherwise the dataset will always apply compatible sets with the highest CCF.
     
     .. note::
         This setting is independent of :attr:`~Dataset.jitter`, if you want no :attr:`~Dataset.jitter` you should set it to 0.
@@ -913,9 +930,8 @@ class Dataset:
             samples = slice(None)
         idx = (regions, samples)
 
-        idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
+        ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
 
-        ds_idx = self._idxer[idx]
         r_idx, _ = np.unravel_index(ds_idx, self.full_shape)
 
         # (b)
@@ -932,7 +948,7 @@ class Dataset:
             hap_lens = hap_lens.squeeze(0)
 
         if out_reshape is not None:
-            hap_lens = hap_lens.reshape(*out_reshape, self._seqs.genotypes.ploidy)
+            hap_lens = hap_lens.reshape(*out_reshape, self._seqs.genotypes.shape[-1])
 
         return hap_lens
 
@@ -1081,10 +1097,7 @@ class Dataset:
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
     ) -> Any:
         # (b)
-        idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
-
-        ds_idx = self._idxer[idx]
-
+        ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
         r_idx, s_idx = np.unravel_index(ds_idx, self.full_shape)
         regions = self._jittered_regions[r_idx]
 
@@ -1143,13 +1156,14 @@ class Dataset:
         self, rag: Ragged | RaggedAnnotatedHaps, to_rc: NDArray[np.bool_]
     ) -> Ragged | RaggedAnnotatedHaps:
         if isinstance(rag, Ragged):
-            to_rc = to_rc.reshape(to_rc.shape + ((1,) * (len(rag.shape) - 1)))
             if is_rag_dtype(rag, np.bytes_):
                 rag = _reverse_complement(rag, to_rc)
             elif is_rag_dtype(rag, np.float32):
                 _reverse(rag, to_rc)
         elif isinstance(rag, RaggedAnnotatedHaps):
-            rag.haps = _reverse_complement(rag.haps, to_rc[:, None])
+            rag.haps = _reverse_complement(rag.haps, to_rc)
+            _reverse(rag.var_idxs, to_rc)
+            _reverse(rag.ref_coords, to_rc)
         else:
             assert_never(rag)
         return rag
@@ -1185,9 +1199,9 @@ class Dataset:
     def _pad(self, rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
         if isinstance(rag, Ragged):
             if is_rag_dtype(rag, np.bytes_):
-                return rag.to_padded(b"N")
+                return to_padded(rag, b"N")
             elif is_rag_dtype(rag, np.float32):
-                return rag.to_padded(0)
+                return to_padded(rag, 0)
             else:
                 raise ValueError(f"Unsupported pad dtype: {rag.data.dtype}")
         elif isinstance(rag, RaggedAnnotatedHaps):

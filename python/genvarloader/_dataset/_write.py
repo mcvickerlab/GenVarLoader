@@ -1,31 +1,27 @@
 import gc
 import json
-import os
 import shutil
 import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Union, cast
 
+import awkward as ak
 import numpy as np
 import polars as pl
+from genoray import PGEN, VCF, Reader, SparseVar
+from genoray._svar import V_IDX_TYPE, SparseGenotypes
+from genoray._utils import parse_memory
 from loguru import logger
+from more_itertools import mark_ends
 from natsort import natsorted
 from numpy.typing import NDArray
+from seqpro._ragged import OFFSET_TYPE
 from tqdm.auto import tqdm
 
 from .._bigwig import BigWigs
-from .._utils import (
-    _lengths_to_offsets,
-    _normalize_contig_name,
-    read_bedlike,
-)
-from .._variants import Variants
-from .._variants._genotypes import PgenGenos, VCFGenos
-from ._genotypes import (
-    SparseGenotypes,
-    SparseSomaticGenotypes,
-    get_haplotype_region_ilens,
-)
+from .._utils import _lengths_to_offsets, _normalize_contig_name, read_bedlike
+from .._variants._utils import path_is_pgen, path_is_vcf
+from ._genotypes import SparseSomaticGenotypes
 from ._utils import splits_sum_le_value
 
 __all__ = ["write"]
@@ -38,14 +34,12 @@ EXTEND_END_MULTIPLIER = 1.1
 def write(
     path: Union[str, Path],
     bed: Union[str, Path, pl.DataFrame],
-    variants: Optional[Union[str, Path, Variants]] = None,
+    variants: str | Path | Reader | None = None,
     bigwigs: Optional[Union[BigWigs, List[BigWigs]]] = None,
     samples: Optional[List[str]] = None,
     max_jitter: Optional[int] = None,
     overwrite: bool = False,
-    max_mem: int = 4 * 2**30,
-    phased: bool = True,
-    dosage_field: Optional[str] = None,
+    max_mem: int | str = "4g",
 ):
     """Write a GVL dataset.
 
@@ -58,7 +52,7 @@ def write(
         Specifically, it must have columns 'chrom', 'chromStart', and 'chromEnd'. If 'strand' is present, its values must be either '+' or '-'.
         Negative stranded regions will be reverse complemented during sequence and/or track reconstruction.
     variants
-        A VCF, PGEN, or :py:class:`Variants` instance. All variants must be
+        A :code:`genoray` VCF or PGEN instance (:code:`genoray` is a GVL dependency so it will be import-able). All variants must be
         left-aligned, bi-allelic, and atomized. Multi-allelic variants can be included by splitting
         them into bi-allelic half-calls. For VCFs, the `bcftools norm <https://samtools.github.io/bcftools/bcftools.html#norm>`_
         command can do all of this normalization. Likewise, see the `PLINK2 documentation <https://www.cog-genomics.org/plink/2.0>`_
@@ -73,19 +67,7 @@ def write(
     overwrite
         Whether to overwrite an existing dataset
     max_mem
-        Approximate maximum memory to use in bytes. This is a soft limit and may be exceeded.
-    phased
-        Whether to treat the genotypes as phased. If phased=False and using a VCF,
-        a dosage FORMAT field must be provided and must have Number = '1' or 'A' in the VCF header.
-        All variants that overlap with the BED regions must also have this field present or else
-        the write will fail partway and raise a :py:class:`~genvarloader._variants._genotypes.DosageFieldError`.
-        For PGEN files, if dosages are not present the write will silently fail with all missing dosages.
-        Ostensibly, there is a flag in PGEN files for whether dosages are present. However, the Python
-        interface to PGEN, pgenlib, does not currently expose a way to check this flag. Thus, a workaround
-        is to use `plink2 --pgen-info <https://www.cog-genomics.org/plink/2.0/basic_stats#pgen_info>`_ to check
-        if dosages are present before you write the dataset.
-    dosage_field
-        Field in the VCF to use as dosage. Ignored if :code:`phased=True`.
+        Approximate maximum memory to use. This is a soft limit and may be exceeded by a small amount.
     """
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
@@ -97,6 +79,8 @@ def write(
         bigwigs = [bigwigs]
 
     logger.info(f"Writing dataset to {path}")
+
+    max_mem = parse_memory(max_mem)
 
     metadata = {}
     path = Path(path)
@@ -120,23 +104,21 @@ def write(
 
     available_samples: Optional[Set[str]] = None
     if variants is not None:
-        if isinstance(variants, Variants) and phased != variants.phased:
-            raise ValueError(
-                f"Phased argument ({phased}) does not match phased status of Variants object ({variants.phased})."
-            )
-
         if isinstance(variants, (str, Path)):
-            variants = Variants.from_file(variants, phased, dosage_field)
-
-        if unavailable_contigs := set(contigs) - {
-            _normalize_contig_name(c, contigs) for c in variants.records.contigs
-        }:
-            logger.warning(
-                f"Contigs in queries {unavailable_contigs} are not found in the VCF."
-            )
+            variants = Path(variants)
+            if path_is_pgen(variants):
+                if variants.suffix == "":
+                    variants = variants.with_suffix(".pgen")
+                variants = PGEN(variants)
+            elif path_is_vcf(variants):
+                variants = VCF(variants)
+            else:
+                raise ValueError(
+                    f"File {variants} has an unrecognized file extension. Please provide either a VCF or PGEN file.`"
+                )
 
         if available_samples is None:
-            available_samples = set(variants.samples)
+            available_samples = set(variants.available_samples)
 
     if bigwigs is not None:
         unavail = []
@@ -176,17 +158,16 @@ def write(
 
     if variants is not None:
         logger.info("Writing genotypes.")
-        gvl_bed = _write_variants(
-            path,
-            gvl_bed,
-            variants,
-            samples,
-            max_mem,
-        )
-        if isinstance(variants.genotypes, VCFGenos):
-            variants.genotypes.close()
+        if isinstance(variants, VCF):
+            variants.set_samples(samples)
+            gvl_bed = _write_from_vcf(path, gvl_bed, variants, max_mem)
+        elif isinstance(variants, PGEN):
+            variants.set_samples(samples)
+            gvl_bed = _write_from_pgen(path, gvl_bed, variants, max_mem)
+        elif isinstance(variants, SparseVar):
+            gvl_bed = _write_from_svar(path, gvl_bed, variants, samples)
         metadata["ploidy"] = variants.ploidy
-        metadata["phased"] = phased
+        metadata["phased"] = True
         # free memory
         del variants
         gc.collect()
@@ -213,12 +194,15 @@ def _prep_bed(
         raise ValueError("No regions found in the BED file.")
 
     contigs = natsorted(bed["chrom"].unique().to_list())
-    if "strand" not in bed:
-        bed = bed.with_columns(strand=pl.lit(1, pl.Int32))
-    else:
-        bed = bed.with_columns(
-            pl.col("strand").replace({"+": 1, "-": -1}, return_dtype=pl.Int32)
-        )
+    with pl.StringCache():
+        if "strand" not in bed:
+            bed = bed.with_columns(strand=pl.lit(1, pl.Int32))
+        else:
+            bed = bed.with_columns(
+                pl.col("strand")
+                .cast(pl.Utf8)
+                .replace_strict({"+": 1, "-": -1, ".": 1}, return_dtype=pl.Int32)
+            )
     bed = bed.select("chrom", "chromStart", "chromEnd", "strand")
     with pl.StringCache():
         pl.Series(contigs, dtype=pl.Categorical)
@@ -251,170 +235,146 @@ def _write_regions(path: Path, bed: pl.DataFrame, contigs: List[str]):
     np.save(path / "regions.npy", regions)
 
 
-def _write_variants(
-    path: Path,
-    bed: pl.DataFrame,
-    variants: Variants,
-    samples: Optional[List[str]] = None,
-    max_mem: int = 4 * 2**30,
-):
-    if samples is None:
-        len(variants.samples)
-        sample_idx = None
-        _samples = cast(List[str], variants.samples.tolist())
-    else:
-        _, key_idx, query_idx = np.intersect1d(
-            variants.samples, samples, return_indices=True
-        )
-        if missing := (set(samples) - set(variants.samples)):
-            raise ValueError(f"Samples {missing} not found in VCF.")
-        sample_idx = key_idx[query_idx]
-        len(sample_idx)
-        _samples = samples
-
+def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if vcf._index is None:
+        if not vcf._index_path().exists():
+            vcf._write_gvi_index()
+
+        vcf._load_index()
+
+    assert vcf._index is not None
+
+    if vcf._index.df.select((pl.col("ALT").list.len() > 1).any()).item():
+        raise ValueError(
+            "VCF with filtering applied still contains multi-allelic variants. Please filter or split them."
+        )
+
     pl.DataFrame(
         {
-            "POS": np.concatenate(list(variants.records.v_starts.values())),
-            "ALT": pl.concat([a.to_polars() for a in variants.records.alt.values()]),
-            "ILEN": np.concatenate(list(variants.records.v_diffs.values())),
+            "POS": vcf._index.gr.df["Start"],
+            "ALT": vcf._index.df["ALT"].list.first(),
+            "ILEN": vcf._index.df.select(
+                pl.col("ALT").list.first().str.len_bytes().cast(pl.Int32)
+                - pl.col("REF").str.len_bytes().cast(pl.Int32)
+            ),
         }
     ).write_ipc(out_dir / "variants.arrow")
 
-    rel_start_idxs: Dict[str, NDArray[np.int32]] = {}
-    rel_end_idxs: Dict[str, NDArray[np.int32]] = {}
-    chunk_offsets: Dict[str, NDArray[np.intp]] = {}
-    n_chunks = 0
-    for (contig,), part in bed.partition_by(
-        "chrom", as_dict=True, include_key=False, maintain_order=True
+    unextended_var_idxs: dict[str, list[NDArray[np.integer]]] = {}
+    for (contig,), df in bed.partition_by(
+        "chrom", as_dict=True, maintain_order=True
     ).items():
         contig = cast(str, contig)
-        _contig = _normalize_contig_name(contig, variants.records.contigs)
-        if _contig is not None:
-            starts = part["chromStart"].to_numpy()
-            # TODO: ends may be extended if haps are too short, causing mem usage to be higher
-            # AFAIK there is no fix for this with the current read/write scheme
-            # the per-file feature would eventually address this
-            ends = part["chromEnd"].to_numpy() + INITIAL_END_EXTENSION
-            rel_s_idxs = variants.records.find_relative_start_idx(_contig, starts)
-            rel_e_idxs = variants.records.find_relative_end_idx(_contig, ends)
-
-            # variants * ploidy * samples * (4 bytes per genotype + 4 bytes per ilen)
-            # up to 4 bytes due to pgenlib reading as i32, then reduced 1 byte
-            # cyvcf2 reads slower, but genotypes are cast to i8 per variant
-            # + 1 region * ploidy * samples * (4 bytes per ilen)
-            n_variants = rel_e_idxs - rel_s_idxs
-            n_regions = len(starts)
-            if isinstance(variants.genotypes, VCFGenos):
-                bytes_per_variant = 1
-            elif isinstance(variants.genotypes, PgenGenos):
-                bytes_per_variant = 4
-            else:
-                # NOTE: this should never run unless user provides a custom genotype reader
-                # in that case this is a safe-ish upper bound
-                bytes_per_variant = 4
-
-            if not variants.phased:
-                bytes_per_variant += 4  # dosage is float 32
-
-            mem_per_r = (n_variants * (bytes_per_variant + 4) + 4) * len(_samples)
-            if variants.phased:
-                mem_per_r *= variants.ploidy
-
-            if np.any(mem_per_r > max_mem):
-                # TODO subset by samples as well if needed
-                # sketch:
-                # 1. for 1 region, read subset of variants -> SparseGenotypes
-                # 2. repeat 1 for next subset of variants
-                raise NotImplementedError(
-                    f"""Memory usage per region exceeds maximum of {max_mem / 1e9} GB.
-                    Largest amount needed for a single region is {mem_per_r.max() / 1e9} GB, set
-                    `max_mem` to this value or higher. Otherwise, chunking by region and sample is
-                    not yet implemented."""
-                )
-
-            offsets = splits_sum_le_value(mem_per_r, max_mem)
-            rel_start_idxs[contig] = rel_s_idxs
-            rel_end_idxs[contig] = rel_e_idxs
-            chunk_offsets[contig] = offsets
-            n_chunks += len(offsets) - 1
-        else:
-            rel_start_idxs[contig] = np.zeros(part.height, dtype=np.int32)
-            rel_end_idxs[contig] = np.zeros(part.height, dtype=np.int32)
-            chunk_offsets[contig] = np.array([0, part.height], dtype=np.intp)
+        starts = df["chromStart"].to_numpy()
+        ends = df["chromEnd"].to_numpy()
+        v_idx, offsets = vcf._var_idxs(contig, starts, ends)
+        unextended_var_idxs[contig] = np.array_split(v_idx, offsets[1:-1])
 
     v_idx_memmap_offsets = 0
-    dosage_memmap_offsets = 0
     offset_memmap_offsets = 0
     last_offset = 0
-    max_ends = np.empty(bed.height, dtype=np.int32)
-    last_max_end_idx = 0
-    with tqdm(total=n_chunks) as pbar:
-        for (contig,), part in bed.partition_by(
-            "chrom", as_dict=True, include_key=False, maintain_order=True
-        ).items():
-            contig = cast(str, contig)
-            c_offsets = chunk_offsets[contig]
-            for o_s, o_e in zip(c_offsets[:-1], c_offsets[1:]):
-                rel_s_idxs = rel_start_idxs[contig][o_s:o_e]
-                rel_e_idxs = rel_end_idxs[contig][o_s:o_e]
-                starts = part[o_s:o_e, "chromStart"].to_numpy()
-                ends = part[o_s:o_e, "chromEnd"].to_numpy()
-                n_regions = len(rel_s_idxs)
-                pbar.set_description(
-                    f"Reading genotypes for {n_regions} regions on chromosome {contig}"
+    max_ends: list[int] = []
+    pbar = tqdm(total=bed.height, desc="Processing genotypes", unit=" region")
+    for (contig,), df in bed.partition_by(
+        "chrom", as_dict=True, maintain_order=True
+    ).items():
+        contig = cast(str, contig)
+        starts = df["chromStart"].to_numpy().copy()
+        ends = df["chromEnd"].to_numpy().copy()
+        for range_, var_idxs, e in zip(
+            vcf._chunk_ranges_with_length(contig, starts, ends, max_mem, VCF.Genos8),
+            unextended_var_idxs[contig],
+            ends,
+        ):
+            var_idxs = var_idxs.astype(V_IDX_TYPE)
+            if range_ is None:
+                logger.warning(
+                    "All regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                    " and source of variants. However, this can also be caused by a mismatch between the"
+                    " reference genome used for the BED file coordinates and the one used for the variants."
                 )
 
-                _contig = _normalize_contig_name(contig, variants.records.contigs)
-
-                genos, chunk_max_ends = _read_variants_chunk(
-                    _contig,
-                    starts,
-                    ends,
-                    rel_s_idxs,
-                    rel_e_idxs,
-                    variants,
-                    _samples,
-                    sample_idx,
+                max_ends.append(e)
+                sp_genos = SparseGenotypes.empty(
+                    (1, vcf.n_samples, vcf.ploidy), np.int32
                 )
-
-                max_ends[last_max_end_idx : last_max_end_idx + n_regions] = (
-                    chunk_max_ends
+                (
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
+                ) = _write_phased_variants_chunk(
+                    out_dir,
+                    sp_genos,
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
                 )
-                last_max_end_idx += n_regions
-
-                pbar.set_description(
-                    f"Writing genotypes for {n_regions} regions on chromosome {contig}"
-                )
-                if isinstance(genos, SparseGenotypes):
-                    (
-                        v_idx_memmap_offsets,
-                        offset_memmap_offsets,
-                        last_offset,
-                    ) = _write_phased_variants_chunk(
-                        out_dir,
-                        genos,
-                        v_idx_memmap_offsets,
-                        offset_memmap_offsets,
-                        last_offset,
-                    )
-                else:
-                    (
-                        v_idx_memmap_offsets,
-                        dosage_memmap_offsets,
-                        offset_memmap_offsets,
-                        last_offset,
-                    ) = _write_somatic_variants_chunk(
-                        out_dir,
-                        genos,
-                        v_idx_memmap_offsets,
-                        dosage_memmap_offsets,
-                        offset_memmap_offsets,
-                        last_offset,
-                    )
                 pbar.update()
+                continue
+
+            offset = 0
+            ls_sparse: list[SparseGenotypes] = []
+            for _, is_last, (genos, chunk_end, n_ext) in mark_ends(range_):
+                n_variants = genos.shape[-1]
+                chunk_idxs = var_idxs[offset : offset + n_variants]
+
+                if n_ext > 0:  # also means is_last is True
+                    ext_s_idx = chunk_idxs[-1] + 1
+                    ext_idxs = np.arange(ext_s_idx, ext_s_idx + n_ext, dtype=np.int32)
+                    chunk_idxs = np.concatenate([chunk_idxs, ext_idxs])
+
+                sp_genos = SparseGenotypes.from_dense(genos, chunk_idxs)
+                ls_sparse.append(sp_genos)
+
+                if is_last:
+                    max_ends.append(chunk_end)
+
+            if len(ls_sparse) == 0:
+                max_ends.append(e)
+                sp_genos = SparseGenotypes.empty(
+                    (1, vcf.n_samples, vcf.ploidy), np.int32
+                )
+                (
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
+                ) = _write_phased_variants_chunk(
+                    out_dir,
+                    sp_genos,
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
+                )
+            else:
+                var_idxs = ak.flatten(
+                    ak.concatenate([a.to_awkward() for a in ls_sparse], -1), None
+                ).to_numpy()
+                # (r s p)
+                lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
+
+                if (lengths == 0).all((1, 2)).any():
+                    logger.warning(
+                        "Some regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                        " and source of variants. However, this can also be caused by a mismatch between the"
+                        " reference genome used for the BED file coordinates and the one used for the variants."
+                    )
+
+                sp_genos = SparseGenotypes.from_lengths(var_idxs, lengths)
+                (
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
+                ) = _write_phased_variants_chunk(
+                    out_dir,
+                    sp_genos,
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
+                )
+            pbar.update()
 
     out = np.memmap(
         out_dir / "offsets.npy",
@@ -426,135 +386,206 @@ def _write_variants(
     out[-1] = last_offset
     out.flush()
 
-    bed = bed.with_columns(chromEnd=pl.lit(max_ends))
+    pbar.close()
+
+    bed = bed.with_columns(chromEnd=pl.Series(max_ends))
     return bed
 
 
-def _read_variants_chunk(
-    contig: Optional[str],
-    starts: NDArray[np.int32],
-    ends: NDArray[np.int32],
-    rel_s_idxs: NDArray[np.int32],
-    rel_e_idxs: NDArray[np.int32],
-    variants: Variants,
-    samples: List[str],
-    sample_idxs: Optional[NDArray[np.intp]],
-) -> Tuple[Union[SparseGenotypes, SparseSomaticGenotypes], NDArray[np.int32]]:
-    desired_lengths = ends - starts
-    ends = ends + INITIAL_END_EXTENSION
+def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
+    if pgen._sei is None:
+        raise ValueError(
+            "PGEN with filtering has multi-allelic variants. Please filter or split them."
+        )
+    assert pgen._sei is not None
 
-    if contig is None:
-        if variants.phased:
-            genos = SparseGenotypes.empty(
-                n_regions=len(rel_s_idxs),
-                n_samples=len(samples),
-                ploidy=variants.ploidy,
-            )
-        else:
-            genos = SparseSomaticGenotypes.empty(
-                n_regions=len(rel_s_idxs), n_samples=len(samples)
-            )
+    out_dir = path / "genotypes"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        chunk_max_ends = ends
-        return genos, chunk_max_ends
+    pl.DataFrame(
+        {
+            "POS": pgen._sei.v_starts,
+            "ALT": pgen._sei.alt,
+            "ILEN": pgen._sei.ilens,
+        }
+    ).write_ipc(out_dir / "variants.arrow")
 
-    first = True
-    while True:
-        logger.debug(f"average region length {(ends - starts).mean()}")
-        if not first:
-            rel_e_idxs = variants.records.find_relative_end_idx(contig, ends)
-        s_idx = variants.records.contig_offsets[contig] + rel_s_idxs
-        e_idx = variants.records.contig_offsets[contig] + rel_e_idxs
-        n_per_region = e_idx - s_idx
+    pbar = tqdm(total=bed.height, desc="Processing genotypes", unit=" region")
 
-        if n_per_region.sum() == 0:
-            if variants.phased:
-                genos = SparseGenotypes.empty(
-                    n_regions=len(rel_s_idxs),
-                    n_samples=len(samples),
-                    ploidy=variants.ploidy,
+    v_idx_memmap_offsets = 0
+    offset_memmap_offsets = 0
+    last_offset = 0
+    max_ends: list[np.integer] = []
+    for contig, df in bed.partition_by(
+        "chrom", as_dict=True, maintain_order=True
+    ).items():
+        contig = cast(str, contig)
+        starts = df["chromStart"].to_numpy().copy()
+        ends = df["chromEnd"].to_numpy().copy()
+        for range_, e in zip(
+            pgen._chunk_ranges_with_length(contig, starts, ends, max_mem), ends
+        ):
+            if range_ is None:
+                logger.warning(
+                    "All regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                    " and source of variants. However, this can also be caused by a mismatch between the"
+                    " reference genome used for the BED file coordinates and the one used for the variants."
+                )
+
+                max_ends.append(e)
+                sp_genos = SparseGenotypes.empty(
+                    (1, pgen.n_samples, pgen.ploidy), np.int32
+                )
+                (
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
+                ) = _write_phased_variants_chunk(
+                    out_dir,
+                    sp_genos,
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
+                )
+                pbar.update()
+                continue
+
+            ls_sparse: list[SparseGenotypes] = []
+            for _, is_last, (genos, chunk_end, chunk_idxs) in mark_ends(range_):
+                chunk_idxs = chunk_idxs.astype(V_IDX_TYPE)
+                sp_genos = SparseGenotypes.from_dense(genos.astype(np.int8), chunk_idxs)
+                ls_sparse.append(sp_genos)
+
+                if is_last:
+                    max_ends.append(chunk_end)
+
+            if len(ls_sparse) == 0:
+                max_ends.append(e)
+                sp_genos = SparseGenotypes.empty(
+                    (1, pgen.n_samples, pgen.ploidy), np.int32
+                )
+                (
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
+                ) = _write_phased_variants_chunk(
+                    out_dir,
+                    sp_genos,
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
                 )
             else:
-                genos = SparseSomaticGenotypes.empty(
-                    n_regions=len(rel_s_idxs), n_samples=len(samples)
+                sp_genos = SparseGenotypes.from_awkward(
+                    ak.concatenate([a.to_awkward() for a in ls_sparse], -1)
                 )
-            chunk_max_ends = ends
-            return genos, chunk_max_ends
 
-        offsets = _lengths_to_offsets(n_per_region)
+                var_idxs = ak.flatten(
+                    ak.concatenate([a.to_awkward() for a in ls_sparse], -1), None
+                ).to_numpy()
+                # (r s p)
+                lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
 
-        # (s p v)
-        logger.debug("read genotypes")
-        if variants.phased:
-            genos = variants.genotypes.multiprocess_read(
-                contig,
-                s_idx,
-                e_idx,
-                sample_idx=sample_idxs,
-                n_jobs=len(os.sched_getaffinity(0)),
+                if (lengths == 0).all((1, 2)).any():
+                    logger.warning(
+                        "Some regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                        " and source of variants. However, this can also be caused by a mismatch between the"
+                        " reference genome used for the BED file coordinates and the one used for the variants."
+                    )
+
+                sp_genos = SparseGenotypes.from_lengths(var_idxs, lengths)
+
+                (
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
+                ) = _write_phased_variants_chunk(
+                    out_dir,
+                    sp_genos,
+                    v_idx_memmap_offsets,
+                    offset_memmap_offsets,
+                    last_offset,
+                )
+
+            pbar.update()
+
+    out = np.memmap(
+        out_dir / "offsets.npy",
+        dtype=np.int64,
+        mode="r+",
+        shape=1,
+        offset=offset_memmap_offsets,
+    )
+    out[-1] = last_offset
+    out.flush()
+
+    bed = bed.with_columns(chromEnd=pl.Series(max_ends))
+    return bed
+
+
+def _write_from_svar(
+    path: Path, bed: pl.DataFrame, svar: SparseVar, samples: list[str]
+):
+    out_dir = path / "genotypes"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    offsets = np.memmap(
+        out_dir / "offsets.npy",
+        np.int64,
+        "w+",
+        shape=(bed.height, len(samples), svar.ploidy, 2),
+    )
+
+    with open(out_dir / "svar_meta.json", "w") as f:
+        json.dump({"shape": offsets.shape, "dtype": offsets.dtype.str}, f)
+
+    v_ends = svar.granges.End
+    max_ends = np.empty(bed.height, np.int32)
+    contig_offset = 0
+    pbar = tqdm(total=bed.height, unit=" region")
+    for (c,), df in bed.partition_by(
+        "chrom", as_dict=True, maintain_order=True
+    ).items():
+        c = cast(str, c)
+        pbar.set_description(f"Processing {df.height} regions on contig {c}")
+        # (r s p 2)
+        out = offsets[contig_offset : contig_offset + df.height]
+        svar._find_starts_ends_with_length(
+            c, df["chromStart"], df["chromEnd"], samples=samples, out=out
+        )
+
+        if (out == np.iinfo(OFFSET_TYPE).max).all((1, 2, 3)).any():
+            logger.warning(
+                "Some regions have no variants for any sample. This could be expected depending on the region lengths"
+                " and source of variants. However, this can also be caused by a mismatch between the"
+                " reference genome used for the BED file coordinates and the one used for the variants."
             )
+
+        # compute max_ends for the bed
+        shape = (df.height, len(samples), svar.ploidy)
+        # (r s p ~v)
+        sp_genos = SparseGenotypes.from_offsets(
+            svar.genos.data, shape, out.reshape(-1, 2)
+        )
+        # this is fine if there aren't any overlapping variants that could make a v_idx < -1
+        # have a further end than v_idx == -1
+        # (r s p ~v) -> (r)
+        v_idxs = ak.max(sp_genos.to_awkward(), -1).to_numpy().max((1, 2))  # type: ignore
+        c_max_ends = max_ends[contig_offset : contig_offset + df.height]
+        if v_idxs.mask is np.ma.nomask:
+            c_max_ends[:] = v_ends[v_idxs.data]
         else:
-            assert variants.dosage_field is not None
-            genos, dosages = variants.genotypes.multiprocess_read_genos_and_dosages(
-                contig,
-                s_idx,
-                e_idx,
-                variants.dosage_field,
-                sample_idx=sample_idxs,
-                n_jobs=len(os.sched_getaffinity(0)),
-            )
+            c_max_ends[~v_idxs.mask] = v_ends[v_idxs.data[~v_idxs.mask]]
+            c_max_ends[v_idxs.mask] = df.filter(v_idxs.mask)["chromEnd"]
+        contig_offset += df.height
+        pbar.update(df.height)
 
-        logger.debug("get haplotype region ilens")
-        # (s p r)
-        # TODO: this is wrong for somatic genotypes since choosing variants is done incorrectly
-        haplotype_ilens = get_haplotype_region_ilens(
-            genos, rel_s_idxs, offsets, variants.records.v_diffs[contig]
-        )
-        # (s p r)
-        haplotype_lengths = ends - starts + haplotype_ilens
-        del haplotype_ilens
-        logger.debug(f"average haplotype length {haplotype_lengths.mean()}")
-        # (s p r)
-        missing_lengths = desired_lengths - haplotype_lengths
-        logger.debug(f"max missing length {missing_lengths.max()}")
+    pbar.close()
+    offsets.flush()
 
-        if np.all(missing_lengths <= 0):
-            break
+    (out_dir / "link.svar").symlink_to(svar.path, True)
 
-        # (r)
-        ends += np.ceil(
-            EXTEND_END_MULTIPLIER * missing_lengths.max((0, 1)).clip(min=0)
-        ).astype(np.int32)
-
-    logger.debug("sparsify genotypes")
-    if variants.phased:
-        genos, chunk_max_ends = SparseGenotypes.from_dense_with_length(
-            genos=genos,
-            first_v_idxs=rel_s_idxs,
-            offsets=offsets,
-            ilens=variants.records.v_diffs[contig],
-            positions=variants.records.v_starts[contig],
-            starts=starts,
-            lengths=desired_lengths,
-        )
-    else:
-        genos, chunk_max_ends = SparseSomaticGenotypes.from_dense_with_length(
-            genos=genos,
-            first_v_idxs=rel_s_idxs,
-            offsets=offsets,
-            ilens=variants.records.v_diffs[contig],
-            positions=variants.records.v_starts[contig],
-            starts=starts,
-            lengths=desired_lengths,
-            dosages=dosages,  # type: ignore | guaranteed bound by read_genos_and_dosages
-        )
-    logger.debug(f"maximum needed length {(chunk_max_ends - starts).max()}")
-    logger.debug(f"minimum needed length {(chunk_max_ends - starts).min()}")
-
-    # make indices absolute
-    genos.variant_idxs += variants.records.contig_offsets[contig]
-
-    return genos, chunk_max_ends
+    return bed.with_columns(chromEnd=pl.Series(max_ends))
 
 
 def _write_phased_variants_chunk(
@@ -567,12 +598,12 @@ def _write_phased_variants_chunk(
     if not genos.is_empty:
         out = np.memmap(
             out_dir / "variant_idxs.npy",
-            dtype=genos.variant_idxs.dtype,
+            dtype=genos.data.dtype,
             mode="w+" if v_idx_memmap_offset == 0 else "r+",
-            shape=genos.variant_idxs.shape,
+            shape=genos.data.shape,
             offset=v_idx_memmap_offset,
         )
-        out[:] = genos.variant_idxs[:]
+        out[:] = genos.data[:]
         out.flush()
         v_idx_memmap_offset += out.nbytes
 
@@ -596,32 +627,32 @@ def _write_somatic_variants_chunk(
     out_dir: Path,
     genos: SparseSomaticGenotypes,
     v_idx_memmap_offset: int,
-    dosage_memmap_offset: int,
+    ccf_memmap_offset: int,
     offsets_memmap_offset: int,
     last_offset: int,
 ):
     if not genos.is_empty:
         out = np.memmap(
             out_dir / "variant_idxs.npy",
-            dtype=genos.variant_idxs.dtype,
+            dtype=genos.data.dtype,
             mode="w+" if v_idx_memmap_offset == 0 else "r+",
-            shape=genos.variant_idxs.shape,
+            shape=genos.data.shape,
             offset=v_idx_memmap_offset,
         )
-        out[:] = genos.variant_idxs[:]
+        out[:] = genos.data[:]
         out.flush()
         v_idx_memmap_offset += out.nbytes
 
         out = np.memmap(
-            out_dir / "dosages.npy",
-            dtype=genos.dosages.dtype,
-            mode="w+" if dosage_memmap_offset == 0 else "r+",
-            shape=genos.dosages.shape,
-            offset=dosage_memmap_offset,
+            out_dir / "ccfs.npy",
+            dtype=genos.ccfs.dtype,
+            mode="w+" if ccf_memmap_offset == 0 else "r+",
+            shape=genos.ccfs.shape,
+            offset=ccf_memmap_offset,
         )
-        out[:] = genos.dosages[:]
+        out[:] = genos.ccfs[:]
         out.flush()
-        dosage_memmap_offset += out.nbytes
+        ccf_memmap_offset += out.nbytes
 
     offsets = genos.offsets
     offsets += last_offset
@@ -636,7 +667,7 @@ def _write_somatic_variants_chunk(
     out[:] = offsets[:-1]
     out.flush()
     offsets_memmap_offset += out.nbytes
-    return v_idx_memmap_offset, dosage_memmap_offset, offsets_memmap_offset, last_offset
+    return v_idx_memmap_offset, ccf_memmap_offset, offsets_memmap_offset, last_offset
 
 
 def _write_bigwigs(

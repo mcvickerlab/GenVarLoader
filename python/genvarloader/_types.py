@@ -24,6 +24,7 @@ INTERVAL_DTYPE = np.dtype(
 Idx = Union[
     int, np.integer, Sequence[int], slice, NDArray[np.integer], NDArray[np.bool_]
 ]
+StrIdx = Idx | str | Sequence[str]
 ListIdx = Union[Sequence[int], NDArray[np.integer]]
 
 

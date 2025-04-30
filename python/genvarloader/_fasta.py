@@ -8,7 +8,7 @@ import numpy as np
 import pysam
 import seqpro as sp
 from numpy.typing import ArrayLike, NDArray
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from typing_extensions import assert_never
 
 from ._types import Reader

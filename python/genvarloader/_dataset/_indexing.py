@@ -2,16 +2,17 @@ from typing import List, Literal, Optional, Sequence, cast
 
 import numpy as np
 from attrs import define, evolve
+from hirola import HashTable
+from more_itertools import collapse
 from numpy.typing import NDArray
 
-from .._types import Idx
-from .._utils import idx_like_to_array
-from ._utils import oidx_to_raveled_idx
+from genvarloader._dataset._utils import oidx_to_raveled_idx
+from genvarloader._types import Idx, StrIdx
+from genvarloader._utils import idx_like_to_array, is_dtype
 
 
 @define
 class DatasetIndexer:
-    full_samples: List[str]
     full_region_idxs: NDArray[np.integer]
     """Full map from input region indices to on-disk region indices."""
     full_sample_idxs: NDArray[np.integer]
@@ -20,6 +21,8 @@ class DatasetIndexer:
     """Map from input indices to on-disk dataset indices."""
     d2i_map: NDArray[np.integer]
     """Map from on-disk dataset indices to input indices."""
+    s2i_map: HashTable
+    """Map from input sample names to on-disk sample indices."""
     region_subset_idxs: Optional[NDArray[np.integer]] = None
     """Which input regions are included in the subset."""
     sample_subset_idxs: Optional[NDArray[np.integer]] = None
@@ -35,13 +38,23 @@ class DatasetIndexer:
         shape = len(r_idxs), len(s_idxs)
         i2d_map = oidx_to_raveled_idx(r_idxs, s_idxs, shape)
         d2i_map = oidx_to_raveled_idx(np.argsort(r_idxs), s_idxs, shape)
+        _samples = np.array(samples)
+        s2i_map = HashTable(
+            max=len(_samples) * 2,  # type: ignore | 2x size for perf > mem
+            dtype=_samples.dtype,
+        )
+        s2i_map.add(_samples)
         return cls(
-            full_samples=samples,
             full_region_idxs=r_idxs,
             full_sample_idxs=s_idxs,
             i2d_map=i2d_map,
             d2i_map=d2i_map,
+            s2i_map=s2i_map,
         )
+
+    @property
+    def full_samples(self) -> NDArray[np.str_]:
+        return self.s2i_map.keys
 
     @property
     def is_subset(self) -> bool:
@@ -78,8 +91,8 @@ class DatasetIndexer:
     @property
     def samples(self) -> List[str]:
         if self.sample_subset_idxs is None:
-            return self.full_samples
-        return [self.full_samples[i] for i in self.sample_subset_idxs]
+            return self.full_samples.tolist()
+        return self.full_samples[self.sample_subset_idxs].tolist()
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -88,9 +101,6 @@ class DatasetIndexer:
     @property
     def full_shape(self) -> tuple[int, int]:
         return len(self.full_region_idxs), len(self.full_sample_idxs)
-
-    def __getitem__(self, idx: Idx) -> NDArray[np.integer]:
-        return self.i2d_map[idx]
 
     def __len__(self):
         return len(self.i2d_map)
@@ -142,7 +152,7 @@ class DatasetIndexer:
         )
 
     def parse_idx(
-        self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
+        self, idx: Idx | tuple[Idx] | tuple[Idx, StrIdx]
     ) -> tuple[NDArray[np.integer], bool, tuple[int, ...] | None]:
         if not isinstance(idx, tuple):
             regions = idx
@@ -153,43 +163,40 @@ class DatasetIndexer:
         else:
             regions, samples = idx
 
-        if isinstance(samples, (int, np.integer, str)):
-            single_sample = True
-        else:
-            single_sample = False
+        s_idx = s2i(samples, self.s2i_map)
+        idx = self.i2d_map.reshape(self.shape)[regions, s_idx]
 
-        if isinstance(samples, str):
-            samples = [samples]
-
-        if not isinstance(samples, (int, np.integer, slice)) and isinstance(
-            samples[0], str
-        ):
-            _samples = set(samples)
-            if missing := _samples.difference(self.full_samples):
-                raise ValueError(f"Samples {missing} not found in the dataset")
-            samples = np.array(
-                [i for i, s in enumerate(self.full_samples) if s in _samples],
-                np.intp,
-            )
-        samples = cast(Idx, samples)  # above clause does this, but can't narrow type
-
-        if isinstance(regions, (int, np.integer)) and single_sample:
-            squeeze = True
-        else:
-            squeeze = False
-
-        r_idx = idx_like_to_array(regions, self.n_regions)
-        s_idx = idx_like_to_array(samples, self.n_samples)
-        if r_idx.ndim > 1 or s_idx.ndim > 1:
-            r_idx, s_idx = np.broadcast_arrays(r_idx, s_idx)
-        elif len(r_idx) != len(s_idx):
-            r_idx, s_idx = np.meshgrid(r_idx, s_idx, indexing="ij")
-        idx = np.ravel_multi_index((r_idx, s_idx), self.shape)
-
+        out_reshape = None
+        squeeze = False
         if idx.ndim > 1:
             out_reshape = idx.shape
-            idx = idx.ravel()
-        else:
-            out_reshape = None
+        elif idx.ndim == 0:
+            squeeze = True
+
+        idx = idx.ravel()
 
         return idx, squeeze, out_reshape
+
+    def s2i(self, samples: StrIdx) -> Idx:
+        """Convert sample names to sample indices."""
+        return s2i(samples, self.s2i_map)
+
+
+def s2i(str_idx: StrIdx, map: HashTable) -> Idx:
+    """Convert a string index to an integer index using a hirola.HashTable."""
+    if (
+        isinstance(str_idx, str)
+        or (isinstance(str_idx, np.ndarray) and is_dtype(str_idx, np.str_))
+        or (isinstance(str_idx, Sequence) and isinstance(next(collapse(str_idx)), str))
+    ):
+        idx = map.get(str_idx)
+        if (np.atleast_1d(idx) == -1).any():
+            raise KeyError(
+                f"Some keys not found in mapping: {np.unique(np.array(str_idx)[idx == -1])}"
+            )
+    else:
+        idx = str_idx
+
+    idx = cast(Idx, idx)  # above clause does this, but can't narrow type
+
+    return idx

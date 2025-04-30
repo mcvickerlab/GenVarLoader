@@ -1,3 +1,76 @@
+## v0.13.0 (2025-04-30)
+
+### Feat
+
+- SVAR support passes all tests
+
+### Fix
+
+- continue migrating to seqpro Ragged, enable logger at module level, add warnings about potential reference genome mismatches
+- add spanning dels to test and fix hap ilens for this case
+
+## v0.12.0 (2025-04-18)
+
+### Feat
+
+- remove Variants from public API. lets variants be a path and automatically infer if it is a VCF or PGEN
+- automatically write or update genoray VCF index to be GVL compatible during write
+- use genoray for variant I/O
+
+## v0.11.0 (2025-04-09)
+
+### Feat
+
+- change format of variant file indices so they can be one file, change naming to add .gvi extension to source.
+
+### Refactor
+
+- let starts and ends be optional for variant queries
+
+## v0.10.8 (2025-04-08)
+
+### Fix
+
+- reverse helper wrong when parallel=True
+- reverse helper wrong when parallel=True
+
+## v0.10.7 (2025-04-04)
+
+### Fix
+
+- pass all tests.
+
+## v0.10.6 (2025-04-04)
+
+### Fix
+
+- bug in rev and rev comp causing garbage output for negative stranded data.
+
+## v0.10.5 (2025-04-01)
+
+### Fix
+
+- (breaks experimental API) rename dosage to CCF and adjust alg to handle missing CCF from e.g. germline variants.
+
+## v0.10.4 (2025-04-01)
+
+### Fix
+
+- hotfix for indexer usage
+
+## v0.10.3 (2025-04-01)
+
+### Fix
+
+- shape of dataset return values.
+
+## v0.10.2 (2025-04-01)
+
+### Fix
+
+- pass relevant tests.
+- faster VCF reading.
+
 ## v0.10.1 (2025-03-25)
 
 ### Fix
