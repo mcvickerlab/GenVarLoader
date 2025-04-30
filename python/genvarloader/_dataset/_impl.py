@@ -1497,7 +1497,7 @@ def _cat_length(
             raise RuntimeError("Should never see a 4+ dim ragged array.")
 
         if is_rag_dtype(rag, np.bytes_):
-            cat = cat.view("S1")
+            cat = cat.view("S1")  # type: ignore
         return cat
     elif isinstance(rag, RaggedAnnotatedHaps):
         haps = _cat_length(rag.haps, offsets)
