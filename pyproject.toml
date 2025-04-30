@@ -27,10 +27,10 @@ dependencies = [
     "tbb",
     "joblib",
     "pooch",
+    "seqpro>=0.3.1",
     "awkward",
     "hirola>=0.3,<0.4",
-    "seqpro>=0.3.0",
-    "genoray>=0.7.1",
+    "genoray>=0.8.0",
 ]
 
 [project.urls]

@@ -41,9 +41,9 @@ uv = "*"
 
 [pypi-dependencies]
 genvarloader = { path = ".", editable = true }
-seqpro = { path = '/cellar/users/dlaub/projects/ML4GLand/SeqPro', editable = true }
+seqpro = "==0.3.1"
 hirola = "==0.3"
-genoray = "==0.7.0"
+genoray = "==0.8.0"
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"
@@ -70,12 +70,6 @@ basenji2-pytorch = ">=0.1.2"
 
 [feature.py310.dependencies]
 python = "3.10.*"
-
-# [feature.py311.dependencies]
-# python = "3.11.*"
-
-# [feature.py312.dependencies]
-# python = "3.12.*"
 
 [environments]
 dev = { features = ["pytorch-cpu", "basenji2", "py310"] }
