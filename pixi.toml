@@ -3,6 +3,11 @@ name = "genvarloader"
 channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64"]
 
+[environments]
+dev = { features = ["pytorch-cpu", "basenji2", "py310"] }
+docs = { features = ["docs", "pytorch-cpu", "basenji2", "py310"] }
+# docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py310"] }
+
 [dependencies]
 numba = ">=0.58.1"
 polars = "==1.26.0"
@@ -69,11 +74,6 @@ basenji2-pytorch = ">=0.1.2"
 
 [feature.py310.dependencies]
 python = "3.10.*"
-
-[environments]
-dev = { features = ["pytorch-cpu", "basenji2", "py310"] }
-docs = { features = ["docs", "pytorch-cpu", "basenji2", "py310"] }
-# docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py310"] }
 
 [tasks]
 pre-commit = "pre-commit install --hook-type commit-msg"

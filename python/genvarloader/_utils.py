@@ -10,6 +10,7 @@ from typing import (
     TypeVar,
     Union,
     cast,
+    overload,
 )
 
 import numpy as np
@@ -94,24 +95,33 @@ def _get_rel_starts(
 DTYPE = TypeVar("DTYPE", bound=np.generic)
 
 
-def _normalize_contig_name(contig: str, contigs: Iterable[str]) -> Optional[str]:
-    """Normalize the contig name to adhere to the convention of the underlying file.
-    i.e. remove or add "chr" to the contig name.
+@overload
+def _normalize_contig_name(contig: str, contigs: Iterable[str]) -> str | None: ...
+@overload
+def _normalize_contig_name(
+    contig: list[str], contigs: Iterable[str]
+) -> list[str | None]: ...
+def _normalize_contig_name(
+    contig: str | list[str], contigs: Iterable[str]
+) -> str | None | list[str | None]:
+    """Normalize the contig name to match the naming scheme of `contigs`.
 
     Parameters
     ----------
     contig : str
-
-    Returns
-    -------
-    str
-        Normalized contig name.
+        Contig name to normalize.
+    contigs : Iterable[str]
+        Collection of contig names to normalize against.
     """
-    for c in contigs:
-        # exact match, remove chr, add chr
-        if contig == c or contig[3:] == c or f"chr{contig}" == c:
-            return c
-    return None
+    _contigs = (
+        {f"{c[3:]}": c for c in contigs if c.startswith("chr")}
+        | {f"chr{c}": c for c in contigs if not c.startswith("chr")}
+        | {c: c for c in contigs}
+    )
+    if isinstance(contig, str):
+        return _contigs.get(contig, None)
+    else:
+        return [_contigs.get(c, None) for c in contig]
 
 
 ITYPE = TypeVar("ITYPE", bound=np.integer)

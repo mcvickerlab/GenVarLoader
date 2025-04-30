@@ -23,8 +23,9 @@ import polars as pl
 from attrs import define, evolve, field
 from loguru import logger
 from numpy.typing import NDArray
-from typing_extensions import NoReturn, assert_never
+from typing_extensions import NoReturn, Self, assert_never
 
+from .._fasta import Fasta
 from .._ragged import (
     Ragged,
     RaggedAnnotatedHaps,
@@ -36,7 +37,7 @@ from .._ragged import (
 )
 from .._torch import TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx
-from .._utils import idx_like_to_array
+from .._utils import _normalize_contig_name, idx_like_to_array
 from ._genotypes import SparseGenotypes
 from ._indexing import DatasetIndexer
 from ._reconstruct import Haps, HapsTracks, Reference, Seqs, SeqsTracks, Tracks
@@ -183,6 +184,20 @@ class Dataset:
 
         has_intervals = (path / "intervals").exists()
 
+        if reference is not None:
+            _fasta = Fasta("ref", reference, "N")
+            if missing := list(
+                c
+                for c, b in zip(
+                    contigs, _normalize_contig_name(contigs, _fasta.contigs)
+                )
+                if b is None
+            ):
+                raise RuntimeError(
+                    f"The dataset has regions on contigs {missing} that do not exist in the"
+                    ' reference (even after removing/adding the "chr" prefix).'
+                )
+
         match reference, has_genotypes, has_intervals:
             case _, False, False:
                 raise RuntimeError(
@@ -293,7 +308,7 @@ class Dataset:
         rng: int | np.random.Generator | None = None,
         deterministic: bool | None = None,
         rc_neg: bool | None = None,
-    ) -> Dataset:
+    ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
         Parameters
@@ -771,7 +786,7 @@ class Dataset:
         self,
         regions: Idx | pl.Series | None = None,
         samples: Idx | str | Sequence[str] | None = None,
-    ) -> "Dataset":
+    ) -> Self:
         """Subset the dataset to specific regions and/or samples by index or a boolean mask. If regions or samples
         are not provided, the corresponding dimension will not be subset.
 
@@ -882,7 +897,7 @@ class Dataset:
 
         return evolve(self, _idxer=idxer)
 
-    def to_full_dataset(self) -> "Dataset":
+    def to_full_dataset(self) -> Self:
         """Return a full sized dataset, undoing any subsetting."""
         return evolve(self, _idxer=self._idxer.to_full_dataset())
 
@@ -1222,6 +1237,8 @@ TFM = TypeVar("TFM")
 class ArrayDataset(Dataset, Generic[SEQ, TRK, IDX, TFM]):
     """Only for type checking purposes, you should never instantiate this class directly."""
 
+    output_length: Literal["variable"] | int
+
     @overload
     def with_len(
         self: ArrayDataset[NDArray[np.bytes_], None, IDX, TFM],
@@ -1386,6 +1403,8 @@ class ArrayDataset(Dataset, Generic[SEQ, TRK, IDX, TFM]):
 
 class RaggedDataset(Dataset, Generic[RSEQ, RTRK, IDX, TFM]):
     """Only for type checking purposes, you should never instantiate this class directly."""
+
+    output_length: Literal["ragged"]
 
     @overload
     def with_len(

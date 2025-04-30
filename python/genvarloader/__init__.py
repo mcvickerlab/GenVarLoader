@@ -6,6 +6,7 @@ from ._dataset._write import write
 from ._dummy import get_dummy_dataset
 from ._ragged import Ragged
 from ._utils import read_bedlike, with_length
+from ._variants._sitesonly import DatasetWithSites, SitesSchema, sites_vcf_to_table
 
 __version__ = importlib.metadata.version("genvarloader")
 
@@ -17,6 +18,9 @@ __all__ = [
     "with_length",
     "Ragged",
     "get_dummy_dataset",
+    "sites_vcf_to_table",
+    "SitesSchema",
+    "DatasetWithSites",
     "ArrayDataset",
     "RaggedDataset",
 ]

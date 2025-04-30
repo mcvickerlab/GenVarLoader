@@ -14,13 +14,6 @@ from typing_extensions import Self, assert_never
 
 from .._utils import _lengths_to_offsets, _normalize_contig_name, _offsets_to_lengths
 
-try:
-    import cyvcf2
-
-    CYVCF2_INSTALLED = True
-except ImportError:
-    CYVCF2_INSTALLED = False
-
 __all__ = []
 
 
@@ -104,9 +97,7 @@ class VLenAlleles:
         offsets = np.empty(len(alleles) + 1, np.int64)
         offsets[0] = 0
         offsets[1:] = alleles.str.len_bytes().cast(pl.Int64).cum_sum().to_numpy()
-        flat_alleles = np.frombuffer(
-            alleles.str.join().to_numpy()[0].encode(), "S1"
-        )
+        flat_alleles = np.frombuffer(alleles.str.join().to_numpy()[0].encode(), "S1")
         return cls(offsets, flat_alleles)
 
     def to_polars(self):
@@ -252,7 +243,7 @@ class Records:
         return sum(len(v) for v in self.v_starts.values())
 
     @classmethod
-    def from_vcf(cls, vcf: Union[str, Path, Dict[str, Path]]) -> Self:
+    def from_vcf(cls, vcf: Union[str, Path, Dict[str, Path]]) -> "Records":
         if isinstance(vcf, (str, Path)):
             vcf = {"_all": Path(vcf)}
 
@@ -293,12 +284,7 @@ class Records:
         return cls.from_var_df(start_dfs)
 
     @staticmethod
-    def read_vcf(vcf_path: Path):
-        if not CYVCF2_INSTALLED:
-            raise ImportError(
-                "cyvcf2 is not installed. Please install it with `pip install cyvcf2`"
-            )
-
+    def read_vcf(vcf_path: Path) -> pl.DataFrame:
         vcf = cyvcf2.VCF(str(vcf_path))  # pyright: ignore
         try:
             n_variants = cast(int, vcf.num_records)
@@ -356,7 +342,7 @@ class Records:
         )
 
     @classmethod
-    def from_pvar(cls, pvar: Union[str, Path, Dict[str, Path]]) -> Self:
+    def from_pvar(cls, pvar: Union[str, Path, Dict[str, Path]]) -> "Records":
         if isinstance(pvar, (str, Path)):
             pvar = {"_all": Path(pvar)}
 
