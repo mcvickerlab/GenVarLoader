@@ -10,6 +10,7 @@ Before passing variants to GenVarLoader, they must be:
 - left-aligned
 - bi-allelic
 - atomic (no MNPs or compound MNP-indels)
+- for VCFs, indexed with `bcftools index` or `tabix`
 
 In general, any VCF can be preprocessed to meet these requirements using [`bcftools norm`](https://samtools.github.io/bcftools/bcftools.html#norm), for example:
 
