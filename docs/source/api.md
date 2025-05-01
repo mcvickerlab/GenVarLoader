@@ -31,6 +31,10 @@
 
 .. autofunction:: get_dummy_dataset
 
+.. autoclass:: Reference
+    :members:
+    :exclude-members: __new__, __init__
+
 .. autoclass:: RaggedDataset
     :exclude-members: __new__, __init__
 
