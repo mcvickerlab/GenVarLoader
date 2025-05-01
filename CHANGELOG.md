@@ -1,3 +1,17 @@
+## 0.14.0 (2025-05-01)
+
+### Feat
+
+- expose the Reference class and allow it to be passed to Dataset.open to avoid data duplication. feat: begin work for returning variant info
+- SVAR support passes all tests
+
+### Fix
+
+- dummy data
+- dummy data with Ragged sparsegenotypes
+- continue migrating to seqpro Ragged, enable logger at module level, add warnings about potential reference genome mismatches
+- add spanning dels to test and fix hap ilens for this case
+
 ## v0.13.0 (2025-04-30)
 
 ### Feat
