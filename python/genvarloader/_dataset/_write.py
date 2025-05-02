@@ -292,7 +292,7 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
             var_idxs = var_idxs.astype(V_IDX_TYPE)
             if range_ is None:
                 logger.warning(
-                    "All regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                    "A region has no variants for any sample. This could be expected depending on the region lengths"
                     " and source of variants. However, this can also be caused by a mismatch between the"
                     " reference genome used for the BED file coordinates and the one used for the variants."
                 )
@@ -352,12 +352,13 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
                 var_idxs = ak.flatten(
                     ak.concatenate([a.to_awkward() for a in ls_sparse], -1), None
                 ).to_numpy()
-                # (r s p)
+                # (s p)
                 lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
+                print(lengths.shape)
 
-                if (lengths == 0).all((1, 2)).any():
+                if (lengths == 0).all():
                     logger.warning(
-                        "Some regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                        "A region has no variants for any sample. This could be expected depending on the region lengths"
                         " and source of variants. However, this can also be caused by a mismatch between the"
                         " reference genome used for the BED file coordinates and the one used for the variants."
                     )
@@ -427,7 +428,7 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
         ):
             if range_ is None:
                 logger.warning(
-                    "All regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                    "A region has no variants for any sample. This could be expected depending on the region lengths"
                     " and source of variants. However, this can also be caused by a mismatch between the"
                     " reference genome used for the BED file coordinates and the one used for the variants."
                 )
@@ -483,12 +484,12 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
                 var_idxs = ak.flatten(
                     ak.concatenate([a.to_awkward() for a in ls_sparse], -1), None
                 ).to_numpy()
-                # (r s p)
+                # (s p)
                 lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
 
-                if (lengths == 0).all((1, 2)).any():
+                if (lengths == 0).all():
                     logger.warning(
-                        "Some regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                        "A region has no variants for any sample. This could be expected depending on the region lengths"
                         " and source of variants. However, this can also be caused by a mismatch between the"
                         " reference genome used for the BED file coordinates and the one used for the variants."
                     )
