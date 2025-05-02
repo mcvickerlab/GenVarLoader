@@ -1,3 +1,9 @@
+## 0.14.1 (2025-05-01)
+
+### Fix
+
+- wrong assumed shapes when checking regions with no variants
+
 ## 0.14.0 (2025-05-01)
 
 ### Feat
