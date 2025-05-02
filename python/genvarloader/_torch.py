@@ -11,10 +11,13 @@ from typing import (
     overload,
 )
 
+import awkward as ak
 import numpy as np
 from loguru import logger
 from numpy.typing import NDArray
+from seqpro._ragged import Ragged
 
+from ._ragged import is_rag_dtype
 from ._types import AnnotatedHaps
 
 try:
@@ -130,6 +133,34 @@ def _tensor_from_maybe_bytes(
         if array.dtype.type == np.bytes_:
             array = array.view(np.uint8)
         return torch.from_numpy(array)
+
+
+def to_nested_tensor(rag: Ragged | ak.Array) -> "torch.Tensor":
+    """Convert a Ragged array to a PyTorch `nested tensor <https://pytorch.org/docs/stable/nested.html>`_. Will cast byte arrays
+    (dtype "S1") to uint8.
+
+    Parameters
+    ----------
+    rag
+        Ragged array to convert.
+    """
+    if not _TORCH_AVAILABLE:
+        raise ImportError(
+            "Could not import PyTorch. Please install PyTorch to use torch features."
+        )
+
+    if isinstance(rag, ak.Array):
+        rag = Ragged.from_awkward(rag)
+
+    if is_rag_dtype(rag, np.bytes_):
+        rag = rag.view(np.uint8)
+
+    values = torch.from_numpy(rag.data)
+    lengths = torch.from_numpy(rag.lengths)
+    nt = torch.nested.nested_tensor_from_jagged(
+        values, lengths=lengths, max_seqlen=rag.lengths.max()
+    )
+    return nt
 
 
 if _TORCH_AVAILABLE:

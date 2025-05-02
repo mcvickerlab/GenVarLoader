@@ -19,11 +19,6 @@ from seqpro.bed import read_bedlike, with_length
 
 from ._types import DTYPE, Idx
 
-__all__ = [
-    "read_bedlike",
-    "with_length",
-]
-
 T = TypeVar("T")
 
 

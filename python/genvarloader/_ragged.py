@@ -6,9 +6,11 @@ import awkward as ak
 import numba as nb
 import numpy as np
 from attrs import define
+from awkward.contents import RegularArray
 from einops import repeat
 from numpy.typing import NDArray
 from seqpro._ragged import Ragged
+from typing_extensions import Self
 
 from ._types import DTYPE, AnnotatedHaps
 from ._utils import _lengths_to_offsets
@@ -16,6 +18,10 @@ from ._utils import _lengths_to_offsets
 __all__ = ["Ragged", "RaggedIntervals", "INTERVAL_DTYPE", "pad_ragged"]
 
 RDTYPE = TypeVar("RDTYPE", bound=np.generic)
+INTERVAL_DTYPE = np.dtype(
+    [("start", np.int32), ("end", np.int32), ("value", np.float32)], align=True
+)
+RaggedIntervals = Ragged[np.void]
 
 
 @define
@@ -60,19 +66,43 @@ class RaggedVariants:
     """Typically contains ragged arrays with shape (batch, ploidy, ~variants)"""
 
     alts: ak.Array  # (batch, ploidy, ~variants, ~length)
-    pos: Ragged[np.int32]
+    """Alternate alleles, note extra ragged dimension for length yielding a shape of
+    (..., ploidy, ~variants, ~length)"""
+    v_starts: Ragged[np.int32]
+    """0-based start positions"""
     ilens: Ragged[np.int32]
+    """Indel lengths"""
     ccfs: Ragged[np.float32]
+    """Cancer cell fractions (or proxy thereof)"""
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.v_starts.shape
+
+    def reshape(self, shape: tuple[int, ...]) -> Self:
+        # bpvl -> pvl -> vl
+        layout = self.alts.layout.content
+        for len_ in reversed(shape[1:]):
+            layout = RegularArray(layout, len_)
+
+        return type(self)(
+            ak.Array(layout),
+            self.v_starts.reshape(shape),
+            self.ilens.reshape(shape),
+            self.ccfs.reshape(shape),
+        )
+
+    def squeeze(self, axis: int = 0) -> Self:
+        return type(self)(
+            ak.flatten(self.alts, axis + 1),
+            self.v_starts.squeeze(axis),
+            self.ilens.squeeze(axis),
+            self.ccfs.squeeze(axis),
+        )
 
 
-def is_rag_dtype(rag: Ragged, dtype: type[DTYPE]) -> TypeGuard[Ragged[DTYPE]]:
-    return np.issubdtype(rag.data.dtype, dtype)
-
-
-INTERVAL_DTYPE = np.dtype(
-    [("start", np.int32), ("end", np.int32), ("value", np.float32)], align=True
-)
-RaggedIntervals = Ragged[np.void]
+def is_rag_dtype(rag: Any, dtype: type[DTYPE]) -> TypeGuard[Ragged[DTYPE]]:
+    return isinstance(rag, Ragged) and np.issubdtype(rag.data.dtype, dtype)
 
 
 def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:

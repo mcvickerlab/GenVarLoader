@@ -24,12 +24,6 @@ from .._variants._utils import path_is_pgen, path_is_vcf
 from ._genotypes import SparseSomaticGenotypes
 from ._utils import splits_sum_le_value
 
-__all__ = ["write"]
-
-
-INITIAL_END_EXTENSION = 1000
-EXTEND_END_MULTIPLIER = 1.1
-
 
 def write(
     path: Union[str, Path],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -17,26 +18,33 @@ from typing import (
     overload,
 )
 
+import awkward as ak
 import numba as nb
 import numpy as np
 import polars as pl
 from attrs import define, evolve
+from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
+from awkward.index import Index64
 from einops import repeat
+from genoray._svar import V_IDX_TYPE, SparseGenotypes
 from loguru import logger
 from numpy.typing import NDArray
+from phantom import Phantom
+from seqpro._ragged import Ragged
 from tqdm.auto import tqdm
+from typing_extensions import assert_never
 
 from .._fasta import Fasta
 from .._ragged import (
     INTERVAL_DTYPE,
-    Ragged,
     RaggedAnnotatedHaps,
     RaggedIntervals,
+    RaggedVariants,
+    is_rag_dtype,
 )
 from .._utils import _lengths_to_offsets, _normalize_contig_name
 from .._variants._records import RaggedAlleles
 from ._genotypes import (
-    SparseGenotypes,
     SparseSomaticGenotypes,
     choose_unphased_variants,
     get_diffs_sparse,
@@ -48,6 +56,11 @@ from ._tracks import shift_and_realign_tracks_sparse
 from ._utils import padded_slice, splits_sum_le_value
 
 T = TypeVar("T", covariant=True)
+
+
+class RaggedSeqs(
+    Ragged[np.bytes_], Phantom, predicate=partial(is_rag_dtype, dtype=np.bytes_)
+): ...
 
 
 @define
@@ -119,8 +132,8 @@ class Reference:
 
 @define
 class _Variants:
-    positions: NDArray[np.int32]
-    sizes: NDArray[np.int32]
+    v_starts: NDArray[np.int32]
+    ilens: NDArray[np.int32]
     alts: RaggedAlleles
 
     @classmethod
@@ -213,36 +226,37 @@ def _get_reference(
     return out
 
 
-H = TypeVar("H", Ragged[np.bytes_], RaggedAnnotatedHaps)
+_H = TypeVar("_H", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
+_NewH = TypeVar("_NewH", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 
 
 @define
-class Haps(Reconstructor[H]):
+class Haps(Reconstructor[_H]):
     reference: Reference
     """The reference genome. This is kept in memory."""
     variants: _Variants
     """The variant sites in the dataset. This is kept in memory."""
     genotypes: Union[SparseGenotypes, SparseSomaticGenotypes]
     """Shape: (regions, samples, ploidy). The genotypes in the dataset. This is memory mapped."""
-    annotate: bool
+    kind: type[_H]
 
     @classmethod
     def from_path(
-        cls: type[Haps[Ragged[np.bytes_]]],
+        cls: type[Haps[RaggedSeqs]],
         path: Path,
         reference: Reference,
         phased: bool,
         regions: NDArray[np.int32],
         samples: List[str],
         ploidy: int,
-    ) -> Haps[Ragged[np.bytes_]]:
+    ) -> Haps[RaggedSeqs]:
         if not (path / "genotypes" / "svar_meta.json").exists():
             logger.info("Loading variant data.")
             variants = _Variants.from_table(path / "genotypes" / "variants.arrow")
             if phased:
                 v_idxs = np.memmap(
                     path / "genotypes" / "variant_idxs.npy",
-                    dtype=np.int32,
+                    dtype=V_IDX_TYPE,
                     mode="r",
                 )
                 offsets = np.memmap(
@@ -269,7 +283,7 @@ class Haps(Reconstructor[H]):
         else:
             v_idxs = np.memmap(
                 path / "genotypes" / "link.svar" / "variant_idxs.npy",
-                dtype=np.int32,
+                dtype=V_IDX_TYPE,
                 mode="r",
             )
             with open(path / "genotypes" / "svar_meta.json") as f:
@@ -300,7 +314,7 @@ class Haps(Reconstructor[H]):
             reference=reference,
             variants=variants,
             genotypes=genotypes,
-            annotate=False,
+            kind=RaggedSeqs,
         )
 
     def _haplotype_ilens(
@@ -323,8 +337,8 @@ class Haps(Reconstructor[H]):
                     geno_offset_idxs=geno_offset_idxs,
                     geno_v_idxs=self.genotypes.data,
                     geno_offsets=self.genotypes.offsets,
-                    positions=self.variants.positions,
-                    sizes=self.variants.sizes,
+                    positions=self.variants.v_starts,
+                    sizes=self.variants.ilens,
                     ccfs=self.genotypes.ccfs,
                     deterministic=deterministic,
                 )
@@ -333,7 +347,7 @@ class Haps(Reconstructor[H]):
                 geno_offset_idxs=geno_offset_idxs,
                 geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
-                ilens=self.variants.sizes,
+                ilens=self.variants.ilens,
                 keep=keep,
                 keep_offsets=keep_offsets,
             )
@@ -343,21 +357,16 @@ class Haps(Reconstructor[H]):
                 geno_offset_idxs=geno_offset_idxs,
                 geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
-                ilens=self.variants.sizes,
+                ilens=self.variants.ilens,
                 q_starts=jittered_regions[:, 1],
                 q_ends=jittered_regions[:, 2],
-                v_starts=self.variants.positions,
+                v_starts=self.variants.v_starts,
             )
 
         return hap_ilens.reshape(-1, self.genotypes.shape[-1])
 
-    @overload
-    def with_annot(self, annotations: Literal[False]) -> Haps[Ragged[np.bytes_]]: ...
-    @overload
-    def with_annot(self, annotations: Literal[True]) -> Haps[RaggedAnnotatedHaps]: ...
-
-    def with_annot(self, annotations: bool) -> Haps:
-        return evolve(self, annotate=annotations)
+    def to_kind(self, kind: type[_NewH]) -> Haps[_NewH]:
+        return cast(Haps[_NewH], evolve(self, kind=kind))
 
     def __call__(
         self,
@@ -366,7 +375,7 @@ class Haps(Reconstructor[H]):
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
         rng: Optional[np.random.Generator],
-    ) -> H:
+    ) -> _H:
         haps, *_ = self.get_haps_and_shifts(
             idx=idx,
             regions=regions,
@@ -384,7 +393,7 @@ class Haps(Reconstructor[H]):
         jitter: int,
         rng: Optional[np.random.Generator],
     ) -> tuple[
-        H,
+        _H,
         NDArray[np.intp],
         NDArray[np.int32],
         NDArray[np.int32],
@@ -405,8 +414,8 @@ class Haps(Reconstructor[H]):
                 geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
                 ccfs=self.genotypes.ccfs,
-                positions=self.variants.positions,
-                sizes=self.variants.sizes,
+                positions=self.variants.v_starts,
+                sizes=self.variants.ilens,
                 deterministic=rng is None,
             )
         else:
@@ -445,7 +454,17 @@ class Haps(Reconstructor[H]):
         out_offsets = _lengths_to_offsets(out_lengths)
 
         # (b p l), (b p l), (b p l)
-        if self.annotate:
+        if issubclass(self.kind, RaggedSeqs):
+            out = self._get_haplotypes(
+                geno_offset_idx=geno_offset_idx,
+                regions=regions,
+                out_offsets=out_offsets,
+                shifts=shifts,
+                keep=keep,
+                keep_offsets=keep_offsets,
+                annotate=False,
+            )
+        elif issubclass(self.kind, RaggedAnnotatedHaps):
             haps, maybe_annot_v_idx, maybe_annot_pos = self._get_haplotypes(
                 geno_offset_idx=geno_offset_idx,
                 regions=regions,
@@ -453,27 +472,19 @@ class Haps(Reconstructor[H]):
                 shifts=shifts,
                 keep=keep,
                 keep_offsets=keep_offsets,
-                annotate=self.annotate,
+                annotate=True,
             )
-        else:
-            haps = self._get_haplotypes(
-                geno_offset_idx=geno_offset_idx,
+            out = RaggedAnnotatedHaps(haps, maybe_annot_v_idx, maybe_annot_pos)  # type: ignore
+        elif issubclass(self.kind, RaggedVariants):
+            out = self._get_variants(
+                idx=idx,
                 regions=regions,
-                out_offsets=out_offsets,
                 shifts=shifts,
                 keep=keep,
                 keep_offsets=keep_offsets,
-                annotate=self.annotate,
             )
-
-        if isinstance(self.genotypes, SparseSomaticGenotypes):
-            # (b 1 l) -> (b l) remove ploidy dim
-            haps = haps.squeeze(1)
-
-        if self.annotate:
-            out = RaggedAnnotatedHaps(haps, maybe_annot_v_idx, maybe_annot_pos)  # type: ignore
         else:
-            out = haps
+            assert_never(self.kind)
 
         return (
             out,  # type: ignore | pylance doesn't like this but it's correct behavior for the signature
@@ -495,6 +506,53 @@ class Haps(Reconstructor[H]):
         rsp_idx = (r_idx[:, None], s_idx[:, None], ploid_idx)
         geno_offset_idx = np.ravel_multi_index(rsp_idx, genotypes.shape)
         return geno_offset_idx
+
+    def _get_variants(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+        shifts: NDArray[np.int32],
+        keep: Optional[NDArray[np.bool_]],
+        keep_offsets: Optional[NDArray[np.int64]],
+    ) -> RaggedVariants:
+        if isinstance(self.genotypes, SparseSomaticGenotypes):
+            raise NotImplementedError
+
+        # TODO: maybe filter variants for region, shifts, and keep?
+        r, s = np.unravel_index(idx, self.genotypes.shape[:2])
+        sp_genos = cast(SparseGenotypes, self.genotypes[r, s])
+        v_idxs = ak.flatten(sp_genos.to_awkward(), None).to_numpy()
+
+        # (b*p*v ~l)
+        alts = cast(RaggedAlleles, self.variants.alts[v_idxs])
+        # reshape to (b p ~v ~l)
+        data = NumpyArray(
+            ak.flatten(alts.to_awkward(), None).to_numpy(),
+            parameters={"__array__": "char"},
+        )
+        l_content = ListOffsetArray(Index64(_lengths_to_offsets(alts.lengths)), data)
+        geno_offsets = _lengths_to_offsets(sp_genos.lengths)
+        vl_content = ListOffsetArray(Index64(geno_offsets), l_content)
+        pvl_content = RegularArray(vl_content, sp_genos.shape[-1])
+        alts = ak.Array(pvl_content)
+
+        v_starts = self.variants.v_starts[v_idxs]
+        v_starts = Ragged[v_starts.dtype.type].from_offsets(
+            v_starts, sp_genos.shape, geno_offsets
+        )
+
+        ilens = self.variants.ilens[v_idxs]
+        ilens = Ragged[ilens.dtype.type].from_offsets(
+            ilens, sp_genos.shape, geno_offsets
+        )
+
+        ccfs = Ragged[np.float32].from_offsets(
+            np.full_like(v_idxs, 1.0, np.float32), sp_genos.shape, geno_offsets
+        )
+
+        variants = RaggedVariants(alts, v_starts, ilens, ccfs)
+
+        return variants
 
     @overload
     def _get_haplotypes(
@@ -529,7 +587,8 @@ class Haps(Reconstructor[H]):
         keep_offsets: Optional[NDArray[np.int64]],
         annotate: bool,
     ) -> (
-        Ragged[np.bytes_] | Tuple[Ragged[np.bytes_], Ragged[np.int32], Ragged[np.int32]]
+        Ragged[np.bytes_]
+        | Tuple[Ragged[np.bytes_], Ragged[V_IDX_TYPE], Ragged[np.int32]]
     ):
         """Reconstruct haplotypes from sparse genotypes.
 
@@ -553,7 +612,7 @@ class Haps(Reconstructor[H]):
 
         if annotate:
             annot_v_idxs = Ragged.from_offsets(
-                np.empty(out_offsets[-1], np.int32), shifts.shape, out_offsets
+                np.empty(out_offsets[-1], V_IDX_TYPE), shifts.shape, out_offsets
             )
             annot_positions = Ragged.from_offsets(
                 np.empty(out_offsets[-1], np.int32), shifts.shape, out_offsets
@@ -571,8 +630,8 @@ class Haps(Reconstructor[H]):
             shifts=shifts,
             geno_offsets=self.genotypes.offsets,
             geno_v_idxs=self.genotypes.data,
-            positions=self.variants.positions,
-            sizes=self.variants.sizes,
+            positions=self.variants.v_starts,
+            sizes=self.variants.ilens,
             alt_alleles=self.variants.alts.data.view(np.uint8),
             alt_offsets=self.variants.alts.offsets,
             ref=self.reference.reference,
@@ -870,22 +929,13 @@ class SeqsTracks(Reconstructor[Tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
 
 
 @define
-class HapsTracks(Reconstructor[tuple[H, Ragged[np.float32]]]):
-    haps: Haps[H]
+class HapsTracks(Reconstructor[tuple[_H, Ragged[np.float32]]]):
+    haps: Haps[_H]
     tracks: Tracks
 
-    @overload
-    def with_annot(
-        self, annotations: Literal[False]
-    ) -> HapsTracks[Ragged[np.bytes_]]: ...
-    @overload
-    def with_annot(
-        self, annotations: Literal[True]
-    ) -> HapsTracks[RaggedAnnotatedHaps]: ...
-
-    def with_annot(self, annotations: bool) -> HapsTracks:
-        haps = self.haps.with_annot(annotations)
-        return evolve(self, haps=haps)
+    def to_kind(self, kind: type[_NewH]) -> HapsTracks[_NewH]:
+        haps = self.haps.to_kind(kind)
+        return cast(HapsTracks[_NewH], evolve(self, haps=haps))
 
     def __call__(
         self,
@@ -894,7 +944,7 @@ class HapsTracks(Reconstructor[tuple[H, Ragged[np.float32]]]):
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
         rng: Optional[np.random.Generator],
-    ) -> Tuple[H, Ragged[np.float32]]:
+    ) -> Tuple[_H, Ragged[np.float32]]:
         lengths = regions[:, 2] - regions[:, 1]
 
         # ragged (b p l), (b p), (b p), (b*p*v), (b*p+1), (b p)
@@ -951,8 +1001,8 @@ class HapsTracks(Reconstructor[tuple[H, Ragged[np.float32]]]):
                 geno_offset_idxs=geno_idx,  # (b p)
                 geno_v_idxs=self.haps.genotypes.data,  # (r*s*p*v)
                 geno_offsets=self.haps.genotypes.offsets,  # (r*s*p+1)
-                positions=self.haps.variants.positions,  # (tot_v)
-                sizes=self.haps.variants.sizes,  # (tot_v)
+                positions=self.haps.variants.v_starts,  # (tot_v)
+                sizes=self.haps.variants.ilens,  # (tot_v)
                 tracks=_tracks,  # ragged (b l)
                 track_offsets=track_ofsts_per_t,  # (b+1)
                 keep=keep,  # (b*p*v)
