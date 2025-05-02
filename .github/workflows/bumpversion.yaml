@@ -1,9 +1,9 @@
 name: Bump version
 
-on:
-  push:
-    branches:
-      - stable
+# on:
+#   push:
+#     branches:
+#       - stable
 
 jobs:
   bump-version:
