@@ -8,7 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    name: "Run test across all Python versions"
+    name: "Publish across all Python versions"
     strategy:
       matrix:
         environment: [py310, py311, py312]
