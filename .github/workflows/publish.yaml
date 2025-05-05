@@ -18,7 +18,6 @@ jobs:
         with:
           pixi-version: v0.46.0
           cache: true
-          auth-host: prefix.dev
           environments: ${{ matrix.environment }}
       - name: Check out
         uses: actions/checkout@v4
