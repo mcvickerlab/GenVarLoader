@@ -20,12 +20,10 @@ jobs:
           cache: true
           auth-host: prefix.dev
           environments: ${{ matrix.environment }}
-      
       - name: Check out
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: "${{ secrets.COMMITIZEN }}"
-      
       - name: Test
         run: pixi run -e ${{ matrix.environment }} test
