@@ -1,26 +1,36 @@
 name: Bump version
 
-# on:
-#   push:
-#     branches:
-#       - stable
+on:
+  push:
+    branches:
+      - stable
 
 jobs:
   bump-version:
-    if: "!startsWith(github.event.head_commit.message, 'bump:')"
     runs-on: ubuntu-latest
     name: "Bump version and create changelog with commitizen"
-    steps:
+    steps:      
       - name: Check out
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
           token: "${{ secrets.COMMITIZEN }}"
+
       - name: Create bump and changelog
         uses: commitizen-tools/commitizen-action@master
         with:
           github_token: ${{ secrets.COMMITIZEN }}
           changelog_increment_filename: body.md
+
+      - name: Merge main -> stable
+        uses: devmasx/merge-branch@master
+        with:
+          type: now
+          target_branch: stable
+          message: "bump: version ${{ env.REVISION }}"
+          github_token: ${{ secrets.COMMITIZEN }}
+
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
