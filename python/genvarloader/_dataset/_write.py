@@ -354,7 +354,6 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
                 ).to_numpy()
                 # (s p)
                 lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
-                print(lengths.shape)
 
                 if (lengths == 0).all():
                     logger.warning(
