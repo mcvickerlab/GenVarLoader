@@ -1,9 +1,3 @@
-## 0.14.2 (2025-05-05)
-
-### Fix
-
-- remove shape check print statement in dataset write
-
 ## 0.14.1 (2025-05-02)
 
 ### Fix
