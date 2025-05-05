@@ -29,7 +29,6 @@ from typing_extensions import NoReturn, assert_never
 from .._ragged import (
     Ragged,
     RaggedAnnotatedHaps,
-    RaggedVariants,
     _jitter,
     _reverse,
     _reverse_complement,
@@ -40,6 +39,7 @@ from .._torch import TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx
 from .._utils import idx_like_to_array
 from ._indexing import DatasetIndexer
+from ._rag_variants import RaggedVariants
 from ._reconstruct import (
     Haps,
     HapsTracks,

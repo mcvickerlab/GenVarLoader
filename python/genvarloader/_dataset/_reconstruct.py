@@ -26,7 +26,13 @@ from attrs import define, evolve
 from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
 from awkward.index import Index64
 from einops import repeat
-from genoray._svar import V_IDX_TYPE, SparseGenotypes
+from genoray._svar import (
+    DOSAGE_TYPE,
+    POS_TYPE,
+    V_IDX_TYPE,
+    SparseDosages,
+    SparseGenotypes,
+)
 from loguru import logger
 from numpy.typing import NDArray
 from phantom import Phantom
@@ -35,13 +41,7 @@ from tqdm.auto import tqdm
 from typing_extensions import assert_never
 
 from .._fasta import Fasta
-from .._ragged import (
-    INTERVAL_DTYPE,
-    RaggedAnnotatedHaps,
-    RaggedIntervals,
-    RaggedVariants,
-    is_rag_dtype,
-)
+from .._ragged import INTERVAL_DTYPE, RaggedAnnotatedHaps, RaggedIntervals, is_rag_dtype
 from .._utils import _lengths_to_offsets, _normalize_contig_name
 from .._variants._records import RaggedAlleles
 from ._genotypes import (
@@ -52,6 +52,7 @@ from ._genotypes import (
 )
 from ._indexing import DatasetIndexer
 from ._intervals import intervals_to_tracks, tracks_to_intervals
+from ._rag_variants import RaggedVariants
 from ._tracks import shift_and_realign_tracks_sparse
 from ._utils import padded_slice, splits_sum_le_value
 
@@ -132,7 +133,7 @@ class Reference:
 
 @define
 class _Variants:
-    v_starts: NDArray[np.int32]
+    v_starts: NDArray[POS_TYPE]
     ilens: NDArray[np.int32]
     alts: RaggedAlleles
 
@@ -236,8 +237,9 @@ class Haps(Reconstructor[_H]):
     """The reference genome. This is kept in memory."""
     variants: _Variants
     """The variant sites in the dataset. This is kept in memory."""
-    genotypes: Union[SparseGenotypes, SparseSomaticGenotypes]
+    genotypes: SparseGenotypes
     """Shape: (regions, samples, ploidy). The genotypes in the dataset. This is memory mapped."""
+    dosages: SparseDosages | None
     kind: type[_H]
 
     @classmethod
@@ -250,7 +252,47 @@ class Haps(Reconstructor[_H]):
         samples: List[str],
         ploidy: int,
     ) -> Haps[RaggedSeqs]:
-        if not (path / "genotypes" / "svar_meta.json").exists():
+        svar_meta_path = path / "genotypes" / "svar_meta.json"
+        dosages = None
+
+        if svar_meta_path.exists():
+            with open(svar_meta_path) as f:
+                metadata = json.load(f)
+            # (r s p 2)
+            shape: tuple[int, ...] = metadata["shape"]
+            dtype: str = metadata["dtype"]
+
+            geno_path = path / "genotypes" / "link.svar" / "genotypes.npy"
+            offset_path = path / "genotypes" / "offsets.npy"
+            dosage_path = path / "genotypes" / "link.svar" / "dosages.npy"
+
+            offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
+
+            v_idxs = np.memmap(geno_path, dtype=V_IDX_TYPE, mode="r")
+            genotypes = SparseGenotypes.from_offsets(
+                v_idxs, shape[:-1], offsets.reshape(-1, 2)
+            )
+
+            if dosage_path.exists():
+                dosages = np.memmap(geno_path, dtype=DOSAGE_TYPE, mode="r")
+                dosages = SparseDosages.from_offsets(
+                    dosages, shape[:-1], offsets.reshape(-1, 2)
+                )
+
+            logger.info("Loading variant data.")
+            svar_index = (
+                pl.scan_ipc(
+                    path / "genotypes" / "link.svar" / "index.arrow", memory_map=False
+                )
+                .select("POS", pl.col("ILEN", "ALT").list.first())
+                .collect()
+            )
+            variants = _Variants(
+                svar_index["POS"].to_numpy() - 1,
+                svar_index["ILEN"].to_numpy(),
+                RaggedAlleles.from_polars(svar_index["ALT"]),
+            )
+        else:
             logger.info("Loading variant data.")
             variants = _Variants.from_table(path / "genotypes" / "variants.arrow")
             if phased:
@@ -265,55 +307,13 @@ class Haps(Reconstructor[_H]):
                 shape = (len(regions), len(samples), ploidy)
                 genotypes = SparseGenotypes.from_offsets(v_idxs, shape, offsets)
             else:
-                genotypes = SparseSomaticGenotypes(
-                    np.memmap(
-                        path / "genotypes" / "variant_idxs.npy",
-                        dtype=np.int32,
-                        mode="r",
-                    ),
-                    np.memmap(
-                        path / "genotypes" / "ccfs.npy", dtype=np.float32, mode="r"
-                    ),
-                    np.memmap(
-                        path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
-                    ),
-                    len(regions),
-                    len(samples),
-                )
-        else:
-            v_idxs = np.memmap(
-                path / "genotypes" / "link.svar" / "variant_idxs.npy",
-                dtype=V_IDX_TYPE,
-                mode="r",
-            )
-            with open(path / "genotypes" / "svar_meta.json") as f:
-                metadata = json.load(f)
-            # (r s p 2)
-            shape: tuple[int, ...] = metadata["shape"]
-            dtype: str = metadata["dtype"]
-            offsets = np.memmap(
-                path / "genotypes" / "offsets.npy", shape=shape, dtype=dtype, mode="r"
-            )
-            genotypes = SparseGenotypes.from_offsets(
-                v_idxs, shape[:-1], offsets.reshape(-1, 2)
-            )
-            logger.info("Loading variant data.")
-            svar_index = (
-                pl.scan_ipc(
-                    path / "genotypes" / "link.svar" / "index.arrow", memory_map=False
-                )
-                .select("POS", pl.col("ILEN", "ALT").list.first())
-                .collect()
-            )
-            variants = _Variants(
-                svar_index["POS"].to_numpy() - 1,
-                svar_index["ILEN"].to_numpy(),
-                RaggedAlleles.from_polars(svar_index["ALT"]),
-            )
+                raise NotImplementedError
+
         return cls(
             reference=reference,
             variants=variants,
             genotypes=genotypes,
+            dosages=dosages,
             kind=RaggedSeqs,
         )
 
@@ -337,8 +337,8 @@ class Haps(Reconstructor[_H]):
                     geno_offset_idxs=geno_offset_idxs,
                     geno_v_idxs=self.genotypes.data,
                     geno_offsets=self.genotypes.offsets,
-                    positions=self.variants.v_starts,
-                    sizes=self.variants.ilens,
+                    v_starts=self.variants.v_starts,
+                    ilens=self.variants.ilens,
                     ccfs=self.genotypes.ccfs,
                     deterministic=deterministic,
                 )
@@ -406,24 +406,8 @@ class Haps(Reconstructor[_H]):
 
         geno_offset_idx = self.get_geno_offset_idx(idx, self.genotypes)
 
-        if isinstance(self.genotypes, SparseSomaticGenotypes):
-            keep, keep_offsets = choose_unphased_variants(
-                starts=regions[:, 1],
-                ends=regions[:, 2],
-                geno_offset_idxs=geno_offset_idx,
-                geno_v_idxs=self.genotypes.data,
-                geno_offsets=self.genotypes.offsets,
-                ccfs=self.genotypes.ccfs,
-                positions=self.variants.v_starts,
-                sizes=self.variants.ilens,
-                deterministic=rng is None,
-            )
-        else:
-            keep = None
-            keep_offsets = None
-
         # (b p)
-        diffs = self._haplotype_ilens(idx, regions, rng is None, keep, keep_offsets)
+        diffs = self._haplotype_ilens(idx, regions, rng is None)
         hap_lengths = lengths[:, None] + diffs
 
         if rng is None or isinstance(output_length, str):
@@ -460,8 +444,8 @@ class Haps(Reconstructor[_H]):
                 regions=regions,
                 out_offsets=out_offsets,
                 shifts=shifts,
-                keep=keep,
-                keep_offsets=keep_offsets,
+                keep=None,
+                keep_offsets=None,
                 annotate=False,
             )
         elif issubclass(self.kind, RaggedAnnotatedHaps):
@@ -470,18 +454,18 @@ class Haps(Reconstructor[_H]):
                 regions=regions,
                 out_offsets=out_offsets,
                 shifts=shifts,
-                keep=keep,
-                keep_offsets=keep_offsets,
+                keep=None,
+                keep_offsets=None,
                 annotate=True,
             )
-            out = RaggedAnnotatedHaps(haps, maybe_annot_v_idx, maybe_annot_pos)  # type: ignore
+            out = RaggedAnnotatedHaps(haps, maybe_annot_v_idx, maybe_annot_pos)
         elif issubclass(self.kind, RaggedVariants):
             out = self._get_variants(
                 idx=idx,
                 regions=regions,
                 shifts=shifts,
-                keep=keep,
-                keep_offsets=keep_offsets,
+                keep=None,
+                keep_offsets=None,
             )
         else:
             assert_never(self.kind)
@@ -492,8 +476,8 @@ class Haps(Reconstructor[_H]):
             shifts,
             diffs,
             hap_lengths,
-            keep,
-            keep_offsets,
+            None,
+            None,
         )
 
     @staticmethod
@@ -515,13 +499,10 @@ class Haps(Reconstructor[_H]):
         keep: Optional[NDArray[np.bool_]],
         keep_offsets: Optional[NDArray[np.int64]],
     ) -> RaggedVariants:
-        if isinstance(self.genotypes, SparseSomaticGenotypes):
-            raise NotImplementedError
-
         # TODO: maybe filter variants for region, shifts, and keep?
         r, s = np.unravel_index(idx, self.genotypes.shape[:2])
-        sp_genos = cast(SparseGenotypes, self.genotypes[r, s])
-        v_idxs = ak.flatten(sp_genos.to_awkward(), None).to_numpy()
+        genos = cast(SparseGenotypes, self.genotypes[r, s])
+        v_idxs = ak.flatten(genos.to_awkward(), None).to_numpy()
 
         # (b*p*v ~l)
         alts = cast(RaggedAlleles, self.variants.alts[v_idxs])
@@ -531,26 +512,30 @@ class Haps(Reconstructor[_H]):
             parameters={"__array__": "char"},
         )
         l_content = ListOffsetArray(Index64(_lengths_to_offsets(alts.lengths)), data)
-        geno_offsets = _lengths_to_offsets(sp_genos.lengths)
+        geno_offsets = _lengths_to_offsets(genos.lengths)
         vl_content = ListOffsetArray(Index64(geno_offsets), l_content)
-        pvl_content = RegularArray(vl_content, sp_genos.shape[-1])
+        pvl_content = RegularArray(vl_content, genos.shape[-1])
         alts = ak.Array(pvl_content)
 
         v_starts = self.variants.v_starts[v_idxs]
         v_starts = Ragged[v_starts.dtype.type].from_offsets(
-            v_starts, sp_genos.shape, geno_offsets
+            v_starts, genos.shape, geno_offsets
         )
 
         ilens = self.variants.ilens[v_idxs]
-        ilens = Ragged[ilens.dtype.type].from_offsets(
-            ilens, sp_genos.shape, geno_offsets
-        )
+        ilens = Ragged[ilens.dtype.type].from_offsets(ilens, genos.shape, geno_offsets)
 
-        ccfs = Ragged[np.float32].from_offsets(
-            np.full_like(v_idxs, 1.0, np.float32), sp_genos.shape, geno_offsets
-        )
+        if self.dosages is not None:
+            dosages = cast(SparseDosages, self.dosages[r, s])
+            dosages = Ragged[DOSAGE_TYPE].from_offsets(
+                ak.flatten(dosages.to_awkward(), None).to_numpy(),
+                genos.shape,
+                geno_offsets,
+            )
+        else:
+            dosages = None
 
-        variants = RaggedVariants(alts, v_starts, ilens, ccfs)
+        variants = RaggedVariants(alts, v_starts, ilens, dosages)
 
         return variants
 
@@ -630,8 +615,8 @@ class Haps(Reconstructor[_H]):
             shifts=shifts,
             geno_offsets=self.genotypes.offsets,
             geno_v_idxs=self.genotypes.data,
-            positions=self.variants.v_starts,
-            sizes=self.variants.ilens,
+            v_starts=self.variants.v_starts,
+            ilens=self.variants.ilens,
             alt_alleles=self.variants.alts.data.view(np.uint8),
             alt_offsets=self.variants.alts.offsets,
             ref=self.reference.reference,
@@ -1001,8 +986,8 @@ class HapsTracks(Reconstructor[tuple[_H, Ragged[np.float32]]]):
                 geno_offset_idxs=geno_idx,  # (b p)
                 geno_v_idxs=self.haps.genotypes.data,  # (r*s*p*v)
                 geno_offsets=self.haps.genotypes.offsets,  # (r*s*p+1)
-                positions=self.haps.variants.v_starts,  # (tot_v)
-                sizes=self.haps.variants.ilens,  # (tot_v)
+                v_starts=self.haps.variants.v_starts,  # (tot_v)
+                ilens=self.haps.variants.ilens,  # (tot_v)
                 tracks=_tracks,  # ragged (b l)
                 track_offsets=track_ofsts_per_t,  # (b+1)
                 keep=keep,  # (b*p*v)

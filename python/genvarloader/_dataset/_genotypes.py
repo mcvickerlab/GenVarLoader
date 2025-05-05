@@ -451,15 +451,15 @@ def get_diffs(
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def get_diffs_sparse(
-    geno_offset_idxs: NDArray[np.intp],
-    geno_v_idxs: NDArray[np.int32],
-    geno_offsets: NDArray[np.int64],
-    ilens: NDArray[np.int32],
+    geno_offset_idxs: NDArray[np.integer],
+    geno_v_idxs: NDArray[np.integer],
+    geno_offsets: NDArray[np.integer],
+    ilens: NDArray[np.integer],
     keep: Optional[NDArray[np.bool_]] = None,
-    keep_offsets: Optional[NDArray[np.int64]] = None,
-    q_starts: Optional[NDArray[np.int32]] = None,
-    q_ends: Optional[NDArray[np.int32]] = None,
-    v_starts: Optional[NDArray[np.int32]] = None,
+    keep_offsets: Optional[NDArray[np.integer]] = None,
+    q_starts: Optional[NDArray[np.integer]] = None,
+    q_ends: Optional[NDArray[np.integer]] = None,
+    v_starts: Optional[NDArray[np.integer]] = None,
 ):
     """Get difference in length wrt reference genome for given genotypes.
 
@@ -555,8 +555,8 @@ def reconstruct_haplotypes_from_sparse(
     geno_offset_idxs: NDArray[np.intp],
     geno_offsets: NDArray[np.int64],
     geno_v_idxs: NDArray[np.int32],
-    positions: NDArray[np.int32],
-    sizes: NDArray[np.int32],
+    v_starts: NDArray[np.integer],
+    ilens: NDArray[np.int32],
     alt_alleles: NDArray[np.uint8],
     alt_offsets: NDArray[np.int64],
     ref: NDArray[np.uint8],
@@ -642,8 +642,8 @@ def reconstruct_haplotypes_from_sparse(
                 offset_idx=o_idx,
                 geno_v_idxs=geno_v_idxs,
                 geno_offsets=geno_offsets,
-                positions=positions,
-                sizes=sizes,
+                v_starts=v_starts,
+                ilens=ilens,
                 shift=qh_shift,
                 alt_alleles=alt_alleles,
                 alt_offsets=alt_offsets,
@@ -662,8 +662,8 @@ def reconstruct_haplotype_from_sparse(
     offset_idx: int,
     geno_v_idxs: NDArray[np.int32],
     geno_offsets: NDArray[np.int64],
-    positions: NDArray[np.int32],
-    sizes: NDArray[np.int32],
+    v_starts: NDArray[np.integer],
+    ilens: NDArray[np.int32],
     shift: int,
     alt_alleles: NDArray[np.uint8],  # full set
     alt_offsets: NDArray[np.int64],  # full set
@@ -743,8 +743,8 @@ def reconstruct_haplotype_from_sparse(
             continue
 
         variant: np.int32 = _variant_idxs[v]
-        v_pos = positions[variant]
-        v_diff = sizes[variant]
+        v_pos = v_starts[variant]
+        v_diff = ilens[variant]
         allele = alt_alleles[alt_offsets[variant] : alt_offsets[variant + 1]]
         v_len = len(allele)
         # +1 assumes atomized variants, exactly 1 nt shared between REF and ALT
@@ -865,8 +865,8 @@ def choose_unphased_variants(
     geno_offset_idxs: NDArray[np.intp],
     geno_v_idxs: NDArray[np.int32],
     geno_offsets: NDArray[np.int64],
-    positions: NDArray[np.int32],
-    sizes: NDArray[np.int32],
+    v_starts: NDArray[np.integer],
+    ilens: NDArray[np.int32],
     ccfs: NDArray[np.float32],
     deterministic: bool,
 ) -> Tuple[NDArray[np.bool_], NDArray[np.int64]]:
@@ -938,8 +938,8 @@ def choose_unphased_variants(
                 query_end=ref_end,
                 variant_idxs=qh_genos,
                 ccfs=qh_ccfs,
-                positions=positions,
-                sizes=sizes,
+                v_starts=v_starts,
+                ilens=ilens,
                 groups=qh_groups,
                 ref_ends=qh_ends,
                 write_lens=qh_w_lens,
@@ -954,8 +954,8 @@ def _choose_unphased_variants(
     query_end: int,
     variant_idxs: NDArray[np.int32],  # (v)
     ccfs: NDArray[np.float32],  # (v)
-    positions: NDArray[np.int32],  # (total variants)
-    sizes: NDArray[np.int32],  # (total variants)
+    v_starts: NDArray[np.integer],  # (total variants)
+    ilens: NDArray[np.int32],  # (total variants)
     groups: NDArray[np.uint32],  # (v)
     ref_ends: NDArray[np.uint32],  # (g)
     write_lens: NDArray[np.uint32],  # (g)
@@ -977,10 +977,10 @@ def _choose_unphased_variants(
     for v in range(len(variant_idxs)):
         n_compat = 0
         v_idx: int = variant_idxs[v]
-        v_pos = positions[v_idx]
+        v_pos = v_starts[v_idx]
         # +1 assumes atomized variants
         maybe_add_one = int(v_pos >= query_start)
-        v_ref_end = v_pos - min(0, sizes[v_idx]) + 1
+        v_ref_end = v_pos - min(0, ilens[v_idx]) + 1
 
         if v_ref_end <= query_start:
             # skip the variant by leaving its group as unseen
@@ -1022,7 +1022,7 @@ def _choose_unphased_variants(
         v_write_len = (
             max(v_pos, query_start)
             - ref_ends[v_group]
-            + max(0, sizes[v_idx])
+            + max(0, ilens[v_idx])
             + maybe_add_one
         )
         writable_len = v_write_len
@@ -1043,10 +1043,10 @@ def _choose_unphased_variants(
         np.float32
     )  # reinterpret this memory to avoid allocation
     for g in range(n_groups):
-        v_starts = positions[variant_idxs[groups == g]]
+        v_starts = v_starts[variant_idxs[groups == g]]
         v_ends = (
             v_starts
-            - np.minimum(0, sizes[variant_idxs[groups == g]])
+            - np.minimum(0, ilens[variant_idxs[groups == g]])
             + (v_starts >= query_start)
         )
         ref_lengths = np.minimum(v_ends, ref_ends[g]) - np.maximum(
