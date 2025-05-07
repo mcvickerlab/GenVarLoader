@@ -1,7 +1,9 @@
 name: Bump version
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - stable
 
 jobs:
   bump-version:
@@ -27,33 +29,6 @@ jobs:
           tag_name: ${{ env.REVISION }}
         env:
           GITHUB_TOKEN: ${{ secrets.COMMITIZEN }}
-
-  push-stable-and-release:
-    environment: pypi
-    runs-on: ubuntu-latest
-    name: "Push stable, release, and publish to pypi"
-    steps:
-      - name: Check out
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-          token: "${{ secrets.COMMITIZEN }}"
-      - name: Merge main -> stable
-        uses: devmasx/merge-branch@master
-        with:
-          type: now
-          target_branch: stable
-          github_token: ${{ secrets.COMMITIZEN }}
-      - name: Setup pixi
-        uses: prefix-dev/setup-pixi@v0.8.8
-        with:
-          pixi-version: v0.46.0
-          cache: true
-          environments: >-
-            py310
-            py311
-            py312
       - name: Publish
         run: |
           pixi run -e py310 publish
