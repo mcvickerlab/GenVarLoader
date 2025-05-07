@@ -1,4 +1,4 @@
-name: Bump and release new version
+name: Bump and release
 
 on:
   pull_request:
