@@ -38,7 +38,7 @@ def test_ds_haps(dataset: gvl.RaggedDataset[gvl.Ragged[np.bytes_], None, None, N
         haps = dataset[region, sample]
         for h in range(2):
             actual = haps[h]
-            fpath = f"sample_{sample}_nr{region}_h{h}.fa"
+            fpath = f"source_{sample}_nr{region}_h{h}.fa"
             with pysam.FastaFile(str(cons_dir / fpath)) as f:
                 desired = sp.cast_seqs(f.fetch(f.references[0]))
             np.testing.assert_equal(

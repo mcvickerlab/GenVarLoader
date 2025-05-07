@@ -5,7 +5,6 @@
 ##reference=Homo_sapiens.GRCh38.p13_v109.dna.toplevel.fa.gz
 ##contig=<ID=19>
 ##contig=<ID=20>
-##contig=<ID=X>
 ##phasing=partial
 ##INFO=<ID=NS,Number=1,Type=Integer,Description="Number of Samples With Data">
 ##INFO=<ID=AN,Number=1,Type=Integer,Description="Total number of alleles in called genotypes">

@@ -8,12 +8,12 @@ from pytest_cases import parametrize_with_cases
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 REF = DATA_DIR / "fasta" / "Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz"
-DATASET = gvl.Dataset.open(DATA_DIR / "phased_dataset.gvl", REF)
+DATASET = gvl.Dataset.open(DATA_DIR / "phased_dataset.vcf.gvl", REF)
 
 
 @fixture(scope="session")
 def dataset():
-    ds = gvl.Dataset.open(DATA_DIR / "phased_dataset.gvl", REF)
+    ds = gvl.Dataset.open(DATA_DIR / "phased_dataset.vcf.gvl", REF)
     return ds
 
 
