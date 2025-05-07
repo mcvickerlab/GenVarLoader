@@ -1,0 +1,29 @@
+name: Publish
+
+on:
+  push:
+    branches:
+      - stable
+
+jobs:
+  bump-version:
+    environment: pypi
+    if: "!startsWith(github.event.head_commit.message, 'bump:')"
+    runs-on: ubuntu-latest
+    name: "Publish new release"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: "${{ secrets.COMMITIZEN }}"
+      - name: Setup pixi
+        uses: prefix-dev/setup-pixi@v0.8.8
+        with:
+          pixi-version: v0.46.0
+          cache: true
+      - name: Publish
+        run: |
+          pixi run -e py310 publish
+          pixi run -e py311 publish
+          pixi run -e py312 publish

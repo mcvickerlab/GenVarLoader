@@ -1,4 +1,4 @@
-name: Bump version
+name: Bump and release new version
 
 on:
   pull_request:
@@ -7,7 +7,6 @@ on:
 
 jobs:
   bump-version:
-    environment: pypi
     if: "!startsWith(github.event.head_commit.message, 'bump:')"
     runs-on: ubuntu-latest
     name: "Bump version and create changelog with commitizen"
@@ -29,8 +28,3 @@ jobs:
           tag_name: ${{ env.REVISION }}
         env:
           GITHUB_TOKEN: ${{ secrets.COMMITIZEN }}
-      - name: Publish
-        run: |
-          pixi run -e py310 publish
-          pixi run -e py311 publish
-          pixi run -e py312 publish
