@@ -42,7 +42,7 @@ samtools = "*"
 bcftools = "*"
 
 [pypi-dependencies]
-genvarloader = { path = ".", editable = true }
+# genvarloader = { path = ".", editable = true }
 hirola = "==0.3"
 seqpro = "==0.3.2"
 genoray = "==0.10.2"
@@ -88,14 +88,13 @@ py312 = { features = ["pytorch-cpu", "py312"] }
 # docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py310"] }
 
 [tasks]
-install = "uv pip install -e /cellar/users/dlaub/projects/ML4GLand/SeqPro -e /cellar/users/dlaub/projects/genoray -e ."
+install = "uv pip install -e ."
 pre-commit = "pre-commit install --hook-type commit-msg"
 gen = "python tests/data/generate_ground_truth.py"
 test = { cmd = "pytest tests && cargo test --release", depends-on = ["gen"] }
 publish = "maturin publish"
 
 [feature.docs.tasks]
-install = "uv pip install -e /cellar/users/dlaub/projects/ML4GLand/SeqPro -e /cellar/users/dlaub/projects/genoray -e ."
 i-kernel = "ipython kernel install --user --name 'gvl-docs' --display-name 'GVL Docs'"
 i-kernel-gpu = "ipython kernel install --user --name 'gvl-docs-gpu' --display-name 'GVL Docs GPU'"
 doc = "cd docs && make clean && make html"
