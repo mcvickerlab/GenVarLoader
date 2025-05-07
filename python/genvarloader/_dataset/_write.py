@@ -24,12 +24,6 @@ from .._variants._utils import path_is_pgen, path_is_vcf
 from ._genotypes import SparseSomaticGenotypes
 from ._utils import splits_sum_le_value
 
-__all__ = ["write"]
-
-
-INITIAL_END_EXTENSION = 1000
-EXTEND_END_MULTIPLIER = 1.1
-
 
 def write(
     path: Union[str, Path],
@@ -523,7 +517,7 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
                 )
 
             pbar.update()
-    
+
     pbar.close()
 
     out = np.memmap(
@@ -594,7 +588,7 @@ def _write_from_svar(
         )
         # this is fine if there aren't any overlapping variants that could make a v_idx < -1
         # have a further end than v_idx == -1
-        #* calling ak.max() means v_idxs is not a view of svar.genos.data
+        # * calling ak.max() means v_idxs is not a view of svar.genos.data
         # (r s p ~v) -> (r)
         v_idxs = ak.max(sp_genos.to_awkward(), -1).to_numpy().max((1, 2))  # type: ignore
         c_max_ends = max_ends[contig_offset : contig_offset + df.height]
