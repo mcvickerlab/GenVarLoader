@@ -43,7 +43,6 @@ def main(
 ):
     """Generate ground truth variant sequences using `bcftools consensus`."""
     import shutil
-    import sys
     from time import perf_counter
 
     import genvarloader as gvl
@@ -55,10 +54,8 @@ def main(
     from tqdm.auto import tqdm
 
     log_file = Path(__file__).parent / "generate_ground_truth.log"
-    log_file.unlink()
-    logger.enable("genvarloader")
-    logger.remove(0)
-    logger.add(sys.stdout, level="INFO")
+    if log_file.exists():
+        log_file.unlink()
     logger.add(log_file, level="DEBUG")
 
     logger.info(
