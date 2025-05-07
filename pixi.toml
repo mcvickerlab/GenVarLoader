@@ -37,12 +37,13 @@ filelock = "*"
 patchelf = "*"
 commitizen = "*"
 typer = "*"
+uv = "*"
 
 [pypi-dependencies]
 genvarloader = { path = ".", editable = true }
 seqpro = "==0.3.1"
 hirola = "==0.3"
-genoray = "==0.8.0"
+genoray = "==0.10.1"
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"
@@ -85,12 +86,14 @@ py312 = { features = ["pytorch-cpu", "py312"] }
 # docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py310"] }
 
 [tasks]
+install = "uv pip install -e /cellar/users/dlaub/projects/genoray -e ."
 pre-commit = "pre-commit install --hook-type commit-msg"
 gen = "python tests/data/generate_ground_truth.py"
-test = "pytest tests"
+test = { cmd = "pytest tests && cargo test --release", depends-on = ["gen"] }
 publish = "maturin publish"
 
 [feature.docs.tasks]
+install = "uv pip install -e /cellar/users/dlaub/projects/genoray -e ."
 i-kernel = "ipython kernel install --user --name 'gvl-docs' --display-name 'GVL Docs'"
 i-kernel-gpu = "ipython kernel install --user --name 'gvl-docs-gpu' --display-name 'GVL Docs GPU'"
 doc = "cd docs && make clean && make html"
