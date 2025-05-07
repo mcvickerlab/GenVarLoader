@@ -20,9 +20,15 @@ jobs:
         with:
           github_token: ${{ secrets.COMMITIZEN }}
           changelog_increment_filename: body.md
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: "body.md"
+          tag_name: ${{ env.REVISION }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.COMMITIZEN }}
 
   push-stable-and-release:
-    if: "!startsWith(github.event.head_commit.message, 'bump:')"
     environment: pypi
     runs-on: ubuntu-latest
     name: "Push stable, release, and publish to pypi"
@@ -39,13 +45,6 @@ jobs:
           type: now
           target_branch: stable
           github_token: ${{ secrets.COMMITIZEN }}
-      - name: Release
-        uses: softprops/action-gh-release@v2
-        with:
-          body_path: "body.md"
-          tag_name: ${{ env.REVISION }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.COMMITIZEN }}
       - name: Setup pixi
         uses: prefix-dev/setup-pixi@v0.8.8
         with:
