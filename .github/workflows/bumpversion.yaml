@@ -1,13 +1,13 @@
 name: Bump version
 
 on:
-  # push:
-  #   branches:
-  #     - stable
-  workflow_dispatch:
+  push:
+    branches:
+      - stable
 
 jobs:
   bump-version:
+    environment: pypi
     if: "!startsWith(github.event.head_commit.message, 'bump:')"
     runs-on: ubuntu-latest
     name: "Bump version and create changelog with commitizen"
@@ -15,7 +15,6 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
         with:
-          ref: main
           fetch-depth: 0
           token: "${{ secrets.COMMITIZEN }}"
       - name: Create bump and changelog
