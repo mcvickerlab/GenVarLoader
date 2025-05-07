@@ -1,10 +1,7 @@
 name: Bump version
 
 on:
-  push:
-    branches:
-      - stable
-    workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
   bump-version:
@@ -29,6 +26,8 @@ jobs:
           target_branch: stable
           message: "bump: version ${{ env.REVISION }}"
           github_token: ${{ secrets.COMMITIZEN }}
+      - name: Push stable
+        run: git push origin stable
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
