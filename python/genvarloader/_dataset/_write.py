@@ -594,7 +594,7 @@ def _write_from_svar(
         )
         # this is fine if there aren't any overlapping variants that could make a v_idx < -1
         # have a further end than v_idx == -1
-        #! calling ak.max() means v_idxs is not a view of svar.genos.data
+        #* calling ak.max() means v_idxs is not a view of svar.genos.data
         # (r s p ~v) -> (r)
         v_idxs = ak.max(sp_genos.to_awkward(), -1).to_numpy().max((1, 2))  # type: ignore
         c_max_ends = max_ends[contig_offset : contig_offset + df.height]
