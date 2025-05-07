@@ -26,11 +26,6 @@ jobs:
           target_branch: stable
           message: "bump: version ${{ env.REVISION }}"
           github_token: ${{ secrets.COMMITIZEN }}
-      - name: Push stable
-        run: |
-          git config --global user.name 'David Laub'
-          git config --global user.email 'dlaub@ucsd.edu'
-          git push origin stable
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
