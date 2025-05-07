@@ -1,19 +1,17 @@
 name: Bump version
 
-# on:
-#   push:
-#     branches:
-#       - stable
+on:
+  workflow_dispatch:
 
 jobs:
   bump-version:
-    if: "!startsWith(github.event.head_commit.message, 'bump:')"
     runs-on: ubuntu-latest
     name: "Bump version and create changelog with commitizen"
-    steps:
+    steps:      
       - name: Check out
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
           token: "${{ secrets.COMMITIZEN }}"
       - name: Create bump and changelog
@@ -21,6 +19,18 @@ jobs:
         with:
           github_token: ${{ secrets.COMMITIZEN }}
           changelog_increment_filename: body.md
+      - name: Merge main -> stable
+        uses: devmasx/merge-branch@master
+        with:
+          type: now
+          target_branch: stable
+          message: "bump: version ${{ env.REVISION }}"
+          github_token: ${{ secrets.COMMITIZEN }}
+      - name: Push stable
+        run: |
+          git config --global user.name 'David Laub'
+          git config --global user.email 'dlaub@ucsd.edu'
+          git push origin stable
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
@@ -28,3 +38,17 @@ jobs:
           tag_name: ${{ env.REVISION }}
         env:
           GITHUB_TOKEN: ${{ secrets.COMMITIZEN }}
+      - name: Setup pixi
+        uses: prefix-dev/setup-pixi@v0.8.8
+        with:
+          pixi-version: v0.46.0
+          cache: true
+          environments: >-
+            py310
+            py311
+            py312
+      - name: Publish
+        run: |
+          pixi run -e py310 publish
+          pixi run -e py311 publish
+          pixi run -e py312 publish

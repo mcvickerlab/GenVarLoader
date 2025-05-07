@@ -37,12 +37,16 @@ filelock = "*"
 patchelf = "*"
 commitizen = "*"
 typer = "*"
+uv = "*"
+samtools = "*"
+bcftools = "*"
+plink2 = "*"
 
 [pypi-dependencies]
-genvarloader = { path = ".", editable = true }
-seqpro = "==0.3.1"
+# genvarloader = { path = ".", editable = true }
 hirola = "==0.3"
-genoray = "==0.8.0"
+seqpro = "==0.3.2"
+genoray = "==0.10.2"
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"
@@ -70,15 +74,26 @@ basenji2-pytorch = ">=0.1.2"
 [feature.py310.dependencies]
 python = "3.10.*"
 
+[feature.py311.dependencies]
+python = "3.11.*"
+
+[feature.py312.dependencies]
+python = "3.12.*"
+
 [environments]
 dev = { features = ["pytorch-cpu", "basenji2", "py310"] }
-docs = { features = ["docs", "pytorch-cpu", "basenji2", "py310"] }
+docs = { features = ["docs", "pytorch-cpu", "basenji2", "py312"] }
+py310 = { features = ["pytorch-cpu", "py310"] }
+py311 = { features = ["pytorch-cpu", "py311"] }
+py312 = { features = ["pytorch-cpu", "py312"] }
 # docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py310"] }
 
 [tasks]
+install = "uv pip install -e ."
 pre-commit = "pre-commit install --hook-type commit-msg"
 gen = "python tests/data/generate_ground_truth.py"
-test = "pytest tests"
+test = { cmd = "pytest tests && cargo test --release", depends-on = ["gen"] }
+publish = "maturin publish"
 
 [feature.docs.tasks]
 i-kernel = "ipython kernel install --user --name 'gvl-docs' --display-name 'GVL Docs'"
