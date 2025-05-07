@@ -1,3 +1,14 @@
+## 0.14.2 (2025-05-07)
+
+### Fix
+
+- **wip**: handle queries on contigs that do not exist in source variants
+- remove print statement gvl write
+
+### Refactor
+
+- remove dead code
+
 ## 0.14.1 (2025-05-02)
 
 ### Fix
