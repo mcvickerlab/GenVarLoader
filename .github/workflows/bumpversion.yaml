@@ -8,7 +8,7 @@ jobs:
     if: "!startsWith(github.event.head_commit.message, 'bump:')"
     runs-on: ubuntu-latest
     name: "Bump version and create changelog with commitizen"
-    steps:      
+    steps:
       - name: Check out
         uses: actions/checkout@v4
         with:
@@ -20,12 +20,24 @@ jobs:
         with:
           github_token: ${{ secrets.COMMITIZEN }}
           changelog_increment_filename: body.md
+
+  push-stable-and-release:
+    if: "!startsWith(github.event.head_commit.message, 'bump:')"
+    environment: pypi
+    runs-on: ubuntu-latest
+    name: "Push stable, release, and publish to pypi"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: "${{ secrets.COMMITIZEN }}"
       - name: Merge main -> stable
         uses: devmasx/merge-branch@master
         with:
           type: now
           target_branch: stable
-          message: "bump: version ${{ env.REVISION }}"
           github_token: ${{ secrets.COMMITIZEN }}
       - name: Release
         uses: softprops/action-gh-release@v2
