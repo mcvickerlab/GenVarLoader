@@ -1,10 +1,15 @@
 name: Publish
 
 on:
-  workflow_dispatch:
+  workflow_run:
+    workflows: ["Bump and release"]
+    branches: [main]
+    types:
+      - completed
 
 jobs:
-  bump-version:
+  publish:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     environment: pypi
     runs-on: ubuntu-latest
     name: "Publish new release"
