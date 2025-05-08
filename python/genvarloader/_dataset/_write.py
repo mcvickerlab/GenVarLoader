@@ -419,7 +419,7 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
     last_offset = 0
     max_ends: list[np.integer] = []
     first_no_variant_warning = True
-    for contig, df in bed.partition_by(
+    for (contig,), df in bed.partition_by(
         "chrom", as_dict=True, maintain_order=True
     ).items():
         pbar.set_description(
