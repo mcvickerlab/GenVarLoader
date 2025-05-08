@@ -1,15 +1,11 @@
 name: Publish
 
 on:
-  # push:
-  #   branches:
-  #     - stable
   workflow_dispatch:
 
 jobs:
   bump-version:
     environment: pypi
-    if: "!startsWith(github.event.head_commit.message, 'bump:')"
     runs-on: ubuntu-latest
     name: "Publish new release"
     steps:
