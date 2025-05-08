@@ -29,11 +29,13 @@ jobs:
           tag_name: ${{ env.REVISION }}
         env:
           GITHUB_TOKEN: ${{ secrets.COMMITIZEN }}
-      - name: Merge main -> stable
+      - name: Checkout stable
         uses: actions/checkout@v4
         with:
+          ref: stable
           fetch-depth: 0
           token: "${{ secrets.COMMITIZEN }}"
+      - name: Merge main -> stable
         run: |
           git rebase origin/main
           git push origin stable
