@@ -39,7 +39,4 @@ jobs:
           pixi-version: v0.46.0
           cache: true
       - name: Publish
-        run: |
-          pixi run -e py310 publish
-          pixi run -e py311 publish
-          pixi run -e py312 publish
+        run: pixi run -e py310 publish
