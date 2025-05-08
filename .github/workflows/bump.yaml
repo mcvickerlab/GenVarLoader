@@ -13,6 +13,10 @@ jobs:
         with:
           fetch-depth: 0
           token: "${{ secrets.COMMITIZEN }}"
+      - name: Config git
+        run: |
+          git config --global user.name "${GITHUB_ACTOR}"
+          git config --global user.email "${GITHUB_ACTOR}@users.noreply.github.com"
       - name: Setup pixi
         uses: prefix-dev/setup-pixi@v0.8.8
         with:
