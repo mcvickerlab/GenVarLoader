@@ -25,7 +25,8 @@ jobs:
       - name: Create bump and changelog
         run: |
           pixi run -e default cz bump --changelog-to-stdout > body.md
-          REVISION=$(pixi run -e default cz version --project)
+          REV=$(pixi run -e default cz version --project)
+          echo "REVISION=${REV}" >> $GITHUB_ENV
           git push origin main --follow-tags
       - name: Release
         uses: softprops/action-gh-release@v2
