@@ -63,21 +63,3 @@ def nonoverlapping_intervals(
     rvs = np.stack([starts, ends], 1)
     return rvs
 
-
-n = 3
-low = 0
-max_width = 5
-high = n * 5
-
-itvs = nonoverlapping_intervals(n, low, high, max_width=max_width, seed=0)
-itvs
-
-_max = -1
-for _ in range(10000):
-    itvs = nonoverlapping_intervals(n, low, high, max_width=max_width)
-    _max = max(_max, itvs.max())
-    widths = np.diff(itvs, axis=1).squeeze()
-    gaps = itvs[1:, 0] - itvs[:-1, 1]
-    np.testing.assert_array_less(0, widths)
-    np.testing.assert_array_less(-1, gaps)
-_max
