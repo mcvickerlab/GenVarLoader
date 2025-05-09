@@ -110,7 +110,7 @@ class Dataset:
     @staticmethod
     def open(
         path: str | Path,
-        reference: str | Path,
+        reference: str | Path | Reference,
         jitter: int = 0,
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
@@ -119,7 +119,7 @@ class Dataset:
     @staticmethod
     def open(
         path: str | Path,
-        reference: str | Path | None = None,
+        reference: str | Path | Reference | None = None,
         jitter: int = 0,
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
@@ -205,7 +205,10 @@ class Dataset:
                 logger.info(
                     "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
                 )
-                _reference = Reference.from_path_and_contigs(reference, contigs)
+                if isinstance(reference, Reference):
+                    _reference = reference
+                else:
+                    _reference = Reference.from_path(reference, contigs)
                 seqs = Seqs(reference=_reference)
                 tracks = Tracks.from_path(path, len(regions), len(samples))
                 tracks = tracks.with_tracks(list(tracks.intervals))
@@ -214,7 +217,10 @@ class Dataset:
                 logger.info(
                     "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
                 )
-                _reference = Reference.from_path_and_contigs(reference, contigs)
+                if isinstance(reference, Reference):
+                    _reference = reference
+                else:
+                    _reference = Reference.from_path(reference, contigs)
                 assert phased is not None
                 assert ploidy is not None
                 seqs = Haps.from_path(
@@ -231,7 +237,10 @@ class Dataset:
                 logger.info(
                     "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
                 )
-                _reference = Reference.from_path_and_contigs(reference, contigs)
+                if isinstance(reference, Reference):
+                    _reference = reference
+                else:
+                    _reference = Reference.from_path(reference, contigs)
                 assert phased is not None
                 assert ploidy is not None
                 seqs = Haps.from_path(
@@ -256,7 +265,8 @@ class Dataset:
             )
             out_of_bounds = bed.select(
                 (
-                    pl.col("chromStart") >= pl.col("chrom").replace_strict(contig_lengths)
+                    pl.col("chromStart")
+                    >= pl.col("chrom").replace_strict(contig_lengths)
                 ).any()
             ).item()
             if out_of_bounds:

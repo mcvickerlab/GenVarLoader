@@ -21,7 +21,7 @@ from ._dataset._reconstruct import (
 from ._dataset._utils import bed_to_regions
 from ._ragged import Ragged, RaggedIntervals
 from ._utils import _lengths_to_offsets
-from ._variants._records import VLenAlleles
+from ._variants._records import RaggedAlleles
 
 
 def get_dummy_dataset():
@@ -32,6 +32,7 @@ def get_dummy_dataset():
     max_jitter = 2
 
     dummy_samples = ["Aang", "Katara", "Sokka", "Toph"]
+    n_samples = len(dummy_samples)
 
     dummy_contigs = [str(i) for i in range(1, 23)] + ["X", "Y", "MT"]
     dummy_bed = pl.DataFrame(
@@ -42,6 +43,7 @@ def get_dummy_dataset():
             "strand": ["+", "-", "+", "+"],
         }
     )
+    n_regions = len(dummy_bed)
 
     with pl.StringCache():
         pl.Series(natsorted(dummy_contigs), dtype=pl.Categorical())
@@ -68,12 +70,13 @@ def get_dummy_dataset():
     )
 
     dummy_vars = _Variants(
-        positions=repeat(dummy_regions[:, 1], "r -> (r s)", s=4),
-        sizes=repeat(np.array([-2, -1, 0, 1], np.int32), "s -> (r s)", r=4),
-        alts=VLenAlleles(
-            alleles=repeat(sp.cast_seqs("ACGTT"), "a -> (r a)", r=4),
+        positions=repeat(dummy_regions[:, 1], "r -> (r s)", s=n_samples),
+        sizes=repeat(np.array([-2, -1, 0, 1], np.int32), "s -> (r s)", r=n_regions),
+        alts=RaggedAlleles.from_offsets(
+            data=repeat(sp.cast_seqs("ACGTT"), "a -> (r a)", r=n_regions),
+            shape=n_regions*n_samples,
             offsets=_lengths_to_offsets(
-                repeat(np.array([1, 1, 1, 2]), "s -> (r s)", r=4)
+                repeat(np.array([1, 1, 1, 2]), "s -> (r s)", r=n_regions)
             ),
         ),
     )

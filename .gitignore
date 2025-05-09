@@ -1,8 +1,6 @@
 # Extra
 sbox*
 archive/
-test.bed.flc.zarr
-test.zarr
 tests/data/fasta
 examples/
 results/
