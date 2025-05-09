@@ -5,11 +5,11 @@ import numpy as np
 from pytest_cases import fixture, parametrize_with_cases
 
 data_dir = Path(__file__).resolve().parents[1] / "data"
-ref = data_dir / "fasta" / "Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz"
+ref = data_dir / "fasta" / "hg38.fa.bgz"
 
 
 def ds_phased():
-    return gvl.Dataset.open(data_dir / "phased_dataset.gvl", ref)
+    return gvl.Dataset.open(data_dir / "phased_dataset.vcf.gvl", ref)
 
 
 # def ds_unphased():

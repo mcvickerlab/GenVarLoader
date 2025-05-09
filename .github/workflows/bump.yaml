@@ -1,13 +1,10 @@
-name: Bump version
+name: Bump and release
 
 on:
-  push:
-    branches:
-      - stable
+  workflow_dispatch:
 
 jobs:
   bump-version:
-    if: "!startsWith(github.event.head_commit.message, 'bump:')"
     runs-on: ubuntu-latest
     name: "Bump version and create changelog with commitizen"
     steps:

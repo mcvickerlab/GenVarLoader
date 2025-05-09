@@ -32,14 +32,7 @@ def main(
             """
             ),
         ),
-    ] = "sample",
-    reference: Annotated[
-        Path,
-        typer.Argument(
-            help="Path to reference genome.",
-        ),
-    ] = WDIR / "fasta" / "Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz",
-    out_dir: Path = WDIR / "consensus",
+    ] = "source",
     indels: Annotated[bool, typer.Option(help="Whether to include indels.")] = True,
     structural_variants: Annotated[
         bool, typer.Option(help="Whether to include structural variants.")
@@ -50,36 +43,63 @@ def main(
 ):
     """Generate ground truth variant sequences using `bcftools consensus`."""
     import shutil
-    import sys
     from time import perf_counter
 
     import genvarloader as gvl
     import polars as pl
     import polars.selectors as cs
+    import pooch
     from genoray import VCF, SparseVar
     from loguru import logger
     from tqdm.auto import tqdm
 
     log_file = Path(__file__).parent / "generate_ground_truth.log"
-    log_file.unlink()
-    logger.enable("genvarloader")
-    logger.remove(0)
-    logger.add(sys.stdout, level="INFO")
+    if log_file.exists():
+        log_file.unlink()
     logger.add(log_file, level="DEBUG")
 
     logger.info(
-        f"""Running command:
-        generate_ground_truth.py {name} {reference} {out_dir} --indels {indels} --structural-variants {structural_variants} --multiallelic {multiallelic}
-        """
+        "Running command:\n"
+        f"generate_ground_truth.py {name} --indels {indels} --structural-variants {structural_variants} --multiallelic {multiallelic}"
     )
 
     t0 = perf_counter()
 
-    out_dir = out_dir.resolve()
-    if out_dir.exists():
-        shutil.rmtree(out_dir)
-    out_dir.mkdir(0o777, parents=True, exist_ok=True)
-    vcf_path = WDIR / "vcf" / f"{name}.vcf"
+    consensus_dir = WDIR / "consensus"
+    if consensus_dir.exists():
+        shutil.rmtree(consensus_dir)
+    consensus_dir.mkdir(0o777, parents=True, exist_ok=True)
+
+    vcf_dir = WDIR / "vcf"
+    if vcf_dir.exists():
+        shutil.rmtree(vcf_dir)
+    vcf_dir.mkdir(0o777, parents=True, exist_ok=True)
+
+    pgen_dir = WDIR / "pgen"
+    if pgen_dir.exists():
+        shutil.rmtree(pgen_dir)
+    pgen_dir.mkdir(0o777, parents=True, exist_ok=True)
+
+    fasta_dir = WDIR / "fasta"
+    fasta_dir.mkdir(0o777, parents=True, exist_ok=True)
+    reference = Path(
+        pooch.retrieve(
+            "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz",
+            known_hash="c1dd87068c254eb53d944f71e51d1311964fce8de24d6fc0effc9c61c01527d4",
+            fname="hg38.fa.gz",
+            path=fasta_dir,
+        )
+    ).resolve()
+    if not reference.with_suffix(".bgz").exists():
+        subprocess.run(
+            f"gzip -dc {reference} | bgzip -c > {reference.with_suffix('.bgz')}",
+            shell=True,
+        )
+    reference = reference.with_suffix(".bgz")
+    if not reference.with_suffix(".csi").exists():
+        run_shell(f"samtools faidx {reference}".split())
+
+    vcf_path = WDIR / f"{name}.vcf"
     filtered_vcf = WDIR / "vcf" / f"filtered_{name}.vcf"
 
     with open(vcf_path, "r") as f:
@@ -164,9 +184,9 @@ def main(
     )
 
     logger.info("Generating SVAR file.")
-    SparseVar.from_vcf(
-        WDIR / "filtered.svar", VCF(filtered_vcf), "50mb", overwrite=True
-    )
+    if (WDIR / "filtered.svar").exists():
+        shutil.rmtree(WDIR / "filtered.svar")
+    SparseVar.from_vcf(WDIR / "filtered.svar", VCF(filtered_vcf), "50mb")
 
     bed = pl.read_csv(
         filtered_vcf,
@@ -213,7 +233,7 @@ def main(
     # spanning del
     rows = pl.DataFrame(
         {
-            "chrom": ["19"],
+            "chrom": ["chr19"],
             "start": [1010696],
             "end": [1010696 + SEQ_LEN],
         }
@@ -221,9 +241,11 @@ def main(
     bed = bed.vstack(rows).with_row_index()
 
     logger.info("Generating BED file.")
+    if (WDIR / f"{name}.bed").exists():
+        (WDIR / f"{name}.bed").unlink()
     (
         bed.select("chrom", "start", "end").write_csv(
-            WDIR / "vcf" / f"{name}.bed", include_header=False, separator="\t"
+            WDIR / f"{name}.bed", include_header=False, separator="\t"
         )
     )
 
@@ -239,7 +261,7 @@ def main(
         ]
         for sample in samples:
             for hap in range(2):
-                out_fasta = out_dir / f"{name}_{sample}_nr{row_nr}_h{hap}.fa"
+                out_fasta = consensus_dir / f"{name}_{sample}_nr{row_nr}_h{hap}.fa"
                 consensus_cmd = [
                     "bcftools",
                     "consensus",
@@ -258,31 +280,25 @@ def main(
                 pbar.update()
     pbar.close()
 
-    bed = WDIR / "vcf" / f"{name}.bed"
+    bed = WDIR / f"{name}.bed"
 
     logger.info("Generating phased datasets.")
     reader = VCF(filtered_vcf)
-    if not reader._index_path().exists():
+    if not reader._valid_index():
         reader._write_gvi_index()
     reader._load_index()
-    gvl.write(
-        path=WDIR / "phased_dataset.vcf.gvl", bed=bed, variants=reader, overwrite=True
-    )
 
+    if (WDIR / "phased_dataset.vcf.gvl").exists():
+        shutil.rmtree(WDIR / "phased_dataset.vcf.gvl")
+    gvl.write(path=WDIR / "phased_dataset.vcf.gvl", bed=bed, variants=reader)
+
+    if (WDIR / "phased_dataset.svar.gvl").exists():
+        shutil.rmtree(WDIR / "phased_dataset.svar.gvl")
     gvl.write(
         path=WDIR / "phased_dataset.svar.gvl",
         bed=bed,
         variants=SparseVar(WDIR / "filtered.svar"),
-        overwrite=True,
     )
-
-    # logger.info("Generating unphased dataset.")
-    # gvl.write(
-    #     path=WDIR / "unphased_dataset.gvl",
-    #     bed=bed,
-    #     variants=reader,
-    #     overwrite=True,
-    # )
 
     logger.info(f"Finished in {perf_counter() - t0} seconds.")
 

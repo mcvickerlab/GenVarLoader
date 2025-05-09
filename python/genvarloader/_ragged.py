@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, Tuple, TypeGuard, TypeVar, Union
 
+import awkward as ak
 import numba as nb
 import numpy as np
 from attrs import define
@@ -52,6 +53,16 @@ class RaggedAnnotatedHaps:
         var_idxs = self.var_idxs.data.reshape(shape)
         ref_coords = self.ref_coords.data.reshape(shape)
         return AnnotatedHaps(haps, var_idxs, ref_coords)
+
+
+@define
+class RaggedVariants:
+    """Typically contains ragged arrays with shape (batch, ploidy, ~variants)"""
+
+    alts: ak.Array  # (batch, ploidy, ~variants, ~length)
+    pos: Ragged[np.int32]
+    ilens: Ragged[np.int32]
+    ccfs: Ragged[np.float32]
 
 
 def is_rag_dtype(rag: Ragged, dtype: type[DTYPE]) -> TypeGuard[Ragged[DTYPE]]:
