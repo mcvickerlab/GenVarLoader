@@ -10,7 +10,14 @@ from ._dataset._genotypes import SparseGenotypes
 from ._dataset._impl import RaggedDataset
 from ._dataset._indexing import DatasetIndexer
 from ._dataset._intervals import tracks_to_intervals
-from ._dataset._reconstruct import Haps, HapsTracks, Reference, Tracks, _Variants
+from ._dataset._reconstruct import (
+    Haps,
+    HapsTracks,
+    Reference,
+    Tracks,
+    TrackType,
+    _Variants,
+)
 from ._dataset._utils import bed_to_regions
 from ._ragged import Ragged, RaggedIntervals
 from ._utils import _lengths_to_offsets
@@ -113,7 +120,26 @@ def get_dummy_dataset():
         )
     }
 
-    dummy_tracks = Tracks(dummy_itvs, ["read-depth"])
+    # (r), want tracks of [0, 0, 1, 0, 0] for each region so that pad values of 0 are obvious
+    track_regions = dummy_regions.copy()
+    track_regions[:, 1] -= max_jitter
+    track_regions[:, 2] = track_regions[:, 1] + 5 + max_jitter
+    t_len = 5
+    one_track = np.zeros(t_len + 2 * max_jitter, dtype=np.float32)
+    one_track[2] = 1
+    data, offsets = tracks_to_intervals(
+        regions=track_regions,
+        tracks=repeat(one_track, "l -> (r l)", r=len(dummy_regions)),
+        track_offsets=_lengths_to_offsets(np.full(4, t_len + 2 * max_jitter)),
+    )
+    lengths = np.diff(offsets)
+    dummy_itvs["annot"] = RaggedIntervals.from_offsets(
+        data=data, shape=4, offsets=offsets
+    )
+
+    avail_tracks = {"read-depth": TrackType.SAMPLE, "annot": TrackType.ANNOT}
+
+    dummy_tracks = Tracks(dummy_itvs, avail_tracks, avail_tracks)
 
     dummy_recon = HapsTracks(dummy_haps, dummy_tracks)
 
