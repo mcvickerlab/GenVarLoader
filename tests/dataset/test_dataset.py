@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 import genvarloader as gvl
 import numpy as np
@@ -6,6 +7,7 @@ from pytest_cases import fixture, parametrize_with_cases
 
 data_dir = Path(__file__).resolve().parents[1] / "data"
 ref = data_dir / "fasta" / "hg38.fa.bgz"
+
 
 def ds_phased():
     return gvl.Dataset.open(data_dir / "phased_dataset.vcf.gvl", ref)
@@ -27,20 +29,11 @@ def seqs_annot():
     return "annotated"
 
 
-def bool_false():
-    return False
-
-
-def bool_true():
-    return True
-
-
 @fixture(scope="session")
 @parametrize_with_cases("ds", prefix="ds_", cases=".")
 @parametrize_with_cases("seq_type", prefix="seqs_", cases=".")
-@parametrize_with_cases("return_indices", prefix="bool_", cases=".")
-def dataset(ds: gvl.Dataset, seq_type, return_indices: bool):
-    return ds.with_seqs(seq_type).with_indices(return_indices)
+def dataset(ds: gvl.Dataset, seq_type: Literal["reference", "haplotypes", "annotated"]):
+    return ds.with_seqs(seq_type)
 
 
 def idx_scalar():
