@@ -31,7 +31,7 @@ def seqs_annot():
 @fixture(scope="session")
 @parametrize_with_cases("ds", prefix="ds_", cases=".")
 @parametrize_with_cases("seq_type", prefix="seqs_", cases=".")
-def dataset(ds: gvl.Dataset, seq_type, return_indices: bool):
+def dataset(ds: gvl.Dataset, seq_type):
     return ds.with_seqs(seq_type)
 
 
