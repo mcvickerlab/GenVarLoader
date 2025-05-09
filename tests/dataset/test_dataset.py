@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 import genvarloader as gvl
 import numpy as np
@@ -31,7 +32,7 @@ def seqs_annot():
 @fixture(scope="session")
 @parametrize_with_cases("ds", prefix="ds_", cases=".")
 @parametrize_with_cases("seq_type", prefix="seqs_", cases=".")
-def dataset(ds: gvl.Dataset, seq_type):
+def dataset(ds: gvl.Dataset, seq_type: Literal["reference", "haplotypes", "annotated"]):
     return ds.with_seqs(seq_type)
 
 
