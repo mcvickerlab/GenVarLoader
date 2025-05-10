@@ -295,7 +295,10 @@ class Dataset:
                     "Some regions in the dataset can not be mapped to a contig in the reference genome."
                 )
             normed_contigs = cast(list[str], normed_contigs)
-            replacer = {c: contig_lengths[norm_c] for c, norm_c in zip(ds_contigs, normed_contigs)}
+            replacer = {
+                c: contig_lengths[norm_c]
+                for c, norm_c in zip(ds_contigs, normed_contigs)
+            }
             out_of_bounds = bed.select(
                 (pl.col("chromStart") >= pl.col("chrom").replace_strict(replacer)).any()
             ).item()
