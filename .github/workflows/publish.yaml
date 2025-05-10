@@ -125,7 +125,10 @@ jobs:
     environment: pypi
     name: Release
     runs-on: ubuntu-latest
-    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'}}
+    if: >
+      startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     needs: [linux, musllinux, sdist]
     permissions:
       # Use to sign the release artifacts
