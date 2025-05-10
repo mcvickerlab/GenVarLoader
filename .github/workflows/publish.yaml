@@ -3,7 +3,7 @@
 #
 #    maturin generate-ci github --platform linux musllinux manylinux
 #
-name: CI
+name: Publish wheels
 
 on:
   workflow_run:
