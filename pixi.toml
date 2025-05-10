@@ -89,7 +89,7 @@ py312 = { features = ["pytorch-cpu", "py312"] }
 # docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py310"] }
 
 [tasks]
-install = "uv pip install -e ."
+install = "uv pip install -e /cellar/users/dlaub/projects/genoray -e ."
 pre-commit = "pre-commit install --hook-type commit-msg"
 gen = "python tests/data/generate_ground_truth.py"
 test = { cmd = "pytest tests && cargo test --release", depends-on = ["gen"] }
