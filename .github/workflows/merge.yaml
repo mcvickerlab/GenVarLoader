@@ -17,7 +17,6 @@ jobs:
     permissions:
       id-token: write
     runs-on: ubuntu-latest
-    name: "Merge"
     steps:
       - name: Check out
         uses: actions/checkout@v4
