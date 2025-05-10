@@ -1,3 +1,10 @@
+## 0.14.3 (2025-05-10)
+
+### Fix
+
+- bump genoray to 0.10.3
+- bounds checking on ds regions vs. reference contig lengths
+
 ## 0.14.2 (2025-05-08)
 
 ### Fix
