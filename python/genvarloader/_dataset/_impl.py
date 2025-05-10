@@ -22,6 +22,7 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from attrs import define, evolve, field
+from genoray._utils import ContigNormalizer
 from loguru import logger
 from numpy.typing import NDArray
 from typing_extensions import NoReturn, Self, assert_never
@@ -260,14 +261,23 @@ class Dataset:
                 assert_never(has_intervals)
 
         if seqs is not None:
+            cnorm = ContigNormalizer(seqs.reference.contigs)
             contig_lengths = dict(
                 zip(seqs.reference.contigs, np.diff(seqs.reference.offsets))
             )
+            ds_contigs = bed["chrom"].unique().to_list()
+            normed_contigs = cnorm.norm(ds_contigs)
+            if any(c is None for c in normed_contigs):
+                raise ValueError(
+                    "Some regions in the dataset can not be mapped to a contig in the reference genome."
+                )
+            normed_contigs = cast(list[str], normed_contigs)
+            replacer = {
+                c: contig_lengths[norm_c]
+                for c, norm_c in zip(ds_contigs, normed_contigs)
+            }
             out_of_bounds = bed.select(
-                (
-                    pl.col("chromStart")
-                    >= pl.col("chrom").replace_strict(contig_lengths)
-                ).any()
+                (pl.col("chromStart") >= pl.col("chrom").replace_strict(replacer)).any()
             ).item()
             if out_of_bounds:
                 logger.warning(
