@@ -18,13 +18,17 @@ from typing import (
     overload,
 )
 
+import awkward as ak
 import numpy as np
 import polars as pl
 from attrs import define, evolve, field
+from awkward.contents import ListOffsetArray
+from awkward.index import Index64
 from genoray._utils import ContigNormalizer
 from loguru import logger
+from more_itertools import collapse
 from numpy.typing import NDArray
-from typing_extensions import NoReturn, assert_never
+from typing_extensions import NoReturn, Self, assert_never
 
 from .._ragged import (
     Ragged,
@@ -36,10 +40,10 @@ from .._ragged import (
     to_padded,
 )
 from .._torch import TorchDataset, get_dataloader
-from .._types import DTYPE, AnnotatedHaps, Idx
-from .._utils import idx_like_to_array
+from .._types import DTYPE, AnnotatedHaps, Idx, StrIdx
+from .._utils import idx_like_to_array, is_dtype
 from ._genotypes import SparseGenotypes
-from ._indexing import DatasetIndexer
+from ._indexing import DatasetIndexer, SpliceIndexer
 from ._reconstruct import Haps, HapsTracks, Reference, Seqs, SeqsTracks, Tracks
 from ._utils import bed_to_regions
 
@@ -94,8 +98,8 @@ class Dataset:
     - :meth:`Dataset.with_transform() <Dataset.with_transform()>`
     """
 
-    @overload
     @staticmethod
+    @overload
     def open(
         path: str | Path,
         reference: None = None,
@@ -103,9 +107,11 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
-    ) -> RaggedDataset[None, RTRK, None, None]: ...
-    @overload
+        splice_info: str | tuple[str, str] | None = None,
+        var_filter: Literal["exonic"] | None = None,
+    ) -> RaggedDataset[None, RTRK]: ...
     @staticmethod
+    @overload
     def open(
         path: str | Path,
         reference: str | Path | Reference,
@@ -113,7 +119,9 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
-    ) -> RaggedDataset[Ragged[np.bytes_], RTRK, None, None]: ...
+        splice_info: str | tuple[str, str] | None = None,
+        var_filter: Literal["exonic"] | None = None,
+    ) -> RaggedDataset[Ragged[np.bytes_], RTRK]: ...
     @staticmethod
     def open(
         path: str | Path,
@@ -122,7 +130,9 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
-    ) -> RaggedDataset[RSEQ, RTRK, None, None]:
+        splice_info: str | tuple[str, str] | None = None,
+        var_filter: Literal["exonic"] | None = None,
+    ) -> RaggedDataset[RSEQ, RTRK]:
         """Open a dataset from a path. If no reference genome is provided, the dataset cannot yield sequences.
         Will initialize the dataset such that it will return tracks and haplotypes (reference sequences if no genotypes) if possible.
         If tracks are available, they will be set to be returned in alphabetical order.
@@ -144,6 +154,14 @@ class Dataset:
             can be returned.
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
+        splice_info
+            A string or tuple of strings representing the splice information to use.
+            If a string, it will be used as the transcript ID and the exons are expected to be in order.
+            If a tuple of strings, the first string will be used as the transcript ID and the second string will be used as the exon number.
+            If a dictionary, the keys will be used as the transcript ID and the values should be the row number for each exon, in order.
+            If False, splicing will be disabled.
+        var_filter
+            Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
         """
         path = Path(path)
         if not path.exists():
@@ -229,6 +247,7 @@ class Dataset:
                     samples=samples,
                     ploidy=ploidy,
                 )
+                seqs.filter = var_filter
                 tracks = None
                 reconstructor = seqs
             case reference, True, True:
@@ -249,6 +268,7 @@ class Dataset:
                     samples=samples,
                     ploidy=ploidy,
                 )
+                seqs.filter = var_filter
                 tracks = Tracks.from_path(path, regions, len(samples))
                 tracks = tracks.with_tracks(list(tracks.intervals))
                 reconstructor = HapsTracks(haps=seqs, tracks=tracks)
@@ -256,6 +276,12 @@ class Dataset:
                 assert_never(reference)
                 assert_never(has_genotypes)
                 assert_never(has_intervals)
+
+        if splice_info is not None:
+            splice_idxer, spliced_bed = _parse_splice_info(splice_info, bed, idxer)
+        else:
+            splice_idxer = None
+            spliced_bed = None
 
         if seqs is not None:
             cnorm = ContigNormalizer(seqs.reference.contigs)
@@ -294,7 +320,9 @@ class Dataset:
             transform=None,
             deterministic=deterministic,
             _idxer=idxer,
+            _sp_idxer=splice_idxer,
             _full_bed=bed,
+            _spliced_bed=spliced_bed,
             _full_regions=regions,
             _jittered_regions=regions.copy(),
             _seqs=seqs,
@@ -313,6 +341,8 @@ class Dataset:
         rng: int | np.random.Generator | None = None,
         deterministic: bool | None = None,
         rc_neg: bool | None = None,
+        splice_info: str | tuple[str, str] | Literal[False] | None = None,
+        var_filter: Literal[False, "exonic"] | None = None,
     ) -> Dataset:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -329,6 +359,14 @@ class Dataset:
             can be returned.
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
+        splice_info
+            A string or tuple of strings representing the splice information to use.
+            If a string, it will be used as the transcript ID and the exons are expected to be in order.
+            If a tuple of strings, the first string will be used as the transcript ID and the second string will be used as the exon number.
+            If a dictionary, the keys will be used as the transcript ID and the values should be the row number for each exon, in order.
+            If False, splicing will be disabled.
+        var_filter
+            Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
         """
         to_evolve = {}
 
@@ -369,6 +407,29 @@ class Dataset:
 
         if rc_neg is not None:
             to_evolve["rc_neg"] = rc_neg
+
+        if splice_info is not None:
+            if splice_info is False:
+                splice_idxer = None
+                spliced_bed = None
+            else:
+                splice_idxer, spliced_bed = _parse_splice_info(
+                    splice_info, self._full_bed, self._idxer
+                )
+            to_evolve["_sp_idxer"] = splice_idxer
+            to_evolve["_spliced_bed"] = spliced_bed
+
+        if var_filter is not None:
+            if not isinstance(self._seqs, Haps):
+                raise ValueError(
+                    "Filtering variants can only be done when the dataset has variants."
+                )
+
+            if var_filter is False:
+                var_filter = None
+
+            if var_filter != self._seqs.filter:
+                to_evolve["_seqs"] = evolve(self._seqs, filter=var_filter)
 
         return evolve(self, **to_evolve)
 
@@ -411,7 +472,9 @@ class Dataset:
                 transform=self.transform,
                 deterministic=self.deterministic,
                 _idxer=self._idxer,
+                _sp_idxer=self._sp_idxer,
                 _full_bed=self._full_bed,
+                _spliced_bed=self._spliced_bed,
                 _full_regions=self._full_regions,
                 _jittered_regions=self._jittered_regions,
                 _seqs=self._seqs,
@@ -431,7 +494,9 @@ class Dataset:
                 transform=self.transform,
                 deterministic=self.deterministic,
                 _idxer=self._idxer,
+                _sp_idxer=self._sp_idxer,
                 _full_bed=self._full_bed,
+                _spliced_bed=self._spliced_bed,
                 _full_regions=self._full_regions,
                 _jittered_regions=self._jittered_regions,
                 _seqs=self._seqs,
@@ -439,34 +504,6 @@ class Dataset:
                 _recon=self._recon,
                 _rng=self._rng,
             )
-
-    def with_indices(self, return_indices: bool):
-        """Whether to return indices, returning a new dataset without modifying the old one.
-        Set to :code:`True` to have the dataset return the row and sample indices of the non-subset dataset. This allows you to
-        combine arbitrary row- and sample-specific data with dataset output on-the-fly with a transform.
-
-        Parameters
-        ----------
-        return_indices
-            Whether to return indices.
-        """
-        return evolve(self, return_indices=return_indices)
-
-    def with_transform(self, transform: Callable | None):
-        """Modify the transform to apply to the dataset output, returning a new dataset without modifying the old one.
-        The transform should take input matching the output of the dataset and can return arbitrary output. In combination
-        with indices, this allows you to combine arbitrary row- and sample-specific data with dataset output on-the-fly.
-
-        .. note::
-            Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
-            dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
-
-        Parameters
-        ----------
-        transform
-            The transform to apply to the dataset.
-        """
-        return evolve(self, transform=transform)
 
     def with_seqs(self, kind: Literal["reference", "haplotypes", "annotated"] | None):
         """Return a new dataset with the specified sequence type. The sequence type can be one of the following:
@@ -633,10 +670,12 @@ class Dataset:
     transform: Callable | None
     """Tranform to apply to what the dataset would otherwise return on its own."""
     _full_bed: pl.DataFrame = field(alias="_full_bed")
+    _spliced_bed: pl.DataFrame | None = field(alias="_spliced_bed")
     _full_regions: NDArray[np.int32] = field(alias="_full_regions")
     """Unjittered, sorted regions matching order on-disk."""
     _jittered_regions: NDArray[np.int32] = field(alias="_jittered_regions")
     _idxer: DatasetIndexer = field(alias="_idxer")
+    _sp_idxer: SpliceIndexer | None = field(alias="_sp_idxer")
     _seqs: Optional[Seqs | Haps[Ragged[np.bytes_]] | Haps[RaggedAnnotatedHaps]] = field(
         alias="_seqs"
     )
@@ -656,6 +695,11 @@ class Dataset:
     def is_subset(self) -> bool:
         """Whether the dataset is a subset."""
         return self._idxer.is_subset
+
+    @property
+    def is_spliced(self) -> bool:
+        """Whether the dataset is spliced."""
+        return self._sp_idxer is not None
 
     @property
     def has_reference(self) -> bool:
@@ -691,29 +735,45 @@ class Dataset:
         return self._idxer.n_regions
 
     @property
+    def spliced_regions(self) -> pl.DataFrame | None:
+        """The spliced regions in the dataset."""
+        if self._spliced_bed is None or self._sp_idxer is None:
+            raise ValueError("Dataset does not have splice information.")
+        if self._sp_idxer.row_subset_idxs is None:
+            return self._spliced_bed
+        else:
+            return self._spliced_bed[self._sp_idxer.row_subset_idxs]
+
+    @property
     def n_samples(self) -> int:
         """The number of samples in the dataset."""
         return self._idxer.n_samples
 
     @property
-    def shape(self) -> Tuple[int, int]:
-        """Return the shape of the dataset. :code:`(n_samples, n_regions)`"""
-        return self.n_regions, self.n_samples
+    def shape(self) -> tuple[int, int]:
+        """Return the shape of the dataset. :code:`(n_rows, n_samples)`"""
+        if self._sp_idxer is None:
+            return self._idxer.shape
+        else:
+            return self._sp_idxer.shape
 
     @property
-    def full_shape(self) -> Tuple[int, int]:
-        """Return the full shape of the dataset, ignoring any subsetting. :code:`(n_samples, n_regions)`"""
-        return self._idxer.full_shape
+    def full_shape(self) -> tuple[int, int]:
+        """Return the full shape of the dataset, ignoring any subsetting. :code:`(n_rows, n_samples)`"""
+        if self._sp_idxer is None:
+            return self._idxer.full_shape
+        else:
+            return self._sp_idxer.full_shape
 
     @property
-    def available_tracks(self) -> List[str] | None:
+    def available_tracks(self) -> list[str] | None:
         """The available tracks in the dataset."""
         if self._tracks is None:
             return
         return list(self._tracks.intervals)
 
     @property
-    def active_tracks(self) -> List[str] | None:
+    def active_tracks(self) -> list[str] | None:
         """The active tracks in the dataset."""
         if self._tracks is None:
             return
@@ -751,11 +811,14 @@ class Dataset:
         return self.n_regions * self.n_samples
 
     def __str__(self) -> str:
-        if self._available_sequences is None or self.sequence_type is None:
-            seq_type = "None"
+        splice_status = "Spliced" if self.is_spliced else "Unspliced"
+
+        if self._available_sequences is None:
+            seq_type = None
         else:
             seqs = self._available_sequences
-            seqs[seqs.index(self.sequence_type)] = f"[{self.sequence_type}]"
+            if self.sequence_type is not None:
+                seqs[seqs.index(self.sequence_type)] = f"[{self.sequence_type}]"
             seq_type = " ".join(seqs)
 
         if self.available_tracks is None:
@@ -772,7 +835,7 @@ class Dataset:
             if len(self.active_tracks) > 5:
                 act_tracks += f" + {len(self.active_tracks) - 5} more"
         return (
-            f"GVL store at {self.path}\n"
+            splice_status + f" GVL dataset at {self.path}\n"
             f"Is subset: {self.is_subset}\n"
             f"# of regions: {self.n_regions}\n"
             f"# of samples: {self.n_samples}\n"
@@ -791,7 +854,7 @@ class Dataset:
         self,
         regions: Idx | pl.Series | None = None,
         samples: Idx | str | Sequence[str] | None = None,
-    ) -> "Dataset":
+    ) -> Self:
         """Subset the dataset to specific regions and/or samples by index or a boolean mask. If regions or samples
         are not provided, the corresponding dimension will not be subset.
 
@@ -860,9 +923,7 @@ class Dataset:
             return self
 
         if samples is not None:
-            if isinstance(samples, np.ndarray) and np.issubdtype(
-                samples.dtype, np.bool_
-            ):
+            if isinstance(samples, np.ndarray) and is_dtype(samples, np.bool_):
                 sample_idx = np.nonzero(samples)[0]
             elif isinstance(
                 samples, (int, np.integer, slice, np.ndarray)
@@ -888,23 +949,35 @@ class Dataset:
         if regions is not None:
             if isinstance(regions, pl.Series):
                 region_idxs = regions.to_numpy()
-                if np.issubdtype(region_idxs.dtype, np.bool_):
+                if is_dtype(region_idxs, np.bool_):
                     region_idxs = np.nonzero(region_idxs)[0]
-                elif not np.issubdtype(region_idxs.dtype, np.integer):
+                elif not is_dtype(region_idxs, np.integer):
                     raise ValueError("`regions` must be index-like or a boolean mask.")
             else:
-                regions = cast(Idx, regions)  # how to narrow dtype? is this possible?
                 region_idxs = idx_like_to_array(regions, self.n_regions)
         else:
             region_idxs = None
 
-        idxer = self._idxer.subset_to(regions=region_idxs, samples=sample_idx)
+        if self._sp_idxer is None:
+            idxer = self._idxer.subset_to(regions=region_idxs, samples=sample_idx)
+            return evolve(self, _idxer=idxer)
+        else:
+            row_idxs = region_idxs
+            sp_idxer, sub_dsi = self._sp_idxer.subset_to(
+                rows=row_idxs, samples=sample_idx
+            )
+            return evolve(self, _idxer=sub_dsi, _sp_idxer=sp_idxer)
 
-        return evolve(self, _idxer=idxer)
-
-    def to_full_dataset(self) -> "Dataset":
+    def to_full_dataset(self) -> Self:
         """Return a full sized dataset, undoing any subsetting."""
-        return evolve(self, _idxer=self._idxer.to_full_dataset())
+        if self._sp_idxer is None:
+            return evolve(self, _idxer=self._idxer.to_full_dataset())
+        else:
+            return evolve(
+                self,
+                _idxer=self._idxer.to_full_dataset(),
+                _sp_idxer=self._sp_idxer.to_full_dataset(),
+            )
 
     def haplotype_lengths(
         self,
@@ -915,6 +988,10 @@ class Dataset:
         not phased or not deterministic, this will return :code:`None` because the haplotypes are not guaranteed to be
         a consistent length due to randomness in what variants are used.
 
+        .. note::
+
+            Currently not implemented for spliced datasets.
+
         Parameters
         ----------
         regions
@@ -922,6 +999,11 @@ class Dataset:
         samples
             Samples to compute haplotype lengths for.
         """
+        if self._sp_idxer is not None:
+            raise NotImplementedError(
+                "Haplotype lengths are not yet implemented for spliced datasets."
+            )
+
         if (
             not isinstance(self._seqs, Haps)
             or not isinstance(self._seqs.genotypes, SparseGenotypes)
@@ -1007,14 +1089,30 @@ class Dataset:
 
         return evolve(self, _tracks=new_tracks)  # type: ignore
 
-    def to_torch_dataset(self) -> "td.Dataset":
-        """Convert the dataset to a PyTorch :external+torch:class:`Dataset <torch.utils.data.Dataset>`. Requires PyTorch to be installed."""
+    def to_torch_dataset(
+        self, return_indices: bool, transform: Callable | None
+    ) -> TorchDataset:
+        """Convert the dataset to a PyTorch :external+torch:class:`Dataset <torch.utils.data.Dataset>`. Requires PyTorch to be installed.
+
+        Parameters
+        ----------
+        return_indices
+            Whether to append arrays of row and sample indices of the non-subset dataset to each batch.
+        transform
+            The transform to apply to each batch of data. The transform should take input matching the output of the dataset and can
+            return anything that can be converted to a PyTorch tensor. In combination with indices, this allows you to combine arbitrary
+            row- and sample-specific data with dataset output on-the-fly.
+
+            .. note::
+                Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
+                dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
+        """
         if self.output_length == "ragged":
             raise ValueError(
                 """`output_length` is currently set to "ragged" and ragged output cannot be converted to PyTorch Tensors."""
                 """ Set `output_length` to "variable" or an integer."""
             )
-        return TorchDataset(self)
+        return TorchDataset(self, return_indices, transform)
 
     def to_dataloader(
         self,
@@ -1033,6 +1131,8 @@ class Dataset:
         prefetch_factor: int | None = None,
         persistent_workers: bool = False,
         pin_memory_device: str = "",
+        return_indices: bool = False,
+        transform: Callable | None = None,
     ) -> "td.DataLoader":
         """Convert the dataset to a PyTorch :external+torch:class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
         :external+torch:class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
@@ -1079,9 +1179,19 @@ class Dataset:
             If :code:`True`, the data loader will not shut down the worker processes after a dataset has been consumed once. This allows to maintain the workers Dataset instances alive.
         pin_memory_device
             The device to :code:`pin_memory` to if :code:`pin_memory` is :code:`True`.
+        return_indices
+            Whether to append arrays of row and sample indices of the non-subset dataset to each batch.
+        transform
+            The transform to apply to each batch of data. The transform should take input matching the output of the dataset and can
+            return anything that can be converted to a PyTorch tensor. In combination with indices, this allows you to combine arbitrary
+            row- and sample-specific data with dataset output on-the-fly.
+
+            .. note::
+                Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
+                dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
         """
         return get_dataloader(
-            dataset=self.to_torch_dataset(),
+            dataset=self.to_torch_dataset(return_indices, transform),
             batch_size=batch_size,
             shuffle=shuffle,
             sampler=sampler,
@@ -1098,12 +1208,59 @@ class Dataset:
             pin_memory_device=pin_memory_device,
         )
 
-    def __getitem__(
+    def __getitem__(self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]) -> Any:
+        if self._sp_idxer is None:
+            if isinstance(idx, tuple):
+                r_idx = idx[0]
+            else:
+                r_idx = idx
+
+            if isinstance(r_idx, str) or (
+                isinstance(r_idx, Sequence) and isinstance(next(collapse(r_idx)), str)
+            ):
+                raise ValueError(
+                    "Unspliced datasets do not support string indexing over regions. Please use integer indexing."
+                )
+
+            idx = cast(Idx | tuple[Idx] | tuple[Idx, StrIdx], idx)
+
+            recon, squeeze, out_reshape = self._getitem_unspliced(idx)
+        else:
+            recon, squeeze, out_reshape = self._getitem_spliced(idx, self._sp_idxer)
+
+        if isinstance(recon, tuple):
+            unlist = False
+            out = list(recon)
+        else:
+            unlist = True
+            out = [recon]
+
+        if self.jitter > 0:
+            out = _rag_jitter(out, self.jitter, self._rng)
+
+        if self.output_length == "variable":
+            out = [_pad(r) for r in out]
+        elif isinstance(self.output_length, int):
+            out = [_fix_len(r, self.output_length) for r in out]
+
+        if squeeze:
+            # (1 [p] l) -> ([p] l)
+            out = [o.squeeze(0) for o in out]
+
+        if out_reshape is not None:
+            out = [o.reshape(out_reshape + o.shape[1:]) for o in out]
+
+        if unlist:
+            out = out[0]
+
+        return out
+
+    def _getitem_unspliced(
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
-    ) -> Any:
+    ):
         # (b)
         ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
-        r_idx, s_idx = np.unravel_index(ds_idx, self.full_shape)
+        r_idx, _ = np.unravel_index(ds_idx, self.full_shape)
         regions = self._jittered_regions[r_idx]
 
         recon = self._recon(
@@ -1114,463 +1271,445 @@ class Dataset:
             None if self.deterministic else self._rng,
         )
 
-        if not isinstance(recon, tuple):
-            out = [recon]
-        else:
-            out = list(recon)
-
         if self.rc_neg:
             # (b)
             to_rc: NDArray[np.bool_] = self._full_regions[r_idx, 3] == -1
-            out = [self._rc(r, to_rc) for r in out]
+            if isinstance(recon, tuple):
+                recon = tuple(_rc(r, to_rc) for r in recon)
+            else:
+                recon = _rc(recon, to_rc)
 
+        return recon, squeeze, out_reshape
+
+    def _getitem_spliced(
+        self,
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
+        splice_idxer: SpliceIndexer,
+    ):
+        if isinstance(self.output_length, int):
+            raise RuntimeError(
+                "In general, splicing cannot be done with fixed length data because even if the length of each region's data"
+                " is fixed/constant, the number of elements in each spliced element is not. Thus, the final length of the"
+                " spliced elements will be variable."
+            )
+
+        # TODO: really need to assert no jitter and deterministic?
+        # * In theory, this still "works" with jitter or non-determinism, but why would anyone want this? Would they want a different alg here?
+        # * Potential issues:
+        # * Each each component of the spliced output will have different jitter
+        # * For non-determinism, each component will have different shifts & different unphased haplotypes chosen
         if self.jitter > 0:
-            out = self._jitter(out)
+            raise RuntimeError(
+                "Jitter is not supported with splicing. Please set jitter to 0."
+            )
 
-        if self.output_length == "variable":
-            out = [self._pad(r) for r in out]
-        elif isinstance(self.output_length, int):
-            out = [self._fix_len(r) for r in out]
+        if not self.deterministic:
+            raise RuntimeError(
+                "Non-deterministic algorithms are not supported with splicing. Please set deterministic to True."
+            )
 
-        if out_reshape is not None:
-            out = [o.reshape(out_reshape + o.shape[1:]) for o in out]
+        inner_ds = self.with_len("ragged")
+        ds_idx, squeeze, out_reshape, offsets = splice_idxer.parse_idx(idx)
+        r_idx, _ = np.unravel_index(ds_idx, self._idxer.full_shape)
+        regions = self._jittered_regions[r_idx]
 
-        if squeeze:
-            # (1 [p] l) -> ([p] l)
-            out = [o.squeeze(0) for o in out]
+        recon = inner_ds._recon(ds_idx, regions, "ragged", self.jitter, self._rng)
 
-        if self.return_indices:
-            inp_idx = self._idxer.d2i_map[ds_idx]
-            inp_r_idx, inp_s_idx = np.unravel_index(inp_idx, self.full_shape)
-            out.extend((inp_r_idx, inp_s_idx))  # type: ignore
-
-        if self.transform is not None:
-            out = self.transform(*out)
-        elif len(out) == 1:
-            out = out[0]
-
-        return out
-
-    @overload
-    def _rc(self, rag: Ragged[DTYPE], to_rc: NDArray[np.bool_]) -> Ragged[DTYPE]: ...
-    @overload
-    def _rc(
-        self, rag: RaggedAnnotatedHaps, to_rc: NDArray[np.bool_]
-    ) -> RaggedAnnotatedHaps: ...
-    def _rc(
-        self, rag: Ragged | RaggedAnnotatedHaps, to_rc: NDArray[np.bool_]
-    ) -> Ragged | RaggedAnnotatedHaps:
-        if isinstance(rag, Ragged):
-            if is_rag_dtype(rag, np.bytes_):
-                rag = _reverse_complement(rag, to_rc)
-            elif is_rag_dtype(rag, np.float32):
-                _reverse(rag, to_rc)
-        elif isinstance(rag, RaggedAnnotatedHaps):
-            rag.haps = _reverse_complement(rag.haps, to_rc)
-            _reverse(rag.var_idxs, to_rc)
-            _reverse(rag.ref_coords, to_rc)
+        if isinstance(recon, tuple):
+            recon = tuple(_cat_length(r, offsets) for r in recon)
         else:
-            assert_never(rag)
-        return rag
+            recon = _cat_length(recon, offsets)
 
-    def _jitter(
-        self, rags: list[Ragged[np.bytes_] | Ragged[np.float32] | RaggedAnnotatedHaps]
-    ) -> list[Ragged[np.bytes_] | Ragged[np.float32] | RaggedAnnotatedHaps]:
-        rag0 = rags[0]
-        if isinstance(rag0, Ragged):
-            batch_size = rag0.shape[0]
-        else:
-            batch_size = rag0.haps.shape[0]
-        starts = self._rng.integers(0, 2 * self.jitter + 1, batch_size)
-
-        jittered = []
-        for r in rags:
-            if isinstance(r, Ragged):
-                jittered.append(_jitter(r, max_jitter=self.jitter, starts=starts))
+        if self.rc_neg:
+            # (b)
+            to_rc: NDArray[np.bool_] = np.logical_and.reduceat(
+                self._full_regions[r_idx, 3] == -1, offsets[:-1], axis=0
+            )
+            if isinstance(recon, tuple):
+                recon = tuple(_rc(r, to_rc) for r in recon)
             else:
-                haps, v_idx, r_coord = _jitter(
-                    *(r.haps, r.var_idxs, r.ref_coords),
-                    max_jitter=self.jitter,
-                    starts=starts,
+                recon = _rc(recon, to_rc)
+
+        return recon, squeeze, out_reshape
+
+
+def _parse_splice_info(
+    splice_info: str | tuple[str, str],
+    full_bed: pl.DataFrame,
+    idxer: DatasetIndexer,
+):
+    """Parse splice info into a SpliceIndexer.
+
+    Parameters
+    ----------
+    splice_info
+        The splice info to parse. Can be a string, a tuple of strings, or a dictionary.
+    regions
+        The regions to parse the splice info from.
+    idxer
+        The idxer to use to parse the splice info.
+    """
+    if isinstance(splice_info, str):
+        sp_bed = (
+            full_bed.rename({splice_info: "splice_id"})
+            .with_row_index()
+            .group_by("splice_id", maintain_order=True)
+            .agg(pl.all())
+        )
+        names = sp_bed["splice_id"].to_list()
+        lengths = sp_bed["index"].list.len().to_numpy()
+        splice_map = Ragged.from_lengths(
+            sp_bed["index"].explode().to_numpy(), lengths
+        ).to_awkward()
+    elif isinstance(splice_info, tuple):
+        if len(splice_info) != 2:
+            raise ValueError(
+                "Splice info tuple must be of length 2, corresponding to columns names for splice IDs and element ordering."
+            )
+        sp_bed = (
+            full_bed.rename({splice_info[0]: "splice_id"})
+            .with_row_index()
+            .group_by("splice_id", maintain_order=True)
+            .agg(pl.all().sort_by(splice_info[1]))
+        )
+        names = sp_bed["splice_id"].to_list()
+        lengths = sp_bed["index"].list.len().to_numpy()
+        splice_map = Ragged.from_lengths(
+            sp_bed["index"].explode().to_numpy(), lengths
+        ).to_awkward()
+    else:
+        assert_never(splice_info)
+
+    splice_map = cast(ak.Array, splice_map)
+    sp_idxer = SpliceIndexer._init(names, splice_map, idxer)
+    return sp_idxer, sp_bed
+
+
+@overload
+def _rc(rag: Ragged[DTYPE], to_rc: NDArray[np.bool_]) -> Ragged[DTYPE]: ...
+@overload
+def _rc(rag: RaggedAnnotatedHaps, to_rc: NDArray[np.bool_]) -> RaggedAnnotatedHaps: ...
+def _rc(
+    rag: Ragged | RaggedAnnotatedHaps, to_rc: NDArray[np.bool_]
+) -> Ragged | RaggedAnnotatedHaps:
+    """Reverse or reverse-complement stuff.
+
+    Parameters
+    ----------
+    rag
+        Ragged data, could be reference, haplotypes, annotated haplotypes, or tracks.
+        Ref shape: (batch, ~length)
+        Hap shape: (batch, ploidy, ~length)
+        Track shape: (batch, tracks, [ploidy], ~length)
+    to_rc
+        Mask of which regions to reverse-complement. Shape: (batch)
+    """
+    if isinstance(rag, Ragged):
+        if is_rag_dtype(rag, np.bytes_):
+            rag = _reverse_complement(rag, to_rc)
+        elif is_rag_dtype(rag, np.float32):
+            _reverse(rag, to_rc)
+    elif isinstance(rag, RaggedAnnotatedHaps):
+        rag.haps = _reverse_complement(rag.haps, to_rc)
+        _reverse(rag.var_idxs, to_rc)
+        _reverse(rag.ref_coords, to_rc)
+    else:
+        assert_never(rag)
+    return rag
+
+
+def _rag_jitter(
+    rags: list[Ragged[np.bytes_] | Ragged[np.float32] | RaggedAnnotatedHaps],
+    jitter: int,
+    rng: np.random.Generator,
+) -> list[Ragged[np.bytes_] | Ragged[np.float32] | RaggedAnnotatedHaps]:
+    rag0 = rags[0]
+    batch_size = rag0.shape[0]
+    starts = rng.integers(0, 2 * jitter + 1, batch_size)
+
+    jittered = []
+    for r in rags:
+        if isinstance(r, Ragged):
+            jittered.append(_jitter(r, max_jitter=jitter, starts=starts))
+        else:
+            haps, v_idx, r_coord = _jitter(
+                *(r.haps, r.var_idxs, r.ref_coords),
+                max_jitter=jitter,
+                starts=starts,
+            )
+            jittered.append(RaggedAnnotatedHaps(haps, v_idx, r_coord))
+
+    return jittered
+
+
+@overload
+def _pad(rag: Ragged[DTYPE]) -> NDArray[DTYPE]: ...
+@overload
+def _pad(rag: RaggedAnnotatedHaps) -> AnnotatedHaps: ...
+def _pad(rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
+    if isinstance(rag, Ragged):
+        if is_rag_dtype(rag, np.bytes_):
+            return to_padded(rag, b"N")
+        elif is_rag_dtype(rag, np.float32):
+            return to_padded(rag, 0)
+        else:
+            raise ValueError(f"Unsupported pad dtype: {rag.data.dtype}")
+    elif isinstance(rag, RaggedAnnotatedHaps):
+        return rag.to_padded()
+    else:
+        assert_never(rag)
+
+
+@overload
+def _fix_len(
+    rag: Ragged[DTYPE], output_length: Literal["ragged", "variable"] | int
+) -> NDArray[DTYPE]: ...
+@overload
+def _fix_len(
+    rag: RaggedAnnotatedHaps, output_length: Literal["ragged", "variable"] | int
+) -> AnnotatedHaps: ...
+def _fix_len(
+    rag: Ragged | RaggedAnnotatedHaps,
+    output_length: Literal["ragged", "variable"] | int,
+) -> NDArray | AnnotatedHaps:
+    assert isinstance(output_length, int)
+    if isinstance(rag, Ragged):
+        # (b p) or (b)
+        return rag.data.reshape((*rag.shape, output_length))
+    elif isinstance(rag, RaggedAnnotatedHaps):
+        return rag.to_fixed_shape((*rag.shape, output_length))
+    else:
+        assert_never(rag)
+
+
+@overload
+def _cat_length(rag: Ragged[DTYPE], offsets: NDArray[np.integer]) -> Ragged[DTYPE]: ...
+@overload
+def _cat_length(
+    rag: RaggedAnnotatedHaps, offsets: NDArray[np.integer]
+) -> RaggedAnnotatedHaps: ...
+def _cat_length(
+    rag: Ragged | RaggedAnnotatedHaps, offsets: NDArray[np.integer]
+) -> Ragged | RaggedAnnotatedHaps:
+    """Concatenate the lengths of the ragged data."""
+    if isinstance(rag, Ragged):
+        if rag.ndim == 1 or rag.shape[1:] == (1,) * (
+            rag.ndim - 1
+        ):  # (b [1] [1] ~l) => layout is correct
+            new_lengths = np.add.reduceat(rag.lengths, offsets[:-1], 0)
+            cat = Ragged.from_lengths(rag.data, new_lengths)
+        elif rag.ndim == 2:  # (b p ~l) or (b t ~l)
+            grouped = ak.Array(
+                ListOffsetArray(Index64(offsets), rag.to_awkward().layout)
+            )
+            cat = Ragged.from_awkward(
+                ak.concatenate(
+                    [
+                        ak.flatten(grouped[:, :, i], -1)[:, None]  # (g 1 ~l)
+                        for i in range(rag.shape[1])
+                    ],
+                    1,
                 )
-                jittered.append(RaggedAnnotatedHaps(haps, v_idx, r_coord))
-
-        return jittered
-
-    @overload
-    def _pad(self, rag: Ragged[DTYPE]) -> NDArray[DTYPE]: ...
-    @overload
-    def _pad(self, rag: RaggedAnnotatedHaps) -> AnnotatedHaps: ...
-    def _pad(self, rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
-        if isinstance(rag, Ragged):
-            if is_rag_dtype(rag, np.bytes_):
-                return to_padded(rag, b"N")
-            elif is_rag_dtype(rag, np.float32):
-                return to_padded(rag, 0)
-            else:
-                raise ValueError(f"Unsupported pad dtype: {rag.data.dtype}")
-        elif isinstance(rag, RaggedAnnotatedHaps):
-            return rag.to_padded()
+            )
+        elif rag.ndim == 3:  # hap tracks: (b t p ~l)
+            raise NotImplementedError("Splicing haplotype tracks.")
         else:
-            assert_never(rag)
+            raise RuntimeError("Should never see a 4+ dim ragged array.")
 
-    @overload
-    def _fix_len(self, rag: Ragged[DTYPE]) -> NDArray[DTYPE]: ...
-    @overload
-    def _fix_len(self, rag: RaggedAnnotatedHaps) -> AnnotatedHaps: ...
-    def _fix_len(self, rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
-        assert isinstance(self.output_length, int)
-        if isinstance(rag, Ragged):
-            # (b p) or (b)
-            return rag.data.reshape((*rag.shape, self.output_length))
-        elif isinstance(rag, RaggedAnnotatedHaps):
-            assert isinstance(self._seqs, Haps)
-            return rag.to_fixed_shape((*rag.shape, self.output_length))
-        else:
-            assert_never(rag)
+        if is_rag_dtype(rag, np.bytes_):
+            cat = cat.view("S1")  # type: ignore
+        return cat
+    elif isinstance(rag, RaggedAnnotatedHaps):
+        haps = _cat_length(rag.haps, offsets)
+        var_idxs = _cat_length(rag.var_idxs, offsets)
+        ref_coords = _cat_length(rag.ref_coords, offsets)
+        return RaggedAnnotatedHaps(haps, var_idxs, ref_coords)
+    else:
+        assert_never(rag)
 
 
-T = TypeVar("T")
 SEQ = TypeVar("SEQ", None, NDArray[np.bytes_], AnnotatedHaps)
-RSEQ = TypeVar("RSEQ", None, Ragged[np.bytes_], RaggedAnnotatedHaps)
 TRK = TypeVar("TRK", None, NDArray[np.float32])
+RSEQ = TypeVar("RSEQ", None, Ragged[np.bytes_], RaggedAnnotatedHaps)
 RTRK = TypeVar("RTRK", None, Ragged[np.float32])
-IDX = TypeVar("IDX", None, tuple[NDArray[np.integer], NDArray[np.integer]])
-TFM = TypeVar("TFM")
 
 
-class ArrayDataset(Dataset, Generic[SEQ, TRK, IDX, TFM]):
+class ArrayDataset(Dataset, Generic[SEQ, TRK]):
     """Only for type checking purposes, you should never instantiate this class directly."""
 
     @overload
     def with_len(
-        self: ArrayDataset[NDArray[np.bytes_], None, IDX, TFM],
+        self: ArrayDataset[NDArray[np.bytes_], None],
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[Ragged[np.bytes_], None, IDX, TFM]: ...
+    ) -> RaggedDataset[Ragged[np.bytes_], None]: ...
     @overload
     def with_len(
-        self: ArrayDataset[AnnotatedHaps, None, IDX, TFM],
+        self: ArrayDataset[AnnotatedHaps, None],
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[RaggedAnnotatedHaps, None, IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedAnnotatedHaps, None]: ...
     @overload
     def with_len(
-        self: ArrayDataset[None, NDArray[np.float32], IDX, TFM],
+        self: ArrayDataset[None, NDArray[np.float32]],
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[None, Ragged[np.float32], IDX, TFM]: ...
+    ) -> RaggedDataset[None, Ragged[np.float32]]: ...
     @overload
     def with_len(
-        self: ArrayDataset[NDArray[np.bytes_], NDArray[np.float32], IDX, TFM],
+        self: ArrayDataset[NDArray[np.bytes_], NDArray[np.float32]],
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[Ragged[np.bytes_], Ragged[np.float32], IDX, TFM]: ...
+    ) -> RaggedDataset[Ragged[np.bytes_], Ragged[np.float32]]: ...
     @overload
     def with_len(
-        self: ArrayDataset[AnnotatedHaps, NDArray[np.float32], IDX, TFM],
+        self: ArrayDataset[AnnotatedHaps, NDArray[np.float32]],
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[RaggedAnnotatedHaps, Ragged[np.float32], IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedAnnotatedHaps, Ragged[np.float32]]: ...
     @overload
     def with_len(
         self,
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[SEQ, TRK, IDX, TFM]: ...
+    ) -> ArrayDataset[SEQ, TRK]: ...
     def with_len(
         self, output_length: Literal["ragged", "variable"] | int
-    ) -> Union[RaggedDataset[RSEQ, RTRK, IDX, TFM], ArrayDataset[SEQ, TRK, IDX, TFM]]:
+    ) -> Union[RaggedDataset[RSEQ, RTRK], ArrayDataset[SEQ, TRK]]:
         return super().with_len(output_length)
 
     @overload
-    def with_seqs(self, kind: None) -> ArrayDataset[None, TRK, IDX, TFM]: ...
+    def with_seqs(self, kind: None) -> ArrayDataset[None, TRK]: ...
     @overload
     def with_seqs(
         self, kind: Literal["reference", "haplotypes"]
-    ) -> ArrayDataset[NDArray[np.bytes_], TRK, IDX, TFM]: ...
+    ) -> ArrayDataset[NDArray[np.bytes_], TRK]: ...
     @overload
     def with_seqs(
         self, kind: Literal["annotated"]
-    ) -> ArrayDataset[AnnotatedHaps, TRK, IDX, TFM]: ...
+    ) -> ArrayDataset[AnnotatedHaps, TRK]: ...
     def with_seqs(
         self, kind: Literal["reference", "haplotypes", "annotated"] | None
     ) -> ArrayDataset:
         return super().with_seqs(kind)
 
     @overload
-    def with_tracks(self, tracks: None) -> ArrayDataset[SEQ, None, IDX, TFM]: ...
+    def with_tracks(self, tracks: None) -> ArrayDataset[SEQ, None]: ...
     @overload
-    def with_tracks(
-        self, tracks: str
-    ) -> ArrayDataset[SEQ, NDArray[np.float32], IDX, TFM]: ...
+    def with_tracks(self, tracks: str) -> ArrayDataset[SEQ, NDArray[np.float32]]: ...
     @overload
     def with_tracks(
         self, tracks: List[str]
-    ) -> ArrayDataset[SEQ, NDArray[np.float32], IDX, TFM]: ...
+    ) -> ArrayDataset[SEQ, NDArray[np.float32]]: ...
     def with_tracks(self, tracks: str | List[str] | None) -> ArrayDataset:
         return super().with_tracks(tracks)
 
     @overload
-    def with_indices(
-        self, return_indices: Literal[False]
-    ) -> ArrayDataset[SEQ, TRK, None, TFM]: ...
-    @overload
-    def with_indices(
-        self, return_indices: Literal[True]
-    ) -> ArrayDataset[
-        SEQ, TRK, tuple[NDArray[np.integer], NDArray[np.integer]], TFM
-    ]: ...
-    def with_indices(self, return_indices: bool) -> ArrayDataset:
-        return super().with_indices(return_indices)
-
-    @overload
-    def with_transform(
-        self: ArrayDataset[SEQ, None, None, TFM],
-        transform: Callable[[SEQ], T],
-    ) -> ArrayDataset[SEQ, TRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: ArrayDataset[None, TRK, None, TFM],
-        transform: Callable[[TRK], T],
-    ) -> ArrayDataset[SEQ, TRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: ArrayDataset[None, None, IDX, TFM],
-        transform: Callable[[NoReturn], T],
-    ) -> ArrayDataset[SEQ, TRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: ArrayDataset[SEQ, TRK, None, TFM],
-        transform: Callable[[SEQ, TRK], T],
-    ) -> ArrayDataset[SEQ, TRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: ArrayDataset[SEQ, None, IDX, TFM],
-        transform: Callable[[SEQ, IDX], T],
-    ) -> ArrayDataset[SEQ, TRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: ArrayDataset[None, TRK, IDX, TFM],
-        transform: Callable[[TRK, IDX], T],
-    ) -> ArrayDataset[SEQ, TRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: ArrayDataset[SEQ, TRK, IDX, TFM],
-        transform: Callable[[SEQ, TRK, IDX], T],
-    ) -> ArrayDataset[SEQ, TRK, IDX, T]: ...
-    @overload
-    def with_transform(self, transform: None) -> ArrayDataset[SEQ, TRK, IDX, None]: ...
-    def with_transform(self, transform: Callable | None) -> ArrayDataset:
-        return super().with_transform(transform)
-
-    @overload
     def __getitem__(
-        self: ArrayDataset[SEQ, None, None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        self: ArrayDataset[SEQ, None],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> SEQ: ...
     @overload
     def __getitem__(
-        self: ArrayDataset[None, TRK, None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        self: ArrayDataset[None, TRK],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> TRK: ...
     @overload
     def __getitem__(
-        self: ArrayDataset[None, None, IDX, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        self: ArrayDataset[None, None],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> NoReturn: ...
     @overload
     def __getitem__(
-        self: ArrayDataset[SEQ, TRK, None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        self: ArrayDataset[SEQ, TRK],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> Tuple[SEQ, TRK]: ...
-    @overload
-    def __getitem__(
-        self: ArrayDataset[SEQ, None, IDX, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[SEQ, IDX]: ...
-    @overload
-    def __getitem__(
-        self: ArrayDataset[None, TRK, IDX, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[TRK, IDX]: ...
-    @overload
-    def __getitem__(
-        self: ArrayDataset[SEQ, TRK, IDX, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[SEQ, TRK, IDX]: ...
-    @overload
-    def __getitem__(
-        self: ArrayDataset[SEQ, TRK, IDX, TFM],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> TFM: ...
-    def __getitem__(
-        self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
-    ) -> Any:
+    def __getitem__(self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]) -> Any:
         return super().__getitem__(idx)
 
 
-class RaggedDataset(Dataset, Generic[RSEQ, RTRK, IDX, TFM]):
+class RaggedDataset(Dataset, Generic[RSEQ, RTRK]):
     """Only for type checking purposes, you should never instantiate this class directly."""
 
     @overload
     def with_len(
-        self: RaggedDataset[Ragged[np.bytes_], None, IDX, TFM],
+        self: RaggedDataset[Ragged[np.bytes_], None],
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[NDArray[np.bytes_], None, IDX, TFM]: ...
+    ) -> ArrayDataset[NDArray[np.bytes_], None]: ...
     @overload
     def with_len(
-        self: RaggedDataset[RaggedAnnotatedHaps, None, IDX, TFM],
+        self: RaggedDataset[RaggedAnnotatedHaps, None],
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[AnnotatedHaps, None, IDX, TFM]: ...
+    ) -> ArrayDataset[AnnotatedHaps, None]: ...
     @overload
     def with_len(
-        self: RaggedDataset[None, Ragged[np.float32], IDX, TFM],
+        self: RaggedDataset[None, Ragged[np.float32]],
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[None, NDArray[np.float32], IDX, TFM]: ...
+    ) -> ArrayDataset[None, NDArray[np.float32]]: ...
     @overload
     def with_len(
-        self: RaggedDataset[None, RTRK, IDX, TFM],
+        self: RaggedDataset[None, RTRK],
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[None, TRK, IDX, TFM]: ...
+    ) -> ArrayDataset[None, TRK]: ...
     @overload
     def with_len(
-        self: RaggedDataset[Ragged[np.bytes_], Ragged[np.float32], IDX, TFM],
+        self: RaggedDataset[Ragged[np.bytes_], Ragged[np.float32]],
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[NDArray[np.bytes_], NDArray[np.float32], IDX, TFM]: ...
+    ) -> ArrayDataset[NDArray[np.bytes_], NDArray[np.float32]]: ...
     @overload
     def with_len(
-        self: RaggedDataset[RaggedAnnotatedHaps, Ragged[np.float32], IDX, TFM],
+        self: RaggedDataset[RaggedAnnotatedHaps, Ragged[np.float32]],
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[AnnotatedHaps, NDArray[np.float32], IDX, TFM]: ...
+    ) -> ArrayDataset[AnnotatedHaps, NDArray[np.float32]]: ...
     @overload
     def with_len(
         self,
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[RSEQ, RTRK, IDX, TFM]: ...
+    ) -> RaggedDataset[RSEQ, RTRK]: ...
     def with_len(
         self, output_length: Union[Literal["ragged", "variable"], int]
-    ) -> Union[RaggedDataset[RSEQ, RTRK, IDX, TFM], ArrayDataset[SEQ, TRK, IDX, TFM]]:
+    ) -> Union[RaggedDataset[RSEQ, RTRK], ArrayDataset[SEQ, TRK]]:
         return super().with_len(output_length)
 
     @overload
-    def with_seqs(self, kind: None) -> RaggedDataset[None, RTRK, IDX, TFM]: ...
+    def with_seqs(self, kind: None) -> RaggedDataset[None, RTRK]: ...
     @overload
     def with_seqs(
         self, kind: Literal["reference", "haplotypes"]
-    ) -> RaggedDataset[Ragged[np.bytes_], RTRK, IDX, TFM]: ...
+    ) -> RaggedDataset[Ragged[np.bytes_], RTRK]: ...
     @overload
     def with_seqs(
         self, kind: Literal["annotated"]
-    ) -> RaggedDataset[RaggedAnnotatedHaps, RTRK, IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedAnnotatedHaps, RTRK]: ...
     def with_seqs(
         self, kind: Literal["reference", "haplotypes", "annotated"] | None
     ) -> RaggedDataset:
         return super().with_seqs(kind)
 
     @overload
-    def with_tracks(self, tracks: None) -> RaggedDataset[RSEQ, None, IDX, TFM]: ...
+    def with_tracks(self, tracks: None) -> RaggedDataset[RSEQ, None]: ...
     @overload
-    def with_tracks(
-        self, tracks: str
-    ) -> RaggedDataset[RSEQ, Ragged[np.float32], IDX, TFM]: ...
+    def with_tracks(self, tracks: str) -> RaggedDataset[RSEQ, Ragged[np.float32]]: ...
     @overload
     def with_tracks(
         self, tracks: List[str]
-    ) -> RaggedDataset[RSEQ, Ragged[np.float32], IDX, TFM]: ...
+    ) -> RaggedDataset[RSEQ, Ragged[np.float32]]: ...
     def with_tracks(self, tracks: str | List[str] | None) -> RaggedDataset:
         return super().with_tracks(tracks)
 
     @overload
-    def with_indices(
-        self, return_indices: Literal[False]
-    ) -> RaggedDataset[RSEQ, RTRK, None, TFM]: ...
-    @overload
-    def with_indices(
-        self, return_indices: Literal[True]
-    ) -> RaggedDataset[
-        RSEQ, RTRK, tuple[NDArray[np.integer], NDArray[np.integer]], TFM
-    ]: ...
-    def with_indices(self, return_indices: bool) -> RaggedDataset:
-        return super().with_indices(return_indices)
-
-    @overload
-    def with_transform(
-        self: RaggedDataset[RSEQ, None, None, TFM],
-        transform: Callable[[RSEQ], T],
-    ) -> RaggedDataset[RSEQ, RTRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: RaggedDataset[None, RTRK, None, TFM],
-        transform: Callable[[RTRK], T],
-    ) -> RaggedDataset[RSEQ, RTRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: RaggedDataset[None, None, IDX, TFM],
-        transform: Callable[[NoReturn], T],
-    ) -> RaggedDataset[RSEQ, RTRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: RaggedDataset[RSEQ, RTRK, None, TFM],
-        transform: Callable[[RSEQ, RTRK], T],
-    ) -> RaggedDataset[RSEQ, RTRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: RaggedDataset[RSEQ, None, IDX, TFM],
-        transform: Callable[[RSEQ, IDX], T],
-    ) -> RaggedDataset[RSEQ, RTRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: RaggedDataset[None, RTRK, IDX, TFM],
-        transform: Callable[[RTRK, IDX], T],
-    ) -> RaggedDataset[RSEQ, RTRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: RaggedDataset[RSEQ, RTRK, IDX, TFM],
-        transform: Callable[[RSEQ, RTRK, IDX], T],
-    ) -> RaggedDataset[RSEQ, RTRK, IDX, T]: ...
-    @overload
-    def with_transform(
-        self, transform: None
-    ) -> RaggedDataset[RSEQ, RTRK, IDX, None]: ...
-    def with_transform(self, transform: Callable | None) -> RaggedDataset:
-        return super().with_transform(transform)
-
-    @overload
     def __getitem__(
-        self: RaggedDataset[RSEQ, None, None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        self: RaggedDataset[RSEQ, None],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> RSEQ: ...
     @overload
     def __getitem__(
-        self: RaggedDataset[None, RTRK, None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        self: RaggedDataset[None, RTRK],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> RTRK: ...
     @overload
     def __getitem__(
-        self: RaggedDataset[None, None, IDX, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        self: RaggedDataset[None, None],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> NoReturn: ...
     @overload
     def __getitem__(
-        self: RaggedDataset[RSEQ, RTRK, None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+        self: RaggedDataset[RSEQ, RTRK],
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
     ) -> Tuple[RSEQ, RTRK]: ...
-    @overload
-    def __getitem__(
-        self: RaggedDataset[RSEQ, None, IDX, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[RSEQ, IDX]: ...
-    @overload
-    def __getitem__(
-        self: RaggedDataset[None, RTRK, IDX, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[RTRK, IDX]: ...
-    @overload
-    def __getitem__(
-        self: RaggedDataset[RSEQ, RTRK, IDX, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[RSEQ, RTRK, IDX]: ...
-    @overload
-    def __getitem__(
-        self: RaggedDataset[RSEQ, RTRK, IDX, TFM],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> TFM: ...
-    def __getitem__(
-        self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
-    ) -> Any:
+    def __getitem__(self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]) -> Any:
         return super().__getitem__(idx)

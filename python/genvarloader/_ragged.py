@@ -8,7 +8,7 @@ import numpy as np
 from attrs import define
 from einops import repeat
 from numpy.typing import NDArray
-from seqpro._ragged import Ragged
+from seqpro._ragged import OFFSET_TYPE, Ragged
 
 from ._types import DTYPE, AnnotatedHaps
 from ._utils import _lengths_to_offsets
@@ -145,11 +145,16 @@ COMPLEMENTS = b"TGCA"
 #! for whatever reason, this causes data corruption with parallel=True?!
 @nb.njit(nogil=True, cache=True)
 def _rc_helper(
-    data: NDArray[np.uint8], offsets: NDArray[np.int64], mask: NDArray[np.bool_]
+    data: NDArray[np.uint8], offsets: NDArray[OFFSET_TYPE], mask: NDArray[np.bool_]
 ) -> NDArray[np.uint8]:
     out = data.copy()
-    for i in nb.prange(len(offsets) - 1):
-        start, end = offsets[i], offsets[i + 1]
+    for i in nb.prange(len(offsets)):
+        if offsets.ndim == 1:
+            if i == len(offsets) - 1:
+                continue
+            start, end = offsets[i], offsets[i + 1]
+        else:
+            start, end = offsets[i, 0], offsets[i, 1]
         _data = data[start:end]
         _out = out[start:end]
         if mask[i]:
@@ -172,10 +177,17 @@ def _reverse_complement(
 
 #! for whatever reason, this causes data corruption with parallel=True?!
 @nb.njit(nogil=True, cache=True)
-def _reverse_helper(data: NDArray, offsets: NDArray[np.int64], mask: NDArray[np.bool_]):
-    for i in nb.prange(len(offsets) - 1):
+def _reverse_helper(
+    data: NDArray, offsets: NDArray[OFFSET_TYPE], mask: NDArray[np.bool_]
+):
+    for i in nb.prange(len(offsets)):
         if mask[i]:
-            start, end = offsets[i], offsets[i + 1]
+            if offsets.ndim == 1:
+                if i == len(offsets) - 1:
+                    continue
+                start, end = offsets[i], offsets[i + 1]
+            else:
+                start, end = offsets[i, 0], offsets[i, 1]
             data[start:end] = np.flip(data[start:end])
 
 
@@ -229,9 +241,9 @@ def _jitter(
 @nb.njit(parallel=True, nogil=True, cache=True)
 def _jitter_helper(
     data: Tuple[NDArray, ...],
-    offsets: Tuple[NDArray[np.int64], ...],
+    offsets: Tuple[NDArray[OFFSET_TYPE], ...],
     shapes: Tuple[Tuple[int, ...], ...],
-    out_offsets: Tuple[NDArray[np.int64], ...],
+    out_offsets: Tuple[NDArray[OFFSET_TYPE], ...],
     starts: NDArray[np.int64],
 ) -> Tuple[NDArray, ...]:
     """Helper to jitter ragged data. Ragged arrays should have shape (batch, ...).
@@ -270,7 +282,16 @@ def _jitter_helper(
 
             for row in nb.prange(idx_s, idx_e):
                 row_s = arr_offsets[row]
-                out_row_s, out_row_e = out_arr_offsets[row], out_arr_offsets[row + 1]
+                if out_arr_offsets.ndim == 1:
+                    out_row_s, out_row_e = (
+                        out_arr_offsets[row],
+                        out_arr_offsets[row + 1],
+                    )
+                else:
+                    out_row_s, out_row_e = (
+                        out_arr_offsets[row, 0],
+                        out_arr_offsets[row, 1],
+                    )
                 out_len = out_row_e - out_row_s
                 out_arr_data[out_row_s:out_row_e] = arr_data[
                     row_s + jit_s : row_s + jit_s + out_len
