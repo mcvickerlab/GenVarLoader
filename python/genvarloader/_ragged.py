@@ -142,7 +142,8 @@ NUCLEOTIDES = b"ACGT"
 COMPLEMENTS = b"TGCA"
 
 
-@nb.njit(parallel=True, nogil=True, cache=True)
+#! for whatever reason, this causes data corruption with parallel=True?!
+@nb.njit(nogil=True, cache=True)
 def _rc_helper(
     data: NDArray[np.uint8], offsets: NDArray[OFFSET_TYPE], mask: NDArray[np.bool_]
 ) -> NDArray[np.uint8]:
@@ -160,8 +161,6 @@ def _rc_helper(
             for nuc, comp in zip(NUCLEOTIDES, COMPLEMENTS):
                 _out[_data == nuc] = comp
             _out[:] = _out[::-1]
-        else:
-            _out[:] = _data
     return out
 
 
