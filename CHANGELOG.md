@@ -1,3 +1,9 @@
+## 0.14.4 (2025-05-12)
+
+### Fix
+
+- data corruption when rc_helper is parallelized
+
 ## 0.14.3 (2025-05-10)
 
 ### Fix
