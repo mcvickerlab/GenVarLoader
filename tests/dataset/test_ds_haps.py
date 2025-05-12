@@ -33,11 +33,15 @@ def dataset_svar():
 @parametrize_with_cases("dataset", cases=".", prefix="dataset_")
 def test_ds_haps(dataset: gvl.RaggedDataset[gvl.Ragged[np.bytes_], None]):
     for region, sample in product(range(dataset.n_regions), dataset.samples):
-        c, s, e = dataset.regions.select("chrom", "chromStart", "chromEnd").row(region)
+        c, s, e, rc = dataset.regions.select(
+            "chrom", "chromStart", "chromEnd", "strand"
+        ).row(region)
         # ragged (p)
         haps = dataset[region, sample]
         for h in range(2):
             actual = haps[h]
+            if rc == "-":
+                actual = sp.DNA.reverse_complement(actual, -1)
             fpath = f"source_{sample}_nr{region}_h{h}.fa"
             with pysam.FastaFile(str(cons_dir / fpath)) as f:
                 desired = sp.cast_seqs(f.fetch(f.references[0]).upper())
