@@ -1,0 +1,34 @@
+name: Merge main -> stable
+
+on:
+  workflow_run:
+    workflows: ["Bump and release"]
+    branches: [main]
+    types:
+      - completed
+  workflow_dispatch:
+
+jobs:
+  merge:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    environment: pypi
+    permissions:
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          ref: stable
+          fetch-depth: 0
+          token: "${{ secrets.COMMITIZEN }}"
+      - name: Config git
+        run: |
+          git config --global user.name "${GITHUB_ACTOR}"
+          git config --global user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+      - name: Merge main -> stable
+        run: |
+          git rebase origin/main
+          git push origin stable

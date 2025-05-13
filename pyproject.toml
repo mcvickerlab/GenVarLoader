@@ -1,6 +1,6 @@
 [project]
 name = "genvarloader"
-version = "0.14.2"
+version = "0.14.4"
 description = "Pipeline for efficient genomic data processing."
 authors = [
     { name = "David Laub", email = "dlaub@ucsd.edu" },
@@ -30,7 +30,7 @@ dependencies = [
     "awkward",
     "hirola>=0.3,<0.4",
     "seqpro>=0.3.2",
-    "genoray>=0.10.2",
+    "genoray>=0.10.7",
 ]
 
 [project.urls]

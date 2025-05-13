@@ -259,8 +259,8 @@ class Haps(Reconstructor[_H]):
             with open(svar_meta_path) as f:
                 metadata = json.load(f)
             # (r s p 2)
-            shape: tuple[int, ...] = metadata["shape"]
-            dtype: str = metadata["dtype"]
+            shape: tuple[int, ...] = tuple(metadata["shape"])
+            dtype = np.dtype(metadata["dtype"])
 
             geno_path = path / "genotypes" / "link.svar" / "genotypes.npy"
             offset_path = path / "genotypes" / "offsets.npy"
@@ -269,6 +269,9 @@ class Haps(Reconstructor[_H]):
             offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
 
             v_idxs = np.memmap(geno_path, dtype=V_IDX_TYPE, mode="r")
+            offsets = np.memmap(
+                path / "genotypes" / "offsets.npy", shape=shape, dtype=dtype, mode="r"
+            )
             genotypes = SparseGenotypes.from_offsets(
                 v_idxs, shape[:-1], offsets.reshape(-1, 2)
             )

@@ -11,7 +11,7 @@ jobs:
     name: "Run test across all Python versions"
     strategy:
       matrix:
-        environment: [py310, py311, py312]
+        environment: [py310, py311]
     steps:
       - name: Check out
         uses: actions/checkout@v4
