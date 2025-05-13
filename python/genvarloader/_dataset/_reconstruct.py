@@ -262,7 +262,7 @@ class Haps(Reconstructor[_H]):
             shape: tuple[int, ...] = tuple(metadata["shape"])
             dtype = np.dtype(metadata["dtype"])
 
-            geno_path = path / "genotypes" / "link.svar" / "genotypes.npy"
+            geno_path = path / "genotypes" / "link.svar" / "variant_idxs.npy"
             offset_path = path / "genotypes" / "offsets.npy"
             dosage_path = path / "genotypes" / "link.svar" / "dosages.npy"
 
