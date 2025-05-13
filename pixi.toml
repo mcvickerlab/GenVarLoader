@@ -46,7 +46,7 @@ plink2 = "*"
 # genvarloader = { path = ".", editable = true }
 hirola = "==0.3"
 seqpro = "==0.3.2"
-genoray = "==0.10.3"
+genoray = "==0.10.7"
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"

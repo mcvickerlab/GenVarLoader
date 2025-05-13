@@ -275,8 +275,8 @@ class Haps(Reconstructor[H]):
             with open(path / "genotypes" / "svar_meta.json") as f:
                 metadata = json.load(f)
             # (r s p 2)
-            shape: tuple[int, ...] = metadata["shape"]
-            dtype: str = metadata["dtype"]
+            shape: tuple[int, ...] = tuple(metadata["shape"])
+            dtype = np.dtype(metadata["dtype"])
             offsets = np.memmap(
                 path / "genotypes" / "offsets.npy", shape=shape, dtype=dtype, mode="r"
             )
