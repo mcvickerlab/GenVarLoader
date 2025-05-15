@@ -85,7 +85,7 @@ def get_dummy_dataset():
         np.array([[3, 2, 4, 1], [1, 3, 2, 4], [2, 1, 4, 3], [4, 2, 3, 1]])[
             [3, 1, 2, 0]
         ]  # target lengths
-        - 1  # idx within region
+        - 1  # 0-based idx within region
         + 4 * np.arange(4)[:, None]  # adjust by region/contig offset
     ).astype(np.int32)
     shape = (4, 4, 1)

@@ -13,7 +13,7 @@ from seqpro._ragged import Ragged
 from ._types import DTYPE, AnnotatedHaps
 from ._utils import _lengths_to_offsets
 
-__all__ = ["Ragged", "RaggedIntervals", "INTERVAL_DTYPE", "pad_ragged"]
+__all__ = ["Ragged", "RaggedIntervals", "pad_ragged"]
 
 RDTYPE = TypeVar("RDTYPE", bound=np.generic)
 
@@ -142,7 +142,8 @@ NUCLEOTIDES = b"ACGT"
 COMPLEMENTS = b"TGCA"
 
 
-@nb.njit(parallel=True, nogil=True, cache=True)
+#! for whatever reason, this causes data corruption with parallel=True?!
+@nb.njit(nogil=True, cache=True)
 def _rc_helper(
     data: NDArray[np.uint8], offsets: NDArray[np.int64], mask: NDArray[np.bool_]
 ) -> NDArray[np.uint8]:
@@ -155,8 +156,6 @@ def _rc_helper(
             for nuc, comp in zip(NUCLEOTIDES, COMPLEMENTS):
                 _out[_data == nuc] = comp
             _out[:] = _out[::-1]
-        else:
-            _out[:] = _data
     return out
 
 

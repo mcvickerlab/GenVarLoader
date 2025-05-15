@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Set, Tuple, Union, cast
 import awkward as ak
 import numpy as np
 import polars as pl
+import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseVar
 from genoray._svar import V_IDX_TYPE, SparseGenotypes
 from genoray._utils import parse_memory
@@ -106,6 +107,8 @@ def write(
                 variants = PGEN(variants)
             elif path_is_vcf(variants):
                 variants = VCF(variants)
+            elif variants.is_dir() and variants.suffix == ".svar":
+                variants = SparseVar(variants)
             else:
                 raise ValueError(
                     f"File {variants} has an unrecognized file extension. Please provide either a VCF or PGEN file.`"
@@ -187,7 +190,6 @@ def _prep_bed(
     if bed.height == 0:
         raise ValueError("No regions found in the BED file.")
 
-    contigs = natsorted(bed["chrom"].unique().to_list())
     with pl.StringCache():
         if "strand" not in bed:
             bed = bed.with_columns(strand=pl.lit(1, pl.Int32))
@@ -197,15 +199,10 @@ def _prep_bed(
                 .cast(pl.Utf8)
                 .replace_strict({"+": 1, "-": -1, ".": 1}, return_dtype=pl.Int32)
             )
+
     bed = bed.select("chrom", "chromStart", "chromEnd", "strand")
-    with pl.StringCache():
-        pl.Series(contigs, dtype=pl.Categorical)
-        bed = bed.with_row_index().sort(
-            pl.col("chrom").cast(pl.Categorical),
-            pl.col("chromStart"),
-            pl.col("chromEnd"),
-            maintain_order=True,
-        )
+    contigs = natsorted(bed["chrom"].unique().to_list())
+    bed = sp.bed.sort(bed.with_row_index())
 
     input_to_sorted_idx_map = np.argsort(bed["index"])
     bed = bed.drop("index")
@@ -235,8 +232,10 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
 
     if vcf._index is None:
         if not vcf._valid_index():
-            vcf._write_gvi_index()
+            logger.info("VCF genoray index is invalid, writing")
+            vcf._write_gvi_index(progress=True)
 
+        logger.info("Loading VCF genoray index")
         vcf._load_index()
 
     assert vcf._index is not None

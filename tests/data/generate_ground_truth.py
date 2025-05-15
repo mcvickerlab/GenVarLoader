@@ -3,6 +3,7 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Annotated, List
 
+import numpy as np
 import typer
 
 WDIR = Path(__file__).resolve().parent
@@ -238,15 +239,23 @@ def main(
             "end": [1010696 + SEQ_LEN],
         }
     )
+    rng = np.random.default_rng(0)
     bed = bed.vstack(rows).with_row_index()
+    strand = pl.Series("strand", rng.choice(["+", "-"], size=bed.height, replace=True))
+    bed = bed.hstack([strand])
 
     logger.info("Generating BED file.")
     if (WDIR / f"{name}.bed").exists():
         (WDIR / f"{name}.bed").unlink()
     (
-        bed.select("chrom", "start", "end").write_csv(
-            WDIR / f"{name}.bed", include_header=False, separator="\t"
-        )
+        bed.select(
+            "chrom",
+            "start",
+            "end",
+            pl.lit(".").alias("name"),
+            pl.lit(".").alias("score"),
+            "strand",
+        ).write_csv(WDIR / f"{name}.bed", include_header=False, separator="\t")
     )
 
     logger.info("Generating consensus sequences.")
