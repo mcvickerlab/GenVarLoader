@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Callable, Sequence, Tuple
+from typing import Any, Callable, Generic, Sequence, Tuple, overload
 
 import cyvcf2
 import numba as nb
@@ -10,7 +12,7 @@ import seqpro as sp
 from genoray import VCF
 from numpy.typing import NDArray
 
-from .._dataset._impl import ArrayDataset
+from .._dataset._impl import ArrayDataset, MaybeTRK
 from .._dataset._indexing import DatasetIndexer
 from .._types import AnnotatedHaps, Idx
 from ._records import VLenAlleles
@@ -53,9 +55,9 @@ def _sites_table_to_bedlike(sites: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-class DatasetWithSites:
+class DatasetWithSites(Generic[MaybeTRK]):
     sites: pl.DataFrame
-    dataset: "ArrayDataset[AnnotatedHaps, None, None, None]"
+    dataset: ArrayDataset[AnnotatedHaps, MaybeTRK, None, None]
     rows: pl.DataFrame
     _row_map: NDArray[np.uint32]
     """Map from row index to dataset row index and site row index."""
@@ -78,7 +80,7 @@ class DatasetWithSites:
 
     def __init__(
         self,
-        dataset: "ArrayDataset",
+        dataset: ArrayDataset[Any, MaybeTRK, Any, Any],
         sites: pl.DataFrame,
         max_variants_per_region: int = 1,
     ):
@@ -91,14 +93,6 @@ class DatasetWithSites:
             )
 
         sites = _sites_table_to_bedlike(sites)
-
-        dataset = (
-            dataset.with_seqs("annotated")
-            .with_tracks(None)
-            .with_indices(False)
-            .with_transform(None)
-            .with_settings(deterministic=True, jitter=0)
-        )
 
         ds_pyr = sp.bed.to_pyranges(dataset.regions.with_row_index("ds_row"))
         sites_pyr = sp.bed.to_pyranges(sites.with_row_index("site_row"))
@@ -120,28 +114,57 @@ class DatasetWithSites:
             .drop("End_site")
             .sort("site_row")
         )
+
+        _dataset = (
+            dataset.with_seqs("annotated")
+            .with_indices(False)
+            .with_transform(None)
+            .with_settings(deterministic=True, jitter=0)
+        )
+
         self.sites = sites
-        self.dataset = dataset
+        self.dataset = _dataset
         self.rows = rows.drop("ds_row", "site_row")
         self._row_map = rows.select("ds_row", "site_row").to_numpy()
         self._idxer = DatasetIndexer.from_region_and_sample_idxs(
             np.arange(self.rows.height), np.arange(dataset.n_samples), dataset.samples
         )
 
+    @overload
+    def __getitem__(
+        self: DatasetWithSites[None],
+        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+    ) -> tuple[AnnotatedHaps, NDArray[np.uint8]]: ...
+    @overload
+    def __getitem__(
+        self: DatasetWithSites[NDArray[np.float32]],
+        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+    ) -> tuple[AnnotatedHaps, NDArray[np.uint8], NDArray[np.float32]]: ...
     def __getitem__(
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
-    ) -> tuple["AnnotatedHaps", NDArray[np.uint8]]:
+    ) -> (
+        tuple[AnnotatedHaps, NDArray[np.uint8]]
+        | tuple[AnnotatedHaps, NDArray[np.uint8], NDArray[np.float32]]
+    ):
         idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
 
         r_idx, s_idx = np.unravel_index(idx, self.shape)
 
         ds_rows = self._row_map[r_idx, 0]
-        haps = self.dataset[ds_rows, s_idx]
+        out = self.dataset[ds_rows, s_idx]
+        if isinstance(out, tuple):
+            haps, tracks = out
+        else:
+            haps = out
 
+        ploidy = haps.shape[-1]
         sites = self.rows[r_idx]
         starts = sites["POS0"].to_numpy()  # 0-based
         alts = VLenAlleles.from_polars(sites["ALT"])
 
+        # (b p)
+        haps = haps.reshape(-1, ploidy)
+        # flags: (b p)
         haps, v_idxs, ref_coords, flags = apply_site_only_variants(
             haps=haps.haps.view(np.uint8),  # (b p l)
             v_idxs=haps.var_idxs,  # (b p l)
@@ -162,10 +185,17 @@ class DatasetWithSites:
             flags = flags.squeeze(0)
 
         if out_reshape is not None:
-            haps = haps.reshape(*out_reshape, 2, -1)
-            flags = flags.reshape(*out_reshape, 2)
+            haps = haps.reshape(*out_reshape, ploidy, -1)
+            flags = flags.reshape(*out_reshape, ploidy)
 
-        return haps, flags
+        if isinstance(out, tuple):
+            return (
+                haps,
+                flags,
+                tracks,  # type: ignore | guaranteed bound
+            )
+        else:
+            return haps, flags
 
 
 APPLIED = np.uint8(0)

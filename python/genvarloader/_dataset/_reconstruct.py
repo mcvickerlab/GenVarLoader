@@ -119,7 +119,7 @@ class Reconstructor(Protocol[T]):
 
 
 @define
-class Seqs(Reconstructor[Ragged[np.bytes_]]):
+class Ref(Reconstructor[Ragged[np.bytes_]]):
     reference: Reference
     """The reference genome. This is kept in memory."""
 
@@ -811,8 +811,8 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
 
 
 @define
-class SeqsTracks(Reconstructor[Tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
-    seqs: Seqs
+class RefTracks(Reconstructor[Tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
+    seqs: Ref
     tracks: Tracks
 
     def __call__(
