@@ -586,10 +586,6 @@ class Dataset:
                     "Dataset is set to only return tracks, so setting tracks to None would"
                     " result in a Dataset that cannot return anything."
                 )
-            case None, _, _, ((Ref() | Haps()) as seqs) | RefTracks(
-                seqs=seqs
-            ) | HapsTracks(haps=seqs):
-                return evolve(self, _recon=seqs)
             case t, _, None, _:
                 raise ValueError(
                     "Can't set dataset to return tracks because it has none to begin with."
@@ -1049,11 +1045,11 @@ class Dataset:
 
         ds_tracks = Tracks.from_path(self.path, *self.full_shape).with_tracks(None)
         match self._recon:
-            case Seqs() | Haps():
+            case Ref() | Haps():
                 recon = self._recon
             case Tracks() as r:
                 recon = ds_tracks.with_tracks(r.active_tracks)
-            case (SeqsTracks() | HapsTracks()) as r:
+            case (RefTracks() | HapsTracks()) as r:
                 recon = evolve(
                     self._recon, tracks=ds_tracks.with_tracks(r.tracks.active_tracks)
                 )
