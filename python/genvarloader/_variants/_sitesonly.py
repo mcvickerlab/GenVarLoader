@@ -28,8 +28,7 @@ def sites_vcf_to_table(
     Parameters
     ----------
     vcf
-        Path to a VCF or a :code:`genoray.VCF <https://genoray.readthedocs.io/en/latest/api.html#genoray.VCF>` instance.
-        Note that :code:`genoray.VCF <https://genoray.readthedocs.io/en/latest/api.html#genoray.VCF>` can accept a filter function.
+        Path to a VCF or a :class:`genoray.VCF` instance. Note that :class:`genoray.VCF` can accept a filter function.
     attributes
         A list of attributes to include in the output table. Note that "CHROM", "POS", "REF", and "ALT" are always included
         even if not in this list.
@@ -74,10 +73,10 @@ def _sites_table_to_bedlike(sites: pl.DataFrame) -> pl.DataFrame:
 
 
 class DatasetWithSites(Generic[MaybeTRK]):
-    sites: pl.DataFrame
-    """Table of variant site information."""
     dataset: ArrayDataset[AnnotatedHaps, MaybeTRK, None, None]
     """Dataset of haplotypes and potentially tracks."""
+    sites: pl.DataFrame
+    """Table of variant site information."""
     rows: pl.DataFrame
     """Rows of this object, where each row is a combination of a dataset region and a site."""
     _row_map: NDArray[np.uint32]
@@ -109,7 +108,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
         Currently only supports bi-allelic SNPs.
 
         Accessed just like a Dataset, but where the rows are combinations of dataset regions and sites. Will return
-        haplotypes with variants applied and flags indicating whether the variant was applied, deleted, or existed.
+        annotated haplotypes with variants applied and flags indicating whether the variant was applied, deleted, or existed.
         The flags are 0 for applied, 1 for deleted, and 2 for existed. If the dataset has tracks, they will be
         returned as well and reflect any site-only variants.
 
@@ -124,10 +123,17 @@ class DatasetWithSites(Generic[MaybeTRK]):
 
         Examples
         --------
-        >>> import genvarloader as gvl
-        >>> ds = gvl.Dataset.open('path/to/dataset.gvl', 'path/to/reference.fasta')
-        >>> sites = gvl.sites_vcf_to_table('path/to/variants.vcf')
-        >>> ds_sites = gvl.DatasetWithSites(ds, sites)
+        .. code-block:: python
+            import genvarloader as gvl
+            sites = gvl.sites_vcf_to_table("path/to/variants.vcf")
+
+            ds = gvl.Dataset.open("path/to/dataset.gvl", "path/to/reference.fasta")
+            ds_sites = gvl.DatasetWithSites(ds, sites)
+            haps, flags = ds_sites[0, 0]
+            # flags is a np.uint8 (or an array of np.uint8 when accessing multiple rows/samples)
+
+            ds_sites.dataset = ds_sites.dataset.with_tracks("read-depth")
+            haps, flags, tracks = ds_sites[0, 0]
         """
         if max_variants_per_region > 1:
             raise NotImplementedError("max_variants_per_region > 1 not yet supported")

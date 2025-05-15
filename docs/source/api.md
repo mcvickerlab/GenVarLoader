@@ -40,4 +40,11 @@
 
 .. autoclass:: ArrayDataset
     :exclude-members: __new__, __init__
+
+.. autofunction:: sites_vcf_to_table
+
+.. autodata:: SitesSchema
+
+.. autoclass:: DatasetWithSites
+    :exclude-members: __new__, __init__
 ```
