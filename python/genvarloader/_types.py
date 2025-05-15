@@ -38,11 +38,11 @@ class AnnotatedHaps:
     def shape(self):
         return self.haps.shape
 
-    def reshape(self, *shape: int | tuple[int, ...]):
+    def reshape(self, shape: int | tuple[int, ...]):
         return AnnotatedHaps(
-            self.haps.reshape(*shape),
-            self.var_idxs.reshape(*shape),
-            self.ref_coords.reshape(*shape),
+            self.haps.reshape(shape),
+            self.var_idxs.reshape(shape),
+            self.ref_coords.reshape(shape),
         )
 
     def squeeze(self, axis: int | tuple[int, ...] | None = None) -> AnnotatedHaps:

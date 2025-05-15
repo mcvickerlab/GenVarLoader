@@ -157,13 +157,15 @@ class DatasetWithSites(Generic[MaybeTRK]):
         else:
             haps = out
 
-        ploidy = haps.shape[-1]
+        ploidy = haps.shape[-2]
+        length = haps.shape[-1]
+
         sites = self.rows[r_idx]
         starts = sites["POS0"].to_numpy()  # 0-based
         alts = RaggedAlleles.from_polars(sites["ALT"])
 
         # (b p)
-        haps = haps.reshape(-1, ploidy)
+        haps = haps.reshape((-1, ploidy, length))
         # flags: (b p)
         haps, v_idxs, ref_coords, flags = apply_site_only_variants(
             haps=haps.haps.view(np.uint8),  # (b p l)
@@ -185,7 +187,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
             flags = flags.squeeze(0)
 
         if out_reshape is not None:
-            haps = haps.reshape(*out_reshape, ploidy, -1)
+            haps = haps.reshape((*out_reshape, ploidy, length))
             flags = flags.reshape(*out_reshape, ploidy)
 
         if isinstance(out, tuple):
