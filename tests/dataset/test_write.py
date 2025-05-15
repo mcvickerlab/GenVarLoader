@@ -5,8 +5,7 @@ import genvarloader as gvl
 import numpy as np
 import polars as pl
 import seqpro as sp
-from genoray import PGEN, VCF, Reader
-from genvarloader._dataset._genotypes import SparseGenotypes
+from genoray import PGEN, VCF, Reader, SparseGenotypes
 from genvarloader._utils import _lengths_to_offsets
 from polars.testing.asserts import assert_frame_equal
 from pytest import fixture, mark
@@ -23,7 +22,7 @@ def reader_vcf():
 
 
 def reader_pgen():
-    index_path = (ddir / "pgen" / "filtered_sample.pvar.gvi")
+    index_path = ddir / "pgen" / "filtered_sample.pvar.gvi"
     index_path.unlink()
     pgen = PGEN(ddir / "pgen" / "filtered_sample.pgen")
     return pgen
