@@ -10,6 +10,7 @@ loguru = "*"
 attrs = "*"
 natsort = "*"
 cyvcf2 = "*"
+pgenlib = "*"
 pandera = "*"
 pysam = "*"
 pyarrow = "*"
@@ -43,10 +44,10 @@ bcftools = "*"
 plink2 = "*"
 
 [pypi-dependencies]
-# genvarloader = { path = ".", editable = true }
+genvarloader = { path = ".", editable = true }
 hirola = "==0.3"
 seqpro = "==0.3.2"
-genoray = "==0.10.3"
+genoray = "==0.10.8"
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"
@@ -93,7 +94,6 @@ install = "uv pip install -e ."
 pre-commit = "pre-commit install --hook-type commit-msg"
 gen = "python tests/data/generate_ground_truth.py"
 test = { cmd = "pytest tests && cargo test --release", depends-on = ["gen"] }
-publish = "maturin publish --non-interactive"
 
 [feature.docs.tasks]
 i-kernel = "ipython kernel install --user --name 'gvl-docs' --display-name 'GVL Docs'"

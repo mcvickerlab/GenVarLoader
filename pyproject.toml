@@ -30,7 +30,7 @@ dependencies = [
     "awkward",
     "hirola>=0.3,<0.4",
     "seqpro>=0.3.2",
-    "genoray>=0.10.3",
+    "genoray>=0.10.8",
 ]
 
 [project.urls]

@@ -43,6 +43,7 @@ intersphinx_mapping = {
     "numba": ("https://numba.readthedocs.io/en/stable/", None),
     "torch": ("https://pytorch.org/docs/stable/", None),
     "awkward": ("https://awkward-array.org/doc/main/", None),
+    "genoray": ("https://genoray.readthedocs.io/en/latest/", None),
 }
 
 napoleon_google_docstring = False

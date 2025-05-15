@@ -108,7 +108,7 @@ class Reference:
             _ref_offsets[contig] = next_offset
             next_offset += len(arr)
         reference = np.concatenate(refs).view(np.uint8)
-        pad_char = ord(_fasta.pad)
+        pad_char = ord("N")
         if any(c is None for c in contigs):
             raise ValueError("Contig names in metadata do not match reference.")
         ref_offsets = np.empty(len(contigs) + 1, np.uint64)
@@ -148,7 +148,7 @@ class Reconstructor(Protocol[T]):
 
 
 @define
-class Seqs(Reconstructor[Ragged[np.bytes_]]):
+class Ref(Reconstructor[Ragged[np.bytes_]]):
     reference: Reference
     """The reference genome. This is kept in memory."""
 
@@ -275,8 +275,8 @@ class Haps(Reconstructor[H]):
             with open(path / "genotypes" / "svar_meta.json") as f:
                 metadata = json.load(f)
             # (r s p 2)
-            shape: tuple[int, ...] = metadata["shape"]
-            dtype: str = metadata["dtype"]
+            shape: tuple[int, ...] = tuple(metadata["shape"])
+            dtype = np.dtype(metadata["dtype"])
             offsets = np.memmap(
                 path / "genotypes" / "offsets.npy", shape=shape, dtype=dtype, mode="r"
             )
@@ -840,8 +840,8 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
 
 
 @define
-class SeqsTracks(Reconstructor[Tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
-    seqs: Seqs
+class RefTracks(Reconstructor[Tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
+    seqs: Ref
     tracks: Tracks
 
     def __call__(
