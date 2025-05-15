@@ -15,7 +15,7 @@ from numpy.typing import NDArray
 from .._dataset._impl import ArrayDataset, MaybeTRK
 from .._dataset._indexing import DatasetIndexer
 from .._types import AnnotatedHaps, Idx
-from ._records import VLenAlleles
+from ._records import RaggedAlleles
 
 
 def sites_vcf_to_table(
@@ -160,7 +160,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
         ploidy = haps.shape[-1]
         sites = self.rows[r_idx]
         starts = sites["POS0"].to_numpy()  # 0-based
-        alts = VLenAlleles.from_polars(sites["ALT"])
+        alts = RaggedAlleles.from_polars(sites["ALT"])
 
         # (b p)
         haps = haps.reshape(-1, ploidy)
@@ -170,7 +170,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
             v_idxs=haps.var_idxs,  # (b p l)
             ref_coords=haps.ref_coords,  # (b p l)
             site_starts=starts,
-            alt_alleles=alts.alleles.view(np.uint8),
+            alt_alleles=alts.data.view(np.uint8),
             alt_offsets=alts.offsets,
         )
 

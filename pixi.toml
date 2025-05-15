@@ -93,7 +93,6 @@ install = "uv pip install -e ."
 pre-commit = "pre-commit install --hook-type commit-msg"
 gen = "python tests/data/generate_ground_truth.py"
 test = { cmd = "pytest tests && cargo test --release", depends-on = ["gen"] }
-publish = "maturin publish --non-interactive"
 
 [feature.docs.tasks]
 i-kernel = "ipython kernel install --user --name 'gvl-docs' --display-name 'GVL Docs'"
