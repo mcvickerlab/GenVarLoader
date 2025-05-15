@@ -19,10 +19,10 @@ __all__ = [
     "with_length",
     "Ragged",
     "get_dummy_dataset",
-    "sites_vcf_to_table",
-    "SitesSchema",
-    "DatasetWithSites",
     "ArrayDataset",
     "RaggedDataset",
     "Reference",
+    "sites_vcf_to_table",
+    "SitesSchema",
+    "DatasetWithSites",
 ]

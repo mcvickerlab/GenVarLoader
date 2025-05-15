@@ -10,7 +10,9 @@ def test_sites():
     ds = gvl.get_dummy_dataset().with_len(4).subset_to(regions=0).with_tracks(None)
     sites = (
         pl.concat([ds.regions, ds.regions])
-        .with_columns(POS=pl.col("chromStart") + pl.arange(1, 3), ALT=pl.lit("T"))
+        .with_columns(
+            POS=pl.col("chromStart") + pl.arange(1, 3), REF=pl.lit("A"), ALT=pl.lit("T")
+        )
         .rename({"chrom": "CHROM"})
         .drop("chromStart", "chromEnd")
     )

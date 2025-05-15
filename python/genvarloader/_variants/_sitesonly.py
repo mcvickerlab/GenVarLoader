@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Generic, Sequence, Tuple, overload
+from typing import Any, Generic, Sequence, Tuple, overload
 
-import cyvcf2
 import numba as nb
 import numpy as np
 import pandera.polars as pa
 import polars as pl
 import seqpro as sp
 from genoray import VCF
+from genoray._utils import ContigNormalizer
 from numpy.typing import NDArray
 
 from .._dataset._impl import ArrayDataset, MaybeTRK
@@ -20,39 +20,44 @@ from ._records import RaggedAlleles
 
 def sites_vcf_to_table(
     vcf: str | Path | VCF,
-    filter: Callable[[cyvcf2.Variant], bool] | None = None,
-    attributes: list[str] | None = None,
+    attributes: list[str] = ["CHROM", "POS", "REF", "ALT"],
     info_fields: list[str] | None = None,
 ) -> pl.DataFrame:
-    """Extract a table of variant site info from a VCF.
-    
+    """Extract a table of variant site info from a VCF. All sites must be bi-allelic.
+
     Parameters
     ----------
     vcf
-        Path to a VCF.
-    filter
-        A callable that takes a cyvcf2.Variant and returns True if the variant should be included.
+        Path to a VCF or a :code:`genoray.VCF <https://genoray.readthedocs.io/en/latest/api.html#genoray.VCF>` instance.
+        Note that :code:`genoray.VCF <https://genoray.readthedocs.io/en/latest/api.html#genoray.VCF>` can accept a filter function.
+    attributes
+        A list of attributes to include in the output table. Note that "CHROM", "POS", "REF", and "ALT" are always included
+        even if not in this list.
+    info_fields
+        A list of INFO fields to include in the output table.
     """
     if not isinstance(vcf, VCF):
         vcf = VCF(vcf)
-    if filter is not None:
-        vcf.filter = filter
 
-    min_attrs = ["CHROM", "POS", "ALT"]
-    if attributes is None:
-        attributes = min_attrs
-    else:
-        attributes = min_attrs + [attr for attr in attributes if attr not in min_attrs]
+    min_attrs = ["CHROM", "POS", "REF", "ALT"]
+    attrs = min_attrs + [attr for attr in attributes if attr not in min_attrs]
 
-    df = vcf.get_record_info(attrs=attributes, info=info_fields, progress=True)
+    df = vcf.get_record_info(attrs=attrs, info=info_fields, progress=True)
+
+    if df.select((pl.col("ALT").list.len() > 1).any()).item():
+        raise ValueError("All sites must be bi-allelic.")
+
+    df = df.with_columns(pl.col("ALT").list.first())
 
     return df
 
 
 class SitesSchema(pa.DataFrameModel):
     """Schema to validate a table of variant sites."""
+
     CHROM: str
     POS: int
+    REF: str
     ALT: str
 
 
@@ -61,7 +66,7 @@ def _sites_table_to_bedlike(sites: pl.DataFrame) -> pl.DataFrame:
     return (
         sites.with_columns(
             chromStart=pl.col("POS") - 1,
-            chromEnd=pl.col("POS") + pl.col("ALT").str.len_bytes() - 1,
+            chromEnd=pl.col("POS") + pl.col("REF").str.len_bytes() - 1,
         )
         .drop("POS")
         .rename({"CHROM": "chrom"})
@@ -70,8 +75,11 @@ def _sites_table_to_bedlike(sites: pl.DataFrame) -> pl.DataFrame:
 
 class DatasetWithSites(Generic[MaybeTRK]):
     sites: pl.DataFrame
+    """Table of variant site information."""
     dataset: ArrayDataset[AnnotatedHaps, MaybeTRK, None, None]
+    """Dataset of haplotypes and potentially tracks."""
     rows: pl.DataFrame
+    """Rows of this object, where each row is a combination of a dataset region and a site."""
     _row_map: NDArray[np.uint32]
     """Map from row index to dataset row index and site row index."""
     _idxer: DatasetIndexer
@@ -97,6 +105,30 @@ class DatasetWithSites(Generic[MaybeTRK]):
         sites: pl.DataFrame,
         max_variants_per_region: int = 1,
     ):
+        """Dataset with variant sites, used to apply site-only variants e.g. from ClinVar to a Dataset of haplotypes.
+        Currently only supports bi-allelic SNPs.
+
+        Accessed just like a Dataset, but where the rows are combinations of dataset regions and sites. Will return
+        haplotypes with variants applied and flags indicating whether the variant was applied, deleted, or existed.
+        The flags are 0 for applied, 1 for deleted, and 2 for existed. If the dataset has tracks, they will be
+        returned as well and reflect any site-only variants.
+
+        Parameters
+        ----------
+        dataset
+            Dataset of haplotypes and potentially tracks.
+        sites
+            Table of variant site information.
+        max_variants_per_region
+            Maximum number of variants per region. Currently only 1 is supported.
+
+        Examples
+        --------
+        >>> import genvarloader as gvl
+        >>> ds = gvl.Dataset.open('path/to/dataset.gvl', 'path/to/reference.fasta')
+        >>> sites = gvl.sites_vcf_to_table('path/to/variants.vcf')
+        >>> ds_sites = gvl.DatasetWithSites(ds, sites)
+        """
         if max_variants_per_region > 1:
             raise NotImplementedError("max_variants_per_region > 1 not yet supported")
 
@@ -106,6 +138,24 @@ class DatasetWithSites(Generic[MaybeTRK]):
             )
 
         sites = _sites_table_to_bedlike(sites)
+
+        if sites.select(
+            (
+                (pl.col("REF").str.len_bytes() != 1) | pl.col("ALT").str.len_bytes()
+                != 1
+            ).any()
+        ).item():
+            raise ValueError(
+                "All sites must be SNPs. Consider filtering the VCF as either a preprocessing step or via the sites_vcf_to_table function."
+            )
+
+        c_norm = ContigNormalizer(dataset.contigs)
+        chroms: list[str] = sites["chrom"].to_list()
+        norm_chroms = c_norm.norm(chroms)
+        norm_chroms = [
+            c if norm is None else norm for c, norm in zip(chroms, norm_chroms)
+        ]
+        sites = sites.with_columns(chrom=pl.Series(norm_chroms))
 
         ds_pyr = sp.bed.to_pyranges(dataset.regions.with_row_index("ds_row"))
         sites_pyr = sp.bed.to_pyranges(sites.with_row_index("site_row"))
