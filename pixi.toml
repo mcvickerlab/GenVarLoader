@@ -10,6 +10,7 @@ loguru = "*"
 attrs = "*"
 natsort = "*"
 cyvcf2 = "*"
+pgenlib = "*"
 pandera = "*"
 pysam = "*"
 pyarrow = "*"
@@ -43,10 +44,10 @@ bcftools = "*"
 plink2 = "*"
 
 [pypi-dependencies]
-# genvarloader = { path = ".", editable = true }
+genvarloader = { path = ".", editable = true }
 hirola = "==0.3"
 seqpro = "==0.3.2"
-genoray = "==0.10.7"
+genoray = "==0.10.8"
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"

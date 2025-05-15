@@ -19,12 +19,24 @@ from ._records import RaggedAlleles
 
 
 def sites_vcf_to_table(
-    vcf: str | Path | cyvcf2.VCF,
+    vcf: str | Path | VCF,
     filter: Callable[[cyvcf2.Variant], bool] | None = None,
     attributes: list[str] | None = None,
     info_fields: list[str] | None = None,
 ) -> pl.DataFrame:
-    _vcf = VCF(vcf, filter)
+    """Extract a table of variant site info from a VCF.
+    
+    Parameters
+    ----------
+    vcf
+        Path to a VCF.
+    filter
+        A callable that takes a cyvcf2.Variant and returns True if the variant should be included.
+    """
+    if not isinstance(vcf, VCF):
+        vcf = VCF(vcf)
+    if filter is not None:
+        vcf.filter = filter
 
     min_attrs = ["CHROM", "POS", "ALT"]
     if attributes is None:
@@ -32,12 +44,13 @@ def sites_vcf_to_table(
     else:
         attributes = min_attrs + [attr for attr in attributes if attr not in min_attrs]
 
-    df = _vcf.get_record_info(attrs=attributes, info=info_fields, progress=True)
+    df = vcf.get_record_info(attrs=attributes, info=info_fields, progress=True)
 
     return df
 
 
 class SitesSchema(pa.DataFrameModel):
+    """Schema to validate a table of variant sites."""
     CHROM: str
     POS: int
     ALT: str
