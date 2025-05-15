@@ -821,7 +821,7 @@ class Dataset:
 
         .. code-block:: python
 
-            r_idx = ds.input_regions["chrom"] == "chr1"
+            r_idx = ds.regions["chrom"] == "chr1"
             ds.subset_to(regions=r_idx)
 
 
@@ -829,31 +829,20 @@ class Dataset:
 
         .. code-block:: python
 
-            r_idx = ds.input_regions["split"] == "train"
+            r_idx = ds.regions["split"] == "train"
             ds.subset_to(regions=r_idx)
 
 
-        Subsetting to dataset regions that intersect with another set of regions (requires `PyRanges <https://github.com/pyranges/pyranges>`_):
+        Subsetting to the intersection with another set of regions:
 
         .. code-block:: python
 
-            import pyranges as pr
+            import seqpro as sp
 
             regions = gvl.read_bedlike("regions.bed")
-            renamer = {
-                "chrom": "Chromosome",
-                "chromStart": "Start",
-                "chromEnd": "End",
-                "strand": "Strand"
-            }
-            regions_pr = pr.PyRanges(bed.rename(renamer, strict=False).to_pandas())
-            input_regions_pr = pr.PyRanges(
-                ds.input_regions
-                .with_row_index()
-                .rename(renamer, strict=False)
-                .to_pandas()
-            )
-            r_idx = input_regions_pr.overlap(regions_pr).df["index"].to_numpy()
+            regions_pr = sp.bed.to_pyranges(regions)
+            ds_regions_pr = sp.bed.to_pyranges(ds.regions.with_row_index())
+            r_idx = ds_regions_pr.overlap(regions_pr).df["index"].to_numpy()
             ds.subset_to(regions=r_idx)
         """
         if regions is None and samples is None:
