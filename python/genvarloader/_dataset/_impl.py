@@ -21,11 +21,11 @@ from typing import (
 import numpy as np
 import polars as pl
 from attrs import define, evolve, field
+from genoray._utils import ContigNormalizer
 from loguru import logger
 from numpy.typing import NDArray
 from typing_extensions import NoReturn, Self, assert_never
 
-from .._fasta import Fasta
 from .._ragged import (
     Ragged,
     RaggedAnnotatedHaps,
@@ -37,7 +37,7 @@ from .._ragged import (
 )
 from .._torch import TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx
-from .._utils import _normalize_contig_name, idx_like_to_array
+from .._utils import idx_like_to_array
 from ._genotypes import SparseGenotypes
 from ._indexing import DatasetIndexer
 from ._reconstruct import Haps, HapsTracks, Ref, Reference, RefTracks, Tracks
@@ -108,7 +108,7 @@ class Dataset:
     @staticmethod
     def open(
         path: str | Path,
-        reference: str | Path,
+        reference: str | Path | Reference,
         jitter: int = 0,
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
@@ -117,7 +117,7 @@ class Dataset:
     @staticmethod
     def open(
         path: str | Path,
-        reference: str | Path | None = None,
+        reference: str | Path | Reference | None = None,
         jitter: int = 0,
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
@@ -184,20 +184,6 @@ class Dataset:
 
         has_intervals = (path / "intervals").exists()
 
-        if reference is not None:
-            _fasta = Fasta("ref", reference, "N")
-            if missing := list(
-                c
-                for c, b in zip(
-                    contigs, _normalize_contig_name(contigs, _fasta.contigs)
-                )
-                if b is None
-            ):
-                raise RuntimeError(
-                    f"The dataset has regions on contigs {missing} that do not exist in the"
-                    ' reference (even after removing/adding the "chr" prefix).'
-                )
-
         match reference, has_genotypes, has_intervals:
             case _, False, False:
                 raise RuntimeError(
@@ -217,7 +203,10 @@ class Dataset:
                 logger.info(
                     "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
                 )
-                _reference = Reference.from_path_and_contigs(reference, contigs)
+                if isinstance(reference, Reference):
+                    _reference = reference
+                else:
+                    _reference = Reference.from_path(reference, contigs)
                 seqs = Ref(reference=_reference)
                 tracks = Tracks.from_path(path, regions, len(samples))
                 tracks = tracks.with_tracks(list(tracks.intervals))
@@ -226,7 +215,10 @@ class Dataset:
                 logger.info(
                     "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
                 )
-                _reference = Reference.from_path_and_contigs(reference, contigs)
+                if isinstance(reference, Reference):
+                    _reference = reference
+                else:
+                    _reference = Reference.from_path(reference, contigs)
                 assert phased is not None
                 assert ploidy is not None
                 seqs = Haps.from_path(
@@ -243,7 +235,10 @@ class Dataset:
                 logger.info(
                     "Loading reference genome into memory. This typically has a modest memory footprint (a few GB) and greatly improves performance."
                 )
-                _reference = Reference.from_path_and_contigs(reference, contigs)
+                if isinstance(reference, Reference):
+                    _reference = reference
+                else:
+                    _reference = Reference.from_path(reference, contigs)
                 assert phased is not None
                 assert ploidy is not None
                 seqs = Haps.from_path(
@@ -263,14 +258,23 @@ class Dataset:
                 assert_never(has_intervals)
 
         if seqs is not None:
+            cnorm = ContigNormalizer(seqs.reference.contigs)
             contig_lengths = dict(
                 zip(seqs.reference.contigs, np.diff(seqs.reference.offsets))
             )
+            ds_contigs = bed["chrom"].unique().to_list()
+            normed_contigs = cnorm.norm(ds_contigs)
+            if any(c is None for c in normed_contigs):
+                raise ValueError(
+                    "Some regions in the dataset can not be mapped to a contig in the reference genome."
+                )
+            normed_contigs = cast(list[str], normed_contigs)
+            replacer = {
+                c: contig_lengths[norm_c]
+                for c, norm_c in zip(ds_contigs, normed_contigs)
+            }
             out_of_bounds = bed.select(
-                (
-                    pl.col("chromStart")
-                    >= pl.col("chrom").replace_strict(contig_lengths)
-                ).any()
+                (pl.col("chromStart") >= pl.col("chrom").replace_strict(replacer)).any()
             ).item()
             if out_of_bounds:
                 logger.warning(
@@ -817,7 +821,7 @@ class Dataset:
 
         .. code-block:: python
 
-            r_idx = ds.input_regions["chrom"] == "chr1"
+            r_idx = ds.regions["chrom"] == "chr1"
             ds.subset_to(regions=r_idx)
 
 
@@ -825,31 +829,20 @@ class Dataset:
 
         .. code-block:: python
 
-            r_idx = ds.input_regions["split"] == "train"
+            r_idx = ds.regions["split"] == "train"
             ds.subset_to(regions=r_idx)
 
 
-        Subsetting to dataset regions that intersect with another set of regions (requires `PyRanges <https://github.com/pyranges/pyranges>`_):
+        Subsetting to the intersection with another set of regions:
 
         .. code-block:: python
 
-            import pyranges as pr
+            import seqpro as sp
 
             regions = gvl.read_bedlike("regions.bed")
-            renamer = {
-                "chrom": "Chromosome",
-                "chromStart": "Start",
-                "chromEnd": "End",
-                "strand": "Strand"
-            }
-            regions_pr = pr.PyRanges(bed.rename(renamer, strict=False).to_pandas())
-            input_regions_pr = pr.PyRanges(
-                ds.input_regions
-                .with_row_index()
-                .rename(renamer, strict=False)
-                .to_pandas()
-            )
-            r_idx = input_regions_pr.overlap(regions_pr).df["index"].to_numpy()
+            regions_pr = sp.bed.to_pyranges(regions)
+            ds_regions_pr = sp.bed.to_pyranges(ds.regions.with_row_index())
+            r_idx = ds_regions_pr.overlap(regions_pr).df["index"].to_numpy()
             ds.subset_to(regions=r_idx)
         """
         if regions is None and samples is None:
@@ -1277,7 +1270,10 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK, IDX, TFM]):
     ) -> ArrayDataset[NDArray[np.bytes_], MaybeTRK, IDX, TFM]: ...
     def with_len(
         self, output_length: Literal["ragged", "variable"] | int
-    ) -> Union[RaggedDataset[MaybeRSEQ, MaybeRTRK, IDX, TFM], ArrayDataset[SEQ, MaybeTRK, IDX, TFM]]:
+    ) -> Union[
+        RaggedDataset[MaybeRSEQ, MaybeRTRK, IDX, TFM],
+        ArrayDataset[SEQ, MaybeTRK, IDX, TFM],
+    ]:
         return super().with_len(output_length)
 
     @overload
@@ -1352,7 +1348,9 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK, IDX, TFM]):
         transform: Callable[[SEQ, NDArray[np.float32], IDX], T],
     ) -> ArrayDataset[SEQ, NDArray[np.float32], IDX, T]: ...
     @overload
-    def with_transform(self, transform: None) -> ArrayDataset[MaybeSEQ, MaybeTRK, IDX, None]: ...
+    def with_transform(
+        self, transform: None
+    ) -> ArrayDataset[MaybeSEQ, MaybeTRK, IDX, None]: ...
     def with_transform(self, transform: Callable | None) -> ArrayDataset:
         return super().with_transform(transform)
 
@@ -1449,7 +1447,10 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK, IDX, TFM]):
     ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK, IDX, TFM]: ...
     def with_len(
         self, output_length: Union[Literal["ragged", "variable"], int]
-    ) -> Union[RaggedDataset[MaybeRSEQ, MaybeRTRK, IDX, TFM], ArrayDataset[MaybeSEQ, MaybeTRK, IDX, TFM]]:
+    ) -> Union[
+        RaggedDataset[MaybeRSEQ, MaybeRTRK, IDX, TFM],
+        ArrayDataset[MaybeSEQ, MaybeTRK, IDX, TFM],
+    ]:
         return super().with_len(output_length)
 
     @overload

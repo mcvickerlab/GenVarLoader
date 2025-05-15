@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Set, Tuple, Union, cast
 import awkward as ak
 import numpy as np
 import polars as pl
+import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseVar
 from genoray._svar import V_IDX_TYPE, SparseGenotypes
 from genoray._utils import parse_memory
@@ -23,12 +24,6 @@ from .._utils import _lengths_to_offsets, _normalize_contig_name, read_bedlike
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._genotypes import SparseSomaticGenotypes
 from ._utils import splits_sum_le_value
-
-__all__ = ["write"]
-
-
-INITIAL_END_EXTENSION = 1000
-EXTEND_END_MULTIPLIER = 1.1
 
 
 def write(
@@ -112,6 +107,8 @@ def write(
                 variants = PGEN(variants)
             elif path_is_vcf(variants):
                 variants = VCF(variants)
+            elif variants.is_dir() and variants.suffix == ".svar":
+                variants = SparseVar(variants)
             else:
                 raise ValueError(
                     f"File {variants} has an unrecognized file extension. Please provide either a VCF or PGEN file.`"
@@ -193,7 +190,6 @@ def _prep_bed(
     if bed.height == 0:
         raise ValueError("No regions found in the BED file.")
 
-    contigs = natsorted(bed["chrom"].unique().to_list())
     with pl.StringCache():
         if "strand" not in bed:
             bed = bed.with_columns(strand=pl.lit(1, pl.Int32))
@@ -203,15 +199,10 @@ def _prep_bed(
                 .cast(pl.Utf8)
                 .replace_strict({"+": 1, "-": -1, ".": 1}, return_dtype=pl.Int32)
             )
+
     bed = bed.select("chrom", "chromStart", "chromEnd", "strand")
-    with pl.StringCache():
-        pl.Series(contigs, dtype=pl.Categorical)
-        bed = bed.with_row_index().sort(
-            pl.col("chrom").cast(pl.Categorical),
-            pl.col("chromStart"),
-            pl.col("chromEnd"),
-            maintain_order=True,
-        )
+    contigs = natsorted(bed["chrom"].unique().to_list())
+    bed = sp.bed.sort(bed.with_row_index())
 
     input_to_sorted_idx_map = np.argsort(bed["index"])
     bed = bed.drop("index")
@@ -240,9 +231,11 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if vcf._index is None:
-        if not vcf._index_path().exists():
-            vcf._write_gvi_index()
+        if not vcf._valid_index():
+            logger.info("VCF genoray index is invalid, writing")
+            vcf._write_gvi_index(progress=True)
 
+        logger.info("Loading VCF genoray index")
         vcf._load_index()
 
     assert vcf._index is not None
@@ -277,10 +270,14 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
     offset_memmap_offsets = 0
     last_offset = 0
     max_ends: list[int] = []
-    pbar = tqdm(total=bed.height, desc="Processing genotypes", unit=" region")
+    pbar = tqdm(total=bed.height, unit=" region")
+    first_no_variant_warning = True
     for (contig,), df in bed.partition_by(
         "chrom", as_dict=True, maintain_order=True
     ).items():
+        pbar.set_description(
+            f"Processing genotypes for {df.height} regions on contig {contig}"
+        )
         contig = cast(str, contig)
         starts = df["chromStart"].to_numpy().copy()
         ends = df["chromEnd"].to_numpy().copy()
@@ -291,11 +288,14 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
         ):
             var_idxs = var_idxs.astype(V_IDX_TYPE)
             if range_ is None:
-                logger.warning(
-                    "All regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
-                    " and source of variants. However, this can also be caused by a mismatch between the"
-                    " reference genome used for the BED file coordinates and the one used for the variants."
-                )
+                if first_no_variant_warning:
+                    first_no_variant_warning = False
+                    logger.warning(
+                        "A region has no variants for any sample. This could be expected depending on the region lengths"
+                        " and source of variants. However, this can also be caused by a mismatch between the"
+                        " reference genome used for the BED file coordinates and the one used for the variants."
+                        " This warning will not be shown again."
+                    )
 
                 max_ends.append(e)
                 sp_genos = SparseGenotypes.empty(
@@ -352,12 +352,13 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
                 var_idxs = ak.flatten(
                     ak.concatenate([a.to_awkward() for a in ls_sparse], -1), None
                 ).to_numpy()
-                # (r s p)
+                # (s p)
                 lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
 
-                if (lengths == 0).all((1, 2)).any():
+                if first_no_variant_warning and (lengths == 0).all():
+                    first_no_variant_warning = False
                     logger.warning(
-                        "Some regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                        "A region has no variants for any sample. This could be expected depending on the region lengths"
                         " and source of variants. However, this can also be caused by a mismatch between the"
                         " reference genome used for the BED file coordinates and the one used for the variants."
                     )
@@ -410,15 +411,19 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
         }
     ).write_ipc(out_dir / "variants.arrow")
 
-    pbar = tqdm(total=bed.height, desc="Processing genotypes", unit=" region")
+    pbar = tqdm(total=bed.height, unit=" region")
 
     v_idx_memmap_offsets = 0
     offset_memmap_offsets = 0
     last_offset = 0
     max_ends: list[np.integer] = []
-    for contig, df in bed.partition_by(
+    first_no_variant_warning = True
+    for (contig,), df in bed.partition_by(
         "chrom", as_dict=True, maintain_order=True
     ).items():
+        pbar.set_description(
+            f"Processing genotypes for {df.height} regions on contig {contig}"
+        )
         contig = cast(str, contig)
         starts = df["chromStart"].to_numpy().copy()
         ends = df["chromEnd"].to_numpy().copy()
@@ -426,11 +431,13 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
             pgen._chunk_ranges_with_length(contig, starts, ends, max_mem), ends
         ):
             if range_ is None:
-                logger.warning(
-                    "All regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
-                    " and source of variants. However, this can also be caused by a mismatch between the"
-                    " reference genome used for the BED file coordinates and the one used for the variants."
-                )
+                if first_no_variant_warning:
+                    first_no_variant_warning = False
+                    logger.warning(
+                        "A region has no variants for any sample. This could be expected depending on the region lengths"
+                        " and source of variants. However, this can also be caused by a mismatch between the"
+                        " reference genome used for the BED file coordinates and the one used for the variants."
+                    )
 
                 max_ends.append(e)
                 sp_genos = SparseGenotypes.empty(
@@ -483,12 +490,13 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
                 var_idxs = ak.flatten(
                     ak.concatenate([a.to_awkward() for a in ls_sparse], -1), None
                 ).to_numpy()
-                # (r s p)
+                # (s p)
                 lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
 
-                if (lengths == 0).all((1, 2)).any():
+                if first_no_variant_warning and (lengths == 0).all():
+                    first_no_variant_warning = False
                     logger.warning(
-                        "Some regions in this chunk have no variants for any sample. This could be expected depending on the region lengths"
+                        "A region has no variants for any sample. This could be expected depending on the region lengths"
                         " and source of variants. However, this can also be caused by a mismatch between the"
                         " reference genome used for the BED file coordinates and the one used for the variants."
                     )
@@ -508,6 +516,8 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
                 )
 
             pbar.update()
+
+    pbar.close()
 
     out = np.memmap(
         out_dir / "offsets.npy",
@@ -543,18 +553,26 @@ def _write_from_svar(
     max_ends = np.empty(bed.height, np.int32)
     contig_offset = 0
     pbar = tqdm(total=bed.height, unit=" region")
+    first_no_variant_warning = True
     for (c,), df in bed.partition_by(
         "chrom", as_dict=True, maintain_order=True
     ).items():
         c = cast(str, c)
-        pbar.set_description(f"Processing {df.height} regions on contig {c}")
+        pbar.set_description(
+            f"Processing genotypes for {df.height} regions on contig {c}"
+        )
+        # set offsets
         # (r s p 2)
         out = offsets[contig_offset : contig_offset + df.height]
         svar._find_starts_ends_with_length(
             c, df["chromStart"], df["chromEnd"], samples=samples, out=out
         )
 
-        if (out == np.iinfo(OFFSET_TYPE).max).all((1, 2, 3)).any():
+        if (
+            first_no_variant_warning
+            and (out == np.iinfo(OFFSET_TYPE).max).all((1, 2, 3)).any()
+        ):
+            first_no_variant_warning = False
             logger.warning(
                 "Some regions have no variants for any sample. This could be expected depending on the region lengths"
                 " and source of variants. However, this can also be caused by a mismatch between the"
@@ -569,6 +587,7 @@ def _write_from_svar(
         )
         # this is fine if there aren't any overlapping variants that could make a v_idx < -1
         # have a further end than v_idx == -1
+        # * calling ak.max() means v_idxs is not a view of svar.genos.data
         # (r s p ~v) -> (r)
         v_idxs = ak.max(sp_genos.to_awkward(), -1).to_numpy().max((1, 2))  # type: ignore
         c_max_ends = max_ends[contig_offset : contig_offset + df.height]

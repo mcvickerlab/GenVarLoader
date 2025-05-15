@@ -36,7 +36,7 @@ def bed():
 
 @fixture
 def ref():
-    return ddir / "fasta" / "Homo_sapiens.GRCh38.dna.primary_assembly.fa.bgz"
+    return ddir / "fasta" / "hg38.fa.bgz"
 
 
 @mark.skip
@@ -101,4 +101,4 @@ def test_write(reader: Reader, bed: pl.DataFrame, ref: Path, tmp_path):
     max_len = lengths.max()
     for len_ in range(1, max_len + 1):
         mask = ak.num(desired, -1) == len_
-        assert ak.all(actual[mask][:, :len_] == desired[mask][:, :len_])
+        assert ak.all(actual[mask][:, :len_] == desired[mask][:, :len_])  # type: ignore

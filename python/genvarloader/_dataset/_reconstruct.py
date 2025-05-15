@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Callable,
     Dict,
     List,
@@ -33,7 +34,7 @@ from .._ragged import (
     RaggedIntervals,
 )
 from .._utils import _lengths_to_offsets, _normalize_contig_name
-from .._variants._records import VLenAlleles
+from .._variants._records import RaggedAlleles
 from ._genotypes import (
     SparseGenotypes,
     SparseSomaticGenotypes,
@@ -51,30 +52,58 @@ T = TypeVar("T", covariant=True)
 
 @define
 class Reference:
+    """A reference genome kept in-memory. Typically this is only instantiated to be
+    passed to :meth:`Dataset.open <genvarloader.Dataset.open>` and avoid data duplication.
+
+    .. note::
+        Do not instantiate this class directly. Use :meth:`Reference.from_path` instead.
+    """
+
     reference: NDArray[np.uint8]
     contigs: List[str]
     offsets: NDArray[np.uint64]
     pad_char: int
 
     @classmethod
-    def from_path_and_contigs(cls, fasta: Union[str, Path], contigs: List[str]):
+    def from_path(cls, fasta: Union[str, Path], contigs: List[str] | None = None):
+        """Load a reference genome from a FASTA file.
+
+        Parameters
+        ----------
+        fasta
+            Path to the FASTA file.
+        contigs
+            List of contig names to load. If None, all contigs in the FASTA file are loaded.
+            Can be either UCSC or Ensembl style (i.e. with or without the "chr" prefix) and
+            will be handled appropriately to match the underlying FASTA.
+        """
         _fasta = Fasta("ref", fasta, "N")
 
         if not _fasta.cache_path.exists():
             logger.info("Memory-mapping FASTA file for faster access.")
             _fasta._write_to_cache()
 
-        contigs = [
-            c
-            for c in _normalize_contig_name(contigs, list(_fasta.contigs))
-            if c is not None
-        ]
-        sequences = _fasta._get_sequences(contigs)
+        if contigs is None:
+            contigs = list(_fasta.contigs)
+
+        _contigs = [_normalize_contig_name(c, _fasta.contigs) for c in contigs]
+        if unmapped := [
+            source for source, mapped in zip(contigs, _contigs) if mapped is None
+        ]:
+            raise ValueError(
+                f"Some of the given contig names are not present in reference file: {unmapped}"
+            )
+        contigs = cast(list[str], _contigs)
+
+        _fasta.sequences = _fasta._get_sequences(contigs)
+        if TYPE_CHECKING:
+            assert _fasta.sequences is not None
+            assert _fasta.pad is not None
         refs: List[NDArray[np.bytes_]] = []
         next_offset = 0
         _ref_offsets: Dict[str, int] = {}
         for contig in contigs:
-            arr = sequences[contig]
+            arr = _fasta.sequences[contig]
             refs.append(arr)
             _ref_offsets[contig] = next_offset
             next_offset += len(arr)
@@ -92,7 +121,7 @@ class Reference:
 class _Variants:
     positions: NDArray[np.int32]
     sizes: NDArray[np.int32]
-    alts: VLenAlleles
+    alts: RaggedAlleles
 
     @classmethod
     def from_table(cls, variants: Union[str, Path, pl.DataFrame]):
@@ -101,7 +130,7 @@ class _Variants:
         return cls(
             variants["POS"].to_numpy(),
             variants["ILEN"].to_numpy(),
-            VLenAlleles.from_polars(variants["ALT"]),
+            RaggedAlleles.from_polars(variants["ALT"]),
         )
 
 
@@ -246,8 +275,8 @@ class Haps(Reconstructor[H]):
             with open(path / "genotypes" / "svar_meta.json") as f:
                 metadata = json.load(f)
             # (r s p 2)
-            shape: tuple[int, ...] = metadata["shape"]
-            dtype: str = metadata["dtype"]
+            shape: tuple[int, ...] = tuple(metadata["shape"])
+            dtype = np.dtype(metadata["dtype"])
             offsets = np.memmap(
                 path / "genotypes" / "offsets.npy", shape=shape, dtype=dtype, mode="r"
             )
@@ -265,7 +294,7 @@ class Haps(Reconstructor[H]):
             variants = _Variants(
                 svar_index["POS"].to_numpy() - 1,
                 svar_index["ILEN"].to_numpy(),
-                VLenAlleles.from_polars(svar_index["ALT"]),
+                RaggedAlleles.from_polars(svar_index["ALT"]),
             )
         return cls(
             reference=reference,
@@ -544,7 +573,7 @@ class Haps(Reconstructor[H]):
             geno_v_idxs=self.genotypes.data,
             positions=self.variants.positions,
             sizes=self.variants.sizes,
-            alt_alleles=self.variants.alts.alleles.view(np.uint8),
+            alt_alleles=self.variants.alts.data.view(np.uint8),
             alt_offsets=self.variants.alts.offsets,
             ref=self.reference.reference,
             ref_offsets=self.reference.offsets,

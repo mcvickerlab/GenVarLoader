@@ -2,6 +2,7 @@ import importlib.metadata
 
 from ._bigwig import BigWigs
 from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
+from ._dataset._reconstruct import Reference
 from ._dataset._write import write
 from ._dummy import get_dummy_dataset
 from ._ragged import Ragged
@@ -23,4 +24,5 @@ __all__ = [
     "DatasetWithSites",
     "ArrayDataset",
     "RaggedDataset",
+    "Reference",
 ]
