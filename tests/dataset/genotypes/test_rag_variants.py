@@ -31,6 +31,18 @@ def ccfs_no_germs():
     return ccfs, v_starts, ilens, v_offsets, max_ccf, desired
 
 
+def ccfs_all_nonoverlap_germs():
+    ccfs = np.full(4, np.nan, np.float32)
+    v_starts = np.array([0, 1, 2, 3], POS_TYPE)
+    ilens = np.array([0, 0, 0, 0], np.int32)
+    v_offsets = np.array([0, 4], OFFSET_TYPE)
+    max_ccf = 1.0
+
+    desired = np.full_like(ccfs, max_ccf)
+
+    return ccfs, v_starts, ilens, v_offsets, max_ccf, desired
+
+
 def ccfs_overlap_som():
     ccfs = np.array([0.1, np.nan, 0.2, 0.3], np.float32)
     v_starts = np.array([0, 1, 1, 1], POS_TYPE)
@@ -72,9 +84,7 @@ def ccfs_spanning_del():
 
 
 @parametrize_with_cases(
-    "ccfs, v_idxs, v_starts, ilens, v_offsets, max_ccf, desired",
-    cases=".",
-    prefix="ccfs_",
+    "ccfs, v_starts, ilens, v_offsets, max_ccf, desired", cases=".", prefix="ccfs_"
 )
 def test_infer_germ_ccfs(
     ccfs: NDArray[np.float32],

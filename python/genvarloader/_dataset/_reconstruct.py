@@ -277,7 +277,7 @@ class Haps(Reconstructor[_H]):
             )
 
             if dosage_path.exists():
-                dosages = np.memmap(geno_path, dtype=DOSAGE_TYPE, mode="r")
+                dosages = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
                 dosages = SparseDosages.from_offsets(
                     dosages, shape[:-1], offsets.reshape(-1, 2)
                 )

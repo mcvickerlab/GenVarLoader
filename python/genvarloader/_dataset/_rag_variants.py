@@ -91,21 +91,19 @@ def _infer_germline_ccfs(
     ----------
     ccfs
         Shape: (alts) raveled view of ragged cancer cell fractions.
-    v_idxs
-        Shape: (alts) variant indices.
-    v_starts
-        Shape: (total_variants) 0-based start positions.
-    ilens
-        Shape: (total_variants) indel lengths.
     v_offsets
-        Shape: (slices + 1) offsets into :code:`ccfs`.
+        Shape: (alts + 1) offsets into :code:`ccfs`.
+    v_starts
+        Shape: (alts) 0-based start positions.
+    ilens
+        Shape: (alts) indel lengths.
     max_ccf
-        Maximum CCF value.
+        Maximum cancer cell fraction.
     """
     n_sp = len(v_offsets) - 1
     for o_idx in nb.prange(n_sp):
         o_s, o_e = v_offsets[o_idx], v_offsets[o_idx + 1]
-        n_variants = o_e - o_s
+        n_variants: int = o_e - o_s
         if n_variants == 0:
             continue
 
@@ -115,11 +113,14 @@ def _infer_germline_ccfs(
         v_start = v_starts[o_s:o_e]
         ilen = ilens[o_s:o_e]
 
-        v_end = v_start - np.minimum(0, ilen) + 1  # atomized variants
+        v_end = (
+            v_start - np.minimum(0, ilen) + 1
+        )  # +1 for atomic variants, +shared_len for non-atomic
         v_end_sorter = np.argsort(v_end)
         v_end = v_end[v_end_sorter]
 
         # sorted merge by starts then ends
+        # ends are marked by being negative
         starts_ends = np.empty(n_variants * 2, POS_TYPE)
         se_local_idx = np.empty(n_variants * 2, V_IDX_TYPE)
         start_idx = 0
@@ -135,11 +136,10 @@ def _infer_germline_ccfs(
                 se_local_idx[i] = v_end_sorter[end_idx]
                 end_idx += 1
 
-        #! this assumes that no germline variants overlap
-        #! true for non-atomic phased genotypes
-        #! wrong for complex indels e.g A>TT insertion --atomize--> A>T,A>AT
         running_ccf = DOSAGE_TYPE(0)
+        # use -1 to mark that we are not currently within a germline variant
         g_idx = V_IDX_TYPE(-1)
+        # set g_end to maximum possible value
         g_end = np.iinfo(POS_TYPE).max
         for i in range(n_variants * 2):
             pos: POS_TYPE = starts_ends[i]
@@ -147,13 +147,16 @@ def _infer_germline_ccfs(
             pos_ccf: DOSAGE_TYPE = ccf[local_idx]
             is_germ = np.isnan(pos_ccf)
 
+            # end of variant overlaps with end of current germline variant
             #! without this we will decrement the running CCF before setting the germline CCF
             # this is because tied ends are sorted by start, but the ends are 0-based exclusive
             # so we need to set the germline CCF before we start any decrementing
             if -pos >= g_end:
                 ccf[g_idx] = max_ccf - running_ccf
+                g_idx = -1
                 g_end = np.iinfo(POS_TYPE).max
 
+            # start of a germline variant
             if is_germ and pos > 0:
                 # for now: check for overlapping variants and set to zero
                 # to correspond to behavior of haplotype reconstruction
@@ -168,7 +171,7 @@ def _infer_germline_ccfs(
                 # to the wrong place
                 g_end = pos - min(0, ilen[local_idx]) + 1
             else:
-                # sign of position, with 0 being positive
+                # sign of pos, with 0 being positive
                 running_ccf += (2 * (pos >= 0) - 1) * pos_ccf
 
         np.nan_to_num(ccf, copy=False, nan=max_ccf)
