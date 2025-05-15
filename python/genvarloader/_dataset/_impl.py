@@ -148,9 +148,7 @@ class Dataset:
             Random seed or np.random.Generator for any stochastic operations.
         deterministic
             Whether to use randomized or deterministic algorithms. If set to True, this will disable random
-            shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
-            and always apply the highest CCF group. Note that for unphased variants, this will mean not all possible haplotypes
-            can be returned.
+            shifting of longer-than-requested haplotypes.
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
         """
@@ -165,7 +163,6 @@ class Dataset:
         contigs: List[str] = metadata["contigs"]
         ploidy: Optional[int] = metadata.get("ploidy", None)
         max_jitter: int = metadata.get("max_jitter", 0)
-        phased: Optional[bool] = metadata.get("phased", None)
 
         # read input regions and generate index map
         bed = pl.read_ipc(path / "input_regions.arrow")
@@ -186,8 +183,6 @@ class Dataset:
 
         has_genotypes = (path / "genotypes").exists()
         if has_genotypes:
-            if phased is None:
-                raise ValueError("Malformed dataset: found genotypes but not phase.")
             if ploidy is None:
                 raise ValueError("Malformed dataset: found genotypes but not ploidy.")
 
@@ -228,12 +223,10 @@ class Dataset:
                     _reference = reference
                 else:
                     _reference = Reference.from_path(reference, contigs)
-                assert phased is not None
                 assert ploidy is not None
                 seqs = Haps.from_path(
                     path,
                     reference=_reference,
-                    phased=phased,
                     regions=regions,
                     samples=samples,
                     ploidy=ploidy,
@@ -248,12 +241,10 @@ class Dataset:
                     _reference = reference
                 else:
                     _reference = Reference.from_path(reference, contigs)
-                assert phased is not None
                 assert ploidy is not None
                 seqs = Haps.from_path(
                     path,
                     reference=_reference,
-                    phased=phased,
                     regions=regions,
                     samples=samples,
                     ploidy=ploidy,

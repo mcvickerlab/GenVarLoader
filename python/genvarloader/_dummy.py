@@ -11,6 +11,7 @@ from ._dataset._impl import RaggedDataset
 from ._dataset._indexing import DatasetIndexer
 from ._dataset._intervals import tracks_to_intervals
 from ._dataset._reconstruct import (
+    POS_TYPE,
     Haps,
     HapsTracks,
     RaggedSeqs,
@@ -70,7 +71,9 @@ def get_dummy_dataset():
     )
 
     dummy_vars = _Variants(
-        v_starts=repeat(dummy_regions[:, 1], "r -> (r s)", s=n_samples),
+        v_starts=repeat(
+            dummy_regions[:, 1].astype(POS_TYPE), "r -> (r s)", s=n_samples
+        ),
         ilens=repeat(np.array([-2, -1, 0, 1], np.int32), "s -> (r s)", r=n_regions),
         alts=RaggedAlleles.from_offsets(
             data=repeat(sp.cast_seqs("ACGTT"), "a -> (r a)", r=n_regions),
@@ -95,7 +98,13 @@ def get_dummy_dataset():
         offsets=np.arange(0, 4 * 4 + 1, dtype=np.int64),  # every entry has 1 variant
     )
 
-    dummy_haps = Haps(dummy_ref, dummy_vars, dummy_genos, RaggedSeqs)
+    dummy_haps = Haps(
+        reference=dummy_ref,
+        variants=dummy_vars,
+        genotypes=dummy_genos,
+        dosages=None,
+        kind=RaggedSeqs,
+    )
 
     # (r s), want tracks of [1, 2, 3, 4, 5] for each region so that pad values of 0 are obvious
     track_regions = dummy_regions.copy()

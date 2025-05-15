@@ -44,12 +44,7 @@ from .._fasta import Fasta
 from .._ragged import INTERVAL_DTYPE, RaggedAnnotatedHaps, RaggedIntervals, is_rag_dtype
 from .._utils import _lengths_to_offsets, _normalize_contig_name
 from .._variants._records import RaggedAlleles
-from ._genotypes import (
-    SparseSomaticGenotypes,
-    choose_unphased_variants,
-    get_diffs_sparse,
-    reconstruct_haplotypes_from_sparse,
-)
+from ._genotypes import get_diffs_sparse, reconstruct_haplotypes_from_sparse
 from ._indexing import DatasetIndexer
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._rag_variants import RaggedVariants
@@ -247,7 +242,6 @@ class Haps(Reconstructor[_H]):
         cls: type[Haps[RaggedSeqs]],
         path: Path,
         reference: Reference,
-        phased: bool,
         regions: NDArray[np.int32],
         samples: List[str],
         ploidy: int,
@@ -298,19 +292,16 @@ class Haps(Reconstructor[_H]):
         else:
             logger.info("Loading variant data.")
             variants = _Variants.from_table(path / "genotypes" / "variants.arrow")
-            if phased:
-                v_idxs = np.memmap(
-                    path / "genotypes" / "variant_idxs.npy",
-                    dtype=V_IDX_TYPE,
-                    mode="r",
-                )
-                offsets = np.memmap(
-                    path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
-                )
-                shape = (len(regions), len(samples), ploidy)
-                genotypes = SparseGenotypes.from_offsets(v_idxs, shape, offsets)
-            else:
-                raise NotImplementedError
+            v_idxs = np.memmap(
+                path / "genotypes" / "variant_idxs.npy",
+                dtype=V_IDX_TYPE,
+                mode="r",
+            )
+            offsets = np.memmap(
+                path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
+            )
+            shape = (len(regions), len(samples), ploidy)
+            genotypes = SparseGenotypes.from_offsets(v_idxs, shape, offsets)
 
         return cls(
             reference=reference,
@@ -332,39 +323,16 @@ class Haps(Reconstructor[_H]):
         # (b p)
         geno_offset_idxs = self.get_geno_offset_idx(idx, self.genotypes)
 
-        if isinstance(self.genotypes, SparseSomaticGenotypes):
-            if keep is None or keep_offsets is None:
-                keep, keep_offsets = choose_unphased_variants(
-                    starts=jittered_regions[:, 1],
-                    ends=jittered_regions[:, 2],
-                    geno_offset_idxs=geno_offset_idxs,
-                    geno_v_idxs=self.genotypes.data,
-                    geno_offsets=self.genotypes.offsets,
-                    v_starts=self.variants.v_starts,
-                    ilens=self.variants.ilens,
-                    ccfs=self.genotypes.ccfs,
-                    deterministic=deterministic,
-                )
-            # (r s p)
-            hap_ilens = get_diffs_sparse(
-                geno_offset_idxs=geno_offset_idxs,
-                geno_v_idxs=self.genotypes.data,
-                geno_offsets=self.genotypes.offsets,
-                ilens=self.variants.ilens,
-                keep=keep,
-                keep_offsets=keep_offsets,
-            )
-        else:
-            # (r s p)
-            hap_ilens = get_diffs_sparse(
-                geno_offset_idxs=geno_offset_idxs,
-                geno_v_idxs=self.genotypes.data,
-                geno_offsets=self.genotypes.offsets,
-                ilens=self.variants.ilens,
-                q_starts=jittered_regions[:, 1],
-                q_ends=jittered_regions[:, 2],
-                v_starts=self.variants.v_starts,
-            )
+        # (r s p)
+        hap_ilens = get_diffs_sparse(
+            geno_offset_idxs=geno_offset_idxs,
+            geno_v_idxs=self.genotypes.data,
+            geno_offsets=self.genotypes.offsets,
+            ilens=self.variants.ilens,
+            q_starts=jittered_regions[:, 1],
+            q_ends=jittered_regions[:, 2],
+            v_starts=self.variants.v_starts,
+        )
 
         return hap_ilens.reshape(-1, self.genotypes.shape[-1])
 
@@ -486,7 +454,7 @@ class Haps(Reconstructor[_H]):
     @staticmethod
     def get_geno_offset_idx(
         idx: NDArray[np.integer],
-        genotypes: Union[SparseGenotypes, SparseSomaticGenotypes],
+        genotypes: SparseGenotypes,
     ) -> NDArray[np.intp]:
         r_idx, s_idx = np.unravel_index(idx, genotypes.shape[:2])
         ploid_idx = np.arange(genotypes.shape[-1], dtype=np.intp)
