@@ -2,7 +2,7 @@ import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
-from .._ragged import INTERVAL_DTYPE
+from .._types import INTERVAL_DTYPE
 
 __all__ = []
 
@@ -11,10 +11,10 @@ __all__ = []
 def intervals_to_tracks(
     offset_idxs: NDArray[np.integer],
     starts: NDArray[np.int32],
-    out_offsets: NDArray[np.int64],
     intervals: NDArray[np.void],
     itv_offsets: NDArray[np.int64],
     out: NDArray[np.float32],
+    out_offsets: NDArray[np.int64],
 ):
     """Convert intervals to tracks at base-pair resolution.
     Assumptions:
@@ -31,9 +31,9 @@ def intervals_to_tracks(
     out_offsets : NDArray[np.int64]
         Shape = (batch + 1) Offsets into output tracks.
     intervals : NDArray[np.void]
-        Ragged shape = (regions*samples*intervals) Sorted intervals with struct dtype: (start: i32, end: i32, value: f32).
+        Ragged shape = (... ~intervals) Sorted intervals with struct dtype: (start: i32, end: i32, value: f32).
     itv_offsets : NDArray[np.uint32]
-        Shape = (regions*samples + 1) Offsets into intervals and values.
+        Shape = (n_slices + 1) Offsets into intervals and values.
         For a GVL Dataset, n_interval_sets = n_samples * n_regions with that layout.
 
     Returns

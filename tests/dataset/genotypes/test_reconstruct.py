@@ -92,7 +92,7 @@ def case_spanning_del_pad():
 
     desired = np.frombuffer(b"GGN", dtype="S1")
     annot_v_idxs = np.array([-1, -1, -1], dtype=np.int32)
-    annot_pos = np.array([2, 3, -1], dtype=np.int32)
+    annot_pos = np.array([2, 3, np.iinfo(np.int32).max], dtype=np.int32)
 
     sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
 

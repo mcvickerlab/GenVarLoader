@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import enum
+import itertools
 import json
 from functools import partial
 from pathlib import Path
@@ -7,6 +9,7 @@ from typing import (
     TYPE_CHECKING,
     Callable,
     Dict,
+    Iterable,
     List,
     Literal,
     Optional,
@@ -117,7 +120,7 @@ class Reference:
             _ref_offsets[contig] = next_offset
             next_offset += len(arr)
         reference = np.concatenate(refs).view(np.uint8)
-        pad_char = ord(_fasta.pad)
+        pad_char = ord("N")
         if any(c is None for c in contigs):
             raise ValueError("Contig names in metadata do not match reference.")
         ref_offsets = np.empty(len(contigs) + 1, np.uint64)
@@ -149,6 +152,7 @@ class Reconstructor(Protocol[T]):
     def __call__(
         self,
         idx: NDArray[np.integer],
+        r_idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
@@ -157,13 +161,14 @@ class Reconstructor(Protocol[T]):
 
 
 @define
-class Seqs(Reconstructor[Ragged[np.bytes_]]):
+class Ref(Reconstructor[Ragged[np.bytes_]]):
     reference: Reference
     """The reference genome. This is kept in memory."""
 
     def __call__(
         self,
         idx: NDArray[np.integer],
+        r_idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
@@ -342,6 +347,7 @@ class Haps(Reconstructor[_H]):
     def __call__(
         self,
         idx: NDArray[np.integer],
+        r_idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
@@ -612,29 +618,64 @@ class Haps(Reconstructor[_H]):
             return haps
 
 
+class TrackType(enum.Enum):
+    SAMPLE = enum.auto()
+    ANNOT = enum.auto()
+
+
 @define
 class Tracks(Reconstructor[Ragged[np.float32]]):
-    intervals: Dict[str, RaggedIntervals]
+    intervals: dict[str, RaggedIntervals]
     """The intervals in the dataset. This is memory mapped."""
-    active_tracks: List[str]
+    active_tracks: dict[str, TrackType]
+    available_tracks: dict[str, TrackType]
 
-    def with_tracks(self, tracks: str | List[str]) -> Tracks:
+    def with_tracks(self, tracks: str | Iterable[str] | None) -> Tracks:
+        if tracks is None:
+            return evolve(self, active_tracks={})
+
         if isinstance(tracks, str):
-            tracks = [tracks]
-        if missing := list(set(tracks) - set(self.intervals)):
+            _tracks = [tracks]
+        else:
+            _tracks = tracks
+
+        if missing := list(set(_tracks) - set(self.intervals)):
             raise ValueError(f"Missing tracks: {missing}")
+
+        tracks = {t: self.available_tracks[t] for t in _tracks}
+
         return evolve(self, active_tracks=tracks)
 
     @classmethod
-    def from_path(cls, path: Path, regions: NDArray[np.int32], n_samples: int):
+    def from_path(cls, path: Path, n_regions: int, n_samples: int):
+        strack_dir = path / "intervals"
+        atrack_dir = path / "annot_intervals"
+
         available_tracks: List[str] = []
-        for p in (path / "intervals").iterdir():
-            if len(list(p.iterdir())) == 0:
-                p.rmdir()
-            else:
-                available_tracks.append(p.name)
-        available_tracks.sort()
+        if strack_dir.exists():
+            for p in (path / "intervals").iterdir():
+                if len(list(p.iterdir())) == 0:
+                    p.rmdir()
+                else:
+                    available_tracks.append(p.name)
+            available_tracks.sort()
+
+        available_annots: list[str] = []
+        if atrack_dir.exists():
+            for p in (path / "annot_intervals").iterdir():
+                if len(list(p.iterdir())) == 0:
+                    p.rmdir()
+                else:
+                    available_annots.append(p.name)
+            available_annots.sort()
+
+        if name_clash := set(available_tracks) & set(available_annots):
+            raise ValueError(
+                f"Found sample and annotation tracks with the same name: {name_clash}"
+            )
+
         intervals: Optional[Dict[str, RaggedIntervals]] = {}
+
         for track in available_tracks:
             itvs = np.memmap(
                 path / "intervals" / track / "intervals.npy",
@@ -647,13 +688,32 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
                 mode="r",
             )
             intervals[track] = RaggedIntervals.from_offsets(
-                itvs, (len(regions), n_samples), offsets
+                itvs, (n_regions, n_samples), offsets
             )
-        return cls(intervals, available_tracks)
+
+        for track in available_annots:
+            itvs = np.memmap(
+                path / "annot_intervals" / track / "intervals.npy",
+                dtype=INTERVAL_DTYPE,
+                mode="r",
+            )
+            offsets = np.memmap(
+                path / "annot_intervals" / track / "offsets.npy",
+                dtype=np.int64,
+                mode="r",
+            )
+            intervals[track] = RaggedIntervals.from_offsets(itvs, n_regions, offsets)
+
+        all_tracks = dict(
+            zip(available_tracks, itertools.repeat(TrackType.SAMPLE))
+        ) | dict(zip(available_annots, itertools.repeat(TrackType.ANNOT)))
+
+        return cls(intervals, all_tracks, all_tracks)
 
     def __call__(
         self,
         idx: NDArray[np.integer],
+        r_idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
@@ -683,12 +743,18 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
         out_lens = repeat(out_lengths, "b -> b t", t=len(self.active_tracks))
         out_offsets = _lengths_to_offsets(out_lens)
 
-        for track_ofst, name in enumerate(self.active_tracks):
+        for track_ofst, (name, tracktype) in enumerate(self.active_tracks.items()):
             intervals = self.intervals[name]
             # (b t l) ragged
             _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
+
+            if tracktype is TrackType.SAMPLE:
+                o_idx = idx
+            else:
+                o_idx = r_idx
+
             intervals_to_tracks(
-                offset_idxs=idx,
+                offset_idxs=o_idx,
                 starts=regions[:, 1],
                 intervals=intervals.data,
                 itv_offsets=intervals.offsets,
@@ -698,7 +764,7 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
 
         out_shape = (len(idx), len(self.active_tracks))
 
-        # ragged (b t [p] l)
+        # ragged (b t l)
         tracks = Ragged.from_offsets(out, out_shape, out_offsets)
 
         return tracks
@@ -851,17 +917,20 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
         out[-1] = last_offset
         out.flush()
 
-        return self.from_path(path, regions, n_samples).with_tracks(self.active_tracks)
+        return self.from_path(path, len(regions), n_samples).with_tracks(
+            self.active_tracks
+        )
 
 
 @define
-class SeqsTracks(Reconstructor[Tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
-    seqs: Seqs
+class RefTracks(Reconstructor[Tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
+    seqs: Ref
     tracks: Tracks
 
     def __call__(
         self,
         idx: NDArray[np.integer],
+        r_idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
@@ -869,6 +938,7 @@ class SeqsTracks(Reconstructor[Tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
     ) -> Tuple[Ragged[np.bytes_], Ragged[np.float32]]:
         seqs = self.seqs(
             idx=idx,
+            r_idx=r_idx,
             regions=regions,
             output_length=output_length,
             jitter=jitter,
@@ -876,6 +946,7 @@ class SeqsTracks(Reconstructor[Tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
         )
         tracks = self.tracks(
             idx=idx,
+            r_idx=r_idx,
             regions=regions,
             output_length=output_length,
             jitter=jitter,
@@ -896,6 +967,7 @@ class HapsTracks(Reconstructor[tuple[_H, Ragged[np.float32]]]):
     def __call__(
         self,
         idx: NDArray[np.integer],  # (b)
+        r_idx: NDArray[np.integer],  # (b)
         regions: NDArray[np.int32],  # (b 3)
         output_length: Union[Literal["ragged", "variable"], int],
         jitter: int,
@@ -934,14 +1006,22 @@ class HapsTracks(Reconstructor[tuple[_H, Ragged[np.float32]]]):
         out_lens = repeat(out_lengths, "b p -> b t p", t=len(self.tracks.active_tracks))
         out_offsets = _lengths_to_offsets(out_lens)
 
-        for track_ofst, name in enumerate(self.tracks.active_tracks):
+        for track_ofst, (name, tracktype) in enumerate(
+            self.tracks.active_tracks.items()
+        ):
             intervals = self.tracks.intervals[name]
 
             # ragged (b l)
             _tracks = np.empty(track_ofsts_per_t[-1], np.float32)
+
+            if tracktype is TrackType.SAMPLE:
+                o_idx = idx
+            else:
+                o_idx = r_idx
+
             intervals_to_tracks(
+                offset_idxs=o_idx,  # (b)
                 starts=regions[:, 1],  # (b)
-                offset_idxs=idx,  # (b)
                 intervals=intervals.data,  # (r*s*l)
                 itv_offsets=intervals.offsets,  # (r*s+1)
                 out=_tracks,  # (b*l)

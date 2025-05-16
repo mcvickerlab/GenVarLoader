@@ -12,7 +12,7 @@ from seqpro._ragged import Ragged
 from ._types import DTYPE, AnnotatedHaps
 from ._utils import _lengths_to_offsets
 
-__all__ = ["Ragged", "RaggedIntervals", "INTERVAL_DTYPE", "pad_ragged"]
+__all__ = ["Ragged", "RaggedIntervals", "pad_ragged"]
 
 RDTYPE = TypeVar("RDTYPE", bound=np.generic)
 INTERVAL_DTYPE = np.dtype(

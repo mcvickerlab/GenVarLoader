@@ -166,6 +166,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/pandera-base-0.23.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/patchelf-0.17.2-h58526e2_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
+      - conda: https://conda.anaconda.org/bioconda/linux-64/pgenlib-0.91.0-py312h5e9d817_1.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/platformdirs-4.3.7-pyh29332c3_0.conda
       - conda: https://conda.anaconda.org/bioconda/linux-64/plink2-2.0.0a.6.9-h9948957_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/pluggy-1.5.0-pyhd8ed1ab_1.conda
@@ -245,13 +246,16 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c8/14/299f99ce0fde4985cc5ba6f2258c624a5b9bbc547c3d243d99919ca53761/cyclopts-3.14.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d5/7c/e9fcff7623954d86bdc17782036cbf715ecab1bec4847c008557affe1ca8/docstring_parser-0.16-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8f/d7/9322c609343d929e75e7e5e6255e614fcc67572cfd083959cdef3b7aad79/docutils-0.21.2-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/55/0f/96a7b226d683c30342887d6e99e9cbf1ad2f9029d0105b82697bb5e3f86f/genoray-0.10.7-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/d2/a8/90a1246c1de9037f83810c24f02464483674f60b770678e6fdece33e597d/genoray-0.10.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/a9/a6/aa38bddc9f8d90e5ce14023f06ccbf642ab5d507da1ffafb031c0f332dc6/numerary-0.4.4-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/18/ec/5434c4a6012ef2ff12d0e71b6c341532686ee82d63e5101717abc24eb3f5/pgenlib-0.92.0.tar.gz
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/bd/06/5c9ed34ec048e51e115cd1b3cf9d9c258e3c75b3105b42db11c0282536a3/pysam-0.23.0-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/fd/bc/cc4e3dbc5e7992398dcb7a8eda0cbcf4fb792a0cdb93f857b478bf3cf884/rich_rst-1.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f5/a1/6de4f7bf0a7704a200de5d0fbaf4d333fd5ca56b9a3e6f3a3ad05e99ba98/seqpro-0.3.2-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/c6/64/3d24181aaea3fb892d4a46f8171845782ee364d60e9494426daf31d12f47/tbb-2022.1.0-py2.py3-none-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/06/bb/09a6dc2f1110b409d6d2f96429969d7466bde9bf4ad8b2e682d851ef104b/tcmlib-1.3.0-py2.py3-none-manylinux_2_28_x86_64.whl
+      - pypi: ./
   dev:
     channels:
     - url: https://conda.anaconda.org/conda-forge/
@@ -425,6 +429,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/pandera-base-0.23.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/patchelf-0.17.2-h58526e2_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
+      - conda: https://conda.anaconda.org/bioconda/linux-64/pgenlib-0.91.0-py310h275bdba_1.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/platformdirs-4.3.7-pyh29332c3_0.conda
       - conda: https://conda.anaconda.org/bioconda/linux-64/plink2-2.0.0a.6.9-h9948957_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/pluggy-1.5.0-pyhd8ed1ab_1.conda
@@ -511,17 +516,20 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c8/14/299f99ce0fde4985cc5ba6f2258c624a5b9bbc547c3d243d99919ca53761/cyclopts-3.14.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d5/7c/e9fcff7623954d86bdc17782036cbf715ecab1bec4847c008557affe1ca8/docstring_parser-0.16-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8f/d7/9322c609343d929e75e7e5e6255e614fcc67572cfd083959cdef3b7aad79/docutils-0.21.2-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/55/0f/96a7b226d683c30342887d6e99e9cbf1ad2f9029d0105b82697bb5e3f86f/genoray-0.10.7-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/d2/a8/90a1246c1de9037f83810c24f02464483674f60b770678e6fdece33e597d/genoray-0.10.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/1a/c1/31b3184cba7b257a4a3b5ca5b88b9204ccb7aa02fe3c992280899293ed54/lightning_utilities-0.14.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a9/a6/aa38bddc9f8d90e5ce14023f06ccbf642ab5d507da1ffafb031c0f332dc6/numerary-0.4.4-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/55/20/93ef95a37e1aa3c3dd2ca1cd1cba8c8849823311d034921c0ec38949ffad/Pgenlib-0.92.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/5a/45/38ae786fb646e5032a982029ad1c0964433e74b67e328d2c9d2fc6691639/pysam-0.23.0-cp310-cp310-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/82/ff/5701f79317a1a03e5ee8a1bf48e7273a8445162a2774e51fc06411a67c89/pytorch_lightning-2.5.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/fd/bc/cc4e3dbc5e7992398dcb7a8eda0cbcf4fb792a0cdb93f857b478bf3cf884/rich_rst-1.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f5/a1/6de4f7bf0a7704a200de5d0fbaf4d333fd5ca56b9a3e6f3a3ad05e99ba98/seqpro-0.3.2-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/c6/64/3d24181aaea3fb892d4a46f8171845782ee364d60e9494426daf31d12f47/tbb-2022.1.0-py2.py3-none-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/06/bb/09a6dc2f1110b409d6d2f96429969d7466bde9bf4ad8b2e682d851ef104b/tcmlib-1.3.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/72/25/973bd6128381951b23cdcd8a9870c6dcfc5606cb864df8eabd82e529f9c1/torchinfo-1.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e0/ee/4d0a7213a6f412afb3483031009a3b970dd7bed3be24de95ab04fba1c05a/torchmetrics-1.7.1-py3-none-any.whl
+      - pypi: ./
   docs:
     channels:
     - url: https://conda.anaconda.org/conda-forge/
@@ -735,6 +743,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/patchelf-0.17.2-h58526e2_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pexpect-4.9.0-pyhd8ed1ab_1.conda
+      - conda: https://conda.anaconda.org/bioconda/linux-64/pgenlib-0.91.0-py312h5e9d817_1.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/pickleshare-0.7.5-pyhd8ed1ab_1004.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pkgutil-resolve-name-1.3.10-pyhd8ed1ab_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/platformdirs-4.3.7-pyh29332c3_0.conda
@@ -854,17 +863,20 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/28/53/21f7b97e82772caa61541348427f42435120b32961c92d16f9c8ce9757d6/cslug-1.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c8/14/299f99ce0fde4985cc5ba6f2258c624a5b9bbc547c3d243d99919ca53761/cyclopts-3.14.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d5/7c/e9fcff7623954d86bdc17782036cbf715ecab1bec4847c008557affe1ca8/docstring_parser-0.16-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/55/0f/96a7b226d683c30342887d6e99e9cbf1ad2f9029d0105b82697bb5e3f86f/genoray-0.10.7-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/d2/a8/90a1246c1de9037f83810c24f02464483674f60b770678e6fdece33e597d/genoray-0.10.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/1a/c1/31b3184cba7b257a4a3b5ca5b88b9204ccb7aa02fe3c992280899293ed54/lightning_utilities-0.14.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a9/a6/aa38bddc9f8d90e5ce14023f06ccbf642ab5d507da1ffafb031c0f332dc6/numerary-0.4.4-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/18/ec/5434c4a6012ef2ff12d0e71b6c341532686ee82d63e5101717abc24eb3f5/pgenlib-0.92.0.tar.gz
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/bd/06/5c9ed34ec048e51e115cd1b3cf9d9c258e3c75b3105b42db11c0282536a3/pysam-0.23.0-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/82/ff/5701f79317a1a03e5ee8a1bf48e7273a8445162a2774e51fc06411a67c89/pytorch_lightning-2.5.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/fd/bc/cc4e3dbc5e7992398dcb7a8eda0cbcf4fb792a0cdb93f857b478bf3cf884/rich_rst-1.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f5/a1/6de4f7bf0a7704a200de5d0fbaf4d333fd5ca56b9a3e6f3a3ad05e99ba98/seqpro-0.3.2-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/c6/64/3d24181aaea3fb892d4a46f8171845782ee364d60e9494426daf31d12f47/tbb-2022.1.0-py2.py3-none-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/06/bb/09a6dc2f1110b409d6d2f96429969d7466bde9bf4ad8b2e682d851ef104b/tcmlib-1.3.0-py2.py3-none-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/72/25/973bd6128381951b23cdcd8a9870c6dcfc5606cb864df8eabd82e529f9c1/torchinfo-1.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e0/ee/4d0a7213a6f412afb3483031009a3b970dd7bed3be24de95ab04fba1c05a/torchmetrics-1.7.1-py3-none-any.whl
+      - pypi: ./
   py310:
     channels:
     - url: https://conda.anaconda.org/conda-forge/
@@ -1038,6 +1050,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/pandera-base-0.23.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/patchelf-0.18.0-h3f2d84a_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
+      - conda: https://conda.anaconda.org/bioconda/linux-64/pgenlib-0.91.0-py310h275bdba_1.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/platformdirs-4.3.7-pyh29332c3_0.conda
       - conda: https://conda.anaconda.org/bioconda/linux-64/plink2-2.0.0a.6.9-h9948957_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/pluggy-1.5.0-pyhd8ed1ab_1.conda
@@ -1123,13 +1136,16 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c8/14/299f99ce0fde4985cc5ba6f2258c624a5b9bbc547c3d243d99919ca53761/cyclopts-3.14.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d5/7c/e9fcff7623954d86bdc17782036cbf715ecab1bec4847c008557affe1ca8/docstring_parser-0.16-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8f/d7/9322c609343d929e75e7e5e6255e614fcc67572cfd083959cdef3b7aad79/docutils-0.21.2-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/55/0f/96a7b226d683c30342887d6e99e9cbf1ad2f9029d0105b82697bb5e3f86f/genoray-0.10.7-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/d2/a8/90a1246c1de9037f83810c24f02464483674f60b770678e6fdece33e597d/genoray-0.10.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/a9/a6/aa38bddc9f8d90e5ce14023f06ccbf642ab5d507da1ffafb031c0f332dc6/numerary-0.4.4-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/55/20/93ef95a37e1aa3c3dd2ca1cd1cba8c8849823311d034921c0ec38949ffad/Pgenlib-0.92.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/5a/45/38ae786fb646e5032a982029ad1c0964433e74b67e328d2c9d2fc6691639/pysam-0.23.0-cp310-cp310-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/fd/bc/cc4e3dbc5e7992398dcb7a8eda0cbcf4fb792a0cdb93f857b478bf3cf884/rich_rst-1.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f5/a1/6de4f7bf0a7704a200de5d0fbaf4d333fd5ca56b9a3e6f3a3ad05e99ba98/seqpro-0.3.2-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/c6/64/3d24181aaea3fb892d4a46f8171845782ee364d60e9494426daf31d12f47/tbb-2022.1.0-py2.py3-none-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/06/bb/09a6dc2f1110b409d6d2f96429969d7466bde9bf4ad8b2e682d851ef104b/tcmlib-1.3.0-py2.py3-none-manylinux_2_28_x86_64.whl
+      - pypi: ./
   py311:
     channels:
     - url: https://conda.anaconda.org/conda-forge/
@@ -1303,6 +1319,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/pandera-base-0.23.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/patchelf-0.18.0-h3f2d84a_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
+      - conda: https://conda.anaconda.org/bioconda/linux-64/pgenlib-0.91.0-py311h2de2dd3_1.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/platformdirs-4.3.7-pyh29332c3_0.conda
       - conda: https://conda.anaconda.org/bioconda/linux-64/plink2-2.0.0a.6.9-h9948957_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/pluggy-1.5.0-pyhd8ed1ab_1.conda
@@ -1388,13 +1405,16 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c8/14/299f99ce0fde4985cc5ba6f2258c624a5b9bbc547c3d243d99919ca53761/cyclopts-3.14.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d5/7c/e9fcff7623954d86bdc17782036cbf715ecab1bec4847c008557affe1ca8/docstring_parser-0.16-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8f/d7/9322c609343d929e75e7e5e6255e614fcc67572cfd083959cdef3b7aad79/docutils-0.21.2-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/55/0f/96a7b226d683c30342887d6e99e9cbf1ad2f9029d0105b82697bb5e3f86f/genoray-0.10.7-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/d2/a8/90a1246c1de9037f83810c24f02464483674f60b770678e6fdece33e597d/genoray-0.10.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/a9/a6/aa38bddc9f8d90e5ce14023f06ccbf642ab5d507da1ffafb031c0f332dc6/numerary-0.4.4-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/89/99/b692da8386ff7b0dd80cf17f1be918127e3279d8878cdadf5494b70dd4f6/Pgenlib-0.92.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/43/00/9a7c84ab4106ea5e63bcfa6f94570cf8dbdf046a86d8797e24b5e19d432a/pysam-0.23.0-cp311-cp311-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/fd/bc/cc4e3dbc5e7992398dcb7a8eda0cbcf4fb792a0cdb93f857b478bf3cf884/rich_rst-1.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f5/a1/6de4f7bf0a7704a200de5d0fbaf4d333fd5ca56b9a3e6f3a3ad05e99ba98/seqpro-0.3.2-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/c6/64/3d24181aaea3fb892d4a46f8171845782ee364d60e9494426daf31d12f47/tbb-2022.1.0-py2.py3-none-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/06/bb/09a6dc2f1110b409d6d2f96429969d7466bde9bf4ad8b2e682d851ef104b/tcmlib-1.3.0-py2.py3-none-manylinux_2_28_x86_64.whl
+      - pypi: ./
   py312:
     channels:
     - url: https://conda.anaconda.org/conda-forge/
@@ -1568,6 +1588,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/pandera-base-0.23.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/patchelf-0.18.0-h3f2d84a_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
+      - conda: https://conda.anaconda.org/bioconda/linux-64/pgenlib-0.91.0-py312h5e9d817_1.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/platformdirs-4.3.7-pyh29332c3_0.conda
       - conda: https://conda.anaconda.org/bioconda/linux-64/plink2-2.0.0a.6.9-h9948957_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/noarch/pluggy-1.5.0-pyhd8ed1ab_1.conda
@@ -1653,13 +1674,16 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c8/14/299f99ce0fde4985cc5ba6f2258c624a5b9bbc547c3d243d99919ca53761/cyclopts-3.14.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d5/7c/e9fcff7623954d86bdc17782036cbf715ecab1bec4847c008557affe1ca8/docstring_parser-0.16-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8f/d7/9322c609343d929e75e7e5e6255e614fcc67572cfd083959cdef3b7aad79/docutils-0.21.2-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/55/0f/96a7b226d683c30342887d6e99e9cbf1ad2f9029d0105b82697bb5e3f86f/genoray-0.10.7-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/d2/a8/90a1246c1de9037f83810c24f02464483674f60b770678e6fdece33e597d/genoray-0.10.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/8e/0eccb528701273640dd4f13678a0c1352176166aecd1ee7f4fa29355132b/hirola-0.3.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/a9/a6/aa38bddc9f8d90e5ce14023f06ccbf642ab5d507da1ffafb031c0f332dc6/numerary-0.4.4-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/18/ec/5434c4a6012ef2ff12d0e71b6c341532686ee82d63e5101717abc24eb3f5/pgenlib-0.92.0.tar.gz
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/bd/06/5c9ed34ec048e51e115cd1b3cf9d9c258e3c75b3105b42db11c0282536a3/pysam-0.23.0-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/fd/bc/cc4e3dbc5e7992398dcb7a8eda0cbcf4fb792a0cdb93f857b478bf3cf884/rich_rst-1.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f5/a1/6de4f7bf0a7704a200de5d0fbaf4d333fd5ca56b9a3e6f3a3ad05e99ba98/seqpro-0.3.2-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/c6/64/3d24181aaea3fb892d4a46f8171845782ee364d60e9494426daf31d12f47/tbb-2022.1.0-py2.py3-none-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/06/bb/09a6dc2f1110b409d6d2f96429969d7466bde9bf4ad8b2e682d851ef104b/tcmlib-1.3.0-py2.py3-none-manylinux_2_28_x86_64.whl
+      - pypi: ./
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_libgcc_mutex-0.1-conda_forge.tar.bz2
   sha256: fe51de6107f9edc7aa4f786a70f4a883943bc9d39b3bb7307c04c41410990726
@@ -1816,7 +1840,6 @@ packages:
   - python >=3.9
   - typing_extensions >=4.1.0
   license: BSD-3-Clause
-  license_family: BSD
   purls:
   - pkg:pypi/awkward?source=hash-mapping
   size: 429538
@@ -2018,7 +2041,6 @@ packages:
   sha256: 9b5a7323dbe50245790dc9c7527ae9b2f8341eeb491ccead060e2a159bd113fd
   md5: 2c3fdcb5a1bf40fd7b6b5598718e5929
   depends:
-  - libgcc >=13
   - __glibc >=2.17,<3.0.a0
   - aws-c-io >=0.18.0,<0.18.1.0a0
   - aws-c-cal >=0.8.9,<0.8.10.0a0
@@ -3056,10 +3078,10 @@ packages:
   - pkg:pypi/fsspec?source=compressed-mapping
   size: 142117
   timestamp: 1743437355974
-- pypi: https://files.pythonhosted.org/packages/55/0f/96a7b226d683c30342887d6e99e9cbf1ad2f9029d0105b82697bb5e3f86f/genoray-0.10.7-py3-none-any.whl
+- pypi: https://files.pythonhosted.org/packages/d2/a8/90a1246c1de9037f83810c24f02464483674f60b770678e6fdece33e597d/genoray-0.10.8-py3-none-any.whl
   name: genoray
-  version: 0.10.7
-  sha256: 0de569336d3c40413053ca3db38c74b8fd359d3ad0b5e17a0e6cfb6d9eec9ff1
+  version: 0.10.8
+  sha256: caf905bcbb102565565a5fd6ef158a91320364fe979527c282516d99ae65b692
   requires_dist:
   - attrs
   - awkward
@@ -3071,7 +3093,7 @@ packages:
   - numba
   - numpy>=1.26
   - pandas>=2.2.2
-  - pgenlib>=0.92.0
+  - pgenlib>=0.91.0
   - phantom-types>=3
   - polars>=1.26
   - pyarrow>=16
@@ -3080,6 +3102,34 @@ packages:
   - tqdm>=4.65
   - typing-extensions>=4.11
   requires_python: '>=3.9,<3.13'
+- pypi: ./
+  name: genvarloader
+  version: 0.14.4
+  sha256: 362bf50057570ecd4c4a7b9cc93a4ac2ff6f7cff2c88fe3283e9b4141f9c6221
+  requires_dist:
+  - numba>=0.58.1
+  - loguru
+  - attrs
+  - natsort
+  - polars>=1.26
+  - cyvcf2
+  - pandera
+  - pysam
+  - pyarrow
+  - pyranges
+  - more-itertools
+  - tqdm
+  - pybigwig
+  - einops
+  - tbb
+  - joblib
+  - pooch
+  - awkward
+  - hirola>=0.3,<0.4
+  - seqpro>=0.3.2
+  - genoray>=0.10.8
+  requires_python: '>=3.10,<3.13'
+  editable: true
 - conda: https://conda.anaconda.org/conda-forge/linux-64/gflags-2.2.2-h5888daf_1005.conda
   sha256: 6c33bf0c4d8f418546ba9c250db4e4221040936aef8956353bc764d4877bc39a
   md5: d411fc29e338efb48c5fd4576d71d881
@@ -4906,7 +4956,6 @@ packages:
   - python >=3.10,<3.11.0a0
   - python_abi 3.10.* *_cp310
   license: BSD-2-Clause
-  license_family: BSD
   purls:
   - pkg:pypi/llvmlite?source=hash-mapping
   size: 29942580
@@ -4938,7 +4987,6 @@ packages:
   - python >=3.12,<3.13.0a0
   - python_abi 3.12.* *_cp312
   license: BSD-2-Clause
-  license_family: BSD
   purls:
   - pkg:pypi/llvmlite?source=hash-mapping
   size: 29996918
@@ -6163,27 +6211,57 @@ packages:
   - pkg:pypi/pexpect?source=compressed-mapping
   size: 53561
   timestamp: 1733302019362
-- pypi: https://files.pythonhosted.org/packages/18/ec/5434c4a6012ef2ff12d0e71b6c341532686ee82d63e5101717abc24eb3f5/pgenlib-0.92.0.tar.gz
-  name: pgenlib
-  version: 0.92.0
-  sha256: 805c87976d8371d5c33a1d87ba1bd2f08150805119b1ff0453bb2aca813b74f9
-  requires_dist:
-  - numpy>=1.19.0
-  requires_python: '>=3.5'
-- pypi: https://files.pythonhosted.org/packages/55/20/93ef95a37e1aa3c3dd2ca1cd1cba8c8849823311d034921c0ec38949ffad/Pgenlib-0.92.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-  name: pgenlib
-  version: 0.92.0
-  sha256: 56cc9715c3464f2d5559f0779cf671922c7651ed2aff3b851974968b86c167f7
-  requires_dist:
-  - numpy>=1.19.0
-  requires_python: '>=3.5'
-- pypi: https://files.pythonhosted.org/packages/89/99/b692da8386ff7b0dd80cf17f1be918127e3279d8878cdadf5494b70dd4f6/Pgenlib-0.92.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-  name: pgenlib
-  version: 0.92.0
-  sha256: 1875f05956d08217adbf8750598dc564741ad6bda1d8f724f45dda9b740ecf66
-  requires_dist:
-  - numpy>=1.19.0
-  requires_python: '>=3.5'
+- conda: https://conda.anaconda.org/bioconda/linux-64/pgenlib-0.91.0-py310h275bdba_1.tar.bz2
+  sha256: 6012aee6f2c9d2f7dd78b27f4246b1c74bde6158744faf82823d36622c564ac7
+  md5: 84456e3dddde471fdc0356b946709cce
+  depends:
+  - libgcc >=13
+  - libstdcxx >=13
+  - libzlib >=1.3.1,<2.0a0
+  - numpy >=1.19.0
+  - numpy >=1.21,<3
+  - python >=3.10,<3.11.0a0
+  - python_abi 3.10.* *_cp310
+  license: LGPL-3.0-or-later
+  license_family: LGPL
+  purls:
+  - pkg:pypi/pgenlib?source=hash-mapping
+  size: 481085
+  timestamp: 1733935120454
+- conda: https://conda.anaconda.org/bioconda/linux-64/pgenlib-0.91.0-py311h2de2dd3_1.tar.bz2
+  sha256: 8bea567c1e5e6f9ca8e76c8dff1aed172e448f7fef56af2458269fd3170898c2
+  md5: eb352fc539a9c7ebc6804d3d27ffeaf7
+  depends:
+  - libgcc >=13
+  - libstdcxx >=13
+  - libzlib >=1.3.1,<2.0a0
+  - numpy >=1.19.0
+  - numpy >=1.21,<3
+  - python >=3.11,<3.12.0a0
+  - python_abi 3.11.* *_cp311
+  license: LGPL-3.0-or-later
+  license_family: LGPL
+  purls:
+  - pkg:pypi/pgenlib?source=hash-mapping
+  size: 481052
+  timestamp: 1733935205655
+- conda: https://conda.anaconda.org/bioconda/linux-64/pgenlib-0.91.0-py312h5e9d817_1.tar.bz2
+  sha256: be92b7dd397ca19a3edffc3a821d09c7f68c4e824af0fe1f3be758c9f56e5e5b
+  md5: bf9e22703f84c9fbf5b6196cd7da44ad
+  depends:
+  - libgcc >=13
+  - libstdcxx >=13
+  - libzlib >=1.3.1,<2.0a0
+  - numpy >=1.19.0
+  - numpy >=1.21,<3
+  - python >=3.12,<3.13.0a0
+  - python_abi 3.12.* *_cp312
+  license: LGPL-3.0-or-later
+  license_family: LGPL
+  purls:
+  - pkg:pypi/pgenlib?source=hash-mapping
+  size: 490315
+  timestamp: 1733935294763
 - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
   name: phantom-types
   version: 3.0.2
@@ -6856,6 +6934,21 @@ packages:
   - pkg:pypi/pyranges?source=hash-mapping
   size: 1488324
   timestamp: 1741965990888
+- pypi: https://files.pythonhosted.org/packages/43/00/9a7c84ab4106ea5e63bcfa6f94570cf8dbdf046a86d8797e24b5e19d432a/pysam-0.23.0-cp311-cp311-manylinux_2_28_x86_64.whl
+  name: pysam
+  version: 0.23.0
+  sha256: 4923c614adf642ffc7620a76faf38f57f2d834b1ba4ab567596db2ac6266038f
+  requires_python: '>=3.6'
+- pypi: https://files.pythonhosted.org/packages/5a/45/38ae786fb646e5032a982029ad1c0964433e74b67e328d2c9d2fc6691639/pysam-0.23.0-cp310-cp310-manylinux_2_28_x86_64.whl
+  name: pysam
+  version: 0.23.0
+  sha256: e681d04efe21040b3888f7484f84a2636433503cfb903bbf9b91d671726ceaed
+  requires_python: '>=3.6'
+- pypi: https://files.pythonhosted.org/packages/bd/06/5c9ed34ec048e51e115cd1b3cf9d9c258e3c75b3105b42db11c0282536a3/pysam-0.23.0-cp312-cp312-manylinux_2_28_x86_64.whl
+  name: pysam
+  version: 0.23.0
+  sha256: 4fd54bae72a832317aab23ad45970f9091ac2c7c233c5a6826941095fbd7f103
+  requires_python: '>=3.6'
 - conda: https://conda.anaconda.org/bioconda/linux-64/pysam-0.23.0-py310h64e62c9_0.tar.bz2
   sha256: a6313ee84df3b44a30fb594d5ef2f2e59b0984b9c631baf2560f561d71627e5e
   md5: f04bd0d137ca5bdb9c6073b28e35ea0e
@@ -8151,6 +8244,12 @@ packages:
   - pkg:pypi/tabulate?source=hash-mapping
   size: 37554
   timestamp: 1733589854804
+- pypi: https://files.pythonhosted.org/packages/c6/64/3d24181aaea3fb892d4a46f8171845782ee364d60e9494426daf31d12f47/tbb-2022.1.0-py2.py3-none-manylinux_2_28_x86_64.whl
+  name: tbb
+  version: 2022.1.0
+  sha256: 4992a3f2268b33f9a7b4c274af9d7001f550e74246436647b267d58e4947628a
+  requires_dist:
+  - tcmlib==1.*
 - conda: https://conda.anaconda.org/conda-forge/linux-64/tbb-2021.13.0-hceb3a55_1.conda
   sha256: 65463732129899770d54b1fbf30e1bb82fdebda9d7553caf08d23db4590cd691
   md5: ba7726b8df7b9d34ea80e82b097a4893
@@ -8177,6 +8276,10 @@ packages:
   purls: []
   size: 179639
   timestamp: 1743578685131
+- pypi: https://files.pythonhosted.org/packages/06/bb/09a6dc2f1110b409d6d2f96429969d7466bde9bf4ad8b2e682d851ef104b/tcmlib-1.3.0-py2.py3-none-manylinux_2_28_x86_64.whl
+  name: tcmlib
+  version: 1.3.0
+  sha256: c328ba464c556e46174879c694cafd17ba17c3e7406a79fee47bb3e8c9c6a6c5
 - conda: https://conda.anaconda.org/conda-forge/noarch/termcolor-2.5.0-pyhd8ed1ab_1.conda
   sha256: 4a7e13776ebd78afcdba3985ea42317e4e0a20722d2c27ecaae3d9f8849e6516
   md5: 1ce02d60767af357e864ce61895268d2

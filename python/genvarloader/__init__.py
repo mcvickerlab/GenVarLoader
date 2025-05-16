@@ -9,6 +9,7 @@ from ._dataset._reconstruct import Reference
 from ._dataset._write import write
 from ._dummy import get_dummy_dataset
 from ._torch import to_nested_tensor
+from ._variants._sitesonly import DatasetWithSites, SitesSchema, sites_vcf_to_table
 
 __version__ = importlib.metadata.version("genvarloader")
 
@@ -24,4 +25,7 @@ __all__ = [
     "RaggedDataset",
     "Reference",
     "to_nested_tensor",
+    "sites_vcf_to_table",
+    "SitesSchema",
+    "DatasetWithSites",
 ]

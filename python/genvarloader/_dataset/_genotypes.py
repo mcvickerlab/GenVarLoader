@@ -832,7 +832,7 @@ def reconstruct_haplotype_from_sparse(
         ref_idx = min(ref_idx, len(ref))
         shifted = shift
 
-    # fill rest with reference sequence and pad with Ns
+    # fill rest with reference sequence and right-pad with Ns
     unfilled_length = length - out_idx
     if unfilled_length > 0:
         # fill with reference sequence
@@ -845,10 +845,10 @@ def reconstruct_haplotype_from_sparse(
         if annot_ref_pos is not None:
             annot_ref_pos[out_idx:out_end_idx] = np.arange(ref_idx, ref_end_idx)
 
-        # pad
+        # right-pad
         if out_end_idx < length:
             out[out_end_idx:] = pad_char
             if annot_v_idxs is not None:
                 annot_v_idxs[out_end_idx:] = -1
             if annot_ref_pos is not None:
-                annot_ref_pos[out_end_idx:] = -1
+                annot_ref_pos[out_end_idx:] = np.iinfo(np.int32).max
