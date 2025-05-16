@@ -4,15 +4,17 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from einops import repeat
+from genoray._svar import SparseGenotypes
 from natsort import natsorted
 
-from ._dataset._genotypes import SparseGenotypes
 from ._dataset._impl import RaggedDataset
 from ._dataset._indexing import DatasetIndexer
 from ._dataset._intervals import tracks_to_intervals
 from ._dataset._reconstruct import (
+    POS_TYPE,
     Haps,
     HapsTracks,
+    RaggedSeqs,
     Reference,
     Tracks,
     TrackType,
@@ -70,11 +72,13 @@ def get_dummy_dataset():
     )
 
     dummy_vars = _Variants(
-        positions=repeat(dummy_regions[:, 1], "r -> (r s)", s=n_samples),
-        sizes=repeat(np.array([-2, -1, 0, 1], np.int32), "s -> (r s)", r=n_regions),
+        v_starts=repeat(
+            dummy_regions[:, 1].astype(POS_TYPE), "r -> (r s)", s=n_samples
+        ),
+        ilens=repeat(np.array([-2, -1, 0, 1], np.int32), "s -> (r s)", r=n_regions),
         alts=RaggedAlleles.from_offsets(
             data=repeat(sp.cast_seqs("ACGTT"), "a -> (r a)", r=n_regions),
-            shape=n_regions*n_samples,
+            shape=n_regions * n_samples,
             offsets=_lengths_to_offsets(
                 repeat(np.array([1, 1, 1, 2]), "s -> (r s)", r=n_regions)
             ),
@@ -95,7 +99,13 @@ def get_dummy_dataset():
         offsets=np.arange(0, 4 * 4 + 1, dtype=np.int64),  # every entry has 1 variant
     )
 
-    dummy_haps = Haps(dummy_ref, dummy_vars, dummy_genos, False)
+    dummy_haps = Haps(
+        reference=dummy_ref,
+        variants=dummy_vars,
+        genotypes=dummy_genos,
+        dosages=None,
+        kind=RaggedSeqs,
+    )
 
     # (r s), want tracks of [1, 2, 3, 4, 5] for each region so that pad values of 0 are obvious
     track_regions = dummy_regions.copy()
@@ -143,7 +153,7 @@ def get_dummy_dataset():
 
     dummy_recon = HapsTracks(dummy_haps, dummy_tracks)
 
-    dummy_dataset: RaggedDataset[Ragged[np.bytes_], Ragged[np.float32], None, None] = (
+    dummy_dataset: RaggedDataset[RaggedSeqs, Ragged[np.float32], None, None] = (
         RaggedDataset(
             path=Path("dummy"),
             output_length="ragged",

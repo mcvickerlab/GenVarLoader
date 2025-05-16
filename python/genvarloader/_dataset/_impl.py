@@ -22,6 +22,7 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from attrs import define, evolve, field
+from genoray._svar import SparseGenotypes
 from genoray._utils import ContigNormalizer
 from loguru import logger
 from numpy.typing import NDArray
@@ -41,9 +42,17 @@ from .._ragged import (
 from .._torch import TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx
 from .._utils import _lengths_to_offsets, _normalize_contig_name, idx_like_to_array
-from ._genotypes import SparseGenotypes
 from ._indexing import DatasetIndexer
-from ._reconstruct import Haps, HapsTracks, Ref, Reference, RefTracks, Tracks
+from ._rag_variants import RaggedVariants
+from ._reconstruct import (
+    Haps,
+    HapsTracks,
+    RaggedSeqs,
+    Ref,
+    Reference,
+    RefTracks,
+    Tracks,
+)
 from ._utils import bed_to_regions, regions_to_bed
 
 try:
@@ -83,7 +92,7 @@ class Dataset:
 
     See :meth:`Dataset.subset_to() <Dataset.subset_to()>`. This is useful, for example, to create
     splits for training, validation, and testing, or filter out regions or samples after writing a full dataset.
-    This is also necessary if you intend to create a Pytorch :external+torch:class:`DataLoader <torch.utils.data.DataLoader>`
+    This is also necessary if you intend to create a Pytorch :class:`DataLoader <torch.utils.data.DataLoader>`
     from the Dataset using :meth:`Dataset.to_dataloader() <Dataset.to_dataloader()>`.
 
     **Return values**
@@ -116,7 +125,7 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
-    ) -> RaggedDataset[Ragged[np.bytes_], MaybeRTRK, None, None]: ...
+    ) -> RaggedDataset[RaggedSeqs, MaybeRTRK, None, None]: ...
     @staticmethod
     def open(
         path: str | Path,
@@ -142,9 +151,7 @@ class Dataset:
             Random seed or np.random.Generator for any stochastic operations.
         deterministic
             Whether to use randomized or deterministic algorithms. If set to True, this will disable random
-            shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
-            and always apply the highest CCF group. Note that for unphased variants, this will mean not all possible haplotypes
-            can be returned.
+            shifting of longer-than-requested haplotypes.
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
         """
@@ -159,7 +166,6 @@ class Dataset:
         contigs: List[str] = metadata["contigs"]
         ploidy: Optional[int] = metadata.get("ploidy", None)
         max_jitter: int = metadata.get("max_jitter", 0)
-        phased: Optional[bool] = metadata.get("phased", None)
 
         # read input regions and generate index map
         bed = pl.read_ipc(path / "input_regions.arrow")
@@ -180,8 +186,6 @@ class Dataset:
 
         has_genotypes = (path / "genotypes").exists()
         if has_genotypes:
-            if phased is None:
-                raise ValueError("Malformed dataset: found genotypes but not phase.")
             if ploidy is None:
                 raise ValueError("Malformed dataset: found genotypes but not ploidy.")
 
@@ -222,12 +226,10 @@ class Dataset:
                     _reference = reference
                 else:
                     _reference = Reference.from_path(reference, contigs)
-                assert phased is not None
                 assert ploidy is not None
                 seqs = Haps.from_path(
                     path,
                     reference=_reference,
-                    phased=phased,
                     regions=regions,
                     samples=samples,
                     ploidy=ploidy,
@@ -242,12 +244,10 @@ class Dataset:
                     _reference = reference
                 else:
                     _reference = Reference.from_path(reference, contigs)
-                assert phased is not None
                 assert ploidy is not None
                 seqs = Haps.from_path(
                     path,
                     reference=_reference,
-                    phased=phased,
                     regions=regions,
                     samples=samples,
                     ploidy=ploidy,
@@ -471,12 +471,15 @@ class Dataset:
         """
         return evolve(self, transform=transform)
 
-    def with_seqs(self, kind: Literal["reference", "haplotypes", "annotated"] | None):
+    def with_seqs(
+        self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
+    ):
         """Return a new dataset with the specified sequence type. The sequence type can be one of the following:
 
         - :code:`"reference"`: reference sequences.
         - :code:`"haplotypes"`: personalized haplotype sequences.
         - :code:`"annotated"`: annotated haplotype sequences, which includes personalized haplotypes along with annotations.
+        - :code:`"variants"`: no sequences, just variants as :class:`RaggedVariants`
 
         Annotated haplotypes are returned as the :class:`~genvarloader._types.AnnotatedHaps` class which is roughly:
 
@@ -512,10 +515,14 @@ class Dataset:
             need to subtract the number of variants on all other chromosomes before the variant index to get the correct variant index in the VCF/PGEN. Relevant values
             can be obtained by instantiating a `gvl.Variants` class from the VCFs/PGENs and accessing the `Variants.records.contig_offsets` attribute.
 
+        If the Dataset's output length is :code:`"ragged"`, then annotated haplotypes will be :class:`~genvarloader._ragged.RaggedAnnotatedHaps` where each
+        field is a Ragged array instead of NumPy arrays.
+
         Parameters
         ----------
         kind
-            The type of sequences to return. Can be one of :code:`"reference"`, :code:`"haplotypes"`, :code:`"annotated"` or :code:`None` to return no sequences.
+            The type of sequences to return. Can be one of :code:`"reference"`, :code:`"haplotypes"`, :code:`"annotated"`, :code:`"variants"`, or :code:`None`
+            to return no sequences.
         """
         match kind, self._seqs, self._tracks, self._recon:
             case None, _, None, _:
@@ -531,11 +538,11 @@ class Dataset:
                 tracks=t
             ):
                 return evolve(self, _recon=t)
-            case "reference" | "haplotypes" | "annotated", None, _, _:
+            case kind, None, _, _:
                 raise ValueError(
                     "Dataset has no reference genome to reconstruct sequences from."
                 )
-            case "haplotypes" | "annotated", Ref(), _, _:
+            case "haplotypes" | "annotated" | "variants", Ref(), _, _:
                 raise ValueError(
                     "Dataset has no genotypes to reconstruct haplotypes from."
                 )
@@ -550,21 +557,36 @@ class Dataset:
                 seqs = Ref(reference=ref)
                 return evolve(self, _recon=RefTracks(seqs=seqs, tracks=tracks))
             case "haplotypes", Haps() as haps, _, Ref() | Haps():
-                return evolve(self, _recon=haps.with_annot(False))
+                return evolve(self, _recon=haps.to_kind(RaggedSeqs))
             case "haplotypes", Haps() as haps, _, (
                 (Tracks() as tracks)
                 | RefTracks(tracks=tracks)
                 | HapsTracks(tracks=tracks)
             ):
-                return evolve(self, _recon=HapsTracks(haps.with_annot(False), tracks))
+                return evolve(self, _recon=HapsTracks(haps.to_kind(RaggedSeqs), tracks))
+
             case "annotated", Haps() as haps, _, Ref() | Haps():
-                return evolve(self, _recon=haps.with_annot(True))
+                return evolve(self, _recon=haps.to_kind(RaggedAnnotatedHaps))
             case "annotated", Haps() as haps, _, (
                 (Tracks() as tracks)
                 | RefTracks(tracks=tracks)
                 | HapsTracks(tracks=tracks)
             ):
-                return evolve(self, _recon=HapsTracks(haps.with_annot(True), tracks))
+                return evolve(
+                    self, _recon=HapsTracks(haps.to_kind(RaggedAnnotatedHaps), tracks)
+                )
+
+            case "variants", Haps() as haps, _, Ref() | Haps():
+                return evolve(self, _recon=haps.to_kind(RaggedVariants))
+            case "variants", Haps() as haps, _, (
+                (Tracks() as tracks)
+                | RefTracks(tracks=tracks)
+                | HapsTracks(tracks=tracks)
+            ):
+                return evolve(
+                    self, _recon=HapsTracks(haps.to_kind(RaggedVariants), tracks)
+                )
+
             case k, s, t, r:
                 assert_never(k), assert_never(s), assert_never(t), assert_never(r)
 
@@ -639,18 +661,20 @@ class Dataset:
     """Unjittered, sorted regions matching order on-disk."""
     _jittered_regions: NDArray[np.int32] = field(alias="_jittered_regions")
     _idxer: DatasetIndexer = field(alias="_idxer")
-    _seqs: Optional[Ref | Haps[Ragged[np.bytes_]] | Haps[RaggedAnnotatedHaps]] = field(
-        alias="_seqs"
-    )
+    _seqs: Optional[
+        Ref | Haps[RaggedSeqs] | Haps[RaggedAnnotatedHaps] | Haps[RaggedVariants]
+    ] = field(alias="_seqs")
     _tracks: Optional[Tracks] = field(alias="_tracks")
     _recon: (
         Ref
-        | Haps[Ragged[np.bytes_]]
+        | Haps[RaggedSeqs]
         | Haps[RaggedAnnotatedHaps]
+        | Haps[RaggedVariants]
         | Tracks
         | RefTracks
-        | HapsTracks[Ragged[np.bytes_]]
+        | HapsTracks[RaggedSeqs]
         | HapsTracks[RaggedAnnotatedHaps]
+        | HapsTracks[RaggedVariants]
     ) = field(alias="_recon")
     _rng: np.random.Generator = field(alias="_rng")
 
@@ -730,20 +754,27 @@ class Dataset:
             case Ref():
                 return ["reference"]
             case Haps():
-                return ["reference", "haplotypes", "annotated"]
+                return ["reference", "haplotypes", "annotated", "variants"]
             case s:
                 assert_never(s)
 
     @property
-    def sequence_type(self) -> Literal["haplotypes", "reference", "annotated"] | None:
+    def sequence_type(
+        self,
+    ) -> Literal["haplotypes", "reference", "annotated", "variants"] | None:
         """The type of sequences in the dataset."""
         match self._recon:
             case Tracks():
                 return
             case (Haps() as haps) | HapsTracks(haps=haps):
-                if haps.annotate:
+                if issubclass(haps.kind, RaggedAnnotatedHaps):
                     return "annotated"
-                return "haplotypes"
+                elif issubclass(haps.kind, RaggedVariants):
+                    return "variants"
+                elif issubclass(haps.kind, RaggedSeqs):
+                    return "haplotypes"
+                else:
+                    assert_never(haps.kind)
             case Ref() | RefTracks():
                 return "reference"
             case r:
@@ -999,15 +1030,17 @@ class Dataset:
         return evolve(self, _tracks=new_tracks)  # type: ignore
 
     def write_annot_tracks(self, tracks: dict[str, str | Path | pl.DataFrame]) -> Self:
-        """Write annotation tracks to the dataset.
+        """Write annotation tracks to the dataset. Returns a new dataset with the
+        tracks available. Activate them with :meth:`with_tracks()`.
 
         Parameters
         ----------
         tracks
             Paths to the annotation tracks (or literal tables) in BED-like format.
-            Keys should be the track names and values should be the paths to the BED files.
+            Keys should be the track names and values should be the paths to the BED files
+            or polars.DataFrames.
 
-            .. important::
+            .. note::
 
                 Only supports BED files for now.
         """
@@ -1061,7 +1094,7 @@ class Dataset:
         return evolve(self, _tracks=ds_tracks, _recon=recon)
 
     def to_torch_dataset(self) -> "td.Dataset":
-        """Convert the dataset to a PyTorch :external+torch:class:`Dataset <torch.utils.data.Dataset>`. Requires PyTorch to be installed."""
+        """Convert the dataset to a PyTorch :class:`Dataset <torch.utils.data.Dataset>`. Requires PyTorch to be installed."""
         if self.output_length == "ragged":
             raise ValueError(
                 """`output_length` is currently set to "ragged" and ragged output cannot be converted to PyTorch Tensors."""
@@ -1087,8 +1120,8 @@ class Dataset:
         persistent_workers: bool = False,
         pin_memory_device: str = "",
     ) -> "td.DataLoader":
-        """Convert the dataset to a PyTorch :external+torch:class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
-        :external+torch:class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
+        """Convert the dataset to a PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
+        :class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
         Requires PyTorch to be installed.
 
         Parameters
@@ -1101,8 +1134,8 @@ class Dataset:
             Defines the strategy to draw samples from the dataset. Can be any :py:class:`Iterable <typing.Iterable>` with :code:`__len__` implemented. If specified, shuffle must not be specified.
 
             .. important::
-                Do not provide a :external+torch:class:`BatchSampler <torch.utils.data.BatchSampler>` here. GVL Datasets use multithreading when indexed with batches of indices to avoid the overhead of multi-processing.
-                To leverage this, GVL will automatically wrap the :code:`sampler` with a :external+torch:class:`BatchSampler <torch.utils.data.BatchSampler>`
+                Do not provide a :class:`BatchSampler <torch.utils.data.BatchSampler>` here. GVL Datasets use multithreading when indexed with batches of indices to avoid the overhead of multi-processing.
+                To leverage this, GVL will automatically wrap the :code:`sampler` with a :class:`BatchSampler <torch.utils.data.BatchSampler>`
                 so that lists of indices are given to the GVL Dataset instead of one index at a time. See `this post <https://discuss.pytorch.org/t/dataloader-sample-by-slices-from-dataset/113005>`_
                 for more information.
         num_workers
@@ -1173,7 +1206,18 @@ class Dataset:
         else:
             out = list(recon)
 
+        ragv = None
+        if isinstance(out[0], RaggedVariants):
+            ragv = out[0]
+            out = out[1:]
+
+        out = cast(list[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps], out)
+
         if self.rc_neg:
+            if self.sequence_type == "variants":
+                raise RuntimeError(
+                    "Reverse complementing variants is not supported. Please set rc_neg to False or use a different sequence type."
+                )
             # (b)
             to_rc: NDArray[np.bool_] = self._full_regions[r_idx, 3] == -1
             out = [self._rc(r, to_rc) for r in out]
@@ -1185,6 +1229,9 @@ class Dataset:
             out = [self._pad(r) for r in out]
         elif isinstance(self.output_length, int):
             out = [self._fix_len(r) for r in out]
+
+        if ragv is not None:
+            out = [ragv] + out
 
         if out_reshape is not None:
             out = [o.reshape(out_reshape + o.shape[1:]) for o in out]
@@ -1228,8 +1275,8 @@ class Dataset:
         return rag
 
     def _jitter(
-        self, rags: list[Ragged[np.bytes_] | Ragged[np.float32] | RaggedAnnotatedHaps]
-    ) -> list[Ragged[np.bytes_] | Ragged[np.float32] | RaggedAnnotatedHaps]:
+        self, rags: list[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps]
+    ) -> list[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps]:
         rag0 = rags[0]
         if isinstance(rag0, Ragged):
             batch_size = rag0.shape[0]
@@ -1315,12 +1362,12 @@ def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedInt
 
 T = TypeVar("T")
 
-SEQ = TypeVar("SEQ", NDArray[np.bytes_], AnnotatedHaps)
-MaybeSEQ = TypeVar("MaybeSEQ", None, NDArray[np.bytes_], AnnotatedHaps)
+SEQ = TypeVar("SEQ", NDArray[np.bytes_], AnnotatedHaps, RaggedVariants)
+MaybeSEQ = TypeVar("MaybeSEQ", None, NDArray[np.bytes_], AnnotatedHaps, RaggedVariants)
 MaybeTRK = TypeVar("MaybeTRK", None, NDArray[np.float32])
 
-RSEQ = TypeVar("RSEQ", Ragged[np.bytes_], RaggedAnnotatedHaps)
-MaybeRSEQ = TypeVar("MaybeRSEQ", None, Ragged[np.bytes_], RaggedAnnotatedHaps)
+RSEQ = TypeVar("RSEQ", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
+MaybeRSEQ = TypeVar("MaybeRSEQ", None, RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 MaybeRTRK = TypeVar("MaybeRTRK", None, Ragged[np.float32])
 
 IDX = TypeVar("IDX", None, tuple[NDArray[np.integer], NDArray[np.integer]])
@@ -1336,7 +1383,7 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK, IDX, TFM]):
     def with_len(
         self: ArrayDataset[NDArray[np.bytes_], None, IDX, TFM],
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[Ragged[np.bytes_], None, IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedSeqs, None, IDX, TFM]: ...
     @overload
     def with_len(
         self: ArrayDataset[AnnotatedHaps, None, IDX, TFM],
@@ -1351,7 +1398,7 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK, IDX, TFM]):
     def with_len(
         self: ArrayDataset[NDArray[np.bytes_], NDArray[np.float32], IDX, TFM],
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[Ragged[np.bytes_], Ragged[np.float32], IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedSeqs, Ragged[np.float32], IDX, TFM]: ...
     @overload
     def with_len(
         self: ArrayDataset[AnnotatedHaps, NDArray[np.float32], IDX, TFM],
@@ -1380,8 +1427,12 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK, IDX, TFM]):
     def with_seqs(
         self, kind: Literal["annotated"]
     ) -> ArrayDataset[AnnotatedHaps, MaybeTRK, IDX, TFM]: ...
+    @overload
     def with_seqs(
-        self, kind: Literal["reference", "haplotypes", "annotated"] | None
+        self, kind: Literal["variants"]
+    ) -> ArrayDataset[RaggedVariants, MaybeTRK, IDX, TFM]: ...
+    def with_seqs(
+        self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
     ) -> ArrayDataset:
         return super().with_seqs(kind)
 
@@ -1506,7 +1557,7 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK, IDX, TFM]):
 
     @overload
     def with_len(
-        self: RaggedDataset[Ragged[np.bytes_], None, IDX, TFM],
+        self: RaggedDataset[RaggedSeqs, None, IDX, TFM],
         output_length: Union[Literal["variable"], int],
     ) -> ArrayDataset[NDArray[np.bytes_], None, IDX, TFM]: ...
     @overload
@@ -1526,7 +1577,7 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK, IDX, TFM]):
     ) -> ArrayDataset[None, MaybeTRK, IDX, TFM]: ...
     @overload
     def with_len(
-        self: RaggedDataset[Ragged[np.bytes_], Ragged[np.float32], IDX, TFM],
+        self: RaggedDataset[RaggedSeqs, Ragged[np.float32], IDX, TFM],
         output_length: Union[Literal["variable"], int],
     ) -> ArrayDataset[NDArray[np.bytes_], NDArray[np.float32], IDX, TFM]: ...
     @overload
@@ -1552,13 +1603,17 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK, IDX, TFM]):
     @overload
     def with_seqs(
         self, kind: Literal["reference", "haplotypes"]
-    ) -> RaggedDataset[Ragged[np.bytes_], MaybeRTRK, IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedSeqs, MaybeRTRK, IDX, TFM]: ...
     @overload
     def with_seqs(
         self, kind: Literal["annotated"]
     ) -> RaggedDataset[RaggedAnnotatedHaps, MaybeRTRK, IDX, TFM]: ...
+    @overload
     def with_seqs(
-        self, kind: Literal["reference", "haplotypes", "annotated"] | None
+        self, kind: Literal["variants"]
+    ) -> RaggedDataset[RaggedVariants, MaybeRTRK, IDX, TFM]: ...
+    def with_seqs(
+        self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
     ) -> RaggedDataset:
         return super().with_seqs(kind)
 

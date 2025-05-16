@@ -9,19 +9,19 @@ __all__ = []
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def shift_and_realign_tracks_sparse(
-    out: NDArray[np.float32],
-    out_offsets: NDArray[np.int64],
-    regions: NDArray[np.int32],
-    shifts: NDArray[np.int32],
+    out: NDArray[np.floating],
+    out_offsets: NDArray[np.integer],
+    regions: NDArray[np.integer],
+    shifts: NDArray[np.integer],
     geno_offset_idxs: NDArray[np.integer],
-    geno_v_idxs: NDArray[np.int32],
-    geno_offsets: NDArray[np.int64],
-    positions: NDArray[np.int32],
-    sizes: NDArray[np.int32],
-    tracks: NDArray[np.float32],
-    track_offsets: NDArray[np.int64],
+    geno_v_idxs: NDArray[np.integer],
+    geno_offsets: NDArray[np.integer],
+    v_starts: NDArray[np.integer],
+    ilens: NDArray[np.integer],
+    tracks: NDArray[np.floating],
+    track_offsets: NDArray[np.integer],
     keep: Optional[NDArray[np.bool_]] = None,
-    keep_offsets: Optional[NDArray[np.int64]] = None,
+    keep_offsets: Optional[NDArray[np.integer]] = None,
 ):
     """Shift and realign tracks to correspond to haplotypes.
 
@@ -78,8 +78,8 @@ def shift_and_realign_tracks_sparse(
                 offset_idx=o_idx,
                 geno_v_idxs=geno_v_idxs,
                 geno_offsets=geno_offsets,
-                positions=positions,
-                sizes=sizes,
+                v_starts=v_starts,
+                ilens=ilens,
                 shift=qh_shifts,
                 track=q_track,
                 query_start=q_start,
@@ -91,14 +91,14 @@ def shift_and_realign_tracks_sparse(
 @nb.njit(nogil=True, cache=True)
 def shift_and_realign_track_sparse(
     offset_idx: int,
-    geno_v_idxs: NDArray[np.int32],
-    geno_offsets: NDArray[np.int64],
-    positions: NDArray[np.int32],
-    sizes: NDArray[np.int32],
+    geno_v_idxs: NDArray[np.integer],
+    geno_offsets: NDArray[np.integer],
+    v_starts: NDArray[np.integer],
+    ilens: NDArray[np.integer],
     shift: int,
-    track: NDArray[np.float32],
+    track: NDArray[np.floating],
     query_start: int,
-    out: NDArray[np.float32],
+    out: NDArray[np.floating],
     keep: Optional[NDArray[np.bool_]] = None,
 ):
     """Shift and realign a track to correspond to a haplotype.
@@ -148,8 +148,8 @@ def shift_and_realign_track_sparse(
 
         # position of variant relative to ref from fetch(contig, start, q_end)
         # i.e. has been put into same coordinate system as ref_idx
-        v_rel_pos = positions[variant] - query_start
-        v_diff = sizes[variant]
+        v_rel_pos = v_starts[variant] - query_start
+        v_diff = ilens[variant]
         # +1 assumes atomized variants, exactly 1 nt shared between REF and ALT
         v_rel_end = v_rel_pos - min(0, v_diff) + 1
 

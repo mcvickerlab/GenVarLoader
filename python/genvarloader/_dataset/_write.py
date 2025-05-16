@@ -164,7 +164,6 @@ def write(
         elif isinstance(variants, SparseVar):
             gvl_bed = _write_from_svar(path, gvl_bed, variants, samples)
         metadata["ploidy"] = variants.ploidy
-        metadata["phased"] = True
         # free memory
         del variants
         gc.collect()

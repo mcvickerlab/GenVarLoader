@@ -1,12 +1,14 @@
 import importlib.metadata
 
+from seqpro._ragged import Ragged
+from seqpro.bed import read_bedlike, with_length
+
 from ._bigwig import BigWigs
 from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
 from ._dataset._reconstruct import Reference
 from ._dataset._write import write
 from ._dummy import get_dummy_dataset
-from ._ragged import Ragged
-from ._utils import read_bedlike, with_length
+from ._torch import to_nested_tensor
 from ._variants._sitesonly import DatasetWithSites, SitesSchema, sites_vcf_to_table
 
 __version__ = importlib.metadata.version("genvarloader")
@@ -22,6 +24,7 @@ __all__ = [
     "ArrayDataset",
     "RaggedDataset",
     "Reference",
+    "to_nested_tensor",
     "sites_vcf_to_table",
     "SitesSchema",
     "DatasetWithSites",

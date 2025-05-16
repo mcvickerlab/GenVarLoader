@@ -51,8 +51,8 @@ napoleon_use_param = True
 napoleon_type_aliases = {
     "Path": ":class:`Path <pathlib.Path>`",
     "Callable": ":class:`Callable <typing.Callable>`",
-    "ArrayLike": ":external+numpy:term:`ArrayLike <array_like>`",
-    "NDArray": ":external+numpy:class:`NDArray <numpy.typing.NDArray>`",
+    "ArrayLike": ":term:`ArrayLike <array_like>`",
+    "NDArray": ":class:`NDArray <numpy.typing.NDArray>`",
     "DataFrame": "pl.DataFrame",
 }
 napoleon_preprocess_types = True

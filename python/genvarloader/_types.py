@@ -31,14 +31,26 @@ ListIdx = Union[Sequence[int], NDArray[np.integer]]
 @define
 class AnnotatedHaps:
     haps: NDArray[np.bytes_]
+    """Haplotypes with dtype S1."""
     var_idxs: NDArray[np.int32]
+    """Variant indices for each position in the haplotypes. A value of -1 indicates no variant was applied at the position."""
     ref_coords: NDArray[np.int32]
+    """Reference coordinates for each position in haplotypes."""
 
     @property
     def shape(self):
+        """Shape of the haplotypes and all annotations."""
         return self.haps.shape
 
     def reshape(self, shape: int | tuple[int, ...]):
+        """Reshape the haplotypes and all annotations.
+        
+        Parameters
+        ----------
+        shape
+            New shape for the haplotypes and all annotations. The total number of elements
+            must remain the same.
+        """
         return AnnotatedHaps(
             self.haps.reshape(shape),
             self.var_idxs.reshape(shape),
@@ -46,6 +58,13 @@ class AnnotatedHaps:
         )
 
     def squeeze(self, axis: int | tuple[int, ...] | None = None) -> AnnotatedHaps:
+        """Squeeze the haplotypes and all annotations along the specified axis.
+
+        Parameters
+        ----------
+        axis
+            Axis or axes to squeeze. If None, all axes of length 1 will be squeezed.
+        """
         return AnnotatedHaps(
             self.haps.squeeze(axis),
             self.var_idxs.squeeze(axis),

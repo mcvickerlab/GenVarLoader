@@ -1,14 +1,14 @@
 # %%
 import numpy as np
-from genvarloader._dataset._genotypes import SparseGenotypes
+from genoray import SparseGenotypes
 from genvarloader._dataset._tracks import shift_and_realign_track_sparse
 from pytest_cases import parametrize_with_cases
 
 
 # %%
 def case_snps():
-    positions = np.array([1, 3], np.int32)
-    sizes = np.zeros(2, dtype=np.int32)
+    v_starts = np.array([1, 3], np.int32)
+    ilens = np.zeros(2, dtype=np.int32)
 
     # (s p v)
     genos = np.array([[[0, 1]]], dtype=np.int8)
@@ -22,8 +22,8 @@ def case_snps():
     sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
 
     return (
-        positions,
-        sizes,
+        v_starts,
+        ilens,
         shift,
         track,
         sparse_genos,
@@ -33,8 +33,8 @@ def case_snps():
 
 
 def case_indels():
-    positions = np.array([1, 3], np.int32)
-    sizes = np.array([-1, 1], dtype=np.int32)
+    v_starts = np.array([1, 3], np.int32)
+    ilens = np.array([-1, 1], dtype=np.int32)
 
     # (s p v) : (1 1 2)
     genos = np.array([[[1, 1]]], dtype=np.int8)
@@ -48,8 +48,8 @@ def case_indels():
     sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
 
     return (
-        positions,
-        sizes,
+        v_starts,
+        ilens,
         shift,
         track,
         sparse_genos,
@@ -59,8 +59,8 @@ def case_indels():
 
 
 def case_spanning_del():
-    positions = np.array([0], np.int32)
-    sizes = np.array([-1], dtype=np.int32)
+    v_starts = np.array([0], np.int32)
+    ilens = np.array([-1], dtype=np.int32)
 
     # (s p v) : (1 1 2)
     genos = np.array([[[1]]], dtype=np.int8)
@@ -76,8 +76,8 @@ def case_spanning_del():
     sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
 
     return (
-        positions,
-        sizes,
+        v_starts,
+        ilens,
         shift,
         track,
         sparse_genos,
@@ -87,8 +87,8 @@ def case_spanning_del():
 
 
 def case_shift_ins():
-    positions = np.array([1, 3], np.int32)
-    sizes = np.array([1, 1], dtype=np.int32)
+    v_starts = np.array([1, 3], np.int32)
+    ilens = np.array([1, 1], dtype=np.int32)
 
     # (s p v) : (1 1 2)
     genos = np.array([[[1, 1]]], dtype=np.int8)
@@ -103,8 +103,8 @@ def case_shift_ins():
     sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
 
     return (
-        positions,
-        sizes,
+        v_starts,
+        ilens,
         shift,
         track,
         sparse_genos,
@@ -114,12 +114,12 @@ def case_shift_ins():
 
 
 @parametrize_with_cases(
-    "positions, sizes, shift, track, sparse_genos, desired, query_start",
+    "v_starts, ilens, shift, track, sparse_genos, desired, query_start",
     cases=".",
 )
 def test_sparse(
-    positions,
-    sizes,
+    v_starts,
+    ilens,
     shift,
     track,
     sparse_genos: SparseGenotypes,
@@ -132,8 +132,8 @@ def test_sparse(
         offset_idx=offset_idx,
         geno_v_idxs=sparse_genos.data,
         geno_offsets=sparse_genos.offsets,
-        positions=positions,
-        sizes=sizes,
+        v_starts=v_starts,
+        ilens=ilens,
         shift=shift,
         track=track,
         query_start=query_start,
