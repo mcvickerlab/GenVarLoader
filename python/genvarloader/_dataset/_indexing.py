@@ -6,9 +6,9 @@ from hirola import HashTable
 from more_itertools import collapse
 from numpy.typing import NDArray
 
-from genvarloader._dataset._utils import oidx_to_raveled_idx
-from genvarloader._types import Idx, StrIdx
-from genvarloader._utils import idx_like_to_array, is_dtype
+from .._types import Idx, StrIdx
+from .._utils import idx_like_to_array, is_dtype
+from ._utils import oidx_to_raveled_idx
 
 
 @define

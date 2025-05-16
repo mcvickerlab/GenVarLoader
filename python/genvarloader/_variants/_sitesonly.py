@@ -108,7 +108,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
         Currently only supports bi-allelic SNPs.
 
         Accessed just like a Dataset, but where the rows are combinations of dataset regions and sites. Will return
-        annotated haplotypes with variants applied and flags indicating whether the variant was applied, deleted, or existed.
+        :class:`AnnotatedHaps` with variants applied and flags indicating whether the variant was applied, deleted, or existed.
         The flags are 0 for applied, 1 for deleted, and 2 for existed. If the dataset has tracks, they will be
         returned as well and reflect any site-only variants.
 
@@ -163,26 +163,27 @@ class DatasetWithSites(Generic[MaybeTRK]):
         ]
         sites = sites.with_columns(chrom=pl.Series(norm_chroms))
 
-        ds_pyr = sp.bed.to_pyranges(dataset.regions.with_row_index("ds_row"))
-        sites_pyr = sp.bed.to_pyranges(sites.with_row_index("site_row"))
+        ds_bed = dataset.regions.with_row_index("region_idx")
+        if isinstance(dataset.output_length, int):
+            ds_bed = ds_bed.with_columns(
+                chromEnd=pl.col("chromStart") + dataset.output_length
+            )
+        ds_pyr = sp.bed.to_pyranges(ds_bed)
+        sites_pyr = sp.bed.to_pyranges(sites.with_row_index("site_idx"))
         rows = pl.from_pandas(ds_pyr.join(sites_pyr, suffix="_site").df)
         if rows.height == 0:
             raise RuntimeError("No overlap between dataset regions and sites.")
 
-        rows = (
-            rows.rename(
-                {
-                    "Chromosome": "chrom",
-                    "Start": "chromStart",
-                    "End": "chromEnd",
-                    "Strand": "strand",
-                    "Start_site": "POS0",
-                },
-                strict=False,
-            )
-            .drop("End_site")
-            .sort("site_row")
-        )
+        rows = rows.rename(
+            {
+                "Chromosome": "chrom",
+                "Start": "chromStart",
+                "End": "chromEnd",
+                "Strand": "strand",
+                "Start_site": "POS0",
+            },
+            strict=False,
+        ).drop("End_site")
 
         _dataset = (
             dataset.with_seqs("annotated")
@@ -193,8 +194,8 @@ class DatasetWithSites(Generic[MaybeTRK]):
 
         self.sites = sites
         self.dataset = _dataset
-        self.rows = rows.drop("ds_row", "site_row")
-        self._row_map = rows.select("ds_row", "site_row").to_numpy()
+        self.rows = rows
+        self._row_map = rows.select("region_idx", "site_idx").to_numpy()
         self._idxer = DatasetIndexer.from_region_and_sample_idxs(
             np.arange(self.rows.height), np.arange(dataset.n_samples), dataset.samples
         )

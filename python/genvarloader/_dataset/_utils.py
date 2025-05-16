@@ -5,7 +5,7 @@ import numpy as np
 import polars as pl
 from numpy.typing import ArrayLike, NDArray
 
-from .._utils import DTYPE
+from .._types import DTYPE
 
 __all__ = []
 

@@ -174,14 +174,7 @@ class Dataset:
             r_idx_map, np.arange(len(samples)), samples
         )
         bed = bed.drop("r_idx_map")
-        with pl.StringCache():
-            pl.Series(contigs, dtype=pl.Categorical)
-            sorted_bed = bed.sort(
-                pl.col("chrom").cast(pl.Categorical),
-                pl.col("chromStart"),
-                pl.col("chromEnd"),
-                maintain_order=True,
-            )
+        sorted_bed = sp.bed.sort(bed)
         regions = bed_to_regions(sorted_bed, contigs)
 
         has_genotypes = (path / "genotypes").exists()

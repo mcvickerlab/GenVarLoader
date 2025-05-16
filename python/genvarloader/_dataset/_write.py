@@ -234,7 +234,6 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
             logger.info("VCF genoray index is invalid, writing")
             vcf._write_gvi_index(progress=True)
 
-        logger.info("Loading VCF genoray index")
         vcf._load_index()
 
     assert vcf._index is not None
