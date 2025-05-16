@@ -47,7 +47,7 @@ gvl.write("path/to/dataset.gvl", bed="path/to/regions.bed", bigwigs=[pos_strand,
 By default, GVL will automatically reverse (and complement) negative stranded regions. You can modify this behavior using
 [`gvl.Dataset.with_settings()`](api.md#genvarloader.Dataset.with_settings) and setting `rc_neg` to False.
 
-# How does GVL handle unphased genotypes?
+## How does GVL handle unphased genotypes?
 
 GVL assumes all genotypes are phased and will not warn you if any genotypes are unphased. Generally, unphased
 genotypes cannot be resolved into haplotypes so we make this simplifying assumption. If you aren't sure whether your genotypes are phased, it is relatively easy to inspect from the CLI using [bcftools view](https://samtools.github.io/bcftools/bcftools.html#view) or [plink2](https://www.cog-genomics.org/plink/2.0/basic_stats#pgen_info):
