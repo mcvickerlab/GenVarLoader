@@ -906,10 +906,6 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
             self.active_tracks
         )
 
-    def _get_sample_tracks(self): ...
-
-    def _get_annot_tracks(self, ds_idx): ...
-
 
 @define
 class RefTracks(Reconstructor[Tuple[Ragged[np.bytes_], Ragged[np.float32]]]):

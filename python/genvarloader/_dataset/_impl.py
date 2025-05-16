@@ -44,7 +44,7 @@ from .._utils import _lengths_to_offsets, _normalize_contig_name, idx_like_to_ar
 from ._genotypes import SparseGenotypes
 from ._indexing import DatasetIndexer
 from ._reconstruct import Haps, HapsTracks, Ref, Reference, RefTracks, Tracks
-from ._utils import bed_to_regions
+from ._utils import bed_to_regions, regions_to_bed
 
 try:
     import torch
@@ -1023,7 +1023,9 @@ class Dataset:
             if isinstance(bedlike, str) or isinstance(bedlike, Path):
                 bedlike = sp.bed.read_bedlike(bedlike)
 
-            itvs = _annot_to_intervals(self._full_bed, bedlike)
+            # ensure the full_bed matches the order on-disk
+            full_bed = regions_to_bed(self._full_regions, self.contigs)
+            itvs = _annot_to_intervals(full_bed, bedlike)
 
             out = np.memmap(
                 out_dir / "intervals.npy",
