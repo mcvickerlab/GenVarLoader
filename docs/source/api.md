@@ -25,10 +25,6 @@
     :members:
     :exclude-members: __init__
 
-.. autoclass:: Ragged
-    :members:
-    :exclude-members: __init__
-
 .. autofunction:: get_dummy_dataset
 
 .. autoclass:: Reference
@@ -47,4 +43,27 @@
 
 .. autoclass:: DatasetWithSites
     :exclude-members: __new__, __init__
+```
+
+## Containers
+
+Classes that GVL Datasets may return.
+
+```{eval-rst}
+
+.. autoclass:: genvarloader._types.AnnotatedHaps
+    :members:
+    :exclude-members: __init__
+
+.. autoclass:: genvarloader.Ragged
+    :members:
+    :exclude-members: __init__
+
+.. autoclass:: genvarloader._ragged.RaggedAnnotatedHaps
+    :members:
+    :exclude-members: __init__
+
+.. autoclass:: genvarloader._dataset._rag_variants.RaggedVariants
+    :members:
+    :exclude-members: __init__
 ```

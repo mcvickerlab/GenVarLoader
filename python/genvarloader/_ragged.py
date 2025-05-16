@@ -23,21 +23,37 @@ RaggedIntervals = Ragged[np.void]
 
 @define
 class RaggedAnnotatedHaps:
+    """Ragged version of :class:`AnnotatedHaps`."""
+
     haps: Ragged[np.bytes_]
+    """Haplotypes with dtype S1."""
     var_idxs: Ragged[np.int32]
+    """Variant indices for each position in the haplotypes. A value of -1 indicates no variant was applied at the position."""
     ref_coords: Ragged[np.int32]
+    """Reference coordinates for each position in haplotypes."""
 
     @property
     def shape(self):
+        """Shape of the haplotypes and all annotations."""
         return self.haps.shape
 
     def to_padded(self) -> AnnotatedHaps:
+        """Convert this Ragged array to a rectilinear array by right-padding each entry with appropriate values.
+        The final axis will have the maximum length across all entries."""
         haps = to_padded(self.haps, b"N")
         var_idxs = to_padded(self.var_idxs, -1)
         ref_coords = to_padded(self.ref_coords, -1)
         return AnnotatedHaps(haps, var_idxs, ref_coords)
 
-    def reshape(self, shape: tuple[int, ...]) -> RaggedAnnotatedHaps:
+    def reshape(self, shape: int | tuple[int, ...]) -> RaggedAnnotatedHaps:
+        """Reshape the haplotypes and all annotations.
+
+        Parameters
+        ----------
+        shape
+            New shape for the haplotypes and all annotations. The total number of elements
+            must remain the same.
+        """
         return RaggedAnnotatedHaps(
             self.haps.reshape(shape),
             self.var_idxs.reshape(shape),
@@ -45,6 +61,13 @@ class RaggedAnnotatedHaps:
         )
 
     def squeeze(self, axis: int | tuple[int, ...] | None = None) -> RaggedAnnotatedHaps:
+        """Squeeze the haplotypes and all annotations along the specified axis.
+
+        Parameters
+        ----------
+        axis
+            Axis or axes to squeeze. If None, all axes of length 1 are squeezed.
+        """
         return RaggedAnnotatedHaps(
             self.haps.squeeze(axis),
             self.var_idxs.squeeze(axis),
@@ -52,6 +75,13 @@ class RaggedAnnotatedHaps:
         )
 
     def to_fixed_shape(self, shape: tuple[int, ...]) -> AnnotatedHaps:
+        """If all entries in the ragged array have the same shape, convert to a rectilinear shape.
+
+        Parameters
+        ----------
+        shape
+            Shape to convert to, including the length axis. The total number of elements must remain the same.
+        """
         haps = self.haps.data.reshape(shape)
         var_idxs = self.var_idxs.data.reshape(shape)
         ref_coords = self.ref_coords.data.reshape(shape)

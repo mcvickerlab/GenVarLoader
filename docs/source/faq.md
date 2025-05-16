@@ -26,11 +26,42 @@ ragged = gvl.Ragged.from_offsets(data, shape, offsets)
 
 You can then work with the ragged data as-is or convert to them [to](api.md#genvarloader.Ragged.to_awkward) and [from](api.md#genvarloader.Ragged.from_awkward) Awkward Arrays. Depending on what you need to do, either representation may be more convenient. Within GVL, we use numba JIT'd functions to compute on the ragged objects directly since it's relatively straightforward.
 
-## How can I get multiple tracks/stranded data?
+.. note::
 
-If you provide multiple tracks to [`gvl.write()`](api.md#genvarloader.write), all of them can be returned simultaneously from the resulting [`Dataset`](api.md#genvarloader.Dataset) and placed along the track axis, sorted by name. By default, a Dataset sets all tracks to active when opened. i.e. tracks have shape `(batch, tracks, [ploidy], length)`.
+    GVL can also return several other kinds of objects, see the [API reference](api.md#containers) for more details.
 
-## How can I get personalized protein/RNA sequences?
+## I have multiple tracks per sample, how can I add them?
+
+If you provide multiple BigWigs to [`gvl.write()`](api.md#genvarloader.write), all of them can be returned simultaneously from the resulting [`Dataset`](api.md#genvarloader.Dataset) and placed along the track axis, sorted by name. By default, a Dataset sets all tracks to active when opened. i.e. tracks have shape `(batch, tracks, [ploidy], length)`. For example:
+
+```python
+import genvarloader as gvl
+
+pos_strand = gvl.BigWigs.from_table("pos", "pos_strand.tsv")
+neg_strand = gvl.BigWigs.from_table("neg", "neg_strand.tsv")
+gvl.write("path/to/dataset.gvl", bed="path/to/regions.bed", bigwigs=[pos_strand, neg_strand])
+```
+
+## How does GVL handle negative stranded regions provided to [`gvl.write()`](api.md#genvarloader.write)?
+
+By default, GVL will automatically reverse (and complement) negative stranded regions. You can modify this behavior using
+[`gvl.Dataset.with_settings()`](api.md#genvarloader.Dataset.with_settings) and setting `rc_neg` to False.
+
+# How does GVL handle unphased genotypes?
+
+GVL assumes all genotypes are phased and will not warn you if any genotypes are unphased. Generally, unphased
+genotypes cannot be resolved into haplotypes so we make this simplifying assumption. If you aren't sure whether your genotypes are phased, it is relatively easy to inspect from the CLI using [bcftools view](https://samtools.github.io/bcftools/bcftools.html#view) or [plink2](https://www.cog-genomics.org/plink/2.0/basic_stats#pgen_info):
+
+```bash
+# for VCF, -p filters for records where all samples are phased
+bcftools view -Hp $vcf | wc -l
+# returns number of phased records
+
+# for PLINK
+plink2 --pgen-info $prefix
+```
+
+## How can I get personalized protein/spliced RNA sequences?
 
 This is not yet supported but on GVL's roadmap for the near future. Keep an eye out in future releases!
 

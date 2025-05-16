@@ -92,7 +92,7 @@ class Dataset:
 
     See :meth:`Dataset.subset_to() <Dataset.subset_to()>`. This is useful, for example, to create
     splits for training, validation, and testing, or filter out regions or samples after writing a full dataset.
-    This is also necessary if you intend to create a Pytorch :external+torch:class:`DataLoader <torch.utils.data.DataLoader>`
+    This is also necessary if you intend to create a Pytorch :class:`DataLoader <torch.utils.data.DataLoader>`
     from the Dataset using :meth:`Dataset.to_dataloader() <Dataset.to_dataloader()>`.
 
     **Return values**
@@ -479,7 +479,7 @@ class Dataset:
         - :code:`"reference"`: reference sequences.
         - :code:`"haplotypes"`: personalized haplotype sequences.
         - :code:`"annotated"`: annotated haplotype sequences, which includes personalized haplotypes along with annotations.
-        - :code:`"variants"`: raw variants, a ragged array of ALT alleles, 0-based start positions
+        - :code:`"variants"`: no sequences, just variants as :class:`RaggedVariants`
 
         Annotated haplotypes are returned as the :class:`~genvarloader._types.AnnotatedHaps` class which is roughly:
 
@@ -1030,15 +1030,17 @@ class Dataset:
         return evolve(self, _tracks=new_tracks)  # type: ignore
 
     def write_annot_tracks(self, tracks: dict[str, str | Path | pl.DataFrame]) -> Self:
-        """Write annotation tracks to the dataset.
+        """Write annotation tracks to the dataset. Returns a new dataset with the
+        tracks available. Activate them with :meth:`with_tracks()`.
 
         Parameters
         ----------
         tracks
             Paths to the annotation tracks (or literal tables) in BED-like format.
-            Keys should be the track names and values should be the paths to the BED files.
+            Keys should be the track names and values should be the paths to the BED files
+            or polars.DataFrames.
 
-            .. important::
+            .. note::
 
                 Only supports BED files for now.
         """
@@ -1092,7 +1094,7 @@ class Dataset:
         return evolve(self, _tracks=ds_tracks, _recon=recon)
 
     def to_torch_dataset(self) -> "td.Dataset":
-        """Convert the dataset to a PyTorch :external+torch:class:`Dataset <torch.utils.data.Dataset>`. Requires PyTorch to be installed."""
+        """Convert the dataset to a PyTorch :class:`Dataset <torch.utils.data.Dataset>`. Requires PyTorch to be installed."""
         if self.output_length == "ragged":
             raise ValueError(
                 """`output_length` is currently set to "ragged" and ragged output cannot be converted to PyTorch Tensors."""
@@ -1118,8 +1120,8 @@ class Dataset:
         persistent_workers: bool = False,
         pin_memory_device: str = "",
     ) -> "td.DataLoader":
-        """Convert the dataset to a PyTorch :external+torch:class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
-        :external+torch:class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
+        """Convert the dataset to a PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
+        :class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
         Requires PyTorch to be installed.
 
         Parameters
@@ -1132,8 +1134,8 @@ class Dataset:
             Defines the strategy to draw samples from the dataset. Can be any :py:class:`Iterable <typing.Iterable>` with :code:`__len__` implemented. If specified, shuffle must not be specified.
 
             .. important::
-                Do not provide a :external+torch:class:`BatchSampler <torch.utils.data.BatchSampler>` here. GVL Datasets use multithreading when indexed with batches of indices to avoid the overhead of multi-processing.
-                To leverage this, GVL will automatically wrap the :code:`sampler` with a :external+torch:class:`BatchSampler <torch.utils.data.BatchSampler>`
+                Do not provide a :class:`BatchSampler <torch.utils.data.BatchSampler>` here. GVL Datasets use multithreading when indexed with batches of indices to avoid the overhead of multi-processing.
+                To leverage this, GVL will automatically wrap the :code:`sampler` with a :class:`BatchSampler <torch.utils.data.BatchSampler>`
                 so that lists of indices are given to the GVL Dataset instead of one index at a time. See `this post <https://discuss.pytorch.org/t/dataloader-sample-by-slices-from-dataset/113005>`_
                 for more information.
         num_workers
