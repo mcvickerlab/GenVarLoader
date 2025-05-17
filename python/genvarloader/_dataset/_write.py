@@ -20,7 +20,7 @@ from seqpro._ragged import OFFSET_TYPE
 from tqdm.auto import tqdm
 
 from .._bigwig import BigWigs
-from .._utils import _lengths_to_offsets, _normalize_contig_name, read_bedlike
+from .._utils import _lengths_to_offsets, _normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._genotypes import SparseSomaticGenotypes
 from ._utils import splits_sum_le_value
@@ -87,7 +87,7 @@ def write(
     path.mkdir(parents=True, exist_ok=True)
 
     if isinstance(bed, (str, Path)):
-        bed = read_bedlike(bed)
+        bed = sp.bed.read_bedlike(bed)
 
     gvl_bed, contigs, input_to_sorted_idx_map = _prep_bed(bed, max_jitter)
     bed.with_columns(r_idx_map=pl.lit(input_to_sorted_idx_map)).write_ipc(
@@ -138,13 +138,10 @@ def write(
             "No samples available across all variant file(s) and/or BigWigs."
         )
 
-    if samples is not None:
-        _samples = set(samples)
-        if missing := (_samples - available_samples):
-            raise ValueError(f"Samples {missing} not found in VCF or BigWigs.")
-        samples = list(_samples)
-    else:
+    if samples is None:
         samples = list(available_samples)
+    elif missing := (set(samples) - available_samples):
+        raise ValueError(f"Samples {missing} not found in VCF or BigWigs.")
 
     samples.sort()
 
