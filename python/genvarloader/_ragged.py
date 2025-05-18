@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import partial
 from typing import Any, Optional, Tuple, TypeGuard, TypeVar, Union
 
 import numba as nb
@@ -7,6 +8,7 @@ import numpy as np
 from attrs import define
 from einops import repeat
 from numpy.typing import NDArray
+from phantom import Phantom
 from seqpro._ragged import Ragged
 
 from ._types import DTYPE, AnnotatedHaps
@@ -19,6 +21,15 @@ INTERVAL_DTYPE = np.dtype(
     [("start", np.int32), ("end", np.int32), ("value", np.float32)], align=True
 )
 RaggedIntervals = Ragged[np.void]
+
+
+def is_rag_dtype(rag: Any, dtype: type[DTYPE]) -> TypeGuard[Ragged[DTYPE]]:
+    return isinstance(rag, Ragged) and np.issubdtype(rag.data.dtype, dtype)
+
+
+class RaggedSeqs(
+    Ragged[np.bytes_], Phantom, predicate=partial(is_rag_dtype, dtype=np.bytes_)
+): ...
 
 
 @define
@@ -86,10 +97,6 @@ class RaggedAnnotatedHaps:
         var_idxs = self.var_idxs.data.reshape(shape)
         ref_coords = self.ref_coords.data.reshape(shape)
         return AnnotatedHaps(haps, var_idxs, ref_coords)
-
-
-def is_rag_dtype(rag: Any, dtype: type[DTYPE]) -> TypeGuard[Ragged[DTYPE]]:
-    return isinstance(rag, Ragged) and np.issubdtype(rag.data.dtype, dtype)
 
 
 def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:

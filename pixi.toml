@@ -87,6 +87,7 @@ docs = { features = ["docs", "pytorch-cpu", "basenji2", "py312"] }
 py310 = { features = ["pytorch-cpu", "py310"] }
 py311 = { features = ["pytorch-cpu", "py311"] }
 py312 = { features = ["pytorch-cpu", "py312"] }
+no-torch = { features = ["py310"] }
 # docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py310"] }
 
 [tasks]

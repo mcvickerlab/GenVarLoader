@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Union, cast
 
@@ -108,18 +107,25 @@ class Fasta(Reader):
         self.contigs = self._get_contig_lengths()
 
         self.handle: Optional[pysam.FastaFile] = None
-        fa_extension = re.compile(r"\.(fa|fna|fasta)(\.b?gz)?$")
-        self.cache_path = Path(fa_extension.sub(".fa.gvl", str(self.path)))
+        self.cache_path = self.path.with_suffix(self.path.suffix + ".gvl")
 
         if not in_memory:
             self.sequences = None
         else:
             if cache:
-                if not self.cache_path.exists():
+                if not self._valid_cache():
                     self._write_to_cache()
                 self.sequences = self._get_sequences(self.contigs)
             else:
                 self.sequences = self._get_sequences(self.contigs)
+
+    def _valid_cache(self) -> bool:
+        """Check if cache exists and has a modified time >= the FASTA file."""
+        if not self.cache_path.exists():
+            return False
+        if self.cache_path.stat().st_mtime_ns < self.path.stat().st_mtime_ns:
+            return False
+        return True
 
     def _get_contig_lengths(self) -> Dict[str, int]:
         with self._open() as f:
@@ -141,26 +147,40 @@ class Fasta(Reader):
                     pbar.update()
                 pbar.close()
         elif self.cache_path.exists():
-            for contig in contigs:
-                sequences[contig] = np.load(self.cache_path / f"{contig}.npy")
+            seqs = np.memmap(self.cache_path, dtype=np.bytes_, mode="r")
+            offset = 0
+            for contig, length in self.contigs.items():
+                sequences[contig] = seqs[offset : offset + length]
+                offset += length
         return sequences
 
     def _write_to_cache(self):
         """Write contigs to cache."""
-        self.cache_path.mkdir(parents=True, exist_ok=True)
+        offset = 0
+        seqs = np.memmap(
+            self.cache_path,
+            dtype=np.uint8,
+            mode="w+",
+            shape=sum(self.contigs.values()),
+        )
+        f = None
 
-        with self._open() as f:
-            pbar = tqdm(total=len(self.contigs))
-            for c in self.contigs:
-                if self.sequences is None:
-                    pbar.set_description(f"Reading contig {c}")
-                    seq = np.frombuffer(f.fetch(c).encode("ascii").upper(), "S1")
-                else:
-                    seq = self.sequences[c]
-                pbar.set_description(f"Writing contig {c}")
-                np.save(self.cache_path / f"{c}.npy", seq)
-                pbar.update()
-            pbar.close()
+        for c in (pbar := tqdm(self.contigs, total=len(seqs), unit=" nucleotide")):
+            if self.sequences is None:
+                if f is None:
+                    f = self._open()
+                pbar.set_description(f"Reading contig {c}")
+                c_seq = np.frombuffer(f.fetch(c).encode("ascii").upper(), "S1")
+            else:
+                c_seq = self.sequences[c]
+            pbar.set_description(f"Writing contig {c}")
+            seqs[offset : offset + len(c_seq)] = c_seq.view(np.uint8)
+            seqs.flush()
+            offset += len(c_seq)
+            pbar.update(len(c_seq))
+
+        if f is not None:
+            f.close()
 
     def _open(self):
         return pysam.FastaFile(str(self.path))

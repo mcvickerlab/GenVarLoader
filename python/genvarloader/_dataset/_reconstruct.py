@@ -3,10 +3,8 @@ from __future__ import annotations
 import enum
 import itertools
 import json
-from functools import partial
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING,
     Callable,
     Dict,
     Iterable,
@@ -22,7 +20,6 @@ from typing import (
 )
 
 import awkward as ak
-import numba as nb
 import numpy as np
 import polars as pl
 from attrs import define, evolve
@@ -38,95 +35,22 @@ from genoray._svar import (
 )
 from loguru import logger
 from numpy.typing import NDArray
-from phantom import Phantom
 from seqpro._ragged import Ragged
 from tqdm.auto import tqdm
 from typing_extensions import assert_never
 
-from .._fasta import Fasta
-from .._ragged import INTERVAL_DTYPE, RaggedAnnotatedHaps, RaggedIntervals, is_rag_dtype
-from .._utils import _lengths_to_offsets, _normalize_contig_name
+from .._ragged import INTERVAL_DTYPE, RaggedAnnotatedHaps, RaggedIntervals, RaggedSeqs
+from .._utils import _lengths_to_offsets
 from .._variants._records import RaggedAlleles
 from ._genotypes import get_diffs_sparse, reconstruct_haplotypes_from_sparse
 from ._indexing import DatasetIndexer
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._rag_variants import RaggedVariants
+from ._reference import Reference, get_reference
 from ._tracks import shift_and_realign_tracks_sparse
-from ._utils import padded_slice, splits_sum_le_value
+from ._utils import splits_sum_le_value
 
 T = TypeVar("T", covariant=True)
-
-
-class RaggedSeqs(
-    Ragged[np.bytes_], Phantom, predicate=partial(is_rag_dtype, dtype=np.bytes_)
-): ...
-
-
-@define
-class Reference:
-    """A reference genome kept in-memory. Typically this is only instantiated to be
-    passed to :meth:`Dataset.open <genvarloader.Dataset.open>` and avoid data duplication.
-
-    .. note::
-        Do not instantiate this class directly. Use :meth:`Reference.from_path` instead.
-    """
-
-    reference: NDArray[np.uint8]
-    contigs: List[str]
-    offsets: NDArray[np.uint64]
-    pad_char: int
-
-    @classmethod
-    def from_path(cls, fasta: Union[str, Path], contigs: List[str] | None = None):
-        """Load a reference genome from a FASTA file.
-
-        Parameters
-        ----------
-        fasta
-            Path to the FASTA file.
-        contigs
-            List of contig names to load. If None, all contigs in the FASTA file are loaded.
-            Can be either UCSC or Ensembl style (i.e. with or without the "chr" prefix) and
-            will be handled appropriately to match the underlying FASTA.
-        """
-        _fasta = Fasta("ref", fasta, "N")
-
-        if not _fasta.cache_path.exists():
-            logger.info("Memory-mapping FASTA file for faster access.")
-            _fasta._write_to_cache()
-
-        if contigs is None:
-            contigs = list(_fasta.contigs)
-
-        _contigs = [_normalize_contig_name(c, _fasta.contigs) for c in contigs]
-        if unmapped := [
-            source for source, mapped in zip(contigs, _contigs) if mapped is None
-        ]:
-            raise ValueError(
-                f"Some of the given contig names are not present in reference file: {unmapped}"
-            )
-        contigs = cast(list[str], _contigs)
-
-        _fasta.sequences = _fasta._get_sequences(contigs)
-        if TYPE_CHECKING:
-            assert _fasta.sequences is not None
-            assert _fasta.pad is not None
-        refs: List[NDArray[np.bytes_]] = []
-        next_offset = 0
-        _ref_offsets: Dict[str, int] = {}
-        for contig in contigs:
-            arr = _fasta.sequences[contig]
-            refs.append(arr)
-            _ref_offsets[contig] = next_offset
-            next_offset += len(arr)
-        reference = np.concatenate(refs).view(np.uint8)
-        pad_char = ord("N")
-        if any(c is None for c in contigs):
-            raise ValueError("Contig names in metadata do not match reference.")
-        ref_offsets = np.empty(len(contigs) + 1, np.uint64)
-        ref_offsets[:-1] = np.array([_ref_offsets[c] for c in contigs], dtype=np.uint64)
-        ref_offsets[-1] = len(reference)
-        return cls(reference, contigs, ref_offsets, pad_char)
 
 
 @define
@@ -197,7 +121,7 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
         out_offsets = _lengths_to_offsets(out_lengths)
 
         # ragged (b)
-        ref = _get_reference(
+        ref = get_reference(
             regions=regions,
             out_offsets=out_offsets,
             reference=self.reference.reference,
@@ -207,24 +131,6 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
         ref = cast(Ragged[np.bytes_], Ragged.from_offsets(ref, batch_size, out_offsets))
 
         return ref
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def _get_reference(
-    regions: NDArray[np.int32],
-    out_offsets: NDArray[np.int64],
-    reference: NDArray[np.uint8],
-    ref_offsets: NDArray[np.uint64],
-    pad_char: int,
-) -> NDArray[np.uint8]:
-    out = np.empty(out_offsets[-1], np.uint8)
-    for i in nb.prange(len(regions)):
-        o_s, o_e = out_offsets[i], out_offsets[i + 1]
-        c_idx, start, end = regions[i, :3]
-        c_s = ref_offsets[c_idx]
-        c_e = ref_offsets[c_idx + 1]
-        out[o_s:o_e] = padded_slice(reference[c_s:c_e], start, end, pad_char)
-    return out
 
 
 _H = TypeVar("_H", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)

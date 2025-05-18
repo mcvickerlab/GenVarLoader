@@ -11,7 +11,9 @@ __all__ = []
 
 
 @nb.njit(nogil=True, cache=True)
-def padded_slice(arr: NDArray, start: int, stop: int, pad_val: int):
+def padded_slice(
+    arr: NDArray[DTYPE], start: int, stop: int, pad_val: int
+) -> NDArray[DTYPE]:
     pad_left = -min(0, start)
     pad_right = max(0, stop - len(arr))
 
@@ -73,7 +75,12 @@ def regions_to_bed(regions: NDArray[np.int32], contigs: Sequence[str]) -> pl.Dat
 
 
 def bed_to_regions(bed: pl.DataFrame, contigs: Sequence[str]) -> NDArray[np.int32]:
-    """Convert a BED3+ DataFrame to GVL's internal representation of regions.
+    """Convert a BED3+ DataFrame to GVL's internal representation of regions, a
+    2D array of shape (n_regions, 4) with the following columns:
+    - chrom: Contig index
+    - chromStart: 0-based start position
+    - chromEnd: 0-based exclusive end position
+    - strand: Strand index (1 for +, -1 for -)
 
     Parameters
     ----------

@@ -33,35 +33,26 @@ from .._ragged import (
     Ragged,
     RaggedAnnotatedHaps,
     RaggedIntervals,
+    RaggedSeqs,
     _jitter,
     _reverse,
     _reverse_complement,
     is_rag_dtype,
     to_padded,
 )
-from .._torch import TorchDataset, get_dataloader
+from .._torch import TORCH_AVAILABLE, TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx
 from .._utils import _lengths_to_offsets, _normalize_contig_name, idx_like_to_array
 from ._indexing import DatasetIndexer
 from ._rag_variants import RaggedVariants
-from ._reconstruct import (
-    Haps,
-    HapsTracks,
-    RaggedSeqs,
-    Ref,
-    Reference,
-    RefTracks,
-    Tracks,
-)
+from ._reconstruct import Haps, HapsTracks, Ref, RefTracks, Tracks
+from ._reference import Reference
 from ._utils import bed_to_regions, regions_to_bed
 
-try:
+if TORCH_AVAILABLE:
     import torch
     import torch.utils.data as td
 
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
 
 _py_open = open
 
@@ -1086,7 +1077,7 @@ class Dataset:
 
         return evolve(self, _tracks=ds_tracks, _recon=recon)
 
-    def to_torch_dataset(self) -> "td.Dataset":
+    def to_torch_dataset(self) -> td.Dataset:
         """Convert the dataset to a PyTorch :class:`Dataset <torch.utils.data.Dataset>`. Requires PyTorch to be installed."""
         if self.output_length == "ragged":
             raise ValueError(
@@ -1099,7 +1090,7 @@ class Dataset:
         self,
         batch_size: int = 1,
         shuffle: bool = False,
-        sampler: "td.Sampler" | Iterable | None = None,  # type: ignore
+        sampler: td.Sampler | Iterable | None = None,
         num_workers: int = 0,
         collate_fn: Callable | None = None,
         pin_memory: bool = False,
@@ -1107,12 +1098,12 @@ class Dataset:
         timeout: float = 0,
         worker_init_fn: Callable | None = None,
         multiprocessing_context: Callable | None = None,
-        generator: "torch.Generator" | None = None,  # type: ignore
+        generator: torch.Generator | None = None,
         *,
         prefetch_factor: int | None = None,
         persistent_workers: bool = False,
         pin_memory_device: str = "",
-    ) -> "td.DataLoader":
+    ) -> td.DataLoader:
         """Convert the dataset to a PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
         :class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
         Requires PyTorch to be installed.

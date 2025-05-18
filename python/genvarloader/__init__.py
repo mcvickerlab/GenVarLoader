@@ -5,7 +5,7 @@ from seqpro.bed import read_bedlike, with_length
 
 from ._bigwig import BigWigs
 from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
-from ._dataset._reconstruct import Reference
+from ._dataset._reference import RefDataset, Reference
 from ._dataset._write import write
 from ._dummy import get_dummy_dataset
 from ._torch import to_nested_tensor
@@ -28,4 +28,5 @@ __all__ = [
     "sites_vcf_to_table",
     "SitesSchema",
     "DatasetWithSites",
+    "RefDataset",
 ]
