@@ -5,7 +5,7 @@ import genvarloader as gvl
 import numpy as np
 import pysam
 import seqpro as sp
-from genvarloader._dataset._reconstruct import RaggedSeqs
+from genvarloader._ragged import RaggedSeqs
 from pytest_cases import parametrize_with_cases
 
 data_dir = Path(__file__).resolve().parents[1] / "data"
