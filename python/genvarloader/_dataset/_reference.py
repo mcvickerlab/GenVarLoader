@@ -20,9 +20,10 @@ from attrs import define, evolve
 from loguru import logger
 from numpy.typing import NDArray
 from seqpro._ragged import Ragged
+from typing_extensions import Self
 
 from .._fasta import Fasta
-from .._ragged import RaggedSeqs, to_padded
+from .._ragged import RaggedSeqs, _reverse_complement, to_padded
 from .._torch import (
     TORCH_AVAILABLE,
     get_dataloader,
@@ -138,15 +139,14 @@ T = TypeVar("T", NDArray[np.bytes_], RaggedSeqs)
 
 @define
 class RefDataset(Generic[T]):
-    """A reference dataset for pulling out sequences from a reference genome. Also a memory saver
-    when the total length of the regions of interest are greater than the reference genome."""
+    """A reference dataset for pulling out sequences from a reference genome."""
 
     reference: Reference
     regions: pl.DataFrame
-    max_jitter: int
     jitter: int
     output_length: Literal["ragged", "variable"] | int
     deterministic: bool
+    rc_neg: bool
     _full_regions: NDArray[np.int32]
     _rng: np.random.Generator
 
@@ -156,9 +156,33 @@ class RefDataset(Generic[T]):
         regions: pl.DataFrame,
         jitter: int = 0,
         deterministic: bool = True,
-        output_length: Literal["ragged", "variable"] | int = "ragged",
+        rc_neg: bool = True,
         seed: int | np.random.Generator | None = None,
     ):
+        """Create a reference dataset.
+
+        Parameters
+        ----------
+        reference
+            The reference genome to use.
+        regions
+            A table of regions to extract from the reference genome. The table must have the following columns:
+            - `chrom`: The name of the contig (e.g. "chr1", "chr2", etc.)
+            - `chromStart`: The start position of the region (0-based).
+            - `chromEnd`: The end position of the region (0-based).
+            A `strand` column can also be included, in which case the regions will be reverse complemented if the strand is -1
+            and the `rc_neg` parameter is set to True.
+        jitter
+            The amount of jitter to apply to the start and end positions of the regions. This is used to create
+            variability in the output sequences. The jitter is applied as a random integer between 0 and 2 * `jitter` (inclusive).
+        deterministic
+            Affects behavior when output_length is an integer. If True, sequences that are too long will be right truncated.
+            If False, sequences that are too long will be randomly shifted to be within the output length.
+        rc_neg
+            If True, reverse complement regions that are on the negative strand.
+        seed
+            A random seed to use for jitter and shifting. If None, a random seed will be used.
+        """
         if regions.height == 0:
             raise ValueError("Table of regions has a height of zero.")
 
@@ -177,7 +201,8 @@ class RefDataset(Generic[T]):
         self.deterministic = deterministic
         self.reference = reference
         self.regions = regions
-        self.output_length = output_length
+        self.rc_neg = rc_neg
+        self.output_length = "ragged"
         self._full_regions = bed_to_regions(regions, reference.contigs)
         self._rng = np.random.default_rng(seed)
 
@@ -205,17 +230,49 @@ class RefDataset(Generic[T]):
                     f"Output length ({output_length}) must be a positive integer."
                 )
             min_r_len: int = (self._full_regions[:, 2] - self._full_regions[:, 1]).min()
-            max_output_length = min_r_len + 2 * self.max_jitter
+            max_output_length = min_r_len
             eff_length = output_length + 2 * self.jitter
 
             if eff_length > max_output_length:
                 raise ValueError(
                     f"Jitter-expanded output length (out_len={self.output_length}) + 2 * ({self.jitter=}) = {eff_length} must be less"
                     f" than or equal to the maximum output length of the dataset ({max_output_length})."
-                    f" The maximum output length is the minimum region length ({min_r_len}) + 2 * (max_jitter={self.max_jitter})."
+                    f" The maximum output length is the minimum region length ({min_r_len})."
                 )
 
         return evolve(self, output_length=output_length)
+
+    def with_settings(
+        self,
+        jitter: int | None = None,
+        deterministic: bool | None = None,
+        rc_neg: bool | None = None,
+        seed: int | np.random.Generator | None = None,
+    ) -> Self:
+        to_evolve = {}
+
+        if jitter is not None:
+            if jitter < 0:
+                raise ValueError(f"jitter ({jitter}) must be a non-negative integer.")
+            elif (
+                jitter
+                > (min_len := self._full_regions[:, 2] - self._full_regions[:, 1]).min()
+            ):
+                raise ValueError(
+                    f"jitter ({jitter}) must be less than the minimum region length ({min_len})."
+                )
+            to_evolve["jitter"] = jitter
+
+        if deterministic is not None:
+            to_evolve["deterministic"] = deterministic
+
+        if rc_neg is not None:
+            to_evolve["rc_neg"] = rc_neg
+
+        if seed is not None:
+            to_evolve["seed"] = np.random.default_rng(seed)
+
+        return evolve(self, **to_evolve)
 
     def __getitem__(self, idx: Idx) -> T:
         # (... 4)
@@ -264,6 +321,10 @@ class RefDataset(Generic[T]):
         ).view("S1")
 
         ref = cast(Ragged[np.bytes_], Ragged.from_offsets(ref, batch_size, out_offsets))
+
+        to_rc = regions[:, 3] == -1
+        if to_rc.any():
+            ref = _reverse_complement(ref, to_rc)
 
         if squeeze:
             ref = ref.squeeze()

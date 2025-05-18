@@ -105,7 +105,8 @@ class DatasetWithSites(Generic[MaybeTRK]):
         max_variants_per_region: int = 1,
     ):
         """Dataset with variant sites, used to apply site-only variants e.g. from ClinVar to a Dataset of haplotypes.
-        Currently only supports bi-allelic SNPs.
+        Currently only supports bi-allelic SNPs. Takes the intersection of the dataset regions and the sites, and
+        applies the site-only variants to the Dataset's haplotypes.
 
         Accessed just like a Dataset, but where the rows are combinations of dataset regions and sites. Will return
         :class:`AnnotatedHaps` with variants applied and flags indicating whether the variant was applied, deleted, or existed.
@@ -124,6 +125,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
         Examples
         --------
         .. code-block:: python
+
             import genvarloader as gvl
             sites = gvl.sites_vcf_to_table("path/to/variants.vcf")
 

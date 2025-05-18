@@ -12,11 +12,13 @@
 .. autofunction:: with_length
 
 .. autoclass:: BigWigs
-    :members:
-    :exclude-members: rev_strand_fn, chunked
+    :members: __init__, from_table
+    :exclude-members: __new__
 ```
 
 ## Reading
+
+### Personalized data
 
 ```{eval-rst}
 .. currentmodule:: genvarloader
@@ -27,22 +29,39 @@
 
 .. autofunction:: get_dummy_dataset
 
-.. autoclass:: Reference
-    :members:
-    :exclude-members: __new__, __init__
-
 .. autoclass:: RaggedDataset
     :exclude-members: __new__, __init__
 
 .. autoclass:: ArrayDataset
     :exclude-members: __new__, __init__
+```
+
+### Reference genome(s)
+
+```{eval-rst}
+.. currentmodule:: genvarloader
+
+.. autoclass:: Reference
+    :members:
+    :exclude-members: __new__, __init__
+
+.. autoclass:: RefDataset
+    :members:
+    :exclude-members: __new__
+```
+
+### Non-personal/site-only variants
+
+```{eval-rst}
+.. currentmodule:: genvarloader
+
+.. autoclass:: DatasetWithSites
+    :members:
+    :exclude-members: __new__
 
 .. autofunction:: sites_vcf_to_table
 
 .. autodata:: SitesSchema
-
-.. autoclass:: DatasetWithSites
-    :exclude-members: __new__, __init__
 ```
 
 ## Containers
