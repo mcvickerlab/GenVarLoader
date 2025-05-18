@@ -153,7 +153,7 @@ def get_dummy_dataset():
 
     dummy_recon = HapsTracks(dummy_haps, dummy_tracks)
 
-    dummy_dataset: RaggedDataset[RaggedSeqs, Ragged[np.float32], None, None] = (
+    dummy_dataset: RaggedDataset[RaggedSeqs, Ragged[np.float32]] = (
         RaggedDataset(
             path=Path("dummy"),
             output_length="ragged",

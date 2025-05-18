@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Generic, Sequence, Tuple, overload
+from typing import Generic, Sequence, Tuple, overload
 
 import numba as nb
 import numpy as np
@@ -12,7 +12,7 @@ from genoray import VCF
 from genoray._utils import ContigNormalizer
 from numpy.typing import NDArray
 
-from .._dataset._impl import ArrayDataset, MaybeTRK
+from .._dataset._impl import SEQ, ArrayDataset, MaybeTRK
 from .._dataset._indexing import DatasetIndexer
 from .._types import AnnotatedHaps, Idx
 from ._records import RaggedAlleles
@@ -73,7 +73,7 @@ def _sites_table_to_bedlike(sites: pl.DataFrame) -> pl.DataFrame:
 
 
 class DatasetWithSites(Generic[MaybeTRK]):
-    dataset: ArrayDataset[AnnotatedHaps, MaybeTRK, None, None]
+    dataset: ArrayDataset[AnnotatedHaps, MaybeTRK]
     """Dataset of haplotypes and potentially tracks."""
     sites: pl.DataFrame
     """Table of variant site information."""
@@ -100,7 +100,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
 
     def __init__(
         self,
-        dataset: ArrayDataset[Any, MaybeTRK, Any, Any],
+        dataset: ArrayDataset[SEQ, MaybeTRK],
         sites: pl.DataFrame,
         max_variants_per_region: int = 1,
     ):
@@ -185,11 +185,8 @@ class DatasetWithSites(Generic[MaybeTRK]):
             strict=False,
         ).drop("End_site")
 
-        _dataset = (
-            dataset.with_seqs("annotated")
-            .with_indices(False)
-            .with_transform(None)
-            .with_settings(deterministic=True, jitter=0)
+        _dataset = dataset.with_seqs("annotated").with_settings(
+            deterministic=True, jitter=0
         )
 
         self.sites = sites

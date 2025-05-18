@@ -106,7 +106,7 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
-    ) -> RaggedDataset[None, MaybeRTRK, None, None]: ...
+    ) -> RaggedDataset[None, MaybeRTRK]: ...
     @overload
     @staticmethod
     def open(
@@ -116,7 +116,7 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
-    ) -> RaggedDataset[RaggedSeqs, MaybeRTRK, None, None]: ...
+    ) -> RaggedDataset[RaggedSeqs, MaybeRTRK]: ...
     @staticmethod
     def open(
         path: str | Path,
@@ -125,7 +125,7 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
-    ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK, None, None]:
+    ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]:
         """Open a dataset from a path. If no reference genome is provided, the dataset cannot yield sequences.
         Will initialize the dataset such that it will return tracks and haplotypes (reference sequences if no genotypes) if possible.
         If tracks are available, they will be set to be returned in alphabetical order.
@@ -426,34 +426,6 @@ class Dataset:
                 _recon=self._recon,
                 _rng=self._rng,
             )
-
-    def with_indices(self, return_indices: bool):
-        """Whether to return indices, returning a new dataset without modifying the old one.
-        Set to :code:`True` to have the dataset return the row and sample indices of the non-subset dataset. This allows you to
-        combine arbitrary row- and sample-specific data with dataset output on-the-fly with a transform.
-
-        Parameters
-        ----------
-        return_indices
-            Whether to return indices.
-        """
-        return evolve(self, return_indices=return_indices)
-
-    def with_transform(self, transform: Callable | None):
-        """Modify the transform to apply to the dataset output, returning a new dataset without modifying the old one.
-        The transform should take input matching the output of the dataset and can return arbitrary output. In combination
-        with indices, this allows you to combine arbitrary row- and sample-specific data with dataset output on-the-fly.
-
-        .. note::
-            Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
-            dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
-
-        Parameters
-        ----------
-        transform
-            The transform to apply to the dataset.
-        """
-        return evolve(self, transform=transform)
 
     def with_seqs(
         self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
@@ -1077,14 +1049,30 @@ class Dataset:
 
         return evolve(self, _tracks=ds_tracks, _recon=recon)
 
-    def to_torch_dataset(self) -> td.Dataset:
-        """Convert the dataset to a PyTorch :class:`Dataset <torch.utils.data.Dataset>`. Requires PyTorch to be installed."""
+    def to_torch_dataset(
+        self, return_indices: bool, transform: Callable | None
+    ) -> TorchDataset:
+        """Convert the dataset to a PyTorch :class:`Dataset <torch.utils.data.Dataset>`. Requires PyTorch to be installed.
+
+        Parameters
+        ----------
+        return_indices
+            Whether to append arrays of row and sample indices of the non-subset dataset to each batch.
+        transform
+            The transform to apply to each batch of data. The transform should take input matching the output of the dataset and can
+            return anything that can be converted to a PyTorch tensor. In combination with indices, this allows you to combine arbitrary
+            row- and sample-specific data with dataset output on-the-fly.
+
+            .. note::
+                Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
+                dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
+        """
         if self.output_length == "ragged":
             raise ValueError(
                 """`output_length` is currently set to "ragged" and ragged output cannot be converted to PyTorch Tensors."""
                 """ Set `output_length` to "variable" or an integer."""
             )
-        return TorchDataset(self)
+        return TorchDataset(self, return_indices, transform)
 
     def to_dataloader(
         self,
@@ -1103,6 +1091,8 @@ class Dataset:
         prefetch_factor: int | None = None,
         persistent_workers: bool = False,
         pin_memory_device: str = "",
+        return_indices: bool = False,
+        transform: Callable | None = None,
     ) -> td.DataLoader:
         """Convert the dataset to a PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
         :class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
@@ -1149,9 +1139,19 @@ class Dataset:
             If :code:`True`, the data loader will not shut down the worker processes after a dataset has been consumed once. This allows to maintain the workers Dataset instances alive.
         pin_memory_device
             The device to :code:`pin_memory` to if :code:`pin_memory` is :code:`True`.
+        return_indices
+            Whether to append arrays of row and sample indices of the non-subset dataset to each batch.
+        transform
+            The transform to apply to each batch of data. The transform should take input matching the output of the dataset and can
+            return anything that can be converted to a PyTorch tensor. In combination with indices, this allows you to combine arbitrary
+            row- and sample-specific data with dataset output on-the-fly.
+
+            .. note::
+                Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
+                dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
         """
         return get_dataloader(
-            dataset=self.to_torch_dataset(),
+            dataset=self.to_torch_dataset(return_indices, transform),
             batch_size=batch_size,
             shuffle=shuffle,
             sampler=sampler,
@@ -1185,10 +1185,12 @@ class Dataset:
             rng=None if self.deterministic else self._rng,
         )
 
-        if not isinstance(recon, tuple):
-            out = [recon]
-        else:
+        if isinstance(recon, tuple):
+            unlist = False
             out = list(recon)
+        else:
+            unlist = True
+            out = [recon]
 
         ragv = None
         if isinstance(out[0], RaggedVariants):
@@ -1224,14 +1226,7 @@ class Dataset:
             # (1 [p] l) -> ([p] l)
             out = [o.squeeze(0) for o in out]
 
-        if self.return_indices:
-            inp_idx = self._idxer.d2i_map[ds_idx]
-            inp_r_idx, inp_s_idx = np.unravel_index(inp_idx, self.full_shape)
-            out.extend((inp_r_idx, inp_s_idx))  # type: ignore
-
-        if self.transform is not None:
-            out = self.transform(*out)
-        elif len(out) == 1:
+        if unlist:
             out = out[0]
 
         return out
@@ -1344,8 +1339,6 @@ def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedInt
     return itvs
 
 
-T = TypeVar("T")
-
 SEQ = TypeVar("SEQ", NDArray[np.bytes_], AnnotatedHaps, RaggedVariants)
 MaybeSEQ = TypeVar("MaybeSEQ", None, NDArray[np.bytes_], AnnotatedHaps, RaggedVariants)
 MaybeTRK = TypeVar("MaybeTRK", None, NDArray[np.float32])
@@ -1354,357 +1347,239 @@ RSEQ = TypeVar("RSEQ", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 MaybeRSEQ = TypeVar("MaybeRSEQ", None, RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 MaybeRTRK = TypeVar("MaybeRTRK", None, Ragged[np.float32])
 
-IDX = TypeVar("IDX", None, tuple[NDArray[np.integer], NDArray[np.integer]])
-TFM = TypeVar("TFM")
 
-
-class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK, IDX, TFM]):
+class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
     """Only for type checking purposes, you should never instantiate this class directly."""
 
     output_length: Literal["variable"] | int
 
     @overload
     def with_len(
-        self: ArrayDataset[NDArray[np.bytes_], None, IDX, TFM],
+        self: ArrayDataset[NDArray[np.bytes_], None],
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[RaggedSeqs, None, IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedSeqs, None]: ...
     @overload
     def with_len(
-        self: ArrayDataset[AnnotatedHaps, None, IDX, TFM],
+        self: ArrayDataset[AnnotatedHaps, None],
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[RaggedAnnotatedHaps, None, IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedAnnotatedHaps, None]: ...
     @overload
     def with_len(
-        self: ArrayDataset[None, NDArray[np.float32], IDX, TFM],
+        self: ArrayDataset[None, NDArray[np.float32]],
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[None, Ragged[np.float32], IDX, TFM]: ...
+    ) -> RaggedDataset[None, Ragged[np.float32]]: ...
     @overload
     def with_len(
-        self: ArrayDataset[NDArray[np.bytes_], NDArray[np.float32], IDX, TFM],
+        self: ArrayDataset[NDArray[np.bytes_], NDArray[np.float32]],
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[RaggedSeqs, Ragged[np.float32], IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedSeqs, Ragged[np.float32]]: ...
     @overload
     def with_len(
-        self: ArrayDataset[AnnotatedHaps, NDArray[np.float32], IDX, TFM],
+        self: ArrayDataset[AnnotatedHaps, NDArray[np.float32]],
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[RaggedAnnotatedHaps, Ragged[np.float32], IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedAnnotatedHaps, Ragged[np.float32]]: ...
     @overload
     def with_len(
         self,
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[NDArray[np.bytes_], MaybeTRK, IDX, TFM]: ...
+    ) -> ArrayDataset[NDArray[np.bytes_], MaybeTRK]: ...
     def with_len(
         self, output_length: Literal["ragged", "variable"] | int
     ) -> Union[
-        RaggedDataset[MaybeRSEQ, MaybeRTRK, IDX, TFM],
-        ArrayDataset[SEQ, MaybeTRK, IDX, TFM],
+        RaggedDataset[MaybeRSEQ, MaybeRTRK],
+        ArrayDataset[SEQ, MaybeTRK],
     ]:
         return super().with_len(output_length)
 
     @overload
-    def with_seqs(self, kind: None) -> ArrayDataset[None, MaybeTRK, IDX, TFM]: ...
+    def with_seqs(self, kind: None) -> ArrayDataset[None, MaybeTRK]: ...
     @overload
     def with_seqs(
         self, kind: Literal["reference", "haplotypes"]
-    ) -> ArrayDataset[NDArray[np.bytes_], MaybeTRK, IDX, TFM]: ...
+    ) -> ArrayDataset[NDArray[np.bytes_], MaybeTRK]: ...
     @overload
     def with_seqs(
         self, kind: Literal["annotated"]
-    ) -> ArrayDataset[AnnotatedHaps, MaybeTRK, IDX, TFM]: ...
+    ) -> ArrayDataset[AnnotatedHaps, MaybeTRK]: ...
     @overload
     def with_seqs(
         self, kind: Literal["variants"]
-    ) -> ArrayDataset[RaggedVariants, MaybeTRK, IDX, TFM]: ...
+    ) -> ArrayDataset[RaggedVariants, MaybeTRK]: ...
     def with_seqs(
         self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
     ) -> ArrayDataset:
         return super().with_seqs(kind)
 
     @overload
-    def with_tracks(self, tracks: None) -> ArrayDataset[MaybeSEQ, None, IDX, TFM]: ...
+    def with_tracks(self, tracks: None) -> ArrayDataset[MaybeSEQ, None]: ...
     @overload
     def with_tracks(
         self, tracks: str
-    ) -> ArrayDataset[MaybeSEQ, NDArray[np.float32], IDX, TFM]: ...
+    ) -> ArrayDataset[MaybeSEQ, NDArray[np.float32]]: ...
     @overload
     def with_tracks(
         self, tracks: List[str]
-    ) -> ArrayDataset[MaybeSEQ, NDArray[np.float32], IDX, TFM]: ...
+    ) -> ArrayDataset[MaybeSEQ, NDArray[np.float32]]: ...
     def with_tracks(self, tracks: str | List[str] | None) -> ArrayDataset:
         return super().with_tracks(tracks)
 
     @overload
-    def with_indices(
-        self, return_indices: Literal[False]
-    ) -> ArrayDataset[MaybeSEQ, MaybeTRK, None, TFM]: ...
-    @overload
-    def with_indices(
-        self, return_indices: Literal[True]
-    ) -> ArrayDataset[
-        MaybeSEQ, MaybeTRK, tuple[NDArray[np.integer], NDArray[np.integer]], TFM
-    ]: ...
-    def with_indices(self, return_indices: bool) -> ArrayDataset:
-        return super().with_indices(return_indices)
-
-    @overload
-    def with_transform(
-        self: ArrayDataset[SEQ, None, None, TFM],
-        transform: Callable[[SEQ], T],
-    ) -> ArrayDataset[SEQ, NDArray[np.float32], IDX, T]: ...
-    @overload
-    def with_transform(
-        self: ArrayDataset[None, NDArray[np.float32], None, TFM],
-        transform: Callable[[NDArray[np.float32]], T],
-    ) -> ArrayDataset[SEQ, NDArray[np.float32], IDX, T]: ...
-    @overload
-    def with_transform(
-        self: ArrayDataset[SEQ, NDArray[np.float32], None, TFM],
-        transform: Callable[[SEQ, NDArray[np.float32]], T],
-    ) -> ArrayDataset[SEQ, NDArray[np.float32], IDX, T]: ...
-    @overload
-    def with_transform(
-        self: ArrayDataset[SEQ, None, IDX, TFM],
-        transform: Callable[[SEQ, IDX], T],
-    ) -> ArrayDataset[SEQ, NDArray[np.float32], IDX, T]: ...
-    @overload
-    def with_transform(
-        self: ArrayDataset[None, NDArray[np.float32], IDX, TFM],
-        transform: Callable[[NDArray[np.float32], IDX], T],
-    ) -> ArrayDataset[SEQ, NDArray[np.float32], IDX, T]: ...
-    @overload
-    def with_transform(
-        self: ArrayDataset[SEQ, NDArray[np.float32], IDX, TFM],
-        transform: Callable[[SEQ, NDArray[np.float32], IDX], T],
-    ) -> ArrayDataset[SEQ, NDArray[np.float32], IDX, T]: ...
-    @overload
-    def with_transform(
-        self, transform: None
-    ) -> ArrayDataset[MaybeSEQ, MaybeTRK, IDX, None]: ...
-    def with_transform(self, transform: Callable | None) -> ArrayDataset:
-        return super().with_transform(transform)
-
+    def __getitem__(
+        self: ArrayDataset[None, None],
+        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+    ) -> NoReturn: ...
     @overload
     def __getitem__(
-        self: ArrayDataset[SEQ, None, None, None],
+        self: ArrayDataset[SEQ, None],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
     ) -> SEQ: ...
     @overload
     def __getitem__(
-        self: ArrayDataset[None, NDArray[np.float32], None, None],
+        self: ArrayDataset[None, NDArray[np.float32]],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
     ) -> NDArray[np.float32]: ...
     @overload
     def __getitem__(
-        self: ArrayDataset[SEQ, NDArray[np.float32], None, None],
+        self: ArrayDataset[SEQ, NDArray[np.float32]],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[SEQ, NDArray[np.float32]]: ...
+    ) -> tuple[SEQ, NDArray[np.float32]]: ...
     @overload
     def __getitem__(
-        self: ArrayDataset[SEQ, None, IDX, None],
+        self: ArrayDataset[SEQ, MaybeTRK],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[SEQ, IDX]: ...
+    ) -> SEQ | tuple[SEQ, NDArray[np.float32]]: ...
     @overload
     def __getitem__(
-        self: ArrayDataset[None, NDArray[np.float32], IDX, None],
+        self: ArrayDataset[MaybeSEQ, NDArray[np.float32]],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[NDArray[np.float32], IDX]: ...
+    ) -> NDArray[np.float32] | tuple[SEQ, NDArray[np.float32]]: ...
     @overload
     def __getitem__(
-        self: ArrayDataset[SEQ, NDArray[np.float32], IDX, None],
+        self: ArrayDataset[MaybeSEQ, MaybeTRK],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[SEQ, NDArray[np.float32], IDX]: ...
-    @overload
-    def __getitem__(
-        self: ArrayDataset[SEQ, NDArray[np.float32], IDX, TFM],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> TFM: ...
-    @overload
-    def __getitem__(
-        self: ArrayDataset[SEQ, MaybeTRK, None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> SEQ | Tuple[SEQ, NDArray[np.float32]]: ...
-    @overload
-    def __getitem__(
-        self: ArrayDataset[MaybeSEQ, MaybeTRK, None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> SEQ | NDArray[np.float32] | Tuple[SEQ, NDArray[np.float32]]: ...
+    ) -> SEQ | NDArray[np.float32] | tuple[SEQ, NDArray[np.float32]]: ...
     def __getitem__(
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
-    ) -> Any:
+    ) -> SEQ | NDArray[np.float32] | tuple[SEQ, NDArray[np.float32]]:
         return super().__getitem__(idx)
 
 
-class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK, IDX, TFM]):
+class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
     """Only for type checking purposes, you should never instantiate this class directly."""
 
     output_length: Literal["ragged"]
 
     @overload
     def with_len(
-        self: RaggedDataset[RaggedSeqs, None, IDX, TFM],
+        self: RaggedDataset[RaggedSeqs, None],
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[NDArray[np.bytes_], None, IDX, TFM]: ...
+    ) -> ArrayDataset[NDArray[np.bytes_], None]: ...
     @overload
     def with_len(
-        self: RaggedDataset[RaggedAnnotatedHaps, None, IDX, TFM],
+        self: RaggedDataset[RaggedAnnotatedHaps, None],
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[AnnotatedHaps, None, IDX, TFM]: ...
+    ) -> ArrayDataset[AnnotatedHaps, None]: ...
     @overload
     def with_len(
-        self: RaggedDataset[None, Ragged[np.float32], IDX, TFM],
+        self: RaggedDataset[None, Ragged[np.float32]],
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[None, NDArray[np.float32], IDX, TFM]: ...
+    ) -> ArrayDataset[None, NDArray[np.float32]]: ...
     @overload
     def with_len(
-        self: RaggedDataset[None, MaybeRTRK, IDX, TFM],
+        self: RaggedDataset[None, MaybeRTRK],
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[None, MaybeTRK, IDX, TFM]: ...
+    ) -> ArrayDataset[None, MaybeTRK]: ...
     @overload
     def with_len(
-        self: RaggedDataset[RaggedSeqs, Ragged[np.float32], IDX, TFM],
+        self: RaggedDataset[RaggedSeqs, Ragged[np.float32]],
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[NDArray[np.bytes_], NDArray[np.float32], IDX, TFM]: ...
+    ) -> ArrayDataset[NDArray[np.bytes_], NDArray[np.float32]]: ...
     @overload
     def with_len(
-        self: RaggedDataset[RaggedAnnotatedHaps, Ragged[np.float32], IDX, TFM],
+        self: RaggedDataset[RaggedAnnotatedHaps, Ragged[np.float32]],
         output_length: Union[Literal["variable"], int],
-    ) -> ArrayDataset[AnnotatedHaps, NDArray[np.float32], IDX, TFM]: ...
+    ) -> ArrayDataset[AnnotatedHaps, NDArray[np.float32]]: ...
     @overload
     def with_len(
         self,
         output_length: Literal["ragged"],
-    ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK, IDX, TFM]: ...
+    ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]: ...
     def with_len(
         self, output_length: Union[Literal["ragged", "variable"], int]
     ) -> Union[
-        RaggedDataset[MaybeRSEQ, MaybeRTRK, IDX, TFM],
-        ArrayDataset[MaybeSEQ, MaybeTRK, IDX, TFM],
+        RaggedDataset[MaybeRSEQ, MaybeRTRK],
+        ArrayDataset[MaybeSEQ, MaybeTRK],
     ]:
         return super().with_len(output_length)
 
     @overload
-    def with_seqs(self, kind: None) -> RaggedDataset[None, MaybeRTRK, IDX, TFM]: ...
+    def with_seqs(self, kind: None) -> RaggedDataset[None, MaybeRTRK]: ...
     @overload
     def with_seqs(
         self, kind: Literal["reference", "haplotypes"]
-    ) -> RaggedDataset[RaggedSeqs, MaybeRTRK, IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedSeqs, MaybeRTRK]: ...
     @overload
     def with_seqs(
         self, kind: Literal["annotated"]
-    ) -> RaggedDataset[RaggedAnnotatedHaps, MaybeRTRK, IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedAnnotatedHaps, MaybeRTRK]: ...
     @overload
     def with_seqs(
         self, kind: Literal["variants"]
-    ) -> RaggedDataset[RaggedVariants, MaybeRTRK, IDX, TFM]: ...
+    ) -> RaggedDataset[RaggedVariants, MaybeRTRK]: ...
     def with_seqs(
         self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
     ) -> RaggedDataset:
         return super().with_seqs(kind)
 
     @overload
-    def with_tracks(self, tracks: None) -> RaggedDataset[MaybeRSEQ, None, IDX, TFM]: ...
+    def with_tracks(self, tracks: None) -> RaggedDataset[MaybeRSEQ, None]: ...
     @overload
     def with_tracks(
         self, tracks: str
-    ) -> RaggedDataset[MaybeRSEQ, Ragged[np.float32], IDX, TFM]: ...
+    ) -> RaggedDataset[MaybeRSEQ, Ragged[np.float32]]: ...
     @overload
     def with_tracks(
         self, tracks: List[str]
-    ) -> RaggedDataset[MaybeRSEQ, Ragged[np.float32], IDX, TFM]: ...
+    ) -> RaggedDataset[MaybeRSEQ, Ragged[np.float32]]: ...
     def with_tracks(self, tracks: str | List[str] | None) -> RaggedDataset:
         return super().with_tracks(tracks)
 
     @overload
-    def with_indices(
-        self, return_indices: Literal[False]
-    ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK, None, TFM]: ...
-    @overload
-    def with_indices(
-        self, return_indices: Literal[True]
-    ) -> RaggedDataset[
-        MaybeRSEQ, MaybeRTRK, tuple[NDArray[np.integer], NDArray[np.integer]], TFM
-    ]: ...
-    def with_indices(self, return_indices: bool) -> RaggedDataset:
-        return super().with_indices(return_indices)
-
-    @overload
-    def with_transform(
-        self: RaggedDataset[RSEQ, None, None, TFM],
-        transform: Callable[[RSEQ], T],
-    ) -> RaggedDataset[RSEQ, None, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: RaggedDataset[None, Ragged[np.float32], None, TFM],
-        transform: Callable[[Ragged[np.float32]], T],
-    ) -> RaggedDataset[None, Ragged[np.float32], IDX, T]: ...
-    @overload
-    def with_transform(
-        self: RaggedDataset[RSEQ, Ragged[np.float32], None, TFM],
-        transform: Callable[[RSEQ, Ragged[np.float32]], T],
-    ) -> RaggedDataset[RSEQ, Ragged[np.float32], IDX, T]: ...
-    @overload
-    def with_transform(
-        self: RaggedDataset[RSEQ, None, IDX, TFM],
-        transform: Callable[[RSEQ, IDX], T],
-    ) -> RaggedDataset[RSEQ, None, IDX, T]: ...
-    @overload
-    def with_transform(
-        self: RaggedDataset[None, Ragged[np.float32], IDX, TFM],
-        transform: Callable[[Ragged[np.float32], IDX], T],
-    ) -> RaggedDataset[None, Ragged[np.float32], IDX, T]: ...
-    @overload
-    def with_transform(
-        self: RaggedDataset[RSEQ, Ragged[np.float32], IDX, TFM],
-        transform: Callable[[RSEQ, Ragged[np.float32], IDX], T],
-    ) -> RaggedDataset[RSEQ, Ragged[np.float32], IDX, T]: ...
-    @overload
-    def with_transform(
-        self, transform: None
-    ) -> RaggedDataset[RSEQ, MaybeRTRK, IDX, None]: ...
-    def with_transform(self, transform: Callable | None) -> RaggedDataset:
-        return super().with_transform(transform)
-
-    @overload
     def __getitem__(
-        self: RaggedDataset[RSEQ, None, None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> RSEQ: ...
-    @overload
-    def __getitem__(
-        self: RaggedDataset[None, Ragged[np.float32], None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Ragged[np.float32]: ...
-    @overload
-    def __getitem__(
-        self: RaggedDataset[None, None, IDX, None],
+        self: RaggedDataset[None, None],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
     ) -> NoReturn: ...
     @overload
     def __getitem__(
-        self: RaggedDataset[RSEQ, Ragged[np.float32], None, None],
+        self: RaggedDataset[RSEQ, None],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[RSEQ, Ragged[np.float32]]: ...
+    ) -> RSEQ: ...
     @overload
     def __getitem__(
-        self: RaggedDataset[RSEQ, None, IDX, None],
+        self: RaggedDataset[None, Ragged[np.float32]],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[RSEQ, IDX]: ...
+    ) -> Ragged[np.float32]: ...
     @overload
     def __getitem__(
-        self: RaggedDataset[None, Ragged[np.float32], IDX, None],
+        self: RaggedDataset[RSEQ, Ragged[np.float32]],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[Ragged[np.float32], IDX]: ...
+    ) -> tuple[RSEQ, Ragged[np.float32]]: ...
     @overload
     def __getitem__(
-        self: RaggedDataset[RSEQ, Ragged[np.float32], IDX, None],
+        self: RaggedDataset[RSEQ, MaybeRTRK],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> Tuple[RSEQ, Ragged[np.float32], IDX]: ...
+    ) -> RSEQ | tuple[RSEQ, Ragged[np.float32]]: ...
     @overload
     def __getitem__(
-        self: RaggedDataset[MaybeRSEQ, MaybeRTRK, IDX, TFM],
+        self: RaggedDataset[MaybeRSEQ, Ragged[np.float32]],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> TFM: ...
+    ) -> Ragged[np.float32] | tuple[RSEQ, Ragged[np.float32]]: ...
+    @overload
+    def __getitem__(
+        self: RaggedDataset[MaybeRSEQ, MaybeRTRK],
+        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
+    ) -> RSEQ | Ragged[np.float32] | tuple[RSEQ, Ragged[np.float32]]: ...
     def __getitem__(
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
-    ) -> Any:
+    ) -> RSEQ | Ragged[np.float32] | tuple[RSEQ, Ragged[np.float32]]:
         return super().__getitem__(idx)

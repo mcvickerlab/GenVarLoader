@@ -16,7 +16,7 @@ def dataset():
 
 
 def test_annot_tracks(
-    dataset: gvl.RaggedDataset[RaggedAnnotatedHaps, None, None, None],
+    dataset: gvl.RaggedDataset[RaggedAnnotatedHaps, None],
 ):
     annots = dataset.regions.with_columns(
         chromEnd=pl.col("chromStart") + 1, score=pl.lit(1.0)

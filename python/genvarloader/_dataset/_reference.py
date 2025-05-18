@@ -279,20 +279,25 @@ class RefDataset(Generic[T]):
 
         return cast(T, out)
 
-    def to_torch_dataset(self) -> TorchDataset:
+    def to_torch_dataset(
+        self, return_indices: bool = False, transform: Callable | None = None
+    ) -> TorchDataset:
         """Convert the dataset to a PyTorch dataset.
 
-        Returns
-        -------
-        TorchDataset
-            A PyTorch dataset.
+        Parameters
+        ----------
+        return_indices
+            If True, the dataset will return the indices of the regions in the reference genome.
+        transform
+            A function to transform the data. Should accept a numpy array of S1 with shape (batch_size, length).
+            If return_indices is true, the function should accept a tuple of (sequences, indices).
         """
         if self.output_length == "ragged":
             raise ValueError(
                 "Cannot convert to PyTorch dataset with ragged output length."
             )
         self = cast(RefDataset[NDArray[np.bytes_]], self)
-        return TorchDataset(self)
+        return TorchDataset(self, include_indices=return_indices, transform=transform)
 
     def to_dataloader(
         self,
@@ -311,6 +316,8 @@ class RefDataset(Generic[T]):
         prefetch_factor: int | None = None,
         persistent_workers: bool = False,
         pin_memory_device: str = "",
+        return_indices: bool = False,
+        transform: Callable | None = None,
     ) -> "td.DataLoader":
         """Convert the dataset to a PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
         :class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
@@ -357,9 +364,14 @@ class RefDataset(Generic[T]):
             If :code:`True`, the data loader will not shut down the worker processes after a dataset has been consumed once. This allows to maintain the workers Dataset instances alive.
         pin_memory_device
             The device to :code:`pin_memory` to if :code:`pin_memory` is :code:`True`.
+        return_indices
+            If True, the dataset will return the indices of the regions in the reference genome.
+        transform
+            A function to transform the data. Should accept a numpy array of S1 with shape (batch_size, length).
+            If return_indices is true, the function should accept a tuple of (sequences, indices).
         """
         return get_dataloader(
-            dataset=self.to_torch_dataset(),
+            dataset=self.to_torch_dataset(return_indices, transform),
             batch_size=batch_size,
             shuffle=shuffle,
             sampler=sampler,
@@ -400,15 +412,40 @@ if TORCH_AVAILABLE:
     import torch.utils.data as td
 
     class TorchDataset(td.Dataset):
-        def __init__(self, dataset: RefDataset[NDArray[np.bytes_]]):
+        def __init__(
+            self,
+            dataset: RefDataset[NDArray[np.bytes_]],
+            include_indices: bool,
+            transform: Callable | None,
+        ):
             self.dataset = dataset
+            self.include_indices = include_indices
+            self.transform = transform
 
         def __len__(self) -> int:
             return len(self.dataset)
 
-        def __getitem__(self, idx: int | list[int]) -> torch.Tensor:
+        def __getitem__(
+            self, idx: int | list[int]
+        ) -> torch.Tensor | tuple[torch.Tensor, ...]:
             batch = self.dataset[idx]
-            batch = tensor_from_maybe_bytes(batch)
+
+            if self.include_indices:
+                _idx = np.atleast_1d(idx)
+                batch = (*batch, _idx)
+                single_item = False
+            else:
+                batch = (batch,)
+                single_item = True
+
+            if self.transform is not None:
+                batch = self.transform(*batch)
+
+            batch = tuple(tensor_from_maybe_bytes(b) for b in batch)
+
+            if single_item:
+                batch = batch[0]
+
             return batch
 else:
     TorchDataset = no_torch_error  # type: ignore
