@@ -5,10 +5,10 @@ from attrs import define, evolve
 from hirola import HashTable
 from more_itertools import collapse
 from numpy.typing import NDArray
+from typing_extensions import assert_never
 
 from .._types import Idx, StrIdx
 from .._utils import idx_like_to_array, is_dtype
-from ._utils import oidx_to_raveled_idx
 
 
 @define
@@ -17,10 +17,6 @@ class DatasetIndexer:
     """Full map from input region indices to on-disk region indices."""
     full_sample_idxs: NDArray[np.integer]
     """Full map from input sample indices to on-disk sample indices."""
-    i2d_map: NDArray[np.integer]
-    """Map from input indices to on-disk dataset indices."""
-    d2i_map: NDArray[np.integer]
-    """Map from on-disk dataset indices to input indices."""
     s2i_map: HashTable
     """Map from input sample names to on-disk sample indices."""
     region_subset_idxs: Optional[NDArray[np.integer]] = None
@@ -35,9 +31,6 @@ class DatasetIndexer:
         s_idxs: NDArray[np.integer],
         samples: List[str],
     ):
-        shape = len(r_idxs), len(s_idxs)
-        i2d_map = oidx_to_raveled_idx(r_idxs, s_idxs, shape)
-        d2i_map = oidx_to_raveled_idx(np.argsort(r_idxs), s_idxs, shape)
         _samples = np.array(samples)
         s2i_map = HashTable(
             max=len(_samples) * 2,  # type: ignore | 2x size for perf > mem
@@ -47,8 +40,6 @@ class DatasetIndexer:
         return cls(
             full_region_idxs=r_idxs,
             full_sample_idxs=s_idxs,
-            i2d_map=i2d_map,
-            d2i_map=d2i_map,
             s2i_map=s2i_map,
         )
 
@@ -74,20 +65,6 @@ class DatasetIndexer:
             return len(self.full_sample_idxs)
         return len(self.sample_subset_idxs)
 
-    def region_idxs(self, mode: Literal["i2d", "d2i"]) -> NDArray[np.integer]:
-        """Map from input region indices to on-disk region indices or vice versa."""
-        if mode == "i2d":
-            return np.unravel_index(self.i2d_map[:: self.n_samples], self.full_shape)[0]
-        else:
-            return np.unravel_index(self.d2i_map[:: self.n_samples], self.full_shape)[0]
-
-    def sample_idxs(self, mode: Literal["i2d", "d2i"]) -> NDArray[np.integer]:
-        """Map from input sample indices to on-disk sample indices or vice versa."""
-        if mode == "i2d":
-            return np.unravel_index(self.i2d_map[: self.n_samples], self.full_shape)[1]
-        else:
-            return np.unravel_index(self.d2i_map[: self.n_samples], self.full_shape)[1]
-
     @property
     def samples(self) -> List[str]:
         if self.sample_subset_idxs is None:
@@ -103,7 +80,7 @@ class DatasetIndexer:
         return len(self.full_region_idxs), len(self.full_sample_idxs)
 
     def __len__(self):
-        return len(self.i2d_map)
+        return np.prod(self.shape)
 
     def subset_to(
         self,
@@ -124,36 +101,20 @@ class DatasetIndexer:
         else:
             region_idxs = np.arange(self.n_regions, dtype=np.intp)
 
-        idx = oidx_to_raveled_idx(
-            row_idx=region_idxs,
-            col_idx=sample_idxs,
-            shape=self.shape,
-        )
-
-        i2d_map = self.i2d_map[idx]
-
         return evolve(
-            self,
-            i2d_map=i2d_map,
-            region_subset_idxs=region_idxs,
-            sample_subset_idxs=sample_idxs,
+            self, region_subset_idxs=region_idxs, sample_subset_idxs=sample_idxs
         )
 
     def to_full_dataset(self) -> "DatasetIndexer":
         """Return a full sized dataset, undoing any subsettting."""
-        i2d_map = oidx_to_raveled_idx(
-            self.full_region_idxs, self.full_sample_idxs, self.full_shape
-        )
-        return evolve(
-            self,
-            i2d_map=i2d_map,
-            region_subset_idxs=None,
-            sample_subset_idxs=None,
-        )
+        return evolve(self, region_subset_idxs=None, sample_subset_idxs=None)
 
     def parse_idx(
         self, idx: Idx | tuple[Idx] | tuple[Idx, StrIdx]
     ) -> tuple[NDArray[np.integer], bool, tuple[int, ...] | None]:
+        out_reshape = None
+        squeeze = False
+
         if not isinstance(idx, tuple):
             regions = idx
             samples = slice(None)
@@ -164,18 +125,53 @@ class DatasetIndexer:
             regions, samples = idx
 
         s_idx = s2i(samples, self.s2i_map)
-        idx = self.i2d_map.reshape(self.shape)[regions, s_idx]
+        idx = (regions, s_idx)
+        idx_t = idx_type(idx)
+        if idx_t == "basic":
+            if all(isinstance(i, (int, np.integer)) for i in idx):
+                squeeze = True
+            r_idx = np.atleast_1d(self._r_idx[regions])
+            s_idx = np.atleast_1d(self._s_idx[s_idx])
+            idx = np.ravel_multi_index(np.ix_(r_idx, s_idx), self.full_shape).squeeze()
+        elif idx_t == "adv":
+            r_idx = self._r_idx[regions]
+            s_idx = self._s_idx[s_idx]
+            idx = np.ravel_multi_index((r_idx, s_idx), self.full_shape)
+        elif idx_t == "combo":
+            r_idx = self._r_idx[regions]
+            s_idx = self._s_idx[s_idx]
+            idx = np.ravel_multi_index(
+                np.ix_(r_idx.ravel(), s_idx.ravel()), self.full_shape
+            )
+            if (
+                isinstance(r_idx, np.ndarray)
+                and r_idx.ndim > 1
+                or isinstance(s_idx, np.ndarray)
+                and s_idx.ndim > 1
+            ):
+                out_reshape = (*r_idx.shape, *s_idx.shape)
+            elif idx.ndim > 1:
+                out_reshape = idx.shape
+        else:
+            assert_never(idx_t)
 
-        out_reshape = None
-        squeeze = False
-        if idx.ndim > 1:
+        if idx_t != "combo" and idx.ndim > 1:
             out_reshape = idx.shape
-        elif idx.ndim == 0:
-            squeeze = True
-
         idx = idx.ravel()
 
         return idx, squeeze, out_reshape
+
+    @property
+    def _r_idx(self):
+        if self.region_subset_idxs is None:
+            return self.full_region_idxs
+        return self.full_region_idxs[self.region_subset_idxs]
+
+    @property
+    def _s_idx(self):
+        if self.sample_subset_idxs is None:
+            return self.full_sample_idxs
+        return self.full_sample_idxs[self.sample_subset_idxs]
 
     def s2i(self, samples: StrIdx) -> Idx:
         """Convert sample names to sample indices."""
@@ -200,3 +196,25 @@ def s2i(str_idx: StrIdx, map: HashTable) -> Idx:
     idx = cast(Idx, idx)  # above clause does this, but can't narrow type
 
     return idx
+
+
+def idx_type(
+    idx: Idx | tuple[Idx] | tuple[Idx, Idx],
+) -> Literal["basic", "adv", "combo"]:
+    """Check if the index is a fancy index."""
+    if not isinstance(idx, tuple):
+        idx = (idx,)
+    n_adv = sum(map(is_adv_idx, idx))
+    if n_adv == 0:
+        return "basic"
+    elif n_adv == 1:
+        return "combo"
+    elif n_adv == 2:
+        return "adv"
+    else:
+        raise ValueError(f"Invalid index type: {idx}")
+
+
+def is_adv_idx(idx: Idx) -> bool:
+    """Check if the index is a fancy index."""
+    return isinstance(idx, (Sequence, np.ndarray))

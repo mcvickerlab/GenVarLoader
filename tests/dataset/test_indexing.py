@@ -17,40 +17,45 @@ def dsi():
 def case_1_region_all_samples():
     r_idx = 0
     s_idx = None
-    expected_idx_map = np.array([2, 3])
-    return r_idx, s_idx, expected_idx_map
+    desired_r_idx = np.array([1])
+    desired_s_idx = np.array([0, 1])
+    return r_idx, s_idx, desired_r_idx, desired_s_idx
 
 
 def case_1_region_1_sample():
     r_idx = 0
     s_idx = 1
-    expected_idx_map = np.array([3])
-    return r_idx, s_idx, expected_idx_map
+    desired_r_idx = np.array([1])
+    desired_s_idx = np.array([1])
+    return r_idx, s_idx, desired_r_idx, desired_s_idx
 
 
 def case_all_regions_1_sample():
     r_idx = None
     s_idx = 1
-    expected_idx_map = np.array([3, 5, 1])
-    return r_idx, s_idx, expected_idx_map
+    desired_r_idx = np.array([1, 2, 0])
+    desired_s_idx = np.array([1])
+    return r_idx, s_idx, desired_r_idx, desired_s_idx
 
 
 def case_2_regions_1_sample():
     r_idx = [0, 2]
     s_idx = 1
-    expected_idx_map = np.array([3, 1])
-    return r_idx, s_idx, expected_idx_map
+    desired_r_idx = np.array([1, 0])
+    desired_s_idx = np.array([1])
+    return r_idx, s_idx, desired_r_idx, desired_s_idx
 
 
 def case_2_regions_all_samples():
     r_idx = [0, 2]
     s_idx = None
-    expected_idx_map = np.array([2, 3, 0, 1])
-    return r_idx, s_idx, expected_idx_map
+    desired_r_idx = np.array([1, 0])
+    desired_s_idx = np.array([0, 1])
+    return r_idx, s_idx, desired_r_idx, desired_s_idx
 
 
-@parametrize_with_cases("r_idx, s_idx, expected_idx_map", cases=".")
-def test_subset(dsi: DatasetIndexer, r_idx, s_idx, expected_idx_map):
+@parametrize_with_cases("r_idx, s_idx, desired_r_idx, desired_s_idx", cases=".")
+def test_subset(dsi: DatasetIndexer, r_idx, s_idx, desired_r_idx, desired_s_idx):
     subset = dsi.subset_to(r_idx, s_idx)
     if r_idx is not None:
         r_idx = idx_like_to_array(r_idx, dsi.n_regions)
@@ -62,7 +67,8 @@ def test_subset(dsi: DatasetIndexer, r_idx, s_idx, expected_idx_map):
         s_idx = np.arange(dsi.n_samples, dtype=np.intp)
     assert subset.n_regions == len(r_idx)
     assert subset.n_samples == len(s_idx)
-    np.testing.assert_equal(subset.i2d_map, expected_idx_map)
+    np.testing.assert_equal(subset._r_idx, desired_r_idx)
+    np.testing.assert_equal(subset._s_idx, desired_s_idx)
 
 
 def test_subset_to_full(dsi: DatasetIndexer):
@@ -70,35 +76,60 @@ def test_subset_to_full(dsi: DatasetIndexer):
     full = subset.to_full_dataset()
     assert full.n_regions == dsi.n_regions
     assert full.n_samples == dsi.n_samples
-    np.testing.assert_equal(full.i2d_map, dsi.i2d_map)
+    np.testing.assert_equal(full._r_idx, dsi._r_idx)
+    np.testing.assert_equal(full._s_idx, dsi._s_idx)
+
+
+# full dataset indices
+# [
+#   [2, 3]
+#   [4, 5]
+#   [0, 1]
+# ]
 
 
 def getitem_squeeze():
     regions = 0
     samples = "Aang"
     s_idx = 0
-    return regions, samples, s_idx
+
+    des_idx = np.array([2])
+    des_squeeze = True
+    des_reshape = None
+    return regions, samples, s_idx, des_idx, des_squeeze, des_reshape
 
 
 def getitem_1d():
     regions = 0
     samples = ["Aang", "Katara"]
     s_idx = [0, 1]
-    return regions, samples, s_idx
+
+    des_idx = np.array([2, 3])
+    des_squeeze = False
+    des_reshape = (1, 2)
+    return regions, samples, s_idx, des_idx, des_squeeze, des_reshape
 
 
 def getitem_slice_scalar():
     regions = slice(2)
     samples = "Aang"
     s_idx = 0
-    return regions, samples, s_idx
+
+    des_idx = np.array([2, 4])
+    des_squeeze = False
+    des_reshape = None
+    return regions, samples, s_idx, des_idx, des_squeeze, des_reshape
 
 
 def getitem_reshape():
     regions = 0
     samples = [["Aang", "Katara"], ["Katara", "Aang"]]
     s_idx = [[0, 1], [1, 0]]
-    return regions, samples, s_idx
+
+    des_idx = np.array([[2, 3], [3, 2]]).ravel()
+    des_squeeze = False
+    des_reshape = (2, 2)
+    return regions, samples, s_idx, des_idx, des_squeeze, des_reshape
 
 
 @pytest.mark.xfail(strict=True, raises=KeyError, reason="Zuko is not in the dataset")
@@ -106,17 +137,29 @@ def getitem_missing():
     regions = 0
     samples = ["Aang", "Zuko"]
     s_idx = [0, -1]
-    return regions, samples, s_idx
+
+    des_idx = None
+    des_squeeze = None
+    des_reshape = None
+    return regions, samples, s_idx, des_idx, des_squeeze, des_reshape
 
 
-@parametrize_with_cases("regions, samples, s_idx", cases=".", prefix="getitem_")
-def test_getitem_shape(dsi: DatasetIndexer, regions, samples, s_idx):
+@parametrize_with_cases(
+    "regions, samples, s_idx, desired_idx, desired_squeeze, desired_reshape",
+    cases=".",
+    prefix="getitem_",
+)
+def test_getitem_shape(
+    dsi: DatasetIndexer,
+    regions,
+    samples,
+    s_idx,
+    desired_idx,
+    desired_squeeze,
+    desired_reshape,
+):
     idx, squeeze, reshape = dsi.parse_idx((regions, samples))
-    desired = dsi.i2d_map.reshape(dsi.shape)[regions, s_idx]
 
-    if reshape is not None:
-        assert desired.shape == reshape
-    elif squeeze:
-        assert idx.shape == (1,)
-
-    np.testing.assert_equal(idx, desired.ravel(), strict=True)
+    np.testing.assert_equal(idx, desired_idx)
+    assert squeeze == desired_squeeze
+    assert reshape == desired_reshape

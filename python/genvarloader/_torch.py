@@ -69,11 +69,6 @@ def get_dataloader(
     persistent_workers: bool = False,
     pin_memory_device: str = "",
 ):
-    if not TORCH_AVAILABLE:
-        raise ImportError(
-            "PyTorch is not available. Please install PyTorch to use this function."
-        )
-
     if num_workers > 1:
         logger.warning(
             "It is recommended to use num_workers <= 1 with GenVarLoader since it leverages"
@@ -110,11 +105,6 @@ def get_dataloader(
 def get_sampler(
     ds_len: int, batch_size: int, shuffle: bool = False, drop_last: bool = False
 ):
-    if not TORCH_AVAILABLE:
-        raise ImportError(
-            "PyTorch is not available. Please install PyTorch to use this function."
-        )
-
     if shuffle:
         inner_sampler = td.RandomSampler(range(ds_len))
     else:
@@ -124,17 +114,13 @@ def get_sampler(
 
 
 @overload
-def tensor_from_maybe_bytes(array: NDArray) -> "torch.Tensor": ...
+def tensor_from_maybe_bytes(array: NDArray) -> torch.Tensor: ...
 @overload
-def tensor_from_maybe_bytes(array: AnnotatedHaps) -> dict[str, "torch.Tensor"]: ...
+def tensor_from_maybe_bytes(array: AnnotatedHaps) -> dict[str, torch.Tensor]: ...
 @requires_torch
 def tensor_from_maybe_bytes(
     array: NDArray | AnnotatedHaps,
-) -> "torch.Tensor" | Dict[str, "torch.Tensor"]:
-    if not TORCH_AVAILABLE:
-        raise ImportError(
-            "Could not import PyTorch. Please install PyTorch to use torch features."
-        )
+) -> torch.Tensor | Dict[str, torch.Tensor]:
     if isinstance(array, AnnotatedHaps):
         return {
             "haps": tensor_from_maybe_bytes(array.haps),
@@ -148,7 +134,7 @@ def tensor_from_maybe_bytes(
 
 
 @requires_torch
-def to_nested_tensor(rag: Ragged | ak.Array) -> "torch.Tensor":
+def to_nested_tensor(rag: Ragged | ak.Array) -> torch.Tensor:
     """Convert a Ragged array to a PyTorch `nested tensor <https://pytorch.org/docs/stable/nested.html>`_. Will cast byte arrays
     (dtype "S1") to uint8.
 
@@ -157,11 +143,6 @@ def to_nested_tensor(rag: Ragged | ak.Array) -> "torch.Tensor":
     rag
         Ragged array to convert.
     """
-    if not TORCH_AVAILABLE:
-        raise ImportError(
-            "Could not import PyTorch. Please install PyTorch to use torch features."
-        )
-
     if isinstance(rag, ak.Array):
         rag = Ragged.from_awkward(rag)
 
@@ -179,12 +160,15 @@ def to_nested_tensor(rag: Ragged | ak.Array) -> "torch.Tensor":
 if TORCH_AVAILABLE:
 
     class TorchDataset(td.Dataset):
-        def __init__(self, dataset: Dataset):
-            if not TORCH_AVAILABLE:
-                raise ImportError(
-                    "Could not import PyTorch. Please install PyTorch to use torch features."
-                )
+        def __init__(
+            self,
+            dataset: Dataset,
+            include_indices: bool,
+            transform: Callable | None,
+        ):
             self.dataset = dataset
+            self.include_indices = include_indices
+            self.transform = transform
 
         def __len__(self) -> int:
             return len(self.dataset)
@@ -194,10 +178,23 @@ if TORCH_AVAILABLE:
         ) -> torch.Tensor | Tuple[torch.Tensor, ...] | Any:
             r_idx, s_idx = np.unravel_index(idx, self.dataset.shape)
             batch = self.dataset[r_idx, s_idx]
-            if isinstance(batch, np.ndarray):
-                batch = tensor_from_maybe_bytes(batch)
-            elif isinstance(batch, tuple):
-                batch = tuple(tensor_from_maybe_bytes(b) for b in batch)
+
+            if not isinstance(batch, tuple):
+                batch = (batch,)
+                single_item = True
+            else:
+                single_item = False
+
+            if self.include_indices:
+                batch = (*batch, r_idx, s_idx)
+
+            if self.transform is not None:
+                batch = self.transform(*batch)
+
+            batch = tuple(tensor_from_maybe_bytes(b) for b in batch)
+            if single_item:
+                batch = batch[0]
+
             return batch
 
     class StratifiedSampler(td.Sampler):

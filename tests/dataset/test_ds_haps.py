@@ -32,7 +32,7 @@ def dataset_svar():
 
 
 @parametrize_with_cases("dataset", cases=".", prefix="dataset_")
-def test_ds_haps(dataset: gvl.RaggedDataset[RaggedSeqs, None, None, None]):
+def test_ds_haps(dataset: gvl.RaggedDataset[RaggedSeqs, None]):
     for region, sample in product(range(dataset.n_regions), dataset.samples):
         c, s, e, rc = dataset.regions.select(
             "chrom", "chromStart", "chromEnd", "strand"
