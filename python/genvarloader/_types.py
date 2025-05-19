@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import (
-    Callable,
     Dict,
     Mapping,
     Protocol,
@@ -19,6 +18,9 @@ __all__ = ["Reader"]
 
 
 DTYPE = TypeVar("DTYPE", bound=np.generic)
+INTERVAL_DTYPE = np.dtype(
+    [("start", np.int32), ("end", np.int32), ("value", np.float32)], align=True
+)
 Idx = Union[
     int,
     np.integer,
@@ -34,21 +36,40 @@ ListIdx = Union[Sequence[int], NDArray[np.integer]]
 @define
 class AnnotatedHaps:
     haps: NDArray[np.bytes_]
+    """Haplotypes with dtype S1."""
     var_idxs: NDArray[np.int32]
+    """Variant indices for each position in the haplotypes. A value of -1 indicates no variant was applied at the position."""
     ref_coords: NDArray[np.int32]
+    """Reference coordinates for each position in haplotypes."""
 
     @property
     def shape(self):
+        """Shape of the haplotypes and all annotations."""
         return self.haps.shape
 
-    def reshape(self, *shape: int | tuple[int, ...]):
+    def reshape(self, shape: int | tuple[int, ...]):
+        """Reshape the haplotypes and all annotations.
+        
+        Parameters
+        ----------
+        shape
+            New shape for the haplotypes and all annotations. The total number of elements
+            must remain the same.
+        """
         return AnnotatedHaps(
-            self.haps.reshape(*shape),
-            self.var_idxs.reshape(*shape),
-            self.ref_coords.reshape(*shape),
+            self.haps.reshape(shape),
+            self.var_idxs.reshape(shape),
+            self.ref_coords.reshape(shape),
         )
 
     def squeeze(self, axis: int | tuple[int, ...] | None = None) -> AnnotatedHaps:
+        """Squeeze the haplotypes and all annotations along the specified axis.
+
+        Parameters
+        ----------
+        axis
+            Axis or axes to squeeze. If None, all axes of length 1 will be squeezed.
+        """
         return AnnotatedHaps(
             self.haps.squeeze(axis),
             self.var_idxs.squeeze(axis),
@@ -68,9 +89,6 @@ class Reader(Protocol):
     """Sizes of the dimensions/axes of what the reader returns."""
     coords: Dict[str, NDArray]
     """Coordinates of what the reader returns, i.e. dimension labels."""
-    rev_strand_fn: Callable[[NDArray], NDArray]
-    """Function to reverse (and potentially complement) data for a genomic region. This
-        is used when the strand is negative."""
     chunked: bool
     """Whether the reader acts like a chunked array store, in which sequential reads
         are far more performant than random access."""
@@ -108,6 +126,12 @@ class Reader(Protocol):
         When multiple regions are provided (i.e. multiple starts and ends) they should
         be concatenated together in the output array along the length dimension.
         """
+        ...
+
+    @staticmethod
+    def rev_strand_fn(data: NDArray) -> NDArray:
+        """Function to reverse (and potentially complement) data for a genomic region. This
+        is used when the strand is negative."""
         ...
 
 

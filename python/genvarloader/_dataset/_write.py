@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Set, Tuple, Union, cast
 import awkward as ak
 import numpy as np
 import polars as pl
+import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseVar
 from genoray._svar import V_IDX_TYPE, SparseGenotypes
 from genoray._utils import parse_memory
@@ -19,7 +20,7 @@ from seqpro._ragged import OFFSET_TYPE
 from tqdm.auto import tqdm
 
 from .._bigwig import BigWigs
-from .._utils import _lengths_to_offsets, _normalize_contig_name, read_bedlike
+from .._utils import _lengths_to_offsets, _normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._genotypes import SparseSomaticGenotypes
 from ._utils import splits_sum_le_value
@@ -86,7 +87,7 @@ def write(
     path.mkdir(parents=True, exist_ok=True)
 
     if isinstance(bed, (str, Path)):
-        bed = read_bedlike(bed)
+        bed = sp.bed.read_bedlike(bed)
 
     gvl_bed, contigs, input_to_sorted_idx_map = _prep_bed(bed, max_jitter)
     bed.with_columns(r_idx_map=pl.lit(input_to_sorted_idx_map)).write_ipc(
@@ -106,6 +107,8 @@ def write(
                 variants = PGEN(variants)
             elif path_is_vcf(variants):
                 variants = VCF(variants)
+            elif variants.is_dir() and variants.suffix == ".svar":
+                variants = SparseVar(variants)
             else:
                 raise ValueError(
                     f"File {variants} has an unrecognized file extension. Please provide either a VCF or PGEN file.`"
@@ -135,13 +138,10 @@ def write(
             "No samples available across all variant file(s) and/or BigWigs."
         )
 
-    if samples is not None:
-        _samples = set(samples)
-        if missing := (_samples - available_samples):
-            raise ValueError(f"Samples {missing} not found in VCF or BigWigs.")
-        samples = list(_samples)
-    else:
+    if samples is None:
         samples = list(available_samples)
+    elif missing := (set(samples) - available_samples):
+        raise ValueError(f"Samples {missing} not found in VCF or BigWigs.")
 
     samples.sort()
 
@@ -161,7 +161,6 @@ def write(
         elif isinstance(variants, SparseVar):
             gvl_bed = _write_from_svar(path, gvl_bed, variants, samples)
         metadata["ploidy"] = variants.ploidy
-        metadata["phased"] = True
         # free memory
         del variants
         gc.collect()
@@ -187,7 +186,6 @@ def _prep_bed(
     if bed.height == 0:
         raise ValueError("No regions found in the BED file.")
 
-    contigs = natsorted(bed["chrom"].unique().to_list())
     with pl.StringCache():
         if "strand" not in bed:
             bed = bed.with_columns(strand=pl.lit(1, pl.Int32))
@@ -197,15 +195,10 @@ def _prep_bed(
                 .cast(pl.Utf8)
                 .replace_strict({"+": 1, "-": -1, ".": 1}, return_dtype=pl.Int32)
             )
+
     bed = bed.select("chrom", "chromStart", "chromEnd", "strand")
-    with pl.StringCache():
-        pl.Series(contigs, dtype=pl.Categorical)
-        bed = bed.with_row_index().sort(
-            pl.col("chrom").cast(pl.Categorical),
-            pl.col("chromStart"),
-            pl.col("chromEnd"),
-            maintain_order=True,
-        )
+    contigs = natsorted(bed["chrom"].unique().to_list())
+    bed = sp.bed.sort(bed.with_row_index())
 
     input_to_sorted_idx_map = np.argsort(bed["index"])
     bed = bed.drop("index")
@@ -235,7 +228,8 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
 
     if vcf._index is None:
         if not vcf._valid_index():
-            vcf._write_gvi_index()
+            logger.info("VCF genoray index is invalid, writing")
+            vcf._write_gvi_index(progress=True)
 
         vcf._load_index()
 

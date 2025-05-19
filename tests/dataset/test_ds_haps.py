@@ -5,6 +5,7 @@ import genvarloader as gvl
 import numpy as np
 import pysam
 import seqpro as sp
+from genvarloader._ragged import RaggedSeqs
 from pytest_cases import parametrize_with_cases
 
 data_dir = Path(__file__).resolve().parents[1] / "data"
@@ -31,7 +32,7 @@ def dataset_svar():
 
 
 @parametrize_with_cases("dataset", cases=".", prefix="dataset_")
-def test_ds_haps(dataset: gvl.RaggedDataset[gvl.Ragged[np.bytes_], None]):
+def test_ds_haps(dataset: gvl.RaggedDataset[RaggedSeqs, None]):
     for region, sample in product(range(dataset.n_regions), dataset.samples):
         c, s, e, rc = dataset.regions.select(
             "chrom", "chromStart", "chromEnd", "strand"

@@ -1,4 +1,5 @@
-from textwrap import dedent
+from __future__ import annotations
+
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -11,19 +12,22 @@ from typing import (
     overload,
 )
 
+import awkward as ak
 import numpy as np
 from loguru import logger
 from numpy.typing import NDArray
+from seqpro._ragged import Ragged
 
+from ._ragged import is_rag_dtype
 from ._types import AnnotatedHaps
 
 try:
     import torch
     import torch.utils.data as td
 
-    _TORCH_AVAILABLE = True
+    TORCH_AVAILABLE = True
 except ImportError:
-    _TORCH_AVAILABLE = False
+    TORCH_AVAILABLE = False
 
 
 if TYPE_CHECKING:
@@ -33,17 +37,25 @@ if TYPE_CHECKING:
     from ._dataset._impl import Dataset
 
 
-def no_torch_error():
+def no_torch_error(*args, **kwargs):
     raise ImportError(
-        "PyTorch is not available. Please install PyTorch to use this function."
+        "PyTorch is not available. Please install PyTorch to use this function/class."
     )
 
 
+def requires_torch(func_or_class):
+    if TORCH_AVAILABLE:
+        return func_or_class
+    else:
+        return no_torch_error
+
+
+@requires_torch
 def get_dataloader(
-    dataset: "td.Dataset",
+    dataset: td.Dataset,
     batch_size: int = 1,
     shuffle: bool = False,
-    sampler: Optional[Union["td.Sampler", Iterable]] = None,
+    sampler: Optional[Union[td.Sampler, Iterable]] = None,
     num_workers: int = 0,
     collate_fn: Optional[Callable] = None,
     pin_memory: bool = False,
@@ -51,29 +63,25 @@ def get_dataloader(
     timeout: float = 0,
     worker_init_fn: Optional[Callable] = None,
     multiprocessing_context: Optional[Callable] = None,
-    generator: Optional["torch.Generator"] = None,
+    generator: Optional[torch.Generator] = None,
     *,
     prefetch_factor: Optional[int] = None,
     persistent_workers: bool = False,
     pin_memory_device: str = "",
 ):
-    if not _TORCH_AVAILABLE:
-        raise ImportError(
-            "PyTorch is not available. Please install PyTorch to use this function."
-        )
-
     if num_workers > 1:
         logger.warning(
-            dedent(
-                """
-                It is recommended to use num_workers <= 1 with GenVarLoader since it leverages
-                multithreading which has lower overhead than multiprocessing.
-                """
-            )
+            "It is recommended to use num_workers <= 1 with GenVarLoader since it leverages"
+            " multithreading which has lower overhead than multiprocessing."
         )
 
     if sampler is None:
-        sampler = get_sampler(len(dataset), batch_size, shuffle, drop_last)  # type: ignore
+        sampler = get_sampler(
+            len(dataset),  # type: ignore
+            batch_size,
+            shuffle,
+            drop_last,
+        )
 
     return td.DataLoader(
         dataset,
@@ -93,14 +101,10 @@ def get_dataloader(
     )
 
 
+@requires_torch
 def get_sampler(
     ds_len: int, batch_size: int, shuffle: bool = False, drop_last: bool = False
 ):
-    if not _TORCH_AVAILABLE:
-        raise ImportError(
-            "PyTorch is not available. Please install PyTorch to use this function."
-        )
-
     if shuffle:
         inner_sampler = td.RandomSampler(range(ds_len))
     else:
@@ -110,21 +114,18 @@ def get_sampler(
 
 
 @overload
-def _tensor_from_maybe_bytes(array: NDArray) -> "torch.Tensor": ...
+def tensor_from_maybe_bytes(array: NDArray) -> torch.Tensor: ...
 @overload
-def _tensor_from_maybe_bytes(array: AnnotatedHaps) -> dict[str, "torch.Tensor"]: ...
-def _tensor_from_maybe_bytes(
+def tensor_from_maybe_bytes(array: AnnotatedHaps) -> dict[str, torch.Tensor]: ...
+@requires_torch
+def tensor_from_maybe_bytes(
     array: NDArray | AnnotatedHaps,
-) -> "torch.Tensor" | Dict[str, "torch.Tensor"]:
-    if not _TORCH_AVAILABLE:
-        raise ImportError(
-            "Could not import PyTorch. Please install PyTorch to use torch features."
-        )
+) -> torch.Tensor | Dict[str, torch.Tensor]:
     if isinstance(array, AnnotatedHaps):
         return {
-            "haps": _tensor_from_maybe_bytes(array.haps),
-            "var_idxs": _tensor_from_maybe_bytes(array.var_idxs),
-            "ref_coords": _tensor_from_maybe_bytes(array.ref_coords),
+            "haps": tensor_from_maybe_bytes(array.haps),
+            "var_idxs": tensor_from_maybe_bytes(array.var_idxs),
+            "ref_coords": tensor_from_maybe_bytes(array.ref_coords),
         }
     else:
         if array.dtype.type == np.bytes_:
@@ -132,20 +133,39 @@ def _tensor_from_maybe_bytes(
         return torch.from_numpy(array)
 
 
-if _TORCH_AVAILABLE:
+@requires_torch
+def to_nested_tensor(rag: Ragged | ak.Array) -> torch.Tensor:
+    """Convert a Ragged array to a PyTorch `nested tensor <https://pytorch.org/docs/stable/nested.html>`_. Will cast byte arrays
+    (dtype "S1") to uint8.
+
+    Parameters
+    ----------
+    rag
+        Ragged array to convert.
+    """
+    if isinstance(rag, ak.Array):
+        rag = Ragged.from_awkward(rag)
+
+    if is_rag_dtype(rag, np.bytes_):
+        rag = rag.view(np.uint8)
+
+    values = torch.from_numpy(rag.data)
+    lengths = torch.from_numpy(rag.lengths)
+    nt = torch.nested.nested_tensor_from_jagged(
+        values, lengths=lengths, max_seqlen=rag.lengths.max()
+    )
+    return nt
+
+
+if TORCH_AVAILABLE:
 
     class TorchDataset(td.Dataset):
-        dataset: "Dataset"
-        include_indices: bool
-        transform: Callable | None
-
         def __init__(
-            self, dataset: "Dataset", include_indices: bool, transform: Callable | None
+            self,
+            dataset: Dataset,
+            include_indices: bool,
+            transform: Callable | None,
         ):
-            if not _TORCH_AVAILABLE:
-                raise ImportError(
-                    "Could not import PyTorch. Please install PyTorch to use torch features."
-                )
             self.dataset = dataset
             self.include_indices = include_indices
             self.transform = transform
@@ -155,7 +175,7 @@ if _TORCH_AVAILABLE:
 
         def __getitem__(
             self, idx: int | list[int]
-        ) -> Union["torch.Tensor", Tuple["torch.Tensor", ...], Any]:
+        ) -> torch.Tensor | Tuple[torch.Tensor, ...] | Any:
             r_idx, s_idx = np.unravel_index(idx, self.dataset.shape)
             batch = self.dataset[r_idx, s_idx]
 
@@ -171,7 +191,7 @@ if _TORCH_AVAILABLE:
             if self.transform is not None:
                 batch = self.transform(*batch)
 
-            batch = tuple(_tensor_from_maybe_bytes(b) for b in batch)
+            batch = tuple(tensor_from_maybe_bytes(b) for b in batch)
             if single_item:
                 batch = batch[0]
 

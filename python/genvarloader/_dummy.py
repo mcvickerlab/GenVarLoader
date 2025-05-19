@@ -4,13 +4,22 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from einops import repeat
+from genoray._svar import SparseGenotypes
 from natsort import natsorted
 
-from ._dataset._genotypes import SparseGenotypes
 from ._dataset._impl import RaggedDataset, _parse_splice_info
 from ._dataset._indexing import DatasetIndexer
 from ._dataset._intervals import tracks_to_intervals
-from ._dataset._reconstruct import Haps, HapsTracks, Reference, Tracks, _Variants
+from ._dataset._reconstruct import (
+    POS_TYPE,
+    Haps,
+    HapsTracks,
+    RaggedSeqs,
+    Reference,
+    Tracks,
+    TrackType,
+    _Variants,
+)
 from ._dataset._utils import bed_to_regions
 from ._ragged import Ragged, RaggedIntervals
 from ._utils import _lengths_to_offsets
@@ -79,11 +88,13 @@ def get_dummy_dataset(spliced: bool = False):
     )
 
     dummy_vars = _Variants(
-        positions=repeat(dummy_regions[:, 1], "r -> (r s)", s=n_samples),
-        sizes=repeat(np.array([-2, -1, 0, 1], np.int32), "s -> (r s)", r=n_regions),
+        v_starts=repeat(
+            dummy_regions[:, 1].astype(POS_TYPE), "r -> (r s)", s=n_samples
+        ),
+        ilens=repeat(np.array([-2, -1, 0, 1], np.int32), "s -> (r s)", r=n_regions),
         alts=RaggedAlleles.from_offsets(
             data=repeat(sp.cast_seqs("ACGTT"), "a -> (r a)", r=n_regions),
-            shape=n_regions*n_samples,
+            shape=n_regions * n_samples,
             offsets=_lengths_to_offsets(
                 repeat(np.array([1, 1, 1, 2]), "s -> (r s)", r=n_regions)
             ),
@@ -94,7 +105,7 @@ def get_dummy_dataset(spliced: bool = False):
         np.array([[3, 2, 4, 1], [1, 3, 2, 4], [2, 1, 4, 3], [4, 2, 3, 1]])[
             [3, 1, 2, 0]
         ]  # target lengths
-        - 1  # idx within region
+        - 1  # 0-based idx within region
         + 4 * np.arange(4)[:, None]  # adjust by region/contig offset
     ).astype(np.int32)
     shape = (4, 4, 1)
@@ -104,7 +115,14 @@ def get_dummy_dataset(spliced: bool = False):
         offsets=np.arange(0, 4 * 4 + 1, dtype=np.int64),  # every entry has 1 variant
     )
 
-    dummy_haps = Haps(dummy_ref, dummy_vars, dummy_genos, False, None)
+    dummy_haps = Haps(
+        reference=dummy_ref,
+        variants=dummy_vars,
+        genotypes=dummy_genos,
+        dosages=None,
+        kind=RaggedSeqs,
+        filter=None,
+    )
 
     # (r s), want tracks of [1, 2, 3, 4, 5] for each region so that pad values of 0 are obvious
     track_regions = dummy_regions.copy()
@@ -129,7 +147,26 @@ def get_dummy_dataset(spliced: bool = False):
         )
     }
 
-    dummy_tracks = Tracks(dummy_itvs, ["read-depth"])
+    # (r), want tracks of [0, 0, 1, 0, 0] for each region so that pad values of 0 are obvious
+    track_regions = dummy_regions.copy()
+    track_regions[:, 1] -= max_jitter
+    track_regions[:, 2] = track_regions[:, 1] + 5 + max_jitter
+    t_len = 5
+    one_track = np.zeros(t_len + 2 * max_jitter, dtype=np.float32)
+    one_track[2] = 1
+    data, offsets = tracks_to_intervals(
+        regions=track_regions,
+        tracks=repeat(one_track, "l -> (r l)", r=len(dummy_regions)),
+        track_offsets=_lengths_to_offsets(np.full(4, t_len + 2 * max_jitter)),
+    )
+    lengths = np.diff(offsets)
+    dummy_itvs["annot"] = RaggedIntervals.from_offsets(
+        data=data, shape=4, offsets=offsets
+    )
+
+    avail_tracks = {"read-depth": TrackType.SAMPLE, "annot": TrackType.ANNOT}
+
+    dummy_tracks = Tracks(dummy_itvs, avail_tracks, avail_tracks)
 
     dummy_recon = HapsTracks(dummy_haps, dummy_tracks)
 
@@ -140,7 +177,7 @@ def get_dummy_dataset(spliced: bool = False):
         dummy_spi = None
         sp_bed = None
 
-    dummy_dataset: RaggedDataset[Ragged[np.bytes_], Ragged[np.float32]] = RaggedDataset(
+    dummy_dataset: RaggedDataset[RaggedSeqs, Ragged[np.float32]] = RaggedDataset(
         path=Path("dummy"),
         output_length="ragged",
         max_jitter=max_jitter,

@@ -43,6 +43,7 @@ intersphinx_mapping = {
     "numba": ("https://numba.readthedocs.io/en/stable/", None),
     "torch": ("https://pytorch.org/docs/stable/", None),
     "awkward": ("https://awkward-array.org/doc/main/", None),
+    "genoray": ("https://genoray.readthedocs.io/en/latest/", None),
 }
 
 napoleon_google_docstring = False
@@ -50,8 +51,8 @@ napoleon_use_param = True
 napoleon_type_aliases = {
     "Path": ":class:`Path <pathlib.Path>`",
     "Callable": ":class:`Callable <typing.Callable>`",
-    "ArrayLike": ":external+numpy:term:`ArrayLike <array_like>`",
-    "NDArray": ":external+numpy:class:`NDArray <numpy.typing.NDArray>`",
+    "ArrayLike": ":term:`ArrayLike <array_like>`",
+    "NDArray": ":class:`NDArray <numpy.typing.NDArray>`",
     "DataFrame": "pl.DataFrame",
 }
 napoleon_preprocess_types = True
