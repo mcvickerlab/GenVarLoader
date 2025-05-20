@@ -346,6 +346,7 @@ class Haps(Reconstructor[_H]):
             out = self._get_variants(
                 idx=idx,
                 regions=regions,
+                out_offsets=out_offsets,
                 shifts=shifts,
                 keep=None,
                 keep_offsets=None,
@@ -378,42 +379,120 @@ class Haps(Reconstructor[_H]):
         self,
         idx: NDArray[np.integer],
         regions: NDArray[np.int32],
+        out_offsets: NDArray[np.int64],
         shifts: NDArray[np.int32],
         keep: Optional[NDArray[np.bool_]],
         keep_offsets: Optional[NDArray[np.int64]],
     ) -> RaggedVariants:
-        # TODO: maybe filter variants for region, shifts, and keep?
+        """Return variants used to reconstruct haplotypes.
+
+        Variants falling completely outside of the query regions or masked by
+        ``keep``/``shifts`` are excluded.
+        """
         r, s = np.unravel_index(idx, self.genotypes.shape[:2])
         genos = cast(SparseGenotypes, self.genotypes[r, s])
-        v_idxs = ak.flatten(genos.to_awkward(), None).to_numpy()
 
-        # (b*p*v ~l)
-        alts = cast(RaggedAlleles, self.variants.alts[v_idxs])
-        # reshape to (b p ~v ~l)
+        # flattened variant indices for all haplotypes in the batch
+        v_idxs = ak.flatten(genos.to_awkward(), None).to_numpy()
+        geno_offsets = _lengths_to_offsets(genos.lengths)
+
+        # annotate haplotypes to determine which variants remain after applying
+        # region bounds, shifts, and keep mask
+        geno_offset_idx = self.get_geno_offset_idx(idx, self.genotypes)
+        annot_v_idxs = np.empty(out_offsets[-1], V_IDX_TYPE)
+        _ = np.empty(out_offsets[-1], np.uint8)
+        reconstruct_haplotypes_from_sparse(
+            geno_offset_idxs=geno_offset_idx,
+            out=_,
+            out_offsets=out_offsets,
+            regions=regions,
+            shifts=shifts,
+            geno_offsets=self.genotypes.offsets,
+            geno_v_idxs=self.genotypes.data,
+            v_starts=self.variants.v_starts,
+            ilens=self.variants.ilens,
+            alt_alleles=self.variants.alts.data.view(np.uint8),
+            alt_offsets=self.variants.alts.offsets,
+            ref=self.reference.reference,
+            ref_offsets=self.reference.offsets,
+            pad_char=self.reference.pad_char,
+            keep=keep,
+            keep_offsets=keep_offsets,
+            annot_v_idxs=annot_v_idxs,
+            annot_ref_pos=None,
+        )
+
+        annot_v_idxs = Ragged[V_IDX_TYPE].from_offsets(
+            annot_v_idxs, genos.shape, out_offsets
+        )
+
+        if self.dosages is not None:
+            dos = cast(SparseDosages, self.dosages[r, s])
+            dos_flat = ak.flatten(dos.to_awkward(), None).to_numpy()
+        else:
+            dos_flat = None
+
+        new_v_idxs_list: list[NDArray[V_IDX_TYPE]] = []
+        new_dos_list: list[NDArray[DOSAGE_TYPE]] = []
+        new_lengths: list[int] = []
+
+        n_haps = geno_offsets.size - 1
+        for h in range(n_haps):
+            used = annot_v_idxs.data[
+                annot_v_idxs.offsets[h] : annot_v_idxs.offsets[h + 1]
+            ]
+            seen: set[int] = set()
+            keep_idx: list[int] = []
+            for v in used:
+                if v == -1 or v in seen:
+                    continue
+                seen.add(int(v))
+                keep_idx.append(int(v))
+
+            g_s, g_e = geno_offsets[h], geno_offsets[h + 1]
+            hap_v_idxs = v_idxs[g_s:g_e]
+            mask = np.isin(hap_v_idxs, keep_idx)
+            new_v_idxs = hap_v_idxs[mask]
+            new_v_idxs_list.append(new_v_idxs)
+            new_lengths.append(len(new_v_idxs))
+
+            if dos_flat is not None:
+                hap_dos = dos_flat[g_s:g_e]
+                new_dos_list.append(hap_dos[mask])
+
+        new_lengths_arr = np.array(new_lengths, np.int32).reshape(genos.shape)
+        new_offsets = _lengths_to_offsets(new_lengths_arr)
+        if len(new_v_idxs_list) > 0:
+            new_v_idxs_flat = np.concatenate(new_v_idxs_list)
+        else:
+            new_v_idxs_flat = np.empty(0, V_IDX_TYPE)
+
+        alts = cast(RaggedAlleles, self.variants.alts[new_v_idxs_flat])
         data = NumpyArray(
             ak.flatten(alts.to_awkward(), None).to_numpy(),
             parameters={"__array__": "char"},
         )
         l_content = ListOffsetArray(Index64(_lengths_to_offsets(alts.lengths)), data)
-        geno_offsets = _lengths_to_offsets(genos.lengths)
-        vl_content = ListOffsetArray(Index64(geno_offsets), l_content)
+        vl_content = ListOffsetArray(Index64(new_offsets), l_content)
         pvl_content = RegularArray(vl_content, genos.shape[-1])
         alts = ak.Array(pvl_content)
 
-        v_starts = self.variants.v_starts[v_idxs]
+        v_starts = self.variants.v_starts[new_v_idxs_flat]
         v_starts = Ragged[v_starts.dtype.type].from_offsets(
-            v_starts, genos.shape, geno_offsets
+            v_starts, genos.shape, new_offsets
         )
 
-        ilens = self.variants.ilens[v_idxs]
-        ilens = Ragged[ilens.dtype.type].from_offsets(ilens, genos.shape, geno_offsets)
+        ilens = self.variants.ilens[new_v_idxs_flat]
+        ilens = Ragged[ilens.dtype.type].from_offsets(
+            ilens, genos.shape, new_offsets
+        )
 
-        if self.dosages is not None:
-            dosages = cast(SparseDosages, self.dosages[r, s])
+        if dos_flat is not None:
+            dos_concat = np.concatenate(new_dos_list) if new_dos_list else np.empty(0, DOSAGE_TYPE)
             dosages = Ragged[DOSAGE_TYPE].from_offsets(
-                ak.flatten(dosages.to_awkward(), None).to_numpy(),
+                dos_concat,
                 genos.shape,
-                geno_offsets,
+                new_offsets,
             )
         else:
             dosages = None
