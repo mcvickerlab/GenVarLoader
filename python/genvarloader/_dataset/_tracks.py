@@ -41,10 +41,6 @@ def shift_and_realign_tracks_sparse(
         Shape = (variants) Indices of variants.
     geno_offsets : NDArray[np.uint32]
         Shape = (tot_regions*samples*ploidy + 1) Offsets into variant idxs.
-    positions : NDArray[np.int32]
-        Shape = (total_variants) Positions of variants.
-    sizes : NDArray[np.int32]
-        Shape = (total_variants) Sizes of variants.
     tracks : NDArray[np.float32]
         Shape = (batch*ploidy*length) Tracks.
     track_offsets : NDArray[np.int64]
@@ -105,18 +101,24 @@ def shift_and_realign_track_sparse(
 
     Parameters
     ----------
-    offset_idx : NDArray[np.int32]
-        Shape = (n_variants) Genotypes of variants.
-    positions : NDArray[np.int32]
-        Shape = (total_variants) Positions of variants.
-    sizes : NDArray[np.int32]
-        Shape = (total_variants) Sizes of variants.
+    offset_idx : int
+        Index into ``geno_offsets`` for the haplotype being processed.
+    geno_v_idxs : NDArray[np.int32]
+        All variant indices for every region.
+    geno_offsets : NDArray[np.int64]
+        Offsets into ``geno_v_idxs`` for each region and haplotype.
+    v_starts : NDArray[np.int32]
+        Start positions of all variants.
+    ilens : NDArray[np.int32]
+        ILEN values (ALT length - REF length) for each variant.
     shift : int
         Total amount to shift by.
     track : NDArray[np.float32]
         Shape = (length) Track.
-    out : NDArray[np.uint8]
-        Shape = (out_length) Shifted and re-aligned track.
+    query_start : int
+        Reference start coordinate of ``track``.
+    out : NDArray[np.float32]
+        Pre-allocated array to write the shifted track into.
     keep : Optional[NDArray[np.bool_]]
         Shape = (n_variants) Keep mask for genotypes.
     """

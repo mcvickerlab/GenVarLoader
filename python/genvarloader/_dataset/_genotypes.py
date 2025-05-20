@@ -570,8 +570,8 @@ def reconstruct_haplotypes_from_sparse(
 
     Parameters
     ----------
-    offset_idxs: NDArray[np.intp]
-        Shape = (n_regions, ploidy) Indices for each region into offsets.
+    geno_offset_idxs: NDArray[np.intp]
+        Indices into ``geno_offsets`` for each region and haplotype.
     out : NDArray[np.uint8]
         Ragged array of shape = (n_regions, ploidy) to write haplotypes into.
     out_offsets : NDArray[np.int64]
@@ -580,14 +580,14 @@ def reconstruct_haplotypes_from_sparse(
         Shape = (n_regions, 3) Regions to reconstruct haplotypes.
     shifts : NDArray[np.uint32]
         Shape = (n_regions, ploidy) Shifts for each region.
-    offsets : NDArray[np.uint32]
-        Shape = (ploidy*n_regions + 1) Offsets into genos.
-    sparse_genos : NDArray[np.int32]
-        Shape = (variants) Sparse genotypes of variants i.e. variant indices for ALT genotypes.
-    positions : NDArray[np.int32]
-        Shape = (total_variants) Positions of variants.
-    sizes : NDArray[np.int32]
-        Shape = (total_variants) Sizes of variants.
+    geno_offsets : NDArray[np.int64]
+        Offsets into ``geno_v_idxs`` for each region and haplotype.
+    geno_v_idxs : NDArray[np.int32]
+        Variant indices for all haplotypes.
+    v_starts : NDArray[np.int32]
+        Start positions of variants.
+    ilens : NDArray[np.int32]
+        ILEN values (ALT length - REF length) for each variant.
     alt_alleles : NDArray[np.uint8]
         Shape = (total_alt_length) ALT alleles.
     alt_offsets : NDArray[np.uintp]
@@ -679,15 +679,15 @@ def reconstruct_haplotype_from_sparse(
     Parameters
     ----------
     offset_idx : int
-        Index for `offsets` for where to find the offsets into variant_idxs.
-    variant_idxs : int
-        Index of alt variants for all samples and variants.
-    offsets : NDArray[np.int32]
-        Shape = Offsets into variant indices.
-    positions : NDArray[np.int32]
-        Shape = (total_variants) Positions of variants.
-    sizes : NDArray[np.int32]
-        Shape = (total_variants) Sizes of variants.
+        Index into ``geno_offsets`` for the haplotype being reconstructed.
+    geno_v_idxs : NDArray[np.int32]
+        Variant indices for all haplotypes.
+    geno_offsets : NDArray[np.int64]
+        Offsets into ``geno_v_idxs`` for each region and haplotype.
+    v_starts : NDArray[np.int32]
+        Start positions of variants.
+    ilens : NDArray[np.int32]
+        ILEN values (ALT length - REF length) for each variant.
     shift : int
         Total amount to shift by.
     alt_alleles : NDArray[np.uint8]
