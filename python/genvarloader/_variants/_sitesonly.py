@@ -15,6 +15,7 @@ from numpy.typing import NDArray
 from .._dataset._impl import SEQ, ArrayDataset, MaybeTRK
 from .._dataset._indexing import DatasetIndexer
 from .._types import AnnotatedHaps, Idx
+from .._utils import _lengths_to_offsets
 from ._records import RaggedAlleles
 
 
@@ -78,9 +79,20 @@ class DatasetWithSites(Generic[MaybeTRK]):
     sites: pl.DataFrame
     """Table of variant site information."""
     rows: pl.DataFrame
-    """Rows of this object, where each row is a combination of a dataset region and a site."""
+    """Rows of this object. Each row corresponds to a dataset region and all
+    site-only variants that fall within that region."""
     _row_map: NDArray[np.uint32]
-    """Map from row index to dataset row index and site row index."""
+    """Map from row index to dataset row index."""
+    _site_offsets: NDArray[np.int64]
+    """Offsets into ``_site_starts``/``_alt_data`` for each row."""
+    _site_starts: NDArray[np.int32]
+    """Flattened start positions of site-only variants."""
+    _alt_data: NDArray[np.uint8]
+    """Flattened alternative alleles for all site-only variants."""
+    _alt_offsets: NDArray[np.int64]
+    """Offsets into ``_alt_data`` for each site-only variant."""
+    max_variants_per_region: int
+    _n_variants_per_row: NDArray[np.int32]
     _idxer: DatasetIndexer
 
     @property
@@ -137,8 +149,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
             ds_sites.dataset = ds_sites.dataset.with_tracks("read-depth")
             haps, flags, tracks = ds_sites[0, 0]
         """
-        if max_variants_per_region > 1:
-            raise NotImplementedError("max_variants_per_region > 1 not yet supported")
+        self.max_variants_per_region = max_variants_per_region
 
         if not isinstance(dataset, ArrayDataset):
             raise ValueError(
@@ -187,14 +198,39 @@ class DatasetWithSites(Generic[MaybeTRK]):
             strict=False,
         ).drop("End_site")
 
-        _dataset = dataset.with_seqs("annotated").with_settings(
-            deterministic=True, jitter=0
+        rows = (
+            rows.sort(["region_idx", "POS0"])
+            .group_by("region_idx", maintain_order=True)
+            .agg(
+                site_idx=pl.col("site_idx").list(),
+                POS0=pl.col("POS0").list(),
+                ALT=pl.col("ALT").list(),
+            )
+            .join(ds_bed, on="region_idx")
         )
+
+        counts = rows["site_idx"].list.len()
+        if counts.max() > max_variants_per_region:
+            raise ValueError(
+                "Found a region with more than allowed site-only variants"
+            )
+        self._n_variants_per_row = counts.to_numpy().astype(np.int32)
+
+        site_lists = rows["POS0"].to_list()
+        flat_sites = [s for sub in site_lists for s in sub]
+        self._site_starts = np.array(flat_sites, dtype=np.int32)
+        self._site_offsets = _lengths_to_offsets([len(s) for s in site_lists])
+
+        alt_lists = rows["ALT"].to_list()
+        flat_alts = [a for sub in alt_lists for a in sub]
+        alts = RaggedAlleles.from_polars(pl.Series(flat_alts))
+        self._alt_data = alts.data.view(np.uint8)
+        self._alt_offsets = alts.offsets
 
         self.sites = sites
         self.dataset = _dataset
         self.rows = rows
-        self._row_map = rows.select("region_idx", "site_idx").to_numpy()
+        self._row_map = rows.select("region_idx").to_numpy().ravel()
         self._idxer = DatasetIndexer.from_region_and_sample_idxs(
             np.arange(self.rows.height), np.arange(dataset.n_samples), dataset.samples
         )
@@ -219,7 +255,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
 
         r_idx, s_idx = np.unravel_index(idx, self.shape)
 
-        ds_rows = self._row_map[r_idx, 0]
+        ds_rows = self._row_map[r_idx]
         out = self.dataset[ds_rows, s_idx]
         if isinstance(out, tuple):
             haps, tracks = out
@@ -229,27 +265,41 @@ class DatasetWithSites(Generic[MaybeTRK]):
         ploidy = haps.shape[-2]
         length = haps.shape[-1]
 
-        sites = self.rows[r_idx]
-        starts = sites["POS0"].to_numpy()  # 0-based
-        alts = RaggedAlleles.from_polars(sites["ALT"])
-
-        # (b p)
         haps = haps.reshape((-1, ploidy, length))
-        # flags: (b p)
-        haps, v_idxs, ref_coords, flags = apply_site_only_variants(
-            haps=haps.haps.view(np.uint8),  # (b p l)
-            v_idxs=haps.var_idxs,  # (b p l)
-            ref_coords=haps.ref_coords,  # (b p l)
-            site_starts=starts,
-            alt_alleles=alts.data.view(np.uint8),
-            alt_offsets=alts.offsets,
+
+        flags = np.full(
+            (len(r_idx), ploidy, self.max_variants_per_region),
+            255,
+            dtype=np.uint8,
         )
+
+        for b, row in enumerate(r_idx):
+            start = self._site_offsets[row]
+            end = self._site_offsets[row + 1]
+            var_i = 0
+            for v in range(start, end):
+                pos = np.array([self._site_starts[v]], dtype=np.int32)
+                alt = self._alt_data[self._alt_offsets[v] : self._alt_offsets[v + 1]]
+                alt_off = np.array([0, len(alt)], dtype=np.int64)
+                _, _, _, flg = apply_site_only_variants(
+                    haps=haps.haps.view(np.uint8)[b : b + 1],
+                    v_idxs=haps.var_idxs[b : b + 1],
+                    ref_coords=haps.ref_coords[b : b + 1],
+                    site_starts=pos,
+                    alt_alleles=alt,
+                    alt_offsets=alt_off,
+                )
+                flags[b, :, var_i] = flg[0]
+                var_i += 1
 
         haps = AnnotatedHaps(
-            haps=haps.view("S1"),
-            var_idxs=v_idxs,
-            ref_coords=ref_coords,
+            haps=haps.haps.view("S1"),
+            var_idxs=haps.var_idxs,
+            ref_coords=haps.ref_coords,
         )
+
+        if self.max_variants_per_region == 1:
+            flags = flags[..., 0]
 
         if squeeze:
             haps = haps.squeeze(0)
@@ -257,7 +307,10 @@ class DatasetWithSites(Generic[MaybeTRK]):
 
         if out_reshape is not None:
             haps = haps.reshape((*out_reshape, ploidy, length))
-            flags = flags.reshape(*out_reshape, ploidy)
+            if flags.ndim == 3:
+                flags = flags.reshape(*out_reshape, ploidy, self.max_variants_per_region)
+            else:
+                flags = flags.reshape(*out_reshape, ploidy)
 
         if isinstance(out, tuple):
             return (
