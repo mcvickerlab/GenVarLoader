@@ -166,7 +166,6 @@ def get_dummy_dataset():
             transform=None,
             _full_bed=dummy_bed,
             _full_regions=dummy_regions,
-            _jittered_regions=dummy_regions.copy(),
             _idxer=dummy_idxer,
             _seqs=dummy_haps,
             _tracks=dummy_tracks,

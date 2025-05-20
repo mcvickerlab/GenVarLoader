@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, Optional, Tuple, TypeGuard, TypeVar, Union
+from typing import Any, TypeGuard, TypeVar
 
 import numba as nb
 import numpy as np
@@ -12,7 +12,6 @@ from phantom import Phantom
 from seqpro._ragged import Ragged
 
 from ._types import DTYPE, AnnotatedHaps
-from ._utils import _lengths_to_offsets
 
 __all__ = ["Ragged", "RaggedIntervals", "pad_ragged"]
 
@@ -183,7 +182,7 @@ def _rc_helper(
     return out
 
 
-def _reverse_complement(
+def reverse_complement(
     seqs: Ragged[np.bytes_], mask: NDArray[np.bool_]
 ) -> Ragged[np.bytes_]:
     # (b [p] ~l), (b)
@@ -203,7 +202,7 @@ def _reverse_helper(data: NDArray, offsets: NDArray[np.int64], mask: NDArray[np.
             data[start:end] = np.flip(data[start:end])
 
 
-def _reverse(tracks: Ragged, mask: NDArray[np.bool_]):
+def reverse(tracks: Ragged, mask: NDArray[np.bool_]):
     """Reverses data along the ragged axis in-place."""
     # (b t [p] ~l), (b)
     if tracks.ndim == 2:
@@ -213,91 +212,3 @@ def _reverse(tracks: Ragged, mask: NDArray[np.bool_]):
         n_tracks, ploidy = tracks.shape[1:]
         mask = repeat(mask, "b -> (b t p)", t=n_tracks, p=ploidy)
     _reverse_helper(tracks.data, tracks.offsets, mask)
-
-
-def _jitter(
-    *arrays: Ragged,
-    max_jitter: int,
-    seed: Optional[Union[int, np.random.Generator]] = None,
-    starts: NDArray[np.int64] | None = None,
-):
-    """Jitter the data along the ragged axis by up to `max_jitter`.
-
-    Assumes only the first axis is to be jittered. In other words, assumes that no user would want to
-    jitter independently across ploidy or tracks.
-    """
-    batch_size = arrays[0].shape[0]
-
-    if starts is None:
-        if not isinstance(seed, np.random.Generator):
-            seed = np.random.default_rng(seed)
-        starts = seed.integers(0, 2 * max_jitter + 1, size=batch_size)
-    out_offsets = tuple(_lengths_to_offsets(a.lengths - 2 * max_jitter) for a in arrays)
-
-    jittered_data = _jitter_helper(
-        tuple(a.data for a in arrays),
-        tuple(a.offsets for a in arrays),
-        tuple(a.shape for a in arrays),
-        tuple(out_offsets),
-        starts,
-    )
-
-    out = tuple(
-        Ragged.from_offsets(jit_data, rag_arr.shape, out_offsets[i])
-        for i, (rag_arr, jit_data) in enumerate(zip(arrays, jittered_data))
-    )
-
-    return out
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def _jitter_helper(
-    data: Tuple[NDArray, ...],
-    offsets: Tuple[NDArray[np.int64], ...],
-    shapes: Tuple[Tuple[int, ...], ...],
-    out_offsets: Tuple[NDArray[np.int64], ...],
-    starts: NDArray[np.int64],
-) -> Tuple[NDArray, ...]:
-    """Helper to jitter ragged data. Ragged arrays should have shape (batch, ...).
-
-    Parameters
-    ----------
-    data
-        Tuple of ragged data arrays.
-    offsets
-        Tuple of offsets arrays.
-    out_offsets
-        Tuple of output offsets arrays.
-    starts
-        Shape: (batch). Array of starting points for jittering.
-    """
-    n_arrays = len(data)
-    batch_size = len(starts)
-    out_data = tuple(
-        np.empty(out_offsets[i][-1], dtype=d.dtype) for i, d in enumerate(data)
-    )
-    for arr in nb.prange(n_arrays):
-        arr_data = data[arr]
-        arr_offsets = offsets[arr]
-
-        out_arr_data = out_data[arr]
-        out_arr_offsets = out_offsets[arr]
-
-        arr_shape = shapes[arr]
-        n_per_batch = np.prod(arr_shape[1:])
-
-        for jit in nb.prange(batch_size):
-            idx_s = jit * n_per_batch
-            idx_e = (jit + 1) * n_per_batch
-
-            jit_s = starts[jit]
-
-            for row in nb.prange(idx_s, idx_e):
-                row_s = arr_offsets[row]
-                out_row_s, out_row_e = out_arr_offsets[row], out_arr_offsets[row + 1]
-                out_len = out_row_e - out_row_s
-                out_arr_data[out_row_s:out_row_e] = arr_data[
-                    row_s + jit_s : row_s + jit_s + out_len
-                ]
-
-    return out_data
