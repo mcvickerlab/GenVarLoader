@@ -570,40 +570,42 @@ def reconstruct_haplotypes_from_sparse(
 
     Parameters
     ----------
-    offset_idxs: NDArray[np.intp]
-        Shape = (n_regions, ploidy) Indices for each region into offsets.
     out : NDArray[np.uint8]
-        Ragged array of shape = (n_regions, ploidy) to write haplotypes into.
+        Ragged array shaped ``(n_regions, ploidy)`` to write haplotypes into.
     out_offsets : NDArray[np.int64]
-        Shape = (n_regions*ploidy + 1) Offsets into out.
+        Offsets into ``out`` with length ``n_regions * ploidy + 1``.
     regions : NDArray[np.int32]
-        Shape = (n_regions, 3) Regions to reconstruct haplotypes.
-    shifts : NDArray[np.uint32]
-        Shape = (n_regions, ploidy) Shifts for each region.
-    offsets : NDArray[np.uint32]
-        Shape = (ploidy*n_regions + 1) Offsets into genos.
-    sparse_genos : NDArray[np.int32]
-        Shape = (variants) Sparse genotypes of variants i.e. variant indices for ALT genotypes.
-    positions : NDArray[np.int32]
-        Shape = (total_variants) Positions of variants.
-    sizes : NDArray[np.int32]
-        Shape = (total_variants) Sizes of variants.
+        Shape ``(n_regions, 3)`` describing the regions to reconstruct.
+    shifts : NDArray[np.int32]
+        Shape ``(n_regions, ploidy)`` giving the shift for each haplotype.
+    geno_offset_idxs : NDArray[np.intp]
+        Indices into ``geno_offsets`` for each region and haplotype.
+    geno_offsets : NDArray[np.int64]
+        Offsets into ``geno_v_idxs``.
+    geno_v_idxs : NDArray[np.int32]
+        Variant indices of ALT genotypes.
+    v_starts : NDArray[np.integer]
+        Positions of variants.
+    ilens : NDArray[np.int32]
+        ILEN values of variants.
     alt_alleles : NDArray[np.uint8]
-        Shape = (total_alt_length) ALT alleles.
-    alt_offsets : NDArray[np.uintp]
-        Shape = (total_variants) Offsets of ALT alleles.
+        Concatenated ALT allele sequences.
+    alt_offsets : NDArray[np.int64]
+        Offsets of ALT alleles, length ``len(v_starts) + 1``.
     ref : NDArray[np.uint8]
-        Shape = (ref_length) Reference sequence.
+        Reference sequence.
     ref_offsets : NDArray[np.uint64]
-        Shape = (n_contigs) Offsets of reference sequences.
+        Offsets of reference sequences for each contig.
     pad_char : int
         Padding character.
-    keep : Optional[NDArray[np.bool_]]
-        Shape = (variants) Keep mask for genotypes.
-    annot_v_idxs : Optional[NDArray[np.int32]]
-        Ragged array of shape (n_regions, ploidy). Variant indices for annotations.
-    annot_ref_pos : Optional[NDArray[np.int32]]
-        Ragged array of shape (n_regions, ploidy). Reference positions for annotations.
+    keep : Optional[NDArray[np.bool_]], optional
+        Mask indicating which variants to keep for each haplotype.
+    keep_offsets : Optional[NDArray[np.int64]], optional
+        Offsets into ``keep`` when it is provided.
+    annot_v_idxs : Optional[NDArray[np.int32]], optional
+        Output array (same layout as ``out``) for variant indices used for annotations.
+    annot_ref_pos : Optional[NDArray[np.int32]], optional
+        Output array (same layout as ``out``) for reference positions used for annotations.
     """
     n_regions, ploidy = geno_offset_idxs.shape
     for query in nb.prange(n_regions):
