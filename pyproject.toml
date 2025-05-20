@@ -41,9 +41,22 @@ issues = "https://github.com/mcvickerlab/GenVarLoader/issues"
 [tool.ruff]
 lint.ignore = ["E501"]
 
-[tool.pyright]
+[tool.basedpyright]
 include = ["python/", "tests/"]
 exclude = ['**/data/']
+enableTypeIgnoreComments = true
+reportImplicitStringConcatenation = false
+reportMissingTypeArgument = false
+reportIgnoreCommentWithoutRule = false
+reportUnknownParameterType = false
+reportUnknownVariableType = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportExplicitAny = false
+reportAny = false
+reportPrivateUsage = false
+reportMissingTypeStubs = false
+reportImplicitOverride = false
 
 [tool.maturin]
 python-source = "python"
