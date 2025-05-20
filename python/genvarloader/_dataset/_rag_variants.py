@@ -137,41 +137,18 @@ def _infer_germline_ccfs(
                 end_idx += 1
 
         running_ccf = DOSAGE_TYPE(0)
-        # use -1 to mark that we are not currently within a germline variant
-        g_idx = V_IDX_TYPE(-1)
-        # set g_end to maximum possible value
-        g_end = np.iinfo(POS_TYPE).max
         for i in range(n_variants * 2):
             pos: POS_TYPE = starts_ends[i]
             local_idx: V_IDX_TYPE = se_local_idx[i]
             pos_ccf: DOSAGE_TYPE = ccf[local_idx]
             is_germ = np.isnan(pos_ccf)
 
-            # end of variant overlaps with end of current germline variant
-            #! without this we will decrement the running CCF before setting the germline CCF
-            # this is because tied ends are sorted by start, but the ends are 0-based exclusive
-            # so we need to set the germline CCF before we start any decrementing
-            if -pos >= g_end:
-                ccf[g_idx] = max_ccf - running_ccf
-                g_idx = -1
-                g_end = np.iinfo(POS_TYPE).max
+            if is_germ:
+                if pos < 0:
+                    ccf[local_idx] = max_ccf - running_ccf
+                continue
 
-            # start of a germline variant
-            if is_germ and pos > 0:
-                # for now: check for overlapping variants and set to zero
-                # to correspond to behavior of haplotype reconstruction
-                # which only keeps first variant out of an overlapping set
-                # TODO: handle overlapping germline vars without excessive memory
-                # iterate over all g_ends, matching running ccf for each?
-                if g_idx != -1 and np.isnan(ccf[g_idx]):
-                    ccf[local_idx] = 0
-                    continue
-                g_idx = local_idx
-                # have to recompute the end because we sorted them above so the local idx points
-                # to the wrong place
-                g_end = pos - min(0, ilen[local_idx]) + 1
-            else:
-                # sign of pos, with 0 being positive
-                running_ccf += (2 * (pos >= 0) - 1) * pos_ccf
+            # sign of pos, with 0 being positive
+            running_ccf += (2 * (pos >= 0) - 1) * pos_ccf
 
         np.nan_to_num(ccf, copy=False, nan=max_ccf)

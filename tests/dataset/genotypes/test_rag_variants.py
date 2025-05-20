@@ -65,7 +65,21 @@ def ccfs_overlap_germ():
 
     desired = ccfs.copy()
     desired[1] = max_ccf - ccfs[3]
-    desired[2] = 0.0
+    desired[2] = desired[1]
+
+    return ccfs, v_starts, ilens, v_offsets, max_ccf, desired
+
+
+def ccfs_nested_germs():
+    ccfs = np.array([np.nan, np.nan, 0.2], np.float32)
+    v_starts = np.array([0, 0, 0], POS_TYPE)
+    ilens = np.array([0, -1, 0], np.int32)
+    v_offsets = np.array([0, 3], OFFSET_TYPE)
+    max_ccf = 1.0
+
+    desired = ccfs.copy()
+    desired[0] = max_ccf - ccfs[2]
+    desired[1] = max_ccf
 
     return ccfs, v_starts, ilens, v_offsets, max_ccf, desired
 
