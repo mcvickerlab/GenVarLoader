@@ -684,9 +684,9 @@ def reconstruct_haplotype_from_sparse(
         Index of alt variants for all samples and variants.
     offsets : NDArray[np.int32]
         Shape = Offsets into variant indices.
-    positions : NDArray[np.int32]
+    v_starts : NDArray[np.integer]
         Shape = (total_variants) Positions of variants.
-    sizes : NDArray[np.int32]
+    ilens : NDArray[np.int32]
         Shape = (total_variants) Sizes of variants.
     shift : int
         Total amount to shift by.
