@@ -684,6 +684,43 @@ def _write_somatic_variants_chunk(
     return v_idx_memmap_offset, ccf_memmap_offset, offsets_memmap_offset, last_offset
 
 
+def _split_samples(
+    n_per_query: NDArray[np.integer], mem_per_interval: int, max_mem: int
+) -> NDArray[np.intp]:
+    """Compute sample split offsets respecting ``max_mem`` for each region.
+
+    Parameters
+    ----------
+    n_per_query
+        Shape = (regions, samples) Number of intervals per query.
+    mem_per_interval
+        Bytes per interval.
+    max_mem
+        Maximum memory in bytes for a single chunk.
+    """
+
+    mem_per_rs = n_per_query * mem_per_interval
+    n_regions, n_samples = mem_per_rs.shape
+
+    offsets = [0]
+    current = np.zeros(n_regions, dtype=np.int64)
+    for s in range(n_samples):
+        sample_mem = mem_per_rs[:, s]
+        if np.any(sample_mem > max_mem):
+            raise NotImplementedError(
+                "Memory usage per region for a single sample exceeds ``max_mem``."
+            )
+        new = current + sample_mem
+        if np.any(new > max_mem) and s > offsets[-1]:
+            offsets.append(s)
+            current = sample_mem.astype(np.int64)
+        else:
+            current = new
+    offsets.append(n_samples)
+
+    return np.array(offsets, dtype=np.intp)
+
+
 def _write_bigwigs(
     path: Path,
     bed: pl.DataFrame,
@@ -698,13 +735,8 @@ def _write_bigwigs(
             raise ValueError(f"Samples {missing} not found in bigwigs.")
         _samples = samples
 
-    MEM_PER_INTERVAL = (
-        12 * 2
-    )  # start u32, end u32, value f32, times 2 for intermediate copies
-    chunk_labels = np.empty(bed.height, np.uint32)
-    chunk_offsets: Dict[int, NDArray[np.int64]] = {}
-    n_chunks = 0
-    last_chunk_offset = 0
+    MEM_PER_INTERVAL = 12 * 2
+    contig_infos = []
     pbar = tqdm(total=bed["chrom"].n_unique())
     for (contig,), part in bed.partition_by(
         "chrom", as_dict=True, include_key=False, maintain_order=True
@@ -712,45 +744,35 @@ def _write_bigwigs(
         pbar.set_description(f"Calculating memory usage for {part.height} regions")
         contig = cast(str, contig)
         _contig = _normalize_contig_name(contig, bigwigs.contigs)
-        if _contig is not None:
-            starts = part["chromStart"].to_numpy()
-            ends = part["chromEnd"].to_numpy()
+        if _contig is None:
+            pbar.update()
+            continue
 
-            # (regions, samples)
-            n_per_query = bigwigs.count_intervals(contig, starts, ends, sample=samples)
-            # (regions)
-            mem_per_r = n_per_query.sum(1) * MEM_PER_INTERVAL
+        starts = part["chromStart"].to_numpy()
+        ends = part["chromEnd"].to_numpy()
+        n_per_query = bigwigs.count_intervals(contig, starts, ends, sample=_samples)
 
-            if np.any(mem_per_r > max_mem):
-                # TODO subset by samples as well if needed
-                raise NotImplementedError(
-                    f"""Memory usage per region exceeds maximum of {max_mem / 1e9} GB.
-                    Largest amount needed for a single region is {mem_per_r.max() / 1e9} GB, set
-                    `max_mem` to this value or higher. Otherwise, chunking by region and sample is
-                    not yet implemented."""
-                )
-
-            split_offsets = splits_sum_le_value(mem_per_r, max_mem)
-            split_lengths = np.diff(split_offsets)
-            for i in range(len(split_lengths)):
-                o_s, o_e = split_offsets[i], split_offsets[i + 1]
-                chunk_idx = n_chunks + i
-                chunk_offsets[chunk_idx] = _lengths_to_offsets(
-                    n_per_query[o_s:o_e].ravel()
-                )
-            first_chunk_idx = n_chunks
-            last_chunk_idx = n_chunks + len(split_lengths)
-            _chunk_labels = np.arange(
-                first_chunk_idx, last_chunk_idx, dtype=np.uint32
-            ).repeat(split_lengths)
-            chunk_labels[last_chunk_offset : last_chunk_offset + len(_chunk_labels)] = (
-                _chunk_labels
+        sample_splits = _split_samples(n_per_query, MEM_PER_INTERVAL, max_mem)
+        region_splits = [
+            splits_sum_le_value(
+                n_per_query[:, s_s:s_e].sum(1) * MEM_PER_INTERVAL, max_mem
             )
-            n_chunks += len(split_lengths)
-            last_chunk_offset += len(_chunk_labels)
+            for s_s, s_e in zip(sample_splits[:-1], sample_splits[1:])
+        ]
+        union_splits = np.unique(np.concatenate(region_splits))
+        union_splits.sort()
+        contig_infos.append(
+            (
+                contig,
+                starts,
+                ends,
+                n_per_query,
+                sample_splits,
+                union_splits,
+            )
+        )
         pbar.update()
     pbar.close()
-    bed = bed.with_columns(chunk=pl.lit(chunk_labels))
 
     out_dir = path / "intervals" / bigwigs.name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -758,55 +780,64 @@ def _write_bigwigs(
     interval_offset = 0
     offset_offset = 0
     last_offset = 0
-    pbar = tqdm(total=bed["chunk"].n_unique())
-    for (chunk_idx,), part in bed.partition_by(
-        "chunk", as_dict=True, include_key=False, maintain_order=True
-    ).items():
-        chunk_idx = cast(int, chunk_idx)
-        contig = cast(str, part[0, "chrom"])
-        pbar.set_description(f"Reading intervals for {part.height} regions on {contig}")
-        starts = part["chromStart"].to_numpy()
-        ends = part["chromEnd"].to_numpy()
-        _offsets = chunk_offsets[chunk_idx]
+    total_chunks = sum(
+        (len(u) - 1) * (len(s) - 1) for _, _, _, _, s, u in contig_infos
+    )
+    pbar = tqdm(total=total_chunks)
+    for contig, starts, ends, n_per_query, sample_splits, region_splits in contig_infos:
+        for r_s, r_e in zip(region_splits[:-1], region_splits[1:]):
+            for s_s, s_e in zip(sample_splits[:-1], sample_splits[1:]):
+                pbar.set_description(
+                    f"Reading intervals for {r_e - r_s} regions on {contig}"
+                )
 
-        intervals = bigwigs._intervals_from_offsets(
-            contig, starts, ends, _offsets, sample=_samples
-        )
+                offsets_arr = _lengths_to_offsets(
+                    n_per_query[r_s:r_e, s_s:s_e].ravel()
+                )
+                intervals = bigwigs._intervals_from_offsets(
+                    contig,
+                    starts[r_s:r_e],
+                    ends[r_s:r_e],
+                    offsets_arr,
+                    sample=_samples[s_s:s_e],
+                )
 
-        pbar.set_description(f"Writing intervals for {part.height} regions on {contig}")
-        out = np.memmap(
-            out_dir / "intervals.npy",
-            dtype=intervals.data.dtype,
-            mode="w+" if interval_offset == 0 else "r+",
-            shape=intervals.data.shape,
-            offset=interval_offset,
-        )
-        out[:] = intervals.data[:]
-        out.flush()
-        interval_offset += out.nbytes
+                pbar.set_description(
+                    f"Writing intervals for {r_e - r_s} regions on {contig}"
+                )
+                out = np.memmap(
+                    out_dir / "intervals.npy",
+                    dtype=intervals.data.dtype,
+                    mode="w+" if interval_offset == 0 else "r+",
+                    shape=intervals.data.shape,
+                    offset=interval_offset,
+                )
+                out[:] = intervals.data[:]
+                out.flush()
+                interval_offset += out.nbytes
 
-        offsets = intervals.offsets
-        offsets += last_offset
-        last_offset = offsets[-1]
-        out = np.memmap(
-            out_dir / "offsets.npy",
-            dtype=offsets.dtype,
-            mode="w+" if offset_offset == 0 else "r+",
-            shape=len(offsets) - 1,
-            offset=offset_offset,
-        )
-        out[:] = offsets[:-1]
-        out.flush()
-        offset_offset += out.nbytes
-        pbar.update()
+                offsets = intervals.offsets
+                offsets += last_offset
+                last_offset = offsets[-1]
+                out = np.memmap(
+                    out_dir / "offsets.npy",
+                    dtype=offsets.dtype,
+                    mode="w+" if offset_offset == 0 else "r+",
+                    shape=len(offsets) - 1,
+                    offset=offset_offset,
+                )
+                out[:] = offsets[:-1]
+                out.flush()
+                offset_offset += out.nbytes
+                pbar.update()
     pbar.close()
 
     out = np.memmap(
         out_dir / "offsets.npy",
-        dtype=offsets.dtype,  # type: ignore
+        dtype=np.int64,
         mode="r+",
         shape=1,
         offset=offset_offset,
     )
-    out[-1] = offsets[-1]  # type: ignore
+    out[-1] = last_offset
     out.flush()
