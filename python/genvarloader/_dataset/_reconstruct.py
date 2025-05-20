@@ -168,10 +168,7 @@ class Haps(Reconstructor[_H]):
             dtype = np.dtype(metadata["dtype"])
 
             geno_path = path / "genotypes" / "link.svar" / "variant_idxs.npy"
-            offset_path = path / "genotypes" / "offsets.npy"
             dosage_path = path / "genotypes" / "link.svar" / "dosages.npy"
-
-            offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
 
             v_idxs = np.memmap(geno_path, dtype=V_IDX_TYPE, mode="r")
             offsets = np.memmap(
