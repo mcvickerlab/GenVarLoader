@@ -1,3 +1,11 @@
+## 0.14.5 (Unreleased)
+
+### Fix
+
+- handle out-of-bounds reference fetches
+- validate coordinates in `get_reference`
+- check slice lengths in `padded_slice`
+
 ## 0.14.4 (2025-05-12)
 
 ### Fix

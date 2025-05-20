@@ -14,17 +14,32 @@ __all__ = []
 def padded_slice(
     arr: NDArray[DTYPE], start: int, stop: int, pad_val: int
 ) -> NDArray[DTYPE]:
+    """Return ``arr[start:stop]`` padded to ``stop - start``.
+
+    This function handles queries that lie completely outside ``arr`` and
+    validates that ``stop`` is greater than ``start``.
+    """
+
+    assert stop > start
+
+    length = stop - start
+
+    if start >= len(arr) or stop <= 0:
+        out = np.empty(length, arr.dtype)
+        out[:] = pad_val
+        return out
+
     pad_left = -min(0, start)
     pad_right = max(0, stop - len(arr))
 
-    out = np.empty(stop - start, arr.dtype)
+    out = np.empty(length, arr.dtype)
 
     if pad_left == 0 and pad_right == 0:
         out[:] = arr[start:stop]
         return out
 
     if pad_left > 0 and pad_right > 0:
-        out_stop = len(out) - pad_right
+        out_stop = length - pad_right
         out[:pad_left] = pad_val
         out[pad_left:out_stop] = arr[:]
         out[out_stop:] = pad_val
@@ -32,7 +47,7 @@ def padded_slice(
         out[:pad_left] = pad_val
         out[pad_left:] = arr[:stop]
     elif pad_right > 0:
-        out_stop = len(out) - pad_right
+        out_stop = length - pad_right
         out[:out_stop] = arr[start:]
         out[out_stop:] = pad_val
 

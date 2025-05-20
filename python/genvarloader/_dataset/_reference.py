@@ -126,7 +126,11 @@ class Reference:
             end = cast(int, self.offsets[c_idx + 1] - self.offsets[c_idx])
 
         _contig = self.reference[o_s:o_e]
-        if start < 0 or end > len(_contig):
+        contig_len = len(_contig)
+
+        if start >= contig_len or end <= 0:
+            seq = np.full(end - start, self.pad_char, np.uint8)
+        elif start < 0 or end > contig_len:
             seq = padded_slice(_contig, start, end, self.pad_char)
         else:
             seq = _contig[start:end]
@@ -464,6 +468,9 @@ def get_reference(
         c_idx, start, end = regions[i, :3]
         c_s = ref_offsets[c_idx]
         c_e = ref_offsets[c_idx + 1]
+
+        assert end > start
+
         out[o_s:o_e] = padded_slice(reference[c_s:c_e], start, end, pad_char)
     return out
 
