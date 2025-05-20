@@ -107,7 +107,7 @@ class BigWigs(Reader):
 
         Returns
         -------
-            Shape: (samples length). Data corresponding to the given genomic coordinates and samples.
+            Shape = (samples, length). Data corresponding to the given genomic coordinates and samples.
         """
         _contig = _normalize_contig_name(contig, self.contigs)
         if _contig is None:
