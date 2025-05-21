@@ -5,6 +5,7 @@ import numpy as np
 import polars as pl
 import pytest
 import seqpro as sp
+from genvarloader._dataset._utils import padded_slice
 from pytest_cases import fixture, parametrize_with_cases
 
 DDIR = Path(__file__).parent / "data"
@@ -49,3 +50,49 @@ def test_getitem(
 
     np.testing.assert_equal(actual.data, desired.data)
     np.testing.assert_equal(actual.lengths, desired.lengths)
+
+
+def padded_slice_no_pad():
+    arr = np.array([1, 2, 3, 4, 5])
+    start = 0
+    stop = 5
+    pad_val = 0
+    desired = np.array([1, 2, 3, 4, 5])
+    return arr, start, stop, pad_val, desired
+
+
+def padded_slice_pad_left():
+    arr = np.array([1, 2, 3, 4, 5])
+    start = -1
+    stop = 5
+    pad_val = 0
+    desired = np.array([0, 1, 2, 3, 4, 5])
+    return arr, start, stop, pad_val, desired
+
+
+def padded_slice_pad_right():
+    arr = np.array([1, 2, 3, 4, 5])
+    start = 0
+    stop = 6
+    pad_val = 0
+    desired = np.array([1, 2, 3, 4, 5, 0])
+    return arr, start, stop, pad_val, desired
+
+
+def padded_slice_pad_both():
+    arr = np.array([1, 2, 3, 4, 5])
+    start = -1
+    stop = 6
+    pad_val = 0
+    desired = np.array([0, 1, 2, 3, 4, 5, 0])
+    return arr, start, stop, pad_val, desired
+
+
+@parametrize_with_cases(
+    "arr, start, stop, pad_val, desired", cases=".", prefix="padded_slice_"
+)
+def test_padded_slice(
+    arr: np.ndarray, start: int, stop: int, pad_val: int, desired: np.ndarray
+):
+    actual = padded_slice(arr, start, stop, pad_val)
+    np.testing.assert_equal(actual, desired)

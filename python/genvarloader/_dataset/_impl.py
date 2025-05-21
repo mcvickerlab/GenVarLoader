@@ -7,12 +7,9 @@ from typing import (
     Callable,
     Generic,
     Iterable,
-    List,
     Literal,
-    Optional,
     Sequence,
     TypeVar,
-    Union,
     cast,
     overload,
 )
@@ -37,9 +34,6 @@ from .._ragged import (
     RaggedAnnotatedHaps,
     RaggedIntervals,
     RaggedSeqs,
-    _jitter,
-    _reverse,
-    _reverse_complement,
     is_rag_dtype,
     to_padded,
 )
@@ -175,9 +169,9 @@ class Dataset:
         # read metadata
         with _py_open(path / "metadata.json") as f:
             metadata = json.load(f)
-        samples: List[str] = metadata["samples"]
-        contigs: List[str] = metadata["contigs"]
-        ploidy: Optional[int] = metadata.get("ploidy", None)
+        samples: list[str] = metadata["samples"]
+        contigs: list[str] = metadata["contigs"]
+        ploidy: int | None = metadata.get("ploidy", None)
         max_jitter: int = metadata.get("max_jitter", 0)
 
         # read input regions and generate index map
@@ -315,7 +309,6 @@ class Dataset:
             _full_bed=bed,
             _spliced_bed=spliced_bed,
             _full_regions=regions,
-            _jittered_regions=regions.copy(),
             _seqs=seqs,
             _tracks=tracks,
             _recon=reconstructor,
@@ -363,12 +356,21 @@ class Dataset:
 
         if jitter is not None:
             if jitter != self.jitter:
-                jittered_regions = self._full_regions.copy()
-                jittered_regions[:, 1] -= jitter
-                jittered_regions[:, 2] += jitter
+                if isinstance(self.output_length, int):
+                    min_r_len: int = (
+                        self._full_regions[:, 2] - self._full_regions[:, 1]
+                    ).min()
+                    max_output_length = min_r_len + 2 * self.max_jitter
+                    eff_length = self.output_length + 2 * jitter
+
+                    if eff_length > max_output_length:
+                        raise ValueError(
+                            f"Jitter-expanded output length (out_len={self.output_length}) + 2 * ({jitter=}) = {eff_length} must be less"
+                            f" than or equal to the maximum output length of the dataset ({max_output_length})."
+                            f" The maximum output length is the minimum region length ({min_r_len}) + 2 * (max_jitter={self.max_jitter})."
+                        )
 
                 to_evolve["jitter"] = jitter
-                to_evolve["_jittered_regions"] = jittered_regions
 
         if rng is not None:
             to_evolve["rng"] = np.random.default_rng(rng)
@@ -482,7 +484,6 @@ class Dataset:
                 _full_bed=self._full_bed,
                 _spliced_bed=self._spliced_bed,
                 _full_regions=self._full_regions,
-                _jittered_regions=self._jittered_regions,
                 _seqs=self._seqs,
                 _tracks=self._tracks,
                 _recon=self._recon,
@@ -504,7 +505,6 @@ class Dataset:
                 _full_bed=self._full_bed,
                 _spliced_bed=self._spliced_bed,
                 _full_regions=self._full_regions,
-                _jittered_regions=self._jittered_regions,
                 _seqs=self._seqs,
                 _tracks=self._tracks,
                 _recon=self._recon,
@@ -587,6 +587,7 @@ class Dataset:
                     "Dataset has no genotypes to reconstruct haplotypes from."
                 )
 
+
             case None, _, _, (Tracks() as t) | RefTracks(tracks=t) | HapsTracks(
                 tracks=t
             ):
@@ -641,7 +642,7 @@ class Dataset:
 
         return self
 
-    def with_tracks(self, tracks: str | List[str] | None):
+    def with_tracks(self, tracks: str | list[str] | None):
         """Modify which tracks to return, returning a new dataset without modifying the old one.
 
         Parameters
@@ -659,14 +660,16 @@ class Dataset:
                     "Dataset is set to only return tracks, so setting tracks to None would"
                     " result in a Dataset that cannot return anything."
                 )
-            case t, _, None, _:
-                raise ValueError(
-                    "Can't set dataset to return tracks because it has none to begin with."
-                )
+            case None, _, None, _:
+                return self
             case None, _, tr, ((Ref() | Haps()) as seqs) | RefTracks(
                 seqs=seqs
             ) | HapsTracks(haps=seqs):
                 return evolve(self, _tracks=tr.with_tracks(None), _recon=seqs)
+            case t, _, None, _:
+                raise ValueError(
+                    "Can't set dataset to return tracks because it has none to begin with."
+                )
             case t, _, tr, (Ref() as seqs) | RefTracks(seqs=seqs):
                 recon = RefTracks(seqs=seqs, tracks=tr.with_tracks(t))
                 return evolve(self, _tracks=tr.with_tracks(t), _recon=recon)
@@ -691,7 +694,7 @@ class Dataset:
     """Maximum jitter."""
     return_indices: bool
     """Whether to return row and sample indices corresponding to the full dataset (no subsetting)."""
-    contigs: List[str]
+    contigs: list[str]
     """List of unique contigs."""
     jitter: int
     """How much jitter to use."""
@@ -711,13 +714,12 @@ class Dataset:
     _spliced_bed: pl.DataFrame | None = field(alias="_spliced_bed")
     _full_regions: NDArray[np.int32] = field(alias="_full_regions")
     """Unjittered, sorted regions matching order on-disk."""
-    _jittered_regions: NDArray[np.int32] = field(alias="_jittered_regions")
     _idxer: DatasetIndexer = field(alias="_idxer")
     _sp_idxer: SpliceIndexer | None = field(alias="_sp_idxer")
-    _seqs: Optional[
-        Ref | Haps[RaggedSeqs] | Haps[RaggedAnnotatedHaps] | Haps[RaggedVariants]
-    ] = field(alias="_seqs")
-    _tracks: Optional[Tracks] = field(alias="_tracks")
+    _seqs: (
+        Ref | Haps[RaggedSeqs] | Haps[RaggedAnnotatedHaps] | Haps[RaggedVariants] | None
+    ) = field(alias="_seqs")
+    _tracks: Tracks | None = field(alias="_tracks")
     _recon: (
         Ref
         | Haps[RaggedSeqs]
@@ -757,7 +759,7 @@ class Dataset:
         return self._tracks is not None
 
     @property
-    def samples(self) -> List[str]:
+    def samples(self) -> list[str]:
         """The samples in the dataset."""
         return self._idxer.samples
 
@@ -788,6 +790,12 @@ class Dataset:
     def n_samples(self) -> int:
         """The number of samples in the dataset."""
         return self._idxer.n_samples
+
+    @property
+    def ploidy(self) -> int | None:
+        """The ploidy of the dataset."""
+        if isinstance(self._seqs, Haps):
+            return self._seqs.genotypes.ploidy
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -1058,7 +1066,9 @@ class Dataset:
         r_idx, _ = np.unravel_index(ds_idx, self.full_shape)
 
         # (b)
-        regions = self._jittered_regions[r_idx]
+        regions = self._full_regions[r_idx]
+        regions[:, 1] -= self.jitter
+        regions[:, 2] += self.jitter
 
         # (b p)
         hap_lens = (
@@ -1328,12 +1338,6 @@ class Dataset:
 
             recon, squeeze, out_reshape = self._getitem_unspliced(idx)
 
-        if self.jitter > 0:
-            recon = cast(
-                tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
-            )
-            recon = _rag_jitter(list(recon), self.jitter, self._rng)
-
         if self.output_length == "variable":
             recon = cast(
                 tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
@@ -1363,7 +1367,15 @@ class Dataset:
         # (b)
         ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
         r_idx, _ = np.unravel_index(ds_idx, self.full_shape)
-        regions = self._jittered_regions[r_idx]
+
+        # makes a copy because r_idx is at least 1D & triggers advanced indexing
+        regions = self._full_regions[r_idx]
+        lengths = regions[:, 2] - regions[:, 1]
+        jitter = self._rng.integers(
+            -self.jitter, self.jitter + 1, size=len(regions), dtype=np.int32
+        )
+        regions[:, 1] += jitter
+        regions[:, 2] = regions[:, 1] + lengths
 
         recon = self._recon(
             idx=ds_idx,
@@ -1371,7 +1383,8 @@ class Dataset:
             regions=regions,
             output_length=self.output_length,
             jitter=self.jitter,
-            rng=None if self.deterministic else self._rng,
+            rng=self._rng,
+            deterministic=self.deterministic,
         )
 
         if not isinstance(recon, tuple):
@@ -1555,29 +1568,6 @@ def _rc(
     return rag
 
 
-def _rag_jitter(
-    rags: Sequence[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps],
-    jitter: int,
-    rng: np.random.Generator,
-) -> tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...]:
-    rag0 = rags[0]
-    batch_size = rag0.shape[0]
-    starts = rng.integers(0, 2 * jitter + 1, batch_size)
-
-    jittered = []
-    for r in rags:
-        if isinstance(r, Ragged):
-            jittered.append(_jitter(r, max_jitter=jitter, starts=starts))
-        else:
-            haps, v_idx, r_coord = _jitter(
-                *(r.haps, r.var_idxs, r.ref_coords),
-                max_jitter=jitter,
-                starts=starts,
-            )
-            jittered.append(RaggedAnnotatedHaps(haps, v_idx, r_coord))
-
-    return tuple(jittered)
-
 
 @overload
 def _pad(rag: Ragged[DTYPE]) -> NDArray[DTYPE]: ...
@@ -1736,14 +1726,11 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
     @overload
     def with_len(
         self,
-        output_length: Union[Literal["variable"], int],
+        output_length: Literal["variable"] | int,
     ) -> ArrayDataset[NDArray[np.bytes_], MaybeTRK]: ...
     def with_len(
         self, output_length: Literal["ragged", "variable"] | int
-    ) -> Union[
-        RaggedDataset[MaybeRSEQ, MaybeRTRK],
-        ArrayDataset[SEQ, MaybeTRK],
-    ]:
+    ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK] | ArrayDataset[SEQ, MaybeTRK]:
         return super().with_len(output_length)
 
     @overload
@@ -1773,9 +1760,9 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
     ) -> ArrayDataset[MaybeSEQ, NDArray[np.float32]]: ...
     @overload
     def with_tracks(
-        self, tracks: List[str]
+        self, tracks: list[str]
     ) -> ArrayDataset[MaybeSEQ, NDArray[np.float32]]: ...
-    def with_tracks(self, tracks: str | List[str] | None) -> ArrayDataset:
+    def with_tracks(self, tracks: str | list[str] | None) -> ArrayDataset:
         return super().with_tracks(tracks)
 
     @overload
@@ -1827,32 +1814,32 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
     @overload
     def with_len(
         self: RaggedDataset[RaggedSeqs, None],
-        output_length: Union[Literal["variable"], int],
+        output_length: Literal["variable"] | int,
     ) -> ArrayDataset[NDArray[np.bytes_], None]: ...
     @overload
     def with_len(
         self: RaggedDataset[RaggedAnnotatedHaps, None],
-        output_length: Union[Literal["variable"], int],
+        output_length: Literal["variable"] | int,
     ) -> ArrayDataset[AnnotatedHaps, None]: ...
     @overload
     def with_len(
         self: RaggedDataset[None, Ragged[np.float32]],
-        output_length: Union[Literal["variable"], int],
+        output_length: Literal["variable"] | int,
     ) -> ArrayDataset[None, NDArray[np.float32]]: ...
     @overload
     def with_len(
         self: RaggedDataset[None, MaybeRTRK],
-        output_length: Union[Literal["variable"], int],
+        output_length: Literal["variable"] | int,
     ) -> ArrayDataset[None, MaybeTRK]: ...
     @overload
     def with_len(
         self: RaggedDataset[RaggedSeqs, Ragged[np.float32]],
-        output_length: Union[Literal["variable"], int],
+        output_length: Literal["variable"] | int,
     ) -> ArrayDataset[NDArray[np.bytes_], NDArray[np.float32]]: ...
     @overload
     def with_len(
         self: RaggedDataset[RaggedAnnotatedHaps, Ragged[np.float32]],
-        output_length: Union[Literal["variable"], int],
+        output_length: Literal["variable"] | int,
     ) -> ArrayDataset[AnnotatedHaps, NDArray[np.float32]]: ...
     @overload
     def with_len(
@@ -1860,11 +1847,8 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
         output_length: Literal["ragged"],
     ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]: ...
     def with_len(
-        self, output_length: Union[Literal["ragged", "variable"], int]
-    ) -> Union[
-        RaggedDataset[MaybeRSEQ, MaybeRTRK],
-        ArrayDataset[MaybeSEQ, MaybeTRK],
-    ]:
+        self, output_length: Literal["ragged", "variable"] | int
+    ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK] | ArrayDataset[MaybeSEQ, MaybeTRK]:
         return super().with_len(output_length)
 
     @overload
@@ -1894,9 +1878,9 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
     ) -> RaggedDataset[MaybeRSEQ, Ragged[np.float32]]: ...
     @overload
     def with_tracks(
-        self, tracks: List[str]
+        self, tracks: list[str]
     ) -> RaggedDataset[MaybeRSEQ, Ragged[np.float32]]: ...
-    def with_tracks(self, tracks: str | List[str] | None) -> RaggedDataset:
+    def with_tracks(self, tracks: str | list[str] | None) -> RaggedDataset:
         return super().with_tracks(tracks)
 
     @overload

@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import subprocess
 from pathlib import Path
 from textwrap import dedent
-from typing import Annotated, List
+from typing import Annotated
 
 import numpy as np
 import typer
@@ -10,7 +12,7 @@ WDIR = Path(__file__).resolve().parent
 SEQ_LEN = 20
 
 
-def run_shell(cmd: List[str], input=None):
+def run_shell(cmd: list[str], input=None):
     try:
         prc = subprocess.run(cmd, check=True, capture_output=True, input=input)
     except subprocess.CalledProcessError as e:
@@ -50,14 +52,14 @@ def main(
     import polars as pl
     import polars.selectors as cs
     import pooch
-    from genoray import VCF, SparseVar
+    from genoray import PGEN, VCF, SparseVar
     from loguru import logger
     from tqdm.auto import tqdm
 
     log_file = Path(__file__).parent / "generate_ground_truth.log"
     if log_file.exists():
         log_file.unlink()
-    logger.add(log_file, level="DEBUG")
+    _ = logger.add(log_file, level="DEBUG")
 
     logger.info(
         "Running command:\n"
@@ -92,13 +94,13 @@ def main(
         )
     ).resolve()
     if not reference.with_suffix(".bgz").exists():
-        subprocess.run(
+        _ = subprocess.run(
             f"gzip -dc {reference} | bgzip -c > {reference.with_suffix('.bgz')}",
             shell=True,
         )
     reference = reference.with_suffix(".bgz")
     if not reference.with_suffix(".csi").exists():
-        run_shell(f"samtools faidx {reference}".split())
+        _ = run_shell(f"samtools faidx {reference}".split())
 
     vcf_path = WDIR / f"{name}.vcf"
     filtered_vcf = WDIR / "vcf" / f"filtered_{name}.vcf"
@@ -153,10 +155,10 @@ def main(
         ]
         vcf = run_shell(remove_sv_cmd, input=vcf).stdout
     with open(filtered_vcf, "w+t") as f:
-        f.write(vcf.decode())
+        _ = f.write(vcf.decode())
 
     # BGZIP the VCF or bcftools consensus errors out
-    run_shell(
+    _ = run_shell(
         [
             "bcftools",
             "view",
@@ -168,10 +170,11 @@ def main(
         ]
     )
     filtered_vcf = filtered_vcf.with_suffix(".vcf.gz")
-    run_shell(["bcftools", "index", str(filtered_vcf)])
+    _ = run_shell(["bcftools", "index", str(filtered_vcf)])
 
     logger.info("Generating PGEN file.")
-    run_shell(
+    filtered_pgen = WDIR / "pgen" / f"filtered_{name}.pgen"
+    _ = run_shell(
         [
             "plink2",
             "--vcf",
@@ -180,7 +183,7 @@ def main(
             "--vcf-half-call",
             "r",
             "--out",
-            str(WDIR / "pgen" / f"filtered_{name}"),
+            str(filtered_pgen.with_suffix("")),
         ]
     )
 
@@ -231,12 +234,13 @@ def main(
         .sample(fraction=1, shuffle=True, seed=0)
     )
     # manual additions
-    # spanning del
+    # - spanning deletion
+    # - no variants
     rows = pl.DataFrame(
         {
-            "chrom": ["chr19"],
-            "start": [1010696],
-            "end": [1010696 + SEQ_LEN],
+            "chrom": ["chr19", "chr1"],
+            "start": [1010696, int(10e6)],
+            "end": [1010696 + SEQ_LEN, int(10e6) + SEQ_LEN],
         }
     )
     rng = np.random.default_rng(0)
@@ -283,23 +287,32 @@ def main(
                     str(filtered_vcf),
                 ]
                 seq = run_shell(subseq_cmd)
-                run_shell(consensus_cmd, input=seq.stdout)
+                _ = run_shell(consensus_cmd, input=seq.stdout)
                 index_cmd = ["samtools", "faidx", str(out_fasta)]
-                run_shell(index_cmd)
-                pbar.update()
+                _ = run_shell(index_cmd)
+                _ = pbar.update()
     pbar.close()
 
     bed = WDIR / f"{name}.bed"
 
     logger.info("Generating phased datasets.")
+
     reader = VCF(filtered_vcf)
     if not reader._valid_index():
         reader._write_gvi_index()
-    reader._load_index()
-
+    _ = reader._load_index()
     if (WDIR / "phased_dataset.vcf.gvl").exists():
         shutil.rmtree(WDIR / "phased_dataset.vcf.gvl")
-    gvl.write(path=WDIR / "phased_dataset.vcf.gvl", bed=bed, variants=reader)
+    gvl.write(
+        path=WDIR / "phased_dataset.vcf.gvl", bed=bed, variants=reader, max_jitter=2
+    )
+
+    reader = PGEN(filtered_pgen)
+    if (WDIR / "phased_dataset.pgen.gvl").exists():
+        shutil.rmtree(WDIR / "phased_dataset.pgen.gvl")
+    gvl.write(
+        path=WDIR / "phased_dataset.pgen.gvl", bed=bed, variants=reader, max_jitter=2
+    )
 
     if (WDIR / "phased_dataset.svar.gvl").exists():
         shutil.rmtree(WDIR / "phased_dataset.svar.gvl")
@@ -307,6 +320,7 @@ def main(
         path=WDIR / "phased_dataset.svar.gvl",
         bed=bed,
         variants=SparseVar(WDIR / "filtered.svar"),
+        max_jitter=2,
     )
 
     logger.info(f"Finished in {perf_counter() - t0} seconds.")

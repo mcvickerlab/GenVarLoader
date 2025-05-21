@@ -1,14 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import (
     Callable,
     Generic,
-    Iterable,
-    List,
     Literal,
     TypeVar,
-    Union,
     cast,
     overload,
 )
@@ -23,7 +21,7 @@ from seqpro._ragged import Ragged
 from typing_extensions import Self
 
 from .._fasta import Fasta
-from .._ragged import RaggedSeqs, _reverse_complement, to_padded
+from .._ragged import RaggedSeqs, reverse_complement, to_padded
 from .._torch import (
     TORCH_AVAILABLE,
     get_dataloader,
@@ -45,15 +43,15 @@ class Reference:
     """
 
     reference: NDArray[np.uint8]
-    contigs: List[str]
+    contigs: list[str]
     offsets: NDArray[np.uint64]
     pad_char: int
 
     @classmethod
     def from_path(
         cls,
-        fasta: Union[str, Path],
-        contigs: List[str] | None = None,
+        fasta: str | Path,
+        contigs: list[str] | None = None,
         in_memory: bool = True,
     ):
         """Load a reference genome from a FASTA file.
@@ -299,11 +297,11 @@ class RefDataset(Generic[T]):
 
         # (b)
         if self.deterministic:
-            missing_len_shift = np.full(batch_size, 0)
+            extra_len = np.full(batch_size, 0)
         else:
-            missing_len_shift = (lengths - out_lengths).clip(min=0)
+            extra_len = (lengths - out_lengths).clip(min=0)
 
-        max_shift = missing_len_shift + 2 * self.jitter
+        max_shift = extra_len + 2 * self.jitter
         shifts = self._rng.integers(0, max_shift + 1, dtype=np.int32)
         regions[:, 1] += shifts - self.jitter
         regions[:, 2] = regions[:, 1] + out_lengths
@@ -324,7 +322,7 @@ class RefDataset(Generic[T]):
 
         to_rc = regions[:, 3] == -1
         if to_rc.any():
-            ref = _reverse_complement(ref, to_rc)
+            ref = reverse_complement(ref, to_rc)
 
         if squeeze:
             ref = ref.squeeze()

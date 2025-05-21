@@ -190,7 +190,6 @@ def get_dummy_dataset(spliced: bool = False):
         _full_bed=dummy_bed,
         _spliced_bed=sp_bed,
         _full_regions=dummy_regions,
-        _jittered_regions=dummy_regions.copy(),
         _idxer=dummy_idxer,
         _sp_idxer=dummy_spi,
         _seqs=dummy_haps,
