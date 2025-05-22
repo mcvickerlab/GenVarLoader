@@ -636,6 +636,13 @@ class Dataset:
         return self._seqs is not None
 
     @property
+    def reference(self) -> Reference | None:
+        """The reference genome."""
+        if self._seqs is None:
+            return None
+        return self._seqs.reference
+
+    @property
     def has_genotypes(self) -> bool:
         """Whether the dataset has genotypes."""
         return isinstance(self._seqs, Haps)
