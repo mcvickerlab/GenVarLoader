@@ -43,10 +43,15 @@ class Reference:
     """
 
     path: Path
+    """The path to the reference genome."""
     reference: NDArray[np.uint8]
+    """The reference genome as a numpy array, with contigs concatenated."""
     contigs: list[str]
+    """The contigs in the reference genome."""
     offsets: NDArray[np.uint64]
+    """The offsets of the contigs in the reference genome."""
     pad_char: int
+    """The padding character used in the reference genome."""
 
     @classmethod
     def from_path(
@@ -142,11 +147,19 @@ class RefDataset(Generic[T]):
     """A reference dataset for pulling out sequences from a reference genome."""
 
     reference: Reference
+    """The reference genome."""
     regions: pl.DataFrame
+    """The regions to extract from the reference genome."""
     jitter: int
+    """The maximum length for randomly shifting start positions."""
     output_length: Literal["ragged", "variable"] | int
+    """The output length of the dataset. Same meaning as :attr:`Dataset.output_length`."""
     deterministic: bool
+    """If true, fixed length sequences will be right truncated from their full length to the output length.
+    If false, fixed length sequences will be randomly shifted to be within the output length.
+    """
     rc_neg: bool
+    """Whether to reverse complement the regions that are on the negative strand."""
     _full_regions: NDArray[np.int32]
     _rng: np.random.Generator
 
