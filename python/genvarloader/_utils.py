@@ -16,7 +16,8 @@ from typing import (
 import numpy as np
 import polars as pl
 from numpy.typing import NDArray
-from seqpro.bed import read_bedlike, with_length
+from seqpro.bed import read as read_bedlike
+from seqpro.bed import with_len as with_length
 
 from ._types import DTYPE, Idx
 
@@ -85,9 +86,6 @@ def _get_rel_starts(
         [[0], (ends - starts).cumsum()[:-1]], dtype=np.int64
     )
     return rel_starts
-
-
-DTYPE = TypeVar("DTYPE", bound=np.generic)
 
 
 @overload

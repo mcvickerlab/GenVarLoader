@@ -46,7 +46,7 @@ plink2 = "*"
 [pypi-dependencies]
 genvarloader = { path = ".", editable = true }
 hirola = "==0.3"
-seqpro = "==0.3.2"
+seqpro = "==0.4.0"
 genoray = "==0.11.2"
 
 [feature.docs.dependencies]

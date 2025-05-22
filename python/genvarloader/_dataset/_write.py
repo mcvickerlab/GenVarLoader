@@ -87,7 +87,7 @@ def write(
     path.mkdir(parents=True, exist_ok=True)
 
     if isinstance(bed, (str, Path)):
-        bed = sp.bed.read_bedlike(bed)
+        bed = sp.bed.read(bed)
 
     gvl_bed, contigs, input_to_sorted_idx_map = _prep_bed(bed, max_jitter)
     bed.with_columns(r_idx_map=pl.lit(input_to_sorted_idx_map)).write_ipc(
