@@ -224,7 +224,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
 
         ds_rows = self._row_map[r_idx, 0]
         out = self.dataset[ds_rows, s_idx]
-        if isinstance(out, tuple):
+        if isinstance(out, tuple) or isinstance(out, list):
             haps, tracks = out
         else:
             haps = out
@@ -262,7 +262,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
             haps = haps.reshape((*out_reshape, ploidy, length))
             flags = flags.reshape(*out_reshape, ploidy)
 
-        if isinstance(out, tuple):
+        if isinstance(out, tuple) or isinstance(out, list):
             return (
                 haps,
                 flags,
