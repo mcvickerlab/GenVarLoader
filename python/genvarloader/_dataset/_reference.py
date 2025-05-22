@@ -42,6 +42,7 @@ class Reference:
         Do not instantiate this class directly. Use :meth:`Reference.from_path` instead.
     """
 
+    path: Path
     reference: NDArray[np.uint8]
     contigs: list[str]
     offsets: NDArray[np.uint64]
@@ -71,6 +72,7 @@ class Reference:
             slower than keeping it in memory. This is useful if you need to work with many
             reference genomes or have very limited RAM.
         """
+        path = Path(fasta)
         _fasta = Fasta("ref", fasta, "N")
 
         if not _fasta._valid_cache():
@@ -109,7 +111,7 @@ class Reference:
         else:
             reference = ref_mmap
 
-        return cls(reference, contigs, offsets, pad_char)
+        return cls(path, reference, contigs, offsets, pad_char)
 
     def fetch(
         self, contig: str, start: int = 0, end: int | None = None
