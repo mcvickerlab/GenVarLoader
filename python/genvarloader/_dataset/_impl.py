@@ -1015,7 +1015,7 @@ class Dataset:
             out_dir.mkdir(parents=True, exist_ok=True)
 
             if isinstance(bedlike, str) or isinstance(bedlike, Path):
-                bedlike = sp.bed.read_bedlike(bedlike)
+                bedlike = sp.bed.read(bedlike)
 
             # ensure the full_bed matches the order on-disk
             full_bed = regions_to_bed(self._full_regions, self.contigs)
@@ -1306,8 +1306,8 @@ def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedInt
     annot = annot.with_columns(chrom=pl.col("chrom").replace(renamer))
 
     # find intersection
-    intersect = sp.bed.from_pyranges(
-        sp.bed.to_pyranges(annot).join(sp.bed.to_pyranges(regions.with_row_index()))
+    intersect = sp.bed.from_pyr(
+        sp.bed.to_pyr(annot).join(sp.bed.to_pyr(regions.with_row_index()))
     ).sort("index", "chrom", "chromStart")
 
     # compute offsets, considering regions with no overlaps

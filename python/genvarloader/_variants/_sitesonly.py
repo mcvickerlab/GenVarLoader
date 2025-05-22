@@ -20,7 +20,7 @@ from ._records import RaggedAlleles
 
 def sites_vcf_to_table(
     vcf: str | Path | VCF,
-    attributes: list[str] = ["CHROM", "POS", "REF", "ALT"],
+    attributes: list[str] | None = None,
     info_fields: list[str] | None = None,
 ) -> pl.DataFrame:
     """Extract a table of variant site info from a VCF. All sites must be bi-allelic.
@@ -39,7 +39,10 @@ def sites_vcf_to_table(
         vcf = VCF(vcf)
 
     min_attrs = ["CHROM", "POS", "REF", "ALT"]
-    attrs = min_attrs + [attr for attr in attributes if attr not in min_attrs]
+    if attributes is None:
+        attrs = min_attrs
+    else:
+        attrs = min_attrs + [attr for attr in attributes if attr not in min_attrs]
 
     df = vcf.get_record_info(attrs=attrs, info=info_fields, progress=True)
 
@@ -170,8 +173,8 @@ class DatasetWithSites(Generic[MaybeTRK]):
             ds_bed = ds_bed.with_columns(
                 chromEnd=pl.col("chromStart") + dataset.output_length
             )
-        ds_pyr = sp.bed.to_pyranges(ds_bed)
-        sites_pyr = sp.bed.to_pyranges(sites.with_row_index("site_idx"))
+        ds_pyr = sp.bed.to_pyr(ds_bed)
+        sites_pyr = sp.bed.to_pyr(sites.with_row_index("site_idx"))
         rows = pl.from_pandas(ds_pyr.join(sites_pyr, suffix="_site").df)
         if rows.height == 0:
             raise RuntimeError("No overlap between dataset regions and sites.")
