@@ -65,6 +65,7 @@ def get_dummy_dataset():
     ref_lens = np.full(len(dummy_contigs), ref_len, dtype=np.int32)
     ref = np.full(ref_len * len(dummy_contigs), b"N", dtype="S1").view(np.uint8)
     dummy_ref = Reference(
+        path=Path("dummy"),
         reference=ref,
         contigs=dummy_contigs,
         offsets=_lengths_to_offsets(ref_lens, np.uint64),
