@@ -172,7 +172,12 @@ def _rc_helper(
 ) -> NDArray[np.uint8]:
     out = data.copy()
     for i in nb.prange(len(offsets) - 1):
-        start, end = offsets[i], offsets[i + 1]
+        if offsets.ndim == 1:
+            if i == len(offsets) - 1:
+                continue
+            start, end = offsets[i], offsets[i + 1]
+        else:
+            start, end = offsets[i]
         _data = data[start:end]
         _out = out[start:end]
         if mask[i]:
@@ -200,7 +205,12 @@ def _reverse_helper(
 ):
     for i in nb.prange(len(offsets)):
         if mask[i]:
-            start, end = offsets[i], offsets[i + 1]
+            if offsets.ndim == 1:
+                if i == len(offsets) - 1:
+                    continue
+                start, end = offsets[i], offsets[i + 1]
+            else:
+                start, end = offsets[i]
             data[start:end] = np.flip(data[start:end])
 
 

@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-from typing import List, Literal, Optional, Sequence, cast
+from collections.abc import Sequence
+from typing import Literal, cast
 
 import awkward as ak
-import numba as nb
 import numpy as np
 from attrs import define, evolve
-from einops import repeat
 from hirola import HashTable
 from more_itertools import collapse
 from numpy.typing import NDArray
 from typing_extensions import Self, assert_never
 
-from .._ragged import Ragged
 from .._types import Idx, StrIdx
 from .._utils import _lengths_to_offsets, idx_like_to_array, is_dtype
 
@@ -25,9 +23,9 @@ class DatasetIndexer:
     """Full map from input sample indices to on-disk sample indices."""
     s2i_map: HashTable
     """Map from input sample names to on-disk sample indices."""
-    region_subset_idxs: Optional[NDArray[np.integer]] = None
+    region_subset_idxs: NDArray[np.integer] | None = None
     """Which input regions are included in the subset."""
-    sample_subset_idxs: Optional[NDArray[np.integer]] = None
+    sample_subset_idxs: NDArray[np.integer] | None = None
     """Which input samples are included in the subset."""
 
     @classmethod
@@ -35,7 +33,7 @@ class DatasetIndexer:
         cls,
         r_idxs: NDArray[np.integer],
         s_idxs: NDArray[np.integer],
-        samples: List[str],
+        samples: list[str],
     ):
         _samples = np.array(samples)
         s2i_map = HashTable(
@@ -72,10 +70,10 @@ class DatasetIndexer:
         return len(self.sample_subset_idxs)
 
     @property
-    def samples(self) -> List[str]:
+    def samples(self) -> list[str]:
         if self.sample_subset_idxs is None:
-            return self.full_samples.tolist()  # type: ignore
-        return self.full_samples[self.sample_subset_idxs].tolist()  # type: ignore
+            return self.full_samples.tolist()
+        return self.full_samples[self.sample_subset_idxs].tolist()
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -90,8 +88,8 @@ class DatasetIndexer:
 
     def subset_to(
         self,
-        regions: Optional[Idx] = None,
-        samples: Optional[Idx] = None,
+        regions: Idx | None = None,
+        samples: Idx | None = None,
     ) -> Self:
         """Subset the dataset to specific regions and/or samples."""
         if regions is None and samples is None:
@@ -149,12 +147,7 @@ class DatasetIndexer:
             idx = np.ravel_multi_index(
                 np.ix_(r_idx.ravel(), s_idx.ravel()), self.full_shape
             )
-            if (
-                isinstance(r_idx, np.ndarray)
-                and r_idx.ndim > 1
-                or isinstance(s_idx, np.ndarray)
-                and s_idx.ndim > 1
-            ):
+            if r_idx.ndim > 1 or s_idx.ndim > 1:
                 out_reshape = (*r_idx.shape, *s_idx.shape)
             elif idx.ndim > 1:
                 out_reshape = idx.shape
@@ -193,9 +186,7 @@ class SpliceIndexer:
     full_splice_map: ak.Array
     """Non-subset map from splice indices to region indices."""
     dsi: DatasetIndexer
-    i2d_map: ak.Array
-    """Shape: (rows, samples, ~regions). Map from spliced row/sample indices to on-disk dataset indices."""
-    row_subset_idxs: Optional[NDArray[np.intp]] = None
+    row_subset_idxs: NDArray[np.intp] | None = None
     """Subset of row indices."""
 
     @classmethod
@@ -225,26 +216,8 @@ class SpliceIndexer:
             splice_map=splice_map,
             full_splice_map=splice_map,
             dsi=dsi,
-            i2d_map=cls.get_i2d_map(splice_map, dsi),
             row_subset_idxs=None,
         )
-
-    @staticmethod
-    def get_i2d_map(splice_map: ak.Array, dsi: DatasetIndexer):
-        regs_per_row = ak.count(splice_map, -1).to_numpy()
-        row_offsets = _lengths_to_offsets(regs_per_row)
-        s_idxs = (
-            dsi.full_sample_idxs
-            if dsi.sample_subset_idxs is None
-            else dsi.sample_subset_idxs
-        )
-        i2d_map = _spliced_i2d_map_helper(
-            dsi.i2d_map.reshape(dsi.shape), splice_map, row_offsets, s_idxs
-        )
-        i2d_map = Ragged.from_lengths(
-            i2d_map, repeat(regs_per_row, "r -> r s", s=dsi.n_samples)
-        ).to_awkward()
-        return i2d_map
 
     @property
     def n_rows(self) -> int:
@@ -267,8 +240,8 @@ class SpliceIndexer:
 
     def subset_to(
         self,
-        rows: Optional[Idx] = None,
-        samples: Optional[Idx] = None,
+        rows: Idx | None = None,
+        samples: Idx | None = None,
     ) -> tuple[Self, DatasetIndexer]:
         """Subset to specific regions and/or samples."""
         if rows is None and samples is None:
@@ -282,7 +255,6 @@ class SpliceIndexer:
         splice_map = cast(ak.Array, self.splice_map[row_idxs])
         # splice_map is to absolute indices so don't subset dsi regions
         sub_dsi = self.dsi.subset_to(samples=samples)
-        i2d_map = self.get_i2d_map(splice_map, sub_dsi)
         region_idxs = ak.flatten(splice_map, None).to_numpy()
         eff_dsi = self.dsi.subset_to(regions=region_idxs, samples=samples)
 
@@ -290,7 +262,6 @@ class SpliceIndexer:
             self,
             splice_map=splice_map,
             dsi=sub_dsi,
-            i2d_map=i2d_map,
             row_subset_idxs=row_idxs,
         ), eff_dsi
 
@@ -303,9 +274,7 @@ class SpliceIndexer:
             row_subset_idxs=None,
         )
 
-    def parse_idx(
-        self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]
-    ) -> tuple[NDArray[np.integer], bool, tuple[int, ...] | None, NDArray[np.integer]]:
+    def parse_idx(self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]):
         """Parse the index into a format suitable for indexing.
 
         Parameters
@@ -330,6 +299,9 @@ class SpliceIndexer:
         s_idx
             Indices of the samples.
         """
+        out_reshape = None
+        squeeze = False
+
         if not isinstance(idx, tuple):
             rows = idx
             samples = slice(None)
@@ -339,24 +311,56 @@ class SpliceIndexer:
         else:
             rows, samples = idx
 
-        rows = s2i(rows, self.rows)
-        samples = s2i(samples, self.dsi.s2i_map)
+        rows = self.r2i(rows)
+        samples = self.s2i(samples)
 
-        ds_idx = cast(ak.Array, self.i2d_map[rows, samples])
-        out_reshape = tuple(map(int, ds_idx.typestr.split(" * ")[:-2]))
-        squeeze = False
-        if len(out_reshape) == 1:
-            out_reshape = None
-        elif out_reshape == ():
-            out_reshape = None
+        if isinstance(rows, (int, np.integer)) and isinstance(
+            samples, (int, np.integer)
+        ):
             squeeze = True
 
-        lengths = ak.count(ds_idx, -1)
+        r_idx = idx_like_to_array(rows, self.n_rows)
+        s_idx = idx_like_to_array(samples, self.n_samples)
+
+        idx_t = idx_type((r_idx, s_idx))
+        if idx_t == "basic":
+            # * FYI this will never execute because idx type is guaranteed to be adv or combo by casting
+            # basic indices to arrays above
+            idx = np.ravel_multi_index(np.ix_(r_idx, s_idx), self.full_shape)
+        elif idx_t == "adv":
+            idx = np.ravel_multi_index((r_idx, s_idx), self.full_shape)
+        elif idx_t == "combo":
+            idx = np.ravel_multi_index(
+                np.ix_(r_idx.ravel(), s_idx.ravel()), self.full_shape
+            )
+            if squeeze:
+                pass
+            elif r_idx.ndim > 1 or s_idx.ndim > 1:
+                out_reshape = (*r_idx.shape, *s_idx.shape)
+            elif idx.ndim > 1:
+                out_reshape = idx.shape
+        else:
+            assert_never(idx_t)
+
+        if idx_t != "combo" and idx.ndim > 1:
+            out_reshape = idx.shape
+        idx = idx.ravel()
+        (
+            r_idx,
+            s_idx,
+        ) = np.unravel_index(idx, self.full_shape)
+
+        r_idx = self.splice_map[r_idx]
+        lengths = ak.count(r_idx, -1)
         if not isinstance(lengths, np.integer):
             lengths = lengths.to_numpy()
         lengths = cast(NDArray[np.int64], lengths)
         offsets = _lengths_to_offsets(lengths)
-        ds_idx = ak.flatten(ds_idx, None).to_numpy()
+        r_idx = ak.flatten(r_idx, -1).to_numpy()
+        s_idx = s_idx.repeat(lengths)
+        ds_idx = np.ravel_multi_index((r_idx, s_idx), self.dsi.full_shape)
+
+        ds_idx = ds_idx.ravel()
 
         return ds_idx, squeeze, out_reshape, offsets
 
@@ -409,22 +413,3 @@ def idx_type(
 def is_adv_idx(idx: Idx) -> bool:
     """Check if the index is a fancy index."""
     return isinstance(idx, (Sequence, np.ndarray))
-
-
-@nb.njit(nogil=True, cache=True)
-def _spliced_i2d_map_helper(
-    i2d_map: NDArray[np.integer],
-    sp_map: ak.Array,
-    row_offsets: NDArray[np.int64],
-    s_idxs: NDArray[np.integer],
-):
-    n_samples = len(s_idxs)
-    # (rows samples ~regions)
-    out = np.empty(row_offsets[-1] * n_samples, dtype=np.int32)
-    for row, r_idxs in enumerate(sp_map):
-        for r, r_idx in enumerate(r_idxs):
-            for s_idx in s_idxs:
-                out[row_offsets[row] * n_samples + s_idx * (len(r_idxs)) + r] = i2d_map[
-                    r_idx, s_idx
-                ]
-    return out

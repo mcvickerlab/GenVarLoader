@@ -35,6 +35,8 @@ from .._ragged import (
     RaggedIntervals,
     RaggedSeqs,
     is_rag_dtype,
+    reverse,
+    reverse_complement,
     to_padded,
 )
 from .._torch import TORCH_AVAILABLE, TorchDataset, get_dataloader
@@ -586,7 +588,6 @@ class Dataset:
                 raise ValueError(
                     "Dataset has no genotypes to reconstruct haplotypes from."
                 )
-
 
             case None, _, _, (Tracks() as t) | RefTracks(tracks=t) | HapsTracks(
                 tracks=t
@@ -1452,7 +1453,7 @@ class Dataset:
         inner_ds = self.with_len("ragged")
         ds_idx, squeeze, out_reshape, offsets = splice_idxer.parse_idx(idx)
         r_idx, _ = np.unravel_index(ds_idx, self._idxer.full_shape)
-        regions = self._jittered_regions[r_idx]
+        regions = self._full_regions[r_idx]
 
         recon = inner_ds._recon(
             idx=ds_idx,
@@ -1461,6 +1462,7 @@ class Dataset:
             output_length="ragged",
             jitter=self.jitter,
             rng=self._rng,
+            deterministic=self.deterministic,
         )
 
         if not isinstance(recon, tuple):
@@ -1469,9 +1471,7 @@ class Dataset:
         recon = cast(
             tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
         )
-
-        if isinstance(recon, tuple):
-            recon = tuple(_cat_length(r, offsets) for r in recon)
+        recon = tuple(_cat_length(r, offsets) for r in recon)
 
         if self.rc_neg:
             # (b)
@@ -1556,17 +1556,16 @@ def _rc(
     """
     if isinstance(rag, Ragged):
         if is_rag_dtype(rag, np.bytes_):
-            rag = _reverse_complement(rag, to_rc)
+            rag = reverse_complement(rag, to_rc)
         elif is_rag_dtype(rag, np.float32):
-            _reverse(rag, to_rc)
+            reverse(rag, to_rc)
     elif isinstance(rag, RaggedAnnotatedHaps):
-        rag.haps = _reverse_complement(rag.haps, to_rc)
-        _reverse(rag.var_idxs, to_rc)
-        _reverse(rag.ref_coords, to_rc)
+        rag.haps = reverse_complement(rag.haps, to_rc)
+        reverse(rag.var_idxs, to_rc)
+        reverse(rag.ref_coords, to_rc)
     else:
         assert_never(rag)
     return rag
-
 
 
 @overload

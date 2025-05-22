@@ -57,6 +57,7 @@ reportAny = false
 reportPrivateUsage = false
 reportMissingTypeStubs = false
 reportImplicitOverride = false
+reportUnusedCallResult = false
 
 [tool.maturin]
 python-source = "python"
