@@ -29,7 +29,7 @@ from .._torch import (
     tensor_from_maybe_bytes,
 )
 from .._types import Idx
-from .._utils import _lengths_to_offsets, _normalize_contig_name
+from .._utils import lengths_to_offsets, normalize_contig_name
 from ._utils import bed_to_regions, padded_slice
 
 
@@ -91,7 +91,7 @@ class Reference:
         if contigs is None:
             contigs = list(_fasta.contigs)
         else:
-            _contigs = [_normalize_contig_name(c, _fasta.contigs) for c in contigs]
+            _contigs = [normalize_contig_name(c, _fasta.contigs) for c in contigs]
             if unmapped := [
                 source for source, mapped in zip(contigs, _contigs) if mapped is None
             ]:
@@ -117,7 +117,7 @@ class Reference:
     def fetch(
         self, contig: str, start: int = 0, end: int | None = None
     ) -> NDArray[np.bytes_]:
-        c = _normalize_contig_name(contig, self.contigs)
+        c = normalize_contig_name(contig, self.contigs)
         if c is None:
             raise ValueError(f"Contig {contig} not found in reference.")
         c_idx = self.contigs.index(c)
@@ -287,7 +287,7 @@ class RefDataset(Generic[T]):
         regions[:, 2] = regions[:, 1] + out_lengths
 
         # (b+1)
-        out_offsets = _lengths_to_offsets(out_lengths)
+        out_offsets = lengths_to_offsets(out_lengths)
 
         # ragged (b ~l)
         ref = get_reference(
@@ -429,7 +429,7 @@ class RefDataset(Generic[T]):
         )
 
 
-@nb.njit(parallel=True, nogil=True, cache=True)  # type: ignore
+@nb.njit(parallel=True, nogil=True, cache=True)
 def get_reference(
     regions: NDArray[np.integer],
     out_offsets: NDArray[np.integer],

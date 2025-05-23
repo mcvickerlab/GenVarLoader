@@ -37,7 +37,7 @@ from .._ragged import (
 )
 from .._torch import TORCH_AVAILABLE, TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx
-from .._utils import _lengths_to_offsets, _normalize_contig_name, idx_like_to_array
+from .._utils import idx_like_to_array, lengths_to_offsets, normalize_contig_name
 from ._indexing import DatasetIndexer
 from ._rag_variants import RaggedVariants
 from ._reconstruct import Haps, HapsTracks, Ref, RefTracks, Tracks
@@ -1301,7 +1301,7 @@ def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedInt
     # normalize contig names
     reg_c = regions["chrom"].unique()
     annot_c = annot["chrom"].unique()
-    renamer = (_normalize_contig_name(c, reg_c) for c in annot_c)
+    renamer = (normalize_contig_name(c, reg_c) for c in annot_c)
     renamer = {c: new_c for c, new_c in zip(annot_c, renamer) if new_c is not None}
     annot = annot.with_columns(chrom=pl.col("chrom").replace(renamer))
 
@@ -1314,7 +1314,7 @@ def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedInt
     i, nonzero_counts = np.unique(intersect["index"], return_counts=True)
     counts = np.zeros(regions.height, dtype=np.int32)
     counts[i] = nonzero_counts
-    offsets = _lengths_to_offsets(counts)
+    offsets = lengths_to_offsets(counts)
 
     # convert to numpy intervals
     itvs = np.empty(intersect.height, dtype=INTERVAL_DTYPE)

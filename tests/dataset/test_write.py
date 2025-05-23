@@ -6,7 +6,7 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseGenotypes
-from genvarloader._utils import _lengths_to_offsets
+from genvarloader._utils import lengths_to_offsets
 from polars.testing.asserts import assert_frame_equal
 from pytest import fixture, mark
 from pytest_cases import parametrize_with_cases
@@ -30,7 +30,7 @@ def reader_pgen():
 
 @fixture
 def bed():
-    return sp.bed.read_bedlike(ddir / "vcf" / "sample.bed")
+    return sp.bed.read(ddir / "vcf" / "sample.bed")
 
 
 @fixture
@@ -93,7 +93,7 @@ def test_write(reader: Reader, bed: pl.DataFrame, ref: Path, tmp_path):
             [[0, 1], [0, 1], [0, 0]],
         ]
     )
-    offsets = _lengths_to_offsets(lengths)
+    offsets = lengths_to_offsets(lengths)
     shape = (8, 3, 2)
     desired = SparseGenotypes.from_offsets(var_idxs, shape, offsets).to_awkward()
 
