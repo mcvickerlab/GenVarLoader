@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Generic, Literal, TypeVar, cast, overload
+from typing import Callable, Generic, Literal, TypeVar, cast, overload
 
 import numpy as np
 import polars as pl
@@ -1166,7 +1166,21 @@ class Dataset:
 
     def __getitem__(
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
-    ) -> Any:
+    ) -> (
+        Ragged[np.bytes_ | np.float32]
+        | RaggedAnnotatedHaps
+        | RaggedVariants
+        | NDArray[np.bytes_ | np.float32]
+        | AnnotatedHaps
+        | tuple[
+            Ragged[np.bytes_ | np.float32]
+            | RaggedAnnotatedHaps
+            | RaggedVariants
+            | NDArray[np.bytes_ | np.float32]
+            | AnnotatedHaps,
+            ...,
+        ]
+    ):
         # (b)
         ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
         r_idx, _ = np.unravel_index(ds_idx, self.full_shape)
@@ -1192,17 +1206,18 @@ class Dataset:
 
         if isinstance(recon, tuple):
             unlist = False
-            out = list(recon)
         else:
             unlist = True
-            out = [recon]
+            recon = (recon,)
 
         ragv = None
-        if isinstance(out[0], RaggedVariants):
-            ragv = out[0]
-            out = out[1:]
+        if isinstance(recon[0], RaggedVariants):
+            ragv = recon[0]
+            recon = recon[1:]
 
-        out = cast(list[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps], out)
+        recon = cast(
+            tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
+        )
 
         if self.rc_neg:
             if self.sequence_type == "variants":
@@ -1211,29 +1226,27 @@ class Dataset:
                 )
             # (b)
             to_rc: NDArray[np.bool_] = self._full_regions[r_idx, 3] == -1
-            out = [self._rc(r, to_rc) for r in out]
+            recon = tuple(self._rc(r, to_rc) for r in recon)
 
         if self.output_length == "variable":
-            out = [self._pad(r) for r in out]
+            recon = tuple(self._pad(r) for r in recon)
         elif isinstance(self.output_length, int):
-            out = [self._fix_len(r) for r in out]
+            recon = tuple(self._fix_len(r) for r in recon)
 
         if ragv is not None:
-            out = [ragv] + out
+            recon = (ragv,) + recon
 
         if out_reshape is not None:
-            out = [o.reshape(out_reshape + o.shape[1:]) for o in out]
+            recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)
 
         if squeeze:
             # (1 [p] l) -> ([p] l)
-            out = [o.squeeze(0) for o in out]
+            recon = tuple(o.squeeze(0) for o in recon)
 
         if unlist:
-            out = out[0]
+            recon = recon[0]
 
-        if isinstance(out, list):
-            out = tuple(out)
-        return out
+        return recon
 
     @overload
     def _rc(self, rag: Ragged[DTYPE], to_rc: NDArray[np.bool_]) -> Ragged[DTYPE]: ...
@@ -1402,11 +1415,6 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
 
     @overload
     def __getitem__(
-        self: ArrayDataset[None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> NoReturn: ...
-    @overload
-    def __getitem__(
         self: ArrayDataset[SEQ, None],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
     ) -> SEQ: ...
@@ -1438,7 +1446,7 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
     def __getitem__(
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
     ) -> SEQ | NDArray[np.float32] | tuple[SEQ, NDArray[np.float32]]:
-        return super().__getitem__(idx)
+        return super().__getitem__(idx)  # type: ignore
 
 
 class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
@@ -1556,4 +1564,4 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
     def __getitem__(
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
     ) -> RSEQ | Ragged[np.float32] | tuple[RSEQ, Ragged[np.float32]]:
-        return super().__getitem__(idx)
+        return super().__getitem__(idx)  # type: ignore
