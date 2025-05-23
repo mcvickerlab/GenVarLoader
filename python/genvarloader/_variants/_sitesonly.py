@@ -248,10 +248,10 @@ class DatasetWithSites(Generic[MaybeTRK]):
         mut_haps, v_idxs, ref_coords, flags = apply_site_only_variants(
             haps=wt_haps.haps.view(np.uint8).copy(),  # (b p l)
             v_idxs=wt_haps.var_idxs.copy(),  # (b p l)
-            ref_coords=wt_haps.ref_coords.copy(),  # (b p l)
-            site_starts=starts.copy(),
-            alt_alleles=alts.data.view(np.uint8).copy(),
-            alt_offsets=alts.offsets.copy(),
+            ref_coords=wt_haps.ref_coords,  # (b p l)
+            site_starts=starts,
+            alt_alleles=alts.data.view(np.uint8),
+            alt_offsets=alts.offsets,
         )
 
         mut_haps = AnnotatedHaps(
