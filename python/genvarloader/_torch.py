@@ -176,19 +176,14 @@ if TORCH_AVAILABLE:
 
             if not isinstance(batch, tuple):
                 batch = (batch,)
-                single_item = True
-            else:
-                single_item = False
 
             if self.include_indices:
                 batch = (*batch, r_idx, s_idx)
 
-            if self.transform is not None:
-                batch = self.transform(*batch)
-
-            batch = tuple(tensor_from_maybe_bytes(b) for b in batch)
-            if single_item:
+            if len(batch) == 1:
                 batch = batch[0]
+            elif self.transform is not None:
+                batch = self.transform(*batch)
 
             return batch
 
