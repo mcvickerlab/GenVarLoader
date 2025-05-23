@@ -29,7 +29,7 @@ dependencies = [
     "pooch",
     "awkward",
     "hirola>=0.3,<0.4",
-    "seqpro>=0.4.0",
+    "seqpro>=0.4.2",
     "genoray>=0.11.2",
 ]
 
