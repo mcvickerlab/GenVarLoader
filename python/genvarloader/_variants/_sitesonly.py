@@ -143,7 +143,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
         if max_variants_per_region > 1:
             raise NotImplementedError("max_variants_per_region > 1 not yet supported")
 
-        if not isinstance(dataset, ArrayDataset):
+        if not isinstance(dataset, ArrayDataset) and dataset.output_length != "variable":
             raise ValueError(
                 'Dataset output_length must either be "variable" or a fixed length integer.'
             )
