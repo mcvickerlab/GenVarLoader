@@ -1231,6 +1231,8 @@ class Dataset:
         if unlist:
             out = out[0]
 
+        if isinstance(out, list):
+            out = tuple(out)
         return out
 
     @overload
