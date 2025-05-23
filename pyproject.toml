@@ -60,6 +60,7 @@ reportImplicitOverride = false
 reportUntypedFunctionDecorator = false
 reportUnusedCallResult = false
 reportUnnecessaryIsInstance = false
+reportUnnecessaryComparison = false
 
 [tool.maturin]
 python-source = "python"

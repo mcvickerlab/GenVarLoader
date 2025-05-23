@@ -1,18 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import (
-    Any,
-    Callable,
-    Generic,
-    Iterable,
-    Literal,
-    Sequence,
-    TypeVar,
-    cast,
-    overload,
-)
+from typing import Any, Callable, Generic, Literal, TypeVar, cast, overload
 
 import numpy as np
 import polars as pl
