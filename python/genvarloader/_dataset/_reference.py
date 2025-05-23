@@ -429,7 +429,7 @@ class RefDataset(Generic[T]):
         )
 
 
-@nb.njit(parallel=True, nogil=True, cache=True)
+@nb.njit(parallel=True, nogil=True, cache=True)  # type: ignore
 def get_reference(
     regions: NDArray[np.integer],
     out_offsets: NDArray[np.integer],

@@ -10,7 +10,7 @@ from .._types import DTYPE
 __all__ = []
 
 
-@nb.njit(nogil=True, cache=True)
+@nb.njit(nogil=True, cache=True)  # type: ignore
 def padded_slice(
     arr: NDArray[DTYPE],
     start: int,
@@ -121,7 +121,7 @@ def bed_to_regions(bed: pl.DataFrame, contigs: Sequence[str]) -> NDArray[np.int3
     return bed.select(cols).to_numpy()
 
 
-@nb.njit(nogil=True, cache=True)
+@nb.njit(nogil=True, cache=True)  # type: ignore
 def splits_sum_le_value(arr: NDArray[np.number], max_value: float) -> NDArray[np.intp]:
     """Get index offsets for groups that sum to no more than a value.
     Note that values greater than the maximum will be kept in their own group.
@@ -191,7 +191,7 @@ def reduceat_offsets(
     indices = [slice(None)] * arr.ndim
     indices[axis] = slice(None, no_var_idx)
     indices = tuple(indices)
-    ufunc.reduceat(arr, offsets[:no_var_idx], axis=axis, out=out_arr[indices])
+    _ = ufunc.reduceat(arr, offsets[:no_var_idx], axis=axis, out=out_arr[indices])
 
     identity_indices = [slice(None)] * arr.ndim
     identity_indices[axis] = slice(no_var_idx, None)
