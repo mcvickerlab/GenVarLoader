@@ -1,18 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import (
-    Any,
-    Callable,
-    Generic,
-    Iterable,
-    Literal,
-    Sequence,
-    TypeVar,
-    cast,
-    overload,
-)
+from typing import Callable, Generic, Literal, TypeVar, cast, overload
 
 import awkward as ak
 import numpy as np
@@ -42,10 +33,10 @@ from .._ragged import (
 from .._torch import TORCH_AVAILABLE, TorchDataset, get_dataloader
 from .._types import DTYPE, AnnotatedHaps, Idx, StrIdx
 from .._utils import (
-    _lengths_to_offsets,
-    _normalize_contig_name,
     idx_like_to_array,
     is_dtype,
+    lengths_to_offsets,
+    normalize_contig_name,
 )
 from ._indexing import DatasetIndexer, SpliceIndexer
 from ._rag_variants import RaggedVariants
@@ -750,6 +741,13 @@ class Dataset:
         return self._seqs is not None
 
     @property
+    def reference(self) -> Reference | None:
+        """The reference genome."""
+        if self._seqs is None:
+            return None
+        return self._seqs.reference
+
+    @property
     def has_genotypes(self) -> bool:
         """Whether the dataset has genotypes."""
         return isinstance(self._seqs, Haps)
@@ -1161,7 +1159,7 @@ class Dataset:
             out_dir.mkdir(parents=True, exist_ok=True)
 
             if isinstance(bedlike, str) or isinstance(bedlike, Path):
-                bedlike = sp.bed.read_bedlike(bedlike)
+                bedlike = sp.bed.read(bedlike)
 
             # ensure the full_bed matches the order on-disk
             full_bed = regions_to_bed(self._full_regions, self.contigs)
@@ -1319,7 +1317,23 @@ class Dataset:
             pin_memory_device=pin_memory_device,
         )
 
-    def __getitem__(self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]) -> Any:
+    def __getitem__(
+        self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]
+    ) -> (
+        Ragged[np.bytes_ | np.float32]
+        | RaggedAnnotatedHaps
+        | RaggedVariants
+        | NDArray[np.bytes_ | np.float32]
+        | AnnotatedHaps
+        | tuple[
+            Ragged[np.bytes_ | np.float32]
+            | RaggedAnnotatedHaps
+            | RaggedVariants
+            | NDArray[np.bytes_ | np.float32]
+            | AnnotatedHaps,
+            ...,
+        ]
+    ):
         if self._sp_idxer is not None:
             recon, squeeze, out_reshape = self._getitem_spliced(idx, self._sp_idxer)
         else:
@@ -1364,7 +1378,9 @@ class Dataset:
 
     def _getitem_unspliced(
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
-    ):
+    ) -> tuple[tuple[
+        Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps | RaggedVariants, ...
+    ], bool, tuple[int, ...] | None]:
         # (b)
         ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
         r_idx, _ = np.unravel_index(ds_idx, self.full_shape)
@@ -1412,17 +1428,15 @@ class Dataset:
         if ragv is not None:
             recon = (ragv,) + recon
 
-        return (
-            recon,
-            squeeze,
-            out_reshape,
-        )
+        return (recon, squeeze, out_reshape)
 
     def _getitem_spliced(
         self,
         idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
         splice_idxer: SpliceIndexer,
-    ):
+    ) -> tuple[tuple[
+        Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...
+    ], bool, tuple[int, ...] | None]:
         if isinstance(self.output_length, int):
             raise RuntimeError(
                 "In general, splicing cannot be done with fixed length data because even if the length of each region's data"
@@ -1658,20 +1672,20 @@ def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedInt
     # normalize contig names
     reg_c = regions["chrom"].unique()
     annot_c = annot["chrom"].unique()
-    renamer = (_normalize_contig_name(c, reg_c) for c in annot_c)
+    renamer = (normalize_contig_name(c, reg_c) for c in annot_c)
     renamer = {c: new_c for c, new_c in zip(annot_c, renamer) if new_c is not None}
     annot = annot.with_columns(chrom=pl.col("chrom").replace(renamer))
 
     # find intersection
-    intersect = sp.bed.from_pyranges(
-        sp.bed.to_pyranges(annot).join(sp.bed.to_pyranges(regions.with_row_index()))
+    intersect = sp.bed.from_pyr(
+        sp.bed.to_pyr(annot).join(sp.bed.to_pyr(regions.with_row_index()))
     ).sort("index", "chrom", "chromStart")
 
     # compute offsets, considering regions with no overlaps
     i, nonzero_counts = np.unique(intersect["index"], return_counts=True)
     counts = np.zeros(regions.height, dtype=np.int32)
     counts[i] = nonzero_counts
-    offsets = _lengths_to_offsets(counts)
+    offsets = lengths_to_offsets(counts)
 
     # convert to numpy intervals
     itvs = np.empty(intersect.height, dtype=INTERVAL_DTYPE)
@@ -1766,11 +1780,6 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
 
     @overload
     def __getitem__(
-        self: ArrayDataset[None, None],
-        idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> NoReturn: ...
-    @overload
-    def __getitem__(
         self: ArrayDataset[SEQ, None],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
     ) -> SEQ: ...
@@ -1802,7 +1811,7 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
     def __getitem__(  # type: ignore
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
     ) -> SEQ | NDArray[np.float32] | tuple[SEQ, NDArray[np.float32]]:
-        return super().__getitem__(idx)
+        return super().__getitem__(idx)  # type: ignore
 
 
 class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
@@ -1920,4 +1929,4 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
     def __getitem__(  # type: ignore
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
     ) -> RSEQ | Ragged[np.float32] | tuple[RSEQ, Ragged[np.float32]]:
-        return super().__getitem__(idx)
+        return super().__getitem__(idx)  # type: ignore

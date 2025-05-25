@@ -14,10 +14,10 @@ from typing import (
 import numba as nb
 import numpy as np
 import polars as pl
-from attrs import define, evolve
+from attrs import define, evolve, field
 from loguru import logger
 from numpy.typing import NDArray
-from seqpro._ragged import Ragged
+from seqpro._ragged import Ragged, lengths_to_offsets
 from typing_extensions import Self
 
 from .._fasta import Fasta
@@ -29,7 +29,7 @@ from .._torch import (
     tensor_from_maybe_bytes,
 )
 from .._types import Idx
-from .._utils import _lengths_to_offsets, _normalize_contig_name
+from .._utils import lengths_to_offsets, normalize_contig_name
 from ._utils import bed_to_regions, padded_slice
 
 
@@ -42,10 +42,16 @@ class Reference:
         Do not instantiate this class directly. Use :meth:`Reference.from_path` instead.
     """
 
+    path: Path
+    """The path to the reference genome."""
     reference: NDArray[np.uint8]
+    """The reference genome as a numpy array, with contigs concatenated."""
     contigs: list[str]
-    offsets: NDArray[np.uint64]
+    """The contigs in the reference genome."""
+    offsets: NDArray[np.int64]
+    """The offsets of the contigs in the reference genome."""
     pad_char: int
+    """The padding character used in the reference genome."""
 
     @classmethod
     def from_path(
@@ -71,6 +77,7 @@ class Reference:
             slower than keeping it in memory. This is useful if you need to work with many
             reference genomes or have very limited RAM.
         """
+        path = Path(fasta)
         _fasta = Fasta("ref", fasta, "N")
 
         if not _fasta._valid_cache():
@@ -78,16 +85,13 @@ class Reference:
             _fasta._write_to_cache()
 
         ref_mmap = np.memmap(_fasta.cache_path, np.uint8, "r")
-        offsets = _lengths_to_offsets(
-            np.array(list(_fasta.contigs.values())), np.uint64
-        )
+        offsets = lengths_to_offsets(np.array(list(_fasta.contigs.values())))
         pad_char = ord("N")
 
-        if contigs is None or not in_memory:
+        if contigs is None:
             contigs = list(_fasta.contigs)
-
-        if in_memory:
-            _contigs = [_normalize_contig_name(c, _fasta.contigs) for c in contigs]
+        else:
+            _contigs = [normalize_contig_name(c, _fasta.contigs) for c in contigs]
             if unmapped := [
                 source for source, mapped in zip(contigs, _contigs) if mapped is None
             ]:
@@ -96,6 +100,7 @@ class Reference:
                 )
             contigs = cast(list[str], _contigs)
 
+        if in_memory:
             reference = np.empty(sum(_fasta.contigs[c] for c in contigs), np.uint8)
             offset = 0
             for c in contigs:
@@ -103,18 +108,16 @@ class Reference:
                 o_s, o_e = offsets[c_idx], offsets[c_idx + 1]
                 reference[offset : offset + o_e - o_s] = ref_mmap[o_s:o_e]
                 offset += o_e - o_s
-            offsets = _lengths_to_offsets(
-                np.array([_fasta.contigs[c] for c in contigs]), np.uint64
-            )
+            offsets = lengths_to_offsets(np.array([_fasta.contigs[c] for c in contigs]))
         else:
             reference = ref_mmap
 
-        return cls(reference, contigs, offsets, pad_char)
+        return cls(path, reference, contigs, offsets, pad_char)
 
     def fetch(
         self, contig: str, start: int = 0, end: int | None = None
     ) -> NDArray[np.bytes_]:
-        c = _normalize_contig_name(contig, self.contigs)
+        c = normalize_contig_name(contig, self.contigs)
         if c is None:
             raise ValueError(f"Contig {contig} not found in reference.")
         c_idx = self.contigs.index(c)
@@ -140,69 +143,46 @@ class RefDataset(Generic[T]):
     """A reference dataset for pulling out sequences from a reference genome."""
 
     reference: Reference
+    """The reference genome."""
     regions: pl.DataFrame
-    jitter: int
-    output_length: Literal["ragged", "variable"] | int
-    deterministic: bool
-    rc_neg: bool
-    _full_regions: NDArray[np.int32]
-    _rng: np.random.Generator
+    """A table of regions to extract from the reference genome. The table must have the following columns:
+    - `chrom`: The name of the contig (e.g. "chr1", "chr2", etc.)
+    - `chromStart`: The start position of the region (0-based).
+    - `chromEnd`: The end position of the region (0-based).
+    A `strand` column can also be included, in which case the regions will be reverse complemented if the strand is -1
+    and the `rc_neg` parameter is set to True.
+    """
+    jitter: int = 0
+    """The maximum length for randomly shifting start positions."""
+    output_length: Literal["ragged", "variable"] | int = "ragged"
+    """The output length of the dataset. Same meaning as :attr:`Dataset.output_length`."""
+    deterministic: bool = True
+    """If true, fixed length sequences will be right truncated from their full length to the output length.
+    If false, fixed length sequences will be randomly shifted to be within the output length.
+    """
+    rc_neg: bool = True
+    """Whether to reverse complement the regions that are on the negative strand."""
+    seed: int | np.random.Generator | None = field(default=None)
+    """A random seed to use for jitter and shifting. If None, a random seed will be used."""
+    _full_regions: NDArray[np.int32] = field(init=False)
+    _rng: np.random.Generator = field(init=False)
 
-    def __init__(
-        self: RefDataset[RaggedSeqs],
-        reference: Reference,
-        regions: pl.DataFrame,
-        jitter: int = 0,
-        deterministic: bool = True,
-        rc_neg: bool = True,
-        seed: int | np.random.Generator | None = None,
-    ):
-        """Create a reference dataset.
-
-        Parameters
-        ----------
-        reference
-            The reference genome to use.
-        regions
-            A table of regions to extract from the reference genome. The table must have the following columns:
-            - `chrom`: The name of the contig (e.g. "chr1", "chr2", etc.)
-            - `chromStart`: The start position of the region (0-based).
-            - `chromEnd`: The end position of the region (0-based).
-            A `strand` column can also be included, in which case the regions will be reverse complemented if the strand is -1
-            and the `rc_neg` parameter is set to True.
-        jitter
-            The amount of jitter to apply to the start and end positions of the regions. This is used to create
-            variability in the output sequences. The jitter is applied as a random integer between 0 and 2 * `jitter` (inclusive).
-        deterministic
-            Affects behavior when output_length is an integer. If True, sequences that are too long will be right truncated.
-            If False, sequences that are too long will be randomly shifted to be within the output length.
-        rc_neg
-            If True, reverse complement regions that are on the negative strand.
-        seed
-            A random seed to use for jitter and shifting. If None, a random seed will be used.
-        """
-        if regions.height == 0:
+    def __attrs_post_init__(self):
+        if self.regions.height == 0:
             raise ValueError("Table of regions has a height of zero.")
 
-        if jitter < 0:
-            raise ValueError(f"jitter ({jitter}) must be a non-negative integer.")
-        elif jitter > (
-            min_len := regions.select(
+        if self.jitter < 0:
+            raise ValueError(f"jitter ({self.jitter}) must be a non-negative integer.")
+        elif self.jitter > (
+            min_len := self.regions.select(
                 (pl.col("chromEnd") - pl.col("chromStart")).min()
             ).item()
         ):
             raise ValueError(
-                f"jitter ({jitter}) must be less than the minimum region length ({min_len})."
+                f"jitter ({self.jitter}) must be less than the minimum region length ({min_len})."
             )
-
-        self.jitter = jitter
-        self.deterministic = deterministic
-        self.reference = reference
-        self.regions = regions
-        self.rc_neg = rc_neg
-        self.output_length = "ragged"
-        self._full_regions = bed_to_regions(regions, reference.contigs)
-        self._rng = np.random.default_rng(seed)
+        self._full_regions = bed_to_regions(self.regions, self.reference.contigs)
+        self._rng = np.random.default_rng(self.seed)
 
     @property
     def shape(self) -> tuple[int]:
@@ -307,7 +287,7 @@ class RefDataset(Generic[T]):
         regions[:, 2] = regions[:, 1] + out_lengths
 
         # (b+1)
-        out_offsets = _lengths_to_offsets(out_lengths)
+        out_offsets = lengths_to_offsets(out_lengths)
 
         # ragged (b ~l)
         ref = get_reference(
@@ -324,8 +304,6 @@ class RefDataset(Generic[T]):
         if to_rc.any():
             ref = reverse_complement(ref, to_rc)
 
-        if squeeze:
-            ref = ref.squeeze()
         if out_reshape is not None:
             ref = ref.reshape(out_reshape)
 
@@ -335,6 +313,9 @@ class RefDataset(Generic[T]):
             out = to_padded(ref, pad_value=self.reference.pad_char)
         else:
             out = ref.to_numpy()
+
+        if squeeze:
+            out = out.squeeze(0)
 
         return cast(T, out)
 
@@ -450,10 +431,10 @@ class RefDataset(Generic[T]):
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def get_reference(
-    regions: NDArray[np.int32],
-    out_offsets: NDArray[np.int64],
-    reference: NDArray[np.uint8],
-    ref_offsets: NDArray[np.uint64],
+    regions: NDArray[np.integer],
+    out_offsets: NDArray[np.integer],
+    reference: NDArray[np.integer],
+    ref_offsets: NDArray[np.integer],
     pad_char: int,
 ) -> NDArray[np.uint8]:
     out = np.empty(out_offsets[-1], np.uint8)
@@ -471,6 +452,10 @@ if TORCH_AVAILABLE:
     import torch.utils.data as td
 
     class TorchDataset(td.Dataset):
+        dataset: RefDataset[NDArray[np.bytes_]]
+        include_indices: bool
+        transform: Callable | None
+
         def __init__(
             self,
             dataset: RefDataset[NDArray[np.bytes_]],
@@ -485,7 +470,7 @@ if TORCH_AVAILABLE:
             return len(self.dataset)
 
         def __getitem__(
-            self, idx: int | list[int]
+            self, idx: list[int]
         ) -> torch.Tensor | tuple[torch.Tensor, ...]:
             batch = self.dataset[idx]
 
@@ -499,6 +484,8 @@ if TORCH_AVAILABLE:
 
             if self.transform is not None:
                 batch = self.transform(*batch)
+                if single_item:
+                    batch = (batch,)
 
             batch = tuple(tensor_from_maybe_bytes(b) for b in batch)
 

@@ -1,6 +1,6 @@
 [project]
 name = "genvarloader"
-version = "0.14.4"
+version = "0.15.0"
 description = "Pipeline for efficient genomic data processing."
 authors = [
     { name = "David Laub", email = "dlaub@ucsd.edu" },
@@ -29,7 +29,7 @@ dependencies = [
     "pooch",
     "awkward",
     "hirola>=0.3,<0.4",
-    "seqpro>=0.3.2",
+    "seqpro>=0.4.2",
     "genoray>=0.11.2",
 ]
 
@@ -57,7 +57,11 @@ reportAny = false
 reportPrivateUsage = false
 reportMissingTypeStubs = false
 reportImplicitOverride = false
+reportUntypedFunctionDecorator = false
 reportUnusedCallResult = false
+reportUnnecessaryIsInstance = false
+reportUnnecessaryComparison = false
+reportUninitializedInstanceVariable = false
 
 [tool.maturin]
 python-source = "python"

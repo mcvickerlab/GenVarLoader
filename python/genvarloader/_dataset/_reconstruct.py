@@ -3,18 +3,9 @@ from __future__ import annotations
 import enum
 import itertools
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import (
-    Callable,
-    Iterable,
-    Literal,
-    Optional,
-    Protocol,
-    Tuple,
-    TypeVar,
-    cast,
-    overload,
-)
+from typing import Callable, Literal, Protocol, TypeVar, cast, overload
 
 import awkward as ak
 import numpy as np
@@ -37,7 +28,7 @@ from tqdm.auto import tqdm
 from typing_extensions import assert_never
 
 from .._ragged import INTERVAL_DTYPE, RaggedAnnotatedHaps, RaggedIntervals, RaggedSeqs
-from .._utils import _lengths_to_offsets
+from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
 from ._genotypes import (
     choose_exonic_variants,
@@ -113,7 +104,7 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
             out_lengths = lengths
 
         # (b+1)
-        out_offsets = _lengths_to_offsets(out_lengths)
+        out_offsets = lengths_to_offsets(out_lengths)
 
         # ragged (b ~l)
         ref = get_reference(
@@ -230,8 +221,8 @@ class Haps(Reconstructor[_H]):
 
         if self.filter == "exonic":
             keep, keep_offsets = choose_exonic_variants(
-                starts=jittered_regions[:, 1],
-                ends=jittered_regions[:, 2],
+                starts=regions[:, 1],
+                ends=regions[:, 2],
                 geno_offset_idxs=geno_offset_idxs,
                 geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
@@ -273,7 +264,6 @@ class Haps(Reconstructor[_H]):
             idx=idx,
             regions=regions,
             output_length=output_length,
-            jitter=jitter,
             rng=rng,
             deterministic=deterministic,
         )
@@ -284,7 +274,6 @@ class Haps(Reconstructor[_H]):
         idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Literal["ragged", "variable"] | int,
-        jitter: int,
         rng: np.random.Generator,
         deterministic: bool,
     ) -> tuple[
@@ -347,7 +336,7 @@ class Haps(Reconstructor[_H]):
                 dtype=np.int32,
             )
         # (b*p+1)
-        out_offsets = _lengths_to_offsets(out_lengths)
+        out_offsets = lengths_to_offsets(out_lengths)
 
         # (b p l), (b p l), (b p l)
         if issubclass(self.kind, RaggedSeqs):
@@ -423,8 +412,8 @@ class Haps(Reconstructor[_H]):
             ak.flatten(alts.to_awkward(), None).to_numpy(),
             parameters={"__array__": "char"},
         )
-        l_content = ListOffsetArray(Index64(_lengths_to_offsets(alts.lengths)), data)
-        geno_offsets = _lengths_to_offsets(genos.lengths)
+        l_content = ListOffsetArray(Index64(lengths_to_offsets(alts.lengths)), data)
+        geno_offsets = lengths_to_offsets(genos.lengths)
         vl_content = ListOffsetArray(Index64(geno_offsets), l_content)
         pvl_content = RegularArray(vl_content, genos.shape[-1])
         alts = ak.Array(pvl_content)
@@ -458,8 +447,8 @@ class Haps(Reconstructor[_H]):
         regions: NDArray[np.int32],
         out_offsets: NDArray[np.int64],
         shifts: NDArray[np.int32],
-        keep: Optional[NDArray[np.bool_]],
-        keep_offsets: Optional[NDArray[np.int64]],
+        keep: NDArray[np.bool_] | None,
+        keep_offsets: NDArray[np.int64] | None,
         annotate: Literal[False],
     ) -> Ragged[np.bytes_]: ...
     @overload
@@ -469,18 +458,19 @@ class Haps(Reconstructor[_H]):
         regions: NDArray[np.int32],
         out_offsets: NDArray[np.int64],
         shifts: NDArray[np.int32],
-        keep: Optional[NDArray[np.bool_]],
-        keep_offsets: Optional[NDArray[np.int64]],
+        keep: NDArray[np.bool_] | None,
+        keep_offsets: NDArray[np.int64] | None,
         annotate: Literal[True],
-    ) -> Tuple[Ragged[np.bytes_], Ragged[np.int32], Ragged[np.int32]]: ...
+    ) -> tuple[Ragged[np.bytes_], Ragged[np.int32], Ragged[np.int32]]: ...
+
     def _get_haplotypes(
         self,
         geno_offset_idx: NDArray[np.intp],
         regions: NDArray[np.int32],
         out_offsets: NDArray[np.int64],
         shifts: NDArray[np.int32],
-        keep: Optional[NDArray[np.bool_]],
-        keep_offsets: Optional[NDArray[np.int64]],
+        keep: NDArray[np.bool_] | None,
+        keep_offsets: NDArray[np.int64] | None,
         annotate: bool,
     ) -> (
         Ragged[np.bytes_]
@@ -663,14 +653,14 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
             out_lengths = track_lengths = lengths
 
         # (b [p])
-        out_ofsts_per_t = _lengths_to_offsets(out_lengths)
-        track_ofsts_per_t = _lengths_to_offsets(track_lengths)
+        out_ofsts_per_t = lengths_to_offsets(out_lengths)
+        track_ofsts_per_t = lengths_to_offsets(track_lengths)
         # caller accounts for ploidy
         n_per_track = out_ofsts_per_t[-1]
         # ragged (b t [p] l)
         out = np.empty(len(self.active_tracks) * n_per_track, np.float32)
         out_lens = repeat(out_lengths, "b -> b t", t=len(self.active_tracks))
-        out_offsets = _lengths_to_offsets(out_lens)
+        out_offsets = lengths_to_offsets(out_lens)
 
         for track_ofst, (name, tracktype) in enumerate(self.active_tracks.items()):
             intervals = self.intervals[name]
@@ -785,7 +775,7 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
                 # (r*s)
                 _regions = regions[r_idx]
                 # (r*s+1)
-                offsets = _lengths_to_offsets(_regions[:, 2] - _regions[:, 1])
+                offsets = lengths_to_offsets(_regions[:, 2] - _regions[:, 1])
                 # layout is (regions, samples) so all samples are local for statistics
                 tracks = np.empty(offsets[-1], np.float32)
                 intervals_to_tracks(
@@ -913,7 +903,6 @@ class HapsTracks(Reconstructor[tuple[_H, Ragged[np.float32]]]):
                 idx=idx,
                 regions=regions,
                 output_length=output_length,
-                jitter=jitter,
                 rng=rng,
                 deterministic=deterministic,
             )
@@ -930,14 +919,14 @@ class HapsTracks(Reconstructor[tuple[_H, Ragged[np.float32]]]):
         track_lengths = lengths - diffs.clip(max=0).min(1)
 
         # (b*p+1)
-        out_ofsts_per_t = _lengths_to_offsets(out_lengths)
+        out_ofsts_per_t = lengths_to_offsets(out_lengths)
         # (b+1)
-        track_ofsts_per_t = _lengths_to_offsets(track_lengths)
+        track_ofsts_per_t = lengths_to_offsets(track_lengths)
         n_per_track = out_ofsts_per_t[-1]
         # ragged (b t p l)
         out = np.empty(len(self.tracks.active_tracks) * n_per_track, np.float32)
         out_lens = repeat(out_lengths, "b p -> b t p", t=len(self.tracks.active_tracks))
-        out_offsets = _lengths_to_offsets(out_lens)
+        out_offsets = lengths_to_offsets(out_lens)
 
         for track_ofst, (name, tracktype) in enumerate(
             self.tracks.active_tracks.items()

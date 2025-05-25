@@ -1,16 +1,7 @@
 from __future__ import annotations
 
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Dict,
-    Iterable,
-    Optional,
-    Tuple,
-    Union,
-    overload,
-)
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any, Callable, overload
 
 import awkward as ak
 import numpy as np
@@ -27,7 +18,7 @@ try:
 
     TORCH_AVAILABLE = True
 except ImportError:
-    TORCH_AVAILABLE = False
+    TORCH_AVAILABLE = False  # type: ignore
 
 
 if TYPE_CHECKING:
@@ -37,15 +28,15 @@ if TYPE_CHECKING:
     from ._dataset._impl import Dataset
 
 
-def no_torch_error(*args, **kwargs):
+def no_torch_error(*args, **kwargs):  # type: ignore
     raise ImportError(
         "PyTorch is not available. Please install PyTorch to use this function/class."
     )
 
 
-def requires_torch(func_or_class):
+def requires_torch(func: Callable) -> Callable:
     if TORCH_AVAILABLE:
-        return func_or_class
+        return func
     else:
         return no_torch_error
 
@@ -55,17 +46,17 @@ def get_dataloader(
     dataset: td.Dataset,
     batch_size: int = 1,
     shuffle: bool = False,
-    sampler: Optional[Union[td.Sampler, Iterable]] = None,
+    sampler: td.Sampler | Iterable | None = None,
     num_workers: int = 0,
-    collate_fn: Optional[Callable] = None,
+    collate_fn: Callable | None = None,
     pin_memory: bool = False,
     drop_last: bool = False,
     timeout: float = 0,
-    worker_init_fn: Optional[Callable] = None,
-    multiprocessing_context: Optional[Callable] = None,
-    generator: Optional[torch.Generator] = None,
+    worker_init_fn: Callable | None = None,
+    multiprocessing_context: Callable | None = None,
+    generator: torch.Generator | None = None,
     *,
-    prefetch_factor: Optional[int] = None,
+    prefetch_factor: int | None = None,
     persistent_workers: bool = False,
     pin_memory_device: str = "",
 ):
@@ -120,7 +111,7 @@ def tensor_from_maybe_bytes(array: AnnotatedHaps) -> dict[str, torch.Tensor]: ..
 @requires_torch
 def tensor_from_maybe_bytes(
     array: NDArray | AnnotatedHaps,
-) -> torch.Tensor | Dict[str, torch.Tensor]:
+) -> torch.Tensor | dict[str, torch.Tensor]:
     if isinstance(array, AnnotatedHaps):
         return {
             "haps": tensor_from_maybe_bytes(array.haps),
@@ -160,6 +151,10 @@ def to_nested_tensor(rag: Ragged | ak.Array) -> torch.Tensor:
 if TORCH_AVAILABLE:
 
     class TorchDataset(td.Dataset):
+        dataset: Dataset
+        include_indices: bool
+        transform: Callable | None
+
         def __init__(
             self,
             dataset: Dataset,
@@ -175,29 +170,24 @@ if TORCH_AVAILABLE:
 
         def __getitem__(
             self, idx: int | list[int]
-        ) -> torch.Tensor | Tuple[torch.Tensor, ...] | Any:
+        ) -> torch.Tensor | tuple[torch.Tensor, ...] | Any:
             r_idx, s_idx = np.unravel_index(idx, self.dataset.shape)
             batch = self.dataset[r_idx, s_idx]
 
             if not isinstance(batch, tuple):
                 batch = (batch,)
-                single_item = True
-            else:
-                single_item = False
 
             if self.include_indices:
                 batch = (*batch, r_idx, s_idx)
 
-            if self.transform is not None:
-                batch = self.transform(*batch)
-
-            batch = tuple(tensor_from_maybe_bytes(b) for b in batch)
-            if single_item:
+            if len(batch) == 1:
                 batch = batch[0]
+            elif self.transform is not None:
+                batch = self.transform(*batch)
 
             return batch
 
-    class StratifiedSampler(td.Sampler):
+    class StratifiedSampler(td.Sampler[np.intp]):
         """Stratified sampler for GVL datasets. This ensures that each batch has the most diversity of samples possible.
 
         Parameters
@@ -224,12 +214,14 @@ if TORCH_AVAILABLE:
         >>> dl = ds.to_dataloader(sampler=sampler)
         """
 
-        def __init__(
+        ds_idx: NDArray[np.intp]
+
+        def __init__(  # type: ignore
             self,
             n_regions: int,
             n_samples: int,
             shuffle: bool = False,
-            seed: Optional[int] = None,
+            seed: int | None = None,
         ):
             rng = np.random.default_rng(seed)
             if shuffle:

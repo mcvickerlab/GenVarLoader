@@ -3,7 +3,7 @@ import json
 import shutil
 import warnings
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union, cast
+from typing import cast
 
 import awkward as ak
 import numpy as np
@@ -20,19 +20,18 @@ from seqpro._ragged import OFFSET_TYPE
 from tqdm.auto import tqdm
 
 from .._bigwig import BigWigs
-from .._utils import _lengths_to_offsets, _normalize_contig_name
+from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
-from ._genotypes import SparseSomaticGenotypes
 from ._utils import splits_sum_le_value
 
 
 def write(
-    path: Union[str, Path],
-    bed: Union[str, Path, pl.DataFrame],
+    path: str | Path,
+    bed: str | Path | pl.DataFrame,
     variants: str | Path | Reader | None = None,
-    bigwigs: Optional[Union[BigWigs, List[BigWigs]]] = None,
-    samples: Optional[List[str]] = None,
-    max_jitter: Optional[int] = None,
+    bigwigs: BigWigs | list[BigWigs] | None = None,
+    samples: list[str] | None = None,
+    max_jitter: int | None = None,
     overwrite: bool = False,
     max_mem: int | str = "4g",
 ):
@@ -87,7 +86,7 @@ def write(
     path.mkdir(parents=True, exist_ok=True)
 
     if isinstance(bed, (str, Path)):
-        bed = sp.bed.read_bedlike(bed)
+        bed = sp.bed.read(bed)
 
     gvl_bed, contigs, input_to_sorted_idx_map = _prep_bed(bed, max_jitter)
     bed.with_columns(r_idx_map=pl.lit(input_to_sorted_idx_map)).write_ipc(
@@ -97,7 +96,7 @@ def write(
     if max_jitter is not None:
         metadata["max_jitter"] = max_jitter
 
-    available_samples: Optional[Set[str]] = None
+    available_samples: set[str] | None = None
     if variants is not None:
         if isinstance(variants, (str, Path)):
             variants = Path(variants)
@@ -121,7 +120,7 @@ def write(
         unavail = []
         for bw in bigwigs:
             if unavailable_contigs := set(contigs) - set(
-                _normalize_contig_name(c, contigs) for c in bw.contigs
+                normalize_contig_name(c, contigs) for c in bw.contigs
             ):
                 unavail.append(unavailable_contigs)
             if available_samples is None:
@@ -181,8 +180,8 @@ def write(
 
 def _prep_bed(
     bed: pl.DataFrame,
-    max_jitter: Optional[int] = None,
-) -> Tuple[pl.DataFrame, List[str], NDArray[np.intp]]:
+    max_jitter: int | None = None,
+) -> tuple[pl.DataFrame, list[str], NDArray[np.intp]]:
     if bed.height == 0:
         raise ValueError("No regions found in the BED file.")
 
@@ -212,7 +211,7 @@ def _prep_bed(
     return bed, contigs, input_to_sorted_idx_map
 
 
-def _write_regions(path: Path, bed: pl.DataFrame, contigs: List[str]):
+def _write_regions(path: Path, bed: pl.DataFrame, contigs: list[str]):
     with pl.StringCache():
         pl.Series(contigs, dtype=pl.Categorical)
         regions = bed.with_columns(
@@ -584,7 +583,7 @@ def _write_from_svar(
         # have a further end than v_idx == -1
         # * calling ak.max() means v_idxs is not a view of svar.genos.data
         # (r s p ~v) -> (r)
-        v_idxs = ak.max(sp_genos.to_awkward(), -1).to_numpy().max((1, 2))  # type: ignore
+        v_idxs = ak.max(sp_genos.to_awkward(), -1).to_numpy().max((1, 2))
         c_max_ends = max_ends[contig_offset : contig_offset + df.height]
         if v_idxs.mask is np.ma.nomask:
             c_max_ends[:] = v_ends[v_idxs.data]
@@ -637,62 +636,15 @@ def _write_phased_variants_chunk(
     return v_idx_memmap_offset, offsets_memmap_offset, last_offset
 
 
-def _write_somatic_variants_chunk(
-    out_dir: Path,
-    genos: SparseSomaticGenotypes,
-    v_idx_memmap_offset: int,
-    ccf_memmap_offset: int,
-    offsets_memmap_offset: int,
-    last_offset: int,
-):
-    if not genos.is_empty:
-        out = np.memmap(
-            out_dir / "variant_idxs.npy",
-            dtype=genos.data.dtype,
-            mode="w+" if v_idx_memmap_offset == 0 else "r+",
-            shape=genos.data.shape,
-            offset=v_idx_memmap_offset,
-        )
-        out[:] = genos.data[:]
-        out.flush()
-        v_idx_memmap_offset += out.nbytes
-
-        out = np.memmap(
-            out_dir / "ccfs.npy",
-            dtype=genos.ccfs.dtype,
-            mode="w+" if ccf_memmap_offset == 0 else "r+",
-            shape=genos.ccfs.shape,
-            offset=ccf_memmap_offset,
-        )
-        out[:] = genos.ccfs[:]
-        out.flush()
-        ccf_memmap_offset += out.nbytes
-
-    offsets = genos.offsets
-    offsets += last_offset
-    last_offset = offsets[-1]
-    out = np.memmap(
-        out_dir / "offsets.npy",
-        dtype=offsets.dtype,
-        mode="w+" if offsets_memmap_offset == 0 else "r+",
-        shape=len(offsets) - 1,
-        offset=offsets_memmap_offset,
-    )
-    out[:] = offsets[:-1]
-    out.flush()
-    offsets_memmap_offset += out.nbytes
-    return v_idx_memmap_offset, ccf_memmap_offset, offsets_memmap_offset, last_offset
-
-
 def _write_bigwigs(
     path: Path,
     bed: pl.DataFrame,
     bigwigs: BigWigs,
-    samples: Optional[List[str]],
+    samples: list[str] | None,
     max_mem: int,
 ):
     if samples is None:
-        _samples = cast(List[str], bigwigs.samples)
+        _samples = bigwigs.samples
     else:
         if missing := (set(samples) - set(bigwigs.samples)):
             raise ValueError(f"Samples {missing} not found in bigwigs.")
@@ -702,7 +654,7 @@ def _write_bigwigs(
         12 * 2
     )  # start u32, end u32, value f32, times 2 for intermediate copies
     chunk_labels = np.empty(bed.height, np.uint32)
-    chunk_offsets: Dict[int, NDArray[np.int64]] = {}
+    chunk_offsets: dict[int, NDArray[np.int64]] = {}
     n_chunks = 0
     last_chunk_offset = 0
     pbar = tqdm(total=bed["chrom"].n_unique())
@@ -711,7 +663,7 @@ def _write_bigwigs(
     ).items():
         pbar.set_description(f"Calculating memory usage for {part.height} regions")
         contig = cast(str, contig)
-        _contig = _normalize_contig_name(contig, bigwigs.contigs)
+        _contig = normalize_contig_name(contig, bigwigs.contigs)
         if _contig is not None:
             starts = part["chromStart"].to_numpy()
             ends = part["chromEnd"].to_numpy()
@@ -735,7 +687,7 @@ def _write_bigwigs(
             for i in range(len(split_lengths)):
                 o_s, o_e = split_offsets[i], split_offsets[i + 1]
                 chunk_idx = n_chunks + i
-                chunk_offsets[chunk_idx] = _lengths_to_offsets(
+                chunk_offsets[chunk_idx] = lengths_to_offsets(
                     n_per_query[o_s:o_e].ravel()
                 )
             first_chunk_idx = n_chunks

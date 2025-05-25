@@ -27,26 +27,26 @@ def test_sites():
         # SNP or insertion
         if coords[0] == coords[1] - 1 or coords[0] == coords[1]:
             # (1 l), (1)
-            site_haps, flags = dss[0, s]  # first site
+            _, mut_haps, flags = dss[0, s]  # first site
             # (l)
-            site_haps = site_haps.haps.squeeze()
+            mut_haps = mut_haps.haps.squeeze()
             # ()
             flags = flags.squeeze()
             if haps[0] == alt:
-                np.testing.assert_array_equal(site_haps, haps)
+                np.testing.assert_array_equal(mut_haps, haps)
                 assert flags == EXISTED
             elif haps[0] != alt:
                 desired = haps.copy()
                 desired[0] = alt
-                np.testing.assert_array_equal(site_haps, desired)
+                np.testing.assert_array_equal(mut_haps, desired)
                 assert flags == APPLIED
         # deletion
         elif coords[0] < coords[1] - 1:
             # (1 l), (1)
-            site_haps, flags = dss[1, s]  # second site
+            _, mut_haps, flags = dss[1, s]  # second site
             # (l)
-            site_haps = site_haps.haps.squeeze()
+            mut_haps = mut_haps.haps.squeeze()
             # ()
             flags = flags.squeeze()
-            np.testing.assert_array_equal(site_haps, haps)
+            np.testing.assert_array_equal(mut_haps, haps)
             assert flags == DELETED

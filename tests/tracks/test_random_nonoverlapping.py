@@ -1,6 +1,6 @@
 import numpy as np
 from pytest_cases import parametrize_with_cases
-from utils import nonoverlapping_intervals
+from utils import nonoverlapping_intervals  # type: ignore
 
 
 def case_gaps_no_max_width():
