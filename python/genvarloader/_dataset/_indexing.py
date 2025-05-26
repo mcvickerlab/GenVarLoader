@@ -12,7 +12,7 @@ from numpy.typing import NDArray
 from typing_extensions import Self, assert_never
 
 from .._types import Idx, StrIdx
-from .._utils import _lengths_to_offsets, idx_like_to_array, is_dtype
+from .._utils import idx_like_to_array, is_dtype, lengths_to_offsets
 
 
 @define
@@ -355,12 +355,11 @@ class SpliceIndexer:
         if not isinstance(lengths, np.integer):
             lengths = lengths.to_numpy()
         lengths = cast(NDArray[np.int64], lengths)
-        offsets = _lengths_to_offsets(lengths)
+        offsets = lengths_to_offsets(lengths)
         r_idx = ak.flatten(r_idx, -1).to_numpy()
         s_idx = s_idx.repeat(lengths)
-        ds_idx = np.ravel_multi_index((r_idx, s_idx), self.dsi.full_shape)
 
-        ds_idx = ds_idx.ravel()
+        ds_idx, *_ = self.dsi.parse_idx((r_idx, s_idx))
 
         return ds_idx, squeeze, out_reshape, offsets
 

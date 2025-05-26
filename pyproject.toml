@@ -66,6 +66,7 @@ reportUninitializedInstanceVariable = false
 [tool.maturin]
 python-source = "python"
 features = ["pyo3/extension-module"]
+# compatibility = "manylinux_2_28"
 
 [tool.pytest.ini_options]
 filterwarnings = [

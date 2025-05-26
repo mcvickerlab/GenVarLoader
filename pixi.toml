@@ -58,6 +58,8 @@ ipywidgets = "*"
 sphinx-book-theme = "*"
 sphinx-autobuild = "*"
 sphinx-autodoc-typehints = "*"
+seaborn = "*"
+fast-histogram = "*"
 
 [feature.pytorch-cpu.dependencies]
 pytorch-cpu = ">=2,<3"
@@ -98,7 +100,6 @@ test = { cmd = "pytest tests && cargo test --release", depends-on = ["gen"] }
 
 [feature.docs.tasks]
 install-e = "uv pip install -e /cellar/users/dlaub/projects/ML4GLand/SeqPro -e /cellar/users/dlaub/projects/genoray -e ."
-install = "uv pip install -e ."
 i-kernel = "ipython kernel install --user --name 'gvl-docs' --display-name 'GVL Docs'"
 i-kernel-gpu = "ipython kernel install --user --name 'gvl-docs-gpu' --display-name 'GVL Docs GPU'"
 doc = "cd docs && make clean && make html"

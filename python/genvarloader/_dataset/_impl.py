@@ -772,8 +772,8 @@ class Dataset:
 
     @property
     def n_regions(self) -> int:
-        """The number of regions in the dataset."""
-        return self._idxer.n_regions
+        """The number of (spliced) regions in the dataset."""
+        return self.shape[0]
 
     @property
     def spliced_regions(self) -> pl.DataFrame | None:
@@ -1378,9 +1378,13 @@ class Dataset:
 
     def _getitem_unspliced(
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
-    ) -> tuple[tuple[
-        Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps | RaggedVariants, ...
-    ], bool, tuple[int, ...] | None]:
+    ) -> tuple[
+        tuple[
+            Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps | RaggedVariants, ...
+        ],
+        bool,
+        tuple[int, ...] | None,
+    ]:
         # (b)
         ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
         r_idx, _ = np.unravel_index(ds_idx, self.full_shape)
@@ -1434,9 +1438,11 @@ class Dataset:
         self,
         idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
         splice_idxer: SpliceIndexer,
-    ) -> tuple[tuple[
-        Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...
-    ], bool, tuple[int, ...] | None]:
+    ) -> tuple[
+        tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...],
+        bool,
+        tuple[int, ...] | None,
+    ]:
         if isinstance(self.output_length, int):
             raise RuntimeError(
                 "In general, splicing cannot be done with fixed length data because even if the length of each region's data"
@@ -1485,14 +1491,13 @@ class Dataset:
         recon = cast(
             tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
         )
-        recon = tuple(_cat_length(r, offsets) for r in recon)
 
         if self.rc_neg:
             # (b)
-            to_rc: NDArray[np.bool_] = np.logical_and.reduceat(
-                self._full_regions[r_idx, 3] == -1, offsets[:-1], axis=0
-            )
+            to_rc: NDArray[np.bool_] = regions[:, 3] == -1
             recon = tuple(_rc(r, to_rc) for r in recon)
+
+        recon = tuple(_cat_length(r, offsets) for r in recon)
 
         return recon, squeeze, out_reshape
 
