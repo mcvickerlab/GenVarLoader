@@ -62,4 +62,3 @@ def nonoverlapping_intervals(
 
     rvs = np.stack([starts, ends], 1)
     return rvs
-

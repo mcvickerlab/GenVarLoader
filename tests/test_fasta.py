@@ -9,12 +9,7 @@ from pytest import fixture
 
 @fixture
 def fasta_path():
-    return (
-        Path(__file__).parent
-        / "data"
-        / "fasta"
-        / "hg38.fa.bgz"
-    )
+    return Path(__file__).parent / "data" / "fasta" / "hg38.fa.bgz"
 
 
 def test_pad_right(fasta_path):
