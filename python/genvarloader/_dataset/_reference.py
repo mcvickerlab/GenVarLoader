@@ -29,7 +29,7 @@ from .._torch import (
     tensor_from_maybe_bytes,
 )
 from .._types import Idx
-from .._utils import lengths_to_offsets, normalize_contig_name
+from .._utils import normalize_contig_name
 from ._utils import bed_to_regions, padded_slice
 
 

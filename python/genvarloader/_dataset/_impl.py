@@ -75,12 +75,11 @@ class Dataset:
     **Return values**
 
     The return value depends on the :code:`Dataset` state, namely :attr:`sequence_type <Dataset.sequence_type>`,
-    :attr:`active_tracks <Dataset.active_tracks>`, :attr:`return_indices <Dataset.return_indices>`, and :attr:`transform <Dataset.transform>`.
+    :attr:`active_tracks <Dataset.active_tracks>`, and :attr:`output_length <Dataset.output_length>`.
     These can all be modified after opening a :code:`Dataset` using the following methods:
     - :meth:`Dataset.with_seqs() <Dataset.with_seqs()>`
     - :meth:`Dataset.with_tracks() <Dataset.with_tracks()>`
-    - :meth:`Dataset.with_indices() <Dataset.with_indices()>`
-    - :meth:`Dataset.with_transform() <Dataset.with_transform()>`
+    - :meth:`Dataset.with_len() <Dataset.with_len()>`
     """
 
     @overload
