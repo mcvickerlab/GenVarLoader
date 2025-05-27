@@ -1422,7 +1422,7 @@
 - passing sample subsets correctly and tracking buffer use.
 - update bnfo-environment.yml.
 - wrong col names.
-- export view_virtual_data in __all__. fix: switch bigwig to shared memmap and joblib, ray docs on shared memmory were less clear.
+- export view_virtual_data in __all__. fix: switch bigwig to shared memmap and joblib, ray docs on shared memory were less clear.
 - partial batches.
 - make GVL a proper iterator.
 - accessing and padding for out of bounds regions.
