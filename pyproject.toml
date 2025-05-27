@@ -84,6 +84,7 @@ version_scheme = "semver2"
 version_provider = "pep621"
 update_changelog_on_bump = true
 major_version_zero = true
+allowed_prefixes = ["Merge", "Revert", "Pull request", "fixup!", "squash!", "[pre-commit.ci]"]
 
 [build-system]
 requires = ["maturin>=1.6,<2.0"]
