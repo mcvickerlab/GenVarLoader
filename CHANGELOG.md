@@ -889,7 +889,7 @@
 
 - change loop order to only open files once.
 - respect memory limits when writing bigwig data.
-- online docs notebook syntax highlightning
+- online docs notebook syntax highlighting
 - better docs.
 
 ## v0.7.1 (2025-01-17)
