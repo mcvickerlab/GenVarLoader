@@ -241,7 +241,7 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
 
     pl.DataFrame(
         {
-            "POS": vcf._index.df['POS'] - 1,
+            "POS": vcf._index.df["POS"] - 1,
             "ALT": vcf._index.df["ALT"].list.first(),
             "ILEN": vcf._index.df.select(
                 pl.col("ALT").list.first().str.len_bytes().cast(pl.Int32)

@@ -408,6 +408,7 @@ def reconstruct_haplotype_from_sparse(
             if annot_ref_pos is not None:
                 annot_ref_pos[out_end_idx:] = np.iinfo(np.int32).max
 
+
 @nb.njit(parallel=True, nogil=True, cache=True)
 def choose_exonic_variants(
     starts: NDArray[np.int32],
@@ -479,6 +480,7 @@ def choose_exonic_variants(
             )
 
     return keep, keep_offsets
+
 
 @nb.njit(nogil=True, cache=True)
 def _choose_exonic_variants(
