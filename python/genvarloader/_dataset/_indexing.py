@@ -1,14 +1,18 @@
-from typing import List, Literal, Optional, Sequence, cast
+from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Literal, cast
+
+import awkward as ak
 import numpy as np
 from attrs import define, evolve
 from hirola import HashTable
 from more_itertools import collapse
 from numpy.typing import NDArray
-from typing_extensions import assert_never
+from typing_extensions import Self, assert_never
 
 from .._types import Idx, StrIdx
-from .._utils import idx_like_to_array, is_dtype
+from .._utils import idx_like_to_array, is_dtype, lengths_to_offsets
 
 
 @define
@@ -19,9 +23,9 @@ class DatasetIndexer:
     """Full map from input sample indices to on-disk sample indices."""
     s2i_map: HashTable
     """Map from input sample names to on-disk sample indices."""
-    region_subset_idxs: Optional[NDArray[np.integer]] = None
+    region_subset_idxs: NDArray[np.integer] | None = None
     """Which input regions are included in the subset."""
-    sample_subset_idxs: Optional[NDArray[np.integer]] = None
+    sample_subset_idxs: NDArray[np.integer] | None = None
     """Which input samples are included in the subset."""
 
     @classmethod
@@ -29,7 +33,7 @@ class DatasetIndexer:
         cls,
         r_idxs: NDArray[np.integer],
         s_idxs: NDArray[np.integer],
-        samples: List[str],
+        samples: list[str],
     ):
         _samples = np.array(samples)
         s2i_map = HashTable(
@@ -66,10 +70,10 @@ class DatasetIndexer:
         return len(self.sample_subset_idxs)
 
     @property
-    def samples(self) -> List[str]:
+    def samples(self) -> list[str]:
         if self.sample_subset_idxs is None:
-            return self.full_samples.tolist()  # type: ignore
-        return self.full_samples[self.sample_subset_idxs].tolist()  # type: ignore
+            return self.full_samples.tolist()
+        return self.full_samples[self.sample_subset_idxs].tolist()
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -84,9 +88,9 @@ class DatasetIndexer:
 
     def subset_to(
         self,
-        regions: Optional[Idx] = None,
-        samples: Optional[Idx] = None,
-    ) -> "DatasetIndexer":
+        regions: Idx | None = None,
+        samples: Idx | None = None,
+    ) -> Self:
         """Subset the dataset to specific regions and/or samples."""
         if regions is None and samples is None:
             return self
@@ -105,7 +109,7 @@ class DatasetIndexer:
             self, region_subset_idxs=region_idxs, sample_subset_idxs=sample_idxs
         )
 
-    def to_full_dataset(self) -> "DatasetIndexer":
+    def to_full_dataset(self) -> Self:
         """Return a full sized dataset, undoing any subsettting."""
         return evolve(self, region_subset_idxs=None, sample_subset_idxs=None)
 
@@ -143,12 +147,7 @@ class DatasetIndexer:
             idx = np.ravel_multi_index(
                 np.ix_(r_idx.ravel(), s_idx.ravel()), self.full_shape
             )
-            if (
-                isinstance(r_idx, np.ndarray)
-                and r_idx.ndim > 1
-                or isinstance(s_idx, np.ndarray)
-                and s_idx.ndim > 1
-            ):
+            if r_idx.ndim > 1 or s_idx.ndim > 1:
                 out_reshape = (*r_idx.shape, *s_idx.shape)
             elif idx.ndim > 1:
                 out_reshape = idx.shape
@@ -176,6 +175,201 @@ class DatasetIndexer:
     def s2i(self, samples: StrIdx) -> Idx:
         """Convert sample names to sample indices."""
         return s2i(samples, self.s2i_map)
+
+
+@define
+class SpliceIndexer:
+    rows: HashTable
+    """Map from splice element names to row indices."""
+    splice_map: ak.Array
+    """Map from splice indices to region indices in splicing order."""
+    full_splice_map: ak.Array
+    """Non-subset map from splice indices to region indices."""
+    dsi: DatasetIndexer
+    row_subset_idxs: NDArray[np.intp] | None = None
+    """Subset of row indices."""
+
+    @classmethod
+    def _init(
+        cls,
+        names: Sequence[str] | NDArray[np.str_],
+        splice_map: ak.Array,
+        dsi: DatasetIndexer,
+    ) -> "SpliceIndexer":
+        _names = np.array(names)
+        rows = HashTable(
+            max=len(names) * 2,  # type: ignore | 2x size for perf > mem
+            dtype=_names.dtype,
+        )
+        rows.add(_names)
+
+        if (
+            ak.max(splice_map, None) >= dsi.n_regions
+            or ak.min(splice_map, None) < -dsi.n_regions
+        ):
+            raise ValueError(
+                "Found indices in the splice map that are out of bounds for the dataset."
+            )
+
+        return cls(
+            rows=rows,
+            splice_map=splice_map,
+            full_splice_map=splice_map,
+            dsi=dsi,
+            row_subset_idxs=None,
+        )
+
+    @property
+    def n_rows(self) -> int:
+        return len(self.splice_map)
+
+    @property
+    def n_samples(self) -> int:
+        return self.dsi.n_samples
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return self.n_rows, self.n_samples
+
+    @property
+    def full_shape(self) -> tuple[int, int]:
+        return len(self.full_splice_map), len(self.dsi.full_samples)
+
+    def __len__(self):
+        return self.n_rows * self.n_samples
+
+    def subset_to(
+        self,
+        rows: Idx | None = None,
+        samples: Idx | None = None,
+    ) -> tuple[Self, DatasetIndexer]:
+        """Subset to specific regions and/or samples."""
+        if rows is None and samples is None:
+            return self, self.dsi
+
+        if rows is not None:
+            row_idxs = idx_like_to_array(rows, self.n_rows)
+        else:
+            row_idxs = np.arange(self.n_rows, dtype=np.intp)
+
+        splice_map = cast(ak.Array, self.splice_map[row_idxs])
+        # splice_map is to absolute indices so don't subset dsi regions
+        sub_dsi = self.dsi.subset_to(samples=samples)
+        region_idxs = ak.flatten(splice_map, None).to_numpy()
+        eff_dsi = self.dsi.subset_to(regions=region_idxs, samples=samples)
+
+        return evolve(
+            self,
+            splice_map=splice_map,
+            dsi=sub_dsi,
+            row_subset_idxs=row_idxs,
+        ), eff_dsi
+
+    def to_full_dataset(self) -> Self:
+        """Return a full sized dataset, undoing any subsettting."""
+        return evolve(
+            self,
+            splice_map=self.full_splice_map,
+            dsi=self.dsi.to_full_dataset(),
+            row_subset_idxs=None,
+        )
+
+    def parse_idx(self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]):
+        """Parse the index into a format suitable for indexing.
+
+        Parameters
+        ----------
+        idx
+            The index to parse. This can be a single index, a tuple of indices,
+            or a tuple of indices and a list of sample names.
+
+        Returns
+        -------
+        idx
+            1-D raveled dataset indices.
+        squeeze
+            Whether to squeeze the output.
+        out_reshape
+            The intended shape of the output, ready to be passed to reshape().
+        reducer
+            Indices for np.add.reduceat() to get the correct lengths for each splice element. Example:
+            spliced_lengths = np.add.reduceat(ragged.lengths, reduce_indices, axis=0)
+        rows
+            Indices of the splice elements.
+        s_idx
+            Indices of the samples.
+        """
+        out_reshape = None
+        squeeze = False
+
+        if not isinstance(idx, tuple):
+            rows = idx
+            samples = slice(None)
+        elif len(idx) == 1:
+            rows = idx[0]
+            samples = slice(None)
+        else:
+            rows, samples = idx
+
+        rows = self.r2i(rows)
+        samples = self.s2i(samples)
+
+        if isinstance(rows, (int, np.integer)) and isinstance(
+            samples, (int, np.integer)
+        ):
+            squeeze = True
+
+        r_idx = idx_like_to_array(rows, self.n_rows)
+        s_idx = idx_like_to_array(samples, self.n_samples)
+
+        idx_t = idx_type((r_idx, s_idx))
+        if idx_t == "basic":
+            # * FYI this will never execute because idx type is guaranteed to be adv or combo by casting
+            # basic indices to arrays above
+            idx = np.ravel_multi_index(np.ix_(r_idx, s_idx), self.full_shape)
+        elif idx_t == "adv":
+            idx = np.ravel_multi_index((r_idx, s_idx), self.full_shape)
+        elif idx_t == "combo":
+            idx = np.ravel_multi_index(
+                np.ix_(r_idx.ravel(), s_idx.ravel()), self.full_shape
+            )
+            if squeeze:
+                pass
+            elif r_idx.ndim > 1 or s_idx.ndim > 1:
+                out_reshape = (*r_idx.shape, *s_idx.shape)
+            elif idx.ndim > 1:
+                out_reshape = idx.shape
+        else:
+            assert_never(idx_t)
+
+        if idx_t != "combo" and idx.ndim > 1:
+            out_reshape = idx.shape
+        idx = idx.ravel()
+        (
+            r_idx,
+            s_idx,
+        ) = np.unravel_index(idx, self.full_shape)
+
+        r_idx = self.splice_map[r_idx]
+        lengths = ak.count(r_idx, -1)
+        if not isinstance(lengths, np.integer):
+            lengths = lengths.to_numpy()
+        lengths = cast(NDArray[np.int64], lengths)
+        offsets = lengths_to_offsets(lengths)
+        r_idx = ak.flatten(r_idx, -1).to_numpy()
+        s_idx = s_idx.repeat(lengths)
+
+        ds_idx, *_ = self.dsi.parse_idx((r_idx, s_idx))
+
+        return ds_idx, squeeze, out_reshape, offsets
+
+    def r2i(self, regions: StrIdx) -> Idx:
+        """Convert region names to region indices."""
+        return s2i(regions, self.rows)
+
+    def s2i(self, samples: StrIdx) -> Idx:
+        """Convert sample names to sample indices."""
+        return s2i(samples, self.dsi.s2i_map)
 
 
 def s2i(str_idx: StrIdx, map: HashTable) -> Idx:
