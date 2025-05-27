@@ -117,9 +117,9 @@ def reconstruct_haplotypes_from_sparse(
     ref_offsets: NDArray[np.integer],
     pad_char: int,
     keep: NDArray[np.bool_] | None = None,
-    keep_offsets: NDArray[np.int64] | None = None,
-    annot_v_idxs: NDArray[np.int32] | None = None,
-    annot_ref_pos: NDArray[np.int32] | None = None,
+    keep_offsets: NDArray[np.integer] | None = None,
+    annot_v_idxs: NDArray[np.integer] | None = None,
+    annot_ref_pos: NDArray[np.integer] | None = None,
 ):
     """Reconstruct haplotypes from reference sequence and variants.
 
@@ -411,14 +411,14 @@ def reconstruct_haplotype_from_sparse(
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def choose_exonic_variants(
-    starts: NDArray[np.int32],
-    ends: NDArray[np.int32],
-    geno_offset_idxs: NDArray[np.intp],
-    geno_v_idxs: NDArray[np.int32],
-    geno_offsets: NDArray[np.int64],
-    positions: NDArray[np.int32],
-    sizes: NDArray[np.int32],
-) -> tuple[NDArray[np.bool_], NDArray[np.int64]]:
+    starts: NDArray[np.integer],
+    ends: NDArray[np.integer],
+    geno_offset_idxs: NDArray[np.integer],
+    geno_v_idxs: NDArray[np.integer],
+    geno_offsets: NDArray[np.integer],
+    v_starts: NDArray[np.integer],
+    ilens: NDArray[np.integer],
+) -> tuple[NDArray[np.bool_], NDArray[np.integer]]:
     """Mark variants to keep for each haplotype.
 
     Parameters
@@ -474,8 +474,8 @@ def choose_exonic_variants(
                 query_start=ref_start,
                 query_end=ref_end,
                 variant_idxs=qh_genos,
-                positions=positions,
-                sizes=sizes,
+                positions=v_starts,
+                sizes=ilens,
                 keep=qh_keep,
             )
 
@@ -486,9 +486,9 @@ def choose_exonic_variants(
 def _choose_exonic_variants(
     query_start: int,
     query_end: int,
-    variant_idxs: NDArray[np.int32],  # (v)
-    positions: NDArray[np.int32],  # (total variants)
-    sizes: NDArray[np.int32],  # (total variants)
+    variant_idxs: NDArray[np.integer],  # (v)
+    positions: NDArray[np.integer],  # (total variants)
+    sizes: NDArray[np.integer],  # (total variants)
     keep: NDArray[np.bool_],  # (v)
 ):
     """Create a mask for variants that are fully contained within the query interval, which is
