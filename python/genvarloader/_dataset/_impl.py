@@ -593,7 +593,7 @@ class Dataset:
     rc_neg: bool
     """Whether to reverse-complement the sequences on negative strands."""
     transform: Callable | None
-    """Tranform to apply to what the dataset would otherwise return on its own."""
+    """Transform to apply to what the dataset would otherwise return on its own."""
     _full_bed: pl.DataFrame = field(alias="_full_bed")
     _full_regions: NDArray[np.int32] = field(alias="_full_regions")
     """Unjittered, sorted regions matching order on-disk."""
