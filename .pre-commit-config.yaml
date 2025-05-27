@@ -19,7 +19,7 @@ repos:
     stages: [commit-msg]
   - id: commitizen-branch
     stages: [pre-push]
-    args: [--rev-range=origin/HEAD..]
+    args: [--rev-range=main..]
 
 ci:
   autofix_commit_msg: 'chore(pre-commit.ci): auto fixes [...]'
