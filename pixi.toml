@@ -94,7 +94,7 @@ no-torch = { features = ["py310"] }
 
 [tasks]
 install = "uv pip install -e ."
-pre-commit = "pre-commit install --hook-type commit-msg"
+pre-commit = "pre-commit install --hook-type commit-msg --hook-type pre-push"
 gen = "python tests/data/generate_ground_truth.py"
 test = { cmd = "pytest tests && cargo test --release", depends-on = ["gen"] }
 
