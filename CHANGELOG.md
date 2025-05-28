@@ -1,3 +1,62 @@
+## 0.15.0 (2025-05-23)
+
+### Feat
+
+- add reference property to Dataset and add path attribute to Reference
+- add RefDataset to work with one or more reference genomes. Also change internal indexing to never materialize a full dataset index, dramatically reducing memory usage to support datasets with 1M+ regions. BREAKING CHANGE: move returning indices and transforms to torch API, since these features are generally unnecessary for non-dataloading contexts.
+- sites-only changes for QoL. fix: consider output length < region length for sites overlap
+- allow tracks to pass-through dataset with sites since SNPs have no affect on them
+- **wip**: pad ragged annotated ref coords with max dtype value. pass sanity checks.
+- **wip**: change ref_coord annotation so that right-pad values have position MAX_I32
+- type-safe Dataset, passes all tests.
+- refactor Dataset implementation to be (almost) fully type-safe.
+- **wip**: sites-only variants
+- **wip**: use sp.bed functions.
+- **wip**: small updates
+- apply sites-only SNPs, filtering non-SNPs out from VCFs.
+- sites-only classes, intersecting them with Datasets, and obtaining information necessary to apply variants.
+- add annot track to dummy dataset
+- **wip**: initial implementation for read/write annotation tracks, incorporating them along the track dimension.
+- deprecate unphased variants
+- **wip**: dosages/CCFs on ragged variants
+- prototype of returning ragged variants from Dataset
+
+### Fix
+
+- shape of single item from RefDataset
+- update init for seqpro bump
+- bump seqpro to 0.4.0 which includes basic gtf ops
+- update dummy dataset for changes to Reference. docs: add more docstrings
+- jittering by folding it into data (re)construction
+- contig offset mapping for in-memory reference and incrementing offset when writing cache
+- bump genoray version to handle unsorted PVAR contigs
+- bump genoray version for filtered PGEN fix
+- ensure annot tracks match on-disk ordering
+- update for internal breaking changes
+- check for SNPs
+- bump genoray so bioconda pgenlib is valid
+- pass all tests
+- internal breaking changes
+- treat POS as 1-based to match VCF spec
+- type annotations
+- type annotation
+- contig naming for reference fasta.
+- contig normalization
+- pass all tests.
+- pass tests.
+- pass tests.
+- Dataset.open returns highest complexity ds by default (haps + all tracks, sorted).
+- use pandera polars not pandas
+- correct manipulation of active tracks
+- dummy dataset
+- wrong germline ccfs for 3rd germline variant and beyond
+- wrong geno path
+- parsing SVAR metadata, bump genoray
+
+### Refactor
+
+- use genoray
+
 ## 0.14.4 (2025-05-12)
 
 ### Fix

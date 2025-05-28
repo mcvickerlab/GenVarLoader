@@ -1,4 +1,4 @@
-from typing import Sequence, Tuple
+from collections.abc import Sequence
 
 import numba as nb
 import numpy as np
@@ -12,12 +12,23 @@ __all__ = []
 
 @nb.njit(nogil=True, cache=True)
 def padded_slice(
-    arr: NDArray[DTYPE], start: int, stop: int, pad_val: int
+    arr: NDArray[DTYPE],
+    start: int,
+    stop: int,
+    pad_val: int,
+    out: NDArray[DTYPE] | None = None,
 ) -> NDArray[DTYPE]:
+    if out is None:
+        out = np.empty(stop - start, arr.dtype)
+
+    if start >= stop:
+        return out
+    elif stop < 0:
+        out[:] = pad_val
+        return out
+
     pad_left = -min(0, start)
     pad_right = max(0, stop - len(arr))
-
-    out = np.empty(stop - start, arr.dtype)
 
     if pad_left == 0 and pad_right == 0:
         out[:] = arr[start:stop]
@@ -39,7 +50,7 @@ def padded_slice(
     return out
 
 
-def oidx_to_raveled_idx(row_idx: ArrayLike, col_idx: ArrayLike, shape: Tuple[int, int]):
+def oidx_to_raveled_idx(row_idx: ArrayLike, col_idx: ArrayLike, shape: tuple[int, int]):
     row_idx = np.asarray(row_idx)
     col_idx = np.asarray(col_idx)
     full_array_linear_indices = np.ravel_multi_index(
@@ -180,7 +191,7 @@ def reduceat_offsets(
     indices = [slice(None)] * arr.ndim
     indices[axis] = slice(None, no_var_idx)
     indices = tuple(indices)
-    ufunc.reduceat(arr, offsets[:no_var_idx], axis=axis, out=out_arr[indices])
+    _ = ufunc.reduceat(arr, offsets[:no_var_idx], axis=axis, out=out_arr[indices])
 
     identity_indices = [slice(None)] * arr.ndim
     identity_indices[axis] = slice(no_var_idx, None)

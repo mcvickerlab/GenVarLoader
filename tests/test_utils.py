@@ -1,6 +1,6 @@
 import numpy as np
 from genvarloader._dataset._utils import splits_sum_le_value
-from genvarloader._utils import _normalize_contig_name
+from genvarloader._utils import normalize_contig_name
 from pytest_cases import parametrize_with_cases
 
 
@@ -49,4 +49,4 @@ def contig_list():
 
 @parametrize_with_cases("unnormed, source, desired", cases=".", prefix="contig_")
 def test_normalize_contig_name(unnormed, source, desired):
-    assert _normalize_contig_name(unnormed, source) == desired
+    assert normalize_contig_name(unnormed, source) == desired

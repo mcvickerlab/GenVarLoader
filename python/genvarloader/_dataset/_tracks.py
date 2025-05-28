@@ -1,5 +1,3 @@
-from typing import Optional
-
 import numba as nb
 import numpy as np
 from numpy.typing import NDArray
@@ -20,8 +18,8 @@ def shift_and_realign_tracks_sparse(
     ilens: NDArray[np.integer],
     tracks: NDArray[np.floating],
     track_offsets: NDArray[np.integer],
-    keep: Optional[NDArray[np.bool_]] = None,
-    keep_offsets: Optional[NDArray[np.integer]] = None,
+    keep: NDArray[np.bool_] | None = None,
+    keep_offsets: NDArray[np.integer] | None = None,
 ):
     """Shift and realign tracks to correspond to haplotypes.
 
@@ -99,7 +97,7 @@ def shift_and_realign_track_sparse(
     track: NDArray[np.floating],
     query_start: int,
     out: NDArray[np.floating],
-    keep: Optional[NDArray[np.bool_]] = None,
+    keep: NDArray[np.bool_] | None = None,
 ):
     """Shift and realign a track to correspond to a haplotype.
 

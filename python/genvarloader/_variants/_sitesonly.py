@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Generic, Sequence, Tuple, overload
+from typing import Generic, overload
 
 import numba as nb
 import numpy as np
@@ -95,7 +96,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
         return self._idxer.n_samples
 
     @property
-    def shape(self) -> Tuple[int, int]:
+    def shape(self) -> tuple[int, int]:
         return self._idxer.shape
 
     def __len__(self) -> int:
@@ -112,9 +113,12 @@ class DatasetWithSites(Generic[MaybeTRK]):
         applies the site-only variants to the Dataset's haplotypes.
 
         Accessed just like a Dataset, but where the rows are combinations of dataset regions and sites. Will return
-        :class:`AnnotatedHaps` with variants applied and flags indicating whether the variant was applied, deleted, or existed.
+        two :class:`AnnotatedHaps` with variants applied and flags indicating whether the variant was applied, deleted, or existed.
         The flags are 0 for applied, 1 for deleted, and 2 for existed. If the dataset has tracks, they will be
-        returned as well and reflect any site-only variants.
+        returned as well and reflect any site-only variants. The first :class:`AnnotatedHaps` is the wildtype haplotypes
+        and the second is the mutated haplotypes. The mutant haplotypes will also have their variant indices and reference
+        coordinates updated to reflect the applied variants. Locations where a site-only variant was applied will have a
+        variant index of -2.
 
         Parameters
         ----------
@@ -134,17 +138,17 @@ class DatasetWithSites(Generic[MaybeTRK]):
 
             ds = gvl.Dataset.open("path/to/dataset.gvl", "path/to/reference.fasta")
             ds_sites = gvl.DatasetWithSites(ds, sites)
-            haps, flags = ds_sites[0, 0]
+            wt_haps, mut_haps, flags = ds_sites[0, 0]
             # flags is a np.uint8 (or an array of np.uint8 when accessing multiple rows/samples)
 
             ds_sites.dataset = ds_sites.dataset.with_tracks("read-depth")
-            haps, flags, tracks = ds_sites[0, 0]
+            wt_haps, mut_haps, flags, tracks = ds_sites[0, 0]
         """
         if max_variants_per_region > 1:
             raise NotImplementedError("max_variants_per_region > 1 not yet supported")
 
         if not isinstance(dataset, ArrayDataset):
-            raise ValueError(
+            raise ValueError(  # type: ignore
                 'Dataset output_length must either be "variable" or a fixed length integer.'
             )
 
@@ -206,70 +210,73 @@ class DatasetWithSites(Generic[MaybeTRK]):
     def __getitem__(
         self: DatasetWithSites[None],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> tuple[AnnotatedHaps, NDArray[np.uint8]]: ...
+    ) -> tuple[AnnotatedHaps, AnnotatedHaps, NDArray[np.uint8]]: ...
     @overload
     def __getitem__(
         self: DatasetWithSites[NDArray[np.float32]],
         idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]],
-    ) -> tuple[AnnotatedHaps, NDArray[np.uint8], NDArray[np.float32]]: ...
+    ) -> tuple[
+        AnnotatedHaps, AnnotatedHaps, NDArray[np.uint8], NDArray[np.float32]
+    ]: ...
     def __getitem__(
         self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
     ) -> (
-        tuple[AnnotatedHaps, NDArray[np.uint8]]
-        | tuple[AnnotatedHaps, NDArray[np.uint8], NDArray[np.float32]]
+        tuple[AnnotatedHaps, AnnotatedHaps, NDArray[np.uint8]]
+        | tuple[AnnotatedHaps, AnnotatedHaps, NDArray[np.uint8], NDArray[np.float32]]
     ):
         idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
 
-        r_idx, s_idx = np.unravel_index(idx, self.shape)
+        row_idx, s_idx = np.unravel_index(idx, self.shape)
 
-        ds_rows = self._row_map[r_idx, 0]
+        ds_rows = self._row_map[row_idx, 0]
         out = self.dataset[ds_rows, s_idx]
         if isinstance(out, tuple):
-            haps, tracks = out
+            wt_haps, tracks = out
         else:
-            haps = out
+            wt_haps = out
 
-        ploidy = haps.shape[-2]
-        length = haps.shape[-1]
+        ploidy = wt_haps.shape[-2]
+        length = wt_haps.shape[-1]
 
-        sites = self.rows[r_idx]
+        sites = self.rows[row_idx]
         starts = sites["POS0"].to_numpy()  # 0-based
         alts = RaggedAlleles.from_polars(sites["ALT"])
 
         # (b p)
-        haps = haps.reshape((-1, ploidy, length))
+        wt_haps = wt_haps.reshape((-1, ploidy, length))
         # flags: (b p)
-        haps, v_idxs, ref_coords, flags = apply_site_only_variants(
-            haps=haps.haps.view(np.uint8),  # (b p l)
-            v_idxs=haps.var_idxs,  # (b p l)
-            ref_coords=haps.ref_coords,  # (b p l)
+        mut_haps, v_idxs, ref_coords, flags = apply_site_only_variants(
+            haps=wt_haps.haps.view(np.uint8).copy(),  # (b p l)
+            v_idxs=wt_haps.var_idxs.copy(),  # (b p l)
+            ref_coords=wt_haps.ref_coords,  # (b p l)
             site_starts=starts,
             alt_alleles=alts.data.view(np.uint8),
             alt_offsets=alts.offsets,
         )
 
-        haps = AnnotatedHaps(
-            haps=haps.view("S1"),
-            var_idxs=v_idxs,
-            ref_coords=ref_coords,
+        mut_haps = AnnotatedHaps(
+            haps=mut_haps.view("S1"), var_idxs=v_idxs, ref_coords=ref_coords
         )
 
         if squeeze:
-            haps = haps.squeeze(0)
+            wt_haps = wt_haps.squeeze(0)
+            mut_haps = mut_haps.squeeze(0)
             flags = flags.squeeze(0)
 
         if out_reshape is not None:
-            haps = haps.reshape((*out_reshape, ploidy, length))
+            wt_haps = wt_haps.reshape((*out_reshape, ploidy, length))
+            mut_haps = mut_haps.reshape((*out_reshape, ploidy, length))
             flags = flags.reshape(*out_reshape, ploidy)
 
         if isinstance(out, tuple):
             return (
-                haps,
+                wt_haps,
+                mut_haps,
                 flags,
                 tracks,  # type: ignore | guaranteed bound
             )
         else:
-            return haps, flags
+            return wt_haps, mut_haps, flags
 
 
 APPLIED = np.uint8(0)
@@ -286,7 +293,7 @@ def apply_site_only_variants(
     site_starts: NDArray[np.int32],  # (b)
     alt_alleles: NDArray[np.uint8],  # ragged (b)
     alt_offsets: NDArray[np.int64],  # (b+1)
-) -> Tuple[NDArray[np.uint8], NDArray[np.int32], NDArray[np.int32], NDArray[np.uint8]]:
+) -> tuple[NDArray[np.uint8], NDArray[np.int32], NDArray[np.int32], NDArray[np.uint8]]:
     batch_size, ploidy, _ = haps.shape
     flags = np.empty((batch_size, ploidy), dtype=np.uint8)
 

@@ -1,14 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import (
-    Dict,
-    Mapping,
-    Protocol,
-    Sequence,
-    TypeVar,
-    Union,
-)
+from collections.abc import Mapping, Sequence
+from typing import Protocol, TypeVar
 
 import numpy as np
 from attrs import define
@@ -21,11 +14,9 @@ DTYPE = TypeVar("DTYPE", bound=np.generic)
 INTERVAL_DTYPE = np.dtype(
     [("start", np.int32), ("end", np.int32), ("value", np.float32)], align=True
 )
-Idx = Union[
-    int, np.integer, Sequence[int], slice, NDArray[np.integer], NDArray[np.bool_]
-]
+Idx = int | np.integer | Sequence[int] | slice | NDArray[np.integer] | NDArray[np.bool_]
 StrIdx = Idx | str | Sequence[str]
-ListIdx = Union[Sequence[int], NDArray[np.integer]]
+ListIdx = Sequence[int] | NDArray[np.integer]
 
 
 @define
@@ -44,7 +35,7 @@ class AnnotatedHaps:
 
     def reshape(self, shape: int | tuple[int, ...]):
         """Reshape the haplotypes and all annotations.
-        
+
         Parameters
         ----------
         shape
@@ -80,9 +71,9 @@ class Reader(Protocol):
     dtype: DTypeLike
     """Data type of what the reader returns."""
     contigs: Mapping[str, int]
-    sizes: Dict[str, int]
+    sizes: dict[str, int]
     """Sizes of the dimensions/axes of what the reader returns."""
-    coords: Dict[str, NDArray]
+    coords: dict[str, NDArray]
     """Coordinates of what the reader returns, i.e. dimension labels."""
     chunked: bool
     """Whether the reader acts like a chunked array store, in which sequential reads
@@ -127,18 +118,4 @@ class Reader(Protocol):
     def rev_strand_fn(data: NDArray) -> NDArray:
         """Function to reverse (and potentially complement) data for a genomic region. This
         is used when the strand is negative."""
-        ...
-
-
-class _ToZarr(Protocol):
-    """Implements the to_zarr() method."""
-
-    def to_zarr(self, store: Path):
-        """Materialize genomes-wide data as a Zarr store.
-
-        Parameters
-        ----------
-        store : Path
-            Directory to write the Zarr store.
-        """
         ...

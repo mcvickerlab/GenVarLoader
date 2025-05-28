@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Union
 
 import numpy as np
 import polars as pl
@@ -10,18 +9,16 @@ from numpy.typing import ArrayLike, NDArray
 
 from ._ragged import RaggedIntervals
 from ._types import INTERVAL_DTYPE, Reader
-from ._utils import _get_rel_starts, _lengths_to_offsets, _normalize_contig_name
+from ._utils import get_rel_starts, lengths_to_offsets, normalize_contig_name
 from .genvarloader import count_intervals as bw_count_intervals
 from .genvarloader import intervals as bw_intervals
-
-__all__ = []
 
 
 class BigWigs(Reader):
     dtype = np.float32  # pyBigWig always returns f32
     chunked = False
 
-    def __init__(self, name: str, paths: Dict[str, str]) -> None:
+    def __init__(self, name: str, paths: dict[str, str]) -> None:
         """Read data from bigWig files.
 
         Parameters
@@ -37,7 +34,7 @@ class BigWigs(Reader):
         self.samples = list(self.paths)
         self.coords = {"sample": np.asarray(self.samples)}
         self.sizes = {"sample": len(self.samples)}
-        contigs: Optional[Dict[str, int]] = None
+        contigs: dict[str, int] | None = None
         for path in self.paths.values():
             with pyBigWig.open(path, "r") as f:
                 if contigs is None:
@@ -52,7 +49,7 @@ class BigWigs(Reader):
         self.contigs = contigs
 
     @classmethod
-    def from_table(cls, name: str, table: Union[str, Path, pl.DataFrame]):
+    def from_table(cls, name: str, table: str | Path | pl.DataFrame):
         """Read data from bigWig files.
 
         Parameters
@@ -109,7 +106,7 @@ class BigWigs(Reader):
         -------
             Shape: (samples length). Data corresponding to the given genomic coordinates and samples.
         """
-        _contig = _normalize_contig_name(contig, self.contigs)
+        _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:
             raise ValueError(f"Contig {contig} not found.")
         else:
@@ -126,7 +123,7 @@ class BigWigs(Reader):
 
         starts = np.atleast_1d(np.asarray(starts, dtype=int))
         ends = np.atleast_1d(np.asarray(ends, dtype=int))
-        rel_starts = _get_rel_starts(starts, ends)
+        rel_starts = get_rel_starts(starts, ends)
         rel_ends = rel_starts + (ends - starts)
 
         out = np.empty((len(samples), (ends - starts).sum()), dtype=np.float32)
@@ -143,7 +140,7 @@ class BigWigs(Reader):
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-        sample: Optional[Union[str, List[str]]] = None,
+        sample: str | list[str] | None = None,
         **kwargs,
     ) -> NDArray[np.int32]:
         """Count the number of intervals corresponding to given genomic coordinates.
@@ -163,7 +160,7 @@ class BigWigs(Reader):
         -------
             Shape: (regions, samples). Number of intervals that overlap with each region and sample.
         """
-        _contig = _normalize_contig_name(contig, self.contigs)
+        _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:
             raise ValueError(f"Contig {contig} not found.")
         else:
@@ -193,7 +190,7 @@ class BigWigs(Reader):
         contig: str,
         starts: ArrayLike,
         ends: ArrayLike,
-        sample: Optional[Union[str, List[str]]] = None,
+        sample: str | list[str] | None = None,
         **kwargs,
     ) -> RaggedIntervals:
         """Read intervals corresponding to given genomic coordinates. The output data
@@ -210,7 +207,7 @@ class BigWigs(Reader):
         sample
             Name of the samples to read data from.
         """
-        _contig = _normalize_contig_name(contig, self.contigs)
+        _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:
             raise ValueError(f"Contig {contig} not found.")
         else:
@@ -232,7 +229,7 @@ class BigWigs(Reader):
 
         # (regions, samples)
         n_per_query = bw_count_intervals(paths, contig, starts, ends)
-        offsets = _lengths_to_offsets(n_per_query.ravel())
+        offsets = lengths_to_offsets(n_per_query.ravel())
 
         intervals = self._intervals_from_offsets(contig, starts, ends, offsets, sample)
 
@@ -244,7 +241,7 @@ class BigWigs(Reader):
         starts: ArrayLike,
         ends: ArrayLike,
         offsets: NDArray[np.int64],
-        sample: Optional[Union[str, List[str]]] = None,
+        sample: str | list[str] | None = None,
         **kwargs,
     ) -> RaggedIntervals:
         """This function is unsafe! Reads intervals corresponding to given genomic coordinates
@@ -266,7 +263,7 @@ class BigWigs(Reader):
         sample
             Name of the samples to read data from.
         """
-        _contig = _normalize_contig_name(contig, self.contigs)
+        _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:
             raise ValueError(f"Contig {contig} not found.")
         else:

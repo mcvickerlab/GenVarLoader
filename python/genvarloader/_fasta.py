@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 from typing_extensions import assert_never
 
 from ._types import Reader
-from ._utils import _get_rel_starts, _normalize_contig_name
+from ._utils import get_rel_starts, normalize_contig_name
 
 __all__ = ["Fasta", "NoPadError"]
 
@@ -220,7 +220,7 @@ class Fasta(Reader):
         ValueError
             Coordinates are out-of-bounds and pad value is not set.
         """
-        _contig = _normalize_contig_name(contig, self.contigs)
+        _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:
             raise ValueError(f"Contig {contig} not found.")
         else:
@@ -253,7 +253,7 @@ class Fasta(Reader):
         else:
             out = np.full(lengths.sum(), self.pad, dtype="S1")
 
-        rel_starts = _get_rel_starts(starts, ends)
+        rel_starts = get_rel_starts(starts, ends)
         rel_ends = rel_starts + lengths - right_pads
         rel_starts += left_pads
 
