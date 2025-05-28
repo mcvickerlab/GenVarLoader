@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-VCF_SUFFIX = re.compile(r"\.[vb]cf(\.gz)?$")
+VCF_SUFFIX = re.compile(r"\.[vb]cf(\.(gz|bgz))?$")
 
 
 def path_is_vcf(path: str | Path) -> bool:
