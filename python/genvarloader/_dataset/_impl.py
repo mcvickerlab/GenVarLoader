@@ -1063,9 +1063,8 @@ class Dataset:
                 dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
         """
         if self.output_length == "ragged":
-            raise ValueError(
-                """`output_length` is currently set to "ragged" and ragged output cannot be converted to PyTorch Tensors."""
-                """ Set `output_length` to "variable" or an integer."""
+            logger.warning(
+                '`output_length` is currently set to "ragged" and ragged output cannot be converted to PyTorch Tensors.'
             )
         return TorchDataset(self, return_indices, transform)
 
