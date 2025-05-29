@@ -1,9 +1,9 @@
-from typing import List, Literal, Optional, Sequence, cast
+from collections.abc import Sequence
+from typing import Literal, cast
 
 import numpy as np
 from attrs import define, evolve
 from hirola import HashTable
-from more_itertools import collapse
 from numpy.typing import NDArray
 from typing_extensions import assert_never
 
@@ -19,9 +19,9 @@ class DatasetIndexer:
     """Full map from input sample indices to on-disk sample indices."""
     s2i_map: HashTable
     """Map from input sample names to on-disk sample indices."""
-    region_subset_idxs: Optional[NDArray[np.integer]] = None
+    region_subset_idxs: NDArray[np.integer] | None = None
     """Which input regions are included in the subset."""
-    sample_subset_idxs: Optional[NDArray[np.integer]] = None
+    sample_subset_idxs: NDArray[np.integer] | None = None
     """Which input samples are included in the subset."""
 
     @classmethod
@@ -29,7 +29,7 @@ class DatasetIndexer:
         cls,
         r_idxs: NDArray[np.integer],
         s_idxs: NDArray[np.integer],
-        samples: List[str],
+        samples: list[str],
     ):
         _samples = np.array(samples)
         s2i_map = HashTable(
@@ -66,7 +66,7 @@ class DatasetIndexer:
         return len(self.sample_subset_idxs)
 
     @property
-    def samples(self) -> List[str]:
+    def samples(self) -> list[str]:
         if self.sample_subset_idxs is None:
             return self.full_samples.tolist()  # type: ignore
         return self.full_samples[self.sample_subset_idxs].tolist()  # type: ignore
@@ -84,14 +84,15 @@ class DatasetIndexer:
 
     def subset_to(
         self,
-        regions: Optional[Idx] = None,
-        samples: Optional[Idx] = None,
+        regions: Idx | None = None,
+        samples: StrIdx | None = None,
     ) -> "DatasetIndexer":
         """Subset the dataset to specific regions and/or samples."""
         if regions is None and samples is None:
             return self
 
         if samples is not None:
+            samples = self.s2i(samples)
             sample_idxs = idx_like_to_array(samples, self.n_samples)
         else:
             sample_idxs = np.arange(self.n_samples, dtype=np.intp)
@@ -124,7 +125,7 @@ class DatasetIndexer:
         else:
             regions, samples = idx
 
-        s_idx = s2i(samples, self.s2i_map)
+        s_idx = self.s2i(samples)
         idx = (regions, s_idx)
         idx_t = idx_type(idx)
         if idx_t == "basic":
@@ -180,20 +181,19 @@ class DatasetIndexer:
 
 def s2i(str_idx: StrIdx, map: HashTable) -> Idx:
     """Convert a string index to an integer index using a hirola.HashTable."""
-    if (
-        isinstance(str_idx, str)
-        or (isinstance(str_idx, np.ndarray) and is_dtype(str_idx, np.str_))
-        or (isinstance(str_idx, Sequence) and isinstance(next(collapse(str_idx)), str))
-    ):
+    if not isinstance(str_idx, (np.ndarray, slice)):
+        str_idx = np.asarray(str_idx)
+
+    if is_dtype(str_idx, np.str_) or is_dtype(str_idx, np.object_):
         idx = map.get(str_idx)
         if (np.atleast_1d(idx) == -1).any():
             raise KeyError(
-                f"Some keys not found in mapping: {np.unique(np.array(str_idx)[idx == -1])}"
+                f"Some keys not found in mapping: {np.unique(str_idx[idx == -1])}"
             )
     else:
         idx = str_idx
 
-    idx = cast(Idx, idx)  # above clause does this, but can't narrow type
+    idx = cast(Idx, idx)
 
     return idx
 

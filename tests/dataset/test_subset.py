@@ -2,13 +2,17 @@ from pathlib import Path
 
 import genvarloader as gvl
 import numpy as np
-from genvarloader._utils import idx_like_to_array
+import polars as pl
+from genvarloader._types import Idx, StrIdx
+from numpy.typing import NDArray
 from pytest import fixture
 from pytest_cases import parametrize_with_cases
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 REF = DATA_DIR / "fasta" / "hg38.fa.bgz"
 DATASET = gvl.Dataset.open(DATA_DIR / "phased_dataset.vcf.gvl", REF)
+REGIONS = DATASET._idxer.full_region_idxs
+SAMPLES = DATASET._idxer.full_samples
 
 
 @fixture(scope="session")
@@ -18,107 +22,143 @@ def dataset():
 
 
 def idx_none():
-    return
+    regions = None
+    desired = REGIONS
+    return regions, desired
 
 
 def idx_scalar():
-    return 0
+    regions = 0
+    desired = REGIONS[regions]
+    return regions, desired
 
 
 def idx_neg_scalar():
-    return -1
+    regions = -1
+    desired = REGIONS[regions]
+    return regions, desired
 
 
 def idx_slice_none():
-    return slice(None)
+    regions = slice(None)
+    desired = REGIONS[regions]
+    return regions, desired
 
 
 def idx_slice_start_none():
-    return slice(1, None)
+    regions = slice(1, None)
+    desired = REGIONS[regions]
+    return regions, desired
 
 
 def idx_slice_none_stop():
-    return slice(None, 2)
+    regions = slice(None, 2)
+    desired = REGIONS[regions]
+    return regions, desired
 
 
 def idx_list():
-    return [0, 1, 2]
+    regions = [0, 1, 2]
+    desired = REGIONS[regions]
+    return regions, desired
 
 
 def idx_array():
-    return np.arange(3)
+    regions = np.arange(3)
+    desired = REGIONS[regions]
+    return regions, desired
 
 
 def idx_bool():
-    return np.random.random(8) > 0.5
+    regions = np.random.random(DATASET.n_regions) > 0.5
+    desired = REGIONS[regions]
+    return regions, desired
 
 
 def smp_none():
-    return
+    samples = None
+    desired = SAMPLES
+    return samples, desired
 
 
 def smp_scalar():
-    return 0
+    samples = 0
+    desired = SAMPLES[samples]
+    return samples, desired
 
 
 def smp_neg_scalar():
-    return -1
+    samples = -1
+    desired = SAMPLES[samples]
+    return samples, desired
 
 
 def smp_slice_none():
-    return slice(None)
+    samples = slice(None)
+    desired = SAMPLES[samples]
+    return samples, desired
 
 
 def smp_slice_start_none():
-    return slice(1, None)
+    samples = slice(1, None)
+    desired = SAMPLES[samples]
+    return samples, desired
 
 
 def smp_slice_none_stop():
-    return slice(None, 2)
+    samples = slice(None, 2)
+    desired = SAMPLES[samples]
+    return samples, desired
 
 
 def smp_list():
-    return [0, 1, 2]
+    samples = [2, 0, 1]
+    desired = SAMPLES[samples]
+    return samples, desired
 
 
 def smp_array():
-    return np.arange(3)
+    samples = np.arange(3)
+    desired = SAMPLES[samples]
+    return samples, desired
 
 
 def smp_bool():
-    return np.random.random(3) > 0.5
+    samples = np.random.random(3) > 0.5
+    desired = SAMPLES[samples]
+    return samples, desired
 
 
 def smp_str():
-    return DATASET.samples[0]
+    samples = DATASET.samples[0]
+    desired = np.atleast_1d(samples)
+    return samples, desired
 
 
 def smp_strs():
-    return DATASET.samples[:2]
+    samples = DATASET._idxer.full_samples[[2, 0, 1]]
+    desired = samples
+    return samples.tolist(), desired
 
 
-@parametrize_with_cases("regions", cases=".", prefix="idx_")
-@parametrize_with_cases("samples", cases=".", prefix="smp_")
-def test_subset(dataset: gvl.Dataset, regions, samples):
-    actual = dataset.subset_to(regions, samples).shape
+def smp_series():
+    samples = pl.Series(DATASET.samples[:2])
+    desired = SAMPLES[:2]
+    return samples, desired
 
-    if isinstance(regions, int):
-        regions = [regions]
-    elif regions is None:
-        regions = slice(None)
 
-    regions = idx_like_to_array(regions, dataset.n_regions)
+@parametrize_with_cases("regions, desired_regions", cases=".", prefix="idx_")
+@parametrize_with_cases("samples, desired_samples", cases=".", prefix="smp_")
+def test_subset(
+    dataset: gvl.Dataset,
+    regions: Idx,
+    samples: StrIdx,
+    desired_regions: NDArray[np.integer],
+    desired_samples: NDArray[np.str_],
+):
+    sub = dataset.subset_to(regions, samples)
+    actual_regions = sub._idxer._r_idx
+    actual_samples = np.atleast_1d(sub.samples)
 
-    if isinstance(samples, int):
-        samples = [samples]
-    elif samples is None:
-        samples = slice(None)
-    elif isinstance(samples, str):
-        samples = [dataset.samples.index(samples)]
-    elif isinstance(samples, list) and isinstance(samples[0], str):
-        samples = [dataset.samples.index(s) for s in samples]
-
-    samples = idx_like_to_array(samples, dataset.n_samples)
-
-    desired = (len(regions), len(samples))
-    assert actual == desired
+    np.testing.assert_equal(actual_regions, desired_regions)
+    np.testing.assert_equal(actual_samples, desired_samples)

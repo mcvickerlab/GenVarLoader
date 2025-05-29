@@ -27,8 +27,8 @@ from .._ragged import (
     to_padded,
 )
 from .._torch import TORCH_AVAILABLE, TorchDataset, get_dataloader
-from .._types import DTYPE, AnnotatedHaps, Idx
-from .._utils import idx_like_to_array, lengths_to_offsets, normalize_contig_name
+from .._types import DTYPE, AnnotatedHaps, Idx, StrIdx
+from .._utils import lengths_to_offsets, normalize_contig_name
 from ._indexing import DatasetIndexer
 from ._rag_variants import RaggedVariants
 from ._reconstruct import Haps, HapsTracks, Ref, RefTracks, Tracks
@@ -770,8 +770,8 @@ class Dataset:
 
     def subset_to(
         self,
-        regions: Idx | pl.Series | None = None,
-        samples: Idx | str | Sequence[str] | None = None,
+        regions: Idx | None = None,
+        samples: StrIdx | None = None,
     ) -> Self:
         """Subset the dataset to specific regions and/or samples by index or a boolean mask. If regions or samples
         are not provided, the corresponding dimension will not be subset.
@@ -829,45 +829,15 @@ class Dataset:
         if regions is None and samples is None:
             return self
 
-        if samples is not None:
-            if isinstance(samples, np.ndarray) and np.issubdtype(
-                samples.dtype, np.bool_
-            ):
-                sample_idx = np.nonzero(samples)[0]
-            elif isinstance(
-                samples, (int, np.integer, slice, np.ndarray)
-            ) or isinstance(samples[0], int):
-                sample_idx = idx_like_to_array(samples, self.n_samples)  # type: ignore
-            else:  # str | Sequence
-                if isinstance(samples, str):
-                    samples = [samples]
-                _samples = set(samples)
-                if missing := _samples.difference(self._idxer.full_samples):
-                    raise ValueError(f"Samples {missing} not found in the dataset")
-                sample_idx = np.array(
-                    [
-                        i
-                        for i, s in enumerate(self._idxer.full_samples)
-                        if s in _samples
-                    ],
-                    np.intp,
-                )
-        else:
-            sample_idx = None
-
         if regions is not None:
             if isinstance(regions, pl.Series):
-                region_idxs = regions.to_numpy()
-                if np.issubdtype(region_idxs.dtype, np.bool_):
-                    region_idxs = np.nonzero(region_idxs)[0]
-                elif not np.issubdtype(region_idxs.dtype, np.integer):
+                regions = regions.to_numpy()
+                if np.issubdtype(regions.dtype, np.bool_):
+                    regions = np.nonzero(regions)[0]
+                elif not np.issubdtype(regions.dtype, np.integer):
                     raise ValueError("`regions` must be index-like or a boolean mask.")
-            else:
-                region_idxs = idx_like_to_array(regions, self.n_regions)
-        else:
-            region_idxs = None
 
-        idxer = self._idxer.subset_to(regions=region_idxs, samples=sample_idx)
+        idxer = self._idxer.subset_to(regions=regions, samples=samples)
 
         return evolve(self, _idxer=idxer)
 

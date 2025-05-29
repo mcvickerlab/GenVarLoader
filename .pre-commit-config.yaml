@@ -22,5 +22,8 @@ repos:
     args: [--rev-range=origin/main..]
 
 ci:
-  autofix_commit_msg: 'chore(pre-commit.ci): auto fixes [...]'
+  autofix_commit_msg: |
+        chore(pre-commit): auto fixes from pre-commit.com hooks
+
+        for more information, see https://pre-commit.ci
   autoupdate_commit_msg: 'chore(pre-commit.ci): pre-commit autoupdate'
