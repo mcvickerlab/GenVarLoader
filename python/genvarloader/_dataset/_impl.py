@@ -950,7 +950,7 @@ class Dataset:
             The arguments given to the transform will be the region and sample indices as numpy arrays
             and the tracks themselves as a :class:`Ragged` array with
             shape (regions, samples). The tracks must be a :class:`Ragged` array since regions may be
-            different lengths to accomodate indels. This function should then return the transformed
+            different lengths to accommodate indels. This function should then return the transformed
             tracks as a :class:`Ragged` array with the same shape and lengths.
         max_mem
             The maximum memory to use in bytes, by default 1 GiB (2**30 bytes)
