@@ -263,7 +263,6 @@ class Dataset:
             contigs=contigs,
             return_indices=False,
             rc_neg=rc_neg,
-            transform=None,
             deterministic=deterministic,
             _idxer=idxer,
             _full_bed=bed,
@@ -378,7 +377,6 @@ class Dataset:
                 contigs=self.contigs,
                 return_indices=self.return_indices,
                 rc_neg=self.rc_neg,
-                transform=self.transform,
                 deterministic=self.deterministic,
                 _idxer=self._idxer,
                 _full_bed=self._full_bed,
@@ -397,7 +395,6 @@ class Dataset:
                 contigs=self.contigs,
                 return_indices=self.return_indices,
                 rc_neg=self.rc_neg,
-                transform=self.transform,
                 deterministic=self.deterministic,
                 _idxer=self._idxer,
                 _full_bed=self._full_bed,
@@ -595,8 +592,6 @@ class Dataset:
     """
     rc_neg: bool
     """Whether to reverse-complement the sequences on negative strands."""
-    transform: Callable | None
-    """Tranform to apply to what the dataset would otherwise return on its own."""
     _full_bed: pl.DataFrame = field(alias="_full_bed")
     _full_regions: NDArray[np.int32] = field(alias="_full_regions")
     """Unjittered, sorted regions matching order on-disk."""
