@@ -52,7 +52,7 @@ class RaggedAnnotatedHaps:
         The final axis will have the maximum length across all entries."""
         haps = to_padded(self.haps, b"N")
         var_idxs = to_padded(self.var_idxs, -1)
-        ref_coords = to_padded(self.ref_coords, -1)
+        ref_coords = to_padded(self.ref_coords, np.iinfo(self.ref_coords.dtype).max)
         return AnnotatedHaps(haps, var_idxs, ref_coords)
 
     def reshape(self, shape: int | tuple[int, ...]) -> RaggedAnnotatedHaps:
