@@ -12,7 +12,7 @@ project = "GenVarLoader"
 copyright = "2024, David Laub"
 author = "David Laub"
 release = genvarloader.__version__
-# X.Y.Z verison
+# X.Y.Z version
 version = ".".join(release.split(".")[:3])
 
 # -- General configuration ---------------------------------------------------
