@@ -155,7 +155,6 @@ def get_dummy_dataset():
         jitter=0,
         deterministic=True,
         rc_neg=True,
-        transform=None,
         _full_bed=dummy_bed,
         _full_regions=dummy_regions,
         _idxer=dummy_idxer,
