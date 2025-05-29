@@ -350,21 +350,24 @@ class Dataset:
             If set to an integer, all sequences will be padded or truncated to this length. See the
             `online documentation <https://genvarloader.readthedocs.io/en/latest/dataset.html>`_ for more information.
         """
-        if isinstance(output_length, int):
-            if output_length < 1:
-                raise ValueError(
-                    f"Output length ({output_length}) must be a positive integer."
-                )
-            min_r_len: int = (self._full_regions[:, 2] - self._full_regions[:, 1]).min()
-            max_output_length = min_r_len + 2 * self.max_jitter
-            eff_length = output_length + 2 * self.jitter
+        if isinstance(output_length, int) or output_length == "variable":
+            if isinstance(output_length, int):
+                if output_length < 1:
+                    raise ValueError(
+                        f"Output length ({output_length}) must be a positive integer."
+                    )
+                min_r_len: int = (
+                    self._full_regions[:, 2] - self._full_regions[:, 1]
+                ).min()
+                max_output_length = min_r_len + 2 * self.max_jitter
+                eff_length = output_length + 2 * self.jitter
 
-            if eff_length > max_output_length:
-                raise ValueError(
-                    f"Jitter-expanded output length (out_len={self.output_length}) + 2 * ({self.jitter=}) = {eff_length} must be less"
-                    f" than or equal to the maximum output length of the dataset ({max_output_length})."
-                    f" The maximum output length is the minimum region length ({min_r_len}) + 2 * (max_jitter={self.max_jitter})."
-                )
+                if eff_length > max_output_length:
+                    raise ValueError(
+                        f"Jitter-expanded output length (out_len={self.output_length}) + 2 * ({self.jitter=}) = {eff_length} must be less"
+                        f" than or equal to the maximum output length of the dataset ({max_output_length})."
+                        f" The maximum output length is the minimum region length ({min_r_len}) + 2 * (max_jitter={self.max_jitter})."
+                    )
 
             return ArrayDataset(
                 path=self.path,
