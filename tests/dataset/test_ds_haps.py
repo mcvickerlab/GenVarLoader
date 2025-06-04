@@ -22,6 +22,15 @@ def dataset_vcf():
     return ds
 
 
+def dataset_pgen():
+    ds = (
+        gvl.Dataset.open(data_dir / "phased_dataset.pgen.gvl", ref)
+        .with_len("ragged")
+        .with_seqs("haplotypes")
+    )
+    return ds
+
+
 def dataset_svar():
     ds = (
         gvl.Dataset.open(data_dir / "phased_dataset.svar.gvl", ref)
