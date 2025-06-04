@@ -242,13 +242,13 @@ class DatasetWithSites(Generic[MaybeTRK]):
         starts = sites["POS0"].to_numpy()  # 0-based
         alts = RaggedAlleles.from_polars(sites["ALT"])
 
-        # (b p)
+        # (b p ~l)
         wt_haps = wt_haps.reshape((-1, ploidy, length))
         # flags: (b p)
         mut_haps, v_idxs, ref_coords, flags = apply_site_only_variants(
-            haps=wt_haps.haps.view(np.uint8).copy(),  # (b p l)
-            v_idxs=wt_haps.var_idxs.copy(),  # (b p l)
-            ref_coords=wt_haps.ref_coords,  # (b p l)
+            haps=wt_haps.haps.view(np.uint8).copy(),  # (b p ~l)
+            v_idxs=wt_haps.var_idxs.copy(),  # (b p ~l)
+            ref_coords=wt_haps.ref_coords,  # (b p ~l)
             site_starts=starts,
             alt_alleles=alts.data.view(np.uint8),
             alt_offsets=alts.offsets,
@@ -287,11 +287,11 @@ EXISTED = np.uint8(2)
 # * fixed length, SNPs only
 @nb.njit(parallel=True, nogil=True, cache=True)
 def apply_site_only_variants(
-    haps: NDArray[np.uint8],  # (b p l)
-    v_idxs: NDArray[np.int32],  # (b p l)
-    ref_coords: NDArray[np.int32],  # (b p l)
+    haps: NDArray[np.uint8],  # (b p ~l)
+    v_idxs: NDArray[np.int32],  # (b p ~l)
+    ref_coords: NDArray[np.int32],  # (b p ~l)
     site_starts: NDArray[np.int32],  # (b)
-    alt_alleles: NDArray[np.uint8],  # ragged (b)
+    alt_alleles: NDArray[np.uint8],  # (b ~a)
     alt_offsets: NDArray[np.int64],  # (b+1)
 ) -> tuple[NDArray[np.uint8], NDArray[np.int32], NDArray[np.int32], NDArray[np.uint8]]:
     batch_size, ploidy, _ = haps.shape

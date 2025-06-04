@@ -44,7 +44,6 @@ bcftools = "*"
 plink2 = "*"
 
 [pypi-dependencies]
-genvarloader = { path = ".", editable = true }
 hirola = "==0.3"
 seqpro = "==0.4.2"
 genoray = "==0.12.0"
