@@ -64,25 +64,32 @@
 .. autodata:: SitesSchema
 ```
 
+## Data registry
+
+```{eval-rst}
+.. autofunction:: genvarloader.data_registry.fetch
+```
+
 ## Containers
 
 Classes that GVL Datasets may return.
 
 ```{eval-rst}
+.. currentmodule:: genvarloader
 
-.. autoclass:: genvarloader._types.AnnotatedHaps
+.. autoclass:: AnnotatedHaps
     :members:
     :exclude-members: __init__
 
-.. autoclass:: genvarloader.Ragged
+.. autoclass:: Ragged
     :members:
     :exclude-members: __init__
 
-.. autoclass:: genvarloader._ragged.RaggedAnnotatedHaps
+.. autoclass:: RaggedAnnotatedHaps
     :members:
     :exclude-members: __init__
 
-.. autoclass:: genvarloader._dataset._rag_variants.RaggedVariants
+.. autoclass:: RaggedVariants
     :members:
     :exclude-members: __init__
 ```

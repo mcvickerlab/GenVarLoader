@@ -4,12 +4,16 @@ from seqpro._ragged import Ragged
 from seqpro.bed import read as read_bedlike
 from seqpro.bed import with_len as with_length
 
+from . import data_registry
 from ._bigwig import BigWigs
 from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
+from ._dataset._rag_variants import RaggedVariants
 from ._dataset._reference import RefDataset, Reference
 from ._dataset._write import write
 from ._dummy import get_dummy_dataset
+from ._ragged import RaggedAnnotatedHaps
 from ._torch import to_nested_tensor
+from ._types import AnnotatedHaps
 from ._variants._sitesonly import DatasetWithSites, SitesSchema, sites_vcf_to_table
 
 __version__ = importlib.metadata.version("genvarloader")
@@ -30,4 +34,8 @@ __all__ = [
     "SitesSchema",
     "DatasetWithSites",
     "RefDataset",
+    "data_registry",
+    "AnnotatedHaps",
+    "RaggedAnnotatedHaps",
+    "RaggedVariants",
 ]

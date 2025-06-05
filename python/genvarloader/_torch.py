@@ -180,10 +180,10 @@ if TORCH_AVAILABLE:
             if self.include_indices:
                 batch = (*batch, r_idx, s_idx)
 
-            if len(batch) == 1:
-                batch = batch[0]
-            elif self.transform is not None:
+            if self.transform is not None:
                 batch = self.transform(*batch)
+            elif len(batch) == 1:
+                batch = batch[0]
 
             return batch
 
