@@ -1,3 +1,25 @@
+## 0.16.0 (2025-06-05)
+
+### Feat
+
+- make DatasetWithSites return both wild-type and mutant haplotypes
+
+### Fix
+
+- transform not applied when dataset returns single item. docs: add basenji2 evaluation
+- use genoray>=0.12. docs: basenji2 eval
+- ensure samples are re-ordered by subset_to if necessary
+- Let GVL recognize bgz-compressed VCFs
+- pad ref_coords with max value for dtype to ensure ref coords are sorted
+- remove transform arg for dummy dataset
+- finish deprecating the transform setting on Dataset, which was moved to dataloading functionality
+- PR #101, ensure variable length output corresponds to ArrayDataset
+- update genoray pixi version
+- permit ragged output for dataloading, emitting a warning instead of raising an error
+- constrain genoray for breaking changes
+- torch dataset issues
+- bump seqpro to 0.4.2
+
 ## 0.15.0 (2025-05-23)
 
 ### Feat
