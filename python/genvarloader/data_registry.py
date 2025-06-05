@@ -9,7 +9,8 @@ N_RETRIES = 3
 
 
 def fetch(name: Literal["geuvadis_ebi", "1kgp"]) -> dict[str, Path]:
-    """Fetch a data for a GVL tutorial dataset. Files are cached in the user's home directory under `~/.cache/genvarloader`.
+    """Download and cache data for constructing/opening a GVL dataset. Files are cached in the
+    user's home directory under :code:`~/.cache/genvarloader`.
 
     Parameters
     ----------
