@@ -44,9 +44,10 @@ bcftools = "*"
 plink2 = "*"
 
 [pypi-dependencies]
+genvarloader = { path = ".", editable = true }
 hirola = "==0.3"
 seqpro = "==0.4.2"
-genoray = "==0.12.0"
+genoray = "==0.12.2"
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"
@@ -57,16 +58,15 @@ ipywidgets = "*"
 sphinx-book-theme = "*"
 sphinx-autobuild = "*"
 sphinx-autodoc-typehints = "*"
+matplotlib = "*"
+seaborn = "*"
+scipy = "*"
 
 [feature.pytorch-cpu.dependencies]
 pytorch-cpu = ">=2,<3"
 
-# [feature.pytorch-gpu.dependencies]
-# pytorch-gpu = ">=2,<3"
-# cuda-version = "12.1.*"
-
-# [feature.pytorch-gpu.system-requirements]
-# cuda = "12.1"
+[feature.pytorch-gpu.pypi-dependencies]
+torch = { version = ">=2,<3", index = "https://download.pytorch.org/whl/cu126" }
 
 [feature.basenji2.pypi-dependencies]
 basenji2-pytorch = ">=0.1.2"
@@ -83,11 +83,11 @@ python = "3.12.*"
 [environments]
 dev = { features = ["pytorch-cpu", "basenji2", "py310"] }
 docs = { features = ["docs", "pytorch-cpu", "basenji2", "py312"] }
+docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py312"] }
 py310 = { features = ["pytorch-cpu", "py310"] }
 py311 = { features = ["pytorch-cpu", "py311"] }
 py312 = { features = ["pytorch-cpu", "py312"] }
 no-torch = { features = ["py310"] }
-# docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py310"] }
 
 [tasks]
 install = "uv pip install -e ."
