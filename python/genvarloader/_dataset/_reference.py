@@ -15,7 +15,7 @@ from typing import (
 import numba as nb
 import numpy as np
 import polars as pl
-from attrs import define, evolve
+from attrs import define, evolve, field
 from loguru import logger
 from numpy.typing import NDArray
 from seqpro._ragged import Ragged, lengths_to_offsets
@@ -27,7 +27,6 @@ from .._torch import (
     TORCH_AVAILABLE,
     get_dataloader,
     no_torch_error,
-    tensor_from_maybe_bytes,
 )
 from .._types import Idx
 from .._utils import is_dtype, normalize_contig_name
@@ -139,12 +138,13 @@ class Reference:
 T = TypeVar("T", NDArray[np.bytes_], RaggedSeqs)
 
 
+@define
 class RefDataset(Generic[T]):
     """A reference dataset for pulling out sequences from a reference genome."""
 
     reference: Reference
     """The reference genome."""
-    _full_bed: pl.DataFrame
+    full_bed: pl.DataFrame
     """A table of regions to extract from the reference genome. The table must have the following columns:
     - `chrom`: The name of the contig (e.g. "chr1", "chr2", etc.)
     - `chromStart`: The start position of the region (0-based).
@@ -152,8 +152,8 @@ class RefDataset(Generic[T]):
     A `strand` column can also be included, in which case the regions will be reverse complemented if the strand is -1
     and the `rc_neg` parameter is set to True.
     """
-    _subset_bed: pl.DataFrame
-    _subset_regions: NDArray[np.int32]
+    _subset_bed: pl.DataFrame = field(init=False, alias="_subset_bed")
+    _subset_regions: NDArray[np.int32] = field(init=False, alias="_subset_regions")
     jitter: int = 0
     """The maximum length for randomly shifting start positions."""
     output_length: Literal["ragged", "variable"] | int = "ragged"
@@ -164,41 +164,27 @@ class RefDataset(Generic[T]):
     """
     rc_neg: bool = True
     """Whether to reverse complement the regions that are on the negative strand."""
-    _rng: np.random.Generator
+    seed: int | np.random.Generator | None = None
+    _rng: np.random.Generator = field(init=False, alias="_rng")
     """A random number generator."""
 
-    def __init__(
-        self,
-        reference: Reference,
-        regions: pl.DataFrame,
-        jitter: int = 0,
-        output_length: Literal["ragged", "variable"] | int = "ragged",
-        deterministic: bool = True,
-        rc_neg: bool = True,
-        seed: int | np.random.Generator | None = None,
-    ):
-        if regions.height == 0:
+    def __attrs_post_init__(self):
+        if self.full_bed.height == 0:
             raise ValueError("Table of regions has a height of zero.")
 
-        if jitter < 0:
-            raise ValueError(f"jitter ({jitter}) must be a non-negative integer.")
-        elif jitter > (
-            min_len := regions.select(
+        if self.jitter < 0:
+            raise ValueError(f"jitter ({self.jitter}) must be a non-negative integer.")
+        elif self.jitter > (
+            min_len := self.full_bed.select(
                 (pl.col("chromEnd") - pl.col("chromStart")).min()
             ).item()
         ):
             raise ValueError(
-                f"jitter ({jitter}) must be less than the minimum region length ({min_len})."
+                f"jitter ({self.jitter}) must be less than the minimum region length ({min_len})."
             )
-        self.reference = reference
-        self._full_bed = regions
-        self._subset_bed = regions
-        self._subset_regions = bed_to_regions(regions, reference.contigs)
-        self.jitter = jitter
-        self.output_length = output_length
-        self.deterministic = deterministic
-        self.rc_neg = rc_neg
-        self._rng = np.random.default_rng(seed)
+        self._subset_bed = self.full_bed
+        self._subset_regions = bed_to_regions(self.full_bed, self.reference.contigs)
+        self._rng = np.random.default_rng(self.seed)
 
     @property
     def regions(self) -> pl.DataFrame:
@@ -289,15 +275,15 @@ class RefDataset(Generic[T]):
             or is_dtype(regions, np.integer)
             or (isinstance(regions, Sequence) and isinstance(regions[0], int))
         ):
-            self._subset_bed = self._full_bed[regions]  # type: ignore
+            self._subset_bed = self.full_bed[regions]  # type: ignore
         else:
-            self._subset_bed = self._full_bed.filter(regions)  # type: ignore
+            self._subset_bed = self.full_bed.filter(regions)  # type: ignore
         self._subset_regions = bed_to_regions(self._subset_bed, self.reference.contigs)
         return self
 
     def to_full_dataset(self) -> Self:
         """Reset the dataset to the full dataset."""
-        self._subset_bed = self._full_bed
+        self._subset_bed = self.full_bed
         self._subset_regions = bed_to_regions(self._subset_bed, self.reference.contigs)
         return self
 
@@ -518,27 +504,17 @@ if TORCH_AVAILABLE:
         def __len__(self) -> int:
             return len(self.dataset)
 
-        def __getitem__(
-            self, idx: list[int]
-        ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-            batch = self.dataset[idx]
+        def __getitem__(self, idx: list[int]):
+            batch = (self.dataset[idx],)
 
             if self.include_indices:
                 _idx = np.atleast_1d(idx)
                 batch = (*batch, _idx)
-                single_item = False
-            else:
-                batch = (batch,)
-                single_item = True
 
             if self.transform is not None:
                 batch = self.transform(*batch)
-                if single_item:
-                    batch = (batch,)
 
-            batch = tuple(tensor_from_maybe_bytes(b) for b in batch)
-
-            if single_item:
+            if len(batch) == 1:
                 batch = batch[0]
 
             return batch
