@@ -6,6 +6,7 @@ from typing import (
     Callable,
     Generic,
     Literal,
+    Sequence,
     TypeVar,
     cast,
     overload,
@@ -26,10 +27,9 @@ from .._torch import (
     TORCH_AVAILABLE,
     get_dataloader,
     no_torch_error,
-    tensor_from_maybe_bytes,
 )
 from .._types import Idx
-from .._utils import normalize_contig_name
+from .._utils import is_dtype, normalize_contig_name
 from ._utils import bed_to_regions, padded_slice
 
 
@@ -144,7 +144,7 @@ class RefDataset(Generic[T]):
 
     reference: Reference
     """The reference genome."""
-    regions: pl.DataFrame
+    full_bed: pl.DataFrame
     """A table of regions to extract from the reference genome. The table must have the following columns:
     - `chrom`: The name of the contig (e.g. "chr1", "chr2", etc.)
     - `chromStart`: The start position of the region (0-based).
@@ -152,6 +152,8 @@ class RefDataset(Generic[T]):
     A `strand` column can also be included, in which case the regions will be reverse complemented if the strand is -1
     and the `rc_neg` parameter is set to True.
     """
+    _subset_bed: pl.DataFrame = field(init=False, alias="_subset_bed")
+    _subset_regions: NDArray[np.int32] = field(init=False, alias="_subset_regions")
     jitter: int = 0
     """The maximum length for randomly shifting start positions."""
     output_length: Literal["ragged", "variable"] | int = "ragged"
@@ -162,27 +164,31 @@ class RefDataset(Generic[T]):
     """
     rc_neg: bool = True
     """Whether to reverse complement the regions that are on the negative strand."""
-    seed: int | np.random.Generator | None = field(default=None)
-    """A random seed to use for jitter and shifting. If None, a random seed will be used."""
-    _full_regions: NDArray[np.int32] = field(init=False)
-    _rng: np.random.Generator = field(init=False)
+    seed: int | np.random.Generator | None = None
+    _rng: np.random.Generator = field(init=False, alias="_rng")
+    """A random number generator."""
 
     def __attrs_post_init__(self):
-        if self.regions.height == 0:
+        if self.full_bed.height == 0:
             raise ValueError("Table of regions has a height of zero.")
 
         if self.jitter < 0:
             raise ValueError(f"jitter ({self.jitter}) must be a non-negative integer.")
         elif self.jitter > (
-            min_len := self.regions.select(
+            min_len := self.full_bed.select(
                 (pl.col("chromEnd") - pl.col("chromStart")).min()
             ).item()
         ):
             raise ValueError(
                 f"jitter ({self.jitter}) must be less than the minimum region length ({min_len})."
             )
-        self._full_regions = bed_to_regions(self.regions, self.reference.contigs)
+        self._subset_bed = self.full_bed
+        self._subset_regions = bed_to_regions(self.full_bed, self.reference.contigs)
         self._rng = np.random.default_rng(self.seed)
+
+    @property
+    def regions(self) -> pl.DataFrame:
+        return self._subset_bed
 
     @property
     def shape(self) -> tuple[int]:
@@ -207,7 +213,9 @@ class RefDataset(Generic[T]):
                 raise ValueError(
                     f"Output length ({output_length}) must be a positive integer."
                 )
-            min_r_len: int = (self._full_regions[:, 2] - self._full_regions[:, 1]).min()
+            min_r_len: int = (
+                self._subset_regions[:, 2] - self._subset_regions[:, 1]
+            ).min()
             max_output_length = min_r_len
             eff_length = output_length + 2 * self.jitter
 
@@ -234,7 +242,9 @@ class RefDataset(Generic[T]):
                 raise ValueError(f"jitter ({jitter}) must be a non-negative integer.")
             elif (
                 jitter
-                > (min_len := self._full_regions[:, 2] - self._full_regions[:, 1]).min()
+                > (
+                    min_len := self._subset_regions[:, 2] - self._subset_regions[:, 1]
+                ).min()
             ):
                 raise ValueError(
                     f"jitter ({jitter}) must be less than the minimum region length ({min_len})."
@@ -252,9 +262,34 @@ class RefDataset(Generic[T]):
 
         return evolve(self, **to_evolve)
 
+    def subset_to(self, regions: Idx):
+        """Subset the dataset to a subset of regions.
+
+        Parameters
+        ----------
+        regions
+            The indices of the regions to subset to.
+        """
+        if (
+            isinstance(regions, (int, np.integer, slice))
+            or is_dtype(regions, np.integer)
+            or (isinstance(regions, Sequence) and isinstance(regions[0], int))
+        ):
+            self._subset_bed = self.full_bed[regions]  # type: ignore
+        else:
+            self._subset_bed = self.full_bed.filter(regions)  # type: ignore
+        self._subset_regions = bed_to_regions(self._subset_bed, self.reference.contigs)
+        return self
+
+    def to_full_dataset(self) -> Self:
+        """Reset the dataset to the full dataset."""
+        self._subset_bed = self.full_bed
+        self._subset_regions = bed_to_regions(self._subset_bed, self.reference.contigs)
+        return self
+
     def __getitem__(self, idx: Idx) -> T:
         # (... 4)
-        regions = self._full_regions[idx].copy()
+        regions = self._subset_regions[idx].copy()
 
         out_reshape = None
         squeeze = False
@@ -469,27 +504,17 @@ if TORCH_AVAILABLE:
         def __len__(self) -> int:
             return len(self.dataset)
 
-        def __getitem__(
-            self, idx: list[int]
-        ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-            batch = self.dataset[idx]
+        def __getitem__(self, idx: list[int]):
+            batch = (self.dataset[idx],)
 
             if self.include_indices:
                 _idx = np.atleast_1d(idx)
                 batch = (*batch, _idx)
-                single_item = False
-            else:
-                batch = (batch,)
-                single_item = True
 
             if self.transform is not None:
                 batch = self.transform(*batch)
-                if single_item:
-                    batch = (batch,)
 
-            batch = tuple(tensor_from_maybe_bytes(b) for b in batch)
-
-            if single_item:
+            if len(batch) == 1:
                 batch = batch[0]
 
             return batch
