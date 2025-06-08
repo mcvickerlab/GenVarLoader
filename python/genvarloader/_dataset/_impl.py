@@ -91,7 +91,7 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
-    ) -> RaggedDataset[None, MaybeRTRK]: ...
+    ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]: ...
     @overload
     @staticmethod
     def open(
@@ -166,10 +166,20 @@ class Dataset:
                     "Malformed dataset: neither genotypes nor intervals found."
                 )
             case None, True, False:
-                raise RuntimeError(
+                logger.warning(
                     "No reference: dataset only has genotypes but no reference was given."
-                    " Resulting dataset would have nothing to return."
+                    " Resulting dataset can only support :code:`.with_seqs('variants')` to return RaggedVariants."
                 )
+                assert ploidy is not None
+                seqs = Haps.from_path(
+                    path,
+                    reference=None,
+                    regions=regions,
+                    samples=samples,
+                    ploidy=ploidy,
+                )
+                tracks = None
+                reconstructor = seqs
             case None, _, True:
                 seqs = None
                 tracks = Tracks.from_path(path, len(regions), len(samples))
@@ -202,7 +212,7 @@ class Dataset:
                     regions=regions,
                     samples=samples,
                     ploidy=ploidy,
-                )
+                ).to_kind(RaggedSeqs)
                 tracks = None
                 reconstructor = seqs
             case reference, True, True:
@@ -220,7 +230,7 @@ class Dataset:
                     regions=regions,
                     samples=samples,
                     ploidy=ploidy,
-                )
+                ).to_kind(RaggedSeqs)
                 tracks = Tracks.from_path(path, len(regions), len(samples))
                 tracks = tracks.with_tracks(list(tracks.intervals))
                 reconstructor = HapsTracks(haps=seqs, tracks=tracks)
@@ -229,7 +239,7 @@ class Dataset:
                 assert_never(has_genotypes)
                 assert_never(has_intervals)
 
-        if seqs is not None:
+        if seqs is not None and seqs.reference is not None:
             cnorm = ContigNormalizer(seqs.reference.contigs)
             contig_lengths = dict(
                 zip(seqs.reference.contigs, np.diff(seqs.reference.offsets))
@@ -482,6 +492,10 @@ class Dataset:
                 )
 
             case "reference", _, _, Ref(reference=r) | Haps(reference=r):
+                if r is None:
+                    raise ValueError(
+                        "Dataset has no reference genome to reconstruct sequences from."
+                    )
                 seqs = Ref(reference=r)
                 return evolve(self, _recon=seqs)
             case "reference", Ref(reference=ref) | Haps(reference=ref), _, (
@@ -489,6 +503,10 @@ class Dataset:
                 | RefTracks(tracks=tracks)
                 | HapsTracks(tracks=tracks)
             ):
+                if ref is None:
+                    raise ValueError(
+                        "Dataset has no reference genome to reconstruct sequences from."
+                    )
                 seqs = Ref(reference=ref)
                 return evolve(self, _recon=RefTracks(seqs=seqs, tracks=tracks))
 
