@@ -122,7 +122,7 @@ _NewH = TypeVar("_NewH", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 
 @define
 class Haps(Reconstructor[_H]):
-    reference: Reference
+    reference: Reference | None
     """The reference genome. This is kept in memory."""
     variants: _Variants
     """The variant sites in the dataset. This is kept in memory."""
@@ -133,13 +133,13 @@ class Haps(Reconstructor[_H]):
 
     @classmethod
     def from_path(
-        cls: type[Haps[RaggedSeqs]],
+        cls: type[Haps[RaggedVariants]],
         path: Path,
-        reference: Reference,
+        reference: Reference | None,
         regions: NDArray[np.int32],
         samples: list[str],
         ploidy: int,
-    ) -> Haps[RaggedSeqs]:
+    ) -> Haps[RaggedVariants]:
         svar_meta_path = path / "genotypes" / "svar_meta.json"
         dosages = None
 
@@ -198,7 +198,7 @@ class Haps(Reconstructor[_H]):
             variants=variants,
             genotypes=genotypes,
             dosages=dosages,
-            kind=RaggedSeqs,
+            kind=RaggedVariants,
         )
 
     def _haplotype_ilens(
@@ -227,6 +227,10 @@ class Haps(Reconstructor[_H]):
         return hap_ilens.reshape(-1, self.genotypes.shape[-1])
 
     def to_kind(self, kind: type[_NewH]) -> Haps[_NewH]:
+        if kind != RaggedVariants and self.reference is None:
+            raise ValueError(
+                f"Cannot return {kind.__name__}: no reference genome was provided."
+            )
         return cast(Haps[_NewH], evolve(self, kind=kind))
 
     def __call__(
@@ -457,6 +461,8 @@ class Haps(Reconstructor[_H]):
             Ragged array, shape: (variants). Whether to keep each variant. Implicitly has the same offsets
             as the sparse genotypes corresponding to geno_offset_idx.
         """
+        assert self.reference is not None
+
         haps = Ragged.from_offsets(
             np.empty(out_offsets[-1], np.uint8), shifts.shape, out_offsets
         )
