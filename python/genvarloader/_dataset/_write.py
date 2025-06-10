@@ -442,7 +442,7 @@ def _write_from_svar(
         out_dir / "offsets.npy",
         np.int64,
         "w+",
-        shape=(bed.height, len(samples), svar.ploidy, 2),
+        shape=(2, bed.height, len(samples), svar.ploidy),
     )
 
     with open(out_dir / "svar_meta.json", "w") as f:
@@ -461,8 +461,8 @@ def _write_from_svar(
             f"Processing genotypes for {df.height} regions on contig {c}"
         )
         # set offsets
-        # (r s p 2)
-        out = offsets[contig_offset : contig_offset + df.height]
+        # (2 r s p)
+        out = offsets[:, contig_offset : contig_offset + df.height]
         svar._find_starts_ends_with_length(
             c, df["chromStart"], df["chromEnd"], samples=samples, out=out
         )
@@ -482,7 +482,7 @@ def _write_from_svar(
         shape = (df.height, len(samples), svar.ploidy)
         # (r s p ~v)
         sp_genos = SparseGenotypes.from_offsets(
-            svar.genos.data, shape, out.reshape(-1, 2)
+            svar.genos.data, shape, out.reshape(2, -1)
         )
         # this is fine if there aren't any overlapping variants that could make a v_idx < -1
         # have a further end than v_idx == -1

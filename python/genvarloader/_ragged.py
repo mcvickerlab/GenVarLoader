@@ -154,7 +154,7 @@ def pad_ragged(
                 continue
             start, end = offsets[i], offsets[i + 1]
         else:
-            start, end = offsets[i]
+            start, end = offsets[:, i]
         entry_len = end - start
         out[i, :entry_len] = data[start:end]
         out[i, entry_len:] = pad_value
@@ -166,6 +166,7 @@ COMPLEMENTS = b"TGCA"
 
 
 #! for whatever reason, this causes data corruption with parallel=True?!
+#! assumes offsets are 1D
 @nb.njit(nogil=True, cache=True)
 def _rc_helper(
     data: NDArray[np.uint8], offsets: NDArray[np.int64], mask: NDArray[np.bool_]
@@ -194,6 +195,7 @@ def reverse_complement(
 
 
 #! for whatever reason, this causes data corruption with parallel=True?!
+#! assumes offsets are 1D
 @nb.njit(nogil=True, cache=True)
 def _reverse_helper(data: NDArray, offsets: NDArray[np.int64], mask: NDArray[np.bool_]):
     for i in nb.prange(len(offsets) - 1):

@@ -157,13 +157,13 @@ class Haps(Reconstructor[_H]):
             offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
             v_idxs = np.memmap(geno_path, dtype=V_IDX_TYPE, mode="r")
             genotypes = SparseGenotypes.from_offsets(
-                v_idxs, shape[:-1], offsets.reshape(-1, 2)
+                v_idxs, shape[1:], offsets.reshape(2, -1)
             )
 
             if dosage_path.exists():
                 dosages = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
                 dosages = SparseDosages.from_offsets(
-                    dosages, shape[:-1], offsets.reshape(-1, 2)
+                    dosages, shape[1:], offsets.reshape(2, -1)
                 )
 
             logger.info("Loading variant data.")
