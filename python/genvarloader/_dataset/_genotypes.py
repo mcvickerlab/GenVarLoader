@@ -48,7 +48,7 @@ def get_diffs_sparse(
             if geno_offsets.ndim == 1:
                 o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
             else:
-                o_s, o_e = geno_offsets[o_idx]
+                o_s, o_e = geno_offsets[:, o_idx]
             n_variants = o_e - o_s
             if n_variants == 0:
                 diffs[query, hap] = 0
@@ -267,7 +267,7 @@ def reconstruct_haplotype_from_sparse(
     if geno_offsets.ndim == 1:
         o_s, o_e = geno_offsets[offset_idx], geno_offsets[offset_idx + 1]
     else:
-        o_s, o_e = geno_offsets[offset_idx]
+        o_s, o_e = geno_offsets[:, offset_idx]
     _variant_idxs = geno_v_idxs[o_s:o_e]
     length = len(out)
     n_variants = len(_variant_idxs)
