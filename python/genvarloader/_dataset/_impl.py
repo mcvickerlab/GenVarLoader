@@ -1194,31 +1194,18 @@ class Dataset:
             unlist = True
             recon = (recon,)
 
-        ragv = None
-        if isinstance(recon[0], RaggedVariants):
-            ragv = recon[0]
-            recon = recon[1:]
-
-        recon = cast(
-            tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
-        )
-
         if self.rc_neg:
-            if self.sequence_type == "variants":
-                raise RuntimeError(
-                    "Reverse complementing variants is not supported. Please set rc_neg to False or use a different sequence type."
-                )
-            # (b)
             to_rc: NDArray[np.bool_] = self._full_regions[r_idx, 3] == -1
             recon = tuple(self._rc(r, to_rc) for r in recon)
 
         if self.output_length == "variable":
-            recon = tuple(self._pad(r) for r in recon)
+            recon = tuple(
+                r if isinstance(r, RaggedVariants) else self._pad(r) for r in recon
+            )
         elif isinstance(self.output_length, int):
-            recon = tuple(self._fix_len(r) for r in recon)
-
-        if ragv is not None:
-            recon = (ragv,) + recon
+            recon = tuple(
+                r if isinstance(r, RaggedVariants) else self._fix_len(r) for r in recon
+            )
 
         if out_reshape is not None:
             recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)
@@ -1230,7 +1217,7 @@ class Dataset:
         if unlist:
             recon = recon[0]
 
-        return recon
+        return recon  # type: ignore
 
     @overload
     def _rc(self, rag: Ragged[DTYPE], to_rc: NDArray[np.bool_]) -> Ragged[DTYPE]: ...
@@ -1238,9 +1225,13 @@ class Dataset:
     def _rc(
         self, rag: RaggedAnnotatedHaps, to_rc: NDArray[np.bool_]
     ) -> RaggedAnnotatedHaps: ...
+    @overload
+    def _rc(self, rag: RaggedVariants, to_rc: NDArray[np.bool_]) -> RaggedVariants: ...
     def _rc(
-        self, rag: Ragged | RaggedAnnotatedHaps, to_rc: NDArray[np.bool_]
-    ) -> Ragged | RaggedAnnotatedHaps:
+        self,
+        rag: Ragged | RaggedAnnotatedHaps | RaggedVariants,
+        to_rc: NDArray[np.bool_],
+    ) -> Ragged | RaggedAnnotatedHaps | RaggedVariants:
         if isinstance(rag, Ragged):
             if is_rag_dtype(rag, np.bytes_):
                 rag = reverse_complement(rag, to_rc)
@@ -1250,6 +1241,8 @@ class Dataset:
             rag.haps = reverse_complement(rag.haps, to_rc)
             reverse(rag.var_idxs, to_rc)
             reverse(rag.ref_coords, to_rc)
+        elif isinstance(rag, RaggedVariants):
+            rag = rag.rc(to_rc)
         else:
             assert_never(rag)
         return rag

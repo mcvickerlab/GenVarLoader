@@ -105,6 +105,40 @@ class RaggedVariants:
 
         return type(self)(alts, v_starts, ilens, dosages)
 
+    def rc(self, to_rc: NDArray[np.bool_] | None = None) -> Self:
+        """Reverse complement the alternative alleles.
+
+        Parameters
+        ----------
+        to_rc
+            A boolean mask of the same shape as the variant dimension. If :code:`True`, the alternative allele will be reverse complemented.
+            If :code:`None`, will reverse complement all alternative alleles.
+
+        Returns
+        -------
+            The RaggedVariants object with the alternative alleles reverse complemented.
+        """
+        ragv = self.to_packed()
+
+        node = ragv.alts.layout
+        while not isinstance(node.content, NumpyArray):
+            node = node.content
+
+        if to_rc is None:
+            to_rc = np.ones(ragv.shape[:-1], np.bool_)
+
+        # (batch) -> (batch * ploidy * n_variants)
+        # batch * ploidy * n_variants = n_alts
+        _to_rc, _ = ak.broadcast_arrays(to_rc, ragv.ilens.to_awkward())
+        _to_rc = _to_rc.layout
+        while not isinstance(_to_rc, NumpyArray):
+            _to_rc = _to_rc.content
+        _to_rc = _to_rc.data
+
+        rc_helper(ak.Array(node), to_rc)
+
+        return ragv
+
     @requires_torch
     def to_nested_tensor_batch(
         self,
@@ -375,3 +409,16 @@ def _infer_germline_ccfs(
                 running_ccf += (2 * (pos >= 0) - 1) * pos_ccf
 
         np.nan_to_num(ccf, copy=False, nan=max_ccf)
+
+
+@nb.njit(nogil=True, cache=True)
+def rc_helper(alts: ak.Array, to_rc: NDArray[np.bool_]):
+    for alt, rc in zip(alts, to_rc):
+        if rc:
+            alt = np.asarray(alt)
+            rc_alt = np.empty_like(alt)
+            rc_alt[alt == ord("A")] = ord("T")
+            rc_alt[alt == ord("C")] = ord("G")
+            rc_alt[alt == ord("G")] = ord("C")
+            rc_alt[alt == ord("T")] = ord("A")
+            alt[:] = rc_alt[::-1]
