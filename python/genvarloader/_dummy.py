@@ -5,6 +5,7 @@ import polars as pl
 import seqpro as sp
 from einops import repeat
 from genoray._svar import POS_TYPE, SparseGenotypes
+from genoray._utils import ContigNormalizer
 from natsort import natsorted
 
 from ._dataset._impl import RaggedDataset
@@ -59,9 +60,9 @@ def get_dummy_dataset():
     dummy_ref = Reference(
         path=Path("dummy"),
         reference=ref,
-        contigs=dummy_contigs,
         offsets=lengths_to_offsets(ref_lens, np.int64),
         pad_char=ord(b"N"),
+        c_map=ContigNormalizer(dummy_contigs),
     )
 
     dummy_vars = _Variants(

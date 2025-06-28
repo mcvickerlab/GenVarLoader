@@ -12,7 +12,7 @@ import numpy as np
 import polars as pl
 from attrs import define, evolve
 from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
-from awkward.index import Index64
+from awkward.index import Index
 from einops import repeat
 from genoray._svar import (
     DOSAGE_TYPE,
@@ -243,13 +243,24 @@ class Haps(Reconstructor[_H]):
         rng: np.random.Generator,
         deterministic: bool,
     ) -> _H:
-        haps, *_ = self.get_haps_and_shifts(
-            idx=idx,
-            regions=regions,
-            output_length=output_length,
-            rng=rng,
-            deterministic=deterministic,
-        )
+        if issubclass(self.kind, RaggedVariants):
+            ragv = self._get_variants(
+                idx=idx,
+                regions=None,
+                shifts=None,
+                keep=None,
+                keep_offsets=None,
+            )
+            ragv = cast(_H, ragv)
+            return ragv
+        else:
+            haps, *_ = self.get_haps_and_shifts(
+                idx=idx,
+                regions=regions,
+                output_length=output_length,
+                rng=rng,
+                deterministic=deterministic,
+            )
         return haps
 
     def get_haps_and_shifts(
@@ -364,8 +375,8 @@ class Haps(Reconstructor[_H]):
     def _get_variants(
         self,
         idx: NDArray[np.integer],
-        regions: NDArray[np.int32],
-        shifts: NDArray[np.int32],
+        regions: NDArray[np.int32] | None,
+        shifts: NDArray[np.int32] | None,
         keep: NDArray[np.bool_] | None,
         keep_offsets: NDArray[np.int64] | None,
     ) -> RaggedVariants:
@@ -373,18 +384,18 @@ class Haps(Reconstructor[_H]):
         r, s = np.unravel_index(idx, self.genotypes.shape[:2])
         genos = cast(SparseGenotypes, self.genotypes[r, s])
         v_idxs = ak.flatten(genos.to_awkward(), None).to_numpy()
+        geno_offsets = lengths_to_offsets(genos.lengths)
 
         # (b*p*v ~l)
         alts = cast(RaggedAlleles, self.variants.alts[v_idxs])
-        # reshape to (b p ~v ~l)
-        data = NumpyArray(
-            ak.flatten(alts.to_awkward(), None).to_numpy(),
-            parameters={"__array__": "char"},
-        )
-        l_content = ListOffsetArray(Index64(lengths_to_offsets(alts.lengths)), data)
-        geno_offsets = lengths_to_offsets(genos.lengths)
-        vl_content = ListOffsetArray(Index64(geno_offsets), l_content)
-        pvl_content = RegularArray(vl_content, genos.shape[-1])
+        alt_offsets = lengths_to_offsets(alts.lengths)
+        node = alts.to_awkward().layout
+        while not isinstance(node, NumpyArray):
+            node = node.content
+        data = ak.with_parameter(node, "__array__", "char", highlevel=False)
+        l_content = ListOffsetArray(Index(alt_offsets), data)
+        vl_content = ListOffsetArray(Index(geno_offsets), l_content)
+        pvl_content = RegularArray(vl_content, genos.ploidy)
         alts = ak.Array(pvl_content)
 
         v_starts = self.variants.v_starts[v_idxs]
@@ -396,6 +407,7 @@ class Haps(Reconstructor[_H]):
         ilens = Ragged[ilens.dtype.type].from_offsets(ilens, genos.shape, geno_offsets)
 
         if self.dosages is not None:
+            # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
             dosages = cast(SparseDosages, self.dosages[r, s])
             dosages = Ragged[DOSAGE_TYPE].from_offsets(
                 ak.flatten(dosages.to_awkward(), None).to_numpy(),

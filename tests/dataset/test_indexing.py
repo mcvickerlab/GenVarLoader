@@ -163,3 +163,9 @@ def test_getitem_shape(
     np.testing.assert_equal(idx, desired_idx)
     assert squeeze == desired_squeeze
     assert reshape == desired_reshape
+
+    idx, squeeze, reshape = dsi.parse_idx((regions, s_idx))
+
+    np.testing.assert_equal(idx, desired_idx)
+    assert squeeze == desired_squeeze
+    assert reshape == desired_reshape
