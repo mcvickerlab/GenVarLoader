@@ -193,6 +193,9 @@ def s2i(str_idx: StrIdx, map: HashTable) -> Idx:
     else:
         idx = str_idx
 
+    if isinstance(idx, np.ndarray) and idx.ndim == 0:
+        idx = idx.item()
+
     idx = cast(Idx, idx)
 
     return idx
