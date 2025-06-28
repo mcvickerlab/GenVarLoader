@@ -1,14 +1,30 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Callable, Literal, TypedDict, cast
+
 import awkward as ak
 import numba as nb
 import numpy as np
+import seqpro as sp
 from attrs import define
-from awkward.contents import RegularArray
+from awkward.contents import (
+    Content,
+    ListArray,
+    ListOffsetArray,
+    NumpyArray,
+    RegularArray,
+)
+from awkward.index import Index
 from genoray._svar import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
 from numpy.typing import NDArray
-from seqpro._ragged import OFFSET_TYPE, Ragged
+from seqpro._ragged import OFFSET_TYPE, Ragged, lengths_to_offsets
 from typing_extensions import Self
+
+from .._torch import TORCH_AVAILABLE, requires_torch
+
+if TORCH_AVAILABLE or TYPE_CHECKING:
+    import torch
+    from torch.nested import nested_tensor_from_jagged as nt_jag
 
 
 @define
@@ -71,6 +87,190 @@ class RaggedVariants:
             max_ccf=max_ccf,
         )
         return self
+
+    def to_packed(self) -> Self:
+        """Apply :func:`ak.to_packed` to all arrays."""
+        alts = ak.to_packed(self.alts)
+        v_starts = Ragged[POS_TYPE].from_awkward(
+            ak.to_packed(self.v_starts.to_awkward())
+        )
+        ilens = Ragged[np.int32].from_awkward(ak.to_packed(self.ilens.to_awkward()))
+        dosages = (
+            None
+            if self.dosages is None
+            else Ragged[DOSAGE_TYPE].from_awkward(
+                ak.to_packed(self.dosages.to_awkward())
+            )
+        )
+
+        return type(self)(alts, v_starts, ilens, dosages)
+
+    @requires_torch
+    def to_nested_tensor_batch(
+        self,
+        device: str | torch.device = "cpu",
+        tokenizer: Literal["seqpro"]
+        | Callable[[NDArray[np.bytes_]], NDArray[np.integer]]
+        | None = None,
+    ) -> RagVarBatch:
+        """Convert a RaggedVariants object to a tuple of nested tensors. Will flatten across
+        the ploidy dimension for attributes ILEN, starts, and dosages such that their shapes are (batch * ploidy, ~variants).
+        For the alternative alleles, will flatten across both the ploidy and variant dimensions such that the
+        shape is (batch * ploidy * ~variants, ~alt_len).
+
+        .. important::
+            This function assumes all variant data is packed (see :func:`ak.to_packed`).
+
+        Parameters
+        ----------
+        device
+            The device to move the tensors to.
+        tokenizer
+            The tokenizer to use for the alternative alleles.
+
+            - If :code:`"seqpro"`, will use :func:`seqpro.tokenize` to convert :code:`ACGTN -> 0 1 2 3 4`.
+            - If :code:`None`, will use the integer ASCII value of each character i.e. :code:`ACGTN -> 65 67 71 84 78`.
+            - Otherwise, will use the provided callable to convert the alternative alleles to a tensor of integers.
+
+        Returns
+        -------
+            Dictionary of `nested tensors <https://docs.pytorch.org/docs/stable/nested.html>`_ and integers with the following keys:
+
+            - :code:`"alts"` with shape :code:`(batch * ploidy * ~variants, ~alt_len)`
+            - :code:`"ilens"` with shape :code:`(batch * ploidy, ~variants)`
+            - :code:`"starts"` with shape :code:`(batch * ploidy, ~variants)`
+            - :code:`"dosages"` with shape :code:`(batch * ploidy, ~variants)`
+            - :code:`"max_seqlen"`: int, maximum number of variants
+            - :code:`"max_alt_len"`: int, maximum length of an alternative allele
+
+        """
+        alts = cast(Content, self.alts.layout)
+        while not isinstance(alts, NumpyArray):
+            if isinstance(alts, (ListArray, ListOffsetArray)):
+                offsets = alts
+            alts = cast(Content, alts.content)
+        alts = cast(NDArray[np.bytes_], alts.data)  # type: ignore
+
+        if tokenizer == "seqpro":
+            alts = sp.tokenize(alts, dict(zip(sp.DNA.alphabet, range(4))), 4)
+        elif tokenizer is not None:
+            alts = tokenizer(alts)
+        else:
+            alts = alts.view(np.uint8)
+
+        alts = torch.from_numpy(alts)
+
+        offsets = cast(ListArray | ListOffsetArray, offsets)  # type: ignore
+        # (N ~V ~L) -> (N ~V) -> (N*~V)
+        if isinstance(offsets, ListArray):
+            lengths = cast(NDArray, offsets.stops.data - offsets.starts.data)  # type: ignore
+            offsets = lengths_to_offsets(lengths, np.int32)
+        else:
+            offsets = offsets.offsets.data.astype(np.int32)  # type: ignore
+            lengths = np.diff(offsets)
+
+        max_alen = lengths.max().item()
+        offsets = torch.from_numpy(offsets)
+        # ((N, ~V), ~L)
+        alts = nt_jag(alts, offsets, max_seqlen=max_alen).to(device)
+
+        max_vlen = np.diff(self.v_starts.offsets).max().item()
+        v_offsets = torch.from_numpy(self.v_starts.offsets.astype(np.int32))
+        ilens = torch.from_numpy(self.ilens.data.astype(np.float32))
+        ilens = nt_jag(ilens, v_offsets, max_seqlen=max_vlen).to(device)
+        starts = torch.from_numpy(self.v_starts.data.astype(np.float32))
+        starts = nt_jag(starts, v_offsets, max_seqlen=max_vlen).to(device)
+
+        if self.dosages is not None:
+            dosages = torch.from_numpy(self.dosages.data.astype(np.float32))
+            dosages = nt_jag(dosages, v_offsets, max_seqlen=max_vlen).to(device)
+        else:
+            dosages = None
+
+        return RagVarBatch(
+            alts=alts,
+            ilens=ilens,
+            starts=starts,
+            dosages=dosages,
+            max_seqlen=max_vlen,
+            max_alt_len=max_alen,
+        )
+
+    def prepend_pad_var(
+        self, alt_char: str = "N", ilen: int = 0, start: int = -1, dosage: float = 0.0
+    ) -> Self:
+        """Prepend a pad variant so that every group is guaranteed to have at least 1 variant.
+
+        Parameters
+        ----------
+        alt_char
+            The character to use for the pad variant's ALT
+        ilen
+            The ILEN to use for the pad variant
+        start
+            The start position to use for the pad variant
+        dosage
+            The dosage to use for the pad variant
+
+        Returns
+        -------
+            The RaggedVariants object with the pad variant prepended to each group.
+        """
+        b, p = self.ilens.shape
+
+        # (b p 1 1)
+        node = NumpyArray(
+            np.full((b, p), ord(alt_char), np.uint8).ravel(),  # type: ignore
+            parameters={"__array__": "char"},
+        )
+        node = ListOffsetArray(Index(np.arange(len(node) + 1)), node)
+        node = RegularArray(node, 1)
+        node = RegularArray(node, p)
+        pad_alt = ak.Array(node)
+        # (b p ~v ~l)
+        new_alts = ak.concatenate([pad_alt, ak.to_packed(self.alts)], axis=2)
+
+        # (b p 1)
+        pad_ilen = ak.from_numpy(np.full((b, p, 1), ilen, np.int32), regulararray=True)
+        # (b p ~v)
+        new_ilens = Ragged.from_awkward(
+            ak.concatenate([pad_ilen, self.ilens.to_awkward()], axis=2)
+        )
+
+        pad_start = ak.from_numpy(
+            np.full((b, p, 1), start, np.int32), regulararray=True
+        )
+        # (b p ~v)
+        new_starts = Ragged.from_awkward(
+            ak.concatenate([pad_start, self.v_starts.to_awkward()], axis=2)
+        )
+
+        if self.dosages is not None:
+            pad_dosage = ak.from_numpy(
+                np.full((b, p, 1), dosage, np.float32), regulararray=True
+            )
+            # (b p ~v)
+            new_dosages = Ragged.from_awkward(
+                ak.concatenate([pad_dosage, self.dosages.to_awkward()], axis=2)
+            )
+        else:
+            new_dosages = None
+
+        return type(self)(
+            alts=new_alts,
+            ilens=new_ilens,
+            v_starts=new_starts,
+            dosages=new_dosages,
+        )
+
+
+class RagVarBatch(TypedDict):
+    alts: torch.Tensor
+    ilens: torch.Tensor
+    starts: torch.Tensor
+    dosages: torch.Tensor | None
+    max_seqlen: int
+    max_alt_len: int
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
