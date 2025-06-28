@@ -105,8 +105,8 @@ class RaggedVariants:
 
         return type(self)(alts, v_starts, ilens, dosages)
 
-    def rc(self, to_rc: NDArray[np.bool_] | None = None) -> Self:
-        """Reverse complement the alternative alleles.
+    def rc_(self, to_rc: NDArray[np.bool_] | None = None) -> Self:
+        """Reverse complement the alternative alleles. This is an in-place operation if the data is already packed.
 
         Parameters
         ----------
@@ -120,9 +120,10 @@ class RaggedVariants:
         """
         ragv = self.to_packed()
 
-        node = ragv.alts.layout
-        while not isinstance(node.content, NumpyArray):
-            node = node.content
+        alts = ragv.alts.layout
+        while not isinstance(alts.content, NumpyArray):
+            alts = alts.content
+        alts = ak.Array(alts)
 
         if to_rc is None:
             to_rc = np.ones(ragv.shape[:-1], np.bool_)
@@ -135,7 +136,7 @@ class RaggedVariants:
             _to_rc = _to_rc.content
         _to_rc = _to_rc.data
 
-        rc_helper(ak.Array(node), to_rc)
+        rc_helper(alts, _to_rc)
 
         return ragv
 
