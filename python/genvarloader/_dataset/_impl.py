@@ -1242,7 +1242,8 @@ class Dataset:
             reverse(rag.var_idxs, to_rc)
             reverse(rag.ref_coords, to_rc)
         elif isinstance(rag, RaggedVariants):
-            rag = rag.rc_(to_rc)
+            # (b p ~v [~l]) & (b) -> (b 1)
+            rag = rag.rc_(to_rc[:, None])
         else:
             assert_never(rag)
         return rag
