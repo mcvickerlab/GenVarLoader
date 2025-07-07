@@ -9,7 +9,6 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from attrs import define, evolve, field
-from genoray._svar import SparseGenotypes
 from genoray._utils import ContigNormalizer
 from loguru import logger
 from numpy.typing import NDArray
@@ -649,7 +648,7 @@ class Dataset:
         return self._seqs.reference
 
     @property
-    def has_genotypes(self) -> bool:
+    def has_genotypes(self):
         """Whether the dataset has genotypes."""
         return isinstance(self._seqs, Haps)
 
@@ -879,11 +878,7 @@ class Dataset:
         samples
             Samples to compute haplotype lengths for.
         """
-        if (
-            not isinstance(self._seqs, Haps)
-            or not isinstance(self._seqs.genotypes, SparseGenotypes)
-            or not self.deterministic
-        ):
+        if not isinstance(self._seqs, Haps) or not self.deterministic:
             return None
 
         if regions is None:
@@ -915,6 +910,51 @@ class Dataset:
             hap_lens = hap_lens.reshape(*out_reshape, self._seqs.genotypes.shape[-1])
 
         return hap_lens
+
+    def n_variants(
+        self,
+        regions: Idx | None = None,
+        samples: Idx | str | Sequence[str] | None = None,
+    ) -> NDArray[np.int32] | None:
+        """The number of variants in the dataset for specified regions and samples.
+
+        Parameters
+        ----------
+        regions
+            Regions to compute the number of variants for.
+        samples
+            Samples to compute the number of variants for.
+
+        Returns
+        -------
+            Array with shape (..., ploidy). The number of variants in the dataset for the specified regions and samples.
+            If the dataset does not have genotypes, this will return :code:`None`.
+        """
+        if not isinstance(self._seqs, Haps):
+            return None
+
+        if regions is None:
+            regions = slice(None)
+        if samples is None:
+            samples = slice(None)
+        idx = (regions, samples)
+
+        ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
+
+        r_idx, s_idx = np.unravel_index(ds_idx, self.full_shape)
+
+        # ((...), P)
+        n_vars = self._seqs.n_variants[r_idx, s_idx]
+
+        if squeeze:
+            # (1, P) -> (P)
+            n_vars = n_vars.squeeze(0)
+
+        if out_reshape is not None:
+            # ((...), P) -> (..., P)
+            n_vars = n_vars.reshape(*out_reshape, n_vars.shape[-1])
+
+        return n_vars
 
     def write_transformed_track(
         self,
