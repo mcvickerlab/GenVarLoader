@@ -10,7 +10,7 @@ from typing import Callable, Literal, Protocol, TypeVar, cast, overload
 import awkward as ak
 import numpy as np
 import polars as pl
-from attrs import define, evolve
+from attrs import define, evolve, field
 from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
 from awkward.index import Index
 from einops import repeat
@@ -130,6 +130,11 @@ class Haps(Reconstructor[_H]):
     """Shape: (regions, samples, ploidy). The genotypes in the dataset. This is memory mapped."""
     dosages: SparseDosages | None
     kind: type[_H]
+    n_variants: NDArray[np.int32] = field(init=False)
+    """Shape: (regions, samples, ploidy). The number of variants in the dataset."""
+
+    def __attrs_post_init__(self):
+        self.n_variants = ak.num(self.genotypes.to_awkward(), -1).to_numpy()
 
     @classmethod
     def from_path(
