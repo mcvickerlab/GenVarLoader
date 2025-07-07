@@ -108,46 +108,35 @@ def test_infer_germ_ccfs(
     np.testing.assert_equal(ccfs, desired)
 
 
-def _make_alts(
-    alts: NDArray[np.uint8],
-    p: int,
-    v_lens: NDArray[np.integer],
-    alt_lens: NDArray[np.integer],
-) -> ak.Array:
-    node = NumpyArray(alts, parameters={"__array__": "char"})
-    l_offsets = Index(lengths_to_offsets(alt_lens))
-    node = ListOffsetArray(l_offsets, node)
-    v_offsets = Index(lengths_to_offsets(v_lens))
-    node = ListOffsetArray(v_offsets, node)
+def _bpv(p: int, data: NDArray, offsets: NDArray) -> ak.Array:
+    node = NumpyArray(data)
+    node = ListOffsetArray(Index(offsets), node)
+    node = RegularArray(node, p)
+    return ak.Array(node)
+
+
+def _bpvl(p: int, data: NDArray, l_offsets: NDArray, v_offsets: NDArray) -> ak.Array:
+    node = NumpyArray(data.view(np.uint8), parameters={"__array__": "byte"})
+    node = ListOffsetArray(Index(l_offsets), node)
+    node = ListOffsetArray(Index(v_offsets), node)
     node = RegularArray(node, p)
     return ak.Array(node)
 
 
 def rc_no_rc():
     # (b, p, ~v, ~l)
-    # (2, 2, [0, 2], [1, 2])
-    v_lens = np.array([0, 2], np.int32)
+    # (2, 1, [0, 2], [1, 2])
     l_lens = np.array([1, 2], np.int32)
-    alts = _make_alts(np.array([b"ACT"]).view(np.uint8), 1, v_lens, l_lens)
-    ilens = Ragged.from_awkward(
-        ak.to_regular(
-            ak.Array([np.array([[]], np.int32), np.array([[0, 1]], np.int32)]), 1
-        )
-    )
-    v_starts = Ragged.from_awkward(
-        ak.to_regular(
-            ak.Array([np.array([[]], POS_TYPE), np.array([[0, 1]], POS_TYPE)]), 1
-        )
-    )
-    dosages = Ragged.from_awkward(
-        ak.to_regular(
-            ak.Array([np.array([[]], np.float32), np.array([[0.1, 0.2]], np.float32)]),
-            1,
-        )
-    )
+    l_offsets = lengths_to_offsets(l_lens)
+    v_lens = np.array([0, 2], np.int32)
+    v_offsets = lengths_to_offsets(v_lens)
+    alts = _bpvl(1, np.array([b"ACT"]).view(np.uint8), l_offsets, v_offsets)
+    ilens = Ragged.from_awkward(_bpv(1, np.array([0, 1], np.int32), v_offsets))
+    v_starts = Ragged.from_awkward(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
+    dosages = Ragged.from_awkward(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
 
     ragv = RaggedVariants(alts, v_starts, ilens, dosages)
-    to_rc = np.zeros(2, np.bool_)
+    to_rc = np.zeros(2, np.bool_)[:, None]
     desired = RaggedVariants(alts, v_starts, ilens, dosages)
 
     return ragv, to_rc, desired
@@ -156,29 +145,18 @@ def rc_no_rc():
 def rc_second_batch():
     # (b, p, ~v, ~l)
     # (2, 2, [0, 2], [1, 2])
-    v_lens = np.array([0, 2], np.int32)
     l_lens = np.array([1, 2], np.int32)
-    alts = _make_alts(np.array([b"ACT"]).view(np.uint8), 1, v_lens, l_lens)
-    rc_alts = _make_alts(np.array([b"TAG"]).view(np.uint8), 1, v_lens, l_lens)
-    ilens = Ragged.from_awkward(
-        ak.to_regular(
-            ak.Array([np.array([[]], np.int32), np.array([[0, 1]], np.int32)]), 1
-        )
-    )
-    v_starts = Ragged.from_awkward(
-        ak.to_regular(
-            ak.Array([np.array([[]], POS_TYPE), np.array([[0, 1]], POS_TYPE)]), 1
-        )
-    )
-    dosages = Ragged.from_awkward(
-        ak.to_regular(
-            ak.Array([np.array([[]], np.float32), np.array([[0.1, 0.2]], np.float32)]),
-            1,
-        )
-    )
+    l_offsets = lengths_to_offsets(l_lens)
+    v_lens = np.array([0, 2], np.int32)
+    v_offsets = lengths_to_offsets(v_lens)
+    alts = _bpvl(1, np.array([b"ACT"]).view(np.uint8), l_offsets, v_offsets)
+    rc_alts = _bpvl(1, np.array([b"TAG"]).view(np.uint8), l_offsets, v_offsets)
+    ilens = Ragged.from_awkward(_bpv(1, np.array([0, 1], np.int32), v_offsets))
+    v_starts = Ragged.from_awkward(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
+    dosages = Ragged.from_awkward(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
 
     ragv = RaggedVariants(alts, v_starts, ilens, dosages)
-    to_rc = np.array([False, True])
+    to_rc = np.array([False, True])[:, None]
     desired = RaggedVariants(rc_alts, v_starts, ilens, dosages)
 
     return ragv, to_rc, desired
@@ -187,26 +165,15 @@ def rc_second_batch():
 def rc_all():
     # (b, p, ~v, ~l)
     # (2, 2, [0, 2], [1, 2])
-    v_lens = np.array([0, 2], np.int32)
     l_lens = np.array([1, 2], np.int32)
-    alts = _make_alts(np.array([b"ACT"]).view(np.uint8), 1, v_lens, l_lens)
-    rc_alts = _make_alts(np.array([b"TAG"]).view(np.uint8), 1, v_lens, l_lens)
-    ilens = Ragged.from_awkward(
-        ak.to_regular(
-            ak.Array([np.array([[]], np.int32), np.array([[0, 1]], np.int32)]), 1
-        )
-    )
-    v_starts = Ragged.from_awkward(
-        ak.to_regular(
-            ak.Array([np.array([[]], POS_TYPE), np.array([[0, 1]], POS_TYPE)]), 1
-        )
-    )
-    dosages = Ragged.from_awkward(
-        ak.to_regular(
-            ak.Array([np.array([[]], np.float32), np.array([[0.1, 0.2]], np.float32)]),
-            1,
-        )
-    )
+    l_offsets = lengths_to_offsets(l_lens)
+    v_lens = np.array([0, 2], np.int32)
+    v_offsets = lengths_to_offsets(v_lens)
+    alts = _bpvl(1, np.array([b"ACT"]).view(np.uint8), l_offsets, v_offsets)
+    rc_alts = _bpvl(1, np.array([b"TAG"]).view(np.uint8), l_offsets, v_offsets)
+    ilens = Ragged.from_awkward(_bpv(1, np.array([0, 1], np.int32), v_offsets))
+    v_starts = Ragged.from_awkward(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
+    dosages = Ragged.from_awkward(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
 
     ragv = RaggedVariants(alts, v_starts, ilens, dosages)
     to_rc = None

@@ -34,7 +34,7 @@ def no_torch_error(*args, **kwargs):  # type: ignore
     )
 
 
-def requires_torch(func: Callable) -> Callable:
+def requires_torch(func):
     if TORCH_AVAILABLE:
         return func
     else:
