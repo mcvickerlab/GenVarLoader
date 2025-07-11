@@ -121,6 +121,17 @@ def getitem_slice_scalar():
     return regions, samples, s_idx, des_idx, des_squeeze, des_reshape
 
 
+def getitem_slice_slice():
+    regions = slice(2)
+    samples = slice(1)
+    s_idx = [0]
+
+    des_idx = np.array([2, 4])
+    des_squeeze = False
+    des_reshape = (2, 1)
+    return regions, samples, s_idx, des_idx, des_squeeze, des_reshape
+
+
 def getitem_reshape():
     regions = 0
     samples = [["Aang", "Katara"], ["Katara", "Aang"]]

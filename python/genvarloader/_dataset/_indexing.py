@@ -134,6 +134,8 @@ class DatasetIndexer:
             r_idx = np.atleast_1d(self._r_idx[regions])
             s_idx = np.atleast_1d(self._s_idx[s_idx])
             idx = np.ravel_multi_index(np.ix_(r_idx, s_idx), self.full_shape).squeeze()
+            if isinstance(regions, slice) and isinstance(samples, slice):
+                out_reshape = (len(r_idx), len(s_idx))
         elif idx_t == "adv":
             r_idx = self._r_idx[regions]
             s_idx = self._s_idx[s_idx]
