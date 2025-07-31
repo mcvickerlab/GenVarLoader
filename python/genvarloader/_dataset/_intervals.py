@@ -2,8 +2,6 @@ import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
-from .._types import INTERVAL_DTYPE
-
 __all__ = []
 
 
@@ -11,7 +9,9 @@ __all__ = []
 def intervals_to_tracks(
     offset_idxs: NDArray[np.integer],
     starts: NDArray[np.int32],
-    intervals: NDArray[np.void],
+    itv_starts: NDArray[np.int32],
+    itv_ends: NDArray[np.int32],
+    itv_values: NDArray[np.float32],
     itv_offsets: NDArray[np.int64],
     out: NDArray[np.float32],
     out_offsets: NDArray[np.int64],
@@ -28,13 +28,19 @@ def intervals_to_tracks(
         Shape = (batch) Indexes into offsets.
     starts : NDArray[np.int32]
         Shape = (batch) Starts for each query.
-    out_offsets : NDArray[np.int64]
-        Shape = (batch + 1) Offsets into output tracks.
-    intervals : NDArray[np.void]
-        Ragged shape = (... ~intervals) Sorted intervals with struct dtype: (start: i32, end: i32, value: f32).
+    itv_starts : NDArray[np.int32]
+        Shape = (n_intervals) Starts for each interval.
+    itv_ends : NDArray[np.int32]
+        Shape = (n_intervals) Ends for each interval.
+    itv_values : NDArray[np.float32]
+        Shape = (n_intervals) Values for each interval.
     itv_offsets : NDArray[np.uint32]
         Shape = (n_slices + 1) Offsets into intervals and values.
         For a GVL Dataset, n_interval_sets = n_samples * n_regions with that layout.
+    out : NDArray[np.float32]
+        Shape = (batch*length) Output tracks.
+    out_offsets : NDArray[np.int64]
+        Shape = (batch + 1) Offsets into output tracks.
 
     Returns
     -------
@@ -60,11 +66,12 @@ def intervals_to_tracks(
 
         # if parallelized, a data race will occur if there are any overlapping intervals
         for interval in range(itv_s, itv_e):
-            itv = intervals[interval]
             #! assumes itv.start >= query_start
-            start, end = itv.start - query_start, itv.end - query_start
+            start = itv_starts[interval] - query_start
+            end = itv_ends[interval] - query_start
+            value = itv_values[interval]
             if start < length:
-                _out[start:end] = itv.value
+                _out[start:end] = value
             else:
                 #! assumes intervals are sorted by start
                 # cannot break if parallelized
@@ -76,7 +83,7 @@ def tracks_to_intervals(
     regions: NDArray[np.int32],
     tracks: NDArray[np.float32],
     track_offsets: NDArray[np.int64],
-):
+) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.float32], NDArray[np.int64]]:
     """Convert tracks to intervals. Note that this will include 0-value intervals.
 
     Parameters
@@ -116,7 +123,9 @@ def tracks_to_intervals(
     interval_offsets[0] = 0
     interval_offsets[1:] = n_intervals.cumsum()
 
-    all_intervals = np.empty(interval_offsets[-1], INTERVAL_DTYPE)
+    all_starts = np.empty(interval_offsets[-1], np.int32)
+    all_ends = np.empty(interval_offsets[-1], np.int32)
+    all_values = np.empty(interval_offsets[-1], np.float32)
     for query in nb.prange(n_queries):
         o_s = track_offsets[query]
         o_e = track_offsets[query + 1]
@@ -128,15 +137,13 @@ def tracks_to_intervals(
         values = track[compacted_backward_mask[:-1]]
         s = interval_offsets[query]
         start = regions[query, 1]
-        #! parallel=True does not implement assignment to non-scalar views of structured arrays
-        #! so, we must explicitly iterate over the slice
-        for i in nb.prange(len(values)):
-            itv = all_intervals[i + s]
-            itv["start"] = compacted_backward_mask[i] + start
-            itv["end"] = compacted_backward_mask[i + 1] + start
-            itv["value"] = values[i]
+        compacted_backward_mask += start
+        n = len(values)
+        all_starts[s : s + n] = compacted_backward_mask[:-1]
+        all_ends[s : s + n] = compacted_backward_mask[1:]
+        all_values[s : s + n] = values
 
-    return all_intervals, interval_offsets
+    return all_starts, all_ends, all_values, interval_offsets
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)

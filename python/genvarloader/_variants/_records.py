@@ -1,8 +1,12 @@
+from __future__ import annotations
+
+from typing import cast
+
 import numpy as np
 import polars as pl
 import pyarrow as pa
 from attrs import define
-from seqpro._ragged import Ragged
+from seqpro.rag import Ragged
 
 
 @define
@@ -19,13 +23,14 @@ class RaggedAlleles(Ragged[np.bytes_]):
     """
 
     @classmethod
-    def from_polars(cls, alleles: pl.Series):
+    def from_polars(cls, alleles: pl.Series) -> RaggedAlleles:
         offsets = np.empty(len(alleles) + 1, np.int64)
         offsets[0] = 0
         offsets[1:] = alleles.str.len_bytes().cast(pl.Int64).cum_sum().to_numpy()
         flat_alleles = np.frombuffer(alleles.str.join().to_numpy()[0].encode(), "S1")
         shape = len(alleles)
-        return cls.from_offsets(flat_alleles, shape, offsets)
+        out = cls.from_offsets(flat_alleles, (shape, None), offsets)
+        return cast(RaggedAlleles, out)
 
     def to_polars(self):
         n_alleles = len(self)

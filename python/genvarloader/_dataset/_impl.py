@@ -12,21 +12,22 @@ from attrs import define, evolve, field
 from genoray._utils import ContigNormalizer
 from loguru import logger
 from numpy.typing import NDArray
+from seqpro.rag import DTYPE, Ragged
 from typing_extensions import NoReturn, Self, assert_never
 
 from .._ragged import (
     INTERVAL_DTYPE,
-    Ragged,
     RaggedAnnotatedHaps,
     RaggedIntervals,
     RaggedSeqs,
+    RaggedTracks,
     is_rag_dtype,
     reverse,
     reverse_complement,
     to_padded,
 )
 from .._torch import TORCH_AVAILABLE, TorchDataset, get_dataloader
-from .._types import DTYPE, AnnotatedHaps, Idx, StrIdx
+from .._types import AnnotatedHaps, Idx, StrIdx
 from .._utils import lengths_to_offsets, normalize_contig_name
 from ._indexing import DatasetIndexer
 from ._rag_variants import RaggedVariants
@@ -292,6 +293,7 @@ class Dataset:
         rng: int | np.random.Generator | None = None,
         deterministic: bool | None = None,
         rc_neg: bool | None = None,
+        # var_filter: Callable[[]]
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -543,45 +545,60 @@ class Dataset:
             case k, s, t, r:
                 assert_never(k), assert_never(s), assert_never(t), assert_never(r)
 
-    def with_tracks(self, tracks: str | list[str] | None):
+    def with_tracks(
+        self,
+        tracks: str | list[str] | Literal[False] | None = None,
+        kind: Literal["tracks", "intervals"] = "tracks",
+    ):
         """Modify which tracks to return, returning a new dataset without modifying the old one.
 
         Parameters
         ----------
         tracks
             The tracks to return. Can be a (list of) track names or :code:`False` to return no tracks."""
+        if tracks is None:
+            tracks = False if self.active_tracks is None else self.active_tracks
+
+        if kind == "tracks":
+            _kind = RaggedTracks
+        elif kind == "intervals":
+            _kind = RaggedIntervals
+        else:
+            assert_never(kind)
+
         match tracks, self._seqs, self._tracks, self._recon:
-            case None, None, _, _:
+            case False, None, _, _:
                 raise ValueError(
                     "Dataset only has tracks available, so returning no tracks would"
                     " result in a Dataset that cannot return anything."
                 )
-            case None, Ref() | Haps(), _, Tracks():
+            case False, Ref() | Haps(), _, Tracks():
                 raise RuntimeError(
                     "Dataset is set to only return tracks, so setting tracks to None would"
                     " result in a Dataset that cannot return anything."
                 )
-            case None, _, None, _:
+            case False, _, None, _:
                 return self
-            case None, _, tr, ((Ref() | Haps()) as seqs) | RefTracks(
+            case False, _, tr, ((Ref() | Haps()) as seqs) | RefTracks(
                 seqs=seqs
             ) | HapsTracks(haps=seqs):
-                return evolve(self, _tracks=tr.with_tracks(None), _recon=seqs)
+                tr = tr.with_tracks(None)
+                return evolve(self, _tracks=tr, _recon=seqs)
             case t, _, None, _:
                 raise ValueError(
                     "Can't set dataset to return tracks because it has none to begin with."
                 )
             case t, _, tr, (Ref() as seqs) | RefTracks(seqs=seqs):
-                recon = RefTracks(seqs=seqs, tracks=tr.with_tracks(t))
-                return evolve(self, _tracks=tr.with_tracks(t), _recon=recon)
+                tr = tr.with_tracks(t).to_kind(_kind)
+                recon = RefTracks(seqs=seqs, tracks=tr)
+                return evolve(self, _tracks=tr, _recon=recon)
             case t, _, tr, (Haps() as seqs) | HapsTracks(haps=seqs):
-                recon = HapsTracks(
-                    haps=seqs,  # type: ignore
-                    tracks=tr.with_tracks(t),
-                )
-                return evolve(self, _tracks=tr.with_tracks(t), _recon=recon)
-            case t, _, tr, Tracks() as r:
-                return evolve(self, _tracks=tr.with_tracks(t), _recon=r.with_tracks(t))
+                tr = tr.with_tracks(t).to_kind(_kind)
+                recon = HapsTracks(haps=seqs, tracks=tr)
+                return evolve(self, _tracks=tr, _recon=recon)
+            case t, _, tr, Tracks():
+                tr = tr.with_tracks(t).to_kind(_kind)
+                return evolve(self, _tracks=tr, _recon=tr)
             case k, s, t, r:
                 assert_never(k), assert_never(s), assert_never(t), assert_never(r)
 
@@ -624,9 +641,12 @@ class Dataset:
         | Haps[RaggedVariants]
         | Tracks
         | RefTracks
-        | HapsTracks[RaggedSeqs]
-        | HapsTracks[RaggedAnnotatedHaps]
-        | HapsTracks[RaggedVariants]
+        | HapsTracks[RaggedSeqs, RaggedTracks]
+        | HapsTracks[RaggedAnnotatedHaps, RaggedTracks]
+        | HapsTracks[RaggedVariants, RaggedTracks]
+        | HapsTracks[RaggedSeqs, RaggedIntervals]
+        | HapsTracks[RaggedAnnotatedHaps, RaggedIntervals]
+        | HapsTracks[RaggedVariants, RaggedIntervals]
     ) = field(alias="_recon")
     _rng: np.random.Generator = field(alias="_rng")
 
@@ -684,7 +704,7 @@ class Dataset:
     def ploidy(self) -> int | None:
         """The ploidy of the dataset."""
         if isinstance(self._seqs, Haps):
-            return self._seqs.genotypes.ploidy
+            return self._seqs.genotypes.shape[-2]
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -907,7 +927,10 @@ class Dataset:
             hap_lens = hap_lens.squeeze(0)
 
         if out_reshape is not None:
-            hap_lens = hap_lens.reshape(*out_reshape, self._seqs.genotypes.shape[-1])
+            hap_lens = hap_lens.reshape(
+                *out_reshape,
+                self._seqs.genotypes.shape[-2],  # type: ignore
+            )
 
         return hap_lens
 
@@ -1021,6 +1044,8 @@ class Dataset:
 
                 Only supports BED files for now.
         """
+        raise NotImplementedError("Not implemented for awkward subclass")
+
         if self.available_tracks is not None and (
             exists := set(tracks) & set(self.available_tracks)
         ):
@@ -1194,12 +1219,14 @@ class Dataset:
         Ragged[np.bytes_ | np.float32]
         | RaggedAnnotatedHaps
         | RaggedVariants
+        | RaggedIntervals
         | NDArray[np.bytes_ | np.float32]
         | AnnotatedHaps
         | tuple[
             Ragged[np.bytes_ | np.float32]
             | RaggedAnnotatedHaps
             | RaggedVariants
+            | RaggedIntervals
             | NDArray[np.bytes_ | np.float32]
             | AnnotatedHaps,
             ...,
@@ -1240,15 +1267,19 @@ class Dataset:
 
         if self.output_length == "variable":
             recon = tuple(
-                r if isinstance(r, RaggedVariants) else self._pad(r) for r in recon
+                r if isinstance(r, (RaggedVariants, RaggedIntervals)) else self._pad(r)
+                for r in recon
             )
         elif isinstance(self.output_length, int):
             recon = tuple(
-                r if isinstance(r, RaggedVariants) else self._fix_len(r) for r in recon
+                r
+                if isinstance(r, (RaggedVariants, RaggedIntervals))
+                else self._fix_len(r)
+                for r in recon
             )
 
         if out_reshape is not None:
-            recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)
+            recon = tuple(o.reshape(out_reshape + o.shape[1:-1]) for o in recon)
 
         if squeeze:
             # (1 [p] l) -> ([p] l)
@@ -1267,11 +1298,15 @@ class Dataset:
     ) -> RaggedAnnotatedHaps: ...
     @overload
     def _rc(self, rag: RaggedVariants, to_rc: NDArray[np.bool_]) -> RaggedVariants: ...
+    @overload
+    def _rc(
+        self, rag: RaggedIntervals, to_rc: NDArray[np.bool_]
+    ) -> RaggedIntervals: ...
     def _rc(
         self,
-        rag: Ragged | RaggedAnnotatedHaps | RaggedVariants,
+        rag: Ragged | RaggedAnnotatedHaps | RaggedVariants | RaggedIntervals,
         to_rc: NDArray[np.bool_],
-    ) -> Ragged | RaggedAnnotatedHaps | RaggedVariants:
+    ) -> Ragged | RaggedAnnotatedHaps | RaggedVariants | RaggedIntervals:
         if isinstance(rag, Ragged):
             if is_rag_dtype(rag, np.bytes_):
                 rag = reverse_complement(rag, to_rc)
@@ -1284,6 +1319,8 @@ class Dataset:
         elif isinstance(rag, RaggedVariants):
             # (b p ~v [~l]) & (b) -> (b 1)
             rag = rag.rc_(to_rc[:, None])
+        elif isinstance(rag, RaggedIntervals):
+            rag = rag
         else:
             assert_never(rag)
         return rag
@@ -1313,10 +1350,20 @@ class Dataset:
         assert isinstance(self.output_length, int)
         if isinstance(rag, Ragged):
             # (b p) or (b)
-            return rag.data.reshape((*rag.shape, self.output_length))
+            return rag.data.reshape(
+                (
+                    *rag.shape[:-1],  # type: ignore
+                    self.output_length,
+                )
+            )
         elif isinstance(rag, RaggedAnnotatedHaps):
             assert isinstance(self._seqs, Haps)
-            return rag.to_fixed_shape((*rag.shape, self.output_length))
+            return rag.to_fixed_shape(
+                (
+                    *rag.shape[:-1],  # type: ignore
+                    self.output_length,
+                )
+            )
         else:
             assert_never(rag)
 
@@ -1339,13 +1386,14 @@ def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedInt
     counts = np.zeros(regions.height, dtype=np.int32)
     counts[i] = nonzero_counts
     offsets = lengths_to_offsets(counts)
+    shape = (len(offsets) - 1, None)
 
     # convert to numpy intervals
     itvs = np.empty(intersect.height, dtype=INTERVAL_DTYPE)
-    itvs["start"] = intersect["chromStart"].to_numpy()
-    itvs["end"] = intersect["chromEnd"].to_numpy()
-    itvs["value"] = intersect["score"].to_numpy()
-    itvs = RaggedIntervals.from_offsets(itvs, len(offsets) - 1, offsets)
+    starts = Ragged.from_offsets(intersect["chromStart"].to_numpy(), shape, offsets)
+    ends = Ragged.from_offsets(intersect["chromEnd"].to_numpy(), shape, offsets)
+    values = Ragged.from_offsets(intersect["score"].to_numpy(), shape, offsets)
+    itvs = RaggedIntervals(starts, ends, values)
 
     return itvs
 
