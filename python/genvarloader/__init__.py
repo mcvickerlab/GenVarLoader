@@ -1,8 +1,8 @@
 import importlib.metadata
 
-from seqpro._ragged import Ragged
 from seqpro.bed import read as read_bedlike
 from seqpro.bed import with_len as with_length
+from seqpro.rag import Ragged
 
 from . import data_registry
 from ._bigwig import BigWigs
