@@ -10,7 +10,7 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseVar
-from genoray._svar import V_IDX_TYPE, SparseGenotypes
+from genoray._svar import V_IDX_TYPE, SparseGenotypes, dense2sparse
 from genoray._utils import parse_memory
 from loguru import logger
 from more_itertools import mark_ends
@@ -20,6 +20,7 @@ from seqpro.rag import OFFSET_TYPE
 from tqdm.auto import tqdm
 
 from .._bigwig import BigWigs
+from .._ragged import INTERVAL_DTYPE
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._utils import splits_sum_le_value
@@ -292,15 +293,13 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
                     ext_idxs = np.arange(ext_s_idx, ext_s_idx + n_ext, dtype=np.int32)
                     chunk_idxs = np.concatenate([chunk_idxs, ext_idxs])
 
-                sp_genos = SparseGenotypes.from_dense(genos, chunk_idxs)
+                sp_genos = dense2sparse(genos, chunk_idxs)
                 ls_sparse.append(sp_genos)
 
                 if is_last:
                     max_ends.append(chunk_end)
 
-            var_idxs = ak.flatten(
-                ak.concatenate([a.to_awkward() for a in ls_sparse], -1), None
-            ).to_numpy()
+            var_idxs = ak.flatten(ak.concatenate(ls_sparse, -1), None).to_numpy()
             # (s p)
             lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
 
@@ -380,15 +379,13 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
             ls_sparse: list[SparseGenotypes] = []
             for _, is_last, (genos, chunk_end, chunk_idxs) in mark_ends(range_):
                 chunk_idxs = chunk_idxs.astype(V_IDX_TYPE)
-                sp_genos = SparseGenotypes.from_dense(genos.astype(np.int8), chunk_idxs)
+                sp_genos = dense2sparse(genos.astype(np.int8), chunk_idxs)
                 ls_sparse.append(sp_genos)
 
                 if is_last:
                     max_ends.append(chunk_end)
 
-            var_idxs = ak.flatten(
-                ak.concatenate([a.to_awkward() for a in ls_sparse], -1), None
-            ).to_numpy()
+            var_idxs = ak.flatten(ak.concatenate(ls_sparse, -1), None).to_numpy()
             # (s p)
             lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
 
@@ -488,7 +485,7 @@ def _write_from_svar(
         # have a further end than v_idx == -1
         # * calling ak.max() means v_idxs is not a view of svar.genos.data
         # (r s p ~v) -> (r)
-        v_idxs = ak.max(sp_genos.to_awkward(), -1).to_numpy().max((1, 2))
+        v_idxs = ak.max(sp_genos, -1).to_numpy().max((1, 2))
         c_max_ends = max_ends[contig_offset : contig_offset + df.height]
         if v_idxs.mask is np.ma.nomask:
             c_max_ends[:] = v_ends[v_idxs.data]
@@ -633,16 +630,18 @@ def _write_bigwigs(
         pbar.set_description(f"Writing intervals for {part.height} regions on {contig}")
         out = np.memmap(
             out_dir / "intervals.npy",
-            dtype=intervals.data.dtype,
+            dtype=INTERVAL_DTYPE,
             mode="w+" if interval_offset == 0 else "r+",
-            shape=intervals.data.shape,
+            shape=intervals.values.data.shape,
             offset=interval_offset,
         )
-        out[:] = intervals.data[:]
+        out["start"] = intervals.starts.data
+        out["end"] = intervals.ends.data
+        out["value"] = intervals.values.data
         out.flush()
         interval_offset += out.nbytes
 
-        offsets = intervals.offsets
+        offsets = intervals.values.offsets
         offsets += last_offset
         last_offset = offsets[-1]
         out = np.memmap(
