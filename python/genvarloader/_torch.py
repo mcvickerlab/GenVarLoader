@@ -7,7 +7,7 @@ import awkward as ak
 import numpy as np
 from loguru import logger
 from numpy.typing import NDArray
-from seqpro._ragged import Ragged
+from seqpro.rag import Ragged
 
 from ._ragged import is_rag_dtype
 from ._types import AnnotatedHaps
@@ -135,7 +135,7 @@ def to_nested_tensor(rag: Ragged | ak.Array) -> torch.Tensor:
         Ragged array to convert.
     """
     if isinstance(rag, ak.Array):
-        rag = Ragged.from_awkward(rag)
+        rag = Ragged(rag)
 
     if is_rag_dtype(rag, np.bytes_):
         rag = rag.view(np.uint8)

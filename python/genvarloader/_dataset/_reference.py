@@ -11,7 +11,7 @@ from attrs import define, evolve, field
 from genoray._utils import ContigNormalizer
 from loguru import logger
 from numpy.typing import ArrayLike, NDArray
-from seqpro._ragged import Ragged, lengths_to_offsets
+from seqpro.rag import Ragged, lengths_to_offsets
 from typing_extensions import Self
 
 from .._fasta import Fasta
@@ -138,7 +138,7 @@ class Reference:
             offsets,
         )
 
-        seqs = Ragged.from_offsets(seqs.view("S1"), len(contigs), offsets)
+        seqs = Ragged.from_offsets(seqs.view("S1"), (len(contigs), None), offsets)
 
         return seqs
 
@@ -359,7 +359,7 @@ class RefDataset(Generic[T]):
             pad_char=self.reference.pad_char,
         ).view("S1")
 
-        ref = cast(Ragged[np.bytes_], Ragged.from_offsets(ref, batch_size, out_offsets))
+        ref = cast(Ragged[np.bytes_], Ragged.from_offsets(ref, (batch_size, None), out_offsets))
 
         to_rc = regions[:, 3] == -1
         if to_rc.any():

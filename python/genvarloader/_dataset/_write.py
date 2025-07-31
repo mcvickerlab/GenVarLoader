@@ -16,7 +16,7 @@ from loguru import logger
 from more_itertools import mark_ends
 from natsort import natsorted
 from numpy.typing import NDArray
-from seqpro._ragged import OFFSET_TYPE
+from seqpro.rag import OFFSET_TYPE
 from tqdm.auto import tqdm
 
 from .._bigwig import BigWigs
