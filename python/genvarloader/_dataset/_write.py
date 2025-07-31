@@ -476,7 +476,7 @@ def _write_from_svar(
             )
 
         # compute max_ends for the bed
-        shape = (df.height, len(samples), svar.ploidy)
+        shape = (df.height, len(samples), svar.ploidy, None)
         # (r s p ~v)
         sp_genos = SparseGenotypes.from_offsets(
             svar.genos.data, shape, out.reshape(2, -1)
