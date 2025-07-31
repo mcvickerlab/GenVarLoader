@@ -17,7 +17,7 @@ from awkward.contents import (
 from awkward.index import Index
 from genoray._svar import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
 from numpy.typing import NDArray
-from seqpro._ragged import OFFSET_TYPE, Ragged, lengths_to_offsets
+from seqpro.rag import OFFSET_TYPE, Ragged, lengths_to_offsets
 from typing_extensions import Self
 
 from .._torch import TORCH_AVAILABLE, requires_torch
@@ -42,7 +42,7 @@ class RaggedVariants:
     """Dosages, potentially interpreted as CCFs depending on how the dosages were defined."""
 
     @property
-    def shape(self) -> tuple[int, ...]:
+    def shape(self) -> tuple[int | None, ...]:
         return self.v_starts.shape
 
     def reshape(self, shape: tuple[int, ...]) -> Self:
@@ -91,17 +91,9 @@ class RaggedVariants:
     def to_packed(self) -> Self:
         """Apply :func:`ak.to_packed` to all arrays."""
         alts = ak.to_packed(self.alts)
-        v_starts = Ragged[POS_TYPE].from_awkward(
-            ak.to_packed(self.v_starts.to_awkward())
-        )
-        ilens = Ragged[np.int32].from_awkward(ak.to_packed(self.ilens.to_awkward()))
-        dosages = (
-            None
-            if self.dosages is None
-            else Ragged[DOSAGE_TYPE].from_awkward(
-                ak.to_packed(self.dosages.to_awkward())
-            )
-        )
+        v_starts = ak.to_packed(self.v_starts)
+        ilens = ak.to_packed(self.ilens)
+        dosages = None if self.dosages is None else ak.to_packed(self.dosages)
 
         return type(self)(alts, v_starts, ilens, dosages)
 
@@ -126,15 +118,15 @@ class RaggedVariants:
         alts = ak.Array(alts)
 
         if to_rc is None:
-            to_rc = np.ones(ragv.shape[:-1], np.bool_)
+            to_rc = np.ones(ragv.shape[:-2], np.bool_)  # type: ignore
 
         # (batch) -> (batch * ploidy * n_variants)
         # batch * ploidy * n_variants = n_alts
-        _to_rc, _ = ak.broadcast_arrays(to_rc, ragv.ilens.to_awkward())
+        _to_rc, _ = ak.broadcast_arrays(to_rc, ragv.ilens)
         _to_rc = _to_rc.layout
         while not isinstance(_to_rc, NumpyArray):
             _to_rc = _to_rc.content
-        _to_rc = _to_rc.data
+        _to_rc = cast(NDArray[np.bool_], _to_rc.data)  # type: ignore
 
         rc_helper(alts, _to_rc)
 
@@ -193,7 +185,7 @@ class RaggedVariants:
         else:
             alts = alts.view(np.uint8)
 
-        alts = torch.from_numpy(alts)
+        alts = torch.from_numpy(alts).to(device)
 
         offsets = cast(ListArray | ListOffsetArray, offsets)  # type: ignore
         # (N ~V ~L) -> (N ~V) -> (N*~V)
@@ -205,20 +197,20 @@ class RaggedVariants:
             lengths = np.diff(offsets)
 
         max_alen = lengths.max().item()
-        offsets = torch.from_numpy(offsets)
+        offsets = torch.from_numpy(offsets).to(device)
         # ((N, ~V), ~L)
-        alts = nt_jag(alts, offsets, max_seqlen=max_alen).to(device)
+        alts = nt_jag(alts, offsets, max_seqlen=max_alen)
 
         max_vlen = np.diff(self.v_starts.offsets).max().item()
-        v_offsets = torch.from_numpy(self.v_starts.offsets.astype(np.int32))
-        ilens = torch.from_numpy(self.ilens.data.astype(np.float32))
-        ilens = nt_jag(ilens, v_offsets, max_seqlen=max_vlen).to(device)
-        starts = torch.from_numpy(self.v_starts.data.astype(np.float32))
-        starts = nt_jag(starts, v_offsets, max_seqlen=max_vlen).to(device)
+        v_offsets = torch.from_numpy(self.v_starts.offsets.astype(np.int32)).to(device)
+        ilens = torch.from_numpy(self.ilens.data.astype(np.float32)).to(device)
+        ilens = nt_jag(ilens, v_offsets, max_seqlen=max_vlen)
+        starts = torch.from_numpy(self.v_starts.data.astype(np.float32)).to(device)
+        starts = nt_jag(starts, v_offsets, max_seqlen=max_vlen)
 
         if self.dosages is not None:
-            dosages = torch.from_numpy(self.dosages.data.astype(np.float32))
-            dosages = nt_jag(dosages, v_offsets, max_seqlen=max_vlen).to(device)
+            dosages = torch.from_numpy(self.dosages.data.astype(np.float32)).to(device)
+            dosages = nt_jag(dosages, v_offsets, max_seqlen=max_vlen)
         else:
             dosages = None
 
@@ -251,7 +243,9 @@ class RaggedVariants:
         -------
             The RaggedVariants object with the pad variant prepended to each group.
         """
-        b, p = self.ilens.shape
+        b, p, _ = self.ilens.shape
+        b = cast(int, b)
+        p = cast(int, p)
 
         # (b p 1 1)
         node = NumpyArray(
@@ -268,26 +262,20 @@ class RaggedVariants:
         # (b p 1)
         pad_ilen = ak.from_numpy(np.full((b, p, 1), ilen, np.int32), regulararray=True)
         # (b p ~v)
-        new_ilens = Ragged.from_awkward(
-            ak.concatenate([pad_ilen, self.ilens.to_awkward()], axis=2)
-        )
+        new_ilens = ak.concatenate([pad_ilen, self.ilens], axis=2)
 
         pad_start = ak.from_numpy(
             np.full((b, p, 1), start, np.int32), regulararray=True
         )
         # (b p ~v)
-        new_starts = Ragged.from_awkward(
-            ak.concatenate([pad_start, self.v_starts.to_awkward()], axis=2)
-        )
+        new_starts = ak.concatenate([pad_start, self.v_starts], axis=2)
 
         if self.dosages is not None:
             pad_dosage = ak.from_numpy(
                 np.full((b, p, 1), dosage, np.float32), regulararray=True
             )
             # (b p ~v)
-            new_dosages = Ragged.from_awkward(
-                ak.concatenate([pad_dosage, self.dosages.to_awkward()], axis=2)
-            )
+            new_dosages = ak.concatenate([pad_dosage, self.dosages], axis=2)
         else:
             new_dosages = None
 

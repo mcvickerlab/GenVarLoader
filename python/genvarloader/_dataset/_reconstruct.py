@@ -23,14 +23,20 @@ from genoray._svar import (
 )
 from loguru import logger
 from numpy.typing import NDArray
-from seqpro._ragged import Ragged
+from seqpro.rag import OFFSET_TYPE, Ragged
 from tqdm.auto import tqdm
 from typing_extensions import assert_never
 
-from .._ragged import INTERVAL_DTYPE, RaggedAnnotatedHaps, RaggedIntervals, RaggedSeqs
+from .._ragged import (
+    INTERVAL_DTYPE,
+    RaggedAnnotatedHaps,
+    RaggedIntervals,
+    RaggedSeqs,
+    RaggedTracks,
+)
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
-from ._genotypes import get_diffs_sparse, reconstruct_haplotypes_from_sparse
+from ._genotypes import filter_af, get_diffs_sparse, reconstruct_haplotypes_from_sparse
 from ._indexing import DatasetIndexer
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._rag_variants import RaggedVariants
@@ -46,15 +52,33 @@ class _Variants:
     v_starts: NDArray[POS_TYPE]
     ilens: NDArray[np.int32]
     alts: RaggedAlleles
+    info: dict[str, NDArray[np.number]]
 
     @classmethod
-    def from_table(cls, variants: str | Path | pl.DataFrame):
+    def from_table(cls, variants: str | Path | pl.DataFrame, one_based: bool = False):
+        """
+        Loads variant info from a table. Must always have POS, ILEN, and ALT.
+        Any numeric columns will be loaded as info.
+
+        Parameters
+        ----------
+        variants : str | Path | pl.DataFrame
+            The path to the variants table or a polars DataFrame.
+        one_based : bool, optional
+            Whether the variants are one-based, by default False.
+        """
         if isinstance(variants, (str, Path)):
             variants = pl.read_ipc(variants)
+        info = {
+            k: variants[k].to_numpy()
+            for k, v in variants.schema.items()
+            if v.is_numeric()
+        }
         return cls(
-            variants["POS"].to_numpy(),
+            variants["POS"].to_numpy() - int(one_based),
             variants["ILEN"].to_numpy(),
             RaggedAlleles.from_polars(variants["ALT"]),
+            info,
         )
 
 
@@ -111,7 +135,9 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
             pad_char=self.reference.pad_char,
         ).view("S1")
 
-        ref = cast(Ragged[np.bytes_], Ragged.from_offsets(ref, batch_size, out_offsets))
+        ref = cast(
+            Ragged[np.bytes_], Ragged.from_offsets(ref, (batch_size, None), out_offsets)
+        )
 
         return ref
 
@@ -132,9 +158,13 @@ class Haps(Reconstructor[_H]):
     kind: type[_H]
     n_variants: NDArray[np.int32] = field(init=False)
     """Shape: (regions, samples, ploidy). The number of variants in the dataset."""
+    min_af: float | None
+    """The minimum allele frequency to keep."""
+    max_af: float | None
+    """The maximum allele frequency to keep."""
 
     def __attrs_post_init__(self):
-        self.n_variants = ak.num(self.genotypes.to_awkward(), -1).to_numpy()
+        self.n_variants = ak.num(self.genotypes, -1).to_numpy()
 
     @classmethod
     def from_path(
@@ -176,14 +206,10 @@ class Haps(Reconstructor[_H]):
                 pl.scan_ipc(
                     path / "genotypes" / "link.svar" / "index.arrow", memory_map=False
                 )
-                .select("POS", pl.col("ILEN", "ALT").list.first())
+                .with_columns(pl.col("ILEN", "ALT").list.first())
                 .collect()
             )
-            variants = _Variants(
-                svar_index["POS"].to_numpy() - 1,
-                svar_index["ILEN"].to_numpy(),
-                RaggedAlleles.from_polars(svar_index["ALT"]),
-            )
+            variants = _Variants.from_table(svar_index, one_based=True)
         else:
             logger.info("Loading variant data.")
             variants = _Variants.from_table(path / "genotypes" / "variants.arrow")
@@ -204,32 +230,9 @@ class Haps(Reconstructor[_H]):
             genotypes=genotypes,
             dosages=dosages,
             kind=RaggedVariants,
+            min_af=None,
+            max_af=None,
         )
-
-    def _haplotype_ilens(
-        self,
-        idx: NDArray[np.integer],
-        regions: NDArray[np.int32],
-        deterministic: bool,
-        keep: NDArray[np.bool_] | None = None,
-        keep_offsets: NDArray[np.int64] | None = None,
-    ) -> NDArray[np.int32]:
-        """`idx` must be 1D."""
-        # (b p)
-        geno_offset_idxs = self.get_geno_offset_idx(idx, self.genotypes)
-
-        # (r s p)
-        hap_ilens = get_diffs_sparse(
-            geno_offset_idxs=geno_offset_idxs,
-            geno_v_idxs=self.genotypes.data,
-            geno_offsets=self.genotypes.offsets,
-            ilens=self.variants.ilens,
-            q_starts=regions[:, 1],
-            q_ends=regions[:, 2],
-            v_starts=self.variants.v_starts,
-        )
-
-        return hap_ilens.reshape(-1, self.genotypes.shape[-1])
 
     def to_kind(self, kind: type[_NewH]) -> Haps[_NewH]:
         if kind != RaggedVariants and self.reference is None:
@@ -266,7 +269,7 @@ class Haps(Reconstructor[_H]):
                 rng=rng,
                 deterministic=deterministic,
             )
-        return haps
+            return haps
 
     def get_haps_and_shifts(
         self,
@@ -284,15 +287,28 @@ class Haps(Reconstructor[_H]):
         NDArray[np.bool_] | None,
         NDArray[np.int64] | None,
     ]:
-        ploidy = self.genotypes.ploidy
+        ploidy = cast(int, self.genotypes.shape[-2])
         batch_size = len(idx)
         # (b)
         lengths = regions[:, 2] - regions[:, 1]
 
-        geno_offset_idx = self.get_geno_offset_idx(idx, self.genotypes)
+        geno_offset_idx = self._get_geno_offset_idx(idx, self.genotypes)
+
+        if self.min_af is not None or self.max_af is not None:
+            keep, keep_offsets = filter_af(
+                geno_offset_idx,
+                self.genotypes.offsets,
+                self.genotypes.data,
+                self.variants.info["af"],
+                self.min_af,
+                self.max_af,
+            )
+        else:
+            keep = None
+            keep_offsets = None
 
         # (b p)
-        diffs = self._haplotype_ilens(idx, regions, deterministic)
+        diffs = self._haplotype_ilens(idx, regions, deterministic, keep, keep_offsets)
         hap_lengths = lengths[:, None] + diffs
 
         if deterministic or isinstance(output_length, str):
@@ -315,11 +331,7 @@ class Haps(Reconstructor[_H]):
             # (b p)
             out_lengths = hap_lengths
         else:
-            out_lengths = np.full(
-                (batch_size, self.genotypes.shape[-1]),
-                output_length,
-                dtype=np.int32,
-            )
+            out_lengths = np.full((batch_size, ploidy), output_length, dtype=np.int32)
         # (b*p+1)
         out_offsets = lengths_to_offsets(out_lengths)
 
@@ -330,8 +342,8 @@ class Haps(Reconstructor[_H]):
                 regions=regions,
                 out_offsets=out_offsets,
                 shifts=shifts,
-                keep=None,
-                keep_offsets=None,
+                keep=keep,
+                keep_offsets=keep_offsets,
                 annotate=False,
             )
         elif issubclass(self.kind, RaggedAnnotatedHaps):
@@ -340,8 +352,8 @@ class Haps(Reconstructor[_H]):
                 regions=regions,
                 out_offsets=out_offsets,
                 shifts=shifts,
-                keep=None,
-                keep_offsets=None,
+                keep=keep,
+                keep_offsets=keep_offsets,
                 annotate=True,
             )
             out = RaggedAnnotatedHaps(haps, maybe_annot_v_idx, maybe_annot_pos)
@@ -350,8 +362,8 @@ class Haps(Reconstructor[_H]):
                 idx=idx,
                 regions=regions,
                 shifts=shifts,
-                keep=None,
-                keep_offsets=None,
+                keep=keep,
+                keep_offsets=keep_offsets,
             )
         else:
             assert_never(self.kind)
@@ -366,15 +378,40 @@ class Haps(Reconstructor[_H]):
             None,
         )
 
+    def _haplotype_ilens(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+        deterministic: bool,
+        keep: NDArray[np.bool_] | None = None,
+        keep_offsets: NDArray[np.int64] | None = None,
+    ) -> NDArray[np.int32]:
+        """`idx` must be 1D."""
+        # (b p)
+        geno_offset_idxs = self._get_geno_offset_idx(idx, self.genotypes)
+
+        # (r s p)
+        hap_ilens = get_diffs_sparse(
+            geno_offset_idxs=geno_offset_idxs,
+            geno_v_idxs=self.genotypes.data,
+            geno_offsets=self.genotypes.offsets,
+            ilens=self.variants.ilens,
+            q_starts=regions[:, 1],
+            q_ends=regions[:, 2],
+            v_starts=self.variants.v_starts,
+        )
+
+        return hap_ilens.reshape(-1, self.genotypes.shape[-2])  # type: ignore
+
     @staticmethod
-    def get_geno_offset_idx(
+    def _get_geno_offset_idx(
         idx: NDArray[np.integer],
         genotypes: SparseGenotypes,
     ) -> NDArray[np.intp]:
-        r_idx, s_idx = np.unravel_index(idx, genotypes.shape[:2])
+        r_idx, s_idx = np.unravel_index(idx, genotypes.shape[:2])  # type: ignore
         ploid_idx = np.arange(genotypes.shape[-1], dtype=np.intp)
         rsp_idx = (r_idx[:, None], s_idx[:, None], ploid_idx)
-        geno_offset_idx = np.ravel_multi_index(rsp_idx, genotypes.shape)
+        geno_offset_idx = np.ravel_multi_index(rsp_idx, genotypes.shape[:-1])  # type: ignore
         return geno_offset_idx
 
     def _get_variants(
@@ -385,16 +422,24 @@ class Haps(Reconstructor[_H]):
         keep: NDArray[np.bool_] | None,
         keep_offsets: NDArray[np.int64] | None,
     ) -> RaggedVariants:
-        # TODO: maybe filter variants for region, shifts, and keep?
-        r, s = np.unravel_index(idx, self.genotypes.shape[:2])
+        # TODO: maybe filter variants for region, shifts?
+        r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore
+        # (b p ~v)
         genos = cast(SparseGenotypes, self.genotypes[r, s])
-        v_idxs = ak.flatten(genos.to_awkward(), None).to_numpy()
+
+        if keep is not None and keep_offsets is not None:
+            node = NumpyArray(keep)  # type: ignore
+            node = ListOffsetArray(Index(keep_offsets), node)
+            mask = ak.Array(node)
+            genos = cast(SparseGenotypes, genos[mask])
+
+        v_idxs = ak.flatten(genos, None).to_numpy()
         geno_offsets = lengths_to_offsets(genos.lengths)
 
         # (b*p*v ~l)
         alts = cast(RaggedAlleles, self.variants.alts[v_idxs])
         alt_offsets = lengths_to_offsets(alts.lengths)
-        node = alts.to_awkward().layout
+        node = alts.layout
         while not isinstance(node, NumpyArray):
             node = node.content
         data = ak.with_parameter(node, "__array__", "char", highlevel=False)
@@ -404,20 +449,16 @@ class Haps(Reconstructor[_H]):
         alts = ak.Array(pvl_content)
 
         v_starts = self.variants.v_starts[v_idxs]
-        v_starts = Ragged[v_starts.dtype.type].from_offsets(
-            v_starts, genos.shape, geno_offsets
-        )
+        v_starts = Ragged.from_offsets(v_starts, genos.shape, geno_offsets)
 
         ilens = self.variants.ilens[v_idxs]
-        ilens = Ragged[ilens.dtype.type].from_offsets(ilens, genos.shape, geno_offsets)
+        ilens = Ragged.from_offsets(ilens, genos.shape, geno_offsets)
 
         if self.dosages is not None:
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
-            dosages = cast(SparseDosages, self.dosages[r, s])
-            dosages = Ragged[DOSAGE_TYPE].from_offsets(
-                ak.flatten(dosages.to_awkward(), None).to_numpy(),
-                genos.shape,
-                geno_offsets,
+            dosages = self.dosages[r, s]
+            dosages = Ragged.from_offsets(
+                ak.flatten(dosages, None).to_numpy(), genos.shape, geno_offsets
             )
         else:
             dosages = None
@@ -434,7 +475,7 @@ class Haps(Reconstructor[_H]):
         out_offsets: NDArray[np.int64],
         shifts: NDArray[np.int32],
         keep: NDArray[np.bool_] | None,
-        keep_offsets: NDArray[np.int64] | None,
+        keep_offsets: NDArray[OFFSET_TYPE] | None,
         annotate: Literal[False],
     ) -> Ragged[np.bytes_]: ...
     @overload
@@ -445,7 +486,7 @@ class Haps(Reconstructor[_H]):
         out_offsets: NDArray[np.int64],
         shifts: NDArray[np.int32],
         keep: NDArray[np.bool_] | None,
-        keep_offsets: NDArray[np.int64] | None,
+        keep_offsets: NDArray[OFFSET_TYPE] | None,
         annotate: Literal[True],
     ) -> tuple[Ragged[np.bytes_], Ragged[np.int32], Ragged[np.int32]]: ...
 
@@ -456,7 +497,7 @@ class Haps(Reconstructor[_H]):
         out_offsets: NDArray[np.int64],
         shifts: NDArray[np.int32],
         keep: NDArray[np.bool_] | None,
-        keep_offsets: NDArray[np.int64] | None,
+        keep_offsets: NDArray[OFFSET_TYPE] | None,
         annotate: bool,
     ) -> (
         Ragged[np.bytes_]
@@ -481,15 +522,17 @@ class Haps(Reconstructor[_H]):
         assert self.reference is not None
 
         haps = Ragged.from_offsets(
-            np.empty(out_offsets[-1], np.uint8), shifts.shape, out_offsets
+            np.empty(out_offsets[-1], np.uint8), (*shifts.shape, None), out_offsets
         )
 
         if annotate:
             annot_v_idxs = Ragged.from_offsets(
-                np.empty(out_offsets[-1], V_IDX_TYPE), shifts.shape, out_offsets
+                np.empty(out_offsets[-1], V_IDX_TYPE),
+                (*shifts.shape, None),
+                out_offsets,
             )
             annot_positions = Ragged.from_offsets(
-                np.empty(out_offsets[-1], np.int32), shifts.shape, out_offsets
+                np.empty(out_offsets[-1], np.int32), (*shifts.shape, None), out_offsets
             )
         else:
             annot_v_idxs = None
@@ -520,9 +563,7 @@ class Haps(Reconstructor[_H]):
             if annot_positions is not None
             else annot_positions,
         )
-
-        haps.data = haps.data.view("S1")
-        haps = cast(Ragged[np.bytes_], haps)
+        haps = cast(Ragged[np.bytes_], haps.view("S1"))
 
         if annotate:
             return haps, annot_v_idxs, annot_positions  # type: ignore
@@ -535,12 +576,19 @@ class TrackType(enum.Enum):
     ANNOT = enum.auto()
 
 
+_T = TypeVar("_T", RaggedTracks, RaggedIntervals)
+_NewT = TypeVar("_NewT", RaggedTracks, RaggedIntervals)
+
+
 @define
-class Tracks(Reconstructor[Ragged[np.float32]]):
+class Tracks(Reconstructor[_T]):
     intervals: dict[str, RaggedIntervals]
     """The intervals in the dataset. This is memory mapped."""
     active_tracks: dict[str, TrackType]
     available_tracks: dict[str, TrackType]
+    kind: type[_T]
+    n_regions: int
+    n_samples: int
 
     def with_tracks(self, tracks: str | Iterable[str] | None) -> Tracks:
         if tracks is None:
@@ -559,7 +607,13 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
         return evolve(self, active_tracks=tracks)
 
     @classmethod
-    def from_path(cls, path: Path, n_regions: int, n_samples: int):
+    def from_path(
+        cls,
+        path: Path,
+        n_regions: int,
+        n_samples: int,
+        kind: type[_T] = RaggedTracks,
+    ):
         strack_dir = path / "intervals"
         atrack_dir = path / "annot_intervals"
 
@@ -589,38 +643,43 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
         intervals: dict[str, RaggedIntervals] | None = {}
 
         for track in available_tracks:
-            itvs = np.memmap(
-                path / "intervals" / track / "intervals.npy",
-                dtype=INTERVAL_DTYPE,
-                mode="r",
-            )
-            offsets = np.memmap(
-                path / "intervals" / track / "offsets.npy",
-                dtype=np.int64,
-                mode="r",
-            )
-            intervals[track] = RaggedIntervals.from_offsets(
-                itvs, (n_regions, n_samples), offsets
-            )
+            intervals[track] = cls._open_intervals(path, track, n_regions, n_samples)
 
         for track in available_annots:
-            itvs = np.memmap(
-                path / "annot_intervals" / track / "intervals.npy",
-                dtype=INTERVAL_DTYPE,
-                mode="r",
-            )
-            offsets = np.memmap(
-                path / "annot_intervals" / track / "offsets.npy",
-                dtype=np.int64,
-                mode="r",
-            )
-            intervals[track] = RaggedIntervals.from_offsets(itvs, n_regions, offsets)
+            intervals[track] = cls._open_intervals(path, track, n_regions, n_samples)
 
         all_tracks = dict(
             zip(available_tracks, itertools.repeat(TrackType.SAMPLE))
         ) | dict(zip(available_annots, itertools.repeat(TrackType.ANNOT)))
 
-        return cls(intervals, all_tracks, all_tracks)
+        return cls(intervals, all_tracks, all_tracks, kind, n_regions, n_samples)
+
+    @staticmethod
+    def _open_intervals(
+        path: Path, track: str, n_regions: int, n_samples: int
+    ) -> RaggedIntervals:
+        itvs = np.memmap(
+            path / "intervals" / track / "intervals.npy",
+            dtype=INTERVAL_DTYPE,
+            mode="r",
+        )
+        offsets = np.memmap(
+            path / "intervals" / track / "offsets.npy",
+            dtype=np.int64,
+            mode="r",
+        )
+        starts = Ragged.from_offsets(
+            itvs["start"], (n_regions, n_samples, None), offsets
+        )
+        ends = Ragged.from_offsets(itvs["end"], (n_regions, n_samples, None), offsets)
+        values = Ragged.from_offsets(
+            itvs["value"], (n_regions, n_samples, None), offsets
+        )
+        return RaggedIntervals(starts, ends, values)
+
+    def to_kind(self, kind: type[_NewT]) -> Tracks[_NewT]:
+        t = evolve(self, kind=kind)
+        return cast(Tracks[_NewT], t)
 
     def __call__(
         self,
@@ -631,7 +690,20 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
         jitter: int,
         rng: np.random.Generator,
         deterministic: bool,
-    ) -> Ragged[np.float32]:
+    ) -> _T:
+        if issubclass(self.kind, RaggedTracks):
+            out = self._call_float32(idx, r_idx, regions, output_length)
+        else:
+            out = self._call_intervals(idx)
+        return cast(_T, out)
+
+    def _call_float32(
+        self,
+        idx: NDArray[np.integer],
+        r_idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+        output_length: Literal["ragged", "variable"] | int,
+    ) -> RaggedTracks:
         batch_size = len(idx)
 
         if isinstance(output_length, int):
@@ -644,7 +716,7 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
         out_ofsts_per_t = lengths_to_offsets(out_lengths)
         track_ofsts_per_t = lengths_to_offsets(track_lengths)
         # caller accounts for ploidy
-        n_per_track = out_ofsts_per_t[-1]
+        n_per_track: int = out_ofsts_per_t[-1]
         # ragged (b t [p] l)
         out = np.empty(len(self.active_tracks) * n_per_track, np.float32)
         out_lens = repeat(out_lengths, "b -> b t", t=len(self.active_tracks))
@@ -663,18 +735,48 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
             intervals_to_tracks(
                 offset_idxs=o_idx,
                 starts=regions[:, 1],
-                intervals=intervals.data,
-                itv_offsets=intervals.offsets,
+                itv_starts=intervals.starts.data,
+                itv_ends=intervals.ends.data,
+                itv_values=intervals.values.data,
+                itv_offsets=intervals.starts.offsets,
                 out=_out,
                 out_offsets=track_ofsts_per_t,
             )
 
-        out_shape = (len(idx), len(self.active_tracks))
+        out_shape = (len(idx), len(self.active_tracks), None)
 
         # ragged (b t l)
-        tracks = Ragged.from_offsets(out, out_shape, out_offsets)
+        tracks = RaggedTracks.from_offsets(out, out_shape, out_offsets)
 
-        return tracks
+        return cast(RaggedTracks, tracks)
+
+    def _call_intervals(self, idx: NDArray[np.integer]) -> RaggedIntervals:
+        r_idx, s_idx = np.unravel_index(idx, (self.n_regions, self.n_samples))
+
+        # out = (batch tracks ~itvs)
+        out_starts = []
+        out_ends = []
+        out_values = []
+
+        for name, tracktype in self.active_tracks.items():
+            # (regions [samples] ~itvs)
+            intervals = self.intervals[name]
+            if tracktype is TrackType.SAMPLE:
+                # (batch ~itvs)
+                itvs = intervals[r_idx, s_idx]
+            else:
+                # (batch ~itvs)
+                itvs = intervals[r_idx]
+            # (batch 1 ~itvs)
+            out_starts.append(itvs.starts[:, None])
+            out_ends.append(itvs.ends[:, None])
+            out_values.append(itvs.values[:, None])
+
+        # (batch tracks ~itvs)
+        starts = ak.concatenate(out_starts, axis=1)
+        ends = ak.concatenate(out_ends, axis=1)
+        values = ak.concatenate(out_values, axis=1)
+        return RaggedIntervals(starts, ends, values)
 
     def write_transformed_track(
         self,
@@ -692,6 +794,10 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
         max_mem: int = 2**30,
         overwrite: bool = False,
     ) -> Tracks:
+        raise NotImplementedError(
+            "Not implemented yet for Ragged arrays that subclass Awkward arrays."
+        )
+
         if new_track == existing_track:
             raise ValueError(
                 "New track name must be different from existing track name."
@@ -732,14 +838,17 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
             # extend ends by max hap diff to match write implementation
             regions[:, 2] += (
                 haps._haplotype_ilens(ds_idx, regions, True)
-                .reshape(n_regions, n_samples, haps.genotypes.shape[-1])
+                .reshape(n_regions, n_samples, haps.genotypes.shape[-2])  # type: ignore
                 .max((1, 2))
                 .clip(min=0)
             )
         lengths = regions[:, 2] - regions[:, 1]
+
         # for each region:
         # bytes = (4 bytes / bp) * (bp / sample) * samples
-        n_regions, n_samples = intervals.shape
+        n_regions, n_samples, *_ = intervals.shape
+        n_regions = cast(int, n_regions)
+        n_samples = cast(int, n_samples)
         mem_per_region = 4 * lengths * n_samples
         splits = splits_sum_le_value(mem_per_region, max_mem)
         memmap_intervals_offset = 0
@@ -769,8 +878,10 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
                 intervals_to_tracks(
                     offset_idxs=ds_idx,
                     starts=_regions[:, 1],
-                    intervals=intervals.data,
-                    itv_offsets=intervals.offsets,
+                    itv_starts=intervals.starts.data,
+                    itv_ends=intervals.ends.data,
+                    itv_values=intervals.values.data,
+                    itv_offsets=intervals.starts.offsets,
                     out=tracks,
                     out_offsets=offsets,
                 )
@@ -781,12 +892,17 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
                 np.testing.assert_equal(tracks.shape, transformed_tracks.shape)
 
                 pbar.set_description("Writing (compressing)")
-                itvs, interval_offsets = tracks_to_intervals(
+                starts, ends, values, interval_offsets = tracks_to_intervals(
                     _regions, transformed_tracks.data, transformed_tracks.offsets
                 )
                 np.testing.assert_equal(
                     len(interval_offsets), n_regions * n_samples + 1
                 )
+
+                itvs = np.empty(len(starts), INTERVAL_DTYPE)
+                itvs["start"] = starts
+                itvs["end"] = ends
+                itvs["value"] = values
 
                 out = np.memmap(
                     out_dir / "intervals.npy",
@@ -829,9 +945,9 @@ class Tracks(Reconstructor[Ragged[np.float32]]):
 
 
 @define
-class RefTracks(Reconstructor[tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
+class RefTracks(Reconstructor[tuple[Ragged[np.bytes_], _T]]):
     seqs: Ref
-    tracks: Tracks
+    tracks: Tracks[_T]
 
     def __call__(
         self,
@@ -842,7 +958,7 @@ class RefTracks(Reconstructor[tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
         jitter: int,
         rng: np.random.Generator,
         deterministic: bool,
-    ) -> tuple[Ragged[np.bytes_], Ragged[np.float32]]:
+    ) -> tuple[Ragged[np.bytes_], _T]:
         seqs = self.seqs(
             idx=idx,
             r_idx=r_idx,
@@ -865,9 +981,9 @@ class RefTracks(Reconstructor[tuple[Ragged[np.bytes_], Ragged[np.float32]]]):
 
 
 @define
-class HapsTracks(Reconstructor[tuple[_H, Ragged[np.float32]]]):
+class HapsTracks(Reconstructor[tuple[_H, _T]]):
     haps: Haps[_H]
-    tracks: Tracks
+    tracks: Tracks[_T]
 
     def to_kind(self, kind: type[_NewH]) -> HapsTracks[_NewH]:
         haps = self.haps.to_kind(kind)
@@ -882,7 +998,7 @@ class HapsTracks(Reconstructor[tuple[_H, Ragged[np.float32]]]):
         jitter: int,
         rng: np.random.Generator,
         deterministic: bool,
-    ) -> tuple[_H, Ragged[np.float32]]:
+    ) -> tuple[_H, _T]:
         lengths = regions[:, 2] - regions[:, 1]
 
         # ragged (b p l), (b p), (b p), (b*p*v), (b*p+1), (b p)
@@ -896,72 +1012,82 @@ class HapsTracks(Reconstructor[tuple[_H, Ragged[np.float32]]]):
             )
         )
 
-        if isinstance(output_length, int):
-            # (b p)
-            out_lengths = np.full_like(hap_lengths, output_length)
-        else:
-            # (b p)
-            out_lengths = hap_lengths
-
-        # (b) = lengths (b) + max deletion length across ploidy (b p) -> (b)
-        track_lengths = lengths - diffs.clip(max=0).min(1)
-
-        # (b*p+1)
-        out_ofsts_per_t = lengths_to_offsets(out_lengths)
-        # (b+1)
-        track_ofsts_per_t = lengths_to_offsets(track_lengths)
-        n_per_track = out_ofsts_per_t[-1]
-        # ragged (b t p l)
-        out = np.empty(len(self.tracks.active_tracks) * n_per_track, np.float32)
-        out_lens = repeat(out_lengths, "b p -> b t p", t=len(self.tracks.active_tracks))
-        out_offsets = lengths_to_offsets(out_lens)
-
-        for track_ofst, (name, tracktype) in enumerate(
-            self.tracks.active_tracks.items()
-        ):
-            intervals = self.tracks.intervals[name]
-
-            # ragged (b l)
-            _tracks = np.empty(track_ofsts_per_t[-1], np.float32)
-
-            if tracktype is TrackType.SAMPLE:
-                o_idx = idx
+        if isinstance(self.tracks, RaggedTracks):
+            if isinstance(output_length, int):
+                # (b p)
+                out_lengths = np.full_like(hap_lengths, output_length)
             else:
-                o_idx = r_idx
+                # (b p)
+                out_lengths = hap_lengths
 
-            intervals_to_tracks(
-                offset_idxs=o_idx,  # (b)
-                starts=regions[:, 1],  # (b)
-                intervals=intervals.data,  # (r*s*l)
-                itv_offsets=intervals.offsets,  # (r*s+1)
-                out=_tracks,  # (b*l)
-                out_offsets=track_ofsts_per_t,  # (b+1)
+            # (b) = lengths (b) + max deletion length across ploidy (b p) -> (b)
+            track_lengths = lengths - diffs.clip(max=0).min(1)
+
+            # (b*p+1)
+            out_ofsts_per_t = lengths_to_offsets(out_lengths)
+            # (b+1)
+            track_ofsts_per_t = lengths_to_offsets(track_lengths)
+            n_per_track: int = out_ofsts_per_t[-1]
+            # ragged (b t p l)
+            out = np.empty(len(self.tracks.active_tracks) * n_per_track, np.float32)
+            out_lens = repeat(
+                out_lengths, "b p -> b t p", t=len(self.tracks.active_tracks)
+            )
+            out_offsets = lengths_to_offsets(out_lens)
+
+            for track_ofst, (name, tracktype) in enumerate(
+                self.tracks.active_tracks.items()
+            ):
+                intervals = self.tracks.intervals[name]
+
+                # ragged (b l)
+                _tracks = np.empty(track_ofsts_per_t[-1], np.float32)
+
+                if tracktype is TrackType.SAMPLE:
+                    o_idx = idx
+                else:
+                    o_idx = r_idx
+
+                intervals_to_tracks(
+                    offset_idxs=o_idx,  # (b)
+                    starts=regions[:, 1],  # (b)
+                    itv_starts=intervals.starts.data,
+                    itv_ends=intervals.ends.data,
+                    itv_values=intervals.values.data,
+                    itv_offsets=intervals.starts.offsets,
+                    out=_tracks,  # (b*l)
+                    out_offsets=track_ofsts_per_t,  # (b+1)
+                )
+
+                _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
+                shift_and_realign_tracks_sparse(
+                    out=_out,  # (b*p*l)
+                    out_offsets=out_ofsts_per_t,  # (b*p+1)
+                    regions=regions,  # (b, 3)
+                    shifts=shifts,  # (b p)
+                    geno_offset_idxs=geno_idx,  # (b p)
+                    geno_v_idxs=self.haps.genotypes.data,  # (r*s*p*v)
+                    geno_offsets=self.haps.genotypes.offsets,  # (r*s*p+1)
+                    v_starts=self.haps.variants.v_starts,  # (tot_v)
+                    ilens=self.haps.variants.ilens,  # (tot_v)
+                    tracks=_tracks,  # ragged (b l)
+                    track_offsets=track_ofsts_per_t,  # (b+1)
+                    keep=keep,  # (b*p*v)
+                    keep_offsets=keep_offsets,  # (b*p+1)
+                )
+
+            out_shape = (
+                len(idx),
+                len(self.tracks.active_tracks),
+                self.haps.genotypes.shape[-1],
             )
 
-            _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
-            shift_and_realign_tracks_sparse(
-                out=_out,  # (b*p*l)
-                out_offsets=out_ofsts_per_t,  # (b*p+1)
-                regions=regions,  # (b, 3)
-                shifts=shifts,  # (b p)
-                geno_offset_idxs=geno_idx,  # (b p)
-                geno_v_idxs=self.haps.genotypes.data,  # (r*s*p*v)
-                geno_offsets=self.haps.genotypes.offsets,  # (r*s*p+1)
-                v_starts=self.haps.variants.v_starts,  # (tot_v)
-                ilens=self.haps.variants.ilens,  # (tot_v)
-                tracks=_tracks,  # ragged (b l)
-                track_offsets=track_ofsts_per_t,  # (b+1)
-                keep=keep,  # (b*p*v)
-                keep_offsets=keep_offsets,  # (b*p+1)
-            )
+            # ragged (b t [p] l)
+            tracks = Ragged.from_offsets(out, out_shape, out_offsets)
 
-        out_shape = (
-            len(idx),
-            len(self.tracks.active_tracks),
-            self.haps.genotypes.shape[-1],
-        )
+        else:
+            tracks = self.tracks._call_intervals(idx)
 
-        # ragged (b t [p] l)
-        tracks = Ragged.from_offsets(out, out_shape, out_offsets)
+        tracks = cast(_T, tracks)
 
         return haps, tracks
