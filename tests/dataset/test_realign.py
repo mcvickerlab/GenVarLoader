@@ -1,6 +1,7 @@
 # %%
 import numpy as np
 from genoray import SparseGenotypes
+from genoray._svar import dense2sparse
 from genvarloader._dataset._tracks import shift_and_realign_track_sparse
 from pytest_cases import parametrize_with_cases
 
@@ -19,7 +20,7 @@ def case_snps():
     desired = track.copy()
     query_start = 0
 
-    sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
+    sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
         v_starts,
@@ -45,7 +46,7 @@ def case_indels():
     desired = np.array([0, 1, 3, 3], np.float32)
     query_start = 0
 
-    sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
+    sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
         v_starts,
@@ -73,7 +74,7 @@ def case_spanning_del():
     desired = track[1:]
     query_start = 1
 
-    sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
+    sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
         v_starts,
@@ -100,7 +101,7 @@ def case_shift_ins():
     desired = np.array([1, 1, 2, 3], np.float32)
     query_start = 0
 
-    sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
+    sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
         v_starts,

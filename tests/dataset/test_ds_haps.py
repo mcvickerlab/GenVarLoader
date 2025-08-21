@@ -15,7 +15,7 @@ cons_dir = data_dir / "consensus"
 
 def dataset_vcf():
     ds = (
-        gvl.Dataset.open(data_dir / "phased_dataset.vcf.gvl", ref)
+        gvl.Dataset.open(data_dir / "phased_dataset.vcf.gvl", ref, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
     )
@@ -24,7 +24,7 @@ def dataset_vcf():
 
 def dataset_pgen():
     ds = (
-        gvl.Dataset.open(data_dir / "phased_dataset.pgen.gvl", ref)
+        gvl.Dataset.open(data_dir / "phased_dataset.pgen.gvl", ref, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
     )
@@ -33,7 +33,7 @@ def dataset_pgen():
 
 def dataset_svar():
     ds = (
-        gvl.Dataset.open(data_dir / "phased_dataset.svar.gvl", ref)
+        gvl.Dataset.open(data_dir / "phased_dataset.svar.gvl", ref, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
     )
@@ -49,9 +49,7 @@ def test_ds_haps(dataset: gvl.RaggedDataset[RaggedSeqs, None]):
         # ragged (p)
         haps = dataset[region, sample]
         for h in range(2):
-            actual = haps[h]
-            if rc == "-":
-                actual = sp.DNA.reverse_complement(actual, -1)
+            actual = sp.cast_seqs(haps[h])
             fpath = f"source_{sample}_nr{region}_h{h}.fa"
             with pysam.FastaFile(str(cons_dir / fpath)) as f:
                 desired = sp.cast_seqs(f.fetch(f.references[0]).upper())

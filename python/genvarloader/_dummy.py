@@ -14,7 +14,7 @@ from ._dataset._intervals import tracks_to_intervals
 from ._dataset._reconstruct import Haps, HapsTracks, Tracks, TrackType, _Variants
 from ._dataset._reference import Reference
 from ._dataset._utils import bed_to_regions
-from ._ragged import Ragged, RaggedIntervals, RaggedSeqs
+from ._ragged import Ragged, RaggedIntervals, RaggedSeqs, RaggedTracks
 from ._utils import lengths_to_offsets
 from ._variants._records import RaggedAlleles
 
@@ -72,11 +72,12 @@ def get_dummy_dataset():
         ilens=repeat(np.array([-2, -1, 0, 1], np.int32), "s -> (r s)", r=n_regions),
         alts=RaggedAlleles.from_offsets(
             data=repeat(sp.cast_seqs("ACGTT"), "a -> (r a)", r=n_regions),
-            shape=n_regions * n_samples,
+            shape=(n_regions * n_samples, None),
             offsets=lengths_to_offsets(
                 repeat(np.array([1, 1, 1, 2]), "s -> (r s)", r=n_regions)
             ),
         ),
+        info={},
     )
 
     v_idxs = (
@@ -86,7 +87,7 @@ def get_dummy_dataset():
         - 1  # 0-based idx within region
         + 4 * np.arange(4)[:, None]  # adjust by region/contig offset
     ).astype(np.int32)
-    shape = (4, 4, 1)
+    shape = (4, 4, 1, None)
     dummy_genos = SparseGenotypes.from_offsets(
         data=v_idxs.ravel(),
         shape=shape,
@@ -99,6 +100,8 @@ def get_dummy_dataset():
         genotypes=dummy_genos,
         dosages=None,
         kind=RaggedSeqs,
+        min_af=None,
+        max_af=None,
     )
 
     # (r s), want tracks of [1, 2, 3, 4, 5] for each region so that pad values of 0 are obvious
@@ -106,7 +109,7 @@ def get_dummy_dataset():
     track_regions[:, 1] -= max_jitter
     track_regions[:, 2] = track_regions[:, 1] + 5 + max_jitter
     t_len = 5
-    data, offsets = tracks_to_intervals(
+    starts, ends, values, offsets = tracks_to_intervals(
         regions=track_regions,
         tracks=repeat(
             np.arange(1, 1 + t_len + 2 * max_jitter, dtype=np.float32),
@@ -115,14 +118,18 @@ def get_dummy_dataset():
         ),
         track_offsets=lengths_to_offsets(np.full(4, t_len + 2 * max_jitter)),
     )
+
+    starts = repeat(starts, "(r i) -> (r s i)", r=4, s=4)
+    ends = repeat(ends, "(r i) -> (r s i)", r=4, s=4)
+    values = repeat(values, "(r i) -> (r s i)", r=4, s=4)
+
     lengths = np.diff(offsets)
-    data = repeat(data, "(r i) -> (r s i)", r=4, s=4)
     offsets = lengths_to_offsets(repeat(lengths, "r -> (r s)", s=4))
-    dummy_itvs = {
-        "read-depth": RaggedIntervals.from_offsets(
-            data=data, shape=(4, 4), offsets=offsets
-        )
-    }
+
+    starts = Ragged.from_offsets(starts, (4, 4, None), offsets)
+    ends = Ragged.from_offsets(ends, (4, 4, None), offsets)
+    values = Ragged.from_offsets(values, (4, 4, None), offsets)
+    dummy_itvs = {"read-depth": RaggedIntervals(starts, ends, values)}
 
     # (r), want tracks of [0, 0, 1, 0, 0] for each region so that pad values of 0 are obvious
     track_regions = dummy_regions.copy()
@@ -131,19 +138,28 @@ def get_dummy_dataset():
     t_len = 5
     one_track = np.zeros(t_len + 2 * max_jitter, dtype=np.float32)
     one_track[2] = 1
-    data, offsets = tracks_to_intervals(
+    starts, ends, values, offsets = tracks_to_intervals(
         regions=track_regions,
         tracks=repeat(one_track, "l -> (r l)", r=len(dummy_regions)),
         track_offsets=lengths_to_offsets(np.full(4, t_len + 2 * max_jitter)),
     )
     lengths = np.diff(offsets)
-    dummy_itvs["annot"] = RaggedIntervals.from_offsets(
-        data=data, shape=4, offsets=offsets
-    )
-
+    offsets = lengths_to_offsets(lengths)
+    shape = (4, None)
+    starts = Ragged.from_offsets(starts, shape, offsets)
+    ends = Ragged.from_offsets(ends, shape, offsets)
+    values = Ragged.from_offsets(values, shape, offsets)
+    dummy_itvs["annot"] = RaggedIntervals(starts, ends, values)
     avail_tracks = {"read-depth": TrackType.SAMPLE, "annot": TrackType.ANNOT}
 
-    dummy_tracks = Tracks(dummy_itvs, avail_tracks, avail_tracks)
+    dummy_tracks = Tracks(
+        dummy_itvs,
+        avail_tracks,
+        avail_tracks,
+        kind=RaggedTracks,
+        n_regions=4,
+        n_samples=4,
+    )
 
     dummy_recon = HapsTracks(dummy_haps, dummy_tracks)
 

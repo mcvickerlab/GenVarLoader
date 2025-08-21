@@ -7,9 +7,8 @@ import awkward as ak
 import numpy as np
 from loguru import logger
 from numpy.typing import NDArray
-from seqpro.rag import Ragged
+from seqpro.rag import Ragged, is_rag_dtype
 
-from ._ragged import is_rag_dtype
 from ._types import AnnotatedHaps
 
 try:
