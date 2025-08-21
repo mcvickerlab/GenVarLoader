@@ -51,7 +51,7 @@ T = TypeVar("T", covariant=True)
 class _Variants:
     v_starts: NDArray[POS_TYPE]
     ilens: NDArray[np.int32]
-    alts: RaggedAlleles
+    alts: Ragged[np.bytes_]
     info: dict[str, NDArray[np.number]]
 
     @classmethod
@@ -181,8 +181,8 @@ class Haps(Reconstructor[_H]):
         if svar_meta_path.exists():
             with open(svar_meta_path) as f:
                 metadata = json.load(f)
-            # (r s p 2)
-            shape: tuple[int, ...] = tuple(metadata["shape"])
+            # (2 r s p)
+            shape = cast(tuple[int, ...], tuple(metadata["shape"]))
             dtype = np.dtype(metadata["dtype"])
 
             offset_path = path / "genotypes" / "offsets.npy"
@@ -191,14 +191,15 @@ class Haps(Reconstructor[_H]):
 
             offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
             v_idxs = np.memmap(geno_path, dtype=V_IDX_TYPE, mode="r")
+            rag_shape = (*shape[1:], None)
             genotypes = SparseGenotypes.from_offsets(
-                v_idxs, shape[1:], offsets.reshape(2, -1)
+                v_idxs, rag_shape, offsets.reshape(2, -1)
             )
 
             if dosage_path.exists():
                 dosages = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
                 dosages = SparseDosages.from_offsets(
-                    dosages, shape[1:], offsets.reshape(2, -1)
+                    dosages, rag_shape, offsets.reshape(2, -1)
                 )
 
             logger.info("Loading variant data.")
@@ -221,7 +222,7 @@ class Haps(Reconstructor[_H]):
             offsets = np.memmap(
                 path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
             )
-            shape = (len(regions), len(samples), ploidy)
+            shape = (len(regions), len(samples), ploidy, None)
             genotypes = SparseGenotypes.from_offsets(v_idxs, shape, offsets)
 
         return cls(
@@ -409,7 +410,7 @@ class Haps(Reconstructor[_H]):
         genotypes: SparseGenotypes,
     ) -> NDArray[np.intp]:
         r_idx, s_idx = np.unravel_index(idx, genotypes.shape[:2])  # type: ignore
-        ploid_idx = np.arange(genotypes.shape[-1], dtype=np.intp)
+        ploid_idx = np.arange(genotypes.shape[-2], dtype=np.intp)
         rsp_idx = (r_idx[:, None], s_idx[:, None], ploid_idx)
         geno_offset_idx = np.ravel_multi_index(rsp_idx, genotypes.shape[:-1])  # type: ignore
         return geno_offset_idx
@@ -433,7 +434,8 @@ class Haps(Reconstructor[_H]):
             mask = ak.Array(node)
             genos = cast(SparseGenotypes, genos[mask])
 
-        v_idxs = ak.flatten(genos, None).to_numpy()
+        genos = ak.to_packed(genos)
+        v_idxs = genos.data
         geno_offsets = lengths_to_offsets(genos.lengths)
 
         # (b*p*v ~l)
@@ -445,7 +447,7 @@ class Haps(Reconstructor[_H]):
         data = ak.with_parameter(node, "__array__", "char", highlevel=False)
         l_content = ListOffsetArray(Index(alt_offsets), data)
         vl_content = ListOffsetArray(Index(geno_offsets), l_content)
-        pvl_content = RegularArray(vl_content, genos.ploidy)
+        pvl_content = RegularArray(vl_content, genos.shape[-2])
         alts = ak.Array(pvl_content)
 
         v_starts = self.variants.v_starts[v_idxs]
@@ -456,10 +458,8 @@ class Haps(Reconstructor[_H]):
 
         if self.dosages is not None:
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
-            dosages = self.dosages[r, s]
-            dosages = Ragged.from_offsets(
-                ak.flatten(dosages, None).to_numpy(), genos.shape, geno_offsets
-            )
+            dosages = ak.to_packed(self.dosages[r, s])
+            dosages = Ragged.from_offsets(dosages.data, genos.shape, geno_offsets)
         else:
             dosages = None
 
@@ -613,13 +613,13 @@ class Tracks(Reconstructor[_T]):
         n_regions: int,
         n_samples: int,
         kind: type[_T] = RaggedTracks,
-    ):
+    ) -> Tracks[_T]:
         strack_dir = path / "intervals"
         atrack_dir = path / "annot_intervals"
 
         available_tracks: list[str] = []
         if strack_dir.exists():
-            for p in (path / "intervals").iterdir():
+            for p in strack_dir.iterdir():
                 if len(list(p.iterdir())) == 0:
                     p.rmdir()
                 else:
@@ -628,7 +628,7 @@ class Tracks(Reconstructor[_T]):
 
         available_annots: list[str] = []
         if atrack_dir.exists():
-            for p in (path / "annot_intervals").iterdir():
+            for p in atrack_dir.iterdir():
                 if len(list(p.iterdir())) == 0:
                     p.rmdir()
                 else:
@@ -643,10 +643,12 @@ class Tracks(Reconstructor[_T]):
         intervals: dict[str, RaggedIntervals] | None = {}
 
         for track in available_tracks:
-            intervals[track] = cls._open_intervals(path, track, n_regions, n_samples)
+            intervals[track] = cls._open_intervals(
+                strack_dir / track, n_regions, n_samples
+            )
 
         for track in available_annots:
-            intervals[track] = cls._open_intervals(path, track, n_regions, n_samples)
+            intervals[track] = cls._open_intervals(atrack_dir / track, n_regions, 0)
 
         all_tracks = dict(
             zip(available_tracks, itertools.repeat(TrackType.SAMPLE))
@@ -655,26 +657,24 @@ class Tracks(Reconstructor[_T]):
         return cls(intervals, all_tracks, all_tracks, kind, n_regions, n_samples)
 
     @staticmethod
-    def _open_intervals(
-        path: Path, track: str, n_regions: int, n_samples: int
-    ) -> RaggedIntervals:
+    def _open_intervals(path: Path, n_regions: int, n_samples: int) -> RaggedIntervals:
+        if n_samples == 0:
+            shape = (n_regions, None)
+        else:
+            shape = (n_regions, n_samples, None)
         itvs = np.memmap(
-            path / "intervals" / track / "intervals.npy",
+            path / "intervals.npy",
             dtype=INTERVAL_DTYPE,
             mode="r",
         )
         offsets = np.memmap(
-            path / "intervals" / track / "offsets.npy",
+            path / "offsets.npy",
             dtype=np.int64,
             mode="r",
         )
-        starts = Ragged.from_offsets(
-            itvs["start"], (n_regions, n_samples, None), offsets
-        )
-        ends = Ragged.from_offsets(itvs["end"], (n_regions, n_samples, None), offsets)
-        values = Ragged.from_offsets(
-            itvs["value"], (n_regions, n_samples, None), offsets
-        )
+        starts = Ragged.from_offsets(itvs["start"], shape, offsets)
+        ends = Ragged.from_offsets(itvs["end"], shape, offsets)
+        values = Ragged.from_offsets(itvs["value"], shape, offsets)
         return RaggedIntervals(starts, ends, values)
 
     def to_kind(self, kind: type[_NewT]) -> Tracks[_NewT]:
@@ -763,10 +763,10 @@ class Tracks(Reconstructor[_T]):
             intervals = self.intervals[name]
             if tracktype is TrackType.SAMPLE:
                 # (batch ~itvs)
-                itvs = intervals[r_idx, s_idx]
+                itvs = intervals[r_idx, s_idx].to_packed()
             else:
                 # (batch ~itvs)
-                itvs = intervals[r_idx]
+                itvs = intervals[r_idx].to_packed()
             # (batch 1 ~itvs)
             out_starts.append(itvs.starts[:, None])
             out_ends.append(itvs.ends[:, None])
@@ -885,7 +885,9 @@ class Tracks(Reconstructor[_T]):
                     out=tracks,
                     out_offsets=offsets,
                 )
-                tracks = Ragged.from_offsets(tracks, (n_regions, n_samples), offsets)
+                tracks = Ragged.from_offsets(
+                    tracks, (n_regions, n_samples, None), offsets
+                )
 
                 pbar.set_description("Writing (transforming)")
                 transformed_tracks = transform(ir_idx, is_idx, tracks)
@@ -1012,7 +1014,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             )
         )
 
-        if isinstance(self.tracks, RaggedTracks):
+        if issubclass(self.tracks.kind, RaggedTracks):
             if isinstance(output_length, int):
                 # (b p)
                 out_lengths = np.full_like(hap_lengths, output_length)
@@ -1079,7 +1081,8 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             out_shape = (
                 len(idx),
                 len(self.tracks.active_tracks),
-                self.haps.genotypes.shape[-1],
+                self.haps.genotypes.shape[-2],
+                None,
             )
 
             # ragged (b t [p] l)

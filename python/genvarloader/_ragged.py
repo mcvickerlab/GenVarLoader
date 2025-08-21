@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, TypeGuard
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import awkward as ak
 import numba as nb
@@ -10,9 +10,14 @@ from attrs import define
 from einops import repeat
 from numpy.typing import NDArray
 from phantom import Phantom
-from seqpro.rag import DTYPE, RDTYPE, Ragged
+from seqpro.rag import RDTYPE, Ragged, is_rag_dtype
 
+from ._torch import TORCH_AVAILABLE
 from ._types import AnnotatedHaps
+
+if TORCH_AVAILABLE or TYPE_CHECKING:
+    import torch
+    from torch.nested import nested_tensor_from_jagged as nt_jag
 
 __all__ = ["Ragged", "RaggedIntervals", "RaggedTracks"]
 INTERVAL_DTYPE = np.dtype(
@@ -89,9 +94,81 @@ class RaggedIntervals:
         values = self.values.data.reshape(shape)
         return starts, ends, values
 
+    def to_packed(self) -> RaggedIntervals:
+        """Apply :func:`ak.to_packed` to all arrays."""
+        starts = ak.to_packed(self.starts)
+        ends = ak.to_packed(self.ends)
+        values = ak.to_packed(self.values)
+        return RaggedIntervals(starts, ends, values)
 
-def is_rag_dtype(rag: Any, dtype: type[DTYPE]) -> TypeGuard[Ragged[DTYPE]]:
-    return isinstance(rag, Ragged) and np.issubdtype(rag.data.dtype, dtype)
+    def to_nested_tensor_batch(
+        self, device: str | torch.device = "cpu"
+    ) -> list[RagItvBatch]:
+        out = []
+        n_tracks = cast(int, self.values.shape[1])
+        for t in range(n_tracks):
+            # (batch tracks ... ~itv) -> (batch ... ~itv)
+            starts = ak.to_packed(self.starts[:, t])
+            ends = ak.to_packed(self.ends[:, t])
+            values = ak.to_packed(self.values[:, t])
+
+            offsets = torch.from_numpy(values.offsets.astype(np.int32)).to(device)
+            max_len = int(values.lengths.max())
+
+            starts = torch.from_numpy(starts.data).to(device)
+            starts = nt_jag(starts, offsets)
+            ends = torch.from_numpy(ends.data).to(device)
+            ends = nt_jag(ends, offsets)
+            values = torch.from_numpy(values.data.astype(np.float32)).to(device)
+            values = nt_jag(values, offsets)
+
+            out.append(
+                RagItvBatch(starts=starts, ends=ends, values=values, max_seqlen=max_len)
+            )
+
+        return out
+
+    def prepend_pad_itv(
+        self, start: int = -1, end: int = -1, value: float = 0.0
+    ) -> RaggedIntervals:
+        """Prepend a pad interval so that every group is guaranteed to have at least 1 interval.
+
+        Parameters
+        ----------
+        start
+            The start position to use for the pad interval
+        end
+            The end position to use for the pad interval
+        value
+            The value to use for the pad interval
+        """
+        b, t, *_ = self.values.shape
+        b = cast(int, b)
+        t = cast(int, t)
+
+        pad_start = ak.from_numpy(
+            np.full((b, t, 1), start, np.int32), regulararray=True
+        )
+        # (b t ~v)
+        new_starts = ak.concatenate([pad_start, self.starts], axis=2)
+        pad_end = ak.from_numpy(np.full((b, t, 1), end, np.int32), regulararray=True)
+        # (b t ~v)
+        new_ends = ak.concatenate([pad_end, self.ends], axis=2)
+        pad_value = ak.from_numpy(
+            np.full((b, t, 1), value, np.float32), regulararray=True
+        )
+        # (b t ~v)
+        new_values = ak.concatenate([pad_value, self.values], axis=2)
+
+        return RaggedIntervals(Ragged(new_starts), Ragged(new_ends), Ragged(new_values))
+
+
+class RagItvBatch(TypedDict):
+    """Dictionary of nested tensors."""
+    starts: torch.Tensor
+    ends: torch.Tensor
+    values: torch.Tensor
+    max_seqlen: int
 
 
 class RaggedSeqs(
@@ -219,7 +296,7 @@ def reverse_complement(
     seqs: Ragged[np.bytes_], mask: NDArray[np.bool_]
 ) -> Ragged[np.bytes_]:
     # (b [p] ~l), (b)
-    if seqs.ndim == 2:
+    if seqs.ndim == 3:
         ploidy = seqs.shape[1]
         mask = repeat(mask, "b -> (b p)", p=ploidy)
     rc_seqs = _rc_helper(seqs.data.view(np.uint8), seqs.offsets, mask)
@@ -239,10 +316,10 @@ def _reverse_helper(data: NDArray, offsets: NDArray[np.int64], mask: NDArray[np.
 def reverse(tracks: Ragged, mask: NDArray[np.bool_]):
     """Reverses data along the ragged axis in-place."""
     # (b t [p] ~l), (b)
-    if tracks.ndim == 2:
+    if tracks.ndim == 3:
         n_tracks = tracks.shape[1]
         mask = repeat(mask, "b -> (b t)", t=n_tracks)
-    elif tracks.ndim == 3:
-        n_tracks, ploidy = tracks.shape[1:]
+    elif tracks.ndim == 4:
+        n_tracks, ploidy = tracks.shape[1:-1]
         mask = repeat(mask, "b -> (b t p)", t=n_tracks, p=ploidy)
     _reverse_helper(tracks.data, tracks.offsets, mask)

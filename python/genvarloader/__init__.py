@@ -11,7 +11,7 @@ from ._dataset._rag_variants import RaggedVariants
 from ._dataset._reference import RefDataset, Reference
 from ._dataset._write import write
 from ._dummy import get_dummy_dataset
-from ._ragged import RaggedAnnotatedHaps
+from ._ragged import RaggedAnnotatedHaps, RaggedIntervals
 from ._torch import to_nested_tensor
 from ._types import AnnotatedHaps
 from ._variants._sitesonly import DatasetWithSites, SitesSchema, sites_vcf_to_table
@@ -38,4 +38,5 @@ __all__ = [
     "AnnotatedHaps",
     "RaggedAnnotatedHaps",
     "RaggedVariants",
+    "RaggedIntervals",
 ]

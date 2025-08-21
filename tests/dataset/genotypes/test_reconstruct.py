@@ -1,6 +1,7 @@
 # %%
 import numpy as np
-from genoray._svar import SparseGenotypes
+from genoray import SparseGenotypes
+from genoray._svar import dense2sparse
 from genvarloader._dataset._genotypes import reconstruct_haplotype_from_sparse
 from pytest_cases import parametrize_with_cases
 
@@ -24,7 +25,7 @@ def case_snps():
     annot_v_idxs = np.array([-1, -1, 1], dtype=np.int32)
     annot_pos = np.array([1, 2, 3], dtype=np.int32)
 
-    sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
+    sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
         v_starts,
@@ -59,7 +60,7 @@ def case_indels():
     annot_v_idxs = np.array([-1, 0, 1, 1], dtype=np.int32)
     annot_pos = np.array([0, 1, 3, 3], dtype=np.int32)
 
-    sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
+    sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
         v_starts,
@@ -94,7 +95,7 @@ def case_spanning_del_pad():
     annot_v_idxs = np.array([-1, -1, -1], dtype=np.int32)
     annot_pos = np.array([2, 3, np.iinfo(np.int32).max], dtype=np.int32)
 
-    sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
+    sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
         v_starts,
@@ -129,7 +130,7 @@ def case_shift_ins():
     annot_v_idxs = np.array([0, 0, -1, 1], dtype=np.int32)
     annot_pos = np.array([1, 1, 2, 3], dtype=np.int32)
 
-    sparse_genos = SparseGenotypes.from_dense(genos=genos, var_idxs=var_idxs)
+    sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
         v_starts,
@@ -163,14 +164,11 @@ def test_sparse(
     annot_v_idxs,
     annot_pos,
 ):
-    offset_idx = 0
     actual = np.empty(len(ref) - ref_start, np.uint8)
     actual_annot_v_idxs = np.empty(len(ref) - ref_start, np.int32)
     actual_annot_pos = np.empty(len(ref) - ref_start, np.int32)
     reconstruct_haplotype_from_sparse(
-        offset_idx=offset_idx,
-        geno_v_idxs=sparse_genos.data,
-        geno_offsets=sparse_genos.offsets,
+        v_idxs=sparse_genos.data,
         v_starts=v_starts,
         ilens=ilens,
         shift=shift,

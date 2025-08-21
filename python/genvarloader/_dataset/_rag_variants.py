@@ -199,18 +199,18 @@ class RaggedVariants:
         max_alen = lengths.max().item()
         offsets = torch.from_numpy(offsets).to(device)
         # ((N, ~V), ~L)
-        alts = nt_jag(alts, offsets, max_seqlen=max_alen)
+        alts = nt_jag(alts, offsets)
 
         max_vlen = np.diff(self.v_starts.offsets).max().item()
         v_offsets = torch.from_numpy(self.v_starts.offsets.astype(np.int32)).to(device)
-        ilens = torch.from_numpy(self.ilens.data.astype(np.float32)).to(device)
-        ilens = nt_jag(ilens, v_offsets, max_seqlen=max_vlen)
-        starts = torch.from_numpy(self.v_starts.data.astype(np.float32)).to(device)
-        starts = nt_jag(starts, v_offsets, max_seqlen=max_vlen)
+        ilens = torch.from_numpy(self.ilens.data).to(device)
+        ilens = nt_jag(ilens, v_offsets)
+        starts = torch.from_numpy(self.v_starts.data).to(device)
+        starts = nt_jag(starts, v_offsets)
 
         if self.dosages is not None:
-            dosages = torch.from_numpy(self.dosages.data.astype(np.float32)).to(device)
-            dosages = nt_jag(dosages, v_offsets, max_seqlen=max_vlen)
+            dosages = torch.from_numpy(self.dosages.data).to(device)
+            dosages = nt_jag(dosages, v_offsets)
         else:
             dosages = None
 
@@ -281,9 +281,9 @@ class RaggedVariants:
 
         return type(self)(
             alts=new_alts,
-            ilens=new_ilens,
-            v_starts=new_starts,
-            dosages=new_dosages,
+            ilens=Ragged(new_ilens),
+            v_starts=Ragged(new_starts),
+            dosages=Ragged(new_dosages),
         )
 
 

@@ -7,7 +7,7 @@ from genvarloader import Ragged, RaggedVariants
 from genvarloader._dataset._rag_variants import _infer_germline_ccfs
 from numpy.typing import NDArray
 from pytest_cases import parametrize_with_cases
-from seqpro._ragged import OFFSET_TYPE, lengths_to_offsets
+from seqpro.rag import OFFSET_TYPE, lengths_to_offsets
 
 
 def ccfs_no_overlaps():
@@ -109,14 +109,17 @@ def test_infer_germ_ccfs(
 
 
 def _bpv(p: int, data: NDArray, offsets: NDArray) -> ak.Array:
-    node = NumpyArray(data)
+    node = NumpyArray(data)  # type: ignore
     node = ListOffsetArray(Index(offsets), node)
     node = RegularArray(node, p)
     return ak.Array(node)
 
 
 def _bpvl(p: int, data: NDArray, l_offsets: NDArray, v_offsets: NDArray) -> ak.Array:
-    node = NumpyArray(data.view(np.uint8), parameters={"__array__": "byte"})
+    node = NumpyArray(
+        data.view(np.uint8),  # type: ignore
+        parameters={"__array__": "byte"},
+    )
     node = ListOffsetArray(Index(l_offsets), node)
     node = ListOffsetArray(Index(v_offsets), node)
     node = RegularArray(node, p)
@@ -131,9 +134,9 @@ def rc_no_rc():
     v_lens = np.array([0, 2], np.int32)
     v_offsets = lengths_to_offsets(v_lens)
     alts = _bpvl(1, np.array([b"ACT"]).view(np.uint8), l_offsets, v_offsets)
-    ilens = Ragged.from_awkward(_bpv(1, np.array([0, 1], np.int32), v_offsets))
-    v_starts = Ragged.from_awkward(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
-    dosages = Ragged.from_awkward(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
+    ilens = Ragged(_bpv(1, np.array([0, 1], np.int32), v_offsets))
+    v_starts = Ragged(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
+    dosages = Ragged(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
 
     ragv = RaggedVariants(alts, v_starts, ilens, dosages)
     to_rc = np.zeros(2, np.bool_)[:, None]
@@ -151,9 +154,9 @@ def rc_second_batch():
     v_offsets = lengths_to_offsets(v_lens)
     alts = _bpvl(1, np.array([b"ACT"]).view(np.uint8), l_offsets, v_offsets)
     rc_alts = _bpvl(1, np.array([b"TAG"]).view(np.uint8), l_offsets, v_offsets)
-    ilens = Ragged.from_awkward(_bpv(1, np.array([0, 1], np.int32), v_offsets))
-    v_starts = Ragged.from_awkward(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
-    dosages = Ragged.from_awkward(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
+    ilens = Ragged(_bpv(1, np.array([0, 1], np.int32), v_offsets))
+    v_starts = Ragged(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
+    dosages = Ragged(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
 
     ragv = RaggedVariants(alts, v_starts, ilens, dosages)
     to_rc = np.array([False, True])[:, None]
@@ -171,9 +174,9 @@ def rc_all():
     v_offsets = lengths_to_offsets(v_lens)
     alts = _bpvl(1, np.array([b"ACT"]).view(np.uint8), l_offsets, v_offsets)
     rc_alts = _bpvl(1, np.array([b"TAG"]).view(np.uint8), l_offsets, v_offsets)
-    ilens = Ragged.from_awkward(_bpv(1, np.array([0, 1], np.int32), v_offsets))
-    v_starts = Ragged.from_awkward(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
-    dosages = Ragged.from_awkward(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
+    ilens = Ragged(_bpv(1, np.array([0, 1], np.int32), v_offsets))
+    v_starts = Ragged(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
+    dosages = Ragged(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
 
     ragv = RaggedVariants(alts, v_starts, ilens, dosages)
     to_rc = None
@@ -198,7 +201,7 @@ def test_rc(ragv: RaggedVariants, to_rc: NDArray[np.bool_], desired: RaggedVaria
 
     np.testing.assert_equal(actual_alts, desired_alts)
 
-    assert ak.all((rc_ragv.ilens == desired.ilens).to_awkward(), None)
-    assert ak.all((rc_ragv.v_starts == desired.v_starts).to_awkward(), None)
+    assert ak.all((rc_ragv.ilens == desired.ilens), None)
+    assert ak.all((rc_ragv.v_starts == desired.v_starts), None)
     if ragv.dosages is not None:
-        assert ak.all((rc_ragv.dosages == desired.dosages).to_awkward(), None)
+        assert ak.all((rc_ragv.dosages == desired.dosages), None)
