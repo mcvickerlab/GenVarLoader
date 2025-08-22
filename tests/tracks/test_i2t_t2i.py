@@ -112,7 +112,7 @@ def test_tracks_to_intervals(data: Data):
     ends = Ragged.from_offsets(ends, shape, offsets)
     values = Ragged.from_offsets(values, shape, offsets)
     intervals = RaggedIntervals(starts, ends, values)
-    
+
     np.testing.assert_array_equal(intervals.starts.data, data.intervals.starts.data)
     np.testing.assert_array_equal(intervals.ends.data, data.intervals.ends.data)
     np.testing.assert_array_equal(intervals.values.data, data.intervals.values.data)

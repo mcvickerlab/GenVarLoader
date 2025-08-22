@@ -165,6 +165,7 @@ class RaggedIntervals:
 
 class RagItvBatch(TypedDict):
     """Dictionary of nested tensors."""
+
     starts: torch.Tensor
     ends: torch.Tensor
     values: torch.Tensor

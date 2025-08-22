@@ -259,7 +259,9 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
         starts = df["chromStart"].to_numpy()
         ends = df["chromEnd"].to_numpy()
         v_idx, offsets = vcf._var_idxs(contig, starts, ends)
-        unextended_var_idxs[contig] = np.array_split(v_idx.astype(V_IDX_TYPE), offsets[1:-1])
+        unextended_var_idxs[contig] = np.array_split(
+            v_idx.astype(V_IDX_TYPE), offsets[1:-1]
+        )
 
     v_idx_memmap_offsets = 0
     offset_memmap_offsets = 0
@@ -287,7 +289,9 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
                 chunk_idxs = unextended_idxs[offset : offset + n_vars]
                 offset += n_vars
 
-                if n_ext > 0:  # also means is_last is True based on implementation of _chunk_ranges_with_length
+                if (
+                    n_ext > 0
+                ):  # also means is_last is True based on implementation of _chunk_ranges_with_length
                     # indices in chunk_idxs are inclusive
                     ext_s_idx = chunk_idxs[-1] + 1
                     ext_idxs = np.arange(ext_s_idx, ext_s_idx + n_ext, dtype=np.int32)

@@ -1509,7 +1509,9 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
     ) -> ArrayDataset[MaybeSEQ, RaggedIntervals]: ...
     @overload
     def with_tracks(
-        self, tracks: Literal[False] = ..., kind: Literal["tracks", "intervals"] | None = ...
+        self,
+        tracks: Literal[False] = ...,
+        kind: Literal["tracks", "intervals"] | None = ...,
     ) -> ArrayDataset[MaybeSEQ, None]: ...
     @overload
     def with_tracks(
@@ -1653,7 +1655,9 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
     ) -> RaggedDataset[MaybeRSEQ, RaggedIntervals]: ...
     @overload
     def with_tracks(
-        self, tracks: Literal[False] = ..., kind: Literal["tracks", "intervals"] | None = ...
+        self,
+        tracks: Literal[False] = ...,
+        kind: Literal["tracks", "intervals"] | None = ...,
     ) -> RaggedDataset[MaybeRSEQ, None]: ...
     @overload
     def with_tracks(
