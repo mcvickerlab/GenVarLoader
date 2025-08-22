@@ -10,7 +10,7 @@ For why, see ["What's a `gvl.Dataset`?"](dataset.md). [`Ragged`](api.md#genvarlo
 :width: 150
 :::
 
-To store this, a [`Ragged`](api.md#genvarloader.Ragged) array minimally consists of two NumPy arrays: a 1D array `data` with shape `(size)` containing the values, and another 1D array `offsets` with shape `(n_rows+1)` specifying the start and end position (exclusive) of every row's data in the `data` array. We could thus create the above example:
+To store this, a [`Ragged`](api.md#genvarloader.Ragged) array minimally consists of two NumPy arrays: a 1D array `data` with shape `(size)` containing the values, and another 1- or 2-D array `offsets` with shape `(n_rows+1)` or `(2, n_rows)`, respectively, specifying the start and end position (exclusive) of every row's data in the `data` array. We could thus create the above example:
 
 ```python
 data = np.array([1, 2, 3, 4, 5, 6])
@@ -24,11 +24,11 @@ ragged = gvl.Ragged.from_offsets(data, shape, offsets)
 # ]
 ```
 
-You can then work with the ragged data as-is or convert to them [to](api.md#genvarloader.Ragged.to_awkward) and [from](api.md#genvarloader.Ragged.from_awkward) Awkward Arrays. Depending on what you need to do, either representation may be more convenient. Within GVL, we use numba JIT'd functions to compute on the ragged objects directly since it's relatively straightforward.
+Ragged arrays are subclasses of [Awkward Arrays](https://github.com/scikit-hep/awkward), so anything you can do with Awkward Arrays you can do with Ragged arrays. Within GVL, we use numba JIT'd functions to compute on the ragged objects' buffers directly since it's relatively straightforward (i.e. iterating over the rows of `data` via the `offsets` array).
 
 .. note::
 
-    GVL can also return several other kinds of objects, see the [API reference](api.md#containers) for more details.
+    GVL Datasets can also return several other kinds of objects, see the [API reference](api.md#containers) for more details.
 
 ## I have multiple tracks per sample, how can I add them?
 
