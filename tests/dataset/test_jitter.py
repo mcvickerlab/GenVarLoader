@@ -38,7 +38,9 @@ def test_jitter(dataset: gvl.RaggedDataset):
     )
 
     desired_starts = ds._full_regions[no_var_regions, 1, None] + jitter
-    desired_starts = repeat(desired_starts, "b s -> b s p", p=ds._seqs.genotypes.shape[-2])
+    desired_starts = repeat(
+        desired_starts, "b s -> b s p", p=ds._seqs.genotypes.shape[-2]
+    )
 
     no_var_regions = (ds.regions["chrom"] == "chr1").to_numpy()
     annhaps = ds[no_var_regions]

@@ -83,7 +83,9 @@ def tracks_to_intervals(
     regions: NDArray[np.int32],
     tracks: NDArray[np.float32],
     track_offsets: NDArray[np.int64],
-) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.float32], NDArray[np.int64]]:
+) -> tuple[
+    NDArray[np.int32], NDArray[np.int32], NDArray[np.float32], NDArray[np.int64]
+]:
     """Convert tracks to intervals. Note that this will include 0-value intervals.
 
     Parameters

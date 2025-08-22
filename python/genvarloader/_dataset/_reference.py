@@ -359,7 +359,9 @@ class RefDataset(Generic[T]):
             pad_char=self.reference.pad_char,
         ).view("S1")
 
-        ref = cast(Ragged[np.bytes_], Ragged.from_offsets(ref, (batch_size, None), out_offsets))
+        ref = cast(
+            Ragged[np.bytes_], Ragged.from_offsets(ref, (batch_size, None), out_offsets)
+        )
 
         to_rc = regions[:, 3] == -1
         if to_rc.any():
