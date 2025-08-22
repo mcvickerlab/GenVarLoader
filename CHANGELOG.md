@@ -1,3 +1,21 @@
+## 0.17.0 (2025-08-22)
+
+### Feat
+
+- use new seqpro.Ragged interface
+- method to obtain the number of variants per region,sample,haplotype.
+- support for reverse complementing alt alleles of RaggedVariants
+- ragvariant methods for pytorch, fix squeeze for scalar indexing, upstream genoray fix for extending genotypes from PGEN, (perf) batched contig normalization
+- subsetting for RefDataset
+
+### Fix
+
+- right shape for double slice indexing
+- shape/broadcasting bug for reverse complementing variants
+- **perf**: breaking changes to ragged data layout from seqpro to eliminate copies when converting non-contiguous ragged data to/from awkward arrays.
+- when ref not passed to Dataset.open, emit a warning instead of error and let ds return raggedvariants
+- refdataset transforms with indices
+
 ## 0.16.0 (2025-06-05)
 
 ### Feat
