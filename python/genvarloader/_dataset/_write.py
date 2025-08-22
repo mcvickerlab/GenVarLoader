@@ -251,7 +251,7 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
         }
     ).write_ipc(out_dir / "variants.arrow")
 
-    unextended_var_idxs: dict[str, list[NDArray[np.integer]]] = {}
+    unextended_var_idxs: dict[str, list[NDArray[V_IDX_TYPE]]] = {}
     for (contig,), df in bed.partition_by(
         "chrom", as_dict=True, maintain_order=True
     ).items():
@@ -259,7 +259,7 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
         starts = df["chromStart"].to_numpy()
         ends = df["chromEnd"].to_numpy()
         v_idx, offsets = vcf._var_idxs(contig, starts, ends)
-        unextended_var_idxs[contig] = np.array_split(v_idx, offsets[1:-1])
+        unextended_var_idxs[contig] = np.array_split(v_idx.astype(V_IDX_TYPE), offsets[1:-1])
 
     v_idx_memmap_offsets = 0
     offset_memmap_offsets = 0
@@ -276,24 +276,24 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
         contig = cast(str, contig)
         starts = df["chromStart"].to_numpy().copy()
         ends = df["chromEnd"].to_numpy().copy()
-        for range_, var_idxs in zip(
+        for range_, unextended_idxs in zip(
             vcf._chunk_ranges_with_length(contig, starts, ends, max_mem, VCF.Genos8),
             unextended_var_idxs[contig],
         ):
-            var_idxs = var_idxs.astype(V_IDX_TYPE)
-
-            offset = 0
             ls_sparse: list[SparseGenotypes] = []
-            for _, is_last, (genos, chunk_end, n_ext) in mark_ends(range_):
-                n_variants = genos.shape[-1]
-                chunk_idxs = var_idxs[offset : offset + n_variants]
+            offset = 0
+            for _, is_last, (chunk_genos, chunk_end, n_ext) in mark_ends(range_):
+                n_vars = chunk_genos.shape[-1]
+                chunk_idxs = unextended_idxs[offset : offset + n_vars]
+                offset += n_vars
 
-                if n_ext > 0:  # also means is_last is True
+                if n_ext > 0:  # also means is_last is True based on implementation of _chunk_ranges_with_length
+                    # indices in chunk_idxs are inclusive
                     ext_s_idx = chunk_idxs[-1] + 1
                     ext_idxs = np.arange(ext_s_idx, ext_s_idx + n_ext, dtype=np.int32)
                     chunk_idxs = np.concatenate([chunk_idxs, ext_idxs])
 
-                sp_genos = dense2sparse(genos, chunk_idxs)
+                sp_genos = dense2sparse(chunk_genos, chunk_idxs)
                 ls_sparse.append(sp_genos)
 
                 if is_last:
