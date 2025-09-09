@@ -57,7 +57,7 @@ plink2 = "*"
 # genvarloader = { path = ".", editable = true }
 hirola = "==0.3"
 # seqpro = "==0.7.1"
-genoray = "==0.15.0"
+genoray = { git = "https://github.com/d-laub/genoray.git", branch = "dlaub/svar-af" }
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"

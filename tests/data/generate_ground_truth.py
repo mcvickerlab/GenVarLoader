@@ -191,6 +191,7 @@ def main(
     if (WDIR / "filtered.svar").exists():
         shutil.rmtree(WDIR / "filtered.svar")
     SparseVar.from_vcf(WDIR / "filtered.svar", VCF(filtered_vcf), "50mb")
+    SparseVar(WDIR / "filtered.svar").cache_af()
 
     bed = pl.read_csv(
         filtered_vcf,
