@@ -36,7 +36,7 @@ from .._ragged import (
 )
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
-from ._genotypes import filter_af, get_diffs_sparse, reconstruct_haplotypes_from_sparse
+from ._genotypes import get_diffs_sparse, reconstruct_haplotypes_from_sparse
 from ._indexing import DatasetIndexer
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._rag_variants import RaggedVariants
@@ -49,37 +49,48 @@ T = TypeVar("T", covariant=True)
 
 @define
 class _Variants:
+    path: Path
     v_starts: NDArray[POS_TYPE]
     ilens: NDArray[np.int32]
-    alts: Ragged[np.bytes_]
+    alts: RaggedAlleles
     info: dict[str, NDArray[np.number]]
 
     @classmethod
-    def from_table(cls, variants: str | Path | pl.DataFrame, one_based: bool = False):
+    def from_table(cls, path: str | Path, one_based: bool = False):
         """
         Loads variant info from a table. Must always have POS, ILEN, and ALT.
         Any numeric columns will be loaded as info.
 
         Parameters
         ----------
-        variants : str | Path | pl.DataFrame
+        path : str | Path
             The path to the variants table or a polars DataFrame.
         one_based : bool, optional
             Whether the variants are one-based, by default False.
         """
-        if isinstance(variants, (str, Path)):
-            variants = pl.read_ipc(variants)
+        path = Path(path).resolve()
+        variants = pl.read_ipc(path, memory_map=False)
+        is_list_type = [
+            col for col in ("ALT", "ILEN") if variants[col].dtype == pl.List
+        ]
+        variants = variants.with_columns(pl.col(is_list_type).list.first())
+
         info = {
             k: variants[k].to_numpy()
             for k, v in variants.schema.items()
             if v.is_numeric()
         }
+
         return cls(
+            path,
             variants["POS"].to_numpy() - int(one_based),
             variants["ILEN"].to_numpy(),
             RaggedAlleles.from_polars(variants["ALT"]),
             info,
         )
+
+    def __len__(self) -> int:
+        return len(self.v_starts)
 
 
 class Reconstructor(Protocol[T]):
@@ -148,6 +159,8 @@ _NewH = TypeVar("_NewH", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 
 @define
 class Haps(Reconstructor[_H]):
+    path: Path
+    """The path to the GVL dataset."""
     reference: Reference | None
     """The reference genome. This is kept in memory."""
     variants: _Variants
@@ -165,6 +178,16 @@ class Haps(Reconstructor[_H]):
 
     def __attrs_post_init__(self):
         self.n_variants = ak.num(self.genotypes, -1).to_numpy()
+
+        if (
+            self.min_af is not None
+            or self.max_af is not None
+            and "AF" not in self.variants.info
+        ):
+            raise RuntimeError(
+                "Either this dataset is not backed by an SVAR file, or the SVAR file has not had AFs cached yet."
+                + "Doing this automatically is not yet supported."
+            )
 
     @classmethod
     def from_path(
@@ -203,14 +226,9 @@ class Haps(Reconstructor[_H]):
                 )
 
             logger.info("Loading variant data.")
-            svar_index = (
-                pl.scan_ipc(
-                    path / "genotypes" / "link.svar" / "index.arrow", memory_map=False
-                )
-                .with_columns(pl.col("ILEN", "ALT").list.first())
-                .collect()
+            variants = _Variants.from_table(
+                path / "genotypes" / "link.svar" / "index.arrow", one_based=True
             )
-            variants = _Variants.from_table(svar_index, one_based=True)
         else:
             logger.info("Loading variant data.")
             variants = _Variants.from_table(path / "genotypes" / "variants.arrow")
@@ -226,6 +244,7 @@ class Haps(Reconstructor[_H]):
             genotypes = SparseGenotypes.from_offsets(v_idxs, shape, offsets)
 
         return cls(
+            path=path,
             reference=reference,
             variants=variants,
             genotypes=genotypes,
@@ -253,13 +272,7 @@ class Haps(Reconstructor[_H]):
         deterministic: bool,
     ) -> _H:
         if issubclass(self.kind, RaggedVariants):
-            ragv = self._get_variants(
-                idx=idx,
-                regions=None,
-                shifts=None,
-                keep=None,
-                keep_offsets=None,
-            )
+            ragv = self._get_variants(idx=idx, regions=None, shifts=None)
             ragv = cast(_H, ragv)
             return ragv
         else:
@@ -296,13 +309,8 @@ class Haps(Reconstructor[_H]):
         geno_offset_idx = self._get_geno_offset_idx(idx, self.genotypes)
 
         if self.min_af is not None or self.max_af is not None:
-            keep, keep_offsets = filter_af(
-                geno_offset_idx,
-                self.genotypes.offsets,
-                self.genotypes.data,
-                self.variants.info["af"],
-                self.min_af,
-                self.max_af,
+            raise NotImplementedError(
+                "Filtering by AF is not supported for haplotype output yet."
             )
         else:
             keep = None
@@ -359,13 +367,7 @@ class Haps(Reconstructor[_H]):
             )
             out = RaggedAnnotatedHaps(haps, maybe_annot_v_idx, maybe_annot_pos)
         elif issubclass(self.kind, RaggedVariants):
-            out = self._get_variants(
-                idx=idx,
-                regions=regions,
-                shifts=shifts,
-                keep=keep,
-                keep_offsets=keep_offsets,
-            )
+            out = self._get_variants(idx=idx, regions=regions, shifts=shifts)
         else:
             assert_never(self.kind)
 
@@ -420,23 +422,25 @@ class Haps(Reconstructor[_H]):
         idx: NDArray[np.integer],
         regions: NDArray[np.int32] | None,
         shifts: NDArray[np.int32] | None,
-        keep: NDArray[np.bool_] | None,
-        keep_offsets: NDArray[np.int64] | None,
     ) -> RaggedVariants:
         # TODO: maybe filter variants for region, shifts?
         r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore
         # (b p ~v)
         genos = cast(SparseGenotypes, self.genotypes[r, s])
 
-        if keep is not None and keep_offsets is not None:
-            node = NumpyArray(keep)  # type: ignore
-            node = ListOffsetArray(Index(keep_offsets), node)
-            mask = ak.Array(node)
-            genos = cast(SparseGenotypes, genos[mask])
-
         genos = ak.to_packed(genos)
         v_idxs = genos.data
-        geno_offsets = lengths_to_offsets(genos.lengths)
+
+        if self.min_af is not None or self.max_af is not None:
+            geno_afs = self.variants.info["AF"][v_idxs]
+            keep = np.full(genos.shape[-1], True, np.bool_)
+            if self.min_af is not None:
+                keep &= geno_afs >= self.min_af
+            if self.max_af is not None:
+                keep &= geno_afs <= self.max_af
+            keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
+            genos = cast(SparseGenotypes, ak.to_packed(genos[keep]))
+            v_idxs = genos.data
 
         # (b*p*v ~l)
         alts = cast(RaggedAlleles, self.variants.alts[v_idxs])
@@ -446,20 +450,20 @@ class Haps(Reconstructor[_H]):
             node = node.content
         data = ak.with_parameter(node, "__array__", "char", highlevel=False)
         l_content = ListOffsetArray(Index(alt_offsets), data)
-        vl_content = ListOffsetArray(Index(geno_offsets), l_content)
+        vl_content = ListOffsetArray(Index(genos.offsets), l_content)
         pvl_content = RegularArray(vl_content, genos.shape[-2])
         alts = ak.Array(pvl_content)
 
         v_starts = self.variants.v_starts[v_idxs]
-        v_starts = Ragged.from_offsets(v_starts, genos.shape, geno_offsets)
+        v_starts = Ragged.from_offsets(v_starts, genos.shape, genos.offsets)
 
         ilens = self.variants.ilens[v_idxs]
-        ilens = Ragged.from_offsets(ilens, genos.shape, geno_offsets)
+        ilens = Ragged.from_offsets(ilens, genos.shape, genos.offsets)
 
         if self.dosages is not None:
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
             dosages = ak.to_packed(self.dosages[r, s])
-            dosages = Ragged.from_offsets(dosages.data, genos.shape, geno_offsets)
+            dosages = Ragged.from_offsets(dosages.data, genos.shape, genos.offsets)
         else:
             dosages = None
 
