@@ -180,10 +180,8 @@ class Haps(Reconstructor[_H]):
         self.n_variants = ak.num(self.genotypes, -1).to_numpy()
 
         if (
-            self.min_af is not None
-            or self.max_af is not None
-            and "AF" not in self.variants.info
-        ):
+            self.min_af is not None or self.max_af is not None
+        ) and "AF" not in self.variants.info:
             raise RuntimeError(
                 "Either this dataset is not backed by an SVAR file, or the SVAR file has not had AFs cached yet."
                 + "Doing this automatically is not yet supported."
@@ -197,6 +195,8 @@ class Haps(Reconstructor[_H]):
         regions: NDArray[np.int32],
         samples: list[str],
         ploidy: int,
+        min_af: float | None = None,
+        max_af: float | None = None,
     ) -> Haps[RaggedVariants]:
         svar_meta_path = path / "genotypes" / "svar_meta.json"
         dosages = None
@@ -250,8 +250,8 @@ class Haps(Reconstructor[_H]):
             genotypes=genotypes,
             dosages=dosages,
             kind=RaggedVariants,
-            min_af=None,
-            max_af=None,
+            min_af=min_af,
+            max_af=max_af,
         )
 
     def to_kind(self, kind: type[_NewH]) -> Haps[_NewH]:
@@ -433,14 +433,16 @@ class Haps(Reconstructor[_H]):
 
         if self.min_af is not None or self.max_af is not None:
             geno_afs = self.variants.info["AF"][v_idxs]
-            keep = np.full(genos.shape[-1], True, np.bool_)
+            keep = np.full(len(v_idxs), True, np.bool_)
             if self.min_af is not None:
                 keep &= geno_afs >= self.min_af
             if self.max_af is not None:
                 keep &= geno_afs <= self.max_af
             keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
-            genos = cast(SparseGenotypes, ak.to_packed(genos[keep]))
+            genos = SparseGenotypes(ak.to_packed(ak.to_regular(genos[keep], 1)))
             v_idxs = genos.data
+        else:
+            keep = None
 
         # (b*p*v ~l)
         alts = cast(RaggedAlleles, self.variants.alts[v_idxs])
@@ -462,8 +464,10 @@ class Haps(Reconstructor[_H]):
 
         if self.dosages is not None:
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
-            dosages = ak.to_packed(self.dosages[r, s])
-            dosages = Ragged.from_offsets(dosages.data, genos.shape, genos.offsets)
+            dosages = self.dosages[r, s]
+            if keep is not None:
+                dosages = ak.to_regular(dosages[keep], 1)
+            dosages = Ragged(ak.to_packed(dosages))
         else:
             dosages = None
 
@@ -991,9 +995,12 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
     haps: Haps[_H]
     tracks: Tracks[_T]
 
-    def to_kind(self, kind: type[_NewH]) -> HapsTracks[_NewH]:
-        haps = self.haps.to_kind(kind)
-        return cast(HapsTracks[_NewH], evolve(self, haps=haps))
+    def to_kind(
+        self, kind: tuple[type[_NewH], type[_NewT]]
+    ) -> HapsTracks[_NewH, _NewT]:
+        haps = self.haps.to_kind(kind[0])
+        tracks = self.tracks.to_kind(kind[1])
+        return cast(HapsTracks[_NewH, _NewT], evolve(self, haps=haps, tracks=tracks))
 
     def __call__(
         self,

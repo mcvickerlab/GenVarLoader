@@ -110,6 +110,8 @@ class Dataset:
         rng: int | np.random.Generator | None = False,
         deterministic: bool = True,
         rc_neg: bool = True,
+        min_af: float | None = None,
+        max_af: float | None = None,
     ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]:
         """Open a dataset from a path. If no reference genome is provided, the dataset cannot yield sequences.
         Will initialize the dataset such that it will return tracks and haplotypes (reference sequences if no genotypes) if possible.
@@ -130,6 +132,10 @@ class Dataset:
             shifting of longer-than-requested haplotypes.
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
+        min_af
+            The minimum allele frequency to include in the dataset. If dataset is not backed by SVAR genotypes, this will raise an error.
+        max_af
+            The maximum allele frequency to include in the dataset. If dataset is not backed by SVAR genotypes, this will raise an error.
         """
         path = Path(path)
         if not path.exists():
@@ -173,6 +179,8 @@ class Dataset:
                 regions=regions,
                 samples=samples,
                 ploidy=ploidy,
+                min_af=min_af,
+                max_af=max_af,
             )
             if reference is None:
                 logger.warning(
@@ -259,7 +267,8 @@ class Dataset:
         rng: int | np.random.Generator | None = None,
         deterministic: bool | None = None,
         rc_neg: bool | None = None,
-        # var_filter: Callable[[]]
+        min_af: float | Literal[False] | None = None,
+        max_af: float | Literal[False] | None = None,
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -276,6 +285,12 @@ class Dataset:
             can be returned.
         rc_neg
             Whether to reverse-complement sequences and reverse tracks on negative strands.
+        min_af
+            The minimum allele frequency to include in the dataset. If set to :code:`False`, disables this filter.
+            If dataset is not backed by SVAR genotypes, this will raise an error.
+        max_af
+            The maximum allele frequency to include in the dataset. If set to :code:`False`, disables this filter.
+            If dataset is not backed by SVAR genotypes, this will raise an error.
         """
         to_evolve = {}
 
@@ -312,6 +327,31 @@ class Dataset:
 
         if rc_neg is not None:
             to_evolve["rc_neg"] = rc_neg
+
+        if min_af is not None or max_af is not None:
+            if not isinstance(self._seqs, Haps):
+                raise ValueError("Dataset has no genotypes to filter.")
+
+            if min_af is None:
+                min_af = self._seqs.min_af
+            elif min_af is False:
+                min_af = None
+
+            if max_af is None:
+                max_af = self._seqs.max_af
+            elif max_af is False:
+                max_af = None
+
+            haps = evolve(self._seqs, min_af=min_af, max_af=max_af)
+            to_evolve["_seqs"] = haps
+
+            if isinstance(self._recon, Haps):
+                recon = haps
+            elif isinstance(self._recon, HapsTracks):
+                recon = evolve(self._recon, haps=haps)
+            else:
+                recon = self._recon
+            to_evolve["_recon"] = recon
 
         return evolve(self, **to_evolve)
 

@@ -90,7 +90,7 @@ def write(
         bed = sp.bed.read(bed)
 
     gvl_bed, contigs, input_to_sorted_idx_map = _prep_bed(bed, max_jitter)
-    bed.with_columns(r_idx_map=pl.lit(input_to_sorted_idx_map)).write_ipc(
+    bed.with_columns(r_idx_map=pl.Series(input_to_sorted_idx_map)).write_ipc(
         path / "input_regions.arrow"
     )
     metadata["contigs"] = contigs
@@ -197,7 +197,7 @@ def _prep_bed(
             )
 
     bed = bed.select("chrom", "chromStart", "chromEnd", "strand")
-    contigs = natsorted(bed["chrom"].unique().to_list())
+    contigs = natsorted(bed["chrom"].unique())
     bed = sp.bed.sort(bed.with_row_index())
 
     input_to_sorted_idx_map = np.argsort(bed["index"])

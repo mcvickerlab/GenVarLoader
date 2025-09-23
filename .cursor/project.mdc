@@ -1,0 +1,7 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+
+This project uses Pixi to manage the development environment. This means all CLI commands that depend on the dev env should be prefaced with `pixi run -e dev`. Inspect the `pixi.toml` file for details on other environments, tasks, and dependencies.
