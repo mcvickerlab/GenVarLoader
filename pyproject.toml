@@ -30,7 +30,7 @@ dependencies = [
     "awkward",
     "hirola>=0.3,<0.4",
     "seqpro>=0.7.1",
-    "genoray@git+https://github.com/d-laub/genoray.git@dlaub/svar-af",
+    "genoray>=0.15.0",
 ]
 
 [project.urls]

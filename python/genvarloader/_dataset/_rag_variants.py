@@ -286,6 +286,14 @@ class RaggedVariants:
             dosages=Ragged(new_dosages),
         )
 
+    def __getitem__(self, idx) -> Self:
+        return type(self)(
+            alts=self.alts[idx],
+            ilens=self.ilens[idx],
+            v_starts=self.v_starts[idx],
+            dosages=None if self.dosages is None else self.dosages[idx],
+        )
+
 
 class RagVarBatch(TypedDict):
     alts: torch.Tensor
