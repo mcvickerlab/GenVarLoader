@@ -71,7 +71,7 @@ def get_dummy_dataset():
             dummy_regions[:, 1].astype(POS_TYPE), "r -> (r s)", s=n_samples
         ),
         ilens=repeat(np.array([-2, -1, 0, 1], np.int32), "s -> (r s)", r=n_regions),
-        alts=RaggedAlleles.from_offsets( # type: ignore
+        alts=RaggedAlleles.from_offsets(  # type: ignore
             data=repeat(sp.cast_seqs("ACGTT"), "a -> (r a)", r=n_regions),
             shape=(n_regions * n_samples, None),
             offsets=lengths_to_offsets(
