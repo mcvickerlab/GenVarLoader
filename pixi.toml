@@ -56,8 +56,8 @@ plink2 = "*"
 [pypi-dependencies]
 # genvarloader = { path = ".", editable = true }
 hirola = "==0.3"
-# seqpro = "==0.7.1"
-genoray = { git = "https://github.com/d-laub/genoray.git", branch = "dlaub/svar-af" }
+seqpro = "==0.8.2"
+genoray = "==0.16.0"
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"
@@ -91,9 +91,11 @@ python = "3.11.*"
 python = "3.12.*"
 
 [tasks]
-install = "uv pip install -e . -e /carter/users/dlaub/projects/ML4GLand/SeqPro"
+install = "uv pip install -e ."
 pre-commit = "pre-commit install --hook-type commit-msg --hook-type pre-push"
-gen = { cmd = "python tests/data/generate_ground_truth.py", depends-on = ["install"] }
+gen = { cmd = "python tests/data/generate_ground_truth.py", depends-on = [
+    "install",
+] }
 test = { cmd = "pytest tests && cargo test --release", depends-on = ["gen"] }
 
 [feature.docs.tasks]

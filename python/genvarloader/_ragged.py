@@ -264,10 +264,13 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
     -------
         Padded array.
     """
-    length = rag.lengths.max()
-    rag = ak.pad_none(rag, length, clip=True)
-    rag = ak.fill_none(rag, pad_value)
-    arr = ak.to_numpy(rag)
+    length = int(rag.lengths.max())
+    if is_rag_dtype(rag, np.bytes_):
+        rag = ak.str.rpad(rag, length, pad_value)
+    else:
+        rag = ak.pad_none(rag, length, clip=True)
+        rag = ak.fill_none(rag, pad_value)
+    arr = Ragged(rag).to_numpy()
     return arr
 
 

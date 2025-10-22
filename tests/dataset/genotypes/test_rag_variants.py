@@ -133,14 +133,14 @@ def rc_no_rc():
     l_offsets = lengths_to_offsets(l_lens)
     v_lens = np.array([0, 2], np.int32)
     v_offsets = lengths_to_offsets(v_lens)
-    alts = _bpvl(1, np.array([b"ACT"]).view(np.uint8), l_offsets, v_offsets)
-    ilens = Ragged(_bpv(1, np.array([0, 1], np.int32), v_offsets))
-    v_starts = Ragged(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
-    dosages = Ragged(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
+    alt = _bpvl(1, np.array([b"ACT"]).view(np.uint8), l_offsets, v_offsets)
+    ilen = Ragged(_bpv(1, np.array([0, 1], np.int32), v_offsets))
+    start = Ragged(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
+    dosage = Ragged(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
 
-    ragv = RaggedVariants(alts, v_starts, ilens, dosages)
+    ragv = RaggedVariants(alt, start, ilen, dosage)
     to_rc = np.zeros(2, np.bool_)[:, None]
-    desired = RaggedVariants(alts, v_starts, ilens, dosages)
+    desired = RaggedVariants(alt, start, ilen, dosage)
 
     return ragv, to_rc, desired
 
@@ -152,15 +152,15 @@ def rc_second_batch():
     l_offsets = lengths_to_offsets(l_lens)
     v_lens = np.array([0, 2], np.int32)
     v_offsets = lengths_to_offsets(v_lens)
-    alts = _bpvl(1, np.array([b"ACT"]).view(np.uint8), l_offsets, v_offsets)
-    rc_alts = _bpvl(1, np.array([b"TAG"]).view(np.uint8), l_offsets, v_offsets)
-    ilens = Ragged(_bpv(1, np.array([0, 1], np.int32), v_offsets))
-    v_starts = Ragged(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
-    dosages = Ragged(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
+    alt = _bpvl(1, np.array([b"ACT"]).view(np.uint8), l_offsets, v_offsets)
+    rc_alt = _bpvl(1, np.array([b"TAG"]).view(np.uint8), l_offsets, v_offsets)
+    ilen = Ragged(_bpv(1, np.array([0, 1], np.int32), v_offsets))
+    start = Ragged(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
+    dosage = Ragged(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
 
-    ragv = RaggedVariants(alts, v_starts, ilens, dosages)
+    ragv = RaggedVariants(alt, start, ilen, dosage)
     to_rc = np.array([False, True])[:, None]
-    desired = RaggedVariants(rc_alts, v_starts, ilens, dosages)
+    desired = RaggedVariants(rc_alt, start, ilen, dosage)
 
     return ragv, to_rc, desired
 
@@ -172,15 +172,15 @@ def rc_all():
     l_offsets = lengths_to_offsets(l_lens)
     v_lens = np.array([0, 2], np.int32)
     v_offsets = lengths_to_offsets(v_lens)
-    alts = _bpvl(1, np.array([b"ACT"]).view(np.uint8), l_offsets, v_offsets)
-    rc_alts = _bpvl(1, np.array([b"TAG"]).view(np.uint8), l_offsets, v_offsets)
-    ilens = Ragged(_bpv(1, np.array([0, 1], np.int32), v_offsets))
-    v_starts = Ragged(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
-    dosages = Ragged(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
+    alt = _bpvl(1, np.array([b"ACT"]).view(np.uint8), l_offsets, v_offsets)
+    rc_alt = _bpvl(1, np.array([b"TAG"]).view(np.uint8), l_offsets, v_offsets)
+    ilen = Ragged(_bpv(1, np.array([0, 1], np.int32), v_offsets))
+    start = Ragged(_bpv(1, np.array([0, 1], POS_TYPE), v_offsets))
+    dosage = Ragged(_bpv(1, np.array([0.1, 0.2], np.float32), v_offsets))
 
-    ragv = RaggedVariants(alts, v_starts, ilens, dosages)
+    ragv = RaggedVariants(alt, start, ilen, dosage)
     to_rc = None
-    desired = RaggedVariants(rc_alts, v_starts, ilens, dosages)
+    desired = RaggedVariants(rc_alt, start, ilen, dosage)
 
     return ragv, to_rc, desired
 
@@ -189,19 +189,19 @@ def rc_all():
 def test_rc(ragv: RaggedVariants, to_rc: NDArray[np.bool_], desired: RaggedVariants):
     rc_ragv = ragv.rc_(to_rc)
 
-    actual_alts = rc_ragv.alts.layout
+    actual_alts = rc_ragv.alt.layout
     while not isinstance(actual_alts, NumpyArray):
         actual_alts = actual_alts.content
     actual_alts = actual_alts.data
 
-    desired_alts = desired.alts.layout
+    desired_alts = desired.alt.layout
     while not isinstance(desired_alts, NumpyArray):
         desired_alts = desired_alts.content
     desired_alts = desired_alts.data
 
     np.testing.assert_equal(actual_alts, desired_alts)
 
-    assert ak.all((rc_ragv.ilens == desired.ilens), None)
-    assert ak.all((rc_ragv.v_starts == desired.v_starts), None)
-    if ragv.dosages is not None:
-        assert ak.all((rc_ragv.dosages == desired.dosages), None)
+    assert ak.all((rc_ragv.ilen == desired.ilen), None)
+    assert ak.all((rc_ragv.start == desired.start), None)
+    if "dosage" in ragv.fields:
+        assert ak.all((rc_ragv.dosage == desired.dosage), None)

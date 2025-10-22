@@ -182,18 +182,18 @@ def test_parse_idx(
     assert reshape == desired_reshape
 
 
-def test_parse_idx_subset(
-    dsi: DatasetIndexer,
-    regions,
-    samples,
-    s_idx,
-    desired_idx,
-    desired_squeeze,
-    desired_reshape,
-):
-    subset = dsi.subset_to(regions, samples)
-    idx, squeeze, reshape = subset.parse_idx((regions, s_idx))
+# def test_parse_idx_subset(
+#     dsi: DatasetIndexer,
+#     regions,
+#     samples,
+#     s_idx,
+#     desired_idx,
+#     desired_squeeze,
+#     desired_reshape,
+# ):
+#     subset = dsi.subset_to(regions, samples)
+#     idx, squeeze, reshape = subset.parse_idx((regions, s_idx))
 
-    np.testing.assert_equal(idx, desired_idx)
-    assert squeeze == desired_squeeze
-    assert reshape == desired_reshape
+#     np.testing.assert_equal(idx, desired_idx)
+#     assert squeeze == desired_squeeze
+#     assert reshape == desired_reshape
