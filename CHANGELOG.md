@@ -1,3 +1,9 @@
+## 0.18.0 (2025-10-22)
+
+### Feat
+
+- make RaggedVariants an Awkward Array subclass supporting arbitrary additional fields.
+
 ## 0.17.0 (2025-08-22)
 
 ### Feat
