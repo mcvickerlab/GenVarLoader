@@ -29,8 +29,8 @@ dependencies = [
     "pooch",
     "awkward",
     "hirola>=0.3,<0.4",
-    "seqpro>=0.7.1",
-    "genoray>=0.15.0",
+    "seqpro>=0.8.2",
+    "genoray>=0.16.0",
 ]
 
 [project.urls]
@@ -84,7 +84,14 @@ version_scheme = "semver2"
 version_provider = "pep621"
 update_changelog_on_bump = true
 major_version_zero = true
-allowed_prefixes = ["Merge", "Revert", "Pull request", "fixup!", "squash!", "[pre-commit.ci]"]
+allowed_prefixes = [
+    "Merge",
+    "Revert",
+    "Pull request",
+    "fixup!",
+    "squash!",
+    "[pre-commit.ci]",
+]
 
 [build-system]
 requires = ["maturin>=1.6,<2.0"]

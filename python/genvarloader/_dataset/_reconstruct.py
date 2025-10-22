@@ -50,13 +50,14 @@ T = TypeVar("T", covariant=True)
 @define
 class _Variants:
     path: Path
-    v_starts: NDArray[POS_TYPE]
-    ilens: NDArray[np.int32]
-    alts: RaggedAlleles
+    start: NDArray[POS_TYPE]
+    ilen: NDArray[np.int32]
+    ref: RaggedAlleles | None
+    alt: RaggedAlleles
     info: dict[str, NDArray[np.number]]
 
     @classmethod
-    def from_table(cls, path: str | Path, one_based: bool = False):
+    def from_table(cls, path: str | Path, one_based: bool = True):
         """
         Loads variant info from a table. Must always have POS, ILEN, and ALT.
         Any numeric columns will be loaded as info.
@@ -81,16 +82,23 @@ class _Variants:
             if v.is_numeric()
         }
 
+        ref = (
+            RaggedAlleles.from_polars(variants["REF"])
+            if "REF" in variants.schema
+            else None
+        )
+
         return cls(
             path,
             variants["POS"].to_numpy() - int(one_based),
             variants["ILEN"].to_numpy(),
+            ref,
             RaggedAlleles.from_polars(variants["ALT"]),
             info,
         )
 
     def __len__(self) -> int:
-        return len(self.v_starts)
+        return len(self.start)
 
 
 class Reconstructor(Protocol[T]):
@@ -175,9 +183,16 @@ class Haps(Reconstructor[_H]):
     """The minimum allele frequency to keep."""
     max_af: float | None
     """The maximum allele frequency to keep."""
+    var_fields: list[str] = field(factory=lambda: ["alt", "ilen", "start"])
+    available_var_fields: list[str] = field(init=False)
 
     def __attrs_post_init__(self):
         self.n_variants = ak.num(self.genotypes, -1).to_numpy()
+        self.available_var_fields = (
+            ["alt", "ilen", "start"]
+            + list(self.variants.info.keys())
+            + (["ref"] if self.variants.ref is not None else [])
+        )
 
         if (
             self.min_af is not None or self.max_af is not None
@@ -227,7 +242,7 @@ class Haps(Reconstructor[_H]):
 
             logger.info("Loading variant data.")
             variants = _Variants.from_table(
-                path / "genotypes" / "link.svar" / "index.arrow", one_based=True
+                path / "genotypes" / "link.svar" / "index.arrow"
             )
         else:
             logger.info("Loading variant data.")
@@ -398,10 +413,10 @@ class Haps(Reconstructor[_H]):
             geno_offset_idxs=geno_offset_idxs,
             geno_v_idxs=self.genotypes.data,
             geno_offsets=self.genotypes.offsets,
-            ilens=self.variants.ilens,
+            ilens=self.variants.ilen,
             q_starts=regions[:, 1],
             q_ends=regions[:, 2],
-            v_starts=self.variants.v_starts,
+            v_starts=self.variants.start,
         )
 
         return hap_ilens.reshape(-1, self.genotypes.shape[-2])  # type: ignore
@@ -444,36 +459,64 @@ class Haps(Reconstructor[_H]):
         else:
             keep = None
 
-        # (b*p*v ~l)
-        alts = cast(RaggedAlleles, self.variants.alts[v_idxs])
-        alt_offsets = lengths_to_offsets(alts.lengths)
-        node = alts.layout
-        while not isinstance(node, NumpyArray):
-            node = node.content
-        data = ak.with_parameter(node, "__array__", "char", highlevel=False)
-        l_content = ListOffsetArray(Index(alt_offsets), data)
-        vl_content = ListOffsetArray(Index(genos.offsets), l_content)
-        pvl_content = RegularArray(vl_content, genos.shape[-2])
-        alts = ak.Array(pvl_content)
+        fields = {}
 
-        v_starts = self.variants.v_starts[v_idxs]
-        v_starts = Ragged.from_offsets(v_starts, genos.shape, genos.offsets)
+        fields["alt"] = self._get_alleles(genos, "alt")
+        fields["start"] = Ragged.from_offsets(
+            self.variants.start[v_idxs], genos.shape, genos.offsets
+        )
 
-        ilens = self.variants.ilens[v_idxs]
-        ilens = Ragged.from_offsets(ilens, genos.shape, genos.offsets)
+        if "ref" in self.var_fields:
+            fields["ref"] = self._get_alleles(genos, "ref")
+        if "ilen" in self.var_fields:
+            fields["ilen"] = Ragged.from_offsets(
+                self.variants.ilen[v_idxs], genos.shape, genos.offsets
+            )
 
         if self.dosages is not None:
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
             dosages = self.dosages[r, s]
             if keep is not None:
-                dosages = ak.to_regular(dosages[keep], 1)
-            dosages = Ragged(ak.to_packed(dosages))
-        else:
-            dosages = None
+                dosages = ak.to_regular(dosages[keep], 1)  # type: ignore
+            fields["dosage"] = Ragged(ak.to_packed(dosages))
 
-        variants = RaggedVariants(alts, v_starts, ilens, dosages)
+        fields.update(
+            {
+                k: self._get_info(genos, k)
+                for k in self.var_fields
+                if k not in {"alt", "ilen", "start", "ref"}
+            }
+        )
+
+        variants = RaggedVariants(**fields)
 
         return variants
+
+    def _get_alleles(
+        self, genos: SparseGenotypes, kind: Literal["alt", "ref"]
+    ) -> ak.Array:
+        v_idxs = genos.data
+
+        # (b*p*v ~l)
+        alleles = ak.to_packed(
+            cast(RaggedAlleles, getattr(self.variants, kind)[v_idxs])
+        )
+        # reshape to (b, p, ~v, ~l)
+        node = alleles.layout
+        while not isinstance(node, NumpyArray):
+            node = node.content
+        l_content = ListOffsetArray(
+            Index(alleles.offsets), node, parameters={"__array__": "bytestring"}
+        )
+        vl_content = ListOffsetArray(Index(genos.offsets), l_content)
+        pvl_content = RegularArray(vl_content, genos.shape[-2])
+        alleles = ak.Array(pvl_content)
+
+        return alleles
+
+    def _get_info(self, genos: SparseGenotypes, attr: str) -> Ragged[np.number]:
+        data = self.variants.info[attr][genos.data]
+        return Ragged.from_offsets(data, genos.shape, genos.offsets)
 
     @overload
     def _get_haplotypes(
@@ -555,10 +598,10 @@ class Haps(Reconstructor[_H]):
             shifts=shifts,
             geno_offsets=self.genotypes.offsets,
             geno_v_idxs=self.genotypes.data,
-            v_starts=self.variants.v_starts,
-            ilens=self.variants.ilens,
-            alt_alleles=self.variants.alts.data.view(np.uint8),
-            alt_offsets=self.variants.alts.offsets,
+            v_starts=self.variants.start,
+            ilens=self.variants.ilen,
+            alt_alleles=self.variants.alt.data.view(np.uint8),
+            alt_offsets=self.variants.alt.offsets,
             ref=self.reference.reference,
             ref_offsets=self.reference.offsets,
             pad_char=self.reference.pad_char,
@@ -1081,8 +1124,8 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                     geno_offset_idxs=geno_idx,  # (b p)
                     geno_v_idxs=self.haps.genotypes.data,  # (r*s*p*v)
                     geno_offsets=self.haps.genotypes.offsets,  # (r*s*p+1)
-                    v_starts=self.haps.variants.v_starts,  # (tot_v)
-                    ilens=self.haps.variants.ilens,  # (tot_v)
+                    v_starts=self.haps.variants.start,  # (tot_v)
+                    ilens=self.haps.variants.ilen,  # (tot_v)
                     tracks=_tracks,  # ragged (b l)
                     track_offsets=track_ofsts_per_t,  # (b+1)
                     keep=keep,  # (b*p*v)

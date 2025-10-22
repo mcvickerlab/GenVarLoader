@@ -269,6 +269,7 @@ class Dataset:
         rc_neg: bool | None = None,
         min_af: float | Literal[False] | None = None,
         max_af: float | Literal[False] | None = None,
+        var_fields: list[str] | None = None,
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -291,6 +292,8 @@ class Dataset:
         max_af
             The maximum allele frequency to include in the dataset. If set to :code:`False`, disables this filter.
             If dataset is not backed by SVAR genotypes, this will raise an error.
+        var_fields
+            The variant fields to include in the dataset.
         """
         to_evolve = {}
 
@@ -342,16 +345,26 @@ class Dataset:
             elif max_af is False:
                 max_af = None
 
-            haps = evolve(self._seqs, min_af=min_af, max_af=max_af)
+            haps = to_evolve.get("_seqs", self._seqs)
+            haps = evolve(haps, min_af=min_af, max_af=max_af)
             to_evolve["_seqs"] = haps
 
+        if var_fields is not None:
+            missing = list(set(var_fields) - set(self.available_var_fields))
+            if missing or not isinstance(self._seqs, Haps):
+                raise ValueError(f"Missing variant fields: {missing}")
+            haps = to_evolve.get("_seqs", self._seqs)
+            haps = evolve(haps, var_fields=var_fields)
+            to_evolve["_seqs"] = haps
+
+        if "_seqs" in to_evolve:
+            haps = to_evolve["_seqs"]
             if isinstance(self._recon, Haps):
                 recon = haps
+                to_evolve["_recon"] = recon
             elif isinstance(self._recon, HapsTracks):
                 recon = evolve(self._recon, haps=haps)
-            else:
-                recon = self._recon
-            to_evolve["_recon"] = recon
+                to_evolve["_recon"] = recon
 
         return evolve(self, **to_evolve)
 
@@ -727,6 +740,24 @@ class Dataset:
     def full_shape(self) -> tuple[int, int]:
         """Return the full shape of the dataset, ignoring any subsetting. :code:`(n_samples, n_regions)`"""
         return self._idxer.full_shape
+
+    @property
+    def available_var_fields(self) -> list[str]:
+        """Available variant fields."""
+        match self._seqs:
+            case Haps():
+                return self._seqs.available_var_fields
+            case _:
+                return []
+
+    @property
+    def active_var_fields(self) -> list[str]:
+        """Active variant fields."""
+        match self._recon:
+            case (Haps() as haps) | HapsTracks(haps=haps):
+                return haps.var_fields
+            case _:
+                return []
 
     @property
     def available_tracks(self) -> list[str] | None:
@@ -1352,7 +1383,7 @@ class Dataset:
 
         if squeeze:
             # (1 [p] l) -> ([p] l)
-            recon = tuple(o.squeeze(0) for o in recon)
+            recon = tuple(o.squeeze(axis=0) for o in recon)
 
         if unlist:
             recon = recon[0]
@@ -1538,28 +1569,32 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
         return super().with_seqs(kind)
 
     @overload
-    def with_tracks(self, tracks: None = ..., kind: None = ...) -> Self: ...
+    def with_tracks(self, tracks: None = None, kind: None = None) -> Self: ...
     @overload
     def with_tracks(
-        self, tracks: None = ..., kind: Literal["tracks"] = ...
+        self, *, tracks: None = None, kind: Literal["tracks"]
     ) -> ArrayDataset[MaybeSEQ, NDArray[np.float32]]: ...
     @overload
     def with_tracks(
-        self, tracks: None = ..., kind: Literal["intervals"] = ...
+        self, *, tracks: None = None, kind: Literal["intervals"]
     ) -> ArrayDataset[MaybeSEQ, RaggedIntervals]: ...
     @overload
     def with_tracks(
         self,
-        tracks: Literal[False] = ...,
-        kind: Literal["tracks", "intervals"] | None = ...,
+        tracks: Literal[False],
+        kind: Literal["tracks", "intervals"] | None = None,
     ) -> ArrayDataset[MaybeSEQ, None]: ...
     @overload
     def with_tracks(
-        self, tracks: str | list[str] = ..., kind: Literal["tracks"] = ...
+        self, tracks: str | list[str], kind: None = None
+    ) -> ArrayDataset[MaybeSEQ, MaybeTRK]: ...
+    @overload
+    def with_tracks(
+        self, tracks: str | list[str], kind: Literal["tracks"]
     ) -> ArrayDataset[MaybeSEQ, NDArray[np.float32]]: ...
     @overload
     def with_tracks(
-        self, tracks: str | list[str] = ..., kind: Literal["intervals"] = ...
+        self, tracks: str | list[str], kind: Literal["intervals"]
     ) -> ArrayDataset[MaybeSEQ, RaggedIntervals]: ...
     def with_tracks(
         self,
@@ -1684,28 +1719,32 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
         return super().with_seqs(kind)
 
     @overload
-    def with_tracks(self, tracks: None = ..., kind: None = ...) -> Self: ...
+    def with_tracks(self, tracks: None = None, kind: None = None) -> Self: ...
     @overload
     def with_tracks(
-        self, tracks: None = ..., kind: Literal["tracks"] = ...
+        self, *, tracks: None = None, kind: Literal["tracks"]
     ) -> RaggedDataset[MaybeRSEQ, RaggedTracks]: ...
     @overload
     def with_tracks(
-        self, tracks: None = ..., kind: Literal["intervals"] = ...
+        self, *, tracks: None = None, kind: Literal["intervals"]
     ) -> RaggedDataset[MaybeRSEQ, RaggedIntervals]: ...
     @overload
     def with_tracks(
         self,
-        tracks: Literal[False] = ...,
-        kind: Literal["tracks", "intervals"] | None = ...,
+        tracks: Literal[False],
+        kind: Literal["tracks", "intervals"] | None = None,
     ) -> RaggedDataset[MaybeRSEQ, None]: ...
     @overload
     def with_tracks(
-        self, tracks: str | list[str] = ..., kind: Literal["tracks"] = ...
+        self, tracks: str | list[str], kind: None = None
+    ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]: ...
+    @overload
+    def with_tracks(
+        self, tracks: str | list[str], kind: Literal["tracks"]
     ) -> RaggedDataset[MaybeRSEQ, RaggedTracks]: ...
     @overload
     def with_tracks(
-        self, tracks: str | list[str] = ..., kind: Literal["intervals"] = ...
+        self, tracks: str | list[str], kind: Literal["intervals"]
     ) -> RaggedDataset[MaybeRSEQ, RaggedIntervals]: ...
     def with_tracks(
         self,

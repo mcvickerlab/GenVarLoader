@@ -240,16 +240,7 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
             "VCF with filtering applied still contains multi-allelic variants. Please filter or split them."
         )
 
-    pl.DataFrame(
-        {
-            "POS": vcf._index.gr.df["Start"],
-            "ALT": vcf._index.df["ALT"].list.first(),
-            "ILEN": vcf._index.df.select(
-                pl.col("ALT").list.first().str.len_bytes().cast(pl.Int32)
-                - pl.col("REF").str.len_bytes().cast(pl.Int32)
-            ),
-        }
-    ).write_ipc(out_dir / "variants.arrow")
+    shutil.copy(vcf._index_path(), out_dir / "variants.arrow")
 
     unextended_var_idxs: dict[str, list[NDArray[V_IDX_TYPE]]] = {}
     for (contig,), df in bed.partition_by(
@@ -355,13 +346,7 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    pl.DataFrame(
-        {
-            "POS": pgen._sei.v_starts,
-            "ALT": pgen._sei.alt,
-            "ILEN": pgen._sei.ilens,
-        }
-    ).write_ipc(out_dir / "variants.arrow")
+    shutil.copy(pgen._index_path(), out_dir / "variants.arrow")
 
     pbar = tqdm(total=bed.height, unit=" region")
 
