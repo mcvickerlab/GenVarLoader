@@ -23,6 +23,7 @@ from genoray._svar import (
 )
 from loguru import logger
 from numpy.typing import NDArray
+from packaging.version import Version
 from seqpro.rag import OFFSET_TYPE, Ragged
 from tqdm.auto import tqdm
 from typing_extensions import assert_never
@@ -210,6 +211,7 @@ class Haps(Reconstructor[_H]):
         regions: NDArray[np.int32],
         samples: list[str],
         ploidy: int,
+        version: Version | None,
         min_af: float | None = None,
         max_af: float | None = None,
     ) -> Haps[RaggedVariants]:
@@ -246,7 +248,10 @@ class Haps(Reconstructor[_H]):
             )
         else:
             logger.info("Loading variant data.")
-            variants = _Variants.from_table(path / "genotypes" / "variants.arrow")
+            variants = _Variants.from_table(
+                path / "genotypes" / "variants.arrow",
+                one_based=version is not None and version >= Version("0.18.0"),
+            )
             v_idxs = np.memmap(
                 path / "genotypes" / "variant_idxs.npy",
                 dtype=V_IDX_TYPE,

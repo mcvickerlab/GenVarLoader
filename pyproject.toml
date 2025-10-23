@@ -20,6 +20,7 @@ dependencies = [
     "pysam",
     "pyarrow",
     "pyranges",
+    "pydantic>=2,<3",
     "more-itertools",
     "tqdm",
     "pybigwig",
