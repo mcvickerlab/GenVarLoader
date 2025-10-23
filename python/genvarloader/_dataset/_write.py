@@ -2,8 +2,9 @@ import gc
 import json
 import shutil
 import warnings
+from importlib.metadata import version
 from pathlib import Path
-from typing import cast
+from typing import Annotated, Any, cast
 
 import awkward as ak
 import numpy as np
@@ -16,6 +17,8 @@ from loguru import logger
 from more_itertools import mark_ends
 from natsort import natsorted
 from numpy.typing import NDArray
+from packaging.version import Version
+from pydantic import BaseModel, BeforeValidator, PlainSerializer, WithJsonSchema
 from seqpro.rag import OFFSET_TYPE
 from tqdm.auto import tqdm
 
@@ -24,6 +27,27 @@ from .._ragged import INTERVAL_DTYPE
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._utils import splits_sum_le_value
+
+
+class Metadata(BaseModel, arbitrary_types_allowed=True):
+    samples: list[str]
+    contigs: list[str]
+    n_regions: int
+    ploidy: int | None = None
+    max_jitter: int = 0
+    version: (
+        Annotated[
+            Version,
+            BeforeValidator(lambda v: Version(v) if isinstance(v, str) else v),
+            PlainSerializer(lambda v: str(v), return_type=str),
+            WithJsonSchema({"type": "string"}, mode="serialization"),
+        ]
+        | None
+    ) = None
+
+    @property
+    def n_samples(self) -> int:
+        return len(self.samples)
 
 
 def write(
@@ -77,7 +101,7 @@ def write(
 
     max_mem = parse_memory(max_mem)
 
-    metadata = {}
+    metadata: dict[str, Any] = {"version": Version(version("genvarloader"))}
     path = Path(path)
     if path.exists() and overwrite:
         logger.info("Found existing GVL store, overwriting.")
@@ -147,7 +171,6 @@ def write(
 
     logger.info(f"Using {len(samples)} samples.")
     metadata["samples"] = samples
-    metadata["n_samples"] = len(samples)
     metadata["n_regions"] = gvl_bed.height
 
     if variants is not None:
@@ -172,8 +195,9 @@ def write(
         for bw in bigwigs:
             _write_bigwigs(path, gvl_bed, bw, samples, max_mem)
 
+    _metadata = Metadata(**metadata)
     with open(path / "metadata.json", "w") as f:
-        json.dump(metadata, f)
+        json.dump(_metadata.model_dump(), f)
 
     logger.info("Finished writing.")
     warnings.simplefilter("default")

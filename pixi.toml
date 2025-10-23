@@ -58,6 +58,7 @@ plink2 = "*"
 hirola = "==0.3"
 seqpro = "==0.8.2"
 genoray = "==0.16.0"
+pydantic = ">=2,<3"
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"

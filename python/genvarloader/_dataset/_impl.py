@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Callable, Generic, Literal, TypeVar, cast, overload
@@ -34,6 +33,7 @@ from ._rag_variants import RaggedVariants
 from ._reconstruct import Haps, HapsTracks, Ref, RefTracks, Tracks, TrackType
 from ._reference import Reference
 from ._utils import bed_to_regions, regions_to_bed
+from ._write import Metadata
 
 if TORCH_AVAILABLE:
     import torch
@@ -143,11 +143,11 @@ class Dataset:
 
         # read metadata
         with _py_open(path / "metadata.json") as f:
-            metadata = json.load(f)
-        samples: list[str] = metadata["samples"]
-        contigs: list[str] = metadata["contigs"]
-        ploidy: int | None = metadata.get("ploidy", None)
-        max_jitter: int = metadata.get("max_jitter", 0)
+            metadata = Metadata.model_validate_json(f.read())
+        samples = metadata.samples
+        contigs = metadata.contigs
+        ploidy = metadata.ploidy
+        max_jitter = metadata.max_jitter
 
         # read input regions and generate index map
         bed = pl.read_ipc(path / "input_regions.arrow")
@@ -179,6 +179,7 @@ class Dataset:
                 regions=regions,
                 samples=samples,
                 ploidy=ploidy,
+                version=metadata.version,
                 min_af=min_af,
                 max_af=max_af,
             )
