@@ -1,3 +1,10 @@
+## 0.18.2 (2025-11-03)
+
+### Fix
+
+- correctly parse and load variant fields (skip duplicates)
+- use ak.str.length instead of ak.num to get ref and alt lengths. docs: shape docstring
+
 ## 0.18.1 (2025-10-23)
 
 ### Fix
