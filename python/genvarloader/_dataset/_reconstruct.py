@@ -80,7 +80,7 @@ class _Variants:
         info = {
             k: variants[k].to_numpy()
             for k, v in variants.schema.items()
-            if v.is_numeric()
+            if v.is_numeric() and k not in {"POS", "ILEN"}
         }
 
         ref = (

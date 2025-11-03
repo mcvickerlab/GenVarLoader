@@ -739,7 +739,7 @@ class Dataset:
 
     @property
     def full_shape(self) -> tuple[int, int]:
-        """Return the full shape of the dataset, ignoring any subsetting. :code:`(n_samples, n_regions)`"""
+        """Return the full shape of the dataset, ignoring any subsetting. :code:`(n_regions, n_samples)`"""
         return self._idxer.full_shape
 
     @property
