@@ -31,7 +31,7 @@ class RaggedVariant(ak.Record):
 
 class RaggedVariants(ak.Array):
     """An awkward record array, typically with shape (batch, ploidy, ~variants).
-    Guaranteed to at least have the field "alts" and "v_starts" and one of "refs" or "ilens"."""
+    Guaranteed to at least have the field "alt" and "start" and one of "ref" or "ilen"."""
 
     def __init__(
         self,
@@ -59,6 +59,25 @@ class RaggedVariants(ak.Array):
 
         super().__init__(arr)
 
+    @classmethod
+    def from_ak(cls, arr: ak.Array) -> RaggedVariants:
+        """Create a RaggedVariants object from an awkward array.
+
+        Parameters
+        ----------
+        arr
+            The awkward array to create a RaggedVariants object from.
+        """
+        fields = set(arr.fields)
+
+        if missing := {"alt", "start"} - fields:
+            raise ValueError(f"Missing required fields: {missing}")
+
+        if {"ref", "ilen"}.isdisjoint(fields):
+            raise ValueError("Must have one of ref or ilen.")
+
+        return ak.with_parameter(arr, "__record__", RaggedVariants.__name__)
+
     @property
     def alt(self) -> ak.Array:
         """Alternative alleles."""
@@ -73,7 +92,7 @@ class RaggedVariants(ak.Array):
     def ilen(self) -> Ragged[np.int32]:
         """Indel lengths. Infallible."""
         if "ilen" not in self.fields:
-            ilen = ak.num(self.alt, -1) - ak.num(self.ref, -1)
+            ilen = ak.str.length(self.alt) - ak.str.length(self.ref)  # type: ignore
             ilen = Ragged(ilen)
             return ilen
 

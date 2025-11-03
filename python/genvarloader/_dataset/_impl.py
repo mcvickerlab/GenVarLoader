@@ -734,7 +734,7 @@ class Dataset:
 
     @property
     def shape(self) -> tuple[int, int]:
-        """Return the shape of the dataset. :code:`(n_samples, n_regions)`"""
+        """Return the shape of the dataset. :code:`(n_regions, n_samples)`"""
         return self.n_regions, self.n_samples
 
     @property
