@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 
 import awkward as ak
+import awkward.operations.str as ak_str
 import numba as nb
 import numpy as np
 from attrs import define
-from einops import repeat
+from awkward.contents import NumpyArray
 from numpy.typing import NDArray
 from phantom import Phantom
 from seqpro.rag import RDTYPE, Ragged, is_rag_dtype
@@ -235,7 +236,7 @@ class RaggedAnnotatedHaps:
             self.ref_coords.squeeze(axis),
         )
 
-    def to_fixed_shape(self, shape: tuple[int, ...]) -> AnnotatedHaps:
+    def to_numpy(self) -> AnnotatedHaps:
         """If all entries in the ragged array have the same shape, convert to a rectilinear shape.
 
         Parameters
@@ -243,9 +244,9 @@ class RaggedAnnotatedHaps:
         shape
             Shape to convert to, including the length axis. The total number of elements must remain the same.
         """
-        haps = self.haps.data.reshape(shape)
-        var_idxs = self.var_idxs.data.reshape(shape)
-        ref_coords = self.ref_coords.data.reshape(shape)
+        haps = self.haps.to_numpy()
+        var_idxs = self.var_idxs.to_numpy()
+        ref_coords = self.ref_coords.to_numpy()
         return AnnotatedHaps(haps, var_idxs, ref_coords)
 
 
@@ -266,7 +267,7 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
     """
     length = int(rag.lengths.max())
     if is_rag_dtype(rag, np.bytes_):
-        rag = ak.str.rpad(rag, length, pad_value)
+        rag = ak_str.rpad(rag, length, pad_value)
     else:
         rag = ak.pad_none(rag, length, clip=True)
         rag = ak.fill_none(rag, pad_value)
@@ -274,56 +275,27 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
     return arr
 
 
-NUCLEOTIDES = b"ACGT"
-COMPLEMENTS = b"TGCA"
+_COMP = np.frombuffer(bytes.maketrans(b"ACGT", b"TGCA"), np.uint8)
 
 
-#! for whatever reason, this causes data corruption with parallel=True?!
-#! assumes offsets are 1D
-@nb.njit(nogil=True, cache=True)
-def _rc_helper(
-    data: NDArray[np.uint8], offsets: NDArray[np.int64], mask: NDArray[np.bool_]
-) -> NDArray[np.uint8]:
-    out = data.copy()
-    for i in nb.prange(len(offsets) - 1):
-        start, end = offsets[i], offsets[i + 1]
-        _data = data[start:end]
-        _out = out[start:end]
-        if mask[i]:
-            for nuc, comp in zip(NUCLEOTIDES, COMPLEMENTS):
-                _out[_data == nuc] = comp
-            _out[:] = _out[::-1]
-    return out
+@nb.vectorize(["u1(u1)"], nopython=True)
+def ufunc_comp_dna(seq: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    return _COMP[seq]
 
 
-def reverse_complement(
-    seqs: Ragged[np.bytes_], mask: NDArray[np.bool_]
-) -> Ragged[np.bytes_]:
-    # (b [p] ~l), (b)
-    if seqs.ndim == 3:
-        ploidy = seqs.shape[1]
-        mask = repeat(mask, "b -> (b p)", p=ploidy)
-    rc_seqs = _rc_helper(seqs.data.view(np.uint8), seqs.offsets, mask)
-    return Ragged.from_offsets(rc_seqs.view("S1"), seqs.shape, seqs.offsets)
+def _ak_comp_dna_helper(layout, **kwargs):
+    if layout.is_numpy:
+        return NumpyArray(
+            ufunc_comp_dna(layout.data),  # type: ignoreF
+            parameters=layout.parameters,
+        )
 
 
-#! for whatever reason, this causes data corruption with parallel=True?!
-#! assumes offsets are 1D
-@nb.njit(nogil=True, cache=True)
-def _reverse_helper(data: NDArray, offsets: NDArray[np.int64], mask: NDArray[np.bool_]):
-    for i in nb.prange(len(offsets) - 1):
-        if mask[i]:
-            start, end = offsets[i], offsets[i + 1]
-            data[start:end] = np.flip(data[start:end])
+T = TypeVar("T", bound=ak.Array)
 
 
-def reverse(tracks: Ragged, mask: NDArray[np.bool_]):
-    """Reverses data along the ragged axis in-place."""
-    # (b t [p] ~l), (b)
-    if tracks.ndim == 3:
-        n_tracks = tracks.shape[1]
-        mask = repeat(mask, "b -> (b t)", t=n_tracks)
-    elif tracks.ndim == 4:
-        n_tracks, ploidy = tracks.shape[1:-1]
-        mask = repeat(mask, "b -> (b t p)", t=n_tracks, p=ploidy)
-    _reverse_helper(tracks.data, tracks.offsets, mask)
+def reverse_complement(arr: T) -> T:
+    og_type = type(arr)
+    arr = ak.to_packed(arr)
+    arr = ak_str.reverse(ak.transform(_ak_comp_dna_helper, arr))
+    return og_type(arr)

@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 from seqpro.rag import OFFSET_TYPE, Ragged, lengths_to_offsets
 from typing_extensions import Self
 
+from .._ragged import reverse_complement
 from .._torch import TORCH_AVAILABLE, requires_torch
 
 if TORCH_AVAILABLE or TYPE_CHECKING:
@@ -175,7 +176,7 @@ class RaggedVariants(ak.Array):
         return ak.to_packed(self)
 
     def rc_(self, to_rc: NDArray[np.bool_] | None = None) -> Self:
-        """Reverse complement the alternative alleles. This is an in-place operation if the data is already packed.
+        """Reverse complement the alleles. This is an in-place operation.
 
         Parameters
         ----------
@@ -185,13 +186,19 @@ class RaggedVariants(ak.Array):
 
         Returns
         -------
-            The RaggedVariants object with the alternative alleles reverse complemented.
+            The RaggedVariants object with the alleles reverse complemented.
         """
-        ragv = self.to_packed()
-        _rc_helper(ragv, "alt", to_rc)
-        if "ref" in ragv.fields:
-            _rc_helper(ragv, "ref", to_rc)
-        return ragv
+        if to_rc is None:
+            to_rc = np.ones(self.shape[0], np.bool_)
+        elif not to_rc.any():
+            return self
+
+        self["alt"] = ak.where(to_rc, reverse_complement(self["alt"]), self["alt"])
+
+        if "ref" in self.fields:
+            self["ref"] = ak.where(to_rc, reverse_complement(self["ref"]), self["ref"])
+
+        return self
 
     @requires_torch
     def to_nested_tensor_batch(

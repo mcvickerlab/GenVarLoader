@@ -20,7 +20,7 @@ def test_annot_tracks(dataset: gvl.RaggedDataset[RaggedAnnotatedHaps, None]):
         chromEnd=pl.col("chromStart") + 1, score=pl.lit(1.0)
     )
     annot_ds = dataset.write_annot_tracks({"5ss": annots}, overwrite=True).with_tracks(
-        "5ss"
+        "5ss", "tracks"
     )
     haps, tracks = annot_ds[:]
     mask = haps.ref_coords == ak.Array(

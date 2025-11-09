@@ -4,6 +4,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Callable, Generic, Literal, TypeVar, cast, overload
 
+import awkward as ak
 import numpy as np
 import polars as pl
 import seqpro as sp
@@ -21,7 +22,6 @@ from .._ragged import (
     RaggedSeqs,
     RaggedTracks,
     is_rag_dtype,
-    reverse,
     reverse_complement,
     to_padded,
 )
@@ -1373,9 +1373,7 @@ class Dataset:
             )
         elif isinstance(self.output_length, int):
             recon = tuple(
-                r
-                if isinstance(r, (RaggedVariants, RaggedIntervals))
-                else self._fix_len(r)
+                r if isinstance(r, (RaggedVariants, RaggedIntervals)) else r.to_numpy()
                 for r in recon
             )
 
@@ -1410,16 +1408,15 @@ class Dataset:
     ) -> Ragged | RaggedAnnotatedHaps | RaggedVariants | RaggedIntervals:
         if isinstance(rag, Ragged):
             if is_rag_dtype(rag, np.bytes_):
-                rag = reverse_complement(rag, to_rc)
-            elif is_rag_dtype(rag, np.float32):
-                reverse(rag, to_rc)
+                rag = Ragged(ak.where(to_rc, reverse_complement(rag), rag))
+            else:
+                rag = Ragged(ak.where(to_rc, rag[..., ::-1], rag))
         elif isinstance(rag, RaggedAnnotatedHaps):
-            rag.haps = reverse_complement(rag.haps, to_rc)
-            reverse(rag.var_idxs, to_rc)
-            reverse(rag.ref_coords, to_rc)
+            rag.haps = self._rc(rag.haps, to_rc)
+            rag.var_idxs = self._rc(rag.var_idxs, to_rc)
+            rag.ref_coords = self._rc(rag.ref_coords, to_rc)
         elif isinstance(rag, RaggedVariants):
-            # (b p ~v [~l]) & (b) -> (b 1)
-            rag = rag.rc_(to_rc[:, None])
+            rag = rag.rc_(to_rc)
         elif isinstance(rag, RaggedIntervals):
             rag = rag
         else:
@@ -1440,31 +1437,6 @@ class Dataset:
                 raise ValueError(f"Unsupported pad dtype: {rag.data.dtype}")
         elif isinstance(rag, RaggedAnnotatedHaps):
             return rag.to_padded()
-        else:
-            assert_never(rag)
-
-    @overload
-    def _fix_len(self, rag: Ragged[DTYPE]) -> NDArray[DTYPE]: ...
-    @overload
-    def _fix_len(self, rag: RaggedAnnotatedHaps) -> AnnotatedHaps: ...
-    def _fix_len(self, rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
-        assert isinstance(self.output_length, int)
-        if isinstance(rag, Ragged):
-            # (b p) or (b)
-            return rag.data.reshape(
-                (
-                    *rag.shape[:-1],  # type: ignore
-                    self.output_length,
-                )
-            )
-        elif isinstance(rag, RaggedAnnotatedHaps):
-            assert isinstance(self._seqs, Haps)
-            return rag.to_fixed_shape(
-                (
-                    *rag.shape[:-1],  # type: ignore
-                    self.output_length,
-                )
-            )
         else:
             assert_never(rag)
 
