@@ -4,6 +4,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Callable, Generic, Literal, TypeVar, cast, overload
 
+import awkward as ak
 import numba as nb
 import numpy as np
 import polars as pl
@@ -365,7 +366,8 @@ class RefDataset(Generic[T]):
 
         to_rc = regions[:, 3] == -1
         if to_rc.any():
-            ref = reverse_complement(ref, to_rc)
+            rc_ref = reverse_complement(cast(Ragged[np.bytes_], ref[to_rc]))
+            ref = ak.where(to_rc, rc_ref, ref)
 
         if out_reshape is not None:
             ref = ref.reshape(out_reshape)
