@@ -1,3 +1,9 @@
+## 0.18.3 (2025-11-09)
+
+### Fix
+
+- **perf**: faster reverse complementing
+
 ## 0.18.2 (2025-11-03)
 
 ### Fix
