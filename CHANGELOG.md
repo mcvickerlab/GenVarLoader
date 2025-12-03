@@ -1,3 +1,9 @@
+## 0.19.0 (2025-12-03)
+
+### Feat
+
+- allow subsetting by region name. fix: convert eligible ak.Array to sp.rag.Ragged for gvl.RaggedVariants whenever possible
+
 ## 0.18.3 (2025-11-09)
 
 ### Fix
