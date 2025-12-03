@@ -1,11 +1,11 @@
 from collections.abc import Sequence
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 from attrs import define, evolve
 from hirola import HashTable
 from numpy.typing import NDArray
-from typing_extensions import assert_never
+from typing_extensions import TypeGuard, assert_never
 
 from .._types import Idx, StrIdx
 from .._utils import idx_like_to_array, is_dtype
@@ -19,6 +19,8 @@ class DatasetIndexer:
     """Full map from input sample indices to on-disk sample indices."""
     s2i_map: HashTable
     """Map from input sample names to on-disk sample indices."""
+    r2i_map: HashTable | None = None
+    """Map from input region names to on-disk region indices."""
     region_subset_idxs: NDArray[np.integer] | None = None
     """Which input regions are included in the subset."""
     sample_subset_idxs: NDArray[np.integer] | None = None
@@ -30,16 +32,29 @@ class DatasetIndexer:
         r_idxs: NDArray[np.integer],
         s_idxs: NDArray[np.integer],
         samples: list[str],
+        regions: list[str] | None = None,
     ):
+        if regions is not None:
+            _regions = np.array(regions)
+            r2i_map = HashTable(
+                max=len(_regions) * 2,  # type: ignore | 2x size for perf > mem
+                dtype=_regions.dtype,
+            )
+            r2i_map.add(_regions)
+        else:
+            r2i_map = None
+
         _samples = np.array(samples)
         s2i_map = HashTable(
             max=len(_samples) * 2,  # type: ignore | 2x size for perf > mem
             dtype=_samples.dtype,
         )
         s2i_map.add(_samples)
+
         return cls(
             full_region_idxs=r_idxs,
             full_sample_idxs=s_idxs,
+            r2i_map=r2i_map,
             s2i_map=s2i_map,
         )
 
@@ -84,7 +99,7 @@ class DatasetIndexer:
 
     def subset_to(
         self,
-        regions: Idx | None = None,
+        regions: StrIdx | None = None,
         samples: StrIdx | None = None,
     ) -> "DatasetIndexer":
         """Subset the dataset to specific regions and/or samples."""
@@ -92,12 +107,13 @@ class DatasetIndexer:
             return self
 
         if samples is not None:
-            samples = self.s2i(samples)
+            samples = self.sample2idx(samples)
             sample_idxs = idx_like_to_array(samples, self.n_samples)
         else:
             sample_idxs = np.arange(self.n_samples, dtype=np.intp)
 
         if regions is not None:
+            regions = self.region2idx(regions)
             region_idxs = idx_like_to_array(regions, self.n_regions)
         else:
             region_idxs = np.arange(self.n_regions, dtype=np.intp)
@@ -111,7 +127,7 @@ class DatasetIndexer:
         return evolve(self, region_subset_idxs=None, sample_subset_idxs=None)
 
     def parse_idx(
-        self, idx: Idx | tuple[Idx] | tuple[Idx, StrIdx]
+        self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]
     ) -> tuple[NDArray[np.integer], bool, tuple[int, ...] | None]:
         out_reshape = None
         squeeze = False
@@ -125,23 +141,24 @@ class DatasetIndexer:
         else:
             regions, samples = idx
 
-        s_idx = self.s2i(samples)
-        idx = (regions, s_idx)
+        r_idx = self.region2idx(regions)
+        s_idx = self.sample2idx(samples)
+        idx = (r_idx, s_idx)
         idx_t = idx_type(idx)
         if idx_t == "basic":
             if all(isinstance(i, (int, np.integer)) for i in idx):
                 squeeze = True
-            r_idx = np.atleast_1d(self._r_idx[regions])
+            r_idx = np.atleast_1d(self._r_idx[r_idx])
             s_idx = np.atleast_1d(self._s_idx[s_idx])
             idx = np.ravel_multi_index(np.ix_(r_idx, s_idx), self.full_shape).squeeze()
             if isinstance(regions, slice) and isinstance(samples, slice):
                 out_reshape = (len(r_idx), len(s_idx))
         elif idx_t == "adv":
-            r_idx = self._r_idx[regions]
+            r_idx = self._r_idx[r_idx]
             s_idx = self._s_idx[s_idx]
             idx = np.ravel_multi_index((r_idx, s_idx), self.full_shape)
         elif idx_t == "combo":
-            r_idx = self._r_idx[regions]
+            r_idx = self._r_idx[r_idx]
             s_idx = self._s_idx[s_idx]
             idx = np.ravel_multi_index(
                 np.ix_(r_idx.ravel(), s_idx.ravel()), self.full_shape
@@ -176,17 +193,26 @@ class DatasetIndexer:
             return self.full_sample_idxs
         return self.full_sample_idxs[self.sample_subset_idxs]
 
-    def s2i(self, samples: StrIdx) -> Idx:
+    def sample2idx(self, samples: StrIdx) -> Idx:
         """Convert sample names to sample indices."""
         return s2i(samples, self.s2i_map)
 
+    def region2idx(self, regions: StrIdx) -> Idx:
+        """Convert region names to region indices."""
+        return s2i(regions, self.r2i_map)
 
-def s2i(str_idx: StrIdx, map: HashTable) -> Idx:
+
+def s2i(str_idx: StrIdx, map: HashTable | None) -> Idx:
     """Convert a string index to an integer index using a hirola.HashTable."""
     if not isinstance(str_idx, (np.ndarray, slice)):
         str_idx = np.asarray(str_idx)
 
-    if is_dtype(str_idx, np.str_) or is_dtype(str_idx, np.object_):
+    if is_str_arr(str_idx):
+        if map is None:
+            raise ValueError(
+                "Queries are names/strings, but no string-to-integer mapping is available."
+            )
+
         idx = map.get(str_idx)
         if (np.atleast_1d(idx) == -1).any():
             raise KeyError(
@@ -209,7 +235,7 @@ def idx_type(
     """Check if the index is a fancy index."""
     if not isinstance(idx, tuple):
         idx = (idx,)
-    n_adv = sum(map(is_adv_idx, idx))
+    n_adv = sum(map(lambda idx: isinstance(idx, (Sequence, np.ndarray)), idx))
     if n_adv == 0:
         return "basic"
     elif n_adv == 1:
@@ -220,6 +246,6 @@ def idx_type(
         raise ValueError(f"Invalid index type: {idx}")
 
 
-def is_adv_idx(idx: Idx) -> bool:
-    """Check if the index is a fancy index."""
-    return isinstance(idx, (Sequence, np.ndarray))
+def is_str_arr(obj: Any) -> TypeGuard[NDArray[np.str_] | NDArray[np.object_]]:
+    """Check if the object is a string array."""
+    return is_dtype(obj, np.str_) or is_dtype(obj, np.object_)
