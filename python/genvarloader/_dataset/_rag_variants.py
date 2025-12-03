@@ -77,6 +77,25 @@ class RaggedVariants(ak.Array):
         if {"ref", "ilen"}.isdisjoint(fields):
             raise ValueError("Must have one of ref or ilen.")
 
+        def find_and_convert_to_ragged(content: Content, depth_context: dict, **kwargs):
+            if isinstance(content, (ListArray, ListOffsetArray)):
+                depth_context["n_varlen"] += 1
+
+            if (
+                # is a varlen leaf
+                isinstance(content, (ListArray, ListOffsetArray))
+                and isinstance(content.content, NumpyArray)
+                # is the only varlen leaf in this branch
+                and depth_context["n_varlen"] == 1
+                # has no parameters that might conflict with Ragged
+                and len(content.parameters) == 0
+            ):
+                return ak.with_parameter(content, "__list__", "Ragged", highlevel=False)
+
+        arr = ak.transform(  # type: ignore
+            find_and_convert_to_ragged, arr, depth_context={"n_varlen": 0}
+        )
+
         return ak.with_parameter(arr, "__record__", RaggedVariants.__name__)
 
     @property
@@ -189,14 +208,22 @@ class RaggedVariants(ak.Array):
             The RaggedVariants object with the alleles reverse complemented.
         """
         if to_rc is None:
-            to_rc = np.ones(self.shape[0], np.bool_)
+            to_rc = np.ones(self.shape[0], np.bool_)  # type: ignore
         elif not to_rc.any():
             return self
 
-        self["alt"] = ak.where(to_rc, reverse_complement(self["alt"]), self["alt"])
+        self["alt"] = ak.where(
+            to_rc,
+            reverse_complement(self["alt"]),  # type: ignore
+            self["alt"],
+        )
 
         if "ref" in self.fields:
-            self["ref"] = ak.where(to_rc, reverse_complement(self["ref"]), self["ref"])
+            self["ref"] = ak.where(
+                to_rc,
+                reverse_complement(self["ref"]),  # type: ignore
+                self["ref"],
+            )
 
         return self
 
@@ -340,7 +367,11 @@ def _alleles_to_nested_tensor(
         offsets = offsets.offsets.data.astype(np.int32)  # type: ignore
         lengths = np.diff(offsets)
 
-    max_alen = lengths.max().item()
+    if len(lengths) == 0:
+        max_alen = 0
+    else:
+        max_alen = lengths.max().item()
+
     offsets = torch.from_numpy(offsets)
     return _alleles, offsets, max_alen
 

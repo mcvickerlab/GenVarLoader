@@ -75,9 +75,9 @@ class RaggedIntervals:
             Axis or axes to squeeze. If None, all axes of length 1 are squeezed.
         """
         return RaggedIntervals(
-            self.starts.squeeze(axis),
-            self.ends.squeeze(axis),
-            self.values.squeeze(axis),
+            self.starts.squeeze(axis),  # type: ignore
+            self.ends.squeeze(axis),  # type: ignore
+            self.values.squeeze(axis),  # type: ignore
         )
 
     def to_fixed_shape(
@@ -286,7 +286,7 @@ def ufunc_comp_dna(seq: NDArray[np.uint8]) -> NDArray[np.uint8]:
 def _ak_comp_dna_helper(layout, **kwargs):
     if layout.is_numpy:
         return NumpyArray(
-            ufunc_comp_dna(layout.data),  # type: ignoreF
+            ufunc_comp_dna(layout.data),  # type: ignore
             parameters=layout.parameters,
         )
 
