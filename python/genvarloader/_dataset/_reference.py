@@ -366,21 +366,20 @@ class RefDataset(Generic[T]):
 
         to_rc = regions[:, 3] == -1
         if to_rc.any():
-            rc_ref = reverse_complement(cast(Ragged[np.bytes_], ref[to_rc]))
-            ref = ak.where(to_rc, rc_ref, ref)
+            ref = ak.where(to_rc, reverse_complement(ref), ref)
 
         if out_reshape is not None:
-            ref = ref.reshape(out_reshape)
+            ref = ref.reshape(out_reshape)  # type: ignore
 
         if self.output_length == "ragged":
             out = ref
         elif self.output_length == "variable":
-            out = to_padded(ref, pad_value=self.reference.pad_char)
+            out = to_padded(ref, pad_value=self.reference.pad_char)  # type: ignore
         else:
-            out = ref.to_numpy()
+            out = ref.to_numpy()  # type: ignore
 
         if squeeze:
-            out = out.squeeze(0)
+            out = out.squeeze(0)  # type: ignore
 
         return cast(T, out)
 

@@ -14,13 +14,8 @@ from attrs import define, evolve, field
 from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
 from awkward.index import Index
 from einops import repeat
-from genoray._svar import (
-    DOSAGE_TYPE,
-    POS_TYPE,
-    V_IDX_TYPE,
-    SparseDosages,
-    SparseGenotypes,
-)
+from genoray._svar import SparseDosages, SparseGenotypes
+from genoray._types import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
 from loguru import logger
 from numpy.typing import NDArray
 from packaging.version import Version
@@ -489,7 +484,7 @@ class Haps(Reconstructor[_H]):
             {
                 k: self._get_info(genos, k)
                 for k in self.var_fields
-                if k not in {"alt", "ilen", "start", "ref"}
+                if k not in {"alt", "start", "ref", "ilen", "dosage"}
             }
         )
 
@@ -832,7 +827,7 @@ class Tracks(Reconstructor[_T]):
         starts = ak.concatenate(out_starts, axis=1)
         ends = ak.concatenate(out_ends, axis=1)
         values = ak.concatenate(out_values, axis=1)
-        return RaggedIntervals(starts, ends, values)
+        return RaggedIntervals(starts, ends, values)  # type: ignore
 
     def write_transformed_track(
         self,

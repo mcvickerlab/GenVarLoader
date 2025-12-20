@@ -11,7 +11,8 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseVar
-from genoray._svar import V_IDX_TYPE, SparseGenotypes, dense2sparse
+from genoray._svar import SparseGenotypes, dense2sparse
+from genoray._types import V_IDX_TYPE
 from genoray._utils import parse_memory
 from loguru import logger
 from more_itertools import mark_ends
@@ -19,14 +20,13 @@ from natsort import natsorted
 from numpy.typing import NDArray
 from packaging.version import Version
 from pydantic import BaseModel, BeforeValidator, PlainSerializer, WithJsonSchema
-from seqpro.rag import OFFSET_TYPE
 from tqdm.auto import tqdm
 
 from .._bigwig import BigWigs
 from .._ragged import INTERVAL_DTYPE
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
-from ._utils import splits_sum_le_value
+from ._utils import bed_to_regions, splits_sum_le_value
 
 
 class Metadata(BaseModel, arbitrary_types_allowed=True):
@@ -237,12 +237,7 @@ def _prep_bed(
 
 
 def _write_regions(path: Path, bed: pl.DataFrame, contigs: list[str]):
-    with pl.StringCache():
-        pl.Series(contigs, dtype=pl.Categorical)
-        regions = bed.with_columns(
-            pl.col("chrom").cast(pl.Categorical).to_physical()
-        ).with_columns(pl.all().cast(pl.Int32))
-    regions = regions.to_numpy()
+    regions = bed_to_regions(bed, contigs)
     np.save(path / "regions.npy", regions)
 
 
@@ -318,7 +313,10 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
                 if is_last:
                     max_ends.append(chunk_end)
 
-            var_idxs = ak.flatten(ak.concatenate(ls_sparse, -1), None).to_numpy()
+            var_idxs = ak.flatten(
+                ak.concatenate(ls_sparse, -1),
+                None,  # type: ignore
+            ).to_numpy()
             # (s p)
             lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
 
@@ -398,7 +396,10 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
                 if is_last:
                     max_ends.append(chunk_end)
 
-            var_idxs = ak.flatten(ak.concatenate(ls_sparse, -1), None).to_numpy()
+            var_idxs = ak.flatten(
+                ak.concatenate(ls_sparse, -1),
+                None,  # type: ignore
+            ).to_numpy()
             # (s p)
             lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
 
@@ -458,7 +459,9 @@ def _write_from_svar(
     with open(out_dir / "svar_meta.json", "w") as f:
         json.dump({"shape": offsets.shape, "dtype": offsets.dtype.str}, f)
 
-    v_ends = svar.granges.End
+    v_ends = svar.var_table.select(
+        end=pl.col("POS") - pl.col("ILEN").list.first().clip(upper_bound=0)
+    )["end"].to_numpy()
     max_ends = np.empty(bed.height, np.int32)
     contig_offset = 0
     pbar = tqdm(total=bed.height, unit=" region")
@@ -477,10 +480,7 @@ def _write_from_svar(
             c, df["chromStart"], df["chromEnd"], samples=samples, out=out
         )
 
-        if (
-            first_no_variant_warning
-            and (out == np.iinfo(OFFSET_TYPE).max).all((1, 2, 3)).any()
-        ):
+        if first_no_variant_warning and (out == 0).all((1, 2, 3)).any():
             first_no_variant_warning = False
             logger.warning(
                 "Some regions have no variants for any sample. This could be expected depending on the region lengths"
@@ -511,7 +511,7 @@ def _write_from_svar(
     pbar.close()
     offsets.flush()
 
-    (out_dir / "link.svar").symlink_to(svar.path, True)
+    (out_dir / "link.svar").symlink_to(svar.path.resolve(), target_is_directory=True)
 
     return bed.with_columns(chromEnd=pl.Series(max_ends))
 

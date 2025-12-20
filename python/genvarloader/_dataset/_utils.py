@@ -111,12 +111,14 @@ def bed_to_regions(bed: pl.DataFrame, contigs: Sequence[str]) -> NDArray[np.int3
         pl.col("chromStart", "chromEnd").cast(pl.Int32),
     ]
 
-    if "strand" in bed:
+    if bed.schema.get("strand", None) == pl.Utf8:
         cols.append(
             pl.col("strand").replace_strict({"+": 1, "-": -1}, return_dtype=pl.Int32)
         )
-    else:
+    elif "strand" not in bed.schema:
         cols.append(pl.lit(1).cast(pl.Int32).alias("strand"))
+    else:
+        cols.append(pl.col("strand"))
 
     return bed.select(cols).to_numpy()
 
