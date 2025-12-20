@@ -1,3 +1,9 @@
+## 0.19.1 (2025-12-20)
+
+### Fix
+
+- **perf**: upgrade genoray for (much) faster writes. test: idempotent fixutres in test_ds_haps
+
 ## 0.19.0 (2025-12-03)
 
 ### Feat
