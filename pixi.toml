@@ -3,8 +3,8 @@ name = "genvarloader"
 channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64"]
 
-# [activation.env]
-# LD_LIBRARY_PATH = "$CONDA_PREFIX/lib"
+[activation.env]
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib"
 
 [environments]
 dev = { features = ["pytorch-cpu", "basenji2", "py310"] }
