@@ -13,7 +13,7 @@ from awkward.contents import (
     NumpyArray,
     RegularArray,
 )
-from genoray._svar import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
+from genoray._types import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
 from numpy.typing import NDArray
 from seqpro.rag import OFFSET_TYPE, Ragged, lengths_to_offsets
 from typing_extensions import Self
@@ -24,6 +24,7 @@ from .._torch import TORCH_AVAILABLE, requires_torch
 if TORCH_AVAILABLE or TYPE_CHECKING:
     import torch
     from torch.nested import nested_tensor_from_jagged as nt_jag
+    from torch.nested._internal.nested_tensor import NestedTensor
 
 
 class RaggedVariant(ak.Record):
@@ -234,7 +235,7 @@ class RaggedVariants(ak.Array):
         tokenizer: Literal["seqpro"]
         | Callable[[NDArray[np.bytes_]], NDArray[np.integer]]
         | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, NestedTensor | int]:
         """Convert a RaggedVariants object to a dictionary of nested tensors. Will flatten across
         the ploidy dimension for attributes ILEN, starts, and dosages such that their shapes are (batch * ploidy, ~variants).
         For the alternative alleles, will flatten across both the ploidy and variant dimensions such that the
@@ -278,13 +279,11 @@ class RaggedVariants(ak.Array):
                     )
                     batch["var_maxlen"] = int(np.diff(arr.offsets).max())
                 batch[field] = nt_jag(data, variant_offsets)
-            else:
+            elif field in {"ref", "alt"}:
                 data, offsets, max_alen = _alleles_to_nested_tensor(arr, tokenizer)
-                if field == "alt":
-                    batch["alt_maxlen"] = max_alen
-                elif field == "ref":
-                    batch["ref_maxlen"] = max_alen
-                batch[field] = nt_jag(data, offsets).to(device)
+                data = data.to(device)
+                batch[f"{field}_maxlen"] = max_alen
+                batch[field] = nt_jag(data, offsets)
 
         return batch
 

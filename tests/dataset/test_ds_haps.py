@@ -18,6 +18,7 @@ def dataset_vcf():
         gvl.Dataset.open(data_dir / "phased_dataset.vcf.gvl", ref, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
+        .with_tracks(False)
     )
     return ds
 
@@ -27,6 +28,7 @@ def dataset_pgen():
         gvl.Dataset.open(data_dir / "phased_dataset.pgen.gvl", ref, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
+        .with_tracks(False)
     )
     return ds
 
@@ -36,6 +38,7 @@ def dataset_svar():
         gvl.Dataset.open(data_dir / "phased_dataset.svar.gvl", ref, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
+        .with_tracks(False)
     )
     return ds
 

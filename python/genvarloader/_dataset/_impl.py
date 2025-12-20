@@ -1453,9 +1453,9 @@ class Dataset:
     ) -> Ragged | RaggedAnnotatedHaps | RaggedVariants | RaggedIntervals:
         if isinstance(rag, Ragged):
             if is_rag_dtype(rag, np.bytes_):
-                rag = Ragged(ak.where(to_rc, reverse_complement(rag), rag))
+                rag = Ragged(ak.where(to_rc, reverse_complement(rag), rag))  # type: ignore
             else:
-                rag = Ragged(ak.where(to_rc, rag[..., ::-1], rag))
+                rag = Ragged(ak.where(to_rc, rag[..., ::-1], rag))  # type: ignore
         elif isinstance(rag, RaggedAnnotatedHaps):
             rag.haps = self._rc(rag.haps, to_rc)
             rag.var_idxs = self._rc(rag.var_idxs, to_rc)
