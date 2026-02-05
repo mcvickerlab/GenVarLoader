@@ -25,10 +25,37 @@ prek = "*"
 commitizen = "*"
 maturin = ">=1.6,<2"
 typing-extensions = ">=4.14"
-numpy = "<2"
 
 [pypi-dependencies]
 genvarloader = { path = ".", editable = true }
+
+[feature.docs.dependencies]
+sphinx = ">=7.4.7"
+myst-parser = "*"
+nbsphinx = "*"
+ipykernel = "*"
+ipywidgets = "*"
+sphinx-book-theme = "*"
+sphinx-autobuild = "*"
+sphinx-autodoc-typehints = "*"
+matplotlib = "*"
+seaborn = "*"
+scipy = "*"
+
+[feature.pytorch-cpu.dependencies]
+pytorch-cpu = ">=2,<3"
+
+[feature.pytorch-gpu.pypi-dependencies]
+torch = { version = ">=2,<3", index = "https://download.pytorch.org/whl/cu126" }
+
+[feature.basenji2.pypi-dependencies]
+basenji2-pytorch = ">=0.1.2"
+
+[feature.py310.dependencies]
+python = "3.10.*"
+numpy = "<2"
+
+[feature.py310.pypi-dependencies]
 numpy = "==1.26.*"
 numba = "==0.59.1"
 pyarrow = ">=21"
@@ -65,31 +92,6 @@ filelock = "*"
 patchelf = "*"
 typer = "*"
 
-[feature.docs.dependencies]
-sphinx = ">=7.4.7"
-myst-parser = "*"
-nbsphinx = "*"
-ipykernel = "*"
-ipywidgets = "*"
-sphinx-book-theme = "*"
-sphinx-autobuild = "*"
-sphinx-autodoc-typehints = "*"
-matplotlib = "*"
-seaborn = "*"
-scipy = "*"
-
-[feature.pytorch-cpu.dependencies]
-pytorch-cpu = ">=2,<3"
-
-[feature.pytorch-gpu.pypi-dependencies]
-torch = { version = ">=2,<3", index = "https://download.pytorch.org/whl/cu126" }
-
-[feature.basenji2.pypi-dependencies]
-basenji2-pytorch = ">=0.1.2"
-
-[feature.py310.dependencies]
-python = "3.10.*"
-
 [feature.py311.dependencies]
 python = "3.11.*"
 
@@ -98,6 +100,10 @@ python = "3.12.*"
 
 [feature.py313.dependencies]
 python = "3.13.*"
+numpy = "<2.3"
+
+[feature.py313.pypi-dependencies]
+numba = "==0.61.2"
 
 [tasks]
 prek-install = "prek install --hook-type commit-msg --hook-type pre-push"
