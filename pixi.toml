@@ -97,7 +97,7 @@ python = "3.11.*"
 python = "3.12.*"
 
 [tasks]
-prek-install = "prek install --hook-type commit-msg --hook-type pre-push"
+prek-i = "prek install --hook-type commit-msg --hook-type pre-push"
 gen = { cmd = "python tests/data/generate_ground_truth.py" }
 test = { cmd = "pytest tests && cargo test --release", depends-on = ["gen"] }
 
