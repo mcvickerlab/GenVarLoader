@@ -158,7 +158,7 @@ def _fetch_impl(
     for i in nb.prange(len(c_idxs)):
         r_s, r_e = ref_offsets[c_idxs[i]], ref_offsets[c_idxs[i] + 1]
         o_s, o_e = out_offsets[i], out_offsets[i + 1]
-        out[o_s:o_e] = padded_slice(reference[r_s:r_e], starts[i], ends[i], pad_char)
+        padded_slice(reference[r_s:r_e], starts[i], ends[i], pad_char, out[o_s:o_e])
     return out
 
 
@@ -507,7 +507,7 @@ def get_reference(
         c_idx, start, end = regions[i, :3]
         c_s = ref_offsets[c_idx]
         c_e = ref_offsets[c_idx + 1]
-        out[o_s:o_e] = padded_slice(reference[c_s:c_e], start, end, pad_char)
+        padded_slice(reference[c_s:c_e], start, end, pad_char, out[o_s:o_e])
     return out
 
 

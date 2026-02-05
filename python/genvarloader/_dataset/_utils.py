@@ -16,11 +16,8 @@ def padded_slice(
     start: int,
     stop: int,
     pad_val: int,
-    out: NDArray[DTYPE] | None = None,
+    out: NDArray[DTYPE],
 ) -> NDArray[DTYPE]:
-    if out is None:
-        out = np.empty(stop - start, arr.dtype)
-
     if start >= stop:
         return out
     elif stop < 0:
