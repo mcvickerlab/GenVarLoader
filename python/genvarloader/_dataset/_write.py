@@ -248,18 +248,18 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
     if vcf._index is None:
         if not vcf._valid_index():
             logger.info("VCF genoray index is invalid, writing")
-            vcf._write_gvi_index(progress=True)
+            vcf._write_gvi_index()
 
         vcf._load_index()
 
     assert vcf._index is not None
 
-    if vcf._index.df.select((pl.col("ALT").list.len() > 1).any()).item():
+    if vcf._index.select((pl.col("ALT").list.len() > 1).any()).item():
         raise ValueError(
             "VCF with filtering applied still contains multi-allelic variants. Please filter or split them."
         )
 
-    shutil.copy(vcf._index_path(), out_dir / "variants.arrow")
+    (out_dir / "variants.arrow").hardlink_to(vcf._index_path())
 
     unextended_var_idxs: dict[str, list[NDArray[V_IDX_TYPE]]] = {}
     for (contig,), df in bed.partition_by(
@@ -368,7 +368,7 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    shutil.copy(pgen._index_path(), out_dir / "variants.arrow")
+    (out_dir / "variants.arrow").hardlink_to(pgen._index_path())
 
     pbar = tqdm(total=bed.height, unit=" region")
 
@@ -459,7 +459,7 @@ def _write_from_svar(
     with open(out_dir / "svar_meta.json", "w") as f:
         json.dump({"shape": offsets.shape, "dtype": offsets.dtype.str}, f)
 
-    v_ends = svar.var_table.select(
+    v_ends = svar.index.select(
         end=pl.col("POS") - pl.col("ILEN").list.first().clip(upper_bound=0)
     )["end"].to_numpy()
     max_ends = np.empty(bed.height, np.int32)

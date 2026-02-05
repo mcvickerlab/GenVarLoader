@@ -15,7 +15,7 @@ from awkward.contents import (
 )
 from genoray._types import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
 from numpy.typing import NDArray
-from seqpro.rag import OFFSET_TYPE, Ragged, lengths_to_offsets
+from seqpro.rag import OFFSET_TYPE, Ragged, is_rag_dtype, lengths_to_offsets
 from typing_extensions import Self
 
 from .._ragged import reverse_complement
@@ -32,8 +32,9 @@ class RaggedVariant(ak.Record):
 
 
 class RaggedVariants(ak.Array):
-    """An awkward record array, typically with shape (batch, ploidy, ~variants).
-    Guaranteed to at least have the field "alt" and "start" and one of "ref" or "ilen"."""
+    """An awkward record array with shape :code:`(batch, ploidy, ~variants, [~length])`.
+    Guaranteed to at least have the field :code:`"alt"` and :code:`"start"` and one of :code:`"ref"` or :code:`"ilen"`.
+    """
 
     def __init__(
         self,
@@ -179,8 +180,8 @@ class RaggedVariants(ak.Array):
             raise ValueError(f"Cannot infer germline CCFs without {ccf_field}.")
 
         ccfs = self[ccf_field]
-        if not isinstance(ccfs, Ragged):
-            raise ValueError(f"{ccf_field} must be a Ragged array.")
+        if not isinstance(ccfs, Ragged) or not is_rag_dtype(ccfs, DOSAGE_TYPE):
+            raise ValueError(f"{ccf_field} must be a Ragged array of {DOSAGE_TYPE}.")
 
         _infer_germline_ccfs(
             ccfs.data,

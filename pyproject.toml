@@ -14,7 +14,7 @@ dependencies = [
     "loguru",
     "attrs",
     "natsort",
-    "polars>=1.30",
+    "polars>=1.37.1",
     "cyvcf2",
     "pandera",
     "pysam",
@@ -31,7 +31,7 @@ dependencies = [
     "awkward",
     "hirola>=0.3,<0.4",
     "seqpro>=0.9",
-    "genoray>=1.0.1,<2",
+    "genoray>=2.1.1,<3",
 ]
 
 [project.urls]

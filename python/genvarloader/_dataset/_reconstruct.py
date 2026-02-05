@@ -16,6 +16,7 @@ from awkward.index import Index
 from einops import repeat
 from genoray._svar import SparseDosages, SparseGenotypes
 from genoray._types import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
+from genoray.exprs import ILEN
 from loguru import logger
 from numpy.typing import NDArray
 from packaging.version import Version
@@ -67,6 +68,13 @@ class _Variants:
         """
         path = Path(path).resolve()
         variants = pl.read_ipc(path, memory_map=False)
+        if variants.schema["ALT"] == pl.List(pl.Utf8):
+            ilen = ILEN
+        else:
+            ilen = pl.col("ALT").str.len_bytes().cast(pl.Int32) - pl.col(
+                "REF"
+            ).str.len_bytes().cast(pl.Int32)
+        variants = variants.with_columns(ILEN=ilen)
         is_list_type = [
             col for col in ("ALT", "ILEN") if variants[col].dtype == pl.List
         ]

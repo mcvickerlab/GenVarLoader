@@ -7,6 +7,7 @@ platforms = ["linux-64"]
 LD_LIBRARY_PATH = "$CONDA_PREFIX/lib"
 
 [environments]
+default = { features = ["default", "py310"] }
 dev = { features = ["pytorch-cpu", "basenji2", "py310"] }
 docs = { features = ["docs", "pytorch-cpu", "basenji2", "py312"] }
 docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py312"] }
@@ -32,9 +33,9 @@ typing-extensions = ">=4.14"
 genvarloader = { path = ".", editable = true }
 hirola = "==0.3"
 seqpro = "==0.9.0"
-genoray = "==1.0.1"
+genoray = "==2.1.1"
 numba = ">=0.58.1"
-polars = "==1.30.0"
+polars = "==1.37.1"
 loguru = "*"
 attrs = "*"
 natsort = "*"
