@@ -11,6 +11,7 @@ docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py312"] }
 py310 = { features = ["pytorch-cpu", "py310"] }
 py311 = { features = ["pytorch-cpu", "py311"] }
 py312 = { features = ["pytorch-cpu", "py312"] }
+py313 = { features = ["pytorch-cpu", "py313"] }
 no-torch = { features = ["py310"] }
 demo = { features = ["demo", "py310"] }
 
@@ -94,6 +95,9 @@ python = "3.11.*"
 
 [feature.py312.dependencies]
 python = "3.12.*"
+
+[feature.py313.dependencies]
+python = "3.13.*"
 
 [tasks]
 prek-install = "prek install --hook-type commit-msg --hook-type pre-push"
