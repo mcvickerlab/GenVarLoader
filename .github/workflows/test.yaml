@@ -22,7 +22,6 @@ jobs:
         uses: prefix-dev/setup-pixi@v0.9.3
         with:
           pixi-version: v0.62.1
-          cache: true
           environments: ${{ matrix.environment }}
       - name: Test
         run: pixi run -e ${{ matrix.environment }} test
