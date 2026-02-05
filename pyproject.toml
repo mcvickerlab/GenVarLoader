@@ -10,7 +10,7 @@ readme = "README.md"
 license = { file = "LICENSE.txt" }
 requires-python = ">=3.10,<3.13" # >= 3.13 blocked by cyvcf2
 dependencies = [
-    "numba>=0.58.1",
+    "numba>=0.59.1",
     "loguru",
     "attrs",
     "natsort",
