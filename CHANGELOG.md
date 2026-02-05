@@ -1,3 +1,14 @@
+## 0.20.0 (2026-02-05)
+
+### Feat
+
+- support python 3.13
+- upgrade to genoray 2
+
+### Fix
+
+- numba weirdness
+
 ## 0.19.1 (2025-12-20)
 
 ### Fix
