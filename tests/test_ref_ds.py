@@ -94,5 +94,6 @@ def padded_slice_pad_both():
 def test_padded_slice(
     arr: np.ndarray, start: int, stop: int, pad_val: int, desired: np.ndarray
 ):
-    actual = padded_slice(arr, start, stop, pad_val)
+    actual = np.empty_like(desired)
+    padded_slice(arr, start, stop, pad_val, actual)
     np.testing.assert_equal(actual, desired)

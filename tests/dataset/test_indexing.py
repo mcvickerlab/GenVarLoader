@@ -121,6 +121,17 @@ def getitem_slice_scalar():
     return regions, samples, s_idx, des_idx, des_squeeze, des_reshape
 
 
+def getitem_slice_slice():
+    regions = slice(2)
+    samples = slice(1)
+    s_idx = [0]
+
+    des_idx = np.array([2, 4])
+    des_squeeze = False
+    des_reshape = (2, 1)
+    return regions, samples, s_idx, des_idx, des_squeeze, des_reshape
+
+
 def getitem_reshape():
     regions = 0
     samples = [["Aang", "Katara"], ["Katara", "Aang"]]
@@ -149,7 +160,7 @@ def getitem_missing():
     cases=".",
     prefix="getitem_",
 )
-def test_getitem_shape(
+def test_parse_idx(
     dsi: DatasetIndexer,
     regions,
     samples,
@@ -163,3 +174,26 @@ def test_getitem_shape(
     np.testing.assert_equal(idx, desired_idx)
     assert squeeze == desired_squeeze
     assert reshape == desired_reshape
+
+    idx, squeeze, reshape = dsi.parse_idx((regions, s_idx))
+
+    np.testing.assert_equal(idx, desired_idx)
+    assert squeeze == desired_squeeze
+    assert reshape == desired_reshape
+
+
+# def test_parse_idx_subset(
+#     dsi: DatasetIndexer,
+#     regions,
+#     samples,
+#     s_idx,
+#     desired_idx,
+#     desired_squeeze,
+#     desired_reshape,
+# ):
+#     subset = dsi.subset_to(regions, samples)
+#     idx, squeeze, reshape = subset.parse_idx((regions, s_idx))
+
+#     np.testing.assert_equal(idx, desired_idx)
+#     assert squeeze == desired_squeeze
+#     assert reshape == desired_reshape

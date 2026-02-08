@@ -2,9 +2,10 @@ import numpy as np
 from attrs import define
 from einops import repeat
 from genvarloader._dataset._intervals import intervals_to_tracks, tracks_to_intervals
-from genvarloader._ragged import INTERVAL_DTYPE, RaggedIntervals
+from genvarloader._ragged import RaggedIntervals
 from numpy.typing import NDArray
 from pytest_cases import parametrize_with_cases
+from seqpro.rag import Ragged
 
 
 @define
@@ -31,14 +32,11 @@ def case_simple():
         dtype=np.int32,
     )
     values = np.array([1, 0, 2, 0, 3], dtype=np.float32)
-    n_intervals = len(values)
-    intervals = np.empty(n_intervals, dtype=INTERVAL_DTYPE)
-    intervals["start"] = coordinates[:, 0]
-    intervals["end"] = coordinates[:, 1]
-    intervals["value"] = values
-    intervals = RaggedIntervals.from_lengths(
-        intervals, np.array([n_intervals], np.uint32)
-    )
+    lengths = np.array([len(values)], np.uint32)
+    starts = Ragged.from_lengths(coordinates[:, 0], lengths)
+    ends = Ragged.from_lengths(coordinates[:, 1], lengths)
+    values = Ragged.from_lengths(values, lengths)
+    intervals = RaggedIntervals(starts, ends, values)
 
     interval_idx = np.array([0], dtype=np.intp)
 
@@ -64,17 +62,15 @@ def case_two_regions():
         dtype=np.int32,
     )
     values = np.array([1, 0, 2, 0, 3], dtype=np.float32)
-    n_intervals = len(values)
+    lengths = np.array([len(values)], np.uint32)
+    coordinates = repeat(coordinates, "n d -> (r n) d", r=2)
+    values = repeat(values, "n -> (r n)", r=2)
+    lengths = repeat(lengths, "n -> (r n)", r=2)
 
-    intervals = np.empty(n_intervals, dtype=INTERVAL_DTYPE)
-    intervals["start"] = coordinates[:, 0]
-    intervals["end"] = coordinates[:, 1]
-    intervals["value"] = values
-    intervals = repeat(intervals, "n -> (r n)", r=2)
-
-    intervals = RaggedIntervals.from_lengths(
-        intervals, np.array([n_intervals, n_intervals], np.uint32)
-    )
+    starts = Ragged.from_lengths(coordinates[:, 0], lengths)
+    ends = Ragged.from_lengths(coordinates[:, 1], lengths)
+    values = Ragged.from_lengths(values, lengths)
+    intervals = RaggedIntervals(starts, ends, values)
 
     interval_idx = np.array([0, 1], dtype=np.intp)
 
@@ -95,8 +91,10 @@ def test_intervals_to_tracks(data: Data):
     intervals_to_tracks(
         offset_idxs=data.interval_idx,
         starts=data.regions[:, 1],
-        intervals=intervals.data,
-        itv_offsets=intervals.offsets,
+        itv_starts=intervals.starts.data,
+        itv_ends=intervals.ends.data,
+        itv_values=intervals.values.data,
+        itv_offsets=intervals.values.offsets,
         out=out,
         out_offsets=out_offsets,
     )
@@ -105,7 +103,19 @@ def test_intervals_to_tracks(data: Data):
 
 @parametrize_with_cases("data", cases=".")
 def test_tracks_to_intervals(data: Data):
-    intervals, offsets = tracks_to_intervals(data.regions, data.track, data.t_offsets)
-    intervals = RaggedIntervals.from_offsets(intervals, 1, offsets)
-    np.testing.assert_array_equal(intervals.data, data.intervals.data)
-    np.testing.assert_array_equal(intervals.offsets, data.intervals.offsets)
+    batch_size = len(data.regions)
+    shape = (batch_size, None)
+    starts, ends, values, offsets = tracks_to_intervals(
+        data.regions, data.track, data.t_offsets
+    )
+    starts = Ragged.from_offsets(starts, shape, offsets)
+    ends = Ragged.from_offsets(ends, shape, offsets)
+    values = Ragged.from_offsets(values, shape, offsets)
+    intervals = RaggedIntervals(starts, ends, values)
+
+    np.testing.assert_array_equal(intervals.starts.data, data.intervals.starts.data)
+    np.testing.assert_array_equal(intervals.ends.data, data.intervals.ends.data)
+    np.testing.assert_array_equal(intervals.values.data, data.intervals.values.data)
+    np.testing.assert_array_equal(
+        intervals.values.offsets, data.intervals.values.offsets
+    )

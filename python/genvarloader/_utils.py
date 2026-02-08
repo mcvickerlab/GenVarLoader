@@ -2,6 +2,7 @@ from collections.abc import Iterable, Sequence
 from typing import Any, TypeGuard, TypeVar, cast, overload
 
 import numpy as np
+import polars as pl
 from numpy.typing import NDArray
 
 from ._types import DTYPE, Idx
@@ -62,23 +63,29 @@ def lengths_to_offsets(
     return offsets
 
 
-def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.intp]:
+def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.integer]:
     """Convert an index-like object to an array of non-negative indices. Shapes of multi-dimensional
     indices are preserved."""
+    if isinstance(idx, (Sequence, pl.Series)):
+        idx = cast(NDArray, np.array(idx))
+        assert is_dtype(idx, np.integer) or is_dtype(idx, np.bool_)
+
     if isinstance(idx, slice):
         _idx = np.arange(max_len, dtype=np.intp)[idx]
     elif is_dtype(idx, np.bool_):
         _idx = idx.nonzero()[0]
-    elif isinstance(idx, Sequence):
-        _idx = np.array(idx, np.intp)
     else:
         _idx = idx
 
-    if isinstance(_idx, (int, np.integer)):
-        _idx = np.array([_idx], np.intp)
+    if (
+        isinstance(_idx, (int, np.integer))
+        or isinstance(_idx, np.ndarray)
+        and _idx.ndim == 0
+    ):
+        _idx = np.atleast_1d(_idx)
 
     # unable to type narrow from NDArray[bool] since it's a generic type
-    _idx = cast(NDArray[np.intp], _idx)
+    _idx = cast(NDArray[np.integer], _idx)
 
     # handle negative indices
     _idx[_idx < 0] += max_len

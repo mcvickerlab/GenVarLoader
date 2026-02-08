@@ -1,3 +1,91 @@
+## 0.20.0 (2026-02-05)
+
+### Feat
+
+- support python 3.13
+- upgrade to genoray 2
+
+### Fix
+
+- numba weirdness
+
+## 0.19.1 (2025-12-20)
+
+### Fix
+
+- **perf**: upgrade genoray for (much) faster writes. test: idempotent fixutres in test_ds_haps
+
+## 0.19.0 (2025-12-03)
+
+### Feat
+
+- allow subsetting by region name. fix: convert eligible ak.Array to sp.rag.Ragged for gvl.RaggedVariants whenever possible
+
+## 0.18.3 (2025-11-09)
+
+### Fix
+
+- **perf**: faster reverse complementing
+
+## 0.18.2 (2025-11-03)
+
+### Fix
+
+- correctly parse and load variant fields (skip duplicates)
+- use ak.str.length instead of ak.num to get ref and alt lengths. docs: shape docstring
+
+## 0.18.1 (2025-10-23)
+
+### Fix
+
+- track file format version
+
+## 0.18.0 (2025-10-22)
+
+### Feat
+
+- make RaggedVariants an Awkward Array subclass supporting arbitrary additional fields.
+
+## 0.17.0 (2025-08-22)
+
+### Feat
+
+- use new seqpro.Ragged interface
+- method to obtain the number of variants per region,sample,haplotype.
+- support for reverse complementing alt alleles of RaggedVariants
+- ragvariant methods for pytorch, fix squeeze for scalar indexing, upstream genoray fix for extending genotypes from PGEN, (perf) batched contig normalization
+- subsetting for RefDataset
+
+### Fix
+
+- right shape for double slice indexing
+- shape/broadcasting bug for reverse complementing variants
+- **perf**: breaking changes to ragged data layout from seqpro to eliminate copies when converting non-contiguous ragged data to/from awkward arrays.
+- when ref not passed to Dataset.open, emit a warning instead of error and let ds return raggedvariants
+- refdataset transforms with indices
+
+## 0.16.0 (2025-06-05)
+
+### Feat
+
+- make DatasetWithSites return both wild-type and mutant haplotypes
+
+### Fix
+
+- transform not applied when dataset returns single item. docs: add basenji2 evaluation
+- use genoray>=0.12. docs: basenji2 eval
+- ensure samples are re-ordered by subset_to if necessary
+- Let GVL recognize bgz-compressed VCFs
+- pad ref_coords with max value for dtype to ensure ref coords are sorted
+- remove transform arg for dummy dataset
+- finish deprecating the transform setting on Dataset, which was moved to dataloading functionality
+- PR #101, ensure variable length output corresponds to ArrayDataset
+- update genoray pixi version
+- permit ragged output for dataloading, emitting a warning instead of raising an error
+- constrain genoray for breaking changes
+- torch dataset issues
+- bump seqpro to 0.4.2
+
 ## 0.15.0 (2025-05-23)
 
 ### Feat

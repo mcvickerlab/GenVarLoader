@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from typing import Protocol, TypeVar
 
 import numpy as np
+import polars as pl
 from attrs import define
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
@@ -14,9 +15,9 @@ DTYPE = TypeVar("DTYPE", bound=np.generic)
 INTERVAL_DTYPE = np.dtype(
     [("start", np.int32), ("end", np.int32), ("value", np.float32)], align=True
 )
-Idx = int | np.integer | Sequence[int] | slice | NDArray[np.integer] | NDArray[np.bool_]
-StrIdx = Idx | str | Sequence[str]
-ListIdx = Sequence[int] | NDArray[np.integer]
+IIdx = int | np.integer | NDArray[np.integer]
+Idx = IIdx | slice | Sequence[int] | Sequence[bool] | NDArray[np.bool_] | pl.Series
+StrIdx = Idx | str | Sequence[str] | NDArray[np.str_] | NDArray[np.object_]
 
 
 @define

@@ -7,9 +7,8 @@ import awkward as ak
 import numpy as np
 from loguru import logger
 from numpy.typing import NDArray
-from seqpro._ragged import Ragged
+from seqpro.rag import Ragged, is_rag_dtype
 
-from ._ragged import is_rag_dtype
 from ._types import AnnotatedHaps
 
 try:
@@ -34,7 +33,7 @@ def no_torch_error(*args, **kwargs):  # type: ignore
     )
 
 
-def requires_torch(func: Callable) -> Callable:
+def requires_torch(func):
     if TORCH_AVAILABLE:
         return func
     else:
@@ -135,7 +134,7 @@ def to_nested_tensor(rag: Ragged | ak.Array) -> torch.Tensor:
         Ragged array to convert.
     """
     if isinstance(rag, ak.Array):
-        rag = Ragged.from_awkward(rag)
+        rag = Ragged(rag)
 
     if is_rag_dtype(rag, np.bytes_):
         rag = rag.view(np.uint8)
@@ -180,10 +179,10 @@ if TORCH_AVAILABLE:
             if self.include_indices:
                 batch = (*batch, r_idx, s_idx)
 
-            if len(batch) == 1:
-                batch = batch[0]
-            elif self.transform is not None:
+            if self.transform is not None:
                 batch = self.transform(*batch)
+            elif len(batch) == 1:
+                batch = batch[0]
 
             return batch
 

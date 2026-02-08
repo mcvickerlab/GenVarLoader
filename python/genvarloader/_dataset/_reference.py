@@ -1,36 +1,28 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import (
-    Callable,
-    Generic,
-    Literal,
-    TypeVar,
-    cast,
-    overload,
-)
+from typing import Callable, Generic, Literal, TypeVar, cast, overload
 
+import awkward as ak
 import numba as nb
 import numpy as np
 import polars as pl
 from attrs import define, evolve, field
+from genoray._utils import ContigNormalizer
 from loguru import logger
-from numpy.typing import NDArray
-from seqpro._ragged import Ragged, lengths_to_offsets
+from numpy.typing import ArrayLike, NDArray
+from seqpro.rag import Ragged, lengths_to_offsets
 from typing_extensions import Self
 
 from .._fasta import Fasta
 from .._ragged import RaggedSeqs, reverse_complement, to_padded
-from .._torch import (
-    TORCH_AVAILABLE,
-    get_dataloader,
-    no_torch_error,
-    tensor_from_maybe_bytes,
-)
+from .._torch import TORCH_AVAILABLE, get_dataloader, no_torch_error
 from .._types import Idx
-from .._utils import normalize_contig_name
+from .._utils import is_dtype
 from ._utils import bed_to_regions, padded_slice
+
+INT64_MAX = np.iinfo(np.int64).max
 
 
 @define
@@ -46,12 +38,11 @@ class Reference:
     """The path to the reference genome."""
     reference: NDArray[np.uint8]
     """The reference genome as a numpy array, with contigs concatenated."""
-    contigs: list[str]
-    """The contigs in the reference genome."""
     offsets: NDArray[np.int64]
-    """The offsets of the contigs in the reference genome."""
+    """The offsets of the contigs in the reference genome. Shape: (n_contigs + 1)"""
     pad_char: int
     """The padding character used in the reference genome."""
+    c_map: ContigNormalizer
 
     @classmethod
     def from_path(
@@ -88,10 +79,11 @@ class Reference:
         offsets = lengths_to_offsets(np.array(list(_fasta.contigs.values())))
         pad_char = ord("N")
 
+        c_map = ContigNormalizer(_fasta.contigs)
         if contigs is None:
-            contigs = list(_fasta.contigs)
+            contigs = c_map.contigs
         else:
-            _contigs = [normalize_contig_name(c, _fasta.contigs) for c in contigs]
+            _contigs = c_map.norm(contigs)
             if unmapped := [
                 source for source, mapped in zip(contigs, _contigs) if mapped is None
             ]:
@@ -99,6 +91,7 @@ class Reference:
                     f"Some of the given contig names are not present in reference file: {unmapped}"
                 )
             contigs = cast(list[str], _contigs)
+            c_map = ContigNormalizer(contigs)
 
         if in_memory:
             reference = np.empty(sum(_fasta.contigs[c] for c in contigs), np.uint8)
@@ -112,27 +105,61 @@ class Reference:
         else:
             reference = ref_mmap
 
-        return cls(path, reference, contigs, offsets, pad_char)
+        return cls(path, reference, offsets, pad_char, c_map)
+
+    @property
+    def contigs(self) -> list[str]:
+        return self.c_map.contigs
 
     def fetch(
-        self, contig: str, start: int = 0, end: int | None = None
-    ) -> NDArray[np.bytes_]:
-        c = normalize_contig_name(contig, self.contigs)
-        if c is None:
-            raise ValueError(f"Contig {contig} not found in reference.")
-        c_idx = self.contigs.index(c)
-        o_s, o_e = self.offsets[c_idx], self.offsets[c_idx + 1]
+        self, contigs: ArrayLike, starts: ArrayLike = 0, ends: ArrayLike = INT64_MAX
+    ) -> Ragged[np.bytes_]:
+        contigs = np.atleast_1d(contigs)
+        starts = np.atleast_1d(starts)
+        ends = np.atleast_1d(ends)
 
-        if end is None:
-            end = cast(int, self.offsets[c_idx + 1] - self.offsets[c_idx])
-
-        _contig = self.reference[o_s:o_e]
-        if start < 0 or end > len(_contig):
-            seq = padded_slice(_contig, start, end, self.pad_char)
+        if not is_dtype(contigs, np.integer):
+            c_idxs = self.c_map.c_idxs(contigs)
+            if (c_idxs == -1).any():
+                raise ValueError("Some contigs not found in reference.")
         else:
-            seq = _contig[start:end]
+            c_idxs = contigs
 
-        return seq.view("S1")
+        lengths = ends - starts
+        offsets = lengths_to_offsets(lengths)
+        seqs = np.empty(offsets[-1], np.uint8)
+        _fetch_impl(
+            c_idxs,
+            starts,
+            ends,
+            self.reference,
+            self.offsets,
+            self.pad_char,
+            seqs,
+            offsets,
+        )
+
+        seqs = Ragged.from_offsets(seqs.view("S1"), (len(contigs), None), offsets)
+
+        return seqs
+
+
+@nb.njit(parallel=True, nogil=True, cache=True)
+def _fetch_impl(
+    c_idxs: NDArray[np.integer],
+    starts: NDArray[np.integer],
+    ends: NDArray[np.integer],
+    reference: NDArray[np.integer],
+    ref_offsets: NDArray[np.integer],
+    pad_char: int,
+    out: NDArray[np.uint8],
+    out_offsets: NDArray[np.integer],
+):
+    for i in nb.prange(len(c_idxs)):
+        r_s, r_e = ref_offsets[c_idxs[i]], ref_offsets[c_idxs[i] + 1]
+        o_s, o_e = out_offsets[i], out_offsets[i + 1]
+        padded_slice(reference[r_s:r_e], starts[i], ends[i], pad_char, out[o_s:o_e])
+    return out
 
 
 T = TypeVar("T", NDArray[np.bytes_], RaggedSeqs)
@@ -144,7 +171,7 @@ class RefDataset(Generic[T]):
 
     reference: Reference
     """The reference genome."""
-    regions: pl.DataFrame
+    full_bed: pl.DataFrame
     """A table of regions to extract from the reference genome. The table must have the following columns:
     - `chrom`: The name of the contig (e.g. "chr1", "chr2", etc.)
     - `chromStart`: The start position of the region (0-based).
@@ -152,6 +179,8 @@ class RefDataset(Generic[T]):
     A `strand` column can also be included, in which case the regions will be reverse complemented if the strand is -1
     and the `rc_neg` parameter is set to True.
     """
+    _subset_bed: pl.DataFrame = field(init=False, alias="_subset_bed")
+    _subset_regions: NDArray[np.int32] = field(init=False, alias="_subset_regions")
     jitter: int = 0
     """The maximum length for randomly shifting start positions."""
     output_length: Literal["ragged", "variable"] | int = "ragged"
@@ -162,27 +191,31 @@ class RefDataset(Generic[T]):
     """
     rc_neg: bool = True
     """Whether to reverse complement the regions that are on the negative strand."""
-    seed: int | np.random.Generator | None = field(default=None)
-    """A random seed to use for jitter and shifting. If None, a random seed will be used."""
-    _full_regions: NDArray[np.int32] = field(init=False)
-    _rng: np.random.Generator = field(init=False)
+    seed: int | np.random.Generator | None = None
+    _rng: np.random.Generator = field(init=False, alias="_rng")
+    """A random number generator."""
 
     def __attrs_post_init__(self):
-        if self.regions.height == 0:
+        if self.full_bed.height == 0:
             raise ValueError("Table of regions has a height of zero.")
 
         if self.jitter < 0:
             raise ValueError(f"jitter ({self.jitter}) must be a non-negative integer.")
         elif self.jitter > (
-            min_len := self.regions.select(
+            min_len := self.full_bed.select(
                 (pl.col("chromEnd") - pl.col("chromStart")).min()
             ).item()
         ):
             raise ValueError(
                 f"jitter ({self.jitter}) must be less than the minimum region length ({min_len})."
             )
-        self._full_regions = bed_to_regions(self.regions, self.reference.contigs)
+        self._subset_bed = self.full_bed
+        self._subset_regions = bed_to_regions(self.full_bed, self.reference.contigs)
         self._rng = np.random.default_rng(self.seed)
+
+    @property
+    def regions(self) -> pl.DataFrame:
+        return self._subset_bed
 
     @property
     def shape(self) -> tuple[int]:
@@ -207,7 +240,9 @@ class RefDataset(Generic[T]):
                 raise ValueError(
                     f"Output length ({output_length}) must be a positive integer."
                 )
-            min_r_len: int = (self._full_regions[:, 2] - self._full_regions[:, 1]).min()
+            min_r_len: int = (
+                self._subset_regions[:, 2] - self._subset_regions[:, 1]
+            ).min()
             max_output_length = min_r_len
             eff_length = output_length + 2 * self.jitter
 
@@ -234,7 +269,9 @@ class RefDataset(Generic[T]):
                 raise ValueError(f"jitter ({jitter}) must be a non-negative integer.")
             elif (
                 jitter
-                > (min_len := self._full_regions[:, 2] - self._full_regions[:, 1]).min()
+                > (
+                    min_len := self._subset_regions[:, 2] - self._subset_regions[:, 1]
+                ).min()
             ):
                 raise ValueError(
                     f"jitter ({jitter}) must be less than the minimum region length ({min_len})."
@@ -252,9 +289,34 @@ class RefDataset(Generic[T]):
 
         return evolve(self, **to_evolve)
 
+    def subset_to(self, regions: Idx):
+        """Subset the dataset to a subset of regions.
+
+        Parameters
+        ----------
+        regions
+            The indices of the regions to subset to.
+        """
+        if (
+            isinstance(regions, (int, np.integer, slice))
+            or is_dtype(regions, np.integer)
+            or (isinstance(regions, Sequence) and isinstance(regions[0], int))
+        ):
+            self._subset_bed = self.full_bed[regions]  # type: ignore
+        else:
+            self._subset_bed = self.full_bed.filter(regions)  # type: ignore
+        self._subset_regions = bed_to_regions(self._subset_bed, self.reference.contigs)
+        return self
+
+    def to_full_dataset(self) -> Self:
+        """Reset the dataset to the full dataset."""
+        self._subset_bed = self.full_bed
+        self._subset_regions = bed_to_regions(self._subset_bed, self.reference.contigs)
+        return self
+
     def __getitem__(self, idx: Idx) -> T:
         # (... 4)
-        regions = self._full_regions[idx].copy()
+        regions = self._subset_regions[idx].copy()
 
         out_reshape = None
         squeeze = False
@@ -298,24 +360,26 @@ class RefDataset(Generic[T]):
             pad_char=self.reference.pad_char,
         ).view("S1")
 
-        ref = cast(Ragged[np.bytes_], Ragged.from_offsets(ref, batch_size, out_offsets))
+        ref = cast(
+            Ragged[np.bytes_], Ragged.from_offsets(ref, (batch_size, None), out_offsets)
+        )
 
         to_rc = regions[:, 3] == -1
         if to_rc.any():
-            ref = reverse_complement(ref, to_rc)
+            ref = ak.where(to_rc, reverse_complement(ref), ref)
 
         if out_reshape is not None:
-            ref = ref.reshape(out_reshape)
+            ref = ref.reshape(out_reshape)  # type: ignore
 
         if self.output_length == "ragged":
             out = ref
         elif self.output_length == "variable":
-            out = to_padded(ref, pad_value=self.reference.pad_char)
+            out = to_padded(ref, pad_value=self.reference.pad_char)  # type: ignore
         else:
-            out = ref.to_numpy()
+            out = ref.to_numpy()  # type: ignore
 
         if squeeze:
-            out = out.squeeze(0)
+            out = out.squeeze(0)  # type: ignore
 
         return cast(T, out)
 
@@ -443,7 +507,7 @@ def get_reference(
         c_idx, start, end = regions[i, :3]
         c_s = ref_offsets[c_idx]
         c_e = ref_offsets[c_idx + 1]
-        out[o_s:o_e] = padded_slice(reference[c_s:c_e], start, end, pad_char)
+        padded_slice(reference[c_s:c_e], start, end, pad_char, out[o_s:o_e])
     return out
 
 
@@ -469,27 +533,17 @@ if TORCH_AVAILABLE:
         def __len__(self) -> int:
             return len(self.dataset)
 
-        def __getitem__(
-            self, idx: list[int]
-        ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-            batch = self.dataset[idx]
+        def __getitem__(self, idx: list[int]):
+            batch = (self.dataset[idx],)
 
             if self.include_indices:
                 _idx = np.atleast_1d(idx)
                 batch = (*batch, _idx)
-                single_item = False
-            else:
-                batch = (batch,)
-                single_item = True
 
             if self.transform is not None:
                 batch = self.transform(*batch)
-                if single_item:
-                    batch = (batch,)
 
-            batch = tuple(tensor_from_maybe_bytes(b) for b in batch)
-
-            if single_item:
+            if len(batch) == 1:
                 batch = batch[0]
 
             return batch

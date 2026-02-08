@@ -16,3 +16,5 @@ def test_path_is_vcf():
     assert path_is_vcf(Path("test.vcf.gz"))
     assert path_is_vcf(Path("test.bcf"))
     assert path_is_vcf(Path("test.bcf.gz"))
+    assert path_is_vcf(Path("test.vcf.bgz"))
+    assert path_is_vcf(Path("test.bcf.bgz"))

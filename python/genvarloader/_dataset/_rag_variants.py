@@ -1,57 +1,172 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, Callable, Literal, cast
+
 import awkward as ak
 import numba as nb
 import numpy as np
-from attrs import define
-from awkward.contents import RegularArray
-from genoray._svar import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
+import seqpro as sp
+from awkward.contents import (
+    Content,
+    ListArray,
+    ListOffsetArray,
+    NumpyArray,
+    RegularArray,
+)
+from genoray._types import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
 from numpy.typing import NDArray
-from seqpro._ragged import OFFSET_TYPE, Ragged
+from seqpro.rag import OFFSET_TYPE, Ragged, is_rag_dtype, lengths_to_offsets
 from typing_extensions import Self
 
+from .._ragged import reverse_complement
+from .._torch import TORCH_AVAILABLE, requires_torch
 
-@define
-class RaggedVariants:
-    """Typically contains ragged arrays with shape (batch, ploidy, ~variants)"""
+if TORCH_AVAILABLE or TYPE_CHECKING:
+    import torch
+    from torch.nested import nested_tensor_from_jagged as nt_jag
+    from torch.nested._internal.nested_tensor import NestedTensor
 
-    alts: ak.Array  # (batch, ploidy, ~variants, ~length)
-    """Alternate alleles, note extra ragged dimension for length yielding a shape of
-    (..., ploidy, ~variants, ~length)"""
-    v_starts: Ragged[POS_TYPE]
-    """0-based start positions"""
-    ilens: Ragged[np.int32]
-    """Indel lengths"""
-    dosages: Ragged[DOSAGE_TYPE] | None
-    """Dosages, potentially interpreted as CCFs depending on how the dosages were defined."""
+
+class RaggedVariant(ak.Record):
+    pass
+
+
+class RaggedVariants(ak.Array):
+    """An awkward record array with shape :code:`(batch, ploidy, ~variants, [~length])`.
+    Guaranteed to at least have the field :code:`"alt"` and :code:`"start"` and one of :code:`"ref"` or :code:`"ilen"`.
+    """
+
+    def __init__(
+        self,
+        alt: ak.Array,
+        start: Ragged[POS_TYPE],
+        ref: ak.Array | None = None,
+        ilen: Ragged[np.int32] | None = None,
+        dosage: Ragged[DOSAGE_TYPE] | None = None,
+        **kwargs: Ragged[np.number],
+    ):
+        if ref is None and ilen is None:
+            raise ValueError("Must provide one of refs or ilens.")
+
+        to_zip = {"alt": alt, "start": start}
+        if ref is not None:
+            to_zip["ref"] = ref
+        if ilen is not None:
+            to_zip["ilen"] = ilen
+        if dosage is not None:
+            to_zip["dosage"] = dosage
+
+        arr = ak.zip(
+            to_zip | kwargs, 1, parameters={"__record__": RaggedVariants.__name__}
+        )
+
+        super().__init__(arr)
+
+    @classmethod
+    def from_ak(cls, arr: ak.Array) -> RaggedVariants:
+        """Create a RaggedVariants object from an awkward array.
+
+        Parameters
+        ----------
+        arr
+            The awkward array to create a RaggedVariants object from.
+        """
+        fields = set(arr.fields)
+
+        if missing := {"alt", "start"} - fields:
+            raise ValueError(f"Missing required fields: {missing}")
+
+        if {"ref", "ilen"}.isdisjoint(fields):
+            raise ValueError("Must have one of ref or ilen.")
+
+        def find_and_convert_to_ragged(content: Content, depth_context: dict, **kwargs):
+            if isinstance(content, (ListArray, ListOffsetArray)):
+                depth_context["n_varlen"] += 1
+
+            if (
+                # is a varlen leaf
+                isinstance(content, (ListArray, ListOffsetArray))
+                and isinstance(content.content, NumpyArray)
+                # is the only varlen leaf in this branch
+                and depth_context["n_varlen"] == 1
+                # has no parameters that might conflict with Ragged
+                and len(content.parameters) == 0
+            ):
+                return ak.with_parameter(content, "__list__", "Ragged", highlevel=False)
+
+        arr = ak.transform(  # type: ignore
+            find_and_convert_to_ragged, arr, depth_context={"n_varlen": 0}
+        )
+
+        return ak.with_parameter(arr, "__record__", RaggedVariants.__name__)
 
     @property
-    def shape(self) -> tuple[int, ...]:
-        return self.v_starts.shape
+    def alt(self) -> ak.Array:
+        """Alternative alleles."""
+        return cast(ak.Array, super().__getitem__("alt"))
 
-    def reshape(self, shape: tuple[int, ...]) -> Self:
-        # bpvl -> pvl -> vl
-        layout = self.alts.layout.content
-        for len_ in reversed(shape[1:]):
-            layout = RegularArray(layout, len_)
+    @property
+    def start(self) -> Ragged[POS_TYPE]:
+        """0-based start positions."""
+        return cast(Ragged[POS_TYPE], super().__getitem__("start"))
 
-        return type(self)(
-            ak.Array(layout),
-            self.v_starts.reshape(shape),
-            self.ilens.reshape(shape),
-            None if self.dosages is None else self.dosages.reshape(shape),
-        )
+    @property
+    def ilen(self) -> Ragged[np.int32]:
+        """Indel lengths. Infallible."""
+        if "ilen" not in self.fields:
+            ilen = ak.str.length(self.alt) - ak.str.length(self.ref)  # type: ignore
+            ilen = Ragged(ilen)
+            return ilen
 
-    def squeeze(self, axis: int = 0) -> Self:
-        return type(self)(
-            ak.flatten(self.alts, axis + 1),
-            self.v_starts.squeeze(axis),
-            self.ilens.squeeze(axis),
-            None if self.dosages is None else self.dosages.squeeze(axis),
-        )
+        return cast(Ragged[np.int32], super().__getitem__("ilen"))
 
-    def infer_germline_ccfs_(self, max_ccf: float = 1.0) -> Self:
-        """Treat dosages as cancer cell fractions and infer germline CCFs in-place.
+    @property
+    def shape(self) -> tuple[int | None, ...]:
+        return self.start.shape
+
+    @property
+    def end(self) -> Ragged[POS_TYPE]:
+        """0-based, exclusive end positions."""
+        if hasattr(self, "ref"):
+            ref = cast(Ragged[np.bytes_], self.ref)
+            return self.start + ak.num(ref, -1)
+        else:
+            ilen = cast(Ragged[np.int32], self.ilen)
+            return self.start - np.clip(ilen, None, 0) + 1
+
+    def reshape(self, shape: tuple[int | None, ...]) -> Self:
+        """Reshape leading, regular axes. Assumes no trailing regular axes."""
+        reshaped = {}
+
+        for field in self.fields:
+            arr = cast(Ragged | ak.Array, self[field])
+            if isinstance(arr, Ragged):
+                arr = arr.reshape(shape)
+            else:
+                # strip regular axes
+                node = arr.layout
+                while isinstance(node, RegularArray):
+                    node = node.content
+
+                # create new regular axes
+                for len_ in reversed(shape[1:]):
+                    if len_ is None:
+                        continue
+                    node = RegularArray(node, len_)
+                arr = ak.Array(node)
+
+            reshaped[field] = arr
+
+        return type(self)(**reshaped)
+
+    def squeeze(self, **kwargs) -> Self:
+        """Squeeze first axis."""
+        return self[0]  # type: ignore
+
+    def infer_germline_ccfs_(
+        self, ccf_field: str = "dosages", max_ccf: float = 1.0
+    ) -> Self:
+        """Infer germline CCFs in-place.
 
         Germline variants are identified by having missing CCFs i.e. they have a variant
         index but missing CCFs. Missing CCFs are inferred to be :code:`max_ccf` - sum(overlapping CCFs).
@@ -61,16 +176,207 @@ class RaggedVariants:
         max_ccf
             Maximum CCF value.
         """
-        if self.dosages is None:
-            raise ValueError("Cannot infer germline CCFs without dosages.")
+        if not hasattr(self, ccf_field):
+            raise ValueError(f"Cannot infer germline CCFs without {ccf_field}.")
+
+        ccfs = self[ccf_field]
+        if not isinstance(ccfs, Ragged) or not is_rag_dtype(ccfs, DOSAGE_TYPE):
+            raise ValueError(f"{ccf_field} must be a Ragged array of {DOSAGE_TYPE}.")
+
         _infer_germline_ccfs(
-            self.dosages.data,
-            self.v_starts.offsets,
-            self.v_starts.data,
-            self.ilens.data,
+            ccfs.data,
+            self.start.offsets,
+            self.start.data,
+            self.ilen.data,
             max_ccf=max_ccf,
         )
         return self
+
+    def to_packed(self) -> Self:
+        """Apply :func:`ak.to_packed` to all arrays."""
+        return ak.to_packed(self)
+
+    def rc_(self, to_rc: NDArray[np.bool_] | None = None) -> Self:
+        """Reverse complement the alleles. This is an in-place operation.
+
+        Parameters
+        ----------
+        to_rc
+            A boolean mask of the same shape as the variant dimension. If :code:`True`, the alternative allele will be reverse complemented.
+            If :code:`None`, will reverse complement all alternative alleles.
+
+        Returns
+        -------
+            The RaggedVariants object with the alleles reverse complemented.
+        """
+        if to_rc is None:
+            to_rc = np.ones(self.shape[0], np.bool_)  # type: ignore
+        elif not to_rc.any():
+            return self
+
+        self["alt"] = ak.where(
+            to_rc,
+            reverse_complement(self["alt"]),  # type: ignore
+            self["alt"],
+        )
+
+        if "ref" in self.fields:
+            self["ref"] = ak.where(
+                to_rc,
+                reverse_complement(self["ref"]),  # type: ignore
+                self["ref"],
+            )
+
+        return self
+
+    @requires_torch
+    def to_nested_tensor_batch(
+        self,
+        device: str | torch.device = "cpu",
+        tokenizer: Literal["seqpro"]
+        | Callable[[NDArray[np.bytes_]], NDArray[np.integer]]
+        | None = None,
+    ) -> dict[str, NestedTensor | int]:
+        """Convert a RaggedVariants object to a dictionary of nested tensors. Will flatten across
+        the ploidy dimension for attributes ILEN, starts, and dosages such that their shapes are (batch * ploidy, ~variants).
+        For the alternative alleles, will flatten across both the ploidy and variant dimensions such that the
+        shape is (batch * ploidy * ~variants, ~alt_len).
+
+        .. important::
+            This function assumes all variant data is packed (see :func:`ak.to_packed`).
+
+        Parameters
+        ----------
+        device
+            The device to move the tensors to.
+        tokenizer
+            The tokenizer to use for the alternative alleles.
+
+            - If :code:`"seqpro"`, will use :func:`seqpro.tokenize` to convert :code:`ACGTN -> 0 1 2 3 4`.
+            - If :code:`None`, will use the integer ASCII value of each character i.e. :code:`ACGTN -> 65 67 71 84 78`.
+            - Otherwise, will use the provided callable to convert the alternative alleles to a tensor of integers.
+
+        Returns
+        -------
+            Dictionary of `nested tensors <https://docs.pytorch.org/docs/stable/nested.html>`_ and integers with the following keys:
+
+            - :code:`"alts"` with shape :code:`(batch * ploidy * ~variants, ~alt_len)`
+            - :code:`"ilens"` with shape :code:`(batch * ploidy, ~variants)`
+            - :code:`"starts"` with shape :code:`(batch * ploidy, ~variants)`
+            - :code:`"dosages"` with shape :code:`(batch * ploidy, ~variants)`
+            - :code:`"max_seqlen"`: int, maximum number of variants
+            - :code:`"max_alt_len"`: int, maximum length of an alternative allele
+
+        """
+        batch = {}
+        variant_offsets = None
+        for field in self.fields:
+            arr = cast(Ragged | ak.Array, self[field])
+            if isinstance(arr, Ragged):
+                data = torch.from_numpy(arr.data).to(device)
+                if variant_offsets is None:
+                    variant_offsets = torch.from_numpy(arr.offsets.astype(np.int32)).to(
+                        device
+                    )
+                    batch["var_maxlen"] = int(np.diff(arr.offsets).max())
+                batch[field] = nt_jag(data, variant_offsets)
+            elif field in {"ref", "alt"}:
+                data, offsets, max_alen = _alleles_to_nested_tensor(arr, tokenizer)
+                data = data.to(device)
+                batch[f"{field}_maxlen"] = max_alen
+                batch[field] = nt_jag(data, offsets)
+
+        return batch
+
+    def pad(
+        self,
+        allele: str | bytes = b"N",
+        ilen: int = 0,
+        start: int = -1,
+        dosage: float = 0.0,
+        **pad_values: Any,
+    ) -> Self:
+        """Append a pad variant so that every group is guaranteed to have at least 1 variant. If the group has variants,
+        no variant is appended.
+
+        Parameters
+        ----------
+        allele
+            The allele to use for ALTs and REFs
+        ilen
+        start
+            The start position to use for the pad variant
+        dosage
+            The dosage to use for the pad variant
+        **pad_values
+            Additional values to use for each field. Raises a ValueError if any field does not have a pad value.
+
+        Returns
+        -------
+            The RaggedVariants object with the pad variant appended to each group that has no variants.
+        """
+        if isinstance(allele, str):
+            allele = allele.encode()
+
+        pad_values |= {
+            "alt": allele,
+            "ref": allele,
+            "ilen": ilen,
+            "start": start,
+            "dosage": dosage,
+        }
+
+        if missing_fields := set(self.fields) - set(pad_values.keys()):
+            raise ValueError(f"Missing pad values for fields: {missing_fields}")
+
+        arr = ak.pad_none(self, 1, -1)
+        for field in self.fields:
+            value = pad_values[field]
+            arr = ak.with_field(arr, ak.fill_none(arr[field], value, -1), field)
+        return arr
+
+
+def _alleles_to_nested_tensor(
+    alleles: ak.Array,
+    tokenizer: Literal["seqpro"]
+    | Callable[[NDArray[np.bytes_]], NDArray[np.integer]]
+    | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    _alleles = cast(Content, alleles.layout)
+    while not isinstance(_alleles, NumpyArray):
+        if isinstance(_alleles, (ListArray, ListOffsetArray)):
+            offsets = _alleles
+        _alleles = cast(Content, _alleles.content)
+    _alleles = cast(NDArray[np.bytes_], _alleles.data)  # type: ignore
+
+    if tokenizer == "seqpro":
+        _alleles = sp.tokenize(_alleles, dict(zip(sp.DNA.alphabet, range(4))), 4)
+    elif tokenizer is not None:
+        _alleles = tokenizer(_alleles)
+    else:
+        _alleles = _alleles.view(np.uint8)
+
+    _alleles = torch.from_numpy(_alleles)
+
+    offsets = cast(ListArray | ListOffsetArray, offsets)  # type: ignore
+    # (N ~V ~L) -> (N ~V) -> (N*~V)
+    if isinstance(offsets, ListArray):
+        lengths = cast(NDArray, offsets.stops.data - offsets.starts.data)  # type: ignore
+        offsets = lengths_to_offsets(lengths, np.int32)
+    else:
+        offsets = offsets.offsets.data.astype(np.int32)  # type: ignore
+        lengths = np.diff(offsets)
+
+    if len(lengths) == 0:
+        max_alen = 0
+    else:
+        max_alen = lengths.max().item()
+
+    offsets = torch.from_numpy(offsets)
+    return _alleles, offsets, max_alen
+
+
+ak.behavior["*", RaggedVariants.__name__] = RaggedVariants
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
@@ -175,3 +481,40 @@ def _infer_germline_ccfs(
                 running_ccf += (2 * (pos >= 0) - 1) * pos_ccf
 
         np.nan_to_num(ccf, copy=False, nan=max_ccf)
+
+
+def _rc_helper(
+    ragv: RaggedVariants, field: str, to_rc: NDArray[np.bool_] | None = None
+):
+    # flatten all but last two dimensions & strip params for numba
+    alleles = ragv[field].layout  # type: ignore
+    while not isinstance(alleles.content, NumpyArray):  # type: ignore
+        alleles = alleles.content  # type: ignore
+    alleles = ak.without_parameters(alleles)
+
+    if to_rc is None:
+        to_rc = np.ones(ragv.shape[:-1], np.bool_)  # type: ignore
+
+    # broadcast to same shape as variants, and flatten
+    # (batch) -> (batch * ploidy * n_variants)
+    # batch * ploidy * n_variants = n_alts
+    _to_rc, _ = ak.broadcast_arrays(to_rc, ragv.start)
+    _to_rc = _to_rc.layout
+    while not isinstance(_to_rc, NumpyArray):
+        _to_rc = _to_rc.content
+    _to_rc = cast(NDArray[np.bool_], _to_rc.data)  # type: ignore
+
+    _rc_numba_helper(alleles, _to_rc)
+
+
+@nb.njit(nogil=True, cache=True)
+def _rc_numba_helper(alts: ak.Array, to_rc: NDArray[np.bool_]):
+    for alt, rc in zip(alts, to_rc):
+        if rc:
+            alt = np.asarray(alt)
+            rc_alt = np.empty_like(alt)
+            rc_alt[alt == ord("A")] = ord("T")
+            rc_alt[alt == ord("C")] = ord("G")
+            rc_alt[alt == ord("G")] = ord("C")
+            rc_alt[alt == ord("T")] = ord("A")
+            alt[:] = rc_alt[::-1]

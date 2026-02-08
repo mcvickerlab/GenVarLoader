@@ -15,15 +15,15 @@ def dataset():
     return gvl.Dataset.open(DDIR / "phased_dataset.vcf.gvl", REF).with_seqs("annotated")
 
 
-def test_annot_tracks(
-    dataset: gvl.RaggedDataset[RaggedAnnotatedHaps, None],
-):
+def test_annot_tracks(dataset: gvl.RaggedDataset[RaggedAnnotatedHaps, None]):
     annots = dataset.regions.with_columns(
         chromEnd=pl.col("chromStart") + 1, score=pl.lit(1.0)
     )
-    annot_ds = dataset.write_annot_tracks({"5ss": annots}).with_tracks("5ss")
+    annot_ds = dataset.write_annot_tracks({"5ss": annots}, overwrite=True).with_tracks(
+        "5ss", "tracks"
+    )
     haps, tracks = annot_ds[:]
-    mask = haps.ref_coords.to_awkward() == ak.Array(
+    mask = haps.ref_coords == ak.Array(
         annot_ds.regions["chromStart"].to_numpy()[:, None, None]
     )
-    assert ak.all(tracks.to_awkward()[:, :, 0][mask] == 1)
+    assert ak.all(tracks[:, :, 0][mask] == 1)

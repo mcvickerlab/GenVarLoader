@@ -1,33 +1,185 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, TypeGuard, TypeVar
+from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 
+import awkward as ak
+import awkward.operations.str as ak_str
 import numba as nb
 import numpy as np
 from attrs import define
-from einops import repeat
+from awkward.contents import NumpyArray
 from numpy.typing import NDArray
 from phantom import Phantom
-from seqpro._ragged import OFFSET_TYPE, Ragged
+from seqpro.rag import RDTYPE, Ragged, is_rag_dtype
 
-from ._types import DTYPE, AnnotatedHaps
+from ._torch import TORCH_AVAILABLE
+from ._types import AnnotatedHaps
 
-__all__ = ["Ragged", "RaggedIntervals", "pad_ragged"]
+if TORCH_AVAILABLE or TYPE_CHECKING:
+    import torch
+    from torch.nested import nested_tensor_from_jagged as nt_jag
 
-RDTYPE = TypeVar("RDTYPE", bound=np.generic)
+__all__ = ["Ragged", "RaggedIntervals", "RaggedTracks"]
 INTERVAL_DTYPE = np.dtype(
     [("start", np.int32), ("end", np.int32), ("value", np.float32)], align=True
 )
-RaggedIntervals = Ragged[np.void]
 
 
-def is_rag_dtype(rag: Any, dtype: type[DTYPE]) -> TypeGuard[Ragged[DTYPE]]:
-    return isinstance(rag, Ragged) and np.issubdtype(rag.data.dtype, dtype)
+@define
+class RaggedIntervals:
+    starts: Ragged[np.int32]
+    ends: Ragged[np.int32]
+    values: Ragged[np.float32]
+
+    def __getitem__(self, idx) -> RaggedIntervals:
+        out = RaggedIntervals(self.starts[idx], self.ends[idx], self.values[idx])  # type: ignore
+        return out
+
+    @property
+    def shape(self):
+        """Shape of the haplotypes and all annotations."""
+        return self.values.shape
+
+    def to_padded(
+        self, start: int, end: int, value: float
+    ) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.float32]]:
+        """Convert this RaggedIntervals to a tuple of rectilinear arrays by right-padding each entry with appropriate values.
+        The final axis will have the maximum length across all entries."""
+        starts = to_padded(self.starts, start)
+        ends = to_padded(self.ends, end)
+        values = to_padded(self.values, value)
+        return starts, ends, values
+
+    def reshape(self, shape: int | tuple[int, ...]) -> RaggedIntervals:
+        """Reshape the haplotypes and all annotations.
+
+        Parameters
+        ----------
+        shape
+            New shape for the haplotypes and all annotations. The total number of elements
+            must remain the same.
+        """
+        return RaggedIntervals(
+            self.starts.reshape(shape),
+            self.ends.reshape(shape),
+            self.values.reshape(shape),
+        )
+
+    def squeeze(self, axis: int | tuple[int, ...] | None = None) -> RaggedIntervals:
+        """Squeeze the haplotypes and all annotations along the specified axis.
+
+        Parameters
+        ----------
+        axis
+            Axis or axes to squeeze. If None, all axes of length 1 are squeezed.
+        """
+        return RaggedIntervals(
+            self.starts.squeeze(axis),  # type: ignore
+            self.ends.squeeze(axis),  # type: ignore
+            self.values.squeeze(axis),  # type: ignore
+        )
+
+    def to_fixed_shape(
+        self, shape: tuple[int, ...]
+    ) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.float32]]:
+        """If all entries in the ragged array have the same shape, convert to a rectilinear shape.
+
+        Parameters
+        ----------
+        shape
+            Shape to convert to, including the length axis. The total number of elements must remain the same.
+        """
+        starts = self.starts.data.reshape(shape)
+        ends = self.ends.data.reshape(shape)
+        values = self.values.data.reshape(shape)
+        return starts, ends, values
+
+    def to_packed(self) -> RaggedIntervals:
+        """Apply :func:`ak.to_packed` to all arrays."""
+        starts = ak.to_packed(self.starts)
+        ends = ak.to_packed(self.ends)
+        values = ak.to_packed(self.values)
+        return RaggedIntervals(starts, ends, values)
+
+    def to_nested_tensor_batch(
+        self, device: str | torch.device = "cpu"
+    ) -> list[RagItvBatch]:
+        out = []
+        n_tracks = cast(int, self.values.shape[1])
+        for t in range(n_tracks):
+            # (batch tracks ... ~itv) -> (batch ... ~itv)
+            starts = ak.to_packed(self.starts[:, t])
+            ends = ak.to_packed(self.ends[:, t])
+            values = ak.to_packed(self.values[:, t])
+
+            offsets = torch.from_numpy(values.offsets.astype(np.int32)).to(device)
+            max_len = int(values.lengths.max())
+
+            starts = torch.from_numpy(starts.data).to(device)
+            starts = nt_jag(starts, offsets)
+            ends = torch.from_numpy(ends.data).to(device)
+            ends = nt_jag(ends, offsets)
+            values = torch.from_numpy(values.data.astype(np.float32)).to(device)
+            values = nt_jag(values, offsets)
+
+            out.append(
+                RagItvBatch(starts=starts, ends=ends, values=values, max_seqlen=max_len)
+            )
+
+        return out
+
+    def prepend_pad_itv(
+        self, start: int = -1, end: int = -1, value: float = 0.0
+    ) -> RaggedIntervals:
+        """Prepend a pad interval so that every group is guaranteed to have at least 1 interval.
+
+        Parameters
+        ----------
+        start
+            The start position to use for the pad interval
+        end
+            The end position to use for the pad interval
+        value
+            The value to use for the pad interval
+        """
+        b, t, *_ = self.values.shape
+        b = cast(int, b)
+        t = cast(int, t)
+
+        pad_start = ak.from_numpy(
+            np.full((b, t, 1), start, np.int32), regulararray=True
+        )
+        # (b t ~v)
+        new_starts = ak.concatenate([pad_start, self.starts], axis=2)
+        pad_end = ak.from_numpy(np.full((b, t, 1), end, np.int32), regulararray=True)
+        # (b t ~v)
+        new_ends = ak.concatenate([pad_end, self.ends], axis=2)
+        pad_value = ak.from_numpy(
+            np.full((b, t, 1), value, np.float32), regulararray=True
+        )
+        # (b t ~v)
+        new_values = ak.concatenate([pad_value, self.values], axis=2)
+
+        return RaggedIntervals(Ragged(new_starts), Ragged(new_ends), Ragged(new_values))
+
+
+class RagItvBatch(TypedDict):
+    """Dictionary of nested tensors."""
+
+    starts: torch.Tensor
+    ends: torch.Tensor
+    values: torch.Tensor
+    max_seqlen: int
 
 
 class RaggedSeqs(
     Ragged[np.bytes_], Phantom, predicate=partial(is_rag_dtype, dtype=np.bytes_)
+): ...
+
+
+class RaggedTracks(
+    Ragged[np.float32], Phantom, predicate=partial(is_rag_dtype, dtype=np.float32)
 ): ...
 
 
@@ -52,7 +204,7 @@ class RaggedAnnotatedHaps:
         The final axis will have the maximum length across all entries."""
         haps = to_padded(self.haps, b"N")
         var_idxs = to_padded(self.var_idxs, -1)
-        ref_coords = to_padded(self.ref_coords, -1)
+        ref_coords = to_padded(self.ref_coords, np.iinfo(self.ref_coords.dtype).max)
         return AnnotatedHaps(haps, var_idxs, ref_coords)
 
     def reshape(self, shape: int | tuple[int, ...]) -> RaggedAnnotatedHaps:
@@ -84,7 +236,7 @@ class RaggedAnnotatedHaps:
             self.ref_coords.squeeze(axis),
         )
 
-    def to_fixed_shape(self, shape: tuple[int, ...]) -> AnnotatedHaps:
+    def to_numpy(self) -> AnnotatedHaps:
         """If all entries in the ragged array have the same shape, convert to a rectilinear shape.
 
         Parameters
@@ -92,135 +244,58 @@ class RaggedAnnotatedHaps:
         shape
             Shape to convert to, including the length axis. The total number of elements must remain the same.
         """
-        haps = self.haps.data.reshape(shape)
-        var_idxs = self.var_idxs.data.reshape(shape)
-        ref_coords = self.ref_coords.data.reshape(shape)
+        haps = self.haps.to_numpy()
+        var_idxs = self.var_idxs.to_numpy()
+        ref_coords = self.ref_coords.to_numpy()
         return AnnotatedHaps(haps, var_idxs, ref_coords)
 
 
 def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
     """Convert this Ragged array to a rectilinear array by right-padding each entry with a value.
-    The final axis will have the maximum length across all entries.
+    The ragged axis will be padded to have the maximum length across all entries.
 
     Parameters
     ----------
+    rag
+        Ragged array to pad.
     pad_value
         Value to pad the entries with.
 
     Returns
     -------
-        Padded array with shape :code:`(*self.shape, self.lengths.max())`.
+        Padded array.
     """
-    length = rag.lengths.max()
-    shape = (*rag.shape, length)
-    if rag.data.dtype.str == "|S1":
-        if isinstance(pad_value, (str, bytes)):
-            if len(pad_value) != 1:
-                raise ValueError(
-                    "Tried padding an S1 array with a `pad_value` that is multiple characters."
-                )
-            pad_value = np.uint8(ord(pad_value))
-        elif isinstance(pad_value, int):
-            if pad_value < 0 or pad_value > 255:
-                raise ValueError(
-                    "Tried padding an S1 array with an integer `pad_value` outside the ASCII range."
-                )
-            pad_value = np.uint8(pad_value)
-        else:
-            raise ValueError(
-                "Tried padding an S1 array with a `pad_value` that isn't a string, byte, or integer."
-            )
-        padded = np.empty((np.prod(shape[:-1]), shape[-1]), dtype=np.uint8)
-        pad_ragged(rag.data.view(np.uint8), rag.offsets, pad_value, padded)
-        padded = padded.view(rag.data.dtype).reshape(shape)
+    length = int(rag.lengths.max())
+    if is_rag_dtype(rag, np.bytes_):
+        rag = ak_str.rpad(rag, length, pad_value)
     else:
-        padded = np.empty((np.prod(shape[:-1]), shape[-1]), dtype=rag.data.dtype)
-        pad_ragged(rag.data, rag.offsets, pad_value, padded)
-        padded = padded.reshape(shape)
-
-    return padded
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def pad_ragged(
-    data: NDArray[DTYPE],
-    offsets: NDArray[np.integer],
-    pad_value: DTYPE,
-    out: NDArray[DTYPE],
-):
-    for i in nb.prange(len(offsets)):
-        if offsets.ndim == 1:
-            if i == len(offsets) - 1:
-                continue
-            start, end = offsets[i], offsets[i + 1]
-        else:
-            start, end = offsets[i]
-        entry_len = end - start
-        out[i, :entry_len] = data[start:end]
-        out[i, entry_len:] = pad_value
-    return out
+        rag = ak.pad_none(rag, length, clip=True)
+        rag = ak.fill_none(rag, pad_value)
+    arr = Ragged(rag).to_numpy()
+    return arr
 
 
-NUCLEOTIDES = b"ACGT"
-COMPLEMENTS = b"TGCA"
+_COMP = np.frombuffer(bytes.maketrans(b"ACGT", b"TGCA"), np.uint8)
 
 
-#! for whatever reason, this causes data corruption with parallel=True?!
-@nb.njit(nogil=True, cache=True)
-def _rc_helper(
-    data: NDArray[np.uint8], offsets: NDArray[OFFSET_TYPE], mask: NDArray[np.bool_]
-) -> NDArray[np.uint8]:
-    out = data.copy()
-    for i in nb.prange(len(offsets) - 1):
-        if offsets.ndim == 1:
-            if i == len(offsets) - 1:
-                continue
-            start, end = offsets[i], offsets[i + 1]
-        else:
-            start, end = offsets[i]
-        _data = data[start:end]
-        _out = out[start:end]
-        if mask[i]:
-            for nuc, comp in zip(NUCLEOTIDES, COMPLEMENTS):
-                _out[_data == nuc] = comp
-            _out[:] = _out[::-1]
-    return out
+@nb.vectorize(["u1(u1)"], nopython=True)
+def ufunc_comp_dna(seq: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    return _COMP[seq]
 
 
-def reverse_complement(
-    seqs: Ragged[np.bytes_], mask: NDArray[np.bool_]
-) -> Ragged[np.bytes_]:
-    # (b [p] ~l), (b)
-    if seqs.ndim == 2:
-        ploidy = seqs.shape[1]
-        mask = repeat(mask, "b -> (b p)", p=ploidy)
-    rc_seqs = _rc_helper(seqs.data.view(np.uint8), seqs.offsets, mask)
-    return Ragged.from_offsets(rc_seqs.view("S1"), seqs.shape, seqs.offsets)
+def _ak_comp_dna_helper(layout, **kwargs):
+    if layout.is_numpy:
+        return NumpyArray(
+            ufunc_comp_dna(layout.data),  # type: ignore
+            parameters=layout.parameters,
+        )
 
 
-#! for whatever reason, this causes data corruption with parallel=True?!
-@nb.njit(nogil=True, cache=True)
-def _reverse_helper(
-    data: NDArray, offsets: NDArray[OFFSET_TYPE], mask: NDArray[np.bool_]
-):
-    for i in nb.prange(len(offsets)):
-        if mask[i]:
-            if offsets.ndim == 1:
-                if i == len(offsets) - 1:
-                    continue
-                start, end = offsets[i], offsets[i + 1]
-            else:
-                start, end = offsets[i]
-            data[start:end] = np.flip(data[start:end])
+T = TypeVar("T", bound=ak.Array)
 
 
-def reverse(tracks: Ragged, mask: NDArray[np.bool_]):
-    """Reverses data along the ragged axis in-place."""
-    # (b t [p] ~l), (b)
-    if tracks.ndim == 2:
-        n_tracks = tracks.shape[1]
-        mask = repeat(mask, "b -> (b t)", t=n_tracks)
-    elif tracks.ndim == 3:
-        n_tracks, ploidy = tracks.shape[1:]
-        mask = repeat(mask, "b -> (b t p)", t=n_tracks, p=ploidy)
-    _reverse_helper(tracks.data, tracks.offsets, mask)
+def reverse_complement(arr: T) -> T:
+    og_type = type(arr)
+    arr = ak.to_packed(arr)
+    arr = ak_str.reverse(ak.transform(_ak_comp_dna_helper, arr))
+    return og_type(arr)

@@ -4,6 +4,7 @@
 dataset
 write
 geuvadis
+basenji2_eval
 faq
 api
 changelog

@@ -6,9 +6,10 @@ import numpy as np
 import polars as pl
 import pyBigWig
 from numpy.typing import ArrayLike, NDArray
+from seqpro.rag import Ragged
 
 from ._ragged import RaggedIntervals
-from ._types import INTERVAL_DTYPE, Reader
+from ._types import Reader
 from ._utils import get_rel_starts, lengths_to_offsets, normalize_contig_name
 from .genvarloader import count_intervals as bw_count_intervals
 from .genvarloader import intervals as bw_intervals
@@ -288,15 +289,9 @@ class BigWigs(Reader):
 
         coordinates = coordinates.astype(np.int32)
 
-        intervals = np.empty(len(coordinates), dtype=INTERVAL_DTYPE)
-        intervals["start"] = coordinates[:, 0]
-        intervals["end"] = coordinates[:, 1]
-        intervals["value"] = values
+        shape = (len(starts), len(samples), None)
+        starts = Ragged.from_offsets(coordinates[:, 0], shape, offsets)
+        ends = Ragged.from_offsets(coordinates[:, 1], shape, offsets)
+        values = Ragged.from_offsets(values, shape, offsets)
 
-        n_regions = len(starts)
-        n_samples = len(samples)
-        intervals = RaggedIntervals.from_offsets(
-            intervals, (n_regions, n_samples), offsets
-        )
-
-        return intervals
+        return RaggedIntervals(starts, ends, values)
