@@ -4,14 +4,17 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Callable, Generic, Literal, TypeVar, cast, overload
 
+import awkward as ak
 import numpy as np
 import polars as pl
 import seqpro as sp
 from attrs import define, evolve, field
+from awkward.contents import ListOffsetArray
+from awkward.index import Index64
 from genoray._utils import ContigNormalizer
 from loguru import logger
 from numpy.typing import NDArray
-from seqpro.rag import DTYPE, Ragged
+from seqpro.rag import DTYPE, Ragged, is_rag_dtype
 from typing_extensions import NoReturn, Self, assert_never
 
 from .._ragged import (
@@ -20,17 +23,16 @@ from .._ragged import (
     RaggedIntervals,
     RaggedSeqs,
     RaggedTracks,
-    is_rag_dtype,
     reverse_complement,
     to_padded,
 )
 from .._torch import TORCH_AVAILABLE, TorchDataset, get_dataloader
-from .._types import DTYPE, AnnotatedHaps, Idx, StrIdx
+from .._types import AnnotatedHaps, Idx, StrIdx
 from .._utils import (
     lengths_to_offsets,
     normalize_contig_name,
 )
-from ._indexing import DatasetIndexer, SpliceIndexer
+from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
 from ._rag_variants import RaggedVariants
 from ._reconstruct import Haps, HapsTracks, Ref, RefTracks, Tracks, TrackType
 from ._reference import Reference
@@ -633,18 +635,13 @@ class Dataset:
                     "Dataset has no genotypes to yield haplotypes/variants from."
                 )
 
-            case None, _, _, (Tracks() as t) | RefTracks(tracks=t) | HapsTracks(
-                tracks=t
-            ):
-                self = evolve(self, _recon=t)
-
             case "reference", _, _, Ref(reference=r) | Haps(reference=r):
                 if r is None:
                     raise ValueError(
                         "Dataset has no reference genome to reconstruct sequences from."
                     )
                 seqs = Ref(reference=r)
-                self = evolve(self, _recon=seqs)
+                return evolve(self, _recon=seqs)
             case "reference", Ref(reference=ref) | Haps(reference=ref), _, (
                 (Tracks() as tracks)
                 | RefTracks(tracks=tracks)
@@ -664,7 +661,7 @@ class Dataset:
                 )
 
             case "haplotypes", Haps() as haps, _, Ref() | Haps():
-                self = evolve(self, _recon=haps.to_kind(RaggedSeqs))
+                return evolve(self, _recon=haps.to_kind(RaggedSeqs))
             case "haplotypes", Haps() as haps, _, (
                 (Tracks() as tracks)
                 | RefTracks(tracks=tracks)
@@ -679,7 +676,7 @@ class Dataset:
                 )
 
             case "annotated", Haps() as haps, _, Ref() | Haps():
-                self = evolve(self, _recon=haps.to_kind(RaggedAnnotatedHaps))
+                return evolve(self, _recon=haps.to_kind(RaggedAnnotatedHaps))
             case "annotated", Haps() as haps, _, (
                 (Tracks() as tracks)
                 | RefTracks(tracks=tracks)
@@ -694,7 +691,7 @@ class Dataset:
                 )
 
             case "variants", Haps() as haps, _, Ref() | Haps():
-                self = evolve(self, _recon=haps.to_kind(RaggedVariants))
+                return evolve(self, _recon=haps.to_kind(RaggedVariants))
             case "variants", Haps() as haps, _, (
                 (Tracks() as tracks)
                 | RefTracks(tracks=tracks)
@@ -749,17 +746,11 @@ class Dataset:
                     "Dataset is set to only return tracks, so setting tracks to None would"
                     " result in a Dataset that cannot return anything."
                 )
-            case False, _, None, _:
-                return self
             case False, _, tr, ((Ref() | Haps()) as seqs) | RefTracks(
                 seqs=seqs
             ) | HapsTracks(haps=seqs):
                 tr = tr.with_tracks(None)
                 return evolve(self, _tracks=tr, _recon=seqs)
-            case t, _, None, _:
-                raise ValueError(
-                    "Can't set dataset to return tracks because it has none to begin with."
-                )
             case t, _, tr, (Ref() as seqs) | RefTracks(seqs=seqs):
                 tr = tr.with_tracks(t).to_kind(
                     _kind,  # type: ignore
@@ -1097,6 +1088,8 @@ class Dataset:
             raise ValueError(
                 "Cannot subset to regions by name because no region name was set."
             )
+
+        if self._sp_idxer is None:
             idxer = self._idxer.subset_to(regions=regions, samples=samples)
             return evolve(self, _idxer=idxer)
         else:
@@ -1538,32 +1531,18 @@ class Dataset:
         if self._sp_idxer is not None:
             recon, squeeze, out_reshape = self._getitem_spliced(idx, self._sp_idxer)
         else:
-            if isinstance(idx, tuple):
-                r_idx = idx[0]
-            else:
-                r_idx = idx
-
-            if isinstance(r_idx, str) or (
-                isinstance(r_idx, Sequence) and isinstance(next(collapse(r_idx)), str)
-            ):
-                raise ValueError(
-                    "Unspliced datasets do not support string indexing over regions. Please use integer indexing."
-                )
-
-            idx = cast(Idx | tuple[Idx] | tuple[Idx, StrIdx], idx)
-
             recon, squeeze, out_reshape = self._getitem_unspliced(idx)
 
         if self.output_length == "variable":
-            recon = cast(
-                tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
+            recon = tuple(
+                r if isinstance(r, (RaggedVariants, RaggedIntervals)) else self._pad(r)
+                for r in recon
             )
-            recon = tuple(_pad(r) for r in recon)
         elif isinstance(self.output_length, int):
-            recon = cast(
-                tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
+            recon = tuple(
+                r if isinstance(r, (RaggedVariants, RaggedIntervals)) else r.to_numpy()
+                for r in recon
             )
-            recon = tuple(_fix_len(r, self.output_length) for r in recon)
 
         if out_reshape is not None:
             recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)
@@ -1578,7 +1557,7 @@ class Dataset:
         return recon
 
     def _getitem_unspliced(
-        self, idx: Idx | tuple[Idx] | tuple[Idx, Idx | str | Sequence[str]]
+        self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]
     ) -> tuple[
         tuple[
             Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps | RaggedVariants, ...
@@ -1609,28 +1588,81 @@ class Dataset:
             deterministic=self.deterministic,
         )
 
-        if isinstance(recon, tuple):
-            unlist = False
-        else:
-            unlist = True
+        if not isinstance(recon, tuple):
             recon = (recon,)
 
         if self.rc_neg:
             to_rc: NDArray[np.bool_] = self._full_regions[r_idx, 3] == -1
             recon = tuple(self._rc(r, to_rc) for r in recon)
 
-        if self.output_length == "variable":
-            recon = tuple(
-                r if isinstance(r, (RaggedVariants, RaggedIntervals)) else self._pad(r)
-                for r in recon
-            )
-        elif isinstance(self.output_length, int):
-            recon = tuple(
-                r if isinstance(r, (RaggedVariants, RaggedIntervals)) else r.to_numpy()
-                for r in recon
+        return recon, squeeze, out_reshape
+
+    def _getitem_spliced(
+        self,
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
+        splice_idxer: SpliceIndexer,
+    ) -> tuple[
+        tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...],
+        bool,
+        tuple[int, ...] | None,
+    ]:
+        if isinstance(self.output_length, int):
+            raise RuntimeError(
+                "In general, splicing cannot be done with fixed length data because even if the length of each region's data"
+                " is fixed/constant, the number of elements in each spliced element is not. Thus, the final length of the"
+                " spliced elements will be variable."
             )
 
-        return (recon, squeeze, out_reshape)
+        assert self.sequence_type != "variants"
+        assert not isinstance(self.output_length, int)
+        assert self.jitter == 0
+        assert self.deterministic
+
+        # TODO: really need to assert no jitter and deterministic?
+        # * In theory, this still "works" with jitter or non-determinism, but why would anyone want this? Would they want a different alg here?
+        # * Potential issues:
+        # * Each each component of the spliced output will have different jitter
+        # * For non-determinism, each component will have different shifts & different unphased haplotypes chosen
+        if self.jitter > 0:
+            raise RuntimeError(
+                "Jitter is not supported with splicing. Please set jitter to 0."
+            )
+
+        if not self.deterministic:
+            raise RuntimeError(
+                "Non-deterministic algorithms are not supported with splicing. Please set deterministic to True."
+            )
+
+        inner_ds = self.with_len("ragged")
+        ds_idx, squeeze, out_reshape, offsets = splice_idxer.parse_idx(idx)
+        r_idx, _ = np.unravel_index(ds_idx, self._idxer.full_shape)
+        regions = self._full_regions[r_idx]
+
+        recon = inner_ds._recon(
+            idx=ds_idx,
+            r_idx=r_idx,
+            regions=regions,
+            output_length="ragged",
+            jitter=self.jitter,
+            rng=self._rng,
+            deterministic=self.deterministic,
+        )
+
+        if not isinstance(recon, tuple):
+            recon = (recon,)
+
+        recon = cast(
+            tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
+        )
+
+        if self.rc_neg:
+            # (b)
+            to_rc: NDArray[np.bool_] = regions[:, 3] == -1
+            recon = tuple(self._rc(r, to_rc) for r in recon)
+
+        recon = tuple(_cat_length(r, offsets) for r in recon)
+
+        return recon, squeeze, out_reshape
 
     @overload
     def _rc(self, rag: Ragged[DTYPE], to_rc: NDArray[np.bool_]) -> Ragged[DTYPE]: ...
@@ -1666,45 +1698,22 @@ class Dataset:
             assert_never(rag)
         return rag
 
-
-@overload
-def _pad(rag: Ragged[DTYPE]) -> NDArray[DTYPE]: ...
-@overload
-def _pad(rag: RaggedAnnotatedHaps) -> AnnotatedHaps: ...
-def _pad(rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
-    if isinstance(rag, Ragged):
-        if is_rag_dtype(rag, np.bytes_):
-            return to_padded(rag, b"N")
-        elif is_rag_dtype(rag, np.float32):
-            return to_padded(rag, 0)
+    @overload
+    def _pad(self, rag: Ragged[DTYPE]) -> NDArray[DTYPE]: ...
+    @overload
+    def _pad(self, rag: RaggedAnnotatedHaps) -> AnnotatedHaps: ...
+    def _pad(self, rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
+        if isinstance(rag, Ragged):
+            if is_rag_dtype(rag, np.bytes_):
+                return to_padded(rag, b"N")
+            elif is_rag_dtype(rag, np.float32):
+                return to_padded(rag, 0)
+            else:
+                raise ValueError(f"Unsupported pad dtype: {rag.data.dtype}")
+        elif isinstance(rag, RaggedAnnotatedHaps):
+            return rag.to_padded()
         else:
-            raise ValueError(f"Unsupported pad dtype: {rag.data.dtype}")
-    elif isinstance(rag, RaggedAnnotatedHaps):
-        return rag.to_padded()
-    else:
-        assert_never(rag)
-
-
-@overload
-def _fix_len(
-    rag: Ragged[DTYPE], output_length: Literal["ragged", "variable"] | int
-) -> NDArray[DTYPE]: ...
-@overload
-def _fix_len(
-    rag: RaggedAnnotatedHaps, output_length: Literal["ragged", "variable"] | int
-) -> AnnotatedHaps: ...
-def _fix_len(
-    rag: Ragged | RaggedAnnotatedHaps,
-    output_length: Literal["ragged", "variable"] | int,
-) -> NDArray | AnnotatedHaps:
-    assert isinstance(output_length, int)
-    if isinstance(rag, Ragged):
-        # (b p) or (b)
-        return rag.data.reshape((*rag.shape, output_length))
-    elif isinstance(rag, RaggedAnnotatedHaps):
-        return rag.to_fixed_shape((*rag.shape, output_length))
-    else:
-        assert_never(rag)
+            assert_never(rag)
 
 
 @overload
@@ -1727,11 +1736,11 @@ def _cat_length(
             grouped = ak.Array(
                 ListOffsetArray(Index64(offsets), rag.to_awkward().layout)
             )
-            cat = Ragged.from_awkward(
-                ak.concatenate(
+            cat = Ragged(
+                ak.concatenate(  # type: ignore
                     [
                         ak.flatten(grouped[:, :, i], -1)[:, None]  # (g 1 ~l)
-                        for i in range(rag.shape[1])
+                        for i in range(rag.shape[1])  # type: ignore
                     ],
                     1,
                 )
@@ -1781,6 +1790,58 @@ def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedInt
     itvs = RaggedIntervals(starts, ends, values)
 
     return itvs
+
+
+def _parse_splice_info(
+    splice_info: str | tuple[str, str],
+    full_bed: pl.DataFrame,
+    idxer: DatasetIndexer,
+):
+    """Parse splice info into a SpliceIndexer.
+
+    Parameters
+    ----------
+    splice_info
+        The splice info to parse. Can be a string, a tuple of strings, or a dictionary.
+    regions
+        The regions to parse the splice info from.
+    idxer
+        The idxer to use to parse the splice info.
+    """
+    if isinstance(splice_info, str):
+        sp_bed = (
+            full_bed.rename({splice_info: "splice_id"})
+            .with_row_index()
+            .group_by("splice_id", maintain_order=True)
+            .agg(pl.all())
+        )
+        names = sp_bed["splice_id"].to_list()
+        lengths = sp_bed["index"].list.len().to_numpy()
+        splice_map = Ragged.from_lengths(
+            sp_bed["index"].explode().to_numpy(), lengths
+        ).to_awkward()
+    elif isinstance(splice_info, tuple):
+        if len(splice_info) != 2:
+            raise ValueError(
+                "Splice info tuple must be of length 2, corresponding to columns names for splice IDs and element ordering."
+            )
+        sp_bed = (
+            full_bed.rename({splice_info[0]: "splice_id"})
+            .with_row_index()
+            .group_by("splice_id", maintain_order=True)
+            .agg(pl.all().sort_by(splice_info[1]))
+        )
+        names = sp_bed["splice_id"].to_list()
+        lengths = sp_bed["index"].list.len().to_numpy()
+        splice_map = Ragged.from_lengths(
+            sp_bed["index"].explode().to_numpy(), lengths
+        ).to_awkward()
+    else:
+        assert_never(splice_info)
+
+    splice_map = cast(ak.Array, splice_map)
+    sp_idxer = SpliceIndexer._init(names, splice_map, idxer)
+    return sp_idxer, sp_bed
 
 
 SEQ = TypeVar("SEQ", NDArray[np.bytes_], AnnotatedHaps, RaggedVariants)

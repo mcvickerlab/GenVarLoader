@@ -222,6 +222,7 @@ class Haps(Reconstructor[_H]):
         version: Version | None,
         min_af: float | None = None,
         max_af: float | None = None,
+        filter: Literal["exonic"] | None = None,
     ) -> Haps[RaggedVariants]:
         svar_meta_path = path / "genotypes" / "svar_meta.json"
         dosages = None
@@ -278,7 +279,7 @@ class Haps(Reconstructor[_H]):
             genotypes=genotypes,
             dosages=dosages,
             kind=RaggedVariants,
-            filter=None,
+            filter=filter,
             min_af=min_af,
             max_af=max_af,
         )
