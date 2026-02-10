@@ -1545,11 +1545,11 @@ class Dataset:
             )
 
         if out_reshape is not None:
-            recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)
+            recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)  # type: ignore
 
         if squeeze:
             # (1 [p] l) -> ([p] l)
-            recon = tuple(o.squeeze(0) for o in recon)
+            recon = tuple(o.squeeze(0) for o in recon)  # type: ignore
 
         if len(recon) == 1:
             recon = recon[0]
@@ -1595,7 +1595,7 @@ class Dataset:
             to_rc: NDArray[np.bool_] = self._full_regions[r_idx, 3] == -1
             recon = tuple(self._rc(r, to_rc) for r in recon)
 
-        return recon, squeeze, out_reshape
+        return recon, squeeze, out_reshape  # type: ignore
 
     def _getitem_spliced(
         self,
@@ -1727,15 +1727,14 @@ def _cat_length(
 ) -> Ragged | RaggedAnnotatedHaps:
     """Concatenate the lengths of the ragged data."""
     if isinstance(rag, Ragged):
-        if rag.ndim == 1 or rag.shape[1:] == (1,) * (
+        if rag.ndim == 2 or rag.shape[1:] == (1,) * (
             rag.ndim - 1
         ):  # (b [1] [1] ~l) => layout is correct
             new_lengths = np.add.reduceat(rag.lengths, offsets[:-1], 0)
             cat = Ragged.from_lengths(rag.data, new_lengths)
-        elif rag.ndim == 2:  # (b p ~l) or (b t ~l)
-            grouped = ak.Array(
-                ListOffsetArray(Index64(offsets), rag.to_awkward().layout)
-            )
+        elif rag.ndim == 3:
+            # (b p ~l) or (b t ~l)
+            grouped = ak.Array(ListOffsetArray(Index64(offsets), rag.to_ak().layout))
             cat = Ragged(
                 ak.concatenate(  # type: ignore
                     [
@@ -1745,7 +1744,7 @@ def _cat_length(
                     1,
                 )
             )
-        elif rag.ndim == 3:  # hap tracks: (b t p ~l)
+        elif rag.ndim == 4:  # hap tracks: (b t p ~l)
             raise NotImplementedError("Splicing haplotype tracks.")
         else:
             raise RuntimeError("Should never see a 4+ dim ragged array.")
@@ -1819,7 +1818,7 @@ def _parse_splice_info(
         lengths = sp_bed["index"].list.len().to_numpy()
         splice_map = Ragged.from_lengths(
             sp_bed["index"].explode().to_numpy(), lengths
-        ).to_awkward()
+        ).to_ak()
     elif isinstance(splice_info, tuple):
         if len(splice_info) != 2:
             raise ValueError(
@@ -1835,7 +1834,7 @@ def _parse_splice_info(
         lengths = sp_bed["index"].list.len().to_numpy()
         splice_map = Ragged.from_lengths(
             sp_bed["index"].explode().to_numpy(), lengths
-        ).to_awkward()
+        ).to_ak()
     else:
         assert_never(splice_info)
 

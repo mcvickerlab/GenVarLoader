@@ -108,7 +108,7 @@ def bed_to_regions(bed: pl.DataFrame, contigs: Sequence[str]) -> NDArray[np.int3
         pl.col("chromStart", "chromEnd").cast(pl.Int32),
     ]
 
-    if bed.schema.get("strand", None) == pl.Utf8:
+    if bed.schema.get("strand", None) in (pl.Utf8, pl.Categorical):
         cols.append(
             pl.col("strand").replace_strict({"+": 1, "-": -1}, return_dtype=pl.Int32)
         )

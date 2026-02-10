@@ -72,13 +72,17 @@ class _Variants:
         """
         path = Path(path).resolve()
         variants = pl.read_ipc(path, memory_map=False)
+
         if variants.schema["ALT"] == pl.List(pl.Utf8):
             ilen = ILEN
         else:
             ilen = pl.col("ALT").str.len_bytes().cast(pl.Int32) - pl.col(
                 "REF"
             ).str.len_bytes().cast(pl.Int32)
-        variants = variants.with_columns(ILEN=ilen)
+
+        if "ILEN" not in variants:
+            variants = variants.with_columns(ILEN=ilen)
+
         is_list_type = [
             col for col in ("ALT", "ILEN") if variants[col].dtype == pl.List
         ]
@@ -322,7 +326,9 @@ class Haps(Reconstructor[_H]):
             keep_offsets=keep_offsets,
         )
 
-        return hap_ilens.reshape(-1, self.genotypes.shape[-1])
+        # genotypes are (r, s, p, ~v)
+        ploidy = cast(int, self.genotypes.shape[-2])
+        return hap_ilens.reshape(-1, ploidy)
 
     def to_kind(self, kind: type[_NewH]) -> Haps[_NewH]:
         if kind != RaggedVariants and self.reference is None:
@@ -428,7 +434,7 @@ class Haps(Reconstructor[_H]):
         else:
             out_lengths = np.full((batch_size, ploidy), output_length, dtype=np.int32)
         # (b*p+1)
-        out_offsets = lengths_to_offsets(out_lengths)
+        out_offsets = lengths_to_offsets(out_lengths, OFFSET_TYPE)
 
         # (b p l), (b p l), (b p l)
         if issubclass(self.kind, RaggedSeqs):
@@ -487,8 +493,8 @@ class Haps(Reconstructor[_H]):
     def _get_variants(
         self,
         idx: NDArray[np.integer],
-        regions: NDArray[np.integer],
-        shifts: NDArray[np.integer],
+        regions: NDArray[np.integer] | None = None,
+        shifts: NDArray[np.integer] | None = None,
         keep: NDArray[np.bool_] | None = None,
         keep_offsets: NDArray[np.integer] | None = None,
     ) -> RaggedVariants:
@@ -507,11 +513,11 @@ class Haps(Reconstructor[_H]):
                 keep &= geno_afs >= self.min_af
             if self.max_af is not None:
                 keep &= geno_afs <= self.max_af
-            keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
-            genos = SparseGenotypes(ak.to_packed(ak.to_regular(genos[keep], 1)))
+            _keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
+            genos = SparseGenotypes(ak.to_packed(ak.to_regular(genos[_keep], 1)))
             v_idxs = genos.data
         else:
-            keep = None
+            _keep = None
 
         fields = {}
 
@@ -530,8 +536,8 @@ class Haps(Reconstructor[_H]):
         if self.dosages is not None:
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
             dosages = self.dosages[r, s]
-            if keep is not None:
-                dosages = ak.to_regular(dosages[keep], 1)  # type: ignore
+            if _keep is not None:
+                dosages = ak.to_regular(dosages[_keep], 1)  # type: ignore
             fields["dosage"] = Ragged(ak.to_packed(dosages))
 
         fields.update(
