@@ -33,7 +33,11 @@ from .._ragged import (
 )
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
-from ._genotypes import get_diffs_sparse, reconstruct_haplotypes_from_sparse
+from ._genotypes import (
+    choose_exonic_variants,
+    get_diffs_sparse,
+    reconstruct_haplotypes_from_sparse,
+)
 from ._indexing import DatasetIndexer
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._rag_variants import RaggedVariants
@@ -68,13 +72,17 @@ class _Variants:
         """
         path = Path(path).resolve()
         variants = pl.read_ipc(path, memory_map=False)
+
         if variants.schema["ALT"] == pl.List(pl.Utf8):
             ilen = ILEN
         else:
             ilen = pl.col("ALT").str.len_bytes().cast(pl.Int32) - pl.col(
                 "REF"
             ).str.len_bytes().cast(pl.Int32)
-        variants = variants.with_columns(ILEN=ilen)
+
+        if "ILEN" not in variants:
+            variants = variants.with_columns(ILEN=ilen)
+
         is_list_type = [
             col for col in ("ALT", "ILEN") if variants[col].dtype == pl.List
         ]
@@ -181,6 +189,7 @@ class Haps(Reconstructor[_H]):
     """Shape: (regions, samples, ploidy). The genotypes in the dataset. This is memory mapped."""
     dosages: SparseDosages | None
     kind: type[_H]
+    filter: Literal["exonic"] | None
     n_variants: NDArray[np.int32] = field(init=False)
     """Shape: (regions, samples, ploidy). The number of variants in the dataset."""
     min_af: float | None
@@ -217,6 +226,7 @@ class Haps(Reconstructor[_H]):
         version: Version | None,
         min_af: float | None = None,
         max_af: float | None = None,
+        filter: Literal["exonic"] | None = None,
     ) -> Haps[RaggedVariants]:
         svar_meta_path = path / "genotypes" / "svar_meta.json"
         dosages = None
@@ -273,9 +283,52 @@ class Haps(Reconstructor[_H]):
             genotypes=genotypes,
             dosages=dosages,
             kind=RaggedVariants,
+            filter=filter,
             min_af=min_af,
             max_af=max_af,
         )
+
+    def _haplotype_ilens(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.integer],
+        deterministic: bool,
+        keep: NDArray[np.bool_] | None = None,
+        keep_offsets: NDArray[np.integer] | None = None,
+    ) -> NDArray[np.int32]:
+        """`idx` must be 1D."""
+        # (b p)
+        geno_offset_idxs = self._get_geno_offset_idx(idx, self.genotypes)
+
+        if self.filter == "exonic":
+            keep, keep_offsets = choose_exonic_variants(
+                starts=regions[:, 1],
+                ends=regions[:, 2],
+                geno_offset_idxs=geno_offset_idxs,
+                geno_v_idxs=self.genotypes.data,
+                geno_offsets=self.genotypes.offsets,
+                v_starts=self.variants.start,
+                ilens=self.variants.ilen,
+            )
+        else:
+            keep, keep_offsets = None, None
+
+        # (r s p)
+        hap_ilens = get_diffs_sparse(
+            geno_offset_idxs=geno_offset_idxs,
+            geno_v_idxs=self.genotypes.data,
+            geno_offsets=self.genotypes.offsets,
+            ilens=self.variants.ilen,
+            q_starts=regions[:, 1],
+            q_ends=regions[:, 2],
+            v_starts=self.variants.start,
+            keep=keep,
+            keep_offsets=keep_offsets,
+        )
+
+        # genotypes are (r, s, p, ~v)
+        ploidy = cast(int, self.genotypes.shape[-2])
+        return hap_ilens.reshape(-1, ploidy)
 
     def to_kind(self, kind: type[_NewH]) -> Haps[_NewH]:
         if kind != RaggedVariants and self.reference is None:
@@ -311,7 +364,7 @@ class Haps(Reconstructor[_H]):
     def get_haps_and_shifts(
         self,
         idx: NDArray[np.integer],
-        regions: NDArray[np.int32],
+        regions: NDArray[np.integer],
         output_length: Literal["ragged", "variable"] | int,
         rng: np.random.Generator,
         deterministic: bool,
@@ -339,8 +392,24 @@ class Haps(Reconstructor[_H]):
             keep = None
             keep_offsets = None
 
+        if self.filter == "exonic":
+            keep, keep_offsets = choose_exonic_variants(
+                starts=regions[:, 1],
+                ends=regions[:, 2],
+                geno_offset_idxs=geno_offset_idx,
+                geno_v_idxs=self.genotypes.data,
+                geno_offsets=self.genotypes.offsets,
+                v_starts=self.variants.start,
+                ilens=self.variants.ilen,
+            )
+        else:
+            keep = None
+            keep_offsets = None
+
         # (b p)
-        diffs = self._haplotype_ilens(idx, regions, deterministic, keep, keep_offsets)
+        diffs = self._haplotype_ilens(
+            idx, regions, deterministic, keep=keep, keep_offsets=keep_offsets
+        )
         hap_lengths = lengths[:, None] + diffs
 
         if deterministic or isinstance(output_length, str):
@@ -365,7 +434,7 @@ class Haps(Reconstructor[_H]):
         else:
             out_lengths = np.full((batch_size, ploidy), output_length, dtype=np.int32)
         # (b*p+1)
-        out_offsets = lengths_to_offsets(out_lengths)
+        out_offsets = lengths_to_offsets(out_lengths, OFFSET_TYPE)
 
         # (b p l), (b p l), (b p l)
         if issubclass(self.kind, RaggedSeqs):
@@ -390,7 +459,13 @@ class Haps(Reconstructor[_H]):
             )
             out = RaggedAnnotatedHaps(haps, maybe_annot_v_idx, maybe_annot_pos)
         elif issubclass(self.kind, RaggedVariants):
-            out = self._get_variants(idx=idx, regions=regions, shifts=shifts)
+            out = self._get_variants(
+                idx=idx,
+                regions=regions,
+                shifts=shifts,
+                keep=keep,
+                keep_offsets=keep_offsets,
+            )
         else:
             assert_never(self.kind)
 
@@ -400,34 +475,9 @@ class Haps(Reconstructor[_H]):
             shifts,
             diffs,
             hap_lengths,
-            None,
-            None,
+            keep,
+            keep_offsets,
         )
-
-    def _haplotype_ilens(
-        self,
-        idx: NDArray[np.integer],
-        regions: NDArray[np.int32],
-        deterministic: bool,
-        keep: NDArray[np.bool_] | None = None,
-        keep_offsets: NDArray[np.int64] | None = None,
-    ) -> NDArray[np.int32]:
-        """`idx` must be 1D."""
-        # (b p)
-        geno_offset_idxs = self._get_geno_offset_idx(idx, self.genotypes)
-
-        # (r s p)
-        hap_ilens = get_diffs_sparse(
-            geno_offset_idxs=geno_offset_idxs,
-            geno_v_idxs=self.genotypes.data,
-            geno_offsets=self.genotypes.offsets,
-            ilens=self.variants.ilen,
-            q_starts=regions[:, 1],
-            q_ends=regions[:, 2],
-            v_starts=self.variants.start,
-        )
-
-        return hap_ilens.reshape(-1, self.genotypes.shape[-2])  # type: ignore
 
     @staticmethod
     def _get_geno_offset_idx(
@@ -443,8 +493,10 @@ class Haps(Reconstructor[_H]):
     def _get_variants(
         self,
         idx: NDArray[np.integer],
-        regions: NDArray[np.int32] | None,
-        shifts: NDArray[np.int32] | None,
+        regions: NDArray[np.integer] | None = None,
+        shifts: NDArray[np.integer] | None = None,
+        keep: NDArray[np.bool_] | None = None,
+        keep_offsets: NDArray[np.integer] | None = None,
     ) -> RaggedVariants:
         # TODO: maybe filter variants for region, shifts?
         r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore
@@ -461,11 +513,11 @@ class Haps(Reconstructor[_H]):
                 keep &= geno_afs >= self.min_af
             if self.max_af is not None:
                 keep &= geno_afs <= self.max_af
-            keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
-            genos = SparseGenotypes(ak.to_packed(ak.to_regular(genos[keep], 1)))
+            _keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
+            genos = SparseGenotypes(ak.to_packed(ak.to_regular(genos[_keep], 1)))
             v_idxs = genos.data
         else:
-            keep = None
+            _keep = None
 
         fields = {}
 
@@ -484,8 +536,8 @@ class Haps(Reconstructor[_H]):
         if self.dosages is not None:
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
             dosages = self.dosages[r, s]
-            if keep is not None:
-                dosages = ak.to_regular(dosages[keep], 1)  # type: ignore
+            if _keep is not None:
+                dosages = ak.to_regular(dosages[_keep], 1)  # type: ignore
             fields["dosage"] = Ragged(ak.to_packed(dosages))
 
         fields.update(
@@ -529,10 +581,10 @@ class Haps(Reconstructor[_H]):
     @overload
     def _get_haplotypes(
         self,
-        geno_offset_idx: NDArray[np.intp],
-        regions: NDArray[np.int32],
-        out_offsets: NDArray[np.int64],
-        shifts: NDArray[np.int32],
+        geno_offset_idx: NDArray[np.integer],
+        regions: NDArray[np.integer],
+        out_offsets: NDArray[OFFSET_TYPE],
+        shifts: NDArray[np.integer],
         keep: NDArray[np.bool_] | None,
         keep_offsets: NDArray[OFFSET_TYPE] | None,
         annotate: Literal[False],
@@ -540,10 +592,10 @@ class Haps(Reconstructor[_H]):
     @overload
     def _get_haplotypes(
         self,
-        geno_offset_idx: NDArray[np.intp],
-        regions: NDArray[np.int32],
-        out_offsets: NDArray[np.int64],
-        shifts: NDArray[np.int32],
+        geno_offset_idx: NDArray[np.integer],
+        regions: NDArray[np.integer],
+        out_offsets: NDArray[OFFSET_TYPE],
+        shifts: NDArray[np.integer],
         keep: NDArray[np.bool_] | None,
         keep_offsets: NDArray[OFFSET_TYPE] | None,
         annotate: Literal[True],
@@ -551,10 +603,10 @@ class Haps(Reconstructor[_H]):
 
     def _get_haplotypes(
         self,
-        geno_offset_idx: NDArray[np.intp],
-        regions: NDArray[np.int32],
-        out_offsets: NDArray[np.int64],
-        shifts: NDArray[np.int32],
+        geno_offset_idx: NDArray[np.integer],
+        regions: NDArray[np.integer],
+        out_offsets: NDArray[OFFSET_TYPE],
+        shifts: NDArray[np.integer],
         keep: NDArray[np.bool_] | None,
         keep_offsets: NDArray[OFFSET_TYPE] | None,
         annotate: bool,

@@ -1,6 +1,7 @@
 import numba as nb
 import numpy as np
 from numpy.typing import NDArray
+from seqpro.rag import OFFSET_TYPE
 
 from .._utils import lengths_to_offsets
 
@@ -119,9 +120,9 @@ def reconstruct_haplotypes_from_sparse(
     ref_offsets: NDArray[np.integer],
     pad_char: int,
     keep: NDArray[np.bool_] | None = None,
-    keep_offsets: NDArray[np.int64] | None = None,
-    annot_v_idxs: NDArray[np.int32] | None = None,
-    annot_ref_pos: NDArray[np.int32] | None = None,
+    keep_offsets: NDArray[np.integer] | None = None,
+    annot_v_idxs: NDArray[np.integer] | None = None,
+    annot_ref_pos: NDArray[np.integer] | None = None,
 ):
     """Reconstruct haplotypes from reference sequence and variants.
 
@@ -406,6 +407,106 @@ def reconstruct_haplotype_from_sparse(
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
+def choose_exonic_variants(
+    starts: NDArray[np.integer],
+    ends: NDArray[np.integer],
+    geno_offset_idxs: NDArray[np.integer],
+    geno_v_idxs: NDArray[np.integer],
+    geno_offsets: NDArray[np.integer],
+    v_starts: NDArray[np.integer],
+    ilens: NDArray[np.integer],
+) -> tuple[NDArray[np.bool_], NDArray[OFFSET_TYPE]]:
+    """Mark variants to keep for each haplotype.
+
+    Parameters
+    ----------
+    starts : NDArray[np.int32]
+        Shape = (n_regions) Start positions for each region.
+    ends : NDArray[np.int32]
+        Shape = (n_regions) Ends for each region.
+    geno_offset_idxs : NDArray[np.intp]
+        Shape = (n_regions, ploidy) Indices for each region into offsets.
+    offsets : NDArray[np.int64]
+        Shape = (total_variants + 1) Offsets into sparse genotypes.
+    sparse_genos : NDArray[np.int32]
+        Shape = (total_variants) Sparse genotypes i.e. variant indices for ALT genotypes.
+    positions : NDArray[np.int32]
+        Shape = (total_variants) Positions of variants.
+    sizes : NDArray[np.int32]
+        Shape = (total_variants) Sizes of variants.
+    deterministic : bool
+        Whether to deterministically assign variants to groups
+    """
+    n_regions, ploidy = geno_offset_idxs.shape
+
+    lengths = np.empty((n_regions, ploidy), np.int64)
+    for query in nb.prange(n_regions):
+        for hap in range(ploidy):
+            o_idx = geno_offset_idxs[query, hap]
+            if geno_offsets.ndim == 1:
+                o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
+            else:
+                o_s, o_e = geno_offsets[o_idx]
+            lengths[query, hap] = o_e - o_s
+    keep_offsets = np.empty(n_regions * ploidy + 1, OFFSET_TYPE)
+    keep_offsets[0] = 0
+    keep_offsets[1:] = lengths.cumsum()
+
+    n_variants = keep_offsets[-1]
+    keep = np.empty(n_variants, np.bool_)
+
+    for query in nb.prange(n_regions):
+        ref_start: int = starts[query]
+        ref_end: int = ends[query]
+        for hap in nb.prange(ploidy):
+            o_idx = geno_offset_idxs[query, hap]
+            o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
+            qh_genos = geno_v_idxs[o_s:o_e]
+
+            k_idx = query * ploidy + hap
+            k_s, k_e = keep_offsets[k_idx], keep_offsets[k_idx + 1]
+            qh_keep = keep[k_s:k_e]
+
+            _choose_exonic_variants(
+                query_start=ref_start,
+                query_end=ref_end,
+                variant_idxs=qh_genos,
+                positions=v_starts,
+                sizes=ilens,
+                keep=qh_keep,
+            )
+
+    return keep, keep_offsets
+
+
+@nb.njit(nogil=True, cache=True)
+def _choose_exonic_variants(
+    query_start: int,
+    query_end: int,
+    variant_idxs: NDArray[np.integer],  # (v)
+    positions: NDArray[np.integer],  # (total variants)
+    sizes: NDArray[np.integer],  # (total variants)
+    keep: NDArray[np.bool_],  # (v)
+):
+    """Create a mask for variants that are fully contained within the query interval, which is
+    assumed to correspond to the exon boundaries."""
+    # no variants
+    if len(variant_idxs) == 0:
+        return
+
+    for v in range(len(variant_idxs)):
+        v_idx: int = variant_idxs[v]
+        v_pos = positions[v_idx]
+        # +1 for atomized
+        v_ref_end = v_pos - min(0, sizes[v_idx]) + 1
+
+        if v_pos >= query_start and v_ref_end <= query_end:
+            keep[v] = True
+        else:
+            keep[v] = False
+
+
+@nb.njit(parallel=True, nogil=True, cache=True)
 def filter_af(
     geno_offset_idxs: NDArray[np.integer],
     geno_offsets: NDArray[np.integer],
@@ -413,18 +514,18 @@ def filter_af(
     afs: NDArray[np.number],
     min_af: float | None,
     max_af: float | None,
-) -> tuple[NDArray[np.bool_], NDArray[np.int64]]:
+) -> tuple[NDArray[np.bool_], NDArray[OFFSET_TYPE]]:
     """Filter variants based on allele frequency, marking them to keep or not."""
 
     batch_size, ploidy = geno_offset_idxs.shape
 
     if geno_offsets.ndim == 1:
-        keep_offsets = geno_offsets
+        keep_offsets = geno_offsets.astype(OFFSET_TYPE)
         n_variants = geno_offsets[-1]
     else:
         # (2, n_slices)
         n_vars_per_slice = geno_offsets[1] - geno_offsets[0]
-        keep_offsets = lengths_to_offsets(n_vars_per_slice)
+        keep_offsets = lengths_to_offsets(n_vars_per_slice, OFFSET_TYPE)
         n_variants = n_vars_per_slice.sum()
 
     keep = np.full(n_variants, True, np.bool_)

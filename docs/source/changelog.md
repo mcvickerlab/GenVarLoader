@@ -940,6 +940,15 @@
 
 ## v0.9.0 (2025-03-06)
 
+This is a breaking change for GVL. Users should view the ["What's a `gvl.Dataset`?"](https://genvarloader.readthedocs.io/en/latest/dataset.html) page in the documentation for details, but major breaks include:
+
+- removed the `length` argument from `gvl.write()`. Regions/BED files are now used as-is. If you want uniform length regions centered on inputs/peaks as before, preprocess your BED file with `gvl.with_length`.
+- changed `Dataset.output_length` from a property to a dynamic setting with behavior describe in the "What's a gvl.Dataset?" page.
+- changed track output shape to have a track axis.
+- Datasets are now deterministic by default.
+
+As a result of these changes, GVL seamlessly supports ragged length output and also paves the way for on-the-fly splicing. Since many changes were made, I wouldn't be surprised if a few bugs crop up despite my best efforts -- please leave issues if so!
+
 ### Feat
 
 - option to return ragged data from gvl.Dataset. output_length is set dynamically. fix: hap reconstruction matches bcftools. change default for Dataset.deterministic from False to True. change track output from a list of arrays to having a track dimension i.e. from shape (b [p] l) to (b t [p] l). docs: add dataset.md, faq.md and overhaul geuvadis.ipynb to be simpler and reflect changes in API.

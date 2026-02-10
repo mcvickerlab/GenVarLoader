@@ -9,10 +9,12 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from attrs import define, evolve, field
+from awkward.contents import ListOffsetArray
+from awkward.index import Index64
 from genoray._utils import ContigNormalizer
 from loguru import logger
 from numpy.typing import NDArray
-from seqpro.rag import DTYPE, Ragged
+from seqpro.rag import DTYPE, Ragged, is_rag_dtype
 from typing_extensions import NoReturn, Self, assert_never
 
 from .._ragged import (
@@ -21,14 +23,16 @@ from .._ragged import (
     RaggedIntervals,
     RaggedSeqs,
     RaggedTracks,
-    is_rag_dtype,
     reverse_complement,
     to_padded,
 )
 from .._torch import TORCH_AVAILABLE, TorchDataset, get_dataloader
 from .._types import AnnotatedHaps, Idx, StrIdx
-from .._utils import lengths_to_offsets, normalize_contig_name
-from ._indexing import DatasetIndexer, is_str_arr
+from .._utils import (
+    lengths_to_offsets,
+    normalize_contig_name,
+)
+from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
 from ._rag_variants import RaggedVariants
 from ._reconstruct import Haps, HapsTracks, Ref, RefTracks, Tracks, TrackType
 from ._reference import Reference
@@ -82,8 +86,8 @@ class Dataset:
     - :meth:`Dataset.with_len() <Dataset.with_len()>`
     """
 
-    @overload
     @staticmethod
+    @overload
     def open(
         path: str | Path,
         reference: None = ...,
@@ -94,9 +98,11 @@ class Dataset:
         min_af: float | None = None,
         max_af: float | None = None,
         region_names: str | None = None,
+        splice_info: str | tuple[str, str] | None = None,
+        var_filter: Literal["exonic"] | None = None,
     ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]: ...
-    @overload
     @staticmethod
+    @overload
     def open(
         path: str | Path,
         reference: str | Path | Reference,
@@ -107,6 +113,8 @@ class Dataset:
         min_af: float | None = None,
         max_af: float | None = None,
         region_names: str | None = None,
+        splice_info: str | tuple[str, str] | None = None,
+        var_filter: Literal["exonic"] | None = None,
     ) -> RaggedDataset[RaggedSeqs, MaybeRTRK]: ...
     @staticmethod
     def open(
@@ -119,6 +127,8 @@ class Dataset:
         min_af: float | None = None,
         max_af: float | None = None,
         region_names: str | None = None,
+        splice_info: str | tuple[str, str] | None = None,
+        var_filter: Literal["exonic"] | None = None,
     ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]:
         """Open a dataset from a path. If no reference genome is provided, the dataset cannot yield sequences.
         Will initialize the dataset such that it will return tracks and haplotypes (reference sequences if no genotypes) if possible.
@@ -143,6 +153,14 @@ class Dataset:
             The minimum allele frequency to include in the dataset. If dataset is not backed by SVAR genotypes, this will raise an error.
         max_af
             The maximum allele frequency to include in the dataset. If dataset is not backed by SVAR genotypes, this will raise an error.
+        splice_info
+            A string or tuple of strings representing the splice information to use.
+            If a string, it will be used as the transcript ID and the exons are expected to be in order.
+            If a tuple of strings, the first string will be used as the transcript ID and the second string will be used as the exon number.
+            If a dictionary, the keys will be used as the transcript ID and the values should be the row number for each exon, in order.
+            If False, splicing will be disabled.
+        var_filter
+            Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
         """
         path = Path(path)
         if not path.exists():
@@ -188,7 +206,7 @@ class Dataset:
         if has_genotypes:
             assert ploidy is not None
             seqs = Haps.from_path(
-                path,
+                path=path,
                 reference=reference,
                 regions=regions,
                 samples=samples,
@@ -196,6 +214,7 @@ class Dataset:
                 version=metadata.version,
                 min_af=min_af,
                 max_af=max_af,
+                filter=var_filter,
             )
             if reference is None:
                 logger.warning(
@@ -229,6 +248,12 @@ class Dataset:
             case seqs, tracks:
                 assert_never(seqs)
                 assert_never(tracks)
+
+        if splice_info is not None:
+            splice_idxer, spliced_bed = _parse_splice_info(splice_info, bed, idxer)
+        else:
+            splice_idxer = None
+            spliced_bed = None
 
         if seqs is not None and reference is not None:
             cnorm = ContigNormalizer(reference.contigs)
@@ -264,7 +289,9 @@ class Dataset:
             rc_neg=rc_neg,
             deterministic=deterministic,
             _idxer=idxer,
+            _sp_idxer=splice_idxer,
             _full_bed=bed,
+            _spliced_bed=spliced_bed,
             _full_regions=regions,
             _seqs=seqs,
             _tracks=tracks,
@@ -285,6 +312,8 @@ class Dataset:
         min_af: float | Literal[False] | None = None,
         max_af: float | Literal[False] | None = None,
         var_fields: list[str] | None = None,
+        splice_info: str | tuple[str, str] | Literal[False] | None = None,
+        var_filter: Literal[False, "exonic"] | None = None,
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -309,17 +338,18 @@ class Dataset:
             If dataset is not backed by SVAR genotypes, this will raise an error.
         var_fields
             The variant fields to include in the dataset.
+        splice_info
+            A string or tuple of strings representing the splice information to use.
+            If a string, it will be used as the transcript ID and the exons are expected to be in order.
+            If a tuple of strings, the first string will be used as the transcript ID and the second string will be used as the exon number.
+            If a dictionary, the keys will be used as the transcript ID and the values should be the row number for each exon, in order.
+            If False, splicing will be disabled.
+        var_filter
+            Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
         """
         to_evolve = {}
 
         if jitter is not None:
-            if jitter < 0:
-                raise ValueError(f"Jitter ({jitter}) must be a non-negative integer.")
-            elif jitter > self.max_jitter:
-                raise ValueError(
-                    f"Jitter ({jitter}) must be less than or equal to the maximum jitter of the dataset ({self.max_jitter})."
-                )
-
             if jitter != self.jitter:
                 if isinstance(self.output_length, int):
                     min_r_len: int = (
@@ -381,7 +411,80 @@ class Dataset:
                 recon = evolve(self._recon, haps=haps)
                 to_evolve["_recon"] = recon
 
-        return evolve(self, **to_evolve)
+        if splice_info is not None:
+            if splice_info is False:
+                splice_idxer = None
+                spliced_bed = None
+            else:
+                splice_idxer, spliced_bed = _parse_splice_info(
+                    splice_info, self._full_bed, self._idxer
+                )
+            to_evolve["_sp_idxer"] = splice_idxer
+            to_evolve["_spliced_bed"] = spliced_bed
+
+        if var_filter is not None:
+            if not isinstance(self._seqs, Haps):
+                raise ValueError(
+                    "Filtering variants can only be done when the dataset has variants."
+                )
+
+            if var_filter is False:
+                var_filter = None
+
+            if var_filter != self._seqs.filter:
+                to_evolve["_seqs"] = evolve(self._seqs, filter=var_filter)
+
+        self = evolve(self, **to_evolve)
+        self._check_valid_state()
+
+        return self
+
+    def _check_valid_state(self):
+        if self.is_spliced:
+            if self.jitter > 0:
+                raise RuntimeError(
+                    "Jitter is not supported with splicing. Please set jitter to 0."
+                )
+
+            if not self.deterministic:
+                raise RuntimeError(
+                    "Non-deterministic algorithms are not supported with splicing. Please set deterministic to True."
+                )
+
+            if self.sequence_type == "variants":
+                raise ValueError("Splicing is not supported with variants.")
+
+        if self.jitter < 0:
+            raise ValueError(f"Jitter ({self.jitter}) must be a non-negative integer.")
+        elif self.jitter > self.max_jitter:
+            raise ValueError(
+                f"Jitter ({self.jitter}) must be less than or equal to the maximum jitter of the dataset ({self.max_jitter})."
+            )
+
+        if isinstance(self.output_length, int):
+            if self.sequence_type == "variants":
+                raise ValueError(
+                    "Output length must be ragged when the sequence type is variants."
+                )
+
+            if self.output_length < 1:
+                raise ValueError(
+                    f"Output length ({self.output_length}) must be a positive integer."
+                )
+
+            min_r_len: int = (self._full_regions[:, 2] - self._full_regions[:, 1]).min()
+            max_output_length = min_r_len + 2 * self.max_jitter
+            eff_length = self.output_length + 2 * self.jitter
+            if eff_length > max_output_length:
+                raise ValueError(
+                    f"Effective length (out_len={self.output_length}) + 2 * ({self.jitter=}) = {eff_length} must be less"
+                    f" than or equal to the maximum output length of the dataset ({max_output_length})."
+                    f" The maximum output length is the minimum region length ({min_r_len}) + 2 * (max_jitter={self.max_jitter})."
+                )
+        elif self.output_length == "variable" and self.sequence_type == "variants":
+            raise ValueError(
+                "Output length must be ragged when the sequence type is variants."
+            )
 
     def with_len(
         self, output_length: Literal["ragged", "variable"] | int
@@ -424,7 +527,9 @@ class Dataset:
                 rc_neg=self.rc_neg,
                 deterministic=self.deterministic,
                 _idxer=self._idxer,
+                _sp_idxer=self._sp_idxer,
                 _full_bed=self._full_bed,
+                _spliced_bed=self._spliced_bed,
                 _full_regions=self._full_regions,
                 _seqs=self._seqs,
                 _tracks=self._tracks,
@@ -432,7 +537,7 @@ class Dataset:
                 _rng=self._rng,
             )
         else:
-            return RaggedDataset(
+            out = RaggedDataset(
                 path=self.path,
                 output_length=output_length,
                 max_jitter=self.max_jitter,
@@ -442,13 +547,19 @@ class Dataset:
                 rc_neg=self.rc_neg,
                 deterministic=self.deterministic,
                 _idxer=self._idxer,
+                _sp_idxer=self._sp_idxer,
                 _full_bed=self._full_bed,
+                _spliced_bed=self._spliced_bed,
                 _full_regions=self._full_regions,
                 _seqs=self._seqs,
                 _tracks=self._tracks,
                 _recon=self._recon,
                 _rng=self._rng,
             )
+
+        out._check_valid_state()
+
+        return out
 
     def with_seqs(
         self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
@@ -635,17 +746,11 @@ class Dataset:
                     "Dataset is set to only return tracks, so setting tracks to None would"
                     " result in a Dataset that cannot return anything."
                 )
-            case False, _, None, _:
-                return self
             case False, _, tr, ((Ref() | Haps()) as seqs) | RefTracks(
                 seqs=seqs
             ) | HapsTracks(haps=seqs):
                 tr = tr.with_tracks(None)
                 return evolve(self, _tracks=tr, _recon=seqs)
-            case t, _, None, _:
-                raise ValueError(
-                    "Can't set dataset to return tracks because it has none to begin with."
-                )
             case t, _, tr, (Ref() as seqs) | RefTracks(seqs=seqs):
                 tr = tr.with_tracks(t).to_kind(
                     _kind,  # type: ignore
@@ -694,9 +799,11 @@ class Dataset:
     rc_neg: bool
     """Whether to reverse-complement the sequences on negative strands."""
     _full_bed: pl.DataFrame = field(alias="_full_bed")
+    _spliced_bed: pl.DataFrame | None = field(alias="_spliced_bed")
     _full_regions: NDArray[np.int32] = field(alias="_full_regions")
     """Unjittered, sorted regions matching order on-disk."""
     _idxer: DatasetIndexer = field(alias="_idxer")
+    _sp_idxer: SpliceIndexer | None = field(alias="_sp_idxer")
     _seqs: (
         Ref | Haps[RaggedSeqs] | Haps[RaggedAnnotatedHaps] | Haps[RaggedVariants] | None
     ) = field(alias="_seqs")
@@ -723,6 +830,11 @@ class Dataset:
     def is_subset(self) -> bool:
         """Whether the dataset is a subset."""
         return self._idxer.is_subset
+
+    @property
+    def is_spliced(self) -> bool:
+        """Whether the dataset is spliced."""
+        return self._sp_idxer is not None
 
     @property
     def has_reference(self) -> bool:
@@ -761,8 +873,18 @@ class Dataset:
 
     @property
     def n_regions(self) -> int:
-        """The number of regions in the dataset."""
-        return self._idxer.n_regions
+        """The number of (spliced) regions in the dataset."""
+        return self.shape[0]
+
+    @property
+    def spliced_regions(self) -> pl.DataFrame | None:
+        """The spliced regions in the dataset."""
+        if self._spliced_bed is None or self._sp_idxer is None:
+            raise ValueError("Dataset does not have splice information.")
+        if self._sp_idxer.row_subset_idxs is None:
+            return self._spliced_bed
+        else:
+            return self._spliced_bed[self._sp_idxer.row_subset_idxs]
 
     @property
     def n_samples(self) -> int:
@@ -777,13 +899,19 @@ class Dataset:
 
     @property
     def shape(self) -> tuple[int, int]:
-        """Return the shape of the dataset. :code:`(n_regions, n_samples)`"""
-        return self.n_regions, self.n_samples
+        """Return the shape of the dataset. :code:`(n_rows, n_samples)`"""
+        if self._sp_idxer is None:
+            return self._idxer.shape
+        else:
+            return self._sp_idxer.shape
 
     @property
     def full_shape(self) -> tuple[int, int]:
-        """Return the full shape of the dataset, ignoring any subsetting. :code:`(n_regions, n_samples)`"""
-        return self._idxer.full_shape
+        """Return the full shape of the dataset, ignoring any subsetting. :code:`(n_rows, n_samples)`"""
+        if self._sp_idxer is None:
+            return self._idxer.full_shape
+        else:
+            return self._sp_idxer.full_shape
 
     @property
     def available_var_fields(self) -> list[str]:
@@ -856,11 +984,14 @@ class Dataset:
         return self.n_regions * self.n_samples
 
     def __str__(self) -> str:
-        if self._available_sequences is None or self.sequence_type is None:
-            seq_type = "None"
+        splice_status = "Spliced" if self.is_spliced else "Unspliced"
+
+        if self._available_sequences is None:
+            seq_type = None
         else:
             seqs = self._available_sequences
-            seqs[seqs.index(self.sequence_type)] = f"[{self.sequence_type}]"
+            if self.sequence_type is not None:
+                seqs[seqs.index(self.sequence_type)] = f"[{self.sequence_type}]"
             seq_type = " ".join(seqs)
 
         if self.available_tracks is None:
@@ -877,7 +1008,7 @@ class Dataset:
             if len(self.active_tracks) > 5:
                 act_tracks += f" + {len(self.active_tracks) - 5} more"
         return (
-            f"GVL store at {self.path}\n"
+            splice_status + f" GVL dataset at {self.path}\n"
             f"Is subset: {self.is_subset}\n"
             f"# of regions: {self.n_regions}\n"
             f"# of samples: {self.n_samples}\n"
@@ -958,13 +1089,23 @@ class Dataset:
                 "Cannot subset to regions by name because no region name was set."
             )
 
-        idxer = self._idxer.subset_to(regions=regions, samples=samples)
-
-        return evolve(self, _idxer=idxer)
+        if self._sp_idxer is None:
+            idxer = self._idxer.subset_to(regions=regions, samples=samples)
+            return evolve(self, _idxer=idxer)
+        else:
+            sp_idxer, sub_dsi = self._sp_idxer.subset_to(rows=regions, samples=samples)
+            return evolve(self, _idxer=sub_dsi, _sp_idxer=sp_idxer)
 
     def to_full_dataset(self) -> Self:
         """Return a full sized dataset, undoing any subsetting."""
-        return evolve(self, _idxer=self._idxer.to_full_dataset())
+        if self._sp_idxer is None:
+            return evolve(self, _idxer=self._idxer.to_full_dataset())
+        else:
+            return evolve(
+                self,
+                _idxer=self._idxer.to_full_dataset(),
+                _sp_idxer=self._sp_idxer.to_full_dataset(),
+            )
 
     def haplotype_lengths(
         self,
@@ -975,6 +1116,10 @@ class Dataset:
         not phased or not deterministic, this will return :code:`None` because the haplotypes are not guaranteed to be
         a consistent length due to randomness in what variants are used.
 
+        .. note::
+
+            Currently not implemented for spliced datasets.
+
         Parameters
         ----------
         regions
@@ -982,6 +1127,11 @@ class Dataset:
         samples
             Samples to compute haplotype lengths for.
         """
+        if self._sp_idxer is not None:
+            raise NotImplementedError(
+                "Haplotype lengths are not yet implemented for spliced datasets."
+            )
+
         if not isinstance(self._seqs, Haps) or not self.deterministic:
             return None
 
@@ -1378,6 +1528,43 @@ class Dataset:
                 "Cannot query regions by name because no region name was set."
             )
 
+        if self._sp_idxer is not None:
+            recon, squeeze, out_reshape = self._getitem_spliced(idx, self._sp_idxer)
+        else:
+            recon, squeeze, out_reshape = self._getitem_unspliced(idx)
+
+        if self.output_length == "variable":
+            recon = tuple(
+                r if isinstance(r, (RaggedVariants, RaggedIntervals)) else self._pad(r)
+                for r in recon
+            )
+        elif isinstance(self.output_length, int):
+            recon = tuple(
+                r if isinstance(r, (RaggedVariants, RaggedIntervals)) else r.to_numpy()
+                for r in recon
+            )
+
+        if out_reshape is not None:
+            recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)  # type: ignore
+
+        if squeeze:
+            # (1 [p] l) -> ([p] l)
+            recon = tuple(o.squeeze(0) for o in recon)  # type: ignore
+
+        if len(recon) == 1:
+            recon = recon[0]
+
+        return recon
+
+    def _getitem_unspliced(
+        self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]
+    ) -> tuple[
+        tuple[
+            Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps | RaggedVariants, ...
+        ],
+        bool,
+        tuple[int, ...] | None,
+    ]:
         # (b)
         ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
         r_idx, _ = np.unravel_index(ds_idx, self.full_shape)
@@ -1401,38 +1588,81 @@ class Dataset:
             deterministic=self.deterministic,
         )
 
-        if isinstance(recon, tuple):
-            unlist = False
-        else:
-            unlist = True
+        if not isinstance(recon, tuple):
             recon = (recon,)
 
         if self.rc_neg:
             to_rc: NDArray[np.bool_] = self._full_regions[r_idx, 3] == -1
             recon = tuple(self._rc(r, to_rc) for r in recon)
 
-        if self.output_length == "variable":
-            recon = tuple(
-                r if isinstance(r, (RaggedVariants, RaggedIntervals)) else self._pad(r)
-                for r in recon
+        return recon, squeeze, out_reshape  # type: ignore
+
+    def _getitem_spliced(
+        self,
+        idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx],
+        splice_idxer: SpliceIndexer,
+    ) -> tuple[
+        tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...],
+        bool,
+        tuple[int, ...] | None,
+    ]:
+        if isinstance(self.output_length, int):
+            raise RuntimeError(
+                "In general, splicing cannot be done with fixed length data because even if the length of each region's data"
+                " is fixed/constant, the number of elements in each spliced element is not. Thus, the final length of the"
+                " spliced elements will be variable."
             )
-        elif isinstance(self.output_length, int):
-            recon = tuple(
-                r if isinstance(r, (RaggedVariants, RaggedIntervals)) else r.to_numpy()
-                for r in recon
+
+        assert self.sequence_type != "variants"
+        assert not isinstance(self.output_length, int)
+        assert self.jitter == 0
+        assert self.deterministic
+
+        # TODO: really need to assert no jitter and deterministic?
+        # * In theory, this still "works" with jitter or non-determinism, but why would anyone want this? Would they want a different alg here?
+        # * Potential issues:
+        # * Each each component of the spliced output will have different jitter
+        # * For non-determinism, each component will have different shifts & different unphased haplotypes chosen
+        if self.jitter > 0:
+            raise RuntimeError(
+                "Jitter is not supported with splicing. Please set jitter to 0."
             )
 
-        if out_reshape is not None:
-            recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)  # type: ignore
+        if not self.deterministic:
+            raise RuntimeError(
+                "Non-deterministic algorithms are not supported with splicing. Please set deterministic to True."
+            )
 
-        if squeeze:
-            # (1 [p] l) -> ([p] l)
-            recon = tuple(o.squeeze(axis=0) for o in recon)
+        inner_ds = self.with_len("ragged")
+        ds_idx, squeeze, out_reshape, offsets = splice_idxer.parse_idx(idx)
+        r_idx, _ = np.unravel_index(ds_idx, self._idxer.full_shape)
+        regions = self._full_regions[r_idx]
 
-        if unlist:
-            recon = recon[0]
+        recon = inner_ds._recon(
+            idx=ds_idx,
+            r_idx=r_idx,
+            regions=regions,
+            output_length="ragged",
+            jitter=self.jitter,
+            rng=self._rng,
+            deterministic=self.deterministic,
+        )
 
-        return recon  # type: ignore
+        if not isinstance(recon, tuple):
+            recon = (recon,)
+
+        recon = cast(
+            tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
+        )
+
+        if self.rc_neg:
+            # (b)
+            to_rc: NDArray[np.bool_] = regions[:, 3] == -1
+            recon = tuple(self._rc(r, to_rc) for r in recon)
+
+        recon = tuple(_cat_length(r, offsets) for r in recon)
+
+        return recon, squeeze, out_reshape
 
     @overload
     def _rc(self, rag: Ragged[DTYPE], to_rc: NDArray[np.bool_]) -> Ragged[DTYPE]: ...
@@ -1486,6 +1716,51 @@ class Dataset:
             assert_never(rag)
 
 
+@overload
+def _cat_length(rag: Ragged[DTYPE], offsets: NDArray[np.integer]) -> Ragged[DTYPE]: ...
+@overload
+def _cat_length(
+    rag: RaggedAnnotatedHaps, offsets: NDArray[np.integer]
+) -> RaggedAnnotatedHaps: ...
+def _cat_length(
+    rag: Ragged | RaggedAnnotatedHaps, offsets: NDArray[np.integer]
+) -> Ragged | RaggedAnnotatedHaps:
+    """Concatenate the lengths of the ragged data."""
+    if isinstance(rag, Ragged):
+        if rag.ndim == 2 or rag.shape[1:] == (1,) * (
+            rag.ndim - 1
+        ):  # (b [1] [1] ~l) => layout is correct
+            new_lengths = np.add.reduceat(rag.lengths, offsets[:-1], 0)
+            cat = Ragged.from_lengths(rag.data, new_lengths)
+        elif rag.ndim == 3:
+            # (b p ~l) or (b t ~l)
+            grouped = ak.Array(ListOffsetArray(Index64(offsets), rag.to_ak().layout))
+            cat = Ragged(
+                ak.concatenate(  # type: ignore
+                    [
+                        ak.flatten(grouped[:, :, i], -1)[:, None]  # (g 1 ~l)
+                        for i in range(rag.shape[1])  # type: ignore
+                    ],
+                    1,
+                )
+            )
+        elif rag.ndim == 4:  # hap tracks: (b t p ~l)
+            raise NotImplementedError("Splicing haplotype tracks.")
+        else:
+            raise RuntimeError("Should never see a 4+ dim ragged array.")
+
+        if is_rag_dtype(rag, np.bytes_):
+            cat = cat.view("S1")  # type: ignore
+        return cat
+    elif isinstance(rag, RaggedAnnotatedHaps):
+        haps = _cat_length(rag.haps, offsets)
+        var_idxs = _cat_length(rag.var_idxs, offsets)
+        ref_coords = _cat_length(rag.ref_coords, offsets)
+        return RaggedAnnotatedHaps(haps, var_idxs, ref_coords)
+    else:
+        assert_never(rag)
+
+
 def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedIntervals:
     # normalize contig names
     reg_c = regions["chrom"].unique()
@@ -1514,6 +1789,58 @@ def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedInt
     itvs = RaggedIntervals(starts, ends, values)
 
     return itvs
+
+
+def _parse_splice_info(
+    splice_info: str | tuple[str, str],
+    full_bed: pl.DataFrame,
+    idxer: DatasetIndexer,
+):
+    """Parse splice info into a SpliceIndexer.
+
+    Parameters
+    ----------
+    splice_info
+        The splice info to parse. Can be a string, a tuple of strings, or a dictionary.
+    regions
+        The regions to parse the splice info from.
+    idxer
+        The idxer to use to parse the splice info.
+    """
+    if isinstance(splice_info, str):
+        sp_bed = (
+            full_bed.rename({splice_info: "splice_id"})
+            .with_row_index()
+            .group_by("splice_id", maintain_order=True)
+            .agg(pl.all())
+        )
+        names = sp_bed["splice_id"].to_list()
+        lengths = sp_bed["index"].list.len().to_numpy()
+        splice_map = Ragged.from_lengths(
+            sp_bed["index"].explode().to_numpy(), lengths
+        ).to_ak()
+    elif isinstance(splice_info, tuple):
+        if len(splice_info) != 2:
+            raise ValueError(
+                "Splice info tuple must be of length 2, corresponding to columns names for splice IDs and element ordering."
+            )
+        sp_bed = (
+            full_bed.rename({splice_info[0]: "splice_id"})
+            .with_row_index()
+            .group_by("splice_id", maintain_order=True)
+            .agg(pl.all().sort_by(splice_info[1]))
+        )
+        names = sp_bed["splice_id"].to_list()
+        lengths = sp_bed["index"].list.len().to_numpy()
+        splice_map = Ragged.from_lengths(
+            sp_bed["index"].explode().to_numpy(), lengths
+        ).to_ak()
+    else:
+        assert_never(splice_info)
+
+    splice_map = cast(ak.Array, splice_map)
+    sp_idxer = SpliceIndexer._init(names, splice_map, idxer)
+    return sp_idxer, sp_bed
 
 
 SEQ = TypeVar("SEQ", NDArray[np.bytes_], AnnotatedHaps, RaggedVariants)
