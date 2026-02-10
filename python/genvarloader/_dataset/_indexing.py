@@ -8,7 +8,6 @@ import numpy as np
 from attrs import define, evolve
 from hirola import HashTable
 from numpy import integer
-from numpy._typing._array_like import NDArray
 from numpy.typing import NDArray
 from typing_extensions import Self, TypeGuard, assert_never
 
