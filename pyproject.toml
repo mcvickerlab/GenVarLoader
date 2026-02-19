@@ -34,6 +34,9 @@ dependencies = [
     "genoray>=2.1.1,<3",
 ]
 
+[project.optional-dependencies]
+cli = ["genvarloader-cli>=0.1.0"]
+
 [project.urls]
 source = "https://github.com/mcvickerlab/GenVarLoader"
 documentation = "https://genvarloader.readthedocs.io/en/stable/"
