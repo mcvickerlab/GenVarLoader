@@ -4,7 +4,7 @@ channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64"]
 
 [environments]
-default = { features = ["default", "py310"] }
+default = { features = ["default", "pytorch-cpu", "py310"] }
 dev = { features = ["pytorch-cpu", "basenji2", "py310"] }
 docs = { features = ["docs", "pytorch-cpu", "basenji2", "py312"] }
 docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py312"] }
@@ -12,7 +12,7 @@ py310 = { features = ["pytorch-cpu", "py310"] }
 py311 = { features = ["pytorch-cpu", "py311"] }
 py312 = { features = ["pytorch-cpu", "py312"] }
 py313 = { features = ["pytorch-cpu", "py313"] }
-no-torch = { features = ["py310"] }
+no-torch = { features = ["py310"], no-default-feature = true }
 demo = { features = ["demo", "py310"] }
 
 [dependencies]

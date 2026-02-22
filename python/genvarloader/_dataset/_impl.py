@@ -171,7 +171,7 @@ class Dataset:
         )
         bed = bed.drop("r_idx_map")
         sorted_bed = sp.bed.sort(bed)
-        regions = bed_to_regions(sorted_bed, contigs)
+        regions = bed_to_regions(sorted_bed, ContigNormalizer(contigs))
 
         has_genotypes = (path / "genotypes").exists()
         if has_genotypes:

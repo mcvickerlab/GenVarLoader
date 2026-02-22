@@ -13,7 +13,7 @@ import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseVar
 from genoray._svar import SparseGenotypes, dense2sparse
 from genoray._types import V_IDX_TYPE
-from genoray._utils import parse_memory
+from genoray._utils import ContigNormalizer, parse_memory
 from loguru import logger
 from more_itertools import mark_ends
 from natsort import natsorted
@@ -59,6 +59,7 @@ def write(
     max_jitter: int | None = None,
     overwrite: bool = False,
     max_mem: int | str = "4g",
+    extend_to_length: bool = True,
 ):
     """Write a GVL dataset.
 
@@ -87,6 +88,11 @@ def write(
         Whether to overwrite an existing dataset
     max_mem
         Approximate maximum memory to use. This is a soft limit and may be exceeded by a small amount.
+    extend_to_length
+        Whether to continue reading/writing variants until all haplotypes have a length at least as long as the intervals in `bed`.
+        Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
+        haplotypes shorter than the intervals is acceptable, in which case they will be padded with reference bases when appropriate.
+        Disabling this also reduces the amount of data read/written and is faster to run.
     """
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
@@ -177,12 +183,18 @@ def write(
         logger.info("Writing genotypes.")
         if isinstance(variants, VCF):
             variants.set_samples(samples)
-            gvl_bed = _write_from_vcf(path, gvl_bed, variants, max_mem)
+            gvl_bed = _write_from_vcf(
+                path, gvl_bed, variants, max_mem, extend_to_length
+            )
         elif isinstance(variants, PGEN):
             variants.set_samples(samples)
-            gvl_bed = _write_from_pgen(path, gvl_bed, variants, max_mem)
+            gvl_bed = _write_from_pgen(
+                path, gvl_bed, variants, max_mem, extend_to_length
+            )
         elif isinstance(variants, SparseVar):
-            gvl_bed = _write_from_svar(path, gvl_bed, variants, samples)
+            gvl_bed = _write_from_svar(
+                path, gvl_bed, variants, samples, extend_to_length
+            )
         metadata["ploidy"] = variants.ploidy
         # free memory
         del variants
@@ -237,11 +249,13 @@ def _prep_bed(
 
 
 def _write_regions(path: Path, bed: pl.DataFrame, contigs: list[str]):
-    regions = bed_to_regions(bed, contigs)
+    regions = bed_to_regions(bed, ContigNormalizer(contigs))
     np.save(path / "regions.npy", regions)
 
 
-def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
+def _write_from_vcf(
+    path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int, extend_to_length: bool
+):
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -358,7 +372,9 @@ def _write_from_vcf(path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int):
     return bed
 
 
-def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
+def _write_from_pgen(
+    path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int, extend_to_length: bool
+):
     if pgen._sei is None:
         raise ValueError(
             "PGEN with filtering has multi-allelic variants. Please filter or split them."
@@ -444,7 +460,11 @@ def _write_from_pgen(path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int):
 
 
 def _write_from_svar(
-    path: Path, bed: pl.DataFrame, svar: SparseVar, samples: list[str]
+    path: Path,
+    bed: pl.DataFrame,
+    svar: SparseVar,
+    samples: list[str],
+    extend_to_length: bool,
 ):
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -466,6 +486,7 @@ def _write_from_svar(
     contig_offset = 0
     pbar = tqdm(total=bed.height, unit=" region")
     first_no_variant_warning = True
+
     for (c,), df in bed.partition_by(
         "chrom", as_dict=True, maintain_order=True
     ).items():
@@ -476,9 +497,14 @@ def _write_from_svar(
         # set offsets
         # (2 r s p)
         out = offsets[:, contig_offset : contig_offset + df.height]
-        svar._find_starts_ends_with_length(
-            c, df["chromStart"], df["chromEnd"], samples=samples, out=out
-        )
+        if extend_to_length:
+            svar._find_starts_ends_with_length(
+                c, df["chromStart"], df["chromEnd"], samples=samples, out=out
+            )
+        else:
+            out[:] = svar._find_starts_ends(
+                c, df["chromStart"], df["chromEnd"], samples=samples
+            )
 
         if first_no_variant_warning and (out == 0).all((1, 2, 3)).any():
             first_no_variant_warning = False

@@ -3,6 +3,7 @@ from collections.abc import Sequence
 import numba as nb
 import numpy as np
 import polars as pl
+from genoray._utils import ContigNormalizer
 from numpy.typing import ArrayLike, NDArray
 
 from .._types import DTYPE
@@ -82,7 +83,9 @@ def regions_to_bed(regions: NDArray[np.int32], contigs: Sequence[str]) -> pl.Dat
     return bed
 
 
-def bed_to_regions(bed: pl.DataFrame, contigs: Sequence[str]) -> NDArray[np.int32]:
+def bed_to_regions(
+    bed: pl.DataFrame, contig_norm: ContigNormalizer
+) -> NDArray[np.int32]:
     """Convert a BED3+ DataFrame to GVL's internal representation of regions, a
     2D array of shape (n_regions, 4) with the following columns:
     - chrom: Contig index
@@ -102,9 +105,10 @@ def bed_to_regions(bed: pl.DataFrame, contigs: Sequence[str]) -> NDArray[np.int3
     NDArray[np.int32]
         Regions.
     """
-    cmap = {v: k for k, v in enumerate(contigs)}
+    c2c = contig_norm.contig_map
+    c2i = {v: k for k, v in enumerate(contig_norm.contigs)}
     cols = [
-        pl.col("chrom").replace_strict(cmap, return_dtype=pl.Int32),
+        pl.col("chrom").replace_strict(c2c).replace_strict(c2i, return_dtype=pl.Int32),
         pl.col("chromStart", "chromEnd").cast(pl.Int32),
     ]
 

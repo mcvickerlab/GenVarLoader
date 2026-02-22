@@ -4,7 +4,8 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from einops import repeat
-from genoray._svar import POS_TYPE, SparseGenotypes
+from genoray._svar import SparseGenotypes
+from genoray._types import POS_TYPE
 from genoray._utils import ContigNormalizer
 from natsort import natsorted
 
@@ -52,7 +53,7 @@ def get_dummy_dataset():
         r_idx_map, np.arange(len(dummy_samples)), dummy_samples
     )
 
-    dummy_regions = bed_to_regions(sorted_bed, dummy_contigs)
+    dummy_regions = bed_to_regions(sorted_bed, ContigNormalizer(dummy_contigs))
 
     ref_len = 20
     ref_lens = np.full(len(dummy_contigs), ref_len, dtype=np.int32)
