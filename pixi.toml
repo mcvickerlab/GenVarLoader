@@ -5,7 +5,7 @@ platforms = ["linux-64"]
 
 [environments]
 default = { features = ["default", "pytorch-cpu", "py310"] }
-dev = { features = ["pytorch-cpu", "basenji2", "py310"] }
+dev = { features = ["basenji2"] }
 docs = { features = ["docs", "pytorch-cpu", "basenji2", "py312"] }
 docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py312"] }
 py310 = { features = ["pytorch-cpu", "py310"] }
@@ -62,11 +62,10 @@ basenji2-pytorch = ">=0.1.2"
 
 [feature.py310.dependencies]
 python = "3.10.*"
-numpy = "<2"
+numpy = "2.0.*"
+numba = "*"
 
 [feature.py310.pypi-dependencies]
-numpy = "==1.26.*"
-numba = "==0.59.1"
 pyarrow = ">=21"
 hirola = "==0.3"
 seqpro = "==0.9.0"

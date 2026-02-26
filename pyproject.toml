@@ -10,6 +10,7 @@ readme = "README.md"
 license = { file = "LICENSE.txt" }
 requires-python = ">=3.10,<3.14" # >= 3.14 blocked by pyarrow/genoray
 dependencies = [
+    "numpy",
     "numba>=0.59.1",
     "loguru",
     "attrs",
