@@ -1,3 +1,13 @@
+## 0.21.0 (2026-02-26)
+
+### Feat
+
+- add option to extend lengths or not for gvl.write() fix: contig normalization
+
+### Fix
+
+- add cli as optional dependency
+
 ## 0.20.0 (2026-02-05)
 
 ### Feat
