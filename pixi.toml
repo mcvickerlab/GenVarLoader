@@ -36,7 +36,7 @@ icecream = "*"
 patchelf = "*"
 
 [pypi-dependencies]
-genvarloader = { path = ".", editable = true }
+genvarloader = { path = ".", editable = true, extras = ["cli"] }
 
 [feature.docs.dependencies]
 sphinx = ">=7.4.7"
