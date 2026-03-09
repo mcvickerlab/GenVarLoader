@@ -502,8 +502,8 @@ def _write_from_svar(
                 c, df["chromStart"], df["chromEnd"], samples=samples, out=out
             )
         else:
-            out[:] = svar._find_starts_ends(
-                c, df["chromStart"], df["chromEnd"], samples=samples
+            svar._find_starts_ends(
+                c, df["chromStart"], df["chromEnd"], samples=samples, out=out
             )
 
         if first_no_variant_warning and (out == 0).all((1, 2, 3)).any():
