@@ -1,3 +1,10 @@
+## 0.21.2 (2026-03-17)
+
+### Fix
+
+- repeated subset_to
+- bump genoray
+
 ## 0.21.1 (2026-03-09)
 
 ### Fix
