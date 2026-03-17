@@ -71,7 +71,9 @@ def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.integer]:
         assert is_dtype(idx, np.integer) or is_dtype(idx, np.bool_)
 
     if isinstance(idx, slice):
-        _idx = np.arange(max_len, dtype=np.intp)[idx]
+        _idx = np.arange(
+            idx.start or 0, idx.stop or max_len, idx.step or 1, dtype=np.intp
+        )
     elif is_dtype(idx, np.bool_):
         _idx = idx.nonzero()[0]
     else:

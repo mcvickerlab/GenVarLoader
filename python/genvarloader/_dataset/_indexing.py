@@ -106,21 +106,19 @@ class DatasetIndexer:
         if regions is None and samples is None:
             return self
 
+        to_update = {}
+
         if samples is not None:
             samples = self.sample2idx(samples)
             sample_idxs = idx_like_to_array(samples, self.n_samples)
-        else:
-            sample_idxs = np.arange(self.n_samples, dtype=np.intp)
+            to_update["sample_subset_idxs"] = sample_idxs
 
         if regions is not None:
             regions = self.region2idx(regions)
             region_idxs = idx_like_to_array(regions, self.n_regions)
-        else:
-            region_idxs = np.arange(self.n_regions, dtype=np.intp)
+            to_update["region_subset_idxs"] = region_idxs
 
-        return evolve(
-            self, region_subset_idxs=region_idxs, sample_subset_idxs=sample_idxs
-        )
+        return evolve(self, **to_update)
 
     def to_full_dataset(self) -> "DatasetIndexer":
         """Return a full sized dataset, undoing any subsettting."""
