@@ -4085,8 +4085,8 @@ packages:
   requires_python: '>=3.10,<3.14'
 - pypi: ./
   name: genvarloader
-  version: 0.21.1
-  sha256: 18cb1bd0df4fd5f9e8c5ed35b26f8d5fee489c1253a7f13d390e583aba229e07
+  version: 0.21.2
+  sha256: f29f087dca4a39f36af0979a0cbf92e8a0ae645e5aafc48665f5c7611ae0bcb8
   requires_dist:
   - numpy
   - numba>=0.59.1

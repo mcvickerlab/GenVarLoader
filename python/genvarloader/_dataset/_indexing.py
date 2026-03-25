@@ -111,11 +111,15 @@ class DatasetIndexer:
         if samples is not None:
             samples = self.sample2idx(samples)
             sample_idxs = idx_like_to_array(samples, self.n_samples)
+            if self.sample_subset_idxs is not None:
+                sample_idxs = self.sample_subset_idxs[sample_idxs]
             to_update["sample_subset_idxs"] = sample_idxs
 
         if regions is not None:
             regions = self.region2idx(regions)
             region_idxs = idx_like_to_array(regions, self.n_regions)
+            if self.region_subset_idxs is not None:
+                region_idxs = self.region_subset_idxs[region_idxs]
             to_update["region_subset_idxs"] = region_idxs
 
         return evolve(self, **to_update)
