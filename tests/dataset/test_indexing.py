@@ -71,6 +71,69 @@ def test_subset(dsi: DatasetIndexer, r_idx, s_idx, desired_r_idx, desired_s_idx)
     np.testing.assert_equal(subset._s_idx, desired_s_idx)
 
 
+def repeated_subset_regions_and_sample_then_region():
+    r1, s1 = [0, 2], 1
+    r2, s2 = 0, None
+    r_once, s_once = 0, 1
+    return r1, s1, r2, s2, r_once, s_once
+
+
+def repeated_subset_regions_then_region_and_sample():
+    r1, s1 = [0, 2], None
+    r2, s2 = 1, 1
+    r_once, s_once = 2, 1
+    return r1, s1, r2, s2, r_once, s_once
+
+
+def repeated_subset_sample_then_regions():
+    r1, s1 = None, 0
+    r2, s2 = [1, 2], None
+    r_once, s_once = [1, 2], 0
+    return r1, s1, r2, s2, r_once, s_once
+
+
+def repeated_subset_regions_then_sample_only():
+    r1, s1 = [0, 2], None
+    r2, s2 = None, 1
+    r_once, s_once = [0, 2], 1
+    return r1, s1, r2, s2, r_once, s_once
+
+
+def repeated_subset_samples_reorder_then_first():
+    r1, s1 = None, [1, 0]
+    r2, s2 = None, 0
+    r_once, s_once = None, 1
+    return r1, s1, r2, s2, r_once, s_once
+
+
+def repeated_subset_samples_reorder_then_second():
+    r1, s1 = None, [1, 0]
+    r2, s2 = None, 1
+    r_once, s_once = None, 0
+    return r1, s1, r2, s2, r_once, s_once
+
+
+def repeated_subset_samples_twice():
+    r1, s1 = None, [1, 0]
+    r2, s2 = None, [1]
+    r_once, s_once = None, 0
+    return r1, s1, r2, s2, r_once, s_once
+
+
+@parametrize_with_cases(
+    "r1, s1, r2, s2, r_once, s_once",
+    cases=".",
+    prefix="repeated_subset_",
+)
+def test_repeated_subset(dsi: DatasetIndexer, r1, s1, r2, s2, r_once, s_once):
+    chained = dsi.subset_to(r1, s1).subset_to(r2, s2)
+    once = dsi.subset_to(r_once, s_once)
+    assert chained.n_regions == once.n_regions
+    assert chained.n_samples == once.n_samples
+    np.testing.assert_equal(chained._r_idx, once._r_idx)
+    np.testing.assert_equal(chained._s_idx, once._s_idx)
+
+
 def test_subset_to_full(dsi: DatasetIndexer):
     subset = dsi.subset_to([0, 2], [0])
     full = subset.to_full_dataset()
