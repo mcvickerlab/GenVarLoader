@@ -1,3 +1,9 @@
+## 0.21.4 (2026-03-26)
+
+### Fix
+
+- chained subset_to y str names
+
 ## 0.21.3 (2026-03-25)
 
 ### Fix
