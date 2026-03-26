@@ -11,6 +11,36 @@ from .._types import Idx, StrIdx
 from .._utils import idx_like_to_array, is_dtype
 
 
+def _global_input_idxs_to_subset_positions(
+    global_idxs: Idx,
+    subs: NDArray[np.integer],
+    n_full: int,
+    label: str,
+) -> Idx:
+    """Map full input indices to subset axis positions; vectorized (sort + search)."""
+    g = np.asarray(idx_like_to_array(global_idxs, n_full), dtype=np.intp)
+    order = np.argsort(subs, kind="stable")
+    s_sorted = subs[order]
+    flat = g.ravel()
+    j = np.searchsorted(s_sorted, flat, side="left")
+    ok = (j < len(subs)) & (s_sorted[j] == flat)
+    if not ok.all():
+        bad = np.unique(flat[~ok])
+        raise KeyError(f"{label} index {bad} is not in the current subset.")
+    pos = order[j].reshape(g.shape)
+    return cast(Idx, pos)
+
+
+def _stridx_uses_names(str_idx: StrIdx, map: HashTable | None) -> bool:
+    if map is None or isinstance(str_idx, slice):
+        return False
+    if isinstance(str_idx, str):
+        return True
+    if isinstance(str_idx, np.ndarray) and is_str_arr(str_idx):
+        return True
+    return bool(is_str_arr(np.asarray(str_idx)))
+
+
 @define
 class DatasetIndexer:
     full_region_idxs: NDArray[np.integer]
@@ -109,17 +139,55 @@ class DatasetIndexer:
         to_update = {}
 
         if samples is not None:
-            samples = self.sample2idx(samples)
-            sample_idxs = idx_like_to_array(samples, self.n_samples)
-            if self.sample_subset_idxs is not None:
-                sample_idxs = self.sample_subset_idxs[sample_idxs]
+            if _stridx_uses_names(samples, self.s2i_map):
+                g = idx_like_to_array(
+                    s2i(samples, self.s2i_map), len(self.full_sample_idxs)
+                )
+                g = np.atleast_1d(g)
+                if self.sample_subset_idxs is not None:
+                    _ok = np.isin(g, self.sample_subset_idxs)
+                    if not _ok.all():
+                        bad = np.unique(g.ravel()[~_ok.ravel()])
+                        raise KeyError(
+                            f"Sample index {bad} is not in the current subset."
+                        )
+                _sd = (
+                    self.sample_subset_idxs.dtype
+                    if self.sample_subset_idxs is not None
+                    else self.full_sample_idxs.dtype
+                )
+                sample_idxs = g.astype(_sd, copy=False)
+            else:
+                s = self.sample2idx(samples)
+                sample_idxs = idx_like_to_array(s, self.n_samples)
+                if self.sample_subset_idxs is not None:
+                    sample_idxs = self.sample_subset_idxs[sample_idxs]
             to_update["sample_subset_idxs"] = sample_idxs
 
         if regions is not None:
-            regions = self.region2idx(regions)
-            region_idxs = idx_like_to_array(regions, self.n_regions)
-            if self.region_subset_idxs is not None:
-                region_idxs = self.region_subset_idxs[region_idxs]
+            if _stridx_uses_names(regions, self.r2i_map):
+                g = idx_like_to_array(
+                    s2i(regions, self.r2i_map), len(self.full_region_idxs)
+                )
+                g = np.atleast_1d(g)
+                if self.region_subset_idxs is not None:
+                    _ok = np.isin(g, self.region_subset_idxs)
+                    if not _ok.all():
+                        bad = np.unique(g.ravel()[~_ok.ravel()])
+                        raise KeyError(
+                            f"Region index {bad} is not in the current subset."
+                        )
+                _rd = (
+                    self.region_subset_idxs.dtype
+                    if self.region_subset_idxs is not None
+                    else self.full_region_idxs.dtype
+                )
+                region_idxs = g.astype(_rd, copy=False)
+            else:
+                r = self.region2idx(regions)
+                region_idxs = idx_like_to_array(r, self.n_regions)
+                if self.region_subset_idxs is not None:
+                    region_idxs = self.region_subset_idxs[region_idxs]
             to_update["region_subset_idxs"] = region_idxs
 
         return evolve(self, **to_update)
@@ -144,7 +212,15 @@ class DatasetIndexer:
             regions, samples = idx
 
         r_idx = self.region2idx(regions)
+        if self.region_subset_idxs is not None and _stridx_uses_names(
+            regions, self.r2i_map
+        ):
+            r_idx = self._global_region_idxs_to_subset_positions(r_idx)
         s_idx = self.sample2idx(samples)
+        if self.sample_subset_idxs is not None and _stridx_uses_names(
+            samples, self.s2i_map
+        ):
+            s_idx = self._global_sample_idxs_to_subset_positions(s_idx)
         idx = (r_idx, s_idx)
         idx_t = idx_type(idx)
         if idx_t == "basic":
@@ -202,6 +278,36 @@ class DatasetIndexer:
     def region2idx(self, regions: StrIdx) -> Idx:
         """Convert region names to region indices."""
         return s2i(regions, self.r2i_map)
+
+    def _global_region_idxs_to_subset_positions(self, global_idxs: Idx) -> Idx:
+        """Map full input region indices (from names) to indices into ``_r_idx``."""
+        if self.region_subset_idxs is None:
+            g = np.asarray(
+                idx_like_to_array(global_idxs, len(self.full_region_idxs)),
+                dtype=np.intp,
+            )
+            return cast(Idx, g)
+        return _global_input_idxs_to_subset_positions(
+            global_idxs,
+            self.region_subset_idxs,
+            len(self.full_region_idxs),
+            "Region",
+        )
+
+    def _global_sample_idxs_to_subset_positions(self, global_idxs: Idx) -> Idx:
+        """Map full input sample indices (from names) to indices into ``_s_idx``."""
+        if self.sample_subset_idxs is None:
+            g = np.asarray(
+                idx_like_to_array(global_idxs, len(self.full_sample_idxs)),
+                dtype=np.intp,
+            )
+            return cast(Idx, g)
+        return _global_input_idxs_to_subset_positions(
+            global_idxs,
+            self.sample_subset_idxs,
+            len(self.full_sample_idxs),
+            "Sample",
+        )
 
 
 def s2i(str_idx: StrIdx, map: HashTable | None) -> Idx:

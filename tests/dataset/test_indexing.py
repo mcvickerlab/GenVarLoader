@@ -14,6 +14,17 @@ def dsi():
     return DatasetIndexer.from_region_and_sample_idxs(r_idx, s_idx, samples)
 
 
+@fixture
+def dsi_named():
+    """Same layout as ``dsi`` but with string region ids ``r0``, ``r1``, ``r2``."""
+    n_samples = 2
+    r_idx = np.array([1, 2, 0])
+    s_idx = np.arange(n_samples)
+    samples = ["Aang", "Katara"]
+    regions = ["r0", "r1", "r2"]
+    return DatasetIndexer.from_region_and_sample_idxs(r_idx, s_idx, samples, regions)
+
+
 def case_1_region_all_samples():
     r_idx = 0
     s_idx = None
@@ -128,6 +139,151 @@ def repeated_subset_samples_twice():
 def test_repeated_subset(dsi: DatasetIndexer, r1, s1, r2, s2, r_once, s_once):
     chained = dsi.subset_to(r1, s1).subset_to(r2, s2)
     once = dsi.subset_to(r_once, s_once)
+    assert chained.n_regions == once.n_regions
+    assert chained.n_samples == once.n_samples
+    np.testing.assert_equal(chained._r_idx, once._r_idx)
+    np.testing.assert_equal(chained._s_idx, once._s_idx)
+
+
+def str_subset_1_region_all_samples():
+    regions = "r0"
+    samples = None
+    desired_r_idx = np.array([1])
+    desired_s_idx = np.array([0, 1])
+    return regions, samples, desired_r_idx, desired_s_idx
+
+
+def str_subset_1_region_1_sample():
+    regions = "r0"
+    samples = "Katara"
+    desired_r_idx = np.array([1])
+    desired_s_idx = np.array([1])
+    return regions, samples, desired_r_idx, desired_s_idx
+
+
+def str_subset_all_regions_1_sample():
+    regions = None
+    samples = "Katara"
+    desired_r_idx = np.array([1, 2, 0])
+    desired_s_idx = np.array([1])
+    return regions, samples, desired_r_idx, desired_s_idx
+
+
+def str_subset_2_regions_1_sample():
+    regions = ["r0", "r2"]
+    samples = "Katara"
+    desired_r_idx = np.array([1, 0])
+    desired_s_idx = np.array([1])
+    return regions, samples, desired_r_idx, desired_s_idx
+
+
+def str_subset_2_regions_all_samples():
+    regions = ["r0", "r2"]
+    samples = None
+    desired_r_idx = np.array([1, 0])
+    desired_s_idx = np.array([0, 1])
+    return regions, samples, desired_r_idx, desired_s_idx
+
+
+@parametrize_with_cases(
+    "regions, samples, desired_r_idx, desired_s_idx",
+    cases=".",
+    prefix="str_subset_",
+)
+def test_subset_string_regions_and_samples(
+    dsi_named: DatasetIndexer,
+    regions,
+    samples,
+    desired_r_idx,
+    desired_s_idx,
+):
+    subset = dsi_named.subset_to(regions, samples)
+    assert subset.n_regions == len(desired_r_idx)
+    assert subset.n_samples == len(desired_s_idx)
+    np.testing.assert_equal(subset._r_idx, desired_r_idx)
+    np.testing.assert_equal(subset._s_idx, desired_s_idx)
+
+
+def test_subset_string_samples_only_matches_int(dsi: DatasetIndexer):
+    by_str = dsi.subset_to(None, "Katara")
+    by_int = dsi.subset_to(None, 1)
+    np.testing.assert_equal(by_str._r_idx, by_int._r_idx)
+    np.testing.assert_equal(by_str._s_idx, by_int._s_idx)
+
+
+def test_subset_string_regions_and_samples_matches_int(dsi_named: DatasetIndexer):
+    """String args match the same selection using integer indices (full indexer)."""
+    by_str = dsi_named.subset_to(["r0", "r2"], "Katara")
+    by_int = dsi_named.subset_to([0, 2], 1)
+    np.testing.assert_equal(by_str._r_idx, by_int._r_idx)
+    np.testing.assert_equal(by_str._s_idx, by_int._s_idx)
+
+
+def test_chained_subset_region_by_name_not_in_subset_raises(dsi_named: DatasetIndexer):
+    sub = dsi_named.subset_to(["r0", "r2"], None)
+    with pytest.raises(KeyError):
+        sub.subset_to("r1", None)
+
+
+def str_repeated_subset_regions_and_sample_then_region():
+    r1, s1 = ["r0", "r2"], "Katara"
+    r2, s2 = "r0", None
+    r_once, s_once = 0, 1
+    return r1, s1, r2, s2, r_once, s_once
+
+
+def str_repeated_subset_regions_then_region_and_sample():
+    r1, s1 = ["r0", "r2"], None
+    r2, s2 = "r2", "Katara"
+    r_once, s_once = 2, 1
+    return r1, s1, r2, s2, r_once, s_once
+
+
+def str_repeated_subset_sample_then_regions():
+    r1, s1 = None, "Aang"
+    r2, s2 = ["r1", "r2"], None
+    r_once, s_once = [1, 2], 0
+    return r1, s1, r2, s2, r_once, s_once
+
+
+def str_repeated_subset_regions_then_sample_only():
+    r1, s1 = ["r0", "r2"], None
+    r2, s2 = None, "Katara"
+    r_once, s_once = [0, 2], 1
+    return r1, s1, r2, s2, r_once, s_once
+
+
+def str_repeated_subset_samples_reorder_then_first():
+    r1, s1 = None, ["Katara", "Aang"]
+    r2, s2 = None, "Katara"
+    r_once, s_once = None, 1
+    return r1, s1, r2, s2, r_once, s_once
+
+
+def str_repeated_subset_samples_reorder_then_second():
+    r1, s1 = None, ["Katara", "Aang"]
+    r2, s2 = None, "Aang"
+    r_once, s_once = None, 0
+    return r1, s1, r2, s2, r_once, s_once
+
+
+def str_repeated_subset_samples_twice():
+    r1, s1 = None, ["Katara", "Aang"]
+    r2, s2 = None, ["Aang"]
+    r_once, s_once = None, 0
+    return r1, s1, r2, s2, r_once, s_once
+
+
+@parametrize_with_cases(
+    "r1, s1, r2, s2, r_once, s_once",
+    cases=".",
+    prefix="str_repeated_subset_",
+)
+def test_repeated_subset_strings(
+    dsi_named: DatasetIndexer, r1, s1, r2, s2, r_once, s_once
+):
+    chained = dsi_named.subset_to(r1, s1).subset_to(r2, s2)
+    once = dsi_named.subset_to(r_once, s_once)
     assert chained.n_regions == once.n_regions
     assert chained.n_samples == once.n_samples
     np.testing.assert_equal(chained._r_idx, once._r_idx)
