@@ -10,6 +10,7 @@ import numpy as np
 import polars as pl
 from attrs import define, evolve, field
 from genoray._utils import ContigNormalizer
+from hirola import HashTable
 from loguru import logger
 from numpy.typing import ArrayLike, NDArray
 from seqpro.rag import Ragged, lengths_to_offsets
@@ -18,8 +19,9 @@ from typing_extensions import Self
 from .._fasta import Fasta
 from .._ragged import RaggedSeqs, reverse_complement, to_padded
 from .._torch import TORCH_AVAILABLE, get_dataloader, no_torch_error
-from .._types import Idx
+from .._types import Idx, StrIdx
 from .._utils import is_dtype
+from ._indexing import is_str_arr, s2i
 from ._utils import bed_to_regions, padded_slice
 
 INT64_MAX = np.iinfo(np.int64).max
@@ -194,6 +196,9 @@ class RefDataset(Generic[T]):
     seed: int | np.random.Generator | None = None
     _rng: np.random.Generator = field(init=False, alias="_rng")
     """A random number generator."""
+    region_names: str | None = None
+    """The name of the column in the full_bed table to use as the region names."""
+    _region_map: HashTable | None = field(init=False, alias="_region_map")
 
     def __attrs_post_init__(self):
         if self.full_bed.height == 0:
@@ -210,8 +215,17 @@ class RefDataset(Generic[T]):
                 f"jitter ({self.jitter}) must be less than the minimum region length ({min_len})."
             )
         self._subset_bed = self.full_bed
-        self._subset_regions = bed_to_regions(self.full_bed, self.reference.contigs)
+        self._subset_regions = bed_to_regions(self.full_bed, self.reference.c_map)
         self._rng = np.random.default_rng(self.seed)
+        if self.region_names is not None:
+            region_names = self.full_bed[self.region_names].to_numpy().astype(np.str_)
+            self._region_map = HashTable(
+                max=len(region_names) * 2,  # type: ignore
+                dtype=region_names.dtype,
+            )
+            self._region_map.add(region_names)
+        else:
+            self._region_map = None
 
     @property
     def regions(self) -> pl.DataFrame:
@@ -289,7 +303,7 @@ class RefDataset(Generic[T]):
 
         return evolve(self, **to_evolve)
 
-    def subset_to(self, regions: Idx):
+    def subset_to(self, regions: StrIdx):
         """Subset the dataset to a subset of regions.
 
         Parameters
@@ -297,6 +311,13 @@ class RefDataset(Generic[T]):
         regions
             The indices of the regions to subset to.
         """
+        if self._region_map is not None:
+            regions = s2i(regions, self._region_map)
+        elif is_str_arr(regions):
+            raise ValueError(
+                "Cannot subset to regions by name because no region name was set."
+            )
+
         if (
             isinstance(regions, (int, np.integer, slice))
             or is_dtype(regions, np.integer)
@@ -305,13 +326,14 @@ class RefDataset(Generic[T]):
             self._subset_bed = self.full_bed[regions]  # type: ignore
         else:
             self._subset_bed = self.full_bed.filter(regions)  # type: ignore
-        self._subset_regions = bed_to_regions(self._subset_bed, self.reference.contigs)
+
+        self._subset_regions = bed_to_regions(self._subset_bed, self.reference.c_map)
         return self
 
     def to_full_dataset(self) -> Self:
         """Reset the dataset to the full dataset."""
         self._subset_bed = self.full_bed
-        self._subset_regions = bed_to_regions(self._subset_bed, self.reference.contigs)
+        self._subset_regions = bed_to_regions(self._subset_bed, self.reference.c_map)
         return self
 
     def __getitem__(self, idx: Idx) -> T:
@@ -512,8 +534,8 @@ def get_reference(
 
 
 if TORCH_AVAILABLE:
-    import torch
-    import torch.utils.data as td
+    import torch  # type: ignore
+    import torch.utils.data as td  # type: ignore
 
     class TorchDataset(td.Dataset):
         dataset: RefDataset[NDArray[np.bytes_]]

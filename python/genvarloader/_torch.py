@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 from seqpro.rag import Ragged, is_rag_dtype
 
 from ._types import AnnotatedHaps
+from ._utils import lengths_to_offsets
 
 try:
     import torch
@@ -140,9 +141,9 @@ def to_nested_tensor(rag: Ragged | ak.Array) -> torch.Tensor:
         rag = rag.view(np.uint8)
 
     values = torch.from_numpy(rag.data)
-    lengths = torch.from_numpy(rag.lengths)
+    offsets = torch.from_numpy(lengths_to_offsets(rag.lengths, np.int32))
     nt = torch.nested.nested_tensor_from_jagged(
-        values, lengths=lengths, max_seqlen=rag.lengths.max()
+        values, offsets, max_seqlen=rag.lengths.max()
     )
     return nt
 

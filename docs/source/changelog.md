@@ -1,3 +1,38 @@
+## 0.21.4 (2026-03-26)
+
+### Fix
+
+- chained subset_to y str names
+
+## 0.21.3 (2026-03-25)
+
+### Fix
+
+- repeated subset_to
+
+## 0.21.2 (2026-03-17)
+
+### Fix
+
+- repeated subset_to
+- bump genoray
+
+## 0.21.1 (2026-03-09)
+
+### Fix
+
+- bump genoray
+
+## 0.21.0 (2026-02-26)
+
+### Feat
+
+- add option to extend lengths or not for gvl.write() fix: contig normalization
+
+### Fix
+
+- add cli as optional dependency
+
 ## 0.20.0 (2026-02-05)
 
 ### Feat

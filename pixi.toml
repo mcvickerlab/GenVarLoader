@@ -4,15 +4,15 @@ channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64"]
 
 [environments]
-default = { features = ["default", "py310"] }
-dev = { features = ["pytorch-cpu", "basenji2", "py310"] }
+default = { features = ["default", "pytorch-cpu", "py310"] }
+dev = { features = ["basenji2"] }
 docs = { features = ["docs", "pytorch-cpu", "basenji2", "py312"] }
 docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py312"] }
 py310 = { features = ["pytorch-cpu", "py310"] }
 py311 = { features = ["pytorch-cpu", "py311"] }
 py312 = { features = ["pytorch-cpu", "py312"] }
 py313 = { features = ["pytorch-cpu", "py313"] }
-no-torch = { features = ["py310"] }
+no-torch = { features = ["py310"], no-default-feature = true }
 notebook = { features = ["notebook", "py310"] }
 
 [dependencies]
@@ -34,12 +34,11 @@ memray = "*"
 py-spy = "*"
 icecream = "*"
 patchelf = "*"
-# numpy and numba must come from same source (conda or pypi, not both)
-numpy = "*"
-numba = "*"
+hypothesis = "*"
+filelock = "*"
 
 [pypi-dependencies]
-genvarloader = { path = ".", editable = true }
+genvarloader = { path = ".", editable = true, extras = ["cli"] }
 
 [feature.docs.pypi-dependencies]
 sphinx = ">=7.4.7"

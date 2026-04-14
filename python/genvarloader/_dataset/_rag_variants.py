@@ -264,8 +264,9 @@ class RaggedVariants(ak.Array):
             - :code:`"ilens"` with shape :code:`(batch * ploidy, ~variants)`
             - :code:`"starts"` with shape :code:`(batch * ploidy, ~variants)`
             - :code:`"dosages"` with shape :code:`(batch * ploidy, ~variants)`
-            - :code:`"max_seqlen"`: int, maximum number of variants
+            - :code:`"max_n_vars"`: int, maximum number of variants
             - :code:`"max_alt_len"`: int, maximum length of an alternative allele
+            - :code:`"max_ref_len"`: int, maximum length of a reference allele
 
         """
         batch = {}
@@ -278,12 +279,12 @@ class RaggedVariants(ak.Array):
                     variant_offsets = torch.from_numpy(arr.offsets.astype(np.int32)).to(
                         device
                     )
-                    batch["var_maxlen"] = int(np.diff(arr.offsets).max())
+                    batch["max_n_vars"] = int(np.diff(arr.offsets).max())
                 batch[field] = nt_jag(data, variant_offsets)
             elif field in {"ref", "alt"}:
                 data, offsets, max_alen = _alleles_to_nested_tensor(arr, tokenizer)
                 data = data.to(device)
-                batch[f"{field}_maxlen"] = max_alen
+                batch[f"max_{field}_len"] = max_alen
                 batch[field] = nt_jag(data, offsets)
 
         return batch
