@@ -1,7 +1,7 @@
 [workspace]
 name = "genvarloader"
 channels = ["conda-forge", "bioconda"]
-platforms = ["linux-64"]
+platforms = ["linux-64", "osx-arm64"]
 
 [environments]
 default = { features = ["default", "pytorch-cpu", "py310"] }
@@ -14,12 +14,12 @@ py312 = { features = ["pytorch-cpu", "py312"] }
 py313 = { features = ["pytorch-cpu", "py313"] }
 no-torch = { features = ["py310"], no-default-feature = true }
 notebook = { features = ["notebook", "py310"] }
+splice = { features = ["notebook", "basenji2", "py310", "splice"] }
 
 [dependencies]
 uv = "*"
 samtools = "*"
 bcftools = "*"
-plink2 = "*"
 ruff = "*"
 prek = "*"
 commitizen = "*"
@@ -37,8 +37,11 @@ patchelf = "*"
 hypothesis = "*"
 filelock = "*"
 
+[target.linux-64.dependencies]
+plink2 = "*"
+
 [pypi-dependencies]
-genvarloader = { path = ".", editable = true, extras = ["cli"] }
+genvarloader = { path = ".", editable = true, extras = ["cli"], no-deps = true }
 
 [feature.docs.pypi-dependencies]
 sphinx = ">=7.4.7"
@@ -66,6 +69,7 @@ basenji2-pytorch = ">=0.1.2"
 python = "3.10.*"
 numpy = "1.26.*"
 numba = "==0.59.1"
+tbb = "*"
 
 [feature.py310.pypi-dependencies]
 pyarrow = ">=21"
@@ -85,7 +89,6 @@ more-itertools = "*"
 tqdm = "*"
 pybigwig = "*"
 einops = "*"
-tbb = "*"
 joblib = "*"
 pooch = "*"
 awkward = "*"
@@ -125,3 +128,10 @@ fast_histogram = "*"
 
 [feature.notebook.tasks]
 i-kernel = "ipython kernel install --user --name gvl"
+
+[feature.splice.pypi-dependencies]
+polars-bio = "*"
+
+[feature.splice.tasks]
+install-splice-branch = "uv pip install --force-reinstall --no-deps \"genvarloader @ git+https://github.com/d-laub/GenVarLoader@splice\""
+i-kernel-splice = "ipython kernel install --user --name gvl-splice --display-name \"GVL Splice\""
