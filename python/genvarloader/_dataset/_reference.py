@@ -388,7 +388,7 @@ class RefDataset(Generic[T]):
 
         to_rc = regions[:, 3] == -1
         if to_rc.any():
-            ref = ak.where(to_rc, reverse_complement(ref), ref)
+            ref = ak.to_packed(ak.where(to_rc, reverse_complement(ref), ref))
 
         if out_reshape is not None:
             ref = ref.reshape(out_reshape)  # type: ignore

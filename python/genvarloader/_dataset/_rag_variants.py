@@ -214,17 +214,21 @@ class RaggedVariants(ak.Array):
         elif not to_rc.any():
             return self
 
-        self["alt"] = ak.where(
-            to_rc,
-            reverse_complement(self["alt"]),  # type: ignore
-            self["alt"],
+        self["alt"] = ak.to_packed(
+            ak.where(
+                to_rc,
+                reverse_complement(self["alt"]),  # type: ignore
+                self["alt"],
+            )
         )
 
         if "ref" in self.fields:
-            self["ref"] = ak.where(
-                to_rc,
-                reverse_complement(self["ref"]),  # type: ignore
-                self["ref"],
+            self["ref"] = ak.to_packed(
+                ak.where(
+                    to_rc,
+                    reverse_complement(self["ref"]),  # type: ignore
+                    self["ref"],
+                )
             )
 
         return self
