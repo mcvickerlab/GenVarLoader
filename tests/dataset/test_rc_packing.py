@@ -71,7 +71,9 @@ def case_mixed():
 @parametrize_with_cases("rag, to_rc", cases=".", prefix="case_")
 def test_rc_returns_packed_buffer(rag: Ragged, to_rc: np.ndarray):
     # mimic Dataset._rc exactly
-    packed = Ragged(ak.to_packed(ak.where(to_rc, reverse_complement(rag.to_ak()), rag.to_ak())))
+    packed = Ragged(
+        ak.to_packed(ak.where(to_rc, reverse_complement(rag.to_ak()), rag.to_ak()))
+    )
     assert _buffer_matches_lengths(packed), (
         f"buffer doubled (len={len(packed.data)}, expected={int(packed.lengths.sum())})"
     )
@@ -100,7 +102,9 @@ def test_cat_length_with_packed_input_preserves_content():
     # Route through _rc with all-False to exercise the code path that used to
     # leak the rc branch into the buffer.
     to_rc = np.array([False, False, False, False])
-    after_rc = Ragged(ak.to_packed(ak.where(to_rc, reverse_complement(rag.to_ak()), rag.to_ak())))
+    after_rc = Ragged(
+        ak.to_packed(ak.where(to_rc, reverse_complement(rag.to_ak()), rag.to_ak()))
+    )
     assert _buffer_matches_lengths(after_rc)
 
     offsets = np.array([0, 2, 4], dtype=np.int64)
@@ -275,7 +279,9 @@ def test_cat_length_non_bytes_dtype():
     """Non-bytestring dtypes (e.g. int32 annotations) must also concatenate per-ploidy."""
     # integers per (exon, ploidy)
     data = np.arange(18, dtype=np.int32)
-    lens = np.array([[2, 2], [3, 3], [2, 2]])  # 3 exons × 2 ploid, total 14 slots... wait
+    lens = np.array(
+        [[2, 2], [3, 3], [2, 2]]
+    )  # 3 exons × 2 ploid, total 14 slots... wait
     # 2+2+3+3+2+2 = 14 but data has 18. Let me recompute lengths summing to 18.
     # exon0 p0 len=2, p1 len=3 → 5 bytes; exon1 p0=3, p1=2 → 5 bytes; exon2 p0=4, p1=4 → 8 bytes. Total 18.
     lens = np.array([[2, 3], [3, 2], [4, 4]])
@@ -355,14 +361,18 @@ def test_multi_exon_spliced_matches_fasta_concat(multi_exon_ds_path: Path):
     )
     comp = bytes.maketrans(b"ACGTacgt", b"TGCAtgca")
     with pysam.FastaFile(str(ref_path)) as fa:
-        for row in ds.spliced_regions.with_row_index("sp_idx").head(5).iter_rows(named=True):
+        for row in (
+            ds.spliced_regions.with_row_index("sp_idx").head(5).iter_rows(named=True)
+        ):
             sp_idx = row["sp_idx"]
             strands = set(row["strand"])
             if len(strands) > 1:
                 continue  # mixed-strand synthetic rows are undefined
             strand = strands.pop()
             parts = []
-            for chrom, start, end in zip(row["chrom"], row["chromStart"], row["chromEnd"]):
+            for chrom, start, end in zip(
+                row["chrom"], row["chromStart"], row["chromEnd"]
+            ):
                 part = fa.fetch(chrom, start, end).upper().encode()
                 if strand == "-":
                     part = part.translate(comp)[::-1]

@@ -1683,7 +1683,9 @@ class Dataset:
     ) -> Ragged | RaggedAnnotatedHaps | RaggedVariants | RaggedIntervals:
         if isinstance(rag, Ragged):
             if is_rag_dtype(rag, np.bytes_):
-                rag = Ragged(ak.to_packed(ak.where(to_rc, reverse_complement(rag), rag)))  # type: ignore
+                rag = Ragged(
+                    ak.to_packed(ak.where(to_rc, reverse_complement(rag), rag))
+                )  # type: ignore
             else:
                 rag = Ragged(ak.to_packed(ak.where(to_rc, rag[..., ::-1], rag)))  # type: ignore
         elif isinstance(rag, RaggedAnnotatedHaps):
@@ -1749,7 +1751,9 @@ def _cat_length(
         elif len(fixed) == 2:
             # (b, p, ~l) or (b, t, ~l) — concatenate bytes across the grouped
             # batch slots, per inner index, using awkward.
-            cat = _cat_length_inner(rag, offsets, is_bytestring=is_rag_dtype(rag, np.bytes_))
+            cat = _cat_length_inner(
+                rag, offsets, is_bytestring=is_rag_dtype(rag, np.bytes_)
+            )
         else:  # hap tracks: (b, t, p, ~l) or deeper
             raise NotImplementedError(
                 f"Splicing with shape {rag.shape} (≥3 fixed axes) is not implemented."
