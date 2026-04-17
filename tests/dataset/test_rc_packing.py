@@ -18,6 +18,7 @@ tests pin that behavior by checking both the buffer size and the concrete
 content against the reference.
 """
 
+import os
 import shutil
 from pathlib import Path
 
@@ -30,7 +31,7 @@ import pytest
 from genoray import VCF
 from pytest_cases import parametrize_with_cases
 
-from genvarloader._dataset._impl import _cat_length, _cat_length_inner
+from genvarloader._dataset._impl import _cat_length
 from genvarloader._ragged import Ragged, reverse_complement
 
 
@@ -390,8 +391,6 @@ def test_multi_exon_spliced_matches_fasta_concat(multi_exon_ds_path: Path):
 # ``GVL_CDS_DATASET=<path> GVL_CDS_REF=<bgz> pytest ...`` to enable.
 # ---------------------------------------------------------------------------
 
-
-import os
 
 CDS_DS = os.environ.get("GVL_CDS_DATASET")
 CDS_REF = os.environ.get("GVL_CDS_REF")
