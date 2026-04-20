@@ -19,8 +19,8 @@ repos:
     language: system
     entry: pixi lock
     pass_filenames: false
+    always_run: true
     stages: [pre-push]
-    files: ^pixi\.toml$
 - repo: https://github.com/commitizen-tools/commitizen
   rev: v4.13.8
   hooks:
