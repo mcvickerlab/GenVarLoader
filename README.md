@@ -32,6 +32,7 @@ A PyTorch dependency is **not** included since it may require [special instructi
 1. Clone the repo.
 2. Assuming you have [Pixi](https://pixi.sh/latest/), install pre-commit hooks `pixi run -e dev pre-commit`. If you forget to do this, your PR will likely fail to pass CI checks.
 3. Activate and use the appropriate Pixi environment for your needs. A decent catch-all is `dev` but you might need a different environment if using a GPU.
+4. If you are developing with osx-arm64 you will need to install plink2 manually from [here](https://www.cog-genomics.org/plink/2.0/) in order to run the tests (needs plink2 to convert VCF -> PGEN).
 
 All the tests are designed to use pytest (sans Rust extension code) and live under `tests/`. These tests ensure the code works as intended so they must all pass before any features are merged into `main` and subsequently released. These tests will automatically run on every PR and failing tests will block PRs from being merged.
 
