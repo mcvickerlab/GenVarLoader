@@ -18,9 +18,12 @@ ndarray = "0.16.1"
 numpy = "0.24.0"
 rayon = "1.10.0"
 
+[features]
+extension-module = ["pyo3/extension-module"]
+
 [dependencies.pyo3]
 version = "0.24.2"
-features = ["abi3-py310", "extension-module"]
+features = ["abi3-py310"]
 
 [dev-dependencies]
 rstest = "0.25.0"

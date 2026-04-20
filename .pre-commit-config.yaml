@@ -12,6 +12,15 @@ repos:
   hooks:
   - id: ruff
   - id: ruff-format
+- repo: local
+  hooks:
+  - id: pixi-lock
+    name: pixi lock
+    language: system
+    entry: pixi lock
+    pass_filenames: false
+    always_run: true
+    stages: [pre-push]
 - repo: https://github.com/commitizen-tools/commitizen
   rev: v4.13.8
   hooks:
