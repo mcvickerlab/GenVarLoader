@@ -1,7 +1,7 @@
 [workspace]
 name = "genvarloader"
 channels = ["conda-forge", "bioconda"]
-platforms = ["linux-64"]
+platforms = ["linux-64", "osx-arm64", "osx-64"]
 
 [environments]
 default = { features = ["default", "pytorch-cpu", "py310"] }
@@ -14,12 +14,12 @@ py312 = { features = ["pytorch-cpu", "py312"] }
 py313 = { features = ["pytorch-cpu", "py313"] }
 no-torch = { features = ["py310"], no-default-feature = true }
 notebook = { features = ["notebook", "py310"] }
+splice = { features = ["notebook", "basenji2", "py310", "splice"] }
 
 [dependencies]
 uv = "*"
 samtools = "*"
 bcftools = "*"
-plink2 = "*"
 ruff = "*"
 prek = "*"
 commitizen = "*"
@@ -30,12 +30,18 @@ pytest-cases = "*"
 pytest-cov = "*"
 pytest-benchmark = "*"
 pytest = "*"
-memray = "*"
 py-spy = "*"
 icecream = "*"
-patchelf = "*"
 hypothesis = "*"
 filelock = "*"
+memray = "*"
+patchelf = "*"
+
+[target.linux-64.dependencies]
+plink2 = "*"
+
+[target.osx-64.dependencies]
+plink2 = "*"
 
 [pypi-dependencies]
 genvarloader = { path = ".", editable = true, extras = ["cli"] }
@@ -53,13 +59,16 @@ matplotlib = "*"
 seaborn = "*"
 scipy = "*"
 
-[feature.pytorch-cpu.dependencies]
+[feature.pytorch-cpu.target.linux-64.dependencies]
 pytorch-cpu = ">=2,<3"
 
-[feature.pytorch-gpu.pypi-dependencies]
+[feature.pytorch-cpu.target.osx-arm64.pypi-dependencies]
+torch = ">=2,<3"
+
+[feature.pytorch-gpu.target.linux-64.pypi-dependencies]
 torch = { version = ">=2,<3", index = "https://download.pytorch.org/whl/cu126" }
 
-[feature.basenji2.pypi-dependencies]
+[feature.basenji2.target.linux-64.pypi-dependencies]
 basenji2-pytorch = ">=0.1.2"
 
 [feature.py310.dependencies]
@@ -85,7 +94,6 @@ more-itertools = "*"
 tqdm = "*"
 pybigwig = "*"
 einops = "*"
-tbb = "*"
 joblib = "*"
 pooch = "*"
 awkward = "*"
@@ -101,6 +109,9 @@ python = "3.12.*"
 
 [feature.py313.dependencies]
 python = "3.13.*"
+
+[activation.env]
+RUSTFLAGS = "-C link-arg=-rpath -C link-arg=$CONDA_PREFIX/lib"
 
 [tasks]
 prek-install = "prek install --hook-type commit-msg --hook-type pre-push"
@@ -125,3 +136,10 @@ fast_histogram = "*"
 
 [feature.notebook.tasks]
 i-kernel = "ipython kernel install --user --name gvl"
+
+[feature.splice.pypi-dependencies]
+polars-bio = "*"
+
+[feature.splice.tasks]
+install-splice-branch = "uv pip install --force-reinstall --no-deps \"genvarloader @ git+https://github.com/d-laub/GenVarLoader@splice\""
+i-kernel-splice = "ipython kernel install --user --name gvl-splice --display-name \"GVL Splice\""
