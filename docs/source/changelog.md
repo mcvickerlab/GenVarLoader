@@ -1,3 +1,38 @@
+# Changelog
+
+
+## 0.22.0 (2026-04-20)
+
+### Feat
+
+- SVAR support passes all tests
+- SVAR support passes all tests
+- add members to conveniently inspect dataset splicing info.
+- move indices and transformation to torch dataset/dataloader API since these are generally never needed outside that context. feat: fully functional zero-copy splicing mechanics. fix: bug in rev and rev comp causing garbage output.
+- **wip**: testing spliced return values
+- initial prototype for splicing.
+
+### Fix
+
+- scope RUSTFLAGS rpath to osx-arm64 only
+- support osx-arm64, add contributing instructions
+- enable cargo test for PyO3 extension crate
+- correct ploidy interleaving in _cat_length
+- pack ak.where results in _rc to prevent buffer leak
+- make sure exonic filter gets applied. style: adhere to pre-commit
+- exons are already in reverse order for negative stranded genes
+- virtual indexing for splice indexer
+- data corruption when rc_helper is parallelized
+- map contig names appropriately for bounds checking on ds regions + ref
+- continue migrating to seqpro Ragged, enable logger at module level, add warnings about potential reference genome mismatches
+- add spanning dels to test and fix hap ilens for this case
+- variant index -> variant info mapping
+- add spanning dels to test and fix hap ilens for this case
+- parsing splice info and returning single item instead of list
+- update spliced_bed in with_settings for splice_info
+- __getitem__ type annotations for StrIdx
+- spliced i2d_map
+
 ## 0.21.4 (2026-03-26)
 
 ### Fix
