@@ -1,7 +1,7 @@
 [workspace]
 name = "genvarloader"
 channels = ["conda-forge", "bioconda"]
-platforms = ["linux-64", "osx-arm64"]
+platforms = ["linux-64", "osx-arm64", "osx-64"]
 
 [environments]
 default = { features = ["default", "pytorch-cpu", "py310"] }
@@ -30,18 +30,21 @@ pytest-cases = "*"
 pytest-cov = "*"
 pytest-benchmark = "*"
 pytest = "*"
-memray = "*"
 py-spy = "*"
 icecream = "*"
-patchelf = "*"
 hypothesis = "*"
 filelock = "*"
+memray = "*"
+patchelf = "*"
 
 [target.linux-64.dependencies]
 plink2 = "*"
 
+[target.osx-64.dependencies]
+plink2 = "*"
+
 [pypi-dependencies]
-genvarloader = { path = ".", editable = true, extras = ["cli"], no-deps = true }
+genvarloader = { path = ".", editable = true, extras = ["cli"] }
 
 [feature.docs.pypi-dependencies]
 sphinx = ">=7.4.7"
@@ -56,20 +59,22 @@ matplotlib = "*"
 seaborn = "*"
 scipy = "*"
 
-[feature.pytorch-cpu.dependencies]
+[feature.pytorch-cpu.target.linux-64.dependencies]
 pytorch-cpu = ">=2,<3"
 
-[feature.pytorch-gpu.pypi-dependencies]
+[feature.pytorch-cpu.target.osx-arm64.pypi-dependencies]
+torch = ">=2,<3"
+
+[feature.pytorch-gpu.target.linux-64.pypi-dependencies]
 torch = { version = ">=2,<3", index = "https://download.pytorch.org/whl/cu126" }
 
-[feature.basenji2.pypi-dependencies]
+[feature.basenji2.target.linux-64.pypi-dependencies]
 basenji2-pytorch = ">=0.1.2"
 
 [feature.py310.dependencies]
 python = "3.10.*"
 numpy = "1.26.*"
 numba = "==0.59.1"
-tbb = "*"
 
 [feature.py310.pypi-dependencies]
 pyarrow = ">=21"
@@ -104,6 +109,9 @@ python = "3.12.*"
 
 [feature.py313.dependencies]
 python = "3.13.*"
+
+[activation.env]
+RUSTFLAGS = "-C link-arg=-rpath -C link-arg=$CONDA_PREFIX/lib"
 
 [tasks]
 prek-install = "prek install --hook-type commit-msg --hook-type pre-push"
