@@ -57,6 +57,7 @@ def get_diffs_sparse(
                 diffs[query, hap] = 0
             elif q_starts is not None and q_ends is not None and v_starts is not None:
                 diffs[query, hap] = 0
+                ref_idx = q_starts[query]
                 for v in range(o_s, o_e):
                     if keep is not None and keep_offsets is not None:
                         k_s = keep_offsets[query * ploidy + hap]
@@ -78,6 +79,14 @@ def get_diffs_sparse(
                         # variants are sorted by position so this variant and everything
                         # after will be outside the region
                         break
+
+                    # skip overlapping variants within the region (mirrors reconstruction logic)
+                    if v_start >= q_starts[query] and v_start < ref_idx:
+                        continue
+
+                    # advance ref_idx to end of this variant
+                    if v_end > ref_idx:
+                        ref_idx = v_end
 
                     # deletion may start before region
                     #     0 1 2 3 4 5 6
