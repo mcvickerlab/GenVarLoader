@@ -14,7 +14,8 @@ issue_bed = data_dir / "issue_153.bed"
 def issue_vcf(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("issue_153_vcf")
     gz = tmp / "issue_153.vcf.gz"
-    subprocess.run(["bgzip", "-c", str(issue_vcf_raw)], stdout=gz.open("wb"), check=True)
+    with gz.open("wb") as fh:
+        subprocess.run(["bgzip", "-c", str(issue_vcf_raw)], stdout=fh, check=True)
     subprocess.run(["bcftools", "index", str(gz)], check=True)
     return gz
 
