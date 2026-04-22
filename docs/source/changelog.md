@@ -1,6 +1,15 @@
 # Changelog
 
 
+# Changelog
+
+
+## 0.22.1 (2026-04-22)
+
+### Fix
+
+- skip overlapping variants in get_diffs_sparse to match reconstruction logic
+
 ## 0.22.0 (2026-04-20)
 
 ### Feat
