@@ -25,7 +25,7 @@ Documentation is available [here](https://genvarloader.readthedocs.io/). See our
 pip install genvarloader
 ```
 
-A PyTorch dependency is **not** included since it may require [special instructions](https://pytorch.org/get-started/locally/).
+A PyTorch dependency is **not** included since it may require [special instructions](https://pytorch.org/get-started/locally/). `tbb` and/or `pyomp` are optional dependencies but highly recommended as they can improve throughput for parallelized numba code.
 
 ## Contributing
 

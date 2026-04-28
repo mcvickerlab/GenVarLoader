@@ -26,8 +26,6 @@ dependencies = [
     "tqdm",
     "pybigwig",
     "einops",
-    "tbb; sys_platform == 'linux'",
-    "pyomp; sys_platform == 'darwin'",
     "joblib",
     "pooch",
     "awkward",
@@ -38,6 +36,8 @@ dependencies = [
 
 [project.optional-dependencies]
 cli = ["genvarloader-cli>=0.1.0"]
+tbb = ['tbb']
+pyomp = ['pyomp']
 
 [project.urls]
 source = "https://github.com/mcvickerlab/GenVarLoader"
