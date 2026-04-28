@@ -4,6 +4,15 @@
 # Changelog
 
 
+# Changelog
+
+
+## 0.22.2 (2026-04-28)
+
+### Fix
+
+- make tbb and pyomp optional dependencies
+
 ## 0.22.1 (2026-04-22)
 
 ### Fix
