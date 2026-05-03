@@ -112,14 +112,29 @@ def bed_to_regions(
         pl.col("chromStart", "chromEnd").cast(pl.Int32),
     ]
 
-    if bed.schema.get("strand", None) in (pl.Utf8, pl.Categorical):
-        cols.append(
-            pl.col("strand").replace_strict({"+": 1, "-": -1}, return_dtype=pl.Int32)
-        )
-    elif "strand" not in bed.schema:
+    strand_dtype = bed.schema.get("strand", None)
+    if strand_dtype is None:
         cols.append(pl.lit(1).cast(pl.Int32).alias("strand"))
+    elif strand_dtype == pl.Utf8 or strand_dtype == pl.Categorical:
+        # Cast Categorical -> Utf8 first. The ``in (pl.Utf8, pl.Categorical)``
+        # check that already lives here picks up the right branch, but
+        # ``replace_strict({"+": 1, "-": -1}, ...)`` won't reliably accept
+        # Categorical keys across all supported polars versions -- on the
+        # versions where it doesn't, the strand column survives the
+        # ``select(...)`` call as Categorical, and ``to_numpy()`` on a frame
+        # mixing ``Int32`` + ``Categorical`` collapses to ``dtype=object``,
+        # which downstream numba kernels reject with
+        # ``non-precise type array(pyobject)``. Casting to Utf8 first keeps
+        # the strand column numeric and the regions array stays ``int32``.
+        cols.append(
+            pl.col("strand")
+            .cast(pl.Utf8)
+            .replace_strict({"+": 1, "-": -1}, return_dtype=pl.Int32)
+        )
     else:
-        cols.append(pl.col("strand"))
+        # An already-numeric strand column is allowed; force Int32 so the
+        # final array doesn't widen to int64 / object on int8 / int16 input.
+        cols.append(pl.col("strand").cast(pl.Int32))
 
     return bed.select(cols).to_numpy()
 
