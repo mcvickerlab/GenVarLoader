@@ -6,6 +6,8 @@ environments:
     - url: https://conda.anaconda.org/bioconda/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
@@ -396,6 +398,8 @@ environments:
     - url: https://conda.anaconda.org/bioconda/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -786,6 +790,8 @@ environments:
     - url: https://conda.anaconda.org/bioconda/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
@@ -1319,6 +1325,8 @@ environments:
     - url: https://conda.anaconda.org/bioconda/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -1857,6 +1865,8 @@ environments:
     - url: https://conda.anaconda.org/bioconda/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -2086,6 +2096,8 @@ environments:
     - url: https://conda.anaconda.org/bioconda/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -2640,6 +2652,8 @@ environments:
     - url: https://conda.anaconda.org/bioconda/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
@@ -3030,6 +3044,8 @@ environments:
     - url: https://conda.anaconda.org/bioconda/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
@@ -3413,6 +3429,8 @@ environments:
     - url: https://conda.anaconda.org/bioconda/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
@@ -3792,6 +3810,8 @@ environments:
     - url: https://conda.anaconda.org/bioconda/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
@@ -4172,6 +4192,8 @@ environments:
     - url: https://conda.anaconda.org/bioconda/
     indexes:
     - https://pypi.org/simple
+    options:
+      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -6842,8 +6864,8 @@ packages:
   requires_python: '>=3.10,<3.14'
 - pypi: ./
   name: genvarloader
-  version: 0.22.1
-  sha256: f500292db72bebde15e891f10d5c3960b8846d7bdef5e11d629cce1731751a5f
+  version: 0.22.2
+  sha256: 478881baafa9450d1d365f01f450c370884f872b2d669afd84a3ee3c460876a8
   requires_dist:
   - numpy
   - numba>=0.59.1
@@ -6871,7 +6893,6 @@ packages:
   - tbb ; extra == 'tbb'
   - pyomp ; extra == 'pyomp'
   requires_python: '>=3.10,<3.14'
-  editable: true
 - pypi: https://files.pythonhosted.org/packages/86/b2/04438111b57e3591c09dfa9f220609ae1afacf436fba124a328dbdb9b7b2/genvarloader_cli-0.1.0-py3-none-any.whl
   name: genvarloader-cli
   version: 0.1.0
