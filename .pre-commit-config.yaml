@@ -8,7 +8,7 @@ repos:
   - id: check-case-conflict
   - id: check-yaml
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.15.2
+  rev: v0.15.12
   hooks:
   - id: ruff
   - id: ruff-format
@@ -22,7 +22,7 @@ repos:
     always_run: true
     stages: [pre-push]
 - repo: https://github.com/commitizen-tools/commitizen
-  rev: v4.13.8
+  rev: v4.15.0
   hooks:
   - id: commitizen
     stages: [commit-msg]
