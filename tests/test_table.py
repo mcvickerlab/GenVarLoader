@@ -70,3 +70,46 @@ def test_table_column_map_per_sample_dict():
         column_map={"start": "chromStart", "end": "chromEnd", "value": "signal"},
     )
     assert t.samples == ["s0"]
+
+
+@pytest.fixture
+def long_df():
+    return make_long_df()
+
+
+@pytest.mark.parametrize("ext,reader_attr", [
+    (".csv", "csv"),
+    (".tsv", "tsv"),
+    (".parquet", "parquet"),
+    (".arrow", "arrow"),
+])
+def test_table_from_path_long_form(long_df, tmp_path, ext, reader_attr):
+    p = tmp_path / f"data{ext}"
+    if ext == ".csv":
+        long_df.write_csv(p)
+    elif ext == ".tsv":
+        long_df.write_csv(p, separator="\t")
+    elif ext == ".parquet":
+        long_df.write_parquet(p)
+    elif ext == ".arrow":
+        long_df.write_ipc(p)
+    t = Table.from_path("signal", p)
+    assert t.samples == ["s0", "s1"]
+
+
+def test_table_from_path_per_sample_dict(long_df, tmp_path):
+    s0 = long_df.filter(pl.col("sample_id") == "s0").drop("sample_id")
+    s1 = long_df.filter(pl.col("sample_id") == "s1").drop("sample_id")
+    p0 = tmp_path / "s0.parquet"
+    p1 = tmp_path / "s1.parquet"
+    s0.write_parquet(p0)
+    s1.write_parquet(p1)
+    t = Table.from_path("signal", {"s0": p0, "s1": p1})
+    assert t.samples == ["s0", "s1"]
+
+
+def test_table_from_path_unknown_extension(tmp_path):
+    p = tmp_path / "data.bogus"
+    p.write_text("nope")
+    with pytest.raises(ValueError, match="extension"):
+        Table.from_path("signal", p)

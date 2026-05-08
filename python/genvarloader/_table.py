@@ -19,6 +19,7 @@ polars-bio (v0.20.1) API findings used by Tasks 8/9:
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import polars as pl
@@ -60,6 +61,36 @@ class Table:
             .agg(pl.col("end").max().alias("max_end"))
             .iter_rows(named=True)
         }
+
+    @classmethod
+    def from_path(
+        cls,
+        name: str,
+        path: str | Path | Mapping[str, str | Path],
+        column_map: Mapping[str, str] | None = None,
+    ) -> "Table":
+        if isinstance(path, Mapping):
+            data: dict[str, pl.DataFrame] = {
+                sid: cls._read_path(Path(p)) for sid, p in path.items()
+            }
+            return cls(name, data, column_map)
+        return cls(name, cls._read_path(Path(path)), column_map)
+
+    @staticmethod
+    def _read_path(p: Path) -> pl.DataFrame:
+        suf = p.suffix.lower()
+        if suf == ".csv":
+            return pl.read_csv(p)
+        if suf in (".tsv", ".txt"):
+            return pl.read_csv(p, separator="\t")
+        if suf == ".parquet":
+            return pl.read_parquet(p)
+        if suf in (".arrow", ".ipc"):
+            return pl.read_ipc(p)
+        raise ValueError(
+            f"Unsupported file extension {suf!r}. "
+            "Expected one of .csv, .tsv, .txt, .parquet, .arrow, .ipc."
+        )
 
     @staticmethod
     def _normalize_input(
