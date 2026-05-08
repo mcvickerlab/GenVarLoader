@@ -4,7 +4,10 @@ import shutil
 import warnings
 from importlib.metadata import version
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
+
+if TYPE_CHECKING:
+    from .._types import IntervalTrack
 
 import awkward as ak
 import numpy as np
@@ -206,7 +209,7 @@ def write(
     if bigwigs is not None:
         logger.info("Writing BigWig intervals.")
         for bw in bigwigs:
-            _write_bigwigs(path, gvl_bed, bw, samples, max_mem)
+            _write_track(path, gvl_bed, bw, samples, max_mem)
 
     _metadata = Metadata(**metadata)
     with open(path / "metadata.json", "w") as f:
@@ -577,18 +580,18 @@ def _write_phased_variants_chunk(
     return v_idx_memmap_offset, offsets_memmap_offset, last_offset
 
 
-def _write_bigwigs(
+def _write_track(
     path: Path,
     bed: pl.DataFrame,
-    bigwigs: BigWigs,
+    track: "IntervalTrack",
     samples: list[str] | None,
     max_mem: int,
 ):
     if samples is None:
-        _samples = bigwigs.samples
+        _samples = track.samples
     else:
-        if missing := (set(samples) - set(bigwigs.samples)):
-            raise ValueError(f"Samples {missing} not found in bigwigs.")
+        if missing := (set(samples) - set(track.samples)):
+            raise ValueError(f"Samples {missing} not found in track.")
         _samples = samples
 
     MEM_PER_INTERVAL = (
@@ -604,13 +607,13 @@ def _write_bigwigs(
     ).items():
         pbar.set_description(f"Calculating memory usage for {part.height} regions")
         contig = cast(str, contig)
-        _contig = normalize_contig_name(contig, bigwigs.contigs)
+        _contig = normalize_contig_name(contig, track.contigs)
         if _contig is not None:
             starts = part["chromStart"].to_numpy()
             ends = part["chromEnd"].to_numpy()
 
             # (regions, samples)
-            n_per_query = bigwigs.count_intervals(contig, starts, ends, sample=samples)
+            n_per_query = track.count_intervals(contig, starts, ends, sample=samples)
             # (regions)
             mem_per_r = n_per_query.sum(1) * MEM_PER_INTERVAL
 
@@ -645,7 +648,7 @@ def _write_bigwigs(
     pbar.close()
     bed = bed.with_columns(chunk=pl.lit(chunk_labels))
 
-    out_dir = path / "intervals" / bigwigs.name
+    out_dir = path / "intervals" / track.name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     interval_offset = 0
@@ -662,7 +665,7 @@ def _write_bigwigs(
         ends = part["chromEnd"].to_numpy()
         _offsets = chunk_offsets[chunk_idx]
 
-        intervals = bigwigs._intervals_from_offsets(
+        intervals = track._intervals_from_offsets(
             contig, starts, ends, _offsets, sample=_samples
         )
 
