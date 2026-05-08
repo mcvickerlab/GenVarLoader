@@ -7,6 +7,17 @@
 # Changelog
 
 
+# Changelog
+
+
+## 0.22.3 (2026-05-08)
+
+### Fix
+
+- **ci**: exclude _impl.py from debug-statements hook (match syntax)
+- **deps**: bump seqpro to 0.11.0 and genoray to 2.3.0
+- **_utils**: handle Categorical strand in bed_to_regions
+
 ## 0.22.2 (2026-04-28)
 
 ### Fix
