@@ -175,7 +175,7 @@ def write(
                 available_samples.intersection_update(tr.samples)
         if unavail:
             logger.warning(
-                f"Contigs in queries {set(unavail)} are not found in one or more tracks."
+                f"Contigs in queries {set().union(*unavail)} are not found in one or more tracks."
             )
 
     if available_samples is None:
@@ -624,7 +624,7 @@ def _write_track(
             ends = part["chromEnd"].to_numpy()
 
             # (regions, samples)
-            n_per_query = track.count_intervals(contig, starts, ends, sample=samples)
+            n_per_query = track.count_intervals(contig, starts, ends, sample=_samples)
             # (regions)
             mem_per_r = n_per_query.sum(1) * MEM_PER_INTERVAL
 

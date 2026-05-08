@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING
 
 import polars as pl
 
+from ._utils import normalize_contig_name
+
 if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import ArrayLike, NDArray
@@ -155,8 +157,10 @@ class Table:
         n_regions = len(starts_arr)
         n_samples = len(samples)
 
-        if contig not in self.contigs:
+        _contig = normalize_contig_name(contig, self.contigs)
+        if _contig is None:
             return np.zeros((n_regions, n_samples), dtype=np.int32)
+        contig = _contig
 
         contig_subset = self._df.filter(pl.col("chrom") == contig)
         if contig_subset.height == 0:
@@ -222,7 +226,9 @@ class Table:
         flat_ends = np.empty(total, dtype=np.int32)
         flat_values = np.empty(total, dtype=np.float32)
 
-        if contig in self.contigs and total > 0:
+        _contig = normalize_contig_name(contig, self.contigs)
+        if _contig is not None and total > 0:
+            contig = _contig
             contig_subset = self._df.filter(pl.col("chrom") == contig)
             if contig_subset.height > 0:
                 queries = pl.DataFrame({

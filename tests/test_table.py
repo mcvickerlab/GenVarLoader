@@ -179,3 +179,18 @@ def test_table_intervals_from_offsets_roundtrip():
     assert flat_start[0] == 0 and flat_end[0] == 10 and flat_val[0] == np.float32(1.5)
     # total interval count == sum of counts
     assert len(flat_start) == int(counts.sum())
+
+
+def test_table_count_intervals_normalizes_contig_names():
+    """Table should accept either `chr1` or `1` styled contig names, like BigWigs."""
+    df = pl.DataFrame({
+        "sample_id": ["s0"],
+        "chrom":     ["1"],   # no chr prefix
+        "start":     [0],
+        "end":       [10],
+        "value":     [1.0],
+    })
+    t = Table("signal", df)
+    # Query using "chr1" should match the "1"-keyed table.
+    counts = t.count_intervals("chr1", np.array([0]), np.array([20]), sample=["s0"])
+    np.testing.assert_array_equal(counts, np.array([[1]], dtype=np.int32))
