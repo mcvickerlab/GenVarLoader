@@ -216,6 +216,65 @@ def write(
     warnings.simplefilter("default")
 
 
+def get_splice_bed(
+    gtf: str | Path,
+    contigs: list[str] | None = None,
+    transcript_support_level: str | None = "1",
+    require_multiple_of_3: bool = True,
+) -> pl.DataFrame:
+    """Process a GTF into a BED-compatible DataFrame for splicing datasets.
+
+    The result has columns ``chrom``, ``chromStart`` (0-based), ``chromEnd``,
+    ``strand``, ``gene_name``, ``transcript_id``, and ``exon_number``, sorted by
+    chromosome (natural order) and ``chromStart``. Pass it directly to
+    :func:`gvl.write` for splicing datasets.
+
+    Parameters
+    ----------
+    gtf
+        Path to a GTF file (gzipped or plain) accepted by :func:`seqpro.gtf.scan`.
+    contigs
+        If provided, keep only rows whose ``seqname`` is in this list.
+    transcript_support_level
+        If a string, require the GTF ``transcript_support_level`` attribute to
+        equal it. ``None`` disables the filter.
+    require_multiple_of_3
+        If ``True``, keep only transcripts whose summed CDS length is a
+        multiple of 3.
+    """
+    lf = sp.gtf.scan(gtf)
+
+    if contigs is not None:
+        lf = lf.filter(pl.col("seqname").is_in(contigs))
+
+    lf = lf.filter(pl.col("feature") == "CDS").rename(
+        {"seqname": "chrom", "start": "chromStart", "end": "chromEnd"}
+    )
+
+    lf = lf.with_columns(
+        pl.col("chromStart") - 1,
+        sp.gtf.attr("gene_name"),
+        sp.gtf.attr("transcript_id"),
+        sp.gtf.attr("exon_number").cast(pl.Int32),
+    )
+
+    drop_cols = ["source", "score", "frame", "feature", "attribute"]
+
+    if require_multiple_of_3:
+        lf = lf.with_columns(
+            transcript_len=(pl.col("chromEnd") - pl.col("chromStart"))
+            .sum()
+            .over("transcript_id")
+        ).filter(pl.col("transcript_len") % 3 == 0)
+        drop_cols.append("transcript_len")
+
+    if transcript_support_level is not None:
+        lf = lf.filter(sp.gtf.attr("transcript_support_level") == transcript_support_level)
+
+    df = lf.drop(drop_cols).collect()
+    return sp.bed.sort(df)
+
+
 def _prep_bed(
     bed: pl.DataFrame,
     max_jitter: int | None = None,
