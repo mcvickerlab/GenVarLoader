@@ -48,3 +48,43 @@ def test_write_with_table_only_roundtrip(tmp_path):
     assert arr.shape[0] == 4
     values = sorted(float(v) for v in arr["value"])
     assert values == [1.0, 2.0, 3.0, 4.0]
+
+
+def test_write_with_mixed_bigwigs_and_table(tmp_path):
+    bed = pl.DataFrame({
+        "chrom":      ["chr1"],
+        "chromStart": [0],
+        "chromEnd":   [200],
+    })
+    bw_dir = ddir / "bigwig"
+    bw = gvl.BigWigs("bw_signal", {
+        "sample_0": str(bw_dir / "sample_0.bw"),
+        "sample_1": str(bw_dir / "sample_1.bw"),
+    })
+    # Table sample IDs match the BigWigs sample IDs so the intersection is non-empty.
+    table = gvl.Table("tab_signal", pl.DataFrame({
+        "sample_id": ["sample_0", "sample_1"],
+        "chrom":     ["chr1", "chr1"],
+        "start":     [0, 50],
+        "end":       [10, 60],
+        "value":     [9.0, 8.0],
+    }))
+
+    out = tmp_path / "mixed.gvl"
+    gvl.write(path=out, bed=bed, tracks=[bw, table])
+
+    assert (out / "intervals" / "bw_signal" / "intervals.npy").exists()
+    assert (out / "intervals" / "tab_signal" / "intervals.npy").exists()
+
+
+def test_write_duplicate_track_names_rejected(tmp_path):
+    import pytest
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [100]})
+    t1 = gvl.Table("dup", pl.DataFrame({
+        "sample_id": ["s0"], "chrom": ["chr1"], "start": [0], "end": [10], "value": [1.0],
+    }))
+    t2 = gvl.Table("dup", pl.DataFrame({
+        "sample_id": ["s0"], "chrom": ["chr1"], "start": [50], "end": [60], "value": [2.0],
+    }))
+    with pytest.raises(ValueError, match="[Dd]uplicate"):
+        gvl.write(path=tmp_path / "x.gvl", bed=bed, tracks=[t1, t2])
