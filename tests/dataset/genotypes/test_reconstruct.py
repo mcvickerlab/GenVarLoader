@@ -1,7 +1,8 @@
 # %%
 import numpy as np
-from genoray import SparseGenotypes
 from genoray._svar import dense2sparse
+from genoray._types import V_IDX_TYPE
+from seqpro.rag import Ragged
 from genvarloader._dataset._genotypes import reconstruct_haplotype_from_sparse
 from pytest_cases import parametrize_with_cases
 
@@ -158,7 +159,7 @@ def test_sparse(
     alt_alleles,
     alt_offsets,
     ref,
-    sparse_genos: SparseGenotypes,
+    sparse_genos: Ragged[V_IDX_TYPE],
     ref_start,
     desired,
     annot_v_idxs,

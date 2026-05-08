@@ -5,7 +5,7 @@ platforms = ["linux-64", "osx-arm64"]
 
 [environments]
 default = { features = ["default", "pytorch-cpu", "py310"] }
-dev = { features = ["basenji2"] }
+dev = { features = ["basenji2", "py310"] }
 docs = { features = ["docs", "pytorch-cpu", "basenji2", "py312"] }
 docs-gpu = { features = ["docs", "pytorch-gpu", "basenji2", "py312"] }
 py310 = { features = ["pytorch-cpu", "py310"] }
@@ -20,13 +20,14 @@ splice = { features = ["notebook", "basenji2", "py310", "splice"] }
 RUSTFLAGS = "-C link-arg=-rpath -C link-arg=$CONDA_PREFIX/lib"
 
 [dependencies]
+python = "<3.14"
 uv = "*"
 samtools = "*"
 bcftools = "*"
 ruff = "*"
 prek = "*"
 commitizen = "*"
-maturin = ">=1.6,<2"
+maturin = ">=1.13.1,<2"
 typing-extensions = ">=4.14"
 typer = "*"
 pytest-cases = "*"
@@ -79,8 +80,8 @@ numba = "==0.59.1"
 [feature.py310.pypi-dependencies]
 pyarrow = ">=21"
 hirola = "==0.3"
-seqpro = "==0.9.0"
-genoray = "==2.2.1"
+seqpro = "==0.11.0"
+genoray = "==2.3.0"
 polars = "==1.37.1"
 loguru = "*"
 attrs = "*"
