@@ -27,16 +27,22 @@ jobs:
         platform:
           - runner: ubuntu-22.04
             target: x86_64
+            sccache: true
           - runner: ubuntu-22.04
             target: x86
+            sccache: true
           - runner: ubuntu-22.04
             target: aarch64
+            sccache: false
           - runner: ubuntu-22.04
             target: armv7
+            sccache: false
           - runner: ubuntu-22.04
             target: s390x
+            sccache: false
           - runner: ubuntu-22.04
             target: ppc64le
+            sccache: false
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -47,14 +53,14 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.platform.sccache }}
           manylinux: auto
       - name: Build free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist -i python3.14t
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.platform.sccache }}
           manylinux: auto
       - name: Upload wheels
         uses: actions/upload-artifact@v6
