@@ -25,6 +25,9 @@ from typing import TYPE_CHECKING
 import polars as pl
 
 if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import ArrayLike, NDArray
+
     from ._ragged import RaggedIntervals
 
 
@@ -129,3 +132,74 @@ class Table:
         if not expect_sample_id:
             rename.pop("sample_id", None)
         return df.rename(rename)
+
+    def count_intervals(
+        self,
+        contig: str,
+        starts: "ArrayLike",
+        ends: "ArrayLike",
+        sample: "str | list[str] | None" = None,
+        **kwargs,
+    ) -> "NDArray[np.int32]":
+        import numpy as np
+        import polars_bio as pb
+
+        # BED data is always 0-based half-open; configure polars-bio accordingly.
+        # Both calls are idempotent and safe to repeat.
+        pb.set_option("datafusion.bio.coordinate_system_check", "false")
+        pb.set_option("datafusion.bio.coordinate_system_zero_based", True)
+
+        samples = self._resolve_samples(sample)
+        starts_arr = np.atleast_1d(np.asarray(starts, dtype=np.int64))
+        ends_arr = np.atleast_1d(np.asarray(ends, dtype=np.int64))
+        n_regions = len(starts_arr)
+        n_samples = len(samples)
+
+        if contig not in self.contigs:
+            return np.zeros((n_regions, n_samples), dtype=np.int32)
+
+        contig_subset = self._df.filter(pl.col("chrom") == contig)
+        if contig_subset.height == 0:
+            return np.zeros((n_regions, n_samples), dtype=np.int32)
+
+        queries = pl.DataFrame({
+            "chrom": np.repeat(np.array([contig], dtype=object), n_regions),
+            "start": starts_arr,
+            "end": ends_arr,
+            "_q": np.arange(n_regions, dtype=np.int64),
+        })
+
+        # polars-bio v0.20.1 does not yet support on_cols, so loop per sample.
+        out = np.zeros((n_regions, n_samples), dtype=np.int32)
+        for si, s in enumerate(samples):
+            sub_s = contig_subset.filter(pl.col("sample_id") == s).select("chrom", "start", "end")
+            if sub_s.height == 0:
+                continue
+            counts_df = pb.count_overlaps(
+                queries,
+                sub_s,
+                cols1=["chrom", "start", "end"],
+                cols2=["chrom", "start", "end"],
+                output_type="polars.DataFrame",
+            )
+            # Schema: (chrom, start, end, _q, count). Order matches queries (zero-filled).
+            # Sort by _q to ensure alignment with output array, in case order differs.
+            sorted_counts = counts_df.sort("_q")["count"].to_numpy().astype(np.int32, copy=False)
+            if len(sorted_counts) < n_regions:
+                # Safety fallback: use left-join in case zero-fill wasn't complete.
+                idx_df = pl.DataFrame({"_q": np.arange(n_regions, dtype=np.int64)})
+                filled = idx_df.join(counts_df.select("_q", "count"), on="_q", how="left").fill_null(0)
+                sorted_counts = filled["count"].to_numpy().astype(np.int32, copy=False)
+            out[:, si] = sorted_counts
+        return out
+
+    def _resolve_samples(self, sample: "str | list[str] | None") -> "list[str]":
+        if sample is None:
+            return list(self.samples)
+        if isinstance(sample, str):
+            samples = [sample]
+        else:
+            samples = list(sample)
+        if missing := set(samples) - set(self.samples):
+            raise ValueError(f"Sample(s) {missing} not found in Table.")
+        return samples

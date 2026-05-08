@@ -113,3 +113,39 @@ def test_table_from_path_unknown_extension(tmp_path):
     p.write_text("nope")
     with pytest.raises(ValueError, match="extension"):
         Table.from_path("signal", p)
+
+
+def _brute_count(df: pl.DataFrame, contig: str, starts, ends, samples):
+    """Reference implementation: O(n*m) overlap count."""
+    out = np.zeros((len(starts), len(samples)), dtype=np.int32)
+    for si, s in enumerate(samples):
+        sub = df.filter((pl.col("sample_id") == s) & (pl.col("chrom") == contig))
+        ts = sub["start"].to_numpy()
+        te = sub["end"].to_numpy()
+        for ri, (rs, re_) in enumerate(zip(starts, ends)):
+            out[ri, si] = int(((ts < re_) & (te > rs)).sum())
+    return out
+
+
+def test_table_count_intervals_matches_brute_force():
+    df = pl.DataFrame({
+        "sample_id": ["s0", "s0", "s0", "s1", "s1"],
+        "chrom":     ["chr1", "chr1", "chr1", "chr1", "chr1"],
+        "start":     [0, 50, 200, 10, 60],
+        "end":       [10, 60, 210, 20, 70],
+        "value":     [1.0, 2.0, 3.0, 4.0, 5.0],
+    })
+    t = Table("signal", df)
+    starts = np.array([0, 55, 100, 200], dtype=np.int32)
+    ends   = np.array([15, 65, 150, 205], dtype=np.int32)
+    counts = t.count_intervals("chr1", starts, ends, sample=["s0", "s1"])
+    expected = _brute_count(df, "chr1", starts, ends, ["s0", "s1"])
+    assert counts.dtype == np.int32
+    assert counts.shape == (4, 2)
+    np.testing.assert_array_equal(counts, expected)
+
+
+def test_table_count_intervals_unknown_contig_returns_zeros():
+    t = Table("signal", make_long_df())
+    counts = t.count_intervals("chrX", np.array([0]), np.array([10]), sample=["s0"])
+    np.testing.assert_array_equal(counts, np.zeros((1, 1), dtype=np.int32))
