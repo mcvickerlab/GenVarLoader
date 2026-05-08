@@ -17,6 +17,7 @@ commit_msg.txt
 data/
 .claude/worktrees/*
 .worktrees/
+scratch/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
