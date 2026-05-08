@@ -3,6 +3,7 @@ import polars as pl
 import pytest
 
 from genvarloader._table import Table
+from genvarloader._utils import lengths_to_offsets
 
 
 def make_long_df():
@@ -149,3 +150,32 @@ def test_table_count_intervals_unknown_contig_returns_zeros():
     t = Table("signal", make_long_df())
     counts = t.count_intervals("chrX", np.array([0]), np.array([10]), sample=["s0"])
     np.testing.assert_array_equal(counts, np.zeros((1, 1), dtype=np.int32))
+
+
+def test_table_intervals_from_offsets_roundtrip():
+    df = pl.DataFrame({
+        "sample_id": ["s0", "s0", "s1"],
+        "chrom":     ["chr1", "chr1", "chr1"],
+        "start":     [0, 50, 10],
+        "end":       [10, 60, 20],
+        "value":     [1.5, 2.5, 3.5],
+    })
+    t = Table("signal", df)
+    starts = np.array([0, 40], dtype=np.int32)
+    ends = np.array([15, 70], dtype=np.int32)
+    samples = ["s0", "s1"]
+
+    counts = t.count_intervals("chr1", starts, ends, sample=samples)
+    offsets = lengths_to_offsets(counts.ravel())
+    intervals = t._intervals_from_offsets("chr1", starts, ends, offsets, sample=samples)
+
+    # shape: (regions=2, samples=2, ragged)
+    assert intervals.starts.data.dtype == np.int32
+    assert intervals.values.data.dtype == np.float32
+    # cell (region=0, sample=s0): one interval [0, 10) value 1.5
+    flat_start = intervals.starts.data
+    flat_end   = intervals.ends.data
+    flat_val   = intervals.values.data
+    assert flat_start[0] == 0 and flat_end[0] == 10 and flat_val[0] == np.float32(1.5)
+    # total interval count == sum of counts
+    assert len(flat_start) == int(counts.sum())

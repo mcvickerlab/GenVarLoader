@@ -193,6 +193,86 @@ class Table:
             out[:, si] = sorted_counts
         return out
 
+    def _intervals_from_offsets(
+        self,
+        contig: str,
+        starts: "ArrayLike",
+        ends: "ArrayLike",
+        offsets: "NDArray[np.int64]",
+        sample: "str | list[str] | None" = None,
+        **kwargs,
+    ) -> "RaggedIntervals":
+        import numpy as np
+        import polars_bio as pb
+        from seqpro.rag import Ragged
+
+        from ._ragged import RaggedIntervals
+
+        pb.set_option("datafusion.bio.coordinate_system_check", "false")
+
+        samples = self._resolve_samples(sample)
+        starts_arr = np.atleast_1d(np.asarray(starts, dtype=np.int64))
+        ends_arr = np.atleast_1d(np.asarray(ends, dtype=np.int64))
+        n_regions = len(starts_arr)
+        n_samples = len(samples)
+        shape = (n_regions, n_samples, None)
+
+        total = int(offsets[-1])
+        flat_starts = np.empty(total, dtype=np.int32)
+        flat_ends = np.empty(total, dtype=np.int32)
+        flat_values = np.empty(total, dtype=np.float32)
+
+        if contig in self.contigs and total > 0:
+            contig_subset = self._df.filter(pl.col("chrom") == contig)
+            if contig_subset.height > 0:
+                queries = pl.DataFrame({
+                    "chrom": np.repeat(np.array([contig], dtype=object), n_regions),
+                    "start": starts_arr,
+                    "end": ends_arr,
+                    "_q": np.arange(n_regions, dtype=np.int64),
+                })
+                # Loop per sample: polars-bio v0.20.1 doesn't support on_cols.
+                for si, s in enumerate(samples):
+                    sub_s = (
+                        contig_subset.filter(pl.col("sample_id") == s)
+                        .select("chrom", "start", "end", "value")
+                    )
+                    if sub_s.height == 0:
+                        continue
+                    joined = pb.overlap(
+                        queries,
+                        sub_s,
+                        cols1=["chrom", "start", "end"],
+                        cols2=["chrom", "start", "end"],
+                        output_type="polars.DataFrame",
+                    )
+                    if joined.height == 0:
+                        continue
+                    # Sort by query index, then by table-side start to match BigWigs order.
+                    joined = joined.sort("_q_1", "start_2")
+                    q_idx = joined["_q_1"].to_numpy()
+                    j_starts = joined["start_2"].to_numpy().astype(np.int32, copy=False)
+                    j_ends   = joined["end_2"].to_numpy().astype(np.int32, copy=False)
+                    j_values = joined["value_2"].to_numpy().astype(np.float32, copy=False)
+
+                    # Place each row at offsets[r*n_samples + si] + intra_cell_idx.
+                    if len(q_idx) > 0:
+                        cell_idx = q_idx * n_samples + si
+                        # Build intra-cell running index: reset per cell boundary.
+                        boundaries = np.concatenate(([0], np.where(np.diff(cell_idx) != 0)[0] + 1))
+                        counts_per_cell = np.diff(np.concatenate((boundaries, [len(cell_idx)])))
+                        intra = np.concatenate([np.arange(c) for c in counts_per_cell])
+                        write_pos = offsets[cell_idx] + intra
+                        flat_starts[write_pos] = j_starts
+                        flat_ends[write_pos] = j_ends
+                        flat_values[write_pos] = j_values
+
+        return RaggedIntervals(
+            Ragged.from_offsets(flat_starts, shape, offsets),
+            Ragged.from_offsets(flat_ends, shape, offsets),
+            Ragged.from_offsets(flat_values, shape, offsets),
+        )
+
     def _resolve_samples(self, sample: "str | list[str] | None") -> "list[str]":
         if sample is None:
             return list(self.samples)
