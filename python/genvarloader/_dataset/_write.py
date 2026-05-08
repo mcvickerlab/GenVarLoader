@@ -13,7 +13,6 @@ import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseVar
 from genoray._svar import dense2sparse
 from genoray._types import V_IDX_TYPE
-from seqpro.rag import Ragged
 from genoray._utils import ContigNormalizer, parse_memory
 from loguru import logger
 from more_itertools import mark_ends
@@ -21,6 +20,7 @@ from natsort import natsorted
 from numpy.typing import NDArray
 from packaging.version import Version
 from pydantic import BaseModel, BeforeValidator, PlainSerializer, WithJsonSchema
+from seqpro.rag import Ragged
 from tqdm.auto import tqdm
 
 from .._bigwig import BigWigs
@@ -151,9 +151,9 @@ def write(
     if bigwigs is not None:
         unavail = []
         for bw in bigwigs:
-            if unavailable_contigs := set(contigs) - set(
+            if unavailable_contigs := set(contigs) - {
                 normalize_contig_name(c, contigs) for c in bw.contigs
-            ):
+            }:
                 unavail.append(unavailable_contigs)
             if available_samples is None:
                 available_samples = set(bw.samples)
@@ -228,7 +228,8 @@ def _prep_bed(
             bed = bed.with_columns(strand=pl.lit(1, pl.Int32))
         else:
             bed = bed.with_columns(
-                pl.col("strand")
+                pl
+                .col("strand")
                 .cast(pl.Utf8)
                 .replace_strict({"+": 1, "-": -1, ".": 1}, return_dtype=pl.Int32)
             )
