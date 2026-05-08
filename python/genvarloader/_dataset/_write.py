@@ -518,9 +518,7 @@ def _write_from_svar(
         # compute max_ends for the bed
         shape = (df.height, len(samples), svar.ploidy, None)
         # (r s p ~v)
-        sp_genos = Ragged.from_offsets(
-            svar.genos.data, shape, out.reshape(2, -1)
-        )
+        sp_genos = Ragged.from_offsets(svar.genos.data, shape, out.reshape(2, -1))
         # this is fine if there aren't any overlapping variants that could make a v_idx < -1
         # have a further end than v_idx == -1
         # * calling ak.max() means v_idxs is not a view of svar.genos.data

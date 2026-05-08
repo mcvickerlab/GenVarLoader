@@ -244,9 +244,7 @@ class Haps(Reconstructor[_H]):
             offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
             v_idxs = np.memmap(geno_path, dtype=V_IDX_TYPE, mode="r")
             rag_shape = (*shape[1:], None)
-            genotypes = Ragged.from_offsets(
-                v_idxs, rag_shape, offsets.reshape(2, -1)
-            )
+            genotypes = Ragged.from_offsets(v_idxs, rag_shape, offsets.reshape(2, -1))
 
             if dosage_path.exists():
                 dosages = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
