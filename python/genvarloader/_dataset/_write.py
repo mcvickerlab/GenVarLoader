@@ -252,7 +252,9 @@ def get_splice_bed(
     )
 
     lf = lf.with_columns(
+        pl.col("chrom").cast(pl.Utf8),
         pl.col("chromStart") - 1,
+        pl.col("strand").cast(pl.Utf8),
         sp.gtf.attr("gene_name"),
         sp.gtf.attr("transcript_id"),
         sp.gtf.attr("exon_number").cast(pl.Int32),
