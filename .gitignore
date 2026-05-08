@@ -15,6 +15,7 @@ genvarloader*.tar.gz
 .nfs*
 commit_msg.txt
 data/
+.claude/worktrees/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
