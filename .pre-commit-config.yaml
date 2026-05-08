@@ -5,6 +5,7 @@ repos:
   - id: check-merge-conflict
   - id: debug-statements
     language_version: python3
+    exclude: python/genvarloader/_dataset/_impl\.py
   - id: mixed-line-ending
   - id: check-case-conflict
   - id: check-yaml
