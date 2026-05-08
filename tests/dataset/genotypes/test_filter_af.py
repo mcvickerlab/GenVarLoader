@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
-from genoray import SparseGenotypes
+from genoray._types import V_IDX_TYPE
+from seqpro.rag import Ragged
 from genvarloader._dataset._genotypes import filter_af
 from numpy.typing import NDArray
 from pytest_cases import parametrize_with_cases
@@ -16,7 +17,7 @@ def test_filter_af(
     min_af: float,
     max_af: float,
     offset_idx: NDArray[np.intp],
-    genos: SparseGenotypes,
+    genos: Ragged[V_IDX_TYPE],
     afs: NDArray[np.float32],
     desired_keep: NDArray[np.bool_],
     desired_offsets: NDArray[np.int64],

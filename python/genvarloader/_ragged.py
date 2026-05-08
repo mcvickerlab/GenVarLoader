@@ -11,7 +11,7 @@ from attrs import define
 from awkward.contents import NumpyArray
 from numpy.typing import NDArray
 from phantom import Phantom
-from seqpro.rag import RDTYPE, Ragged, is_rag_dtype
+from seqpro.rag import RDTYPE_co as RDTYPE, Ragged, is_rag_dtype
 
 from ._torch import TORCH_AVAILABLE
 from ._types import AnnotatedHaps

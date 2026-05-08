@@ -14,7 +14,7 @@ from awkward.index import Index64
 from genoray._utils import ContigNormalizer
 from loguru import logger
 from numpy.typing import NDArray
-from seqpro.rag import DTYPE, Ragged, is_rag_dtype
+from seqpro.rag import DTYPE_co as DTYPE, Ragged, is_rag_dtype
 from typing_extensions import NoReturn, Self, assert_never
 
 from .._ragged import (

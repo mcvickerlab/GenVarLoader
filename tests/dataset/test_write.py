@@ -5,7 +5,8 @@ import genvarloader as gvl
 import numpy as np
 import polars as pl
 import seqpro as sp
-from genoray import PGEN, VCF, Reader, SparseGenotypes
+from genoray import PGEN, VCF, Reader
+from seqpro.rag import Ragged
 from genvarloader._utils import lengths_to_offsets
 from polars.testing.asserts import assert_frame_equal
 from pytest import fixture, mark
@@ -51,7 +52,7 @@ def test_write(reader: Reader, bed: pl.DataFrame, ref: Path, tmp_path):
     var_idxs = np.memmap(out / "genotypes" / "variant_idxs.npy", dtype=np.int32)
     offsets = np.memmap(out / "genotypes" / "offsets.npy", dtype=np.int64)
     shape = (*ds.shape, reader.ploidy)
-    actual = SparseGenotypes.from_offsets(var_idxs, shape, offsets).to_awkward()
+    actual = Ragged.from_offsets(var_idxs, (*shape, None), offsets).to_ak()
 
     # *                 0,
     # * 2,3,   3,3,     1,
@@ -95,7 +96,7 @@ def test_write(reader: Reader, bed: pl.DataFrame, ref: Path, tmp_path):
     )
     offsets = lengths_to_offsets(lengths)
     shape = (8, 3, 2)
-    desired = SparseGenotypes.from_offsets(var_idxs, shape, offsets).to_awkward()
+    desired = Ragged.from_offsets(var_idxs, (*shape, None), offsets).to_ak()
 
     max_len = lengths.max()
     for len_ in range(1, max_len + 1):

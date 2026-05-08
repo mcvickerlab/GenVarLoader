@@ -1,7 +1,8 @@
 # %%
 import numpy as np
-from genoray import SparseGenotypes
 from genoray._svar import dense2sparse
+from genoray._types import V_IDX_TYPE
+from seqpro.rag import Ragged
 from genvarloader._dataset._tracks import shift_and_realign_track_sparse
 from pytest_cases import parametrize_with_cases
 
@@ -123,7 +124,7 @@ def test_sparse(
     ilens,
     shift,
     track,
-    sparse_genos: SparseGenotypes,
+    sparse_genos: Ragged[V_IDX_TYPE],
     desired,
     query_start,
 ):

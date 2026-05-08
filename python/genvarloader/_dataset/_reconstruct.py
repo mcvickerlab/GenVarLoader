@@ -14,7 +14,6 @@ from attrs import define, evolve, field
 from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
 from awkward.index import Index
 from einops import repeat
-from genoray._svar import SparseDosages, SparseGenotypes
 from genoray._types import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
 from genoray.exprs import ILEN
 from loguru import logger
@@ -185,9 +184,9 @@ class Haps(Reconstructor[_H]):
     """The reference genome. This is kept in memory."""
     variants: _Variants
     """The variant sites in the dataset. This is kept in memory."""
-    genotypes: SparseGenotypes
+    genotypes: Ragged[V_IDX_TYPE]
     """Shape: (regions, samples, ploidy). The genotypes in the dataset. This is memory mapped."""
-    dosages: SparseDosages | None
+    dosages: Ragged[DOSAGE_TYPE] | None
     kind: type[_H]
     filter: Literal["exonic"] | None
     n_variants: NDArray[np.int32] = field(init=False)
@@ -245,13 +244,13 @@ class Haps(Reconstructor[_H]):
             offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
             v_idxs = np.memmap(geno_path, dtype=V_IDX_TYPE, mode="r")
             rag_shape = (*shape[1:], None)
-            genotypes = SparseGenotypes.from_offsets(
+            genotypes = Ragged.from_offsets(
                 v_idxs, rag_shape, offsets.reshape(2, -1)
             )
 
             if dosage_path.exists():
                 dosages = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
-                dosages = SparseDosages.from_offsets(
+                dosages = Ragged.from_offsets(
                     dosages, rag_shape, offsets.reshape(2, -1)
                 )
 
@@ -274,7 +273,7 @@ class Haps(Reconstructor[_H]):
                 path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
             )
             shape = (len(regions), len(samples), ploidy, None)
-            genotypes = SparseGenotypes.from_offsets(v_idxs, shape, offsets)
+            genotypes = Ragged.from_offsets(v_idxs, shape, offsets)
 
         return cls(
             path=path,
@@ -482,7 +481,7 @@ class Haps(Reconstructor[_H]):
     @staticmethod
     def _get_geno_offset_idx(
         idx: NDArray[np.integer],
-        genotypes: SparseGenotypes,
+        genotypes: Ragged[V_IDX_TYPE],
     ) -> NDArray[np.intp]:
         r_idx, s_idx = np.unravel_index(idx, genotypes.shape[:2])  # type: ignore
         ploid_idx = np.arange(genotypes.shape[-2], dtype=np.intp)
@@ -501,7 +500,7 @@ class Haps(Reconstructor[_H]):
         # TODO: maybe filter variants for region, shifts?
         r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore
         # (b p ~v)
-        genos = cast(SparseGenotypes, self.genotypes[r, s])
+        genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s])
 
         genos = ak.to_packed(genos)
         v_idxs = genos.data
@@ -514,7 +513,7 @@ class Haps(Reconstructor[_H]):
             if self.max_af is not None:
                 keep &= geno_afs <= self.max_af
             _keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
-            genos = SparseGenotypes(ak.to_packed(ak.to_regular(genos[_keep], 1)))
+            genos = Ragged(ak.to_packed(ak.to_regular(genos[_keep], 1)))
             v_idxs = genos.data
         else:
             _keep = None
@@ -553,7 +552,7 @@ class Haps(Reconstructor[_H]):
         return variants
 
     def _get_alleles(
-        self, genos: SparseGenotypes, kind: Literal["alt", "ref"]
+        self, genos: Ragged[V_IDX_TYPE], kind: Literal["alt", "ref"]
     ) -> ak.Array:
         v_idxs = genos.data
 
@@ -574,7 +573,7 @@ class Haps(Reconstructor[_H]):
 
         return alleles
 
-    def _get_info(self, genos: SparseGenotypes, attr: str) -> Ragged[np.number]:
+    def _get_info(self, genos: Ragged[V_IDX_TYPE], attr: str) -> Ragged[np.number]:
         data = self.variants.info[attr][genos.data]
         return Ragged.from_offsets(data, genos.shape, genos.offsets)
 

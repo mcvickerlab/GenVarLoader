@@ -4,7 +4,6 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from einops import repeat
-from genoray._svar import SparseGenotypes
 from genoray._types import POS_TYPE
 from genoray._utils import ContigNormalizer
 from natsort import natsorted
@@ -105,7 +104,7 @@ def get_dummy_dataset(spliced: bool = False):
         + 4 * np.arange(4)[:, None]  # adjust by region/contig offset
     ).astype(np.int32)
     shape = (4, 4, 1, None)
-    dummy_genos = SparseGenotypes.from_offsets(
+    dummy_genos = Ragged.from_offsets(
         data=v_idxs.ravel(),
         shape=shape,
         offsets=np.arange(0, 4 * 4 + 1, dtype=np.int64),  # every entry has 1 variant

@@ -11,8 +11,9 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseVar
-from genoray._svar import SparseGenotypes, dense2sparse
+from genoray._svar import dense2sparse
 from genoray._types import V_IDX_TYPE
+from seqpro.rag import Ragged
 from genoray._utils import ContigNormalizer, parse_memory
 from loguru import logger
 from more_itertools import mark_ends
@@ -306,7 +307,7 @@ def _write_from_vcf(
             vcf._chunk_ranges_with_length(contig, starts, ends, max_mem, VCF.Genos8),
             unextended_var_idxs[contig],
         ):
-            ls_sparse: list[SparseGenotypes] = []
+            ls_sparse: list[Ragged] = []
             offset = 0
             for _, is_last, (chunk_genos, chunk_end, n_ext) in mark_ends(range_):
                 n_vars = chunk_genos.shape[-1]
@@ -342,7 +343,7 @@ def _write_from_vcf(
                     " reference genome used for the BED file coordinates and the one used for the variants."
                 )
 
-            sp_genos = SparseGenotypes.from_lengths(var_idxs, lengths)
+            sp_genos = Ragged.from_lengths(var_idxs, lengths)
             (
                 v_idx_memmap_offsets,
                 offset_memmap_offsets,
@@ -403,7 +404,7 @@ def _write_from_pgen(
         starts = df["chromStart"].to_numpy().copy()
         ends = df["chromEnd"].to_numpy().copy()
         for range_ in pgen._chunk_ranges_with_length(contig, starts, ends, max_mem):
-            ls_sparse: list[SparseGenotypes] = []
+            ls_sparse: list[Ragged] = []
             for _, is_last, (genos, chunk_end, chunk_idxs) in mark_ends(range_):
                 chunk_idxs = chunk_idxs.astype(V_IDX_TYPE)
                 sp_genos = dense2sparse(genos.astype(np.int8), chunk_idxs)
@@ -427,7 +428,7 @@ def _write_from_pgen(
                     " reference genome used for the BED file coordinates and the one used for the variants."
                 )
 
-            sp_genos = SparseGenotypes.from_lengths(var_idxs, lengths)
+            sp_genos = Ragged.from_lengths(var_idxs, lengths)
 
             (
                 v_idx_memmap_offsets,
@@ -517,7 +518,7 @@ def _write_from_svar(
         # compute max_ends for the bed
         shape = (df.height, len(samples), svar.ploidy, None)
         # (r s p ~v)
-        sp_genos = SparseGenotypes.from_offsets(
+        sp_genos = Ragged.from_offsets(
             svar.genos.data, shape, out.reshape(2, -1)
         )
         # this is fine if there aren't any overlapping variants that could make a v_idx < -1
@@ -544,7 +545,7 @@ def _write_from_svar(
 
 def _write_phased_variants_chunk(
     out_dir: Path,
-    genos: SparseGenotypes,
+    genos: Ragged,
     v_idx_memmap_offset: int,
     offsets_memmap_offset: int,
     last_offset: int,
