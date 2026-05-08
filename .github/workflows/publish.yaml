@@ -55,6 +55,9 @@ jobs:
           args: --release --out dist
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.platform.sccache }}
           manylinux: auto
+        env:
+          CFLAGS_aarch64_unknown_linux_gnu: -march=armv8-a
+          CFLAGS_armv7_unknown_linux_gnueabihf: -march=armv7-a
       - name: Build free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -62,6 +65,9 @@ jobs:
           args: --release --out dist -i python3.14t
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.platform.sccache }}
           manylinux: auto
+        env:
+          CFLAGS_aarch64_unknown_linux_gnu: -march=armv8-a
+          CFLAGS_armv7_unknown_linux_gnueabihf: -march=armv7-a
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
