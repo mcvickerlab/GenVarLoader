@@ -9,7 +9,7 @@ from ._bigwig import BigWigs
 from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
 from ._dataset._rag_variants import RaggedVariants
 from ._dataset._reference import RefDataset, Reference
-from ._dataset._write import write
+from ._dataset._write import get_splice_bed, write
 from ._dummy import get_dummy_dataset
 from ._ragged import RaggedAnnotatedHaps, RaggedIntervals
 from ._torch import to_nested_tensor
@@ -20,6 +20,7 @@ __version__ = importlib.metadata.version("genvarloader")
 
 __all__ = [
     "write",
+    "get_splice_bed",
     "Dataset",
     "BigWigs",
     "read_bedlike",
