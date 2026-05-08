@@ -6828,7 +6828,7 @@ packages:
 - pypi: ./
   name: genvarloader
   version: 0.22.2
-  sha256: b086c9f13a089a952d3bdeb67b36f83130051540224c5d4ac0778e81e0fe8404
+  sha256: 2dd6d6ee226d6fb4d7c84510715f2a30e79aac21ef2f0660070e3f531f4e3184
   requires_dist:
   - numpy
   - numba>=0.59.1
