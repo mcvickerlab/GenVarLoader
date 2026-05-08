@@ -2,9 +2,13 @@ import gc
 import json
 import shutil
 import warnings
+from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
+
+if TYPE_CHECKING:
+    from .._types import IntervalTrack
 
 import awkward as ak
 import numpy as np
@@ -23,7 +27,6 @@ from pydantic import BaseModel, BeforeValidator, PlainSerializer, WithJsonSchema
 from seqpro.rag import Ragged
 from tqdm.auto import tqdm
 
-from .._bigwig import BigWigs
 from .._ragged import INTERVAL_DTYPE
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
@@ -55,7 +58,7 @@ def write(
     path: str | Path,
     bed: str | Path | pl.DataFrame,
     variants: str | Path | Reader | None = None,
-    bigwigs: BigWigs | list[BigWigs] | None = None,
+    tracks: "IntervalTrack | Sequence[IntervalTrack] | None" = None,
     samples: list[str] | None = None,
     max_jitter: int | None = None,
     overwrite: bool = False,
@@ -79,8 +82,10 @@ def write(
         command can do all of this normalization. Likewise, see the `PLINK2 documentation <https://www.cog-genomics.org/plink/2.0>`_
         for PGEN files. Commands of interest include :code:`--make-bpgen` for splitting variants,
         :code:`--normalize` for left-aligning and atomizing overlapping variants, and :code:`--ref-from-fa` for REF allele correction.
-    bigwigs
-        BigWigs object or list of BigWigs objects containing intervals
+    tracks
+        An :class:`IntervalTrack` (e.g. :class:`BigWigs`, :class:`Table`) or a
+        sequence of them. Each track must have a unique ``name``; the on-disk
+        layout writes to ``<path>/intervals/<track.name>/``.
     samples
         Samples to include in the dataset
     max_jitter
@@ -98,11 +103,20 @@ def write(
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
 
-    if variants is None and bigwigs is None:
-        raise ValueError("At least one of `vcf` or `bigwigs` must be provided.")
+    if variants is None and tracks is None:
+        raise ValueError("At least one of `variants` or `tracks` must be provided.")
 
-    if isinstance(bigwigs, BigWigs):
-        bigwigs = [bigwigs]
+    if tracks is not None and not isinstance(tracks, (list, tuple)):
+        tracks = [tracks]
+    elif tracks is not None:
+        tracks = list(tracks)
+
+    if tracks is not None:
+        names = [t.name for t in tracks]
+        if len(set(names)) != len(names):
+            raise ValueError(
+                f"Duplicate track names: {names}. Each track must have a unique `name`."
+            )
 
     logger.info(f"Writing dataset to {path}")
 
@@ -148,31 +162,31 @@ def write(
         if available_samples is None:
             available_samples = set(variants.available_samples)
 
-    if bigwigs is not None:
+    if tracks is not None:
         unavail = []
-        for bw in bigwigs:
+        for tr in tracks:
             if unavailable_contigs := set(contigs) - {
-                normalize_contig_name(c, contigs) for c in bw.contigs
+                normalize_contig_name(c, contigs) for c in tr.contigs
             }:
                 unavail.append(unavailable_contigs)
             if available_samples is None:
-                available_samples = set(bw.samples)
+                available_samples = set(tr.samples)
             else:
-                available_samples.intersection_update(bw.samples)
+                available_samples.intersection_update(tr.samples)
         if unavail:
             logger.warning(
-                f"Contigs in queries {set(unavail)} are not found in the BigWigs."
+                f"Contigs in queries {set().union(*unavail)} are not found in one or more tracks."
             )
 
     if available_samples is None:
         raise ValueError(
-            "No samples available across all variant file(s) and/or BigWigs."
+            "No samples available across all variant file(s) and/or tracks."
         )
 
     if samples is None:
         samples = list(available_samples)
     elif missing := (set(samples) - available_samples):
-        raise ValueError(f"Samples {missing} not found in VCF or BigWigs.")
+        raise ValueError(f"Samples {missing} not found in variants or tracks.")
 
     samples.sort()
 
@@ -203,10 +217,10 @@ def write(
 
     _write_regions(path, gvl_bed, contigs)
 
-    if bigwigs is not None:
-        logger.info("Writing BigWig intervals.")
-        for bw in bigwigs:
-            _write_bigwigs(path, gvl_bed, bw, samples, max_mem)
+    if tracks is not None:
+        logger.info("Writing track intervals.")
+        for tr in tracks:
+            _write_track(path, gvl_bed, tr, samples, max_mem)
 
     _metadata = Metadata(**metadata)
     with open(path / "metadata.json", "w") as f:
@@ -638,18 +652,18 @@ def _write_phased_variants_chunk(
     return v_idx_memmap_offset, offsets_memmap_offset, last_offset
 
 
-def _write_bigwigs(
+def _write_track(
     path: Path,
     bed: pl.DataFrame,
-    bigwigs: BigWigs,
+    track: "IntervalTrack",
     samples: list[str] | None,
     max_mem: int,
 ):
     if samples is None:
-        _samples = bigwigs.samples
+        _samples = track.samples
     else:
-        if missing := (set(samples) - set(bigwigs.samples)):
-            raise ValueError(f"Samples {missing} not found in bigwigs.")
+        if missing := (set(samples) - set(track.samples)):
+            raise ValueError(f"Samples {missing} not found in track.")
         _samples = samples
 
     MEM_PER_INTERVAL = (
@@ -665,13 +679,13 @@ def _write_bigwigs(
     ).items():
         pbar.set_description(f"Calculating memory usage for {part.height} regions")
         contig = cast(str, contig)
-        _contig = normalize_contig_name(contig, bigwigs.contigs)
+        _contig = normalize_contig_name(contig, track.contigs)
         if _contig is not None:
             starts = part["chromStart"].to_numpy()
             ends = part["chromEnd"].to_numpy()
 
             # (regions, samples)
-            n_per_query = bigwigs.count_intervals(contig, starts, ends, sample=samples)
+            n_per_query = track.count_intervals(contig, starts, ends, sample=_samples)
             # (regions)
             mem_per_r = n_per_query.sum(1) * MEM_PER_INTERVAL
 
@@ -706,7 +720,7 @@ def _write_bigwigs(
     pbar.close()
     bed = bed.with_columns(chunk=pl.lit(chunk_labels))
 
-    out_dir = path / "intervals" / bigwigs.name
+    out_dir = path / "intervals" / track.name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     interval_offset = 0
@@ -723,7 +737,7 @@ def _write_bigwigs(
         ends = part["chromEnd"].to_numpy()
         _offsets = chunk_offsets[chunk_idx]
 
-        intervals = bigwigs._intervals_from_offsets(
+        intervals = track._intervals_from_offsets(
             contig, starts, ends, _offsets, sample=_samples
         )
 

@@ -6828,7 +6828,7 @@ packages:
 - pypi: ./
   name: genvarloader
   version: 0.22.3
-  sha256: 662f538d52f3cede39af14ab327c976f15e5d8618b6d8fa594cf063286bff803
+  sha256: 6ac7dc729b2fd7dcd893b71cc1f09f7910f03029142364dce7f63a536b3843c2
   requires_dist:
   - numpy
   - numba>=0.59.1
@@ -6852,6 +6852,7 @@ packages:
   - hirola>=0.3,<0.4
   - seqpro>=0.11.0
   - genoray>=2.3.0,<3
+  - polars-bio>=0.20,<0.21
   - genvarloader-cli>=0.1.0 ; extra == 'cli'
   - tbb ; extra == 'tbb'
   - pyomp ; extra == 'pyomp'

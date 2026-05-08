@@ -39,7 +39,7 @@ import genvarloader as gvl
 
 pos_strand = gvl.BigWigs.from_table("pos", "pos_strand.tsv")
 neg_strand = gvl.BigWigs.from_table("neg", "neg_strand.tsv")
-gvl.write("path/to/dataset.gvl", bed="path/to/regions.bed", bigwigs=[pos_strand, neg_strand])
+gvl.write("path/to/dataset.gvl", bed="path/to/regions.bed", tracks=[pos_strand, neg_strand])
 ```
 
 ## How does GVL handle negative stranded regions provided to [`gvl.write()`](api.md#genvarloader.write)?

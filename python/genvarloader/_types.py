@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Protocol, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 import numpy as np
 import polars as pl
 from attrs import define
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
-__all__ = ["Reader"]
+if TYPE_CHECKING:
+    from ._ragged import RaggedIntervals
+
+__all__ = ["Reader", "IntervalTrack"]
 
 
 DTYPE = TypeVar("DTYPE", bound=np.generic)
@@ -119,4 +122,44 @@ class Reader(Protocol):
     def rev_strand_fn(data: NDArray) -> NDArray:
         """Function to reverse (and potentially complement) data for a genomic region. This
         is used when the strand is negative."""
+        ...
+
+
+class IntervalTrack(Protocol):
+    """Structural protocol implemented by interval-valued track readers
+    (e.g. :class:`BigWigs`, :class:`Table`). Used by :func:`gvl.write()` to
+    accept either source via the ``tracks=`` parameter.
+    """
+
+    name: str
+    samples: list[str]
+    contigs: Mapping[str, int]
+
+    def count_intervals(
+        self,
+        contig: str,
+        starts: ArrayLike,
+        ends: ArrayLike,
+        sample: str | list[str] | None = None,
+        **kwargs,
+    ) -> NDArray[np.int32]:
+        """Return shape ``(regions, samples)`` count of intervals overlapping each
+        ``(region, sample)`` cell."""
+        ...
+
+    def _intervals_from_offsets(
+        self,
+        contig: str,
+        starts: ArrayLike,
+        ends: ArrayLike,
+        offsets: NDArray[np.int64],
+        sample: str | list[str] | None = None,
+        **kwargs,
+    ) -> RaggedIntervals:
+        """Read intervals using pre-computed offsets.
+
+        This is unsafe — if ``offsets`` does not match what
+        :meth:`count_intervals` would produce for the same arguments, behaviour
+        is undefined. Use :meth:`count_intervals` to obtain valid offsets.
+        """
         ...

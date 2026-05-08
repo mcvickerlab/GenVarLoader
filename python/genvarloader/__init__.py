@@ -6,6 +6,7 @@ from seqpro.rag import Ragged
 
 from . import data_registry
 from ._bigwig import BigWigs
+from ._table import Table
 from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
 from ._dataset._rag_variants import RaggedVariants
 from ._dataset._reference import RefDataset, Reference
@@ -40,4 +41,5 @@ __all__ = [
     "RaggedAnnotatedHaps",
     "RaggedVariants",
     "RaggedIntervals",
+    "Table",
 ]

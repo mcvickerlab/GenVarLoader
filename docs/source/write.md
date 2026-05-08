@@ -72,7 +72,7 @@ gvl.write(
     path='1000_genomes_lncRNA.gvl',
     bed='lncRNA.bed',  # can be varying length regions
     variants='all_chroms.bcf',
-    bigwigs=[
+    tracks=[
         gvl.BigWigs.from_table('pos', 'pos_strands.tsv'),
         gvl.BigWigs.from_table('neg', 'pos_strands.tsv'),
     ]
