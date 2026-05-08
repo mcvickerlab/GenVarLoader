@@ -155,6 +155,11 @@ class IntervalTrack(Protocol):
         offsets: NDArray[np.int64],
         sample: str | list[str] | None = None,
         **kwargs,
-    ) -> "RaggedIntervals":
-        """Read intervals using offsets pre-computed from :meth:`count_intervals`."""
+    ) -> RaggedIntervals:
+        """Read intervals using pre-computed offsets.
+
+        This is unsafe — if ``offsets`` does not match what
+        :meth:`count_intervals` would produce for the same arguments, behaviour
+        is undefined. Use :meth:`count_intervals` to obtain valid offsets.
+        """
         ...
