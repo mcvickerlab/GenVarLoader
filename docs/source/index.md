@@ -70,7 +70,7 @@ gvl.write(
     path="cool_dataset.gvl",
     bed="interesting_regions.bed",
     variants="cool_variants.vcf",
-    bigwigs=gvl.BigWigs.from_table("bigwig", "samples_to_bigwigs.csv"),
+    tracks=gvl.BigWigs.from_table("bigwig", "samples_to_bigwigs.csv"),
     max_jitter=128,
 )
 ```

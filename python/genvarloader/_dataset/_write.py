@@ -2,6 +2,7 @@ import gc
 import json
 import shutil
 import warnings
+from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
@@ -58,7 +59,7 @@ def write(
     path: str | Path,
     bed: str | Path | pl.DataFrame,
     variants: str | Path | Reader | None = None,
-    bigwigs: BigWigs | list[BigWigs] | None = None,
+    tracks: "IntervalTrack | Sequence[IntervalTrack] | None" = None,
     samples: list[str] | None = None,
     max_jitter: int | None = None,
     overwrite: bool = False,
@@ -82,8 +83,10 @@ def write(
         command can do all of this normalization. Likewise, see the `PLINK2 documentation <https://www.cog-genomics.org/plink/2.0>`_
         for PGEN files. Commands of interest include :code:`--make-bpgen` for splitting variants,
         :code:`--normalize` for left-aligning and atomizing overlapping variants, and :code:`--ref-from-fa` for REF allele correction.
-    bigwigs
-        BigWigs object or list of BigWigs objects containing intervals
+    tracks
+        An :class:`IntervalTrack` (e.g. :class:`BigWigs`, :class:`Table`) or a
+        sequence of them. Each track must have a unique ``name``; the on-disk
+        layout writes to ``<path>/intervals/<track.name>/``.
     samples
         Samples to include in the dataset
     max_jitter
@@ -101,11 +104,20 @@ def write(
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
 
-    if variants is None and bigwigs is None:
-        raise ValueError("At least one of `vcf` or `bigwigs` must be provided.")
+    if variants is None and tracks is None:
+        raise ValueError("At least one of `variants` or `tracks` must be provided.")
 
-    if isinstance(bigwigs, BigWigs):
-        bigwigs = [bigwigs]
+    if tracks is not None and not isinstance(tracks, (list, tuple)):
+        tracks = [tracks]
+    elif tracks is not None:
+        tracks = list(tracks)
+
+    if tracks is not None:
+        names = [t.name for t in tracks]
+        if len(set(names)) != len(names):
+            raise ValueError(
+                f"Duplicate track names: {names}. Each track must have a unique `name`."
+            )
 
     logger.info(f"Writing dataset to {path}")
 
@@ -151,31 +163,31 @@ def write(
         if available_samples is None:
             available_samples = set(variants.available_samples)
 
-    if bigwigs is not None:
+    if tracks is not None:
         unavail = []
-        for bw in bigwigs:
+        for tr in tracks:
             if unavailable_contigs := set(contigs) - {
-                normalize_contig_name(c, contigs) for c in bw.contigs
+                normalize_contig_name(c, contigs) for c in tr.contigs
             }:
                 unavail.append(unavailable_contigs)
             if available_samples is None:
-                available_samples = set(bw.samples)
+                available_samples = set(tr.samples)
             else:
-                available_samples.intersection_update(bw.samples)
+                available_samples.intersection_update(tr.samples)
         if unavail:
             logger.warning(
-                f"Contigs in queries {set(unavail)} are not found in the BigWigs."
+                f"Contigs in queries {set(unavail)} are not found in one or more tracks."
             )
 
     if available_samples is None:
         raise ValueError(
-            "No samples available across all variant file(s) and/or BigWigs."
+            "No samples available across all variant file(s) and/or tracks."
         )
 
     if samples is None:
         samples = list(available_samples)
     elif missing := (set(samples) - available_samples):
-        raise ValueError(f"Samples {missing} not found in VCF or BigWigs.")
+        raise ValueError(f"Samples {missing} not found in variants or tracks.")
 
     samples.sort()
 
@@ -206,10 +218,10 @@ def write(
 
     _write_regions(path, gvl_bed, contigs)
 
-    if bigwigs is not None:
-        logger.info("Writing BigWig intervals.")
-        for bw in bigwigs:
-            _write_track(path, gvl_bed, bw, samples, max_mem)
+    if tracks is not None:
+        logger.info("Writing track intervals.")
+        for tr in tracks:
+            _write_track(path, gvl_bed, tr, samples, max_mem)
 
     _metadata = Metadata(**metadata)
     with open(path / "metadata.json", "w") as f:
