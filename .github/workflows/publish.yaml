@@ -116,6 +116,9 @@ jobs:
           path: dist
 
   windows:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -158,6 +161,9 @@ jobs:
           path: dist
 
   macos:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -217,7 +223,7 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
-    needs: [linux, musllinux, sdist]
+    needs: [linux, musllinux, macos, windows, sdist]
     permissions:
       # Use to sign the release artifacts
       id-token: write
