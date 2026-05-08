@@ -12390,6 +12390,7 @@ packages:
   constrains:
   - __glibc >=2.17
   license: MIT
+  license_family: MIT
   purls: []
   size: 5916663
   timestamp: 1778015597635
@@ -12401,6 +12402,7 @@ packages:
   constrains:
   - __osx >=11.0
   license: MIT
+  license_family: MIT
   purls: []
   size: 5515401
   timestamp: 1778015743544
