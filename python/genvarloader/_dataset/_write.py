@@ -27,7 +27,6 @@ from pydantic import BaseModel, BeforeValidator, PlainSerializer, WithJsonSchema
 from seqpro.rag import Ragged
 from tqdm.auto import tqdm
 
-from .._bigwig import BigWigs
 from .._ragged import INTERVAL_DTYPE
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
