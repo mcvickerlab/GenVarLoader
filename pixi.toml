@@ -101,6 +101,7 @@ awkward = "*"
 pydantic = ">=2,<3"
 hypothesis = "*"
 filelock = "*"
+polars-bio = "*"
 
 [feature.py311.dependencies]
 python = "3.11.*"
