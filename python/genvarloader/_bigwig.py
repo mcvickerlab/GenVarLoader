@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,14 @@ from .genvarloader import intervals as bw_intervals
 class BigWigs(Reader):
     dtype = np.float32  # pyBigWig always returns f32
     chunked = False
+
+    name: str
+    paths: dict[str, str]
+    readers: dict[str, pyBigWig.BigWig] | None
+    samples: list[str]
+    coords: dict[str, NDArray]
+    sizes: dict[str, int]
+    contigs: Mapping[str, int]
 
     def __init__(self, name: str, paths: dict[str, str]) -> None:
         """Read data from bigWig files.

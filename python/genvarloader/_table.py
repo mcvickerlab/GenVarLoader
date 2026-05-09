@@ -42,7 +42,7 @@ class Table:
 
     name: str
     samples: list[str]
-    contigs: dict[str, int]
+    contigs: Mapping[str, int]
 
     def __init__(
         self,
@@ -52,20 +52,19 @@ class Table:
     ) -> None:
         self.name = name
         df = self._normalize_input(data, column_map)
-        df = df.cast(
-            {
-                "sample_id": pl.Utf8,
-                "chrom": pl.Utf8,
-                "start": pl.Int64,
-                "end": pl.Int64,
-                "value": pl.Float32,
-            }
-        ).sort("chrom", "sample_id", "start")
+        df = df.cast({
+            "sample_id": pl.Utf8,
+            "chrom": pl.Utf8,
+            "start": pl.Int64,
+            "end": pl.Int64,
+            "value": pl.Float32,
+        }).sort("chrom", "sample_id", "start")
         self._df = df
         self.samples = sorted(df["sample_id"].unique().to_list())
         self.contigs = {
             row["chrom"]: int(row["max_end"])
-            for row in df.group_by("chrom")
+            for row in df
+            .group_by("chrom")
             .agg(pl.col("end").max().alias("max_end"))
             .iter_rows(named=True)
         }
@@ -76,7 +75,7 @@ class Table:
         name: str,
         path: str | Path | Mapping[str, str | Path],
         column_map: Mapping[str, str] | None = None,
-    ) -> "Table":
+    ) -> Table:
         if isinstance(path, Mapping):
             data: dict[str, pl.DataFrame] = {
                 sid: cls._read_path(Path(p)) for sid, p in path.items()
@@ -147,11 +146,11 @@ class Table:
     def count_intervals(
         self,
         contig: str,
-        starts: "ArrayLike",
-        ends: "ArrayLike",
-        sample: "str | list[str] | None" = None,
+        starts: ArrayLike,
+        ends: ArrayLike,
+        sample: str | list[str] | None = None,
         **kwargs,
-    ) -> "NDArray[np.int32]":
+    ) -> NDArray[np.int32]:
         import numpy as np
         import polars_bio as pb
 
@@ -175,14 +174,12 @@ class Table:
         if contig_subset.height == 0:
             return np.zeros((n_regions, n_samples), dtype=np.int32)
 
-        queries = pl.DataFrame(
-            {
-                "chrom": np.repeat(np.array([contig], dtype=object), n_regions),
-                "start": starts_arr,
-                "end": ends_arr,
-                "_q": np.arange(n_regions, dtype=np.int64),
-            }
-        )
+        queries = pl.DataFrame({
+            "chrom": np.repeat(np.array([contig], dtype=object), n_regions),
+            "start": starts_arr,
+            "end": ends_arr,
+            "_q": np.arange(n_regions, dtype=np.int64),
+        })
 
         # polars-bio v0.20.1 does not yet support on_cols, so loop per sample.
         out = np.zeros((n_regions, n_samples), dtype=np.int32)
@@ -217,12 +214,12 @@ class Table:
     def _intervals_from_offsets(
         self,
         contig: str,
-        starts: "ArrayLike",
-        ends: "ArrayLike",
-        offsets: "NDArray[np.int64]",
-        sample: "str | list[str] | None" = None,
+        starts: ArrayLike,
+        ends: ArrayLike,
+        offsets: NDArray[np.int64],
+        sample: str | list[str] | None = None,
         **kwargs,
-    ) -> "RaggedIntervals":
+    ) -> RaggedIntervals:
         import numpy as np
         import polars_bio as pb
         from seqpro.rag import Ragged
@@ -248,14 +245,12 @@ class Table:
             contig = _contig
             contig_subset = self._df.filter(pl.col("chrom") == contig)
             if contig_subset.height > 0:
-                queries = pl.DataFrame(
-                    {
-                        "chrom": np.repeat(np.array([contig], dtype=object), n_regions),
-                        "start": starts_arr,
-                        "end": ends_arr,
-                        "_q": np.arange(n_regions, dtype=np.int64),
-                    }
-                )
+                queries = pl.DataFrame({
+                    "chrom": np.repeat(np.array([contig], dtype=object), n_regions),
+                    "start": starts_arr,
+                    "end": ends_arr,
+                    "_q": np.arange(n_regions, dtype=np.int64),
+                })
                 # Loop per sample: polars-bio v0.20.1 doesn't support on_cols.
                 for si, s in enumerate(samples):
                     sub_s = contig_subset.filter(pl.col("sample_id") == s).select(
@@ -285,9 +280,10 @@ class Table:
                     if len(q_idx) > 0:
                         cell_idx = q_idx * n_samples + si
                         # Build intra-cell running index: reset per cell boundary.
-                        boundaries = np.concatenate(
-                            ([0], np.where(np.diff(cell_idx) != 0)[0] + 1)
-                        )
+                        boundaries = np.concatenate((
+                            [0],
+                            np.where(np.diff(cell_idx) != 0)[0] + 1,
+                        ))
                         counts_per_cell = np.diff(
                             np.concatenate((boundaries, [len(cell_idx)]))
                         )
@@ -303,7 +299,7 @@ class Table:
             Ragged.from_offsets(flat_values, shape, offsets),
         )
 
-    def _resolve_samples(self, sample: "str | list[str] | None") -> "list[str]":
+    def _resolve_samples(self, sample: str | list[str] | None) -> list[str]:
         if sample is None:
             return list(self.samples)
         if isinstance(sample, str):
