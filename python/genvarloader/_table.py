@@ -2,19 +2,6 @@
 
 Mirrors the :class:`BigWigs` reader API surface so that
 :func:`genvarloader._dataset._write._write_track` can dispatch to either.
-
-polars-bio (v0.20.1) API findings used by Tasks 8/9:
-- `on_cols` is NOT yet supported — AssertionError. Filter by sample manually
-  and loop+concat across samples.
-- `pb.overlap` suffixes all columns: `<col>_1` for left (queries),
-  `<col>_2` for right (table). Output column order: df1 coords, df2 coords,
-  df2 extras, df1 extras.
-- `pb.count_overlaps` zero-fills queries with no matches; output has a
-  `count: Int64` column and no suffixing on the left side.
-- Coordinate system metadata: set per-DataFrame via
-  `df.config_meta.set(coordinate_system_zero_based=True)` (BED is 0-based
-  half-open) OR globally via
-  `pb.set_option("datafusion.bio.coordinate_system_check", "false")`.
 """
 
 from __future__ import annotations
@@ -155,8 +142,6 @@ class Table:
         import numpy as np
         import polars_bio as pb
 
-        # BED data is always 0-based half-open; configure polars-bio accordingly.
-        # Both calls are idempotent and safe to repeat.
         pb.set_option("datafusion.bio.coordinate_system_check", "false")
         pb.set_option("datafusion.bio.coordinate_system_zero_based", True)
 
@@ -171,47 +156,38 @@ class Table:
             return np.zeros((n_regions, n_samples), dtype=np.int32)
         contig = _contig
 
-        contig_subset = self._df.filter(pl.col("chrom") == contig)
+        contig_subset = self._df.filter(
+            (pl.col("chrom") == contig) & pl.col("sample_id").is_in(samples)
+        )
         if contig_subset.height == 0:
             return np.zeros((n_regions, n_samples), dtype=np.int32)
 
+        sample_to_si = {s: i for i, s in enumerate(samples)}
         queries = pl.DataFrame(
             {
-                "chrom": np.repeat(np.array([contig], dtype=object), n_regions),
+                "chrom": np.full(n_regions, contig, dtype=object).astype(str),
                 "start": starts_arr,
                 "end": ends_arr,
                 "_q": np.arange(n_regions, dtype=np.int64),
             }
         )
-
-        # polars-bio v0.20.1 does not yet support on_cols, so loop per sample.
+        result = pb.overlap(
+            queries,
+            contig_subset.select("chrom", "start", "end", "sample_id"),
+            cols1=["chrom", "start", "end"],
+            cols2=["chrom", "start", "end"],
+            output_type="polars.DataFrame",
+        )
         out = np.zeros((n_regions, n_samples), dtype=np.int32)
-        for si, s in enumerate(samples):
-            sub_s = contig_subset.filter(pl.col("sample_id") == s).select(
-                "chrom", "start", "end"
-            )
-            if sub_s.height == 0:
-                continue
-            counts_df = pb.count_overlaps(
-                queries,
-                sub_s,
-                cols1=["chrom", "start", "end"],
-                cols2=["chrom", "start", "end"],
-                output_type="polars.DataFrame",
-            )
-            # Schema: (chrom, start, end, _q, count). Order matches queries (zero-filled).
-            # Sort by _q to ensure alignment with output array, in case order differs.
-            sorted_counts = (
-                counts_df.sort("_q")["count"].to_numpy().astype(np.int32, copy=False)
-            )
-            if len(sorted_counts) < n_regions:
-                # Safety fallback: use left-join in case zero-fill wasn't complete.
-                idx_df = pl.DataFrame({"_q": np.arange(n_regions, dtype=np.int64)})
-                filled = idx_df.join(
-                    counts_df.select("_q", "count"), on="_q", how="left"
-                ).fill_null(0)
-                sorted_counts = filled["count"].to_numpy().astype(np.int32, copy=False)
-            out[:, si] = sorted_counts
+        if result.height == 0:
+            return out
+        q_idx = result["_q_1"].to_numpy()
+        si_idx = np.fromiter(
+            (sample_to_si[s] for s in result["sample_id_2"].to_list()),
+            dtype=np.int64,
+            count=result.height,
+        )
+        np.add.at(out, (q_idx, si_idx), 1)
         return out
 
     def _intervals_from_offsets(
@@ -230,6 +206,7 @@ class Table:
         from ._ragged import RaggedIntervals
 
         pb.set_option("datafusion.bio.coordinate_system_check", "false")
+        pb.set_option("datafusion.bio.coordinate_system_zero_based", True)
 
         samples = self._resolve_samples(sample)
         starts_arr = np.atleast_1d(np.asarray(starts, dtype=np.int64))
@@ -246,59 +223,54 @@ class Table:
         _contig = normalize_contig_name(contig, self.contigs)
         if _contig is not None and total > 0:
             contig = _contig
-            contig_subset = self._df.filter(pl.col("chrom") == contig)
+            contig_subset = self._df.filter(
+                (pl.col("chrom") == contig) & pl.col("sample_id").is_in(samples)
+            )
             if contig_subset.height > 0:
+                sample_to_si = {s: i for i, s in enumerate(samples)}
                 queries = pl.DataFrame(
                     {
-                        "chrom": np.repeat(np.array([contig], dtype=object), n_regions),
+                        "chrom": np.full(n_regions, contig, dtype=object).astype(str),
                         "start": starts_arr,
                         "end": ends_arr,
                         "_q": np.arange(n_regions, dtype=np.int64),
                     }
                 )
-                # Loop per sample: polars-bio v0.20.1 doesn't support on_cols.
-                for si, s in enumerate(samples):
-                    sub_s = contig_subset.filter(pl.col("sample_id") == s).select(
-                        "chrom", "start", "end", "value"
+                joined = pb.overlap(
+                    queries,
+                    contig_subset.select("chrom", "start", "end", "sample_id", "value"),
+                    cols1=["chrom", "start", "end"],
+                    cols2=["chrom", "start", "end"],
+                    output_type="polars.DataFrame",
+                )
+                if joined.height > 0:
+                    # Sort by query index, sample index, then table start (matches BigWigs order).
+                    si_full = np.fromiter(
+                        (sample_to_si[s] for s in joined["sample_id_2"].to_list()),
+                        dtype=np.int64,
+                        count=joined.height,
                     )
-                    if sub_s.height == 0:
-                        continue
-                    joined = pb.overlap(
-                        queries,
-                        sub_s,
-                        cols1=["chrom", "start", "end"],
-                        cols2=["chrom", "start", "end"],
-                        output_type="polars.DataFrame",
-                    )
-                    if joined.height == 0:
-                        continue
-                    # Sort by query index, then by table-side start to match BigWigs order.
-                    joined = joined.sort("_q_1", "start_2")
+                    joined = joined.with_columns(
+                        pl.Series("_si", si_full)
+                    ).sort("_q_1", "_si", "start_2")
                     q_idx = joined["_q_1"].to_numpy()
+                    si_idx = joined["_si"].to_numpy()
                     j_starts = joined["start_2"].to_numpy().astype(np.int32, copy=False)
                     j_ends = joined["end_2"].to_numpy().astype(np.int32, copy=False)
-                    j_values = (
-                        joined["value_2"].to_numpy().astype(np.float32, copy=False)
-                    )
+                    j_values = joined["value_2"].to_numpy().astype(np.float32, copy=False)
 
-                    # Place each row at offsets[r*n_samples + si] + intra_cell_idx.
-                    if len(q_idx) > 0:
-                        cell_idx = q_idx * n_samples + si
-                        # Build intra-cell running index: reset per cell boundary.
-                        boundaries = np.concatenate(
-                            (
-                                [0],
-                                np.where(np.diff(cell_idx) != 0)[0] + 1,
-                            )
-                        )
-                        counts_per_cell = np.diff(
-                            np.concatenate((boundaries, [len(cell_idx)]))
-                        )
-                        intra = np.concatenate([np.arange(c) for c in counts_per_cell])
-                        write_pos = offsets[cell_idx] + intra
-                        flat_starts[write_pos] = j_starts
-                        flat_ends[write_pos] = j_ends
-                        flat_values[write_pos] = j_values
+                    cell_idx = q_idx * n_samples + si_idx
+                    boundaries = np.concatenate(
+                        ([0], np.where(np.diff(cell_idx) != 0)[0] + 1)
+                    )
+                    counts_per_cell = np.diff(
+                        np.concatenate((boundaries, [len(cell_idx)]))
+                    )
+                    intra = np.concatenate([np.arange(c) for c in counts_per_cell])
+                    write_pos = offsets[cell_idx] + intra
+                    flat_starts[write_pos] = j_starts
+                    flat_ends[write_pos] = j_ends
+                    flat_values[write_pos] = j_values
 
         return RaggedIntervals(
             Ragged.from_offsets(flat_starts, shape, offsets),
