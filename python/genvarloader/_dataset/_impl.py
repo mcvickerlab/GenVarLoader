@@ -1076,8 +1076,8 @@ class Dataset:
             import seqpro as sp
 
             regions = gvl.read_bedlike("regions.bed")
-            regions_pr = sp.bed.to_pyranges(regions)
-            ds_regions_pr = sp.bed.to_pyranges(ds.regions.with_row_index())
+            regions_pr = sp.bed.to_pyr(regions)
+            ds_regions_pr = sp.bed.to_pyr(ds.regions.with_row_index())
             r_idx = ds_regions_pr.overlap(regions_pr).df["index"].to_numpy()
             ds.subset_to(regions=r_idx)
         """
