@@ -10,12 +10,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import polars as pl
 
 from ._utils import normalize_contig_name
 
 if TYPE_CHECKING:
-    import numpy as np
     from numpy.typing import ArrayLike, NDArray
 
     from ._ragged import RaggedIntervals
@@ -139,13 +139,14 @@ class Table:
         sample: str | list[str] | None = None,
         **kwargs,
     ) -> NDArray[np.int32]:
-        import numpy as np
         import polars_bio as pb
 
+        # pb.set_option is idempotent; called per-method to avoid relying on import order.
         pb.set_option("datafusion.bio.coordinate_system_check", "false")
         pb.set_option("datafusion.bio.coordinate_system_zero_based", True)
 
         samples = self._resolve_samples(sample)
+        sample_to_si = {s: i for i, s in enumerate(samples)}
         starts_arr = np.atleast_1d(np.asarray(starts, dtype=np.int64))
         ends_arr = np.atleast_1d(np.asarray(ends, dtype=np.int64))
         n_regions = len(starts_arr)
@@ -162,10 +163,9 @@ class Table:
         if contig_subset.height == 0:
             return np.zeros((n_regions, n_samples), dtype=np.int32)
 
-        sample_to_si = {s: i for i, s in enumerate(samples)}
         queries = pl.DataFrame(
             {
-                "chrom": np.full(n_regions, contig, dtype=object).astype(str),
+                "chrom": [contig] * n_regions,
                 "start": starts_arr,
                 "end": ends_arr,
                 "_q": np.arange(n_regions, dtype=np.int64),
@@ -182,10 +182,14 @@ class Table:
         if result.height == 0:
             return out
         q_idx = result["_q_1"].to_numpy()
-        si_idx = np.fromiter(
-            (sample_to_si[s] for s in result["sample_id_2"].to_list()),
-            dtype=np.int64,
-            count=result.height,
+        si_idx = (
+            result.select(
+                pl.col("sample_id_2").replace_strict(
+                    sample_to_si, return_dtype=pl.Int64
+                )
+            )
+            .to_series()
+            .to_numpy()
         )
         np.add.at(out, (q_idx, si_idx), 1)
         return out
@@ -199,16 +203,17 @@ class Table:
         sample: str | list[str] | None = None,
         **kwargs,
     ) -> RaggedIntervals:
-        import numpy as np
         import polars_bio as pb
         from seqpro.rag import Ragged
 
         from ._ragged import RaggedIntervals
 
+        # pb.set_option is idempotent; called per-method to avoid relying on import order.
         pb.set_option("datafusion.bio.coordinate_system_check", "false")
         pb.set_option("datafusion.bio.coordinate_system_zero_based", True)
 
         samples = self._resolve_samples(sample)
+        sample_to_si = {s: i for i, s in enumerate(samples)}
         starts_arr = np.atleast_1d(np.asarray(starts, dtype=np.int64))
         ends_arr = np.atleast_1d(np.asarray(ends, dtype=np.int64))
         n_regions = len(starts_arr)
@@ -227,10 +232,9 @@ class Table:
                 (pl.col("chrom") == contig) & pl.col("sample_id").is_in(samples)
             )
             if contig_subset.height > 0:
-                sample_to_si = {s: i for i, s in enumerate(samples)}
                 queries = pl.DataFrame(
                     {
-                        "chrom": np.full(n_regions, contig, dtype=object).astype(str),
+                        "chrom": [contig] * n_regions,
                         "start": starts_arr,
                         "end": ends_arr,
                         "_q": np.arange(n_regions, dtype=np.int64),
@@ -245,19 +249,31 @@ class Table:
                 )
                 if joined.height > 0:
                     # Sort by query index, sample index, then table start (matches BigWigs order).
-                    si_full = np.fromiter(
-                        (sample_to_si[s] for s in joined["sample_id_2"].to_list()),
-                        dtype=np.int64,
-                        count=joined.height,
+                    si_idx = (
+                        joined.select(
+                            pl.col("sample_id_2").replace_strict(
+                                sample_to_si, return_dtype=pl.Int64
+                            )
+                        )
+                        .to_series()
+                        .to_numpy()
                     )
-                    joined = joined.with_columns(
-                        pl.Series("_si", si_full)
-                    ).sort("_q_1", "_si", "start_2")
                     q_idx = joined["_q_1"].to_numpy()
-                    si_idx = joined["_si"].to_numpy()
-                    j_starts = joined["start_2"].to_numpy().astype(np.int32, copy=False)
-                    j_ends = joined["end_2"].to_numpy().astype(np.int32, copy=False)
-                    j_values = joined["value_2"].to_numpy().astype(np.float32, copy=False)
+                    j_starts_raw = joined["start_2"].to_numpy()
+                    order = np.lexsort(
+                        (j_starts_raw, si_idx, q_idx)
+                    )  # last key = primary
+                    q_idx = q_idx[order]
+                    si_idx = si_idx[order]
+                    j_starts = j_starts_raw[order].astype(np.int32, copy=False)
+                    j_ends = (
+                        joined["end_2"].to_numpy()[order].astype(np.int32, copy=False)
+                    )
+                    j_values = (
+                        joined["value_2"]
+                        .to_numpy()[order]
+                        .astype(np.float32, copy=False)
+                    )
 
                     cell_idx = q_idx * n_samples + si_idx
                     boundaries = np.concatenate(
@@ -266,7 +282,9 @@ class Table:
                     counts_per_cell = np.diff(
                         np.concatenate((boundaries, [len(cell_idx)]))
                     )
-                    intra = np.concatenate([np.arange(c) for c in counts_per_cell])
+                    intra = np.arange(len(cell_idx)) - np.repeat(
+                        boundaries, counts_per_cell
+                    )
                     write_pos = offsets[cell_idx] + intra
                     flat_starts[write_pos] = j_starts
                     flat_ends[write_pos] = j_ends
