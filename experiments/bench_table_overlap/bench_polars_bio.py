@@ -33,33 +33,44 @@ OUT_CSV = Path(__file__).parent / "results_polars_bio.csv"
 
 # ── methods ──────────────────────────────────────────────────────────────────
 
+
 def count_per_sample_loop(table_df, samples, starts, ends, contig="chr1"):
     n_regions, n_samples = len(starts), len(samples)
     contig_subset = table_df.filter(pl.col("chrom") == contig)
     if contig_subset.height == 0:
         return np.zeros((n_regions, n_samples), np.int32)
-    queries = pl.DataFrame({
-        "chrom": np.full(n_regions, contig, dtype=object).astype(str),
-        "start": starts.astype(np.int64),
-        "end": ends.astype(np.int64),
-        "_q": np.arange(n_regions, dtype=np.int64),
-    })
+    queries = pl.DataFrame(
+        {
+            "chrom": np.full(n_regions, contig, dtype=object).astype(str),
+            "start": starts.astype(np.int64),
+            "end": ends.astype(np.int64),
+            "_q": np.arange(n_regions, dtype=np.int64),
+        }
+    )
     out = np.zeros((n_regions, n_samples), np.int32)
     for si, s in enumerate(samples):
-        sub_s = contig_subset.filter(pl.col("sample_id") == s).select("chrom", "start", "end")
+        sub_s = contig_subset.filter(pl.col("sample_id") == s).select(
+            "chrom", "start", "end"
+        )
         if sub_s.height == 0:
             continue
         counts_df = pb.count_overlaps(
-            queries, sub_s,
-            cols1=["chrom", "start", "end"], cols2=["chrom", "start", "end"],
+            queries,
+            sub_s,
+            cols1=["chrom", "start", "end"],
+            cols2=["chrom", "start", "end"],
             output_type="polars.DataFrame",
         )
-        sorted_counts = counts_df.sort("_q")["count"].to_numpy().astype(np.int32, copy=False)
+        sorted_counts = (
+            counts_df.sort("_q")["count"].to_numpy().astype(np.int32, copy=False)
+        )
         if len(sorted_counts) < n_regions:
             idx_df = pl.DataFrame({"_q": np.arange(n_regions, dtype=np.int64)})
             sorted_counts = (
                 idx_df.join(counts_df.select("_q", "count"), on="_q", how="left")
-                .fill_null(0)["count"].to_numpy().astype(np.int32, copy=False)
+                .fill_null(0)["count"]
+                .to_numpy()
+                .astype(np.int32, copy=False)
             )
         out[:, si] = sorted_counts
     return out
@@ -74,18 +85,23 @@ def count_lazy_filter(table_df, samples, starts, ends, contig="chr1"):
     if contig_subset.height == 0:
         return np.zeros((n_regions, n_samples), np.int32)
     _n = n_regions * n_samples
-    queries = pl.DataFrame({
-        "chrom": np.full(_n, contig, dtype=object).astype(str),
-        "start": np.tile(starts, n_samples).astype(np.int64),
-        "end": np.tile(ends, n_samples).astype(np.int64),
-        "_q": np.tile(np.arange(n_regions, dtype=np.int64), n_samples),
-        "sample_id": np.repeat(np.array(samples, dtype=object), n_regions).astype(str),
-    })
+    queries = pl.DataFrame(
+        {
+            "chrom": np.full(_n, contig, dtype=object).astype(str),
+            "start": np.tile(starts, n_samples).astype(np.int64),
+            "end": np.tile(ends, n_samples).astype(np.int64),
+            "_q": np.tile(np.arange(n_regions, dtype=np.int64), n_samples),
+            "sample_id": np.repeat(np.array(samples, dtype=object), n_regions).astype(
+                str
+            ),
+        }
+    )
     result = (
         pb.overlap(
             queries.lazy(),
             contig_subset.select("chrom", "start", "end", "sample_id").lazy(),
-            cols1=["chrom", "start", "end"], cols2=["chrom", "start", "end"],
+            cols1=["chrom", "start", "end"],
+            cols2=["chrom", "start", "end"],
             output_type="polars.LazyFrame",
         )
         .filter(pl.col("sample_id_1") == pl.col("sample_id_2"))
@@ -95,7 +111,9 @@ def count_lazy_filter(table_df, samples, starts, ends, contig="chr1"):
     if result.height == 0:
         return out
     q_idx = result["_q_1"].to_numpy()
-    si_idx = np.fromiter((sample_to_si[s] for s in result["sample_id_1"].to_list()), dtype=np.int64)
+    si_idx = np.fromiter(
+        (sample_to_si[s] for s in result["sample_id_1"].to_list()), dtype=np.int64
+    )
     np.add.at(out, (q_idx, si_idx), 1)
     return out
 
@@ -108,28 +126,34 @@ def count_no_xprod(table_df, samples, starts, ends, contig="chr1"):
     )
     if contig_subset.height == 0:
         return np.zeros((n_regions, n_samples), np.int32)
-    queries = pl.DataFrame({
-        "chrom": np.full(n_regions, contig, dtype=object).astype(str),
-        "start": starts.astype(np.int64),
-        "end": ends.astype(np.int64),
-        "_q": np.arange(n_regions, dtype=np.int64),
-    })
+    queries = pl.DataFrame(
+        {
+            "chrom": np.full(n_regions, contig, dtype=object).astype(str),
+            "start": starts.astype(np.int64),
+            "end": ends.astype(np.int64),
+            "_q": np.arange(n_regions, dtype=np.int64),
+        }
+    )
     result = pb.overlap(
         queries,
         contig_subset.select("chrom", "start", "end", "sample_id"),
-        cols1=["chrom", "start", "end"], cols2=["chrom", "start", "end"],
+        cols1=["chrom", "start", "end"],
+        cols2=["chrom", "start", "end"],
         output_type="polars.DataFrame",
     )
     out = np.zeros((n_regions, n_samples), np.int32)
     if result.height == 0:
         return out
     q_idx = result["_q_1"].to_numpy()
-    si_idx = np.fromiter((sample_to_si[s] for s in result["sample_id_2"].to_list()), dtype=np.int64)
+    si_idx = np.fromiter(
+        (sample_to_si[s] for s in result["sample_id_2"].to_list()), dtype=np.int64
+    )
     np.add.at(out, (q_idx, si_idx), 1)
     return out
 
 
 # ── harness ──────────────────────────────────────────────────────────────────
+
 
 def time_and_mem(fn, *args):
     gc.collect()
@@ -144,14 +168,18 @@ def time_and_mem(fn, *args):
 
 METHODS = [
     ("per_sample_loop", count_per_sample_loop),
-    ("lazy_filter",     count_lazy_filter),
-    ("no_xprod",        count_no_xprod),
+    ("lazy_filter", count_lazy_filter),
+    ("no_xprod", count_no_xprod),
 ]
 
 
 def main():
-    print(f"polars-bio {pb.__version__}  polars {pl.__version__}  python {sys.version.split()[0]}")
-    print(f"{'case':>8} {'n_reg':>6} {'n_s':>5} {'ipp':>5} {'method':>18} {'time_s':>9} {'peak_MB':>9}")
+    print(
+        f"polars-bio {pb.__version__}  polars {pl.__version__}  python {sys.version.split()[0]}"
+    )
+    print(
+        f"{'case':>8} {'n_reg':>6} {'n_s':>5} {'ipp':>5} {'method':>18} {'time_s':>9} {'peak_MB':>9}"
+    )
     print("-" * 68)
 
     rows = []
@@ -169,25 +197,61 @@ def main():
                     t_data = gen_table(n_s, ipp, seed=trial * 31)
                     s_arr, e_arr = gen_queries(n_r, seed=trial * 31 + 1)
                     t, p, _ = time_and_mem(fn, t_data, samples, s_arr, e_arr)
-                    times.append(t); peaks.append(p)
+                    times.append(t)
+                    peaks.append(p)
                 t_med = float(np.median(times))
                 t_std = float(np.std(times))
                 p_med = float(np.median(peaks))
-                print(f"{case['name']:>8} {n_r:>6} {n_s:>5} {ipp:>5} {m_name:>18} {t_med:>9.3f}±{t_std:.3f} {p_med:>9.1f}")
+                print(
+                    f"{case['name']:>8} {n_r:>6} {n_s:>5} {ipp:>5} {m_name:>18} {t_med:>9.3f}±{t_std:.3f} {p_med:>9.1f}"
+                )
                 for i, (t, p) in enumerate(zip(times, peaks)):
-                    rows.append({"backend": "polars_bio", "method": m_name,
-                                 "case": case["name"], "n_regions": n_r,
-                                 "n_samples": n_s, "ipp": ipp,
-                                 "trial": i, "time_s": t, "peak_MB": p})
+                    rows.append(
+                        {
+                            "backend": "polars_bio",
+                            "method": m_name,
+                            "case": case["name"],
+                            "n_regions": n_r,
+                            "n_samples": n_s,
+                            "ipp": ipp,
+                            "trial": i,
+                            "time_s": t,
+                            "peak_MB": p,
+                        }
+                    )
             except Exception as e:
-                print(f"{case['name']:>8} {n_r:>6} {n_s:>5} {ipp:>5} {m_name:>18} FAIL ({e!s:.40})")
-                rows.append({"backend": "polars_bio", "method": m_name,
-                              "case": case["name"], "n_regions": n_r,
-                              "n_samples": n_s, "ipp": ipp,
-                              "trial": 0, "time_s": None, "peak_MB": None})
+                print(
+                    f"{case['name']:>8} {n_r:>6} {n_s:>5} {ipp:>5} {m_name:>18} FAIL ({e!s:.40})"
+                )
+                rows.append(
+                    {
+                        "backend": "polars_bio",
+                        "method": m_name,
+                        "case": case["name"],
+                        "n_regions": n_r,
+                        "n_samples": n_s,
+                        "ipp": ipp,
+                        "trial": 0,
+                        "time_s": None,
+                        "peak_MB": None,
+                    }
+                )
 
     with OUT_CSV.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["backend","method","case","n_regions","n_samples","ipp","trial","time_s","peak_MB"])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "backend",
+                "method",
+                "case",
+                "n_regions",
+                "n_samples",
+                "ipp",
+                "trial",
+                "time_s",
+                "peak_MB",
+            ],
+        )
         writer.writeheader()
         writer.writerows(rows)
     print(f"\nResults written to {OUT_CSV}")
