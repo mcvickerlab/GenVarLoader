@@ -16,6 +16,7 @@ polars-bio (v0.20.1) API findings used by Tasks 8/9:
   half-open) OR globally via
   `pb.set_option("datafusion.bio.coordinate_system_check", "false")`.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -51,13 +52,15 @@ class Table:
     ) -> None:
         self.name = name
         df = self._normalize_input(data, column_map)
-        df = df.cast({
-            "sample_id": pl.Utf8,
-            "chrom": pl.Utf8,
-            "start": pl.Int64,
-            "end": pl.Int64,
-            "value": pl.Float32,
-        }).sort("chrom", "sample_id", "start")
+        df = df.cast(
+            {
+                "sample_id": pl.Utf8,
+                "chrom": pl.Utf8,
+                "start": pl.Int64,
+                "end": pl.Int64,
+                "value": pl.Float32,
+            }
+        ).sort("chrom", "sample_id", "start")
         self._df = df
         self.samples = sorted(df["sample_id"].unique().to_list())
         self.contigs = {
@@ -108,7 +111,9 @@ class Table:
             # dict[sample_id, df] without sample_id col
             frames: list[pl.DataFrame] = []
             for sid, sub in data.items():
-                renamed = Table._apply_column_map(sub, column_map, expect_sample_id=False)
+                renamed = Table._apply_column_map(
+                    sub, column_map, expect_sample_id=False
+                )
                 frames.append(renamed.with_columns(sample_id=pl.lit(sid)))
             if not frames:
                 raise ValueError("Empty mapping passed to Table.")
@@ -130,7 +135,11 @@ class Table:
         if not column_map:
             return df
         # column_map is canonical -> actual; invert to actual -> canonical for rename
-        rename = {actual: canonical for canonical, actual in column_map.items() if actual in df.columns}
+        rename = {
+            actual: canonical
+            for canonical, actual in column_map.items()
+            if actual in df.columns
+        }
         if not expect_sample_id:
             rename.pop("sample_id", None)
         return df.rename(rename)
@@ -166,17 +175,21 @@ class Table:
         if contig_subset.height == 0:
             return np.zeros((n_regions, n_samples), dtype=np.int32)
 
-        queries = pl.DataFrame({
-            "chrom": np.repeat(np.array([contig], dtype=object), n_regions),
-            "start": starts_arr,
-            "end": ends_arr,
-            "_q": np.arange(n_regions, dtype=np.int64),
-        })
+        queries = pl.DataFrame(
+            {
+                "chrom": np.repeat(np.array([contig], dtype=object), n_regions),
+                "start": starts_arr,
+                "end": ends_arr,
+                "_q": np.arange(n_regions, dtype=np.int64),
+            }
+        )
 
         # polars-bio v0.20.1 does not yet support on_cols, so loop per sample.
         out = np.zeros((n_regions, n_samples), dtype=np.int32)
         for si, s in enumerate(samples):
-            sub_s = contig_subset.filter(pl.col("sample_id") == s).select("chrom", "start", "end")
+            sub_s = contig_subset.filter(pl.col("sample_id") == s).select(
+                "chrom", "start", "end"
+            )
             if sub_s.height == 0:
                 continue
             counts_df = pb.count_overlaps(
@@ -188,11 +201,15 @@ class Table:
             )
             # Schema: (chrom, start, end, _q, count). Order matches queries (zero-filled).
             # Sort by _q to ensure alignment with output array, in case order differs.
-            sorted_counts = counts_df.sort("_q")["count"].to_numpy().astype(np.int32, copy=False)
+            sorted_counts = (
+                counts_df.sort("_q")["count"].to_numpy().astype(np.int32, copy=False)
+            )
             if len(sorted_counts) < n_regions:
                 # Safety fallback: use left-join in case zero-fill wasn't complete.
                 idx_df = pl.DataFrame({"_q": np.arange(n_regions, dtype=np.int64)})
-                filled = idx_df.join(counts_df.select("_q", "count"), on="_q", how="left").fill_null(0)
+                filled = idx_df.join(
+                    counts_df.select("_q", "count"), on="_q", how="left"
+                ).fill_null(0)
                 sorted_counts = filled["count"].to_numpy().astype(np.int32, copy=False)
             out[:, si] = sorted_counts
         return out
@@ -231,17 +248,18 @@ class Table:
             contig = _contig
             contig_subset = self._df.filter(pl.col("chrom") == contig)
             if contig_subset.height > 0:
-                queries = pl.DataFrame({
-                    "chrom": np.repeat(np.array([contig], dtype=object), n_regions),
-                    "start": starts_arr,
-                    "end": ends_arr,
-                    "_q": np.arange(n_regions, dtype=np.int64),
-                })
+                queries = pl.DataFrame(
+                    {
+                        "chrom": np.repeat(np.array([contig], dtype=object), n_regions),
+                        "start": starts_arr,
+                        "end": ends_arr,
+                        "_q": np.arange(n_regions, dtype=np.int64),
+                    }
+                )
                 # Loop per sample: polars-bio v0.20.1 doesn't support on_cols.
                 for si, s in enumerate(samples):
-                    sub_s = (
-                        contig_subset.filter(pl.col("sample_id") == s)
-                        .select("chrom", "start", "end", "value")
+                    sub_s = contig_subset.filter(pl.col("sample_id") == s).select(
+                        "chrom", "start", "end", "value"
                     )
                     if sub_s.height == 0:
                         continue
@@ -258,15 +276,21 @@ class Table:
                     joined = joined.sort("_q_1", "start_2")
                     q_idx = joined["_q_1"].to_numpy()
                     j_starts = joined["start_2"].to_numpy().astype(np.int32, copy=False)
-                    j_ends   = joined["end_2"].to_numpy().astype(np.int32, copy=False)
-                    j_values = joined["value_2"].to_numpy().astype(np.float32, copy=False)
+                    j_ends = joined["end_2"].to_numpy().astype(np.int32, copy=False)
+                    j_values = (
+                        joined["value_2"].to_numpy().astype(np.float32, copy=False)
+                    )
 
                     # Place each row at offsets[r*n_samples + si] + intra_cell_idx.
                     if len(q_idx) > 0:
                         cell_idx = q_idx * n_samples + si
                         # Build intra-cell running index: reset per cell boundary.
-                        boundaries = np.concatenate(([0], np.where(np.diff(cell_idx) != 0)[0] + 1))
-                        counts_per_cell = np.diff(np.concatenate((boundaries, [len(cell_idx)])))
+                        boundaries = np.concatenate(
+                            ([0], np.where(np.diff(cell_idx) != 0)[0] + 1)
+                        )
+                        counts_per_cell = np.diff(
+                            np.concatenate((boundaries, [len(cell_idx)]))
+                        )
                         intra = np.concatenate([np.arange(c) for c in counts_per_cell])
                         write_pos = offsets[cell_idx] + intra
                         flat_starts[write_pos] = j_starts

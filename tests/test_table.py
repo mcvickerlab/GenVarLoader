@@ -7,13 +7,15 @@ from genvarloader._utils import lengths_to_offsets
 
 
 def make_long_df():
-    return pl.DataFrame({
-        "sample_id": ["s0", "s0", "s1", "s1"],
-        "chrom": ["chr1", "chr1", "chr1", "chr2"],
-        "start": [10, 100, 20, 0],
-        "end":   [20, 110, 30, 5],
-        "value": [1.0, 2.0, 3.0, 4.0],
-    })
+    return pl.DataFrame(
+        {
+            "sample_id": ["s0", "s0", "s1", "s1"],
+            "chrom": ["chr1", "chr1", "chr1", "chr2"],
+            "start": [10, 100, 20, 0],
+            "end": [20, 110, 30, 5],
+            "value": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
 
 
 def test_table_init_from_long_df():
@@ -33,8 +35,12 @@ def test_table_init_missing_canonical_column_raises():
 
 def test_table_init_from_dict_of_dfs():
     per_sample = {
-        "s0": pl.DataFrame({"chrom": ["chr1"], "start": [10], "end": [20], "value": [1.0]}),
-        "s1": pl.DataFrame({"chrom": ["chr2"], "start": [0],  "end": [5],  "value": [2.0]}),
+        "s0": pl.DataFrame(
+            {"chrom": ["chr1"], "start": [10], "end": [20], "value": [1.0]}
+        ),
+        "s1": pl.DataFrame(
+            {"chrom": ["chr2"], "start": [0], "end": [5], "value": [2.0]}
+        ),
     }
     t = Table("signal", per_sample)
     assert t.samples == ["s0", "s1"]
@@ -42,18 +48,24 @@ def test_table_init_from_dict_of_dfs():
 
 
 def test_table_column_map_renames_long_form():
-    df = pl.DataFrame({
-        "donor":      ["s0"],
-        "chrom":      ["chr1"],
-        "chromStart": [10],
-        "chromEnd":   [20],
-        "signal":     [1.5],
-    })
+    df = pl.DataFrame(
+        {
+            "donor": ["s0"],
+            "chrom": ["chr1"],
+            "chromStart": [10],
+            "chromEnd": [20],
+            "signal": [1.5],
+        }
+    )
     t = Table(
         "signal",
         df,
-        column_map={"sample_id": "donor", "start": "chromStart",
-                    "end": "chromEnd", "value": "signal"},
+        column_map={
+            "sample_id": "donor",
+            "start": "chromStart",
+            "end": "chromEnd",
+            "value": "signal",
+        },
     )
     assert t.samples == ["s0"]
     assert t.contigs["chr1"] == 20
@@ -61,9 +73,14 @@ def test_table_column_map_renames_long_form():
 
 def test_table_column_map_per_sample_dict():
     per_sample = {
-        "s0": pl.DataFrame({
-            "chrom": ["chr1"], "chromStart": [10], "chromEnd": [20], "signal": [1.5],
-        }),
+        "s0": pl.DataFrame(
+            {
+                "chrom": ["chr1"],
+                "chromStart": [10],
+                "chromEnd": [20],
+                "signal": [1.5],
+            }
+        ),
     }
     t = Table(
         "signal",
@@ -78,12 +95,15 @@ def long_df():
     return make_long_df()
 
 
-@pytest.mark.parametrize("ext,reader_attr", [
-    (".csv", "csv"),
-    (".tsv", "tsv"),
-    (".parquet", "parquet"),
-    (".arrow", "arrow"),
-])
+@pytest.mark.parametrize(
+    "ext,reader_attr",
+    [
+        (".csv", "csv"),
+        (".tsv", "tsv"),
+        (".parquet", "parquet"),
+        (".arrow", "arrow"),
+    ],
+)
 def test_table_from_path_long_form(long_df, tmp_path, ext, reader_attr):
     p = tmp_path / f"data{ext}"
     if ext == ".csv":
@@ -129,16 +149,18 @@ def _brute_count(df: pl.DataFrame, contig: str, starts, ends, samples):
 
 
 def test_table_count_intervals_matches_brute_force():
-    df = pl.DataFrame({
-        "sample_id": ["s0", "s0", "s0", "s1", "s1"],
-        "chrom":     ["chr1", "chr1", "chr1", "chr1", "chr1"],
-        "start":     [0, 50, 200, 10, 60],
-        "end":       [10, 60, 210, 20, 70],
-        "value":     [1.0, 2.0, 3.0, 4.0, 5.0],
-    })
+    df = pl.DataFrame(
+        {
+            "sample_id": ["s0", "s0", "s0", "s1", "s1"],
+            "chrom": ["chr1", "chr1", "chr1", "chr1", "chr1"],
+            "start": [0, 50, 200, 10, 60],
+            "end": [10, 60, 210, 20, 70],
+            "value": [1.0, 2.0, 3.0, 4.0, 5.0],
+        }
+    )
     t = Table("signal", df)
     starts = np.array([0, 55, 100, 200], dtype=np.int32)
-    ends   = np.array([15, 65, 150, 205], dtype=np.int32)
+    ends = np.array([15, 65, 150, 205], dtype=np.int32)
     counts = t.count_intervals("chr1", starts, ends, sample=["s0", "s1"])
     expected = _brute_count(df, "chr1", starts, ends, ["s0", "s1"])
     assert counts.dtype == np.int32
@@ -153,13 +175,15 @@ def test_table_count_intervals_unknown_contig_returns_zeros():
 
 
 def test_table_intervals_from_offsets_roundtrip():
-    df = pl.DataFrame({
-        "sample_id": ["s0", "s0", "s1"],
-        "chrom":     ["chr1", "chr1", "chr1"],
-        "start":     [0, 50, 10],
-        "end":       [10, 60, 20],
-        "value":     [1.5, 2.5, 3.5],
-    })
+    df = pl.DataFrame(
+        {
+            "sample_id": ["s0", "s0", "s1"],
+            "chrom": ["chr1", "chr1", "chr1"],
+            "start": [0, 50, 10],
+            "end": [10, 60, 20],
+            "value": [1.5, 2.5, 3.5],
+        }
+    )
     t = Table("signal", df)
     starts = np.array([0, 40], dtype=np.int32)
     ends = np.array([15, 70], dtype=np.int32)
@@ -174,8 +198,8 @@ def test_table_intervals_from_offsets_roundtrip():
     assert intervals.values.data.dtype == np.float32
     # cell (region=0, sample=s0): one interval [0, 10) value 1.5
     flat_start = intervals.starts.data
-    flat_end   = intervals.ends.data
-    flat_val   = intervals.values.data
+    flat_end = intervals.ends.data
+    flat_val = intervals.values.data
     assert flat_start[0] == 0 and flat_end[0] == 10 and flat_val[0] == np.float32(1.5)
     # total interval count == sum of counts
     assert len(flat_start) == int(counts.sum())
@@ -183,13 +207,15 @@ def test_table_intervals_from_offsets_roundtrip():
 
 def test_table_count_intervals_normalizes_contig_names():
     """Table should accept either `chr1` or `1` styled contig names, like BigWigs."""
-    df = pl.DataFrame({
-        "sample_id": ["s0"],
-        "chrom":     ["1"],   # no chr prefix
-        "start":     [0],
-        "end":       [10],
-        "value":     [1.0],
-    })
+    df = pl.DataFrame(
+        {
+            "sample_id": ["s0"],
+            "chrom": ["1"],  # no chr prefix
+            "start": [0],
+            "end": [10],
+            "value": [1.0],
+        }
+    )
     t = Table("signal", df)
     # Query using "chr1" should match the "1"-keyed table.
     counts = t.count_intervals("chr1", np.array([0]), np.array([20]), sample=["s0"])

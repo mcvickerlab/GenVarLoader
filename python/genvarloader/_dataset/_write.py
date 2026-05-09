@@ -285,7 +285,9 @@ def get_splice_bed(
         drop_cols.append("transcript_len")
 
     if transcript_support_level is not None:
-        lf = lf.filter(sp.gtf.attr("transcript_support_level") == transcript_support_level)
+        lf = lf.filter(
+            sp.gtf.attr("transcript_support_level") == transcript_support_level
+        )
 
     df = lf.drop(drop_cols).collect()
     return sp.bed.sort(df)
@@ -303,8 +305,7 @@ def _prep_bed(
             bed = bed.with_columns(strand=pl.lit(1, pl.Int32))
         else:
             bed = bed.with_columns(
-                pl
-                .col("strand")
+                pl.col("strand")
                 .cast(pl.Utf8)
                 .replace_strict({"+": 1, "-": -1, ".": 1}, return_dtype=pl.Int32)
             )

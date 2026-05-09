@@ -8,8 +8,10 @@ def test_bigwigs_satisfies_interval_track_protocol():
     data_dir = Path(__file__).parent / "data" / "bigwig"
     bw = BigWigs(
         "signal",
-        {"sample_0": str(data_dir / "sample_0.bw"),
-         "sample_1": str(data_dir / "sample_1.bw")},
+        {
+            "sample_0": str(data_dir / "sample_0.bw"),
+            "sample_1": str(data_dir / "sample_1.bw"),
+        },
     )
     # runtime structural check: required attributes/methods are present
     assert hasattr(bw, "name")
