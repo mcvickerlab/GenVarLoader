@@ -7,12 +7,18 @@
 
 .. autofunction:: write
 
+.. autofunction:: get_splice_bed
+
 .. autofunction:: read_bedlike
 
 .. autofunction:: with_length
 
 .. autoclass:: BigWigs
     :members: __init__, from_table
+    :exclude-members: __new__
+
+.. autoclass:: Table
+    :members:
     :exclude-members: __new__
 ```
 
@@ -90,6 +96,10 @@ Classes that GVL Datasets may return.
     :exclude-members: __init__
 
 .. autoclass:: RaggedVariants
+    :members:
+    :exclude-members: __init__
+
+.. autoclass:: RaggedIntervals
     :members:
     :exclude-members: __init__
 ```
