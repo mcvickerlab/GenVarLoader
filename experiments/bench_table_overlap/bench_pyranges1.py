@@ -21,11 +21,13 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-assert sys.version_info >= (3, 12), "pyranges1 requires py>=3.12"
-import pyranges1 as pr
+if sys.version_info < (3, 12):
+    raise ImportError("pyranges1 requires py>=3.12")
+
+import pyranges1 as pr  # noqa: E402,RUF100
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _common import CASES, N_TRIALS, gen_queries, gen_table  # noqa: E402
+from _common import CASES, N_TRIALS, gen_queries, gen_table
 
 OUT_CSV = Path(__file__).parent / "results_pyranges1.csv"
 
@@ -41,15 +43,13 @@ def count_xprod(table_df, samples, starts, ends, contig="chr1"):
     _si = np.repeat(np.arange(n_samples, dtype=np.int64), n_regions)
     _q = np.tile(np.arange(n_regions, dtype=np.int64), n_samples)
     chrom_keys = [f"{contig}|{s}" for s in np.repeat(samples, n_regions)]
-    queries_df = pd.DataFrame(
-        {
-            "Chromosome": chrom_keys,
-            "Start": np.tile(starts, n_samples),
-            "End": np.tile(ends, n_samples),
-            "_q": _q,
-            "_si": _si,
-        }
-    )
+    queries_df = pd.DataFrame({
+        "Chromosome": chrom_keys,
+        "Start": np.tile(starts, n_samples),
+        "End": np.tile(ends, n_samples),
+        "_q": _q,
+        "_si": _si,
+    })
     tpd = contig_subset.select("sample_id", "start", "end").to_pandas()
     tpd["Chromosome"] = contig + "|" + tpd["sample_id"]
     tpd = tpd.rename(columns={"start": "Start", "end": "End"})[
@@ -70,14 +70,12 @@ def count_join_groupby(table_df, samples, starts, ends, contig="chr1"):
     )
     if contig_subset.height == 0:
         return np.zeros((n_regions, n_samples), np.int32)
-    queries_df = pd.DataFrame(
-        {
-            "Chromosome": np.full(n_regions, contig, dtype=object).astype(str),
-            "Start": starts,
-            "End": ends,
-            "_q": np.arange(n_regions, dtype=np.int64),
-        }
-    )
+    queries_df = pd.DataFrame({
+        "Chromosome": np.full(n_regions, contig, dtype=object).astype(str),
+        "Start": starts,
+        "End": ends,
+        "_q": np.arange(n_regions, dtype=np.int64),
+    })
     tpd = contig_subset.select("sample_id", "start", "end").to_pandas()
     tpd = tpd.rename(columns={"start": "Start", "end": "End"})
     tpd["Chromosome"] = contig
@@ -145,36 +143,32 @@ def main():
                     f"{case['name']:>8} {n_r:>6} {n_s:>5} {ipp:>5} {m_name:>18} {t_med:>9.3f}±{t_std:.3f} {p_med:>9.1f}"
                 )
                 for i, (t, p) in enumerate(zip(times, peaks)):
-                    rows.append(
-                        {
-                            "backend": "pyranges1",
-                            "method": m_name,
-                            "case": case["name"],
-                            "n_regions": n_r,
-                            "n_samples": n_s,
-                            "ipp": ipp,
-                            "trial": i,
-                            "time_s": t,
-                            "peak_MB": p,
-                        }
-                    )
-            except Exception as e:
-                print(
-                    f"{case['name']:>8} {n_r:>6} {n_s:>5} {ipp:>5} {m_name:>18} FAIL ({e!s:.40})"
-                )
-                rows.append(
-                    {
+                    rows.append({
                         "backend": "pyranges1",
                         "method": m_name,
                         "case": case["name"],
                         "n_regions": n_r,
                         "n_samples": n_s,
                         "ipp": ipp,
-                        "trial": 0,
-                        "time_s": None,
-                        "peak_MB": None,
-                    }
+                        "trial": i,
+                        "time_s": t,
+                        "peak_MB": p,
+                    })
+            except Exception as e:
+                print(
+                    f"{case['name']:>8} {n_r:>6} {n_s:>5} {ipp:>5} {m_name:>18} FAIL ({e!s:.40})"
                 )
+                rows.append({
+                    "backend": "pyranges1",
+                    "method": m_name,
+                    "case": case["name"],
+                    "n_regions": n_r,
+                    "n_samples": n_s,
+                    "ipp": ipp,
+                    "trial": 0,
+                    "time_s": None,
+                    "peak_MB": None,
+                })
 
     with OUT_CSV.open("w", newline="") as f:
         writer = csv.DictWriter(
