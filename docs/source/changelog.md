@@ -10,6 +10,33 @@
 # Changelog
 
 
+# Changelog
+
+
+## 0.23.0 (2026-05-09)
+
+### Feat
+
+- generalize gvl.write() to accept Table tracks
+- rename write() param bigwigs= -> tracks=, support mixed sequences
+- Table._intervals_from_offsets via polars_bio.overlap
+- Table.count_intervals via polars_bio.count_overlaps
+- add Table.from_path for csv/tsv/parquet/arrow files
+- add Table skeleton with long-form DataFrame init
+- add IntervalTrack Protocol for unified track sources
+- export get_splice_bed from package root
+- add get_splice_bed for GTF→splicing-BED conversion
+
+### Fix
+
+- normalize contig names in Table; correct unavail set warning
+- cast chrom and strand to Utf8 in get_splice_bed
+
+### Refactor
+
+- rename _write_bigwigs -> _write_track
+- tighten IntervalTrack Protocol annotation and docstring
+
 ## 0.22.3 (2026-05-08)
 
 ### Fix
