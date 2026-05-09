@@ -47,6 +47,9 @@ plink2 = "*"
 [pypi-dependencies]
 genvarloader = { path = ".", editable = true, extras = ["cli"] }
 
+[feature.docs.dependencies]
+pandoc = "*"
+
 [feature.docs.pypi-dependencies]
 sphinx = ">=7.4.7"
 myst-parser = "*"
