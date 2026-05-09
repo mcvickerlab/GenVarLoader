@@ -93,6 +93,45 @@ def test_write_with_mixed_bigwigs_and_table(tmp_path):
     assert (out / "intervals" / "tab_signal" / "intervals.npy").exists()
 
 
+def test_write_with_variants_and_tracks(tmp_path):
+    """gvl.write() should succeed when both variants and tracks are provided."""
+    from genoray import VCF
+
+    vcf = VCF(ddir / "vcf" / "filtered_source.vcf.gz")
+    # VCF samples are NA00001, NA00002, NA00003 — Table must share at least one.
+    table = gvl.Table(
+        "signal",
+        pl.DataFrame(
+            {
+                "sample_id": ["NA00001", "NA00002", "NA00003"],
+                "chrom": ["chr19", "chr19", "chr19"],
+                "start": [1010686, 1010686, 1010686],
+                "end": [1010706, 1010706, 1010706],
+                "value": [1.0, 2.0, 3.0],
+            }
+        ),
+    )
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr19"],
+            "chromStart": [1010686],
+            "chromEnd": [1010706],
+        }
+    )
+
+    out = tmp_path / "variants_and_tracks.gvl"
+    gvl.write(path=out, bed=bed, variants=vcf, tracks=table)
+
+    assert (out / "genotypes").is_dir()
+    assert (out / "intervals" / "signal" / "intervals.npy").exists()
+    assert (out / "intervals" / "signal" / "offsets.npy").exists()
+
+    import json
+
+    meta = json.loads((out / "metadata.json").read_text())
+    assert set(meta["samples"]) == {"NA00001", "NA00002", "NA00003"}
+
+
 def test_write_duplicate_track_names_rejected(tmp_path):
     import pytest
 
