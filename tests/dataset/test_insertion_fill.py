@@ -39,12 +39,15 @@ def test_lower_all_strategies():
     assert params[2, 0] == 0.5
     assert params[3, 0] == 3.0
     assert params[4, 0] == 2.0
+    # Repeat5p (index 0) and Repeat5pNormalized (index 1) have no params: assert zeros.
+    assert np.all(params[0] == 0)
+    assert np.all(params[1] == 0)
 
 
 def test_lower_empty():
     ids, params = lower([])
     assert ids.shape == (0,)
-    assert params.shape == (0, 2)
+    assert params.shape == (0, 1)
 
 
 def test_constant_default_is_nan():
@@ -71,3 +74,10 @@ def test_lower_unknown_class_raises():
 
     with pytest.raises(TypeError, match="Unknown InsertionFill subclass"):
         lower([Bogus()])  # type: ignore[list-item]
+
+
+def test_insertion_fill_base_not_instantiable():
+    from genvarloader._dataset._insertion_fill import InsertionFill
+
+    with pytest.raises(TypeError, match="abstract"):
+        InsertionFill()

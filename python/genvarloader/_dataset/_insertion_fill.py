@@ -12,12 +12,15 @@ CONSTANT = 2
 FLANK_SAMPLE = 3
 INTERPOLATE = 4
 
-MAX_PARAMS = 2  # widest strategy uses 1 slot; keep small buffer for future
+MAX_PARAMS = 1  # widest strategy uses 1 slot
 
 
-@define
 class InsertionFill:
     """Base class for track insertion fill strategies. Do not instantiate directly."""
+
+    def __init__(self):
+        if type(self) is InsertionFill:
+            raise TypeError("InsertionFill is abstract; instantiate a subclass.")
 
 
 @define
@@ -60,7 +63,7 @@ class FlankSample(InsertionFill):
 
     flank_width: int = 5
 
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         if self.flank_width < 0:
             raise ValueError(f"flank_width must be >= 0, got {self.flank_width}")
 
@@ -81,7 +84,7 @@ class Interpolate(InsertionFill):
 
     order: int = 1
 
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         if self.order not in (1, 2, 3):
             raise ValueError(
                 f"Interpolate order must be 1, 2, or 3 (got {self.order})"
@@ -100,9 +103,9 @@ def lower(
     params
         Shape (n, MAX_PARAMS), float64. Per-strategy parameter slots:
         - Repeat5p / Repeat5pNormalized: unused (all zeros).
-        - Constant: [value, 0].
-        - FlankSample: [flank_width, 0].
-        - Interpolate: [order, 0].
+        - Constant: [value].
+        - FlankSample: [flank_width].
+        - Interpolate: [order].
     """
     n = len(strategies)
     ids = np.empty(n, dtype=np.int8)
