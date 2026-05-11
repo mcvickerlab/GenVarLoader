@@ -140,6 +140,7 @@ def test_sparse(
         track=track,
         query_start=query_start,
         out=actual,
+        params=np.zeros(1, dtype=np.float64),
     )
 
     np.testing.assert_equal(actual, desired)
