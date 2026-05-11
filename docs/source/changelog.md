@@ -13,6 +13,22 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.23.1 (2026-05-11)
+
+### Fix
+
+- **perf**: benchmarks
+- **perf**: bench gvl.Table query algs
+- **perf**: use single polars-bio overlap (no xprod) in gvl.Table
+- types
+
+### Refactor
+
+- **perf**: vectorize scatter, use replace_strict and lexsort in gvl.Table
+
 ## 0.23.0 (2026-05-09)
 
 ### Feat
