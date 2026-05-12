@@ -99,6 +99,20 @@ def make_pgen(filtered_bcf: Path) -> Path:
         ]
     )
     return out_prefix.with_suffix(".pgen")
+
+
+def make_svar(filtered_bcf: Path) -> Path:
+    """Generate SparseVar from normalized BCF via genoray."""
+    from genoray import VCF, SparseVar
+
+    out = ONE_KG_DIR / "filtered.svar"
+    if out.exists():
+        shutil.rmtree(out)
+    SparseVar.from_vcf(out, VCF(filtered_bcf), "50mb")
+    SparseVar(out).cache_afs()
+    return out
+
+
 def main() -> None:
     """Generate 1000 Genomes ground-truth haplotypes via bcftools consensus."""
     log_file = WDIR / "generate_1kg_ground_truth.log"
@@ -128,7 +142,8 @@ def main() -> None:
     logger.info(f"Normalized BCF at {filtered}")
     pgen = make_pgen(filtered)
     logger.info(f"PGEN at {pgen}")
-
+    svar = make_svar(filtered)
+    logger.info(f"SVAR at {svar}")
     logger.info(f"Finished in {perf_counter() - t0:.1f}s")
 
 
