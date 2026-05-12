@@ -1187,11 +1187,15 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             ]
             strat_ids, strat_params = _lower_insertion_fills(strat_list)
             # Base seed for FlankSample determinism. When deterministic, derive
-            # from idx so the same input always produces the same fill.
+            # from the full idx array so different batches produce different
+            # fills; same input always produces the same fill. Uses the full
+            # uint64 range.
             if deterministic:
-                base_seed = np.uint64(int(idx[0]) & ((1 << 63) - 1))
+                base_seed = np.uint64(
+                    np.bitwise_xor.reduce(idx.astype(np.uint64, copy=False))
+                )
             else:
-                base_seed = np.uint64(rng.integers(0, 1 << 63))
+                base_seed = np.uint64(rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64))
 
             for track_ofst, (name, tracktype) in enumerate(
                 self.tracks.active_tracks.items()
