@@ -198,6 +198,54 @@ def write_datasets(filtered_bcf: Path, pgen: Path, svar: Path, bed_path: Path) -
     logger.info(f"Wrote {svar_ds}")
 
 
+def generate_consensus_fastas(filtered_bcf: Path, bed_path: Path) -> None:
+    import polars as pl
+    from tqdm.auto import tqdm
+
+    proc = run_shell(["bcftools", "query", "-l", str(filtered_bcf)])
+    samples = proc.stdout.decode().strip().splitlines()
+    logger.info(f"Samples: {samples}")
+
+    bed = pl.read_csv(
+        bed_path,
+        separator="\t",
+        has_header=False,
+        new_columns=["chrom", "start", "end", "name", "score", "strand"],
+        schema_overrides={"chrom": pl.Utf8},
+    ).with_row_index()
+
+    total = bed.height * len(samples) * 2
+    pbar = tqdm(total=total, desc="bcftools consensus")
+    for row_nr, chrom, start, end in bed.select(
+        "index", "chrom", "start", "end"
+    ).iter_rows():
+        subseq = run_shell(
+            ["samtools", "faidx", str(REF), f"{chrom}:{start + 1}-{end}"]
+        )
+        for sample in samples:
+            for hap in (0, 1):
+                out_fa = CONS_DIR / f"1kg_{sample}_nr{row_nr}_h{hap}.fa"
+                _ = run_shell(
+                    [
+                        "bcftools",
+                        "consensus",
+                        "-H",
+                        str(hap + 1),
+                        "-s",
+                        sample,
+                        "-e",
+                        'ALT~"<.*>"',
+                        "-o",
+                        str(out_fa),
+                        str(filtered_bcf),
+                    ],
+                    input=subseq.stdout,
+                )
+                _ = run_shell(["samtools", "faidx", str(out_fa)])
+                _ = pbar.update()
+    pbar.close()
+
+
 def main() -> None:
     """Generate 1000 Genomes ground-truth haplotypes via bcftools consensus."""
     log_file = WDIR / "generate_1kg_ground_truth.log"
@@ -231,6 +279,7 @@ def main() -> None:
     logger.info(f"SVAR at {svar}")
     bed_path = pick_regions(filtered)
     write_datasets(filtered, pgen, svar, bed_path)
+    generate_consensus_fastas(filtered, bed_path)
     logger.info(f"Finished in {perf_counter() - t0:.1f}s")
 
 
