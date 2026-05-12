@@ -82,6 +82,23 @@ def normalize_bcf(source_bcf: Path) -> Path:
 
     _ = run_shell(["bcftools", "index", "-f", str(filtered)])
     return filtered
+
+def make_pgen(filtered_bcf: Path) -> Path:
+    """Generate PGEN from normalized BCF via plink2."""
+    out_prefix = ONE_KG_DIR / "filtered"
+    _ = run_shell(
+        [
+            "plink2",
+            "--bcf",
+            str(filtered_bcf),
+            "--make-pgen",
+            "--vcf-half-call",
+            "r",
+            "--out",
+            str(out_prefix),
+        ]
+    )
+    return out_prefix.with_suffix(".pgen")
 def main() -> None:
     """Generate 1000 Genomes ground-truth haplotypes via bcftools consensus."""
     log_file = WDIR / "generate_1kg_ground_truth.log"
@@ -109,6 +126,8 @@ def main() -> None:
 
     filtered = normalize_bcf(bcf)
     logger.info(f"Normalized BCF at {filtered}")
+    pgen = make_pgen(filtered)
+    logger.info(f"PGEN at {pgen}")
 
     logger.info(f"Finished in {perf_counter() - t0:.1f}s")
 
