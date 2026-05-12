@@ -113,6 +113,65 @@ def make_svar(filtered_bcf: Path) -> Path:
     return out
 
 
+def pick_regions(filtered_bcf: Path) -> Path:
+    import io
+    import numpy as np
+    import polars as pl
+
+    bed_path = ONE_KG_DIR / "regions.bed"
+
+    proc = run_shell(
+        [
+            "bcftools",
+            "query",
+            "-f",
+            "%CHROM\t%POS\n",
+            "-r",
+            "chr21,chr22",
+            str(filtered_bcf),
+        ]
+    )
+    raw = proc.stdout.decode().strip()
+    if not raw:
+        raise SystemExit(
+            "No variants found on chr21/chr22. Inspect filtered.bcf with "
+            "`bcftools view -h` to verify contig naming."
+        )
+
+    df = pl.read_csv(
+        io.BytesIO(raw.encode()),
+        separator="\t",
+        has_header=False,
+        new_columns=["chrom", "pos"],
+        schema_overrides={"chrom": pl.Utf8, "pos": pl.Int64},
+    )
+
+    half = REGION_LEN // 2
+    df = df.filter(pl.col("pos") > half)
+
+    rng = np.random.default_rng(SEED)
+    idx = rng.choice(df.height, size=N_REGIONS, replace=False)
+    chosen = df[idx.tolist()]
+
+    starts = chosen["pos"].to_numpy() - half
+    ends = starts + REGION_LEN
+    strand = rng.choice(["+", "-"], size=N_REGIONS, replace=True)
+
+    out = pl.DataFrame(
+        {
+            "chrom": chosen["chrom"].to_numpy(),
+            "start": starts,
+            "end": ends,
+            "name": ["."] * N_REGIONS,
+            "score": ["."] * N_REGIONS,
+            "strand": strand,
+        }
+    )
+    out.write_csv(bed_path, include_header=False, separator="\t")
+    logger.info(f"Wrote {N_REGIONS} regions to {bed_path}")
+    return bed_path
+
+
 def main() -> None:
     """Generate 1000 Genomes ground-truth haplotypes via bcftools consensus."""
     log_file = WDIR / "generate_1kg_ground_truth.log"
@@ -144,6 +203,7 @@ def main() -> None:
     logger.info(f"PGEN at {pgen}")
     svar = make_svar(filtered)
     logger.info(f"SVAR at {svar}")
+    bed_path = pick_regions(filtered)
     logger.info(f"Finished in {perf_counter() - t0:.1f}s")
 
 
