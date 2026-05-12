@@ -3,7 +3,9 @@ import math
 import numpy as np
 import pytest
 from genoray._svar import dense2sparse
+from seqpro.rag import Ragged
 
+import genvarloader as gvl
 from genvarloader._dataset._insertion_fill import (
     CONSTANT,
     FLANK_SAMPLE,
@@ -17,7 +19,9 @@ from genvarloader._dataset._insertion_fill import (
     Repeat5pNormalized,
     lower,
 )
+from genvarloader._dataset._reconstruct import Tracks, TrackType
 from genvarloader._dataset._tracks import shift_and_realign_track_sparse
+from genvarloader._ragged import RaggedIntervals, RaggedTracks
 
 
 def test_lower_all_strategies():
@@ -217,9 +221,6 @@ def test_kernel_flank_sample_edge_clamp():
         assert float(v) in pool
 
 
-import genvarloader as gvl
-
-
 def test_end_to_end_set_insertion_fill():
     """Use the dummy dataset to confirm with_insertion_fill plumbing works end-to-end."""
     ds = gvl.get_dummy_dataset()
@@ -299,11 +300,6 @@ def test_kernel_flank_sample_query_hap_affects_hash():
 # ---------------------------------------------------------------------------
 # Tracks reconstructor — insertion_fill plumbing
 # ---------------------------------------------------------------------------
-
-from seqpro.rag import Ragged
-
-from genvarloader._dataset._reconstruct import Tracks, TrackType
-from genvarloader._ragged import RaggedIntervals, RaggedTracks
 
 
 def _make_tracks(names):

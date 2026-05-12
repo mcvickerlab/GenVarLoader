@@ -3,9 +3,9 @@ from __future__ import annotations
 import enum
 import itertools
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Callable, Literal, Protocol, TypeVar, cast, overload
+from typing import Literal, Protocol, TypeVar, cast, overload
 
 import awkward as ak
 import numpy as np
@@ -32,14 +32,14 @@ from .._ragged import (
 )
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
-from ._insertion_fill import InsertionFill, Repeat5p
-from ._insertion_fill import lower as _lower_insertion_fills
 from ._genotypes import (
     choose_exonic_variants,
     get_diffs_sparse,
     reconstruct_haplotypes_from_sparse,
 )
 from ._indexing import DatasetIndexer
+from ._insertion_fill import InsertionFill, Repeat5p
+from ._insertion_fill import lower as _lower_insertion_fills
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._rag_variants import RaggedVariants
 from ._reference import Reference, get_reference
@@ -539,13 +539,11 @@ class Haps(Reconstructor[_H]):
                 dosages = ak.to_regular(dosages[_keep], 1)  # type: ignore
             fields["dosage"] = Ragged(ak.to_packed(dosages))
 
-        fields.update(
-            {
-                k: self._get_info(genos, k)
-                for k in self.var_fields
-                if k not in {"alt", "start", "ref", "ilen", "dosage"}
-            }
-        )
+        fields.update({
+            k: self._get_info(genos, k)
+            for k in self.var_fields
+            if k not in {"alt", "start", "ref", "ilen", "dosage"}
+        })
 
         variants = RaggedVariants(**fields)
 
@@ -977,7 +975,8 @@ class Tracks(Reconstructor[_T]):
         if haps is not None:
             # extend ends by max hap diff to match write implementation
             regions[:, 2] += (
-                haps._haplotype_ilens(ds_idx, regions, True)
+                haps
+                ._haplotype_ilens(ds_idx, regions, True)
                 .reshape(n_regions, n_samples, haps.genotypes.shape[-2])  # type: ignore
                 .max((1, 2))
                 .clip(min=0)
@@ -1195,7 +1194,9 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                     np.bitwise_xor.reduce(idx.astype(np.uint64, copy=False))
                 )
             else:
-                base_seed = np.uint64(rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64))
+                base_seed = np.uint64(
+                    rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
+                )
 
             for track_ofst, (name, tracktype) in enumerate(
                 self.tracks.active_tracks.items()

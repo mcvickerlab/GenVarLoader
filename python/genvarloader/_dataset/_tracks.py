@@ -95,14 +95,12 @@ def _apply_insertion_fill(
         ys = np.empty(n_anchors, dtype=np.float64)
         for j in range(k):
             ref_idx = v_rel_pos - j
-            if ref_idx < 0:
-                ref_idx = 0
+            ref_idx = max(ref_idx, 0)
             xs[j] = -float(j)
             ys[j] = track[ref_idx]
         for j in range(k):
             ref_idx = v_rel_pos + 1 + j
-            if ref_idx > track_len - 1:
-                ref_idx = track_len - 1
+            ref_idx = min(ref_idx, track_len - 1)
             xs[k + j] = float(v_len) + float(j)
             ys[k + j] = track[ref_idx]
         # Lagrange interpolation at each output position in [0, writable_length)
