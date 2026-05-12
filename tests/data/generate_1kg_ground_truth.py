@@ -39,6 +39,49 @@ def fetch_zenodo(url: str, known_hash: str, fname: str) -> Path:
     return Path(
         pooch.retrieve(url, known_hash=known_hash, fname=fname, path=ONE_KG_DIR)
     )
+
+
+def normalize_bcf(source_bcf: Path) -> Path:
+    """Left-align, atomize, and split multiallelics. Returns indexed filtered.bcf."""
+    filtered = ONE_KG_DIR / "filtered.bcf"
+
+    # Step A: left-align
+    result = run_shell(
+        [
+            "bcftools",
+            "norm",
+            "-f",
+            str(REF),
+            "-O",
+            "u",
+            str(source_bcf),
+        ]
+    )
+    logger.info("bcftools norm (left-align) done")
+
+    # Step B: atomize + split multiallelics; emit as bgzipped BCF
+    _ = run_shell(
+        [
+            "bcftools",
+            "norm",
+            "-a",
+            "--atom-overlaps",
+            ".",
+            "-f",
+            str(REF),
+            "-m",
+            "-",
+            "-O",
+            "b",
+            "-o",
+            str(filtered),
+        ],
+        input=result.stdout,
+    )
+    logger.info("bcftools norm (atomize + split) done")
+
+    _ = run_shell(["bcftools", "index", "-f", str(filtered)])
+    return filtered
 def main() -> None:
     """Generate 1000 Genomes ground-truth haplotypes via bcftools consensus."""
     log_file = WDIR / "generate_1kg_ground_truth.log"
@@ -63,6 +106,10 @@ def main() -> None:
     csi = fetch_zenodo(ZENODO_CSI_URL, ZENODO_CSI_MD5, "source.bcf.csi")
     logger.info(f"Fetched: {bcf} ({bcf.stat().st_size} bytes)")
     logger.info(f"Fetched: {csi} ({csi.stat().st_size} bytes)")
+
+    filtered = normalize_bcf(bcf)
+    logger.info(f"Normalized BCF at {filtered}")
+
     logger.info(f"Finished in {perf_counter() - t0:.1f}s")
 
 
