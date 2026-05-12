@@ -24,5 +24,6 @@ jobs:
           pixi-version: v0.68.0
           cache: true
           environments: ${{ matrix.environment }}
+          locked: false
       - name: Test
         run: pixi run -e ${{ matrix.environment }} test
