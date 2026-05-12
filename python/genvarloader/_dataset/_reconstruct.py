@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 import itertools
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Callable, Literal, Protocol, TypeVar, cast, overload
 
@@ -32,6 +32,7 @@ from .._ragged import (
 )
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
+from ._insertion_fill import InsertionFill, Repeat5p
 from ._genotypes import (
     choose_exonic_variants,
     get_diffs_sparse,
@@ -697,10 +698,12 @@ class Tracks(Reconstructor[_T]):
     kind: type[_T]
     n_regions: int
     n_samples: int
+    insertion_fill: dict[str, InsertionFill] = field(factory=dict)
+    """Per-track insertion fill strategy. Defaults to Repeat5p for every active track."""
 
     def with_tracks(self, tracks: str | Iterable[str] | None) -> Tracks:
         if tracks is None:
-            return evolve(self, active_tracks={})
+            return evolve(self, active_tracks={}, insertion_fill={})
 
         if isinstance(tracks, str):
             _tracks = [tracks]
@@ -711,8 +714,27 @@ class Tracks(Reconstructor[_T]):
             raise ValueError(f"Missing tracks: {missing}")
 
         tracks = {t: self.available_tracks[t] for t in _tracks}
+        fills = {t: self.insertion_fill.get(t, Repeat5p()) for t in _tracks}
+        return evolve(self, active_tracks=tracks, insertion_fill=fills)
 
-        return evolve(self, active_tracks=tracks)
+    def with_insertion_fill(
+        self,
+        fill: InsertionFill | Mapping[str, InsertionFill],
+    ) -> Tracks:
+        """Configure the insertion-fill strategy for each active track.
+
+        Parameters
+        ----------
+        fill
+            Either a single :class:`InsertionFill` strategy applied to every
+            active track, or a mapping from track name to strategy. Track names
+            not present in the mapping fall back to :class:`Repeat5p`.
+        """
+        if isinstance(fill, InsertionFill):
+            fills = {name: fill for name in self.active_tracks}
+        else:
+            fills = {name: fill.get(name, Repeat5p()) for name in self.active_tracks}
+        return evolve(self, insertion_fill=fills)
 
     @classmethod
     def from_path(
@@ -762,7 +784,16 @@ class Tracks(Reconstructor[_T]):
             zip(available_tracks, itertools.repeat(TrackType.SAMPLE))
         ) | dict(zip(available_annots, itertools.repeat(TrackType.ANNOT)))
 
-        return cls(intervals, all_tracks, all_tracks, kind, n_regions, n_samples)
+        insertion_fill = {name: Repeat5p() for name in all_tracks}
+        return cls(
+            intervals,
+            all_tracks,
+            all_tracks,
+            kind,
+            n_regions,
+            n_samples,
+            insertion_fill,
+        )
 
     @staticmethod
     def _open_intervals(path: Path, n_regions: int, n_samples: int) -> RaggedIntervals:

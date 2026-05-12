@@ -255,3 +255,62 @@ def test_kernel_flank_sample_query_hap_affects_hash():
     # Each pair should differ at least one position.
     assert not np.array_equal(a, b)
     assert not np.array_equal(a, c)
+
+
+# ---------------------------------------------------------------------------
+# Tracks reconstructor — insertion_fill plumbing
+# ---------------------------------------------------------------------------
+
+from seqpro.rag import Ragged
+
+from genvarloader._dataset._reconstruct import Tracks, TrackType
+from genvarloader._ragged import RaggedIntervals, RaggedTracks
+
+
+def _make_tracks(names):
+    """Build a minimal Tracks instance for testing with_insertion_fill plumbing."""
+    starts = ends = values = np.array([0], dtype=np.int32)
+    offsets = np.array([0, 1], dtype=np.int64)
+    intervals = {
+        n: RaggedIntervals(
+            Ragged.from_offsets(starts, (1, None), offsets),
+            Ragged.from_offsets(ends, (1, None), offsets),
+            Ragged.from_offsets(values, (1, None), offsets),
+        )
+        for n in names
+    }
+    active = {n: TrackType.SAMPLE for n in names}
+    return Tracks(
+        intervals=intervals,
+        active_tracks=active,
+        available_tracks=active,
+        kind=RaggedTracks,
+        n_regions=1,
+        n_samples=1,
+        insertion_fill={n: Repeat5p() for n in names},
+    )
+
+
+def test_with_insertion_fill_single_applies_to_all():
+    tracks = _make_tracks(["a", "b"])
+    new = tracks.with_insertion_fill(Constant(0.0))
+    assert isinstance(new.insertion_fill["a"], Constant)
+    assert isinstance(new.insertion_fill["b"], Constant)
+    # original unchanged (evolve returns new instance)
+    assert isinstance(tracks.insertion_fill["a"], Repeat5p)
+
+
+def test_with_insertion_fill_dict_partial_falls_back():
+    tracks = _make_tracks(["a", "b"])
+    new = tracks.with_insertion_fill({"a": FlankSample(flank_width=2)})
+    assert isinstance(new.insertion_fill["a"], FlankSample)
+    assert isinstance(new.insertion_fill["b"], Repeat5p)
+
+
+def test_with_tracks_prunes_insertion_fill():
+    tracks = _make_tracks(["a", "b"]).with_insertion_fill(
+        {"a": Constant(0.0), "b": FlankSample()}
+    )
+    new = tracks.with_tracks("a")
+    assert set(new.insertion_fill) == {"a"}
+    assert isinstance(new.insertion_fill["a"], Constant)
