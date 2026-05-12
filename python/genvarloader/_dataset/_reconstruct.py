@@ -33,6 +33,7 @@ from .._ragged import (
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
 from ._insertion_fill import InsertionFill, Repeat5p
+from ._insertion_fill import lower as _lower_insertion_fills
 from ._genotypes import (
     choose_exonic_variants,
     get_diffs_sparse,
@@ -1179,6 +1180,19 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             )
             out_offsets = lengths_to_offsets(out_lens)
 
+            # Lower per-track strategies into numba-friendly arrays.
+            strat_list = [
+                self.tracks.insertion_fill[name]
+                for name in self.tracks.active_tracks
+            ]
+            strat_ids, strat_params = _lower_insertion_fills(strat_list)
+            # Base seed for FlankSample determinism. When deterministic, derive
+            # from idx so the same input always produces the same fill.
+            if deterministic:
+                base_seed = np.uint64(int(idx[0]) & ((1 << 63) - 1))
+            else:
+                base_seed = np.uint64(rng.integers(0, 1 << 63))
+
             for track_ofst, (name, tracktype) in enumerate(
                 self.tracks.active_tracks.items()
             ):
@@ -1216,9 +1230,11 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                     ilens=self.haps.variants.ilen,  # (tot_v)
                     tracks=_tracks,  # ragged (b l)
                     track_offsets=track_ofsts_per_t,  # (b+1)
-                    params=np.zeros(1, dtype=np.float64),  # TODO Task 5: per-track strategy
+                    params=strat_params[track_ofst],
                     keep=keep,  # (b*p*v)
                     keep_offsets=keep_offsets,  # (b*p+1)
+                    strategy_id=int(strat_ids[track_ofst]),
+                    base_seed=base_seed,
                 )
 
             out_shape = (
