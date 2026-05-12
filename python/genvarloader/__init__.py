@@ -6,6 +6,14 @@ from seqpro.rag import Ragged
 
 from . import data_registry
 from ._bigwig import BigWigs
+from ._dataset._insertion_fill import (
+    Constant,
+    FlankSample,
+    InsertionFill,
+    Interpolate,
+    Repeat5p,
+    Repeat5pNormalized,
+)
 from ._table import Table
 from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
 from ._dataset._rag_variants import RaggedVariants
@@ -42,4 +50,10 @@ __all__ = [
     "RaggedVariants",
     "RaggedIntervals",
     "Table",
+    "InsertionFill",
+    "Repeat5p",
+    "Repeat5pNormalized",
+    "Constant",
+    "FlankSample",
+    "Interpolate",
 ]

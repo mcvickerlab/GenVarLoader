@@ -4,6 +4,118 @@ from numpy.typing import NDArray
 
 __all__ = []
 
+# Strategy enum (mirrors _insertion_fill.py; duplicated to avoid Python-level
+# imports inside @njit functions)
+_REPEAT_5P = 0
+_REPEAT_5P_NORM = 1
+_CONSTANT = 2
+_FLANK_SAMPLE = 3
+_INTERPOLATE = 4
+
+
+@nb.njit(nogil=True, cache=True, inline="always")
+def _xorshift64(x: np.uint64) -> np.uint64:
+    """Single round of xorshift64. Pure function — safe in parallel."""
+    x ^= x << np.uint64(13)
+    x ^= x >> np.uint64(7)
+    x ^= x << np.uint64(17)
+    return x
+
+
+@nb.njit(nogil=True, cache=True, inline="always")
+def _hash4(a: np.uint64, b: np.uint64, c: np.uint64, d: np.uint64) -> np.uint64:
+    """Hash four uint64 values into one. Used as a per-position deterministic seed."""
+    h = a
+    h = _xorshift64(h ^ b)
+    h = _xorshift64(h ^ c)
+    h = _xorshift64(h ^ d)
+    return h
+
+
+@nb.njit(nogil=True, cache=True, inline="always")
+def _apply_insertion_fill(
+    out: NDArray[np.floating],
+    out_idx: int,
+    writable_length: int,
+    v_len: int,
+    track: NDArray[np.floating],
+    v_rel_pos: int,
+    strategy_id: int,
+    params: NDArray[np.float64],
+    base_seed: np.uint64,
+    query: int,
+    hap: int,
+):
+    """Write `writable_length` values at out[out_idx:] according to strategy.
+
+    v_len is the total length of the insertion stretch (v_diff + 1); the kernel
+    may truncate the actual write to writable_length when running out of output.
+    """
+    track_len = len(track)
+
+    # The _REPEAT_5P branch is unreachable from the outer kernel (which short-circuits
+    # this strategy before calling). Kept for completeness and direct-helper-call safety.
+    if strategy_id == _REPEAT_5P:
+        val = track[v_rel_pos]
+        for i in range(writable_length):
+            out[out_idx + i] = val
+
+    elif strategy_id == _REPEAT_5P_NORM:
+        val = track[v_rel_pos] / v_len
+        for i in range(writable_length):
+            out[out_idx + i] = val
+
+    elif strategy_id == _CONSTANT:
+        val = params[0]
+        for i in range(writable_length):
+            out[out_idx + i] = val
+
+    elif strategy_id == _FLANK_SAMPLE:
+        width = np.int64(params[0])
+        pool_lo = max(0, v_rel_pos - width)
+        pool_hi = min(track_len - 1, v_rel_pos + width)
+        pool_size = pool_hi - pool_lo + 1
+        for i in range(writable_length):
+            seed = _hash4(
+                base_seed,
+                np.uint64(query),
+                np.uint64(hap),
+                np.uint64(out_idx + i),
+            )
+            offset = np.int64(seed % np.uint64(pool_size))
+            out[out_idx + i] = track[pool_lo + offset]
+
+    elif strategy_id == _INTERPOLATE:
+        order = np.int64(params[0])
+        # Number of anchor values per side: ceil((order+1)/2)
+        k = (order + 1 + 1) // 2  # ceil((order+1)/2)
+        # Anchors: 5' side at x = 0, -1, -2, ...; 3' side at x = v_len, v_len+1, ...
+        n_anchors = 2 * k
+        xs = np.empty(n_anchors, dtype=np.float64)
+        ys = np.empty(n_anchors, dtype=np.float64)
+        for j in range(k):
+            ref_idx = v_rel_pos - j
+            ref_idx = max(ref_idx, 0)
+            xs[j] = -float(j)
+            ys[j] = track[ref_idx]
+        for j in range(k):
+            ref_idx = v_rel_pos + 1 + j
+            ref_idx = min(ref_idx, track_len - 1)
+            xs[k + j] = float(v_len) + float(j)
+            ys[k + j] = track[ref_idx]
+        # Lagrange interpolation at each output position in [0, writable_length)
+        for i in range(writable_length):
+            x = float(i)
+            acc = 0.0
+            for a in range(n_anchors):
+                term = ys[a]
+                for b in range(n_anchors):
+                    if b == a:
+                        continue
+                    term *= (x - xs[b]) / (xs[a] - xs[b])
+                acc += term
+            out[out_idx + i] = acc
+
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def shift_and_realign_tracks_sparse(
@@ -18,8 +130,11 @@ def shift_and_realign_tracks_sparse(
     ilens: NDArray[np.integer],
     tracks: NDArray[np.floating],
     track_offsets: NDArray[np.integer],
+    params: NDArray[np.float64],
     keep: NDArray[np.bool_] | None = None,
     keep_offsets: NDArray[np.integer] | None = None,
+    strategy_id: int = 0,
+    base_seed: np.uint64 = np.uint64(0),
 ):
     """Shift and realign tracks to correspond to haplotypes.
 
@@ -82,7 +197,12 @@ def shift_and_realign_tracks_sparse(
                 track=q_track,
                 query_start=q_start,
                 out=qh_out,
+                params=params,
                 keep=qh_keep,
+                strategy_id=strategy_id,
+                base_seed=base_seed,
+                query=query,
+                hap=hap,
             )
 
 
@@ -97,7 +217,12 @@ def shift_and_realign_track_sparse(
     track: NDArray[np.floating],
     query_start: int,
     out: NDArray[np.floating],
+    params: NDArray[np.float64],
     keep: NDArray[np.bool_] | None = None,
+    strategy_id: int = 0,
+    base_seed: np.uint64 = np.uint64(0),
+    query: int = 0,
+    hap: int = 0,
 ):
     """Shift and realign a track to correspond to a haplotype.
 
@@ -212,7 +337,24 @@ def shift_and_realign_track_sparse(
 
         # indels (substitutions are skipped above and then handled by above clause)
         writable_length = min(v_len, length - out_idx)
-        out[out_idx : out_idx + writable_length] = track[v_rel_pos]
+        if v_diff > 0 and strategy_id != _REPEAT_5P:
+            _apply_insertion_fill(
+                out=out,
+                out_idx=out_idx,
+                writable_length=writable_length,
+                v_len=v_len,
+                track=track,
+                v_rel_pos=v_rel_pos,
+                strategy_id=strategy_id,
+                params=params,
+                base_seed=base_seed,
+                query=query,
+                hap=hap,
+            )
+        else:
+            # Deletions and Repeat5p insertions: original behavior.
+            for i in range(writable_length):
+                out[out_idx + i] = track[v_rel_pos]
         out_idx += writable_length
         track_idx = v_rel_end
 

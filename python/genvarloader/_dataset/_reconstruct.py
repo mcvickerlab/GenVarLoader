@@ -3,9 +3,9 @@ from __future__ import annotations
 import enum
 import itertools
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Callable, Literal, Protocol, TypeVar, cast, overload
+from typing import Literal, Protocol, TypeVar, cast, overload
 
 import awkward as ak
 import numpy as np
@@ -38,6 +38,8 @@ from ._genotypes import (
     reconstruct_haplotypes_from_sparse,
 )
 from ._indexing import DatasetIndexer
+from ._insertion_fill import InsertionFill, Repeat5p
+from ._insertion_fill import lower as _lower_insertion_fills
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._rag_variants import RaggedVariants
 from ._reference import Reference, get_reference
@@ -697,10 +699,12 @@ class Tracks(Reconstructor[_T]):
     kind: type[_T]
     n_regions: int
     n_samples: int
+    insertion_fill: dict[str, InsertionFill] = field(factory=dict)
+    """Per-track insertion fill strategy. Defaults to Repeat5p for every active track."""
 
     def with_tracks(self, tracks: str | Iterable[str] | None) -> Tracks:
         if tracks is None:
-            return evolve(self, active_tracks={})
+            return evolve(self, active_tracks={}, insertion_fill={})
 
         if isinstance(tracks, str):
             _tracks = [tracks]
@@ -711,8 +715,27 @@ class Tracks(Reconstructor[_T]):
             raise ValueError(f"Missing tracks: {missing}")
 
         tracks = {t: self.available_tracks[t] for t in _tracks}
+        fills = {t: self.insertion_fill.get(t, Repeat5p()) for t in _tracks}
+        return evolve(self, active_tracks=tracks, insertion_fill=fills)
 
-        return evolve(self, active_tracks=tracks)
+    def with_insertion_fill(
+        self,
+        fill: InsertionFill | Mapping[str, InsertionFill],
+    ) -> Tracks:
+        """Configure the insertion-fill strategy for each active track.
+
+        Parameters
+        ----------
+        fill
+            Either a single :class:`InsertionFill` strategy applied to every
+            active track, or a mapping from track name to strategy. Track names
+            not present in the mapping fall back to :class:`Repeat5p`.
+        """
+        if isinstance(fill, InsertionFill):
+            fills = {name: fill for name in self.active_tracks}
+        else:
+            fills = {name: fill.get(name, Repeat5p()) for name in self.active_tracks}
+        return evolve(self, insertion_fill=fills)
 
     @classmethod
     def from_path(
@@ -762,7 +785,16 @@ class Tracks(Reconstructor[_T]):
             zip(available_tracks, itertools.repeat(TrackType.SAMPLE))
         ) | dict(zip(available_annots, itertools.repeat(TrackType.ANNOT)))
 
-        return cls(intervals, all_tracks, all_tracks, kind, n_regions, n_samples)
+        insertion_fill = {name: Repeat5p() for name in all_tracks}
+        return cls(
+            intervals,
+            all_tracks,
+            all_tracks,
+            kind,
+            n_regions,
+            n_samples,
+            insertion_fill,
+        )
 
     @staticmethod
     def _open_intervals(path: Path, n_regions: int, n_samples: int) -> RaggedIntervals:
@@ -1148,6 +1180,25 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             )
             out_offsets = lengths_to_offsets(out_lens)
 
+            # Lower per-track strategies into numba-friendly arrays.
+            strat_list = [
+                self.tracks.insertion_fill.get(name, Repeat5p())
+                for name in self.tracks.active_tracks
+            ]
+            strat_ids, strat_params = _lower_insertion_fills(strat_list)
+            # Base seed for FlankSample determinism. When deterministic, derive
+            # from the full idx array so different batches produce different
+            # fills; same input always produces the same fill. Uses the full
+            # uint64 range.
+            if deterministic:
+                base_seed = np.uint64(
+                    np.bitwise_xor.reduce(idx.astype(np.uint64, copy=False))
+                )
+            else:
+                base_seed = np.uint64(
+                    rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
+                )
+
             for track_ofst, (name, tracktype) in enumerate(
                 self.tracks.active_tracks.items()
             ):
@@ -1185,8 +1236,11 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                     ilens=self.haps.variants.ilen,  # (tot_v)
                     tracks=_tracks,  # ragged (b l)
                     track_offsets=track_ofsts_per_t,  # (b+1)
+                    params=strat_params[track_ofst],
                     keep=keep,  # (b*p*v)
                     keep_offsets=keep_offsets,  # (b*p+1)
+                    strategy_id=int(strat_ids[track_ofst]),
+                    base_seed=base_seed,
                 )
 
             out_shape = (
