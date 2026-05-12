@@ -1182,7 +1182,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
 
             # Lower per-track strategies into numba-friendly arrays.
             strat_list = [
-                self.tracks.insertion_fill[name]
+                self.tracks.insertion_fill.get(name, Repeat5p())
                 for name in self.tracks.active_tracks
             ]
             strat_ids, strat_params = _lower_insertion_fills(strat_list)

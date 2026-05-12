@@ -232,6 +232,17 @@ def test_end_to_end_set_insertion_fill():
     assert math.isnan(ds_nan._tracks.insertion_fill[first_track].value)
     # Original dataset is unchanged (default fallback is Repeat5p when not explicitly set).
     assert isinstance(ds._tracks.insertion_fill.get(first_track, Repeat5p()), Repeat5p)
+    # Trigger actual reconstruction to verify the full call path executes without error.
+    _ = ds_nan[0, 0]
+
+
+def test_dummy_dataset_with_default_insertion_fill_does_not_crash():
+    """Tracks created outside from_path may have empty insertion_fill — must not KeyError."""
+    ds = gvl.get_dummy_dataset()
+    if ds._tracks is None or ds._seqs is None:
+        pytest.skip("dummy dataset shape does not include both seqs and tracks")
+    # Just trigger reconstruction; the call must not raise KeyError.
+    _ = ds[0, 0]
 
 
 def test_with_insertion_fill_rejects_dataset_without_haps_or_tracks():
