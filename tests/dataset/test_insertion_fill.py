@@ -109,8 +109,8 @@ def _run_kernel(strategy_id, params, base_seed=np.uint64(0)):
         track=track,
         query_start=0,
         out=out,
-        strategy_id=strategy_id,
         params=params,
+        strategy_id=strategy_id,
         base_seed=base_seed,
     )
     return out, track
@@ -208,10 +208,50 @@ def test_kernel_flank_sample_edge_clamp():
         track=track,
         query_start=0,
         out=out,
-        strategy_id=FLANK_SAMPLE,
         params=params,
+        strategy_id=FLANK_SAMPLE,
         base_seed=np.uint64(7),
     )
     pool = {5.0, 6.0, 7.0}
     for v in out[:3]:
         assert float(v) in pool
+
+
+def test_kernel_flank_sample_query_hap_affects_hash():
+    """Different (query, hap) seeds must drive different samples for the same base_seed."""
+    v_starts = np.array([1], dtype=np.int32)
+    ilens = np.array([3], dtype=np.int32)
+    track = np.array([0.0, 10.0, 20.0, 30.0, 40.0], dtype=np.float32)
+    genos = np.array([[[1]]], dtype=np.int8)
+    var_idxs = np.array([0], dtype=np.int32)
+    sparse_genos = dense2sparse(genos, var_idxs)
+
+    params = np.zeros(1, dtype=np.float64)
+    params[0] = 2.0
+
+    def run(query, hap):
+        out = np.zeros(8, dtype=np.float32)
+        shift_and_realign_track_sparse(
+            offset_idx=0,
+            geno_v_idxs=sparse_genos.data,
+            geno_offsets=sparse_genos.offsets,
+            v_starts=v_starts,
+            ilens=ilens,
+            shift=0,
+            track=track,
+            query_start=0,
+            out=out,
+            params=params,
+            strategy_id=FLANK_SAMPLE,
+            base_seed=np.uint64(99),
+            query=query,
+            hap=hap,
+        )
+        return out[1:5].copy()
+
+    a = run(0, 0)
+    b = run(1, 0)
+    c = run(0, 1)
+    # Each pair should differ at least one position.
+    assert not np.array_equal(a, b)
+    assert not np.array_equal(a, c)

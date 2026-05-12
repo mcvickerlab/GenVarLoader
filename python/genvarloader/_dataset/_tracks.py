@@ -53,6 +53,8 @@ def _apply_insertion_fill(
     """
     track_len = len(track)
 
+    # The _REPEAT_5P branch is unreachable from the outer kernel (which short-circuits
+    # this strategy before calling). Kept for completeness and direct-helper-call safety.
     if strategy_id == _REPEAT_5P:
         val = track[v_rel_pos]
         for i in range(writable_length):
@@ -130,8 +132,11 @@ def shift_and_realign_tracks_sparse(
     ilens: NDArray[np.integer],
     tracks: NDArray[np.floating],
     track_offsets: NDArray[np.integer],
+    params: NDArray[np.float64],
     keep: NDArray[np.bool_] | None = None,
     keep_offsets: NDArray[np.integer] | None = None,
+    strategy_id: int = 0,
+    base_seed: np.uint64 = np.uint64(0),
 ):
     """Shift and realign tracks to correspond to haplotypes.
 
@@ -194,7 +199,12 @@ def shift_and_realign_tracks_sparse(
                 track=q_track,
                 query_start=q_start,
                 out=qh_out,
+                params=params,
                 keep=qh_keep,
+                strategy_id=strategy_id,
+                base_seed=base_seed,
+                query=query,
+                hap=hap,
             )
 
 
@@ -209,9 +219,9 @@ def shift_and_realign_track_sparse(
     track: NDArray[np.floating],
     query_start: int,
     out: NDArray[np.floating],
+    params: NDArray[np.float64],
     keep: NDArray[np.bool_] | None = None,
     strategy_id: int = 0,
-    params: NDArray[np.float64] | None = None,
     base_seed: np.uint64 = np.uint64(0),
     query: int = 0,
     hap: int = 0,
@@ -329,7 +339,7 @@ def shift_and_realign_track_sparse(
 
         # indels (substitutions are skipped above and then handled by above clause)
         writable_length = min(v_len, length - out_idx)
-        if v_diff > 0 and strategy_id != _REPEAT_5P and params is not None:
+        if v_diff > 0 and strategy_id != _REPEAT_5P:
             _apply_insertion_fill(
                 out=out,
                 out_idx=out_idx,

@@ -1185,6 +1185,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                     ilens=self.haps.variants.ilen,  # (tot_v)
                     tracks=_tracks,  # ragged (b l)
                     track_offsets=track_ofsts_per_t,  # (b+1)
+                    params=np.zeros(1, dtype=np.float64),  # TODO Task 5: per-track strategy
                     keep=keep,  # (b*p*v)
                     keep_offsets=keep_offsets,  # (b*p+1)
                 )

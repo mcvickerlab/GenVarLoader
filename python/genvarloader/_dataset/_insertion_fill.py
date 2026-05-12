@@ -32,7 +32,9 @@ class Repeat5p(InsertionFill):
 class Repeat5pNormalized(InsertionFill):
     """Repeat track[v_rel_pos] / (v_diff + 1) across the inserted region.
 
-    Preserves the sum: the total written value equals track[v_rel_pos].
+    Preserves the sum: when the full insertion stretch is written, the total
+    written value equals track[v_rel_pos]. If the insertion is truncated at
+    the output boundary, the sum is reduced proportionally.
     """
 
 
