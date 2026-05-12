@@ -17,12 +17,10 @@ N_REGIONS = 100
 REGION_LEN = 10_000
 SEED = 0
 
-ZENODO_BCF_URL = "https://zenodo.org/records/20132907/files/1kg.chr21_chr22.5samples.bcf"
-ZENODO_CSI_URL = "https://zenodo.org/records/20132907/files/1kg.chr21_chr22.5samples.bcf.csi"
-# Fill these in on first successful run; the script prints observed hashes
-# and exits when they are None.
-ZENODO_BCF_HASH: str | None = None
-ZENODO_CSI_HASH: str | None = None
+ZENODO_BCF_URL = "https://zenodo.org/records/20132907/files/1kgp.thin.bcf"
+ZENODO_CSI_URL = "https://zenodo.org/records/20132907/files/1kgp.thin.bcf.csi"
+ZENODO_BCF_MD5 = "md5:3bdfed585e4a6b2a51c49d1d7dc7124f"
+ZENODO_CSI_MD5 = "md5:8f190a43294404ca320b45a05851d56a"
 
 
 def run_shell(cmd: list[str], input: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
@@ -35,6 +33,12 @@ def run_shell(cmd: list[str], input: bytes | None = None) -> subprocess.Complete
         raise
 
 
+def fetch_zenodo(url: str, known_hash: str, fname: str) -> Path:
+    import pooch
+
+    return Path(
+        pooch.retrieve(url, known_hash=known_hash, fname=fname, path=ONE_KG_DIR)
+    )
 def main() -> None:
     """Generate 1000 Genomes ground-truth haplotypes via bcftools consensus."""
     log_file = WDIR / "generate_1kg_ground_truth.log"
@@ -55,7 +59,10 @@ def main() -> None:
         shutil.rmtree(CONS_DIR)
     CONS_DIR.mkdir(0o777, parents=True, exist_ok=True)
 
-    logger.info("Pipeline scaffold OK")
+    bcf = fetch_zenodo(ZENODO_BCF_URL, ZENODO_BCF_MD5, "source.bcf")
+    csi = fetch_zenodo(ZENODO_CSI_URL, ZENODO_CSI_MD5, "source.bcf.csi")
+    logger.info(f"Fetched: {bcf} ({bcf.stat().st_size} bytes)")
+    logger.info(f"Fetched: {csi} ({csi.stat().st_size} bytes)")
     logger.info(f"Finished in {perf_counter() - t0:.1f}s")
 
 
