@@ -539,11 +539,13 @@ class Haps(Reconstructor[_H]):
                 dosages = ak.to_regular(dosages[_keep], 1)  # type: ignore
             fields["dosage"] = Ragged(ak.to_packed(dosages))
 
-        fields.update({
-            k: self._get_info(genos, k)
-            for k in self.var_fields
-            if k not in {"alt", "start", "ref", "ilen", "dosage"}
-        })
+        fields.update(
+            {
+                k: self._get_info(genos, k)
+                for k in self.var_fields
+                if k not in {"alt", "start", "ref", "ilen", "dosage"}
+            }
+        )
 
         variants = RaggedVariants(**fields)
 
@@ -975,8 +977,7 @@ class Tracks(Reconstructor[_T]):
         if haps is not None:
             # extend ends by max hap diff to match write implementation
             regions[:, 2] += (
-                haps
-                ._haplotype_ilens(ds_idx, regions, True)
+                haps._haplotype_ilens(ds_idx, regions, True)
                 .reshape(n_regions, n_samples, haps.genotypes.shape[-2])  # type: ignore
                 .max((1, 2))
                 .clip(min=0)

@@ -793,9 +793,7 @@ class Dataset:
             in the dict fall back to :class:`Repeat5p`.
         """
         if self._tracks is None:
-            raise ValueError(
-                "Dataset has no tracks; cannot configure insertion fill."
-            )
+            raise ValueError("Dataset has no tracks; cannot configure insertion fill.")
         if not isinstance(self._recon, HapsTracks):
             raise ValueError(
                 "with_insertion_fill is only meaningful for datasets with both "

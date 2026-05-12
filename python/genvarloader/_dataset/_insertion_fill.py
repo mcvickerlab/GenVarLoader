@@ -88,9 +88,7 @@ class Interpolate(InsertionFill):
 
     def __attrs_post_init__(self) -> None:
         if self.order not in (1, 2, 3):
-            raise ValueError(
-                f"Interpolate order must be 1, 2, or 3 (got {self.order})"
-            )
+            raise ValueError(f"Interpolate order must be 1, 2, or 3 (got {self.order})")
 
 
 def lower(
