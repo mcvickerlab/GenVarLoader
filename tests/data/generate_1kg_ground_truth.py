@@ -23,7 +23,9 @@ ZENODO_BCF_MD5 = "md5:3bdfed585e4a6b2a51c49d1d7dc7124f"
 ZENODO_CSI_MD5 = "md5:8f190a43294404ca320b45a05851d56a"
 
 
-def run_shell(cmd: list[str], input: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+def run_shell(
+    cmd: list[str], input: bytes | None = None
+) -> subprocess.CompletedProcess[bytes]:
     try:
         return subprocess.run(cmd, check=True, capture_output=True, input=input)
     except subprocess.CalledProcessError as e:
@@ -100,6 +102,7 @@ def normalize_bcf(source_bcf: Path) -> Path:
 
     _ = run_shell(["bcftools", "index", "-f", str(filtered)])
     return filtered
+
 
 def make_pgen(filtered_bcf: Path) -> Path:
     """Generate PGEN from normalized BCF via plink2."""
@@ -273,8 +276,7 @@ def main() -> None:
 
     if not REF.exists():
         raise SystemExit(
-            f"Reference {REF} not found. Run `pixi run -e dev gen` first to "
-            "fetch hg38."
+            f"Reference {REF} not found. Run `pixi run -e dev gen` first to fetch hg38."
         )
 
     ONE_KG_DIR.mkdir(0o777, parents=True, exist_ok=True)
