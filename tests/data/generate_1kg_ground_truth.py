@@ -172,6 +172,32 @@ def pick_regions(filtered_bcf: Path) -> Path:
     return bed_path
 
 
+def write_datasets(filtered_bcf: Path, pgen: Path, svar: Path, bed_path: Path) -> None:
+    import genvarloader as gvl
+    from genoray import PGEN, VCF, SparseVar
+
+    bcf_ds = ONE_KG_DIR / "phased_1kg.bcf.gvl"
+    pgen_ds = ONE_KG_DIR / "phased_1kg.pgen.gvl"
+    svar_ds = ONE_KG_DIR / "phased_1kg.svar.gvl"
+
+    for d in (bcf_ds, pgen_ds, svar_ds):
+        if d.exists():
+            shutil.rmtree(d)
+
+    vcf_reader = VCF(filtered_bcf)
+    if not vcf_reader._valid_index():
+        vcf_reader._write_gvi_index()
+    _ = vcf_reader._load_index()
+    gvl.write(path=bcf_ds, bed=bed_path, variants=vcf_reader)
+    logger.info(f"Wrote {bcf_ds}")
+
+    gvl.write(path=pgen_ds, bed=bed_path, variants=PGEN(pgen))
+    logger.info(f"Wrote {pgen_ds}")
+
+    gvl.write(path=svar_ds, bed=bed_path, variants=SparseVar(svar))
+    logger.info(f"Wrote {svar_ds}")
+
+
 def main() -> None:
     """Generate 1000 Genomes ground-truth haplotypes via bcftools consensus."""
     log_file = WDIR / "generate_1kg_ground_truth.log"
@@ -204,6 +230,7 @@ def main() -> None:
     svar = make_svar(filtered)
     logger.info(f"SVAR at {svar}")
     bed_path = pick_regions(filtered)
+    write_datasets(filtered, pgen, svar, bed_path)
     logger.info(f"Finished in {perf_counter() - t0:.1f}s")
 
 
