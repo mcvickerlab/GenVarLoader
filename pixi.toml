@@ -84,7 +84,7 @@ numba = "==0.59.1"
 pyarrow = ">=21"
 hirola = "==0.3"
 seqpro = "==0.11.0"
-genoray = "==2.3.1"
+genoray = "==2.3.2"
 polars = "==1.37.1"
 loguru = "*"
 attrs = "*"
@@ -118,7 +118,13 @@ python = "3.13.*"
 [tasks]
 prek-install = "prek install --hook-type commit-msg --hook-type pre-push"
 gen = { cmd = "python tests/data/generate_ground_truth.py" }
-test = { cmd = "pytest tests && cargo test --release", depends-on = ["gen"] }
+gen-1kg = { cmd = "python tests/data/generate_1kg_ground_truth.py", depends-on = [
+    "gen",
+] }
+test = { cmd = "pytest tests && cargo test --release", depends-on = [
+    "gen",
+    "gen-1kg",
+] }
 
 [feature.docs.tasks]
 install-e = "uv pip install -e /cellar/users/dlaub/projects/ML4GLand/SeqPro -e /cellar/users/dlaub/projects/genoray -e ."
