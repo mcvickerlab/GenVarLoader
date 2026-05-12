@@ -230,8 +230,8 @@ def test_end_to_end_set_insertion_fill():
     ds_nan = ds.with_insertion_fill({first_track: Constant(float("nan"))})
     assert isinstance(ds_nan._tracks.insertion_fill[first_track], Constant)
     assert math.isnan(ds_nan._tracks.insertion_fill[first_track].value)
-    # Original dataset is unchanged (default fallback is Repeat5p when not explicitly set).
-    assert isinstance(ds._tracks.insertion_fill.get(first_track, Repeat5p()), Repeat5p)
+    # Immutability: original dataset's insertion_fill is not mutated by the new dataset.
+    assert first_track not in ds._tracks.insertion_fill
     # Trigger actual reconstruction to verify the full call path executes without error.
     _ = ds_nan[0, 0]
 
@@ -245,14 +245,15 @@ def test_dummy_dataset_with_default_insertion_fill_does_not_crash():
     _ = ds[0, 0]
 
 
-def test_with_insertion_fill_rejects_dataset_without_haps_or_tracks():
-    """Datasets without both haplotypes and tracks should reject with_insertion_fill."""
+def test_with_insertion_fill_rejects_when_no_tracks_active():
+    """A dataset with tracks disabled (Haps-only reconstructor) should reject with_insertion_fill."""
     ds = gvl.get_dummy_dataset()
-    # If the dummy dataset already has both haps+tracks, we can't test the rejection here.
-    if ds._tracks is not None and ds._seqs is not None:
-        pytest.skip("dummy dataset has both haps and tracks; rejection path not testable")
-    with pytest.raises(ValueError):
-        ds.with_insertion_fill(Repeat5p())
+    if ds._tracks is None or ds._seqs is None:
+        pytest.skip("dummy dataset shape does not include both seqs and tracks")
+    # Disable tracks: reconstructor becomes Haps, not HapsTracks.
+    ds_no_tracks = ds.with_tracks(False)
+    with pytest.raises(ValueError, match="HapsTracks"):
+        ds_no_tracks.with_insertion_fill(Repeat5p())
 
 
 def test_kernel_flank_sample_query_hap_affects_hash():

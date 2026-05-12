@@ -778,7 +778,7 @@ class Dataset:
     def with_insertion_fill(
         self,
         fill: InsertionFill | Mapping[str, InsertionFill],
-    ):
+    ) -> "Self":
         """Configure how track values are filled at insertion sites.
 
         Only meaningful when the dataset returns haplotypes *and* tracks (i.e.
@@ -794,7 +794,7 @@ class Dataset:
         """
         if self._tracks is None:
             raise ValueError(
-                "Dataset has no tracks; with_insertion_fill is a no-op."
+                "Dataset has no tracks; cannot configure insertion fill."
             )
         if not isinstance(self._recon, HapsTracks):
             raise ValueError(
