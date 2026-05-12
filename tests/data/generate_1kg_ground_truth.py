@@ -80,6 +80,24 @@ def normalize_bcf(source_bcf: Path) -> Path:
     )
     logger.info("bcftools norm (atomize + split) done")
 
+    # Drop symbolic alleles (SVs / OTHER); gvl + bcftools must see the same variants.
+    filtered_tmp = ONE_KG_DIR / "filtered.no_svs.bcf"
+    _ = run_shell(
+        [
+            "bcftools",
+            "view",
+            "-e",
+            'TYPE="OTHER"',
+            "-O",
+            "b",
+            "-o",
+            str(filtered_tmp),
+            str(filtered),
+        ]
+    )
+    filtered_tmp.replace(filtered)
+    logger.info("bcftools view (drop SVs) done")
+
     _ = run_shell(["bcftools", "index", "-f", str(filtered)])
     return filtered
 
@@ -233,8 +251,6 @@ def generate_consensus_fastas(filtered_bcf: Path, bed_path: Path) -> None:
                         str(hap + 1),
                         "-s",
                         sample,
-                        "-e",
-                        'ALT~"<.*>"',
                         "-o",
                         str(out_fa),
                         str(filtered_bcf),
