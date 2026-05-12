@@ -217,6 +217,33 @@ def test_kernel_flank_sample_edge_clamp():
         assert float(v) in pool
 
 
+import genvarloader as gvl
+
+
+def test_end_to_end_set_insertion_fill():
+    """Use the dummy dataset to confirm with_insertion_fill plumbing works end-to-end."""
+    ds = gvl.get_dummy_dataset()
+    # Only haps+tracks datasets support insertion fill.
+    if ds._tracks is None or ds._seqs is None:
+        pytest.skip("dummy dataset shape does not include both seqs and tracks")
+    first_track = next(iter(ds._tracks.active_tracks))
+    ds_nan = ds.with_insertion_fill({first_track: Constant(float("nan"))})
+    assert isinstance(ds_nan._tracks.insertion_fill[first_track], Constant)
+    assert math.isnan(ds_nan._tracks.insertion_fill[first_track].value)
+    # Original dataset is unchanged (default fallback is Repeat5p when not explicitly set).
+    assert isinstance(ds._tracks.insertion_fill.get(first_track, Repeat5p()), Repeat5p)
+
+
+def test_with_insertion_fill_rejects_dataset_without_haps_or_tracks():
+    """Datasets without both haplotypes and tracks should reject with_insertion_fill."""
+    ds = gvl.get_dummy_dataset()
+    # If the dummy dataset already has both haps+tracks, we can't test the rejection here.
+    if ds._tracks is not None and ds._seqs is not None:
+        pytest.skip("dummy dataset has both haps and tracks; rejection path not testable")
+    with pytest.raises(ValueError):
+        ds.with_insertion_fill(Repeat5p())
+
+
 def test_kernel_flank_sample_query_hap_affects_hash():
     """Different (query, hap) seeds must drive different samples for the same base_seed."""
     v_starts = np.array([1], dtype=np.int32)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Callable, Generic, Literal, TypeVar, cast, overload
 
@@ -34,6 +34,7 @@ from .._utils import (
 )
 from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
 from ._rag_variants import RaggedVariants
+from ._insertion_fill import InsertionFill
 from ._reconstruct import Haps, HapsTracks, Ref, RefTracks, Tracks, TrackType
 from ._reference import Reference
 from ._utils import bed_to_regions, regions_to_bed
@@ -773,6 +774,36 @@ class Dataset:
                 return evolve(self, _tracks=tr, _recon=tr)
             case k, s, t, r:
                 assert_never(k), assert_never(s), assert_never(t), assert_never(r)
+
+    def with_insertion_fill(
+        self,
+        fill: InsertionFill | Mapping[str, InsertionFill],
+    ):
+        """Configure how track values are filled at insertion sites.
+
+        Only meaningful when the dataset returns haplotypes *and* tracks (i.e.
+        when the reconstructor is :class:`HapsTracks`). Pure-reference and
+        pure-haplotype datasets have no insertion fill to configure.
+
+        Parameters
+        ----------
+        fill
+            Either a single :class:`InsertionFill` strategy applied to every
+            active track, or a dict mapping track name to strategy. Tracks not
+            in the dict fall back to :class:`Repeat5p`.
+        """
+        if self._tracks is None:
+            raise ValueError(
+                "Dataset has no tracks; with_insertion_fill is a no-op."
+            )
+        if not isinstance(self._recon, HapsTracks):
+            raise ValueError(
+                "with_insertion_fill is only meaningful for datasets with both "
+                "haplotypes and tracks (reconstructor must be HapsTracks)."
+            )
+        new_tracks = self._tracks.with_insertion_fill(fill)
+        new_recon = evolve(self._recon, tracks=new_tracks)
+        return evolve(self, _tracks=new_tracks, _recon=new_recon)
 
     path: Path
     """Path to the dataset."""
