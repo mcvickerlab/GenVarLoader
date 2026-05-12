@@ -16,6 +16,28 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.24.0 (2026-05-12)
+
+### Feat
+
+- Dataset.with_insertion_fill + public API exports
+- route per-track insertion fill into HapsTracks kernel call
+- per-track insertion-fill on Tracks reconstructor
+- kernel-level insertion-fill strategy dispatch
+- add InsertionFill strategy classes and lowering helper
+
+### Fix
+
+- bump genoray
+- **insertion-fill**: strengthen tests, Self return type, clearer error
+- **insertion-fill**: lazy fallback to Repeat5p for unpopulated insertion_fill
+- **insertion-fill**: derive base_seed from full idx array, use full uint64 range
+- **insertion-fill**: require params, document fallback, broaden flank-sample tests
+- **insertion-fill**: non-instantiable base, tighter MAX_PARAMS, add test coverage
+
 ## v0.23.1 (2026-05-11)
 
 ### Fix
