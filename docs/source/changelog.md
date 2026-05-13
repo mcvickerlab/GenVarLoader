@@ -19,6 +19,15 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.24.1 (2026-05-13)
+
+### Fix
+
+- bump genoray, VCF bug
+
 ## v0.24.0 (2026-05-12)
 
 ### Feat
