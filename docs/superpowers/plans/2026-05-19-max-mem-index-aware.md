@@ -279,60 +279,61 @@ Do not proceed to release. Fix issues; if they are unrelated to this change, sur
 
 ---
 
-### Task 6: Bump genoray version and push
+### Task 6: Push branch and open PR for genoray
 
-**Files:**
-- Modify: `pyproject.toml` (version bump)
+**Files:** none
 
-- [ ] **Step 1: Determine new version**
+> **Important:** Do NOT bump the genoray version manually. The genoray project's CI handles release/versioning on merge. Just push the feature branch and open a PR.
 
-Current version is `2.3.3`. This is an additive non-breaking feature → bump minor: `2.4.0`.
+- [ ] **Step 1: Confirm with user before pushing**
 
-- [ ] **Step 2: Use commitizen to bump version**
+This is a remote-affecting action — pause for explicit user confirmation before running the push command.
+
+- [ ] **Step 2: Push the branch**
 
 ```bash
 cd /Users/david/projects/genoray
-pixi run -e default cz bump --increment MINOR
-```
-
-Expected: updates `pyproject.toml` to `2.4.0`, creates a commit and tag.
-
-If commitizen is unavailable / not configured, manually edit `pyproject.toml`:
-```diff
--version = "2.3.3"
-+version = "2.4.0"
-```
-then:
-```bash
-rtk git add pyproject.toml
-rtk git commit -m "bump: version 2.3.3 → 2.4.0"
-rtk git tag 2.4.0
-```
-
-- [ ] **Step 3: Push branch and tag**
-
-**Confirm with user before pushing**, since this is a remote-affecting action.
-
-```bash
 rtk git push -u origin feat/nbytes
-rtk git push origin 2.4.0
 ```
 
-- [ ] **Step 4: Open PR / merge / publish per project release flow**
+- [ ] **Step 3: Open the PR**
 
-User-driven step. After release artifacts (PyPI, conda-forge) are available, proceed to Phase 2.
+```bash
+rtk gh pr create --title "feat: add nbytes property to VCF/PGEN/SparseVar" --body "$(cat <<'EOF'
+## Summary
+- Adds a public `nbytes: int` property to `VCF`, `PGEN`, and `SparseVar` reporting the in-memory footprint of resident (non-mmap'd) data structures.
+- `VCF.nbytes`: size of the loaded gvi index (0 if not loaded).
+- `PGEN.nbytes`: index dataframe + `StartsEndsIlens` cache.
+- `SparseVar.nbytes`: polars index only; `genos` and `fields` are memory-mapped and excluded.
+
+Enables downstream consumers (e.g. GenVarLoader) to treat their `max_mem` budgets as true total caps by subtracting `reader.nbytes` before passing the remainder to chunked readers.
+
+## Test plan
+- [x] `pytest tests/test_vcf.py -v` — new `nbytes` tests pass
+- [x] `pytest tests/test_pgen.py -v` — new `nbytes` tests pass
+- [x] `pytest tests/test_svar.py -v` — new `nbytes` test passes
+- [x] Full `pytest tests/` green
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+EOF
+)"
+```
+
+- [ ] **Step 4: Wait for CI / merge / release**
+
+CI handles version bump and publication on merge. **Phase 2 proceeds against a local editable install** (Task 7), so it does not have to wait for the release to be on the index — but the GVL dep-version bump (deferred to the end of Phase 2) does.
 
 ---
 
 ## Phase 2 — GVL consumer
 
-> **Prerequisite:** genoray `2.4.0` (or whichever version contains `.nbytes`) is available on the package index used by the GVL pixi environment.
+> **Prerequisite for dev:** Phase 1 changes are committed locally in `/Users/david/projects/genoray`. We will dev against an **editable local install** of that working tree, so we do not have to wait for the genoray release.
+>
+> **Prerequisite for merging the GVL PR:** the new genoray version (containing `.nbytes`) is released and available on the package index. The dep-version bump in `pyproject.toml` / `pixi.toml` happens **after** that release lands (Task 11.5, below) — not now.
 
-### Task 7: Create branch and bump genoray dependency
+### Task 7: Create branch and install genoray editably
 
-**Files:**
-- Modify: `/Users/david/projects/GenVarLoader/pyproject.toml`
-- Modify: `/Users/david/projects/GenVarLoader/pixi.toml`
+**Files:** none (no version-string edits at this stage)
 
 - [ ] **Step 1: Switch to GVL repo and branch**
 
@@ -341,44 +342,30 @@ cd /Users/david/projects/GenVarLoader
 rtk git checkout -b feat/max-mem-index-aware
 ```
 
-- [ ] **Step 2: Bump pyproject.toml**
-
-Edit `pyproject.toml` line 34:
-```diff
--"genoray>=2.3.3,<3",
-+"genoray>=2.4.0,<3",
-```
-
-- [ ] **Step 3: Bump pixi.toml**
-
-Edit `pixi.toml` line 87:
-```diff
--genoray = "==2.3.3"
-+genoray = "==2.4.0"
-```
-
-- [ ] **Step 4: Refresh lockfile**
+- [ ] **Step 2: Install local genoray editably into the dev env**
 
 ```bash
-pixi install -e dev
+pixi run -e dev uv pip install -e /Users/david/projects/genoray
 ```
 
-Expected: pixi.lock updated with genoray 2.4.0.
+If `uv` is not on the dev env, fall back to `pip`:
+```bash
+pixi run -e dev pip install -e /Users/david/projects/genoray
+```
 
-- [ ] **Step 5: Sanity check the new property is importable**
+Expected: `Successfully installed genoray-<x.y.z>` (the working-tree version of genoray, which has `nbytes`).
+
+- [ ] **Step 3: Sanity check the new property is importable**
 
 ```bash
-pixi run -e dev python -c "from genoray import VCF; v = VCF.__init__; print(hasattr(VCF, 'nbytes'))"
+pixi run -e dev python -c "from genoray import VCF, PGEN, SparseVar; print(hasattr(VCF, 'nbytes'), hasattr(PGEN, 'nbytes'), hasattr(SparseVar, 'nbytes'))"
 ```
 
-Expected: `True`.
+Expected: `True True True`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: No commit yet**
 
-```bash
-rtk git add pyproject.toml pixi.toml pixi.lock
-rtk git commit -m "chore(deps): bump genoray to 2.4.0 for nbytes property"
-```
+The editable install touches the pixi env, not tracked files. Nothing to commit in this task.
 
 ---
 
@@ -616,17 +603,69 @@ assert isinstance(variants, (VCF, PGEN, SparseVar))
 idx_bytes = variants.nbytes
 ```
 
-- [ ] **Step 2: Push branch and open PR**
+- [ ] **Step 2: Do NOT push yet**
 
-**Confirm with user before pushing.**
+The GVL PR depends on the new genoray release being on the index. Pause here until the user confirms genoray has been released. Phase 2 implementation work is complete on the local branch; the remaining task (11.5) bumps the dep version once the release is available.
+
+---
+
+### Task 11.5: Bump genoray dependency (after genoray release lands)
+
+**Files:**
+- Modify: `pyproject.toml`
+- Modify: `pixi.toml`
+
+> **Trigger:** Run this task only after the user confirms the new genoray version (containing `.nbytes`) has been published. Replace `<NEW_VERSION>` below with the actual released version (e.g. `2.4.0`).
+
+- [ ] **Step 1: Bump pyproject.toml**
+
+Edit the `genoray` line (currently line 34):
+```diff
+-"genoray>=2.3.3,<3",
++"genoray>=<NEW_VERSION>,<3",
+```
+
+- [ ] **Step 2: Bump pixi.toml**
+
+Edit the `genoray` line (currently line 87):
+```diff
+-genoray = "==2.3.3"
++genoray = "==<NEW_VERSION>"
+```
+
+- [ ] **Step 3: Uninstall the editable install and refresh lockfile**
+
+```bash
+pixi run -e dev pip uninstall -y genoray
+pixi install -e dev
+```
+
+Expected: pixi.lock updated; the released genoray version is resolved.
+
+- [ ] **Step 4: Re-run the full test suite against the released version**
+
+```bash
+pixi run -e dev test
+```
+
+Expected: all tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+rtk git add pyproject.toml pixi.toml pixi.lock
+rtk git commit -m "chore(deps): bump genoray to <NEW_VERSION> for nbytes property"
+```
+
+- [ ] **Step 6: Push and open PR (confirm with user first)**
 
 ```bash
 rtk git push -u origin feat/max-mem-index-aware
 rtk gh pr create --title "feat(write): index-aware max_mem accounting" --body "$(cat <<'EOF'
 ## Summary
-- Subtracts `variants.nbytes` (new in genoray 2.4.0) from `max_mem` before passing the remainder to genoray chunking in `_write_from_vcf` / `_write_from_pgen`.
+- Subtracts `variants.nbytes` (new in genoray <NEW_VERSION>) from `max_mem` before passing the remainder to genoray chunking in `_write_from_vcf` / `_write_from_pgen`.
 - Emits a `UserWarning` when the resident genoray index exceeds 50% of `max_mem`.
-- Bumps genoray dependency to `>=2.4.0`.
+- Bumps genoray dependency to `>=<NEW_VERSION>`.
 
 See `docs/superpowers/specs/2026-05-19-max-mem-index-aware-design.md` for the design.
 
