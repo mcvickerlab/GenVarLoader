@@ -102,3 +102,25 @@ def test_write(reader: Reader, bed: pl.DataFrame, ref: Path, tmp_path):
     for len_ in range(1, max_len + 1):
         mask = ak.num(desired, -1) == len_
         assert ak.all(actual[mask][:, :len_] == desired[mask][:, :len_])  # type: ignore
+
+
+def test_write_warns_when_index_dominates_max_mem(tmp_path, monkeypatch):
+    """If variants.nbytes exceeds 50% of max_mem, gvl.write emits a UserWarning."""
+    import pytest
+
+    vcf = VCF(ddir / "vcf" / "filtered_source.vcf.gz")
+    vcf._write_gvi_index()
+    vcf._load_index()
+
+    bed = sp.bed.read(ddir / "source.bed")
+
+    # Force nbytes to a large value relative to max_mem.
+    # max_mem = 4 MiB; nbytes = 3 MiB → 75% of budget, should warn.
+    monkeypatch.setattr(type(vcf), "nbytes", property(lambda self: 3 * 1024 * 1024))
+
+    out = tmp_path / "test.gvl"
+    with pytest.warns(UserWarning, match="exceeds 50% of max_mem"):
+        gvl.write(out, bed, vcf, max_mem=4 * 1024 * 1024)
+
+    # Sanity: dataset directory was actually created
+    assert (out / "metadata.json").exists()
