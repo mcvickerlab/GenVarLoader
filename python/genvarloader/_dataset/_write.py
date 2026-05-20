@@ -256,6 +256,7 @@ def get_splice_bed(
     contigs: list[str] | None = None,
     transcript_support_level: str | None = "1",
     require_multiple_of_3: bool = True,
+    deduplicate_overlapping_cds: bool = False,
 ) -> pl.DataFrame:
     """Process a GTF into a BED-compatible DataFrame for splicing datasets.
 
@@ -276,6 +277,20 @@ def get_splice_bed(
     require_multiple_of_3
         If ``True``, keep only transcripts whose summed CDS length is a
         multiple of 3.
+    deduplicate_overlapping_cds
+        If ``True``, drop rows whose ``(chrom, chromStart, chromEnd, strand)``
+        is already present in the output (keeping the first occurrence by
+        sort order). Genes with multiple transcripts at the requested
+        ``transcript_support_level`` often share CDS exons at identical
+        genomic coordinates; the default output contains the same
+        coordinates once per matching transcript. Feeding those duplicate
+        rows to :func:`write` triggers redundant per-region work and can
+        drop throughput by orders of magnitude on VCF-backed datasets
+        (see issue #164 for a chr2 ``PPM1B`` reproducer). Defaults to
+        ``False`` to preserve existing behaviour; set to ``True`` when
+        one row per unique CDS position is sufficient (downstream
+        ``transcript_id`` / ``exon_number`` columns will reflect
+        whichever transcript was encountered first by sort order).
     """
     lf = sp.gtf.scan(gtf)
 
@@ -311,7 +326,14 @@ def get_splice_bed(
         )
 
     df = lf.drop(drop_cols).collect()
-    return sp.bed.sort(df)
+    df = sp.bed.sort(df)
+    if deduplicate_overlapping_cds:
+        df = df.unique(
+            subset=["chrom", "chromStart", "chromEnd", "strand"],
+            maintain_order=True,
+            keep="first",
+        )
+    return df
 
 
 def _prep_bed(

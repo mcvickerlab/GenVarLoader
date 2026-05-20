@@ -124,3 +124,56 @@ def test_write_warns_when_index_dominates_max_mem(tmp_path, monkeypatch):
 
     # Sanity: dataset directory was actually created
     assert (out / "metadata.json").exists()
+
+
+def _write_two_transcripts_gtf(path: Path) -> None:
+    """Write a minimal GTF with one gene (``GENE1``) and two TSL=1 transcripts
+    (``T1`` and ``T2``) whose CDS exons sit at identical genomic coordinates.
+
+    The shared exons are at ``chr1:1-99`` and ``chr1:201-290``; each transcript's
+    summed CDS length is ``99 + 90 = 189`` bytes (a multiple of 3, so the
+    ``require_multiple_of_3`` filter keeps both).
+    """
+    lines = [
+        '1\ttest\tCDS\t1\t99\t.\t+\t0\t'
+        'gene_id "G1"; gene_name "GENE1"; transcript_id "T1"; '
+        'transcript_support_level "1"; exon_number "1";',
+        '1\ttest\tCDS\t201\t290\t.\t+\t0\t'
+        'gene_id "G1"; gene_name "GENE1"; transcript_id "T1"; '
+        'transcript_support_level "1"; exon_number "2";',
+        '1\ttest\tCDS\t1\t99\t.\t+\t0\t'
+        'gene_id "G1"; gene_name "GENE1"; transcript_id "T2"; '
+        'transcript_support_level "1"; exon_number "1";',
+        '1\ttest\tCDS\t201\t290\t.\t+\t0\t'
+        'gene_id "G1"; gene_name "GENE1"; transcript_id "T2"; '
+        'transcript_support_level "1"; exon_number "2";',
+    ]
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_get_splice_bed_dedupe_overlapping_cds(tmp_path):
+    """When `deduplicate_overlapping_cds=True`, rows whose (chrom, chromStart,
+    chromEnd, strand) was already produced are dropped — useful when a gene
+    has multiple TSL=1 transcripts sharing CDS exons.
+
+    Default behaviour (``False``) keeps every matching transcript's row.
+    """
+    gtf = tmp_path / "two_transcripts.gtf"
+    _write_two_transcripts_gtf(gtf)
+
+    # Default: 4 rows (2 per transcript, 2 transcripts)
+    bed_full = gvl.get_splice_bed(gtf)
+    assert bed_full.height == 4
+    # Two distinct (chromStart, chromEnd) positions, each duplicated
+    assert (
+        bed_full.unique(subset=["chromStart", "chromEnd"]).height == 2
+    )
+
+    # With dedupe: one row per unique CDS position
+    bed_dedup = gvl.get_splice_bed(gtf, deduplicate_overlapping_cds=True)
+    assert bed_dedup.height == 2
+    # Output is still sorted by (chrom, chromStart) and preserves transcript_id
+    # from the first row encountered at each position.
+    assert bed_dedup["chromStart"].to_list() == [0, 200]  # 0-based BED
+    assert bed_dedup["chromEnd"].to_list() == [99, 290]
+    assert set(bed_dedup["transcript_id"].to_list()) == {"T1"}
