@@ -135,16 +135,16 @@ def _write_two_transcripts_gtf(path: Path) -> None:
     ``require_multiple_of_3`` filter keeps both).
     """
     lines = [
-        '1\ttest\tCDS\t1\t99\t.\t+\t0\t'
+        "1\ttest\tCDS\t1\t99\t.\t+\t0\t"
         'gene_id "G1"; gene_name "GENE1"; transcript_id "T1"; '
         'transcript_support_level "1"; exon_number "1";',
-        '1\ttest\tCDS\t201\t290\t.\t+\t0\t'
+        "1\ttest\tCDS\t201\t290\t.\t+\t0\t"
         'gene_id "G1"; gene_name "GENE1"; transcript_id "T1"; '
         'transcript_support_level "1"; exon_number "2";',
-        '1\ttest\tCDS\t1\t99\t.\t+\t0\t'
+        "1\ttest\tCDS\t1\t99\t.\t+\t0\t"
         'gene_id "G1"; gene_name "GENE1"; transcript_id "T2"; '
         'transcript_support_level "1"; exon_number "1";',
-        '1\ttest\tCDS\t201\t290\t.\t+\t0\t'
+        "1\ttest\tCDS\t201\t290\t.\t+\t0\t"
         'gene_id "G1"; gene_name "GENE1"; transcript_id "T2"; '
         'transcript_support_level "1"; exon_number "2";',
     ]
@@ -165,9 +165,7 @@ def test_get_splice_bed_dedupe_overlapping_cds(tmp_path):
     bed_full = gvl.get_splice_bed(gtf)
     assert bed_full.height == 4
     # Two distinct (chromStart, chromEnd) positions, each duplicated
-    assert (
-        bed_full.unique(subset=["chromStart", "chromEnd"]).height == 2
-    )
+    assert bed_full.unique(subset=["chromStart", "chromEnd"]).height == 2
 
     # With dedupe: one row per unique CDS position
     bed_dedup = gvl.get_splice_bed(gtf, deduplicate_overlapping_cds=True)
