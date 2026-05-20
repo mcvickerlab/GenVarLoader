@@ -17,7 +17,7 @@ import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseVar
 from genoray._svar import dense2sparse
 from genoray._types import V_IDX_TYPE
-from genoray._utils import ContigNormalizer, parse_memory
+from genoray._utils import ContigNormalizer, format_memory, parse_memory
 from loguru import logger
 from more_itertools import mark_ends
 from natsort import natsorted
@@ -93,7 +93,12 @@ def write(
     overwrite
         Whether to overwrite an existing dataset
     max_mem
-        Approximate maximum memory to use. This is a soft limit and may be exceeded by a small amount.
+        Approximate maximum total memory to use, including the genoray variant
+        index already resident before genotype reading begins. The reader's
+        :attr:`~genoray.VCF.nbytes` (or equivalent) is subtracted from
+        ``max_mem`` to determine the budget available for genotype chunking.
+        A warning is emitted if the resident index exceeds 50% of ``max_mem``.
+        This is a soft limit and may be exceeded by a small amount.
     extend_to_length
         Whether to continue reading/writing variants until all haplotypes have a length at least as long as the intervals in `bed`.
         Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
@@ -196,15 +201,31 @@ def write(
 
     if variants is not None:
         logger.info("Writing genotypes.")
+
+        idx_bytes = variants.nbytes
+        effective_max_mem = max_mem - idx_bytes
+        logger.info(
+            f"Variant reader resident size: {format_memory(idx_bytes)}; "
+            f"max_mem budget: {format_memory(max_mem)}; "
+            f"available for chunking: {format_memory(max(effective_max_mem, 0))}"
+        )
+        if idx_bytes > max_mem // 2:
+            warnings.warn(
+                f"Variant index resident size ({format_memory(idx_bytes)}) "
+                f"exceeds 50% of max_mem ({format_memory(max_mem)}). "
+                f"Consider increasing max_mem.",
+                stacklevel=2,
+            )
+
         if isinstance(variants, VCF):
             variants.set_samples(samples)
             gvl_bed = _write_from_vcf(
-                path, gvl_bed, variants, max_mem, extend_to_length
+                path, gvl_bed, variants, effective_max_mem, extend_to_length
             )
         elif isinstance(variants, PGEN):
             variants.set_samples(samples)
             gvl_bed = _write_from_pgen(
-                path, gvl_bed, variants, max_mem, extend_to_length
+                path, gvl_bed, variants, effective_max_mem, extend_to_length
             )
         elif isinstance(variants, SparseVar):
             gvl_bed = _write_from_svar(
