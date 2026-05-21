@@ -97,12 +97,12 @@ def test_write_from_svar_records_svar_link_and_no_symlink(svar_dataset_paths):
     link_path = gvl_path / "genotypes" / "link.svar"
     assert not link_path.exists() and not link_path.is_symlink()
 
-    metadata = Metadata.model_validate_json(
-        (gvl_path / "metadata.json").read_text()
-    )
+    metadata = Metadata.model_validate_json((gvl_path / "metadata.json").read_text())
     assert metadata.svar_link is not None
     assert Path(metadata.svar_link.absolute_path) == svar_path.resolve()
-    assert (gvl_path / metadata.svar_link.relative_path).resolve() == svar_path.resolve()
+    assert (
+        gvl_path / metadata.svar_link.relative_path
+    ).resolve() == svar_path.resolve()
     expected_bytes = (svar_path / "variant_idxs.npy").stat().st_size
     assert metadata.svar_link.fingerprint.variant_idxs_bytes == expected_bytes
     assert metadata.svar_link.fingerprint.n_variants > 0
@@ -123,9 +123,7 @@ def test_resolve_svar_prefers_override(svar_dataset_paths):
 
 def test_resolve_svar_uses_relative_path(svar_dataset_paths):
     gvl_path, svar_path = svar_dataset_paths
-    metadata = Metadata.model_validate_json(
-        (gvl_path / "metadata.json").read_text()
-    )
+    metadata = Metadata.model_validate_json((gvl_path / "metadata.json").read_text())
     resolved = _resolve_svar(gvl_path, metadata.svar_link, override=None)
     assert resolved.resolve() == svar_path.resolve()
 
@@ -171,9 +169,7 @@ def test_verify_fingerprint_mismatch_raises(svar_dataset_paths):
 
 def test_verify_fingerprint_ok(svar_dataset_paths):
     gvl_path, svar_path = svar_dataset_paths
-    metadata = Metadata.model_validate_json(
-        (gvl_path / "metadata.json").read_text()
-    )
+    metadata = Metadata.model_validate_json((gvl_path / "metadata.json").read_text())
     _verify_fingerprint(svar_path, metadata.svar_link)
 
 
