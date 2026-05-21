@@ -1,18 +1,23 @@
 name: Merge main -> stable
 
 on:
-  workflow_run:
-    workflows: ["Bump and release"]
-    branches: [main]
-    types:
-      - completed
+  workflow_call:
+    inputs:
+      dry_run:
+        description: 'Compute the rebase but do not push'
+        type: boolean
+        required: false
+        default: false
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Compute the rebase but do not push'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   merge:
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
     environment: pypi
     permissions:
       id-token: write
@@ -23,12 +28,23 @@ jobs:
         with:
           ref: stable
           fetch-depth: 0
-          token: "${{ secrets.COMMITIZEN }}"
+          token: ${{ secrets.COMMITIZEN }}
       - name: Config git
         run: |
           git config --global user.name "${GITHUB_ACTOR}"
           git config --global user.email "${GITHUB_ACTOR}@users.noreply.github.com"
-      - name: Merge main -> stable
+      - name: Rebase stable onto main
+        run: git rebase origin/main
+      - name: Push to stable
+        if: inputs.dry_run == false
+        run: git push origin stable
+      - name: Dry-run summary (skipped push)
+        if: inputs.dry_run == true
         run: |
-          git rebase origin/main
-          git push origin stable
+          {
+            echo "## Dry-run: would push the following to stable"
+            echo
+            echo '```'
+            git log --oneline origin/stable..HEAD
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
