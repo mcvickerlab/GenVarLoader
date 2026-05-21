@@ -104,8 +104,10 @@ def test_write(reader: Reader, bed: pl.DataFrame, ref: Path, tmp_path):
         assert ak.all(actual[mask][:, :len_] == desired[mask][:, :len_])  # type: ignore
 
 
-def test_write_warns_when_index_dominates_max_mem(tmp_path, monkeypatch):
-    """If variants.nbytes exceeds 50% of max_mem, gvl.write emits a UserWarning."""
+def test_write_errors_when_post_index_budget_too_small(tmp_path, monkeypatch):
+    """If max_mem minus the variant index leaves no room for even one
+    variant chunk, gvl.write raises ValueError instead of silently
+    blowing the budget."""
     import pytest
 
     vcf = VCF(ddir / "vcf" / "filtered_source.vcf.gz")
@@ -114,13 +116,40 @@ def test_write_warns_when_index_dominates_max_mem(tmp_path, monkeypatch):
 
     bed = sp.bed.read(ddir / "source.bed")
 
-    # Force nbytes to a large value relative to max_mem.
-    # max_mem = 4 MiB; nbytes = 3 MiB → 75% of budget, should warn.
-    monkeypatch.setattr(type(vcf), "nbytes", property(lambda self: 3 * 1024 * 1024))
+    # Force nbytes large enough that effective_max_mem < bytes_per_var.
+    # bytes_per_var = n_samples * ploidy (VCF, Genos8 = 1 byte).
+    # Set nbytes = max_mem so effective_max_mem == 0.
+    max_mem = 4 * 1024 * 1024
+    monkeypatch.setattr(type(vcf), "nbytes", property(lambda self: max_mem))
 
     out = tmp_path / "test.gvl"
-    with pytest.warns(UserWarning, match="exceeds 50% of max_mem"):
-        gvl.write(out, bed, vcf, max_mem=4 * 1024 * 1024)
+    with pytest.raises(ValueError, match="max_mem"):
+        gvl.write(out, bed, vcf, max_mem=max_mem)
 
-    # Sanity: dataset directory was actually created
+
+def test_write_loads_lazy_vcf_index(tmp_path):
+    """gvl.write should load the index itself when given a VCF constructed
+    with with_gvi_index=False, and produce a valid dataset."""
+    vcf = VCF(ddir / "vcf" / "filtered_source.vcf.gz", with_gvi_index=False)
+    assert vcf._index is None
+
+    bed = sp.bed.read(ddir / "source.bed")
+    out = tmp_path / "test.gvl"
+    gvl.write(out, bed, vcf)
+
     assert (out / "metadata.json").exists()
+    assert (out / "genotypes" / "variants.arrow").exists()
+
+
+def test_write_loads_lazy_pgen_index(tmp_path):
+    """gvl.write should load the index itself when given a PGEN constructed
+    with load_index=False, and produce a valid dataset."""
+    pgen = PGEN(ddir / "pgen" / "filtered_source.pgen", load_index=False)
+    assert pgen._index is None
+
+    bed = sp.bed.read(ddir / "source.bed")
+    out = tmp_path / "test.gvl"
+    gvl.write(out, bed, pgen)
+
+    assert (out / "metadata.json").exists()
+    assert (out / "genotypes" / "variants.arrow").exists()
