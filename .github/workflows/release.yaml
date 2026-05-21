@@ -32,6 +32,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # In real mode, pin to the just-pushed tag so the changelog includes
+          # the new section (bump's commit is past the orchestrator's dispatch
+          # ref). In dry-run, the tag does not exist; fall back to caller's ref.
+          ref: ${{ inputs.dry_run == false && inputs.tag || '' }}
 
       - name: Resolve tag
         id: tag
