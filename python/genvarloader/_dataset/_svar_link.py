@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -95,3 +97,57 @@ def _verify_fingerprint(svar_path: Path, link: SvarLink | None) -> None:
         raise ValueError(
             f"svar fingerprint mismatch at {svar_path}: " + "; ".join(mismatches)
         )
+
+
+def migrate_svar_link(gvl_path: str | Path) -> None:
+    """Upgrade a legacy GVL dataset's ``link.svar`` symlink to an
+    ``svar_link`` entry in ``metadata.json`` and remove the symlink.
+
+    Idempotent. No-op when ``svar_link`` is already populated, or when the
+    dataset has no SVAR dependency.
+    Raises FileNotFoundError if the legacy symlink is dangling.
+    """
+    gvl_path = Path(gvl_path)
+    meta_path = gvl_path / "metadata.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(f"No metadata.json at {meta_path}")
+
+    raw = json.loads(meta_path.read_text())
+    if raw.get("svar_link") is not None:
+        return
+
+    symlink = gvl_path / "genotypes" / "link.svar"
+    if not (symlink.exists() or symlink.is_symlink()):
+        return
+
+    target = symlink.resolve(strict=False)
+    if not target.is_dir():
+        raise FileNotFoundError(
+            f"link.svar at {symlink} points to {target}, which does not exist. "
+            f"Cannot migrate."
+        )
+
+    variant_idxs = target / "variant_idxs.npy"
+
+    import polars as pl
+
+    n_variants = (
+        pl.scan_ipc(target / "index.arrow").select(pl.len()).collect().item()
+    )
+
+    link = SvarLink(
+        relative_path=os.path.relpath(target, start=gvl_path).replace(os.sep, "/"),
+        absolute_path=str(target),
+        fingerprint=SvarFingerprint(
+            n_variants=n_variants,
+            variant_idxs_bytes=variant_idxs.stat().st_size,
+        ),
+    )
+
+    raw["svar_link"] = link.model_dump()
+
+    tmp = meta_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(raw))
+    tmp.replace(meta_path)
+
+    symlink.unlink()

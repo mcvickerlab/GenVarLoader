@@ -251,3 +251,62 @@ def test_open_dataset_legacy_symlink_layout(tmp_path, svar_dataset_paths):
             issubclass(w.category, DeprecationWarning) and "link.svar" in str(w.message)
             for w in caught
         )
+
+
+def test_migrate_svar_link_upgrades_legacy_dataset(tmp_path, svar_dataset_paths):
+    import warnings as _warnings
+
+    import genvarloader as gvl
+
+    gvl_path, svar_path = svar_dataset_paths
+    meta_path = gvl_path / "metadata.json"
+    meta = json.loads(meta_path.read_text())
+    meta["version"] = "0.18.0"
+    meta.pop("svar_link", None)
+    meta_path.write_text(json.dumps(meta))
+    (gvl_path / "genotypes" / "link.svar").symlink_to(
+        svar_path.resolve(), target_is_directory=True
+    )
+
+    gvl.migrate_svar_link(gvl_path)
+
+    upgraded = json.loads(meta_path.read_text())
+    assert upgraded.get("svar_link") is not None
+    assert not (gvl_path / "genotypes" / "link.svar").exists()
+
+    ref = _DATA_DIR / "fasta" / "hg38.fa.bgz"
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        ds = (
+            gvl.Dataset.open(gvl_path, reference=ref)
+            .with_seqs("haplotypes")
+            .with_tracks(False)
+        )
+        _ = ds[0, 0]
+        assert not any(issubclass(w.category, DeprecationWarning) for w in caught)
+
+
+def test_migrate_svar_link_is_idempotent(svar_dataset_paths):
+    import genvarloader as gvl
+
+    gvl_path, _ = svar_dataset_paths
+    before = (gvl_path / "metadata.json").read_text()
+    gvl.migrate_svar_link(gvl_path)
+    after = (gvl_path / "metadata.json").read_text()
+    assert before == after
+
+
+def test_migrate_svar_link_refuses_dangling_symlink(tmp_path, svar_dataset_paths):
+    import genvarloader as gvl
+
+    gvl_path, _ = svar_dataset_paths
+    meta_path = gvl_path / "metadata.json"
+    meta = json.loads(meta_path.read_text())
+    meta["version"] = "0.18.0"
+    meta.pop("svar_link", None)
+    meta_path.write_text(json.dumps(meta))
+    (gvl_path / "genotypes" / "link.svar").symlink_to(
+        tmp_path / "does_not_exist.svar", target_is_directory=True
+    )
+    with pytest.raises(FileNotFoundError):
+        gvl.migrate_svar_link(gvl_path)

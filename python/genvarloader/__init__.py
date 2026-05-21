@@ -18,6 +18,7 @@ from ._table import Table
 from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
 from ._dataset._rag_variants import RaggedVariants
 from ._dataset._reference import RefDataset, Reference
+from ._dataset._svar_link import migrate_svar_link
 from ._dataset._write import get_splice_bed, write
 from ._dummy import get_dummy_dataset
 from ._ragged import RaggedAnnotatedHaps, RaggedIntervals
@@ -29,6 +30,7 @@ __version__ = importlib.metadata.version("genvarloader")
 
 __all__ = [
     "write",
+    "migrate_svar_link",
     "get_splice_bed",
     "Dataset",
     "BigWigs",
