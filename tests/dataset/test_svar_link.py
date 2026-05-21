@@ -175,3 +175,79 @@ def test_verify_fingerprint_ok(svar_dataset_paths):
         (gvl_path / "metadata.json").read_text()
     )
     _verify_fingerprint(svar_path, metadata.svar_link)
+
+
+def test_open_dataset_via_recorded_svar_link(svar_dataset_paths):
+    import genvarloader as gvl
+
+    gvl_path, _ = svar_dataset_paths
+    ref = _DATA_DIR / "fasta" / "hg38.fa.bgz"
+    ds = (
+        gvl.Dataset.open(gvl_path, reference=ref)
+        .with_seqs("haplotypes")
+        .with_tracks(False)
+    )
+    _ = ds[0, 0]
+
+
+def test_open_dataset_after_relocation_via_override(tmp_path, svar_dataset_paths):
+    import genvarloader as gvl
+
+    gvl_path, svar_path = svar_dataset_paths
+    moved = tmp_path / "moved.svar"
+    shutil.copytree(svar_path, moved)
+
+    # Break the stored paths by relocating the dataset (so relative & absolute fail).
+    moved_gvl = tmp_path / "elsewhere" / "ds.gvl"
+    moved_gvl.parent.mkdir()
+    shutil.copytree(gvl_path, moved_gvl)
+
+    ref = _DATA_DIR / "fasta" / "hg38.fa.bgz"
+    ds = (
+        gvl.Dataset.open(moved_gvl, reference=ref, svar=moved)
+        .with_seqs("haplotypes")
+        .with_tracks(False)
+    )
+    _ = ds[0, 0]
+
+
+def test_open_dataset_mismatched_svar_raises(tmp_path, svar_dataset_paths):
+    import genvarloader as gvl
+
+    gvl_path, svar_path = svar_dataset_paths
+    fake = tmp_path / "fake.svar"
+    shutil.copytree(svar_path, fake)
+    target = fake / "variant_idxs.npy"
+    target.write_bytes(target.read_bytes()[:-8])
+    with pytest.raises(ValueError, match="fingerprint"):
+        gvl.Dataset.open(gvl_path, svar=fake)
+
+
+def test_open_dataset_legacy_symlink_layout(tmp_path, svar_dataset_paths):
+    import warnings as _warnings
+
+    import genvarloader as gvl
+
+    gvl_path, svar_path = svar_dataset_paths
+    meta_path = gvl_path / "metadata.json"
+    meta = json.loads(meta_path.read_text())
+    meta["version"] = "0.18.0"
+    meta.pop("svar_link", None)
+    meta_path.write_text(json.dumps(meta))
+    (gvl_path / "genotypes" / "link.svar").symlink_to(
+        svar_path.resolve(), target_is_directory=True
+    )
+
+    ref = _DATA_DIR / "fasta" / "hg38.fa.bgz"
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        ds = (
+            gvl.Dataset.open(gvl_path, reference=ref)
+            .with_seqs("haplotypes")
+            .with_tracks(False)
+        )
+        _ = ds[0, 0]
+        assert any(
+            issubclass(w.category, DeprecationWarning) and "link.svar" in str(w.message)
+            for w in caught
+        )

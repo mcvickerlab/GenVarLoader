@@ -101,6 +101,8 @@ class Dataset:
         region_names: str | None = None,
         splice_info: str | tuple[str, str] | None = None,
         var_filter: Literal["exonic"] | None = None,
+        *,
+        svar: str | Path | None = None,
     ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]: ...
     @staticmethod
     @overload
@@ -116,6 +118,8 @@ class Dataset:
         region_names: str | None = None,
         splice_info: str | tuple[str, str] | None = None,
         var_filter: Literal["exonic"] | None = None,
+        *,
+        svar: str | Path | None = None,
     ) -> RaggedDataset[RaggedSeqs, MaybeRTRK]: ...
     @staticmethod
     def open(
@@ -130,6 +134,8 @@ class Dataset:
         region_names: str | None = None,
         splice_info: str | tuple[str, str] | None = None,
         var_filter: Literal["exonic"] | None = None,
+        *,
+        svar: str | Path | None = None,
     ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]:
         """Open a dataset from a path. If no reference genome is provided, the dataset cannot yield sequences.
         Will initialize the dataset such that it will return tracks and haplotypes (reference sequences if no genotypes) if possible.
@@ -162,6 +168,10 @@ class Dataset:
             If False, splicing will be disabled.
         var_filter
             Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
+        svar
+            Override the recorded SVAR location. Use when the original SVAR has
+            moved and the dataset cannot find it via the stored relative/absolute
+            path or by sibling discovery.
         """
         path = Path(path)
         if not path.exists():
@@ -213,6 +223,8 @@ class Dataset:
                 samples=samples,
                 ploidy=ploidy,
                 version=metadata.version,
+                svar_link=metadata.svar_link,
+                svar_override=svar,
                 min_af=min_af,
                 max_af=max_af,
                 filter=var_filter,

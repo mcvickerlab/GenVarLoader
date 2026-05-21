@@ -19,6 +19,8 @@ from genoray.exprs import ILEN
 from loguru import logger
 from numpy.typing import NDArray
 from pydantic_extra_types.semantic_version import SemanticVersion
+
+import warnings
 from seqpro.rag import OFFSET_TYPE, Ragged
 from tqdm.auto import tqdm
 from typing_extensions import assert_never
@@ -43,6 +45,7 @@ from ._insertion_fill import lower as _lower_insertion_fills
 from ._intervals import intervals_to_tracks, tracks_to_intervals
 from ._rag_variants import RaggedVariants
 from ._reference import Reference, get_reference
+from ._svar_link import SvarLink, _resolve_svar, _verify_fingerprint
 from ._tracks import shift_and_realign_tracks_sparse
 from ._utils import splits_sum_le_value
 
@@ -225,6 +228,8 @@ class Haps(Reconstructor[_H]):
         samples: list[str],
         ploidy: int,
         version: SemanticVersion | None,
+        svar_link: "SvarLink | None" = None,
+        svar_override: "Path | str | None" = None,
         min_af: float | None = None,
         max_af: float | None = None,
         filter: Literal["exonic"] | None = None,
@@ -240,8 +245,38 @@ class Haps(Reconstructor[_H]):
             dtype = np.dtype(metadata["dtype"])
 
             offset_path = path / "genotypes" / "offsets.npy"
-            geno_path = path / "genotypes" / "link.svar" / "variant_idxs.npy"
-            dosage_path = path / "genotypes" / "link.svar" / "dosages.npy"
+
+            if svar_link is not None:
+                svar_path = _resolve_svar(path, svar_link, svar_override)
+                _verify_fingerprint(svar_path, svar_link)
+            else:
+                legacy_link = path / "genotypes" / "link.svar"
+                if svar_override is not None:
+                    svar_path = Path(svar_override)
+                    if not svar_path.is_dir():
+                        raise FileNotFoundError(
+                            f"svar override does not exist: {svar_path}"
+                        )
+                elif legacy_link.exists():
+                    warnings.warn(
+                        f"GVL dataset at {path} uses the legacy link.svar "
+                        f"symlink. Run "
+                        f"`genvarloader.migrate_svar_link({str(path)!r})` "
+                        f"to upgrade.",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+                    svar_path = legacy_link.resolve()
+                else:
+                    raise FileNotFoundError(
+                        f"Legacy GVL dataset at {path} is missing its link.svar "
+                        f"symlink and has no svar_link metadata. "
+                        f"Pass `svar=` to Dataset.open(...) to recover, or "
+                        f"re-run `gvl.write`."
+                    )
+
+            geno_path = svar_path / "variant_idxs.npy"
+            dosage_path = svar_path / "dosages.npy"
 
             offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
             v_idxs = np.memmap(geno_path, dtype=V_IDX_TYPE, mode="r")
@@ -255,9 +290,7 @@ class Haps(Reconstructor[_H]):
                 )
 
             logger.info("Loading variant data.")
-            variants = _Variants.from_table(
-                path / "genotypes" / "link.svar" / "index.arrow"
-            )
+            variants = _Variants.from_table(svar_path / "index.arrow")
         else:
             logger.info("Loading variant data.")
             variants = _Variants.from_table(
