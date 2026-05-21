@@ -64,3 +64,39 @@ def test_semantic_version_ordering_for_one_based_dispatch():
     assert SemanticVersion.parse("0.18.0") >= SemanticVersion.parse("0.18.0")
     assert SemanticVersion.parse("0.20.0") >= SemanticVersion.parse("0.18.0")
     assert not (SemanticVersion.parse("0.17.5") >= SemanticVersion.parse("0.18.0"))
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DATA_DIR = _REPO_ROOT / "tests" / "data"
+
+
+@pytest.fixture
+def svar_dataset_paths(tmp_path):
+    """Produce a fresh GVL dataset built from the canonical test svar."""
+    import genvarloader as gvl
+
+    svar_path = _DATA_DIR / "filtered.svar"
+    bed_path = _DATA_DIR / "source.bed"
+    assert svar_path.is_dir(), f"missing fixture {svar_path}; run pixi run -e dev gen"
+    assert bed_path.exists(), f"missing fixture {bed_path}"
+
+    gvl_path = tmp_path / "ds.gvl"
+    gvl.write(path=gvl_path, bed=bed_path, variants=svar_path, overwrite=True)
+    return gvl_path, svar_path
+
+
+def test_write_from_svar_records_svar_link_and_no_symlink(svar_dataset_paths):
+    gvl_path, svar_path = svar_dataset_paths
+
+    link_path = gvl_path / "genotypes" / "link.svar"
+    assert not link_path.exists() and not link_path.is_symlink()
+
+    metadata = Metadata.model_validate_json(
+        (gvl_path / "metadata.json").read_text()
+    )
+    assert metadata.svar_link is not None
+    assert Path(metadata.svar_link.absolute_path) == svar_path.resolve()
+    assert (gvl_path / metadata.svar_link.relative_path).resolve() == svar_path.resolve()
+    expected_bytes = (svar_path / "variant_idxs.npy").stat().st_size
+    assert metadata.svar_link.fingerprint.variant_idxs_bytes == expected_bytes
+    assert metadata.svar_link.fingerprint.n_variants > 0

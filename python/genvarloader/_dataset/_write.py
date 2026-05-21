@@ -247,9 +247,10 @@ def write(
                 path, gvl_bed, variants, effective_max_mem, extend_to_length
             )
         elif isinstance(variants, SparseVar):
-            gvl_bed = _write_from_svar(
+            gvl_bed, _svar_link = _write_from_svar(
                 path, gvl_bed, variants, samples, extend_to_length
             )
+            metadata["svar_link"] = _svar_link
         metadata["ploidy"] = variants.ploidy
         # free memory
         del variants
@@ -578,7 +579,7 @@ def _write_from_svar(
     svar: SparseVar,
     samples: list[str],
     extend_to_length: bool,
-):
+) -> tuple[pl.DataFrame, SvarLink]:
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -648,9 +649,24 @@ def _write_from_svar(
     pbar.close()
     offsets.flush()
 
-    (out_dir / "link.svar").symlink_to(svar.path.resolve(), target_is_directory=True)
+    import os
 
-    return bed.with_columns(chromEnd=pl.Series(max_ends))
+    from ._svar_link import SvarFingerprint
+
+    svar_resolved = svar.path.resolve()
+    variant_idxs_path = svar_resolved / "variant_idxs.npy"
+    svar_link = SvarLink(
+        relative_path=os.path.relpath(svar_resolved, start=path).replace(
+            os.sep, "/"
+        ),
+        absolute_path=str(svar_resolved),
+        fingerprint=SvarFingerprint(
+            n_variants=svar.index.height,
+            variant_idxs_bytes=variant_idxs_path.stat().st_size,
+        ),
+    )
+
+    return bed.with_columns(chromEnd=pl.Series(max_ends)), svar_link
 
 
 def _write_phased_variants_chunk(
