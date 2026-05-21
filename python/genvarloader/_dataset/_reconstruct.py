@@ -18,7 +18,7 @@ from genoray._types import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
 from genoray.exprs import ILEN
 from loguru import logger
 from numpy.typing import NDArray
-from packaging.version import Version
+from pydantic_extra_types.semantic_version import SemanticVersion
 from seqpro.rag import OFFSET_TYPE, Ragged
 from tqdm.auto import tqdm
 from typing_extensions import assert_never
@@ -224,7 +224,7 @@ class Haps(Reconstructor[_H]):
         regions: NDArray[np.int32],
         samples: list[str],
         ploidy: int,
-        version: Version | None,
+        version: SemanticVersion | None,
         min_af: float | None = None,
         max_af: float | None = None,
         filter: Literal["exonic"] | None = None,
@@ -262,7 +262,8 @@ class Haps(Reconstructor[_H]):
             logger.info("Loading variant data.")
             variants = _Variants.from_table(
                 path / "genotypes" / "variants.arrow",
-                one_based=version is not None and version >= Version("0.18.0"),
+                one_based=version is not None
+                and version >= SemanticVersion.parse("0.18.0"),
             )
             v_idxs = np.memmap(
                 path / "genotypes" / "variant_idxs.npy",

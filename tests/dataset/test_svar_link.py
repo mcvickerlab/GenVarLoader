@@ -57,3 +57,10 @@ def test_metadata_version_serializes_back_to_string():
 def test_metadata_svar_link_defaults_to_none():
     m = Metadata(samples=["s1"], contigs=["1"], n_regions=1)
     assert m.svar_link is None
+
+
+def test_semantic_version_ordering_for_one_based_dispatch():
+    """The legacy comparison '>= 0.18.0' must still work under SemanticVersion."""
+    assert SemanticVersion.parse("0.18.0") >= SemanticVersion.parse("0.18.0")
+    assert SemanticVersion.parse("0.20.0") >= SemanticVersion.parse("0.18.0")
+    assert not (SemanticVersion.parse("0.17.5") >= SemanticVersion.parse("0.18.0"))

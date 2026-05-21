@@ -264,7 +264,7 @@ def write(
 
     _metadata = Metadata(**metadata)
     with open(path / "metadata.json", "w") as f:
-        json.dump(_metadata.model_dump(), f)
+        f.write(_metadata.model_dump_json())
 
     logger.info("Finished writing.")
     warnings.simplefilter("default")
