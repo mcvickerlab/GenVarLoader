@@ -1,0 +1,101 @@
+name: Release pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      increment:
+        description: "Force a specific bump (auto = let commitizen decide)"
+        type: choice
+        required: false
+        default: "auto"
+        options: ["auto", "PATCH", "MINOR", "MAJOR"]
+      skip_bump:
+        description: "Skip bump; release/publish/merge an existing tag instead"
+        type: boolean
+        required: false
+        default: false
+      tag:
+        description: "Existing tag to release (required when skip_bump=true; with v prefix)"
+        type: string
+        required: false
+        default: ""
+      dry_run:
+        description: "Run end-to-end without external side effects"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.out.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate inputs
+        id: out
+        run: |
+          if [ "${{ inputs.skip_bump }}" = "true" ]; then
+            TAG="${{ inputs.tag }}"
+            if [ -z "$TAG" ]; then
+              echo "::error::skip_bump=true requires a tag input"
+              exit 1
+            fi
+            if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::tag '$TAG' does not match vX.Y.Z"
+              exit 1
+            fi
+            git fetch --tags --quiet
+            if ! git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+              echo "::error::tag '$TAG' does not exist on the remote"
+              exit 1
+            fi
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+  bump:
+    needs: resolve
+    if: inputs.skip_bump == false
+    uses: ./.github/workflows/bump.yaml
+    secrets: inherit
+    with:
+      increment: ${{ inputs.increment }}
+      dry_run: ${{ inputs.dry_run }}
+
+  release:
+    needs: [resolve, bump]
+    if: |
+      always() &&
+      needs.resolve.result == 'success' &&
+      (needs.bump.result == 'success' || needs.bump.result == 'skipped')
+    uses: ./.github/workflows/release.yaml
+    secrets: inherit
+    with:
+      tag: ${{ needs.bump.outputs.tag || needs.resolve.outputs.tag }}
+      dry_run: ${{ inputs.dry_run }}
+
+  publish:
+    needs: [resolve, bump, release]
+    if: always() && needs.release.result == 'success'
+    uses: ./.github/workflows/publish.yaml
+    secrets: inherit
+    with:
+      dry_run: ${{ inputs.dry_run }}
+      tag: ${{ needs.bump.outputs.tag || needs.resolve.outputs.tag }}
+
+  merge:
+    needs: publish
+    if: always() && needs.publish.result == 'success'
+    uses: ./.github/workflows/merge.yaml
+    secrets: inherit
+    with:
+      dry_run: ${{ inputs.dry_run }}
