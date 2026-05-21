@@ -94,11 +94,13 @@ def write(
         Whether to overwrite an existing dataset
     max_mem
         Approximate maximum total memory to use, including the genoray variant
-        index already resident before genotype reading begins. The reader's
-        :attr:`~genoray.VCF.nbytes` (or equivalent) is subtracted from
-        ``max_mem`` to determine the budget available for genotype chunking.
-        A warning is emitted if the resident index exceeds 50% of ``max_mem``.
-        This is a soft limit and may be exceeded by a small amount.
+        index. The reader's index is loaded eagerly at the start of
+        :func:`write` (for :class:`~genoray.VCF` and :class:`~genoray.PGEN`)
+        so that :attr:`~genoray.VCF.nbytes` reflects its true size; that value
+        is subtracted from ``max_mem`` to determine the budget available for
+        genotype chunking. A :class:`ValueError` is raised if the remaining
+        budget is too small to fit even a single variant chunk. This is a
+        soft limit and may be exceeded by a small amount.
     extend_to_length
         Whether to continue reading/writing variants until all haplotypes have a length at least as long as the intervals in `bed`.
         Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
