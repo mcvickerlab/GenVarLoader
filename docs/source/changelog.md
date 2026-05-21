@@ -22,6 +22,31 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.25.0 (2026-05-21)
+
+### Feat
+
+- add migrate_svar_link for upgrading legacy datasets
+- **dataset**: wire svar_link resolver into Haps.from_path; Dataset.open(svar=)
+- **dataset**: add _resolve_svar and _verify_fingerprint
+- **write**: record SvarLink in metadata, drop link.svar symlink
+- **dataset**: add SvarLink / SvarFingerprint pydantic models
+- **write**: subtract genoray nbytes from max_mem; warn when index dominates
+
+### Fix
+
+- ndim guard on geno_offsets in choose_exonic_variants second loop
+- **write**: clarify max_mem docstring and skip index-accounting log for SparseVar
+- **write**: eager-load variant index for accurate max_mem accounting
+
+### Refactor
+
+- **dataset**: switch Haps.from_path version compare to SemanticVersion
+- **dataset**: use SemanticVersion in Metadata, add svar_link field
+
 ## v0.24.1 (2026-05-13)
 
 ### Fix
