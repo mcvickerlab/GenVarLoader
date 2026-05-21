@@ -69,7 +69,7 @@ Steps:
 3. **Partial-bump detection** — compare `cz version --project` against the latest `vX.Y.Z` tag on the remote. If they differ, a previous bump pushed the tag but not the files; set `partial=true`.
 4. `Bump version (real)` — runs `commitizen-action` when `partial=false` and not dry-run. Honors the `increment` input when not `auto`.
 5. `Bump version (dry-run)` — runs `cz bump --dry-run --yes` instead when `dry_run=true`.
-6. `Fix partial bump` — when `partial=true`: `cz bump --files-only --yes`, commit `pyproject.toml` + `docs/source/changelog.md`, push to `main`, then push the existing tag again to ensure the bump commit precedes it.
+6. `Fix partial bump` — when `partial=true` (orphan tag on remote without matching pyproject version): run `cz bump --files-only --yes` to update `pyproject.toml` and `docs/source/changelog.md` to a new version that supersedes the orphan, commit with `bump: version <new>`, push to `main`, then push the new tag. The orphan tag is left in place; the next release moves past it. (This matches SeqPro's recovery — it deliberately advances past the bad state rather than trying to rewrite history.)
 7. `Emit resulting tag` — sets output to `v$(cz version --project)`.
 
 GVL-specific deltas from SeqPro:
