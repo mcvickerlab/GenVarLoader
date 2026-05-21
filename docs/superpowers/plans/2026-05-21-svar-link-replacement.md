@@ -55,7 +55,7 @@ Edit `pyproject.toml`, in the `[project] dependencies` array (the same one that 
 - [ ] **Step 3: Install and verify**
 
 Run: `pixi install -e dev`
-Then: `pixi run -e dev python -c "from pydantic_extra_types.semantic_version import SemanticVersion; print(SemanticVersion('0.18.0'))"`
+Then: `pixi run -e dev python -c "from pydantic_extra_types.semantic_version import SemanticVersion; print(SemanticVersion.parse('0.18.0'))"`
 Expected: `0.18.0` printed; no ImportError.
 
 - [ ] **Step 4: Commit**
@@ -175,7 +175,7 @@ def test_metadata_version_parses_existing_strings():
     )
     m = Metadata.model_validate_json(payload)
     assert isinstance(m.version, SemanticVersion)
-    assert m.version == SemanticVersion("0.18.0")
+    assert m.version == SemanticVersion.parse("0.18.0")
 
 
 def test_metadata_version_serializes_back_to_string():
@@ -183,7 +183,7 @@ def test_metadata_version_serializes_back_to_string():
         samples=["s1"],
         contigs=["1"],
         n_regions=1,
-        version=SemanticVersion("0.18.0"),
+        version=SemanticVersion.parse("0.18.0"),
     )
     dumped = json.loads(m.model_dump_json())
     assert dumped["version"] == "0.18.0"
@@ -274,9 +274,9 @@ Append to `tests/dataset/test_svar_link.py`:
 ```python
 def test_semantic_version_ordering_for_one_based_dispatch():
     """The legacy comparison '>= 0.18.0' must still work under SemanticVersion."""
-    assert SemanticVersion("0.18.0") >= SemanticVersion("0.18.0")
-    assert SemanticVersion("0.20.0") >= SemanticVersion("0.18.0")
-    assert not (SemanticVersion("0.17.5") >= SemanticVersion("0.18.0"))
+    assert SemanticVersion.parse("0.18.0") >= SemanticVersion.parse("0.18.0")
+    assert SemanticVersion.parse("0.20.0") >= SemanticVersion.parse("0.18.0")
+    assert not (SemanticVersion.parse("0.17.5") >= SemanticVersion.parse("0.18.0"))
 ```
 
 - [ ] **Step 2: Run it to verify the lib comparison works**
@@ -319,7 +319,7 @@ Replace line 265:
 with:
 
 ```python
-                one_based=version is not None and version >= SemanticVersion("0.18.0"),
+                one_based=version is not None and version >= SemanticVersion.parse("0.18.0"),
 ```
 
 - [ ] **Step 4: Run the dataset tests to ensure nothing regressed**
@@ -785,7 +785,7 @@ Replace the body of the `if svar_meta_path.exists():` branch (currently `_recons
             offset_path = path / "genotypes" / "offsets.npy"
 
             # Decide which layout to read from.
-            NEXT_VERSION = SemanticVersion("NEXT_VERSION")  # substitute literal
+            NEXT_VERSION = SemanticVersion.parse("0.25.0")  # substitute literal
             is_new_layout = (
                 svar_link is not None
                 and version is not None
@@ -980,7 +980,7 @@ from typing import Union
 
 from pydantic_extra_types.semantic_version import SemanticVersion
 
-NEXT_VERSION = SemanticVersion("NEXT_VERSION")  # substitute literal at top of file
+NEXT_VERSION = SemanticVersion.parse("0.25.0")  # substitute literal at top of file
 
 
 def migrate_svar_link(gvl_path: Union[str, Path]) -> None:
