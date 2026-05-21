@@ -167,6 +167,18 @@ def write(
         if available_samples is None:
             available_samples = set(variants.available_samples)
 
+        # Eagerly load the variant index so max_mem accounting is honest.
+        # VCF and PGEN both support lazy-index construction; without this,
+        # variants.nbytes returns 0 and the budget overcounts memory.
+        if isinstance(variants, VCF):
+            if variants._index is None:
+                if not variants._valid_index():
+                    logger.info("VCF genoray index is invalid, writing")
+                    variants._write_gvi_index()
+                variants._load_index()
+        elif isinstance(variants, PGEN):
+            variants._init_index()
+
     if tracks is not None:
         unavail = []
         for tr in tracks:
@@ -209,12 +221,20 @@ def write(
             f"max_mem budget: {format_memory(max_mem)}; "
             f"available for chunking: {format_memory(max(effective_max_mem, 0))}"
         )
-        if idx_bytes > max_mem // 2:
-            warnings.warn(
-                f"Variant index resident size ({format_memory(idx_bytes)}) "
-                f"exceeds 50% of max_mem ({format_memory(max_mem)}). "
-                f"Consider increasing max_mem.",
-                stacklevel=2,
+        if isinstance(variants, VCF):
+            bytes_per_var = variants.n_samples * variants.ploidy  # Genos8: 1 byte
+        elif isinstance(variants, PGEN):
+            bytes_per_var = variants.n_samples * variants.ploidy * 4  # int32
+        else:
+            bytes_per_var = 0  # SparseVar: no chunking path uses effective_max_mem
+
+        if bytes_per_var and effective_max_mem < bytes_per_var:
+            raise ValueError(
+                f"max_mem ({format_memory(max_mem)}) is too small: the variant "
+                f"index alone consumes {format_memory(idx_bytes)}, leaving "
+                f"{format_memory(max(effective_max_mem, 0))} for chunking, but "
+                f"at least {format_memory(bytes_per_var)} is needed per variant. "
+                f"Increase max_mem."
             )
 
         if isinstance(variants, VCF):
@@ -358,14 +378,7 @@ def _write_from_vcf(
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if vcf._index is None:
-        if not vcf._valid_index():
-            logger.info("VCF genoray index is invalid, writing")
-            vcf._write_gvi_index()
-
-        vcf._load_index()
-
-    assert vcf._index is not None
+    assert vcf._index is not None, "caller must load the VCF index before _write_from_vcf"
 
     if vcf._index.select((pl.col("ALT").list.len() > 1).any()).item():
         raise ValueError(
