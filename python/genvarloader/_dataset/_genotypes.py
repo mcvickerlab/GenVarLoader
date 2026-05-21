@@ -469,7 +469,17 @@ def choose_exonic_variants(
         ref_end: int = ends[query]
         for hap in nb.prange(ploidy):
             o_idx = geno_offset_idxs[query, hap]
-            o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
+            # Mirror the ndim guard from the first loop (lines ~455-458)
+            # and from the sibling `filter_af` kernel (lines ~549-552).
+            # Without the guard, a 2-D `geno_offsets` makes
+            # `geno_offsets[o_idx]` return a length-2 array, which then
+            # makes the slice below `geno_v_idxs[array:array]` — numba
+            # raises `TypingError: slice(array(int64, 1d, C),
+            # array(int64, 1d, C))` at JIT compile time.
+            if geno_offsets.ndim == 1:
+                o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
+            else:
+                o_s, o_e = geno_offsets[o_idx]
             qh_genos = geno_v_idxs[o_s:o_e]
 
             k_idx = query * ploidy + hap
