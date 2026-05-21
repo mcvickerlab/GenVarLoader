@@ -70,12 +70,24 @@ jobs:
 
       - name: Bump version (dry-run)
         if: steps.detect.outputs.partial != 'true' && inputs.dry_run == true
+        id: dryrun
         run: |
           ARGS="--dry-run --yes"
           if [ "${{ inputs.increment }}" != "auto" ]; then
             ARGS="$ARGS --increment ${{ inputs.increment }}"
           fi
-          cz bump $ARGS
+          OUT=$(cz bump $ARGS 2>&1 | tee /dev/stderr)
+          PROJECTED=$(echo "$OUT" | grep -oE 'tag to create: v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          if [ -z "$PROJECTED" ]; then
+            # Fallback parser for older cz versions
+            PROJECTED=$(echo "$OUT" | grep -oE '\-> [0-9]+\.[0-9]+\.[0-9]+' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          fi
+          if [ -z "$PROJECTED" ]; then
+            echo "::error::Could not parse projected version from 'cz bump --dry-run' output"
+            exit 1
+          fi
+          echo "projected=$PROJECTED" >> "$GITHUB_OUTPUT"
+          echo "Projected version: $PROJECTED"
 
       - name: Refuse to bump (orphan tag detected)
         if: steps.detect.outputs.partial == 'true'
@@ -86,7 +98,11 @@ jobs:
       - name: Emit resulting tag
         id: emit
         run: |
-          VERSION=$(cz version --project)
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            VERSION="${{ steps.dryrun.outputs.projected }}"
+          else
+            VERSION=$(cz version --project)
+          fi
           TAG="v$VERSION"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Resolved tag: $TAG"
