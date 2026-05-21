@@ -3,6 +3,7 @@
 
 dataset
 write
+format
 geuvadis
 basenji2_eval
 faq
