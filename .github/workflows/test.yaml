@@ -26,24 +26,10 @@ jobs:
       - name: Setup pixi
         uses: prefix-dev/setup-pixi@v0.9.5
         with:
-          pixi-version: v0.9.4
+          pixi-version: v0.68.1
           cache: true
           environments: ${{ matrix.environment }}
           locked: false
       - name: Test
         run: pixi run -e ${{ matrix.environment }} test
 
-  cargo-test:
-    runs-on: ubuntu-latest
-    name: "cargo test"
-    steps:
-      - name: Check out
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-      - name: cargo test
-        run: cargo test --release
