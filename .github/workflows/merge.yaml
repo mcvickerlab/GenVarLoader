@@ -18,9 +18,6 @@ on:
 
 jobs:
   merge:
-    environment: pypi
-    permissions:
-      id-token: write
     runs-on: ubuntu-latest
     steps:
       - name: Check out
