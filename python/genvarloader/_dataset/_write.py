@@ -99,8 +99,9 @@ def write(
         so that :attr:`~genoray.VCF.nbytes` reflects its true size; that value
         is subtracted from ``max_mem`` to determine the budget available for
         genotype chunking. A :class:`ValueError` is raised if the remaining
-        budget is too small to fit even a single variant chunk. This is a
-        soft limit and may be exceeded by a small amount.
+        budget is too small to fit even a single variant chunk. Otherwise
+        ``max_mem`` is a soft limit on overall usage and may be exceeded by
+        a small amount.
     extend_to_length
         Whether to continue reading/writing variants until all haplotypes have a length at least as long as the intervals in `bed`.
         Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
@@ -216,28 +217,28 @@ def write(
     if variants is not None:
         logger.info("Writing genotypes.")
 
-        idx_bytes = variants.nbytes
-        effective_max_mem = max_mem - idx_bytes
-        logger.info(
-            f"Variant reader resident size: {format_memory(idx_bytes)}; "
-            f"max_mem budget: {format_memory(max_mem)}; "
-            f"available for chunking: {format_memory(max(effective_max_mem, 0))}"
-        )
-        if isinstance(variants, VCF):
-            bytes_per_var = variants.n_samples * variants.ploidy  # Genos8: 1 byte
-        elif isinstance(variants, PGEN):
-            bytes_per_var = variants.n_samples * variants.ploidy * 4  # int32
-        else:
-            bytes_per_var = 0  # SparseVar: no chunking path uses effective_max_mem
-
-        if bytes_per_var and effective_max_mem < bytes_per_var:
-            raise ValueError(
-                f"max_mem ({format_memory(max_mem)}) is too small: the variant "
-                f"index alone consumes {format_memory(idx_bytes)}, leaving "
-                f"{format_memory(max(effective_max_mem, 0))} for chunking, but "
-                f"at least {format_memory(bytes_per_var)} is needed per variant. "
-                f"Increase max_mem."
+        effective_max_mem = max_mem
+        if isinstance(variants, (VCF, PGEN)):
+            idx_bytes = variants.nbytes
+            effective_max_mem = max_mem - idx_bytes
+            logger.info(
+                f"Variant reader resident size: {format_memory(idx_bytes)}; "
+                f"max_mem budget: {format_memory(max_mem)}; "
+                f"available for chunking: {format_memory(max(effective_max_mem, 0))}"
             )
+            if isinstance(variants, VCF):
+                bytes_per_var = variants.n_samples * variants.ploidy  # Genos8: 1 byte
+            else:
+                bytes_per_var = variants.n_samples * variants.ploidy * 4  # int32
+
+            if effective_max_mem < bytes_per_var:
+                raise ValueError(
+                    f"max_mem ({format_memory(max_mem)}) is too small: the variant "
+                    f"index alone consumes {format_memory(idx_bytes)}, leaving "
+                    f"{format_memory(max(effective_max_mem, 0))} for chunking, but "
+                    f"at least {format_memory(bytes_per_var)} is needed per variant. "
+                    f"Increase max_mem."
+                )
 
         if isinstance(variants, VCF):
             variants.set_samples(samples)
