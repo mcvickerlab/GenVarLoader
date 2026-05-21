@@ -1,27 +1,99 @@
-name: Bump and release
+name: Bump version
 
 on:
+  workflow_call:
+    inputs:
+      increment:
+        description: "Force a specific bump (auto|PATCH|MINOR|MAJOR)"
+        type: string
+        required: false
+        default: "auto"
+      dry_run:
+        description: "Compute the bump but do not commit/push"
+        type: boolean
+        required: false
+        default: false
+    outputs:
+      tag:
+        description: "Resolved tag (with v prefix) after the bump, or projected tag in dry-run"
+        value: ${{ jobs.bump.outputs.tag }}
   workflow_dispatch:
+    inputs:
+      increment:
+        description: "Force a specific bump"
+        type: choice
+        required: false
+        default: "auto"
+        options: ["auto", "PATCH", "MINOR", "MAJOR"]
+      dry_run:
+        description: "Compute the bump but do not commit/push"
+        type: boolean
+        required: false
+        default: false
 
 jobs:
-  bump-version:
+  bump:
     runs-on: ubuntu-latest
-    name: "Bump version and create changelog with commitizen"
+    outputs:
+      tag: ${{ steps.emit.outputs.tag }}
     steps:
       - name: Check out
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: "${{ secrets.COMMITIZEN }}"
-      - name: Create bump and changelog
+          token: ${{ secrets.COMMITIZEN }}
+
+      - name: Install commitizen
+        run: pip install commitizen --quiet
+
+      - name: Detect partial bump
+        id: detect
+        run: |
+          PROJECT_VERSION=$(cz version --project)
+          LATEST_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          # Strip v prefix from tag for comparison with project version
+          LATEST_TAG_NOPREFIX="${LATEST_TAG#v}"
+          if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG_NOPREFIX" != "$PROJECT_VERSION" ]; then
+            echo "partial=true" >> "$GITHUB_OUTPUT"
+            echo "orphan_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+            echo "::warning::Detected orphan tag $LATEST_TAG (project version is $PROJECT_VERSION). Will advance past it."
+          else
+            echo "partial=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump version (real)
+        if: steps.detect.outputs.partial != 'true' && inputs.dry_run == false
         uses: commitizen-tools/commitizen-action@master
         with:
           github_token: ${{ secrets.COMMITIZEN }}
-          changelog_increment_filename: body.md
-      - name: Release
-        uses: softprops/action-gh-release@v2
-        with:
-          body_path: "body.md"
-          tag_name: v${{ env.REVISION }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.COMMITIZEN }}
+          increment: ${{ inputs.increment != 'auto' && inputs.increment || '' }}
+
+      - name: Bump version (dry-run)
+        if: steps.detect.outputs.partial != 'true' && inputs.dry_run == true
+        run: |
+          ARGS="--dry-run --yes"
+          if [ "${{ inputs.increment }}" != "auto" ]; then
+            ARGS="$ARGS --increment ${{ inputs.increment }}"
+          fi
+          cz bump $ARGS
+
+      - name: Fix partial bump (advance past orphan tag)
+        if: steps.detect.outputs.partial == 'true' && inputs.dry_run == false
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          cz bump --files-only --yes
+          NEW_VERSION=$(cz version --project)
+          git add pyproject.toml docs/source/changelog.md
+          git commit -m "bump: version $NEW_VERSION"
+          git tag "v$NEW_VERSION"
+          git push origin main
+          git push origin "v$NEW_VERSION"
+
+      - name: Emit resulting tag
+        id: emit
+        run: |
+          VERSION=$(cz version --project)
+          TAG="v$VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: $TAG"
