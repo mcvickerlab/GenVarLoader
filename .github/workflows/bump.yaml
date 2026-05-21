@@ -63,7 +63,7 @@ jobs:
 
       - name: Bump version (real)
         if: steps.detect.outputs.partial != 'true' && inputs.dry_run == false
-        uses: commitizen-tools/commitizen-action@master
+        uses: commitizen-tools/commitizen-action@0.27.1
         with:
           github_token: ${{ secrets.COMMITIZEN }}
           increment: ${{ inputs.increment != 'auto' && inputs.increment || '' }}
