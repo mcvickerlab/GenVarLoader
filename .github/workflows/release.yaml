@@ -6,6 +6,11 @@ on:
       tag:
         description: 'Tag to release (e.g. v0.25.0)'
         required: true
+      dry_run:
+        description: 'Build the release body but do not create a GH release'
+        type: boolean
+        required: false
+        default: false
   workflow_call:
     inputs:
       tag:
@@ -54,7 +59,7 @@ jobs:
           fi
 
       - name: Dry-run summary
-        if: github.event_name == 'workflow_call' && inputs.dry_run == true
+        if: inputs.dry_run == true
         run: |
           {
             echo "## Dry-run: release ${{ steps.tag.outputs.tag }}"
@@ -67,7 +72,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create GitHub release
-        if: ${{ !(github.event_name == 'workflow_call' && inputs.dry_run == true) }}
+        if: inputs.dry_run == false
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
