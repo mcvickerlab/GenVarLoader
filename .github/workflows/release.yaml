@@ -1,9 +1,6 @@
 name: Create release
 
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
     inputs:
       tag:
@@ -34,11 +31,7 @@ jobs:
       - name: Resolve tag
         id: tag
         run: |
-          case "${{ github.event_name }}" in
-            push)              echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT" ;;
-            workflow_dispatch) echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT" ;;
-            workflow_call)     echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT" ;;
-          esac
+          echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
 
       - name: Extract changelog section
         run: |
