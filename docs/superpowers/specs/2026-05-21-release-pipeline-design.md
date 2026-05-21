@@ -35,8 +35,7 @@ SeqPro (sibling repo) recently solved (1)–(4) with a `release-pipeline.yaml` o
 ├── release.yaml            # NEW: split from bump; creates GH release from changelog
 ├── publish.yaml            # REWRITE: workflow_call, tag-pinned checkout, dry-run, uv publish
 ├── merge.yaml              # REWRITE: workflow_call, dry-run summary
-├── test.yaml               # UPDATE: run on push to main/stable, add cargo test job
-└── lint.yaml               # NEW: ruff + basedpyright + cz check
+└── test.yaml               # UPDATE: run on push to main/stable, add cargo test job
 ```
 
 ### release-pipeline.yaml (orchestrator)
@@ -130,20 +129,9 @@ Bump `prefix-dev/setup-pixi` to latest stable (verify at implementation time).
 
 Add a second job `cargo-test` running `cargo test --release` on `ubuntu-latest`. Reuse the same pixi env to ensure the Rust toolchain matches. Keep the existing Python matrix job as `pytest`.
 
-### lint.yaml (new)
-
-Triggers: `pull_request` to `main`, `push` to `main`.
-
-Jobs:
-
-1. `ruff` — `pixi run -e dev ruff check python/ tests/`.
-2. `basedpyright` — `pixi run -e dev basedpyright`.
-3. `cz-check` — only on `pull_request`; runs `cz check --rev-range origin/${{ github.base_ref }}..HEAD` to enforce conventional-commit format on incoming commits.
-
-All three run in parallel on `ubuntu-latest` with `setup-pixi` + `cache: true`.
-
 ## Out of scope
 
+- **`lint.yaml`** — deferred to a future batch of work that will migrate type checking from basedpyright to pyrefly. Lint CI (ruff + pyrefly + `cz check`) lands then.
 - Docs deploy workflow (GVL presumably uses ReadTheDocs; not in scope per user selection).
 - Removing `legacy_tag_formats = ['$version']` from `pyproject.toml` — old tags exist; leave it.
 - Backporting the partial-bump recovery to existing broken tags (none known).
