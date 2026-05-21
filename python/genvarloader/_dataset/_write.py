@@ -5,7 +5,7 @@ import warnings
 from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from .._types import IntervalTrack
@@ -22,14 +22,15 @@ from loguru import logger
 from more_itertools import mark_ends
 from natsort import natsorted
 from numpy.typing import NDArray
-from packaging.version import Version
-from pydantic import BaseModel, BeforeValidator, PlainSerializer, WithJsonSchema
+from pydantic import BaseModel
+from pydantic_extra_types.semantic_version import SemanticVersion
 from seqpro.rag import Ragged
 from tqdm.auto import tqdm
 
 from .._ragged import INTERVAL_DTYPE
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
+from ._svar_link import SvarLink
 from ._utils import bed_to_regions, splits_sum_le_value
 
 
@@ -39,15 +40,8 @@ class Metadata(BaseModel, arbitrary_types_allowed=True):
     n_regions: int
     ploidy: int | None = None
     max_jitter: int = 0
-    version: (
-        Annotated[
-            Version,
-            BeforeValidator(lambda v: Version(v) if isinstance(v, str) else v),
-            PlainSerializer(lambda v: str(v), return_type=str),
-            WithJsonSchema({"type": "string"}, mode="serialization"),
-        ]
-        | None
-    ) = None
+    version: SemanticVersion | None = None
+    svar_link: SvarLink | None = None
 
     @property
     def n_samples(self) -> int:
@@ -130,7 +124,9 @@ def write(
 
     max_mem = parse_memory(max_mem)
 
-    metadata: dict[str, Any] = {"version": Version(version("genvarloader"))}
+    metadata: dict[str, Any] = {
+        "version": SemanticVersion.parse(version("genvarloader"))
+    }
     path = Path(path)
     if path.exists() and overwrite:
         logger.info("Found existing GVL store, overwriting.")
