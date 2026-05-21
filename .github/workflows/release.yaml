@@ -1,0 +1,68 @@
+name: Create release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.25.0)'
+        required: true
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Tag to release (with v prefix)'
+        type: string
+        required: true
+      dry_run:
+        description: 'Build the release body but do not create a GH release'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract changelog section
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          awk -v tag="$TAG" '
+            $0 ~ "^## " tag " " { flag=1; next }
+            flag && /^## / { exit }
+            flag { print }
+          ' docs/source/changelog.md > body.md
+          if [ ! -s body.md ]; then
+            echo "::error::No changelog section found for $TAG in docs/source/changelog.md"
+            exit 1
+          fi
+
+      - name: Dry-run summary
+        if: github.event_name == 'workflow_call' && inputs.dry_run == true
+        run: |
+          {
+            echo "## Dry-run: release ${{ steps.tag.outputs.tag }}"
+            echo
+            echo "Would create a GitHub Release with the following body:"
+            echo
+            echo '```markdown'
+            cat body.md
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create GitHub release
+        if: ${{ !(github.event_name == 'workflow_call' && inputs.dry_run == true) }}
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          body_path: body.md
+          token: ${{ secrets.COMMITIZEN }}

@@ -4,13 +4,18 @@ on:
   pull_request:
     branches:
       - main
+  push:
+    branches:
+      - main
+      - stable
   workflow_dispatch:
 
 jobs:
-  test:
+  pytest:
     runs-on: ubuntu-latest
-    name: "Run test across all Python versions"
+    name: "pytest on Python ${{ matrix.environment }}"
     strategy:
+      fail-fast: false
       matrix:
         environment: [py310, py311, py312, py313]
     steps:
@@ -27,3 +32,4 @@ jobs:
           locked: false
       - name: Test
         run: pixi run -e ${{ matrix.environment }} test
+
