@@ -296,6 +296,26 @@ def test_migrate_svar_link_is_idempotent(svar_dataset_paths):
     assert before == after
 
 
+def test_open_after_joint_relocation_preserves_relative(tmp_path, svar_dataset_paths):
+    import genvarloader as gvl
+
+    gvl_path, svar_path = svar_dataset_paths
+    new_parent = tmp_path / "relocated"
+    new_parent.mkdir()
+    new_gvl = new_parent / gvl_path.name
+    new_svar = new_parent / svar_path.name
+    shutil.copytree(gvl_path, new_gvl)
+    shutil.copytree(svar_path, new_svar)
+
+    ref = _DATA_DIR / "fasta" / "hg38.fa.bgz"
+    ds = (
+        gvl.Dataset.open(new_gvl, reference=ref)
+        .with_seqs("haplotypes")
+        .with_tracks(False)
+    )
+    _ = ds[0, 0]
+
+
 def test_migrate_svar_link_refuses_dangling_symlink(tmp_path, svar_dataset_paths):
     import genvarloader as gvl
 
