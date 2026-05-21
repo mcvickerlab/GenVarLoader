@@ -77,18 +77,11 @@ jobs:
           fi
           cz bump $ARGS
 
-      - name: Fix partial bump (advance past orphan tag)
-        if: steps.detect.outputs.partial == 'true' && inputs.dry_run == false
+      - name: Refuse to bump (orphan tag detected)
+        if: steps.detect.outputs.partial == 'true'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          cz bump --files-only --yes
-          NEW_VERSION=$(cz version --project)
-          git add pyproject.toml docs/source/changelog.md
-          git commit -m "bump: version $NEW_VERSION"
-          git tag "v$NEW_VERSION"
-          git push origin main
-          git push origin "v$NEW_VERSION"
+          echo "::error::Orphan tag ${{ steps.detect.outputs.orphan_tag }} exists on the remote but pyproject.toml is at $(cz version --project). Resolve manually: either (a) delete the orphan tag with 'git push --delete origin ${{ steps.detect.outputs.orphan_tag }}' if it was published in error, or (b) hand-bump pyproject.toml + docs/source/changelog.md to match the tag. Then re-run."
+          exit 1
 
       - name: Emit resulting tag
         id: emit
