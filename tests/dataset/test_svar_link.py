@@ -1,11 +1,17 @@
 import json
+import shutil
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 from pydantic_extra_types.semantic_version import SemanticVersion
 
-from genvarloader._dataset._svar_link import SvarFingerprint, SvarLink
+from genvarloader._dataset._svar_link import (
+    SvarFingerprint,
+    SvarLink,
+    _resolve_svar,
+    _verify_fingerprint,
+)
 from genvarloader._dataset._write import Metadata
 
 
@@ -100,3 +106,72 @@ def test_write_from_svar_records_svar_link_and_no_symlink(svar_dataset_paths):
     expected_bytes = (svar_path / "variant_idxs.npy").stat().st_size
     assert metadata.svar_link.fingerprint.variant_idxs_bytes == expected_bytes
     assert metadata.svar_link.fingerprint.n_variants > 0
+
+
+def test_resolve_svar_prefers_override(svar_dataset_paths):
+    gvl_path, svar_path = svar_dataset_paths
+    link = SvarLink(
+        relative_path="does/not/exist",
+        absolute_path="/does/not/exist",
+        fingerprint=SvarFingerprint(
+            n_variants=1,
+            variant_idxs_bytes=(svar_path / "variant_idxs.npy").stat().st_size,
+        ),
+    )
+    assert _resolve_svar(gvl_path, link, override=svar_path) == svar_path
+
+
+def test_resolve_svar_uses_relative_path(svar_dataset_paths):
+    gvl_path, svar_path = svar_dataset_paths
+    metadata = Metadata.model_validate_json(
+        (gvl_path / "metadata.json").read_text()
+    )
+    resolved = _resolve_svar(gvl_path, metadata.svar_link, override=None)
+    assert resolved.resolve() == svar_path.resolve()
+
+
+def test_resolve_svar_falls_back_to_sibling(tmp_path, svar_dataset_paths):
+    gvl_path, svar_path = svar_dataset_paths
+    sibling = gvl_path.parent / "sibling.svar"
+    shutil.copytree(svar_path, sibling)
+    link = SvarLink(
+        relative_path="nowhere",
+        absolute_path="/nowhere",
+        fingerprint=SvarFingerprint(
+            n_variants=1,
+            variant_idxs_bytes=(sibling / "variant_idxs.npy").stat().st_size,
+        ),
+    )
+    resolved = _resolve_svar(gvl_path, link, override=None)
+    assert resolved.resolve() == sibling.resolve()
+
+
+def test_resolve_svar_raises_when_not_found(tmp_path):
+    gvl_path = tmp_path / "ds.gvl"
+    gvl_path.mkdir()
+    link = SvarLink(
+        relative_path="nowhere",
+        absolute_path="/nowhere",
+        fingerprint=SvarFingerprint(n_variants=1, variant_idxs_bytes=1),
+    )
+    with pytest.raises(FileNotFoundError, match="svar="):
+        _resolve_svar(gvl_path, link, override=None)
+
+
+def test_verify_fingerprint_mismatch_raises(svar_dataset_paths):
+    _, svar_path = svar_dataset_paths
+    bogus = SvarLink(
+        relative_path=str(svar_path),
+        absolute_path=str(svar_path),
+        fingerprint=SvarFingerprint(n_variants=999_999, variant_idxs_bytes=1),
+    )
+    with pytest.raises(ValueError, match="fingerprint"):
+        _verify_fingerprint(svar_path, bogus)
+
+
+def test_verify_fingerprint_ok(svar_dataset_paths):
+    gvl_path, svar_path = svar_dataset_paths
+    metadata = Metadata.model_validate_json(
+        (gvl_path / "metadata.json").read_text()
+    )
+    _verify_fingerprint(svar_path, metadata.svar_link)
