@@ -90,7 +90,11 @@ jobs:
     secrets: inherit
     with:
       dry_run: ${{ inputs.dry_run }}
-      tag: ${{ needs.bump.outputs.tag || needs.resolve.outputs.tag }}
+      # In dry-run + fresh-bump the projected tag does not exist on the remote
+      # (the real bump was skipped), so we can't pin checkouts to it. Fall back
+      # to the caller's ref (main). Real releases and dry-run + skip_bump both
+      # have a real tag to pin to.
+      tag: ${{ (inputs.dry_run == false || inputs.skip_bump == true) && (needs.bump.outputs.tag || needs.resolve.outputs.tag) || '' }}
 
   merge:
     needs: publish
