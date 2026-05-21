@@ -70,8 +70,7 @@ def _verify_fingerprint(svar_path: Path, link: SvarLink | None) -> None:
     variant_idxs = svar_path / "variant_idxs.npy"
     if not variant_idxs.exists():
         raise FileNotFoundError(
-            f"Expected variant_idxs.npy at {variant_idxs}; "
-            f"resolved svar is malformed."
+            f"Expected variant_idxs.npy at {variant_idxs}; resolved svar is malformed."
         )
 
     observed_bytes = variant_idxs.stat().st_size
@@ -131,9 +130,7 @@ def migrate_svar_link(gvl_path: str | Path) -> None:
 
     import polars as pl
 
-    n_variants = (
-        pl.scan_ipc(target / "index.arrow").select(pl.len()).collect().item()
-    )
+    n_variants = pl.scan_ipc(target / "index.arrow").select(pl.len()).collect().item()
 
     link = SvarLink(
         relative_path=os.path.relpath(target, start=gvl_path).replace(os.sep, "/"),

@@ -656,9 +656,7 @@ def _write_from_svar(
     svar_resolved = svar.path.resolve()
     variant_idxs_path = svar_resolved / "variant_idxs.npy"
     svar_link = SvarLink(
-        relative_path=os.path.relpath(svar_resolved, start=path).replace(
-            os.sep, "/"
-        ),
+        relative_path=os.path.relpath(svar_resolved, start=path).replace(os.sep, "/"),
         absolute_path=str(svar_resolved),
         fingerprint=SvarFingerprint(
             n_variants=svar.index.height,
