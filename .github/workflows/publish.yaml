@@ -87,7 +87,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.platform.sccache }}
+          sccache: ${{ inputs.tag == '' && matrix.platform.sccache }}
           manylinux: auto
         env:
           CFLAGS_aarch64_unknown_linux_gnu: -march=armv8-a -D__ARM_ARCH=8
@@ -97,7 +97,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist -i python3.14t
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') && matrix.platform.sccache }}
+          sccache: ${{ inputs.tag == '' && matrix.platform.sccache }}
           manylinux: auto
         env:
           CFLAGS_aarch64_unknown_linux_gnu: -march=armv8-a -D__ARM_ARCH=8
@@ -133,14 +133,14 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          sccache: ${{ inputs.tag == '' }}
           manylinux: musllinux_1_2
       - name: Build free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist -i python3.14t
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          sccache: ${{ inputs.tag == '' }}
           manylinux: musllinux_1_2
       - name: Upload wheels
         uses: actions/upload-artifact@v6
@@ -175,7 +175,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          sccache: ${{ inputs.tag == '' }}
       - uses: actions/setup-python@v6
         with:
           python-version: '3.14t'
@@ -185,7 +185,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist -i python3.14t
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          sccache: ${{ inputs.tag == '' }}
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
@@ -213,7 +213,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          sccache: ${{ inputs.tag == '' }}
       - uses: actions/setup-python@v6
         with:
           python-version: '3.14t'
@@ -222,7 +222,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist -i python3.14t
-          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          sccache: ${{ inputs.tag == '' }}
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
