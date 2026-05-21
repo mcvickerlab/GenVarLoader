@@ -381,7 +381,9 @@ def _write_from_vcf(
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    assert vcf._index is not None, "caller must load the VCF index before _write_from_vcf"
+    assert vcf._index is not None, (
+        "caller must load the VCF index before _write_from_vcf"
+    )
 
     if vcf._index.select((pl.col("ALT").list.len() > 1).any()).item():
         raise ValueError(
