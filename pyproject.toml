@@ -22,6 +22,7 @@ dependencies = [
     "pyarrow",
     "pyranges",
     "pydantic>=2,<3",
+    "pydantic-extra-types[semver]>=2.10",
     "more-itertools",
     "tqdm",
     "pybigwig",
