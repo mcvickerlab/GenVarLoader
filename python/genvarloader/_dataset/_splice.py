@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-from typing import overload
+from typing import cast, overload
 
 import awkward as ak
 import numpy as np
+import polars as pl
+from attrs import define, evolve
 from awkward.contents import ListOffsetArray, NumpyArray
 from awkward.index import Index64
+from hirola import HashTable
 from numpy.typing import NDArray
 from seqpro.rag import DTYPE_co as DTYPE, Ragged, is_rag_dtype
 from typing_extensions import assert_never
 
 from .._ragged import RaggedAnnotatedHaps
+from .._utils import lengths_to_offsets
+from ._indexing import s2i
 
 
 @overload
@@ -102,3 +107,137 @@ def _cat_length_inner(
             part = ak.flatten(sel, -1)
         parts.append(part[:, None])
     return Ragged(ak.concatenate(parts, 1))  # type: ignore
+
+
+@define
+class SpliceMap:
+    """Sample-agnostic mapping from splice row → ordered region indices.
+
+    Owns the parsed splice BED, the name → row hash table, the awkward
+    splice-map (rows → list[region_idx]), and any active row subset. Used by
+    both `Dataset` (via `SpliceIndexer`) and `RefDataset`.
+    """
+
+    names: HashTable
+    splice_map: ak.Array
+    full_splice_map: ak.Array
+    row_idxs: NDArray[np.intp]
+    row_subset_idxs: NDArray[np.intp] | None = None
+
+    @classmethod
+    def from_bed(
+        cls,
+        splice_info: str | tuple[str, str],
+        full_bed: pl.DataFrame,
+    ) -> tuple["SpliceMap", pl.DataFrame]:
+        """Parse splice_info into a (SpliceMap, spliced_bed) pair. Pure — no sampler."""
+        if isinstance(splice_info, str):
+            sp_bed = (
+                full_bed.rename({splice_info: "splice_id"})
+                .with_row_index()
+                .group_by("splice_id", maintain_order=True)
+                .agg(pl.all())
+            )
+        elif isinstance(splice_info, tuple):
+            if len(splice_info) != 2:
+                raise ValueError(
+                    "Splice info tuple must be of length 2, corresponding to columns "
+                    "names for splice IDs and element ordering."
+                )
+            sp_bed = (
+                full_bed.rename({splice_info[0]: "splice_id"})
+                .with_row_index()
+                .group_by("splice_id", maintain_order=True)
+                .agg(pl.all().sort_by(splice_info[1]))
+            )
+        else:
+            assert_never(splice_info)
+
+        names = sp_bed["splice_id"].to_numpy().astype(np.str_)
+        lengths = sp_bed["index"].list.len().to_numpy()
+        splice_map = Ragged.from_lengths(
+            sp_bed["index"].explode().to_numpy(), lengths
+        ).to_ak()
+        splice_map = cast(ak.Array, splice_map)
+
+        rows = HashTable(max=len(names) * 2, dtype=names.dtype)  # type: ignore
+        rows.add(names)
+
+        return (
+            cls(
+                names=rows,
+                splice_map=splice_map,
+                full_splice_map=splice_map,
+                row_idxs=np.arange(len(splice_map), dtype=np.intp),
+                row_subset_idxs=None,
+            ),
+            sp_bed,
+        )
+
+    @property
+    def n_rows(self) -> int:
+        return len(self.splice_map)
+
+    @property
+    def _r_idx(self) -> NDArray[np.intp]:
+        if self.row_subset_idxs is None:
+            return self.row_idxs
+        return self.row_subset_idxs
+
+    def row2idx(self, rows):
+        """Convert row names (or already-int indices) to int indices."""
+        return s2i(rows, self.names)
+
+    def subset_to(self, rows):
+        """Return a new SpliceMap restricted to the given rows."""
+        if rows is None:
+            return self
+        row_idxs = self._r_idx[self.row2idx(rows)]
+        splice_map = cast(ak.Array, self.full_splice_map[row_idxs])
+        return evolve(self, splice_map=splice_map, row_subset_idxs=row_idxs)
+
+    def to_full(self):
+        """Reset to the un-subsetted splice map."""
+        return evolve(
+            self, splice_map=self.full_splice_map, row_subset_idxs=None
+        )
+
+    def parse_rows(self, rows):
+        """Parse a row index into the inputs needed for a per-region fetch.
+
+        Returns
+        -------
+        flat_region_idxs
+            1-D region indices to feed the unspliced reader.
+        offsets
+            For ``np.add.reduceat``-style concat (len == n_selected_rows + 1).
+        out_reshape
+            Target shape for fancy/combo indexing, or ``None``.
+        squeeze
+            Whether to squeeze the row dim out (scalar index).
+        """
+        out_reshape = None
+        squeeze = False
+
+        r_idx_raw = self.row2idx(rows)
+        if isinstance(r_idx_raw, (int, np.integer)):
+            squeeze = True
+            local = np.atleast_1d(np.asarray(r_idx_raw, dtype=np.intp))
+        elif isinstance(r_idx_raw, slice):
+            local = np.arange(self.n_rows, dtype=np.intp)[r_idx_raw]
+        else:
+            local = np.asarray(r_idx_raw)
+            if local.ndim > 1:
+                out_reshape = local.shape
+            local = local.ravel().astype(np.intp)
+
+        abs_idx = self._r_idx[local]
+        sel = cast(ak.Array, self.full_splice_map[abs_idx])
+        lengths = ak.count(sel, -1)
+        if not isinstance(lengths, np.integer):
+            lengths = lengths.to_numpy()
+        lengths = cast(NDArray[np.int64], lengths)
+        offsets = lengths_to_offsets(lengths)
+        flat_region_idxs = ak.flatten(sel, -1).to_numpy().astype(np.intp)
+
+        return flat_region_idxs, offsets, out_reshape, squeeze
