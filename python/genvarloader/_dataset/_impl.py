@@ -226,7 +226,6 @@ class Dataset:
                 svar_override=svar,
                 min_af=min_af,
                 max_af=max_af,
-                filter=var_filter,
             )
             if reference is None:
                 logger.warning(
@@ -261,21 +260,8 @@ class Dataset:
                 assert_never(seqs)
                 assert_never(tracks)
 
-        if splice_info is not None:
-            sm, spliced_bed = SpliceMap.from_bed(splice_info, bed)
-            # SpliceIndexer._init performed a bounds check that `from_bed` does not.
-            # Preserve it here.
-            if (
-                ak.max(sm.splice_map, None) >= idxer.n_regions
-                or ak.min(sm.splice_map, None) < -idxer.n_regions
-            ):
-                raise ValueError(
-                    "Found indices in the splice map that are out of bounds for the dataset."
-                )
-            splice_idxer = SpliceIndexer(map=sm, dsi=idxer)
-        else:
-            splice_idxer = None
-            spliced_bed = None
+        splice_idxer = None
+        spliced_bed = None
 
         if seqs is not None and reference is not None:
             cnorm = ContigNormalizer(reference.contigs)
@@ -320,6 +306,22 @@ class Dataset:
             _recon=recon,
             _rng=np.random.default_rng(rng),
         )
+
+        if splice_info is not None or var_filter is not None:
+            # splice_info is only valid with haplotypes/reference sequence types.
+            # If the dataset still has the default "variants" sequence type (i.e.
+            # the caller hasn't called with_seqs yet), promote to "haplotypes" so
+            # _check_valid_state() doesn't reject splice_info=... up front.
+            if (
+                splice_info is not None
+                and isinstance(dataset._seqs, Haps)
+                and dataset.sequence_type == "variants"
+            ):
+                dataset = dataset.with_seqs("haplotypes")
+            dataset = dataset.with_settings(
+                splice_info=splice_info,
+                var_filter=var_filter,
+            )
 
         logger.info(f"Opened dataset:\n{dataset}")
 
@@ -460,7 +462,19 @@ class Dataset:
                 var_filter = None
 
             if var_filter != self._seqs.filter:
-                to_evolve["_seqs"] = evolve(self._seqs, filter=var_filter)
+                haps = to_evolve.get("_seqs", self._seqs)
+                to_evolve["_seqs"] = evolve(haps, filter=var_filter)
+
+                # Propagate to _recon, preserving its kind (set by with_seqs).
+                # We must not replace _recon with _seqs wholesale — _recon has
+                # a different kind (e.g. RaggedSeqs) than _seqs (RaggedVariants).
+                if isinstance(self._recon, Haps):
+                    recon_haps = to_evolve.get("_recon", self._recon)
+                    to_evolve["_recon"] = evolve(recon_haps, filter=var_filter)
+                elif isinstance(self._recon, HapsTracks):
+                    recon = to_evolve.get("_recon", self._recon)
+                    new_haps = evolve(recon.haps, filter=var_filter)
+                    to_evolve["_recon"] = evolve(recon, haps=new_haps)
 
         self = evolve(self, **to_evolve)
         self._check_valid_state()

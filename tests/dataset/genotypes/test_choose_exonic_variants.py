@@ -43,13 +43,23 @@ def test_choose_exonic_variants_1d_geno_offsets() -> None:
 
 
 def test_choose_exonic_variants_2d_geno_offsets() -> None:
-    """2-D geno_offsets used to JIT-fail at numba compile time."""
+    """SVAR offsets are shape (2, n_slices). Wrong indexing returns a
+    length-n_slices row and produces garbage o_s/o_e. Use n_slices > 2
+    so wrong indexing cannot accidentally yield 2 elements.
+    """
     inputs = _common_inputs()
-    # Shape (total_variants, 2) -- each row is [o_s, o_e] for one variant.
-    # Equivalent logical content to the 1-D fixture above.
-    inputs["geno_offsets"] = np.asarray([[0, 1], [1, 2]], dtype=np.int64)
+    # Real SVAR layout: shape (2, n_slices). Row 0 is starts, row 1 is ends.
+    # 3 slices total; region 0, haplotype 0 -> slice 0 = [0, 1).
+    # region 0, haplotype 1 -> slice 1 = [1, 2). Slice 2 is unused padding.
+    inputs["geno_offsets"] = np.asarray(
+        [
+            [0, 1, 2],  # starts
+            [1, 2, 2],  # ends
+        ],
+        dtype=np.int64,
+    )
     keep, keep_offsets = choose_exonic_variants(**inputs)
-    # Same output as the 1-D path -- the 2-D layout is just a different
-    # internal storage shape; logical content is identical.
-    assert keep_offsets.shape == (3,)
+    # Logical content identical to the 1-D case: 2 variants kept.
+    assert keep_offsets.shape == (3,)  # n_regions * ploidy + 1
+    assert keep_offsets.tolist() == [0, 1, 2]
     assert keep.tolist() == [True, True]
