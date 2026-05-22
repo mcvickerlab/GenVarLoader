@@ -217,6 +217,19 @@ dataset_dir/
 └── intervals/             # track data (or annot_intervals/ with annotation)
 ```
 
+## Maintaining the `genvarloader` skill
+
+`skills/genvarloader/SKILL.md` is an AI-agent reference for gvl's public Python API. **Any PR that changes the public API must also update this skill.** Public API = anything exported in `python/genvarloader/__init__.py` `__all__`, plus the docstrings, signatures, and defaults of `gvl.write`, `Dataset.open`, and every `Dataset.with_*` method.
+
+In scope:
+- New, removed, or renamed public symbols
+- Changed signatures, defaults, or accepted literal values (e.g. new `with_seqs` kind)
+- New output modes, insertion-fill strategies, or splice/site-only behavior
+- Changed bcftools/plink2 preprocessing requirements
+- Changed on-disk format that affects how users open datasets
+
+When a change ships, update the relevant section of the skill and re-check the "Common gotchas" and "Where to look next" pointer table. The skill is published to https://www.skills.sh/ as `mcvickerlab/GenVarLoader` (installable via `npx skills add mcvickerlab/GenVarLoader`); keep it accurate against `main`.
+
 ## Development Notes
 
 - **Pixi environments**: Use `-e dev` for development, `-e docs` for documentation, `-e py310`/`py311`/`py312`/`py313` for Python version testing. Platform is linux-64.
