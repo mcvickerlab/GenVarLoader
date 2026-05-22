@@ -182,3 +182,84 @@ def test_plan_dtype_invariants():
     # offset arrays use seqpro's OFFSET_TYPE (int64).
     assert plan.permuted_out_offsets.dtype == np.int64
     assert plan.group_offsets.dtype == np.int64
+
+
+def test_ref_call_with_plan_writes_per_element_layout():
+    """Ref.__call__(splice_plan=...) returns a per-element Ragged whose
+    offsets are plan.permuted_out_offsets and shape is (n_elements, None)."""
+    from pathlib import Path
+
+    import genvarloader as gvl
+    import polars as pl
+
+    from genvarloader._dataset._reconstruct import Ref
+    from genvarloader._dataset._splice import build_splice_plan
+    from genvarloader._dataset._utils import bed_to_regions
+
+    # Find the data directory. In git worktrees the large binary test data
+    # lives in the main project's tests/data/, not in the worktree checkout.
+    import subprocess
+
+    _here = Path(__file__).resolve()
+    # Try: worktree-local first, then git common dir (main worktree root).
+    _candidates = [
+        _here.parent.parent / "data" / "fasta" / "hg38.fa.bgz",
+        _here.parent.parent.parent / "data" / "fasta" / "hg38.fa.bgz",
+    ]
+    try:
+        _git_root = Path(
+            subprocess.check_output(
+                ["git", "rev-parse", "--git-common-dir"],
+                cwd=str(_here.parent),
+                text=True,
+            ).strip()
+        ).parent
+        _candidates.insert(0, _git_root / "tests" / "data" / "fasta" / "hg38.fa.bgz")
+    except Exception:
+        pass
+    for _c in _candidates:
+        if _c.exists():
+            DDIR = _c.parent.parent
+            break
+    else:
+        pytest.skip("hg38.fa.bgz not found — run from repo root or main project")
+
+    reference = gvl.Reference.from_path(DDIR / "fasta" / "hg38.fa.bgz", in_memory=False)
+
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [1000, 2000, 5000],
+            "chromEnd": [1010, 2010, 5010],
+            "strand": [1, 1, 1],
+        }
+    )
+
+    regions = bed_to_regions(bed, reference.c_map)
+    # Two splice rows: row 0 = elements [0, 1], row 1 = element [2].
+    flat_r_idx = np.array([0, 1, 2], dtype=np.intp)
+    splice_offsets = np.array([0, 2, 3], dtype=np.int64)
+    lengths = (regions[flat_r_idx, 2] - regions[flat_r_idx, 1]).astype(np.int32)
+    plan = build_splice_plan(
+        lengths=lengths,
+        splice_row_offsets=splice_offsets,
+        n_samples=1,
+        n_rows=2,
+    )
+
+    reconstructor = Ref(reference=reference)
+    out = reconstructor(
+        idx=flat_r_idx,
+        r_idx=flat_r_idx,
+        regions=regions[flat_r_idx],
+        output_length="ragged",
+        jitter=0,
+        rng=np.random.default_rng(0),
+        deterministic=True,
+        splice_plan=plan,
+    )
+
+    # Per-element shape: (n_elements=3, None) — NOT the grouped (2, 1, None).
+    assert out.shape == (3, None), f"unexpected shape: {out.shape}"
+    # Total byte count matches sum of per-region lengths (3 regions × 10 bp each).
+    assert int(out.data.shape[0]) == int(lengths.sum())

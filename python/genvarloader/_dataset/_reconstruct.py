@@ -43,6 +43,7 @@ from ._indexing import DatasetIndexer
 from ._insertion_fill import InsertionFill, Repeat5p
 from ._insertion_fill import lower as _lower_insertion_fills
 from ._intervals import intervals_to_tracks, tracks_to_intervals
+from ._splice import SplicePlan
 from ._rag_variants import RaggedVariants
 from ._reference import Reference, get_reference
 from ._svar_link import SvarLink, _resolve_svar, _verify_fingerprint
@@ -146,6 +147,7 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
         jitter: int,
         rng: np.random.Generator,
         deterministic: bool,
+        splice_plan: SplicePlan | None = None,
     ) -> Ragged[np.bytes_]:
         batch_size = len(idx)
 
@@ -156,25 +158,48 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
             regions[:, 2] = regions[:, 1] + out_lengths
         else:
             lengths = regions[:, 2] - regions[:, 1]
-            out_lengths = lengths
+            out_lengths = lengths.astype(np.int32, copy=False)
 
-        # (b+1)
-        out_offsets = lengths_to_offsets(out_lengths)
+        if splice_plan is None:
+            # (b+1)
+            out_offsets = lengths_to_offsets(out_lengths)
 
-        # ragged (b ~l)
+            # ragged (b ~l)
+            ref = get_reference(
+                regions=regions,
+                out_offsets=out_offsets,
+                reference=self.reference.reference,
+                ref_offsets=self.reference.offsets,
+                pad_char=self.reference.pad_char,
+            ).view("S1")
+
+            ref = cast(
+                Ragged[np.bytes_], Ragged.from_offsets(ref, (batch_size, None), out_offsets)
+            )
+
+            return ref
+
+        # Spliced path: write bytes in (row, sample, element) C-order using the
+        # plan's permutation. E=1 for Ref (no inner-fixed axes).
+        perm = splice_plan.perm
+        permuted_regions = regions[perm]  # (B, 3) — identity permutation for E=1
         ref = get_reference(
-            regions=regions,
-            out_offsets=out_offsets,
+            regions=permuted_regions,
+            out_offsets=splice_plan.permuted_out_offsets,
             reference=self.reference.reference,
             ref_offsets=self.reference.offsets,
             pad_char=self.reference.pad_char,
         ).view("S1")
 
-        ref = cast(
-            Ragged[np.bytes_], Ragged.from_offsets(ref, (batch_size, None), out_offsets)
+        n_elements = splice_plan.permuted_lengths.shape[0]
+        return cast(
+            Ragged[np.bytes_],
+            Ragged.from_offsets(
+                ref,
+                (n_elements, None),
+                splice_plan.permuted_out_offsets,
+            ),
         )
-
-        return ref
 
 
 _H = TypeVar("_H", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
