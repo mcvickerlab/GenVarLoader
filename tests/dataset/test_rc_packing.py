@@ -31,7 +31,7 @@ import pytest
 from genoray import VCF
 from pytest_cases import parametrize_with_cases
 
-from genvarloader._dataset._impl import _cat_length
+from genvarloader._dataset._splice import _cat_length
 from genvarloader._ragged import Ragged, reverse_complement
 
 
