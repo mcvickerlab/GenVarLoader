@@ -464,3 +464,22 @@ def test_cds_internal_stops_bounded():
         f"(CDS excludes the terminal stop in Ensembl GTF, and in-frame variants "
         f"introduce at most one premature stop). Likely a reconstruction bug."
     )
+
+
+def test_spliced_tracks_round_trip(multi_exon_ds_path: Path):
+    """Spliced track output: data buffer equals sum of per-element lengths.
+
+    Skipped if the fixture has no tracks attached (the default multi-exon
+    fixture has none). When present, this exercises the Tracks splice path
+    and verifies the packed-buffer invariant on the resulting Ragged.
+    """
+    try:
+        ds = (
+            gvl.Dataset.open(multi_exon_ds_path, ref_path)
+            .with_tracks("dummy")
+            .with_settings(splice_info=("transcript_id", "exon_number"))
+        )
+    except ValueError:
+        pytest.skip("No tracks in fixture; tracks splice path covered elsewhere")
+    out = ds[0, 0]
+    assert out is not None

@@ -1020,13 +1020,14 @@ class Tracks(Reconstructor[_T]):
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
     ) -> _T:
-        if splice_plan is not None:
+        if splice_plan is not None and not issubclass(self.kind, RaggedTracks):
             raise NotImplementedError(
-                "Splicing of tracks is not yet supported; the SplicePlan-aware "
-                "Tracks path lands in a follow-up."
+                "Splicing of RaggedIntervals tracks is not supported."
             )
         if issubclass(self.kind, RaggedTracks):
-            out = self._call_float32(idx, r_idx, regions, output_length)
+            out = self._call_float32(
+                idx, r_idx, regions, output_length, splice_plan=splice_plan
+            )
         else:
             out = self._call_intervals(idx)
         return cast(_T, out)
@@ -1037,6 +1038,7 @@ class Tracks(Reconstructor[_T]):
         r_idx: NDArray[np.integer],
         regions: NDArray[np.int32],
         output_length: Literal["ragged", "variable"] | int,
+        splice_plan: SplicePlan | None = None,
     ) -> RaggedTracks:
         batch_size = len(idx)
 
@@ -1046,43 +1048,98 @@ class Tracks(Reconstructor[_T]):
             lengths = regions[:, 2] - regions[:, 1]
             out_lengths = track_lengths = lengths
 
-        # (b [p])
-        out_ofsts_per_t = lengths_to_offsets(out_lengths)
-        track_ofsts_per_t = lengths_to_offsets(track_lengths)
-        # caller accounts for ploidy
-        n_per_track: int = out_ofsts_per_t[-1]
-        # ragged (b t [p] l)
-        out = np.empty(len(self.active_tracks) * n_per_track, np.float32)
-        out_lens = repeat(out_lengths, "b -> b t", t=len(self.active_tracks))
-        out_offsets = lengths_to_offsets(out_lens)
+        if splice_plan is None:
+            # (b [p])
+            out_ofsts_per_t = lengths_to_offsets(out_lengths)
+            track_ofsts_per_t = lengths_to_offsets(track_lengths)
+            # caller accounts for ploidy
+            n_per_track: int = out_ofsts_per_t[-1]
+            # ragged (b t [p] l)
+            out = np.empty(len(self.active_tracks) * n_per_track, np.float32)
+            out_lens = repeat(out_lengths, "b -> b t", t=len(self.active_tracks))
+            out_offsets = lengths_to_offsets(out_lens)
+
+            for track_ofst, (name, tracktype) in enumerate(self.active_tracks.items()):
+                intervals = self.intervals[name]
+                # (b t l) ragged
+                _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
+
+                if tracktype is TrackType.SAMPLE:
+                    o_idx = idx
+                else:
+                    o_idx = r_idx
+
+                intervals_to_tracks(
+                    offset_idxs=o_idx,
+                    starts=regions[:, 1],
+                    itv_starts=intervals.starts.data,
+                    itv_ends=intervals.ends.data,
+                    itv_values=intervals.values.data,
+                    itv_offsets=intervals.starts.offsets,
+                    out=_out,
+                    out_offsets=track_ofsts_per_t,
+                )
+
+            out_shape = (len(idx), len(self.active_tracks), None)
+
+            # ragged (b t l)
+            tracks = RaggedTracks.from_offsets(out, out_shape, out_offsets)
+
+            return cast(RaggedTracks, tracks)
+
+        # ---- splice plan path ----
+        assert not isinstance(output_length, int), "splice plan path requires variable/ragged output"
+        # The plan was built with inner_fixed = (n_tracks,) so plan.perm has
+        # length B*T indexed in (query, track) C-order: k = query * T + track.
+        # Each k_new in the permuted order targets one (query, track) pair; we
+        # need to write its bytes into out_buf at plan.permuted_out_offsets[k_new].
+        n_tracks = len(self.active_tracks)
+        total = int(splice_plan.permuted_out_offsets[-1])
+        out_buf = np.empty(total, np.float32)
+
+        k_old = splice_plan.perm  # length B*T
+        track_of_k = k_old % n_tracks
+        query_of_k = k_old // n_tracks
 
         for track_ofst, (name, tracktype) in enumerate(self.active_tracks.items()):
+            mask = track_of_k == track_ofst
+            if not mask.any():
+                continue
+            # k_new indices that target this track, in permuted order.
+            k_new_idx = np.flatnonzero(mask)
+            queries = query_of_k[k_new_idx]  # length M
             intervals = self.intervals[name]
-            # (b t l) ragged
-            _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
-
-            if tracktype is TrackType.SAMPLE:
-                o_idx = idx
-            else:
-                o_idx = r_idx
-
+            o_idx_full = idx if tracktype is TrackType.SAMPLE else r_idx
+            sub_lengths = regions[queries, 2] - regions[queries, 1]
+            sub_offsets = lengths_to_offsets(sub_lengths)
+            scratch = np.empty(int(sub_offsets[-1]), np.float32)
             intervals_to_tracks(
-                offset_idxs=o_idx,
-                starts=regions[:, 1],
+                offset_idxs=o_idx_full[queries],
+                starts=regions[queries, 1],
                 itv_starts=intervals.starts.data,
                 itv_ends=intervals.ends.data,
                 itv_values=intervals.values.data,
                 itv_offsets=intervals.starts.offsets,
-                out=_out,
-                out_offsets=track_ofsts_per_t,
+                out=scratch,
+                out_offsets=sub_offsets,
             )
+            # Scatter scratch[m] into out_buf at the global permuted position.
+            perm_out = splice_plan.permuted_out_offsets
+            for m, k_new in enumerate(k_new_idx):
+                s_dest = int(perm_out[k_new])
+                e_dest = int(perm_out[k_new + 1])
+                s_src = int(sub_offsets[m])
+                e_src = int(sub_offsets[m + 1])
+                out_buf[s_dest:e_dest] = scratch[s_src:e_src]
 
-        out_shape = (len(idx), len(self.active_tracks), None)
-
-        # ragged (b t l)
-        tracks = RaggedTracks.from_offsets(out, out_shape, out_offsets)
-
-        return cast(RaggedTracks, tracks)
+        # Per-element Ragged (caller rewraps with group_offsets via _regroup).
+        out_shape = (splice_plan.permuted_lengths.shape[0], None)
+        return cast(
+            RaggedTracks,
+            RaggedTracks.from_offsets(
+                out_buf, out_shape, splice_plan.permuted_out_offsets
+            ),
+        )
 
     def _call_intervals(self, idx: NDArray[np.integer]) -> RaggedIntervals:
         r_idx, s_idx = np.unravel_index(idx, (self.n_regions, self.n_samples))

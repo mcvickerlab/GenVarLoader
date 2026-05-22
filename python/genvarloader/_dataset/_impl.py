@@ -1803,8 +1803,17 @@ class Dataset:
                 "Splicing of reference + tracks is not yet supported."
             )
         if isinstance(recon, Tracks):
-            raise NotImplementedError(
-                "Splicing of tracks is not yet supported."
+            # Tracks have deterministic per-region lengths (no haplotype
+            # indels). Replicate the (B,) length array across the n_tracks
+            # inner axis so the plan's inner_fixed = (n_tracks,).
+            n_tracks = len(recon.active_tracks)
+            base = (regions[:, 2] - regions[:, 1]).astype(np.int32, copy=False)
+            lengths_2d = np.broadcast_to(base[:, None], (base.shape[0], n_tracks))
+            return build_splice_plan(
+                lengths=np.ascontiguousarray(lengths_2d),
+                splice_row_offsets=splice_row_offsets,
+                n_samples=n_samples,
+                n_rows=n_rows,
             )
         if isinstance(recon, Haps):
             lengths_2d = recon.haplotype_lengths_for_plan(
