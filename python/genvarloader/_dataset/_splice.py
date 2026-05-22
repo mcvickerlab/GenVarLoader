@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-from typing import TypeVar, overload
+from typing import overload
 
+import awkward as ak
 import numpy as np
 from awkward.contents import ListOffsetArray, NumpyArray
 from awkward.index import Index64
 from numpy.typing import NDArray
-from seqpro.rag import Ragged, is_rag_dtype
-
-import awkward as ak
+from seqpro.rag import DTYPE_co as DTYPE, Ragged, is_rag_dtype
+from typing_extensions import assert_never
 
 from .._ragged import RaggedAnnotatedHaps
-
-DTYPE = TypeVar("DTYPE", bound=np.generic)
 
 
 @overload
@@ -65,7 +63,6 @@ def _cat_length(
         ref_coords = _cat_length(rag.ref_coords, offsets)
         return RaggedAnnotatedHaps(haps, var_idxs, ref_coords)
     else:
-        from typing_extensions import assert_never
         assert_never(rag)
 
 
