@@ -227,7 +227,6 @@ class Dataset:
                 svar_override=svar,
                 min_af=min_af,
                 max_af=max_af,
-                filter=var_filter,
             )
             if reference is None:
                 logger.warning(
@@ -262,11 +261,8 @@ class Dataset:
                 assert_never(seqs)
                 assert_never(tracks)
 
-        if splice_info is not None:
-            splice_idxer, spliced_bed = _parse_splice_info(splice_info, bed, idxer)
-        else:
-            splice_idxer = None
-            spliced_bed = None
+        splice_idxer = None
+        spliced_bed = None
 
         if seqs is not None and reference is not None:
             cnorm = ContigNormalizer(reference.contigs)
@@ -311,6 +307,12 @@ class Dataset:
             _recon=recon,
             _rng=np.random.default_rng(rng),
         )
+
+        if splice_info is not None or var_filter is not None:
+            dataset = dataset.with_settings(
+                splice_info=splice_info,
+                var_filter=var_filter,
+            )
 
         logger.info(f"Opened dataset:\n{dataset}")
 
