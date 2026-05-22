@@ -413,6 +413,7 @@ class Haps(Reconstructor[_H]):
         output_length: Literal["ragged", "variable"] | int,
         rng: np.random.Generator,
         deterministic: bool,
+        splice_plan: SplicePlan | None = None,
     ) -> tuple[
         _H,
         NDArray[np.intp],
@@ -478,8 +479,12 @@ class Haps(Reconstructor[_H]):
             out_lengths = hap_lengths
         else:
             out_lengths = np.full((batch_size, ploidy), output_length, dtype=np.int32)
-        # (b*p+1)
-        out_offsets = lengths_to_offsets(out_lengths, OFFSET_TYPE)
+        if splice_plan is None:
+            # (b*p+1)
+            out_offsets = lengths_to_offsets(out_lengths, OFFSET_TYPE)
+        else:
+            # Plan owns the (permuted) per-element offsets the kernel will use.
+            out_offsets = splice_plan.permuted_out_offsets
 
         # (b p l), (b p l), (b p l)
         if issubclass(self.kind, RaggedSeqs):
@@ -491,6 +496,7 @@ class Haps(Reconstructor[_H]):
                 keep=keep,
                 keep_offsets=keep_offsets,
                 annotate=False,
+                splice_plan=splice_plan,
             )
         elif issubclass(self.kind, RaggedAnnotatedHaps):
             haps, maybe_annot_v_idx, maybe_annot_pos = self._get_haplotypes(
@@ -501,9 +507,14 @@ class Haps(Reconstructor[_H]):
                 keep=keep,
                 keep_offsets=keep_offsets,
                 annotate=True,
+                splice_plan=splice_plan,
             )
             out = RaggedAnnotatedHaps(haps, maybe_annot_v_idx, maybe_annot_pos)
         elif issubclass(self.kind, RaggedVariants):
+            if splice_plan is not None:
+                raise NotImplementedError(
+                    "Spliced output is not supported for RaggedVariants."
+                )
             out = self._get_variants(
                 idx=idx,
                 regions=regions,
@@ -633,6 +644,7 @@ class Haps(Reconstructor[_H]):
         keep: NDArray[np.bool_] | None,
         keep_offsets: NDArray[OFFSET_TYPE] | None,
         annotate: Literal[False],
+        splice_plan: SplicePlan | None = ...,
     ) -> Ragged[np.bytes_]: ...
     @overload
     def _get_haplotypes(
@@ -644,6 +656,7 @@ class Haps(Reconstructor[_H]):
         keep: NDArray[np.bool_] | None,
         keep_offsets: NDArray[OFFSET_TYPE] | None,
         annotate: Literal[True],
+        splice_plan: SplicePlan | None = ...,
     ) -> tuple[Ragged[np.bytes_], Ragged[np.int32], Ragged[np.int32]]: ...
 
     def _get_haplotypes(
@@ -655,6 +668,7 @@ class Haps(Reconstructor[_H]):
         keep: NDArray[np.bool_] | None,
         keep_offsets: NDArray[OFFSET_TYPE] | None,
         annotate: bool,
+        splice_plan: SplicePlan | None = None,
     ) -> (
         Ragged[np.bytes_]
         | tuple[Ragged[np.bytes_], Ragged[V_IDX_TYPE], Ragged[np.int32]]
@@ -677,30 +691,107 @@ class Haps(Reconstructor[_H]):
         """
         assert self.reference is not None
 
-        haps = Ragged.from_offsets(
-            np.empty(out_offsets[-1], np.uint8), (*shifts.shape, None), out_offsets
-        )
+        if splice_plan is None:
+            haps = Ragged.from_offsets(
+                np.empty(out_offsets[-1], np.uint8), (*shifts.shape, None), out_offsets
+            )
 
-        if annotate:
-            annot_v_idxs = Ragged.from_offsets(
-                np.empty(out_offsets[-1], V_IDX_TYPE),
-                (*shifts.shape, None),
-                out_offsets,
+            if annotate:
+                annot_v_idxs = Ragged.from_offsets(
+                    np.empty(out_offsets[-1], V_IDX_TYPE),
+                    (*shifts.shape, None),
+                    out_offsets,
+                )
+                annot_positions = Ragged.from_offsets(
+                    np.empty(out_offsets[-1], np.int32),
+                    (*shifts.shape, None),
+                    out_offsets,
+                )
+            else:
+                annot_v_idxs = None
+                annot_positions = None
+
+            # don't need to pass annot offsets because they are the same as haps offsets
+            reconstruct_haplotypes_from_sparse(
+                geno_offset_idxs=geno_offset_idx,
+                out=haps.data,
+                out_offsets=haps.offsets,
+                regions=regions,
+                shifts=shifts,
+                geno_offsets=self.genotypes.offsets,
+                geno_v_idxs=self.genotypes.data,
+                v_starts=self.variants.start,
+                ilens=self.variants.ilen,
+                alt_alleles=self.variants.alt.data.view(np.uint8),
+                alt_offsets=self.variants.alt.offsets,
+                ref=self.reference.reference,
+                ref_offsets=self.reference.offsets,
+                pad_char=self.reference.pad_char,
+                keep=keep,
+                keep_offsets=keep_offsets,
+                annot_v_idxs=annot_v_idxs.data
+                if annot_v_idxs is not None
+                else annot_v_idxs,
+                annot_ref_pos=annot_positions.data
+                if annot_positions is not None
+                else annot_positions,
             )
-            annot_positions = Ragged.from_offsets(
-                np.empty(out_offsets[-1], np.int32), (*shifts.shape, None), out_offsets
+            haps = cast(Ragged[np.bytes_], haps.view("S1"))
+
+            if annotate:
+                return haps, annot_v_idxs, annot_positions  # type: ignore
+            else:
+                return haps
+
+        # ---- splice plan path ----
+        # geno_offset_idx, shifts have shape (B, P). Flatten to (B*P,) in
+        # (query, ploidy) C-order, then permute. Then call the kernel with
+        # ploidy=1 over the B*P flattened queries.
+        B = regions.shape[0]
+        P = shifts.shape[1] if shifts.ndim > 1 else 1
+        perm = splice_plan.perm
+        flat_geno_idx = geno_offset_idx.reshape(-1)[perm].astype(np.intp, copy=False)
+        flat_shifts = shifts.reshape(-1)[perm].astype(np.int32, copy=False)
+        # regions has shape (B, 3). For (B*P, 3), each query repeats P times
+        # consecutively, then we apply the same perm.
+        regions_flat = np.repeat(regions, P, axis=0)
+        permuted_regions = regions_flat[perm]
+
+        # keep / keep_offsets: per-k granularity (length B*P + 1).
+        if keep is not None and keep_offsets is not None:
+            keep_lens = np.diff(keep_offsets)
+            keep_lens_perm = keep_lens[perm]
+            keep_offsets_perm = lengths_to_offsets(
+                keep_lens_perm.astype(np.int64), dtype=np.int64
             )
+            keep_perm = np.empty(int(keep_lens_perm.sum()), dtype=np.bool_)
+            write_cursor = 0
+            for k_old in perm:
+                s = int(keep_offsets[k_old])
+                e = int(keep_offsets[k_old + 1])
+                width = e - s
+                keep_perm[write_cursor : write_cursor + width] = keep[s:e]
+                write_cursor += width
         else:
-            annot_v_idxs = None
-            annot_positions = None
+            keep_perm = None
+            keep_offsets_perm = None
 
-        # don't need to pass annot offsets because they are the same as haps offsets
+        # Allocate output buffers sized for the total permuted bytes.
+        total = int(splice_plan.permuted_out_offsets[-1])
+        out_buf = np.empty(total, np.uint8)
+        if annotate:
+            annot_v_buf = np.empty(total, V_IDX_TYPE)
+            annot_pos_buf = np.empty(total, np.int32)
+        else:
+            annot_v_buf = None
+            annot_pos_buf = None
+
         reconstruct_haplotypes_from_sparse(
-            geno_offset_idxs=geno_offset_idx,
-            out=haps.data,
-            out_offsets=haps.offsets,
-            regions=regions,
-            shifts=shifts,
+            geno_offset_idxs=flat_geno_idx.reshape(-1, 1),
+            out=out_buf,
+            out_offsets=splice_plan.permuted_out_offsets,
+            regions=permuted_regions,
+            shifts=flat_shifts.reshape(-1, 1),
             geno_offsets=self.genotypes.offsets,
             geno_v_idxs=self.genotypes.data,
             v_starts=self.variants.start,
@@ -710,21 +801,32 @@ class Haps(Reconstructor[_H]):
             ref=self.reference.reference,
             ref_offsets=self.reference.offsets,
             pad_char=self.reference.pad_char,
-            keep=keep,
-            keep_offsets=keep_offsets,
-            annot_v_idxs=annot_v_idxs.data
-            if annot_v_idxs is not None
-            else annot_v_idxs,
-            annot_ref_pos=annot_positions.data
-            if annot_positions is not None
-            else annot_positions,
+            keep=keep_perm,
+            keep_offsets=keep_offsets_perm,
+            annot_v_idxs=annot_v_buf,
+            annot_ref_pos=annot_pos_buf,
         )
-        haps = cast(Ragged[np.bytes_], haps.view("S1"))
 
+        # Return per-element Ragged. The caller (Task 5) will apply RC and
+        # re-wrap with group_offsets / out_shape after that.
+        per_elem_shape = (splice_plan.permuted_lengths.shape[0], None)
+        haps_rag = cast(
+            Ragged[np.bytes_],
+            Ragged.from_offsets(
+                out_buf.view("S1"),
+                per_elem_shape,
+                splice_plan.permuted_out_offsets,
+            ),
+        )
         if annotate:
-            return haps, annot_v_idxs, annot_positions  # type: ignore
-        else:
-            return haps
+            annot_v_rag = Ragged.from_offsets(
+                annot_v_buf, per_elem_shape, splice_plan.permuted_out_offsets
+            )
+            annot_pos_rag = Ragged.from_offsets(
+                annot_pos_buf, per_elem_shape, splice_plan.permuted_out_offsets
+            )
+            return haps_rag, annot_v_rag, annot_pos_rag  # type: ignore
+        return haps_rag
 
 
 class TrackType(enum.Enum):
