@@ -9,8 +9,6 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from attrs import define, evolve, field
-from awkward.contents import ListOffsetArray, NumpyArray
-from awkward.index import Index64
 from genoray._utils import ContigNormalizer
 from loguru import logger
 from numpy.typing import NDArray
@@ -33,6 +31,7 @@ from .._utils import (
     normalize_contig_name,
 )
 from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
+from ._splice import SpliceMap, _cat_length
 from ._rag_variants import RaggedVariants
 from ._insertion_fill import InsertionFill
 from ._reconstruct import Haps, HapsTracks, Ref, RefTracks, Tracks, TrackType
@@ -263,7 +262,17 @@ class Dataset:
                 assert_never(tracks)
 
         if splice_info is not None:
-            splice_idxer, spliced_bed = _parse_splice_info(splice_info, bed, idxer)
+            sm, spliced_bed = SpliceMap.from_bed(splice_info, bed)
+            # SpliceIndexer._init performed a bounds check that `from_bed` does not.
+            # Preserve it here.
+            if (
+                ak.max(sm.splice_map, None) >= idxer.n_regions
+                or ak.min(sm.splice_map, None) < -idxer.n_regions
+            ):
+                raise ValueError(
+                    "Found indices in the splice map that are out of bounds for the dataset."
+                )
+            splice_idxer = SpliceIndexer(map=sm, dsi=idxer)
         else:
             splice_idxer = None
             spliced_bed = None
@@ -429,9 +438,15 @@ class Dataset:
                 splice_idxer = None
                 spliced_bed = None
             else:
-                splice_idxer, spliced_bed = _parse_splice_info(
-                    splice_info, self._full_bed, self._idxer
-                )
+                sm, spliced_bed = SpliceMap.from_bed(splice_info, self._full_bed)
+                if (
+                    ak.max(sm.splice_map, None) >= self._idxer.n_regions
+                    or ak.min(sm.splice_map, None) < -self._idxer.n_regions
+                ):
+                    raise ValueError(
+                        "Found indices in the splice map that are out of bounds for the dataset."
+                    )
+                splice_idxer = SpliceIndexer(map=sm, dsi=self._idxer)
             to_evolve["_sp_idxer"] = splice_idxer
             to_evolve["_spliced_bed"] = spliced_bed
 
@@ -1759,97 +1774,6 @@ class Dataset:
             assert_never(rag)
 
 
-@overload
-def _cat_length(rag: Ragged[DTYPE], offsets: NDArray[np.integer]) -> Ragged[DTYPE]: ...
-@overload
-def _cat_length(
-    rag: RaggedAnnotatedHaps, offsets: NDArray[np.integer]
-) -> RaggedAnnotatedHaps: ...
-def _cat_length(
-    rag: Ragged | RaggedAnnotatedHaps, offsets: NDArray[np.integer]
-) -> Ragged | RaggedAnnotatedHaps:
-    """Concatenate the lengths of the ragged data.
-
-    ``offsets`` groups contiguous ranges along the outer (batch) axis. Every
-    other fixed dimension (e.g. ploidy, tracks) is preserved; we merge
-    bytes/elements across the grouped batch slots within each inner index.
-
-    Branch on ``shape[:-1]`` (the fixed axes; ``shape[-1]`` is always ``None``
-    for the ragged axis) instead of ``Ragged.ndim``, which counts bytestring
-    dtypes differently from numeric dtypes.
-
-    The fast ``np.add.reduceat`` path only works when the data buffer is
-    already laid out in batch order — i.e. a single fixed dim, or every inner
-    fixed dim == 1. Otherwise the buffer is interleaved by the inner axes and
-    walking it sequentially produces wrong bytes (pre-fix ploid-1 corruption).
-    """
-    if isinstance(rag, Ragged):
-        fixed = rag.shape[:-1]  # the non-ragged axes
-        inner_is_trivial = all(s == 1 for s in fixed[1:])
-        if len(fixed) == 1 or inner_is_trivial:
-            new_lengths = np.add.reduceat(rag.lengths, offsets[:-1], 0)
-            cat = Ragged.from_lengths(rag.data, new_lengths)
-        elif len(fixed) == 2:
-            # (b, p, ~l) or (b, t, ~l) — concatenate bytes across the grouped
-            # batch slots, per inner index, using awkward.
-            cat = _cat_length_inner(
-                rag, offsets, is_bytestring=is_rag_dtype(rag, np.bytes_)
-            )
-        else:  # hap tracks: (b, t, p, ~l) or deeper
-            raise NotImplementedError(
-                f"Splicing with shape {rag.shape} (≥3 fixed axes) is not implemented."
-            )
-
-        if is_rag_dtype(rag, np.bytes_):
-            cat = cat.view("S1")  # type: ignore
-        return cat
-    elif isinstance(rag, RaggedAnnotatedHaps):
-        haps = _cat_length(rag.haps, offsets)
-        var_idxs = _cat_length(rag.var_idxs, offsets)
-        ref_coords = _cat_length(rag.ref_coords, offsets)
-        return RaggedAnnotatedHaps(haps, var_idxs, ref_coords)
-    else:
-        assert_never(rag)
-
-
-def _cat_length_inner(
-    rag: Ragged, offsets: NDArray[np.integer], is_bytestring: bool
-) -> Ragged:
-    """Per-inner-axis bytes concatenation for (b, inner, ~l) Ragged arrays.
-
-    Groups the batch axis via ``offsets`` and, for each inner index, flattens
-    the grouped batch slots' bytes into a single run. Preserves the inner
-    axis. Required because the data buffer is laid out in (batch, inner)
-    interleaved order, so a naive reduceat walks the wrong bytes.
-    """
-    inner = rag.shape[1]
-    grouped = ak.Array(ListOffsetArray(Index64(offsets), rag.to_ak().layout))
-    parts = []
-    for i in range(inner):  # type: ignore
-        sel = grouped[:, :, i]
-        if is_bytestring:
-            # Bytestrings are atomic w.r.t. ak.flatten; strip the parameter to
-            # expose them as a list of uint8, flatten batch + bytes together,
-            # then re-wrap the inner axis as a bytestring.
-            sel_raw = ak.without_parameters(sel)
-            flat = ak.flatten(sel_raw, -1)
-            inner_np = flat.layout.content  # type: ignore
-            inner_np = NumpyArray(
-                inner_np.data.view(np.uint8),  # type: ignore
-                parameters={"__array__": "byte"},
-            )
-            wrapped = ListOffsetArray(
-                flat.layout.offsets,  # type: ignore
-                inner_np,
-                parameters={"__array__": "bytestring"},
-            )
-            part = ak.Array(wrapped)
-        else:
-            part = ak.flatten(sel, -1)
-        parts.append(part[:, None])
-    return Ragged(ak.concatenate(parts, 1))  # type: ignore
-
-
 def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedIntervals:
     # normalize contig names
     reg_c = regions["chrom"].unique()
@@ -1878,58 +1802,6 @@ def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedInt
     itvs = RaggedIntervals(starts, ends, values)
 
     return itvs
-
-
-def _parse_splice_info(
-    splice_info: str | tuple[str, str],
-    full_bed: pl.DataFrame,
-    idxer: DatasetIndexer,
-):
-    """Parse splice info into a SpliceIndexer.
-
-    Parameters
-    ----------
-    splice_info
-        The splice info to parse. Can be a string, a tuple of strings, or a dictionary.
-    regions
-        The regions to parse the splice info from.
-    idxer
-        The idxer to use to parse the splice info.
-    """
-    if isinstance(splice_info, str):
-        sp_bed = (
-            full_bed.rename({splice_info: "splice_id"})
-            .with_row_index()
-            .group_by("splice_id", maintain_order=True)
-            .agg(pl.all())
-        )
-        names = sp_bed["splice_id"].to_list()
-        lengths = sp_bed["index"].list.len().to_numpy()
-        splice_map = Ragged.from_lengths(
-            sp_bed["index"].explode().to_numpy(), lengths
-        ).to_ak()
-    elif isinstance(splice_info, tuple):
-        if len(splice_info) != 2:
-            raise ValueError(
-                "Splice info tuple must be of length 2, corresponding to columns names for splice IDs and element ordering."
-            )
-        sp_bed = (
-            full_bed.rename({splice_info[0]: "splice_id"})
-            .with_row_index()
-            .group_by("splice_id", maintain_order=True)
-            .agg(pl.all().sort_by(splice_info[1]))
-        )
-        names = sp_bed["splice_id"].to_list()
-        lengths = sp_bed["index"].list.len().to_numpy()
-        splice_map = Ragged.from_lengths(
-            sp_bed["index"].explode().to_numpy(), lengths
-        ).to_ak()
-    else:
-        assert_never(splice_info)
-
-    splice_map = cast(ak.Array, splice_map)
-    sp_idxer = SpliceIndexer._init(names, splice_map, idxer)
-    return sp_idxer, sp_bed
 
 
 SEQ = TypeVar("SEQ", NDArray[np.bytes_], AnnotatedHaps, RaggedVariants)

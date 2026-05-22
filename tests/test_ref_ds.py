@@ -97,3 +97,16 @@ def test_padded_slice(
     actual = np.empty_like(desired)
     padded_slice(arr, start, stop, pad_val, actual)
     np.testing.assert_equal(actual, desired)
+
+
+def test_refdataset_unspliced_defaults(reference: gvl.Reference):
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [0, 100],
+            "chromEnd": [100, 150],
+        }
+    )
+    ds = gvl.RefDataset(reference, bed)
+    assert ds.is_spliced is False
+    assert ds.splice_info is None

@@ -8,8 +8,9 @@ from genoray._types import POS_TYPE
 from genoray._utils import ContigNormalizer
 from natsort import natsorted
 
-from ._dataset._impl import RaggedDataset, _parse_splice_info
-from ._dataset._indexing import DatasetIndexer
+from ._dataset._impl import RaggedDataset
+from ._dataset._indexing import DatasetIndexer, SpliceIndexer
+from ._dataset._splice import SpliceMap
 from ._dataset._intervals import tracks_to_intervals
 from ._dataset._reconstruct import Haps, HapsTracks, Tracks, TrackType, _Variants
 from ._dataset._reference import Reference
@@ -183,7 +184,8 @@ def get_dummy_dataset(spliced: bool = False):
 
     if spliced:
         dummy_bed = dummy_bed.with_columns(chrom=pl.lit("chr1"))
-        dummy_spi, sp_bed = _parse_splice_info(("gene", "exon"), dummy_bed, dummy_idxer)
+        sm, sp_bed = SpliceMap.from_bed(("gene", "exon"), dummy_bed)
+        dummy_spi = SpliceIndexer(map=sm, dsi=dummy_idxer)
     else:
         dummy_spi = None
         sp_bed = None

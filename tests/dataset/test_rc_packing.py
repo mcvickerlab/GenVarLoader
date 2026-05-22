@@ -31,7 +31,7 @@ import pytest
 from genoray import VCF
 from pytest_cases import parametrize_with_cases
 
-from genvarloader._dataset._impl import _cat_length
+from genvarloader._dataset._splice import _cat_length
 from genvarloader._ragged import Ragged, reverse_complement
 
 
@@ -143,7 +143,7 @@ def spliced_ds_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     gvl.write(path=out, bed=source_bed, variants=reader)
 
     # Re-write input_regions.arrow with transcript_id / exon_number columns so
-    # _parse_splice_info can discover them.
+    # SpliceMap.from_bed can discover them.
     regions_path = out / "input_regions.arrow"
     bed = pl.read_ipc(regions_path)
     bed = bed.with_columns(
