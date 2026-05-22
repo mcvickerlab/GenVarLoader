@@ -22,7 +22,7 @@ from .._torch import TORCH_AVAILABLE, get_dataloader, no_torch_error
 from .._types import Idx, StrIdx
 from .._utils import is_dtype
 from ._indexing import is_str_arr, s2i
-from ._splice import SpliceMap
+from ._splice import SpliceMap, _cat_length
 from ._utils import bed_to_regions, padded_slice
 
 INT64_MAX = np.iinfo(np.int64).max
@@ -391,6 +391,44 @@ class RefDataset(Generic[T]):
         return self
 
     def __getitem__(self, idx: Idx) -> T:
+        if self._splice_map is not None:
+            return self._getitem_spliced(idx)
+        return self._getitem_unspliced(idx)
+
+    def _getitem_spliced(self, idx: Idx) -> T:
+        assert self._splice_map is not None
+        assert not isinstance(self.output_length, int)
+
+        flat_r_idx, offsets, out_reshape, squeeze = self._splice_map.parse_rows(idx)
+
+        inner = evolve(
+            self,
+            output_length="ragged",
+            splice_info=None,
+        )
+        # evolve can't set init=False fields; clear them manually
+        inner._splice_map = None
+        inner._spliced_bed = None
+
+        ref = inner._getitem_unspliced(flat_r_idx)  # Ragged[S1]
+        ref = _cat_length(ref, offsets)
+
+        if out_reshape is not None:
+            ref = ref.reshape(out_reshape)  # type: ignore
+
+        if self.output_length == "ragged":
+            out = ref
+        elif self.output_length == "variable":
+            out = to_padded(ref, pad_value=self.reference.pad_char)  # type: ignore
+        else:
+            raise AssertionError("splice + fixed-length output should be blocked earlier")
+
+        if squeeze:
+            out = out.squeeze(0)  # type: ignore
+
+        return cast(T, out)
+
+    def _getitem_unspliced(self, idx: Idx) -> T:
         # (... 4)
         regions = self._subset_regions[idx].copy()
 
