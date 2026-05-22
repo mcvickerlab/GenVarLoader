@@ -309,6 +309,16 @@ class Dataset:
         )
 
         if splice_info is not None or var_filter is not None:
+            # splice_info is only valid with haplotypes/reference sequence types.
+            # If the dataset still has the default "variants" sequence type (i.e.
+            # the caller hasn't called with_seqs yet), promote to "haplotypes" so
+            # _check_valid_state() doesn't reject splice_info=... up front.
+            if (
+                splice_info is not None
+                and isinstance(dataset._seqs, Haps)
+                and dataset.sequence_type == "variants"
+            ):
+                dataset = dataset.with_seqs("haplotypes")
             dataset = dataset.with_settings(
                 splice_info=splice_info,
                 var_filter=var_filter,
