@@ -172,6 +172,17 @@ sds = gvl.Dataset.open(
 
 `get_splice_bed` does GTF→BED with TSL filtering and an optional "CDS length multiple of 3" filter. To roll your own splice BED, just include `transcript_id` (or any grouping column) and `exon_number` columns on the BED. See `docs/source/splicing.ipynb`.
 
+### RefDataset splicing
+
+`gvl.RefDataset` accepts the same `splice_info` argument as `Dataset.open`. Pass either a transcript-ID column name (rows already in splice order) or a `(group_col, sort_col)` tuple to reorder exons. `with_settings(splice_info=False)` disables splicing on an existing `RefDataset`; pass a new value to re-enable. Splicing requires `output_length` in `{"ragged", "variable"}`, `jitter=0`, and `deterministic=True`. `subset_to(transcript_ids)` works the same as for `Dataset`.
+
+```python
+ref = gvl.Reference.from_path("hg38.fa.bgz")
+bed = gvl.get_splice_bed("annotations.gtf")
+ref_ds = gvl.RefDataset(ref, bed, splice_info="transcript_id")
+seqs = ref_ds[:]  # Ragged[S1], one row per transcript
+```
+
 ## Site-only variants (e.g. ClinVar)
 
 Use `gvl.sites_vcf_to_table(vcf)` → `pl.DataFrame` (bi-allelic SNPs only), then wrap an `ArrayDataset[AnnotatedHaps, ...]` with `gvl.DatasetWithSites(ds, sites, max_variants_per_region=1)`. Returns `(wt_haps, mut_haps, flags[, tracks])`; flags encode applied / deleted-overlap / already-existing. See `_variants/_sitesonly.py`.

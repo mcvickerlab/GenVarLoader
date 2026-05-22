@@ -170,7 +170,13 @@ T = TypeVar("T", NDArray[np.bytes_], RaggedSeqs)
 
 @define
 class RefDataset(Generic[T]):
-    """A reference dataset for pulling out sequences from a reference genome."""
+    """A reference dataset for pulling out sequences from a reference genome.
+
+    When ``splice_info`` is provided, the dataset returns per-transcript
+    concatenated reference sequence, with one row per splice group instead of
+    one row per BED region. Same semantics as
+    :meth:`Dataset.open(splice_info=...) <genvarloader.Dataset.open>`.
+    """
 
     reference: Reference
     """The reference genome."""

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
+
+if TYPE_CHECKING:
+    from ._splice import SpliceMap
 
 import awkward as ak
 import numpy as np
