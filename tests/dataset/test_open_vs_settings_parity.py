@@ -76,7 +76,6 @@ def test_open_vs_with_settings_parity_state(spliced_svar_ds_path):
 
     assert ds_a._seqs.filter == ds_b._seqs.filter == "exonic"
     assert ds_a._recon.filter == ds_b._recon.filter == "exonic"
-    assert (ds_a._sp_idxer is None) == (ds_b._sp_idxer is None)
     assert ds_a._sp_idxer is not None and ds_b._sp_idxer is not None
 
 
