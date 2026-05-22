@@ -452,7 +452,9 @@ class RefDataset(Generic[T]):
         elif self.output_length == "variable":
             out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))  # type: ignore
         else:
-            raise AssertionError("splice + fixed-length output should be blocked earlier")
+            raise AssertionError(
+                "splice + fixed-length output should be blocked earlier"
+            )
 
         if squeeze:
             out = out.squeeze(0)  # type: ignore

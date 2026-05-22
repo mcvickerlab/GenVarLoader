@@ -201,9 +201,7 @@ class SpliceMap:
 
     def to_full(self) -> Self:
         """Reset to the un-subsetted splice map."""
-        return evolve(
-            self, splice_map=self.full_splice_map, row_subset_idxs=None
-        )
+        return evolve(self, splice_map=self.full_splice_map, row_subset_idxs=None)
 
     def parse_rows(
         self, rows: Idx | StrIdx

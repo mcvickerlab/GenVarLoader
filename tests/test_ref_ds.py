@@ -100,11 +100,13 @@ def test_padded_slice(
 
 
 def test_refdataset_unspliced_defaults(reference: gvl.Reference):
-    bed = pl.DataFrame({
-        "chrom": ["chr1", "chr1"],
-        "chromStart": [0, 100],
-        "chromEnd": [100, 150],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [0, 100],
+            "chromEnd": [100, 150],
+        }
+    )
     ds = gvl.RefDataset(reference, bed)
     assert ds.is_spliced is False
     assert ds.splice_info is None
