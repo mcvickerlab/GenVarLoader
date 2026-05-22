@@ -8,7 +8,7 @@
 
 **Tech Stack:** GitHub Actions, commitizen (`v$version` tags), maturin, `uv publish`, pixi, `softprops/action-gh-release@v3`, `PyO3/maturin-action@v1`, `astral-sh/setup-uv@v7`.
 
-**Reference spec:** `docs/superpowers/specs/2026-05-21-release-pipeline-design.md`
+**Reference spec:** `docs/superpowers/specs/2026-05-21-release-pipeline-design.md` — see the **"Post-implementation notes"** section there for the bugs surfaced during code review and post-merge validation (six total). The plan below is the original task list as executed; PRs #171, #172, #173, #175 patched issues found after the initial PR #168 landed.
 
 **Validation note:** GitHub Actions has no offline test harness. Each task's verification step is either (a) `actionlint` if available, otherwise a YAML syntax check via `python -c "import yaml; yaml.safe_load(open('...'))"`, and (b) a `workflow_dispatch`-triggered dry run after the orchestrator lands (Task 7). Do not delete the old workflow files until Task 7 passes.
 
