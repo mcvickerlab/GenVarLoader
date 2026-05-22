@@ -33,9 +33,7 @@ def spliced_svar_ds_path(tmp_path_factory):
     """
     svar_path = _DATA_DIR / "filtered.svar"
     bed_path = _DATA_DIR / "source.bed"
-    assert svar_path.is_dir(), (
-        f"missing fixture {svar_path}; run pixi run -e dev gen"
-    )
+    assert svar_path.is_dir(), f"missing fixture {svar_path}; run pixi run -e dev gen"
 
     tmp = tmp_path_factory.mktemp("issue_176_parity")
     out = tmp / "ds.gvl"

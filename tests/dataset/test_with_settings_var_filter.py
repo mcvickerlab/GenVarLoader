@@ -19,9 +19,7 @@ _DATA_DIR = _REPO_ROOT / "data"
 def svar_gvl_path(tmp_path):
     svar_path = _DATA_DIR / "filtered.svar"
     bed_path = _DATA_DIR / "source.bed"
-    assert svar_path.is_dir(), (
-        f"missing fixture {svar_path}; run pixi run -e dev gen"
-    )
+    assert svar_path.is_dir(), f"missing fixture {svar_path}; run pixi run -e dev gen"
     out = tmp_path / "ds.gvl"
     gvl.write(path=out, bed=bed_path, variants=svar_path, overwrite=True)
     return out
