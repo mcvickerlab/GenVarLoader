@@ -25,6 +25,8 @@ def test_plan_no_inner_axes():
     # group_offsets at (row, sample) granularity: 2 entries + 1.
     np.testing.assert_array_equal(plan.group_offsets, [0, 7, 12])
     assert plan.out_shape == (2, 1, None)
+    # flat_out_shape collapses (n_rows=2, n_samples=1) → n_pairs=2.
+    assert plan.flat_out_shape == (2, None)
 
 
 def test_plan_ploidy_2():
@@ -76,6 +78,8 @@ def test_plan_ploidy_2():
     # cell sums: row0,s0,p0 = 10+20=30; row0,s0,p1 = 11+21=32; row1,s0,p0 = 30; row1,s0,p1 = 31.
     np.testing.assert_array_equal(plan.group_offsets, [0, 30, 62, 92, 123])
     assert plan.out_shape == (2, 1, 2, None)
+    # flat_out_shape collapses (n_rows=2, n_samples=1) → n_pairs=2.
+    assert plan.flat_out_shape == (2, 2, None)
 
 
 def test_plan_multi_sample_ploidy_2():
@@ -110,6 +114,8 @@ def test_plan_multi_sample_ploidy_2():
     # cell sums: 1+3=4, 2+4=6, 5+7=12, 6+8=14
     np.testing.assert_array_equal(plan.group_offsets, [0, 4, 10, 22, 36])
     assert plan.out_shape == (1, 2, 2, None)
+    # flat_out_shape collapses (n_rows=1, n_samples=2) → n_pairs=2.
+    assert plan.flat_out_shape == (2, 2, None)
 
 
 def test_plan_total_bytes_consistent():
@@ -263,3 +269,5 @@ def test_ref_call_with_plan_writes_per_element_layout():
     assert out.shape == (3, None), f"unexpected shape: {out.shape}"
     # Total byte count matches sum of per-region lengths (3 regions × 10 bp each).
     assert int(out.data.shape[0]) == int(lengths.sum())
+    # Per-element offsets must match the plan's permuted_out_offsets exactly.
+    np.testing.assert_array_equal(out.offsets, plan.permuted_out_offsets)

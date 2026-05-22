@@ -40,6 +40,22 @@ class SplicePlan:
     group_offsets: NDArray[np.int64]
     out_shape: tuple[int | None, ...]
 
+    @property
+    def flat_out_shape(self) -> tuple[int | None, ...]:
+        """Shape with the leading ``(n_rows, n_samples)`` axes collapsed to ``n_pairs``.
+
+        ``out_shape`` is ``(n_rows, n_samples, *inner_fixed, None)``.
+        ``flat_out_shape`` is ``(n_rows * n_samples, *inner_fixed, None)``.
+
+        This is the shape passed to ``_regroup`` after the kernel writes
+        per-element data into the flattened ``(n_pairs, ...)`` layout.
+        Future callers (e.g. a Tracks splice path) should use this property
+        rather than recomputing the flattening inline.
+        """
+        n_rows, n_samples = self.out_shape[0], self.out_shape[1]
+        assert isinstance(n_rows, int) and isinstance(n_samples, int)
+        return (n_rows * n_samples, *self.out_shape[2:])
+
 
 def build_splice_plan(
     lengths: NDArray[np.int32],

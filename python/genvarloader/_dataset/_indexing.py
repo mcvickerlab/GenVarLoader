@@ -408,16 +408,23 @@ class SpliceIndexer:
                 squeeze = True
             r_idx = np.atleast_1d(self.map._r_idx[r_idx])
             s_idx = np.atleast_1d(self.dsi._s_idx[s_idx])
+            n_rows_sel = len(r_idx)
+            n_samples_sel = len(s_idx)
             idx = np.ravel_multi_index(np.ix_(r_idx, s_idx), self.full_shape)
             if isinstance(rows, slice) and isinstance(samples, slice):
                 out_reshape = (len(r_idx), len(s_idx))
         elif idx_t == "adv":
             r_idx = self.map._r_idx[r_idx]
             s_idx = self.dsi._s_idx[s_idx]
+            # adv pairs (r, s) elementwise → one "sample" axis of length B.
+            n_rows_sel = int(np.asarray(r_idx).size)
+            n_samples_sel = 1
             idx = np.ravel_multi_index((r_idx, s_idx), self.full_shape)
         elif idx_t == "combo":
             r_idx = self.map._r_idx[r_idx]
             s_idx = self.dsi._s_idx[s_idx]
+            n_rows_sel = int(np.asarray(r_idx).ravel().size)
+            n_samples_sel = int(np.asarray(s_idx).ravel().size)
             idx = np.ravel_multi_index(
                 np.ix_(r_idx.ravel(), s_idx.ravel()), self.full_shape
             )
@@ -444,7 +451,7 @@ class SpliceIndexer:
 
         ds_idx, *_ = self.dsi.parse_idx((r_idx, s_idx))
 
-        return ds_idx, squeeze, out_reshape, offsets
+        return ds_idx, squeeze, out_reshape, offsets, n_rows_sel, n_samples_sel
 
     @property
     def splice_map(self) -> ak.Array:

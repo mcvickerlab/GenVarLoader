@@ -375,6 +375,40 @@ class Haps(Reconstructor[_H]):
         ploidy = cast(int, self.genotypes.shape[-2])
         return hap_ilens.reshape(-1, ploidy)
 
+    def haplotype_lengths_for_plan(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+    ) -> NDArray[np.int32]:
+        """Compute ``(B, P)`` per-query haplotype lengths without running the
+        full reconstruction. Used by the spliced path to size buffers and
+        build a ``SplicePlan`` before the kernel is invoked.
+
+        The body mirrors the length-calculation prefix of
+        ``get_haps_and_shifts``: optional exonic filter, then
+        ``_haplotype_ilens``, then ``region_length[:, None] + diffs``.
+        """
+        lengths = regions[:, 2] - regions[:, 1]
+        geno_offset_idx = self._get_geno_offset_idx(idx, self.genotypes)
+        if self.filter == "exonic":
+            keep, keep_offsets = choose_exonic_variants(
+                starts=regions[:, 1],
+                ends=regions[:, 2],
+                geno_offset_idxs=geno_offset_idx,
+                geno_v_idxs=self.genotypes.data,
+                geno_offsets=self.genotypes.offsets,
+                v_starts=self.variants.start,
+                ilens=self.variants.ilen,
+            )
+        else:
+            keep = None
+            keep_offsets = None
+        diffs = self._haplotype_ilens(
+            idx, regions, deterministic=True, keep=keep, keep_offsets=keep_offsets
+        )
+        hap_lengths = lengths[:, None] + diffs
+        return hap_lengths.astype(np.int32, copy=False)
+
     def to_kind(self, kind: type[_NewH]) -> Haps[_NewH]:
         if kind != RaggedVariants and self.reference is None:
             raise ValueError(
@@ -391,8 +425,13 @@ class Haps(Reconstructor[_H]):
         jitter: int,
         rng: np.random.Generator,
         deterministic: bool,
+        splice_plan: SplicePlan | None = None,
     ) -> _H:
         if issubclass(self.kind, RaggedVariants):
+            if splice_plan is not None:
+                raise NotImplementedError(
+                    "Spliced output is not supported for RaggedVariants."
+                )
             ragv = self._get_variants(idx=idx, regions=None, shifts=None)
             ragv = cast(_H, ragv)
             return ragv
@@ -403,6 +442,7 @@ class Haps(Reconstructor[_H]):
                 output_length=output_length,
                 rng=rng,
                 deterministic=deterministic,
+                splice_plan=splice_plan,
             )
             return haps
 
@@ -978,7 +1018,13 @@ class Tracks(Reconstructor[_T]):
         jitter: int,
         rng: np.random.Generator,
         deterministic: bool,
+        splice_plan: SplicePlan | None = None,
     ) -> _T:
+        if splice_plan is not None:
+            raise NotImplementedError(
+                "Splicing of tracks is not yet supported; the SplicePlan-aware "
+                "Tracks path lands in a follow-up."
+            )
         if issubclass(self.kind, RaggedTracks):
             out = self._call_float32(idx, r_idx, regions, output_length)
         else:
@@ -1248,7 +1294,12 @@ class RefTracks(Reconstructor[tuple[Ragged[np.bytes_], _T]]):
         jitter: int,
         rng: np.random.Generator,
         deterministic: bool,
+        splice_plan: SplicePlan | None = None,
     ) -> tuple[Ragged[np.bytes_], _T]:
+        if splice_plan is not None:
+            raise NotImplementedError(
+                "Splicing of reference + tracks is not yet supported."
+            )
         seqs = self.seqs(
             idx=idx,
             r_idx=r_idx,
@@ -1291,7 +1342,13 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
         jitter: int,
         rng: np.random.Generator,
         deterministic: bool,
+        splice_plan: SplicePlan | None = None,
     ) -> tuple[_H, _T]:
+        if splice_plan is not None:
+            raise NotImplementedError(
+                "Splicing of haplotypes + tracks (shape (b, t, p, ~l)) is not "
+                "supported."
+            )
         lengths = regions[:, 2] - regions[:, 1]
 
         # ragged (b p l), (b p), (b p), (b*p*v), (b*p+1), (b p)
