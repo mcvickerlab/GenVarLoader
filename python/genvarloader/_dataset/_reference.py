@@ -22,6 +22,7 @@ from .._torch import TORCH_AVAILABLE, get_dataloader, no_torch_error
 from .._types import Idx, StrIdx
 from .._utils import is_dtype
 from ._indexing import is_str_arr, s2i
+from ._splice import SpliceMap, _cat_length
 from ._utils import bed_to_regions, padded_slice
 
 INT64_MAX = np.iinfo(np.int64).max
@@ -169,7 +170,13 @@ T = TypeVar("T", NDArray[np.bytes_], RaggedSeqs)
 
 @define
 class RefDataset(Generic[T]):
-    """A reference dataset for pulling out sequences from a reference genome."""
+    """A reference dataset for pulling out sequences from a reference genome.
+
+    When ``splice_info`` is provided, the dataset returns per-transcript
+    concatenated reference sequence, with one row per splice group instead of
+    one row per BED region. Same semantics as
+    :meth:`Dataset.open(splice_info=...) <genvarloader.Dataset.open>`.
+    """
 
     reference: Reference
     """The reference genome."""
@@ -199,6 +206,13 @@ class RefDataset(Generic[T]):
     region_names: str | None = None
     """The name of the column in the full_bed table to use as the region names."""
     _region_map: HashTable | None = field(init=False, alias="_region_map")
+    splice_info: str | tuple[str, str] | None = None
+    """If set, the dataset is spliced. Either the column name with rows already
+    in splice order or a (group_col, sort_col) pair applied against ``full_bed``."""
+    _splice_map: SpliceMap | None = field(init=False, alias="_splice_map", default=None)
+    _spliced_bed: pl.DataFrame | None = field(
+        init=False, alias="_spliced_bed", default=None
+    )
 
     def __attrs_post_init__(self):
         if self.full_bed.height == 0:
@@ -227,17 +241,63 @@ class RefDataset(Generic[T]):
         else:
             self._region_map = None
 
+        if self.splice_info is not None:
+            sm, sp_bed = SpliceMap.from_bed(self.splice_info, self.full_bed)
+            self._splice_map = sm
+            self._spliced_bed = sp_bed
+            self._check_valid_state()
+        else:
+            self._splice_map = None
+            self._spliced_bed = None
+
+    def _check_valid_state(self):
+        if self._splice_map is None:
+            return
+        if self.jitter > 0:
+            raise RuntimeError(
+                "Jitter is not supported with splicing. Please set jitter to 0."
+            )
+        if not self.deterministic:
+            raise RuntimeError(
+                "Non-deterministic algorithms are not supported with splicing."
+                " Please set deterministic to True."
+            )
+        if isinstance(self.output_length, int):
+            raise RuntimeError(
+                "Splicing requires output_length='ragged' or 'variable',"
+                " not a fixed integer length."
+            )
+
     @property
     def regions(self) -> pl.DataFrame:
         return self._subset_bed
 
     @property
+    def is_spliced(self) -> bool:
+        """Whether the dataset is spliced."""
+        return self._splice_map is not None
+
+    @property
+    def spliced_regions(self) -> pl.DataFrame:
+        """The spliced BED, subset to the current row subset."""
+        if self._spliced_bed is None or self._splice_map is None:
+            raise ValueError("Dataset does not have splice information.")
+        subset = self._splice_map.row_subset_idxs
+        if subset is None:
+            return self._spliced_bed
+        return self._spliced_bed[subset]
+
+    @property
     def shape(self) -> tuple[int]:
         """Shape of the dataset."""
+        if self._splice_map is not None:
+            return (self._splice_map.n_rows,)
         return (self.regions.height,)
 
     def __len__(self) -> int:
         """Length of the dataset."""
+        if self._splice_map is not None:
+            return self._splice_map.n_rows
         return self.regions.height
 
     @overload
@@ -267,7 +327,9 @@ class RefDataset(Generic[T]):
                     f" The maximum output length is the minimum region length ({min_r_len})."
                 )
 
-        return evolve(self, output_length=output_length)
+        out = evolve(self, output_length=output_length)
+        out._check_valid_state()
+        return out
 
     def with_settings(
         self,
@@ -275,6 +337,7 @@ class RefDataset(Generic[T]):
         deterministic: bool | None = None,
         rc_neg: bool | None = None,
         seed: int | np.random.Generator | None = None,
+        splice_info: str | tuple[str, str] | Literal[False] | None = None,
     ) -> Self:
         to_evolve = {}
 
@@ -301,16 +364,36 @@ class RefDataset(Generic[T]):
         if seed is not None:
             to_evolve["seed"] = np.random.default_rng(seed)
 
-        return evolve(self, **to_evolve)
+        new_sm = None
+        new_bed = None
+        if splice_info is not None:
+            if splice_info is False:
+                to_evolve["splice_info"] = None
+            else:
+                new_sm, new_bed = SpliceMap.from_bed(splice_info, self.full_bed)
+                to_evolve["splice_info"] = splice_info
+
+        out = evolve(self, **to_evolve)
+
+        if splice_info is not None:
+            out._splice_map = new_sm
+            out._spliced_bed = new_bed
+
+        out._check_valid_state()
+        return out
 
     def subset_to(self, regions: StrIdx):
-        """Subset the dataset to a subset of regions.
+        """Subset the dataset to a subset of regions (or transcripts, when spliced)."""
+        if self._splice_map is not None:
+            new_map = self._splice_map.subset_to(regions)
+            flat = ak.flatten(new_map.splice_map, None).to_numpy()
+            self._splice_map = new_map
+            self._subset_bed = self.full_bed[flat]
+            self._subset_regions = bed_to_regions(
+                self._subset_bed, self.reference.c_map
+            )
+            return self
 
-        Parameters
-        ----------
-        regions
-            The indices of the regions to subset to.
-        """
         if self._region_map is not None:
             regions = s2i(regions, self._region_map)
         elif is_str_arr(regions):
@@ -332,11 +415,53 @@ class RefDataset(Generic[T]):
 
     def to_full_dataset(self) -> Self:
         """Reset the dataset to the full dataset."""
+        if self._splice_map is not None:
+            self._splice_map = self._splice_map.to_full()
         self._subset_bed = self.full_bed
         self._subset_regions = bed_to_regions(self._subset_bed, self.reference.c_map)
         return self
 
     def __getitem__(self, idx: Idx) -> T:
+        if self._splice_map is not None:
+            return self._getitem_spliced(idx)
+        return self._getitem_unspliced(idx)
+
+    def _getitem_spliced(self, idx: Idx) -> T:
+        assert self._splice_map is not None
+        assert not isinstance(self.output_length, int)
+
+        flat_r_idx, offsets, out_reshape, squeeze = self._splice_map.parse_rows(idx)
+
+        inner = evolve(
+            self,
+            output_length="ragged",
+            splice_info=None,
+        )
+        # evolve can't set init=False fields; clear them manually
+        inner._splice_map = None
+        inner._spliced_bed = None
+
+        ref = inner._getitem_unspliced(flat_r_idx)  # Ragged[S1]
+        ref = _cat_length(ref, offsets)
+
+        if out_reshape is not None:
+            ref = ref.reshape(out_reshape)  # type: ignore
+
+        if self.output_length == "ragged":
+            out = ref
+        elif self.output_length == "variable":
+            out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))  # type: ignore
+        else:
+            raise AssertionError(
+                "splice + fixed-length output should be blocked earlier"
+            )
+
+        if squeeze:
+            out = out.squeeze(0)  # type: ignore
+
+        return cast(T, out)
+
+    def _getitem_unspliced(self, idx: Idx) -> T:
         # (... 4)
         regions = self._subset_regions[idx].copy()
 
@@ -396,7 +521,7 @@ class RefDataset(Generic[T]):
         if self.output_length == "ragged":
             out = ref
         elif self.output_length == "variable":
-            out = to_padded(ref, pad_value=self.reference.pad_char)  # type: ignore
+            out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))  # type: ignore
         else:
             out = ref.to_numpy()  # type: ignore
 
