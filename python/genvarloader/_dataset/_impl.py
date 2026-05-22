@@ -31,7 +31,7 @@ from .._utils import (
     normalize_contig_name,
 )
 from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
-from ._splice import _cat_length
+from ._splice import SpliceMap, _cat_length
 from ._rag_variants import RaggedVariants
 from ._insertion_fill import InsertionFill
 from ._reconstruct import Haps, HapsTracks, Ref, RefTracks, Tracks, TrackType
@@ -262,7 +262,17 @@ class Dataset:
                 assert_never(tracks)
 
         if splice_info is not None:
-            splice_idxer, spliced_bed = _parse_splice_info(splice_info, bed, idxer)
+            sm, spliced_bed = SpliceMap.from_bed(splice_info, bed)
+            # SpliceIndexer._init performed a bounds check that `from_bed` does not.
+            # Preserve it here.
+            if (
+                ak.max(sm.splice_map, None) >= idxer.n_regions
+                or ak.min(sm.splice_map, None) < -idxer.n_regions
+            ):
+                raise ValueError(
+                    "Found indices in the splice map that are out of bounds for the dataset."
+                )
+            splice_idxer = SpliceIndexer(map=sm, dsi=idxer)
         else:
             splice_idxer = None
             spliced_bed = None
@@ -428,9 +438,15 @@ class Dataset:
                 splice_idxer = None
                 spliced_bed = None
             else:
-                splice_idxer, spliced_bed = _parse_splice_info(
-                    splice_info, self._full_bed, self._idxer
-                )
+                sm, spliced_bed = SpliceMap.from_bed(splice_info, self._full_bed)
+                if (
+                    ak.max(sm.splice_map, None) >= self._idxer.n_regions
+                    or ak.min(sm.splice_map, None) < -self._idxer.n_regions
+                ):
+                    raise ValueError(
+                        "Found indices in the splice map that are out of bounds for the dataset."
+                    )
+                splice_idxer = SpliceIndexer(map=sm, dsi=self._idxer)
             to_evolve["_sp_idxer"] = splice_idxer
             to_evolve["_spliced_bed"] = spliced_bed
 
@@ -1787,57 +1803,6 @@ def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedInt
 
     return itvs
 
-
-def _parse_splice_info(
-    splice_info: str | tuple[str, str],
-    full_bed: pl.DataFrame,
-    idxer: DatasetIndexer,
-):
-    """Parse splice info into a SpliceIndexer.
-
-    Parameters
-    ----------
-    splice_info
-        The splice info to parse. Can be a string, a tuple of strings, or a dictionary.
-    regions
-        The regions to parse the splice info from.
-    idxer
-        The idxer to use to parse the splice info.
-    """
-    if isinstance(splice_info, str):
-        sp_bed = (
-            full_bed.rename({splice_info: "splice_id"})
-            .with_row_index()
-            .group_by("splice_id", maintain_order=True)
-            .agg(pl.all())
-        )
-        names = sp_bed["splice_id"].to_list()
-        lengths = sp_bed["index"].list.len().to_numpy()
-        splice_map = Ragged.from_lengths(
-            sp_bed["index"].explode().to_numpy(), lengths
-        ).to_ak()
-    elif isinstance(splice_info, tuple):
-        if len(splice_info) != 2:
-            raise ValueError(
-                "Splice info tuple must be of length 2, corresponding to columns names for splice IDs and element ordering."
-            )
-        sp_bed = (
-            full_bed.rename({splice_info[0]: "splice_id"})
-            .with_row_index()
-            .group_by("splice_id", maintain_order=True)
-            .agg(pl.all().sort_by(splice_info[1]))
-        )
-        names = sp_bed["splice_id"].to_list()
-        lengths = sp_bed["index"].list.len().to_numpy()
-        splice_map = Ragged.from_lengths(
-            sp_bed["index"].explode().to_numpy(), lengths
-        ).to_ak()
-    else:
-        assert_never(splice_info)
-
-    splice_map = cast(ak.Array, splice_map)
-    sp_idxer = SpliceIndexer._init(names, splice_map, idxer)
-    return sp_idxer, sp_bed
 
 
 SEQ = TypeVar("SEQ", NDArray[np.bytes_], AnnotatedHaps, RaggedVariants)
