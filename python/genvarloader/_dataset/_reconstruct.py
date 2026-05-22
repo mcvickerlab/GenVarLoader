@@ -43,9 +43,9 @@ from ._indexing import DatasetIndexer
 from ._insertion_fill import InsertionFill, Repeat5p
 from ._insertion_fill import lower as _lower_insertion_fills
 from ._intervals import intervals_to_tracks, tracks_to_intervals
-from ._splice import SplicePlan
 from ._rag_variants import RaggedVariants
-from ._reference import Reference, get_reference
+from ._reference import Reference, _fetch_spliced_ref, get_reference
+from ._splice import SplicePlan
 from ._svar_link import SvarLink, _resolve_svar, _verify_fingerprint
 from ._tracks import shift_and_realign_tracks_sparse
 from ._utils import splits_sum_le_value
@@ -158,7 +158,7 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
             regions[:, 2] = regions[:, 1] + out_lengths
         else:
             lengths = regions[:, 2] - regions[:, 1]
-            out_lengths = lengths.astype(np.int32, copy=False)
+            out_lengths = lengths
 
         if splice_plan is None:
             # (b+1)
@@ -179,26 +179,13 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
 
             return ref
 
-        # Spliced path: write bytes in (row, sample, element) C-order using the
-        # plan's permutation. E=1 for Ref (no inner-fixed axes).
-        perm = splice_plan.perm
-        permuted_regions = regions[perm]  # (B, 3) — identity permutation for E=1
-        ref = get_reference(
-            regions=permuted_regions,
-            out_offsets=splice_plan.permuted_out_offsets,
+        # Spliced path: delegate to the shared kernel-dispatch helper.
+        return _fetch_spliced_ref(
+            regions=regions,
+            plan=splice_plan,
             reference=self.reference.reference,
             ref_offsets=self.reference.offsets,
             pad_char=self.reference.pad_char,
-        ).view("S1")
-
-        n_elements = splice_plan.permuted_lengths.shape[0]
-        return cast(
-            Ragged[np.bytes_],
-            Ragged.from_offsets(
-                ref,
-                (n_elements, None),
-                splice_plan.permuted_out_offsets,
-            ),
         )
 
 

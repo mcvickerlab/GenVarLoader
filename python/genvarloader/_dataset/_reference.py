@@ -22,7 +22,7 @@ from .._torch import TORCH_AVAILABLE, get_dataloader, no_torch_error
 from .._types import Idx, StrIdx
 from .._utils import is_dtype
 from ._indexing import is_str_arr, s2i
-from ._splice import SpliceMap, _cat_length
+from ._splice import SpliceMap, SplicePlan, build_splice_plan
 from ._utils import bed_to_regions, padded_slice
 
 INT64_MAX = np.iinfo(np.int64).max
@@ -431,18 +431,50 @@ class RefDataset(Generic[T]):
         assert not isinstance(self.output_length, int)
 
         flat_r_idx, offsets, out_reshape, squeeze = self._splice_map.parse_rows(idx)
+        # flat_r_idx values are absolute indices into full_bed (not _subset_regions).
+        # polars accepts a 1-D numpy integer array directly — no .tolist() needed.
+        regions = bed_to_regions(self.full_bed[flat_r_idx], self.reference.c_map)
+        lengths = (regions[:, 2] - regions[:, 1]).astype(np.int32, copy=False)
 
-        inner = evolve(
-            self,
-            output_length="ragged",
-            splice_info=None,
+        n_rows = offsets.shape[0] - 1
+        plan = build_splice_plan(
+            lengths=lengths,
+            splice_row_offsets=offsets,
+            n_samples=1,
+            n_rows=n_rows,
         )
-        # evolve can't set init=False fields; clear them manually
-        inner._splice_map = None
-        inner._spliced_bed = None
 
-        ref = inner._getitem_unspliced(flat_r_idx)  # Ragged[S1]
-        ref = _cat_length(ref, offsets)
+        # Delegate kernel dispatch to the shared helper (eliminates duplication
+        # with Ref.__call__'s splice branch). Returns per-element Ragged (n_elements, None)
+        # already in permuted write order.
+        per_elem = _fetch_spliced_ref(
+            regions=regions,
+            plan=plan,
+            reference=self.reference.reference,
+            ref_offsets=self.reference.offsets,
+            pad_char=self.reference.pad_char,
+        )
+
+        if self.rc_neg:
+            to_rc_unperm = regions[:, 3] == -1
+            if to_rc_unperm.any():
+                to_rc_perm = to_rc_unperm[plan.perm]
+                per_elem = Ragged(
+                    ak.to_packed(
+                        ak.where(
+                            to_rc_perm,
+                            reverse_complement(per_elem.to_ak()),
+                            per_elem.to_ak(),
+                        )
+                    )
+                )
+
+        # Rewrap with group_offsets at (n_rows, None) — skip the (n_rows, 1, None)
+        # + squeeze(1) trick since RefDataset has no sample axis.
+        ref = cast(
+            Ragged[np.bytes_],
+            Ragged.from_offsets(per_elem.data, (n_rows, None), plan.group_offsets),
+        )
 
         if out_reshape is not None:
             ref = ref.reshape(out_reshape)  # type: ignore
@@ -656,6 +688,34 @@ def get_reference(
         c_e = ref_offsets[c_idx + 1]
         padded_slice(reference[c_s:c_e], start, end, pad_char, out[o_s:o_e])
     return out
+
+
+def _fetch_spliced_ref(
+    regions: NDArray[np.integer],
+    plan: "SplicePlan",
+    reference: NDArray[np.uint8],
+    ref_offsets: NDArray[np.int64],
+    pad_char: int,
+) -> "Ragged[np.bytes_]":
+    """Fetch reference bytes in splice-permuted order, returning a per-element
+    Ragged of shape ``(n_elements, None)``.
+
+    This is the kernel-dispatch core shared by :class:`Ref.__call__`'s splice
+    branch and :meth:`RefDataset._getitem_spliced`.
+    """
+    permuted_regions = regions[plan.perm]
+    raw = get_reference(
+        regions=permuted_regions,
+        out_offsets=plan.permuted_out_offsets,
+        reference=reference,
+        ref_offsets=ref_offsets,
+        pad_char=pad_char,
+    ).view("S1")
+    n_elements = plan.permuted_lengths.shape[0]
+    return cast(
+        Ragged[np.bytes_],
+        Ragged.from_offsets(raw, (n_elements, None), plan.permuted_out_offsets),
+    )
 
 
 if TORCH_AVAILABLE:
