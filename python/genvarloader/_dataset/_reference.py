@@ -22,6 +22,7 @@ from .._torch import TORCH_AVAILABLE, get_dataloader, no_torch_error
 from .._types import Idx, StrIdx
 from .._utils import is_dtype
 from ._indexing import is_str_arr, s2i
+from ._splice import SpliceMap
 from ._utils import bed_to_regions, padded_slice
 
 INT64_MAX = np.iinfo(np.int64).max
@@ -199,6 +200,13 @@ class RefDataset(Generic[T]):
     region_names: str | None = None
     """The name of the column in the full_bed table to use as the region names."""
     _region_map: HashTable | None = field(init=False, alias="_region_map")
+    splice_info: str | tuple[str, str] | None = None
+    """If set, the dataset is spliced. Either the column name with rows already
+    in splice order or a (group_col, sort_col) pair applied against ``full_bed``."""
+    _splice_map: SpliceMap | None = field(init=False, alias="_splice_map", default=None)
+    _spliced_bed: pl.DataFrame | None = field(
+        init=False, alias="_spliced_bed", default=None
+    )
 
     def __attrs_post_init__(self):
         if self.full_bed.height == 0:
@@ -227,17 +235,63 @@ class RefDataset(Generic[T]):
         else:
             self._region_map = None
 
+        if self.splice_info is not None:
+            sm, sp_bed = SpliceMap.from_bed(self.splice_info, self.full_bed)
+            self._splice_map = sm
+            self._spliced_bed = sp_bed
+            self._check_valid_state()
+        else:
+            self._splice_map = None
+            self._spliced_bed = None
+
+    def _check_valid_state(self):
+        if self._splice_map is None:
+            return
+        if self.jitter > 0:
+            raise RuntimeError(
+                "Jitter is not supported with splicing. Please set jitter to 0."
+            )
+        if not self.deterministic:
+            raise RuntimeError(
+                "Non-deterministic algorithms are not supported with splicing."
+                " Please set deterministic to True."
+            )
+        if isinstance(self.output_length, int):
+            raise RuntimeError(
+                "Splicing requires output_length='ragged' or 'variable',"
+                " not a fixed integer length."
+            )
+
     @property
     def regions(self) -> pl.DataFrame:
         return self._subset_bed
 
     @property
+    def is_spliced(self) -> bool:
+        """Whether the dataset is spliced."""
+        return self._splice_map is not None
+
+    @property
+    def spliced_regions(self) -> pl.DataFrame:
+        """The spliced BED, subset to the current row subset."""
+        if self._spliced_bed is None or self._splice_map is None:
+            raise ValueError("Dataset does not have splice information.")
+        subset = self._splice_map.row_subset_idxs
+        if subset is None:
+            return self._spliced_bed
+        return self._spliced_bed[subset]
+
+    @property
     def shape(self) -> tuple[int]:
         """Shape of the dataset."""
+        if self._splice_map is not None:
+            return (self._splice_map.n_rows,)
         return (self.regions.height,)
 
     def __len__(self) -> int:
         """Length of the dataset."""
+        if self._splice_map is not None:
+            return self._splice_map.n_rows
         return self.regions.height
 
     @overload
