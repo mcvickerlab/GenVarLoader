@@ -329,6 +329,7 @@ class RefDataset(Generic[T]):
         deterministic: bool | None = None,
         rc_neg: bool | None = None,
         seed: int | np.random.Generator | None = None,
+        splice_info: str | tuple[str, str] | Literal[False] | None = None,
     ) -> Self:
         to_evolve = {}
 
@@ -355,16 +356,36 @@ class RefDataset(Generic[T]):
         if seed is not None:
             to_evolve["seed"] = np.random.default_rng(seed)
 
-        return evolve(self, **to_evolve)
+        new_sm = None
+        new_bed = None
+        if splice_info is not None:
+            if splice_info is False:
+                to_evolve["splice_info"] = None
+            else:
+                new_sm, new_bed = SpliceMap.from_bed(splice_info, self.full_bed)
+                to_evolve["splice_info"] = splice_info
+
+        out = evolve(self, **to_evolve)
+
+        if splice_info is not None:
+            out._splice_map = new_sm
+            out._spliced_bed = new_bed
+
+        out._check_valid_state()
+        return out
 
     def subset_to(self, regions: StrIdx):
-        """Subset the dataset to a subset of regions.
+        """Subset the dataset to a subset of regions (or transcripts, when spliced)."""
+        if self._splice_map is not None:
+            new_map = self._splice_map.subset_to(regions)
+            flat = ak.flatten(new_map.splice_map, None).to_numpy()
+            self._splice_map = new_map
+            self._subset_bed = self.full_bed[flat]
+            self._subset_regions = bed_to_regions(
+                self._subset_bed, self.reference.c_map
+            )
+            return self
 
-        Parameters
-        ----------
-        regions
-            The indices of the regions to subset to.
-        """
         if self._region_map is not None:
             regions = s2i(regions, self._region_map)
         elif is_str_arr(regions):
@@ -386,6 +407,8 @@ class RefDataset(Generic[T]):
 
     def to_full_dataset(self) -> Self:
         """Reset the dataset to the full dataset."""
+        if self._splice_map is not None:
+            self._splice_map = self._splice_map.to_full()
         self._subset_bed = self.full_bed
         self._subset_regions = bed_to_regions(self._subset_bed, self.reference.c_map)
         return self

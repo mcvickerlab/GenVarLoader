@@ -87,3 +87,38 @@ def test_spliced_mixed_strand(reference: gvl.Reference):
     unsp = gvl.RefDataset(reference, bed, rc_neg=True)[:]
     expected = np.concatenate([_as_s1(unsp[0]), _as_s1(unsp[1])])
     np.testing.assert_equal(_as_s1(spliced), expected)
+
+
+def test_with_settings_disable_splice(reference, two_transcript_bed):
+    ds = gvl.RefDataset(reference, two_transcript_bed, splice_info="transcript_id")
+    assert ds.is_spliced
+    plain = ds.with_settings(splice_info=False)
+    assert plain.is_spliced is False
+    assert len(plain) == 3  # back to per-exon row count
+
+
+def test_with_settings_enable_splice(reference, two_transcript_bed):
+    ds = gvl.RefDataset(reference, two_transcript_bed)
+    assert not ds.is_spliced
+    sp = ds.with_settings(splice_info="transcript_id")
+    assert sp.is_spliced
+    assert len(sp) == 2
+
+
+def test_with_settings_validation(reference, two_transcript_bed):
+    ds = gvl.RefDataset(reference, two_transcript_bed, jitter=0)
+    with pytest.raises(RuntimeError, match="Jitter is not supported"):
+        ds.with_settings(splice_info="transcript_id", jitter=1)
+
+    with pytest.raises(RuntimeError, match="Non-deterministic"):
+        ds.with_settings(splice_info="transcript_id", deterministic=False)
+
+
+def test_subset_to_transcripts(reference, two_transcript_bed):
+    ds = gvl.RefDataset(reference, two_transcript_bed, splice_info="transcript_id")
+    sub = ds.subset_to(["T2"])
+    assert len(sub) == 1
+    spliced = sub[0]
+    unsp = gvl.RefDataset(reference, two_transcript_bed)[:]
+    # The single exon of T2 should match unsp[2].
+    np.testing.assert_equal(_as_s1(spliced), _as_s1(unsp[2]))
