@@ -122,3 +122,19 @@ def test_subset_to_transcripts(reference, two_transcript_bed):
     unsp = gvl.RefDataset(reference, two_transcript_bed)[:]
     # The single exon of T2 should match unsp[2].
     np.testing.assert_equal(_as_s1(spliced), _as_s1(unsp[2]))
+
+
+def test_spliced_output_length_variable(reference, two_transcript_bed):
+    ds = gvl.RefDataset(
+        reference, two_transcript_bed, splice_info="transcript_id"
+    ).with_len("variable")
+    out = ds[:]
+    # variable-length pads to the longest transcript in the batch.
+    assert out.shape[0] == 2
+    assert out.shape[1] == 20  # T1 has 2 × 10 = 20; T2 padded to 20.
+
+
+def test_spliced_rejects_fixed_length(reference, two_transcript_bed):
+    ds = gvl.RefDataset(reference, two_transcript_bed)
+    with pytest.raises(RuntimeError, match="Splicing requires output_length"):
+        ds.with_settings(splice_info="transcript_id").with_len(5)

@@ -321,7 +321,9 @@ class RefDataset(Generic[T]):
                     f" The maximum output length is the minimum region length ({min_r_len})."
                 )
 
-        return evolve(self, output_length=output_length)
+        out = evolve(self, output_length=output_length)
+        out._check_valid_state()
+        return out
 
     def with_settings(
         self,
@@ -442,7 +444,7 @@ class RefDataset(Generic[T]):
         if self.output_length == "ragged":
             out = ref
         elif self.output_length == "variable":
-            out = to_padded(ref, pad_value=self.reference.pad_char)  # type: ignore
+            out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))  # type: ignore
         else:
             raise AssertionError("splice + fixed-length output should be blocked earlier")
 
@@ -511,7 +513,7 @@ class RefDataset(Generic[T]):
         if self.output_length == "ragged":
             out = ref
         elif self.output_length == "variable":
-            out = to_padded(ref, pad_value=self.reference.pad_char)  # type: ignore
+            out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))  # type: ignore
         else:
             out = ref.to_numpy()  # type: ignore
 
