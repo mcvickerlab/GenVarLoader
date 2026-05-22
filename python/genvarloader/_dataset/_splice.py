@@ -21,6 +21,139 @@ from .._utils import lengths_to_offsets
 from ._indexing import s2i
 
 
+@define
+class SplicePlan:
+    """Permutation + offsets that re-target the kernel write into spliced layout.
+
+    The kernel is called with ``ploidy=1`` and one query per element of the
+    flattened ``(B, *inner_fixed)`` length array. ``perm`` reorders those
+    flattened k-indices so the global write order becomes
+    ``(splice_row, sample, *inner_fixed, splice_element)`` C-order. After the
+    kernel writes, the data buffer can be exposed as a Ragged with either
+    ``permuted_out_offsets`` (per-element) or ``group_offsets`` (per
+    ``(splice_row, sample, inner)`` cell).
+    """
+
+    perm: NDArray[np.intp]
+    permuted_lengths: NDArray[np.int32]
+    permuted_out_offsets: NDArray[np.int64]
+    group_offsets: NDArray[np.int64]
+    out_shape: tuple[int | None, ...]
+
+
+def build_splice_plan(
+    lengths: NDArray[np.int32],
+    splice_row_offsets: NDArray[np.int64],
+    n_samples: int,
+    n_rows: int,
+) -> SplicePlan:
+    """Build a splice plan from per-query lengths and splice-row boundaries.
+
+    Parameters
+    ----------
+    lengths
+        Shape ``(B, *inner_fixed)``. Per-query lengths in current ``(splice_row,
+        sample, splice_element)`` C-order, with any inner fixed axes (ploidy,
+        tracks) intact. ``E = prod(inner_fixed)`` is the inner flatten factor.
+    splice_row_offsets
+        Shape ``(n_rows * n_samples + 1,)``. Cumulative count of elements per
+        ``(splice_row, sample)`` pair — i.e. the ``offsets`` returned by
+        ``SpliceIndexer.parse_idx``.
+    n_samples
+        Number of samples in the outer ``(splice_row, sample)`` grid.
+    n_rows
+        Number of splice rows in the outer ``(splice_row, sample)`` grid.
+    """
+    if lengths.ndim == 1:
+        inner_fixed: tuple[int, ...] = ()
+        flat_lengths = lengths.astype(np.int32, copy=False)
+    else:
+        inner_fixed = tuple(lengths.shape[1:])
+        # (B, *inner) -> (B, E) -> (B*E,) in (query, inner) C-order.
+        flat_lengths = lengths.reshape(lengths.shape[0], -1).astype(
+            np.int32, copy=False
+        )
+    E = int(np.prod(inner_fixed)) if inner_fixed else 1
+    B = int(lengths.shape[0])
+    # k-index in the current layout: k = query * E + e.
+    # We want to permute into (row, sample, e, element) C-order, which means:
+    #   for each (row, sample) pair p (in C-order):
+    #     for each e in 0..E:
+    #       for each element q in the pair's element range:
+    #         emit k = q * E + e
+    # The element range for pair p is splice_row_offsets[p]:splice_row_offsets[p+1].
+    n_pairs = n_rows * n_samples
+    pair_lengths = np.diff(splice_row_offsets)  # length n_pairs
+    if E == 1:
+        # Identity permutation; flat_lengths shape is (B,) already permuted.
+        perm = np.arange(B, dtype=np.intp)
+        permuted_lengths_flat = flat_lengths.reshape(-1).astype(
+            np.int32, copy=False
+        )
+    else:
+        # Build perm by iterating (pair, e, element).
+        # For a pair p with element range [s, s+L):
+        #   for e in 0..E:
+        #     k-indices = [(s+0)*E + e, (s+1)*E + e, ..., (s+L-1)*E + e]
+        # Vectorized: outer product of "queries within pair" and a per-e offset.
+        # Build with broadcasting.
+        flat_2d = flat_lengths  # (B, E)
+        perm_parts = []
+        for p_idx in range(n_pairs):
+            s = int(splice_row_offsets[p_idx])
+            L = int(pair_lengths[p_idx])
+            if L == 0:
+                continue
+            q_range = np.arange(s, s + L, dtype=np.intp)  # (L,)
+            # (E, L): each row e is q_range*E + e.
+            ke = q_range[None, :] * E + np.arange(E, dtype=np.intp)[:, None]
+            perm_parts.append(ke.reshape(-1))
+        perm = (
+            np.concatenate(perm_parts)
+            if perm_parts
+            else np.empty(0, dtype=np.intp)
+        )
+        permuted_lengths_flat = flat_2d.reshape(-1)[perm].astype(
+            np.int32, copy=False
+        )
+
+    permuted_out_offsets = lengths_to_offsets(
+        permuted_lengths_flat, dtype=np.int64
+    )
+
+    # group_offsets at (row, sample, *inner_fixed) granularity:
+    # each cell aggregates L elements (or 0 for empty pairs).
+    # Within the permuted layout, cells are laid out as: for each pair p, E
+    # cells of L lengths back-to-back. So the cell-boundary indices in the
+    # flat permuted_lengths array are:
+    #   pair_offsets[p]*E + e*L_p     for e in 0..E
+    # Equivalently: take pair_lengths repeated E times then cumsum.
+    if E == 1:
+        cell_lengths = pair_lengths.astype(np.int64, copy=False)
+    else:
+        cell_lengths = np.repeat(pair_lengths.astype(np.int64), E)
+    # cell_lengths length = n_pairs * E. group_offsets indexes the
+    # *permuted_lengths* array at cell boundaries.
+    cell_starts = np.concatenate(
+        ([0], np.cumsum(cell_lengths, dtype=np.int64))
+    )  # length n_pairs*E + 1
+    # group_offsets[i] = permuted_out_offsets[cell_starts[i]]
+    group_offsets = permuted_out_offsets[cell_starts]
+
+    if inner_fixed:
+        out_shape: tuple[int | None, ...] = (n_rows, n_samples, *inner_fixed, None)
+    else:
+        out_shape = (n_rows, n_samples, None)
+
+    return SplicePlan(
+        perm=perm,
+        permuted_lengths=permuted_lengths_flat,
+        permuted_out_offsets=permuted_out_offsets,
+        group_offsets=group_offsets,
+        out_shape=out_shape,
+    )
+
+
 @overload
 def _cat_length(rag: Ragged[DTYPE], offsets: NDArray[np.integer]) -> Ragged[DTYPE]: ...
 @overload
