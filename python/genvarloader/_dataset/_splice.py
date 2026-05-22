@@ -13,7 +13,10 @@ from numpy.typing import NDArray
 from seqpro.rag import DTYPE_co as DTYPE, Ragged, is_rag_dtype
 from typing_extensions import assert_never
 
+from typing_extensions import Self
+
 from .._ragged import RaggedAnnotatedHaps
+from .._types import Idx, StrIdx
 from .._utils import lengths_to_offsets
 from ._indexing import s2i
 
@@ -184,11 +187,11 @@ class SpliceMap:
             return self.row_idxs
         return self.row_subset_idxs
 
-    def row2idx(self, rows):
+    def row2idx(self, rows: StrIdx) -> Idx:
         """Convert row names (or already-int indices) to int indices."""
         return s2i(rows, self.names)
 
-    def subset_to(self, rows):
+    def subset_to(self, rows: StrIdx | None) -> Self:
         """Return a new SpliceMap restricted to the given rows."""
         if rows is None:
             return self
@@ -196,13 +199,15 @@ class SpliceMap:
         splice_map = cast(ak.Array, self.full_splice_map[row_idxs])
         return evolve(self, splice_map=splice_map, row_subset_idxs=row_idxs)
 
-    def to_full(self):
+    def to_full(self) -> Self:
         """Reset to the un-subsetted splice map."""
         return evolve(
             self, splice_map=self.full_splice_map, row_subset_idxs=None
         )
 
-    def parse_rows(self, rows):
+    def parse_rows(
+        self, rows: Idx | StrIdx
+    ) -> tuple[NDArray[np.intp], NDArray[np.int64], tuple[int, ...] | None, bool]:
         """Parse a row index into the inputs needed for a per-region fetch.
 
         Returns
