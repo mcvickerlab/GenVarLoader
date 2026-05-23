@@ -1,8 +1,24 @@
 # Refactor Campaign: Readability + Targeted Architecture
 
-**Status:** Design — pending plan
+**Status:** In progress — PR0, PR1, attrs migration shipped; PR2+ pending
 **Date:** 2026-05-23
 **Scope:** `python/genvarloader/` (no Rust changes)
+
+## Progress log
+
+| Date | PR | What | Branch | Result |
+|---|---|---|---|---|
+| 2026-05-23 | #181 | PR0 — pyrefly strict baseline + drop basedpyright + CI lint workflow | `refactor/pr0-pyrefly` | Merged. 0 errors / 117 warnings under curated baseline. CI uses `j178/prek-action` via `prek` so `.pre-commit-config.yaml` is single source of truth. |
+| 2026-05-23 | #182 | PR1 — promote reconstructor view-state to explicit `Dataset._seqs_kind` field; centralize construction in `_build_reconstructor(seqs, tracks, seqs_kind)` factory | `refactor/pr1-build-reconstructor` | Merged. ~150 lines net removed from `_impl.py`; `sequence_type` is now a one-line field lookup. Latent bug fixed in passing (`Tracks.active_tracks` is a dict, not optional list; was always-truthy so `with_insertion_fill` guard never fired after `with_tracks(False)`). Test suite 475 → 488 passing (+12 factory unit tests + 1 newly-active insertion-fill test). |
+| 2026-05-23 | #183 | attrs → stdlib dataclasses migration (out-of-band, not numbered in the campaign) | `refactor/attrs-to-dataclass` | Merged. 10 source files + tests migrated to `@dataclass(slots=True)`; `attrs` dropped from `pyproject.toml` / `pixi.toml`. Zero behavioral changes. Motivated by pyrefly's weaker support for attrs. |
+
+**Current state of heavyweight files (post these three PRs):**
+
+- `_dataset/_impl.py` — 2156 lines (was 2253; −97)
+- `_dataset/_reconstruct.py` — 1595 lines (was 1525; +70 from factory + view-state work, expected)
+- `_dataset/_write.py` — 832 lines (unchanged)
+- `_dataset/_reference.py` — 756 lines (unchanged-ish)
+- `_dataset/_genotypes.py` — 571 lines (unchanged)
 
 ## Goals
 
@@ -50,13 +66,15 @@ duplicating the haplotype-reconstruction kernel. Concretely:
   region-major iteration. It should be a pure function (or method on a small
   pipeline object) that takes "which variants apply, which samples, which
   reference window" and returns sequences. The region-major iteration driver in
-  `Dataset` is layered *on top* of this kernel, not woven into it.
-- Reconstruction request objects (PR6 below) describe *what* to reconstruct,
+  `Dataset` is layered *on top* of this kernel, not woven into it. **PR5
+  (`ReconstructionRequest` + haplotype kernel extraction) is the slot for this
+  work.**
+- Reconstruction request objects (PR5) describe *what* to reconstruct,
   agnostic of *how* iteration is driven.
-- Names: the write-side `VariantSource` protocol (PR2) is for writers; the
-  future read-side variant-major API will be a separate protocol. To leave room,
-  the writer protocol is named `VariantWriter` (or similar), not `VariantSource`.
-- File layout: the package leaves room for a future `python/genvarloader/_online/`
+- Names: any writer-side protocol introduced in PR2 should be named
+  `VariantWriter`, not `VariantSource` — reserve "Source" terminology for the
+  future read-side variant-major API.
+- File layout: PR6 leaves room for a future `python/genvarloader/_online/`
   (or similarly named) sibling to `_dataset/`.
 
 The future class is **not** implemented in this campaign.
@@ -97,10 +115,12 @@ Specific debt items the campaign targets:
 
 Each PR is independently shippable and keeps the full test suite green.
 
-### PR0 — Integrate pyrefly as a type-check gate
+### PR0 — Integrate pyrefly as a type-check gate ✅ SHIPPED (#181)
 
 Add [pyrefly](https://github.com/facebook/pyrefly) as a type-checking gate for
 the library code, configured for the `strict` preset as the baseline.
+
+**As shipped:** Pre-commit hook is a `local` hook invoking `pixi run -e dev pyrefly check` (rather than the `facebook/pyrefly-pre-commit` repo hook), because a `language: system` hook silently picks up a `~/.pixi/bin/pyrefly` outside the project env. CI runs `j178/prek-action@v2` after `setup-pixi activate-environment: true` so PATH carries the dev env's pyrefly. `pre-commit.ci` is configured to skip the pixi-invoking hooks (no pixi in that runner). debug-statements hook pinned to `python3.10` (the python3 default chokes on `match/case`). Baseline relaxations populated empirically in `[tool.pyrefly.errors]` with one-line reasons per category.
 
 **Scope:**
 
@@ -134,7 +154,15 @@ automatically. This catches subtle regressions during architectural moves
 since by then pyrefly will be the source of truth for what suppressions are
 actually needed.
 
-### PR1 — Centralize reconstructor construction via a factory
+### PR1 — Centralize reconstructor construction via a factory ✅ SHIPPED (#182)
+
+**As shipped (deviation from original spec):** The original "DatasetSettings value object" framing didn't fit the code — only 4 of 9 args to `with_settings` are settings; the rest mutate sources. Reading `with_seqs`/`with_tracks` revealed that `_recon`'s runtime class was doing double duty as (1) callable and (2) implicit view-state. Promoting view-state to an explicit `Dataset._seqs_kind: Literal[...] | None` field — combined with a single `_build_reconstructor(seqs, tracks, seqs_kind)` factory — collapsed the 90-line match in `with_seqs`, the isinstance ladders in `with_settings` propagation, the `with_tracks` match, and the `with_insertion_fill` guard. `sequence_type` is now `return self._seqs_kind`. Tracks-active state stays on `Tracks.active_tracks` (a dict — truthiness signals "active"; this is the latent bug found in passing). The 5 reconstructor classes (`Haps`, `Ref`, `Tracks`, `RefTracks`, `HapsTracks`) are preserved — they encode genuinely different combination strategies. The original PR5 ("Pipeline composition") was dropped as a result.
+
+(The historical original-PR1 framing is below for reference but is superseded by the shipped work.)
+
+---
+
+**Original spec (superseded by what shipped):**
 
 **Revision note (post-PR0):** the original PR1 framing (`DatasetSettings` value
 object) didn't fit the code well — only 4 of the 9 args to `with_settings` are
@@ -187,20 +215,33 @@ a one-liner factory call; the 90-line `with_seqs` match collapses; the
 invariant ("either seqs or tracks must be present") moves into the type system
 at the factory boundary.
 
-### PR2 — `VariantWriter` protocol
+### PR2 — VCF + PGEN writer dedup (scope refined from original spec)
 
-Replace the `_write_from_vcf` / `_write_from_pgen` / `_write_from_svar` dispatch
-with a small `VariantWriter` protocol (`iter_chunks() → Iterator[Chunk]`, or
-similar). `write()` picks the writer; the shared chunking logic moves into a
-single `_write_variants_chunked()` helper.
+**Scope finding before implementation:** the three writers in `_write.py` are not
+uniformly de-dupable. `_write_from_vcf` and `_write_from_pgen` share ~90% of
+their structure (contig/chunk iteration, dense→sparse conversion,
+`_write_phased_variants_chunk` calls). `_write_from_svar` is genuinely
+different — it pre-allocates a memmap, uses `SparseVar._find_starts_ends` for
+direct offset extraction, and returns a `(bed, SvarLink)` tuple. A
+`VariantWriter` protocol that uniformly covers all three would paper over real
+semantic differences.
 
-**Name choice:** "writer", not "source" — reserve "VariantSource" terminology
-for the future variant-major read-side protocol.
+**Revised scope:**
+
+1. Extract a shared `_write_phased_chunked(out_dir, bed, source, ...)` helper
+   used by VCF and PGEN writers only.
+2. Leave SVAR's writer untouched.
+3. If a small `VariantWriter` protocol falls out naturally during dedup (with
+   SVAR as one of two implementations or as an opt-out), introduce it — but
+   don't force the abstraction. Decide during implementation.
+4. **Naming:** if a protocol is introduced, call it `VariantWriter`, not
+   `VariantSource` — reserve "Source" terminology for the future variant-major
+   read-side protocol.
 
 **Touches:** `_dataset/_write.py`.
 **Risk:** low. Behavior-preserving dedup.
-**Win:** three near-duplicate writers collapse to one helper + three thin
-protocol implementations.
+**Win:** ~50–80 lines of duplication between VCF and PGEN writers removed.
+Smaller architectural drama than the original spec implied.
 
 ### PR3 — Collapse `ArrayDataset` / `RaggedDataset`
 
@@ -285,21 +326,34 @@ Final sweep:
 
 ## Sequencing rationale
 
-- PR0 lands first so every subsequent refactor is type-checked under pyrefly
-  strict, surfacing regressions during the riskier moves (PRs 1, 4, 5).
-- PR1 (reconstructor factory) goes second because it centralizes the
-  construction logic that PRs 2, 4, 5 all rely on; with the factory in place,
-  every `with_*` method collapses cleanly.
-- PR2 / PR3 are low-risk warm-ups.
-- PR4 is the highest-leverage single deletion (~150 lines) and is gated only by
-  willingness to touch public-adjacent names; doing it before PR5 surfaces
-  user feedback early.
-- PR5 is the largest architectural change and carries numerical-parity risk.
-  Sequenced after PRs 1–4 so the surrounding code is already tidied (clearer
-  blast radius, easier review).
-- PR6 is mechanical and only worth doing once the boundaries from PRs 1, 3, 5
-  are real.
-- PR7 is a finisher.
+- ✅ PR0 landed first so every subsequent refactor is type-checked under pyrefly
+  strict, surfacing regressions during the riskier moves.
+- ✅ PR1 (reconstructor factory + view-state) collapsed the construction logic
+  that PRs 2, 4, 5 rely on; with the factory in place, every `with_*` method
+  now uses it.
+- ✅ **Out-of-band: attrs → stdlib dataclasses migration** (PR #183). Reduced
+  pyrefly false-positive surface area on `evolve()` chains and `field(...)`
+  generic inference. Mechanical, behavior-preserving. Not numbered in the
+  campaign because it's a tooling/quality concern, not architectural.
+- **PR2 (next):** small, low-risk warm-up — VCF + PGEN writer dedup. Refined
+  scope (SVAR stays as-is). See PR2 section for the scope finding.
+- **PR3** is the highest-leverage single deletion (~150 lines of overload
+  boilerplate); gated only by willingness to touch public-adjacent names.
+- **PR4** depends on PR1's factory being merged (done).
+- **PR5** is the largest remaining architectural change and carries
+  numerical-parity risk. Sequenced after PRs 1–4 so the surrounding code is
+  already tidied (clearer blast radius, easier review).
+- **PR6** is mechanical and only worth doing once the boundaries from PRs 1,
+  3, 5 are real.
+- **PR7** is a finisher.
+
+## Out-of-band tooling work
+
+Work that doesn't fit the numbered campaign but lands alongside it:
+
+| PR | Description | Status |
+|---|---|---|
+| #183 | Migrate `attrs` → stdlib `dataclasses(slots=True)`; drop the `attrs` dep. Motivated by pyrefly's weaker support for attrs. No NamedTuple/msgspec yet — no hot-loop construction sites identified. | Merged 2026-05-23 |
 
 ## Verification strategy
 
