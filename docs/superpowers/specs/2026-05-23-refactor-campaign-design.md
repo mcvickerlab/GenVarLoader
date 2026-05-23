@@ -97,6 +97,43 @@ Specific debt items the campaign targets:
 
 Each PR is independently shippable and keeps the full test suite green.
 
+### PR0 — Integrate pyrefly as a type-check gate
+
+Add [pyrefly](https://github.com/facebook/pyrefly) as a type-checking gate for
+the library code, configured for the `strict` preset as the baseline.
+
+**Scope:**
+
+- Add a `[tool.pyrefly]` section to `pyproject.toml` with `project_includes`
+  scoped to `python/genvarloader/` and the `strict` preset enabled.
+- Wire in the [`facebook/pyrefly-pre-commit`](https://github.com/facebook/pyrefly-pre-commit)
+  hook in `.pre-commit-config.yaml` (creating the file if absent), pinned to a
+  released revision.
+- Add a CI job (matching the existing `pixi run -e dev` flow) that runs
+  `pyrefly check` on the library and fails on any error.
+- Make `pyrefly check` pass on `python/genvarloader/` under `strict` as the
+  baseline. Where strict is too noisy to fix in this PR, relax the rule in
+  `pyproject.toml` (per-rule, with a short comment explaining why) rather than
+  blanket-suppressing — the relaxed config becomes the de facto baseline that
+  subsequent PRs must continue to satisfy.
+- Tests (`tests/`) are out of scope for pyrefly enforcement in this PR; they
+  may be added later.
+- `basedpyright` is kept as a parallel checker (configured permissively per
+  existing project setup); pyrefly is additive, not a replacement.
+
+**Touches:** `pyproject.toml`, new `.pre-commit-config.yaml` (or update if
+present), CI config, possibly a small number of source files where strict
+errors are cheaper to fix than to suppress.
+
+**Risk:** medium. Strict may surface unexpected issues. The mitigation is
+explicit: relax pyrefly config rather than expand the PR's blast radius.
+
+**Win:** every subsequent refactor PR is type-checked under pyrefly-strict
+automatically. This catches subtle regressions during architectural moves
+(PRs 3, 5, 6 especially), and folds naturally into PR8's `type: ignore` audit
+since by then pyrefly will be the source of truth for what suppressions are
+actually needed.
+
 ### PR1 — `DatasetSettings` value object
 
 Extract a `DatasetSettings` dataclass from the eight settings currently validated
@@ -220,6 +257,8 @@ Final sweep:
 
 ## Sequencing rationale
 
+- PR0 lands first so every subsequent refactor is type-checked under pyrefly
+  strict, surfacing regressions during the riskier moves (PRs 3, 5, 6).
 - PR1 / PR2 are low-risk warm-ups that also enable PR4 / PR3 respectively.
 - PR3 is the highest-leverage single deletion (~150 lines) and is gated only by
   willingness to touch public-adjacent names; doing it early surfaces user
@@ -239,7 +278,9 @@ Each PR:
 1. Full pytest run (`pixi run -e dev test`).
 2. Cargo test run (covered by `pixi run -e dev test`).
 3. Ruff + basedpyright clean.
-4. For PRs 3, 5, 6: explicit numerical-parity tests against the pre-PR
+4. Pyrefly check clean under the baseline config established in PR0 (from PR1
+   onward).
+5. For PRs 3, 5, 6: explicit numerical-parity tests against the pre-PR
    implementation, on the existing test fixtures.
 
 For PR5 specifically, before merging: run the existing dataset tests AND add a
