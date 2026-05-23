@@ -134,15 +134,58 @@ automatically. This catches subtle regressions during architectural moves
 since by then pyrefly will be the source of truth for what suppressions are
 actually needed.
 
-### PR1 — `DatasetSettings` value object
+### PR1 — Centralize reconstructor construction via a factory
 
-Extract a `DatasetSettings` dataclass from the eight settings currently validated
-inline inside `Dataset.with_settings()`. Settings owns its own `validate()` and
-`evolve()`. `Dataset.with_settings()` becomes a thin wrapper that delegates.
+**Revision note (post-PR0):** the original PR1 framing (`DatasetSettings` value
+object) didn't fit the code well — only 4 of the 9 args to `with_settings` are
+"settings" in a value-object sense; the others mutate the underlying `_seqs` /
+`_recon` / `_sp_idxer` reconstructor state. The real source of the propagation
+ugliness is that `_recon` duplicates state from `_seqs` (`HapsTracks.haps` is a
+copy of `_seqs`), so changing `_seqs` requires `isinstance`-dispatched re-stitching
+of `_recon` in every `with_*` method. We address that directly here.
 
-**Touches:** `_dataset/_impl.py`, new `_dataset/_settings.py`.
-**Risk:** low. Pure extraction.
-**Win:** ~150-line method becomes ~30 lines; settings testable in isolation.
+**The fix:** make the 5 reconstructor classes (`Haps`, `Ref`, `Tracks`, `RefTracks`,
+`HapsTracks`) a derived view of authoritative source state. Specifically:
+
+- Authoritative state on `Dataset`: `_seqs: Haps | Ref | None` (where `Haps`
+  already carries the output kind in its generic parameter) and `_tracks: Tracks | None`.
+- Add `_build_reconstructor(seqs, tracks) -> Reconstructor` factory in
+  `_reconstruct.py`. Single source of truth for which of the 5 classes to construct,
+  given the (seqs, tracks) sources. The factory enforces the invariant that at
+  least one source must be present.
+- `_recon` stays as a stored field on `Dataset` (avoiding attrs-frozen property
+  awkwardness), but is only ever assigned via the factory.
+- Collapse the scattered construction sites:
+  - `Dataset.open` (~15-line match) → factory call
+  - `with_seqs` (~90-line match constructing different `RefTracks` / `HapsTracks`
+    variants) → update `_seqs.kind` via `Haps.to_kind`, factory call
+  - `with_tracks` → update `_tracks`, factory call
+  - `with_settings` propagation block → update `_seqs`, factory call
+- `sequence_type` property simplifies from a `match` on `_recon`'s class to a
+  lookup on `_seqs.kind`.
+
+**The 5 reconstructor classes are NOT collapsed.** They already form a valid ADT
+(invalid `(None, None)` state isn't representable in their union), and the two
+combined classes (`RefTracks`, `HapsTracks`) encode genuinely different semantics
+— `RefTracks.__call__` is naive composition, `HapsTracks.__call__` does indel-aware
+joint reconstruction (it calls `Haps.get_haps_and_shifts` and re-aligns tracks to
+haplotype coordinates). Forcing both into one class would shove ~50 lines of
+specialized joint-reconstruction logic alongside a 2-line naive composition.
+
+**Implication for the campaign:** original PR5 ("Pipeline composition for
+reconstructors") is no longer needed — the existing 5 classes are already the
+ADT we want, just with their construction now centralized. PR5's other goal
+(extracting the haplotype-reconstruction kernel for forward compat with the
+future variant-major class) folds into PR5 (was PR6) below.
+
+**Touches:** `_dataset/_reconstruct.py` (add factory), `_dataset/_impl.py`
+(rewrite scattered construction sites).
+**Risk:** medium. Touches `with_seqs`, `with_tracks`, `with_settings`,
+`Dataset.open` — all heavily used. Full test suite is the parity check.
+**Win:** propagation block collapses from ~10 lines of `isinstance` dispatch to
+a one-liner factory call; the 90-line `with_seqs` match collapses; the
+invariant ("either seqs or tracks must be present") moves into the type system
+at the factory boundary.
 
 ### PR2 — `VariantWriter` protocol
 
@@ -184,29 +227,7 @@ PR1 because settings are already a value object.
 **Risk:** low–medium. Splits a 206-line method; needs careful parity testing.
 **Win:** `open()` shrinks to ~30 lines; resolution stages testable in isolation.
 
-### PR5 — Pipeline composition for reconstructors
-
-Replace the five reconstructor classes (`Haps`, `Ref`, `Tracks`, `RefTracks`,
-`HapsTracks`) with composition: a single `ReconstructionPipeline` that holds
-**zero-or-one sequence source** (currently `Haps` or `Ref`) and
-**zero-or-more track sources** (currently `Tracks`). The two existing combined
-classes (`RefTracks`, `HapsTracks`) disappear; their stitching logic lives once
-on the pipeline.
-
-**Critical for forward compatibility:** the haplotype-reconstruction *kernel*
-must remain callable independent of region-major iteration. The current
-`Haps._get_haplotypes` does too much — it mixes the per-window reconstruction
-kernel with iteration plumbing. The kernel is extracted as a pure function (or
-method on `Haps`) that takes (variants, samples, reference window, optional
-splice plan) and returns sequences.
-
-**Touches:** `_dataset/_reconstruct.py`, callers in `_dataset/_impl.py`.
-**Risk:** high. This is the largest single behavioral surface in the campaign.
-Numerical parity must be verified against the existing implementation.
-**Win:** five classes → one pipeline + two sources; duplicated track-stitching
-collapses; kernel becomes reusable.
-
-### PR6 — `ReconstructionRequest` + decompose big methods
+### PR5 — `ReconstructionRequest` + extract haplotype kernel
 
 Introduce a `ReconstructionRequest` value object describing *what* to reconstruct
 (region, sample, splice plan if any, annotation flag). The three overloads of
@@ -214,22 +235,29 @@ Introduce a `ReconstructionRequest` value object describing *what* to reconstruc
 for `Tracks.write_transformed_track` (166 lines) — split the insertion-fill
 strategies into named helpers.
 
+**Critical for forward compatibility:** the haplotype-reconstruction *kernel*
+must remain callable independent of region-major iteration. The current
+`Haps._get_haplotypes` does too much — it mixes the per-window reconstruction
+kernel with iteration plumbing. The kernel is extracted as a pure function (or
+method on `Haps`) that takes (variants, samples, reference window, optional
+splice plan) and returns sequences. This was originally scoped to the old PR5
+(Pipeline composition); since that PR is no longer needed, the kernel extraction
+folds in here.
+
 **Touches:** `_dataset/_reconstruct.py`, callers.
 **Risk:** medium. Numerical parity verification.
 **Win:** overload triplet disappears; 167-line and 166-line methods
 decomposed; future variant-major class can construct requests without going
 through region-major iteration.
 
-### PR7 — File splits
+### PR6 — File splits
 
 With architectural boundaries now real, split `_impl.py` and `_reconstruct.py`
 along the seams:
 
 - `_dataset/_impl.py` keeps the `Dataset` class itself.
-- `_dataset/_settings.py` — already created in PR1.
-- `_dataset/_open.py` — already created in PR4.
+- `_dataset/_open.py` — already created in PR3.
 - `_dataset/_query.py` — `__getitem__` and the spliced/unspliced query paths.
-- `_dataset/_pipeline.py` — `ReconstructionPipeline` (from PR5).
 - `_dataset/_haps.py` / `_dataset/_ref.py` / `_dataset/_tracks.py` (latter
   already exists) — one source class per file.
 
@@ -238,7 +266,7 @@ along the seams:
 **Win:** `_impl.py` and `_reconstruct.py` drop from 2253 / 1525 lines to
 something readable in one sitting.
 
-### PR8 — Naming pass + `type: ignore` audit
+### PR7 — Naming pass + `type: ignore` audit
 
 Final sweep:
 
@@ -248,7 +276,7 @@ Final sweep:
 - Make plural/singular consistent (e.g. `reconstruct_haplotype_from_sparse` vs
   `reconstruct_haplotypes_from_sparse` — pick one or split clearly).
 - Audit the ~50 `# type: ignore` comments. Many likely become unnecessary once
-  PRs 3, 5, 6 have improved type modeling. Where they remain, add a one-line
+  PRs 1, 4, 5 have improved type modeling. Where they remain, add a one-line
   reason comment so future-us knows whether they can be removed.
 
 **Touches:** package-wide.
@@ -258,18 +286,20 @@ Final sweep:
 ## Sequencing rationale
 
 - PR0 lands first so every subsequent refactor is type-checked under pyrefly
-  strict, surfacing regressions during the riskier moves (PRs 3, 5, 6).
-- PR1 / PR2 are low-risk warm-ups that also enable PR4 / PR3 respectively.
-- PR3 is the highest-leverage single deletion (~150 lines) and is gated only by
-  willingness to touch public-adjacent names; doing it early surfaces user
-  feedback early.
+  strict, surfacing regressions during the riskier moves (PRs 1, 4, 5).
+- PR1 (reconstructor factory) goes second because it centralizes the
+  construction logic that PRs 2, 4, 5 all rely on; with the factory in place,
+  every `with_*` method collapses cleanly.
+- PR2 / PR3 are low-risk warm-ups.
+- PR4 is the highest-leverage single deletion (~150 lines) and is gated only by
+  willingness to touch public-adjacent names; doing it before PR5 surfaces
+  user feedback early.
 - PR5 is the largest architectural change and carries numerical-parity risk.
   Sequenced after PRs 1–4 so the surrounding code is already tidied (clearer
   blast radius, easier review).
-- PR6 depends on PR5's pipeline being in place.
-- PR7 is mechanical and only worth doing once the boundaries from PRs 1, 4, 5
+- PR6 is mechanical and only worth doing once the boundaries from PRs 1, 3, 5
   are real.
-- PR8 is a finisher.
+- PR7 is a finisher.
 
 ## Verification strategy
 
@@ -278,13 +308,12 @@ Each PR:
 1. Full pytest run (`pixi run -e dev test`).
 2. Cargo test run (covered by `pixi run -e dev test`).
 3. Ruff clean.
-4. Pyrefly check clean under the baseline config established in PR0 (from PR1
-   onward).
-5. For PRs 3, 5, 6: explicit numerical-parity tests against the pre-PR
+4. Pyrefly check clean under the baseline config established in PR0.
+5. For PRs 1, 4, 5: explicit numerical-parity tests against the pre-PR
    implementation, on the existing test fixtures.
 
 For PR5 specifically, before merging: run the existing dataset tests AND add a
-direct unit test that constructs a `ReconstructionPipeline` from synthetic
+direct unit test that constructs a `ReconstructionRequest` from synthetic
 inputs and verifies output against a tiny hand-computed expected.
 
 ## Out of scope (revisited)

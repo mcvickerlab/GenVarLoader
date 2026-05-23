@@ -3,6 +3,7 @@ from __future__ import annotations
 import enum
 import itertools
 import json
+import warnings
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Literal, Protocol, TypeVar, cast, overload
@@ -19,8 +20,6 @@ from genoray.exprs import ILEN
 from loguru import logger
 from numpy.typing import NDArray
 from pydantic_extra_types.semantic_version import SemanticVersion
-
-import warnings
 from seqpro.rag import OFFSET_TYPE, Ragged
 from tqdm.auto import tqdm
 from typing_extensions import assert_never
@@ -241,8 +240,8 @@ class Haps(Reconstructor[_H]):
         samples: list[str],
         ploidy: int,
         version: SemanticVersion | None,
-        svar_link: "SvarLink | None" = None,
-        svar_override: "Path | str | None" = None,
+        svar_link: SvarLink | None = None,
+        svar_override: Path | str | None = None,
         min_af: float | None = None,
         max_af: float | None = None,
         filter: Literal["exonic"] | None = None,
@@ -1523,3 +1522,74 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
         tracks = cast(_T, tracks)
 
         return haps, tracks
+
+
+def _build_reconstructor(
+    seqs: Haps | Ref | None,
+    tracks: Tracks | None,
+    seqs_kind: Literal["haplotypes", "reference", "annotated", "variants"] | None,
+) -> Reconstructor:
+    """Construct the reconstructor for the given (storage + view) state.
+
+    The user's view choice is carried in ``seqs_kind`` (``None`` means "user does
+    not want sequences"). Track activation is read from ``tracks.active_tracks``
+    (``None`` means "user does not want tracks"). This function maps that
+    explicit state to one of the 5 reconstructor classes.
+
+    Invariant: after resolving view state, at least one of (active_seqs,
+    active_tracks) must be non-None.
+    """
+    # Resolve active seqs from storage + view kind.
+    active_seqs: Haps | Ref | None
+    if seqs_kind is None or seqs is None:
+        active_seqs = None
+    elif seqs_kind == "reference":
+        if isinstance(seqs, Ref):
+            active_seqs = seqs
+        elif isinstance(seqs, Haps):
+            if seqs.reference is None:
+                raise ValueError(
+                    "Cannot view as 'reference': storage has no reference genome."
+                )
+            active_seqs = Ref(reference=seqs.reference)
+        else:
+            assert_never(seqs)
+    elif seqs_kind in ("haplotypes", "annotated", "variants"):
+        if not isinstance(seqs, Haps):
+            raise ValueError(
+                f"Cannot view as {seqs_kind!r}: storage has no haplotypes."
+            )
+        kind_map = {
+            "haplotypes": RaggedSeqs,
+            "annotated": RaggedAnnotatedHaps,
+            "variants": RaggedVariants,
+        }
+        active_seqs = seqs.to_kind(kind_map[seqs_kind])
+    else:
+        assert_never(seqs_kind)
+
+    # Resolve active tracks from storage + active_tracks subset.
+    active_tracks = (
+        tracks if (tracks is not None and bool(tracks.active_tracks)) else None
+    )
+
+    # Dispatch.
+    match active_seqs, active_tracks:
+        case None, None:
+            raise ValueError(
+                "_build_reconstructor requires at least one of (seqs, tracks) "
+                "to be active. Got seqs_kind=None and tracks inactive."
+            )
+        case (Haps() | Ref()) as s, None:
+            return s
+        case None, Tracks() as t:
+            return t
+        case Ref() as s, Tracks() as t:
+            return RefTracks(seqs=s, tracks=t)
+        case Haps() as s, Tracks() as t:
+            return HapsTracks(haps=s, tracks=t)
+        case _:
+            raise AssertionError(
+                f"unreachable: active_seqs={type(active_seqs).__name__}, "
+                f"active_tracks={type(active_tracks).__name__}"
+            )

@@ -34,7 +34,15 @@ from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
 from ._splice import SpliceMap, SplicePlan, build_splice_plan
 from ._rag_variants import RaggedVariants
 from ._insertion_fill import InsertionFill
-from ._reconstruct import Haps, HapsTracks, Ref, RefTracks, Tracks, TrackType
+from ._reconstruct import (
+    Haps,
+    HapsTracks,
+    Ref,
+    RefTracks,
+    Tracks,
+    TrackType,
+    _build_reconstructor,
+)
 from ._reference import Reference
 from ._utils import bed_to_regions, regions_to_bed
 from ._write import Metadata
@@ -243,22 +251,22 @@ class Dataset:
         else:
             tracks = None
 
-        match seqs, tracks:
-            case None, None:
-                raise RuntimeError(
-                    "Malformed dataset: neither genotypes nor intervals found."
-                )
-            case Ref() | Haps(), None:
-                recon = seqs
-            case None, Tracks():
-                recon = tracks
-            case Ref(), Tracks():
-                recon = RefTracks(seqs, tracks)
-            case Haps(), Tracks():
-                recon = HapsTracks(seqs, tracks)
-            case seqs, tracks:
-                assert_never(seqs)
-                assert_never(tracks)
+        if seqs is None and tracks is None:
+            raise RuntimeError(
+                "Malformed dataset: neither genotypes nor intervals found."
+            )
+
+        # Initial view kind: matches the default class produced for each storage shape.
+        if isinstance(seqs, Haps):
+            seqs_kind: (
+                Literal["haplotypes", "reference", "annotated", "variants"] | None
+            ) = "haplotypes"
+        elif isinstance(seqs, Ref):
+            seqs_kind = "reference"
+        else:
+            seqs_kind = None
+
+        recon = _build_reconstructor(seqs, tracks, seqs_kind)
 
         splice_idxer = None
         spliced_bed = None
@@ -303,7 +311,8 @@ class Dataset:
             _full_regions=regions,
             _seqs=seqs,
             _tracks=tracks,
-            _recon=recon,  # pyrefly: ignore[unbound-name]  # exhaustive match above
+            _seqs_kind=seqs_kind,
+            _recon=recon,
             _rng=np.random.default_rng(rng),
         )
 
@@ -426,15 +435,6 @@ class Dataset:
             haps = evolve(haps, var_fields=var_fields)
             to_evolve["_seqs"] = haps
 
-        if "_seqs" in to_evolve:
-            haps = to_evolve["_seqs"]
-            if isinstance(self._recon, Haps):
-                recon = haps
-                to_evolve["_recon"] = recon
-            elif isinstance(self._recon, HapsTracks):
-                recon = evolve(self._recon, haps=haps)
-                to_evolve["_recon"] = recon
-
         if splice_info is not None:
             if splice_info is False:
                 splice_idxer = None
@@ -465,16 +465,13 @@ class Dataset:
                 haps = to_evolve.get("_seqs", self._seqs)
                 to_evolve["_seqs"] = evolve(haps, filter=var_filter)
 
-                # Propagate to _recon, preserving its kind (set by with_seqs).
-                # We must not replace _recon with _seqs wholesale — _recon has
-                # a different kind (e.g. RaggedSeqs) than _seqs (RaggedVariants).
-                if isinstance(self._recon, Haps):
-                    recon_haps = to_evolve.get("_recon", self._recon)
-                    to_evolve["_recon"] = evolve(recon_haps, filter=var_filter)
-                elif isinstance(self._recon, HapsTracks):
-                    recon = to_evolve.get("_recon", self._recon)
-                    new_haps = evolve(recon.haps, filter=var_filter)
-                    to_evolve["_recon"] = evolve(recon, haps=new_haps)
+        # If any source state changed, rebuild _recon via the factory.
+        if "_seqs" in to_evolve or "_tracks" in to_evolve:
+            new_seqs = to_evolve.get("_seqs", self._seqs)
+            new_tracks = to_evolve.get("_tracks", self._tracks)
+            to_evolve["_recon"] = _build_reconstructor(
+                new_seqs, new_tracks, self._seqs_kind
+            )
 
         self = evolve(self, **to_evolve)
         self._check_valid_state()
@@ -575,6 +572,7 @@ class Dataset:
                 _full_regions=self._full_regions,
                 _seqs=self._seqs,
                 _tracks=self._tracks,
+                _seqs_kind=self._seqs_kind,
                 _recon=self._recon,
                 _rng=self._rng,
             )
@@ -595,6 +593,7 @@ class Dataset:
                 _full_regions=self._full_regions,
                 _seqs=self._seqs,
                 _tracks=self._tracks,
+                _seqs_kind=self._seqs_kind,
                 _recon=self._recon,
                 _rng=self._rng,
             )
@@ -656,99 +655,33 @@ class Dataset:
             The type of sequences to return. Can be one of :code:`"reference"`, :code:`"haplotypes"`, :code:`"annotated"`, :code:`"variants"`, or :code:`None`
             to return no sequences.
         """
-        match kind, self._seqs, self._tracks, self._recon:
-            case None, _, None, _:
-                raise ValueError(
-                    "Dataset only has sequences available, so returning no sequences is not possible."
-                )
-            case None, _, _, Haps() | Ref():
+        # Validate the requested kind against storage state.
+        if kind is None:
+            tracks_active = self._tracks is not None and bool(
+                self._tracks.active_tracks
+            )
+            if not tracks_active:
                 raise RuntimeError(
                     "Dataset is set to only return sequences, so setting sequence_type to None would"
                     " result in a Dataset that cannot return anything."
                 )
-            case None, _, _, (Tracks() as t) | RefTracks(tracks=t) | HapsTracks(
-                tracks=t
-            ):
-                return evolve(self, _recon=t)
-            case "reference" | "haplotypes" | "annotated", None, _, _:
+        elif kind == "reference":
+            if not isinstance(self._seqs, (Haps, Ref)):
                 raise ValueError("Dataset has no reference to yield sequences from.")
-            case "haplotypes" | "annotated" | "variants", None | Ref(), _, _:
+            if self._seqs.reference is None:
+                raise ValueError(
+                    "Dataset has no reference genome to reconstruct sequences from."
+                )
+        elif kind in ("haplotypes", "annotated", "variants"):
+            if not isinstance(self._seqs, Haps):
                 raise ValueError(
                     "Dataset has no genotypes to yield haplotypes/variants from."
                 )
+        else:
+            assert_never(kind)
 
-            case "reference", _, _, Ref(reference=r) | Haps(reference=r):
-                if r is None:
-                    raise ValueError(
-                        "Dataset has no reference genome to reconstruct sequences from."
-                    )
-                seqs = Ref(reference=r)
-                return evolve(self, _recon=seqs)
-            case "reference", Ref(reference=ref) | Haps(reference=ref), _, (
-                (Tracks() as tracks)
-                | RefTracks(tracks=tracks)
-                | HapsTracks(tracks=tracks)
-            ):
-                if ref is None:
-                    raise ValueError(
-                        "Dataset has no reference genome to reconstruct sequences from."
-                    )
-                seqs = Ref(reference=ref)
-                return evolve(
-                    self,
-                    _recon=RefTracks(
-                        seqs=seqs,
-                        tracks=tracks,  # type: ignore
-                    ),
-                )
-
-            case "haplotypes", Haps() as haps, _, Ref() | Haps():
-                return evolve(self, _recon=haps.to_kind(RaggedSeqs))
-            case "haplotypes", Haps() as haps, _, (
-                (Tracks() as tracks)
-                | RefTracks(tracks=tracks)
-                | HapsTracks(tracks=tracks)
-            ):
-                return evolve(
-                    self,
-                    _recon=HapsTracks(
-                        haps.to_kind(RaggedSeqs),
-                        tracks,  # type: ignore
-                    ),
-                )
-
-            case "annotated", Haps() as haps, _, Ref() | Haps():
-                return evolve(self, _recon=haps.to_kind(RaggedAnnotatedHaps))
-            case "annotated", Haps() as haps, _, (
-                (Tracks() as tracks)
-                | RefTracks(tracks=tracks)
-                | HapsTracks(tracks=tracks)
-            ):
-                return evolve(
-                    self,
-                    _recon=HapsTracks(
-                        haps.to_kind(RaggedAnnotatedHaps),
-                        tracks,  # type: ignore
-                    ),
-                )
-
-            case "variants", Haps() as haps, _, Ref() | Haps():
-                return evolve(self, _recon=haps.to_kind(RaggedVariants))
-            case "variants", Haps() as haps, _, (
-                (Tracks() as tracks)
-                | RefTracks(tracks=tracks)
-                | HapsTracks(tracks=tracks)
-            ):
-                return evolve(
-                    self,
-                    _recon=HapsTracks(
-                        haps.to_kind(RaggedVariants),
-                        tracks,  # type: ignore
-                    ),
-                )
-
-            case k, s, t, r:
-                assert_never(k), assert_never(s), assert_never(t), assert_never(r)
+        new_recon = _build_reconstructor(self._seqs, self._tracks, kind)
+        return evolve(self, _seqs_kind=kind, _recon=new_recon)
 
     def with_tracks(
         self,
@@ -777,44 +710,30 @@ class Dataset:
         else:
             assert_never(kind)
 
-        match tracks, self._seqs, self._tracks, self._recon:
-            case False, None, _, _:
-                raise ValueError(
-                    "Dataset only has tracks available, so returning no tracks would"
-                    " result in a Dataset that cannot return anything."
-                )
-            case False, Ref() | Haps(), _, Tracks():
-                raise RuntimeError(
-                    "Dataset is set to only return tracks, so setting tracks to None would"
-                    " result in a Dataset that cannot return anything."
-                )
-            case False, _, tr, ((Ref() | Haps()) as seqs) | RefTracks(
-                seqs=seqs
-            ) | HapsTracks(haps=seqs):
-                tr = tr.with_tracks(None)
-                return evolve(self, _tracks=tr, _recon=seqs)
-            case t, _, tr, (Ref() as seqs) | RefTracks(seqs=seqs):
-                tr = tr.with_tracks(t).to_kind(
-                    _kind,  # type: ignore
-                )
-                recon = RefTracks(seqs=seqs, tracks=tr)
-                return evolve(self, _tracks=tr, _recon=recon)
-            case t, _, tr, (Haps() as seqs) | HapsTracks(haps=seqs):
-                tr = tr.with_tracks(t).to_kind(
-                    _kind,  # type: ignore
-                )
-                recon = HapsTracks(
-                    haps=seqs,  # type: ignore
-                    tracks=tr,
-                )
-                return evolve(self, _tracks=tr, _recon=recon)
-            case t, _, tr, Tracks():
-                tr = tr.with_tracks(t).to_kind(
-                    _kind,  # type: ignore
-                )
-                return evolve(self, _tracks=tr, _recon=tr)
-            case k, s, t, r:
-                assert_never(k), assert_never(s), assert_never(t), assert_never(r)
+        # Compute the new tracks state (active set + kind).
+        if tracks is False:
+            # User-deactivate all tracks.
+            new_tracks = self._tracks.with_tracks(None)
+        elif isinstance(tracks, str):
+            new_tracks = self._tracks.with_tracks([tracks]).to_kind(
+                _kind,  # type: ignore
+            )
+        else:
+            new_tracks = self._tracks.with_tracks(tracks).to_kind(
+                _kind,  # type: ignore
+            )
+
+        # Validate: at least one of (seqs, tracks) must remain active.
+        seqs_active = self._seqs_kind is not None and self._seqs is not None
+        tracks_active = bool(new_tracks.active_tracks)
+        if not seqs_active and not tracks_active:
+            raise RuntimeError(
+                "Dataset is set to only return tracks, so setting tracks to None would"
+                " result in a Dataset that cannot return anything."
+            )
+
+        new_recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
+        return evolve(self, _tracks=new_tracks, _recon=new_recon)
 
     def with_insertion_fill(
         self,
@@ -835,13 +754,18 @@ class Dataset:
         """
         if self._tracks is None:
             raise ValueError("Dataset has no tracks; cannot configure insertion fill.")
-        if not isinstance(self._recon, HapsTracks):
+        if self._seqs_kind not in ("haplotypes", "annotated", "variants"):
             raise ValueError(
                 "with_insertion_fill is only meaningful for datasets with both "
-                "haplotypes and tracks (reconstructor must be HapsTracks)."
+                "haplotypes and tracks (use with_seqs to activate haplotypes first)."
+            )
+        if not self._tracks.active_tracks:
+            raise ValueError(
+                "with_insertion_fill is only meaningful when tracks are active "
+                "(use with_tracks to activate tracks first)."
             )
         new_tracks = self._tracks.with_insertion_fill(fill)
-        new_recon = evolve(self._recon, tracks=new_tracks)
+        new_recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
         return evolve(self, _tracks=new_tracks, _recon=new_recon)
 
     path: Path
@@ -879,6 +803,9 @@ class Dataset:
     ) = field(alias="_seqs")
     _tracks: Tracks[RaggedTracks] | Tracks[RaggedIntervals] | None = field(
         alias="_tracks"
+    )
+    _seqs_kind: Literal["haplotypes", "reference", "annotated", "variants"] | None = (
+        field(alias="_seqs_kind")
     )
     _recon: (
         Ref
@@ -1033,22 +960,7 @@ class Dataset:
         self,
     ) -> Literal["haplotypes", "reference", "annotated", "variants"] | None:
         """The type of sequences in the dataset."""
-        match self._recon:
-            case Tracks():
-                return
-            case (Haps() as haps) | HapsTracks(haps=haps):
-                if issubclass(haps.kind, RaggedAnnotatedHaps):
-                    return "annotated"
-                elif issubclass(haps.kind, RaggedVariants):
-                    return "variants"
-                elif issubclass(haps.kind, RaggedSeqs):
-                    return "haplotypes"
-                else:
-                    assert_never(haps.kind)
-            case Ref() | RefTracks():
-                return "reference"
-            case r:
-                assert_never(r)
+        return self._seqs_kind
 
     def __len__(self):
         return self.n_regions * self.n_samples
@@ -1442,18 +1354,13 @@ class Dataset:
             out.flush()
 
         ds_tracks = Tracks.from_path(self.path, *self.full_shape).with_tracks(None)
-        match self._recon:
-            case Ref() | Haps():
-                recon = self._recon
-            case Tracks() as r:
-                recon = ds_tracks.with_tracks(r.active_tracks)
-            case (RefTracks() | HapsTracks()) as r:
-                recon = evolve(
-                    self._recon, tracks=ds_tracks.with_tracks(r.tracks.active_tracks)
-                )
-            case r:
-                assert_never(r)
-
+        # Re-activate the same tracks on the newly loaded ds_tracks object,
+        # then route through the factory to keep _recon consistent with view-state.
+        cur_active = self._tracks.active_tracks if self._tracks is not None else {}
+        new_tracks = (
+            ds_tracks.with_tracks(cur_active.keys()) if cur_active else ds_tracks
+        )
+        recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
         return evolve(self, _tracks=ds_tracks, _recon=recon)
 
     def to_torch_dataset(
