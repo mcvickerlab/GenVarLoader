@@ -327,7 +327,9 @@ Expected: all hooks pass (or only the known pixi-lock pre-push hook is skipped b
 
 This implements the lint workflow anticipated by the release-pipeline spec (`docs/superpowers/specs/2026-05-21-release-pipeline-design.md:134`).
 
-**Approach:** The CI job invokes `prek run --all-files` rather than calling ruff / pyrefly individually. This keeps CI mechanically in sync with `.pre-commit-config.yaml` — adding, removing, or reconfiguring a hook locally automatically updates what CI runs. `prek` only runs hooks whose stages include the default `pre-commit` stage, so the existing `pixi-lock` (pre-push) and `commitizen` (commit-msg / pre-push) hooks are naturally skipped.
+**Approach:** The CI job uses [`j178/prek-action`](https://github.com/j178/prek-action) to run all configured hooks. This keeps CI mechanically in sync with `.pre-commit-config.yaml` — adding, removing, or reconfiguring a hook locally automatically updates what CI runs. `prek` only runs hooks whose stages include the default `pre-commit` stage, so the existing `pixi-lock` (pre-push) and `commitizen` (commit-msg / pre-push) hooks are naturally skipped.
+
+**PATH requirement:** the pyrefly hook is `language: system` (from Task 4), meaning prek invokes the `pyrefly` binary directly. CI therefore sets up the pixi dev env *before* running prek-action, so pyrefly is on `PATH`.
 
 - [ ] **Step 1: Create `.github/workflows/lint.yaml`**
 
@@ -347,24 +349,25 @@ on:
   workflow_dispatch:
 
 jobs:
-  lint:
+  prek:
     runs-on: ubuntu-latest
     name: "pre-commit hooks"
     steps:
-      - name: Check out
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Setup pixi
+      - name: Setup pixi (provides pyrefly on PATH)
         uses: prefix-dev/setup-pixi@v0.9.5
         with:
           pixi-version: v0.68.1
           cache: true
           environments: dev
           locked: false
-      - name: Run pre-commit hooks
-        run: pixi run -e dev prek run --all-files --show-diff-on-failure
+          activate-environment: true
+      - uses: j178/prek-action@v2
 ```
+
+The `activate-environment: true` flag on `setup-pixi` puts the dev env's binaries (including `pyrefly`) on `PATH` for subsequent steps, so `prek-action` can find them.
 
 - [ ] **Step 2: Validate the YAML locally**
 
@@ -392,7 +395,7 @@ If any hook fails, fix the underlying issue (do **not** add `--hook-stage` overr
 
 ```bash
 git add .github/workflows/lint.yaml
-git commit -m "ci: add lint workflow (delegates to prek/.pre-commit-config.yaml)"
+git commit -m "ci: add lint workflow (j178/prek-action over .pre-commit-config.yaml)"
 ```
 
 ---
