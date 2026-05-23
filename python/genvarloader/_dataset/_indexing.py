@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 
 import awkward as ak
 import numpy as np
-from attrs import define, evolve
+from dataclasses import dataclass, replace
 from hirola import HashTable
 from numpy import integer
 from numpy.typing import NDArray
@@ -48,7 +48,7 @@ def _stridx_uses_names(str_idx: StrIdx, map: HashTable | None) -> bool:
     return bool(is_str_arr(np.asarray(str_idx)))
 
 
-@define
+@dataclass(slots=True)
 class DatasetIndexer:
     full_region_idxs: NDArray[np.integer]
     """Full map from input region indices to on-disk region indices."""
@@ -197,11 +197,11 @@ class DatasetIndexer:
                     region_idxs = self.region_subset_idxs[region_idxs]
             to_update["region_subset_idxs"] = region_idxs
 
-        return evolve(self, **to_update)
+        return replace(self, **to_update)
 
     def to_full_dataset(self) -> Self:
         """Return a full sized dataset, undoing any subsettting."""
-        return evolve(self, region_subset_idxs=None, sample_subset_idxs=None)
+        return replace(self, region_subset_idxs=None, sample_subset_idxs=None)
 
     def parse_idx(
         self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]
@@ -312,7 +312,7 @@ class DatasetIndexer:
         )
 
 
-@define
+@dataclass(slots=True)
 class SpliceIndexer:
     """Splice-aware indexer = sample-agnostic SpliceMap + sample-aware DatasetIndexer."""
 
@@ -380,10 +380,10 @@ class SpliceIndexer:
         region_idxs = ak.flatten(new_map.splice_map, None).to_numpy()  # type: ignore
         eff_dsi = self.dsi.subset_to(regions=region_idxs, samples=samples)
 
-        return evolve(self, map=new_map, dsi=sub_dsi), eff_dsi
+        return replace(self, map=new_map, dsi=sub_dsi), eff_dsi
 
     def to_full_dataset(self) -> Self:
-        return evolve(self, map=self.map.to_full(), dsi=self.dsi.to_full_dataset())
+        return replace(self, map=self.map.to_full(), dsi=self.dsi.to_full_dataset())
 
     def parse_idx(self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]):
         """See historical docstring — semantics unchanged."""

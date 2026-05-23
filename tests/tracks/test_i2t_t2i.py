@@ -1,5 +1,5 @@
 import numpy as np
-from attrs import define
+from dataclasses import dataclass
 from einops import repeat
 from genvarloader._dataset._intervals import intervals_to_tracks, tracks_to_intervals
 from genvarloader._ragged import RaggedIntervals
@@ -8,7 +8,7 @@ from pytest_cases import parametrize_with_cases
 from seqpro.rag import Ragged
 
 
-@define
+@dataclass(slots=True)
 class Data:
     interval_idx: NDArray[np.intp]
     regions: NDArray[np.int32]

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import numpy as np
-from attrs import define
+from dataclasses import dataclass
 from numpy.typing import NDArray
 
 REPEAT_5P = 0
@@ -23,12 +23,12 @@ class InsertionFill:
             raise TypeError("InsertionFill is abstract; instantiate a subclass.")
 
 
-@define
+@dataclass(slots=True)
 class Repeat5p(InsertionFill):
     """Repeat the value at the variant POS across the entire inserted region. Current default behavior."""
 
 
-@define
+@dataclass(slots=True)
 class Repeat5pNormalized(InsertionFill):
     """Repeat track[v_rel_pos] / (v_diff + 1) across the inserted region.
 
@@ -38,7 +38,7 @@ class Repeat5pNormalized(InsertionFill):
     """
 
 
-@define
+@dataclass(slots=True)
 class Constant(InsertionFill):
     """Write a fixed value at every inserted position.
 
@@ -51,7 +51,7 @@ class Constant(InsertionFill):
     value: float = float("nan")
 
 
-@define
+@dataclass(slots=True)
 class FlankSample(InsertionFill):
     """Sample (with replacement) from the 2*flank_width+1 reference values
     centered at the variant POS. Each inserted position samples independently.
@@ -65,12 +65,12 @@ class FlankSample(InsertionFill):
 
     flank_width: int = 5
 
-    def __attrs_post_init__(self) -> None:
+    def __post_init__(self) -> None:
         if self.flank_width < 0:
             raise ValueError(f"flank_width must be >= 0, got {self.flank_width}")
 
 
-@define
+@dataclass(slots=True)
 class Interpolate(InsertionFill):
     """Polynomial interpolation across the inserted region.
 
@@ -86,7 +86,7 @@ class Interpolate(InsertionFill):
 
     order: int = 1
 
-    def __attrs_post_init__(self) -> None:
+    def __post_init__(self) -> None:
         if self.order not in (1, 2, 3):
             raise ValueError(f"Interpolate order must be 1, 2, or 3 (got {self.order})")
 

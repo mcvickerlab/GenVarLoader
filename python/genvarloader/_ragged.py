@@ -7,7 +7,7 @@ import awkward as ak
 import awkward.operations.str as ak_str
 import numba as nb
 import numpy as np
-from attrs import define
+from dataclasses import dataclass
 from awkward.contents import NumpyArray
 from numpy.typing import NDArray
 from phantom import Phantom
@@ -26,7 +26,7 @@ INTERVAL_DTYPE = np.dtype(
 )
 
 
-@define
+@dataclass(slots=True)
 class RaggedIntervals:
     starts: Ragged[np.int32]
     ends: Ragged[np.int32]
@@ -183,7 +183,7 @@ class RaggedTracks(
 ): ...
 
 
-@define
+@dataclass(slots=True)
 class RaggedAnnotatedHaps:
     """Ragged version of :class:`AnnotatedHaps`."""
 
