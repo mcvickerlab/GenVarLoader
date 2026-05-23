@@ -48,3 +48,6 @@ ci:
 
         for more information, see https://pre-commit.ci
   autoupdate_commit_msg: 'chore(pre-commit.ci): pre-commit autoupdate'
+  # pre-commit.ci has no pixi; these hooks invoke `pixi run …`. The
+  # project's own `Lint` workflow runs them in CI (see .github/workflows/lint.yaml).
+  skip: [pyrefly-check, pixi-lock]
