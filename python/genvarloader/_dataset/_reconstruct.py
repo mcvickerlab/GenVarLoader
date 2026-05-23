@@ -1523,3 +1523,37 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
         tracks = cast(_T, tracks)
 
         return haps, tracks
+
+
+def _build_reconstructor(
+    seqs: Haps | Ref | None,
+    tracks: Tracks | None,
+) -> Reconstructor:
+    """Construct the reconstructor for the given sources.
+
+    This is the single source of truth for "given (seqs, tracks), which of the
+    5 reconstructor classes do we construct?" Callers in `_impl.py` route all
+    construction through this function so the dispatch lives in exactly one
+    place.
+
+    Invariant: at least one of `seqs` or `tracks` must be non-None.
+    """
+    match seqs, tracks:
+        case None, None:
+            raise ValueError(
+                "_build_reconstructor requires at least one of seqs or tracks "
+                "to be non-None."
+            )
+        case (Haps() | Ref()) as s, None:
+            return s
+        case None, Tracks() as t:
+            return t
+        case Ref() as s, Tracks() as t:
+            return RefTracks(seqs=s, tracks=t)
+        case Haps() as s, Tracks() as t:
+            return HapsTracks(haps=s, tracks=t)
+        case _:
+            raise AssertionError(
+                f"unreachable: _build_reconstructor got {type(seqs).__name__=}, "
+                f"{type(tracks).__name__=}"
+            )
