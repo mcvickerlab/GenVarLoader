@@ -34,7 +34,15 @@ from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
 from ._splice import SpliceMap, SplicePlan, build_splice_plan
 from ._rag_variants import RaggedVariants
 from ._insertion_fill import InsertionFill
-from ._reconstruct import Haps, HapsTracks, Ref, RefTracks, Tracks, TrackType
+from ._reconstruct import (
+    Haps,
+    HapsTracks,
+    Ref,
+    RefTracks,
+    Tracks,
+    TrackType,
+    _build_reconstructor,
+)
 from ._reference import Reference
 from ._utils import bed_to_regions, regions_to_bed
 from ._write import Metadata
@@ -243,22 +251,11 @@ class Dataset:
         else:
             tracks = None
 
-        match seqs, tracks:
-            case None, None:
-                raise RuntimeError(
-                    "Malformed dataset: neither genotypes nor intervals found."
-                )
-            case Ref() | Haps(), None:
-                recon = seqs
-            case None, Tracks():
-                recon = tracks
-            case Ref(), Tracks():
-                recon = RefTracks(seqs, tracks)
-            case Haps(), Tracks():
-                recon = HapsTracks(seqs, tracks)
-            case seqs, tracks:
-                assert_never(seqs)
-                assert_never(tracks)
+        if seqs is None and tracks is None:
+            raise RuntimeError(
+                "Malformed dataset: neither genotypes nor intervals found."
+            )
+        recon = _build_reconstructor(seqs, tracks)
 
         splice_idxer = None
         spliced_bed = None
@@ -303,7 +300,7 @@ class Dataset:
             _full_regions=regions,
             _seqs=seqs,
             _tracks=tracks,
-            _recon=recon,  # pyrefly: ignore[unbound-name]  # exhaustive match above
+            _recon=recon,
             _rng=np.random.default_rng(rng),
         )
 
