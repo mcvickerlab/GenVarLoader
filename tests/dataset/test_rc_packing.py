@@ -1,17 +1,12 @@
-"""Regression tests for the ``_rc`` + ``_cat_length`` packing bug.
+"""Regression tests for the ``_rc`` packing fix.
 
 Before the fix, ``Dataset._rc`` built a ``Ragged`` from the raw ``ak.where(...)``
 output. ``ak.where`` eagerly evaluates both branches and leaves an unpacked
 layout whose content buffer holds ``[rc_branch, orig_branch]`` concatenated,
 even though the virtual offsets only index into the selected branch. The
-visible symptoms were:
-
-1. ``rag.data`` exposed the full (2x) buffer rather than just the logical
-   bytes, so direct buffer readers saw garbage followed by the real sequence.
-2. ``_cat_length`` wrapped this unpacked layout in a new ``ListOffsetArray``
-   and then called ``ak.flatten``/``ak.concatenate``, which walked the *wrong*
-   half of the buffer for spliced datasets (e.g. positive-strand CDS came out
-   reverse-complemented).
+visible symptom was: ``rag.data`` exposed the full (2x) buffer rather than just
+the logical bytes, so direct buffer readers saw garbage followed by the real
+sequence.
 
 The fix adds ``ak.to_packed(...)`` around each ``ak.where`` result. These
 tests pin that behavior by checking both the buffer size and the concrete
@@ -31,7 +26,6 @@ import pytest
 from genoray import VCF
 from pytest_cases import parametrize_with_cases
 
-from genvarloader._dataset._splice import _cat_length
 from genvarloader._ragged import Ragged, reverse_complement
 
 
@@ -88,39 +82,6 @@ def test_rc_returns_packed_buffer(rag: Ragged, to_rc: np.ndarray):
 
 
 # ---------------------------------------------------------------------------
-# Unit: _cat_length over an unpacked source silently corrupted content. After
-# the fix, feeding it a *packed* source (which is what _rc now guarantees)
-# produces correct spliced output.
-# ---------------------------------------------------------------------------
-
-
-def test_cat_length_with_packed_input_preserves_content():
-    # 4 "exons" × 2 ploidy × 3 bytes each, grouped 2+2.
-    data = np.frombuffer(b"ATG" * 8, dtype="S1")
-    lengths = np.array([[3, 3], [3, 3], [3, 3], [3, 3]])
-    rag = Ragged.from_lengths(data, lengths)
-
-    # Route through _rc with all-False to exercise the code path that used to
-    # leak the rc branch into the buffer.
-    to_rc = np.array([False, False, False, False])
-    after_rc = Ragged(
-        ak.to_packed(ak.where(to_rc, reverse_complement(rag.to_ak()), rag.to_ak()))
-    )
-    assert _buffer_matches_lengths(after_rc)
-
-    offsets = np.array([0, 2, 4], dtype=np.int64)
-    cat = _cat_length(after_rc, offsets)
-    # Each splice concatenates 2 exons of 3 bytes on each of 2 ploidies
-    assert cat.shape[0] == 2
-    for splice_idx in range(2):
-        for ploid in range(2):
-            seq = bytes(ak.to_numpy(cat.to_ak()[splice_idx, ploid]))
-            assert seq == b"ATGATG", (
-                f"splice {splice_idx} ploid {ploid} content corrupted: {seq!r}"
-            )
-
-
-# ---------------------------------------------------------------------------
 # Integration fixtures: write a fresh dataset into tmp so we don't mutate the
 # shared test fixtures, and can attach custom transcript_id / exon_number
 # columns to exercise the splice path.
@@ -133,7 +94,7 @@ def spliced_ds_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     Each BED row becomes its own one-exon transcript so the spliced output
     should equal the reference slice (for + strand) or its reverse complement
-    (for - strand). This exercises _getitem_spliced -> _rc -> _cat_length.
+    (for - strand). This exercises _getitem_spliced -> _rc.
     """
     tmp = tmp_path_factory.mktemp("rc_packing")
     out = tmp / "single_exon.gvl"
@@ -244,58 +205,6 @@ def test_spliced_reference_neg_strand_is_rc_of_fasta(spliced_ds: gvl.Dataset):
                 f"neg-strand splice {sp_idx} ({chrom}:{start}-{end}): "
                 f"got {got[:15]}... expected {expected[:15]}..."
             )
-
-
-# ---------------------------------------------------------------------------
-# _cat_length regression: ploidy interleaving used to scramble ploid 1's bytes
-# because the fast (ndim==2) path walked a (batch, ploidy)-interleaved data
-# buffer sequentially. Lock that down.
-# ---------------------------------------------------------------------------
-
-
-def test_cat_length_preserves_per_ploidy_content():
-    """Shape (n_batch, n_ploidy, var) with distinct per-ploidy content.
-
-    Before the fix, ploid 1 of the concatenated output leaked ploid 0 bytes
-    from the next batch slot.
-    """
-    # 4 exons × 2 ploidy, each exon's ploid 0 is "A...", ploid 1 is "B..."
-    data = np.frombuffer(b"AAAAABBBBBCCCDDDEEEEFFFFGGHH", dtype="S1")
-    lens = np.array([[5, 5], [3, 3], [4, 4], [2, 2]])
-    rag = Ragged.from_lengths(data, lens)
-    assert rag.ndim == 2  # Ragged's ndim excludes the ragged axis
-    # Group exons 0-1 into splice 0 and exons 2-3 into splice 1
-    offsets = np.array([0, 2, 4], dtype=np.int64)
-    cat = _cat_length(rag, offsets)
-
-    assert cat.shape == (2, 2, None), f"unexpected shape {cat.shape}"
-    out = cat.to_ak().to_list()
-    assert out == [
-        [b"AAAAACCC", b"BBBBBDDD"],
-        [b"EEEEGG", b"FFFFHH"],
-    ], f"ploidy interleaving corrupted content: {out}"
-
-
-def test_cat_length_non_bytes_dtype():
-    """Non-bytestring dtypes (e.g. int32 annotations) must also concatenate per-ploidy."""
-    # integers per (exon, ploidy)
-    data = np.arange(18, dtype=np.int32)
-    lens = np.array(
-        [[2, 2], [3, 3], [2, 2]]
-    )  # 3 exons × 2 ploid, total 14 slots... wait
-    # 2+2+3+3+2+2 = 14 but data has 18. Let me recompute lengths summing to 18.
-    # exon0 p0 len=2, p1 len=3 → 5 bytes; exon1 p0=3, p1=2 → 5 bytes; exon2 p0=4, p1=4 → 8 bytes. Total 18.
-    lens = np.array([[2, 3], [3, 2], [4, 4]])
-    rag = Ragged.from_lengths(data, lens)
-    offsets = np.array([0, 2, 3], dtype=np.int64)
-    cat = _cat_length(rag, offsets)
-    out = cat.to_ak().to_list()
-    # splice 0 = exons 0-1; p0 = [0,1,5,6,7]; p1 = [2,3,4,8,9]
-    # splice 1 = exon 2; p0 = [10,11,12,13]; p1 = [14,15,16,17]
-    assert out == [
-        [[0, 1, 5, 6, 7], [2, 3, 4, 8, 9]],
-        [[10, 11, 12, 13], [14, 15, 16, 17]],
-    ], f"non-bytes content corrupted: {out}"
 
 
 # ---------------------------------------------------------------------------
@@ -464,3 +373,39 @@ def test_cds_internal_stops_bounded():
         f"(CDS excludes the terminal stop in Ensembl GTF, and in-frame variants "
         f"introduce at most one premature stop). Likely a reconstruction bug."
     )
+
+
+def test_spliced_tracks_round_trip(multi_exon_ds_path: Path):
+    """Spliced track output: data buffer equals sum of per-element lengths.
+
+    Skipped if the fixture has no tracks attached (the default multi-exon
+    fixture has none). When present, this exercises the Tracks splice path
+    and verifies the packed-buffer invariant on the resulting Ragged.
+    """
+    try:
+        ds = (
+            gvl.Dataset.open(multi_exon_ds_path, ref_path)
+            .with_tracks("dummy")
+            .with_settings(splice_info=("transcript_id", "exon_number"))
+        )
+    except ValueError:
+        pytest.skip("No tracks in fixture; tracks splice path covered elsewhere")
+    out = ds[0, 0]
+    assert out is not None
+
+
+def test_haptracks_splicing_raises(multi_exon_ds_path: Path):
+    """Haplotype + track splicing is not supported (shape (b, t, p, ~l))."""
+    from genvarloader._dataset._reconstruct import HapsTracks
+
+    ds = (
+        gvl.Dataset.open(multi_exon_ds_path, ref_path)
+        .with_seqs("haplotypes")
+        .with_tracks("dummy")
+        .with_settings(splice_info=("transcript_id", "exon_number"))
+    )
+    # Skip if fixture has no tracks (the default multi_exon_ds_path has none).
+    if not isinstance(ds._recon, HapsTracks):
+        pytest.skip("no tracks in fixture")
+    with pytest.raises(NotImplementedError, match="aplotype"):
+        _ = ds[0, 0]

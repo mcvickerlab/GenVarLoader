@@ -31,7 +31,7 @@ from .._utils import (
     normalize_contig_name,
 )
 from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
-from ._splice import SpliceMap, _cat_length
+from ._splice import SpliceMap, SplicePlan, build_splice_plan
 from ._rag_variants import RaggedVariants
 from ._insertion_fill import InsertionFill
 from ._reconstruct import Haps, HapsTracks, Ref, RefTracks, Tracks, TrackType
@@ -1704,9 +1704,27 @@ class Dataset:
             )
 
         inner_ds = self.with_len("ragged")
-        ds_idx, squeeze, out_reshape, offsets = splice_idxer.parse_idx(idx)
+        (
+            ds_idx,
+            squeeze,
+            out_reshape,
+            offsets,
+            n_rows_sel,
+            n_samples_sel,
+        ) = splice_idxer.parse_idx(idx)
         r_idx, _ = np.unravel_index(ds_idx, self._idxer.full_shape)
         regions = self._full_regions[r_idx]
+
+        # Build the splice plan from per-query lengths produced by the active
+        # reconstructor. The plan drives the kernel into writing pre-spliced
+        # bytes in (splice_row, sample, *inner_fixed, splice_element) C-order.
+        plan = inner_ds._build_splice_plan(
+            ds_idx=ds_idx,
+            regions=regions,
+            splice_row_offsets=offsets,
+            n_rows=n_rows_sel,
+            n_samples=n_samples_sel,
+        )
 
         recon = inner_ds._recon(
             idx=ds_idx,
@@ -1716,6 +1734,7 @@ class Dataset:
             jitter=self.jitter,
             rng=self._rng,
             deterministic=self.deterministic,
+            splice_plan=plan,
         )
 
         if not isinstance(recon, tuple):
@@ -1726,13 +1745,95 @@ class Dataset:
         )
 
         if self.rc_neg:
-            # (b)
-            to_rc: NDArray[np.bool_] = regions[:, 3] == -1
-            recon = tuple(self._rc(r, to_rc) for r in recon)
+            # Permute the per-region to_rc mask the same way the plan permuted
+            # the kernel queries. The plan acts on a flattened (B, *inner_fixed)
+            # k-index, so first replicate to_rc across the inner axes, then
+            # gather via plan.perm.
+            B = regions.shape[0]
+            n_k = int(plan.perm.shape[0])
+            inner_factor, rem = divmod(n_k, B)
+            if rem != 0:
+                raise AssertionError(
+                    "plan.perm length is not a multiple of len(regions); "
+                    "inner-fixed flatten factor inconsistent."
+                )
+            to_rc_unperm = regions[:, 3] == -1
+            if inner_factor == 1:
+                to_rc_flat = to_rc_unperm
+            else:
+                # (B, E) C-order: same value across the inner axis for a given
+                # query. np.repeat gives (B*E,) in (query, inner) C-order.
+                to_rc_flat = np.repeat(to_rc_unperm, inner_factor)
+            to_rc_per_elem: NDArray[np.bool_] = to_rc_flat[plan.perm]
+            recon = tuple(self._rc(r, to_rc_per_elem) for r in recon)
 
-        recon = tuple(_cat_length(r, offsets) for r in recon)
+        # Rewrap each per-element Ragged with the plan's group_offsets to
+        # expose one contiguous spliced element per (row, sample[, inner]) cell.
+        # Collapse (n_rows, n_samples) into a single leading "pair" axis so the
+        # downstream out_reshape step in __getitem__ can reshape it back to
+        # whatever shape the user's index requested.
+        recon = tuple(
+            _regroup(r, plan.group_offsets, plan.flat_out_shape) for r in recon
+        )
 
         return recon, squeeze, out_reshape
+
+    def _build_splice_plan(
+        self,
+        ds_idx: NDArray[np.intp],
+        regions: NDArray[np.int32],
+        splice_row_offsets: NDArray[np.int64],
+        n_rows: int,
+        n_samples: int,
+    ) -> SplicePlan:
+        """Build a ``SplicePlan`` for the active reconstructor.
+
+        Dispatches on ``type(self._recon)``: ``Haps`` uses (B, P) haplotype
+        lengths; ``Ref`` uses 1-D per-region lengths. Track-bearing
+        reconstructors are not yet supported in the spliced path.
+        """
+        recon = self._recon
+        if isinstance(recon, HapsTracks):
+            raise NotImplementedError(
+                "Splicing of haplotypes + tracks (shape (b, t, p, ~l)) is not "
+                "supported."
+            )
+        if isinstance(recon, RefTracks):
+            raise NotImplementedError(
+                "Splicing of reference + tracks is not yet supported."
+            )
+        if isinstance(recon, Tracks):
+            # Tracks have deterministic per-region lengths (no haplotype
+            # indels). Replicate the (B,) length array across the n_tracks
+            # inner axis so the plan's inner_fixed = (n_tracks,).
+            n_tracks = len(recon.active_tracks)
+            base = (regions[:, 2] - regions[:, 1]).astype(np.int32, copy=False)
+            lengths_2d = np.broadcast_to(base[:, None], (base.shape[0], n_tracks))
+            return build_splice_plan(
+                lengths=np.ascontiguousarray(lengths_2d),
+                splice_row_offsets=splice_row_offsets,
+                n_samples=n_samples,
+                n_rows=n_rows,
+            )
+        if isinstance(recon, Haps):
+            lengths_2d = recon.haplotype_lengths_for_plan(idx=ds_idx, regions=regions)
+            return build_splice_plan(
+                lengths=lengths_2d.astype(np.int32, copy=False),
+                splice_row_offsets=splice_row_offsets,
+                n_samples=n_samples,
+                n_rows=n_rows,
+            )
+        if isinstance(recon, Ref):
+            lengths_1d = (regions[:, 2] - regions[:, 1]).astype(np.int32, copy=False)
+            return build_splice_plan(
+                lengths=lengths_1d,
+                splice_row_offsets=splice_row_offsets,
+                n_samples=n_samples,
+                n_rows=n_rows,
+            )
+        raise NotImplementedError(
+            f"Splicing not supported for reconstructor {type(recon).__name__}."
+        )
 
     @overload
     def _rc(self, rag: Ragged[DTYPE], to_rc: NDArray[np.bool_]) -> Ragged[DTYPE]: ...
@@ -1786,6 +1887,29 @@ class Dataset:
             return rag.to_padded()
         else:
             assert_never(rag)
+
+
+def _regroup(
+    rag: Ragged | RaggedAnnotatedHaps,
+    group_offsets: NDArray[np.int64],
+    out_shape: tuple[int | None, ...],
+) -> Ragged | RaggedAnnotatedHaps:
+    """Rewrap a per-element Ragged (or RaggedAnnotatedHaps) with grouped
+    offsets so each cell holds one contiguous spliced element.
+
+    Both branches share the same data buffer; only the outer offsets / shape
+    change.
+    """
+    if isinstance(rag, RaggedAnnotatedHaps):
+        return RaggedAnnotatedHaps(
+            haps=cast(
+                Ragged[np.bytes_],
+                _regroup(rag.haps, group_offsets, out_shape),
+            ),
+            var_idxs=cast(Ragged, _regroup(rag.var_idxs, group_offsets, out_shape)),
+            ref_coords=cast(Ragged, _regroup(rag.ref_coords, group_offsets, out_shape)),
+        )
+    return Ragged.from_offsets(rag.data, out_shape, group_offsets)
 
 
 def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedIntervals:
