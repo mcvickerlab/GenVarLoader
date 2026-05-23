@@ -1569,7 +1569,7 @@ def _build_reconstructor(
 
     # Resolve active tracks from storage + active_tracks subset.
     active_tracks = (
-        tracks if (tracks is not None and tracks.active_tracks is not None) else None
+        tracks if (tracks is not None and bool(tracks.active_tracks)) else None
     )
 
     # Dispatch.

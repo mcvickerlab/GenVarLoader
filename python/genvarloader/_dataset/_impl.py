@@ -668,7 +668,7 @@ class Dataset:
         # Validate the requested kind against storage state.
         if kind is None:
             tracks_active = (
-                self._tracks is not None and self._tracks.active_tracks is not None
+                self._tracks is not None and bool(self._tracks.active_tracks)
             )
             if not tracks_active:
                 raise RuntimeError(
@@ -720,44 +720,30 @@ class Dataset:
         else:
             assert_never(kind)
 
-        match tracks, self._seqs, self._tracks, self._recon:
-            case False, None, _, _:
-                raise ValueError(
-                    "Dataset only has tracks available, so returning no tracks would"
-                    " result in a Dataset that cannot return anything."
-                )
-            case False, Ref() | Haps(), _, Tracks():
-                raise RuntimeError(
-                    "Dataset is set to only return tracks, so setting tracks to None would"
-                    " result in a Dataset that cannot return anything."
-                )
-            case False, _, tr, ((Ref() | Haps()) as seqs) | RefTracks(
-                seqs=seqs
-            ) | HapsTracks(haps=seqs):
-                tr = tr.with_tracks(None)
-                return evolve(self, _tracks=tr, _recon=seqs)
-            case t, _, tr, (Ref() as seqs) | RefTracks(seqs=seqs):
-                tr = tr.with_tracks(t).to_kind(
-                    _kind,  # type: ignore
-                )
-                recon = RefTracks(seqs=seqs, tracks=tr)
-                return evolve(self, _tracks=tr, _recon=recon)
-            case t, _, tr, (Haps() as seqs) | HapsTracks(haps=seqs):
-                tr = tr.with_tracks(t).to_kind(
-                    _kind,  # type: ignore
-                )
-                recon = HapsTracks(
-                    haps=seqs,  # type: ignore
-                    tracks=tr,
-                )
-                return evolve(self, _tracks=tr, _recon=recon)
-            case t, _, tr, Tracks():
-                tr = tr.with_tracks(t).to_kind(
-                    _kind,  # type: ignore
-                )
-                return evolve(self, _tracks=tr, _recon=tr)
-            case k, s, t, r:
-                assert_never(k), assert_never(s), assert_never(t), assert_never(r)
+        # Compute the new tracks state (active set + kind).
+        if tracks is False:
+            # User-deactivate all tracks.
+            new_tracks = self._tracks.with_tracks(None)
+        elif isinstance(tracks, str):
+            new_tracks = self._tracks.with_tracks([tracks]).to_kind(
+                _kind,  # type: ignore
+            )
+        else:
+            new_tracks = self._tracks.with_tracks(tracks).to_kind(
+                _kind,  # type: ignore
+            )
+
+        # Validate: at least one of (seqs, tracks) must remain active.
+        seqs_active = self._seqs_kind is not None and self._seqs is not None
+        tracks_active = bool(new_tracks.active_tracks)
+        if not seqs_active and not tracks_active:
+            raise RuntimeError(
+                "Dataset is set to only return tracks, so setting tracks to None would"
+                " result in a Dataset that cannot return anything."
+            )
+
+        new_recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
+        return evolve(self, _tracks=new_tracks, _recon=new_recon)
 
     def with_insertion_fill(
         self,
