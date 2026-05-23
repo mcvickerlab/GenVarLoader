@@ -49,6 +49,15 @@ issues = "https://github.com/mcvickerlab/GenVarLoader/issues"
 [tool.ruff]
 lint.ignore = ["E501"]
 
+[tool.pyrefly]
+project-includes = ["python/genvarloader", "tests"]
+project-excludes = ["**/data/**", "**/__pycache__/**"]
+preset = "strict"
+
+# Per-error relaxations are added in Task 5 once the strict baseline is run.
+# Each entry below MUST carry a one-line comment giving the reason for relaxation.
+[tool.pyrefly.errors]
+
 [tool.basedpyright]
 include = ["python/", "tests/"]
 exclude = ['**/data/']
