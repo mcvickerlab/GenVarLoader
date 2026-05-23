@@ -327,6 +327,8 @@ Expected: all hooks pass (or only the known pixi-lock pre-push hook is skipped b
 
 This implements the lint workflow anticipated by the release-pipeline spec (`docs/superpowers/specs/2026-05-21-release-pipeline-design.md:134`).
 
+**Approach:** The CI job invokes `prek run --all-files` rather than calling ruff / pyrefly individually. This keeps CI mechanically in sync with `.pre-commit-config.yaml` — adding, removing, or reconfiguring a hook locally automatically updates what CI runs. `prek` only runs hooks whose stages include the default `pre-commit` stage, so the existing `pixi-lock` (pre-push) and `commitizen` (commit-msg / pre-push) hooks are naturally skipped.
+
 - [ ] **Step 1: Create `.github/workflows/lint.yaml`**
 
 Write the following content:
@@ -347,7 +349,7 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
-    name: "ruff + pyrefly"
+    name: "pre-commit hooks"
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -360,10 +362,8 @@ jobs:
           cache: true
           environments: dev
           locked: false
-      - name: Ruff
-        run: pixi run -e dev ruff check python/ tests/
-      - name: Pyrefly
-        run: pixi run -e dev typecheck
+      - name: Run pre-commit hooks
+        run: pixi run -e dev prek run --all-files --show-diff-on-failure
 ```
 
 - [ ] **Step 2: Validate the YAML locally**
@@ -376,11 +376,23 @@ pixi run -e dev python -c "import yaml; yaml.safe_load(open('.github/workflows/l
 
 Expected: no exception.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Confirm `prek run --all-files` matches what CI will execute**
+
+Run the same command the workflow will run:
+
+```bash
+pixi run -e dev prek run --all-files --show-diff-on-failure
+```
+
+Expected: exit code 0. The hooks that should execute at default (pre-commit) stage are the pre-commit-hooks suite, ruff-check, ruff-format, and pyrefly-check. The `pixi-lock` and `commitizen*` hooks should be silently skipped because their stages don't include `pre-commit`.
+
+If any hook fails, fix the underlying issue (do **not** add `--hook-stage` overrides to dodge it). If a stage-gated hook unexpectedly runs, fix the stage config in `.pre-commit-config.yaml`.
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add .github/workflows/lint.yaml
-git commit -m "ci: add lint workflow (ruff + pyrefly)"
+git commit -m "ci: add lint workflow (delegates to prek/.pre-commit-config.yaml)"
 ```
 
 ---
@@ -449,13 +461,11 @@ git commit -m "build(typecheck): drop basedpyright (replaced by pyrefly)"
 Run these in order:
 
 ```bash
-pixi run -e dev ruff check python/ tests/
-pixi run -e dev typecheck
-pixi run -e dev prek run --all-files
+pixi run -e dev prek run --all-files --show-diff-on-failure
 pixi run -e dev test
 ```
 
-Each command must exit 0 (the pre-push pixi-lock hook may be skipped). If any fail, stop and investigate before opening the PR.
+Each command must exit 0 (the pre-push `pixi-lock` and `commitizen*` hooks are stage-gated and will be skipped by `prek run --all-files`). `prek` covers ruff and pyrefly. If anything fails, stop and investigate before opening the PR.
 
 - [ ] **Step 2: Open the PR**
 
