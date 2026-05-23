@@ -5,7 +5,7 @@ from typing import cast
 import awkward as ak
 import numpy as np
 import polars as pl
-from attrs import define, evolve
+from dataclasses import dataclass, replace
 from hirola import HashTable
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
@@ -16,7 +16,7 @@ from .._utils import lengths_to_offsets
 from ._indexing import s2i
 
 
-@define
+@dataclass(slots=True)
 class SplicePlan:
     """Permutation + offsets that re-target the kernel write into spliced layout.
 
@@ -155,7 +155,7 @@ def build_splice_plan(
     )
 
 
-@define
+@dataclass(slots=True)
 class SpliceMap:
     """Sample-agnostic mapping from splice row → ordered region indices.
 
@@ -240,11 +240,11 @@ class SpliceMap:
             return self
         row_idxs = self._r_idx[self.row2idx(rows)]
         splice_map = cast(ak.Array, self.full_splice_map[row_idxs])
-        return evolve(self, splice_map=splice_map, row_subset_idxs=row_idxs)
+        return replace(self, splice_map=splice_map, row_subset_idxs=row_idxs)
 
     def to_full(self) -> Self:
         """Reset to the un-subsetted splice map."""
-        return evolve(self, splice_map=self.full_splice_map, row_subset_idxs=None)
+        return replace(self, splice_map=self.full_splice_map, row_subset_idxs=None)
 
     def parse_rows(
         self, rows: Idx | StrIdx
