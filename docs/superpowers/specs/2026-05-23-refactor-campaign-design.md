@@ -105,21 +105,21 @@ the library code, configured for the `strict` preset as the baseline.
 **Scope:**
 
 - Add a `[tool.pyrefly]` section to `pyproject.toml` with `project_includes`
-  scoped to `python/genvarloader/` and the `strict` preset enabled.
+  scoped to both `python/genvarloader/` and `tests/`, with the `strict` preset
+  enabled.
 - Wire in the [`facebook/pyrefly-pre-commit`](https://github.com/facebook/pyrefly-pre-commit)
   hook in `.pre-commit-config.yaml` (creating the file if absent), pinned to a
   released revision.
 - Add a CI job (matching the existing `pixi run -e dev` flow) that runs
   `pyrefly check` on the library and fails on any error.
-- Make `pyrefly check` pass on `python/genvarloader/` under `strict` as the
-  baseline. Where strict is too noisy to fix in this PR, relax the rule in
-  `pyproject.toml` (per-rule, with a short comment explaining why) rather than
-  blanket-suppressing — the relaxed config becomes the de facto baseline that
-  subsequent PRs must continue to satisfy.
-- Tests (`tests/`) are out of scope for pyrefly enforcement in this PR; they
-  may be added later.
-- `basedpyright` is kept as a parallel checker (configured permissively per
-  existing project setup); pyrefly is additive, not a replacement.
+- Make `pyrefly check` pass on `python/genvarloader/` AND `tests/` under
+  `strict` as the baseline. Where strict is too noisy to fix in this PR,
+  relax the rule in `pyproject.toml` (per-rule, with a short comment
+  explaining why) rather than blanket-suppressing — the relaxed config
+  becomes the de facto baseline that subsequent PRs must continue to satisfy.
+- Remove `basedpyright`: delete the `[tool.basedpyright]` block from
+  `pyproject.toml`, drop it from `pixi.toml`/dev tasks, and remove any
+  references from `CLAUDE.md`. Pyrefly is the sole type checker.
 
 **Touches:** `pyproject.toml`, new `.pre-commit-config.yaml` (or update if
 present), CI config, possibly a small number of source files where strict
@@ -277,7 +277,7 @@ Each PR:
 
 1. Full pytest run (`pixi run -e dev test`).
 2. Cargo test run (covered by `pixi run -e dev test`).
-3. Ruff + basedpyright clean.
+3. Ruff clean.
 4. Pyrefly check clean under the baseline config established in PR0 (from PR1
    onward).
 5. For PRs 3, 5, 6: explicit numerical-parity tests against the pre-PR
