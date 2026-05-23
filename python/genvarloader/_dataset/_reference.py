@@ -8,7 +8,7 @@ import awkward as ak
 import numba as nb
 import numpy as np
 import polars as pl
-from attrs import define, evolve, field
+from dataclasses import dataclass, field, replace
 from genoray._utils import ContigNormalizer
 from hirola import HashTable
 from loguru import logger
@@ -28,7 +28,7 @@ from ._utils import bed_to_regions, padded_slice
 INT64_MAX = np.iinfo(np.int64).max
 
 
-@define
+@dataclass(slots=True)
 class Reference:
     """A reference genome kept in-memory. Typically this is only instantiated to be
     passed to :meth:`Dataset.open <genvarloader.Dataset.open>` and avoid data duplication.
@@ -168,7 +168,7 @@ def _fetch_impl(
 T = TypeVar("T", NDArray[np.bytes_], RaggedSeqs)
 
 
-@define
+@dataclass(slots=True)
 class RefDataset(Generic[T]):
     """A reference dataset for pulling out sequences from a reference genome.
 
@@ -188,8 +188,8 @@ class RefDataset(Generic[T]):
     A `strand` column can also be included, in which case the regions will be reverse complemented if the strand is -1
     and the `rc_neg` parameter is set to True.
     """
-    _subset_bed: pl.DataFrame = field(init=False, alias="_subset_bed")
-    _subset_regions: NDArray[np.int32] = field(init=False, alias="_subset_regions")
+    _subset_bed: pl.DataFrame = field(init=False)
+    _subset_regions: NDArray[np.int32] = field(init=False)
     jitter: int = 0
     """The maximum length for randomly shifting start positions."""
     output_length: Literal["ragged", "variable"] | int = "ragged"
@@ -201,20 +201,18 @@ class RefDataset(Generic[T]):
     rc_neg: bool = True
     """Whether to reverse complement the regions that are on the negative strand."""
     seed: int | np.random.Generator | None = None
-    _rng: np.random.Generator = field(init=False, alias="_rng")
+    _rng: np.random.Generator = field(init=False)
     """A random number generator."""
     region_names: str | None = None
     """The name of the column in the full_bed table to use as the region names."""
-    _region_map: HashTable | None = field(init=False, alias="_region_map")
+    _region_map: HashTable | None = field(init=False)
     splice_info: str | tuple[str, str] | None = None
     """If set, the dataset is spliced. Either the column name with rows already
     in splice order or a (group_col, sort_col) pair applied against ``full_bed``."""
-    _splice_map: SpliceMap | None = field(init=False, alias="_splice_map", default=None)
-    _spliced_bed: pl.DataFrame | None = field(
-        init=False, alias="_spliced_bed", default=None
-    )
+    _splice_map: SpliceMap | None = field(init=False, default=None)
+    _spliced_bed: pl.DataFrame | None = field(init=False, default=None)
 
-    def __attrs_post_init__(self):
+    def __post_init__(self):
         if self.full_bed.height == 0:
             raise ValueError("Table of regions has a height of zero.")
 
@@ -327,7 +325,7 @@ class RefDataset(Generic[T]):
                     f" The maximum output length is the minimum region length ({min_r_len})."
                 )
 
-        out = evolve(self, output_length=output_length)
+        out = replace(self, output_length=output_length)
         out._check_valid_state()
         return out
 
@@ -373,7 +371,7 @@ class RefDataset(Generic[T]):
                 new_sm, new_bed = SpliceMap.from_bed(splice_info, self.full_bed)
                 to_evolve["splice_info"] = splice_info
 
-        out = evolve(self, **to_evolve)
+        out = replace(self, **to_evolve)
 
         if splice_info is not None:
             out._splice_map = new_sm
