@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Protocol, TypeVar
 
 import numpy as np
 import polars as pl
-from attrs import define
+from dataclasses import dataclass
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
 if TYPE_CHECKING:
@@ -23,7 +23,7 @@ Idx = IIdx | slice | Sequence[int] | Sequence[bool] | NDArray[np.bool_] | pl.Ser
 StrIdx = Idx | str | Sequence[str] | NDArray[np.str_] | NDArray[np.object_]
 
 
-@define
+@dataclass(slots=True)
 class AnnotatedHaps:
     haps: NDArray[np.bytes_]
     """Haplotypes with dtype S1."""
