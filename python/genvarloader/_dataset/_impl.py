@@ -665,99 +665,33 @@ class Dataset:
             The type of sequences to return. Can be one of :code:`"reference"`, :code:`"haplotypes"`, :code:`"annotated"`, :code:`"variants"`, or :code:`None`
             to return no sequences.
         """
-        match kind, self._seqs, self._tracks, self._recon:
-            case None, _, None, _:
-                raise ValueError(
-                    "Dataset only has sequences available, so returning no sequences is not possible."
-                )
-            case None, _, _, Haps() | Ref():
+        # Validate the requested kind against storage state.
+        if kind is None:
+            tracks_active = (
+                self._tracks is not None and self._tracks.active_tracks is not None
+            )
+            if not tracks_active:
                 raise RuntimeError(
                     "Dataset is set to only return sequences, so setting sequence_type to None would"
                     " result in a Dataset that cannot return anything."
                 )
-            case None, _, _, (Tracks() as t) | RefTracks(tracks=t) | HapsTracks(
-                tracks=t
-            ):
-                return evolve(self, _recon=t)
-            case "reference" | "haplotypes" | "annotated", None, _, _:
+        elif kind == "reference":
+            if not isinstance(self._seqs, (Haps, Ref)):
                 raise ValueError("Dataset has no reference to yield sequences from.")
-            case "haplotypes" | "annotated" | "variants", None | Ref(), _, _:
+            if self._seqs.reference is None:
+                raise ValueError(
+                    "Dataset has no reference genome to reconstruct sequences from."
+                )
+        elif kind in ("haplotypes", "annotated", "variants"):
+            if not isinstance(self._seqs, Haps):
                 raise ValueError(
                     "Dataset has no genotypes to yield haplotypes/variants from."
                 )
+        else:
+            assert_never(kind)
 
-            case "reference", _, _, Ref(reference=r) | Haps(reference=r):
-                if r is None:
-                    raise ValueError(
-                        "Dataset has no reference genome to reconstruct sequences from."
-                    )
-                seqs = Ref(reference=r)
-                return evolve(self, _recon=seqs)
-            case "reference", Ref(reference=ref) | Haps(reference=ref), _, (
-                (Tracks() as tracks)
-                | RefTracks(tracks=tracks)
-                | HapsTracks(tracks=tracks)
-            ):
-                if ref is None:
-                    raise ValueError(
-                        "Dataset has no reference genome to reconstruct sequences from."
-                    )
-                seqs = Ref(reference=ref)
-                return evolve(
-                    self,
-                    _recon=RefTracks(
-                        seqs=seqs,
-                        tracks=tracks,  # type: ignore
-                    ),
-                )
-
-            case "haplotypes", Haps() as haps, _, Ref() | Haps():
-                return evolve(self, _recon=haps.to_kind(RaggedSeqs))
-            case "haplotypes", Haps() as haps, _, (
-                (Tracks() as tracks)
-                | RefTracks(tracks=tracks)
-                | HapsTracks(tracks=tracks)
-            ):
-                return evolve(
-                    self,
-                    _recon=HapsTracks(
-                        haps.to_kind(RaggedSeqs),
-                        tracks,  # type: ignore
-                    ),
-                )
-
-            case "annotated", Haps() as haps, _, Ref() | Haps():
-                return evolve(self, _recon=haps.to_kind(RaggedAnnotatedHaps))
-            case "annotated", Haps() as haps, _, (
-                (Tracks() as tracks)
-                | RefTracks(tracks=tracks)
-                | HapsTracks(tracks=tracks)
-            ):
-                return evolve(
-                    self,
-                    _recon=HapsTracks(
-                        haps.to_kind(RaggedAnnotatedHaps),
-                        tracks,  # type: ignore
-                    ),
-                )
-
-            case "variants", Haps() as haps, _, Ref() | Haps():
-                return evolve(self, _recon=haps.to_kind(RaggedVariants))
-            case "variants", Haps() as haps, _, (
-                (Tracks() as tracks)
-                | RefTracks(tracks=tracks)
-                | HapsTracks(tracks=tracks)
-            ):
-                return evolve(
-                    self,
-                    _recon=HapsTracks(
-                        haps.to_kind(RaggedVariants),
-                        tracks,  # type: ignore
-                    ),
-                )
-
-            case k, s, t, r:
-                assert_never(k), assert_never(s), assert_never(t), assert_never(r)
+        new_recon = _build_reconstructor(self._seqs, self._tracks, kind)
+        return evolve(self, _seqs_kind=kind, _recon=new_recon)
 
     def with_tracks(
         self,
