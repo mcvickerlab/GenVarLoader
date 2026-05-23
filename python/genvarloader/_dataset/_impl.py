@@ -752,13 +752,18 @@ class Dataset:
         """
         if self._tracks is None:
             raise ValueError("Dataset has no tracks; cannot configure insertion fill.")
-        if not isinstance(self._recon, HapsTracks):
+        if self._seqs_kind not in ("haplotypes", "annotated", "variants"):
             raise ValueError(
                 "with_insertion_fill is only meaningful for datasets with both "
-                "haplotypes and tracks (reconstructor must be HapsTracks)."
+                "haplotypes and tracks (use with_seqs to activate haplotypes first)."
+            )
+        if not self._tracks.active_tracks:
+            raise ValueError(
+                "with_insertion_fill is only meaningful when tracks are active "
+                "(use with_tracks to activate tracks first)."
             )
         new_tracks = self._tracks.with_insertion_fill(fill)
-        new_recon = evolve(self._recon, tracks=new_tracks)
+        new_recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
         return evolve(self, _tracks=new_tracks, _recon=new_recon)
 
     path: Path
@@ -1347,18 +1352,11 @@ class Dataset:
             out.flush()
 
         ds_tracks = Tracks.from_path(self.path, *self.full_shape).with_tracks(None)
-        match self._recon:
-            case Ref() | Haps():
-                recon = self._recon
-            case Tracks() as r:
-                recon = ds_tracks.with_tracks(r.active_tracks)
-            case (RefTracks() | HapsTracks()) as r:
-                recon = evolve(
-                    self._recon, tracks=ds_tracks.with_tracks(r.tracks.active_tracks)
-                )
-            case r:
-                assert_never(r)
-
+        # Re-activate the same tracks on the newly loaded ds_tracks object,
+        # then route through the factory to keep _recon consistent with view-state.
+        cur_active = self._tracks.active_tracks if self._tracks is not None else {}
+        new_tracks = ds_tracks.with_tracks(cur_active.keys()) if cur_active else ds_tracks
+        recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
         return evolve(self, _tracks=ds_tracks, _recon=recon)
 
     def to_torch_dataset(
