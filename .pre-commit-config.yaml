@@ -14,15 +14,18 @@ repos:
   hooks:
   - id: ruff-check
   - id: ruff-format
-- repo: https://github.com/facebook/pyrefly-pre-commit
-  rev: 1.0.0
+- repo: local
   hooks:
   - id: pyrefly-check
     name: Pyrefly (type checking)
-    pass_filenames: false
+    # Invoke through pixi so the dev env (and its site-packages: attrs,
+    # pydantic, seqpro, …) is active. A bare `pyrefly` on system PATH
+    # (e.g. from `pixi global install pyrefly`) would otherwise be picked
+    # up by `git push` outside of a `pixi run` context and resolve the
+    # wrong Python interpreter.
+    entry: pixi run -e dev pyrefly check
     language: system
-- repo: local
-  hooks:
+    pass_filenames: false
   - id: pixi-lock
     name: pixi lock
     language: system
