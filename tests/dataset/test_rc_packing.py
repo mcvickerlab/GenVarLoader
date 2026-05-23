@@ -1,17 +1,12 @@
-"""Regression tests for the ``_rc`` + ``_cat_length`` packing bug.
+"""Regression tests for the ``_rc`` packing fix.
 
 Before the fix, ``Dataset._rc`` built a ``Ragged`` from the raw ``ak.where(...)``
 output. ``ak.where`` eagerly evaluates both branches and leaves an unpacked
 layout whose content buffer holds ``[rc_branch, orig_branch]`` concatenated,
 even though the virtual offsets only index into the selected branch. The
-visible symptoms were:
-
-1. ``rag.data`` exposed the full (2x) buffer rather than just the logical
-   bytes, so direct buffer readers saw garbage followed by the real sequence.
-2. ``_cat_length`` wrapped this unpacked layout in a new ``ListOffsetArray``
-   and then called ``ak.flatten``/``ak.concatenate``, which walked the *wrong*
-   half of the buffer for spliced datasets (e.g. positive-strand CDS came out
-   reverse-complemented).
+visible symptom was: ``rag.data`` exposed the full (2x) buffer rather than just
+the logical bytes, so direct buffer readers saw garbage followed by the real
+sequence.
 
 The fix adds ``ak.to_packed(...)`` around each ``ak.where`` result. These
 tests pin that behavior by checking both the buffer size and the concrete
@@ -87,13 +82,6 @@ def test_rc_returns_packed_buffer(rag: Ragged, to_rc: np.ndarray):
 
 
 # ---------------------------------------------------------------------------
-# Unit: _cat_length over an unpacked source silently corrupted content. After
-# the fix, feeding it a *packed* source (which is what _rc now guarantees)
-# produces correct spliced output.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Integration fixtures: write a fresh dataset into tmp so we don't mutate the
 # shared test fixtures, and can attach custom transcript_id / exon_number
 # columns to exercise the splice path.
@@ -106,7 +94,7 @@ def spliced_ds_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     Each BED row becomes its own one-exon transcript so the spliced output
     should equal the reference slice (for + strand) or its reverse complement
-    (for - strand). This exercises _getitem_spliced -> _rc -> _cat_length.
+    (for - strand). This exercises _getitem_spliced -> _rc.
     """
     tmp = tmp_path_factory.mktemp("rc_packing")
     out = tmp / "single_exon.gvl"
