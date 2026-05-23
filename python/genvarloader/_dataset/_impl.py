@@ -433,15 +433,6 @@ class Dataset:
             haps = evolve(haps, var_fields=var_fields)
             to_evolve["_seqs"] = haps
 
-        if "_seqs" in to_evolve:
-            haps = to_evolve["_seqs"]
-            if isinstance(self._recon, Haps):
-                recon = haps
-                to_evolve["_recon"] = recon
-            elif isinstance(self._recon, HapsTracks):
-                recon = evolve(self._recon, haps=haps)
-                to_evolve["_recon"] = recon
-
         if splice_info is not None:
             if splice_info is False:
                 splice_idxer = None
@@ -472,16 +463,13 @@ class Dataset:
                 haps = to_evolve.get("_seqs", self._seqs)
                 to_evolve["_seqs"] = evolve(haps, filter=var_filter)
 
-                # Propagate to _recon, preserving its kind (set by with_seqs).
-                # We must not replace _recon with _seqs wholesale — _recon has
-                # a different kind (e.g. RaggedSeqs) than _seqs (RaggedVariants).
-                if isinstance(self._recon, Haps):
-                    recon_haps = to_evolve.get("_recon", self._recon)
-                    to_evolve["_recon"] = evolve(recon_haps, filter=var_filter)
-                elif isinstance(self._recon, HapsTracks):
-                    recon = to_evolve.get("_recon", self._recon)
-                    new_haps = evolve(recon.haps, filter=var_filter)
-                    to_evolve["_recon"] = evolve(recon, haps=new_haps)
+        # If any source state changed, rebuild _recon via the factory.
+        if "_seqs" in to_evolve or "_tracks" in to_evolve:
+            new_seqs = to_evolve.get("_seqs", self._seqs)
+            new_tracks = to_evolve.get("_tracks", self._tracks)
+            to_evolve["_recon"] = _build_reconstructor(
+                new_seqs, new_tracks, self._seqs_kind
+            )
 
         self = evolve(self, **to_evolve)
         self._check_valid_state()
