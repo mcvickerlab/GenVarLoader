@@ -13,7 +13,6 @@ dependencies = [
     "numpy",
     "numba>=0.59.1",
     "loguru",
-    "attrs",
     "natsort",
     "polars>=1.37.1",
     "cyvcf2",
