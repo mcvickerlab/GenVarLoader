@@ -174,7 +174,8 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
             ).view("S1")
 
             ref = cast(
-                Ragged[np.bytes_], Ragged.from_offsets(ref, (batch_size, None), out_offsets)
+                Ragged[np.bytes_],
+                Ragged.from_offsets(ref, (batch_size, None), out_offsets),
             )
 
             return ref
@@ -1087,7 +1088,9 @@ class Tracks(Reconstructor[_T]):
             return cast(RaggedTracks, tracks)
 
         # ---- splice plan path ----
-        assert not isinstance(output_length, int), "splice plan path requires variable/ragged output"
+        assert not isinstance(output_length, int), (
+            "splice plan path requires variable/ragged output"
+        )
         # The plan was built with inner_fixed = (n_tracks,) so plan.perm has
         # length B*T indexed in (query, track) C-order: k = query * T + track.
         # Each k_new in the permuted order targets one (query, track) pair; we

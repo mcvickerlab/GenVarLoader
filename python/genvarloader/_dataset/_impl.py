@@ -1816,9 +1816,7 @@ class Dataset:
                 n_rows=n_rows,
             )
         if isinstance(recon, Haps):
-            lengths_2d = recon.haplotype_lengths_for_plan(
-                idx=ds_idx, regions=regions
-            )
+            lengths_2d = recon.haplotype_lengths_for_plan(idx=ds_idx, regions=regions)
             return build_splice_plan(
                 lengths=lengths_2d.astype(np.int32, copy=False),
                 splice_row_offsets=splice_row_offsets,
@@ -1826,9 +1824,7 @@ class Dataset:
                 n_rows=n_rows,
             )
         if isinstance(recon, Ref):
-            lengths_1d = (regions[:, 2] - regions[:, 1]).astype(
-                np.int32, copy=False
-            )
+            lengths_1d = (regions[:, 2] - regions[:, 1]).astype(np.int32, copy=False)
             return build_splice_plan(
                 lengths=lengths_1d,
                 splice_row_offsets=splice_row_offsets,
@@ -1910,12 +1906,8 @@ def _regroup(
                 Ragged[np.bytes_],
                 _regroup(rag.haps, group_offsets, out_shape),
             ),
-            var_idxs=cast(
-                Ragged, _regroup(rag.var_idxs, group_offsets, out_shape)
-            ),
-            ref_coords=cast(
-                Ragged, _regroup(rag.ref_coords, group_offsets, out_shape)
-            ),
+            var_idxs=cast(Ragged, _regroup(rag.var_idxs, group_offsets, out_shape)),
+            ref_coords=cast(Ragged, _regroup(rag.ref_coords, group_offsets, out_shape)),
         )
     return Ragged.from_offsets(rag.data, out_shape, group_offsets)
 

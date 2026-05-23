@@ -93,7 +93,6 @@ def test_rc_returns_packed_buffer(rag: Ragged, to_rc: np.ndarray):
 # ---------------------------------------------------------------------------
 
 
-
 # ---------------------------------------------------------------------------
 # Integration fixtures: write a fresh dataset into tmp so we don't mutate the
 # shared test fixtures, and can attach custom transcript_id / exon_number
@@ -218,8 +217,6 @@ def test_spliced_reference_neg_strand_is_rc_of_fasta(spliced_ds: gvl.Dataset):
                 f"neg-strand splice {sp_idx} ({chrom}:{start}-{end}): "
                 f"got {got[:15]}... expected {expected[:15]}..."
             )
-
-
 
 
 # ---------------------------------------------------------------------------

@@ -98,9 +98,7 @@ def build_splice_plan(
     if E == 1:
         # Identity permutation; flat_lengths shape is (B,) already permuted.
         perm = np.arange(B, dtype=np.intp)
-        permuted_lengths_flat = flat_lengths.reshape(-1).astype(
-            np.int32, copy=False
-        )
+        permuted_lengths_flat = flat_lengths.reshape(-1).astype(np.int32, copy=False)
     else:
         # Build perm by iterating (pair, e, element).
         # For a pair p with element range [s, s+L):
@@ -119,18 +117,10 @@ def build_splice_plan(
             # (E, L): each row e is q_range*E + e.
             ke = q_range[None, :] * E + np.arange(E, dtype=np.intp)[:, None]
             perm_parts.append(ke.reshape(-1))
-        perm = (
-            np.concatenate(perm_parts)
-            if perm_parts
-            else np.empty(0, dtype=np.intp)
-        )
-        permuted_lengths_flat = flat_2d.reshape(-1)[perm].astype(
-            np.int32, copy=False
-        )
+        perm = np.concatenate(perm_parts) if perm_parts else np.empty(0, dtype=np.intp)
+        permuted_lengths_flat = flat_2d.reshape(-1)[perm].astype(np.int32, copy=False)
 
-    permuted_out_offsets = lengths_to_offsets(
-        permuted_lengths_flat, dtype=np.int64
-    )
+    permuted_out_offsets = lengths_to_offsets(permuted_lengths_flat, dtype=np.int64)
 
     # group_offsets at (row, sample, *inner_fixed) granularity:
     # each cell aggregates L elements (or 0 for empty pairs).
@@ -163,7 +153,6 @@ def build_splice_plan(
         group_offsets=group_offsets,
         out_shape=out_shape,
     )
-
 
 
 @define
