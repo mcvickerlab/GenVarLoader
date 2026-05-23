@@ -953,22 +953,7 @@ class Dataset:
         self,
     ) -> Literal["haplotypes", "reference", "annotated", "variants"] | None:
         """The type of sequences in the dataset."""
-        match self._recon:
-            case Tracks():
-                return
-            case (Haps() as haps) | HapsTracks(haps=haps):
-                if issubclass(haps.kind, RaggedAnnotatedHaps):
-                    return "annotated"
-                elif issubclass(haps.kind, RaggedVariants):
-                    return "variants"
-                elif issubclass(haps.kind, RaggedSeqs):
-                    return "haplotypes"
-                else:
-                    assert_never(haps.kind)
-            case Ref() | RefTracks():
-                return "reference"
-            case r:
-                assert_never(r)
+        return self._seqs_kind
 
     def __len__(self):
         return self.n_regions * self.n_samples
