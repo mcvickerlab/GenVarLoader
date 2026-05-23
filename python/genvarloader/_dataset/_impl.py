@@ -258,7 +258,9 @@ class Dataset:
 
         # Initial view kind: matches the default class produced for each storage shape.
         if isinstance(seqs, Haps):
-            seqs_kind: Literal["haplotypes", "reference", "annotated", "variants"] | None = "haplotypes"
+            seqs_kind: (
+                Literal["haplotypes", "reference", "annotated", "variants"] | None
+            ) = "haplotypes"
         elif isinstance(seqs, Ref):
             seqs_kind = "reference"
         else:
@@ -655,8 +657,8 @@ class Dataset:
         """
         # Validate the requested kind against storage state.
         if kind is None:
-            tracks_active = (
-                self._tracks is not None and bool(self._tracks.active_tracks)
+            tracks_active = self._tracks is not None and bool(
+                self._tracks.active_tracks
             )
             if not tracks_active:
                 raise RuntimeError(
@@ -1355,7 +1357,9 @@ class Dataset:
         # Re-activate the same tracks on the newly loaded ds_tracks object,
         # then route through the factory to keep _recon consistent with view-state.
         cur_active = self._tracks.active_tracks if self._tracks is not None else {}
-        new_tracks = ds_tracks.with_tracks(cur_active.keys()) if cur_active else ds_tracks
+        new_tracks = (
+            ds_tracks.with_tracks(cur_active.keys()) if cur_active else ds_tracks
+        )
         recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
         return evolve(self, _tracks=ds_tracks, _recon=recon)
 
