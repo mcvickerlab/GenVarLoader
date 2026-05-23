@@ -407,3 +407,20 @@ def test_spliced_tracks_round_trip(multi_exon_ds_path: Path):
         pytest.skip("No tracks in fixture; tracks splice path covered elsewhere")
     out = ds[0, 0]
     assert out is not None
+
+
+def test_haptracks_splicing_raises(multi_exon_ds_path: Path):
+    """Haplotype + track splicing is not supported (shape (b, t, p, ~l))."""
+    from genvarloader._dataset._reconstruct import HapsTracks
+
+    ds = (
+        gvl.Dataset.open(multi_exon_ds_path, ref_path)
+        .with_seqs("haplotypes")
+        .with_tracks("dummy")
+        .with_settings(splice_info=("transcript_id", "exon_number"))
+    )
+    # Skip if fixture has no tracks (the default multi_exon_ds_path has none).
+    if not isinstance(ds._recon, HapsTracks):
+        pytest.skip("no tracks in fixture")
+    with pytest.raises(NotImplementedError, match="aplotype"):
+        _ = ds[0, 0]
