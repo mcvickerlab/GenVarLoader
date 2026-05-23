@@ -89,7 +89,9 @@ def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.integer]:
     # unable to type narrow from NDArray[bool] since it's a generic type
     _idx = cast(NDArray[np.integer], _idx)
 
-    # handle negative indices
+    # handle negative indices (non-mutating to support read-only inputs e.g. arrow-backed views)
+    if isinstance(_idx, np.ndarray) and not _idx.flags.writeable:
+        _idx = _idx.copy()
     _idx[_idx < 0] += max_len
 
     return _idx
