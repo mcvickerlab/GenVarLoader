@@ -67,6 +67,7 @@ class Fasta(Reader):
         """
         self.name = name
         self.path = Path(path)
+        self.pad: bytes | None
         if pad is None:
             self.pad = pad
         else:
