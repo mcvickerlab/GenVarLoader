@@ -49,27 +49,66 @@ issues = "https://github.com/mcvickerlab/GenVarLoader/issues"
 [tool.ruff]
 lint.ignore = ["E501"]
 
-[tool.basedpyright]
-include = ["python/", "tests/"]
-exclude = ['**/data/']
-enableTypeIgnoreComments = true
-reportImplicitStringConcatenation = false
-reportMissingTypeArgument = false
-reportIgnoreCommentWithoutRule = false
-reportUnknownParameterType = false
-reportUnknownVariableType = false
-reportUnknownMemberType = false
-reportUnknownArgumentType = false
-reportExplicitAny = false
-reportAny = false
-reportPrivateUsage = false
-reportMissingTypeStubs = false
-reportImplicitOverride = false
-reportUntypedFunctionDecorator = false
-reportUnusedCallResult = false
-reportUnnecessaryIsInstance = false
-reportUnnecessaryComparison = false
-reportUninitializedInstanceVariable = false
+[tool.pyrefly]
+project-includes = ["python/genvarloader", "tests"]
+# Heuristics disabled: pyrefly otherwise auto-excludes our maturin source dir
+# `python/` because the name collides with the site-packages heuristic.
+disable-project-excludes-heuristics = true
+project-excludes = [
+    "**/data/**",
+    "**/__pycache__/**",
+    "**/node_modules/**",
+    ".venv/**",
+    ".pixi/**",
+    "target/**",
+]
+# Use the active env's `python` on PATH (set by pixi activation). This keeps
+# the config env-agnostic across py310/py311/py312/py313 pixi environments.
+fallback-python-interpreter-name = "python"
+preset = "strict"
+
+# Per-error relaxations populated empirically below. Each entry MUST carry a
+# one-line comment giving the reason for relaxation. The campaign's later PRs
+# may tighten these back up as the surrounding code is improved.
+[tool.pyrefly.errors]
+# Codebase predates strict typing; numpy generics (np.ndarray, etc.) trigger
+# this across hundreds of sites. PR8 (naming + type pass) revisits.
+implicit-any-type-argument = false
+implicit-any-parameter = false
+implicit-any-empty-container = false
+implicit-any-attribute = false
+# Interop with optional deps (taichi, torch.nested internals, pyBigWig case
+# mismatch with the pybigwig package). Not actionable in PR0.
+missing-import = false
+# Numpy / awkward / polars operator and iteration interop produces noisy
+# false positives. PR5 (Pipeline refactor) and PR8 will revisit.
+not-iterable = false
+unsupported-operation = false
+# Cosmetic Python 3.12 @override decorator — not a behavioral concern.
+missing-override-decorator = false
+# Polars / narwhals / numpy generic type-var upper-bound friction. Interop.
+bad-specialization = false
+# ArrayDataset / RaggedDataset overload stubs are inconsistent by design;
+# PR3 of the campaign collapses these and the warnings disappear.
+bad-override = "warn"
+# Mostly the same ArrayDataset / RaggedDataset return-shape drift plus a few
+# polymorphic-return sites that PR5/PR6 will narrow. Keep visible as WARN.
+bad-return = "warn"
+# numba ITYPE default + a default arg mismatch in a small kernel; revisit
+# in PR8 once the surrounding code stabilizes.
+bad-function-definition = "warn"
+# Six call sites with overload friction (seqpro.cast_seqs, Dataset.open,
+# numpy.reshape, genoray.get_record_info). Surface but don't block.
+no-matching-overload = "warn"
+# Soft type drift in places where pyrefly cannot narrow through dynamic
+# polars / numpy code paths. Surface as WARN.
+bad-argument-type = "warn"
+missing-attribute = "warn"
+bad-index = "warn"
+bad-assignment = "warn"
+# TorchDataset alias is `type[...] | (lambda raising NotImplementedError)`
+# when torch is unavailable. Two sites; keep visible.
+not-a-type = "warn"
 
 [tool.maturin]
 python-source = "python"

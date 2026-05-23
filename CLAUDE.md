@@ -158,7 +158,7 @@ pixi run -e dev pytest tests/dataset/test_dataset.py::test_name -v
 
 # Lint
 pixi run -e dev ruff check python/
-pixi run -e dev basedpyright python/
+pixi run -e dev typecheck
 
 # Build docs
 pixi run -e docs doc
@@ -234,6 +234,6 @@ When a change ships, update the relevant section of the skill and re-check the "
 
 - **Pixi environments**: Use `-e dev` for development, `-e docs` for documentation, `-e py310`/`py311`/`py312`/`py313` for Python version testing. Platform is linux-64.
 - **Ruff config**: E501 (line length) is ignored.
-- **BasedPyright**: Configured permissively; type annotations follow patterns in `_types.py`.
+- **Pyrefly**: Configured permissively; type annotations follow patterns in `_types.py`.
 - **Conventional commits**: Project uses commitizen for versioning.
 - **Test markers**: `@pytest.mark.slow` for slow tests (excluded by default).

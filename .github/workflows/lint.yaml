@@ -1,0 +1,29 @@
+name: Lint
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - stable
+  workflow_dispatch:
+
+jobs:
+  prek:
+    runs-on: ubuntu-latest
+    name: "pre-commit hooks"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup pixi (provides pyrefly on PATH)
+        uses: prefix-dev/setup-pixi@v0.9.5
+        with:
+          pixi-version: v0.68.1
+          cache: true
+          environments: dev
+          locked: false
+          activate-environment: true
+      - uses: j178/prek-action@v2

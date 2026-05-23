@@ -303,7 +303,7 @@ class Dataset:
             _full_regions=regions,
             _seqs=seqs,
             _tracks=tracks,
-            _recon=recon,
+            _recon=recon,  # pyrefly: ignore[unbound-name]  # exhaustive match above
             _rng=np.random.default_rng(rng),
         )
 
