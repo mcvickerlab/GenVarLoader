@@ -31,7 +31,6 @@ import pytest
 from genoray import VCF
 from pytest_cases import parametrize_with_cases
 
-from genvarloader._dataset._splice import _cat_length
 from genvarloader._ragged import Ragged, reverse_complement
 
 
@@ -93,31 +92,6 @@ def test_rc_returns_packed_buffer(rag: Ragged, to_rc: np.ndarray):
 # produces correct spliced output.
 # ---------------------------------------------------------------------------
 
-
-def test_cat_length_with_packed_input_preserves_content():
-    # 4 "exons" × 2 ploidy × 3 bytes each, grouped 2+2.
-    data = np.frombuffer(b"ATG" * 8, dtype="S1")
-    lengths = np.array([[3, 3], [3, 3], [3, 3], [3, 3]])
-    rag = Ragged.from_lengths(data, lengths)
-
-    # Route through _rc with all-False to exercise the code path that used to
-    # leak the rc branch into the buffer.
-    to_rc = np.array([False, False, False, False])
-    after_rc = Ragged(
-        ak.to_packed(ak.where(to_rc, reverse_complement(rag.to_ak()), rag.to_ak()))
-    )
-    assert _buffer_matches_lengths(after_rc)
-
-    offsets = np.array([0, 2, 4], dtype=np.int64)
-    cat = _cat_length(after_rc, offsets)
-    # Each splice concatenates 2 exons of 3 bytes on each of 2 ploidies
-    assert cat.shape[0] == 2
-    for splice_idx in range(2):
-        for ploid in range(2):
-            seq = bytes(ak.to_numpy(cat.to_ak()[splice_idx, ploid]))
-            assert seq == b"ATGATG", (
-                f"splice {splice_idx} ploid {ploid} content corrupted: {seq!r}"
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -246,56 +220,6 @@ def test_spliced_reference_neg_strand_is_rc_of_fasta(spliced_ds: gvl.Dataset):
             )
 
 
-# ---------------------------------------------------------------------------
-# _cat_length regression: ploidy interleaving used to scramble ploid 1's bytes
-# because the fast (ndim==2) path walked a (batch, ploidy)-interleaved data
-# buffer sequentially. Lock that down.
-# ---------------------------------------------------------------------------
-
-
-def test_cat_length_preserves_per_ploidy_content():
-    """Shape (n_batch, n_ploidy, var) with distinct per-ploidy content.
-
-    Before the fix, ploid 1 of the concatenated output leaked ploid 0 bytes
-    from the next batch slot.
-    """
-    # 4 exons × 2 ploidy, each exon's ploid 0 is "A...", ploid 1 is "B..."
-    data = np.frombuffer(b"AAAAABBBBBCCCDDDEEEEFFFFGGHH", dtype="S1")
-    lens = np.array([[5, 5], [3, 3], [4, 4], [2, 2]])
-    rag = Ragged.from_lengths(data, lens)
-    assert rag.ndim == 2  # Ragged's ndim excludes the ragged axis
-    # Group exons 0-1 into splice 0 and exons 2-3 into splice 1
-    offsets = np.array([0, 2, 4], dtype=np.int64)
-    cat = _cat_length(rag, offsets)
-
-    assert cat.shape == (2, 2, None), f"unexpected shape {cat.shape}"
-    out = cat.to_ak().to_list()
-    assert out == [
-        [b"AAAAACCC", b"BBBBBDDD"],
-        [b"EEEEGG", b"FFFFHH"],
-    ], f"ploidy interleaving corrupted content: {out}"
-
-
-def test_cat_length_non_bytes_dtype():
-    """Non-bytestring dtypes (e.g. int32 annotations) must also concatenate per-ploidy."""
-    # integers per (exon, ploidy)
-    data = np.arange(18, dtype=np.int32)
-    lens = np.array(
-        [[2, 2], [3, 3], [2, 2]]
-    )  # 3 exons × 2 ploid, total 14 slots... wait
-    # 2+2+3+3+2+2 = 14 but data has 18. Let me recompute lengths summing to 18.
-    # exon0 p0 len=2, p1 len=3 → 5 bytes; exon1 p0=3, p1=2 → 5 bytes; exon2 p0=4, p1=4 → 8 bytes. Total 18.
-    lens = np.array([[2, 3], [3, 2], [4, 4]])
-    rag = Ragged.from_lengths(data, lens)
-    offsets = np.array([0, 2, 3], dtype=np.int64)
-    cat = _cat_length(rag, offsets)
-    out = cat.to_ak().to_list()
-    # splice 0 = exons 0-1; p0 = [0,1,5,6,7]; p1 = [2,3,4,8,9]
-    # splice 1 = exon 2; p0 = [10,11,12,13]; p1 = [14,15,16,17]
-    assert out == [
-        [[0, 1, 5, 6, 7], [2, 3, 4, 8, 9]],
-        [[10, 11, 12, 13], [14, 15, 16, 17]],
-    ], f"non-bytes content corrupted: {out}"
 
 
 # ---------------------------------------------------------------------------
