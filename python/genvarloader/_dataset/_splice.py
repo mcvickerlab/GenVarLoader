@@ -1,21 +1,16 @@
 from __future__ import annotations
 
-from typing import cast, overload
+from typing import cast
 
 import awkward as ak
 import numpy as np
 import polars as pl
 from attrs import define, evolve
-from awkward.contents import ListOffsetArray, NumpyArray
-from awkward.index import Index64
 from hirola import HashTable
 from numpy.typing import NDArray
-from seqpro.rag import DTYPE_co as DTYPE, Ragged, is_rag_dtype
-from typing_extensions import assert_never
+from seqpro.rag import Ragged
+from typing_extensions import Self, assert_never
 
-from typing_extensions import Self
-
-from .._ragged import RaggedAnnotatedHaps
 from .._types import Idx, StrIdx
 from .._utils import lengths_to_offsets
 from ._indexing import s2i

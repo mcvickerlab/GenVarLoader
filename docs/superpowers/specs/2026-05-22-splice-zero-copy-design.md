@@ -1,6 +1,6 @@
 # Zero-copy splicing via query-flattened reconstruction
 
-**Status:** Draft
+**Status:** Implemented
 **Date:** 2026-05-22
 
 ## Problem

@@ -787,7 +787,6 @@ class Haps(Reconstructor[_H]):
         # geno_offset_idx, shifts have shape (B, P). Flatten to (B*P,) in
         # (query, ploidy) C-order, then permute. Then call the kernel with
         # ploidy=1 over the B*P flattened queries.
-        B = regions.shape[0]
         P = shifts.shape[1] if shifts.ndim > 1 else 1
         perm = splice_plan.perm
         flat_geno_idx = geno_offset_idx.reshape(-1)[perm].astype(np.intp, copy=False)
