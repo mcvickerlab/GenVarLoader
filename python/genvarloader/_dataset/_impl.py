@@ -8,7 +8,7 @@ import awkward as ak
 import numpy as np
 import polars as pl
 import seqpro as sp
-from attrs import define, evolve, field
+from dataclasses import dataclass, replace
 from genoray._utils import ContigNormalizer
 from loguru import logger
 from numpy.typing import NDArray
@@ -55,7 +55,7 @@ if TORCH_AVAILABLE:
 _py_open = open
 
 
-@define(frozen=True)
+@dataclass(slots=True, frozen=True)
 class Dataset:
     """A dataset of genotypes, reference sequences, and intervals.
 
@@ -424,7 +424,7 @@ class Dataset:
                 max_af = None
 
             haps = to_evolve.get("_seqs", self._seqs)
-            haps = evolve(haps, min_af=min_af, max_af=max_af)
+            haps = replace(haps, min_af=min_af, max_af=max_af)
             to_evolve["_seqs"] = haps
 
         if var_fields is not None:
@@ -432,7 +432,7 @@ class Dataset:
             if missing or not isinstance(self._seqs, Haps):
                 raise ValueError(f"Missing variant fields: {missing}")
             haps = to_evolve.get("_seqs", self._seqs)
-            haps = evolve(haps, var_fields=var_fields)
+            haps = replace(haps, var_fields=var_fields)
             to_evolve["_seqs"] = haps
 
         if splice_info is not None:
@@ -463,7 +463,7 @@ class Dataset:
 
             if var_filter != self._seqs.filter:
                 haps = to_evolve.get("_seqs", self._seqs)
-                to_evolve["_seqs"] = evolve(haps, filter=var_filter)
+                to_evolve["_seqs"] = replace(haps, filter=var_filter)
 
         # If any source state changed, rebuild _recon via the factory.
         if "_seqs" in to_evolve or "_tracks" in to_evolve:
@@ -473,7 +473,7 @@ class Dataset:
                 new_seqs, new_tracks, self._seqs_kind
             )
 
-        self = evolve(self, **to_evolve)
+        self = replace(self, **to_evolve)
         self._check_valid_state()
 
         return self
@@ -681,7 +681,7 @@ class Dataset:
             assert_never(kind)
 
         new_recon = _build_reconstructor(self._seqs, self._tracks, kind)
-        return evolve(self, _seqs_kind=kind, _recon=new_recon)
+        return replace(self, _seqs_kind=kind, _recon=new_recon)
 
     def with_tracks(
         self,
@@ -733,7 +733,7 @@ class Dataset:
             )
 
         new_recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
-        return evolve(self, _tracks=new_tracks, _recon=new_recon)
+        return replace(self, _tracks=new_tracks, _recon=new_recon)
 
     def with_insertion_fill(
         self,
@@ -766,7 +766,7 @@ class Dataset:
             )
         new_tracks = self._tracks.with_insertion_fill(fill)
         new_recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
-        return evolve(self, _tracks=new_tracks, _recon=new_recon)
+        return replace(self, _tracks=new_tracks, _recon=new_recon)
 
     path: Path
     """Path to the dataset."""
@@ -792,21 +792,17 @@ class Dataset:
     """
     rc_neg: bool
     """Whether to reverse-complement the sequences on negative strands."""
-    _full_bed: pl.DataFrame = field(alias="_full_bed")
-    _spliced_bed: pl.DataFrame | None = field(alias="_spliced_bed")
-    _full_regions: NDArray[np.int32] = field(alias="_full_regions")
+    _full_bed: pl.DataFrame
+    _spliced_bed: pl.DataFrame | None
+    _full_regions: NDArray[np.int32]
     """Unjittered, sorted regions matching order on-disk."""
-    _idxer: DatasetIndexer = field(alias="_idxer")
-    _sp_idxer: SpliceIndexer | None = field(alias="_sp_idxer")
+    _idxer: DatasetIndexer
+    _sp_idxer: SpliceIndexer | None
     _seqs: (
         Ref | Haps[RaggedSeqs] | Haps[RaggedAnnotatedHaps] | Haps[RaggedVariants] | None
-    ) = field(alias="_seqs")
-    _tracks: Tracks[RaggedTracks] | Tracks[RaggedIntervals] | None = field(
-        alias="_tracks"
     )
-    _seqs_kind: Literal["haplotypes", "reference", "annotated", "variants"] | None = (
-        field(alias="_seqs_kind")
-    )
+    _tracks: Tracks[RaggedTracks] | Tracks[RaggedIntervals] | None
+    _seqs_kind: Literal["haplotypes", "reference", "annotated", "variants"] | None
     _recon: (
         Ref
         | Haps[RaggedSeqs]
@@ -820,8 +816,8 @@ class Dataset:
         | HapsTracks[RaggedSeqs, RaggedIntervals]
         | HapsTracks[RaggedAnnotatedHaps, RaggedIntervals]
         | HapsTracks[RaggedVariants, RaggedIntervals]
-    ) = field(alias="_recon")
-    _rng: np.random.Generator = field(alias="_rng")
+    )
+    _rng: np.random.Generator
 
     @property
     def is_subset(self) -> bool:
@@ -1073,17 +1069,17 @@ class Dataset:
 
         if self._sp_idxer is None:
             idxer = self._idxer.subset_to(regions=regions, samples=samples)
-            return evolve(self, _idxer=idxer)
+            return replace(self, _idxer=idxer)
         else:
             sp_idxer, sub_dsi = self._sp_idxer.subset_to(rows=regions, samples=samples)
-            return evolve(self, _idxer=sub_dsi, _sp_idxer=sp_idxer)
+            return replace(self, _idxer=sub_dsi, _sp_idxer=sp_idxer)
 
     def to_full_dataset(self) -> Self:
         """Return a full sized dataset, undoing any subsetting."""
         if self._sp_idxer is None:
-            return evolve(self, _idxer=self._idxer.to_full_dataset())
+            return replace(self, _idxer=self._idxer.to_full_dataset())
         else:
-            return evolve(
+            return replace(
                 self,
                 _idxer=self._idxer.to_full_dataset(),
                 _sp_idxer=self._sp_idxer.to_full_dataset(),
@@ -1295,7 +1291,7 @@ class Dataset:
             overwrite=overwrite,
         )
 
-        return evolve(self, _tracks=new_tracks)  # type: ignore
+        return replace(self, _tracks=new_tracks)  # type: ignore
 
     def write_annot_tracks(
         self, tracks: dict[str, str | Path | pl.DataFrame], overwrite: bool = False
@@ -1361,7 +1357,7 @@ class Dataset:
             ds_tracks.with_tracks(cur_active.keys()) if cur_active else ds_tracks
         )
         recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
-        return evolve(self, _tracks=ds_tracks, _recon=recon)
+        return replace(self, _tracks=ds_tracks, _recon=recon)
 
     def to_torch_dataset(
         self, return_indices: bool, transform: Callable | None
