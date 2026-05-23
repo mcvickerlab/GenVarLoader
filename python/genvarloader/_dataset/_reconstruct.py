@@ -11,7 +11,7 @@ from typing import Literal, Protocol, TypeVar, cast, overload
 import awkward as ak
 import numpy as np
 import polars as pl
-from attrs import define, evolve, field
+from dataclasses import dataclass, field, replace
 from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
 from awkward.index import Index
 from einops import repeat
@@ -52,7 +52,7 @@ from ._utils import splits_sum_le_value
 T = TypeVar("T", covariant=True)
 
 
-@define
+@dataclass(slots=True)
 class _Variants:
     path: Path
     start: NDArray[POS_TYPE]
@@ -132,7 +132,7 @@ class Reconstructor(Protocol[T]):
     ) -> T: ...
 
 
-@define
+@dataclass(slots=True)
 class Ref(Reconstructor[Ragged[np.bytes_]]):
     reference: Reference
     """The reference genome. This is kept in memory."""
@@ -193,7 +193,7 @@ _H = TypeVar("_H", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 _NewH = TypeVar("_NewH", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 
 
-@define
+@dataclass(slots=True)
 class Haps(Reconstructor[_H]):
     path: Path
     """The path to the GVL dataset."""
@@ -212,10 +212,10 @@ class Haps(Reconstructor[_H]):
     """The minimum allele frequency to keep."""
     max_af: float | None
     """The maximum allele frequency to keep."""
-    var_fields: list[str] = field(factory=lambda: ["alt", "ilen", "start"])
+    var_fields: list[str] = field(default_factory=lambda: ["alt", "ilen", "start"])
     available_var_fields: list[str] = field(init=False)
 
-    def __attrs_post_init__(self):
+    def __post_init__(self):
         self.n_variants = ak.num(self.genotypes, -1).to_numpy()
         self.available_var_fields = (
             ["alt", "ilen", "start"]
@@ -414,7 +414,7 @@ class Haps(Reconstructor[_H]):
             raise ValueError(
                 f"Cannot return {kind.__name__}: no reference genome was provided."
             )
-        return cast(Haps[_NewH], evolve(self, kind=kind))
+        return cast(Haps[_NewH], replace(self, kind=kind))
 
     def __call__(
         self,
@@ -877,7 +877,7 @@ _T = TypeVar("_T", RaggedTracks, RaggedIntervals)
 _NewT = TypeVar("_NewT", RaggedTracks, RaggedIntervals)
 
 
-@define
+@dataclass(slots=True)
 class Tracks(Reconstructor[_T]):
     intervals: dict[str, RaggedIntervals]
     """The intervals in the dataset. This is memory mapped."""
@@ -886,12 +886,12 @@ class Tracks(Reconstructor[_T]):
     kind: type[_T]
     n_regions: int
     n_samples: int
-    insertion_fill: dict[str, InsertionFill] = field(factory=dict)
+    insertion_fill: dict[str, InsertionFill] = field(default_factory=dict)
     """Per-track insertion fill strategy. Defaults to Repeat5p for every active track."""
 
     def with_tracks(self, tracks: str | Iterable[str] | None) -> Tracks:
         if tracks is None:
-            return evolve(self, active_tracks={}, insertion_fill={})
+            return replace(self, active_tracks={}, insertion_fill={})
 
         if isinstance(tracks, str):
             _tracks = [tracks]
@@ -903,7 +903,7 @@ class Tracks(Reconstructor[_T]):
 
         tracks = {t: self.available_tracks[t] for t in _tracks}
         fills = {t: self.insertion_fill.get(t, Repeat5p()) for t in _tracks}
-        return evolve(self, active_tracks=tracks, insertion_fill=fills)
+        return replace(self, active_tracks=tracks, insertion_fill=fills)
 
     def with_insertion_fill(
         self,
@@ -922,7 +922,7 @@ class Tracks(Reconstructor[_T]):
             fills = {name: fill for name in self.active_tracks}
         else:
             fills = {name: fill.get(name, Repeat5p()) for name in self.active_tracks}
-        return evolve(self, insertion_fill=fills)
+        return replace(self, insertion_fill=fills)
 
     @classmethod
     def from_path(
@@ -1005,7 +1005,7 @@ class Tracks(Reconstructor[_T]):
         return RaggedIntervals(starts, ends, values)
 
     def to_kind(self, kind: type[_NewT]) -> Tracks[_NewT]:
-        t = evolve(self, kind=kind)
+        t = replace(self, kind=kind)
         return cast(Tracks[_NewT], t)
 
     def __call__(
@@ -1338,7 +1338,7 @@ class Tracks(Reconstructor[_T]):
         )
 
 
-@define
+@dataclass(slots=True)
 class RefTracks(Reconstructor[tuple[Ragged[np.bytes_], _T]]):
     seqs: Ref
     tracks: Tracks[_T]
@@ -1379,7 +1379,7 @@ class RefTracks(Reconstructor[tuple[Ragged[np.bytes_], _T]]):
         return seqs, tracks
 
 
-@define
+@dataclass(slots=True)
 class HapsTracks(Reconstructor[tuple[_H, _T]]):
     haps: Haps[_H]
     tracks: Tracks[_T]
@@ -1389,7 +1389,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
     ) -> HapsTracks[_NewH, _NewT]:
         haps = self.haps.to_kind(kind[0])
         tracks = self.tracks.to_kind(kind[1])
-        return cast(HapsTracks[_NewH, _NewT], evolve(self, haps=haps, tracks=tracks))
+        return cast(HapsTracks[_NewH, _NewT], replace(self, haps=haps, tracks=tracks))
 
     def __call__(
         self,
