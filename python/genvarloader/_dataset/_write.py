@@ -413,9 +413,7 @@ def _vcf_region_chunks(
         contig = cast(str, contig)
         starts = df["chromStart"].to_numpy().copy()
         ends = df["chromEnd"].to_numpy().copy()
-        contig_desc = (
-            f"Processing genotypes for {df.height} regions on contig {contig}"
-        )
+        contig_desc = f"Processing genotypes for {df.height} regions on contig {contig}"
         first_in_contig = True
         for range_, unextended_idxs in zip(
             vcf._chunk_ranges_with_length(contig, starts, ends, max_mem, VCF.Genos8),
@@ -473,9 +471,7 @@ def _pgen_region_chunks(
         contig = cast(str, contig)
         starts = df["chromStart"].to_numpy().copy()
         ends = df["chromEnd"].to_numpy().copy()
-        contig_desc = (
-            f"Processing genotypes for {df.height} regions on contig {contig}"
-        )
+        contig_desc = f"Processing genotypes for {df.height} regions on contig {contig}"
         first_in_contig = True
         for range_ in pgen._chunk_ranges_with_length(contig, starts, ends, max_mem):
             ls_sparse: list[Ragged] = []
