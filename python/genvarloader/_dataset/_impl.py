@@ -255,7 +255,16 @@ class Dataset:
             raise RuntimeError(
                 "Malformed dataset: neither genotypes nor intervals found."
             )
-        recon = _build_reconstructor(seqs, tracks)
+
+        # Initial view kind: matches the default class produced for each storage shape.
+        if isinstance(seqs, Haps):
+            seqs_kind: Literal["haplotypes", "reference", "annotated", "variants"] | None = "haplotypes"
+        elif isinstance(seqs, Ref):
+            seqs_kind = "reference"
+        else:
+            seqs_kind = None
+
+        recon = _build_reconstructor(seqs, tracks, seqs_kind)
 
         splice_idxer = None
         spliced_bed = None
@@ -300,6 +309,7 @@ class Dataset:
             _full_regions=regions,
             _seqs=seqs,
             _tracks=tracks,
+            _seqs_kind=seqs_kind,
             _recon=recon,
             _rng=np.random.default_rng(rng),
         )
@@ -572,6 +582,7 @@ class Dataset:
                 _full_regions=self._full_regions,
                 _seqs=self._seqs,
                 _tracks=self._tracks,
+                _seqs_kind=self._seqs_kind,
                 _recon=self._recon,
                 _rng=self._rng,
             )
@@ -592,6 +603,7 @@ class Dataset:
                 _full_regions=self._full_regions,
                 _seqs=self._seqs,
                 _tracks=self._tracks,
+                _seqs_kind=self._seqs_kind,
                 _recon=self._recon,
                 _rng=self._rng,
             )
@@ -876,6 +888,9 @@ class Dataset:
     ) = field(alias="_seqs")
     _tracks: Tracks[RaggedTracks] | Tracks[RaggedIntervals] | None = field(
         alias="_tracks"
+    )
+    _seqs_kind: Literal["haplotypes", "reference", "annotated", "variants"] | None = (
+        field(alias="_seqs_kind")
     )
     _recon: (
         Ref

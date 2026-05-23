@@ -206,6 +206,7 @@ def get_dummy_dataset(spliced: bool = False):
         _sp_idxer=dummy_spi,
         _seqs=dummy_haps,
         _tracks=dummy_tracks,
+        _seqs_kind="haplotypes",
         _recon=dummy_recon,
         _rng=np.random.default_rng(),
     )

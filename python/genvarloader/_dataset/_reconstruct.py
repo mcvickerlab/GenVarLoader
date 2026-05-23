@@ -3,6 +3,7 @@ from __future__ import annotations
 import enum
 import itertools
 import json
+import warnings
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Literal, Protocol, TypeVar, cast, overload
@@ -19,8 +20,6 @@ from genoray.exprs import ILEN
 from loguru import logger
 from numpy.typing import NDArray
 from pydantic_extra_types.semantic_version import SemanticVersion
-
-import warnings
 from seqpro.rag import OFFSET_TYPE, Ragged
 from tqdm.auto import tqdm
 from typing_extensions import assert_never
@@ -241,8 +240,8 @@ class Haps(Reconstructor[_H]):
         samples: list[str],
         ploidy: int,
         version: SemanticVersion | None,
-        svar_link: "SvarLink | None" = None,
-        svar_override: "Path | str | None" = None,
+        svar_link: SvarLink | None = None,
+        svar_override: Path | str | None = None,
         min_af: float | None = None,
         max_af: float | None = None,
         filter: Literal["exonic"] | None = None,
@@ -637,13 +636,11 @@ class Haps(Reconstructor[_H]):
                 dosages = ak.to_regular(dosages[_keep], 1)  # type: ignore
             fields["dosage"] = Ragged(ak.to_packed(dosages))
 
-        fields.update(
-            {
-                k: self._get_info(genos, k)
-                for k in self.var_fields
-                if k not in {"alt", "start", "ref", "ilen", "dosage"}
-            }
-        )
+        fields.update({
+            k: self._get_info(genos, k)
+            for k in self.var_fields
+            if k not in {"alt", "start", "ref", "ilen", "dosage"}
+        })
 
         variants = RaggedVariants(**fields)
 
@@ -1230,7 +1227,8 @@ class Tracks(Reconstructor[_T]):
         if haps is not None:
             # extend ends by max hap diff to match write implementation
             regions[:, 2] += (
-                haps._haplotype_ilens(ds_idx, regions, True)
+                haps
+                ._haplotype_ilens(ds_idx, regions, True)
                 .reshape(n_regions, n_samples, haps.genotypes.shape[-2])  # type: ignore
                 .max((1, 2))
                 .clip(min=0)
@@ -1528,21 +1526,58 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
 def _build_reconstructor(
     seqs: Haps | Ref | None,
     tracks: Tracks | None,
+    seqs_kind: Literal["haplotypes", "reference", "annotated", "variants"] | None,
 ) -> Reconstructor:
-    """Construct the reconstructor for the given sources.
+    """Construct the reconstructor for the given (storage + view) state.
 
-    This is the single source of truth for "given (seqs, tracks), which of the
-    5 reconstructor classes do we construct?" Callers in `_impl.py` route all
-    construction through this function so the dispatch lives in exactly one
-    place.
+    The user's view choice is carried in ``seqs_kind`` (``None`` means "user does
+    not want sequences"). Track activation is read from ``tracks.active_tracks``
+    (``None`` means "user does not want tracks"). This function maps that
+    explicit state to one of the 5 reconstructor classes.
 
-    Invariant: at least one of `seqs` or `tracks` must be non-None.
+    Invariant: after resolving view state, at least one of (active_seqs,
+    active_tracks) must be non-None.
     """
-    match seqs, tracks:
+    # Resolve active seqs from storage + view kind.
+    active_seqs: Haps | Ref | None
+    if seqs_kind is None or seqs is None:
+        active_seqs = None
+    elif seqs_kind == "reference":
+        if isinstance(seqs, Ref):
+            active_seqs = seqs
+        elif isinstance(seqs, Haps):
+            if seqs.reference is None:
+                raise ValueError(
+                    "Cannot view as 'reference': storage has no reference genome."
+                )
+            active_seqs = Ref(reference=seqs.reference)
+        else:
+            assert_never(seqs)
+    elif seqs_kind in ("haplotypes", "annotated", "variants"):
+        if not isinstance(seqs, Haps):
+            raise ValueError(
+                f"Cannot view as {seqs_kind!r}: storage has no haplotypes."
+            )
+        kind_map = {
+            "haplotypes": RaggedSeqs,
+            "annotated": RaggedAnnotatedHaps,
+            "variants": RaggedVariants,
+        }
+        active_seqs = seqs.to_kind(kind_map[seqs_kind])
+    else:
+        assert_never(seqs_kind)
+
+    # Resolve active tracks from storage + active_tracks subset.
+    active_tracks = (
+        tracks if (tracks is not None and tracks.active_tracks is not None) else None
+    )
+
+    # Dispatch.
+    match active_seqs, active_tracks:
         case None, None:
             raise ValueError(
-                "_build_reconstructor requires at least one of seqs or tracks "
-                "to be non-None."
+                "_build_reconstructor requires at least one of (seqs, tracks) "
+                "to be active. Got seqs_kind=None and tracks inactive."
             )
         case (Haps() | Ref()) as s, None:
             return s
@@ -1554,6 +1589,6 @@ def _build_reconstructor(
             return HapsTracks(haps=s, tracks=t)
         case _:
             raise AssertionError(
-                f"unreachable: _build_reconstructor got {type(seqs).__name__=}, "
-                f"{type(tracks).__name__=}"
+                f"unreachable: active_seqs={type(active_seqs).__name__}, "
+                f"active_tracks={type(active_tracks).__name__}"
             )
