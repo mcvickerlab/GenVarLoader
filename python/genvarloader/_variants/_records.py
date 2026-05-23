@@ -5,11 +5,11 @@ from typing import cast
 import numpy as np
 import polars as pl
 import pyarrow as pa
-from attrs import define
+from dataclasses import dataclass
 from seqpro.rag import Ragged
 
 
-@define
+@dataclass(slots=True)
 class RaggedAlleles(Ragged[np.bytes_]):
     """Ragged array of alleles.
 
