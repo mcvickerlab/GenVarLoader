@@ -110,28 +110,6 @@ bad-assignment = "warn"
 # when torch is unavailable. Two sites; keep visible.
 not-a-type = "warn"
 
-[tool.basedpyright]
-include = ["python/", "tests/"]
-exclude = ['**/data/']
-enableTypeIgnoreComments = true
-reportImplicitStringConcatenation = false
-reportMissingTypeArgument = false
-reportIgnoreCommentWithoutRule = false
-reportUnknownParameterType = false
-reportUnknownVariableType = false
-reportUnknownMemberType = false
-reportUnknownArgumentType = false
-reportExplicitAny = false
-reportAny = false
-reportPrivateUsage = false
-reportMissingTypeStubs = false
-reportImplicitOverride = false
-reportUntypedFunctionDecorator = false
-reportUnusedCallResult = false
-reportUnnecessaryIsInstance = false
-reportUnnecessaryComparison = false
-reportUninitializedInstanceVariable = false
-
 [tool.maturin]
 python-source = "python"
 features = ["pyo3/extension-module"]
