@@ -126,6 +126,7 @@ test = { cmd = "pytest tests && cargo test --release", depends-on = [
     "gen",
     "gen-1kg",
 ] }
+typecheck = { cmd = "pyrefly check" }
 
 [feature.docs.tasks]
 install-e = "uv pip install -e /cellar/users/dlaub/projects/ML4GLand/SeqPro -e /cellar/users/dlaub/projects/genoray -e ."
