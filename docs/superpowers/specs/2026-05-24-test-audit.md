@@ -1,7 +1,7 @@
 # Test Audit (post-refactor)
 
 **Date:** 2026-05-24
-**Spec:** docs/superpowers/specs/2026-05-23-refactor-campaign-design.md
+**Spec:** docs/superpowers/specs/2026-05-24-test-suite-overhaul-design.md
 **Baseline:** docs/superpowers/specs/2026-05-24-test-audit-coverage-baseline.txt
 
 This audit classifies every test function in `tests/integration/` (the
