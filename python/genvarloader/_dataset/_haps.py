@@ -169,6 +169,20 @@ class _Variants:
             if v.is_numeric() and k not in {"POS", "ILEN"}
         ]
 
+    def load_info(self, fields) -> None:
+        """Lazily load additional numeric info columns from ``self.path``.
+
+        Fields already present in ``self.info`` are skipped. Unknown numeric
+        columns silently no-op (the caller should validate against
+        :meth:`available_info_fields` first).
+        """
+        missing = [f for f in fields if f not in self.info]
+        if not missing:
+            return
+        df = pl.read_ipc(self.path, columns=missing, memory_map=False)
+        for f in missing:
+            self.info[f] = df[f].to_numpy()
+
 
 _H = TypeVar("_H", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 _NewH = TypeVar("_NewH", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)

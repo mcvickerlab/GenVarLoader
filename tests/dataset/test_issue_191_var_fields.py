@@ -118,3 +118,29 @@ def test_from_table_info_fields_none_loads_all():
     available = set(_Variants.available_info_fields(_SOURCE_SVAR / "index.arrow"))
     v = _Variants.from_table(_SOURCE_SVAR / "index.arrow", info_fields=None)
     assert set(v.info.keys()) == available
+
+
+def test_load_info_extends_info_dict():
+    """load_info reads only the missing fields from disk and merges them."""
+    available = set(_Variants.available_info_fields(_SOURCE_SVAR / "index.arrow"))
+    if not available:
+        pytest.skip("No numeric info columns in canonical SVAR; cannot exercise load_info")
+
+    pick = next(iter(available))
+    # Start with empty info
+    v = _Variants.from_table(_SOURCE_SVAR / "index.arrow", info_fields=set())
+    assert pick not in v.info
+
+    v.load_info([pick])
+    assert pick in v.info
+
+
+def test_load_info_idempotent_for_already_loaded_fields():
+    v = _Variants.from_table(_SOURCE_SVAR / "index.arrow", info_fields=None)
+    already = list(v.info.keys())
+    if not already:
+        pytest.skip("No numeric info columns in canonical SVAR")
+    # Snapshot one array; load_info shouldn't reload it.
+    arr0 = v.info[already[0]]
+    v.load_info(already)
+    assert v.info[already[0]] is arr0
