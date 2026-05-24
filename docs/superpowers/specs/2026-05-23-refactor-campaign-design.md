@@ -1,6 +1,6 @@
 # Refactor Campaign: Readability + Targeted Architecture
 
-**Status:** In progress — PR0, PR1, attrs migration shipped; PR2+ pending
+**Status:** In progress — PR0, PR1, attrs migration, PR2 shipped; PR3 dropped after investigation; PR4+ pending
 **Date:** 2026-05-23
 **Scope:** `python/genvarloader/` (no Rust changes)
 
@@ -11,12 +11,14 @@
 | 2026-05-23 | #181 | PR0 — pyrefly strict baseline + drop basedpyright + CI lint workflow | `refactor/pr0-pyrefly` | Merged. 0 errors / 117 warnings under curated baseline. CI uses `j178/prek-action` via `prek` so `.pre-commit-config.yaml` is single source of truth. |
 | 2026-05-23 | #182 | PR1 — promote reconstructor view-state to explicit `Dataset._seqs_kind` field; centralize construction in `_build_reconstructor(seqs, tracks, seqs_kind)` factory | `refactor/pr1-build-reconstructor` | Merged. ~150 lines net removed from `_impl.py`; `sequence_type` is now a one-line field lookup. Latent bug fixed in passing (`Tracks.active_tracks` is a dict, not optional list; was always-truthy so `with_insertion_fill` guard never fired after `with_tracks(False)`). Test suite 475 → 488 passing (+12 factory unit tests + 1 newly-active insertion-fill test). |
 | 2026-05-23 | #183 | attrs → stdlib dataclasses migration (out-of-band, not numbered in the campaign) | `refactor/attrs-to-dataclass` | Merged. 10 source files + tests migrated to `@dataclass(slots=True)`; `attrs` dropped from `pyproject.toml` / `pixi.toml`. Zero behavioral changes. Motivated by pyrefly's weaker support for attrs. |
+| 2026-05-23 | #185 | PR2 — VCF + PGEN writer dedup via shared `_write_phased_chunked` helper | `refactor/pr2-write-dedup` | Merged. `_write.py`: 832 → 817 lines (−15 net). `_write_from_vcf` / `_write_from_pgen` collapsed to small setup + per-region generators that feed a shared aggregation helper. SVAR untouched (per scope refinement). |
+| 2026-05-23 | — | PR3 dropped after investigation (see "PR3 dropped" section below) | `refactor/pr3-collapse-datasets` (closed) | Dropped. Probed phantom-types + self-typed overloads; concluded the ~150 lines of overload stubs encode the Array/Ragged ADT in Python's type system and are not deletable boilerplate. Net realistic deletion would be ~30 lines of `super()` bodies — not worth the architectural churn. |
 
-**Current state of heavyweight files (post these three PRs):**
+**Current state of heavyweight files (post the merged PRs):**
 
 - `_dataset/_impl.py` — 2156 lines (was 2253; −97)
 - `_dataset/_reconstruct.py` — 1595 lines (was 1525; +70 from factory + view-state work, expected)
-- `_dataset/_write.py` — 832 lines (unchanged)
+- `_dataset/_write.py` — 817 lines (was 832; −15 after PR2)
 - `_dataset/_reference.py` — 756 lines (unchanged-ish)
 - `_dataset/_genotypes.py` — 571 lines (unchanged)
 
@@ -46,9 +48,7 @@ The work runs as a multi-PR campaign, each PR independently shippable.
   conventional-commit messages (the project uses commitizen).
 - Any PR that changes the public API surface must update
   `skills/genvarloader/SKILL.md` in the same PR (per `CLAUDE.md`).
-- `__all__` in `python/genvarloader/__init__.py` stays unchanged. If a class is
-  collapsed (e.g. `ArrayDataset`/`RaggedDataset`), the names remain importable
-  (as type aliases if necessary) so user code does not break.
+- `__all__` in `python/genvarloader/__init__.py` stays unchanged.
 
 ## Forward compatibility: future variant-major class
 
@@ -91,8 +91,11 @@ Heavyweight files:
 
 Specific debt items the campaign targets:
 
-1. `ArrayDataset` / `RaggedDataset` carry ~150 lines of overload boilerplate that
-   only `super()`-calls — a type-system workaround.
+1. ~~`ArrayDataset` / `RaggedDataset` carry ~150 lines of overload boilerplate that
+   only `super()`-calls — a type-system workaround.~~ **Re-evaluated 2026-05-23
+   (PR3 dropped):** these overloads encode the Array/Ragged ADT — they are not
+   boilerplate but the only way to express the ADT in Python's type system. See
+   the "PR3 — DROPPED" section below.
 2. Five reconstructor classes (`Haps`, `Ref`, `Tracks`, `RefTracks`, `HapsTracks`)
    express a combinatorial product (`Optional[Seqs] × Optional[Tracks]`).
    `RefTracks` and `HapsTracks` duplicate track-stitching logic.
@@ -243,19 +246,50 @@ semantic differences.
 **Win:** ~50–80 lines of duplication between VCF and PGEN writers removed.
 Smaller architectural drama than the original spec implied.
 
-### PR3 — Collapse `ArrayDataset` / `RaggedDataset`
+### PR3 — Collapse `ArrayDataset` / `RaggedDataset` (DROPPED)
 
-Move from class-hierarchy expression of `Ragged|Padded` to generic typing on a
-single `Dataset` class. The names `ArrayDataset` and `RaggedDataset` remain
-importable as type aliases (or thin views) so `__all__` is unchanged and user
-imports keep working. The ~32 overload stubs that just `super()` are deleted.
+**Status:** Dropped after brainstorming + a concrete pyrefly probe.
 
-**Touches:** `_dataset/_impl.py`, `python/genvarloader/__init__.py` (if needed
-for re-exports), `skills/genvarloader/SKILL.md`.
-**Risk:** medium. Type-system change; downstream user type hints may need
-adjustment. Public-API-adjacent.
-**Win:** ~150 lines of boilerplate deleted; the actual generic shape becomes
-visible.
+**The misread:** the original spec framed `ArrayDataset` / `RaggedDataset` as
+~150 lines of `super()`-only overload boilerplate. They aren't. The overloads
+encode an algebraic data type — GenVarLoader does not support mixed Array and
+Ragged return shapes, so a Dataset is *either* in the Array universe
+(`NDArray[bytes_]`, `AnnotatedHaps`, `NDArray[float32]`, `RaggedIntervals`) *or*
+in the Ragged universe (`RaggedSeqs`, `RaggedAnnotatedHaps`, `Ragged[float32]`,
+`RaggedIntervals`). The `with_seqs` / `with_tracks` / `__getitem__` overloads
+encode the per-universe associated-type mapping, and the cross-class `with_len`
+overloads encode the state transition.
+
+**Patterns considered:**
+
+1. Pure type aliases (`ArrayDataset = Dataset`) — breaks `isinstance(ds, ArrayDataset)` in `_variants/_sitesonly.py`.
+2. TYPE_CHECKING split — keeps narrowing, but the overloads still have to be written somewhere; LOC delta is essentially zero.
+3. `.pyi` stub file — same line count, plus a second source of truth to keep in sync.
+4. Decompose along typestate boundaries (separate shared core from leaf Array/Ragged classes) — cleaner architecture, but doesn't reduce overload count.
+5. Higher-kinded types via `dry-python/returns` (`Kind1[T, X]`) — provides container polymorphism, not associated-type projection. Doesn't solve our problem.
+6. Phantom types via `antonagestam/phantom-types` — see probe below.
+7. Codegen — small declarative source generates the overloads. Adds build complexity.
+
+**Phantom-types probe (concrete pyrefly check):**
+
+A minimal synthetic Dataset with two `Phantom` subclasses (`ArrayDataset` /
+`RaggedDataset`) using predicates on `output_length` was checked under pyrefly:
+
+- ✅ Runtime `isinstance(ds, ArrayDataset)` works via Phantom's predicate-based `__instancecheck__`.
+- ✅ Overloads on the phantom subclass narrow correctly (`ArrayDataset.with_seqs("haplotypes") → ArrayDataset[NDArrayBytes, ...]`).
+- ❌ Moving overloads onto the base with self-typed dispatch returns `Unknown` for the SEQ/TRK params — the base's TypeVars can't reach into the subclass's universe-specific TypeVars.
+- ❌ Dropping `return super().method(...)` impl bodies fails pyrefly: "Overloaded function must have an implementation."
+
+**Honest LOC accounting if PR3 went ahead with phantom-types:** about +10 lines of phantom metaclass machinery and consolidation of constructor sites (`ArrayDataset(...)` / `RaggedDataset(...)` → `Dataset(...)`); the ~150 lines of overload stubs stay; the ~30 lines of `super()` bodies stay (required by pyrefly). Net deletion: roughly zero.
+
+**Decision:** the ADT is the design intent — preserve it. The overload stubs
+are the cost of expressing this ADT in Python's type system (which lacks
+associated types). Documenting the finding here so future maintainers don't
+re-litigate the same path.
+
+**Future variant-major class:** if/when that class lands, it may benefit from a
+shared `_DatasetCore` mixin housing the state-independent methods (settings,
+subset_to, etc.), but that's a forward-compat concern, not deletion-driven.
 
 ### PR4 — `OpenRequest` + decompose `Dataset.open`
 
@@ -297,7 +331,7 @@ With architectural boundaries now real, split `_impl.py` and `_reconstruct.py`
 along the seams:
 
 - `_dataset/_impl.py` keeps the `Dataset` class itself.
-- `_dataset/_open.py` — already created in PR3.
+- `_dataset/_open.py` — created in PR4.
 - `_dataset/_query.py` — `__getitem__` and the spliced/unspliced query paths.
 - `_dataset/_haps.py` / `_dataset/_ref.py` / `_dataset/_tracks.py` (latter
   already exists) — one source class per file.
@@ -335,16 +369,17 @@ Final sweep:
   pyrefly false-positive surface area on `evolve()` chains and `field(...)`
   generic inference. Mechanical, behavior-preserving. Not numbered in the
   campaign because it's a tooling/quality concern, not architectural.
-- **PR2 (next):** small, low-risk warm-up — VCF + PGEN writer dedup. Refined
-  scope (SVAR stays as-is). See PR2 section for the scope finding.
-- **PR3** is the highest-leverage single deletion (~150 lines of overload
-  boilerplate); gated only by willingness to touch public-adjacent names.
-- **PR4** depends on PR1's factory being merged (done).
+- ✅ **PR2 (shipped #185):** small, low-risk warm-up — VCF + PGEN writer dedup.
+  Refined scope (SVAR stays as-is).
+- ❌ **PR3 (dropped):** the "~150 lines of overload boilerplate" reading was
+  wrong; the overloads encode the Array/Ragged ADT. See the PR3 section above.
+- **PR4 (next):** `OpenRequest` + decompose `Dataset.open`. Depends on PR1's
+  factory being merged (done). Creates `_dataset/_open.py`.
 - **PR5** is the largest remaining architectural change and carries
-  numerical-parity risk. Sequenced after PRs 1–4 so the surrounding code is
+  numerical-parity risk. Sequenced after PRs 1, 2, 4 so the surrounding code is
   already tidied (clearer blast radius, easier review).
-- **PR6** is mechanical and only worth doing once the boundaries from PRs 1,
-  3, 5 are real.
+- **PR6** is mechanical and only worth doing once the boundaries from PRs 1, 5
+  are real.
 - **PR7** is a finisher.
 
 ## Out-of-band tooling work
