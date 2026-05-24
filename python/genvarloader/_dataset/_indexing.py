@@ -74,7 +74,7 @@ class DatasetIndexer:
         if regions is not None:
             _regions = np.array(regions)
             r2i_map = HashTable(
-                max=len(_regions) * 2,  # type: ignore | 2x size for perf > mem
+                max=len(_regions) * 2,  # type: ignore[bad-argument-type]  # hirola HashTable.max typed as numpy.Number but accepts int (2x size for perf > mem)
                 dtype=_regions.dtype,
             )
             r2i_map.add(_regions)
@@ -83,7 +83,7 @@ class DatasetIndexer:
 
         _samples = np.array(samples)
         s2i_map = HashTable(
-            max=len(_samples) * 2,  # type: ignore | 2x size for perf > mem
+            max=len(_samples) * 2,  # type: ignore[bad-argument-type]  # hirola HashTable.max typed as numpy.Number but accepts int (2x size for perf > mem)
             dtype=_samples.dtype,
         )
         s2i_map.add(_samples)
@@ -337,7 +337,7 @@ class SpliceIndexer:
             raise ValueError(
                 "Found indices in the splice map that are out of bounds for the dataset."
             )
-        rows = HashTable(max=len(_names) * 2, dtype=_names.dtype)  # type: ignore
+        rows = HashTable(max=len(_names) * 2, dtype=_names.dtype)  # type: ignore[bad-argument-type]  # hirola HashTable.max typed as numpy.Number but accepts int
         rows.add(_names)
         sm = SpliceMap(
             names=rows,
@@ -377,7 +377,7 @@ class SpliceIndexer:
 
         new_map = self.map.subset_to(rows) if rows is not None else self.map
         sub_dsi = self.dsi.subset_to(samples=samples)
-        region_idxs = ak.flatten(new_map.splice_map, None).to_numpy()  # type: ignore
+        region_idxs = ak.flatten(new_map.splice_map, None).to_numpy()
         eff_dsi = self.dsi.subset_to(regions=region_idxs, samples=samples)
 
         return replace(self, map=new_map, dsi=sub_dsi), eff_dsi

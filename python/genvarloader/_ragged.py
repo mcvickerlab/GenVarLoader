@@ -33,7 +33,7 @@ class RaggedIntervals:
     values: Ragged[np.float32]
 
     def __getitem__(self, idx) -> RaggedIntervals:
-        out = RaggedIntervals(self.starts[idx], self.ends[idx], self.values[idx])  # type: ignore
+        out = RaggedIntervals(self.starts[idx], self.ends[idx], self.values[idx])  # type: ignore[bad-argument-type]  # Ragged.__getitem__ widens to Array per awkward stubs
         return out
 
     @property
@@ -75,9 +75,9 @@ class RaggedIntervals:
             Axis or axes to squeeze. If None, all axes of length 1 are squeezed.
         """
         return RaggedIntervals(
-            self.starts.squeeze(axis),  # type: ignore
-            self.ends.squeeze(axis),  # type: ignore
-            self.values.squeeze(axis),  # type: ignore
+            self.starts.squeeze(axis),  # type: ignore[bad-argument-type]  # seqpro Ragged.squeeze stub returns broader union than Ragged[T]
+            self.ends.squeeze(axis),  # type: ignore[bad-argument-type]  # see above
+            self.values.squeeze(axis),  # type: ignore[bad-argument-type]  # see above
         )
 
     def to_fixed_shape(
@@ -286,7 +286,7 @@ def ufunc_comp_dna(seq: NDArray[np.uint8]) -> NDArray[np.uint8]:
 def _ak_comp_dna_helper(layout, **kwargs):
     if layout.is_numpy:
         return NumpyArray(
-            ufunc_comp_dna(layout.data),  # type: ignore
+            ufunc_comp_dna(layout.data),
             parameters=layout.parameters,
         )
 

@@ -453,7 +453,7 @@ class Haps(Reconstructor[_H]):
             assert_never(self.kind)
 
         return (
-            out,  # type: ignore | pylance doesn't like this but it's correct behavior for the signature
+            out,
             req.geno_offset_idx,
             req.shifts,
             req.diffs,
@@ -545,11 +545,11 @@ class Haps(Reconstructor[_H]):
         idx: NDArray[np.integer],
         genotypes: Ragged[V_IDX_TYPE],
     ) -> NDArray[np.intp]:
-        r_idx, s_idx = np.unravel_index(idx, genotypes.shape[:2])  # type: ignore
+        r_idx, s_idx = np.unravel_index(idx, genotypes.shape[:2])  # type: ignore[no-matching-overload]  # Ragged.shape is tuple[int | None, ...]; numpy overload expects all-int
         ploid_idx = np.arange(genotypes.shape[-2], dtype=np.intp)
         # (region, sample, ploid) index tuple for ravel_multi_index.
         region_sample_ploid_idx = (r_idx[:, None], s_idx[:, None], ploid_idx)
-        geno_offset_idx = np.ravel_multi_index(region_sample_ploid_idx, genotypes.shape[:-1])  # type: ignore
+        geno_offset_idx = np.ravel_multi_index(region_sample_ploid_idx, genotypes.shape[:-1])  # type: ignore[no-matching-overload]  # Ragged.shape is tuple[int | None, ...]; numpy overload expects all-int
         return geno_offset_idx
 
     def _get_variants(
@@ -561,7 +561,7 @@ class Haps(Reconstructor[_H]):
         keep_offsets: NDArray[np.integer] | None = None,
     ) -> RaggedVariants:
         # TODO: maybe filter variants for region, shifts?
-        r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore
+        r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore[no-matching-overload]  # Ragged.shape is tuple[int | None, ...]; numpy overload expects all-int
         # (b p ~v)
         genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s])
 
@@ -599,7 +599,7 @@ class Haps(Reconstructor[_H]):
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
             dosages = self.dosages[r, s]
             if _keep is not None:
-                dosages = ak.to_regular(dosages[_keep], 1)  # type: ignore
+                dosages = ak.to_regular(dosages[_keep], 1)
             fields["dosage"] = Ragged(ak.to_packed(dosages))
 
         fields.update(

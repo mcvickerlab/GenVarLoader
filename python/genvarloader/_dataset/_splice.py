@@ -210,7 +210,7 @@ class SpliceMap:
         ).to_ak()
         splice_map = cast(ak.Array, splice_map)
 
-        rows = HashTable(max=len(names) * 2, dtype=names.dtype)  # type: ignore
+        rows = HashTable(max=len(names) * 2, dtype=names.dtype)  # type: ignore[bad-argument-type]  # hirola HashTable.max typed as numpy.Number but accepts int
         rows.add(names)
 
         return (

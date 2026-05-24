@@ -103,11 +103,11 @@ def getitem(
         )
 
     if out_reshape is not None:
-        recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)  # type: ignore
+        recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)  # type: ignore[bad-argument-type, no-matching-overload]  # heterogeneous reshape() across array kinds; shape tuple may contain None for ragged dims
 
     if squeeze:
         # (1 [p] l) -> ([p] l)
-        recon = tuple(o.squeeze(0) for o in recon)  # type: ignore
+        recon = tuple(o.squeeze(0) for o in recon)  # type: ignore[bad-argument-count]  # RaggedVariants.squeeze() takes no args; other kinds do — heterogeneous dispatch
 
     if len(recon) == 1:
         recon = recon[0]
@@ -152,7 +152,7 @@ def _getitem_unspliced(
         to_rc: NDArray[np.bool_] = view.full_regions[r_idx, 3] == -1
         recon = tuple(reverse_complement_ragged(r, to_rc) for r in recon)
 
-    return recon, squeeze, out_reshape  # type: ignore
+    return recon, squeeze, out_reshape
 
 
 def _getitem_spliced(
@@ -334,9 +334,9 @@ def reverse_complement_ragged(
     """Reverse-complement (or reverse) ragged outputs according to a per-row mask."""
     if isinstance(rag, Ragged):
         if is_rag_dtype(rag, np.bytes_):
-            rag = Ragged(ak.to_packed(ak.where(to_rc, reverse_complement(rag), rag)))  # type: ignore
+            rag = Ragged(ak.to_packed(ak.where(to_rc, reverse_complement(rag), rag)))
         else:
-            rag = Ragged(ak.to_packed(ak.where(to_rc, rag[..., ::-1], rag)))  # type: ignore
+            rag = Ragged(ak.to_packed(ak.where(to_rc, rag[..., ::-1], rag)))
     elif isinstance(rag, RaggedAnnotatedHaps):
         rag.haps = reverse_complement_ragged(rag.haps, to_rc)
         rag.var_idxs = reverse_complement_ragged(rag.var_idxs, to_rc)

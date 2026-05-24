@@ -705,7 +705,7 @@ class Tracks(Reconstructor[_T]):
         starts = ak.concatenate(out_starts, axis=1)
         ends = ak.concatenate(out_ends, axis=1)
         values = ak.concatenate(out_values, axis=1)
-        return RaggedIntervals(starts, ends, values)  # type: ignore
+        return RaggedIntervals(starts, ends, values)
 
     def write_transformed_track(
         self,

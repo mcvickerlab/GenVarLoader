@@ -148,7 +148,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
             raise NotImplementedError("max_variants_per_region > 1 not yet supported")
 
         if not isinstance(dataset, ArrayDataset):
-            raise ValueError(  # type: ignore
+            raise ValueError(
                 'Dataset output_length must either be "variable" or a fixed length integer.'
             )
 
@@ -273,7 +273,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
                 wt_haps,
                 mut_haps,
                 flags,
-                tracks,  # type: ignore | guaranteed bound
+                tracks,  # type: ignore[unbound-name]  # tracks is bound when isinstance(out, tuple) branch is taken
             )
         else:
             return wt_haps, mut_haps, flags

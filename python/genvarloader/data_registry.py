@@ -28,7 +28,7 @@ def fetch(name: Literal["geuvadis_ebi", "1kgp"]) -> dict[str, Path]:
         return _geuvadis_ebi()
     elif name == "1kgp":
         return _1kgp()
-    raise ValueError(f"Unknown dataset: {name}")  # type: ignore
+    raise ValueError(f"Unknown dataset: {name}")
 
 
 def _geuvadis_ebi():

@@ -94,7 +94,7 @@ class RaggedVariants(ak.Array):
             ):
                 return ak.with_parameter(content, "__list__", "Ragged", highlevel=False)
 
-        arr = ak.transform(  # type: ignore
+        arr = ak.transform(  # type: ignore[bad-assignment]  # ak.transform stub returns Array|tuple|None; we know it's Array here
             find_and_convert_to_ragged, arr, depth_context={"n_varlen": 0}
         )
 
@@ -114,7 +114,7 @@ class RaggedVariants(ak.Array):
     def ilen(self) -> Ragged[np.int32]:
         """Indel lengths. Infallible."""
         if "ilen" not in self.fields:
-            ilen = ak.str.length(self.alt) - ak.str.length(self.ref)  # type: ignore
+            ilen = ak.str.length(self.alt) - ak.str.length(self.ref)  # type: ignore[missing-attribute]  # ak.str submodule isn't exposed in awkward's top-level type stubs
             ilen = Ragged(ilen)
             return ilen
 
@@ -161,7 +161,7 @@ class RaggedVariants(ak.Array):
 
     def squeeze(self, **kwargs) -> Self:
         """Squeeze first axis."""
-        return self[0]  # type: ignore
+        return self[0]
 
     def infer_germline_ccfs_(
         self, ccf_field: str = "dosages", max_ccf: float = 1.0
@@ -210,14 +210,14 @@ class RaggedVariants(ak.Array):
             The RaggedVariants object with the alleles reverse complemented.
         """
         if to_rc is None:
-            to_rc = np.ones(self.shape[0], np.bool_)  # type: ignore
+            to_rc = np.ones(self.shape[0], np.bool_)  # type: ignore[no-matching-overload]  # ak.Array shape may contain None; np.ones overload expects int|Sequence[int]
         elif not to_rc.any():
             return self
 
         self["alt"] = ak.to_packed(
             ak.where(
                 to_rc,
-                reverse_complement(self["alt"]),  # type: ignore
+                reverse_complement(self["alt"]),
                 self["alt"],
             )
         )
@@ -226,7 +226,7 @@ class RaggedVariants(ak.Array):
             self["ref"] = ak.to_packed(
                 ak.where(
                     to_rc,
-                    reverse_complement(self["ref"]),  # type: ignore
+                    reverse_complement(self["ref"]),
                     self["ref"],
                 )
             )
@@ -352,7 +352,7 @@ def _alleles_to_nested_tensor(
         if isinstance(_alleles, (ListArray, ListOffsetArray)):
             offsets = _alleles
         _alleles = cast(Content, _alleles.content)
-    _alleles = cast(NDArray[np.bytes_], _alleles.data)  # type: ignore
+    _alleles = cast(NDArray[np.bytes_], _alleles.data)
 
     if tokenizer == "seqpro":
         _alleles = sp.tokenize(_alleles, dict(zip(sp.DNA.alphabet, range(4))), 4)
@@ -363,13 +363,13 @@ def _alleles_to_nested_tensor(
 
     _alleles = torch.from_numpy(_alleles)
 
-    offsets = cast(ListArray | ListOffsetArray, offsets)  # type: ignore
+    offsets = cast(ListArray | ListOffsetArray, offsets)  # type: ignore[redundant-cast]  # cast is documentation here; pyrefly narrows but readers benefit
     # (N ~V ~L) -> (N ~V) -> (N*~V)
     if isinstance(offsets, ListArray):
-        lengths = cast(NDArray, offsets.stops.data - offsets.starts.data)  # type: ignore
+        lengths = cast(NDArray, offsets.stops.data - offsets.starts.data)
         offsets = lengths_to_offsets(lengths, np.int32)
     else:
-        offsets = offsets.offsets.data.astype(np.int32)  # type: ignore
+        offsets = offsets.offsets.data.astype(np.int32)  # type: ignore[missing-attribute]  # awkward Index.data typed as ArrayLike; numpy ndarray method missing on stub
         lengths = np.diff(offsets)
 
     if len(lengths) == 0:
@@ -492,13 +492,13 @@ def _rc_helper(
     ragv: RaggedVariants, field: str, to_rc: NDArray[np.bool_] | None = None
 ):
     # flatten all but last two dimensions & strip params for numba
-    alleles = ragv[field].layout  # type: ignore
-    while not isinstance(alleles.content, NumpyArray):  # type: ignore
-        alleles = alleles.content  # type: ignore
+    alleles = ragv[field].layout
+    while not isinstance(alleles.content, NumpyArray):
+        alleles = alleles.content
     alleles = ak.without_parameters(alleles)
 
     if to_rc is None:
-        to_rc = np.ones(ragv.shape[:-1], np.bool_)  # type: ignore
+        to_rc = np.ones(ragv.shape[:-1], np.bool_)  # type: ignore[no-matching-overload]  # ak.Array shape may contain None; np.ones overload expects int|Sequence[int]
 
     # broadcast to same shape as variants, and flatten
     # (batch) -> (batch * ploidy * n_variants)
@@ -507,7 +507,7 @@ def _rc_helper(
     _to_rc = _to_rc.layout
     while not isinstance(_to_rc, NumpyArray):
         _to_rc = _to_rc.content
-    _to_rc = cast(NDArray[np.bool_], _to_rc.data)  # type: ignore
+    _to_rc = cast(NDArray[np.bool_], _to_rc.data)
 
     _rc_numba_helper(alleles, _to_rc)
 

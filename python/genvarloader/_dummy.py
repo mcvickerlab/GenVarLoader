@@ -87,7 +87,7 @@ def get_dummy_dataset(spliced: bool = False):
         start=repeat(dummy_regions[:, 1].astype(POS_TYPE), "r -> (r s)", s=n_samples),
         ilen=repeat(np.array([-2, -1, 0, 1], np.int32), "s -> (r s)", r=n_regions),
         ref=None,
-        alt=RaggedAlleles.from_offsets(  # type: ignore
+        alt=RaggedAlleles.from_offsets(  # type: ignore[bad-argument-type]  # RaggedAlleles is a Phantom subclass; from_offsets returns base Ragged[bytes_]
             data=repeat(sp.cast_seqs("ACGTT"), "a -> (r a)", r=n_regions),
             shape=(n_regions * n_samples, None),
             offsets=lengths_to_offsets(

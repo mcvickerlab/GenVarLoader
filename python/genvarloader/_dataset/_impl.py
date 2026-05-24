@@ -573,11 +573,11 @@ class Dataset:
             new_tracks = self._tracks.with_tracks(None)
         elif isinstance(tracks, str):
             new_tracks = self._tracks.with_tracks([tracks]).to_kind(
-                _kind,  # type: ignore
+                _kind,  # type: ignore[bad-argument-type]  # _kind is broader union; runtime branch ensures correct subtype
             )
         else:
             new_tracks = self._tracks.with_tracks(tracks).to_kind(
-                _kind,  # type: ignore
+                _kind,  # type: ignore[bad-argument-type]  # _kind is broader union; runtime branch ensures correct subtype
             )
 
         # Validate: at least one of (seqs, tracks) must remain active.
@@ -998,7 +998,7 @@ class Dataset:
         if out_reshape is not None:
             hap_lens = hap_lens.reshape(
                 *out_reshape,
-                self._seqs.genotypes.shape[-2],  # type: ignore
+                self._seqs.genotypes.shape[-2],
             )
 
         return hap_lens
@@ -1148,7 +1148,7 @@ class Dataset:
             overwrite=overwrite,
         )
 
-        return replace(self, _tracks=new_tracks)  # type: ignore
+        return replace(self, _tracks=new_tracks)  # type: ignore[bad-return]  # dataclasses.replace returns Self but pyrefly widens to base Dataset union
 
     def write_annot_tracks(
         self, tracks: dict[str, str | Path | pl.DataFrame], overwrite: bool = False
@@ -1554,7 +1554,7 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
     def __getitem__(
         self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]
     ) -> SEQ | TRK | tuple[SEQ, TRK]:
-        return super().__getitem__(idx)  # type: ignore
+        return super().__getitem__(idx)  # type: ignore[bad-return]  # base Dataset returns broad union; SEQ/TRK typevars narrow at use sites
 
 
 class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
@@ -1709,4 +1709,4 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
     def __getitem__(
         self, idx: StrIdx | tuple[StrIdx] | tuple[StrIdx, StrIdx]
     ) -> RSEQ | RTRK | tuple[RSEQ, RTRK]:
-        return super().__getitem__(idx)  # type: ignore
+        return super().__getitem__(idx)  # type: ignore[bad-return]  # base Dataset returns broad union; RSEQ/RTRK typevars narrow at use sites
