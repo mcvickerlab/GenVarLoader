@@ -1,17 +1,12 @@
-from pathlib import Path
-
 import genvarloader as gvl
 import numpy as np
 import polars as pl
 import pytest
 
-DDIR = Path(__file__).parent.parent / "data"
-REF = DDIR / "fasta" / "hg38.fa.bgz"
-
 
 @pytest.fixture
-def reference() -> gvl.Reference:
-    return gvl.Reference.from_path(REF, in_memory=False)
+def reference(ref_fasta) -> gvl.Reference:
+    return gvl.Reference.from_path(ref_fasta, in_memory=False)
 
 
 @pytest.fixture
