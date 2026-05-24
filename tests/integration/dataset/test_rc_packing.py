@@ -29,12 +29,6 @@ from pytest_cases import parametrize_with_cases
 from genvarloader._ragged import Ragged, reverse_complement
 
 
-data_dir = Path(__file__).resolve().parents[2] / "data"
-ref_path = data_dir / "fasta" / "hg38.fa.bgz"
-source_bed = data_dir / "source.bed"
-source_vcf = data_dir / "vcf" / "filtered_source.vcf.gz"
-
-
 def _buffer_matches_lengths(rag: Ragged) -> bool:
     """Packed invariant: raw content equals the sum of the logical lengths."""
     return len(rag.data) == int(rag.lengths.sum())
@@ -89,13 +83,14 @@ def test_rc_returns_packed_buffer(rag: Ragged, to_rc: np.ndarray):
 
 
 @pytest.fixture(scope="module")
-def spliced_ds_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def spliced_ds_path(tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir) -> Path:
     """Build a VCF-backed GVL store with single-exon transcript annotations.
 
     Each BED row becomes its own one-exon transcript so the spliced output
     should equal the reference slice (for + strand) or its reverse complement
     (for - strand). This exercises _getitem_spliced -> _rc.
     """
+    source_vcf = vcf_dir / "filtered_source.vcf.gz"
     tmp = tmp_path_factory.mktemp("rc_packing")
     out = tmp / "single_exon.gvl"
     reader = VCF(source_vcf)
@@ -119,9 +114,9 @@ def spliced_ds_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def spliced_ds(spliced_ds_path: Path) -> gvl.Dataset:
+def spliced_ds(spliced_ds_path: "Path", ref_fasta) -> gvl.Dataset:
     return (
-        gvl.Dataset.open(spliced_ds_path, ref_path)
+        gvl.Dataset.open(spliced_ds_path, ref_fasta)
         .with_seqs("reference")
         .with_settings(splice_info=("transcript_id", "exon_number"))
     )
@@ -132,14 +127,14 @@ def spliced_ds(spliced_ds_path: Path) -> gvl.Dataset:
 # ---------------------------------------------------------------------------
 
 
-def test_unspliced_single_item_buffer_packed(spliced_ds_path: Path):
+def test_unspliced_single_item_buffer_packed(spliced_ds_path, ref_fasta):
     """dss[region, sample] must not expose a doubled buffer from ak.where.
 
     Uses the default ragged output. The invariant we pin: the data buffer
     length equals the sum of the per-ploidy lengths. Before the fix
     ``ak.where`` left a 2x buffer behind and this check would fail.
     """
-    ds = gvl.Dataset.open(spliced_ds_path, ref_path).with_seqs("haplotypes")
+    ds = gvl.Dataset.open(spliced_ds_path, ref_fasta).with_seqs("haplotypes")
     for region in range(min(ds.n_regions, 5)):
         # ragged of shape (ploidy, var)
         haps = ds[region, 0]
@@ -161,7 +156,7 @@ def test_unspliced_single_item_buffer_packed(spliced_ds_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_spliced_reference_pos_strand_matches_fasta(spliced_ds: gvl.Dataset):
+def test_spliced_reference_pos_strand_matches_fasta(spliced_ds: gvl.Dataset, ref_fasta):
     """A single-exon positive-strand splice must equal the reference slice."""
     pos_rows = spliced_ds.spliced_regions.with_row_index("sp_idx").filter(
         pl.col("strand").list.eval(pl.element() == "+").list.all()
@@ -169,7 +164,7 @@ def test_spliced_reference_pos_strand_matches_fasta(spliced_ds: gvl.Dataset):
     if pos_rows.height == 0:
         pytest.skip("no positive-strand regions in fixture")
 
-    with pysam.FastaFile(str(ref_path)) as fa:
+    with pysam.FastaFile(str(ref_fasta)) as fa:
         for row in pos_rows.head(3).iter_rows(named=True):
             sp_idx = row["sp_idx"]
             chrom = row["chrom"][0]
@@ -183,7 +178,7 @@ def test_spliced_reference_pos_strand_matches_fasta(spliced_ds: gvl.Dataset):
             )
 
 
-def test_spliced_reference_neg_strand_is_rc_of_fasta(spliced_ds: gvl.Dataset):
+def test_spliced_reference_neg_strand_is_rc_of_fasta(spliced_ds: gvl.Dataset, ref_fasta):
     """A single-exon negative-strand splice must equal the RC of the reference slice."""
     neg_rows = spliced_ds.spliced_regions.with_row_index("sp_idx").filter(
         pl.col("strand").list.eval(pl.element() == "-").list.all()
@@ -192,7 +187,7 @@ def test_spliced_reference_neg_strand_is_rc_of_fasta(spliced_ds: gvl.Dataset):
         pytest.skip("no negative-strand regions in fixture")
 
     comp = bytes.maketrans(b"ACGTacgt", b"TGCAtgca")
-    with pysam.FastaFile(str(ref_path)) as fa:
+    with pysam.FastaFile(str(ref_fasta)) as fa:
         for row in neg_rows.head(3).iter_rows(named=True):
             sp_idx = row["sp_idx"]
             chrom = row["chrom"][0]
@@ -214,12 +209,13 @@ def test_spliced_reference_neg_strand_is_rc_of_fasta(spliced_ds: gvl.Dataset):
 
 
 @pytest.fixture(scope="module")
-def multi_exon_ds_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def multi_exon_ds_path(tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir) -> Path:
     """Build a GVL store where each transcript has multiple exons.
 
     We reuse the BED rows grouped 2-at-a-time as a fake "transcript_id" so the
     splice logic has to concatenate multiple per-region outputs per ploidy.
     """
+    source_vcf = vcf_dir / "filtered_source.vcf.gz"
     tmp = tmp_path_factory.mktemp("rc_packing_multi")
     out = tmp / "multi_exon.gvl"
     reader = VCF(source_vcf)
@@ -241,7 +237,7 @@ def multi_exon_ds_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return out
 
 
-def test_multi_exon_spliced_buffer_packed(multi_exon_ds_path: Path):
+def test_multi_exon_spliced_buffer_packed(multi_exon_ds_path, ref_fasta):
     """Spliced haplotype output: data buffer must equal sum of lengths for both ploidies.
 
     The _cat_length ploidy-interleaving bug produced an oversized/mispopulated
@@ -249,7 +245,7 @@ def test_multi_exon_spliced_buffer_packed(multi_exon_ds_path: Path):
     interleaving bug in one check.
     """
     ds = (
-        gvl.Dataset.open(multi_exon_ds_path, ref_path)
+        gvl.Dataset.open(multi_exon_ds_path, ref_fasta)
         .with_seqs("haplotypes")
         .with_settings(splice_info=("transcript_id", "exon_number"))
     )
@@ -262,15 +258,15 @@ def test_multi_exon_spliced_buffer_packed(multi_exon_ds_path: Path):
         )
 
 
-def test_multi_exon_spliced_matches_fasta_concat(multi_exon_ds_path: Path):
+def test_multi_exon_spliced_matches_fasta_concat(multi_exon_ds_path, ref_fasta):
     """Reference-mode spliced output must equal the concat of per-exon FASTA slices."""
     ds = (
-        gvl.Dataset.open(multi_exon_ds_path, ref_path)
+        gvl.Dataset.open(multi_exon_ds_path, ref_fasta)
         .with_seqs("reference")
         .with_settings(splice_info=("transcript_id", "exon_number"))
     )
     comp = bytes.maketrans(b"ACGTacgt", b"TGCAtgca")
-    with pysam.FastaFile(str(ref_path)) as fa:
+    with pysam.FastaFile(str(ref_fasta)) as fa:
         for row in (
             ds.spliced_regions.with_row_index("sp_idx").head(5).iter_rows(named=True)
         ):
@@ -375,7 +371,7 @@ def test_cds_internal_stops_bounded():
     )
 
 
-def test_spliced_tracks_round_trip(multi_exon_ds_path: Path):
+def test_spliced_tracks_round_trip(multi_exon_ds_path, ref_fasta):
     """Spliced track output: data buffer equals sum of per-element lengths.
 
     Skipped if the fixture has no tracks attached (the default multi-exon
@@ -384,7 +380,7 @@ def test_spliced_tracks_round_trip(multi_exon_ds_path: Path):
     """
     try:
         ds = (
-            gvl.Dataset.open(multi_exon_ds_path, ref_path)
+            gvl.Dataset.open(multi_exon_ds_path, ref_fasta)
             .with_tracks("dummy")
             .with_settings(splice_info=("transcript_id", "exon_number"))
         )
@@ -394,12 +390,12 @@ def test_spliced_tracks_round_trip(multi_exon_ds_path: Path):
     assert out is not None
 
 
-def test_haptracks_splicing_raises(multi_exon_ds_path: Path):
+def test_haptracks_splicing_raises(multi_exon_ds_path, ref_fasta):
     """Haplotype + track splicing is not supported (shape (b, t, p, ~l))."""
     from genvarloader._dataset._reconstruct import HapsTracks
 
     ds = (
-        gvl.Dataset.open(multi_exon_ds_path, ref_path)
+        gvl.Dataset.open(multi_exon_ds_path, ref_fasta)
         .with_seqs("haplotypes")
         .with_tracks("dummy")
         .with_settings(splice_info=("transcript_id", "exon_number"))
