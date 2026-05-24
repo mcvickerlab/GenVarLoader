@@ -549,7 +549,9 @@ class Haps(Reconstructor[_H]):
         ploid_idx = np.arange(genotypes.shape[-2], dtype=np.intp)
         # (region, sample, ploid) index tuple for ravel_multi_index.
         region_sample_ploid_idx = (r_idx[:, None], s_idx[:, None], ploid_idx)
-        geno_offset_idx = np.ravel_multi_index(region_sample_ploid_idx, genotypes.shape[:-1])  # type: ignore[no-matching-overload]  # Ragged.shape is tuple[int | None, ...]; numpy overload expects all-int
+        geno_offset_idx = np.ravel_multi_index(
+            region_sample_ploid_idx, genotypes.shape[:-1]
+        )  # type: ignore[no-matching-overload]  # Ragged.shape is tuple[int | None, ...]; numpy overload expects all-int
         return geno_offset_idx
 
     def _get_variants(
