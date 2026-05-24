@@ -7,7 +7,7 @@ from einops import repeat
 from genvarloader._dataset._reconstruct import Haps
 from pytest_cases import parametrize_with_cases
 
-DDIR = Path(__file__).parent.parent
+DDIR = Path(__file__).parent.parent.parent
 REF = DDIR / "data" / "fasta" / "hg38.fa.bgz"
 
 

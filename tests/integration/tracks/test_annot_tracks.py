@@ -6,7 +6,7 @@ import polars as pl
 from genvarloader._ragged import RaggedAnnotatedHaps
 from pytest import fixture
 
-DDIR = Path(__file__).parent.parent / "data"
+DDIR = Path(__file__).parent.parent.parent / "data"
 REF = DDIR / "fasta" / "hg38.fa.bgz"
 
 
