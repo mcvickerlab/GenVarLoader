@@ -1,6 +1,6 @@
 # Test Suite Overhaul — Status & Resume Notes
 
-**As of:** 2026-05-24 (committed through `fdd02ec`)
+**As of:** 2026-05-24 (committed through `9310226`)
 **Branch:** `worktree-test-suite-overhaul`
 **Worktree:** `/Users/david/projects/GenVarLoader/.claude/worktrees/test-suite-overhaul`
 **PR:** https://github.com/mcvickerlab/GenVarLoader/pull/194 (open)
@@ -22,6 +22,7 @@ Living status snapshot. Read this first when resuming with fresh context — it 
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-variants.md`
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-splice.md`
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-svar-link.md`
+  - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-utility.md`
 
 ---
 
@@ -31,7 +32,7 @@ Living status snapshot. Read this first when resuming with fresh context — it 
 
 - **Non-slow tier:** 351 passed, 3 skipped, 3 deselected, 2 xfailed
 - **Slow tier (1kg, where data exists):** 3 passed
-- **Unit tier alone:** 129 passed, 1 xfailed (~12s combined, 1.3s unit alone)
+- **Unit tier alone:** 138 passed, 1 xfailed (~12s combined, 1.3s unit alone)
 - **Coverage:** 63% line+branch (parity with Phase 3 baseline; no production code modified)
 
 ### File layout
@@ -43,7 +44,8 @@ tests/
 │   ├── __init__.py
 │   ├── ragged.py                   # make_ragged_seqs, make_ragged_intervals
 │   └── reconstruct.py              # make_tracks
-├── unit/                           # ← 129 tests
+├── unit/                           # ← 138 tests
+│   ├── test_utils.py
 │   ├── dataset/
 │   │   ├── genotypes/
 │   │   │   ├── test_choose_exonic_variants.py
@@ -71,7 +73,6 @@ tests/
 │   ├── test_ref_ds.py
 │   ├── test_ref_ds_splicing.py
 │   ├── test_table.py
-│   ├── test_utils.py
 │   ├── dataset/
 │   │   ├── test_dataset.py
 │   │   ├── test_ds_haps.py
@@ -109,6 +110,7 @@ tests/
 | 5 variants | _Variants info-field unit tests | 5 extracted to `unit/variants/test_variants_info_fields.py`; 10 dataset-dependent kept. test_choose_exonic_variants moved whole-file |
 | 5 splice | get_splice_bed move + ref_ds_splicing split | 11 moved to `unit/splice/test_get_splice_bed.py`; 5 RefDataset settings/validation tests extracted to `unit/splice/test_ref_ds_splice_settings.py`; 4 byte-comparison tests stay in integration |
 | 5 svar_link | 7 pydantic-model tests extracted | `unit/dataset/test_svar_link_models.py`; 14 dataset-dependent kept |
+| 5 utility | test_utils.py whole-file move | 9 collected tests (5 audit-Port entries; pytest_cases expands `test_normalize_contig_name` to 5 cases) moved to `unit/test_utils.py`; no source changes; no builder needed |
 
 ---
 
@@ -117,10 +119,6 @@ tests/
 Numbers are best-effort estimates from the audit; verify against the current integration tree before planning.
 
 ### Components with port-bucket tests still in integration
-
-#### Utility (~5 ports — likely fastest next plan)
-
-- `tests/integration/test_utils.py` — 5 ports, 0 keeps per audit. Likely a whole-file move to `tests/unit/test_utils.py` (or `tests/unit/utility/test_utils.py`). Pure helper-function tests with no fixture dependencies. **Risk:** very low.
 
 #### Tracks (broader) — ~14 ports across 3 files
 
@@ -171,17 +169,12 @@ Numbers are best-effort estimates from the audit; verify against the current int
 
 ## Recommended next plan
 
-**Utility component** (`test_utils.py`, 5 ports, whole-file candidate):
+**Tracks (broader)** — Three files, two trivial (1-port each), one larger (`test_table.py` 12 ports). Tackle the trivial ones first, then table separately. Watch for the `utils.py` sibling of `test_random_nonoverlapping.py` (per gotcha 1 + status doc layout note).
 
-- Smallest remaining scope; likely a one-task plan (whole-file move + verify).
-- Validates that the next plan's velocity stays high without further builder work.
-- Frees up `tests/integration/test_utils.py` and gives `tests/unit/` a "test_utils.py" — a sensible location for shared unit helpers if they ever need a home.
+Subsequent order:
 
-After utility, the natural order is:
-
-1. **Tracks (broader)** — Three files, two trivial (1-port each), one larger (`test_table.py` 12 ports). Tackle the trivial ones first, then table separately. Watch for the `utils.py` sibling of `test_random_nonoverlapping.py`.
-2. **Ref / FASTA + reference-fixture promotion** — Could combine into one plan: move `test_fasta.py` and the 2 remaining `test_ref_ds.py` ports, and promote the `reference` fixture to conftest, deduplicating across `test_ref_ds_splicing.py` (integration), `test_ref_ds_splice_settings.py` (unit), and the new unit ref tests.
-3. **Dataset polymorphism / `make_dataset`** — Last. Requires the most builder work but only has 2 specific tests gated on it.
+1. **Ref / FASTA + reference-fixture promotion** — Could combine into one plan: move `test_fasta.py` and the 2 remaining `test_ref_ds.py` ports, and promote the `reference` fixture to conftest, deduplicating across `test_ref_ds_splicing.py` (integration), `test_ref_ds_splice_settings.py` (unit), and the new unit ref tests.
+2. **Dataset polymorphism / `make_dataset`** — Last. Requires the most builder work but only has 2 specific tests gated on it.
 
 Once all components above land:
 - **Phase 6 (integration trim)** — As outlined in design spec. Review each integration-tier file post-overhaul; remove redundancies where unit coverage now subsumes them.
