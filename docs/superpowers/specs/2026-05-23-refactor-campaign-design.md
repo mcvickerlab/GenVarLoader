@@ -1,6 +1,6 @@
 # Refactor Campaign: Readability + Targeted Architecture
 
-**Status:** In progress — PR0, PR1, attrs migration, PR2, PR4, PR5 shipped; PR3 dropped after investigation; PR5c (dead-code), PR6, PR7 pending
+**Status:** In progress — PR0, PR1, attrs migration, PR2, PR4, PR5, PR5c, PR6 shipped; PR3 dropped after investigation; PR7 pending
 **Date:** 2026-05-23
 **Scope:** `python/genvarloader/` (no Rust changes)
 
@@ -14,13 +14,20 @@
 | 2026-05-23 | #185 | PR2 — VCF + PGEN writer dedup via shared `_write_phased_chunked` helper | `refactor/pr2-write-dedup` | Merged. `_write.py`: 832 → 817 lines (−15 net). `_write_from_vcf` / `_write_from_pgen` collapsed to small setup + per-region generators that feed a shared aggregation helper. SVAR untouched (per scope refinement). |
 | 2026-05-23 | — | PR3 dropped after investigation (see "PR3 dropped" section below) | `refactor/pr3-collapse-datasets` (closed) | Dropped. Probed phantom-types + self-typed overloads; concluded the ~150 lines of overload stubs encode the Array/Ragged ADT in Python's type system and are not deletable boilerplate. Net realistic deletion would be ~30 lines of `super()` bodies — not worth the architectural churn. |
 | 2026-05-23 | #187 | PR4 — `OpenRequest` + decompose `Dataset.open` | `refactor/pr4-open-request` | Merged. `_impl.py`: 2156 → 2015 (−141). New `_dataset/_open.py` (262 lines) houses `OpenRequest` with 10 small stage methods. `Dataset.open` becomes a ~20-line facade. Public API unchanged. |
-| 2026-05-23 | (this PR) | PR5 — `ReconstructionRequest` + restructure `Haps._get_haplotypes` | `refactor/pr5-reconstruction-request` | `_reconstruct.py`: 1595 → 1682 lines (+87 net; reorganization adds dataclass + helper, deletes ~30 lines of overloads). `Haps._get_haplotypes` overload triplet replaced with `_reconstruct_haplotypes` / `_reconstruct_annotated_haplotypes`. Splice permutation prep extracted into shared `_permute_request_for_splice`. `get_haps_and_shifts` now a two-stage op (`_prepare_request` → dispatch). Spec revised inline to reflect audit findings; PR5c (dead-code in `write_transformed_track`) carved out as separate small PR. |
+| 2026-05-23 | #188 | PR5 — `ReconstructionRequest` + restructure `Haps._get_haplotypes` | `refactor/pr5-reconstruction-request` | Merged. `_reconstruct.py`: 1595 → 1682 lines (+87 net; reorganization adds dataclass + helper, deletes ~30 lines of overloads). `Haps._get_haplotypes` overload triplet replaced with `_reconstruct_haplotypes` / `_reconstruct_annotated_haplotypes`. Splice permutation prep extracted into shared `_permute_request_for_splice`. `get_haps_and_shifts` now a two-stage op (`_prepare_request` → dispatch). Spec revised inline to reflect audit findings; PR5c (dead-code in `write_transformed_track`) carved out as separate small PR. |
+| 2026-05-23 | #189 | PR5c — delete dead body of `Tracks.write_transformed_track` + add `docs/superpowers/roadmap.md` | `refactor/pr5c-dead-code-roadmap` | Merged. `_reconstruct.py`: 1682 → 1539 (−143). 145 unreachable lines under unconditional `NotImplementedError` deleted. New internal roadmap doc captures the feature's intent (transformed track writing) for future revival; structured to grow. Public API behavior unchanged. |
+| 2026-05-23 | (this PR) | PR6 — file splits + `QueryView` composition | `refactor/pr6-file-splits` | `_reconstruct.py` decomposed: `Ref` → new `_ref.py` (76 lines), `Haps` + `ReconstructionRequest` + `_Variants` → new `_haps.py` (870 lines), `Tracks` + `TrackType` merged into existing `_tracks.py` (379 → 736 lines). `Reconstructor` Protocol moved to new `_protocol.py` (34 lines) to break circular imports. `_reconstruct.py`: 1539 → 310 lines (now just `RefTracks` + `HapsTracks` + `_build_reconstructor` + re-exports). `Dataset.__getitem__` cluster (getitem + `_getitem_(un)spliced` + `_build_splice_plan` + `_rc` + `_pad` + module-level `_regroup`) extracted to new `_query.py` (403 lines) via a typed `QueryView` frozen dataclass; `Dataset.__getitem__` becomes a ~15-line facade. `_impl.py`: 2015 → 1712 lines. Audit-driven design folded in inline (see PR6 section below). |
 
 **Current state of heavyweight files (post the merged PRs):**
 
-- `_dataset/_impl.py` — 2015 lines (was 2253; −238 net, post-PR4)
-- `_dataset/_reconstruct.py` — 1682 lines (was 1525; +157 net, post-PR1 factory + post-PR5 ReconstructionRequest reorganization)
+- `_dataset/_impl.py` — 1712 lines (was 2253; −541 net, post-PR4+PR6)
+- `_dataset/_reconstruct.py` — 310 lines (was 1525; −1215 net — now just compound classes + factory + re-exports)
+- `_dataset/_haps.py` — 870 lines (new in PR6; houses `Haps`, `_Variants`, `ReconstructionRequest`)
+- `_dataset/_tracks.py` — 736 lines (was 379; merged class + numba kernels in PR6)
+- `_dataset/_query.py` — 403 lines (new in PR6; `QueryView` + free-function query path)
 - `_dataset/_open.py` — 262 lines (new in PR4)
+- `_dataset/_ref.py` — 76 lines (new in PR6)
+- `_dataset/_protocol.py` — 34 lines (new in PR6; `Reconstructor` Protocol, lives alone to break import cycle)
 - `_dataset/_write.py` — 817 lines (was 832; −15 after PR2)
 - `_dataset/_reference.py` — 756 lines (unchanged-ish)
 - `_dataset/_genotypes.py` — 571 lines (unchanged)
@@ -338,21 +345,61 @@ PR1 because settings are already a value object.
 **Risk:** None. Was unreachable.
 **Win:** ~145 lines deleted; the file gets clearer.
 
-### PR6 — File splits
+### PR6 — File splits + `QueryView` composition (revised after audit)
 
-With architectural boundaries now real, split `_impl.py` and `_reconstruct.py`
-along the seams:
+**Audit findings (2026-05-23, before implementation):**
 
-- `_dataset/_impl.py` keeps the `Dataset` class itself.
-- `_dataset/_open.py` — created in PR4.
-- `_dataset/_query.py` — `__getitem__` and the spliced/unspliced query paths.
-- `_dataset/_haps.py` / `_dataset/_ref.py` / `_dataset/_tracks.py` (latter
-  already exists) — one source class per file.
+- ✅ Reconstructor classes in `_reconstruct.py` ARE cleanly splittable: each is
+  self-contained with well-defined imports.
+- ⚠️ Existing `_dataset/_tracks.py` is **all numba kernels** (~379 lines), not a
+  home for the `Tracks` class (which lives in `_reconstruct.py`). The original
+  spec wording elided that distinction. Chosen resolution: merge class + kernels
+  into one file (semantically coherent — class is the public face of kernels).
+- ❌ The `_dataset/_query.py` extraction is **not** a mechanical move. The
+  query cluster (`__getitem__`, `_getitem_(un)spliced`, `_build_splice_plan`,
+  `_rc`, `_pad`) touches ~9 fields of Dataset state. Spec called it "mostly
+  mechanical, low risk" — wrong. Chosen resolution: composition via a typed
+  `QueryView` frozen dataclass (matches the PR4 `OpenRequest` / PR5
+  `ReconstructionRequest` idiom). Each query function is then a pure function
+  of the view; testable in isolation; type-safe contract.
+- ⚠️ Cycle hazard: `_ref.py` / `_haps.py` / `_tracks.py` all need
+  `Reconstructor` Protocol, but the dispatcher (`_reconstruct.py`) also needs
+  the leaves for `RefTracks`/`HapsTracks`/`_build_reconstructor`. Chosen
+  resolution: extract `Reconstructor` Protocol into a tiny `_protocol.py`
+  (~34 lines). Clean DAG, no cycles.
 
-**Touches:** mostly mechanical moves + import updates.
-**Risk:** low. No behavior changes.
-**Win:** `_impl.py` and `_reconstruct.py` drop from 2253 / 1525 lines to
-something readable in one sitting.
+**Revised scope (as shipped):**
+
+1. New `_dataset/_protocol.py` — `Reconstructor` Protocol (with `splice_plan`
+   declared in the contract; the original Protocol omitted it even though all
+   implementers used it).
+2. New `_dataset/_ref.py` — `Ref`.
+3. New `_dataset/_haps.py` — `Haps`, `_Variants`, `ReconstructionRequest`.
+4. `_dataset/_tracks.py` merged — existing numba kernels + new `Tracks` +
+   `TrackType` class block.
+5. New `_dataset/_query.py` — `QueryView` dataclass + free functions
+   (`getitem`, `_getitem_unspliced`, `_getitem_spliced`,
+   `build_recon_splice_plan`, `reverse_complement_ragged` (was `Dataset._rc`),
+   `pad` (was `Dataset._pad`), `_regroup`).
+6. `_dataset/_reconstruct.py` slimmed — `RefTracks`, `HapsTracks`,
+   `_build_reconstructor` factory, plus re-exports of all moved symbols so
+   downstream imports (`_impl.py`, `_open.py`, `_dummy.py`) keep working.
+7. `Dataset.__getitem__` becomes a ~15-line facade: build a `QueryView`, call
+   `_query.getitem`. The `inner_ds = self.with_len("ragged")` trick from
+   `_getitem_spliced` is replaced by a direct `output_length="ragged"`
+   argument to the recon call — no inner Dataset construction needed.
+8. `_regroup` moves to `_query.py` (only the query path uses it).
+   `_annot_to_intervals` stays in `_impl.py` (used by `write_annot_tracks`,
+   not the query path).
+
+**Touches:** `_dataset/_reconstruct.py`, `_dataset/_impl.py`,
+`_dataset/_tracks.py`; new `_dataset/{_protocol,_ref,_haps,_query}.py`.
+**Risk:** Low for the splits (mechanical with re-exports preserving import
+paths). Low for the QueryView extraction (pure composition; no MRO concerns;
+the same kernel calls happen with the same arguments).
+**Win:** `_reconstruct.py` 1539 → 310 (−1229); `_impl.py` 2015 → 1712 (−303).
+Each leaf module is small and focused. The query path is testable as free
+functions taking `QueryView`.
 
 ### PR7 — Naming pass + `type: ignore` audit
 
@@ -388,14 +435,20 @@ Final sweep:
   wrong; the overloads encode the Array/Ragged ADT. See the PR3 section above.
 - ✅ **PR4 (shipped #187):** `OpenRequest` + decompose `Dataset.open`.
   `_impl.py`: 2156 → 2015. New `_dataset/_open.py` with 10 small stage methods.
-- ✅ **PR5 (this PR):** `ReconstructionRequest` + restructure
+- ✅ **PR5 (shipped #188):** `ReconstructionRequest` + restructure
   `Haps._get_haplotypes`. Audit (before implementation) revealed two of the
   original spec's premises were wrong (kernel already extracted; insertion-fill
   branching not in `write_transformed_track`); spec was revised inline.
   Parity-risk turned out to be low (kernel call args unchanged); the existing
   test suite is the parity check.
-- **PR5c (next, small):** delete the 145 dead lines under
-  `Tracks.write_transformed_track`'s unconditional `NotImplementedError`.
+- ✅ **PR5c (shipped #189):** delete the 145 dead lines under
+  `Tracks.write_transformed_track`'s unconditional `NotImplementedError`;
+  capture the feature intent in `docs/superpowers/roadmap.md`.
+- ✅ **PR6 (this PR):** reconstructor file splits + `QueryView` composition.
+  Audit before implementation surfaced two design wrinkles (existing
+  `_tracks.py` name collision; the query extraction is not mechanical) that
+  the spec underspecified; both resolved inline. `_reconstruct.py` now
+  ~310 lines (was 1539); `_impl.py` 2015 → 1712.
 - **PR6** is mechanical and only worth doing once the boundaries from PRs 1, 5
   are real.
 - **PR7** is a finisher.
