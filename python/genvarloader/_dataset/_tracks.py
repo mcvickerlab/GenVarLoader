@@ -627,7 +627,7 @@ class Tracks(Reconstructor[_T]):
         assert not isinstance(output_length, int), (
             "splice plan path requires variable/ragged output"
         )
-        # The plan was built with inner_fixed = (n_tracks,) so plan.perm has
+        # The plan was built with inner_fixed = (n_tracks,) so plan.permutation has
         # length B*T indexed in (query, track) C-order: k = query * T + track.
         # Each k_new in the permuted order targets one (query, track) pair; we
         # need to write its bytes into out_buf at plan.permuted_out_offsets[k_new].
@@ -635,7 +635,7 @@ class Tracks(Reconstructor[_T]):
         total = int(splice_plan.permuted_out_offsets[-1])
         out_buf = np.empty(total, np.float32)
 
-        k_old = splice_plan.perm  # length B*T
+        k_old = splice_plan.permutation  # length B*T
         track_of_k = k_old % n_tracks
         query_of_k = k_old // n_tracks
 

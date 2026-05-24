@@ -825,7 +825,7 @@ class Haps(Reconstructor[_H]):
         NDArray[np.bool_] | None,
         NDArray[np.integer] | None,
     ]:
-        """Permute the per-element arrays in ``req`` according to ``splice_plan.perm``.
+        """Permute the per-element arrays in ``req`` according to ``splice_plan.permutation``.
 
         ``geno_offset_idx`` and ``shifts`` have shape ``(B, P)``; flatten to
         ``(B*P,)`` in (query, ploidy) C-order, then permute. The kernel then
@@ -834,27 +834,27 @@ class Haps(Reconstructor[_H]):
         assert req.splice_plan is not None
         splice_plan = req.splice_plan
         ploidy = req.shifts.shape[1] if req.shifts.ndim > 1 else 1
-        perm = splice_plan.perm
+        permutation = splice_plan.permutation
 
-        flat_geno_idx = req.geno_offset_idx.reshape(-1)[perm].astype(
+        flat_geno_idx = req.geno_offset_idx.reshape(-1)[permutation].astype(
             np.intp, copy=False
         )
-        flat_shifts = req.shifts.reshape(-1)[perm].astype(np.int32, copy=False)
+        flat_shifts = req.shifts.reshape(-1)[permutation].astype(np.int32, copy=False)
         # regions has shape (B, 3). For (B*P, 3), each query repeats P times
-        # consecutively, then we apply the same perm.
+        # consecutively, then we apply the same permutation.
         regions_flat = np.repeat(req.regions, ploidy, axis=0)
-        permuted_regions = regions_flat[perm]
+        permuted_regions = regions_flat[permutation]
 
         # keep / keep_offsets: per-k granularity (length B*P + 1).
         if req.keep is not None and req.keep_offsets is not None:
             keep_lens = np.diff(req.keep_offsets)
-            keep_lens_perm = keep_lens[perm]
+            keep_lens_perm = keep_lens[permutation]
             keep_offsets_perm = lengths_to_offsets(
                 keep_lens_perm.astype(np.int64), dtype=np.int64
             )
             keep_perm = np.empty(int(keep_lens_perm.sum()), dtype=np.bool_)
             write_cursor = 0
-            for k_old in perm:
+            for k_old in permutation:
                 s = int(req.keep_offsets[k_old])
                 e = int(req.keep_offsets[k_old + 1])
                 width = e - s

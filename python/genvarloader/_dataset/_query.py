@@ -222,13 +222,13 @@ def _getitem_spliced(
         # Permute the per-region to_rc mask the same way the plan permuted
         # the kernel queries. The plan acts on a flattened (B, *inner_fixed)
         # k-index, so first replicate to_rc across the inner axes, then
-        # gather via plan.perm.
+        # gather via plan.permutation.
         B = regions.shape[0]
-        n_k = int(plan.perm.shape[0])
+        n_k = int(plan.permutation.shape[0])
         inner_factor, rem = divmod(n_k, B)
         if rem != 0:
             raise AssertionError(
-                "plan.perm length is not a multiple of len(regions); "
+                "plan.permutation length is not a multiple of len(regions); "
                 "inner-fixed flatten factor inconsistent."
             )
         to_rc_unperm = regions[:, 3] == -1
@@ -238,7 +238,7 @@ def _getitem_spliced(
             # (B, E) C-order: same value across the inner axis for a given
             # query. np.repeat gives (B*E,) in (query, inner) C-order.
             to_rc_flat = np.repeat(to_rc_unperm, inner_factor)
-        to_rc_per_elem: NDArray[np.bool_] = to_rc_flat[plan.perm]
+        to_rc_per_elem: NDArray[np.bool_] = to_rc_flat[plan.permutation]
         recon = tuple(reverse_complement_ragged(r, to_rc_per_elem) for r in recon)
 
     # Rewrap each per-element Ragged with the plan's group_offsets to expose

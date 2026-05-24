@@ -456,7 +456,7 @@ class RefDataset(Generic[T]):
         if self.rc_neg:
             to_rc_unperm = regions[:, 3] == -1
             if to_rc_unperm.any():
-                to_rc_perm = to_rc_unperm[plan.perm]
+                to_rc_perm = to_rc_unperm[plan.permutation]
                 per_elem = Ragged(
                     ak.to_packed(
                         ak.where(
@@ -701,7 +701,7 @@ def _fetch_spliced_ref(
     This is the kernel-dispatch core shared by :class:`Ref.__call__`'s splice
     branch and :meth:`RefDataset._getitem_spliced`.
     """
-    permuted_regions = regions[plan.perm]
+    permuted_regions = regions[plan.permutation]
     raw = get_reference(
         regions=permuted_regions,
         out_offsets=plan.permuted_out_offsets,
