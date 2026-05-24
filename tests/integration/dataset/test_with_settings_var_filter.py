@@ -6,29 +6,21 @@ old with_settings only evolved self._seqs, silently dropping the
 filter from the code path that __getitem__ actually exercises.
 """
 
-from pathlib import Path
-
 import genvarloader as gvl
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_DATA_DIR = _REPO_ROOT / "data"
-
 
 @pytest.fixture
-def svar_gvl_path(tmp_path):
-    svar_path = _DATA_DIR / "filtered.svar"
-    bed_path = _DATA_DIR / "source.bed"
-    assert svar_path.is_dir(), f"missing fixture {svar_path}; run pixi run -e dev gen"
+def svar_gvl_path(tmp_path, filtered_svar, source_bed):
+    assert filtered_svar.is_dir(), f"missing fixture {filtered_svar}; run pixi run -e dev gen"
     out = tmp_path / "ds.gvl"
-    gvl.write(path=out, bed=bed_path, variants=svar_path, overwrite=True)
+    gvl.write(path=out, bed=source_bed, variants=filtered_svar, overwrite=True)
     return out
 
 
-def test_with_settings_var_filter_propagates_to_recon(svar_gvl_path):
-    ref_path = _DATA_DIR / "fasta" / "hg38.fa.bgz"
+def test_with_settings_var_filter_propagates_to_recon(svar_gvl_path, ref_fasta):
     ds = (
-        gvl.Dataset.open(svar_gvl_path, reference=ref_path)
+        gvl.Dataset.open(svar_gvl_path, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_settings(var_filter="exonic")
     )
@@ -39,10 +31,9 @@ def test_with_settings_var_filter_propagates_to_recon(svar_gvl_path):
     )
 
 
-def test_with_settings_var_filter_false_clears_recon(svar_gvl_path):
-    ref_path = _DATA_DIR / "fasta" / "hg38.fa.bgz"
+def test_with_settings_var_filter_false_clears_recon(svar_gvl_path, ref_fasta):
     ds = (
-        gvl.Dataset.open(svar_gvl_path, reference=ref_path)
+        gvl.Dataset.open(svar_gvl_path, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_settings(var_filter="exonic")
         .with_settings(var_filter=False)
