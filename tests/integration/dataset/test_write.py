@@ -12,31 +12,29 @@ from polars.testing.asserts import assert_frame_equal
 from pytest import fixture, mark
 from pytest_cases import parametrize_with_cases
 
-ddir = Path(__file__).parents[2] / "data"
 
-
-def reader_vcf():
-    vcf = VCF(ddir / "vcf" / "filtered_sample.vcf.gz")
+def reader_vcf(vcf_dir):
+    vcf = VCF(vcf_dir / "filtered_sample.vcf.gz")
     vcf._write_gvi_index()
     vcf._load_index()
     return vcf
 
 
-def reader_pgen():
-    index_path = ddir / "pgen" / "filtered_sample.pvar.gvi"
+def reader_pgen(pgen_dir):
+    index_path = pgen_dir / "filtered_sample.pvar.gvi"
     index_path.unlink()
-    pgen = PGEN(ddir / "pgen" / "filtered_sample.pgen")
+    pgen = PGEN(pgen_dir / "filtered_sample.pgen")
     return pgen
 
 
 @fixture
-def bed():
-    return sp.bed.read(ddir / "vcf" / "sample.bed")
+def bed(vcf_dir: Path):
+    return sp.bed.read(vcf_dir / "sample.bed")
 
 
 @fixture
-def ref():
-    return ddir / "fasta" / "hg38.fa.bgz"
+def ref(ref_fasta: Path):
+    return ref_fasta
 
 
 @mark.skip
@@ -104,17 +102,19 @@ def test_write(reader: Reader, bed: pl.DataFrame, ref: Path, tmp_path):
         assert ak.all(actual[mask][:, :len_] == desired[mask][:, :len_])  # type: ignore
 
 
-def test_write_errors_when_post_index_budget_too_small(tmp_path, monkeypatch):
+def test_write_errors_when_post_index_budget_too_small(
+    tmp_path, monkeypatch, vcf_dir: Path, source_bed: Path
+):
     """If max_mem minus the variant index leaves no room for even one
     variant chunk, gvl.write raises ValueError instead of silently
     blowing the budget."""
     import pytest
 
-    vcf = VCF(ddir / "vcf" / "filtered_source.vcf.gz")
+    vcf = VCF(vcf_dir / "filtered_source.vcf.gz")
     vcf._write_gvi_index()
     vcf._load_index()
 
-    bed = sp.bed.read(ddir / "source.bed")
+    bed = sp.bed.read(source_bed)
 
     # Force nbytes large enough that effective_max_mem < bytes_per_var.
     # bytes_per_var = n_samples * ploidy (VCF, Genos8 = 1 byte).
@@ -127,13 +127,13 @@ def test_write_errors_when_post_index_budget_too_small(tmp_path, monkeypatch):
         gvl.write(out, bed, vcf, max_mem=max_mem)
 
 
-def test_write_loads_lazy_vcf_index(tmp_path):
+def test_write_loads_lazy_vcf_index(tmp_path, vcf_dir: Path, source_bed: Path):
     """gvl.write should load the index itself when given a VCF constructed
     with with_gvi_index=False, and produce a valid dataset."""
-    vcf = VCF(ddir / "vcf" / "filtered_source.vcf.gz", with_gvi_index=False)
+    vcf = VCF(vcf_dir / "filtered_source.vcf.gz", with_gvi_index=False)
     assert vcf._index is None
 
-    bed = sp.bed.read(ddir / "source.bed")
+    bed = sp.bed.read(source_bed)
     out = tmp_path / "test.gvl"
     gvl.write(out, bed, vcf)
 
@@ -141,13 +141,13 @@ def test_write_loads_lazy_vcf_index(tmp_path):
     assert (out / "genotypes" / "variants.arrow").exists()
 
 
-def test_write_loads_lazy_pgen_index(tmp_path):
+def test_write_loads_lazy_pgen_index(tmp_path, pgen_dir: Path, source_bed: Path):
     """gvl.write should load the index itself when given a PGEN constructed
     with load_index=False, and produce a valid dataset."""
-    pgen = PGEN(ddir / "pgen" / "filtered_source.pgen", load_index=False)
+    pgen = PGEN(pgen_dir / "filtered_source.pgen", load_index=False)
     assert pgen._index is None
 
-    bed = sp.bed.read(ddir / "source.bed")
+    bed = sp.bed.read(source_bed)
     out = tmp_path / "test.gvl"
     gvl.write(out, bed, pgen)
 
