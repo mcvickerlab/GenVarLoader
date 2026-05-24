@@ -547,8 +547,9 @@ class Haps(Reconstructor[_H]):
     ) -> NDArray[np.intp]:
         r_idx, s_idx = np.unravel_index(idx, genotypes.shape[:2])  # type: ignore
         ploid_idx = np.arange(genotypes.shape[-2], dtype=np.intp)
-        rsp_idx = (r_idx[:, None], s_idx[:, None], ploid_idx)
-        geno_offset_idx = np.ravel_multi_index(rsp_idx, genotypes.shape[:-1])  # type: ignore
+        # (region, sample, ploid) index tuple for ravel_multi_index.
+        region_sample_ploid_idx = (r_idx[:, None], s_idx[:, None], ploid_idx)
+        geno_offset_idx = np.ravel_multi_index(region_sample_ploid_idx, genotypes.shape[:-1])  # type: ignore
         return geno_offset_idx
 
     def _get_variants(
