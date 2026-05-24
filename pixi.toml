@@ -125,6 +125,10 @@ test = { cmd = "pytest tests && cargo test --release", depends-on = [
     "gen",
     "gen-1kg",
 ] }
+test-cov = { cmd = "pytest tests --cov --cov-report=term-missing --cov-report=html --cov-report=xml", depends-on = [
+    "gen",
+    "gen-1kg",
+] }
 typecheck = { cmd = "pyrefly check" }
 
 [feature.docs.tasks]
