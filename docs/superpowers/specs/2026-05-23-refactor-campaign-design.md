@@ -1,6 +1,6 @@
 # Refactor Campaign: Readability + Targeted Architecture
 
-**Status:** In progress — PR0, PR1, attrs migration, PR2 shipped; PR3 dropped after investigation; PR4+ pending
+**Status:** In progress — PR0, PR1, attrs migration, PR2, PR4, PR5 shipped; PR3 dropped after investigation; PR5c (dead-code), PR6, PR7 pending
 **Date:** 2026-05-23
 **Scope:** `python/genvarloader/` (no Rust changes)
 
@@ -13,11 +13,14 @@
 | 2026-05-23 | #183 | attrs → stdlib dataclasses migration (out-of-band, not numbered in the campaign) | `refactor/attrs-to-dataclass` | Merged. 10 source files + tests migrated to `@dataclass(slots=True)`; `attrs` dropped from `pyproject.toml` / `pixi.toml`. Zero behavioral changes. Motivated by pyrefly's weaker support for attrs. |
 | 2026-05-23 | #185 | PR2 — VCF + PGEN writer dedup via shared `_write_phased_chunked` helper | `refactor/pr2-write-dedup` | Merged. `_write.py`: 832 → 817 lines (−15 net). `_write_from_vcf` / `_write_from_pgen` collapsed to small setup + per-region generators that feed a shared aggregation helper. SVAR untouched (per scope refinement). |
 | 2026-05-23 | — | PR3 dropped after investigation (see "PR3 dropped" section below) | `refactor/pr3-collapse-datasets` (closed) | Dropped. Probed phantom-types + self-typed overloads; concluded the ~150 lines of overload stubs encode the Array/Ragged ADT in Python's type system and are not deletable boilerplate. Net realistic deletion would be ~30 lines of `super()` bodies — not worth the architectural churn. |
+| 2026-05-23 | #187 | PR4 — `OpenRequest` + decompose `Dataset.open` | `refactor/pr4-open-request` | Merged. `_impl.py`: 2156 → 2015 (−141). New `_dataset/_open.py` (262 lines) houses `OpenRequest` with 10 small stage methods. `Dataset.open` becomes a ~20-line facade. Public API unchanged. |
+| 2026-05-23 | (this PR) | PR5 — `ReconstructionRequest` + restructure `Haps._get_haplotypes` | `refactor/pr5-reconstruction-request` | `_reconstruct.py`: 1595 → 1682 lines (+87 net; reorganization adds dataclass + helper, deletes ~30 lines of overloads). `Haps._get_haplotypes` overload triplet replaced with `_reconstruct_haplotypes` / `_reconstruct_annotated_haplotypes`. Splice permutation prep extracted into shared `_permute_request_for_splice`. `get_haps_and_shifts` now a two-stage op (`_prepare_request` → dispatch). Spec revised inline to reflect audit findings; PR5c (dead-code in `write_transformed_track`) carved out as separate small PR. |
 
 **Current state of heavyweight files (post the merged PRs):**
 
-- `_dataset/_impl.py` — 2156 lines (was 2253; −97)
-- `_dataset/_reconstruct.py` — 1595 lines (was 1525; +70 from factory + view-state work, expected)
+- `_dataset/_impl.py` — 2015 lines (was 2253; −238 net, post-PR4)
+- `_dataset/_reconstruct.py` — 1682 lines (was 1525; +157 net, post-PR1 factory + post-PR5 ReconstructionRequest reorganization)
+- `_dataset/_open.py` — 262 lines (new in PR4)
 - `_dataset/_write.py` — 817 lines (was 832; −15 after PR2)
 - `_dataset/_reference.py` — 756 lines (unchanged-ish)
 - `_dataset/_genotypes.py` — 571 lines (unchanged)
@@ -302,28 +305,38 @@ PR1 because settings are already a value object.
 **Risk:** low–medium. Splits a 206-line method; needs careful parity testing.
 **Win:** `open()` shrinks to ~30 lines; resolution stages testable in isolation.
 
-### PR5 — `ReconstructionRequest` + extract haplotype kernel
+### PR5 — `ReconstructionRequest` + restructure `Haps._get_haplotypes` (revised after audit)
 
-Introduce a `ReconstructionRequest` value object describing *what* to reconstruct
-(region, sample, splice plan if any, annotation flag). The three overloads of
-`Haps._get_haplotypes` collapse to one method taking the request. Same treatment
-for `Tracks.write_transformed_track` (166 lines) — split the insertion-fill
-strategies into named helpers.
+**Audit findings (2026-05-23, before implementation):**
 
-**Critical for forward compatibility:** the haplotype-reconstruction *kernel*
-must remain callable independent of region-major iteration. The current
-`Haps._get_haplotypes` does too much — it mixes the per-window reconstruction
-kernel with iteration plumbing. The kernel is extracted as a pure function (or
-method on `Haps`) that takes (variants, samples, reference window, optional
-splice plan) and returns sequences. This was originally scoped to the old PR5
-(Pipeline composition); since that PR is no longer needed, the kernel extraction
-folds in here.
+- ✅ Verified: `Haps._get_haplotypes` is 3 signatures (2 `@overload` stubs + impl) in ~167 lines, with two distinct internal paths (no-splice ~50 lines, splice-plan ~80 lines).
+- ❌ Disproven: `Tracks.write_transformed_track` is 166 lines, but line 1189 unconditionally raises `NotImplementedError` — the 145 lines below are unreachable dead code. There is **zero insertion-fill branching** in it. The actual insertion-fill dispatch lives in `_dataset/_tracks.py:_apply_insertion_fill` (a small numba helper, ~30 lines, not 166). Moved to a separate small PR (see PR5c below).
+- ❌ Already done: the "haplotype-reconstruction kernel must be callable independent of region-major iteration" is already true. `_dataset/_genotypes.py:reconstruct_haplotypes_from_sparse` is a numba-jit pure function taking raw arrays (variants, samples, ref window, optional keep mask, optional annotation buffers). A future variant-major class can call it directly. No further kernel extraction needed.
+- ⚠️ Misframed: a `ReconstructionRequest` for `_get_haplotypes` alone (one caller chain) buys little. The *real* opportunity is to extract `_prepare_request()` out of `get_haps_and_shifts` (the ~60 lines that compute `geno_offset_idx`, `keep`, `keep_offsets`, `shifts`, `out_offsets`, `diffs`, `hap_lengths`) into a frozen dataclass `ReconstructionRequest` consumed by `_get_haplotypes` and `_get_variants`. That gives a clean prep → dispatch seam and a stable shape for the future variant-major class to construct directly.
 
-**Touches:** `_dataset/_reconstruct.py`, callers.
-**Risk:** medium. Numerical parity verification.
-**Win:** overload triplet disappears; 167-line and 166-line methods
-decomposed; future variant-major class can construct requests without going
-through region-major iteration.
+**Revised scope (PR5):**
+
+1. Introduce `ReconstructionRequest` (frozen dataclass with `slots=True`) holding the per-batch prep state.
+2. Extract `Haps._prepare_request()` returning a `ReconstructionRequest`.
+3. Replace `Haps._get_haplotypes` (2 overloads + 1 impl) with two named methods: `_reconstruct_haplotypes(req)` and `_reconstruct_annotated_haplotypes(req)`. Drop the overload triplet entirely.
+4. Extract `_permute_request_for_splice(req)` as a shared helper for the splice-plan branch of both methods.
+5. Rewire `get_haps_and_shifts` to: `req = _prepare_request(...); dispatch on self.kind`. Preserve the 7-tuple return shape so `HapsTracks.__call__` consumers stay unchanged.
+
+**Out of scope (deferred to PR5c):**
+
+- `Tracks.write_transformed_track` dead-code deletion (145 lines under unconditional `NotImplementedError`).
+
+**Touches:** `_dataset/_reconstruct.py`.
+**Risk:** low. The kernel calls are unchanged (same args, same library call); the change is purely a reorganization of the Python wrapper around the numba kernel. Numerical parity is verified by the existing test suite (488 pytest + cargo).
+**Win:** overload triplet eliminated; `get_haps_and_shifts` is now a two-stage operation (prep → kernel); a future variant-major class can construct a `ReconstructionRequest` and call the kernel-facing methods directly without going through region-major preparation.
+
+### PR5c — Delete dead code in `Tracks.write_transformed_track`
+
+`Tracks.write_transformed_track` unconditionally raises `NotImplementedError` at line 1189 of `_dataset/_reconstruct.py`. The 145 lines of body below are unreachable. Replace the method body with `raise NotImplementedError(...)` and a one-line comment about why it's stubbed.
+
+**Touches:** `_dataset/_reconstruct.py`.
+**Risk:** None. Was unreachable.
+**Win:** ~145 lines deleted; the file gets clearer.
 
 ### PR6 — File splits
 
@@ -373,11 +386,16 @@ Final sweep:
   Refined scope (SVAR stays as-is).
 - ❌ **PR3 (dropped):** the "~150 lines of overload boilerplate" reading was
   wrong; the overloads encode the Array/Ragged ADT. See the PR3 section above.
-- **PR4 (next):** `OpenRequest` + decompose `Dataset.open`. Depends on PR1's
-  factory being merged (done). Creates `_dataset/_open.py`.
-- **PR5** is the largest remaining architectural change and carries
-  numerical-parity risk. Sequenced after PRs 1, 2, 4 so the surrounding code is
-  already tidied (clearer blast radius, easier review).
+- ✅ **PR4 (shipped #187):** `OpenRequest` + decompose `Dataset.open`.
+  `_impl.py`: 2156 → 2015. New `_dataset/_open.py` with 10 small stage methods.
+- ✅ **PR5 (this PR):** `ReconstructionRequest` + restructure
+  `Haps._get_haplotypes`. Audit (before implementation) revealed two of the
+  original spec's premises were wrong (kernel already extracted; insertion-fill
+  branching not in `write_transformed_track`); spec was revised inline.
+  Parity-risk turned out to be low (kernel call args unchanged); the existing
+  test suite is the parity check.
+- **PR5c (next, small):** delete the 145 dead lines under
+  `Tracks.write_transformed_track`'s unconditional `NotImplementedError`.
 - **PR6** is mechanical and only worth doing once the boundaries from PRs 1, 5
   are real.
 - **PR7** is a finisher.
