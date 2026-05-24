@@ -159,7 +159,7 @@ class RaggedVariants(ak.Array):
 
         return type(self)(**reshaped)
 
-    def squeeze(self, **kwargs) -> Self:
+    def squeeze(self, axis: int | None = None, **kwargs) -> Self:
         """Squeeze first axis."""
         return self[0]
 
