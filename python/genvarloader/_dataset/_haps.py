@@ -180,6 +180,7 @@ class Haps(Reconstructor[_H]):
             ["alt", "ilen", "start"]
             + list(self.variants.info.keys())
             + (["ref"] if self.variants.ref is not None else [])
+            + (["dosage"] if self.dosages is not None else [])
         )
 
         if (
@@ -597,7 +598,7 @@ class Haps(Reconstructor[_H]):
                 self.variants.ilen[v_idxs], genos.shape, genos.offsets
             )
 
-        if self.dosages is not None:
+        if self.dosages is not None and "dosage" in self.var_fields:
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
             dosages = self.dosages[r, s]
             if _keep is not None:
