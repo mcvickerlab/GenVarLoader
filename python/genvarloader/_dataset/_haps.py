@@ -93,17 +93,24 @@ class _Variants:
     info: dict[str, NDArray[np.number]]
 
     @classmethod
-    def from_table(cls, path: str | Path, one_based: bool = True):
+    def from_table(
+        cls,
+        path: str | Path,
+        one_based: bool = True,
+        info_fields: set[str] | None = None,
+    ):
         """
         Loads variant info from a table. Must always have POS, ILEN, and ALT.
-        Any numeric columns will be loaded as info.
 
         Parameters
         ----------
         path : str | Path
-            The path to the variants table or a polars DataFrame.
+            The path to the variants table.
         one_based : bool, optional
             Whether the variants are one-based, by default False.
+        info_fields
+            Optional whitelist of numeric column names to load as info.
+            If ``None`` (default), load every numeric column except POS/ILEN.
         """
         path = Path(path).resolve()
         variants = pl.read_ipc(path, memory_map=False)
@@ -126,7 +133,9 @@ class _Variants:
         info = {
             k: variants[k].to_numpy()
             for k, v in variants.schema.items()
-            if v.is_numeric() and k not in {"POS", "ILEN"}
+            if v.is_numeric()
+            and k not in {"POS", "ILEN"}
+            and (info_fields is None or k in info_fields)
         }
 
         ref = (

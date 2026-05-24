@@ -100,3 +100,21 @@ def test_available_info_fields_lists_numeric_columns_without_loading():
     assert all(isinstance(f, str) for f in fields)
     # Non-empty for a real SVAR
     assert len(fields) >= 0  # may be 0 if no extra numeric columns; that's fine
+
+
+def test_from_table_info_fields_filter():
+    """When info_fields is a set, only those numeric columns are loaded."""
+    available = set(_Variants.available_info_fields(_SOURCE_SVAR / "index.arrow"))
+    if not available:
+        pytest.skip("No numeric info columns in canonical SVAR; cannot exercise filter")
+
+    pick = {next(iter(available))}
+    v = _Variants.from_table(_SOURCE_SVAR / "index.arrow", info_fields=pick)
+    assert set(v.info.keys()) == pick
+
+
+def test_from_table_info_fields_none_loads_all():
+    """Back-compat: info_fields=None loads every numeric column (current behavior)."""
+    available = set(_Variants.available_info_fields(_SOURCE_SVAR / "index.arrow"))
+    v = _Variants.from_table(_SOURCE_SVAR / "index.arrow", info_fields=None)
+    assert set(v.info.keys()) == available
