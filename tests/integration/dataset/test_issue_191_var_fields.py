@@ -4,7 +4,6 @@ See docs/superpowers/specs/2026-05-24-issue-191-var-fields-loading-design.md.
 """
 
 import shutil
-from pathlib import Path
 
 import genvarloader as gvl
 import numpy as np
@@ -12,18 +11,13 @@ import pytest
 from genoray._types import DOSAGE_TYPE
 from genvarloader._dataset._haps import _Variants
 
-_DATA = Path(__file__).resolve().parents[2] / "data"
-_REF = _DATA / "fasta" / "hg38.fa.bgz"
-_SOURCE_SVAR = _DATA / "filtered.svar"
-_SOURCE_BED = _DATA / "source.bed"
-
 
 @pytest.fixture
-def svar_with_dosages_ds(tmp_path):
+def svar_with_dosages_ds(tmp_path, filtered_svar, source_bed):
     """Copy the canonical SVAR to tmp_path, add a synthetic dosages.npy, then
     write a fresh GVL dataset pointing at it. Returns the GVL path."""
     svar_copy = tmp_path / "filtered.svar"
-    shutil.copytree(_SOURCE_SVAR, svar_copy)
+    shutil.copytree(filtered_svar, svar_copy)
 
     v_idxs_bytes = (svar_copy / "variant_idxs.npy").stat().st_size
     n_records = v_idxs_bytes // np.dtype(np.uint32).itemsize
@@ -38,18 +32,18 @@ def svar_with_dosages_ds(tmp_path):
     del mm
 
     gvl_path = tmp_path / "ds.gvl"
-    gvl.write(path=gvl_path, bed=_SOURCE_BED, variants=svar_copy, overwrite=True)
+    gvl.write(path=gvl_path, bed=source_bed, variants=svar_copy, overwrite=True)
     return gvl_path
 
 
-def test_dosage_absent_when_not_requested(svar_with_dosages_ds):
+def test_dosage_absent_when_not_requested(svar_with_dosages_ds, ref_fasta):
     """Regression: bug from issue #191.
 
     Dataset has dosages on disk; user did NOT request dosage in var_fields.
     The output RaggedVariants must not contain a `dosage` field.
     """
     ds = (
-        gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+        gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
         .with_len("ragged")
         .with_seqs("variants")
         .with_settings(var_fields=["alt", "ref", "start"])
@@ -60,10 +54,10 @@ def test_dosage_absent_when_not_requested(svar_with_dosages_ds):
     )
 
 
-def test_dosage_present_when_requested(svar_with_dosages_ds):
+def test_dosage_present_when_requested(svar_with_dosages_ds, ref_fasta):
     """Sanity: opting in adds the field."""
     ds = (
-        gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+        gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
         .with_len("ragged")
         .with_seqs("variants")
         .with_settings(var_fields=["alt", "ref", "start", "dosage"])
@@ -72,26 +66,26 @@ def test_dosage_present_when_requested(svar_with_dosages_ds):
     assert "dosage" in batch.fields
 
 
-def test_available_var_fields_includes_dosage_when_present(svar_with_dosages_ds):
-    ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+def test_available_var_fields_includes_dosage_when_present(svar_with_dosages_ds, ref_fasta):
+    ds = gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
     assert "dosage" in ds.available_var_fields
 
 
-def test_available_var_fields_excludes_dosage_when_absent():
+def test_available_var_fields_excludes_dosage_when_absent(phased_svar_gvl, ref_fasta):
     # The canonical SVAR (no dosages.npy) — opening the existing fixture
     # should not list dosage as available.
     ds = gvl.Dataset.open(
-        _DATA / "phased_dataset.svar.gvl",
-        _REF,
+        phased_svar_gvl,
+        ref_fasta,
         rc_neg=False,
     )
     assert "dosage" not in ds.available_var_fields
 
 
-def test_available_info_fields_lists_numeric_columns_without_loading():
+def test_available_info_fields_lists_numeric_columns_without_loading(filtered_svar):
     """Schema peek: returns numeric columns from the variants table without
     materializing data."""
-    fields = _Variants.available_info_fields(_SOURCE_SVAR / "index.arrow")
+    fields = _Variants.available_info_fields(filtered_svar / "index.arrow")
     # Canonical SVAR has at least AF in its index.
     # POS and ILEN must NOT appear — they're treated as positional, not info.
     assert "POS" not in fields
@@ -102,27 +96,27 @@ def test_available_info_fields_lists_numeric_columns_without_loading():
     assert len(fields) >= 0  # may be 0 if no extra numeric columns; that's fine
 
 
-def test_from_table_info_fields_filter():
+def test_from_table_info_fields_filter(filtered_svar):
     """When info_fields is a set, only those numeric columns are loaded."""
-    available = set(_Variants.available_info_fields(_SOURCE_SVAR / "index.arrow"))
+    available = set(_Variants.available_info_fields(filtered_svar / "index.arrow"))
     if not available:
         pytest.skip("No numeric info columns in canonical SVAR; cannot exercise filter")
 
     pick = {next(iter(available))}
-    v = _Variants.from_table(_SOURCE_SVAR / "index.arrow", info_fields=pick)
+    v = _Variants.from_table(filtered_svar / "index.arrow", info_fields=pick)
     assert set(v.info.keys()) == pick
 
 
-def test_from_table_info_fields_none_loads_all():
+def test_from_table_info_fields_none_loads_all(filtered_svar):
     """Back-compat: info_fields=None loads every numeric column (current behavior)."""
-    available = set(_Variants.available_info_fields(_SOURCE_SVAR / "index.arrow"))
-    v = _Variants.from_table(_SOURCE_SVAR / "index.arrow", info_fields=None)
+    available = set(_Variants.available_info_fields(filtered_svar / "index.arrow"))
+    v = _Variants.from_table(filtered_svar / "index.arrow", info_fields=None)
     assert set(v.info.keys()) == available
 
 
-def test_load_info_extends_info_dict():
+def test_load_info_extends_info_dict(filtered_svar):
     """load_info reads only the missing fields from disk and merges them."""
-    available = set(_Variants.available_info_fields(_SOURCE_SVAR / "index.arrow"))
+    available = set(_Variants.available_info_fields(filtered_svar / "index.arrow"))
     if not available:
         pytest.skip(
             "No numeric info columns in canonical SVAR; cannot exercise load_info"
@@ -130,15 +124,15 @@ def test_load_info_extends_info_dict():
 
     pick = next(iter(available))
     # Start with empty info
-    v = _Variants.from_table(_SOURCE_SVAR / "index.arrow", info_fields=set())
+    v = _Variants.from_table(filtered_svar / "index.arrow", info_fields=set())
     assert pick not in v.info
 
     v.load_info([pick])
     assert pick in v.info
 
 
-def test_load_info_idempotent_for_already_loaded_fields():
-    v = _Variants.from_table(_SOURCE_SVAR / "index.arrow", info_fields=None)
+def test_load_info_idempotent_for_already_loaded_fields(filtered_svar):
+    v = _Variants.from_table(filtered_svar / "index.arrow", info_fields=None)
     already = list(v.info.keys())
     if not already:
         pytest.skip("No numeric info columns in canonical SVAR")
@@ -148,10 +142,10 @@ def test_load_info_idempotent_for_already_loaded_fields():
     assert v.info[already[0]] is arr0
 
 
-def test_haps_from_path_filters_info_loading(svar_with_dosages_ds):
+def test_haps_from_path_filters_info_loading(svar_with_dosages_ds, ref_fasta):
     """from_path(var_fields=[default]) does not load extra numeric info columns
     or open the dosages memmap."""
-    ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+    ds = gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
     haps = ds._seqs  # type: ignore[attr-defined]
     # Default var_fields: only alt/ilen/start. info dict must not contain extras.
     assert haps.var_fields == ["alt", "ilen", "start"]
@@ -160,21 +154,21 @@ def test_haps_from_path_filters_info_loading(svar_with_dosages_ds):
     assert haps.dosages is None
 
 
-def test_haps_available_var_fields_from_schema(svar_with_dosages_ds):
+def test_haps_available_var_fields_from_schema(svar_with_dosages_ds, ref_fasta):
     """available_var_fields reflects the file's schema + dosage presence,
     not what was actually loaded."""
-    ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+    ds = gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
     assert "dosage" in ds.available_var_fields
     # ref is also discoverable because the SVAR has a REF column
     assert "ref" in ds.available_var_fields
 
 
-def test_dataset_open_accepts_var_fields(svar_with_dosages_ds):
+def test_dataset_open_accepts_var_fields(svar_with_dosages_ds, ref_fasta):
     """Dataset.open(var_fields=...) routes through to Haps.from_path so the
     requested fields are loaded eagerly at open time."""
     ds = gvl.Dataset.open(
         svar_with_dosages_ds,
-        _REF,
+        ref_fasta,
         rc_neg=False,
         var_fields=["alt", "ilen", "start", "dosage"],
     )
@@ -183,16 +177,16 @@ def test_dataset_open_accepts_var_fields(svar_with_dosages_ds):
     assert haps.dosages is not None
 
 
-def test_dataset_open_default_var_fields_is_minimum_useful_set(svar_with_dosages_ds):
-    ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+def test_dataset_open_default_var_fields_is_minimum_useful_set(svar_with_dosages_ds, ref_fasta):
+    ds = gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
     assert ds.active_var_fields == ["alt", "ilen", "start"]
 
 
-def test_with_settings_lazily_loads_new_info_field(svar_with_dosages_ds):
+def test_with_settings_lazily_loads_new_info_field(svar_with_dosages_ds, filtered_svar, ref_fasta):
     """Opening with default var_fields does not load AF (or other info columns).
     with_settings(var_fields=[..., 'AF']) should lazily extend the info dict."""
-    ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
-    available_info = set(_Variants.available_info_fields(_SOURCE_SVAR / "index.arrow"))
+    ds = gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
+    available_info = set(_Variants.available_info_fields(filtered_svar / "index.arrow"))
     if not available_info:
         pytest.skip("No numeric info columns; cannot test lazy info expansion")
 
@@ -205,10 +199,10 @@ def test_with_settings_lazily_loads_new_info_field(svar_with_dosages_ds):
     assert new_field in haps_after.variants.info
 
 
-def test_with_settings_lazily_loads_dosages(svar_with_dosages_ds):
+def test_with_settings_lazily_loads_dosages(svar_with_dosages_ds, ref_fasta):
     """Opening with default var_fields does not memmap dosages.
     with_settings(var_fields=[..., 'dosage']) should memmap them."""
-    ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+    ds = gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
     assert ds._seqs.dosages is None  # type: ignore[attr-defined]
 
     ds2 = ds.with_settings(var_fields=["alt", "ilen", "start", "dosage"])
