@@ -184,3 +184,32 @@ def test_dataset_open_accepts_var_fields(svar_with_dosages_ds):
 def test_dataset_open_default_var_fields_is_minimum_useful_set(svar_with_dosages_ds):
     ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
     assert ds.active_var_fields == ["alt", "ilen", "start"]
+
+
+def test_with_settings_lazily_loads_new_info_field(svar_with_dosages_ds):
+    """Opening with default var_fields does not load AF (or other info columns).
+    with_settings(var_fields=[..., 'AF']) should lazily extend the info dict."""
+    ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+    available_info = set(
+        _Variants.available_info_fields(_SOURCE_SVAR / "index.arrow")
+    )
+    if not available_info:
+        pytest.skip("No numeric info columns; cannot test lazy info expansion")
+
+    new_field = next(iter(available_info))
+    haps_before = ds._seqs  # type: ignore[attr-defined]
+    assert new_field not in haps_before.variants.info
+
+    ds2 = ds.with_settings(var_fields=["alt", "ilen", "start", new_field])
+    haps_after = ds2._seqs  # type: ignore[attr-defined]
+    assert new_field in haps_after.variants.info
+
+
+def test_with_settings_lazily_loads_dosages(svar_with_dosages_ds):
+    """Opening with default var_fields does not memmap dosages.
+    with_settings(var_fields=[..., 'dosage']) should memmap them."""
+    ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+    assert ds._seqs.dosages is None  # type: ignore[attr-defined]
+
+    ds2 = ds.with_settings(var_fields=["alt", "ilen", "start", "dosage"])
+    assert ds2._seqs.dosages is not None  # type: ignore[attr-defined]

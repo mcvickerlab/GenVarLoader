@@ -299,6 +299,19 @@ class Dataset:
             if missing or not isinstance(self._seqs, Haps):
                 raise ValueError(f"Missing variant fields: {missing}")
             haps = to_evolve.get("_seqs", self._seqs)
+            # Lazily load any newly-requested info columns into the existing
+            # _Variants struct (mutates haps.variants.info in place).
+            builtin = {"alt", "ilen", "start", "ref", "dosage"}
+            new_info_fields = [
+                f
+                for f in var_fields
+                if f not in builtin and f not in haps.variants.info
+            ]
+            if new_info_fields:
+                haps.variants.load_info(new_info_fields)
+            # Lazily memmap dosages if newly requested.
+            if "dosage" in var_fields and haps.dosages is None:
+                haps = _lazy_load_dosages(self, haps)
             haps = replace(haps, var_fields=var_fields)
             to_evolve["_seqs"] = haps
 
@@ -1379,6 +1392,57 @@ class Dataset:
             rc_neg=self.rc_neg,
         )
         return getitem(view, idx)
+
+
+def _lazy_load_dosages(dataset: "Dataset", haps: Haps) -> Haps:
+    """Open the dosages memmap for a Haps that didn't request them at open time.
+
+    Reuses the same path-resolution logic that ``Haps.from_path`` used. Returns
+    a new ``Haps`` with ``dosages`` populated (does NOT mutate the input).
+    """
+    import json as _json
+
+    from genoray._types import DOSAGE_TYPE
+
+    from ._svar_link import _resolve_svar
+    from ._write import Metadata
+
+    path = haps.path
+    svar_meta_path = path / "genotypes" / "svar_meta.json"
+    if not svar_meta_path.exists():
+        raise ValueError(
+            "Dosage requested but this dataset is not SVAR-backed; no dosages.npy possible."
+        )
+
+    with open(svar_meta_path) as f:
+        svar_meta = _json.load(f)
+    shape = tuple(svar_meta["shape"])
+    dtype = np.dtype(svar_meta["dtype"])
+
+    offset_path = path / "genotypes" / "offsets.npy"
+
+    # Resolve the SVAR directory the same way Haps.from_path did. Dataset does
+    # not retain Metadata, so re-read metadata.json from disk.
+    meta = Metadata.model_validate_json((path / "metadata.json").read_text())
+    svar_link = meta.svar_link
+    if svar_link is not None:
+        svar_path = _resolve_svar(path, svar_link, None)
+    else:
+        legacy_link = path / "genotypes" / "link.svar"
+        svar_path = legacy_link.resolve()
+
+    dosage_path = svar_path / "dosages.npy"
+    if not dosage_path.exists():
+        raise ValueError(
+            f"Dosage requested but {dosage_path} does not exist. "
+            f"Check the SVAR was built with dosages."
+        )
+
+    offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
+    dosages_mm = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
+    rag_shape = (*shape[1:], None)
+    dosages = Ragged.from_offsets(dosages_mm, rag_shape, offsets.reshape(2, -1))
+    return replace(haps, dosages=dosages)
 
 
 def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedIntervals:
