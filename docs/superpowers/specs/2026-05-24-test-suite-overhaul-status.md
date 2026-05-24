@@ -1,0 +1,198 @@
+# Test Suite Overhaul — Status & Resume Notes
+
+**As of:** 2026-05-24 (committed through `fdd02ec`)
+**Branch:** `worktree-test-suite-overhaul`
+**Worktree:** `/Users/david/projects/GenVarLoader/.claude/worktrees/test-suite-overhaul`
+**PR:** https://github.com/mcvickerlab/GenVarLoader/pull/194 (open)
+
+Living status snapshot. Read this first when resuming with fresh context — it points to the authoritative spec/audit/plan files but captures the deltas that aren't visible in those frozen documents.
+
+---
+
+## Authoritative reference files
+
+- **Design spec** (frozen intent): `docs/superpowers/specs/2026-05-24-test-suite-overhaul-design.md`
+- **Audit** (frozen classification): `docs/superpowers/specs/2026-05-24-test-audit.md`
+- **Coverage baseline** (frozen, Phase 3): `docs/superpowers/specs/2026-05-24-test-audit-coverage-baseline.txt`
+- **Plans** (one per component executed):
+  - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phases-1-3.md`
+  - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase4.md`
+  - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-prelude-and-ragged.md`
+  - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-reconstruct.md`
+  - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-variants.md`
+  - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-splice.md`
+  - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-svar-link.md`
+
+---
+
+## Current state
+
+### Test counts
+
+- **Non-slow tier:** 351 passed, 3 skipped, 3 deselected, 2 xfailed
+- **Slow tier (1kg, where data exists):** 3 passed
+- **Unit tier alone:** 129 passed, 1 xfailed (~12s combined, 1.3s unit alone)
+- **Coverage:** 63% line+branch (parity with Phase 3 baseline; no production code modified)
+
+### File layout
+
+```
+tests/
+├── conftest.py                     # session-scoped path fixtures (Phase 2)
+├── _builders/
+│   ├── __init__.py
+│   ├── ragged.py                   # make_ragged_seqs, make_ragged_intervals
+│   └── reconstruct.py              # make_tracks
+├── unit/                           # ← 129 tests
+│   ├── dataset/
+│   │   ├── genotypes/
+│   │   │   ├── test_choose_exonic_variants.py
+│   │   │   └── test_reconstruct.py
+│   │   ├── test_build_reconstructor.py
+│   │   ├── test_indexing.py
+│   │   └── test_svar_link_models.py
+│   ├── ragged/
+│   │   ├── test_rag_variants.py
+│   │   └── test_ragged_rc_packing.py
+│   ├── splice/
+│   │   ├── test_get_splice_bed.py
+│   │   ├── test_ref_ds_splice_settings.py
+│   │   └── test_splice_plan.py
+│   ├── tracks/
+│   │   ├── test_i2t_t2i.py
+│   │   ├── test_insertion_fill.py
+│   │   ├── test_realign.py
+│   │   └── test_tracks_splice.py
+│   └── variants/
+│       ├── test_variant_utils.py
+│       └── test_variants_info_fields.py
+├── integration/                    # ← 222 tests (351 - 129)
+│   ├── test_fasta.py
+│   ├── test_ref_ds.py
+│   ├── test_ref_ds_splicing.py
+│   ├── test_table.py
+│   ├── test_utils.py
+│   ├── dataset/
+│   │   ├── test_dataset.py
+│   │   ├── test_ds_haps.py
+│   │   ├── test_ds_haps_1kg.py
+│   │   ├── test_dummy_dataset_insertion_fill.py   # renamed in Phase 5 reconstruct
+│   │   ├── test_issue_153.py
+│   │   ├── test_issue_191_var_fields.py
+│   │   ├── test_jitter.py
+│   │   ├── test_open_vs_settings_parity.py
+│   │   ├── test_rc_packing.py
+│   │   ├── test_subset.py
+│   │   ├── test_svar_link.py
+│   │   ├── test_with_settings_var_filter.py
+│   │   ├── test_write.py
+│   │   └── test_write_tracks.py
+│   ├── tracks/
+│   │   ├── test_annot_tracks.py
+│   │   └── test_random_nonoverlapping.py
+│   └── variants/
+│       └── test_sites.py
+├── data/
+└── test_bigwig.rs                  # Rust test, untouched throughout overhaul
+```
+
+---
+
+## What shipped (50 commits)
+
+| Phase | Component | Result |
+|---|---|---|
+| 1–3 | Bootstrap, conftest, audit | `pytest-cov` config, `test-cov` pixi task, unit/integration/_builders scaffolding, relocated 33 files under integration/, centralized path fixtures, generated coverage baseline, classified 137 test functions in audit doc |
+| 4 | Delete pass | 5 deletions: `test_filter_af.py` (whole-file), `test_rs_indexing` (147 cases), `test_interval_track.py` (whole-file), `test_refdataset_unspliced_defaults`, `test_write` (skipped) |
+| 5 prelude + ragged | First builders + 11 moves | `make_ragged_seqs`, `make_ragged_intervals`; 9 file moves/extractions including 4 whole-file (test_build_reconstructor, test_indexing, test_realign, test_reconstruct, test_variant_utils, test_i2t_t2i, test_rag_variants) and 2 splice splits (test_splice_plan + test_tracks_splice extraction) and 1 ragged extraction (test_rc_returns_packed_buffer) |
+| 5 reconstruct | `make_tracks` builder + insertion-fill split | 19 unit tests extracted to `unit/tracks/test_insertion_fill.py`; 3 dataset-dependent kept in `integration/dataset/test_dummy_dataset_insertion_fill.py` (renamed to avoid basename collision) |
+| 5 variants | _Variants info-field unit tests | 5 extracted to `unit/variants/test_variants_info_fields.py`; 10 dataset-dependent kept. test_choose_exonic_variants moved whole-file |
+| 5 splice | get_splice_bed move + ref_ds_splicing split | 11 moved to `unit/splice/test_get_splice_bed.py`; 5 RefDataset settings/validation tests extracted to `unit/splice/test_ref_ds_splice_settings.py`; 4 byte-comparison tests stay in integration |
+| 5 svar_link | 7 pydantic-model tests extracted | `unit/dataset/test_svar_link_models.py`; 14 dataset-dependent kept |
+
+---
+
+## What's left (by remaining component)
+
+Numbers are best-effort estimates from the audit; verify against the current integration tree before planning.
+
+### Components with port-bucket tests still in integration
+
+#### Utility (~5 ports — likely fastest next plan)
+
+- `tests/integration/test_utils.py` — 5 ports, 0 keeps per audit. Likely a whole-file move to `tests/unit/test_utils.py` (or `tests/unit/utility/test_utils.py`). Pure helper-function tests with no fixture dependencies. **Risk:** very low.
+
+#### Tracks (broader) — ~14 ports across 3 files
+
+- `tests/integration/tracks/test_random_nonoverlapping.py` — 1 port. **Watch out:** this file does `from utils import nonoverlapping_intervals` relying on pytest's prepend-mode sys.path injection. The sibling `tests/integration/tracks/utils.py` is the source. If moving the test to `tests/unit/tracks/`, the `utils.py` must move too (or get promoted to a builder).
+- `tests/integration/dataset/test_write_tracks.py` — 1 port (`test_write_duplicate_track_names_rejected`), 3 keeps. Atomic split.
+- `tests/integration/test_table.py` — 12 ports, 0 keeps. Per audit, all 12 are `Table.from_path` format-dispatch tests (csv/tsv/parquet/arrow). Likely whole-file move; may need a small file-format builder. **Check first** what fixtures (if any) the tests use beyond `tmp_path`.
+
+#### Ref / FASTA (~10 ports across 3 files)
+
+- `tests/integration/test_fasta.py` — 3 ports. Whole-file move candidate.
+- `tests/integration/test_ref_ds.py` — 2 remaining ports (after Phase 4 deletion). Examine bodies — they share a `reference` fixture pattern with `test_ref_ds_splicing.py` (now split).
+- `tests/integration/test_ref_ds_splicing.py` — already split in Phase 5 splice; 4 keeps remain.
+- **Worth considering:** promote the `reference = gvl.Reference.from_path(ref_fasta, in_memory=False)` fixture into `tests/conftest.py` since `test_ref_ds.py`, `test_ref_ds_splicing.py` (integration), and `tests/unit/splice/test_ref_ds_splice_settings.py` all duplicate it. Either as a separate conftest hygiene plan or rolled into the ref/fasta plan.
+
+### Components with NO port-bucket tests remaining
+
+- **Haps** — Audit identified no Haps-specific Port tests outside the 5 already moved in the variants plan. A "haps component" plan would be builder-only scaffolding (`make_variants_table`, `make_variants`, `make_haps`). Per YAGNI, deferred until a real consumer surfaces. Reconsider if/when later plans need to construct synthetic `_Variants`/`Haps` without a real SVAR.
+- **Dataset polymorphism** — `test_dataset.py:test_ds_indexing` and `test_dummy_dataset_insertion_fill.py:test_with_insertion_fill_rejects_when_no_tracks_active` are audit-Port but need a `make_dataset` builder before porting. Save for a final plan once everything else has landed.
+
+### Deferred individual tests
+
+- **`test_resolve_svar_prefers_override`, `test_resolve_svar_falls_back_to_sibling`** — Audit-classified Port but their current bodies use the `svar_dataset_paths` fixture. To move, they'd need to be rewritten to synthesize a fake SVAR directory with matching `variant_idxs.npy` fingerprint. Skip until there's a reason to invest.
+
+---
+
+## Notable decisions / gotchas
+
+1. **Basename collisions** — pytest's default `--import-mode=prepend` treats same-basename test files in different dirs as the same module. Discovered when `tests/unit/tracks/test_insertion_fill.py` collided with `tests/integration/dataset/test_insertion_fill.py`. Briefly tried `--import-mode=importlib`, but it broke `tests/integration/tracks/test_random_nonoverlapping.py`'s `from utils import ...` (which relies on prepend-mode sys.path injection). **Settled fix:** rename the integration file in each collision. The reconstruct plan's commit `d33a521` did this for insertion_fill. Watch for this when porting `test_table.py`, `test_random_nonoverlapping.py`, or any other file that may collide with a future unit-tier counterpart.
+
+2. **Builder imports use sys.path injection** — Unit tests that consume `_builders/` use:
+   ```python
+   import sys
+   from pathlib import Path
+   sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+   from _builders.<module> import ...   # noqa: E402
+   ```
+   Required because `tests/` has no `__init__.py`. See `tests/unit/tracks/test_insertion_fill.py` for the canonical example. **Don't promote `tests/` to a package** — that breaks pytest collection in the default import mode.
+
+3. **Pre-push hook runs ruff** — Format and lint are enforced at push time. Several pushes required follow-up commits to drop unused imports from trimmed integration files (e.g., commit `fdd02ec` cleaned up `SemanticVersion`/`ValidationError` after the svar_link extraction). When trimming an integration file, **proactively run** `pixi run -e dev ruff check tests/integration/<path>.py --fix` before committing to fold the fix into the same commit.
+
+4. **Plan-doc bodies vs source bodies** — Several plans had cases where my plan reproduced test bodies from incomplete reads (the insertion_fill plan was the worst — I hand-reconstructed kernel-test bodies that differed significantly from source). **Rule going forward:** before writing a plan that extracts tests, read every test body in full and quote verbatim. When a plan says "copy from source", the implementer must actually verify before pasting.
+
+5. **`_resolve_svar` reset state in the integration file** — After Phase 5 svar_link extraction, `tests/integration/dataset/test_svar_link.py` no longer imports `SemanticVersion` or `ValidationError` (Phase 5 ruff cleanup). Don't re-add those if revisiting.
+
+6. **1kg slow tests in the worktree** — The worktree at `.claude/worktrees/test-suite-overhaul/tests/data/1kg/` is NOT populated by default. To run slow tier here you'd need `pixi run -e dev gen-1kg`. The main checkout at `/Users/david/projects/GenVarLoader/tests/data/1kg/` IS populated; for slow-tier verification, `git checkout --detach worktree-test-suite-overhaul` in the main checkout, run tests, then `git checkout main` to return.
+
+---
+
+## Recommended next plan
+
+**Utility component** (`test_utils.py`, 5 ports, whole-file candidate):
+
+- Smallest remaining scope; likely a one-task plan (whole-file move + verify).
+- Validates that the next plan's velocity stays high without further builder work.
+- Frees up `tests/integration/test_utils.py` and gives `tests/unit/` a "test_utils.py" — a sensible location for shared unit helpers if they ever need a home.
+
+After utility, the natural order is:
+
+1. **Tracks (broader)** — Three files, two trivial (1-port each), one larger (`test_table.py` 12 ports). Tackle the trivial ones first, then table separately. Watch for the `utils.py` sibling of `test_random_nonoverlapping.py`.
+2. **Ref / FASTA + reference-fixture promotion** — Could combine into one plan: move `test_fasta.py` and the 2 remaining `test_ref_ds.py` ports, and promote the `reference` fixture to conftest, deduplicating across `test_ref_ds_splicing.py` (integration), `test_ref_ds_splice_settings.py` (unit), and the new unit ref tests.
+3. **Dataset polymorphism / `make_dataset`** — Last. Requires the most builder work but only has 2 specific tests gated on it.
+
+Once all components above land:
+- **Phase 6 (integration trim)** — As outlined in design spec. Review each integration-tier file post-overhaul; remove redundancies where unit coverage now subsumes them.
+- **Phase 7 (CI report)** — Wire `htmlcov/` upload into CI per design spec.
+
+---
+
+## How to resume
+
+1. `cd /Users/david/projects/GenVarLoader/.claude/worktrees/test-suite-overhaul && git status` — should be on `worktree-test-suite-overhaul`, clean.
+2. Read this file.
+3. Read the design spec (intent) and audit (test classification) if you want full context.
+4. Pick the next plan from "Recommended next plan" above.
+5. Follow the same pattern as the executed plans: ask user for scope (one component at a time per their preference), write the plan via `superpowers:writing-plans`, execute via inline (small) or subagent-driven (larger).
