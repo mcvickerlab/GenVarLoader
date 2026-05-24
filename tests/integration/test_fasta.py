@@ -1,21 +1,13 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
 from genvarloader._fasta import Fasta, NoPadError
 from pysam import FastaFile
-from pytest import fixture
 
 
-@fixture
-def fasta_path():
-    return Path(__file__).parent.parent / "data" / "fasta" / "hg38.fa.bgz"
-
-
-def test_pad_right(fasta_path):
-    fasta = Fasta("ref", fasta_path, pad="N")
+def test_pad_right(ref_fasta):
+    fasta = Fasta("ref", ref_fasta, pad="N")
     contig = "chr1"
-    with FastaFile(fasta_path) as f:
+    with FastaFile(ref_fasta) as f:
         end_of_contig = f.get_reference_length(contig)
         start = end_of_contig - 5
         end = start + 10
@@ -29,21 +21,21 @@ def test_pad_right(fasta_path):
     np.testing.assert_equal(seq, desired)
 
 
-def test_pad_left(fasta_path):
-    fasta = Fasta("ref", fasta_path, pad="N")
+def test_pad_left(ref_fasta):
+    fasta = Fasta("ref", ref_fasta, pad="N")
     contig = "chr1"
     start = -5
     end = start + 10
     seq = fasta.read(contig, start, end)
-    with FastaFile(fasta_path) as f:
+    with FastaFile(ref_fasta) as f:
         desired = np.full(end - start, b"N", "S1")
         desired[5:] = np.frombuffer(f.fetch(contig, 0, end).encode("ascii"), "S1")
 
     np.testing.assert_equal(seq, desired)
 
 
-def test_no_pad(fasta_path):
-    fasta = Fasta("ref", fasta_path)
+def test_no_pad(ref_fasta):
+    fasta = Fasta("ref", ref_fasta)
     end_of_contig_1 = 248956422
     contig = "chr1"
     start = end_of_contig_1 - 5
