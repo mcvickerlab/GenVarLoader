@@ -21,7 +21,6 @@ from loguru import logger
 from numpy.typing import NDArray
 from pydantic_extra_types.semantic_version import SemanticVersion
 from seqpro.rag import OFFSET_TYPE, Ragged
-from tqdm.auto import tqdm
 from typing_extensions import assert_never
 
 from .._ragged import (
@@ -41,13 +40,12 @@ from ._genotypes import (
 from ._indexing import DatasetIndexer
 from ._insertion_fill import InsertionFill, Repeat5p
 from ._insertion_fill import lower as _lower_insertion_fills
-from ._intervals import intervals_to_tracks, tracks_to_intervals
+from ._intervals import intervals_to_tracks
 from ._rag_variants import RaggedVariants
 from ._reference import Reference, _fetch_spliced_ref, get_reference
 from ._splice import SplicePlan
 from ._svar_link import SvarLink, _resolve_svar, _verify_fingerprint
 from ._tracks import shift_and_realign_tracks_sparse
-from ._utils import splits_sum_le_value
 
 T = TypeVar("T", covariant=True)
 
@@ -1271,155 +1269,16 @@ class Tracks(Reconstructor[_T]):
         max_mem: int = 2**30,
         overwrite: bool = False,
     ) -> Tracks:
+        # The pre-Awkward-Ragged implementation lived here as a chunked
+        # decompress -> user transform -> recompress loop; it did not survive
+        # the migration of Ragged to its Awkward-backed form. See
+        # `docs/superpowers/roadmap.md` for what would be needed to revive it,
+        # and `git show 1f1b718:python/genvarloader/_dataset/_reconstruct.py`
+        # for the previous implementation.
         raise NotImplementedError(
-            "Not implemented yet for Ragged arrays that subclass Awkward arrays."
-        )
-
-        if new_track == existing_track:
-            raise ValueError(
-                "New track name must be different from existing track name."
-            )
-
-        if existing_track not in self.intervals:
-            raise ValueError(
-                f"Requested existing track {existing_track} does not exist."
-            )
-
-        intervals = self.intervals[existing_track]
-
-        out_dir = path / "intervals" / new_track
-
-        if out_dir.exists() and not overwrite:
-            raise FileExistsError(
-                f"Track at {out_dir} already exists. Set overwrite=True to overwrite."
-            )
-        elif out_dir.exists() and overwrite:
-            # according to GVL file format, should only have intervals.npy and offsets.npy in here
-            for p in out_dir.iterdir():
-                p.unlink()
-            out_dir.rmdir()
-
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        # (r)
-        n_regions, n_samples = idxer.full_shape
-        regions = regions.copy()
-        regions[:, 1] -= max_jitter
-        regions[:, 2] += max_jitter
-        r_idx = np.arange(n_regions)[:, None]
-        s_idx = np.arange(n_samples)
-        # (r s) -> (r*s)
-        ds_idx = np.ravel_multi_index((r_idx, s_idx), idxer.full_shape).ravel()
-        r_idx, s_idx = np.unravel_index(ds_idx, idxer.full_shape)
-        if haps is not None:
-            # extend ends by max hap diff to match write implementation
-            regions[:, 2] += (
-                haps._haplotype_ilens(ds_idx, regions, True)
-                .reshape(n_regions, n_samples, haps.genotypes.shape[-2])  # type: ignore
-                .max((1, 2))
-                .clip(min=0)
-            )
-        lengths = regions[:, 2] - regions[:, 1]
-
-        # for each region:
-        # bytes = (4 bytes / bp) * (bp / sample) * samples
-        n_regions, n_samples, *_ = intervals.shape
-        n_regions = cast(int, n_regions)
-        n_samples = cast(int, n_samples)
-        mem_per_region = 4 * lengths * n_samples
-        splits = splits_sum_le_value(mem_per_region, max_mem)
-        memmap_intervals_offset = 0
-        memmap_offsets_offset = 0
-        last_offset = 0
-        with tqdm(total=len(splits) - 1) as pbar:
-            for offset_s, offset_e in zip(splits[:-1], splits[1:]):
-                n_regions = int(offset_e - offset_s)
-                ir_idx = repeat(
-                    np.arange(offset_s, offset_e, dtype=np.intp),
-                    "r -> (r s)",
-                    s=n_samples,
-                )
-                is_idx = repeat(
-                    np.arange(n_samples, dtype=np.intp), "s -> (r s)", r=n_regions
-                )
-                ds_idx, _, _ = idxer.parse_idx((ir_idx, is_idx))
-                r_idx, s_idx = np.unravel_index(ds_idx, idxer.full_shape)
-
-                pbar.set_description("Writing (decompressing)")
-                # (r*s)
-                _regions = regions[r_idx]
-                # (r*s+1)
-                offsets = lengths_to_offsets(_regions[:, 2] - _regions[:, 1])
-                # layout is (regions, samples) so all samples are local for statistics
-                tracks = np.empty(offsets[-1], np.float32)
-                intervals_to_tracks(
-                    offset_idxs=ds_idx,
-                    starts=_regions[:, 1],
-                    itv_starts=intervals.starts.data,
-                    itv_ends=intervals.ends.data,
-                    itv_values=intervals.values.data,
-                    itv_offsets=intervals.starts.offsets,
-                    out=tracks,
-                    out_offsets=offsets,
-                )
-                tracks = Ragged.from_offsets(
-                    tracks, (n_regions, n_samples, None), offsets
-                )
-
-                pbar.set_description("Writing (transforming)")
-                transformed_tracks = transform(ir_idx, is_idx, tracks)
-                np.testing.assert_equal(tracks.shape, transformed_tracks.shape)
-
-                pbar.set_description("Writing (compressing)")
-                starts, ends, values, interval_offsets = tracks_to_intervals(
-                    _regions, transformed_tracks.data, transformed_tracks.offsets
-                )
-                np.testing.assert_equal(
-                    len(interval_offsets), n_regions * n_samples + 1
-                )
-
-                itvs = np.empty(len(starts), INTERVAL_DTYPE)
-                itvs["start"] = starts
-                itvs["end"] = ends
-                itvs["value"] = values
-
-                out = np.memmap(
-                    out_dir / "intervals.npy",
-                    dtype=itvs.dtype,
-                    mode="w+" if memmap_intervals_offset == 0 else "r+",
-                    shape=itvs.shape,
-                    offset=memmap_intervals_offset,
-                )
-                out[:] = itvs[:]
-                out.flush()
-                memmap_intervals_offset += out.nbytes
-
-                interval_offsets += last_offset
-                last_offset = interval_offsets[-1]
-                out = np.memmap(
-                    out_dir / "offsets.npy",
-                    dtype=interval_offsets.dtype,
-                    mode="w+" if memmap_offsets_offset == 0 else "r+",
-                    shape=len(interval_offsets) - 1,
-                    offset=memmap_offsets_offset,
-                )
-                out[:] = interval_offsets[:-1]
-                out.flush()
-                memmap_offsets_offset += out.nbytes
-                pbar.update()
-
-        out = np.memmap(
-            out_dir / "offsets.npy",
-            dtype=np.int64,
-            mode="r+",
-            shape=1,
-            offset=memmap_offsets_offset,
-        )
-        out[-1] = last_offset
-        out.flush()
-
-        return self.from_path(path, len(regions), n_samples).with_tracks(
-            self.active_tracks
+            "write_transformed_track is not implemented for the current "
+            "Awkward-backed Ragged. See docs/superpowers/roadmap.md "
+            "(\"Transformed track writing\") for the revival plan."
         )
 
 
