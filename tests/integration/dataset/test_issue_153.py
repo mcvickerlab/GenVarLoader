@@ -4,28 +4,23 @@ from pathlib import Path
 import genvarloader as gvl
 import pytest
 
-data_dir = Path(__file__).resolve().parents[2] / "data"
-ref = data_dir / "fasta" / "hg38.fa.bgz"
-issue_vcf_raw = data_dir / "issue_153.vcf"
-issue_bed = data_dir / "issue_153.bed"
-
 
 @pytest.fixture(scope="module")
-def issue_vcf(tmp_path_factory):
+def issue_vcf(tmp_path_factory, issue_153_vcf: Path):
     tmp = tmp_path_factory.mktemp("issue_153_vcf")
     gz = tmp / "issue_153.vcf.gz"
     with gz.open("wb") as fh:
-        subprocess.run(["bgzip", "-c", str(issue_vcf_raw)], stdout=fh, check=True)
+        subprocess.run(["bgzip", "-c", str(issue_153_vcf)], stdout=fh, check=True)
     subprocess.run(["bcftools", "index", str(gz)], check=True)
     return gz
 
 
 @pytest.fixture(scope="module")
-def issue_ds(issue_vcf, tmp_path_factory):
+def issue_ds(issue_vcf, tmp_path_factory, issue_153_bed: Path, ref_fasta: Path):
     tmp = tmp_path_factory.mktemp("issue_153_ds")
     ds_path = tmp / "issue_153.gvl"
-    gvl.write(path=ds_path, bed=issue_bed, variants=issue_vcf)
-    return gvl.Dataset.open(ds_path, ref).with_len("ragged").with_seqs("haplotypes")
+    gvl.write(path=ds_path, bed=issue_153_bed, variants=issue_vcf)
+    return gvl.Dataset.open(ds_path, ref_fasta).with_len("ragged").with_seqs("haplotypes")
 
 
 def test_issue_153_hap_lengths(issue_ds):
