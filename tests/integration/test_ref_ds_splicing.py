@@ -1,3 +1,11 @@
+"""End-to-end splice tests requiring real reference data + byte comparisons.
+
+The settings/validation unit tests for ``RefDataset`` splice handling live
+in ``tests/unit/splice/test_ref_ds_splice_settings.py``. The 4 tests here
+all compare reconstructed sequence bytes against expected concatenations
+of unspliced slices — they need the actual reference genome.
+"""
+
 import genvarloader as gvl
 import numpy as np
 import polars as pl
@@ -88,31 +96,6 @@ def test_spliced_mixed_strand(reference: gvl.Reference):
     np.testing.assert_equal(_as_s1(spliced), expected)
 
 
-def test_with_settings_disable_splice(reference, two_transcript_bed):
-    ds = gvl.RefDataset(reference, two_transcript_bed, splice_info="transcript_id")
-    assert ds.is_spliced
-    plain = ds.with_settings(splice_info=False)
-    assert plain.is_spliced is False
-    assert len(plain) == 3  # back to per-exon row count
-
-
-def test_with_settings_enable_splice(reference, two_transcript_bed):
-    ds = gvl.RefDataset(reference, two_transcript_bed)
-    assert not ds.is_spliced
-    sp = ds.with_settings(splice_info="transcript_id")
-    assert sp.is_spliced
-    assert len(sp) == 2
-
-
-def test_with_settings_validation(reference, two_transcript_bed):
-    ds = gvl.RefDataset(reference, two_transcript_bed, jitter=0)
-    with pytest.raises(RuntimeError, match="Jitter is not supported"):
-        ds.with_settings(splice_info="transcript_id", jitter=1)
-
-    with pytest.raises(RuntimeError, match="Non-deterministic"):
-        ds.with_settings(splice_info="transcript_id", deterministic=False)
-
-
 def test_subset_to_transcripts(reference, two_transcript_bed):
     ds = gvl.RefDataset(reference, two_transcript_bed, splice_info="transcript_id")
     sub = ds.subset_to(["T2"])
@@ -121,19 +104,3 @@ def test_subset_to_transcripts(reference, two_transcript_bed):
     unsp = gvl.RefDataset(reference, two_transcript_bed)[:]
     # The single exon of T2 should match unsp[2].
     np.testing.assert_equal(_as_s1(spliced), _as_s1(unsp[2]))
-
-
-def test_spliced_output_length_variable(reference, two_transcript_bed):
-    ds = gvl.RefDataset(
-        reference, two_transcript_bed, splice_info="transcript_id"
-    ).with_len("variable")
-    out = ds[:]
-    # variable-length pads to the longest transcript in the batch.
-    assert out.shape[0] == 2
-    assert out.shape[1] == 20  # T1 has 2 × 10 = 20; T2 padded to 20.
-
-
-def test_spliced_rejects_fixed_length(reference, two_transcript_bed):
-    ds = gvl.RefDataset(reference, two_transcript_bed)
-    with pytest.raises(RuntimeError, match="Splicing requires output_length"):
-        ds.with_settings(splice_info="transcript_id").with_len(5)
