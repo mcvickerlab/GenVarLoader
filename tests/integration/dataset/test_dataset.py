@@ -5,17 +5,6 @@ import genvarloader as gvl
 import numpy as np
 from pytest_cases import fixture, parametrize_with_cases
 
-data_dir = Path(__file__).resolve().parents[2] / "data"
-ref = data_dir / "fasta" / "hg38.fa.bgz"
-
-
-def ds_phased():
-    return gvl.Dataset.open(data_dir / "phased_dataset.vcf.gvl", ref)
-
-
-# def ds_unphased():
-#     return gvl.Dataset.open(data_dir / "unphased_dataset.gvl", ref)
-
 
 def seqs_ref():
     return "reference"
@@ -30,9 +19,13 @@ def seqs_annot():
 
 
 @fixture(scope="session")
-@parametrize_with_cases("ds", prefix="ds_", cases=".")
 @parametrize_with_cases("seq_type", prefix="seqs_", cases=".")
-def dataset(ds: gvl.Dataset, seq_type: Literal["reference", "haplotypes", "annotated"]):
+def dataset(
+    phased_vcf_gvl: Path,
+    ref_fasta: Path,
+    seq_type: Literal["reference", "haplotypes", "annotated"],
+):
+    ds = gvl.Dataset.open(phased_vcf_gvl, ref_fasta)
     return ds.with_seqs(seq_type)
 
 
