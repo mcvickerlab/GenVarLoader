@@ -3,27 +3,24 @@ from pathlib import Path
 
 import genvarloader as gvl
 import numpy as np
+import pytest
 from einops import repeat
 from genvarloader._dataset._reconstruct import Haps
-from pytest_cases import parametrize_with_cases
-
-DDIR = Path(__file__).parent.parent.parent
-REF = DDIR / "data" / "fasta" / "hg38.fa.bgz"
 
 
-def ds_vcf():
-    return gvl.Dataset.open(DDIR / "data" / "phased_dataset.vcf.gvl", REF)
+@pytest.fixture(
+    scope="session",
+    params=["vcf", "pgen", "svar"],
+)
+def dataset(request, phased_vcf_gvl, phased_pgen_gvl, phased_svar_gvl, ref_fasta):
+    gvl_path = {
+        "vcf": phased_vcf_gvl,
+        "pgen": phased_pgen_gvl,
+        "svar": phased_svar_gvl,
+    }[request.param]
+    return gvl.Dataset.open(gvl_path, ref_fasta)
 
 
-def ds_pgen():
-    return gvl.Dataset.open(DDIR / "data" / "phased_dataset.pgen.gvl", REF)
-
-
-def ds_svar():
-    return gvl.Dataset.open(DDIR / "data" / "phased_dataset.svar.gvl", REF)
-
-
-@parametrize_with_cases("dataset", cases=".", prefix="ds_")
 def test_jitter(dataset: gvl.RaggedDataset):
     ds = (
         dataset.with_settings(jitter=dataset.max_jitter, rc_neg=False)
