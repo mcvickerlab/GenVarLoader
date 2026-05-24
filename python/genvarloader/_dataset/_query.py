@@ -84,9 +84,7 @@ def getitem(
     """Top-level eager query. Dispatches to the (un)spliced helpers and then
     applies the shape-massaging steps (pad / to_numpy, reshape, squeeze)."""
     if is_str_arr(idx) and view.idxer.r2i_map is None:
-        raise ValueError(
-            "Cannot query regions by name because no region name was set."
-        )
+        raise ValueError("Cannot query regions by name because no region name was set.")
 
     if view.sp_idxer is not None:
         recon, squeeze, out_reshape = _getitem_spliced(view, idx, view.sp_idxer)
@@ -273,8 +271,7 @@ def build_recon_splice_plan(
 
     if isinstance(recon, HapsTracks):
         raise NotImplementedError(
-            "Splicing of haplotypes + tracks (shape (b, t, p, ~l)) is not "
-            "supported."
+            "Splicing of haplotypes + tracks (shape (b, t, p, ~l)) is not supported."
         )
     if isinstance(recon, RefTracks):
         raise NotImplementedError(
@@ -337,9 +334,7 @@ def reverse_complement_ragged(
     """Reverse-complement (or reverse) ragged outputs according to a per-row mask."""
     if isinstance(rag, Ragged):
         if is_rag_dtype(rag, np.bytes_):
-            rag = Ragged(
-                ak.to_packed(ak.where(to_rc, reverse_complement(rag), rag))
-            )  # type: ignore
+            rag = Ragged(ak.to_packed(ak.where(to_rc, reverse_complement(rag), rag)))  # type: ignore
         else:
             rag = Ragged(ak.to_packed(ak.where(to_rc, rag[..., ::-1], rag)))  # type: ignore
     elif isinstance(rag, RaggedAnnotatedHaps):
