@@ -8,7 +8,7 @@ from .._utils import lengths_to_offsets
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def get_diffs_sparse(
-    geno_offset_idxs: NDArray[np.integer],
+    geno_offset_idx: NDArray[np.integer],
     geno_v_idxs: NDArray[np.integer],
     geno_offsets: NDArray[np.integer],
     ilens: NDArray[np.integer],
@@ -24,7 +24,7 @@ def get_diffs_sparse(
 
     Parameters
     ----------
-    geno_offset_idxs : NDArray[np.intp]
+    geno_offset_idx : NDArray[np.intp]
         Shape = (n_regions, ploidy) Indices for each region into offsets.
     geno_v_idxs : NDArray[np.int32]
         Shape = (variants*samples*ploidy) Sparse genotypes i.e. variant indices for ALT genotypes.
@@ -43,11 +43,11 @@ def get_diffs_sparse(
     v_starts : Optional[NDArray[np.int32]]
         Shape = (total_variants) Positions of unique variants.
     """
-    n_queries, ploidy = geno_offset_idxs.shape
+    n_queries, ploidy = geno_offset_idx.shape
     diffs = np.empty((n_queries, ploidy), np.int32)
     for query in nb.prange(n_queries):
         for hap in nb.prange(ploidy):
-            o_idx = geno_offset_idxs[query, hap]
+            o_idx = geno_offset_idx[query, hap]
             if geno_offsets.ndim == 1:
                 o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
             else:
@@ -118,7 +118,7 @@ def reconstruct_haplotypes_from_sparse(
     out_offsets: NDArray[np.integer],
     regions: NDArray[np.integer],
     shifts: NDArray[np.integer],
-    geno_offset_idxs: NDArray[np.integer],
+    geno_offset_idx: NDArray[np.integer],
     geno_offsets: NDArray[np.integer],
     geno_v_idxs: NDArray[np.integer],
     v_starts: NDArray[np.integer],
@@ -135,6 +135,9 @@ def reconstruct_haplotypes_from_sparse(
 ):
     """Reconstruct haplotypes from reference sequence and variants.
 
+    Batched parallel driver: dispatches to :func:`reconstruct_haplotype_from_sparse`
+    (singular) for each ``(query, hap)`` pair.
+
     Parameters
     ----------
     out : NDArray[np.uint8]
@@ -145,7 +148,7 @@ def reconstruct_haplotypes_from_sparse(
         Shape = (batch, 3) Regions to reconstruct haplotypes.
     shifts : NDArray[np.uint32]
         Shape = (batch, ploidy) Shifts for each region.
-    geno_offset_idxs: NDArray[np.intp]
+    geno_offset_idx: NDArray[np.intp]
         Shape = (batch, ploidy) Indices for each region into offsets.
     geno_offsets : NDArray[np.uint32]
         Shape = (batch*ploidy + 1) Offsets into genos.
@@ -174,7 +177,7 @@ def reconstruct_haplotypes_from_sparse(
     annot_ref_pos : NDArray[np.int32] | None
         Ragged buffer for shape (batch, ploidy, ~length). Reference positions for annotations.
     """
-    batch_size, ploidy = geno_offset_idxs.shape
+    batch_size, ploidy = geno_offset_idx.shape
     for query in nb.prange(batch_size):
         q = regions[query]
         c_idx: int = q[0]
@@ -185,7 +188,7 @@ def reconstruct_haplotypes_from_sparse(
 
         for hap in nb.prange(ploidy):
             # index for full sparse genos
-            o_idx = geno_offset_idxs[query, hap]
+            o_idx = geno_offset_idx[query, hap]
             if geno_offsets.ndim == 1:
                 o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
             else:
@@ -244,7 +247,10 @@ def reconstruct_haplotype_from_sparse(
     annot_v_idxs: NDArray[np.integer] | None = None,
     annot_ref_pos: NDArray[np.integer] | None = None,
 ):
-    """Reconstruct a haplotype from reference sequence and variants.
+    """Reconstruct a single haplotype from reference sequence and variants.
+
+    Single-haplotype inner kernel. Use :func:`reconstruct_haplotypes_from_sparse`
+    (plural) to reconstruct a batch in parallel.
 
     Parameters
     ----------
@@ -419,7 +425,7 @@ def reconstruct_haplotype_from_sparse(
 def choose_exonic_variants(
     starts: NDArray[np.integer],
     ends: NDArray[np.integer],
-    geno_offset_idxs: NDArray[np.integer],
+    geno_offset_idx: NDArray[np.integer],
     geno_v_idxs: NDArray[np.integer],
     geno_offsets: NDArray[np.integer],
     v_starts: NDArray[np.integer],
@@ -433,7 +439,7 @@ def choose_exonic_variants(
         Shape = (n_regions) Start positions for each region.
     ends : NDArray[np.int32]
         Shape = (n_regions) Ends for each region.
-    geno_offset_idxs : NDArray[np.intp]
+    geno_offset_idx : NDArray[np.intp]
         Shape = (n_regions, ploidy) Indices for each region into offsets.
     offsets : NDArray[np.int64]
         Shape = (total_variants + 1) Offsets into sparse genotypes.
@@ -446,12 +452,12 @@ def choose_exonic_variants(
     deterministic : bool
         Whether to deterministically assign variants to groups
     """
-    n_regions, ploidy = geno_offset_idxs.shape
+    n_regions, ploidy = geno_offset_idx.shape
 
     lengths = np.empty((n_regions, ploidy), np.int64)
     for query in nb.prange(n_regions):
         for hap in range(ploidy):
-            o_idx = geno_offset_idxs[query, hap]
+            o_idx = geno_offset_idx[query, hap]
             if geno_offsets.ndim == 1:
                 o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
             else:
@@ -468,7 +474,7 @@ def choose_exonic_variants(
         ref_start: int = starts[query]
         ref_end: int = ends[query]
         for hap in nb.prange(ploidy):
-            o_idx = geno_offset_idxs[query, hap]
+            o_idx = geno_offset_idx[query, hap]
             # Mirror filter_af's (2, n_slices) indexing (sibling kernel below).
             if geno_offsets.ndim == 1:
                 o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
@@ -521,7 +527,7 @@ def _choose_exonic_variants(
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def filter_af(
-    geno_offset_idxs: NDArray[np.integer],
+    geno_offset_idx: NDArray[np.integer],
     geno_offsets: NDArray[np.integer],
     geno_v_idxs: NDArray[np.integer],
     afs: NDArray[np.number],
@@ -530,7 +536,7 @@ def filter_af(
 ) -> tuple[NDArray[np.bool_], NDArray[OFFSET_TYPE]]:
     """Filter variants based on allele frequency, marking them to keep or not."""
 
-    batch_size, ploidy = geno_offset_idxs.shape
+    batch_size, ploidy = geno_offset_idx.shape
 
     if geno_offsets.ndim == 1:
         keep_offsets = geno_offsets.astype(OFFSET_TYPE)
@@ -549,7 +555,7 @@ def filter_af(
     for query in nb.prange(batch_size):
         for hap in range(ploidy):
             # index for full sparse genos
-            o_idx = geno_offset_idxs[query, hap]
+            o_idx = geno_offset_idx[query, hap]
             if geno_offsets.ndim == 1:
                 o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
             else:

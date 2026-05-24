@@ -144,7 +144,7 @@ def shift_and_realign_tracks_sparse(
     out_offsets: NDArray[np.integer],
     regions: NDArray[np.integer],
     shifts: NDArray[np.integer],
-    geno_offset_idxs: NDArray[np.integer],
+    geno_offset_idx: NDArray[np.integer],
     geno_v_idxs: NDArray[np.integer],
     geno_offsets: NDArray[np.integer],
     v_starts: NDArray[np.integer],
@@ -169,7 +169,7 @@ def shift_and_realign_tracks_sparse(
         Shape = (batch, 3) Regions, each is (contig_idx, start, end).
     shifts : NDArray[np.int32]
         Shape = (batch, ploidy) Shifts for each haplotype.
-    geno_offset_idxs : NDArray[np.intp]
+    geno_offset_idx : NDArray[np.intp]
         Shape = (batch, ploidy) Indices into offsets for each region.
     geno_v_idxs : NDArray[np.int32]
         Shape = (variants) Indices of variants.
@@ -188,7 +188,7 @@ def shift_and_realign_tracks_sparse(
     keep_offsets : Optional[NDArray[np.int64]]
         Shape = (batch*ploidy + 1) Offsets into keep.
     """
-    n_regions, ploidy = geno_offset_idxs.shape
+    n_regions, ploidy = geno_offset_idx.shape
     for query in nb.prange(n_regions):
         t_s, t_e = track_offsets[query], track_offsets[query + 1]
         q_track = tracks[t_s:t_e]
@@ -196,7 +196,7 @@ def shift_and_realign_tracks_sparse(
         q_start = regions[query, 1]
 
         for hap in nb.prange(ploidy):
-            o_idx = geno_offset_idxs[query, hap]
+            o_idx = geno_offset_idx[query, hap]
 
             k_idx = query * ploidy + hap
             if keep is not None and keep_offsets is not None:
@@ -627,7 +627,7 @@ class Tracks(Reconstructor[_T]):
         assert not isinstance(output_length, int), (
             "splice plan path requires variable/ragged output"
         )
-        # The plan was built with inner_fixed = (n_tracks,) so plan.perm has
+        # The plan was built with inner_fixed = (n_tracks,) so plan.permutation has
         # length B*T indexed in (query, track) C-order: k = query * T + track.
         # Each k_new in the permuted order targets one (query, track) pair; we
         # need to write its bytes into out_buf at plan.permuted_out_offsets[k_new].
@@ -635,7 +635,7 @@ class Tracks(Reconstructor[_T]):
         total = int(splice_plan.permuted_out_offsets[-1])
         out_buf = np.empty(total, np.float32)
 
-        k_old = splice_plan.perm  # length B*T
+        k_old = splice_plan.permutation  # length B*T
         track_of_k = k_old % n_tracks
         query_of_k = k_old // n_tracks
 
@@ -705,7 +705,7 @@ class Tracks(Reconstructor[_T]):
         starts = ak.concatenate(out_starts, axis=1)
         ends = ak.concatenate(out_ends, axis=1)
         values = ak.concatenate(out_values, axis=1)
-        return RaggedIntervals(starts, ends, values)  # type: ignore
+        return RaggedIntervals(starts, ends, values)
 
     def write_transformed_track(
         self,

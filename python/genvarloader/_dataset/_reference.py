@@ -232,7 +232,7 @@ class RefDataset(Generic[T]):
         if self.region_names is not None:
             region_names = self.full_bed[self.region_names].to_numpy().astype(np.str_)
             self._region_map = HashTable(
-                max=len(region_names) * 2,  # type: ignore
+                max=len(region_names) * 2,  # type: ignore[bad-argument-type]  # hirola HashTable.max typed as numpy.Number but accepts int
                 dtype=region_names.dtype,
             )
             self._region_map.add(region_names)
@@ -404,9 +404,9 @@ class RefDataset(Generic[T]):
             or is_dtype(regions, np.integer)
             or (isinstance(regions, Sequence) and isinstance(regions[0], int))
         ):
-            self._subset_bed = self.full_bed[regions]  # type: ignore
+            self._subset_bed = self.full_bed[regions]  # type: ignore[bad-index]  # polars DataFrame.__getitem__ doesn't accept all our union members but runtime branch ensures valid kinds
         else:
-            self._subset_bed = self.full_bed.filter(regions)  # type: ignore
+            self._subset_bed = self.full_bed.filter(regions)  # type: ignore[bad-argument-type]  # polars filter accepts predicates / bool arrays; our union has equivalent shapes
 
         self._subset_regions = bed_to_regions(self._subset_bed, self.reference.c_map)
         return self
@@ -456,7 +456,7 @@ class RefDataset(Generic[T]):
         if self.rc_neg:
             to_rc_unperm = regions[:, 3] == -1
             if to_rc_unperm.any():
-                to_rc_perm = to_rc_unperm[plan.perm]
+                to_rc_perm = to_rc_unperm[plan.permutation]
                 per_elem = Ragged(
                     ak.to_packed(
                         ak.where(
@@ -475,19 +475,19 @@ class RefDataset(Generic[T]):
         )
 
         if out_reshape is not None:
-            ref = ref.reshape(out_reshape)  # type: ignore
+            ref = ref.reshape(out_reshape)
 
         if self.output_length == "ragged":
             out = ref
         elif self.output_length == "variable":
-            out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))  # type: ignore
+            out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))
         else:
             raise AssertionError(
                 "splice + fixed-length output should be blocked earlier"
             )
 
         if squeeze:
-            out = out.squeeze(0)  # type: ignore
+            out = out.squeeze(0)
 
         return cast(T, out)
 
@@ -546,17 +546,17 @@ class RefDataset(Generic[T]):
             ref = ak.to_packed(ak.where(to_rc, reverse_complement(ref), ref))
 
         if out_reshape is not None:
-            ref = ref.reshape(out_reshape)  # type: ignore
+            ref = ref.reshape(out_reshape)
 
         if self.output_length == "ragged":
             out = ref
         elif self.output_length == "variable":
-            out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))  # type: ignore
+            out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))
         else:
-            out = ref.to_numpy()  # type: ignore
+            out = ref.to_numpy()
 
         if squeeze:
-            out = out.squeeze(0)  # type: ignore
+            out = out.squeeze(0)
 
         return cast(T, out)
 
@@ -701,7 +701,7 @@ def _fetch_spliced_ref(
     This is the kernel-dispatch core shared by :class:`Ref.__call__`'s splice
     branch and :meth:`RefDataset._getitem_spliced`.
     """
-    permuted_regions = regions[plan.perm]
+    permuted_regions = regions[plan.permutation]
     raw = get_reference(
         regions=permuted_regions,
         out_offsets=plan.permuted_out_offsets,
@@ -717,8 +717,8 @@ def _fetch_spliced_ref(
 
 
 if TORCH_AVAILABLE:
-    import torch  # type: ignore
-    import torch.utils.data as td  # type: ignore
+    import torch
+    import torch.utils.data as td
 
     class TorchDataset(td.Dataset):
         dataset: RefDataset[NDArray[np.bytes_]]
@@ -753,4 +753,4 @@ if TORCH_AVAILABLE:
 
             return batch
 else:
-    TorchDataset = no_torch_error  # type: ignore
+    TorchDataset = no_torch_error

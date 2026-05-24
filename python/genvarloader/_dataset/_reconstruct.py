@@ -207,7 +207,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                     out_offsets=out_ofsts_per_t,  # (b*p+1)
                     regions=regions,  # (b, 3)
                     shifts=shifts,  # (b p)
-                    geno_offset_idxs=geno_idx,  # (b p)
+                    geno_offset_idx=geno_idx,  # (b p)
                     geno_v_idxs=self.haps.genotypes.data,  # (r*s*p*v)
                     geno_offsets=self.haps.genotypes.offsets,  # (r*s*p+1)
                     v_starts=self.haps.variants.start,  # (tot_v)

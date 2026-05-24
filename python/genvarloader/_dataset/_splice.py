@@ -21,7 +21,7 @@ class SplicePlan:
     """Permutation + offsets that re-target the kernel write into spliced layout.
 
     The kernel is called with ``ploidy=1`` and one query per element of the
-    flattened ``(B, *inner_fixed)`` length array. ``perm`` reorders those
+    flattened ``(B, *inner_fixed)`` length array. ``permutation`` reorders those
     flattened k-indices so the global write order becomes
     ``(splice_row, sample, *inner_fixed, splice_element)`` C-order. After the
     kernel writes, the data buffer can be exposed as a Ragged with either
@@ -29,7 +29,7 @@ class SplicePlan:
     ``(splice_row, sample, inner)`` cell).
     """
 
-    perm: NDArray[np.intp]
+    permutation: NDArray[np.intp]
     permuted_lengths: NDArray[np.int32]
     permuted_out_offsets: NDArray[np.int64]
     group_offsets: NDArray[np.int64]
@@ -97,10 +97,10 @@ def build_splice_plan(
     pair_lengths = np.diff(splice_row_offsets)  # length n_pairs
     if E == 1:
         # Identity permutation; flat_lengths shape is (B,) already permuted.
-        perm = np.arange(B, dtype=np.intp)
+        permutation = np.arange(B, dtype=np.intp)
         permuted_lengths_flat = flat_lengths.reshape(-1).astype(np.int32, copy=False)
     else:
-        # Build perm by iterating (pair, e, element).
+        # Build permutation by iterating (pair, e, element).
         # For a pair p with element range [s, s+L):
         #   for e in 0..E:
         #     k-indices = [(s+0)*E + e, (s+1)*E + e, ..., (s+L-1)*E + e]
@@ -117,8 +117,12 @@ def build_splice_plan(
             # (E, L): each row e is q_range*E + e.
             ke = q_range[None, :] * E + np.arange(E, dtype=np.intp)[:, None]
             perm_parts.append(ke.reshape(-1))
-        perm = np.concatenate(perm_parts) if perm_parts else np.empty(0, dtype=np.intp)
-        permuted_lengths_flat = flat_2d.reshape(-1)[perm].astype(np.int32, copy=False)
+        permutation = (
+            np.concatenate(perm_parts) if perm_parts else np.empty(0, dtype=np.intp)
+        )
+        permuted_lengths_flat = flat_2d.reshape(-1)[permutation].astype(
+            np.int32, copy=False
+        )
 
     permuted_out_offsets = lengths_to_offsets(permuted_lengths_flat, dtype=np.int64)
 
@@ -147,7 +151,7 @@ def build_splice_plan(
         out_shape = (n_rows, n_samples, None)
 
     return SplicePlan(
-        perm=perm,
+        permutation=permutation,
         permuted_lengths=permuted_lengths_flat,
         permuted_out_offsets=permuted_out_offsets,
         group_offsets=group_offsets,
@@ -206,7 +210,7 @@ class SpliceMap:
         ).to_ak()
         splice_map = cast(ak.Array, splice_map)
 
-        rows = HashTable(max=len(names) * 2, dtype=names.dtype)  # type: ignore
+        rows = HashTable(max=len(names) * 2, dtype=names.dtype)  # type: ignore[bad-argument-type]  # hirola HashTable.max typed as numpy.Number but accepts int
         rows.add(names)
 
         return (

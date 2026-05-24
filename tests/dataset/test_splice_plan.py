@@ -19,7 +19,7 @@ def test_plan_no_inner_axes():
         n_rows=2,
     )
     # No inner fixed, so perm is identity.
-    np.testing.assert_array_equal(plan.perm, [0, 1, 2])
+    np.testing.assert_array_equal(plan.permutation, [0, 1, 2])
     np.testing.assert_array_equal(plan.permuted_lengths, [3, 4, 5])
     np.testing.assert_array_equal(plan.permuted_out_offsets, [0, 3, 7, 12])
     # group_offsets at (row, sample) granularity: 2 entries + 1.
@@ -65,7 +65,7 @@ def test_plan_ploidy_2():
         n_samples=1,
         n_rows=2,
     )
-    np.testing.assert_array_equal(plan.perm, [0, 2, 1, 3, 4, 5])
+    np.testing.assert_array_equal(plan.permutation, [0, 2, 1, 3, 4, 5])
     np.testing.assert_array_equal(plan.permuted_lengths, [10, 20, 11, 21, 30, 31])
     np.testing.assert_array_equal(
         plan.permuted_out_offsets, [0, 10, 30, 41, 62, 92, 123]
@@ -100,7 +100,7 @@ def test_plan_multi_sample_ploidy_2():
     #   s=0, p=1: e=0 → k(q=0,p=1)=1; e=1 → k(q=1,p=1)=3
     #   s=1, p=0: e=0 → k(q=2,p=0)=4; e=1 → k(q=3,p=0)=6
     #   s=1, p=1: e=0 → k(q=2,p=1)=5; e=1 → k(q=3,p=1)=7
-    np.testing.assert_array_equal(plan.perm, [0, 2, 1, 3, 4, 6, 5, 7])
+    np.testing.assert_array_equal(plan.permutation, [0, 2, 1, 3, 4, 6, 5, 7])
     np.testing.assert_array_equal(plan.permuted_lengths, [1, 3, 2, 4, 5, 7, 6, 8])
     # group_offsets at (1, 2, 2) granularity = 4 cells + 1.
     # cell sums: 1+3=4, 2+4=6, 5+7=12, 6+8=14
@@ -137,7 +137,7 @@ def test_plan_single_element_rows():
         n_rows=2,
     )
     # With singleton splice rows the permutation still groups by (r, s, p).
-    np.testing.assert_array_equal(plan.perm, [0, 1, 2, 3])
+    np.testing.assert_array_equal(plan.permutation, [0, 1, 2, 3])
     np.testing.assert_array_equal(plan.permuted_lengths, [5, 6, 7, 8])
 
 
@@ -157,7 +157,7 @@ def test_plan_inner_fixed_size_3():
     #   t=0: e=0 → k=0; e=1 → k=3
     #   t=1: e=0 → k=1; e=1 → k=4
     #   t=2: e=0 → k=2; e=1 → k=5
-    np.testing.assert_array_equal(plan.perm, [0, 3, 1, 4, 2, 5])
+    np.testing.assert_array_equal(plan.permutation, [0, 3, 1, 4, 2, 5])
     np.testing.assert_array_equal(plan.permuted_lengths, [1, 4, 2, 5, 3, 6])
     np.testing.assert_array_equal(plan.group_offsets, [0, 5, 12, 21])
     assert plan.out_shape == (1, 1, 3, None)
@@ -173,7 +173,7 @@ def test_plan_dtype_invariants():
         n_samples=1,
         n_rows=2,
     )
-    assert plan.perm.dtype == np.intp
+    assert plan.permutation.dtype == np.intp
     assert plan.permuted_lengths.dtype == np.int32
     # offset arrays use seqpro's OFFSET_TYPE (int64).
     assert plan.permuted_out_offsets.dtype == np.int64

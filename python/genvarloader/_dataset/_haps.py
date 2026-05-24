@@ -302,13 +302,13 @@ class Haps(Reconstructor[_H]):
     ) -> NDArray[np.int32]:
         """`idx` must be 1D."""
         # (b p)
-        geno_offset_idxs = self._get_geno_offset_idx(idx, self.genotypes)
+        geno_offset_idx = self._get_geno_offset_idx(idx, self.genotypes)
 
         if self.filter == "exonic":
             keep, keep_offsets = choose_exonic_variants(
                 starts=regions[:, 1],
                 ends=regions[:, 2],
-                geno_offset_idxs=geno_offset_idxs,
+                geno_offset_idx=geno_offset_idx,
                 geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
                 v_starts=self.variants.start,
@@ -319,7 +319,7 @@ class Haps(Reconstructor[_H]):
 
         # (r s p)
         hap_ilens = get_diffs_sparse(
-            geno_offset_idxs=geno_offset_idxs,
+            geno_offset_idx=geno_offset_idx,
             geno_v_idxs=self.genotypes.data,
             geno_offsets=self.genotypes.offsets,
             ilens=self.variants.ilen,
@@ -353,7 +353,7 @@ class Haps(Reconstructor[_H]):
             keep, keep_offsets = choose_exonic_variants(
                 starts=regions[:, 1],
                 ends=regions[:, 2],
-                geno_offset_idxs=geno_offset_idx,
+                geno_offset_idx=geno_offset_idx,
                 geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
                 v_starts=self.variants.start,
@@ -453,7 +453,7 @@ class Haps(Reconstructor[_H]):
             assert_never(self.kind)
 
         return (
-            out,  # type: ignore | pylance doesn't like this but it's correct behavior for the signature
+            out,
             req.geno_offset_idx,
             req.shifts,
             req.diffs,
@@ -488,7 +488,7 @@ class Haps(Reconstructor[_H]):
             keep, keep_offsets = choose_exonic_variants(
                 starts=regions[:, 1],
                 ends=regions[:, 2],
-                geno_offset_idxs=geno_offset_idx,
+                geno_offset_idx=geno_offset_idx,
                 geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
                 v_starts=self.variants.start,
@@ -545,10 +545,13 @@ class Haps(Reconstructor[_H]):
         idx: NDArray[np.integer],
         genotypes: Ragged[V_IDX_TYPE],
     ) -> NDArray[np.intp]:
-        r_idx, s_idx = np.unravel_index(idx, genotypes.shape[:2])  # type: ignore
+        r_idx, s_idx = np.unravel_index(idx, genotypes.shape[:2])  # type: ignore[no-matching-overload]  # Ragged.shape is tuple[int | None, ...]; numpy overload expects all-int
         ploid_idx = np.arange(genotypes.shape[-2], dtype=np.intp)
-        rsp_idx = (r_idx[:, None], s_idx[:, None], ploid_idx)
-        geno_offset_idx = np.ravel_multi_index(rsp_idx, genotypes.shape[:-1])  # type: ignore
+        # (region, sample, ploid) index tuple for ravel_multi_index.
+        region_sample_ploid_idx = (r_idx[:, None], s_idx[:, None], ploid_idx)
+        geno_offset_idx = np.ravel_multi_index(
+            region_sample_ploid_idx, genotypes.shape[:-1]
+        )  # type: ignore[no-matching-overload]  # Ragged.shape is tuple[int | None, ...]; numpy overload expects all-int
         return geno_offset_idx
 
     def _get_variants(
@@ -560,7 +563,7 @@ class Haps(Reconstructor[_H]):
         keep_offsets: NDArray[np.integer] | None = None,
     ) -> RaggedVariants:
         # TODO: maybe filter variants for region, shifts?
-        r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore
+        r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore[no-matching-overload]  # Ragged.shape is tuple[int | None, ...]; numpy overload expects all-int
         # (b p ~v)
         genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s])
 
@@ -598,7 +601,7 @@ class Haps(Reconstructor[_H]):
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
             dosages = self.dosages[r, s]
             if _keep is not None:
-                dosages = ak.to_regular(dosages[_keep], 1)  # type: ignore
+                dosages = ak.to_regular(dosages[_keep], 1)
             fields["dosage"] = Ragged(ak.to_packed(dosages))
 
         fields.update(
@@ -650,7 +653,7 @@ class Haps(Reconstructor[_H]):
                 req.out_offsets,
             )
             reconstruct_haplotypes_from_sparse(
-                geno_offset_idxs=req.geno_offset_idx,
+                geno_offset_idx=req.geno_offset_idx,
                 out=haps.data,
                 out_offsets=haps.offsets,
                 regions=req.regions,
@@ -681,7 +684,7 @@ class Haps(Reconstructor[_H]):
         out_buf = np.empty(total, np.uint8)
 
         reconstruct_haplotypes_from_sparse(
-            geno_offset_idxs=flat_geno_idx.reshape(-1, 1),
+            geno_offset_idx=flat_geno_idx.reshape(-1, 1),
             out=out_buf,
             out_offsets=splice_plan.permuted_out_offsets,
             regions=permuted_regions,
@@ -741,7 +744,7 @@ class Haps(Reconstructor[_H]):
 
             # annot offsets match haps offsets, so we share them.
             reconstruct_haplotypes_from_sparse(
-                geno_offset_idxs=req.geno_offset_idx,
+                geno_offset_idx=req.geno_offset_idx,
                 out=haps.data,
                 out_offsets=haps.offsets,
                 regions=req.regions,
@@ -778,7 +781,7 @@ class Haps(Reconstructor[_H]):
         annot_pos_buf = np.empty(total, np.int32)
 
         reconstruct_haplotypes_from_sparse(
-            geno_offset_idxs=flat_geno_idx.reshape(-1, 1),
+            geno_offset_idx=flat_geno_idx.reshape(-1, 1),
             out=out_buf,
             out_offsets=splice_plan.permuted_out_offsets,
             regions=permuted_regions,
@@ -824,7 +827,7 @@ class Haps(Reconstructor[_H]):
         NDArray[np.bool_] | None,
         NDArray[np.integer] | None,
     ]:
-        """Permute the per-element arrays in ``req`` according to ``splice_plan.perm``.
+        """Permute the per-element arrays in ``req`` according to ``splice_plan.permutation``.
 
         ``geno_offset_idx`` and ``shifts`` have shape ``(B, P)``; flatten to
         ``(B*P,)`` in (query, ploidy) C-order, then permute. The kernel then
@@ -833,27 +836,27 @@ class Haps(Reconstructor[_H]):
         assert req.splice_plan is not None
         splice_plan = req.splice_plan
         ploidy = req.shifts.shape[1] if req.shifts.ndim > 1 else 1
-        perm = splice_plan.perm
+        permutation = splice_plan.permutation
 
-        flat_geno_idx = req.geno_offset_idx.reshape(-1)[perm].astype(
+        flat_geno_idx = req.geno_offset_idx.reshape(-1)[permutation].astype(
             np.intp, copy=False
         )
-        flat_shifts = req.shifts.reshape(-1)[perm].astype(np.int32, copy=False)
+        flat_shifts = req.shifts.reshape(-1)[permutation].astype(np.int32, copy=False)
         # regions has shape (B, 3). For (B*P, 3), each query repeats P times
-        # consecutively, then we apply the same perm.
+        # consecutively, then we apply the same permutation.
         regions_flat = np.repeat(req.regions, ploidy, axis=0)
-        permuted_regions = regions_flat[perm]
+        permuted_regions = regions_flat[permutation]
 
         # keep / keep_offsets: per-k granularity (length B*P + 1).
         if req.keep is not None and req.keep_offsets is not None:
             keep_lens = np.diff(req.keep_offsets)
-            keep_lens_perm = keep_lens[perm]
+            keep_lens_perm = keep_lens[permutation]
             keep_offsets_perm = lengths_to_offsets(
                 keep_lens_perm.astype(np.int64), dtype=np.int64
             )
             keep_perm = np.empty(int(keep_lens_perm.sum()), dtype=np.bool_)
             write_cursor = 0
-            for k_old in perm:
+            for k_old in permutation:
                 s = int(req.keep_offsets[k_old])
                 e = int(req.keep_offsets[k_old + 1])
                 width = e - s

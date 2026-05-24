@@ -513,7 +513,7 @@ def _write_phased_chunked(
 
         var_idxs = ak.flatten(
             ak.concatenate(ls_sparse, -1),
-            None,  # type: ignore
+            None,
         ).to_numpy()
         # (s p)
         lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
@@ -804,10 +804,10 @@ def _write_track(
 
     out = np.memmap(
         out_dir / "offsets.npy",
-        dtype=offsets.dtype,  # type: ignore
+        dtype=offsets.dtype,
         mode="r+",
         shape=1,
         offset=offset_offset,
     )
-    out[-1] = offsets[-1]  # type: ignore
+    out[-1] = offsets[-1]
     out.flush()

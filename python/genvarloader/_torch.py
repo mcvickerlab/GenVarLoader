@@ -18,7 +18,7 @@ try:
 
     TORCH_AVAILABLE = True
 except ImportError:
-    TORCH_AVAILABLE = False  # type: ignore
+    TORCH_AVAILABLE = False
 
 
 if TYPE_CHECKING:
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from ._dataset._impl import Dataset
 
 
-def no_torch_error(*args, **kwargs):  # type: ignore
+def no_torch_error(*args, **kwargs):
     raise ImportError(
         "PyTorch is not available. Please install PyTorch to use this function/class."
     )
@@ -68,7 +68,7 @@ def get_dataloader(
 
     if sampler is None:
         sampler = get_sampler(
-            len(dataset),  # type: ignore
+            len(dataset),
             batch_size,
             shuffle,
             drop_last,
@@ -216,7 +216,7 @@ if TORCH_AVAILABLE:
 
         ds_idx: NDArray[np.intp]
 
-        def __init__(  # type: ignore
+        def __init__(
             self,
             n_regions: int,
             n_samples: int,
@@ -240,5 +240,5 @@ if TORCH_AVAILABLE:
         def __iter__(self):
             return iter(self.ds_idx)
 else:
-    TorchDataset = no_torch_error  # type: ignore
-    StratifiedSampler = no_torch_error  # type: ignore
+    TorchDataset = no_torch_error
+    StratifiedSampler = no_torch_error

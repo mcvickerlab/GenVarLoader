@@ -103,11 +103,11 @@ def getitem(
         )
 
     if out_reshape is not None:
-        recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)  # type: ignore
+        recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)  # type: ignore[bad-argument-type, no-matching-overload]  # heterogeneous reshape() across array kinds; shape tuple may contain None for ragged dims
 
     if squeeze:
         # (1 [p] l) -> ([p] l)
-        recon = tuple(o.squeeze(0) for o in recon)  # type: ignore
+        recon = tuple(o.squeeze(0) for o in recon)  # type: ignore[bad-argument-count]  # RaggedVariants.squeeze() takes no args; other kinds do — heterogeneous dispatch
 
     if len(recon) == 1:
         recon = recon[0]
@@ -152,7 +152,7 @@ def _getitem_unspliced(
         to_rc: NDArray[np.bool_] = view.full_regions[r_idx, 3] == -1
         recon = tuple(reverse_complement_ragged(r, to_rc) for r in recon)
 
-    return recon, squeeze, out_reshape  # type: ignore
+    return recon, squeeze, out_reshape
 
 
 def _getitem_spliced(
@@ -222,13 +222,13 @@ def _getitem_spliced(
         # Permute the per-region to_rc mask the same way the plan permuted
         # the kernel queries. The plan acts on a flattened (B, *inner_fixed)
         # k-index, so first replicate to_rc across the inner axes, then
-        # gather via plan.perm.
+        # gather via plan.permutation.
         B = regions.shape[0]
-        n_k = int(plan.perm.shape[0])
+        n_k = int(plan.permutation.shape[0])
         inner_factor, rem = divmod(n_k, B)
         if rem != 0:
             raise AssertionError(
-                "plan.perm length is not a multiple of len(regions); "
+                "plan.permutation length is not a multiple of len(regions); "
                 "inner-fixed flatten factor inconsistent."
             )
         to_rc_unperm = regions[:, 3] == -1
@@ -238,7 +238,7 @@ def _getitem_spliced(
             # (B, E) C-order: same value across the inner axis for a given
             # query. np.repeat gives (B*E,) in (query, inner) C-order.
             to_rc_flat = np.repeat(to_rc_unperm, inner_factor)
-        to_rc_per_elem: NDArray[np.bool_] = to_rc_flat[plan.perm]
+        to_rc_per_elem: NDArray[np.bool_] = to_rc_flat[plan.permutation]
         recon = tuple(reverse_complement_ragged(r, to_rc_per_elem) for r in recon)
 
     # Rewrap each per-element Ragged with the plan's group_offsets to expose
@@ -334,9 +334,9 @@ def reverse_complement_ragged(
     """Reverse-complement (or reverse) ragged outputs according to a per-row mask."""
     if isinstance(rag, Ragged):
         if is_rag_dtype(rag, np.bytes_):
-            rag = Ragged(ak.to_packed(ak.where(to_rc, reverse_complement(rag), rag)))  # type: ignore
+            rag = Ragged(ak.to_packed(ak.where(to_rc, reverse_complement(rag), rag)))
         else:
-            rag = Ragged(ak.to_packed(ak.where(to_rc, rag[..., ::-1], rag)))  # type: ignore
+            rag = Ragged(ak.to_packed(ak.where(to_rc, rag[..., ::-1], rag)))
     elif isinstance(rag, RaggedAnnotatedHaps):
         rag.haps = reverse_complement_ragged(rag.haps, to_rc)
         rag.var_idxs = reverse_complement_ragged(rag.var_idxs, to_rc)
