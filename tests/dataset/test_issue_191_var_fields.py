@@ -144,3 +144,24 @@ def test_load_info_idempotent_for_already_loaded_fields():
     arr0 = v.info[already[0]]
     v.load_info(already)
     assert v.info[already[0]] is arr0
+
+
+def test_haps_from_path_filters_info_loading(svar_with_dosages_ds):
+    """from_path(var_fields=[default]) does not load extra numeric info columns
+    or open the dosages memmap."""
+    ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+    haps = ds._seqs  # type: ignore[attr-defined]
+    # Default var_fields: only alt/ilen/start. info dict must not contain extras.
+    assert haps.var_fields == ["alt", "ilen", "start"]
+    assert set(haps.variants.info.keys()) == set()
+    # Dosages file exists on disk but should not be loaded.
+    assert haps.dosages is None
+
+
+def test_haps_available_var_fields_from_schema(svar_with_dosages_ds):
+    """available_var_fields reflects the file's schema + dosage presence,
+    not what was actually loaded."""
+    ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+    assert "dosage" in ds.available_var_fields
+    # ref is also discoverable because the SVAR has a REF column
+    assert "ref" in ds.available_var_fields
