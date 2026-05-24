@@ -5,8 +5,6 @@ import numpy as np
 import polars as pl
 from genvarloader._table import Table
 
-ddir = Path(__file__).parents[2] / "data"
-
 
 def _make_bed(tmp_path: Path) -> pl.DataFrame:
     bed = pl.DataFrame(
@@ -56,7 +54,7 @@ def test_write_with_table_only_roundtrip(tmp_path):
     assert values == [1.0, 2.0, 3.0, 4.0]
 
 
-def test_write_with_mixed_bigwigs_and_table(tmp_path):
+def test_write_with_mixed_bigwigs_and_table(tmp_path, bigwig_dir: Path):
     bed = pl.DataFrame(
         {
             "chrom": ["chr1"],
@@ -64,7 +62,7 @@ def test_write_with_mixed_bigwigs_and_table(tmp_path):
             "chromEnd": [200],
         }
     )
-    bw_dir = ddir / "bigwig"
+    bw_dir = bigwig_dir
     bw = gvl.BigWigs(
         "bw_signal",
         {
@@ -93,11 +91,11 @@ def test_write_with_mixed_bigwigs_and_table(tmp_path):
     assert (out / "intervals" / "tab_signal" / "intervals.npy").exists()
 
 
-def test_write_with_variants_and_tracks(tmp_path):
+def test_write_with_variants_and_tracks(tmp_path, vcf_dir: Path):
     """gvl.write() should succeed when both variants and tracks are provided."""
     from genoray import VCF
 
-    vcf = VCF(ddir / "vcf" / "filtered_source.vcf.gz")
+    vcf = VCF(vcf_dir / "filtered_source.vcf.gz")
     # VCF samples are NA00001, NA00002, NA00003 — Table must share at least one.
     table = gvl.Table(
         "signal",
