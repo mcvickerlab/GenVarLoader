@@ -72,23 +72,17 @@ def test_semantic_version_ordering_for_one_based_dispatch():
     assert not (SemanticVersion.parse("0.17.5") >= SemanticVersion.parse("0.18.0"))
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_DATA_DIR = _REPO_ROOT / "tests" / "data"
-
-
 @pytest.fixture
-def svar_dataset_paths(tmp_path):
+def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
     """Produce a fresh GVL dataset built from the canonical test svar."""
     import genvarloader as gvl
 
-    svar_path = _DATA_DIR / "filtered.svar"
-    bed_path = _DATA_DIR / "source.bed"
-    assert svar_path.is_dir(), f"missing fixture {svar_path}; run pixi run -e dev gen"
-    assert bed_path.exists(), f"missing fixture {bed_path}"
+    assert filtered_svar.is_dir(), f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+    assert source_bed.exists(), f"missing fixture {source_bed}"
 
     gvl_path = tmp_path / "ds.gvl"
-    gvl.write(path=gvl_path, bed=bed_path, variants=svar_path, overwrite=True)
-    return gvl_path, svar_path
+    gvl.write(path=gvl_path, bed=source_bed, variants=filtered_svar, overwrite=True)
+    return gvl_path, filtered_svar
 
 
 def test_write_from_svar_records_svar_link_and_no_symlink(svar_dataset_paths):
@@ -173,20 +167,19 @@ def test_verify_fingerprint_ok(svar_dataset_paths):
     _verify_fingerprint(svar_path, metadata.svar_link)
 
 
-def test_open_dataset_via_recorded_svar_link(svar_dataset_paths):
+def test_open_dataset_via_recorded_svar_link(svar_dataset_paths, ref_fasta):
     import genvarloader as gvl
 
     gvl_path, _ = svar_dataset_paths
-    ref = _DATA_DIR / "fasta" / "hg38.fa.bgz"
     ds = (
-        gvl.Dataset.open(gvl_path, reference=ref)
+        gvl.Dataset.open(gvl_path, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_tracks(False)
     )
     _ = ds[0, 0]
 
 
-def test_open_dataset_after_relocation_via_override(tmp_path, svar_dataset_paths):
+def test_open_dataset_after_relocation_via_override(tmp_path, svar_dataset_paths, ref_fasta):
     import genvarloader as gvl
 
     gvl_path, svar_path = svar_dataset_paths
@@ -198,9 +191,8 @@ def test_open_dataset_after_relocation_via_override(tmp_path, svar_dataset_paths
     moved_gvl.parent.mkdir()
     shutil.copytree(gvl_path, moved_gvl)
 
-    ref = _DATA_DIR / "fasta" / "hg38.fa.bgz"
     ds = (
-        gvl.Dataset.open(moved_gvl, reference=ref, svar=moved)
+        gvl.Dataset.open(moved_gvl, reference=ref_fasta, svar=moved)
         .with_seqs("haplotypes")
         .with_tracks(False)
     )
@@ -219,7 +211,7 @@ def test_open_dataset_mismatched_svar_raises(tmp_path, svar_dataset_paths):
         gvl.Dataset.open(gvl_path, svar=fake)
 
 
-def test_open_dataset_legacy_symlink_layout(tmp_path, svar_dataset_paths):
+def test_open_dataset_legacy_symlink_layout(tmp_path, svar_dataset_paths, ref_fasta):
     import warnings as _warnings
 
     import genvarloader as gvl
@@ -234,11 +226,10 @@ def test_open_dataset_legacy_symlink_layout(tmp_path, svar_dataset_paths):
         svar_path.resolve(), target_is_directory=True
     )
 
-    ref = _DATA_DIR / "fasta" / "hg38.fa.bgz"
     with _warnings.catch_warnings(record=True) as caught:
         _warnings.simplefilter("always")
         ds = (
-            gvl.Dataset.open(gvl_path, reference=ref)
+            gvl.Dataset.open(gvl_path, reference=ref_fasta)
             .with_seqs("haplotypes")
             .with_tracks(False)
         )
@@ -249,7 +240,7 @@ def test_open_dataset_legacy_symlink_layout(tmp_path, svar_dataset_paths):
         )
 
 
-def test_migrate_svar_link_upgrades_legacy_dataset(tmp_path, svar_dataset_paths):
+def test_migrate_svar_link_upgrades_legacy_dataset(tmp_path, svar_dataset_paths, ref_fasta):
     import warnings as _warnings
 
     import genvarloader as gvl
@@ -270,11 +261,10 @@ def test_migrate_svar_link_upgrades_legacy_dataset(tmp_path, svar_dataset_paths)
     assert upgraded.get("svar_link") is not None
     assert not (gvl_path / "genotypes" / "link.svar").exists()
 
-    ref = _DATA_DIR / "fasta" / "hg38.fa.bgz"
     with _warnings.catch_warnings(record=True) as caught:
         _warnings.simplefilter("always")
         ds = (
-            gvl.Dataset.open(gvl_path, reference=ref)
+            gvl.Dataset.open(gvl_path, reference=ref_fasta)
             .with_seqs("haplotypes")
             .with_tracks(False)
         )
@@ -292,7 +282,7 @@ def test_migrate_svar_link_is_idempotent(svar_dataset_paths):
     assert before == after
 
 
-def test_open_after_joint_relocation_preserves_relative(tmp_path, svar_dataset_paths):
+def test_open_after_joint_relocation_preserves_relative(tmp_path, svar_dataset_paths, ref_fasta):
     import genvarloader as gvl
 
     gvl_path, svar_path = svar_dataset_paths
@@ -303,9 +293,8 @@ def test_open_after_joint_relocation_preserves_relative(tmp_path, svar_dataset_p
     shutil.copytree(gvl_path, new_gvl)
     shutil.copytree(svar_path, new_svar)
 
-    ref = _DATA_DIR / "fasta" / "hg38.fa.bgz"
     ds = (
-        gvl.Dataset.open(new_gvl, reference=ref)
+        gvl.Dataset.open(new_gvl, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_tracks(False)
     )
