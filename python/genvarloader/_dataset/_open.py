@@ -196,8 +196,7 @@ class OpenRequest:
             )
         normed_contigs = cast(list[str], normed_contigs)
         replacer = {
-            c: contig_lengths[norm_c]
-            for c, norm_c in zip(ds_contigs, normed_contigs)
+            c: contig_lengths[norm_c] for c, norm_c in zip(ds_contigs, normed_contigs)
         }
         out_of_bounds = bed.select(
             (pl.col("chromStart") >= pl.col("chrom").replace_strict(replacer)).any()
