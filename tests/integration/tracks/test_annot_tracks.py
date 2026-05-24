@@ -1,18 +1,13 @@
-from pathlib import Path
-
 import awkward as ak
 import genvarloader as gvl
 import polars as pl
 from genvarloader._ragged import RaggedAnnotatedHaps
 from pytest import fixture
 
-DDIR = Path(__file__).parent.parent.parent / "data"
-REF = DDIR / "fasta" / "hg38.fa.bgz"
-
 
 @fixture
-def dataset():
-    return gvl.Dataset.open(DDIR / "phased_dataset.vcf.gvl", REF).with_seqs("annotated")
+def dataset(phased_vcf_gvl, ref_fasta):
+    return gvl.Dataset.open(phased_vcf_gvl, ref_fasta).with_seqs("annotated")
 
 
 def test_annot_tracks(dataset: gvl.RaggedDataset[RaggedAnnotatedHaps, None]):
