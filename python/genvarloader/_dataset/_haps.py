@@ -147,6 +147,19 @@ class _Variants:
     def __len__(self) -> int:
         return len(self.start)
 
+    @staticmethod
+    def available_info_fields(path: str | Path) -> list[str]:
+        """Return numeric column names that would be loaded as info, without
+        materializing any data.
+
+        ``POS`` and ``ILEN`` are excluded — they're positional, not info.
+        """
+        schema = pl.scan_ipc(path).collect_schema()
+        return [
+            k for k, v in schema.items()
+            if v.is_numeric() and k not in {"POS", "ILEN"}
+        ]
+
 
 _H = TypeVar("_H", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 _NewH = TypeVar("_NewH", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)

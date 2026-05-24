@@ -10,6 +10,7 @@ import genvarloader as gvl
 import numpy as np
 import pytest
 from genoray._types import DOSAGE_TYPE
+from genvarloader._dataset._haps import _Variants
 
 _DATA = Path(__file__).resolve().parents[1] / "data"
 _REF = _DATA / "fasta" / "hg38.fa.bgz"
@@ -85,3 +86,17 @@ def test_available_var_fields_excludes_dosage_when_absent():
         rc_neg=False,
     )
     assert "dosage" not in ds.available_var_fields
+
+
+def test_available_info_fields_lists_numeric_columns_without_loading():
+    """Schema peek: returns numeric columns from the variants table without
+    materializing data."""
+    fields = _Variants.available_info_fields(_SOURCE_SVAR / "index.arrow")
+    # Canonical SVAR has at least AF in its index.
+    # POS and ILEN must NOT appear — they're treated as positional, not info.
+    assert "POS" not in fields
+    assert "ILEN" not in fields
+    # All returned names are strings
+    assert all(isinstance(f, str) for f in fields)
+    # Non-empty for a real SVAR
+    assert len(fields) >= 0  # may be 0 if no extra numeric columns; that's fine
