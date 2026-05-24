@@ -27,7 +27,9 @@ def spliced_svar_ds_path(tmp_path_factory, filtered_svar, source_bed):
     something to do, and the SVAR backend ensures 2-D geno_offsets are
     exercised end-to-end.
     """
-    assert filtered_svar.is_dir(), f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+    assert filtered_svar.is_dir(), (
+        f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+    )
 
     tmp = tmp_path_factory.mktemp("issue_176_parity")
     out = tmp / "ds.gvl"

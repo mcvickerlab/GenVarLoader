@@ -18,6 +18,7 @@ import pytest
 
 # --- root paths --------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def tests_dir() -> Path:
     return Path(__file__).resolve().parent
@@ -30,6 +31,7 @@ def data_dir(tests_dir: Path) -> Path:
 
 # --- reference -------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def ref_fasta(data_dir: Path) -> Path:
     """bgzipped hg38 reference used by the default toy datasets."""
@@ -37,6 +39,7 @@ def ref_fasta(data_dir: Path) -> Path:
 
 
 # --- toy phased datasets (one per variant source) ----------------------------
+
 
 @pytest.fixture(scope="session")
 def phased_vcf_gvl(data_dir: Path) -> Path:
@@ -54,6 +57,7 @@ def phased_svar_gvl(data_dir: Path) -> Path:
 
 
 # --- 1kg datasets (slow tier) ------------------------------------------------
+
 
 @pytest.fixture(scope="session")
 def kg_dir(data_dir: Path) -> Path:
@@ -77,6 +81,7 @@ def kg_svar_gvl(kg_dir: Path) -> Path:
 
 # --- raw inputs / regression artifacts --------------------------------------
 
+
 @pytest.fixture(scope="session")
 def source_bed(data_dir: Path) -> Path:
     return data_dir / "source.bed"
@@ -99,6 +104,7 @@ def issue_153_vcf(data_dir: Path) -> Path:
 
 # --- raw variant source subdirectories --------------------------------------
 
+
 @pytest.fixture(scope="session")
 def vcf_dir(data_dir: Path) -> Path:
     """Directory containing filtered VCF files used as variant sources."""
@@ -119,6 +125,7 @@ def filtered_svar(data_dir: Path) -> Path:
 
 # --- bigwig tracks -----------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def bigwig_dir(data_dir: Path) -> Path:
     """Directory containing sample BigWig files."""
@@ -126,6 +133,7 @@ def bigwig_dir(data_dir: Path) -> Path:
 
 
 # --- ground-truth / consensus directories -----------------------------------
+
 
 @pytest.fixture(scope="session")
 def consensus_dir(data_dir: Path) -> Path:

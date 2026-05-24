@@ -83,7 +83,9 @@ def test_rc_returns_packed_buffer(rag: Ragged, to_rc: np.ndarray):
 
 
 @pytest.fixture(scope="module")
-def spliced_ds_path(tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir) -> Path:
+def spliced_ds_path(
+    tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir
+) -> Path:
     """Build a VCF-backed GVL store with single-exon transcript annotations.
 
     Each BED row becomes its own one-exon transcript so the spliced output
@@ -178,7 +180,9 @@ def test_spliced_reference_pos_strand_matches_fasta(spliced_ds: gvl.Dataset, ref
             )
 
 
-def test_spliced_reference_neg_strand_is_rc_of_fasta(spliced_ds: gvl.Dataset, ref_fasta):
+def test_spliced_reference_neg_strand_is_rc_of_fasta(
+    spliced_ds: gvl.Dataset, ref_fasta
+):
     """A single-exon negative-strand splice must equal the RC of the reference slice."""
     neg_rows = spliced_ds.spliced_regions.with_row_index("sp_idx").filter(
         pl.col("strand").list.eval(pl.element() == "-").list.all()
@@ -209,7 +213,9 @@ def test_spliced_reference_neg_strand_is_rc_of_fasta(spliced_ds: gvl.Dataset, re
 
 
 @pytest.fixture(scope="module")
-def multi_exon_ds_path(tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir) -> Path:
+def multi_exon_ds_path(
+    tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir
+) -> Path:
     """Build a GVL store where each transcript has multiple exons.
 
     We reuse the BED rows grouped 2-at-a-time as a fake "transcript_id" so the

@@ -66,7 +66,9 @@ def test_dosage_present_when_requested(svar_with_dosages_ds, ref_fasta):
     assert "dosage" in batch.fields
 
 
-def test_available_var_fields_includes_dosage_when_present(svar_with_dosages_ds, ref_fasta):
+def test_available_var_fields_includes_dosage_when_present(
+    svar_with_dosages_ds, ref_fasta
+):
     ds = gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
     assert "dosage" in ds.available_var_fields
 
@@ -177,12 +179,16 @@ def test_dataset_open_accepts_var_fields(svar_with_dosages_ds, ref_fasta):
     assert haps.dosages is not None
 
 
-def test_dataset_open_default_var_fields_is_minimum_useful_set(svar_with_dosages_ds, ref_fasta):
+def test_dataset_open_default_var_fields_is_minimum_useful_set(
+    svar_with_dosages_ds, ref_fasta
+):
     ds = gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
     assert ds.active_var_fields == ["alt", "ilen", "start"]
 
 
-def test_with_settings_lazily_loads_new_info_field(svar_with_dosages_ds, filtered_svar, ref_fasta):
+def test_with_settings_lazily_loads_new_info_field(
+    svar_with_dosages_ds, filtered_svar, ref_fasta
+):
     """Opening with default var_fields does not load AF (or other info columns).
     with_settings(var_fields=[..., 'AF']) should lazily extend the info dict."""
     ds = gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)

@@ -20,7 +20,9 @@ def issue_ds(issue_vcf, tmp_path_factory, issue_153_bed: Path, ref_fasta: Path):
     tmp = tmp_path_factory.mktemp("issue_153_ds")
     ds_path = tmp / "issue_153.gvl"
     gvl.write(path=ds_path, bed=issue_153_bed, variants=issue_vcf)
-    return gvl.Dataset.open(ds_path, ref_fasta).with_len("ragged").with_seqs("haplotypes")
+    return (
+        gvl.Dataset.open(ds_path, ref_fasta).with_len("ragged").with_seqs("haplotypes")
+    )
 
 
 def test_issue_153_hap_lengths(issue_ds):

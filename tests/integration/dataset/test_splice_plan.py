@@ -1,7 +1,6 @@
 """Unit tests for build_splice_plan: permutation + offset math."""
 
 import numpy as np
-import pytest
 
 from genvarloader._dataset._splice import build_splice_plan
 

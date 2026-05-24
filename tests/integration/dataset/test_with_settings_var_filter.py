@@ -12,7 +12,9 @@ import pytest
 
 @pytest.fixture
 def svar_gvl_path(tmp_path, filtered_svar, source_bed):
-    assert filtered_svar.is_dir(), f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+    assert filtered_svar.is_dir(), (
+        f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+    )
     out = tmp_path / "ds.gvl"
     gvl.write(path=out, bed=source_bed, variants=filtered_svar, overwrite=True)
     return out

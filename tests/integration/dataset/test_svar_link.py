@@ -77,7 +77,9 @@ def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
     """Produce a fresh GVL dataset built from the canonical test svar."""
     import genvarloader as gvl
 
-    assert filtered_svar.is_dir(), f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+    assert filtered_svar.is_dir(), (
+        f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+    )
     assert source_bed.exists(), f"missing fixture {source_bed}"
 
     gvl_path = tmp_path / "ds.gvl"
@@ -179,7 +181,9 @@ def test_open_dataset_via_recorded_svar_link(svar_dataset_paths, ref_fasta):
     _ = ds[0, 0]
 
 
-def test_open_dataset_after_relocation_via_override(tmp_path, svar_dataset_paths, ref_fasta):
+def test_open_dataset_after_relocation_via_override(
+    tmp_path, svar_dataset_paths, ref_fasta
+):
     import genvarloader as gvl
 
     gvl_path, svar_path = svar_dataset_paths
@@ -240,7 +244,9 @@ def test_open_dataset_legacy_symlink_layout(tmp_path, svar_dataset_paths, ref_fa
         )
 
 
-def test_migrate_svar_link_upgrades_legacy_dataset(tmp_path, svar_dataset_paths, ref_fasta):
+def test_migrate_svar_link_upgrades_legacy_dataset(
+    tmp_path, svar_dataset_paths, ref_fasta
+):
     import warnings as _warnings
 
     import genvarloader as gvl
@@ -282,7 +288,9 @@ def test_migrate_svar_link_is_idempotent(svar_dataset_paths):
     assert before == after
 
 
-def test_open_after_joint_relocation_preserves_relative(tmp_path, svar_dataset_paths, ref_fasta):
+def test_open_after_joint_relocation_preserves_relative(
+    tmp_path, svar_dataset_paths, ref_fasta
+):
     import genvarloader as gvl
 
     gvl_path, svar_path = svar_dataset_paths
