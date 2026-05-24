@@ -1,8 +1,29 @@
+from __future__ import annotations
+
+import enum
+import itertools
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, TypeVar, cast
+
+import awkward as ak
 import numba as nb
 import numpy as np
+from einops import repeat
 from numpy.typing import NDArray
+from seqpro.rag import Ragged
 
-__all__ = []
+from .._ragged import INTERVAL_DTYPE, RaggedIntervals, RaggedTracks
+from .._utils import lengths_to_offsets
+from ._indexing import DatasetIndexer
+from ._insertion_fill import InsertionFill, Repeat5p
+from ._intervals import intervals_to_tracks
+from ._protocol import Reconstructor
+from ._splice import SplicePlan
+
+if TYPE_CHECKING:
+    from ._haps import Haps
 
 # Strategy enum (mirrors _insertion_fill.py; duplicated to avoid Python-level
 # imports inside @njit functions)
@@ -377,3 +398,339 @@ def shift_and_realign_track_sparse(
 
         if out_end_idx < length:
             out[out_end_idx:] = 0
+
+
+# -----------------------------------------------------------------------------
+# Tracks reconstructor (Python-level wrapper around the numba kernels above).
+# -----------------------------------------------------------------------------
+
+
+class TrackType(enum.Enum):
+    SAMPLE = enum.auto()
+    ANNOT = enum.auto()
+
+
+_T = TypeVar("_T", RaggedTracks, RaggedIntervals)
+_NewT = TypeVar("_NewT", RaggedTracks, RaggedIntervals)
+
+
+@dataclass(slots=True)
+class Tracks(Reconstructor[_T]):
+    intervals: dict[str, RaggedIntervals]
+    """The intervals in the dataset. This is memory mapped."""
+    active_tracks: dict[str, TrackType]
+    available_tracks: dict[str, TrackType]
+    kind: type[_T]
+    n_regions: int
+    n_samples: int
+    insertion_fill: dict[str, InsertionFill] = field(default_factory=dict)
+    """Per-track insertion fill strategy. Defaults to Repeat5p for every active track."""
+
+    def with_tracks(self, tracks: str | Iterable[str] | None) -> Tracks:
+        if tracks is None:
+            return replace(self, active_tracks={}, insertion_fill={})
+
+        if isinstance(tracks, str):
+            _tracks = [tracks]
+        else:
+            _tracks = tracks
+
+        if missing := list(set(_tracks) - set(self.intervals)):
+            raise ValueError(f"Missing tracks: {missing}")
+
+        tracks = {t: self.available_tracks[t] for t in _tracks}
+        fills = {t: self.insertion_fill.get(t, Repeat5p()) for t in _tracks}
+        return replace(self, active_tracks=tracks, insertion_fill=fills)
+
+    def with_insertion_fill(
+        self,
+        fill: InsertionFill | Mapping[str, InsertionFill],
+    ) -> Tracks:
+        """Configure the insertion-fill strategy for each active track.
+
+        Parameters
+        ----------
+        fill
+            Either a single :class:`InsertionFill` strategy applied to every
+            active track, or a mapping from track name to strategy. Track names
+            not present in the mapping fall back to :class:`Repeat5p`.
+        """
+        if isinstance(fill, InsertionFill):
+            fills = {name: fill for name in self.active_tracks}
+        else:
+            fills = {name: fill.get(name, Repeat5p()) for name in self.active_tracks}
+        return replace(self, insertion_fill=fills)
+
+    @classmethod
+    def from_path(
+        cls,
+        path: Path,
+        n_regions: int,
+        n_samples: int,
+        kind: type[_T] = RaggedTracks,
+    ) -> Tracks[_T]:
+        strack_dir = path / "intervals"
+        atrack_dir = path / "annot_intervals"
+
+        available_tracks: list[str] = []
+        if strack_dir.exists():
+            for p in strack_dir.iterdir():
+                if len(list(p.iterdir())) == 0:
+                    p.rmdir()
+                else:
+                    available_tracks.append(p.name)
+            available_tracks.sort()
+
+        available_annots: list[str] = []
+        if atrack_dir.exists():
+            for p in atrack_dir.iterdir():
+                if len(list(p.iterdir())) == 0:
+                    p.rmdir()
+                else:
+                    available_annots.append(p.name)
+            available_annots.sort()
+
+        if name_clash := set(available_tracks) & set(available_annots):
+            raise ValueError(
+                f"Found sample and annotation tracks with the same name: {name_clash}"
+            )
+
+        intervals: dict[str, RaggedIntervals] | None = {}
+
+        for track in available_tracks:
+            intervals[track] = cls._open_intervals(
+                strack_dir / track, n_regions, n_samples
+            )
+
+        for track in available_annots:
+            intervals[track] = cls._open_intervals(atrack_dir / track, n_regions, 0)
+
+        all_tracks = dict(
+            zip(available_tracks, itertools.repeat(TrackType.SAMPLE))
+        ) | dict(zip(available_annots, itertools.repeat(TrackType.ANNOT)))
+
+        insertion_fill = {name: Repeat5p() for name in all_tracks}
+        return cls(
+            intervals,
+            all_tracks,
+            all_tracks,
+            kind,
+            n_regions,
+            n_samples,
+            insertion_fill,
+        )
+
+    @staticmethod
+    def _open_intervals(path: Path, n_regions: int, n_samples: int) -> RaggedIntervals:
+        if n_samples == 0:
+            shape = (n_regions, None)
+        else:
+            shape = (n_regions, n_samples, None)
+        itvs = np.memmap(
+            path / "intervals.npy",
+            dtype=INTERVAL_DTYPE,
+            mode="r",
+        )
+        offsets = np.memmap(
+            path / "offsets.npy",
+            dtype=np.int64,
+            mode="r",
+        )
+        starts = Ragged.from_offsets(itvs["start"], shape, offsets)
+        ends = Ragged.from_offsets(itvs["end"], shape, offsets)
+        values = Ragged.from_offsets(itvs["value"], shape, offsets)
+        return RaggedIntervals(starts, ends, values)
+
+    def to_kind(self, kind: type[_NewT]) -> Tracks[_NewT]:
+        t = replace(self, kind=kind)
+        return cast(Tracks[_NewT], t)
+
+    def __call__(
+        self,
+        idx: NDArray[np.integer],
+        r_idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+        output_length: Literal["ragged", "variable"] | int,
+        jitter: int,
+        rng: np.random.Generator,
+        deterministic: bool,
+        splice_plan: SplicePlan | None = None,
+    ) -> _T:
+        if splice_plan is not None and not issubclass(self.kind, RaggedTracks):
+            raise NotImplementedError(
+                "Splicing of RaggedIntervals tracks is not supported."
+            )
+        if issubclass(self.kind, RaggedTracks):
+            out = self._call_float32(
+                idx, r_idx, regions, output_length, splice_plan=splice_plan
+            )
+        else:
+            out = self._call_intervals(idx)
+        return cast(_T, out)
+
+    def _call_float32(
+        self,
+        idx: NDArray[np.integer],
+        r_idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+        output_length: Literal["ragged", "variable"] | int,
+        splice_plan: SplicePlan | None = None,
+    ) -> RaggedTracks:
+        batch_size = len(idx)
+
+        if isinstance(output_length, int):
+            out_lengths = track_lengths = np.full(batch_size, output_length)
+        else:
+            lengths = regions[:, 2] - regions[:, 1]
+            out_lengths = track_lengths = lengths
+
+        if splice_plan is None:
+            # (b [p])
+            out_ofsts_per_t = lengths_to_offsets(out_lengths)
+            track_ofsts_per_t = lengths_to_offsets(track_lengths)
+            # caller accounts for ploidy
+            n_per_track: int = out_ofsts_per_t[-1]
+            # ragged (b t [p] l)
+            out = np.empty(len(self.active_tracks) * n_per_track, np.float32)
+            out_lens = repeat(out_lengths, "b -> b t", t=len(self.active_tracks))
+            out_offsets = lengths_to_offsets(out_lens)
+
+            for track_ofst, (name, tracktype) in enumerate(self.active_tracks.items()):
+                intervals = self.intervals[name]
+                # (b t l) ragged
+                _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
+
+                if tracktype is TrackType.SAMPLE:
+                    o_idx = idx
+                else:
+                    o_idx = r_idx
+
+                intervals_to_tracks(
+                    offset_idxs=o_idx,
+                    starts=regions[:, 1],
+                    itv_starts=intervals.starts.data,
+                    itv_ends=intervals.ends.data,
+                    itv_values=intervals.values.data,
+                    itv_offsets=intervals.starts.offsets,
+                    out=_out,
+                    out_offsets=track_ofsts_per_t,
+                )
+
+            out_shape = (len(idx), len(self.active_tracks), None)
+
+            # ragged (b t l)
+            tracks = RaggedTracks.from_offsets(out, out_shape, out_offsets)
+
+            return cast(RaggedTracks, tracks)
+
+        # ---- splice plan path ----
+        assert not isinstance(output_length, int), (
+            "splice plan path requires variable/ragged output"
+        )
+        # The plan was built with inner_fixed = (n_tracks,) so plan.perm has
+        # length B*T indexed in (query, track) C-order: k = query * T + track.
+        # Each k_new in the permuted order targets one (query, track) pair; we
+        # need to write its bytes into out_buf at plan.permuted_out_offsets[k_new].
+        n_tracks = len(self.active_tracks)
+        total = int(splice_plan.permuted_out_offsets[-1])
+        out_buf = np.empty(total, np.float32)
+
+        k_old = splice_plan.perm  # length B*T
+        track_of_k = k_old % n_tracks
+        query_of_k = k_old // n_tracks
+
+        for track_ofst, (name, tracktype) in enumerate(self.active_tracks.items()):
+            mask = track_of_k == track_ofst
+            if not mask.any():
+                continue
+            # k_new indices that target this track, in permuted order.
+            k_new_idx = np.flatnonzero(mask)
+            queries = query_of_k[k_new_idx]  # length M
+            intervals = self.intervals[name]
+            o_idx_full = idx if tracktype is TrackType.SAMPLE else r_idx
+            sub_lengths = regions[queries, 2] - regions[queries, 1]
+            sub_offsets = lengths_to_offsets(sub_lengths)
+            scratch = np.empty(int(sub_offsets[-1]), np.float32)
+            intervals_to_tracks(
+                offset_idxs=o_idx_full[queries],
+                starts=regions[queries, 1],
+                itv_starts=intervals.starts.data,
+                itv_ends=intervals.ends.data,
+                itv_values=intervals.values.data,
+                itv_offsets=intervals.starts.offsets,
+                out=scratch,
+                out_offsets=sub_offsets,
+            )
+            # Scatter scratch[m] into out_buf at the global permuted position.
+            perm_out = splice_plan.permuted_out_offsets
+            for m, k_new in enumerate(k_new_idx):
+                s_dest = int(perm_out[k_new])
+                e_dest = int(perm_out[k_new + 1])
+                s_src = int(sub_offsets[m])
+                e_src = int(sub_offsets[m + 1])
+                out_buf[s_dest:e_dest] = scratch[s_src:e_src]
+
+        # Per-element Ragged (caller rewraps with group_offsets via _regroup).
+        out_shape = (splice_plan.permuted_lengths.shape[0], None)
+        return cast(
+            RaggedTracks,
+            RaggedTracks.from_offsets(
+                out_buf, out_shape, splice_plan.permuted_out_offsets
+            ),
+        )
+
+    def _call_intervals(self, idx: NDArray[np.integer]) -> RaggedIntervals:
+        r_idx, s_idx = np.unravel_index(idx, (self.n_regions, self.n_samples))
+
+        # out = (batch tracks ~itvs)
+        out_starts = []
+        out_ends = []
+        out_values = []
+
+        for name, tracktype in self.active_tracks.items():
+            # (regions [samples] ~itvs)
+            intervals = self.intervals[name]
+            if tracktype is TrackType.SAMPLE:
+                # (batch ~itvs)
+                itvs = intervals[r_idx, s_idx].to_packed()
+            else:
+                # (batch ~itvs)
+                itvs = intervals[r_idx].to_packed()
+            # (batch 1 ~itvs)
+            out_starts.append(itvs.starts[:, None])
+            out_ends.append(itvs.ends[:, None])
+            out_values.append(itvs.values[:, None])
+
+        # (batch tracks ~itvs)
+        starts = ak.concatenate(out_starts, axis=1)
+        ends = ak.concatenate(out_ends, axis=1)
+        values = ak.concatenate(out_values, axis=1)
+        return RaggedIntervals(starts, ends, values)  # type: ignore
+
+    def write_transformed_track(
+        self,
+        new_track: str,
+        existing_track: str,
+        transform: Callable[
+            [NDArray[np.intp], NDArray[np.intp], Ragged[np.float32]],
+            Ragged[np.float32],
+        ],
+        path: Path,
+        regions: NDArray[np.int32],
+        max_jitter: int,
+        idxer: DatasetIndexer,
+        haps: Haps | None = None,
+        max_mem: int = 2**30,
+        overwrite: bool = False,
+    ) -> Tracks:
+        # The pre-Awkward-Ragged implementation lived here as a chunked
+        # decompress -> user transform -> recompress loop; it did not survive
+        # the migration of Ragged to its Awkward-backed form. See
+        # `docs/superpowers/roadmap.md` for what would be needed to revive it,
+        # and `git show 1f1b718:python/genvarloader/_dataset/_reconstruct.py`
+        # for the previous implementation.
+        raise NotImplementedError(
+            "write_transformed_track is not implemented for the current "
+            "Awkward-backed Ragged. See docs/superpowers/roadmap.md "
+            '("Transformed track writing") for the revival plan.'
+        )
