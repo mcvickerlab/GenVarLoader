@@ -11,7 +11,7 @@ from pathlib import Path
 import genvarloader as gvl
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _DATA_DIR = _REPO_ROOT / "data"
 
 

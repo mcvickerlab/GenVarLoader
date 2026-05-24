@@ -5,7 +5,7 @@ from genvarloader._types import IntervalTrack
 
 
 def test_bigwigs_satisfies_interval_track_protocol():
-    data_dir = Path(__file__).parent / "data" / "bigwig"
+    data_dir = Path(__file__).parent.parent / "data" / "bigwig"
     bw = BigWigs(
         "signal",
         {

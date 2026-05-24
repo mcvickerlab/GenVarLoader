@@ -5,7 +5,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-DDIR = Path(__file__).parent / "data"
+DDIR = Path(__file__).parent.parent / "data"
 REF = DDIR / "fasta" / "hg38.fa.bgz"
 
 

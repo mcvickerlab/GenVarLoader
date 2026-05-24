@@ -5,7 +5,7 @@ import genvarloader as gvl
 import numpy as np
 from pytest_cases import fixture, parametrize_with_cases
 
-data_dir = Path(__file__).resolve().parents[1] / "data"
+data_dir = Path(__file__).resolve().parents[2] / "data"
 ref = data_dir / "fasta" / "hg38.fa.bgz"
 
 

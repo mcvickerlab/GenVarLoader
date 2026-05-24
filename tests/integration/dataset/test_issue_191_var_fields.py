@@ -12,7 +12,7 @@ import pytest
 from genoray._types import DOSAGE_TYPE
 from genvarloader._dataset._haps import _Variants
 
-_DATA = Path(__file__).resolve().parents[1] / "data"
+_DATA = Path(__file__).resolve().parents[2] / "data"
 _REF = _DATA / "fasta" / "hg38.fa.bgz"
 _SOURCE_SVAR = _DATA / "filtered.svar"
 _SOURCE_BED = _DATA / "source.bed"

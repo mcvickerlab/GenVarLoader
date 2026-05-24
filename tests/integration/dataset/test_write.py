@@ -12,7 +12,7 @@ from polars.testing.asserts import assert_frame_equal
 from pytest import fixture, mark
 from pytest_cases import parametrize_with_cases
 
-ddir = Path(__file__).parents[1] / "data"
+ddir = Path(__file__).parents[2] / "data"
 
 
 def reader_vcf():

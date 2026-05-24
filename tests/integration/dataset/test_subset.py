@@ -8,7 +8,7 @@ from numpy.typing import NDArray
 from pytest import fixture
 from pytest_cases import parametrize_with_cases
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 REF = DATA_DIR / "fasta" / "hg38.fa.bgz"
 DATASET = gvl.Dataset.open(DATA_DIR / "phased_dataset.vcf.gvl", REF)
 REGIONS = DATASET._idxer.full_region_idxs

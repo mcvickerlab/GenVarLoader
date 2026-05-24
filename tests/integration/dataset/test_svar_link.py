@@ -72,7 +72,7 @@ def test_semantic_version_ordering_for_one_based_dispatch():
     assert not (SemanticVersion.parse("0.17.5") >= SemanticVersion.parse("0.18.0"))
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _DATA_DIR = _REPO_ROOT / "tests" / "data"
 
 

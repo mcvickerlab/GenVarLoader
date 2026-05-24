@@ -29,7 +29,7 @@ from pytest_cases import parametrize_with_cases
 from genvarloader._ragged import Ragged, reverse_complement
 
 
-data_dir = Path(__file__).resolve().parents[1] / "data"
+data_dir = Path(__file__).resolve().parents[2] / "data"
 ref_path = data_dir / "fasta" / "hg38.fa.bgz"
 source_bed = data_dir / "source.bed"
 source_vcf = data_dir / "vcf" / "filtered_source.vcf.gz"

@@ -8,7 +8,7 @@ import seqpro as sp
 from genvarloader._ragged import RaggedSeqs
 from pytest_cases import parametrize_with_cases
 
-data_dir = Path(__file__).resolve().parents[1] / "data"
+data_dir = Path(__file__).resolve().parents[2] / "data"
 ref = data_dir / "fasta" / "hg38.fa.bgz"
 cons_dir = data_dir / "consensus"
 

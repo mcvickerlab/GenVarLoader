@@ -8,7 +8,7 @@ import seqpro as sp
 from genvarloader._dataset._utils import padded_slice
 from pytest_cases import fixture, parametrize_with_cases
 
-DDIR = Path(__file__).parent / "data"
+DDIR = Path(__file__).parent.parent / "data"
 REF = DDIR / "fasta" / "hg38.fa.bgz"
 
 

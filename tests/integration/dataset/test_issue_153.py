@@ -4,7 +4,7 @@ from pathlib import Path
 import genvarloader as gvl
 import pytest
 
-data_dir = Path(__file__).resolve().parents[1] / "data"
+data_dir = Path(__file__).resolve().parents[2] / "data"
 ref = data_dir / "fasta" / "hg38.fa.bgz"
 issue_vcf_raw = data_dir / "issue_153.vcf"
 issue_bed = data_dir / "issue_153.bed"

@@ -5,7 +5,7 @@ import numpy as np
 import polars as pl
 from genvarloader._table import Table
 
-ddir = Path(__file__).parents[1] / "data"
+ddir = Path(__file__).parents[2] / "data"
 
 
 def _make_bed(tmp_path: Path) -> pl.DataFrame:
