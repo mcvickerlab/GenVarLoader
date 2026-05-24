@@ -180,11 +180,9 @@ def test_plan_dtype_invariants():
     assert plan.group_offsets.dtype == np.int64
 
 
-def test_ref_call_with_plan_writes_per_element_layout():
+def test_ref_call_with_plan_writes_per_element_layout(ref_fasta):
     """Ref.__call__(splice_plan=...) returns a per-element Ragged whose
     offsets are plan.permuted_out_offsets and shape is (n_elements, None)."""
-    from pathlib import Path
-
     import genvarloader as gvl
     import polars as pl
 
@@ -192,35 +190,7 @@ def test_ref_call_with_plan_writes_per_element_layout():
     from genvarloader._dataset._splice import build_splice_plan
     from genvarloader._dataset._utils import bed_to_regions
 
-    # Find the data directory. In git worktrees the large binary test data
-    # lives in the main project's tests/data/, not in the worktree checkout.
-    import subprocess
-
-    _here = Path(__file__).resolve()
-    # Try: worktree-local first, then git common dir (main worktree root).
-    _candidates = [
-        _here.parent.parent / "data" / "fasta" / "hg38.fa.bgz",
-        _here.parent.parent.parent / "data" / "fasta" / "hg38.fa.bgz",
-    ]
-    try:
-        _git_root = Path(
-            subprocess.check_output(
-                ["git", "rev-parse", "--git-common-dir"],
-                cwd=str(_here.parent),
-                text=True,
-            ).strip()
-        ).parent
-        _candidates.insert(0, _git_root / "tests" / "data" / "fasta" / "hg38.fa.bgz")
-    except Exception:
-        pass
-    for _c in _candidates:
-        if _c.exists():
-            DDIR = _c.parent.parent
-            break
-    else:
-        pytest.skip("hg38.fa.bgz not found — run from repo root or main project")
-
-    reference = gvl.Reference.from_path(DDIR / "fasta" / "hg38.fa.bgz", in_memory=False)
+    reference = gvl.Reference.from_path(ref_fasta, in_memory=False)
 
     bed = pl.DataFrame(
         {
