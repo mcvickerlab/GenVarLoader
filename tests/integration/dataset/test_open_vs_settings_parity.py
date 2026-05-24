@@ -12,32 +12,26 @@ Post-fix: both paths produce the same, correctly-filtered output.
 """
 
 import shutil
-from pathlib import Path
 
 import awkward as ak
 import genvarloader as gvl
 import polars as pl
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_DATA_DIR = _REPO_ROOT / "data"
-
 
 @pytest.fixture(scope="module")
-def spliced_svar_ds_path(tmp_path_factory):
+def spliced_svar_ds_path(tmp_path_factory, filtered_svar, source_bed):
     """Build an SVAR-backed GVL store with per-region single-exon transcripts.
 
     Each BED row becomes its own single-exon transcript so SpliceMap has
     something to do, and the SVAR backend ensures 2-D geno_offsets are
     exercised end-to-end.
     """
-    svar_path = _DATA_DIR / "filtered.svar"
-    bed_path = _DATA_DIR / "source.bed"
-    assert svar_path.is_dir(), f"missing fixture {svar_path}; run pixi run -e dev gen"
+    assert filtered_svar.is_dir(), f"missing fixture {filtered_svar}; run pixi run -e dev gen"
 
     tmp = tmp_path_factory.mktemp("issue_176_parity")
     out = tmp / "ds.gvl"
-    gvl.write(path=out, bed=bed_path, variants=svar_path, overwrite=True)
+    gvl.write(path=out, bed=source_bed, variants=filtered_svar, overwrite=True)
 
     # Inject transcript_id / exon_number so SpliceMap.from_bed can resolve.
     regions_path = out / "input_regions.arrow"
@@ -52,19 +46,17 @@ def spliced_svar_ds_path(tmp_path_factory):
     return out
 
 
-def test_open_vs_with_settings_parity_state(spliced_svar_ds_path):
+def test_open_vs_with_settings_parity_state(spliced_svar_ds_path, ref_fasta):
     """Internal state probe: both paths produce the same filter / spliced state."""
-    ref_path = _DATA_DIR / "fasta" / "hg38.fa.bgz"
-
     ds_a = gvl.Dataset.open(
         spliced_svar_ds_path,
-        reference=ref_path,
+        reference=ref_fasta,
         splice_info=("transcript_id", "exon_number"),
         var_filter="exonic",
     ).with_seqs("haplotypes")
 
     ds_b = (
-        gvl.Dataset.open(spliced_svar_ds_path, reference=ref_path)
+        gvl.Dataset.open(spliced_svar_ds_path, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_settings(
             splice_info=("transcript_id", "exon_number"),
@@ -77,19 +69,17 @@ def test_open_vs_with_settings_parity_state(spliced_svar_ds_path):
     assert ds_a._sp_idxer is not None and ds_b._sp_idxer is not None
 
 
-def test_open_vs_with_settings_parity_output(spliced_svar_ds_path):
+def test_open_vs_with_settings_parity_output(spliced_svar_ds_path, ref_fasta):
     """Materialized output: __getitem__ must agree byte-for-byte."""
-    ref_path = _DATA_DIR / "fasta" / "hg38.fa.bgz"
-
     ds_a = gvl.Dataset.open(
         spliced_svar_ds_path,
-        reference=ref_path,
+        reference=ref_fasta,
         splice_info=("transcript_id", "exon_number"),
         var_filter="exonic",
     ).with_seqs("haplotypes")
 
     ds_b = (
-        gvl.Dataset.open(spliced_svar_ds_path, reference=ref_path)
+        gvl.Dataset.open(spliced_svar_ds_path, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_settings(
             splice_info=("transcript_id", "exon_number"),
