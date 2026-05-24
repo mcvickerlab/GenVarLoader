@@ -60,4 +60,3 @@ def idx_array():
 @parametrize_with_cases("idx", prefix="idx_", cases=".")
 def test_ds_indexing(dataset, idx):
     dataset[idx]
-
