@@ -55,6 +55,7 @@ class OpenRequest:
     splice_info: str | tuple[str, str] | None = None
     var_filter: Literal["exonic"] | None = None
     svar: str | Path | None = None
+    var_fields: list[str] | None = None
 
     def resolve(self) -> RaggedDataset:
         """Resolve the request into a :class:`Dataset`."""
@@ -154,6 +155,7 @@ class OpenRequest:
                 svar_override=self.svar,
                 min_af=self.min_af,
                 max_af=self.max_af,
+                var_fields=self.var_fields,
             )
             if reference is None:
                 logger.warning(

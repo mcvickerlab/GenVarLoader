@@ -107,11 +107,14 @@ gvl.Dataset.open(
     region_names=None,
     splice_info=None,                    # see "Spliced haplotypes"
     var_filter=None,                     # None | "exonic"
+    var_fields=None,                     # list[str] | None — see below
     *, svar=None,
 )
 ```
 
 Without `reference=`, only variants/haplotypes are available (you can't produce reference-overlaid sequences). `svar=` overrides the recorded SVAR location.
+
+- **`var_fields: list[str] | None`** — Variant fields to include on `RaggedVariants` output. Defaults to the minimum useful set `["alt", "ilen", "start"]`. Pass additional names (e.g. `"ref"`, `"dosage"`, or any numeric info column in the source variants table) to load them eagerly at open time. Must be a subset of `Dataset.available_var_fields`. Can be reconfigured later via `Dataset.with_settings(var_fields=...)`, which lazily loads any newly-requested columns. `"dosage"` must be requested explicitly — it is *not* added automatically even when `dosages.npy` exists on disk.
 
 ## Output modes — `with_seqs` × `with_tracks`
 
@@ -238,6 +241,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - BED `strand` of `.` is treated as `+`. Reverse-complement happens automatically when `rc_neg=True` (default) and `strand == "-"`.
 - Splicing is a read-time setting on a *flat* BED of exons — do not pre-concatenate exons before `gvl.write`.
 - `extend_to_length=False` at write time will produce haplotypes shorter than the BED region when deletions are present; downstream code must tolerate `<` region length.
+- Missing a `dosage` field on a `RaggedVariants` output you expected? Check `var_fields` — `dosage` must be requested explicitly even if `dosages.npy` exists on disk.
 
 ## Maintaining this skill
 

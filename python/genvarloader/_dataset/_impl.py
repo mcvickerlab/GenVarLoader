@@ -101,6 +101,7 @@ class Dataset:
         rc_neg: bool = True,
         min_af: float | None = None,
         max_af: float | None = None,
+        var_fields: list[str] | None = None,
         region_names: str | None = None,
         splice_info: str | tuple[str, str] | None = None,
         var_filter: Literal["exonic"] | None = None,
@@ -118,6 +119,7 @@ class Dataset:
         rc_neg: bool = True,
         min_af: float | None = None,
         max_af: float | None = None,
+        var_fields: list[str] | None = None,
         region_names: str | None = None,
         splice_info: str | tuple[str, str] | None = None,
         var_filter: Literal["exonic"] | None = None,
@@ -134,6 +136,7 @@ class Dataset:
         rc_neg: bool = True,
         min_af: float | None = None,
         max_af: float | None = None,
+        var_fields: list[str] | None = None,
         region_names: str | None = None,
         splice_info: str | tuple[str, str] | None = None,
         var_filter: Literal["exonic"] | None = None,
@@ -163,6 +166,12 @@ class Dataset:
             The minimum allele frequency to include in the dataset. If dataset is not backed by SVAR genotypes, this will raise an error.
         max_af
             The maximum allele frequency to include in the dataset. If dataset is not backed by SVAR genotypes, this will raise an error.
+        var_fields
+            The variant fields to include in the dataset. Defaults to the
+            minimum useful set ``["alt", "ilen", "start"]``. Pass additional
+            field names (e.g. ``"ref"``, ``"dosage"``, or any info column
+            present in the source variants table) to load them eagerly at open
+            time. Must be a subset of :attr:`available_var_fields`.
         splice_info
             A string or tuple of strings representing the splice information to use.
             If a string, it will be used as the transcript ID and the exons are expected to be in order.
@@ -187,6 +196,7 @@ class Dataset:
             rc_neg=rc_neg,
             min_af=min_af,
             max_af=max_af,
+            var_fields=var_fields,
             region_names=region_names,
             splice_info=splice_info,
             var_filter=var_filter,
@@ -289,6 +299,19 @@ class Dataset:
             if missing or not isinstance(self._seqs, Haps):
                 raise ValueError(f"Missing variant fields: {missing}")
             haps = to_evolve.get("_seqs", self._seqs)
+            # Lazily load any newly-requested info columns into the existing
+            # _Variants struct (mutates haps.variants.info in place).
+            builtin = {"alt", "ilen", "start", "ref", "dosage"}
+            new_info_fields = [
+                f
+                for f in var_fields
+                if f not in builtin and f not in haps.variants.info
+            ]
+            if new_info_fields:
+                haps.variants.load_info(new_info_fields)
+            # Lazily memmap dosages if newly requested.
+            if "dosage" in var_fields and haps.dosages is None:
+                haps = _lazy_load_dosages(self, haps)
             haps = replace(haps, var_fields=var_fields)
             to_evolve["_seqs"] = haps
 
@@ -1369,6 +1392,57 @@ class Dataset:
             rc_neg=self.rc_neg,
         )
         return getitem(view, idx)
+
+
+def _lazy_load_dosages(dataset: "Dataset", haps: Haps) -> Haps:
+    """Open the dosages memmap for a Haps that didn't request them at open time.
+
+    Reuses the same path-resolution logic that ``Haps.from_path`` used. Returns
+    a new ``Haps`` with ``dosages`` populated (does NOT mutate the input).
+    """
+    import json as _json
+
+    from genoray._types import DOSAGE_TYPE
+
+    from ._svar_link import _resolve_svar
+    from ._write import Metadata
+
+    path = haps.path
+    svar_meta_path = path / "genotypes" / "svar_meta.json"
+    if not svar_meta_path.exists():
+        raise ValueError(
+            "Dosage requested but this dataset is not SVAR-backed; no dosages.npy possible."
+        )
+
+    with open(svar_meta_path) as f:
+        svar_meta = _json.load(f)
+    shape = tuple(svar_meta["shape"])
+    dtype = np.dtype(svar_meta["dtype"])
+
+    offset_path = path / "genotypes" / "offsets.npy"
+
+    # Resolve the SVAR directory the same way Haps.from_path did. Dataset does
+    # not retain Metadata, so re-read metadata.json from disk.
+    meta = Metadata.model_validate_json((path / "metadata.json").read_text())
+    svar_link = meta.svar_link
+    if svar_link is not None:
+        svar_path = _resolve_svar(path, svar_link, None)
+    else:
+        legacy_link = path / "genotypes" / "link.svar"
+        svar_path = legacy_link.resolve()
+
+    dosage_path = svar_path / "dosages.npy"
+    if not dosage_path.exists():
+        raise ValueError(
+            f"Dosage requested but {dosage_path} does not exist. "
+            f"Check the SVAR was built with dosages."
+        )
+
+    offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
+    dosages_mm = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
+    rag_shape = (*shape[1:], None)
+    dosages = Ragged.from_offsets(dosages_mm, rag_shape, offsets.reshape(2, -1))
+    return replace(haps, dosages=dosages)
 
 
 def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedIntervals:

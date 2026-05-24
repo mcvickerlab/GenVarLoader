@@ -93,17 +93,24 @@ class _Variants:
     info: dict[str, NDArray[np.number]]
 
     @classmethod
-    def from_table(cls, path: str | Path, one_based: bool = True):
+    def from_table(
+        cls,
+        path: str | Path,
+        one_based: bool = True,
+        info_fields: set[str] | None = None,
+    ):
         """
         Loads variant info from a table. Must always have POS, ILEN, and ALT.
-        Any numeric columns will be loaded as info.
 
         Parameters
         ----------
         path : str | Path
-            The path to the variants table or a polars DataFrame.
+            The path to the variants table.
         one_based : bool, optional
             Whether the variants are one-based, by default False.
+        info_fields
+            Optional whitelist of numeric column names to load as info.
+            If ``None`` (default), load every numeric column except POS/ILEN.
         """
         path = Path(path).resolve()
         variants = pl.read_ipc(path, memory_map=False)
@@ -126,7 +133,9 @@ class _Variants:
         info = {
             k: variants[k].to_numpy()
             for k, v in variants.schema.items()
-            if v.is_numeric() and k not in {"POS", "ILEN"}
+            if v.is_numeric()
+            and k not in {"POS", "ILEN"}
+            and (info_fields is None or k in info_fields)
         }
 
         ref = (
@@ -146,6 +155,32 @@ class _Variants:
 
     def __len__(self) -> int:
         return len(self.start)
+
+    @staticmethod
+    def available_info_fields(path: str | Path) -> list[str]:
+        """Return numeric column names that would be loaded as info, without
+        materializing any data.
+
+        ``POS`` and ``ILEN`` are excluded — they're positional, not info.
+        """
+        schema = pl.scan_ipc(path).collect_schema()
+        return [
+            k for k, v in schema.items() if v.is_numeric() and k not in {"POS", "ILEN"}
+        ]
+
+    def load_info(self, fields) -> None:
+        """Lazily load additional numeric info columns from ``self.path``.
+
+        Fields already present in ``self.info`` are skipped. Unknown numeric
+        columns silently no-op (the caller should validate against
+        :meth:`available_info_fields` first).
+        """
+        missing = [f for f in fields if f not in self.info]
+        if not missing:
+            return
+        df = pl.read_ipc(self.path, columns=missing, memory_map=False)
+        for f in missing:
+            self.info[f] = df[f].to_numpy()
 
 
 _H = TypeVar("_H", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
@@ -176,19 +211,47 @@ class Haps(Reconstructor[_H]):
 
     def __post_init__(self):
         self.n_variants = ak.num(self.genotypes, -1).to_numpy()
+
+        # Discover available info fields from the on-disk schema, not from the
+        # (possibly-filtered) loaded info dict. This way the user can see every
+        # field they could request, even if only a subset was loaded. Fall back
+        # to whatever was loaded if the variants path isn't a readable file
+        # (e.g. synthetic in-memory _Variants used by the dummy dataset).
+        if self.variants.path.is_file():
+            schema_info_fields = _Variants.available_info_fields(self.variants.path)
+        else:
+            schema_info_fields = list(self.variants.info.keys())
+        has_dosage_file = self._has_dosage_file_on_disk()
+
         self.available_var_fields = (
             ["alt", "ilen", "start"]
-            + list(self.variants.info.keys())
+            + schema_info_fields
             + (["ref"] if self.variants.ref is not None else [])
+            + (["dosage"] if has_dosage_file else [])
         )
 
         if (
             self.min_af is not None or self.max_af is not None
-        ) and "AF" not in self.variants.info:
+        ) and "AF" not in schema_info_fields:
             raise RuntimeError(
                 "Either this dataset is not backed by an SVAR file, or the SVAR file has not had AFs cached yet."
                 + "Doing this automatically is not yet supported."
             )
+
+    def _has_dosage_file_on_disk(self) -> bool:
+        """True iff the linked SVAR contains a dosages.npy.
+
+        Returns False for non-SVAR datasets (no dosage path).
+        """
+        # If we already loaded dosages, we definitely had the file.
+        if self.dosages is not None:
+            return True
+        # Otherwise inspect the SVAR directory next to the variants table.
+        # _Variants.path is set to <svar_dir>/index.arrow for SVAR datasets,
+        # or <gvl>/genotypes/variants.arrow for legacy. We treat "next-to
+        # variants table" as "is dosage possible here".
+        candidate = self.variants.path.parent / "dosages.npy"
+        return candidate.exists()
 
     @classmethod
     def from_path(
@@ -204,7 +267,17 @@ class Haps(Reconstructor[_H]):
         min_af: float | None = None,
         max_af: float | None = None,
         filter: Literal["exonic"] | None = None,
+        var_fields: list[str] | None = None,
     ) -> Haps[RaggedVariants]:
+        # Default var_fields for loading. var_fields=None means "use the default
+        # set" — we resolve it here so we know exactly which info columns to load.
+        if var_fields is None:
+            var_fields = ["alt", "ilen", "start"]
+        # Which numeric info columns to eagerly load: those in var_fields that
+        # aren't built-ins. (alt/ilen/start/ref/dosage are handled separately.)
+        builtin = {"alt", "ilen", "start", "ref", "dosage"}
+        info_fields = {f for f in var_fields if f not in builtin}
+
         svar_meta_path = path / "genotypes" / "svar_meta.json"
         dosages = None
 
@@ -254,20 +327,23 @@ class Haps(Reconstructor[_H]):
             rag_shape = (*shape[1:], None)
             genotypes = Ragged.from_offsets(v_idxs, rag_shape, offsets.reshape(2, -1))
 
-            if dosage_path.exists():
-                dosages = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
+            if "dosage" in var_fields and dosage_path.exists():
+                dosages_mm = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
                 dosages = Ragged.from_offsets(
-                    dosages, rag_shape, offsets.reshape(2, -1)
+                    dosages_mm, rag_shape, offsets.reshape(2, -1)
                 )
 
             logger.info("Loading variant data.")
-            variants = _Variants.from_table(svar_path / "index.arrow")
+            variants = _Variants.from_table(
+                svar_path / "index.arrow", info_fields=info_fields
+            )
         else:
             logger.info("Loading variant data.")
             variants = _Variants.from_table(
                 path / "genotypes" / "variants.arrow",
                 one_based=version is not None
                 and version >= SemanticVersion.parse("0.18.0"),
+                info_fields=info_fields,
             )
             v_idxs = np.memmap(
                 path / "genotypes" / "variant_idxs.npy",
@@ -290,6 +366,7 @@ class Haps(Reconstructor[_H]):
             filter=filter,
             min_af=min_af,
             max_af=max_af,
+            var_fields=var_fields,
         )
 
     def _haplotype_ilens(
@@ -597,7 +674,7 @@ class Haps(Reconstructor[_H]):
                 self.variants.ilen[v_idxs], genos.shape, genos.offsets
             )
 
-        if self.dosages is not None:
+        if self.dosages is not None and "dosage" in self.var_fields:
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
             dosages = self.dosages[r, s]
             if _keep is not None:
