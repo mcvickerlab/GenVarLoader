@@ -165,3 +165,22 @@ def test_haps_available_var_fields_from_schema(svar_with_dosages_ds):
     assert "dosage" in ds.available_var_fields
     # ref is also discoverable because the SVAR has a REF column
     assert "ref" in ds.available_var_fields
+
+
+def test_dataset_open_accepts_var_fields(svar_with_dosages_ds):
+    """Dataset.open(var_fields=...) routes through to Haps.from_path so the
+    requested fields are loaded eagerly at open time."""
+    ds = gvl.Dataset.open(
+        svar_with_dosages_ds,
+        _REF,
+        rc_neg=False,
+        var_fields=["alt", "ilen", "start", "dosage"],
+    )
+    haps = ds._seqs  # type: ignore[attr-defined]
+    assert haps.var_fields == ["alt", "ilen", "start", "dosage"]
+    assert haps.dosages is not None
+
+
+def test_dataset_open_default_var_fields_is_minimum_useful_set(svar_with_dosages_ds):
+    ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+    assert ds.active_var_fields == ["alt", "ilen", "start"]

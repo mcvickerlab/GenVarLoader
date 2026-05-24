@@ -101,6 +101,7 @@ class Dataset:
         rc_neg: bool = True,
         min_af: float | None = None,
         max_af: float | None = None,
+        var_fields: list[str] | None = None,
         region_names: str | None = None,
         splice_info: str | tuple[str, str] | None = None,
         var_filter: Literal["exonic"] | None = None,
@@ -118,6 +119,7 @@ class Dataset:
         rc_neg: bool = True,
         min_af: float | None = None,
         max_af: float | None = None,
+        var_fields: list[str] | None = None,
         region_names: str | None = None,
         splice_info: str | tuple[str, str] | None = None,
         var_filter: Literal["exonic"] | None = None,
@@ -134,6 +136,7 @@ class Dataset:
         rc_neg: bool = True,
         min_af: float | None = None,
         max_af: float | None = None,
+        var_fields: list[str] | None = None,
         region_names: str | None = None,
         splice_info: str | tuple[str, str] | None = None,
         var_filter: Literal["exonic"] | None = None,
@@ -163,6 +166,12 @@ class Dataset:
             The minimum allele frequency to include in the dataset. If dataset is not backed by SVAR genotypes, this will raise an error.
         max_af
             The maximum allele frequency to include in the dataset. If dataset is not backed by SVAR genotypes, this will raise an error.
+        var_fields
+            The variant fields to include in the dataset. Defaults to the
+            minimum useful set ``["alt", "ilen", "start"]``. Pass additional
+            field names (e.g. ``"ref"``, ``"dosage"``, or any info column
+            present in the source variants table) to load them eagerly at open
+            time. Must be a subset of :attr:`available_var_fields`.
         splice_info
             A string or tuple of strings representing the splice information to use.
             If a string, it will be used as the transcript ID and the exons are expected to be in order.
@@ -187,6 +196,7 @@ class Dataset:
             rc_neg=rc_neg,
             min_af=min_af,
             max_af=max_af,
+            var_fields=var_fields,
             region_names=region_names,
             splice_info=splice_info,
             var_filter=var_filter,
