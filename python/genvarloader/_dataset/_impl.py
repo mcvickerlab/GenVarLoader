@@ -9,7 +9,6 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from dataclasses import dataclass, replace
-from genoray._utils import ContigNormalizer
 from loguru import logger
 from numpy.typing import NDArray
 from seqpro.rag import DTYPE_co as DTYPE, Ragged, is_rag_dtype
@@ -44,8 +43,7 @@ from ._reconstruct import (
     _build_reconstructor,
 )
 from ._reference import Reference
-from ._utils import bed_to_regions, regions_to_bed
-from ._write import Metadata
+from ._utils import regions_to_bed
 
 if TORCH_AVAILABLE:
     import torch
@@ -180,161 +178,22 @@ class Dataset:
             moved and the dataset cannot find it via the stored relative/absolute
             path or by sibling discovery.
         """
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"{path} does not exist.")
+        from ._open import OpenRequest
 
-        # read metadata
-        with _py_open(path / "metadata.json") as f:
-            metadata = Metadata.model_validate_json(f.read())
-        samples = metadata.samples
-        contigs = metadata.contigs
-        ploidy = metadata.ploidy
-        max_jitter = metadata.max_jitter
-
-        # read input regions and generate index map
-        bed = pl.read_ipc(path / "input_regions.arrow")
-        if region_names is not None:
-            _region_names = bed[region_names].to_list()
-        else:
-            _region_names = None
-        r_idx_map = bed["r_idx_map"].to_numpy().astype(np.intp)
-        idxer = DatasetIndexer.from_region_and_sample_idxs(
-            r_idxs=r_idx_map,
-            s_idxs=np.arange(len(samples)),
-            samples=samples,
-            regions=_region_names,
-        )
-        bed = bed.drop("r_idx_map")
-        sorted_bed = sp.bed.sort(bed)
-        regions = bed_to_regions(sorted_bed, ContigNormalizer(contigs))
-
-        has_genotypes = (path / "genotypes").exists()
-        if has_genotypes:
-            if ploidy is None:
-                raise ValueError("Malformed dataset: found genotypes but not ploidy.")
-
-        has_intervals = (path / "intervals").exists() or (
-            path / "annot_intervals"
-        ).exists()
-
-        if isinstance(reference, (str, Path)):
-            reference = Reference.from_path(reference, contigs)
-
-        if has_genotypes:
-            assert ploidy is not None
-            seqs = Haps.from_path(
-                path=path,
-                reference=reference,
-                regions=regions,
-                samples=samples,
-                ploidy=ploidy,
-                version=metadata.version,
-                svar_link=metadata.svar_link,
-                svar_override=svar,
-                min_af=min_af,
-                max_af=max_af,
-            )
-            if reference is None:
-                logger.warning(
-                    "No reference: dataset only has genotypes but no reference was given."
-                    " Resulting dataset can only support :code:`.with_seqs('variants')` to return RaggedVariants."
-                )
-        elif reference is not None:
-            seqs = Ref(reference=reference)
-        else:
-            seqs = None
-
-        if has_intervals:
-            tracks = Tracks.from_path(path, len(regions), len(samples))
-            tracks = tracks.with_tracks(list(tracks.intervals))
-        else:
-            tracks = None
-
-        if seqs is None and tracks is None:
-            raise RuntimeError(
-                "Malformed dataset: neither genotypes nor intervals found."
-            )
-
-        # Initial view kind: matches the default class produced for each storage shape.
-        if isinstance(seqs, Haps):
-            seqs_kind: (
-                Literal["haplotypes", "reference", "annotated", "variants"] | None
-            ) = "haplotypes"
-        elif isinstance(seqs, Ref):
-            seqs_kind = "reference"
-        else:
-            seqs_kind = None
-
-        recon = _build_reconstructor(seqs, tracks, seqs_kind)
-
-        splice_idxer = None
-        spliced_bed = None
-
-        if seqs is not None and reference is not None:
-            cnorm = ContigNormalizer(reference.contigs)
-            contig_lengths = dict(zip(reference.contigs, np.diff(reference.offsets)))
-            ds_contigs = bed["chrom"].unique().to_list()
-            normed_contigs = cnorm.norm(ds_contigs)
-            if any(c is None for c in normed_contigs):
-                raise ValueError(
-                    "Some regions in the dataset can not be mapped to a contig in the reference genome."
-                )
-            normed_contigs = cast(list[str], normed_contigs)
-            replacer = {
-                c: contig_lengths[norm_c]
-                for c, norm_c in zip(ds_contigs, normed_contigs)
-            }
-            out_of_bounds = bed.select(
-                (pl.col("chromStart") >= pl.col("chrom").replace_strict(replacer)).any()
-            ).item()
-            if out_of_bounds:
-                logger.warning(
-                    "Some regions in the dataset have a start coordinate that is out"
-                    " of bounds for the reference genome provided. This may happen if"
-                    " the dataset's regions are for a different reference genome."
-                )
-
-        dataset = RaggedDataset(
-            path=path,
-            output_length="ragged",
-            max_jitter=max_jitter,
+        return OpenRequest(
+            path=Path(path),
+            reference=reference,
             jitter=jitter,
-            contigs=contigs,
-            return_indices=False,
-            rc_neg=rc_neg,
+            rng=rng,
             deterministic=deterministic,
-            _idxer=idxer,
-            _sp_idxer=splice_idxer,
-            _full_bed=bed,
-            _spliced_bed=spliced_bed,
-            _full_regions=regions,
-            _seqs=seqs,
-            _tracks=tracks,
-            _seqs_kind=seqs_kind,
-            _recon=recon,
-            _rng=np.random.default_rng(rng),
-        )
-
-        if splice_info is not None or var_filter is not None:
-            # splice_info is only valid with haplotypes/reference sequence types.
-            # If the dataset still has the default "variants" sequence type (i.e.
-            # the caller hasn't called with_seqs yet), promote to "haplotypes" so
-            # _check_valid_state() doesn't reject splice_info=... up front.
-            if (
-                splice_info is not None
-                and isinstance(dataset._seqs, Haps)
-                and dataset.sequence_type == "variants"
-            ):
-                dataset = dataset.with_seqs("haplotypes")
-            dataset = dataset.with_settings(
-                splice_info=splice_info,
-                var_filter=var_filter,
-            )
-
-        logger.info(f"Opened dataset:\n{dataset}")
-
-        return dataset
+            rc_neg=rc_neg,
+            min_af=min_af,
+            max_af=max_af,
+            region_names=region_names,
+            splice_info=splice_info,
+            var_filter=var_filter,
+            svar=svar,
+        ).resolve()
 
     def with_settings(
         self,
