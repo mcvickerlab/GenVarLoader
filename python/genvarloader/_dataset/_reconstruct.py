@@ -718,9 +718,7 @@ class Haps(Reconstructor[_H]):
         data = self.variants.info[attr][genos.data]
         return Ragged.from_offsets(data, genos.shape, genos.offsets)
 
-    def _reconstruct_haplotypes(
-        self, req: ReconstructionRequest
-    ) -> Ragged[np.bytes_]:
+    def _reconstruct_haplotypes(self, req: ReconstructionRequest) -> Ragged[np.bytes_]:
         """Reconstruct haplotype byte sequences from sparse genotypes."""
         assert self.reference is not None
 
