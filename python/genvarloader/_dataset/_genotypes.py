@@ -135,6 +135,9 @@ def reconstruct_haplotypes_from_sparse(
 ):
     """Reconstruct haplotypes from reference sequence and variants.
 
+    Batched parallel driver: dispatches to :func:`reconstruct_haplotype_from_sparse`
+    (singular) for each ``(query, hap)`` pair.
+
     Parameters
     ----------
     out : NDArray[np.uint8]
@@ -244,7 +247,10 @@ def reconstruct_haplotype_from_sparse(
     annot_v_idxs: NDArray[np.integer] | None = None,
     annot_ref_pos: NDArray[np.integer] | None = None,
 ):
-    """Reconstruct a haplotype from reference sequence and variants.
+    """Reconstruct a single haplotype from reference sequence and variants.
+
+    Single-haplotype inner kernel. Use :func:`reconstruct_haplotypes_from_sparse`
+    (plural) to reconstruct a batch in parallel.
 
     Parameters
     ----------
