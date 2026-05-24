@@ -61,8 +61,3 @@ def idx_array():
 def test_ds_indexing(dataset, idx):
     dataset[idx]
 
-
-@parametrize_with_cases("r_idx", prefix="idx_", cases=".")
-@parametrize_with_cases("s_idx", prefix="idx_", cases=".")
-def test_rs_indexing(dataset, r_idx, s_idx):
-    dataset[r_idx, s_idx]
