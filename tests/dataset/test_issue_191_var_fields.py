@@ -124,7 +124,9 @@ def test_load_info_extends_info_dict():
     """load_info reads only the missing fields from disk and merges them."""
     available = set(_Variants.available_info_fields(_SOURCE_SVAR / "index.arrow"))
     if not available:
-        pytest.skip("No numeric info columns in canonical SVAR; cannot exercise load_info")
+        pytest.skip(
+            "No numeric info columns in canonical SVAR; cannot exercise load_info"
+        )
 
     pick = next(iter(available))
     # Start with empty info
@@ -190,9 +192,7 @@ def test_with_settings_lazily_loads_new_info_field(svar_with_dosages_ds):
     """Opening with default var_fields does not load AF (or other info columns).
     with_settings(var_fields=[..., 'AF']) should lazily extend the info dict."""
     ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
-    available_info = set(
-        _Variants.available_info_fields(_SOURCE_SVAR / "index.arrow")
-    )
+    available_info = set(_Variants.available_info_fields(_SOURCE_SVAR / "index.arrow"))
     if not available_info:
         pytest.skip("No numeric info columns; cannot test lazy info expansion")
 

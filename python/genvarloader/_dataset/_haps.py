@@ -165,8 +165,7 @@ class _Variants:
         """
         schema = pl.scan_ipc(path).collect_schema()
         return [
-            k for k, v in schema.items()
-            if v.is_numeric() and k not in {"POS", "ILEN"}
+            k for k, v in schema.items() if v.is_numeric() and k not in {"POS", "ILEN"}
         ]
 
     def load_info(self, fields) -> None:
