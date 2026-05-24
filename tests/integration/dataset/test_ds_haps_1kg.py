@@ -7,44 +7,30 @@ import pysam
 import pytest
 import seqpro as sp
 from genvarloader._ragged import RaggedSeqs
-from pytest_cases import parametrize_with_cases
-
-data_dir = Path(__file__).resolve().parents[2] / "data"
-ref = data_dir / "fasta" / "hg38.fa.bgz"
-cons_dir = data_dir / "1kg_consensus"
 
 pytestmark = pytest.mark.slow
 
 
-def dataset_bcf():
+@pytest.fixture(
+    scope="session",
+    params=["bcf", "pgen", "svar"],
+)
+def dataset(request, kg_bcf_gvl, kg_pgen_gvl, kg_svar_gvl, ref_fasta):
+    gvl_path = {
+        "bcf": kg_bcf_gvl,
+        "pgen": kg_pgen_gvl,
+        "svar": kg_svar_gvl,
+    }[request.param]
     return (
-        gvl.Dataset.open(data_dir / "1kg" / "phased_1kg.bcf.gvl", ref, rc_neg=False)
+        gvl.Dataset.open(gvl_path, ref_fasta, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
         .with_tracks(False)
     )
 
 
-def dataset_pgen():
-    return (
-        gvl.Dataset.open(data_dir / "1kg" / "phased_1kg.pgen.gvl", ref, rc_neg=False)
-        .with_len("ragged")
-        .with_seqs("haplotypes")
-        .with_tracks(False)
-    )
-
-
-def dataset_svar():
-    return (
-        gvl.Dataset.open(data_dir / "1kg" / "phased_1kg.svar.gvl", ref, rc_neg=False)
-        .with_len("ragged")
-        .with_seqs("haplotypes")
-        .with_tracks(False)
-    )
-
-
-@parametrize_with_cases("dataset", cases=".", prefix="dataset_")
-def test_ds_haps_1kg(dataset: gvl.RaggedDataset[RaggedSeqs, None]):
+def test_ds_haps_1kg(dataset: gvl.RaggedDataset[RaggedSeqs, None], data_dir: Path):
+    cons_dir = data_dir / "1kg_consensus"
     for region, sample in product(range(dataset.n_regions), dataset.samples):
         c, s, e, _ = dataset.regions.select(
             "chrom", "chromStart", "chromEnd", "strand"
