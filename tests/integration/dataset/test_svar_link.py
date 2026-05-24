@@ -3,8 +3,6 @@ import shutil
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
-from pydantic_extra_types.semantic_version import SemanticVersion
 
 from genvarloader._dataset._svar_link import (
     SvarFingerprint,
