@@ -302,13 +302,13 @@ class Haps(Reconstructor[_H]):
     ) -> NDArray[np.int32]:
         """`idx` must be 1D."""
         # (b p)
-        geno_offset_idxs = self._get_geno_offset_idx(idx, self.genotypes)
+        geno_offset_idx = self._get_geno_offset_idx(idx, self.genotypes)
 
         if self.filter == "exonic":
             keep, keep_offsets = choose_exonic_variants(
                 starts=regions[:, 1],
                 ends=regions[:, 2],
-                geno_offset_idxs=geno_offset_idxs,
+                geno_offset_idx=geno_offset_idx,
                 geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
                 v_starts=self.variants.start,
@@ -319,7 +319,7 @@ class Haps(Reconstructor[_H]):
 
         # (r s p)
         hap_ilens = get_diffs_sparse(
-            geno_offset_idxs=geno_offset_idxs,
+            geno_offset_idx=geno_offset_idx,
             geno_v_idxs=self.genotypes.data,
             geno_offsets=self.genotypes.offsets,
             ilens=self.variants.ilen,
@@ -353,7 +353,7 @@ class Haps(Reconstructor[_H]):
             keep, keep_offsets = choose_exonic_variants(
                 starts=regions[:, 1],
                 ends=regions[:, 2],
-                geno_offset_idxs=geno_offset_idx,
+                geno_offset_idx=geno_offset_idx,
                 geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
                 v_starts=self.variants.start,
@@ -488,7 +488,7 @@ class Haps(Reconstructor[_H]):
             keep, keep_offsets = choose_exonic_variants(
                 starts=regions[:, 1],
                 ends=regions[:, 2],
-                geno_offset_idxs=geno_offset_idx,
+                geno_offset_idx=geno_offset_idx,
                 geno_v_idxs=self.genotypes.data,
                 geno_offsets=self.genotypes.offsets,
                 v_starts=self.variants.start,
@@ -651,7 +651,7 @@ class Haps(Reconstructor[_H]):
                 req.out_offsets,
             )
             reconstruct_haplotypes_from_sparse(
-                geno_offset_idxs=req.geno_offset_idx,
+                geno_offset_idx=req.geno_offset_idx,
                 out=haps.data,
                 out_offsets=haps.offsets,
                 regions=req.regions,
@@ -682,7 +682,7 @@ class Haps(Reconstructor[_H]):
         out_buf = np.empty(total, np.uint8)
 
         reconstruct_haplotypes_from_sparse(
-            geno_offset_idxs=flat_geno_idx.reshape(-1, 1),
+            geno_offset_idx=flat_geno_idx.reshape(-1, 1),
             out=out_buf,
             out_offsets=splice_plan.permuted_out_offsets,
             regions=permuted_regions,
@@ -742,7 +742,7 @@ class Haps(Reconstructor[_H]):
 
             # annot offsets match haps offsets, so we share them.
             reconstruct_haplotypes_from_sparse(
-                geno_offset_idxs=req.geno_offset_idx,
+                geno_offset_idx=req.geno_offset_idx,
                 out=haps.data,
                 out_offsets=haps.offsets,
                 regions=req.regions,
@@ -779,7 +779,7 @@ class Haps(Reconstructor[_H]):
         annot_pos_buf = np.empty(total, np.int32)
 
         reconstruct_haplotypes_from_sparse(
-            geno_offset_idxs=flat_geno_idx.reshape(-1, 1),
+            geno_offset_idx=flat_geno_idx.reshape(-1, 1),
             out=out_buf,
             out_offsets=splice_plan.permuted_out_offsets,
             regions=permuted_regions,

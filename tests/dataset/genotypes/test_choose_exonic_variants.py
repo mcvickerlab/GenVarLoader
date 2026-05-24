@@ -22,7 +22,7 @@ def _common_inputs() -> dict[str, np.ndarray]:
     return {
         "starts": np.asarray([0], dtype=np.int32),
         "ends": np.asarray([100], dtype=np.int32),
-        "geno_offset_idxs": np.asarray([[0, 1]], dtype=np.intp),
+        "geno_offset_idx": np.asarray([[0, 1]], dtype=np.intp),
         # Two variants, indices 0 and 1, both inside [0, 100):
         "geno_v_idxs": np.asarray([0, 1], dtype=np.int32),
         "v_starts": np.asarray([10, 50], dtype=np.int32),

@@ -144,7 +144,7 @@ def shift_and_realign_tracks_sparse(
     out_offsets: NDArray[np.integer],
     regions: NDArray[np.integer],
     shifts: NDArray[np.integer],
-    geno_offset_idxs: NDArray[np.integer],
+    geno_offset_idx: NDArray[np.integer],
     geno_v_idxs: NDArray[np.integer],
     geno_offsets: NDArray[np.integer],
     v_starts: NDArray[np.integer],
@@ -169,7 +169,7 @@ def shift_and_realign_tracks_sparse(
         Shape = (batch, 3) Regions, each is (contig_idx, start, end).
     shifts : NDArray[np.int32]
         Shape = (batch, ploidy) Shifts for each haplotype.
-    geno_offset_idxs : NDArray[np.intp]
+    geno_offset_idx : NDArray[np.intp]
         Shape = (batch, ploidy) Indices into offsets for each region.
     geno_v_idxs : NDArray[np.int32]
         Shape = (variants) Indices of variants.
@@ -188,7 +188,7 @@ def shift_and_realign_tracks_sparse(
     keep_offsets : Optional[NDArray[np.int64]]
         Shape = (batch*ploidy + 1) Offsets into keep.
     """
-    n_regions, ploidy = geno_offset_idxs.shape
+    n_regions, ploidy = geno_offset_idx.shape
     for query in nb.prange(n_regions):
         t_s, t_e = track_offsets[query], track_offsets[query + 1]
         q_track = tracks[t_s:t_e]
@@ -196,7 +196,7 @@ def shift_and_realign_tracks_sparse(
         q_start = regions[query, 1]
 
         for hap in nb.prange(ploidy):
-            o_idx = geno_offset_idxs[query, hap]
+            o_idx = geno_offset_idx[query, hap]
 
             k_idx = query * ploidy + hap
             if keep is not None and keep_offsets is not None:
