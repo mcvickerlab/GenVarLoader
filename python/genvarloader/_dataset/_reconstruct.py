@@ -1278,7 +1278,7 @@ class Tracks(Reconstructor[_T]):
         raise NotImplementedError(
             "write_transformed_track is not implemented for the current "
             "Awkward-backed Ragged. See docs/superpowers/roadmap.md "
-            "(\"Transformed track writing\") for the revival plan."
+            '("Transformed track writing") for the revival plan.'
         )
 
 
