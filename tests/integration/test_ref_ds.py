@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import genvarloader as gvl
 import numpy as np
 import polars as pl
@@ -8,13 +6,10 @@ import seqpro as sp
 from genvarloader._dataset._utils import padded_slice
 from pytest_cases import fixture, parametrize_with_cases
 
-DDIR = Path(__file__).parent.parent / "data"
-REF = DDIR / "fasta" / "hg38.fa.bgz"
-
 
 @fixture
-def reference():
-    return gvl.Reference.from_path(REF, in_memory=False)
+def reference(ref_fasta):
+    return gvl.Reference.from_path(ref_fasta, in_memory=False)
 
 
 @pytest.mark.xfail(strict=True, raises=ValueError)
