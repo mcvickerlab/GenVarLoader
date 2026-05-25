@@ -38,5 +38,5 @@ def test_bigwigs_reader_protocol_attrs(bigwig_dir: Path):
 def test_bigwigs_missing_path_raises():
     """Constructor raises when a path does not exist."""
     paths = {"sample_x": "/nonexistent/path/sample.bw"}
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         BigWigs("signal", paths)
