@@ -4,8 +4,8 @@ import pytest
 
 torch = pytest.importorskip("torch")  # module-level skip if torch missing
 
-import genvarloader as gvl
-from genvarloader._torch import get_dataloader, get_sampler
+import genvarloader as gvl  # noqa: E402  # must follow importorskip
+from genvarloader._torch import get_dataloader, get_sampler  # noqa: E402
 
 
 @pytest.fixture(scope="module")
