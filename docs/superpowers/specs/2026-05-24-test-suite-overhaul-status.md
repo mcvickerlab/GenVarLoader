@@ -120,6 +120,7 @@ tests/
 | 5 tracks (broader) | test_random_nonoverlapping + utils.py whole-move; test_write_tracks atomic split (integration renamed to `_e2e`); test_table.py whole-file move | 3 files relocated, 1 atomic split, 1 integration rename for basename-collision avoidance |
 | 5 ref/fasta | reference fixture → conftest; test_fasta.py + test_ref_ds.py whole-file moves | Session-scoped `reference` fixture promoted with docstring carve-out (metadata-only Reference is cheap); 2 duplicate local fixtures dropped; 2 whole-file moves; no basename collisions |
 | 5 dataset polymorphism (minimal) | atomic split of test_dummy_dataset_insertion_fill.py | 1 test (test_with_insertion_fill_rejects_when_no_tracks_active) extracted to tests/unit/dataset/test_with_insertion_fill.py; test_ds_indexing deferred (would require a `make_dataset` builder wrapping gvl.write — speculative scaffolding per YAGNI) |
+| 6 integration trim | systematic redundancy audit — no-op | Explore-agent comparison of every remaining integration test against the unit tier found zero strict redundancies. The audit's Port/Delete buckets already captured everything that could move; remaining Keeps exercise write→read roundtrips, byte-comparison against real FASTA, or full reconstruction call paths that no unit test covers. Phase 6 closes with no deletions. |
 
 ---
 
@@ -169,12 +170,9 @@ Numbers are best-effort estimates from the audit; verify against the current int
 
 ## Recommended next plan
 
-All component-level plans are complete. The next two phases (per design spec):
+Phase 6 closed as a no-op (see "What shipped"). One remaining piece:
 
-1. **Phase 6 (integration trim)** — Review each remaining integration-tier file. Where unit coverage now strictly subsumes an integration test, delete the redundancy. Candidates worth examining first: integration files where the unit-tier extraction left a thin shell (e.g. `test_dummy_dataset_insertion_fill.py`, `test_ref_ds_splicing.py`, `test_write_tracks_e2e.py`, `test_dataset.py`).
-2. **Phase 7 (CI report)** — Wire `htmlcov/` upload into CI per the design spec.
-
-Phase 6 should land as its own plan; Phase 7 is a small CI-config change that can probably ride along with whatever PR completes the overhaul.
+**Phase 7 (CI report)** — Wire `htmlcov/` upload into CI per the original overhaul intent. Small CI-config change; likely a single PR-workflow edit that publishes the coverage HTML artifact alongside the existing test job.
 
 ---
 
