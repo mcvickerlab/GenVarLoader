@@ -1,6 +1,5 @@
 """Smoke tests for the PyTorch integration."""
 import pytest
-import numpy as np
 
 torch = pytest.importorskip("torch")  # module-level skip if torch missing
 
