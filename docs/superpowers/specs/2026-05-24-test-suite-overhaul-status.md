@@ -1,6 +1,6 @@
 # Test Suite Overhaul — Status & Resume Notes
 
-**As of:** 2026-05-24 (committed through `1257be9`)
+**As of:** 2026-05-24 (committed through `cbb7fa5`)
 **Branch:** `worktree-test-suite-overhaul`
 **Worktree:** `/Users/david/projects/GenVarLoader/.claude/worktrees/test-suite-overhaul`
 **PR:** https://github.com/mcvickerlab/GenVarLoader/pull/194 (open)
@@ -24,6 +24,7 @@ Living status snapshot. Read this first when resuming with fresh context — it 
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-svar-link.md`
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-utility.md`
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-tracks-broader.md`
+  - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-ref-fasta.md`
 
 ---
 
@@ -33,7 +34,7 @@ Living status snapshot. Read this first when resuming with fresh context — it 
 
 - **Non-slow tier:** 351 passed, 3 skipped, 3 deselected, 2 xfailed
 - **Slow tier (1kg, where data exists):** 3 passed
-- **Unit tier alone:** 158 passed, 1 xfailed (~12s combined, ~3.2s unit alone)
+- **Unit tier alone:** 166 passed, 2 xfailed (~12s combined, ~3.2s unit alone)
 - **Coverage:** 63% line+branch (parity with Phase 3 baseline; no production code modified)
 
 ### File layout
@@ -45,7 +46,8 @@ tests/
 │   ├── __init__.py
 │   ├── ragged.py                   # make_ragged_seqs, make_ragged_intervals
 │   └── reconstruct.py              # make_tracks
-├── unit/                           # ← 158 tests
+├── unit/                           # ← 166 tests
+│   ├── test_fasta.py
 │   ├── test_table.py
 │   ├── test_utils.py
 │   ├── dataset/
@@ -54,6 +56,7 @@ tests/
 │   │   │   └── test_reconstruct.py
 │   │   ├── test_build_reconstructor.py
 │   │   ├── test_indexing.py
+│   │   ├── test_ref_ds.py
 │   │   ├── test_svar_link_models.py
 │   │   └── test_write_tracks.py
 │   ├── ragged/
@@ -73,9 +76,7 @@ tests/
 │   └── variants/
 │       ├── test_variant_utils.py
 │       └── test_variants_info_fields.py
-├── integration/                    # ← 193 tests
-│   ├── test_fasta.py
-│   ├── test_ref_ds.py
+├── integration/                    # ← 185 tests
 │   ├── test_ref_ds_splicing.py
 │   ├── dataset/
 │   │   ├── test_dataset.py
@@ -115,21 +116,13 @@ tests/
 | 5 svar_link | 7 pydantic-model tests extracted | `unit/dataset/test_svar_link_models.py`; 14 dataset-dependent kept |
 | 5 utility | test_utils.py whole-file move | 9 collected tests (5 audit-Port entries; pytest_cases expands `test_normalize_contig_name` to 5 cases) moved to `unit/test_utils.py`; no source changes; no builder needed |
 | 5 tracks (broader) | test_random_nonoverlapping + utils.py whole-move; test_write_tracks atomic split (integration renamed to `_e2e`); test_table.py whole-file move | 3 files relocated, 1 atomic split, 1 integration rename for basename-collision avoidance |
+| 5 ref/fasta | reference fixture → conftest; test_fasta.py + test_ref_ds.py whole-file moves | Session-scoped `reference` fixture promoted with docstring carve-out (metadata-only Reference is cheap); 2 duplicate local fixtures dropped; 2 whole-file moves; no basename collisions |
 
 ---
 
 ## What's left (by remaining component)
 
 Numbers are best-effort estimates from the audit; verify against the current integration tree before planning.
-
-### Components with port-bucket tests still in integration
-
-#### Ref / FASTA (~10 ports across 3 files)
-
-- `tests/integration/test_fasta.py` — 3 ports. Whole-file move candidate.
-- `tests/integration/test_ref_ds.py` — 2 remaining ports (after Phase 4 deletion). Examine bodies — they share a `reference` fixture pattern with `test_ref_ds_splicing.py` (now split).
-- `tests/integration/test_ref_ds_splicing.py` — already split in Phase 5 splice; 4 keeps remain.
-- **Worth considering:** promote the `reference = gvl.Reference.from_path(ref_fasta, in_memory=False)` fixture into `tests/conftest.py` since `test_ref_ds.py`, `test_ref_ds_splicing.py` (integration), and `tests/unit/splice/test_ref_ds_splice_settings.py` all duplicate it. Either as a separate conftest hygiene plan or rolled into the ref/fasta plan.
 
 ### Components with NO port-bucket tests remaining
 
@@ -167,15 +160,13 @@ Numbers are best-effort estimates from the audit; verify against the current int
 
 8. **Stale `bench_cpu_gpu.py` in tracks dir** — `tests/integration/tracks/bench_cpu_gpu.py` is a typer CLI benchmark script (not a pytest-collected test). It imports `from utils import nonoverlapping_intervals` lazily inside `main()`. The tracks-broader plan moved `utils.py` to `tests/unit/tracks/`, so this script's lazy import now fails — but the script was already broken (imports `genvarloader.dataset.intervals`, `genvarloader.types`, `genvarloader.utils` — old module paths that no longer exist post-rename). No test regression; flag for eventual deletion or restoration.
 
+9. **Conftest `reference` fixture carve-out** — The original conftest convention (docstring) said fixtures yield *paths*, not opened Datasets, because Datasets are expensive. Phase 5 ref/fasta added a `reference` fixture to conftest as a deliberate exception: `Reference.from_path(path, in_memory=False)` reads only FAI/GZI metadata, so session-scoped centralization is cheap. The fixture's own docstring records the rationale. Future work that wants to add another "opened object" fixture should explicitly justify the same way or stick to paths.
+
 ---
 
 ## Recommended next plan
 
-**Ref / FASTA + reference-fixture promotion** — One combined plan: move `test_fasta.py` (3 ports) and the 2 remaining `test_ref_ds.py` ports to the unit tier, and promote the `reference = gvl.Reference.from_path(ref_fasta, in_memory=False)` fixture to `tests/conftest.py`, deduplicating across `test_ref_ds_splicing.py` (integration), `test_ref_ds_splice_settings.py` (unit), and the new unit ref tests.
-
-Subsequent order:
-
-1. **Dataset polymorphism / `make_dataset`** — Last component plan. Requires the most builder work but only has 2 specific tests gated on it.
+**Dataset polymorphism / `make_dataset`** — Last component plan. Two specific audit-Port tests gated on a `make_dataset` builder: `test_dataset.py:test_ds_indexing` and `test_dummy_dataset_insertion_fill.py:test_with_insertion_fill_rejects_when_no_tracks_active`. The builder needs to synthesize Datasets with selectable seq/track/variant configurations to stand in for the toy-dataset fixtures these tests currently depend on.
 
 Once all components above land:
 - **Phase 6 (integration trim)** — As outlined in design spec. Review each integration-tier file post-overhaul; remove redundancies where unit coverage now subsumes them.
