@@ -1,6 +1,6 @@
 # Test Suite Overhaul — Status & Resume Notes
 
-**As of:** 2026-05-24 (committed through `cbb7fa5`)
+**As of:** 2026-05-24 (committed through `b44a8b0`)
 **Branch:** `worktree-test-suite-overhaul`
 **Worktree:** `/Users/david/projects/GenVarLoader/.claude/worktrees/test-suite-overhaul`
 **PR:** https://github.com/mcvickerlab/GenVarLoader/pull/194 (open)
@@ -25,6 +25,7 @@ Living status snapshot. Read this first when resuming with fresh context — it 
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-utility.md`
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-tracks-broader.md`
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-ref-fasta.md`
+  - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-dataset-polymorphism.md`
 
 ---
 
@@ -34,7 +35,7 @@ Living status snapshot. Read this first when resuming with fresh context — it 
 
 - **Non-slow tier:** 351 passed, 3 skipped, 3 deselected, 2 xfailed
 - **Slow tier (1kg, where data exists):** 3 passed
-- **Unit tier alone:** 166 passed, 2 xfailed (~12s combined, ~3.2s unit alone)
+- **Unit tier alone:** 167 passed, 2 xfailed (~12s combined, ~3.2s unit alone)
 - **Coverage:** 63% line+branch (parity with Phase 3 baseline; no production code modified)
 
 ### File layout
@@ -46,7 +47,7 @@ tests/
 │   ├── __init__.py
 │   ├── ragged.py                   # make_ragged_seqs, make_ragged_intervals
 │   └── reconstruct.py              # make_tracks
-├── unit/                           # ← 166 tests
+├── unit/                           # ← 167 tests
 │   ├── test_fasta.py
 │   ├── test_table.py
 │   ├── test_utils.py
@@ -58,6 +59,7 @@ tests/
 │   │   ├── test_indexing.py
 │   │   ├── test_ref_ds.py
 │   │   ├── test_svar_link_models.py
+│   │   ├── test_with_insertion_fill.py
 │   │   └── test_write_tracks.py
 │   ├── ragged/
 │   │   ├── test_rag_variants.py
@@ -76,7 +78,7 @@ tests/
 │   └── variants/
 │       ├── test_variant_utils.py
 │       └── test_variants_info_fields.py
-├── integration/                    # ← 185 tests
+├── integration/                    # ← 184 tests
 │   ├── test_ref_ds_splicing.py
 │   ├── dataset/
 │   │   ├── test_dataset.py
@@ -117,6 +119,7 @@ tests/
 | 5 utility | test_utils.py whole-file move | 9 collected tests (5 audit-Port entries; pytest_cases expands `test_normalize_contig_name` to 5 cases) moved to `unit/test_utils.py`; no source changes; no builder needed |
 | 5 tracks (broader) | test_random_nonoverlapping + utils.py whole-move; test_write_tracks atomic split (integration renamed to `_e2e`); test_table.py whole-file move | 3 files relocated, 1 atomic split, 1 integration rename for basename-collision avoidance |
 | 5 ref/fasta | reference fixture → conftest; test_fasta.py + test_ref_ds.py whole-file moves | Session-scoped `reference` fixture promoted with docstring carve-out (metadata-only Reference is cheap); 2 duplicate local fixtures dropped; 2 whole-file moves; no basename collisions |
+| 5 dataset polymorphism (minimal) | atomic split of test_dummy_dataset_insertion_fill.py | 1 test (test_with_insertion_fill_rejects_when_no_tracks_active) extracted to tests/unit/dataset/test_with_insertion_fill.py; test_ds_indexing deferred (would require a `make_dataset` builder wrapping gvl.write — speculative scaffolding per YAGNI) |
 
 ---
 
@@ -127,7 +130,7 @@ Numbers are best-effort estimates from the audit; verify against the current int
 ### Components with NO port-bucket tests remaining
 
 - **Haps** — Audit identified no Haps-specific Port tests outside the 5 already moved in the variants plan. A "haps component" plan would be builder-only scaffolding (`make_variants_table`, `make_variants`, `make_haps`). Per YAGNI, deferred until a real consumer surfaces. Reconsider if/when later plans need to construct synthetic `_Variants`/`Haps` without a real SVAR.
-- **Dataset polymorphism** — `test_dataset.py:test_ds_indexing` and `test_dummy_dataset_insertion_fill.py:test_with_insertion_fill_rejects_when_no_tracks_active` are audit-Port but need a `make_dataset` builder before porting. Save for a final plan once everything else has landed.
+- **Dataset polymorphism (closed, minimal scope)** — `test_with_insertion_fill_rejects_when_no_tracks_active` moved to unit. `test_dataset.py:test_ds_indexing` deferred: porting requires a `make_dataset` builder that wraps `gvl.write()` with synthetic BED + variants + tracks + reference inputs. That builder has no other consumer; per YAGNI, build it when a real need surfaces.
 
 ### Deferred individual tests
 
@@ -166,11 +169,12 @@ Numbers are best-effort estimates from the audit; verify against the current int
 
 ## Recommended next plan
 
-**Dataset polymorphism / `make_dataset`** — Last component plan. Two specific audit-Port tests gated on a `make_dataset` builder: `test_dataset.py:test_ds_indexing` and `test_dummy_dataset_insertion_fill.py:test_with_insertion_fill_rejects_when_no_tracks_active`. The builder needs to synthesize Datasets with selectable seq/track/variant configurations to stand in for the toy-dataset fixtures these tests currently depend on.
+All component-level plans are complete. The next two phases (per design spec):
 
-Once all components above land:
-- **Phase 6 (integration trim)** — As outlined in design spec. Review each integration-tier file post-overhaul; remove redundancies where unit coverage now subsumes them.
-- **Phase 7 (CI report)** — Wire `htmlcov/` upload into CI per design spec.
+1. **Phase 6 (integration trim)** — Review each remaining integration-tier file. Where unit coverage now strictly subsumes an integration test, delete the redundancy. Candidates worth examining first: integration files where the unit-tier extraction left a thin shell (e.g. `test_dummy_dataset_insertion_fill.py`, `test_ref_ds_splicing.py`, `test_write_tracks_e2e.py`, `test_dataset.py`).
+2. **Phase 7 (CI report)** — Wire `htmlcov/` upload into CI per the design spec.
+
+Phase 6 should land as its own plan; Phase 7 is a small CI-config change that can probably ride along with whatever PR completes the overhaul.
 
 ---
 
