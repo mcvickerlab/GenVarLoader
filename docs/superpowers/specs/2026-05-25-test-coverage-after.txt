@@ -1,0 +1,1583 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.10.20, pytest-9.0.3, pluggy-1.6.0
+benchmark: 5.2.3 (defaults: timer=time.perf_counter disable_gc=False min_rounds=5 min_time=0.000005 max_time=1.0 calibration_precision=10 warmup=False warmup_iterations=100000)
+rootdir: /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative
+configfile: pyproject.toml
+plugins: benchmark-5.2.3, cov-7.1.0, hypothesis-6.152.6, typeguard-4.5.1, cases-3.10.1
+collected 419 items / 1 skipped
+
+tests/dataset/test_open.py .....                                         [  1%]
+tests/dataset/test_with_methods.py ...................                   [  5%]
+tests/integration/dataset/test_dataset.py .......                        [  7%]
+tests/integration/dataset/test_ds_haps.py .                              [  7%]
+tests/integration/dataset/test_ds_haps_1kg.py .                          [  7%]
+tests/integration/dataset/test_jitter.py .                               [  8%]
+tests/integration/dataset/test_dataset.py .......                        [  9%]
+tests/integration/dataset/test_ds_haps.py .                              [ 10%]
+tests/integration/dataset/test_ds_haps_1kg.py .                          [ 10%]
+tests/integration/dataset/test_jitter.py .                               [ 10%]
+tests/integration/dataset/test_dataset.py .......                        [ 12%]
+tests/integration/dataset/test_ds_haps.py .                              [ 12%]
+tests/integration/dataset/test_ds_haps_1kg.py .                          [ 12%]
+tests/integration/dataset/test_jitter.py .                               [ 12%]
+tests/integration/dataset/test_dummy_dataset_insertion_fill.py ..        [ 13%]
+tests/integration/dataset/test_issue_153.py .                            [ 13%]
+tests/integration/dataset/test_issue_191_var_fields.py EEE.EEEEEE        [ 15%]
+tests/integration/dataset/test_open_vs_settings_parity.py EE             [ 16%]
+tests/integration/dataset/test_rc_packing.py EEEEEssEE                   [ 18%]
+tests/integration/dataset/test_subset.py ............................... [ 26%]
+........................................................................ [ 43%]
+.....                                                                    [ 44%]
+tests/integration/dataset/test_svar_link.py EEEEEEEEEEEEEE               [ 47%]
+tests/integration/dataset/test_with_settings_var_filter.py EE            [ 48%]
+tests/integration/dataset/test_write.py FFF                              [ 48%]
+tests/integration/dataset/test_write_tracks_e2e.py ...                   [ 49%]
+tests/integration/test_ref_ds_splicing.py ....                           [ 50%]
+tests/integration/tracks/test_annot_tracks.py .                          [ 50%]
+tests/integration/variants/test_sites.py .                               [ 51%]
+tests/unit/dataset/genotypes/test_choose_exonic_variants.py .......      [ 52%]
+tests/unit/dataset/genotypes/test_filter_af.py ....x                     [ 53%]
+tests/unit/dataset/genotypes/test_get_diffs.py .....                     [ 55%]
+tests/unit/dataset/genotypes/test_reconstruct.py .......                 [ 56%]
+tests/unit/dataset/test_build_reconstructor.py ............              [ 59%]
+tests/unit/dataset/test_indexing.py .................................x.. [ 68%]
+......                                                                   [ 69%]
+tests/unit/dataset/test_intervals_kernel.py ....                         [ 70%]
+tests/unit/dataset/test_ref_ds.py x.....                                 [ 72%]
+tests/unit/dataset/test_svar_link_models.py .......                      [ 73%]
+tests/unit/dataset/test_with_insertion_fill.py .                         [ 73%]
+tests/unit/dataset/test_write_tracks.py .                                [ 74%]
+tests/unit/ragged/test_rag_variants.py .........                         [ 76%]
+tests/unit/ragged/test_ragged_rc_packing.py ...                          [ 77%]
+tests/unit/splice/test_get_splice_bed.py ...........                     [ 79%]
+tests/unit/splice/test_ref_ds_splice_settings.py .....                   [ 80%]
+tests/unit/splice/test_splice_plan.py ........                           [ 82%]
+tests/unit/test_bigwig.py ...                                            [ 83%]
+tests/unit/test_fasta.py ......                                          [ 84%]
+tests/unit/test_table.py ...............                                 [ 88%]
+tests/unit/test_utils.py .........                                       [ 90%]
+tests/unit/tracks/test_i2t_t2i.py ....                                   [ 91%]
+tests/unit/tracks/test_insertion_fill.py ...................             [ 96%]
+tests/unit/tracks/test_random_nonoverlapping.py ....                     [ 97%]
+tests/unit/tracks/test_realign.py ....                                   [ 98%]
+tests/unit/tracks/test_tracks_splice.py .                                [ 98%]
+tests/unit/variants/test_variant_utils.py ..                             [ 98%]
+tests/unit/variants/test_variants_info_fields.py .....                   [100%]
+
+==================================== ERRORS ====================================
+___________ ERROR at setup of test_dosage_absent_when_not_requested ____________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_dosage_absent_when_not_re0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_with_dosages_ds(tmp_path, filtered_svar, source_bed):
+        """Copy the canonical SVAR to tmp_path, add a synthetic dosages.npy, then
+        write a fresh GVL dataset pointing at it. Returns the GVL path."""
+        svar_copy = tmp_path / "filtered.svar"
+        shutil.copytree(filtered_svar, svar_copy)
+    
+        v_idxs_bytes = (svar_copy / "variant_idxs.npy").stat().st_size
+        n_records = v_idxs_bytes // np.dtype(np.uint32).itemsize
+        mm = np.memmap(
+            svar_copy / "dosages.npy",
+            dtype=DOSAGE_TYPE,
+            mode="w+",
+            shape=(n_records,),
+        )
+        mm[:] = np.arange(n_records, dtype=DOSAGE_TYPE)
+        mm.flush()
+        del mm
+    
+        gvl_path = tmp_path / "ds.gvl"
+>       gvl.write(path=gvl_path, bed=source_bed, variants=svar_copy, overwrite=True)
+
+tests/integration/dataset/test_issue_191_var_fields.py:40: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:33.915 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_dosage_absent_when_not_re0/ds.gvl
+_____________ ERROR at setup of test_dosage_present_when_requested _____________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_dosage_present_when_reque0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_with_dosages_ds(tmp_path, filtered_svar, source_bed):
+        """Copy the canonical SVAR to tmp_path, add a synthetic dosages.npy, then
+        write a fresh GVL dataset pointing at it. Returns the GVL path."""
+        svar_copy = tmp_path / "filtered.svar"
+        shutil.copytree(filtered_svar, svar_copy)
+    
+        v_idxs_bytes = (svar_copy / "variant_idxs.npy").stat().st_size
+        n_records = v_idxs_bytes // np.dtype(np.uint32).itemsize
+        mm = np.memmap(
+            svar_copy / "dosages.npy",
+            dtype=DOSAGE_TYPE,
+            mode="w+",
+            shape=(n_records,),
+        )
+        mm[:] = np.arange(n_records, dtype=DOSAGE_TYPE)
+        mm.flush()
+        del mm
+    
+        gvl_path = tmp_path / "ds.gvl"
+>       gvl.write(path=gvl_path, bed=source_bed, variants=svar_copy, overwrite=True)
+
+tests/integration/dataset/test_issue_191_var_fields.py:40: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.020 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_dosage_present_when_reque0/ds.gvl
+___ ERROR at setup of test_available_var_fields_includes_dosage_when_present ___
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_available_var_fields_incl0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_with_dosages_ds(tmp_path, filtered_svar, source_bed):
+        """Copy the canonical SVAR to tmp_path, add a synthetic dosages.npy, then
+        write a fresh GVL dataset pointing at it. Returns the GVL path."""
+        svar_copy = tmp_path / "filtered.svar"
+        shutil.copytree(filtered_svar, svar_copy)
+    
+        v_idxs_bytes = (svar_copy / "variant_idxs.npy").stat().st_size
+        n_records = v_idxs_bytes // np.dtype(np.uint32).itemsize
+        mm = np.memmap(
+            svar_copy / "dosages.npy",
+            dtype=DOSAGE_TYPE,
+            mode="w+",
+            shape=(n_records,),
+        )
+        mm[:] = np.arange(n_records, dtype=DOSAGE_TYPE)
+        mm.flush()
+        del mm
+    
+        gvl_path = tmp_path / "ds.gvl"
+>       gvl.write(path=gvl_path, bed=source_bed, variants=svar_copy, overwrite=True)
+
+tests/integration/dataset/test_issue_191_var_fields.py:40: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.040 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_available_var_fields_incl0/ds.gvl
+__________ ERROR at setup of test_haps_from_path_filters_info_loading __________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_haps_from_path_filters_in0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_with_dosages_ds(tmp_path, filtered_svar, source_bed):
+        """Copy the canonical SVAR to tmp_path, add a synthetic dosages.npy, then
+        write a fresh GVL dataset pointing at it. Returns the GVL path."""
+        svar_copy = tmp_path / "filtered.svar"
+        shutil.copytree(filtered_svar, svar_copy)
+    
+        v_idxs_bytes = (svar_copy / "variant_idxs.npy").stat().st_size
+        n_records = v_idxs_bytes // np.dtype(np.uint32).itemsize
+        mm = np.memmap(
+            svar_copy / "dosages.npy",
+            dtype=DOSAGE_TYPE,
+            mode="w+",
+            shape=(n_records,),
+        )
+        mm[:] = np.arange(n_records, dtype=DOSAGE_TYPE)
+        mm.flush()
+        del mm
+    
+        gvl_path = tmp_path / "ds.gvl"
+>       gvl.write(path=gvl_path, bed=source_bed, variants=svar_copy, overwrite=True)
+
+tests/integration/dataset/test_issue_191_var_fields.py:40: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.124 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_haps_from_path_filters_in0/ds.gvl
+_________ ERROR at setup of test_haps_available_var_fields_from_schema _________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_haps_available_var_fields0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_with_dosages_ds(tmp_path, filtered_svar, source_bed):
+        """Copy the canonical SVAR to tmp_path, add a synthetic dosages.npy, then
+        write a fresh GVL dataset pointing at it. Returns the GVL path."""
+        svar_copy = tmp_path / "filtered.svar"
+        shutil.copytree(filtered_svar, svar_copy)
+    
+        v_idxs_bytes = (svar_copy / "variant_idxs.npy").stat().st_size
+        n_records = v_idxs_bytes // np.dtype(np.uint32).itemsize
+        mm = np.memmap(
+            svar_copy / "dosages.npy",
+            dtype=DOSAGE_TYPE,
+            mode="w+",
+            shape=(n_records,),
+        )
+        mm[:] = np.arange(n_records, dtype=DOSAGE_TYPE)
+        mm.flush()
+        del mm
+    
+        gvl_path = tmp_path / "ds.gvl"
+>       gvl.write(path=gvl_path, bed=source_bed, variants=svar_copy, overwrite=True)
+
+tests/integration/dataset/test_issue_191_var_fields.py:40: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.144 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_haps_available_var_fields0/ds.gvl
+____________ ERROR at setup of test_dataset_open_accepts_var_fields ____________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_dataset_open_accepts_var_0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_with_dosages_ds(tmp_path, filtered_svar, source_bed):
+        """Copy the canonical SVAR to tmp_path, add a synthetic dosages.npy, then
+        write a fresh GVL dataset pointing at it. Returns the GVL path."""
+        svar_copy = tmp_path / "filtered.svar"
+        shutil.copytree(filtered_svar, svar_copy)
+    
+        v_idxs_bytes = (svar_copy / "variant_idxs.npy").stat().st_size
+        n_records = v_idxs_bytes // np.dtype(np.uint32).itemsize
+        mm = np.memmap(
+            svar_copy / "dosages.npy",
+            dtype=DOSAGE_TYPE,
+            mode="w+",
+            shape=(n_records,),
+        )
+        mm[:] = np.arange(n_records, dtype=DOSAGE_TYPE)
+        mm.flush()
+        del mm
+    
+        gvl_path = tmp_path / "ds.gvl"
+>       gvl.write(path=gvl_path, bed=source_bed, variants=svar_copy, overwrite=True)
+
+tests/integration/dataset/test_issue_191_var_fields.py:40: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.163 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_dataset_open_accepts_var_0/ds.gvl
+_ ERROR at setup of test_dataset_open_default_var_fields_is_minimum_useful_set _
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_dataset_open_default_var_0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_with_dosages_ds(tmp_path, filtered_svar, source_bed):
+        """Copy the canonical SVAR to tmp_path, add a synthetic dosages.npy, then
+        write a fresh GVL dataset pointing at it. Returns the GVL path."""
+        svar_copy = tmp_path / "filtered.svar"
+        shutil.copytree(filtered_svar, svar_copy)
+    
+        v_idxs_bytes = (svar_copy / "variant_idxs.npy").stat().st_size
+        n_records = v_idxs_bytes // np.dtype(np.uint32).itemsize
+        mm = np.memmap(
+            svar_copy / "dosages.npy",
+            dtype=DOSAGE_TYPE,
+            mode="w+",
+            shape=(n_records,),
+        )
+        mm[:] = np.arange(n_records, dtype=DOSAGE_TYPE)
+        mm.flush()
+        del mm
+    
+        gvl_path = tmp_path / "ds.gvl"
+>       gvl.write(path=gvl_path, bed=source_bed, variants=svar_copy, overwrite=True)
+
+tests/integration/dataset/test_issue_191_var_fields.py:40: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.184 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_dataset_open_default_var_0/ds.gvl
+_______ ERROR at setup of test_with_settings_lazily_loads_new_info_field _______
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_with_settings_lazily_load0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_with_dosages_ds(tmp_path, filtered_svar, source_bed):
+        """Copy the canonical SVAR to tmp_path, add a synthetic dosages.npy, then
+        write a fresh GVL dataset pointing at it. Returns the GVL path."""
+        svar_copy = tmp_path / "filtered.svar"
+        shutil.copytree(filtered_svar, svar_copy)
+    
+        v_idxs_bytes = (svar_copy / "variant_idxs.npy").stat().st_size
+        n_records = v_idxs_bytes // np.dtype(np.uint32).itemsize
+        mm = np.memmap(
+            svar_copy / "dosages.npy",
+            dtype=DOSAGE_TYPE,
+            mode="w+",
+            shape=(n_records,),
+        )
+        mm[:] = np.arange(n_records, dtype=DOSAGE_TYPE)
+        mm.flush()
+        del mm
+    
+        gvl_path = tmp_path / "ds.gvl"
+>       gvl.write(path=gvl_path, bed=source_bed, variants=svar_copy, overwrite=True)
+
+tests/integration/dataset/test_issue_191_var_fields.py:40: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.204 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_with_settings_lazily_load0/ds.gvl
+__________ ERROR at setup of test_with_settings_lazily_loads_dosages ___________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_with_settings_lazily_load1')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_with_dosages_ds(tmp_path, filtered_svar, source_bed):
+        """Copy the canonical SVAR to tmp_path, add a synthetic dosages.npy, then
+        write a fresh GVL dataset pointing at it. Returns the GVL path."""
+        svar_copy = tmp_path / "filtered.svar"
+        shutil.copytree(filtered_svar, svar_copy)
+    
+        v_idxs_bytes = (svar_copy / "variant_idxs.npy").stat().st_size
+        n_records = v_idxs_bytes // np.dtype(np.uint32).itemsize
+        mm = np.memmap(
+            svar_copy / "dosages.npy",
+            dtype=DOSAGE_TYPE,
+            mode="w+",
+            shape=(n_records,),
+        )
+        mm[:] = np.arange(n_records, dtype=DOSAGE_TYPE)
+        mm.flush()
+        del mm
+    
+        gvl_path = tmp_path / "ds.gvl"
+>       gvl.write(path=gvl_path, bed=source_bed, variants=svar_copy, overwrite=True)
+
+tests/integration/dataset/test_issue_191_var_fields.py:40: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.223 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_with_settings_lazily_load1/ds.gvl
+__________ ERROR at setup of test_open_vs_with_settings_parity_state ___________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x104663f70>, _basetemp=PosixPath.../folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146'), _retention_count=3, _retention_policy='all')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture(scope="module")
+    def spliced_svar_ds_path(tmp_path_factory, filtered_svar, source_bed):
+        """Build an SVAR-backed GVL store with per-region single-exon transcripts.
+    
+        Each BED row becomes its own single-exon transcript so SpliceMap has
+        something to do, and the SVAR backend ensures 2-D geno_offsets are
+        exercised end-to-end.
+        """
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+    
+        tmp = tmp_path_factory.mktemp("issue_176_parity")
+        out = tmp / "ds.gvl"
+>       gvl.write(path=out, bed=source_bed, variants=filtered_svar, overwrite=True)
+
+tests/integration/dataset/test_open_vs_settings_parity.py:36: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.237 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/issue_176_parity0/ds.gvl
+__________ ERROR at setup of test_open_vs_with_settings_parity_output __________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x104663f70>, _basetemp=PosixPath.../folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146'), _retention_count=3, _retention_policy='all')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture(scope="module")
+    def spliced_svar_ds_path(tmp_path_factory, filtered_svar, source_bed):
+        """Build an SVAR-backed GVL store with per-region single-exon transcripts.
+    
+        Each BED row becomes its own single-exon transcript so SpliceMap has
+        something to do, and the SVAR backend ensures 2-D geno_offsets are
+        exercised end-to-end.
+        """
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+    
+        tmp = tmp_path_factory.mktemp("issue_176_parity")
+        out = tmp / "ds.gvl"
+>       gvl.write(path=out, bed=source_bed, variants=filtered_svar, overwrite=True)
+
+tests/integration/dataset/test_open_vs_settings_parity.py:36: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+__________ ERROR at setup of test_unspliced_single_item_buffer_packed __________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x104663f70>, _basetemp=PosixPath.../folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146'), _retention_count=3, _retention_policy='all')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+vcf_dir = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/vcf')
+
+    @pytest.fixture(scope="module")
+    def spliced_ds_path(
+        tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir
+    ) -> Path:
+        """Build a VCF-backed GVL store with single-exon transcript annotations.
+    
+        Each BED row becomes its own one-exon transcript so the spliced output
+        should equal the reference slice (for + strand) or its reverse complement
+        (for - strand). This exercises _getitem_spliced -> _rc.
+        """
+        source_vcf = vcf_dir / "filtered_source.vcf.gz"
+        tmp = tmp_path_factory.mktemp("rc_packing")
+        out = tmp / "single_exon.gvl"
+        reader = VCF(source_vcf)
+        reader._write_gvi_index()
+        reader._load_index()
+>       gvl.write(path=out, bed=source_bed, variants=reader)
+
+tests/integration/dataset/test_rc_packing.py:52: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.263 | INFO     | genoray._vcf:_load_index:1096 - Loading genoray index.
+2026-05-25 12:17:34.267 | INFO     | genoray._vcf:_load_index:1096 - Loading genoray index.
+2026-05-25 12:17:34.268 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/rc_packing0/single_exon.gvl
+______ ERROR at setup of test_spliced_reference_pos_strand_matches_fasta _______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x104663f70>, _basetemp=PosixPath.../folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146'), _retention_count=3, _retention_policy='all')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+vcf_dir = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/vcf')
+
+    @pytest.fixture(scope="module")
+    def spliced_ds_path(
+        tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir
+    ) -> Path:
+        """Build a VCF-backed GVL store with single-exon transcript annotations.
+    
+        Each BED row becomes its own one-exon transcript so the spliced output
+        should equal the reference slice (for + strand) or its reverse complement
+        (for - strand). This exercises _getitem_spliced -> _rc.
+        """
+        source_vcf = vcf_dir / "filtered_source.vcf.gz"
+        tmp = tmp_path_factory.mktemp("rc_packing")
+        out = tmp / "single_exon.gvl"
+        reader = VCF(source_vcf)
+        reader._write_gvi_index()
+        reader._load_index()
+>       gvl.write(path=out, bed=source_bed, variants=reader)
+
+tests/integration/dataset/test_rc_packing.py:52: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+______ ERROR at setup of test_spliced_reference_neg_strand_is_rc_of_fasta ______
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x104663f70>, _basetemp=PosixPath.../folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146'), _retention_count=3, _retention_policy='all')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+vcf_dir = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/vcf')
+
+    @pytest.fixture(scope="module")
+    def spliced_ds_path(
+        tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir
+    ) -> Path:
+        """Build a VCF-backed GVL store with single-exon transcript annotations.
+    
+        Each BED row becomes its own one-exon transcript so the spliced output
+        should equal the reference slice (for + strand) or its reverse complement
+        (for - strand). This exercises _getitem_spliced -> _rc.
+        """
+        source_vcf = vcf_dir / "filtered_source.vcf.gz"
+        tmp = tmp_path_factory.mktemp("rc_packing")
+        out = tmp / "single_exon.gvl"
+        reader = VCF(source_vcf)
+        reader._write_gvi_index()
+        reader._load_index()
+>       gvl.write(path=out, bed=source_bed, variants=reader)
+
+tests/integration/dataset/test_rc_packing.py:52: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+___________ ERROR at setup of test_multi_exon_spliced_buffer_packed ____________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x104663f70>, _basetemp=PosixPath.../folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146'), _retention_count=3, _retention_policy='all')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+vcf_dir = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/vcf')
+
+    @pytest.fixture(scope="module")
+    def multi_exon_ds_path(
+        tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir
+    ) -> Path:
+        """Build a GVL store where each transcript has multiple exons.
+    
+        We reuse the BED rows grouped 2-at-a-time as a fake "transcript_id" so the
+        splice logic has to concatenate multiple per-region outputs per ploidy.
+        """
+        source_vcf = vcf_dir / "filtered_source.vcf.gz"
+        tmp = tmp_path_factory.mktemp("rc_packing_multi")
+        out = tmp / "multi_exon.gvl"
+        reader = VCF(source_vcf)
+        reader._write_gvi_index()
+        reader._load_index()
+>       gvl.write(path=out, bed=source_bed, variants=reader)
+
+tests/integration/dataset/test_rc_packing.py:181: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.345 | INFO     | genoray._vcf:_load_index:1096 - Loading genoray index.
+2026-05-25 12:17:34.348 | INFO     | genoray._vcf:_load_index:1096 - Loading genoray index.
+2026-05-25 12:17:34.349 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/rc_packing_multi0/multi_exon.gvl
+________ ERROR at setup of test_multi_exon_spliced_matches_fasta_concat ________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x104663f70>, _basetemp=PosixPath.../folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146'), _retention_count=3, _retention_policy='all')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+vcf_dir = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/vcf')
+
+    @pytest.fixture(scope="module")
+    def multi_exon_ds_path(
+        tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir
+    ) -> Path:
+        """Build a GVL store where each transcript has multiple exons.
+    
+        We reuse the BED rows grouped 2-at-a-time as a fake "transcript_id" so the
+        splice logic has to concatenate multiple per-region outputs per ploidy.
+        """
+        source_vcf = vcf_dir / "filtered_source.vcf.gz"
+        tmp = tmp_path_factory.mktemp("rc_packing_multi")
+        out = tmp / "multi_exon.gvl"
+        reader = VCF(source_vcf)
+        reader._write_gvi_index()
+        reader._load_index()
+>       gvl.write(path=out, bed=source_bed, variants=reader)
+
+tests/integration/dataset/test_rc_packing.py:181: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+_______________ ERROR at setup of test_spliced_tracks_round_trip _______________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x104663f70>, _basetemp=PosixPath.../folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146'), _retention_count=3, _retention_policy='all')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+vcf_dir = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/vcf')
+
+    @pytest.fixture(scope="module")
+    def multi_exon_ds_path(
+        tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir
+    ) -> Path:
+        """Build a GVL store where each transcript has multiple exons.
+    
+        We reuse the BED rows grouped 2-at-a-time as a fake "transcript_id" so the
+        splice logic has to concatenate multiple per-region outputs per ploidy.
+        """
+        source_vcf = vcf_dir / "filtered_source.vcf.gz"
+        tmp = tmp_path_factory.mktemp("rc_packing_multi")
+        out = tmp / "multi_exon.gvl"
+        reader = VCF(source_vcf)
+        reader._write_gvi_index()
+        reader._load_index()
+>       gvl.write(path=out, bed=source_bed, variants=reader)
+
+tests/integration/dataset/test_rc_packing.py:181: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+_______________ ERROR at setup of test_haptracks_splicing_raises _______________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=None, _trace=<pluggy._tracing.TagTracerSub object at 0x104663f70>, _basetemp=PosixPath.../folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146'), _retention_count=3, _retention_policy='all')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+vcf_dir = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/vcf')
+
+    @pytest.fixture(scope="module")
+    def multi_exon_ds_path(
+        tmp_path_factory: pytest.TempPathFactory, source_bed, vcf_dir
+    ) -> Path:
+        """Build a GVL store where each transcript has multiple exons.
+    
+        We reuse the BED rows grouped 2-at-a-time as a fake "transcript_id" so the
+        splice logic has to concatenate multiple per-region outputs per ploidy.
+        """
+        source_vcf = vcf_dir / "filtered_source.vcf.gz"
+        tmp = tmp_path_factory.mktemp("rc_packing_multi")
+        out = tmp / "multi_exon.gvl"
+        reader = VCF(source_vcf)
+        reader._write_gvi_index()
+        reader._load_index()
+>       gvl.write(path=out, bed=source_bed, variants=reader)
+
+tests/integration/dataset/test_rc_packing.py:181: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+___ ERROR at setup of test_write_from_svar_records_svar_link_and_no_symlink ____
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_write_from_svar_records_s0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+_____________ ERROR at setup of test_resolve_svar_prefers_override _____________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_resolve_svar_prefers_over0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+____________ ERROR at setup of test_resolve_svar_uses_relative_path ____________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_resolve_svar_uses_relativ0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+__________ ERROR at setup of test_resolve_svar_falls_back_to_sibling ___________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_resolve_svar_falls_back_t0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+__________ ERROR at setup of test_verify_fingerprint_mismatch_raises ___________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_verify_fingerprint_mismat0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+_________________ ERROR at setup of test_verify_fingerprint_ok _________________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_verify_fingerprint_ok0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+__________ ERROR at setup of test_open_dataset_via_recorded_svar_link __________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_open_dataset_via_recorded0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+______ ERROR at setup of test_open_dataset_after_relocation_via_override _______
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_open_dataset_after_reloca0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+__________ ERROR at setup of test_open_dataset_mismatched_svar_raises __________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_open_dataset_mismatched_s0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+__________ ERROR at setup of test_open_dataset_legacy_symlink_layout ___________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_open_dataset_legacy_symli0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+_______ ERROR at setup of test_migrate_svar_link_upgrades_legacy_dataset _______
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_migrate_svar_link_upgrade0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+____________ ERROR at setup of test_migrate_svar_link_is_idempotent ____________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_migrate_svar_link_is_idem0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+____ ERROR at setup of test_open_after_joint_relocation_preserves_relative _____
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_open_after_joint_relocati0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+______ ERROR at setup of test_migrate_svar_link_refuses_dangling_symlink _______
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_migrate_svar_link_refuses0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_dataset_paths(tmp_path, filtered_svar, source_bed):
+        """Produce a fresh GVL dataset built from the canonical test svar."""
+        import genvarloader as gvl
+    
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+>       assert source_bed.exists(), f"missing fixture {source_bed}"
+E       AssertionError: missing fixture /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed').exists
+
+tests/integration/dataset/test_svar_link.py:24: AssertionError
+_____ ERROR at setup of test_with_settings_var_filter_propagates_to_recon ______
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_with_settings_var_filter_0')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_gvl_path(tmp_path, filtered_svar, source_bed):
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+        out = tmp_path / "ds.gvl"
+>       gvl.write(path=out, bed=source_bed, variants=filtered_svar, overwrite=True)
+
+tests/integration/dataset/test_with_settings_var_filter.py:19: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.581 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_with_settings_var_filter_0/ds.gvl
+______ ERROR at setup of test_with_settings_var_filter_false_clears_recon ______
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_with_settings_var_filter_1')
+filtered_svar = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/filtered.svar')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    @pytest.fixture
+    def svar_gvl_path(tmp_path, filtered_svar, source_bed):
+        assert filtered_svar.is_dir(), (
+            f"missing fixture {filtered_svar}; run pixi run -e dev gen"
+        )
+        out = tmp_path / "ds.gvl"
+>       gvl.write(path=out, bed=source_bed, variants=filtered_svar, overwrite=True)
+
+tests/integration/dataset/test_with_settings_var_filter.py:19: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/genvarloader/_dataset/_write.py:139: in write
+    bed = sp.bed.read(bed)
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+---------------------------- Captured stderr setup -----------------------------
+2026-05-25 12:17:34.594 | INFO     | genvarloader._dataset._write:write:123 - Writing dataset to /private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_with_settings_var_filter_1/ds.gvl
+=================================== FAILURES ===================================
+______________ test_write_errors_when_post_index_budget_too_small ______________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_write_errors_when_post_in0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x43f0cf310>
+vcf_dir = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/vcf')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def test_write_errors_when_post_index_budget_too_small(
+        tmp_path, monkeypatch, vcf_dir: Path, source_bed: Path
+    ):
+        """If max_mem minus the variant index leaves no room for even one
+        variant chunk, gvl.write raises ValueError instead of silently
+        blowing the budget."""
+        import pytest
+    
+        vcf = VCF(vcf_dir / "filtered_source.vcf.gz")
+        vcf._write_gvi_index()
+        vcf._load_index()
+    
+>       bed = sp.bed.read(source_bed)
+
+tests/integration/dataset/test_write.py:20: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+----------------------------- Captured stderr call -----------------------------
+2026-05-25 12:17:34.638 | INFO     | genoray._vcf:_load_index:1096 - Loading genoray index.
+2026-05-25 12:17:34.642 | INFO     | genoray._vcf:_load_index:1096 - Loading genoray index.
+_______________________ test_write_loads_lazy_vcf_index ________________________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_write_loads_lazy_vcf_inde0')
+vcf_dir = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/vcf')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def test_write_loads_lazy_vcf_index(tmp_path, vcf_dir: Path, source_bed: Path):
+        """gvl.write should load the index itself when given a VCF constructed
+        with with_gvi_index=False, and produce a valid dataset."""
+        vcf = VCF(vcf_dir / "filtered_source.vcf.gz", with_gvi_index=False)
+        assert vcf._index is None
+    
+>       bed = sp.bed.read(source_bed)
+
+tests/integration/dataset/test_write.py:39: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+_______________________ test_write_loads_lazy_pgen_index _______________________
+
+tmp_path = PosixPath('/private/var/folders/yp/m7qzp0hs4cq5pr6sds4jdc240000gn/T/pytest-of-david/pytest-146/test_write_loads_lazy_pgen_ind0')
+pgen_dir = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/pgen')
+source_bed = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def test_write_loads_lazy_pgen_index(tmp_path, pgen_dir: Path, source_bed: Path):
+        """gvl.write should load the index itself when given a PGEN constructed
+        with load_index=False, and produce a valid dataset."""
+        pgen = PGEN(pgen_dir / "filtered_source.pgen", load_index=False)
+        assert pgen._index is None
+    
+>       bed = sp.bed.read(source_bed)
+
+tests/integration/dataset/test_write.py:53: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:180: in read
+    result = _read_bed(path)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = PosixPath('/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed')
+
+    def _read_bed(path: PathLike) -> pl.DataFrame:
+        path = Path(path)
+    
+        if path.suffix == ".bed":
+            opener = open
+        elif path.suffix == ".gz":
+            opener = partial(gzip.open, mode="rt")
+        else:
+            raise ValueError(f"Unsupported file type: {path.suffix}")
+    
+>       with opener(path) as f:
+E       FileNotFoundError: [Errno 2] No such file or directory: '/Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/tests/data/source.bed'
+
+.pixi/envs/dev/lib/python3.10/site-packages/seqpro/bed.py:228: FileNotFoundError
+=============================== warnings summary ===============================
+tests/integration/dataset/test_write_tracks_e2e.py::test_write_with_table_only_roundtrip
+tests/integration/dataset/test_write_tracks_e2e.py::test_write_with_mixed_bigwigs_and_table
+tests/integration/dataset/test_write_tracks_e2e.py::test_write_with_variants_and_tracks
+tests/unit/test_table.py::test_table_count_intervals_matches_brute_force
+tests/unit/test_table.py::test_table_intervals_from_offsets_roundtrip
+tests/unit/test_table.py::test_table_count_intervals_normalizes_contig_names
+  /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/python/genvarloader/_table.py:174: UserWarning: Coordinate system metadata is missing for: Polars DataFrame, Polars DataFrame. Using global POLARS_BIO_COORDINATE_SYSTEM_ZERO_BASED setting (0-based). Set metadata explicitly on DataFrames or use polars-bio I/O functions (scan_*, read_*) to avoid this warning.
+    result = pb.overlap(
+
+tests/integration/dataset/test_write_tracks_e2e.py::test_write_with_table_only_roundtrip
+tests/integration/dataset/test_write_tracks_e2e.py::test_write_with_mixed_bigwigs_and_table
+tests/integration/dataset/test_write_tracks_e2e.py::test_write_with_variants_and_tracks
+tests/unit/test_table.py::test_table_intervals_from_offsets_roundtrip
+  /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/python/genvarloader/_table.py:243: UserWarning: Coordinate system metadata is missing for: Polars DataFrame, Polars DataFrame. Using global POLARS_BIO_COORDINATE_SYSTEM_ZERO_BASED setting (0-based). Set metadata explicitly on DataFrames or use polars-bio I/O functions (scan_*, read_*) to avoid this warning.
+    joined = pb.overlap(
+
+tests/unit/dataset/test_ref_ds.py::test_getitem[no_regions]
+  /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/.pixi/envs/dev/lib/python3.10/site-packages/_pytest/runner.py:245: PluggyTeardownRaisedWarning: A plugin raised an exception during an old-style hookwrapper teardown.
+  Plugin: cases, Hook: pytest_runtest_setup
+  ValueError: tuple.index(x): x not in tuple
+  For more information see https://pluggy.readthedocs.io/en/stable/api_reference.html#pluggy.PluggyTeardownRaisedWarning
+    lambda: runtest_hook(item=item, **kwds),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================================ tests coverage ================================
+______________ coverage: platform darwin, python 3.10.20-final-0 _______________
+
+Name                                              Stmts   Miss Branch BrPart  Cover   Missing
+---------------------------------------------------------------------------------------------
+python/genvarloader/__init__.py                      20      0      0      0   100%
+python/genvarloader/_bigwig.py                      138     43     52     13    61%   58, 73-82, 89-92, 121, 125->128, 130, 132, 175, 180, 182, 187, 220-246, 278, 283, 285, 290
+python/genvarloader/_dataset/__init__.py              0      0      0      0   100%
+python/genvarloader/_dataset/_genotypes.py            5      0      0      0   100%
+python/genvarloader/_dataset/_haps.py               333    120     72     14    60%   157, 236, 248, 274->278, 297-313, 331-332, 385, 427-446, 450, 467-473, 517-530, 565, 592-594, 606, 645-694, 699-716, 719-720, 755-785, 850-896, 913-946
+python/genvarloader/_dataset/_impl.py               516    205    220     41    54%   47-48, 255-262, 271, 280-295, 298-316, 319-333, 336-346, 350-352, 363-374, 377, 385, 390, 398, 404, 421->439, 544, 550, 552, 557, 582, 587, 591, 602, 610, 636, 638, 715, 720-722, 727, 732, 755-760, 770-771, 779, 787, 795-796, 801-805, 826, 828, 831-832, 842, 848, 851->853, 860, 867, 882, 946, 954-955, 959-962, 988-1027, 1048-1072, 1093-1124, 1158-1174, 1195->1201, 1199, 1206, 1260-1264, 1342, 1403-1445, 1527
+python/genvarloader/_dataset/_indexing.py           280    106     90      6    61%   28-38, 47, 135, 144, 157-158, 286-292, 301-307, 330-349, 353, 357, 361, 365, 368, 375-383, 386, 390-454, 459, 463, 467, 471, 481, 506, 515
+python/genvarloader/_dataset/_insertion_fill.py      54      0     18      1    99%   22->exit
+python/genvarloader/_dataset/_open.py               120     12     32      8    84%   110, 161, 167, 181-183, 190, 196, 207, 254-260
+python/genvarloader/_dataset/_protocol.py             6      0      0      0   100%
+python/genvarloader/_dataset/_query.py               72     28     20      1    51%   270-303, 344-349, 359-369
+python/genvarloader/_dataset/_rag_variants.py       154     96     64      7    32%   25-27, 49, 53, 54->56, 56->59, 74-101, 117-119, 130-135, 164, 179-193, 197, 226, 276-294, 323-341, 350-381, 495-512
+python/genvarloader/_dataset/_reconstruct.py        102     10     34      6    88%   105-107, 141, 176, 235, 271, 284, 306-307
+python/genvarloader/_dataset/_ref.py                 28      3      4      1    88%   42-44
+python/genvarloader/_dataset/_reference.py          327     90    116     26    67%   78-79, 93, 120-147, 217, 220, 226, 233-238, 281-286, 291-293, 312, 322, 344, 351, 360, 363, 367->374, 376->380, 395-412, 416-420, 456->472, 478, 485, 501, 503, 513, 521, 549, 553-556, 559, 576-581, 654, 720-754
+python/genvarloader/_dataset/_splice.py              93      5     18      4    92%   115, 193, 204, 244, 251
+python/genvarloader/_dataset/_svar_link.py           69     33     30      9    47%   34-39, 41->49, 47, 51, 68, 72, 87, 91, 96, 109-150
+python/genvarloader/_dataset/_tracks.py             174     29     48     10    79%   477-482, 485->493, 488, 494, 501, 528, 568, 582, 604, 645, 683-708
+python/genvarloader/_dataset/_utils.py               45     18      6      0    61%   52-57, 197-218
+python/genvarloader/_dataset/_write.py              391     97    138     28    71%   48, 109, 132-133, 135, 147, 154-156, 159-162, 166->172, 174->177, 178-179, 187, 193, 198, 204-205, 217->239, 228, 231, 244-253, 342, 348, 362, 386, 441->425, 451-462, 468-488, 510->512, 522-523, 564-648, 658->670, 694, 697, 714->750
+python/genvarloader/_dummy.py                        80      3      2      1    95%   186-188
+python/genvarloader/_fasta.py                       149     62     60     11    52%   75, 83-92, 97-105, 116-121, 126, 128, 139-156, 160-184, 190-192, 235, 238, 253, 262->265, 272-276
+python/genvarloader/_ragged.py                      115     46      8      2    59%   20-21, 36-37, 42, 49-52, 100-103, 108-130, 146-164, 205-208, 272-273, 283
+python/genvarloader/_table.py                       138      6     40      9    92%   106, 164, 183, 229->293, 234->293, 250->293, 301, 303, 307
+python/genvarloader/_torch.py                        79     50     20      2    31%   17-19, 32, 39, 63-77, 99-104, 115-124, 137-148, 153-241
+python/genvarloader/_types.py                        45      0      0      0   100%
+python/genvarloader/_utils.py                        38      1     12      1    96%   94
+python/genvarloader/_variants/__init__.py             0      0      0      0   100%
+python/genvarloader/_variants/_records.py            24      5      0      0    79%   36-42
+python/genvarloader/_variants/_sitesonly.py         114     21     22      8    74%   39-55, 92, 103, 151, 163, 176->180, 184, 234, 261->266, 267-269, 272
+python/genvarloader/_variants/_utils.py               9      0      0      0   100%
+python/genvarloader/data_registry.py                 28     21      4      0    22%   27-31, 35-72, 82-101
+---------------------------------------------------------------------------------------------
+TOTAL                                              3746   1110   1130    209    65%
+=========================== short test summary info ============================
+FAILED tests/integration/dataset/test_write.py::test_write_errors_when_post_index_budget_too_small
+FAILED tests/integration/dataset/test_write.py::test_write_loads_lazy_vcf_index
+FAILED tests/integration/dataset/test_write.py::test_write_loads_lazy_pgen_index
+ERROR tests/integration/dataset/test_issue_191_var_fields.py::test_dosage_absent_when_not_requested
+ERROR tests/integration/dataset/test_issue_191_var_fields.py::test_dosage_present_when_requested
+ERROR tests/integration/dataset/test_issue_191_var_fields.py::test_available_var_fields_includes_dosage_when_present
+ERROR tests/integration/dataset/test_issue_191_var_fields.py::test_haps_from_path_filters_info_loading
+ERROR tests/integration/dataset/test_issue_191_var_fields.py::test_haps_available_var_fields_from_schema
+ERROR tests/integration/dataset/test_issue_191_var_fields.py::test_dataset_open_accepts_var_fields
+ERROR tests/integration/dataset/test_issue_191_var_fields.py::test_dataset_open_default_var_fields_is_minimum_useful_set
+ERROR tests/integration/dataset/test_issue_191_var_fields.py::test_with_settings_lazily_loads_new_info_field
+ERROR tests/integration/dataset/test_issue_191_var_fields.py::test_with_settings_lazily_loads_dosages
+ERROR tests/integration/dataset/test_open_vs_settings_parity.py::test_open_vs_with_settings_parity_state
+ERROR tests/integration/dataset/test_open_vs_settings_parity.py::test_open_vs_with_settings_parity_output
+ERROR tests/integration/dataset/test_rc_packing.py::test_unspliced_single_item_buffer_packed
+ERROR tests/integration/dataset/test_rc_packing.py::test_spliced_reference_pos_strand_matches_fasta
+ERROR tests/integration/dataset/test_rc_packing.py::test_spliced_reference_neg_strand_is_rc_of_fasta
+ERROR tests/integration/dataset/test_rc_packing.py::test_multi_exon_spliced_buffer_packed
+ERROR tests/integration/dataset/test_rc_packing.py::test_multi_exon_spliced_matches_fasta_concat
+ERROR tests/integration/dataset/test_rc_packing.py::test_spliced_tracks_round_trip
+ERROR tests/integration/dataset/test_rc_packing.py::test_haptracks_splicing_raises
+ERROR tests/integration/dataset/test_svar_link.py::test_write_from_svar_records_svar_link_and_no_symlink
+ERROR tests/integration/dataset/test_svar_link.py::test_resolve_svar_prefers_override
+ERROR tests/integration/dataset/test_svar_link.py::test_resolve_svar_uses_relative_path
+ERROR tests/integration/dataset/test_svar_link.py::test_resolve_svar_falls_back_to_sibling
+ERROR tests/integration/dataset/test_svar_link.py::test_verify_fingerprint_mismatch_raises
+ERROR tests/integration/dataset/test_svar_link.py::test_verify_fingerprint_ok
+ERROR tests/integration/dataset/test_svar_link.py::test_open_dataset_via_recorded_svar_link
+ERROR tests/integration/dataset/test_svar_link.py::test_open_dataset_after_relocation_via_override
+ERROR tests/integration/dataset/test_svar_link.py::test_open_dataset_mismatched_svar_raises
+ERROR tests/integration/dataset/test_svar_link.py::test_open_dataset_legacy_symlink_layout
+ERROR tests/integration/dataset/test_svar_link.py::test_migrate_svar_link_upgrades_legacy_dataset
+ERROR tests/integration/dataset/test_svar_link.py::test_migrate_svar_link_is_idempotent
+ERROR tests/integration/dataset/test_svar_link.py::test_open_after_joint_relocation_preserves_relative
+ERROR tests/integration/dataset/test_svar_link.py::test_migrate_svar_link_refuses_dangling_symlink
+ERROR tests/integration/dataset/test_with_settings_var_filter.py::test_with_settings_var_filter_propagates_to_recon
+ERROR tests/integration/dataset/test_with_settings_var_filter.py::test_with_settings_var_filter_false_clears_recon
+= 3 failed, 377 passed, 3 skipped, 3 xfailed, 11 warnings, 34 errors in 8.74s ==
