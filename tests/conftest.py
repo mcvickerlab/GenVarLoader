@@ -38,6 +38,21 @@ def ref_fasta(data_dir: Path) -> Path:
     return data_dir / "fasta" / "hg38.fa.bgz"
 
 
+@pytest.fixture(scope="session")
+def reference(ref_fasta: Path):
+    """Opened ``gvl.Reference`` (metadata-only, ``in_memory=False``).
+
+    Carve-out vs. the "yield paths, not Datasets" convention: opening a
+    Reference with ``in_memory=False`` is metadata-only (FAI/GZI read),
+    not the expensive bytes-loading path. Multiple tests need this exact
+    construction, so centralizing it here removes duplication without
+    violating the spirit of the convention.
+    """
+    import genvarloader as gvl
+
+    return gvl.Reference.from_path(ref_fasta, in_memory=False)
+
+
 # --- toy phased datasets (one per variant source) ----------------------------
 
 

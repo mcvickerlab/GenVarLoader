@@ -15,11 +15,6 @@ import pytest
 
 
 @pytest.fixture
-def reference(ref_fasta) -> gvl.Reference:
-    return gvl.Reference.from_path(ref_fasta, in_memory=False)
-
-
-@pytest.fixture
 def two_transcript_bed() -> pl.DataFrame:
     # Two transcripts, both '+' strand. T1 has 2 exons; T2 has 1 exon.
     return pl.DataFrame(
