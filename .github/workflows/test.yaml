@@ -33,3 +33,35 @@ jobs:
       - name: Test
         run: pixi run -e ${{ matrix.environment }} test
 
+  coverage:
+    runs-on: ubuntu-latest
+    name: "coverage (py312)"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup pixi
+        uses: prefix-dev/setup-pixi@v0.9.5
+        with:
+          pixi-version: v0.68.1
+          cache: true
+          environments: py312
+          locked: false
+      - name: Run pytest with coverage
+        run: pixi run -e py312 test-cov
+      - name: Upload HTML coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: htmlcov
+          path: htmlcov/
+          if-no-files-found: error
+      - name: Upload coverage.xml
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: error
+
