@@ -1,6 +1,6 @@
 # Test Suite Overhaul — Status & Resume Notes
 
-**As of:** 2026-05-24 (committed through `9310226`)
+**As of:** 2026-05-24 (committed through `1257be9`)
 **Branch:** `worktree-test-suite-overhaul`
 **Worktree:** `/Users/david/projects/GenVarLoader/.claude/worktrees/test-suite-overhaul`
 **PR:** https://github.com/mcvickerlab/GenVarLoader/pull/194 (open)
@@ -23,6 +23,7 @@ Living status snapshot. Read this first when resuming with fresh context — it 
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-splice.md`
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-svar-link.md`
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-utility.md`
+  - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-tracks-broader.md`
 
 ---
 
@@ -32,7 +33,7 @@ Living status snapshot. Read this first when resuming with fresh context — it 
 
 - **Non-slow tier:** 351 passed, 3 skipped, 3 deselected, 2 xfailed
 - **Slow tier (1kg, where data exists):** 3 passed
-- **Unit tier alone:** 138 passed, 1 xfailed (~12s combined, 1.3s unit alone)
+- **Unit tier alone:** 158 passed, 1 xfailed (~12s combined, ~3.2s unit alone)
 - **Coverage:** 63% line+branch (parity with Phase 3 baseline; no production code modified)
 
 ### File layout
@@ -44,7 +45,8 @@ tests/
 │   ├── __init__.py
 │   ├── ragged.py                   # make_ragged_seqs, make_ragged_intervals
 │   └── reconstruct.py              # make_tracks
-├── unit/                           # ← 138 tests
+├── unit/                           # ← 158 tests
+│   ├── test_table.py
 │   ├── test_utils.py
 │   ├── dataset/
 │   │   ├── genotypes/
@@ -52,7 +54,8 @@ tests/
 │   │   │   └── test_reconstruct.py
 │   │   ├── test_build_reconstructor.py
 │   │   ├── test_indexing.py
-│   │   └── test_svar_link_models.py
+│   │   ├── test_svar_link_models.py
+│   │   └── test_write_tracks.py
 │   ├── ragged/
 │   │   ├── test_rag_variants.py
 │   │   └── test_ragged_rc_packing.py
@@ -63,16 +66,17 @@ tests/
 │   ├── tracks/
 │   │   ├── test_i2t_t2i.py
 │   │   ├── test_insertion_fill.py
+│   │   ├── test_random_nonoverlapping.py
 │   │   ├── test_realign.py
-│   │   └── test_tracks_splice.py
+│   │   ├── test_tracks_splice.py
+│   │   └── utils.py                # sibling helper for test_random_nonoverlapping
 │   └── variants/
 │       ├── test_variant_utils.py
 │       └── test_variants_info_fields.py
-├── integration/                    # ← 222 tests (351 - 129)
+├── integration/                    # ← 193 tests
 │   ├── test_fasta.py
 │   ├── test_ref_ds.py
 │   ├── test_ref_ds_splicing.py
-│   ├── test_table.py
 │   ├── dataset/
 │   │   ├── test_dataset.py
 │   │   ├── test_ds_haps.py
@@ -87,10 +91,9 @@ tests/
 │   │   ├── test_svar_link.py
 │   │   ├── test_with_settings_var_filter.py
 │   │   ├── test_write.py
-│   │   └── test_write_tracks.py
+│   │   └── test_write_tracks_e2e.py               # renamed in Phase 5 tracks (basename collision)
 │   ├── tracks/
-│   │   ├── test_annot_tracks.py
-│   │   └── test_random_nonoverlapping.py
+│   │   └── test_annot_tracks.py
 │   └── variants/
 │       └── test_sites.py
 ├── data/
@@ -111,6 +114,7 @@ tests/
 | 5 splice | get_splice_bed move + ref_ds_splicing split | 11 moved to `unit/splice/test_get_splice_bed.py`; 5 RefDataset settings/validation tests extracted to `unit/splice/test_ref_ds_splice_settings.py`; 4 byte-comparison tests stay in integration |
 | 5 svar_link | 7 pydantic-model tests extracted | `unit/dataset/test_svar_link_models.py`; 14 dataset-dependent kept |
 | 5 utility | test_utils.py whole-file move | 9 collected tests (5 audit-Port entries; pytest_cases expands `test_normalize_contig_name` to 5 cases) moved to `unit/test_utils.py`; no source changes; no builder needed |
+| 5 tracks (broader) | test_random_nonoverlapping + utils.py whole-move; test_write_tracks atomic split (integration renamed to `_e2e`); test_table.py whole-file move | 3 files relocated, 1 atomic split, 1 integration rename for basename-collision avoidance |
 
 ---
 
@@ -119,12 +123,6 @@ tests/
 Numbers are best-effort estimates from the audit; verify against the current integration tree before planning.
 
 ### Components with port-bucket tests still in integration
-
-#### Tracks (broader) — ~14 ports across 3 files
-
-- `tests/integration/tracks/test_random_nonoverlapping.py` — 1 port. **Watch out:** this file does `from utils import nonoverlapping_intervals` relying on pytest's prepend-mode sys.path injection. The sibling `tests/integration/tracks/utils.py` is the source. If moving the test to `tests/unit/tracks/`, the `utils.py` must move too (or get promoted to a builder).
-- `tests/integration/dataset/test_write_tracks.py` — 1 port (`test_write_duplicate_track_names_rejected`), 3 keeps. Atomic split.
-- `tests/integration/test_table.py` — 12 ports, 0 keeps. Per audit, all 12 are `Table.from_path` format-dispatch tests (csv/tsv/parquet/arrow). Likely whole-file move; may need a small file-format builder. **Check first** what fixtures (if any) the tests use beyond `tmp_path`.
 
 #### Ref / FASTA (~10 ports across 3 files)
 
@@ -165,16 +163,19 @@ Numbers are best-effort estimates from the audit; verify against the current int
 
 6. **1kg slow tests in the worktree** — The worktree at `.claude/worktrees/test-suite-overhaul/tests/data/1kg/` is NOT populated by default. To run slow tier here you'd need `pixi run -e dev gen-1kg`. The main checkout at `/Users/david/projects/GenVarLoader/tests/data/1kg/` IS populated; for slow-tier verification, `git checkout --detach worktree-test-suite-overhaul` in the main checkout, run tests, then `git checkout main` to return.
 
+7. **Second basename-collision case (tracks-broader plan)** — `test_write_tracks.py` collided between `tests/integration/dataset/` (3 Keeps) and the new `tests/unit/dataset/` (1 Port). Resolved by renaming the integration file to `test_write_tracks_e2e.py`, consistent with the reconstruct-plan precedent (gotcha 1). Watch the same pattern for any future split that wants the natural integration filename.
+
+8. **Stale `bench_cpu_gpu.py` in tracks dir** — `tests/integration/tracks/bench_cpu_gpu.py` is a typer CLI benchmark script (not a pytest-collected test). It imports `from utils import nonoverlapping_intervals` lazily inside `main()`. The tracks-broader plan moved `utils.py` to `tests/unit/tracks/`, so this script's lazy import now fails — but the script was already broken (imports `genvarloader.dataset.intervals`, `genvarloader.types`, `genvarloader.utils` — old module paths that no longer exist post-rename). No test regression; flag for eventual deletion or restoration.
+
 ---
 
 ## Recommended next plan
 
-**Tracks (broader)** — Three files, two trivial (1-port each), one larger (`test_table.py` 12 ports). Tackle the trivial ones first, then table separately. Watch for the `utils.py` sibling of `test_random_nonoverlapping.py` (per gotcha 1 + status doc layout note).
+**Ref / FASTA + reference-fixture promotion** — One combined plan: move `test_fasta.py` (3 ports) and the 2 remaining `test_ref_ds.py` ports to the unit tier, and promote the `reference = gvl.Reference.from_path(ref_fasta, in_memory=False)` fixture to `tests/conftest.py`, deduplicating across `test_ref_ds_splicing.py` (integration), `test_ref_ds_splice_settings.py` (unit), and the new unit ref tests.
 
 Subsequent order:
 
-1. **Ref / FASTA + reference-fixture promotion** — Could combine into one plan: move `test_fasta.py` and the 2 remaining `test_ref_ds.py` ports, and promote the `reference` fixture to conftest, deduplicating across `test_ref_ds_splicing.py` (integration), `test_ref_ds_splice_settings.py` (unit), and the new unit ref tests.
-2. **Dataset polymorphism / `make_dataset`** — Last. Requires the most builder work but only has 2 specific tests gated on it.
+1. **Dataset polymorphism / `make_dataset`** — Last component plan. Requires the most builder work but only has 2 specific tests gated on it.
 
 Once all components above land:
 - **Phase 6 (integration trim)** — As outlined in design spec. Review each integration-tier file post-overhaul; remove redundancies where unit coverage now subsumes them.
