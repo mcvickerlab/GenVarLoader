@@ -1,6 +1,6 @@
 # Test Suite Overhaul — Status & Resume Notes
 
-**As of:** 2026-05-24 (committed through `b44a8b0`)
+**As of:** 2026-05-24 (committed through `ca76796`)
 **Branch:** `worktree-test-suite-overhaul`
 **Worktree:** `/Users/david/projects/GenVarLoader/.claude/worktrees/test-suite-overhaul`
 **PR:** https://github.com/mcvickerlab/GenVarLoader/pull/194 (open)
@@ -26,6 +26,7 @@ Living status snapshot. Read this first when resuming with fresh context — it 
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-tracks-broader.md`
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-ref-fasta.md`
   - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase5-dataset-polymorphism.md`
+  - `docs/superpowers/plans/2026-05-24-test-suite-overhaul-phase7-ci-coverage.md`
 
 ---
 
@@ -121,6 +122,7 @@ tests/
 | 5 ref/fasta | reference fixture → conftest; test_fasta.py + test_ref_ds.py whole-file moves | Session-scoped `reference` fixture promoted with docstring carve-out (metadata-only Reference is cheap); 2 duplicate local fixtures dropped; 2 whole-file moves; no basename collisions |
 | 5 dataset polymorphism (minimal) | atomic split of test_dummy_dataset_insertion_fill.py | 1 test (test_with_insertion_fill_rejects_when_no_tracks_active) extracted to tests/unit/dataset/test_with_insertion_fill.py; test_ds_indexing deferred (would require a `make_dataset` builder wrapping gvl.write — speculative scaffolding per YAGNI) |
 | 6 integration trim | systematic redundancy audit — no-op | Explore-agent comparison of every remaining integration test against the unit tier found zero strict redundancies. The audit's Port/Delete buckets already captured everything that could move; remaining Keeps exercise write→read roundtrips, byte-comparison against real FASTA, or full reconstruction call paths that no unit test covers. Phase 6 closes with no deletions. |
+| 7 CI coverage | new `coverage` job in .github/workflows/test.yaml | Runs `test-cov` on py312 in parallel with the pytest matrix; uploads `htmlcov/` and `coverage.xml` as GHA artifacts. Closes Phase 7. |
 
 ---
 
@@ -168,11 +170,17 @@ Numbers are best-effort estimates from the audit; verify against the current int
 
 ---
 
-## Recommended next plan
+## Status: complete
 
-Phase 6 closed as a no-op (see "What shipped"). One remaining piece:
+All seven phases of the test-suite overhaul have shipped on this branch. Summary:
 
-**Phase 7 (CI report)** — Wire `htmlcov/` upload into CI per the original overhaul intent. Small CI-config change; likely a single PR-workflow edit that publishes the coverage HTML artifact alongside the existing test job.
+- **Tiers:** `tests/unit/` (167 fast tests, no project fixtures) and `tests/integration/` (184 tests using real on-disk artifacts).
+- **Builders:** `tests/_builders/` provides `make_ragged_seqs`, `make_ragged_intervals`, `make_tracks` for unit-tier scaffolding.
+- **Conftest:** centralized path fixtures + a session-scoped `reference` fixture (metadata-only Reference is cheap; see gotcha 9).
+- **CI:** htmlcov + coverage.xml artifacts published on every PR and main push (Phase 7).
+- **Deferred:** `make_dataset` builder + `test_ds_indexing` port (no consumer beyond one test; YAGNI).
+
+This document remains a useful resume note for anyone touching the test suite. Re-read it before adding new tests so you place them in the right tier and reuse the conftest fixtures / builders rather than re-inventing them.
 
 ---
 
