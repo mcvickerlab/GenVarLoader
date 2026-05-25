@@ -4,12 +4,7 @@ import polars as pl
 import pytest
 import seqpro as sp
 from genvarloader._dataset._utils import padded_slice
-from pytest_cases import fixture, parametrize_with_cases
-
-
-@fixture
-def reference(ref_fasta):
-    return gvl.Reference.from_path(ref_fasta, in_memory=False)
+from pytest_cases import parametrize_with_cases
 
 
 @pytest.mark.xfail(strict=True, raises=ValueError)
