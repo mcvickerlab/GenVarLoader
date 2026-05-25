@@ -106,7 +106,7 @@ tests/
 
 ---
 
-## What shipped (79 commits)
+## What shipped
 
 | Phase | Component | Result |
 |---|---|---|
