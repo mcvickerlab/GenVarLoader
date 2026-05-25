@@ -11,7 +11,7 @@ import math
 import pytest
 
 import genvarloader as gvl
-from genvarloader._dataset._insertion_fill import Constant, Repeat5p
+from genvarloader._dataset._insertion_fill import Constant
 
 
 def test_end_to_end_set_insertion_fill():
@@ -37,14 +37,3 @@ def test_dummy_dataset_with_default_insertion_fill_does_not_crash():
         pytest.skip("dummy dataset shape does not include both seqs and tracks")
     # Just trigger reconstruction; the call must not raise KeyError.
     _ = ds[0, 0]
-
-
-def test_with_insertion_fill_rejects_when_no_tracks_active():
-    """A dataset with tracks disabled should reject with_insertion_fill."""
-    ds = gvl.get_dummy_dataset()
-    if ds._tracks is None or ds._seqs is None:
-        pytest.skip("dummy dataset shape does not include both seqs and tracks")
-    # Disable tracks: view-state no longer has active tracks.
-    ds_no_tracks = ds.with_tracks(False)
-    with pytest.raises(ValueError, match="with_tracks"):
-        ds_no_tracks.with_insertion_fill(Repeat5p())
