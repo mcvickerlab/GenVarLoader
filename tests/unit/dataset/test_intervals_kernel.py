@@ -15,8 +15,14 @@ def test_intervals_to_tracks_empty():
     out_offsets = np.array([0, 5], dtype=np.int64)
 
     intervals_to_tracks(
-        offset_idxs, starts, itv_starts, itv_ends, itv_values,
-        itv_offsets, out, out_offsets,
+        offset_idxs,
+        starts,
+        itv_starts,
+        itv_ends,
+        itv_values,
+        itv_offsets,
+        out,
+        out_offsets,
     )
     np.testing.assert_equal(out, np.zeros(5, dtype=np.float32))
 
@@ -33,8 +39,14 @@ def test_intervals_to_tracks_single_interval():
     out_offsets = np.array([0, 5], dtype=np.int64)
 
     intervals_to_tracks(
-        offset_idxs, starts, itv_starts, itv_ends, itv_values,
-        itv_offsets, out, out_offsets,
+        offset_idxs,
+        starts,
+        itv_starts,
+        itv_ends,
+        itv_values,
+        itv_offsets,
+        out,
+        out_offsets,
     )
     np.testing.assert_equal(out, np.array([0.0, 2.5, 2.5, 2.5, 0.0], dtype=np.float32))
 
@@ -51,8 +63,14 @@ def test_intervals_to_tracks_multiple_non_overlapping():
     out_offsets = np.array([0, 5], dtype=np.int64)
 
     intervals_to_tracks(
-        offset_idxs, starts, itv_starts, itv_ends, itv_values,
-        itv_offsets, out, out_offsets,
+        offset_idxs,
+        starts,
+        itv_starts,
+        itv_ends,
+        itv_values,
+        itv_offsets,
+        out,
+        out_offsets,
     )
     np.testing.assert_equal(out, np.array([1.0, 1.0, 0.0, 3.0, 3.0], dtype=np.float32))
 
@@ -69,7 +87,13 @@ def test_intervals_to_tracks_offset_query_start():
     out_offsets = np.array([0, 4], dtype=np.int64)
 
     intervals_to_tracks(
-        offset_idxs, starts, itv_starts, itv_ends, itv_values,
-        itv_offsets, out, out_offsets,
+        offset_idxs,
+        starts,
+        itv_starts,
+        itv_ends,
+        itv_values,
+        itv_offsets,
+        out,
+        out_offsets,
     )
     np.testing.assert_equal(out, np.array([0.0, 7.0, 7.0, 0.0], dtype=np.float32))

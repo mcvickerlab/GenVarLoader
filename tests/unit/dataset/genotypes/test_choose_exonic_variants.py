@@ -74,6 +74,7 @@ def test_choose_exonic_variants_2d_geno_offsets() -> None:
 # Region used below: start=10, end=50 (single haplotype, 1-D offsets).
 # ---------------------------------------------------------------------------
 
+
 def _single_variant_inputs(
     v_pos: int,
     ilen: int,

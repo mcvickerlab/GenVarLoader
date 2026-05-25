@@ -1,4 +1,5 @@
 """Smoke tests for the PyTorch integration."""
+
 import numpy as np  # noqa: F401  # import before torch to avoid numpy/torch ABI abort in py310 env
 import pytest
 

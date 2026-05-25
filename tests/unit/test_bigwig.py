@@ -1,4 +1,5 @@
 """Smoke tests for BigWigs reader."""
+
 from pathlib import Path
 
 import numpy as np

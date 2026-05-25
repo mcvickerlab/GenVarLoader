@@ -168,8 +168,17 @@ def case_ref_only():
     sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
-        v_starts, ilens, shift, alt_alleles, alt_offsets, ref,
-        sparse_genos, ref_start, desired, annot_v_idxs, annot_pos,
+        v_starts,
+        ilens,
+        shift,
+        alt_alleles,
+        alt_offsets,
+        ref,
+        sparse_genos,
+        ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
     )
 
 
@@ -188,13 +197,24 @@ def case_spanning_del_end():
 
     desired = np.frombuffer(b"ACGNN", dtype="S1")
     annot_v_idxs = np.array([-1, -1, 0, -1, -1], dtype=np.int32)
-    annot_pos = np.array([0, 1, 2, np.iinfo(np.int32).max, np.iinfo(np.int32).max], dtype=np.int32)
+    annot_pos = np.array(
+        [0, 1, 2, np.iinfo(np.int32).max, np.iinfo(np.int32).max], dtype=np.int32
+    )
 
     sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
-        v_starts, ilens, shift, alt_alleles, alt_offsets, ref,
-        sparse_genos, ref_start, desired, annot_v_idxs, annot_pos,
+        v_starts,
+        ilens,
+        shift,
+        alt_alleles,
+        alt_offsets,
+        ref,
+        sparse_genos,
+        ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
     )
 
 
@@ -220,8 +240,17 @@ def case_overlapping_variants():
     sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
-        v_starts, ilens, shift, alt_alleles, alt_offsets, ref,
-        sparse_genos, ref_start, desired, annot_v_idxs, annot_pos,
+        v_starts,
+        ilens,
+        shift,
+        alt_alleles,
+        alt_offsets,
+        ref,
+        sparse_genos,
+        ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
     )
 
 
