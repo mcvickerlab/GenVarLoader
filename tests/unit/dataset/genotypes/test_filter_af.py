@@ -1,5 +1,5 @@
 import numpy as np
-import pytest
+
 from genvarloader._dataset._genotypes import filter_af
 
 
@@ -44,17 +44,6 @@ def test_filter_af_both():
     np.testing.assert_equal(keep, np.array([False, True, True, False]))
 
 
-@pytest.mark.xfail(
-    reason=(
-        "The 2-D geno_offsets branch calls lengths_to_offsets, a plain NumPy "
-        "helper that is not numba-typed.  numba raises TypingError when it "
-        "tries to compile this path.  This test documents the broken contract "
-        "and should be un-xfailed once lengths_to_offsets is decorated with "
-        "@nb.njit or the branch is refactored."
-    ),
-    strict=True,
-    raises=Exception,
-)
 def test_filter_af_2d_offsets_layout():
     """(2, n_slices) offsets layout — slice [start, end) per row."""
     geno_offset_idx = np.array([[0]], dtype=np.intp)

@@ -1,12 +1,11 @@
 """Smoke tests for the PyTorch integration."""
 
-import numpy as np  # noqa: F401  # import before torch to avoid numpy/torch ABI abort in py310 env
 import pytest
 
-torch = pytest.importorskip("torch")  # module-level skip if torch missing
+import genvarloader as gvl  # eagerly loads numpy in the order torch expects
+from genvarloader._torch import get_dataloader, get_sampler
 
-import genvarloader as gvl  # noqa: E402  # must follow importorskip
-from genvarloader._torch import get_dataloader, get_sampler  # noqa: E402
+torch = pytest.importorskip("torch")  # module-level skip if torch missing
 
 
 @pytest.fixture(scope="module")
