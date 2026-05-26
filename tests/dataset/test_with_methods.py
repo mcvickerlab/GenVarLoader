@@ -10,7 +10,7 @@ Methods covered:
                           tests/unit/dataset/test_with_insertion_fill.py)
 """
 
-import polars as pl
+import pyBigWig
 import pytest
 import genvarloader as gvl
 from genvarloader._dataset._insertion_fill import Repeat5p, Constant
@@ -29,6 +29,11 @@ def base_ds(source_bed, vcf_dir, reference, tmp_path_factory):
     which omits tracks) so the with_tracks / with_seqs(None) tests have a track
     to exercise.
 
+    Tracks are provided via ``gvl.BigWigs`` (not ``gvl.Table``) to avoid leaving
+    the polars_bio C extension in a bad state, which segfaulted a downstream
+    ``gvl.write`` call on py312/py313 when these tests ran in the same session
+    as ``tests/integration/dataset/test_issue_153.py``.
+
     Default state after open():
       - output_length = "ragged"
       - sequence_type = "haplotypes"
@@ -38,49 +43,37 @@ def base_ds(source_bed, vcf_dir, reference, tmp_path_factory):
     """
     from genoray import VCF
 
-    out = tmp_path_factory.mktemp("with_methods_ds") / "phased_with_tracks.gvl"
+    tmp_dir = tmp_path_factory.mktemp("with_methods_ds")
+    out = tmp_dir / "phased_with_tracks.gvl"
+
+    # Build per-sample BigWig files covering every contig in source.bed
+    # (chr1, chr19, chr20). Sample IDs match the VCF samples so the
+    # intersection is non-empty.
+    vcf_samples = ["NA00001", "NA00002", "NA00003"]
+    # Header lengths are generous upper bounds for the regions in source.bed.
+    contig_sizes = [("chr1", 20_000_000), ("chr19", 2_000_000), ("chr20", 2_000_000)]
+    bw_paths: dict[str, str] = {}
+    for i, sample in enumerate(vcf_samples):
+        bw_path = tmp_dir / f"{sample}.bw"
+        with pyBigWig.open(str(bw_path), "w") as bw:
+            bw.addHeader(contig_sizes, maxZooms=0)
+            # One short interval per contig; values differ per sample.
+            value = float(i + 1)
+            bw.addEntries(
+                ["chr1", "chr19", "chr20"],
+                [10_000_000, 1_010_686, 17_320],
+                ends=[10_000_020, 1_010_706, 17_340],
+                values=[value, value, value],
+            )
+        bw_paths[sample] = str(bw_path)
+
+    bigwigs = gvl.BigWigs("5ss", bw_paths)
     vcf = VCF(vcf_dir / "filtered_source.vcf.gz")
-    # VCF samples are NA00001, NA00002, NA00003; share at least one with the Table.
-    # Table must cover every contig present in the BED so each region has at
-    # least one interval candidate; otherwise Dataset.open's ragged-shape
-    # bookkeeping mismatches at read time.
-    table = gvl.Table(
-        "5ss",
-        pl.DataFrame(
-            {
-                "sample_id": ["NA00001", "NA00002", "NA00003"] * 3,
-                "chrom": ["chr1"] * 3 + ["chr19"] * 3 + ["chr20"] * 3,
-                "start": [
-                    10000000,
-                    10000000,
-                    10000000,
-                    1010686,
-                    1010686,
-                    1010686,
-                    17320,
-                    17320,
-                    17320,
-                ],
-                "end": [
-                    10000020,
-                    10000020,
-                    10000020,
-                    1010706,
-                    1010706,
-                    1010706,
-                    17340,
-                    17340,
-                    17340,
-                ],
-                "value": [1.0, 2.0, 3.0] * 3,
-            }
-        ),
-    )
     gvl.write(
         path=out,
         bed=source_bed,
         variants=vcf,
-        tracks=table,
+        tracks=bigwigs,
         max_jitter=2,
     )
     return gvl.Dataset.open(out, reference=reference)
