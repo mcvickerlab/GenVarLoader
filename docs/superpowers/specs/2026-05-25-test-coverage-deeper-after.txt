@@ -1,0 +1,50 @@
+    joined = pb.overlap(
+
+tests/unit/dataset/test_ref_ds.py::test_getitem[no_regions]
+  /Users/david/projects/GenVarLoader/.claude/worktrees/test-coverage-initiative/.pixi/envs/dev/lib/python3.10/site-packages/_pytest/runner.py:245: PluggyTeardownRaisedWarning: A plugin raised an exception during an old-style hookwrapper teardown.
+  Plugin: cases, Hook: pytest_runtest_setup
+  ValueError: tuple.index(x): x not in tuple
+  For more information see https://pluggy.readthedocs.io/en/stable/api_reference.html#pluggy.PluggyTeardownRaisedWarning
+    lambda: runtest_hook(item=item, **kwds),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================================ tests coverage ================================
+______________ coverage: platform darwin, python 3.10.20-final-0 _______________
+
+Name                                              Stmts   Miss Branch BrPart  Cover   Missing
+---------------------------------------------------------------------------------------------
+python/genvarloader/__init__.py                      20      0      0      0   100%
+python/genvarloader/_bigwig.py                      138     43     52     13    61%   58, 73-82, 89-92, 121, 125->128, 130, 132, 175, 180, 182, 187, 220-246, 278, 283, 285, 290
+python/genvarloader/_dataset/__init__.py              0      0      0      0   100%
+python/genvarloader/_dataset/_genotypes.py            4      0      0      0   100%
+python/genvarloader/_dataset/_haps.py               333     26     72      8    91%   157, 236, 299-301, 450, 517-530, 592-594, 653->655, 681, 850-896
+python/genvarloader/_dataset/_impl.py               516    134    220     51    68%   47-48, 255-262, 281, 284, 286, 291, 300, 320-321, 328, 337, 344->349, 364, 369, 374, 377, 385, 390, 398, 404, 421->439, 544, 550, 552, 557, 582, 587, 591, 602, 610, 636, 638, 715, 720-722, 727, 732, 756, 760, 770-771, 787, 795-796, 804-805, 826, 828, 831-832, 848, 851->853, 860, 867, 946, 954-955, 959-962, 988-1027, 1048-1072, 1093-1124, 1158-1174, 1195->1201, 1199, 1206, 1260-1264, 1342, 1413, 1431-1432, 1436, 1527
+python/genvarloader/_dataset/_indexing.py           280     58     90     14    77%   35-36, 47, 135, 144, 157-158, 286-292, 302-306, 330-349, 368, 375-383, 386, 394-395, 397-398, 415-436, 439, 445->447, 459, 463, 481, 506, 515
+python/genvarloader/_dataset/_insertion_fill.py      54      0     18      1    99%   22->exit
+python/genvarloader/_dataset/_open.py               120     10     32      8    87%   110, 161, 167, 181-183, 190, 196, 207, 259
+python/genvarloader/_dataset/_protocol.py             6      0      0      0   100%
+python/genvarloader/_dataset/_query.py               72     16     20      2    70%   284-287, 346-349, 359-369
+python/genvarloader/_dataset/_rag_variants.py       154     94     64      4    34%   25-27, 49, 74-101, 117-119, 130-135, 179-193, 197, 226, 276-294, 323-341, 350-381, 495-512
+python/genvarloader/_dataset/_reconstruct.py        102      9     34      5    90%   105-107, 141, 235, 271, 284, 306-307
+python/genvarloader/_dataset/_ref.py                 28      3      4      1    88%   42-44
+python/genvarloader/_dataset/_reference.py          327     90    116     26    67%   78-79, 93, 120-147, 217, 220, 226, 233-238, 281-286, 291-293, 312, 322, 344, 351, 360, 363, 367->374, 376->380, 395-412, 416-420, 456->472, 478, 485, 501, 503, 513, 521, 549, 553-556, 559, 576-581, 654, 720-754
+python/genvarloader/_dataset/_splice.py              93      5     18      4    92%   115, 193, 204, 244, 251
+python/genvarloader/_dataset/_svar_link.py           69      5     30      6    89%   36, 41->49, 68, 72, 112, 120
+python/genvarloader/_dataset/_tracks.py             174     29     48     10    79%   477-482, 485->493, 488, 494, 501, 528, 568, 582, 604, 645, 683-708
+python/genvarloader/_dataset/_utils.py               45      0      6      0   100%
+python/genvarloader/_dataset/_write.py              391     22    138     22    91%   48, 109, 132-133, 135, 147, 154-156, 162, 166->172, 187, 193, 198, 204-205, 249->254, 362, 386, 441->425, 452, 484->479, 600, 623, 694, 697, 714->750
+python/genvarloader/_dummy.py                        80      3      2      1    95%   186-188
+python/genvarloader/_fasta.py                       149     62     60     11    52%   75, 83-92, 97-105, 116-121, 126, 128, 139-156, 160-184, 190-192, 235, 238, 253, 262->265, 272-276
+python/genvarloader/_ragged.py                      115     30      8      1    73%   20-21, 50-52, 100-103, 108-130, 205-208, 283
+python/genvarloader/_table.py                       138      6     40      9    92%   106, 164, 183, 229->293, 234->293, 250->293, 301, 303, 307
+python/genvarloader/_torch.py                        79     50     20      2    31%   17-19, 32, 39, 63-77, 99-104, 115-124, 137-148, 153-241
+python/genvarloader/_types.py                        45      0      0      0   100%
+python/genvarloader/_utils.py                        38      1     12      1    96%   94
+python/genvarloader/_variants/__init__.py             0      0      0      0   100%
+python/genvarloader/_variants/_records.py            24      5      0      0    79%   36-42
+python/genvarloader/_variants/_sitesonly.py         114     13     22      8    83%   39->42, 50-55, 92, 103, 151, 163, 176->180, 234, 261->266, 267-269, 272
+python/genvarloader/_variants/_utils.py               9      0      0      0   100%
+python/genvarloader/data_registry.py                 28     21      4      0    22%   27-31, 35-72, 82-101
+---------------------------------------------------------------------------------------------
+TOTAL                                              3745    735   1130    208    76%
+=========== 457 passed, 5 skipped, 8 xfailed, 11 warnings in 16.89s ============
