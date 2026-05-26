@@ -194,9 +194,7 @@ def test_deletion_spans_region_end_boundary(
     start, end = 1010685, 1010700
     region_len = end - start  # 15
 
-    bed = pl.DataFrame(
-        {"chrom": [chrom], "chromStart": [start], "chromEnd": [end]}
-    )
+    bed = pl.DataFrame({"chrom": [chrom], "chromStart": [start], "chromEnd": [end]})
     out = tmp_path / "del_span_boundary.gvl"
 
     gvl.write(out, bed, _vcf(vcf_dir))
@@ -224,9 +222,7 @@ def test_deletion_spans_region_end_boundary(
             f"region {chrom}:{start + 1}-{end} with a spanning deletion"
         )
         # No null bytes - reconstruction must not leak unmaterialized memory.
-        assert b"\x00" not in seq, (
-            f"hap {h}: null bytes in haplotype {seq!r}"
-        )
+        assert b"\x00" not in seq, f"hap {h}: null bytes in haplotype {seq!r}"
         # All bytes are valid IUPAC-ish nucleotide chars (incl. N).
         assert all(c in b"ACGTNacgtn" for c in seq), (
             f"hap {h}: non-nucleotide bytes in haplotype {seq!r}"
