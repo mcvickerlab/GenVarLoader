@@ -107,3 +107,32 @@ def test_get_diffs_variant_outside_region_skipped():
     )
 
     np.testing.assert_equal(diffs, np.array([[2]], dtype=np.int32))
+
+
+def test_fast_and_slow_paths_agree_no_spanning():
+    """When no variant spans a region boundary, the fast path (no q_starts/v_starts)
+    and the slow path (with all spanning args) must produce the same diff."""
+    geno_offset_idx = np.array([[0]], dtype=np.intp)
+    geno_v_idxs = np.array([0, 1, 2], dtype=np.int32)
+    geno_offsets = np.array([0, 3], dtype=np.int64)
+    ilens = np.array([1, -1, 2], dtype=np.int32)
+    v_starts = np.array([5, 10, 15], dtype=np.int32)
+    q_starts = np.array([0], dtype=np.int32)
+    q_ends = np.array([100], dtype=np.int32)
+
+    fast = get_diffs_sparse(
+        geno_offset_idx=geno_offset_idx,
+        geno_v_idxs=geno_v_idxs,
+        geno_offsets=geno_offsets,
+        ilens=ilens,
+    )
+    slow = get_diffs_sparse(
+        geno_offset_idx=geno_offset_idx,
+        geno_v_idxs=geno_v_idxs,
+        geno_offsets=geno_offsets,
+        ilens=ilens,
+        q_starts=q_starts,
+        q_ends=q_ends,
+        v_starts=v_starts,
+    )
+    np.testing.assert_equal(fast, slow)

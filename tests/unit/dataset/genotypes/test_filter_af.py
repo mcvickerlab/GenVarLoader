@@ -57,3 +57,23 @@ def test_filter_af_2d_offsets_layout():
     np.testing.assert_equal(keep, np.array([False, True, True, True]))
     # keep_offsets is cumulative offsets over n_slices: length n_slices+1 = 2.
     assert keep_offsets.shape == (2,)
+
+
+def test_1d_and_2d_layouts_agree():
+    """1-D offsets [0, N] and 2-D offsets [[0], [N]] describe the same input
+    and must produce equivalent `keep` arrays."""
+    geno_offset_idx = np.array([[0]], dtype=np.intp)
+    geno_v_idxs = np.array([0, 1, 2, 3], dtype=np.int32)
+    afs = np.array([0.001, 0.05, 0.2, 0.5], dtype=np.float32)
+
+    keep_1d, _ = filter_af(
+        geno_offset_idx,
+        np.array([0, 4], dtype=np.int64),
+        geno_v_idxs, afs, 0.05, None,
+    )
+    keep_2d, _ = filter_af(
+        geno_offset_idx,
+        np.array([[0], [4]], dtype=np.int64),
+        geno_v_idxs, afs, 0.05, None,
+    )
+    np.testing.assert_equal(keep_1d, keep_2d)
