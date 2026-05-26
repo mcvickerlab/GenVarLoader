@@ -99,3 +99,70 @@ def test_bed_with_missing_contig_raises(tmp_path: Path, vcf_dir: Path):
         gvl.write(out, bed, _vcf(vcf_dir))
         # If write somehow accepts this, opening must surface the problem.
         gvl.Dataset.open(out)
+
+
+def test_query_past_contig_end_pads_with_N(
+    tmp_path: Path, vcf_dir: Path, ref_fasta: Path
+):
+    """A BED region whose end runs past the reference contig length must
+    either be rejected at write time with a clear error, or produce a
+    dataset whose reference query is right-padded with ``N`` for the
+    portion past the contig boundary.
+
+    This pins the observed boundary behavior so that a future change in
+    handling (silent truncation, garbage bytes, etc.) is caught.
+    """
+    import pysam
+
+    chrom = "chr19"
+    with pysam.FastaFile(str(ref_fasta)) as fh:
+        contig_len = fh.get_reference_length(chrom)
+
+    # Region: [contig_len - 50, contig_len + 50). 50 in-bounds, 50 past end.
+    in_bounds = 50
+    past_end = 50
+    start = contig_len - in_bounds
+    end = contig_len + past_end
+    region_len = end - start  # 100
+
+    # Include a second region that overlaps known variants so writing has
+    # something to genotype (otherwise the writer can produce a zero-variant
+    # dataset that the reader can't reopen).
+    bed = pl.DataFrame(
+        {
+            "chrom": [chrom, chrom],
+            "chromStart": [1010685, start],
+            "chromEnd": [1010715, end],
+        }
+    )
+    out = tmp_path / "past_contig_end.gvl"
+
+    try:
+        gvl.write(out, bed, _vcf(vcf_dir))
+    except (ValueError, RuntimeError) as e:
+        msg = str(e).lower()
+        assert any(
+            kw in msg
+            for kw in ("contig", "length", "bound", "end", "past", "beyond", "exceed")
+        ), f"Past-contig-end error must be clear: {e!r}"
+        return
+
+    ds = gvl.Dataset.open(out, reference=ref_fasta).with_seqs("reference")
+    # Region 1 is the one that runs past the contig end.
+    seqs = ds[1, 0]
+    # ArrayDataset[reference] returns a numpy array of S1 bytes (or a ragged
+    # wrapper). Materialize to a 1-D bytes view either way.
+    if hasattr(seqs, "to_padded"):
+        arr = seqs.to_padded()
+    else:
+        arr = seqs
+    flat = bytes(arr.reshape(-1).tobytes())
+
+    assert len(flat) == region_len, (
+        f"Expected query length {region_len}, got {len(flat)}"
+    )
+    # Tail bytes past the contig boundary must be ``N``.
+    tail = flat[in_bounds:]
+    assert tail == b"N" * past_end, (
+        f"Expected {past_end} trailing 'N's past contig end, got {tail!r}"
+    )
