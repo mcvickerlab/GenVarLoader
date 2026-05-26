@@ -10,6 +10,7 @@ Methods covered:
                           tests/unit/dataset/test_with_insertion_fill.py)
 """
 
+import polars as pl
 import pytest
 import genvarloader as gvl
 from genvarloader._dataset._insertion_fill import Repeat5p, Constant
@@ -21,8 +22,12 @@ from genvarloader._dataset._insertion_fill import Repeat5p, Constant
 
 
 @pytest.fixture(scope="module")
-def base_ds(phased_vcf_gvl, reference):
-    """Phased VCF dataset opened with a reference genome.
+def base_ds(source_bed, vcf_dir, reference, tmp_path_factory):
+    """Phased VCF dataset opened with a reference genome and a "5ss" track.
+
+    Writes a fresh dataset (rather than relying on canonical ground-truth data,
+    which omits tracks) so the with_tracks / with_seqs(None) tests have a track
+    to exercise.
 
     Default state after open():
       - output_length = "ragged"
@@ -31,7 +36,42 @@ def base_ds(phased_vcf_gvl, reference):
       - jitter = 0, max_jitter = 2
       - rc_neg = True, deterministic = True
     """
-    return gvl.Dataset.open(phased_vcf_gvl, reference=reference)
+    from genoray import VCF
+
+    out = tmp_path_factory.mktemp("with_methods_ds") / "phased_with_tracks.gvl"
+    vcf = VCF(vcf_dir / "filtered_source.vcf.gz")
+    # VCF samples are NA00001, NA00002, NA00003; share at least one with the Table.
+    # Table must cover every contig present in the BED so each region has at
+    # least one interval candidate; otherwise Dataset.open's ragged-shape
+    # bookkeeping mismatches at read time.
+    table = gvl.Table(
+        "5ss",
+        pl.DataFrame(
+            {
+                "sample_id": ["NA00001", "NA00002", "NA00003"] * 3,
+                "chrom": ["chr1"] * 3 + ["chr19"] * 3 + ["chr20"] * 3,
+                "start": [
+                    10000000, 10000000, 10000000,
+                    1010686, 1010686, 1010686,
+                    17320, 17320, 17320,
+                ],
+                "end": [
+                    10000020, 10000020, 10000020,
+                    1010706, 1010706, 1010706,
+                    17340, 17340, 17340,
+                ],
+                "value": [1.0, 2.0, 3.0] * 3,
+            }
+        ),
+    )
+    gvl.write(
+        path=out,
+        bed=source_bed,
+        variants=vcf,
+        tracks=table,
+        max_jitter=2,
+    )
+    return gvl.Dataset.open(out, reference=reference)
 
 
 # ---------------------------------------------------------------------------
