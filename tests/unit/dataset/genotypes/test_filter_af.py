@@ -69,12 +69,18 @@ def test_1d_and_2d_layouts_agree():
     keep_1d, _ = filter_af(
         geno_offset_idx,
         np.array([0, 4], dtype=np.int64),
-        geno_v_idxs, afs, 0.05, None,
+        geno_v_idxs,
+        afs,
+        0.05,
+        None,
     )
     keep_2d, _ = filter_af(
         geno_offset_idx,
         np.array([[0], [4]], dtype=np.int64),
-        geno_v_idxs, afs, 0.05, None,
+        geno_v_idxs,
+        afs,
+        0.05,
+        None,
     )
     np.testing.assert_equal(keep_1d, keep_2d)
 

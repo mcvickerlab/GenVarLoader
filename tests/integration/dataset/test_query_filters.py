@@ -128,9 +128,7 @@ def test_compose_subset_and_af_filter(vars_ds):
     n_one_sample = _n_variants(vars_ds.subset_to(samples=one_sample)[:, :])
     n_af_only = _n_variants(vars_ds.with_settings(min_af=0.3)[:, :])
 
-    composed = (
-        vars_ds.subset_to(samples=one_sample).with_settings(min_af=0.3)[:, :]
-    )
+    composed = vars_ds.subset_to(samples=one_sample).with_settings(min_af=0.3)[:, :]
     n_composed = _n_variants(composed)
     # Composition is at most as large as either filter applied alone.
     assert n_composed <= n_one_sample

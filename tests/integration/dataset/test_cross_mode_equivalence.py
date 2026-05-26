@@ -113,15 +113,13 @@ def test_sample_name_and_integer_index_agree(phased_vcf_gvl, ref_fasta):
                 np.asarray(by_name.lengths),
                 np.asarray(by_int.lengths),
                 err_msg=(
-                    f"lengths mismatch region={region} sample={s_name} "
-                    f"(int={s_int})"
+                    f"lengths mismatch region={region} sample={s_name} (int={s_int})"
                 ),
             )
             np.testing.assert_equal(
                 sp.cast_seqs(by_name.data),
                 sp.cast_seqs(by_int.data),
                 err_msg=(
-                    f"haplotype mismatch region={region} sample={s_name} "
-                    f"(int={s_int})"
+                    f"haplotype mismatch region={region} sample={s_name} (int={s_int})"
                 ),
             )

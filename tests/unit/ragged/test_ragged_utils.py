@@ -63,7 +63,9 @@ def test_to_padded_bytes_no_padding_needed():
 
     out = to_padded(rag, b"N")
 
-    np.testing.assert_array_equal(out, np.array([[b"A", b"C"], [b"G", b"T"]], dtype="S1"))
+    np.testing.assert_array_equal(
+        out, np.array([[b"A", b"C"], [b"G", b"T"]], dtype="S1")
+    )
 
 
 def test_ragged_intervals_shape_and_reshape():
@@ -162,8 +164,12 @@ def test_ragged_intervals_to_padded():
     assert starts.shape == (2, 1, 2)
     assert ends.shape == (2, 1, 2)
     assert values.shape == (2, 1, 2)
-    np.testing.assert_array_equal(starts, np.array([[[0, 10]], [[5, -1]]], dtype=np.int32))
-    np.testing.assert_array_equal(ends, np.array([[[5, 20]], [[15, -1]]], dtype=np.int32))
+    np.testing.assert_array_equal(
+        starts, np.array([[[0, 10]], [[5, -1]]], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        ends, np.array([[[5, 20]], [[15, -1]]], dtype=np.int32)
+    )
     np.testing.assert_array_equal(
         values, np.array([[[1.0, 2.0]], [[3.0, 0.0]]], dtype=np.float32)
     )
