@@ -92,6 +92,23 @@ def test_jitter_zero_is_deterministic(phased_vcf_gvl: Path, ref_fasta: Path):
         _assert_equal(a, c)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Dataset.with_settings(rng=...) raises TypeError: "
+        "python/genvarloader/_dataset/_impl.py:271 writes to_evolve['rng'] but "
+        "the dataclass field is named '_rng', so attrs.evolve rejects the kwarg. "
+        "Workaround in other tests: pass rng= to Dataset.open(). Flip this xfail "
+        "to a regular assertion once line 271 uses to_evolve['_rng']."
+    ),
+)
+def test_with_settings_rng_kwarg_broken(phased_vcf_gvl: Path, ref_fasta: Path):
+    """Capture the with_settings(rng=...) bug so it surfaces when fixed."""
+    ds = gvl.Dataset.open(phased_vcf_gvl, ref_fasta)
+    ds2 = ds.with_settings(rng=SEED)
+    assert isinstance(ds2, gvl.Dataset)
+
+
 # -- torch-only test ----------------------------------------------------------
 
 
