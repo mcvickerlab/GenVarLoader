@@ -102,16 +102,6 @@ def test_with_settings_rng_kwarg_propagates(phased_vcf_gvl: Path, ref_fasta: Pat
 # -- torch-only test ----------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "get_sampler() creates RandomSampler without forwarding the DataLoader "
-        "generator, so the sampler uses the global torch RNG and shuffled batch "
-        "order is not reproducible from a seeded torch.Generator. See _torch.py "
-        "get_sampler / get_dataloader. Flip this xfail to a regular assertion "
-        "once the sampler accepts/forwards the generator."
-    ),
-    strict=True,
-)
 def test_dataloader_seeded_batch_order_reproducible(
     phased_vcf_gvl: Path, ref_fasta: Path
 ):
