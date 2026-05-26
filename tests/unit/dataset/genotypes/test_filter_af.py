@@ -77,3 +77,30 @@ def test_1d_and_2d_layouts_agree():
         geno_v_idxs, afs, 0.05, None,
     )
     np.testing.assert_equal(keep_1d, keep_2d)
+
+
+def test_filter_af_nan_behavior():
+    """NaN allele frequencies: assert observed behavior, document the contract.
+
+    `nan >= min_af` is False and `nan <= max_af` is False, so a NaN should be
+    REJECTED by either bound. Verify."""
+    geno_offset_idx = np.array([[0]], dtype=np.intp)
+    geno_offsets = np.array([0, 3], dtype=np.int64)
+    geno_v_idxs = np.array([0, 1, 2], dtype=np.int32)
+    afs = np.array([0.1, np.nan, 0.5], dtype=np.float32)
+
+    # min only — NaN must be rejected
+    keep, _ = filter_af(geno_offset_idx, geno_offsets, geno_v_idxs, afs, 0.05, None)
+    np.testing.assert_equal(keep, np.array([True, False, True]))
+
+    # max only — NaN must be rejected
+    keep, _ = filter_af(geno_offset_idx, geno_offsets, geno_v_idxs, afs, None, 0.5)
+    np.testing.assert_equal(keep, np.array([True, False, True]))
+
+    # both — NaN must be rejected
+    keep, _ = filter_af(geno_offset_idx, geno_offsets, geno_v_idxs, afs, 0.05, 0.5)
+    np.testing.assert_equal(keep, np.array([True, False, True]))
+
+    # neither — NaN passes through (no-op short-circuit)
+    keep, _ = filter_af(geno_offset_idx, geno_offsets, geno_v_idxs, afs, None, None)
+    np.testing.assert_equal(keep, np.array([True, True, True]))
