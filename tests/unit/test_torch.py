@@ -80,3 +80,54 @@ def test_torch_dataset_len_matches_gvl(small_gvl_ds, small_torch_ds):
     """TorchDataset.__len__ matches gvl Dataset n_regions * n_samples."""
     expected = small_gvl_ds.n_regions * small_gvl_ds.n_samples
     assert len(small_torch_ds) == expected
+
+
+def test_torch_dataset_return_indices_appends_r_and_s(small_gvl_ds):
+    """With return_indices=True, __getitem__ output ends with (r_idx, s_idx) arrays
+    matching what ravel/unravel would produce for the queried flat index."""
+    import numpy as np
+
+    td_ds = small_gvl_ds.to_torch_dataset(return_indices=True, transform=None)
+    # Use a batch of flat indices so r_idx/s_idx are arrays (matches __getitem__ contract).
+    flat_idx = [0, 1]
+    out = td_ds[flat_idx]
+    # Should be a tuple ending with two index arrays.
+    assert isinstance(out, tuple)
+    assert len(out) >= 3, f"expected at least (data, r_idx, s_idx), got len={len(out)}"
+    r_idx, s_idx = out[-2], out[-1]
+    expected_r, expected_s = np.unravel_index(flat_idx, small_gvl_ds.shape)
+    np.testing.assert_array_equal(r_idx, expected_r)
+    np.testing.assert_array_equal(s_idx, expected_s)
+
+    # And without return_indices, the same batch has fewer elements (or is not a tuple).
+    td_no = small_gvl_ds.to_torch_dataset(return_indices=False, transform=None)
+    out_no = td_no[flat_idx]
+    if isinstance(out_no, tuple):
+        assert len(out_no) == len(out) - 2
+    # else: single tensor — definitely no appended indices.
+
+
+def test_torch_dataset_transform_is_applied(small_gvl_ds):
+    """A user-supplied transform receives the unpacked batch and its return value
+    is what __getitem__ yields."""
+    sentinel = object()
+    captured = {}
+
+    def transform(*batch):
+        captured["nargs"] = len(batch)
+        captured["batch"] = batch
+        return sentinel
+
+    td_ds = small_gvl_ds.to_torch_dataset(return_indices=False, transform=transform)
+    out = td_ds[[0, 1]]
+    assert out is sentinel
+    assert captured["nargs"] >= 1
+
+    # With return_indices=True, transform receives the data args + (r_idx, s_idx).
+    captured.clear()
+    td_with = small_gvl_ds.to_torch_dataset(return_indices=True, transform=transform)
+    out2 = td_with[[0, 1]]
+    assert out2 is sentinel
+    # transform should now have been called with >=2 more args than the no-indices case
+    # (last two are the unravelled r/s indices).
+    assert captured["nargs"] >= 3
