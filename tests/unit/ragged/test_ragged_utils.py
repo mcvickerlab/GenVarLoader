@@ -16,7 +16,6 @@ methods are skipped here and called out in the task report.
 """
 
 import numpy as np
-import pytest
 from seqpro.rag import Ragged
 
 from genvarloader._ragged import (
@@ -121,17 +120,6 @@ def test_reverse_complement_direct():
     assert rc2.to_list() == [b"GTTT"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Bug in genvarloader/_ragged.py::to_padded numeric branch (lines "
-        "~272-274): ak.pad_none(rag, length, clip=True) collapses the ragged "
-        "dimension into a RegularArray, so the subsequent Ragged(rag) "
-        "constructor raises ValueError ('Expected 1 ragged dimension, got 0'). "
-        "Bytes path uses ak_str.rpad which preserves the ragged structure. "
-        "Flips to pass once the numeric branch is fixed."
-    ),
-)
 def test_to_padded_numeric_branch():
     """``to_padded`` should work for numeric dtypes, not just bytes."""
     data = np.array([1, 2, 3, 4, 5], dtype=np.int32)
@@ -145,17 +133,6 @@ def test_to_padded_numeric_branch():
     np.testing.assert_array_equal(out[1], np.array([3, 4, 5], dtype=np.int32))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Bug in genvarloader/_ragged.py::to_padded numeric branch (lines "
-        "~272-274) propagates to RaggedIntervals.to_padded, which calls "
-        "to_padded() on int32 starts/ends and float32 values. "
-        "ak.pad_none(..., clip=True) collapses the ragged dim into a "
-        "RegularArray, so Ragged(rag).to_numpy() raises ValueError. "
-        "Flips to pass once the numeric branch is fixed."
-    ),
-)
 def test_ragged_intervals_to_padded():
     itvs = _make_intervals_3d()
     starts, ends, values = itvs.to_padded(start=-1, end=-1, value=0.0)

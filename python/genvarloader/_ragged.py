@@ -268,10 +268,15 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
     length = int(rag.lengths.max())
     if is_rag_dtype(rag, np.bytes_):
         rag = ak_str.rpad(rag, length, pad_value)
+        arr = Ragged(rag).to_numpy()
     else:
-        rag = ak.pad_none(rag, length, clip=True)
+        # Pad along the innermost (ragged) axis. clip=True forces that axis to
+        # become a RegularArray of exactly `length`, so the result is already
+        # rectilinear — convert directly without going back through Ragged().
+        orig_dtype = rag.dtype
+        rag = ak.pad_none(rag, length, axis=-1, clip=True)
         rag = ak.fill_none(rag, pad_value)
-    arr = Ragged(rag).to_numpy()
+        arr = ak.to_numpy(rag).astype(orig_dtype, copy=False)
     return arr
 
 
