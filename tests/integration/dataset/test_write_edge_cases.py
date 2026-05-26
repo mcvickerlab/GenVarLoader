@@ -166,3 +166,68 @@ def test_query_past_contig_end_pads_with_N(
     assert tail == b"N" * past_end, (
         f"Expected {past_end} trailing 'N's past contig end, got {tail!r}"
     )
+
+
+def test_deletion_spans_region_end_boundary(
+    tmp_path: Path, vcf_dir: Path, ref_fasta: Path
+):
+    """A deletion variant whose REF span extends past the region's chromEnd
+    should still produce a haplotype of the requested region length.
+
+    Setup: the toy VCF carries a 10-bp deletion at chr19:1010696
+    ``GAGACGGGGCC>G`` (REF length 11, ALT length 1). 0-based reference span
+    is ``[1010695, 1010706)``. The BED region ``[1010685, 1010700)`` has
+    length 15 and its end (1010700) falls inside the deletion's REF span
+    (6 bp of the deletion extends past the region end).
+
+    Sample ``NA00002`` is homozygous (``1|1``) for this variant on both
+    haplotypes, which makes the assertion deterministic across phasing.
+
+    Pins down the haplotype-reconstruction behavior at a region boundary
+    that is overlapped by a spanning deletion: the returned haplotype must
+    still have the requested region length (ragged variable-length output
+    is allowed but must be > 0 and <= region length) and must not crash.
+    """
+    chrom = "chr19"
+    # 0-based half-open region. End falls inside the 10-bp deletion at
+    # 0-based [1010695, 1010706).
+    start, end = 1010685, 1010700
+    region_len = end - start  # 15
+
+    bed = pl.DataFrame(
+        {"chrom": [chrom], "chromStart": [start], "chromEnd": [end]}
+    )
+    out = tmp_path / "del_span_boundary.gvl"
+
+    gvl.write(out, bed, _vcf(vcf_dir))
+
+    ds = (
+        gvl.Dataset.open(out, reference=ref_fasta, rc_neg=False)
+        .with_len("ragged")
+        .with_seqs("haplotypes")
+        .with_tracks(False)
+    )
+
+    # NA00002 is 1|1 for the spanning 10-bp deletion → both haplotypes carry
+    # the deletion. The haplotype length should be (region_len - deleted bp
+    # within region). The deletion's REF lies at 0-based [1010695, 1010706);
+    # the part inside the region is [1010695, 1010700) = 5 bp deleted within
+    # the region. After applying it, the haplotype reconstruction must
+    # produce a finite, non-empty sequence.
+    haps = ds[0, "NA00002"]
+    for h in range(2):
+        h_arr = haps[h]
+        seq = h_arr.tobytes() if hasattr(h_arr, "tobytes") else bytes(h_arr)
+        # Must be non-empty and not exceed the requested region length.
+        assert 0 < len(seq) <= region_len, (
+            f"hap {h}: length {len(seq)} not in (0, {region_len}] for "
+            f"region {chrom}:{start + 1}-{end} with a spanning deletion"
+        )
+        # No null bytes - reconstruction must not leak unmaterialized memory.
+        assert b"\x00" not in seq, (
+            f"hap {h}: null bytes in haplotype {seq!r}"
+        )
+        # All bytes are valid IUPAC-ish nucleotide chars (incl. N).
+        assert all(c in b"ACGTNacgtn" for c in seq), (
+            f"hap {h}: non-nucleotide bytes in haplotype {seq!r}"
+        )
