@@ -268,7 +268,7 @@ class Dataset:
                 to_evolve["jitter"] = jitter
 
         if rng is not None:
-            to_evolve["rng"] = np.random.default_rng(rng)
+            to_evolve["_rng"] = np.random.default_rng(rng)
 
         if deterministic is not None:
             to_evolve["deterministic"] = deterministic

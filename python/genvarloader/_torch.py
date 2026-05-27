@@ -72,6 +72,7 @@ def get_dataloader(
             batch_size,
             shuffle,
             drop_last,
+            generator=generator,
         )
 
     return td.DataLoader(
@@ -94,10 +95,14 @@ def get_dataloader(
 
 @requires_torch
 def get_sampler(
-    ds_len: int, batch_size: int, shuffle: bool = False, drop_last: bool = False
+    ds_len: int,
+    batch_size: int,
+    shuffle: bool = False,
+    drop_last: bool = False,
+    generator: torch.Generator | None = None,
 ):
     if shuffle:
-        inner_sampler = td.RandomSampler(range(ds_len))
+        inner_sampler = td.RandomSampler(range(ds_len), generator=generator)
     else:
         inner_sampler = td.SequentialSampler(range(ds_len))
 

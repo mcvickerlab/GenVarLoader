@@ -48,3 +48,26 @@ def test_no_pad(ref_fasta):
     end = start + 10
     with pytest.raises(NoPadError):
         fasta.read(contig, start, end)
+
+
+def test_fasta_missing_contig_raises(ref_fasta):
+    """Reading a contig not in the FASTA raises ValueError."""
+    fasta = Fasta("ref", ref_fasta, pad="N")
+    with pytest.raises(ValueError, match="not found"):
+        fasta.read("nonexistent_contig_zzz", 0, 100)
+
+
+def test_fasta_reader_protocol_attrs(ref_fasta):
+    """Fasta exposes the Reader protocol surface: name, dtype, contigs."""
+    fasta = Fasta("ref", ref_fasta, pad="N")
+    assert fasta.name == "ref"
+    assert fasta.dtype == np.dtype("S1")
+    assert isinstance(fasta.contigs, dict)
+    assert "chr1" in fasta.contigs
+
+
+def test_fasta_zero_length_range(ref_fasta):
+    """start == end returns an empty array."""
+    fasta = Fasta("ref", ref_fasta, pad="N")
+    seq = fasta.read("chr1", 100, 100)
+    assert len(seq) == 0

@@ -1,9 +1,21 @@
+import sys
 from pathlib import Path
 
 import genvarloader as gvl
 import numpy as np
 import polars as pl
+import pytest
 from genvarloader._table import Table
+
+# polars-bio's overlap kernel segfaults on CPython 3.12 (passes on 3.11 and 3.13).
+# The eager pb.overlap done by Table writes poisons the process so a later lazy
+# pb.overlap().collect() (the variant write path) crashes the interpreter.
+# Upstream: https://github.com/biodatageeks/polars-bio/issues/395
+pytestmark = pytest.mark.skipif(
+    sys.version_info[:2] == (3, 12),
+    reason="polars-bio overlap segfaults on py3.12; see "
+    "https://github.com/biodatageeks/polars-bio/issues/395",
+)
 
 
 def _make_bed(tmp_path: Path) -> pl.DataFrame:

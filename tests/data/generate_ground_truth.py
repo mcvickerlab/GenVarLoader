@@ -88,6 +88,8 @@ def main(
     reference = Path(
         pooch.retrieve(
             "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz",
+            # If this reference (and thus known_hash) changes, bump the CI cache key
+            # `hg38-ref-<...>` in .github/workflows/test.yaml so CI re-fetches it.
             known_hash="c1dd87068c254eb53d944f71e51d1311964fce8de24d6fc0effc9c61c01527d4",
             fname="hg38.fa.gz",
             path=fasta_dir,

@@ -3,8 +3,6 @@ import numpy as np
 from numpy.typing import NDArray
 from seqpro.rag import OFFSET_TYPE
 
-from .._utils import lengths_to_offsets
-
 
 @nb.njit(parallel=True, nogil=True, cache=True)
 def get_diffs_sparse(
@@ -544,7 +542,13 @@ def filter_af(
     else:
         # (2, n_slices)
         n_vars_per_slice = geno_offsets[1] - geno_offsets[0]
-        keep_offsets = lengths_to_offsets(n_vars_per_slice, OFFSET_TYPE)
+        n_slices = len(n_vars_per_slice)
+        keep_offsets = np.empty(n_slices + 1, OFFSET_TYPE)
+        keep_offsets[0] = 0
+        acc = OFFSET_TYPE(0)
+        for i in range(n_slices):
+            acc += n_vars_per_slice[i]
+            keep_offsets[i + 1] = acc
         n_variants = n_vars_per_slice.sum()
 
     keep = np.full(n_variants, True, np.bool_)

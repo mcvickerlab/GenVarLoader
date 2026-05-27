@@ -45,7 +45,7 @@ def sites_vcf_to_table(
     else:
         attrs = min_attrs + [attr for attr in attributes if attr not in min_attrs]
 
-    df = vcf.get_record_info(attrs=attrs, info=info_fields, progress=True)
+    df = vcf.get_record_info(fields=attrs, info=info_fields)
 
     if df.select((pl.col("ALT").list.len() > 1).any()).item():
         raise ValueError("All sites must be bi-allelic.")

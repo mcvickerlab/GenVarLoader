@@ -416,3 +416,78 @@ def test_parse_idx(
 #     np.testing.assert_equal(idx, desired_idx)
 #     assert squeeze == desired_squeeze
 #     assert reshape == desired_reshape
+
+
+# ---------------------------------------------------------------------------
+# Edge-case index forms
+# ---------------------------------------------------------------------------
+
+
+def test_negative_region_index_wraps(dsi: DatasetIndexer):
+    """Negative region index (-1) wraps to the last region, matching the positive equivalent."""
+    # dsi has n_regions=3; -1 should resolve to position 2
+    idx_neg, squeeze_neg, reshape_neg = dsi.parse_idx((-1, 0))
+    idx_pos, squeeze_pos, reshape_pos = dsi.parse_idx((2, 0))
+    np.testing.assert_equal(idx_neg, idx_pos)
+    assert squeeze_neg == squeeze_pos
+    assert reshape_neg == reshape_pos
+
+
+def test_negative_sample_index_wraps(dsi: DatasetIndexer):
+    """Negative sample index (-1) wraps to the last sample, matching the positive equivalent."""
+    # dsi has n_samples=2; -1 should resolve to position 1
+    idx_neg, squeeze_neg, reshape_neg = dsi.parse_idx((0, -1))
+    idx_pos, squeeze_pos, reshape_pos = dsi.parse_idx((0, 1))
+    np.testing.assert_equal(idx_neg, idx_pos)
+    assert squeeze_neg == squeeze_pos
+    assert reshape_neg == reshape_pos
+
+
+def test_oob_region_raises(dsi: DatasetIndexer):
+    """Out-of-bounds region index raises IndexError."""
+    with pytest.raises(IndexError):
+        dsi.parse_idx((100, 0))
+
+
+def test_oob_sample_raises(dsi: DatasetIndexer):
+    """Out-of-bounds sample index raises IndexError."""
+    with pytest.raises(IndexError):
+        dsi.parse_idx((0, 100))
+
+
+def test_slice_with_step_returns_correct_regions(dsi: DatasetIndexer):
+    """Slice with step selects every other region."""
+    # slice(None, None, 2) on 3 regions → positions [0, 2]
+    # _r_idx = [1, 2, 0], so positions [0, 2] → [1, 0]
+    # sample 0: _s_idx[0] = 0
+    # ravel_multi_index(ix_([1, 0], [0]), (3, 2)) = [[2], [0]] → reshape=(2,1)
+    idx, squeeze, reshape = dsi.parse_idx((slice(None, None, 2), slice(1)))
+    np.testing.assert_equal(idx, np.array([2, 0]))
+    assert squeeze is False
+    assert reshape == (2, 1)
+
+
+def test_boolean_mask_selects_regions(dsi: DatasetIndexer):
+    """Boolean mask on regions selects the expected subset."""
+    n = dsi.n_regions
+    mask = np.zeros(n, dtype=bool)
+    mask[0] = True
+    mask[2] = True
+    # positions [0, 2] → _r_idx[[0, 2]] = [1, 0]
+    subset = dsi.subset_to(mask, None)
+    assert subset.n_regions == 2
+    np.testing.assert_equal(subset._r_idx, np.array([1, 0]))
+
+
+def test_empty_region_selection_is_empty(dsi: DatasetIndexer):
+    """Empty integer array selects no regions without error."""
+    subset = dsi.subset_to(np.array([], dtype=int), None)
+    assert subset.n_regions == 0
+    assert subset.n_samples == dsi.n_samples
+
+
+def test_empty_sample_selection_is_empty(dsi: DatasetIndexer):
+    """Empty integer array selects no samples without error."""
+    subset = dsi.subset_to(None, np.array([], dtype=int))
+    assert subset.n_regions == dsi.n_regions
+    assert subset.n_samples == 0

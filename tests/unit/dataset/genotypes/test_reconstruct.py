@@ -148,6 +148,112 @@ def case_shift_ins():
     )
 
 
+def case_ref_only():
+    """No variants applied — output is pure reference slice."""
+    v_starts = np.array([], np.int32)
+    ilens = np.array([], np.int32)
+    genos = np.zeros((1, 1, 0), dtype=np.int8)  # (s p v)
+    var_idxs = np.array([], dtype=np.int32)
+
+    shift = 0
+    alt_alleles = np.frombuffer(b"", dtype=np.uint8)
+    alt_offsets = np.array([0], dtype=np.uintp)
+    ref = np.frombuffer(b"ACGT", dtype=np.uint8)
+    ref_start = 0
+
+    desired = np.frombuffer(b"ACGT", dtype="S1")
+    annot_v_idxs = np.array([-1, -1, -1, -1], dtype=np.int32)
+    annot_pos = np.array([0, 1, 2, 3], dtype=np.int32)
+
+    sparse_genos = dense2sparse(genos, var_idxs)
+
+    return (
+        v_starts,
+        ilens,
+        shift,
+        alt_alleles,
+        alt_offsets,
+        ref,
+        sparse_genos,
+        ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
+    )
+
+
+def case_spanning_del_end():
+    """Deletion runs past region end — output truncates at out length."""
+    v_starts = np.array([2], np.int32)
+    ilens = np.array([-2], dtype=np.int32)
+    genos = np.array([[[1]]], dtype=np.int8)
+    var_idxs = np.array([0], dtype=np.int32)
+
+    shift = 0
+    alt_alleles = np.frombuffer(b"G", dtype=np.uint8)
+    alt_offsets = np.array([0, 1], np.uintp)
+    ref = np.frombuffer(b"ACGTA", dtype=np.uint8)
+    ref_start = 0
+
+    desired = np.frombuffer(b"ACGNN", dtype="S1")
+    annot_v_idxs = np.array([-1, -1, 0, -1, -1], dtype=np.int32)
+    annot_pos = np.array(
+        [0, 1, 2, np.iinfo(np.int32).max, np.iinfo(np.int32).max], dtype=np.int32
+    )
+
+    sparse_genos = dense2sparse(genos, var_idxs)
+
+    return (
+        v_starts,
+        ilens,
+        shift,
+        alt_alleles,
+        alt_offsets,
+        ref,
+        sparse_genos,
+        ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
+    )
+
+
+def case_overlapping_variants():
+    """Two variants at same position — first ALT wins, second skipped."""
+    v_starts = np.array([1, 1], np.int32)
+    ilens = np.zeros(2, dtype=np.int32)
+    # Both variants are ALT so both enter sparse data; kernel applies the first
+    # (variant 0, ALT=T) and skips the second (v_pos < ref_idx after first applied).
+    genos = np.array([[[1, 1]]], dtype=np.int8)
+    var_idxs = np.array([0, 1], dtype=np.int32)
+
+    shift = 0
+    alt_alleles = np.frombuffer(b"T" + b"G", dtype=np.uint8)
+    alt_offsets = np.array([0, 1, 2], dtype=np.uintp)
+    ref = np.frombuffer(b"ACGG", dtype=np.uint8)
+    ref_start = 0
+
+    desired = np.frombuffer(b"ATGG", dtype="S1")
+    annot_v_idxs = np.array([-1, 0, -1, -1], dtype=np.int32)
+    annot_pos = np.array([0, 1, 2, 3], dtype=np.int32)
+
+    sparse_genos = dense2sparse(genos, var_idxs)
+
+    return (
+        v_starts,
+        ilens,
+        shift,
+        alt_alleles,
+        alt_offsets,
+        ref,
+        sparse_genos,
+        ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
+    )
+
+
 @parametrize_with_cases(
     "v_starts, ilens, shift, alt_alleles, alt_offsets, ref, sparse_genos, ref_start, desired, annot_v_idxs, annot_pos",
     cases=".",
