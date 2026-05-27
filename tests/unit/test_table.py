@@ -1,9 +1,22 @@
+import sys
+
 import numpy as np
 import polars as pl
 import pytest
 
 from genvarloader._table import Table
 from genvarloader._utils import lengths_to_offsets
+
+# polars-bio's overlap kernel segfaults on CPython 3.12 (passes on 3.11 and 3.13).
+# The eager pb.overlap done by Table operations poisons the process so that a
+# later lazy pb.overlap().collect() (variant write path) crashes. Skip the whole
+# module on 3.12 to avoid poisoning the shared interpreter for downstream tests.
+# Upstream: https://github.com/biodatageeks/polars-bio/issues/395
+pytestmark = pytest.mark.skipif(
+    sys.version_info[:2] == (3, 12),
+    reason="polars-bio overlap segfaults on py3.12; see "
+    "https://github.com/biodatageeks/polars-bio/issues/395",
+)
 
 
 def make_long_df():
