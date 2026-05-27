@@ -30,6 +30,13 @@ jobs:
           cache: true
           environments: ${{ matrix.environment }}
           locked: false
+      - name: Cache hg38 reference
+        uses: actions/cache@v4
+        with:
+          path: tests/data/fasta
+          # Static key derived from the pooch known_hash in
+          # tests/data/generate_ground_truth.py. Bump this if the reference changes.
+          key: hg38-ref-c1dd8706
       - name: Test
         run: pixi run -e ${{ matrix.environment }} test
 
@@ -48,6 +55,13 @@ jobs:
           cache: true
           environments: py312
           locked: false
+      - name: Cache hg38 reference
+        uses: actions/cache@v4
+        with:
+          path: tests/data/fasta
+          # Static key derived from the pooch known_hash in
+          # tests/data/generate_ground_truth.py. Bump this if the reference changes.
+          key: hg38-ref-c1dd8706
       - name: Run pytest with coverage
         run: pixi run -e py312 test-cov
       - name: Upload HTML coverage report
