@@ -1097,6 +1097,9 @@ class Dataset:
 
         seq_kind = self.sequence_type  # "reference" | "haplotypes" | "annotated" | "variants" | None
         total = np.zeros(len(r_idx), dtype=np.int64)
+        # These are computed conditionally below; declared here to satisfy the type checker.
+        hap_len_sum: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+        region_lens: NDArray[np.int64] = np.empty(0, dtype=np.int64)
 
         # --- seqs payload ---
         if seq_kind == "reference":
@@ -1159,9 +1162,23 @@ class Dataset:
         else:
             raise AssertionError(f"unknown sequence_type {seq_kind!r}")
 
-        # --- tracks payload added in Task 5 ---
+        # --- tracks payload ---
         if self.active_tracks:
-            raise NotImplementedError("tracks branch added in Task 5")
+            n_tracks = len(self.active_tracks)
+            track_itemsize = np.dtype(np.float32).itemsize  # tracks are always float32
+            if seq_kind in ("haplotypes", "annotated"):
+                # Tracks have shape (b, t, p, ~l): length = haplotype length per ploid.
+                # hap_len_sum already sums over ploidy → total per instance = hap_len_sum * n_tracks.
+                total += hap_len_sum * n_tracks * track_itemsize
+            else:
+                # reference, variants, or no-seq: tracks have shape (b, t, ~l), length = region length.
+                # "reference" already computed region_lens above; others need to compute it now.
+                if seq_kind != "reference":
+                    regions_arr = self._full_regions[r_idx].copy()
+                    regions_arr[:, 1] -= self.jitter
+                    regions_arr[:, 2] += self.jitter
+                    region_lens = (regions_arr[:, 2] - regions_arr[:, 1]).astype(np.int64)
+                total += region_lens * n_tracks * track_itemsize
 
         if squeeze:
             return total

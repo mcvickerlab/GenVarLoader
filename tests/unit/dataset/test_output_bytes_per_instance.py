@@ -136,3 +136,25 @@ def test_variants_with_info_column_exact():
     got = ds._output_bytes_per_instance(r, s)
     expected = _materialized_nbytes_per_instance(ds, r, s)
     np.testing.assert_array_equal(got, expected)
+
+
+def test_haplotypes_plus_tracks_exact():
+    ds = gvl.get_dummy_dataset().with_seqs("haplotypes").with_settings(deterministic=True)
+    if not ds.active_tracks:
+        pytest.skip("dummy dataset has no tracks")
+    r = np.arange(ds.full_shape[0])
+    s = np.zeros(len(r), dtype=np.int64)
+    got = ds._output_bytes_per_instance(r, s)
+    expected = _materialized_nbytes_per_instance(ds, r, s)
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_reference_plus_tracks_exact():
+    ds = gvl.get_dummy_dataset().with_seqs("reference")
+    if not ds.active_tracks:
+        pytest.skip("dummy dataset has no tracks")
+    r = np.arange(ds.full_shape[0])
+    s = np.zeros(len(r), dtype=np.int64)
+    got = ds._output_bytes_per_instance(r, s)
+    expected = _materialized_nbytes_per_instance(ds, r, s)
+    np.testing.assert_array_equal(got, expected)
