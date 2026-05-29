@@ -1071,6 +1071,76 @@ class Dataset:
 
         return n_vars
 
+    def _output_bytes_per_instance(
+        self,
+        regions: Idx | None = None,
+        samples: Idx | str | Sequence[str] | None = None,
+    ) -> NDArray[np.int64]:
+        """Exact bytes one (region, sample) instance materializes to under the
+        current schema. Shape: (n_instances,) of int64.
+
+        Raises NotImplementedError for spliced datasets. Raises ValueError for
+        non-deterministic datasets when with_seqs is in {"haplotypes", "annotated"}.
+        """
+        if self._sp_idxer is not None:
+            raise NotImplementedError(
+                "_output_bytes_per_instance is not implemented for spliced datasets."
+            )
+
+        if regions is None:
+            regions = slice(None)
+        if samples is None:
+            samples = slice(None)
+        idx = (regions, samples)
+        ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
+        r_idx, _s_idx = np.unravel_index(ds_idx, self.full_shape)
+
+        seq_kind = self.sequence_type  # "reference" | "haplotypes" | "annotated" | "variants" | None
+        total = np.zeros(len(r_idx), dtype=np.int64)
+
+        # --- seqs payload ---
+        if seq_kind == "reference":
+            # region length × 1 byte/nt (S1), no ploidy expansion.
+            regions_arr = self._full_regions[r_idx].copy()
+            regions_arr[:, 1] -= self.jitter
+            regions_arr[:, 2] += self.jitter
+            region_lens = (regions_arr[:, 2] - regions_arr[:, 1]).astype(np.int64)
+            total += region_lens
+        elif seq_kind in ("haplotypes", "annotated"):
+            if not self.deterministic:
+                raise ValueError(
+                    f"with_seqs={seq_kind!r} requires deterministic=True for "
+                    "_output_bytes_per_instance. Use dataset.with_settings(deterministic=True)."
+                )
+            hap_lens = self.haplotype_lengths(regions, samples)
+            if hap_lens is None:
+                raise ValueError(
+                    f"with_seqs={seq_kind!r} requires haplotype_lengths() to be available."
+                )
+            # hap_lens shape: (..., ploidy). Flatten to (n_inst, ploidy).
+            hap_lens_flat = hap_lens.reshape(-1, hap_lens.shape[-1]).astype(np.int64)
+            hap_len_sum = hap_lens_flat.sum(-1)  # sum over ploidy
+            total += hap_len_sum  # haps S1: 1 byte/nt
+            if seq_kind == "annotated":
+                # annotated: add ref_coords (int32) and var_idxs (int32)
+                raise NotImplementedError("annotated branch added in Task 3")
+        elif seq_kind == "variants":
+            raise NotImplementedError("variants branch added in Task 4")
+        elif seq_kind is None:
+            pass
+        else:
+            raise AssertionError(f"unknown sequence_type {seq_kind!r}")
+
+        # --- tracks payload added in Task 5 ---
+        if self.active_tracks:
+            raise NotImplementedError("tracks branch added in Task 5")
+
+        if squeeze:
+            return total
+        if out_reshape is not None:
+            return total.reshape(out_reshape)
+        return total
+
     def n_intervals(
         self,
         regions: Idx | None = None,
