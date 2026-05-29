@@ -10,10 +10,10 @@ from natsort import natsorted
 
 from ._dataset._impl import RaggedDataset
 from ._dataset._indexing import DatasetIndexer, SpliceIndexer
-from ._dataset._splice import SpliceMap
 from ._dataset._intervals import tracks_to_intervals
 from ._dataset._reconstruct import Haps, HapsTracks, Tracks, TrackType, _Variants
 from ._dataset._reference import Reference
+from ._dataset._splice import SpliceMap
 from ._dataset._utils import bed_to_regions
 from ._ragged import Ragged, RaggedIntervals, RaggedSeqs, RaggedTracks
 from ._utils import lengths_to_offsets

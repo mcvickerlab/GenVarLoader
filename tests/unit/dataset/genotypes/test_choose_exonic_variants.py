@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
 from genvarloader._dataset._genotypes import choose_exonic_variants
 
 

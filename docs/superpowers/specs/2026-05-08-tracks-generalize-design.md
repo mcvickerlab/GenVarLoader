@@ -59,14 +59,22 @@ class Table:
     ) -> "Table": ...
 
     def count_intervals(
-        self, contig: str, starts: ArrayLike, ends: ArrayLike,
-        sample: str | list[str] | None = None, **kwargs,
+        self,
+        contig: str,
+        starts: ArrayLike,
+        ends: ArrayLike,
+        sample: str | list[str] | None = None,
+        **kwargs,
     ) -> NDArray[np.int32]: ...
 
     def _intervals_from_offsets(
-        self, contig: str, starts: ArrayLike, ends: ArrayLike,
+        self,
+        contig: str,
+        starts: ArrayLike,
+        ends: ArrayLike,
         offsets: NDArray[np.int64],
-        sample: str | list[str] | None = None, **kwargs,
+        sample: str | list[str] | None = None,
+        **kwargs,
     ) -> RaggedIntervals: ...
 ```
 
@@ -96,14 +104,22 @@ class IntervalTrack(Protocol):
     contigs: dict[str, int]
 
     def count_intervals(
-        self, contig: str, starts: ArrayLike, ends: ArrayLike,
-        sample: str | list[str] | None = None, **kwargs,
-    ) -> NDArray[np.int32]: ...   # shape (regions, samples)
+        self,
+        contig: str,
+        starts: ArrayLike,
+        ends: ArrayLike,
+        sample: str | list[str] | None = None,
+        **kwargs,
+    ) -> NDArray[np.int32]: ...  # shape (regions, samples)
 
     def _intervals_from_offsets(
-        self, contig: str, starts: ArrayLike, ends: ArrayLike,
+        self,
+        contig: str,
+        starts: ArrayLike,
+        ends: ArrayLike,
         offsets: NDArray[np.int64],
-        sample: str | list[str] | None = None, **kwargs,
+        sample: str | list[str] | None = None,
+        **kwargs,
     ) -> RaggedIntervals: ...
 ```
 

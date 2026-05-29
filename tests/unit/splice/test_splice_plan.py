@@ -1,7 +1,6 @@
 """Unit tests for build_splice_plan: permutation + offset math."""
 
 import numpy as np
-
 from genvarloader._dataset._splice import build_splice_plan
 
 
@@ -184,7 +183,6 @@ def test_ref_call_with_plan_writes_per_element_layout(ref_fasta):
     offsets are plan.permuted_out_offsets and shape is (n_elements, None)."""
     import genvarloader as gvl
     import polars as pl
-
     from genvarloader._dataset._reconstruct import Ref
     from genvarloader._dataset._splice import build_splice_plan
     from genvarloader._dataset._utils import bed_to_regions

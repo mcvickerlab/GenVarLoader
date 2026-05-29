@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Generic, Literal, TypeVar, cast, overload
+from typing import Generic, Literal, TypeVar, cast, overload
 
 import awkward as ak
 import numba as nb
 import numpy as np
 import polars as pl
-from dataclasses import dataclass, field, replace
 from genoray._utils import ContigNormalizer
 from hirola import HashTable
 from loguru import logger
@@ -599,7 +599,7 @@ class RefDataset(Generic[T]):
         pin_memory_device: str = "",
         return_indices: bool = False,
         transform: Callable | None = None,
-    ) -> "td.DataLoader":
+    ) -> td.DataLoader:
         """Convert the dataset to a PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
         :class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
         Requires PyTorch to be installed.
@@ -690,11 +690,11 @@ def get_reference(
 
 def _fetch_spliced_ref(
     regions: NDArray[np.integer],
-    plan: "SplicePlan",
+    plan: SplicePlan,
     reference: NDArray[np.uint8],
     ref_offsets: NDArray[np.int64],
     pad_char: int,
-) -> "Ragged[np.bytes_]":
+) -> Ragged[np.bytes_]:
     """Fetch reference bytes in splice-permuted order, returning a per-element
     Ragged of shape ``(n_elements, None)``.
 
@@ -752,5 +752,6 @@ if TORCH_AVAILABLE:
                 batch = batch[0]
 
             return batch
+
 else:
     TorchDataset = no_torch_error

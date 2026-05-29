@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Generic, Literal, TypeVar, overload
+from typing import Generic, Literal, NoReturn, TypeVar, overload
 
 import awkward as ak
 import numpy as np
 import polars as pl
 import seqpro as sp
-from dataclasses import dataclass, replace
 from loguru import logger
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
-from typing_extensions import NoReturn, Self, assert_never
+from typing_extensions import Self, assert_never
 
 from .._ragged import (
     INTERVAL_DTYPE,
@@ -28,9 +28,8 @@ from .._utils import (
     normalize_contig_name,
 )
 from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
-from ._splice import SpliceMap
-from ._rag_variants import RaggedVariants
 from ._insertion_fill import InsertionFill
+from ._rag_variants import RaggedVariants
 from ._reconstruct import (
     Haps,
     HapsTracks,
@@ -41,6 +40,7 @@ from ._reconstruct import (
     _build_reconstructor,
 )
 from ._reference import Reference
+from ._splice import SpliceMap
 from ._utils import regions_to_bed
 
 if TORCH_AVAILABLE:
@@ -618,7 +618,7 @@ class Dataset:
     def with_insertion_fill(
         self,
         fill: InsertionFill | Mapping[str, InsertionFill],
-    ) -> "Self":
+    ) -> Self:
         """Configure how track values are filled at insertion sites.
 
         Only meaningful when the dataset returns haplotypes *and* tracks (i.e.
@@ -1071,6 +1071,173 @@ class Dataset:
 
         return n_vars
 
+    def _output_bytes_per_instance(
+        self,
+        regions: Idx | None = None,
+        samples: Idx | str | Sequence[str] | None = None,
+        *,
+        include_offsets: bool = False,
+    ) -> NDArray[np.int64]:
+        """Exact bytes one (region, sample) instance materializes to under the
+        current schema. Shape: (n_instances,) of int64.
+
+        Parameters
+        ----------
+        include_offsets
+            If ``False`` (default), return the *payload* bytes — the
+            ``numpy.nbytes`` of the materialized output. If ``True``, add the
+            per-instance share of the int64 offset/lengths arrays that the
+            shared-memory chunk serialization writes alongside the payload
+            (see ``_shm_layout.write_chunk``): ``8 * ploidy`` per ragged
+            output array (outer offsets) and, for ``variants`` ``alt``/``ref``
+            fields, ``8 * n_variants`` (inner allele offsets). This is the
+            footprint that must fit in a ``double_buffered`` slot; payload
+            alone undersizes the slot for ragged outputs. The per-chunk
+            ``+1`` offset terminators and 8-byte alignment padding are not
+            included here — they are absorbed by the slot's fixed slack.
+
+        Raises NotImplementedError for spliced datasets. Raises ValueError for
+        non-deterministic datasets when with_seqs is in {"haplotypes", "annotated"}.
+        """
+        if self._sp_idxer is not None:
+            raise NotImplementedError(
+                "_output_bytes_per_instance is not implemented for spliced datasets."
+            )
+
+        if regions is None:
+            regions = slice(None)
+        if samples is None:
+            samples = slice(None)
+        idx = (regions, samples)
+        ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
+        r_idx, _s_idx = np.unravel_index(ds_idx, self.full_shape)
+
+        seq_kind = (
+            self.sequence_type
+        )  # "reference" | "haplotypes" | "annotated" | "variants" | None
+        total = np.zeros(len(r_idx), dtype=np.int64)
+        # Per-instance share of int64 offset/lengths arrays (filled when
+        # include_offsets); added to `total` just before the final reshape.
+        offset_total = np.zeros(len(r_idx), dtype=np.int64)
+        OFF = 8  # int64 offset entry
+        ploidy = self._seqs.n_variants.shape[-1] if isinstance(self._seqs, Haps) else 1
+        # These are computed conditionally below; declared here to satisfy the type checker.
+        hap_len_sum: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+        region_lens: NDArray[np.int64] = np.empty(0, dtype=np.int64)
+
+        # --- seqs payload ---
+        if seq_kind == "reference":
+            # region length × 1 byte/nt (S1), no ploidy expansion.
+            regions_arr = self._full_regions[r_idx].copy()
+            regions_arr[:, 1] -= self.jitter
+            regions_arr[:, 2] += self.jitter
+            region_lens = (regions_arr[:, 2] - regions_arr[:, 1]).astype(np.int64)
+            total += region_lens
+            if include_offsets and self.output_length == "ragged":
+                # ragged reference: 1 outer-offset entry per instance (no ploidy).
+                offset_total += OFF
+        elif seq_kind in ("haplotypes", "annotated"):
+            if not self.deterministic:
+                raise ValueError(
+                    f"with_seqs={seq_kind!r} requires deterministic=True for "
+                    "_output_bytes_per_instance. Use dataset.with_settings(deterministic=True)."
+                )
+            hap_lens = self.haplotype_lengths(regions, samples)
+            if hap_lens is None:
+                raise ValueError(
+                    f"with_seqs={seq_kind!r} requires haplotype_lengths() to be available."
+                )
+            # hap_lens shape: (..., ploidy). Flatten to (n_inst, ploidy).
+            hap_lens_flat = hap_lens.reshape(-1, hap_lens.shape[-1]).astype(np.int64)
+            hap_len_sum = hap_lens_flat.sum(-1)  # sum over ploidy
+            total += hap_len_sum  # haps S1: 1 byte/nt
+            if seq_kind == "annotated":
+                # annotated: var_idxs and ref_coords are per-position (same
+                # length as haps), not per-variant. Both are int32 (4 bytes).
+                total += hap_len_sum * 4  # var_idxs int32
+                total += hap_len_sum * 4  # ref_coords int32
+            if include_offsets:
+                # Each ragged array's outer offsets carry `ploidy` entries per
+                # instance: 1 array for haplotypes, 3 (haps/var_idxs/ref_coords)
+                # for annotated.
+                n_seq_arrays = 1 if seq_kind == "haplotypes" else 3
+                offset_total += OFF * ploidy * n_seq_arrays
+        elif seq_kind == "variants":
+            if not isinstance(self._seqs, Haps):
+                raise AssertionError("variants mode requires Haps")
+            haps_obj = self._seqs
+            var_fields = haps_obj.var_fields
+            n_vars = self.n_variants(regions, samples)  # (n_inst, ploidy)
+            n_vars_flat = n_vars.reshape(-1, n_vars.shape[-1]).astype(np.int64)
+            n_vars_total = n_vars_flat.sum(-1)  # over ploidy → (n_inst,)
+            ploidy = n_vars.shape[-1]
+
+            for f in var_fields:
+                if f == "start":
+                    total += n_vars_total * haps_obj.variants.start.dtype.itemsize
+                elif f == "ilen":
+                    total += n_vars_total * haps_obj.variants.ilen.dtype.itemsize
+                elif f == "dosage":
+                    if haps_obj.dosages is None:
+                        continue
+                    dosage_dtype = haps_obj.dosages.data.dtype
+                    total += n_vars_total * dosage_dtype.itemsize
+                elif f in ("alt", "ref"):
+                    # Allele scan: _allele_bytes_sum returns (len(ds_idx) * ploidy,).
+                    per_ploid = haps_obj._allele_bytes_sum(ds_idx, f)
+                    total += per_ploid.reshape(-1, ploidy).sum(-1)
+                else:
+                    # INFO column: numeric, known dtype from on-disk schema.
+                    info_dtype = haps_obj.variants.info[f].dtype
+                    total += n_vars_total * info_dtype.itemsize
+            if include_offsets:
+                # RaggedVariants (kind=2) writes, per field: outer offsets
+                # (ploidy entries/instance) and, for alt/ref allele fields,
+                # inner offsets (one entry per variant → n_vars_total/instance).
+                n_allele_fields = sum(1 for f in var_fields if f in ("alt", "ref"))
+                offset_total += OFF * ploidy * len(var_fields)
+                offset_total += OFF * n_vars_total * n_allele_fields
+        elif seq_kind is None:
+            pass
+        else:
+            raise AssertionError(f"unknown sequence_type {seq_kind!r}")
+
+        # --- tracks payload ---
+        if self.active_tracks:
+            n_tracks = len(self.active_tracks)
+            track_itemsize = np.dtype(np.float32).itemsize  # tracks are always float32
+            if seq_kind in ("haplotypes", "annotated"):
+                # Tracks have shape (b, t, p, ~l): length = haplotype length per ploid.
+                # hap_len_sum already sums over ploidy → total per instance = hap_len_sum * n_tracks.
+                total += hap_len_sum * n_tracks * track_itemsize
+            else:
+                # reference, variants, or no-seq: tracks have shape (b, t, ~l), length = region length.
+                # "reference" already computed region_lens above; others need to compute it now.
+                if seq_kind != "reference":
+                    regions_arr = self._full_regions[r_idx].copy()
+                    regions_arr[:, 1] -= self.jitter
+                    regions_arr[:, 2] += self.jitter
+                    region_lens = (regions_arr[:, 2] - regions_arr[:, 1]).astype(
+                        np.int64
+                    )
+                total += region_lens * n_tracks * track_itemsize
+            if include_offsets:
+                # Each track is its own ragged array. Grouped by (instance ×
+                # ploidy) for haplotype-shaped outputs, else by instance.
+                if seq_kind in ("haplotypes", "annotated"):
+                    offset_total += OFF * ploidy * n_tracks
+                else:
+                    offset_total += OFF * n_tracks
+
+        if include_offsets:
+            total += offset_total
+
+        if squeeze:
+            return total
+        if out_reshape is not None:
+            return total.reshape(out_reshape)
+        return total
+
     def n_intervals(
         self,
         regions: Idx | None = None,
@@ -1192,11 +1359,12 @@ class Dataset:
         overwrite
             Whether to overwrite the existing tracks, by default False
         """
-        if self.available_tracks is not None and (
-            exists := set(tracks) & set(self.available_tracks)
+        if (
+            self.available_tracks is not None
+            and (exists := set(tracks) & set(self.available_tracks))
+            and not overwrite
         ):
-            if not overwrite:
-                raise ValueError(f"Some tracks already exists in the dataset: {exists}")
+            raise ValueError(f"Some tracks already exists in the dataset: {exists}")
 
         for name, bedlike in tracks.items():
             out_dir = self.path / "annot_intervals" / name
@@ -1282,6 +1450,10 @@ class Dataset:
         pin_memory_device: str = "",
         return_indices: bool = False,
         transform: Callable | None = None,
+        mode: str | None = None,
+        buffer_bytes: int = 2 * 1024**3,
+        copy: bool = True,
+        heartbeat_seconds: float = 60.0,
     ) -> td.DataLoader:
         """Convert the dataset to a PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
         :class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
@@ -1339,6 +1511,25 @@ class Dataset:
                 Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
                 dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
         """
+        if mode is not None:
+            # Buffered modes operate directly on the Dataset, not on a TorchDataset wrapper,
+            # because they need access to _output_bytes_per_instance and raw indexing.
+            return get_dataloader(
+                dataset=self,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                sampler=sampler,
+                num_workers=num_workers,
+                collate_fn=collate_fn,
+                pin_memory=pin_memory,
+                drop_last=drop_last,
+                generator=generator,
+                pin_memory_device=pin_memory_device,
+                mode=mode,
+                buffer_bytes=buffer_bytes,
+                copy=copy,
+                heartbeat_seconds=heartbeat_seconds,
+            )
         return get_dataloader(
             dataset=self.to_torch_dataset(return_indices, transform),
             batch_size=batch_size,
@@ -1394,7 +1585,7 @@ class Dataset:
         return getitem(view, idx)
 
 
-def _lazy_load_dosages(dataset: "Dataset", haps: Haps) -> Haps:
+def _lazy_load_dosages(dataset: Dataset, haps: Haps) -> Haps:
     """Open the dosages memmap for a Haps that didn't request them at open time.
 
     Reuses the same path-resolution logic that ``Haps.from_path`` used. Returns

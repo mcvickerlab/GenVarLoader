@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from typing import cast
 
 import awkward as ak
 import numpy as np
 import polars as pl
-from dataclasses import dataclass, replace
 from hirola import HashTable
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
@@ -140,7 +140,10 @@ def build_splice_plan(
     # cell_lengths length = n_pairs * E. group_offsets indexes the
     # *permuted_lengths* array at cell boundaries.
     cell_starts = np.concatenate(
-        ([0], np.cumsum(cell_lengths, dtype=np.int64))
+        (
+            [0],
+            np.cumsum(cell_lengths, dtype=np.int64),
+        )
     )  # length n_pairs*E + 1
     # group_offsets[i] = permuted_out_offsets[cell_starts[i]]
     group_offsets = permuted_out_offsets[cell_starts]
@@ -179,7 +182,7 @@ class SpliceMap:
         cls,
         splice_info: str | tuple[str, str],
         full_bed: pl.DataFrame,
-    ) -> tuple["SpliceMap", pl.DataFrame]:
+    ) -> tuple[SpliceMap, pl.DataFrame]:
         """Parse splice_info into a (SpliceMap, spliced_bed) pair. Pure — no sampler."""
         if isinstance(splice_info, str):
             sp_bed = (

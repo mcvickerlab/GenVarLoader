@@ -58,9 +58,9 @@ Once your data is prepared, you can use [`gvl.write()`](api.md#genvarloader.writ
 import genvarloader as gvl
 
 gvl.write(
-    path='1000_genomes_haplotypes.gvl',
-    bed='tiling_windows.bed',
-    variants='all_chroms.bcf',
+    path="1000_genomes_haplotypes.gvl",
+    bed="tiling_windows.bed",
+    variants="all_chroms.bcf",
     # OR variants='all_chroms.pgen',
 )
 ```
@@ -69,13 +69,13 @@ This dataset would have haplotypes available for all samples in `all_chroms.bcf`
 
 ```python
 gvl.write(
-    path='1000_genomes_lncRNA.gvl',
-    bed='lncRNA.bed',  # can be varying length regions
-    variants='all_chroms.bcf',
+    path="1000_genomes_lncRNA.gvl",
+    bed="lncRNA.bed",  # can be varying length regions
+    variants="all_chroms.bcf",
     tracks=[
-        gvl.BigWigs.from_table('pos', 'pos_strands.tsv'),
-        gvl.BigWigs.from_table('neg', 'pos_strands.tsv'),
-    ]
+        gvl.BigWigs.from_table("pos", "pos_strands.tsv"),
+        gvl.BigWigs.from_table("neg", "pos_strands.tsv"),
+    ],
 )
 ```
 

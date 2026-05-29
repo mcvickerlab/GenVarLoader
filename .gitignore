@@ -18,6 +18,9 @@ data/
 .claude/worktrees/*
 .worktrees/
 scratch/
+repro/
+experiments/dataloader/tmp/
+uv.lock
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -109,8 +109,6 @@ def test_rs_indexing(dataset, r_idx, s_idx):
 The file should end after the `test_ds_indexing` function. Delete:
 
 ```python
-
-
 @parametrize_with_cases("r_idx", prefix="idx_", cases=".")
 @parametrize_with_cases("s_idx", prefix="idx_", cases=".")
 def test_rs_indexing(dataset, r_idx, s_idx):
@@ -190,16 +188,12 @@ Run: `sed -n '94,108p' tests/integration/test_ref_ds.py`
 Expected (last block of the file):
 
 ```python
-
-
 def test_refdataset_unspliced_defaults(reference: gvl.Reference):
-    bed = pl.DataFrame(
-        {
-            "chrom": ["chr1", "chr1"],
-            "chromStart": [0, 100],
-            "chromEnd": [100, 150],
-        }
-    )
+    bed = pl.DataFrame({
+        "chrom": ["chr1", "chr1"],
+        "chromStart": [0, 100],
+        "chromEnd": [100, 150],
+    })
     ds = gvl.RefDataset(reference, bed)
     assert ds.is_spliced is False
     assert ds.splice_info is None

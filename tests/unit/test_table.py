@@ -3,7 +3,6 @@ import sys
 import numpy as np
 import polars as pl
 import pytest
-
 from genvarloader._table import Table
 from genvarloader._utils import lengths_to_offsets
 
@@ -49,10 +48,20 @@ def test_table_init_missing_canonical_column_raises():
 def test_table_init_from_dict_of_dfs():
     per_sample = {
         "s0": pl.DataFrame(
-            {"chrom": ["chr1"], "start": [10], "end": [20], "value": [1.0]}
+            {
+                "chrom": ["chr1"],
+                "start": [10],
+                "end": [20],
+                "value": [1.0],
+            }
         ),
         "s1": pl.DataFrame(
-            {"chrom": ["chr2"], "start": [0], "end": [5], "value": [2.0]}
+            {
+                "chrom": ["chr2"],
+                "start": [0],
+                "end": [5],
+                "value": [2.0],
+            }
         ),
     }
     t = Table("signal", per_sample)

@@ -1,5 +1,4 @@
 import numpy as np
-
 from genvarloader._dataset._genotypes import filter_af
 
 

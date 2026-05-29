@@ -165,14 +165,12 @@ from pydantic_extra_types.semantic_version import SemanticVersion
 
 
 def test_metadata_version_parses_existing_strings():
-    payload = json.dumps(
-        {
-            "samples": ["s1"],
-            "contigs": ["1"],
-            "n_regions": 1,
-            "version": "0.18.0",
-        }
-    )
+    payload = json.dumps({
+        "samples": ["s1"],
+        "contigs": ["1"],
+        "n_regions": 1,
+        "version": "0.18.0",
+    })
     m = Metadata.model_validate_json(payload)
     assert isinstance(m.version, SemanticVersion)
     assert m.version == SemanticVersion.parse("0.18.0")
@@ -313,13 +311,13 @@ with:
 Replace line 265:
 
 ```python
-                one_based=version is not None and version >= Version("0.18.0"),
+one_based = (version is not None and version >= Version("0.18.0"),)
 ```
 
 with:
 
 ```python
-                one_based=version is not None and version >= SemanticVersion.parse("0.18.0"),
+one_based = (version is not None and version >= SemanticVersion.parse("0.18.0"),)
 ```
 
 - [ ] **Step 4: Run the dataset tests to ensure nothing regressed**
@@ -378,13 +376,13 @@ def test_write_from_svar_records_svar_link_and_no_symlink(svar_dataset_paths):
     assert not (gvl_path / "genotypes" / "link.svar").is_symlink()
 
     # Metadata records the svar.
-    metadata = Metadata.model_validate_json(
-        (gvl_path / "metadata.json").read_text()
-    )
+    metadata = Metadata.model_validate_json((gvl_path / "metadata.json").read_text())
     assert metadata.svar_link is not None
     assert Path(metadata.svar_link.absolute_path) == svar_path.resolve()
     # relative_path should resolve back to the svar from the dataset dir.
-    assert (gvl_path / metadata.svar_link.relative_path).resolve() == svar_path.resolve()
+    assert (
+        gvl_path / metadata.svar_link.relative_path
+    ).resolve() == svar_path.resolve()
     # Fingerprint matches the source.
     expected_bytes = (svar_path / "variant_idxs.npy").stat().st_size
     assert metadata.svar_link.fingerprint.variant_idxs_bytes == expected_bytes
@@ -498,7 +496,9 @@ from genvarloader._dataset._svar_link import _resolve_svar, _verify_fingerprint
 
 def _make_link(svar_path: Path, gvl_path: Path, override_bytes: int | None = None):
     return SvarLink(
-        relative_path=str(Path("../") / svar_path.name),  # not necessarily correct, test resolver handles it
+        relative_path=str(
+            Path("../") / svar_path.name
+        ),  # not necessarily correct, test resolver handles it
         absolute_path=str(svar_path.resolve()),
         fingerprint=SvarFingerprint(
             n_variants=10,
@@ -621,9 +621,7 @@ def _resolve_svar(
     if len(siblings) == 1:
         return siblings[0]
 
-    expected = (
-        Path(link.absolute_path).name if link is not None else "<unknown>.svar"
-    )
+    expected = Path(link.absolute_path).name if link is not None else "<unknown>.svar"
     raise FileNotFoundError(
         f"Could not locate svar '{expected}' for GVL dataset at {gvl_path}. "
         f"Tried: stored relative path, stored absolute path, sibling *.svar. "
@@ -653,9 +651,9 @@ def _verify_fingerprint(svar_path: Path, link: SvarLink | None) -> None:
     try:
         import polars as pl
 
-        n_variants_observed = pl.scan_ipc(svar_path / "index.arrow").select(
-            pl.len()
-        ).collect().item()
+        n_variants_observed = (
+            pl.scan_ipc(svar_path / "index.arrow").select(pl.len()).collect().item()
+        )
     except Exception as exc:
         raise ValueError(
             f"Could not read variant index at {svar_path / 'index.arrow'}: {exc}"
@@ -743,8 +741,7 @@ def test_open_dataset_legacy_symlink_layout(tmp_path, svar_dataset_paths):
         ds = gvl.Dataset.open(gvl_path)
         _ = ds[0, 0]
         assert any(
-            issubclass(w.category, DeprecationWarning)
-            and "link.svar" in str(w.message)
+            issubclass(w.category, DeprecationWarning) and "link.svar" in str(w.message)
             for w in caught
         )
 ```
@@ -776,58 +773,54 @@ from ._svar_link import SvarLink, _resolve_svar, _verify_fingerprint
 Replace the body of the `if svar_meta_path.exists():` branch (currently `_reconstruct.py:235-260`) — which is currently keyed on the existence of `svar_meta.json` — with version-dispatched logic:
 
 ```python
-        if svar_meta_path.exists():
-            with open(svar_meta_path) as f:
-                metadata = json.load(f)
-            shape = cast(tuple[int, ...], tuple(metadata["shape"]))
-            dtype = np.dtype(metadata["dtype"])
+if svar_meta_path.exists():
+    with open(svar_meta_path) as f:
+        metadata = json.load(f)
+    shape = cast(tuple[int, ...], tuple(metadata["shape"]))
+    dtype = np.dtype(metadata["dtype"])
 
-            offset_path = path / "genotypes" / "offsets.npy"
+    offset_path = path / "genotypes" / "offsets.npy"
 
-            # Decide which layout to read from.
-            NEXT_VERSION = SemanticVersion.parse("0.25.0")  # substitute literal
-            is_new_layout = (
-                svar_link is not None
-                and version is not None
-                and version >= NEXT_VERSION
+    # Decide which layout to read from.
+    NEXT_VERSION = SemanticVersion.parse("0.25.0")  # substitute literal
+    is_new_layout = (
+        svar_link is not None and version is not None and version >= NEXT_VERSION
+    )
+
+    if is_new_layout:
+        svar_path = _resolve_svar(path, svar_link, svar_override)
+        _verify_fingerprint(svar_path, svar_link)
+    else:
+        legacy_link = path / "genotypes" / "link.svar"
+        if not legacy_link.exists():
+            raise FileNotFoundError(
+                f"Legacy GVL dataset at {path} is missing its link.svar "
+                f"symlink and has no svar_link metadata. "
+                f"Pass `svar=` to Dataset.open(...) to recover, or "
+                f"re-run `gvl.write`."
             )
+        warnings.warn(
+            f"GVL dataset at {path} uses the legacy link.svar symlink. "
+            f"Run `genvarloader.migrate_svar_link(path)` to upgrade.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        svar_path = legacy_link.resolve()
 
-            if is_new_layout:
-                svar_path = _resolve_svar(path, svar_link, svar_override)
-                _verify_fingerprint(svar_path, svar_link)
-            else:
-                legacy_link = path / "genotypes" / "link.svar"
-                if not legacy_link.exists():
-                    raise FileNotFoundError(
-                        f"Legacy GVL dataset at {path} is missing its link.svar "
-                        f"symlink and has no svar_link metadata. "
-                        f"Pass `svar=` to Dataset.open(...) to recover, or "
-                        f"re-run `gvl.write`."
-                    )
-                warnings.warn(
-                    f"GVL dataset at {path} uses the legacy link.svar symlink. "
-                    f"Run `genvarloader.migrate_svar_link(path)` to upgrade.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                svar_path = legacy_link.resolve()
+    geno_path = svar_path / "variant_idxs.npy"
+    dosage_path = svar_path / "dosages.npy"
 
-            geno_path = svar_path / "variant_idxs.npy"
-            dosage_path = svar_path / "dosages.npy"
+    offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
+    v_idxs = np.memmap(geno_path, dtype=V_IDX_TYPE, mode="r")
+    rag_shape = (*shape[1:], None)
+    genotypes = Ragged.from_offsets(v_idxs, rag_shape, offsets.reshape(2, -1))
 
-            offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
-            v_idxs = np.memmap(geno_path, dtype=V_IDX_TYPE, mode="r")
-            rag_shape = (*shape[1:], None)
-            genotypes = Ragged.from_offsets(v_idxs, rag_shape, offsets.reshape(2, -1))
+    if dosage_path.exists():
+        dosages = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
+        dosages = Ragged.from_offsets(dosages, rag_shape, offsets.reshape(2, -1))
 
-            if dosage_path.exists():
-                dosages = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
-                dosages = Ragged.from_offsets(
-                    dosages, rag_shape, offsets.reshape(2, -1)
-                )
-
-            logger.info("Loading variant data.")
-            variants = _Variants.from_table(svar_path / "index.arrow")
+    logger.info("Loading variant data.")
+    variants = _Variants.from_table(svar_path / "index.arrow")
 ```
 
 (Note: the `dosages = None` on line 233 of the original is preserved before the `if`.)

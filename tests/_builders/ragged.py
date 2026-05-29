@@ -15,9 +15,8 @@ can construct synthetic ragged inputs without re-implementing the
 from __future__ import annotations
 
 import numpy as np
-from seqpro.rag import Ragged
-
 from genvarloader._ragged import RaggedIntervals
+from seqpro.rag import Ragged
 
 
 def make_ragged_seqs(rows: list[bytes]) -> Ragged:

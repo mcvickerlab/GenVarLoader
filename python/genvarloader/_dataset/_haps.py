@@ -693,6 +693,38 @@ class Haps(Reconstructor[_H]):
 
         return variants
 
+    def _allele_bytes_sum(
+        self, idx: NDArray[np.integer], kind: Literal["alt", "ref"]
+    ) -> NDArray[np.int64]:
+        """Exact total bytes of the selected variants' `kind` allele payload, per
+        instance flattened over ploidy.
+
+        Returns shape (len(idx) * ploidy,) of int64. O(|selected variants|);
+        does not touch allele payload bytes — only the RaggedAlleles offsets.
+        """
+        r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore[no-matching-overload]
+        genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s])
+
+        genos = ak.to_packed(genos)
+        v_idxs = genos.data
+
+        if self.min_af is not None or self.max_af is not None:
+            geno_afs = self.variants.info["AF"][v_idxs]
+            keep = np.full(len(v_idxs), True, np.bool_)
+            if self.min_af is not None:
+                keep &= geno_afs >= self.min_af
+            if self.max_af is not None:
+                keep &= geno_afs <= self.max_af
+            _keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
+            genos = Ragged(ak.to_packed(ak.to_regular(genos[_keep], 1)))
+            v_idxs = genos.data
+
+        offsets = getattr(self.variants, kind).offsets  # int-typed, length n_variants+1
+        v_lens = (offsets[v_idxs + 1] - offsets[v_idxs]).astype(np.int64)
+        # genos.offsets has length b*p + 1 (one offset per (instance, ploid) group).
+        # reduceat needs starts, not full offsets; drop the last.
+        return np.add.reduceat(v_lens, genos.offsets[:-1])
+
     def _get_alleles(
         self, genos: Ragged[V_IDX_TYPE], kind: Literal["alt", "ref"]
     ) -> ak.Array:

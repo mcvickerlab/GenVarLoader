@@ -77,15 +77,16 @@ the reconstructors need:
 ```python
 @define
 class SplicePlan:
-    perm: NDArray[np.intp]                # length K·E
-    permuted_lengths: NDArray[np.int32]   # length K·E
+    perm: NDArray[np.intp]  # length K·E
+    permuted_lengths: NDArray[np.int32]  # length K·E
     permuted_out_offsets: NDArray[OFFSET_TYPE]  # length K·E + 1
-    group_offsets: NDArray[OFFSET_TYPE]   # length n_rows·S·E + 1
-    out_shape: tuple[int | None, ...]     # final ragged outer shape
+    group_offsets: NDArray[OFFSET_TYPE]  # length n_rows·S·E + 1
+    out_shape: tuple[int | None, ...]  # final ragged outer shape
+
 
 def build_splice_plan(
-    lengths: NDArray[np.int32],           # shape (B, *inner_fixed)
-    splice_row_offsets: NDArray[np.int64],# from SpliceIndexer.parse_idx
+    lengths: NDArray[np.int32],  # shape (B, *inner_fixed)
+    splice_row_offsets: NDArray[np.int64],  # from SpliceIndexer.parse_idx
     n_samples: int,
     n_rows: int,
 ) -> SplicePlan: ...

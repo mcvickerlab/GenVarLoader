@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
-from dataclasses import dataclass
 from numpy.typing import NDArray
 
 REPEAT_5P = 0

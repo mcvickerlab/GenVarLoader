@@ -73,8 +73,7 @@ In `_dataset/_haps.py`:
    def available_info_fields(path: str | Path) -> list[str]:
        """Return numeric column names without loading any data."""
        schema = pl.scan_ipc(path).collect_schema()
-       return [k for k, v in schema.items()
-               if v.is_numeric() and k not in {"POS", "ILEN"}]
+       return [k for k, v in schema.items() if v.is_numeric() and k not in {"POS", "ILEN"}]
    ```
    Used by `Haps` to compute `available_var_fields` from the file's schema rather than from `self.variants.info.keys()`.
 

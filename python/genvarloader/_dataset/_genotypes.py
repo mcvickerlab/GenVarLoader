@@ -83,8 +83,7 @@ def get_diffs_sparse(
                         continue
 
                     # advance ref_idx to end of this variant
-                    if v_end > ref_idx:
-                        ref_idx = v_end
+                    ref_idx = max(ref_idx, v_end)
 
                     # deletion may start before region
                     #     0 1 2 3 4 5 6

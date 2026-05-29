@@ -13,9 +13,8 @@ disk I/O.
 
 import awkward as ak
 import numpy as np
-from pytest_cases import parametrize_with_cases
-
 from genvarloader._ragged import Ragged, reverse_complement
+from pytest_cases import parametrize_with_cases
 
 
 def _buffer_matches_lengths(rag: Ragged) -> bool:

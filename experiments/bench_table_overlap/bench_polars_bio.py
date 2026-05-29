@@ -23,7 +23,9 @@ import polars as pl
 import polars_bio as pb
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _common import CASES, N_TRIALS, gen_queries, gen_table  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # experiments/
+import _sysinfo
+from _common import CASES, N_TRIALS, gen_queries, gen_table
 
 pb.set_option("datafusion.bio.coordinate_system_check", "false")
 pb.set_option("datafusion.bio.coordinate_system_zero_based", True)
@@ -174,6 +176,7 @@ METHODS = [
 
 
 def main():
+    _sysinfo.write_and_log(Path(__file__).parent)
     print(
         f"polars-bio {pb.__version__}  polars {pl.__version__}  python {sys.version.split()[0]}"
     )

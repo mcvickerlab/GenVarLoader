@@ -8,9 +8,9 @@ etc.
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import Mock
 
+import pytest
 from genvarloader._dataset._reconstruct import (
     Haps,
     HapsTracks,

@@ -6,13 +6,15 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 if TYPE_CHECKING:
     from ._splice import SpliceMap
 
+from dataclasses import dataclass, replace
+from typing import TypeGuard
+
 import awkward as ak
 import numpy as np
-from dataclasses import dataclass, replace
 from hirola import HashTable
 from numpy import integer
 from numpy.typing import NDArray
-from typing_extensions import Self, TypeGuard, assert_never
+from typing_extensions import Self, assert_never
 
 from .._types import Idx, StrIdx
 from .._utils import idx_like_to_array, is_dtype, lengths_to_offsets
@@ -138,7 +140,7 @@ class DatasetIndexer:
         self,
         regions: StrIdx | None = None,
         samples: StrIdx | None = None,
-    ) -> "DatasetIndexer":
+    ) -> DatasetIndexer:
         """Subset the dataset to specific regions and/or samples."""
         if regions is None and samples is None:
             return self
@@ -316,7 +318,7 @@ class DatasetIndexer:
 class SpliceIndexer:
     """Splice-aware indexer = sample-agnostic SpliceMap + sample-aware DatasetIndexer."""
 
-    map: "SpliceMap"
+    map: SpliceMap
     dsi: DatasetIndexer
 
     @classmethod
@@ -325,7 +327,7 @@ class SpliceIndexer:
         names: Collection[str] | NDArray[np.str_],
         splice_map: ak.Array,
         dsi: DatasetIndexer,
-    ) -> "SpliceIndexer":
+    ) -> SpliceIndexer:
         # Kept for backward-compat callers; prefer SpliceMap.from_bed.
         from ._splice import SpliceMap
 

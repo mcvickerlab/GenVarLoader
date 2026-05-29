@@ -13,7 +13,6 @@ import genvarloader as gvl
 import numpy as np
 import pytest
 from genoray._types import DOSAGE_TYPE
-
 from genvarloader._dataset._haps import _Variants
 
 

@@ -61,9 +61,6 @@ project-excludes = [
     ".pixi/**",
     "target/**",
 ]
-# Use the active env's `python` on PATH (set by pixi activation). This keeps
-# the config env-agnostic across py310/py311/py312/py313 pixi environments.
-fallback-python-interpreter-name = "python"
 preset = "strict"
 
 # Per-error relaxations populated empirically below. Each entry MUST carry a

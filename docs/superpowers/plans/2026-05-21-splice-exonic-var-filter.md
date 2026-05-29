@@ -215,9 +215,7 @@ _DATA_DIR = _REPO_ROOT / "data"
 def svar_gvl_path(tmp_path):
     svar_path = _DATA_DIR / "filtered.svar"
     bed_path = _DATA_DIR / "source.bed"
-    assert svar_path.is_dir(), (
-        f"missing fixture {svar_path}; run pixi run -e dev gen"
-    )
+    assert svar_path.is_dir(), f"missing fixture {svar_path}; run pixi run -e dev gen"
     out = tmp_path / "ds.gvl"
     gvl.write(path=out, bed=bed_path, variants=svar_path, overwrite=True)
     return out
@@ -226,7 +224,8 @@ def svar_gvl_path(tmp_path):
 def test_with_settings_var_filter_propagates_to_recon(svar_gvl_path):
     ref_path = _DATA_DIR / "fasta" / "hg38.fa.bgz"
     ds = (
-        gvl.Dataset.open(svar_gvl_path, reference=ref_path)
+        gvl.Dataset
+        .open(svar_gvl_path, reference=ref_path)
         .with_seqs("haplotypes")
         .with_settings(var_filter="exonic")
     )
@@ -241,7 +240,8 @@ def test_with_settings_var_filter_propagates_to_recon(svar_gvl_path):
 def test_with_settings_var_filter_false_clears_recon(svar_gvl_path):
     ref_path = _DATA_DIR / "fasta" / "hg38.fa.bgz"
     ds = (
-        gvl.Dataset.open(svar_gvl_path, reference=ref_path)
+        gvl.Dataset
+        .open(svar_gvl_path, reference=ref_path)
         .with_seqs("haplotypes")
         .with_settings(var_filter="exonic")
         .with_settings(var_filter=False)
@@ -520,9 +520,7 @@ def spliced_svar_ds_path(tmp_path_factory):
     """
     svar_path = _DATA_DIR / "filtered.svar"
     bed_path = _DATA_DIR / "source.bed"
-    assert svar_path.is_dir(), (
-        f"missing fixture {svar_path}; run pixi run -e dev gen"
-    )
+    assert svar_path.is_dir(), f"missing fixture {svar_path}; run pixi run -e dev gen"
 
     tmp = tmp_path_factory.mktemp("issue_176_parity")
     out = tmp / "ds.gvl"
@@ -553,7 +551,8 @@ def test_open_vs_with_settings_parity_state(spliced_svar_ds_path):
     ).with_seqs("haplotypes")
 
     ds_b = (
-        gvl.Dataset.open(spliced_svar_ds_path, reference=ref_path)
+        gvl.Dataset
+        .open(spliced_svar_ds_path, reference=ref_path)
         .with_seqs("haplotypes")
         .with_settings(
             splice_info=("transcript_id", "exon_number"),
@@ -579,7 +578,8 @@ def test_open_vs_with_settings_parity_output(spliced_svar_ds_path):
     ).with_seqs("haplotypes")
 
     ds_b = (
-        gvl.Dataset.open(spliced_svar_ds_path, reference=ref_path)
+        gvl.Dataset
+        .open(spliced_svar_ds_path, reference=ref_path)
         .with_seqs("haplotypes")
         .with_settings(
             splice_info=("transcript_id", "exon_number"),

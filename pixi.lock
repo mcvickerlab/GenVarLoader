@@ -88,6 +88,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prek-0.3.13-hb17b654_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/py-spy-0.4.2-he182f42_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.0.0-h2b88eb6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.10.20-h3c07f61_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pytorch-2.10.0-cpu_mkl_py310_hf1dacaf_103.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pytorch-cpu-2.10.0-cpu_mkl_hd61e0f4_103.conda
@@ -184,7 +185,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/44/28/b6672962639e85dc0ac36f71ab3a8f5f38e01b51343d7aa372a6b56fa3f3/pyarrow-21.0.0-cp310-cp310-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4e/ca/03624e017e5ee2d7ce8a08d89f81c1e535eb3c30d7b2dc4a435ea3fbbeae/mkdocs_glightbox-0.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/61/16/cfa2d61a4aa1e1f7bca48bb37acd01c6a09db4864b16a54f9587092765ff/pyrefly-1.0.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/63/2f/ed68a7ee0f76b20b3d8ea3c3dcb06f9c2a2725a95c83cbe0eee65939e750/awkward_cpp-52-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/65/f3/107a22063bf27bdccf2024833d3445f4eea42b2e598abfbd46f6a63b6cb0/typing_inspect-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6b/a4/bd8ad7d1cf66268219f282d4268b6ba73f8ff51c5fba2c9663adab103615/sorted_nearest-0.0.41.tar.gz
@@ -321,6 +321,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/perl-5.32.1-7_h4614cfb_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prek-0.3.13-h6fdd925_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/py-spy-0.4.2-h748bcf4_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyrefly-1.0.0-h4dd0d4f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.10.20-h1b19095_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyyaml-6.0.3-py310hb46c203_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/readline-8.3-h46df422_0.conda
@@ -367,7 +368,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/7c/1b/477e180dd01e407dbddb8a18fad670b743c6d3f563b2baffa737b8c5f844/awkward_cpp-52-cp310-cp310-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/7e/46/81b71b7aa9e3703ee6e4ef1f69a87e40f58ea7c99212bf49a95071e99c8c/polars_runtime_32-1.37.1-cp310-abi3-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/82/91/a3cf2a1e87d336eaa804a1e6fc93266faf6dc2a97eecdbc7eae289628022/pyrefly-1.0.0-py3-none-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/85/dc/bf8a9b7e289dd9b0b550b9964786231fe48264583eecd733f7ab77b374b7/ncls-0.0.70-cp310-cp310-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/86/b2/04438111b57e3591c09dfa9f220609ae1afacf436fba124a328dbdb9b7b2/genvarloader_cli-0.1.0-py3-none-any.whl
@@ -478,6 +478,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prek-0.3.13-hb17b654_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/py-spy-0.4.2-he182f42_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.0.0-h2b88eb6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.10.20-h3c07f61_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyyaml-6.0.3-py310h3406613_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/readline-8.3-h853b02a_0.conda
@@ -578,7 +579,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/56/79/12978b96bd44274fe38b5dde5cfb660b1d114f70a65ef962bcbbed99b549/nvidia_cusparselt_cu12-0.7.1-py3-none-manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5d/ed/c7895fd2fde7f3ee70d248175f9b6cdf792fb741ab92dc59cd9ef3bd241b/frozenlist-1.8.0-cp310-cp310-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/61/16/cfa2d61a4aa1e1f7bca48bb37acd01c6a09db4864b16a54f9587092765ff/pyrefly-1.0.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/63/2f/ed68a7ee0f76b20b3d8ea3c3dcb06f9c2a2725a95c83cbe0eee65939e750/awkward_cpp-52-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/65/f3/107a22063bf27bdccf2024833d3445f4eea42b2e598abfbd46f6a63b6cb0/typing_inspect-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6b/a4/bd8ad7d1cf66268219f282d4268b6ba73f8ff51c5fba2c9663adab103615/sorted_nearest-0.0.41.tar.gz
@@ -735,6 +735,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/perl-5.32.1-7_h4614cfb_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prek-0.3.13-h6fdd925_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/py-spy-0.4.2-h748bcf4_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyrefly-1.0.0-h4dd0d4f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.10.20-h1b19095_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyyaml-6.0.3-py310hb46c203_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/readline-8.3-h46df422_0.conda
@@ -779,7 +780,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/7c/1b/477e180dd01e407dbddb8a18fad670b743c6d3f563b2baffa737b8c5f844/awkward_cpp-52-cp310-cp310-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/7e/46/81b71b7aa9e3703ee6e4ef1f69a87e40f58ea7c99212bf49a95071e99c8c/polars_runtime_32-1.37.1-cp310-abi3-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/82/91/a3cf2a1e87d336eaa804a1e6fc93266faf6dc2a97eecdbc7eae289628022/pyrefly-1.0.0-py3-none-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/85/dc/bf8a9b7e289dd9b0b550b9964786231fe48264583eecd733f7ab77b374b7/ncls-0.0.70-cp310-cp310-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/86/b2/04438111b57e3591c09dfa9f220609ae1afacf436fba124a328dbdb9b7b2/genvarloader_cli-0.1.0-py3-none-any.whl
@@ -895,6 +895,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prek-0.3.13-hb17b654_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/py-spy-0.4.2-he182f42_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.0.0-h2b88eb6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.12.13-hd63d673_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pytorch-2.10.0-cpu_mkl_py312_hca44ed5_103.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pytorch-cpu-2.10.0-cpu_mkl_hd61e0f4_103.conda
@@ -1200,6 +1201,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/perl-5.32.1-7_h4614cfb_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prek-0.3.13-h6fdd925_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/py-spy-0.4.2-h748bcf4_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyrefly-1.0.0-h4dd0d4f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.12.13-h8561d8f_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyyaml-6.0.3-py312h04c11ed_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/readline-8.3-h46df422_0.conda
@@ -1426,6 +1428,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prek-0.3.13-hb17b654_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/py-spy-0.4.2-he182f42_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.0.0-h2b88eb6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.12.13-hd63d673_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyyaml-6.0.3-py312h8a5da7c_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/readline-8.3-h853b02a_0.conda
@@ -1750,6 +1753,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/perl-5.32.1-7_h4614cfb_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prek-0.3.13-h6fdd925_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/py-spy-0.4.2-h748bcf4_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyrefly-1.0.0-h4dd0d4f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.12.13-h8561d8f_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyyaml-6.0.3-py312h04c11ed_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/readline-8.3-h46df422_0.conda
@@ -1970,7 +1974,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/4e/ca/03624e017e5ee2d7ce8a08d89f81c1e535eb3c30d7b2dc4a435ea3fbbeae/mkdocs_glightbox-0.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5f/1c/ed568eca3a963dc3e447b01961ae653e0d6f107c2cfd77b3f2b1a5cfc520/hypothesis-6.152.6-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/61/16/cfa2d61a4aa1e1f7bca48bb37acd01c6a09db4864b16a54f9587092765ff/pyrefly-1.0.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/63/2f/ed68a7ee0f76b20b3d8ea3c3dcb06f9c2a2725a95c83cbe0eee65939e750/awkward_cpp-52-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/65/f3/107a22063bf27bdccf2024833d3445f4eea42b2e598abfbd46f6a63b6cb0/typing_inspect-0.9.0-py3-none-any.whl
@@ -2094,7 +2097,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/47/dd9a212ef6e343a6857485ffe25bba537304f1913bdbed446a23f7f592e1/filelock-3.29.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/82/91/a3cf2a1e87d336eaa804a1e6fc93266faf6dc2a97eecdbc7eae289628022/pyrefly-1.0.0-py3-none-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/85/dc/bf8a9b7e289dd9b0b550b9964786231fe48264583eecd733f7ab77b374b7/ncls-0.0.70-cp310-cp310-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/8a/0e/97c33bf5009bdbac74fd2beace167cab3f978feb69cc36f1ef79360d6c4e/exceptiongroup-1.3.1-py3-none-any.whl
@@ -2265,6 +2267,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/psutil-7.2.2-py310h139afa4_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pthread-stubs-0.4-hb9d3cd8_1002.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/py-spy-0.4.2-he182f42_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.0.0-h2b88eb6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyside6-6.11.0-py310hb9dbd67_3.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.10.20-h3c07f61_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyyaml-6.0.3-py310h3406613_1.conda
@@ -2419,7 +2422,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/4e/ca/03624e017e5ee2d7ce8a08d89f81c1e535eb3c30d7b2dc4a435ea3fbbeae/mkdocs_glightbox-0.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/50/3e/f0dba6333dbe5c5a338d1466939c8733256a5f6d7e10615b8f96a90277e5/fast_histogram-0.14-cp39-abi3-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/61/16/cfa2d61a4aa1e1f7bca48bb37acd01c6a09db4864b16a54f9587092765ff/pyrefly-1.0.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/63/2f/ed68a7ee0f76b20b3d8ea3c3dcb06f9c2a2725a95c83cbe0eee65939e750/awkward_cpp-52-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/65/f3/107a22063bf27bdccf2024833d3445f4eea42b2e598abfbd46f6a63b6cb0/typing_inspect-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6b/a4/bd8ad7d1cf66268219f282d4268b6ba73f8ff51c5fba2c9663adab103615/sorted_nearest-0.0.41.tar.gz
@@ -2611,6 +2613,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/psutil-7.2.2-py310haea493c_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pthread-stubs-0.4-hd74edd7_1002.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/py-spy-0.4.2-h748bcf4_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyrefly-1.0.0-h4dd0d4f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.10.20-h1b19095_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyyaml-6.0.3-py310hb46c203_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyzmq-27.1.0-py310hf0664f0_2.conda
@@ -2665,7 +2668,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/7c/1b/477e180dd01e407dbddb8a18fad670b743c6d3f563b2baffa737b8c5f844/awkward_cpp-52-cp310-cp310-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/7e/46/81b71b7aa9e3703ee6e4ef1f69a87e40f58ea7c99212bf49a95071e99c8c/polars_runtime_32-1.37.1-cp310-abi3-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/82/91/a3cf2a1e87d336eaa804a1e6fc93266faf6dc2a97eecdbc7eae289628022/pyrefly-1.0.0-py3-none-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/85/dc/bf8a9b7e289dd9b0b550b9964786231fe48264583eecd733f7ab77b374b7/ncls-0.0.70-cp310-cp310-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/86/b2/04438111b57e3591c09dfa9f220609ae1afacf436fba124a328dbdb9b7b2/genvarloader_cli-0.1.0-py3-none-any.whl
@@ -2779,6 +2781,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prek-0.3.13-hb17b654_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/py-spy-0.4.2-he182f42_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.0.0-h2b88eb6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.10.20-h3c07f61_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pytorch-2.10.0-cpu_mkl_py310_hf1dacaf_103.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pytorch-cpu-2.10.0-cpu_mkl_hd61e0f4_103.conda
@@ -2875,7 +2878,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/44/28/b6672962639e85dc0ac36f71ab3a8f5f38e01b51343d7aa372a6b56fa3f3/pyarrow-21.0.0-cp310-cp310-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/4e/ca/03624e017e5ee2d7ce8a08d89f81c1e535eb3c30d7b2dc4a435ea3fbbeae/mkdocs_glightbox-0.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/61/16/cfa2d61a4aa1e1f7bca48bb37acd01c6a09db4864b16a54f9587092765ff/pyrefly-1.0.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/63/2f/ed68a7ee0f76b20b3d8ea3c3dcb06f9c2a2725a95c83cbe0eee65939e750/awkward_cpp-52-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/65/f3/107a22063bf27bdccf2024833d3445f4eea42b2e598abfbd46f6a63b6cb0/typing_inspect-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6b/a4/bd8ad7d1cf66268219f282d4268b6ba73f8ff51c5fba2c9663adab103615/sorted_nearest-0.0.41.tar.gz
@@ -3012,6 +3014,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/perl-5.32.1-7_h4614cfb_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prek-0.3.13-h6fdd925_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/py-spy-0.4.2-h748bcf4_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyrefly-1.0.0-h4dd0d4f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.10.20-h1b19095_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyyaml-6.0.3-py310hb46c203_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/readline-8.3-h46df422_0.conda
@@ -3058,7 +3061,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/7c/1b/477e180dd01e407dbddb8a18fad670b743c6d3f563b2baffa737b8c5f844/awkward_cpp-52-cp310-cp310-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/7e/46/81b71b7aa9e3703ee6e4ef1f69a87e40f58ea7c99212bf49a95071e99c8c/polars_runtime_32-1.37.1-cp310-abi3-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/82/91/a3cf2a1e87d336eaa804a1e6fc93266faf6dc2a97eecdbc7eae289628022/pyrefly-1.0.0-py3-none-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/85/dc/bf8a9b7e289dd9b0b550b9964786231fe48264583eecd733f7ab77b374b7/ncls-0.0.70-cp310-cp310-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/86/b2/04438111b57e3591c09dfa9f220609ae1afacf436fba124a328dbdb9b7b2/genvarloader_cli-0.1.0-py3-none-any.whl
@@ -3175,6 +3177,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prek-0.3.13-hb17b654_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/py-spy-0.4.2-he182f42_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.0.0-h2b88eb6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.11.15-hd63d673_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pytorch-2.10.0-cpu_mkl_py311_h3da180d_103.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pytorch-cpu-2.10.0-cpu_mkl_hd61e0f4_103.conda
@@ -3402,6 +3405,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/perl-5.32.1-7_h4614cfb_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prek-0.3.13-h6fdd925_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/py-spy-0.4.2-h748bcf4_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyrefly-1.0.0-h4dd0d4f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.11.15-h8561d8f_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyyaml-6.0.3-py311hc290fe0_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/readline-8.3-h46df422_0.conda
@@ -3565,6 +3569,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prek-0.3.13-hb17b654_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/py-spy-0.4.2-he182f42_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.0.0-h2b88eb6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.12.13-hd63d673_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pytorch-2.10.0-cpu_mkl_py312_hca44ed5_103.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pytorch-cpu-2.10.0-cpu_mkl_hd61e0f4_103.conda
@@ -3790,6 +3795,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/perl-5.32.1-7_h4614cfb_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prek-0.3.13-h6fdd925_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/py-spy-0.4.2-h748bcf4_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyrefly-1.0.0-h4dd0d4f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.12.13-h8561d8f_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyyaml-6.0.3-py312h04c11ed_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/readline-8.3-h46df422_0.conda
@@ -3951,6 +3957,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prek-0.3.13-hb17b654_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/py-spy-0.4.2-he182f42_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.0.0-h2b88eb6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.13.13-h6add32d_100_cp313.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pytorch-2.10.0-cpu_mkl_py313_h86e55c7_103.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pytorch-cpu-2.10.0-cpu_mkl_hd61e0f4_103.conda
@@ -4177,6 +4184,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/perl-5.32.1-7_h4614cfb_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prek-0.3.13-h6fdd925_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/py-spy-0.4.2-h748bcf4_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyrefly-1.0.0-h4dd0d4f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.13.13-h20e6be0_100_cp313.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyyaml-6.0.3-py313h65a2061_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/readline-8.3-h46df422_0.conda
@@ -4389,6 +4397,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/psutil-7.2.2-py310h139afa4_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pthread-stubs-0.4-hb9d3cd8_1002.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/py-spy-0.4.2-he182f42_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.0.0-h2b88eb6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyside6-6.11.0-py310hb9dbd67_3.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.10.20-h3c07f61_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyyaml-6.0.3-py310h3406613_1.conda
@@ -4559,7 +4568,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/56/79/12978b96bd44274fe38b5dde5cfb660b1d114f70a65ef962bcbbed99b549/nvidia_cusparselt_cu12-0.7.1-py3-none-manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5b/bc/246f452431c592a2a424050e8bb9ccf494fb47613fd97c912f4d573a5e3b/phantom_types-3.0.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5d/ed/c7895fd2fde7f3ee70d248175f9b6cdf792fb741ab92dc59cd9ef3bd241b/frozenlist-1.8.0-cp310-cp310-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/61/16/cfa2d61a4aa1e1f7bca48bb37acd01c6a09db4864b16a54f9587092765ff/pyrefly-1.0.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/63/2f/ed68a7ee0f76b20b3d8ea3c3dcb06f9c2a2725a95c83cbe0eee65939e750/awkward_cpp-52-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/65/f3/107a22063bf27bdccf2024833d3445f4eea42b2e598abfbd46f6a63b6cb0/typing_inspect-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6b/a4/bd8ad7d1cf66268219f282d4268b6ba73f8ff51c5fba2c9663adab103615/sorted_nearest-0.0.41.tar.gz
@@ -4770,6 +4778,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/psutil-7.2.2-py310haea493c_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pthread-stubs-0.4-hd74edd7_1002.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/py-spy-0.4.2-h748bcf4_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyrefly-1.0.0-h4dd0d4f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.10.20-h1b19095_0_cpython.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyyaml-6.0.3-py310hb46c203_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyzmq-27.1.0-py310hf0664f0_2.conda
@@ -4824,7 +4833,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/7c/1b/477e180dd01e407dbddb8a18fad670b743c6d3f563b2baffa737b8c5f844/awkward_cpp-52-cp310-cp310-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/7e/46/81b71b7aa9e3703ee6e4ef1f69a87e40f58ea7c99212bf49a95071e99c8c/polars_runtime_32-1.37.1-cp310-abi3-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/82/91/a3cf2a1e87d336eaa804a1e6fc93266faf6dc2a97eecdbc7eae289628022/pyrefly-1.0.0-py3-none-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/83/89/35ea267fb12e608529f0df315aff200171e555623cb38b2e4444592ce872/pyranges-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/85/dc/bf8a9b7e289dd9b0b550b9964786231fe48264583eecd733f7ab77b374b7/ncls-0.0.70-cp310-cp310-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/86/b2/04438111b57e3591c09dfa9f220609ae1afacf436fba124a328dbdb9b7b2/genvarloader_cli-0.1.0-py3-none-any.whl
@@ -7282,6 +7290,19 @@ packages:
   purls: []
   size: 1759386
   timestamp: 1777312019188
+- conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.0.0-h2b88eb6_0.conda
+  sha256: 225d491c94a6962b92377154b33b424cb0cc30aa2fe0b433c6c110d05da7283d
+  md5: 132a1bc9d31e17d6e12d7188ca7ddfb8
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=14
+  constrains:
+  - __glibc >=2.17
+  license: MIT
+  license_family: MIT
+  purls: []
+  size: 10962615
+  timestamp: 1778629320799
 - conda: https://conda.anaconda.org/conda-forge/linux-64/pyside6-6.11.0-py310hb9dbd67_3.conda
   sha256: 62438802f55e4628949dad6e8eb1cbc725a1b83aafa11c2fc05afe1151bb9abd
   md5: 66d0fe0080bcba4e19abdd074a1ee5cf
@@ -10807,6 +10828,18 @@ packages:
   purls: []
   size: 1176168
   timestamp: 1777313031417
+- conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyrefly-1.0.0-h4dd0d4f_0.conda
+  sha256: 34dd964342267b5d93674eefe37055b8915943de60d43b4e36a08b9642319f46
+  md5: b0b2e5d34dba70dfad3955a59e611b46
+  depends:
+  - __osx >=11.0
+  constrains:
+  - __osx >=11.0
+  license: MIT
+  license_family: MIT
+  purls: []
+  size: 10330096
+  timestamp: 1778629356792
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.10.20-h1b19095_0_cpython.conda
   sha256: f0f6fcbb6cfdee5a6b9c03b5b94d2bbe737f3b17a618006c7685cc48992ae667
   md5: 55ec25b0d09379eb11c32dbe09ee28c4
@@ -13183,11 +13216,6 @@ packages:
   requires_dist:
   - pytest ; extra == 'test'
   requires_python: '>=3.8'
-- pypi: https://files.pythonhosted.org/packages/61/16/cfa2d61a4aa1e1f7bca48bb37acd01c6a09db4864b16a54f9587092765ff/pyrefly-1.0.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-  name: pyrefly
-  version: 1.0.0
-  sha256: 1382d5b1fcdb49a4de9f34d112d2bddf290a78ff93ee8149492ad5f1077ddffc
-  requires_python: '>=3.8'
 - pypi: https://files.pythonhosted.org/packages/63/2f/ed68a7ee0f76b20b3d8ea3c3dcb06f9c2a2725a95c83cbe0eee65939e750/awkward_cpp-52-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
   name: awkward-cpp
   version: '52'
@@ -13950,11 +13978,6 @@ packages:
   requires_dist:
   - cython ; extra == 'cython'
   requires_python: '>=3.9,<3.15'
-- pypi: https://files.pythonhosted.org/packages/82/91/a3cf2a1e87d336eaa804a1e6fc93266faf6dc2a97eecdbc7eae289628022/pyrefly-1.0.0-py3-none-macosx_11_0_arm64.whl
-  name: pyrefly
-  version: 1.0.0
-  sha256: a7038efc3a40f8294edee339895633cf22db268c0d434cdbcbefc34f78a9ecc3
-  requires_python: '>=3.8'
 - pypi: https://files.pythonhosted.org/packages/82/b9/e73d5d9f405cba7706c539aa8b311b49d4c2f3d698d9c12f815231169c71/ipykernel-7.2.0-py3-none-any.whl
   name: ipykernel
   version: 7.2.0

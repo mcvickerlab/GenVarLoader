@@ -3,7 +3,6 @@ import shutil
 from pathlib import Path
 
 import pytest
-
 from genvarloader._dataset._svar_link import (
     SvarFingerprint,
     SvarLink,

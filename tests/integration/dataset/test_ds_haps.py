@@ -4,9 +4,9 @@ from pathlib import Path
 import genvarloader as gvl
 import numpy as np
 import pysam
+import pytest
 import seqpro as sp
 from genvarloader._ragged import RaggedSeqs
-import pytest
 
 
 @pytest.fixture(

@@ -14,7 +14,6 @@ import genvarloader as gvl
 import numpy as np
 import pytest
 
-
 SEED = 1234
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 
@@ -7,11 +8,11 @@ import awkward as ak
 import awkward.operations.str as ak_str
 import numba as nb
 import numpy as np
-from dataclasses import dataclass
 from awkward.contents import NumpyArray
 from numpy.typing import NDArray
 from phantom import Phantom
-from seqpro.rag import RDTYPE_co as RDTYPE, Ragged, is_rag_dtype
+from seqpro.rag import Ragged, is_rag_dtype
+from seqpro.rag import RDTYPE_co as RDTYPE
 
 from ._torch import TORCH_AVAILABLE
 from ._types import AnnotatedHaps

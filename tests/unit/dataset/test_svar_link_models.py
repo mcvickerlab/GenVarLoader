@@ -15,15 +15,14 @@ require a real written dataset — they remain in the integration tier.
 import json
 
 import pytest
-from pydantic import ValidationError
-from pydantic_extra_types.semantic_version import SemanticVersion
-
 from genvarloader._dataset._svar_link import (
     SvarFingerprint,
     SvarLink,
     _resolve_svar,
 )
 from genvarloader._dataset._write import Metadata
+from pydantic import ValidationError
+from pydantic_extra_types.semantic_version import SemanticVersion
 
 
 def test_svar_link_roundtrip():

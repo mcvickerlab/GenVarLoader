@@ -8,9 +8,8 @@ The unit-tier insertion-fill tests live in
 
 import math
 
-import pytest
-
 import genvarloader as gvl
+import pytest
 from genvarloader._dataset._insertion_fill import Constant
 
 

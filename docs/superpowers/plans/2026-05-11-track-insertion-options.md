@@ -121,9 +121,7 @@ class Interpolate(InsertionFill):
 
     def __attrs_post_init__(self):
         if self.order not in (1, 2, 3):
-            raise ValueError(
-                f"Interpolate order must be 1, 2, or 3 (got {self.order})"
-            )
+            raise ValueError(f"Interpolate order must be 1, 2, or 3 (got {self.order})")
 
 
 def lower(
@@ -534,7 +532,9 @@ def test_kernel_repeat_5p_default():
     out, track = _run_kernel(REPEAT_5P, np.zeros(2, dtype=np.float64))
     # Positions 1..4 are the v_len=4 insertion stretch (anchor + 3 inserted bases).
     # All equal track[1] = 10.
-    np.testing.assert_array_equal(out[1:5], np.array([10, 10, 10, 10], dtype=np.float32))
+    np.testing.assert_array_equal(
+        out[1:5], np.array([10, 10, 10, 10], dtype=np.float32)
+    )
     # Surrounding values are reference data.
     assert out[0] == 0.0
     np.testing.assert_array_equal(out[5:], track[2:])
@@ -832,6 +832,7 @@ def _make_tracks(names):
     starts = ends = values = np.array([0], dtype=np.int32)
     offsets = np.array([0, 1], dtype=np.int64)
     from seqpro.rag import Ragged
+
     intervals = {
         n: RaggedIntervals(
             Ragged.from_offsets(starts, (1, None), offsets),
@@ -869,7 +870,10 @@ def test_with_insertion_fill_dict_partial_falls_back():
 
 
 def test_with_tracks_prunes_insertion_fill():
-    tracks = _make_tracks(["a", "b"]).with_insertion_fill({"a": Constant(0.0), "b": FlankSample()})
+    tracks = _make_tracks(["a", "b"]).with_insertion_fill({
+        "a": Constant(0.0),
+        "b": FlankSample(),
+    })
     new = tracks.with_tracks("a")
     assert set(new.insertion_fill) == {"a"}
     assert isinstance(new.insertion_fill["a"], Constant)
@@ -910,17 +914,14 @@ from ._insertion_fill import lower as _lower_insertion_fills
 Find the per-track loop in `HapsTracks.__call__` (around `_reconstruct.py:1151-1190`). Just before the `for track_ofst, (name, tracktype) in enumerate(...)` line, lower the strategies once:
 
 ```python
-            strat_list = [
-                self.tracks.insertion_fill[name]
-                for name in self.tracks.active_tracks
-            ]
-            strat_ids, strat_params = _lower_insertion_fills(strat_list)
-            # Draw a base seed for FlankSample determinism. If deterministic,
-            # derive it from idx so calls are reproducible.
-            if deterministic:
-                base_seed = np.uint64(int(idx.sum()) & ((1 << 63) - 1))
-            else:
-                base_seed = np.uint64(rng.integers(0, 1 << 63))
+strat_list = [self.tracks.insertion_fill[name] for name in self.tracks.active_tracks]
+strat_ids, strat_params = _lower_insertion_fills(strat_list)
+# Draw a base seed for FlankSample determinism. If deterministic,
+# derive it from idx so calls are reproducible.
+if deterministic:
+    base_seed = np.uint64(int(idx.sum()) & ((1 << 63) - 1))
+else:
+    base_seed = np.uint64(rng.integers(0, 1 << 63))
 ```
 
 Inside the existing loop, update the `shift_and_realign_tracks_sparse` call (`_reconstruct.py:1176-1190`) to pass the per-track strategy:
@@ -975,35 +976,33 @@ rtk git commit -m "feat: route per-track insertion fill into HapsTracks kernel c
 In `python/genvarloader/_dataset/_impl.py`, just after the `with_tracks` method (around line 775), add:
 
 ```python
-    def with_insertion_fill(
-        self,
-        fill: "InsertionFill | Mapping[str, InsertionFill]",
-    ):
-        """Configure how track values are filled at insertion sites.
+def with_insertion_fill(
+    self,
+    fill: "InsertionFill | Mapping[str, InsertionFill]",
+):
+    """Configure how track values are filled at insertion sites.
 
-        Only meaningful when the dataset returns haplotypes *and* tracks (i.e.
-        when the reconstructor is :class:`HapsTracks`). Pure-reference and
-        pure-haplotype datasets have no insertion fill to configure.
+    Only meaningful when the dataset returns haplotypes *and* tracks (i.e.
+    when the reconstructor is :class:`HapsTracks`). Pure-reference and
+    pure-haplotype datasets have no insertion fill to configure.
 
-        Parameters
-        ----------
-        fill
-            Either a single :class:`InsertionFill` strategy applied to every
-            active track, or a dict mapping track name to strategy. Tracks not
-            in the dict fall back to :class:`Repeat5p`.
-        """
-        if self._tracks is None:
-            raise ValueError(
-                "Dataset has no tracks; with_insertion_fill is a no-op."
-            )
-        if not isinstance(self._recon, HapsTracks):
-            raise ValueError(
-                "with_insertion_fill is only meaningful for datasets with both "
-                "haplotypes and tracks (reconstructor must be HapsTracks)."
-            )
-        new_tracks = self._tracks.with_insertion_fill(fill)
-        new_recon = evolve(self._recon, tracks=new_tracks)
-        return evolve(self, _tracks=new_tracks, _recon=new_recon)
+    Parameters
+    ----------
+    fill
+        Either a single :class:`InsertionFill` strategy applied to every
+        active track, or a dict mapping track name to strategy. Tracks not
+        in the dict fall back to :class:`Repeat5p`.
+    """
+    if self._tracks is None:
+        raise ValueError("Dataset has no tracks; with_insertion_fill is a no-op.")
+    if not isinstance(self._recon, HapsTracks):
+        raise ValueError(
+            "with_insertion_fill is only meaningful for datasets with both "
+            "haplotypes and tracks (reconstructor must be HapsTracks)."
+        )
+    new_tracks = self._tracks.with_insertion_fill(fill)
+    new_recon = evolve(self._recon, tracks=new_tracks)
+    return evolve(self, _tracks=new_tracks, _recon=new_recon)
 ```
 
 Add imports near the top of `_impl.py` (find the existing `from ._reconstruct import` block and append):
@@ -1036,12 +1035,12 @@ from ._dataset._insertion_fill import (
 Add to `__all__`:
 
 ```python
-    "InsertionFill",
-    "Repeat5p",
-    "Repeat5pNormalized",
-    "Constant",
-    "FlankSample",
-    "Interpolate",
+("InsertionFill",)
+("Repeat5p",)
+("Repeat5pNormalized",)
+("Constant",)
+("FlankSample",)
+("Interpolate",)
 ```
 
 - [ ] **Step 3: Add an end-to-end test**
@@ -1062,12 +1061,8 @@ def test_end_to_end_constant_nan(tmp_path):
     first_track = next(iter(ds._tracks.active_tracks))
     ds_nan = ds.with_insertion_fill({first_track: Constant(float("nan"))})
     # The returned object is a new dataset; the configured strategy is recorded.
-    assert isinstance(
-        ds_nan._tracks.insertion_fill[first_track], Constant
-    )
-    assert math.isnan(
-        ds_nan._tracks.insertion_fill[first_track].value
-    )
+    assert isinstance(ds_nan._tracks.insertion_fill[first_track], Constant)
+    assert math.isnan(ds_nan._tracks.insertion_fill[first_track].value)
 
 
 def test_with_insertion_fill_rejects_tracks_only_dataset():

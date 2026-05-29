@@ -110,9 +110,7 @@ def test_plan_ploidy_2():
       k(q=2, p=0)=4,                  # row 1 sample 0 ploidy 0
       k(q=2, p=1)=5,                  # row 1 sample 0 ploidy 1
     """
-    lengths = np.array(
-        [[10, 11], [20, 21], [30, 31]], dtype=np.int32
-    )  # (B=3, P=2)
+    lengths = np.array([[10, 11], [20, 21], [30, 31]], dtype=np.int32)  # (B=3, P=2)
     splice_row_offsets = np.array([0, 2, 3], dtype=np.int64)
     plan = build_splice_plan(
         lengths=lengths,
@@ -121,9 +119,7 @@ def test_plan_ploidy_2():
         n_rows=2,
     )
     np.testing.assert_array_equal(plan.perm, [0, 2, 1, 3, 4, 5])
-    np.testing.assert_array_equal(
-        plan.permuted_lengths, [10, 20, 11, 21, 30, 31]
-    )
+    np.testing.assert_array_equal(plan.permuted_lengths, [10, 20, 11, 21, 30, 31])
     np.testing.assert_array_equal(
         plan.permuted_out_offsets, [0, 10, 30, 41, 62, 92, 123]
     )
@@ -141,9 +137,7 @@ def test_plan_multi_sample_ploidy_2():
     #   q1 = (r=0, s=0, e=1)
     #   q2 = (r=0, s=1, e=0)
     #   q3 = (r=0, s=1, e=1)
-    lengths = np.array(
-        [[1, 2], [3, 4], [5, 6], [7, 8]], dtype=np.int32
-    )  # (B=4, P=2)
+    lengths = np.array([[1, 2], [3, 4], [5, 6], [7, 8]], dtype=np.int32)  # (B=4, P=2)
     splice_row_offsets = np.array([0, 2, 4], dtype=np.int64)
     plan = build_splice_plan(
         lengths=lengths,
@@ -158,9 +152,7 @@ def test_plan_multi_sample_ploidy_2():
     #   s=1, p=0: e=0 → k(q=2,p=0)=4; e=1 → k(q=3,p=0)=6
     #   s=1, p=1: e=0 → k(q=2,p=1)=5; e=1 → k(q=3,p=1)=7
     np.testing.assert_array_equal(plan.perm, [0, 2, 1, 3, 4, 6, 5, 7])
-    np.testing.assert_array_equal(
-        plan.permuted_lengths, [1, 3, 2, 4, 5, 7, 6, 8]
-    )
+    np.testing.assert_array_equal(plan.permuted_lengths, [1, 3, 2, 4, 5, 7, 6, 8])
     # group_offsets at (1, 2, 2) granularity = 4 cells + 1.
     # cell sums: 1+3=4, 2+4=6, 5+7=12, 6+8=14
     np.testing.assert_array_equal(plan.group_offsets, [0, 4, 10, 22, 36])
@@ -202,9 +194,7 @@ def test_plan_inner_fixed_size_3():
     """E=3: e.g. a track axis of 3 stacked tracks. Verify general inner-fixed handling."""
     # 1 splice row × 1 sample × 2 elements × 3 tracks.
     # B = 2 queries × 3 tracks = 6 inner k-indices.
-    lengths = np.array(
-        [[1, 2, 3], [4, 5, 6]], dtype=np.int32
-    )  # (B=2, T=3)
+    lengths = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int32)  # (B=2, T=3)
     splice_row_offsets = np.array([0, 2], dtype=np.int64)
     plan = build_splice_plan(
         lengths=lengths,
@@ -318,9 +308,7 @@ def build_splice_plan(
     if E == 1:
         # Identity permutation; flat_lengths shape is (B,) already permuted.
         perm = np.arange(B, dtype=np.intp)
-        permuted_lengths_flat = flat_lengths.reshape(-1).astype(
-            np.int32, copy=False
-        )
+        permuted_lengths_flat = flat_lengths.reshape(-1).astype(np.int32, copy=False)
     else:
         # Build perm by iterating (pair, e, element).
         # For a pair p with element range [s, s+L):
@@ -339,18 +327,10 @@ def build_splice_plan(
             # (E, L): each row e is q_range*E + e.
             ke = q_range[None, :] * E + np.arange(E, dtype=np.intp)[:, None]
             perm_parts.append(ke.reshape(-1))
-        perm = (
-            np.concatenate(perm_parts)
-            if perm_parts
-            else np.empty(0, dtype=np.intp)
-        )
-        permuted_lengths_flat = flat_2d.reshape(-1)[perm].astype(
-            np.int32, copy=False
-        )
+        perm = np.concatenate(perm_parts) if perm_parts else np.empty(0, dtype=np.intp)
+        permuted_lengths_flat = flat_2d.reshape(-1)[perm].astype(np.int32, copy=False)
 
-    permuted_out_offsets = lengths_to_offsets(
-        permuted_lengths_flat, dtype=np.int64
-    )
+    permuted_out_offsets = lengths_to_offsets(permuted_lengths_flat, dtype=np.int64)
 
     # group_offsets at (row, sample, *inner_fixed) granularity:
     # each cell aggregates L elements (or 0 for empty pairs).
@@ -365,9 +345,10 @@ def build_splice_plan(
         cell_lengths = np.repeat(pair_lengths.astype(np.int64), E)
     # cell_lengths length = n_pairs * E. group_offsets indexes the
     # *permuted_lengths* array at cell boundaries.
-    cell_starts = np.concatenate(
-        ([0], np.cumsum(cell_lengths, dtype=np.int64))
-    )  # length n_pairs*E + 1
+    cell_starts = np.concatenate((
+        [0],
+        np.cumsum(cell_lengths, dtype=np.int64),
+    ))  # length n_pairs*E + 1
     # group_offsets[i] = permuted_out_offsets[cell_starts[i]]
     group_offsets = permuted_out_offsets[cell_starts]
 
@@ -437,16 +418,14 @@ def test_ref_call_with_plan_matches_current_behavior(tmp_path, request):
 
     DDIR = Path(request.config.rootpath) / "tests" / "data"
     ref = gvl.Reference.from_path(DDIR / "fasta" / "hg38.fa.bgz", in_memory=False)
-    bed = pl.DataFrame(
-        {
-            "chrom": ["chr1", "chr1", "chr1"],
-            "chromStart": [1000, 2000, 5000],
-            "chromEnd": [1010, 2010, 5010],
-            "strand": [1, 1, 1],
-            "transcript_id": ["T1", "T1", "T2"],
-            "exon_number": [1, 2, 1],
-        }
-    )
+    bed = pl.DataFrame({
+        "chrom": ["chr1", "chr1", "chr1"],
+        "chromStart": [1000, 2000, 5000],
+        "chromEnd": [1010, 2010, 5010],
+        "strand": [1, 1, 1],
+        "transcript_id": ["T1", "T1", "T2"],
+        "exon_number": [1, 2, 1],
+    })
 
     sp_ds = gvl.RefDataset(ref, bed, splice_info="transcript_id")
     new_path = sp_ds[:]  # exercises the production path once Task 3 lands.
@@ -454,9 +433,10 @@ def test_ref_call_with_plan_matches_current_behavior(tmp_path, request):
     # Legacy path replicated inline.
     plain = gvl.RefDataset(ref, bed)
     unsp = plain[:]
-    t1 = np.concatenate(
-        [np.asarray(unsp[0], dtype="S1"), np.asarray(unsp[1], dtype="S1")]
-    )
+    t1 = np.concatenate([
+        np.asarray(unsp[0], dtype="S1"),
+        np.asarray(unsp[1], dtype="S1"),
+    ])
     t2 = np.asarray(unsp[2], dtype="S1")
 
     np.testing.assert_equal(np.asarray(new_path[0], dtype="S1").ravel(), t1)
@@ -478,14 +458,12 @@ def test_ref_call_with_plan_writes_grouped_layout(tmp_path, request):
 
     DDIR = Path(request.config.rootpath) / "tests" / "data"
     ref = gvl.Reference.from_path(DDIR / "fasta" / "hg38.fa.bgz", in_memory=False)
-    bed = pl.DataFrame(
-        {
-            "chrom": ["chr1", "chr1", "chr1"],
-            "chromStart": [1000, 2000, 5000],
-            "chromEnd": [1010, 2010, 5010],
-            "strand": [1, 1, 1],
-        }
-    )
+    bed = pl.DataFrame({
+        "chrom": ["chr1", "chr1", "chr1"],
+        "chromStart": [1000, 2000, 5000],
+        "chromEnd": [1010, 2010, 5010],
+        "strand": [1, 1, 1],
+    })
     plain = gvl.RefDataset(ref, bed).with_len("ragged")
     # Manually drive Ref.__call__ as RefDataset._getitem_spliced will:
     from genvarloader._dataset._utils import bed_to_regions
@@ -675,9 +653,7 @@ def _getitem_spliced(self, idx: Idx) -> T:
     elif self.output_length == "variable":
         out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))  # type: ignore
     else:
-        raise AssertionError(
-            "splice + fixed-length output should be blocked earlier"
-        )
+        raise AssertionError("splice + fixed-length output should be blocked earlier")
 
     if squeeze:
         out = out.squeeze(0)  # type: ignore
@@ -722,7 +698,8 @@ def _getitem_spliced(self, idx: Idx) -> T:
         per_elem = cast(
             Ragged[np.bytes_],
             Ragged.from_offsets(
-                ref_data, (plan.permuted_lengths.shape[0], None),
+                ref_data,
+                (plan.permuted_lengths.shape[0], None),
                 plan.permuted_out_offsets,
             ),
         )
@@ -742,9 +719,7 @@ def _getitem_spliced(self, idx: Idx) -> T:
         permuted_out_offsets = per_elem_rc.offsets
         # Rebuild group_offsets by gathering from the new permuted offsets
         # at the same cell boundaries.
-        cell_starts = np.searchsorted(
-            permuted_out_offsets, plan.group_offsets
-        )
+        cell_starts = np.searchsorted(permuted_out_offsets, plan.group_offsets)
         # Actually, lengths are unchanged by RC, so the cumulative offsets
         # match plan.permuted_out_offsets element-for-element. Reuse.
         group_offsets = plan.group_offsets
@@ -767,9 +742,7 @@ def _getitem_spliced(self, idx: Idx) -> T:
     elif self.output_length == "variable":
         out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))  # type: ignore
     else:
-        raise AssertionError(
-            "splice + fixed-length output should be blocked earlier"
-        )
+        raise AssertionError("splice + fixed-length output should be blocked earlier")
 
     if squeeze:
         out = out.squeeze(0)  # type: ignore
@@ -845,10 +818,7 @@ def _get_haplotypes(
     keep_offsets: NDArray[OFFSET_TYPE] | None,
     annotate: bool,
     splice_plan: "SplicePlan | None" = None,
-) -> (
-    Ragged[np.bytes_]
-    | tuple[Ragged[np.bytes_], Ragged[V_IDX_TYPE], Ragged[np.int32]]
-):
+) -> Ragged[np.bytes_] | tuple[Ragged[np.bytes_], Ragged[V_IDX_TYPE], Ragged[np.int32]]:
     """Reconstruct haplotypes from sparse genotypes.
 
     When ``splice_plan`` is provided, the kernel is called with ``ploidy=1``
@@ -907,9 +877,7 @@ def _get_haplotypes(
     flat_geno_idx = geno_offset_idx.reshape(-1)[splice_plan.perm].astype(
         np.intp, copy=False
     )
-    flat_shifts = shifts.reshape(-1)[splice_plan.perm].astype(
-        np.int32, copy=False
-    )
+    flat_shifts = shifts.reshape(-1)[splice_plan.perm].astype(np.int32, copy=False)
     # regions has shape (B, 3). For (B*P, 3) flattened, each query is
     # repeated P times consecutively, then we apply the same perm. We need
     # regions_flat such that regions_flat[k_orig] is regions[query(k_orig)].
@@ -1070,7 +1038,8 @@ In `Ref.__call__` plan branch, change the return to:
 return cast(
     Ragged[np.bytes_],
     Ragged.from_offsets(
-        ref, (splice_plan.permuted_lengths.shape[0], None),
+        ref,
+        (splice_plan.permuted_lengths.shape[0], None),
         splice_plan.permuted_out_offsets,
     ),
 )
@@ -1121,7 +1090,9 @@ def _getitem_spliced(
     assert self.deterministic
 
     if self.jitter > 0:
-        raise RuntimeError("Jitter is not supported with splicing. Please set jitter to 0.")
+        raise RuntimeError(
+            "Jitter is not supported with splicing. Please set jitter to 0."
+        )
     if not self.deterministic:
         raise RuntimeError(
             "Non-deterministic algorithms are not supported with splicing. Please set deterministic to True."
@@ -1156,9 +1127,7 @@ def _getitem_spliced(
     # out_reshape when basic indexing is used; for advanced indexing we
     # fall back to treating the whole thing as a single sample axis.
     # SIMPLE RULE: ask the splice_idxer.
-    n_rows_sel, n_samples_sel = _splice_selection_shape(
-        splice_idxer, idx, n_pairs
-    )
+    n_rows_sel, n_samples_sel = _splice_selection_shape(splice_idxer, idx, n_pairs)
 
     # Compute per-query lengths and build the plan.
     plan = inner_ds._build_splice_plan(
@@ -1194,9 +1163,7 @@ def _getitem_spliced(
 
     # Now rewrap each Ragged with group_offsets / out_shape to expose the
     # spliced layout.
-    recon = tuple(
-        _regroup(r, plan.group_offsets, plan.out_shape) for r in recon
-    )
+    recon = tuple(_regroup(r, plan.group_offsets, plan.out_shape) for r in recon)
 
     return recon, squeeze, out_reshape  # type: ignore
 ```
@@ -1227,19 +1194,29 @@ def _splice_selection_shape(
     n_r = (
         1
         if isinstance(r_idx, (int, np.integer))
-        else len(np.atleast_1d(np.asarray(r_idx) if not isinstance(r_idx, slice) else np.arange(splice_idxer.n_rows)[r_idx]))
+        else len(
+            np.atleast_1d(
+                np.asarray(r_idx)
+                if not isinstance(r_idx, slice)
+                else np.arange(splice_idxer.n_rows)[r_idx]
+            )
+        )
     )
     n_s = (
         1
         if isinstance(s_idx, (int, np.integer))
-        else len(np.atleast_1d(np.asarray(s_idx) if not isinstance(s_idx, slice) else np.arange(splice_idxer.n_samples)[s_idx]))
+        else len(
+            np.atleast_1d(
+                np.asarray(s_idx)
+                if not isinstance(s_idx, slice)
+                else np.arange(splice_idxer.n_samples)[s_idx]
+            )
+        )
     )
     return n_r, n_s
 
 
-def _regroup(
-    rag, group_offsets: NDArray[np.int64], out_shape: tuple[int | None, ...]
-):
+def _regroup(rag, group_offsets: NDArray[np.int64], out_shape: tuple[int | None, ...]):
     """Rewrap a per-element Ragged / RaggedAnnotatedHaps with grouped offsets."""
     if isinstance(rag, RaggedAnnotatedHaps):
         return RaggedAnnotatedHaps(
@@ -1272,9 +1249,7 @@ def _build_splice_plan(
     if isinstance(recon, Haps):
         ploidy = recon.genotypes.shape[-2]
         # Lengths shape (B, P) — same calc as get_haps_and_shifts does.
-        lengths_2d = recon.haplotype_lengths_for_plan(
-            ds_idx=ds_idx, regions=regions
-        )
+        lengths_2d = recon.haplotype_lengths_for_plan(ds_idx=ds_idx, regions=regions)
         return build_splice_plan(
             lengths=lengths_2d.astype(np.int32, copy=False),
             splice_row_offsets=splice_row_offsets,
@@ -1293,7 +1268,9 @@ def _build_splice_plan(
         n_tracks = len(recon.active_tracks)
         # Track lengths are deterministic from regions.
         per_region = (regions[:, 2] - regions[:, 1]).astype(np.int32, copy=False)
-        lengths_2d = np.broadcast_to(per_region[:, None], (per_region.shape[0], n_tracks)).copy()
+        lengths_2d = np.broadcast_to(
+            per_region[:, None], (per_region.shape[0], n_tracks)
+        ).copy()
         return build_splice_plan(
             lengths=lengths_2d,
             splice_row_offsets=splice_row_offsets,
@@ -1508,9 +1485,7 @@ def _call_float32(
     out_shape = (splice_plan.permuted_lengths.shape[0], None)
     return cast(
         RaggedTracks,
-        RaggedTracks.from_offsets(
-            out_buf, out_shape, splice_plan.permuted_out_offsets
-        ),
+        RaggedTracks.from_offsets(out_buf, out_shape, splice_plan.permuted_out_offsets),
     )
 ```
 
@@ -1533,11 +1508,13 @@ If no splice-track test exists, add a minimal one to `tests/dataset/test_rc_pack
 def test_spliced_tracks_round_trip(multi_exon_ds_path: Path):
     """Spliced track output: data buffer equals sum of per-element lengths."""
     import genvarloader as gvl
+
     # Skip if the fixture has no tracks attached; otherwise verify the
     # invariant that the splice plan path produces sane buffers.
     try:
         ds = (
-            gvl.Dataset.open(multi_exon_ds_path, ref_path)
+            gvl.Dataset
+            .open(multi_exon_ds_path, ref_path)
             .with_tracks("dummy")
             .with_settings(splice_info=("transcript_id", "exon_number"))
         )
@@ -1625,10 +1602,12 @@ In `tests/dataset/test_rc_packing.py`, add:
 def test_haptracks_splicing_raises(multi_exon_ds_path: Path):
     """Haplotype + track splicing is not supported (shape (b, t, p, ~l))."""
     import pytest
+
     # If the fixture lacks tracks, skip.
     try:
         ds = (
-            gvl.Dataset.open(multi_exon_ds_path, ref_path)
+            gvl.Dataset
+            .open(multi_exon_ds_path, ref_path)
             .with_seqs("haplotypes")
             .with_tracks("dummy")
             .with_settings(splice_info=("transcript_id", "exon_number"))

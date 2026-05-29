@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 import numpy as np
 import polars as pl
-from dataclasses import dataclass
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
 if TYPE_CHECKING:
     from ._ragged import RaggedIntervals
 
-__all__ = ["Reader", "IntervalTrack"]
+__all__ = ["IntervalTrack", "Reader"]
 
 
 DTYPE = TypeVar("DTYPE", bound=np.generic)

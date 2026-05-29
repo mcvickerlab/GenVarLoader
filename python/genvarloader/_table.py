@@ -261,7 +261,11 @@ class Table:
                     q_idx = joined["_q_1"].to_numpy()
                     j_starts_raw = joined["start_2"].to_numpy()
                     order = np.lexsort(
-                        (j_starts_raw, si_idx, q_idx)
+                        (
+                            j_starts_raw,
+                            si_idx,
+                            q_idx,
+                        )
                     )  # last key = primary
                     q_idx = q_idx[order]
                     si_idx = si_idx[order]
@@ -277,7 +281,10 @@ class Table:
 
                     cell_idx = q_idx * n_samples + si_idx
                     boundaries = np.concatenate(
-                        ([0], np.where(np.diff(cell_idx) != 0)[0] + 1)
+                        (
+                            [0],
+                            np.where(np.diff(cell_idx) != 0)[0] + 1,
+                        )
                     )
                     counts_per_cell = np.diff(
                         np.concatenate((boundaries, [len(cell_idx)]))

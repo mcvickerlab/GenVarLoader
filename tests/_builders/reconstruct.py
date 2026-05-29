@@ -13,11 +13,10 @@ than parametrize this one.
 from __future__ import annotations
 
 import numpy as np
-from seqpro.rag import Ragged
-
 from genvarloader._dataset._insertion_fill import InsertionFill, Repeat5p
 from genvarloader._dataset._reconstruct import Tracks, TrackType
 from genvarloader._ragged import RaggedIntervals, RaggedTracks
+from seqpro.rag import Ragged
 
 
 def make_tracks(

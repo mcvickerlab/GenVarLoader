@@ -25,7 +25,6 @@ import pysam
 import pytest
 from genoray import VCF
 
-
 # ---------------------------------------------------------------------------
 # Integration fixtures: write a fresh dataset into tmp so we don't mutate the
 # shared test fixtures, and can attach custom transcript_id / exon_number
@@ -296,8 +295,8 @@ def test_cds_internal_stops_bounded():
     reporting ≥2 stops almost always indicates a reconstruction bug rather
     than real biology, so we cap it at 1.
     """
-    import seqpro as sp
     import genvarloader as gvl
+    import seqpro as sp
 
     dss = (
         gvl.Dataset.open(CDS_DS, CDS_REF)
@@ -343,6 +342,7 @@ def test_spliced_tracks_round_trip(multi_exon_ds_path, ref_fasta):
         )
     except ValueError:
         pytest.skip("No tracks in fixture; tracks splice path covered elsewhere")
+        return  # for type checker: pytest.skip raises
     out = ds[0, 0]
     assert out is not None
 

@@ -19,23 +19,24 @@ import genvarloader as gvl
 gvl.write(
     path="ds.gvl",
     bed="rois.bed",
-    variants="normed.bcf",         # or .pgen, or .svar directory
+    variants="normed.bcf",  # or .pgen, or .svar directory
     tracks=[gvl.BigWigs.from_table("signal", "bw_table.tsv")],
     max_jitter=128,
 )
 
 # 3. Open and configure (chainable fluent API)
 ds = (
-    gvl.Dataset.open("ds.gvl", reference="ref.fa")
-        .with_seqs("haplotypes")
-        .with_tracks(["signal"])
-        .with_insertion_fill(gvl.Repeat5pNormalized())
-        .with_len(2048)              # or "ragged" / "variable"
-        .with_settings(jitter=32, deterministic=False)
+    gvl.Dataset
+    .open("ds.gvl", reference="ref.fa")
+    .with_seqs("haplotypes")
+    .with_tracks(["signal"])
+    .with_insertion_fill(gvl.Repeat5pNormalized())
+    .with_len(2048)  # or "ragged" / "variable"
+    .with_settings(jitter=32, deterministic=False)
 )
 
 # 4. Eager indexing: dataset[region_idx, sample_idx]
-batch = ds[0:8, :]   # shape depends on with_* state — see "Output shapes"
+batch = ds[0:8, :]  # shape depends on with_* state — see "Output shapes"
 ```
 
 ## Variant preprocessing requirements
@@ -73,6 +74,7 @@ Create an SVAR from a normalized VCF/PGEN with `genoray`:
 ```python
 from genoray._svar import dense2sparse
 from genoray import VCF
+
 dense2sparse(VCF("normed.bcf"), "normed.svar")  # writes a .svar/ directory
 ```
 
@@ -82,9 +84,15 @@ SVARs are resolved at `Dataset.open` time via `metadata.json` → caller `svar=`
 
 ```python
 gvl.write(
-    path, bed, variants=None, tracks=None,
-    samples=None, max_jitter=None, overwrite=False,
-    max_mem="4g", extend_to_length=True,
+    path,
+    bed,
+    variants=None,
+    tracks=None,
+    samples=None,
+    max_jitter=None,
+    overwrite=False,
+    max_mem="4g",
+    extend_to_length=True,
 )
 ```
 
@@ -165,7 +173,7 @@ sds = gvl.Dataset.open(
     "splice.gvl",
     reference="ref.fa",
     splice_info=("transcript_id", "exon_number"),  # tuple = (group_col, order_col)
-    var_filter="exonic",                            # optional: drop intronic variants
+    var_filter="exonic",  # optional: drop intronic variants
 )
 ```
 
@@ -189,6 +197,35 @@ seqs = ref_ds[:]  # Ragged[S1], one row per transcript
 ## Site-only variants (e.g. ClinVar)
 
 Use `gvl.sites_vcf_to_table(vcf)` → `pl.DataFrame` (bi-allelic SNPs only), then wrap an `ArrayDataset[AnnotatedHaps, ...]` with `gvl.DatasetWithSites(ds, sites, max_variants_per_region=1)`. Returns `(wt_haps, mut_haps, flags[, tracks])`; flags encode applied / deleted-overlap / already-existing. See `_variants/_sitesonly.py`.
+
+## Prefetching dataloader (`mode=...` on `to_dataloader`)
+
+`Dataset.to_dataloader()` accepts an optional `mode` to coarsen fetching: gvl's throughput scales with fetch size (internal multithreading amortizes overhead), so one big `dataset[r_idx, s_idx]` call sliced into mini-batches outperforms many small per-batch calls.
+
+```python
+loader = ds.to_dataloader(
+    batch_size=32,
+    mode="double_buffered",   # or "buffered", or None
+    buffer_bytes=2 * 1024**3, # total RAM budget; split across slots in double mode
+    copy=True,                # zero-copy opt-out (default True = safe)
+    heartbeat_seconds=60.0,   # double_buffered: max wait per chunk before liveness check
+)
+```
+
+Modes:
+
+- `None` (default) — plain `torch.utils.data.DataLoader`; existing behavior.
+- `"buffered"` — main process fetches one chunk per call (sized to `buffer_bytes`), slices into mini-batches. Refill latency visible but amortized over many batches.
+- `"double_buffered"` — subprocess producer fills one shm slot while consumer drains the other; refill latency hidden. Requires a file-backed `Dataset.open(path)`.
+
+Preconditions (all raise `ValueError` at construction):
+
+- `with_seqs in {"haplotypes", "annotated"}` requires `deterministic=True` (set via `with_settings(deterministic=True)`). `reference` and `variants` modes have no determinism requirement.
+- Spliced datasets are not supported.
+- `num_workers > 0` is rejected — the new loader IS the concurrency strategy.
+- A single mini-batch whose exact footprint exceeds the per-slot capacity raises with the offending size and remediation knobs (`batch_size↓`, `buffer_bytes↑`).
+
+Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (uses `haplotype_lengths`, `n_variants`, and allele offset tables) — no Zipf-style worst-case slack.
 
 ## Other public surface (one-liners)
 

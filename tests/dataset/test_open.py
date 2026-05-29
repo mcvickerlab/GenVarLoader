@@ -10,12 +10,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import genvarloader as gvl
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 import pytest
-
-import genvarloader as gvl
-
 
 # ---------------------------------------------------------------------------
 # Helpers

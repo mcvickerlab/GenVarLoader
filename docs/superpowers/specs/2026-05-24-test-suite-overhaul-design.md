@@ -79,47 +79,63 @@ Builders are the load-bearing piece of this overhaul. They take plain Python / n
 ```python
 # tests/_builders/genotypes.py
 def make_sparse_genotypes(
-    *, n_regions=2, n_samples=3, ploidy=2,
+    *,
+    n_regions=2,
+    n_samples=3,
+    ploidy=2,
     variants_per_region: int | list[int] | None = None,
     seed: int = 0,
 ) -> SparseGenotypes: ...
 
+
 # tests/_builders/variants.py
 def make_variants_table(
-    *, contig: str = "chr1",
+    *,
+    contig: str = "chr1",
     positions: Sequence[int],
     refs: Sequence[str],
     alts: Sequence[str],
     info: dict[str, list] | None = None,
 ) -> pa.Table: ...
 
+
 def make_variants(table: pa.Table | None = None, **table_kwargs) -> _Variants: ...
+
 
 # tests/_builders/haps.py
 def make_haps(
-    *, regions=None, samples=None,
+    *,
+    regions=None,
+    samples=None,
     variants: _Variants | None = None,
     genotypes: SparseGenotypes | None = None,
     ref: Ref | None = None,
     var_fields: Sequence[str] = (),
 ) -> Haps: ...
 
+
 # tests/_builders/ref.py
 def make_ref(contig_seqs: dict[str, bytes]) -> Ref: ...
 
+
 # tests/_builders/tracks.py
-def make_ragged_intervals(per_region: list[list[tuple[int, int, float]]]) -> RaggedIntervals: ...
+def make_ragged_intervals(
+    per_region: list[list[tuple[int, int, float]]],
+) -> RaggedIntervals: ...
+
 
 # tests/_builders/readers.py
-class FakeBigWigReader:        # implements Reader protocol
+class FakeBigWigReader:  # implements Reader protocol
     name: str
     dtype = np.float32
     contigs: list[str]
     coords = "intervals"
     chunked = False
+
     def read(self, contig, starts, ends) -> RaggedIntervals: ...
 
-class FakeFastaReader: ...     # contigs from dict, coords="bytes"
+
+class FakeFastaReader: ...  # contigs from dict, coords="bytes"
 ```
 
 ### Rules
@@ -141,11 +157,11 @@ Centralize axes so every relevant test parametrizes from the same source of trut
 ```python
 # tests/unit/dataset/_axes.py  (mirror in integration/)
 OUTPUT_MODES = ["haplotypes", "reference", "annotated", "variants"]
-LEN_MODES    = ["ragged", "padded"]
-JITTER       = [0, 5]
-RC_NEG       = [False, True]
-SPLICED      = [False, True]
-VARIANT_SRC  = ["vcf", "pgen", "svar"]   # integration only
+LEN_MODES = ["ragged", "padded"]
+JITTER = [0, 5]
+RC_NEG = [False, True]
+SPLICED = [False, True]
+VARIANT_SRC = ["vcf", "pgen", "svar"]  # integration only
 ```
 
 | Axis | Unit | Integration |
