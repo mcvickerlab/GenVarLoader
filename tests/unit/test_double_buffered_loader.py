@@ -229,7 +229,10 @@ def test_double_buffered_variants_offset_overflow_regression(
     if not svar.is_dir() or not regions.exists():
         pytest.skip("missing 1kg filtered.svar / regions.bed; run pixi run -e dev gen")
 
-    bed = sp.bed.read(regions)
+    # A 32-region subset still has SNV-dense regions whose alt/ref inner
+    # offsets (~8 B/variant) overflowed the slot pre-fix, but writes far less
+    # data — keeps this slow-marked test to a fraction of a second of work.
+    bed = sp.bed.read(regions).head(32)
     gvl_path = tmp_path / "ds_1kg.gvl"
     gvl.write(path=gvl_path, bed=bed, variants=svar, overwrite=True)
 

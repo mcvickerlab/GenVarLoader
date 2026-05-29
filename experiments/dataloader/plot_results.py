@@ -1,8 +1,11 @@
-"""Read results.csv → results_plot.png (3 outputs × 4 axes small multiples).
+"""Read results.csv → two 3×4 small-multiples figures.
 
-Each panel: x = the column's axis values, y = instances_per_s, one line per
-mode, holding the other three axes at their midpoint. mode=None is absent from
-the buffer_bytes column (baseline ignores the buffer budget).
+Each panel: x = the column's axis values, one line per mode, holding the other
+three axes at their midpoint. mode=None is absent from the buffer_bytes column
+(baseline ignores the buffer budget). Two metrics are rendered:
+  - results_plot.png            → instances/s (throughput)
+  - results_plot_bandwidth.png  → MiB/s (bandwidth; larger output modes
+                                  saturate bandwidth at smaller batch counts)
 
 Run (matplotlib lives in the `notebook` pixi env):
     pixi run -e notebook python experiments/dataloader/plot_results.py
@@ -23,6 +26,7 @@ import _common as C
 HERE = Path(__file__).resolve().parent
 RESULTS_CSV = HERE / "results.csv"
 OUT_PNG = HERE / "results_plot.png"
+OUT_PNG_BANDWIDTH = HERE / "results_plot_bandwidth.png"
 
 # column axis -> (csv column, fan values, {pinned other axis: midpoint})
 AXES = {
@@ -44,8 +48,8 @@ MODE_STYLE = {
 }
 
 
-def _panel_series(df: pl.DataFrame, axis_col: str, pins: dict, mode_key: str):
-    """Return (x, y) sorted by x for one mode on one panel."""
+def _panel_series(df: pl.DataFrame, axis_col: str, pins: dict, mode_key: str, metric: str):
+    """Return (x, y) sorted by x for one mode on one panel, y = ``metric``."""
     # The CSV stores mode=None (baseline) as an empty field, which read_csv with
     # null_values=[""] loads as null — so match it via is_null(), not == "".
     if mode_key == "":
@@ -64,16 +68,11 @@ def _panel_series(df: pl.DataFrame, axis_col: str, pins: dict, mode_key: str):
         else:
             sub = sub.filter(pl.col("buffer_bytes") == C.BUFFER_MID)
     sub = sub.sort(axis_col)
-    return sub[axis_col].to_list(), sub["instances_per_s"].to_list()
+    return sub[axis_col].to_list(), sub[metric].to_list()
 
 
-def main() -> None:
-    if not RESULTS_CSV.exists():
-        print(f"Missing {RESULTS_CSV} — run bench.py first.")
-        return
-    # buffer_bytes is empty for baseline rows -> read as nullable int
-    df = pl.read_csv(RESULTS_CSV, null_values=[""])
-
+def _render(df: pl.DataFrame, metric: str, ylabel: str, title: str, out_png: Path) -> None:
+    """Render the 3×4 small-multiples grid for one metric to ``out_png``."""
     axis_names = list(AXES)
     fig, axs = plt.subplots(
         len(C.OUTPUTS), len(axis_names),
@@ -87,7 +86,7 @@ def main() -> None:
             ax = axs[r][c]
             axis_col, _, pins = AXES[axis_name]
             for mode_key, (label, color, marker) in MODE_STYLE.items():
-                x, y = _panel_series(out_df, axis_col, pins, mode_key)
+                x, y = _panel_series(out_df, axis_col, pins, mode_key, metric)
                 if x:
                     ax.plot(x, y, marker=marker, color=color, label=label)
             if axis_name == "buffer_bytes":
@@ -95,24 +94,45 @@ def main() -> None:
             if r == 0:
                 ax.set_title(axis_name)
             if c == 0:
-                ax.set_ylabel(f"{output}\ninstances/s")
+                ax.set_ylabel(f"{output}\n{ylabel}")
             ax.grid(True, alpha=0.3)
     # Anchor the legend to a panel that carries all three series (the
     # buffer_bytes column has no None baseline).
     axs[0][0].legend(fontsize=8)
 
-    fig.suptitle(
-        "DataLoader throughput: mode comparison across knobs "
-        "(other axes pinned at midpoint)",
-        fontsize=13, fontweight="bold",
-    )
-    fig.savefig(OUT_PNG, dpi=150)
-    print(f"Saved {OUT_PNG}")
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+    fig.savefig(out_png, dpi=150)
+    print(f"Saved {out_png}")
     plt.close(fig)
 
-    # --- optional MiB_per_s variant (uncomment to render bandwidth view) ---
-    # Re-run with "MiB_per_s" substituted for "instances_per_s" in
-    # _panel_series and OUT_PNG -> results_plot_bandwidth.png.
+
+def main() -> None:
+    if not RESULTS_CSV.exists():
+        print(f"Missing {RESULTS_CSV} — run bench.py first.")
+        return
+    # buffer_bytes is empty for baseline rows -> read as nullable int
+    df = pl.read_csv(RESULTS_CSV, null_values=[""])
+
+    _render(
+        df,
+        metric="instances_per_s",
+        ylabel="instances/s",
+        title=(
+            "DataLoader throughput: mode comparison across knobs "
+            "(other axes pinned at midpoint)"
+        ),
+        out_png=OUT_PNG,
+    )
+    _render(
+        df,
+        metric="MiB_per_s",
+        ylabel="MiB/s",
+        title=(
+            "DataLoader bandwidth: mode comparison across knobs "
+            "(other axes pinned at midpoint)"
+        ),
+        out_png=OUT_PNG_BANDWIDTH,
+    )
 
 
 if __name__ == "__main__":
