@@ -12,9 +12,16 @@ Two deliverables:
    and the four generation pipelines (haplotype, variant, track, re-aligned track), so the
    ~18–20× regression documented in `REGRESSIONS.md` — and any future regression — is caught
    continuously.
-2. A **py-spy + memray profiling pass** over the tracks, haplotype, and variant hot paths to
+2. A **py-spy + memray profiling pass** over the haplotype, track, and variant hot paths to
    identify where the regression lives, written up against the existing hypotheses in
    `REGRESSIONS.md`.
+
+**Haplotype and track regressions are co-equal headlines.** `REGRESSIONS.md` currently
+headlines tracks (controlled parity: ~18–20×) and relegates haplotypes to a "supporting,
+less-controlled" smoke grid (~10–22×). But haplotype dataloading is the more heavily used
+path, so its regression is arguably the more critical of the two. This work treats both as
+first-class profiling and benchmarking targets, and the profiling write-up elevates
+haplotypes to a headline alongside tracks in `REGRESSIONS.md`.
 
 Decisions locked in during brainstorming:
 
@@ -29,12 +36,15 @@ Decisions locked in during brainstorming:
 ## Background: the regression
 
 `REGRESSIONS.md` records that track dataloading is ~18–20× slower and uses dramatically more
-RAM on 0.24.1 vs 0.6.1, confirmed by a controlled parity test. The fingered hot path is
-tracks-only re-alignment: `with_seqs(None).with_tracks("read-depth").with_len(16384)`,
-single numba thread. The suggested investigation order is: (1) profile the serial tracks-only
-hot path, (4) find what now scales with seqlen at fixed nucleotides-per-batch. This design
-operationalizes (1) for tracks, haplotypes, and variants, and adds continuous regression
-tracking so any fix is measurable.
+RAM on 0.24.1 vs 0.6.1, confirmed by a controlled parity test; the haplotype smoke grid shows
+a comparable ~10–22× slowdown (noisier, not yet controlled). The fingered track hot path is
+tracks-only re-alignment: `with_seqs(None).with_tracks("read-depth").with_len(16384)`, single
+numba thread; the haplotype hot path is `with_seqs("haplotypes").with_len(16384)`. The
+suggested investigation order is: (1) profile the serial hot paths, (4) find what now scales
+with seqlen at fixed nucleotides-per-batch. This design operationalizes (1) for haplotypes,
+tracks, and variants, and adds continuous regression tracking so any fix is measurable. Because
+haplotype reconstruction is the more heavily used path, it is treated as a co-equal headline
+with tracks rather than a secondary "supporting" measurement.
 
 ## Data: committed chr22 1kGP + GEUVADIS slice
 
@@ -143,25 +153,28 @@ Reconstructor `__call__` over the opened dataset, at `with_len(16384)` (the regr
 - Tasks:
   - `bench` — `pytest tests/benchmarks --codspeed` (falls back to plain `pytest-benchmark` when
     `--codspeed` is unavailable).
-  - `profile-tracks` / `profile-haps` / `profile-variants` — thin drivers around
+  - `profile-haps` / `profile-tracks` / `profile-variants` — thin drivers around
     `profiling/profile.py --mode ...` under py-spy.
-  - `memray-tracks` / `memray-haps` / `memray-variants` — the same modes under memray.
+  - `memray-haps` / `memray-tracks` / `memray-variants` — the same modes under memray.
 - No CodSpeed GitHub Action this round (local-only).
 
 ## Component 3 — profiling pass + write-up
 
-`profiling/profile.py` takes `--mode {tracks,haplotypes,variants}`, runs single numba thread
+`profiling/profile.py` takes `--mode {haplotypes,tracks,variants}`, runs single numba thread
 (`NUMBA_NUM_THREADS=1`) over the committed chr22 dataset at `with_len(16384)`:
 
-- **tracks** — `with_seqs(None).with_tracks("read-depth")` (the regression target).
-- **haplotypes** — `with_seqs("haplotypes")` (reconstruction from real 1kGP indels + masked reference).
+- **haplotypes** — `with_seqs("haplotypes")` (co-equal headline; reconstruction from real 1kGP
+  indels + masked reference; the more heavily used path).
+- **tracks** — `with_seqs(None).with_tracks("read-depth")` (co-equal headline; the controlled
+  track-regression target).
 - **variants** — `with_seqs("variants")` (`RaggedVariants` assembly).
 
 Each mode runs under both py-spy (sampling → speedscope/flamegraph) and memray (allocation →
 peak-RSS attribution). After analysis, append a **"Profiling results (local, chr22 GEUVADIS
-slice)"** section to `REGRESSIONS.md` mapping each pipeline's hot spots to the existing
-hypotheses (serial bottleneck #1, memory-scales-with-seqlen #4), with the caveat that absolute
-parity numbers still need the cluster-scale dataset.
+slice)"** section to `REGRESSIONS.md` that headlines the haplotype and track hot paths
+together, mapping each pipeline's hot spots to the existing hypotheses (serial bottleneck #1,
+memory-scales-with-seqlen #4), with the caveat that absolute parity numbers still need the
+cluster-scale dataset.
 
 ## Out of scope
 
