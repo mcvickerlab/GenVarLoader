@@ -1075,9 +1075,26 @@ class Dataset:
         self,
         regions: Idx | None = None,
         samples: Idx | str | Sequence[str] | None = None,
+        *,
+        include_offsets: bool = False,
     ) -> NDArray[np.int64]:
         """Exact bytes one (region, sample) instance materializes to under the
         current schema. Shape: (n_instances,) of int64.
+
+        Parameters
+        ----------
+        include_offsets
+            If ``False`` (default), return the *payload* bytes — the
+            ``numpy.nbytes`` of the materialized output. If ``True``, add the
+            per-instance share of the int64 offset/lengths arrays that the
+            shared-memory chunk serialization writes alongside the payload
+            (see ``_shm_layout.write_chunk``): ``8 * ploidy`` per ragged
+            output array (outer offsets) and, for ``variants`` ``alt``/``ref``
+            fields, ``8 * n_variants`` (inner allele offsets). This is the
+            footprint that must fit in a ``double_buffered`` slot; payload
+            alone undersizes the slot for ragged outputs. The per-chunk
+            ``+1`` offset terminators and 8-byte alignment padding are not
+            included here — they are absorbed by the slot's fixed slack.
 
         Raises NotImplementedError for spliced datasets. Raises ValueError for
         non-deterministic datasets when with_seqs is in {"haplotypes", "annotated"}.
@@ -1099,6 +1116,13 @@ class Dataset:
             self.sequence_type
         )  # "reference" | "haplotypes" | "annotated" | "variants" | None
         total = np.zeros(len(r_idx), dtype=np.int64)
+        # Per-instance share of int64 offset/lengths arrays (filled when
+        # include_offsets); added to `total` just before the final reshape.
+        offset_total = np.zeros(len(r_idx), dtype=np.int64)
+        OFF = 8  # int64 offset entry
+        ploidy = (
+            self._seqs.n_variants.shape[-1] if isinstance(self._seqs, Haps) else 1
+        )
         # These are computed conditionally below; declared here to satisfy the type checker.
         hap_len_sum: NDArray[np.int64] = np.empty(0, dtype=np.int64)
         region_lens: NDArray[np.int64] = np.empty(0, dtype=np.int64)
@@ -1111,6 +1135,9 @@ class Dataset:
             regions_arr[:, 2] += self.jitter
             region_lens = (regions_arr[:, 2] - regions_arr[:, 1]).astype(np.int64)
             total += region_lens
+            if include_offsets and self.output_length == "ragged":
+                # ragged reference: 1 outer-offset entry per instance (no ploidy).
+                offset_total += OFF
         elif seq_kind in ("haplotypes", "annotated"):
             if not self.deterministic:
                 raise ValueError(
@@ -1131,6 +1158,12 @@ class Dataset:
                 # length as haps), not per-variant. Both are int32 (4 bytes).
                 total += hap_len_sum * 4  # var_idxs int32
                 total += hap_len_sum * 4  # ref_coords int32
+            if include_offsets:
+                # Each ragged array's outer offsets carry `ploidy` entries per
+                # instance: 1 array for haplotypes, 3 (haps/var_idxs/ref_coords)
+                # for annotated.
+                n_seq_arrays = 1 if seq_kind == "haplotypes" else 3
+                offset_total += OFF * ploidy * n_seq_arrays
         elif seq_kind == "variants":
             if not isinstance(self._seqs, Haps):
                 raise AssertionError("variants mode requires Haps")
@@ -1159,6 +1192,13 @@ class Dataset:
                     # INFO column: numeric, known dtype from on-disk schema.
                     info_dtype = haps_obj.variants.info[f].dtype
                     total += n_vars_total * info_dtype.itemsize
+            if include_offsets:
+                # RaggedVariants (kind=2) writes, per field: outer offsets
+                # (ploidy entries/instance) and, for alt/ref allele fields,
+                # inner offsets (one entry per variant → n_vars_total/instance).
+                n_allele_fields = sum(1 for f in var_fields if f in ("alt", "ref"))
+                offset_total += OFF * ploidy * len(var_fields)
+                offset_total += OFF * n_vars_total * n_allele_fields
         elif seq_kind is None:
             pass
         else:
@@ -1183,6 +1223,16 @@ class Dataset:
                         np.int64
                     )
                 total += region_lens * n_tracks * track_itemsize
+            if include_offsets:
+                # Each track is its own ragged array. Grouped by (instance ×
+                # ploidy) for haplotype-shaped outputs, else by instance.
+                if seq_kind in ("haplotypes", "annotated"):
+                    offset_total += OFF * ploidy * n_tracks
+                else:
+                    offset_total += OFF * n_tracks
+
+        if include_offsets:
+            total += offset_total
 
         if squeeze:
             return total

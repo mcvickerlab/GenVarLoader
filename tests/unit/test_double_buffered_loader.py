@@ -133,6 +133,48 @@ def test_double_buffered_schema_settings_parity(file_backed_ds, seq_kind):
 
 
 @pytest.mark.slow
+def test_double_buffered_variants_offset_overflow_regression(
+    data_dir, reference, tmp_path
+):
+    """Regression: double_buffered slots must be sized for the *serialized*
+    footprint, not payload alone.
+
+    A serialized ragged chunk also stores int64 offset/lengths arrays. For
+    ``variants`` output the alt/ref inner offsets cost ~8 bytes per variant,
+    which dwarfs the 1-byte SNV allele payload; on realistic data (1KG,
+    ~287k variants) these overflowed the fixed slot slack and the producer
+    raised ``ProducerError (ValueError): buffer is smaller than requested
+    size``. ``buffered`` mode never serializes into a fixed slot, so it was
+    unaffected — hence we compare the two.
+    """
+    import seqpro as sp
+
+    svar = data_dir / "1kg" / "filtered.svar"
+    regions = data_dir / "1kg" / "regions.bed"
+    if not svar.is_dir() or not regions.exists():
+        pytest.skip("missing 1kg filtered.svar / regions.bed; run pixi run -e dev gen")
+
+    bed = sp.bed.read(regions)
+    gvl_path = tmp_path / "ds_1kg.gvl"
+    gvl.write(path=gvl_path, bed=bed, variants=svar, overwrite=True)
+
+    ds = gvl.Dataset.open(gvl_path, reference=reference).with_seqs("variants")
+    common = dict(
+        batch_size=16,
+        shuffle=False,
+        drop_last=True,
+        buffer_bytes=8 * 1024 * 1024,
+    )
+    buf_batches = list(ds.to_dataloader(mode="buffered", **common))
+    # This line raised ProducerError before the slot-sizing fix.
+    db_batches = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+
+    assert len(db_batches) == len(buf_batches)
+    for i, (b, d) in enumerate(zip(buf_batches, db_batches)):
+        assert len(b) == len(d), f"batch {i} instance-count mismatch"
+
+
+@pytest.mark.slow
 def test_shm_cleanup_after_close(file_backed_ds):
     """No gvl-prefixed entries leak in /dev/shm after the loader is closed."""
     if not os.path.isdir("/dev/shm"):

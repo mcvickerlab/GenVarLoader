@@ -50,11 +50,17 @@ def _resolve_buffered_inputs(
     generator,
     buffer_bytes: int,
     n_slots: int,
+    include_offsets: bool = False,
 ):
     """Compute flat (r_idx, s_idx) epoch order, bytes_per_instance table, and slot_bytes.
 
     ``dataset`` must be a raw gvl Dataset (not a TorchDataset wrapper) so that
     ``_output_bytes_per_instance`` and ``.shape`` are available.
+
+    ``include_offsets`` adds the serialized offset/lengths overhead to the
+    byte table. Required for ``double_buffered``, whose fixed-size shm slots
+    must hold the full serialized chunk (payload + offsets); ``buffered`` packs
+    by payload alone since it never serializes into a fixed slot.
     """
     # 1) Resolve full epoch order from the BatchSampler.
     if sampler is None:
@@ -72,7 +78,7 @@ def _resolve_buffered_inputs(
     # 2) Pre-pass: exact bytes per instance for the entire (n_regions, n_samples) grid.
     # Pass None, None so parse_idx uses slice(None), slice(None) → "basic" indexing →
     # out_reshape=(n_regions, n_samples), and _output_bytes_per_instance returns a 2-D array.
-    bpi = dataset._output_bytes_per_instance(None, None)
+    bpi = dataset._output_bytes_per_instance(None, None, include_offsets=include_offsets)
     # Ensure exactly (n_regions, n_samples) 2-D regardless of squeeze/reshape behavior.
     bpi = np.asarray(bpi, dtype=np.int64).reshape(dataset.shape)
 
@@ -157,6 +163,7 @@ def get_dataloader(
         generator,
         buffer_bytes,
         n_slots,
+        include_offsets=(mode == "double_buffered"),
     )
 
     if mode == "buffered":
