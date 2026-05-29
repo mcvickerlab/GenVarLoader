@@ -26,19 +26,22 @@ ALL_MODES = [None, "buffered", "double_buffered"]
 THREADS_FACT = [1, 8]
 REGION_FACT = [1_000, 10_000]
 BATCH_FACT = [16, 128]
-BUFFER_FACT = [256 * MiB, 2 * GiB]
+# buffer_bytes is the total RAM budget; double_buffered splits it across two
+# slots and the producer+consumer each hold a chunk copy, so keep the ceiling
+# modest for workstation RAM. Max 512 MiB.
+BUFFER_FACT = [64 * MiB, 512 * MiB]
 
 # ── fan values (each includes its axis midpoint) ─────────────────────────────
 THREADS_FAN = [2, 4, 16]
 REGION_FAN = [2_500, 5_000, 25_000]
 BATCH_FAN = [32, 64, 256]
-BUFFER_FAN = [512 * MiB, 1 * GiB, 4 * GiB]
+BUFFER_FAN = [128 * MiB, 256 * MiB, 512 * MiB]
 
 # ── midpoints (other axes pinned here during a 1-axis fan) ────────────────────
 THREADS_MID = 4
 REGION_MID = 5_000
 BATCH_MID = 64
-BUFFER_MID = 1 * GiB
+BUFFER_MID = 256 * MiB
 
 # ── unions used for process dispatch / dataset prep ──────────────────────────
 ALL_THREADS = sorted(set(THREADS_FACT) | set(THREADS_FAN))

@@ -23,17 +23,17 @@ def test_axis_constants_match_spec():
     assert C.THREADS_FACT == [1, 8]
     assert C.REGION_FACT == [1_000, 10_000]
     assert C.BATCH_FACT == [16, 128]
-    assert C.BUFFER_FACT == [256 * C.MiB, 2 * C.GiB]
+    assert C.BUFFER_FACT == [64 * C.MiB, 512 * C.MiB]
 
     assert C.THREADS_FAN == [2, 4, 16]
     assert C.REGION_FAN == [2_500, 5_000, 25_000]
     assert C.BATCH_FAN == [32, 64, 256]
-    assert C.BUFFER_FAN == [512 * C.MiB, 1 * C.GiB, 4 * C.GiB]
+    assert C.BUFFER_FAN == [128 * C.MiB, 256 * C.MiB, 512 * C.MiB]
 
     assert C.THREADS_MID == 4
     assert C.REGION_MID == 5_000
     assert C.BATCH_MID == 64
-    assert C.BUFFER_MID == 1 * C.GiB
+    assert C.BUFFER_MID == 256 * C.MiB
 
 
 def test_dispatch_unions():

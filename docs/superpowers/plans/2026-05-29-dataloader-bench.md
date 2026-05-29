@@ -27,6 +27,14 @@ Expected: `prereq OK`. If it errors, stop and land the prefetching-dataloader pl
 
 ## Spec reconciliation (read before coding)
 
+> **CORRECTION (mid-execution, buffer sizes).** The `buffer_bytes` axis was
+> reduced for workstation RAM (`double_buffered` allocates two slots totaling
+> `buffer_bytes`, plus producer+consumer chunk copies). Live values in
+> `_common.py`: `BUFFER_FACT=[64 MiB, 512 MiB]`, `BUFFER_FAN=[128, 256, 512] MiB`,
+> `BUFFER_MID=256 MiB` (ceiling 512 MiB). The code blocks below show the
+> original `{256 MiB … 4 GiB}` values; `_common.py` is authoritative. Cell
+> counts are unchanged (the all-midpoint cell is now `(4, 5000, 64, 256 MiB)`).
+
 The spec (`docs/superpowers/specs/2026-05-29-dataloader-bench-design.md`) quotes **192 cells** and per-cell counts of 28 (new modes) / 8 (baseline). Two refinements, both decided during planning, change the realized count to **195**:
 
 1. **Shared-midpoint dedup (new modes).** Every axis fan includes that axis's *midpoint* value (threads `{2,4,16}`∋4, region `{2500,5000,25000}`∋5000, batch `{32,64,256}`∋64, buffer `{512MiB,1GiB,4GiB}`∋1GiB). So the all-midpoint cell `(4, 5000, 64, 1GiB)` is produced by all four fans. It is the **same physical configuration** and must be measured **once**, not four times. Deduped new-mode count is `16 (factorial) + 9 (fans, 12 raw − 3 duplicate midpoints) = 25` per `(mode, output)`. New-mode total: `25 × 2 × 3 = 150`.
