@@ -135,6 +135,18 @@ def generate_bed(regions_bed: str | Path, region_length: int):
     return sp.bed.with_len(bed, region_length)
 
 
+def output_bytes_table(dataset):
+    """Compute the exact per-instance byte table once for a configured dataset.
+
+    Returns ``(instances, total_bytes, table)`` where ``table`` is the
+    ``(n_regions, n_samples)`` int64 array from
+    ``Dataset._output_bytes_per_instance``. For a full epoch with shuffle off,
+    ``instances == table.size`` and ``total_bytes == table.sum()``.
+    """
+    table = dataset._output_bytes_per_instance()
+    return int(table.size), int(table.sum()), table
+
+
 def prepare_datasets(
     region_lengths: list[int],
     svar_path: str | Path,

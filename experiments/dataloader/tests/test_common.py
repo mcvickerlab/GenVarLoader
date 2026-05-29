@@ -141,3 +141,22 @@ def test_generate_bed_resizes_to_target_length():
     lengths = (bed["chromEnd"] - bed["chromStart"]).unique().to_list()
     assert lengths == [2_500]
     assert bed.height == 100  # regions.bed has 100 regions
+
+
+@pytest.mark.slow
+def test_output_bytes_table_matches_actual_nbytes(tmp_path):
+    import genvarloader as gvl
+
+    repo = Path(__file__).resolve().parents[3]
+    svar = repo / "tests" / "data" / "1kg" / "filtered.svar"
+    regions = repo / "tests" / "data" / "1kg" / "regions.bed"
+    if not svar.is_dir():
+        pytest.skip("missing filtered.svar; run pixi run -e dev gen")
+
+    paths = C.prepare_datasets([1_000], svar, regions, tmp_path)
+    ds = gvl.Dataset.open(paths[1_000]).with_seqs("variants")
+
+    instances, total_bytes, table = C.output_bytes_table(ds)
+    assert instances == table.size
+    assert total_bytes == int(table.sum())
+    assert instances == 100 * 5  # 100 regions × 5 samples

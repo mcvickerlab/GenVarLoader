@@ -177,6 +177,11 @@ class OpenRequest:
     def _initial_seqs_kind(seqs: Haps | Ref | None) -> SeqsKind:
         # Default view kind for each storage shape.
         if isinstance(seqs, Haps):
+            # Without a reference we cannot reconstruct sequences; default to
+            # "variants" so that open() succeeds and the caller can use
+            # .with_seqs("variants") without error.
+            if seqs.reference is None:
+                return "variants"
             return "haplotypes"
         if isinstance(seqs, Ref):
             return "reference"
