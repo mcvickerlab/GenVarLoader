@@ -681,11 +681,13 @@ class Haps(Reconstructor[_H]):
                 dosages = ak.to_regular(dosages[_keep], 1)
             fields["dosage"] = Ragged(ak.to_packed(dosages))
 
-        fields.update({
-            k: self._get_info(genos, k)
-            for k in self.var_fields
-            if k not in {"alt", "start", "ref", "ilen", "dosage"}
-        })
+        fields.update(
+            {
+                k: self._get_info(genos, k)
+                for k in self.var_fields
+                if k not in {"alt", "start", "ref", "ilen", "dosage"}
+            }
+        )
 
         variants = RaggedVariants(**fields)
 

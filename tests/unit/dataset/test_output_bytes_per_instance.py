@@ -3,6 +3,7 @@
 Invariant: Dataset._output_bytes_per_instance(r, s) == nbytes of the actual
 dataset[r, s] output, summed over arrays returned for that instance.
 """
+
 import awkward as ak
 import numpy as np
 import pytest
@@ -139,7 +140,11 @@ def test_variants_with_info_column_exact():
 
 
 def test_haplotypes_plus_tracks_exact():
-    ds = gvl.get_dummy_dataset().with_seqs("haplotypes").with_settings(deterministic=True)
+    ds = (
+        gvl.get_dummy_dataset()
+        .with_seqs("haplotypes")
+        .with_settings(deterministic=True)
+    )
     if not ds.active_tracks:
         pytest.skip("dummy dataset has no tracks")
     r = np.arange(ds.full_shape[0])

@@ -1,4 +1,5 @@
 """Round-trip tests for the shm slot layout."""
+
 import multiprocessing as mp
 import numpy as np
 import pytest
@@ -67,6 +68,7 @@ def test_dense_cross_process():
 
 def test_ragged_roundtrip():
     from seqpro.rag import Ragged
+
     data = np.arange(20, dtype=np.int32)
     # Three rows of lengths 5, 8, 7 → offsets [0, 5, 13, 20].
     offsets = np.array([0, 5, 13, 20], dtype=np.int64)
@@ -78,6 +80,7 @@ def test_ragged_roundtrip():
         n_inst, views = read_chunk(shm.buf)
         assert n_inst == 3
         from seqpro.rag import Ragged as R
+
         assert isinstance(views[0], R)
         np.testing.assert_array_equal(views[0].data, data)
         np.testing.assert_array_equal(views[0].offsets, offsets)
@@ -89,13 +92,16 @@ def test_ragged_roundtrip():
 def test_annotated_haps_roundtrip():
     """Three Ragged arrays in sequence (haps S1, ref_coords int32, var_idxs int32)."""
     from seqpro.rag import Ragged
+
     haps_data = np.frombuffer(b"ACGTAAAA", dtype="S1")
     haps_offsets = np.array([0, 4, 8], dtype=np.int64)
     haps = Ragged.from_offsets(haps_data, (2, None), haps_offsets)
-    coords = Ragged.from_offsets(np.arange(8, dtype=np.int32),
-                                  (2, None), haps_offsets)
-    v_idxs = Ragged.from_offsets(np.array([10, 20, 30], dtype=np.int32),
-                                  (2, None), np.array([0, 1, 3], dtype=np.int64))
+    coords = Ragged.from_offsets(np.arange(8, dtype=np.int32), (2, None), haps_offsets)
+    v_idxs = Ragged.from_offsets(
+        np.array([10, 20, 30], dtype=np.int32),
+        (2, None),
+        np.array([0, 1, 3], dtype=np.int64),
+    )
     capacity = 8192
     shm = SharedMemory(create=True, size=capacity)
     try:
@@ -103,8 +109,9 @@ def test_annotated_haps_roundtrip():
         n_inst, views = read_chunk(shm.buf)
         assert n_inst == 2 and len(views) == 3
         np.testing.assert_array_equal(views[0].data, haps_data)
-        np.testing.assert_array_equal(views[1].data.view(np.int32),
-                                       np.arange(8, dtype=np.int32))
+        np.testing.assert_array_equal(
+            views[1].data.view(np.int32), np.arange(8, dtype=np.int32)
+        )
     finally:
         shm.close()
         shm.unlink()
@@ -113,6 +120,7 @@ def test_annotated_haps_roundtrip():
 def test_rag_variants_roundtrip():
     import genvarloader as gvl
     from genvarloader._shm_layout import HEADER_RESERVED
+
     ds = gvl.get_dummy_dataset().with_seqs("variants").with_tracks(False)
     r = np.arange(ds.full_shape[0])
     s = np.zeros(len(r), dtype=np.int64)
@@ -125,8 +133,10 @@ def test_rag_variants_roundtrip():
         write_chunk(shm.buf, [rv], n_instances=len(r))
         n_inst, views = read_chunk(shm.buf)
         from genvarloader._dataset._rag_variants import RaggedVariants
+
         assert isinstance(views[0], RaggedVariants)
         import awkward as ak
+
         assert ak.to_list(views[0]) == ak.to_list(rv)
     finally:
         shm.close()

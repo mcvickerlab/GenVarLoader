@@ -1,4 +1,5 @@
 """End-to-end tests for mode='double_buffered'."""
+
 from __future__ import annotations
 
 import os
@@ -61,12 +62,14 @@ def test_double_buffered_iter_matches_buffered(file_backed_ds, seq_kind):
             )
             for j, (x, y) in enumerate(zip(b, d)):
                 np.testing.assert_array_equal(
-                    np.asarray(x), np.asarray(y),
+                    np.asarray(x),
+                    np.asarray(y),
                     err_msg=f"batch {i} element {j} mismatch",
                 )
         else:
             np.testing.assert_array_equal(
-                np.asarray(b), np.asarray(d),
+                np.asarray(b),
+                np.asarray(d),
                 err_msg=f"batch {i} mismatch",
             )
 
@@ -98,8 +101,7 @@ def test_producer_exception_reraised(file_backed_ds, monkeypatch):
 def test_double_buffered_schema_settings_parity(file_backed_ds, seq_kind):
     """rc_neg and deterministic are replayed correctly in the producer subprocess."""
     ds = (
-        file_backed_ds
-        .with_seqs(seq_kind)
+        file_backed_ds.with_seqs(seq_kind)
         .with_tracks(False)
         .with_settings(rc_neg=False, deterministic=True)
     )
@@ -118,12 +120,14 @@ def test_double_buffered_schema_settings_parity(file_backed_ds, seq_kind):
         if isinstance(b, tuple):
             for j, (x, y) in enumerate(zip(b, d)):
                 np.testing.assert_array_equal(
-                    np.asarray(x), np.asarray(y),
+                    np.asarray(x),
+                    np.asarray(y),
                     err_msg=f"batch {i} element {j} mismatch",
                 )
         else:
             np.testing.assert_array_equal(
-                np.asarray(b), np.asarray(d),
+                np.asarray(b),
+                np.asarray(d),
                 err_msg=f"batch {i} mismatch",
             )
 

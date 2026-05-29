@@ -22,8 +22,7 @@ def dataset(request, phased_vcf_gvl, phased_pgen_gvl, phased_svar_gvl, ref_fasta
 
 def test_jitter(dataset: gvl.RaggedDataset):
     ds = (
-        dataset
-        .with_settings(jitter=dataset.max_jitter, rc_neg=False)
+        dataset.with_settings(jitter=dataset.max_jitter, rc_neg=False)
         .with_seqs("annotated")
         .with_tracks(False)
     )

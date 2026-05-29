@@ -100,10 +100,12 @@ def main(
         ti_times[i] = perf_counter() - t0
 
         np.testing.assert_equal(nb_tracks, ti_tracks)
-    pl.DataFrame({
-        "numba": nb_times,
-        f"taichi_{ti_arch}": ti_times,
-    }).write_csv(out.with_suffix(".csv"))
+    pl.DataFrame(
+        {
+            "numba": nb_times,
+            f"taichi_{ti_arch}": ti_times,
+        }
+    ).write_csv(out.with_suffix(".csv"))
     with open(out.with_suffix(".json"), "w") as f:
         metadata = {
             "n_queries": n_queries,

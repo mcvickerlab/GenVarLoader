@@ -36,12 +36,14 @@ def _write_minimal_metadata(path: Path, *, ploidy: int | None = None) -> None:
 
 def _write_minimal_regions(path: Path) -> None:
     """Write a minimal ``input_regions.arrow`` into *path* (must already exist)."""
-    table = pa.table({
-        "chrom": pa.array(["chr1"], type=pa.large_utf8()),
-        "chromStart": pa.array([0], type=pa.int32()),
-        "chromEnd": pa.array([100], type=pa.int32()),
-        "r_idx_map": pa.array([0], type=pa.int64()),
-    })
+    table = pa.table(
+        {
+            "chrom": pa.array(["chr1"], type=pa.large_utf8()),
+            "chromStart": pa.array([0], type=pa.int32()),
+            "chromEnd": pa.array([100], type=pa.int32()),
+            "r_idx_map": pa.array([0], type=pa.int64()),
+        }
+    )
     with pa_ipc.new_file(path / "input_regions.arrow", table.schema) as writer:
         writer.write_table(table)
 

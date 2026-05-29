@@ -139,10 +139,12 @@ def build_splice_plan(
         cell_lengths = np.repeat(pair_lengths.astype(np.int64), E)
     # cell_lengths length = n_pairs * E. group_offsets indexes the
     # *permuted_lengths* array at cell boundaries.
-    cell_starts = np.concatenate((
-        [0],
-        np.cumsum(cell_lengths, dtype=np.int64),
-    ))  # length n_pairs*E + 1
+    cell_starts = np.concatenate(
+        (
+            [0],
+            np.cumsum(cell_lengths, dtype=np.int64),
+        )
+    )  # length n_pairs*E + 1
     # group_offsets[i] = permuted_out_offsets[cell_starts[i]]
     group_offsets = permuted_out_offsets[cell_starts]
 
@@ -184,8 +186,7 @@ class SpliceMap:
         """Parse splice_info into a (SpliceMap, spliced_bed) pair. Pure — no sampler."""
         if isinstance(splice_info, str):
             sp_bed = (
-                full_bed
-                .rename({splice_info: "splice_id"})
+                full_bed.rename({splice_info: "splice_id"})
                 .with_row_index()
                 .group_by("splice_id", maintain_order=True)
                 .agg(pl.all())
@@ -197,8 +198,7 @@ class SpliceMap:
                     "names for splice IDs and element ordering."
                 )
             sp_bed = (
-                full_bed
-                .rename({splice_info[0]: "splice_id"})
+                full_bed.rename({splice_info[0]: "splice_id"})
                 .with_row_index()
                 .group_by("splice_id", maintain_order=True)
                 .agg(pl.all().sort_by(splice_info[1]))

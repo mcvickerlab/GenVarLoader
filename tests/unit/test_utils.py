@@ -18,12 +18,14 @@ def test_bed_to_regions_categorical_strand_returns_int32() -> None:
     `non-precise type array(pyobject, 1d, A)`. See PR for the chr19 ADNI
     cohort reproducer.
     """
-    bed = pl.DataFrame({
-        "chrom": ["chr19", "chr19"],
-        "chromStart": [44906624, 44907759],
-        "chromEnd": [44906667, 44907952],
-        "strand": ["+", "+"],
-    }).with_columns(pl.col("strand").cast(pl.Categorical))
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr19", "chr19"],
+            "chromStart": [44906624, 44907759],
+            "chromEnd": [44906667, 44907952],
+            "strand": ["+", "+"],
+        }
+    ).with_columns(pl.col("strand").cast(pl.Categorical))
     assert bed.schema["strand"] == pl.Categorical
     regions = bed_to_regions(bed, ContigNormalizer(["chr19"]))
     assert regions.dtype == np.int32, f"want int32, got {regions.dtype}"
@@ -36,12 +38,14 @@ def test_bed_to_regions_categorical_strand_returns_int32() -> None:
 
 def test_bed_to_regions_utf8_strand_still_works() -> None:
     """Sanity: the existing Utf8-strand path still produces int32."""
-    bed = pl.DataFrame({
-        "chrom": ["chr1"],
-        "chromStart": [100],
-        "chromEnd": [200],
-        "strand": ["-"],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1"],
+            "chromStart": [100],
+            "chromEnd": [200],
+            "strand": ["-"],
+        }
+    )
     assert bed.schema["strand"] == pl.Utf8
     regions = bed_to_regions(bed, ContigNormalizer(["chr1"]))
     assert regions.dtype == np.int32

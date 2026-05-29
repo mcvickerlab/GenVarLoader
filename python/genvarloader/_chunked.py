@@ -1,5 +1,6 @@
 """Chunk planner: groups (r, s) pairs into per-slot chunks aligned to
 mini-batch boundaries."""
+
 from __future__ import annotations
 
 from typing import Iterator
@@ -68,7 +69,10 @@ class ChunkPlanner:
         while i < n_batches:
             running = 0
             j = i
-            while j < n_batches and running + int(self._batch_totals[j]) <= self.slot_bytes:
+            while (
+                j < n_batches
+                and running + int(self._batch_totals[j]) <= self.slot_bytes
+            ):
                 running += int(self._batch_totals[j])
                 j += 1
             assert j > i  # guaranteed by per-batch validation
@@ -77,16 +81,23 @@ class ChunkPlanner:
             i = j
         return peak
 
-    def __iter__(self) -> Iterator[tuple[NDArray[np.integer], NDArray[np.integer], int]]:
+    def __iter__(
+        self,
+    ) -> Iterator[tuple[NDArray[np.integer], NDArray[np.integer], int]]:
         n_batches = len(self._batch_totals)
         i = 0
         while i < n_batches:
             running = 0
             j = i
-            while j < n_batches and running + int(self._batch_totals[j]) <= self.slot_bytes:
+            while (
+                j < n_batches
+                and running + int(self._batch_totals[j]) <= self.slot_bytes
+            ):
                 running += int(self._batch_totals[j])
                 j += 1
-            assert j > i  # at least one batch per chunk, guaranteed by per-batch validation
+            assert (
+                j > i
+            )  # at least one batch per chunk, guaranteed by per-batch validation
             start = i * self.batch_size
             end = j * self.batch_size
             yield self.r_idx[start:end], self.s_idx[start:end], j - i

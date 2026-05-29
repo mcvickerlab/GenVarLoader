@@ -4,6 +4,7 @@ The helper returns the exact total bytes of REF or ALT allele payloads for the
 variants selected by each (region, sample, ploid) entry, computed in O(|V|) by
 differencing the RaggedAlleles offsets array (no payload read).
 """
+
 import numpy as np
 import pytest
 import genvarloader as gvl

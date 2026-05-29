@@ -1,4 +1,5 @@
 """Producer subprocess entrypoint for mode='double_buffered'."""
+
 from __future__ import annotations
 
 import os
@@ -52,6 +53,7 @@ def producer_main(
         reference_in_memory = schema.get("reference_in_memory", True)
         if reference_path is not None:
             from ._dataset._reference import Reference
+
             ref = Reference.from_path(reference_path, in_memory=reference_in_memory)
             ds = gvl.Dataset.open(dataset_path, reference=ref)
         else:

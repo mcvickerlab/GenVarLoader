@@ -1,4 +1,5 @@
 """End-to-end tests for mode='buffered'."""
+
 import numpy as np
 import pytest
 import genvarloader as gvl
@@ -6,7 +7,9 @@ import genvarloader as gvl
 pytest.importorskip("torch")
 
 
-@pytest.mark.parametrize("seq_kind", ["reference", "haplotypes", "annotated", "variants"])
+@pytest.mark.parametrize(
+    "seq_kind", ["reference", "haplotypes", "annotated", "variants"]
+)
 def test_buffered_iter_matches_direct(seq_kind):
     ds = gvl.get_dummy_dataset().with_seqs(seq_kind).with_tracks(False)
     if seq_kind in ("haplotypes", "annotated"):
@@ -23,8 +26,10 @@ def test_buffered_iter_matches_direct(seq_kind):
     )
     seen = 0
     for batch in loader:
-        seen += batch_size if not isinstance(batch, tuple) else (
-            batch[0].shape[0] if hasattr(batch[0], "shape") else len(batch[0])
+        seen += (
+            batch_size
+            if not isinstance(batch, tuple)
+            else (batch[0].shape[0] if hasattr(batch[0], "shape") else len(batch[0]))
         )
     assert seen == (n_total // batch_size) * batch_size
 
@@ -43,6 +48,10 @@ def test_buffered_rejects_oversized_batch():
 
 
 def test_buffered_rejects_nondeterministic_for_haplotypes():
-    ds = gvl.get_dummy_dataset().with_seqs("haplotypes").with_settings(deterministic=False)
+    ds = (
+        gvl.get_dummy_dataset()
+        .with_seqs("haplotypes")
+        .with_settings(deterministic=False)
+    )
     with pytest.raises(ValueError, match="deterministic"):
         ds.to_dataloader(mode="buffered", batch_size=2)

@@ -298,10 +298,12 @@ def test_with_insertion_fill_dict_partial_falls_back():
 
 
 def test_with_tracks_prunes_insertion_fill():
-    tracks = make_tracks(["a", "b"]).with_insertion_fill({
-        "a": Constant(0.0),
-        "b": FlankSample(),
-    })
+    tracks = make_tracks(["a", "b"]).with_insertion_fill(
+        {
+            "a": Constant(0.0),
+            "b": FlankSample(),
+        }
+    )
     new = tracks.with_tracks("a")
     assert set(new.insertion_fill) == {"a"}
     assert isinstance(new.insertion_fill["a"], Constant)

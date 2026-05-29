@@ -102,8 +102,7 @@ def test_open_dataset_via_recorded_svar_link(svar_dataset_paths, ref_fasta):
 
     gvl_path, _ = svar_dataset_paths
     ds = (
-        gvl.Dataset
-        .open(gvl_path, reference=ref_fasta)
+        gvl.Dataset.open(gvl_path, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_tracks(False)
     )
@@ -125,8 +124,7 @@ def test_open_dataset_after_relocation_via_override(
     shutil.copytree(gvl_path, moved_gvl)
 
     ds = (
-        gvl.Dataset
-        .open(moved_gvl, reference=ref_fasta, svar=moved)
+        gvl.Dataset.open(moved_gvl, reference=ref_fasta, svar=moved)
         .with_seqs("haplotypes")
         .with_tracks(False)
     )
@@ -163,8 +161,7 @@ def test_open_dataset_legacy_symlink_layout(tmp_path, svar_dataset_paths, ref_fa
     with _warnings.catch_warnings(record=True) as caught:
         _warnings.simplefilter("always")
         ds = (
-            gvl.Dataset
-            .open(gvl_path, reference=ref_fasta)
+            gvl.Dataset.open(gvl_path, reference=ref_fasta)
             .with_seqs("haplotypes")
             .with_tracks(False)
         )
@@ -201,8 +198,7 @@ def test_migrate_svar_link_upgrades_legacy_dataset(
     with _warnings.catch_warnings(record=True) as caught:
         _warnings.simplefilter("always")
         ds = (
-            gvl.Dataset
-            .open(gvl_path, reference=ref_fasta)
+            gvl.Dataset.open(gvl_path, reference=ref_fasta)
             .with_seqs("haplotypes")
             .with_tracks(False)
         )
@@ -234,8 +230,7 @@ def test_open_after_joint_relocation_preserves_relative(
     shutil.copytree(svar_path, new_svar)
 
     ds = (
-        gvl.Dataset
-        .open(new_gvl, reference=ref_fasta)
+        gvl.Dataset.open(new_gvl, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_tracks(False)
     )

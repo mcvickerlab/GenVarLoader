@@ -1,4 +1,5 @@
 """mode='double_buffered' dataloader: subprocess producer + 2-slot shm ping-pong."""
+
 from __future__ import annotations
 
 import atexit
@@ -57,13 +58,17 @@ def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
     for arr in views:
         if isinstance(arr, Ragged):
             n_groups = arr.shape[0]
-            if n_groups != n_instances and n_instances > 0 and n_groups % n_instances == 0:
+            if (
+                n_groups != n_instances
+                and n_instances > 0
+                and n_groups % n_instances == 0
+            ):
                 ploidy = n_groups // n_instances
-                arr = Ragged.from_offsets(arr.data, (n_instances, ploidy, None), arr.offsets)
+                arr = Ragged.from_offsets(
+                    arr.data, (n_instances, ploidy, None), arr.offsets
+                )
         result.append(arr)
     return result
-
-
 
 
 class _DoubleBufferedIterable:
@@ -104,7 +109,9 @@ class _DoubleBufferedIterable:
         capacity = HEADER_RESERVED + peak + 4096
         suffix = uuid.uuid4().hex[:8]
         self._shm_names = [f"gvl-{os.getpid()}-{suffix}-{i}" for i in range(2)]
-        self._shms = [SharedMemory(create=True, name=n, size=capacity) for n in self._shm_names]
+        self._shms = [
+            SharedMemory(create=True, name=n, size=capacity) for n in self._shm_names
+        ]
 
         ctx = mp.get_context("spawn")
         self._ctx = ctx

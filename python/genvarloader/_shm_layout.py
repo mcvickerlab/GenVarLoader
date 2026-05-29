@@ -37,6 +37,7 @@ Header layout (little-endian throughout):
       u8   name_len
       char name[name_len]
 """
+
 from __future__ import annotations
 
 import struct
@@ -47,7 +48,6 @@ import numpy as np
 HEADER_RESERVED = 4096
 
 _PREAMBLE = struct.Struct("<QQB")  # n_instances, payload_bytes, n_arrays
-
 
 
 def _align(off: int, align: int = 8) -> int:
@@ -83,7 +83,9 @@ def _write_dense(buf: memoryview, a: np.ndarray, cursor: int) -> tuple[dict, int
     cursor = _align(cursor)
     data_off = cursor
     a_c = np.ascontiguousarray(a)
-    np.frombuffer(buf, dtype=a_c.dtype, count=a_c.size, offset=data_off).reshape(a_c.shape)[...] = a_c
+    np.frombuffer(buf, dtype=a_c.dtype, count=a_c.size, offset=data_off).reshape(
+        a_c.shape
+    )[...] = a_c
     cursor += a_c.nbytes
     return {
         "kind": 0,
@@ -102,17 +104,22 @@ def _write_dense(buf: memoryview, a: np.ndarray, cursor: int) -> tuple[dict, int
 def _write_ragged(buf: memoryview, a, cursor: int) -> tuple[dict, int]:
     """Write a seqpro.rag.Ragged into buf. Returns descriptor dict and new cursor."""
     from seqpro.rag import Ragged
+
     data_arr = np.ascontiguousarray(a.data)
     off_arr = np.ascontiguousarray(a.offsets)
 
     cursor = _align(cursor)
     data_off = cursor
-    np.frombuffer(buf, dtype=data_arr.dtype, count=data_arr.size, offset=data_off)[...] = data_arr.ravel()
+    np.frombuffer(buf, dtype=data_arr.dtype, count=data_arr.size, offset=data_off)[
+        ...
+    ] = data_arr.ravel()
     cursor += data_arr.nbytes
 
     cursor = _align(cursor)
     off_off = cursor
-    np.frombuffer(buf, dtype=off_arr.dtype, count=off_arr.size, offset=off_off)[...] = off_arr
+    np.frombuffer(buf, dtype=off_arr.dtype, count=off_arr.size, offset=off_off)[...] = (
+        off_arr
+    )
     cursor += off_arr.nbytes
 
     return {
@@ -149,11 +156,15 @@ def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
         f_layout = ak.to_layout(rv[field])
 
         # Level 0: RegularArray(size=ploidy)
-        assert isinstance(f_layout, RegularArray), f"Expected RegularArray for field {field!r}"
+        assert isinstance(f_layout, RegularArray), (
+            f"Expected RegularArray for field {field!r}"
+        )
         regular_size = f_layout.size
         # Level 1: ListOffsetArray (outer: groups of variants per (batch, ploid) cell)
         outer = f_layout.content
-        assert isinstance(outer, ListOffsetArray), f"Expected outer ListOffsetArray for {field!r}"
+        assert isinstance(outer, ListOffsetArray), (
+            f"Expected outer ListOffsetArray for {field!r}"
+        )
         outer_offsets = np.ascontiguousarray(outer.offsets.data)  # int64
 
         inner_content = outer.content
@@ -162,7 +173,9 @@ def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
             inner = inner_content
             inner_offsets = np.ascontiguousarray(inner.offsets.data)  # int64
             leaf = inner.content
-            assert isinstance(leaf, NumpyArray), f"Expected NumpyArray leaf for {field!r} alleles"
+            assert isinstance(leaf, NumpyArray), (
+                f"Expected NumpyArray leaf for {field!r} alleles"
+            )
             leaf_data = np.ascontiguousarray(leaf.data)
             field_kind = 1  # alleles
         elif isinstance(inner_content, NumpyArray):
@@ -171,39 +184,52 @@ def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
             leaf_data = np.ascontiguousarray(inner_content.data)
             field_kind = 0  # numeric
         else:
-            raise TypeError(f"Unexpected layout for field {field!r}: {type(inner_content)}")
+            raise TypeError(
+                f"Unexpected layout for field {field!r}: {type(inner_content)}"
+            )
 
         cursor = _align(cursor)
         outer_off = cursor
-        np.frombuffer(buf, dtype=outer_offsets.dtype, count=outer_offsets.size, offset=outer_off)[...] = outer_offsets
+        np.frombuffer(
+            buf, dtype=outer_offsets.dtype, count=outer_offsets.size, offset=outer_off
+        )[...] = outer_offsets
         cursor += outer_offsets.nbytes
 
         if field_kind == 1:  # alleles: inner offsets present; numeric: skip
             cursor = _align(cursor)
             inner_off = cursor
-            np.frombuffer(buf, dtype=inner_offsets.dtype, count=inner_offsets.size, offset=inner_off)[...] = inner_offsets
+            np.frombuffer(
+                buf,
+                dtype=inner_offsets.dtype,
+                count=inner_offsets.size,
+                offset=inner_off,
+            )[...] = inner_offsets
             cursor += inner_offsets.nbytes
         else:
             inner_off = 0
 
         cursor = _align(cursor)
         data_off = cursor
-        np.frombuffer(buf, dtype=leaf_data.dtype, count=leaf_data.size, offset=data_off)[...] = leaf_data.ravel()
+        np.frombuffer(
+            buf, dtype=leaf_data.dtype, count=leaf_data.size, offset=data_off
+        )[...] = leaf_data.ravel()
         cursor += leaf_data.nbytes
 
         name_bytes = field.encode("utf-8")
-        field_descs.append({
-            "field_kind": field_kind,
-            "dtype_str": _dtype_to_bytes(leaf_data.dtype),
-            "outer_offsets_offset": outer_off,
-            "outer_offsets_nbytes": outer_offsets.nbytes,
-            "inner_offsets_offset": inner_off,
-            "inner_offsets_nbytes": inner_offsets.nbytes if field_kind == 1 else 0,
-            "data_offset": data_off,
-            "data_nbytes": leaf_data.nbytes,
-            "regular_size": regular_size,
-            "name": name_bytes,
-        })
+        field_descs.append(
+            {
+                "field_kind": field_kind,
+                "dtype_str": _dtype_to_bytes(leaf_data.dtype),
+                "outer_offsets_offset": outer_off,
+                "outer_offsets_nbytes": outer_offsets.nbytes,
+                "inner_offsets_offset": inner_off,
+                "inner_offsets_nbytes": inner_offsets.nbytes if field_kind == 1 else 0,
+                "data_offset": data_off,
+                "data_nbytes": leaf_data.nbytes,
+                "regular_size": regular_size,
+                "name": name_bytes,
+            }
+        )
 
     return {
         "kind": 2,
@@ -315,7 +341,7 @@ def _unpack_one_descriptor(buf_bytes: memoryview, cursor: int) -> tuple[dict, in
     """Unpack one array descriptor starting at cursor into the header bytes region."""
     kind, ndim = struct.unpack_from("<BB", buf_bytes, cursor)
     cursor += 2
-    dtype_str = bytes(buf_bytes[cursor: cursor + 4])
+    dtype_str = bytes(buf_bytes[cursor : cursor + 4])
     cursor += 4
     shape = []
     for _ in range(ndim):
@@ -323,14 +349,17 @@ def _unpack_one_descriptor(buf_bytes: memoryview, cursor: int) -> tuple[dict, in
         shape.append(int(dim))
         cursor += 8
     (
-        data_offset, data_nbytes,
-        offsets_offset, offsets_nbytes,
-        inner_offsets_offset, inner_offsets_nbytes,
+        data_offset,
+        data_nbytes,
+        offsets_offset,
+        offsets_nbytes,
+        inner_offsets_offset,
+        inner_offsets_nbytes,
     ) = struct.unpack_from("<6Q", buf_bytes, cursor)
     cursor += 48
     (name_len,) = struct.unpack_from("<B", buf_bytes, cursor)
     cursor += 1
-    name = bytes(buf_bytes[cursor: cursor + name_len]).decode("utf-8")
+    name = bytes(buf_bytes[cursor : cursor + name_len]).decode("utf-8")
     cursor += name_len
 
     d = {
@@ -353,31 +382,36 @@ def _unpack_one_descriptor(buf_bytes: memoryview, cursor: int) -> tuple[dict, in
         for _ in range(n_fields):
             (field_kind,) = struct.unpack_from("<B", buf_bytes, cursor)
             cursor += 1
-            fdtype_str = bytes(buf_bytes[cursor: cursor + 4])
+            fdtype_str = bytes(buf_bytes[cursor : cursor + 4])
             cursor += 4
             (
-                outer_offsets_offset, outer_offsets_nbytes,
-                inner_offsets_offset_fd, inner_offsets_nbytes_fd,
-                fd_data_offset, fd_data_nbytes,
+                outer_offsets_offset,
+                outer_offsets_nbytes,
+                inner_offsets_offset_fd,
+                inner_offsets_nbytes_fd,
+                fd_data_offset,
+                fd_data_nbytes,
                 regular_size,
             ) = struct.unpack_from("<7Q", buf_bytes, cursor)
             cursor += 56
             (fname_len,) = struct.unpack_from("<B", buf_bytes, cursor)
             cursor += 1
-            fname = bytes(buf_bytes[cursor: cursor + fname_len]).decode("utf-8")
+            fname = bytes(buf_bytes[cursor : cursor + fname_len]).decode("utf-8")
             cursor += fname_len
-            field_descs.append({
-                "field_kind": field_kind,
-                "dtype_str": fdtype_str,
-                "outer_offsets_offset": outer_offsets_offset,
-                "outer_offsets_nbytes": outer_offsets_nbytes,
-                "inner_offsets_offset": inner_offsets_offset_fd,
-                "inner_offsets_nbytes": inner_offsets_nbytes_fd,
-                "data_offset": fd_data_offset,
-                "data_nbytes": fd_data_nbytes,
-                "regular_size": regular_size,
-                "name": fname,
-            })
+            field_descs.append(
+                {
+                    "field_kind": field_kind,
+                    "dtype_str": fdtype_str,
+                    "outer_offsets_offset": outer_offsets_offset,
+                    "outer_offsets_nbytes": outer_offsets_nbytes,
+                    "inner_offsets_offset": inner_offsets_offset_fd,
+                    "inner_offsets_nbytes": inner_offsets_nbytes_fd,
+                    "data_offset": fd_data_offset,
+                    "data_nbytes": fd_data_nbytes,
+                    "regular_size": regular_size,
+                    "name": fname,
+                }
+            )
         d["_field_descs"] = field_descs
 
     return d, cursor
@@ -387,17 +421,22 @@ def _read_dense(buf: memoryview, d: dict, copy: bool = True) -> np.ndarray:
     dtype = _dtype_from_bytes(d["dtype_str"])
     shape = d["shape"]
     count = int(np.prod(shape)) if shape else 1
-    view = np.frombuffer(buf, dtype=dtype, count=count, offset=d["data_offset"]).reshape(shape)
+    view = np.frombuffer(
+        buf, dtype=dtype, count=count, offset=d["data_offset"]
+    ).reshape(shape)
     return view.copy() if copy else view
 
 
 def _read_ragged(buf: memoryview, d: dict, copy: bool = True):
     from seqpro.rag import Ragged
+
     dtype = _dtype_from_bytes(d["dtype_str"])
     n_items = d["shape"][0]
     data = np.frombuffer(buf, dtype=dtype, count=n_items, offset=d["data_offset"])
     n_offsets = d["offsets_nbytes"] // 8
-    offsets = np.frombuffer(buf, dtype=np.int64, count=n_offsets, offset=d["offsets_offset"])
+    offsets = np.frombuffer(
+        buf, dtype=np.int64, count=n_offsets, offset=d["offsets_offset"]
+    )
     if copy:
         data = data.copy()
         offsets = offsets.copy()

@@ -1095,7 +1095,9 @@ class Dataset:
         ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
         r_idx, _s_idx = np.unravel_index(ds_idx, self.full_shape)
 
-        seq_kind = self.sequence_type  # "reference" | "haplotypes" | "annotated" | "variants" | None
+        seq_kind = (
+            self.sequence_type
+        )  # "reference" | "haplotypes" | "annotated" | "variants" | None
         total = np.zeros(len(r_idx), dtype=np.int64)
         # These are computed conditionally below; declared here to satisfy the type checker.
         hap_len_sum: NDArray[np.int64] = np.empty(0, dtype=np.int64)
@@ -1177,7 +1179,9 @@ class Dataset:
                     regions_arr = self._full_regions[r_idx].copy()
                     regions_arr[:, 1] -= self.jitter
                     regions_arr[:, 2] += self.jitter
-                    region_lens = (regions_arr[:, 2] - regions_arr[:, 1]).astype(np.int64)
+                    region_lens = (regions_arr[:, 2] - regions_arr[:, 1]).astype(
+                        np.int64
+                    )
                 total += region_lens * n_tracks * track_itemsize
 
         if squeeze:
@@ -1307,9 +1311,11 @@ class Dataset:
         overwrite
             Whether to overwrite the existing tracks, by default False
         """
-        if self.available_tracks is not None and (
-            exists := set(tracks) & set(self.available_tracks)
-        ) and not overwrite:
+        if (
+            self.available_tracks is not None
+            and (exists := set(tracks) & set(self.available_tracks))
+            and not overwrite
+        ):
             raise ValueError(f"Some tracks already exists in the dataset: {exists}")
 
         for name, bedlike in tracks.items():

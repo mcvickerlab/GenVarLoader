@@ -22,8 +22,7 @@ def svar_gvl_path(tmp_path, filtered_svar, source_bed):
 
 def test_with_settings_var_filter_propagates_to_recon(svar_gvl_path, ref_fasta):
     ds = (
-        gvl.Dataset
-        .open(svar_gvl_path, reference=ref_fasta)
+        gvl.Dataset.open(svar_gvl_path, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_settings(var_filter="exonic")
     )
@@ -36,8 +35,7 @@ def test_with_settings_var_filter_propagates_to_recon(svar_gvl_path, ref_fasta):
 
 def test_with_settings_var_filter_false_clears_recon(svar_gvl_path, ref_fasta):
     ds = (
-        gvl.Dataset
-        .open(svar_gvl_path, reference=ref_fasta)
+        gvl.Dataset.open(svar_gvl_path, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_settings(var_filter="exonic")
         .with_settings(var_filter=False)

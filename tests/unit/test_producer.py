@@ -1,4 +1,5 @@
 """Tests for the producer subprocess in isolation."""
+
 import multiprocessing as mp
 import numpy as np
 import pytest

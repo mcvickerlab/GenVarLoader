@@ -37,8 +37,7 @@ def svar_ds_path(tmp_path_factory, filtered_svar, source_bed):
 def vars_ds(svar_ds_path, ref_fasta):
     """Variants-mode dataset (the AF-filter path uses this output mode)."""
     return (
-        gvl.Dataset
-        .open(svar_ds_path, reference=ref_fasta)
+        gvl.Dataset.open(svar_ds_path, reference=ref_fasta)
         .with_seqs("variants")
         .with_len("ragged")
         # AF info isn't loaded eagerly; AF filtering reads variants.info["AF"].
@@ -49,8 +48,7 @@ def vars_ds(svar_ds_path, ref_fasta):
 @pytest.fixture(scope="module")
 def haps_ds(svar_ds_path, ref_fasta):
     return (
-        gvl.Dataset
-        .open(svar_ds_path, reference=ref_fasta)
+        gvl.Dataset.open(svar_ds_path, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_len("ragged")
     )

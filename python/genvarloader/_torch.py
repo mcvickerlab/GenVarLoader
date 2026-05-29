@@ -58,7 +58,9 @@ def _resolve_buffered_inputs(
     """
     # 1) Resolve full epoch order from the BatchSampler.
     if sampler is None:
-        sampler = get_sampler(len(dataset), batch_size, shuffle, drop_last, generator=generator)
+        sampler = get_sampler(
+            len(dataset), batch_size, shuffle, drop_last, generator=generator
+        )
     flat = []
     for batch in sampler:
         flat.extend(batch)
@@ -147,13 +149,22 @@ def get_dataloader(
 
     n_slots = 1 if mode == "buffered" else 2
     r_idx, s_idx, bpi, slot_bytes, _sampler = _resolve_buffered_inputs(
-        dataset, batch_size, shuffle, drop_last, sampler, generator, buffer_bytes, n_slots
+        dataset,
+        batch_size,
+        shuffle,
+        drop_last,
+        sampler,
+        generator,
+        buffer_bytes,
+        n_slots,
     )
 
     if mode == "buffered":
         from ._buffered_loader import make_buffered_dataset
 
-        inner_ds = make_buffered_dataset(dataset, batch_size, slot_bytes, bpi, r_idx, s_idx)
+        inner_ds = make_buffered_dataset(
+            dataset, batch_size, slot_bytes, bpi, r_idx, s_idx
+        )
     else:
         from ._double_buffered_loader import make_double_buffered_dataset
 

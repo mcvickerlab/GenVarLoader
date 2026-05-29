@@ -18,11 +18,13 @@ def case_no_regions():
 
 def case_ragged_regions():
     """Three regions with different lengths."""
-    regions = pl.DataFrame({
-        "chrom": ["chr1", "chr1"],
-        "chromStart": [0, 100],
-        "chromEnd": [100, 150],
-    })
+    regions = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [0, 100],
+            "chromEnd": [100, 150],
+        }
+    )
     data = sp.cast_seqs(b"N" * 150)
     lengths = (regions["chromEnd"] - regions["chromStart"]).to_numpy().astype(np.uint32)
     desired = gvl.Ragged.from_lengths(data, lengths)

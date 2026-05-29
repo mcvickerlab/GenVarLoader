@@ -19,22 +19,26 @@ pytestmark = pytest.mark.skipif(
 
 
 def _make_bed(tmp_path: Path) -> pl.DataFrame:
-    bed = pl.DataFrame({
-        "chrom": ["chr1", "chr1"],
-        "chromStart": [0, 100],
-        "chromEnd": [50, 200],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [0, 100],
+            "chromEnd": [50, 200],
+        }
+    )
     return bed
 
 
 def _make_table_df() -> pl.DataFrame:
-    return pl.DataFrame({
-        "sample_id": ["s0", "s0", "s1", "s1"],
-        "chrom": ["chr1", "chr1", "chr1", "chr1"],
-        "start": [10, 110, 5, 150],
-        "end": [20, 130, 15, 160],
-        "value": [1.0, 2.0, 3.0, 4.0],
-    })
+    return pl.DataFrame(
+        {
+            "sample_id": ["s0", "s0", "s1", "s1"],
+            "chrom": ["chr1", "chr1", "chr1", "chr1"],
+            "start": [10, 110, 5, 150],
+            "end": [20, 130, 15, 160],
+            "value": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
 
 
 def test_write_with_table_only_roundtrip(tmp_path):
@@ -63,11 +67,13 @@ def test_write_with_table_only_roundtrip(tmp_path):
 
 
 def test_write_with_mixed_bigwigs_and_table(tmp_path, bigwig_dir: Path):
-    bed = pl.DataFrame({
-        "chrom": ["chr1"],
-        "chromStart": [0],
-        "chromEnd": [200],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1"],
+            "chromStart": [0],
+            "chromEnd": [200],
+        }
+    )
     bw_dir = bigwig_dir
     bw = gvl.BigWigs(
         "bw_signal",
@@ -79,13 +85,15 @@ def test_write_with_mixed_bigwigs_and_table(tmp_path, bigwig_dir: Path):
     # Table sample IDs match the BigWigs sample IDs so the intersection is non-empty.
     table = gvl.Table(
         "tab_signal",
-        pl.DataFrame({
-            "sample_id": ["sample_0", "sample_1"],
-            "chrom": ["chr1", "chr1"],
-            "start": [0, 50],
-            "end": [10, 60],
-            "value": [9.0, 8.0],
-        }),
+        pl.DataFrame(
+            {
+                "sample_id": ["sample_0", "sample_1"],
+                "chrom": ["chr1", "chr1"],
+                "start": [0, 50],
+                "end": [10, 60],
+                "value": [9.0, 8.0],
+            }
+        ),
     )
 
     out = tmp_path / "mixed.gvl"
@@ -103,19 +111,23 @@ def test_write_with_variants_and_tracks(tmp_path, vcf_dir: Path):
     # VCF samples are NA00001, NA00002, NA00003 — Table must share at least one.
     table = gvl.Table(
         "signal",
-        pl.DataFrame({
-            "sample_id": ["NA00001", "NA00002", "NA00003"],
-            "chrom": ["chr19", "chr19", "chr19"],
-            "start": [1010686, 1010686, 1010686],
-            "end": [1010706, 1010706, 1010706],
-            "value": [1.0, 2.0, 3.0],
-        }),
+        pl.DataFrame(
+            {
+                "sample_id": ["NA00001", "NA00002", "NA00003"],
+                "chrom": ["chr19", "chr19", "chr19"],
+                "start": [1010686, 1010686, 1010686],
+                "end": [1010706, 1010706, 1010706],
+                "value": [1.0, 2.0, 3.0],
+            }
+        ),
     )
-    bed = pl.DataFrame({
-        "chrom": ["chr19"],
-        "chromStart": [1010686],
-        "chromEnd": [1010706],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr19"],
+            "chromStart": [1010686],
+            "chromEnd": [1010706],
+        }
+    )
 
     out = tmp_path / "variants_and_tracks.gvl"
     gvl.write(path=out, bed=bed, variants=vcf, tracks=table)

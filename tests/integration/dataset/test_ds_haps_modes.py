@@ -26,8 +26,7 @@ def base_dataset(request, phased_vcf_gvl, phased_pgen_gvl, phased_svar_gvl, ref_
         "svar": phased_svar_gvl,
     }[request.param]
     return (
-        gvl.Dataset
-        .open(gvl_path, ref_fasta, rc_neg=False)
+        gvl.Dataset.open(gvl_path, ref_fasta, rc_neg=False)
         .with_len("ragged")
         .with_tracks(False)
     )

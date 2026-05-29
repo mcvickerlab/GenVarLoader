@@ -189,12 +189,14 @@ def test_ref_call_with_plan_writes_per_element_layout(ref_fasta):
 
     reference = gvl.Reference.from_path(ref_fasta, in_memory=False)
 
-    bed = pl.DataFrame({
-        "chrom": ["chr1", "chr1", "chr1"],
-        "chromStart": [1000, 2000, 5000],
-        "chromEnd": [1010, 2010, 5010],
-        "strand": [1, 1, 1],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [1000, 2000, 5000],
+            "chromEnd": [1010, 2010, 5010],
+            "strand": [1, 1, 1],
+        }
+    )
 
     regions = bed_to_regions(bed, reference.c_map)
     # Two splice rows: row 0 = elements [0, 1], row 1 = element [2].

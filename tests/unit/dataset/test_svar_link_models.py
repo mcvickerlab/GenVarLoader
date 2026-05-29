@@ -46,12 +46,14 @@ def test_svar_link_rejects_malformed_fingerprint():
 
 
 def test_metadata_version_parses_existing_strings():
-    payload = json.dumps({
-        "samples": ["s1"],
-        "contigs": ["1"],
-        "n_regions": 1,
-        "version": "0.18.0",
-    })
+    payload = json.dumps(
+        {
+            "samples": ["s1"],
+            "contigs": ["1"],
+            "n_regions": 1,
+            "version": "0.18.0",
+        }
+    )
     m = Metadata.model_validate_json(payload)
     assert isinstance(m.version, SemanticVersion)
     assert m.version == SemanticVersion.parse("0.18.0")

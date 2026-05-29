@@ -1,4 +1,5 @@
 """ChunkPlanner unit tests. Pure logic, no Dataset dependency."""
+
 import numpy as np
 import pytest
 import genvarloader as gvl
@@ -14,8 +15,11 @@ def test_plan_respects_slot_bytes():
     r = flat_idx // 10
     s = flat_idx % 10
     planner = ChunkPlanner(
-        r_idx=r, s_idx=s, batch_size=5,
-        bytes_per_instance=bytes_per_instance, slot_bytes=200,
+        r_idx=r,
+        s_idx=s,
+        batch_size=5,
+        bytes_per_instance=bytes_per_instance,
+        slot_bytes=200,
     )
     chunks = list(planner)
     # Each chunk's total bytes ≤ 200; each chunk is a multiple of batch_size.
@@ -32,8 +36,11 @@ def test_plan_single_batch_chunks_when_tight():
     bytes_per_instance = np.full((4, 1), 100, dtype=np.int64)
     flat = np.arange(4)
     planner = ChunkPlanner(
-        r_idx=flat, s_idx=np.zeros_like(flat), batch_size=2,
-        bytes_per_instance=bytes_per_instance, slot_bytes=200,
+        r_idx=flat,
+        s_idx=np.zeros_like(flat),
+        batch_size=2,
+        bytes_per_instance=bytes_per_instance,
+        slot_bytes=200,
     )
     chunks = list(planner)
     assert len(chunks) == 2  # 200 bytes per batch fits exactly one chunk
@@ -45,10 +52,15 @@ def test_plan_raises_when_batch_exceeds_slot():
     bytes_per_instance = np.full((2, 1), 300, dtype=np.int64)
     flat = np.arange(2)
     with pytest.raises(ValueError, match="exceeds slot"):
-        list(ChunkPlanner(
-            r_idx=flat, s_idx=np.zeros_like(flat), batch_size=2,
-            bytes_per_instance=bytes_per_instance, slot_bytes=200,
-        ))
+        list(
+            ChunkPlanner(
+                r_idx=flat,
+                s_idx=np.zeros_like(flat),
+                batch_size=2,
+                bytes_per_instance=bytes_per_instance,
+                slot_bytes=200,
+            )
+        )
 
 
 def test_peak_chunk_bytes_reported():
@@ -57,8 +69,11 @@ def test_peak_chunk_bytes_reported():
     r = flat // 2
     s = flat % 2
     planner = ChunkPlanner(
-        r_idx=r, s_idx=s, batch_size=2,
-        bytes_per_instance=bytes_per_instance, slot_bytes=1000,
+        r_idx=r,
+        s_idx=s,
+        batch_size=2,
+        bytes_per_instance=bytes_per_instance,
+        slot_bytes=1000,
     )
     chunks = list(planner)
     # Single chunk of 4 instances, total bytes = 10+20+30+40 = 100.
@@ -94,8 +109,12 @@ def _compare(a, b):
     elif isinstance(a, Ragged):
         # Ragged slicing returns a view where .data may be the full backing
         # array; compare only the actual content via offsets.
-        np.testing.assert_array_equal(a.data[a.offsets[0]:a.offsets[-1]], b.data[b.offsets[0]:b.offsets[-1]])
-        np.testing.assert_array_equal(a.offsets - a.offsets[0], b.offsets - b.offsets[0])
+        np.testing.assert_array_equal(
+            a.data[a.offsets[0] : a.offsets[-1]], b.data[b.offsets[0] : b.offsets[-1]]
+        )
+        np.testing.assert_array_equal(
+            a.offsets - a.offsets[0], b.offsets - b.offsets[0]
+        )
     elif isinstance(a, AnnotatedHaps):
         _compare(a.haps, b.haps)
         _compare(a.var_idxs, b.var_idxs)
@@ -107,7 +126,9 @@ def _compare(a, b):
         raise AssertionError(f"unsupported {type(a)}")
 
 
-@pytest.mark.parametrize("seq_kind", ["reference", "haplotypes", "annotated", "variants"])
+@pytest.mark.parametrize(
+    "seq_kind", ["reference", "haplotypes", "annotated", "variants"]
+)
 def test_slice_chunk_matches_direct(seq_kind):
     ds = gvl.get_dummy_dataset().with_seqs(seq_kind)
     if seq_kind in ("haplotypes", "annotated"):
@@ -121,5 +142,5 @@ def test_slice_chunk_matches_direct(seq_kind):
     sliced = list(slice_chunk(chunk, batch_size=n_s))
     assert len(sliced) == n_r
     for i, mini in enumerate(sliced):
-        direct = ds[r[i * n_s:(i + 1) * n_s], s[i * n_s:(i + 1) * n_s]]
+        direct = ds[r[i * n_s : (i + 1) * n_s], s[i * n_s : (i + 1) * n_s]]
         _compare(mini, direct)

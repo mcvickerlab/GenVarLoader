@@ -45,14 +45,16 @@ def get_dummy_dataset(spliced: bool = False):
     n_samples = len(dummy_samples)
 
     dummy_contigs = [str(i) for i in range(1, 23)] + ["X", "Y", "MT"]
-    dummy_bed = pl.DataFrame({
-        "chrom": ["8", "3", "6", "2"],
-        "chromStart": [5, 13, 8, 2],
-        "chromEnd": [8, 16, 11, 5],
-        "strand": ["+", "-", "+", "+"],
-        "gene": ["tp53", "shh", "tp53", "tp53"],
-        "exon": [3, 1, 1, 2],
-    })
+    dummy_bed = pl.DataFrame(
+        {
+            "chrom": ["8", "3", "6", "2"],
+            "chromStart": [5, 13, 8, 2],
+            "chromEnd": [8, 16, 11, 5],
+            "strand": ["+", "-", "+", "+"],
+            "gene": ["tp53", "shh", "tp53", "tp53"],
+            "exon": [3, 1, 1, 2],
+        }
+    )
     n_regions = len(dummy_bed)
 
     with pl.StringCache():
