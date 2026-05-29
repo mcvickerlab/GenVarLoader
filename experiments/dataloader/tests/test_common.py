@@ -44,3 +44,66 @@ def test_dispatch_unions():
     assert C.REGION_MID in C.REGION_FAN
     assert C.BATCH_MID in C.BATCH_FAN
     assert C.BUFFER_MID in C.BUFFER_FAN
+
+
+def test_new_mode_cell_count_is_25_per_mode_output():
+    for mode in C.MODES_NEW:
+        for output in C.OUTPUTS:
+            cells = [
+                c for c in C.enumerate_cells()
+                if c.mode == mode and c.with_seqs == output
+            ]
+            # 16 factorial + 9 fan (12 raw − 3 shared midpoints) = 25
+            assert len(cells) == 25, (mode, output, len(cells))
+
+
+def test_baseline_cell_count_is_15_per_output_and_has_no_buffer():
+    for output in C.OUTPUTS:
+        cells = [
+            c for c in C.enumerate_cells()
+            if c.mode is None and c.with_seqs == output
+        ]
+        # 8 factorial corners + 7 fan (9 raw − 2 shared midpoints) = 15
+        assert len(cells) == 15, (output, len(cells))
+        assert all(c.buffer_bytes is None for c in cells)
+
+
+def test_total_cell_count_is_195_and_all_unique():
+    cells = C.enumerate_cells()
+    assert len(cells) == 195
+    keys = {
+        (c.mode, c.with_seqs, c.threads, c.region_length, c.batch_size, c.buffer_bytes)
+        for c in cells
+    }
+    assert len(keys) == 195  # no duplicate configurations
+
+
+def test_baseline_fan_cells_sit_at_midpoints():
+    # the threads fan for baseline pins region=MID, batch=MID
+    base = [c for c in C.enumerate_cells() if c.mode is None and c.with_seqs == "variants"]
+    threads_fan = [
+        c for c in base
+        if c.region_length == C.REGION_MID and c.batch_size == C.BATCH_MID
+    ]
+    assert sorted(c.threads for c in threads_fan) == [2, 4, 16]
+
+
+def test_new_mode_buffer_fan_pins_other_axes_at_midpoint():
+    buf_fan = [
+        c for c in C.enumerate_cells()
+        if c.mode == "buffered" and c.with_seqs == "haplotypes"
+        and c.threads == C.THREADS_MID
+        and c.region_length == C.REGION_MID
+        and c.batch_size == C.BATCH_MID
+    ]
+    assert sorted(c.buffer_bytes for c in buf_fan) == sorted(C.BUFFER_FAN)
+
+
+def test_cells_for_threads_partitions_by_thread_count():
+    all_cells = C.enumerate_cells()
+    union = []
+    for n in C.ALL_THREADS:
+        sub = C.cells_for_threads(n)
+        assert all(c.threads == n for c in sub)
+        union.extend(sub)
+    assert len(union) == len(all_cells)
