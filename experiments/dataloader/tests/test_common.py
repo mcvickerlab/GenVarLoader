@@ -107,3 +107,37 @@ def test_cells_for_threads_partitions_by_thread_count():
         assert all(c.threads == n for c in sub)
         union.extend(sub)
     assert len(union) == len(all_cells)
+
+
+import pytest
+
+
+@pytest.mark.slow
+def test_prepare_datasets_writes_one_gvl_per_region_length(tmp_path):
+    repo = Path(__file__).resolve().parents[3]
+    svar = repo / "tests" / "data" / "1kg" / "filtered.svar"
+    regions = repo / "tests" / "data" / "1kg" / "regions.bed"
+    if not svar.is_dir():
+        pytest.skip("missing tests/data/1kg/filtered.svar; run pixi run -e dev gen")
+
+    paths = C.prepare_datasets([1_000, 2_500], svar, regions, tmp_path)
+
+    assert set(paths) == {1_000, 2_500}
+    for length, p in paths.items():
+        assert p.is_dir(), p
+        assert (p / "metadata.json").exists()
+
+
+@pytest.mark.slow
+def test_generate_bed_resizes_to_target_length():
+    import seqpro as sp
+
+    repo = Path(__file__).resolve().parents[3]
+    regions = repo / "tests" / "data" / "1kg" / "regions.bed"
+    if not regions.exists():
+        pytest.skip("missing regions.bed")
+
+    bed = C.generate_bed(regions, 2_500)
+    lengths = (bed["chromEnd"] - bed["chromStart"]).unique().to_list()
+    assert lengths == [2_500]
+    assert bed.height == 100  # regions.bed has 100 regions

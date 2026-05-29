@@ -8,6 +8,7 @@ prefetching-dataloader public API and are exercised by ``bench.py``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 MiB = 1024**2
 GiB = 1024**3
@@ -123,3 +124,40 @@ def cells_for_threads(n_threads: int) -> list[Cell]:
     """Subset of cells whose ``threads`` equals ``n_threads`` (a child runs
     only these, since rayon thread count is pinned per child process)."""
     return [c for c in enumerate_cells() if c.threads == n_threads]
+
+
+def generate_bed(regions_bed: str | Path, region_length: int):
+    """Read the canonical regions BED and recenter+resize every region to
+    ``region_length`` (``sp.bed.with_len`` resizes around the midpoint)."""
+    import seqpro as sp
+
+    bed = sp.bed.read(regions_bed)
+    return sp.bed.with_len(bed, region_length)
+
+
+def prepare_datasets(
+    region_lengths: list[int],
+    svar_path: str | Path,
+    regions_bed: str | Path,
+    tmp_dir: str | Path,
+) -> dict[int, Path]:
+    """Write one fresh ``.gvl`` dataset per region length, keyed by length.
+
+    Amortized once at bench startup. Returns ``{length: dataset_path}``.
+    """
+    import genvarloader as gvl
+
+    tmp_dir = Path(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    out: dict[int, Path] = {}
+    for length in region_lengths:
+        bed = generate_bed(regions_bed, length)
+        ds_path = tmp_dir / f"dataset_rL{length}.gvl"
+        gvl.write(
+            path=ds_path,
+            bed=bed,
+            variants=Path(svar_path),
+            overwrite=True,
+        )
+        out[length] = ds_path
+    return out
