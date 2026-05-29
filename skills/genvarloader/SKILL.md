@@ -198,6 +198,35 @@ seqs = ref_ds[:]  # Ragged[S1], one row per transcript
 
 Use `gvl.sites_vcf_to_table(vcf)` → `pl.DataFrame` (bi-allelic SNPs only), then wrap an `ArrayDataset[AnnotatedHaps, ...]` with `gvl.DatasetWithSites(ds, sites, max_variants_per_region=1)`. Returns `(wt_haps, mut_haps, flags[, tracks])`; flags encode applied / deleted-overlap / already-existing. See `_variants/_sitesonly.py`.
 
+## Prefetching dataloader (`mode=...` on `to_dataloader`)
+
+`Dataset.to_dataloader()` accepts an optional `mode` to coarsen fetching: gvl's throughput scales with fetch size (internal multithreading amortizes overhead), so one big `dataset[r_idx, s_idx]` call sliced into mini-batches outperforms many small per-batch calls.
+
+```python
+loader = ds.to_dataloader(
+    batch_size=32,
+    mode="double_buffered",   # or "buffered", or None
+    buffer_bytes=2 * 1024**3, # total RAM budget; split across slots in double mode
+    copy=True,                # zero-copy opt-out (default True = safe)
+    heartbeat_seconds=60.0,   # double_buffered: max wait per chunk before liveness check
+)
+```
+
+Modes:
+
+- `None` (default) — plain `torch.utils.data.DataLoader`; existing behavior.
+- `"buffered"` — main process fetches one chunk per call (sized to `buffer_bytes`), slices into mini-batches. Refill latency visible but amortized over many batches.
+- `"double_buffered"` — subprocess producer fills one shm slot while consumer drains the other; refill latency hidden. Requires a file-backed `Dataset.open(path)`.
+
+Preconditions (all raise `ValueError` at construction):
+
+- `with_seqs in {"haplotypes", "annotated"}` requires `deterministic=True` (set via `with_settings(deterministic=True)`). `reference` and `variants` modes have no determinism requirement.
+- Spliced datasets are not supported.
+- `num_workers > 0` is rejected — the new loader IS the concurrency strategy.
+- A single mini-batch whose exact footprint exceeds the per-slot capacity raises with the offending size and remediation knobs (`batch_size↓`, `buffer_bytes↑`).
+
+Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (uses `haplotype_lengths`, `n_variants`, and allele offset tables) — no Zipf-style worst-case slack.
+
 ## Other public surface (one-liners)
 
 - `gvl.Reference.from_path(fasta, contigs=None)` — wrap a FASTA. Cached.
