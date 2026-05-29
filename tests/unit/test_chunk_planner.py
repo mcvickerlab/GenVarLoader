@@ -1,7 +1,8 @@
 """ChunkPlanner unit tests. Pure logic, no Dataset dependency."""
 import numpy as np
 import pytest
-from genvarloader._chunked import ChunkPlanner
+import genvarloader as gvl
+from genvarloader._chunked import ChunkPlanner, slice_chunk
 
 
 def test_plan_respects_slot_bytes():
@@ -63,3 +64,62 @@ def test_peak_chunk_bytes_reported():
     # Single chunk of 4 instances, total bytes = 10+20+30+40 = 100.
     assert len(chunks) == 1
     assert planner.peak_chunk_bytes == 100
+
+
+# ---------------------------------------------------------------------------
+# Task 7: slice_chunk parity tests against real dataset outputs
+# ---------------------------------------------------------------------------
+
+
+def _compare(a, b):
+    """Recursive equality for ndarray, Ragged, RaggedAnnotatedHaps, AnnotatedHaps,
+    ak.Array (including RaggedVariants), and tuples thereof."""
+    from seqpro.rag import Ragged
+    from genvarloader._types import AnnotatedHaps
+    from genvarloader._ragged import RaggedAnnotatedHaps
+    import awkward as ak
+
+    if isinstance(a, tuple):
+        assert isinstance(b, tuple) and len(a) == len(b)
+        for x, y in zip(a, b):
+            _compare(x, y)
+    elif isinstance(a, np.ndarray):
+        np.testing.assert_array_equal(a, b)
+    elif isinstance(a, RaggedAnnotatedHaps):
+        # RaggedAnnotatedHaps is a dataclass of three Ragged arrays.
+        assert isinstance(b, RaggedAnnotatedHaps)
+        _compare(a.haps, b.haps)
+        _compare(a.var_idxs, b.var_idxs)
+        _compare(a.ref_coords, b.ref_coords)
+    elif isinstance(a, Ragged):
+        # Ragged slicing returns a view where .data may be the full backing
+        # array; compare only the actual content via offsets.
+        np.testing.assert_array_equal(a.data[a.offsets[0]:a.offsets[-1]], b.data[b.offsets[0]:b.offsets[-1]])
+        np.testing.assert_array_equal(a.offsets - a.offsets[0], b.offsets - b.offsets[0])
+    elif isinstance(a, AnnotatedHaps):
+        _compare(a.haps, b.haps)
+        _compare(a.var_idxs, b.var_idxs)
+        _compare(a.ref_coords, b.ref_coords)
+    elif isinstance(a, ak.Array):
+        # Covers RaggedVariants (ak.Array subclass).
+        assert ak.to_list(a) == ak.to_list(b)
+    else:
+        raise AssertionError(f"unsupported {type(a)}")
+
+
+@pytest.mark.parametrize("seq_kind", ["reference", "haplotypes", "annotated", "variants"])
+def test_slice_chunk_matches_direct(seq_kind):
+    ds = gvl.get_dummy_dataset().with_seqs(seq_kind)
+    if seq_kind in ("haplotypes", "annotated"):
+        ds = ds.with_settings(deterministic=True)
+    ds = ds.with_tracks(False)
+    n_r = ds.full_shape[0]
+    n_s = min(2, ds.full_shape[1])
+    r = np.repeat(np.arange(n_r), n_s)
+    s = np.tile(np.arange(n_s), n_r)
+    chunk = ds[r, s]
+    sliced = list(slice_chunk(chunk, batch_size=n_s))
+    assert len(sliced) == n_r
+    for i, mini in enumerate(sliced):
+        direct = ds[r[i * n_s:(i + 1) * n_s], s[i * n_s:(i + 1) * n_s]]
+        _compare(mini, direct)
