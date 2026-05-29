@@ -133,6 +133,43 @@ def test_double_buffered_schema_settings_parity(file_backed_ds, seq_kind):
 
 
 @pytest.mark.slow
+def test_double_buffered_annotated_matches_buffered(file_backed_ds):
+    """Regression: double_buffered must support ``annotated`` output.
+
+    Annotated output is a ``RaggedAnnotatedHaps`` (three ragged arrays:
+    haps / var_idxs / ref_coords). ``write_chunk`` had no case for it and
+    raised ``TypeError: unsupported array type RaggedAnnotatedHaps`` in the
+    producer; this checks double_buffered reproduces buffered for annotated.
+    """
+    ds = (
+        file_backed_ds.with_seqs("annotated")
+        .with_tracks(False)
+        .with_settings(deterministic=True)
+    )
+    common = dict(
+        batch_size=2,
+        shuffle=False,
+        drop_last=True,
+        buffer_bytes=4 * 1024 * 1024,
+    )
+    buf_batches = list(ds.to_dataloader(mode="buffered", **common))
+    db_batches = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+
+    assert len(db_batches) == len(buf_batches)
+    for i, (b, d) in enumerate(zip(buf_batches, db_batches)):
+        b_pad, d_pad = b.to_padded(), d.to_padded()
+        np.testing.assert_array_equal(
+            b_pad.haps, d_pad.haps, err_msg=f"batch {i} haps mismatch"
+        )
+        np.testing.assert_array_equal(
+            b_pad.var_idxs, d_pad.var_idxs, err_msg=f"batch {i} var_idxs mismatch"
+        )
+        np.testing.assert_array_equal(
+            b_pad.ref_coords, d_pad.ref_coords, err_msg=f"batch {i} ref_coords mismatch"
+        )
+
+
+@pytest.mark.slow
 def test_double_buffered_variants_offset_overflow_regression(
     data_dir, reference, tmp_path
 ):

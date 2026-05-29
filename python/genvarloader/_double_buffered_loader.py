@@ -54,8 +54,9 @@ def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
     """
     from seqpro.rag import Ragged
 
-    result: list = []
-    for arr in views:
+    from ._ragged import RaggedAnnotatedHaps
+
+    def _reshape_one(arr):
         if isinstance(arr, Ragged):
             n_groups = arr.shape[0]
             if (
@@ -67,6 +68,20 @@ def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
                 arr = Ragged.from_offsets(
                     arr.data, (n_instances, ploidy, None), arr.offsets
                 )
+        return arr
+
+    result: list = []
+    for arr in views:
+        if isinstance(arr, RaggedAnnotatedHaps):
+            # Re-introduce the ploidy axis on each component (haps/var_idxs/
+            # ref_coords) just as for a bare Ragged.
+            arr = RaggedAnnotatedHaps(
+                haps=_reshape_one(arr.haps),
+                var_idxs=_reshape_one(arr.var_idxs),
+                ref_coords=_reshape_one(arr.ref_coords),
+            )
+        else:
+            arr = _reshape_one(arr)
         result.append(arr)
     return result
 

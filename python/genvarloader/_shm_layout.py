@@ -245,6 +245,57 @@ def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
     }, cursor
 
 
+def _write_rag_annotated(buf: memoryview, rah, cursor: int) -> tuple[dict, int]:
+    """Write a RaggedAnnotatedHaps (kind=3) into buf.
+
+    Stores its three ragged components (haps S1, var_idxs int32, ref_coords
+    int32) as data+offsets segments under a single descriptor. The consumer
+    re-introduces the (n_inst, ploidy) axis via _reshape_ragged_for_chunk.
+    """
+    sub_descs: list[dict] = []
+    for comp in (rah.haps, rah.var_idxs, rah.ref_coords):
+        data_arr = np.ascontiguousarray(comp.data)
+        off_arr = np.ascontiguousarray(comp.offsets)
+
+        cursor = _align(cursor)
+        data_off = cursor
+        np.frombuffer(buf, dtype=data_arr.dtype, count=data_arr.size, offset=data_off)[
+            ...
+        ] = data_arr.ravel()
+        cursor += data_arr.nbytes
+
+        cursor = _align(cursor)
+        off_off = cursor
+        np.frombuffer(buf, dtype=off_arr.dtype, count=off_arr.size, offset=off_off)[
+            ...
+        ] = off_arr
+        cursor += off_arr.nbytes
+
+        sub_descs.append(
+            {
+                "dtype_str": _dtype_to_bytes(data_arr.dtype),
+                "data_offset": data_off,
+                "data_nbytes": data_arr.nbytes,
+                "offsets_offset": off_off,
+                "offsets_nbytes": off_arr.nbytes,
+            }
+        )
+
+    return {
+        "kind": 3,
+        "dtype_str": b"\x00" * 4,
+        "shape": [len(sub_descs)],
+        "data_offset": 0,
+        "data_nbytes": 0,
+        "offsets_offset": 0,
+        "offsets_nbytes": 0,
+        "inner_offsets_offset": 0,
+        "inner_offsets_nbytes": 0,
+        "name": b"",
+        "_sub_descs": sub_descs,
+    }, cursor
+
+
 def _pack_descriptor(d: dict) -> bytes:
     """Pack one top-level array descriptor into bytes."""
     kind = d["kind"]
@@ -285,6 +336,19 @@ def _pack_descriptor(d: dict) -> bytes:
             )
             out += fname
 
+    if kind == 3:
+        sub_descs = d["_sub_descs"]
+        out += struct.pack("<B", len(sub_descs))
+        for sd in sub_descs:
+            out += struct.pack(
+                "<4s4Q",
+                sd["dtype_str"],
+                sd["data_offset"],
+                sd["data_nbytes"],
+                sd["offsets_offset"],
+                sd["offsets_nbytes"],
+            )
+
     return out
 
 
@@ -302,6 +366,7 @@ def write_chunk(
     """
     from seqpro.rag import Ragged
     from ._dataset._rag_variants import RaggedVariants
+    from ._ragged import RaggedAnnotatedHaps
 
     if len(arrays) > 255:
         raise ValueError("at most 255 arrays per chunk")
@@ -312,6 +377,8 @@ def write_chunk(
     for a in arrays:
         if isinstance(a, RaggedVariants):
             desc, cursor = _write_rag_variants(buf, a, cursor)
+        elif isinstance(a, RaggedAnnotatedHaps):
+            desc, cursor = _write_rag_annotated(buf, a, cursor)
         elif isinstance(a, Ragged):
             desc, cursor = _write_ragged(buf, a, cursor)
         elif isinstance(a, np.ndarray):
@@ -413,6 +480,31 @@ def _unpack_one_descriptor(buf_bytes: memoryview, cursor: int) -> tuple[dict, in
             )
         d["_field_descs"] = field_descs
 
+    if kind == 3:
+        (n_subs,) = struct.unpack_from("<B", buf_bytes, cursor)
+        cursor += 1
+        sub_descs = []
+        for _ in range(n_subs):
+            sdtype_str = bytes(buf_bytes[cursor : cursor + 4])
+            cursor += 4
+            (
+                sd_data_offset,
+                sd_data_nbytes,
+                sd_offsets_offset,
+                sd_offsets_nbytes,
+            ) = struct.unpack_from("<4Q", buf_bytes, cursor)
+            cursor += 32
+            sub_descs.append(
+                {
+                    "dtype_str": sdtype_str,
+                    "data_offset": sd_data_offset,
+                    "data_nbytes": sd_data_nbytes,
+                    "offsets_offset": sd_offsets_offset,
+                    "offsets_nbytes": sd_offsets_nbytes,
+                }
+            )
+        d["_sub_descs"] = sub_descs
+
     return d, cursor
 
 
@@ -494,6 +586,34 @@ def _read_rag_variants(buf: memoryview, d: dict, copy: bool = True):
     return RaggedVariants.from_ak(ak.zip(field_arrays, depth_limit=1))
 
 
+def _read_rag_annotated(buf: memoryview, d: dict, copy: bool = True):
+    """Reconstruct a RaggedAnnotatedHaps (kind=3) from its 3 ragged components.
+
+    Components are returned with flat ``(n_groups, None)`` shape; the consumer's
+    ``_reshape_ragged_for_chunk`` re-introduces the ploidy axis from n_instances.
+    """
+    from seqpro.rag import Ragged
+
+    from ._ragged import RaggedAnnotatedHaps
+
+    comps = []
+    for sd in d["_sub_descs"]:
+        dtype = _dtype_from_bytes(sd["dtype_str"])
+        count = sd["data_nbytes"] // dtype.itemsize
+        data = np.frombuffer(buf, dtype=dtype, count=count, offset=sd["data_offset"])
+        n_offsets = sd["offsets_nbytes"] // 8
+        offsets = np.frombuffer(
+            buf, dtype=np.int64, count=n_offsets, offset=sd["offsets_offset"]
+        )
+        if copy:
+            data = data.copy()
+            offsets = offsets.copy()
+        n_groups = len(offsets) - 1
+        comps.append(Ragged.from_offsets(data, (n_groups, None), offsets))
+
+    return RaggedAnnotatedHaps(haps=comps[0], var_idxs=comps[1], ref_coords=comps[2])
+
+
 def read_chunk(buf: memoryview, copy: bool = True) -> tuple[int, list]:
     """Read arrays from the shared-memory slot.
 
@@ -522,6 +642,8 @@ def read_chunk(buf: memoryview, copy: bool = True) -> tuple[int, list]:
             views.append(_read_ragged(buf, d, copy=copy))
         elif kind == 2:
             views.append(_read_rag_variants(buf, d, copy=copy))
+        elif kind == 3:
+            views.append(_read_rag_annotated(buf, d, copy=copy))
         else:
             raise ValueError(f"Unknown descriptor kind {kind}")
 
