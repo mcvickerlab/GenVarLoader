@@ -27,6 +27,8 @@ if sys.version_info < (3, 12):
 import pyranges1 as pr  # noqa: E402,RUF100
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # experiments/
+import _sysinfo
 from _common import CASES, N_TRIALS, gen_queries, gen_table
 
 OUT_CSV = Path(__file__).parent / "results_pyranges1.csv"
@@ -115,6 +117,7 @@ METHODS = [
 
 
 def main():
+    _sysinfo.write_and_log(Path(__file__).parent)
     print(
         f"pyranges1 {pr.__version__}  polars {pl.__version__}  python {sys.version.split()[0]}"
     )

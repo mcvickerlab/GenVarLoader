@@ -200,6 +200,9 @@ CSV_COLUMNS = [
     "git_sha",
     "host",
     "started_at",
+    "cpu_brand",
+    "cpu_microarch",
+    "logical_cpus",
 ]
 
 
@@ -259,6 +262,9 @@ def measure_cell(
     git_sha: str = "",
     host: str = "",
     started_at: str = "",
+    cpu_brand: str = "",
+    cpu_microarch: str = "",
+    logical_cpus: int | str = "",
 ) -> dict:
     """Run the spec measurement protocol for one cell; return a CSV row dict."""
     dataset = _build_dataset(cell, dataset_path, reference)
@@ -317,4 +323,7 @@ def measure_cell(
         "git_sha": git_sha,
         "host": host,
         "started_at": started_at,
+        "cpu_brand": cpu_brand,
+        "cpu_microarch": cpu_microarch,
+        "logical_cpus": logical_cpus,
     }

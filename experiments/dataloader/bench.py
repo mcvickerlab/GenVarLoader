@@ -21,8 +21,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # experiments/
 
 import _common as C
+import _sysinfo
 
 HERE = Path(__file__).resolve().parent
 RESULTS_CSV = HERE / "results.csv"
@@ -48,6 +50,9 @@ def run_child(n_threads: int) -> None:
     """Child process: run only the cells pinned to this thread count."""
     git_sha = os.environ.get("BENCH_GIT_SHA", "")
     started_at = os.environ.get("BENCH_STARTED_AT", "")
+    cpu_brand = os.environ.get("BENCH_CPU_BRAND", "")
+    cpu_microarch = os.environ.get("BENCH_CPU_MICROARCH", "")
+    logical_cpus = os.environ.get("BENCH_LOGICAL_CPUS", "")
     host = socket.gethostname()
     tmp_dir = Path(os.environ["BENCH_TMP"])
 
@@ -67,6 +72,9 @@ def run_child(n_threads: int) -> None:
                 git_sha=git_sha,
                 host=host,
                 started_at=started_at,
+                cpu_brand=cpu_brand,
+                cpu_microarch=cpu_microarch,
+                logical_cpus=logical_cpus,
             )
         except Exception as e:  # noqa: BLE001 - one bad cell must not kill the run
             print(f"[threads={n_threads}] cell {i}/{len(cells)} FAILED: {cell} -> {e}")
@@ -89,6 +97,12 @@ def run_parent() -> None:
     started_at = _dt.datetime.now().isoformat(timespec="seconds")
     git_sha = _git_sha()
 
+    # Capture + log CPU/system/microarch once; write system_info.json next to
+    # the CSV and propagate key fields to children for per-row reproducibility.
+    info = _sysinfo.write_and_log(
+        HERE, extra={"git_sha": git_sha, "started_at": started_at}
+    )
+
     for n_threads in C.ALL_THREADS:
         env = {
             **os.environ,
@@ -96,6 +110,9 @@ def run_parent() -> None:
             "BENCH_TMP": str(TMP_DIR),
             "BENCH_GIT_SHA": git_sha,
             "BENCH_STARTED_AT": started_at,
+            "BENCH_CPU_BRAND": str(info.get("cpu_brand") or ""),
+            "BENCH_CPU_MICROARCH": str(info.get("cpu_microarch") or ""),
+            "BENCH_LOGICAL_CPUS": str(info.get("logical_cpus") or ""),
             "RAYON_NUM_THREADS": str(n_threads),
             "POLARS_MAX_THREADS": str(n_threads),
             "OMP_NUM_THREADS": str(n_threads),

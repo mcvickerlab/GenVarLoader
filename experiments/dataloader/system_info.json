@@ -1,0 +1,27 @@
+{
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "system": "Darwin",
+  "machine": "arm64",
+  "processor": "arm",
+  "python": "3.10.20",
+  "logical_cpus": 14,
+  "physical_cpus": 14,
+  "ram_gib": 24.0,
+  "cpu_hz_advertised": null,
+  "cpu_count_cpuinfo": 14,
+  "cpu_simd": [],
+  "cpu_brand": "Apple M4 Pro",
+  "cpu_microarch": "Apple M4 Pro (arm64)",
+  "packages": {
+    "genvarloader": "0.25.0",
+    "genoray": "2.4.0",
+    "seqpro": "0.11.0",
+    "numpy": "1.26.4",
+    "polars": "1.37.1",
+    "awkward": "2.9.0",
+    "torch": "2.10.0",
+    "py-cpuinfo": "9.0.0"
+  },
+  "git_sha": "596edea",
+  "started_at": "2026-05-29T14:13:58"
+}
