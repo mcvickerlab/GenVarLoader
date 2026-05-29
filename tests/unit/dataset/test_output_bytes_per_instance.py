@@ -34,16 +34,9 @@ def _materialized_nbytes_per_instance(ds, r_arr, s_arr):
                     lens = np.diff(field.offsets).reshape(n_inst, -1)
                     totals += lens.sum(-1) * field.data.dtype.itemsize
                 else:
-                    # Allele field (alt/ref): ak.Array of bytes objects (b, p, ~v).
-                    # Each element is a bytes object; cost = sum of len(b).
-                    flat = ak.flatten(field, axis=None).tolist()
-                    # Rebuild per-instance sum: flatten per ploidy x variants.
-                    # Use ak.sum over the innermost axis to get total bytes per (b, p).
-                    byte_lens = ak.num(field, axis=-1)  # (b, p) variant counts
-                    # Each allele contributes len(allele) bytes. Use ak.str.length.
-                    allele_lens = ak.str.length(field)  # (b, p, ~v) byte lengths
-                    per_ploid_bytes = ak.sum(allele_lens, axis=-1)  # (b, p)
-                    per_inst_bytes = ak.sum(per_ploid_bytes, axis=-1).to_numpy()  # (b,)
+                    allele_lens = ak.str.length(field)
+                    per_ploid_bytes = ak.sum(allele_lens, axis=-1)
+                    per_inst_bytes = ak.sum(per_ploid_bytes, axis=-1).to_numpy()
                     totals += per_inst_bytes.astype(np.int64)
         elif isinstance(arr, RaggedAnnotatedHaps):
             # Sum bytes over all three Ragged fields (haps S1, var_idxs int32, ref_coords int32).

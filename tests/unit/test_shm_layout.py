@@ -2,7 +2,6 @@
 
 import multiprocessing as mp
 import numpy as np
-import pytest
 from multiprocessing.shared_memory import SharedMemory
 from genvarloader._shm_layout import write_chunk, read_chunk, slot_capacity_for
 

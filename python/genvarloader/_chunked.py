@@ -113,7 +113,6 @@ def slice_chunk(chunk_output, batch_size: int):
     from seqpro.rag import Ragged
     from ._types import AnnotatedHaps
     from ._ragged import RaggedAnnotatedHaps
-    from ._dataset._rag_variants import RaggedVariants
     import awkward as ak
 
     def _len(arr) -> int:

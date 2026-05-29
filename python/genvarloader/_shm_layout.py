@@ -41,7 +41,7 @@ Header layout (little-endian throughout):
 from __future__ import annotations
 
 import struct
-from typing import Sequence, Union
+from typing import Sequence
 
 import numpy as np
 
@@ -103,7 +103,6 @@ def _write_dense(buf: memoryview, a: np.ndarray, cursor: int) -> tuple[dict, int
 
 def _write_ragged(buf: memoryview, a, cursor: int) -> tuple[dict, int]:
     """Write a seqpro.rag.Ragged into buf. Returns descriptor dict and new cursor."""
-    from seqpro.rag import Ragged
 
     data_arr = np.ascontiguousarray(a.data)
     off_arr = np.ascontiguousarray(a.offsets)
