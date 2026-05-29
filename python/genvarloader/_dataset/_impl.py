@@ -1127,7 +1127,33 @@ class Dataset:
                 total += hap_len_sum * 4  # var_idxs int32
                 total += hap_len_sum * 4  # ref_coords int32
         elif seq_kind == "variants":
-            raise NotImplementedError("variants branch added in Task 4")
+            if not isinstance(self._seqs, Haps):
+                raise AssertionError("variants mode requires Haps")
+            haps_obj = self._seqs
+            var_fields = haps_obj.var_fields
+            n_vars = self.n_variants(regions, samples)  # (n_inst, ploidy)
+            n_vars_flat = n_vars.reshape(-1, n_vars.shape[-1]).astype(np.int64)
+            n_vars_total = n_vars_flat.sum(-1)  # over ploidy → (n_inst,)
+            ploidy = n_vars.shape[-1]
+
+            for f in var_fields:
+                if f == "start":
+                    total += n_vars_total * haps_obj.variants.start.dtype.itemsize
+                elif f == "ilen":
+                    total += n_vars_total * haps_obj.variants.ilen.dtype.itemsize
+                elif f == "dosage":
+                    if haps_obj.dosages is None:
+                        continue
+                    dosage_dtype = haps_obj.dosages.data.dtype
+                    total += n_vars_total * dosage_dtype.itemsize
+                elif f in ("alt", "ref"):
+                    # Allele scan: _allele_bytes_sum returns (len(ds_idx) * ploidy,).
+                    per_ploid = haps_obj._allele_bytes_sum(ds_idx, f)
+                    total += per_ploid.reshape(-1, ploidy).sum(-1)
+                else:
+                    # INFO column: numeric, known dtype from on-disk schema.
+                    info_dtype = haps_obj.variants.info[f].dtype
+                    total += n_vars_total * info_dtype.itemsize
         elif seq_kind is None:
             pass
         else:

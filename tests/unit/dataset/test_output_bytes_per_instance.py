@@ -3,16 +3,18 @@
 Invariant: Dataset._output_bytes_per_instance(r, s) == nbytes of the actual
 dataset[r, s] output, summed over arrays returned for that instance.
 """
+import awkward as ak
 import numpy as np
 import pytest
 import genvarloader as gvl
 from seqpro.rag import Ragged
 
+from genvarloader._dataset._rag_variants import RaggedVariants
+from genvarloader._ragged import RaggedAnnotatedHaps
+
 
 def _materialized_nbytes_per_instance(ds, r_arr, s_arr):
     """Compute actual nbytes by indexing the dataset and measuring."""
-    from genvarloader._ragged import RaggedAnnotatedHaps
-
     out = ds[r_arr, s_arr]
     # Normalize to tuple
     if not isinstance(out, tuple):
@@ -21,11 +23,32 @@ def _materialized_nbytes_per_instance(ds, r_arr, s_arr):
     n_inst = len(r_arr)
     totals = np.zeros(n_inst, dtype=np.int64)
     for arr in out:
-        if isinstance(arr, RaggedAnnotatedHaps):
+        if isinstance(arr, RaggedVariants):
+            # Sum bytes across all fields per instance.
+            for fname in arr.fields:
+                field = arr[fname]
+                if isinstance(field, Ragged):
+                    # Numeric field: (b, p, ~v) — n_variants * itemsize.
+                    # Ragged.offsets has b*p+1 entries.
+                    lens = np.diff(field.offsets).reshape(n_inst, -1)
+                    totals += lens.sum(-1) * field.data.dtype.itemsize
+                else:
+                    # Allele field (alt/ref): ak.Array of bytes objects (b, p, ~v).
+                    # Each element is a bytes object; cost = sum of len(b).
+                    flat = ak.flatten(field, axis=None).tolist()
+                    # Rebuild per-instance sum: flatten per ploidy x variants.
+                    # Use ak.sum over the innermost axis to get total bytes per (b, p).
+                    byte_lens = ak.num(field, axis=-1)  # (b, p) variant counts
+                    # Each allele contributes len(allele) bytes. Use ak.str.length.
+                    allele_lens = ak.str.length(field)  # (b, p, ~v) byte lengths
+                    per_ploid_bytes = ak.sum(allele_lens, axis=-1)  # (b, p)
+                    per_inst_bytes = ak.sum(per_ploid_bytes, axis=-1).to_numpy()  # (b,)
+                    totals += per_inst_bytes.astype(np.int64)
+        elif isinstance(arr, RaggedAnnotatedHaps):
             # Sum bytes over all three Ragged fields (haps S1, var_idxs int32, ref_coords int32).
-            for field in (arr.haps, arr.var_idxs, arr.ref_coords):
-                lens = np.diff(field.offsets).reshape(n_inst, -1)
-                totals += lens.sum(-1) * field.data.dtype.itemsize
+            for ragged_field in (arr.haps, arr.var_idxs, arr.ref_coords):
+                lens = np.diff(ragged_field.offsets).reshape(n_inst, -1)
+                totals += lens.sum(-1) * ragged_field.data.dtype.itemsize
         elif isinstance(arr, Ragged):
             # Ragged.offsets is (n_inst * ... + 1,); reshape lens to (n_inst, -1)
             lens = np.diff(arr.offsets)
@@ -69,6 +92,45 @@ def test_annotated_mode_exact():
         .with_tracks(False)
         .with_settings(deterministic=True)
     )
+    r = np.arange(ds.full_shape[0])
+    s = np.zeros(len(r), dtype=np.int64)
+    got = ds._output_bytes_per_instance(r, s)
+    expected = _materialized_nbytes_per_instance(ds, r, s)
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_variants_default_var_fields_exact():
+    """Default var_fields = ['alt', 'ilen', 'start']."""
+    ds = gvl.get_dummy_dataset().with_seqs("variants").with_tracks(False)
+    r = np.arange(ds.full_shape[0])
+    s = np.zeros(len(r), dtype=np.int64)
+    got = ds._output_bytes_per_instance(r, s)
+    expected = _materialized_nbytes_per_instance(ds, r, s)
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_variants_with_ref_exact():
+    ds = gvl.get_dummy_dataset().with_seqs("variants").with_tracks(False)
+    if "ref" not in ds._seqs.available_var_fields:
+        pytest.skip("dummy dataset does not have ref allele")
+    ds = ds.with_settings(var_fields=["alt", "ref", "ilen", "start"])
+    r = np.arange(ds.full_shape[0])
+    s = np.zeros(len(r), dtype=np.int64)
+    got = ds._output_bytes_per_instance(r, s)
+    expected = _materialized_nbytes_per_instance(ds, r, s)
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_variants_with_info_column_exact():
+    ds = gvl.get_dummy_dataset().with_seqs("variants").with_tracks(False)
+    info_cols = [
+        c
+        for c in ds._seqs.available_var_fields
+        if c not in {"alt", "ref", "ilen", "start", "dosage"}
+    ]
+    if not info_cols:
+        pytest.skip("dummy dataset has no INFO columns")
+    ds = ds.with_settings(var_fields=["alt", "start", "ilen", info_cols[0]])
     r = np.arange(ds.full_shape[0])
     s = np.zeros(len(r), dtype=np.int64)
     got = ds._output_bytes_per_instance(r, s)
