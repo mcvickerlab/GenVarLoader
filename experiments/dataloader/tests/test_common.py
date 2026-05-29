@@ -150,11 +150,12 @@ def test_output_bytes_table_matches_actual_nbytes(tmp_path):
     repo = Path(__file__).resolve().parents[3]
     svar = repo / "tests" / "data" / "1kg" / "filtered.svar"
     regions = repo / "tests" / "data" / "1kg" / "regions.bed"
-    if not svar.is_dir():
-        pytest.skip("missing filtered.svar; run pixi run -e dev gen")
+    ref = repo / "tests" / "data" / "fasta" / "hg38.fa.bgz"
+    if not svar.is_dir() or not ref.exists():
+        pytest.skip("missing filtered.svar or hg38 reference; run pixi run -e dev gen")
 
     paths = C.prepare_datasets([1_000], svar, regions, tmp_path)
-    ds = gvl.Dataset.open(paths[1_000]).with_seqs("variants")
+    ds = gvl.Dataset.open(paths[1_000], reference=ref).with_seqs("variants")
 
     instances, total_bytes, table = C.output_bytes_table(ds)
     assert instances == table.size
