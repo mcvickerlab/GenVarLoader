@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import atexit
 import multiprocessing as mp
 import os
 import uuid
@@ -147,8 +146,12 @@ class _DoubleBufferedIterable:
             return producer_holder[0]
 
         self._producer_holder = producer_holder
+        # weakref.finalize handles cleanup both on garbage collection AND at
+        # interpreter exit, without retaining a strong reference. Do NOT also
+        # atexit.register(self.close): a bound method keeps the loader alive for
+        # the whole process, so per-loader producers + shm would accumulate
+        # (e.g. one loader per bench cell) until exit and exhaust RAM.
         weakref.finalize(self, _cleanup, shm_snapshot, _producer_getter)
-        atexit.register(self.close)
 
     def _spawn_producer(self) -> None:
         from ._producer import producer_main

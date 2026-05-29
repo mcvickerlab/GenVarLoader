@@ -133,6 +133,44 @@ def test_double_buffered_schema_settings_parity(file_backed_ds, seq_kind):
 
 
 @pytest.mark.slow
+def test_double_buffered_producer_reaped_on_drop(file_backed_ds):
+    """Dropping a loader must terminate its producer subprocess promptly.
+
+    Regression: the loader registered ``atexit.register(self.close)``, which
+    held a strong reference for the whole process lifetime, so per-loader
+    producers (and their shm) accumulated until process exit. Creating many
+    loaders in one process (e.g. the bench's per-cell loop) then exhausted RAM.
+    """
+    import gc
+    import time
+
+    ds = ds_ref = file_backed_ds.with_seqs("reference").with_tracks(False)
+    loader = ds_ref.to_dataloader(
+        mode="double_buffered",
+        batch_size=2,
+        shuffle=False,
+        drop_last=True,
+        buffer_bytes=1 << 20,
+    )
+    list(loader)
+    impl = loader.dataset._impl
+    proc = impl._producer
+    assert proc is not None and proc.is_alive()
+
+    del loader, impl, ds, ds_ref
+    gc.collect()
+
+    for _ in range(50):  # allow the finalizer's terminate()/join() to land
+        if not proc.is_alive():
+            break
+        time.sleep(0.1)
+    assert not proc.is_alive(), (
+        "producer subprocess still alive after the loader was dropped — "
+        "atexit must not retain a strong reference to the loader"
+    )
+
+
+@pytest.mark.slow
 def test_double_buffered_annotated_matches_buffered(file_backed_ds):
     """Regression: double_buffered must support ``annotated`` output.
 

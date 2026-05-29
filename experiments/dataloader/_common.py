@@ -261,8 +261,15 @@ def measure_cell(
         epochs += 1
     rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
-    # tear down before measuring nothing else; clip RSS between cells
-    del loader, dataset
+    # Tear down before the next cell. Explicitly close the buffered/
+    # double_buffered iterable so its producer subprocess + shm slots are
+    # released NOW, rather than relying on GC timing — otherwise per-cell
+    # loaders accumulate and exhaust RAM.
+    inner = getattr(loader, "dataset", None)
+    impl = getattr(inner, "_impl", None)
+    if impl is not None and hasattr(impl, "close"):
+        impl.close()
+    del loader, dataset, inner, impl
     gc.collect()
 
     instances = instances_per_epoch * epochs
