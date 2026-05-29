@@ -45,7 +45,6 @@ class ChunkPlanner:
         self.bytes_per_instance = bytes_per_instance
         self.slot_bytes = int(slot_bytes)
 
-        # Pre-validate: no single mini-batch may exceed slot_bytes.
         per_inst = bytes_per_instance[self.r_idx, self.s_idx].astype(np.int64)
         batch_totals = per_inst.reshape(-1, batch_size).sum(-1)
         too_big = batch_totals > self.slot_bytes
@@ -58,13 +57,11 @@ class ChunkPlanner:
             )
         self._batch_totals = batch_totals
 
-        # Eagerly compute peak_chunk_bytes via a non-consuming pre-pass.
-        # This ensures peak_chunk_bytes is available before __iter__ is called
-        # (required by Task 12 to size slots at construction time).
+        # Compute peak_chunk_bytes before __iter__ so callers can size shm slots
+        # at construction time without consuming the iterator.
         self.peak_chunk_bytes: int = self._compute_peak_chunk_bytes()
 
     def _compute_peak_chunk_bytes(self) -> int:
-        """Compute the maximum bytes across all chunks without consuming the iterator."""
         n_batches = len(self._batch_totals)
         peak = 0
         i = 0
@@ -89,8 +86,7 @@ class ChunkPlanner:
             while j < n_batches and running + int(self._batch_totals[j]) <= self.slot_bytes:
                 running += int(self._batch_totals[j])
                 j += 1
-            # j-i batches go into this chunk; at least one (guaranteed by the per-batch check).
-            assert j > i
+            assert j > i  # at least one batch per chunk, guaranteed by per-batch validation
             start = i * self.batch_size
             end = j * self.batch_size
             yield self.r_idx[start:end], self.s_idx[start:end], j - i

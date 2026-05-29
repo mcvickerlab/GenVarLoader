@@ -64,34 +64,6 @@ def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
     return result
 
 
-def _deep_copy_batch(batch):
-    """Recursively copy a batch so it doesn't share memory with the shm slot."""
-    from seqpro.rag import Ragged
-    from ._types import AnnotatedHaps
-    from ._ragged import RaggedAnnotatedHaps
-    import awkward as ak
-
-    if isinstance(batch, tuple):
-        return tuple(_deep_copy_batch(x) for x in batch)
-    if isinstance(batch, np.ndarray):
-        return batch.copy()
-    if isinstance(batch, RaggedAnnotatedHaps):
-        return RaggedAnnotatedHaps(
-            haps=batch.haps[...].copy() if hasattr(batch.haps, "data") else batch.haps.copy(),
-            var_idxs=batch.var_idxs[...].copy() if hasattr(batch.var_idxs, "data") else batch.var_idxs.copy(),
-            ref_coords=batch.ref_coords[...].copy() if hasattr(batch.ref_coords, "data") else batch.ref_coords.copy(),
-        )
-    if isinstance(batch, Ragged):
-        return Ragged.from_offsets(batch.data.copy(), batch.shape, batch.offsets.copy())
-    if isinstance(batch, AnnotatedHaps):
-        return AnnotatedHaps(
-            haps=_deep_copy_batch(batch.haps),
-            var_idxs=_deep_copy_batch(batch.var_idxs),
-            ref_coords=_deep_copy_batch(batch.ref_coords),
-        )
-    if isinstance(batch, ak.Array):
-        return ak.copy(batch)
-    raise TypeError(f"_deep_copy_batch: unsupported {type(batch)}")
 
 
 class _DoubleBufferedIterable:
@@ -119,7 +91,6 @@ class _DoubleBufferedIterable:
         self._copy = copy
         self._heartbeat = heartbeat_seconds
 
-        # Build the chunk plan once and store it for reuse across epochs.
         planner = ChunkPlanner(
             r_idx=flat_r,
             s_idx=flat_s,
@@ -128,19 +99,16 @@ class _DoubleBufferedIterable:
             slot_bytes=slot_bytes,
         )
         self._chunks: list[tuple[np.ndarray, np.ndarray, int]] = list(planner)
-        # peak_chunk_bytes is computed eagerly in ChunkPlanner.__init__.
         peak = planner.peak_chunk_bytes
 
-        # Each slot needs header space + payload.
         capacity = HEADER_RESERVED + peak + 4096
-        # Unique prefix avoids collisions between concurrent processes.
         suffix = uuid.uuid4().hex[:8]
         self._shm_names = [f"gvl-{os.getpid()}-{suffix}-{i}" for i in range(2)]
         self._shms = [SharedMemory(create=True, name=n, size=capacity) for n in self._shm_names]
 
         ctx = mp.get_context("spawn")
         self._ctx = ctx
-        # events[i] = (free, ready); free starts set, ready starts clear.
+        # events[i] = (free_event, ready_event); free starts set, ready starts clear.
         self._events: list[tuple] = [(ctx.Event(), ctx.Event()) for _ in range(2)]
         for free, ready in self._events:
             free.set()
@@ -150,7 +118,6 @@ class _DoubleBufferedIterable:
         self._exc_q: mp.Queue = ctx.Queue()
         self._producer: mp.Process | None = None
 
-        # Register cleanup on GC and process exit.
         shm_snapshot = list(self._shms)
         producer_holder: list[mp.Process | None] = [None]
 
@@ -168,7 +135,6 @@ class _DoubleBufferedIterable:
 
         ds = self._dataset
 
-        # Reject settings that cannot be serialized into the schema dict.
         if ds.is_spliced:
             raise ValueError(
                 "mode='double_buffered' is not supported when splice_info is set; "
@@ -206,7 +172,6 @@ class _DoubleBufferedIterable:
             if hasattr(seqs, "var_fields"):
                 schema["var_fields"] = list(seqs.var_fields)
 
-        # Pass reference path so the producer can reopen with a reference genome.
         ref = getattr(ds, "reference", None)
         if ref is not None:
             ref_path = getattr(ref, "path", None)
@@ -242,48 +207,37 @@ class _DoubleBufferedIterable:
         self._producer_holder[0] = proc
 
     def __iter__(self):
-        # Spawn producer on first iteration; reuse on subsequent epochs.
         if self._producer is None:
             self._spawn_producer()
 
-        # Re-initialise slot events for this epoch.
         for free, ready in self._events:
             free.set()
             ready.clear()
 
         # Enqueue all chunk work items upfront.
         for i, (cr, cs, nb) in enumerate(self._chunks):
+            # slot_idx = i % 2 works because the producer drains the queue in
+            # order, so slot ownership rotates deterministically between the two
+            # sides and is never double-assigned.
             self._index_queue.put((i % 2, cr, cs, nb))
 
-        # Consume chunks in order, yielding mini-batches.
         for i, (_cr, _cs, _nb) in enumerate(self._chunks):
             slot_idx = i % 2
             _free, ready = self._events[slot_idx]
 
-            # Wait for producer to fill the slot; check liveness on timeout.
             while not ready.wait(timeout=self._heartbeat):
                 if not self._producer.is_alive():
                     raise self._reraise_or_die()
 
-            # Also verify no exception slipped through before we got here.
             if not self._exc_q.empty():
                 raise self._reraise_or_die()
 
             _n_inst, views = read_chunk(self._shms[slot_idx].buf, copy=self._copy)
-            # Restore intermediate fixed dims (e.g. ploidy) that were flattened
-            # in the shm round-trip for Ragged arrays.
             views = _reshape_ragged_for_chunk(views, int(_n_inst))
             chunk_output: object = tuple(views) if len(views) > 1 else views[0]
 
-            for mini in slice_chunk(chunk_output, self._batch_size):
-                if self._copy:
-                    # read_chunk with copy=True already owns data; no extra copy needed.
-                    yield mini
-                else:
-                    # Zero-copy: caller must consume before next iteration.
-                    yield mini
+            yield from slice_chunk(chunk_output, self._batch_size)
 
-            # Signal the producer that this slot is free to overwrite.
             ready.clear()
             _free.set()
 
@@ -325,7 +279,7 @@ class _DoubleBufferedIterable:
             except Exception:
                 pass
         # Clear list so finalizer is idempotent.
-        self._shms.clear()
+        self._shms.clear()  # idempotent: prevents double-unlink in finalizer
 
 
 def make_double_buffered_dataset(

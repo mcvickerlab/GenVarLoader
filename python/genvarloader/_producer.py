@@ -43,15 +43,8 @@ def producer_main(
     index_queue,
     exc_q,
 ) -> None:
-    """Main function for the producer subprocess.
-
-    Opens the dataset, reapplies the schema, and loops on index_queue items.
-    Each item is a tuple of (slot_idx, r_idx, s_idx, n_batches).
-    Sentinel None item causes clean exit.
-    Any exception is pushed to exc_q as (type_name, message, traceback).
-    """
+    """Producer subprocess: opens dataset, replays schema, writes chunks to shm slots."""
     try:
-        # Test-only hook (also used in Task 13 crash tests).
         if os.environ.get("GVL_TEST_PRODUCER_RAISE") == "1":
             raise RuntimeError("test-injected producer failure")
 

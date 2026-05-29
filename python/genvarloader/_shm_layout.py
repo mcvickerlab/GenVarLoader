@@ -44,20 +44,10 @@ from typing import Sequence, Union
 
 import numpy as np
 
-# Reserve a generous prefix for header. Slot layout: [HEADER (HEADER_RESERVED bytes)][PAYLOAD].
 HEADER_RESERVED = 4096
 
 _PREAMBLE = struct.Struct("<QQB")  # n_instances, payload_bytes, n_arrays
 
-# Static dtype lookup: dtype.num -> np.dtype (built once at import time).
-# np.dtype(num) does not work in NumPy ≥1.24; use sctypeDict which maps int keys.
-_DTYPE_FROM_NUM: dict[int, np.dtype] = {}
-for _name, _t in np.sctypeDict.items():
-    try:
-        _dt = np.dtype(_t)
-        _DTYPE_FROM_NUM[_dt.num] = _dt
-    except Exception:
-        pass
 
 
 def _align(off: int, align: int = 8) -> int:
@@ -183,14 +173,12 @@ def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
         else:
             raise TypeError(f"Unexpected layout for field {field!r}: {type(inner_content)}")
 
-        # Write outer offsets
         cursor = _align(cursor)
         outer_off = cursor
         np.frombuffer(buf, dtype=outer_offsets.dtype, count=outer_offsets.size, offset=outer_off)[...] = outer_offsets
         cursor += outer_offsets.nbytes
 
-        # Write inner offsets (alleles only; zero-size array for numeric)
-        if field_kind == 1:
+        if field_kind == 1:  # alleles: inner offsets present; numeric: skip
             cursor = _align(cursor)
             inner_off = cursor
             np.frombuffer(buf, dtype=inner_offsets.dtype, count=inner_offsets.size, offset=inner_off)[...] = inner_offsets
@@ -198,7 +186,6 @@ def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
         else:
             inner_off = 0
 
-        # Write leaf data
         cursor = _align(cursor)
         data_off = cursor
         np.frombuffer(buf, dtype=leaf_data.dtype, count=leaf_data.size, offset=data_off)[...] = leaf_data.ravel()
@@ -218,9 +205,6 @@ def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
             "name": name_bytes,
         })
 
-    # The "shape" slot of the kind=2 top-level descriptor carries [n_fields].
-    # We encode the field descriptors inline in the header instead of the payload.
-    # Build a bytes object for the field descriptors that will be embedded in hdr.
     return {
         "kind": 2,
         "dtype_str": b"\x00" * 4,
@@ -241,7 +225,6 @@ def _pack_descriptor(d: dict) -> bytes:
     kind = d["kind"]
     ndim = len(d["shape"])
     name = d.get("name", b"")
-    # Fixed part: kind(1) + ndim(1) + dtype_str(4) + shape(8*ndim) + 6×u64(48) + name_len(1) + name
     out = struct.pack("<BB4s", kind, ndim, d["dtype_str"])
     for dim in d["shape"]:
         out += struct.pack("<Q", int(dim))
@@ -258,7 +241,6 @@ def _pack_descriptor(d: dict) -> bytes:
     out += name
 
     if kind == 2:
-        # Embed per-field descriptors inline.
         field_descs = d["_field_descs"]
         out += struct.pack("<B", len(field_descs))
         for fd in field_descs:
@@ -315,7 +297,6 @@ def write_chunk(
 
     payload_bytes = cursor - HEADER_RESERVED
 
-    # Build header bytes.
     hdr = bytearray()
     hdr += _PREAMBLE.pack(n_instances, payload_bytes, len(descriptors))
     for d in descriptors:
@@ -366,7 +347,6 @@ def _unpack_one_descriptor(buf_bytes: memoryview, cursor: int) -> tuple[dict, in
     }
 
     if kind == 2:
-        # Read per-field descriptors.
         (n_fields,) = struct.unpack_from("<B", buf_bytes, cursor)
         cursor += 1
         field_descs = []
@@ -438,13 +418,11 @@ def _read_rag_variants(buf: memoryview, d: dict, copy: bool = True):
         leaf_dtype = _dtype_from_bytes(fd["dtype_str"])
         regular_size = fd["regular_size"]
 
-        # Read outer offsets (b*ploidy + 1 values of int64)
         n_outer = fd["outer_offsets_nbytes"] // 8
         outer_offsets = np.frombuffer(
             buf, dtype=np.int64, count=n_outer, offset=fd["outer_offsets_offset"]
         )
 
-        # Read leaf data
         leaf_nbytes = fd["data_nbytes"]
         leaf_count = leaf_nbytes // leaf_dtype.itemsize
         leaf_data = np.frombuffer(
@@ -456,7 +434,6 @@ def _read_rag_variants(buf: memoryview, d: dict, copy: bool = True):
             leaf_data = leaf_data.copy()
 
         if fd["field_kind"] == 1:
-            # Alleles: RegularArray(size=ploidy) -> ListOffsetArray(outer) -> ListOffsetArray(inner) -> NumpyArray
             n_inner = fd["inner_offsets_nbytes"] // 8
             inner_offsets = np.frombuffer(
                 buf, dtype=np.int64, count=n_inner, offset=fd["inner_offsets_offset"]
@@ -471,7 +448,6 @@ def _read_rag_variants(buf: memoryview, d: dict, copy: bool = True):
             outer_loa = ListOffsetArray(Index64(outer_offsets), inner_loa)
             arr = ak.Array(RegularArray(outer_loa, regular_size))
         else:
-            # Numeric: RegularArray(size=ploidy) -> ListOffsetArray(outer) -> NumpyArray
             outer_loa = ListOffsetArray(Index64(outer_offsets), NumpyArray(leaf_data))
             arr = ak.Array(RegularArray(outer_loa, regular_size))
 
