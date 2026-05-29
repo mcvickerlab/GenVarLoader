@@ -1396,6 +1396,10 @@ class Dataset:
         pin_memory_device: str = "",
         return_indices: bool = False,
         transform: Callable | None = None,
+        mode: str | None = None,
+        buffer_bytes: int = 2 * 1024**3,
+        copy: bool = True,
+        heartbeat_seconds: float = 60.0,
     ) -> td.DataLoader:
         """Convert the dataset to a PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
         :class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
@@ -1453,6 +1457,25 @@ class Dataset:
                 Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
                 dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
         """
+        if mode is not None:
+            # Buffered modes operate directly on the Dataset, not on a TorchDataset wrapper,
+            # because they need access to _output_bytes_per_instance and raw indexing.
+            return get_dataloader(
+                dataset=self,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                sampler=sampler,
+                num_workers=num_workers,
+                collate_fn=collate_fn,
+                pin_memory=pin_memory,
+                drop_last=drop_last,
+                generator=generator,
+                pin_memory_device=pin_memory_device,
+                mode=mode,
+                buffer_bytes=buffer_bytes,
+                copy=copy,
+                heartbeat_seconds=heartbeat_seconds,
+            )
         return get_dataloader(
             dataset=self.to_torch_dataset(return_indices, transform),
             batch_size=batch_size,

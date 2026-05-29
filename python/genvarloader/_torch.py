@@ -41,9 +41,46 @@ def requires_torch(func):
         return no_torch_error
 
 
+def _resolve_buffered_inputs(
+    dataset,
+    batch_size: int,
+    shuffle: bool,
+    drop_last: bool,
+    sampler,
+    generator,
+    buffer_bytes: int,
+    n_slots: int,
+):
+    """Compute flat (r_idx, s_idx) epoch order, bytes_per_instance table, and slot_bytes.
+
+    ``dataset`` must be a raw gvl Dataset (not a TorchDataset wrapper) so that
+    ``_output_bytes_per_instance`` and ``.shape`` are available.
+    """
+    # 1) Resolve full epoch order from the BatchSampler.
+    if sampler is None:
+        sampler = get_sampler(len(dataset), batch_size, shuffle, drop_last, generator=generator)
+    flat = []
+    for batch in sampler:
+        flat.extend(batch)
+    flat = np.asarray(flat, dtype=np.int64)
+    n_keep = (len(flat) // batch_size) * batch_size
+    flat = flat[:n_keep]
+    r_idx, s_idx = np.unravel_index(flat, dataset.shape)
+
+    # 2) Pre-pass: exact bytes per instance for the entire (n_regions, n_samples) grid.
+    # Pass None, None so parse_idx uses slice(None), slice(None) → "basic" indexing →
+    # out_reshape=(n_regions, n_samples), and _output_bytes_per_instance returns a 2-D array.
+    bpi = dataset._output_bytes_per_instance(None, None)
+    # Ensure exactly (n_regions, n_samples) 2-D regardless of squeeze/reshape behavior.
+    bpi = np.asarray(bpi, dtype=np.int64).reshape(dataset.shape)
+
+    slot_bytes = buffer_bytes // n_slots
+    return r_idx, s_idx, bpi, slot_bytes, sampler
+
+
 @requires_torch
 def get_dataloader(
-    dataset: td.Dataset,
+    dataset,
     batch_size: int = 1,
     shuffle: bool = False,
     sampler: td.Sampler | Iterable | None = None,
@@ -59,36 +96,84 @@ def get_dataloader(
     prefetch_factor: int | None = None,
     persistent_workers: bool = False,
     pin_memory_device: str = "",
+    mode: str | None = None,
+    buffer_bytes: int = 2 * 1024**3,
+    copy: bool = True,
+    heartbeat_seconds: float = 60.0,
 ):
-    if num_workers > 1:
-        logger.warning(
-            "It is recommended to use num_workers <= 1 with GenVarLoader since it leverages"
-            " multithreading which has lower overhead than multiprocessing."
+    if mode is None:
+        # Existing path unchanged.
+        if num_workers > 1:
+            logger.warning(
+                "It is recommended to use num_workers <= 1 with GenVarLoader since it leverages"
+                " multithreading which has lower overhead than multiprocessing."
+            )
+
+        if sampler is None:
+            sampler = get_sampler(
+                len(dataset),
+                batch_size,
+                shuffle,
+                drop_last,
+                generator=generator,
+            )
+
+        return td.DataLoader(
+            dataset,
+            batch_size=None,
+            sampler=sampler,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=pin_memory,
+            drop_last=drop_last,
+            timeout=timeout,
+            worker_init_fn=worker_init_fn,
+            multiprocessing_context=multiprocessing_context,
+            generator=generator,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+            pin_memory_device=pin_memory_device,
         )
 
-    if sampler is None:
-        sampler = get_sampler(
-            len(dataset),
+    if mode not in {"buffered", "double_buffered"}:
+        raise ValueError(
+            f"unknown mode={mode!r}; expected None, 'buffered', or 'double_buffered'"
+        )
+    if num_workers > 0:
+        raise ValueError(
+            f"mode={mode!r} is incompatible with num_workers>0; "
+            "the loader IS the concurrency strategy"
+        )
+
+    n_slots = 1 if mode == "buffered" else 2
+    r_idx, s_idx, bpi, slot_bytes, _sampler = _resolve_buffered_inputs(
+        dataset, batch_size, shuffle, drop_last, sampler, generator, buffer_bytes, n_slots
+    )
+
+    if mode == "buffered":
+        from ._buffered_loader import make_buffered_dataset
+
+        inner_ds = make_buffered_dataset(dataset, batch_size, slot_bytes, bpi, r_idx, s_idx)
+    else:
+        from ._double_buffered_loader import make_double_buffered_dataset
+
+        inner_ds = make_double_buffered_dataset(
+            dataset,
             batch_size,
-            shuffle,
-            drop_last,
-            generator=generator,
+            slot_bytes,
+            bpi,
+            r_idx,
+            s_idx,
+            copy=copy,
+            heartbeat_seconds=heartbeat_seconds,
         )
 
     return td.DataLoader(
-        dataset,
+        inner_ds,
         batch_size=None,
-        sampler=sampler,
-        num_workers=num_workers,
+        num_workers=0,
         collate_fn=collate_fn,
         pin_memory=pin_memory,
-        drop_last=drop_last,
-        timeout=timeout,
-        worker_init_fn=worker_init_fn,
-        multiprocessing_context=multiprocessing_context,
-        generator=generator,
-        prefetch_factor=prefetch_factor,
-        persistent_workers=persistent_workers,
         pin_memory_device=pin_memory_device,
     )
 
