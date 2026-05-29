@@ -208,6 +208,13 @@ def append_row(path, row: dict) -> None:
 def _build_dataset(cell: Cell, dataset_path, reference):
     import genvarloader as gvl
 
+    # Open the reference as a memmap (in_memory=False) — the full hg38 is ~3 GB
+    # and Reference.from_path defaults to in_memory=True, which would load it
+    # into RAM per cell AND per double_buffered producer subprocess. A memmap is
+    # file-backed/reclaimable; the producer mirrors it (reference_in_memory=False).
+    if isinstance(reference, (str, Path)):
+        reference = gvl.Reference.from_path(reference, in_memory=False)
+
     ds = gvl.Dataset.open(dataset_path, reference=reference).with_seqs(cell.with_seqs)
     if cell.with_seqs in ("haplotypes", "annotated"):
         ds = ds.with_settings(deterministic=True)
