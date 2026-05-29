@@ -46,7 +46,12 @@ MODE_STYLE = {
 
 def _panel_series(df: pl.DataFrame, axis_col: str, pins: dict, mode_key: str):
     """Return (x, y) sorted by x for one mode on one panel."""
-    sub = df.filter(pl.col("mode") == mode_key)
+    # The CSV stores mode=None (baseline) as an empty field, which read_csv with
+    # null_values=[""] loads as null — so match it via is_null(), not == "".
+    if mode_key == "":
+        sub = df.filter(pl.col("mode").is_null())
+    else:
+        sub = df.filter(pl.col("mode") == mode_key)
     for col, mid in pins.items():
         sub = sub.filter(pl.col(col) == mid)
     # baseline has no buffer_bytes; the buffer panel pins it for new modes only
@@ -92,7 +97,9 @@ def main() -> None:
             if c == 0:
                 ax.set_ylabel(f"{output}\ninstances/s")
             ax.grid(True, alpha=0.3)
-    axs[0][-1].legend(fontsize=8)
+    # Anchor the legend to a panel that carries all three series (the
+    # buffer_bytes column has no None baseline).
+    axs[0][0].legend(fontsize=8)
 
     fig.suptitle(
         "DataLoader throughput: mode comparison across knobs "

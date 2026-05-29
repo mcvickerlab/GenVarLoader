@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import _common as C
@@ -109,9 +111,6 @@ def test_cells_for_threads_partitions_by_thread_count():
     assert len(union) == len(all_cells)
 
 
-import pytest
-
-
 @pytest.mark.slow
 def test_prepare_datasets_writes_one_gvl_per_region_length(tmp_path):
     repo = Path(__file__).resolve().parents[3]
@@ -130,8 +129,6 @@ def test_prepare_datasets_writes_one_gvl_per_region_length(tmp_path):
 
 @pytest.mark.slow
 def test_generate_bed_resizes_to_target_length():
-    import seqpro as sp
-
     repo = Path(__file__).resolve().parents[3]
     regions = repo / "tests" / "data" / "1kg" / "regions.bed"
     if not regions.exists():
