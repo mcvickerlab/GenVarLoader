@@ -45,7 +45,14 @@ def producer_main(
         if os.environ.get("GVL_TEST_PRODUCER_RAISE") == "1":
             raise RuntimeError("test-injected producer failure")
 
-        ds = gvl.Dataset.open(dataset_path)
+        reference_path = schema.get("reference_path")
+        reference_in_memory = schema.get("reference_in_memory", True)
+        if reference_path is not None:
+            from ._dataset._reference import Reference
+            ref = Reference.from_path(reference_path, in_memory=reference_in_memory)
+            ds = gvl.Dataset.open(dataset_path, reference=ref)
+        else:
+            ds = gvl.Dataset.open(dataset_path)
         ds = _apply_schema(ds, schema)
 
         shms = [SharedMemory(name=n) for n in shm_names]
