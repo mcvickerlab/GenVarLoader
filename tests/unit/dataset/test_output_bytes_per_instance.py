@@ -11,16 +11,22 @@ from seqpro.rag import Ragged
 
 def _materialized_nbytes_per_instance(ds, r_arr, s_arr):
     """Compute actual nbytes by indexing the dataset and measuring."""
+    from genvarloader._ragged import RaggedAnnotatedHaps
+
     out = ds[r_arr, s_arr]
     # Normalize to tuple
     if not isinstance(out, tuple):
         out = (out,)
-    # Each ndarray/Ragged contributes its data nbytes per instance. For Ragged,
-    # we sum the per-instance data nbytes via the offsets.
+    # Each element contributes per-instance bytes.
     n_inst = len(r_arr)
     totals = np.zeros(n_inst, dtype=np.int64)
     for arr in out:
-        if isinstance(arr, Ragged):
+        if isinstance(arr, RaggedAnnotatedHaps):
+            # Sum bytes over all three Ragged fields (haps S1, var_idxs int32, ref_coords int32).
+            for field in (arr.haps, arr.var_idxs, arr.ref_coords):
+                lens = np.diff(field.offsets).reshape(n_inst, -1)
+                totals += lens.sum(-1) * field.data.dtype.itemsize
+        elif isinstance(arr, Ragged):
             # Ragged.offsets is (n_inst * ... + 1,); reshape lens to (n_inst, -1)
             lens = np.diff(arr.offsets)
             lens = lens.reshape(n_inst, -1)
@@ -46,6 +52,20 @@ def test_haplotypes_mode_exact():
     ds = (
         gvl.get_dummy_dataset()
         .with_seqs("haplotypes")
+        .with_tracks(False)
+        .with_settings(deterministic=True)
+    )
+    r = np.arange(ds.full_shape[0])
+    s = np.zeros(len(r), dtype=np.int64)
+    got = ds._output_bytes_per_instance(r, s)
+    expected = _materialized_nbytes_per_instance(ds, r, s)
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_annotated_mode_exact():
+    ds = (
+        gvl.get_dummy_dataset()
+        .with_seqs("annotated")
         .with_tracks(False)
         .with_settings(deterministic=True)
     )

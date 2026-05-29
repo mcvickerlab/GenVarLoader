@@ -1122,8 +1122,10 @@ class Dataset:
             hap_len_sum = hap_lens_flat.sum(-1)  # sum over ploidy
             total += hap_len_sum  # haps S1: 1 byte/nt
             if seq_kind == "annotated":
-                # annotated: add ref_coords (int32) and var_idxs (int32)
-                raise NotImplementedError("annotated branch added in Task 3")
+                # annotated: var_idxs and ref_coords are per-position (same
+                # length as haps), not per-variant. Both are int32 (4 bytes).
+                total += hap_len_sum * 4  # var_idxs int32
+                total += hap_len_sum * 4  # ref_coords int32
         elif seq_kind == "variants":
             raise NotImplementedError("variants branch added in Task 4")
         elif seq_kind is None:
