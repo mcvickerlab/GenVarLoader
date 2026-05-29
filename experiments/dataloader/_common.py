@@ -183,9 +183,23 @@ def prepare_datasets(
 
 
 CSV_COLUMNS = [
-    "mode", "with_seqs", "threads", "region_length", "batch_size", "buffer_bytes",
-    "n_epochs", "instances", "bytes", "wall_s", "instances_per_s", "MiB_per_s",
-    "peak_rss_MiB", "timed_out", "git_sha", "host", "started_at",
+    "mode",
+    "with_seqs",
+    "threads",
+    "region_length",
+    "batch_size",
+    "buffer_bytes",
+    "n_epochs",
+    "instances",
+    "bytes",
+    "wall_s",
+    "instances_per_s",
+    "MiB_per_s",
+    "peak_rss_MiB",
+    "timed_out",
+    "git_sha",
+    "host",
+    "started_at",
 ]
 
 

@@ -1120,9 +1120,7 @@ class Dataset:
         # include_offsets); added to `total` just before the final reshape.
         offset_total = np.zeros(len(r_idx), dtype=np.int64)
         OFF = 8  # int64 offset entry
-        ploidy = (
-            self._seqs.n_variants.shape[-1] if isinstance(self._seqs, Haps) else 1
-        )
+        ploidy = self._seqs.n_variants.shape[-1] if isinstance(self._seqs, Haps) else 1
         # These are computed conditionally below; declared here to satisfy the type checker.
         hap_len_sum: NDArray[np.int64] = np.empty(0, dtype=np.int64)
         region_lens: NDArray[np.int64] = np.empty(0, dtype=np.int64)

@@ -78,7 +78,9 @@ def _resolve_buffered_inputs(
     # 2) Pre-pass: exact bytes per instance for the entire (n_regions, n_samples) grid.
     # Pass None, None so parse_idx uses slice(None), slice(None) → "basic" indexing →
     # out_reshape=(n_regions, n_samples), and _output_bytes_per_instance returns a 2-D array.
-    bpi = dataset._output_bytes_per_instance(None, None, include_offsets=include_offsets)
+    bpi = dataset._output_bytes_per_instance(
+        None, None, include_offsets=include_offsets
+    )
     # Ensure exactly (n_regions, n_samples) 2-D regardless of squeeze/reshape behavior.
     bpi = np.asarray(bpi, dtype=np.int64).reshape(dataset.shape)
 

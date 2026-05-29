@@ -30,15 +30,30 @@ OUT_PNG_BANDWIDTH = HERE / "results_plot_bandwidth.png"
 
 # column axis -> (csv column, fan values, {pinned other axis: midpoint})
 AXES = {
-    "threads": ("threads", C.THREADS_FAN,
-                {"region_length": C.REGION_MID, "batch_size": C.BATCH_MID}),
-    "region_length": ("region_length", C.REGION_FAN,
-                      {"threads": C.THREADS_MID, "batch_size": C.BATCH_MID}),
-    "batch_size": ("batch_size", C.BATCH_FAN,
-                   {"threads": C.THREADS_MID, "region_length": C.REGION_MID}),
-    "buffer_bytes": ("buffer_bytes", C.BUFFER_FAN,
-                     {"threads": C.THREADS_MID, "region_length": C.REGION_MID,
-                      "batch_size": C.BATCH_MID}),
+    "threads": (
+        "threads",
+        C.THREADS_FAN,
+        {"region_length": C.REGION_MID, "batch_size": C.BATCH_MID},
+    ),
+    "region_length": (
+        "region_length",
+        C.REGION_FAN,
+        {"threads": C.THREADS_MID, "batch_size": C.BATCH_MID},
+    ),
+    "batch_size": (
+        "batch_size",
+        C.BATCH_FAN,
+        {"threads": C.THREADS_MID, "region_length": C.REGION_MID},
+    ),
+    "buffer_bytes": (
+        "buffer_bytes",
+        C.BUFFER_FAN,
+        {
+            "threads": C.THREADS_MID,
+            "region_length": C.REGION_MID,
+            "batch_size": C.BATCH_MID,
+        },
+    ),
 }
 
 MODE_STYLE = {
@@ -48,7 +63,9 @@ MODE_STYLE = {
 }
 
 
-def _panel_series(df: pl.DataFrame, axis_col: str, pins: dict, mode_key: str, metric: str):
+def _panel_series(
+    df: pl.DataFrame, axis_col: str, pins: dict, mode_key: str, metric: str
+):
     """Return (x, y) sorted by x for one mode on one panel, y = ``metric``."""
     # The CSV stores mode=None (baseline) as an empty field, which read_csv with
     # null_values=[""] loads as null — so match it via is_null(), not == "".
@@ -71,13 +88,17 @@ def _panel_series(df: pl.DataFrame, axis_col: str, pins: dict, mode_key: str, me
     return sub[axis_col].to_list(), sub[metric].to_list()
 
 
-def _render(df: pl.DataFrame, metric: str, ylabel: str, title: str, out_png: Path) -> None:
+def _render(
+    df: pl.DataFrame, metric: str, ylabel: str, title: str, out_png: Path
+) -> None:
     """Render the 3×4 small-multiples grid for one metric to ``out_png``."""
     axis_names = list(AXES)
     fig, axs = plt.subplots(
-        len(C.OUTPUTS), len(axis_names),
+        len(C.OUTPUTS),
+        len(axis_names),
         figsize=(4 * len(axis_names), 3 * len(C.OUTPUTS)),
-        constrained_layout=True, squeeze=False,
+        constrained_layout=True,
+        squeeze=False,
     )
 
     for r, output in enumerate(C.OUTPUTS):

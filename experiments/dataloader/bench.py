@@ -53,8 +53,7 @@ def run_child(n_threads: int) -> None:
 
     # dataset paths were written by the parent, keyed by region length
     ds_paths = {
-        length: tmp_dir / f"dataset_rL{length}.gvl"
-        for length in C.REGION_LENGTHS
+        length: tmp_dir / f"dataset_rL{length}.gvl" for length in C.REGION_LENGTHS
     }
 
     cells = C.cells_for_threads(n_threads)
@@ -62,8 +61,12 @@ def run_child(n_threads: int) -> None:
         ds_path = ds_paths[cell.region_length]
         try:
             row = C.measure_cell(
-                cell, ds_path, REF,
-                git_sha=git_sha, host=host, started_at=started_at,
+                cell,
+                ds_path,
+                REF,
+                git_sha=git_sha,
+                host=host,
+                started_at=started_at,
             )
         except Exception as e:  # noqa: BLE001 - one bad cell must not kill the run
             print(f"[threads={n_threads}] cell {i}/{len(cells)} FAILED: {cell} -> {e}")
