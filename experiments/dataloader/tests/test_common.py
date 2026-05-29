@@ -161,3 +161,32 @@ def test_output_bytes_table_matches_actual_nbytes(tmp_path):
     assert instances == table.size
     assert total_bytes == int(table.sum())
     assert instances == 100 * 5  # 100 regions × 5 samples
+
+
+@pytest.mark.slow
+def test_measure_cell_returns_a_complete_row(tmp_path):
+    repo = Path(__file__).resolve().parents[3]
+    svar = repo / "tests" / "data" / "1kg" / "filtered.svar"
+    regions = repo / "tests" / "data" / "1kg" / "regions.bed"
+    ref = repo / "tests" / "data" / "fasta" / "hg38.fa.bgz"
+    if not svar.is_dir() or not ref.exists():
+        pytest.skip("missing filtered.svar or hg38 reference; run pixi run -e dev gen")
+
+    paths = C.prepare_datasets([1_000], svar, regions, tmp_path)
+    cell = C.Cell(
+        mode=None, with_seqs="variants",
+        threads=1, region_length=1_000, batch_size=16, buffer_bytes=None,
+    )
+    # tiny stop conditions so the test is fast
+    row = C.measure_cell(
+        cell, paths[1_000], ref, min_epochs=1, min_seconds=0.0, hard_cap_s=10.0,
+    )
+
+    for col in C.CSV_COLUMNS:
+        assert col in row, col
+    assert row["mode"] == ""          # None serialized as empty
+    assert row["with_seqs"] == "variants"
+    assert row["n_epochs"] >= 1
+    assert row["instances"] == 100 * 5 * row["n_epochs"]
+    assert row["instances_per_s"] > 0
+    assert row["timed_out"] in (True, False)

@@ -7,6 +7,9 @@ prefetching-dataloader public API and are exercised by ``bench.py``.
 
 from __future__ import annotations
 
+import gc
+import resource
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -173,3 +176,97 @@ def prepare_datasets(
         )
         out[length] = ds_path
     return out
+
+
+CSV_COLUMNS = [
+    "mode", "with_seqs", "threads", "region_length", "batch_size", "buffer_bytes",
+    "n_epochs", "instances", "bytes", "wall_s", "instances_per_s", "MiB_per_s",
+    "peak_rss_MiB", "timed_out", "git_sha", "host", "started_at",
+]
+
+
+def _build_dataset(cell: Cell, dataset_path, reference):
+    import genvarloader as gvl
+
+    ds = gvl.Dataset.open(dataset_path, reference=reference).with_seqs(cell.with_seqs)
+    if cell.with_seqs in ("haplotypes", "annotated"):
+        ds = ds.with_settings(deterministic=True)
+    return ds
+
+
+def _build_loader(cell: Cell, dataset):
+    kwargs = dict(batch_size=cell.batch_size, shuffle=False, num_workers=0)
+    if cell.mode is not None:
+        kwargs["mode"] = cell.mode
+        kwargs["buffer_bytes"] = cell.buffer_bytes
+    return dataset.to_dataloader(**kwargs)
+
+
+def _drain(loader) -> None:
+    for _ in loader:
+        pass
+
+
+def measure_cell(
+    cell: Cell,
+    dataset_path,
+    reference,
+    *,
+    min_epochs: int = 3,
+    min_seconds: float = 1.5,
+    hard_cap_s: float = 10.0,
+    git_sha: str = "",
+    host: str = "",
+    started_at: str = "",
+) -> dict:
+    """Run the spec measurement protocol for one cell; return a CSV row dict."""
+    dataset = _build_dataset(cell, dataset_path, reference)
+    instances_per_epoch, bytes_per_epoch, _ = output_bytes_table(dataset)
+    loader = _build_loader(cell, dataset)
+
+    # warmup (discarded)
+    _drain(loader)
+
+    rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    epochs = 0
+    total_wall = 0.0
+    timed_out = False
+    while total_wall < min_seconds or epochs < min_epochs:
+        if total_wall >= hard_cap_s:
+            timed_out = True
+            break
+        t0 = time.perf_counter()
+        _drain(loader)
+        total_wall += time.perf_counter() - t0
+        epochs += 1
+    rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+    # tear down before measuring nothing else; clip RSS between cells
+    del loader, dataset
+    gc.collect()
+
+    instances = instances_per_epoch * epochs
+    total_bytes = bytes_per_epoch * epochs
+    wall_s = total_wall if total_wall > 0 else float("nan")
+    # ru_maxrss is KiB on Linux; delta is the high-water-mark growth
+    peak_rss_MiB = max(0, rss_after - rss_before) / 1024
+
+    return {
+        "mode": "" if cell.mode is None else cell.mode,
+        "with_seqs": cell.with_seqs,
+        "threads": cell.threads,
+        "region_length": cell.region_length,
+        "batch_size": cell.batch_size,
+        "buffer_bytes": "" if cell.buffer_bytes is None else cell.buffer_bytes,
+        "n_epochs": epochs,
+        "instances": instances,
+        "bytes": total_bytes,
+        "wall_s": wall_s,
+        "instances_per_s": instances / wall_s,
+        "MiB_per_s": (total_bytes / wall_s) / MiB,
+        "peak_rss_MiB": peak_rss_MiB,
+        "timed_out": timed_out,
+        "git_sha": git_sha,
+        "host": host,
+        "started_at": started_at,
+    }
