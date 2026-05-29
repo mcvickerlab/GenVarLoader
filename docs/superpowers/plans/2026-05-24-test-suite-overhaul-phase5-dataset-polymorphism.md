@@ -76,8 +76,6 @@ def test_with_insertion_fill_rejects_when_no_tracks_active():
 Edit `tests/integration/dataset/test_dummy_dataset_insertion_fill.py`. Delete lines 42–50 (the `test_with_insertion_fill_rejects_when_no_tracks_active` function and the preceding blank line):
 
 ```python
-
-
 def test_with_insertion_fill_rejects_when_no_tracks_active():
     """A dataset with tracks disabled should reject with_insertion_fill."""
     ds = gvl.get_dummy_dataset()

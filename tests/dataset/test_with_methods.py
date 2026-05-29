@@ -10,11 +10,10 @@ Methods covered:
                           tests/unit/dataset/test_with_insertion_fill.py)
 """
 
+import genvarloader as gvl
 import pyBigWig
 import pytest
-import genvarloader as gvl
-from genvarloader._dataset._insertion_fill import Repeat5p, Constant
-
+from genvarloader._dataset._insertion_fill import Constant, Repeat5p
 
 # ---------------------------------------------------------------------------
 # Fixtures

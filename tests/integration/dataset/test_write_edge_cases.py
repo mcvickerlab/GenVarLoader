@@ -56,13 +56,11 @@ def test_overlapping_bed_regions_succeed_or_raise(
     preserve the row count, or raise a clear documented error."""
     # Two regions overlapping on chr19, both within the contigs the toy
     # VCF carries variants on.
-    bed = pl.DataFrame(
-        {
-            "chrom": ["chr19", "chr19", "chr19"],
-            "chromStart": [1010685, 1010690, 1010700],
-            "chromEnd": [1010715, 1010720, 1010730],
-        }
-    )
+    bed = pl.DataFrame({
+        "chrom": ["chr19", "chr19", "chr19"],
+        "chromStart": [1010685, 1010690, 1010700],
+        "chromEnd": [1010715, 1010720, 1010730],
+    })
     out = tmp_path / "overlap.gvl"
 
     try:
@@ -83,13 +81,11 @@ def test_bed_with_missing_contig_raises(tmp_path: Path, vcf_dir: Path):
     not a real reference contig should produce a clear error from
     ``gvl.write`` (or a downstream open) rather than a silent partial
     dataset."""
-    bed = pl.DataFrame(
-        {
-            "chrom": ["chr_does_not_exist"],
-            "chromStart": [100],
-            "chromEnd": [200],
-        }
-    )
+    bed = pl.DataFrame({
+        "chrom": ["chr_does_not_exist"],
+        "chromStart": [100],
+        "chromEnd": [200],
+    })
     out = tmp_path / "missing_contig.gvl"
 
     # Either ``write`` raises directly, or it succeeds and ``open`` raises;
@@ -128,13 +124,11 @@ def test_query_past_contig_end_pads_with_N(
     # Include a second region that overlaps known variants so writing has
     # something to genotype (otherwise the writer can produce a zero-variant
     # dataset that the reader can't reopen).
-    bed = pl.DataFrame(
-        {
-            "chrom": [chrom, chrom],
-            "chromStart": [1010685, start],
-            "chromEnd": [1010715, end],
-        }
-    )
+    bed = pl.DataFrame({
+        "chrom": [chrom, chrom],
+        "chromStart": [1010685, start],
+        "chromEnd": [1010715, end],
+    })
     out = tmp_path / "past_contig_end.gvl"
 
     try:
@@ -200,7 +194,8 @@ def test_deletion_spans_region_end_boundary(
     gvl.write(out, bed, _vcf(vcf_dir))
 
     ds = (
-        gvl.Dataset.open(out, reference=ref_fasta, rc_neg=False)
+        gvl.Dataset
+        .open(out, reference=ref_fasta, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
         .with_tracks(False)

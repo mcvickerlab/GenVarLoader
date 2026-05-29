@@ -13,7 +13,6 @@ import genvarloader as gvl
 import numpy as np
 import pytest
 from genoray._types import DOSAGE_TYPE
-
 from genvarloader._dataset._haps import _Variants
 
 
@@ -48,7 +47,8 @@ def test_dosage_absent_when_not_requested(svar_with_dosages_ds, ref_fasta):
     The output RaggedVariants must not contain a `dosage` field.
     """
     ds = (
-        gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
+        gvl.Dataset
+        .open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
         .with_len("ragged")
         .with_seqs("variants")
         .with_settings(var_fields=["alt", "ref", "start"])
@@ -62,7 +62,8 @@ def test_dosage_absent_when_not_requested(svar_with_dosages_ds, ref_fasta):
 def test_dosage_present_when_requested(svar_with_dosages_ds, ref_fasta):
     """Sanity: opting in adds the field."""
     ds = (
-        gvl.Dataset.open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
+        gvl.Dataset
+        .open(svar_with_dosages_ds, ref_fasta, rc_neg=False)
         .with_len("ragged")
         .with_seqs("variants")
         .with_settings(var_fields=["alt", "ref", "start", "dosage"])

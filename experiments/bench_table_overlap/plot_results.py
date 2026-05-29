@@ -40,7 +40,8 @@ def main():
 
     # Aggregate per (case, label): median + std across trials
     agg = (
-        df.group_by(["case", "label", "n_regions", "n_samples", "ipp"])
+        df
+        .group_by(["case", "label", "n_regions", "n_samples", "ipp"])
         .agg(
             pl.col("time_s").median().alias("t_med"),
             pl.col("time_s").std().alias("t_std"),

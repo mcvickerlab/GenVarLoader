@@ -56,9 +56,9 @@ and `RefDataset` depend on this module.
 ```python
 @define
 class SpliceMap:
-    names: HashTable                   # row name → row idx
-    splice_map: ak.Array               # rows → list[region_idx] (current view)
-    full_splice_map: ak.Array          # pre-subset map
+    names: HashTable  # row name → row idx
+    splice_map: ak.Array  # rows → list[region_idx] (current view)
+    full_splice_map: ak.Array  # pre-subset map
     row_idxs: NDArray[np.intp]
     row_subset_idxs: NDArray[np.intp] | None = None
 
@@ -85,9 +85,7 @@ class SpliceMap:
     #   squeeze:          whether to squeeze the row dim out (scalar idx)
     def parse_rows(
         self, rows: StrIdx
-    ) -> tuple[
-        NDArray[np.intp], NDArray[np.int64], tuple[int, ...] | None, bool
-    ]: ...
+    ) -> tuple[NDArray[np.intp], NDArray[np.int64], tuple[int, ...] | None, bool]: ...
 ```
 
 The body of `SpliceMap.from_bed` is the body of today's `_parse_splice_info`
@@ -113,11 +111,11 @@ class SpliceIndexer:
     def shape(self) -> tuple[int, int]: ...
     @property
     def full_shape(self) -> tuple[int, int]: ...
-    def subset_to(self, rows=None, samples=None
-                 ) -> tuple[Self, DatasetIndexer]: ...
+    def subset_to(self, rows=None, samples=None) -> tuple[Self, DatasetIndexer]: ...
     def to_full_dataset(self) -> Self: ...
-    def parse_idx(self, idx) -> tuple[Idx, bool, tuple[int,...] | None,
-                                       NDArray[np.int64]]: ...
+    def parse_idx(
+        self, idx
+    ) -> tuple[Idx, bool, tuple[int, ...] | None, NDArray[np.int64]]: ...
 ```
 
 All row-side state and logic delegates to `self.map`; all sample-side state to
@@ -132,10 +130,10 @@ All row-side state and logic delegates to `self.map`; all sample-side state to
 class RefDataset(Generic[T]):
     ...
     splice_info: str | tuple[str, str] | None = None
-    _splice_map: SpliceMap | None = field(init=False, alias="_splice_map",
-                                           default=None)
-    _spliced_bed: pl.DataFrame | None = field(init=False, alias="_spliced_bed",
-                                               default=None)
+    _splice_map: SpliceMap | None = field(init=False, alias="_splice_map", default=None)
+    _spliced_bed: pl.DataFrame | None = field(
+        init=False, alias="_spliced_bed", default=None
+    )
 ```
 
 `region_names` already exists; when spliced, it identifies the *transcript*
@@ -164,7 +162,9 @@ Error messages mirror the existing ones in `Dataset._check_valid_state`.
 
 ```python
 @property
-def is_spliced(self) -> bool: return self._splice_map is not None
+def is_spliced(self) -> bool:
+    return self._splice_map is not None
+
 
 @property
 def spliced_regions(self) -> pl.DataFrame:
@@ -217,8 +217,10 @@ def __getitem__(self, idx: Idx) -> T:
 2. Build an unspliced view and reuse the existing per-region fetch:
    ```python
    inner = evolve(
-       self, output_length="ragged",
-       _splice_map=None, _spliced_bed=None,
+       self,
+       output_length="ragged",
+       _splice_map=None,
+       _spliced_bed=None,
    )
    ref: Ragged[np.bytes_] = inner[flat_r_idx]
    ```

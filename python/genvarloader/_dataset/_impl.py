@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Generic, Literal, TypeVar, overload
+from typing import Generic, Literal, NoReturn, TypeVar, overload
 
 import awkward as ak
 import numpy as np
 import polars as pl
 import seqpro as sp
-from dataclasses import dataclass, replace
 from loguru import logger
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
-from typing_extensions import NoReturn, Self, assert_never
+from typing_extensions import Self, assert_never
 
 from .._ragged import (
     INTERVAL_DTYPE,
@@ -28,9 +28,8 @@ from .._utils import (
     normalize_contig_name,
 )
 from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
-from ._splice import SpliceMap
-from ._rag_variants import RaggedVariants
 from ._insertion_fill import InsertionFill
+from ._rag_variants import RaggedVariants
 from ._reconstruct import (
     Haps,
     HapsTracks,
@@ -41,6 +40,7 @@ from ._reconstruct import (
     _build_reconstructor,
 )
 from ._reference import Reference
+from ._splice import SpliceMap
 from ._utils import regions_to_bed
 
 if TORCH_AVAILABLE:
@@ -618,7 +618,7 @@ class Dataset:
     def with_insertion_fill(
         self,
         fill: InsertionFill | Mapping[str, InsertionFill],
-    ) -> "Self":
+    ) -> Self:
         """Configure how track values are filled at insertion sites.
 
         Only meaningful when the dataset returns haplotypes *and* tracks (i.e.
@@ -1194,9 +1194,8 @@ class Dataset:
         """
         if self.available_tracks is not None and (
             exists := set(tracks) & set(self.available_tracks)
-        ):
-            if not overwrite:
-                raise ValueError(f"Some tracks already exists in the dataset: {exists}")
+        ) and not overwrite:
+            raise ValueError(f"Some tracks already exists in the dataset: {exists}")
 
         for name, bedlike in tracks.items():
             out_dir = self.path / "annot_intervals" / name
@@ -1394,7 +1393,7 @@ class Dataset:
         return getitem(view, idx)
 
 
-def _lazy_load_dosages(dataset: "Dataset", haps: Haps) -> Haps:
+def _lazy_load_dosages(dataset: Dataset, haps: Haps) -> Haps:
     """Open the dosages memmap for a Haps that didn't request them at open time.
 
     Reuses the same path-resolution logic that ``Haps.from_path`` used. Returns

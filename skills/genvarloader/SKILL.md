@@ -19,23 +19,24 @@ import genvarloader as gvl
 gvl.write(
     path="ds.gvl",
     bed="rois.bed",
-    variants="normed.bcf",         # or .pgen, or .svar directory
+    variants="normed.bcf",  # or .pgen, or .svar directory
     tracks=[gvl.BigWigs.from_table("signal", "bw_table.tsv")],
     max_jitter=128,
 )
 
 # 3. Open and configure (chainable fluent API)
 ds = (
-    gvl.Dataset.open("ds.gvl", reference="ref.fa")
-        .with_seqs("haplotypes")
-        .with_tracks(["signal"])
-        .with_insertion_fill(gvl.Repeat5pNormalized())
-        .with_len(2048)              # or "ragged" / "variable"
-        .with_settings(jitter=32, deterministic=False)
+    gvl.Dataset
+    .open("ds.gvl", reference="ref.fa")
+    .with_seqs("haplotypes")
+    .with_tracks(["signal"])
+    .with_insertion_fill(gvl.Repeat5pNormalized())
+    .with_len(2048)  # or "ragged" / "variable"
+    .with_settings(jitter=32, deterministic=False)
 )
 
 # 4. Eager indexing: dataset[region_idx, sample_idx]
-batch = ds[0:8, :]   # shape depends on with_* state — see "Output shapes"
+batch = ds[0:8, :]  # shape depends on with_* state — see "Output shapes"
 ```
 
 ## Variant preprocessing requirements
@@ -73,6 +74,7 @@ Create an SVAR from a normalized VCF/PGEN with `genoray`:
 ```python
 from genoray._svar import dense2sparse
 from genoray import VCF
+
 dense2sparse(VCF("normed.bcf"), "normed.svar")  # writes a .svar/ directory
 ```
 
@@ -82,9 +84,15 @@ SVARs are resolved at `Dataset.open` time via `metadata.json` → caller `svar=`
 
 ```python
 gvl.write(
-    path, bed, variants=None, tracks=None,
-    samples=None, max_jitter=None, overwrite=False,
-    max_mem="4g", extend_to_length=True,
+    path,
+    bed,
+    variants=None,
+    tracks=None,
+    samples=None,
+    max_jitter=None,
+    overwrite=False,
+    max_mem="4g",
+    extend_to_length=True,
 )
 ```
 
@@ -165,7 +173,7 @@ sds = gvl.Dataset.open(
     "splice.gvl",
     reference="ref.fa",
     splice_info=("transcript_id", "exon_number"),  # tuple = (group_col, order_col)
-    var_filter="exonic",                            # optional: drop intronic variants
+    var_filter="exonic",  # optional: drop intronic variants
 )
 ```
 

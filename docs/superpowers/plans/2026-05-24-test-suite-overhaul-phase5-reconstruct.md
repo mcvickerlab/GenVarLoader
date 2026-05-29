@@ -351,7 +351,9 @@ def test_kernel_constant_nan():
     track = np.array([10.0, 20.0, 30.0, 40.0, 50.0], dtype=np.float32)
     v_starts, ilens, genos = _single_insertion(ilen=2)
     params = np.array([float("nan")], dtype=np.float64)
-    out = _kernel_call(track, v_starts, ilens, genos, strategy_id=CONSTANT, params=params)
+    out = _kernel_call(
+        track, v_starts, ilens, genos, strategy_id=CONSTANT, params=params
+    )
     assert math.isnan(out[1])
     assert math.isnan(out[2])
     assert out[0] == 10.0
@@ -363,7 +365,13 @@ def test_kernel_flank_sample_pool_membership():
     v_starts, ilens, genos = _single_insertion(ilen=3)
     params = np.array([2.0], dtype=np.float64)  # flank_width=2
     out = _kernel_call(
-        track, v_starts, ilens, genos, strategy_id=FLANK_SAMPLE, params=params, base_seed=42
+        track,
+        v_starts,
+        ilens,
+        genos,
+        strategy_id=FLANK_SAMPLE,
+        params=params,
+        base_seed=42,
     )
     # Sampled values must come from the flank pool {0.0, 10.0, 20.0, 30.0}.
     pool = {0.0, 10.0, 20.0, 30.0}
@@ -376,10 +384,22 @@ def test_kernel_flank_sample_deterministic():
     v_starts, ilens, genos = _single_insertion(ilen=3)
     params = np.array([2.0], dtype=np.float64)
     out_a = _kernel_call(
-        track, v_starts, ilens, genos, strategy_id=FLANK_SAMPLE, params=params, base_seed=7
+        track,
+        v_starts,
+        ilens,
+        genos,
+        strategy_id=FLANK_SAMPLE,
+        params=params,
+        base_seed=7,
     )
     out_b = _kernel_call(
-        track, v_starts, ilens, genos, strategy_id=FLANK_SAMPLE, params=params, base_seed=7
+        track,
+        v_starts,
+        ilens,
+        genos,
+        strategy_id=FLANK_SAMPLE,
+        params=params,
+        base_seed=7,
     )
     np.testing.assert_array_equal(out_a, out_b)
 
@@ -388,7 +408,9 @@ def test_kernel_interpolate_linear():
     track = np.array([0.0, 10.0, 30.0, 40.0, 50.0], dtype=np.float32)
     v_starts, ilens, genos = _single_insertion(ilen=1)
     params = np.array([1.0], dtype=np.float64)  # order=1 (linear)
-    out = _kernel_call(track, v_starts, ilens, genos, strategy_id=INTERPOLATE, params=params)
+    out = _kernel_call(
+        track, v_starts, ilens, genos, strategy_id=INTERPOLATE, params=params
+    )
     # Linear interpolate between anchors 10.0 and 30.0 for 1 fill cell → 20.0
     np.testing.assert_allclose(out[1], 20.0)
 
@@ -397,7 +419,9 @@ def test_kernel_interpolate_cubic_passes_through_anchors():
     track = np.array([0.0, 10.0, 30.0, 40.0, 50.0], dtype=np.float32)
     v_starts, ilens, genos = _single_insertion(ilen=1)
     params = np.array([3.0], dtype=np.float64)
-    out = _kernel_call(track, v_starts, ilens, genos, strategy_id=INTERPOLATE, params=params)
+    out = _kernel_call(
+        track, v_starts, ilens, genos, strategy_id=INTERPOLATE, params=params
+    )
     # Anchors at indices 0 and 1 of original track must survive.
     np.testing.assert_allclose(out[0], 10.0)
     np.testing.assert_allclose(out[2], 30.0)
@@ -408,8 +432,14 @@ def test_kernel_flank_sample_edge_clamp():
     v_starts, ilens, genos = _single_insertion(ilen=3)
     params = np.array([10.0], dtype=np.float64)  # flank_width clamped to track size
     out = _kernel_call(
-        track, v_starts, ilens, genos, strategy_id=FLANK_SAMPLE, params=params,
-        base_seed=99, out_size=5,
+        track,
+        v_starts,
+        ilens,
+        genos,
+        strategy_id=FLANK_SAMPLE,
+        params=params,
+        base_seed=99,
+        out_size=5,
     )
     # Pool clamped to {10.0, 20.0}; all fill values must be one of those.
     pool = {10.0, 20.0}

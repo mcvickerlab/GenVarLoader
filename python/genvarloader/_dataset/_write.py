@@ -302,9 +302,11 @@ def get_splice_bed(
     if contigs is not None:
         lf = lf.filter(pl.col("seqname").is_in(contigs))
 
-    lf = lf.filter(pl.col("feature") == "CDS").rename(
-        {"seqname": "chrom", "start": "chromStart", "end": "chromEnd"}
-    )
+    lf = lf.filter(pl.col("feature") == "CDS").rename({
+        "seqname": "chrom",
+        "start": "chromStart",
+        "end": "chromEnd",
+    })
 
     lf = lf.with_columns(
         pl.col("chrom").cast(pl.Utf8),
@@ -346,7 +348,8 @@ def _prep_bed(
             bed = bed.with_columns(strand=pl.lit(1, pl.Int32))
         else:
             bed = bed.with_columns(
-                pl.col("strand")
+                pl
+                .col("strand")
                 .cast(pl.Utf8)
                 .replace_strict({"+": 1, "-": -1, ".": 1}, return_dtype=pl.Int32)
             )

@@ -6,6 +6,7 @@ from seqpro.rag import Ragged
 
 from . import data_registry
 from ._bigwig import BigWigs
+from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
 from ._dataset._insertion_fill import (
     Constant,
     FlankSample,
@@ -14,14 +15,13 @@ from ._dataset._insertion_fill import (
     Repeat5p,
     Repeat5pNormalized,
 )
-from ._table import Table
-from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
 from ._dataset._rag_variants import RaggedVariants
 from ._dataset._reference import RefDataset, Reference
 from ._dataset._svar_link import migrate_svar_link
 from ._dataset._write import get_splice_bed, write
 from ._dummy import get_dummy_dataset
 from ._ragged import RaggedAnnotatedHaps, RaggedIntervals
+from ._table import Table
 from ._torch import to_nested_tensor
 from ._types import AnnotatedHaps
 from ._variants._sitesonly import DatasetWithSites, SitesSchema, sites_vcf_to_table
@@ -29,33 +29,33 @@ from ._variants._sitesonly import DatasetWithSites, SitesSchema, sites_vcf_to_ta
 __version__ = importlib.metadata.version("genvarloader")
 
 __all__ = [
-    "write",
-    "migrate_svar_link",
-    "get_splice_bed",
-    "Dataset",
-    "BigWigs",
-    "read_bedlike",
-    "with_length",
-    "Ragged",
-    "get_dummy_dataset",
-    "ArrayDataset",
-    "RaggedDataset",
-    "Reference",
-    "to_nested_tensor",
-    "sites_vcf_to_table",
-    "SitesSchema",
-    "DatasetWithSites",
-    "RefDataset",
-    "data_registry",
     "AnnotatedHaps",
-    "RaggedAnnotatedHaps",
-    "RaggedVariants",
-    "RaggedIntervals",
-    "Table",
+    "ArrayDataset",
+    "BigWigs",
+    "Constant",
+    "Dataset",
+    "DatasetWithSites",
+    "FlankSample",
     "InsertionFill",
+    "Interpolate",
+    "Ragged",
+    "RaggedAnnotatedHaps",
+    "RaggedDataset",
+    "RaggedIntervals",
+    "RaggedVariants",
+    "RefDataset",
+    "Reference",
     "Repeat5p",
     "Repeat5pNormalized",
-    "Constant",
-    "FlankSample",
-    "Interpolate",
+    "SitesSchema",
+    "Table",
+    "data_registry",
+    "get_dummy_dataset",
+    "get_splice_bed",
+    "migrate_svar_link",
+    "read_bedlike",
+    "sites_vcf_to_table",
+    "to_nested_tensor",
+    "with_length",
+    "write",
 ]

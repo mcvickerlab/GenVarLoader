@@ -12,7 +12,6 @@ because they require the full open/write path.
 """
 
 import pytest
-
 from genvarloader._dataset._haps import _Variants
 
 

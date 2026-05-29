@@ -127,7 +127,8 @@ def bed_to_regions(
         # ``non-precise type array(pyobject)``. Casting to Utf8 first keeps
         # the strand column numeric and the regions array stays ``int32``.
         cols.append(
-            pl.col("strand")
+            pl
+            .col("strand")
             .cast(pl.Utf8)
             .replace_strict({"+": 1, "-": -1}, return_dtype=pl.Int32)
         )

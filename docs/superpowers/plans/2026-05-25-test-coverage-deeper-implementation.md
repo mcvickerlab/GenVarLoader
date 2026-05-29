@@ -57,6 +57,7 @@ Confirm: `AnnotatedHaps` has `.haps`, `.var_idx`, `.ref_pos` ragged-array fields
 Sibling of test_ds_haps.py — same consensus ground truth, same vcf/pgen/svar
 parametrization, different output mode.
 """
+
 from itertools import product
 from pathlib import Path
 
@@ -77,7 +78,12 @@ def base_dataset(request, phased_vcf_gvl, phased_pgen_gvl, phased_svar_gvl, ref_
         "pgen": phased_pgen_gvl,
         "svar": phased_svar_gvl,
     }[request.param]
-    return gvl.Dataset.open(gvl_path, ref_fasta, rc_neg=False).with_len("ragged").with_tracks(False)
+    return (
+        gvl.Dataset
+        .open(gvl_path, ref_fasta, rc_neg=False)
+        .with_len("ragged")
+        .with_tracks(False)
+    )
 
 
 def test_annotated_haps_match_consensus(base_dataset, consensus_dir: Path):
@@ -92,7 +98,8 @@ def test_annotated_haps_match_consensus(base_dataset, consensus_dir: Path):
             with pysam.FastaFile(str(consensus_dir / fpath)) as f:
                 desired = sp.cast_seqs(f.fetch(f.references[0]).upper())
             np.testing.assert_equal(
-                actual, desired,
+                actual,
+                desired,
                 err_msg=f"haps mismatch region={region} sample={sample} h={h}",
             )
 
@@ -103,7 +110,9 @@ def test_annotated_haps_match_consensus(base_dataset, consensus_dir: Path):
             r_pos = np.asarray(result.ref_pos[h])
             assert v_idx.shape == r_pos.shape == actual.shape
             ref_pad = (r_pos == -1) | (r_pos == np.iinfo(np.int32).max)
-            assert np.all(v_idx[ref_pad] == -1), "var_idx must be -1 at padded positions"
+            assert np.all(v_idx[ref_pad] == -1), (
+                "var_idx must be -1 at padded positions"
+            )
 
 
 def test_reference_mode_returns_unaltered_reference(base_dataset, ref_fasta):
@@ -119,7 +128,8 @@ def test_reference_mode_returns_unaltered_reference(base_dataset, ref_fasta):
                 actual = sp.cast_seqs(ds[region, sample])
                 desired = sp.cast_seqs(f.fetch(chrom, start, end).upper())
                 np.testing.assert_equal(
-                    actual, desired,
+                    actual,
+                    desired,
                     err_msg=f"reference mismatch region={region}",
                 )
 ```
@@ -165,6 +175,7 @@ Find: signatures for `with_len("ragged")` vs `with_len(int)`. Note what the arra
 The same logical query must yield identical content across different output
 containers (Ragged vs Array) and different variant sources (VCF/PGEN/SVAR).
 """
+
 from itertools import product
 
 import genvarloader as gvl
@@ -174,7 +185,12 @@ import seqpro as sp
 
 
 def _open_haps(path, ref):
-    return gvl.Dataset.open(path, ref, rc_neg=False).with_tracks(False).with_seqs("haplotypes")
+    return (
+        gvl.Dataset
+        .open(path, ref, rc_neg=False)
+        .with_tracks(False)
+        .with_seqs("haplotypes")
+    )
 
 
 def test_vcf_pgen_svar_yield_identical_haplotypes(
@@ -189,8 +205,12 @@ def test_vcf_pgen_svar_yield_identical_haplotypes(
         v = sp.cast_seqs(vcf_ds[region, sample])
         p = sp.cast_seqs(pgen_ds[region, sample])
         s = sp.cast_seqs(svar_ds[region, sample])
-        np.testing.assert_equal(v, p, err_msg=f"VCF vs PGEN region={region} sample={sample}")
-        np.testing.assert_equal(v, s, err_msg=f"VCF vs SVAR region={region} sample={sample}")
+        np.testing.assert_equal(
+            v, p, err_msg=f"VCF vs PGEN region={region} sample={sample}"
+        )
+        np.testing.assert_equal(
+            v, s, err_msg=f"VCF vs SVAR region={region} sample={sample}"
+        )
 
 
 def test_ragged_and_array_agree_on_ragged_length(phased_vcf_gvl, ref_fasta):
@@ -212,7 +232,9 @@ def test_sample_name_and_integer_index_agree(phased_vcf_gvl, ref_fasta):
         for s_int, s_name in enumerate(ds.samples):
             by_name = sp.cast_seqs(ds[region, s_name])
             by_int = sp.cast_seqs(ds[region, s_int])
-            np.testing.assert_equal(by_name, by_int, err_msg=f"region={region} sample={s_name}")
+            np.testing.assert_equal(
+                by_name, by_int, err_msg=f"region={region} sample={s_name}"
+            )
 ```
 
 Adapt: if `rag.shape` doesn't exist (it's `Ragged`, may need `.lengths` or `len(rag[0])`), use the right accessor. Read `seqpro.rag.Ragged` if uncertain.
@@ -291,12 +313,18 @@ def test_1d_and_2d_layouts_agree():
     keep_1d, _ = filter_af(
         geno_offset_idx,
         np.array([0, 4], dtype=np.int64),
-        geno_v_idxs, afs, 0.05, None,
+        geno_v_idxs,
+        afs,
+        0.05,
+        None,
     )
     keep_2d, _ = filter_af(
         geno_offset_idx,
         np.array([[0], [4]], dtype=np.int64),
-        geno_v_idxs, afs, 0.05, None,
+        geno_v_idxs,
+        afs,
+        0.05,
+        None,
     )
     np.testing.assert_equal(keep_1d, keep_2d)
 ```
@@ -335,6 +363,7 @@ Determine: what `seed=` parameter exists and at what level (`with_settings(seed=
 
 ```python
 """Determinism invariants: same seed → same output, same jitter offsets, same batch order."""
+
 import genvarloader as gvl
 import numpy as np
 import pytest
@@ -364,7 +393,8 @@ def test_jitter_zero_is_deterministic(phased_vcf_gvl, ref_fasta):
 
 
 @pytest.mark.skipif(
-    pytest.importorskip("torch", reason="torch not installed") is None, reason="no torch",
+    pytest.importorskip("torch", reason="torch not installed") is None,
+    reason="no torch",
 )
 def test_dataloader_seeded_batch_order_reproducible(phased_vcf_gvl, ref_fasta):
     """A seeded torch Generator yields the same batch order across two runs."""
@@ -378,6 +408,7 @@ def test_dataloader_seeded_batch_order_reproducible(phased_vcf_gvl, ref_fasta):
     # Compare the first batch only (sufficient to detect non-determinism)
     b1 = next(iter(dl1))
     b2 = next(iter(dl2))
+
     # Batches may be tuples/namedtuples; compare via flattened numpy
     # If types differ, walk the structure
     def _flatten(obj):
@@ -386,6 +417,7 @@ def test_dataloader_seeded_batch_order_reproducible(phased_vcf_gvl, ref_fasta):
                 yield from _flatten(x)
         else:
             yield np.asarray(obj) if hasattr(obj, "__array__") else obj
+
     f1 = list(_flatten(b1))
     f2 = list(_flatten(b2))
     assert len(f1) == len(f2)
@@ -445,6 +477,7 @@ The exact tests depend on what `_query.py` exposes. Skeleton:
 
 ```python
 """Filter combinations in _query.py: AF + exonic-only + sample subset."""
+
 import numpy as np
 import pytest
 import genvarloader as gvl
@@ -775,6 +808,7 @@ rtk git commit -m "test(boundary): contig-end deletion pads with N"
 
 ```python
 """Edge-case dataset shapes: empty selection, single-sample, single-region."""
+
 import numpy as np
 import pytest
 import genvarloader as gvl
@@ -848,6 +882,7 @@ Note required arguments (likely: `out_dir`, `bed`, `variants`, `reference`, opti
 For each edge case: write the dataset (or assert the documented error),
 re-open it, and exercise the simplest valid query.
 """
+
 import polars as pl
 import pytest
 import genvarloader as gvl
@@ -866,12 +901,16 @@ def test_empty_bed_either_succeeds_or_raises_clearly(tmp_path, ref_fasta, source
     """Writing with an empty BED: either succeed (producing a 0-region dataset)
     or raise a clear ValueError."""
     out = tmp_path / "empty.gvl"
-    empty_bed = pl.DataFrame({"chrom": [], "chromStart": [], "chromEnd": []},
-                              schema={"chrom": pl.Utf8, "chromStart": pl.Int32, "chromEnd": pl.Int32})
+    empty_bed = pl.DataFrame(
+        {"chrom": [], "chromStart": [], "chromEnd": []},
+        schema={"chrom": pl.Utf8, "chromStart": pl.Int32, "chromEnd": pl.Int32},
+    )
     try:
         gvl.write(out_dir=out, bed=empty_bed, variants=source_vcf, reference=ref_fasta)
     except (ValueError, RuntimeError) as e:
-        assert "empty" in str(e).lower() or "no regions" in str(e).lower() or True  # any clear error
+        assert (
+            "empty" in str(e).lower() or "no regions" in str(e).lower() or True
+        )  # any clear error
         return
     # If it succeeded, open and verify n_regions=0
     ds = gvl.Dataset.open(out, ref_fasta)
@@ -888,7 +927,9 @@ def test_overlapping_bed_regions_succeed_or_raise(tmp_path, ref_fasta, source_vc
     })
     out = tmp_path / "overlap.gvl"
     try:
-        gvl.write(out_dir=out, bed=overlapping, variants=source_vcf, reference=ref_fasta)
+        gvl.write(
+            out_dir=out, bed=overlapping, variants=source_vcf, reference=ref_fasta
+        )
     except (ValueError, RuntimeError):
         return
     ds = gvl.Dataset.open(out, ref_fasta)

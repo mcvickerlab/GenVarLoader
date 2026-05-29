@@ -2,9 +2,9 @@
 import numpy as np
 from genoray._svar import dense2sparse
 from genoray._types import V_IDX_TYPE
-from seqpro.rag import Ragged
 from genvarloader._dataset._tracks import shift_and_realign_track_sparse
 from pytest_cases import parametrize_with_cases
+from seqpro.rag import Ragged
 
 
 # %%

@@ -14,11 +14,10 @@ def test_tracks_call_float32_splice_plan():
     - out.offsets == plan.permuted_out_offsets
     - Each scatter slice holds the expected constant value (7.0)
     """
-    from seqpro.rag import Ragged
-
-    from genvarloader._dataset._reconstruct import TrackType, Tracks
+    from genvarloader._dataset._reconstruct import Tracks, TrackType
     from genvarloader._dataset._splice import build_splice_plan
     from genvarloader._ragged import RaggedIntervals, RaggedTracks
+    from seqpro.rag import Ragged
 
     # ------------------------------------------------------------------
     # 1. Build synthetic intervals for 2 regions × 2 samples, 1 track.

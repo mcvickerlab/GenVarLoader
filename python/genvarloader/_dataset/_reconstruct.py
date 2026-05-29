@@ -21,13 +21,9 @@ from numpy.typing import NDArray
 from seqpro.rag import Ragged
 from typing_extensions import assert_never
 
-from .._ragged import (
-    RaggedAnnotatedHaps,
-    RaggedSeqs,
-    RaggedTracks,
-)
+from .._ragged import RaggedAnnotatedHaps, RaggedSeqs, RaggedTracks
 from .._utils import lengths_to_offsets
-from ._haps import Haps, ReconstructionRequest, _H, _NewH, _Variants
+from ._haps import _H, Haps, ReconstructionRequest, _NewH, _Variants
 from ._insertion_fill import Repeat5p
 from ._insertion_fill import lower as _lower_insertion_fills
 from ._intervals import intervals_to_tracks
@@ -35,7 +31,7 @@ from ._protocol import Reconstructor
 from ._rag_variants import RaggedVariants
 from ._ref import Ref
 from ._splice import SplicePlan
-from ._tracks import Tracks, TrackType, _NewT, _T, shift_and_realign_tracks_sparse
+from ._tracks import _T, Tracks, TrackType, _NewT, shift_and_realign_tracks_sparse
 
 # Re-exports for back-compat (callers historically imported these from
 # ``_reconstruct``):

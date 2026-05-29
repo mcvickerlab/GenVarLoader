@@ -122,8 +122,10 @@ def test_bigwigs_satisfies_interval_track_protocol():
     data_dir = Path(__file__).parent / "data" / "bigwig"
     bw = BigWigs(
         "signal",
-        {"sample_0": str(data_dir / "sample_0.bw"),
-         "sample_1": str(data_dir / "sample_1.bw")},
+        {
+            "sample_0": str(data_dir / "sample_0.bw"),
+            "sample_1": str(data_dir / "sample_1.bw"),
+        },
     )
     # runtime structural check: required attributes/methods are present
     assert hasattr(bw, "name")
@@ -208,27 +210,29 @@ Captures the exact output schema (column names) and zero-fill behavior of
 count_overlaps for query rows with no matches. Run once; record findings in
 the implementation; delete afterward.
 """
+
 import polars as pl
 import polars_bio as pb
 
 queries = pl.DataFrame({
     "chrom": ["chr1", "chr1", "chr2"],
     "start": [0, 50, 0],
-    "end":   [10, 60, 10],
-    "_q":    [0, 1, 2],
+    "end": [10, 60, 10],
+    "_q": [0, 1, 2],
     "sample_id": ["s0", "s0", "s0"],
 })
 table = pl.DataFrame({
     "chrom": ["chr1", "chr1"],
     "start": [2, 100],
-    "end":   [5, 105],
+    "end": [5, 105],
     "value": [1.0, 2.0],
     "sample_id": ["s0", "s0"],
 })
 
 print("=== overlap ===")
 ov = pb.overlap(
-    queries, table,
+    queries,
+    table,
     cols1=["chrom", "start", "end"],
     cols2=["chrom", "start", "end"],
     on_cols=["sample_id"],
@@ -239,7 +243,8 @@ print(ov)
 
 print("=== count_overlaps ===")
 co = pb.count_overlaps(
-    queries, table,
+    queries,
+    table,
     cols1=["chrom", "start", "end"],
     cols2=["chrom", "start", "end"],
     on_cols=["sample_id"],
@@ -299,7 +304,7 @@ def make_long_df():
         "sample_id": ["s0", "s0", "s1", "s1"],
         "chrom": ["chr1", "chr1", "chr1", "chr2"],
         "start": [10, 100, 20, 0],
-        "end":   [20, 110, 30, 5],
+        "end": [20, 110, 30, 5],
         "value": [1.0, 2.0, 3.0, 4.0],
     })
 
@@ -340,6 +345,7 @@ Mirrors the :class:`BigWigs` reader API surface so that
 polars-bio output schema notes (from API spike, see plan Task 4):
 - TODO: paste actual column names + zero-fill behavior here from spike.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -383,7 +389,10 @@ class Table:
         self.samples = sorted(df["sample_id"].unique().to_list())
         self.contigs = {
             row["chrom"]: int(row["max_end"])
-            for row in df.group_by("chrom").agg(pl.col("end").max().alias("max_end")).iter_rows(named=True)
+            for row in df
+            .group_by("chrom")
+            .agg(pl.col("end").max().alias("max_end"))
+            .iter_rows(named=True)
         }
 
     @staticmethod
@@ -397,7 +406,9 @@ class Table:
             # dict[sample_id, df] without sample_id col
             frames: list[pl.DataFrame] = []
             for sid, sub in data.items():
-                renamed = Table._apply_column_map(sub, column_map, expect_sample_id=False)
+                renamed = Table._apply_column_map(
+                    sub, column_map, expect_sample_id=False
+                )
                 frames.append(renamed.with_columns(sample_id=pl.lit(sid)))
             if not frames:
                 raise ValueError("Empty mapping passed to Table.")
@@ -419,7 +430,11 @@ class Table:
         if not column_map:
             return df
         # column_map is canonical -> actual; invert to actual -> canonical for rename
-        rename = {actual: canonical for canonical, actual in column_map.items() if actual in df.columns}
+        rename = {
+            actual: canonical
+            for canonical, actual in column_map.items()
+            if actual in df.columns
+        }
         if not expect_sample_id:
             rename.pop("sample_id", None)
         return df.rename(rename)
@@ -462,8 +477,18 @@ git commit -m "feat: add Table skeleton with long-form DataFrame init"
 ```python
 def test_table_init_from_dict_of_dfs():
     per_sample = {
-        "s0": pl.DataFrame({"chrom": ["chr1"], "start": [10], "end": [20], "value": [1.0]}),
-        "s1": pl.DataFrame({"chrom": ["chr2"], "start": [0],  "end": [5],  "value": [2.0]}),
+        "s0": pl.DataFrame({
+            "chrom": ["chr1"],
+            "start": [10],
+            "end": [20],
+            "value": [1.0],
+        }),
+        "s1": pl.DataFrame({
+            "chrom": ["chr2"],
+            "start": [0],
+            "end": [5],
+            "value": [2.0],
+        }),
     }
     t = Table("signal", per_sample)
     assert t.samples == ["s0", "s1"]
@@ -472,17 +497,21 @@ def test_table_init_from_dict_of_dfs():
 
 def test_table_column_map_renames_long_form():
     df = pl.DataFrame({
-        "donor":      ["s0"],
-        "chrom":      ["chr1"],
+        "donor": ["s0"],
+        "chrom": ["chr1"],
         "chromStart": [10],
-        "chromEnd":   [20],
-        "signal":     [1.5],
+        "chromEnd": [20],
+        "signal": [1.5],
     })
     t = Table(
         "signal",
         df,
-        column_map={"sample_id": "donor", "start": "chromStart",
-                    "end": "chromEnd", "value": "signal"},
+        column_map={
+            "sample_id": "donor",
+            "start": "chromStart",
+            "end": "chromEnd",
+            "value": "signal",
+        },
     )
     assert t.samples == ["s0"]
     assert t.contigs["chr1"] == 20
@@ -491,7 +520,10 @@ def test_table_column_map_renames_long_form():
 def test_table_column_map_per_sample_dict():
     per_sample = {
         "s0": pl.DataFrame({
-            "chrom": ["chr1"], "chromStart": [10], "chromEnd": [20], "signal": [1.5],
+            "chrom": ["chr1"],
+            "chromStart": [10],
+            "chromEnd": [20],
+            "signal": [1.5],
         }),
     }
     t = Table(
@@ -535,12 +567,15 @@ def long_df():
     return make_long_df()
 
 
-@pytest.mark.parametrize("ext,reader_attr", [
-    (".csv", "csv"),
-    (".tsv", "tsv"),
-    (".parquet", "parquet"),
-    (".arrow", "arrow"),
-])
+@pytest.mark.parametrize(
+    "ext,reader_attr",
+    [
+        (".csv", "csv"),
+        (".tsv", "tsv"),
+        (".parquet", "parquet"),
+        (".arrow", "arrow"),
+    ],
+)
 def test_table_from_path_long_form(long_df, tmp_path, ext, reader_attr):
     p = tmp_path / f"data{ext}"
     if ext == ".csv":
@@ -586,35 +621,36 @@ Expected: FAIL with `AttributeError: type object 'Table' has no attribute 'from_
 In `python/genvarloader/_table.py`, add as a classmethod:
 
 ```python
-    @classmethod
-    def from_path(
-        cls,
-        name: str,
-        path: str | Path | Mapping[str, str | Path],
-        column_map: Mapping[str, str] | None = None,
-    ) -> "Table":
-        if isinstance(path, Mapping):
-            data: dict[str, pl.DataFrame] = {
-                sid: cls._read_path(Path(p)) for sid, p in path.items()
-            }
-            return cls(name, data, column_map)
-        return cls(name, cls._read_path(Path(path)), column_map)
+@classmethod
+def from_path(
+    cls,
+    name: str,
+    path: str | Path | Mapping[str, str | Path],
+    column_map: Mapping[str, str] | None = None,
+) -> "Table":
+    if isinstance(path, Mapping):
+        data: dict[str, pl.DataFrame] = {
+            sid: cls._read_path(Path(p)) for sid, p in path.items()
+        }
+        return cls(name, data, column_map)
+    return cls(name, cls._read_path(Path(path)), column_map)
 
-    @staticmethod
-    def _read_path(p: Path) -> pl.DataFrame:
-        suf = p.suffix.lower()
-        if suf == ".csv":
-            return pl.read_csv(p)
-        if suf in (".tsv", ".txt"):
-            return pl.read_csv(p, separator="\t")
-        if suf == ".parquet":
-            return pl.read_parquet(p)
-        if suf in (".arrow", ".ipc"):
-            return pl.read_ipc(p)
-        raise ValueError(
-            f"Unsupported file extension {suf!r}. "
-            "Expected one of .csv, .tsv, .txt, .parquet, .arrow, .ipc."
-        )
+
+@staticmethod
+def _read_path(p: Path) -> pl.DataFrame:
+    suf = p.suffix.lower()
+    if suf == ".csv":
+        return pl.read_csv(p)
+    if suf in (".tsv", ".txt"):
+        return pl.read_csv(p, separator="\t")
+    if suf == ".parquet":
+        return pl.read_parquet(p)
+    if suf in (".arrow", ".ipc"):
+        return pl.read_ipc(p)
+    raise ValueError(
+        f"Unsupported file extension {suf!r}. "
+        "Expected one of .csv, .tsv, .txt, .parquet, .arrow, .ipc."
+    )
 ```
 
 - [ ] **Step 4: Run tests**
@@ -660,14 +696,14 @@ def _brute_count(df: pl.DataFrame, contig: str, starts, ends, samples):
 def test_table_count_intervals_matches_brute_force():
     df = pl.DataFrame({
         "sample_id": ["s0", "s0", "s0", "s1", "s1"],
-        "chrom":     ["chr1", "chr1", "chr1", "chr1", "chr1"],
-        "start":     [0, 50, 200, 10, 60],
-        "end":       [10, 60, 210, 20, 70],
-        "value":     [1.0, 2.0, 3.0, 4.0, 5.0],
+        "chrom": ["chr1", "chr1", "chr1", "chr1", "chr1"],
+        "start": [0, 50, 200, 10, 60],
+        "end": [10, 60, 210, 20, 70],
+        "value": [1.0, 2.0, 3.0, 4.0, 5.0],
     })
     t = Table("signal", df)
     starts = np.array([0, 55, 100, 200], dtype=np.int32)
-    ends   = np.array([15, 65, 150, 205], dtype=np.int32)
+    ends = np.array([15, 65, 150, 205], dtype=np.int32)
     counts = t.count_intervals("chr1", starts, ends, sample=["s0", "s1"])
     expected = _brute_count(df, "chr1", starts, ends, ["s0", "s1"])
     assert counts.dtype == np.int32
@@ -694,84 +730,83 @@ Expected: FAIL with `AttributeError: 'Table' object has no attribute 'count_inte
 Append to `python/genvarloader/_table.py` (inside the class):
 
 ```python
-    def count_intervals(
-        self,
-        contig: str,
-        starts: ArrayLike,
-        ends: ArrayLike,
-        sample: str | list[str] | None = None,
-        **kwargs,
-    ) -> NDArray[np.int32]:
-        import polars_bio as pb
+def count_intervals(
+    self,
+    contig: str,
+    starts: ArrayLike,
+    ends: ArrayLike,
+    sample: str | list[str] | None = None,
+    **kwargs,
+) -> NDArray[np.int32]:
+    import polars_bio as pb
 
-        samples = self._resolve_samples(sample)
-        starts_arr = np.atleast_1d(np.asarray(starts, dtype=np.int64))
-        ends_arr = np.atleast_1d(np.asarray(ends, dtype=np.int64))
-        n_regions = len(starts_arr)
+    samples = self._resolve_samples(sample)
+    starts_arr = np.atleast_1d(np.asarray(starts, dtype=np.int64))
+    ends_arr = np.atleast_1d(np.asarray(ends, dtype=np.int64))
+    n_regions = len(starts_arr)
 
-        if contig not in self.contigs:
-            return np.zeros((n_regions, len(samples)), dtype=np.int32)
+    if contig not in self.contigs:
+        return np.zeros((n_regions, len(samples)), dtype=np.int32)
 
-        subset = self._df.filter(
-            (pl.col("chrom") == contig) & pl.col("sample_id").is_in(samples)
-        )
-        queries = self._build_queries(contig, starts_arr, ends_arr, samples)
+    subset = self._df.filter(
+        (pl.col("chrom") == contig) & pl.col("sample_id").is_in(samples)
+    )
+    queries = self._build_queries(contig, starts_arr, ends_arr, samples)
 
-        if subset.height == 0:
-            return np.zeros((n_regions, len(samples)), dtype=np.int32)
+    if subset.height == 0:
+        return np.zeros((n_regions, len(samples)), dtype=np.int32)
 
-        counts_df = pb.count_overlaps(
-            queries,
-            subset,
-            cols1=["chrom", "start", "end"],
-            cols2=["chrom", "start", "end"],
-            on_cols=["sample_id"],
-            output_type="polars.DataFrame",
-        )
-        # Left-join back onto queries to ensure zero-fill for unmatched cells.
-        # The exact `count` column name in polars_bio output is captured in the
-        # spike notes; if it differs, adjust the alias below.
-        count_col = "count" if "count" in counts_df.columns else counts_df.columns[-1]
-        merged = queries.join(
-            counts_df.select("_q", "sample_id", pl.col(count_col).alias("count")),
-            on=["_q", "sample_id"],
-            how="left",
-        ).with_columns(pl.col("count").fill_null(0))
+    counts_df = pb.count_overlaps(
+        queries,
+        subset,
+        cols1=["chrom", "start", "end"],
+        cols2=["chrom", "start", "end"],
+        on_cols=["sample_id"],
+        output_type="polars.DataFrame",
+    )
+    # Left-join back onto queries to ensure zero-fill for unmatched cells.
+    # The exact `count` column name in polars_bio output is captured in the
+    # spike notes; if it differs, adjust the alias below.
+    count_col = "count" if "count" in counts_df.columns else counts_df.columns[-1]
+    merged = queries.join(
+        counts_df.select("_q", "sample_id", pl.col(count_col).alias("count")),
+        on=["_q", "sample_id"],
+        how="left",
+    ).with_columns(pl.col("count").fill_null(0))
 
-        sample_to_idx = {s: i for i, s in enumerate(samples)}
-        out = np.zeros((n_regions, len(samples)), dtype=np.int32)
-        for q, sid, c in merged.select("_q", "sample_id", "count").iter_rows():
-            out[int(q), sample_to_idx[sid]] = int(c)
-        return out
+    sample_to_idx = {s: i for i, s in enumerate(samples)}
+    out = np.zeros((n_regions, len(samples)), dtype=np.int32)
+    for q, sid, c in merged.select("_q", "sample_id", "count").iter_rows():
+        out[int(q), sample_to_idx[sid]] = int(c)
+    return out
 
-    def _resolve_samples(self, sample) -> list[str]:
-        if sample is None:
-            return list(self.samples)
-        if isinstance(sample, str):
-            samples = [sample]
-        else:
-            samples = list(sample)
-        if missing := set(samples) - set(self.samples):
-            raise ValueError(f"Sample(s) {missing} not found in Table.")
-        return samples
 
-    def _build_queries(
-        self,
-        contig: str,
-        starts: NDArray[np.int64],
-        ends: NDArray[np.int64],
-        samples: list[str],
-    ) -> pl.DataFrame:
-        n = len(starts)
-        return (
-            pl.DataFrame({
-                "_q": np.arange(n, dtype=np.int64),
-                "chrom": np.repeat(np.array([contig], dtype=object), n),
-                "start": starts,
-                "end": ends,
-            })
-            .join(pl.DataFrame({"sample_id": samples}), how="cross")
-        )
+def _resolve_samples(self, sample) -> list[str]:
+    if sample is None:
+        return list(self.samples)
+    if isinstance(sample, str):
+        samples = [sample]
+    else:
+        samples = list(sample)
+    if missing := set(samples) - set(self.samples):
+        raise ValueError(f"Sample(s) {missing} not found in Table.")
+    return samples
+
+
+def _build_queries(
+    self,
+    contig: str,
+    starts: NDArray[np.int64],
+    ends: NDArray[np.int64],
+    samples: list[str],
+) -> pl.DataFrame:
+    n = len(starts)
+    return pl.DataFrame({
+        "_q": np.arange(n, dtype=np.int64),
+        "chrom": np.repeat(np.array([contig], dtype=object), n),
+        "start": starts,
+        "end": ends,
+    }).join(pl.DataFrame({"sample_id": samples}), how="cross")
 ```
 
 - [ ] **Step 4: Run tests**
@@ -808,10 +843,10 @@ from genvarloader._utils import lengths_to_offsets
 def test_table_intervals_from_offsets_roundtrip():
     df = pl.DataFrame({
         "sample_id": ["s0", "s0", "s1"],
-        "chrom":     ["chr1", "chr1", "chr1"],
-        "start":     [0, 50, 10],
-        "end":       [10, 60, 20],
-        "value":     [1.5, 2.5, 3.5],
+        "chrom": ["chr1", "chr1", "chr1"],
+        "start": [0, 50, 10],
+        "end": [10, 60, 20],
+        "value": [1.5, 2.5, 3.5],
     })
     t = Table("signal", df)
     starts = np.array([0, 40], dtype=np.int32)
@@ -827,8 +862,8 @@ def test_table_intervals_from_offsets_roundtrip():
     assert intervals.values.data.dtype == np.float32
     # cell (region=0, sample=s0): one interval [0, 10) value 1.5
     flat_start = intervals.starts.data
-    flat_end   = intervals.ends.data
-    flat_val   = intervals.values.data
+    flat_end = intervals.ends.data
+    flat_val = intervals.values.data
     assert flat_start[0] == 0 and flat_end[0] == 10 and flat_val[0] == np.float32(1.5)
     # total interval count == sum of counts
     assert len(flat_start) == int(counts.sum())
@@ -847,80 +882,89 @@ Expected: FAIL with `AttributeError: 'Table' object has no attribute '_intervals
 Append to `python/genvarloader/_table.py` (inside the class):
 
 ```python
-    def _intervals_from_offsets(
-        self,
-        contig: str,
-        starts: ArrayLike,
-        ends: ArrayLike,
-        offsets: NDArray[np.int64],
-        sample: str | list[str] | None = None,
-        **kwargs,
-    ) -> "RaggedIntervals":
-        import polars_bio as pb
-        from seqpro.rag import Ragged
+def _intervals_from_offsets(
+    self,
+    contig: str,
+    starts: ArrayLike,
+    ends: ArrayLike,
+    offsets: NDArray[np.int64],
+    sample: str | list[str] | None = None,
+    **kwargs,
+) -> "RaggedIntervals":
+    import polars_bio as pb
+    from seqpro.rag import Ragged
 
-        from ._ragged import RaggedIntervals
+    from ._ragged import RaggedIntervals
 
-        samples = self._resolve_samples(sample)
-        starts_arr = np.atleast_1d(np.asarray(starts, dtype=np.int64))
-        ends_arr = np.atleast_1d(np.asarray(ends, dtype=np.int64))
-        n_regions = len(starts_arr)
-        shape = (n_regions, len(samples), None)
+    samples = self._resolve_samples(sample)
+    starts_arr = np.atleast_1d(np.asarray(starts, dtype=np.int64))
+    ends_arr = np.atleast_1d(np.asarray(ends, dtype=np.int64))
+    n_regions = len(starts_arr)
+    shape = (n_regions, len(samples), None)
 
-        total = int(offsets[-1])
-        flat_starts = np.empty(total, dtype=np.int32)
-        flat_ends = np.empty(total, dtype=np.int32)
-        flat_values = np.empty(total, dtype=np.float32)
+    total = int(offsets[-1])
+    flat_starts = np.empty(total, dtype=np.int32)
+    flat_ends = np.empty(total, dtype=np.int32)
+    flat_values = np.empty(total, dtype=np.float32)
 
-        if contig in self.contigs and total > 0:
-            subset = self._df.filter(
-                (pl.col("chrom") == contig) & pl.col("sample_id").is_in(samples)
-            )
-            if subset.height > 0:
-                queries = self._build_queries(contig, starts_arr, ends_arr, samples)
-                joined = pb.overlap(
-                    queries,
-                    subset,
-                    cols1=["chrom", "start", "end"],
-                    cols2=["chrom", "start", "end"],
-                    on_cols=["sample_id"],
-                    output_type="polars.DataFrame",
-                )
-                # Right-side columns get a suffix; spike notes from Task 4
-                # confirm the exact suffix. Below assumes the table's start/end/value
-                # appear as start_2/end_2/value (or value_2). Adjust per spike findings.
-                start_col = "start_2" if "start_2" in joined.columns else "start_right"
-                end_col   = "end_2"   if "end_2"   in joined.columns else "end_right"
-                value_col = "value"   if "value"   in joined.columns else (
-                    "value_2" if "value_2" in joined.columns else "value_right"
-                )
-                joined = joined.sort("_q", "sample_id", start_col)
-                # Group rows into per-(region, sample) cells matching offsets layout.
-                sample_to_idx = {s: i for i, s in enumerate(samples)}
-                cell_idx_col = (
-                    pl.col("_q") * len(samples)
-                    + pl.col("sample_id").replace_strict(sample_to_idx, return_dtype=pl.Int64)
-                )
-                joined = joined.with_columns(_cell=cell_idx_col).sort("_cell", start_col)
-
-                cells = joined["_cell"].to_numpy()
-                # Compute write positions from offsets in the flat layout.
-                # offsets is over flattened (region, sample) cells; row i of the
-                # joined frame goes to position offsets[cells[i]] + intra_cell_index.
-                # Compute intra-cell running index:
-                _, first_idx = np.unique(cells, return_index=True)
-                pos_in_cell = np.arange(len(cells)) - np.repeat(first_idx, np.diff(np.r_[first_idx, len(cells)]))
-                write_pos = offsets[cells] + pos_in_cell
-
-                flat_starts[write_pos] = joined[start_col].to_numpy().astype(np.int32, copy=False)
-                flat_ends[write_pos]   = joined[end_col].to_numpy().astype(np.int32, copy=False)
-                flat_values[write_pos] = joined[value_col].to_numpy().astype(np.float32, copy=False)
-
-        return RaggedIntervals(
-            Ragged.from_offsets(flat_starts, shape, offsets),
-            Ragged.from_offsets(flat_ends, shape, offsets),
-            Ragged.from_offsets(flat_values, shape, offsets),
+    if contig in self.contigs and total > 0:
+        subset = self._df.filter(
+            (pl.col("chrom") == contig) & pl.col("sample_id").is_in(samples)
         )
+        if subset.height > 0:
+            queries = self._build_queries(contig, starts_arr, ends_arr, samples)
+            joined = pb.overlap(
+                queries,
+                subset,
+                cols1=["chrom", "start", "end"],
+                cols2=["chrom", "start", "end"],
+                on_cols=["sample_id"],
+                output_type="polars.DataFrame",
+            )
+            # Right-side columns get a suffix; spike notes from Task 4
+            # confirm the exact suffix. Below assumes the table's start/end/value
+            # appear as start_2/end_2/value (or value_2). Adjust per spike findings.
+            start_col = "start_2" if "start_2" in joined.columns else "start_right"
+            end_col = "end_2" if "end_2" in joined.columns else "end_right"
+            value_col = (
+                "value"
+                if "value" in joined.columns
+                else ("value_2" if "value_2" in joined.columns else "value_right")
+            )
+            joined = joined.sort("_q", "sample_id", start_col)
+            # Group rows into per-(region, sample) cells matching offsets layout.
+            sample_to_idx = {s: i for i, s in enumerate(samples)}
+            cell_idx_col = pl.col("_q") * len(samples) + pl.col(
+                "sample_id"
+            ).replace_strict(sample_to_idx, return_dtype=pl.Int64)
+            joined = joined.with_columns(_cell=cell_idx_col).sort("_cell", start_col)
+
+            cells = joined["_cell"].to_numpy()
+            # Compute write positions from offsets in the flat layout.
+            # offsets is over flattened (region, sample) cells; row i of the
+            # joined frame goes to position offsets[cells[i]] + intra_cell_index.
+            # Compute intra-cell running index:
+            _, first_idx = np.unique(cells, return_index=True)
+            pos_in_cell = np.arange(len(cells)) - np.repeat(
+                first_idx, np.diff(np.r_[first_idx, len(cells)])
+            )
+            write_pos = offsets[cells] + pos_in_cell
+
+            flat_starts[write_pos] = (
+                joined[start_col].to_numpy().astype(np.int32, copy=False)
+            )
+            flat_ends[write_pos] = (
+                joined[end_col].to_numpy().astype(np.int32, copy=False)
+            )
+            flat_values[write_pos] = (
+                joined[value_col].to_numpy().astype(np.float32, copy=False)
+            )
+
+    return RaggedIntervals(
+        Ragged.from_offsets(flat_starts, shape, offsets),
+        Ragged.from_offsets(flat_ends, shape, offsets),
+        Ragged.from_offsets(flat_values, shape, offsets),
+    )
 ```
 
 - [ ] **Step 4: Run test**
@@ -1033,7 +1077,7 @@ In `python/genvarloader/_dataset/_write.py`:
 
 1. Line 58 — change parameter:
    ```python
-   tracks: "IntervalTrack | Sequence[IntervalTrack] | None" = None,
+   tracks: "IntervalTrack | Sequence[IntervalTrack] | None" = (None,)
    ```
    Add the `Sequence` import if not already present:
    ```python
@@ -1061,7 +1105,9 @@ In `python/genvarloader/_dataset/_write.py`:
    if tracks is not None:
        names = [t.name for t in tracks]
        if len(set(names)) != len(names):
-           raise ValueError(f"Duplicate track names: {names}. Each track must have a unique `name`.")
+           raise ValueError(
+               f"Duplicate track names: {names}. Each track must have a unique `name`."
+           )
    ```
 
    Note: `BigWigs` is not a `Sequence`, but neither is `Table` — the `isinstance(..., Sequence)` check correctly distinguishes a single track from `[track, track]`. Verify by writing a quick interactive check if uncertain.
@@ -1151,9 +1197,9 @@ ddir = Path(__file__).parents[1] / "data"
 
 def _make_bed(tmp_path: Path) -> pl.DataFrame:
     bed = pl.DataFrame({
-        "chrom":      ["chr1", "chr1"],
+        "chrom": ["chr1", "chr1"],
         "chromStart": [0, 100],
-        "chromEnd":   [50, 200],
+        "chromEnd": [50, 200],
     })
     return bed
 
@@ -1161,10 +1207,10 @@ def _make_bed(tmp_path: Path) -> pl.DataFrame:
 def _make_table_df() -> pl.DataFrame:
     return pl.DataFrame({
         "sample_id": ["s0", "s0", "s1", "s1"],
-        "chrom":     ["chr1", "chr1", "chr1", "chr1"],
-        "start":     [10, 110, 5, 150],
-        "end":       [20, 130, 15, 160],
-        "value":     [1.0, 2.0, 3.0, 4.0],
+        "chrom": ["chr1", "chr1", "chr1", "chr1"],
+        "start": [10, 110, 5, 150],
+        "end": [20, 130, 15, 160],
+        "value": [1.0, 2.0, 3.0, 4.0],
     })
 
 
@@ -1184,7 +1230,9 @@ def test_write_with_table_only_roundtrip(tmp_path):
         [("start", np.int32), ("end", np.int32), ("value", np.float32)],
         align=True,
     )
-    arr = np.memmap(out / "intervals" / "signal" / "intervals.npy", dtype=INTERVAL_DTYPE, mode="r")
+    arr = np.memmap(
+        out / "intervals" / "signal" / "intervals.npy", dtype=INTERVAL_DTYPE, mode="r"
+    )
     # Both samples + both regions should produce 4 intervals total.
     assert arr.shape[0] == 4
     values = sorted(float(v) for v in arr["value"])
@@ -1220,23 +1268,29 @@ Append to `tests/dataset/test_write_tracks.py`:
 ```python
 def test_write_with_mixed_bigwigs_and_table(tmp_path):
     bed = pl.DataFrame({
-        "chrom":      ["chr1"],
+        "chrom": ["chr1"],
         "chromStart": [0],
-        "chromEnd":   [200],
+        "chromEnd": [200],
     })
     bw_dir = ddir / "bigwig"
-    bw = gvl.BigWigs("bw_signal", {
-        "sample_0": str(bw_dir / "sample_0.bw"),
-        "sample_1": str(bw_dir / "sample_1.bw"),
-    })
+    bw = gvl.BigWigs(
+        "bw_signal",
+        {
+            "sample_0": str(bw_dir / "sample_0.bw"),
+            "sample_1": str(bw_dir / "sample_1.bw"),
+        },
+    )
     # Table sample IDs match the BigWigs sample IDs so the intersection is non-empty.
-    table = Table("tab_signal", pl.DataFrame({
-        "sample_id": ["sample_0", "sample_1"],
-        "chrom":     ["chr1", "chr1"],
-        "start":     [0, 50],
-        "end":       [10, 60],
-        "value":     [9.0, 8.0],
-    }))
+    table = Table(
+        "tab_signal",
+        pl.DataFrame({
+            "sample_id": ["sample_0", "sample_1"],
+            "chrom": ["chr1", "chr1"],
+            "start": [0, 50],
+            "end": [10, 60],
+            "value": [9.0, 8.0],
+        }),
+    )
 
     out = tmp_path / "mixed.gvl"
     gvl.write(path=out, bed=bed, tracks=[bw, table])
@@ -1247,13 +1301,28 @@ def test_write_with_mixed_bigwigs_and_table(tmp_path):
 
 def test_write_duplicate_track_names_rejected(tmp_path):
     import pytest
+
     bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [100]})
-    t1 = Table("dup", pl.DataFrame({
-        "sample_id": ["s0"], "chrom": ["chr1"], "start": [0], "end": [10], "value": [1.0],
-    }))
-    t2 = Table("dup", pl.DataFrame({
-        "sample_id": ["s0"], "chrom": ["chr1"], "start": [50], "end": [60], "value": [2.0],
-    }))
+    t1 = Table(
+        "dup",
+        pl.DataFrame({
+            "sample_id": ["s0"],
+            "chrom": ["chr1"],
+            "start": [0],
+            "end": [10],
+            "value": [1.0],
+        }),
+    )
+    t2 = Table(
+        "dup",
+        pl.DataFrame({
+            "sample_id": ["s0"],
+            "chrom": ["chr1"],
+            "start": [50],
+            "end": [60],
+            "value": [2.0],
+        }),
+    )
     with pytest.raises(ValueError, match="[Dd]uplicate"):
         gvl.write(path=tmp_path / "x.gvl", bed=bed, tracks=[t1, t2])
 ```

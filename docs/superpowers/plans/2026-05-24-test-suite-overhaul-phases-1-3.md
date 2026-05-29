@@ -266,6 +266,7 @@ import pytest
 
 # --- root paths --------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def tests_dir() -> Path:
     return Path(__file__).resolve().parent
@@ -278,6 +279,7 @@ def data_dir(tests_dir: Path) -> Path:
 
 # --- reference -------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def ref_fasta(data_dir: Path) -> Path:
     """bgzipped hg38 reference used by the default toy datasets."""
@@ -285,6 +287,7 @@ def ref_fasta(data_dir: Path) -> Path:
 
 
 # --- toy phased datasets (one per variant source) ----------------------------
+
 
 @pytest.fixture(scope="session")
 def phased_vcf_gvl(data_dir: Path) -> Path:
@@ -302,6 +305,7 @@ def phased_svar_gvl(data_dir: Path) -> Path:
 
 
 # --- 1kg datasets (slow tier) ------------------------------------------------
+
 
 @pytest.fixture(scope="session")
 def kg_dir(data_dir: Path) -> Path:
@@ -324,6 +328,7 @@ def kg_svar_gvl(kg_dir: Path) -> Path:
 
 
 # --- raw inputs / regression artifacts --------------------------------------
+
 
 @pytest.fixture(scope="session")
 def source_bed(data_dir: Path) -> Path:
@@ -483,12 +488,14 @@ import genvarloader as gvl
 import numpy as np
 from pytest_cases import fixture, parametrize_with_cases
 
-data_dir = Path(__file__).resolve().parents[2] / "data"   # parents[2] after Task 4
+data_dir = Path(__file__).resolve().parents[2] / "data"  # parents[2] after Task 4
 ref = data_dir / "fasta" / "hg38.fa.bgz"
 
 
 def ds_phased():
     return gvl.Dataset.open(data_dir / "phased_dataset.vcf.gvl", ref)
+
+
 # ...
 ```
 
@@ -511,6 +518,8 @@ def ds_phased(phased_vcf_gvl: Path, ref_fasta: Path):
 @parametrize_with_cases("ds", prefix="ds_", cases=".")
 def dataset(ds: gvl.Dataset, seq_type: Literal["reference", "haplotypes", "annotated"]):
     return ds.with_seqs(seq_type)
+
+
 # ...
 ```
 
@@ -527,24 +536,68 @@ def dataset(phased_vcf_gvl: Path, ref_fasta: Path):
     return gvl.Dataset.open(phased_vcf_gvl, ref_fasta)
 
 
-def idx_none(): return None
-def idx_scalar(): return 0
-def idx_neg_scalar(): return -1
-def idx_slice_none(): return slice(None)
-def idx_slice_start_none(): return slice(1, None)
-def idx_slice_none_stop(): return slice(None, 2)
-def idx_list(): return [0, 1, 2]
-def idx_array(): return np.arange(3)
+def idx_none():
+    return None
 
 
-def smp_none(): return None
-def smp_scalar(): return 0
-def smp_neg_scalar(): return -1
-def smp_slice_none(): return slice(None)
-def smp_slice_start_none(): return slice(1, None)
-def smp_slice_none_stop(): return slice(None, 2)
-def smp_list(): return [2, 0, 1]
-def smp_array(): return np.arange(3)
+def idx_scalar():
+    return 0
+
+
+def idx_neg_scalar():
+    return -1
+
+
+def idx_slice_none():
+    return slice(None)
+
+
+def idx_slice_start_none():
+    return slice(1, None)
+
+
+def idx_slice_none_stop():
+    return slice(None, 2)
+
+
+def idx_list():
+    return [0, 1, 2]
+
+
+def idx_array():
+    return np.arange(3)
+
+
+def smp_none():
+    return None
+
+
+def smp_scalar():
+    return 0
+
+
+def smp_neg_scalar():
+    return -1
+
+
+def smp_slice_none():
+    return slice(None)
+
+
+def smp_slice_start_none():
+    return slice(1, None)
+
+
+def smp_slice_none_stop():
+    return slice(None, 2)
+
+
+def smp_list():
+    return [2, 0, 1]
+
+
+def smp_array():
+    return np.arange(3)
 
 
 @parametrize_with_cases("regions", cases=".", prefix="idx_")

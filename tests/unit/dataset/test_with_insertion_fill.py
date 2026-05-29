@@ -8,9 +8,8 @@ integration file exercise the full reconstruction call path and stay
 in the integration tier.
 """
 
-import pytest
-
 import genvarloader as gvl
+import pytest
 from genvarloader._dataset._insertion_fill import Repeat5p
 
 

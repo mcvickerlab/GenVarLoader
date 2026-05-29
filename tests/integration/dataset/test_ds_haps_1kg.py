@@ -22,7 +22,8 @@ def dataset(request, kg_bcf_gvl, kg_pgen_gvl, kg_svar_gvl, ref_fasta):
         "svar": kg_svar_gvl,
     }[request.param]
     return (
-        gvl.Dataset.open(gvl_path, ref_fasta, rc_neg=False)
+        gvl.Dataset
+        .open(gvl_path, ref_fasta, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
         .with_tracks(False)

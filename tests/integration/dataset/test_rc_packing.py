@@ -25,7 +25,6 @@ import pysam
 import pytest
 from genoray import VCF
 
-
 # ---------------------------------------------------------------------------
 # Integration fixtures: write a fresh dataset into tmp so we don't mutate the
 # shared test fixtures, and can attach custom transcript_id / exon_number
@@ -69,7 +68,8 @@ def spliced_ds_path(
 @pytest.fixture(scope="module")
 def spliced_ds(spliced_ds_path: "Path", ref_fasta) -> gvl.Dataset:
     return (
-        gvl.Dataset.open(spliced_ds_path, ref_fasta)
+        gvl.Dataset
+        .open(spliced_ds_path, ref_fasta)
         .with_seqs("reference")
         .with_settings(splice_info=("transcript_id", "exon_number"))
     )
@@ -202,7 +202,8 @@ def test_multi_exon_spliced_buffer_packed(multi_exon_ds_path, ref_fasta):
     interleaving bug in one check.
     """
     ds = (
-        gvl.Dataset.open(multi_exon_ds_path, ref_fasta)
+        gvl.Dataset
+        .open(multi_exon_ds_path, ref_fasta)
         .with_seqs("haplotypes")
         .with_settings(splice_info=("transcript_id", "exon_number"))
     )
@@ -218,7 +219,8 @@ def test_multi_exon_spliced_buffer_packed(multi_exon_ds_path, ref_fasta):
 def test_multi_exon_spliced_matches_fasta_concat(multi_exon_ds_path, ref_fasta):
     """Reference-mode spliced output must equal the concat of per-exon FASTA slices."""
     ds = (
-        gvl.Dataset.open(multi_exon_ds_path, ref_fasta)
+        gvl.Dataset
+        .open(multi_exon_ds_path, ref_fasta)
         .with_seqs("reference")
         .with_settings(splice_info=("transcript_id", "exon_number"))
     )
@@ -272,7 +274,8 @@ def test_cds_start_codon_is_atg_nearly_always():
     import genvarloader as gvl
 
     dss = (
-        gvl.Dataset.open(CDS_DS, CDS_REF)
+        gvl.Dataset
+        .open(CDS_DS, CDS_REF)
         .with_seqs("haplotypes")
         .with_settings(splice_info=("transcript_id", "exon_number"))
     )
@@ -296,11 +299,12 @@ def test_cds_internal_stops_bounded():
     reporting ≥2 stops almost always indicates a reconstruction bug rather
     than real biology, so we cap it at 1.
     """
-    import seqpro as sp
     import genvarloader as gvl
+    import seqpro as sp
 
     dss = (
-        gvl.Dataset.open(CDS_DS, CDS_REF)
+        gvl.Dataset
+        .open(CDS_DS, CDS_REF)
         .with_seqs("haplotypes")
         .with_settings(splice_info=("transcript_id", "exon_number"))
     )
@@ -337,12 +341,14 @@ def test_spliced_tracks_round_trip(multi_exon_ds_path, ref_fasta):
     """
     try:
         ds = (
-            gvl.Dataset.open(multi_exon_ds_path, ref_fasta)
+            gvl.Dataset
+            .open(multi_exon_ds_path, ref_fasta)
             .with_tracks("dummy")
             .with_settings(splice_info=("transcript_id", "exon_number"))
         )
     except ValueError:
         pytest.skip("No tracks in fixture; tracks splice path covered elsewhere")
+        return  # for type checker: pytest.skip raises
     out = ds[0, 0]
     assert out is not None
 
@@ -352,7 +358,8 @@ def test_haptracks_splicing_raises(multi_exon_ds_path, ref_fasta):
     from genvarloader._dataset._reconstruct import HapsTracks
 
     ds = (
-        gvl.Dataset.open(multi_exon_ds_path, ref_fasta)
+        gvl.Dataset
+        .open(multi_exon_ds_path, ref_fasta)
         .with_seqs("haplotypes")
         .with_tracks("dummy")
         .with_settings(splice_info=("transcript_id", "exon_number"))

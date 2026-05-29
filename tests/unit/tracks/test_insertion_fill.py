@@ -15,7 +15,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 from genoray._svar import dense2sparse
-
 from genvarloader._dataset._insertion_fill import (
     CONSTANT,
     FLANK_SAMPLE,
@@ -33,8 +32,7 @@ from genvarloader._dataset._tracks import shift_and_realign_track_sparse
 
 # Make tests/_builders/ importable.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _builders.reconstruct import make_tracks  # noqa: E402
-
+from _builders.reconstruct import make_tracks
 
 # ---------------------------------------------------------------------------
 # InsertionFill subclasses — pure unit tests of the dataclass / serializer
@@ -300,9 +298,10 @@ def test_with_insertion_fill_dict_partial_falls_back():
 
 
 def test_with_tracks_prunes_insertion_fill():
-    tracks = make_tracks(["a", "b"]).with_insertion_fill(
-        {"a": Constant(0.0), "b": FlankSample()}
-    )
+    tracks = make_tracks(["a", "b"]).with_insertion_fill({
+        "a": Constant(0.0),
+        "b": FlankSample(),
+    })
     new = tracks.with_tracks("a")
     assert set(new.insertion_fill) == {"a"}
     assert isinstance(new.insertion_fill["a"], Constant)

@@ -1,8 +1,7 @@
 """Smoke tests for the PyTorch integration."""
 
-import pytest
-
 import genvarloader as gvl  # eagerly loads numpy in the order torch expects
+import pytest
 from genvarloader._torch import get_dataloader, get_sampler
 
 torch = pytest.importorskip("torch")  # module-level skip if torch missing

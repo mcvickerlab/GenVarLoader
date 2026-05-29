@@ -1,7 +1,6 @@
 """Unit tests for build_splice_plan: permutation + offset math."""
 
 import numpy as np
-
 from genvarloader._dataset._splice import build_splice_plan
 
 
@@ -184,21 +183,18 @@ def test_ref_call_with_plan_writes_per_element_layout(ref_fasta):
     offsets are plan.permuted_out_offsets and shape is (n_elements, None)."""
     import genvarloader as gvl
     import polars as pl
-
     from genvarloader._dataset._reconstruct import Ref
     from genvarloader._dataset._splice import build_splice_plan
     from genvarloader._dataset._utils import bed_to_regions
 
     reference = gvl.Reference.from_path(ref_fasta, in_memory=False)
 
-    bed = pl.DataFrame(
-        {
-            "chrom": ["chr1", "chr1", "chr1"],
-            "chromStart": [1000, 2000, 5000],
-            "chromEnd": [1010, 2010, 5010],
-            "strand": [1, 1, 1],
-        }
-    )
+    bed = pl.DataFrame({
+        "chrom": ["chr1", "chr1", "chr1"],
+        "chromStart": [1000, 2000, 5000],
+        "chromEnd": [1010, 2010, 5010],
+        "strand": [1, 1, 1],
+    })
 
     regions = bed_to_regions(bed, reference.c_map)
     # Two splice rows: row 0 = elements [0, 1], row 1 = element [2].

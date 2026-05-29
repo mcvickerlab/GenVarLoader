@@ -16,13 +16,12 @@ methods are skipped here and called out in the task report.
 """
 
 import numpy as np
-from seqpro.rag import Ragged
-
 from genvarloader._ragged import (
     RaggedIntervals,
     reverse_complement,
     to_padded,
 )
+from seqpro.rag import Ragged
 
 
 def _make_intervals_3d() -> RaggedIntervals:

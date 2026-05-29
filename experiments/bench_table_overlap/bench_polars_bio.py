@@ -23,7 +23,7 @@ import polars as pl
 import polars_bio as pb
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _common import CASES, N_TRIALS, gen_queries, gen_table  # noqa: E402
+from _common import CASES, N_TRIALS, gen_queries, gen_table
 
 pb.set_option("datafusion.bio.coordinate_system_check", "false")
 pb.set_option("datafusion.bio.coordinate_system_zero_based", True)
@@ -39,14 +39,12 @@ def count_per_sample_loop(table_df, samples, starts, ends, contig="chr1"):
     contig_subset = table_df.filter(pl.col("chrom") == contig)
     if contig_subset.height == 0:
         return np.zeros((n_regions, n_samples), np.int32)
-    queries = pl.DataFrame(
-        {
-            "chrom": np.full(n_regions, contig, dtype=object).astype(str),
-            "start": starts.astype(np.int64),
-            "end": ends.astype(np.int64),
-            "_q": np.arange(n_regions, dtype=np.int64),
-        }
-    )
+    queries = pl.DataFrame({
+        "chrom": np.full(n_regions, contig, dtype=object).astype(str),
+        "start": starts.astype(np.int64),
+        "end": ends.astype(np.int64),
+        "_q": np.arange(n_regions, dtype=np.int64),
+    })
     out = np.zeros((n_regions, n_samples), np.int32)
     for si, s in enumerate(samples):
         sub_s = contig_subset.filter(pl.col("sample_id") == s).select(
@@ -67,7 +65,8 @@ def count_per_sample_loop(table_df, samples, starts, ends, contig="chr1"):
         if len(sorted_counts) < n_regions:
             idx_df = pl.DataFrame({"_q": np.arange(n_regions, dtype=np.int64)})
             sorted_counts = (
-                idx_df.join(counts_df.select("_q", "count"), on="_q", how="left")
+                idx_df
+                .join(counts_df.select("_q", "count"), on="_q", how="left")
                 .fill_null(0)["count"]
                 .to_numpy()
                 .astype(np.int32, copy=False)
@@ -85,19 +84,16 @@ def count_lazy_filter(table_df, samples, starts, ends, contig="chr1"):
     if contig_subset.height == 0:
         return np.zeros((n_regions, n_samples), np.int32)
     _n = n_regions * n_samples
-    queries = pl.DataFrame(
-        {
-            "chrom": np.full(_n, contig, dtype=object).astype(str),
-            "start": np.tile(starts, n_samples).astype(np.int64),
-            "end": np.tile(ends, n_samples).astype(np.int64),
-            "_q": np.tile(np.arange(n_regions, dtype=np.int64), n_samples),
-            "sample_id": np.repeat(np.array(samples, dtype=object), n_regions).astype(
-                str
-            ),
-        }
-    )
+    queries = pl.DataFrame({
+        "chrom": np.full(_n, contig, dtype=object).astype(str),
+        "start": np.tile(starts, n_samples).astype(np.int64),
+        "end": np.tile(ends, n_samples).astype(np.int64),
+        "_q": np.tile(np.arange(n_regions, dtype=np.int64), n_samples),
+        "sample_id": np.repeat(np.array(samples, dtype=object), n_regions).astype(str),
+    })
     result = (
-        pb.overlap(
+        pb
+        .overlap(
             queries.lazy(),
             contig_subset.select("chrom", "start", "end", "sample_id").lazy(),
             cols1=["chrom", "start", "end"],
@@ -126,14 +122,12 @@ def count_no_xprod(table_df, samples, starts, ends, contig="chr1"):
     )
     if contig_subset.height == 0:
         return np.zeros((n_regions, n_samples), np.int32)
-    queries = pl.DataFrame(
-        {
-            "chrom": np.full(n_regions, contig, dtype=object).astype(str),
-            "start": starts.astype(np.int64),
-            "end": ends.astype(np.int64),
-            "_q": np.arange(n_regions, dtype=np.int64),
-        }
-    )
+    queries = pl.DataFrame({
+        "chrom": np.full(n_regions, contig, dtype=object).astype(str),
+        "start": starts.astype(np.int64),
+        "end": ends.astype(np.int64),
+        "_q": np.arange(n_regions, dtype=np.int64),
+    })
     result = pb.overlap(
         queries,
         contig_subset.select("chrom", "start", "end", "sample_id"),
@@ -206,36 +200,32 @@ def main():
                     f"{case['name']:>8} {n_r:>6} {n_s:>5} {ipp:>5} {m_name:>18} {t_med:>9.3f}±{t_std:.3f} {p_med:>9.1f}"
                 )
                 for i, (t, p) in enumerate(zip(times, peaks)):
-                    rows.append(
-                        {
-                            "backend": "polars_bio",
-                            "method": m_name,
-                            "case": case["name"],
-                            "n_regions": n_r,
-                            "n_samples": n_s,
-                            "ipp": ipp,
-                            "trial": i,
-                            "time_s": t,
-                            "peak_MB": p,
-                        }
-                    )
-            except Exception as e:
-                print(
-                    f"{case['name']:>8} {n_r:>6} {n_s:>5} {ipp:>5} {m_name:>18} FAIL ({e!s:.40})"
-                )
-                rows.append(
-                    {
+                    rows.append({
                         "backend": "polars_bio",
                         "method": m_name,
                         "case": case["name"],
                         "n_regions": n_r,
                         "n_samples": n_s,
                         "ipp": ipp,
-                        "trial": 0,
-                        "time_s": None,
-                        "peak_MB": None,
-                    }
+                        "trial": i,
+                        "time_s": t,
+                        "peak_MB": p,
+                    })
+            except Exception as e:
+                print(
+                    f"{case['name']:>8} {n_r:>6} {n_s:>5} {ipp:>5} {m_name:>18} FAIL ({e!s:.40})"
                 )
+                rows.append({
+                    "backend": "polars_bio",
+                    "method": m_name,
+                    "case": case["name"],
+                    "n_regions": n_r,
+                    "n_samples": n_s,
+                    "ipp": ipp,
+                    "trial": 0,
+                    "time_s": None,
+                    "peak_MB": None,
+                })
 
     with OUT_CSV.open("w", newline="") as f:
         writer = csv.DictWriter(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable, overload
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any, overload
 
 import awkward as ak
 import numpy as np
@@ -244,6 +244,7 @@ if TORCH_AVAILABLE:
 
         def __iter__(self):
             return iter(self.ds_idx)
+
 else:
     TorchDataset = no_torch_error
     StratifiedSampler = no_torch_error

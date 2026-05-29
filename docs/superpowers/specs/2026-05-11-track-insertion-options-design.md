@@ -21,19 +21,26 @@ New module: `python/genvarloader/_dataset/_insertion_fill.py`. Strategy classes 
 @define
 class InsertionFill: ...  # base
 
-@define
-class Repeat5p(InsertionFill): pass
 
 @define
-class Repeat5pNormalized(InsertionFill): pass
+class Repeat5p(InsertionFill):
+    pass
+
+
+@define
+class Repeat5pNormalized(InsertionFill):
+    pass
+
 
 @define
 class Constant(InsertionFill):
     value: float = float("nan")
 
+
 @define
 class FlankSample(InsertionFill):
     flank_width: int = 5
+
 
 @define
 class Interpolate(InsertionFill):
@@ -43,8 +50,8 @@ class Interpolate(InsertionFill):
 **Dataset method** (mirrors `with_tracks`):
 
 ```python
-dataset.with_insertion_fill(Constant(float("nan")))                   # all active tracks
-dataset.with_insertion_fill({"atac": Repeat5p(), "mask": Constant(0)}) # per-track
+dataset.with_insertion_fill(Constant(float("nan")))  # all active tracks
+dataset.with_insertion_fill({"atac": Repeat5p(), "mask": Constant(0)})  # per-track
 ```
 
 Returns a new lazy view via `evolve`. Default (never called) = `Repeat5p()`, which is the existing behavior — fully backwards compatible. In the dict form, tracks not in the mapping fall back to `Repeat5p()`.

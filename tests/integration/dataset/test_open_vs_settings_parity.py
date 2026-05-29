@@ -58,7 +58,8 @@ def test_open_vs_with_settings_parity_state(spliced_svar_ds_path, ref_fasta):
     ).with_seqs("haplotypes")
 
     ds_b = (
-        gvl.Dataset.open(spliced_svar_ds_path, reference=ref_fasta)
+        gvl.Dataset
+        .open(spliced_svar_ds_path, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_settings(
             splice_info=("transcript_id", "exon_number"),
@@ -81,7 +82,8 @@ def test_open_vs_with_settings_parity_output(spliced_svar_ds_path, ref_fasta):
     ).with_seqs("haplotypes")
 
     ds_b = (
-        gvl.Dataset.open(spliced_svar_ds_path, reference=ref_fasta)
+        gvl.Dataset
+        .open(spliced_svar_ds_path, reference=ref_fasta)
         .with_seqs("haplotypes")
         .with_settings(
             splice_info=("transcript_id", "exon_number"),

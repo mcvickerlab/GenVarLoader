@@ -57,8 +57,17 @@ def case_ref_only():
     sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
-        v_starts, ilens, shift, alt_alleles, alt_offsets, ref,
-        sparse_genos, ref_start, desired, annot_v_idxs, annot_pos,
+        v_starts,
+        ilens,
+        shift,
+        alt_alleles,
+        alt_offsets,
+        ref,
+        sparse_genos,
+        ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
     )
 ```
 
@@ -85,13 +94,24 @@ def case_spanning_del_end():
     # NB: test driver below sets out length = len(ref) - ref_start = 5
     desired = np.frombuffer(b"ACGNN", dtype="S1")
     annot_v_idxs = np.array([-1, -1, 0, -1, -1], dtype=np.int32)
-    annot_pos = np.array([0, 1, 2, np.iinfo(np.int32).max, np.iinfo(np.int32).max], dtype=np.int32)
+    annot_pos = np.array(
+        [0, 1, 2, np.iinfo(np.int32).max, np.iinfo(np.int32).max], dtype=np.int32
+    )
 
     sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
-        v_starts, ilens, shift, alt_alleles, alt_offsets, ref,
-        sparse_genos, ref_start, desired, annot_v_idxs, annot_pos,
+        v_starts,
+        ilens,
+        shift,
+        alt_alleles,
+        alt_offsets,
+        ref,
+        sparse_genos,
+        ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
     )
 ```
 
@@ -121,8 +141,17 @@ def case_overlapping_variants():
     sparse_genos = dense2sparse(genos, var_idxs)
 
     return (
-        v_starts, ilens, shift, alt_alleles, alt_offsets, ref,
-        sparse_genos, ref_start, desired, annot_v_idxs, annot_pos,
+        v_starts,
+        ilens,
+        shift,
+        alt_alleles,
+        alt_offsets,
+        ref,
+        sparse_genos,
+        ref_start,
+        desired,
+        annot_v_idxs,
+        annot_pos,
     )
 ```
 
@@ -406,8 +435,14 @@ def test_intervals_to_tracks_empty():
     out_offsets = np.array([0, 5], dtype=np.int64)
 
     intervals_to_tracks(
-        offset_idxs, starts, itv_starts, itv_ends, itv_values,
-        itv_offsets, out, out_offsets,
+        offset_idxs,
+        starts,
+        itv_starts,
+        itv_ends,
+        itv_values,
+        itv_offsets,
+        out,
+        out_offsets,
     )
     np.testing.assert_equal(out, np.zeros(5, dtype=np.float32))
 
@@ -424,8 +459,14 @@ def test_intervals_to_tracks_single_interval():
     out_offsets = np.array([0, 5], dtype=np.int64)
 
     intervals_to_tracks(
-        offset_idxs, starts, itv_starts, itv_ends, itv_values,
-        itv_offsets, out, out_offsets,
+        offset_idxs,
+        starts,
+        itv_starts,
+        itv_ends,
+        itv_values,
+        itv_offsets,
+        out,
+        out_offsets,
     )
     np.testing.assert_equal(out, np.array([0.0, 2.5, 2.5, 2.5, 0.0], dtype=np.float32))
 
@@ -442,8 +483,14 @@ def test_intervals_to_tracks_multiple_non_overlapping():
     out_offsets = np.array([0, 5], dtype=np.int64)
 
     intervals_to_tracks(
-        offset_idxs, starts, itv_starts, itv_ends, itv_values,
-        itv_offsets, out, out_offsets,
+        offset_idxs,
+        starts,
+        itv_starts,
+        itv_ends,
+        itv_values,
+        itv_offsets,
+        out,
+        out_offsets,
     )
     np.testing.assert_equal(out, np.array([1.0, 1.0, 0.0, 3.0, 3.0], dtype=np.float32))
 
@@ -460,8 +507,14 @@ def test_intervals_to_tracks_offset_query_start():
     out_offsets = np.array([0, 4], dtype=np.int64)
 
     intervals_to_tracks(
-        offset_idxs, starts, itv_starts, itv_ends, itv_values,
-        itv_offsets, out, out_offsets,
+        offset_idxs,
+        starts,
+        itv_starts,
+        itv_ends,
+        itv_values,
+        itv_offsets,
+        out,
+        out_offsets,
     )
     np.testing.assert_equal(out, np.array([0.0, 7.0, 7.0, 0.0], dtype=np.float32))
 ```

@@ -70,13 +70,11 @@ def test_dataset_with_sites_empty_overlap_raises():
     ds = gvl.get_dummy_dataset().with_len(4).with_tracks(False)
     # Build a sites table on a contig that exists but at a coordinate far from
     # the dummy dataset's regions (which sit at positions < 20 on chrs 2/3/6/8).
-    sites = pl.DataFrame(
-        {
-            "CHROM": ["8"],
-            "POS": [10_000_000],
-            "REF": ["A"],
-            "ALT": ["T"],
-        }
-    )
+    sites = pl.DataFrame({
+        "CHROM": ["8"],
+        "POS": [10_000_000],
+        "REF": ["A"],
+        "ALT": ["T"],
+    })
     with pytest.raises(RuntimeError, match="No overlap"):
         gvl.DatasetWithSites(ds, sites)

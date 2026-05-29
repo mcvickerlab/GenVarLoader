@@ -114,7 +114,8 @@ def test_dosage_absent_when_not_requested(svar_with_dosages_ds):
     The output RaggedVariants must not contain a `dosage` field.
     """
     ds = (
-        gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+        gvl.Dataset
+        .open(svar_with_dosages_ds, _REF, rc_neg=False)
         .with_len("ragged")
         .with_seqs("variants")
         .with_settings(var_fields=["alt", "ref", "start"])
@@ -128,7 +129,8 @@ def test_dosage_absent_when_not_requested(svar_with_dosages_ds):
 def test_dosage_present_when_requested(svar_with_dosages_ds):
     """Sanity: opting in adds the field."""
     ds = (
-        gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
+        gvl.Dataset
+        .open(svar_with_dosages_ds, _REF, rc_neg=False)
         .with_len("ragged")
         .with_seqs("variants")
         .with_settings(var_fields=["alt", "ref", "start", "dosage"])
@@ -292,18 +294,15 @@ Expected: AttributeError — `_Variants.available_info_fields` doesn't exist.
 In `_haps.py`, on the `_Variants` class (after `from_table` ends around line 145), add:
 
 ```python
-    @staticmethod
-    def available_info_fields(path: str | Path) -> list[str]:
-        """Return numeric column names that would be loaded as info, without
-        materializing any data.
+@staticmethod
+def available_info_fields(path: str | Path) -> list[str]:
+    """Return numeric column names that would be loaded as info, without
+    materializing any data.
 
-        ``POS`` and ``ILEN`` are excluded — they're positional, not info.
-        """
-        schema = pl.scan_ipc(path).collect_schema()
-        return [
-            k for k, v in schema.items()
-            if v.is_numeric() and k not in {"POS", "ILEN"}
-        ]
+    ``POS`` and ``ILEN`` are excluded — they're positional, not info.
+    """
+    schema = pl.scan_ipc(path).collect_schema()
+    return [k for k, v in schema.items() if v.is_numeric() and k not in {"POS", "ILEN"}]
 ```
 
 - [ ] **Step 4: Run to confirm pass**
@@ -442,7 +441,9 @@ def test_load_info_extends_info_dict():
     """load_info reads only the missing fields from disk and merges them."""
     available = set(_Variants.available_info_fields(_SOURCE_SVAR / "index.arrow"))
     if not available:
-        pytest.skip("No numeric info columns in canonical SVAR; cannot exercise load_info")
+        pytest.skip(
+            "No numeric info columns in canonical SVAR; cannot exercise load_info"
+        )
 
     pick = next(iter(available))
     # Start with empty info
@@ -551,121 +552,119 @@ Expected: both fail — `info` currently has every numeric column eagerly loaded
 In `_haps.py`, modify `Haps.from_path` signature (around line 193-207). Add a new param `var_fields` and the logic to use it. Replace the whole signature + body up through the `return cls(...)` block:
 
 ```python
-    @classmethod
-    def from_path(
-        cls: type[Haps[RaggedVariants]],
-        path: Path,
-        reference: Reference | None,
-        regions: NDArray[np.int32],
-        samples: list[str],
-        ploidy: int,
-        version: SemanticVersion | None,
-        svar_link: SvarLink | None = None,
-        svar_override: Path | str | None = None,
-        min_af: float | None = None,
-        max_af: float | None = None,
-        filter: Literal["exonic"] | None = None,
-        var_fields: list[str] | None = None,
-    ) -> Haps[RaggedVariants]:
-        # Default var_fields for loading. var_fields=None means "use the default
-        # set" — we resolve it here so we know exactly which info columns to load.
-        if var_fields is None:
-            var_fields = ["alt", "ilen", "start"]
-        # Which numeric info columns to eagerly load: those in var_fields that
-        # aren't built-ins. (alt/ilen/start/ref/dosage are handled separately.)
-        builtin = {"alt", "ilen", "start", "ref", "dosage"}
-        info_fields = {f for f in var_fields if f not in builtin}
+@classmethod
+def from_path(
+    cls: type[Haps[RaggedVariants]],
+    path: Path,
+    reference: Reference | None,
+    regions: NDArray[np.int32],
+    samples: list[str],
+    ploidy: int,
+    version: SemanticVersion | None,
+    svar_link: SvarLink | None = None,
+    svar_override: Path | str | None = None,
+    min_af: float | None = None,
+    max_af: float | None = None,
+    filter: Literal["exonic"] | None = None,
+    var_fields: list[str] | None = None,
+) -> Haps[RaggedVariants]:
+    # Default var_fields for loading. var_fields=None means "use the default
+    # set" — we resolve it here so we know exactly which info columns to load.
+    if var_fields is None:
+        var_fields = ["alt", "ilen", "start"]
+    # Which numeric info columns to eagerly load: those in var_fields that
+    # aren't built-ins. (alt/ilen/start/ref/dosage are handled separately.)
+    builtin = {"alt", "ilen", "start", "ref", "dosage"}
+    info_fields = {f for f in var_fields if f not in builtin}
 
-        svar_meta_path = path / "genotypes" / "svar_meta.json"
-        dosages = None
+    svar_meta_path = path / "genotypes" / "svar_meta.json"
+    dosages = None
 
-        if svar_meta_path.exists():
-            with open(svar_meta_path) as f:
-                metadata = json.load(f)
-            # (2 r s p)
-            shape = cast(tuple[int, ...], tuple(metadata["shape"]))
-            dtype = np.dtype(metadata["dtype"])
+    if svar_meta_path.exists():
+        with open(svar_meta_path) as f:
+            metadata = json.load(f)
+        # (2 r s p)
+        shape = cast(tuple[int, ...], tuple(metadata["shape"]))
+        dtype = np.dtype(metadata["dtype"])
 
-            offset_path = path / "genotypes" / "offsets.npy"
+        offset_path = path / "genotypes" / "offsets.npy"
 
-            if svar_link is not None:
-                svar_path = _resolve_svar(path, svar_link, svar_override)
-                _verify_fingerprint(svar_path, svar_link)
-            else:
-                legacy_link = path / "genotypes" / "link.svar"
-                if svar_override is not None:
-                    svar_path = Path(svar_override)
-                    if not svar_path.is_dir():
-                        raise FileNotFoundError(
-                            f"svar override does not exist: {svar_path}"
-                        )
-                elif legacy_link.exists():
-                    warnings.warn(
-                        f"GVL dataset at {path} uses the legacy link.svar "
-                        f"symlink. Run "
-                        f"`genvarloader.migrate_svar_link({str(path)!r})` "
-                        f"to upgrade.",
-                        DeprecationWarning,
-                        stacklevel=2,
-                    )
-                    svar_path = legacy_link.resolve()
-                else:
+        if svar_link is not None:
+            svar_path = _resolve_svar(path, svar_link, svar_override)
+            _verify_fingerprint(svar_path, svar_link)
+        else:
+            legacy_link = path / "genotypes" / "link.svar"
+            if svar_override is not None:
+                svar_path = Path(svar_override)
+                if not svar_path.is_dir():
                     raise FileNotFoundError(
-                        f"Legacy GVL dataset at {path} is missing its link.svar "
-                        f"symlink and has no svar_link metadata. "
-                        f"Pass `svar=` to Dataset.open(...) to recover, or "
-                        f"re-run `gvl.write`."
+                        f"svar override does not exist: {svar_path}"
                     )
-
-            geno_path = svar_path / "variant_idxs.npy"
-            dosage_path = svar_path / "dosages.npy"
-
-            offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
-            v_idxs = np.memmap(geno_path, dtype=V_IDX_TYPE, mode="r")
-            rag_shape = (*shape[1:], None)
-            genotypes = Ragged.from_offsets(v_idxs, rag_shape, offsets.reshape(2, -1))
-
-            if "dosage" in var_fields and dosage_path.exists():
-                dosages_mm = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
-                dosages = Ragged.from_offsets(
-                    dosages_mm, rag_shape, offsets.reshape(2, -1)
+            elif legacy_link.exists():
+                warnings.warn(
+                    f"GVL dataset at {path} uses the legacy link.svar "
+                    f"symlink. Run "
+                    f"`genvarloader.migrate_svar_link({str(path)!r})` "
+                    f"to upgrade.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                svar_path = legacy_link.resolve()
+            else:
+                raise FileNotFoundError(
+                    f"Legacy GVL dataset at {path} is missing its link.svar "
+                    f"symlink and has no svar_link metadata. "
+                    f"Pass `svar=` to Dataset.open(...) to recover, or "
+                    f"re-run `gvl.write`."
                 )
 
-            logger.info("Loading variant data.")
-            variants = _Variants.from_table(
-                svar_path / "index.arrow", info_fields=info_fields
-            )
-        else:
-            logger.info("Loading variant data.")
-            variants = _Variants.from_table(
-                path / "genotypes" / "variants.arrow",
-                one_based=version is not None
-                and version >= SemanticVersion.parse("0.18.0"),
-                info_fields=info_fields,
-            )
-            v_idxs = np.memmap(
-                path / "genotypes" / "variant_idxs.npy",
-                dtype=V_IDX_TYPE,
-                mode="r",
-            )
-            offsets = np.memmap(
-                path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
-            )
-            shape = (len(regions), len(samples), ploidy, None)
-            genotypes = Ragged.from_offsets(v_idxs, shape, offsets)
+        geno_path = svar_path / "variant_idxs.npy"
+        dosage_path = svar_path / "dosages.npy"
 
-        return cls(
-            path=path,
-            reference=reference,
-            variants=variants,
-            genotypes=genotypes,
-            dosages=dosages,
-            kind=RaggedVariants,
-            filter=filter,
-            min_af=min_af,
-            max_af=max_af,
-            var_fields=var_fields,
+        offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
+        v_idxs = np.memmap(geno_path, dtype=V_IDX_TYPE, mode="r")
+        rag_shape = (*shape[1:], None)
+        genotypes = Ragged.from_offsets(v_idxs, rag_shape, offsets.reshape(2, -1))
+
+        if "dosage" in var_fields and dosage_path.exists():
+            dosages_mm = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
+            dosages = Ragged.from_offsets(dosages_mm, rag_shape, offsets.reshape(2, -1))
+
+        logger.info("Loading variant data.")
+        variants = _Variants.from_table(
+            svar_path / "index.arrow", info_fields=info_fields
         )
+    else:
+        logger.info("Loading variant data.")
+        variants = _Variants.from_table(
+            path / "genotypes" / "variants.arrow",
+            one_based=version is not None
+            and version >= SemanticVersion.parse("0.18.0"),
+            info_fields=info_fields,
+        )
+        v_idxs = np.memmap(
+            path / "genotypes" / "variant_idxs.npy",
+            dtype=V_IDX_TYPE,
+            mode="r",
+        )
+        offsets = np.memmap(
+            path / "genotypes" / "offsets.npy", dtype=np.int64, mode="r"
+        )
+        shape = (len(regions), len(samples), ploidy, None)
+        genotypes = Ragged.from_offsets(v_idxs, shape, offsets)
+
+    return cls(
+        path=path,
+        reference=reference,
+        variants=variants,
+        genotypes=genotypes,
+        dosages=dosages,
+        kind=RaggedVariants,
+        filter=filter,
+        min_af=min_af,
+        max_af=max_af,
+        var_fields=var_fields,
+    )
 ```
 
 (The two changes versus current code: pass `info_fields=info_fields` to both `_Variants.from_table` calls; gate the dosages memmap on `"dosage" in var_fields`; pass `var_fields=var_fields` through to `cls(...)`.)
@@ -675,44 +674,45 @@ In `_haps.py`, modify `Haps.from_path` signature (around line 193-207). Add a ne
 In `_haps.py`, replace `Haps.__post_init__` (around line 177-191):
 
 ```python
-    def __post_init__(self):
-        self.n_variants = ak.num(self.genotypes, -1).to_numpy()
+def __post_init__(self):
+    self.n_variants = ak.num(self.genotypes, -1).to_numpy()
 
-        # Discover available info fields from the on-disk schema, not from the
-        # (possibly-filtered) loaded info dict. This way the user can see every
-        # field they could request, even if only a subset was loaded.
-        schema_info_fields = _Variants.available_info_fields(self.variants.path)
-        has_dosage_file = self._has_dosage_file_on_disk()
+    # Discover available info fields from the on-disk schema, not from the
+    # (possibly-filtered) loaded info dict. This way the user can see every
+    # field they could request, even if only a subset was loaded.
+    schema_info_fields = _Variants.available_info_fields(self.variants.path)
+    has_dosage_file = self._has_dosage_file_on_disk()
 
-        self.available_var_fields = (
-            ["alt", "ilen", "start"]
-            + schema_info_fields
-            + (["ref"] if self.variants.ref is not None else [])
-            + (["dosage"] if has_dosage_file else [])
+    self.available_var_fields = (
+        ["alt", "ilen", "start"]
+        + schema_info_fields
+        + (["ref"] if self.variants.ref is not None else [])
+        + (["dosage"] if has_dosage_file else [])
+    )
+
+    if (
+        self.min_af is not None or self.max_af is not None
+    ) and "AF" not in schema_info_fields:
+        raise RuntimeError(
+            "Either this dataset is not backed by an SVAR file, or the SVAR file has not had AFs cached yet."
+            + "Doing this automatically is not yet supported."
         )
 
-        if (
-            self.min_af is not None or self.max_af is not None
-        ) and "AF" not in schema_info_fields:
-            raise RuntimeError(
-                "Either this dataset is not backed by an SVAR file, or the SVAR file has not had AFs cached yet."
-                + "Doing this automatically is not yet supported."
-            )
 
-    def _has_dosage_file_on_disk(self) -> bool:
-        """True iff the linked SVAR contains a dosages.npy.
+def _has_dosage_file_on_disk(self) -> bool:
+    """True iff the linked SVAR contains a dosages.npy.
 
-        Returns False for non-SVAR datasets (no dosage path).
-        """
-        # If we already loaded dosages, we definitely had the file.
-        if self.dosages is not None:
-            return True
-        # Otherwise inspect the SVAR directory next to the variants table.
-        # _Variants.path is set to <svar_dir>/index.arrow for SVAR datasets,
-        # or <gvl>/genotypes/variants.arrow for legacy. We treat "next-to
-        # variants table" as "is dosage possible here".
-        candidate = self.variants.path.parent / "dosages.npy"
-        return candidate.exists()
+    Returns False for non-SVAR datasets (no dosage path).
+    """
+    # If we already loaded dosages, we definitely had the file.
+    if self.dosages is not None:
+        return True
+    # Otherwise inspect the SVAR directory next to the variants table.
+    # _Variants.path is set to <svar_dir>/index.arrow for SVAR datasets,
+    # or <gvl>/genotypes/variants.arrow for legacy. We treat "next-to
+    # variants table" as "is dosage possible here".
+    candidate = self.variants.path.parent / "dosages.npy"
+    return candidate.exists()
 ```
 
 Note: the old `__post_init__` derived available info fields from `self.variants.info.keys()`. After this change it derives them from the schema peek. The `min_af`/`max_af` precondition now checks `schema_info_fields` (what's available) rather than `self.variants.info` (what's loaded), which is the correct check.
@@ -904,9 +904,7 @@ def test_with_settings_lazily_loads_new_info_field(svar_with_dosages_ds):
     """Opening with default var_fields does not load AF (or other info columns).
     with_settings(var_fields=[..., 'AF']) should lazily extend the info dict."""
     ds = gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
-    available_info = set(
-        _Variants.available_info_fields(_SOURCE_SVAR / "index.arrow")
-    )
+    available_info = set(_Variants.available_info_fields(_SOURCE_SVAR / "index.arrow"))
     if not available_info:
         pytest.skip("No numeric info columns; cannot test lazy info expansion")
 
@@ -952,26 +950,24 @@ In `python/genvarloader/_dataset/_impl.py`, find the existing `var_fields` block
 Replace with:
 
 ```python
-        if var_fields is not None:
-            missing = list(set(var_fields) - set(self.available_var_fields))
-            if missing or not isinstance(self._seqs, Haps):
-                raise ValueError(f"Missing variant fields: {missing}")
-            haps = to_evolve.get("_seqs", self._seqs)
-            # Lazily load any newly-requested info columns into the existing
-            # _Variants struct (mutates self.info in place).
-            builtin = {"alt", "ilen", "start", "ref", "dosage"}
-            new_info_fields = [
-                f
-                for f in var_fields
-                if f not in builtin and f not in haps.variants.info
-            ]
-            if new_info_fields:
-                haps.variants.load_info(new_info_fields)
-            # Lazily memmap dosages if newly requested.
-            if "dosage" in var_fields and haps.dosages is None:
-                haps = _lazy_load_dosages(self, haps)
-            haps = replace(haps, var_fields=var_fields)
-            to_evolve["_seqs"] = haps
+if var_fields is not None:
+    missing = list(set(var_fields) - set(self.available_var_fields))
+    if missing or not isinstance(self._seqs, Haps):
+        raise ValueError(f"Missing variant fields: {missing}")
+    haps = to_evolve.get("_seqs", self._seqs)
+    # Lazily load any newly-requested info columns into the existing
+    # _Variants struct (mutates self.info in place).
+    builtin = {"alt", "ilen", "start", "ref", "dosage"}
+    new_info_fields = [
+        f for f in var_fields if f not in builtin and f not in haps.variants.info
+    ]
+    if new_info_fields:
+        haps.variants.load_info(new_info_fields)
+    # Lazily memmap dosages if newly requested.
+    if "dosage" in var_fields and haps.dosages is None:
+        haps = _lazy_load_dosages(self, haps)
+    haps = replace(haps, var_fields=var_fields)
+    to_evolve["_seqs"] = haps
 ```
 
 - [ ] **Step 4: Add the `_lazy_load_dosages` helper**
@@ -1030,8 +1026,9 @@ The helper accesses `dataset._metadata` — verify this attribute exists on the 
 If `_metadata` isn't on the dataset, replace the `metadata = dataset._metadata` line with:
 
 ```python
-    from ._write import Metadata
-    metadata = Metadata.model_validate_json((path / "metadata.json").read_text())
+from ._write import Metadata
+
+metadata = Metadata.model_validate_json((path / "metadata.json").read_text())
 ```
 
 - [ ] **Step 5: Run the new tests**

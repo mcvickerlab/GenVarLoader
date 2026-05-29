@@ -10,10 +10,10 @@ from natsort import natsorted
 
 from ._dataset._impl import RaggedDataset
 from ._dataset._indexing import DatasetIndexer, SpliceIndexer
-from ._dataset._splice import SpliceMap
 from ._dataset._intervals import tracks_to_intervals
 from ._dataset._reconstruct import Haps, HapsTracks, Tracks, TrackType, _Variants
 from ._dataset._reference import Reference
+from ._dataset._splice import SpliceMap
 from ._dataset._utils import bed_to_regions
 from ._ragged import Ragged, RaggedIntervals, RaggedSeqs, RaggedTracks
 from ._utils import lengths_to_offsets
@@ -45,16 +45,14 @@ def get_dummy_dataset(spliced: bool = False):
     n_samples = len(dummy_samples)
 
     dummy_contigs = [str(i) for i in range(1, 23)] + ["X", "Y", "MT"]
-    dummy_bed = pl.DataFrame(
-        {
-            "chrom": ["8", "3", "6", "2"],
-            "chromStart": [5, 13, 8, 2],
-            "chromEnd": [8, 16, 11, 5],
-            "strand": ["+", "-", "+", "+"],
-            "gene": ["tp53", "shh", "tp53", "tp53"],
-            "exon": [3, 1, 1, 2],
-        }
-    )
+    dummy_bed = pl.DataFrame({
+        "chrom": ["8", "3", "6", "2"],
+        "chromStart": [5, 13, 8, 2],
+        "chromEnd": [8, 16, 11, 5],
+        "strand": ["+", "-", "+", "+"],
+        "gene": ["tp53", "shh", "tp53", "tp53"],
+        "exon": [3, 1, 1, 2],
+    })
     n_regions = len(dummy_bed)
 
     with pl.StringCache():

@@ -25,15 +25,13 @@ def gen_table(
     sample_ids = np.repeat(
         np.array([f"s{i}" for i in range(n_samples)], dtype=object), ipp
     )
-    return pl.DataFrame(
-        {
-            "sample_id": sample_ids.astype(str),
-            "chrom": np.full(n_total, "chr1", dtype=object).astype(str),
-            "start": starts,
-            "end": ends,
-            "value": rng.standard_normal(n_total).astype(np.float32),
-        }
-    )
+    return pl.DataFrame({
+        "sample_id": sample_ids.astype(str),
+        "chrom": np.full(n_total, "chr1", dtype=object).astype(str),
+        "start": starts,
+        "end": ends,
+        "value": rng.standard_normal(n_total).astype(np.float32),
+    })
 
 
 def gen_queries(

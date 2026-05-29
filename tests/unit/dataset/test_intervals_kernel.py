@@ -1,5 +1,4 @@
 import numpy as np
-
 from genvarloader._dataset._intervals import intervals_to_tracks
 
 

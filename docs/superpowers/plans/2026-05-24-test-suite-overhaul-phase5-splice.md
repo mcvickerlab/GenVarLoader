@@ -133,16 +133,14 @@ def reference(ref_fasta) -> gvl.Reference:
 @pytest.fixture
 def two_transcript_bed() -> pl.DataFrame:
     # Two transcripts, both '+' strand. T1 has 2 exons; T2 has 1 exon.
-    return pl.DataFrame(
-        {
-            "chrom": ["chr1", "chr1", "chr1"],
-            "chromStart": [1000, 2000, 5000],
-            "chromEnd": [1010, 2010, 5010],
-            "strand": [1, 1, 1],
-            "transcript_id": ["T1", "T1", "T2"],
-            "exon_number": [1, 2, 1],
-        }
-    )
+    return pl.DataFrame({
+        "chrom": ["chr1", "chr1", "chr1"],
+        "chromStart": [1000, 2000, 5000],
+        "chromEnd": [1010, 2010, 5010],
+        "strand": [1, 1, 1],
+        "transcript_id": ["T1", "T1", "T2"],
+        "exon_number": [1, 2, 1],
+    })
 
 
 def test_with_settings_disable_splice(reference, two_transcript_bed):
@@ -227,16 +225,14 @@ def reference(ref_fasta) -> gvl.Reference:
 @pytest.fixture
 def two_transcript_bed() -> pl.DataFrame:
     # Two transcripts, both '+' strand. T1 has 2 exons; T2 has 1 exon.
-    return pl.DataFrame(
-        {
-            "chrom": ["chr1", "chr1", "chr1"],
-            "chromStart": [1000, 2000, 5000],
-            "chromEnd": [1010, 2010, 5010],
-            "strand": [1, 1, 1],
-            "transcript_id": ["T1", "T1", "T2"],
-            "exon_number": [1, 2, 1],
-        }
-    )
+    return pl.DataFrame({
+        "chrom": ["chr1", "chr1", "chr1"],
+        "chromStart": [1000, 2000, 5000],
+        "chromEnd": [1010, 2010, 5010],
+        "strand": [1, 1, 1],
+        "transcript_id": ["T1", "T1", "T2"],
+        "exon_number": [1, 2, 1],
+    })
 
 
 def _as_s1(x) -> np.ndarray:

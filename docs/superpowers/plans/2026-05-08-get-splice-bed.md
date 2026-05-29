@@ -52,7 +52,9 @@ Per-row notes (do not put in fixture, just for plan readers):
 Helper to write the fixture:
 
 ```python
-GTF_TEXT = "\t".join  # placeholder marker; the real fixture uses the literal string above
+GTF_TEXT = (
+    "\t".join
+)  # placeholder marker; the real fixture uses the literal string above
 ```
 
 In the test file, write the string verbatim. Use tabs (not spaces) between fields.
@@ -76,14 +78,14 @@ import genvarloader as gvl
 
 
 GTF_TEXT = (
-    "1\ttest\texon\t100\t200\t.\t+\t.\tgene_id \"G1\"; gene_name \"GENEA\"; transcript_id \"T1\"; exon_number \"1\"; transcript_support_level \"1\";\n"
-    "1\ttest\tCDS\t300\t308\t.\t+\t0\tgene_id \"G1\"; gene_name \"GENEA\"; transcript_id \"T1\"; exon_number \"2\"; transcript_support_level \"1\";\n"
-    "1\ttest\tCDS\t100\t108\t.\t+\t0\tgene_id \"G1\"; gene_name \"GENEA\"; transcript_id \"T1\"; exon_number \"1\"; transcript_support_level \"1\";\n"
-    "2\ttest\tCDS\t500\t506\t.\t-\t0\tgene_id \"G2\"; gene_name \"GENEB\"; transcript_id \"T2\"; exon_number \"1\"; transcript_support_level \"1\";\n"
-    "2\ttest\tCDS\t600\t606\t.\t-\t0\tgene_id \"G2\"; gene_name \"GENEB\"; transcript_id \"T2\"; exon_number \"2\"; transcript_support_level \"1\";\n"
-    "3\ttest\tCDS\t700\t705\t.\t+\t0\tgene_id \"G3\"; gene_name \"GENEC\"; transcript_id \"T3\"; exon_number \"1\"; transcript_support_level \"2\";\n"
-    "4\ttest\tCDS\t800\t804\t.\t+\t0\tgene_id \"G4\"; transcript_id \"T4\"; exon_number \"1\"; transcript_support_level \"1\";\n"
-    "1\ttest\tfive_prime_utr\t50\t99\t.\t+\t.\tgene_id \"G1\"; gene_name \"GENEA\"; transcript_id \"T1\";\n"
+    '1\ttest\texon\t100\t200\t.\t+\t.\tgene_id "G1"; gene_name "GENEA"; transcript_id "T1"; exon_number "1"; transcript_support_level "1";\n'
+    '1\ttest\tCDS\t300\t308\t.\t+\t0\tgene_id "G1"; gene_name "GENEA"; transcript_id "T1"; exon_number "2"; transcript_support_level "1";\n'
+    '1\ttest\tCDS\t100\t108\t.\t+\t0\tgene_id "G1"; gene_name "GENEA"; transcript_id "T1"; exon_number "1"; transcript_support_level "1";\n'
+    '2\ttest\tCDS\t500\t506\t.\t-\t0\tgene_id "G2"; gene_name "GENEB"; transcript_id "T2"; exon_number "1"; transcript_support_level "1";\n'
+    '2\ttest\tCDS\t600\t606\t.\t-\t0\tgene_id "G2"; gene_name "GENEB"; transcript_id "T2"; exon_number "2"; transcript_support_level "1";\n'
+    '3\ttest\tCDS\t700\t705\t.\t+\t0\tgene_id "G3"; gene_name "GENEC"; transcript_id "T3"; exon_number "1"; transcript_support_level "2";\n'
+    '4\ttest\tCDS\t800\t804\t.\t+\t0\tgene_id "G4"; transcript_id "T4"; exon_number "1"; transcript_support_level "1";\n'
+    '1\ttest\tfive_prime_utr\t50\t99\t.\t+\t.\tgene_id "G1"; gene_name "GENEA"; transcript_id "T1";\n'
 )
 
 
@@ -127,14 +129,18 @@ def test_chrom_end_unchanged(gtf_path: Path):
 
 def test_dropped_non_cds_rows(gtf_path: Path):
     """exon and five_prime_utr rows are removed."""
-    bed = gvl.get_splice_bed(gtf_path, transcript_support_level=None, require_multiple_of_3=False)
+    bed = gvl.get_splice_bed(
+        gtf_path, transcript_support_level=None, require_multiple_of_3=False
+    )
     # Every surviving row corresponds to a CDS feature; we have 6 CDS rows in fixture.
     assert bed.height == 6
 
 
 def test_sorted_output(gtf_path: Path):
     """Output is sorted by chrom (natural), then chromStart."""
-    bed = gvl.get_splice_bed(gtf_path, transcript_support_level=None, require_multiple_of_3=False)
+    bed = gvl.get_splice_bed(
+        gtf_path, transcript_support_level=None, require_multiple_of_3=False
+    )
     chroms = bed["chrom"].to_list()
     starts = bed["chromStart"].to_list()
     assert chroms == sorted(chroms, key=lambda c: (len(c), c))  # natural order
@@ -166,7 +172,10 @@ def test_tsl_explicit_value(gtf_path: Path):
 def test_contigs_filter(gtf_path: Path):
     """contigs=['1'] restricts to chr 1 rows."""
     bed = gvl.get_splice_bed(
-        gtf_path, contigs=["1"], transcript_support_level=None, require_multiple_of_3=False
+        gtf_path,
+        contigs=["1"],
+        transcript_support_level=None,
+        require_multiple_of_3=False,
     )
     assert bed["chrom"].unique().to_list() == ["1"]
 
@@ -250,9 +259,11 @@ def get_splice_bed(
     if contigs is not None:
         lf = lf.filter(pl.col("seqname").is_in(contigs))
 
-    lf = lf.filter(pl.col("feature") == "CDS").rename(
-        {"seqname": "chrom", "start": "chromStart", "end": "chromEnd"}
-    )
+    lf = lf.filter(pl.col("feature") == "CDS").rename({
+        "seqname": "chrom",
+        "start": "chromStart",
+        "end": "chromEnd",
+    })
 
     lf = lf.with_columns(
         pl.col("chromStart") - 1,
@@ -272,7 +283,9 @@ def get_splice_bed(
         drop_cols.append("transcript_len")
 
     if transcript_support_level is not None:
-        lf = lf.filter(sp.gtf.attr("transcript_support_level") == transcript_support_level)
+        lf = lf.filter(
+            sp.gtf.attr("transcript_support_level") == transcript_support_level
+        )
 
     df = lf.drop(drop_cols).collect()
     return sp.bed.sort(df)
@@ -326,12 +339,7 @@ from ._dataset._write import get_splice_bed, write
 And add `"get_splice_bed",` to the `__all__` list (e.g. immediately after `"write"`):
 
 ```python
-__all__ = [
-    "write",
-    "get_splice_bed",
-    "Dataset",
-    ...
-]
+__all__ = ["write", "get_splice_bed", "Dataset", ...]
 ```
 
 - [ ] **Step 2: Run the test suite — expect all green**

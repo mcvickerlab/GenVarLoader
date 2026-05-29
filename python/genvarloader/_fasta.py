@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Union, cast
+from typing import cast
 
 import numpy as np
 import pysam
@@ -33,9 +34,9 @@ class Fasta(Reader):
     def __init__(
         self,
         name: str,
-        path: Union[str, Path],
-        pad: Optional[str] = None,
-        alphabet: Optional[Union[str, sp.NucleotideAlphabet]] = None,
+        path: str | Path,
+        pad: str | None = None,
+        alphabet: str | sp.NucleotideAlphabet | None = None,
         in_memory: bool = False,
         cache: bool = False,
     ) -> None:
@@ -107,7 +108,7 @@ class Fasta(Reader):
         self.rev_strand_fn = rev_strand_fn
         self.contigs = self._get_contig_lengths()
 
-        self.handle: Optional[pysam.FastaFile] = None
+        self.handle: pysam.FastaFile | None = None
         self.cache_path = self.path.with_suffix(self.path.suffix + ".gvl")
 
         if not in_memory:
@@ -128,15 +129,15 @@ class Fasta(Reader):
             return False
         return True
 
-    def _get_contig_lengths(self) -> Dict[str, int]:
+    def _get_contig_lengths(self) -> dict[str, int]:
         with self._open() as f:
             return {c: f.get_reference_length(c) for c in f.references}
 
     def _get_sequences(
         self, contigs: Iterable[str], from_fasta=False
-    ) -> Dict[str, NDArray[np.bytes_]]:
+    ) -> dict[str, NDArray[np.bytes_]]:
         """Load contigs into memory."""
-        sequences: Dict[str, NDArray[np.bytes_]] = {}
+        sequences: dict[str, NDArray[np.bytes_]] = {}
         if from_fasta or not self.cache_path.exists():
             with self._open() as f:
                 pbar = tqdm(total=len(self.contigs))

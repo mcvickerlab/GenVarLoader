@@ -17,7 +17,8 @@ import seqpro as sp
 
 def _open_haps(path, ref):
     return (
-        gvl.Dataset.open(path, ref, rc_neg=False)
+        gvl.Dataset
+        .open(path, ref, rc_neg=False)
         .with_tracks(False)
         .with_seqs("haplotypes")
     )

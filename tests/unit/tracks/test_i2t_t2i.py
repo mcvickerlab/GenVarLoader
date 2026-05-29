@@ -1,5 +1,6 @@
-import numpy as np
 from dataclasses import dataclass
+
+import numpy as np
 from einops import repeat
 from genvarloader._dataset._intervals import intervals_to_tracks, tracks_to_intervals
 from genvarloader._ragged import RaggedIntervals

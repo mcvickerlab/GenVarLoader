@@ -1,4 +1,3 @@
-from typing import Optional
 
 import numpy as np
 
@@ -24,8 +23,8 @@ def nonoverlapping_intervals(
     low: int,
     high: int,
     min_width: int = 1,
-    max_width: Optional[int] = None,
-    seed: Optional[int] = None,
+    max_width: int | None = None,
+    seed: int | None = None,
 ):
     if min_width < 1:
         raise ValueError("min_width must be greater than or equal to 1")

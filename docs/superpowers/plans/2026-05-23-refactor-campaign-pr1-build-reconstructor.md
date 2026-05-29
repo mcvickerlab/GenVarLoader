@@ -247,22 +247,20 @@ sed -n '240,265p' python/genvarloader/_dataset/_impl.py
 Confirm the match looks like:
 
 ```python
-        match seqs, tracks:
-            case None, None:
-                raise RuntimeError(
-                    "Malformed dataset: neither genotypes nor intervals found."
-                )
-            case Ref() | Haps(), None:
-                recon = seqs
-            case None, Tracks():
-                recon = tracks
-            case Ref(), Tracks():
-                recon = RefTracks(seqs, tracks)
-            case Haps(), Tracks():
-                recon = HapsTracks(seqs, tracks)
-            case seqs, tracks:
-                assert_never(seqs)
-                assert_never(tracks)
+match seqs, tracks:
+    case None, None:
+        raise RuntimeError("Malformed dataset: neither genotypes nor intervals found.")
+    case Ref() | Haps(), None:
+        recon = seqs
+    case None, Tracks():
+        recon = tracks
+    case Ref(), Tracks():
+        recon = RefTracks(seqs, tracks)
+    case Haps(), Tracks():
+        recon = HapsTracks(seqs, tracks)
+    case seqs, tracks:
+        assert_never(seqs)
+        assert_never(tracks)
 ```
 
 (If structure differs, abort and report — the line numbers may have shifted since this plan was drafted.)
@@ -272,11 +270,9 @@ Confirm the match looks like:
 Use the Edit tool to replace the entire match block (currently around lines 246–261) with:
 
 ```python
-        if seqs is None and tracks is None:
-            raise RuntimeError(
-                "Malformed dataset: neither genotypes nor intervals found."
-            )
-        recon = _build_reconstructor(seqs, tracks)
+if seqs is None and tracks is None:
+    raise RuntimeError("Malformed dataset: neither genotypes nor intervals found.")
+recon = _build_reconstructor(seqs, tracks)
 ```
 
 This keeps the user-facing "Malformed dataset" error message (the factory's `ValueError` message is for internal callers; the user-facing one for opening a dataset directory should stay).
@@ -308,7 +304,7 @@ from ._reconstruct import (
 After the match replacement, the `recon` variable is now guaranteed to be initialized (the factory either returns or raises before reaching the next line). The PR0 suppression on line 306 (`_recon=recon,  # pyrefly: ignore[unbound-name]  # exhaustive match above`) is no longer needed. Remove the comment so it reads:
 
 ```python
-            _recon=recon,
+_recon = (recon,)
 ```
 
 - [ ] **Step 5: Run the typechecker**
@@ -377,45 +373,41 @@ The current state is `self._seqs` and `self._tracks`; the current `_recon` is `s
 Replace the entire match block (the `match k, seqs, tracks, recon:` block from approx. lines 658–751) with:
 
 ```python
-        seqs = self._seqs
-        tracks = self._tracks
+seqs = self._seqs
+tracks = self._tracks
 
-        # Validate the requested kind against the available sources.
-        if kind is None:
-            if tracks is None:
-                raise RuntimeError(
-                    "Dataset is set to only return sequences, so setting"
-                    " sequence_type to None would result in a Dataset that"
-                    " cannot return anything."
-                )
-            # Drop the seqs entirely — return tracks-only.
-            new_seqs: Haps | Ref | None = None
-        elif kind == "reference":
-            if not isinstance(seqs, (Haps, Ref)):
-                raise ValueError(
-                    "Dataset has no reference to yield sequences from."
-                )
-            ref = seqs.reference
-            if ref is None:
-                raise ValueError(
-                    "Dataset has no reference genome to reconstruct sequences from."
-                )
-            new_seqs = Ref(reference=ref)
-        else:
-            # "haplotypes" | "annotated" | "variants"
-            if not isinstance(seqs, Haps):
-                raise ValueError(
-                    "Dataset has no genotypes to yield haplotypes/variants from."
-                )
-            kind_type = {
-                "haplotypes": RaggedSeqs,
-                "annotated": RaggedAnnotatedHaps,
-                "variants": RaggedVariants,
-            }[kind]
-            new_seqs = seqs.to_kind(kind_type)
+# Validate the requested kind against the available sources.
+if kind is None:
+    if tracks is None:
+        raise RuntimeError(
+            "Dataset is set to only return sequences, so setting"
+            " sequence_type to None would result in a Dataset that"
+            " cannot return anything."
+        )
+    # Drop the seqs entirely — return tracks-only.
+    new_seqs: Haps | Ref | None = None
+elif kind == "reference":
+    if not isinstance(seqs, (Haps, Ref)):
+        raise ValueError("Dataset has no reference to yield sequences from.")
+    ref = seqs.reference
+    if ref is None:
+        raise ValueError(
+            "Dataset has no reference genome to reconstruct sequences from."
+        )
+    new_seqs = Ref(reference=ref)
+else:
+    # "haplotypes" | "annotated" | "variants"
+    if not isinstance(seqs, Haps):
+        raise ValueError("Dataset has no genotypes to yield haplotypes/variants from.")
+    kind_type = {
+        "haplotypes": RaggedSeqs,
+        "annotated": RaggedAnnotatedHaps,
+        "variants": RaggedVariants,
+    }[kind]
+    new_seqs = seqs.to_kind(kind_type)
 
-        new_recon = _build_reconstructor(new_seqs, tracks)
-        return evolve(self, _seqs=new_seqs, _recon=new_recon)
+new_recon = _build_reconstructor(new_seqs, tracks)
+return evolve(self, _seqs=new_seqs, _recon=new_recon)
 ```
 
 Three things to watch for in this replacement:
@@ -652,7 +644,7 @@ For each match, decide:
 A common remaining site is around line 1452 in `_getitem_spliced`:
 
 ```python
-self._recon, tracks=ds_tracks.with_tracks(r.tracks.active_tracks)
+self._recon, tracks = ds_tracks.with_tracks(r.tracks.active_tracks)
 ```
 
 This may be `evolve(self._recon, tracks=...)` — i.e. mutating the recon's tracks. Replace with:
@@ -947,8 +939,7 @@ def _build_reconstructor(
     seqs: Haps | Ref | None,
     tracks: Tracks | None,
     seqs_kind: Literal["haplotypes", "reference", "annotated", "variants"] | None,
-) -> Reconstructor:
-    ...
+) -> Reconstructor: ...
 ```
 
 **Factory body:**
@@ -1226,11 +1217,9 @@ In `Dataset.open`, after the `seqs` variable is built but before the existing fa
 Then update the factory call to pass it:
 
 ```python
-        if seqs is None and tracks is None:
-            raise RuntimeError(
-                "Malformed dataset: neither genotypes nor intervals found."
-            )
-        recon = _build_reconstructor(seqs, tracks, seqs_kind)
+if seqs is None and tracks is None:
+    raise RuntimeError("Malformed dataset: neither genotypes nor intervals found.")
+recon = _build_reconstructor(seqs, tracks, seqs_kind)
 ```
 
 And update the `RaggedDataset(...)` constructor call further down to set `_seqs_kind=seqs_kind`:
@@ -1285,36 +1274,30 @@ git commit -m "feat(reconstruct): promote view-state to explicit _seqs_kind fiel
 The current `with_seqs` (lines 603–748) has a `match kind, self._seqs, self._tracks, self._recon:` with ~15 cases. Replace the entire match body (everything from `match kind, ...` to the final `assert_never` block) with:
 
 ```python
-        # Validate the requested kind against storage state.
-        if kind is None:
-            tracks_active = (
-                self._tracks is not None and self._tracks.active_tracks is not None
-            )
-            if not tracks_active:
-                raise RuntimeError(
-                    "Dataset is set to only return sequences, so setting"
-                    " sequence_type to None would result in a Dataset that"
-                    " cannot return anything."
-                )
-        elif kind == "reference":
-            if not isinstance(self._seqs, (Haps, Ref)):
-                raise ValueError(
-                    "Dataset has no reference to yield sequences from."
-                )
-            if self._seqs.reference is None:
-                raise ValueError(
-                    "Dataset has no reference genome to reconstruct sequences from."
-                )
-        elif kind in ("haplotypes", "annotated", "variants"):
-            if not isinstance(self._seqs, Haps):
-                raise ValueError(
-                    "Dataset has no genotypes to yield haplotypes/variants from."
-                )
-        else:
-            assert_never(kind)
+# Validate the requested kind against storage state.
+if kind is None:
+    tracks_active = self._tracks is not None and self._tracks.active_tracks is not None
+    if not tracks_active:
+        raise RuntimeError(
+            "Dataset is set to only return sequences, so setting"
+            " sequence_type to None would result in a Dataset that"
+            " cannot return anything."
+        )
+elif kind == "reference":
+    if not isinstance(self._seqs, (Haps, Ref)):
+        raise ValueError("Dataset has no reference to yield sequences from.")
+    if self._seqs.reference is None:
+        raise ValueError(
+            "Dataset has no reference genome to reconstruct sequences from."
+        )
+elif kind in ("haplotypes", "annotated", "variants"):
+    if not isinstance(self._seqs, Haps):
+        raise ValueError("Dataset has no genotypes to yield haplotypes/variants from.")
+else:
+    assert_never(kind)
 
-        new_recon = _build_reconstructor(self._seqs, self._tracks, kind)
-        return evolve(self, _seqs_kind=kind, _recon=new_recon)
+new_recon = _build_reconstructor(self._seqs, self._tracks, kind)
+return evolve(self, _seqs_kind=kind, _recon=new_recon)
 ```
 
 The validation logic mirrors what the old match cases raised; the construction is delegated to the factory.
@@ -1472,13 +1455,11 @@ Delete this block entirely (the factory rebuild at the end handles it).
 Insert:
 
 ```python
-        # If any source state changed, rebuild _recon via the factory.
-        if "_seqs" in to_evolve or "_tracks" in to_evolve:
-            new_seqs = to_evolve.get("_seqs", self._seqs)
-            new_tracks = to_evolve.get("_tracks", self._tracks)
-            to_evolve["_recon"] = _build_reconstructor(
-                new_seqs, new_tracks, self._seqs_kind
-            )
+# If any source state changed, rebuild _recon via the factory.
+if "_seqs" in to_evolve or "_tracks" in to_evolve:
+    new_seqs = to_evolve.get("_seqs", self._seqs)
+    new_tracks = to_evolve.get("_tracks", self._tracks)
+    to_evolve["_recon"] = _build_reconstructor(new_seqs, new_tracks, self._seqs_kind)
 ```
 
 - [ ] **Step 4: Tests**
@@ -1576,11 +1557,15 @@ For each: ask whether it's checking view state. If yes, replace with a check on 
 Common case: `with_insertion_fill` has `if not isinstance(self._recon, HapsTracks):` — this checks "is the active view haps+tracks?" Replace with:
 
 ```python
-        if self._seqs_kind not in ("haplotypes", "annotated", "variants") or self._tracks is None or self._tracks.active_tracks is None:
-            raise ValueError(
-                "with_insertion_fill is only meaningful for datasets currently "
-                "viewing both haplotypes and tracks."
-            )
+if (
+    self._seqs_kind not in ("haplotypes", "annotated", "variants")
+    or self._tracks is None
+    or self._tracks.active_tracks is None
+):
+    raise ValueError(
+        "with_insertion_fill is only meaningful for datasets currently "
+        "viewing both haplotypes and tracks."
+    )
 ```
 
 - [ ] **Step 3: Grep for `evolve(self._recon, ...)`**

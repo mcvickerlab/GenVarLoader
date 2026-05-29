@@ -1,9 +1,8 @@
 """Edge-case dataset shapes: empty selection, single-sample, single-region."""
 
+import genvarloader as gvl
 import numpy as np
 import pytest
-
-import genvarloader as gvl
 
 
 @pytest.fixture

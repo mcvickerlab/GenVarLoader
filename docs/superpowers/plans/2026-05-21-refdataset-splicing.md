@@ -228,7 +228,8 @@ class SpliceMap:
         """
         if isinstance(splice_info, str):
             sp_bed = (
-                full_bed.rename({splice_info: "splice_id"})
+                full_bed
+                .rename({splice_info: "splice_id"})
                 .with_row_index()
                 .group_by("splice_id", maintain_order=True)
                 .agg(pl.all())
@@ -240,7 +241,8 @@ class SpliceMap:
                     "names for splice IDs and element ordering."
                 )
             sp_bed = (
-                full_bed.rename({splice_info[0]: "splice_id"})
+                full_bed
+                .rename({splice_info[0]: "splice_id"})
                 .with_row_index()
                 .group_by("splice_id", maintain_order=True)
                 .agg(pl.all().sort_by(splice_info[1]))
@@ -293,15 +295,11 @@ class SpliceMap:
 
     def to_full(self) -> Self:
         """Reset to the un-subsetted splice map."""
-        return evolve(
-            self, splice_map=self.full_splice_map, row_subset_idxs=None
-        )
+        return evolve(self, splice_map=self.full_splice_map, row_subset_idxs=None)
 
     def parse_rows(
         self, rows: Idx | StrIdx
-    ) -> tuple[
-        NDArray[np.intp], NDArray[np.int64], tuple[int, ...] | None, bool
-    ]:
+    ) -> tuple[NDArray[np.intp], NDArray[np.int64], tuple[int, ...] | None, bool]:
         """Parse a row index into the inputs needed for a per-region fetch.
 
         Returns
@@ -393,7 +391,7 @@ import polars as pl
 from genvarloader._dataset._splice import SpliceMap
 
 bed = pl.DataFrame({
-    "chrom": ["chr1"]*4,
+    "chrom": ["chr1"] * 4,
     "chromStart": [0, 100, 200, 300],
     "chromEnd": [10, 110, 210, 310],
     "transcript_id": ["T1", "T1", "T2", "T2"],
@@ -775,36 +773,38 @@ Add `_check_valid_state` as a method on `RefDataset` (place after `__attrs_post_
 Add the two properties after the existing `regions` property:
 
 ```python
-    @property
-    def is_spliced(self) -> bool:
-        """Whether the dataset is spliced."""
-        return self._splice_map is not None
+@property
+def is_spliced(self) -> bool:
+    """Whether the dataset is spliced."""
+    return self._splice_map is not None
 
-    @property
-    def spliced_regions(self) -> pl.DataFrame:
-        """The spliced BED, subset to the current row subset."""
-        if self._spliced_bed is None or self._splice_map is None:
-            raise ValueError("Dataset does not have splice information.")
-        subset = self._splice_map.row_subset_idxs
-        if subset is None:
-            return self._spliced_bed
-        return self._spliced_bed[subset]
+
+@property
+def spliced_regions(self) -> pl.DataFrame:
+    """The spliced BED, subset to the current row subset."""
+    if self._spliced_bed is None or self._splice_map is None:
+        raise ValueError("Dataset does not have splice information.")
+    subset = self._splice_map.row_subset_idxs
+    if subset is None:
+        return self._spliced_bed
+    return self._spliced_bed[subset]
 ```
 
 Update `shape` and `__len__` to reflect splice rows when spliced:
 
 ```python
-    @property
-    def shape(self) -> tuple[int]:
-        """Shape of the dataset."""
-        if self._splice_map is not None:
-            return (self._splice_map.n_rows,)
-        return (self.regions.height,)
+@property
+def shape(self) -> tuple[int]:
+    """Shape of the dataset."""
+    if self._splice_map is not None:
+        return (self._splice_map.n_rows,)
+    return (self.regions.height,)
 
-    def __len__(self) -> int:
-        if self._splice_map is not None:
-            return self._splice_map.n_rows
-        return self.regions.height
+
+def __len__(self) -> int:
+    if self._splice_map is not None:
+        return self._splice_map.n_rows
+    return self.regions.height
 ```
 
 - [ ] **Step 3: Run the new test plus the broader RefDataset tests**
@@ -863,9 +863,7 @@ def two_transcript_bed() -> pl.DataFrame:
 
 
 def test_spliced_single_col(reference: gvl.Reference, two_transcript_bed: pl.DataFrame):
-    ds = gvl.RefDataset(
-        reference, two_transcript_bed, splice_info="transcript_id"
-    )
+    ds = gvl.RefDataset(reference, two_transcript_bed, splice_info="transcript_id")
     assert ds.is_spliced is True
     assert len(ds) == 2  # two transcripts
 
@@ -1085,37 +1083,35 @@ Add `from typing import Literal` to the existing typing imports at the top if no
 In `python/genvarloader/_dataset/_reference.py`, replace the existing `subset_to` body (around line 306–331) with:
 
 ```python
-    def subset_to(self, regions: StrIdx):
-        """Subset the dataset to a subset of regions (or transcripts, when spliced)."""
-        if self._splice_map is not None:
-            new_map = self._splice_map.subset_to(regions)
-            # Subset full_bed to the flat region rows referenced by the new map.
-            flat = ak.flatten(new_map.splice_map, None).to_numpy()
-            self._splice_map = new_map
-            self._subset_bed = self.full_bed[flat]
-            self._subset_regions = bed_to_regions(
-                self._subset_bed, self.reference.c_map
-            )
-            return self
-
-        if self._region_map is not None:
-            regions = s2i(regions, self._region_map)
-        elif is_str_arr(regions):
-            raise ValueError(
-                "Cannot subset to regions by name because no region name was set."
-            )
-
-        if (
-            isinstance(regions, (int, np.integer, slice))
-            or is_dtype(regions, np.integer)
-            or (isinstance(regions, Sequence) and isinstance(regions[0], int))
-        ):
-            self._subset_bed = self.full_bed[regions]  # type: ignore
-        else:
-            self._subset_bed = self.full_bed.filter(regions)  # type: ignore
-
+def subset_to(self, regions: StrIdx):
+    """Subset the dataset to a subset of regions (or transcripts, when spliced)."""
+    if self._splice_map is not None:
+        new_map = self._splice_map.subset_to(regions)
+        # Subset full_bed to the flat region rows referenced by the new map.
+        flat = ak.flatten(new_map.splice_map, None).to_numpy()
+        self._splice_map = new_map
+        self._subset_bed = self.full_bed[flat]
         self._subset_regions = bed_to_regions(self._subset_bed, self.reference.c_map)
         return self
+
+    if self._region_map is not None:
+        regions = s2i(regions, self._region_map)
+    elif is_str_arr(regions):
+        raise ValueError(
+            "Cannot subset to regions by name because no region name was set."
+        )
+
+    if (
+        isinstance(regions, (int, np.integer, slice))
+        or is_dtype(regions, np.integer)
+        or (isinstance(regions, Sequence) and isinstance(regions[0], int))
+    ):
+        self._subset_bed = self.full_bed[regions]  # type: ignore
+    else:
+        self._subset_bed = self.full_bed.filter(regions)  # type: ignore
+
+    self._subset_regions = bed_to_regions(self._subset_bed, self.reference.c_map)
+    return self
 ```
 
 - [ ] **Step 4: Extend `to_full_dataset` to reset the splice map**
@@ -1179,30 +1175,26 @@ Expected: PASS (`_check_valid_state` already blocks fixed length; `_getitem_spli
 `RefDataset.with_len` currently does `return evolve(self, output_length=output_length)`. After evolve, splice validation must run. Update `with_len` to:
 
 ```python
-    def with_len(
-        self, output_length: Literal["ragged", "variable"] | int
-    ) -> RefDataset:
-        if isinstance(output_length, int):
-            if output_length < 1:
-                raise ValueError(
-                    f"Output length ({output_length}) must be a positive integer."
-                )
-            min_r_len: int = (
-                self._subset_regions[:, 2] - self._subset_regions[:, 1]
-            ).min()
-            max_output_length = min_r_len
-            eff_length = output_length + 2 * self.jitter
+def with_len(self, output_length: Literal["ragged", "variable"] | int) -> RefDataset:
+    if isinstance(output_length, int):
+        if output_length < 1:
+            raise ValueError(
+                f"Output length ({output_length}) must be a positive integer."
+            )
+        min_r_len: int = (self._subset_regions[:, 2] - self._subset_regions[:, 1]).min()
+        max_output_length = min_r_len
+        eff_length = output_length + 2 * self.jitter
 
-            if eff_length > max_output_length:
-                raise ValueError(
-                    f"Jitter-expanded output length (out_len={self.output_length}) + 2 * ({self.jitter=}) = {eff_length} must be less"
-                    f" than or equal to the maximum output length of the dataset ({max_output_length})."
-                    f" The maximum output length is the minimum region length ({min_r_len})."
-                )
+        if eff_length > max_output_length:
+            raise ValueError(
+                f"Jitter-expanded output length (out_len={self.output_length}) + 2 * ({self.jitter=}) = {eff_length} must be less"
+                f" than or equal to the maximum output length of the dataset ({max_output_length})."
+                f" The maximum output length is the minimum region length ({min_r_len})."
+            )
 
-        out = evolve(self, output_length=output_length)
-        out._check_valid_state()
-        return out
+    out = evolve(self, output_length=output_length)
+    out._check_valid_state()
+    return out
 ```
 
 (Body unchanged except for `out._check_valid_state()`.)
@@ -1270,6 +1262,7 @@ Open `docs/source/splicing.ipynb`. Append a new section "Spliced reference-only 
 
 ```python
 import genvarloader as gvl
+
 ref = gvl.Reference.from_path("hg38.fa.bgz")
 bed = gvl.get_splice_bed("annotations.gtf")
 ref_ds = gvl.RefDataset(ref, bed, splice_info="transcript_id")

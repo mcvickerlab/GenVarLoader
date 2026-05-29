@@ -9,7 +9,8 @@ from genvarloader._variants._sitesonly import APPLIED, DELETED, EXISTED
 def test_sites():
     ds = gvl.get_dummy_dataset().with_len(4).subset_to(regions=0).with_tracks(False)
     sites = (
-        pl.concat([ds.regions, ds.regions])
+        pl
+        .concat([ds.regions, ds.regions])
         .with_columns(
             POS=pl.col("chromStart") + pl.arange(1, 3), REF=pl.lit("A"), ALT=pl.lit("T")
         )

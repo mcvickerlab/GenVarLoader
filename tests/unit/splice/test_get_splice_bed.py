@@ -1,10 +1,8 @@
 from pathlib import Path
 
+import genvarloader as gvl
 import polars as pl
 import pytest
-
-import genvarloader as gvl
-
 
 GTF_TEXT = (
     '1\ttest\texon\t100\t200\t.\t+\t.\tgene_id "G1"; gene_name "GENEA"; transcript_id "T1"; exon_number "1"; transcript_support_level "1";\n'
