@@ -264,7 +264,7 @@ def _pack_descriptor(d: dict) -> bytes:
         for fd in field_descs:
             fname = fd["name"]
             out += struct.pack(
-                "<B4s6QB",
+                "<B4s7QB",
                 fd["field_kind"],
                 fd["dtype_str"],
                 fd["outer_offsets_offset"],
@@ -463,7 +463,11 @@ def _read_rag_variants(buf: memoryview, d: dict, copy: bool = True):
             )
             if copy:
                 inner_offsets = inner_offsets.copy()
-            inner_loa = ListOffsetArray(Index64(inner_offsets), NumpyArray(leaf_data))
+            inner_loa = ListOffsetArray(
+                Index64(inner_offsets),
+                NumpyArray(leaf_data, parameters={"__array__": "byte"}),
+                parameters={"__array__": "bytestring"},
+            )
             outer_loa = ListOffsetArray(Index64(outer_offsets), inner_loa)
             arr = ak.Array(RegularArray(outer_loa, regular_size))
         else:
