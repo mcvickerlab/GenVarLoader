@@ -1,6 +1,6 @@
 # Performance & memory regressions: GVL 0.6.1 → 0.24.x
 
-**Status:** observed, reproduced, not yet root-caused upstream.
+**Status:** observed, reproduced under a fully-controlled parity test, not yet root-caused upstream.
 **Discovered:** 2026-05-29, while regenerating the GenVarLoader manuscript throughput
 benchmarks (`gvl-paper`).
 **Affected versions:** regression is present in the current release line (measured on
@@ -8,7 +8,7 @@ benchmarks (`gvl-paper`).
 collected on.
 
 This document exists to (a) record the evidence so the manuscript can pin to 0.6.1
-without silently shipping ~10–30× worse numbers, and (b) open the door for upstream
+without silently shipping ~18–20× worse numbers, and (b) open the door for upstream
 optimization. Some of the slowdown may be the unavoidable cost of correctness fixes
 added since 0.6.1, but the magnitude strongly suggests there is also low-hanging
 optimization work.
@@ -17,25 +17,73 @@ optimization work.
 
 ## TL;DR
 
-Haplotype and track dataloading are **roughly an order of magnitude slower** and use
-**dramatically more RAM** on 0.24.1 than on 0.6.1, for identical datasets and grid cells.
+Track dataloading is **~18–20× slower** on 0.24.1 than 0.6.1, confirmed by a fully
+controlled parity test (same machine, same inputs, same regions/samples, single numba
+thread, tracks-only on both sides). It also uses **dramatically more RAM**.
+
+### Controlled parity test (decisive)
+
+Both datasets built from the *identical* 300-region BED, the same `merged.norm.bcf` and
+the same BigWig table (TCGA_ATAC, 61 samples, seqlen 16384, ploidy 2). Benched single
+numba thread, tracks-only (0.6.1 `return_sequences=False`; 0.24.1 `with_seqs(None)`),
+150 batches × 3 reps. Same byte accounting (`Σ track.numel() × element_size`).
+
+| batch | GVL 0.6.1 | GVL 0.24.1 | slowdown |
+|---|---|---|---|
+| 8  | 3630 MiB/s | 184 MiB/s | **19.7×** |
+| 32 | 8604 MiB/s | 495 MiB/s | **17.4×** |
+
+0.6.1 on this machine reproduces the original manuscript numbers
+(`results/track_results.csv`: 2931 / 5851 MiB/s on the full dataset), so there is no
+machine/era confound.
+
+### Supporting (earlier, less-controlled)
 
 | Modality | Dataset | Cell | 0.6.1 | 0.24.1 | Slowdown |
 |---|---|---|---|---|---|
-| Tracks (matched, rigorous) | TCGA_ATAC, seqlen 16384 | 1 thread, batch 8 | 2931 MiB/s | 177 MiB/s | **16.6×** |
-| Tracks (matched, rigorous) | TCGA_ATAC, seqlen 16384 | 1 thread, batch 32 | 5851 MiB/s | 472 MiB/s | **12.4×** |
-| Haplotypes (smoke grid)¹ | 1KGP, seqlen 16384 | batch 32 | 1696–3729 MiB/s | 163–170 MiB/s | 10–22× |
-| Haplotypes (smoke grid)¹ | 1KGP, seqlen 2048 | batch 32 | 617–654 MiB/s | 29 MiB/s | 21–22× |
+| Tracks (existing 0.24.1 ds, tracks+seqs+variants) | TCGA_ATAC 16384 | 1 thr, batch 32 | 5851 | 472 | 12.4× |
+| Haplotypes (smoke grid)¹ | 1KGP 16384 | batch 32 | 1696–3729 | 163–170 | 10–22× |
 
-¹ The haplotype numbers come from a `--test` grid (only 5 measured batches per cell, cold)
-and are noisier / biased slow, especially at `batch_size=1`. The **conservative floor**
-from the haplotype data is ~5–6× (large seqlen, batch 32). The tracks numbers are the
-rigorous ones: 200 measured batches, 3 replicates, <5% spread.
+¹ Smoke grid (5 cold batches/cell), noisy; superseded by the parity test above for tracks.
 
 Memory: peak RSS for track dataloading scales steeply with seqlen and is far higher than
 0.6.1. On 0.24.1, TCGA_ATAC tracks peak ~123 GB at seqlen 16384 (top of grid) and exceed
 **256 GB** at seqlen 131072 — cells that completed within a ≤256 GB SLURM allocation on
 0.6.1.
+
+---
+
+## What it is NOT (ruled out)
+
+These were checked and are **not** the (primary) cause:
+
+- **Not the benchmark harness.** Pure tracks-only output (`with_seqs(None)`, batch = a
+  single track tensor) is still ~18× slow. The manuscript harness additionally leaves
+  sequence/variant reconstruction on (datasets are written "annotated [variants]", so a
+  "tracks" batch returns `[RaggedVariants, track_tensor]`), but disabling it only recovers
+  **~19%** (461 → 549 MiB/s at 1 thread, batch 32). Real, but minor.
+- **Not the numba threading layer (tbb).** 0.6.1 *required* `tbb`; 0.24.1 made it optional
+  and the bench env didn't install it, so numba fell back to `omp`. But on a 64-core node,
+  omp vs tbb tracks throughput is nearly identical (omp 559→365, tbb 557→446 across
+  1→64 threads) — both ~10× below 0.6.1. tbb is worth restoring for scaling headroom, but
+  it does not explain the regression.
+- **Not machine / dataset / byte-accounting.** Controlled away by the parity build above.
+
+## Secondary finding: broken multi-thread scaling
+
+On 0.24.1, track-dataloading throughput **decreases** with more numba threads instead of
+increasing (TCGA_ATAC 16384, batch 32, on a 64-core node):
+
+| threads | omp | tbb |
+|---|---|---|
+| 1 | 559 | 557 |
+| 8 | 576 | 500 |
+| 32 | 488 | 511 |
+| 64 | 365 | 446 |
+
+Throughput peaks at ~1–8 threads and regresses thereafter under both layers — i.e. the
+per-batch bottleneck is serial, and adding threads only adds contention. This is
+consistent with the ~18× serial regression being the dominant cost.
 
 ---
 
@@ -57,30 +105,9 @@ many batches are measured, so it is directly comparable across runs.
     `NUMBA_NUM_THREADS=1`, 200 batches × 3 reps.
   - Haplotypes: `--test` grid via the Nextflow pipeline.
 
-### Caveats / confounds (for honest upstream triage)
-
-1. **Haplotype data is a smoke grid** (5 batches, cold). Treat the ~5–6× large-batch floor
-   as the trustworthy lower bound; the tracks 12–17× is the rigorous figure.
-2. **Thread control differs slightly.** 0.6.1 set numba threads explicitly; the 0.24.1
-   re-run used `NUMBA_NUM_THREADS=1`. DataLoader worker processes may add parallelism not
-   captured by that env var. This would, if anything, make 0.24.1 look *faster* than a true
-   single-thread comparison — i.e. it biases against finding a regression.
-3. **Hardware/time gap.** 0.6.1 numbers are from 2024; 0.24.1 from 2026. Same cluster, but
-   not bit-for-bit the same node.
-
----
-
-## Secondary finding: per-batch `RaggedVariants` reconstruction
-
-On 0.24.1, opening a dataset written in "annotated [variants]" mode and requesting tracks
-yields a **list per batch**: `[RaggedVariants(shape=(B, ploidy, None)), track_tensor]`.
-The benchmark only consumes the track tensor, yet GVL reconstructs the `RaggedVariants`
-object every batch. The old tracks-only path delivered a single tensor.
-
-This per-batch variant annotation is plausibly a meaningful chunk of the track-dataloading
-slowdown (work performed and immediately discarded). Worth checking whether annotation can
-be made lazy / opt-out when the consumer doesn't read it, or whether dataset write defaults
-changed to always annotate.
+The parity test (controlled build, single thread, tracks-only on both sides) removes the
+earlier confounds — both sides use the same machine, regions, samples, byte accounting,
+and thread count.
 
 ---
 
@@ -103,25 +130,29 @@ cells fit within a ≤256 GB allocation. The OOM-kills observed in the new pipel
 
 ## Suggested upstream investigation
 
-1. **Bisect 0.6.1 → 0.24.1** on the rigorous tracks probe (TCGA_ATAC seqlen-16384, batch
-   8/32, single thread) to localize the commit(s) that introduced the slowdown and the
-   memory growth. The probe is cheap (~1 min/version) and low-variance.
-2. **Profile the track dataloading hot path** on 0.24.1 (e.g. `py-spy`/`memray`) — separate
-   the cost of variant annotation (`RaggedVariants`) from track reconstruction itself.
-3. **Check write-time defaults** — did datasets start being written with variant annotation
-   always-on, forcing per-batch reconstruction even for track-only consumers?
+1. **Profile the serial tracks-only hot path** on 0.24.1 (`py-spy`/`memray`) with
+   `with_seqs(None).with_tracks("read-depth")`, single thread — this is where the ~18×
+   lives. The variant-annotation path (~19%) and the threading layer (tbb) are secondary;
+   start with the core interval/track reconstruction.
+2. **Bisect 0.6.1 → 0.24.1** on the controlled parity probe (build a small TCGA_ATAC tracks
+   dataset, bench tracks-only single thread at batch 8/32). Cheap (~1 min/version),
+   low-variance, and now has a clean 0.6.1 baseline to compare against.
+3. **Fix multi-thread scaling** — throughput currently *decreases* with thread count; find
+   the serial section / lock / oversubscription. Restoring `tbb` as a (default?) dep gives
+   scaling headroom but won't fix the negative scaling on its own.
 4. **Memory:** identify what now scales with seqlen at fixed nucleotides-per-batch; on 0.6.1
    the same npb fit in far less RAM.
 
-## Reproduce the rigorous tracks probe
+## Reproduce the tracks-only probe (0.24.1)
 
 ```python
 import genvarloader as gvl
 from time import perf_counter
-ds = gvl.Dataset.open(DS_PATH, FASTA).with_tracks("read-depth","tracks").with_len(16384)
+# tracks-only: with_seqs(None) -> batch is a single track tensor (no RaggedVariants)
+ds = gvl.Dataset.open(DS_PATH, FASTA).with_seqs(None).with_tracks("read-depth","tracks").with_len(16384)
 for bs in (8, 32):
     dl = ds.to_dataloader(batch_size=bs, shuffle=False)
-    ny=nnuc=0; burn=5; nb=200; t0=perf_counter(); esz=4; done=False
+    ny=nnuc=0; burn=5; nb=150; t0=perf_counter(); esz=4; done=False
     while not done:
         for b in dl:
             trk = b[1] if isinstance(b,(list,tuple)) else b   # track tensor
@@ -131,4 +162,20 @@ for bs in (8, 32):
             if ny>=nb: done=True; break
     print(bs, nnuc/(perf_counter()-t0)/2**20*esz, "MiB/s")
 ```
-Run with `NUMBA_NUM_THREADS=1` for the single-thread numbers above.
+Run with `NUMBA_NUM_THREADS=1` for the single-thread numbers. The 0.6.1 side uses the
+equivalent old API (`gvl.Dataset.open(ds, fasta, return_sequences=False)`; restored in
+`gvl-paper/hap_track_throughput/bin_gvl061/benchmark_tracks.py`). Build both datasets from
+the *same* BED + variants + BigWig table to keep regions/samples identical.
+
+### Check the numba threading layer
+
+```python
+import numpy as np, numba as nb
+@nb.njit(parallel=True)
+def f(x):
+    s=0.0
+    for i in nb.prange(x.size): s+=x[i]
+    return s
+f(np.ones(1000)); print(nb.threading_layer())   # 'tbb' if installed, else 'omp'
+```
+0.6.1 pulled `tbb` transitively; 0.24.1 made it optional, so fresh installs report `omp`.
