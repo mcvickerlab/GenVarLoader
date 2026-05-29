@@ -163,16 +163,48 @@ class _DoubleBufferedIterable:
 
     def _spawn_producer(self) -> None:
         from ._producer import producer_main
+        from ._dataset._reconstruct import Haps
+        from ._dataset._insertion_fill import Repeat5p
 
         ds = self._dataset
-        # Build a serialisable schema the producer subprocess can replay.
+
+        # Reject settings that cannot be serialized into the schema dict.
+        if ds.is_spliced:
+            raise ValueError(
+                "mode='double_buffered' is not supported when splice_info is set; "
+                "use mode='buffered' instead."
+            )
+        tracks = ds._tracks
+        if tracks is not None and tracks.insertion_fill:
+            non_default = {
+                name: fill
+                for name, fill in tracks.insertion_fill.items()
+                if not isinstance(fill, Repeat5p)
+            }
+            if non_default:
+                raise ValueError(
+                    "mode='double_buffered' is not supported when non-default insertion_fill "
+                    f"strategies are set ({list(non_default)}); use mode='buffered' instead."
+                )
+
         schema: dict = {
             "with_seqs": ds.sequence_type,
             "with_tracks": ds.active_tracks if ds.active_tracks else False,
             "deterministic": ds.deterministic,
+            "rc_neg": ds.rc_neg,
+            "jitter": ds.jitter,
         }
-        if ds.sequence_type == "variants" and hasattr(ds, "_seqs") and ds._seqs is not None:
-            schema["var_fields"] = list(ds._seqs.var_fields) if hasattr(ds._seqs, "var_fields") else None
+
+        seqs = ds._seqs
+        if isinstance(seqs, Haps):
+            if seqs.min_af is not None:
+                schema["min_af"] = seqs.min_af
+            if seqs.max_af is not None:
+                schema["max_af"] = seqs.max_af
+            if seqs.filter is not None:
+                schema["var_filter"] = seqs.filter
+            if hasattr(seqs, "var_fields"):
+                schema["var_fields"] = list(seqs.var_fields)
 
         # Pass reference path so the producer can reopen with a reference genome.
         ref = getattr(ds, "reference", None)
@@ -186,7 +218,6 @@ class _DoubleBufferedIterable:
                 ref_data = getattr(ref, "reference", None)
                 schema["reference_in_memory"] = not isinstance(ref_data, np.memmap)
 
-        # Dataset.path is the public frozen-dataclass attribute.
         ds_path = ds.path
         if not ds_path.is_dir():
             raise RuntimeError(

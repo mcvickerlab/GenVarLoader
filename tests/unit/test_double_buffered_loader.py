@@ -94,6 +94,41 @@ def test_producer_exception_reraised(file_backed_ds, monkeypatch):
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("seq_kind", ["reference", "haplotypes"])
+def test_double_buffered_schema_settings_parity(file_backed_ds, seq_kind):
+    """rc_neg and deterministic are replayed correctly in the producer subprocess."""
+    ds = (
+        file_backed_ds
+        .with_seqs(seq_kind)
+        .with_tracks(False)
+        .with_settings(rc_neg=False, deterministic=True)
+    )
+    batch_size = 2
+    common = dict(
+        batch_size=batch_size,
+        shuffle=False,
+        drop_last=True,
+        buffer_bytes=4 * 1024 * 1024,
+    )
+    buf_batches = list(ds.to_dataloader(mode="buffered", **common))
+    db_batches = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+
+    assert len(db_batches) == len(buf_batches)
+    for i, (b, d) in enumerate(zip(buf_batches, db_batches)):
+        if isinstance(b, tuple):
+            for j, (x, y) in enumerate(zip(b, d)):
+                np.testing.assert_array_equal(
+                    np.asarray(x), np.asarray(y),
+                    err_msg=f"batch {i} element {j} mismatch",
+                )
+        else:
+            np.testing.assert_array_equal(
+                np.asarray(b), np.asarray(d),
+                err_msg=f"batch {i} mismatch",
+            )
+
+
+@pytest.mark.slow
 def test_shm_cleanup_after_close(file_backed_ds):
     """No gvl-prefixed entries leak in /dev/shm after the loader is closed."""
     if not os.path.isdir("/dev/shm"):

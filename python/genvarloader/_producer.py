@@ -15,9 +15,19 @@ def _apply_schema(ds, schema: dict):
         ds = ds.with_seqs(schema["with_seqs"])
     if "with_tracks" in schema:
         ds = ds.with_tracks(schema["with_tracks"])
-    settings_kwargs = {}
+    settings_kwargs: dict = {}
     if schema.get("deterministic") is not None:
         settings_kwargs["deterministic"] = schema["deterministic"]
+    if schema.get("rc_neg") is not None:
+        settings_kwargs["rc_neg"] = schema["rc_neg"]
+    if schema.get("jitter") is not None:
+        settings_kwargs["jitter"] = schema["jitter"]
+    if schema.get("min_af") is not None:
+        settings_kwargs["min_af"] = schema["min_af"]
+    if schema.get("max_af") is not None:
+        settings_kwargs["max_af"] = schema["max_af"]
+    if schema.get("var_filter") is not None:
+        settings_kwargs["var_filter"] = schema["var_filter"]
     if schema.get("var_fields") is not None:
         settings_kwargs["var_fields"] = schema["var_fields"]
     if settings_kwargs:
