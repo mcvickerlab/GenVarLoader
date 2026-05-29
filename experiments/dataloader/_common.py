@@ -7,6 +7,7 @@ prefetching-dataloader public API and are exercised by ``bench.py``.
 
 from __future__ import annotations
 
+import csv as _csv
 import gc
 import resource
 import time
@@ -183,6 +184,22 @@ CSV_COLUMNS = [
     "n_epochs", "instances", "bytes", "wall_s", "instances_per_s", "MiB_per_s",
     "peak_rss_MiB", "timed_out", "git_sha", "host", "started_at",
 ]
+
+
+def init_csv(path) -> None:
+    """Write the header row, truncating any existing file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = _csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        writer.writeheader()
+
+
+def append_row(path, row: dict) -> None:
+    """Append one result row. ``extrasaction='raise'`` rejects unknown keys."""
+    with Path(path).open("a", newline="") as f:
+        writer = _csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="raise")
+        writer.writerow(row)
 
 
 def _build_dataset(cell: Cell, dataset_path, reference):

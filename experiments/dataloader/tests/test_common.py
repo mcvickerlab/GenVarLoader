@@ -163,6 +163,36 @@ def test_output_bytes_table_matches_actual_nbytes(tmp_path):
     assert instances == 100 * 5  # 100 regions × 5 samples
 
 
+def test_csv_init_then_append_roundtrips(tmp_path):
+    import csv
+
+    csv_path = tmp_path / "results.csv"
+    C.init_csv(csv_path)
+
+    with csv_path.open() as f:
+        header = next(csv.reader(f))
+    assert header == C.CSV_COLUMNS
+
+    row = {col: 0 for col in C.CSV_COLUMNS}
+    row["mode"] = "buffered"
+    row["with_seqs"] = "variants"
+    C.append_row(csv_path, row)
+    C.append_row(csv_path, row)
+
+    with csv_path.open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2
+    assert rows[0]["mode"] == "buffered"
+    assert rows[0]["with_seqs"] == "variants"
+
+
+def test_append_row_rejects_unknown_columns(tmp_path):
+    csv_path = tmp_path / "results.csv"
+    C.init_csv(csv_path)
+    with pytest.raises((ValueError, KeyError)):
+        C.append_row(csv_path, {"bogus": 1})
+
+
 @pytest.mark.slow
 def test_measure_cell_returns_a_complete_row(tmp_path):
     repo = Path(__file__).resolve().parents[3]
