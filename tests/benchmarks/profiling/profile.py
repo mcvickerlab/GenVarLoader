@@ -55,9 +55,11 @@ def main() -> None:
 
     ds = build(gvl.Dataset.open(DS_PATH, REF_PATH), args.mode)
     n_regions, n_samples = ds.shape[0], ds.shape[1]
+    # Mirrors tests.benchmarks._indices.batch_indices (inlined to keep this a
+    # standalone script that py-spy/memray can run without repo-root on sys.path).
     n = min(BATCH, n_regions * n_samples)
     regions = [i % n_regions for i in range(n)]
-    samples = [(i // n_regions) % n_samples for i in range(n)]
+    samples = [i % n_samples for i in range(n)]
 
     print(f"mode={args.mode} threads={os.environ['NUMBA_NUM_THREADS']} "
           f"batches={args.n_batches} batch={n}")

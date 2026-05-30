@@ -4,20 +4,14 @@ tracks-only path that REGRESSIONS.md fingered."""
 
 from __future__ import annotations
 
+from tests.benchmarks._indices import batch_indices
+
 SEQLEN = 16384
 BATCH = 32
 
 
-def _indices(ds, n=BATCH):
-    n_regions, n_samples = ds.shape[0], ds.shape[1]
-    n = min(n, n_regions * n_samples)
-    regions = [i % n_regions for i in range(n)]
-    samples = [(i // n_regions) % n_samples for i in range(n)]
-    return regions, samples
-
-
 def _bench_indexing(benchmark, ds):
-    r, s = _indices(ds)
+    r, s = batch_indices(ds.shape[0], ds.shape[1], BATCH)
     ds[r, s]  # warmup (JIT link, caches)
     result = benchmark(lambda: ds[r, s])
     assert result is not None

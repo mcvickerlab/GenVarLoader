@@ -33,8 +33,8 @@ def capture_first_call(
         reference to the *same* function. Every pair is patched so the call is
         recorded no matter which namespace invokes it.
     thunk
-        Zero-arg callable that triggers exactly one (or more) calls to the
-        target. Only the first call's arguments are kept.
+        Zero-arg callable that triggers at least one call to the target. Only
+        the first call's arguments are kept.
 
     Returns
     -------

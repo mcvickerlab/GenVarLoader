@@ -16,6 +16,7 @@ import pytest
 import genvarloader as gvl
 from genvarloader._dataset import _haps, _reconstruct, _tracks
 from tests.benchmarks._capture import capture_first_call
+from tests.benchmarks._indices import batch_indices
 
 DATA = Path(__file__).resolve().parent / "data"
 DS_PATH = DATA / "chr22_geuv.gvl"
@@ -35,18 +36,8 @@ def bench_dataset():
 
 
 def _batch_indices(ds, n: int):
-    """A flat list of (region_idx, sample_idx) within the dataset bounds."""
-    n_regions, n_samples = ds.shape[0], ds.shape[1]
-    pairs = []
-    r = s = 0
-    for _ in range(min(n, n_regions * n_samples)):
-        pairs.append((r % n_regions, s % n_samples))
-        r += 1
-        if r % n_regions == 0:
-            s += 1
-    regions = [p[0] for p in pairs]
-    samples = [p[1] for p in pairs]
-    return regions, samples
+    """A flat batch of (region_idx, sample_idx) within the dataset bounds."""
+    return batch_indices(ds.shape[0], ds.shape[1], n)
 
 
 @pytest.fixture(scope="session")
