@@ -179,3 +179,80 @@ def f(x):
 f(np.ones(1000)); print(nb.threading_layer())   # 'tbb' if installed, else 'omp'
 ```
 0.6.1 pulled `tbb` transitively; 0.24.1 made it optional, so fresh installs report `omp`.
+
+---
+
+## Profiling results (local, chr22 GEUVADIS slice)
+
+Profiled on the committed `tests/benchmarks/data/chr22_geuv.gvl` slice (5 samples,
+chr22, GEUVADIS read-depth tracks, real 1kGP indels, 165 regions), `NUMBA_NUM_THREADS=1`,
+seqlen 16384, batch 32 × 200 batches, via `pixi run -e dev profile-{haps,tracks,variants}`
+(py-spy) and `memray-{haps,tracks,variants}`. This localizes *where* time and memory go on
+the current release line; absolute parity numbers vs 0.6.1 still require the cluster-scale
+dataset. Note: on this slice the `tracks` mode is `with_seqs(None)` (reference-coordinate
+tracks via `intervals_to_tracks`, no indel re-alignment); haplotype-coordinate track
+re-alignment (`shift_and_realign_tracks_sparse`) only runs on the combined haplotype+tracks
+path — see the end-to-end benchmarks.
+
+Because this slice is tiny, total py-spy wall time is dominated by one-time module import +
+numba JIT compile (`<frozen importlib>` / `llvmlite` frames, ~50% of all samples). The
+numbers below are therefore reported **restricted to the steady-state `getitem` hot path**
+(stacks under `_dataset/_query.py:getitem`), with self-time percentages relative to that
+hot-path subset. Hot-path sample counts: haps 760/1482, tracks 237/959, variants 798/1520.
+memray peak heap is whole-process (it includes the JIT'd code), so all three modes plateau
+at the same ~3.8 GB; the discriminating memray signal is cumulative allocation churn and the
+top *gvl-attributable* allocators, reported below.
+
+### Haplotypes (heavily-used path)
+- Top self-time frames (within `getitem`, ~7.6 s hot): `awkward.contents.numpyarray._carry`
+  (19.1%), `awkward._kernels.__call__` (15.8%), `awkward._nplikes.array_module.concat`
+  (8.9%), then gvl's numba dispatch `_reconstruct.py:189/201 __call__` (2.5% + 2.4%) and
+  `_haps.py:764 _reconstruct_haplotypes` (2.0%). Dominant inclusive frames:
+  `_query.py:153 _getitem_unspliced` (4.7%) → `reverse_complement_ragged` (`_query.py:337-339`,
+  ~4.7%) and `awkward ak_to_packed.to_packed` (1.7%).
+- Peak heap (memray): 3.821 GB; total allocated 18.96 GB over 1.43 M allocations. Top
+  gvl-path allocators: `awkward array_module.empty` (5.375 GB cumulative), `awkward concat`
+  (2.150 GB), `awkward numpyarray._carry` (1.935 GB). (The `<frozen importlib>` 3.25 GB /
+  `get_data` 2.62 GB entries are one-time numba/JIT import allocations, constant across modes.)
+- Maps to hypothesis: **#1 serial bottleneck** (the per-batch cost is awkward/ragged
+  assembly + reverse-complement, all serial Python/awkward) and **#4 memory** (the awkward
+  `empty`/`concat`/`_carry` churn is the bulk of the per-batch allocation).
+
+### Tracks (REGRESSIONS.md headline)
+- Top self-time frames (within `getitem`, ~2.4 s hot): `awkward numpyarray._carry` (19.4%),
+  `awkward._kernels.__call__` (8.0%), then gvl's `_tracks.py:608 _call_float32` — the
+  `intervals_to_tracks` numba call (6.8%) — and `awkward concat` (3.8%). Dominant inclusive
+  frames: `_query.py:153 _getitem_unspliced` (4.9%) → `reverse_complement_ragged`
+  (`_query.py:339`, 4.9%) and awkward `ak_where.where` (1.5%).
+- Peak heap (memray): 3.805 GB; total allocated 11.63 GB over 1.38 M allocations (lowest
+  churn of the three modes). Top gvl-path allocators: `awkward array_module.empty` (1.720 GB),
+  `awkward concat` (859.8 MB), `awkward numpyarray._carry` (859.8 MB).
+- Maps to hypothesis: **#1 serial bottleneck** — even with `with_seqs(None)`, the steady-state
+  cost is awkward ragged carry/concat plus the serial `intervals_to_tracks` numba kernel and a
+  reverse-complement pass; nothing here parallelizes across the batch. Secondary **#4 memory**
+  via the same awkward `empty`/`concat`/`_carry` churn (lower magnitude than haps/variants).
+
+### Variants
+- Top self-time frames (within `getitem`, ~8.0 s hot): `awkward numpyarray._carry` (16.4%),
+  `awkward concat` (8.8%), `awkward._kernels.__call__` (7.0%), then gvl's numba dispatch
+  `_reconstruct.py:189/201 __call__` (3.6% + 2.3%) and `_haps.py:398 _haplotype_ilens`
+  (0.8%). Dominant inclusive frames: `_query.py:153 _getitem_unspliced` (4.1%) →
+  `reverse_complement_ragged` (3.0%), awkward `ak_where.where` (1.4%), `to_packed` (1.4%).
+- Peak heap (memray): 3.826 GB; total allocated 16.01 GB over 1.44 M allocations. Top
+  gvl-path allocators: `awkward array_module.empty` (3.461 GB), `awkward numpyarray._carry`
+  (1.721 GB), `awkward concat` (1.720 GB).
+
+### Takeaway
+Across all three modes the steady-state per-batch cost is dominated by **awkward-array ragged
+assembly** — `numpyarray._carry`, `_kernels.__call__`, and `concat` together account for
+~25–45% of hot-path self-time everywhere — driven by `_query.py:_getitem_unspliced` and its
+`reverse_complement_ragged` step, not by gvl's numba kernels. The haplotype and track hot
+paths therefore **share the same bottleneck**: the awkward/ragged packing+carry+concat
+pipeline, with gvl's own numba work (`intervals_to_tracks` for tracks, `_reconstruct_haplotypes`
+for haps) a distinct but smaller second tier. The single most promising optimization target is
+the ragged-assembly / reverse-complement path in `_query.py` (reduce per-batch awkward
+`empty`/`concat`/`_carry` churn — also the top memory allocator in every mode), which would
+help all three output modes at once. Caveat: this is the **0.24.x side only** — no 0.6.1
+profile was run locally, so these results localize *where* current cost lives but do not by
+themselves attribute the ~18–20× tracks regression to a specific frame; that still requires the
+controlled 0.6.1↔0.24.x bisect on the cluster-scale dataset.
