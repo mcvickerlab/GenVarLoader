@@ -114,6 +114,7 @@ features = ["pyo3/extension-module"]
 platform = ['manylinux', 'musllinux', 'windows', 'macos']
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 filterwarnings = [
     "ignore::DeprecationWarning:ray.*",
     "ignore::DeprecationWarning:pkg_resources.*",
