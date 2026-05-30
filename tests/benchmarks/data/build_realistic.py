@@ -68,8 +68,13 @@ def choose_samples() -> list[str]:
     return chosen
 
 
-def slice_pgen(samples: list[str]) -> Path:
-    """plink2 slice: chr22, chosen samples, -> tests/benchmarks/data/chr22_5s.pgen."""
+def slice_pgen(samples: list[str], bed_path: Path) -> Path:
+    """plink2 slice: chr22, chosen samples, variants within benchmark windows.
+
+    Restricting to variants that overlap the benchmark regions keeps the
+    committed genotypes/variants.arrow small (only ~tens of thousands of
+    variants instead of the full ~1M-variant chr22 table).
+    """
     keep = DATA / "_keep.txt"
     keep.write_text("#IID\n" + "\n".join(samples) + "\n")
     out_prefix = DATA / "chr22_5s"
@@ -81,6 +86,9 @@ def slice_pgen(samples: list[str]) -> Path:
             "--psam", str(PLINK_PREFIX) + ".psam",
             "--chr", "chr22",
             "--keep", str(keep),
+            # The widened chr22_egenes.bed is standard 0-based half-open BED;
+            # plink2 reads its first 3 columns to restrict to overlapping vars.
+            "--extract", "bed0", str(bed_path),
             "--make-pgen",
             "--out", str(out_prefix),
         ]
@@ -195,8 +203,10 @@ def main() -> None:
         )
     DATA.mkdir(parents=True, exist_ok=True)
     samples = choose_samples()
-    pgen = slice_pgen(samples)
+    # Build the widened regions BED first: slice_pgen now restricts the PGEN
+    # to variants overlapping these benchmark windows.
     bed_path = copy_regions()
+    pgen = slice_pgen(samples, bed_path)
     build_masked_reference(bed_path)
     build_dataset(samples, pgen, bed_path)
     print("Done.")
