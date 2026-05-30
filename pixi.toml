@@ -33,6 +33,7 @@ typer = "*"
 pytest-cases = "*"
 pytest-cov = "*"
 pytest-benchmark = "*"
+pytest-codspeed = "*"
 pytest = "*"
 py-spy = "*"
 icecream = "*"
@@ -130,6 +131,14 @@ test-cov = { cmd = "pytest tests --cov --cov-report=term-missing --cov-report=ht
     "gen-1kg",
 ] }
 typecheck = { cmd = "pyrefly check" }
+bench = { cmd = "pytest tests/benchmarks --codspeed -p no:cov" }
+bench-local = { cmd = "pytest tests/benchmarks --benchmark-only -p no:cov" }
+profile-haps = { cmd = "py-spy record -o tests/benchmarks/profiling/haps.speedscope.json -f speedscope -- python tests/benchmarks/profiling/profile.py --mode haplotypes" }
+profile-tracks = { cmd = "py-spy record -o tests/benchmarks/profiling/tracks.speedscope.json -f speedscope -- python tests/benchmarks/profiling/profile.py --mode tracks" }
+profile-variants = { cmd = "py-spy record -o tests/benchmarks/profiling/variants.speedscope.json -f speedscope -- python tests/benchmarks/profiling/profile.py --mode variants" }
+memray-haps = { cmd = "memray run -fo tests/benchmarks/profiling/haps.memray.bin python tests/benchmarks/profiling/profile.py --mode haplotypes" }
+memray-tracks = { cmd = "memray run -fo tests/benchmarks/profiling/tracks.memray.bin python tests/benchmarks/profiling/profile.py --mode tracks" }
+memray-variants = { cmd = "memray run -fo tests/benchmarks/profiling/variants.memray.bin python tests/benchmarks/profiling/profile.py --mode variants" }
 
 [feature.docs.tasks]
 install-e = "uv pip install -e /cellar/users/dlaub/projects/ML4GLand/SeqPro -e /cellar/users/dlaub/projects/genoray -e ."
