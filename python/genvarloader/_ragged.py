@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from phantom import Phantom
 from seqpro.rag import Ragged, is_rag_dtype
 from seqpro.rag import RDTYPE_co as RDTYPE
+from seqpro.rag import reverse_complement as _sp_reverse_complement
 
 from ._torch import TORCH_AVAILABLE
 from ._types import AnnotatedHaps
@@ -305,3 +306,35 @@ def reverse_complement(arr: T) -> T:
     arr = ak.to_packed(arr)
     arr = ak_str.reverse(ak.transform(_ak_comp_dna_helper, arr))
     return og_type(arr)
+
+
+def reverse_complement_masked(
+    rag: Ragged[np.bytes_], mask: NDArray[np.bool_]
+) -> Ragged[np.bytes_]:
+    """Masked reverse-complement of an S1 ragged batch, in place.
+
+    Flat-buffer replacement for the awkward idiom
+    ``Ragged(ak.to_packed(ak.where(mask, reverse_complement(rag), rag)))``: seqpro's
+    kernel touches only the ``mask``-selected rows, runs a single in-place pass per row,
+    and reuses ``rag``'s offsets. Reuses :data:`_COMP` (the same A<->T, C<->G table the
+    awkward path uses) so output is byte-identical.
+
+    Mutates ``rag`` in place (``copy=False``); only call on a freshly reconstructed batch
+    the caller owns.
+
+    ``mask`` is one entry per outer query (e.g. per region); awkward's ``ak.where``
+    used to broadcast it across any inner fixed axes (e.g. ploidy) left-aligned. seqpro's
+    flat kernel wants one entry per flattened ragged row, so replicate the mask across the
+    inner axes in C order to match.
+    """
+    mask = np.ascontiguousarray(mask, dtype=np.bool_).reshape(-1)
+    n_rows = int(np.prod(rag.shape[: rag.rag_dim], dtype=np.int64))
+    if mask.size != n_rows:
+        inner_factor, rem = divmod(n_rows, mask.size)
+        if rem != 0:
+            raise ValueError(
+                f"mask has {mask.size} entries but ragged array has {n_rows} rows, "
+                "which is not an integer multiple."
+            )
+        mask = np.repeat(mask, inner_factor)
+    return _sp_reverse_complement(rag, _COMP, mask=mask, copy=False)

@@ -17,7 +17,7 @@ from seqpro.rag import Ragged, lengths_to_offsets
 from typing_extensions import Self
 
 from .._fasta import Fasta
-from .._ragged import RaggedSeqs, reverse_complement, to_padded
+from .._ragged import RaggedSeqs, reverse_complement_masked, to_padded
 from .._torch import TORCH_AVAILABLE, get_dataloader, no_torch_error
 from .._types import Idx, StrIdx
 from .._utils import is_dtype
@@ -457,15 +457,7 @@ class RefDataset(Generic[T]):
             to_rc_unperm = regions[:, 3] == -1
             if to_rc_unperm.any():
                 to_rc_perm = to_rc_unperm[plan.permutation]
-                per_elem = Ragged(
-                    ak.to_packed(
-                        ak.where(
-                            to_rc_perm,
-                            reverse_complement(per_elem.to_ak()),
-                            per_elem.to_ak(),
-                        )
-                    )
-                )
+                per_elem = reverse_complement_masked(per_elem, to_rc_perm)
 
         # Rewrap with group_offsets at (n_rows, None) — skip the (n_rows, 1, None)
         # + squeeze(1) trick since RefDataset has no sample axis.
@@ -543,7 +535,7 @@ class RefDataset(Generic[T]):
 
         to_rc = regions[:, 3] == -1
         if to_rc.any():
-            ref = ak.to_packed(ak.where(to_rc, reverse_complement(ref), ref))
+            ref = reverse_complement_masked(ref, to_rc)
 
         if out_reshape is not None:
             ref = ref.reshape(out_reshape)

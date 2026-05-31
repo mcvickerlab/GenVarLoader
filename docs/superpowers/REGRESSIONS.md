@@ -310,3 +310,45 @@ parallelize at typical batch sizes.
 **Caveats (unchanged):** profile is **0.24.x only** — this is *a* speedup, not yet shown to be
 *the* fix for the ~18–20× tracks regression vs 0.6.1 (confirm whether 0.6.1 RC'd differently
 before claiming so). Padding (`to_padded`) is the obvious next flat-buffer target after RC.
+
+### Shipped + integrated (2026-05-31)
+
+The flat-buffer kernel was released as **seqpro 0.12.1** —
+`seqpro.rag.reverse_complement(rag, comp_lut, *, mask=None, copy=True)` — and **parallelized**
+across rows (gvl runs very large and/or buffered-loader batches, where thread dispatch is
+amortized; the prototype's "don't parallelize" note applied only to the batch=32 microbench).
+
+Integrated into gvl on this branch via a thin wrapper `reverse_complement_masked(rag, mask)`
+in `_ragged.py`:
+- Calls seqpro with `copy=False` (mutates in place) — safe because every call site operates on
+  a freshly reconstructed, caller-owned batch.
+- Reuses the existing `_COMP` LUT (`bytes.maketrans(b"ACGT", b"TGCA")`), so output is
+  **byte-identical** to the old awkward `reverse_complement`.
+- Replicates the per-region mask across inner fixed axes (`np.repeat(mask, n_rows // mask.size)`):
+  seqpro's flat kernel wants one mask entry per *flattened* ragged row, whereas awkward's
+  `ak.where` used to left-align-broadcast the per-region mask across the ploidy axis.
+
+All **3** masked `ak.where(to_rc, rc(x), x)` sites were replaced: `_query.py` haps,
+`_reference.py` unspliced and spliced reference. The old awkward `reverse_complement`
+(`_ragged.py:303`) is retained **only** for `RaggedVariants.rc_` (variant allele strings, not
+a flat S1 batch). Dependency floor raised: seqpro 0.12.x requires **genoray ≥ 2.7.1**
+(genoray 2.4.0 capped seqpro `<0.12`); both bumped in `pixi.toml` + `pyproject.toml`.
+
+End-to-end bench (1024 rows × 8 kb, 268/512 masked) vs the old awkward idiom:
+
+| impl | ms/call | speedup | peak MB/call |
+|---|---|---|---|
+| awkward (old) | 13.26 | 1.0× | 92.3 |
+| seqpro 0.12.1 flat (in-place, parallel) | 0.38 | **34.7×** | ~0 |
+
+The parallelism pays off far more at buffered-loader scale (34.7×) than the single-thread
+prototype's 5.9–9.5× on 32 small rows. Verification: 200 randomized trials byte-identical to
+the awkward path; 319 dataset tests pass (the 3 `test_ds_haps_1kg` errors are the missing
+`gen-1kg` fixture, not regressions).
+
+**Still open — 0.6.1 throughput parity.** This closes the RC allocator hotspot on the 0.24.x
+side but does **not** yet establish parity with 0.6.1. Remaining gap-closers tracked here as we
+work them: (a) the controlled 0.6.1↔0.24.x bisect on the cluster-scale dataset to attribute the
+~18–20× tracks regression to a frame; (b) flat-buffer `to_padded` (next target); (c) re-run the
+parity probe after the dataset rebase (post-#197, `extend_to_length=False`). Update this section
+as each lands until the 0.6.1 gap is closed.

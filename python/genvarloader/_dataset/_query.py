@@ -21,7 +21,7 @@ from typing_extensions import assert_never
 from .._ragged import (
     RaggedAnnotatedHaps,
     RaggedIntervals,
-    reverse_complement,
+    reverse_complement_masked,
     to_padded,
 )
 from .._types import AnnotatedHaps, StrIdx
@@ -334,7 +334,8 @@ def reverse_complement_ragged(
     """Reverse-complement (or reverse) ragged outputs according to a per-row mask."""
     if isinstance(rag, Ragged):
         if is_rag_dtype(rag, np.bytes_):
-            rag = Ragged(ak.to_packed(ak.where(to_rc, reverse_complement(rag), rag)))
+            # Flat-buffer in-place RC of the freshly reconstructed batch.
+            rag = reverse_complement_masked(rag, to_rc)
         else:
             rag = Ragged(ak.to_packed(ak.where(to_rc, rag[..., ::-1], rag)))
     elif isinstance(rag, RaggedAnnotatedHaps):
