@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 
 import numpy as np
+import pysam
+from vcfixture import Number, Type, VcfBuilder
 
 # (contig, length) — sized to span every variant locus with headroom.
 CONTIGS: list[tuple[str, int]] = [("chr19", 1_300_000), ("chr20", 1_300_000)]
@@ -80,3 +82,69 @@ def write_synthetic_reference(path: str | Path, seed: int = 0) -> Path:
         plain.unlink(missing_ok=True)
     subprocess.run(["samtools", "faidx", str(path)], check=True)
     return path
+
+
+def build_source_vcf(reference_path: str | Path) -> "object":
+    """Re-encode the canonical source VCF against the synthetic reference.
+
+    Returns a built ``vcfixture`` document (has ``.render()`` / ``.write()``).
+    Contigs (names + lengths) are read from ``reference_path``'s FASTA index so
+    the VCF header always matches the reference. REF alleles are taken verbatim
+    from the records below and match the engineered reference bases written by
+    ``write_synthetic_reference``.
+    """
+    with pysam.FastaFile(str(reference_path)) as fa:
+        contigs = list(zip(fa.references, fa.lengths))
+    b = VcfBuilder(samples=["NA00001", "NA00002", "NA00003"], contigs=contigs)
+    # INFO defs (must match the original header).
+    b.info("NS", Number.ONE, Type.INTEGER)
+    b.info("AN", Number.ONE, Type.INTEGER)
+    b.info("AC", Number.DOT, Type.INTEGER)
+    b.info("DP", Number.ONE, Type.INTEGER)
+    b.info("AF", Number.DOT, Type.FLOAT)
+    b.info("AA", Number.ONE, Type.STRING)
+    b.info("DB", Number.FLAG, Type.FLAG)
+    b.info("H2", Number.FLAG, Type.FLAG)
+    # FORMAT defs.
+    b.fmt("GT")
+    b.fmt("VAF", Number.A, Type.FLOAT)
+    b.fmt("GQ", Number.ONE, Type.INTEGER)
+    b.fmt("DP", Number.ONE, Type.INTEGER)
+    b.fmt("HQ", Number.fixed(2), Type.INTEGER)
+    # FILTER defs.
+    b.filter("q10", "Quality below 10")
+    b.filter("s50", "Less than 50% of samples have data")
+
+    # chr19 block — FORMAT GT:VAF:HQ. Non-GT FORMAT values are not assertion-
+    # critical (no test reads them); GT is reproduced exactly.
+    b.record("chr19", 111, ref="N", alt=["C"], gt=["0|0", "0|0", "0/1"])
+    b.record("chr19", 1010696, ref="GAGA", alt=["G"], gt=["1|0", "0|0", "0/0"])
+    b.record("chr19", 1010696, ref="GAGACGG", alt=["G"], gt=["0|0", "0|0", "0/1"])
+    b.record("chr19", 1010696, ref="GAGACGGGGCC", alt=["G"], gt=["0|1", "1|1", "0/0"])
+    b.record("chr19", 1110696, ref="A", alt=["TTT"], gt=["0|1", "1|1", "0/0"])
+    b.record("chr19", 1110696, ref="A", alt=["G"], gt=["0|0", "0|0", "0/1"])
+    b.record("chr19", 1210696, ref="C", alt=["G"], gt=["1|.", "0/1", "1|1"])
+    b.record("chr19", 1210696, ref="C", alt=["G"], gt=[".|1", "0|0", "0/0"])
+    b.record("chr19", 1210697, ref="T", alt=["G"], gt=["0/0", "1|0", "0/1"])
+    b.record("chr19", 1210697, ref="T", alt=["A"], gt=["0/0", "1|0", "0/1"])
+
+    # chr20 block — carries INFO (test_sitesonly) and IDs/FILTERs.
+    b.record(
+        "chr20", 14370, ref="N", alt=["A"], ids=["rs6054257"], qual=29.0, filter=(),
+        gt=["0|0", "1|0", "1/1"], info={"NS": 3, "DP": 14, "AF": [0.5], "DB": True, "H2": True},
+    )
+    b.record(
+        "chr20", 17330, ref="N", alt=["A"], qual=3.0, filter=["q10"],
+        gt=["0|0", "0|1", "0/0"], info={"NS": 3, "DP": 11, "AF": [0.017]},
+    )
+    b.record(
+        "chr20", 1110696, ref="G", alt=["A", "T"], ids=["rs6040355"], qual=67.0, filter=(),
+        gt=["1|2", "2|1", "2/2"],
+        info={"NS": 2, "DP": 10, "AF": [0.333, 0.667], "AA": "T", "DB": True},
+    )
+    b.record(
+        "chr20", 1234567, ref="A", alt=["GA", "AC"], ids=["microsat1"], qual=50.0, filter=(),
+        gt=["0/1", "0/2", "./."],
+        info={"NS": 3, "DP": 9, "AA": "G", "AN": 6, "AC": [3, 1]},
+    )
+    return b.build()
