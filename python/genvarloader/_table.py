@@ -24,8 +24,30 @@ if TYPE_CHECKING:
 CANONICAL_COLS = ("sample_id", "chrom", "start", "end", "value")
 
 
+#: ``gvl.Table`` is temporarily disabled: its backend, ``polars-bio``,
+#: intermittently segfaults the interpreter during overlap queries (a
+#: non-deterministic native-runtime issue observed on CPython 3.12 and 3.13).
+#: ``polars-bio`` has been removed from genvarloader's direct dependencies (it
+#: remains an indirect dependency of ``genoray``). Re-enable by reverting this
+#: commit once the upstream issue is resolved.
+#: Upstream: https://github.com/biodatageeks/polars-bio/issues/395
+_TABLE_DISABLED_MSG = (
+    "gvl.Table is temporarily disabled because its polars-bio backend "
+    "intermittently segfaults during overlap queries (upstream "
+    "https://github.com/biodatageeks/polars-bio/issues/395). Use gvl.BigWigs "
+    "for track input in the meantime."
+)
+
+
 class Table:
-    """Long-form interval track keyed by ``(sample_id, chrom, start, end, value)``."""
+    """Long-form interval track keyed by ``(sample_id, chrom, start, end, value)``.
+
+    .. warning::
+        Temporarily disabled. Constructing a :class:`Table` raises
+        :class:`NotImplementedError` while the ``polars-bio`` segfault
+        (`#395 <https://github.com/biodatageeks/polars-bio/issues/395>`_) is
+        unresolved. Use :class:`BigWigs` for track input in the meantime.
+    """
 
     name: str
     samples: list[str]
@@ -37,6 +59,7 @@ class Table:
         data: pl.DataFrame | Mapping[str, pl.DataFrame],
         column_map: Mapping[str, str] | None = None,
     ) -> None:
+        raise NotImplementedError(_TABLE_DISABLED_MSG)
         self.name = name
         df = self._normalize_input(data, column_map)
         df = df.cast(
