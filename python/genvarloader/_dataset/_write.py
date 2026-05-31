@@ -394,7 +394,9 @@ def _write_from_vcf(
 
     (out_dir / "variants.arrow").hardlink_to(vcf._index_path())
 
-    return _write_phased_chunked(out_dir, bed, _vcf_region_chunks(bed, vcf, max_mem))
+    return _write_phased_chunked(
+        out_dir, bed, _vcf_region_chunks(bed, vcf, max_mem, extend_to_length)
+    )
 
 
 def _window_to_sparse(
@@ -428,57 +430,116 @@ def _window_to_sparse(
     return dense2sparse(genos, var_idxs)
 
 
+def _region_end(rag: Ragged, v_ends: NDArray, fallback_end: int) -> int:
+    """Per-region chromEnd = end position of the furthest retained variant.
+
+    ``rag`` is a sparse ``(samples, ploidy, ~variants)`` Ragged of global
+    variant indices. Returns ``v_ends[max idx]`` across all haplotypes, or
+    ``fallback_end`` when no variant is retained (mirrors _write_from_svar).
+    """
+    if rag.data.size == 0:
+        return int(fallback_end)
+    return int(v_ends[int(rag.data.max())])
+
+
+def _region_ends_from_list(
+    ls_sparse: list[Ragged], v_ends: NDArray, fallback_end: int
+) -> int:
+    """Same as `_region_end` but over a list of per-chunk Ragged arrays."""
+    max_idx = -1
+    for rag in ls_sparse:
+        if rag.data.size:
+            max_idx = max(max_idx, int(rag.data.max()))
+    if max_idx < 0:
+        return int(fallback_end)
+    return int(v_ends[max_idx])
+
+
 def _vcf_region_chunks(
-    bed: pl.DataFrame, vcf: VCF, max_mem: int
+    bed: pl.DataFrame, vcf: VCF, max_mem: int, extend_to_length: bool
 ) -> Iterator[tuple[list[Ragged], Any, str | None]]:
-    unextended_var_idxs: dict[str, list[NDArray[V_IDX_TYPE]]] = {}
+    assert vcf._index is not None
+    pos = vcf._index["POS"].to_numpy()
+    ilen_all = vcf._index["ILEN"].list.first().to_numpy()
+    # end position of each variant = POS + deletion length (matches _write_from_svar)
+    v_ends = pos - np.clip(ilen_all, a_min=None, a_max=0)
+
     for (contig,), df in bed.partition_by(
         "chrom", as_dict=True, maintain_order=True
     ).items():
         contig = cast(str, contig)
         starts = df["chromStart"].to_numpy()
         ends = df["chromEnd"].to_numpy()
-        v_idx, offsets = vcf._var_idxs(contig, starts, ends)
-        unextended_var_idxs[contig] = np.array_split(
-            v_idx.astype(V_IDX_TYPE), offsets[1:-1]
+        # unextended in-range variant indices, split per region
+        v_idx, v_offsets = vcf._var_idxs(contig, starts, ends)
+        unextended_idxs = np.array_split(
+            v_idx.astype(V_IDX_TYPE), v_offsets[1:-1]
         )
 
-    for (contig,), df in bed.partition_by(
-        "chrom", as_dict=True, maintain_order=True
-    ).items():
-        contig = cast(str, contig)
-        starts = df["chromStart"].to_numpy().copy()
-        ends = df["chromEnd"].to_numpy().copy()
         contig_desc = f"Processing genotypes for {df.height} regions on contig {contig}"
         first_in_contig = True
-        for range_, unextended_idxs in zip(
-            vcf._chunk_ranges_with_length(contig, starts, ends, max_mem, VCF.Genos8),
-            unextended_var_idxs[contig],
-        ):
-            ls_sparse: list[Ragged] = []
-            offset = 0
-            region_end: Any = None
-            for _, is_last, (chunk_genos, chunk_end, n_ext) in mark_ends(range_):
-                n_vars = chunk_genos.shape[-1]
-                chunk_idxs = unextended_idxs[offset : offset + n_vars]
-                offset += n_vars
 
-                if (
-                    n_ext > 0
-                ):  # also means is_last is True based on implementation of _chunk_ranges_with_length
-                    # indices in chunk_idxs are inclusive
-                    ext_s_idx = chunk_idxs[-1] + 1
-                    ext_idxs = np.arange(ext_s_idx, ext_s_idx + n_ext, dtype=np.int32)
-                    chunk_idxs = np.concatenate([chunk_idxs, ext_idxs])
+        if extend_to_length:
+            region_iter = vcf._chunk_ranges_with_length(
+                contig, starts, ends, max_mem, VCF.Genos8
+            )
+        else:
+            # one generator per region; VCF.chunk takes a single range
+            region_iter = (
+                vcf.chunk(contig, s, e, max_mem, VCF.Genos8)
+                for s, e in zip(starts, ends)
+            )
 
-                sp_genos = dense2sparse(chunk_genos, chunk_idxs)
-                ls_sparse.append(sp_genos)
-
-                if is_last:
-                    region_end = chunk_end
-
-            yield ls_sparse, region_end, contig_desc if first_in_contig else None
+        for ri, range_ in enumerate(region_iter):
+            q_start = int(starts[ri])
+            q_end = int(ends[ri])
+            reg_unext = unextended_idxs[ri]
+            desc = contig_desc if first_in_contig else None
             first_in_contig = False
+
+            if extend_to_length:
+                # assemble the full window across memory-chunks
+                chunk_genos_list: list[NDArray] = []
+                n_ext_total = 0
+                for _, is_last, (chunk_genos, _chunk_end, n_ext) in mark_ends(range_):
+                    chunk_genos_list.append(chunk_genos)
+                    if is_last:
+                        n_ext_total = n_ext
+                genos = np.concatenate(chunk_genos_list, axis=-1)
+
+                if reg_unext.size == 0 and n_ext_total == 0:
+                    # empty region: no variants for any sample
+                    yield [dense2sparse(genos, reg_unext)], q_end, desc
+                    continue
+
+                if n_ext_total > 0:
+                    ext_start = int(reg_unext[-1]) + 1
+                    ext_idxs = np.arange(
+                        ext_start, ext_start + n_ext_total, dtype=V_IDX_TYPE
+                    )
+                    var_idxs = np.concatenate([reg_unext, ext_idxs])
+                else:
+                    var_idxs = reg_unext
+
+                v_starts = (pos[var_idxs] - 1).astype(np.int32)
+                ilens = ilen_all[var_idxs].astype(np.int32)
+                rag = _window_to_sparse(
+                    genos, var_idxs, q_start, q_end, v_starts, ilens, True
+                )
+                region_end = _region_end(rag, v_ends, q_end)
+                yield [rag], region_end, desc
+            else:
+                # no extension: convert each chunk independently with plain
+                # dense2sparse; var_idxs are exactly the unextended in-range ones
+                ls_sparse: list[Ragged] = []
+                offset = 0
+                for genos in range_:
+                    n_vars = genos.shape[-1]
+                    chunk_idxs = reg_unext[offset : offset + n_vars]
+                    offset += n_vars
+                    ls_sparse.append(dense2sparse(genos, chunk_idxs))
+                region_end = _region_ends_from_list(ls_sparse, v_ends, q_end)
+                yield ls_sparse, region_end, desc
 
 
 def _write_from_pgen(
