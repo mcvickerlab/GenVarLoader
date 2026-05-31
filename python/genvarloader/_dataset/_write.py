@@ -472,9 +472,7 @@ def _vcf_region_chunks(
         ends = df["chromEnd"].to_numpy()
         # unextended in-range variant indices, split per region
         v_idx, v_offsets = vcf._var_idxs(contig, starts, ends)
-        unextended_idxs = np.array_split(
-            v_idx.astype(V_IDX_TYPE), v_offsets[1:-1]
-        )
+        unextended_idxs = np.array_split(v_idx.astype(V_IDX_TYPE), v_offsets[1:-1])
 
         contig_desc = f"Processing genotypes for {df.height} regions on contig {contig}"
         first_in_contig = True
@@ -543,7 +541,9 @@ def _vcf_region_chunks(
                     f"for region [{q_start}, {q_end})"
                 )
                 if not ls_sparse:
-                    empty_genos = np.empty((vcf.n_samples, vcf.ploidy, 0), dtype=np.int8)
+                    empty_genos = np.empty(
+                        (vcf.n_samples, vcf.ploidy, 0), dtype=np.int8
+                    )
                     ls_sparse = [dense2sparse(empty_genos, reg_unext)]
                 region_end = _region_ends_from_list(ls_sparse, v_ends, q_end)
                 yield ls_sparse, region_end, desc
@@ -590,9 +590,7 @@ def _pgen_region_chunks(
             region_iter = pgen._chunk_ranges_with_length(contig, starts, ends, max_mem)
         else:
             v_idx, v_offsets = pgen.var_idxs(contig, starts, ends)
-            unextended_idxs = np.array_split(
-                v_idx.astype(V_IDX_TYPE), v_offsets[1:-1]
-            )
+            unextended_idxs = np.array_split(v_idx.astype(V_IDX_TYPE), v_offsets[1:-1])
             region_iter = (
                 pgen.chunk(contig, int(s), int(e), max_mem)
                 for s, e in zip(starts, ends)
