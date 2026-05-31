@@ -16,6 +16,7 @@ import polars as pl
 import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseVar
 from genoray._svar import dense2sparse
+from genoray._svar import _dense2sparse_with_length  # type: ignore[missing-module-attribute]
 from genoray._types import V_IDX_TYPE
 from genoray._utils import ContigNormalizer, format_memory, parse_memory
 from loguru import logger
@@ -394,6 +395,37 @@ def _write_from_vcf(
     (out_dir / "variants.arrow").hardlink_to(vcf._index_path())
 
     return _write_phased_chunked(out_dir, bed, _vcf_region_chunks(bed, vcf, max_mem))
+
+
+def _window_to_sparse(
+    genos: NDArray[np.integer],
+    var_idxs: NDArray[V_IDX_TYPE],
+    q_start: int,
+    q_end: int,
+    v_starts: NDArray[np.int32],
+    ilens: NDArray[np.int32],
+    extend_to_length: bool,
+) -> Ragged:
+    """Convert a full dense region window into per-haplotype sparse genotypes.
+
+    ``genos`` has shape ``(samples, ploidy, variants)`` and must cover the
+    entire region window (all genoray memory-chunks concatenated along the
+    variant axis). ``var_idxs`` are the window's global variant indices.
+    ``v_starts`` (``POS - 1``) and ``ilens`` (``ILEN``) are window-aligned,
+    positionally aligned with ``var_idxs``.
+
+    When ``extend_to_length`` is ``True`` this defers to genoray's
+    ``_dense2sparse_with_length``, which walks each haplotype's length and keeps
+    only the variants it needs to reach ``q_end`` (per-haplotype-minimal,
+    identical to ``SparseVar.read_ranges_with_length``). When ``False`` it falls
+    back to plain ``dense2sparse`` (every haplotype keeps exactly the variants it
+    carries within the window, with no length extension).
+    """
+    if extend_to_length:
+        return _dense2sparse_with_length(
+            genos, var_idxs, q_start, q_end, v_starts, ilens
+        )
+    return dense2sparse(genos, var_idxs)
 
 
 def _vcf_region_chunks(
