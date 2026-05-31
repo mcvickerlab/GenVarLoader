@@ -538,6 +538,13 @@ def _vcf_region_chunks(
                     chunk_idxs = reg_unext[offset : offset + n_vars]
                     offset += n_vars
                     ls_sparse.append(dense2sparse(genos, chunk_idxs))
+                assert offset == reg_unext.size, (
+                    f"VCF.chunk variant count ({offset}) != _var_idxs count ({reg_unext.size}) "
+                    f"for region [{q_start}, {q_end})"
+                )
+                if not ls_sparse:
+                    empty_genos = np.empty((vcf.n_samples, vcf.ploidy, 0), dtype=np.int8)
+                    ls_sparse = [dense2sparse(empty_genos, reg_unext)]
                 region_end = _region_ends_from_list(ls_sparse, v_ends, q_end)
                 yield ls_sparse, region_end, desc
 
