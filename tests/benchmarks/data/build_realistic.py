@@ -47,9 +47,7 @@ def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
 
 def choose_samples() -> list[str]:
     """Deterministically pick N samples present in both genotypes and bigwigs."""
-    psam = pl.read_csv(
-        str(PLINK_PREFIX) + ".psam", separator="\t", infer_schema=False
-    )
+    psam = pl.read_csv(str(PLINK_PREFIX) + ".psam", separator="\t", infer_schema=False)
     # plink psam first column is "#IID" or "IID".
     iid_col = "#IID" if "#IID" in psam.columns else "IID"
     geno_samples = set(psam[iid_col].to_list())
@@ -81,16 +79,24 @@ def slice_pgen(samples: list[str], bed_path: Path) -> Path:
     run(
         [
             "plink2",
-            "--pgen", str(PLINK_PREFIX) + ".pgen",
-            "--pvar", str(PLINK_PREFIX) + ".pvar.zst",
-            "--psam", str(PLINK_PREFIX) + ".psam",
-            "--chr", "chr22",
-            "--keep", str(keep),
+            "--pgen",
+            str(PLINK_PREFIX) + ".pgen",
+            "--pvar",
+            str(PLINK_PREFIX) + ".pvar.zst",
+            "--psam",
+            str(PLINK_PREFIX) + ".psam",
+            "--chr",
+            "chr22",
+            "--keep",
+            str(keep),
             # The widened chr22_egenes.bed is standard 0-based half-open BED;
             # plink2 reads its first 3 columns to restrict to overlapping vars.
-            "--extract", "bed0", str(bed_path),
+            "--extract",
+            "bed0",
+            str(bed_path),
             "--make-pgen",
-            "--out", str(out_prefix),
+            "--out",
+            str(out_prefix),
         ]
     )
     keep.unlink()
@@ -111,7 +117,7 @@ def copy_regions() -> Path:
     # Expand zero-width TSS points into centered WINDOW-bp regions, clipped to
     # the chromosome. Wider-than-zero rows are left untouched.
     half = WINDOW // 2
-    center = ((pl.col("start") + pl.col("end")) // 2)
+    center = (pl.col("start") + pl.col("end")) // 2
     bed = bed.with_columns(
         start=(center - half).clip(0, CHR22_LEN),
         end=(center + half).clip(0, CHR22_LEN),
@@ -177,7 +183,7 @@ def build_dataset(samples: list[str], pgen: Path, bed_path: Path) -> Path:
         if not bw.exists():
             raise SystemExit(f"Missing chr22 bigwig for {sample}: {bw}")
         paths[sample] = str(bw)
-    assert set(paths) == set(samples), (set(samples) - set(paths))
+    assert set(paths) == set(samples), set(samples) - set(paths)
 
     tracks = gvl.BigWigs("read-depth", paths)
 

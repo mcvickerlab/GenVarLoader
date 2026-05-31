@@ -8,7 +8,9 @@ the same batch shape.
 from __future__ import annotations
 
 
-def batch_indices(n_regions: int, n_samples: int, n: int) -> tuple[list[int], list[int]]:
+def batch_indices(
+    n_regions: int, n_samples: int, n: int
+) -> tuple[list[int], list[int]]:
     """A flat batch of ``n`` (region_idx, sample_idx) pairs within bounds.
 
     Regions cycle ``0..n_regions-1`` and samples rotate ``0..n_samples-1`` in

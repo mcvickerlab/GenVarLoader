@@ -41,7 +41,9 @@ def build(ds, mode: str):
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--mode", choices=["haplotypes", "tracks", "variants"], required=True)
+    p.add_argument(
+        "--mode", choices=["haplotypes", "tracks", "variants"], required=True
+    )
     p.add_argument("--n-batches", type=int, default=N_BATCHES)
     args = p.parse_args()
 
@@ -61,8 +63,10 @@ def main() -> None:
     regions = [i % n_regions for i in range(n)]
     samples = [i % n_samples for i in range(n)]
 
-    print(f"mode={args.mode} threads={os.environ['NUMBA_NUM_THREADS']} "
-          f"batches={args.n_batches} batch={n}")
+    print(
+        f"mode={args.mode} threads={os.environ['NUMBA_NUM_THREADS']} "
+        f"batches={args.n_batches} batch={n}"
+    )
     for i in range(args.n_batches + BURN_IN):
         _ = ds[regions, samples]
     print("done")

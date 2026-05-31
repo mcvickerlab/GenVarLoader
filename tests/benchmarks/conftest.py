@@ -78,7 +78,9 @@ def captured_intervals_to_tracks(bench_dataset):
 def captured_realign_tracks(bench_dataset):
     # shift_and_realign_tracks_sparse only fires on the haplotype+tracks path
     # (_reconstruct.py); the tracks-only path (_tracks.py) never realigns.
-    ds = bench_dataset.with_seqs("haplotypes").with_tracks("read-depth").with_len(SEQLEN)
+    ds = (
+        bench_dataset.with_seqs("haplotypes").with_tracks("read-depth").with_len(SEQLEN)
+    )
     r, s = _batch_indices(ds, BATCH)
     return capture_first_call(
         targets=[(_reconstruct, "shift_and_realign_tracks_sparse")],
