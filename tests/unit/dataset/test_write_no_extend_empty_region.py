@@ -3,7 +3,6 @@ region contains no variants (the no-extend VCF path previously yielded an empty
 chunk list that broke downstream ak.concatenate)."""
 
 import polars as pl
-import pytest
 from genoray import VCF
 
 import genvarloader as gvl
