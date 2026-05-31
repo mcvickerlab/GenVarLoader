@@ -34,8 +34,9 @@ git push -u fork feat/bench-codspeed-profiling     # after fixing the fork URL
 # or, if you have write access:  git push -u origin feat/bench-codspeed-profiling
 ```
 On the new machine: `git clone <remote> && git checkout feat/bench-codspeed-profiling`.
-The clone contains code + the committed (broken) `.gvl` (enough to RUN benchmarks). The
-build-source for REGENERATING the dataset is an R2 artifact (see "Data").
+The clone is **code + small text only** — no `.gvl` dataset, no reference (both were stripped
+from history; they're regenerable). You MUST regenerate the dataset from the R2 build-source
+(see "Data") before benchmarks will run; until then the dataset-dependent benches just skip.
 
 ## What is DONE (suite — works, reviewed task-by-task)
 
@@ -170,16 +171,17 @@ The 5 samples (deterministic, in `samples.txt`): HG00096, HG00097, HG00099, HG00
 ## Resume checklist (new machine)
 
 1. `git checkout feat/bench-codspeed-profiling`; `pixi install -e dev`.
-2. Sanity: `pixi run -e dev pytest tests/benchmarks -p no:cov -q` → 11 passed (uses the
-   committed BROKEN-but-functional dataset; benchmarks still run).
-3. Decide fix option (1/2/3 above) with the user.
-4. Edit `tests/benchmarks/data/build_realistic.py`:
+2. Sanity: `pixi run -e dev pytest tests/benchmarks -p no:cov -q` → the 2 capture unit tests
+   pass; the 9 dataset-dependent benches SKIP (no dataset committed — regenerate in steps 3–5).
+3. Get the R2 build-source (see "Data"): `rclone copy r2-scratch:smb-data-prod-scratch/GenVarLoader/gvl-bench-source.tar /tmp/ && tar -C /tmp -xf /tmp/gvl-bench-source.tar`.
+4. Decide fix option (1/2/3 above) with the user, then edit `tests/benchmarks/data/build_realistic.py`:
    - Currently it does `plink2 ... --extract bed0 <widened windows>` in `slice_pgen()`.
    - Option 1: change the extract BED to windows ± ~50 kb (build a flanked range file).
    - Option 2: drop `--extract` AND pass `extend_to_length=False` to `gvl.write` in `build_dataset()`.
    - Point the source-path constants (`PLINK_PREFIX`, `RNA_DIR`, `REF_FASTA`) at the extracted
-     `/tmp/source/` (from the R2 tar — see "Data").
-5. Rebuild: `pixi run -e dev python tests/benchmarks/data/build_realistic.py`.
+     `/tmp/source/`. (`build_realistic.py`, `samples.txt`, `chr22_egenes.bed` are kept in-branch.)
+5. Rebuild: `pixi run -e dev python tests/benchmarks/data/build_realistic.py` (writes the
+   `.gvl` + masked ref back into `tests/benchmarks/data/`, which is gitignored).
 6. **VERIFY THE FIX:** regions must be ~17 kb, not 200 kb:
    ```bash
    pixi run -e dev python -c "import numpy as np; r=np.load('tests/benchmarks/data/chr22_geuv.gvl/regions.npy'); s=r[:,2]-r[:,1]; print('mean',s.mean(),'max',s.max())"
@@ -188,30 +190,35 @@ The 5 samples (deterministic, in `samples.txt`): HG00096, HG00097, HG00099, HG00
 7. `pixi run -e dev bench-local` → 9 pass. Re-run profiling if you want fresh numbers
    (`pixi run -e dev profile-tracks` etc.), and update the REGRESSIONS.md profiling section
    if the dataset changed materially.
-8. Commit the corrected dataset (the `data/` dir is gitignored — use `git add -f`). Then see
-   "git history note" below about the now-stale data in earlier commits.
+8. Decide whether to commit the regenerated dataset. The branch is intentionally **text-only**;
+   the corrected `.gvl` is large binary. Prefer uploading it to R2 alongside the source bundle
+   rather than committing it (the `data/` dir is gitignored; only `build_realistic.py`,
+   `samples.txt`, `chr22_egenes.bed` are tracked). If you do commit data, use `git add -f`.
 
 ## git history note (read before merging)
 
-History was rewritten once (`git filter-branch`) to scrub an 89 MB `variants.arrow` blob that
-an earlier build committed — `.git` went 171 MB → 4.6 MB. Side effect: in the intermediate
-commits `6524a03`..`9ce69a9` the rewrite swapped in the final `intervals.npy` but not its
-matching `offsets.npy`, so those **intermediate** commits have mismatched intervals/offsets
-(cosmetic — only HEAD's tree is used). The user **does not use squash merges**, so when you
-land this, land the real commits. After the dataset fix you'll be replacing the data blobs
-again; consider whether a final `filter-branch`/`filter-repo` pass is worth it to keep the
-branch's blob history tidy, or just commit the corrected data forward and move on.
+The branch history was rewritten (`git filter-branch`) **three times** to keep it all-text:
+(1) scrubbed an 89 MB `variants.arrow` blob from an earlier build; (2) scrubbed a 25 MB
+build-source tar (now the R2 artifact); (3) scrubbed the entire committed `.gvl` dataset +
+masked reference (regenerable from R2). Net: `.git` went from ~177 MB to <1 MB and the branch
+contains only code + small text. All large data lives on R2
+(`r2-scratch:smb-data-prod-scratch/GenVarLoader/`). The user **does not use squash merges**, so
+land the real commits. Because the binaries were scrubbed (never reach `main`), no further
+history cleanup is needed before merging.
 
 ## Commit log (branch)
+Shas churn on every history rewrite, so see `git log --oneline main..HEAD` on the new machine.
+The logical sequence (oldest→newest):
 ```
-0d7097d test(bench): consolidate batch-index logic into shared helper
-6e18060 test(bench): restrict benchmark variants to regions (msg now stale post-rewrite)
-9ce69a9 docs(REGRESSIONS): add local py-spy/memray profiling results for hot paths
-37f1f15 test(bench): add py-spy/memray profiling driver for hot paths
-e7f8247 test(bench): add end-to-end reconstructor benchmarks
-bb7a07f test(bench): add micro-benchmarks for hot numba reconstruction kernels
-ea3af63 test(bench): add session fixtures for dataset + captured numba args
-6524a03 test(bench): add committed chr22 1kGP+GEUVADIS realistic slice + build script
-3e33a74 test(bench): add capture-and-replay helper for micro-benchmark inputs
-d84f43f build(bench): add pytest-codspeed dep and bench/profile pixi tasks
+build(bench): add pytest-codspeed dep and bench/profile pixi tasks
+test(bench): add capture-and-replay helper for micro-benchmark inputs
+test(bench): add committed chr22 1kGP+GEUVADIS realistic slice + build script
+test(bench): add session fixtures for dataset + captured numba args
+test(bench): add micro-benchmarks for hot numba reconstruction kernels
+test(bench): add end-to-end reconstructor benchmarks
+test(bench): add py-spy/memray profiling driver for hot paths
+docs(REGRESSIONS): add local py-spy/memray profiling results for hot paths
+test(bench): restrict benchmark variants to regions   (NOTE: its diff is now empty post-strip)
+test(bench): consolidate batch-index logic into shared helper
+style(bench): apply ruff-format ; docs(handoff): … ; (data-bearing commits scrubbed to text-only)
 ```
