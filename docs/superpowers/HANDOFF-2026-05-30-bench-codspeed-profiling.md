@@ -1,7 +1,10 @@
 # Handoff: codspeed bench suite + profiling (resume on another machine)
 
-**Written:** 2026-05-30, because carter HPC is going down for several days.
-**Branch:** `feat/bench-codspeed-profiling` (HEAD `0d7097d`, 10 commits ahead of `main`).
+**Written:** 2026-05-30. The **entire cluster (carter AND cellar) is undergoing a
+multi-day migration** — no cluster filesystem will be reachable. Dev resumes on a local
+machine or cloud VM. **git is the only transport**, so both the code and the build-source
+data travel in this branch (see "Data").
+**Branch:** `feat/bench-codspeed-profiling` (10 commits + handoff/format/bundle commits ahead of `main`).
 **Spec:** `docs/superpowers/specs/2026-05-29-codspeed-perf-tracking-design.md`
 **Plan:** `docs/superpowers/plans/2026-05-29-codspeed-perf-tracking.md`
 
@@ -18,14 +21,20 @@ Everything except the dataset correctness is done and reviewed.
 
 ## How to get the branch on the new machine
 
-The branch is local-only unless pushed. Before carter dies, push it:
+The branch MUST be pushed before the cluster goes down (no filesystem access afterward).
+Caveats hit while pushing from here:
+- `fork` (`git@github.com:d-laub/genome-loader.git`) is a **dead URL** — repo renamed. Set the
+  correct fork: `git remote set-url fork git@github.com:d-laub/GenVarLoader.git` (verify the name).
+- `origin` = `mcvickerlab/GenVarLoader` (push needs write access).
+- The pre-push hook runs `ruff-format`; formatting is already committed, so it should pass now.
+
+Push (run yourself so interactive auth works — type with a leading `!` in Claude, or in a shell):
 ```bash
-# from this repo (carter), while it's still up:
-git push fork feat/bench-codspeed-profiling   # fork = git@github.com:d-laub/genome-loader.git
-# (origin = mcvickerlab/GenVarLoader; push there instead if you prefer)
+git push -u fork feat/bench-codspeed-profiling     # after fixing the fork URL
+# or, if you have write access:  git push -u origin feat/bench-codspeed-profiling
 ```
-Then on the new machine: `git fetch && git checkout feat/bench-codspeed-profiling`.
-If you cannot push, the whole repo also lives on `/cellar` (separate filesystem, see Data).
+On the new machine: `git clone <remote> && git checkout feat/bench-codspeed-profiling`.
+The clone contains EVERYTHING: code, the committed (broken) `.gvl`, and the build-source tar.
 
 ## What is DONE (suite — works, reviewed task-by-task)
 
@@ -124,28 +133,32 @@ by a matching flank when you regenerate.
 ## Data — what's needed and where it is
 
 Running the existing benchmarks/profiling needs ONLY the committed `.gvl` + masked reference
-(self-contained, already in git) — no `/carter`. **Regenerating** the dataset (the fix) needs
-the build inputs. A portable copy is staged on `/cellar` (separate filesystem from carter,
-291 TB, survives the carter outage):
+(self-contained, already in git) — no cluster filesystem. **Regenerating** the dataset (the
+fix) needs the build inputs, which are **committed into this branch** as a tarball (the whole
+cluster is down, so this is the only reliable transport):
 
 ```
-/cellar/users/dlaub/projects/gvl-bench-handoff/
-├── gvl-bench-source.tar          # ~25 MB — the whole bundle, scp anywhere
-└── source/
-    ├── chr22_5s.pgen / .pvar.zst / .psam   # chr22, 5 samples, ALL chr22 variants (unrestricted → any fix option works)
-    ├── bw_chr22/                            # the 5 GEUVADIS read-depth bigwigs (13 MB)
-    ├── sample_id_to_bigwig.csv              # sample → bigwig basename map (subset to our 5)
-    ├── chr22_egenes.raw.bed                 # original recount3 egenes BED (zero-width TSS points)
-    ├── chr22_egenes.bed                     # the WIDENED 165 windows actually used
-    ├── chr22.masked.fa.gz(.fai/.gzi)        # masked reference
-    └── samples.txt
+tests/benchmarks/data/_handoff_source.tar   # ~25 MB, committed (TEMPORARY — remove after the fix)
 ```
+Extract on the new machine: `tar -C /tmp -xf tests/benchmarks/data/_handoff_source.tar`
+→ `/tmp/source/` containing:
+```
+chr22_5s.pgen / .pvar.zst / .psam   # chr22, 5 samples, ALL chr22 variants (unrestricted → any fix option works)
+bw_chr22/                            # the 5 GEUVADIS read-depth bigwigs (13 MB)
+sample_id_to_bigwig.csv              # sample → bigwig basename map (our 5)
+chr22_egenes.raw.bed                 # original recount3 egenes BED (zero-width TSS points)
+chr22_egenes.bed                     # the WIDENED 165 windows actually used
+chr22.masked.fa.gz(.fai/.gzi)        # masked reference
+samples.txt
+```
+Then point `build_realistic.py` at `/tmp/source/` (replace the `/carter` `PLINK_PREFIX`,
+`RNA_DIR`, `REF_FASTA` constants). The unrestricted PGEN supports any of the three fix options.
 
-If `/cellar` is NOT mountable from the new machine: `scp` the tar off now, or re-fetch from the
-originals (carter, when back): genotypes `/carter/users/dlaub/data/1kGP/plink2/hg38.norm.{pgen,psam,pvar.zst}`;
-RNA-seq `/carter/users/dlaub/data/1kGP-rna-seq/{sample_id_to_bigwig.csv,bw_chr22/,chr22_egenes.bed}`
-(bigwigs are recount3 study ERP001942, publicly re-downloadable). Reference for masking:
-`tests/data/fasta/hg38.fa.bgz` (run `pixi run -e dev gen` to fetch).
+Provenance, if you ever need to rebuild the bundle from scratch (cluster back, or fresh fetch):
+genotypes `/carter/users/dlaub/data/1kGP/plink2/hg38.norm.{pgen,psam,pvar.zst}`; RNA-seq
+`/carter/users/dlaub/data/1kGP-rna-seq/{sample_id_to_bigwig.csv,bw_chr22/,chr22_egenes.bed}`
+(bigwigs = recount3 study ERP001942, publicly re-downloadable); masking reference
+`tests/data/fasta/hg38.fa.bgz` (run `pixi run -e dev gen`).
 
 The 5 samples (deterministic, in `samples.txt`): HG00096, HG00097, HG00099, HG00100, HG00101.
 
@@ -159,7 +172,8 @@ The 5 samples (deterministic, in `samples.txt`): HG00096, HG00097, HG00099, HG00
    - Currently it does `plink2 ... --extract bed0 <widened windows>` in `slice_pgen()`.
    - Option 1: change the extract BED to windows ± ~50 kb (build a flanked range file).
    - Option 2: drop `--extract` AND pass `extend_to_length=False` to `gvl.write` in `build_dataset()`.
-   - Point the source paths at the `/cellar` bundle (or re-fetched `/carter`).
+   - Point the source-path constants (`PLINK_PREFIX`, `RNA_DIR`, `REF_FASTA`) at the extracted
+     `/tmp/source/` (from `_handoff_source.tar`).
 5. Rebuild: `pixi run -e dev python tests/benchmarks/data/build_realistic.py`.
 6. **VERIFY THE FIX:** regions must be ~17 kb, not 200 kb:
    ```bash
