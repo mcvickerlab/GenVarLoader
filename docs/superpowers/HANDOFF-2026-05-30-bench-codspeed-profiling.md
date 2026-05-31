@@ -34,7 +34,8 @@ git push -u fork feat/bench-codspeed-profiling     # after fixing the fork URL
 # or, if you have write access:  git push -u origin feat/bench-codspeed-profiling
 ```
 On the new machine: `git clone <remote> && git checkout feat/bench-codspeed-profiling`.
-The clone contains EVERYTHING: code, the committed (broken) `.gvl`, and the build-source tar.
+The clone contains code + the committed (broken) `.gvl` (enough to RUN benchmarks). The
+build-source for REGENERATING the dataset is an R2 artifact (see "Data").
 
 ## What is DONE (suite — works, reviewed task-by-task)
 
@@ -133,14 +134,18 @@ by a matching flank when you regenerate.
 ## Data — what's needed and where it is
 
 Running the existing benchmarks/profiling needs ONLY the committed `.gvl` + masked reference
-(self-contained, already in git) — no cluster filesystem. **Regenerating** the dataset (the
-fix) needs the build inputs, which are **committed into this branch** as a tarball (the whole
-cluster is down, so this is the only reliable transport):
+(self-contained, already in git) — no cluster filesystem and no R2. **Regenerating** the
+dataset (the fix) needs the build inputs, which live as a **Cloudflare R2 artifact** (kept
+out of git so the branch is all small text files):
 
 ```
-tests/benchmarks/data/_handoff_source.tar   # ~25 MB, committed (TEMPORARY — remove after the fix)
+r2-scratch:smb-data-prod-scratch/GenVarLoader/gvl-bench-source.tar   # 25,210,880 bytes, md5 a58231b93d925a788c4770090830938f
 ```
-Extract on the new machine: `tar -C /tmp -xf tests/benchmarks/data/_handoff_source.tar`
+Download + extract on the new machine (needs `rclone` configured with the `r2-scratch` remote):
+```bash
+rclone copy r2-scratch:smb-data-prod-scratch/GenVarLoader/gvl-bench-source.tar /tmp/
+tar -C /tmp -xf /tmp/gvl-bench-source.tar
+```
 → `/tmp/source/` containing:
 ```
 chr22_5s.pgen / .pvar.zst / .psam   # chr22, 5 samples, ALL chr22 variants (unrestricted → any fix option works)
@@ -173,7 +178,7 @@ The 5 samples (deterministic, in `samples.txt`): HG00096, HG00097, HG00099, HG00
    - Option 1: change the extract BED to windows ± ~50 kb (build a flanked range file).
    - Option 2: drop `--extract` AND pass `extend_to_length=False` to `gvl.write` in `build_dataset()`.
    - Point the source-path constants (`PLINK_PREFIX`, `RNA_DIR`, `REF_FASTA`) at the extracted
-     `/tmp/source/` (from `_handoff_source.tar`).
+     `/tmp/source/` (from the R2 tar — see "Data").
 5. Rebuild: `pixi run -e dev python tests/benchmarks/data/build_realistic.py`.
 6. **VERIFY THE FIX:** regions must be ~17 kb, not 200 kb:
    ```bash
