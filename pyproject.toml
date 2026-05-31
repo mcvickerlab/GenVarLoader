@@ -32,7 +32,6 @@ dependencies = [
     "hirola>=0.3,<0.4",
     "seqpro>=0.11.0",
     "genoray>=2.4.0,<3",
-    "polars-bio>=0.20,<0.21",
 ]
 
 [project.optional-dependencies]

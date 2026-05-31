@@ -1,4 +1,3 @@
-import sys
 from pathlib import Path
 
 import genvarloader as gvl
@@ -7,13 +6,13 @@ import polars as pl
 import pytest
 from genvarloader._table import Table
 
-# polars-bio's overlap kernel segfaults on CPython 3.12 (passes on 3.11 and 3.13).
-# The eager pb.overlap done by Table writes poisons the process so a later lazy
-# pb.overlap().collect() (the variant write path) crashes the interpreter.
+# gvl.Table is temporarily disabled (polars-bio backend intermittently segfaults
+# on CPython 3.12 and 3.13; polars-bio removed as a direct dependency, still
+# transitive via genoray). These Table-driven end-to-end write tests are skipped
+# until it is re-enabled.
 # Upstream: https://github.com/biodatageeks/polars-bio/issues/395
-pytestmark = pytest.mark.skipif(
-    sys.version_info[:2] == (3, 12),
-    reason="polars-bio overlap segfaults on py3.12; see "
+pytestmark = pytest.mark.skip(
+    reason="gvl.Table temporarily disabled pending polars-bio segfault fix; see "
     "https://github.com/biodatageeks/polars-bio/issues/395",
 )
 
