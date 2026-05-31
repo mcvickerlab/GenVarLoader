@@ -58,10 +58,13 @@ def base_ds(source_bed, vcf_dir, reference, tmp_path_factory):
             bw.addHeader(contig_sizes, maxZooms=0)
             # One short interval per contig; values differ per sample.
             value = float(i + 1)
+            # Each interval must overlap its contig's region in source.bed so
+            # every region has at least one interval (chr1's no-variant region
+            # sits at chr1:500_000).
             bw.addEntries(
                 ["chr1", "chr19", "chr20"],
-                [10_000_000, 1_010_686, 17_320],
-                ends=[10_000_020, 1_010_706, 17_340],
+                [499_990, 1_010_686, 17_320],
+                ends=[500_030, 1_010_706, 17_340],
                 values=[value, value, value],
             )
         bw_paths[sample] = str(bw_path)

@@ -225,8 +225,8 @@ def main(
     rows = pl.DataFrame(
         {
             # spanning deletion region (over chr19:1010696 10-bp deletion)
-            # and a no-variant region on chr20.
-            "chrom": ["chr19", "chr20"],
+            # and a no-variant region on chr1 (chr1 carries no variants).
+            "chrom": ["chr19", "chr1"],
             "start": [1010696, 500_000],
             "end": [1010696 + SEQ_LEN, 500_000 + SEQ_LEN],
         }

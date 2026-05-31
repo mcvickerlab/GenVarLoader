@@ -16,7 +16,12 @@ import pysam
 from vcfixture import Number, Type, VcfBuilder
 
 # (contig, length) — sized to span every variant locus with headroom.
-CONTIGS: list[tuple[str, int]] = [("chr19", 1_300_000), ("chr20", 1_300_000)]
+CONTIGS: list[tuple[str, int]] = [
+    ("chr1", 1_300_000),
+    ("chr2", 100_000),
+    ("chr19", 1_300_000),
+    ("chr20", 1_300_000),
+]
 
 # (contig, 1-based pos, REF) — the longest REF at each shared position.
 REF_OVERWRITES: list[tuple[str, int, str]] = [
@@ -66,6 +71,10 @@ def write_synthetic_reference(path: str | Path, seed: int = 0) -> Path:
     for contig, pos, guard in FLANK_GUARDS:
         # Base immediately 5' of the anchor (0-based index pos-2).
         seqs[contig][pos - 2] = guard.encode()
+
+    # hg38 parity: chr1 begins with an N-masked telomere. tests/unit/dataset/
+    # test_ref_ds.py expects chr1:0-150 to read as N.
+    seqs["chr1"][0:150] = np.frombuffer(b"N" * 150, dtype="S1")
 
     # Write plain FASTA (60-col wrapped), then bgzip + faidx via samtools.
     plain = path.with_suffix("")  # strip .bgz -> .fa
