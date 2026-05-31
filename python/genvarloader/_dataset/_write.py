@@ -563,33 +563,91 @@ def _write_from_pgen(
 
     (out_dir / "variants.arrow").hardlink_to(pgen._index_path())
 
-    return _write_phased_chunked(out_dir, bed, _pgen_region_chunks(bed, pgen, max_mem))
+    return _write_phased_chunked(
+        out_dir, bed, _pgen_region_chunks(bed, pgen, max_mem, extend_to_length)
+    )
 
 
 def _pgen_region_chunks(
-    bed: pl.DataFrame, pgen: PGEN, max_mem: int
+    bed: pl.DataFrame, pgen: PGEN, max_mem: int, extend_to_length: bool
 ) -> Iterator[tuple[list[Ragged], Any, str | None]]:
+    assert pgen._index is not None
+    pos = pgen._index["POS"].to_numpy()
+    ilen_all = pgen._index["ILEN"].list.first().to_numpy()
+    v_ends = pos - np.clip(ilen_all, a_min=None, a_max=0)
+
     for (contig,), df in bed.partition_by(
         "chrom", as_dict=True, maintain_order=True
     ).items():
         contig = cast(str, contig)
-        starts = df["chromStart"].to_numpy().copy()
-        ends = df["chromEnd"].to_numpy().copy()
+        starts = df["chromStart"].to_numpy()
+        ends = df["chromEnd"].to_numpy()
         contig_desc = f"Processing genotypes for {df.height} regions on contig {contig}"
         first_in_contig = True
-        for range_ in pgen._chunk_ranges_with_length(contig, starts, ends, max_mem):
-            ls_sparse: list[Ragged] = []
-            region_end: Any = None
-            for _, is_last, (genos, chunk_end, chunk_idxs) in mark_ends(range_):
-                chunk_idxs = chunk_idxs.astype(V_IDX_TYPE)
-                sp_genos = dense2sparse(genos.astype(np.int8), chunk_idxs)
-                ls_sparse.append(sp_genos)
 
-                if is_last:
-                    region_end = chunk_end
+        unextended_idxs: list[NDArray] = []
+        if extend_to_length:
+            region_iter = pgen._chunk_ranges_with_length(contig, starts, ends, max_mem)
+        else:
+            v_idx, v_offsets = pgen.var_idxs(contig, starts, ends)
+            unextended_idxs = np.array_split(
+                v_idx.astype(V_IDX_TYPE), v_offsets[1:-1]
+            )
+            region_iter = (
+                pgen.chunk(contig, int(s), int(e), max_mem)
+                for s, e in zip(starts, ends)
+            )
 
-            yield ls_sparse, region_end, contig_desc if first_in_contig else None
+        for ri, range_ in enumerate(region_iter):
+            q_start = int(starts[ri])
+            q_end = int(ends[ri])
+            desc = contig_desc if first_in_contig else None
             first_in_contig = False
+
+            if extend_to_length:
+                genos_list: list[NDArray] = []
+                idx_list: list[NDArray] = []
+                for genos, _chunk_end, chunk_idxs in range_:
+                    genos_list.append(genos.astype(np.int8))
+                    idx_list.append(chunk_idxs.astype(V_IDX_TYPE))
+                genos = np.concatenate(genos_list, axis=-1)
+                var_idxs = (
+                    np.concatenate(idx_list)
+                    if idx_list
+                    else np.empty(0, dtype=V_IDX_TYPE)
+                )
+
+                if var_idxs.size == 0:
+                    yield [dense2sparse(genos, var_idxs)], q_end, desc
+                    continue
+
+                v_starts = (pos[var_idxs] - 1).astype(np.int32)
+                ilens = ilen_all[var_idxs].astype(np.int32)
+                rag = _window_to_sparse(
+                    genos, var_idxs, q_start, q_end, v_starts, ilens, True
+                )
+                region_end = _region_end(rag, v_ends, q_end)
+                yield [rag], region_end, desc
+            else:
+                reg_unext = unextended_idxs[ri]
+                ls_sparse: list[Ragged] = []
+                offset = 0
+                for genos in range_:
+                    n_vars = genos.shape[-1]
+                    chunk_idxs = reg_unext[offset : offset + n_vars]
+                    offset += n_vars
+                    ls_sparse.append(dense2sparse(genos.astype(np.int8), chunk_idxs))
+                assert offset == reg_unext.size, (
+                    f"PGEN.chunk variant count ({offset}) != var_idxs count "
+                    f"({reg_unext.size}) for region [{q_start}, {q_end})"
+                )
+                if not ls_sparse:
+                    empty_genos = np.empty(
+                        (pgen.n_samples, pgen.ploidy, 0), dtype=np.int8
+                    )
+                    ls_sparse = [dense2sparse(empty_genos, reg_unext)]
+                region_end = _region_ends_from_list(ls_sparse, v_ends, q_end)
+                yield ls_sparse, region_end, desc
 
 
 def _write_phased_chunked(
