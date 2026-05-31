@@ -95,7 +95,14 @@ def build_source_vcf(reference_path: str | Path) -> "object":
     """
     with pysam.FastaFile(str(reference_path)) as fa:
         contigs = list(zip(fa.references, fa.lengths))
-    b = VcfBuilder(samples=["NA00001", "NA00002", "NA00003"], contigs=contigs)
+    # VCFv4.0 to match the original hand-authored source.vcf: under VCFv4.4+
+    # an INFO field with Number=. (used here for AC/AF) is rejected by the
+    # noodles VCF parser that genoray's SparseVar.from_vcf relies on via oxbow.
+    b = VcfBuilder(
+        samples=["NA00001", "NA00002", "NA00003"],
+        contigs=contigs,
+        fileformat="VCFv4.0",
+    )
     # INFO defs (must match the original header).
     b.info("NS", Number.ONE, Type.INTEGER)
     b.info("AN", Number.ONE, Type.INTEGER)

@@ -51,7 +51,6 @@ def main(
     import genvarloader as gvl
     import polars as pl
     import polars.selectors as cs
-    import pooch
     from genoray import PGEN, VCF, SparseVar
     from loguru import logger
     from tqdm.auto import tqdm
@@ -85,30 +84,14 @@ def main(
 
     fasta_dir = WDIR / "fasta"
     fasta_dir.mkdir(0o777, parents=True, exist_ok=True)
-    reference = Path(
-        pooch.retrieve(
-            "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz",
-            # If this reference (and thus known_hash) changes, bump the CI cache key
-            # `hg38-ref-<...>` in .github/workflows/test.yaml so CI re-fetches it.
-            known_hash="c1dd87068c254eb53d944f71e51d1311964fce8de24d6fc0effc9c61c01527d4",
-            fname="hg38.fa.gz",
-            path=fasta_dir,
-        )
-    ).resolve()
-    if not reference.with_suffix(".bgz").exists():
-        _ = subprocess.run(
-            f"gzip -dc {reference} | bgzip -c > {reference.with_suffix('.bgz')}",
-            shell=True,
-        )
-    reference = reference.with_suffix(".bgz")
-    if not reference.with_suffix(".csi").exists():
-        _ = run_shell(f"samtools faidx {reference}".split())
+    from _synthetic import build_source_vcf, write_synthetic_reference
 
-    vcf_path = WDIR / f"{name}.vcf"
+    reference = write_synthetic_reference(fasta_dir / "synthetic.fa.bgz", seed=0)
+
     filtered_vcf = WDIR / "vcf" / f"filtered_{name}.vcf"
 
-    with open(vcf_path, "r") as f:
-        vcf = f.read().encode()
+    # Re-encode the (formerly hand-authored) source VCF programmatically.
+    vcf = build_source_vcf(reference).render().encode()
     # left-align
     norm_cmd = [
         "bcftools",
@@ -241,9 +224,11 @@ def main(
     # - no variants
     rows = pl.DataFrame(
         {
-            "chrom": ["chr19", "chr1"],
-            "start": [1010696, int(10e6)],
-            "end": [1010696 + SEQ_LEN, int(10e6) + SEQ_LEN],
+            # spanning deletion region (over chr19:1010696 10-bp deletion)
+            # and a no-variant region on chr20.
+            "chrom": ["chr19", "chr20"],
+            "start": [1010696, 500_000],
+            "end": [1010696 + SEQ_LEN, 500_000 + SEQ_LEN],
         }
     )
     rng = np.random.default_rng(0)
