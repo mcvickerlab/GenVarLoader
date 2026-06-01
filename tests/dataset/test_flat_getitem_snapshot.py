@@ -13,8 +13,8 @@ it.  It uses the same ingredients as the ``base_ds`` fixture in
 Track name: "5ss"   (only track written by this fixture)
 SEQLEN: 20          (region length = 20 bp, max_jitter=2, jitter=0 → max=24)
 
-Cases kept (all 9)
-------------------
+Cases kept (all 10)
+-------------------
 haps_ragged         seqs="haplotypes",                   out_len="ragged"
 haps_fixed          seqs="haplotypes",                   out_len=SEQLEN
 haps_variable       seqs="haplotypes",                   out_len="variable"
@@ -24,6 +24,7 @@ tracks_fixed        seqs=None, tracks="5ss",             out_len=SEQLEN
 ref_fixed           seqs="reference",                    out_len=SEQLEN
 haps_tracks_fixed   seqs="haplotypes", tracks="5ss",     out_len=SEQLEN
 haps_tracks_ragged  seqs="haplotypes", tracks="5ss",     out_len="ragged"
+variants_ragged     seqs="variants",                     out_len="ragged"
 
 No cases were dropped; all are satisfiable with the fixture above.
 """
@@ -37,6 +38,7 @@ import pyBigWig
 import pytest
 
 import genvarloader as gvl
+from genvarloader import RaggedVariants
 from genvarloader._ragged import RaggedAnnotatedHaps
 from genvarloader._types import AnnotatedHaps
 from seqpro.rag import Ragged
@@ -54,6 +56,7 @@ CASES = [
     ("ref_fixed", dict(seqs="reference"), SEQLEN),
     ("haps_tracks_fixed", dict(seqs="haplotypes", tracks="5ss"), SEQLEN),
     ("haps_tracks_ragged", dict(seqs="haplotypes", tracks="5ss"), "ragged"),
+    ("variants_ragged", dict(seqs="variants"), "ragged"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -156,6 +159,20 @@ def _flatten_output(obj) -> dict[str, np.ndarray]:
         out["haps"] = np.asarray(obj.haps)
         out["var_idxs"] = np.asarray(obj.var_idxs)
         out["ref_coords"] = np.asarray(obj.ref_coords)
+    elif isinstance(obj, RaggedVariants):
+        # Serialize each field to plain arrays. Numeric fields -> data+offsets.
+        # alt/ref are doubly-nested bytes -> leaf bytes + both offset levels.
+        for fld in sorted(obj.fields):
+            v = obj[fld]
+            if fld in ("alt", "ref"):
+                lay = v.layout
+                out[f"{fld}_group_off"] = np.asarray(lay.content.offsets)
+                out[f"{fld}_allele_off"] = np.asarray(lay.content.content.offsets)
+                out[f"{fld}_bytes"] = np.asarray(lay.content.content.content.data)
+                out[f"{fld}_ploidy"] = np.asarray(lay.size)
+            else:
+                out[f"{fld}_data"] = np.asarray(v.data)
+                out[f"{fld}_off"] = np.asarray(v.offsets)
     elif isinstance(obj, np.ndarray):
         out["arr"] = obj
     else:
