@@ -54,11 +54,11 @@ def test_overlapping_bed_regions_succeed_or_raise(
     """Overlapping regions are conceptually independent (each region is
     materialized on its own), so ``gvl.write`` should either succeed and
     preserve the row count, or raise a clear documented error."""
-    # Two regions overlapping on chr19, both within the contigs the toy
+    # Two regions overlapping on chr1, both within the contigs the toy
     # VCF carries variants on.
     bed = pl.DataFrame(
         {
-            "chrom": ["chr19", "chr19", "chr19"],
+            "chrom": ["chr1", "chr1", "chr1"],
             "chromStart": [1010685, 1010690, 1010700],
             "chromEnd": [1010715, 1010720, 1010730],
         }
@@ -114,7 +114,7 @@ def test_query_past_contig_end_pads_with_N(
     """
     import pysam
 
-    chrom = "chr19"
+    chrom = "chr1"
     with pysam.FastaFile(str(ref_fasta)) as fh:
         contig_len = fh.get_reference_length(chrom)
 
@@ -174,13 +174,13 @@ def test_deletion_spans_region_end_boundary(
     """A deletion variant whose REF span extends past the region's chromEnd
     should still produce a haplotype of the requested region length.
 
-    Setup: the toy VCF carries a 10-bp deletion at chr19:1010696
+    Setup: the toy VCF carries a 10-bp deletion at chr1:1010696
     ``GAGACGGGGCC>G`` (REF length 11, ALT length 1). 0-based reference span
     is ``[1010695, 1010706)``. The BED region ``[1010685, 1010700)`` has
     length 15 and its end (1010700) falls inside the deletion's REF span
     (6 bp of the deletion extends past the region end).
 
-    Sample ``NA00002`` is homozygous (``1|1``) for this variant on both
+    Sample ``s1`` is homozygous (``1|1``) for this variant on both
     haplotypes, which makes the assertion deterministic across phasing.
 
     Pins down the haplotype-reconstruction behavior at a region boundary
@@ -188,7 +188,7 @@ def test_deletion_spans_region_end_boundary(
     still have the requested region length (ragged variable-length output
     is allowed but must be > 0 and <= region length) and must not crash.
     """
-    chrom = "chr19"
+    chrom = "chr1"
     # 0-based half-open region. End falls inside the 10-bp deletion at
     # 0-based [1010695, 1010706).
     start, end = 1010685, 1010700
@@ -206,13 +206,13 @@ def test_deletion_spans_region_end_boundary(
         .with_tracks(False)
     )
 
-    # NA00002 is 1|1 for the spanning 10-bp deletion → both haplotypes carry
+    # s1 is 1|1 for the spanning 10-bp deletion → both haplotypes carry
     # the deletion. The haplotype length should be (region_len - deleted bp
     # within region). The deletion's REF lies at 0-based [1010695, 1010706);
     # the part inside the region is [1010695, 1010700) = 5 bp deleted within
     # the region. After applying it, the haplotype reconstruction must
     # produce a finite, non-empty sequence.
-    haps = ds[0, "NA00002"]
+    haps = ds[0, "s1"]
     for h in range(2):
         h_arr = haps[h]
         seq = h_arr.tobytes() if hasattr(h_arr, "tobytes") else bytes(h_arr)

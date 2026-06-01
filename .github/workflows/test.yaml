@@ -34,9 +34,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tests/data/fasta
-          # Static key derived from the pooch known_hash in
-          # tests/data/generate_ground_truth.py. Bump this if the reference changes.
-          key: hg38-ref-c1dd8706
+          # Minimal hg38 (chr21 + chr22) concatenated + bgzipped by
+          # tests/data/generate_1kg_ground_truth.py::provision_minimal_hg38.
+          # Keyed on the pinned UCSC chr21/chr22 sha256s; bump if those change.
+          key: hg38-chr21chr22-c979ca1e-05f9d97d
       - name: Test
         run: pixi run -e ${{ matrix.environment }} test
 
@@ -59,9 +60,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tests/data/fasta
-          # Static key derived from the pooch known_hash in
-          # tests/data/generate_ground_truth.py. Bump this if the reference changes.
-          key: hg38-ref-c1dd8706
+          # Minimal hg38 (chr21 + chr22) concatenated + bgzipped by
+          # tests/data/generate_1kg_ground_truth.py::provision_minimal_hg38.
+          # Keyed on the pinned UCSC chr21/chr22 sha256s; bump if those change.
+          key: hg38-chr21chr22-c979ca1e-05f9d97d
       - name: Run pytest with coverage
         run: pixi run -e py312 test-cov
       - name: Upload HTML coverage report

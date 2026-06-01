@@ -107,13 +107,13 @@ def test_write_with_variants_and_tracks(tmp_path, vcf_dir: Path):
     from genoray import VCF
 
     vcf = VCF(vcf_dir / "filtered_source.vcf.gz")
-    # VCF samples are NA00001, NA00002, NA00003 — Table must share at least one.
+    # VCF samples are s0, s1, s2 — Table must share at least one.
     table = gvl.Table(
         "signal",
         pl.DataFrame(
             {
-                "sample_id": ["NA00001", "NA00002", "NA00003"],
-                "chrom": ["chr19", "chr19", "chr19"],
+                "sample_id": ["s0", "s1", "s2"],
+                "chrom": ["chr1", "chr1", "chr1"],
                 "start": [1010686, 1010686, 1010686],
                 "end": [1010706, 1010706, 1010706],
                 "value": [1.0, 2.0, 3.0],
@@ -122,7 +122,7 @@ def test_write_with_variants_and_tracks(tmp_path, vcf_dir: Path):
     )
     bed = pl.DataFrame(
         {
-            "chrom": ["chr19"],
+            "chrom": ["chr1"],
             "chromStart": [1010686],
             "chromEnd": [1010706],
         }
@@ -138,4 +138,4 @@ def test_write_with_variants_and_tracks(tmp_path, vcf_dir: Path):
     import json
 
     meta = json.loads((out / "metadata.json").read_text())
-    assert set(meta["samples"]) == {"NA00001", "NA00002", "NA00003"}
+    assert set(meta["samples"]) == {"s0", "s1", "s2"}

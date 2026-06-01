@@ -38,8 +38,14 @@ def test_jitter(dataset: gvl.RaggedDataset):
         desired_starts, "b s -> b s p", p=ds._seqs.genotypes.shape[-2]
     )
 
-    no_var_regions = (ds.regions["chrom"] == "chr1").to_numpy()
-    annhaps = ds[no_var_regions]
+    # Convert the sorted-order genotype mask to display order before indexing ds.
+    # ds._seqs.genotypes is indexed by the internal sorted region order; ds[mask]
+    # expects a mask over the display order (ds.regions row order).
+    # full_region_idxs[display_idx] = sorted_idx, so indexing by it remaps the mask.
+    # In the new chr1/chr2 geography, chr1 carries variants too, so the old
+    # `chrom == "chr1"` proxy no longer matches the no-variant set.
+    no_var_display = no_var_regions[ds._idxer.full_region_idxs]
+    annhaps = ds[no_var_display]
     # (b s p ~l) -> (b s p)
     actual_starts = annhaps.ref_coords[..., 0].to_numpy()  # type: ignore
     np.testing.assert_equal(actual_starts, desired_starts)
