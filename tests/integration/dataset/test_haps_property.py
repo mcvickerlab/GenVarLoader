@@ -72,8 +72,13 @@ def _all_gts_phased_diploid(doc) -> bool:
       (b) Haploid GTs (GT=1) → promoted to homozygous diploid (1/1); both
           haplotypes get the ALT even when only one should.
 
-    Phased diploid GTs are fully faithful, including phased half-calls (1|. and
-    .|1 → (1,0,phased) and (0,1,phased) under --vcf-half-call r).
+    This filter requires every genotype to be fully-called phased diploid:
+    diploid (exactly 2 alleles), no missing allele, and phased.  Note that
+    plink2 does faithfully round-trip phased half-calls (1|. and .|1 →
+    (1,0,phased) and (0,1,phased) under --vcf-half-call r), so they could in
+    principle be admitted for pgen; they are excluded here conservatively
+    because the bcftools-consensus oracle's handling of the missing allele has
+    not been verified to match gvl-pgen's.
 
     vcf and svar preserve VCF allele order and do not need this filter.
     """
