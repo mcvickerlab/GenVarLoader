@@ -201,7 +201,12 @@ def _build_allele_layout(
     per-(b*p)-row variant boundaries (len b*p + 1). Both offset arrays must be
     zero-based. ``ploidy`` groups the b*p rows into the outer regular axis.
     """
-    leaf = NumpyArray(np.ascontiguousarray(data), parameters={"__array__": "byte"})
+    # rc_ mutates this leaf in place (reverse_complement_masked), so it must be
+    # writable; callers may pass a read-only buffer (e.g. np.frombuffer on bytes).
+    buf = np.ascontiguousarray(data)
+    if not buf.flags.writeable:
+        buf = buf.copy()
+    leaf = NumpyArray(buf, parameters={"__array__": "byte"})
     l_content = ListOffsetArray(
         Index(np.asarray(allele_offsets, np.int64)),
         leaf,

@@ -19,7 +19,7 @@ from numpy.typing import NDArray
 from seqpro.rag import OFFSET_TYPE, Ragged, is_rag_dtype, lengths_to_offsets
 from typing_extensions import Self
 
-from .._ragged import reverse_complement
+from .._ragged import reverse_complement_masked
 from .._torch import TORCH_AVAILABLE, requires_torch
 
 if TORCH_AVAILABLE or TYPE_CHECKING:
@@ -215,22 +215,22 @@ class RaggedVariants(ak.Array):
         elif not to_rc.any():
             return self
 
-        self["alt"] = ak.to_packed(
-            ak.where(
-                to_rc,
-                reverse_complement(self["alt"]),
-                self["alt"],
-            )
-        )
+        # local import: _haps imports RaggedVariants (avoid circular import)
+        from ._haps import _alt_layout_parts
 
-        if "ref" in self.fields:
-            self["ref"] = ak.to_packed(
-                ak.where(
-                    to_rc,
-                    reverse_complement(self["ref"]),
-                    self["ref"],
-                )
+        for field in ("alt", "ref"):
+            if field not in self.fields:
+                continue
+            arr = self[field]
+            leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
+            # per-allele mask: to_rc is per-batch; broadcast across ploidy then variants
+            per_bp = np.repeat(np.ascontiguousarray(to_rc, np.bool_), ploidy)
+            per_allele = np.repeat(per_bp, np.diff(group_off))
+            view = Ragged.from_offsets(
+                leaf.view("S1"), (per_allele.size, None), allele_off
             )
+            # in-place: mutates `leaf`, which shares memory with `arr`'s buffer
+            reverse_complement_masked(view, per_allele)
 
         return self
 
