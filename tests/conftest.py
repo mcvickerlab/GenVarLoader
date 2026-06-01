@@ -52,22 +52,51 @@ def reference(ref_fasta: Path):
     return gvl.Reference.from_path(ref_fasta, in_memory=False)
 
 
+# --- session-scoped generated case (Phase 2) --------------------------------
+
+
+@pytest.fixture(scope="session")
+def synthetic_case(tmp_path_factory):
+    """Build one standardized (chr1/chr2, s0..s2) case per session via the
+    shared build_case pipeline. Replaces the committed consensus/ +
+    phased_dataset.*.gvl/ artifacts; the path fixtures below yield from it."""
+    import sys
+
+    builders = Path(__file__).resolve().parent / "_builders"
+    if str(builders) not in sys.path:
+        sys.path.insert(0, str(builders))
+    import polars as pl
+    from case import SEQ_LEN, build_case, session_document, session_reference
+
+    spec = session_reference()
+    doc = session_document(spec)
+    extra = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "start": [1010696, 500_000],
+            "end": [1010696 + SEQ_LEN, 500_000 + SEQ_LEN],
+        }
+    )
+    workdir = tmp_path_factory.mktemp("synthetic_case")
+    return build_case(spec, doc, workdir, extra_regions=extra)
+
+
 # --- toy phased datasets (one per variant source) ----------------------------
 
 
 @pytest.fixture(scope="session")
-def phased_vcf_gvl(data_dir: Path) -> Path:
-    return data_dir / "phased_dataset.vcf.gvl"
+def phased_vcf_gvl(synthetic_case) -> Path:
+    return synthetic_case.gvl_path["vcf"]
 
 
 @pytest.fixture(scope="session")
-def phased_pgen_gvl(data_dir: Path) -> Path:
-    return data_dir / "phased_dataset.pgen.gvl"
+def phased_pgen_gvl(synthetic_case) -> Path:
+    return synthetic_case.gvl_path["pgen"]
 
 
 @pytest.fixture(scope="session")
-def phased_svar_gvl(data_dir: Path) -> Path:
-    return data_dir / "phased_dataset.svar.gvl"
+def phased_svar_gvl(synthetic_case) -> Path:
+    return synthetic_case.gvl_path["svar"]
 
 
 # --- 1kg datasets (slow tier) ------------------------------------------------
@@ -145,6 +174,6 @@ def bigwig_dir(data_dir: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
-def consensus_dir(data_dir: Path) -> Path:
-    """Directory containing per-haplotype consensus FASTA ground-truth files."""
-    return data_dir / "consensus"
+def consensus_dir(synthetic_case) -> Path:
+    """Per-haplotype consensus FASTA ground truth, generated per session."""
+    return synthetic_case.consensus_dir

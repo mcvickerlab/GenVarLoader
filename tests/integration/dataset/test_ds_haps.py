@@ -9,18 +9,11 @@ import seqpro as sp
 from genvarloader._ragged import RaggedSeqs
 
 
-@pytest.fixture(
-    scope="session",
-    params=["vcf", "pgen", "svar"],
-)
-def dataset(request, phased_vcf_gvl, phased_pgen_gvl, phased_svar_gvl, ref_fasta):
-    gvl_path = {
-        "vcf": phased_vcf_gvl,
-        "pgen": phased_pgen_gvl,
-        "svar": phased_svar_gvl,
-    }[request.param]
+@pytest.fixture(scope="session", params=["vcf", "pgen", "svar"])
+def dataset(request, synthetic_case):
+    gvl_path = synthetic_case.gvl_path[request.param]
     return (
-        gvl.Dataset.open(gvl_path, ref_fasta, rc_neg=False)
+        gvl.Dataset.open(gvl_path, synthetic_case.ref_path, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
         .with_tracks(False)
