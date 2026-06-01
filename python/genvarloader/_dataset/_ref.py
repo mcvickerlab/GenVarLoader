@@ -13,6 +13,7 @@ import numpy as np
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
+from .._flat import _Flat
 from .._utils import lengths_to_offsets
 from ._protocol import Reconstructor
 from ._reference import Reference, _fetch_spliced_ref, get_reference
@@ -57,14 +58,12 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
                 reference=self.reference.reference,
                 ref_offsets=self.reference.offsets,
                 pad_char=self.reference.pad_char,
-            ).view("S1")
+            )  # uint8 flat buffer
 
-            ref = cast(
-                Ragged[np.bytes_],
-                Ragged.from_offsets(ref, (batch_size, None), out_offsets),
+            return cast(
+                "Ragged[np.bytes_]",
+                _Flat.from_offsets(ref, (batch_size, None), out_offsets).view("S1"),
             )
-
-            return ref
 
         # Spliced path: delegate to the shared kernel-dispatch helper.
         return _fetch_spliced_ref(
