@@ -684,9 +684,7 @@ class Haps(Reconstructor[_H]):
         # TODO: maybe filter variants for region, shifts?
         r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore[no-matching-overload]  # Ragged.shape is tuple[int | None, ...]; numpy overload expects all-int
         # (b p ~v)
-        genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s])
-
-        genos = ak.to_packed(genos)
+        genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s]).to_packed()
         v_idxs = genos.data
 
         if self.min_af is not None or self.max_af is not None:
@@ -697,7 +695,8 @@ class Haps(Reconstructor[_H]):
             if self.max_af is not None:
                 keep &= geno_afs <= self.max_af
             _keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
-            genos = Ragged(ak.to_packed(ak.to_regular(genos[_keep], 1)))
+            # genos[_keep] yields a bare ak.Array; wrap before to_packed
+            genos = Ragged(ak.to_regular(genos[_keep], 1)).to_packed()
             v_idxs = genos.data
         else:
             _keep = None
@@ -718,10 +717,12 @@ class Haps(Reconstructor[_H]):
 
         if self.dosages is not None and "dosage" in self.var_fields:
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
-            dosages = self.dosages[r, s]
+            dosages = cast(Ragged, self.dosages[r, s])
             if _keep is not None:
-                dosages = ak.to_regular(dosages[_keep], 1)
-            fields["dosage"] = Ragged(ak.to_packed(dosages))
+                # dosages[_keep] yields a bare ak.Array; wrap before to_packed
+                fields["dosage"] = Ragged(ak.to_regular(dosages[_keep], 1)).to_packed()
+            else:
+                fields["dosage"] = dosages.to_packed()
 
         fields.update(
             {
@@ -772,9 +773,7 @@ class Haps(Reconstructor[_H]):
     ) -> ak.Array:
         v_idxs = genos.data
         # (b*p*v ~l) packed allele bytes for the selected variants
-        alleles = ak.to_packed(
-            cast(RaggedAlleles, getattr(self.variants, kind)[v_idxs])
-        )
+        alleles = cast(RaggedAlleles, getattr(self.variants, kind)[v_idxs]).to_packed()
         return _build_allele_layout(
             np.asarray(alleles.data).view(np.uint8),
             np.asarray(alleles.offsets),
