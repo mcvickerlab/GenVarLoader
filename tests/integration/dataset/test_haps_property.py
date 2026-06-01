@@ -10,6 +10,24 @@ pipeline, and compares gvl output against two oracles:
 Each example shells out to bcftools/plink2/samtools, so deadlines are disabled
 and per-example isolation uses a TemporaryDirectory created inside the test body
 (NOT a function-scoped fixture — that trips Hypothesis's health check).
+
+Backend-specific filters
+------------------------
+All-REF records are dropped by build_case._normalize (``bcftools view --min-ac
+1``) before gvl.write sees the VCF.  This enforces a gvl.write invariant and
+removes the need to gate on _has_any_alt globally.
+
+vcf/svar: broad draw — any GT class (phased, unphased, half-call, haploid,
+  missing) is exercised.  Both backends preserve VCF allele order and therefore
+  match the bcftools consensus oracle on all GT classes.
+
+pgen: restricted to phased diploid GTs only.  plink2 (used to convert VCF →
+  PGEN) diverges from the VCF oracle in two ways:
+    (a) Unphased hets (e.g. 0/1 and 1/0) are both stored as (0,1,unphased) —
+        allele order is canonicalized.
+    (b) Haploid GTs (e.g. GT=1) are promoted to homozygous diploid (1/1).
+  Phased diploid GTs, including phased half-calls (1|. and .|1 under
+  --vcf-half-call r), are preserved faithfully.
 """
 from __future__ import annotations
 
@@ -46,15 +64,18 @@ def _has_any_alt(doc) -> bool:
 def _all_gts_phased_diploid(doc) -> bool:
     """Return True if every sample genotype in every record is phased diploid.
 
-    Filters out inputs that expose known pgen backend limitations:
-    - Haploid GTs (one allele): plink2 --make-pgen promotes GT=1 to GT=1/1,
-      causing the pgen backend to apply the ALT to both haplotypes.
-    - Half-call / missing-allele GTs (e.g. GT=1/.): plink2 --vcf-half-call r
-      promotes the missing allele to REF and may swap allele order.
-    - Unphased diploid GTs (e.g. GT=0/1): plink2 may reorder alleles when
-      converting unphased heterozygous genotypes to PGEN format.
-    All are genuine gvl/pgen limitation bugs; VCF and SVAR handle them correctly.
-    This filter applies to all backends to keep the comparison fair.
+    Used only for the pgen backend.  plink2 diverges from the VCF oracle in two
+    empirically verified ways:
+
+      (a) Unphased hets (0/1, 1/0) → both stored as (0,1,unphased); allele order
+          is canonicalized, so pgen output differs from bcftools consensus.
+      (b) Haploid GTs (GT=1) → promoted to homozygous diploid (1/1); both
+          haplotypes get the ALT even when only one should.
+
+    Phased diploid GTs are fully faithful, including phased half-calls (1|. and
+    .|1 → (1,0,phased) and (0,1,phased) under --vcf-half-call r).
+
+    vcf and svar preserve VCF allele order and do not need this filter.
     """
     for record in doc.records:
         for sample_fields in record.samples:
@@ -82,17 +103,19 @@ def test_haplotypes_match_consensus(src, case_inputs):
     # Zero-record documents produce no BED regions and nothing to reconstruct;
     # skip them rather than treating them as failures.
     assume(len(doc.records) > 0)
-    # All-REF documents (every sample is 0/0 for every record) cause gvl.write to
-    # skip writing variant_idxs.npy, which then crashes Haps.from_path with
-    # FileNotFoundError. This is a genuine gvl bug (tracked separately); exclude
-    # this degenerate input class here since it carries no haplotype variation
-    # to reconstruct.
+    # STOPGAP (Change 3): gvl.write + plink2 both crash on a zero-variant VCF
+    # (gvl.write: NoDataError on empty BED CSV; plink2: "No variants in --vcf
+    # file" RuntimeError).  build_case._normalize now drops all-REF records via
+    # `bcftools view --min-ac 1`, so a doc whose records are entirely all-REF
+    # will produce a zero-variant VCF after prep.  Exclude such docs here until
+    # gvl.write is hardened to accept zero-region input (tracked separately).
     assume(_has_any_alt(doc))
-    # plink2 mishandles both haploid GTs (promoted to homozygous diploid) and
-    # half-call/missing-allele GTs (allele order swapped by --vcf-half-call r).
-    # Both are genuine gvl/pgen limitation bugs; VCF and SVAR are correct.
-    # Exclude here to avoid source-dependent divergence; file dedicated issues.
-    assume(_all_gts_phased_diploid(doc))
+    # pgen only: plink2 canonicalizes unphased het allele order and promotes
+    # haploid GTs to homozygous diploid, causing divergence from the bcftools
+    # consensus oracle.  Phased diploid GTs (incl. phased half-calls) are
+    # faithful.  vcf and svar preserve VCF order and don't need this filter.
+    if src == "pgen":
+        assume(_all_gts_phased_diploid(doc))
     with tempfile.TemporaryDirectory() as tmp:
         case = build_case(spec, doc, Path(tmp), sources=(src,), normalize=True)
         ds = (

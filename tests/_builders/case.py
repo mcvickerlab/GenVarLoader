@@ -47,12 +47,24 @@ class Case:
 
 
 def _normalize(raw_vcf: bytes, ref: Path) -> bytes:
-    """Left-align, then atomize + split multiallelics (canonicalize)."""
+    """Left-align, atomize + split multiallelics, then drop all-REF records.
+
+    Pipeline:
+      1. bcftools norm -f ref   — left-align indels
+      2. bcftools norm -a --atom-overlaps . -m -   — split multiallelics, atomize
+      3. bcftools view --min-ac 1   — drop records where no sample carries ALT
+
+    Step 3 enforces the gvl.write invariant that every record in the input VCF
+    has at least one ALT allele observed across samples.  Records where all
+    genotypes are 0/0 (or ./.) contribute nothing to haplotype reconstruction and
+    can trigger downstream failures (e.g. missing variant_idxs.npy).
+    """
     vcf = _run(["bcftools", "norm", "-f", str(ref)], input=raw_vcf)
     vcf = _run(
         ["bcftools", "norm", "-a", "--atom-overlaps", ".", "-f", str(ref), "-m", "-"],
         input=vcf,
     )
+    vcf = _run(["bcftools", "view", "--min-ac", "1", "-O", "v", "-"], input=vcf)
     return vcf
 
 
