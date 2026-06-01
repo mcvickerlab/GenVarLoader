@@ -86,11 +86,19 @@ class _Flat(Generic[RDTYPE]):
         return _Flat(self.data, self.offsets, (*outer, None))
 
     def reverse_masked(self, mask: NDArray[np.bool_], comp: NDArray | None = None) -> "_Flat":
-        """Reverse (DNA: reverse-complement) the `mask`-selected rows, in place.
+        """Reverse (or DNA reverse-complement) the `mask`-selected rows.
 
-        `mask` is one entry per outer query; replicate across any inner fixed
-        axes in C order to get one entry per flattened ragged row, matching the
-        awkward `ak.where` broadcast it replaces.
+        ``comp`` is a **mode selector**, not a complement LUT that gets applied:
+
+        * Pass ``comp=None`` (default) for a plain reversal of each selected row.
+        * Pass ``comp=_COMP`` (gvl's standard ACGT→TGCA lookup) to enable DNA
+          reverse-complement mode.  The LUT that is actually applied is always
+          gvl's internal ``_COMP`` (via ``reverse_complement_masked``); passing a
+          *different* array is not supported and will raise ``ValueError``.
+
+        ``mask`` is one entry per outer query; it is replicated across any inner
+        fixed axes in C order to produce one entry per flattened ragged row,
+        matching the ``ak.where`` broadcast it replaces.
         """
         m = np.ascontiguousarray(mask, np.bool_).reshape(-1)
         if m.size != self.n_rows:
@@ -104,8 +112,13 @@ class _Flat(Generic[RDTYPE]):
         if comp is not None:
             # DNA reverse-complement via the flat seqpro kernel (reuses gvl's LUT).
             # seqpro requires S1 dtype; view uint8 as S1 for the call, then keep uint8.
-            from ._ragged import reverse_complement_masked
+            from ._ragged import _COMP, reverse_complement_masked
 
+            if comp is not _COMP and not np.array_equal(comp, _COMP):
+                raise ValueError(
+                    "reverse_masked only supports gvl's standard complement LUT (_COMP); "
+                    "pass comp=_COMP to enable DNA reverse-complement or comp=None for a plain reverse."
+                )
             s1_flat = self if self.data.dtype == np.dtype("S1") else self.view("S1")
             rag = reverse_complement_masked(s1_flat.to_ragged(), m)
             result_data = np.asarray(rag.data)
