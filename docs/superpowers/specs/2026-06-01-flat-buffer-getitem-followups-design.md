@@ -4,9 +4,19 @@
 **Branch:** `feat/bench-codspeed-profiling` (follow-ups to PR #205)
 **Status:** design; pending writing-plans
 
-Two follow-ups identified during review of the flat-buffer `__getitem__` refactor
-(PR #205). Both concern track paths that the main refactor deliberately left out of
-scope. Independent; FU-1 is trivial, FU-2 is the substantive work.
+Three follow-ups to the flat-buffer `__getitem__` refactor (PR #205). FU-1/FU-2 were
+identified during review (track paths the main refactor left out of scope); FU-3 takes
+on the **variants** path, which PR #205 deliberately left awkward-native (Task 10
+decision, based on *allocation* profiling) but which the final *CPU* py-spy A/B revealed
+still spends ~4.21 s / 55% of getitem self-time in awkward. Independent of each other.
+FU-1 is trivial, FU-2 and FU-3 are substantive.
+
+FU-3's approach was unlocked by **seqpro 0.14.0**, which exposes a numba-parallel
+`seqpro.rag.to_packed()` / `Ragged.to_packed()` — a flat replacement for
+`Ragged(ak.to_packed(rag))`. Empirically (verified during design), `Ragged[idx]` fancy
+indexing (1-D and 2-D) and `.to_packed()` dispatch **zero** awkward kernels, so the
+per-batch allele/genotype/dosage *gathers* become one-line swaps with no hand-written
+kernel.
 
 ---
 
@@ -176,3 +186,117 @@ float32 tracks), so fewer users hit it. But it is single-level ragged (unlike va
 so the flat conversion is genuinely viable and removes the last awkward dispatch from the
 track hot path. Do it if/when intervals-mode throughput matters; otherwise the FU-1 guard
 + documented carve-out is a clean holding state.
+
+---
+
+## FU-3: Flat-ify the variants path (`to_packed` gathers + flat `rc_`)
+
+### Problem
+
+PR #205 left `RaggedVariants` awkward-native — the Task 10 spike decided so on the basis
+of *memray* (variant assembly was not a top allocator). But the final *py-spy* A/B showed
+variants still spends **~4.21 s / 55%** of getitem self-time in awkward — the largest
+residual of any mode. `RaggedVariants` being an `ak.Array` subclass (public, in `__all__`)
+forces the **container** to be awkward, but not the **work**. The per-batch awkward work is:
+
+- **Gathers** — `ak.to_packed(<Ragged>[idx])` to pull each batch's rows from the on-disk
+  stores: alleles `self.variants.{alt,ref}[v_idxs]` (`_haps.py:_get_alleles`), sparse
+  genotypes `self.genotypes[r,s]` and dosages `self.dosages[r,s]` (`_haps.py:_get_variants`),
+  and the AF-filter pack `ak.to_packed(ak.to_regular(genos[_keep], 1))`.
+- **`rc_`** (`_rag_variants.py:200`) — `ak.where(to_rc, reverse_complement(alt), alt)`
+  + `ak.to_packed`, ×2 for alt/ref. RCs the **whole batch eagerly** then `ak.where`-selects
+  (the same anti-pattern removed for haps in PR #205), on the slow `ak.str` path.
+- **`RaggedVariants.to_packed()`** (`_rag_variants.py:195`) — `ak.to_packed(self)` over the
+  whole record array.
+
+### Constraints / decisions (from brainstorming)
+
+- **`RaggedVariants` stays an `ak.Array` subclass** — public API frozen, non-breaking. Move
+  the work to flat buffers; build/keep the `ak.Array` as a thin layout wrapper at the boundary.
+- **seqpro 0.14.0 `to_packed`** is the enabling primitive. Verified during design: `Ragged[idx]`
+  fancy index (1-D `[v_idxs]` and 2-D `[r,s]`) returns a `Ragged` view with **0 awkward calls**,
+  and `.to_packed()` materializes the gathered/reordered rows into a contiguous zero-based buffer
+  with **0 awkward calls**, byte-correct. So `Ragged[idx].to_packed()` *is* an awkward-free,
+  numba-parallel gather — no hand-written kernel needed.
+- **Architecture B** (surgical, no new container): swap the awkward kernels in place; reuse the
+  already-shipped seqpro `reverse_complement_masked` for `rc_`.
+
+### Components
+
+**C1 — gather swaps (`ak.to_packed(<Ragged>[idx])` → `<Ragged>[idx].to_packed()`):**
+- `_get_alleles`: `self.variants.{alt,ref}[v_idxs].to_packed()` (×2). The downstream layout
+  surgery (`ListOffsetArray`→`ListOffsetArray`→`RegularArray` → `(b,p,~v,~l)` `ak.Array`) is
+  unchanged — it is cheap offset-wrapping, not a kernel.
+- `_get_variants`: `genos = self.genotypes[r,s].to_packed()`; `dosages = self.dosages[r,s].to_packed()`.
+- AF-filter path (only when `min_af`/`max_af` set): swap the `to_packed`. **Verify** the
+  boolean-mask index `genos[_keep]` and `ak.to_regular(..., 1)` stay flat; if `to_regular` still
+  dispatches awkward, either keep it (documented) or replace with offset arithmetic. Settle in the plan.
+
+**C2 — flat `rc_`** (the one piece with real new logic; keep `rc_`'s signature + in-place contract):
+- `to_rc` is per batch (length `shape[0] = b`). Build a **per-allele mask**:
+  `np.repeat(np.repeat(to_rc, ploidy), variants_per_group)`, where `variants_per_group =
+  np.diff(group_offsets)` (RC depends only on strand/batch, broadcast across ploidy then variants).
+- Extract alt/ref's leaf byte buffer + innermost allele-offsets from the `ak.Array` layout, view as
+  a 1-level `Ragged(n_alleles, ~l)`, and call seqpro `reverse_complement_masked(…, per_allele_mask)`
+  (`copy=False`, in place, reuses `_COMP`). No `ak.where` / `ak.str.reverse` / `ak.to_packed`. ×2.
+- The `ak.Array` shares the mutated buffer → in-place semantics preserved. Keep the early-return for
+  `to_rc.any() == False`; `to_rc=None` → all-True mask.
+
+**C3 — field-wise `RaggedVariants.to_packed()`** (replace `ak.to_packed(self)` with composition):
+- Pack each **numeric** field (`start`, `ilen`, `dosage`, info fields) via `Ragged.to_packed()`
+  (seqpro 0.14, single ragged dim).
+- `alt`/`ref` are the **doubly-nested** case (ragged-of-ragged-of-uint8: `(b,p)→variants` and
+  `variant→bytes`) — seqpro `to_packed` targets one ragged dim, so they need a dedicated 2-level
+  pack. Approach: compose seqpro inner allele-byte pack (`Ragged(n_alleles, ~bytes).to_packed()`,
+  which contiguates the bytes in the existing `(b,p,variant)` row order) + rebuild the outer
+  group-offsets (cumsum of variant counts — structural, no second data copy); or a small numba
+  2-level pack kernel. Settle the exact mechanism in the plan, gated by byte-identity.
+- Reassemble the record from the packed fields.
+
+### Left awkward (documented, irreducible-ish)
+
+- `ak.zip` in `RaggedVariants.__init__` — the record-array construction. Cheap layout wrap; keeping
+  it is the cost of the frozen `ak.Array` public type. This is the documented limit of "remove
+  awkward as much as possible" for variants.
+
+### Testing
+
+- **Byte-identity gate:** add a `variants` case to `tests/dataset/test_flat_getitem_snapshot.py`
+  (`with_seqs("variants")`, ragged). Extend `_flatten_output` to serialize a `RaggedVariants`
+  (each field's data + both offset levels for alt/ref). Regenerate that one `.npz`.
+- **Unit:** flat `rc_` vs old awkward `rc_` byte-identical (cases: `to_rc=None`, all-False early
+  return, mixed-strand mask, multi-ploidy); field-wise `to_packed()` vs `ak.to_packed(self)`
+  byte-identical, including a **sliced/scattered** input (the case `to_packed` exists to handle);
+  gather swaps vs the old `ak.to_packed(<idx>)` byte-identical.
+- **Awkward guard:** add a `variants` case to `tests/dataset/test_no_awkward_in_hotpath.py` asserting
+  the gathers + `rc_` + `to_packed` no longer dispatch awkward — i.e. `ak.where`/`ak.str`/`ak.to_packed`
+  call counts are 0; document that `ak.zip` (record construction) is the only remaining awkward and is
+  intentionally excluded (mirroring the existing `RaggedVariants` carve-out note).
+- **Profiling:** re-run `--mode variants` (memray + `sudo py-spy`) and refresh the variants row of the
+  REGRESSIONS.md A/B; the gather `_carry` / `ak.str` RC / `to_packed` frames should drop out, leaving
+  `ak.zip` + the gvl numba kernels as the residual.
+
+### Risks
+
+- **C2 leaf-buffer extraction + mask broadcast**: reaching the correct innermost byte buffer/offsets
+  across the `RegularArray`/`ListOffsetArray` nesting, and the batch→ploidy→variants mask broadcast,
+  are the correctness pins. Byte-identity unit test + snapshot guard them.
+- **C2/C3 in-place buffer sharing**: confirm the extracted buffer is the `ak.Array`'s actual buffer
+  (not a copy) so mutation is visible; otherwise rebuild the layout from the packed buffer.
+- **AF-filter flatness**: `genos[_keep]` (bool-mask) + `to_regular` may still touch awkward; verify and
+  document if so (this path is opt-in via `min_af`/`max_af`).
+
+### Acceptance
+
+- `with_seqs("variants")` output byte-identical to pre-change (new snapshot case + dataset suite green).
+- Awkward guard: variants gathers + `rc_` + `to_packed` dispatch 0 awkward; only `ak.zip` remains
+  (documented).
+- memray + py-spy A/B show the variants awkward self-time (~4.21 s) substantially reduced; record the
+  residual (`ak.zip` + numba kernels).
+
+### Worth-it check
+
+Higher value than FU-2: variants is a primary output mode and carried the **largest** residual awkward
+CPU after PR #205. seqpro 0.14 collapses the gathers to one-liners, so the cost is concentrated in C2
+(flat `rc_`) and C3's alt/ref 2-level pack — bounded, well-understood work. The frozen `ak.Array`
+container means `ak.zip` stays; that is the acknowledged floor.
