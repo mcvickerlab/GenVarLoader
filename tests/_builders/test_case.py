@@ -49,3 +49,33 @@ def test_build_case_produces_all_artifacts(tmp_path: Path):
     # Ground truth is exposed and shaped (n_variants, n_samples, ploidy).
     assert case.truth.genotypes.shape == (1, 2, 2)
     assert case.samples == ["s0", "s1"]
+
+
+def test_session_document_shapes(tmp_path: Path):
+    from tests._builders.case import session_document, session_reference
+
+    spec = session_reference()
+    ref = spec.write(tmp_path / "ref.fa.bgz")
+    doc = session_document(spec)
+    text = doc.render()
+
+    # Standardized samples.
+    header = next(l for l in text.splitlines() if l.startswith("#CHROM"))
+    assert header.endswith("s0\ts1\ts2")
+
+    # Standardized contigs only.
+    assert "##contig=<ID=chr1," in text
+    assert "##contig=<ID=chr2," in text
+    assert "chr19" not in text and "chr20" not in text
+
+    # The 10-bp deletion coupled to test_write_edge_cases is at chr1:1010696.
+    assert any(
+        line.startswith("chr1\t1010696\t") and "GAGACGGGGCC" in line
+        for line in text.splitlines()
+    )
+
+    # Reference bases match the engineered REF alleles + N telomere.
+    with pysam.FastaFile(str(ref)) as fa:
+        assert fa.fetch("chr1", 0, 150).upper() == "N" * 150
+        assert fa.fetch("chr1", 1010695, 1010706).upper() == "GAGACGGGGCC"
+        assert fa.fetch("chr2", 14369, 14370).upper() == "N"
