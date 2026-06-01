@@ -11,11 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, cast, overload
 
-import awkward as ak
 import numpy as np
 from numpy.typing import NDArray
 from seqpro.rag import DTYPE_co as DTYPE
-from seqpro.rag import Ragged, is_rag_dtype
+from seqpro.rag import Ragged
 from typing_extensions import assert_never
 
 from .._flat import _Flat, _FlatAnnotatedHaps
@@ -23,8 +22,6 @@ from .._ragged import (
     RaggedAnnotatedHaps,
     RaggedIntervals,
     _COMP,
-    reverse_complement_masked,
-    to_padded,
 )
 from .._types import AnnotatedHaps, StrIdx
 from ._haps import Haps
@@ -101,8 +98,7 @@ def getitem(
     elif isinstance(view.output_length, int):
         recon = tuple(
             r if isinstance(r, (RaggedVariants, RaggedIntervals))
-            else r.to_fixed(view.output_length) if isinstance(r, (_Flat, _FlatAnnotatedHaps))
-            else r.to_numpy()
+            else r.to_fixed(view.output_length)
             for r in recon
         )
 
@@ -348,23 +344,11 @@ def reverse_complement_ragged(
         return rag.reverse_masked(to_rc, comp=comp)
     if isinstance(rag, _FlatAnnotatedHaps):
         return rag.reverse_masked(to_rc, _COMP)
-    if isinstance(rag, Ragged):
-        if is_rag_dtype(rag, np.bytes_):
-            # Flat-buffer in-place RC of the freshly reconstructed batch.
-            rag = reverse_complement_masked(rag, to_rc)
-        else:
-            rag = Ragged(ak.to_packed(ak.where(to_rc, rag[..., ::-1], rag)))
-    elif isinstance(rag, RaggedAnnotatedHaps):
-        rag.haps = reverse_complement_ragged(rag.haps, to_rc)
-        rag.var_idxs = reverse_complement_ragged(rag.var_idxs, to_rc)
-        rag.ref_coords = reverse_complement_ragged(rag.ref_coords, to_rc)
-    elif isinstance(rag, RaggedVariants):
-        rag = rag.rc_(to_rc)
-    elif isinstance(rag, RaggedIntervals):
-        rag = rag
-    else:
-        assert_never(rag)
-    return rag
+    if isinstance(rag, RaggedVariants):
+        return rag.rc_(to_rc)
+    if isinstance(rag, RaggedIntervals):
+        return rag
+    assert_never(rag)  # type: ignore[arg-type]
 
 
 @overload
@@ -373,24 +357,14 @@ def pad(rag: Ragged[DTYPE]) -> NDArray[DTYPE]: ...
 def pad(rag: RaggedAnnotatedHaps) -> AnnotatedHaps: ...
 def pad(rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
     """Materialize a Ragged (or RaggedAnnotatedHaps) into a dense padded array."""
-    if isinstance(rag, (_Flat, _FlatAnnotatedHaps)):
-        if isinstance(rag, _Flat):
-            if rag.data.dtype.kind == "S":
-                return rag.view("S1").to_padded(b"N")
-            else:
-                return rag.to_padded(0)
-        return rag.to_padded()
-    if isinstance(rag, Ragged):
-        if is_rag_dtype(rag, np.bytes_):
-            return to_padded(rag, b"N")
-        elif is_rag_dtype(rag, np.float32):
-            return to_padded(rag, 0)
+    if isinstance(rag, _Flat):
+        if rag.data.dtype.kind == "S":
+            return rag.view("S1").to_padded(b"N")
         else:
-            raise ValueError(f"Unsupported pad dtype: {rag.data.dtype}")
-    elif isinstance(rag, RaggedAnnotatedHaps):
+            return rag.to_padded(0)
+    if isinstance(rag, _FlatAnnotatedHaps):
         return rag.to_padded()
-    else:
-        assert_never(rag)
+    assert_never(rag)  # type: ignore[arg-type]
 
 
 def _regroup(

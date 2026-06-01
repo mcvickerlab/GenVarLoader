@@ -489,3 +489,117 @@ transform flattening done in Tasks 5–9.
 
 **No files changed. Gate results:** `pytest tests/dataset -q -m "not slow"` → 44 passed;
 `pytest tests/dataset/test_flat_getitem_snapshot.py -q` → 9 passed.
+
+---
+
+### Task 11 (2026-06-01): Flat-buffer getitem refactor — final A/B write-up
+
+#### Summary of changes (Tasks 1–11)
+
+All non-variant reconstructors (`Ref`, `Haps`/annotated, `Tracks` float32,
+`RefTracks`, `HapsTracks`) now return `_Flat`/`_FlatAnnotatedHaps` — pure-numpy
+`(data, offsets, shape)` containers that route through flat numba kernels for
+RC and padding without any awkward dispatch. `RaggedVariants` stays awkward-native
+by deliberate design (Task 10: allele strings are genuinely VLVL; numeric fields
+have no awkward intermediate; flattening the public API boundary is out-of-scope).
+
+The legacy `isinstance(rag, Ragged)` and `isinstance(rag, RaggedAnnotatedHaps)` branches
+in `reverse_complement_ragged` and `pad` that handled pre-flat reconstructor output were
+removed in Task 11 (grep-verified unreachable: no `Ragged.from_offsets` / `RaggedAnnotatedHaps`
+call in any reconstructor's `__call__`; all return `_Flat` cast as `Ragged` via type hints).
+The `else r.to_numpy()` fallback in the int-densify step was likewise removed. An awkward
+guard test (`tests/dataset/test_no_awkward_in_hotpath.py`) now asserts 0 awkward dispatches
+across `tracks_fixed`, `haps_fixed`, `ref_fixed`, `haps_tracks_fixed`, and `haps_ragged`.
+
+#### Flat-buffer getitem refactor A/B: Task 0 baseline vs final (memray, N_BATCHES=2000, batch=32)
+
+Dataset: `chr22_geuv.gvl` (5 samples, chr22, GEUVADIS, 165 regions, `extend_to_length=False`).
+`NUMBA_NUM_THREADS=1`. Both baseline and final use the same fixed dataset (committed at `638dcf6`).
+Baseline = pre-refactor commit; final = current branch tip (Task 11).
+
+**Tracks mode** (`with_seqs(None).with_tracks(...).with_len(16384)`):
+
+| metric | baseline | final | delta |
+|---|---|---|---|
+| Total allocated | 41.953 GB | 8.248 GB | **−80.3%** |
+| Total allocations | 584,855 | 544,653 | −6.9% |
+| Peak RSS | 3.570 GB | 3.569 GB | ~0 |
+
+Top gvl-attributable allocators by size:
+
+| frame | baseline | final |
+|---|---|---|
+| `awkward array_module.empty` | 16.819 GB | (not in top 5) |
+| `awkward array_module.concat` | 8.410 GB | (not in top 5) |
+| `awkward numpyarray._carry` | 8.410 GB | (not in top 5) |
+| `_call_float32` (track output buffer) | 4.205 GB | 4.205 GB (unchanged) |
+
+The three awkward `empty`/`concat`/`_carry` frames that dominated tracks-baseline
+cumulative allocation are absent from the final top-5; the remaining dominant allocator
+is the unavoidable track output `np.empty` buffer.
+
+**Haplotypes mode** (`with_seqs("haplotypes").with_tracks(...).with_len(16384)`):
+
+| metric | baseline | final | delta |
+|---|---|---|---|
+| Total allocated | 88.162 GB | 18.774 GB | **−78.7%** |
+| Total allocations | 843,357 | 781,335 | −7.4% |
+| Peak RSS | 3.588 GB | 3.569 GB | ~0 |
+
+Top gvl-attributable allocators by size:
+
+| frame | baseline | final |
+|---|---|---|
+| `awkward array_module.empty` | 35.747 GB | (not in top 5) |
+| `awkward array_module.concat` | 16.819 GB | (not in top 5) |
+| `awkward numpyarray._carry` | 16.819 GB | (not in top 5) |
+| `_reconstruct.py __call__` (track out) | 8.410 GB | 8.410 GB (unchanged) |
+| `_reconstruct_haplotypes` (hap buffer) | (not in top 5) | 2.102 GB |
+
+The awkward frames vanish. `_reconstruct_haplotypes` (the flat numba buffer allocation)
+surfaces in the final top-5 as the haps-specific allocation, which is expected.
+
+**Variants mode** (`with_seqs("variants").with_tracks(...).with_len(16384)`):
+
+| metric | baseline | final | delta |
+|---|---|---|---|
+| Total allocated | 84.586 GB | 17.265 GB | **−79.6%** |
+| Total allocations | 1,066,033 | 1,003,429 | −5.9% |
+| Peak RSS | 3.587 GB | 3.569 GB | ~0 |
+
+Top gvl-attributable allocators by size:
+
+| frame | baseline | final |
+|---|---|---|
+| `awkward array_module.empty` | 33.854 GB | 209 MB (residual, RaggedVariants-native) |
+| `awkward numpyarray._carry` | 16.832 GB | (not in top 5) |
+| `awkward array_module.concat` | 16.824 GB | (not in top 5) |
+| `_reconstruct.py __call__` (track out) | 8.410 GB | 8.410 GB (unchanged) |
+
+Variants retain a small residual awkward `empty` footprint (209 MB, ~52 K calls)
+from `RaggedVariants` construction — this is the irreducible minimum for the awkward-native
+variants path (Task 10 deliberate decision). The bulk (33.6 GB → 209 MB, **−99.4%** on the
+`empty` frame alone) is eliminated.
+
+#### Takeaway
+
+Across all three modes, cumulative memory allocation drops **~79–80%** (total allocated;
+peak RSS is flat — the dominant `np.empty` for track output and hap reconstruction buffers
+is unchanged). The eliminated allocations are the awkward `empty`/`concat`/`_carry` frames
+that performed per-batch ragged assembly in the old path.
+
+Peak RSS is unchanged because the peak-RSS bottleneck is the track output buffer
+(`_reconstruct.py` lines 152/183 — `np.empty` for the pre-allocated flat out array and
+per-track scratch, together 4.2 + 8.4 GB cumulative = peak in the steady state), which
+is retained in both baseline and final.
+
+#### py-spy self-time A/B: PENDING final py-spy run
+
+The baseline py-spy speedscope files exist at
+`tests/benchmarks/profiling/*.baseline.speedscope.json`. A final py-spy run requires `sudo`
+on macOS and must be run by the maintainer. Add the self-time A/B comparison here once the
+`haps.speedscope.json` / `tracks.speedscope.json` / `variants.speedscope.json` final files
+are captured. Expected signal: the `awkward numpyarray._carry` / `_kernels.__call__` / `concat`
+self-time frames (39–53% of hot-path self-time at baseline) should drop substantially;
+`intervals_to_tracks` and `_reconstruct_haplotypes` should surface as the dominant residual
+gvl-side costs.
