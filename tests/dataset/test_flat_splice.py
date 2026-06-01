@@ -126,5 +126,9 @@ def test_haps_spliced_flat_byte_identity(phased_vcf_gvl, reference):
     assert isinstance(t1_s0, Ragged), f"Expected Ragged, got {type(t1_s0)}"
     assert t1_s0.shape == (2, None)
 
-    np.testing.assert_array_equal(_row(t1_s0, 0), exp_h0, err_msg="T1 s0 h0 spliced bytes")
-    np.testing.assert_array_equal(_row(t1_s0, 1), exp_h1, err_msg="T1 s0 h1 spliced bytes")
+    np.testing.assert_array_equal(
+        _row(t1_s0, 0), exp_h0, err_msg="T1 s0 h0 spliced bytes"
+    )
+    np.testing.assert_array_equal(
+        _row(t1_s0, 1), exp_h1, err_msg="T1 s0 h1 spliced bytes"
+    )

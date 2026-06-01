@@ -40,6 +40,7 @@ def test_to_padded_matches_seqpro():
     off = np.array([0, 2, 5], np.int64)  # rows len 2 and 3
     f = _Flat.from_offsets(data, (2, None), off)
     from genvarloader._ragged import to_padded
+
     expected = to_padded(_rag(data, (2, None), off), -1)
     np.testing.assert_array_equal(f.to_padded(-1), expected)
 
@@ -62,6 +63,7 @@ def test_squeeze_outer_one():
 
 def test_reverse_masked_int_matches_awkward():
     import awkward as ak
+
     data = np.arange(10, dtype=np.int32)
     off = np.array([0, 3, 6, 10], np.int64)  # 3 rows
     mask = np.array([True, False, True])
@@ -76,6 +78,7 @@ def test_reverse_masked_int_matches_awkward():
 
 def test_reverse_masked_dna_matches_existing():
     from genvarloader._ragged import reverse_complement_masked, _COMP  # noqa
+
     seq = np.frombuffer(b"ACGTAACCGGTT", dtype="S1")
     off = np.array([0, 4, 12], np.int64)  # 2 rows
     mask = np.array([True, False])
@@ -87,8 +90,11 @@ def test_reverse_masked_dna_matches_existing():
 
 def test_flat_annotated_to_ragged():
     from genvarloader._flat import _Flat, _FlatAnnotatedHaps
+
     off = np.array([0, 2, 4], np.int64)
-    h = _Flat.from_offsets(np.frombuffer(b"ACGT", "S1").view(np.uint8).copy(), (2, None), off)
+    h = _Flat.from_offsets(
+        np.frombuffer(b"ACGT", "S1").view(np.uint8).copy(), (2, None), off
+    )
     v = _Flat.from_offsets(np.array([0, 1, 2, 3], np.int32), (2, None), off)
     p = _Flat.from_offsets(np.array([10, 11, 12, 13], np.int32), (2, None), off)
     rah = _FlatAnnotatedHaps(h, v, p).to_ragged()

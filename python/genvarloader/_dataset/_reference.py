@@ -458,6 +458,7 @@ class RefDataset(Generic[T]):
             to_rc_unperm = regions[:, 3] == -1
             if to_rc_unperm.any():
                 from .._ragged import _COMP
+
                 to_rc_perm = to_rc_unperm[plan.permutation]
                 per_elem = per_elem.reverse_masked(to_rc_perm, comp=_COMP)
 
@@ -465,7 +466,9 @@ class RefDataset(Generic[T]):
         # + squeeze(1) trick since RefDataset has no sample axis.
         ref = cast(
             Ragged[np.bytes_],
-            _Flat.from_offsets(per_elem.data, (n_rows, None), plan.group_offsets).to_ragged(),
+            _Flat.from_offsets(
+                per_elem.data, (n_rows, None), plan.group_offsets
+            ).to_ragged(),
         )
 
         if out_reshape is not None:
@@ -706,7 +709,9 @@ def _fetch_spliced_ref(
     n_elements = plan.permuted_lengths.shape[0]
     return cast(
         "_Flat[np.bytes_]",
-        _Flat.from_offsets(raw, (n_elements, None), plan.permuted_out_offsets).view("S1"),
+        _Flat.from_offsets(raw, (n_elements, None), plan.permuted_out_offsets).view(
+            "S1"
+        ),
     )
 
 

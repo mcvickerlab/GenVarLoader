@@ -818,7 +818,9 @@ class Haps(Reconstructor[_H]):
         per_elem_shape = (splice_plan.permuted_lengths.shape[0], None)
         return cast(
             "Ragged[np.bytes_]",
-            _Flat.from_offsets(out_buf, per_elem_shape, splice_plan.permuted_out_offsets).view("S1"),
+            _Flat.from_offsets(
+                out_buf, per_elem_shape, splice_plan.permuted_out_offsets
+            ).view("S1"),
         )
 
     def _reconstruct_annotated_haplotypes(

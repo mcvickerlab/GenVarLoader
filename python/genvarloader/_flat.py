@@ -85,7 +85,9 @@ class _Flat(Generic[RDTYPE]):
             del outer[axis]
         return _Flat(self.data, self.offsets, (*outer, None))
 
-    def reverse_masked(self, mask: NDArray[np.bool_], comp: NDArray | None = None) -> "_Flat":
+    def reverse_masked(
+        self, mask: NDArray[np.bool_], comp: NDArray | None = None
+    ) -> "_Flat":
         """Reverse (or DNA reverse-complement) the `mask`-selected rows.
 
         ``comp`` is a **mode selector**, not a complement LUT that gets applied:
@@ -141,7 +143,9 @@ class _FlatAnnotatedHaps:
     def shape(self) -> tuple[int | None, ...]:
         return self.haps.shape
 
-    def reverse_masked(self, mask: NDArray[np.bool_], comp: NDArray) -> "_FlatAnnotatedHaps":
+    def reverse_masked(
+        self, mask: NDArray[np.bool_], comp: NDArray
+    ) -> "_FlatAnnotatedHaps":
         self.haps = self.haps.reverse_masked(mask, comp=comp)
         self.var_idxs = self.var_idxs.reverse_masked(mask)
         self.ref_coords = self.ref_coords.reverse_masked(mask)

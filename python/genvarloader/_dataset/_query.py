@@ -96,7 +96,8 @@ def getitem(
         )
     elif isinstance(view.output_length, int):
         recon = tuple(
-            r if isinstance(r, (RaggedVariants, RaggedIntervals))
+            r
+            if isinstance(r, (RaggedVariants, RaggedIntervals))
             else r.to_fixed(view.output_length)
             for r in recon
         )
@@ -318,9 +319,7 @@ def build_recon_splice_plan(
 
 
 @overload
-def reverse_complement_ragged(
-    rag: _Flat, to_rc: NDArray[np.bool_]
-) -> _Flat: ...
+def reverse_complement_ragged(rag: _Flat, to_rc: NDArray[np.bool_]) -> _Flat: ...
 @overload
 def reverse_complement_ragged(
     rag: _FlatAnnotatedHaps, to_rc: NDArray[np.bool_]
