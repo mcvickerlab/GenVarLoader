@@ -379,11 +379,48 @@ int32+`iinfo.max`, float32+`0.0`, `(batch, ploidy, None)` leading dims, sliced n
 `seqpro.rag` imports — a pre-existing resolver artifact that also affects the `reverse_complement`
 import; the symbols resolve at runtime and tests pass.)
 
-**Still open — 0.6.1 throughput parity.** The two awkward transform hotspots (RC, `to_padded`)
-are now closed on the 0.24.x side, but parity with 0.6.1 is **not** yet established. Remaining
-gap-closers tracked here as we work them: (a) **re-profile** the tracks/haps hot path on this
-branch (`pixi run -e dev profile-tracks`/`-haps`) to confirm the awkward `empty`/`concat`/`_carry`
-self-time actually dropped now that both transforms are flat — and surface the new top frame;
-(b) the controlled 0.6.1↔0.24.x bisect on the cluster-scale dataset to attribute the ~18–20×
-tracks regression to a frame; (c) re-run the parity probe after the dataset rebase (post-#197,
-`extend_to_length=False`). Update this section as each lands until the 0.6.1 gap is closed.
+### Re-profile after RC + `to_padded` (2026-05-31, local slice; memray + py-spy)
+
+Re-profiled (memray allocation + `sudo py-spy` self-time) on the **regenerated, correct**
+`chr22_geuv.gvl` slice (option 2: `extend_to_length=False` + exact-window variants, fixed after
+merging main's #197 PGEN fix — regions ~16,384 bp, `intervals.npy` 10.4 MB, `variants.arrow`
+6.5 MB), `NUMBA_NUM_THREADS=1`, seqlen 16384, batch 32 × 200 batches.
+
+> **⚠️ The earlier "Profiling results" baseline is NOT a clean comparator.** It was run on the
+> **broken** committed dataset (regions up to 3.1 Mb, `intervals.npy` 36 MB). This re-profile is
+> on the **fixed** dataset. So before/after deltas conflate the flat-buffer transforms with the
+> dataset fix — they do **not** isolate the transform effect. Treat the numbers below as a
+> **current-state localization** on the correct dataset, not as a measured speedup. A clean
+> isolation needs a same-(fixed-)dataset A/B (revert the flat transforms, re-profile) or the
+> cluster-scale throughput bisect. Also: this slice is tiny and noisy — the `getitem` hot path is
+> only 28% (tracks) / 52% (haps) / 61% (variants) of wall; the rest is one-time JIT/import.
+
+**Current-state self-time within the `getitem` hot path (py-spy, fixed dataset, flat RC+to_padded):**
+- **Tracks:** awkward `_carry` 23.5%, awkward `_kernels.__call__` 16.2%, `intervals_to_tracks`
+  (`_tracks.py` `_call_float32`) 10.3%, `reverse_complement_ragged` self **2.9%**.
+- **Haps:** awkward `_kernels.__call__` 29.3%, `_carry` 14.6%, `_reconstruct_haplotypes` 5.7%,
+  `concat` 4.9%, `_getitem_unspliced` 4.1%, `reverse_complement_ragged` self 3.3%.
+- **Variants:** `_carry` 15.8%, `_kernels.__call__` 15.2%, `concat` 7.1%, `_reconstruct` dispatch 8.6%.
+- **Awkward ragged-assembly self-time (`_carry`+`_kernels`+`concat`) = 39–53% of the hot path**
+  (tracks 43%, haps 53%, variants 39%) — the single largest bucket in every mode.
+
+**Two clean takeaways (independent of the broken-baseline confound):**
+1. **The dominant cost is awkward ragged assembly**, not the transforms we flattened: `_carry` +
+   `_kernels.__call__` + `concat` (per-region `ak.concatenate` + the `_carry` of fancy-indexing
+   `dataset[regions,samples]`) is ~40–53% of hot-path self-time; gvl's own numba kernels
+   (`intervals_to_tracks` 10% tracks, `_reconstruct_haplotypes` 6% haps) are a clear second tier.
+2. **The flat RC kernel itself is cheap, but its awkward *glue* isn't fully gone.**
+   `reverse_complement_ragged` is ~23% of wall inclusive (tracks), yet its kernel self-time is only
+   ~3% — ~half of that 23% is awkward `_carry`/`_kernels` + seqpro `Ragged.__getitem__`/`__init__`/
+   `ak`-dispatch *around* the flat kernel (contiguity/packing + Ragged (re)construction). So even a
+   flat transform still pays awkward wrapping on each call.
+
+**Still open — 0.6.1 throughput parity.** RC + `to_padded` are flat and the dataset is correct, but
+the transform *effect* is not yet cleanly measured and the dominant *assembly* cost remains.
+Remaining gap-closers: (a) a **same-dataset A/B** (revert the flat transforms on the fixed slice,
+re-profile) to actually isolate the RC+to_padded effect — local and cheap, but the slice is noisy;
+(b) flat-buffer / de-awkward the **ragged-assembly path** in `_getitem` (the per-region
+`ak.concatenate` + fancy-index `_carry`, now the #1 self-time bucket) and the awkward glue around
+the flat kernels — the biggest remaining lever, harder than the standalone transforms; (c) the
+controlled 0.6.1↔0.24.x bisect on the **cluster-scale** dataset — the only real proof of the
+~18–20× throughput regression and its fix. Update this section as each lands until the gap closes.
