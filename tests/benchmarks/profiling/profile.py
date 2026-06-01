@@ -25,7 +25,7 @@ DS_PATH = DATA / "chr22_geuv.gvl"
 REF_PATH = DATA / "chr22.masked.fa.gz"
 SEQLEN = 16384
 BATCH = 32
-N_BATCHES = 200
+N_BATCHES = 2000
 BURN_IN = 5
 
 
