@@ -723,19 +723,52 @@ Fixed overhead (module import + `Dataset.open` + 5 burn-in batches) measured sep
 `ak.to_packed`/`ak.where`/`ak_str.reverse` dispatches) in favor of seqpro flat-buffer kernels.
 `to_packed` has no production getitem caller, so its speedup is not captured here (unit-tested only).
 
-#### py-spy CPU self-time A/B
+#### py-spy CPU self-time A/B (2026-06-01, `sudo py-spy`, variants mode, fixed dataset, single-thread)
 
-**PENDING** — py-spy requires `sudo` on macOS and must be run by the maintainer. (The wall-clock
-A/B above already confirms the ~1.5× hot-path speedup; py-spy will attribute it to the dropped frames.)
+Same methodology as the Task 11 py-spy A/B above: leaf self-time aggregated from speedscope
+samples (weights = seconds of sampled CPU); "getitem hot path" = samples whose stack passes
+through `_dataset/_query.py`; "awkward self-time" = leaf self-time in awkward-library frames.
+Task 0 and FU-3 columns recomputed from the preserved `variants.baseline.speedscope.json` and
+the maintainer's FU-3 `variants.speedscope.json`; the Task 11 column is carried from the table
+above (its source speedscope was overwritten by the FU-3 run). The parser reproduces the Task 0
+baseline to within sampling noise (wall 18.59 s, getitem 17.17 s, awkward 12.85 s / 74.8 %),
+confirming methodology parity.
 
-Run: `sudo bash tests/benchmarks/profiling/run_pyspy.sh`
-(runs all three modes; writes `tests/benchmarks/profiling/{tracks,haplotypes,variants}.speedscope.json`)
+| metric (variants mode)              | Task 0 baseline | Task 11 (pre-FU-3) | FU-3 |
+|-------------------------------------|-----------------|--------------------|------|
+| total sampled wall (s)              | 18.59           | 9.02               | **5.09** |
+| getitem hot-path self-time (s)      | 17.17           | 7.64               | **4.04** |
+| awkward leaf self-time in getitem   | 12.85 (74.8 %)  | 4.21 (55.1 %)      | **1.72 (42.6 %)** |
 
-For the FU-3 variants A/B specifically: compare the new `variants.speedscope.json` to
-`variants.final.memray.bin`-era profile (`variants.speedscope.json` from Task 11). Expected signal:
-`ak.to_packed`/`ak_str.reverse`/`ak.where` self-time in the variants hot path should drop to 0
-(replaced by `seqpro._pack` + `reverse_complement_masked`). The `ak.zip` / `_get_alleles` frames
-are the documented residual and should be unchanged.
+**FU-3-specific delta (Task 11 → FU-3):** awkward self-time within getitem **4.21 s → 1.72 s
+(−59 %)**, getitem self-time 7.64 s → 4.04 s (−47 %), total sampled wall 9.02 s → 5.09 s (1.77×).
+This is the CPU-self-time counterpart to the wall-clock A/B above (~1.5× on the steady-state loop;
+the larger 1.77× here includes one-time JIT/import, which py-spy samples).
+
+**The targeted awkward kernels are eliminated** — per-frame leaf self-time within getitem,
+Task 0 → FU-3:
+
+| awkward frame (gather/RC kernel)            | Task 0 | FU-3 |
+|---------------------------------------------|--------|------|
+| `_kernels.__call__`                         | 3.22 s | **0** |
+| `numpyarray._carry`                         | 2.39 s | **0** |
+| `array_module.concat`                       | 0.75 s | **0** |
+| `listarray.to_ListOffsetArray64`            | 0.18 s | **0** |
+| `index.__init__`                            | 0.47 s | 0.14 s |
+
+FU-3's entire 1.72 s awkward residual is diffuse `ak.zip` record-construction + layout-wrap glue
+— every remaining awkward leaf frame is <0.15 s (`wrap_layout`, `highlevel.__setattr__/__getattr__`,
+`listoffsetarray.__init__`, `regulararray._getitem_next`, `_errors.*`), with **no** awkward
+*kernel* frames (`_carry`, `_kernels.__call__`, `concat`) left. That matches the documented floor:
+`ak.zip` is the irreducible cost of constructing the public `RaggedVariants` `ak.Array` container
+each batch (see the awkward guard below), not the per-batch gather/RC churn FU-3 removed.
+
+**Caveats:** the chr22 GEUVADIS slice is tiny (getitem-inclusive samples are <100 % of each
+profile; one-time JIT/import inflates total wall), single-thread, and py-spy sampling is
+statistical (~few-percent frames are noisy). The Task 11 → FU-3 row mixes two separate py-spy
+sessions, so treat those deltas as approximate; the Task 0 → FU-3 frame-level elimination (kernels
+→ 0) is from a single consistent parser pass and is unambiguous. Reproduce with
+`sudo bash tests/benchmarks/profiling/run_pyspy.sh`.
 
 #### Awkward guard
 
