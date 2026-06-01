@@ -703,9 +703,30 @@ the variants-specific awkward overhead. The removed 209 MB awkward `empty` was i
 after the Task 11 refactor had already eliminated the ~33.6 GB that was present in the Task 0
 baseline.
 
+#### Wall-clock A/B (variants getitem hot path, no sudo required)
+
+Direct end-to-end timing of `profile.py --mode variants` (`chr22_geuv.gvl`, batch=32,
+N_BATCHES=4000, NUMBA_NUM_THREADS=1, median of 3 runs). The A/B swaps **only** the two
+hot-path files (`_haps.py`, `_rag_variants.py`) between the pre-FU-3 commit (`559d882`,
+awkward gathers + awkward `rc_`) and FU-3 HEAD (seqpro flat gathers + flat in-place `rc_`);
+everything else (dataset, reference, Rust ext, seqpro 0.14) is held constant.
+
+| variant            | wall (4000 batches) | fixed overhead | loop-only | per-batch |
+|--------------------|---------------------|----------------|-----------|-----------|
+| pre-FU-3 (awkward) | 16.21 s             | 1.37 s         | 14.84 s   | 3.71 ms   |
+| FU-3 (flat seqpro) | 11.11 s             | 1.37 s         | 9.74 s    | 2.44 ms   |
+| **delta**          | **−31% (1.46×)**    | —              | **−34% (1.52×)** | **−1.27 ms** |
+
+Fixed overhead (module import + `Dataset.open` + 5 burn-in batches) measured separately at
+1.37 s and subtracted to isolate the per-batch loop cost. The variants getitem loop is
+**~1.5× faster**; the gain is the removal of the per-batch awkward gather/RC kernels (the
+`ak.to_packed`/`ak.where`/`ak_str.reverse` dispatches) in favor of seqpro flat-buffer kernels.
+`to_packed` has no production getitem caller, so its speedup is not captured here (unit-tested only).
+
 #### py-spy CPU self-time A/B
 
-**PENDING** — py-spy requires `sudo` on macOS and must be run by the maintainer.
+**PENDING** — py-spy requires `sudo` on macOS and must be run by the maintainer. (The wall-clock
+A/B above already confirms the ~1.5× hot-path speedup; py-spy will attribute it to the dropped frames.)
 
 Run: `sudo bash tests/benchmarks/profiling/run_pyspy.sh`
 (runs all three modes; writes `tests/benchmarks/profiling/{tracks,haplotypes,variants}.speedscope.json`)
