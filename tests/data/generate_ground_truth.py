@@ -1,318 +1,75 @@
+"""Regenerate the committed toy *inputs* (reference, normalized VCF, PGEN,
+SVAR, BED) under tests/data/ via the shared `build_case` pipeline.
+
+Phase 2: the consensus FASTAs and phased_dataset.*.gvl/ datasets are NO LONGER
+committed — they are built per-session in conftest (and per-example in the
+property tests) from the same `session_document`. This task only persists the
+inputs that the self-contained write/track/edge tests and the FASTA-only unit
+tests consume.
+"""
 from __future__ import annotations
 
-import subprocess
+import shutil
+import sys
+import tempfile
 from pathlib import Path
-from textwrap import dedent
-from typing import Annotated
-
-import numpy as np
-import typer
 
 WDIR = Path(__file__).resolve().parent
-SEQ_LEN = 20
+sys.path.insert(0, str(WDIR.parent / "_builders"))
 
 
-def run_shell(cmd: list[str], input=None):
-    try:
-        prc = subprocess.run(cmd, check=True, capture_output=True, input=input)
-    except subprocess.CalledProcessError as e:
-        print("Command:", " ".join(e.cmd))
-        print("Stdout:", e.stdout.decode())
-        print("Error message:", e.stderr.decode())
-        raise e
-    return prc
-
-
-def main(
-    name: Annotated[
-        str,
-        typer.Argument(
-            help=dedent(
-                """
-            Prefix for files. There should be a file named <name>.vcf and then this
-            script will generate <name>.bed and <name>_<sample>_nr<row_nr>_h<hap_nr>.fa
-            files.
-            """
-            ),
-        ),
-    ] = "source",
-    indels: Annotated[bool, typer.Option(help="Whether to include indels.")] = True,
-    structural_variants: Annotated[
-        bool, typer.Option(help="Whether to include structural variants.")
-    ] = False,
-    multiallelic: Annotated[
-        bool, typer.Option(help="Whether to allow multiallelic variants.")
-    ] = False,
-):
-    """Generate ground truth variant sequences using `bcftools consensus`."""
-    import shutil
-    from time import perf_counter
-
-    import genvarloader as gvl
+def main() -> None:
     import polars as pl
-    import polars.selectors as cs
-    from genoray import PGEN, VCF, SparseVar
-    from loguru import logger
-    from tqdm.auto import tqdm
+    from case import SEQ_LEN, build_case, session_document, session_reference
 
-    log_file = Path(__file__).parent / "generate_ground_truth.log"
-    if log_file.exists():
-        log_file.unlink()
-    _ = logger.add(log_file, level="DEBUG")
+    spec = session_reference()
+    doc = session_document(spec)
 
-    logger.info(
-        "Running command:\n"
-        f"generate_ground_truth.py {name} --indels {indels} --structural-variants {structural_variants} --multiallelic {multiallelic}"
-    )
-
-    t0 = perf_counter()
-
-    consensus_dir = WDIR / "consensus"
-    if consensus_dir.exists():
-        shutil.rmtree(consensus_dir)
-    consensus_dir.mkdir(0o777, parents=True, exist_ok=True)
-
-    vcf_dir = WDIR / "vcf"
-    if vcf_dir.exists():
-        shutil.rmtree(vcf_dir)
-    vcf_dir.mkdir(0o777, parents=True, exist_ok=True)
-
-    pgen_dir = WDIR / "pgen"
-    if pgen_dir.exists():
-        shutil.rmtree(pgen_dir)
-    pgen_dir.mkdir(0o777, parents=True, exist_ok=True)
-
-    fasta_dir = WDIR / "fasta"
-    fasta_dir.mkdir(0o777, parents=True, exist_ok=True)
-    from _synthetic import build_source_vcf, write_synthetic_reference
-
-    reference = write_synthetic_reference(fasta_dir / "synthetic.fa.bgz", seed=0)
-
-    filtered_vcf = WDIR / "vcf" / f"filtered_{name}.vcf"
-
-    # Re-encode the (formerly hand-authored) source VCF programmatically.
-    vcf = build_source_vcf(reference).render().encode()
-    # left-align
-    norm_cmd = [
-        "bcftools",
-        "norm",
-        "-f",
-        str(reference),
-    ]
-    result = run_shell(norm_cmd, input=vcf)
-    logger.info(f"Left-alignment: {result.stderr.decode()}")
-    vcf = result.stdout
-
-    if not multiallelic:
-        logger.info("Splitting multiallelic variants.")
-        split_multiallelics_cmd = [
-            "bcftools",
-            "norm",
-            "-a",
-            "--atom-overlaps",
-            ".",
-            "-f",
-            str(reference),
-            "-m",
-            "-",
-        ]
-        result = run_shell(split_multiallelics_cmd, input=vcf)
-        logger.info(
-            f"Atomizing variants and splitting multiallelics: {result.stderr.decode()}"
-        )
-        vcf = result.stdout
-    if not indels:
-        logger.info("Ignoring indels.")
-        remove_indel_cmd = [
-            "bcftools",
-            "view",
-            "-e",
-            'TYPE="indel"',
-        ]
-        vcf = run_shell(remove_indel_cmd, input=vcf).stdout
-    if not structural_variants:
-        logger.info("Ignoring structural variants.")
-        remove_sv_cmd = [
-            "bcftools",
-            "view",
-            "-e",
-            'TYPE="OTHER"',
-        ]
-        vcf = run_shell(remove_sv_cmd, input=vcf).stdout
-    with open(filtered_vcf, "w+t") as f:
-        _ = f.write(vcf.decode())
-
-    # BGZIP the VCF or bcftools consensus errors out
-    _ = run_shell(
-        [
-            "bcftools",
-            "view",
-            "-O",
-            "z",
-            "-o",
-            str(filtered_vcf.with_suffix(".vcf.gz")),
-            str(filtered_vcf),
-        ]
-    )
-    filtered_vcf = filtered_vcf.with_suffix(".vcf.gz")
-    _ = run_shell(["bcftools", "index", str(filtered_vcf)])
-
-    logger.info("Generating PGEN file.")
-    filtered_pgen = WDIR / "pgen" / f"filtered_{name}.pgen"
-    _ = run_shell(
-        [
-            "plink2",
-            "--vcf",
-            str(filtered_vcf),
-            "--make-pgen",
-            "--vcf-half-call",
-            "r",
-            "--out",
-            str(filtered_pgen.with_suffix("")),
-        ]
-    )
-
-    logger.info("Generating SVAR file.")
-    if (WDIR / "filtered.svar").exists():
-        shutil.rmtree(WDIR / "filtered.svar")
-    SparseVar.from_vcf(WDIR / "filtered.svar", VCF(filtered_vcf), "50mb")
-    SparseVar(WDIR / "filtered.svar").cache_afs()
-
-    bed = pl.read_csv(
-        filtered_vcf,
-        separator="\t",
-        comment_prefix="#",
-        has_header=False,
-        new_columns=[
-            "chrom",
-            "pos",
-            "ID",
-            "REF",
-            "ALT",
-            "QUAL",
-            "FILTER",
-            "INFO",
-            "FORMAT",
-            "NA00001",
-            "NA00002",
-            "NA00003",
-        ],
-        schema_overrides={"chrom": pl.Utf8},
-    )
-    samples = bed.select(cs.matches(r"^NA\d{5}$")).columns
-
-    #! when writing the source VCF, make sure that the most distant variants within a group are not more than SEQ_LEN // 2 apart
-    #! also ensure that groups of variants are more than SEQ_LEN apart
-    #! otherwise, the logic below won't work
-    bed = (
-        bed.group_by("chrom", maintain_order=True)
-        .agg(
-            "pos",
-            (pl.col("pos").diff().fill_null(0) > SEQ_LEN).cum_sum().alias("group"),
-        )
-        .explode("pos", "group")
-        .group_by("chrom", "group", maintain_order=True)
-        .agg(
-            start=pl.col("pos").min() - SEQ_LEN // 2,
-            end=pl.col("pos").min() + SEQ_LEN // 2,
-        )
-        .drop("group")
-        .sample(fraction=1, shuffle=True, seed=0)
-    )
-    # manual additions
-    # - spanning deletion
-    # - no variants
-    rows = pl.DataFrame(
+    # Manual coverage regions: the chr1:1010696 spanning deletion (coupled to
+    # test_write_edge_cases) and a no-variant region on chr1.
+    extra = pl.DataFrame(
         {
-            # spanning deletion region (over chr19:1010696 10-bp deletion)
-            # and a no-variant region on chr1 (chr1 carries no variants).
-            "chrom": ["chr19", "chr1"],
+            "chrom": ["chr1", "chr1"],
             "start": [1010696, 500_000],
             "end": [1010696 + SEQ_LEN, 500_000 + SEQ_LEN],
         }
     )
-    rng = np.random.default_rng(0)
-    bed = bed.vstack(rows).with_row_index()
-    strand = pl.Series("strand", rng.choice(["+", "-"], size=bed.height, replace=True))
-    bed = bed.hstack([strand])
 
-    logger.info("Generating BED file.")
-    if (WDIR / f"{name}.bed").exists():
-        (WDIR / f"{name}.bed").unlink()
-    (
-        bed.select(
-            "chrom",
-            "start",
-            "end",
-            pl.lit(".").alias("name"),
-            pl.lit(".").alias("score"),
-            "strand",
-        ).write_csv(WDIR / f"{name}.bed", include_header=False, separator="\t")
-    )
+    with tempfile.TemporaryDirectory() as tmp:
+        case = build_case(spec, doc, Path(tmp), extra_regions=extra)
 
-    logger.info("Generating consensus sequences.")
-    pbar = tqdm(total=bed.height * len(samples) * 2)
-    for row in bed.select("index", "chrom", "start", "end").iter_rows():
-        row_nr, chrom, start, end = row
-        subseq_cmd = [
-            "samtools",
-            "faidx",
-            str(reference),
-            f"{chrom}:{start + 1}-{end}",
-        ]
-        for sample in samples:
-            for hap in range(2):
-                out_fasta = consensus_dir / f"{name}_{sample}_nr{row_nr}_h{hap}.fa"
-                consensus_cmd = [
-                    "bcftools",
-                    "consensus",
-                    "-H",
-                    str(hap + 1),
-                    "-s",
-                    sample,
-                    "-o",
-                    str(out_fasta),
-                    str(filtered_vcf),
-                ]
-                seq = run_shell(subseq_cmd)
-                _ = run_shell(consensus_cmd, input=seq.stdout)
-                index_cmd = ["samtools", "faidx", str(out_fasta)]
-                _ = run_shell(index_cmd)
-                _ = pbar.update()
-    pbar.close()
+        fasta_dir = WDIR / "fasta"
+        fasta_dir.mkdir(parents=True, exist_ok=True)
+        for suffix in ("", ".fai", ".gzi"):
+            src = case.ref_path.parent / (case.ref_path.name + suffix)
+            if src.exists():
+                shutil.copy(src, fasta_dir / ("synthetic.fa.bgz" + suffix))
 
-    bed = WDIR / f"{name}.bed"
+        vcf_dir = WDIR / "vcf"
+        if vcf_dir.exists():
+            shutil.rmtree(vcf_dir)
+        vcf_dir.mkdir(parents=True)
+        for suffix in ("", ".csi", ".tbi"):
+            src = case.vcf_path.parent / (case.vcf_path.name + suffix)
+            if src.exists():
+                shutil.copy(src, vcf_dir / ("filtered_source.vcf.gz" + suffix))
 
-    logger.info("Generating phased datasets.")
+        pgen_dir = WDIR / "pgen"
+        if pgen_dir.exists():
+            shutil.rmtree(pgen_dir)
+        pgen_dir.mkdir(parents=True)
+        for ext in (".pgen", ".pvar", ".psam"):
+            src = case.pgen_path.with_suffix(ext)
+            if src.exists():
+                shutil.copy(src, pgen_dir / ("filtered_source" + ext))
 
-    reader = VCF(filtered_vcf)
-    if not reader._valid_index():
-        reader._write_gvi_index()
-    _ = reader._load_index()
-    if (WDIR / "phased_dataset.vcf.gvl").exists():
-        shutil.rmtree(WDIR / "phased_dataset.vcf.gvl")
-    gvl.write(
-        path=WDIR / "phased_dataset.vcf.gvl", bed=bed, variants=reader, max_jitter=2
-    )
+        svar_dst = WDIR / "filtered.svar"
+        if svar_dst.exists():
+            shutil.rmtree(svar_dst)
+        shutil.copytree(case.svar_path, svar_dst)
 
-    reader = PGEN(filtered_pgen)
-    if (WDIR / "phased_dataset.pgen.gvl").exists():
-        shutil.rmtree(WDIR / "phased_dataset.pgen.gvl")
-    gvl.write(
-        path=WDIR / "phased_dataset.pgen.gvl", bed=bed, variants=reader, max_jitter=2
-    )
-
-    if (WDIR / "phased_dataset.svar.gvl").exists():
-        shutil.rmtree(WDIR / "phased_dataset.svar.gvl")
-    gvl.write(
-        path=WDIR / "phased_dataset.svar.gvl",
-        bed=bed,
-        variants=SparseVar(WDIR / "filtered.svar"),
-        max_jitter=2,
-    )
-
-    logger.info(f"Finished in {perf_counter() - t0} seconds.")
+        shutil.copy(case.bed_path, WDIR / "source.bed")
 
 
 if __name__ == "__main__":
-    typer.run(main)
+    main()
