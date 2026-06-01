@@ -29,6 +29,7 @@ pgen: restricted to phased diploid GTs only.  plink2 (used to convert VCF →
   Phased diploid GTs, including phased half-calls (1|. and .|1 under
   --vcf-half-call r), are preserved faithfully.
 """
+
 from __future__ import annotations
 
 import sys
@@ -101,10 +102,16 @@ def _all_gts_phased_diploid(doc) -> bool:
 
 @pytest.mark.parametrize("src", ["vcf", "pgen", "svar"])
 @settings(max_examples=25, deadline=None, suppress_health_check=_SUPPRESS)
-@given(case_inputs=st.reference_and_documents(
-    violations=_ALL_VIOLATIONS, max_samples=2, max_records=4,
-    max_contigs=2, max_contig_len=2000, max_repeats=3,
-))
+@given(
+    case_inputs=st.reference_and_documents(
+        violations=_ALL_VIOLATIONS,
+        max_samples=2,
+        max_records=4,
+        max_contigs=2,
+        max_contig_len=2000,
+        max_repeats=3,
+    )
+)
 def test_haplotypes_match_consensus(src, case_inputs):
     spec, doc, _truth = case_inputs
     # Zero-record documents produce no BED regions and nothing to reconstruct;
@@ -139,7 +146,8 @@ def test_haplotypes_match_consensus(src, case_inputs):
                 with pysam.FastaFile(str(fa_path)) as f:
                     desired = sp.cast_seqs(f.fetch(f.references[0]).upper())
                 np.testing.assert_equal(
-                    actual, desired,
+                    actual,
+                    desired,
                     f"src={src} region={region} sample={sample} hap={h}",
                 )
 
@@ -265,10 +273,16 @@ def test_track1b_af_matches_vcf_oracle_on_session_case(synthetic_case):
 
 
 @settings(max_examples=15, deadline=None, suppress_health_check=_SUPPRESS)
-@given(case_inputs=st.reference_and_documents(
-    violations=frozenset(), max_samples=2, max_records=4,
-    max_contigs=2, max_contig_len=2000, max_repeats=3,
-))
+@given(
+    case_inputs=st.reference_and_documents(
+        violations=frozenset(),
+        max_samples=2,
+        max_records=4,
+        max_contigs=2,
+        max_contig_len=2000,
+        max_repeats=3,
+    )
+)
 def test_af_and_dosage_consistent(case_inputs):
     """Property test: AF bounds + AF consistency on the svar backend.
 
@@ -425,7 +439,9 @@ def test_multiallelic_raw_is_rejected(case_inputs):
             _raw_write_vcf(doc, tmp)
 
 
-@pytest.mark.xfail(strict=False, reason="gvl #199: gvl.write does not validate atomization")
+@pytest.mark.xfail(
+    strict=False, reason="gvl #199: gvl.write does not validate atomization"
+)
 @settings(max_examples=10, deadline=None, suppress_health_check=_SUPPRESS)
 @given(case_inputs=_spec_and_violating_doc("non_atomic"))
 def test_non_atomic_raw_is_rejected(case_inputs):
@@ -439,7 +455,9 @@ def test_non_atomic_raw_is_rejected(case_inputs):
             _raw_write_vcf(doc, tmp)
 
 
-@pytest.mark.xfail(strict=False, reason="gvl #200: gvl.write does not validate left-alignment")
+@pytest.mark.xfail(
+    strict=False, reason="gvl #200: gvl.write does not validate left-alignment"
+)
 @settings(max_examples=10, deadline=None, suppress_health_check=_SUPPRESS)
 @given(case_inputs=_spec_and_violating_doc("non_left_aligned"))
 def test_non_left_aligned_raw_is_rejected(case_inputs):

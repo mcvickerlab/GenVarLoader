@@ -1,4 +1,5 @@
 """Tests for the shared build_case fixture builder."""
+
 from __future__ import annotations
 
 from pathlib import Path

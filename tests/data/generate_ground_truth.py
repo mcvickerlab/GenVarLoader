@@ -7,6 +7,7 @@ property tests) from the same `session_document`. This task only persists the
 inputs that the self-contained write/track/edge tests and the FASTA-only unit
 tests consume.
 """
+
 from __future__ import annotations
 
 import shutil

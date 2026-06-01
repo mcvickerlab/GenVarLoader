@@ -5,6 +5,7 @@ Used by BOTH the property-test module (random reference-consistent draws) and
 the session conftest fixture / `gen` task (one fixed standardized document), so
 the generation logic lives in exactly one place.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -91,9 +92,7 @@ def _bgzip_index(vcf_text: bytes, out_gz: Path) -> Path:
     return out_gz
 
 
-def _derive_bed(
-    vcf_gz: Path, extra_regions: pl.DataFrame | None
-) -> pl.DataFrame:
+def _derive_bed(vcf_gz: Path, extra_regions: pl.DataFrame | None) -> pl.DataFrame:
     """Group variant positions into SEQ_LEN-wide regions (Phase-1 logic, keyed
     off the *normalized* VCF positions). Optionally append manual regions."""
     try:
@@ -109,7 +108,12 @@ def _derive_bed(
         )
     except pl.exceptions.NoDataError:
         # VCF has no data rows (zero-record document after normalization).
-        df = pl.DataFrame({"chrom": pl.Series([], dtype=pl.Utf8), "pos": pl.Series([], dtype=pl.Int64)})
+        df = pl.DataFrame(
+            {
+                "chrom": pl.Series([], dtype=pl.Utf8),
+                "pos": pl.Series([], dtype=pl.Int64),
+            }
+        )
     bed = (
         df.group_by("chrom", maintain_order=True)
         .agg(
@@ -145,8 +149,15 @@ def _write_consensus(
                 out_fa = out_dir / f"source_{sample}_nr{row_nr}_h{hap}.fa"
                 _run(
                     [
-                        "bcftools", "consensus", "-H", str(hap + 1),
-                        "-s", sample, "-o", str(out_fa), str(vcf_gz),
+                        "bcftools",
+                        "consensus",
+                        "-H",
+                        str(hap + 1),
+                        "-s",
+                        sample,
+                        "-o",
+                        str(out_fa),
+                        str(vcf_gz),
                     ],
                     input=seq,
                 )
@@ -205,8 +216,14 @@ def build_case(
         pgen_path = workdir / "filtered.pgen"
         _run(
             [
-                "plink2", "--vcf", str(vcf_gz), "--make-pgen",
-                "--vcf-half-call", "r", "--out", str(pgen_path.with_suffix("")),
+                "plink2",
+                "--vcf",
+                str(vcf_gz),
+                "--make-pgen",
+                "--vcf-half-call",
+                "r",
+                "--out",
+                str(pgen_path.with_suffix("")),
             ]
         )
 
@@ -335,22 +352,46 @@ def session_document(spec):
 
     # chr2 block (relabeled from chr20) — carries INFO/IDs/FILTERs.
     b.record(
-        "chr2", 14370, ref="N", alt=["A"], ids=["rs6054257"], qual=29.0, filter=(),
+        "chr2",
+        14370,
+        ref="N",
+        alt=["A"],
+        ids=["rs6054257"],
+        qual=29.0,
+        filter=(),
         gt=["0|0", "1|0", "1/1"],
         info={"NS": 3, "DP": 14, "AF": [0.5], "DB": True, "H2": True},
     )
     b.record(
-        "chr2", 17330, ref="N", alt=["A"], qual=3.0, filter=["q10"],
-        gt=["0|0", "0|1", "0/0"], info={"NS": 3, "DP": 11, "AF": [0.017]},
+        "chr2",
+        17330,
+        ref="N",
+        alt=["A"],
+        qual=3.0,
+        filter=["q10"],
+        gt=["0|0", "0|1", "0/0"],
+        info={"NS": 3, "DP": 11, "AF": [0.017]},
     )
     b.record(
-        "chr2", 1110696, ref="G", alt=["A", "T"], ids=["rs6040355"], qual=67.0,
-        filter=(), gt=["1|2", "2|1", "2/2"],
+        "chr2",
+        1110696,
+        ref="G",
+        alt=["A", "T"],
+        ids=["rs6040355"],
+        qual=67.0,
+        filter=(),
+        gt=["1|2", "2|1", "2/2"],
         info={"NS": 2, "DP": 10, "AF": [0.333, 0.667], "AA": "T", "DB": True},
     )
     b.record(
-        "chr2", 1234567, ref="A", alt=["GA", "AC"], ids=["microsat1"], qual=50.0,
-        filter=(), gt=["0/1", "0/2", "./."],
+        "chr2",
+        1234567,
+        ref="A",
+        alt=["GA", "AC"],
+        ids=["microsat1"],
+        qual=50.0,
+        filter=(),
+        gt=["0/1", "0/2", "./."],
         info={"NS": 3, "DP": 9, "AA": "G", "AN": 6, "AC": [3, 1]},
     )
     return b.build()

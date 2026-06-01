@@ -1,4 +1,5 @@
 """Unit tests for the standardized session reference + source document."""
+
 from __future__ import annotations
 
 import subprocess
@@ -50,7 +51,8 @@ def test_reference_n_masks_chr1_telomere(tmp_path: Path):
 def _norm(vcf_path: Path, ref_path: Path) -> str:
     out = subprocess.run(
         ["bcftools", "norm", "-f", str(ref_path), str(vcf_path)],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     return out.stdout.decode()
 
