@@ -320,7 +320,7 @@ def session_document(spec):
     Replaces Phase-1 ``_synthetic.build_source_vcf``. VCFv4.0 is used so the
     Number=. INFO fields parse under the noodles VCF reader SparseVar relies on.
     """
-    contigs = [(c, l) for c, l in _SESSION_CONTIGS]
+    contigs = list(_SESSION_CONTIGS)
     b = VcfBuilder(samples=["s0", "s1", "s2"], contigs=contigs, fileformat="VCFv4.0")
     b.info("NS", Number.ONE, Type.INTEGER)
     b.info("AN", Number.ONE, Type.INTEGER)

@@ -61,7 +61,7 @@ def test_source_vcf_samples_and_info(tmp_path: Path):
     spec = session_reference()
     spec.write(tmp_path / "synthetic.fa.bgz")
     text = session_document(spec).render()
-    header_line = next(l for l in text.splitlines() if l.startswith("#CHROM"))
+    header_line = next(line for line in text.splitlines() if line.startswith("#CHROM"))
     assert header_line.endswith("s0\ts1\ts2")
     for fid in ("NS", "DP", "AF"):
         assert f"##INFO=<ID={fid}," in text
@@ -76,5 +76,5 @@ def test_source_vcf_passes_norm_and_preserves_coupled_positions(tmp_path: Path):
         line.startswith("chr1\t1010696\t") and "GAGACGGGGCC" in line
         for line in normalized.splitlines()
     ), "chr1:1010696 10-bp deletion shifted or lost during norm"
-    assert any(l.startswith("chr2\t1110696\t") for l in normalized.splitlines())
-    assert any(l.startswith("chr2\t1234567\t") for l in normalized.splitlines())
+    assert any(line.startswith("chr2\t1110696\t") for line in normalized.splitlines())
+    assert any(line.startswith("chr2\t1234567\t") for line in normalized.splitlines())

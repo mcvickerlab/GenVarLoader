@@ -60,7 +60,7 @@ def test_session_document_shapes(tmp_path: Path):
     text = doc.render()
 
     # Standardized samples.
-    header = next(l for l in text.splitlines() if l.startswith("#CHROM"))
+    header = next(line for line in text.splitlines() if line.startswith("#CHROM"))
     assert header.endswith("s0\ts1\ts2")
 
     # Standardized contigs only.
