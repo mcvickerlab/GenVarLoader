@@ -106,10 +106,26 @@ def snap_dataset(source_bed, vcf_dir, reference, tmp_path_factory):
 
 
 def _build(ds, seqs, tracks=None, out_len="ragged"):
-    """Apply with_seqs / with_tracks / with_len and return configured dataset."""
+    """Apply with_seqs / with_tracks / with_len and return configured dataset.
+
+    Tracks are explicitly controlled:
+    - If ``tracks`` is a string, activate that track (and set seqs accordingly).
+    - If ``tracks`` is None and ``seqs`` is not None (seqs-only case), explicitly
+      disable tracks with ``with_tracks(False)`` so the dataset returns ONLY the
+      sequence output — not a (seqs, tracks) tuple.
+    - If ``seqs`` is None (tracks-only case), tracks must be a string; seqs-off
+      is handled by ``with_seqs(None)``.
+    """
     ds = ds.with_seqs(seqs)
     if tracks is not None:
+        # Activate the requested track (string name).
         ds = ds.with_tracks(tracks)
+    elif seqs is not None:
+        # Seqs-only case: explicitly turn tracks OFF so output is seqs alone,
+        # not a (seqs, tracks) tuple from the default-on track state.
+        ds = ds.with_tracks(False)
+    # If seqs is None and tracks is None that would be invalid; our CASES never
+    # reach that state (tracks-only cases always supply a track name).
     if out_len == "ragged":
         return ds
     if out_len == "variable":
