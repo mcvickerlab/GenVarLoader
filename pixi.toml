@@ -103,7 +103,7 @@ pooch = "*"
 awkward = "*"
 pydantic = ">=2,<3"
 hypothesis = "*"
-vcfixture = ">=0.2.1"
+vcfixture = ">=0.4.0"
 filelock = "*"
 
 [feature.py311.dependencies]
