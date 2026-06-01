@@ -1,30 +1,31 @@
-"""Unit tests for the synthetic reference + source-VCF re-encoding helpers."""
-
+"""Unit tests for the standardized session reference + source document."""
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pysam
 
-from _synthetic import FLANK_GUARDS, build_source_vcf, write_synthetic_reference
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "_builders"))
+from case import session_document, session_reference  # noqa: E402
 
-# (contig, 1-based pos, expected REF) for every variant locus in the source VCF.
+# (contig, 1-based pos, expected REF) for every variant locus.
 LOCI = [
-    ("chr19", 111, "N"),
-    ("chr19", 1010696, "GAGACGGGGCC"),
-    ("chr19", 1110696, "A"),
-    ("chr19", 1210696, "C"),
-    ("chr19", 1210697, "T"),
-    ("chr20", 14370, "N"),
-    ("chr20", 17330, "N"),
-    ("chr20", 1110696, "G"),
-    ("chr20", 1234567, "A"),
+    ("chr1", 111, "N"),
+    ("chr1", 1010696, "GAGACGGGGCC"),
+    ("chr1", 1110696, "A"),
+    ("chr1", 1210696, "C"),
+    ("chr1", 1210697, "T"),
+    ("chr2", 14370, "N"),
+    ("chr2", 17330, "N"),
+    ("chr2", 1110696, "G"),
+    ("chr2", 1234567, "A"),
 ]
 
 
 def test_reference_has_expected_bases_at_loci(tmp_path: Path):
-    ref = write_synthetic_reference(tmp_path / "synthetic.fa.bgz", seed=0)
+    ref = session_reference().write(tmp_path / "synthetic.fa.bgz")
     assert ref.exists()
     assert (ref.parent / (ref.name + ".fai")).exists()
     with pysam.FastaFile(str(ref)) as fa:
@@ -34,52 +35,44 @@ def test_reference_has_expected_bases_at_loci(tmp_path: Path):
 
 
 def test_reference_is_deterministic(tmp_path: Path):
-    a = write_synthetic_reference(tmp_path / "a.fa.bgz", seed=0)
-    b = write_synthetic_reference(tmp_path / "b.fa.bgz", seed=0)
+    a = session_reference().write(tmp_path / "a.fa.bgz")
+    b = session_reference().write(tmp_path / "b.fa.bgz")
     with pysam.FastaFile(str(a)) as fa, pysam.FastaFile(str(b)) as fb:
-        assert fa.fetch("chr19", 0, 5000) == fb.fetch("chr19", 0, 5000)
+        assert fa.fetch("chr1", 0, 5000) == fb.fetch("chr1", 0, 5000)
 
 
-def test_reference_has_flank_guards(tmp_path: Path):
-    ref = write_synthetic_reference(tmp_path / "synthetic.fa.bgz", seed=0)
+def test_reference_n_masks_chr1_telomere(tmp_path: Path):
+    ref = session_reference().write(tmp_path / "synthetic.fa.bgz")
     with pysam.FastaFile(str(ref)) as fa:
-        for contig, pos, guard in FLANK_GUARDS:
-            got = fa.fetch(contig, pos - 2, pos - 1).upper()
-            assert got == guard, f"{contig}:{pos} guard got {got!r}, want {guard!r}"
+        assert fa.fetch("chr1", 0, 150).upper() == "N" * 150
 
 
 def _norm(vcf_path: Path, ref_path: Path) -> str:
-    """Left-align with bcftools norm; return normalized VCF text."""
     out = subprocess.run(
         ["bcftools", "norm", "-f", str(ref_path), str(vcf_path)],
-        check=True,
-        capture_output=True,
+        check=True, capture_output=True,
     )
     return out.stdout.decode()
 
 
-def test_source_vcf_re_encode_matches_header_and_samples(tmp_path: Path):
-    ref = write_synthetic_reference(tmp_path / "synthetic.fa.bgz", seed=0)
-    doc = build_source_vcf(ref)
-    text = doc.render()
-    # Samples preserved exactly.
+def test_source_vcf_samples_and_info(tmp_path: Path):
+    spec = session_reference()
+    spec.write(tmp_path / "synthetic.fa.bgz")
+    text = session_document(spec).render()
     header_line = next(l for l in text.splitlines() if l.startswith("#CHROM"))
-    assert header_line.endswith("NA00001\tNA00002\tNA00003")
-    # INFO defs required by test_sitesonly are declared.
+    assert header_line.endswith("s0\ts1\ts2")
     for fid in ("NS", "DP", "AF"):
         assert f"##INFO=<ID={fid}," in text
 
 
 def test_source_vcf_passes_norm_and_preserves_coupled_positions(tmp_path: Path):
-    ref = write_synthetic_reference(tmp_path / "synthetic.fa.bgz", seed=0)
-    doc = build_source_vcf(ref)
-    vcf = doc.write(tmp_path / "source.vcf", bgzip=False)
-    normalized = _norm(vcf, ref)  # raises if any REF mismatches the reference
-    # The 10-bp deletion hardcoded by test_write_edge_cases must survive at pos.
+    spec = session_reference()
+    ref = spec.write(tmp_path / "synthetic.fa.bgz")
+    vcf = session_document(spec).write(tmp_path / "source.vcf", bgzip=False)
+    normalized = _norm(vcf, ref)
     assert any(
-        line.startswith("chr19\t1010696\t") and "GAGACGGGGCC" in line
+        line.startswith("chr1\t1010696\t") and "GAGACGGGGCC" in line
         for line in normalized.splitlines()
-    ), "chr19:1010696 10-bp deletion shifted or lost during norm"
-    # chr20 multiallelic and microsat records present.
-    assert any(l.startswith("chr20\t1110696\t") for l in normalized.splitlines())
-    assert any(l.startswith("chr20\t1234567\t") for l in normalized.splitlines())
+    ), "chr1:1010696 10-bp deletion shifted or lost during norm"
+    assert any(l.startswith("chr2\t1110696\t") for l in normalized.splitlines())
+    assert any(l.startswith("chr2\t1234567\t") for l in normalized.splitlines())

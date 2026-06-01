@@ -46,11 +46,11 @@ def base_ds(source_bed, vcf_dir, reference, tmp_path_factory):
     out = tmp_dir / "phased_with_tracks.gvl"
 
     # Build per-sample BigWig files covering every contig in source.bed
-    # (chr1, chr19, chr20). Sample IDs match the VCF samples so the
+    # (chr1, chr2). Sample IDs match the VCF samples so the
     # intersection is non-empty.
-    vcf_samples = ["NA00001", "NA00002", "NA00003"]
+    vcf_samples = ["s0", "s1", "s2"]
     # Header lengths are generous upper bounds for the regions in source.bed.
-    contig_sizes = [("chr1", 20_000_000), ("chr19", 2_000_000), ("chr20", 2_000_000)]
+    contig_sizes = [("chr1", 2_000_000), ("chr2", 2_000_000)]
     bw_paths: dict[str, str] = {}
     for i, sample in enumerate(vcf_samples):
         bw_path = tmp_dir / f"{sample}.bw"
@@ -62,7 +62,7 @@ def base_ds(source_bed, vcf_dir, reference, tmp_path_factory):
             # every region has at least one interval (chr1's no-variant region
             # sits at chr1:500_000).
             bw.addEntries(
-                ["chr1", "chr19", "chr20"],
+                ["chr1", "chr1", "chr2"],
                 [499_990, 1_010_686, 17_320],
                 ends=[500_030, 1_010_706, 17_340],
                 values=[value, value, value],

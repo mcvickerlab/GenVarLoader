@@ -20,14 +20,14 @@ def test_bed_to_regions_categorical_strand_returns_int32() -> None:
     """
     bed = pl.DataFrame(
         {
-            "chrom": ["chr19", "chr19"],
+            "chrom": ["chr1", "chr1"],
             "chromStart": [44906624, 44907759],
             "chromEnd": [44906667, 44907952],
             "strand": ["+", "+"],
         }
     ).with_columns(pl.col("strand").cast(pl.Categorical))
     assert bed.schema["strand"] == pl.Categorical
-    regions = bed_to_regions(bed, ContigNormalizer(["chr19"]))
+    regions = bed_to_regions(bed, ContigNormalizer(["chr1"]))
     assert regions.dtype == np.int32, f"want int32, got {regions.dtype}"
     assert regions.shape == (2, 4)
     np.testing.assert_array_equal(
