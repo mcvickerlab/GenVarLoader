@@ -751,9 +751,7 @@ class Haps(Reconstructor[_H]):
         does not touch allele payload bytes — only the RaggedAlleles offsets.
         """
         r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore[no-matching-overload]
-        genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s])
-
-        genos = ak.to_packed(genos)
+        genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s]).to_packed()
         v_idxs = genos.data
 
         if self.min_af is not None or self.max_af is not None:
@@ -764,7 +762,7 @@ class Haps(Reconstructor[_H]):
             if self.max_af is not None:
                 keep &= geno_afs <= self.max_af
             _keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
-            genos = Ragged(ak.to_packed(ak.to_regular(genos[_keep], 1)))
+            genos = Ragged(ak.to_regular(genos[_keep], 1)).to_packed()
             v_idxs = genos.data
 
         offsets = getattr(self.variants, kind).offsets  # int-typed, length n_variants+1
