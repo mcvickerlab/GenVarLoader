@@ -188,6 +188,47 @@ _H = TypeVar("_H", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 _NewH = TypeVar("_NewH", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 
 
+def _build_allele_layout(
+    data: NDArray[np.uint8],
+    allele_offsets: NDArray[np.integer],
+    group_offsets: NDArray[np.integer],
+    ploidy: int,
+) -> ak.Array:
+    """Wrap flat allele bytes + two offset levels into a (b, p, ~v, ~l) ak.Array.
+
+    ``data`` is the contiguous allele byte buffer (uint8). ``allele_offsets`` are the
+    per-variant byte boundaries (len n_alleles + 1). ``group_offsets`` are the
+    per-(b*p)-row variant boundaries (len b*p + 1). Both offset arrays must be
+    zero-based. ``ploidy`` groups the b*p rows into the outer regular axis.
+    """
+    leaf = NumpyArray(np.ascontiguousarray(data), parameters={"__array__": "byte"})
+    l_content = ListOffsetArray(
+        Index(np.asarray(allele_offsets, np.int64)),
+        leaf,
+        parameters={"__array__": "bytestring"},
+    )
+    vl_content = ListOffsetArray(Index(np.asarray(group_offsets, np.int64)), l_content)
+    pvl_content = RegularArray(vl_content, ploidy)
+    return ak.Array(pvl_content)
+
+
+def _alt_layout_parts(
+    arr: ak.Array,
+) -> tuple[NDArray[np.uint8], NDArray[np.int64], NDArray[np.int64], int]:
+    """Inverse of :func:`_build_allele_layout`: extract (leaf_uint8, allele_offsets,
+    group_offsets, ploidy) from a (b, p, ~v, ~l) allele ak.Array.
+
+    The returned ``leaf_uint8`` shares memory with ``arr``'s buffer, so mutating it
+    mutates ``arr`` in place.
+    """
+    lay = arr.layout
+    ploidy = int(lay.size)
+    group_offsets = np.asarray(lay.content.offsets, np.int64)
+    allele_offsets = np.asarray(lay.content.content.offsets, np.int64)
+    leaf = np.asarray(lay.content.content.content.data).view(np.uint8)
+    return leaf, allele_offsets, group_offsets, ploidy
+
+
 @dataclass(slots=True)
 class Haps(Reconstructor[_H]):
     path: Path
@@ -730,23 +771,16 @@ class Haps(Reconstructor[_H]):
         self, genos: Ragged[V_IDX_TYPE], kind: Literal["alt", "ref"]
     ) -> ak.Array:
         v_idxs = genos.data
-
-        # (b*p*v ~l)
+        # (b*p*v ~l) packed allele bytes for the selected variants
         alleles = ak.to_packed(
             cast(RaggedAlleles, getattr(self.variants, kind)[v_idxs])
         )
-        # reshape to (b, p, ~v, ~l)
-        node = alleles.layout
-        while not isinstance(node, NumpyArray):
-            node = node.content
-        l_content = ListOffsetArray(
-            Index(alleles.offsets), node, parameters={"__array__": "bytestring"}
+        return _build_allele_layout(
+            np.asarray(alleles.data).view(np.uint8),
+            np.asarray(alleles.offsets),
+            np.asarray(genos.offsets),
+            genos.shape[-2],
         )
-        vl_content = ListOffsetArray(Index(genos.offsets), l_content)
-        pvl_content = RegularArray(vl_content, genos.shape[-2])
-        alleles = ak.Array(pvl_content)
-
-        return alleles
 
     def _get_info(self, genos: Ragged[V_IDX_TYPE], attr: str) -> Ragged[np.number]:
         data = self.variants.info[attr][genos.data]
