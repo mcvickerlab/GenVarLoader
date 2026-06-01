@@ -14,6 +14,7 @@ from einops import repeat
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
+from .._flat import _Flat
 from .._ragged import INTERVAL_DTYPE, RaggedIntervals, RaggedTracks
 from .._utils import lengths_to_offsets
 from ._indexing import DatasetIndexer
@@ -617,11 +618,8 @@ class Tracks(Reconstructor[_T]):
                 )
 
             out_shape = (len(idx), len(self.active_tracks), None)
-
-            # ragged (b t l)
-            tracks = RaggedTracks.from_offsets(out, out_shape, out_offsets)
-
-            return cast(RaggedTracks, tracks)
+            # flat (b t l)
+            return cast(RaggedTracks, _Flat.from_offsets(out, out_shape, out_offsets))
 
         # ---- splice plan path ----
         assert not isinstance(output_length, int), (
