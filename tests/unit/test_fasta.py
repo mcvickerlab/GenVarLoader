@@ -36,7 +36,8 @@ def test_pad_left(ref_fasta):
 
 def test_no_pad(ref_fasta):
     fasta = Fasta("ref", ref_fasta)
-    end_of_contig_1 = 248956422
+    with FastaFile(ref_fasta) as f:
+        end_of_contig_1 = f.get_reference_length("chr1")
     contig = "chr1"
     start = end_of_contig_1 - 5
     end = start + 10

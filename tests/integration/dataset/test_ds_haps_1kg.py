@@ -15,14 +15,18 @@ pytestmark = pytest.mark.slow
     scope="session",
     params=["bcf", "pgen", "svar"],
 )
-def dataset(request, kg_bcf_gvl, kg_pgen_gvl, kg_svar_gvl, ref_fasta):
+def dataset(request, kg_bcf_gvl, kg_pgen_gvl, kg_svar_gvl, hg38_ref_fasta):
     gvl_path = {
         "bcf": kg_bcf_gvl,
         "pgen": kg_pgen_gvl,
         "svar": kg_svar_gvl,
     }[request.param]
+    if not gvl_path.exists() or not hg38_ref_fasta.exists():
+        pytest.skip(
+            "missing 1kg datasets / hg38 reference; run pixi run -e dev gen-1kg"
+        )
     return (
-        gvl.Dataset.open(gvl_path, ref_fasta, rc_neg=False)
+        gvl.Dataset.open(gvl_path, hg38_ref_fasta, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
         .with_tracks(False)

@@ -85,22 +85,50 @@ def test_unspliced_single_item_buffer_packed(spliced_ds_path, ref_fasta):
     Uses the default ragged output. The invariant we pin: the data buffer
     length equals the sum of the per-ploidy lengths. Before the fix
     ``ak.where`` left a 2x buffer behind and this check would fail.
+
+    For regions with no indels (jitter=0 and all applied variants are SNPs),
+    each ploidy's haplotype length must also equal the region's reference
+    length. Regions carrying indels legitimately produce ragged haplotypes
+    whose lengths differ from the reference length; only the packing invariant
+    (data buffer == sum of lengths) is checked for those.
     """
     ds = gvl.Dataset.open(spliced_ds_path, ref_fasta).with_seqs("haplotypes")
+    ilen = ds._seqs.variants.ilen  # per-variant indel lengths (0 for SNPs)
+    geno = ds._seqs.genotypes
+    n_samples = ds.n_samples
+    ploidy = geno.lengths.shape[-1]
     for region in range(min(ds.n_regions, 5)):
-        # ragged of shape (ploidy, var)
+        # ragged of shape (ploidy, ~len)
         haps = ds[region, 0]
+        # Primary invariant: packed buffer (catches the ak.where 2x-buffer bug).
         assert len(haps.data) == int(haps.lengths.sum()), (
             f"region {region}: data buffer len={len(haps.data)}, expected "
             f"{int(haps.lengths.sum())}. Likely unpacked ak.where buffer leaked through."
         )
-        # Per-ploidy length should match the stored region length (no jitter).
         sorted_idx = ds._idxer.full_region_idxs[region]
         start, end = ds._full_regions[sorted_idx, 1:3]
         expected_len = int(end - start)
-        assert (haps.lengths == expected_len).all(), (
-            f"region {region}: lengths {haps.lengths} != expected {expected_len}"
-        )
+        # Secondary invariant: for SNP-only regions (no indels across any
+        # sample/ploidy), the haplotype length must equal the reference length.
+        # Detect indels non-circularly via per-variant ilen stored at write time.
+        has_indel = False
+        for s in range(n_samples):
+            for h in range(ploidy):
+                flat_idx = sorted_idx * n_samples * ploidy + s * ploidy + h
+                n_vars = geno.lengths[sorted_idx, s, h]
+                if n_vars > 0:
+                    off = geno.offsets[flat_idx]
+                    vidxs = geno.data[off : off + n_vars]
+                    if np.any(ilen[vidxs] != 0):
+                        has_indel = True
+                        break
+            if has_indel:
+                break
+        if not has_indel:
+            assert (haps.lengths == expected_len).all(), (
+                f"region {region}: lengths {haps.lengths} != expected {expected_len} "
+                f"(SNP-only region, no indels; length should equal reference length)"
+            )
 
 
 # ---------------------------------------------------------------------------

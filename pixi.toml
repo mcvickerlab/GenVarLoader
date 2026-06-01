@@ -47,6 +47,9 @@ plink2 = "*"
 
 [pypi-dependencies]
 genvarloader = { path = ".", editable = true, extras = ["cli"] }
+# Test-only: needed by the property/fixture tests across the whole py3xx matrix
+# (not a genvarloader runtime dep, so it must live here, not just in py310).
+vcfixture = ">=0.5.0"
 
 [feature.docs.dependencies]
 pandoc = "*"
@@ -103,6 +106,7 @@ pooch = "*"
 awkward = "*"
 pydantic = ">=2,<3"
 hypothesis = "*"
+vcfixture = ">=0.5.0"
 filelock = "*"
 
 [feature.py311.dependencies]

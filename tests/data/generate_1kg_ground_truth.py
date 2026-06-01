@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import shutil
 import subprocess
 from pathlib import Path
@@ -22,6 +23,23 @@ ZENODO_CSI_URL = "https://zenodo.org/records/20132907/files/1kgp.thin.bcf.csi"
 ZENODO_BCF_MD5 = "md5:3bdfed585e4a6b2a51c49d1d7dc7124f"
 ZENODO_CSI_MD5 = "md5:8f190a43294404ca320b45a05851d56a"
 
+# Minimal hg38 reference: just chr21 + chr22 (the only contigs the 1kg slow
+# tier touches). Built from UCSC single-chromosome FASTAs so the 1kg tests can
+# run anywhere quickly without a full ~3 GB hg38 download. CI caches the
+# concatenated, bgzipped result (tests/data/fasta); see .github/workflows.
+UCSC_CHR21_URL = (
+    "https://hgdownload.soe.ucsc.edu/goldenpath/hg38/chromosomes/chr21.fa.gz"
+)
+UCSC_CHR22_URL = (
+    "https://hgdownload.soe.ucsc.edu/goldenpath/hg38/chromosomes/chr22.fa.gz"
+)
+UCSC_CHR21_SHA256 = (
+    "sha256:c979ca1e5065c2521a50773473e0d0cc018fd6f3e9bb3aa90493fe7b45d57d1b"
+)
+UCSC_CHR22_SHA256 = (
+    "sha256:05f9d97d6fbfd08a44ca45b50837ca2ae9c471f35ba79dffec04d2cb5eaaf695"
+)
+
 
 def run_shell(
     cmd: list[str], input: bytes | None = None
@@ -41,6 +59,52 @@ def fetch_zenodo(url: str, known_hash: str, fname: str) -> Path:
     return Path(
         pooch.retrieve(url, known_hash=known_hash, fname=fname, path=ONE_KG_DIR)
     )
+
+
+def provision_minimal_hg38() -> Path:
+    """Build ``tests/data/fasta/hg38.fa.bgz`` (chr21 + chr22) if absent.
+
+    Downloads the two UCSC single-chromosome FASTAs, concatenates them, and
+    bgzips + faidx's the result. Idempotent: returns immediately if the
+    bgzipped reference already exists (e.g. restored from the CI cache).
+    """
+    import pooch
+
+    if REF.exists():
+        return REF
+
+    fasta_dir = REF.parent
+    fasta_dir.mkdir(parents=True, exist_ok=True)
+
+    chr21_gz = Path(
+        pooch.retrieve(
+            UCSC_CHR21_URL,
+            known_hash=UCSC_CHR21_SHA256,
+            fname="chr21.fa.gz",
+            path=fasta_dir,
+        )
+    )
+    chr22_gz = Path(
+        pooch.retrieve(
+            UCSC_CHR22_URL,
+            known_hash=UCSC_CHR22_SHA256,
+            fname="chr22.fa.gz",
+            path=fasta_dir,
+        )
+    )
+
+    plain = fasta_dir / "hg38.fa"
+    with plain.open("wb") as out:
+        for gz in (chr21_gz, chr22_gz):
+            with gzip.open(gz, "rb") as fh:
+                shutil.copyfileobj(fh, out)
+
+    compressed = run_shell(["bgzip", "-c", str(plain)])
+    REF.write_bytes(compressed.stdout)
+    _ = run_shell(["samtools", "faidx", str(REF)])
+    plain.unlink()
+    logger.info(f"Built minimal hg38 (chr21+chr22) at {REF}")
+    return REF
 
 
 def normalize_bcf(source_bcf: Path) -> Path:
@@ -274,10 +338,7 @@ def main() -> None:
 
     t0 = perf_counter()
 
-    if not REF.exists():
-        raise SystemExit(
-            f"Reference {REF} not found. Run `pixi run -e dev gen` first to fetch hg38."
-        )
+    provision_minimal_hg38()
 
     ONE_KG_DIR.mkdir(0o777, parents=True, exist_ok=True)
     if CONS_DIR.exists():
