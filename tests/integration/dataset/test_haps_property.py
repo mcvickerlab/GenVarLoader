@@ -17,17 +17,22 @@ All-REF records are dropped by build_case._normalize (``bcftools view --min-ac
 1``) before gvl.write sees the VCF.  This enforces a gvl.write invariant and
 removes the need to gate on _has_any_alt globally.
 
-vcf/svar: broad draw — any GT class (phased, unphased, half-call, haploid,
-  missing) is exercised.  Both backends preserve VCF allele order and therefore
-  match the bcftools consensus oracle on all GT classes.
+All backends (Track 1a): restricted to diploid GTs.  The `bcftools consensus
+  -H 2` oracle is undefined for haploid samples (there is no second haplotype),
+  so gvl and bcftools diverge on haploid GTs in a platform-dependent way (linux
+  bcftools keeps REF for the absent hap; macOS bcftools applies the allele).
+  Diploid half-calls (1|., .|1) remain in scope; only true haploid GTs are
+  excluded.
 
-pgen: restricted to phased diploid GTs only.  plink2 (used to convert VCF →
-  PGEN) diverges from the VCF oracle in two ways:
-    (a) Unphased hets (e.g. 0/1 and 1/0) are both stored as (0,1,unphased) —
-        allele order is canonicalized.
-    (b) Haploid GTs (e.g. GT=1) are promoted to homozygous diploid (1/1).
-  Phased diploid GTs, including phased half-calls (1|. and .|1 under
-  --vcf-half-call r), are preserved faithfully.
+vcf/svar: otherwise a broad draw — any diploid GT class (phased, unphased,
+  half-call, missing) is exercised.  Both backends preserve VCF allele order and
+  match the bcftools consensus oracle on all diploid GT classes.
+
+pgen: additionally restricted to phased diploid GTs only.  plink2 (used to
+  convert VCF → PGEN) canonicalizes unphased het allele order (e.g. 0/1 and 1/0
+  are both stored as (0,1,unphased)), diverging from the VCF oracle.  Phased
+  diploid GTs, including phased half-calls (1|. and .|1 under --vcf-half-call
+  r), are preserved faithfully.
 """
 
 from __future__ import annotations
@@ -140,10 +145,18 @@ def test_haplotypes_match_consensus(src, case_inputs):
     # will produce a zero-variant VCF after prep.  Exclude such docs here until
     # gvl.write is hardened to accept zero-region input (gvl #201).
     assume(_has_any_alt(doc))
-    # pgen only: plink2 canonicalizes unphased het allele order and promotes
-    # haploid GTs to homozygous diploid, causing divergence from the bcftools
-    # consensus oracle.  Phased diploid GTs (incl. phased half-calls) are
-    # faithful.  vcf and svar preserve VCF order and don't need this filter.
+    # The `bcftools consensus -H 2` oracle is undefined for haploid samples:
+    # there is no second haplotype, so gvl (which applies the single allele to
+    # the requested hap) and bcftools diverge — and the divergence is
+    # platform-dependent (linux bcftools keeps REF for the absent hap; macOS
+    # bcftools applies the allele).  Restrict to diploid GTs for all backends,
+    # mirroring the Track 1b AF oracle.  Diploid half-calls (1|., .|1) stay in
+    # scope; only true haploid GTs (len(alleles) == 1) are excluded.
+    assume(_all_diploid(doc))
+    # pgen only: plink2 canonicalizes unphased het allele order, causing
+    # divergence from the bcftools consensus oracle.  Phased diploid GTs (incl.
+    # phased half-calls) are faithful.  vcf and svar preserve VCF order and
+    # don't need this filter.
     if src == "pgen":
         assume(_all_gts_phased_diploid(doc))
     with tempfile.TemporaryDirectory() as tmp:
