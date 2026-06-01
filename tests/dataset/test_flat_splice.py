@@ -112,14 +112,15 @@ def test_haps_spliced_flat_byte_identity(phased_vcf_gvl, reference):
     assert spliced.is_spliced
     assert spliced.shape == (2, 3)  # 2 transcripts × 3 samples
 
-    # Unspliced fixed-length haplotypes for exons 0+1, sample 0.
-    unsp = hap_ds.with_len(20)
-    u0_s0 = unsp[0, 0]  # exon 0, sample 0 → (2, 20) ndarray (ploidy, length)
-    u1_s0 = unsp[1, 0]  # exon 1, sample 0 → (2, 20) ndarray (ploidy, length)
+    # Unspliced RAGGED haplotypes for exons 0+1, sample 0. Ragged (not a fixed
+    # with_len) because indels make each exon's haplotype length vary — the
+    # spliced output is ragged, so the expectation must be too.
+    u0_s0 = hap_ds[0, 0]  # exon 0, sample 0 → Ragged (ploidy, ~l)
+    u1_s0 = hap_ds[1, 0]  # exon 1, sample 0 → Ragged (ploidy, ~l)
 
     # Expected: concat exon0+exon1 for each haplotype.
-    exp_h0 = np.concatenate([u0_s0[0].ravel(), u1_s0[0].ravel()])
-    exp_h1 = np.concatenate([u0_s0[1].ravel(), u1_s0[1].ravel()])
+    exp_h0 = np.concatenate([_row(u0_s0, 0), _row(u1_s0, 0)])
+    exp_h1 = np.concatenate([_row(u0_s0, 1), _row(u1_s0, 1)])
 
     # spliced[0, 0] = T1, sample 0 → Ragged (2 haplotypes, ~l).
     t1_s0 = spliced[0, 0]

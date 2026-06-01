@@ -77,19 +77,22 @@ def snap_dataset(source_bed, vcf_dir, reference, tmp_path_factory):
     tmp_dir = tmp_path_factory.mktemp("snap_ds")
     out = tmp_dir / "snap.gvl"
 
-    vcf_samples = ["NA00001", "NA00002", "NA00003"]
-    contig_sizes = [("chr1", 20_000_000), ("chr19", 2_000_000), ("chr20", 2_000_000)]
+    vcf_samples = ["s0", "s1", "s2"]
+    # Header lengths are generous upper bounds for the regions in source.bed.
+    contig_sizes = [("chr1", 2_000_000), ("chr2", 2_000_000)]
     bw_paths: dict[str, str] = {}
     for i, sample in enumerate(vcf_samples):
         bw_path = tmp_dir / f"{sample}.bw"
         with pyBigWig.open(str(bw_path), "w") as bw:
             bw.addHeader(contig_sizes, maxZooms=0)
+            # One short interval per contig region in source.bed; values differ
+            # per sample. Mirrors base_ds in tests/dataset/test_with_methods.py.
             value = float(i + 1)
             bw.addEntries(
-                ["chr1", "chr19", "chr20"],
-                [10_000_000, 1_010_686, 17_320],
-                ends=[10_000_020, 1_010_706, 17_340],
-                values=[value, value, value],
+                ["chr1", "chr1", "chr2", "chr2"],
+                [499_990, 1_010_686, 17_320, 1_234_560],
+                ends=[500_030, 1_010_706, 17_340, 1_234_580],
+                values=[value, value, value, value],
             )
         bw_paths[sample] = str(bw_path)
 
