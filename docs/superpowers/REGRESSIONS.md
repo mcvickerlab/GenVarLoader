@@ -346,9 +346,44 @@ prototype's 5.9–9.5× on 32 small rows. Verification: 200 randomized trials by
 the awkward path; 319 dataset tests pass (the 3 `test_ds_haps_1kg` errors are the missing
 `gen-1kg` fixture, not regressions).
 
-**Still open — 0.6.1 throughput parity.** This closes the RC allocator hotspot on the 0.24.x
-side but does **not** yet establish parity with 0.6.1. Remaining gap-closers tracked here as we
-work them: (a) the controlled 0.6.1↔0.24.x bisect on the cluster-scale dataset to attribute the
-~18–20× tracks regression to a frame; (b) flat-buffer `to_padded` (next target); (c) re-run the
-parity probe after the dataset rebase (post-#197, `extend_to_length=False`). Update this section
-as each lands until the 0.6.1 gap is closed.
+### Shipped + integrated — flat-buffer `to_padded` (2026-05-31)
+
+The second flat-buffer transform landed: densify-and-right-pad, the top awkward
+`array_module.empty` allocator in the profile. Released as **seqpro 0.13.0** —
+`seqpro.rag.to_padded(rag, pad_value, *, length=None)` — a single-pass, parallel byte-copy
+kernel over the flat `(data, offsets)` buffer (one dtype-agnostic `uint8`-view copy into a
+pre-filled output; `length=None` pads to batch max, explicit `length` pads/truncates;
+ragged-axis-last, non-record only). Shipped via SeqPro PR #37 with 17 tests + a microbench.
+
+Integrated into gvl on this branch: `to_padded` in `_ragged.py` is now a **thin pass-through**
+to `seqpro.rag.to_padded` (the 13-line awkward `ak_str.rpad` / `ak.pad_none`+`fill_none`+
+`to_numpy` body collapses to one delegate call). The `(rag, pad_value)` positional contract is
+unchanged, so all call sites port untouched (`_query.py` haps/tracks padded output;
+`_reference.py` reference padded output; `RaggedVariants`/`RaggedAnnotatedHaps.to_padded`).
+Dependency floor raised: seqpro 0.13 requires **genoray ≥ 2.7.2** (genoray 2.7.1 capped
+seqpro `<0.13`); both bumped in `pixi.toml` + `pyproject.toml`.
+
+seqpro-side microbench (1024 rows × ~4 kb S1, pad to batch max) vs the old awkward idiom:
+
+| impl | ms/call | speedup | peak MB/call |
+|---|---|---|---|
+| awkward (`ak_str.rpad` → `to_numpy`) | ~1.36 | 1.0× | +4.20 |
+| seqpro 0.13.0 flat (parallel) | ~0.41 | **~3.3×** | +4.19 |
+
+Unlike RC, peak allocation is **comparable** — both paths materialize the same dense output
+array; the win is eliminating the awkward intermediate `empty`/`concat`/`pad_none` churn
+(the cumulative-allocation hotspot), not the output allocation itself. Verification: byte-identical
+to the old awkward path across every gvl dtype/pad pattern (S1+`b"N"`, int32+`-1`,
+int32+`iinfo.max`, float32+`0.0`, `(batch, ploidy, None)` leading dims, sliced non-contiguous);
+248 gvl unit tests pass, ruff clean. (Pyrefly reports `missing-module-attribute` on the
+`seqpro.rag` imports — a pre-existing resolver artifact that also affects the `reverse_complement`
+import; the symbols resolve at runtime and tests pass.)
+
+**Still open — 0.6.1 throughput parity.** The two awkward transform hotspots (RC, `to_padded`)
+are now closed on the 0.24.x side, but parity with 0.6.1 is **not** yet established. Remaining
+gap-closers tracked here as we work them: (a) **re-profile** the tracks/haps hot path on this
+branch (`pixi run -e dev profile-tracks`/`-haps`) to confirm the awkward `empty`/`concat`/`_carry`
+self-time actually dropped now that both transforms are flat — and surface the new top frame;
+(b) the controlled 0.6.1↔0.24.x bisect on the cluster-scale dataset to attribute the ~18–20×
+tracks regression to a frame; (c) re-run the parity probe after the dataset rebase (post-#197,
+`extend_to_length=False`). Update this section as each lands until the 0.6.1 gap is closed.
