@@ -424,3 +424,68 @@ re-profile) to actually isolate the RC+to_padded effect — local and cheap, but
 the flat kernels — the biggest remaining lever, harder than the standalone transforms; (c) the
 controlled 0.6.1↔0.24.x bisect on the **cluster-scale** dataset — the only real proof of the
 ~18–20× throughput regression and its fix. Update this section as each lands until the gap closes.
+
+---
+
+### Task 10 (2026-06-01): Variants path spike — decision NOT to flatten numeric fields
+
+**Decision: (b) — RaggedVariants stays awkward-native. No code change.**
+
+**Profiling run:** `memray run -fo variants.t10.memray.bin profile.py --mode variants`
+(2000 batches × 32, chr22_geuv.gvl, NUMBA_NUM_THREADS=1). Results:
+
+| metric | value |
+|---|---|
+| Total allocated | 18.205 GB |
+| Peak RSS | 3.589 GB |
+| Total allocations | 2,382,364 |
+
+**Top allocators by size:**
+1. `_reconstruct.py:152` → **8.410 GB** (track output buffer, `np.empty` for out/tracks arrays)
+2. `_reconstruct.py:183` → **4.206 GB** (per-track `_tracks` array)
+3. importlib bootstrap → 3.240 GB (one-time JIT/import)
+4. llvmlite/ffi → 733 MB (numba compilation)
+5. `awkward/_nplikes/array_module.py:153` (awkward `empty`) → **209 MB**
+
+**Top allocators by count:**
+1. llvmlite/ffi → 1,535,233 (numba)
+2. pyarrow.compute → 54,135
+3. awkward `array_module.empty` → 52,132
+4. `intervals_to_tracks` → 48,120
+5. numpy `_wrapreduction` → 42,130
+
+**Why (b) — key observations:**
+
+1. **The variants-specific assembly is not in the hot list.** `RaggedVariants.__init__` (`ak.zip` at
+   `_rag_variants.py:60`) and `_get_alleles` (`_haps.py:730`) are absent from both top-5 lists.
+   The awkward `empty` at 209 MB / 52K calls is dominated by track work (`_reconstruct.py`), not
+   variant assembly.
+
+2. **Numeric fields are already flat on the assembly side.** `start`, `ilen`, and `dosage` are
+   assembled via plain numpy fancy-indexing (`self.variants.start[v_idxs]`) + `Ragged.from_offsets`
+   in `_haps.py:_get_variants`. There is no awkward intermediate for these scalars — the only
+   awkward call in the assembly hot path is `ak.zip` at the very end (to build the `RaggedVariants`
+   container) and the layout manipulation in `_get_alleles` for the allele strings.
+
+3. **The `rc_` path's awkward cost is in the allele strings, not the numerics.** `rc_` calls
+   `ak.where(to_rc, reverse_complement(self["alt"]), self["alt"])` — this is variable-length-of-
+   variable-length (`alt`/`ref` are `(batch, ploidy, ~variants, ~allele_len)`). The numeric fields
+   (`start`/`ilen`/`dosage`) are NOT touched by `rc_`. Flattening the numeric `rc_` would be a
+   no-op — those fields are plain `Ragged` already and `rc_` never reverses them.
+
+4. **Prior py-spy data corroborates.** Variants had the lowest awkward share (~39%) vs tracks 43%,
+   haps 53% of the `getitem` hot path. The profiling pattern here — tracks dominating even in
+   "variants mode" (which co-fetches tracks) — is consistent with that earlier finding.
+
+**Principled limit of the flat-buffer initiative:** `RaggedVariants` is the natural terminus of
+Tasks 5–10. Its allele strings (`alt`/`ref`) are genuinely variable-length-of-variable-length and
+therefore cannot be densified into a flat array without either padding (changing the data contract)
+or building a two-level offset table (essentially re-implementing awkward). The numeric fields are
+already assembled with no awkward intermediate. The `ak.zip` constructor call and `_get_alleles`
+layout manipulation are the minimal irreducible awkward overhead for this data shape. Any further
+optimization here would require replacing the awkward container at the public API boundary
+(`RaggedVariants` is user-facing), which is a much larger breaking change than the internal
+transform flattening done in Tasks 5–9.
+
+**No files changed. Gate results:** `pytest tests/dataset -q -m "not slow"` → 44 passed;
+`pytest tests/dataset/test_flat_getitem_snapshot.py -q` → 9 passed.
