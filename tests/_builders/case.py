@@ -69,16 +69,20 @@ def _derive_bed(
 ) -> pl.DataFrame:
     """Group variant positions into SEQ_LEN-wide regions (Phase-1 logic, keyed
     off the *normalized* VCF positions). Optionally append manual regions."""
-    df = pl.read_csv(
-        vcf_gz,
-        separator="\t",
-        comment_prefix="#",
-        has_header=False,
-        truncate_ragged_lines=True,
-    ).select(
-        pl.nth(0).cast(pl.Utf8).alias("chrom"),
-        pl.nth(1).cast(pl.Int64).alias("pos"),
-    )
+    try:
+        df = pl.read_csv(
+            vcf_gz,
+            separator="\t",
+            comment_prefix="#",
+            has_header=False,
+            truncate_ragged_lines=True,
+        ).select(
+            pl.nth(0).cast(pl.Utf8).alias("chrom"),
+            pl.nth(1).cast(pl.Int64).alias("pos"),
+        )
+    except pl.exceptions.NoDataError:
+        # VCF has no data rows (zero-record document after normalization).
+        df = pl.DataFrame({"chrom": pl.Series([], dtype=pl.Utf8), "pos": pl.Series([], dtype=pl.Int64)})
     bed = (
         df.group_by("chrom", maintain_order=True)
         .agg(
