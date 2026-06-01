@@ -58,3 +58,28 @@ def test_squeeze_outer_one():
     s = f.squeeze(0)
     assert s.shape == (2, None)
     np.testing.assert_array_equal(s.offsets, f.offsets)
+
+
+def test_reverse_masked_int_matches_awkward():
+    import awkward as ak
+    data = np.arange(10, dtype=np.int32)
+    off = np.array([0, 3, 6, 10], np.int64)  # 3 rows
+    mask = np.array([True, False, True])
+    f = _Flat.from_offsets(data.copy(), (3, None), off)
+    out = f.reverse_masked(mask)
+    # awkward reference: reverse masked rows only
+    rag = _rag(data.copy(), (3, None), off)
+    expected = ak.to_packed(ak.where(mask, rag[..., ::-1], rag))
+    np.testing.assert_array_equal(out.data, ak.flatten(expected, None).to_numpy())
+    np.testing.assert_array_equal(out.offsets, off)
+
+
+def test_reverse_masked_dna_matches_existing():
+    from genvarloader._ragged import reverse_complement_masked, _COMP  # noqa
+    seq = np.frombuffer(b"ACGTAACCGGTT", dtype="S1")
+    off = np.array([0, 4, 12], np.int64)  # 2 rows
+    mask = np.array([True, False])
+    f = _Flat.from_offsets(seq.view(np.uint8).copy(), (2, None), off)
+    out = f.reverse_masked(mask, comp=_COMP).view("S1")
+    expected = reverse_complement_masked(_rag(seq.copy(), (2, None), off), mask)
+    np.testing.assert_array_equal(out.data, np.asarray(expected.data))

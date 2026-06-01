@@ -11,11 +11,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Generic
 
+import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 from seqpro.rag import RDTYPE_co as RDTYPE
 from seqpro.rag import Ragged
 from seqpro.rag import to_padded as _sp_to_padded
+
+
+@nb.njit(parallel=True, cache=True)
+def _reverse_rows_masked(data, offsets, mask):  # pragma: no cover - njit
+    n = mask.shape[0]
+    for i in nb.prange(n):
+        if mask[i]:
+            lo = offsets[i]
+            hi = offsets[i + 1] - 1
+            while lo < hi:
+                tmp = data[lo]
+                data[lo] = data[hi]
+                data[hi] = tmp
+                lo += 1
+                hi -= 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -68,3 +84,33 @@ class _Flat(Generic[RDTYPE]):
                 raise ValueError(f"cannot squeeze axis {axis} with size {outer[axis]}")
             del outer[axis]
         return _Flat(self.data, self.offsets, (*outer, None))
+
+    def reverse_masked(self, mask: NDArray[np.bool_], comp: NDArray | None = None) -> "_Flat":
+        """Reverse (DNA: reverse-complement) the `mask`-selected rows, in place.
+
+        `mask` is one entry per outer query; replicate across any inner fixed
+        axes in C order to get one entry per flattened ragged row, matching the
+        awkward `ak.where` broadcast it replaces.
+        """
+        m = np.ascontiguousarray(mask, np.bool_).reshape(-1)
+        if m.size != self.n_rows:
+            factor, rem = divmod(self.n_rows, m.size)
+            if rem != 0:
+                raise ValueError(
+                    f"mask has {m.size} entries but {self.n_rows} rows "
+                    "(not an integer multiple)."
+                )
+            m = np.repeat(m, factor)
+        if comp is not None:
+            # DNA reverse-complement via the flat seqpro kernel (reuses gvl's LUT).
+            # seqpro requires S1 dtype; view uint8 as S1 for the call, then keep uint8.
+            from ._ragged import reverse_complement_masked
+
+            s1_flat = self if self.data.dtype == np.dtype("S1") else self.view("S1")
+            rag = reverse_complement_masked(s1_flat.to_ragged(), m)
+            result_data = np.asarray(rag.data)
+            if self.data.dtype != np.dtype("S1"):
+                result_data = result_data.view(self.data.dtype)
+            return _Flat(result_data, self.offsets, self.shape)
+        _reverse_rows_masked(self.data, self.offsets, m)
+        return self
