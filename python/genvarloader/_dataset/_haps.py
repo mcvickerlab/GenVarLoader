@@ -30,6 +30,7 @@ from pydantic_extra_types.semantic_version import SemanticVersion
 from seqpro.rag import OFFSET_TYPE, Ragged
 from typing_extensions import assert_never
 
+from .._flat import _Flat, _FlatAnnotatedHaps
 from .._ragged import RaggedAnnotatedHaps, RaggedSeqs
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
@@ -513,7 +514,7 @@ class Haps(Reconstructor[_H]):
             out = self._reconstruct_haplotypes(req)
         elif issubclass(self.kind, RaggedAnnotatedHaps):
             haps, annot_v_idx, annot_pos = self._reconstruct_annotated_haplotypes(req)
-            out = RaggedAnnotatedHaps(haps, annot_v_idx, annot_pos)
+            out = _FlatAnnotatedHaps(haps, annot_v_idx, annot_pos)
         elif issubclass(self.kind, RaggedVariants):
             if splice_plan is not None:
                 raise NotImplementedError(
@@ -756,15 +757,13 @@ class Haps(Reconstructor[_H]):
         assert self.reference is not None
 
         if req.splice_plan is None:
-            haps = Ragged.from_offsets(
-                np.empty(req.out_offsets[-1], np.uint8),
-                (*req.shifts.shape, None),
-                req.out_offsets,
-            )
+            out_data = np.empty(req.out_offsets[-1], np.uint8)
+            out_offsets = np.asarray(req.out_offsets, np.int64)
+            shape = (*req.shifts.shape, None)
             reconstruct_haplotypes_from_sparse(
                 geno_offset_idx=req.geno_offset_idx,
-                out=haps.data,
-                out_offsets=haps.offsets,
+                out=out_data,
+                out_offsets=out_offsets,
                 regions=req.regions,
                 shifts=req.shifts,
                 geno_offsets=self.genotypes.offsets,
@@ -781,7 +780,10 @@ class Haps(Reconstructor[_H]):
                 annot_v_idxs=None,
                 annot_ref_pos=None,
             )
-            return cast(Ragged[np.bytes_], haps.view("S1"))
+            return cast(
+                "Ragged[np.bytes_]",
+                _Flat.from_offsets(out_data, shape, out_offsets).view("S1"),
+            )
 
         # ---- splice plan path ----
         flat_geno_idx, flat_shifts, permuted_regions, keep_perm, keep_offsets_perm = (
@@ -835,27 +837,17 @@ class Haps(Reconstructor[_H]):
         assert self.reference is not None
 
         if req.splice_plan is None:
-            haps = Ragged.from_offsets(
-                np.empty(req.out_offsets[-1], np.uint8),
-                (*req.shifts.shape, None),
-                req.out_offsets,
-            )
-            annot_v_idxs = Ragged.from_offsets(
-                np.empty(req.out_offsets[-1], V_IDX_TYPE),
-                (*req.shifts.shape, None),
-                req.out_offsets,
-            )
-            annot_positions = Ragged.from_offsets(
-                np.empty(req.out_offsets[-1], np.int32),
-                (*req.shifts.shape, None),
-                req.out_offsets,
-            )
+            out_data = np.empty(req.out_offsets[-1], np.uint8)
+            annot_v_data = np.empty(req.out_offsets[-1], V_IDX_TYPE)
+            annot_pos_data = np.empty(req.out_offsets[-1], np.int32)
+            out_offsets = np.asarray(req.out_offsets, np.int64)
+            shape = (*req.shifts.shape, None)
 
             # annot offsets match haps offsets, so we share them.
             reconstruct_haplotypes_from_sparse(
                 geno_offset_idx=req.geno_offset_idx,
-                out=haps.data,
-                out_offsets=haps.offsets,
+                out=out_data,
+                out_offsets=out_offsets,
                 regions=req.regions,
                 shifts=req.shifts,
                 geno_offsets=self.genotypes.offsets,
@@ -869,13 +861,22 @@ class Haps(Reconstructor[_H]):
                 pad_char=self.reference.pad_char,
                 keep=req.keep,
                 keep_offsets=req.keep_offsets,
-                annot_v_idxs=annot_v_idxs.data,
-                annot_ref_pos=annot_positions.data,
+                annot_v_idxs=annot_v_data,
+                annot_ref_pos=annot_pos_data,
             )
             return (
-                cast(Ragged[np.bytes_], haps.view("S1")),
-                annot_v_idxs,
-                annot_positions,
+                cast(
+                    "Ragged[np.bytes_]",
+                    _Flat.from_offsets(out_data, shape, out_offsets).view("S1"),
+                ),
+                cast(
+                    "Ragged[V_IDX_TYPE]",
+                    _Flat.from_offsets(annot_v_data, shape, out_offsets),
+                ),
+                cast(
+                    "Ragged[np.int32]",
+                    _Flat.from_offsets(annot_pos_data, shape, out_offsets),
+                ),
             )
 
         # ---- splice plan path ----
