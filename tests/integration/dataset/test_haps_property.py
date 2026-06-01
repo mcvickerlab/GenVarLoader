@@ -196,8 +196,10 @@ def test_track1b_af_matches_vcf_oracle_on_session_case(synthetic_case):
     previous index.arrow comparison would have passed silently.
 
     Axes:
-    - ``n_checked`` = number of variants in the SVAR index (15 for the session
-      case, since one multiallelic in session_document is split into two).
+    - ``n_checked`` = number of variants in the SVAR index (17 for the session
+      case: the chr2:1110696 multiallelic splits into 2 bi-allelic records, and
+      the chr2:1234567 microsat A>GA,AC splits into 2 bi-allelic records after
+      the stale INFO/AC strip that fixed the bcf_calc_ac retention bug).
     - ``n_rv_checked`` = number of (region, sample, hap, variant) cells across
       all rv arrays where an AF value was retrieved and validated.
 
@@ -351,7 +353,7 @@ def test_af_and_dosage_consistent(case_inputs):
 import hypothesis.strategies as hyp  # noqa: E402
 
 
-def _raw_write_vcf(spec, doc, tmp) -> None:
+def _raw_write_vcf(doc, tmp) -> None:
     """Render the RAW (un-normalized) doc and feed it directly to gvl.write.
 
     Deliberately skips the consensus/pgen/svar steps that full build_case runs,
@@ -359,15 +361,15 @@ def _raw_write_vcf(spec, doc, tmp) -> None:
     and plink2 would error first on raw violating input, masking the gvl.write
     ValueError we want to assert).
 
-    Steps: write reference -> render+bgzip+index the raw VCF -> derive BED ->
-    VCF reader -> gvl.write.  No normalization, no oracle, no pgen/svar.
+    Steps: render+bgzip+index the raw VCF -> derive BED -> VCF reader ->
+    gvl.write.  No reference write, no normalization, no oracle, no pgen/svar.
+    gvl.write does not require a reference FASTA (variants= path only).
     """
     import genvarloader as gvl
     from genoray import VCF
     from case import _bgzip_index, _derive_bed  # module-level helpers
 
     tmp = Path(tmp)
-    ref = spec.write(tmp / "ref.fa.bgz")
     raw_bytes = doc.render().encode()
     vcf_gz = _bgzip_index(raw_bytes, tmp / "raw.vcf.gz")
     bed = _derive_bed(vcf_gz, None)
@@ -414,13 +416,13 @@ def _spec_and_violating_doc(draw, violation):
 @given(case_inputs=_spec_and_violating_doc("multiallelic"))
 def test_multiallelic_raw_is_rejected(case_inputs):
     """gvl.write rejects raw multiallelic input (already enforced)."""
-    spec, doc = case_inputs
+    _spec, doc = case_inputs
     # violations={"multiallelic"} enables but does not guarantee a multiallelic
     # record appears in every draw; skip draws that contain none.
     assume(_has_violation_label(doc, "multiallelic"))
     with tempfile.TemporaryDirectory() as tmp:
         with pytest.raises(ValueError, match="multi-allelic"):
-            _raw_write_vcf(spec, doc, tmp)
+            _raw_write_vcf(doc, tmp)
 
 
 @pytest.mark.xfail(strict=False, reason="gvl #199: gvl.write does not validate atomization")
@@ -428,13 +430,13 @@ def test_multiallelic_raw_is_rejected(case_inputs):
 @given(case_inputs=_spec_and_violating_doc("non_atomic"))
 def test_non_atomic_raw_is_rejected(case_inputs):
     """gvl SHOULD reject raw non-atomic input; currently it does not (xfail #199)."""
-    spec, doc = case_inputs
+    _spec, doc = case_inputs
     # violations={"non_atomic"} enables but does not guarantee a non-atomic
     # record appears in every draw; skip draws that contain none.
     assume(_has_violation_label(doc, "non_atomic"))
     with tempfile.TemporaryDirectory() as tmp:
         with pytest.raises(ValueError):
-            _raw_write_vcf(spec, doc, tmp)
+            _raw_write_vcf(doc, tmp)
 
 
 @pytest.mark.xfail(strict=False, reason="gvl #200: gvl.write does not validate left-alignment")
@@ -442,10 +444,10 @@ def test_non_atomic_raw_is_rejected(case_inputs):
 @given(case_inputs=_spec_and_violating_doc("non_left_aligned"))
 def test_non_left_aligned_raw_is_rejected(case_inputs):
     """gvl SHOULD reject raw non-left-aligned input; currently it does not (xfail #200)."""
-    spec, doc = case_inputs
+    _spec, doc = case_inputs
     # violations={"non_left_aligned"} labels records with "off_anchor"; skip draws
     # that contain no non-left-aligned record.
     assume(_has_violation_label(doc, "off_anchor"))
     with tempfile.TemporaryDirectory() as tmp:
         with pytest.raises(ValueError):
-            _raw_write_vcf(spec, doc, tmp)
+            _raw_write_vcf(doc, tmp)

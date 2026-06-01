@@ -5,7 +5,6 @@ from pathlib import Path
 
 import genvarloader as gvl
 import pysam
-import pytest
 from vcfixture import ReferenceBuilder, VcfBuilder
 
 

@@ -52,16 +52,31 @@ def _normalize(raw_vcf: bytes, ref: Path) -> bytes:
     Pipeline:
       1. bcftools norm -f ref   — left-align indels
       2. bcftools norm -a --atom-overlaps . -m -   — split multiallelics, atomize
-      3. bcftools view --min-ac 1   — drop records where no sample carries ALT
+      3. bcftools annotate -x INFO/AC,INFO/AN   — strip stale count fields so
+         bcf_calc_ac always recomputes from genotypes in step 4
+      4. bcftools view --min-ac 1   — drop records where no sample carries ALT
 
-    Step 3 enforces the gvl.write invariant that every record in the input VCF
+    Step 4 enforces the gvl.write invariant that every record in the input VCF
     has at least one ALT allele observed across samples.  Records where all
     genotypes are 0/0 (or ./.) contribute nothing to haplotype reconstruction and
     can trigger downstream failures (e.g. missing variant_idxs.npy).
+
+    Step 3 is necessary because bcftools norm -m - splits multiallelics but
+    carries the original INFO/AC values (e.g. AC=[3,1]) unchanged onto both
+    resulting bi-allelic records.  ``bcf_calc_ac`` (used by --min-ac) reads the
+    present INFO/AC field instead of recomputing from genotypes when the field
+    exists, so a stale multi-valued AC on a bi-allelic record causes it to emit
+    "[W::bcf_calc_ac] Incorrect number of AC fields" and silently drop valid
+    ALT-carrying records.  Stripping AC and AN forces recomputation from GTs.
+    INFO/AF and other fields are intentionally left intact.
     """
     vcf = _run(["bcftools", "norm", "-f", str(ref)], input=raw_vcf)
     vcf = _run(
         ["bcftools", "norm", "-a", "--atom-overlaps", ".", "-f", str(ref), "-m", "-"],
+        input=vcf,
+    )
+    vcf = _run(
+        ["bcftools", "annotate", "-x", "INFO/AC,INFO/AN", "-O", "v", "-"],
         input=vcf,
     )
     vcf = _run(["bcftools", "view", "--min-ac", "1", "-O", "v", "-"], input=vcf)
