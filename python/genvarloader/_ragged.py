@@ -14,6 +14,7 @@ from phantom import Phantom
 from seqpro.rag import Ragged, is_rag_dtype
 from seqpro.rag import RDTYPE_co as RDTYPE
 from seqpro.rag import reverse_complement as _sp_reverse_complement
+from seqpro.rag import to_padded as _sp_to_padded
 
 from ._torch import TORCH_AVAILABLE
 from ._types import AnnotatedHaps
@@ -256,6 +257,12 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
     """Convert this Ragged array to a rectilinear array by right-padding each entry with a value.
     The ragged axis will be padded to have the maximum length across all entries.
 
+    Thin pass-through to :func:`seqpro.rag.to_padded` (seqpro 0.13+), a single-pass,
+    parallel flat-buffer densify-and-pad kernel that replaced the old awkward
+    ``ak_str.rpad`` / ``ak.pad_none`` + ``fill_none`` + ``to_numpy`` idiom. Output is
+    byte-identical for every dtype/pad gvl uses (S1, int32, float32); seqpro pads to
+    the batch maximum ``rag.lengths.max()`` when no explicit length is given.
+
     Parameters
     ----------
     rag
@@ -267,19 +274,7 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
     -------
         Padded array.
     """
-    length = int(rag.lengths.max())
-    if is_rag_dtype(rag, np.bytes_):
-        rag = ak_str.rpad(rag, length, pad_value)
-        arr = Ragged(rag).to_numpy()
-    else:
-        # Pad along the innermost (ragged) axis. clip=True forces that axis to
-        # become a RegularArray of exactly `length`, so the result is already
-        # rectilinear — convert directly without going back through Ragged().
-        orig_dtype = rag.dtype
-        rag = ak.pad_none(rag, length, axis=-1, clip=True)
-        rag = ak.fill_none(rag, pad_value)
-        arr = ak.to_numpy(rag).astype(orig_dtype, copy=False)
-    return arr
+    return _sp_to_padded(rag, pad_value)
 
 
 _COMP = np.frombuffer(bytes.maketrans(b"ACGT", b"TGCA"), np.uint8)
