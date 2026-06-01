@@ -21,6 +21,7 @@ from numpy.typing import NDArray
 from seqpro.rag import Ragged
 from typing_extensions import assert_never
 
+from .._flat import _Flat
 from .._ragged import RaggedAnnotatedHaps, RaggedSeqs, RaggedTracks
 from .._utils import lengths_to_offsets
 from ._haps import _H, Haps, ReconstructionRequest, _NewH, _Variants
@@ -224,8 +225,8 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                 None,
             )
 
-            # ragged (b t [p] l)
-            tracks = Ragged.from_offsets(out, out_shape, out_offsets)
+            # flat (b t p l)
+            tracks = _Flat.from_offsets(out, out_shape, out_offsets)
 
         else:
             tracks = self.tracks._call_intervals(idx)
