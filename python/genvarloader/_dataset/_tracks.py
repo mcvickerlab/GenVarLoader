@@ -668,13 +668,11 @@ class Tracks(Reconstructor[_T]):
                 e_src = int(sub_offsets[m + 1])
                 out_buf[s_dest:e_dest] = scratch[s_src:e_src]
 
-        # Per-element Ragged (caller rewraps with group_offsets via _regroup).
+        # Per-element flat (caller rewraps with group_offsets via _regroup).
         out_shape = (splice_plan.permuted_lengths.shape[0], None)
         return cast(
             RaggedTracks,
-            RaggedTracks.from_offsets(
-                out_buf, out_shape, splice_plan.permuted_out_offsets
-            ),
+            _Flat.from_offsets(out_buf, out_shape, splice_plan.permuted_out_offsets),
         )
 
     def _call_intervals(self, idx: NDArray[np.integer]) -> RaggedIntervals:

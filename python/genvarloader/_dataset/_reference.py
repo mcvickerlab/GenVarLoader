@@ -16,6 +16,7 @@ from numpy.typing import ArrayLike, NDArray
 from seqpro.rag import Ragged, lengths_to_offsets
 from typing_extensions import Self
 
+from .._flat import _Flat
 from .._fasta import Fasta
 from .._ragged import RaggedSeqs, reverse_complement_masked, to_padded
 from .._torch import TORCH_AVAILABLE, get_dataloader, no_torch_error
@@ -456,14 +457,15 @@ class RefDataset(Generic[T]):
         if self.rc_neg:
             to_rc_unperm = regions[:, 3] == -1
             if to_rc_unperm.any():
+                from .._ragged import _COMP
                 to_rc_perm = to_rc_unperm[plan.permutation]
-                per_elem = reverse_complement_masked(per_elem, to_rc_perm)
+                per_elem = per_elem.reverse_masked(to_rc_perm, comp=_COMP)
 
         # Rewrap with group_offsets at (n_rows, None) — skip the (n_rows, 1, None)
         # + squeeze(1) trick since RefDataset has no sample axis.
         ref = cast(
             Ragged[np.bytes_],
-            Ragged.from_offsets(per_elem.data, (n_rows, None), plan.group_offsets),
+            _Flat.from_offsets(per_elem.data, (n_rows, None), plan.group_offsets).to_ragged(),
         )
 
         if out_reshape is not None:
@@ -686,9 +688,9 @@ def _fetch_spliced_ref(
     reference: NDArray[np.uint8],
     ref_offsets: NDArray[np.int64],
     pad_char: int,
-) -> Ragged[np.bytes_]:
+) -> "_Flat[np.bytes_]":
     """Fetch reference bytes in splice-permuted order, returning a per-element
-    Ragged of shape ``(n_elements, None)``.
+    flat ragged of shape ``(n_elements, None)``.
 
     This is the kernel-dispatch core shared by :class:`Ref.__call__`'s splice
     branch and :meth:`RefDataset._getitem_spliced`.
@@ -700,11 +702,11 @@ def _fetch_spliced_ref(
         reference=reference,
         ref_offsets=ref_offsets,
         pad_char=pad_char,
-    ).view("S1")
+    )  # uint8 flat buffer
     n_elements = plan.permuted_lengths.shape[0]
     return cast(
-        Ragged[np.bytes_],
-        Ragged.from_offsets(raw, (n_elements, None), plan.permuted_out_offsets),
+        "_Flat[np.bytes_]",
+        _Flat.from_offsets(raw, (n_elements, None), plan.permuted_out_offsets).view("S1"),
     )
 
 

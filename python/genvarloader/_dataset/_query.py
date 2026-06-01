@@ -394,16 +394,24 @@ def pad(rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
 
 
 def _regroup(
-    rag: Ragged | RaggedAnnotatedHaps,
+    rag: _Flat | _FlatAnnotatedHaps | Ragged | RaggedAnnotatedHaps,
     group_offsets: NDArray[np.int64],
     out_shape: tuple[int | None, ...],
-) -> Ragged | RaggedAnnotatedHaps:
-    """Rewrap a per-element Ragged (or RaggedAnnotatedHaps) with grouped
-    offsets so each cell holds one contiguous spliced element.
+) -> _Flat | _FlatAnnotatedHaps | Ragged | RaggedAnnotatedHaps:
+    """Rewrap a per-element flat ragged (or Ragged) with grouped offsets so
+    each cell holds one contiguous spliced element.
 
     Both branches share the same data buffer; only the outer offsets / shape
     change.
     """
+    if isinstance(rag, _FlatAnnotatedHaps):
+        return _FlatAnnotatedHaps(
+            _regroup(rag.haps, group_offsets, out_shape),  # type: ignore[arg-type]
+            _regroup(rag.var_idxs, group_offsets, out_shape),  # type: ignore[arg-type]
+            _regroup(rag.ref_coords, group_offsets, out_shape),  # type: ignore[arg-type]
+        )
+    if isinstance(rag, _Flat):
+        return _Flat.from_offsets(rag.data, out_shape, group_offsets)
     if isinstance(rag, RaggedAnnotatedHaps):
         return RaggedAnnotatedHaps(
             haps=cast(

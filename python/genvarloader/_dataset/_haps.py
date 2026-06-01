@@ -817,12 +817,8 @@ class Haps(Reconstructor[_H]):
 
         per_elem_shape = (splice_plan.permuted_lengths.shape[0], None)
         return cast(
-            Ragged[np.bytes_],
-            Ragged.from_offsets(
-                out_buf.view("S1"),
-                per_elem_shape,
-                splice_plan.permuted_out_offsets,
-            ),
+            "Ragged[np.bytes_]",
+            _Flat.from_offsets(out_buf, per_elem_shape, splice_plan.permuted_out_offsets).view("S1"),
         )
 
     def _reconstruct_annotated_haplotypes(
@@ -912,19 +908,18 @@ class Haps(Reconstructor[_H]):
         )
 
         per_elem_shape = (splice_plan.permuted_lengths.shape[0], None)
+        off = splice_plan.permuted_out_offsets
         haps_rag = cast(
-            Ragged[np.bytes_],
-            Ragged.from_offsets(
-                out_buf.view("S1"),
-                per_elem_shape,
-                splice_plan.permuted_out_offsets,
-            ),
+            "Ragged[np.bytes_]",
+            _Flat.from_offsets(out_buf, per_elem_shape, off).view("S1"),
         )
-        annot_v_rag = Ragged.from_offsets(
-            annot_v_buf, per_elem_shape, splice_plan.permuted_out_offsets
+        annot_v_rag = cast(
+            "Ragged[V_IDX_TYPE]",
+            _Flat.from_offsets(annot_v_buf, per_elem_shape, off),
         )
-        annot_pos_rag = Ragged.from_offsets(
-            annot_pos_buf, per_elem_shape, splice_plan.permuted_out_offsets
+        annot_pos_rag = cast(
+            "Ragged[np.int32]",
+            _Flat.from_offsets(annot_pos_buf, per_elem_shape, off),
         )
         return haps_rag, annot_v_rag, annot_pos_rag
 
