@@ -15,6 +15,7 @@ Requires the test reference fasta (run `pixi run -e dev gen` first to fetch it).
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,8 +25,19 @@ import polars as pl
 REPO = Path(__file__).resolve().parents[3]
 DATA = Path(__file__).resolve().parent
 
-PLINK_PREFIX = Path("/carter/users/dlaub/data/1kGP/plink2/hg38.norm")
-RNA_DIR = Path("/carter/users/dlaub/data/1kGP-rna-seq")
+# Source inputs. Post-cluster-migration these come from the R2 build-source bundle
+# (see docs/superpowers/HANDOFF-2026-05-30-bench-codspeed-profiling.md): set
+# GVL_BENCH_SOURCE to the extracted dir (e.g. /tmp/source), whose layout is
+# chr22_5s.{pgen,pvar.zst,psam} + sample_id_to_bigwig.csv + bw_chr22/ + chr22_egenes.bed.
+# With the cluster mounted, the defaults point at /carter.
+_SOURCE = os.environ.get("GVL_BENCH_SOURCE")
+if _SOURCE:
+    SOURCE = Path(_SOURCE)
+    PLINK_PREFIX = SOURCE / "chr22_5s"
+    RNA_DIR = SOURCE
+else:
+    PLINK_PREFIX = Path("/carter/users/dlaub/data/1kGP/plink2/hg38.norm")
+    RNA_DIR = Path("/carter/users/dlaub/data/1kGP-rna-seq")
 SAMPLE_MAP = RNA_DIR / "sample_id_to_bigwig.csv"
 BW_CHR22_DIR = RNA_DIR / "bw_chr22"
 EGENES_BED = RNA_DIR / "chr22_egenes.bed"
@@ -190,6 +202,12 @@ def build_dataset(samples: list[str], pgen: Path, bed_path: Path) -> Path:
     out = DATA / "chr22_geuv.gvl"
     if out.exists():
         shutil.rmtree(out)
+    # extend_to_length=False: regions stay exactly at the BED windows instead of
+    # being variant-extended past them. Combined with the exact-window variant
+    # --extract in slice_pgen, this keeps the dataset small AND internally
+    # consistent (the earlier broken build paired exact-window variants with the
+    # default extend_to_length=True, which starved the extender and ran region
+    # ends out to ~3 Mb). Haplotypes are reference-padded after deletions.
     gvl.write(
         path=out,
         bed=bed_path,
@@ -197,6 +215,7 @@ def build_dataset(samples: list[str], pgen: Path, bed_path: Path) -> Path:
         tracks=tracks,
         samples=samples,
         overwrite=True,
+        extend_to_length=False,
     )
     print(f"Wrote dataset {out}")
     return out
