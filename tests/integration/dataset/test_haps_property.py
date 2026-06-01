@@ -148,20 +148,52 @@ def test_haplotypes_match_consensus(src, case_inputs):
 # Track 1b — AF exposure on the svar backend
 # ---------------------------------------------------------------------------
 
-def test_track1b_af_matches_truth_on_session_case(synthetic_case):
-    """Probe test: gvl's per-variant AF array matches the SVAR-index cached AFs.
 
-    ``cache_afs()`` computes population-level AFs from the SVAR genotypes and
-    writes them into ``index.arrow``.  gvl reads that same array and exposes
-    each variant's AF in ``rv.AF[h]``.  This test cross-checks the round-trip:
+def _oracle_afs_from_vcf(vcf_path) -> np.ndarray:
+    """Compute per-variant AF from post-norm VCF genotypes using the fixed-2N convention.
 
-      gvl-internal AF array  ==  SVAR-index AF array (authoritative source)
+    genoray/gvl uses ``alt_allele_count / (2 * n_samples)`` — missing alleles
+    count in the denominator (fixed-2N), NOT called-AN (which would exclude
+    missing alleles from the denominator).  This was confirmed empirically on
+    the session case: variants at chr1:1210696 with ``1|.`` / ``.|1`` / ``0/1``
+    GTs have AF=0.666667 and AF=0.166667 respectively, which matches fixed-2N
+    but NOT called-AN (which gives 0.8 and 0.2).
 
-    The SVAR index is the post-normalization ground truth; pre-norm truth AFs
-    are NOT used here because bcftools norm can rewrite positions/alleles in
-    ways that make 1-to-1 matching unreliable (left-alignment, atomization,
-    multiallelic splits).  Using the SVAR index directly avoids the pre/post-
-    norm boundary entirely.
+    Records are returned in VCF iteration order, which matches the SVAR index
+    order (both are sorted chrom/pos; both use 1-based coordinates).
+
+    Only bi-allelic records (post-normalization) are expected; each record's
+    ALT allele count is the number of allele values equal to 1 across all
+    samples, treating None (missing) as 0.
+    """
+    oracle = []
+    with pysam.VariantFile(str(vcf_path)) as vcf:
+        samples = list(vcf.header.samples)
+        n_samples = len(samples)
+        fixed_denom = 2 * n_samples
+        for rec in vcf.fetch():
+            alt_count = 0
+            for samp in samples:
+                gt = rec.samples[samp]["GT"]
+                for a in gt:
+                    if a == 1:
+                        alt_count += 1
+            oracle.append(alt_count / fixed_denom)
+    return np.array(oracle, dtype=np.float32)
+
+
+def test_track1b_af_matches_vcf_oracle_on_session_case(synthetic_case):
+    """gvl's per-variant AF array matches an independent post-norm-VCF oracle.
+
+    Oracle: per-variant AF computed directly from ``case.vcf_path`` (the
+    bgzipped, indexed, post-normalization VCF that the SVAR dataset is built
+    from).  Convention: ``alt_allele_count / (2 * n_samples)`` (fixed-2N —
+    missing alleles count in the denominator).
+
+    This is a GENUINE cross-check: the oracle is derived independently of
+    ``index.arrow`` (which is where gvl reads AF from).  A bug in genoray's
+    ``cache_afs()`` AF computation would cause this test to fail, whereas the
+    previous index.arrow comparison would have passed silently.
 
     Axes:
     - ``n_checked`` = number of variants in the SVAR index (15 for the session
@@ -174,8 +206,6 @@ def test_track1b_af_matches_truth_on_session_case(synthetic_case):
     window.  AF is the same for every haplotype that carries a given variant
     (population-level, not per-haplotype).
     """
-    import polars as pl
-
     ds = (
         gvl.Dataset.open(
             synthetic_case.gvl_path["svar"],
@@ -187,40 +217,43 @@ def test_track1b_af_matches_truth_on_session_case(synthetic_case):
         .with_tracks(False)
     )
 
-    # 1. Verify the internal AF array is an exact read-back of the cached AFs.
+    # 1. Independent oracle from the post-norm VCF (not from index.arrow).
     gvl_afs = ds._seqs.variants.info["AF"]  # type: ignore[attr-defined]
-    svar_index = pl.read_ipc(synthetic_case.svar_path / "index.arrow")
-    svar_afs = svar_index["AF"].to_numpy()
+    oracle_afs = _oracle_afs_from_vcf(synthetic_case.vcf_path)
 
     n_checked = len(gvl_afs)
     assert n_checked > 0, "No variants in SVAR index — test is vacuous"
+    assert len(oracle_afs) == n_checked, (
+        f"VCF oracle has {len(oracle_afs)} records but gvl has {n_checked} variants; "
+        "ordering assumption violated"
+    )
     np.testing.assert_allclose(
         gvl_afs,
-        svar_afs,
+        oracle_afs,
         atol=1e-6,
         err_msg=(
-            "gvl internal AF array differs from SVAR index AF array — "
-            "cache_afs() round-trip is broken"
+            "gvl AF array differs from independent VCF-derived oracle — "
+            "cache_afs() AF computation is incorrect"
         ),
     )
 
     # 2. Verify all AF values are in [0, 1].
     assert np.all((gvl_afs >= 0.0) & (gvl_afs <= 1.0)), (
-        f"SVAR-index AFs contain out-of-range values: {gvl_afs}"
+        f"gvl AFs contain out-of-range values: {gvl_afs}"
     )
 
-    # 3. Verify each rv.AF value is one of the valid AF values from the
-    #    internal array (validates the per-cell indexing path).
-    gvl_af_values = set(float(x) for x in gvl_afs)
+    # 3. Verify each rv.AF value is one of the valid AF values from the oracle
+    #    (validates the per-cell indexing path).
+    oracle_af_set = set(float(x) for x in oracle_afs)
     n_rv_checked = 0
     for region in range(ds.n_regions):
         for sample in ds.samples:
             rv = ds[region, sample]
             for h in range(2):
                 for af in ak.to_list(rv.AF[h]):
-                    assert any(abs(af - a) < 1e-6 for a in gvl_af_values), (
+                    assert any(abs(af - a) < 1e-6 for a in oracle_af_set), (
                         f"rv.AF value {af!r} at region={region} sample={sample} "
-                        f"hap={h} is not present in the internal AF array"
+                        f"hap={h} is not present in the VCF oracle AF array"
                     )
                     n_rv_checked += 1
 
@@ -242,20 +275,18 @@ def test_af_and_dosage_consistent(case_inputs):
 
     Assertions:
     (a) Every AF value exposed via rv.AF is in [0.0, 1.0].
-    (b) The gvl-internal AF array matches the SVAR-index AF array element-
-        by-element (validates cache_afs() round-trip for arbitrary inputs).
+    (b) The gvl AF array matches the independent post-norm-VCF oracle
+        element-by-element (validates the full cache_afs() → gvl.write →
+        read pipeline for arbitrary inputs).
+
+    Oracle convention: ``alt_allele_count / (2 * n_samples)`` (fixed-2N —
+    missing alleles count in the denominator).  This was confirmed on the
+    session case; see ``_oracle_afs_from_vcf`` for details.
 
     Dosage is NOT tested here: ``build_case`` does not write ``dosages.npy``
     by default, so ``dosage`` is not in ``available_var_fields``.  Per-sample
     alt dosage would require calling ``SparseVar(...).cache_dosages()`` (or
     equivalent) before ``gvl.write``, which is outside the current pipeline.
-
-    AF↔dosage consistency form: **(b) strong internal consistency** — the
-    gvl-internal AF array must match the SVAR index byte-for-byte within
-    float32 tolerance.  This is strong in the sense that it validates the
-    full cache → write → read → expose pipeline for every variant, not just
-    that the values are plausible.  The weak monotonic form (AF>0 iff any
-    dosage>0) is not implemented because dosage is unavailable.
     """
     spec, doc, _truth = case_inputs
     assume(len(doc.records) > 0)
@@ -277,24 +308,27 @@ def test_af_and_dosage_consistent(case_inputs):
             .with_tracks(False)
         )
 
-        # (b) Strong internal consistency: gvl reads back the cached AFs exactly.
+        # (b) Independent oracle: compute AF directly from the post-norm VCF.
         gvl_afs = ds._seqs.variants.info["AF"]  # type: ignore[attr-defined]
-        svar_afs = pl.read_ipc(case.svar_path / "index.arrow")["AF"].to_numpy()
+        oracle_afs = _oracle_afs_from_vcf(case.vcf_path)
+        assert len(oracle_afs) == len(gvl_afs), (
+            f"VCF oracle has {len(oracle_afs)} records but gvl has {len(gvl_afs)} variants"
+        )
         np.testing.assert_allclose(
             gvl_afs,
-            svar_afs,
+            oracle_afs,
             atol=1e-6,
-            err_msg="gvl internal AF array differs from SVAR index AF array",
+            err_msg="gvl AF array differs from independent VCF-derived oracle",
         )
 
         # (a) All AF values must be in [0, 1].
         assert np.all((gvl_afs >= 0.0) & (gvl_afs <= 1.0)), (
-            f"SVAR-index AFs out of range: {gvl_afs}"
+            f"gvl AFs out of range: {gvl_afs}"
         )
 
         # Also confirm the rv-level AF values are valid (exercises the per-cell
         # indexing path on random inputs, not just the internal array).
-        gvl_af_values = set(float(x) for x in gvl_afs)
+        oracle_af_set = set(float(x) for x in oracle_afs)
         for region in range(ds.n_regions):
             for sample in ds.samples:
                 rv = ds[region, sample]
@@ -304,7 +338,7 @@ def test_af_and_dosage_consistent(case_inputs):
                             f"rv.AF {af!r} out of [0,1] at "
                             f"region={region} sample={sample} hap={h}"
                         )
-                        assert any(abs(af - a) < 1e-6 for a in gvl_af_values), (
-                            f"rv.AF {af!r} not in internal AF array at "
+                        assert any(abs(af - a) < 1e-6 for a in oracle_af_set), (
+                            f"rv.AF {af!r} not in VCF oracle AF array at "
                             f"region={region} sample={sample} hap={h}"
                         )
