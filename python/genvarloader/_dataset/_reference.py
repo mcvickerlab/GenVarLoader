@@ -444,7 +444,7 @@ class RefDataset(Generic[T]):
         )
 
         # Delegate kernel dispatch to the shared helper (eliminates duplication
-        # with Ref.__call__'s splice branch). Returns per-element Ragged (n_elements, None)
+        # with Ref.__call__'s splice branch). Returns a per-element _Flat (n_elements, None)
         # already in permuted write order.
         per_elem = _fetch_spliced_ref(
             regions=regions,
