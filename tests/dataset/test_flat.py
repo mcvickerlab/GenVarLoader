@@ -1,0 +1,60 @@
+import numpy as np
+import pytest
+from seqpro.rag import Ragged
+
+from genvarloader._flat import _Flat
+
+
+def _rag(data, shape, offsets):
+    return Ragged.from_offsets(data, shape, np.asarray(offsets, np.int64))
+
+
+def test_to_ragged_roundtrip():
+    data = np.arange(6, dtype=np.int32)
+    f = _Flat.from_offsets(data, (2, None), np.array([0, 3, 6], np.int64))
+    r = f.to_ragged()
+    np.testing.assert_array_equal(r.data, data)
+    np.testing.assert_array_equal(r.offsets, [0, 3, 6])
+    assert r.shape == (2, None)
+
+
+def test_to_fixed_matches_ragged_to_numpy():
+    data = np.arange(8, dtype=np.float32)
+    off = np.array([0, 4, 8], np.int64)
+    f = _Flat.from_offsets(data, (2, None), off)
+    expected = _rag(data, (2, None), off).to_numpy()
+    np.testing.assert_array_equal(f.to_fixed(4), expected)
+
+
+def test_to_fixed_multi_outer():
+    data = np.arange(12, dtype=np.float32)
+    off = np.arange(0, 13, 2, dtype=np.int64)  # 6 rows of length 2
+    f = _Flat.from_offsets(data, (3, 2, None), off)
+    out = f.to_fixed(2)
+    assert out.shape == (3, 2, 2)
+    np.testing.assert_array_equal(out.reshape(-1), data)
+
+
+def test_to_padded_matches_seqpro():
+    data = np.array([1, 2, 3, 4, 5], np.int32)
+    off = np.array([0, 2, 5], np.int64)  # rows len 2 and 3
+    f = _Flat.from_offsets(data, (2, None), off)
+    from genvarloader._ragged import to_padded
+    expected = to_padded(_rag(data, (2, None), off), -1)
+    np.testing.assert_array_equal(f.to_padded(-1), expected)
+
+
+def test_view_changes_dtype_not_offsets():
+    data = np.zeros(4, np.uint8)
+    f = _Flat.from_offsets(data, (2, None), np.array([0, 2, 4], np.int64))
+    fv = f.view("S1")
+    assert fv.data.dtype == np.dtype("S1")
+    np.testing.assert_array_equal(fv.offsets, f.offsets)
+
+
+def test_squeeze_outer_one():
+    data = np.arange(4, dtype=np.int32)
+    f = _Flat.from_offsets(data, (1, 2, None), np.array([0, 2, 4], np.int64))
+    s = f.squeeze(0)
+    assert s.shape == (2, None)
+    np.testing.assert_array_equal(s.offsets, f.offsets)
