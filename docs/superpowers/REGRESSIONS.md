@@ -593,13 +593,37 @@ Peak RSS is unchanged because the peak-RSS bottleneck is the track output buffer
 per-track scratch, together 4.2 + 8.4 GB cumulative = peak in the steady state), which
 is retained in both baseline and final.
 
-#### py-spy self-time A/B: PENDING final py-spy run
+#### py-spy CPU self-time A/B (2026-06-01, `sudo py-spy`, fixed dataset, N_BATCHES=2000)
 
-The baseline py-spy speedscope files exist at
-`tests/benchmarks/profiling/*.baseline.speedscope.json`. A final py-spy run requires `sudo`
-on macOS and must be run by the maintainer. Add the self-time A/B comparison here once the
-`haps.speedscope.json` / `tracks.speedscope.json` / `variants.speedscope.json` final files
-are captured. Expected signal: the `awkward numpyarray._carry` / `_kernels.__call__` / `concat`
-self-time frames (39–53% of hot-path self-time at baseline) should drop substantially;
-`intervals_to_tracks` and `_reconstruct_haplotypes` should surface as the dominant residual
-gvl-side costs.
+Same-dataset A/B from the preserved baseline (`*.baseline.speedscope.json`, Task 0 pre-refactor)
+vs the final speedscope captured on the merged refactor. Metric: leaf self-time aggregated from
+the speedscope samples (weights = seconds of sampled CPU time, single-thread). "getitem hot path"
+= samples whose stack passes through `_dataset/_query.py` getitem. "Awkward self-time" = leaf
+self-time in awkward frames (`numpyarray._carry`, `_kernels.__call__`, `concatenate`, `to_packed`,
+`array_module.empty`, list/offset layout ops) — the per-batch ragged-assembly + glue this refactor
+targeted.
+
+| mode | getitem hot-path self-time (s) | awkward self-time within getitem | total sampled wall (s) |
+|---|---|---|---|
+| **tracks**   | 5.70 → **0.57** (−90%) | 78.8% (4.49 s) → **0.0% (0 s)** | 7.00 → **2.19** (3.2×) |
+| **haps**     | 13.63 → **3.18** (−77%) | 69.8% (9.51 s) → **9.4% (0.30 s)** | 14.85 → **4.43** (3.4×) |
+| **variants** | 17.22 → **7.64** (−56%) | 74.7% (12.87 s) → **55.1% (4.21 s)** | 18.59 → **9.02** (2.1×) |
+
+Whole-profile awkward leaf self-time: tracks 64.1% → **0.9%**, haps 64.0% → **7.0%**,
+variants 69.2% → **46.8%**.
+
+**Reading:** the awkward ragged-assembly/glue churn is effectively eliminated from the tracks
+hot path (4.49 s → 0 s) and the haps hot path (9.51 s → 0.30 s). For variants, awkward self-time
+drops ~67% (12.87 s → 4.21 s) but remains the largest bucket — expected and by design, since
+`RaggedVariants` is awkward-native (Task 10): only the assembly/RC *glue* around it was removed,
+not the awkward allele-string container itself. This is the **throughput** counterpart to the
+memray allocation A/B above (which the earlier profiling caveat flagged as not-yet-demonstrated):
+total sampled CPU time falls ~2–3.4× per mode, and CPU self-time *within getitem* falls 56–90%.
+
+**Caveats:** the chr22 GEUVADIS slice is tiny, so total wall is partly one-time JIT/import (why
+getitem-inclusive samples are <100% of each profile, and the final tracks profile is only ~2.2 s
+total); single-thread; py-spy sampling is statistical (~few-percent frames are noisy). The
+direction and magnitude (awkward churn → ~0 for tracks/haps) are unambiguous; treat the exact
+percentages as approximate. Residual dominant gvl-side costs are now the numba kernels
+(`intervals_to_tracks`, `_reconstruct_haplotypes`) and, for variants, the awkward `RaggedVariants`
+assembly.
