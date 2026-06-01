@@ -127,3 +127,63 @@ class _Flat(Generic[RDTYPE]):
             return _Flat(result_data, self.offsets, self.shape)
         _reverse_rows_masked(self.data, self.offsets, m)
         return self
+
+
+@dataclass(slots=True)
+class _FlatAnnotatedHaps:
+    """Composite flat-buffer analog of :class:`AnnotatedHaps` over three :class:`_Flat` s."""
+
+    haps: _Flat
+    var_idxs: _Flat
+    ref_coords: _Flat
+
+    @property
+    def shape(self) -> tuple[int | None, ...]:
+        return self.haps.shape
+
+    def reverse_masked(self, mask: NDArray[np.bool_], comp: NDArray) -> "_FlatAnnotatedHaps":
+        self.haps = self.haps.reverse_masked(mask, comp=comp)
+        self.var_idxs = self.var_idxs.reverse_masked(mask)
+        self.ref_coords = self.ref_coords.reverse_masked(mask)
+        return self
+
+    def reshape(self, shape) -> "_FlatAnnotatedHaps":
+        return _FlatAnnotatedHaps(
+            self.haps.reshape(shape),
+            self.var_idxs.reshape(shape),
+            self.ref_coords.reshape(shape),
+        )
+
+    def squeeze(self, axis=None) -> "_FlatAnnotatedHaps":
+        return _FlatAnnotatedHaps(
+            self.haps.squeeze(axis),
+            self.var_idxs.squeeze(axis),
+            self.ref_coords.squeeze(axis),
+        )
+
+    def to_ragged(self):
+        from ._ragged import RaggedAnnotatedHaps  # boundary import
+
+        return RaggedAnnotatedHaps(
+            self.haps.view("S1").to_ragged(),
+            self.var_idxs.to_ragged(),
+            self.ref_coords.to_ragged(),
+        )
+
+    def to_fixed(self, length: int):
+        from ._types import AnnotatedHaps
+
+        return AnnotatedHaps(
+            self.haps.view("S1").to_fixed(length),
+            self.var_idxs.to_fixed(length),
+            self.ref_coords.to_fixed(length),
+        )
+
+    def to_padded(self):
+        from ._types import AnnotatedHaps
+
+        return AnnotatedHaps(
+            self.haps.view("S1").to_padded(b"N"),
+            self.var_idxs.to_padded(-1),
+            self.ref_coords.to_padded(np.iinfo(self.ref_coords.data.dtype).max),
+        )

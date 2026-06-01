@@ -18,9 +18,11 @@ from seqpro.rag import DTYPE_co as DTYPE
 from seqpro.rag import Ragged, is_rag_dtype
 from typing_extensions import assert_never
 
+from .._flat import _Flat, _FlatAnnotatedHaps
 from .._ragged import (
     RaggedAnnotatedHaps,
     RaggedIntervals,
+    _COMP,
     reverse_complement_masked,
     to_padded,
 )
@@ -98,9 +100,18 @@ def getitem(
         )
     elif isinstance(view.output_length, int):
         recon = tuple(
-            r if isinstance(r, (RaggedVariants, RaggedIntervals)) else r.to_numpy()
+            r if isinstance(r, (RaggedVariants, RaggedIntervals))
+            else r.to_fixed(view.output_length) if isinstance(r, (_Flat, _FlatAnnotatedHaps))
+            else r.to_numpy()
             for r in recon
         )
+
+    # Convert any still-flat elements (ragged output_length path) to their
+    # public Ragged types before reshape/squeeze apply the existing logic.
+    recon = tuple(
+        o.to_ragged() if isinstance(o, (_Flat, _FlatAnnotatedHaps)) else o
+        for o in recon
+    )
 
     if out_reshape is not None:
         recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)  # type: ignore[bad-argument-type, no-matching-overload]  # heterogeneous reshape() across array kinds; shape tuple may contain None for ragged dims
@@ -332,6 +343,11 @@ def reverse_complement_ragged(
     to_rc: NDArray[np.bool_],
 ) -> Ragged | RaggedAnnotatedHaps | RaggedVariants | RaggedIntervals:
     """Reverse-complement (or reverse) ragged outputs according to a per-row mask."""
+    if isinstance(rag, _Flat):
+        comp = _COMP if rag.data.dtype.kind == "S" else None
+        return rag.reverse_masked(to_rc, comp=comp)
+    if isinstance(rag, _FlatAnnotatedHaps):
+        return rag.reverse_masked(to_rc, _COMP)
     if isinstance(rag, Ragged):
         if is_rag_dtype(rag, np.bytes_):
             # Flat-buffer in-place RC of the freshly reconstructed batch.
@@ -357,6 +373,13 @@ def pad(rag: Ragged[DTYPE]) -> NDArray[DTYPE]: ...
 def pad(rag: RaggedAnnotatedHaps) -> AnnotatedHaps: ...
 def pad(rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
     """Materialize a Ragged (or RaggedAnnotatedHaps) into a dense padded array."""
+    if isinstance(rag, (_Flat, _FlatAnnotatedHaps)):
+        if isinstance(rag, _Flat):
+            if rag.data.dtype.kind == "S":
+                return rag.view("S1").to_padded(b"N")
+            else:
+                return rag.to_padded(0)
+        return rag.to_padded()
     if isinstance(rag, Ragged):
         if is_rag_dtype(rag, np.bytes_):
             return to_padded(rag, b"N")

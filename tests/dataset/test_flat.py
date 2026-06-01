@@ -83,3 +83,14 @@ def test_reverse_masked_dna_matches_existing():
     out = f.reverse_masked(mask, comp=_COMP).view("S1")
     expected = reverse_complement_masked(_rag(seq.copy(), (2, None), off), mask)
     np.testing.assert_array_equal(out.data, np.asarray(expected.data))
+
+
+def test_flat_annotated_to_ragged():
+    from genvarloader._flat import _Flat, _FlatAnnotatedHaps
+    off = np.array([0, 2, 4], np.int64)
+    h = _Flat.from_offsets(np.frombuffer(b"ACGT", "S1").view(np.uint8).copy(), (2, None), off)
+    v = _Flat.from_offsets(np.array([0, 1, 2, 3], np.int32), (2, None), off)
+    p = _Flat.from_offsets(np.array([10, 11, 12, 13], np.int32), (2, None), off)
+    rah = _FlatAnnotatedHaps(h, v, p).to_ragged()
+    assert rah.haps.data.dtype == np.dtype("S1")
+    np.testing.assert_array_equal(np.asarray(rah.var_idxs.data), [0, 1, 2, 3])
