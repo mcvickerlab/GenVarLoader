@@ -25,6 +25,136 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.26.0 (2026-06-01)
+
+### Feat
+
+- **query**: flat-aware getitem boundary (legacy Ragged still supported)
+- **flat**: masked reverse/RC on flat buffers
+- **flat**: _Flat numpy ragged transport (no awkward kernels)
+- **write**: add _window_to_sparse dense->sparse dispatch helper
+- **bench**: log CPU/system/microarch info for all benchmarks
+- **bench**: add MiB/s bandwidth plot; trim 1KG regression test data
+- **bench**: add 3x4 small-multiples results plot
+- **bench**: add bench.py thread-pinned orchestration
+- **bench**: add CSV header/append helpers
+- **bench**: add per-cell measurement protocol
+- **bench**: add exact output-bytes table helper
+- **bench**: add BED resize + per-region-length dataset prep
+- **bench**: enumerate deduped dataloader bench cells
+- **bench**: scaffold dataloader bench axis constants
+- mode='double_buffered' dataloader happy path
+- **producer**: subprocess entrypoint for double_buffered mode
+- **shm**: Ragged and RaggedVariants serialization
+- **shm**: hand-rolled slot header + dense round-trip
+- mode='buffered' dataloader
+- **chunked**: ChunkPlanner and slice_chunk
+- **dataset**: _output_bytes_per_instance tracks branch
+- **dataset**: _output_bytes_per_instance variants branch with var_fields
+- **dataset**: _output_bytes_per_instance annotated branch
+- **dataset**: _output_bytes_per_instance reference + haplotypes
+- **haps**: add _allele_bytes_sum for exact variant footprint
+- **dataset**: with_settings lazily loads new var_fields
+- **open**: Dataset.open accepts var_fields, forwards to Haps.from_path
+- **haps**: from_path honors var_fields for lazy info+dosage loading
+- **haps**: _Variants.load_info lazily extends info dict
+- **haps**: _Variants.from_table accepts info_fields filter
+- **haps**: add _Variants.available_info_fields schema peek
+- **reconstruct**: promote view-state to explicit _seqs_kind field
+- **reconstruct**: add _build_reconstructor factory
+- **splice**: Tracks._call_float32 accepts SplicePlan
+- **splice**: Haps._get_haplotypes accepts SplicePlan
+- **splice**: Ref.__call__ accepts optional SplicePlan for zero-copy spliced layout
+- **splice**: add SplicePlan + build_splice_plan helper
+- **refds**: support with_settings(splice_info) and spliced subset_to
+- **refds**: implement spliced __getitem__ via SpliceMap + _cat_length
+- **refds**: add splice_info field and is_spliced/spliced_regions
+- **splice**: add sample-agnostic SpliceMap
+
+### Fix
+
+- **write**: handle empty regions in no-extend VCF path; assert chunk/index alignment
+- **table**: temporarily disable gvl.Table to avoid polars-bio segfault
+- **double_buffered**: release producer+shm per loader, not at process exit
+- **double_buffered**: serialize RaggedAnnotatedHaps (annotated output)
+- **double_buffered**: size shm slots for serialized ragged footprint
+- **bench**: open datasets with hg38 reference; revert out-of-scope _open.py change
+- **double_buffered**: replay all Dataset settings in producer subprocess
+- **sitesonly**: use correct genoray VCF.get_record_info kwargs (fields= not attrs=)
+- **ragged**: to_padded numeric branch handles clip=True RegularArray output
+- **torch**: forward generator from DataLoader through to RandomSampler for reproducible shuffle
+- **dataset**: with_settings(rng=...) maps to _rng dataclass field
+- inline offset computation in filter_af 2-D path; reorder test_torch imports
+- **rag_variants**: accept positional axis arg in RaggedVariants.squeeze
+- **haps**: gate dosage output by var_fields (#191)
+- **utils**: copy read-only inputs in idx_like_to_array
+- **types**: annotate Fasta.pad as bytes | None
+- **Dataset.open**: promote to haplotypes before with_settings(splice_info)
+- **choose_exonic_variants**: use (2, n_slices) indexing for 2-D offsets
+- **with_settings**: propagate var_filter to _recon, preserving kind
+
+### Refactor
+
+- **variants**: remove orphaned _rc_helper/_rc_numba_helper
+- **haps**: extract _build_allele_layout/_alt_layout_parts helpers
+- **query**: overloads for reverse_complement_ragged/pad match flat runtime contract
+- **flat**: document + guard reverse_masked comp as DNA-RC mode selector
+- **write**: assemble full PGEN windows, dispatch via _window_to_sparse, fix max_ends
+- **write**: assemble full VCF windows, dispatch via _window_to_sparse, fix max_ends
+- trim dead code and over-commenting per CLAUDE.md
+- **types**: remove stale type:ignore and annotate the rest
+- **naming**: rename SplicePlan.perm -> SplicePlan.permutation
+- **naming**: standardize geno_offset_idxs -> geno_offset_idx
+- **naming**: rename rsp_idx -> region_sample_ploid_idx
+- **dataset**: split _reconstruct.py + extract _query.py via QueryView (PR6)
+- **reconstruct**: delete dead body of write_transformed_track + add roadmap
+- **reconstruct**: ReconstructionRequest + restructure _get_haplotypes
+- **open**: extract OpenRequest + decompose Dataset.open
+- **write**: extract shared phased-chunked writer for VCF/PGEN
+- **impl**: migrate _impl.py from attrs to stdlib dataclass
+- **reconstruct**: migrate _reconstruct.py from attrs to stdlib dataclass
+- **reference**: migrate _reference.py from attrs to stdlib dataclass
+- **indexing**: migrate _indexing.py from attrs to stdlib dataclass
+- **splice**: migrate _splice.py from attrs to stdlib dataclass
+- **insertion-fill**: migrate _insertion_fill.py from attrs to stdlib dataclass
+- **ragged**: migrate _ragged.py from attrs to stdlib dataclass
+- **variants**: migrate _records.py from attrs to stdlib dataclass
+- **types**: migrate _types.py from attrs to stdlib dataclass
+- **impl**: route remaining _recon construction/checks through view-state
+- **impl**: sequence_type returns the _seqs_kind field directly
+- **impl**: collapse with_settings _recon propagation via factory
+- **impl**: simplify with_tracks via factory + active_tracks check
+- **impl**: simplify with_seqs via _seqs_kind + factory
+- **impl**: route Dataset.open construction through factory
+- **splice**: Dataset spliced path uses SplicePlan
+- **splice**: RefDataset spliced path uses SplicePlan
+- **splice**: compose SpliceIndexer from SpliceMap + DatasetIndexer
+- **splice**: annotate SpliceMap method signatures
+- **splice**: clean up _splice imports per review
+- **splice**: move _cat_length helpers to _splice module
+- **Dataset.open**: delegate splice_info/var_filter to with_settings
+
+### Perf
+
+- **haps**: seqpro to_packed for _allele_bytes_sum gather
+- **variants**: field-wise RaggedVariants.to_packed (seqpro + layout rebuild)
+- **variants**: flat in-place rc_ via seqpro reverse_complement_masked
+- **variants**: seqpro to_packed for allele/genotype/dosage gathers
+- **getitem**: remove dead legacy branches + guard awkward out of hot path + A/B write-up
+- **variants**: documented awkward-native limit for RaggedVariants (Task 10)
+- **splice**: flat-buffer spliced reconstruction + _regroup (Task 9)
+- **reconstruct**: _Flat tracks in HapsTracks; RefTracks flat via leaves
+- **ref**: return _Flat from reference reconstruction
+- **haps**: return _Flat / _FlatAnnotatedHaps from reconstruction
+- **tracks**: return _Flat from float32 reconstruction
+- **bench**: 10x profiling iterations (N_BATCHES=2000) + sudo py-spy script
+- **ragged**: delegate to_padded to seqpro 0.13 flat-buffer kernel
+- **rc**: flat-buffer reverse-complement via seqpro 0.12.1
+- **bench**: open hg38 reference as memmap (in_memory=False)
+
 ## v0.25.0 (2026-05-21)
 
 ### Feat
