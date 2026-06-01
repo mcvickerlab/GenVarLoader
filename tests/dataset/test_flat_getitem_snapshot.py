@@ -13,16 +13,17 @@ it.  It uses the same ingredients as the ``base_ds`` fixture in
 Track name: "5ss"   (only track written by this fixture)
 SEQLEN: 20          (region length = 20 bp, max_jitter=2, jitter=0 → max=24)
 
-Cases kept (all 8)
+Cases kept (all 9)
 ------------------
-haps_ragged       seqs="haplotypes",                   out_len="ragged"
-haps_fixed        seqs="haplotypes",                   out_len=SEQLEN
-haps_variable     seqs="haplotypes",                   out_len="variable"
-annot_fixed       seqs="annotated",                    out_len=SEQLEN
-tracks_ragged     seqs=None, tracks="5ss",             out_len="ragged"
-tracks_fixed      seqs=None, tracks="5ss",             out_len=SEQLEN
-ref_fixed         seqs="reference",                    out_len=SEQLEN
-haps_tracks_fixed seqs="haplotypes", tracks="5ss",     out_len=SEQLEN
+haps_ragged         seqs="haplotypes",                   out_len="ragged"
+haps_fixed          seqs="haplotypes",                   out_len=SEQLEN
+haps_variable       seqs="haplotypes",                   out_len="variable"
+annot_fixed         seqs="annotated",                    out_len=SEQLEN
+tracks_ragged       seqs=None, tracks="5ss",             out_len="ragged"
+tracks_fixed        seqs=None, tracks="5ss",             out_len=SEQLEN
+ref_fixed           seqs="reference",                    out_len=SEQLEN
+haps_tracks_fixed   seqs="haplotypes", tracks="5ss",     out_len=SEQLEN
+haps_tracks_ragged  seqs="haplotypes", tracks="5ss",     out_len="ragged"
 
 No cases were dropped; all are satisfiable with the fixture above.
 """
@@ -52,6 +53,7 @@ CASES = [
     ("tracks_fixed", dict(seqs=None, tracks="5ss"), SEQLEN),
     ("ref_fixed", dict(seqs="reference"), SEQLEN),
     ("haps_tracks_fixed", dict(seqs="haplotypes", tracks="5ss"), SEQLEN),
+    ("haps_tracks_ragged", dict(seqs="haplotypes", tracks="5ss"), "ragged"),
 ]
 
 # ---------------------------------------------------------------------------
