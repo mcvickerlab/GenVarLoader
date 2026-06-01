@@ -54,6 +54,22 @@ _SUPPRESS = [HealthCheck.too_slow, HealthCheck.filter_too_much]
 _ALL_VIOLATIONS = frozenset({"multiallelic", "non_atomic", "non_left_aligned"})
 
 
+def _all_diploid(doc) -> bool:
+    """Return True if every sample genotype in every record is diploid.
+
+    The Track 1b AF oracle (``_oracle_afs_from_vcf``) uses the fixed-2N
+    convention (alt count / ``2 * n_samples``), which is only well-defined when
+    every genotype is diploid. Haploid genotypes (e.g. ``GT=1``) make the AF
+    denominator ambiguous, so they are excluded from the AF property test.
+    """
+    for record in doc.records:
+        for sample_fields in record.samples:
+            gt = sample_fields.get("GT")
+            if gt is not None and len(gt.alleles) != 2:
+                return False
+    return True
+
+
 def _has_any_alt(doc) -> bool:
     """Return True if any sample in any record carries at least one ALT allele."""
     for record in doc.records:
@@ -309,6 +325,9 @@ def test_af_and_dosage_consistent(case_inputs):
     # STOPGAP: all-REF docs produce zero-variant VCFs after _normalize.
     # Exclude until gvl.write is hardened to accept zero-variant input (gvl #201).
     assume(_has_any_alt(doc))
+    # The fixed-2N AF oracle is only well-defined for diploid genotypes; haploid
+    # GTs (e.g. GT=1) make the AF denominator ambiguous. Exclude them.
+    assume(_all_diploid(doc))
 
     with tempfile.TemporaryDirectory() as tmp:
         case = build_case(spec, doc, Path(tmp), sources=("svar",), normalize=True)
