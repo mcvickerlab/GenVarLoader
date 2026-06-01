@@ -13,7 +13,6 @@ from typing import Literal, cast, overload
 
 import numpy as np
 from numpy.typing import NDArray
-from seqpro.rag import DTYPE_co as DTYPE
 from seqpro.rag import Ragged
 from typing_extensions import assert_never
 
@@ -320,12 +319,12 @@ def build_recon_splice_plan(
 
 @overload
 def reverse_complement_ragged(
-    rag: Ragged[DTYPE], to_rc: NDArray[np.bool_]
-) -> Ragged[DTYPE]: ...
+    rag: _Flat, to_rc: NDArray[np.bool_]
+) -> _Flat: ...
 @overload
 def reverse_complement_ragged(
-    rag: RaggedAnnotatedHaps, to_rc: NDArray[np.bool_]
-) -> RaggedAnnotatedHaps: ...
+    rag: _FlatAnnotatedHaps, to_rc: NDArray[np.bool_]
+) -> _FlatAnnotatedHaps: ...
 @overload
 def reverse_complement_ragged(
     rag: RaggedVariants, to_rc: NDArray[np.bool_]
@@ -335,9 +334,9 @@ def reverse_complement_ragged(
     rag: RaggedIntervals, to_rc: NDArray[np.bool_]
 ) -> RaggedIntervals: ...
 def reverse_complement_ragged(
-    rag: Ragged | RaggedAnnotatedHaps | RaggedVariants | RaggedIntervals,
+    rag: _Flat | _FlatAnnotatedHaps | RaggedVariants | RaggedIntervals,
     to_rc: NDArray[np.bool_],
-) -> Ragged | RaggedAnnotatedHaps | RaggedVariants | RaggedIntervals:
+) -> _Flat | _FlatAnnotatedHaps | RaggedVariants | RaggedIntervals:
     """Reverse-complement (or reverse) ragged outputs according to a per-row mask."""
     if isinstance(rag, _Flat):
         comp = _COMP if rag.data.dtype.kind == "S" else None
@@ -352,11 +351,11 @@ def reverse_complement_ragged(
 
 
 @overload
-def pad(rag: Ragged[DTYPE]) -> NDArray[DTYPE]: ...
+def pad(rag: _Flat) -> NDArray: ...
 @overload
-def pad(rag: RaggedAnnotatedHaps) -> AnnotatedHaps: ...
-def pad(rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
-    """Materialize a Ragged (or RaggedAnnotatedHaps) into a dense padded array."""
+def pad(rag: _FlatAnnotatedHaps) -> AnnotatedHaps: ...
+def pad(rag: _Flat | _FlatAnnotatedHaps) -> NDArray | AnnotatedHaps:
+    """Materialize a _Flat (or _FlatAnnotatedHaps) into a dense padded array."""
     if isinstance(rag, _Flat):
         if rag.data.dtype.kind == "S":
             return rag.view("S1").to_padded(b"N")
