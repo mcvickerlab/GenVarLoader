@@ -139,6 +139,7 @@ def _flatten_output(obj) -> dict[str, np.ndarray]:
     if isinstance(obj, tuple):
         for i, o in enumerate(obj):
             out.update({f"{i}_{k}": v for k, v in _flatten_output(o).items()})
+    # RaggedAnnotatedHaps is a separate dataclass (not a Ragged subclass); branch before Ragged by convention.
     elif isinstance(obj, RaggedAnnotatedHaps):
         out["haps_data"] = np.asarray(obj.haps.data)
         out["haps_off"] = np.asarray(obj.haps.offsets)
@@ -153,8 +154,13 @@ def _flatten_output(obj) -> dict[str, np.ndarray]:
         out["haps"] = np.asarray(obj.haps)
         out["var_idxs"] = np.asarray(obj.var_idxs)
         out["ref_coords"] = np.asarray(obj.ref_coords)
+    elif isinstance(obj, np.ndarray):
+        out["arr"] = obj
     else:
-        out["arr"] = np.asarray(obj)
+        raise NotImplementedError(
+            f"_flatten_output: unhandled getitem return type {type(obj).__name__!r}; "
+            "add an explicit branch before snapshotting this case."
+        )
     return out
 
 
