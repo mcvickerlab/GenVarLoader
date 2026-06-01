@@ -180,3 +180,6 @@ dmypy.json
 *.egg-info
 
 .claude/
+tests/benchmarks/profiling/*.speedscope.json
+tests/benchmarks/profiling/*.memray.bin
+tests/benchmarks/profiling/*.flamegraph.html

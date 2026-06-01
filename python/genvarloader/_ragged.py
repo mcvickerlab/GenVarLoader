@@ -13,6 +13,8 @@ from numpy.typing import NDArray
 from phantom import Phantom
 from seqpro.rag import Ragged, is_rag_dtype
 from seqpro.rag import RDTYPE_co as RDTYPE
+from seqpro.rag import reverse_complement as _sp_reverse_complement
+from seqpro.rag import to_padded as _sp_to_padded
 
 from ._torch import TORCH_AVAILABLE
 from ._types import AnnotatedHaps
@@ -255,6 +257,12 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
     """Convert this Ragged array to a rectilinear array by right-padding each entry with a value.
     The ragged axis will be padded to have the maximum length across all entries.
 
+    Thin pass-through to :func:`seqpro.rag.to_padded` (seqpro 0.13+), a single-pass,
+    parallel flat-buffer densify-and-pad kernel that replaced the old awkward
+    ``ak_str.rpad`` / ``ak.pad_none`` + ``fill_none`` + ``to_numpy`` idiom. Output is
+    byte-identical for every dtype/pad gvl uses (S1, int32, float32); seqpro pads to
+    the batch maximum ``rag.lengths.max()`` when no explicit length is given.
+
     Parameters
     ----------
     rag
@@ -266,19 +274,7 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
     -------
         Padded array.
     """
-    length = int(rag.lengths.max())
-    if is_rag_dtype(rag, np.bytes_):
-        rag = ak_str.rpad(rag, length, pad_value)
-        arr = Ragged(rag).to_numpy()
-    else:
-        # Pad along the innermost (ragged) axis. clip=True forces that axis to
-        # become a RegularArray of exactly `length`, so the result is already
-        # rectilinear — convert directly without going back through Ragged().
-        orig_dtype = rag.dtype
-        rag = ak.pad_none(rag, length, axis=-1, clip=True)
-        rag = ak.fill_none(rag, pad_value)
-        arr = ak.to_numpy(rag).astype(orig_dtype, copy=False)
-    return arr
+    return _sp_to_padded(rag, pad_value)
 
 
 _COMP = np.frombuffer(bytes.maketrans(b"ACGT", b"TGCA"), np.uint8)
@@ -305,3 +301,35 @@ def reverse_complement(arr: T) -> T:
     arr = ak.to_packed(arr)
     arr = ak_str.reverse(ak.transform(_ak_comp_dna_helper, arr))
     return og_type(arr)
+
+
+def reverse_complement_masked(
+    rag: Ragged[np.bytes_], mask: NDArray[np.bool_]
+) -> Ragged[np.bytes_]:
+    """Masked reverse-complement of an S1 ragged batch, in place.
+
+    Flat-buffer replacement for the awkward idiom
+    ``Ragged(ak.to_packed(ak.where(mask, reverse_complement(rag), rag)))``: seqpro's
+    kernel touches only the ``mask``-selected rows, runs a single in-place pass per row,
+    and reuses ``rag``'s offsets. Reuses :data:`_COMP` (the same A<->T, C<->G table the
+    awkward path uses) so output is byte-identical.
+
+    Mutates ``rag`` in place (``copy=False``); only call on a freshly reconstructed batch
+    the caller owns.
+
+    ``mask`` is one entry per outer query (e.g. per region); awkward's ``ak.where``
+    used to broadcast it across any inner fixed axes (e.g. ploidy) left-aligned. seqpro's
+    flat kernel wants one entry per flattened ragged row, so replicate the mask across the
+    inner axes in C order to match.
+    """
+    mask = np.ascontiguousarray(mask, dtype=np.bool_).reshape(-1)
+    n_rows = int(np.prod(rag.shape[: rag.rag_dim], dtype=np.int64))
+    if mask.size != n_rows:
+        inner_factor, rem = divmod(n_rows, mask.size)
+        if rem != 0:
+            raise ValueError(
+                f"mask has {mask.size} entries but ragged array has {n_rows} rows, "
+                "which is not an integer multiple."
+            )
+        mask = np.repeat(mask, inner_factor)
+    return _sp_reverse_complement(rag, _COMP, mask=mask, copy=False)

@@ -19,7 +19,7 @@ from numpy.typing import NDArray
 from seqpro.rag import OFFSET_TYPE, Ragged, is_rag_dtype, lengths_to_offsets
 from typing_extensions import Self
 
-from .._ragged import reverse_complement
+from .._ragged import reverse_complement_masked
 from .._torch import TORCH_AVAILABLE, requires_torch
 
 if TORCH_AVAILABLE or TYPE_CHECKING:
@@ -194,8 +194,54 @@ class RaggedVariants(ak.Array):
         return self
 
     def to_packed(self) -> Self:
-        """Apply :func:`ak.to_packed` to all arrays."""
-        return ak.to_packed(self)
+        """Pack all fields into contiguous, zero-based arrays.
+
+        Replaces the previous :func:`ak.to_packed` call with field-wise packing:
+        seqpro :meth:`~seqpro.rag.Ragged.to_packed` for numeric :class:`~seqpro.rag.Ragged`
+        fields, and an allele-level seqpro pack + group-offset rebase +
+        :func:`~._haps._build_allele_layout` rebuild for the doubly-nested ``alt``/``ref``
+        fields.
+        """
+        from seqpro.rag import Ragged
+
+        # local import to avoid circular dependency (_haps imports RaggedVariants)
+        from ._haps import _alt_layout_parts, _build_allele_layout
+
+        packed: dict = {}
+        for field in self.fields:
+            arr = self[field]
+            if field in ("alt", "ref"):
+                leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
+                # _alt_layout_parts returns the FULL (un-sliced) leaf and allele_off even
+                # for a sliced view — only group_off carries the slice's offset.  We must
+                # use group_off[0] to locate where this view's allele groups begin in the
+                # full allele_off, then slice and zero-base both allele_off and leaf to
+                # match so that _build_allele_layout sees a clean, contiguous layout.
+                g0 = int(group_off[0])
+                rebased_group = np.asarray(group_off, np.int64) - g0
+                # slice allele_off to only the alleles in this view and zero-base
+                a0 = int(allele_off[g0])
+                sliced_allele_off = np.asarray(allele_off[g0:], np.int64) - a0
+                sliced_leaf = leaf[a0:]
+                # pack the allele (byte) level: contiguates bytes
+                allele_lvl = Ragged.from_offsets(
+                    sliced_leaf.view("S1"),
+                    (sliced_allele_off.size - 1, None),
+                    sliced_allele_off,
+                ).to_packed()
+                packed[field] = _build_allele_layout(
+                    np.asarray(allele_lvl.data).view(np.uint8),
+                    np.asarray(allele_lvl.offsets),
+                    rebased_group,
+                    ploidy,
+                )
+            else:
+                packed[field] = (
+                    arr.to_packed()
+                    if isinstance(arr, Ragged)
+                    else Ragged(arr).to_packed()
+                )
+        return type(self)(**packed)
 
     def rc_(self, to_rc: NDArray[np.bool_] | None = None) -> Self:
         """Reverse complement the alleles. This is an in-place operation.
@@ -215,22 +261,22 @@ class RaggedVariants(ak.Array):
         elif not to_rc.any():
             return self
 
-        self["alt"] = ak.to_packed(
-            ak.where(
-                to_rc,
-                reverse_complement(self["alt"]),
-                self["alt"],
-            )
-        )
+        # local import: _haps imports RaggedVariants (avoid circular import)
+        from ._haps import _alt_layout_parts
 
-        if "ref" in self.fields:
-            self["ref"] = ak.to_packed(
-                ak.where(
-                    to_rc,
-                    reverse_complement(self["ref"]),
-                    self["ref"],
-                )
+        for field in ("alt", "ref"):
+            if field not in self.fields:
+                continue
+            arr = self[field]
+            leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
+            # per-allele mask: to_rc is per-batch; broadcast across ploidy then variants
+            per_bp = np.repeat(np.ascontiguousarray(to_rc, np.bool_), ploidy)
+            per_allele = np.repeat(per_bp, np.diff(group_off))
+            view = Ragged.from_offsets(
+                leaf.view("S1"), (per_allele.size, None), allele_off
             )
+            # in-place: mutates `leaf`, which shares memory with `arr`'s buffer
+            reverse_complement_masked(view, per_allele)
 
         return self
 
@@ -487,40 +533,3 @@ def _infer_germline_ccfs(
                 running_ccf += (2 * (pos >= 0) - 1) * pos_ccf
 
         np.nan_to_num(ccf, copy=False, nan=max_ccf)
-
-
-def _rc_helper(
-    ragv: RaggedVariants, field: str, to_rc: NDArray[np.bool_] | None = None
-):
-    # flatten all but last two dimensions & strip params for numba
-    alleles = ragv[field].layout
-    while not isinstance(alleles.content, NumpyArray):
-        alleles = alleles.content
-    alleles = ak.without_parameters(alleles)
-
-    if to_rc is None:
-        to_rc = np.ones(ragv.shape[:-1], np.bool_)  # type: ignore[no-matching-overload]  # ak.Array shape may contain None; np.ones overload expects int|Sequence[int]
-
-    # broadcast to same shape as variants, and flatten
-    # (batch) -> (batch * ploidy * n_variants)
-    # batch * ploidy * n_variants = n_alts
-    _to_rc, _ = ak.broadcast_arrays(to_rc, ragv.start)
-    _to_rc = _to_rc.layout
-    while not isinstance(_to_rc, NumpyArray):
-        _to_rc = _to_rc.content
-    _to_rc = cast(NDArray[np.bool_], _to_rc.data)
-
-    _rc_numba_helper(alleles, _to_rc)
-
-
-@nb.njit(nogil=True, cache=True)
-def _rc_numba_helper(alts: ak.Array, to_rc: NDArray[np.bool_]):
-    for alt, rc in zip(alts, to_rc):
-        if rc:
-            alt = np.asarray(alt)
-            rc_alt = np.empty_like(alt)
-            rc_alt[alt == ord("A")] = ord("T")
-            rc_alt[alt == ord("C")] = ord("G")
-            rc_alt[alt == ord("G")] = ord("C")
-            rc_alt[alt == ord("T")] = ord("A")
-            alt[:] = rc_alt[::-1]

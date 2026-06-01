@@ -30,6 +30,7 @@ from pydantic_extra_types.semantic_version import SemanticVersion
 from seqpro.rag import OFFSET_TYPE, Ragged
 from typing_extensions import assert_never
 
+from .._flat import _Flat, _FlatAnnotatedHaps
 from .._ragged import RaggedAnnotatedHaps, RaggedSeqs
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
@@ -185,6 +186,52 @@ class _Variants:
 
 _H = TypeVar("_H", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
 _NewH = TypeVar("_NewH", RaggedSeqs, RaggedAnnotatedHaps, RaggedVariants)
+
+
+def _build_allele_layout(
+    data: NDArray[np.uint8],
+    allele_offsets: NDArray[np.integer],
+    group_offsets: NDArray[np.integer],
+    ploidy: int,
+) -> ak.Array:
+    """Wrap flat allele bytes + two offset levels into a (b, p, ~v, ~l) ak.Array.
+
+    ``data`` is the contiguous allele byte buffer (uint8). ``allele_offsets`` are the
+    per-variant byte boundaries (len n_alleles + 1). ``group_offsets`` are the
+    per-(b*p)-row variant boundaries (len b*p + 1). Both offset arrays must be
+    zero-based. ``ploidy`` groups the b*p rows into the outer regular axis.
+    """
+    # rc_ mutates this leaf in place (reverse_complement_masked), so it must be
+    # writable; callers may pass a read-only buffer (e.g. np.frombuffer on bytes).
+    buf = np.ascontiguousarray(data)
+    if not buf.flags.writeable:
+        buf = buf.copy()
+    leaf = NumpyArray(buf, parameters={"__array__": "byte"})
+    l_content = ListOffsetArray(
+        Index(np.asarray(allele_offsets, np.int64)),
+        leaf,
+        parameters={"__array__": "bytestring"},
+    )
+    vl_content = ListOffsetArray(Index(np.asarray(group_offsets, np.int64)), l_content)
+    pvl_content = RegularArray(vl_content, ploidy)
+    return ak.Array(pvl_content)
+
+
+def _alt_layout_parts(
+    arr: ak.Array,
+) -> tuple[NDArray[np.uint8], NDArray[np.int64], NDArray[np.int64], int]:
+    """Inverse of :func:`_build_allele_layout`: extract (leaf_uint8, allele_offsets,
+    group_offsets, ploidy) from a (b, p, ~v, ~l) allele ak.Array.
+
+    The returned ``leaf_uint8`` shares memory with ``arr``'s buffer, so mutating it
+    mutates ``arr`` in place.
+    """
+    lay = arr.layout
+    ploidy = int(lay.size)
+    group_offsets = np.asarray(lay.content.offsets, np.int64)
+    allele_offsets = np.asarray(lay.content.content.offsets, np.int64)
+    leaf = np.asarray(lay.content.content.content.data).view(np.uint8)
+    return leaf, allele_offsets, group_offsets, ploidy
 
 
 @dataclass(slots=True)
@@ -513,7 +560,7 @@ class Haps(Reconstructor[_H]):
             out = self._reconstruct_haplotypes(req)
         elif issubclass(self.kind, RaggedAnnotatedHaps):
             haps, annot_v_idx, annot_pos = self._reconstruct_annotated_haplotypes(req)
-            out = RaggedAnnotatedHaps(haps, annot_v_idx, annot_pos)
+            out = _FlatAnnotatedHaps(haps, annot_v_idx, annot_pos)
         elif issubclass(self.kind, RaggedVariants):
             if splice_plan is not None:
                 raise NotImplementedError(
@@ -642,9 +689,7 @@ class Haps(Reconstructor[_H]):
         # TODO: maybe filter variants for region, shifts?
         r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore[no-matching-overload]  # Ragged.shape is tuple[int | None, ...]; numpy overload expects all-int
         # (b p ~v)
-        genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s])
-
-        genos = ak.to_packed(genos)
+        genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s]).to_packed()
         v_idxs = genos.data
 
         if self.min_af is not None or self.max_af is not None:
@@ -655,7 +700,8 @@ class Haps(Reconstructor[_H]):
             if self.max_af is not None:
                 keep &= geno_afs <= self.max_af
             _keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
-            genos = Ragged(ak.to_packed(ak.to_regular(genos[_keep], 1)))
+            # genos[_keep] yields a bare ak.Array; wrap before to_packed
+            genos = Ragged(ak.to_regular(genos[_keep], 1)).to_packed()
             v_idxs = genos.data
         else:
             _keep = None
@@ -676,10 +722,12 @@ class Haps(Reconstructor[_H]):
 
         if self.dosages is not None and "dosage" in self.var_fields:
             # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
-            dosages = self.dosages[r, s]
+            dosages = cast(Ragged, self.dosages[r, s])
             if _keep is not None:
-                dosages = ak.to_regular(dosages[_keep], 1)
-            fields["dosage"] = Ragged(ak.to_packed(dosages))
+                # dosages[_keep] yields a bare ak.Array; wrap before to_packed
+                fields["dosage"] = Ragged(ak.to_regular(dosages[_keep], 1)).to_packed()
+            else:
+                fields["dosage"] = dosages.to_packed()
 
         fields.update(
             {
@@ -703,9 +751,7 @@ class Haps(Reconstructor[_H]):
         does not touch allele payload bytes — only the RaggedAlleles offsets.
         """
         r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore[no-matching-overload]
-        genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s])
-
-        genos = ak.to_packed(genos)
+        genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s]).to_packed()
         v_idxs = genos.data
 
         if self.min_af is not None or self.max_af is not None:
@@ -716,7 +762,7 @@ class Haps(Reconstructor[_H]):
             if self.max_af is not None:
                 keep &= geno_afs <= self.max_af
             _keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
-            genos = Ragged(ak.to_packed(ak.to_regular(genos[_keep], 1)))
+            genos = Ragged(ak.to_regular(genos[_keep], 1)).to_packed()
             v_idxs = genos.data
 
         offsets = getattr(self.variants, kind).offsets  # int-typed, length n_variants+1
@@ -729,23 +775,14 @@ class Haps(Reconstructor[_H]):
         self, genos: Ragged[V_IDX_TYPE], kind: Literal["alt", "ref"]
     ) -> ak.Array:
         v_idxs = genos.data
-
-        # (b*p*v ~l)
-        alleles = ak.to_packed(
-            cast(RaggedAlleles, getattr(self.variants, kind)[v_idxs])
+        # (b*p*v ~l) packed allele bytes for the selected variants
+        alleles = cast(RaggedAlleles, getattr(self.variants, kind)[v_idxs]).to_packed()
+        return _build_allele_layout(
+            np.asarray(alleles.data).view(np.uint8),
+            np.asarray(alleles.offsets),
+            np.asarray(genos.offsets),
+            genos.shape[-2],
         )
-        # reshape to (b, p, ~v, ~l)
-        node = alleles.layout
-        while not isinstance(node, NumpyArray):
-            node = node.content
-        l_content = ListOffsetArray(
-            Index(alleles.offsets), node, parameters={"__array__": "bytestring"}
-        )
-        vl_content = ListOffsetArray(Index(genos.offsets), l_content)
-        pvl_content = RegularArray(vl_content, genos.shape[-2])
-        alleles = ak.Array(pvl_content)
-
-        return alleles
 
     def _get_info(self, genos: Ragged[V_IDX_TYPE], attr: str) -> Ragged[np.number]:
         data = self.variants.info[attr][genos.data]
@@ -756,15 +793,13 @@ class Haps(Reconstructor[_H]):
         assert self.reference is not None
 
         if req.splice_plan is None:
-            haps = Ragged.from_offsets(
-                np.empty(req.out_offsets[-1], np.uint8),
-                (*req.shifts.shape, None),
-                req.out_offsets,
-            )
+            out_data = np.empty(req.out_offsets[-1], np.uint8)
+            out_offsets = np.asarray(req.out_offsets, np.int64)
+            shape = (*req.shifts.shape, None)
             reconstruct_haplotypes_from_sparse(
                 geno_offset_idx=req.geno_offset_idx,
-                out=haps.data,
-                out_offsets=haps.offsets,
+                out=out_data,
+                out_offsets=out_offsets,
                 regions=req.regions,
                 shifts=req.shifts,
                 geno_offsets=self.genotypes.offsets,
@@ -781,7 +816,10 @@ class Haps(Reconstructor[_H]):
                 annot_v_idxs=None,
                 annot_ref_pos=None,
             )
-            return cast(Ragged[np.bytes_], haps.view("S1"))
+            return cast(
+                "Ragged[np.bytes_]",
+                _Flat.from_offsets(out_data, shape, out_offsets).view("S1"),
+            )
 
         # ---- splice plan path ----
         flat_geno_idx, flat_shifts, permuted_regions, keep_perm, keep_offsets_perm = (
@@ -815,12 +853,10 @@ class Haps(Reconstructor[_H]):
 
         per_elem_shape = (splice_plan.permuted_lengths.shape[0], None)
         return cast(
-            Ragged[np.bytes_],
-            Ragged.from_offsets(
-                out_buf.view("S1"),
-                per_elem_shape,
-                splice_plan.permuted_out_offsets,
-            ),
+            "Ragged[np.bytes_]",
+            _Flat.from_offsets(
+                out_buf, per_elem_shape, splice_plan.permuted_out_offsets
+            ).view("S1"),
         )
 
     def _reconstruct_annotated_haplotypes(
@@ -835,27 +871,17 @@ class Haps(Reconstructor[_H]):
         assert self.reference is not None
 
         if req.splice_plan is None:
-            haps = Ragged.from_offsets(
-                np.empty(req.out_offsets[-1], np.uint8),
-                (*req.shifts.shape, None),
-                req.out_offsets,
-            )
-            annot_v_idxs = Ragged.from_offsets(
-                np.empty(req.out_offsets[-1], V_IDX_TYPE),
-                (*req.shifts.shape, None),
-                req.out_offsets,
-            )
-            annot_positions = Ragged.from_offsets(
-                np.empty(req.out_offsets[-1], np.int32),
-                (*req.shifts.shape, None),
-                req.out_offsets,
-            )
+            out_data = np.empty(req.out_offsets[-1], np.uint8)
+            annot_v_data = np.empty(req.out_offsets[-1], V_IDX_TYPE)
+            annot_pos_data = np.empty(req.out_offsets[-1], np.int32)
+            out_offsets = np.asarray(req.out_offsets, np.int64)
+            shape = (*req.shifts.shape, None)
 
             # annot offsets match haps offsets, so we share them.
             reconstruct_haplotypes_from_sparse(
                 geno_offset_idx=req.geno_offset_idx,
-                out=haps.data,
-                out_offsets=haps.offsets,
+                out=out_data,
+                out_offsets=out_offsets,
                 regions=req.regions,
                 shifts=req.shifts,
                 geno_offsets=self.genotypes.offsets,
@@ -869,13 +895,22 @@ class Haps(Reconstructor[_H]):
                 pad_char=self.reference.pad_char,
                 keep=req.keep,
                 keep_offsets=req.keep_offsets,
-                annot_v_idxs=annot_v_idxs.data,
-                annot_ref_pos=annot_positions.data,
+                annot_v_idxs=annot_v_data,
+                annot_ref_pos=annot_pos_data,
             )
             return (
-                cast(Ragged[np.bytes_], haps.view("S1")),
-                annot_v_idxs,
-                annot_positions,
+                cast(
+                    "Ragged[np.bytes_]",
+                    _Flat.from_offsets(out_data, shape, out_offsets).view("S1"),
+                ),
+                cast(
+                    "Ragged[V_IDX_TYPE]",
+                    _Flat.from_offsets(annot_v_data, shape, out_offsets),
+                ),
+                cast(
+                    "Ragged[np.int32]",
+                    _Flat.from_offsets(annot_pos_data, shape, out_offsets),
+                ),
             )
 
         # ---- splice plan path ----
@@ -911,19 +946,18 @@ class Haps(Reconstructor[_H]):
         )
 
         per_elem_shape = (splice_plan.permuted_lengths.shape[0], None)
+        off = splice_plan.permuted_out_offsets
         haps_rag = cast(
-            Ragged[np.bytes_],
-            Ragged.from_offsets(
-                out_buf.view("S1"),
-                per_elem_shape,
-                splice_plan.permuted_out_offsets,
-            ),
+            "Ragged[np.bytes_]",
+            _Flat.from_offsets(out_buf, per_elem_shape, off).view("S1"),
         )
-        annot_v_rag = Ragged.from_offsets(
-            annot_v_buf, per_elem_shape, splice_plan.permuted_out_offsets
+        annot_v_rag = cast(
+            "Ragged[V_IDX_TYPE]",
+            _Flat.from_offsets(annot_v_buf, per_elem_shape, off),
         )
-        annot_pos_rag = Ragged.from_offsets(
-            annot_pos_buf, per_elem_shape, splice_plan.permuted_out_offsets
+        annot_pos_rag = cast(
+            "Ragged[np.int32]",
+            _Flat.from_offsets(annot_pos_buf, per_elem_shape, off),
         )
         return haps_rag, annot_v_rag, annot_pos_rag
 

@@ -1,0 +1,224 @@
+# Handoff: codspeed bench suite + profiling (resume on another machine)
+
+**Written:** 2026-05-30. The **entire cluster (carter AND cellar) is undergoing a
+multi-day migration** — no cluster filesystem will be reachable. Dev resumes on a local
+machine or cloud VM. **git is the only transport**, so both the code and the build-source
+data travel in this branch (see "Data").
+**Branch:** `feat/bench-codspeed-profiling` (10 commits + handoff/format/bundle commits ahead of `main`).
+**Spec:** `docs/superpowers/specs/2026-05-29-codspeed-perf-tracking-design.md`
+**Plan:** `docs/superpowers/plans/2026-05-29-codspeed-perf-tracking.md`
+
+## TL;DR of where things stand
+
+The benchmark + profiling **suite is built and works**. There is **one open problem**:
+the committed benchmark dataset (`tests/benchmarks/data/chr22_geuv.gvl/`) is a **broken
+build** — its regions are massively over-extended (one to 3.1 Mb) and its track intervals
+are inflated 11 MB → 36 MB. Root cause is understood (below). The fix is a **pending
+decision** between three options; all require regenerating the dataset from source, which
+needs `/carter` data (a portable copy has been staged — see "Data").
+
+Everything except the dataset correctness is done and reviewed.
+
+## How to get the branch on the new machine
+
+The branch MUST be pushed before the cluster goes down (no filesystem access afterward).
+Caveats hit while pushing from here:
+- `fork` (`git@github.com:d-laub/genome-loader.git`) is a **dead URL** — repo renamed. Set the
+  correct fork: `git remote set-url fork git@github.com:d-laub/GenVarLoader.git` (verify the name).
+- `origin` = `mcvickerlab/GenVarLoader` (push needs write access).
+- The pre-push hook runs `ruff-format`; formatting is already committed, so it should pass now.
+
+Push (run yourself so interactive auth works — type with a leading `!` in Claude, or in a shell):
+```bash
+git push -u fork feat/bench-codspeed-profiling     # after fixing the fork URL
+# or, if you have write access:  git push -u origin feat/bench-codspeed-profiling
+```
+On the new machine: `git clone <remote> && git checkout feat/bench-codspeed-profiling`.
+The clone is **code + small text only** — no `.gvl` dataset, no reference (both were stripped
+from history; they're regenerable). You MUST regenerate the dataset from the R2 build-source
+(see "Data") before benchmarks will run; until then the dataset-dependent benches just skip.
+
+## What is DONE (suite — works, reviewed task-by-task)
+
+Implemented per the plan, Tasks 1–8 + a final review polish:
+
+- `pixi.toml`: `pytest-codspeed` dep; tasks `bench`, `bench-local`, `profile-{haps,tracks,variants}`,
+  `memray-{haps,tracks,variants}`.
+- `tests/benchmarks/_capture.py` (+ `test_capture.py`): capture-and-replay helper that records
+  the first call's args of a hot numba fn by patching the **consumer** module namespace
+  (gvl imports these by name). 2 unit tests pass.
+- `tests/benchmarks/_indices.py`: shared `batch_indices(n_regions, n_samples, n)` used by
+  conftest, e2e, and the profiler.
+- `tests/benchmarks/conftest.py`: session fixtures — `bench_dataset` (opens the committed
+  dataset, skips if absent) and `captured_{haplotypes,diffs,intervals_to_tracks,realign_tracks}`.
+  NOTE: a `captured_germline_ccfs` fixture was intentionally dropped — `_infer_germline_ccfs`
+  never fires on this data (no CCF field); the e2e `variants` bench covers that path.
+  NOTE: `captured_realign_tracks` uses the `with_seqs("haplotypes").with_tracks(...)` path
+  because `shift_and_realign_tracks_sparse` only fires there (the tracks-only path never
+  re-aligns).
+- `tests/benchmarks/test_micro.py`: 4 micro-benches (get_diffs_sparse, reconstruct_haplotypes_from_sparse,
+  intervals_to_tracks, shift_and_realign_tracks_sparse). Warmup is OUTSIDE the timed region;
+  buffer-writer kernels asserted via `np.asarray(out).size > 0`.
+- `tests/benchmarks/test_e2e.py`: 5 e2e benches (haplotypes, annotated, variants, tracks,
+  tracks_only) at `with_len(16384)`.
+- `tests/benchmarks/profiling/profile.py`: `--mode {haplotypes,tracks,variants}`,
+  `NUMBA_NUM_THREADS=1`; py-spy/memray outputs are gitignored.
+- `docs/superpowers/REGRESSIONS.md`: appended "Profiling results (local, chr22 GEUVADIS
+  slice)". Key local finding (0.24.x side only): the dominant per-batch cost in ALL three
+  modes is **awkward-array ragged assembly** (`numpyarray._carry`, `_kernels.__call__`,
+  `concat`) driven by `_query.py:_getitem_unspliced` + `reverse_complement_ragged`, ABOVE
+  gvl's own numba kernels. Most promising optimization target = that ragged-assembly path.
+  CAVEAT: this is 0.24.x only; no 0.6.1 comparison was run locally.
+
+Verification (all green on the current tree): `pixi run -e dev pytest tests/benchmarks -p no:cov -q`
+→ 11 passed (9 benches + 2 capture unit tests). `pixi run -e dev bench-local` → 9 benches pass.
+
+## The OPEN PROBLEM (must fix before this is mergeable)
+
+### Symptom
+The committed `chr22_geuv.gvl` has `intervals/read-depth/intervals.npy` = 36 MB and region
+spans up to **3,138,304 bp** (mean 205,800 bp) for nominal 16,384 bp windows.
+
+### Root cause (confirmed, deterministic — NOT non-determinism)
+In `python/genvarloader/_dataset/_write.py::write`:
+```
+gvl_bed = _write_from_pgen(..., extend_to_length)   # :246 reassigns bed; extends region ENDS via variants
+_write_regions(path, gvl_bed, contigs)              # :259 writes regions.npy (extended ends)
+_write_track(path, gvl_bed, tr, samples, max_mem)   # :264 extracts BigWig intervals over those ends
+```
+With `extend_to_length=True` (the default), region ends are pushed out using the variant set
+so haplotypes still reach the requested length after deletions. Track intervals are then
+extracted over those **variant-extended** regions. So stored track size is deterministically
+coupled to the variant set.
+
+### How the current committed dataset got broken
+During the size-fix (commit history below) I restricted the source variants to the **nominal**
+16,384 bp windows with `plink2 --extract bed0`. That removed the just-past-the-window variants
+that `extend_to_length` needs to find where to stop, so the extension ran away. Measured from
+`regions.npy` (same 165 starts):
+
+| build | mean region span | max span | intervals.npy |
+|---|---|---|---|
+| full variants (FAITHFUL) | 17,184 bp (~window + 0.8 kb real extension) | 20,331 bp | 11 MB |
+| restricted (CURRENT, BROKEN) | 205,800 bp | 3,138,304 bp | 36 MB |
+
+Real `extend_to_length` extension is tiny (<4 kb worst case). The 3.1 Mb spans are pure
+artifact of starving the extender.
+
+### The fix decision (PENDING — pick one, then regenerate)
+The original reason for restricting variants: `gvl.write` stores the **entire** source variant
+table in `genotypes/variants.arrow` (~1M chr22 variants ≈ 94 MB), even though only ~77K overlap
+the windows. Reducing region count does NOT shrink it — only restricting the source does. So
+we must shrink the source WITHOUT starving `extend_to_length`:
+
+1. **Window + safe flank extract (recommended — faithful + small).** `--extract bed0` over
+   each window ± ~50 kb (real extension <4 kb, so this preserves correct extension and faithful
+   ~17 kb regions / 11 MB intervals). Est. `variants.arrow` ~15–20 MB, total ~30 MB.
+   Verify after rebuild: `regions.npy` spans ≈ 17 kb (NOT 200 kb).
+2. **Disable `extend_to_length` (simplest + smallest).** `gvl.write(..., extend_to_length=False)`
+   + restrict variants to exact windows. `variants.arrow` ~6 MB, intervals ~11 MB, total ~18 MB,
+   internally consistent. Tradeoff: haplotypes are reference-padded after deletions instead of
+   extended — a valid gvl mode but not the default user path.
+3. **Full variants, accept size.** No restriction; faithful but `variants.arrow` ~94 MB
+   (~105 MB committed). Defeats the size goal.
+
+I recommended #1. The user paused to discuss before choosing — **get/confirm the decision,
+then implement in `tests/benchmarks/data/build_realistic.py`.**
+
+### IMPORTANT side effect to handle: the masked reference
+`build_realistic.py::build_masked_reference` masks chr22 to `N` outside the **nominal** windows.
+`extend_to_length` extends ~0.8–4 kb past the window, so reconstructed haplotype bases in the
+extension zone are currently `N`. For a perf benchmark that's harmless (extension is computed
+from variant positions, not reference content), but if you want faithful bases, widen the mask
+by a matching flank when you regenerate.
+
+## Data — what's needed and where it is
+
+Running the existing benchmarks/profiling needs ONLY the committed `.gvl` + masked reference
+(self-contained, already in git) — no cluster filesystem and no R2. **Regenerating** the
+dataset (the fix) needs the build inputs, which live as a **Cloudflare R2 artifact** (kept
+out of git so the branch is all small text files):
+
+```
+r2-scratch:smb-data-prod-scratch/GenVarLoader/gvl-bench-source.tar   # 25,210,880 bytes, md5 a58231b93d925a788c4770090830938f
+```
+Download + extract on the new machine (needs `rclone` configured with the `r2-scratch` remote):
+```bash
+rclone copy r2-scratch:smb-data-prod-scratch/GenVarLoader/gvl-bench-source.tar /tmp/
+tar -C /tmp -xf /tmp/gvl-bench-source.tar
+```
+→ `/tmp/source/` containing:
+```
+chr22_5s.pgen / .pvar.zst / .psam   # chr22, 5 samples, ALL chr22 variants (unrestricted → any fix option works)
+bw_chr22/                            # the 5 GEUVADIS read-depth bigwigs (13 MB)
+sample_id_to_bigwig.csv              # sample → bigwig basename map (our 5)
+chr22_egenes.raw.bed                 # original recount3 egenes BED (zero-width TSS points)
+chr22_egenes.bed                     # the WIDENED 165 windows actually used
+chr22.masked.fa.gz(.fai/.gzi)        # masked reference
+samples.txt
+```
+Then point `build_realistic.py` at `/tmp/source/` (replace the `/carter` `PLINK_PREFIX`,
+`RNA_DIR`, `REF_FASTA` constants). The unrestricted PGEN supports any of the three fix options.
+
+Provenance, if you ever need to rebuild the bundle from scratch (cluster back, or fresh fetch):
+genotypes `/carter/users/dlaub/data/1kGP/plink2/hg38.norm.{pgen,psam,pvar.zst}`; RNA-seq
+`/carter/users/dlaub/data/1kGP-rna-seq/{sample_id_to_bigwig.csv,bw_chr22/,chr22_egenes.bed}`
+(bigwigs = recount3 study ERP001942, publicly re-downloadable); masking reference
+`tests/data/fasta/hg38.fa.bgz` (run `pixi run -e dev gen`).
+
+The 5 samples (deterministic, in `samples.txt`): HG00096, HG00097, HG00099, HG00100, HG00101.
+
+## Resume checklist (new machine)
+
+1. `git checkout feat/bench-codspeed-profiling`; `pixi install -e dev`.
+2. Sanity: `pixi run -e dev pytest tests/benchmarks -p no:cov -q` → the 2 capture unit tests
+   pass; the 9 dataset-dependent benches SKIP (no dataset committed — regenerate in steps 3–5).
+3. Get the R2 build-source (see "Data"): `rclone copy r2-scratch:smb-data-prod-scratch/GenVarLoader/gvl-bench-source.tar /tmp/ && tar -C /tmp -xf /tmp/gvl-bench-source.tar`.
+4. Decide fix option (1/2/3 above) with the user, then edit `tests/benchmarks/data/build_realistic.py`:
+   - Currently it does `plink2 ... --extract bed0 <widened windows>` in `slice_pgen()`.
+   - Option 1: change the extract BED to windows ± ~50 kb (build a flanked range file).
+   - Option 2: drop `--extract` AND pass `extend_to_length=False` to `gvl.write` in `build_dataset()`.
+   - Point the source-path constants (`PLINK_PREFIX`, `RNA_DIR`, `REF_FASTA`) at the extracted
+     `/tmp/source/`. (`build_realistic.py`, `samples.txt`, `chr22_egenes.bed` are kept in-branch.)
+5. Rebuild: `pixi run -e dev python tests/benchmarks/data/build_realistic.py` (writes the
+   `.gvl` + masked ref back into `tests/benchmarks/data/`, which is gitignored).
+6. **VERIFY THE FIX:** regions must be ~17 kb, not 200 kb:
+   ```bash
+   pixi run -e dev python -c "import numpy as np; r=np.load('tests/benchmarks/data/chr22_geuv.gvl/regions.npy'); s=r[:,2]-r[:,1]; print('mean',s.mean(),'max',s.max())"
+   ```
+   Expect mean ~17 k, max ~20 k (option 1) or ~16384 (option 2). Check `intervals.npy` ≈ 11 MB.
+7. `pixi run -e dev bench-local` → 9 pass. Re-run profiling if you want fresh numbers
+   (`pixi run -e dev profile-tracks` etc.), and update the REGRESSIONS.md profiling section
+   if the dataset changed materially.
+8. Decide whether to commit the regenerated dataset. The branch is intentionally **text-only**;
+   the corrected `.gvl` is large binary. Prefer uploading it to R2 alongside the source bundle
+   rather than committing it (the `data/` dir is gitignored; only `build_realistic.py`,
+   `samples.txt`, `chr22_egenes.bed` are tracked). If you do commit data, use `git add -f`.
+
+## git history note (read before merging)
+
+The branch history was rewritten (`git filter-branch`) **three times** to keep it all-text:
+(1) scrubbed an 89 MB `variants.arrow` blob from an earlier build; (2) scrubbed a 25 MB
+build-source tar (now the R2 artifact); (3) scrubbed the entire committed `.gvl` dataset +
+masked reference (regenerable from R2). Net: `.git` went from ~177 MB to <1 MB and the branch
+contains only code + small text. All large data lives on R2
+(`r2-scratch:smb-data-prod-scratch/GenVarLoader/`). The user **does not use squash merges**, so
+land the real commits. Because the binaries were scrubbed (never reach `main`), no further
+history cleanup is needed before merging.
+
+## Commit log (branch)
+Shas churn on every history rewrite, so see `git log --oneline main..HEAD` on the new machine.
+The logical sequence (oldest→newest):
+```
+build(bench): add pytest-codspeed dep and bench/profile pixi tasks
+test(bench): add capture-and-replay helper for micro-benchmark inputs
+test(bench): add committed chr22 1kGP+GEUVADIS realistic slice + build script
+test(bench): add session fixtures for dataset + captured numba args
+test(bench): add micro-benchmarks for hot numba reconstruction kernels
+test(bench): add end-to-end reconstructor benchmarks
+test(bench): add py-spy/memray profiling driver for hot paths
+docs(REGRESSIONS): add local py-spy/memray profiling results for hot paths
+test(bench): restrict benchmark variants to regions   (NOTE: its diff is now empty post-strip)
+test(bench): consolidate batch-index logic into shared helper
+style(bench): apply ruff-format ; docs(handoff): … ; (data-bearing commits scrubbed to text-only)
+```

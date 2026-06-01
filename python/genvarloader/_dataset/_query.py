@@ -11,18 +11,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, cast, overload
 
-import awkward as ak
 import numpy as np
 from numpy.typing import NDArray
-from seqpro.rag import DTYPE_co as DTYPE
-from seqpro.rag import Ragged, is_rag_dtype
+from seqpro.rag import Ragged
 from typing_extensions import assert_never
 
+from .._flat import _Flat, _FlatAnnotatedHaps
 from .._ragged import (
     RaggedAnnotatedHaps,
     RaggedIntervals,
-    reverse_complement,
-    to_padded,
+    _COMP,
 )
 from .._types import AnnotatedHaps, StrIdx
 from ._haps import Haps
@@ -98,9 +96,18 @@ def getitem(
         )
     elif isinstance(view.output_length, int):
         recon = tuple(
-            r if isinstance(r, (RaggedVariants, RaggedIntervals)) else r.to_numpy()
+            r
+            if isinstance(r, (RaggedVariants, RaggedIntervals))
+            else r.to_fixed(view.output_length)
             for r in recon
         )
+
+    # Convert any still-flat elements (ragged output_length path) to their
+    # public Ragged types before reshape/squeeze apply the existing logic.
+    recon = tuple(
+        o.to_ragged() if isinstance(o, (_Flat, _FlatAnnotatedHaps)) else o
+        for o in recon
+    )
 
     if out_reshape is not None:
         recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)  # type: ignore[bad-argument-type, no-matching-overload]  # heterogeneous reshape() across array kinds; shape tuple may contain None for ragged dims
@@ -312,13 +319,11 @@ def build_recon_splice_plan(
 
 
 @overload
-def reverse_complement_ragged(
-    rag: Ragged[DTYPE], to_rc: NDArray[np.bool_]
-) -> Ragged[DTYPE]: ...
+def reverse_complement_ragged(rag: _Flat, to_rc: NDArray[np.bool_]) -> _Flat: ...
 @overload
 def reverse_complement_ragged(
-    rag: RaggedAnnotatedHaps, to_rc: NDArray[np.bool_]
-) -> RaggedAnnotatedHaps: ...
+    rag: _FlatAnnotatedHaps, to_rc: NDArray[np.bool_]
+) -> _FlatAnnotatedHaps: ...
 @overload
 def reverse_complement_ragged(
     rag: RaggedVariants, to_rc: NDArray[np.bool_]
@@ -328,58 +333,57 @@ def reverse_complement_ragged(
     rag: RaggedIntervals, to_rc: NDArray[np.bool_]
 ) -> RaggedIntervals: ...
 def reverse_complement_ragged(
-    rag: Ragged | RaggedAnnotatedHaps | RaggedVariants | RaggedIntervals,
+    rag: _Flat | _FlatAnnotatedHaps | RaggedVariants | RaggedIntervals,
     to_rc: NDArray[np.bool_],
-) -> Ragged | RaggedAnnotatedHaps | RaggedVariants | RaggedIntervals:
+) -> _Flat | _FlatAnnotatedHaps | RaggedVariants | RaggedIntervals:
     """Reverse-complement (or reverse) ragged outputs according to a per-row mask."""
-    if isinstance(rag, Ragged):
-        if is_rag_dtype(rag, np.bytes_):
-            rag = Ragged(ak.to_packed(ak.where(to_rc, reverse_complement(rag), rag)))
-        else:
-            rag = Ragged(ak.to_packed(ak.where(to_rc, rag[..., ::-1], rag)))
-    elif isinstance(rag, RaggedAnnotatedHaps):
-        rag.haps = reverse_complement_ragged(rag.haps, to_rc)
-        rag.var_idxs = reverse_complement_ragged(rag.var_idxs, to_rc)
-        rag.ref_coords = reverse_complement_ragged(rag.ref_coords, to_rc)
-    elif isinstance(rag, RaggedVariants):
-        rag = rag.rc_(to_rc)
-    elif isinstance(rag, RaggedIntervals):
-        rag = rag
-    else:
-        assert_never(rag)
-    return rag
+    if isinstance(rag, _Flat):
+        comp = _COMP if rag.data.dtype.kind == "S" else None
+        return rag.reverse_masked(to_rc, comp=comp)
+    if isinstance(rag, _FlatAnnotatedHaps):
+        return rag.reverse_masked(to_rc, _COMP)
+    if isinstance(rag, RaggedVariants):
+        return rag.rc_(to_rc)
+    if isinstance(rag, RaggedIntervals):
+        return rag
+    assert_never(rag)  # type: ignore[arg-type]
 
 
 @overload
-def pad(rag: Ragged[DTYPE]) -> NDArray[DTYPE]: ...
+def pad(rag: _Flat) -> NDArray: ...
 @overload
-def pad(rag: RaggedAnnotatedHaps) -> AnnotatedHaps: ...
-def pad(rag: Ragged | RaggedAnnotatedHaps) -> NDArray | AnnotatedHaps:
-    """Materialize a Ragged (or RaggedAnnotatedHaps) into a dense padded array."""
-    if isinstance(rag, Ragged):
-        if is_rag_dtype(rag, np.bytes_):
-            return to_padded(rag, b"N")
-        elif is_rag_dtype(rag, np.float32):
-            return to_padded(rag, 0)
+def pad(rag: _FlatAnnotatedHaps) -> AnnotatedHaps: ...
+def pad(rag: _Flat | _FlatAnnotatedHaps) -> NDArray | AnnotatedHaps:
+    """Materialize a _Flat (or _FlatAnnotatedHaps) into a dense padded array."""
+    if isinstance(rag, _Flat):
+        if rag.data.dtype.kind == "S":
+            return rag.view("S1").to_padded(b"N")
         else:
-            raise ValueError(f"Unsupported pad dtype: {rag.data.dtype}")
-    elif isinstance(rag, RaggedAnnotatedHaps):
+            return rag.to_padded(0)
+    if isinstance(rag, _FlatAnnotatedHaps):
         return rag.to_padded()
-    else:
-        assert_never(rag)
+    assert_never(rag)  # type: ignore[arg-type]
 
 
 def _regroup(
-    rag: Ragged | RaggedAnnotatedHaps,
+    rag: _Flat | _FlatAnnotatedHaps | Ragged | RaggedAnnotatedHaps,
     group_offsets: NDArray[np.int64],
     out_shape: tuple[int | None, ...],
-) -> Ragged | RaggedAnnotatedHaps:
-    """Rewrap a per-element Ragged (or RaggedAnnotatedHaps) with grouped
-    offsets so each cell holds one contiguous spliced element.
+) -> _Flat | _FlatAnnotatedHaps | Ragged | RaggedAnnotatedHaps:
+    """Rewrap a per-element flat ragged (or Ragged) with grouped offsets so
+    each cell holds one contiguous spliced element.
 
     Both branches share the same data buffer; only the outer offsets / shape
     change.
     """
+    if isinstance(rag, _FlatAnnotatedHaps):
+        return _FlatAnnotatedHaps(
+            _regroup(rag.haps, group_offsets, out_shape),  # type: ignore[arg-type]
+            _regroup(rag.var_idxs, group_offsets, out_shape),  # type: ignore[arg-type]
+            _regroup(rag.ref_coords, group_offsets, out_shape),  # type: ignore[arg-type]
+        )
+    if isinstance(rag, _Flat):
+        return _Flat.from_offsets(rag.data, out_shape, group_offsets)
     if isinstance(rag, RaggedAnnotatedHaps):
         return RaggedAnnotatedHaps(
             haps=cast(
