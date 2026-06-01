@@ -627,3 +627,101 @@ direction and magnitude (awkward churn → ~0 for tracks/haps) are unambiguous; 
 percentages as approximate. Residual dominant gvl-side costs are now the numba kernels
 (`intervals_to_tracks`, `_reconstruct_haplotypes`) and, for variants, the awkward `RaggedVariants`
 assembly.
+
+---
+
+### FU-3 (2026-06-01): flat variants path — `to_packed` + `rc_` + gather
+
+#### Changes
+
+Three remaining awkward kernels in the `RaggedVariants` hot path were replaced with flat
+operations:
+
+1. **`RaggedVariants.to_packed`** — previously a single `ak.to_packed(self)` call. Replaced
+   with field-wise packing: seqpro `Ragged.to_packed()` for numeric `Ragged` fields
+   (`start`/`ilen`/`dosage`) and an allele-level seqpro pack + group-offset rebase +
+   `_build_allele_layout` rebuild for the doubly-nested `alt`/`ref` fields. No `ak.to_packed`
+   call in the output path.
+2. **`RaggedVariants.rc_`** — previously used `ak.where(to_rc, reverse_complement(self["alt"]),
+   self["alt"])` over the allele-string field (variable-length-of-variable-length). Replaced
+   with `reverse_complement_masked(view, per_allele)` (seqpro flat in-place numba kernel,
+   already used for the haps/ref paths since the flat-RC ship). No `ak.where` or
+   `ak.to_packed`/`ak_str.reverse` in the RC path.
+3. **Variants gather** — numeric fields (`start`, `ilen`, `dosage`) were already assembled via
+   numpy fancy-indexing + `Ragged.from_offsets`; allele-string gather already used awkward
+   natively. No structural change here — confirmed by Task 10 profiling that the gather itself
+   had no `ak.to_packed`/`ak.where` hot path.
+
+`ak.zip` (record construction in `RaggedVariants.__init__`) remains — it is the irreducible
+awkward overhead for building the public `RaggedVariants` container from its fields and is
+intentionally not patched in the guard test.
+
+An awkward-guard test (`test_variants_ragged_minimal_awkward` in
+`tests/dataset/test_no_awkward_in_hotpath.py`) now asserts that `ak.to_packed`, `ak.where`,
+`ak.flatten`, and `ak.to_numpy` are never dispatched during a variants getitem + `rc_` +
+`to_packed` call. 6/6 guard tests pass.
+
+#### memray A/B (variants mode, `chr22_geuv.gvl`, N_BATCHES=2000, batch=32, NUMBA_NUM_THREADS=1)
+
+Baseline = `variants.final.memray.bin` (Task 11 tip, pre-FU-3). FU-3 = `variants.fu3.memray.bin`.
+
+| metric | Task 11 baseline | FU-3 | delta |
+|---|---|---|---|
+| Total allocated | 17.265 GB | 17.020 GB | −1.4% |
+| Total allocations | 1,003,429 | 980,105 | −2.3% |
+| Peak RSS | 3.569 GB | 3.574 GB | ~0 |
+
+Top 5 largest allocating locations (by size):
+
+| frame | Task 11 baseline | FU-3 |
+|---|---|---|
+| `_reconstruct.py:152` (track out buffer) | 8.410 GB | 8.410 GB (unchanged) |
+| `_reconstruct.py:183` (per-track scratch) | 4.206 GB | 4.206 GB (unchanged) |
+| importlib bootstrap (one-time JIT) | 3.237 GB | 3.235 GB (~0) |
+| `awkward array_module.empty` | **209 MB** (RaggedVariants-native) | (not in top 5) |
+| llvmlite/ffi (numba compilation) | 123 MB | 124 MB (~0) |
+
+Top 5 by allocation count:
+
+| frame | Task 11 baseline | FU-3 |
+|---|---|---|
+| llvmlite/ffi | 296,638 | 301,080 |
+| `pyarrow.compute` (arrow reads) | 54,135 | (not in top 5) |
+| `awkward array_module.empty` | **52,131** | (not in top 5) |
+| `intervals_to_tracks` | 48,120 | 48,120 (unchanged) |
+| numpy `_wrapreduction` | 42,130 | 74,210 |
+| seqpro `_pack` (new) | (not in top 5) | **52,130** |
+
+**Reading:** the `awkward array_module.empty` frame (209 MB / 52 K calls in Task 11) drops out of
+the top-5 in both size and count rankings. Its function is replaced by seqpro `_pack` (52 K calls,
+comparable count — the flat allele-level pack step in `to_packed`'s `alt`/`ref` branch), which does
+not incur the awkward empty/layout overhead. The `pyarrow.compute` calls (54 K) also disappear from
+the count top-5; these were variant-assembly reads that are now handled by numpy fancy-indexing.
+Total allocated delta is small (−1.4%, −245 MB) because the bulk of allocation in variants mode was
+already the track output buffers (`_reconstruct.py:152/183`, 12.6 GB combined = 74% of total), not
+the variants-specific awkward overhead. The removed 209 MB awkward `empty` was itself the residual
+after the Task 11 refactor had already eliminated the ~33.6 GB that was present in the Task 0
+baseline.
+
+#### py-spy CPU self-time A/B
+
+**PENDING** — py-spy requires `sudo` on macOS and must be run by the maintainer.
+
+Run: `sudo bash tests/benchmarks/profiling/run_pyspy.sh`
+(runs all three modes; writes `tests/benchmarks/profiling/{tracks,haplotypes,variants}.speedscope.json`)
+
+For the FU-3 variants A/B specifically: compare the new `variants.speedscope.json` to
+`variants.final.memray.bin`-era profile (`variants.speedscope.json` from Task 11). Expected signal:
+`ak.to_packed`/`ak_str.reverse`/`ak.where` self-time in the variants hot path should drop to 0
+(replaced by `seqpro._pack` + `reverse_complement_masked`). The `ak.zip` / `_get_alleles` frames
+are the documented residual and should be unchanged.
+
+#### Awkward guard
+
+`ak.zip` is the **only** remaining awkward call in the variants getitem + `rc_` + `to_packed`
+pipeline. It is the irreducible record-construction overhead for the public `RaggedVariants`
+container (allele strings are genuinely variable-length-of-variable-length; replacing the
+awkward container at the public API boundary is out-of-scope per Task 10 deliberate decision).
+The guard test (`test_variants_ragged_minimal_awkward`) documents and enforces this: it patches
+`to_packed`/`where`/`flatten`/`to_numpy` and asserts 0 dispatches; `ak.zip` is intentionally
+not patched.

@@ -10,8 +10,9 @@ the "flat" hot paths:
 If any of these fire, it means a reconstructor is still routing through awkward
 densification, which is a regression.
 
-RaggedVariants paths are intentionally excluded from this guard: they use
-awkward natively (Task 10 deliberate decision).
+RaggedVariants now has its own minimal-awkward guard (test_variants_ragged_minimal_awkward)
+that tolerates only ak.zip (record construction); the kernels removed in FU-3
+(to_packed, where, flatten, to_numpy) are patched and must dispatch zero times.
 """
 
 from __future__ import annotations
@@ -181,4 +182,34 @@ def test_haps_ragged_no_awkward(monkeypatch, guard_dataset):
     assert calls["n"] == 0, (
         f"haps_ragged path dispatched {calls['n']} awkward kernel(s); "
         "a reconstructor is still routing through awkward densification."
+    )
+
+
+def test_variants_ragged_minimal_awkward(monkeypatch, guard_dataset):
+    """Variants gather + rc_ + to_packed must dispatch no awkward kernels.
+
+    ak.zip (record construction in RaggedVariants.__init__) is the documented
+    remaining awkward call and is NOT patched here.  The kernels we removed in
+    FU-3 — ak.to_packed, ak.where, ak.flatten, and the old ak.to_numpy
+    densification — are patched; asserting zero dispatches confirms the
+    flat-buffer gather + seqpro reverse_complement_masked + field-wise to_packed
+    path has no residual awkward in those slots.
+    """
+    calls = _install_ak_counters(
+        monkeypatch
+    )  # patches to_numpy/to_packed/flatten/where
+
+    ds = guard_dataset.with_seqs("variants").with_tracks(False)
+    n_regions = min(4, ds.shape[0])
+    regions = list(range(n_regions))
+    samples = [i % ds.shape[1] for i in range(n_regions)]
+
+    rv = ds[regions, samples]
+    rv.rc_(np.ones(n_regions, np.bool_))  # exercise rc_ explicitly
+    rv.to_packed()  # exercise field-wise to_packed
+
+    assert calls["n"] == 0, (
+        f"variants gather/rc_/to_packed dispatched {calls['n']} awkward kernel(s) "
+        "(to_packed/where/flatten/to_numpy); a removed kernel is still being called. "
+        "Note: ak.zip (RaggedVariants record construction) is intentionally NOT patched."
     )
