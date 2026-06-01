@@ -52,6 +52,35 @@ def reference(ref_fasta: Path):
     return gvl.Reference.from_path(ref_fasta, in_memory=False)
 
 
+# --- hg38 reference (1kg slow tier) -----------------------------------------
+
+
+@pytest.fixture(scope="session")
+def hg38_ref_fasta(data_dir: Path) -> Path:
+    """Minimal hg38 (chr21 + chr22) used by the 1kg slow tier.
+
+    Built by ``pixi run -e dev gen-1kg`` (see
+    ``tests/data/generate_1kg_ground_truth.py::provision_minimal_hg38``). The
+    toy datasets use the synthetic chr1/chr2 reference instead; the 1kg data is
+    on chr21/chr22 and needs real hg38 coordinates. Tests that depend on this
+    should ``pytest.skip`` when it is absent.
+    """
+    return data_dir / "fasta" / "hg38.fa.bgz"
+
+
+@pytest.fixture(scope="session")
+def hg38_reference(hg38_ref_fasta: Path):
+    """Opened ``gvl.Reference`` over the minimal hg38 (chr21 + chr22).
+
+    Skips the depending test when the reference is absent (it is only built by
+    the ``gen-1kg`` task, not the default ``gen``)."""
+    import genvarloader as gvl
+
+    if not hg38_ref_fasta.exists():
+        pytest.skip("missing hg38 reference; run pixi run -e dev gen-1kg")
+    return gvl.Reference.from_path(hg38_ref_fasta, in_memory=False)
+
+
 # --- session-scoped generated case (Phase 2) --------------------------------
 
 

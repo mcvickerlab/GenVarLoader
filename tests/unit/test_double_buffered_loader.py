@@ -209,7 +209,7 @@ def test_double_buffered_annotated_matches_buffered(file_backed_ds):
 
 @pytest.mark.slow
 def test_double_buffered_variants_offset_overflow_regression(
-    data_dir, reference, tmp_path
+    data_dir, hg38_reference, tmp_path
 ):
     """Regression: double_buffered slots must be sized for the *serialized*
     footprint, not payload alone.
@@ -236,7 +236,7 @@ def test_double_buffered_variants_offset_overflow_regression(
     gvl_path = tmp_path / "ds_1kg.gvl"
     gvl.write(path=gvl_path, bed=bed, variants=svar, overwrite=True)
 
-    ds = gvl.Dataset.open(gvl_path, reference=reference).with_seqs("variants")
+    ds = gvl.Dataset.open(gvl_path, reference=hg38_reference).with_seqs("variants")
     common = dict(
         batch_size=16,
         shuffle=False,
