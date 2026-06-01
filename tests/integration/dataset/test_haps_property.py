@@ -115,7 +115,7 @@ def test_haplotypes_match_consensus(src, case_inputs):
     # file" RuntimeError).  build_case._normalize now drops all-REF records via
     # `bcftools view --min-ac 1`, so a doc whose records are entirely all-REF
     # will produce a zero-variant VCF after prep.  Exclude such docs here until
-    # gvl.write is hardened to accept zero-region input (tracked separately).
+    # gvl.write is hardened to accept zero-region input (gvl #201).
     assume(_has_any_alt(doc))
     # pgen only: plink2 canonicalizes unphased het allele order and promotes
     # haploid GTs to homozygous diploid, causing divergence from the bcftools
@@ -291,7 +291,7 @@ def test_af_and_dosage_consistent(case_inputs):
     spec, doc, _truth = case_inputs
     assume(len(doc.records) > 0)
     # STOPGAP: all-REF docs produce zero-variant VCFs after _normalize.
-    # Exclude until gvl.write is hardened to accept zero-variant input.
+    # Exclude until gvl.write is hardened to accept zero-variant input (gvl #201).
     assume(_has_any_alt(doc))
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -342,3 +342,110 @@ def test_af_and_dosage_consistent(case_inputs):
                             f"rv.AF {af!r} not in VCF oracle AF array at "
                             f"region={region} sample={sample} hap={h}"
                         )
+
+
+# ---------------------------------------------------------------------------
+# Track 2 — clean rejection of non-canonical raw input
+# ---------------------------------------------------------------------------
+
+import hypothesis.strategies as hyp  # noqa: E402
+
+
+def _raw_write_vcf(spec, doc, tmp) -> None:
+    """Render the RAW (un-normalized) doc and feed it directly to gvl.write.
+
+    Deliberately skips the consensus/pgen/svar steps that full build_case runs,
+    so gvl.write is the FIRST place any error can originate (bcftools consensus
+    and plink2 would error first on raw violating input, masking the gvl.write
+    ValueError we want to assert).
+
+    Steps: write reference -> render+bgzip+index the raw VCF -> derive BED ->
+    VCF reader -> gvl.write.  No normalization, no oracle, no pgen/svar.
+    """
+    import genvarloader as gvl
+    from genoray import VCF
+    from case import _bgzip_index, _derive_bed  # module-level helpers
+
+    tmp = Path(tmp)
+    ref = spec.write(tmp / "ref.fa.bgz")
+    raw_bytes = doc.render().encode()
+    vcf_gz = _bgzip_index(raw_bytes, tmp / "raw.vcf.gz")
+    bed = _derive_bed(vcf_gz, None)
+    # If the violating doc produced no usable variant rows, _derive_bed returns
+    # an empty DataFrame and gvl.write would fail with a no-data error unrelated
+    # to the violation.  Skip such draws.
+    assume(bed.height > 0)
+    bed_path = tmp / "source.bed"
+    bed.select(
+        "chrom",
+        "start",
+        "end",
+        pl.lit(".").alias("name"),
+        pl.lit(".").alias("score"),
+        "strand",
+    ).write_csv(bed_path, include_header=False, separator="\t")
+    reader = VCF(vcf_gz)
+    if not reader._valid_index():
+        reader._write_gvi_index()
+    reader._load_index()
+    gvl.write(path=tmp / "ds.gvl", bed=bed_path, variants=reader, max_jitter=2)
+
+
+def _has_violation_label(doc, label: str) -> bool:
+    """Return True if any record in doc carries the given violation label."""
+    return any(label in record.labels for record in doc.records)
+
+
+@hyp.composite
+def _spec_and_violating_doc(draw, violation):
+    spec = draw(st.references(max_contigs=2, max_contig_len=2000, max_repeats=3))
+    doc = draw(
+        st.documents(
+            reference=spec,
+            violations={violation},
+            max_samples=2,
+            max_records=4,
+        )
+    )
+    return spec, doc
+
+
+@settings(max_examples=10, deadline=None, suppress_health_check=_SUPPRESS)
+@given(case_inputs=_spec_and_violating_doc("multiallelic"))
+def test_multiallelic_raw_is_rejected(case_inputs):
+    """gvl.write rejects raw multiallelic input (already enforced)."""
+    spec, doc = case_inputs
+    # violations={"multiallelic"} enables but does not guarantee a multiallelic
+    # record appears in every draw; skip draws that contain none.
+    assume(_has_violation_label(doc, "multiallelic"))
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(ValueError, match="multi-allelic"):
+            _raw_write_vcf(spec, doc, tmp)
+
+
+@pytest.mark.xfail(strict=False, reason="gvl #199: gvl.write does not validate atomization")
+@settings(max_examples=10, deadline=None, suppress_health_check=_SUPPRESS)
+@given(case_inputs=_spec_and_violating_doc("non_atomic"))
+def test_non_atomic_raw_is_rejected(case_inputs):
+    """gvl SHOULD reject raw non-atomic input; currently it does not (xfail #199)."""
+    spec, doc = case_inputs
+    # violations={"non_atomic"} enables but does not guarantee a non-atomic
+    # record appears in every draw; skip draws that contain none.
+    assume(_has_violation_label(doc, "non_atomic"))
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(ValueError):
+            _raw_write_vcf(spec, doc, tmp)
+
+
+@pytest.mark.xfail(strict=False, reason="gvl #200: gvl.write does not validate left-alignment")
+@settings(max_examples=10, deadline=None, suppress_health_check=_SUPPRESS)
+@given(case_inputs=_spec_and_violating_doc("non_left_aligned"))
+def test_non_left_aligned_raw_is_rejected(case_inputs):
+    """gvl SHOULD reject raw non-left-aligned input; currently it does not (xfail #200)."""
+    spec, doc = case_inputs
+    # violations={"non_left_aligned"} labels records with "off_anchor"; skip draws
+    # that contain no non-left-aligned record.
+    assume(_has_violation_label(doc, "off_anchor"))
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(ValueError):
+            _raw_write_vcf(spec, doc, tmp)
