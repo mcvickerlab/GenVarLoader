@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from seqpro.rag import Ragged
 
 from genvarloader._flat import _Flat

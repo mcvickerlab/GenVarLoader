@@ -25,7 +25,6 @@ from dataclasses import replace
 
 import numpy as np
 import polars as pl
-import pytest
 
 import genvarloader as gvl
 from seqpro.rag import Ragged
