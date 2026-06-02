@@ -247,3 +247,28 @@ def test_ensure_cache_from_gvlfa_stale_rebuilds(tmp_path):
     meta, data_path = fc.ensure_cache(gvlfa)
     data = np.memmap(data_path, dtype="S1", mode="r")
     np.testing.assert_array_equal(data, np.frombuffer(b"TTTTTTTT", "S1"))
+
+
+def test_ensure_cache_from_gvlfa_corrupt_data_no_source_raises(tmp_path, local_fa):
+    gvlfa = tmp_path / "out.gvlfa"
+    fc.build(local_fa, gvlfa)
+    # Corrupt the data and remove the source so it cannot be rebuilt.
+    (gvlfa / fc.DATA_FILENAME).write_bytes(b"short")
+    local_fa.unlink()
+    with pytest.raises(ValueError, match="could not be located"):
+        fc.ensure_cache(gvlfa)
+
+
+def test_ensure_cache_format_too_new_raises_from_both_entry_points(tmp_path, local_fa):
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    meta = fc.build(local_fa, gvlfa)
+    meta.format_version = type(meta.format_version)(
+        major=fc.FORMAT_VERSION.major + 1, minor=0, patch=0
+    )
+    (gvlfa / fc.METADATA_FILENAME).write_text(meta.model_dump_json())
+    # Direct .gvlfa entry point raises.
+    with pytest.raises(ValueError, match="newer than supported"):
+        fc.ensure_cache(gvlfa)
+    # .fa entry point (sibling cache) must ALSO raise, not silently rebuild/downgrade.
+    with pytest.raises(ValueError, match="newer than supported"):
+        fc.ensure_cache(local_fa)

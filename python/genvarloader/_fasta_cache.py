@@ -206,18 +206,22 @@ def _ensure_from_fasta(source_fa: Path) -> tuple[FastaCache, Path]:
     legacy = _legacy_for(source_fa)
     data_path = gvlfa_dir / DATA_FILENAME
     if gvlfa_dir.exists():
-        meta: FastaCache | None = None
         try:
-            meta = FastaCache.model_validate_json(
+            meta: FastaCache | None = FastaCache.model_validate_json(
                 (gvlfa_dir / METADATA_FILENAME).read_text()
             )
+        except Exception:
+            meta = None  # unreadable/corrupt metadata -> rebuild below
+        if meta is not None:
+            # Format-too-new raises here and propagates, matching _ensure_from_gvlfa:
+            # gvl never silently downgrades a cache written by a newer version.
             _check_format_version(meta, gvlfa_dir)
             valid = _data_size_ok(gvlfa_dir, meta) and _fingerprints_match(
                 meta.fingerprint, source_fa
             )
-        except Exception:
+        else:
             valid = False
-        if not valid or meta is None:
+        if not valid or meta is None:  # redundant at runtime; satisfies the type checker
             logger.info(f"Building FASTA cache at {gvlfa_dir}.")
             meta = build(source_fa, gvlfa_dir)
         return meta, data_path
