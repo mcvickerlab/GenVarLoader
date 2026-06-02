@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from pathlib import Path
 from typing import cast
 
@@ -11,6 +10,7 @@ from numpy.typing import ArrayLike, NDArray
 from tqdm.auto import tqdm
 from typing_extensions import assert_never
 
+from . import _fasta_cache
 from ._types import Reader
 from ._utils import get_rel_starts, normalize_contig_name
 
@@ -47,7 +47,7 @@ class Fasta(Reader):
         name : str
             Name of the reader, for example `'seq'`.
         path : Union[str, Path]
-            Path to the FASTA file.
+            Path to the FASTA file or a `.gvlfa` cache directory.
         pad : Optional[str], optional
             A single character which, if passed, will pad out-of-bound ranges with this
             value. By default no padding is done and out-of-bound ranges raise an error.
@@ -58,8 +58,11 @@ class Fasta(Reader):
             loaded into memory and the FASTA file will be closed. If `False`, the sequences
             will be read from the FASTA file on demand. Defaults to `False`.
         cache : bool, optional
-            Whether to cache the sequences to disk. If `True`, the sequences will be written
-            to disk in a `.fa.gvl` file. Defaults to `False`. Only used if `in_memory` is `True`.
+            Whether to cache the sequences to disk. If `True`, the sequences are written
+            to a sibling `.gvlfa` directory (a self-describing, fingerprint-validated
+            cache). Defaults to `False`. Only used if `in_memory` is `True`. A legacy
+            `.fa.gvl` cache, if present, is migrated automatically. A `.gvlfa` directory
+            may also be passed directly as `path`.
 
         Raises
         ------
@@ -67,7 +70,7 @@ class Fasta(Reader):
             If pad value is not a single character.
         """
         self.name = name
-        self.path = Path(path)
+        path = Path(path)
         self.pad: bytes | None
         if pad is None:
             self.pad = pad
@@ -76,8 +79,22 @@ class Fasta(Reader):
                 raise ValueError("Pad value must be a single character.")
             self.pad = pad.encode("ascii")
 
-        with self._open() as f:
-            self.contigs = {c: f.get_reference_length(c) for c in f.references}
+        self._is_cache_input = _fasta_cache.is_gvlfa(path)
+        if self._is_cache_input:
+            meta, data_path = _fasta_cache.ensure_cache(path)
+            self.cache_path = path
+            self._data_path = data_path
+            self.contigs = dict(meta.contigs)
+            source = _fasta_cache.resolve_source(path, meta)
+            self._source_available = source is not None
+            self.path = source if source is not None else path
+        else:
+            self.path = path
+            self.cache_path = _fasta_cache._cache_dir_for(path)
+            self._data_path = self.cache_path / _fasta_cache.DATA_FILENAME
+            self._source_available = True
+            with self._open() as f:
+                self.contigs = {c: f.get_reference_length(c) for c in f.references}
 
         if alphabet is None:
             self.alphabet: sp.NucleotideAlphabet = sp.alphabets.DNA
@@ -106,85 +123,43 @@ class Fasta(Reader):
             assert_never(self.alphabet)
 
         self.rev_strand_fn = rev_strand_fn
-        self.contigs = self._get_contig_lengths()
-
         self.handle: pysam.FastaFile | None = None
-        self.cache_path = self.path.with_suffix(self.path.suffix + ".gvl")
 
         if not in_memory:
             self.sequences = None
+        elif self._is_cache_input:
+            self.sequences = self._memmap_sequences()
+        elif cache:
+            _, self._data_path = _fasta_cache.ensure_cache(self.path)
+            self.sequences = self._memmap_sequences()
         else:
-            if cache:
-                if not self._valid_cache():
-                    self._write_to_cache()
-                self.sequences = self._get_sequences(self.contigs)
-            else:
-                self.sequences = self._get_sequences(self.contigs)
+            self.sequences = self._read_all_from_fasta()
 
-    def _valid_cache(self) -> bool:
-        """Check if cache exists and has a modified time >= the FASTA file."""
-        if not self.cache_path.exists():
-            return False
-        if self.cache_path.stat().st_mtime_ns < self.path.stat().st_mtime_ns:
-            return False
-        return True
-
-    def _get_contig_lengths(self) -> dict[str, int]:
-        with self._open() as f:
-            return {c: f.get_reference_length(c) for c in f.references}
-
-    def _get_sequences(
-        self, contigs: Iterable[str], from_fasta=False
-    ) -> dict[str, NDArray[np.bytes_]]:
-        """Load contigs into memory."""
-        sequences: dict[str, NDArray[np.bytes_]] = {}
-        if from_fasta or not self.cache_path.exists():
-            with self._open() as f:
-                pbar = tqdm(total=len(self.contigs))
-                for c in contigs:
-                    pbar.set_description(f"Reading contig {c}")
-                    sequences[c] = np.frombuffer(
-                        f.fetch(c).encode("ascii").upper(), "S1"
-                    )
-                    pbar.update()
-                pbar.close()
-        elif self.cache_path.exists():
-            seqs = np.memmap(self.cache_path, dtype=np.bytes_, mode="r")
-            offset = 0
-            for contig, length in self.contigs.items():
-                sequences[contig] = seqs[offset : offset + length]
-                offset += length
-        return sequences
-
-    def _write_to_cache(self):
-        """Write contigs to cache."""
+    def _memmap_sequences(self) -> dict[str, NDArray[np.bytes_]]:
+        """Load contigs as views into the cached sequence.bin memmap."""
+        seqs = np.memmap(self._data_path, dtype="S1", mode="r")
+        out: dict[str, NDArray[np.bytes_]] = {}
         offset = 0
-        seqs = np.memmap(
-            self.cache_path,
-            dtype=np.uint8,
-            mode="w+",
-            shape=sum(self.contigs.values()),
-        )
-        f = None
+        for contig, length in self.contigs.items():
+            out[contig] = seqs[offset : offset + length]
+            offset += length
+        return out
 
-        for c in (pbar := tqdm(self.contigs, total=len(seqs), unit=" nucleotide")):
-            if self.sequences is None:
-                if f is None:
-                    f = self._open()
-                pbar.set_description(f"Reading contig {c}")
-                c_seq = np.frombuffer(f.fetch(c).encode("ascii").upper(), "S1")
-            else:
-                c_seq = self.sequences[c]
-            pbar.set_description(f"Writing contig {c}")
-            seqs[offset : offset + len(c_seq)] = c_seq.view(np.uint8)
-            seqs.flush()
-            offset += len(c_seq)
-            pbar.update(len(c_seq))
-
-        if f is not None:
-            f.close()
+    def _read_all_from_fasta(self) -> dict[str, NDArray[np.bytes_]]:
+        """Load all contigs into memory directly from the FASTA (no disk cache)."""
+        out: dict[str, NDArray[np.bytes_]] = {}
+        with self._open() as f:
+            for c in tqdm(self.contigs, total=len(self.contigs)):
+                out[c] = np.frombuffer(f.fetch(c).encode("ascii").upper(), "S1")
+        return out
 
     def _open(self):
+        if not self._source_available:
+            raise FileNotFoundError(
+                f"Source FASTA for cache {self.cache_path} could not be located; "
+                "on-demand reads require the source file. Re-open with in_memory=True "
+                "to use cached data, or restore the source FASTA."
+            )
         return pysam.FastaFile(str(self.path))
 
     def close(self):
