@@ -172,3 +172,26 @@ def test_fasta_in_memory_no_cache_reads_from_fasta(tmp_path, ref_fasta):
     with FastaFile(str(ref_fasta)) as f:
         expected = np.frombuffer(f.fetch(contig, 0, 8).encode("ascii").upper(), "S1")
     np.testing.assert_array_equal(seq, expected)
+
+
+def test_reference_from_path_accepts_gvlfa(tmp_path, ref_fasta):
+    import shutil
+
+    import genvarloader as gvl
+
+    local = tmp_path / Path(ref_fasta).name
+    shutil.copy(ref_fasta, local)
+    for ext in (".fai", ".gzi"):
+        side = Path(str(ref_fasta) + ext)
+        if side.exists():
+            shutil.copy(side, tmp_path / side.name)
+
+    ref_from_fa = gvl.Reference.from_path(local, in_memory=True)
+    gvlfa = local.with_name(local.name + ".gvlfa")
+    assert gvlfa.is_dir()
+
+    ref_from_gvlfa = gvl.Reference.from_path(gvlfa, in_memory=True)
+    assert ref_from_gvlfa.contigs == ref_from_fa.contigs
+    np.testing.assert_array_equal(
+        ref_from_gvlfa.reference, ref_from_fa.reference
+    )

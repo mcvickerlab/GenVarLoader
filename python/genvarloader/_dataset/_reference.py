@@ -11,13 +11,12 @@ import numpy as np
 import polars as pl
 from genoray._utils import ContigNormalizer
 from hirola import HashTable
-from loguru import logger
 from numpy.typing import ArrayLike, NDArray
 from seqpro.rag import Ragged, lengths_to_offsets
 from typing_extensions import Self
 
 from .._flat import _Flat
-from .._fasta import Fasta
+from .._fasta_cache import ensure_cache
 from .._ragged import RaggedSeqs, reverse_complement_masked, to_padded
 from .._torch import TORCH_AVAILABLE, get_dataloader, no_torch_error
 from .._types import Idx, StrIdx
@@ -73,17 +72,14 @@ class Reference:
             reference genomes or have very limited RAM.
         """
         path = Path(fasta)
-        _fasta = Fasta("ref", fasta, "N")
+        meta, data_path = ensure_cache(fasta)
+        full_contigs = meta.contigs
 
-        if not _fasta._valid_cache():
-            logger.info("Memory-mapping FASTA file for faster access.")
-            _fasta._write_to_cache()
-
-        ref_mmap = np.memmap(_fasta.cache_path, np.uint8, "r")
-        offsets = lengths_to_offsets(np.array(list(_fasta.contigs.values())))
+        ref_mmap = np.memmap(data_path, np.uint8, "r")
+        offsets = lengths_to_offsets(np.array(list(full_contigs.values())))
         pad_char = ord("N")
 
-        c_map = ContigNormalizer(_fasta.contigs)
+        c_map = ContigNormalizer(full_contigs)
         if contigs is None:
             contigs = c_map.contigs
         else:
@@ -98,14 +94,14 @@ class Reference:
             c_map = ContigNormalizer(contigs)
 
         if in_memory:
-            reference = np.empty(sum(_fasta.contigs[c] for c in contigs), np.uint8)
+            reference = np.empty(sum(full_contigs[c] for c in contigs), np.uint8)
             offset = 0
             for c in contigs:
-                c_idx = list(_fasta.contigs).index(c)
+                c_idx = list(full_contigs).index(c)
                 o_s, o_e = offsets[c_idx], offsets[c_idx + 1]
                 reference[offset : offset + o_e - o_s] = ref_mmap[o_s:o_e]
                 offset += o_e - o_s
-            offsets = lengths_to_offsets(np.array([_fasta.contigs[c] for c in contigs]))
+            offsets = lengths_to_offsets(np.array([full_contigs[c] for c in contigs]))
         else:
             reference = ref_mmap
 
