@@ -161,3 +161,14 @@ def test_fasta_migrates_legacy_gvl(tmp_path):
     np.testing.assert_array_equal(
         fasta.read("chr1", 0, 8), np.frombuffer(b"ACGTACGT", "S1")
     )
+
+
+def test_fasta_in_memory_no_cache_reads_from_fasta(tmp_path, ref_fasta):
+    # in_memory=True, cache=False -> _read_all_from_fasta path, no .gvlfa written.
+    fasta = Fasta("ref", ref_fasta, pad="N", in_memory=True, cache=False)
+    assert fasta.sequences is not None
+    contig = next(iter(fasta.contigs))
+    seq = fasta.read(contig, 0, 8)
+    with FastaFile(str(ref_fasta)) as f:
+        expected = np.frombuffer(f.fetch(contig, 0, 8).encode("ascii").upper(), "S1")
+    np.testing.assert_array_equal(seq, expected)
