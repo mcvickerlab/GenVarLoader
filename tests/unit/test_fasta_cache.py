@@ -154,3 +154,32 @@ def test_data_size_ok_detects_corruption(tmp_path, local_fa):
     assert fc._data_size_ok(gvlfa, meta) is True
     (gvlfa / fc.DATA_FILENAME).write_bytes(b"too short")
     assert fc._data_size_ok(gvlfa, meta) is False
+
+
+def test_migrate_legacy_reuses_bytes_and_removes_old(tmp_path, local_fa):
+    # Fabricate a legacy flat cache: concatenated contigs, exactly as the old
+    # _write_to_cache produced. Build via the new code, then rename to legacy.
+    staging = tmp_path / "staging.gvlfa"
+    fc.build(local_fa, staging)
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    shutil.move(str(staging / fc.DATA_FILENAME), str(legacy))
+    legacy_bytes = legacy.read_bytes()
+
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    meta = fc.migrate_legacy(local_fa, legacy, gvlfa)
+
+    assert not legacy.exists()  # old file removed (moved)
+    assert (gvlfa / fc.DATA_FILENAME).read_bytes() == legacy_bytes  # bytes reused
+    assert meta.contigs == fc._contig_lengths(local_fa)
+    _, source, status = fc.load(gvlfa)
+    assert status == "fresh" and source == local_fa.resolve()
+
+
+def test_migrate_legacy_aborts_before_move_if_source_unreadable(tmp_path):
+    legacy = tmp_path / "ghost.fa.gvl"
+    legacy.write_bytes(b"data")
+    missing_src = tmp_path / "ghost.fa"  # does not exist
+    gvlfa = tmp_path / "ghost.fa.gvlfa"
+    with pytest.raises(Exception):
+        fc.migrate_legacy(missing_src, legacy, gvlfa)
+    assert legacy.exists()  # untouched on failure

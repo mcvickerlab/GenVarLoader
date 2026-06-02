@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from hashlib import blake2b
 from importlib.metadata import version
 from pathlib import Path
@@ -145,6 +146,32 @@ def _fingerprints_match(stored: Fingerprint, source_fa: Path) -> bool:
     if stored.size_bytes != Path(source_fa).stat().st_size:
         return False
     return fingerprint(source_fa).digest == stored.digest
+
+
+def migrate_legacy(
+    source_fa: str | Path, legacy_gvl: str | Path, gvlfa_dir: str | Path
+) -> FastaCache:
+    """Upgrade a legacy flat .gvl cache to a .gvlfa dir by reusing its bytes.
+
+    Reads contig lengths and fingerprints the source *before* touching the legacy
+    file, so a missing/unreadable source aborts without disturbing it.
+    """
+    source_fa = Path(source_fa)
+    legacy_gvl = Path(legacy_gvl)
+    gvlfa_dir = Path(gvlfa_dir)
+    contigs = _contig_lengths(source_fa)  # raises here if source is unreadable
+    fp = fingerprint(source_fa)
+    gvlfa_dir.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(legacy_gvl), str(gvlfa_dir / DATA_FILENAME))
+    meta = FastaCache(
+        format_version=FORMAT_VERSION,
+        genvarloader_version=_gvl_version(),
+        contigs=contigs,
+        source=_source_hints(source_fa, gvlfa_dir),
+        fingerprint=fp,
+    )
+    (gvlfa_dir / METADATA_FILENAME).write_text(meta.model_dump_json())
+    return meta
 
 
 def load(gvlfa_dir: str | Path) -> tuple[FastaCache, Path | None, Literal["fresh", "stale", "unvalidated"]]:
