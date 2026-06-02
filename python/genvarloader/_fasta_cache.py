@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from hashlib import blake2b
 from pathlib import Path
 from typing import Literal
@@ -37,6 +38,34 @@ class FastaCache(BaseModel):
     contigs: dict[str, int]
     source: SourceHints
     fingerprint: Fingerprint
+
+
+def _source_hints(source_fa: str | Path, gvlfa_dir: str | Path) -> SourceHints:
+    source = Path(source_fa).resolve()
+    dest = Path(gvlfa_dir).resolve()
+    try:
+        relative = os.path.relpath(source, dest)
+    except ValueError:  # e.g. different drives on Windows
+        relative = str(source)
+    return SourceHints(
+        filename=source.name,
+        absolute_path=str(source),
+        relative_path=str(relative),
+    )
+
+
+def resolve_source(gvlfa_dir: str | Path, meta: FastaCache) -> Path | None:
+    """Locate the source FASTA: sibling, then relative, then absolute. First hit wins."""
+    gvlfa_dir = Path(gvlfa_dir)
+    candidates = [
+        gvlfa_dir.parent / meta.source.filename,
+        gvlfa_dir / meta.source.relative_path,
+        Path(meta.source.absolute_path),
+    ]
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+    return None
 
 
 def fingerprint(path: str | Path) -> Fingerprint:
