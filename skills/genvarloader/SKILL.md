@@ -229,7 +229,7 @@ Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (use
 
 ## Other public surface (one-liners)
 
-- `gvl.Reference.from_path(fasta, contigs=None)` — wrap a FASTA. Cached.
+- `gvl.Reference.from_path(fasta, contigs=None)` — wrap a FASTA (path to a `.fa`/`.fa.bgz`, or a `.gvlfa` cache dir). Builds/reuses a sibling `.gvlfa` cache directory (self-describing, fingerprint-validated; legacy `.fa.gvl` caches auto-migrate).
 - `gvl.read_bedlike(path)` / `gvl.with_length(bed, L)` — BED helpers (re-exported from `seqpro`).
 - `gvl.Ragged`, `gvl.RaggedAnnotatedHaps`, `gvl.RaggedVariants`, `gvl.RaggedIntervals` — ragged return containers.
 - `gvl.to_nested_tensor(ragged)` — convert to a PyTorch nested tensor (requires `torch`).
