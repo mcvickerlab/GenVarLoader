@@ -192,6 +192,4 @@ def test_reference_from_path_accepts_gvlfa(tmp_path, ref_fasta):
 
     ref_from_gvlfa = gvl.Reference.from_path(gvlfa, in_memory=True)
     assert ref_from_gvlfa.contigs == ref_from_fa.contigs
-    np.testing.assert_array_equal(
-        ref_from_gvlfa.reference, ref_from_fa.reference
-    )
+    np.testing.assert_array_equal(ref_from_gvlfa.reference, ref_from_fa.reference)

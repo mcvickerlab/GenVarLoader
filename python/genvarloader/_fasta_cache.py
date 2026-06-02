@@ -233,7 +233,9 @@ def _ensure_from_fasta(source_fa: Path) -> tuple[FastaCache, Path]:
             )
         else:
             valid = False
-        if not valid or meta is None:  # redundant at runtime; satisfies the type checker
+        if (
+            not valid or meta is None
+        ):  # redundant at runtime; satisfies the type checker
             logger.info(f"Building FASTA cache at {gvlfa_dir}.")
             meta = build(source_fa, gvlfa_dir)
         return meta, data_path
@@ -271,7 +273,9 @@ def _ensure_from_gvlfa(gvlfa_dir: Path) -> tuple[FastaCache, Path]:
     return meta, data_path
 
 
-def load(gvlfa_dir: str | Path) -> tuple[FastaCache, Path | None, Literal["fresh", "stale", "unvalidated"]]:
+def load(
+    gvlfa_dir: str | Path,
+) -> tuple[FastaCache, Path | None, Literal["fresh", "stale", "unvalidated"]]:
     """Read cache metadata and classify it: 'fresh' | 'stale' | 'unvalidated'.
 
     Raises ValueError if the format version is too new to read.
