@@ -138,6 +138,9 @@ def _check_format_version(meta: FastaCache, gvlfa_dir: Path) -> None:
 
 
 def _data_size_ok(gvlfa_dir: Path, meta: FastaCache) -> bool:
+    # NOTE: only total byte count is checked here. A same-size corruption of
+    # sequence.bin is not detected; full-content hashing would be prohibitively
+    # expensive for large reference genomes.
     data_path = Path(gvlfa_dir) / DATA_FILENAME
     if not data_path.exists():
         return False
@@ -156,13 +159,22 @@ def migrate_legacy(
     """Upgrade a legacy flat .gvl cache to a .gvlfa dir by reusing its bytes.
 
     Reads contig lengths and fingerprints the source *before* touching the legacy
-    file, so a missing/unreadable source aborts without disturbing it.
+    file, so a missing/unreadable source aborts without disturbing it. If the legacy
+    bytes don't match the current source's expected size (i.e. the legacy cache is
+    stale or truncated), the legacy file is left untouched and a fresh cache is built
+    from the source instead of reusing untrustworthy bytes.
     """
     source_fa = Path(source_fa)
     legacy_gvl = Path(legacy_gvl)
     gvlfa_dir = Path(gvlfa_dir)
     contigs = _contig_lengths(source_fa)  # raises here if source is unreadable
     fp = fingerprint(source_fa)
+    if legacy_gvl.stat().st_size != sum(contigs.values()):
+        logger.info(
+            f"Legacy cache {legacy_gvl} size does not match source {source_fa}; "
+            "ignoring stale legacy bytes and building a fresh cache."
+        )
+        return build(source_fa, gvlfa_dir)
     gvlfa_dir.mkdir(parents=True, exist_ok=True)
     shutil.move(str(legacy_gvl), str(gvlfa_dir / DATA_FILENAME))
     meta = FastaCache(

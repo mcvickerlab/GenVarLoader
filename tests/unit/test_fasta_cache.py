@@ -185,6 +185,21 @@ def test_migrate_legacy_aborts_before_move_if_source_unreadable(tmp_path):
     assert legacy.exists()  # untouched on failure
 
 
+def test_migrate_legacy_truncated_bytes_builds_fresh(tmp_path, local_fa):
+    # A stale/truncated legacy cache must NOT be trusted: migrate should build
+    # fresh from the source and leave the legacy file untouched.
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    legacy.write_bytes(b"truncated")  # wrong size vs the real source
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    meta = fc.migrate_legacy(local_fa, legacy, gvlfa)
+
+    assert legacy.exists()  # stale legacy left untouched, not consumed
+    assert (gvlfa / fc.DATA_FILENAME).stat().st_size == sum(meta.contigs.values())
+    # The rebuilt cache is valid and fresh against the source.
+    _, source, status = fc.load(gvlfa)
+    assert status == "fresh" and source == local_fa.resolve()
+
+
 def test_is_gvlfa_dir(tmp_path, local_fa):
     gvlfa = tmp_path / "out.gvlfa"
     fc.build(local_fa, gvlfa)

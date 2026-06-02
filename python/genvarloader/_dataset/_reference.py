@@ -59,7 +59,10 @@ class Reference:
         Parameters
         ----------
         fasta
-            Path to the FASTA file.
+            Path to a ``.fa``/``.fa.bgz`` FASTA file or an existing ``.gvlfa``
+            cache directory. When a FASTA path is given, a sibling ``.gvlfa``
+            cache is built on first use and reused on subsequent calls; a legacy
+            ``.fa.gvl`` flat cache is automatically migrated to the new format.
         contigs
             List of contig names to load. If None, all contigs in the FASTA file are loaded.
             Can be either UCSC or Ensembl style (i.e. with or without the "chr" prefix) and
