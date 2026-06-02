@@ -98,10 +98,13 @@ def _write_sequence(source_fa: Path, gvlfa_dir: Path, contigs: dict[str, int]) -
     data = np.memmap(gvlfa_dir / DATA_FILENAME, dtype=np.uint8, mode="w+", shape=total)
     offset = 0
     with pysam.FastaFile(str(source_fa)) as f:
-        for c in tqdm(contigs, total=total, unit=" nucleotide"):
+        pbar = tqdm(total=total, unit=" nucleotide")
+        for c in contigs:
             c_seq = np.frombuffer(f.fetch(c).encode("ascii").upper(), "S1")
             data[offset : offset + len(c_seq)] = c_seq.view(np.uint8)
             offset += len(c_seq)
+            pbar.update(len(c_seq))
+        pbar.close()
     data.flush()
 
 
@@ -144,7 +147,7 @@ def _fingerprints_match(stored: Fingerprint, source_fa: Path) -> bool:
     return fingerprint(source_fa).digest == stored.digest
 
 
-def load(gvlfa_dir: str | Path) -> tuple[FastaCache, Path | None, str]:
+def load(gvlfa_dir: str | Path) -> tuple[FastaCache, Path | None, Literal["fresh", "stale", "unvalidated"]]:
     """Read cache metadata and classify it: 'fresh' | 'stale' | 'unvalidated'.
 
     Raises ValueError if the format version is too new to read.
