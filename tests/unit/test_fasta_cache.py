@@ -183,3 +183,67 @@ def test_migrate_legacy_aborts_before_move_if_source_unreadable(tmp_path):
     with pytest.raises(Exception):
         fc.migrate_legacy(missing_src, legacy, gvlfa)
     assert legacy.exists()  # untouched on failure
+
+
+def test_is_gvlfa_dir(tmp_path, local_fa):
+    gvlfa = tmp_path / "out.gvlfa"
+    fc.build(local_fa, gvlfa)
+    assert fc.is_gvlfa(gvlfa) is True
+    assert fc.is_gvlfa(local_fa) is False
+
+
+def test_ensure_cache_from_fasta_builds_then_loads(tmp_path, local_fa):
+    meta, data_path = fc.ensure_cache(local_fa)
+    expected_dir = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    assert data_path == expected_dir / fc.DATA_FILENAME
+    assert data_path.exists()
+    # Second call loads the existing fresh cache (no error, same contigs).
+    meta2, _ = fc.ensure_cache(local_fa)
+    assert meta2.contigs == meta.contigs
+
+
+def test_ensure_cache_from_fasta_rebuilds_when_stale(tmp_path, local_fa):
+    fc.ensure_cache(local_fa)
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    # Corrupt the data file; ensure_cache should rebuild it to the right size.
+    (gvlfa / fc.DATA_FILENAME).write_bytes(b"short")
+    meta, data_path = fc.ensure_cache(local_fa)
+    assert data_path.stat().st_size == sum(meta.contigs.values())
+
+
+def test_ensure_cache_from_fasta_migrates_legacy(tmp_path, local_fa):
+    staging = tmp_path / "staging.gvlfa"
+    fc.build(local_fa, staging)
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    shutil.move(str(staging / fc.DATA_FILENAME), str(legacy))
+    shutil.rmtree(staging)
+
+    meta, data_path = fc.ensure_cache(local_fa)
+    assert not legacy.exists()
+    assert data_path.exists()
+    assert meta.contigs == fc._contig_lengths(local_fa)
+
+
+def test_ensure_cache_from_gvlfa_missing_source_warns(tmp_path, local_fa):
+    gvlfa = tmp_path / "out.gvlfa"
+    fc.build(local_fa, gvlfa)
+    local_fa.unlink()
+    with pytest.warns(UserWarning, match="Could not locate source FASTA"):
+        meta, data_path = fc.ensure_cache(gvlfa)
+    assert data_path == gvlfa / fc.DATA_FILENAME
+
+
+def test_ensure_cache_from_gvlfa_stale_rebuilds(tmp_path):
+    # Use a plain-text FASTA: rebuilding needs a valid re-readable source, and
+    # truncating a bgzipped file would corrupt it for pysam.
+    src = tmp_path / "tiny.fa"
+    src.write_text(">chr1\nACGTACGT\n")
+    pysam.faidx(str(src))
+    gvlfa = tmp_path / "tiny.fa.gvlfa"
+    fc.build(src, gvlfa)
+    # Change the source content (same path), invalidating the fingerprint.
+    src.write_text(">chr1\nTTTTTTTT\n")
+    pysam.faidx(str(src))
+    meta, data_path = fc.ensure_cache(gvlfa)
+    data = np.memmap(data_path, dtype="S1", mode="r")
+    np.testing.assert_array_equal(data, np.frombuffer(b"TTTTTTTT", "S1"))

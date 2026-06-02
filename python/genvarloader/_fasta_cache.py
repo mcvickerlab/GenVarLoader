@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import warnings
 from hashlib import blake2b
 from importlib.metadata import version
 from pathlib import Path
@@ -9,11 +10,12 @@ from typing import Literal
 
 import numpy as np
 import pysam
+from loguru import logger
 from pydantic import BaseModel
 from pydantic_extra_types.semantic_version import SemanticVersion
 from tqdm.auto import tqdm
 
-__all__ = ["FastaCache"]
+__all__ = ["FastaCache", "ensure_cache"]
 
 FORMAT_VERSION = SemanticVersion.parse("1.0.0")
 """On-disk schema version for the .gvlfa cache."""
@@ -172,6 +174,85 @@ def migrate_legacy(
     )
     (gvlfa_dir / METADATA_FILENAME).write_text(meta.model_dump_json())
     return meta
+
+
+def _cache_dir_for(source_fa: Path) -> Path:
+    return source_fa.with_name(source_fa.name + GVLFA_SUFFIX)
+
+
+def _legacy_for(source_fa: Path) -> Path:
+    return source_fa.with_name(source_fa.name + LEGACY_SUFFIX)
+
+
+def is_gvlfa(path: str | Path) -> bool:
+    """True if path is a .gvlfa cache directory."""
+    path = Path(path)
+    if not path.is_dir():
+        return False
+    return path.name.endswith(GVLFA_SUFFIX) or (path / METADATA_FILENAME).exists()
+
+
+def ensure_cache(path: str | Path) -> tuple[FastaCache, Path]:
+    """Resolve a usable cache for `path` (a .fa or a .gvlfa), building, migrating,
+    or rebuilding as needed. Returns (metadata, path to sequence.bin)."""
+    path = Path(path)
+    if is_gvlfa(path):
+        return _ensure_from_gvlfa(path)
+    return _ensure_from_fasta(path)
+
+
+def _ensure_from_fasta(source_fa: Path) -> tuple[FastaCache, Path]:
+    gvlfa_dir = _cache_dir_for(source_fa)
+    legacy = _legacy_for(source_fa)
+    data_path = gvlfa_dir / DATA_FILENAME
+    if gvlfa_dir.exists():
+        meta: FastaCache | None = None
+        try:
+            meta = FastaCache.model_validate_json(
+                (gvlfa_dir / METADATA_FILENAME).read_text()
+            )
+            _check_format_version(meta, gvlfa_dir)
+            valid = _data_size_ok(gvlfa_dir, meta) and _fingerprints_match(
+                meta.fingerprint, source_fa
+            )
+        except Exception:
+            valid = False
+        if not valid or meta is None:
+            logger.info(f"Building FASTA cache at {gvlfa_dir}.")
+            meta = build(source_fa, gvlfa_dir)
+        return meta, data_path
+    if legacy.exists():
+        logger.info(f"Migrating legacy FASTA cache {legacy} -> {gvlfa_dir}.")
+        return migrate_legacy(source_fa, legacy, gvlfa_dir), data_path
+    logger.info(f"Building FASTA cache at {gvlfa_dir}.")
+    return build(source_fa, gvlfa_dir), data_path
+
+
+def _ensure_from_gvlfa(gvlfa_dir: Path) -> tuple[FastaCache, Path]:
+    data_path = gvlfa_dir / DATA_FILENAME
+    try:
+        meta, source, status = load(gvlfa_dir)
+    except ValueError:
+        raise  # format-too-new: actionable, do not swallow
+    except Exception as e:
+        raise ValueError(f"FASTA cache at {gvlfa_dir} is unreadable: {e}") from e
+    if not _data_size_ok(gvlfa_dir, meta):
+        if source is not None:
+            return build(source, gvlfa_dir), data_path
+        raise ValueError(
+            f"FASTA cache data at {data_path} is corrupt and the source FASTA "
+            "could not be located to rebuild it."
+        )
+    if status == "stale":
+        logger.info(f"Source FASTA changed; rebuilding cache at {gvlfa_dir}.")
+        meta = build(source, gvlfa_dir)
+    elif status == "unvalidated":
+        warnings.warn(
+            f"Could not locate source FASTA for cache {gvlfa_dir}; using cached "
+            "data without validation. On-demand reads (in_memory=False) will fail.",
+            stacklevel=2,
+        )
+    return meta, data_path
 
 
 def load(gvlfa_dir: str | Path) -> tuple[FastaCache, Path | None, Literal["fresh", "stale", "unvalidated"]]:
