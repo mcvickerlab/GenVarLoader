@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import genvarloader as gvl
+import numpy as np
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 import pytest
@@ -35,7 +36,7 @@ def _write_minimal_metadata(path: Path, *, ploidy: int | None = None) -> None:
 
 
 def _write_minimal_regions(path: Path) -> None:
-    """Write a minimal ``input_regions.arrow`` into *path* (must already exist)."""
+    """Write ``input_regions.arrow`` and ``regions.npy`` into *path* (must already exist)."""
     table = pa.table(
         {
             "chrom": pa.array(["chr1"], type=pa.large_utf8()),
@@ -46,6 +47,7 @@ def _write_minimal_regions(path: Path) -> None:
     )
     with pa_ipc.new_file(path / "input_regions.arrow", table.schema) as writer:
         writer.write_table(table)
+    np.save(path / "regions.npy", np.zeros((1, 4), dtype=np.int32))
 
 
 # ---------------------------------------------------------------------------
@@ -68,12 +70,12 @@ def test_open_dir_without_metadata_raises(tmp_path: Path) -> None:
 
 
 def test_open_dir_without_regions_raises(tmp_path: Path) -> None:
-    """metadata.json present but input_regions.arrow missing — raises FileNotFoundError."""
+    """metadata.json present but input_regions.arrow missing — raises ValueError."""
     ds = tmp_path / "no_regions.gvl"
     ds.mkdir()
     _write_minimal_metadata(ds)
     # no input_regions.arrow written
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ValueError, match="input_regions.arrow"):
         gvl.Dataset.open(ds)
 
 
