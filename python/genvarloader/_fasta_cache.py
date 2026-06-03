@@ -1,3 +1,10 @@
+"""FASTA cache (``.gvlfa``) build and validation logic.
+
+The cache is built atomically (temp directory + :func:`os.replace`) under a best-effort
+``filelock``, so concurrent builders sharing one reference FASTA are safe. The cache
+auto-rebuilds from its source when stale or missing (source fingerprint mismatch or
+incomplete on-disk data).
+"""
 from __future__ import annotations
 
 import os

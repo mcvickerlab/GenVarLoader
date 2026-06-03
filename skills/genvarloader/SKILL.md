@@ -105,6 +105,10 @@ Notable:
 
 Source: `python/genvarloader/_dataset/_write.py`.
 
+**Atomic creation:** `gvl.write` builds into a private sibling temp directory and publishes via an atomic `os.replace`. A best-effort `filelock` avoids redundant rebuilds when parallel jobs share the same destination, but correctness relies on the rename — the lock is advisory only. **Datasets do not auto-rebuild**; if the on-disk artifact is missing or corrupt, re-run `gvl.write`.
+
+**Out-of-scope:** `genoray` `.gvi` index files and `pysam` `.fai`/`.gzi` index files are created by those libraries and are **not** covered by gvl's atomic/locked creation. Concurrent jobs that trigger index creation for those files depend on the upstream libraries' behavior.
+
 ## `Dataset.open` — key arguments
 
 ```python
@@ -121,6 +125,8 @@ gvl.Dataset.open(
 ```
 
 Without `reference=`, only variants/haplotypes are available (you can't produce reference-overlaid sequences). `svar=` overrides the recorded SVAR location.
+
+**Format validation:** `Dataset.open` validates the dataset's `format_version` and structural integrity (file presence + sizes). An incompatible or corrupt dataset raises a `ValueError` instructing regeneration with `gvl.write`. Datasets do **not** auto-rebuild.
 
 - **`var_fields: list[str] | None`** — Variant fields to include on `RaggedVariants` output. Defaults to the minimum useful set `["alt", "ilen", "start"]`. Pass additional names (e.g. `"ref"`, `"dosage"`, or any numeric info column in the source variants table) to load them eagerly at open time. Must be a subset of `Dataset.available_var_fields`. Can be reconfigured later via `Dataset.with_settings(var_fields=...)`, which lazily loads any newly-requested columns. `"dosage"` must be requested explicitly — it is *not* added automatically even when `dosages.npy` exists on disk.
 
@@ -229,7 +235,7 @@ Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (use
 
 ## Other public surface (one-liners)
 
-- `gvl.Reference.from_path(fasta, contigs=None)` — wrap a FASTA (path to a `.fa`/`.fa.bgz`, or a `.gvlfa` cache dir). Builds/reuses a sibling `.gvlfa` cache directory (self-describing, fingerprint-validated; legacy `.fa.gvl` caches auto-migrate).
+- `gvl.Reference.from_path(fasta, contigs=None)` — wrap a FASTA (path to a `.fa`/`.fa.bgz`, or a `.gvlfa` cache dir). Builds/reuses a sibling `.gvlfa` cache directory (self-describing, fingerprint-validated; legacy `.fa.gvl` caches auto-migrate). The cache is built atomically (temp + `os.replace`) under a best-effort lock, so concurrent builders sharing one reference are safe; the cache **auto-rebuilds** from its source when stale or missing.
 - `gvl.read_bedlike(path)` / `gvl.with_length(bed, L)` — BED helpers (re-exported from `seqpro`).
 - `gvl.Ragged`, `gvl.RaggedAnnotatedHaps`, `gvl.RaggedVariants`, `gvl.RaggedIntervals` — ragged return containers.
 - `gvl.to_nested_tensor(ragged)` — convert to a PyTorch nested tensor (requires `torch`).

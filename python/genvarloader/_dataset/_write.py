@@ -108,6 +108,18 @@ def write(
         Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
         haplotypes shorter than the intervals is acceptable, in which case they will be padded with reference bases when appropriate.
         Disabling this also reduces the amount of data read/written and is faster to run.
+
+    Notes
+    -----
+    The dataset directory is built atomically: all data is written to a private sibling
+    temp directory and published via :func:`os.replace`. A best-effort ``filelock``
+    prevents redundant parallel rebuilds, but correctness relies on the atomic rename —
+    the lock is advisory only.
+
+    Out of scope: ``genoray`` ``.gvi`` index files and ``pysam`` ``.fai``/``.gzi`` index
+    files are created by those libraries and are not covered by gvl's atomic/locked
+    creation. Concurrent jobs that trigger index creation for those files depend on the
+    upstream libraries' behavior.
     """
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
