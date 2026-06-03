@@ -83,3 +83,26 @@ def test_genotype_offsets_correct_length_passes(tmp_path):
     # offsets.npy is a raw memmap (no numpy header), so use tofile not np.save
     np.zeros(2 * 2 * 2 + 1, dtype=np.int64).tofile(geno / "offsets.npy")
     validate_dataset(meta, path)  # no raise
+
+
+def test_format_version_too_old_raises(tmp_path):
+    path = tmp_path / "ds.gvl"
+    meta = _minimal_valid_dataset(path)
+    from pydantic_extra_types.semantic_version import SemanticVersion
+
+    # DATASET_FORMAT_VERSION.major is 1, so major 0 is "too old"
+    meta.format_version = SemanticVersion.parse("0.0.0")
+    with pytest.raises(ValueError, match="format version") as exc_info:
+        validate_dataset(meta, path)
+    assert "upgrade genvarloader" not in str(exc_info.value)
+
+
+def test_genotypes_present_but_no_ploidy_raises(tmp_path):
+    path = tmp_path / "ds.gvl"
+    meta = _minimal_valid_dataset(path)  # ploidy defaults to None
+    geno = path / "genotypes"
+    geno.mkdir()
+    # offsets.npy is a raw memmap (no numpy header), so use tofile not np.save
+    np.zeros(4, dtype=np.int64).tofile(geno / "offsets.npy")
+    with pytest.raises(ValueError, match="ploidy"):
+        validate_dataset(meta, path)
