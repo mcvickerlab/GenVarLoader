@@ -39,8 +39,9 @@ def _publish(tmp: Path, dest: Path, *, overwrite: bool) -> None:
     """Move `tmp` into place at `dest` as atomically as the filesystem allows."""
     if dest.exists():
         if not overwrite:
-            # A racing builder published `dest` while we built. Our content is
-            # byte-identical, so discard ours; theirs wins harmlessly.
+            # A racing builder published `dest` while we built. Discard ours and
+            # let theirs win: for the FASTA cache the content is byte-identical so
+            # this is harmless; for a dataset write it is first-writer-wins.
             shutil.rmtree(tmp, ignore_errors=True)
             return
         aside = dest.with_name(f"{dest.name}.old.{uuid4().hex[:8]}")
