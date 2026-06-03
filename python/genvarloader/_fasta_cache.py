@@ -15,6 +15,8 @@ from pydantic import BaseModel
 from pydantic_extra_types.semantic_version import SemanticVersion
 from tqdm.auto import tqdm
 
+from ._atomic import SkipPublish, atomic_dir
+
 __all__ = ["FastaCache", "ensure_cache"]
 
 FORMAT_VERSION = SemanticVersion.parse("1.0.0")
@@ -111,22 +113,57 @@ def _write_sequence(source_fa: Path, gvlfa_dir: Path, contigs: dict[str, int]) -
     data.flush()
 
 
-def build(source_fa: str | Path, gvlfa_dir: str | Path) -> FastaCache:
-    """Build a fresh .gvlfa cache containing all contigs of the source FASTA."""
-    source_fa = Path(source_fa)
-    gvlfa_dir = Path(gvlfa_dir)
-    gvlfa_dir.mkdir(parents=True, exist_ok=True)
+def _build_into(source_fa: Path, target_dir: Path, dest_for_hints: Path) -> FastaCache:
+    """Write sequence.bin + metadata.json into `target_dir`.
+
+    `dest_for_hints` is the *final* cache dir (a sibling of `target_dir` at the
+    same depth) used to compute source path hints, so the stored relative path is
+    correct after publish.
+    """
     contigs = _contig_lengths(source_fa)
-    _write_sequence(source_fa, gvlfa_dir, contigs)
+    _write_sequence(source_fa, target_dir, contigs)
     meta = FastaCache(
         format_version=FORMAT_VERSION,
         genvarloader_version=_gvl_version(),
         contigs=contigs,
-        source=_source_hints(source_fa, gvlfa_dir),
+        source=_source_hints(source_fa, dest_for_hints),
         fingerprint=fingerprint(source_fa),
     )
-    (gvlfa_dir / METADATA_FILENAME).write_text(meta.model_dump_json())
+    (target_dir / METADATA_FILENAME).write_text(meta.model_dump_json())
     return meta
+
+
+def build(source_fa: str | Path, gvlfa_dir: str | Path) -> FastaCache:
+    """Build a fresh .gvlfa cache containing all contigs of the source FASTA.
+
+    Builds into a private sibling temp dir and atomically publishes it, so a
+    concurrent builder or an interrupted build never leaves a partial cache.
+    """
+    source_fa = Path(source_fa)
+    gvlfa_dir = Path(gvlfa_dir)
+    meta_holder: dict[str, FastaCache] = {}
+    with atomic_dir(gvlfa_dir, overwrite=True) as tmp:
+        meta_holder["meta"] = _build_into(source_fa, tmp, gvlfa_dir)
+    return meta_holder["meta"]
+
+
+def _ensure_built(source_fa: Path, gvlfa_dir: Path) -> FastaCache:
+    """Build the cache under a best-effort lock, double-checking inside the lock
+    that another job hasn't already published a fresh cache."""
+    with atomic_dir(gvlfa_dir, overwrite=True) as tmp:
+        if gvlfa_dir.exists():
+            try:
+                meta, _source, status = load(gvlfa_dir)
+                if status == "fresh" and _data_size_ok(gvlfa_dir, meta):
+                    raise SkipPublish
+            except SkipPublish:
+                raise
+            except Exception:
+                pass  # unreadable/corrupt -> fall through and rebuild
+        _build_into(source_fa, tmp, gvlfa_dir)
+    return FastaCache.model_validate_json(
+        (gvlfa_dir / METADATA_FILENAME).read_text()
+    )
 
 
 def _check_format_version(meta: FastaCache, gvlfa_dir: Path) -> None:
@@ -175,17 +212,19 @@ def migrate_legacy(
             "ignoring stale legacy bytes and building a fresh cache."
         )
         return build(source_fa, gvlfa_dir)
-    gvlfa_dir.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(legacy_gvl), str(gvlfa_dir / DATA_FILENAME))
-    meta = FastaCache(
-        format_version=FORMAT_VERSION,
-        genvarloader_version=_gvl_version(),
-        contigs=contigs,
-        source=_source_hints(source_fa, gvlfa_dir),
-        fingerprint=fp,
-    )
-    (gvlfa_dir / METADATA_FILENAME).write_text(meta.model_dump_json())
-    return meta
+    meta_holder: dict[str, FastaCache] = {}
+    with atomic_dir(gvlfa_dir, overwrite=True) as tmp:
+        shutil.move(str(legacy_gvl), str(tmp / DATA_FILENAME))
+        meta = FastaCache(
+            format_version=FORMAT_VERSION,
+            genvarloader_version=_gvl_version(),
+            contigs=contigs,
+            source=_source_hints(source_fa, gvlfa_dir),
+            fingerprint=fp,
+        )
+        (tmp / METADATA_FILENAME).write_text(meta.model_dump_json())
+        meta_holder["meta"] = meta
+    return meta_holder["meta"]
 
 
 def _cache_dir_for(source_fa: Path) -> Path:
@@ -237,13 +276,13 @@ def _ensure_from_fasta(source_fa: Path) -> tuple[FastaCache, Path]:
             not valid or meta is None
         ):  # redundant at runtime; satisfies the type checker
             logger.info(f"Building FASTA cache at {gvlfa_dir}.")
-            meta = build(source_fa, gvlfa_dir)
+            meta = _ensure_built(source_fa, gvlfa_dir)
         return meta, data_path
     if legacy.exists():
         logger.info(f"Migrating legacy FASTA cache {legacy} -> {gvlfa_dir}.")
         return migrate_legacy(source_fa, legacy, gvlfa_dir), data_path
     logger.info(f"Building FASTA cache at {gvlfa_dir}.")
-    return build(source_fa, gvlfa_dir), data_path
+    return _ensure_built(source_fa, gvlfa_dir), data_path
 
 
 def _ensure_from_gvlfa(gvlfa_dir: Path) -> tuple[FastaCache, Path]:
@@ -256,14 +295,14 @@ def _ensure_from_gvlfa(gvlfa_dir: Path) -> tuple[FastaCache, Path]:
         raise ValueError(f"FASTA cache at {gvlfa_dir} is unreadable: {e}") from e
     if not _data_size_ok(gvlfa_dir, meta):
         if source is not None:
-            return build(source, gvlfa_dir), data_path
+            return _ensure_built(source, gvlfa_dir), data_path
         raise ValueError(
             f"FASTA cache data at {data_path} is corrupt and the source FASTA "
             "could not be located to rebuild it."
         )
     if status == "stale":
         logger.info(f"Source FASTA changed; rebuilding cache at {gvlfa_dir}.")
-        meta = build(source, gvlfa_dir)
+        meta = _ensure_built(source, gvlfa_dir)
     elif status == "unvalidated":
         warnings.warn(
             f"Could not locate source FASTA for cache {gvlfa_dir}; using cached "

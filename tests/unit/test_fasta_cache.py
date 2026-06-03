@@ -287,3 +287,45 @@ def test_ensure_cache_format_too_new_raises_from_both_entry_points(tmp_path, loc
     # .fa entry point (sibling cache) must ALSO raise, not silently rebuild/downgrade.
     with pytest.raises(ValueError, match="newer than supported"):
         fc.ensure_cache(local_fa)
+
+
+def test_build_is_atomic_no_temp_left(tmp_path):
+    src = tmp_path / "ref.fa"
+    src.write_text(">chr1\nACGTACGT\n")
+    pysam.faidx(str(src))
+    gvlfa = tmp_path / "ref.fa.gvlfa"
+    fc.build(src, gvlfa)
+    assert (gvlfa / fc.DATA_FILENAME).exists()
+    assert (gvlfa / fc.METADATA_FILENAME).exists()
+    # no orphan temp / lock-leak that looks like a cache dir
+    assert list(tmp_path.glob("ref.fa.gvlfa.tmp.*")) == []
+    assert list(tmp_path.glob("ref.fa.gvlfa.old.*")) == []
+
+
+def test_build_failure_leaves_no_partial_cache(tmp_path, monkeypatch):
+    src = tmp_path / "ref.fa"
+    src.write_text(">chr1\nACGTACGT\n")
+    pysam.faidx(str(src))
+    gvlfa = tmp_path / "ref.fa.gvlfa"
+
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(fc, "_write_sequence", boom)
+    with pytest.raises(RuntimeError, match="disk full"):
+        fc.build(src, gvlfa)
+    assert not gvlfa.exists()
+    assert list(tmp_path.glob("ref.fa.gvlfa.tmp.*")) == []
+
+
+def test_ensure_cache_double_check_reuses_fresh(tmp_path):
+    # When dest is already a fresh cache, ensure_cache must not rebuild it.
+    src = tmp_path / "ref.fa"
+    src.write_text(">chr1\nACGTACGT\n")
+    pysam.faidx(str(src))
+    meta1, data1 = fc.ensure_cache(src)
+    mtime1 = (data1).stat().st_mtime_ns
+    meta2, data2 = fc.ensure_cache(src)
+    assert data2 == data1
+    # data file was not rewritten (fresh cache reused)
+    assert data2.stat().st_mtime_ns == mtime1
