@@ -32,6 +32,7 @@ dependencies = [
     "pooch",
     "awkward",
     "hirola>=0.3,<0.4",
+    "filelock>=3.12",
 ]
 
 [project.optional-dependencies]
