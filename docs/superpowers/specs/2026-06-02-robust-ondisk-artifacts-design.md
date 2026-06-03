@@ -1,6 +1,6 @@
 # Robust on-disk artifacts: atomic creation + validation — Design
 
-**Status:** Approved design, ready for implementation planning.
+**Status:** Approved design with all implementation decisions resolved; ready for implementation planning.
 
 **Goal:** Make GenVarLoader's generated on-disk artifacts safe under concurrency and resilient to format drift. Two coupled problems, one initiative:
 
@@ -58,8 +58,8 @@ def atomic_dir(
 
 - **Temp location:** `<dest>.tmp.<pid>-<uniq>/` as a *sibling* of `dest` (same filesystem, so `os.replace` is atomic; avoids `EXDEV`).
 - **Publish:** on clean context exit, `os.replace(tmp, dest)`. On exception, remove `tmp` and re-raise; `dest` is never touched.
-- **Existing dest:** checked up front — exists & not `overwrite` → `FileExistsError`; exists & `overwrite` → the final `os.replace` replaces it (for a directory dest, replace into a freshly-renamed-aside or removed old dir; see Open Questions).
-- **Lock layer** (`filelock`): a `<dest>.lock` sibling. Flow is **double-checked**: acquire lock (with `timeout`) → re-validate `dest` (another job may have just published it → reuse, skip build) → else build. On lock timeout or a silent network-FS no-op, fall back to building anyway; atomic rename keeps that correct.
+- **Existing dest:** checked up front — exists & not `overwrite` → `FileExistsError`; exists & `overwrite` → **move-aside then rename**: `os.replace(dest, <dest>.old.<uniq>)`, then `os.replace(tmp, dest)`, then `rmtree(<dest>.old.<uniq>)`. Two fast metadata renames keep the dest-absent window minimal; if the second rename fails the `.old` copy is still recoverable.
+- **Lock layer** (`filelock`): a `<dest>.lock` sibling, **internal with a 60s default `DEFAULT_LOCK_TIMEOUT`** (not exposed on the public API — the lock is only a best-effort optimization; atomic rename is the correctness guarantee). Flow is **double-checked**: acquire lock (with `timeout`) → re-validate `dest` (another job may have just published it → reuse, skip build) → else build. On lock timeout or a silent network-FS no-op, fall back to building anyway; atomic rename keeps that correct.
 
 ### `_fasta_cache.py` (from PR #206)
 
@@ -158,8 +158,8 @@ Cross-platform: `filelock` covers posix/Windows; `os.replace` is atomic within a
 
 ---
 
-## Open questions for implementation
+## Resolved implementation decisions
 
-1. **Directory `os.replace` onto a non-empty existing dir** fails on POSIX. For `overwrite=True` the publish must first move the old `dest` aside to `<dest>.old.<uniq>` (then remove it after a successful rename) or `rmtree` it just before the rename. Decide the exact sequence to keep the window where `dest` is absent as small as possible.
-2. **`DEFAULT_LOCK_TIMEOUT` value** and whether to expose `lock`/`timeout` as parameters on `gvl.write` / `Reference.from_path` / `Fasta`, or keep them internal with a sensible default.
-3. **`format_version` starting value and bump policy** — declare the current dataset layout `1.0.0`; document when a major bump is required.
+1. **Overwrite publish (non-empty existing dir).** `os.replace` cannot replace a non-empty dir on POSIX, so `overwrite=True` uses **move-aside then rename**: `os.replace(dest, <dest>.old.<uniq>)` → `os.replace(tmp, dest)` → `rmtree(<dest>.old.<uniq>)`. Two fast metadata renames keep the dest-absent window minimal, and a failure of the second rename leaves the old data recoverable under `.old` (vs. an `rmtree`-first approach that spans the whole delete and loses old data on a mid-delete crash).
+2. **Lock timeout / API surface.** `DEFAULT_LOCK_TIMEOUT = 60s`, kept **internal** — `lock`/`timeout` are not exposed on `gvl.write` / `Reference.from_path` / `Fasta`. The lock is a best-effort optimization only; atomic rename is the correctness guarantee, so tuning is rarely needed.
+3. **`format_version`.** Current dataset layout is **`1.0.0`**. Bump **MAJOR** only when an existing dataset can no longer be read correctly by new code (incompatible layout change); minor/patch for backward-compatible additions. A missing `format_version` field is treated as `1.0.0`.
