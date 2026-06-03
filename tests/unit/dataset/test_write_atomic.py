@@ -1,5 +1,7 @@
 """Tests for atomic gvl.write and format_version stamping."""
 
+import json
+
 import polars as pl
 import pytest
 
@@ -65,3 +67,47 @@ def test_overwrite_false_existing_raises(synthetic_case, tmp_path):
             variants=str(vcf_path),
             overwrite=False,
         )
+
+
+def test_format_version_stamped_on_disk(synthetic_case, tmp_path):
+    """gvl.write stamps format_version in metadata.json on a real write."""
+    dest = tmp_path / "test_format_version.gvl"
+    bed = synthetic_case.regions.select(
+        chrom=pl.col("chrom"),
+        chromStart=pl.col("start"),
+        chromEnd=pl.col("end"),
+    ).head(2)
+
+    gvl.write(
+        path=dest,
+        bed=bed,
+        variants=str(synthetic_case.vcf_path),
+        overwrite=False,
+    )
+
+    meta = json.loads((dest / "metadata.json").read_text())
+    assert meta["format_version"] == "1.0.0"
+
+
+def test_failure_leaves_no_partial_artifacts(synthetic_case, tmp_path):
+    """A mid-write failure cleans up: no dest dir and no .tmp.* sibling left."""
+    dest = tmp_path / "test_failure_atomic.gvl"
+    bed = synthetic_case.regions.select(
+        chrom=pl.col("chrom"),
+        chromStart=pl.col("start"),
+        chromEnd=pl.col("end"),
+    ).head(2)
+
+    # Pass a sample name that doesn't exist in the VCF — raises ValueError after
+    # atomic_dir has created the temp directory and written input_regions.arrow.
+    with pytest.raises(ValueError, match="not found in variants or tracks"):
+        gvl.write(
+            path=dest,
+            bed=bed,
+            variants=str(synthetic_case.vcf_path),
+            samples=["NOT_A_REAL_SAMPLE"],
+            overwrite=False,
+        )
+
+    assert not dest.exists()
+    assert list(dest.parent.glob(f"{dest.name}.tmp.*")) == []

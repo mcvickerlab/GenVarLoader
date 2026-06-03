@@ -1,6 +1,5 @@
 import gc
 import json
-import sys
 import warnings
 from collections.abc import Iterator, Sequence
 from importlib.metadata import version
@@ -112,173 +111,167 @@ def write(
     """
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
-
-    if variants is None and tracks is None:
-        raise ValueError("At least one of `variants` or `tracks` must be provided.")
-
-    if tracks is not None and not isinstance(tracks, (list, tuple)):
-        tracks = [tracks]
-    elif tracks is not None:
-        tracks = list(tracks)
-
-    if tracks is not None:
-        names = [t.name for t in tracks]
-        if len(set(names)) != len(names):
-            raise ValueError(
-                f"Duplicate track names: {names}. Each track must have a unique `name`."
-            )
-
-    logger.info(f"Writing dataset to {path}")
-
-    max_mem = parse_memory(max_mem)
-
-    metadata: dict[str, Any] = {
-        "version": SemanticVersion.parse(version("genvarloader")),
-        "format_version": DATASET_FORMAT_VERSION,
-    }
-    dest = Path(path)
-    _atomic_ctx = atomic_dir(dest, overwrite=overwrite)
-    path = _atomic_ctx.__enter__()
     try:
-        if isinstance(bed, (str, Path)):
-            bed = sp.bed.read(bed)
+        if variants is None and tracks is None:
+            raise ValueError("At least one of `variants` or `tracks` must be provided.")
 
-        gvl_bed, contigs, input_to_sorted_idx_map = _prep_bed(bed, max_jitter)
-        bed.with_columns(r_idx_map=pl.Series(input_to_sorted_idx_map)).write_ipc(
-            path / "input_regions.arrow"
-        )
-        metadata["contigs"] = contigs
-        if max_jitter is not None:
-            metadata["max_jitter"] = max_jitter
+        if tracks is not None and not isinstance(tracks, (list, tuple)):
+            tracks = [tracks]
+        elif tracks is not None:
+            tracks = list(tracks)
 
-        available_samples: set[str] | None = None
-        if variants is not None:
-            if isinstance(variants, (str, Path)):
-                variants = Path(variants)
-                if path_is_pgen(variants):
-                    if variants.suffix == "":
-                        variants = variants.with_suffix(".pgen")
-                    variants = PGEN(variants)
-                elif path_is_vcf(variants):
-                    variants = VCF(variants)
-                elif variants.is_dir() and variants.suffix == ".svar":
-                    variants = SparseVar(variants)
-                else:
-                    raise ValueError(
-                        f"File {variants} has an unrecognized file extension. Please provide either a VCF or PGEN file.`"
+        if tracks is not None:
+            names = [t.name for t in tracks]
+            if len(set(names)) != len(names):
+                raise ValueError(
+                    f"Duplicate track names: {names}. Each track must have a unique `name`."
+                )
+
+        logger.info(f"Writing dataset to {path}")
+
+        max_mem = parse_memory(max_mem)
+
+        metadata: dict[str, Any] = {
+            "version": SemanticVersion.parse(version("genvarloader")),
+            "format_version": DATASET_FORMAT_VERSION,
+        }
+        dest = Path(path)
+        with atomic_dir(dest, overwrite=overwrite) as path:
+            if isinstance(bed, (str, Path)):
+                bed = sp.bed.read(bed)
+
+            gvl_bed, contigs, input_to_sorted_idx_map = _prep_bed(bed, max_jitter)
+            bed.with_columns(r_idx_map=pl.Series(input_to_sorted_idx_map)).write_ipc(
+                path / "input_regions.arrow"
+            )
+            metadata["contigs"] = contigs
+            if max_jitter is not None:
+                metadata["max_jitter"] = max_jitter
+
+            available_samples: set[str] | None = None
+            if variants is not None:
+                if isinstance(variants, (str, Path)):
+                    variants = Path(variants)
+                    if path_is_pgen(variants):
+                        if variants.suffix == "":
+                            variants = variants.with_suffix(".pgen")
+                        variants = PGEN(variants)
+                    elif path_is_vcf(variants):
+                        variants = VCF(variants)
+                    elif variants.is_dir() and variants.suffix == ".svar":
+                        variants = SparseVar(variants)
+                    else:
+                        raise ValueError(
+                            f"File {variants} has an unrecognized file extension. Please provide either a VCF or PGEN file.`"
+                        )
+
+                if available_samples is None:
+                    available_samples = set(variants.available_samples)
+
+                # Eagerly load the variant index so max_mem accounting is honest.
+                # VCF and PGEN both support lazy-index construction; without this,
+                # variants.nbytes returns 0 and the budget overcounts memory.
+                if isinstance(variants, VCF):
+                    if variants._index is None:
+                        if not variants._valid_index():
+                            logger.info("VCF genoray index is invalid, writing")
+                            variants._write_gvi_index()
+                        variants._load_index()
+                elif isinstance(variants, PGEN):
+                    variants._init_index()
+
+            if tracks is not None:
+                unavail = []
+                for tr in tracks:
+                    if unavailable_contigs := set(contigs) - {
+                        normalize_contig_name(c, contigs) for c in tr.contigs
+                    }:
+                        unavail.append(unavailable_contigs)
+                    if available_samples is None:
+                        available_samples = set(tr.samples)
+                    else:
+                        available_samples.intersection_update(tr.samples)
+                if unavail:
+                    logger.warning(
+                        f"Contigs in queries {set().union(*unavail)} are not found in one or more tracks."
                     )
 
             if available_samples is None:
-                available_samples = set(variants.available_samples)
-
-            # Eagerly load the variant index so max_mem accounting is honest.
-            # VCF and PGEN both support lazy-index construction; without this,
-            # variants.nbytes returns 0 and the budget overcounts memory.
-            if isinstance(variants, VCF):
-                if variants._index is None:
-                    if not variants._valid_index():
-                        logger.info("VCF genoray index is invalid, writing")
-                        variants._write_gvi_index()
-                    variants._load_index()
-            elif isinstance(variants, PGEN):
-                variants._init_index()
-
-        if tracks is not None:
-            unavail = []
-            for tr in tracks:
-                if unavailable_contigs := set(contigs) - {
-                    normalize_contig_name(c, contigs) for c in tr.contigs
-                }:
-                    unavail.append(unavailable_contigs)
-                if available_samples is None:
-                    available_samples = set(tr.samples)
-                else:
-                    available_samples.intersection_update(tr.samples)
-            if unavail:
-                logger.warning(
-                    f"Contigs in queries {set().union(*unavail)} are not found in one or more tracks."
+                raise ValueError(
+                    "No samples available across all variant file(s) and/or tracks."
                 )
 
-        if available_samples is None:
-            raise ValueError(
-                "No samples available across all variant file(s) and/or tracks."
-            )
+            if samples is None:
+                samples = list(available_samples)
+            elif missing := (set(samples) - available_samples):
+                raise ValueError(f"Samples {missing} not found in variants or tracks.")
 
-        if samples is None:
-            samples = list(available_samples)
-        elif missing := (set(samples) - available_samples):
-            raise ValueError(f"Samples {missing} not found in variants or tracks.")
+            samples.sort()
 
-        samples.sort()
+            logger.info(f"Using {len(samples)} samples.")
+            metadata["samples"] = samples
+            metadata["n_regions"] = gvl_bed.height
 
-        logger.info(f"Using {len(samples)} samples.")
-        metadata["samples"] = samples
-        metadata["n_regions"] = gvl_bed.height
+            if variants is not None:
+                logger.info("Writing genotypes.")
 
-        if variants is not None:
-            logger.info("Writing genotypes.")
-
-            effective_max_mem = max_mem
-            if isinstance(variants, (VCF, PGEN)):
-                idx_bytes = variants.nbytes
-                effective_max_mem = max_mem - idx_bytes
-                logger.info(
-                    f"Variant reader resident size: {format_memory(idx_bytes)}; "
-                    f"max_mem budget: {format_memory(max_mem)}; "
-                    f"available for chunking: {format_memory(max(effective_max_mem, 0))}"
-                )
-                if isinstance(variants, VCF):
-                    bytes_per_var = variants.n_samples * variants.ploidy  # Genos8: 1 byte
-                else:
-                    bytes_per_var = variants.n_samples * variants.ploidy * 4  # int32
-
-                if effective_max_mem < bytes_per_var:
-                    raise ValueError(
-                        f"max_mem ({format_memory(max_mem)}) is too small: the variant "
-                        f"index alone consumes {format_memory(idx_bytes)}, leaving "
-                        f"{format_memory(max(effective_max_mem, 0))} for chunking, but "
-                        f"at least {format_memory(bytes_per_var)} is needed per variant. "
-                        f"Increase max_mem."
+                effective_max_mem = max_mem
+                if isinstance(variants, (VCF, PGEN)):
+                    idx_bytes = variants.nbytes
+                    effective_max_mem = max_mem - idx_bytes
+                    logger.info(
+                        f"Variant reader resident size: {format_memory(idx_bytes)}; "
+                        f"max_mem budget: {format_memory(max_mem)}; "
+                        f"available for chunking: {format_memory(max(effective_max_mem, 0))}"
                     )
+                    if isinstance(variants, VCF):
+                        bytes_per_var = variants.n_samples * variants.ploidy  # Genos8: 1 byte
+                    else:
+                        bytes_per_var = variants.n_samples * variants.ploidy * 4  # int32
 
-            if isinstance(variants, VCF):
-                variants.set_samples(samples)
-                gvl_bed = _write_from_vcf(
-                    path, gvl_bed, variants, effective_max_mem, extend_to_length
-                )
-            elif isinstance(variants, PGEN):
-                variants.set_samples(samples)
-                gvl_bed = _write_from_pgen(
-                    path, gvl_bed, variants, effective_max_mem, extend_to_length
-                )
-            elif isinstance(variants, SparseVar):
-                gvl_bed, _svar_link = _write_from_svar(
-                    path, gvl_bed, variants, samples, extend_to_length
-                )
-                metadata["svar_link"] = _svar_link
-            metadata["ploidy"] = variants.ploidy
-            # free memory
-            del variants
-            gc.collect()
+                    if effective_max_mem < bytes_per_var:
+                        raise ValueError(
+                            f"max_mem ({format_memory(max_mem)}) is too small: the variant "
+                            f"index alone consumes {format_memory(idx_bytes)}, leaving "
+                            f"{format_memory(max(effective_max_mem, 0))} for chunking, but "
+                            f"at least {format_memory(bytes_per_var)} is needed per variant. "
+                            f"Increase max_mem."
+                        )
 
-        _write_regions(path, gvl_bed, contigs)
+                if isinstance(variants, VCF):
+                    variants.set_samples(samples)
+                    gvl_bed = _write_from_vcf(
+                        path, gvl_bed, variants, effective_max_mem, extend_to_length
+                    )
+                elif isinstance(variants, PGEN):
+                    variants.set_samples(samples)
+                    gvl_bed = _write_from_pgen(
+                        path, gvl_bed, variants, effective_max_mem, extend_to_length
+                    )
+                elif isinstance(variants, SparseVar):
+                    gvl_bed, _svar_link = _write_from_svar(
+                        path, gvl_bed, variants, samples, extend_to_length
+                    )
+                    metadata["svar_link"] = _svar_link
+                metadata["ploidy"] = variants.ploidy
+                # free memory
+                del variants
+                gc.collect()
 
-        if tracks is not None:
-            logger.info("Writing track intervals.")
-            for tr in tracks:
-                _write_track(path, gvl_bed, tr, samples, max_mem)
+            _write_regions(path, gvl_bed, contigs)
 
-        _metadata = Metadata(**metadata)
-        with open(path / "metadata.json", "w") as f:
-            f.write(_metadata.model_dump_json())
-    except BaseException:
-        _atomic_ctx.__exit__(*sys.exc_info())
-        raise
-    else:
-        _atomic_ctx.__exit__(None, None, None)
+            if tracks is not None:
+                logger.info("Writing track intervals.")
+                for tr in tracks:
+                    _write_track(path, gvl_bed, tr, samples, max_mem)
 
-    logger.info("Finished writing.")
-    warnings.simplefilter("default")
+            _metadata = Metadata(**metadata)
+            with open(path / "metadata.json", "w") as f:
+                f.write(_metadata.model_dump_json())
+
+        logger.info("Finished writing.")
+    finally:
+        warnings.simplefilter("default")
 
 
 def get_splice_bed(
