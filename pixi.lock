@@ -11497,6 +11497,7 @@ packages:
   - pooch
   - awkward
   - hirola>=0.3,<0.4
+  - filelock>=3.12
   - genvarloader-cli>=0.1.0 ; extra == 'cli'
   - tbb ; extra == 'tbb'
   - pyomp ; extra == 'pyomp'
