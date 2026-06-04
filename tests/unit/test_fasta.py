@@ -1,3 +1,6 @@
+from pathlib import Path
+
+import genvarloader._fasta_cache as fc
 import numpy as np
 import pytest
 from genvarloader._fasta import Fasta, NoPadError
@@ -72,11 +75,6 @@ def test_fasta_zero_length_range(ref_fasta):
     fasta = Fasta("ref", ref_fasta, pad="N")
     seq = fasta.read("chr1", 100, 100)
     assert len(seq) == 0
-
-
-from pathlib import Path
-
-import genvarloader._fasta_cache as fc
 
 
 def test_fasta_cache_creates_gvlfa_dir(tmp_path, ref_fasta):
