@@ -237,9 +237,13 @@ def write(
                         f"available for chunking: {format_memory(max(effective_max_mem, 0))}"
                     )
                     if isinstance(variants, VCF):
-                        bytes_per_var = variants.n_samples * variants.ploidy  # Genos8: 1 byte
+                        bytes_per_var = (
+                            variants.n_samples * variants.ploidy
+                        )  # Genos8: 1 byte
                     else:
-                        bytes_per_var = variants.n_samples * variants.ploidy * 4  # int32
+                        bytes_per_var = (
+                            variants.n_samples * variants.ploidy * 4
+                        )  # int32
 
                     if effective_max_mem < bytes_per_var:
                         raise ValueError(

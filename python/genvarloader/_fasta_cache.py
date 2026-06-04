@@ -5,6 +5,7 @@ The cache is built atomically (temp directory + :func:`os.replace`) under a best
 auto-rebuilds from its source when stale or missing (source fingerprint mismatch or
 incomplete on-disk data).
 """
+
 from __future__ import annotations
 
 import os
@@ -168,9 +169,7 @@ def _ensure_built(source_fa: Path, gvlfa_dir: Path) -> FastaCache:
             except Exception:
                 pass  # unreadable/corrupt -> fall through and rebuild
         _build_into(source_fa, tmp, gvlfa_dir)
-    return FastaCache.model_validate_json(
-        (gvlfa_dir / METADATA_FILENAME).read_text()
-    )
+    return FastaCache.model_validate_json((gvlfa_dir / METADATA_FILENAME).read_text())
 
 
 def _check_format_version(meta: FastaCache, gvlfa_dir: Path) -> None:
