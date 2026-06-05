@@ -1,8 +1,28 @@
 """Smoke tests for the PyTorch integration."""
 
+import math
+
 import genvarloader as gvl  # eagerly loads numpy in the order torch expects
 import pytest
 from genvarloader._torch import get_dataloader, get_sampler
+
+
+def _n_instances(batch) -> int:
+    """Outer (instance) dimension of a dataloader batch, across the gvl output
+    types that buffered/double_buffered modes can yield."""
+    import numpy as np
+    from seqpro.rag import Ragged
+
+    if isinstance(batch, tuple):
+        batch = batch[0]
+    if isinstance(batch, np.ndarray):
+        return batch.shape[0]
+    if isinstance(batch, Ragged):
+        return batch.shape[0]
+    if hasattr(batch, "haps"):  # AnnotatedHaps / RaggedAnnotatedHaps
+        return batch.haps.shape[0]
+    return len(batch)  # ak.Array (RaggedVariants) and fallbacks
+
 
 torch = pytest.importorskip("torch")  # module-level skip if torch missing
 
@@ -130,3 +150,47 @@ def test_torch_dataset_transform_is_applied(small_gvl_ds):
     # transform should now have been called with >=2 more args than the no-indices case
     # (last two are the unravelled r/s indices).
     assert captured["nargs"] >= 3
+
+
+def test_default_mode_drop_last_true_does_not_crash(small_gvl_ds):
+    """mode=None with drop_last=True must not raise. The BatchSampler applies
+    drop_last; forwarding it to the DataLoader (which also gets batch_size=None)
+    is what PyTorch rejected."""
+    ds = small_gvl_ds.with_seqs("reference").with_tracks(False)
+    N = len(ds)
+    bs = next((c for c in range(2, N) if N % c), 1)
+    assert N % bs != 0, "need an indivisible batch_size to exercise drop_last"
+    dl = ds.to_dataloader(batch_size=bs, shuffle=False, drop_last=True)  # mode=None
+    n_batches = sum(1 for _ in dl)
+    assert n_batches == N // bs
+
+
+@pytest.mark.parametrize("mode", ["buffered", "double_buffered"])
+@pytest.mark.parametrize("drop_last", [False, True])
+def test_buffered_modes_respect_drop_last(small_gvl_ds, mode, drop_last):
+    ds = small_gvl_ds.with_seqs("reference").with_tracks(False)
+    N = len(ds)
+    bs = next((c for c in range(2, N) if N % c), 1)
+    assert N % bs != 0, "need an indivisible batch_size to exercise drop_last"
+
+    dl = ds.to_dataloader(batch_size=bs, shuffle=False, drop_last=drop_last, mode=mode)
+    batches = list(dl)
+    expected = N // bs if drop_last else math.ceil(N / bs)
+    assert len(batches) == expected
+    assert len(dl) == expected  # __len__ must match what iteration yields
+    if not drop_last:
+        # The final batch is the smaller, partial one.
+        assert _n_instances(batches[-1]) == N % bs
+
+
+def test_buffered_drop_last_false_with_custom_batch_sampler(small_gvl_ds):
+    """DDP-shaped case: when the (r,s) indices come from a user-supplied sampler
+    whose count is not a multiple of batch_size, the partial batch must survive."""
+    import torch.utils.data as tud
+
+    ds = small_gvl_ds.with_seqs("reference").with_tracks(False)
+    N = len(ds)
+    bs = next((c for c in range(2, N) if N % c), 1)
+    sampler = tud.BatchSampler(tud.SequentialSampler(range(N)), bs, drop_last=False)
+    dl = ds.to_dataloader(sampler=sampler, drop_last=False, mode="buffered")
+    assert len(list(dl)) == math.ceil(N / bs)

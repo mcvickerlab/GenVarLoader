@@ -71,8 +71,11 @@ def _resolve_buffered_inputs(
     for batch in sampler:
         flat.extend(batch)
     flat = np.asarray(flat, dtype=np.int64)
-    n_keep = (len(flat) // batch_size) * batch_size
-    flat = flat[:n_keep]
+    # Only drop the trailing partial batch when the caller asked for it. When
+    # drop_last=False, keep it -- ChunkPlanner emits it as a partial batch.
+    if drop_last:
+        n_keep = (len(flat) // batch_size) * batch_size
+        flat = flat[:n_keep]
     r_idx, s_idx = np.unravel_index(flat, dataset.shape)
 
     # 2) Pre-pass: exact bytes per instance for the entire (n_regions, n_samples) grid.
@@ -135,7 +138,6 @@ def get_dataloader(
             num_workers=num_workers,
             collate_fn=collate_fn,
             pin_memory=pin_memory,
-            drop_last=drop_last,
             timeout=timeout,
             worker_init_fn=worker_init_fn,
             multiprocessing_context=multiprocessing_context,
@@ -154,6 +156,18 @@ def get_dataloader(
             f"mode={mode!r} is incompatible with num_workers>0; "
             "the loader IS the concurrency strategy"
         )
+
+    # When the caller passes a BatchSampler directly, use its batch_size so the
+    # buffered loader re-batches at the granularity the sampler intended. This
+    # mirrors the mode=None path, where the sampler governs batching too.
+    if isinstance(sampler, td.BatchSampler):
+        if batch_size != 1 and batch_size != sampler.batch_size:
+            logger.warning(
+                f"Both a BatchSampler and an explicit batch_size={batch_size} "
+                "were passed; the BatchSampler's batch_size="
+                f"{sampler.batch_size} takes precedence."
+            )
+        batch_size = sampler.batch_size
 
     n_slots = 1 if mode == "buffered" else 2
     r_idx, s_idx, bpi, slot_bytes, _sampler = _resolve_buffered_inputs(
