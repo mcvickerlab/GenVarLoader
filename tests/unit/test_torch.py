@@ -130,3 +130,16 @@ def test_torch_dataset_transform_is_applied(small_gvl_ds):
     # transform should now have been called with >=2 more args than the no-indices case
     # (last two are the unravelled r/s indices).
     assert captured["nargs"] >= 3
+
+
+def test_default_mode_drop_last_true_does_not_crash(small_gvl_ds):
+    """mode=None with drop_last=True must not raise. The BatchSampler applies
+    drop_last; forwarding it to the DataLoader (which also gets batch_size=None)
+    is what PyTorch rejected."""
+    ds = small_gvl_ds.with_seqs("reference").with_tracks(False)
+    N = len(ds)
+    bs = next((c for c in range(2, N) if N % c), 1)
+    assert N % bs != 0, "need an indivisible batch_size to exercise drop_last"
+    dl = ds.to_dataloader(batch_size=bs, shuffle=False, drop_last=True)  # mode=None
+    n_batches = sum(1 for _ in dl)
+    assert n_batches == N // bs
