@@ -35,19 +35,27 @@ class ChunkPlanner:
         if len(r_idx) != len(s_idx):
             raise ValueError("r_idx and s_idx must have the same length")
         n = len(r_idx)
-        if n % batch_size != 0:
-            raise ValueError(
-                f"len(r_idx)={n} is not a multiple of batch_size={batch_size}. "
-                "Use drop_last or pad the sampler before passing to ChunkPlanner."
-            )
         self.r_idx = np.asarray(r_idx)
         self.s_idx = np.asarray(s_idx)
         self.batch_size = batch_size
         self.bytes_per_instance = bytes_per_instance
         self.slot_bytes = int(slot_bytes)
+        self._n = n
 
+        # Per-instance byte cost in epoch order, grouped into mini-batches. The
+        # final batch may be partial (drop_last=False); its bytes are summed into
+        # a trailing batch_totals entry so chunk packing and peak-byte sizing
+        # account for it like any other batch.
         per_inst = bytes_per_instance[self.r_idx, self.s_idx].astype(np.int64)
-        batch_totals = per_inst.reshape(-1, batch_size).sum(-1)
+        n_full = n // batch_size
+        full_totals = (
+            per_inst[: n_full * batch_size].reshape(n_full, batch_size).sum(-1)
+        )
+        remainder = per_inst[n_full * batch_size :]
+        if remainder.size:
+            batch_totals = np.concatenate([full_totals, remainder.sum(keepdims=True)])
+        else:
+            batch_totals = full_totals
         too_big = batch_totals > self.slot_bytes
         if too_big.any():
             offender = int(np.argmax(too_big))
@@ -99,7 +107,7 @@ class ChunkPlanner:
                 j > i
             )  # at least one batch per chunk, guaranteed by per-batch validation
             start = i * self.batch_size
-            end = j * self.batch_size
+            end = min(j * self.batch_size, self._n)
             yield self.r_idx[start:end], self.s_idx[start:end], j - i
             i = j
 

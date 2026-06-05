@@ -144,3 +144,38 @@ def test_slice_chunk_matches_direct(seq_kind):
     for i, mini in enumerate(sliced):
         direct = ds[r[i * n_s : (i + 1) * n_s], s[i * n_s : (i + 1) * n_s]]
         _compare(mini, direct)
+
+
+def test_plan_keeps_partial_final_batch():
+    # 7 instances, batch_size=3 -> 2 full batches + 1 partial (1 instance).
+    # Generous slot_bytes so everything fits in a single chunk.
+    bytes_per_instance = np.full((7, 1), 10, dtype=np.int64)
+    flat = np.arange(7)
+    planner = ChunkPlanner(
+        r_idx=flat,
+        s_idx=np.zeros_like(flat),
+        batch_size=3,
+        bytes_per_instance=bytes_per_instance,
+        slot_bytes=1000,
+    )
+    chunks = list(planner)
+    # All 7 instances preserved -- the trailing partial batch is not dropped.
+    assert sum(len(cr) for cr, _, _ in chunks) == 7
+    # ceil(7 / 3) == 3 mini-batches counted across chunks.
+    assert sum(nb for _, _, nb in chunks) == 3
+
+
+def test_plan_single_partial_batch_smaller_than_batch_size():
+    # 2 instances, batch_size=5 -> a single partial batch of 2.
+    bytes_per_instance = np.full((2, 1), 10, dtype=np.int64)
+    flat = np.arange(2)
+    planner = ChunkPlanner(
+        r_idx=flat,
+        s_idx=np.zeros_like(flat),
+        batch_size=5,
+        bytes_per_instance=bytes_per_instance,
+        slot_bytes=1000,
+    )
+    chunks = list(planner)
+    assert sum(len(cr) for cr, _, _ in chunks) == 2
+    assert sum(nb for _, _, nb in chunks) == 1
