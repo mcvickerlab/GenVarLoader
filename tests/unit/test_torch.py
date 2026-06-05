@@ -23,6 +23,7 @@ def _n_instances(batch) -> int:
         return batch.haps.shape[0]
     return len(batch)  # ak.Array (RaggedVariants) and fallbacks
 
+
 torch = pytest.importorskip("torch")  # module-level skip if torch missing
 
 
@@ -172,9 +173,7 @@ def test_buffered_modes_respect_drop_last(small_gvl_ds, mode, drop_last):
     bs = next((c for c in range(2, N) if N % c), 1)
     assert N % bs != 0, "need an indivisible batch_size to exercise drop_last"
 
-    dl = ds.to_dataloader(
-        batch_size=bs, shuffle=False, drop_last=drop_last, mode=mode
-    )
+    dl = ds.to_dataloader(batch_size=bs, shuffle=False, drop_last=drop_last, mode=mode)
     batches = list(dl)
     expected = N // bs if drop_last else math.ceil(N / bs)
     assert len(batches) == expected
