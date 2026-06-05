@@ -42,6 +42,6 @@ def make_buffered_dataset(
                 yield from slice_chunk(chunk, self._batch_size)
 
         def __len__(self) -> int:
-            return len(flat_r) // batch_size
+            return (len(flat_r) + batch_size - 1) // batch_size
 
     return BufferedTorchDataset()
