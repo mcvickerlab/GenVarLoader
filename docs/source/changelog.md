@@ -28,6 +28,40 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.27.0 (2026-06-05)
+
+### Feat
+
+- **_open**: validate dataset format version + integrity on open
+- **_write**: atomic dataset creation + format_version in Metadata
+- **_fasta_cache**: publish cache atomically via atomic_dir + locked double-check
+- **_atomic**: add atomic_dir directory-publish primitive
+- **fasta**: use .gvlfa cache module and accept .gvlfa input
+- **_fasta_cache**: add ensure_cache orchestrator and dispatch
+- **_fasta_cache**: migrate legacy .gvl caches by reusing bytes
+- **_fasta_cache**: add build, load, and validity guards
+- **_fasta_cache**: add source hints and three-way resolution
+- **_fasta_cache**: add FastaCache models and fingerprint
+
+### Fix
+
+- **torch**: warn when BatchSampler overrides explicit batch_size
+- **torch**: buffered modes honor drop_last=False
+- **torch**: do not forward drop_last to DataLoader in default mode
+- **chunked**: keep trailing partial batch in ChunkPlanner
+- **test_fasta**: move mid-file imports to top (E402, CI lint)
+- **_fasta_cache**: guard legacy migration against stale/truncated bytes
+- **_fasta_cache**: raise on format-too-new sibling cache instead of silent downgrade
+
+### Refactor
+
+- **_write**: use plain with-atomic_dir; restore warnings filter; add atomicity + format_version on-disk tests
+- **reference**: build cache via ensure_cache, accept .gvlfa
+- **_fasta_cache**: fix progress bar advance and tighten load status type
+
 ## v0.26.0 (2026-06-01)
 
 ### Feat
