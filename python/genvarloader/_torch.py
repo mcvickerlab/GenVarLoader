@@ -163,10 +163,9 @@ def get_dataloader(
     if isinstance(sampler, td.BatchSampler):
         if batch_size != 1 and batch_size != sampler.batch_size:
             logger.warning(
-                "Both a BatchSampler and an explicit batch_size={} were passed; "
-                "the BatchSampler's batch_size={} takes precedence.",
-                batch_size,
-                sampler.batch_size,
+                f"Both a BatchSampler and an explicit batch_size={batch_size} "
+                "were passed; the BatchSampler's batch_size="
+                f"{sampler.batch_size} takes precedence."
             )
         batch_size = sampler.batch_size
 
