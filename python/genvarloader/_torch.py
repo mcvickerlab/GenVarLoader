@@ -157,9 +157,17 @@ def get_dataloader(
             "the loader IS the concurrency strategy"
         )
 
-    # When the caller passes a BatchSampler directly, use its batch_size so that
-    # the buffered loader re-batches at the same granularity the sampler intended.
+    # When the caller passes a BatchSampler directly, use its batch_size so the
+    # buffered loader re-batches at the granularity the sampler intended. This
+    # mirrors the mode=None path, where the sampler governs batching too.
     if isinstance(sampler, td.BatchSampler):
+        if batch_size != 1 and batch_size != sampler.batch_size:
+            logger.warning(
+                "Both a BatchSampler and an explicit batch_size={} were passed; "
+                "the BatchSampler's batch_size={} takes precedence.",
+                batch_size,
+                sampler.batch_size,
+            )
         batch_size = sampler.batch_size
 
     n_slots = 1 if mode == "buffered" else 2
