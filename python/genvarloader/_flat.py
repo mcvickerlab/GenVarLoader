@@ -16,7 +16,11 @@ import numpy as np
 from numpy.typing import NDArray
 from seqpro.rag import RDTYPE_co as RDTYPE
 from seqpro.rag import Ragged
-from seqpro.rag import to_padded as _sp_to_padded
+
+# `to_padded` is re-exported from seqpro.rag._ops; it resolves at runtime and
+# type-checks standalone, but pyrefly can't follow the package re-export while
+# .pixi is excluded from analysis (false positive).
+from seqpro.rag import to_padded as _sp_to_padded  # pyrefly: ignore[missing-module-attribute]
 
 
 @nb.njit(parallel=True, cache=True)
