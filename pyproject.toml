@@ -76,6 +76,13 @@ implicit-any-attribute = false
 # Interop with optional deps (taichi, torch.nested internals, pyBigWig case
 # mismatch with the pybigwig package). Not actionable in PR0.
 missing-import = false
+# seqpro.rag re-exports to_padded/reverse_complement from its ._ops submodule
+# (both in __all__). They resolve at runtime and type-check standalone, but
+# some pyrefly versions can't follow the package re-export and report them as
+# missing — inconsistently across environments. WARN rather than inline-ignore
+# so it passes regardless of which env reports it (an inline ignore is unused,
+# and thus an error, in the envs that resolve the re-export correctly).
+missing-module-attribute = "warn"
 # Numpy / awkward / polars operator and iteration interop produces noisy
 # false positives. PR5 (Pipeline refactor) and PR8 will revisit.
 not-iterable = false

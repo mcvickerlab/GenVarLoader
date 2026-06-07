@@ -13,12 +13,8 @@ from numpy.typing import NDArray
 from phantom import Phantom
 from seqpro.rag import Ragged, is_rag_dtype
 from seqpro.rag import RDTYPE_co as RDTYPE
-
-# `reverse_complement`/`to_padded` are re-exported from seqpro.rag._ops; they
-# resolve at runtime and type-check standalone, but pyrefly can't follow the
-# package re-export while .pixi is excluded from analysis (false positive).
-from seqpro.rag import reverse_complement as _sp_reverse_complement  # pyrefly: ignore[missing-module-attribute]
-from seqpro.rag import to_padded as _sp_to_padded  # pyrefly: ignore[missing-module-attribute]
+from seqpro.rag import reverse_complement as _sp_reverse_complement
+from seqpro.rag import to_padded as _sp_to_padded
 
 from ._torch import TORCH_AVAILABLE
 from ._types import AnnotatedHaps
