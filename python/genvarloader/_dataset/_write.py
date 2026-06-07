@@ -597,9 +597,11 @@ def _write_from_pgen(
         "caller must init the PGEN index before _write_from_pgen"
     )
     _reject_unsupported_variants(pgen._index, "PGEN")
-    # _sei is genoray's sparse-extraction index; it is only built for
-    # bi-allelic data. The validator above already rejects multi-allelics, so a
-    # None _sei here signals a distinct genoray-internal failure, not bad input.
+    # _sei is genoray's sparse-extraction index; it is None iff some record is
+    # not bi-allelic (ALT count != 1). The validator above rejects records with
+    # ALT count > 1, and real PGEN sites always carry >= 1 ALT, so once
+    # validation passes _sei is non-None for any genuine PGEN input. A None here
+    # therefore signals a genoray-internal failure, not unhandled bad input.
     assert pgen._sei is not None, (
         "PGEN sparse-extraction index is None despite passing variant validation"
     )
