@@ -767,6 +767,8 @@ def _write_from_svar(
     samples: list[str],
     extend_to_length: bool,
 ) -> tuple[pl.DataFrame, SvarLink]:
+    _reject_unsupported_variants(svar.index, "SVAR")
+
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
