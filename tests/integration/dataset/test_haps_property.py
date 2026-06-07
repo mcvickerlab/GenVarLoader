@@ -501,3 +501,87 @@ def test_non_left_aligned_raw_is_rejected(case_inputs):
     with tempfile.TemporaryDirectory() as tmp:
         with pytest.raises(ValueError):
             _raw_write_vcf(doc, tmp)
+
+
+# ---------------------------------------------------------------------------
+# Track 2 (continued) — deterministic hand-crafted rejection tests
+# ---------------------------------------------------------------------------
+# vcfixture silently ignores violation labels it doesn't recognize — its
+# records strategy only checks for "multiallelic", "non_atomic", and
+# "non_left_aligned". Passing "symbolic"/"breakend" would produce clean VCFs
+# with no such records, making hypothesis property tests vacuous, so the
+# hand-crafted tests below are the coverage for those classes.
+
+# A minimal VCF containing one clean SNP, one symbolic <DEL>, and one
+# breakend ALT. Used to assert gvl.write rejects symbolic/breakend inputs.
+_SYM_BND_VCF = """\
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=2000>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="SV type">
+##INFO=<ID=END,Number=1,Type=Integer,Description="End position">
+##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="SV length">
+##ALT=<ID=DEL,Description="Deletion">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts0\ts1
+chr1\t100\t.\tA\tT\t.\t.\t.\tGT\t0|1\t1|0
+chr1\t200\t.\tG\t<DEL>\t.\t.\tSVTYPE=DEL;END=300;SVLEN=-100\tGT\t0|1\t0|0
+chr1\t400\t.\tC\tC[chr1:600[\t.\t.\tSVTYPE=BND\tGT\t0|1\t0|0
+"""
+
+
+def _write_vcf_text(text: str, tmp) -> tuple[Path, Path]:
+    """bgzip+index the given VCF text and derive a BED. Returns (vcf_gz, bed_path)."""
+    from case import _bgzip_index, _derive_bed
+
+    tmp = Path(tmp)
+    vcf_gz = _bgzip_index(text.encode(), tmp / "raw.vcf.gz")
+    bed = _derive_bed(vcf_gz, None)
+    bed_path = tmp / "source.bed"
+    bed.select(
+        "chrom",
+        "start",
+        "end",
+        pl.lit(".").alias("name"),
+        pl.lit(".").alias("score"),
+        "strand",
+    ).write_csv(bed_path, include_header=False, separator="\t")
+    return vcf_gz, bed_path
+
+
+def test_symbolic_breakend_vcf_is_rejected():
+    """gvl.write rejects a VCF containing symbolic and breakend ALTs."""
+    import genvarloader as gvl
+    from genoray import VCF
+
+    with tempfile.TemporaryDirectory() as tmp:
+        vcf_gz, bed_path = _write_vcf_text(_SYM_BND_VCF, tmp)
+        reader = VCF(vcf_gz)
+        if not reader._valid_index():
+            reader._write_gvi_index()
+        reader._load_index()
+        with pytest.raises(ValueError, match="symbolic"):
+            gvl.write(
+                path=Path(tmp) / "ds.gvl",
+                bed=bed_path,
+                variants=reader,
+                max_jitter=2,
+            )
+
+
+def test_symbolic_breakend_svar_is_rejected():
+    """gvl.write rejects a .svar built (unfiltered) from symbolic/breakend input."""
+    import genvarloader as gvl
+    from genoray import SparseVar, VCF
+
+    with tempfile.TemporaryDirectory() as tmp:
+        vcf_gz, bed_path = _write_vcf_text(_SYM_BND_VCF, tmp)
+        svar_path = Path(tmp) / "v.svar"
+        # No filter: symbolic/breakend records are carried into the .svar index.
+        SparseVar.from_vcf(svar_path, VCF(vcf_gz), max_mem="1g", overwrite=True)
+        with pytest.raises(ValueError, match="symbolic"):
+            gvl.write(
+                path=Path(tmp) / "ds.gvl",
+                bed=bed_path,
+                variants=SparseVar(svar_path),
+                max_jitter=2,
+            )
