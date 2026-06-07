@@ -431,10 +431,7 @@ def _write_from_vcf(
         "caller must load the VCF index before _write_from_vcf"
     )
 
-    if vcf._index.select((pl.col("ALT").list.len() > 1).any()).item():
-        raise ValueError(
-            "VCF with filtering applied still contains multi-allelic variants. Please filter or split them."
-        )
+    _reject_unsupported_variants(vcf._index, "VCF")
 
     (out_dir / "variants.arrow").hardlink_to(vcf._index_path())
 
