@@ -506,9 +506,11 @@ def test_non_left_aligned_raw_is_rejected(case_inputs):
 # ---------------------------------------------------------------------------
 # Track 2 (continued) — deterministic hand-crafted rejection tests
 # ---------------------------------------------------------------------------
-# vcfixture does not support "symbolic" or "breakend" violation generation
-# (its violations= parameter only accepts "multiallelic", "non_atomic",
-# "non_left_aligned"), so these tests use a hand-crafted VCF instead.
+# vcfixture silently ignores violation labels it doesn't recognize — its
+# records strategy only checks for "multiallelic", "non_atomic", and
+# "non_left_aligned". Passing "symbolic"/"breakend" would produce clean VCFs
+# with no such records, making hypothesis property tests vacuous, so the
+# hand-crafted tests below are the coverage for those classes.
 
 # A minimal VCF containing one clean SNP, one symbolic <DEL>, and one
 # breakend ALT. Used to assert gvl.write rejects symbolic/breakend inputs.
