@@ -14,6 +14,7 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseVar
+from genoray import exprs as _gexprs
 from genoray._svar import dense2sparse
 from genoray._svar import _dense2sparse_with_length  # type: ignore[missing-module-attribute]
 from genoray._types import V_IDX_TYPE
@@ -393,6 +394,31 @@ def _prep_bed(
 def _write_regions(path: Path, bed: pl.DataFrame, contigs: list[str]):
     regions = bed_to_regions(bed, ContigNormalizer(contigs))
     np.save(path / "regions.npy", regions)
+
+
+def _reject_unsupported_variants(index: pl.DataFrame, source: str) -> None:
+    """Raise if the variant index contains alleles gvl cannot reconstruct.
+
+    gvl expands each variant's ALT into literal haplotype sequence, so it
+    requires bi-allelic, non-symbolic, non-breakend records. This runs over the
+    FULL index (post any user-supplied filter), matching the "valid inputs only"
+    contract. ``source`` names the input for the error message (e.g. "VCF").
+    """
+    n_multi, n_sym, n_bnd = index.select(
+        n_multi=(pl.col("ALT").list.len() > 1).cast(pl.Int64).sum(),
+        n_symbolic=_gexprs.is_symbolic.cast(pl.Int64).sum(),
+        n_breakend=_gexprs.is_breakend.cast(pl.Int64).sum(),
+    ).row(0)
+    if n_multi or n_sym or n_bnd:
+        raise ValueError(
+            f"{source} contains unsupported variants: {n_multi} multi-allelic, "
+            f"{n_sym} symbolic (e.g. <DEL>/<INS>), {n_bnd} breakend. gvl can only "
+            f"reconstruct bi-allelic, non-symbolic, non-breakend variants. Remove "
+            f"them upstream (bcftools/plink2 — split multi-allelics, drop SVs), or "
+            f"construct the genoray reader with a filter such as "
+            f"`filter=genoray.exprs.is_biallelic & ~genoray.exprs.is_symbolic & "
+            f"~genoray.exprs.is_breakend`."
+        )
 
 
 def _write_from_vcf(
