@@ -424,14 +424,14 @@ def _reject_unsupported_variants(index: pl.DataFrame, source: str) -> None:
 def _write_from_vcf(
     path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int, extend_to_length: bool
 ):
-    out_dir = path / "genotypes"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     assert vcf._index is not None, (
         "caller must load the VCF index before _write_from_vcf"
     )
 
     _reject_unsupported_variants(vcf._index, "VCF")
+
+    out_dir = path / "genotypes"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     (out_dir / "variants.arrow").hardlink_to(vcf._index_path())
 
