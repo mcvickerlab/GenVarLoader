@@ -41,7 +41,7 @@ batch = ds[0:8, :]  # shape depends on with_* state — see "Output shapes"
 
 ## Variant preprocessing requirements
 
-Variants passed to `gvl.write` **must be** left-aligned, bi-allelic, and atomized (no MNPs or compound MNP-indels). VCFs must be indexed.
+Variants passed to `gvl.write` **must be** left-aligned, bi-allelic, atomized (no MNPs or compound MNP-indels), and **free of symbolic (`<DEL>`, `<INS>`, …) and breakend ALT alleles**. gvl expands every ALT into literal haplotype sequence and cannot reconstruct symbolic or breakend records — `gvl.write` raises `ValueError` (with per-class counts of multi-allelic, symbolic, and breakend variants) if any are present, for VCF, PGEN, and SVAR inputs alike. VCFs must be indexed.
 
 ```bash
 # VCF/BCF
@@ -277,6 +277,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 
 ## Common gotchas
 
+- **Symbolic / breakend variants are rejected, not skipped.** Remove them before `gvl.write` — e.g. `bcftools view -e 'ALT~"<" || ALT~"\["'` (drop SVs and breakends), or construct the genoray reader with `filter=genoray.exprs.is_biallelic & ~genoray.exprs.is_symbolic & ~genoray.exprs.is_breakend`. SVAR inputs must be built from an already-filtered source, since gvl validates but cannot re-filter a materialized `.svar`.
 - `with_insertion_fill` raises unless the dataset has both haplotypes AND tracks active.
 - `min_af` / `max_af` raise unless the dataset is SVAR-backed.
 - `with_len(L)` requires `L + 2·jitter ≤ min(region_length) + 2·max_jitter` — set `max_jitter` accordingly at `write` time.
