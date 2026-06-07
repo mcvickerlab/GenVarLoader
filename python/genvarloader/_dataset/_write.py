@@ -593,11 +593,16 @@ def _vcf_region_chunks(
 def _write_from_pgen(
     path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int, extend_to_length: bool
 ):
-    if pgen._sei is None:
-        raise ValueError(
-            "PGEN with filtering has multi-allelic variants. Please filter or split them."
-        )
-    assert pgen._sei is not None
+    assert pgen._index is not None, (
+        "caller must init the PGEN index before _write_from_pgen"
+    )
+    _reject_unsupported_variants(pgen._index, "PGEN")
+    # _sei is genoray's sparse-extraction index; it is only built for
+    # bi-allelic data. The validator above already rejects multi-allelics, so a
+    # None _sei here signals a distinct genoray-internal failure, not bad input.
+    assert pgen._sei is not None, (
+        "PGEN sparse-extraction index is None despite passing variant validation"
+    )
 
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
