@@ -74,9 +74,7 @@ def _decompose_alleles(
         reg = lay
 
     if not isinstance(reg, RegularArray):
-        raise ValueError(
-            f"Unsupported allele layout for packing: {arr.layout.form}"
-        )
+        raise ValueError(f"Unsupported allele layout for packing: {arr.layout.form}")
     ploidy = int(reg.size)
 
     var_node = reg.content
@@ -92,9 +90,9 @@ def _decompose_alleles(
         n_out_rows = len(reg) * ploidy
         row_src = np.arange(n_out_rows, dtype=np.int64)
     else:
-        row_src = (
-            index[:, None] * ploidy + np.arange(ploidy, dtype=np.int64)
-        ).reshape(-1)
+        row_src = (index[:, None] * ploidy + np.arange(ploidy, dtype=np.int64)).reshape(
+            -1
+        )
     return row_src, var_starts, var_stops, allele_starts, allele_stops, leaf, ploidy
 
 
@@ -347,11 +345,21 @@ class RaggedVariants(ak.Array):
                     # non-canonical (IndexedArray/ListArray from slicing/reorder):
                     # numba gather, no ak.to_packed / awkward gather primitives.
                     (
-                        row_src, var_starts, var_stops,
-                        allele_starts, allele_stops, leaf, ploidy,
+                        row_src,
+                        var_starts,
+                        var_stops,
+                        allele_starts,
+                        allele_stops,
+                        leaf,
+                        ploidy,
                     ) = _decompose_alleles(arr)
                     packed_bytes, allele_off, group_off = _pack_alleles(
-                        row_src, var_starts, var_stops, allele_starts, allele_stops, leaf
+                        row_src,
+                        var_starts,
+                        var_stops,
+                        allele_starts,
+                        allele_stops,
+                        leaf,
                     )
                     packed[field] = _build_allele_layout(
                         packed_bytes, allele_off, group_off, ploidy
