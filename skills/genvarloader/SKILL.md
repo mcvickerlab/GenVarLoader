@@ -124,7 +124,7 @@ gvl.Dataset.open(
 )
 ```
 
-Without `reference=`, only variants/haplotypes are available (you can't produce reference-overlaid sequences). `svar=` overrides the recorded SVAR location.
+Without `reference=`, a genotypes-only dataset opens with the **`"variants"`** view by default (yielding `RaggedVariants`) — `Dataset.open(path)` just works, no `with_seqs` needed. The `"haplotypes"`, `"annotated"`, and `"reference"` views all require a reference; requesting one via `with_seqs` on a reference-less dataset raises a clear `ValueError`. `svar=` overrides the recorded SVAR location.
 
 **Format validation:** `Dataset.open` validates the dataset's `format_version` and structural integrity (file presence + sizes). An incompatible or corrupt dataset raises a `ValueError` instructing regeneration with `gvl.write`. Datasets do **not** auto-rebuild.
 
@@ -278,6 +278,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 ## Common gotchas
 
 - **Symbolic / breakend variants are rejected, not skipped.** Remove them before `gvl.write` — e.g. `bcftools view -e 'ALT~"<" || ALT~"\["'` (drop SVs and breakends), or construct the genoray reader with `filter=genoray.exprs.is_biallelic & ~genoray.exprs.is_symbolic & ~genoray.exprs.is_breakend`. SVAR inputs must be built from an already-filtered source, since gvl validates but cannot re-filter a materialized `.svar`.
+- Opening a genotypes-only dataset without a `reference=` defaults to the `"variants"` view (`RaggedVariants`), not `"haplotypes"`. Only `"variants"` is available without a reference; `with_seqs("haplotypes" | "annotated" | "reference")` raises `ValueError` if no reference was provided.
 - `with_insertion_fill` raises unless the dataset has both haplotypes AND tracks active.
 - `min_af` / `max_af` raise unless the dataset is SVAR-backed.
 - `with_len(L)` requires `L + 2·jitter ≤ min(region_length) + 2·max_jitter` — set `max_jitter` accordingly at `write` time.
