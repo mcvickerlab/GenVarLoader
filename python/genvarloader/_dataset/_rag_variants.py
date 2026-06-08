@@ -9,6 +9,8 @@ import numpy as np
 import seqpro as sp
 from awkward.contents import (
     Content,
+    IndexedArray,
+    IndexedOptionArray,
     ListArray,
     ListOffsetArray,
     NumpyArray,
@@ -26,6 +28,108 @@ if TORCH_AVAILABLE or TYPE_CHECKING:
     import torch
     from torch.nested import nested_tensor_from_jagged as nt_jag
     from torch.nested._internal.nested_tensor import NestedTensor
+
+
+def _is_canonical_alleles(layout: Content) -> bool:
+    """True if an alt/ref layout is the canonical, directly-extractable chain
+    ``RegularArray -> ListOffsetArray -> ListOffsetArray -> NumpyArray`` (possibly
+    sliced, i.e. non-zero-based offsets — handled by the existing fast path). Any
+    ``IndexedArray``/``ListArray`` wrapping (from fancy-index/reverse) returns False."""
+    return (
+        isinstance(layout, RegularArray)
+        and isinstance(layout.content, ListOffsetArray)
+        and isinstance(layout.content.content, ListOffsetArray)
+        and isinstance(layout.content.content.content, NumpyArray)
+    )
+
+
+def _decompose_alleles(
+    arr: ak.Array,
+) -> tuple[
+    NDArray[np.int64],
+    NDArray[np.int64],
+    NDArray[np.int64],
+    NDArray[np.int64],
+    NDArray[np.int64],
+    NDArray[np.uint8],
+    int,
+]:
+    """Decompose a (possibly non-canonical) (b, p, ~v, ~l) allele array into raw
+    primitives for :func:`_pack_alleles`. Reads ``.starts``/``.stops`` (present on
+    both ``ListArray`` and ``ListOffsetArray``) and the optional outer index.
+
+    Returns ``(row_src, var_starts, var_stops, allele_starts, allele_stops, leaf, ploidy)``
+    where ``row_src[b*p + h] = index[b]*p + h`` indexes the variant-list rows.
+    """
+    lay = arr.layout
+    if isinstance(lay, (IndexedArray, IndexedOptionArray)):
+        index = np.asarray(lay.index, np.int64)
+        reg = lay.project() if isinstance(lay, IndexedOptionArray) else lay.content
+        # For IndexedArray, content is the (un-indexed) RegularArray; for the option
+        # case we project (gvl variants never contain None, but be safe).
+        if isinstance(lay, IndexedOptionArray):
+            index = None  # project() already applied the gather
+    else:
+        index = None
+        reg = lay
+
+    if not isinstance(reg, RegularArray):
+        raise ValueError(f"Unsupported allele layout for packing: {arr.layout.form}")
+    ploidy = int(reg.size)
+
+    var_node = reg.content
+    var_starts = np.asarray(var_node.starts, np.int64)
+    var_stops = np.asarray(var_node.stops, np.int64)
+
+    allele_node = var_node.content
+    allele_starts = np.asarray(allele_node.starts, np.int64)
+    allele_stops = np.asarray(allele_node.stops, np.int64)
+    leaf = np.asarray(allele_node.content.data).view(np.uint8)
+
+    if index is None:
+        n_out_rows = len(reg) * ploidy
+        row_src = np.arange(n_out_rows, dtype=np.int64)
+    else:
+        row_src = (index[:, None] * ploidy + np.arange(ploidy, dtype=np.int64)).reshape(
+            -1
+        )
+    return row_src, var_starts, var_stops, allele_starts, allele_stops, leaf, ploidy
+
+
+@nb.njit(nogil=True, cache=True)
+def _pack_alleles(row_src, var_starts, var_stops, allele_starts, allele_stops, leaf):
+    """Gather doubly-nested alleles into contiguous, zero-based byte buffers in
+    canonical ``(b, p, ~v, ~l)`` row-major order. Sequential (offset accumulation);
+    only invoked off the hot path for non-canonical layouts."""
+    n_rows = row_src.shape[0]
+    n_alleles = 0
+    n_bytes = 0
+    for i in range(n_rows):
+        src = row_src[i]
+        for a in range(var_starts[src], var_stops[src]):
+            n_alleles += 1
+            n_bytes += allele_stops[a] - allele_starts[a]
+
+    packed = np.empty(n_bytes, np.uint8)
+    allele_off = np.empty(n_alleles + 1, np.int64)
+    group_off = np.empty(n_rows + 1, np.int64)
+    allele_off[0] = 0
+    group_off[0] = 0
+
+    ai = 0
+    bi = 0
+    for i in range(n_rows):
+        src = row_src[i]
+        for a in range(var_starts[src], var_stops[src]):
+            s = allele_starts[a]
+            e = allele_stops[a]
+            for k in range(s, e):
+                packed[bi] = leaf[k]
+                bi += 1
+            ai += 1
+            allele_off[ai] = bi
+        group_off[i + 1] = ai
+    return packed, allele_off, group_off
 
 
 class RaggedVariant(ak.Record):
@@ -211,30 +315,55 @@ class RaggedVariants(ak.Array):
         for field in self.fields:
             arr = self[field]
             if field in ("alt", "ref"):
-                leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
-                # _alt_layout_parts returns the FULL (un-sliced) leaf and allele_off even
-                # for a sliced view — only group_off carries the slice's offset.  We must
-                # use group_off[0] to locate where this view's allele groups begin in the
-                # full allele_off, then slice and zero-base both allele_off and leaf to
-                # match so that _build_allele_layout sees a clean, contiguous layout.
-                g0 = int(group_off[0])
-                rebased_group = np.asarray(group_off, np.int64) - g0
-                # slice allele_off to only the alleles in this view and zero-base
-                a0 = int(allele_off[g0])
-                sliced_allele_off = np.asarray(allele_off[g0:], np.int64) - a0
-                sliced_leaf = leaf[a0:]
-                # pack the allele (byte) level: contiguates bytes
-                allele_lvl = Ragged.from_offsets(
-                    sliced_leaf.view("S1"),
-                    (sliced_allele_off.size - 1, None),
-                    sliced_allele_off,
-                ).to_packed()
-                packed[field] = _build_allele_layout(
-                    np.asarray(allele_lvl.data).view(np.uint8),
-                    np.asarray(allele_lvl.offsets),
-                    rebased_group,
-                    ploidy,
-                )
+                if _is_canonical_alleles(arr.layout):
+                    # fast path (unchanged): canonical (possibly sliced) layout
+                    leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
+                    # _alt_layout_parts returns the FULL (un-sliced) leaf and allele_off even
+                    # for a sliced view — only group_off carries the slice's offset.  We must
+                    # use group_off[0] to locate where this view's allele groups begin in the
+                    # full allele_off, then slice and zero-base both allele_off and leaf to
+                    # match so that _build_allele_layout sees a clean, contiguous layout.
+                    g0 = int(group_off[0])
+                    rebased_group = np.asarray(group_off, np.int64) - g0
+                    # slice allele_off to only the alleles in this view and zero-base
+                    a0 = int(allele_off[g0])
+                    sliced_allele_off = np.asarray(allele_off[g0:], np.int64) - a0
+                    sliced_leaf = leaf[a0:]
+                    # pack the allele (byte) level: contiguates bytes
+                    allele_lvl = Ragged.from_offsets(
+                        sliced_leaf.view("S1"),
+                        (sliced_allele_off.size - 1, None),
+                        sliced_allele_off,
+                    ).to_packed()
+                    packed[field] = _build_allele_layout(
+                        np.asarray(allele_lvl.data).view(np.uint8),
+                        np.asarray(allele_lvl.offsets),
+                        rebased_group,
+                        ploidy,
+                    )
+                else:
+                    # non-canonical (IndexedArray/ListArray from slicing/reorder):
+                    # numba gather, no ak.to_packed / awkward gather primitives.
+                    (
+                        row_src,
+                        var_starts,
+                        var_stops,
+                        allele_starts,
+                        allele_stops,
+                        leaf,
+                        ploidy,
+                    ) = _decompose_alleles(arr)
+                    packed_bytes, allele_off, group_off = _pack_alleles(
+                        row_src,
+                        var_starts,
+                        var_stops,
+                        allele_starts,
+                        allele_stops,
+                        leaf,
+                    )
+                    packed[field] = _build_allele_layout(
+                        packed_bytes, allele_off, group_off, ploidy
+                    )
             else:
                 packed[field] = (
                     arr.to_packed()
@@ -244,7 +373,11 @@ class RaggedVariants(ak.Array):
         return type(self)(**packed)
 
     def rc_(self, to_rc: NDArray[np.bool_] | None = None) -> Self:
-        """Reverse complement the alleles. This is an in-place operation.
+        """Reverse complement the alleles. This is an in-place operation for
+        canonical (contiguous) layouts. For non-canonical (sliced/reordered)
+        views, the data is materialized into a new contiguous object first, so a
+        NEW object is returned and ``self`` is left unmutated — callers should
+        use the return value.
 
         Parameters
         ----------
@@ -260,6 +393,17 @@ class RaggedVariants(ak.Array):
             to_rc = np.ones(self.shape[0], np.bool_)  # type: ignore[no-matching-overload]  # ak.Array shape may contain None; np.ones overload expects int|Sequence[int]
         elif not to_rc.any():
             return self
+
+        # Non-canonical (sliced/reordered) views can't be reverse-complemented in
+        # place safely. Materialize a contiguous canonical copy, then recurse — the
+        # recursion hits the in-place fast path below. Returns a new object; the sole
+        # caller (reverse_complement_ragged) uses the return value.
+        if any(
+            not _is_canonical_alleles(self[f].layout)
+            for f in ("alt", "ref")
+            if f in self.fields
+        ):
+            return self.to_packed().rc_(to_rc)
 
         # local import: _haps imports RaggedVariants (avoid circular import)
         from ._haps import _alt_layout_parts

@@ -182,3 +182,228 @@ def test_to_packed_matches_awkward_sliced():
     np.testing.assert_array_equal(
         np.asarray(got["start"].data), np.asarray(exp["start"].data)
     )
+
+
+def test_to_packed_numeric_field_reorders_through_indexed_view():
+    # After fancy-indexing a RaggedVariants, its numeric `start` field is a Ragged
+    # backed by an IndexedArray layout. seqpro 0.15.1's IndexedArray unbox fix lets
+    # `.to_packed()` materialize + reorder it correctly with no gvl change. The full
+    # RaggedVariants.to_packed() over alt/ref on non-canonical views lands in a later
+    # task; this isolates the numeric path.
+    group_off = [0, 2, 3, 5]
+    rv = _make_rv(
+        [b"A", b"C", b"G", b"T", b"N"],
+        [b"a", b"c", b"g", b"t", b"n"],
+        [10, 20, 30, 40, 50],
+        group_off,
+        ploidy=1,
+    )
+    fancy = RaggedVariants.from_ak(rv[np.array([2, 0])])
+    start = fancy["start"]
+    assert isinstance(start, Ragged)
+    from awkward.contents import IndexedArray
+
+    assert isinstance(start.layout, IndexedArray)
+    got = start.to_packed()
+    exp = ak.to_packed(ak.Array(fancy)["start"])
+    assert ak.to_list(got) == ak.to_list(exp)
+
+
+def test_pack_alleles_kernel_identity_and_reorder():
+    from genvarloader._dataset._rag_variants import _pack_alleles
+
+    # 3 variant rows, leaf "ACGTGG", alleles [ACG, T, GG]; rows: [v0,v1],[v2]
+    leaf = np.frombuffer(b"ACGTGG", np.uint8)
+    allele_starts = np.array([0, 3, 4], np.int64)
+    allele_stops = np.array([3, 4, 6], np.int64)
+    var_starts = np.array(
+        [0, 2], np.int64
+    )  # row0 -> alleles[0:2], row1 -> alleles[2:3]
+    var_stops = np.array([2, 3], np.int64)
+
+    # identity order
+    packed, allele_off, group_off = _pack_alleles(
+        np.array([0, 1], np.int64),
+        var_starts,
+        var_stops,
+        allele_starts,
+        allele_stops,
+        leaf,
+    )
+    assert bytes(packed) == b"ACGTGG"
+    assert allele_off.tolist() == [0, 3, 4, 6]
+    assert group_off.tolist() == [0, 2, 3]
+
+    # reversed row order
+    packed, allele_off, group_off = _pack_alleles(
+        np.array([1, 0], np.int64),
+        var_starts,
+        var_stops,
+        allele_starts,
+        allele_stops,
+        leaf,
+    )
+    assert bytes(packed) == b"GGACGT"
+    assert allele_off.tolist() == [0, 2, 5, 6]
+    assert group_off.tolist() == [0, 1, 3]
+
+
+def test_is_canonical_alleles():
+    from genvarloader._dataset._rag_variants import _is_canonical_alleles
+
+    rv = _make_rv([b"A", b"C"], [b"a", b"c"], [1, 2], [0, 1, 2], ploidy=1)
+    assert _is_canonical_alleles(rv["alt"].layout) is True
+    fancy = RaggedVariants.from_ak(rv[np.array([1, 0])])
+    assert _is_canonical_alleles(fancy["alt"].layout) is False
+
+
+def test_decompose_alleles_reversed():
+    from genvarloader._dataset._rag_variants import _decompose_alleles, _pack_alleles
+
+    rv = _make_rv(
+        [b"A", b"C", b"G", b"T", b"N"],
+        [b"a", b"c", b"g", b"t", b"n"],
+        [1, 2, 3, 4, 5],
+        [0, 2, 3, 5],
+        ploidy=1,
+    )
+    fancy = RaggedVariants.from_ak(rv[np.array([2, 0])])
+    row_src, var_starts, var_stops, allele_starts, allele_stops, leaf, ploidy = (
+        _decompose_alleles(fancy["alt"])
+    )
+    assert ploidy == 1
+    packed, allele_off, group_off = _pack_alleles(
+        row_src, var_starts, var_stops, allele_starts, allele_stops, leaf
+    )
+    from genvarloader._dataset._haps import _build_allele_layout
+
+    rebuilt = _build_allele_layout(packed, allele_off, group_off, ploidy)
+    assert ak.to_list(rebuilt) == ak.to_list(fancy["alt"])
+
+
+@pytest.mark.parametrize("transform", ["reverse", "fancy"])
+def test_to_packed_alt_ref_on_lazy_views(transform):
+    # 4 rows, 6 variants total: group_off=[0,2,3,5,6]
+    group_off = [0, 2, 3, 5, 6]
+    rv = _make_rv(
+        [b"ACG", b"T", b"GG", b"AA", b"C", b"TTT"],
+        [b"A", b"CC", b"T", b"G", b"TT", b"C"],
+        [1, 5, 9, 12, 20, 25],
+        group_off,
+        ploidy=1,
+    )
+    view = rv[::-1] if transform == "reverse" else rv[np.array([2, 0, 3, 1])]
+    view = RaggedVariants.from_ak(view)
+    got = view.to_packed()
+    exp = ak.to_packed(ak.Array(view))
+    assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
+    assert ak.to_list(got["ref"]) == ak.to_list(exp["ref"])
+    np.testing.assert_array_equal(
+        np.asarray(got["start"].data), np.asarray(exp["start"].data)
+    )
+
+
+@pytest.mark.parametrize("transform", ["reverse", "fancy"])
+def test_rc_on_lazy_views_matches_reference(transform):
+    group_off = [0, 2, 3, 5, 6]
+    rv = _make_rv(
+        [b"ACG", b"T", b"GG", b"AA", b"C", b"TTT"],
+        [b"A", b"CC", b"T", b"G", b"TT", b"C"],
+        [1, 5, 9, 12, 20, 25],
+        group_off,
+        ploidy=1,
+    )
+    view = rv[::-1] if transform == "reverse" else rv[np.array([2, 0, 3, 1])]
+    view = RaggedVariants.from_ak(view)
+
+    n = view.shape[0]
+    mask = np.ones(n, np.bool_)
+    exp_alt, exp_ref = _ref_rc(
+        view, mask
+    )  # independent awkward reference (defined at top of file)
+
+    out = view.rc_(mask)
+    assert ak.to_list(out["alt"]) == ak.to_list(exp_alt)
+    assert ak.to_list(out["ref"]) == ak.to_list(exp_ref)
+
+
+def test_to_packed_ploidy2_reordered():
+    # b=2, p=2 -> 4 (b*p) rows; variant counts per row = [2, 1, 1, 1] -> 5 variants.
+    # alt/ref carry exactly ONE allele per variant, so n_alleles == n_variants == 5.
+    group_off = np.array([0, 2, 3, 4, 5], np.int64)
+    # alt alleles: ["AC","G","T","GG","A"] -> b"ACGTGGA" (lengths 2,1,1,2,1)
+    alt = _build_allele_layout(
+        np.frombuffer(b"ACGTGGA", np.uint8),
+        np.array([0, 2, 3, 4, 6, 7], np.int64),
+        group_off,
+        ploidy=2,
+    )
+    # ref alleles: ["a","c","g","t","n"] -> b"acgtn"
+    ref = _build_allele_layout(
+        np.frombuffer(b"acgtn", np.uint8),
+        np.array([0, 1, 2, 3, 4, 5], np.int64),
+        group_off,
+        ploidy=2,
+    )
+    start = Ragged.from_offsets(
+        np.array([1, 2, 3, 4, 5], np.int32), (2, 2, None), group_off
+    )
+    rv = RaggedVariants(alt=alt, start=start, ref=ref)
+    fancy = RaggedVariants.from_ak(rv[np.array([1, 0])])  # swap the two batches
+    got = fancy.to_packed()
+    exp = ak.to_packed(ak.Array(fancy))
+    assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
+    assert ak.to_list(got["ref"]) == ak.to_list(exp["ref"])
+
+
+def test_rc_on_lazy_view_mixed_mask():
+    # A mixed (not all-True) mask on a reordered (non-canonical) view exercises
+    # mask/row alignment through the to_packed() materialize-then-recurse path.
+    group_off = [0, 2, 3, 5, 6]
+    rv = _make_rv(
+        [b"ACG", b"T", b"GG", b"AA", b"C", b"TTT"],
+        [b"A", b"CC", b"T", b"G", b"TT", b"C"],
+        [1, 5, 9, 12, 20, 25],
+        group_off,
+        ploidy=1,
+    )
+    view = RaggedVariants.from_ak(rv[np.array([2, 0, 3, 1])])
+    mask = np.array([True, False, True, False])
+    exp_alt, exp_ref = _ref_rc(view, mask)
+    out = view.rc_(mask)
+    assert ak.to_list(out["alt"]) == ak.to_list(exp_alt)
+    assert ak.to_list(out["ref"]) == ak.to_list(exp_ref)
+
+
+def test_to_packed_explicit_listarray_variant_level():
+    # Hand-build a variant-level ListArray (starts/stops), as the user bug report hit.
+    from awkward.contents import ListArray, ListOffsetArray, RegularArray, NumpyArray
+    from awkward.index import Index
+
+    def listarray_alleles(joined_bytes, allele_off, starts, stops):
+        leaf = NumpyArray(
+            np.frombuffer(joined_bytes, np.uint8), parameters={"__array__": "byte"}
+        )
+        allele = ListOffsetArray(
+            Index(np.asarray(allele_off, np.int64)),
+            leaf,
+            parameters={"__array__": "bytestring"},
+        )
+        var = ListArray(
+            Index(np.asarray(starts, np.int64)),
+            Index(np.asarray(stops, np.int64)),
+            allele,
+        )
+        return ak.Array(RegularArray(var, 1))
+
+    alt = listarray_alleles(b"ACGTGG", [0, 3, 4, 6], [0, 2], [2, 3])
+    ref = listarray_alleles(b"ACCT", [0, 1, 3, 4], [0, 2], [2, 3])
+    start = Ragged.from_offsets(
+        np.array([1, 5, 9], np.int32), (2, None), np.array([0, 2, 3], np.int64)
+    )
+    rv = RaggedVariants(alt=alt, start=start, ref=ref)
+
+    got = rv.to_packed()
+    exp = ak.to_packed(ak.Array(rv))
+    assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
+    assert ak.to_list(got["ref"]) == ak.to_list(exp["ref"])
