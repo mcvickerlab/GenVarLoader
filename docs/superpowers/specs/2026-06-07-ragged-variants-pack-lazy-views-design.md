@@ -2,7 +2,12 @@
 
 **Date:** 2026-06-07
 **Status:** Design — approved scope, pending spec review
-**Area:** `python/genvarloader/_dataset/_rag_variants.py`, `python/genvarloader/_dataset/_haps.py`
+**Area (gvl):** `python/genvarloader/_dataset/_rag_variants.py`, `python/genvarloader/_dataset/_haps.py`
+**Area (seqpro, upstream):** `python/seqpro/rag/_array.py` (`/Users/david/projects/SeqPro`)
+
+> **Two-repo change.** The numeric-field half of this bug is an upstream defect in seqpro's
+> `unbox()`; we fix it in seqpro (§3a), release, and bump gvl's pin. The doubly-nested alt/ref half
+> is gvl's own (§4). Ordering: land seqpro first, then the gvl PR depends on the new seqpro.
 
 ## Problem
 
@@ -34,11 +39,18 @@ But any ordinary awkward operation on the result rebuilds the layout as a *lazy 
 These are *equivalent* representations of the same data, but the current code assumes the
 canonical chain and reads attributes that only the canonical nodes expose:
 
-- `_alt_layout_parts()` (`_haps.py:220`) reads `lay.size`, `lay.content.offsets`,
+- **alt/ref (gvl):** `_alt_layout_parts()` (`_haps.py:220`) reads `lay.size`, `lay.content.offsets`,
   `lay.content.content.offsets`. `IndexedArray` has no `.size`; `ListArray` has `.starts`/`.stops`,
   not `.offsets`. → `AttributeError`.
-- Numeric fields route through seqpro `Ragged.to_packed()`, which rejects the `IndexedArray`-wrapped
-  layout: `ValueError: Expected 1 ragged dimension, got 0`.
+- **numeric (seqpro, upstream):** Numeric fields route through seqpro `Ragged.to_packed()`, which
+  rejects the `IndexedArray`-wrapped layout: `ValueError: Expected 1 ragged dimension, got 0`. This
+  is a seqpro bug — its layout walkers `unbox()` (`_array.py:759`) and `_extract_list_offsets()`
+  (`_array.py:85`) loop `while isinstance(node, (ListArray, ListOffsetArray, RegularArray,
+  RecordArray))`, which omits `IndexedArray`/`IndexedOptionArray`. An indexed layout stops the loop
+  immediately → `n_ragged == 0` → raise. Yet seqpro *constructs* a `Ragged` over the indexed layout
+  via behavior dispatch, so the failure is deferred and surprising. Confirmed with a seqpro-only
+  repro: `Ragged(ak.zip({"x": r}, depth_limit=1)[perm]["x"])`. `ListArray` is handled; only the
+  `Indexed*` case (which arises from indexing a record then extracting a field) breaks.
 
 So a user who does `ds[...]`, shuffles/reorders the batch, then calls `.to_packed()` (e.g. before
 `to_nested_tensor_batch`, which documents that it assumes packed data) hits the crash. `rc_()` shares
@@ -59,8 +71,10 @@ rv[::-1].rc_()                                # ValueError: Expected 1 ragged di
 
 - **No `ak.to_packed`.** It was central to recent serious performance regressions and is banned —
   not just on hot paths.
-- **Pack with numba.** The reorder/gather must be done in numba kernels (or seqpro's numba-backed
-  ops), not via awkward gather primitives (`ak.to_packed`, `project()`, `to_ListOffsetArray64`).
+- **Pack with numba (gvl paths).** In gvl, the reorder/gather is done in numba kernels (or seqpro's
+  numba-backed ops), not via awkward gather primitives (`ak.to_packed`, `project()`,
+  `to_ListOffsetArray64`). Exception: the one-time `project()` inside seqpro's `unbox` (§3a) runs
+  only when an index is actually present — off every hot path — and is acceptable there.
 - **Do not regress the canonical path.** `rc_()` is on the eager-indexing hot path
   (`_getitem_unspliced`/`_getitem_spliced` → `reverse_complement_ragged`), always called on
   freshly-built canonical arrays. That path must stay byte-identical and zero-overhead — guarded by
@@ -71,18 +85,18 @@ rv[::-1].rc_()                                # ValueError: Expected 1 ragged di
 Resolve a lazy/reordered awkward view into contiguous, canonical, zero-based buffers using
 numba-based packing. Gate on a cheap layout type-check so the canonical path is untouched.
 
-### 1. Gate: canonical vs. non-canonical
+### 1. Gate: canonical vs. non-canonical (alt/ref only)
 
-A cheap `isinstance`-chain check classifies the field layout:
+After the seqpro fix (§3a), **numeric fields need no gate** — seqpro's `Ragged.to_packed()` handles
+canonical, `ListArray`, and `Indexed*` layouts uniformly. The gate applies only to the doubly-nested
+alt/ref fields, where gvl owns the packing.
 
-- **alt/ref canonical:** `RegularArray → ListOffsetArray → ListOffsetArray → NumpyArray`.
-- **numeric canonical:** `ListOffsetArray → NumpyArray` (i.e. a clean seqpro `Ragged`).
+A cheap `isinstance`-chain check classifies the alt/ref field layout against the canonical
+`RegularArray → ListOffsetArray → ListOffsetArray → NumpyArray`. Canonical → keep the **existing fast
+path** exactly (current allele-level seqpro pack + `_build_allele_layout`; in-place `rc_`).
+Non-canonical → resolve via §2 + §4.
 
-Canonical → keep the **existing fast path** exactly (seqpro `Ragged.to_packed()` for numeric; the
-current allele-level seqpro pack + `_build_allele_layout` for alt/ref; in-place `rc_`). Non-canonical
-→ resolve via the steps below.
-
-### 2. Extract the row permutation
+### 2. Extract the row permutation (for the alt/ref kernel)
 
 The only reordering ordinary user ops introduce is at the outer (batch) level via
 `IndexedArray`/`IndexedOptionArray`. Extract `row_src = np.asarray(layout.index)` and unwrap to the
@@ -90,20 +104,28 @@ clean inner layout. Absent an index, `row_src` is identity (plain slices like `r
 a clean `RegularArray`/`ListOffsetArray` and need no reorder).
 
 For ploidy `p`, the per-`(b, p)`-row source into the variant-list level is `index[b] * p + h`
-(verified). For numeric fields it is `index` directly (verified).
+(verified). (Numeric fields are now handled entirely by seqpro and do not use `row_src`.)
 
-### 3. Pack numeric fields (start, dosage, ilen, …) — seqpro numba
+### 3a. seqpro upstream fix (numeric fields)
 
-Build a clean `Ragged` from the inner `ListOffsetArray` (offsets + data, in original order), then
-fancy-index + pack with seqpro:
+In seqpro `python/seqpro/rag/_array.py`, make both layout walkers traverse `Indexed*`:
 
-```python
-clean = Ragged.from_offsets(inner_data, (n_orig_rows, None), inner_offsets)
-packed = clean[row_src].to_packed()           # seqpro 0.14 numba, 0 awkward calls
-```
+- `unbox()` (`_array.py:759`) and `_extract_list_offsets()` (`_array.py:85`): when the current node
+  is `IndexedArray`/`IndexedOptionArray`, project it (`node = node.project()`) before/within the
+  walk, then continue. Projection materializes the gather **only when an index is actually present**;
+  canonical layouts never enter this branch, so there is no regression on seqpro's (or gvl's) hot
+  paths. Verified: `to_packed` succeeds after `field.layout.project()`.
 
-`Ragged[idx].to_packed()` is the awkward-free gather already used elsewhere in this codebase
-(the flat-variants path). Verified to reproduce the reordered field byte-for-byte.
+Add seqpro regression tests (`tests/test_rag_to_packed.py` and/or `tests/test_ragged.py`):
+construct a record-layout Ragged, index it, extract a field, and assert `.offsets`, `.data`, and
+`.to_packed()` all succeed and match the reordered expectation. Bump the seqpro version and release.
+
+### 3b. gvl numeric fields (start, dosage, ilen, …)
+
+Once seqpro handles `Indexed*`, numeric fields need **no special handling** in gvl — the existing
+field-wise `Ragged.to_packed()` (and `Ragged(arr).to_packed()`) path just works on the
+indexed/`ListArray` layout. Pin gvl to the fixed seqpro release (update `pyproject.toml` +
+`pixi.lock`; verify genoray remains compatible — see seqpro↔genoray version-coupling gotcha).
 
 ### 4. Pack alt/ref (doubly-nested) — new numba kernel
 
@@ -133,16 +155,18 @@ is contiguous, zero-based, in canonical `(b, p, ~v, ~l)` row-major order. Then
 
 ### 5. `to_packed()`
 
-Per field: gate (§1). Canonical → existing fast path. Non-canonical → §2 once, then §3 (numeric) or
-§4 (alt/ref). `to_packed()` always returns a fresh object, so materialization is free of side-effect
-concerns.
+- **Numeric fields:** `Ragged.to_packed()` (resp. `Ragged(arr).to_packed()`) unchanged — now correct
+  for all layouts thanks to §3a.
+- **alt/ref:** gate (§1). Canonical → existing fast path. Non-canonical → §2 + §4 kernel.
+
+`to_packed()` always returns a fresh object, so materialization is free of side-effect concerns.
 
 ### 6. `rc_()`
 
 `rc_` is private with a single call site (`reverse_complement_ragged`) that uses the **return value**.
 
 - Canonical (hot path) → unchanged: in-place reverse-complement of the shared leaf, `return self`.
-- Non-canonical → materialize a contiguous canonical copy (reuse §2–§4 / the `to_packed` machinery),
+- Non-canonical → materialize a contiguous canonical copy of the alt/ref fields (reuse §2 + §4),
   reverse-complement the copy's leaf in place, and **return the new object**. No write-back into the
   original is required (the caller uses the return value), and in-place mutation of a reordered view
   is unavoidable-to-copy anyway.
@@ -156,7 +180,11 @@ keeps the existing simpler extraction.
 
 ## Testing (TDD)
 
-Append to `tests/dataset/test_flat_variants.py`:
+**seqpro** (`tests/test_rag_to_packed.py` / `tests/test_ragged.py`): record-layout Ragged → index →
+extract field → assert `.offsets`/`.data`/`.to_packed()` succeed and match the reordered expectation;
+keep existing canonical tests green.
+
+**gvl** — append to `tests/dataset/test_flat_variants.py`:
 
 1. **`to_packed` on lazy views** — reversed (`rv[::-1]`), fancy-indexed (`rv[perm]`), and an
    explicitly-constructed `ListArray` variant level. Each: no crash, and byte-identical to the
@@ -181,7 +209,15 @@ Append to `tests/dataset/test_flat_variants.py`:
 
 ## Files
 
-- `python/genvarloader/_dataset/_rag_variants.py` — `to_packed`, `rc_`.
+**seqpro** (`/Users/david/projects/SeqPro`, land + release first):
+- `python/seqpro/rag/_array.py` — `unbox()` (`:759`), `_extract_list_offsets()` (`:85`): traverse
+  `Indexed*`.
+- `tests/test_rag_to_packed.py` / `tests/test_ragged.py` — regression tests.
+- version bump + release.
+
+**gvl** (depends on the new seqpro):
+- `pyproject.toml` / `pixi.lock` — bump seqpro pin (verify genoray compat).
+- `python/genvarloader/_dataset/_rag_variants.py` — `to_packed` (alt/ref branch), `rc_`.
 - `python/genvarloader/_dataset/_haps.py` — generalize the layout-decomposition helper; add the
   numba `_pack_alleles` kernel (final location — `_haps.py` vs `_rag_variants.py` vs a kernels
   module — decided in the plan).
