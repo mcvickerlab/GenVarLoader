@@ -43,7 +43,17 @@ def _is_canonical_alleles(layout: Content) -> bool:
     )
 
 
-def _decompose_alleles(arr: ak.Array):
+def _decompose_alleles(
+    arr: ak.Array,
+) -> tuple[
+    NDArray[np.int64],
+    NDArray[np.int64],
+    NDArray[np.int64],
+    NDArray[np.int64],
+    NDArray[np.int64],
+    NDArray[np.uint8],
+    int,
+]:
     """Decompose a (possibly non-canonical) (b, p, ~v, ~l) allele array into raw
     primitives for :func:`_pack_alleles`. Reads ``.starts``/``.stops`` (present on
     both ``ListArray`` and ``ListOffsetArray``) and the optional outer index.
@@ -355,7 +365,11 @@ class RaggedVariants(ak.Array):
         return type(self)(**packed)
 
     def rc_(self, to_rc: NDArray[np.bool_] | None = None) -> Self:
-        """Reverse complement the alleles. This is an in-place operation.
+        """Reverse complement the alleles. This is an in-place operation for
+        canonical (contiguous) layouts. For non-canonical (sliced/reordered)
+        views, the data is materialized into a new contiguous object first, so a
+        NEW object is returned and ``self`` is left unmutated — callers should
+        use the return value.
 
         Parameters
         ----------

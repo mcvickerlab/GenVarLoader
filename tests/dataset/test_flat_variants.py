@@ -301,6 +301,49 @@ def test_rc_on_lazy_views_matches_reference(transform):
     assert ak.to_list(out["ref"]) == ak.to_list(exp_ref)
 
 
+def test_to_packed_ploidy2_reordered():
+    # b=2, p=2 -> 4 (b*p) rows; variant counts per row = [2, 1, 1, 1] -> 5 variants.
+    # alt/ref carry exactly ONE allele per variant, so n_alleles == n_variants == 5.
+    group_off = np.array([0, 2, 3, 4, 5], np.int64)
+    # alt alleles: ["AC","G","T","GG","A"] -> b"ACGTGGA" (lengths 2,1,1,2,1)
+    alt = _build_allele_layout(
+        np.frombuffer(b"ACGTGGA", np.uint8),
+        np.array([0, 2, 3, 4, 6, 7], np.int64),
+        group_off, ploidy=2,
+    )
+    # ref alleles: ["a","c","g","t","n"] -> b"acgtn"
+    ref = _build_allele_layout(
+        np.frombuffer(b"acgtn", np.uint8),
+        np.array([0, 1, 2, 3, 4, 5], np.int64),
+        group_off, ploidy=2,
+    )
+    start = Ragged.from_offsets(
+        np.array([1, 2, 3, 4, 5], np.int32), (2, 2, None), group_off
+    )
+    rv = RaggedVariants(alt=alt, start=start, ref=ref)
+    fancy = RaggedVariants.from_ak(rv[np.array([1, 0])])  # swap the two batches
+    got = fancy.to_packed()
+    exp = ak.to_packed(ak.Array(fancy))
+    assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
+    assert ak.to_list(got["ref"]) == ak.to_list(exp["ref"])
+
+
+def test_rc_on_lazy_view_mixed_mask():
+    # A mixed (not all-True) mask on a reordered (non-canonical) view exercises
+    # mask/row alignment through the to_packed() materialize-then-recurse path.
+    group_off = [0, 2, 3, 5, 6]
+    rv = _make_rv(
+        [b"ACG", b"T", b"GG", b"AA", b"C", b"TTT"], [b"A", b"CC", b"T", b"G", b"TT", b"C"],
+        [1, 5, 9, 12, 20, 25], group_off, ploidy=1,
+    )
+    view = RaggedVariants.from_ak(rv[np.array([2, 0, 3, 1])])
+    mask = np.array([True, False, True, False])
+    exp_alt, exp_ref = _ref_rc(view, mask)
+    out = view.rc_(mask)
+    assert ak.to_list(out["alt"]) == ak.to_list(exp_alt)
+    assert ak.to_list(out["ref"]) == ak.to_list(exp_ref)
+
+
 def test_to_packed_explicit_listarray_variant_level():
     # Hand-build a variant-level ListArray (starts/stops), as the user bug report hit.
     from awkward.contents import ListArray, ListOffsetArray, RegularArray, NumpyArray
