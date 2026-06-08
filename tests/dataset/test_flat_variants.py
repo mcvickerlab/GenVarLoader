@@ -182,3 +182,28 @@ def test_to_packed_matches_awkward_sliced():
     np.testing.assert_array_equal(
         np.asarray(got["start"].data), np.asarray(exp["start"].data)
     )
+
+
+def test_to_packed_numeric_field_reorders_through_indexed_view():
+    # After fancy-indexing a RaggedVariants, its numeric `start` field is a Ragged
+    # backed by an IndexedArray layout. seqpro 0.15.1's IndexedArray unbox fix lets
+    # `.to_packed()` materialize + reorder it correctly with no gvl change. The full
+    # RaggedVariants.to_packed() over alt/ref on non-canonical views lands in a later
+    # task; this isolates the numeric path.
+    group_off = [0, 2, 3, 5]
+    rv = _make_rv(
+        [b"A", b"C", b"G", b"T", b"N"],
+        [b"a", b"c", b"g", b"t", b"n"],
+        [10, 20, 30, 40, 50],
+        group_off,
+        ploidy=1,
+    )
+    fancy = RaggedVariants.from_ak(rv[np.array([2, 0])])
+    start = fancy["start"]
+    assert isinstance(start, Ragged)
+    from awkward.contents import IndexedArray
+
+    assert isinstance(start.layout, IndexedArray)
+    got = start.to_packed()
+    exp = ak.to_packed(ak.Array(fancy)["start"])
+    assert ak.to_list(got) == ak.to_list(exp)
