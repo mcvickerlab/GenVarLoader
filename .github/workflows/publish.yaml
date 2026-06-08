@@ -55,6 +55,7 @@ jobs:
   linux:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
+      fail-fast: false
       matrix:
         platform:
           - runner: ubuntu-22.04
@@ -93,6 +94,9 @@ jobs:
           CFLAGS_aarch64_unknown_linux_gnu: -march=armv8-a -D__ARM_ARCH=8
           CFLAGS_armv7_unknown_linux_gnueabihf: -march=armv7-a -D__ARM_ARCH=7
       - name: Build free-threaded wheels
+        # cp314t free-threaded cross-builds flake under QEMU emulation; don't let
+        # a free-threaded build failure block the release of the stable wheels.
+        continue-on-error: true
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
@@ -111,6 +115,7 @@ jobs:
   musllinux:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
+      fail-fast: false
       matrix:
         platform:
           - runner: ubuntu-22.04
@@ -136,6 +141,9 @@ jobs:
           sccache: ${{ inputs.tag == '' }}
           manylinux: musllinux_1_2
       - name: Build free-threaded wheels
+        # cp314t free-threaded cross-builds flake under QEMU emulation; don't let
+        # a free-threaded build failure block the release of the stable wheels.
+        continue-on-error: true
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
@@ -151,6 +159,7 @@ jobs:
   windows:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
+      fail-fast: false
       matrix:
         platform:
           - runner: windows-latest
@@ -181,6 +190,9 @@ jobs:
           python-version: '3.14t'
           architecture: ${{ matrix.platform.python_arch }}
       - name: Build free-threaded wheels
+        # cp314t free-threaded cross-builds flake under QEMU emulation; don't let
+        # a free-threaded build failure block the release of the stable wheels.
+        continue-on-error: true
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
@@ -195,6 +207,7 @@ jobs:
   macos:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
+      fail-fast: false
       matrix:
         platform:
           - runner: macos-15-intel
@@ -218,6 +231,9 @@ jobs:
         with:
           python-version: '3.14t'
       - name: Build free-threaded wheels
+        # cp314t free-threaded cross-builds flake under QEMU emulation; don't let
+        # a free-threaded build failure block the release of the stable wheels.
+        continue-on-error: true
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
