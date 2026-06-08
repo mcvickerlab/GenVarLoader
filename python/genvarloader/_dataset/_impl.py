@@ -1450,7 +1450,7 @@ class Dataset:
         pin_memory_device: str = "",
         return_indices: bool = False,
         transform: Callable | None = None,
-        mode: str | None = None,
+        mode: Literal["buffered", "double_buffered"] | None = None,
         buffer_bytes: int = 2 * 1024**3,
         copy: bool = True,
         heartbeat_seconds: float = 60.0,
@@ -1510,6 +1510,20 @@ class Dataset:
             .. note::
                 Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
                 dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
+        mode
+            Dataloading strategy. :code:`None` (default) uses the standard PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`
+            over a map-style dataset. :code:`"buffered"` and :code:`"double_buffered"` use a prefetching producer that fills an
+            in-memory buffer ahead of consumption to hide read latency; both are incompatible with :code:`num_workers > 0` since
+            the loader is itself the concurrency strategy. :code:`"double_buffered"` serializes chunks into two fixed-size
+            shared-memory slots, allowing a producer thread to fill one slot while the consumer drains the other.
+        buffer_bytes
+            Total byte budget for the prefetch buffer when :code:`mode` is :code:`"buffered"` or :code:`"double_buffered"`.
+            For :code:`"double_buffered"` this is split across two shared-memory slots (:code:`buffer_bytes / 2` each). Defaults to 2 GiB.
+        copy
+            Only used when :code:`mode="double_buffered"`. If :code:`True` (default), each batch owns its data. If :code:`False`,
+            batches are zero-copy views into shared memory and are only valid until the next batch is yielded.
+        heartbeat_seconds
+            Only used when :code:`mode="double_buffered"`. Seconds to wait per slot before checking that the producer is still alive.
         """
         if mode is not None:
             # Buffered modes operate directly on the Dataset, not on a TorchDataset wrapper,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import awkward as ak
 import numpy as np
@@ -109,7 +109,7 @@ def get_dataloader(
     prefetch_factor: int | None = None,
     persistent_workers: bool = False,
     pin_memory_device: str = "",
-    mode: str | None = None,
+    mode: Literal["buffered", "double_buffered"] | None = None,
     buffer_bytes: int = 2 * 1024**3,
     copy: bool = True,
     heartbeat_seconds: float = 60.0,
