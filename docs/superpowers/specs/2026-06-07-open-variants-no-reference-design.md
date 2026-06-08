@@ -79,7 +79,12 @@ warning text remains accurate.
 
 - **Genotypes + tracks, no reference:** default to `variants` view with tracks
   active (tracks keep their current auto-activation). Yields `RaggedVariants`
-  alongside the active tracks.
+  alongside the active tracks, i.e. `RaggedDataset[RaggedVariants,
+  RaggedTracks]`. Tracks default to per-nucleotide `RaggedTracks`
+  (`Tracks.from_path` defaults `kind=RaggedTracks`), not `RaggedIntervals`;
+  `RaggedTracks` re-aligns to haplotype coordinates using variant indel lengths
+  from the genotypes, not the reference sequence, so it works without a
+  reference.
 
 ## Testing (TDD)
 
