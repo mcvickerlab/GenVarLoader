@@ -372,6 +372,17 @@ class RaggedVariants(ak.Array):
         elif not to_rc.any():
             return self
 
+        # Non-canonical (sliced/reordered) views can't be reverse-complemented in
+        # place safely. Materialize a contiguous canonical copy, then recurse — the
+        # recursion hits the in-place fast path below. Returns a new object; the sole
+        # caller (reverse_complement_ragged) uses the return value.
+        if any(
+            not _is_canonical_alleles(self[f].layout)
+            for f in ("alt", "ref")
+            if f in self.fields
+        ):
+            return self.to_packed().rc_(to_rc)
+
         # local import: _haps imports RaggedVariants (avoid circular import)
         from ._haps import _alt_layout_parts
 

@@ -282,6 +282,25 @@ def test_to_packed_alt_ref_on_lazy_views(transform):
     np.testing.assert_array_equal(np.asarray(got["start"].data), np.asarray(exp["start"].data))
 
 
+@pytest.mark.parametrize("transform", ["reverse", "fancy"])
+def test_rc_on_lazy_views_matches_reference(transform):
+    group_off = [0, 2, 3, 5, 6]
+    rv = _make_rv(
+        [b"ACG", b"T", b"GG", b"AA", b"C", b"TTT"], [b"A", b"CC", b"T", b"G", b"TT", b"C"],
+        [1, 5, 9, 12, 20, 25], group_off, ploidy=1,
+    )
+    view = rv[::-1] if transform == "reverse" else rv[np.array([2, 0, 3, 1])]
+    view = RaggedVariants.from_ak(view)
+
+    n = view.shape[0]
+    mask = np.ones(n, np.bool_)
+    exp_alt, exp_ref = _ref_rc(view, mask)   # independent awkward reference (defined at top of file)
+
+    out = view.rc_(mask)
+    assert ak.to_list(out["alt"]) == ak.to_list(exp_alt)
+    assert ak.to_list(out["ref"]) == ak.to_list(exp_ref)
+
+
 def test_to_packed_explicit_listarray_variant_level():
     # Hand-build a variant-level ListArray (starts/stops), as the user bug report hit.
     from awkward.contents import ListArray, ListOffsetArray, RegularArray, NumpyArray
