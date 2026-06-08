@@ -307,30 +307,45 @@ class RaggedVariants(ak.Array):
         for field in self.fields:
             arr = self[field]
             if field in ("alt", "ref"):
-                leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
-                # _alt_layout_parts returns the FULL (un-sliced) leaf and allele_off even
-                # for a sliced view — only group_off carries the slice's offset.  We must
-                # use group_off[0] to locate where this view's allele groups begin in the
-                # full allele_off, then slice and zero-base both allele_off and leaf to
-                # match so that _build_allele_layout sees a clean, contiguous layout.
-                g0 = int(group_off[0])
-                rebased_group = np.asarray(group_off, np.int64) - g0
-                # slice allele_off to only the alleles in this view and zero-base
-                a0 = int(allele_off[g0])
-                sliced_allele_off = np.asarray(allele_off[g0:], np.int64) - a0
-                sliced_leaf = leaf[a0:]
-                # pack the allele (byte) level: contiguates bytes
-                allele_lvl = Ragged.from_offsets(
-                    sliced_leaf.view("S1"),
-                    (sliced_allele_off.size - 1, None),
-                    sliced_allele_off,
-                ).to_packed()
-                packed[field] = _build_allele_layout(
-                    np.asarray(allele_lvl.data).view(np.uint8),
-                    np.asarray(allele_lvl.offsets),
-                    rebased_group,
-                    ploidy,
-                )
+                if _is_canonical_alleles(arr.layout):
+                    # fast path (unchanged): canonical (possibly sliced) layout
+                    leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
+                    # _alt_layout_parts returns the FULL (un-sliced) leaf and allele_off even
+                    # for a sliced view — only group_off carries the slice's offset.  We must
+                    # use group_off[0] to locate where this view's allele groups begin in the
+                    # full allele_off, then slice and zero-base both allele_off and leaf to
+                    # match so that _build_allele_layout sees a clean, contiguous layout.
+                    g0 = int(group_off[0])
+                    rebased_group = np.asarray(group_off, np.int64) - g0
+                    # slice allele_off to only the alleles in this view and zero-base
+                    a0 = int(allele_off[g0])
+                    sliced_allele_off = np.asarray(allele_off[g0:], np.int64) - a0
+                    sliced_leaf = leaf[a0:]
+                    # pack the allele (byte) level: contiguates bytes
+                    allele_lvl = Ragged.from_offsets(
+                        sliced_leaf.view("S1"),
+                        (sliced_allele_off.size - 1, None),
+                        sliced_allele_off,
+                    ).to_packed()
+                    packed[field] = _build_allele_layout(
+                        np.asarray(allele_lvl.data).view(np.uint8),
+                        np.asarray(allele_lvl.offsets),
+                        rebased_group,
+                        ploidy,
+                    )
+                else:
+                    # non-canonical (IndexedArray/ListArray from slicing/reorder):
+                    # numba gather, no ak.to_packed / awkward gather primitives.
+                    (
+                        row_src, var_starts, var_stops,
+                        allele_starts, allele_stops, leaf, ploidy,
+                    ) = _decompose_alleles(arr)
+                    packed_bytes, allele_off, group_off = _pack_alleles(
+                        row_src, var_starts, var_stops, allele_starts, allele_stops, leaf
+                    )
+                    packed[field] = _build_allele_layout(
+                        packed_bytes, allele_off, group_off, ploidy
+                    )
             else:
                 packed[field] = (
                     arr.to_packed()

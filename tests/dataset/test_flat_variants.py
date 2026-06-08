@@ -263,3 +263,44 @@ def test_decompose_alleles_reversed():
     from genvarloader._dataset._haps import _build_allele_layout
     rebuilt = _build_allele_layout(packed, allele_off, group_off, ploidy)
     assert ak.to_list(rebuilt) == ak.to_list(fancy["alt"])
+
+
+@pytest.mark.parametrize("transform", ["reverse", "fancy"])
+def test_to_packed_alt_ref_on_lazy_views(transform):
+    # 4 rows, 6 variants total: group_off=[0,2,3,5,6]
+    group_off = [0, 2, 3, 5, 6]
+    rv = _make_rv(
+        [b"ACG", b"T", b"GG", b"AA", b"C", b"TTT"], [b"A", b"CC", b"T", b"G", b"TT", b"C"],
+        [1, 5, 9, 12, 20, 25], group_off, ploidy=1,
+    )
+    view = rv[::-1] if transform == "reverse" else rv[np.array([2, 0, 3, 1])]
+    view = RaggedVariants.from_ak(view)
+    got = view.to_packed()
+    exp = ak.to_packed(ak.Array(view))
+    assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
+    assert ak.to_list(got["ref"]) == ak.to_list(exp["ref"])
+    np.testing.assert_array_equal(np.asarray(got["start"].data), np.asarray(exp["start"].data))
+
+
+def test_to_packed_explicit_listarray_variant_level():
+    # Hand-build a variant-level ListArray (starts/stops), as the user bug report hit.
+    from awkward.contents import ListArray, ListOffsetArray, RegularArray, NumpyArray
+    from awkward.index import Index
+
+    def listarray_alleles(joined_bytes, allele_off, starts, stops):
+        leaf = NumpyArray(np.frombuffer(joined_bytes, np.uint8), parameters={"__array__": "byte"})
+        allele = ListOffsetArray(
+            Index(np.asarray(allele_off, np.int64)), leaf, parameters={"__array__": "bytestring"}
+        )
+        var = ListArray(Index(np.asarray(starts, np.int64)), Index(np.asarray(stops, np.int64)), allele)
+        return ak.Array(RegularArray(var, 1))
+
+    alt = listarray_alleles(b"ACGTGG", [0, 3, 4, 6], [0, 2], [2, 3])
+    ref = listarray_alleles(b"ACCT", [0, 1, 3, 4], [0, 2], [2, 3])
+    start = Ragged.from_offsets(np.array([1, 5, 9], np.int32), (2, None), np.array([0, 2, 3], np.int64))
+    rv = RaggedVariants(alt=alt, start=start, ref=ref)
+
+    got = rv.to_packed()
+    exp = ak.to_packed(ak.Array(rv))
+    assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
+    assert ak.to_list(got["ref"]) == ak.to_list(exp["ref"])
