@@ -9,6 +9,8 @@ import numpy as np
 import seqpro as sp
 from awkward.contents import (
     Content,
+    IndexedArray,
+    IndexedOptionArray,
     ListArray,
     ListOffsetArray,
     NumpyArray,
@@ -26,6 +28,100 @@ if TORCH_AVAILABLE or TYPE_CHECKING:
     import torch
     from torch.nested import nested_tensor_from_jagged as nt_jag
     from torch.nested._internal.nested_tensor import NestedTensor
+
+
+def _is_canonical_alleles(layout: Content) -> bool:
+    """True if an alt/ref layout is the canonical, directly-extractable chain
+    ``RegularArray -> ListOffsetArray -> ListOffsetArray -> NumpyArray`` (possibly
+    sliced, i.e. non-zero-based offsets — handled by the existing fast path). Any
+    ``IndexedArray``/``ListArray`` wrapping (from fancy-index/reverse) returns False."""
+    return (
+        isinstance(layout, RegularArray)
+        and isinstance(layout.content, ListOffsetArray)
+        and isinstance(layout.content.content, ListOffsetArray)
+        and isinstance(layout.content.content.content, NumpyArray)
+    )
+
+
+def _decompose_alleles(arr: ak.Array):
+    """Decompose a (possibly non-canonical) (b, p, ~v, ~l) allele array into raw
+    primitives for :func:`_pack_alleles`. Reads ``.starts``/``.stops`` (present on
+    both ``ListArray`` and ``ListOffsetArray``) and the optional outer index.
+
+    Returns ``(row_src, var_starts, var_stops, allele_starts, allele_stops, leaf, ploidy)``
+    where ``row_src[b*p + h] = index[b]*p + h`` indexes the variant-list rows.
+    """
+    lay = arr.layout
+    if isinstance(lay, (IndexedArray, IndexedOptionArray)):
+        index = np.asarray(lay.index, np.int64)
+        reg = lay.project() if isinstance(lay, IndexedOptionArray) else lay.content
+        # For IndexedArray, content is the (un-indexed) RegularArray; for the option
+        # case we project (gvl variants never contain None, but be safe).
+        if isinstance(lay, IndexedOptionArray):
+            index = None  # project() already applied the gather
+    else:
+        index = None
+        reg = lay
+
+    if not isinstance(reg, RegularArray):
+        raise ValueError(
+            f"Unsupported allele layout for packing: {arr.layout.form}"
+        )
+    ploidy = int(reg.size)
+
+    var_node = reg.content
+    var_starts = np.asarray(var_node.starts, np.int64)
+    var_stops = np.asarray(var_node.stops, np.int64)
+
+    allele_node = var_node.content
+    allele_starts = np.asarray(allele_node.starts, np.int64)
+    allele_stops = np.asarray(allele_node.stops, np.int64)
+    leaf = np.asarray(allele_node.content.data).view(np.uint8)
+
+    if index is None:
+        n_out_rows = len(reg) * ploidy
+        row_src = np.arange(n_out_rows, dtype=np.int64)
+    else:
+        row_src = (
+            index[:, None] * ploidy + np.arange(ploidy, dtype=np.int64)
+        ).reshape(-1)
+    return row_src, var_starts, var_stops, allele_starts, allele_stops, leaf, ploidy
+
+
+@nb.njit(nogil=True, cache=True)
+def _pack_alleles(row_src, var_starts, var_stops, allele_starts, allele_stops, leaf):
+    """Gather doubly-nested alleles into contiguous, zero-based byte buffers in
+    canonical ``(b, p, ~v, ~l)`` row-major order. Sequential (offset accumulation);
+    only invoked off the hot path for non-canonical layouts."""
+    n_rows = row_src.shape[0]
+    n_alleles = 0
+    n_bytes = 0
+    for i in range(n_rows):
+        src = row_src[i]
+        for a in range(var_starts[src], var_stops[src]):
+            n_alleles += 1
+            n_bytes += allele_stops[a] - allele_starts[a]
+
+    packed = np.empty(n_bytes, np.uint8)
+    allele_off = np.empty(n_alleles + 1, np.int64)
+    group_off = np.empty(n_rows + 1, np.int64)
+    allele_off[0] = 0
+    group_off[0] = 0
+
+    ai = 0
+    bi = 0
+    for i in range(n_rows):
+        src = row_src[i]
+        for a in range(var_starts[src], var_stops[src]):
+            s = allele_starts[a]
+            e = allele_stops[a]
+            for k in range(s, e):
+                packed[bi] = leaf[k]
+                bi += 1
+            ai += 1
+            allele_off[ai] = bi
+        group_off[i + 1] = ai
+    return packed, allele_off, group_off
 
 
 class RaggedVariant(ak.Record):
