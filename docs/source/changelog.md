@@ -31,6 +31,26 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.28.0 (2026-06-08)
+
+### Feat
+
+- **variants**: numba allele-pack kernel + layout decomposition for non-canonical views
+- **write**: reject symbolic/breakend variants from SVAR inputs
+- **write**: reject symbolic/breakend variants from PGEN inputs
+- **write**: reject symbolic/breakend variants from VCF inputs
+- **write**: add consolidated unsupported-variant validator
+
+### Fix
+
+- **variants**: rc_() on sliced/reordered views via materialized copy
+- **variants**: to_packed() handles sliced/reordered alt/ref via numba kernel
+- **open**: default to variants when genotypes have no reference
+- **write**: validate VCF variants before creating output directory
+
 ## v0.27.0 (2026-06-05)
 
 ### Feat
