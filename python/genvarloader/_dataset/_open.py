@@ -180,7 +180,9 @@ class OpenRequest:
     def _initial_seqs_kind(seqs: Haps | Ref | None) -> SeqsKind:
         # Default view kind for each storage shape.
         if isinstance(seqs, Haps):
-            return "haplotypes"
+            # Without a reference we can't reconstruct haplotypes; the only
+            # sequence view Haps.to_kind allows is RaggedVariants.
+            return "haplotypes" if seqs.reference is not None else "variants"
         if isinstance(seqs, Ref):
             return "reference"
         return None
