@@ -126,6 +126,8 @@ gvl.Dataset.open(
 
 Without `reference=`, a genotypes-only dataset opens with the **`"variants"`** view by default (yielding `RaggedVariants`) — `Dataset.open(path)` just works, no `with_seqs` needed. The `"haplotypes"`, `"annotated"`, and `"reference"` views all require a reference; requesting one via `with_seqs` on a reference-less dataset raises a clear `ValueError`. `svar=` overrides the recorded SVAR location.
 
+**`with_settings(dummy_variant=...)`** — inserts a `gvl.DummyVariant` into every **empty** `(region, sample, ploid)` variant group so that every group has at least one variant. Only fills groups that are empty; non-empty groups are unchanged. Only valid when the output kind is `"variants"` (set via `with_seqs("variants")`); indexing raises `ValueError` if `dummy_variant` is set and the output kind is not variants (the check is order-independent with `with_seqs`). `False` disables dummy padding; `None` (default) leaves the current setting unchanged. Applies before reverse-complementing, so a non-`b"N"` dummy allele is reverse-complemented on negative-strand regions like any real allele — the default `b"N"` is rc-invariant. Setting `dummy_variant=False` when the output is not variants is a harmless no-op.
+
 **Format validation:** `Dataset.open` validates the dataset's `format_version` and structural integrity (file presence + sizes). An incompatible or corrupt dataset raises a `ValueError` instructing regeneration with `gvl.write`. Datasets do **not** auto-rebuild.
 
 - **`var_fields: list[str] | None`** — Variant fields to include on `RaggedVariants` output. Defaults to the minimum useful set `["alt", "ilen", "start"]`. Pass additional names (e.g. `"ref"`, `"dosage"`, or any numeric info column in the source variants table) to load them eagerly at open time. Must be a subset of `Dataset.available_var_fields`. Can be reconfigured later via `Dataset.with_settings(var_fields=...)`, which lazily loads any newly-requested columns. `"dosage"` must be requested explicitly — it is *not* added automatically even when `dosages.npy` exists on disk.
@@ -265,6 +267,7 @@ Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (use
 - `gvl.FlatAnnotatedHaps` — flat analog of `RaggedAnnotatedHaps`: fields `.haps`, `.var_idxs`, `.ref_coords` (each a `FlatRagged`). Methods: `.to_ragged()`, `.to_fixed(length)`, `.to_padded()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_flat.py`.
 - `gvl.FlatVariants` — flat analog of `RaggedVariants`: `.fields` dict mapping field names to `FlatRagged` (scalar fields: `start`/`ilen`/`dosage`/info) or `FlatAlleles` (`alt`/`ref`). `.shape` delegates to `fields["start"].shape`. Methods: `.to_ragged()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_dataset/_flat_variants.py`.
 - `gvl.FlatAlleles` — two-level flat bytestring for allele fields: `.byte_data` (uint8), `.seq_offsets` (per-variant byte offsets, int64), `.var_offsets` (per-(batch×ploidy)-row variant offsets, int64), `.shape`. Methods: `.to_ragged()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_dataset/_flat_variants.py`.
+- `gvl.DummyVariant` — frozen dataclass used with `with_settings(dummy_variant=...)`. Fields and defaults: `start: int = -1`, `ilen: int = 0`, `dosage: float = 0.0`, `ref: bytes = b"N"`, `alt: bytes = b"N"`, `info: dict = {}`. Unspecified `info` keys default to `0` for integer columns and `NaN` for float columns. Source: `python/genvarloader/_dataset/_flat_variants.py`.
 - `gvl.to_nested_tensor(ragged)` — convert to a PyTorch nested tensor (requires `torch`).
 - `gvl.get_dummy_dataset()` — small in-memory dataset for examples/tests.
 - `gvl.RefDataset` — reference-only dataset (no genotypes).
@@ -318,6 +321,8 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - Missing a `dosage` field on a `RaggedVariants` output you expected? Check `var_fields` — `dosage` must be requested explicitly even if `dosages.npy` exists on disk.
 - `FlatRagged` / `FlatVariants` offsets are **int64**. PyTorch nested tensors require int32 offsets — cast with `.astype(np.int32)` or `tensor.to(torch.int32)` before passing to `torch.nested.narrow`.
 - In `"flat"` mode, tracks and intervals are **not yet flattened** — they still return the same `Ragged`-backed containers as in `"ragged"` mode. Only seqs/haplotypes/annotated-haps/reference and variants outputs are affected.
+- `dummy_variant` padding is **variants-output-only**. Setting `dummy_variant=<DummyVariant>` and then indexing with any other `with_seqs` kind (or no seqs at all) raises `ValueError`. `dummy_variant=False` with a non-variants output is silently ignored.
+- A non-`b"N"` `DummyVariant.alt` (or `.ref`) **is reverse-complemented** on negative-strand regions, exactly like a real variant allele. The default `b"N"` is rc-invariant; use it if you want a strand-neutral sentinel.
 
 ## Maintaining this skill
 
