@@ -31,12 +31,24 @@ def compute_flank_tokens(
     ilens: NDArray[np.integer],  # (n_var,)
     flank_len: int,
     lut: NDArray,
-    row_offsets: NDArray[np.int64],  # (b*p + 1,) per-(instance,ploid) variant offsets
+    row_offsets: NDArray[np.int64],  # (b*p + 1,) variant boundaries per (instance, ploid) row
 ) -> tuple[NDArray, NDArray[np.int64]]:
-    """Ride-along flank tokens: ``[flank5 | flank3]`` (2*flank_len tokens) per
-    variant. Returns ``(token_data, offsets)`` where ``token_data`` is flat
-    ``(n_var * 2 * flank_len,)`` and ``offsets == row_offsets`` (one row per variant,
-    fixed inner dim 2*flank_len)."""
+    """Ride-along flank tokens: ``[flank5 | flank3]`` (``2 * flank_len`` tokens) per
+    variant.
+
+    Returns ``(token_data, offsets)``:
+
+    - ``token_data`` is the flat token buffer, length ``n_var * 2 * flank_len``,
+      laid out variant-major (each variant contributes ``2 * flank_len``
+      contiguous tokens: flank5 then flank3).
+    - ``offsets`` is ``row_offsets`` unchanged (length ``b*p + 1``): it groups
+      *variants* into the ``b*p`` instance/ploid rows. These are variant-level
+      offsets, NOT byte indices into ``token_data`` -- the fixed ``2 * flank_len``
+      inner dimension is carried separately as a trailing regular axis when this
+      buffer is wrapped as ``_Flat.from_offsets(token_data, (b, p, None, 2*L),
+      offsets)`` (see ``get_variants_flat``). The trailing regular axis supplies
+      the per-variant stride, so the offsets stay at variant granularity.
+    """
     starts = np.asarray(starts, np.int32)
     ilens = np.asarray(ilens, np.int32)
     ends = starts - np.minimum(ilens, 0) + 1
