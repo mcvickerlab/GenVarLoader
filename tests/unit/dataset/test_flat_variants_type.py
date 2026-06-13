@@ -299,8 +299,8 @@ def test_get_variants_flat_fills_empty_groups():
     # Without dummy: some groups are empty
     plain = get_variants_flat(haps, idx).to_ragged()
     plain_starts = ak.to_list(plain["start"])
-    # shape is (b=2, p=1, ~v): plain_starts = [[[10], []], [[20, 30], []]]
-    # row [0][0] has 1 variant, row [0][1] is empty, etc.
+    # shape is (b=4, p=1, ~v): plain_starts = [[[10]], [[]], [[20, 30]], [[]]]
+    # idx covers 4 (region, sample) combos; each outer row has p=1 ploidy group.
     assert any(len(g) == 0 for row in plain_starts for g in row)
 
     # With dummy: every group has >= 1 variant
