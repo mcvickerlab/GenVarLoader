@@ -155,7 +155,11 @@ def _gather_v_idxs(
     geno_offset_idx, geno_offsets, geno_v_idxs
 ):  # pragma: no cover - njit
     """Gather per-row variant indices: for each row's offset slice into the
-    sparse arrays, copy its values out into flat ``(data, offsets)``."""
+    sparse arrays, copy its values out into flat ``(data, offsets)``.
+
+    ``geno_offsets`` must be 1-D contiguous (length n_rows + 1).  For the
+    non-contiguous (2, n_rows) starts/stops form use :func:`_gather_v_idxs_ss`.
+    """
     n_rows = geno_offset_idx.shape[0]
     out_offsets = np.empty(n_rows + 1, np.int64)
     out_offsets[0] = 0
@@ -171,6 +175,36 @@ def _gather_v_idxs(
         goi = geno_offset_idx[i]
         s = geno_offsets[goi]
         e = geno_offsets[goi + 1]
+        for k in range(s, e):
+            v_idxs[dst] = geno_v_idxs[k]
+            dst += 1
+    return v_idxs, out_offsets
+
+
+@nb.njit(nogil=True, cache=True)
+def _gather_v_idxs_ss(
+    geno_offset_idx, geno_starts, geno_stops, geno_v_idxs
+):  # pragma: no cover - njit
+    """Like :func:`_gather_v_idxs` but for non-contiguous (starts, stops) offsets.
+
+    ``geno_starts`` and ``geno_stops`` are the two rows of a ``(2, n)`` offset
+    array (``geno_starts = geno_offsets[0]``, ``geno_stops = geno_offsets[1]``).
+    """
+    n_rows = geno_offset_idx.shape[0]
+    out_offsets = np.empty(n_rows + 1, np.int64)
+    out_offsets[0] = 0
+    for i in range(n_rows):
+        goi = geno_offset_idx[i]
+        out_offsets[i + 1] = out_offsets[i] + (
+            geno_stops[goi] - geno_starts[goi]
+        )
+    total = out_offsets[n_rows]
+    v_idxs = np.empty(total, geno_v_idxs.dtype)
+    dst = 0
+    for i in range(n_rows):
+        goi = geno_offset_idx[i]
+        s = geno_starts[goi]
+        e = geno_stops[goi]
         for k in range(s, e):
             v_idxs[dst] = geno_v_idxs[k]
             dst += 1
@@ -224,6 +258,23 @@ def _compact_keep(v_idxs, row_offsets, keep):  # pragma: no cover - njit
     return new_v, new_offsets
 
 
+def _gather_rows(
+    geno_offset_idx: NDArray[np.intp],
+    offsets: NDArray[np.int64],
+    data: NDArray,
+) -> tuple[NDArray, NDArray[np.int64]]:
+    """Dispatch to the correct gather kernel based on offset array shape.
+
+    ``offsets`` may be:
+    - 1-D ``(n + 1,)``: contiguous offsets — use :func:`_gather_v_idxs`.
+    - 2-D ``(2, n)``: non-contiguous starts/stops — use :func:`_gather_v_idxs_ss`.
+    """
+    if offsets.ndim == 1:
+        return _gather_v_idxs(geno_offset_idx, offsets, data)
+    else:
+        return _gather_v_idxs_ss(geno_offset_idx, offsets[0], offsets[1], data)
+
+
 def get_variants_flat(haps: "Haps", idx: NDArray[np.integer]) -> _FlatVariants:
     """Flat-buffer analog of :meth:`Haps._get_variants`: builds a
     :class:`_FlatVariants` with no awkward on the hot path. Re-wrapping the
@@ -249,7 +300,8 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer]) -> _FlatVariants:
     geno_v_idxs = np.asarray(genotypes.data)
 
     # v_idxs: gathered per (b*ploidy) row; row_offsets length b*ploidy + 1.
-    v_idxs, row_offsets = _gather_v_idxs(geno_offset_idx, geno_offsets, geno_v_idxs)
+    # Dispatch on offsets shape: 1-D contiguous vs 2-D starts/stops.
+    v_idxs, row_offsets = _gather_rows(geno_offset_idx, geno_offsets, geno_v_idxs)
 
     # Unfiltered offsets needed for dosage parallel-gather + compaction.
     unfiltered_row_offsets = row_offsets
@@ -273,7 +325,7 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer]) -> _FlatVariants:
         dos_all = np.asarray(haps.dosages.data)
         # The returned row offsets == unfiltered_row_offsets by construction
         # (genotypes and dosages share offset structure), so discard them.
-        dosage_data, _ = _gather_v_idxs(geno_offset_idx, dos_offsets, dos_all)
+        dosage_data, _ = _gather_rows(geno_offset_idx, dos_offsets, dos_all)
 
     # Apply AF compaction to v_idxs / row_offsets / dosage.
     if keep is not None:
