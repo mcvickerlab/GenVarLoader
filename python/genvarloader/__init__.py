@@ -6,7 +6,7 @@ from seqpro.rag import Ragged
 
 from . import data_registry
 from ._bigwig import BigWigs
-from ._dataset._flat_variants import VarWindowOpt
+from ._dataset._flat_variants import DummyVariant, VarWindowOpt
 from ._dataset._flat_variants import _FlatAlleles as FlatAlleles
 from ._dataset._flat_variants import _FlatVariants as FlatVariants
 from ._dataset._flat_variants import _FlatVariantWindows as FlatVariantWindows
@@ -41,6 +41,7 @@ __all__ = [
     "Constant",
     "Dataset",
     "DatasetWithSites",
+    "DummyVariant",
     "FlankSample",
     "FlatAlleles",
     "FlatAnnotatedHaps",

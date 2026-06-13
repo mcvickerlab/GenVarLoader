@@ -108,7 +108,9 @@ def getitem(
         # Convert any still-flat elements (ragged output_length path) to their
         # public Ragged types before reshape/squeeze apply the existing logic.
         recon = tuple(
-            o.to_ragged() if isinstance(o, (_Flat, _FlatAnnotatedHaps)) else o
+            o.to_ragged()
+            if isinstance(o, (_Flat, _FlatAnnotatedHaps, _FlatVariants))
+            else o
             for o in recon
         )
 

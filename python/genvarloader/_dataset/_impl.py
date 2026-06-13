@@ -27,6 +27,7 @@ from .._utils import (
     lengths_to_offsets,
     normalize_contig_name,
 )
+from ._flat_variants import DummyVariant
 from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
 from ._insertion_fill import InsertionFill
 from ._rag_variants import RaggedVariants
@@ -218,6 +219,7 @@ class Dataset:
         flank_length: int | None = None,
         token_alphabet: bytes | None = None,
         unknown_token: int | None = None,
+        dummy_variant: "DummyVariant | Literal[False] | None" = None,
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -259,6 +261,11 @@ class Dataset:
         unknown_token
             Integer token to assign to any byte not present in *token_alphabet*. Must be supplied
             together with *token_alphabet*.
+        dummy_variant
+            A :class:`DummyVariant` to insert into empty (region, sample, ploid) variant
+            groups so every group has at least one variant. Only valid for the variants
+            output (:meth:`with_seqs("variants") <genvarloader.Dataset.with_seqs>`). Pass
+            :code:`False` to disable.
         """
         to_evolve = {}
 
@@ -389,6 +396,20 @@ class Dataset:
                 token_lut=lut,
                 token_dtype=lut_dtype,
             )
+
+        if dummy_variant is not None:
+            if dummy_variant is False:
+                # disable is a no-op on datasets without variants/genotypes
+                if isinstance(self._seqs, Haps):
+                    haps = to_evolve.get("_seqs", self._seqs)
+                    to_evolve["_seqs"] = replace(haps, dummy_variant=None)
+            else:
+                if not isinstance(self._seqs, Haps):
+                    raise ValueError(
+                        "dummy_variant requires a dataset with variants/genotypes."
+                    )
+                haps = to_evolve.get("_seqs", self._seqs)
+                to_evolve["_seqs"] = replace(haps, dummy_variant=dummy_variant)
 
         # If any source state changed, rebuild _recon via the factory.
         if "_seqs" in to_evolve or "_tracks" in to_evolve:
@@ -1704,6 +1725,17 @@ class Dataset:
     ):
         # Thin facade: package state into a QueryView and hand off to the
         # query module's free functions, which carry the actual logic.
+        if (
+            isinstance(self._seqs, Haps)
+            and self._seqs.dummy_variant is not None
+            and self._seqs_kind != "variants"
+        ):
+            raise ValueError(
+                "dummy_variant is only valid for the variants output; "
+                "call with_seqs('variants') (got output kind "
+                f"{self._seqs_kind!r})."
+            )
+
         from ._query import QueryView, getitem
 
         view = QueryView(
