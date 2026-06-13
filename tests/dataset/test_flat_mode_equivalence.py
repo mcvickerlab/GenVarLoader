@@ -54,6 +54,27 @@ def test_a_flat_variants_to_ragged_matches_ragged(snap_dataset, idx):
     assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
 
 
+def test_a_flat_variants_2d_index_matches_ragged(snap_dataset):
+    # Exercise the MULTI-DIM path through _reshape_outer: a genuine 2-D fancy
+    # index (region, sample) produces a multi-dim out_reshape, so _FlatAlleles
+    # must re-append its ragged None just like its _Flat siblings.
+    ds = snap_dataset.with_seqs("variants").with_tracks(False)
+    n_r, n_s = snap_dataset.shape
+    r = np.arange(min(3, n_r))
+    s = np.arange(min(2, n_s))
+    idx = (r[:, None], s[None, :])  # 2-D (region, sample) fancy index
+    ragged = ds[idx]
+    flat = ds.with_output_format("flat")[idx]
+    # Structural invariant: every field (both _Flat and _FlatAlleles) must carry
+    # the ragged None as its trailing axis after the multi-dim out_reshape. A
+    # _FlatAlleles that stored out_reshape verbatim would be missing it.
+    for name, f in flat.fields.items():
+        assert f.shape[-1] is None, f"field {name} shape {f.shape} lost ragged axis"
+        assert f.shape.count(None) == 1, f"field {name} shape {f.shape} not single-ragged"
+    rewrapped = flat.to_ragged()
+    assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
+
+
 def test_a_flat_variants_empty_region_and_ploidy(snap_dataset):
     ds = snap_dataset.with_seqs("variants").with_tracks(False)
     idx = (np.arange(min(6, snap_dataset.shape[0])),)

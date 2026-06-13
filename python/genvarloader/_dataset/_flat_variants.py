@@ -93,8 +93,15 @@ class _FlatAlleles:
         reverse_complement_masked(view, per_allele)  # mutates byte_data in place
         return self
 
-    def reshape(self, shape: tuple[int | None, ...]) -> "_FlatAlleles":
-        return _FlatAlleles(self.byte_data, self.seq_offsets, self.var_offsets, shape)
+    def reshape(self, shape: int | tuple[int, ...]) -> "_FlatAlleles":
+        # Mirror _Flat.reshape: accept outer dims and APPEND our own ragged None.
+        if isinstance(shape, int):
+            shape = (shape,)
+        shape = tuple(shape)
+        if shape and shape[-1] is None:  # be defensive: strip a trailing None
+            shape = shape[:-1]
+        new = shape + (None,)
+        return _FlatAlleles(self.byte_data, self.seq_offsets, self.var_offsets, new)
 
     def squeeze(self, axis: int | None = None) -> "_FlatAlleles":
         fixed = [d for d in self.shape if d is not None]
@@ -144,6 +151,8 @@ class _FlatVariants:
 
 @nb.njit(nogil=True, cache=True)
 def _gather_v_idxs(geno_offset_idx, geno_offsets, geno_v_idxs):  # pragma: no cover - njit
+    """Gather per-row variant indices: for each row's offset slice into the
+    sparse arrays, copy its values out into flat ``(data, offsets)``."""
     n_rows = geno_offset_idx.shape[0]
     out_offsets = np.empty(n_rows + 1, np.int64)
     out_offsets[0] = 0
@@ -165,6 +174,8 @@ def _gather_v_idxs(geno_offset_idx, geno_offsets, geno_v_idxs):  # pragma: no co
 
 @nb.njit(nogil=True, cache=True)
 def _gather_alleles(v_idxs, allele_bytes, allele_offsets):  # pragma: no cover - njit
+    """Gather variable-length allele bytestrings for ``v_idxs`` from the global
+    allele byte buffer into flat ``(data, seq_offsets)``."""
     n = v_idxs.shape[0]
     seq_offsets = np.empty(n + 1, np.int64)
     seq_offsets[0] = 0
@@ -185,6 +196,9 @@ def _gather_alleles(v_idxs, allele_bytes, allele_offsets):  # pragma: no cover -
 
 @nb.njit(nogil=True, cache=True)
 def _compact_keep(v_idxs, row_offsets, keep):  # pragma: no cover - njit
+    """Drop variants where ``keep`` is False, rebuilding row offsets. The first
+    param is per-variant values to compact -- either ``v_idxs`` itself or a
+    parallel array (e.g. gathered dosage values) sharing the same row layout."""
     n_rows = row_offsets.shape[0] - 1
     new_offsets = np.empty(n_rows + 1, np.int64)
     new_offsets[0] = 0
@@ -250,11 +264,9 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer]) -> _FlatVariants:
     if haps.dosages is not None and "dosage" in haps.var_fields:
         dos_offsets = np.asarray(haps.dosages.offsets, np.int64)
         dos_all = np.asarray(haps.dosages.data)
-        dosage_data, dos_row_offsets = _gather_v_idxs(
-            geno_offset_idx, dos_offsets, dos_all
-        )
-        # dos_row_offsets == unfiltered_row_offsets by construction (genotypes and
-        # dosages share offset structure).
+        # The returned row offsets == unfiltered_row_offsets by construction
+        # (genotypes and dosages share offset structure), so discard them.
+        dosage_data, _ = _gather_v_idxs(geno_offset_idx, dos_offsets, dos_all)
 
     # Apply AF compaction to v_idxs / row_offsets / dosage.
     if keep is not None:

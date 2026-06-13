@@ -32,4 +32,8 @@ class Reconstructor(Protocol[T]):
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
         flat: bool = False,
-    ) -> T: ...
+    ) -> T:
+        """``flat`` only changes behavior for :class:`Haps` producing
+        ``RaggedVariants`` (it returns a flat ``_FlatVariants`` instead); all
+        other reconstructors are already flat-native and accept-and-ignore it."""
+        ...
