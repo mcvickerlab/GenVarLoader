@@ -5,7 +5,7 @@ import awkward as ak
 import pytest
 
 from genvarloader import RaggedVariants
-from genvarloader._dataset._flat_variants import _fill_empty_seq
+from genvarloader._dataset._flat_variants import _fill_empty_fixed, _fill_empty_seq
 from genvarloader._dataset._haps import _build_allele_layout
 from genvarloader._ragged import reverse_complement  # the awkward reference
 from seqpro.rag import Ragged
@@ -407,6 +407,19 @@ def test_to_packed_explicit_listarray_variant_level():
     got = rv.to_packed()
     exp = ak.to_packed(ak.Array(rv))
     assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
+
+
+def test_fill_empty_fixed_inserts_unk_block_for_empty_rows():
+    inner = 2  # pretend 2L = 2
+    # 2 rows: row0 empty, row1 has one variant (2 tokens).
+    data = np.array([7, 8], np.int32)        # row1 variant: tokens [7, 8]
+    offsets = np.array([0, 0, 1], np.int64)  # row0 [0,0) empty; row1 [0,1)
+    nd, noff = _fill_empty_fixed(data, offsets, inner, 4)
+    assert nd.dtype == np.int32
+    # row0 gets one dummy variant -> variant counts [1, 1]
+    assert noff.tolist() == [0, 1, 2]
+    # row0's dummy block is [4, 4]; row1 unchanged [7, 8]
+    assert nd.tolist() == [4, 4, 7, 8]
 
 
 def test_fill_empty_seq_preserves_int32_dtype_and_fills_unk():

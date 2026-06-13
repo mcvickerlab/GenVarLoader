@@ -583,6 +583,37 @@ def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):  # pragma: no cover 
     return new_data, new_var, new_seq
 
 
+@nb.njit(nogil=True, cache=True)
+def _fill_empty_fixed(data, offsets, inner, fill):  # pragma: no cover - njit
+    """Fixed-inner-stride analogue of ``_fill_empty_scalar`` for ``flank_tokens``.
+
+    ``data`` holds ``n_var * inner`` tokens (variant-major); ``offsets`` are
+    *variant-level* (``b*p + 1``). Each empty row receives one dummy variant of
+    ``inner`` tokens all equal to ``fill``; non-empty rows pass through.
+    Returns ``(new_data, new_offsets)``."""
+    n_rows = offsets.shape[0] - 1
+    new_offsets = np.empty(n_rows + 1, np.int64)
+    new_offsets[0] = 0
+    for i in range(n_rows):
+        nv = offsets[i + 1] - offsets[i]
+        new_offsets[i + 1] = new_offsets[i] + (nv if nv > 0 else 1)
+    total_vars = new_offsets[n_rows]
+    new_data = np.empty(total_vars * inner, data.dtype)
+    dptr = 0
+    for i in range(n_rows):
+        vs = offsets[i]
+        ve = offsets[i + 1]
+        if ve == vs:
+            for _ in range(inner):
+                new_data[dptr] = fill
+                dptr += 1
+        else:
+            for k in range(vs * inner, ve * inner):
+                new_data[dptr] = data[k]
+                dptr += 1
+    return new_data, new_offsets
+
+
 def get_variants_flat(
     haps: "Haps", idx: NDArray[np.integer], regions=None
 ) -> "_FlatVariants | _FlatVariantWindows":
