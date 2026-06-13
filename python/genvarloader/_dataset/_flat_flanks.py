@@ -22,3 +22,29 @@ def build_token_lut(alphabet: bytes, unknown_token: int) -> tuple[NDArray, np.dt
     for i, b in enumerate(alphabet):
         lut[b] = i
     return lut, np.dtype(dtype)
+
+
+def compute_flank_tokens(
+    reference,
+    v_contigs: NDArray[np.integer],  # (n_var,) contig id per variant
+    starts: NDArray[np.integer],  # (n_var,)
+    ilens: NDArray[np.integer],  # (n_var,)
+    flank_len: int,
+    lut: NDArray,
+    row_offsets: NDArray[np.int64],  # (b*p + 1,) per-(instance,ploid) variant offsets
+) -> tuple[NDArray, NDArray[np.int64]]:
+    """Ride-along flank tokens: ``[flank5 | flank3]`` (2*flank_len tokens) per
+    variant. Returns ``(token_data, offsets)`` where ``token_data`` is flat
+    ``(n_var * 2 * flank_len,)`` and ``offsets == row_offsets`` (one row per variant,
+    fixed inner dim 2*flank_len)."""
+    starts = np.asarray(starts, np.int32)
+    ilens = np.asarray(ilens, np.int32)
+    ends = starts - np.minimum(ilens, 0) + 1
+    f5 = reference.fetch(v_contigs, starts - flank_len, starts).data.view(np.uint8)
+    f3 = reference.fetch(v_contigs, ends, ends + flank_len).data.view(np.uint8)
+    n = starts.shape[0]
+    f5 = f5.reshape(n, flank_len)
+    f3 = f3.reshape(n, flank_len)
+    flank_bytes = np.concatenate([f5, f3], axis=1)  # (n, 2L)
+    tokens = lut[flank_bytes]  # vectorized 256-LUT gather -> lut.dtype
+    return tokens.reshape(-1), np.asarray(row_offsets, np.int64)
