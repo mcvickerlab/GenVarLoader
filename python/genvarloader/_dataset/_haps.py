@@ -525,7 +525,7 @@ class Haps(Reconstructor[_H]):
             if flat:
                 from ._flat_variants import get_variants_flat
 
-                return cast(_H, get_variants_flat(self, idx))
+                return cast(_H, get_variants_flat(self, idx, regions))
             ragv = self._get_variants(idx=idx, regions=None, shifts=None)
             ragv = cast(_H, ragv)
             return ragv

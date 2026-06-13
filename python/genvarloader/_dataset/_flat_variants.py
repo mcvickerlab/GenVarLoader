@@ -219,6 +219,7 @@ class _FlatVariants:
     fields: start/ilen/dosage/info) or _FlatAlleles (alt/ref)."""
 
     fields: dict[str, Any] = field(default_factory=dict)
+    flank_tokens: Any = None  # _Flat | None — ride-along, shape (b, p, ~v, 2L); flat-mode only
 
     @property
     def shape(self) -> tuple[int | None, ...]:
@@ -233,10 +234,34 @@ class _FlatVariants:
         return RaggedVariants(**kw)
 
     def reshape(self, shape) -> "_FlatVariants":
-        return _FlatVariants({k: v.reshape(shape) for k, v in self.fields.items()})
+        new = _FlatVariants(
+            {k: v.reshape(shape) for k, v in self.fields.items()}
+        )
+        if self.flank_tokens is not None:
+            from .._flat import _Flat
+
+            ft = self.flank_tokens
+            inner = ft.shape[-1]  # 2L, fixed
+            outer = shape if isinstance(shape, tuple) else (shape,)
+            new.flank_tokens = _Flat(ft.data, ft.offsets, (*outer, None, inner))
+        return new
 
     def squeeze(self, axis: int | None = None) -> "_FlatVariants":
-        return _FlatVariants({k: v.squeeze(axis) for k, v in self.fields.items()})
+        new = _FlatVariants(
+            {k: v.squeeze(axis) for k, v in self.fields.items()}
+        )
+        if self.flank_tokens is not None:
+            from .._flat import _Flat
+
+            ft = self.flank_tokens
+            inner = ft.shape[-1]
+            outer = [d for d in ft.shape[:-1] if d is not None]
+            if axis is None:
+                outer = [d for d in outer if d != 1]
+            else:
+                del outer[axis]
+            new.flank_tokens = _Flat(ft.data, ft.offsets, (*outer, None, inner))
+        return new
 
     def reverse_masked(self, mask: NDArray[np.bool_]) -> "_FlatVariants":
         # Only alt/ref alleles are reverse-complemented; scalar fields unchanged
@@ -321,7 +346,7 @@ def _compact_keep(v_idxs, row_offsets, keep):  # pragma: no cover - njit
     return new_v, new_offsets
 
 
-def get_variants_flat(haps: "Haps", idx: NDArray[np.integer]) -> _FlatVariants:
+def get_variants_flat(haps: "Haps", idx: NDArray[np.integer], regions=None) -> "_FlatVariants | _FlatVariantWindows":
     """Flat-buffer analog of :meth:`Haps._get_variants`: builds a
     :class:`_FlatVariants` with no awkward on the hot path. Re-wrapping the
     result via :meth:`_FlatVariants.to_ragged` is byte-identical to the awkward
@@ -415,4 +440,33 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer]) -> _FlatVariants:
         info_data = np.asarray(haps.variants.info[k])[v_idxs]
         fields[k] = _Flat.from_offsets(info_data, shape, row_offsets)
 
-    return _FlatVariants(fields)
+    flat = _FlatVariants(fields)
+
+    if haps.flank_length and haps.token_lut is not None and regions is not None:
+        from .._flat import _Flat
+        from ._flat_flanks import compute_flank_tokens, compute_windows
+
+        L = haps.flank_length
+        starts_v = np.asarray(haps.variants.start)[v_idxs]
+        ilens_v = np.asarray(haps.variants.ilen)[v_idxs]
+        regions = np.asarray(regions)
+        group_contigs = np.repeat(regions[:, 0], ploidy)  # (b*p,)
+        v_contigs = np.repeat(group_contigs, np.diff(row_offsets))  # (n_var,)
+
+        if issubclass(haps.kind, _FlatVariantWindows):
+            ref_w, alt_w = compute_windows(
+                haps.reference, v_contigs, starts_v, ilens_v,
+                alt_data, alt_seq_off, L, haps.token_lut, row_offsets,
+            )
+            wshape = (b, ploidy, None, None)
+            ref_w.shape = wshape
+            alt_w.shape = wshape
+            wfields = {k: v for k, v in fields.items() if k not in ("alt", "ref")}
+            return _FlatVariantWindows(wfields, ref_w, alt_w)
+
+        tok, off = compute_flank_tokens(
+            haps.reference, v_contigs, starts_v, ilens_v, L, haps.token_lut, row_offsets,
+        )
+        flat.flank_tokens = _Flat.from_offsets(tok, (b, ploidy, None, 2 * L), off)
+
+    return flat

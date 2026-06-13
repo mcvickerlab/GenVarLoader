@@ -3,6 +3,14 @@ from genvarloader._dataset._flat_flanks import build_token_lut, compute_flank_to
 from genvarloader._dataset._flat_variants import _FlatWindow, _FlatVariantWindows
 
 
+def _flatten_lut_flanks(ref, contigs, starts, ilens, flank_len, lut):
+    """Independent oracle: per-variant [flank5|flank3] tokens, shape (n_var, 2L)."""
+    ends = starts - np.minimum(ilens, 0) + 1
+    f5 = ref.fetch(contigs, starts - flank_len, starts).data.view(np.uint8).reshape(-1, flank_len)
+    f3 = ref.fetch(contigs, ends, ends + flank_len).data.view(np.uint8).reshape(-1, flank_len)
+    return lut[np.concatenate([f5, f3], axis=1)]  # (n_var, 2L)
+
+
 def test_build_token_lut_dna():
     lut, dtype = build_token_lut(b"ACGT", unknown_token=4)
     assert lut.shape == (256,)
@@ -179,3 +187,38 @@ def test_compute_windows_unit(snap_dataset):
         [[0], np.cumsum(2 * 3 + alt_lens)]
     ).astype(np.int64)
     np.testing.assert_array_equal(alt_w.seq_offsets, e_alt_off)
+
+
+def test_flank_tokens_end_to_end_matches_oracle(snap_dataset):
+    import awkward as ak
+
+    L = 5
+    flat_ds = (
+        snap_dataset.with_seqs("variants").with_tracks(False)
+        .with_output_format("flat")
+        .with_settings(flank_length=L, token_alphabet=b"ACGT", unknown_token=4)
+    )
+    rag_ds = snap_dataset.with_seqs("variants").with_tracks(False)
+    idx = ([0, 1, 2], [0, 1, 2])
+
+    flat = flat_ds[idx]
+    rag = rag_ds[idx]
+    assert flat.flank_tokens is not None
+
+    ref = snap_dataset._seqs.reference
+    lut = flat_ds._seqs.token_lut
+    ploidy = snap_dataset._seqs.genotypes.shape[-2]
+
+    # per-variant contigs: region contig repeated by ploidy then by variant counts,
+    # matching get_variants_flat's (b, p, ~v) C-order.
+    ds_idx, _, _ = snap_dataset._idxer.parse_idx(idx)
+    r_idx, _ = np.unravel_index(np.asarray(ds_idx), snap_dataset._idxer.full_shape)
+    region_contigs = snap_dataset._full_regions[r_idx, 0]
+    counts = np.asarray(ak.flatten(ak.num(rag.start, axis=-1), axis=None))
+    starts = np.asarray(ak.flatten(rag.start, axis=None))
+    ilens = np.asarray(ak.flatten(rag.ilen, axis=None))
+    v_contigs = np.repeat(np.repeat(region_contigs, ploidy), counts)
+
+    expected = _flatten_lut_flanks(ref, v_contigs, starts, ilens, L, lut)  # (n_var, 2L)
+    got = np.asarray(flat.flank_tokens.to_ragged().data)  # (n_var, 2L)
+    np.testing.assert_array_equal(got, expected)
