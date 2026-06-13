@@ -92,10 +92,15 @@ def _assemble_alt_windows(f5, f3, alt_data, alt_seq_off, flank_len):
 
 def compute_windows(
     reference,
-    v_contigs, starts, ilens,
-    alt_data, alt_seq_off,
-    flank_len, lut, row_offsets,
-):
+    v_contigs: NDArray[np.integer],
+    starts: NDArray[np.integer],
+    ilens: NDArray[np.integer],
+    alt_data: NDArray[np.uint8],
+    alt_seq_off: NDArray[np.int64],
+    flank_len: int,
+    lut: NDArray,
+    row_offsets: NDArray[np.int64],
+) -> tuple[_FlatWindow, _FlatWindow]:
     """ref_window = tokenized [start-L, end+L) (single contiguous read);
     alt_window  = tokenized flank5 . alt . flank3 (assembly).
 

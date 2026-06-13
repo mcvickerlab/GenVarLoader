@@ -173,3 +173,9 @@ def test_compute_windows_unit(snap_dataset):
     np.testing.assert_array_equal(ref_w.data, e_ref_tok)
     np.testing.assert_array_equal(ref_w.seq_offsets, e_ref_off)
     np.testing.assert_array_equal(alt_w.data, e_alt_tok)
+    # alt_window offsets: per-variant window length = 2*flank_len + alt_len, cumsum from 0
+    alt_lens = np.diff(alt_seq_off)
+    e_alt_off = np.concatenate(
+        [[0], np.cumsum(2 * 3 + alt_lens)]
+    ).astype(np.int64)
+    np.testing.assert_array_equal(alt_w.seq_offsets, e_alt_off)
