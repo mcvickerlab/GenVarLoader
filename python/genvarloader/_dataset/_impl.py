@@ -27,6 +27,7 @@ from .._utils import (
     lengths_to_offsets,
     normalize_contig_name,
 )
+from ._flat_variants import DummyVariant
 from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
 from ._insertion_fill import InsertionFill
 from ._rag_variants import RaggedVariants
@@ -214,6 +215,7 @@ class Dataset:
         var_fields: list[str] | None = None,
         splice_info: str | tuple[str, str] | Literal[False] | None = None,
         var_filter: Literal[False, "exonic"] | None = None,
+        dummy_variant: "DummyVariant | Literal[False] | None" = None,
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -246,6 +248,11 @@ class Dataset:
             If False, splicing will be disabled.
         var_filter
             Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
+        dummy_variant
+            A :class:`DummyVariant` to insert into empty (region, sample, ploid) variant
+            groups so every group has at least one variant. Only valid for the variants
+            output (:meth:`with_seqs("variants") <genvarloader.Dataset.with_seqs>`). Pass
+            :code:`False` to disable.
         """
         to_evolve = {}
 
@@ -344,6 +351,15 @@ class Dataset:
             if var_filter != self._seqs.filter:
                 haps = to_evolve.get("_seqs", self._seqs)
                 to_evolve["_seqs"] = replace(haps, filter=var_filter)
+
+        if dummy_variant is not None:
+            if not isinstance(self._seqs, Haps):
+                raise ValueError(
+                    "dummy_variant requires a dataset with variants/genotypes."
+                )
+            dv = None if dummy_variant is False else dummy_variant
+            haps = to_evolve.get("_seqs", self._seqs)
+            to_evolve["_seqs"] = replace(haps, dummy_variant=dv)
 
         # If any source state changed, rebuild _recon via the factory.
         if "_seqs" in to_evolve or "_tracks" in to_evolve:
@@ -1600,6 +1616,17 @@ class Dataset:
     ):
         # Thin facade: package state into a QueryView and hand off to the
         # query module's free functions, which carry the actual logic.
+        if (
+            isinstance(self._seqs, Haps)
+            and self._seqs.dummy_variant is not None
+            and self._seqs_kind != "variants"
+        ):
+            raise ValueError(
+                "dummy_variant is only valid for the variants output; "
+                "call with_seqs('variants') (got output kind "
+                f"{self._seqs_kind!r})."
+            )
+
         from ._query import QueryView, getitem
 
         view = QueryView(
