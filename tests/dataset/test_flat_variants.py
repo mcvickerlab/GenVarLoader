@@ -416,6 +416,7 @@ def test_to_packed_explicit_listarray_variant_level():
     got = rv.to_packed()
     exp = ak.to_packed(ak.Array(rv))
     assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
+    assert ak.to_list(got["ref"]) == ak.to_list(exp["ref"])
 
 
 def test_fill_empty_fixed_inserts_unk_block_for_empty_rows():
