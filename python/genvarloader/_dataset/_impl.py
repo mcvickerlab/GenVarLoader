@@ -377,6 +377,11 @@ class Dataset:
                 from ._flat_flanks import build_token_lut
 
                 lut, lut_dtype = build_token_lut(token_alphabet, unknown_token)
+            if new_flank_len and lut is None:
+                raise ValueError(
+                    "flank_length requires a token LUT; pass token_alphabet and"
+                    " unknown_token to with_settings(...) (in this or a prior call)."
+                )
             to_evolve["_seqs"] = replace(
                 haps,
                 flank_length=new_flank_len,

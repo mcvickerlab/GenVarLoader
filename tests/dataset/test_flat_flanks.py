@@ -43,3 +43,39 @@ def test_with_settings_flank_length_zero_disables(snap_dataset):
         flank_length=0, token_alphabet=b"ACGT", unknown_token=4
     )
     assert ds._seqs.flank_length == 0
+
+
+def test_with_settings_token_alphabet_requires_unknown_token(snap_dataset):
+    import pytest
+
+    with pytest.raises(ValueError, match="set together"):
+        snap_dataset.with_seqs("variants").with_settings(token_alphabet=b"ACGT")
+
+
+def test_with_settings_flank_requires_genotypes(reference, source_bed, tmp_path):
+    import pytest
+    import pyBigWig
+
+    # Open a reference-only dataset (no variants) so _seqs is Ref, not Haps.
+    # gvl.write requires at least tracks or variants, so provide a minimal BigWig.
+    import genvarloader as gvl
+
+    bw_path = tmp_path / "dummy.bw"
+    contig_sizes = [("chr1", 2_000_000), ("chr2", 2_000_000)]
+    with pyBigWig.open(str(bw_path), "w") as bw:
+        bw.addHeader(contig_sizes, maxZooms=0)
+        bw.addEntries(["chr1"], [499_990], ends=[500_030], values=[1.0])
+
+    out = tmp_path / "ref_only.gvl"
+    gvl.write(path=out, bed=source_bed, tracks=gvl.BigWigs("sig", {"dummy": str(bw_path)}))
+    ds = gvl.Dataset.open(out, reference=reference)
+    # _seqs is Ref here; flank settings require Haps (genotypes present).
+    with pytest.raises(ValueError, match="genotypes"):
+        ds.with_settings(flank_length=5, token_alphabet=b"ACGT", unknown_token=4)
+
+
+def test_with_settings_flank_length_without_lut_errors(snap_dataset):
+    import pytest
+
+    with pytest.raises(ValueError, match="token LUT"):
+        snap_dataset.with_seqs("variants").with_settings(flank_length=5)

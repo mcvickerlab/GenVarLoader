@@ -256,8 +256,11 @@ class Haps(Reconstructor[_H]):
     var_fields: list[str] = field(default_factory=lambda: ["alt", "ilen", "start"])
     available_var_fields: list[str] = field(init=False)
     flank_length: int | None = None
+    """Number of reference flank bases on each side for flank/window tokenization. ``0``/``None`` disables."""
     token_lut: NDArray | None = None
+    """256-entry byte->token lookup table (see ``build_token_lut``). Set together with ``token_dtype``."""
     token_dtype: np.dtype | None = None
+    """Output dtype of tokens produced via ``token_lut``."""
 
     def __post_init__(self):
         self.n_variants = ak.num(self.genotypes, -1).to_numpy()
