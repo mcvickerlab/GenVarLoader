@@ -112,6 +112,26 @@ def test_flat_buffered_rejects_variants_flank_tokens(mode):
         ds.to_dataloader(mode=mode, batch_size=2, buffer_bytes=4 * 1024 * 1024)
 
 
+@pytest.mark.parametrize("mode", ["buffered", "double_buffered"])
+def test_flat_buffered_rejects_variant_windows(mode):
+    """flat + 'variant-windows' output is unsupported over the buffered transport
+    (the producer schema does not carry the VarWindowOpt); to_dataloader must
+    reject it up front rather than crash mid-iteration."""
+    import genvarloader as gvl
+
+    ds = (
+        gvl.get_dummy_dataset()
+        .with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            gvl.VarWindowOpt(flank_length=3, token_alphabet=b"ACGT", unknown_token=4),
+        )
+    )
+    with pytest.raises(ValueError, match="variant-windows"):
+        ds.to_dataloader(mode=mode, batch_size=2, buffer_bytes=4 * 1024 * 1024)
+
+
 def test_flat_buffered_plain_variants_still_works():
     """Regression guard: flat + variants WITHOUT flank tokens must NOT be rejected."""
     import genvarloader as gvl
