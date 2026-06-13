@@ -414,8 +414,10 @@ class Dataset:
                     "Non-deterministic algorithms are not supported with splicing. Please set deterministic to True."
                 )
 
-            if self.sequence_type == "variants":
-                raise ValueError("Splicing is not supported with variants.")
+            if self.sequence_type in ("variants", "variant-windows"):
+                raise ValueError(
+                    "Splicing is not supported with variants or variant-windows."
+                )
 
         if self.jitter < 0:
             raise ValueError(f"Jitter ({self.jitter}) must be a non-negative integer.")

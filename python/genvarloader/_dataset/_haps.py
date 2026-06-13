@@ -521,7 +521,8 @@ class Haps(Reconstructor[_H]):
         if issubclass(self.kind, (RaggedVariants, _FlatVariantWindows)):
             if splice_plan is not None:
                 raise NotImplementedError(
-                    "Spliced output is not supported for RaggedVariants."
+                    "Spliced output is not supported for the 'variants' or"
+                    " 'variant-windows' sequence types."
                 )
             if issubclass(self.kind, _FlatVariantWindows) and not flat:
                 raise ValueError(
