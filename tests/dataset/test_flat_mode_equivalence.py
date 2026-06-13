@@ -54,6 +54,25 @@ def test_a_flat_variants_to_ragged_matches_ragged(snap_dataset, idx):
     assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
 
 
+def test_a_flat_variants_scalar_scalar_index_matches_ragged(snap_dataset):
+    ds = snap_dataset.with_seqs("variants").with_tracks(False)
+    # both region AND sample scalar -> triggers squeeze(0) on the variant output
+    ragged = ds[0, 0]
+    rewrapped = ds.with_output_format("flat")[0, 0].to_ragged()
+    assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
+
+
+def test_a_flat_variants_scalar_scalar_index_nonempty_matches_ragged(snap_dataset):
+    # Second scalar-scalar case with NON-EMPTY alleles, so actual allele bytes are
+    # exercised through the squeezed (b, p, None) -> (p, None) path, not just empty
+    # lists. (region=0, sample=2) is known to carry variants in snap_dataset.
+    ds = snap_dataset.with_seqs("variants").with_tracks(False)
+    ragged = ds[0, 2]
+    assert any(len(p) > 0 for p in ak.to_list(ragged["alt"])), "expected non-empty alt"
+    rewrapped = ds.with_output_format("flat")[0, 2].to_ragged()
+    assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
+
+
 def test_a_flat_variants_2d_index_matches_ragged(snap_dataset):
     # Exercise the MULTI-DIM path through _reshape_outer: a genuine 2-D fancy
     # index (region, sample) produces a multi-dim out_reshape, so _FlatAlleles

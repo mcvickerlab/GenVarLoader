@@ -39,34 +39,37 @@ class _FlatAlleles:
         return fixed[-1] if len(fixed) >= 2 else 1
 
     def to_ragged(self):
-        from awkward.contents import RegularArray
+        import awkward as ak
+        from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
+        from awkward.index import Index
 
-        from ._haps import _build_allele_layout
-
-        # Build the canonical (outer_p, p, ~v, ~l) layout where the innermost
-        # RegularArray groups the b*p rows by ploidy.
-        arr = _build_allele_layout(
+        # Build the ragged variant-row node (leaf -> bytestring -> variant-row
+        # ListOffsetArray) giving (n_groups, ~v, ~l) where n_groups =
+        # len(var_offsets) - 1. This mirrors the inner part of
+        # _build_allele_layout but WITHOUT the ploidy RegularArray wrap.
+        leaf = NumpyArray(
             np.ascontiguousarray(self.byte_data, np.uint8),
-            np.asarray(self.seq_offsets, np.int64),
-            np.asarray(self.var_offsets, np.int64),
-            self.ploidy,
+            parameters={"__array__": "byte"},
         )
-        # If there are additional leading fixed dims (e.g. (6, 3, 2)), rebuild the
-        # regular-axis stack so the outer shape matches self.shape exactly. Mirrors
-        # RaggedVariants.reshape: strip all RegularArrays down to the variant-row
-        # node, then wrap by reversed(shape[1:]) (= every fixed dim except the
-        # leading one, which is implied by the remaining group count).
+        l_content = ListOffsetArray(
+            Index(np.asarray(self.seq_offsets, np.int64)),
+            leaf,
+            parameters={"__array__": "bytestring"},
+        )
+        vl_content = ListOffsetArray(
+            Index(np.asarray(self.var_offsets, np.int64)), l_content
+        )
+        # Wrap with RegularArrays for the INNER fixed dims (everything except the
+        # outermost, which is implied by the remaining group count). Shape-driven:
+        # this makes to_ragged() agnostic to ploidy after a scalar-scalar squeeze.
+        #   fixed=[b,p]   -> reversed([p])   -> RegularArray(vl,p) -> (b,p,~v,~l)
+        #   fixed=[p]     -> reversed([])    -> no wrap            -> (p,~v,~l)
+        #   fixed=[b,s,p] -> reversed([s,p]) -> nested             -> (b,s,p,~v,~l)
+        node = vl_content
         fixed = [d for d in self.shape if d is not None]
-        if len(fixed) > 2:
-            import awkward as ak
-
-            node = arr.layout
-            while isinstance(node, RegularArray):
-                node = node.content
-            for len_ in reversed(fixed[1:]):
-                node = RegularArray(node, len_)
-            arr = ak.Array(node)
-        return arr
+        for size in reversed(fixed[1:]):
+            node = RegularArray(node, size)
+        return ak.Array(node)
 
     def reverse_masked(self, mask: NDArray[np.bool_]) -> "_FlatAlleles":
         """DNA reverse-complement the mask-selected rows' alleles, in place.
