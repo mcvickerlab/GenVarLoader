@@ -1,5 +1,6 @@
 import numpy as np
 from genvarloader._dataset._flat_flanks import build_token_lut, compute_flank_tokens
+from genvarloader._dataset._flat_variants import _FlatWindow, _FlatVariantWindows
 
 
 def test_build_token_lut_dna():
@@ -110,3 +111,23 @@ def test_compute_flank_tokens_unit(snap_dataset):
     expected = _oracle_flank_tokens(ref, v_contigs, starts, ilens, 3, lut)
     np.testing.assert_array_equal(tokens.reshape(-1, 6), expected)
     np.testing.assert_array_equal(off, row_offsets)
+
+
+def test_flat_window_to_ragged_roundtrip():
+    import awkward as ak
+
+    # two groups (b=2, p=1), variant counts [2, 1]; window lens [3, 4 | 2]
+    token_data = np.arange(3 + 4 + 2, dtype=np.uint8)
+    seq_offsets = np.array([0, 3, 7, 9], dtype=np.int64)  # per-variant
+    var_offsets = np.array([0, 2, 3], dtype=np.int64)  # per group
+    shape = (2, 1, None, None)
+    w = _FlatWindow(token_data, seq_offsets, var_offsets, shape)
+    rag = w.to_ragged()  # ak.Array (2, 1, ~v, ~win) — two ragged axes
+    assert rag.ndim == 4
+    # element-identical content after wrapping
+    np.testing.assert_array_equal(
+        np.asarray(ak.flatten(rag, axis=None)).view(np.uint8), token_data
+    )
+    # structure preserved: variant counts per (b, p) and window length per variant
+    assert ak.to_list(ak.num(rag, axis=2)) == [[2], [1]]
+    assert ak.to_list(ak.num(rag, axis=3)) == [[[3, 4]], [[2]]]

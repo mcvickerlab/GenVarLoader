@@ -117,6 +117,103 @@ class _FlatAlleles:
 
 
 @dataclass(slots=True)
+class _FlatWindow:
+    """Two-level flat token buffer for ref/alt windows, shape (b, p, ~v, ~win).
+
+    Mirrors _FlatAlleles but `data` holds tokens (configured int dtype), not bytes,
+    so to_ragged() drops the byte/bytestring awkward parameters. Both inner axes
+    (variant count and window length) are ragged, so to_ragged() returns a raw
+    awkward Array (seqpro Ragged supports only one ragged axis).
+    """
+
+    data: NDArray  # tokens (uint8 or int32), flat
+    seq_offsets: NDArray[np.int64]  # per-variant window offsets, n_variants + 1
+    var_offsets: NDArray[np.int64]  # per (instance, ploid) offsets, b*p + 1
+    shape: tuple[int | None, ...]
+
+    def to_ragged(self):
+        import awkward as ak
+        from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
+        from awkward.index import Index
+
+        leaf = NumpyArray(np.ascontiguousarray(self.data))
+        l_content = ListOffsetArray(
+            Index(np.asarray(self.seq_offsets, np.int64)), leaf
+        )
+        vl_content = ListOffsetArray(
+            Index(np.asarray(self.var_offsets, np.int64)), l_content
+        )
+        node = vl_content
+        fixed = [d for d in self.shape if d is not None]
+        for size in reversed(fixed[1:]):
+            node = RegularArray(node, size)
+        return ak.Array(node)
+
+    def reshape(self, shape) -> "_FlatWindow":
+        if isinstance(shape, int):
+            shape = (shape,)
+        shape = tuple(shape)
+        # strip any trailing None defensively, then append our two ragged axes
+        while shape and shape[-1] is None:
+            shape = shape[:-1]
+        return _FlatWindow(
+            self.data, self.seq_offsets, self.var_offsets, (*shape, None, None)
+        )
+
+    def squeeze(self, axis: int | None = None) -> "_FlatWindow":
+        fixed = [d for d in self.shape if d is not None]
+        if axis is None:
+            fixed = [d for d in fixed if d != 1]
+        else:
+            del fixed[axis]
+        return _FlatWindow(
+            self.data, self.seq_offsets, self.var_offsets, (*fixed, None, None)
+        )
+
+
+@dataclass(slots=True)
+class _FlatVariantWindows:
+    """Window-mode variants output: scalar fields + ref/alt token windows.
+
+    Raw alleles are intentionally absent (folded into the windows). In flat output
+    mode this object is returned to the caller directly (the query boundary does not
+    convert it). Reverse-complement is intentionally NOT supported here: windows are
+    reference-oriented (see spec).
+    """
+
+    fields: dict[str, Any]  # start / ilen / dosage / info -> _Flat
+    ref_window: _FlatWindow
+    alt_window: _FlatWindow
+
+    @property
+    def shape(self) -> tuple[int | None, ...]:
+        return self.fields["start"].shape
+
+    def to_ragged(self):
+        # Windows are doubly-ragged -> raw awkward Arrays; scalar fields -> Ragged.
+        # Returned as a plain dict of ragged parts (lightweight container; the flat
+        # object itself is the primary public surface in flat output mode).
+        out = {k: v.to_ragged() for k, v in self.fields.items()}
+        out["ref_window"] = self.ref_window.to_ragged()
+        out["alt_window"] = self.alt_window.to_ragged()
+        return out
+
+    def reshape(self, shape) -> "_FlatVariantWindows":
+        return _FlatVariantWindows(
+            {k: v.reshape(shape) for k, v in self.fields.items()},
+            self.ref_window.reshape(shape),
+            self.alt_window.reshape(shape),
+        )
+
+    def squeeze(self, axis: int | None = None) -> "_FlatVariantWindows":
+        return _FlatVariantWindows(
+            {k: v.squeeze(axis) for k, v in self.fields.items()},
+            self.ref_window.squeeze(axis),
+            self.alt_window.squeeze(axis),
+        )
+
+
+@dataclass(slots=True)
 class _FlatVariants:
     """Flat analog of RaggedVariants. `fields` maps field name -> _Flat (scalar
     fields: start/ilen/dosage/info) or _FlatAlleles (alt/ref)."""
