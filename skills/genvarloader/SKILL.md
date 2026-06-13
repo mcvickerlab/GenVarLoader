@@ -153,6 +153,29 @@ Without `reference=`, a genotypes-only dataset opens with the **`"variants"`** v
 
 Returns either a `RaggedDataset` or `ArrayDataset` (frozen dataclass views) based on `with_len`. See `docs/source/dataset.md` for diagrams.
 
+`with_output_format(fmt)` selects the container type returned by eager indexing:
+
+| `fmt`      | Container types returned                                                   | Default? |
+|------------|----------------------------------------------------------------------------|----------|
+| `"ragged"` | Awkward-backed `Ragged` / `RaggedVariants` / `RaggedAnnotatedHaps`         | Yes      |
+| `"flat"`   | Pure-numpy `FlatRagged` / `FlatVariants` / `FlatAnnotatedHaps`             | No       |
+
+In `"flat"` mode the hot path is zero-awkward; the returned containers carry `.data` (flat numpy array) and `.offsets` (int64). All flat types expose `.to_ragged()`, `.to_fixed(length)`, and `.to_padded(pad_value)` as escape hatches back to dense or awkward-backed forms.
+
+```python
+ds_flat = ds.with_output_format("flat")
+result = ds_flat[0:8, :]   # FlatRagged or FlatAnnotatedHaps or FlatVariants
+# direct tensorization — no awkward round-trip
+import torch
+t = torch.from_numpy(result.data)
+# or convert back
+ragged = result.to_ragged()
+```
+
+`with_output_format` is orthogonal to and composes with `with_len` and `subset_to`.
+
+**Scope note:** only seqs/haplotypes/annotated-haps/reference and variants outputs are flattened. Tracks and intervals are **not** yet flattened — they still return ragged containers in `"flat"` mode.
+
 ## Track insertion fill (only when haps + tracks together)
 
 Indels make track length differ from reference length. `Dataset.with_insertion_fill(fill)` controls what gets written into inserted positions. Only valid when the dataset returns **both** haplotypes and tracks — pure-ref and pure-hap datasets ignore it (raises if attempted).
@@ -238,6 +261,10 @@ Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (use
 - `gvl.Reference.from_path(fasta, contigs=None)` — wrap a FASTA (path to a `.fa`/`.fa.bgz`, or a `.gvlfa` cache dir). Builds/reuses a sibling `.gvlfa` cache directory (self-describing, fingerprint-validated; legacy `.fa.gvl` caches auto-migrate). The cache is built atomically (temp + `os.replace`) under a best-effort lock, so concurrent builders sharing one reference are safe; the cache **auto-rebuilds** from its source when stale or missing.
 - `gvl.read_bedlike(path)` / `gvl.with_length(bed, L)` — BED helpers (re-exported from `seqpro`).
 - `gvl.Ragged`, `gvl.RaggedAnnotatedHaps`, `gvl.RaggedVariants`, `gvl.RaggedIntervals` — ragged return containers.
+- `gvl.FlatRagged` — flat analog of `Ragged`: `.data` (flat numpy array), `.offsets` (int64), `.shape`. Methods: `.to_ragged()`, `.to_fixed(length)`, `.to_padded(pad_value)`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_flat.py`.
+- `gvl.FlatAnnotatedHaps` — flat analog of `RaggedAnnotatedHaps`: fields `.haps`, `.var_idxs`, `.ref_coords` (each a `FlatRagged`). Methods: `.to_ragged()`, `.to_fixed(length)`, `.to_padded()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_flat.py`.
+- `gvl.FlatVariants` — flat analog of `RaggedVariants`: `.fields` dict mapping field names to `FlatRagged` (scalar fields: `start`/`ilen`/`dosage`/info) or `FlatAlleles` (`alt`/`ref`). `.shape` delegates to `fields["start"].shape`. Methods: `.to_ragged()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_dataset/_flat_variants.py`.
+- `gvl.FlatAlleles` — two-level flat bytestring for allele fields: `.byte_data` (uint8), `.seq_offsets` (per-variant byte offsets, int64), `.var_offsets` (per-(batch×ploidy)-row variant offsets, int64), `.shape`. Methods: `.to_ragged()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_dataset/_flat_variants.py`.
 - `gvl.to_nested_tensor(ragged)` — convert to a PyTorch nested tensor (requires `torch`).
 - `gvl.get_dummy_dataset()` — small in-memory dataset for examples/tests.
 - `gvl.RefDataset` — reference-only dataset (no genotypes).
@@ -274,6 +301,8 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 | Track re-alignment internals          | `python/genvarloader/_dataset/_tracks.py`, `_reconstruct.py` |
 | Insertion fill internals              | `python/genvarloader/_dataset/_insertion_fill.py`      |
 | SVAR back-reference / migration       | `python/genvarloader/_dataset/_svar_link.py`           |
+| Flat-buffer ragged containers         | `python/genvarloader/_flat.py`                         |
+| Flat variants + alleles types         | `python/genvarloader/_dataset/_flat_variants.py`       |
 
 ## Common gotchas
 
@@ -287,6 +316,8 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - Splicing is a read-time setting on a *flat* BED of exons — do not pre-concatenate exons before `gvl.write`.
 - `extend_to_length=False` at write time will produce haplotypes shorter than the BED region when deletions are present; downstream code must tolerate `<` region length.
 - Missing a `dosage` field on a `RaggedVariants` output you expected? Check `var_fields` — `dosage` must be requested explicitly even if `dosages.npy` exists on disk.
+- `FlatRagged` / `FlatVariants` offsets are **int64**. PyTorch nested tensors require int32 offsets — cast with `.astype(np.int32)` or `tensor.to(torch.int32)` before passing to `torch.nested.narrow`.
+- In `"flat"` mode, tracks and intervals are **not yet flattened** — they still return the same `Ragged`-backed containers as in `"ragged"` mode. Only seqs/haplotypes/annotated-haps/reference and variants outputs are affected.
 
 ## Maintaining this skill
 
