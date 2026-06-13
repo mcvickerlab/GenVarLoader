@@ -125,9 +125,7 @@ def test_flat_buffered_rejects_variant_windows(mode):
         .with_output_format("flat")
         .with_seqs(
             "variant-windows",
-            gvl.VarWindowOpt(
-                flank_length=3, token_alphabet=b"ACGT", unknown_token=4
-            ),
+            gvl.VarWindowOpt(flank_length=3, token_alphabet=b"ACGT", unknown_token=4),
         )
     )
     with pytest.raises(ValueError, match="variant-windows"):
