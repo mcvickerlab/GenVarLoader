@@ -121,11 +121,17 @@ def slice_chunk(chunk_output, batch_size: int):
     from seqpro.rag import Ragged
     from ._types import AnnotatedHaps
     from ._ragged import RaggedAnnotatedHaps
+    from ._flat import _Flat, _FlatAnnotatedHaps
+    from ._dataset._flat_variants import _FlatVariants
     import awkward as ak
+
+    _FLAT_TYPES = (_Flat, _FlatAnnotatedHaps, _FlatVariants)
 
     def _len(arr) -> int:
         """Return the outer (instance) dimension length."""
         if isinstance(arr, (np.ndarray, Ragged, RaggedAnnotatedHaps)):
+            return arr.shape[0]
+        if isinstance(arr, _FLAT_TYPES):
             return arr.shape[0]
         if isinstance(arr, ak.Array):
             # RaggedVariants is an ak.Array subclass; len() works.
@@ -135,6 +141,8 @@ def slice_chunk(chunk_output, batch_size: int):
         raise TypeError(f"slice_chunk: cannot determine length of {type(arr)}")
 
     def _slice_one(arr, start: int, stop: int):
+        if isinstance(arr, _FLAT_TYPES):
+            return arr[start:stop]
         if isinstance(arr, np.ndarray):
             return arr[start:stop]
         if isinstance(arr, Ragged):

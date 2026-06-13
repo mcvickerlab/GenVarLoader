@@ -179,3 +179,43 @@ def test_plan_single_partial_batch_smaller_than_batch_size():
     chunks = list(planner)
     assert sum(len(cr) for cr, _, _ in chunks) == 2
     assert sum(nb for _, _, nb in chunks) == 1
+
+
+@pytest.mark.parametrize("seq_kind", ["reference", "haplotypes", "annotated", "variants"])
+def test_slice_chunk_flat_matches_direct(seq_kind):
+    """slice_chunk on a flat chunk yields mini-batches whose .to_ragged()
+    equals direct ragged indexing of the same instances."""
+    import awkward as ak
+    from seqpro.rag import Ragged
+
+    import genvarloader as gvl
+    from genvarloader._chunked import slice_chunk
+
+    ds = gvl.get_dummy_dataset().with_seqs(seq_kind).with_tracks(False)
+    if seq_kind in ("haplotypes", "annotated"):
+        ds = ds.with_settings(deterministic=True)
+
+    n = min(4, int(np.prod(ds.shape)))
+    flat_idx = np.arange(n, dtype=np.int64)
+    r, s = np.unravel_index(flat_idx, ds.shape)
+    chunk = ds.with_output_format("flat")[r, s]
+
+    batch_size = 2
+    batches = list(slice_chunk(chunk, batch_size))
+    assert len(batches) == (n + batch_size - 1) // batch_size
+
+    pos = 0
+    for batch in batches:
+        width = min(batch_size, n - pos)
+        rr, ss = np.unravel_index(flat_idx[pos : pos + width], ds.shape)
+        ref = ds[rr, ss]
+        got = batch.to_ragged()
+        if seq_kind == "variants":
+            assert ak.to_list(got) == ak.to_list(ref)
+        elif seq_kind == "annotated":
+            np.testing.assert_array_equal(np.asarray(got.haps.data), np.asarray(ref.haps.data))
+            np.testing.assert_array_equal(np.asarray(got.haps.offsets), np.asarray(ref.haps.offsets))
+        else:
+            np.testing.assert_array_equal(np.asarray(got.data), np.asarray(ref.data))
+            np.testing.assert_array_equal(np.asarray(got.offsets), np.asarray(ref.offsets))
+        pos += width
