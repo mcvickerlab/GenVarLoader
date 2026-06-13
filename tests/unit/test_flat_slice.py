@@ -33,7 +33,6 @@ def test_flat_slice_matches_direct_index(seq_kind, sl):
     r_idx, s_idx = np.unravel_index(flat_idx, ds.shape)
 
     flat = ds.with_output_format("flat")[r_idx, s_idx]
-    ragged_full = ds[r_idx, s_idx]
 
     sliced = flat[sl]
     # Direct-index the SAME instance sub-range in ragged mode for the ground truth.
@@ -51,7 +50,9 @@ def test_flat_slice_matches_direct_index(seq_kind, sl):
         else:
             _ak_eq(got, ragged_sub)
     elif seq_kind == "annotated":
-        if sub.size:
+        if sub.size == 0:
+            assert got.haps.shape[0] == 0
+        else:
             _rag_eq(got.haps, ragged_sub.haps)
             _rag_eq(got.var_idxs, ragged_sub.var_idxs)
             _rag_eq(got.ref_coords, ragged_sub.ref_coords)

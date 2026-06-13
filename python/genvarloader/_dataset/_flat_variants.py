@@ -151,6 +151,8 @@ class _FlatAlleles:
                 f"_FlatAlleles supports only instance-axis slicing, got {key!r}"
             )
         n_inst = self.shape[0]
+        if n_inst is None:
+            raise ValueError("_FlatAlleles.__getitem__: leading axis is the ragged axis")
         start, stop, step = key.indices(n_inst)
         if step != 1:
             raise ValueError("_FlatAlleles slicing supports step=1 only")
@@ -335,6 +337,15 @@ class _FlatVariants:
         return new
 
     def __getitem__(self, key) -> "_FlatVariants":
+        # flank_tokens (shape (b, ploidy, None, 2L), ragged axis in the middle)
+        # cannot be sliced by the instance-axis _Flat.__getitem__, and the
+        # buffered transport path does not carry it. Slicing a _FlatVariants that
+        # has flank_tokens is unsupported rather than silently lossy.
+        if self.flank_tokens is not None:
+            raise NotImplementedError(
+                "Instance-axis slicing of _FlatVariants with flank_tokens is not "
+                "supported; flank tokens are not carried on the buffered transport path."
+            )
         return _FlatVariants({k: v[key] for k, v in self.fields.items()})
 
     def reverse_masked(self, mask: NDArray[np.bool_]) -> "_FlatVariants":
