@@ -55,3 +55,33 @@ def test_buffered_rejects_nondeterministic_for_haplotypes():
     )
     with pytest.raises(ValueError, match="deterministic"):
         ds.to_dataloader(mode="buffered", batch_size=2)
+
+
+@pytest.mark.parametrize("seq_kind", ["reference", "haplotypes", "annotated", "variants"])
+def test_buffered_flat_matches_ragged(seq_kind):
+    """mode='buffered' in flat output yields Flat* mini-batches whose
+    .to_ragged() equals the ragged-mode buffered output, batch for batch.
+
+    Note: Ragged slicing returns non-copying views that keep the full backing
+    buffer, so we compare via to_padded() which densifies only the valid rows.
+    """
+    import awkward as ak
+    from seqpro.rag import to_padded
+
+    base = gvl.get_dummy_dataset().with_seqs(seq_kind).with_tracks(False)
+    if seq_kind in ("haplotypes", "annotated"):
+        base = base.with_settings(deterministic=True)
+
+    common = dict(batch_size=2, shuffle=False, drop_last=True, buffer_bytes=10 * 1024 * 1024)
+    ragged_batches = list(base.to_dataloader(mode="buffered", **common))
+    flat_batches = list(base.with_output_format("flat").to_dataloader(mode="buffered", **common))
+
+    assert len(flat_batches) == len(ragged_batches)
+    for rb, fb in zip(ragged_batches, flat_batches):
+        got = fb.to_ragged()
+        if seq_kind == "variants":
+            assert ak.to_list(got) == ak.to_list(rb)
+        elif seq_kind == "annotated":
+            np.testing.assert_array_equal(to_padded(got.haps, b"N"), to_padded(rb.haps, b"N"))
+        else:
+            np.testing.assert_array_equal(to_padded(got, b"N"), to_padded(rb, b"N"))
