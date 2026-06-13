@@ -242,7 +242,8 @@ class _FlatVariants:
 
             ft = self.flank_tokens
             inner = ft.shape[-1]  # 2L, fixed
-            outer = shape if isinstance(shape, tuple) else (shape,)
+            # Normalize like _Flat.reshape (accept int or any sequence of dims).
+            outer = (shape,) if isinstance(shape, int) else tuple(shape)
             new.flank_tokens = _Flat(ft.data, ft.offsets, (*outer, None, inner))
         return new
 
@@ -443,7 +444,6 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer], regions=None) -> "
     flat = _FlatVariants(fields)
 
     if haps.flank_length and haps.token_lut is not None and regions is not None:
-        from .._flat import _Flat
         from ._flat_flanks import compute_flank_tokens, compute_windows
 
         L = haps.flank_length
@@ -458,6 +458,7 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer], regions=None) -> "
                 haps.reference, v_contigs, starts_v, ilens_v,
                 alt_data, alt_seq_off, L, haps.token_lut, row_offsets,
             )
+            # Overwrite the placeholder shape compute_windows set on each window.
             wshape = (b, ploidy, None, None)
             ref_w.shape = wshape
             alt_w.shape = wshape
