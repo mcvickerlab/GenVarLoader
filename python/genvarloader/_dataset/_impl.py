@@ -625,6 +625,11 @@ class Dataset:
                     " with_seqs('variant-windows', VarWindowOpt(flank_length=...,"
                     " token_alphabet=..., unknown_token=...))."
                 )
+            if window_opt.ref == "allele" and self._seqs.variants.ref is None:
+                raise ValueError(
+                    "VarWindowOpt(ref='allele') needs REF alleles, but this dataset"
+                    " has none. Use ref='window', or write the dataset with REF."
+                )
         else:
             assert_never(kind)
 
