@@ -640,6 +640,9 @@ class Dataset:
         if kind == "variant-windows":
             from ._flat_flanks import build_token_lut
 
+            # Both invariants were established in the validation branch above; the
+            # assert narrows them for the type checker (Ref has no flank fields).
+            assert isinstance(self._seqs, Haps) and window_opt is not None
             lut, lut_dtype = build_token_lut(
                 window_opt.token_alphabet, window_opt.unknown_token
             )
