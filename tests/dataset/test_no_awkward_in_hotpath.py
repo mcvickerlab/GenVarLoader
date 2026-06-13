@@ -243,3 +243,26 @@ def test_variants_ragged_minimal_awkward(monkeypatch, guard_dataset):
         "(to_packed/where/flatten/to_numpy); a removed kernel is still being called. "
         "Note: ak.zip (RaggedVariants record construction) is intentionally NOT patched."
     )
+
+
+def test_flat_variants_dummy_fill_has_no_awkward(monkeypatch, guard_dataset):
+    """Flat variant decode with dummy fill must dispatch zero awkward kernels.
+
+    ``with_settings(dummy_variant=...)`` routes empty (region, sample, ploid) slots
+    through the numba fill kernel in ``get_variants_flat``.  None of the patched
+    awkward kernels (to_numpy, to_packed, flatten, where) should be called.
+    """
+    calls = _install_ak_counters(monkeypatch)
+    ds = (
+        guard_dataset.with_seqs("variants")
+        .with_tracks(False)
+        .with_output_format("flat")
+        .with_settings(dummy_variant=gvl.DummyVariant(start=-1, alt=b"N", ref=b"N"))
+    )
+    n_regions = min(4, ds.shape[0])
+    regions = list(range(n_regions))
+    samples = [i % ds.shape[1] for i in range(n_regions)]
+    _ = ds[regions, samples]
+    assert calls["n"] == 0, (
+        f"flat dummy-fill decode dispatched {calls['n']} awkward kernel(s)"
+    )

@@ -105,3 +105,29 @@ def test_a_flat_variants_empty_region_and_ploidy(snap_dataset):
     ragged = ds[idx]
     rewrapped = ds.with_output_format("flat")[idx].to_ragged()
     assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
+
+
+# ---------------------------------------------------------------------------
+# Task-B: dummy-fill parity tests
+# ---------------------------------------------------------------------------
+
+import genvarloader as gvl  # noqa: E402 — appended after prior imports
+
+
+@pytest.mark.parametrize("idx", IDX)
+def test_b_dummy_fill_flat_to_ragged_matches_ragged(snap_dataset, idx):
+    dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N", ilen=0)
+    ds = snap_dataset.with_seqs("variants").with_tracks(False).with_settings(dummy_variant=dv)
+    ragged = ds[idx]                                   # ragged mode (flat decode + to_ragged)
+    rewrapped = ds.with_output_format("flat")[idx].to_ragged()
+    assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
+
+
+def test_b_dummy_fill_no_empty_groups(snap_dataset):
+    dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N")
+    ds = snap_dataset.with_seqs("variants").with_tracks(False).with_settings(dummy_variant=dv)
+    idx = (np.arange(min(6, snap_dataset.shape[0])),)
+    rv = ds[idx]
+    for ploid_groups in ak.to_list(rv["start"]):
+        for g in ploid_groups:
+            assert len(g) >= 1
