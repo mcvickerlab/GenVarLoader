@@ -55,7 +55,9 @@ def test_flat_variants_squeeze_leading_axis():
     # Build _FlatAlleles with shape (1, 2, 1, None) — leading size-1 axis
     data_bytes = [b"ACG", b"T", b"GG"]
     byte_data = np.frombuffer(b"".join(data_bytes), np.uint8).copy()
-    seq_off = np.concatenate([[0], np.cumsum([len(r) for r in data_bytes])]).astype(np.int64)
+    seq_off = np.concatenate([[0], np.cumsum([len(r) for r in data_bytes])]).astype(
+        np.int64
+    )
     alt = _FlatAlleles(
         byte_data=byte_data,
         seq_offsets=seq_off,
@@ -72,7 +74,9 @@ def test_flat_variants_squeeze_leading_axis():
 
     ref_bytes = [b"A", b"CC", b"T"]
     ref_byte_data = np.frombuffer(b"".join(ref_bytes), np.uint8).copy()
-    ref_seq_off = np.concatenate([[0], np.cumsum([len(r) for r in ref_bytes])]).astype(np.int64)
+    ref_seq_off = np.concatenate([[0], np.cumsum([len(r) for r in ref_bytes])]).astype(
+        np.int64
+    )
     ref = _FlatAlleles(
         byte_data=ref_byte_data,
         seq_offsets=ref_seq_off,

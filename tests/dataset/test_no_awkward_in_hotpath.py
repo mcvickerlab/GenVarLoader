@@ -197,7 +197,11 @@ def test_flat_variants_decode_has_no_awkward(monkeypatch, guard_dataset):
     """
     calls = _install_ak_counters(monkeypatch)
 
-    ds = guard_dataset.with_seqs("variants").with_tracks(False).with_output_format("flat")
+    ds = (
+        guard_dataset.with_seqs("variants")
+        .with_tracks(False)
+        .with_output_format("flat")
+    )
     n_regions = min(4, ds.shape[0])
     regions = list(range(n_regions))
     samples = [i % ds.shape[1] for i in range(n_regions)]

@@ -1,4 +1,5 @@
 """flat-mode output, re-wrapped via .to_ragged(), must be byte-identical to ragged mode."""
+
 from __future__ import annotations
 
 import awkward as ak
@@ -16,8 +17,10 @@ def _to_plain(obj):
     """Normalize a ragged/annot/flat object into dict of ndarrays for comparison."""
     if isinstance(obj, RaggedAnnotatedHaps):
         return {
-            "haps": np.asarray(obj.haps.data), "haps_off": np.asarray(obj.haps.offsets),
-            "vidx": np.asarray(obj.var_idxs.data), "pos": np.asarray(obj.ref_coords.data),
+            "haps": np.asarray(obj.haps.data),
+            "haps_off": np.asarray(obj.haps.offsets),
+            "vidx": np.asarray(obj.var_idxs.data),
+            "pos": np.asarray(obj.ref_coords.data),
         }
     if isinstance(obj, Ragged):
         return {"data": np.asarray(obj.data), "off": np.asarray(obj.offsets)}
@@ -48,8 +51,8 @@ def _rv_to_lists(rv: RaggedVariants) -> dict:
 @pytest.mark.parametrize("idx", IDX)
 def test_a_flat_variants_to_ragged_matches_ragged(snap_dataset, idx):
     ds = snap_dataset.with_seqs("variants").with_tracks(False)
-    ragged = ds[idx]                                  # RaggedVariants (current path)
-    flat = ds.with_output_format("flat")[idx]         # _FlatVariants
+    ragged = ds[idx]  # RaggedVariants (current path)
+    flat = ds.with_output_format("flat")[idx]  # _FlatVariants
     rewrapped = flat.to_ragged()
     assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
 
@@ -89,7 +92,9 @@ def test_a_flat_variants_2d_index_matches_ragged(snap_dataset):
     # _FlatAlleles that stored out_reshape verbatim would be missing it.
     for name, f in flat.fields.items():
         assert f.shape[-1] is None, f"field {name} shape {f.shape} lost ragged axis"
-        assert f.shape.count(None) == 1, f"field {name} shape {f.shape} not single-ragged"
+        assert f.shape.count(None) == 1, (
+            f"field {name} shape {f.shape} not single-ragged"
+        )
     rewrapped = flat.to_ragged()
     assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
 

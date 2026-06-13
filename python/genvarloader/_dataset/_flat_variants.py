@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from ._haps import Haps
 
 
-
 @dataclass(slots=True)
 class _FlatAlleles:
     """Two-level flat bytestring for an alt/ref allele field, shape (b, p, ~v, ~l).
@@ -112,8 +111,9 @@ class _FlatAlleles:
             fixed = [d for d in fixed if d != 1]
         else:
             del fixed[axis]
-        return _FlatAlleles(self.byte_data, self.seq_offsets, self.var_offsets,
-                            (*fixed, None))
+        return _FlatAlleles(
+            self.byte_data, self.seq_offsets, self.var_offsets, (*fixed, None)
+        )
 
 
 @dataclass(slots=True)
@@ -139,9 +139,7 @@ class _FlatVariants:
         return _FlatVariants({k: v.reshape(shape) for k, v in self.fields.items()})
 
     def squeeze(self, axis: int | None = None) -> "_FlatVariants":
-        return _FlatVariants(
-            {k: v.squeeze(axis) for k, v in self.fields.items()}
-        )
+        return _FlatVariants({k: v.squeeze(axis) for k, v in self.fields.items()})
 
     def reverse_masked(self, mask: NDArray[np.bool_]) -> "_FlatVariants":
         # Only alt/ref alleles are reverse-complemented; scalar fields unchanged
@@ -153,7 +151,9 @@ class _FlatVariants:
 
 
 @nb.njit(nogil=True, cache=True)
-def _gather_v_idxs(geno_offset_idx, geno_offsets, geno_v_idxs):  # pragma: no cover - njit
+def _gather_v_idxs(
+    geno_offset_idx, geno_offsets, geno_v_idxs
+):  # pragma: no cover - njit
     """Gather per-row variant indices: for each row's offset slice into the
     sparse arrays, copy its values out into flat ``(data, offsets)``."""
     n_rows = geno_offset_idx.shape[0]
@@ -161,7 +161,9 @@ def _gather_v_idxs(geno_offset_idx, geno_offsets, geno_v_idxs):  # pragma: no co
     out_offsets[0] = 0
     for i in range(n_rows):
         goi = geno_offset_idx[i]
-        out_offsets[i + 1] = out_offsets[i] + (geno_offsets[goi + 1] - geno_offsets[goi])
+        out_offsets[i + 1] = out_offsets[i] + (
+            geno_offsets[goi + 1] - geno_offsets[goi]
+        )
     total = out_offsets[n_rows]
     v_idxs = np.empty(total, geno_v_idxs.dtype)
     dst = 0
@@ -184,7 +186,9 @@ def _gather_alleles(v_idxs, allele_bytes, allele_offsets):  # pragma: no cover -
     seq_offsets[0] = 0
     for i in range(n):
         v = v_idxs[i]
-        seq_offsets[i + 1] = seq_offsets[i] + (allele_offsets[v + 1] - allele_offsets[v])
+        seq_offsets[i + 1] = seq_offsets[i] + (
+            allele_offsets[v + 1] - allele_offsets[v]
+        )
     data = np.empty(seq_offsets[n], np.uint8)
     dst = 0
     for i in range(n):
