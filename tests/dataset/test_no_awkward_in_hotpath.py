@@ -188,6 +188,29 @@ def test_haps_ragged_no_awkward(monkeypatch, guard_dataset):
     )
 
 
+def test_flat_variants_decode_has_no_awkward(monkeypatch, guard_dataset):
+    """Flat variant decode must dispatch zero awkward kernels.
+
+    ``with_output_format("flat")`` routes ``ds[...]`` through ``get_variants_flat``
+    which is pure-numpy/numba.  None of the patched awkward kernels
+    (to_numpy, to_packed, flatten, where) should be called.
+    """
+    calls = _install_ak_counters(monkeypatch)
+
+    ds = guard_dataset.with_seqs("variants").with_tracks(False).with_output_format("flat")
+    n_regions = min(4, ds.shape[0])
+    regions = list(range(n_regions))
+    samples = [i % ds.shape[1] for i in range(n_regions)]
+
+    _ = ds[regions, samples]
+
+    assert calls["n"] == 0, (
+        f"flat variant decode dispatched {calls['n']} awkward kernel(s) "
+        "(to_numpy/to_packed/flatten/where); get_variants_flat has a residual "
+        "awkward call that must be wrapped in np.asarray."
+    )
+
+
 def test_variants_ragged_minimal_awkward(monkeypatch, guard_dataset):
     """Variants gather + rc_ + to_packed must dispatch no awkward kernels.
 
