@@ -694,9 +694,7 @@ def test_dummy_variant_windows_fill_empty_region_all_unk(snap_dataset):
         pytest.skip("no empty (region, sample) variant set in this fixture")
     L = 5
     ploidy = snap_dataset._seqs.genotypes.shape[-2]
-    opt = VarWindowOpt(
-        flank_length=L, token_alphabet=b"ACGT", unknown_token=4
-    )
+    opt = VarWindowOpt(flank_length=L, token_alphabet=b"ACGT", unknown_token=4)
     flat_ds = (
         snap_dataset.with_output_format("flat")
         .with_tracks(False)

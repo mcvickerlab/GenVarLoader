@@ -422,7 +422,7 @@ def test_to_packed_explicit_listarray_variant_level():
 def test_fill_empty_fixed_inserts_unk_block_for_empty_rows():
     inner = 2  # pretend 2L = 2
     # 2 rows: row0 empty, row1 has one variant (2 tokens).
-    data = np.array([7, 8], np.int32)        # row1 variant: tokens [7, 8]
+    data = np.array([7, 8], np.int32)  # row1 variant: tokens [7, 8]
     offsets = np.array([0, 0, 1], np.int64)  # row0 [0,0) empty; row1 [0,1)
     nd, noff = _fill_empty_fixed(data, offsets, inner, 4)
     assert nd.dtype == np.int32
@@ -434,10 +434,10 @@ def test_fill_empty_fixed_inserts_unk_block_for_empty_rows():
 
 def test_fill_empty_seq_preserves_int32_dtype_and_fills_unk():
     # Two (b*p) rows: row 0 empty, row 1 has one 2-token variant.
-    data = np.array([7, 8], np.int32)         # row 1's single variant tokens
-    var_offsets = np.array([0, 0, 1], np.int64)   # row0: [0,0) empty; row1: [0,1)
-    seq_offsets = np.array([0, 2], np.int64)      # variant 0 spans data[0:2]
-    dummy = np.array([4, 4, 4], np.int32)         # all-unk window, len 3
+    data = np.array([7, 8], np.int32)  # row 1's single variant tokens
+    var_offsets = np.array([0, 0, 1], np.int64)  # row0: [0,0) empty; row1: [0,1)
+    seq_offsets = np.array([0, 2], np.int64)  # variant 0 spans data[0:2]
+    dummy = np.array([4, 4, 4], np.int32)  # all-unk window, len 3
     nd, nvar, nseq = _fill_empty_seq(data, var_offsets, seq_offsets, dummy)
     assert nd.dtype == np.int32
     # row0 got one dummy variant of length 3; row1 unchanged (one 2-token variant)
@@ -476,7 +476,7 @@ def test_flatvariantwindows_fill_empty_groups_all_unk():
     # alt_window: row0 dummy window len 2L + len("N") = 11, all unk=4
     w = out.alt_window
     assert w.var_offsets.tolist() == [0, 1, 2]
-    assert w.seq_offsets.tolist() == [0, 11, 14]   # dummy(11) then row1's window(3)
+    assert w.seq_offsets.tolist() == [0, 11, 14]  # dummy(11) then row1's window(3)
     assert w.data[:11].tolist() == [4] * 11
     assert w.data[11:].tolist() == [5, 6, 7]
     assert w.data.dtype == np.int32
@@ -489,7 +489,7 @@ def test_flatvariants_fill_empty_groups_fills_flank_tokens():
     )
     alt = _FlatAlleles(
         np.frombuffer(b"A", np.uint8).copy(),
-        np.array([0, 1], np.int64),   # seq offsets
+        np.array([0, 1], np.int64),  # seq offsets
         np.array([0, 0, 1], np.int64),  # var offsets (row0 empty)
         (1, 1, None),
     )
