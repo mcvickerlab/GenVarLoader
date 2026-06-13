@@ -1,6 +1,12 @@
 import numpy as np
 from genvarloader._dataset._flat_flanks import build_token_lut, compute_flank_tokens, compute_windows
 from genvarloader._dataset._flat_variants import _FlatWindow, _FlatVariantWindows
+from genvarloader._dataset._flat_flanks import (
+    compute_ref_window,
+    compute_alt_window,
+    tokenize_alleles,
+)
+from genvarloader._dataset._flat_variants import VarWindowOpt
 
 
 def _flatten_lut_flanks(ref, contigs, starts, ilens, flank_len, lut):
@@ -274,3 +280,76 @@ def test_variant_windows_reshape_preserves_ploidy(snap_dataset):
     # to_ragged must still work (offsets/data consistent after reshape)
     out.ref_window.to_ragged()
     out.alt_window.to_ragged()
+
+
+def test_varwindowopt_defaults():
+    opt = VarWindowOpt(flank_length=5, token_alphabet=b"ACGT", unknown_token=4)
+    assert opt.ref == "window" and opt.alt == "window"
+    opt2 = VarWindowOpt(flank_length=5, token_alphabet=b"ACGT", unknown_token=4,
+                        ref="allele", alt="window")
+    assert opt2.ref == "allele"
+
+
+def test_compute_ref_alt_window_split_matches_compute_windows(snap_dataset):
+    # compute_windows must equal (compute_ref_window, compute_alt_window)
+    from genvarloader._dataset._flat_flanks import compute_windows
+
+    haps = snap_dataset.with_seqs("variants").with_settings(
+        flank_length=3, token_alphabet=b"ACGT", unknown_token=4
+    )._seqs
+    ref, lut = haps.reference, haps.token_lut
+    v_contigs = np.array([0, 0], dtype=np.int32)
+    starts = np.array([10, 20], dtype=np.int32)
+    ilens = np.array([0, -2], dtype=np.int32)
+    alt_data = np.frombuffer(b"ACT", dtype=np.uint8).copy()
+    alt_seq_off = np.array([0, 2, 3], dtype=np.int64)
+    row_offsets = np.array([0, 2], dtype=np.int64)
+
+    ref_w, alt_w = compute_windows(
+        ref, v_contigs, starts, ilens, alt_data, alt_seq_off, 3, lut, row_offsets
+    )
+    ref_w2 = compute_ref_window(ref, v_contigs, starts, ilens, 3, lut, row_offsets)
+    alt_w2 = compute_alt_window(
+        ref, v_contigs, starts, ilens, alt_data, alt_seq_off, 3, lut, row_offsets
+    )
+    np.testing.assert_array_equal(ref_w.data, ref_w2.data)
+    np.testing.assert_array_equal(ref_w.seq_offsets, ref_w2.seq_offsets)
+    np.testing.assert_array_equal(alt_w.data, alt_w2.data)
+    np.testing.assert_array_equal(alt_w.seq_offsets, alt_w2.seq_offsets)
+
+
+def test_tokenize_alleles_bare(snap_dataset):
+    haps = snap_dataset.with_seqs("variants").with_settings(
+        flank_length=3, token_alphabet=b"ACGT", unknown_token=4
+    )._seqs
+    lut = haps.token_lut
+    alt_data = np.frombuffer(b"ACT", dtype=np.uint8).copy()
+    alt_seq_off = np.array([0, 2, 3], dtype=np.int64)
+    row_offsets = np.array([0, 2], dtype=np.int64)
+    w = tokenize_alleles(alt_data, alt_seq_off, lut, row_offsets)
+    # bare allele tokens == LUT applied directly to allele bytes, no flanks
+    np.testing.assert_array_equal(w.data, lut[alt_data])
+    np.testing.assert_array_equal(w.seq_offsets, alt_seq_off)
+    np.testing.assert_array_equal(w.var_offsets, row_offsets)
+
+
+def test_flat_variant_windows_optional_fields():
+    # _FlatVariantWindows now holds optional ref_window/alt_window/ref/alt
+    from genvarloader._dataset._flat_variants import _FlatWindow, _FlatVariantWindows
+    from genvarloader._flat import _Flat
+
+    data = np.arange(4, dtype=np.uint8)
+    seq_off = np.array([0, 2, 4], dtype=np.int64)
+    var_off = np.array([0, 2], dtype=np.int64)
+    w = _FlatWindow(data, seq_off, var_off, (1, 1, None, None))
+    start = _Flat.from_offsets(np.array([10, 20]), (1, 1, None), var_off)
+    # ref as window, alt as bare allele
+    fvw = _FlatVariantWindows({"start": start}, ref_window=w, alt=w)
+    assert fvw.ref_window is not None and fvw.alt is not None
+    assert fvw.alt_window is None and fvw.ref is None
+    rag = fvw.to_ragged()
+    assert "ref_window" in rag and "alt" in rag
+    assert "alt_window" not in rag and "ref" not in rag
+    # reshape/squeeze only act on present fields
+    fvw.reshape((1, 1))
+    fvw.squeeze(0)

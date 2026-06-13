@@ -90,6 +90,69 @@ def _assemble_alt_windows(f5, f3, alt_data, alt_seq_off, flank_len):
     return out, out_off
 
 
+def compute_ref_window(
+    reference,
+    v_contigs: NDArray[np.integer],
+    starts: NDArray[np.integer],
+    ilens: NDArray[np.integer],
+    flank_len: int,
+    lut: NDArray,
+    row_offsets: NDArray[np.int64],
+) -> "_FlatWindow":
+    """ref window = tokenized single contiguous read ``[start-L, end+L)``."""
+    starts = np.asarray(starts, np.int32)
+    ilens = np.asarray(ilens, np.int32)
+    ends = starts - np.minimum(ilens, 0) + 1
+    rw = reference.fetch(v_contigs, starts - flank_len, ends + flank_len)
+    ref_tok = lut[rw.data.view(np.uint8)]
+    return _FlatWindow(
+        ref_tok, np.asarray(rw.offsets, np.int64),
+        np.asarray(row_offsets, np.int64), (None,),
+    )
+
+
+def compute_alt_window(
+    reference,
+    v_contigs: NDArray[np.integer],
+    starts: NDArray[np.integer],
+    ilens: NDArray[np.integer],
+    alt_data: NDArray[np.uint8],
+    alt_seq_off: NDArray[np.int64],
+    flank_len: int,
+    lut: NDArray,
+    row_offsets: NDArray[np.int64],
+) -> "_FlatWindow":
+    """alt window = tokenized ``flank5 . alt . flank3`` assembly."""
+    starts = np.asarray(starts, np.int32)
+    ilens = np.asarray(ilens, np.int32)
+    ends = starts - np.minimum(ilens, 0) + 1
+    f5 = reference.fetch(v_contigs, starts - flank_len, starts).data.view(np.uint8)
+    f3 = reference.fetch(v_contigs, ends, ends + flank_len).data.view(np.uint8)
+    alt_bytes, alt_off = _assemble_alt_windows(
+        np.ascontiguousarray(f5), np.ascontiguousarray(f3),
+        np.asarray(alt_data, np.uint8), np.asarray(alt_seq_off, np.int64), flank_len,
+    )
+    alt_tok = lut[alt_bytes]
+    return _FlatWindow(
+        alt_tok, alt_off, np.asarray(row_offsets, np.int64), (None,),
+    )
+
+
+def tokenize_alleles(
+    allele_data: NDArray[np.uint8],
+    allele_seq_off: NDArray[np.int64],
+    lut: NDArray,
+    row_offsets: NDArray[np.int64],
+) -> "_FlatWindow":
+    """Bare tokenized allele (no flanks) as a two-level ``_FlatWindow``: just the
+    LUT applied to the gathered allele bytes, with the allele byte offsets."""
+    tok = lut[np.asarray(allele_data, np.uint8)]
+    return _FlatWindow(
+        tok, np.asarray(allele_seq_off, np.int64),
+        np.asarray(row_offsets, np.int64), (None,),
+    )
+
+
 def compute_windows(
     reference,
     v_contigs: NDArray[np.integer],
@@ -101,31 +164,9 @@ def compute_windows(
     lut: NDArray,
     row_offsets: NDArray[np.int64],
 ) -> tuple[_FlatWindow, _FlatWindow]:
-    """ref_window = tokenized [start-L, end+L) (single contiguous read);
-    alt_window  = tokenized flank5 . alt . flank3 (assembly).
-
-    Returns (ref_window, alt_window) as _FlatWindow with placeholder shape
-    ``(None,)``; the caller (get_variants_flat) overwrites ``.shape`` with the
-    real ``(b, p, None, None)``."""
-    starts = np.asarray(starts, np.int32)
-    ilens = np.asarray(ilens, np.int32)
-    ends = starts - np.minimum(ilens, 0) + 1
-
-    rw = reference.fetch(v_contigs, starts - flank_len, ends + flank_len)
-    ref_tok = lut[rw.data.view(np.uint8)]
-    ref_window = _FlatWindow(
-        ref_tok, np.asarray(rw.offsets, np.int64),
-        np.asarray(row_offsets, np.int64), (None,),
+    """ref_window = [start-L, end+L) read; alt_window = flank5 . alt . flank3.
+    Thin wrapper over compute_ref_window / compute_alt_window."""
+    return (
+        compute_ref_window(reference, v_contigs, starts, ilens, flank_len, lut, row_offsets),
+        compute_alt_window(reference, v_contigs, starts, ilens, alt_data, alt_seq_off, flank_len, lut, row_offsets),
     )
-
-    f5 = reference.fetch(v_contigs, starts - flank_len, starts).data.view(np.uint8)
-    f3 = reference.fetch(v_contigs, ends, ends + flank_len).data.view(np.uint8)
-    alt_bytes, alt_off = _assemble_alt_windows(
-        np.ascontiguousarray(f5), np.ascontiguousarray(f3),
-        np.asarray(alt_data, np.uint8), np.asarray(alt_seq_off, np.int64), flank_len,
-    )
-    alt_tok = lut[alt_bytes]
-    alt_window = _FlatWindow(
-        alt_tok, alt_off, np.asarray(row_offsets, np.int64), (None,),
-    )
-    return ref_window, alt_window

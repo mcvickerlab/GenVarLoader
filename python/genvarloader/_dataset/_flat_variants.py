@@ -4,7 +4,7 @@ no awkward on the hot path. Converts to RaggedVariants only via to_ragged()."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numba as nb
 import numpy as np
@@ -171,45 +171,71 @@ class _FlatWindow:
         )
 
 
+@dataclass(frozen=True)
+class VarWindowOpt:
+    """Options for ``with_seqs('variant-windows')``.
+
+    Bundles every variant-window setting in one place so they are explicit
+    rather than inherited from ``with_settings``. ``ref`` and ``alt`` are chosen
+    independently: ``"window"`` emits the flanked, tokenized window (ref =
+    ``[start-L, end+L)`` reference read; alt = ``flank5 . alt . flank3``), while
+    ``"allele"`` emits the bare tokenized allele with no flanks.
+    """
+
+    flank_length: int
+    token_alphabet: bytes
+    unknown_token: int
+    ref: Literal["window", "allele"] = "window"
+    alt: Literal["window", "allele"] = "window"
+
+
+_WINDOW_FIELD_NAMES = ("ref_window", "alt_window", "ref", "alt")
+
+
 @dataclass(slots=True)
 class _FlatVariantWindows:
-    """Window-mode variants output: scalar fields + ref/alt token windows.
+    """Window-mode variants output: scalar fields + per-allele token buffers.
 
-    Raw alleles are intentionally absent (folded into the windows). In flat output
-    mode this object is returned to the caller directly (the query boundary does not
-    convert it). Reverse-complement is intentionally NOT supported here: windows are
-    reference-oriented (see spec).
+    Each allele is emitted either as a flanked window (``ref_window`` /
+    ``alt_window``) or a bare tokenized allele (``ref`` / ``alt``); the unused
+    slot of each pair is ``None``. Raw (byte) alleles are intentionally absent.
+    Returned directly in flat output mode (the query boundary never converts it).
+    Reverse-complement is intentionally NOT supported (reference-oriented).
     """
 
     fields: dict[str, Any]  # start / ilen / dosage / info -> _Flat
-    ref_window: _FlatWindow
-    alt_window: _FlatWindow
+    ref_window: _FlatWindow | None = None
+    alt_window: _FlatWindow | None = None
+    ref: _FlatWindow | None = None  # bare tokenized ref allele (no flanks)
+    alt: _FlatWindow | None = None  # bare tokenized alt allele (no flanks)
 
     @property
     def shape(self) -> tuple[int | None, ...]:
         return self.fields["start"].shape
 
+    def _present(self) -> dict[str, "_FlatWindow"]:
+        return {
+            n: getattr(self, n)
+            for n in _WINDOW_FIELD_NAMES
+            if getattr(self, n) is not None
+        }
+
     def to_ragged(self):
-        # Windows are doubly-ragged -> raw awkward Arrays; scalar fields -> Ragged.
-        # Returned as a plain dict of ragged parts (lightweight container; the flat
-        # object itself is the primary public surface in flat output mode).
         out = {k: v.to_ragged() for k, v in self.fields.items()}
-        out["ref_window"] = self.ref_window.to_ragged()
-        out["alt_window"] = self.alt_window.to_ragged()
+        for n, w in self._present().items():
+            out[n] = w.to_ragged()
         return out
 
     def reshape(self, shape) -> "_FlatVariantWindows":
+        present = {n: w.reshape(shape) for n, w in self._present().items()}
         return _FlatVariantWindows(
-            {k: v.reshape(shape) for k, v in self.fields.items()},
-            self.ref_window.reshape(shape),
-            self.alt_window.reshape(shape),
+            {k: v.reshape(shape) for k, v in self.fields.items()}, **present
         )
 
     def squeeze(self, axis: int | None = None) -> "_FlatVariantWindows":
+        present = {n: w.squeeze(axis) for n, w in self._present().items()}
         return _FlatVariantWindows(
-            {k: v.squeeze(axis) for k, v in self.fields.items()},
-            self.ref_window.squeeze(axis),
-            self.alt_window.squeeze(axis),
+            {k: v.squeeze(axis) for k, v in self.fields.items()}, **present
         )
 
 
