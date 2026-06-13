@@ -236,6 +236,68 @@ def test_fill_empty_groups_noop_when_no_empties():
     assert ak.to_list(filled.to_ragged()["start"]) == [[3], [7]]
 
 
+def test_gather_rows_1d_vs_2d_dispatch():
+    """_gather_rows dispatches correctly for both 1D contiguous offsets and 2D
+    starts/stops. Both representations of the same logical ragged layout must
+    produce identical gathered results, and the result must match the expected
+    hand-computed values.
+
+    Layout: 4 rows with variant-index counts [2, 0, 3, 1].
+    geno_v_idxs = [10, 11,   20, 21, 22,   30]
+    contiguous offsets (1D): [0, 2, 2, 5, 6]   (length n_rows + 1)
+    starts/stops (2D):
+      starts = [0, 2, 2, 5]
+      stops  = [2, 2, 5, 6]
+
+    geno_offset_idx selects rows [2, 0, 3] (reorder, skip row 1).
+    Expected gather:
+      row 2: variants [20, 21, 22]
+      row 0: variants [10, 11]
+      row 3: variants [30]
+    => v_idxs  = [20, 21, 22, 10, 11, 30]
+    => offsets = [0, 3, 5, 6]
+    """
+    from genvarloader._dataset._flat_variants import (
+        _gather_rows,
+        _gather_v_idxs_ss,
+    )
+
+    geno_v_idxs = np.array([10, 11, 20, 21, 22, 30], np.int32)
+    offsets_1d = np.array([0, 2, 2, 5, 6], np.int64)
+
+    # Build equivalent 2D (2, n) starts/stops
+    starts = offsets_1d[:-1]  # [0, 2, 2, 5]
+    stops = offsets_1d[1:]    # [2, 2, 5, 6]
+    offsets_2d = np.stack([starts, stops])  # shape (2, 4)
+
+    geno_offset_idx = np.array([2, 0, 3], np.intp)
+
+    # Expected golden values
+    expected_v_idxs = np.array([20, 21, 22, 10, 11, 30], np.int32)
+    expected_offsets = np.array([0, 3, 5, 6], np.int64)
+
+    # 1D path
+    v_1d, off_1d = _gather_rows(geno_offset_idx, offsets_1d, geno_v_idxs)
+    np.testing.assert_array_equal(v_1d, expected_v_idxs, err_msg="1D v_idxs mismatch")
+    np.testing.assert_array_equal(off_1d, expected_offsets, err_msg="1D offsets mismatch")
+
+    # 2D path
+    v_2d, off_2d = _gather_rows(geno_offset_idx, offsets_2d, geno_v_idxs)
+    np.testing.assert_array_equal(v_2d, expected_v_idxs, err_msg="2D v_idxs mismatch")
+    np.testing.assert_array_equal(off_2d, expected_offsets, err_msg="2D offsets mismatch")
+
+    # 1D and 2D must agree with each other
+    np.testing.assert_array_equal(v_1d, v_2d, err_msg="1D and 2D v_idxs disagree")
+    np.testing.assert_array_equal(off_1d, off_2d, err_msg="1D and 2D offsets disagree")
+
+    # Also test _gather_v_idxs_ss directly against the golden value
+    v_ss, off_ss = _gather_v_idxs_ss(
+        geno_offset_idx, offsets_2d[0], offsets_2d[1], geno_v_idxs
+    )
+    np.testing.assert_array_equal(v_ss, expected_v_idxs, err_msg="_gather_v_idxs_ss v_idxs mismatch")
+    np.testing.assert_array_equal(off_ss, expected_offsets, err_msg="_gather_v_idxs_ss offsets mismatch")
+
+
 def test_get_variants_flat_fills_empty_groups():
     """get_variants_flat with haps.dummy_variant set fills empty (b*p) groups.
 
