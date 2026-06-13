@@ -253,3 +253,24 @@ def test_variant_windows_requires_flat_output(snap_dataset):
     )  # output_format defaults to "ragged"
     with pytest.raises(ValueError, match="flat"):
         _ = ds[[0, 1], [0, 1]]
+
+
+def test_variant_windows_reshape_preserves_ploidy(snap_dataset):
+    # A 2-D index (out_reshape != None) drives the _reshape_outer path. Regression
+    # for a bug where windows dropped the ploidy dim during reshape.
+    ds = (
+        snap_dataset.with_tracks(False)
+        .with_output_format("flat")
+        .with_settings(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
+        .with_seqs("variant-windows")
+    )
+    ploidy = snap_dataset._seqs.genotypes.shape[-2]
+    out = ds[[[0, 1]], [[0, 1]]]  # out_reshape == (1, 2)
+    # scalar start field shape: (1, 2, ploidy, None)
+    assert out.shape == (1, 2, ploidy, None)
+    # windows carry an extra ragged window axis: (1, 2, ploidy, None, None)
+    assert out.ref_window.shape == (1, 2, ploidy, None, None)
+    assert out.alt_window.shape == (1, 2, ploidy, None, None)
+    # to_ragged must still work (offsets/data consistent after reshape)
+    out.ref_window.to_ragged()
+    out.alt_window.to_ragged()

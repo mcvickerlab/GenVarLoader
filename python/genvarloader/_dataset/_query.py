@@ -136,10 +136,11 @@ def _reshape_outer(o, out_reshape: tuple[int, ...]):
     shape (which already ends in ``None``) would yield a double ragged axis.
     For those we drop the trailing ``None`` and pass only the outer dims.
     """
-    if isinstance(o, _FlatVariantWindows):
-        # shape is (b, p, ~v, ~win) — drop the two trailing None dims
-        return o.reshape(out_reshape + o.shape[1:-2])
-    if isinstance(o, (_Flat, _FlatAnnotatedHaps, _FlatVariants)):
+    if isinstance(o, (_Flat, _FlatAnnotatedHaps, _FlatVariants, _FlatVariantWindows)):
+        # _FlatVariantWindows.shape mirrors _FlatVariants ((b, p, None) — one None,
+        # taken from its scalar `start` field), so it shares this branch: drop the
+        # single trailing None and pass only the outer fixed dims; reshape() re-appends
+        # its own ragged axis/axes.
         return o.reshape(out_reshape + o.shape[1:-1])
     return o.reshape(out_reshape + o.shape[1:])  # type: ignore[bad-argument-type, no-matching-overload]  # heterogeneous reshape() across array kinds; shape tuple may contain None for ragged dims
 
