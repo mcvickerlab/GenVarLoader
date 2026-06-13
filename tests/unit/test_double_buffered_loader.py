@@ -283,3 +283,37 @@ def test_shm_cleanup_after_close(file_backed_ds):
     after = set(os.listdir("/dev/shm"))
     leaked = {n for n in after - before if n.startswith("gvl-")}
     assert not leaked, f"leaked shm segments: {leaked}"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seq_kind", ["reference", "haplotypes", "variants"])
+def test_double_buffered_flat_matches_ragged(file_backed_ds, seq_kind):
+    """double_buffered in flat output equals double_buffered in ragged output,
+    batch for batch, after .to_ragged().
+
+    Ragged slicing returns non-copying views over the full chunk buffer (offsets
+    not rebased), while the flat path rebases+trims; so compare via offset-aware
+    to_padded()/to_list(), not raw .data/.offsets.
+    """
+    import awkward as ak
+    from seqpro.rag import to_padded
+
+    base = file_backed_ds.with_seqs(seq_kind).with_tracks(False)
+    if seq_kind in ("haplotypes", "annotated"):
+        base = base.with_settings(deterministic=True)
+
+    common = dict(batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024)
+    ragged_batches = list(base.to_dataloader(mode="double_buffered", copy=True, **common))
+    flat_batches = list(
+        base.with_output_format("flat").to_dataloader(mode="double_buffered", copy=True, **common)
+    )
+
+    assert len(flat_batches) == len(ragged_batches)
+    for i, (rb, fb) in enumerate(zip(ragged_batches, flat_batches)):
+        got = fb.to_ragged()
+        if seq_kind == "variants":
+            assert ak.to_list(got) == ak.to_list(rb), f"batch {i}"
+        else:
+            np.testing.assert_array_equal(
+                to_padded(got, b"N"), to_padded(rb, b"N"), err_msg=f"batch {i}"
+            )

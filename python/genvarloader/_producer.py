@@ -16,6 +16,8 @@ def _apply_schema(ds, schema: dict):
         ds = ds.with_seqs(schema["with_seqs"])
     if "with_tracks" in schema:
         ds = ds.with_tracks(schema["with_tracks"])
+    if schema.get("output_format") == "flat":
+        ds = ds.with_output_format("flat")
     settings_kwargs: dict = {}
     if schema.get("deterministic") is not None:
         settings_kwargs["deterministic"] = schema["deterministic"]
