@@ -184,19 +184,23 @@ def test_fill_empty_seq_kernel():
 
     # 3 rows: empty, ["AC","G"], empty
     data = np.frombuffer(b"ACG", np.uint8).copy()
-    var_off = np.array([0, 0, 2, 2], np.int64)      # per-row variant boundaries
-    seq_off = np.array([0, 2, 3], np.int64)         # per-variant byte boundaries
+    var_off = np.array([0, 0, 2, 2], np.int64)  # per-row variant boundaries
+    seq_off = np.array([0, 2, 3], np.int64)  # per-variant byte boundaries
     dummy = np.frombuffer(b"N", np.uint8).copy()
     nd, nvar, nseq = _fill_empty_seq(data, var_off, seq_off, dummy)
-    assert nvar.tolist() == [0, 1, 3, 4]            # each empty row gains 1 variant
-    assert nseq.tolist() == [0, 1, 3, 4, 5]         # dummy(1) AC(2) G(1) dummy(1)
+    assert nvar.tolist() == [0, 1, 3, 4]  # each empty row gains 1 variant
+    assert nseq.tolist() == [0, 1, 3, 4, 5]  # dummy(1) AC(2) G(1) dummy(1)
     assert bytes(nd) == b"NACGN"
 
 
 def test_fill_empty_groups_roundtrip():
     import awkward as ak
 
-    from genvarloader._dataset._flat_variants import DummyVariant, _FlatAlleles, _FlatVariants
+    from genvarloader._dataset._flat_variants import (
+        DummyVariant,
+        _FlatAlleles,
+        _FlatVariants,
+    )
     from genvarloader._flat import _Flat
 
     # b*p = 3 rows: row0 empty, row1 has [b"AC", b"G"], row2 empty
@@ -222,12 +226,20 @@ def test_fill_empty_groups_roundtrip():
 def test_fill_empty_groups_noop_when_no_empties():
     import awkward as ak
 
-    from genvarloader._dataset._flat_variants import DummyVariant, _FlatAlleles, _FlatVariants
+    from genvarloader._dataset._flat_variants import (
+        DummyVariant,
+        _FlatAlleles,
+        _FlatVariants,
+    )
     from genvarloader._flat import _Flat
 
     group_off = np.array([0, 1, 2], np.int64)  # every row has 1 variant
-    alt = _FlatAlleles(np.frombuffer(b"AG", np.uint8).copy(),
-                       np.array([0, 1, 2], np.int64), group_off.copy(), (2, None))
+    alt = _FlatAlleles(
+        np.frombuffer(b"AG", np.uint8).copy(),
+        np.array([0, 1, 2], np.int64),
+        group_off.copy(),
+        (2, None),
+    )
     start = _Flat.from_offsets(np.array([3, 7], np.int32), (2, None), group_off.copy())
     ilen = _Flat.from_offsets(np.array([0, 0], np.int32), (2, None), group_off.copy())
     fv = _FlatVariants(fields={"alt": alt, "start": start, "ilen": ilen})
@@ -267,7 +279,7 @@ def test_gather_rows_1d_vs_2d_dispatch():
 
     # Build equivalent 2D (2, n) starts/stops
     starts = offsets_1d[:-1]  # [0, 2, 2, 5]
-    stops = offsets_1d[1:]    # [2, 2, 5, 6]
+    stops = offsets_1d[1:]  # [2, 2, 5, 6]
     offsets_2d = np.stack([starts, stops])  # shape (2, 4)
 
     geno_offset_idx = np.array([2, 0, 3], np.intp)
@@ -279,12 +291,16 @@ def test_gather_rows_1d_vs_2d_dispatch():
     # 1D path
     v_1d, off_1d = _gather_rows(geno_offset_idx, offsets_1d, geno_v_idxs)
     np.testing.assert_array_equal(v_1d, expected_v_idxs, err_msg="1D v_idxs mismatch")
-    np.testing.assert_array_equal(off_1d, expected_offsets, err_msg="1D offsets mismatch")
+    np.testing.assert_array_equal(
+        off_1d, expected_offsets, err_msg="1D offsets mismatch"
+    )
 
     # 2D path
     v_2d, off_2d = _gather_rows(geno_offset_idx, offsets_2d, geno_v_idxs)
     np.testing.assert_array_equal(v_2d, expected_v_idxs, err_msg="2D v_idxs mismatch")
-    np.testing.assert_array_equal(off_2d, expected_offsets, err_msg="2D offsets mismatch")
+    np.testing.assert_array_equal(
+        off_2d, expected_offsets, err_msg="2D offsets mismatch"
+    )
 
     # 1D and 2D must agree with each other
     np.testing.assert_array_equal(v_1d, v_2d, err_msg="1D and 2D v_idxs disagree")
@@ -294,8 +310,12 @@ def test_gather_rows_1d_vs_2d_dispatch():
     v_ss, off_ss = _gather_v_idxs_ss(
         geno_offset_idx, offsets_2d[0], offsets_2d[1], geno_v_idxs
     )
-    np.testing.assert_array_equal(v_ss, expected_v_idxs, err_msg="_gather_v_idxs_ss v_idxs mismatch")
-    np.testing.assert_array_equal(off_ss, expected_offsets, err_msg="_gather_v_idxs_ss offsets mismatch")
+    np.testing.assert_array_equal(
+        v_ss, expected_v_idxs, err_msg="_gather_v_idxs_ss v_idxs mismatch"
+    )
+    np.testing.assert_array_equal(
+        off_ss, expected_offsets, err_msg="_gather_v_idxs_ss offsets mismatch"
+    )
 
 
 def test_get_variants_flat_fills_empty_groups():

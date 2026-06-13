@@ -116,7 +116,11 @@ def test_a_flat_variants_empty_region_and_ploidy(snap_dataset):
 @pytest.mark.parametrize("idx", IDX)
 def test_b_dummy_fill_flat_to_ragged_matches_ragged(snap_dataset, idx):
     dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N")
-    ds = snap_dataset.with_seqs("variants").with_tracks(False).with_settings(dummy_variant=dv)
+    ds = (
+        snap_dataset.with_seqs("variants")
+        .with_tracks(False)
+        .with_settings(dummy_variant=dv)
+    )
     ragged = ds[idx]  # RaggedVariants (both modes share the flat decode path)
     rewrapped = ds.with_output_format("flat")[idx].to_ragged()
     assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
@@ -127,7 +131,11 @@ def test_b_dummy_fill_2d_index_matches_ragged(snap_dataset):
     # Mirrors test_a_flat_variants_2d_index_matches_ragged but with dummy_variant
     # applied, so fill_empty_groups is exercised under a multi-dim out_reshape.
     dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N")
-    ds = snap_dataset.with_seqs("variants").with_tracks(False).with_settings(dummy_variant=dv)
+    ds = (
+        snap_dataset.with_seqs("variants")
+        .with_tracks(False)
+        .with_settings(dummy_variant=dv)
+    )
     n_r, n_s = snap_dataset.shape
     r = np.arange(min(3, n_r))
     s = np.arange(min(2, n_s))
@@ -139,7 +147,11 @@ def test_b_dummy_fill_2d_index_matches_ragged(snap_dataset):
 
 def test_b_dummy_fill_no_empty_groups(snap_dataset):
     dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N")
-    ds = snap_dataset.with_seqs("variants").with_tracks(False).with_settings(dummy_variant=dv)
+    ds = (
+        snap_dataset.with_seqs("variants")
+        .with_tracks(False)
+        .with_settings(dummy_variant=dv)
+    )
     idx = (np.arange(min(6, snap_dataset.shape[0])),)
     rv = ds[idx]
     for ploid_groups in ak.to_list(rv["start"]):

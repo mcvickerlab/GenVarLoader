@@ -187,8 +187,12 @@ class _FlatVariants:
         new_fields: dict[str, Any] = {}
         for name, f in self.fields.items():
             if isinstance(f, _FlatAlleles):
-                db = np.frombuffer(dummy.alt if name == "alt" else dummy.ref, np.uint8).copy()
-                nd, nvar, nseq = _fill_empty_seq(f.byte_data, f.var_offsets, f.seq_offsets, db)
+                db = np.frombuffer(
+                    dummy.alt if name == "alt" else dummy.ref, np.uint8
+                ).copy()
+                nd, nvar, nseq = _fill_empty_seq(
+                    f.byte_data, f.var_offsets, f.seq_offsets, db
+                )
                 new_fields[name] = _FlatAlleles(nd, nseq, nvar, f.shape)
             else:
                 fill = dummy.scalar_for(name, f.data.dtype)
@@ -242,9 +246,7 @@ def _gather_v_idxs_ss(
     out_offsets[0] = 0
     for i in range(n_rows):
         goi = geno_offset_idx[i]
-        out_offsets[i + 1] = out_offsets[i] + (
-            geno_stops[goi] - geno_starts[goi]
-        )
+        out_offsets[i + 1] = out_offsets[i] + (geno_stops[goi] - geno_starts[goi])
     total = out_offsets[n_rows]
     v_idxs = np.empty(total, geno_v_idxs.dtype)
     dst = 0
