@@ -215,6 +215,8 @@ def test_fill_empty_groups_roundtrip():
     # empty rows now hold exactly the dummy; non-empty row unchanged
     assert ak.to_list(rv["alt"]) == [[b"N"], [b"AC", b"G"], [b"N"]]
     assert ak.to_list(rv["start"]) == [[-1], [5, 9], [-1]]
+    # ilen: empty rows get DummyVariant default (ilen=0); non-empty row keeps original values
+    assert ak.to_list(rv["ilen"]) == [[0], [1, -1], [0]]
 
 
 def test_fill_empty_groups_noop_when_no_empties():
