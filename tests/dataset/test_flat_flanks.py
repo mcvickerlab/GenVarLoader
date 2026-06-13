@@ -222,3 +222,34 @@ def test_flank_tokens_end_to_end_matches_oracle(snap_dataset):
     expected = _flatten_lut_flanks(ref, v_contigs, starts, ilens, L, lut)  # (n_var, 2L)
     got = np.asarray(flat.flank_tokens.to_ragged().data)  # (n_var, 2L)
     np.testing.assert_array_equal(got, expected)
+
+
+def test_variant_windows_kind_end_to_end(snap_dataset):
+    ds = (
+        snap_dataset.with_tracks(False)
+        .with_output_format("flat")
+        .with_settings(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
+        .with_seqs("variant-windows")
+    )
+    out = ds[[0, 1], [0, 1]]
+    assert out.ref_window is not None and out.alt_window is not None
+    assert "alt" not in out.fields and "ref" not in out.fields
+
+
+def test_variant_windows_requires_flank_settings(snap_dataset):
+    import pytest
+
+    with pytest.raises(ValueError, match="flank"):
+        snap_dataset.with_seqs("variant-windows")  # no flank_length set
+
+
+def test_variant_windows_requires_flat_output(snap_dataset):
+    import pytest
+
+    ds = (
+        snap_dataset.with_tracks(False)
+        .with_settings(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
+        .with_seqs("variant-windows")
+    )  # output_format defaults to "ragged"
+    with pytest.raises(ValueError, match="flat"):
+        _ = ds[[0, 1], [0, 1]]

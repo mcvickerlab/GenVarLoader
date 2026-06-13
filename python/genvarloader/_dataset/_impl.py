@@ -449,6 +449,18 @@ class Dataset:
                 "Output length must be ragged when the sequence type is variants."
             )
 
+        if self.sequence_type == "variant-windows":
+            haps = self._seqs
+            if (
+                not isinstance(haps, Haps)
+                or not haps.flank_length
+                or haps.token_lut is None
+            ):
+                raise ValueError(
+                    "with_seqs('variant-windows') requires flank_length,"
+                    " token_alphabet, and unknown_token via with_settings(...)."
+                )
+
     def with_len(
         self, output_length: Literal["ragged", "variable"] | int
     ) -> ArrayDataset | RaggedDataset:
@@ -527,7 +539,7 @@ class Dataset:
         return out
 
     def with_seqs(
-        self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
+        self, kind: Literal["reference", "haplotypes", "annotated", "variants", "variant-windows"] | None
     ):
         """Return a new dataset with the specified sequence type. The sequence type can be one of the following:
 
@@ -600,6 +612,16 @@ class Dataset:
             if not isinstance(self._seqs, Haps):
                 raise ValueError(
                     "Dataset has no genotypes to yield haplotypes/variants from."
+                )
+        elif kind == "variant-windows":
+            if not isinstance(self._seqs, Haps):
+                raise ValueError(
+                    "Dataset has no genotypes to yield variant windows from."
+                )
+            if not self._seqs.flank_length or self._seqs.token_lut is None:
+                raise ValueError(
+                    "with_seqs('variant-windows') requires flank_length,"
+                    " token_alphabet, and unknown_token via with_settings(...)."
                 )
         else:
             assert_never(kind)
@@ -739,7 +761,7 @@ class Dataset:
         Ref | Haps[RaggedSeqs] | Haps[RaggedAnnotatedHaps] | Haps[RaggedVariants] | None
     )
     _tracks: Tracks[RaggedTracks] | Tracks[RaggedIntervals] | None
-    _seqs_kind: Literal["haplotypes", "reference", "annotated", "variants"] | None
+    _seqs_kind: Literal["haplotypes", "reference", "annotated", "variants", "variant-windows"] | None
     _recon: (
         Ref
         | Haps[RaggedSeqs]
@@ -888,14 +910,14 @@ class Dataset:
             case Ref():
                 return ["reference"]
             case Haps():
-                return ["reference", "haplotypes", "annotated", "variants"]
+                return ["reference", "haplotypes", "annotated", "variants", "variant-windows"]
             case s:
                 assert_never(s)
 
     @property
     def sequence_type(
         self,
-    ) -> Literal["haplotypes", "reference", "annotated", "variants"] | None:
+    ) -> Literal["haplotypes", "reference", "annotated", "variants", "variant-windows"] | None:
         """The type of sequences in the dataset."""
         return self._seqs_kind
 
@@ -1808,7 +1830,7 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
         self, kind: Literal["variants"]
     ) -> ArrayDataset[RaggedVariants, MaybeTRK]: ...
     def with_seqs(
-        self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
+        self, kind: Literal["reference", "haplotypes", "annotated", "variants", "variant-windows"] | None
     ) -> ArrayDataset:
         return super().with_seqs(kind)
 
@@ -1958,7 +1980,7 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
         self, kind: Literal["variants"]
     ) -> RaggedDataset[RaggedVariants, MaybeRTRK]: ...
     def with_seqs(
-        self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
+        self, kind: Literal["reference", "haplotypes", "annotated", "variants", "variant-windows"] | None
     ) -> RaggedDataset:
         return super().with_seqs(kind)
 

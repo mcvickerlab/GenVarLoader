@@ -27,6 +27,7 @@ from .._utils import lengths_to_offsets
 from ._haps import _H, Haps, ReconstructionRequest, _NewH, _Variants
 from ._insertion_fill import Repeat5p
 from ._insertion_fill import lower as _lower_insertion_fills
+from ._flat_variants import _FlatVariantWindows
 from ._intervals import intervals_to_tracks
 from ._protocol import Reconstructor
 from ._rag_variants import RaggedVariants
@@ -241,7 +242,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
 def _build_reconstructor(
     seqs: Haps | Ref | None,
     tracks: Tracks | None,
-    seqs_kind: Literal["haplotypes", "reference", "annotated", "variants"] | None,
+    seqs_kind: Literal["haplotypes", "reference", "annotated", "variants", "variant-windows"] | None,
 ) -> Reconstructor:
     """Construct the reconstructor for the given (storage + view) state.
 
@@ -268,7 +269,7 @@ def _build_reconstructor(
             active_seqs = Ref(reference=seqs.reference)
         else:
             assert_never(seqs)
-    elif seqs_kind in ("haplotypes", "annotated", "variants"):
+    elif seqs_kind in ("haplotypes", "annotated", "variants", "variant-windows"):
         if not isinstance(seqs, Haps):
             raise ValueError(
                 f"Cannot view as {seqs_kind!r}: storage has no haplotypes."
@@ -277,6 +278,7 @@ def _build_reconstructor(
             "haplotypes": RaggedSeqs,
             "annotated": RaggedAnnotatedHaps,
             "variants": RaggedVariants,
+            "variant-windows": _FlatVariantWindows,
         }
         active_seqs = seqs.to_kind(kind_map[seqs_kind])
     else:

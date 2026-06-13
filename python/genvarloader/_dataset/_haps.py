@@ -32,6 +32,7 @@ from typing_extensions import assert_never
 
 from .._flat import _Flat, _FlatAnnotatedHaps
 from .._ragged import RaggedAnnotatedHaps, RaggedSeqs
+from ._flat_variants import _FlatVariantWindows
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
 from ._genotypes import (
@@ -517,10 +518,15 @@ class Haps(Reconstructor[_H]):
         splice_plan: SplicePlan | None = None,
         flat: bool = False,
     ) -> _H:
-        if issubclass(self.kind, RaggedVariants):
+        if issubclass(self.kind, (RaggedVariants, _FlatVariantWindows)):
             if splice_plan is not None:
                 raise NotImplementedError(
                     "Spliced output is not supported for RaggedVariants."
+                )
+            if issubclass(self.kind, _FlatVariantWindows) and not flat:
+                raise ValueError(
+                    "with_seqs('variant-windows') requires the flat output format;"
+                    " call with_output_format('flat')."
                 )
             if flat:
                 from ._flat_variants import get_variants_flat
