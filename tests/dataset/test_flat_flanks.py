@@ -644,3 +644,10 @@ def test_variant_windows_rejects_active_tracks(snap_dataset):
             "variant-windows",
             VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
         )
+
+
+def test_with_settings_stores_unknown_token(snap_dataset):
+    ds = snap_dataset.with_seqs("variants").with_settings(
+        flank_length=5, token_alphabet=b"ACGT", unknown_token=4
+    )
+    assert ds._seqs.unknown_token == 4

@@ -266,6 +266,8 @@ class Haps(Reconstructor[_H]):
     """256-entry byte->token lookup table (see ``build_token_lut``). Set together with ``token_dtype``."""
     token_dtype: np.dtype | None = None
     """Output dtype of tokens produced via ``token_lut``."""
+    unknown_token: int | None = None
+    """Token id for bytes outside ``token_alphabet`` (set with ``token_lut``)."""
     window_opt: VarWindowOpt | None = None
     """Options for variant-windows output mode. Set via ``with_seqs('variant-windows', opt)``."""
 

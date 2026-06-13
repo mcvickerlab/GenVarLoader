@@ -395,6 +395,9 @@ class Dataset:
                 flank_length=new_flank_len,
                 token_lut=lut,
                 token_dtype=lut_dtype,
+                unknown_token=(
+                    unknown_token if unknown_token is not None else haps.unknown_token
+                ),
             )
 
         if dummy_variant is not None:
@@ -672,6 +675,7 @@ class Dataset:
                 token_lut=lut,
                 token_dtype=lut_dtype,
                 window_opt=window_opt,
+                unknown_token=window_opt.unknown_token,
             )
         new_recon = _build_reconstructor(new_seqs, self._tracks, kind)
         return replace(self, _seqs=new_seqs, _seqs_kind=kind, _recon=new_recon)
