@@ -809,16 +809,15 @@ def get_variants_flat(
             aw.shape = wshape
             win.alt = aw
 
+        if haps.dummy_variant is not None:
+            win = win.fill_empty_groups(
+                haps.dummy_variant, unk=haps.unknown_token, flank_length=L
+            )
+
         return win
 
     # ride-along flank tokens on the plain variants output.
     if haps.flank_length and haps.token_lut is not None and regions is not None:
-        if haps.dummy_variant is not None:
-            raise ValueError(
-                "dummy_variant cannot be combined with flank tokens: the empty-group"
-                " fill rebuilds the variant fields and would drop the ride-along"
-                " flank_tokens. Disable one of them."
-            )
         from ._flat_flanks import compute_flank_tokens
 
         L = haps.flank_length
@@ -839,8 +838,8 @@ def get_variants_flat(
         )
         flat.flank_tokens = _Flat.from_offsets(tok, (b, ploidy, None, 2 * L), off)
 
-    # dummy-variant empty-group fill (plain variants output only).
+    # dummy-variant empty-group fill (scalars, alleles, and flank_tokens).
     if haps.dummy_variant is not None:
-        flat = flat.fill_empty_groups(haps.dummy_variant)
+        flat = flat.fill_empty_groups(haps.dummy_variant, unk=haps.unknown_token)
 
     return flat
