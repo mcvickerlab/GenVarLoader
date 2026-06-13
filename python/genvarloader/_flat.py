@@ -85,6 +85,30 @@ class _Flat(Generic[RDTYPE]):
             del outer[axis]
         return _Flat(self.data, self.offsets, (*outer, None))
 
+    def __getitem__(self, key) -> "_Flat":
+        """Slice the leading (instance) axis. Supports a `slice` with step 1.
+
+        Rebases offsets so the result is a self-contained `_Flat`. Inner fixed
+        dims (e.g. ploidy) are preserved; `groups_per_inst` accounts for them.
+        """
+        if not isinstance(key, slice):
+            raise TypeError(
+                f"_Flat supports only instance-axis slicing (a slice), got {key!r}"
+            )
+        n_inst = self.shape[0]
+        if n_inst is None:
+            raise ValueError("_Flat.__getitem__: leading axis is the ragged axis")
+        start, stop, step = key.indices(n_inst)
+        if step != 1:
+            raise ValueError("_Flat slicing supports step=1 only")
+        groups_per_inst = self.n_rows // n_inst if n_inst else 0
+        g0, g1 = start * groups_per_inst, stop * groups_per_inst
+        base = self.offsets[g0]
+        new_offsets = np.ascontiguousarray(self.offsets[g0 : g1 + 1] - base)
+        new_data = self.data[self.offsets[g0] : self.offsets[g1]]
+        new_shape = (stop - start,) + self.shape[1:]
+        return _Flat(new_data, new_offsets, new_shape)
+
     def reverse_masked(
         self, mask: NDArray[np.bool_], comp: NDArray | None = None
     ) -> "_Flat":
@@ -163,6 +187,11 @@ class _FlatAnnotatedHaps:
             self.haps.squeeze(axis),
             self.var_idxs.squeeze(axis),
             self.ref_coords.squeeze(axis),
+        )
+
+    def __getitem__(self, key) -> "_FlatAnnotatedHaps":
+        return _FlatAnnotatedHaps(
+            self.haps[key], self.var_idxs[key], self.ref_coords[key]
         )
 
     def to_ragged(self):
