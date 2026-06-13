@@ -17,6 +17,7 @@ from seqpro.rag import Ragged
 from typing_extensions import assert_never
 
 from .._flat import _Flat, _FlatAnnotatedHaps
+from ._flat_variants import _FlatVariants
 from .._ragged import (
     RaggedAnnotatedHaps,
     RaggedIntervals,
@@ -135,7 +136,7 @@ def _reshape_outer(o, out_reshape: tuple[int, ...]):
     shape (which already ends in ``None``) would yield a double ragged axis.
     For those we drop the trailing ``None`` and pass only the outer dims.
     """
-    if isinstance(o, (_Flat, _FlatAnnotatedHaps)):
+    if isinstance(o, (_Flat, _FlatAnnotatedHaps, _FlatVariants)):
         return o.reshape(out_reshape + o.shape[1:-1])
     return o.reshape(out_reshape + o.shape[1:])  # type: ignore[bad-argument-type, no-matching-overload]  # heterogeneous reshape() across array kinds; shape tuple may contain None for ragged dims
 
@@ -168,6 +169,7 @@ def _getitem_unspliced(
         jitter=view.jitter,
         rng=view.rng,
         deterministic=view.deterministic,
+        flat=view.flat_output,
     )
 
     if not isinstance(recon, tuple):
@@ -234,6 +236,7 @@ def _getitem_spliced(
         rng=view.rng,
         deterministic=view.deterministic,
         splice_plan=plan,
+        flat=view.flat_output,
     )
 
     if not isinstance(recon, tuple):
@@ -344,6 +347,10 @@ def reverse_complement_ragged(
 ) -> _FlatAnnotatedHaps: ...
 @overload
 def reverse_complement_ragged(
+    rag: _FlatVariants, to_rc: NDArray[np.bool_]
+) -> _FlatVariants: ...
+@overload
+def reverse_complement_ragged(
     rag: RaggedVariants, to_rc: NDArray[np.bool_]
 ) -> RaggedVariants: ...
 @overload
@@ -351,15 +358,17 @@ def reverse_complement_ragged(
     rag: RaggedIntervals, to_rc: NDArray[np.bool_]
 ) -> RaggedIntervals: ...
 def reverse_complement_ragged(
-    rag: _Flat | _FlatAnnotatedHaps | RaggedVariants | RaggedIntervals,
+    rag: _Flat | _FlatAnnotatedHaps | _FlatVariants | RaggedVariants | RaggedIntervals,
     to_rc: NDArray[np.bool_],
-) -> _Flat | _FlatAnnotatedHaps | RaggedVariants | RaggedIntervals:
+) -> _Flat | _FlatAnnotatedHaps | _FlatVariants | RaggedVariants | RaggedIntervals:
     """Reverse-complement (or reverse) ragged outputs according to a per-row mask."""
     if isinstance(rag, _Flat):
         comp = _COMP if rag.data.dtype.kind == "S" else None
         return rag.reverse_masked(to_rc, comp=comp)
     if isinstance(rag, _FlatAnnotatedHaps):
         return rag.reverse_masked(to_rc, _COMP)
+    if isinstance(rag, _FlatVariants):
+        return rag.reverse_masked(to_rc)
     if isinstance(rag, RaggedVariants):
         return rag.rc_(to_rc)
     if isinstance(rag, RaggedIntervals):

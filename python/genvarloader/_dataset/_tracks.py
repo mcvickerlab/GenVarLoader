@@ -556,6 +556,7 @@ class Tracks(Reconstructor[_T]):
         rng: np.random.Generator,
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
+        flat: bool = False,
     ) -> _T:
         if splice_plan is not None and not issubclass(self.kind, RaggedTracks):
             raise NotImplementedError(

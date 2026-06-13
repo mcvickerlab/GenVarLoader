@@ -31,4 +31,5 @@ class Reconstructor(Protocol[T]):
         rng: np.random.Generator,
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
+        flat: bool = False,
     ) -> T: ...

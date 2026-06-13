@@ -105,6 +105,49 @@ def test_flat_variants_squeeze_leading_axis():
     assert ak.to_list(rv["start"]) == [[1, 5], [9]]
 
 
+def test_compact_keep_compacts_v_idxs_and_offsets():
+    """_compact_keep drops masked-out variants per row and rebuilds offsets.
+    This is the AF-filter compaction kernel; exercised here in isolation since
+    snap_dataset (a phased VCF) cannot carry an AF cache for integration."""
+    from genvarloader._dataset._flat_variants import _compact_keep
+
+    # 2 rows: row0 has variants [10,11,12], row1 has [20,21]
+    v_idxs = np.array([10, 11, 12, 20, 21], np.int32)
+    row_offsets = np.array([0, 3, 5], np.int64)
+    # keep middle of row0 dropped, all of row1
+    keep = np.array([True, False, True, True, True], np.bool_)
+
+    new_v, new_off = _compact_keep(v_idxs, row_offsets, keep)
+    np.testing.assert_array_equal(new_v, [10, 12, 20, 21])
+    np.testing.assert_array_equal(new_off, [0, 2, 4])
+
+
+def test_compact_keep_used_for_dosage_values():
+    """When compacting dosage, _compact_keep is called with the dosage VALUES in
+    place of v_idxs and the UNFILTERED row offsets — verify it gathers correctly."""
+    from genvarloader._dataset._flat_variants import _compact_keep
+
+    dos = np.array([0.5, 0.1, 0.9, 0.2, 0.8], np.float32)
+    row_offsets = np.array([0, 3, 5], np.int64)
+    keep = np.array([True, False, True, True, True], np.bool_)
+
+    new_dos, new_off = _compact_keep(dos, row_offsets, keep)
+    np.testing.assert_array_equal(new_dos, np.array([0.5, 0.9, 0.2, 0.8], np.float32))
+    np.testing.assert_array_equal(new_off, [0, 2, 4])
+    assert new_dos.dtype == np.float32
+
+
+def test_flat_alleles_to_ragged_multidim_outer():
+    """_FlatAlleles.to_ragged() rebuilds the full regular-axis stack for shapes
+    with more than one leading fixed dim (b, s, p, ~v, ~l)."""
+    # shape (2, 1, 2, None): b=2, s=1, p=2 -> 4 b*p rows.
+    group_off = [0, 1, 1, 2, 2]  # rows: [v], [], [v], []
+    alt = _alleles([b"AC", b"GGG"], group_off, ploidy=2)
+    alt = _FlatAlleles(alt.byte_data, alt.seq_offsets, alt.var_offsets, (2, 1, 2, None))
+    rv = alt.to_ragged()
+    assert ak.to_list(rv) == [[[[b"AC"], []]], [[[b"GGG"], []]]]
+
+
 def test_public_flat_exports():
     import genvarloader as gvl
 

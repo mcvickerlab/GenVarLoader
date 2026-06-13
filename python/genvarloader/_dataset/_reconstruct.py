@@ -65,6 +65,7 @@ class RefTracks(Reconstructor[tuple[Ragged[np.bytes_], _T]]):
         rng: np.random.Generator,
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
+        flat: bool = False,
     ) -> tuple[Ragged[np.bytes_], _T]:
         if splice_plan is not None:
             raise NotImplementedError(
@@ -113,6 +114,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
         rng: np.random.Generator,
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
+        flat: bool = False,
     ) -> tuple[_H, _T]:
         if splice_plan is not None:
             raise NotImplementedError(

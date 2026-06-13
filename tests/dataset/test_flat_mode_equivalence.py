@@ -1,10 +1,12 @@
 """flat-mode output, re-wrapped via .to_ragged(), must be byte-identical to ragged mode."""
 from __future__ import annotations
 
+import awkward as ak
 import numpy as np
 import pytest
 from seqpro.rag import Ragged
 
+from genvarloader import RaggedVariants
 from genvarloader._ragged import RaggedAnnotatedHaps
 
 IDX = [0, (np.array([0, 1, 2]),)]  # scalar-ish and a list index
@@ -33,3 +35,28 @@ def test_a0_flat_to_ragged_matches_ragged(snap_dataset, seqs, idx):
     assert r.keys() == f.keys()
     for k in r:
         np.testing.assert_array_equal(r[k], f[k], err_msg=f"field {k}")
+
+
+def _rv_to_lists(rv: RaggedVariants) -> dict:
+    out = {"alt": ak.to_list(rv["alt"]), "start": ak.to_list(rv["start"])}
+    for f in ("ref", "ilen", "dosage"):
+        if f in rv.fields:
+            out[f] = ak.to_list(rv[f])
+    return out
+
+
+@pytest.mark.parametrize("idx", IDX)
+def test_a_flat_variants_to_ragged_matches_ragged(snap_dataset, idx):
+    ds = snap_dataset.with_seqs("variants").with_tracks(False)
+    ragged = ds[idx]                                  # RaggedVariants (current path)
+    flat = ds.with_output_format("flat")[idx]         # _FlatVariants
+    rewrapped = flat.to_ragged()
+    assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
+
+
+def test_a_flat_variants_empty_region_and_ploidy(snap_dataset):
+    ds = snap_dataset.with_seqs("variants").with_tracks(False)
+    idx = (np.arange(min(6, snap_dataset.shape[0])),)
+    ragged = ds[idx]
+    rewrapped = ds.with_output_format("flat")[idx].to_ragged()
+    assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)

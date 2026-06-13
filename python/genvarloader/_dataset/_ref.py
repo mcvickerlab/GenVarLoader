@@ -35,6 +35,7 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
         rng: np.random.Generator,
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
+        flat: bool = False,
     ) -> Ragged[np.bytes_]:
         batch_size = len(idx)
 
