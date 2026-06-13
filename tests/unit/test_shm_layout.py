@@ -194,6 +194,48 @@ def test_flat_variants_roundtrip_matches_ragged():
         shm.unlink()
 
 
+def test_flat_annotated_roundtrip_matches_ragged():
+    """Write a _FlatAnnotatedHaps, read it back flat; its .to_ragged() equals
+    the RaggedAnnotatedHaps read of the SAME (r, s) via the awkward path."""
+    from multiprocessing.shared_memory import SharedMemory
+
+    import genvarloader as gvl
+    from genvarloader._shm_layout import write_chunk, read_chunk, HEADER_RESERVED
+    from genvarloader._flat import _FlatAnnotatedHaps
+
+    ds = (
+        gvl.get_dummy_dataset()
+        .with_seqs("annotated")
+        .with_tracks(False)
+        .with_settings(deterministic=True)
+    )
+    r = np.array([0, 0, 1], dtype=np.int64)
+    s = np.array([0, 1, 0], dtype=np.int64)
+
+    flat_ah = ds.with_output_format("flat")[r, s]   # _FlatAnnotatedHaps
+    ragged_ah = ds[r, s]                              # RaggedAnnotatedHaps
+
+    cap = HEADER_RESERVED + 1024 * 1024
+    shm = SharedMemory(create=True, size=cap)
+    try:
+        write_chunk(shm.buf, [flat_ah], n_instances=len(r))
+        _n_inst, views = read_chunk(shm.buf, flat=True)
+        assert isinstance(views[0], _FlatAnnotatedHaps)
+        got = views[0].to_ragged()
+        for comp in ("haps", "var_idxs", "ref_coords"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(got, comp).data),
+                np.asarray(getattr(ragged_ah, comp).data),
+            )
+            np.testing.assert_array_equal(
+                np.asarray(getattr(got, comp).offsets),
+                np.asarray(getattr(ragged_ah, comp).offsets),
+            )
+    finally:
+        shm.close()
+        shm.unlink()
+
+
 def test_flat_read_avoids_awkward_variant_funcs(monkeypatch):
     """The flat read/write path must not touch the awkward kind-2 helpers."""
     from multiprocessing.shared_memory import SharedMemory

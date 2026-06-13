@@ -360,7 +360,11 @@ def write_chunk(
     """Write arrays into the shared-memory slot.
 
     Supports np.ndarray (kind=0), seqpro.rag.Ragged (kind=1),
-    and RaggedVariants (kind=2).
+    and RaggedVariants (kind=2). The flat containers ``_Flat`` (kind=1),
+    ``_FlatVariants`` (kind=2), ``_FlatAnnotatedHaps`` (kind=3), and
+    ``RaggedAnnotatedHaps`` (kind=3) serialize into the same on-wire kinds
+    as their ragged counterparts; the ``flat`` flag on ``read_chunk`` selects
+    which reader reconstructs them.
 
     Returns total bytes consumed (header + payload).
     """
@@ -603,6 +607,10 @@ def _write_flat_variants(buf: memoryview, fv, cursor: int) -> tuple[dict, int]:
     Mirrors _write_rag_variants's byte layout but reads each field straight off
     the flat numpy buffers (`_Flat` scalars: outer offsets + leaf data;
     `_FlatAlleles`: var_offsets (outer) + seq_offsets (inner) + byte_data).
+
+    Fields are written in ``fv.fields`` dict-insertion order, which mirrors the
+    field order produced by ``_write_rag_variants``, so the descriptor field
+    order is consistent across the flat and awkward write paths.
     """
     from ._dataset._flat_variants import _FlatAlleles
 
@@ -730,32 +738,32 @@ def _read_flat_variants(buf: memoryview, d: dict, copy: bool = True):
         leaf_dtype = _dtype_from_bytes(fd["dtype_str"])
         regular_size = fd["regular_size"]
 
-        n_outer = fd["outer_offsets_nbytes"] // 8
-        outer = np.frombuffer(
-            buf, dtype=np.int64, count=n_outer, offset=fd["outer_offsets_offset"]
+        n_var = fd["outer_offsets_nbytes"] // 8
+        var_off = np.frombuffer(
+            buf, dtype=np.int64, count=n_var, offset=fd["outer_offsets_offset"]
         )
         leaf_count = fd["data_nbytes"] // leaf_dtype.itemsize
         leaf = np.frombuffer(
             buf, dtype=leaf_dtype, count=leaf_count, offset=fd["data_offset"]
         )
         if copy:
-            outer = outer.copy()
+            var_off = var_off.copy()
             leaf = leaf.copy()
 
-        n_bp = len(outer) - 1
+        n_bp = len(var_off) - 1
         b = n_bp // regular_size if regular_size else n_bp
         shape = (b, regular_size, None)
 
         if fd["field_kind"] == 1:
-            n_inner = fd["inner_offsets_nbytes"] // 8
-            inner = np.frombuffer(
-                buf, dtype=np.int64, count=n_inner, offset=fd["inner_offsets_offset"]
+            n_seq = fd["inner_offsets_nbytes"] // 8
+            seq_off = np.frombuffer(
+                buf, dtype=np.int64, count=n_seq, offset=fd["inner_offsets_offset"]
             )
             if copy:
-                inner = inner.copy()
-            fields[name] = _FlatAlleles(leaf, inner, outer, shape)
+                seq_off = seq_off.copy()
+            fields[name] = _FlatAlleles(leaf, seq_off, var_off, shape)
         else:
-            fields[name] = _Flat(leaf, outer, shape)
+            fields[name] = _Flat(leaf, var_off, shape)
 
     return _FlatVariants(fields)
 
