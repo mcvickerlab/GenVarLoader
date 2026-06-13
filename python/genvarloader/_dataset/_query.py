@@ -51,6 +51,7 @@ class QueryView:
     jitter: int
     deterministic: bool
     rc_neg: bool
+    flat_output: bool = False
 
     @property
     def full_shape(self) -> tuple[int, int]:
