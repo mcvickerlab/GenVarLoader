@@ -92,9 +92,12 @@ Both kinds require genotypes (storage is `Haps`), like the existing `"variants"`
 ### 2.3 New public types (`genvarloader/__init__.py` `__all__`)
 
 - **`FlatVariantWindows`** (new): the variant **scalar** fields (`start` / `ilen` / `dosage` /
-  `info[...]` as `FlatRagged`) **plus** `ref_window: FlatRagged` and `alt_window: FlatRagged`,
-  each shape `(b, p, ~v, ~win)` (ragged in both the variant axis and window length).
-  Implements `.to_ragged()`, `reshape`, `squeeze` delegating to each field.
+  `info[...]` as `FlatRagged`) **plus** `ref_window` and `alt_window`. Each window is ragged in
+  **both** the variant axis *and* window length (`(b, p, ~v, ~win)`), so it uses the **two-level
+  flat layout of `FlatAlleles`** (token `data`, per-variant `seq_offsets`, per-`(instance,ploid)`
+  `var_offsets`, `shape`) rather than single-ragged `FlatRagged`. The window `data` holds tokens
+  (the configured dtype) instead of allele bytes. Implements `.to_ragged()`, `reshape`, `squeeze`
+  delegating to each field.
 
 `FlatVariants` (defined in A) gains an optional field:
 
