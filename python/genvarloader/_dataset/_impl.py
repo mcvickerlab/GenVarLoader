@@ -263,9 +263,12 @@ class Dataset:
             together with *token_alphabet*.
         dummy_variant
             A :class:`DummyVariant` to insert into empty (region, sample, ploid) variant
-            groups so every group has at least one variant. Only valid for the variants
-            output (:meth:`with_seqs("variants") <genvarloader.Dataset.with_seqs>`). Pass
-            :code:`False` to disable.
+            groups so every group has at least one variant. Valid for the ``"variants"``
+            and ``"variant-windows"`` outputs (see
+            :meth:`with_seqs <genvarloader.Dataset.with_seqs>`); indexing any other output
+            kind with a dummy set raises. For token outputs (the ride-along ``flank_tokens``
+            and the variant-window token buffers) the dummy entry is filled entirely with
+            ``unknown_token``. Pass :code:`False` to disable.
         """
         to_evolve = {}
 
@@ -395,6 +398,9 @@ class Dataset:
                 flank_length=new_flank_len,
                 token_lut=lut,
                 token_dtype=lut_dtype,
+                unknown_token=(
+                    unknown_token if unknown_token is not None else haps.unknown_token
+                ),
             )
 
         if dummy_variant is not None:
@@ -672,6 +678,7 @@ class Dataset:
                 token_lut=lut,
                 token_dtype=lut_dtype,
                 window_opt=window_opt,
+                unknown_token=window_opt.unknown_token,
             )
         new_recon = _build_reconstructor(new_seqs, self._tracks, kind)
         return replace(self, _seqs=new_seqs, _seqs_kind=kind, _recon=new_recon)
@@ -1728,11 +1735,12 @@ class Dataset:
         if (
             isinstance(self._seqs, Haps)
             and self._seqs.dummy_variant is not None
-            and self._seqs_kind != "variants"
+            and self._seqs_kind not in ("variants", "variant-windows")
         ):
             raise ValueError(
-                "dummy_variant is only valid for the variants output; "
-                "call with_seqs('variants') (got output kind "
+                "dummy_variant is only valid for the 'variants' and "
+                "'variant-windows' outputs; call with_seqs('variants') or "
+                "with_seqs('variant-windows') (got output kind "
                 f"{self._seqs_kind!r})."
             )
 

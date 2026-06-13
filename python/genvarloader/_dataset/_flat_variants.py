@@ -294,6 +294,33 @@ class _FlatVariantWindows:
             {k: v.squeeze(axis) for k, v in self.fields.items()}, **present
         )
 
+    def fill_empty_groups(
+        self, dummy: "DummyVariant", unk: int, flank_length: int
+    ) -> "_FlatVariantWindows":
+        """Insert one all-``unk`` dummy entry into each empty (b*p) group.
+
+        Scalar fields take ``DummyVariant`` values; window fields take ``unk``.
+        Window length: ``2*flank_length + len(dummy allele)`` for ref/alt
+        windows, ``len(dummy allele)`` for bare ref/alt alleles."""
+        from .._flat import _Flat
+
+        new_fields: dict[str, Any] = {}
+        for name, f in self.fields.items():
+            fill = dummy.scalar_for(name, f.data.dtype)
+            nd, noff = _fill_empty_scalar(f.data, f.offsets, fill)
+            new_fields[name] = _Flat.from_offsets(nd, f.shape, noff)
+
+        present: dict[str, _FlatWindow] = {}
+        for name, w in self._present().items():
+            allele = dummy.alt if name in ("alt", "alt_window") else dummy.ref
+            base = len(allele)
+            win_len = (2 * flank_length + base) if name.endswith("_window") else base
+            dwin = np.full(win_len, unk, dtype=w.data.dtype)
+            nd, nvar, nseq = _fill_empty_seq(w.data, w.var_offsets, w.seq_offsets, dwin)
+            present[name] = _FlatWindow(nd, nseq, nvar, w.shape)
+
+        return _FlatVariantWindows(new_fields, **present)
+
 
 @dataclass(slots=True)
 class _FlatVariants:
@@ -364,10 +391,13 @@ class _FlatVariants:
                 self.fields[name] = self.fields[name].reverse_masked(mask)
         return self
 
-    def fill_empty_groups(self, dummy: "DummyVariant") -> "_FlatVariants":
+    def fill_empty_groups(
+        self, dummy: "DummyVariant", unk: int | None = None
+    ) -> "_FlatVariants":
         """Insert one dummy variant into each empty (b*p) group; non-empty
         groups are unchanged. Every field shares the same empty-row pattern, so
-        the rebuilt offsets stay consistent across fields."""
+        the rebuilt offsets stay consistent across fields. When ``flank_tokens``
+        is present, its empty rows are filled with ``2L`` ``unk`` tokens."""
         from .._flat import _Flat
 
         new_fields: dict[str, Any] = {}
@@ -384,7 +414,15 @@ class _FlatVariants:
                 fill = dummy.scalar_for(name, f.data.dtype)
                 nd, noff = _fill_empty_scalar(f.data, f.offsets, fill)
                 new_fields[name] = _Flat.from_offsets(nd, f.shape, noff)
-        return _FlatVariants(new_fields)
+        out = _FlatVariants(new_fields)
+        if self.flank_tokens is not None:
+            # flank_tokens is only set on the token-enabled ride-along path, where
+            # unknown_token (-> unk) is always provided; so unk is non-None here.
+            ft = self.flank_tokens
+            inner = ft.shape[-1]  # 2L, fixed
+            nd, noff = _fill_empty_fixed(ft.data, ft.offsets, inner, unk)
+            out.flank_tokens = _Flat(nd, noff, ft.shape)
+        return out
 
 
 @nb.njit(nogil=True, cache=True)
@@ -561,7 +599,7 @@ def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):  # pragma: no cover 
                 vlen = seq_offsets[v + 1] - seq_offsets[v]
                 new_seq[vptr + 1] = new_seq[vptr] + vlen
                 vptr += 1
-    new_data = np.empty(new_seq[total_vars], np.uint8)
+    new_data = np.empty(new_seq[total_vars], data.dtype)
     vptr = 0
     dptr = 0
     for i in range(n_rows):
@@ -581,6 +619,37 @@ def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):  # pragma: no cover 
                     dptr += 1
                 vptr += 1
     return new_data, new_var, new_seq
+
+
+@nb.njit(nogil=True, cache=True)
+def _fill_empty_fixed(data, offsets, inner, fill):  # pragma: no cover - njit
+    """Fixed-inner-stride analogue of ``_fill_empty_scalar`` for ``flank_tokens``.
+
+    ``data`` holds ``n_var * inner`` tokens (variant-major); ``offsets`` are
+    *variant-level* (``b*p + 1``). Each empty row receives one dummy variant of
+    ``inner`` tokens all equal to ``fill``; non-empty rows pass through.
+    Returns ``(new_data, new_offsets)``."""
+    n_rows = offsets.shape[0] - 1
+    new_offsets = np.empty(n_rows + 1, np.int64)
+    new_offsets[0] = 0
+    for i in range(n_rows):
+        nv = offsets[i + 1] - offsets[i]
+        new_offsets[i + 1] = new_offsets[i] + (nv if nv > 0 else 1)
+    total_vars = new_offsets[n_rows]
+    new_data = np.empty(total_vars * inner, data.dtype)
+    dptr = 0
+    for i in range(n_rows):
+        vs = offsets[i]
+        ve = offsets[i + 1]
+        if ve == vs:
+            for _ in range(inner):
+                new_data[dptr] = fill
+                dptr += 1
+        else:
+            for k in range(vs * inner, ve * inner):
+                new_data[dptr] = data[k]
+                dptr += 1
+    return new_data, new_offsets
 
 
 def get_variants_flat(
@@ -740,16 +809,15 @@ def get_variants_flat(
             aw.shape = wshape
             win.alt = aw
 
+        if haps.dummy_variant is not None:
+            win = win.fill_empty_groups(
+                haps.dummy_variant, unk=haps.unknown_token, flank_length=L
+            )
+
         return win
 
     # ride-along flank tokens on the plain variants output.
     if haps.flank_length and haps.token_lut is not None and regions is not None:
-        if haps.dummy_variant is not None:
-            raise ValueError(
-                "dummy_variant cannot be combined with flank tokens: the empty-group"
-                " fill rebuilds the variant fields and would drop the ride-along"
-                " flank_tokens. Disable one of them."
-            )
         from ._flat_flanks import compute_flank_tokens
 
         L = haps.flank_length
@@ -770,8 +838,8 @@ def get_variants_flat(
         )
         flat.flank_tokens = _Flat.from_offsets(tok, (b, ploidy, None, 2 * L), off)
 
-    # dummy-variant empty-group fill (plain variants output only).
+    # dummy-variant empty-group fill (scalars, alleles, and flank_tokens).
     if haps.dummy_variant is not None:
-        flat = flat.fill_empty_groups(haps.dummy_variant)
+        flat = flat.fill_empty_groups(haps.dummy_variant, unk=haps.unknown_token)
 
     return flat

@@ -5,9 +5,19 @@ import awkward as ak
 import pytest
 
 from genvarloader import RaggedVariants
+from genvarloader._dataset._flat_variants import (
+    DummyVariant,
+    _fill_empty_fixed,
+    _fill_empty_seq,
+    _FlatAlleles,
+    _FlatVariants,
+    _FlatVariantWindows,
+    _FlatWindow,
+)
+from genvarloader._flat import _Flat
+from genvarloader._dataset._haps import _build_allele_layout
 from genvarloader._ragged import reverse_complement  # the awkward reference
 from seqpro.rag import Ragged
-from genvarloader._dataset._haps import _build_allele_layout
 
 
 def _make_rv(alt_rows, ref_rows, starts, group_off, ploidy):
@@ -407,3 +417,99 @@ def test_to_packed_explicit_listarray_variant_level():
     exp = ak.to_packed(ak.Array(rv))
     assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
     assert ak.to_list(got["ref"]) == ak.to_list(exp["ref"])
+
+
+def test_fill_empty_fixed_inserts_unk_block_for_empty_rows():
+    inner = 2  # pretend 2L = 2
+    # 2 rows: row0 empty, row1 has one variant (2 tokens).
+    data = np.array([7, 8], np.int32)  # row1 variant: tokens [7, 8]
+    offsets = np.array([0, 0, 1], np.int64)  # row0 [0,0) empty; row1 [0,1)
+    nd, noff = _fill_empty_fixed(data, offsets, inner, 4)
+    assert nd.dtype == np.int32
+    # row0 gets one dummy variant -> variant counts [1, 1]
+    assert noff.tolist() == [0, 1, 2]
+    # row0's dummy block is [4, 4]; row1 unchanged [7, 8]
+    assert nd.tolist() == [4, 4, 7, 8]
+
+
+def test_fill_empty_seq_preserves_int32_dtype_and_fills_unk():
+    # Two (b*p) rows: row 0 empty, row 1 has one 2-token variant.
+    data = np.array([7, 8], np.int32)  # row 1's single variant tokens
+    var_offsets = np.array([0, 0, 1], np.int64)  # row0: [0,0) empty; row1: [0,1)
+    seq_offsets = np.array([0, 2], np.int64)  # variant 0 spans data[0:2]
+    dummy = np.array([4, 4, 4], np.int32)  # all-unk window, len 3
+    nd, nvar, nseq = _fill_empty_seq(data, var_offsets, seq_offsets, dummy)
+    assert nd.dtype == np.int32
+    # row0 got one dummy variant of length 3; row1 unchanged (one 2-token variant)
+    assert nvar.tolist() == [0, 1, 2]
+    assert nseq.tolist() == [0, 3, 5]
+    assert nd.tolist() == [4, 4, 4, 7, 8]
+
+
+def _win(data, seq_off, var_off):
+    return _FlatWindow(
+        np.asarray(data, np.int32),
+        np.asarray(seq_off, np.int64),
+        np.asarray(var_off, np.int64),
+        (1, 1, None, None),
+    )
+
+
+def test_flatvariantwindows_fill_empty_groups_all_unk():
+    # 2 (b*p) rows: row0 empty, row1 has one variant.
+    # scalar start: row0 empty, row1 has start=100
+    start = _Flat.from_offsets(
+        np.array([100], np.int32), (1, 1, None), np.array([0, 0, 1], np.int64)
+    )
+    # alt_window for row1's single variant: a length-3 window [5,6,7]
+    aw = _win([5, 6, 7], [0, 3], [0, 0, 1])
+    win = _FlatVariantWindows({"start": start}, alt_window=aw)
+
+    dummy = DummyVariant(start=-1, alt=b"N")  # 1-byte alt
+    L = 5
+    out = win.fill_empty_groups(dummy, unk=4, flank_length=L)
+
+    # scalar: row0 filled with start=-1
+    s = out.fields["start"]
+    assert s.offsets.tolist() == [0, 1, 2]
+    assert s.data.tolist() == [-1, 100]
+    # alt_window: row0 dummy window len 2L + len("N") = 11, all unk=4
+    w = out.alt_window
+    assert w.var_offsets.tolist() == [0, 1, 2]
+    assert w.seq_offsets.tolist() == [0, 11, 14]  # dummy(11) then row1's window(3)
+    assert w.data[:11].tolist() == [4] * 11
+    assert w.data[11:].tolist() == [5, 6, 7]
+    assert w.data.dtype == np.int32
+
+
+def test_flatvariants_fill_empty_groups_fills_flank_tokens():
+    # 2 (b*p) rows: row0 empty, row1 one variant.
+    start = _Flat.from_offsets(
+        np.array([100], np.int32), (1, 1, None), np.array([0, 0, 1], np.int64)
+    )
+    alt = _FlatAlleles(
+        np.frombuffer(b"A", np.uint8).copy(),
+        np.array([0, 1], np.int64),  # seq offsets
+        np.array([0, 0, 1], np.int64),  # var offsets (row0 empty)
+        (1, 1, None),
+    )
+    fv = _FlatVariants({"start": start, "alt": alt})
+    L = 3
+    # flank_tokens: row1's single variant has 2L=6 tokens; shape carries 2L inner.
+    fv.flank_tokens = _Flat(
+        np.arange(6, dtype=np.int32),
+        np.array([0, 0, 1], np.int64),
+        (1, 1, None, 2 * L),
+    )
+
+    dummy = DummyVariant(start=-1, alt=b"N")
+    out = fv.fill_empty_groups(dummy, unk=4)
+
+    # flank_tokens row0 gets a 2L=6 run of unk; row1 unchanged.
+    ft = out.flank_tokens
+    assert ft.offsets.tolist() == [0, 1, 2]
+    assert ft.data[:6].tolist() == [4] * 6
+    assert ft.data[6:].tolist() == list(range(6))
+    assert ft.data.dtype == np.int32
+    # scalar still filled
+    assert out.fields["start"].data.tolist() == [-1, 100]

@@ -11,7 +11,7 @@ from genvarloader._dataset._flat_flanks import (
     compute_alt_window,
     tokenize_alleles,
 )
-from genvarloader._dataset._flat_variants import VarWindowOpt
+from genvarloader._dataset._flat_variants import DummyVariant, VarWindowOpt
 
 
 def _flatten_lut_flanks(ref, contigs, starts, ilens, flank_len, lut):
@@ -644,3 +644,90 @@ def test_variant_windows_rejects_active_tracks(snap_dataset):
             "variant-windows",
             VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
         )
+
+
+def test_with_settings_stores_unknown_token(snap_dataset):
+    ds = snap_dataset.with_seqs("variants").with_settings(
+        flank_length=5, token_alphabet=b"ACGT", unknown_token=4
+    )
+    assert ds._seqs.unknown_token == 4
+
+
+def _find_empty_region(snap_dataset):
+    import awkward as ak
+
+    rag_ds = snap_dataset.with_seqs("variants").with_tracks(False)
+    for r in range(snap_dataset._full_regions.shape[0]):
+        rag = rag_ds[[r], [0]]
+        if int(ak.sum(ak.num(rag.start, axis=-1))) == 0:
+            return r
+    return None
+
+
+def test_dummy_flank_tokens_fills_empty_region_all_unk(snap_dataset):
+    import awkward as ak
+
+    target = _find_empty_region(snap_dataset)
+    if target is None:
+        pytest.skip("no empty (region, sample) variant set in this fixture")
+    L = 5
+    ploidy = snap_dataset._seqs.genotypes.shape[-2]
+    flat_ds = (
+        snap_dataset.with_seqs("variants")
+        .with_tracks(False)
+        .with_output_format("flat")
+        .with_settings(flank_length=L, token_alphabet=b"ACGT", unknown_token=4)
+        .with_settings(dummy_variant=DummyVariant(start=-1, alt=b"N", ref=b"N"))
+    )
+    flat = flat_ds[[target], [0]]
+    rg = flat.flank_tokens.to_ragged()
+    toks = np.asarray(ak.flatten(rg, axis=None))
+    # one dummy variant per (region, sample, ploid) group => ploidy dummies, each 2L tokens
+    assert toks.tolist() == [4] * (ploidy * 2 * L)
+
+
+def test_dummy_variant_windows_fill_empty_region_all_unk(snap_dataset):
+    import awkward as ak
+
+    target = _find_empty_region(snap_dataset)
+    if target is None:
+        pytest.skip("no empty (region, sample) variant set in this fixture")
+    L = 5
+    ploidy = snap_dataset._seqs.genotypes.shape[-2]
+    opt = VarWindowOpt(flank_length=L, token_alphabet=b"ACGT", unknown_token=4)
+    flat_ds = (
+        snap_dataset.with_output_format("flat")
+        .with_tracks(False)
+        .with_seqs("variant-windows", opt)
+        .with_settings(dummy_variant=DummyVariant(start=-1, alt=b"N", ref=b"N"))
+    )
+    flat = flat_ds[[target], [0]]
+    # one dummy per (region, sample, ploid) group => ploidy dummies, each 2L+1 unknown tokens
+    for w in (flat.ref_window, flat.alt_window):
+        vals = np.asarray(ak.flatten(w.to_ragged(), axis=None))
+        assert vals.tolist() == [4] * (ploidy * (2 * L + 1))
+
+
+def test_no_awkward_on_dummy_window_hot_path(snap_dataset, monkeypatch):
+    import awkward as ak
+
+    target = _find_empty_region(snap_dataset)
+    if target is None:
+        pytest.skip("no empty (region, sample) variant set in this fixture")
+    opt = VarWindowOpt(flank_length=5, token_alphabet=b"ACGT", unknown_token=4)
+    flat_ds = (
+        snap_dataset.with_output_format("flat")
+        .with_tracks(False)
+        .with_seqs("variant-windows", opt)
+        .with_settings(dummy_variant=DummyVariant(start=-1, alt=b"N", ref=b"N"))
+    )
+    calls = {"n": 0}
+    orig = ak.highlevel.Array.__getitem__
+
+    def spy(self, *a, **k):
+        calls["n"] += 1
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(ak.highlevel.Array, "__getitem__", spy)
+    _ = flat_ds[[target], [0]]  # indexing only; do NOT call to_ragged()
+    assert calls["n"] == 0, f"awkward __getitem__ called {calls['n']}x on dummy path"
