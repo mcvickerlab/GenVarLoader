@@ -167,7 +167,10 @@ def get_dataloader(
         and getattr(dataset, "sequence_type", None) == "variants"
     ):
         _seqs = getattr(dataset, "_seqs", None)
-        if getattr(_seqs, "flank_length", None) and getattr(_seqs, "token_lut", None) is not None:
+        if (
+            getattr(_seqs, "flank_length", None)
+            and getattr(_seqs, "token_lut", None) is not None
+        ):
             raise ValueError(
                 f"mode={mode!r} with output_format='flat' does not support variants output "
                 "carrying ride-along flank tokens (set via with_settings(flank_length=...)): "

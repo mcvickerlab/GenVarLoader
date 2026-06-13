@@ -302,10 +302,16 @@ def test_double_buffered_flat_matches_ragged(file_backed_ds, seq_kind):
     if seq_kind == "haplotypes":
         base = base.with_settings(deterministic=True)
 
-    common = dict(batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024)
-    ragged_batches = list(base.to_dataloader(mode="double_buffered", copy=True, **common))
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
+    ragged_batches = list(
+        base.to_dataloader(mode="double_buffered", copy=True, **common)
+    )
     flat_batches = list(
-        base.with_output_format("flat").to_dataloader(mode="double_buffered", copy=True, **common)
+        base.with_output_format("flat").to_dataloader(
+            mode="double_buffered", copy=True, **common
+        )
     )
 
     assert len(flat_batches) == len(ragged_batches)
@@ -336,10 +342,16 @@ def test_double_buffered_flat_annotated_matches_ragged(file_backed_ds):
         .with_tracks(False)
         .with_settings(deterministic=True)
     )
-    common = dict(batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024)
-    ragged_batches = list(base.to_dataloader(mode="double_buffered", copy=True, **common))
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
+    ragged_batches = list(
+        base.to_dataloader(mode="double_buffered", copy=True, **common)
+    )
     flat_batches = list(
-        base.with_output_format("flat").to_dataloader(mode="double_buffered", copy=True, **common)
+        base.with_output_format("flat").to_dataloader(
+            mode="double_buffered", copy=True, **common
+        )
     )
     assert len(flat_batches) == len(ragged_batches)
     pads = {"haps": b"N", "var_idxs": -1, "ref_coords": np.iinfo(np.int32).max}
@@ -364,8 +376,14 @@ def test_double_buffered_flat_consumer_avoids_awkward(file_backed_ds, monkeypatc
 
     monkeypatch.setattr(L, "_read_rag_variants", _boom)
 
-    base = file_backed_ds.with_seqs("variants").with_tracks(False).with_output_format("flat")
-    common = dict(batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024)
+    base = (
+        file_backed_ds.with_seqs("variants")
+        .with_tracks(False)
+        .with_output_format("flat")
+    )
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
     # Draining must succeed without hitting the awkward reader.
     batches = list(base.to_dataloader(mode="double_buffered", copy=True, **common))
     assert batches  # produced something

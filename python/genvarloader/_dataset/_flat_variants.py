@@ -152,16 +152,24 @@ class _FlatAlleles:
             )
         n_inst = self.shape[0]
         if n_inst is None:
-            raise ValueError("_FlatAlleles.__getitem__: leading axis is the ragged axis")
+            raise ValueError(
+                "_FlatAlleles.__getitem__: leading axis is the ragged axis"
+            )
         start, stop, step = key.indices(n_inst)
         if step != 1:
             raise ValueError("_FlatAlleles slicing supports step=1 only")
         rows_per_inst = (len(self.var_offsets) - 1) // n_inst if n_inst else 0
         r0, r1 = start * rows_per_inst, stop * rows_per_inst
         v0, v1 = int(self.var_offsets[r0]), int(self.var_offsets[r1])
-        new_var = np.ascontiguousarray(self.var_offsets[r0 : r1 + 1] - self.var_offsets[r0])
-        new_seq = np.ascontiguousarray(self.seq_offsets[v0 : v1 + 1] - self.seq_offsets[v0])
-        new_bytes = self.byte_data[int(self.seq_offsets[v0]) : int(self.seq_offsets[v1])]
+        new_var = np.ascontiguousarray(
+            self.var_offsets[r0 : r1 + 1] - self.var_offsets[r0]
+        )
+        new_seq = np.ascontiguousarray(
+            self.seq_offsets[v0 : v1 + 1] - self.seq_offsets[v0]
+        )
+        new_bytes = self.byte_data[
+            int(self.seq_offsets[v0]) : int(self.seq_offsets[v1])
+        ]
         new_shape = (stop - start,) + self.shape[1:]
         return _FlatAlleles(new_bytes, new_seq, new_var, new_shape)
 

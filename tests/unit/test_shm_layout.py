@@ -151,7 +151,9 @@ def test_flat_ragged_roundtrip():
     flat = _Flat(data, offsets, (3, None))
     from multiprocessing.shared_memory import SharedMemory
 
-    shm = SharedMemory(create=True, size=HEADER_RESERVED + data.nbytes + offsets.nbytes + 64)
+    shm = SharedMemory(
+        create=True, size=HEADER_RESERVED + data.nbytes + offsets.nbytes + 64
+    )
     try:
         write_chunk(shm.buf, [flat], n_instances=3)
         n_inst, views = read_chunk(shm.buf, flat=True)
@@ -177,8 +179,8 @@ def test_flat_variants_roundtrip_matches_ragged():
     r = np.array([0, 0, 1], dtype=np.int64)
     s = np.array([0, 1, 0], dtype=np.int64)
 
-    flat_fv = ds.with_output_format("flat")[r, s]   # _FlatVariants
-    ragged_rv = ds[r, s]                              # RaggedVariants (awkward)
+    flat_fv = ds.with_output_format("flat")[r, s]  # _FlatVariants
+    ragged_rv = ds[r, s]  # RaggedVariants (awkward)
 
     cap = HEADER_RESERVED + 1024 * 1024
     shm = SharedMemory(create=True, size=cap)
@@ -212,8 +214,8 @@ def test_flat_annotated_roundtrip_matches_ragged():
     r = np.array([0, 0, 1], dtype=np.int64)
     s = np.array([0, 1, 0], dtype=np.int64)
 
-    flat_ah = ds.with_output_format("flat")[r, s]   # _FlatAnnotatedHaps
-    ragged_ah = ds[r, s]                              # RaggedAnnotatedHaps
+    flat_ah = ds.with_output_format("flat")[r, s]  # _FlatAnnotatedHaps
+    ragged_ah = ds[r, s]  # RaggedAnnotatedHaps
 
     cap = HEADER_RESERVED + 1024 * 1024
     shm = SharedMemory(create=True, size=cap)
@@ -256,8 +258,10 @@ def test_flat_read_avoids_awkward_variant_funcs(monkeypatch):
 
     shm = SharedMemory(create=True, size=L.HEADER_RESERVED + 1024 * 1024)
     try:
-        L.write_chunk(shm.buf, [flat_fv], n_instances=2)  # must NOT call _write_rag_variants
-        L.read_chunk(shm.buf, flat=True)                   # must NOT call _read_rag_variants
+        L.write_chunk(
+            shm.buf, [flat_fv], n_instances=2
+        )  # must NOT call _write_rag_variants
+        L.read_chunk(shm.buf, flat=True)  # must NOT call _read_rag_variants
     finally:
         shm.close()
         shm.unlink()

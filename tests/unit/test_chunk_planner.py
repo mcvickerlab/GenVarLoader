@@ -181,7 +181,9 @@ def test_plan_single_partial_batch_smaller_than_batch_size():
     assert sum(nb for _, _, nb in chunks) == 1
 
 
-@pytest.mark.parametrize("seq_kind", ["reference", "haplotypes", "annotated", "variants"])
+@pytest.mark.parametrize(
+    "seq_kind", ["reference", "haplotypes", "annotated", "variants"]
+)
 def test_slice_chunk_flat_matches_direct(seq_kind):
     """slice_chunk on a flat chunk yields mini-batches whose .to_ragged()
     equals direct ragged indexing of the same instances."""
@@ -213,9 +215,15 @@ def test_slice_chunk_flat_matches_direct(seq_kind):
         if seq_kind == "variants":
             assert ak.to_list(got) == ak.to_list(ref)
         elif seq_kind == "annotated":
-            np.testing.assert_array_equal(np.asarray(got.haps.data), np.asarray(ref.haps.data))
-            np.testing.assert_array_equal(np.asarray(got.haps.offsets), np.asarray(ref.haps.offsets))
+            np.testing.assert_array_equal(
+                np.asarray(got.haps.data), np.asarray(ref.haps.data)
+            )
+            np.testing.assert_array_equal(
+                np.asarray(got.haps.offsets), np.asarray(ref.haps.offsets)
+            )
         else:
             np.testing.assert_array_equal(np.asarray(got.data), np.asarray(ref.data))
-            np.testing.assert_array_equal(np.asarray(got.offsets), np.asarray(ref.offsets))
+            np.testing.assert_array_equal(
+                np.asarray(got.offsets), np.asarray(ref.offsets)
+            )
         pos += width

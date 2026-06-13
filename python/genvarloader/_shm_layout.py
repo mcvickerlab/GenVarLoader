@@ -648,9 +648,9 @@ def _write_flat_variants(buf: memoryview, fv, cursor: int) -> tuple[dict, int]:
 
         cursor = _align(cursor)
         data_off = cursor
-        np.frombuffer(buf, dtype=leaf_data.dtype, count=leaf_data.size, offset=data_off)[
-            ...
-        ] = leaf_data.ravel()
+        np.frombuffer(
+            buf, dtype=leaf_data.dtype, count=leaf_data.size, offset=data_off
+        )[...] = leaf_data.ravel()
         cursor += leaf_data.nbytes
 
         field_descs.append(
@@ -789,7 +789,9 @@ def _read_flat_annotated(buf: memoryview, d: dict, copy: bool = True):
     return _FlatAnnotatedHaps(haps=comps[0], var_idxs=comps[1], ref_coords=comps[2])
 
 
-def read_chunk(buf: memoryview, copy: bool = True, flat: bool = False) -> tuple[int, list]:
+def read_chunk(
+    buf: memoryview, copy: bool = True, flat: bool = False
+) -> tuple[int, list]:
     """Read arrays from the shared-memory slot.
 
     Parameters
@@ -828,7 +830,9 @@ def read_chunk(buf: memoryview, copy: bool = True, flat: bool = False) -> tuple[
             )
         elif kind == 3:
             views.append(
-                (_read_flat_annotated if flat else _read_rag_annotated)(buf, d, copy=copy)
+                (_read_flat_annotated if flat else _read_rag_annotated)(
+                    buf, d, copy=copy
+                )
             )
         else:
             raise ValueError(f"Unknown descriptor kind {kind}")

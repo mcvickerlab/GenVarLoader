@@ -1,4 +1,5 @@
 """Instance-axis slicing parity for the flat containers (no torch needed)."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -19,7 +20,9 @@ def _ak_eq(a, b):
     assert ak.to_list(a) == ak.to_list(b)
 
 
-@pytest.mark.parametrize("seq_kind", ["reference", "haplotypes", "annotated", "variants"])
+@pytest.mark.parametrize(
+    "seq_kind", ["reference", "haplotypes", "annotated", "variants"]
+)
 @pytest.mark.parametrize("sl", [slice(0, 1), slice(1, 3), slice(2, 4), slice(0, 0)])
 def test_flat_slice_matches_direct_index(seq_kind, sl):
     ds = gvl.get_dummy_dataset().with_seqs(seq_kind).with_tracks(False)
