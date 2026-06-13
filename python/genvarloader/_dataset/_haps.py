@@ -15,7 +15,10 @@ import json
 import warnings
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, TypeVar, cast
+
+if TYPE_CHECKING:
+    from ._flat_variants import DummyVariant
 
 import awkward as ak
 import numpy as np
@@ -254,6 +257,7 @@ class Haps(Reconstructor[_H]):
     max_af: float | None
     """The maximum allele frequency to keep."""
     var_fields: list[str] = field(default_factory=lambda: ["alt", "ilen", "start"])
+    dummy_variant: "DummyVariant | None" = None
     available_var_fields: list[str] = field(init=False)
 
     def __post_init__(self):

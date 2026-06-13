@@ -234,3 +234,88 @@ def test_fill_empty_groups_noop_when_no_empties():
     filled = fv.fill_empty_groups(DummyVariant())
     assert ak.to_list(filled.to_ragged()["alt"]) == [[b"A"], [b"G"]]
     assert ak.to_list(filled.to_ragged()["start"]) == [[3], [7]]
+
+
+def test_get_variants_flat_fills_empty_groups():
+    """get_variants_flat with haps.dummy_variant set fills empty (b*p) groups.
+
+    NOTE: snap_dataset fixture is NOT visible from tests/unit/dataset/ (it lives
+    in tests/dataset/conftest.py, a sibling not a parent). Per plan fallback,
+    this test builds a minimal synthetic Haps with controlled empty groups.
+    Full integration coverage is deferred to Task 5.
+    """
+    import awkward as ak
+    from dataclasses import replace
+    from pathlib import Path
+
+    from genoray._types import POS_TYPE, V_IDX_TYPE
+    from seqpro.rag import Ragged
+
+    from genvarloader._dataset._flat_variants import DummyVariant, get_variants_flat
+    from genvarloader._dataset._haps import Haps, _Variants
+    from genvarloader._dataset._rag_variants import RaggedVariants
+    from genvarloader._variants._records import RaggedAlleles
+
+    # Build a minimal _Variants: 3 variants with ALT = [b"A", b"C", b"G"]
+    alt_bytes = np.frombuffer(b"ACG", np.uint8).copy().view("S1")
+    alt_offsets = np.array([0, 1, 2, 3], np.int64)
+    alt_ra = RaggedAlleles.from_offsets(alt_bytes, (3, None), alt_offsets)
+    variants = _Variants(
+        path=Path("dummy"),
+        start=np.array([10, 20, 30], POS_TYPE),
+        ilen=np.array([0, 1, -1], np.int32),
+        ref=None,
+        alt=alt_ra,
+        info={},
+    )
+
+    # Build genotypes: b=2 regions, s=2 samples, p=1 ploidy
+    # Layout (r=2, s=2, p=1, ~v):
+    #   [r0,s0,p0]: variant 0      (non-empty)
+    #   [r0,s1,p0]: empty          (empty group)
+    #   [r1,s0,p0]: variants 1,2   (non-empty)
+    #   [r1,s1,p0]: empty          (empty group)
+    v_idxs = np.array([0, 1, 2], V_IDX_TYPE)
+    # offsets for 4 rows: [1, 0, 2, 0] variants → cumsum → [0, 1, 1, 3, 3]
+    offsets = np.array([0, 1, 1, 3, 3], np.int64)
+    genotypes = Ragged.from_offsets(v_idxs, (2, 2, 1, None), offsets)
+
+    haps = Haps(
+        path=Path("dummy"),
+        reference=None,
+        variants=variants,
+        genotypes=genotypes,
+        dosages=None,
+        kind=RaggedVariants,
+        filter=None,
+        min_af=None,
+        max_af=None,
+        var_fields=["alt", "ilen", "start"],
+    )
+
+    # idx covers all b*s = 4 region/sample combos
+    idx = np.arange(4, dtype=np.intp)
+
+    # Without dummy: some groups are empty
+    plain = get_variants_flat(haps, idx).to_ragged()
+    plain_starts = ak.to_list(plain["start"])
+    # shape is (b=2, p=1, ~v): plain_starts = [[[10], []], [[20, 30], []]]
+    # row [0][0] has 1 variant, row [0][1] is empty, etc.
+    assert any(len(g) == 0 for row in plain_starts for g in row)
+
+    # With dummy: every group has >= 1 variant
+    haps_d = replace(haps, dummy_variant=DummyVariant(start=-1, alt=b"N", ref=b"N"))
+    filled = get_variants_flat(haps_d, idx).to_ragged()
+
+    filled_starts = ak.to_list(filled["start"])
+    for row in filled_starts:
+        for g in row:
+            assert len(g) >= 1, f"empty group found after fill: {filled_starts}"
+
+    # Non-empty groups are unchanged vs plain
+    for pr, fr in zip(plain_starts, filled_starts):
+        for pg, fg in zip(pr, fr):
+            if len(pg) > 0:
+                assert fg == pg, f"non-empty group changed: {pg} -> {fg}"
+            else:
+                assert fg == [-1], f"empty group not filled with dummy start=-1: {fg}"

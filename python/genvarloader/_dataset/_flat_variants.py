@@ -490,4 +490,7 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer]) -> _FlatVariants:
         info_data = np.asarray(haps.variants.info[k])[v_idxs]
         fields[k] = _Flat.from_offsets(info_data, shape, row_offsets)
 
-    return _FlatVariants(fields)
+    result = _FlatVariants(fields)
+    if haps.dummy_variant is not None:
+        result = result.fill_empty_groups(haps.dummy_variant)
+    return result
