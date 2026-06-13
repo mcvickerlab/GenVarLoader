@@ -263,9 +263,12 @@ class Dataset:
             together with *token_alphabet*.
         dummy_variant
             A :class:`DummyVariant` to insert into empty (region, sample, ploid) variant
-            groups so every group has at least one variant. Only valid for the variants
-            output (:meth:`with_seqs("variants") <genvarloader.Dataset.with_seqs>`). Pass
-            :code:`False` to disable.
+            groups so every group has at least one variant. Valid for the ``"variants"``
+            and ``"variant-windows"`` outputs (see
+            :meth:`with_seqs <genvarloader.Dataset.with_seqs>`); indexing any other output
+            kind with a dummy set raises. For token outputs (ride-along ``flank_tokens`` and
+            the variant-window token buffers) the dummy entry is filled entirely with
+            ``unknown_token``. Pass :code:`False` to disable.
         """
         to_evolve = {}
 
