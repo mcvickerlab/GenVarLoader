@@ -360,13 +360,19 @@ def write_chunk(
     """Write arrays into the shared-memory slot.
 
     Supports np.ndarray (kind=0), seqpro.rag.Ragged (kind=1),
-    and RaggedVariants (kind=2).
+    and RaggedVariants (kind=2). The flat containers ``_Flat`` (kind=1),
+    ``_FlatVariants`` (kind=2), ``_FlatAnnotatedHaps`` (kind=3), and
+    ``RaggedAnnotatedHaps`` (kind=3) serialize into the same on-wire kinds
+    as their ragged counterparts; the ``flat`` flag on ``read_chunk`` selects
+    which reader reconstructs them.
 
     Returns total bytes consumed (header + payload).
     """
     from seqpro.rag import Ragged
     from ._dataset._rag_variants import RaggedVariants
     from ._ragged import RaggedAnnotatedHaps
+    from ._flat import _Flat, _FlatAnnotatedHaps
+    from ._dataset._flat_variants import _FlatVariants
 
     if len(arrays) > 255:
         raise ValueError("at most 255 arrays per chunk")
@@ -375,11 +381,13 @@ def write_chunk(
     cursor = HEADER_RESERVED
 
     for a in arrays:
-        if isinstance(a, RaggedVariants):
+        if isinstance(a, _FlatVariants):
+            desc, cursor = _write_flat_variants(buf, a, cursor)
+        elif isinstance(a, RaggedVariants):
             desc, cursor = _write_rag_variants(buf, a, cursor)
-        elif isinstance(a, RaggedAnnotatedHaps):
+        elif isinstance(a, (RaggedAnnotatedHaps, _FlatAnnotatedHaps)):
             desc, cursor = _write_rag_annotated(buf, a, cursor)
-        elif isinstance(a, Ragged):
+        elif isinstance(a, (Ragged, _Flat)):
             desc, cursor = _write_ragged(buf, a, cursor)
         elif isinstance(a, np.ndarray):
             desc, cursor = _write_dense(buf, a, cursor)
@@ -586,6 +594,95 @@ def _read_rag_variants(buf: memoryview, d: dict, copy: bool = True):
     return RaggedVariants.from_ak(ak.zip(field_arrays, depth_limit=1))
 
 
+def _flat_ploidy(shape) -> int:
+    """Ploidy (RegularArray.size) for a flat field shape: the last fixed dim
+    when there are >=2 fixed dims, else 1."""
+    fixed = [d for d in shape if d is not None]
+    return fixed[-1] if len(fixed) >= 2 else 1
+
+
+def _write_flat_variants(buf: memoryview, fv, cursor: int) -> tuple[dict, int]:
+    """Write a _FlatVariants into buf as a kind=2 block with NO awkward.
+
+    Mirrors _write_rag_variants's byte layout but reads each field straight off
+    the flat numpy buffers (`_Flat` scalars: outer offsets + leaf data;
+    `_FlatAlleles`: var_offsets (outer) + seq_offsets (inner) + byte_data).
+
+    Fields are written in ``fv.fields`` dict-insertion order, which mirrors the
+    field order produced by ``_write_rag_variants``, so the descriptor field
+    order is consistent across the flat and awkward write paths.
+    """
+    from ._dataset._flat_variants import _FlatAlleles
+
+    field_descs: list[dict] = []
+    for name, f in fv.fields.items():
+        if isinstance(f, _FlatAlleles):
+            outer_offsets = np.ascontiguousarray(f.var_offsets, np.int64)
+            inner_offsets = np.ascontiguousarray(f.seq_offsets, np.int64)
+            leaf_data = np.ascontiguousarray(f.byte_data)
+            field_kind = 1
+            regular_size = _flat_ploidy(f.shape)
+        else:  # _Flat scalar field (start / ilen / dosage / info[...])
+            outer_offsets = np.ascontiguousarray(f.offsets, np.int64)
+            inner_offsets = np.empty(0, dtype=np.int64)
+            leaf_data = np.ascontiguousarray(f.data)
+            field_kind = 0
+            regular_size = _flat_ploidy(f.shape)
+
+        cursor = _align(cursor)
+        outer_off = cursor
+        np.frombuffer(buf, dtype=np.int64, count=outer_offsets.size, offset=outer_off)[
+            ...
+        ] = outer_offsets
+        cursor += outer_offsets.nbytes
+
+        if field_kind == 1:
+            cursor = _align(cursor)
+            inner_off = cursor
+            np.frombuffer(
+                buf, dtype=np.int64, count=inner_offsets.size, offset=inner_off
+            )[...] = inner_offsets
+            cursor += inner_offsets.nbytes
+        else:
+            inner_off = 0
+
+        cursor = _align(cursor)
+        data_off = cursor
+        np.frombuffer(
+            buf, dtype=leaf_data.dtype, count=leaf_data.size, offset=data_off
+        )[...] = leaf_data.ravel()
+        cursor += leaf_data.nbytes
+
+        field_descs.append(
+            {
+                "field_kind": field_kind,
+                "dtype_str": _dtype_to_bytes(leaf_data.dtype),
+                "outer_offsets_offset": outer_off,
+                "outer_offsets_nbytes": outer_offsets.nbytes,
+                "inner_offsets_offset": inner_off,
+                "inner_offsets_nbytes": inner_offsets.nbytes if field_kind == 1 else 0,
+                "data_offset": data_off,
+                "data_nbytes": leaf_data.nbytes,
+                "regular_size": regular_size,
+                "name": name.encode("utf-8"),
+            }
+        )
+
+    return {
+        "kind": 2,
+        "dtype_str": b"\x00" * 4,
+        "shape": [len(field_descs)],
+        "data_offset": 0,
+        "data_nbytes": 0,
+        "offsets_offset": 0,
+        "offsets_nbytes": 0,
+        "inner_offsets_offset": 0,
+        "inner_offsets_nbytes": 0,
+        "name": b"",
+        "_field_descs": field_descs,
+    }, cursor
+
+
 def _read_rag_annotated(buf: memoryview, d: dict, copy: bool = True):
     """Reconstruct a RaggedAnnotatedHaps (kind=3) from its 3 ragged components.
 
@@ -614,7 +711,87 @@ def _read_rag_annotated(buf: memoryview, d: dict, copy: bool = True):
     return RaggedAnnotatedHaps(haps=comps[0], var_idxs=comps[1], ref_coords=comps[2])
 
 
-def read_chunk(buf: memoryview, copy: bool = True) -> tuple[int, list]:
+def _read_flat_ragged(buf: memoryview, d: dict, copy: bool = True):
+    from ._flat import _Flat
+
+    dtype = _dtype_from_bytes(d["dtype_str"])
+    n_items = d["shape"][0]
+    data = np.frombuffer(buf, dtype=dtype, count=n_items, offset=d["data_offset"])
+    n_offsets = d["offsets_nbytes"] // 8
+    offsets = np.frombuffer(
+        buf, dtype=np.int64, count=n_offsets, offset=d["offsets_offset"]
+    )
+    if copy:
+        data = data.copy()
+        offsets = offsets.copy()
+    n_groups = len(offsets) - 1
+    return _Flat(data, offsets, (n_groups, None))
+
+
+def _read_flat_variants(buf: memoryview, d: dict, copy: bool = True):
+    from ._flat import _Flat
+    from ._dataset._flat_variants import _FlatAlleles, _FlatVariants
+
+    fields: dict = {}
+    for fd in d["_field_descs"]:
+        name = fd["name"]
+        leaf_dtype = _dtype_from_bytes(fd["dtype_str"])
+        regular_size = fd["regular_size"]
+
+        n_var = fd["outer_offsets_nbytes"] // 8
+        var_off = np.frombuffer(
+            buf, dtype=np.int64, count=n_var, offset=fd["outer_offsets_offset"]
+        )
+        leaf_count = fd["data_nbytes"] // leaf_dtype.itemsize
+        leaf = np.frombuffer(
+            buf, dtype=leaf_dtype, count=leaf_count, offset=fd["data_offset"]
+        )
+        if copy:
+            var_off = var_off.copy()
+            leaf = leaf.copy()
+
+        n_bp = len(var_off) - 1
+        b = n_bp // regular_size if regular_size else n_bp
+        shape = (b, regular_size, None)
+
+        if fd["field_kind"] == 1:
+            n_seq = fd["inner_offsets_nbytes"] // 8
+            seq_off = np.frombuffer(
+                buf, dtype=np.int64, count=n_seq, offset=fd["inner_offsets_offset"]
+            )
+            if copy:
+                seq_off = seq_off.copy()
+            fields[name] = _FlatAlleles(leaf, seq_off, var_off, shape)
+        else:
+            fields[name] = _Flat(leaf, var_off, shape)
+
+    return _FlatVariants(fields)
+
+
+def _read_flat_annotated(buf: memoryview, d: dict, copy: bool = True):
+    from ._flat import _Flat, _FlatAnnotatedHaps
+
+    comps = []
+    for sd in d["_sub_descs"]:
+        dtype = _dtype_from_bytes(sd["dtype_str"])
+        count = sd["data_nbytes"] // dtype.itemsize
+        data = np.frombuffer(buf, dtype=dtype, count=count, offset=sd["data_offset"])
+        n_offsets = sd["offsets_nbytes"] // 8
+        offsets = np.frombuffer(
+            buf, dtype=np.int64, count=n_offsets, offset=sd["offsets_offset"]
+        )
+        if copy:
+            data = data.copy()
+            offsets = offsets.copy()
+        n_groups = len(offsets) - 1
+        comps.append(_Flat(data, offsets, (n_groups, None)))
+
+    return _FlatAnnotatedHaps(haps=comps[0], var_idxs=comps[1], ref_coords=comps[2])
+
+
+def read_chunk(
+    buf: memoryview, copy: bool = True, flat: bool = False
+) -> tuple[int, list]:
     """Read arrays from the shared-memory slot.
 
     Parameters
@@ -625,9 +802,14 @@ def read_chunk(buf: memoryview, copy: bool = True) -> tuple[int, list]:
         If True (default), returned arrays own their data (safe to use after
         the slot is released). If False, arrays are zero-copy views into buf
         (valid only while buf remains mapped and unmodified by the producer).
+    flat
+        If True, kinds 1/2/3 reconstruct ``_Flat`` / ``_FlatVariants`` /
+        ``_FlatAnnotatedHaps`` instead of the awkward-backed types
+        (``Ragged`` / ``RaggedVariants`` / ``RaggedAnnotatedHaps``).
 
     Returns (n_instances, [arrays...]) where arrays may be np.ndarray,
-    seqpro.rag.Ragged, or RaggedVariants.
+    seqpro.rag.Ragged, RaggedVariants, _Flat, _FlatVariants, or
+    _FlatAnnotatedHaps depending on the ``flat`` flag.
     """
     n_inst, payload_bytes, n_arrays = _PREAMBLE.unpack_from(buf, 0)
     cursor = _PREAMBLE.size
@@ -639,11 +821,19 @@ def read_chunk(buf: memoryview, copy: bool = True) -> tuple[int, list]:
         if kind == 0:
             views.append(_read_dense(buf, d, copy=copy))
         elif kind == 1:
-            views.append(_read_ragged(buf, d, copy=copy))
+            views.append(
+                (_read_flat_ragged if flat else _read_ragged)(buf, d, copy=copy)
+            )
         elif kind == 2:
-            views.append(_read_rag_variants(buf, d, copy=copy))
+            views.append(
+                (_read_flat_variants if flat else _read_rag_variants)(buf, d, copy=copy)
+            )
         elif kind == 3:
-            views.append(_read_rag_annotated(buf, d, copy=copy))
+            views.append(
+                (_read_flat_annotated if flat else _read_rag_annotated)(
+                    buf, d, copy=copy
+                )
+            )
         else:
             raise ValueError(f"Unknown descriptor kind {kind}")
 

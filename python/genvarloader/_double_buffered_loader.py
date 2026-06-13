@@ -42,18 +42,14 @@ def _cleanup(shms: list, producer_ref) -> None:
 
 
 def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
-    """Reshape any Ragged in ``views`` that has lost intermediate fixed dims.
-
-    ``_read_ragged`` always reconstructs Ragged with shape ``(n_groups, None)``.
-    For multi-dimensional ragged output such as haplotypes ``(n_inst, ploidy, None)``,
-    ``n_groups = n_inst * ploidy``, so we need to re-introduce the ploidy axis.
-
-    If ``n_groups % n_instances != 0`` (already correct, e.g. 1-D ragged), we leave
-    the array unchanged.
+    """Re-introduce the ploidy axis on any Ragged / _Flat that the shm reader
+    flattened to (n_groups, None). _FlatVariants / RaggedVariants already carry
+    ploidy (regular_size) and are left unchanged.
     """
     from seqpro.rag import Ragged
 
     from ._ragged import RaggedAnnotatedHaps
+    from ._flat import _Flat, _FlatAnnotatedHaps
 
     def _reshape_one(arr):
         if isinstance(arr, Ragged):
@@ -67,14 +63,29 @@ def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
                 arr = Ragged.from_offsets(
                     arr.data, (n_instances, ploidy, None), arr.offsets
                 )
+            return arr
+        if isinstance(arr, _Flat):
+            n_groups = arr.shape[0]
+            if (
+                n_groups != n_instances
+                and n_instances > 0
+                and n_groups % n_instances == 0
+            ):
+                ploidy = n_groups // n_instances
+                arr = arr.reshape((n_instances, ploidy))
+            return arr
         return arr
 
     result: list = []
     for arr in views:
         if isinstance(arr, RaggedAnnotatedHaps):
-            # Re-introduce the ploidy axis on each component (haps/var_idxs/
-            # ref_coords) just as for a bare Ragged.
             arr = RaggedAnnotatedHaps(
+                haps=_reshape_one(arr.haps),
+                var_idxs=_reshape_one(arr.var_idxs),
+                ref_coords=_reshape_one(arr.ref_coords),
+            )
+        elif isinstance(arr, _FlatAnnotatedHaps):
+            arr = _FlatAnnotatedHaps(
                 haps=_reshape_one(arr.haps),
                 var_idxs=_reshape_one(arr.var_idxs),
                 ref_coords=_reshape_one(arr.ref_coords),
@@ -184,6 +195,7 @@ class _DoubleBufferedIterable:
             "deterministic": ds.deterministic,
             "rc_neg": ds.rc_neg,
             "jitter": ds.jitter,
+            "output_format": ds.output_format,
         }
 
         seqs = ds._seqs
@@ -246,6 +258,8 @@ class _DoubleBufferedIterable:
             # sides and is never double-assigned.
             self._index_queue.put((i % 2, cr, cs, nb))
 
+        flat = self._dataset.output_format == "flat"
+
         for i, (_cr, _cs, _nb) in enumerate(self._chunks):
             slot_idx = i % 2
             _free, ready = self._events[slot_idx]
@@ -257,7 +271,9 @@ class _DoubleBufferedIterable:
             if not self._exc_q.empty():
                 raise self._reraise_or_die()
 
-            _n_inst, views = read_chunk(self._shms[slot_idx].buf, copy=self._copy)
+            _n_inst, views = read_chunk(
+                self._shms[slot_idx].buf, copy=self._copy, flat=flat
+            )
             views = _reshape_ragged_for_chunk(views, int(_n_inst))
             chunk_output: object = tuple(views) if len(views) > 1 else views[0]
 

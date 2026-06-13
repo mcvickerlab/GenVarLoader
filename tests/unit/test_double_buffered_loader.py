@@ -283,3 +283,107 @@ def test_shm_cleanup_after_close(file_backed_ds):
     after = set(os.listdir("/dev/shm"))
     leaked = {n for n in after - before if n.startswith("gvl-")}
     assert not leaked, f"leaked shm segments: {leaked}"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seq_kind", ["reference", "haplotypes", "variants"])
+def test_double_buffered_flat_matches_ragged(file_backed_ds, seq_kind):
+    """double_buffered in flat output equals double_buffered in ragged output,
+    batch for batch, after .to_ragged().
+
+    Ragged slicing returns non-copying views over the full chunk buffer (offsets
+    not rebased), while the flat path rebases+trims; so compare via offset-aware
+    to_padded()/to_list(), not raw .data/.offsets.
+    """
+    import awkward as ak
+    from seqpro.rag import to_padded
+
+    base = file_backed_ds.with_seqs(seq_kind).with_tracks(False)
+    if seq_kind == "haplotypes":
+        base = base.with_settings(deterministic=True)
+
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
+    ragged_batches = list(
+        base.to_dataloader(mode="double_buffered", copy=True, **common)
+    )
+    flat_batches = list(
+        base.with_output_format("flat").to_dataloader(
+            mode="double_buffered", copy=True, **common
+        )
+    )
+
+    assert len(flat_batches) == len(ragged_batches)
+    for i, (rb, fb) in enumerate(zip(ragged_batches, flat_batches)):
+        got = fb.to_ragged()
+        if seq_kind == "variants":
+            assert ak.to_list(got) == ak.to_list(rb), f"batch {i}"
+        else:
+            np.testing.assert_array_equal(
+                to_padded(got, b"N"), to_padded(rb, b"N"), err_msg=f"batch {i}"
+            )
+
+
+@pytest.mark.slow
+def test_double_buffered_flat_annotated_matches_ragged(file_backed_ds):
+    """double_buffered annotated flat output equals ragged output per batch.
+
+    As in test_double_buffered_flat_matches_ragged, ragged slicing returns
+    non-copying views over the full chunk buffer (offsets not rebased) while the
+    flat path rebases+trims, so raw .data/.offsets differ even when logically
+    equal. Compare each component offset-aware via to_padded() with a shared pad
+    value per dtype.
+    """
+    from seqpro.rag import to_padded
+
+    base = (
+        file_backed_ds.with_seqs("annotated")
+        .with_tracks(False)
+        .with_settings(deterministic=True)
+    )
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
+    ragged_batches = list(
+        base.to_dataloader(mode="double_buffered", copy=True, **common)
+    )
+    flat_batches = list(
+        base.with_output_format("flat").to_dataloader(
+            mode="double_buffered", copy=True, **common
+        )
+    )
+    assert len(flat_batches) == len(ragged_batches)
+    pads = {"haps": b"N", "var_idxs": -1, "ref_coords": np.iinfo(np.int32).max}
+    for i, (rb, fb) in enumerate(zip(ragged_batches, flat_batches)):
+        got = fb.to_ragged()
+        for comp, pad in pads.items():
+            np.testing.assert_array_equal(
+                to_padded(getattr(got, comp), pad),
+                to_padded(getattr(rb, comp), pad),
+                err_msg=f"batch {i} comp {comp}",
+            )
+
+
+@pytest.mark.slow
+def test_double_buffered_flat_consumer_avoids_awkward(file_backed_ds, monkeypatch):
+    """In flat mode the consumer must reconstruct via the flat readers, never
+    the awkward kind-2 reader."""
+    import genvarloader._shm_layout as L
+
+    def _boom(*a, **k):
+        raise AssertionError("_read_rag_variants called in flat double_buffered mode")
+
+    monkeypatch.setattr(L, "_read_rag_variants", _boom)
+
+    base = (
+        file_backed_ds.with_seqs("variants")
+        .with_tracks(False)
+        .with_output_format("flat")
+    )
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
+    # Draining must succeed without hitting the awkward reader.
+    batches = list(base.to_dataloader(mode="double_buffered", copy=True, **common))
+    assert batches  # produced something

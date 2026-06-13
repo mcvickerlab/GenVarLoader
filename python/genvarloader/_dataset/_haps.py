@@ -725,9 +725,14 @@ class Haps(Reconstructor[_H]):
 
         offsets = getattr(self.variants, kind).offsets  # int-typed, length n_variants+1
         v_lens = (offsets[v_idxs + 1] - offsets[v_idxs]).astype(np.int64)
-        # genos.offsets has length b*p + 1 (one offset per (instance, ploid) group).
-        # reduceat needs starts, not full offsets; drop the last.
-        return np.add.reduceat(v_lens, genos.offsets[:-1])
+        # genos.offsets has length b*p + 1 (one offset per (instance, ploid)
+        # group). Segment-sum v_lens per group via a cumulative sum: this
+        # handles empty groups correctly (np.add.reduceat would index
+        # out-of-bounds / mishandle zero-length groups when a group's start
+        # offset equals len(v_lens)).
+        group_offsets = np.asarray(genos.offsets, dtype=np.int64)
+        csum = np.concatenate([[0], np.cumsum(v_lens, dtype=np.int64)])
+        return csum[group_offsets[1:]] - csum[group_offsets[:-1]]
 
     def _reconstruct_haplotypes(self, req: ReconstructionRequest) -> Ragged[np.bytes_]:
         """Reconstruct haplotype byte sequences from sparse genotypes."""
