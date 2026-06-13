@@ -9,6 +9,8 @@ from genvarloader._dataset._flat_variants import (
     DummyVariant,
     _fill_empty_fixed,
     _fill_empty_seq,
+    _FlatAlleles,
+    _FlatVariants,
     _FlatVariantWindows,
     _FlatWindow,
 )
@@ -477,3 +479,36 @@ def test_flatvariantwindows_fill_empty_groups_all_unk():
     assert w.data[:11].tolist() == [4] * 11
     assert w.data[11:].tolist() == [5, 6, 7]
     assert w.data.dtype == np.int32
+
+
+def test_flatvariants_fill_empty_groups_fills_flank_tokens():
+    # 2 (b*p) rows: row0 empty, row1 one variant.
+    start = _Flat.from_offsets(
+        np.array([100], np.int32), (1, 1, None), np.array([0, 0, 1], np.int64)
+    )
+    alt = _FlatAlleles(
+        np.frombuffer(b"A", np.uint8).copy(),
+        np.array([0, 1], np.int64),   # seq offsets
+        np.array([0, 0, 1], np.int64),  # var offsets (row0 empty)
+        (1, 1, None),
+    )
+    fv = _FlatVariants({"start": start, "alt": alt})
+    L = 3
+    # flank_tokens: row1's single variant has 2L=6 tokens; shape carries 2L inner.
+    fv.flank_tokens = _Flat(
+        np.arange(6, dtype=np.int32),
+        np.array([0, 0, 1], np.int64),
+        (1, 1, None, 2 * L),
+    )
+
+    dummy = DummyVariant(start=-1, alt=b"N")
+    out = fv.fill_empty_groups(dummy, unk=4)
+
+    # flank_tokens row0 gets a 2L=6 run of unk; row1 unchanged.
+    ft = out.flank_tokens
+    assert ft.offsets.tolist() == [0, 1, 2]
+    assert ft.data[:6].tolist() == [4] * 6
+    assert ft.data[6:].tolist() == list(range(6))
+    assert ft.data.dtype == np.int32
+    # scalar still filled
+    assert out.fields["start"].data.tolist() == [-1, 100]

@@ -391,10 +391,13 @@ class _FlatVariants:
                 self.fields[name] = self.fields[name].reverse_masked(mask)
         return self
 
-    def fill_empty_groups(self, dummy: "DummyVariant") -> "_FlatVariants":
+    def fill_empty_groups(
+        self, dummy: "DummyVariant", unk: int | None = None
+    ) -> "_FlatVariants":
         """Insert one dummy variant into each empty (b*p) group; non-empty
         groups are unchanged. Every field shares the same empty-row pattern, so
-        the rebuilt offsets stay consistent across fields."""
+        the rebuilt offsets stay consistent across fields. When ``flank_tokens``
+        is present, its empty rows are filled with ``2L`` ``unk`` tokens."""
         from .._flat import _Flat
 
         new_fields: dict[str, Any] = {}
@@ -411,7 +414,15 @@ class _FlatVariants:
                 fill = dummy.scalar_for(name, f.data.dtype)
                 nd, noff = _fill_empty_scalar(f.data, f.offsets, fill)
                 new_fields[name] = _Flat.from_offsets(nd, f.shape, noff)
-        return _FlatVariants(new_fields)
+        out = _FlatVariants(new_fields)
+        if self.flank_tokens is not None:
+            # flank_tokens is only set on the token-enabled ride-along path, where
+            # unknown_token (-> unk) is always provided; so unk is non-None here.
+            ft = self.flank_tokens
+            inner = ft.shape[-1]  # 2L, fixed
+            nd, noff = _fill_empty_fixed(ft.data, ft.offsets, inner, unk)
+            out.flank_tokens = _Flat(nd, noff, ft.shape)
+        return out
 
 
 @nb.njit(nogil=True, cache=True)
