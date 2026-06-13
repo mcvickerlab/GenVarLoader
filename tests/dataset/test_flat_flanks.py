@@ -457,3 +457,134 @@ def test_public_exports():
     # VarWindowOpt is constructible and is the documented config object
     opt = gvl.VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
     assert opt.ref == "window" and opt.alt == "window"
+
+
+# ---------------------------------------------------------------------------
+# Acceptance tests for flat flank ride-along tokens (mode C)
+# ---------------------------------------------------------------------------
+
+
+def _oracle_flank_from_ragged(dataset, idx, flank_len, lut):
+    """Independent oracle: (n_var, 2L) flank tokens for ``dataset[idx]`` in flat
+    flank-ride-along mode, computed from the ragged variants output + region contigs."""
+    import awkward as ak
+
+    rag = dataset.with_seqs("variants").with_tracks(False)[idx]
+    ploidy = dataset._seqs.genotypes.shape[-2]
+    ds_idx, _, _ = dataset._idxer.parse_idx(idx)
+    r_idx, _ = np.unravel_index(np.asarray(ds_idx), dataset._idxer.full_shape)
+    region_contigs = dataset._full_regions[r_idx, 0]
+    counts = np.asarray(ak.flatten(ak.num(rag.start, axis=-1), axis=None))
+    starts = np.asarray(ak.flatten(rag.start, axis=None))
+    ilens = np.asarray(ak.flatten(rag.ilen, axis=None))
+    v_contigs = np.repeat(np.repeat(region_contigs, ploidy), counts)
+    ref = dataset._seqs.reference
+    return _flatten_lut_flanks(ref, v_contigs, starts, ilens, flank_len, lut)
+
+
+@pytest.mark.parametrize("idx", [
+    (0, 2),                  # scalar (squeezed) — region 0 / sample 2 has 1 variant
+    ([1, 2, 3], [0, 1, 2]),  # paired list — each (region, sample) has variants
+    ([1, 1], [0, 1]),        # same region, two samples — both have variants
+])
+def test_flank_tokens_index_matrix(snap_dataset, idx):
+    L = 5
+    flat_ds = (
+        snap_dataset.with_seqs("variants").with_tracks(False)
+        .with_output_format("flat")
+        .with_settings(flank_length=L, token_alphabet=b"ACGT", unknown_token=4)
+    )
+    flat = flat_ds[idx]
+    lut = flat_ds._seqs.token_lut
+    expected = _oracle_flank_from_ragged(snap_dataset, idx, L, lut)
+    got = np.asarray(flat.flank_tokens.to_ragged().data)  # (n_var, 2L)
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_oob_flank_padding(snap_dataset):
+    """OOB reference positions tokenize to unknown_token (4).
+
+    Region 0 / sample 2 has a variant at start=110 on chr1.  With L=256 the
+    flank5 window spans positions [110-256, 110) = [-146, 110).  Positions
+    [-146, 0) are outside the contig — the reference reader pads them as 'N'
+    which the LUT maps to unknown_token=4.  We assert that:
+      - start - L < 0 (confirmed OOB)
+      - at least (L - start) tokens in the flank5 column equal 4
+    """
+    L = 256
+    # Region 0, sample 2: variant at start=110 on chr1 (confirmed during exploration)
+    flat_ds = (
+        snap_dataset.with_seqs("variants").with_tracks(False)
+        .with_output_format("flat")
+        .with_settings(flank_length=L, token_alphabet=b"ACGT", unknown_token=4)
+    )
+    import awkward as ak
+
+    rag_ds = snap_dataset.with_seqs("variants").with_tracks(False)
+    rag = rag_ds[[0], [2]]
+    starts = np.asarray(ak.flatten(rag.start, axis=None))
+    assert len(starts) > 0, "expected at least one variant in region 0 / sample 2"
+    min_start = int(starts.min())
+    # Confirm the variant actually crosses position 0
+    assert min_start < L, (
+        f"variant start {min_start} is not < L={L}; adjust the region/sample or L"
+    )
+    n_oob = L - min_start  # positions strictly outside [0, contig_end)
+
+    flat = flat_ds[[0], [2]]
+    toks = np.asarray(flat.flank_tokens.to_ragged().data)  # (n_var, 2L)
+    assert toks.size > 0, "expected non-empty token array"
+    # The first n_oob tokens of flank5 for each variant must be unknown_token
+    flank5 = toks[:, :L]
+    assert (flank5[:, :n_oob] == 4).all(), (
+        f"expected first {n_oob} flank5 tokens to be unknown_token=4 for start={min_start} L={L}"
+    )
+
+
+def test_flank_tokens_empty_region_row(snap_dataset):
+    """A (region, sample) with zero variants must produce a zero-length row."""
+    import awkward as ak
+
+    L = 5
+    flat_ds = (
+        snap_dataset.with_seqs("variants").with_tracks(False)
+        .with_output_format("flat")
+        .with_settings(flank_length=L, token_alphabet=b"ACGT", unknown_token=4)
+    )
+    rag_ds = snap_dataset.with_seqs("variants").with_tracks(False)
+    target = None
+    for r in range(snap_dataset._full_regions.shape[0]):
+        rag = rag_ds[[r], [0]]
+        if int(ak.sum(ak.num(rag.start, axis=-1))) == 0:
+            target = r
+            break
+    if target is None:
+        pytest.skip("no empty (region, sample) variant set in this fixture")
+    flat = flat_ds[[target], [0]]
+    rg = flat.flank_tokens.to_ragged()
+    # zero variants -> zero rows of flank token pairs
+    assert np.asarray(ak.flatten(rg, axis=None)).size == 0
+
+
+def test_no_awkward_on_flank_hot_path(snap_dataset, monkeypatch):
+    """The flat decode path must not invoke awkward __getitem__ during indexing."""
+    import awkward as ak
+
+    calls = {"n": 0}
+    orig = ak.highlevel.Array.__getitem__
+
+    def spy(self, *a, **k):
+        calls["n"] += 1
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(ak.highlevel.Array, "__getitem__", spy)
+    flat_ds = (
+        snap_dataset.with_seqs("variants").with_tracks(False)
+        .with_output_format("flat")
+        .with_settings(flank_length=5, token_alphabet=b"ACGT", unknown_token=4)
+    )
+    calls["n"] = 0
+    _ = flat_ds[[0, 1, 2], [0, 1, 2]]  # indexing only; do NOT call to_ragged()
+    assert calls["n"] == 0, (
+        f"awkward __getitem__ was called {calls['n']} time(s) on the flat flank hot path"
+    )
