@@ -103,3 +103,20 @@ def test_flat_variants_squeeze_leading_axis():
     assert ak.to_list(rv["alt"]) == [[[b"ACG", b"T"]], [[b"GG"]]]
     assert ak.to_list(rv["ref"]) == [[[b"A", b"CC"]], [[b"T"]]]
     assert ak.to_list(rv["start"]) == [[1, 5], [9]]
+
+
+def test_public_flat_exports():
+    import genvarloader as gvl
+
+    assert gvl.FlatRagged is not None
+    assert gvl.FlatAnnotatedHaps is not None
+    assert gvl.FlatVariants is not None
+    assert gvl.FlatAlleles is not None
+    # aliases point at the existing internals
+    from genvarloader._flat import _Flat, _FlatAnnotatedHaps
+    from genvarloader._dataset._flat_variants import _FlatVariants, _FlatAlleles
+
+    assert gvl.FlatRagged is _Flat
+    assert gvl.FlatAnnotatedHaps is _FlatAnnotatedHaps
+    assert gvl.FlatVariants is _FlatVariants
+    assert gvl.FlatAlleles is _FlatAlleles
