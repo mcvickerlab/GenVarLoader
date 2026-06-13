@@ -536,7 +536,3 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer], regions=None) -> "
         flat.flank_tokens = _Flat.from_offsets(tok, (b, ploidy, None, 2 * L), off)
 
     return flat
-
-
-# Public aliases (keep the underscored names working internally).
-FlatVariantWindows = _FlatVariantWindows

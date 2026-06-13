@@ -185,14 +185,17 @@ ragged = result.to_ragged()
 import seqpro as sp
 import genvarloader as gvl
 
+# Both paths need tracks disabled — the flat variants/windows channel is not
+# produced when tracks are active (see gotchas).
+
 # (a) ride-along flank tokens on the "variants" output
-fv = (ds.with_seqs("variants").with_output_format("flat")
+fv = (ds.with_tracks(False).with_seqs("variants").with_output_format("flat")
         .with_settings(flank_length=128, token_alphabet=sp.DNA.alphabet,
                        unknown_token=len(sp.DNA)))[0:8]
 fv.flank_tokens          # FlatRagged, shape (b, p, ~v, 2*128), or None if not configured
 
 # (b) per-allele windows: ref as a flanked window, alt as a bare tokenized allele
-fw = (ds.with_output_format("flat")
+fw = (ds.with_tracks(False).with_output_format("flat")
         .with_seqs("variant-windows",
                    gvl.VarWindowOpt(flank_length=128, token_alphabet=sp.DNA.alphabet,
                                     unknown_token=len(sp.DNA), ref="window", alt="allele")))[0:8]
@@ -355,6 +358,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - `FlatRagged` / `FlatVariants` offsets are **int64**. PyTorch nested tensors require int32 offsets — cast with `.astype(np.int32)` or `tensor.to(torch.int32)` before passing to `torch.nested.narrow`.
 - In `"flat"` mode, tracks and intervals are **not yet flattened** — they still return the same `Ragged`-backed containers as in `"ragged"` mode. Only seqs/haplotypes/annotated-haps/reference and variants outputs are affected.
 - `with_seqs("variant-windows")` requires a `VarWindowOpt` second argument, `with_output_format("flat")`, and a reference genome. Querying in `"ragged"` mode raises. It does **not** inherit flank settings from `with_settings`.
+- **Flat variants/windows need tracks disabled.** `with_seqs("variant-windows", ...)` with active tracks raises (`call with_tracks(False)`). For the ride-along, `FlatVariants.flank_tokens` is only produced on the pure flat variants channel — with active tracks the variants output falls back to ragged `RaggedVariants` (no `flank_tokens`). Call `with_tracks(False)` for both.
 - Flank tokens (`FlatVariants.flank_tokens`) and variant windows (`FlatVariantWindows`) are **reference-oriented** — they are NOT reverse-complemented even when `rc_neg=True`. Only the alt/ref allele fields of `FlatVariants` / `RaggedVariants` are RC'd (not their scalar fields, not flank tokens, not windows).
 - Token dtype is `uint8` when max token id ≤ 255, else `int32`; offsets are `int64`.
 - `VarWindowOpt(ref="allele")` (bare allele mode) requires REF alleles on disk. `flank_length` ride-along on `FlatVariants` requires `token_alphabet` and `unknown_token` to be set together in the same or a prior `with_settings` call.

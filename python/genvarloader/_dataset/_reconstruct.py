@@ -303,6 +303,11 @@ def _build_reconstructor(
         case Ref() as s, Tracks() as t:
             return RefTracks(seqs=s, tracks=t)
         case Haps() as s, Tracks() as t:
+            if seqs_kind == "variant-windows":
+                raise ValueError(
+                    "with_seqs('variant-windows') does not support tracks; call"
+                    " with_tracks(False) to disable them before requesting windows."
+                )
             return HapsTracks(haps=s, tracks=t)
         case _:
             raise AssertionError(
