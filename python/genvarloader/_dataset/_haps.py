@@ -509,12 +509,17 @@ class Haps(Reconstructor[_H]):
         rng: np.random.Generator,
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
+        flat: bool = False,
     ) -> _H:
         if issubclass(self.kind, RaggedVariants):
             if splice_plan is not None:
                 raise NotImplementedError(
                     "Spliced output is not supported for RaggedVariants."
                 )
+            if flat:
+                from ._flat_variants import get_variants_flat
+
+                return cast(_H, get_variants_flat(self, idx))
             ragv = self._get_variants(idx=idx, regions=None, shifts=None)
             ragv = cast(_H, ragv)
             return ragv

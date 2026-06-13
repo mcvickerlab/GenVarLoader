@@ -31,4 +31,9 @@ class Reconstructor(Protocol[T]):
         rng: np.random.Generator,
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
-    ) -> T: ...
+        flat: bool = False,
+    ) -> T:
+        """``flat`` only changes behavior for :class:`Haps` producing
+        ``RaggedVariants`` (it returns a flat ``_FlatVariants`` instead); all
+        other reconstructors are already flat-native and accept-and-ignore it."""
+        ...

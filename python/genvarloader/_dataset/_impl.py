@@ -648,6 +648,19 @@ class Dataset:
         new_recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
         return replace(self, _tracks=new_tracks, _recon=new_recon)
 
+    def with_output_format(self, fmt: Literal["ragged", "flat"]) -> "Dataset":
+        """Return a copy that yields ``fmt`` containers from eager indexing.
+
+        Parameters
+        ----------
+        fmt
+            ``"ragged"`` for awkward-backed ``Ragged``/``RaggedVariants`` (default),
+            or ``"flat"`` for pure-numpy ``FlatRagged``/``FlatVariants``.
+        """
+        if fmt not in ("ragged", "flat"):
+            raise ValueError(f"output_format must be 'ragged' or 'flat', got {fmt!r}.")
+        return replace(self, output_format=fmt)
+
     path: Path
     """Path to the dataset."""
     output_length: Literal["ragged", "variable"] | int
@@ -698,6 +711,10 @@ class Dataset:
         | HapsTracks[RaggedVariants, RaggedIntervals]
     )
     _rng: np.random.Generator
+    output_format: Literal["ragged", "flat"] = "ragged"
+    """Container format for eager indexing. ``"ragged"`` (default) returns awkward-backed
+    seqpro ``Ragged`` / ``RaggedVariants``; ``"flat"`` returns pure-numpy ``FlatRagged`` /
+    ``FlatVariants`` with zero awkward on the hot path. See ``with_output_format``."""
 
     @property
     def is_subset(self) -> bool:
@@ -1595,6 +1612,7 @@ class Dataset:
             jitter=self.jitter,
             deterministic=self.deterministic,
             rc_neg=self.rc_neg,
+            flat_output=self.output_format == "flat",
         )
         return getitem(view, idx)
 

@@ -6,6 +6,8 @@ from seqpro.rag import Ragged
 
 from . import data_registry
 from ._bigwig import BigWigs
+from ._dataset._flat_variants import _FlatAlleles as FlatAlleles
+from ._dataset._flat_variants import _FlatVariants as FlatVariants
 from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
 from ._dataset._insertion_fill import (
     Constant,
@@ -20,6 +22,8 @@ from ._dataset._reference import RefDataset, Reference
 from ._dataset._svar_link import migrate_svar_link
 from ._dataset._write import get_splice_bed, write
 from ._dummy import get_dummy_dataset
+from ._flat import _Flat as FlatRagged
+from ._flat import _FlatAnnotatedHaps as FlatAnnotatedHaps
 from ._ragged import RaggedAnnotatedHaps, RaggedIntervals
 from ._table import Table
 from ._torch import to_nested_tensor
@@ -36,6 +40,10 @@ __all__ = [
     "Dataset",
     "DatasetWithSites",
     "FlankSample",
+    "FlatAlleles",
+    "FlatAnnotatedHaps",
+    "FlatRagged",
+    "FlatVariants",
     "InsertionFill",
     "Interpolate",
     "Ragged",
