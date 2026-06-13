@@ -90,28 +90,29 @@ def getitem(
     else:
         recon, squeeze, out_reshape = _getitem_unspliced(view, idx)
 
-    if view.output_length == "variable":
-        recon = tuple(
-            r if isinstance(r, (RaggedVariants, RaggedIntervals)) else pad(r)
-            for r in recon
-        )
-    elif isinstance(view.output_length, int):
-        recon = tuple(
-            r
-            if isinstance(r, (RaggedVariants, RaggedIntervals))
-            else r.to_fixed(view.output_length)
-            for r in recon
-        )
+    if not view.flat_output:
+        if view.output_length == "variable":
+            recon = tuple(
+                r if isinstance(r, (RaggedVariants, RaggedIntervals)) else pad(r)
+                for r in recon
+            )
+        elif isinstance(view.output_length, int):
+            recon = tuple(
+                r
+                if isinstance(r, (RaggedVariants, RaggedIntervals))
+                else r.to_fixed(view.output_length)
+                for r in recon
+            )
 
-    # Convert any still-flat elements (ragged output_length path) to their
-    # public Ragged types before reshape/squeeze apply the existing logic.
-    recon = tuple(
-        o.to_ragged() if isinstance(o, (_Flat, _FlatAnnotatedHaps)) else o
-        for o in recon
-    )
+        # Convert any still-flat elements (ragged output_length path) to their
+        # public Ragged types before reshape/squeeze apply the existing logic.
+        recon = tuple(
+            o.to_ragged() if isinstance(o, (_Flat, _FlatAnnotatedHaps)) else o
+            for o in recon
+        )
 
     if out_reshape is not None:
-        recon = tuple(o.reshape(out_reshape + o.shape[1:]) for o in recon)  # type: ignore[bad-argument-type, no-matching-overload]  # heterogeneous reshape() across array kinds; shape tuple may contain None for ragged dims
+        recon = tuple(_reshape_outer(o, out_reshape) for o in recon)
 
     if squeeze:
         # (1 [p] l) -> ([p] l)
@@ -121,6 +122,22 @@ def getitem(
         recon = recon[0]
 
     return recon
+
+
+def _reshape_outer(o, out_reshape: tuple[int, ...]):
+    """Reshape the outer (leading) dims of a query output to ``out_reshape``.
+
+    Reshape conventions differ by type. An awkward ``Ragged`` (or
+    ``RaggedAnnotatedHaps``) ``.reshape()`` takes the FULL new shape, including
+    the trailing ragged ``None`` axis, so we pass ``out_reshape + o.shape[1:]``.
+    By contrast ``_Flat``/``_FlatAnnotatedHaps`` ``.reshape()`` takes only the
+    OUTER fixed dims and re-appends its own trailing ``None``; passing the full
+    shape (which already ends in ``None``) would yield a double ragged axis.
+    For those we drop the trailing ``None`` and pass only the outer dims.
+    """
+    if isinstance(o, (_Flat, _FlatAnnotatedHaps)):
+        return o.reshape(out_reshape + o.shape[1:-1])
+    return o.reshape(out_reshape + o.shape[1:])  # type: ignore[bad-argument-type, no-matching-overload]  # heterogeneous reshape() across array kinds; shape tuple may contain None for ragged dims
 
 
 def _getitem_unspliced(
