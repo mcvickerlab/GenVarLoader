@@ -188,7 +188,6 @@ def test_slice_chunk_flat_matches_direct(seq_kind):
     """slice_chunk on a flat chunk yields mini-batches whose .to_ragged()
     equals direct ragged indexing of the same instances."""
     import awkward as ak
-    from seqpro.rag import Ragged
 
     import genvarloader as gvl
     from genvarloader._chunked import slice_chunk

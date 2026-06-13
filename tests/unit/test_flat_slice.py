@@ -47,8 +47,6 @@ def test_flat_slice_matches_direct_index(seq_kind, sl):
     got = sliced.to_ragged()
     if seq_kind == "variants":
         if sub.size == 0:
-            import awkward as ak
-
             assert len(got) == 0
         else:
             _ak_eq(got, ragged_sub)
