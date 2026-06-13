@@ -266,8 +266,8 @@ class Dataset:
             groups so every group has at least one variant. Valid for the ``"variants"``
             and ``"variant-windows"`` outputs (see
             :meth:`with_seqs <genvarloader.Dataset.with_seqs>`); indexing any other output
-            kind with a dummy set raises. For token outputs (ride-along ``flank_tokens`` and
-            the variant-window token buffers) the dummy entry is filled entirely with
+            kind with a dummy set raises. For token outputs (the ride-along ``flank_tokens``
+            and the variant-window token buffers) the dummy entry is filled entirely with
             ``unknown_token``. Pass :code:`False` to disable.
         """
         to_evolve = {}
