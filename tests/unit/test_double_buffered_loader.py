@@ -299,7 +299,7 @@ def test_double_buffered_flat_matches_ragged(file_backed_ds, seq_kind):
     from seqpro.rag import to_padded
 
     base = file_backed_ds.with_seqs(seq_kind).with_tracks(False)
-    if seq_kind in ("haplotypes", "annotated"):
+    if seq_kind == "haplotypes":
         base = base.with_settings(deterministic=True)
 
     common = dict(batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024)

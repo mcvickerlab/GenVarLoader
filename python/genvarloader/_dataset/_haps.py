@@ -731,7 +731,7 @@ class Haps(Reconstructor[_H]):
         # out-of-bounds / mishandle zero-length groups when a group's start
         # offset equals len(v_lens)).
         group_offsets = np.asarray(genos.offsets, dtype=np.int64)
-        csum = np.concatenate([[0], np.cumsum(v_lens)])
+        csum = np.concatenate([[0], np.cumsum(v_lens, dtype=np.int64)])
         return csum[group_offsets[1:]] - csum[group_offsets[:-1]]
 
     def _reconstruct_haplotypes(self, req: ReconstructionRequest) -> Ragged[np.bytes_]:
