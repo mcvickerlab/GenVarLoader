@@ -34,6 +34,65 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.29.0 (2026-06-13)
+
+### Feat
+
+- **flat**: dummy padding for flank_tokens and variant-windows in get_variants_flat
+- **flat**: thread unknown_token onto Haps for dummy token fill
+- **flat**: fill_empty_groups fills flank_tokens with unknown_token
+- **flat**: _FlatVariantWindows.fill_empty_groups (all-unknown_token dummy)
+- **flat**: _fill_empty_fixed kernel for flank_tokens empty-row dummy fill
+- **flat**: double_buffered carries flat buffers without awkward re-wrap
+- **flat**: slice_chunk handles flat containers
+- **flat**: shm write/read flat types (kind 1/2/3) without awkward
+- **flat**: instance-axis __getitem__ on flat containers
+- **flat**: with_settings(dummy_variant=...) + export DummyVariant + non-variant guard
+- **flat**: Haps.dummy_variant + apply empty-group fill in get_variants_flat
+- **flat**: DummyVariant + empty-group fill kernels + fill_empty_groups
+- **flat**: export FlatVariantWindows and VarWindowOpt
+- **flat**: VarWindowOpt-driven per-allele variant-windows (window|allele matrix)
+- **flat**: VarWindowOpt + per-allele window/allele computation + optional window fields
+- **flat**: register variant-windows kind end-to-end
+- **flat**: attach flank_tokens / emit windows from get_variants_flat
+- **flat**: ref/alt window assembly + tokenization
+- **flat**: _FlatWindow + _FlatVariantWindows two-level token types
+- **flat**: compute ride-along flank tokens from reference
+- **flat**: thread flank_length + token LUT settings onto Haps
+- **flat**: byte->int token LUT builder for flank tokenization
+- **flat**: A flat variant decode (get_variants_flat) with no awkward
+- **flat**: A0 flat passthrough for seqs/haps/annot/reference outputs
+- **flat**: output_format field + with_output_format + QueryView.flat_output
+- **flat**: export FlatRagged/FlatAnnotatedHaps/FlatVariants/FlatAlleles
+- **flat**: _FlatVariants/_FlatAlleles types with to_ragged()
+
+### Fix
+
+- **torch**: reject variant-windows output over buffered transport up front
+- **flat**: allow dummy_variant with variant-windows output kind
+- **flat**: _fill_empty_seq preserves input dtype for token windows
+- **flat**: reject flat+buffered variants with flank tokens at construction
+- **flat**: harden _FlatVariants slice for flank_tokens; test polish
+- **flat**: with_settings(dummy_variant=False) is a no-op on non-variant datasets
+- **flat**: narrow _seqs to Haps before flank-field replace (pyrefly)
+- **flat**: clear error for variant-windows + active tracks; drop dead alias
+- **flat**: clear error for VarWindowOpt(ref='allele') on REF-less dataset
+- **flat**: clearer splice-unsupported messages for variant-windows
+- **flat**: windows reshape must keep ploidy dim ([1:-1] not [1:-2])
+- **flat**: guard flank-without-LUT, document Haps fields, test validation paths
+- **flat**: shape-driven _FlatAlleles.to_ragged fixes scalar-scalar squeeze byte-identity
+- **flat**: _FlatAlleles.reshape re-appends ragged axis; docstrings + 2D-index test
+- **flat**: add _FlatAlleles.squeeze so _FlatVariants.squeeze works
+
+### Refactor
+
+- **flat**: clarify flat-variant reader names; annotated shm round-trip test
+- **flat**: retire awkward _get_variants; ragged variants decode via flat path
+- **flat**: normalize _FlatVariants.reshape shape arg; drop redundant import
+
 ## v0.28.0 (2026-06-08)
 
 ### Feat
