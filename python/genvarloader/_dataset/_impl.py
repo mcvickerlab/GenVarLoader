@@ -39,6 +39,7 @@ from ._reconstruct import (
     TrackType,
     _build_reconstructor,
 )
+from ._flat_variants import VarWindowOpt
 from ._reference import Reference
 from ._splice import SpliceMap
 from ._utils import regions_to_bed
@@ -453,14 +454,10 @@ class Dataset:
 
         if self.sequence_type == "variant-windows":
             haps = self._seqs
-            if (
-                not isinstance(haps, Haps)
-                or not haps.flank_length
-                or haps.token_lut is None
-            ):
+            if not isinstance(haps, Haps) or haps.window_opt is None:
                 raise ValueError(
-                    "with_seqs('variant-windows') requires flank_length,"
-                    " token_alphabet, and unknown_token via with_settings(...)."
+                    "with_seqs('variant-windows') requires a VarWindowOpt"
+                    " (pass it to with_seqs)."
                 )
 
     def with_len(
@@ -541,7 +538,9 @@ class Dataset:
         return out
 
     def with_seqs(
-        self, kind: Literal["reference", "haplotypes", "annotated", "variants", "variant-windows"] | None
+        self,
+        kind: Literal["reference", "haplotypes", "annotated", "variants", "variant-windows"] | None,
+        window_opt: "VarWindowOpt | None" = None,
     ):
         """Return a new dataset with the specified sequence type. The sequence type can be one of the following:
 
@@ -620,16 +619,30 @@ class Dataset:
                 raise ValueError(
                     "Dataset has no genotypes to yield variant windows from."
                 )
-            if not self._seqs.flank_length or self._seqs.token_lut is None:
+            if window_opt is None:
                 raise ValueError(
-                    "with_seqs('variant-windows') requires flank_length,"
-                    " token_alphabet, and unknown_token via with_settings(...)."
+                    "with_seqs('variant-windows') requires a VarWindowOpt, e.g."
+                    " with_seqs('variant-windows', VarWindowOpt(flank_length=...,"
+                    " token_alphabet=..., unknown_token=...))."
                 )
         else:
             assert_never(kind)
 
-        new_recon = _build_reconstructor(self._seqs, self._tracks, kind)
-        return replace(self, _seqs_kind=kind, _recon=new_recon)
+        new_seqs = self._seqs
+        if kind == "variant-windows":
+            from ._flat_flanks import build_token_lut
+
+            lut, lut_dtype = build_token_lut(
+                window_opt.token_alphabet, window_opt.unknown_token
+            )
+            new_seqs = replace(
+                self._seqs,
+                token_lut=lut,
+                token_dtype=lut_dtype,
+                window_opt=window_opt,
+            )
+        new_recon = _build_reconstructor(new_seqs, self._tracks, kind)
+        return replace(self, _seqs=new_seqs, _seqs_kind=kind, _recon=new_recon)
 
     def with_tracks(
         self,
@@ -1832,9 +1845,11 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
         self, kind: Literal["variants"]
     ) -> ArrayDataset[RaggedVariants, MaybeTRK]: ...
     def with_seqs(
-        self, kind: Literal["reference", "haplotypes", "annotated", "variants", "variant-windows"] | None
+        self,
+        kind: Literal["reference", "haplotypes", "annotated", "variants", "variant-windows"] | None,
+        window_opt: "VarWindowOpt | None" = None,
     ) -> ArrayDataset:
-        return super().with_seqs(kind)
+        return super().with_seqs(kind, window_opt)
 
     @overload
     def with_tracks(self, tracks: None = None, kind: None = None) -> Self: ...
@@ -1982,9 +1997,11 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
         self, kind: Literal["variants"]
     ) -> RaggedDataset[RaggedVariants, MaybeRTRK]: ...
     def with_seqs(
-        self, kind: Literal["reference", "haplotypes", "annotated", "variants", "variant-windows"] | None
+        self,
+        kind: Literal["reference", "haplotypes", "annotated", "variants", "variant-windows"] | None,
+        window_opt: "VarWindowOpt | None" = None,
     ) -> RaggedDataset:
-        return super().with_seqs(kind)
+        return super().with_seqs(kind, window_opt)
 
     @overload
     def with_tracks(self, tracks: None = None, kind: None = None) -> Self: ...

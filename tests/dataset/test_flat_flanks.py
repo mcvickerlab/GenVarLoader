@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from genvarloader._dataset._flat_flanks import build_token_lut, compute_flank_tokens, compute_windows
 from genvarloader._dataset._flat_variants import _FlatWindow, _FlatVariantWindows
 from genvarloader._dataset._flat_flanks import (
@@ -231,31 +232,37 @@ def test_flank_tokens_end_to_end_matches_oracle(snap_dataset):
 
 
 def test_variant_windows_kind_end_to_end(snap_dataset):
+    from genvarloader._dataset._flat_variants import VarWindowOpt
+
     ds = (
         snap_dataset.with_tracks(False)
         .with_output_format("flat")
-        .with_settings(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
-        .with_seqs("variant-windows")
+        .with_seqs(
+            "variant-windows",
+            VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
+        )
     )
     out = ds[[0, 1], [0, 1]]
+    # default: both alleles are windows
     assert out.ref_window is not None and out.alt_window is not None
+    assert out.ref is None and out.alt is None
     assert "alt" not in out.fields and "ref" not in out.fields
 
 
-def test_variant_windows_requires_flank_settings(snap_dataset):
+def test_variant_windows_requires_opt(snap_dataset):
     import pytest
 
-    with pytest.raises(ValueError, match="flank"):
-        snap_dataset.with_seqs("variant-windows")  # no flank_length set
+    with pytest.raises(ValueError, match="VarWindowOpt"):
+        snap_dataset.with_seqs("variant-windows")  # no VarWindowOpt
 
 
 def test_variant_windows_requires_flat_output(snap_dataset):
     import pytest
+    from genvarloader._dataset._flat_variants import VarWindowOpt
 
-    ds = (
-        snap_dataset.with_tracks(False)
-        .with_settings(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
-        .with_seqs("variant-windows")
+    ds = snap_dataset.with_tracks(False).with_seqs(
+        "variant-windows",
+        VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
     )  # output_format defaults to "ragged"
     with pytest.raises(ValueError, match="flat"):
         _ = ds[[0, 1], [0, 1]]
@@ -264,11 +271,15 @@ def test_variant_windows_requires_flat_output(snap_dataset):
 def test_variant_windows_reshape_preserves_ploidy(snap_dataset):
     # A 2-D index (out_reshape != None) drives the _reshape_outer path. Regression
     # for a bug where windows dropped the ploidy dim during reshape.
+    from genvarloader._dataset._flat_variants import VarWindowOpt
+
     ds = (
         snap_dataset.with_tracks(False)
         .with_output_format("flat")
-        .with_settings(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
-        .with_seqs("variant-windows")
+        .with_seqs(
+            "variant-windows",
+            VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
+        )
     )
     ploidy = snap_dataset._seqs.genotypes.shape[-2]
     out = ds[[[0, 1]], [[0, 1]]]  # out_reshape == (1, 2)
@@ -280,6 +291,86 @@ def test_variant_windows_reshape_preserves_ploidy(snap_dataset):
     # to_ragged must still work (offsets/data consistent after reshape)
     out.ref_window.to_ragged()
     out.alt_window.to_ragged()
+
+
+@pytest.mark.parametrize(
+    "ref_mode,alt_mode",
+    [("window", "window"), ("window", "allele"), ("allele", "window"), ("allele", "allele")],
+)
+def test_variant_windows_matrix_fields(snap_dataset, ref_mode, alt_mode):
+    from genvarloader._dataset._flat_variants import VarWindowOpt
+
+    ds = (
+        snap_dataset.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            VarWindowOpt(
+                flank_length=4, token_alphabet=b"ACGT", unknown_token=4,
+                ref=ref_mode, alt=alt_mode,
+            ),
+        )
+    )
+    out = ds[[0, 1], [0, 1]]
+    # ref slot
+    if ref_mode == "window":
+        assert out.ref_window is not None and out.ref is None
+    else:
+        assert out.ref is not None and out.ref_window is None
+    # alt slot
+    if alt_mode == "window":
+        assert out.alt_window is not None and out.alt is None
+    else:
+        assert out.alt is not None and out.alt_window is None
+    # all present buffers convert to ragged without error
+    out.to_ragged()
+
+
+def test_variant_windows_ref_window_alt_allele_oracle(snap_dataset):
+    # The user's case: ref=window, alt=bare allele. Verify both against oracles.
+    import awkward as ak
+    from genvarloader._dataset._flat_variants import VarWindowOpt
+    from genvarloader._dataset._flat_flanks import build_token_lut
+
+    L = 4
+    base = snap_dataset.with_settings(rc_neg=False)
+    ds = (
+        base.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            VarWindowOpt(flank_length=L, token_alphabet=b"ACGT", unknown_token=4,
+                        ref="window", alt="allele"),
+        )
+    )
+    rag = base.with_seqs("variants").with_tracks(False)
+    idx = ([0, 1, 2], [0, 1, 2])
+    out = ds[idx]
+    rv = rag[idx]
+
+    ref = snap_dataset._seqs.reference
+    lut, _ = build_token_lut(b"ACGT", 4)
+    ploidy = snap_dataset._seqs.genotypes.shape[-2]
+    ds_idx, _, _ = snap_dataset._idxer.parse_idx(idx)
+    r_idx, _ = np.unravel_index(np.asarray(ds_idx), snap_dataset._idxer.full_shape)
+    region_contigs = snap_dataset._full_regions[r_idx, 0]
+    counts = np.asarray(ak.flatten(ak.num(rv.start, axis=-1), axis=None))
+    starts = np.asarray(ak.flatten(rv.start, axis=None))
+    ilens = np.asarray(ak.flatten(rv.ilen, axis=None))
+    v_contigs = np.repeat(np.repeat(region_contigs, ploidy), counts)
+    ends = starts - np.minimum(ilens, 0) + 1
+
+    # ref window oracle: [start-L, end+L) read tokenized
+    rw = ref.fetch(v_contigs, starts - L, ends + L)
+    exp_ref = lut[rw.data.view(np.uint8)]
+    got_ref_flat = np.asarray(ak.flatten(out.ref_window.to_ragged(), axis=None))
+    np.testing.assert_array_equal(got_ref_flat, exp_ref)
+
+    # alt bare allele oracle: tokenized alt bytes (no flanks)
+    alt_bytes = np.asarray(ak.flatten(rv.alt, axis=None)).view(np.uint8)
+    exp_alt = lut[alt_bytes]
+    got_alt_flat = np.asarray(ak.flatten(out.alt.to_ragged(), axis=None))
+    np.testing.assert_array_equal(got_alt_flat, exp_alt)
 
 
 def test_varwindowopt_defaults():

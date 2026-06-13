@@ -469,8 +469,59 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer], regions=None) -> "
 
     flat = _FlatVariants(fields)
 
+    opt = haps.window_opt
+    if (
+        regions is not None
+        and issubclass(haps.kind, _FlatVariantWindows)
+        and opt is not None
+    ):
+        from ._flat_flanks import (
+            compute_alt_window,
+            compute_ref_window,
+            tokenize_alleles,
+        )
+
+        L = opt.flank_length
+        lut = haps.token_lut
+        starts_v = np.asarray(haps.variants.start)[v_idxs]
+        ilens_v = np.asarray(haps.variants.ilen)[v_idxs]
+        regions = np.asarray(regions)
+        group_contigs = np.repeat(regions[:, 0], ploidy)
+        v_contigs = np.repeat(group_contigs, np.diff(row_offsets))
+        wshape = (b, ploidy, None, None)
+        wfields = {k: v for k, v in fields.items() if k not in ("alt", "ref")}
+        win = _FlatVariantWindows(wfields)
+
+        if opt.ref == "window":
+            rw = compute_ref_window(
+                haps.reference, v_contigs, starts_v, ilens_v, L, lut, row_offsets
+            )
+            rw.shape = wshape
+            win.ref_window = rw
+        else:  # "allele": bare tokenized ref allele
+            ref_bytes = np.asarray(haps.variants.ref.data).view(np.uint8)
+            ref_off = np.asarray(haps.variants.ref.offsets, np.int64)
+            ref_data, ref_seq_off = _gather_alleles(v_idxs, ref_bytes, ref_off)
+            rw = tokenize_alleles(ref_data, ref_seq_off, lut, row_offsets)
+            rw.shape = wshape
+            win.ref = rw
+
+        if opt.alt == "window":
+            aw = compute_alt_window(
+                haps.reference, v_contigs, starts_v, ilens_v,
+                alt_data, alt_seq_off, L, lut, row_offsets,
+            )
+            aw.shape = wshape
+            win.alt_window = aw
+        else:  # "allele": bare tokenized alt allele
+            aw = tokenize_alleles(alt_data, alt_seq_off, lut, row_offsets)
+            aw.shape = wshape
+            win.alt = aw
+
+        return win
+
     if haps.flank_length and haps.token_lut is not None and regions is not None:
-        from ._flat_flanks import compute_flank_tokens, compute_windows
+        from ._flat_flanks import compute_flank_tokens
 
         L = haps.flank_length
         starts_v = np.asarray(haps.variants.start)[v_idxs]
@@ -478,18 +529,6 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer], regions=None) -> "
         regions = np.asarray(regions)
         group_contigs = np.repeat(regions[:, 0], ploidy)  # (b*p,)
         v_contigs = np.repeat(group_contigs, np.diff(row_offsets))  # (n_var,)
-
-        if issubclass(haps.kind, _FlatVariantWindows):
-            ref_w, alt_w = compute_windows(
-                haps.reference, v_contigs, starts_v, ilens_v,
-                alt_data, alt_seq_off, L, haps.token_lut, row_offsets,
-            )
-            # Overwrite the placeholder shape compute_windows set on each window.
-            wshape = (b, ploidy, None, None)
-            ref_w.shape = wshape
-            alt_w.shape = wshape
-            wfields = {k: v for k, v in fields.items() if k not in ("alt", "ref")}
-            return _FlatVariantWindows(wfields, ref_w, alt_w)
 
         tok, off = compute_flank_tokens(
             haps.reference, v_contigs, starts_v, ilens_v, L, haps.token_lut, row_offsets,

@@ -32,7 +32,7 @@ from typing_extensions import assert_never
 
 from .._flat import _Flat, _FlatAnnotatedHaps
 from .._ragged import RaggedAnnotatedHaps, RaggedSeqs
-from ._flat_variants import _FlatVariantWindows
+from ._flat_variants import _FlatVariantWindows, VarWindowOpt
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
 from ._genotypes import (
@@ -262,6 +262,8 @@ class Haps(Reconstructor[_H]):
     """256-entry byte->token lookup table (see ``build_token_lut``). Set together with ``token_dtype``."""
     token_dtype: np.dtype | None = None
     """Output dtype of tokens produced via ``token_lut``."""
+    window_opt: VarWindowOpt | None = None
+    """Options for variant-windows output mode. Set via ``with_seqs('variant-windows', opt)``."""
 
     def __post_init__(self):
         self.n_variants = ak.num(self.genotypes, -1).to_numpy()
