@@ -366,9 +366,21 @@ def reverse_complement_ragged(
     rag: RaggedIntervals, to_rc: NDArray[np.bool_]
 ) -> RaggedIntervals: ...
 def reverse_complement_ragged(
-    rag: _Flat | _FlatAnnotatedHaps | _FlatVariants | _FlatVariantWindows | RaggedVariants | RaggedIntervals,
+    rag: _Flat
+    | _FlatAnnotatedHaps
+    | _FlatVariants
+    | _FlatVariantWindows
+    | RaggedVariants
+    | RaggedIntervals,
     to_rc: NDArray[np.bool_],
-) -> _Flat | _FlatAnnotatedHaps | _FlatVariants | _FlatVariantWindows | RaggedVariants | RaggedIntervals:
+) -> (
+    _Flat
+    | _FlatAnnotatedHaps
+    | _FlatVariants
+    | _FlatVariantWindows
+    | RaggedVariants
+    | RaggedIntervals
+):
     """Reverse-complement (or reverse) ragged outputs according to a per-row mask."""
     if isinstance(rag, _FlatVariantWindows):
         # Windows are reference-oriented; reverse-complement is not applied.

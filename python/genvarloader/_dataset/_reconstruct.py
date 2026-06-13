@@ -242,7 +242,10 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
 def _build_reconstructor(
     seqs: Haps | Ref | None,
     tracks: Tracks | None,
-    seqs_kind: Literal["haplotypes", "reference", "annotated", "variants", "variant-windows"] | None,
+    seqs_kind: Literal[
+        "haplotypes", "reference", "annotated", "variants", "variant-windows"
+    ]
+    | None,
 ) -> Reconstructor:
     """Construct the reconstructor for the given (storage + view) state.
 

@@ -539,7 +539,10 @@ class Dataset:
 
     def with_seqs(
         self,
-        kind: Literal["reference", "haplotypes", "annotated", "variants", "variant-windows"] | None,
+        kind: Literal[
+            "reference", "haplotypes", "annotated", "variants", "variant-windows"
+        ]
+        | None,
         window_opt: "VarWindowOpt | None" = None,
     ):
         """Return a new dataset with the specified sequence type. The sequence type can be one of the following:
@@ -781,7 +784,10 @@ class Dataset:
         Ref | Haps[RaggedSeqs] | Haps[RaggedAnnotatedHaps] | Haps[RaggedVariants] | None
     )
     _tracks: Tracks[RaggedTracks] | Tracks[RaggedIntervals] | None
-    _seqs_kind: Literal["haplotypes", "reference", "annotated", "variants", "variant-windows"] | None
+    _seqs_kind: (
+        Literal["haplotypes", "reference", "annotated", "variants", "variant-windows"]
+        | None
+    )
     _recon: (
         Ref
         | Haps[RaggedSeqs]
@@ -930,14 +936,23 @@ class Dataset:
             case Ref():
                 return ["reference"]
             case Haps():
-                return ["reference", "haplotypes", "annotated", "variants", "variant-windows"]
+                return [
+                    "reference",
+                    "haplotypes",
+                    "annotated",
+                    "variants",
+                    "variant-windows",
+                ]
             case s:
                 assert_never(s)
 
     @property
     def sequence_type(
         self,
-    ) -> Literal["haplotypes", "reference", "annotated", "variants", "variant-windows"] | None:
+    ) -> (
+        Literal["haplotypes", "reference", "annotated", "variants", "variant-windows"]
+        | None
+    ):
         """The type of sequences in the dataset."""
         return self._seqs_kind
 
@@ -1851,7 +1866,10 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
     ) -> ArrayDataset[RaggedVariants, MaybeTRK]: ...
     def with_seqs(
         self,
-        kind: Literal["reference", "haplotypes", "annotated", "variants", "variant-windows"] | None,
+        kind: Literal[
+            "reference", "haplotypes", "annotated", "variants", "variant-windows"
+        ]
+        | None,
         window_opt: "VarWindowOpt | None" = None,
     ) -> ArrayDataset:
         return super().with_seqs(kind, window_opt)
@@ -2003,7 +2021,10 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
     ) -> RaggedDataset[RaggedVariants, MaybeRTRK]: ...
     def with_seqs(
         self,
-        kind: Literal["reference", "haplotypes", "annotated", "variants", "variant-windows"] | None,
+        kind: Literal[
+            "reference", "haplotypes", "annotated", "variants", "variant-windows"
+        ]
+        | None,
         window_opt: "VarWindowOpt | None" = None,
     ) -> RaggedDataset:
         return super().with_seqs(kind, window_opt)

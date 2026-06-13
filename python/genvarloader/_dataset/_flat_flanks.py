@@ -34,7 +34,9 @@ def compute_flank_tokens(
     ilens: NDArray[np.integer],  # (n_var,)
     flank_len: int,
     lut: NDArray,
-    row_offsets: NDArray[np.int64],  # (b*p + 1,) variant boundaries per (instance, ploid) row
+    row_offsets: NDArray[
+        np.int64
+    ],  # (b*p + 1,) variant boundaries per (instance, ploid) row
 ) -> tuple[NDArray, NDArray[np.int64]]:
     """Ride-along flank tokens: ``[flank5 | flank3]`` (``2 * flank_len`` tokens) per
     variant.
@@ -106,8 +108,10 @@ def compute_ref_window(
     rw = reference.fetch(v_contigs, starts - flank_len, ends + flank_len)
     ref_tok = lut[rw.data.view(np.uint8)]
     return _FlatWindow(
-        ref_tok, np.asarray(rw.offsets, np.int64),
-        np.asarray(row_offsets, np.int64), (None,),
+        ref_tok,
+        np.asarray(rw.offsets, np.int64),
+        np.asarray(row_offsets, np.int64),
+        (None,),
     )
 
 
@@ -129,12 +133,18 @@ def compute_alt_window(
     f5 = reference.fetch(v_contigs, starts - flank_len, starts).data.view(np.uint8)
     f3 = reference.fetch(v_contigs, ends, ends + flank_len).data.view(np.uint8)
     alt_bytes, alt_off = _assemble_alt_windows(
-        np.ascontiguousarray(f5), np.ascontiguousarray(f3),
-        np.asarray(alt_data, np.uint8), np.asarray(alt_seq_off, np.int64), flank_len,
+        np.ascontiguousarray(f5),
+        np.ascontiguousarray(f3),
+        np.asarray(alt_data, np.uint8),
+        np.asarray(alt_seq_off, np.int64),
+        flank_len,
     )
     alt_tok = lut[alt_bytes]
     return _FlatWindow(
-        alt_tok, alt_off, np.asarray(row_offsets, np.int64), (None,),
+        alt_tok,
+        alt_off,
+        np.asarray(row_offsets, np.int64),
+        (None,),
     )
 
 
@@ -148,8 +158,10 @@ def tokenize_alleles(
     LUT applied to the gathered allele bytes, with the allele byte offsets."""
     tok = lut[np.asarray(allele_data, np.uint8)]
     return _FlatWindow(
-        tok, np.asarray(allele_seq_off, np.int64),
-        np.asarray(row_offsets, np.int64), (None,),
+        tok,
+        np.asarray(allele_seq_off, np.int64),
+        np.asarray(row_offsets, np.int64),
+        (None,),
     )
 
 
@@ -167,6 +179,18 @@ def compute_windows(
     """ref_window = [start-L, end+L) read; alt_window = flank5 . alt . flank3.
     Thin wrapper over compute_ref_window / compute_alt_window."""
     return (
-        compute_ref_window(reference, v_contigs, starts, ilens, flank_len, lut, row_offsets),
-        compute_alt_window(reference, v_contigs, starts, ilens, alt_data, alt_seq_off, flank_len, lut, row_offsets),
+        compute_ref_window(
+            reference, v_contigs, starts, ilens, flank_len, lut, row_offsets
+        ),
+        compute_alt_window(
+            reference,
+            v_contigs,
+            starts,
+            ilens,
+            alt_data,
+            alt_seq_off,
+            flank_len,
+            lut,
+            row_offsets,
+        ),
     )

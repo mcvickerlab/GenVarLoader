@@ -137,9 +137,7 @@ class _FlatWindow:
         from awkward.index import Index
 
         leaf = NumpyArray(np.ascontiguousarray(self.data))
-        l_content = ListOffsetArray(
-            Index(np.asarray(self.seq_offsets, np.int64)), leaf
-        )
+        l_content = ListOffsetArray(Index(np.asarray(self.seq_offsets, np.int64)), leaf)
         vl_content = ListOffsetArray(
             Index(np.asarray(self.var_offsets, np.int64)), l_content
         )
@@ -245,7 +243,9 @@ class _FlatVariants:
     fields: start/ilen/dosage/info) or _FlatAlleles (alt/ref)."""
 
     fields: dict[str, Any] = field(default_factory=dict)
-    flank_tokens: Any = None  # _Flat | None — ride-along, shape (b, p, ~v, 2L); flat-mode only
+    flank_tokens: Any = (
+        None  # _Flat | None — ride-along, shape (b, p, ~v, 2L); flat-mode only
+    )
 
     @property
     def shape(self) -> tuple[int | None, ...]:
@@ -260,9 +260,7 @@ class _FlatVariants:
         return RaggedVariants(**kw)
 
     def reshape(self, shape) -> "_FlatVariants":
-        new = _FlatVariants(
-            {k: v.reshape(shape) for k, v in self.fields.items()}
-        )
+        new = _FlatVariants({k: v.reshape(shape) for k, v in self.fields.items()})
         if self.flank_tokens is not None:
             from .._flat import _Flat
 
@@ -274,9 +272,7 @@ class _FlatVariants:
         return new
 
     def squeeze(self, axis: int | None = None) -> "_FlatVariants":
-        new = _FlatVariants(
-            {k: v.squeeze(axis) for k, v in self.fields.items()}
-        )
+        new = _FlatVariants({k: v.squeeze(axis) for k, v in self.fields.items()})
         if self.flank_tokens is not None:
             from .._flat import _Flat
 
@@ -373,7 +369,9 @@ def _compact_keep(v_idxs, row_offsets, keep):  # pragma: no cover - njit
     return new_v, new_offsets
 
 
-def get_variants_flat(haps: "Haps", idx: NDArray[np.integer], regions=None) -> "_FlatVariants | _FlatVariantWindows":
+def get_variants_flat(
+    haps: "Haps", idx: NDArray[np.integer], regions=None
+) -> "_FlatVariants | _FlatVariantWindows":
     """Flat-buffer analog of :meth:`Haps._get_variants`: builds a
     :class:`_FlatVariants` with no awkward on the hot path. Re-wrapping the
     result via :meth:`_FlatVariants.to_ragged` is byte-identical to the awkward
@@ -508,8 +506,15 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer], regions=None) -> "
 
         if opt.alt == "window":
             aw = compute_alt_window(
-                haps.reference, v_contigs, starts_v, ilens_v,
-                alt_data, alt_seq_off, L, lut, row_offsets,
+                haps.reference,
+                v_contigs,
+                starts_v,
+                ilens_v,
+                alt_data,
+                alt_seq_off,
+                L,
+                lut,
+                row_offsets,
             )
             aw.shape = wshape
             win.alt_window = aw
@@ -531,7 +536,13 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer], regions=None) -> "
         v_contigs = np.repeat(group_contigs, np.diff(row_offsets))  # (n_var,)
 
         tok, off = compute_flank_tokens(
-            haps.reference, v_contigs, starts_v, ilens_v, L, haps.token_lut, row_offsets,
+            haps.reference,
+            v_contigs,
+            starts_v,
+            ilens_v,
+            L,
+            haps.token_lut,
+            row_offsets,
         )
         flat.flank_tokens = _Flat.from_offsets(tok, (b, ploidy, None, 2 * L), off)
 

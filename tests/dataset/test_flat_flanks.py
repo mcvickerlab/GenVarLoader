@@ -1,6 +1,10 @@
 import numpy as np
 import pytest
-from genvarloader._dataset._flat_flanks import build_token_lut, compute_flank_tokens, compute_windows
+from genvarloader._dataset._flat_flanks import (
+    build_token_lut,
+    compute_flank_tokens,
+    compute_windows,
+)
 from genvarloader._dataset._flat_variants import _FlatWindow, _FlatVariantWindows
 from genvarloader._dataset._flat_flanks import (
     compute_ref_window,
@@ -13,8 +17,16 @@ from genvarloader._dataset._flat_variants import VarWindowOpt
 def _flatten_lut_flanks(ref, contigs, starts, ilens, flank_len, lut):
     """Independent oracle: per-variant [flank5|flank3] tokens, shape (n_var, 2L)."""
     ends = starts - np.minimum(ilens, 0) + 1
-    f5 = ref.fetch(contigs, starts - flank_len, starts).data.view(np.uint8).reshape(-1, flank_len)
-    f3 = ref.fetch(contigs, ends, ends + flank_len).data.view(np.uint8).reshape(-1, flank_len)
+    f5 = (
+        ref.fetch(contigs, starts - flank_len, starts)
+        .data.view(np.uint8)
+        .reshape(-1, flank_len)
+    )
+    f3 = (
+        ref.fetch(contigs, ends, ends + flank_len)
+        .data.view(np.uint8)
+        .reshape(-1, flank_len)
+    )
     return lut[np.concatenate([f5, f3], axis=1)]  # (n_var, 2L)
 
 
@@ -43,9 +55,8 @@ def test_build_token_lut_dtype_promotes_to_int32():
 
 
 def test_with_settings_stores_flank_config(snap_dataset):
-    ds = (
-        snap_dataset.with_seqs("variants")
-        .with_settings(flank_length=5, token_alphabet=b"ACGT", unknown_token=4)
+    ds = snap_dataset.with_seqs("variants").with_settings(
+        flank_length=5, token_alphabet=b"ACGT", unknown_token=4
     )
     haps = ds._seqs
     assert haps.flank_length == 5
@@ -83,7 +94,9 @@ def test_with_settings_flank_requires_genotypes(reference, source_bed, tmp_path)
         bw.addEntries(["chr1"], [499_990], ends=[500_030], values=[1.0])
 
     out = tmp_path / "ref_only.gvl"
-    gvl.write(path=out, bed=source_bed, tracks=gvl.BigWigs("sig", {"dummy": str(bw_path)}))
+    gvl.write(
+        path=out, bed=source_bed, tracks=gvl.BigWigs("sig", {"dummy": str(bw_path)})
+    )
     ds = gvl.Dataset.open(out, reference=reference)
     # _seqs is Ref here; flank settings require Haps (genotypes present).
     with pytest.raises(ValueError, match="genotypes"):
@@ -110,9 +123,11 @@ def _oracle_flank_tokens(reference, v_contigs, starts, ilens, flank_len, lut):
 
 
 def test_compute_flank_tokens_unit(snap_dataset):
-    haps = snap_dataset.with_seqs("variants").with_settings(
-        flank_length=3, token_alphabet=b"ACGT", unknown_token=4
-    )._seqs
+    haps = (
+        snap_dataset.with_seqs("variants")
+        .with_settings(flank_length=3, token_alphabet=b"ACGT", unknown_token=4)
+        ._seqs
+    )
     ref = haps.reference
     lut = haps.token_lut
     # one (b=1, ploidy=1) group with two variants
@@ -148,8 +163,9 @@ def test_flat_window_to_ragged_roundtrip():
     assert ak.to_list(ak.num(rag, axis=3)) == [[[3, 4]], [[2]]]
 
 
-def _oracle_windows(reference, v_contigs, starts, ilens, alt_data, alt_seq_off,
-                    flank_len, lut):
+def _oracle_windows(
+    reference, v_contigs, starts, ilens, alt_data, alt_seq_off, flank_len, lut
+):
     ends = starts - np.minimum(ilens, 0) + 1
     # ref_window: single contiguous read [start-L, end+L)
     rw = reference.fetch(v_contigs, starts - flank_len, ends + flank_len)
@@ -161,16 +177,18 @@ def _oracle_windows(reference, v_contigs, starts, ilens, alt_data, alt_seq_off,
     f3 = f3.reshape(len(starts), flank_len)
     alt_rows = []
     for i in range(len(starts)):
-        a = alt_data[alt_seq_off[i]:alt_seq_off[i + 1]]
+        a = alt_data[alt_seq_off[i] : alt_seq_off[i + 1]]
         alt_rows.append(np.concatenate([f5[i], a, f3[i]]))
     alt_tok = lut[np.concatenate(alt_rows)] if alt_rows else np.empty(0, lut.dtype)
     return ref_tok, np.asarray(rw.offsets), alt_tok
 
 
 def test_compute_windows_unit(snap_dataset):
-    haps = snap_dataset.with_seqs("variants").with_settings(
-        flank_length=3, token_alphabet=b"ACGT", unknown_token=4
-    )._seqs
+    haps = (
+        snap_dataset.with_seqs("variants")
+        .with_settings(flank_length=3, token_alphabet=b"ACGT", unknown_token=4)
+        ._seqs
+    )
     ref, lut = haps.reference, haps.token_lut
     v_contigs = np.array([0, 0], dtype=np.int32)
     starts = np.array([10, 20], dtype=np.int32)
@@ -190,9 +208,7 @@ def test_compute_windows_unit(snap_dataset):
     np.testing.assert_array_equal(alt_w.data, e_alt_tok)
     # alt_window offsets: per-variant window length = 2*flank_len + alt_len, cumsum from 0
     alt_lens = np.diff(alt_seq_off)
-    e_alt_off = np.concatenate(
-        [[0], np.cumsum(2 * 3 + alt_lens)]
-    ).astype(np.int64)
+    e_alt_off = np.concatenate([[0], np.cumsum(2 * 3 + alt_lens)]).astype(np.int64)
     np.testing.assert_array_equal(alt_w.seq_offsets, e_alt_off)
 
 
@@ -201,7 +217,8 @@ def test_flank_tokens_end_to_end_matches_oracle(snap_dataset):
 
     L = 5
     flat_ds = (
-        snap_dataset.with_seqs("variants").with_tracks(False)
+        snap_dataset.with_seqs("variants")
+        .with_tracks(False)
         .with_output_format("flat")
         .with_settings(flank_length=L, token_alphabet=b"ACGT", unknown_token=4)
     )
@@ -295,7 +312,12 @@ def test_variant_windows_reshape_preserves_ploidy(snap_dataset):
 
 @pytest.mark.parametrize(
     "ref_mode,alt_mode",
-    [("window", "window"), ("window", "allele"), ("allele", "window"), ("allele", "allele")],
+    [
+        ("window", "window"),
+        ("window", "allele"),
+        ("allele", "window"),
+        ("allele", "allele"),
+    ],
 )
 def test_variant_windows_matrix_fields(snap_dataset, ref_mode, alt_mode):
     from genvarloader._dataset._flat_variants import VarWindowOpt
@@ -306,8 +328,11 @@ def test_variant_windows_matrix_fields(snap_dataset, ref_mode, alt_mode):
         .with_seqs(
             "variant-windows",
             VarWindowOpt(
-                flank_length=4, token_alphabet=b"ACGT", unknown_token=4,
-                ref=ref_mode, alt=alt_mode,
+                flank_length=4,
+                token_alphabet=b"ACGT",
+                unknown_token=4,
+                ref=ref_mode,
+                alt=alt_mode,
             ),
         )
     )
@@ -339,8 +364,13 @@ def test_variant_windows_ref_window_alt_allele_oracle(snap_dataset):
         .with_output_format("flat")
         .with_seqs(
             "variant-windows",
-            VarWindowOpt(flank_length=L, token_alphabet=b"ACGT", unknown_token=4,
-                        ref="window", alt="allele"),
+            VarWindowOpt(
+                flank_length=L,
+                token_alphabet=b"ACGT",
+                unknown_token=4,
+                ref="window",
+                alt="allele",
+            ),
         )
     )
     rag = base.with_seqs("variants").with_tracks(False)
@@ -376,8 +406,13 @@ def test_variant_windows_ref_window_alt_allele_oracle(snap_dataset):
 def test_varwindowopt_defaults():
     opt = VarWindowOpt(flank_length=5, token_alphabet=b"ACGT", unknown_token=4)
     assert opt.ref == "window" and opt.alt == "window"
-    opt2 = VarWindowOpt(flank_length=5, token_alphabet=b"ACGT", unknown_token=4,
-                        ref="allele", alt="window")
+    opt2 = VarWindowOpt(
+        flank_length=5,
+        token_alphabet=b"ACGT",
+        unknown_token=4,
+        ref="allele",
+        alt="window",
+    )
     assert opt2.ref == "allele"
 
 
@@ -385,9 +420,11 @@ def test_compute_ref_alt_window_split_matches_compute_windows(snap_dataset):
     # compute_windows must equal (compute_ref_window, compute_alt_window)
     from genvarloader._dataset._flat_flanks import compute_windows
 
-    haps = snap_dataset.with_seqs("variants").with_settings(
-        flank_length=3, token_alphabet=b"ACGT", unknown_token=4
-    )._seqs
+    haps = (
+        snap_dataset.with_seqs("variants")
+        .with_settings(flank_length=3, token_alphabet=b"ACGT", unknown_token=4)
+        ._seqs
+    )
     ref, lut = haps.reference, haps.token_lut
     v_contigs = np.array([0, 0], dtype=np.int32)
     starts = np.array([10, 20], dtype=np.int32)
@@ -410,9 +447,11 @@ def test_compute_ref_alt_window_split_matches_compute_windows(snap_dataset):
 
 
 def test_tokenize_alleles_bare(snap_dataset):
-    haps = snap_dataset.with_seqs("variants").with_settings(
-        flank_length=3, token_alphabet=b"ACGT", unknown_token=4
-    )._seqs
+    haps = (
+        snap_dataset.with_seqs("variants")
+        .with_settings(flank_length=3, token_alphabet=b"ACGT", unknown_token=4)
+        ._seqs
+    )
     lut = haps.token_lut
     alt_data = np.frombuffer(b"ACT", dtype=np.uint8).copy()
     alt_seq_off = np.array([0, 2, 3], dtype=np.int64)
@@ -482,15 +521,19 @@ def _oracle_flank_from_ragged(dataset, idx, flank_len, lut):
     return _flatten_lut_flanks(ref, v_contigs, starts, ilens, flank_len, lut)
 
 
-@pytest.mark.parametrize("idx", [
-    (0, 2),                  # scalar (squeezed) — region 0 / sample 2 has 1 variant
-    ([1, 2, 3], [0, 1, 2]),  # paired list — each (region, sample) has variants
-    ([1, 1], [0, 1]),        # same region, two samples — both have variants
-])
+@pytest.mark.parametrize(
+    "idx",
+    [
+        (0, 2),  # scalar (squeezed) — region 0 / sample 2 has 1 variant
+        ([1, 2, 3], [0, 1, 2]),  # paired list — each (region, sample) has variants
+        ([1, 1], [0, 1]),  # same region, two samples — both have variants
+    ],
+)
 def test_flank_tokens_index_matrix(snap_dataset, idx):
     L = 5
     flat_ds = (
-        snap_dataset.with_seqs("variants").with_tracks(False)
+        snap_dataset.with_seqs("variants")
+        .with_tracks(False)
         .with_output_format("flat")
         .with_settings(flank_length=L, token_alphabet=b"ACGT", unknown_token=4)
     )
@@ -514,7 +557,8 @@ def test_oob_flank_padding(snap_dataset):
     L = 256
     # Region 0, sample 2: variant at start=110 on chr1 (confirmed during exploration)
     flat_ds = (
-        snap_dataset.with_seqs("variants").with_tracks(False)
+        snap_dataset.with_seqs("variants")
+        .with_tracks(False)
         .with_output_format("flat")
         .with_settings(flank_length=L, token_alphabet=b"ACGT", unknown_token=4)
     )
@@ -547,7 +591,8 @@ def test_flank_tokens_empty_region_row(snap_dataset):
 
     L = 5
     flat_ds = (
-        snap_dataset.with_seqs("variants").with_tracks(False)
+        snap_dataset.with_seqs("variants")
+        .with_tracks(False)
         .with_output_format("flat")
         .with_settings(flank_length=L, token_alphabet=b"ACGT", unknown_token=4)
     )
@@ -579,7 +624,8 @@ def test_no_awkward_on_flank_hot_path(snap_dataset, monkeypatch):
 
     monkeypatch.setattr(ak.highlevel.Array, "__getitem__", spy)
     flat_ds = (
-        snap_dataset.with_seqs("variants").with_tracks(False)
+        snap_dataset.with_seqs("variants")
+        .with_tracks(False)
         .with_output_format("flat")
         .with_settings(flank_length=5, token_alphabet=b"ACGT", unknown_token=4)
     )
