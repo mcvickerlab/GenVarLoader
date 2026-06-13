@@ -136,13 +136,16 @@ Without `reference=`, a genotypes-only dataset opens with the **`"variants"`** v
 
 `with_seqs(kind)` selects the sequence output channel:
 
-| `kind`         | Returns                                    | Use when                                          |
-|----------------|--------------------------------------------|---------------------------------------------------|
-| `"reference"`  | Reference sequence (`S1`)                  | Baseline / no personalization                     |
-| `"haplotypes"` | Personalized haplotypes with indels (`S1`) | Standard variant-aware modeling                   |
-| `"annotated"`  | `AnnotatedHaps` (haps + var_idxs + ref_coords) | Need to map back to variants/ref coords      |
-| `"variants"`   | `RaggedVariants` (variants only, no seq)   | Variant-centric tasks                             |
-| `None`         | No sequences                               | Tracks-only datasets                              |
+| `kind`              | Returns                                    | Use when                                          |
+|---------------------|--------------------------------------------|---------------------------------------------------|
+| `"reference"`       | Reference sequence (`S1`)                  | Baseline / no personalization                     |
+| `"haplotypes"`      | Personalized haplotypes with indels (`S1`) | Standard variant-aware modeling                   |
+| `"annotated"`       | `AnnotatedHaps` (haps + var_idxs + ref_coords) | Need to map back to variants/ref coords      |
+| `"variants"`        | `RaggedVariants` (variants only, no seq)   | Variant-centric tasks                             |
+| `"variant-windows"` | `FlatVariantWindows` (per-allele window/allele token buffers; flat mode only) | Tokenized model input around each variant |
+| `None`              | No sequences                               | Tracks-only datasets                              |
+
+`"variant-windows"` requires a `VarWindowOpt` second argument (`with_seqs("variant-windows", gvl.VarWindowOpt(...))`), `with_output_format("flat")`, and a reference genome. It does **not** inherit flank settings from `with_settings`.
 
 `with_tracks(tracks=..., kind=...)` selects tracks:
 - `tracks`: `None` (default), `False` (disable), a single name, or a list of names.
@@ -177,6 +180,39 @@ ragged = result.to_ragged()
 `with_output_format` is orthogonal to and composes with `with_len` and `subset_to`.
 
 **Scope note:** only seqs/haplotypes/annotated-haps/reference and variants outputs are flattened. Tracks and intervals are **not** yet flattened — they still return ragged containers in `"flat"` mode.
+
+**Flat variants extras — ride-along flank tokens and variant windows:**
+
+```python
+import seqpro as sp
+import genvarloader as gvl
+
+# Both paths need tracks disabled — the flat variants/windows channel is not
+# produced when tracks are active (see gotchas).
+
+# (a) ride-along flank tokens on the "variants" output
+fv = (ds.with_tracks(False).with_seqs("variants").with_output_format("flat")
+        .with_settings(flank_length=128, token_alphabet=sp.DNA.alphabet,
+                       unknown_token=len(sp.DNA)))[0:8]
+fv.flank_tokens          # FlatRagged, shape (b, p, ~v, 2*128), or None if not configured
+
+# (b) per-allele windows: ref as a flanked window, alt as a bare tokenized allele
+fw = (ds.with_tracks(False).with_output_format("flat")
+        .with_seqs("variant-windows",
+                   gvl.VarWindowOpt(flank_length=128, token_alphabet=sp.DNA.alphabet,
+                                    unknown_token=len(sp.DNA), ref="window", alt="allele")))[0:8]
+fw.ref_window            # flanked ref window tokens (two-level token buffer)
+fw.alt                   # bare alt allele tokens (no flanks); fw.alt_window is None
+fw.ref_window.shape      # the window buffer's own shape: (b, p, ~v, ~len)
+```
+
+**Ride-along `FlatVariants.flank_tokens`** (`with_seqs("variants")` + `with_settings(flank_length=L, token_alphabet=..., unknown_token=...)`): appends a `FlatRagged` of shape `(b, p, ~v, 2L)` to the returned `FlatVariants`. Per variant the buffer holds `[flank5 | flank3]` reference-context tokens (each `L` long). Coordinate rule: `flank5 = [start-L, start)`, `flank3 = [end, end+L)` where `end = start - min(ilen, 0) + 1`. `token_alphabet` (bytes) and `unknown_token` (int) together build a 256-entry byte→token LUT (seqpro-style): each alphabet byte → its 0-based index; every other byte (including `N` and out-of-bounds padding) → `unknown_token`. `flank_length=0`/`None` disables; both `token_alphabet` and `unknown_token` must be set together. Token dtype is `uint8` when max token id ≤ 255, else `int32`; offsets are `int64`.
+
+**`VarWindowOpt` / `FlatVariantWindows`** (`with_seqs("variant-windows", opt)`): each variant gets a fixed-length token buffer in two modes selected independently for ref and alt via `VarWindowOpt.ref` / `VarWindowOpt.alt` ∈ `{"window", "allele"}`:
+- `"window"`: flanked + tokenized — ref-window = tokenized `[start-L, end+L)` reference read; alt-window = tokenized `flank5 · alt-allele · flank3` assembly.
+- `"allele"`: the bare tokenized allele (ref or alt bases) with no flanks.
+
+`FlatVariantWindows` sets exactly one of `.ref_window` / `.ref` (the other is `None`) and one of `.alt_window` / `.alt` (the other is `None`). `.fields` is a dict of scalar `FlatRagged` (`start`/`ilen`/`dosage`/info; raw byte alleles are dropped). Flanks and windows are **reference-oriented** — NOT reverse-complemented even when `rc_neg=True`. Splicing is not supported with `"variant-windows"`.
 
 ## Track insertion fill (only when haps + tracks together)
 
@@ -265,8 +301,10 @@ Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (use
 - `gvl.Ragged`, `gvl.RaggedAnnotatedHaps`, `gvl.RaggedVariants`, `gvl.RaggedIntervals` — ragged return containers.
 - `gvl.FlatRagged` — flat analog of `Ragged`: `.data` (flat numpy array), `.offsets` (int64), `.shape`. Methods: `.to_ragged()`, `.to_fixed(length)`, `.to_padded(pad_value)`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_flat.py`.
 - `gvl.FlatAnnotatedHaps` — flat analog of `RaggedAnnotatedHaps`: fields `.haps`, `.var_idxs`, `.ref_coords` (each a `FlatRagged`). Methods: `.to_ragged()`, `.to_fixed(length)`, `.to_padded()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_flat.py`.
-- `gvl.FlatVariants` — flat analog of `RaggedVariants`: `.fields` dict mapping field names to `FlatRagged` (scalar fields: `start`/`ilen`/`dosage`/info) or `FlatAlleles` (`alt`/`ref`). `.shape` delegates to `fields["start"].shape`. Methods: `.to_ragged()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_dataset/_flat_variants.py`.
+- `gvl.FlatVariants` — flat analog of `RaggedVariants`: `.fields` dict mapping field names to `FlatRagged` (scalar fields: `start`/`ilen`/`dosage`/info) or `FlatAlleles` (`alt`/`ref`). `.shape` delegates to `fields["start"].shape`. `.flank_tokens`: optional ride-along `FlatRagged` of shape `(b, p, ~v, 2L)` (set when `with_settings(flank_length=L, ...)` is configured; `None` otherwise). Methods: `.to_ragged()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_dataset/_flat_variants.py`.
 - `gvl.FlatAlleles` — two-level flat bytestring for allele fields: `.byte_data` (uint8), `.seq_offsets` (per-variant byte offsets, int64), `.var_offsets` (per-(batch×ploidy)-row variant offsets, int64), `.shape`. Methods: `.to_ragged()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_dataset/_flat_variants.py`.
+- `gvl.FlatVariantWindows` — returned by `with_seqs("variant-windows", VarWindowOpt(...))` in flat mode. `.fields`: dict of scalar `FlatRagged` (`start`/`ilen`/`dosage`/info; raw byte alleles are dropped). Per-allele token buffers — exactly one of `.ref_window` (flanked ref window, `"window"` mode) or `.ref` (bare ref allele tokens, `"allele"` mode) is set; same for `.alt_window` / `.alt`. Each non-None buffer is a two-level token buffer (internal `_FlatWindow`, not the public `FlatRagged`) of shape `(b, p, ~v, ~len)` with its own `.to_ragged()`. The container's `.shape` delegates to `fields["start"].shape`. Methods: `.to_ragged()` (returns dict of ragged parts), `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_dataset/_flat_variants.py`.
+- `gvl.VarWindowOpt` — frozen config dataclass for `with_seqs("variant-windows", ...)`. Fields: `flank_length` (int), `token_alphabet` (bytes), `unknown_token` (int), `ref` ∈ `{"window","allele"}`, `alt` ∈ `{"window","allele"}`. `ref` and `alt` are chosen independently. `"window"` = flanked + tokenized reference read (ref) or flank·alt·flank assembly (alt); `"allele"` = bare tokenized allele with no flanks. Source: `python/genvarloader/_dataset/_flat_variants.py`.
 - `gvl.DummyVariant` — frozen dataclass used with `with_settings(dummy_variant=...)`. Fields and defaults: `start: int = -1`, `ilen: int = 0`, `dosage: float = 0.0`, `ref: bytes = b"N"`, `alt: bytes = b"N"`, `info: dict = {}`. Unspecified `info` keys default to `0` for integer columns and `NaN` for float columns. Source: `python/genvarloader/_dataset/_flat_variants.py`.
 - `gvl.to_nested_tensor(ragged)` — convert to a PyTorch nested tensor (requires `torch`).
 - `gvl.get_dummy_dataset()` — small in-memory dataset for examples/tests.
@@ -306,6 +344,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 | SVAR back-reference / migration       | `python/genvarloader/_dataset/_svar_link.py`           |
 | Flat-buffer ragged containers         | `python/genvarloader/_flat.py`                         |
 | Flat variants + alleles types         | `python/genvarloader/_dataset/_flat_variants.py`       |
+| Flank fetch + tokenization + windows  | `python/genvarloader/_dataset/_flat_flanks.py`         |
 
 ## Common gotchas
 
@@ -321,6 +360,11 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - Missing a `dosage` field on a `RaggedVariants` output you expected? Check `var_fields` — `dosage` must be requested explicitly even if `dosages.npy` exists on disk.
 - `FlatRagged` / `FlatVariants` offsets are **int64**. PyTorch nested tensors require int32 offsets — cast with `.astype(np.int32)` or `tensor.to(torch.int32)` before passing to `torch.nested.narrow`.
 - In `"flat"` mode, tracks and intervals are **not yet flattened** — they still return the same `Ragged`-backed containers as in `"ragged"` mode. Only seqs/haplotypes/annotated-haps/reference and variants outputs are affected.
+- `with_seqs("variant-windows")` requires a `VarWindowOpt` second argument, `with_output_format("flat")`, and a reference genome. Querying in `"ragged"` mode raises. It does **not** inherit flank settings from `with_settings`.
+- **Flat variants/windows need tracks disabled.** `with_seqs("variant-windows", ...)` with active tracks raises (`call with_tracks(False)`). For the ride-along, `FlatVariants.flank_tokens` is only produced on the pure flat variants channel — with active tracks the variants output falls back to ragged `RaggedVariants` (no `flank_tokens`). Call `with_tracks(False)` for both.
+- Flank tokens (`FlatVariants.flank_tokens`) and variant windows (`FlatVariantWindows`) are **reference-oriented** — they are NOT reverse-complemented even when `rc_neg=True`. Only the alt/ref allele fields of `FlatVariants` / `RaggedVariants` are RC'd (not their scalar fields, not flank tokens, not windows).
+- Token dtype is `uint8` when max token id ≤ 255, else `int32`; offsets are `int64`.
+- `VarWindowOpt(ref="allele")` (bare allele mode) requires REF alleles on disk. `flank_length` ride-along on `FlatVariants` requires `token_alphabet` and `unknown_token` to be set together in the same or a prior `with_settings` call.
 - `dummy_variant` padding is **variants-output-only**. Setting `dummy_variant=<DummyVariant>` and then indexing with any other `with_seqs` kind (or no seqs at all) raises `ValueError`. `dummy_variant=False` with a non-variants output is silently ignored.
 - A non-`b"N"` `DummyVariant.alt` (or `.ref`) **is reverse-complemented** on negative-strand regions, exactly like a real variant allele. The default `b"N"` is rc-invariant; use it if you want a strand-neutral sentinel.
 

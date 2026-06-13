@@ -35,6 +35,7 @@ from typing_extensions import assert_never
 
 from .._flat import _Flat, _FlatAnnotatedHaps
 from .._ragged import RaggedAnnotatedHaps, RaggedSeqs
+from ._flat_variants import _FlatVariantWindows, VarWindowOpt
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
 from ._genotypes import (
@@ -259,6 +260,14 @@ class Haps(Reconstructor[_H]):
     var_fields: list[str] = field(default_factory=lambda: ["alt", "ilen", "start"])
     dummy_variant: "DummyVariant | None" = None
     available_var_fields: list[str] = field(init=False)
+    flank_length: int | None = None
+    """Number of reference flank bases on each side for flank/window tokenization. ``0``/``None`` disables."""
+    token_lut: NDArray | None = None
+    """256-entry byte->token lookup table (see ``build_token_lut``). Set together with ``token_dtype``."""
+    token_dtype: np.dtype | None = None
+    """Output dtype of tokens produced via ``token_lut``."""
+    window_opt: VarWindowOpt | None = None
+    """Options for variant-windows output mode. Set via ``with_seqs('variant-windows', opt)``."""
 
     def __post_init__(self):
         self.n_variants = ak.num(self.genotypes, -1).to_numpy()
@@ -515,15 +524,25 @@ class Haps(Reconstructor[_H]):
         splice_plan: SplicePlan | None = None,
         flat: bool = False,
     ) -> _H:
-        if issubclass(self.kind, RaggedVariants):
+        if issubclass(self.kind, (RaggedVariants, _FlatVariantWindows)):
             if splice_plan is not None:
                 raise NotImplementedError(
-                    "Spliced output is not supported for RaggedVariants."
+                    "Spliced output is not supported for the 'variants' or"
+                    " 'variant-windows' sequence types."
+                )
+            if issubclass(self.kind, _FlatVariantWindows) and not flat:
+                raise ValueError(
+                    "with_seqs('variant-windows') requires the flat output format;"
+                    " call with_output_format('flat')."
                 )
             from ._flat_variants import get_variants_flat
 
-            # `flat` is not checked here: variants always decode flat; the param is retained for protocol/signature stability.
-            return cast(_H, get_variants_flat(self, idx))
+            # `flat` is not checked here: variants always decode flat (the query
+            # boundary converts to RaggedVariants when ragged output is requested);
+            # the param is retained for protocol/signature stability. `regions` is
+            # threaded for flank/window computation. (variant-windows required flat
+            # output above.)
+            return cast(_H, get_variants_flat(self, idx, regions))
         else:
             haps, *_ = self.get_haps_and_shifts(
                 idx=idx,

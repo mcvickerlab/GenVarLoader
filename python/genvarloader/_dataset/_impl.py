@@ -40,6 +40,7 @@ from ._reconstruct import (
     TrackType,
     _build_reconstructor,
 )
+from ._flat_variants import VarWindowOpt
 from ._reference import Reference
 from ._splice import SpliceMap
 from ._utils import regions_to_bed
@@ -215,6 +216,9 @@ class Dataset:
         var_fields: list[str] | None = None,
         splice_info: str | tuple[str, str] | Literal[False] | None = None,
         var_filter: Literal[False, "exonic"] | None = None,
+        flank_length: int | None = None,
+        token_alphabet: bytes | None = None,
+        unknown_token: int | None = None,
         dummy_variant: "DummyVariant | Literal[False] | None" = None,
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
@@ -248,6 +252,15 @@ class Dataset:
             If False, splicing will be disabled.
         var_filter
             Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
+        flank_length
+            Number of reference-sequence bases to fetch as flanks around each variant. Stored on
+            the :class:`Haps` reconstructor for use by the flat-window output mode.
+        token_alphabet
+            Byte string whose characters define the token alphabet (e.g. ``b"ACGT"``). Position ``i``
+            in the string maps to integer token ``i``. Must be supplied together with *unknown_token*.
+        unknown_token
+            Integer token to assign to any byte not present in *token_alphabet*. Must be supplied
+            together with *token_alphabet*.
         dummy_variant
             A :class:`DummyVariant` to insert into empty (region, sample, ploid) variant
             groups so every group has at least one variant. Only valid for the variants
@@ -352,6 +365,38 @@ class Dataset:
                 haps = to_evolve.get("_seqs", self._seqs)
                 to_evolve["_seqs"] = replace(haps, filter=var_filter)
 
+        if (
+            flank_length is not None
+            or token_alphabet is not None
+            or unknown_token is not None
+        ):
+            if not isinstance(self._seqs, Haps):
+                raise ValueError(
+                    "Flank settings require a dataset with genotypes (variants)."
+                )
+            haps = to_evolve.get("_seqs", self._seqs)
+            new_flank_len = haps.flank_length if flank_length is None else flank_length
+            lut, lut_dtype = haps.token_lut, haps.token_dtype
+            if token_alphabet is not None or unknown_token is not None:
+                if token_alphabet is None or unknown_token is None:
+                    raise ValueError(
+                        "token_alphabet and unknown_token must be set together."
+                    )
+                from ._flat_flanks import build_token_lut
+
+                lut, lut_dtype = build_token_lut(token_alphabet, unknown_token)
+            if new_flank_len and lut is None:
+                raise ValueError(
+                    "flank_length requires a token LUT; pass token_alphabet and"
+                    " unknown_token to with_settings(...) (in this or a prior call)."
+                )
+            to_evolve["_seqs"] = replace(
+                haps,
+                flank_length=new_flank_len,
+                token_lut=lut,
+                token_dtype=lut_dtype,
+            )
+
         if dummy_variant is not None:
             if dummy_variant is False:
                 # disable is a no-op on datasets without variants/genotypes
@@ -391,8 +436,10 @@ class Dataset:
                     "Non-deterministic algorithms are not supported with splicing. Please set deterministic to True."
                 )
 
-            if self.sequence_type == "variants":
-                raise ValueError("Splicing is not supported with variants.")
+            if self.sequence_type in ("variants", "variant-windows"):
+                raise ValueError(
+                    "Splicing is not supported with variants or variant-windows."
+                )
 
         if self.jitter < 0:
             raise ValueError(f"Jitter ({self.jitter}) must be a non-negative integer.")
@@ -425,6 +472,14 @@ class Dataset:
             raise ValueError(
                 "Output length must be ragged when the sequence type is variants."
             )
+
+        if self.sequence_type == "variant-windows":
+            haps = self._seqs
+            if not isinstance(haps, Haps) or haps.window_opt is None:
+                raise ValueError(
+                    "with_seqs('variant-windows') requires a VarWindowOpt"
+                    " (pass it to with_seqs)."
+                )
 
     def with_len(
         self, output_length: Literal["ragged", "variable"] | int
@@ -504,7 +559,12 @@ class Dataset:
         return out
 
     def with_seqs(
-        self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
+        self,
+        kind: Literal[
+            "reference", "haplotypes", "annotated", "variants", "variant-windows"
+        ]
+        | None,
+        window_opt: "VarWindowOpt | None" = None,
     ):
         """Return a new dataset with the specified sequence type. The sequence type can be one of the following:
 
@@ -578,11 +638,43 @@ class Dataset:
                 raise ValueError(
                     "Dataset has no genotypes to yield haplotypes/variants from."
                 )
+        elif kind == "variant-windows":
+            if not isinstance(self._seqs, Haps):
+                raise ValueError(
+                    "Dataset has no genotypes to yield variant windows from."
+                )
+            if window_opt is None:
+                raise ValueError(
+                    "with_seqs('variant-windows') requires a VarWindowOpt, e.g."
+                    " with_seqs('variant-windows', VarWindowOpt(flank_length=...,"
+                    " token_alphabet=..., unknown_token=...))."
+                )
+            if window_opt.ref == "allele" and self._seqs.variants.ref is None:
+                raise ValueError(
+                    "VarWindowOpt(ref='allele') needs REF alleles, but this dataset"
+                    " has none. Use ref='window', or write the dataset with REF."
+                )
         else:
             assert_never(kind)
 
-        new_recon = _build_reconstructor(self._seqs, self._tracks, kind)
-        return replace(self, _seqs_kind=kind, _recon=new_recon)
+        new_seqs = self._seqs
+        if kind == "variant-windows":
+            from ._flat_flanks import build_token_lut
+
+            # Both invariants were established in the validation branch above; the
+            # assert narrows them for the type checker (Ref has no flank fields).
+            assert isinstance(self._seqs, Haps) and window_opt is not None
+            lut, lut_dtype = build_token_lut(
+                window_opt.token_alphabet, window_opt.unknown_token
+            )
+            new_seqs = replace(
+                self._seqs,
+                token_lut=lut,
+                token_dtype=lut_dtype,
+                window_opt=window_opt,
+            )
+        new_recon = _build_reconstructor(new_seqs, self._tracks, kind)
+        return replace(self, _seqs=new_seqs, _seqs_kind=kind, _recon=new_recon)
 
     def with_tracks(
         self,
@@ -716,7 +808,10 @@ class Dataset:
         Ref | Haps[RaggedSeqs] | Haps[RaggedAnnotatedHaps] | Haps[RaggedVariants] | None
     )
     _tracks: Tracks[RaggedTracks] | Tracks[RaggedIntervals] | None
-    _seqs_kind: Literal["haplotypes", "reference", "annotated", "variants"] | None
+    _seqs_kind: (
+        Literal["haplotypes", "reference", "annotated", "variants", "variant-windows"]
+        | None
+    )
     _recon: (
         Ref
         | Haps[RaggedSeqs]
@@ -865,14 +960,23 @@ class Dataset:
             case Ref():
                 return ["reference"]
             case Haps():
-                return ["reference", "haplotypes", "annotated", "variants"]
+                return [
+                    "reference",
+                    "haplotypes",
+                    "annotated",
+                    "variants",
+                    "variant-windows",
+                ]
             case s:
                 assert_never(s)
 
     @property
     def sequence_type(
         self,
-    ) -> Literal["haplotypes", "reference", "annotated", "variants"] | None:
+    ) -> (
+        Literal["haplotypes", "reference", "annotated", "variants", "variant-windows"]
+        | None
+    ):
         """The type of sequences in the dataset."""
         return self._seqs_kind
 
@@ -1796,9 +1900,14 @@ class ArrayDataset(Dataset, Generic[MaybeSEQ, MaybeTRK]):
         self, kind: Literal["variants"]
     ) -> ArrayDataset[RaggedVariants, MaybeTRK]: ...
     def with_seqs(
-        self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
+        self,
+        kind: Literal[
+            "reference", "haplotypes", "annotated", "variants", "variant-windows"
+        ]
+        | None,
+        window_opt: "VarWindowOpt | None" = None,
     ) -> ArrayDataset:
-        return super().with_seqs(kind)
+        return super().with_seqs(kind, window_opt)
 
     @overload
     def with_tracks(self, tracks: None = None, kind: None = None) -> Self: ...
@@ -1946,9 +2055,14 @@ class RaggedDataset(Dataset, Generic[MaybeRSEQ, MaybeRTRK]):
         self, kind: Literal["variants"]
     ) -> RaggedDataset[RaggedVariants, MaybeRTRK]: ...
     def with_seqs(
-        self, kind: Literal["reference", "haplotypes", "annotated", "variants"] | None
+        self,
+        kind: Literal[
+            "reference", "haplotypes", "annotated", "variants", "variant-windows"
+        ]
+        | None,
+        window_opt: "VarWindowOpt | None" = None,
     ) -> RaggedDataset:
-        return super().with_seqs(kind)
+        return super().with_seqs(kind, window_opt)
 
     @overload
     def with_tracks(self, tracks: None = None, kind: None = None) -> Self: ...
