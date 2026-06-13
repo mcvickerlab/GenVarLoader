@@ -167,3 +167,68 @@ def test_public_flat_exports():
     assert gvl.FlatAnnotatedHaps is _FlatAnnotatedHaps
     assert gvl.FlatVariants is _FlatVariants
     assert gvl.FlatAlleles is _FlatAlleles
+
+
+def test_fill_empty_scalar_kernel():
+    from genvarloader._dataset._flat_variants import _fill_empty_scalar
+
+    data = np.array([10, 11, 20], np.int32)
+    offsets = np.array([0, 0, 2, 2, 3], np.int64)  # rows: empty, [10,11], empty, [20]
+    new_data, new_off = _fill_empty_scalar(data, offsets, np.int32(-1))
+    assert new_off.tolist() == [0, 1, 3, 4, 5]
+    assert new_data.tolist() == [-1, 10, 11, -1, 20]
+
+
+def test_fill_empty_seq_kernel():
+    from genvarloader._dataset._flat_variants import _fill_empty_seq
+
+    # 3 rows: empty, ["AC","G"], empty
+    data = np.frombuffer(b"ACG", np.uint8).copy()
+    var_off = np.array([0, 0, 2, 2], np.int64)      # per-row variant boundaries
+    seq_off = np.array([0, 2, 3], np.int64)         # per-variant byte boundaries
+    dummy = np.frombuffer(b"N", np.uint8).copy()
+    nd, nvar, nseq = _fill_empty_seq(data, var_off, seq_off, dummy)
+    assert nvar.tolist() == [0, 1, 3, 4]            # each empty row gains 1 variant
+    assert nseq.tolist() == [0, 1, 3, 4, 5]         # dummy(1) AC(2) G(1) dummy(1)
+    assert bytes(nd) == b"NACGN"
+
+
+def test_fill_empty_groups_roundtrip():
+    import awkward as ak
+
+    from genvarloader._dataset._flat_variants import DummyVariant, _FlatAlleles, _FlatVariants
+    from genvarloader._flat import _Flat
+
+    # b*p = 3 rows: row0 empty, row1 has [b"AC", b"G"], row2 empty
+    group_off = np.array([0, 0, 2, 2], np.int64)
+    alt = _FlatAlleles(
+        byte_data=np.frombuffer(b"ACG", np.uint8).copy(),
+        seq_offsets=np.array([0, 2, 3], np.int64),
+        var_offsets=group_off.copy(),
+        shape=(3, None),
+    )
+    start = _Flat.from_offsets(np.array([5, 9], np.int32), (3, None), group_off.copy())
+    ilen = _Flat.from_offsets(np.array([1, -1], np.int32), (3, None), group_off.copy())
+    fv = _FlatVariants(fields={"alt": alt, "start": start, "ilen": ilen})
+    filled = fv.fill_empty_groups(DummyVariant(start=-1, alt=b"N"))
+    rv = filled.to_ragged()
+    # empty rows now hold exactly the dummy; non-empty row unchanged
+    assert ak.to_list(rv["alt"]) == [[b"N"], [b"AC", b"G"], [b"N"]]
+    assert ak.to_list(rv["start"]) == [[-1], [5, 9], [-1]]
+
+
+def test_fill_empty_groups_noop_when_no_empties():
+    import awkward as ak
+
+    from genvarloader._dataset._flat_variants import DummyVariant, _FlatAlleles, _FlatVariants
+    from genvarloader._flat import _Flat
+
+    group_off = np.array([0, 1, 2], np.int64)  # every row has 1 variant
+    alt = _FlatAlleles(np.frombuffer(b"AG", np.uint8).copy(),
+                       np.array([0, 1, 2], np.int64), group_off.copy(), (2, None))
+    start = _Flat.from_offsets(np.array([3, 7], np.int32), (2, None), group_off.copy())
+    ilen = _Flat.from_offsets(np.array([0, 0], np.int32), (2, None), group_off.copy())
+    fv = _FlatVariants(fields={"alt": alt, "start": start, "ilen": ilen})
+    filled = fv.fill_empty_groups(DummyVariant())
+    assert ak.to_list(filled.to_ragged()["alt"]) == [[b"A"], [b"G"]]
+    assert ak.to_list(filled.to_ragged()["start"]) == [[3], [7]]
