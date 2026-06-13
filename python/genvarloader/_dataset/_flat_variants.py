@@ -9,7 +9,6 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from .._flat import _Flat
 
 
 @dataclass(slots=True)
@@ -65,6 +64,15 @@ class _FlatAlleles:
 
     def reshape(self, shape: tuple[int | None, ...]) -> "_FlatAlleles":
         return _FlatAlleles(self.byte_data, self.seq_offsets, self.var_offsets, shape)
+
+    def squeeze(self, axis: int | None = None) -> "_FlatAlleles":
+        fixed = [d for d in self.shape if d is not None]
+        if axis is None:
+            fixed = [d for d in fixed if d != 1]
+        else:
+            del fixed[axis]
+        return _FlatAlleles(self.byte_data, self.seq_offsets, self.var_offsets,
+                            (*fixed, None))
 
 
 @dataclass(slots=True)
