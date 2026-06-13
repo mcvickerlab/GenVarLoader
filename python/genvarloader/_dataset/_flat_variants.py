@@ -14,6 +14,35 @@ if TYPE_CHECKING:
     from ._haps import Haps
 
 
+@dataclass(frozen=True)
+class DummyVariant:
+    """Per-field values for the dummy variant inserted into empty
+    (region, sample, ploid) groups. Unspecified info fields default to ``0``
+    for integer columns and ``NaN`` for float columns."""
+
+    start: int = -1
+    ilen: int = 0
+    dosage: float = 0.0
+    ref: bytes = b"N"
+    alt: bytes = b"N"
+    info: dict[str, Any] = field(default_factory=dict)
+
+    def scalar_for(self, name: str, dtype: np.dtype):
+        """Return the dummy fill value for a scalar field, as a numpy scalar of ``dtype``."""
+        dt = np.dtype(dtype)
+        if name == "start":
+            return dt.type(self.start)
+        if name == "ilen":
+            return dt.type(self.ilen)
+        if name == "dosage":
+            return dt.type(self.dosage)
+        if name in self.info:
+            return dt.type(self.info[name])
+        if np.issubdtype(dt, np.floating):
+            return dt.type(np.nan)
+        return dt.type(0)
+
+
 @dataclass(slots=True)
 class _FlatAlleles:
     """Two-level flat bytestring for an alt/ref allele field, shape (b, p, ~v, ~l).
@@ -149,13 +178,39 @@ class _FlatVariants:
                 self.fields[name] = self.fields[name].reverse_masked(mask)
         return self
 
+    def fill_empty_groups(self, dummy: "DummyVariant") -> "_FlatVariants":
+        """Insert one dummy variant into each empty (b*p) group; non-empty
+        groups are unchanged. Every field shares the same empty-row pattern, so
+        the rebuilt offsets stay consistent across fields."""
+        from .._flat import _Flat
+
+        new_fields: dict[str, Any] = {}
+        for name, f in self.fields.items():
+            if isinstance(f, _FlatAlleles):
+                db = np.frombuffer(
+                    dummy.alt if name == "alt" else dummy.ref, np.uint8
+                ).copy()
+                nd, nvar, nseq = _fill_empty_seq(
+                    f.byte_data, f.var_offsets, f.seq_offsets, db
+                )
+                new_fields[name] = _FlatAlleles(nd, nseq, nvar, f.shape)
+            else:
+                fill = dummy.scalar_for(name, f.data.dtype)
+                nd, noff = _fill_empty_scalar(f.data, f.offsets, fill)
+                new_fields[name] = _Flat.from_offsets(nd, f.shape, noff)
+        return _FlatVariants(new_fields)
+
 
 @nb.njit(nogil=True, cache=True)
 def _gather_v_idxs(
     geno_offset_idx, geno_offsets, geno_v_idxs
 ):  # pragma: no cover - njit
     """Gather per-row variant indices: for each row's offset slice into the
-    sparse arrays, copy its values out into flat ``(data, offsets)``."""
+    sparse arrays, copy its values out into flat ``(data, offsets)``.
+
+    ``geno_offsets`` must be 1-D contiguous (length n_rows + 1).  For the
+    non-contiguous (2, n_rows) starts/stops form use :func:`_gather_v_idxs_ss`.
+    """
     n_rows = geno_offset_idx.shape[0]
     out_offsets = np.empty(n_rows + 1, np.int64)
     out_offsets[0] = 0
@@ -171,6 +226,34 @@ def _gather_v_idxs(
         goi = geno_offset_idx[i]
         s = geno_offsets[goi]
         e = geno_offsets[goi + 1]
+        for k in range(s, e):
+            v_idxs[dst] = geno_v_idxs[k]
+            dst += 1
+    return v_idxs, out_offsets
+
+
+@nb.njit(nogil=True, cache=True)
+def _gather_v_idxs_ss(
+    geno_offset_idx, geno_starts, geno_stops, geno_v_idxs
+):  # pragma: no cover - njit
+    """Like :func:`_gather_v_idxs` but for non-contiguous (starts, stops) offsets.
+
+    ``geno_starts`` and ``geno_stops`` are the two rows of a ``(2, n)`` offset
+    array (``geno_starts = geno_offsets[0]``, ``geno_stops = geno_offsets[1]``).
+    """
+    n_rows = geno_offset_idx.shape[0]
+    out_offsets = np.empty(n_rows + 1, np.int64)
+    out_offsets[0] = 0
+    for i in range(n_rows):
+        goi = geno_offset_idx[i]
+        out_offsets[i + 1] = out_offsets[i] + (geno_stops[goi] - geno_starts[goi])
+    total = out_offsets[n_rows]
+    v_idxs = np.empty(total, geno_v_idxs.dtype)
+    dst = 0
+    for i in range(n_rows):
+        goi = geno_offset_idx[i]
+        s = geno_starts[goi]
+        e = geno_stops[goi]
         for k in range(s, e):
             v_idxs[dst] = geno_v_idxs[k]
             dst += 1
@@ -224,6 +307,96 @@ def _compact_keep(v_idxs, row_offsets, keep):  # pragma: no cover - njit
     return new_v, new_offsets
 
 
+def _gather_rows(
+    geno_offset_idx: NDArray[np.intp],
+    offsets: NDArray[np.int64],
+    data: NDArray,
+) -> tuple[NDArray, NDArray[np.int64]]:
+    """Dispatch to the correct gather kernel based on offset array shape.
+
+    ``offsets`` may be:
+    - 1-D ``(n + 1,)``: contiguous offsets — use :func:`_gather_v_idxs`.
+    - 2-D ``(2, n)``: non-contiguous starts/stops — use :func:`_gather_v_idxs_ss`.
+    """
+    if offsets.ndim == 1:
+        return _gather_v_idxs(geno_offset_idx, offsets, data)
+    else:
+        return _gather_v_idxs_ss(geno_offset_idx, offsets[0], offsets[1], data)
+
+
+@nb.njit(nogil=True, cache=True)
+def _fill_empty_scalar(data, offsets, fill):  # pragma: no cover - njit
+    """Insert one ``fill`` element into each empty row; copy non-empty rows
+    through. Returns ``(new_data, new_offsets)``."""
+    n_rows = offsets.shape[0] - 1
+    new_offsets = np.empty(n_rows + 1, np.int64)
+    new_offsets[0] = 0
+    for i in range(n_rows):
+        ln = offsets[i + 1] - offsets[i]
+        new_offsets[i + 1] = new_offsets[i] + (ln if ln > 0 else 1)
+    new_data = np.empty(new_offsets[n_rows], data.dtype)
+    for i in range(n_rows):
+        s = offsets[i]
+        e = offsets[i + 1]
+        d = new_offsets[i]
+        if e == s:
+            new_data[d] = fill
+        else:
+            for k in range(s, e):
+                new_data[d] = data[k]
+                d += 1
+    return new_data, new_offsets
+
+
+@nb.njit(nogil=True, cache=True)
+def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):  # pragma: no cover - njit
+    """Two-level analogue of ``_fill_empty_scalar`` for allele bytestrings.
+    Empty variant-rows receive one dummy allele of ``dummy`` bytes. Returns
+    ``(new_data, new_var_offsets, new_seq_offsets)``."""
+    n_rows = var_offsets.shape[0] - 1
+    L = dummy.shape[0]
+    new_var = np.empty(n_rows + 1, np.int64)
+    new_var[0] = 0
+    for i in range(n_rows):
+        nv = var_offsets[i + 1] - var_offsets[i]
+        new_var[i + 1] = new_var[i] + (nv if nv > 0 else 1)
+    total_vars = new_var[n_rows]
+    new_seq = np.empty(total_vars + 1, np.int64)
+    new_seq[0] = 0
+    vptr = 0
+    for i in range(n_rows):
+        vs = var_offsets[i]
+        ve = var_offsets[i + 1]
+        if ve == vs:
+            new_seq[vptr + 1] = new_seq[vptr] + L
+            vptr += 1
+        else:
+            for v in range(vs, ve):
+                vlen = seq_offsets[v + 1] - seq_offsets[v]
+                new_seq[vptr + 1] = new_seq[vptr] + vlen
+                vptr += 1
+    new_data = np.empty(new_seq[total_vars], np.uint8)
+    vptr = 0
+    dptr = 0
+    for i in range(n_rows):
+        vs = var_offsets[i]
+        ve = var_offsets[i + 1]
+        if ve == vs:
+            for k in range(L):
+                new_data[dptr] = dummy[k]
+                dptr += 1
+            vptr += 1
+        else:
+            for v in range(vs, ve):
+                bs = seq_offsets[v]
+                be = seq_offsets[v + 1]
+                for k in range(bs, be):
+                    new_data[dptr] = data[k]
+                    dptr += 1
+                vptr += 1
+    return new_data, new_var, new_seq
+
+
 def get_variants_flat(haps: "Haps", idx: NDArray[np.integer]) -> _FlatVariants:
     """Flat-buffer analog of :meth:`Haps._get_variants`: builds a
     :class:`_FlatVariants` with no awkward on the hot path. Re-wrapping the
@@ -249,7 +422,8 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer]) -> _FlatVariants:
     geno_v_idxs = np.asarray(genotypes.data)
 
     # v_idxs: gathered per (b*ploidy) row; row_offsets length b*ploidy + 1.
-    v_idxs, row_offsets = _gather_v_idxs(geno_offset_idx, geno_offsets, geno_v_idxs)
+    # Dispatch on offsets shape: 1-D contiguous vs 2-D starts/stops.
+    v_idxs, row_offsets = _gather_rows(geno_offset_idx, geno_offsets, geno_v_idxs)
 
     # Unfiltered offsets needed for dosage parallel-gather + compaction.
     unfiltered_row_offsets = row_offsets
@@ -273,7 +447,7 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer]) -> _FlatVariants:
         dos_all = np.asarray(haps.dosages.data)
         # The returned row offsets == unfiltered_row_offsets by construction
         # (genotypes and dosages share offset structure), so discard them.
-        dosage_data, _ = _gather_v_idxs(geno_offset_idx, dos_offsets, dos_all)
+        dosage_data, _ = _gather_rows(geno_offset_idx, dos_offsets, dos_all)
 
     # Apply AF compaction to v_idxs / row_offsets / dosage.
     if keep is not None:
@@ -318,4 +492,7 @@ def get_variants_flat(haps: "Haps", idx: NDArray[np.integer]) -> _FlatVariants:
         info_data = np.asarray(haps.variants.info[k])[v_idxs]
         fields[k] = _Flat.from_offsets(info_data, shape, row_offsets)
 
-    return _FlatVariants(fields)
+    result = _FlatVariants(fields)
+    if haps.dummy_variant is not None:
+        result = result.fill_empty_groups(haps.dummy_variant)
+    return result

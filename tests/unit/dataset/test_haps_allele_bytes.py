@@ -18,9 +18,9 @@ def ds():
 def _expected_bytes(haps, idx, kind):
     """Ground-truth: sum byte lengths of allele strings per (instance, ploid).
 
-    Uses _get_variants (a completely different code path from _allele_bytes_sum)
-    to materialise the RaggedVariants record, then sums allele byte lengths via
-    awkward's ak.num.
+    Uses get_variants_flat (the canonical decode path) to materialise a
+    _FlatVariants record, converts to RaggedVariants via to_ragged(), then sums
+    allele byte lengths via awkward's ak.num.
 
     The field type is ``b * p * var * bytes`` (four dimensions).  Awkward's
     ``bytes`` type is special: ``axis=-1`` does NOT reach into byte content;
@@ -30,7 +30,10 @@ def _expected_bytes(haps, idx, kind):
     """
     import awkward as ak
 
-    ragv = haps._get_variants(idx)
+    from genvarloader._dataset._flat_variants import get_variants_flat
+
+    flat_v = get_variants_flat(haps, idx)
+    ragv = flat_v.to_ragged()
     field = getattr(ragv, kind)  # type: b * p * ~v * bytes
     # axis=3: byte length of each allele string → shape (b, p, ~v)
     # axis=2: sum across variants per (b, p) → shape (b, p)

@@ -15,7 +15,10 @@ import json
 import warnings
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, TypeVar, cast
+
+if TYPE_CHECKING:
+    from ._flat_variants import DummyVariant
 
 import awkward as ak
 import numpy as np
@@ -254,6 +257,7 @@ class Haps(Reconstructor[_H]):
     max_af: float | None
     """The maximum allele frequency to keep."""
     var_fields: list[str] = field(default_factory=lambda: ["alt", "ilen", "start"])
+    dummy_variant: "DummyVariant | None" = None
     available_var_fields: list[str] = field(init=False)
 
     def __post_init__(self):
@@ -516,13 +520,10 @@ class Haps(Reconstructor[_H]):
                 raise NotImplementedError(
                     "Spliced output is not supported for RaggedVariants."
                 )
-            if flat:
-                from ._flat_variants import get_variants_flat
+            from ._flat_variants import get_variants_flat
 
-                return cast(_H, get_variants_flat(self, idx))
-            ragv = self._get_variants(idx=idx, regions=None, shifts=None)
-            ragv = cast(_H, ragv)
-            return ragv
+            # `flat` is not checked here: variants always decode flat; the param is retained for protocol/signature stability.
+            return cast(_H, get_variants_flat(self, idx))
         else:
             haps, *_ = self.get_haps_and_shifts(
                 idx=idx,
@@ -571,13 +572,9 @@ class Haps(Reconstructor[_H]):
                 raise NotImplementedError(
                     "Spliced output is not supported for RaggedVariants."
                 )
-            out = self._get_variants(
-                idx=idx,
-                regions=req.regions,
-                shifts=req.shifts,
-                keep=req.keep,
-                keep_offsets=req.keep_offsets,
-            )
+            from ._flat_variants import get_variants_flat
+
+            out = get_variants_flat(self, idx)
         else:
             assert_never(self.kind)
 
@@ -683,69 +680,6 @@ class Haps(Reconstructor[_H]):
         )  # type: ignore[no-matching-overload]  # Ragged.shape is tuple[int | None, ...]; numpy overload expects all-int
         return geno_offset_idx
 
-    def _get_variants(
-        self,
-        idx: NDArray[np.integer],
-        regions: NDArray[np.integer] | None = None,
-        shifts: NDArray[np.integer] | None = None,
-        keep: NDArray[np.bool_] | None = None,
-        keep_offsets: NDArray[np.integer] | None = None,
-    ) -> RaggedVariants:
-        # TODO: maybe filter variants for region, shifts?
-        r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore[no-matching-overload]  # Ragged.shape is tuple[int | None, ...]; numpy overload expects all-int
-        # (b p ~v)
-        genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s]).to_packed()
-        v_idxs = genos.data
-
-        if self.min_af is not None or self.max_af is not None:
-            geno_afs = self.variants.info["AF"][v_idxs]
-            keep = np.full(len(v_idxs), True, np.bool_)
-            if self.min_af is not None:
-                keep &= geno_afs >= self.min_af
-            if self.max_af is not None:
-                keep &= geno_afs <= self.max_af
-            _keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
-            # genos[_keep] yields a bare ak.Array; wrap before to_packed
-            genos = Ragged(ak.to_regular(genos[_keep], 1)).to_packed()
-            v_idxs = genos.data
-        else:
-            _keep = None
-
-        fields = {}
-
-        fields["alt"] = self._get_alleles(genos, "alt")
-        fields["start"] = Ragged.from_offsets(
-            self.variants.start[v_idxs], genos.shape, genos.offsets
-        )
-
-        if "ref" in self.var_fields:
-            fields["ref"] = self._get_alleles(genos, "ref")
-        if "ilen" in self.var_fields:
-            fields["ilen"] = Ragged.from_offsets(
-                self.variants.ilen[v_idxs], genos.shape, genos.offsets
-            )
-
-        if self.dosages is not None and "dosage" in self.var_fields:
-            # guaranteed to have same shape as genotypes but need to make it contiguous/copy the data
-            dosages = cast(Ragged, self.dosages[r, s])
-            if _keep is not None:
-                # dosages[_keep] yields a bare ak.Array; wrap before to_packed
-                fields["dosage"] = Ragged(ak.to_regular(dosages[_keep], 1)).to_packed()
-            else:
-                fields["dosage"] = dosages.to_packed()
-
-        fields.update(
-            {
-                k: self._get_info(genos, k)
-                for k in self.var_fields
-                if k not in {"alt", "start", "ref", "ilen", "dosage"}
-            }
-        )
-
-        variants = RaggedVariants(**fields)
-
-        return variants
-
     def _allele_bytes_sum(
         self, idx: NDArray[np.integer], kind: Literal["alt", "ref"]
     ) -> NDArray[np.int64]:
@@ -775,23 +709,6 @@ class Haps(Reconstructor[_H]):
         # genos.offsets has length b*p + 1 (one offset per (instance, ploid) group).
         # reduceat needs starts, not full offsets; drop the last.
         return np.add.reduceat(v_lens, genos.offsets[:-1])
-
-    def _get_alleles(
-        self, genos: Ragged[V_IDX_TYPE], kind: Literal["alt", "ref"]
-    ) -> ak.Array:
-        v_idxs = genos.data
-        # (b*p*v ~l) packed allele bytes for the selected variants
-        alleles = cast(RaggedAlleles, getattr(self.variants, kind)[v_idxs]).to_packed()
-        return _build_allele_layout(
-            np.asarray(alleles.data).view(np.uint8),
-            np.asarray(alleles.offsets),
-            np.asarray(genos.offsets),
-            genos.shape[-2],
-        )
-
-    def _get_info(self, genos: Ragged[V_IDX_TYPE], attr: str) -> Ragged[np.number]:
-        data = self.variants.info[attr][genos.data]
-        return Ragged.from_offsets(data, genos.shape, genos.offsets)
 
     def _reconstruct_haplotypes(self, req: ReconstructionRequest) -> Ragged[np.bytes_]:
         """Reconstruct haplotype byte sequences from sparse genotypes."""
