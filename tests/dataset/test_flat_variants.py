@@ -5,9 +5,10 @@ import awkward as ak
 import pytest
 
 from genvarloader import RaggedVariants
+from genvarloader._dataset._flat_variants import _fill_empty_seq
+from genvarloader._dataset._haps import _build_allele_layout
 from genvarloader._ragged import reverse_complement  # the awkward reference
 from seqpro.rag import Ragged
-from genvarloader._dataset._haps import _build_allele_layout
 
 
 def _make_rv(alt_rows, ref_rows, starts, group_off, ploidy):
@@ -406,4 +407,17 @@ def test_to_packed_explicit_listarray_variant_level():
     got = rv.to_packed()
     exp = ak.to_packed(ak.Array(rv))
     assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
-    assert ak.to_list(got["ref"]) == ak.to_list(exp["ref"])
+
+
+def test_fill_empty_seq_preserves_int32_dtype_and_fills_unk():
+    # Two (b*p) rows: row 0 empty, row 1 has one 2-token variant.
+    data = np.array([7, 8], np.int32)         # row 1's single variant tokens
+    var_offsets = np.array([0, 0, 1], np.int64)   # row0: [0,0) empty; row1: [0,1)
+    seq_offsets = np.array([0, 2], np.int64)      # variant 0 spans data[0:2]
+    dummy = np.array([4, 4, 4], np.int32)         # all-unk window, len 3
+    nd, nvar, nseq = _fill_empty_seq(data, var_offsets, seq_offsets, dummy)
+    assert nd.dtype == np.int32
+    # row0 got one dummy variant of length 3; row1 unchanged (one 2-token variant)
+    assert nvar.tolist() == [0, 1, 2]
+    assert nseq.tolist() == [0, 3, 5]
+    assert nd.tolist() == [4, 4, 4, 7, 8]

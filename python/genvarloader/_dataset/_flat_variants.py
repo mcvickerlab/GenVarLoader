@@ -561,7 +561,7 @@ def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):  # pragma: no cover 
                 vlen = seq_offsets[v + 1] - seq_offsets[v]
                 new_seq[vptr + 1] = new_seq[vptr] + vlen
                 vptr += 1
-    new_data = np.empty(new_seq[total_vars], np.uint8)
+    new_data = np.empty(new_seq[total_vars], data.dtype)
     vptr = 0
     dptr = 0
     for i in range(n_rows):
