@@ -1732,11 +1732,12 @@ class Dataset:
         if (
             isinstance(self._seqs, Haps)
             and self._seqs.dummy_variant is not None
-            and self._seqs_kind != "variants"
+            and self._seqs_kind not in ("variants", "variant-windows")
         ):
             raise ValueError(
-                "dummy_variant is only valid for the variants output; "
-                "call with_seqs('variants') (got output kind "
+                "dummy_variant is only valid for the 'variants' and "
+                "'variant-windows' outputs; call with_seqs('variants') or "
+                "with_seqs('variant-windows') (got output kind "
                 f"{self._seqs_kind!r})."
             )
 
