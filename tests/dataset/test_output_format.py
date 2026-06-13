@@ -42,6 +42,22 @@ def test_dummy_variant_rejected_on_non_variant_kind(snap_dataset):
         _ = ds[0]
 
 
+def test_with_settings_dummy_variant_false_noop_on_non_variant(snap_dataset):
+    # disabling (False) on a ref-only dataset (Ref _seqs, not Haps) must be a
+    # harmless no-op — it previously raised ValueError spuriously.
+    # snap_dataset has a reference, so with_seqs("reference") gives a Ref _seqs.
+    ds = snap_dataset.with_seqs("reference").with_tracks(False)
+    # should NOT raise
+    ds2 = ds.with_settings(dummy_variant=False)
+    assert ds2 is not None
+    # Also confirm idempotent clear on a variants dataset that never had dummy_variant set:
+    # calling False on a Haps dataset with no prior dummy_variant leaves it None.
+    ds_haps = snap_dataset.with_seqs("variants").with_tracks(False)
+    assert ds_haps._seqs.dummy_variant is None
+    ds_haps2 = ds_haps.with_settings(dummy_variant=False)
+    assert ds_haps2._seqs.dummy_variant is None
+
+
 def test_dummy_variant_export():
     import genvarloader as gvl
 

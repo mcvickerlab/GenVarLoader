@@ -353,13 +353,18 @@ class Dataset:
                 to_evolve["_seqs"] = replace(haps, filter=var_filter)
 
         if dummy_variant is not None:
-            if not isinstance(self._seqs, Haps):
-                raise ValueError(
-                    "dummy_variant requires a dataset with variants/genotypes."
-                )
-            dv = None if dummy_variant is False else dummy_variant
-            haps = to_evolve.get("_seqs", self._seqs)
-            to_evolve["_seqs"] = replace(haps, dummy_variant=dv)
+            if dummy_variant is False:
+                # disable is a no-op on datasets without variants/genotypes
+                if isinstance(self._seqs, Haps):
+                    haps = to_evolve.get("_seqs", self._seqs)
+                    to_evolve["_seqs"] = replace(haps, dummy_variant=None)
+            else:
+                if not isinstance(self._seqs, Haps):
+                    raise ValueError(
+                        "dummy_variant requires a dataset with variants/genotypes."
+                    )
+                haps = to_evolve.get("_seqs", self._seqs)
+                to_evolve["_seqs"] = replace(haps, dummy_variant=dummy_variant)
 
         # If any source state changed, rebuild _recon via the factory.
         if "_seqs" in to_evolve or "_tracks" in to_evolve:
