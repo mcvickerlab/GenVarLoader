@@ -426,7 +426,7 @@ def test_tokenize_alleles_bare(snap_dataset):
 
 def test_flat_variant_windows_optional_fields():
     # _FlatVariantWindows now holds optional ref_window/alt_window/ref/alt
-    from genvarloader._dataset._flat_variants import _FlatWindow, _FlatVariantWindows
+    from genvarloader._dataset._flat_variants import _FlatWindow
     from genvarloader._flat import _Flat
 
     data = np.arange(4, dtype=np.uint8)
