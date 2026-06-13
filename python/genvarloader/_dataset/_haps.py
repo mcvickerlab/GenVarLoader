@@ -255,6 +255,9 @@ class Haps(Reconstructor[_H]):
     """The maximum allele frequency to keep."""
     var_fields: list[str] = field(default_factory=lambda: ["alt", "ilen", "start"])
     available_var_fields: list[str] = field(init=False)
+    flank_length: int | None = None
+    token_lut: NDArray | None = None
+    token_dtype: np.dtype | None = None
 
     def __post_init__(self):
         self.n_variants = ak.num(self.genotypes, -1).to_numpy()

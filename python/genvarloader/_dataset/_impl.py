@@ -214,6 +214,9 @@ class Dataset:
         var_fields: list[str] | None = None,
         splice_info: str | tuple[str, str] | Literal[False] | None = None,
         var_filter: Literal[False, "exonic"] | None = None,
+        flank_length: int | None = None,
+        token_alphabet: bytes | None = None,
+        unknown_token: int | None = None,
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -246,6 +249,15 @@ class Dataset:
             If False, splicing will be disabled.
         var_filter
             Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
+        flank_length
+            Number of reference-sequence bases to fetch as flanks around each variant. Stored on
+            the :class:`Haps` reconstructor for use by the flat-window output mode.
+        token_alphabet
+            Byte string whose characters define the token alphabet (e.g. ``b"ACGT"``). Position ``i``
+            in the string maps to integer token ``i``. Must be supplied together with *unknown_token*.
+        unknown_token
+            Integer token to assign to any byte not present in *token_alphabet*. Must be supplied
+            together with *token_alphabet*.
         """
         to_evolve = {}
 
@@ -344,6 +356,33 @@ class Dataset:
             if var_filter != self._seqs.filter:
                 haps = to_evolve.get("_seqs", self._seqs)
                 to_evolve["_seqs"] = replace(haps, filter=var_filter)
+
+        if (
+            flank_length is not None
+            or token_alphabet is not None
+            or unknown_token is not None
+        ):
+            if not isinstance(self._seqs, Haps):
+                raise ValueError(
+                    "Flank settings require a dataset with genotypes (variants)."
+                )
+            haps = to_evolve.get("_seqs", self._seqs)
+            new_flank_len = haps.flank_length if flank_length is None else flank_length
+            lut, lut_dtype = haps.token_lut, haps.token_dtype
+            if token_alphabet is not None or unknown_token is not None:
+                if token_alphabet is None or unknown_token is None:
+                    raise ValueError(
+                        "token_alphabet and unknown_token must be set together."
+                    )
+                from ._flat_flanks import build_token_lut
+
+                lut, lut_dtype = build_token_lut(token_alphabet, unknown_token)
+            to_evolve["_seqs"] = replace(
+                haps,
+                flank_length=new_flank_len,
+                token_lut=lut,
+                token_dtype=lut_dtype,
+            )
 
         # If any source state changed, rebuild _recon via the factory.
         if "_seqs" in to_evolve or "_tracks" in to_evolve:

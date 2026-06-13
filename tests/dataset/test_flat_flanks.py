@@ -24,3 +24,22 @@ def test_build_token_lut_dtype_promotes_to_int32():
     lut, dtype = build_token_lut(bytes(range(200)), unknown_token=300)
     assert dtype == np.int32
     assert lut.dtype == np.int32
+
+
+def test_with_settings_stores_flank_config(snap_dataset):
+    ds = (
+        snap_dataset.with_seqs("variants")
+        .with_settings(flank_length=5, token_alphabet=b"ACGT", unknown_token=4)
+    )
+    haps = ds._seqs
+    assert haps.flank_length == 5
+    assert haps.token_lut is not None
+    assert haps.token_lut[ord("A")] == 0
+    assert haps.token_dtype == np.uint8
+
+
+def test_with_settings_flank_length_zero_disables(snap_dataset):
+    ds = snap_dataset.with_seqs("variants").with_settings(
+        flank_length=0, token_alphabet=b"ACGT", unknown_token=4
+    )
+    assert ds._seqs.flank_length == 0
