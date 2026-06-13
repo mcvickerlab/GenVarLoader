@@ -160,7 +160,7 @@ Returns either a `RaggedDataset` or `ArrayDataset` (frozen dataclass views) base
 | `"ragged"` | Awkward-backed `Ragged` / `RaggedVariants` / `RaggedAnnotatedHaps`         | Yes      |
 | `"flat"`   | Pure-numpy `FlatRagged` / `FlatVariants` / `FlatAnnotatedHaps`             | No       |
 
-In `"flat"` mode the hot path is zero-awkward; the returned containers carry `.data` (flat numpy array) and `.offsets` (int64). All flat types expose `.to_ragged()`, `.to_fixed(length)`, and `.to_padded(pad_value)` as escape hatches back to dense or awkward-backed forms.
+In `"flat"` mode the hot path is zero-awkward; the returned containers carry `.data` (flat numpy array) and `.offsets` (int64). Every flat type has `.to_ragged()` back to its awkward-backed form. Densification escape hatches vary by type: `FlatRagged` has `.to_fixed(length)` and `.to_padded(pad_value)`; `FlatAnnotatedHaps` has `.to_fixed(length)` and `.to_padded()` (no arg — uses per-field pad defaults); `FlatVariants`/`FlatAlleles` expose only `.to_ragged()` (plus `.reshape`/`.squeeze`).
 
 ```python
 ds_flat = ds.with_output_format("flat")
