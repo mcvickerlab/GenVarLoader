@@ -6,8 +6,11 @@ genome. No awkward on the hot path.
 
 from __future__ import annotations
 
+import numba as nb
 import numpy as np
 from numpy.typing import NDArray
+
+from ._flat_variants import _FlatWindow
 
 
 def build_token_lut(alphabet: bytes, unknown_token: int) -> tuple[NDArray, np.dtype]:
@@ -60,3 +63,64 @@ def compute_flank_tokens(
     flank_bytes = np.concatenate([f5, f3], axis=1)  # (n, 2L)
     tokens = lut[flank_bytes]  # vectorized 256-LUT gather -> lut.dtype
     return tokens.reshape(-1), np.asarray(row_offsets, np.int64)
+
+
+@nb.njit(nogil=True, cache=True)  # pragma: no cover - njit
+def _assemble_alt_windows(f5, f3, alt_data, alt_seq_off, flank_len):
+    """Concatenate flank5 (fixed L) + alt (variable) + flank3 (fixed L) per variant
+    into a flat byte buffer. f5/f3 are (n_var, L) row-major flat (n_var*L,)."""
+    n = alt_seq_off.shape[0] - 1
+    out_off = np.empty(n + 1, np.int64)
+    out_off[0] = 0
+    for i in range(n):
+        alt_len = alt_seq_off[i + 1] - alt_seq_off[i]
+        out_off[i + 1] = out_off[i] + 2 * flank_len + alt_len
+    out = np.empty(out_off[n], np.uint8)
+    for i in range(n):
+        dst = out_off[i]
+        for k in range(flank_len):
+            out[dst] = f5[i * flank_len + k]
+            dst += 1
+        for k in range(alt_seq_off[i], alt_seq_off[i + 1]):
+            out[dst] = alt_data[k]
+            dst += 1
+        for k in range(flank_len):
+            out[dst] = f3[i * flank_len + k]
+            dst += 1
+    return out, out_off
+
+
+def compute_windows(
+    reference,
+    v_contigs, starts, ilens,
+    alt_data, alt_seq_off,
+    flank_len, lut, row_offsets,
+):
+    """ref_window = tokenized [start-L, end+L) (single contiguous read);
+    alt_window  = tokenized flank5 . alt . flank3 (assembly).
+
+    Returns (ref_window, alt_window) as _FlatWindow with placeholder shape
+    ``(None,)``; the caller (get_variants_flat) overwrites ``.shape`` with the
+    real ``(b, p, None, None)``."""
+    starts = np.asarray(starts, np.int32)
+    ilens = np.asarray(ilens, np.int32)
+    ends = starts - np.minimum(ilens, 0) + 1
+
+    rw = reference.fetch(v_contigs, starts - flank_len, ends + flank_len)
+    ref_tok = lut[rw.data.view(np.uint8)]
+    ref_window = _FlatWindow(
+        ref_tok, np.asarray(rw.offsets, np.int64),
+        np.asarray(row_offsets, np.int64), (None,),
+    )
+
+    f5 = reference.fetch(v_contigs, starts - flank_len, starts).data.view(np.uint8)
+    f3 = reference.fetch(v_contigs, ends, ends + flank_len).data.view(np.uint8)
+    alt_bytes, alt_off = _assemble_alt_windows(
+        np.ascontiguousarray(f5), np.ascontiguousarray(f3),
+        np.asarray(alt_data, np.uint8), np.asarray(alt_seq_off, np.int64), flank_len,
+    )
+    alt_tok = lut[alt_bytes]
+    alt_window = _FlatWindow(
+        alt_tok, alt_off, np.asarray(row_offsets, np.int64), (None,),
+    )
+    return ref_window, alt_window

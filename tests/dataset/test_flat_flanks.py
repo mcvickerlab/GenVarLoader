@@ -1,5 +1,5 @@
 import numpy as np
-from genvarloader._dataset._flat_flanks import build_token_lut, compute_flank_tokens
+from genvarloader._dataset._flat_flanks import build_token_lut, compute_flank_tokens, compute_windows
 from genvarloader._dataset._flat_variants import _FlatWindow, _FlatVariantWindows
 
 
@@ -131,3 +131,45 @@ def test_flat_window_to_ragged_roundtrip():
     # structure preserved: variant counts per (b, p) and window length per variant
     assert ak.to_list(ak.num(rag, axis=2)) == [[2], [1]]
     assert ak.to_list(ak.num(rag, axis=3)) == [[[3, 4]], [[2]]]
+
+
+def _oracle_windows(reference, v_contigs, starts, ilens, alt_data, alt_seq_off,
+                    flank_len, lut):
+    ends = starts - np.minimum(ilens, 0) + 1
+    # ref_window: single contiguous read [start-L, end+L)
+    rw = reference.fetch(v_contigs, starts - flank_len, ends + flank_len)
+    ref_tok = lut[rw.data.view(np.uint8)]
+    # alt_window: flank5 + alt + flank3
+    f5 = reference.fetch(v_contigs, starts - flank_len, starts).data.view(np.uint8)
+    f3 = reference.fetch(v_contigs, ends, ends + flank_len).data.view(np.uint8)
+    f5 = f5.reshape(len(starts), flank_len)
+    f3 = f3.reshape(len(starts), flank_len)
+    alt_rows = []
+    for i in range(len(starts)):
+        a = alt_data[alt_seq_off[i]:alt_seq_off[i + 1]]
+        alt_rows.append(np.concatenate([f5[i], a, f3[i]]))
+    alt_tok = lut[np.concatenate(alt_rows)] if alt_rows else np.empty(0, lut.dtype)
+    return ref_tok, np.asarray(rw.offsets), alt_tok
+
+
+def test_compute_windows_unit(snap_dataset):
+    haps = snap_dataset.with_seqs("variants").with_settings(
+        flank_length=3, token_alphabet=b"ACGT", unknown_token=4
+    )._seqs
+    ref, lut = haps.reference, haps.token_lut
+    v_contigs = np.array([0, 0], dtype=np.int32)
+    starts = np.array([10, 20], dtype=np.int32)
+    ilens = np.array([0, -2], dtype=np.int32)
+    # alt alleles: "AC" and "T"
+    alt_data = np.frombuffer(b"ACT", dtype=np.uint8).copy()
+    alt_seq_off = np.array([0, 2, 3], dtype=np.int64)
+    row_offsets = np.array([0, 2], dtype=np.int64)
+    ref_w, alt_w = compute_windows(
+        ref, v_contigs, starts, ilens, alt_data, alt_seq_off, 3, lut, row_offsets
+    )
+    e_ref_tok, e_ref_off, e_alt_tok = _oracle_windows(
+        ref, v_contigs, starts, ilens, alt_data, alt_seq_off, 3, lut
+    )
+    np.testing.assert_array_equal(ref_w.data, e_ref_tok)
+    np.testing.assert_array_equal(ref_w.seq_offsets, e_ref_off)
+    np.testing.assert_array_equal(alt_w.data, e_alt_tok)
