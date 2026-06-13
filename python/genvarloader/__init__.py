@@ -6,8 +6,10 @@ from seqpro.rag import Ragged
 
 from . import data_registry
 from ._bigwig import BigWigs
+from ._dataset._flat_variants import VarWindowOpt
 from ._dataset._flat_variants import _FlatAlleles as FlatAlleles
 from ._dataset._flat_variants import _FlatVariants as FlatVariants
+from ._dataset._flat_variants import _FlatVariantWindows as FlatVariantWindows
 from ._dataset._impl import ArrayDataset, Dataset, RaggedDataset
 from ._dataset._insertion_fill import (
     Constant,
@@ -43,6 +45,7 @@ __all__ = [
     "FlatAlleles",
     "FlatAnnotatedHaps",
     "FlatRagged",
+    "FlatVariantWindows",
     "FlatVariants",
     "InsertionFill",
     "Interpolate",
@@ -57,6 +60,7 @@ __all__ = [
     "Repeat5pNormalized",
     "SitesSchema",
     "Table",
+    "VarWindowOpt",
     "data_registry",
     "get_dummy_dataset",
     "get_splice_bed",

@@ -444,3 +444,16 @@ def test_flat_variant_windows_optional_fields():
     # reshape/squeeze only act on present fields
     fvw.reshape((1, 1))
     fvw.squeeze(0)
+
+
+def test_public_exports():
+    import genvarloader as gvl
+
+    assert hasattr(gvl, "FlatVariantWindows")
+    assert hasattr(gvl, "VarWindowOpt")
+    assert hasattr(gvl, "FlatVariants")  # from sub-project A
+    assert "FlatVariantWindows" in gvl.__all__
+    assert "VarWindowOpt" in gvl.__all__
+    # VarWindowOpt is constructible and is the documented config object
+    opt = gvl.VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
+    assert opt.ref == "window" and opt.alt == "window"
