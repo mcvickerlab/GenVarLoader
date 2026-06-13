@@ -518,6 +518,7 @@ class Haps(Reconstructor[_H]):
                 )
             from ._flat_variants import get_variants_flat
 
+            # `flat` is not checked here: variants always decode flat; the param is retained for protocol/signature stability.
             return cast(_H, get_variants_flat(self, idx))
         else:
             haps, *_ = self.get_haps_and_shifts(
