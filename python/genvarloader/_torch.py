@@ -157,6 +157,25 @@ def get_dataloader(
             "the loader IS the concurrency strategy"
         )
 
+    # Flat output cannot carry ride-along flank tokens over the buffered transport:
+    # the shm writer does not serialize _FlatVariants.flank_tokens, the double_buffered
+    # producer schema does not carry flank_length, and the in-process flat slice cannot
+    # rebase the flank tokens' (b, ploidy, None, 2L) layout. Reject up front rather than
+    # crashing mid-iteration (buffered) or silently dropping them (double_buffered).
+    if (
+        getattr(dataset, "output_format", "ragged") == "flat"
+        and getattr(dataset, "sequence_type", None) == "variants"
+    ):
+        _seqs = getattr(dataset, "_seqs", None)
+        if getattr(_seqs, "flank_length", None) and getattr(_seqs, "token_lut", None) is not None:
+            raise ValueError(
+                f"mode={mode!r} with output_format='flat' does not support variants output "
+                "carrying ride-along flank tokens (set via with_settings(flank_length=...)): "
+                "the buffered transport path does not carry flank_tokens. Use the default "
+                "ragged output (with_output_format('ragged')) for this configuration, or drop "
+                "flank_length."
+            )
+
     # When the caller passes a BatchSampler directly, use its batch_size so the
     # buffered loader re-batches at the granularity the sampler intended. This
     # mirrors the mode=None path, where the sampler governs batching too.

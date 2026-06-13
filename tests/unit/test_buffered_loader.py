@@ -85,3 +85,31 @@ def test_buffered_flat_matches_ragged(seq_kind):
             np.testing.assert_array_equal(to_padded(got.haps, b"N"), to_padded(rb.haps, b"N"))
         else:
             np.testing.assert_array_equal(to_padded(got, b"N"), to_padded(rb, b"N"))
+
+
+@pytest.mark.parametrize("mode", ["buffered", "double_buffered"])
+def test_flat_buffered_rejects_variants_flank_tokens(mode):
+    """flat + variants + ride-along flank tokens is unsupported over the buffered
+    transport; to_dataloader must reject it up front (not crash mid-iteration)."""
+    import genvarloader as gvl
+
+    ds = (
+        gvl.get_dummy_dataset()
+        .with_seqs("variants")
+        .with_tracks(False)
+        .with_settings(flank_length=3, token_alphabet=b"ACGT", unknown_token=0)
+        .with_output_format("flat")
+    )
+    with pytest.raises(ValueError, match="flank"):
+        ds.to_dataloader(mode=mode, batch_size=2, buffer_bytes=4 * 1024 * 1024)
+
+
+def test_flat_buffered_plain_variants_still_works():
+    """Regression guard: flat + variants WITHOUT flank tokens must NOT be rejected."""
+    import genvarloader as gvl
+
+    ds = gvl.get_dummy_dataset().with_seqs("variants").with_tracks(False).with_output_format("flat")
+    # buffered works in-process with the dummy dataset; just confirm it constructs and yields.
+    dl = ds.to_dataloader(mode="buffered", batch_size=2, drop_last=True, buffer_bytes=4 * 1024 * 1024)
+    batches = list(dl)
+    assert batches  # produced something, no rejection
