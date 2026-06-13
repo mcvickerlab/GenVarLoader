@@ -294,6 +294,33 @@ class _FlatVariantWindows:
             {k: v.squeeze(axis) for k, v in self.fields.items()}, **present
         )
 
+    def fill_empty_groups(
+        self, dummy: "DummyVariant", unk: int, flank_length: int
+    ) -> "_FlatVariantWindows":
+        """Insert one all-``unk`` dummy entry into each empty (b*p) group.
+
+        Scalar fields take ``DummyVariant`` values; window fields take ``unk``.
+        Window length: ``2*flank_length + len(dummy allele)`` for ref/alt
+        windows, ``len(dummy allele)`` for bare ref/alt alleles."""
+        from .._flat import _Flat
+
+        new_fields: dict[str, Any] = {}
+        for name, f in self.fields.items():
+            fill = dummy.scalar_for(name, f.data.dtype)
+            nd, noff = _fill_empty_scalar(f.data, f.offsets, fill)
+            new_fields[name] = _Flat.from_offsets(nd, f.shape, noff)
+
+        present: dict[str, _FlatWindow] = {}
+        for name, w in self._present().items():
+            allele = dummy.alt if name in ("alt", "alt_window") else dummy.ref
+            base = len(allele)
+            win_len = (2 * flank_length + base) if name.endswith("_window") else base
+            dwin = np.full(win_len, unk, dtype=w.data.dtype)
+            nd, nvar, nseq = _fill_empty_seq(w.data, w.var_offsets, w.seq_offsets, dwin)
+            present[name] = _FlatWindow(nd, nseq, nvar, w.shape)
+
+        return _FlatVariantWindows(new_fields, **present)
+
 
 @dataclass(slots=True)
 class _FlatVariants:

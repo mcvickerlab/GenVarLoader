@@ -5,7 +5,14 @@ import awkward as ak
 import pytest
 
 from genvarloader import RaggedVariants
-from genvarloader._dataset._flat_variants import _fill_empty_fixed, _fill_empty_seq
+from genvarloader._dataset._flat_variants import (
+    DummyVariant,
+    _fill_empty_fixed,
+    _fill_empty_seq,
+    _FlatVariantWindows,
+    _FlatWindow,
+)
+from genvarloader._flat import _Flat
 from genvarloader._dataset._haps import _build_allele_layout
 from genvarloader._ragged import reverse_complement  # the awkward reference
 from seqpro.rag import Ragged
@@ -434,3 +441,39 @@ def test_fill_empty_seq_preserves_int32_dtype_and_fills_unk():
     assert nvar.tolist() == [0, 1, 2]
     assert nseq.tolist() == [0, 3, 5]
     assert nd.tolist() == [4, 4, 4, 7, 8]
+
+
+def _win(data, seq_off, var_off):
+    return _FlatWindow(
+        np.asarray(data, np.int32),
+        np.asarray(seq_off, np.int64),
+        np.asarray(var_off, np.int64),
+        (1, 1, None, None),
+    )
+
+
+def test_flatvariantwindows_fill_empty_groups_all_unk():
+    # 2 (b*p) rows: row0 empty, row1 has one variant.
+    # scalar start: row0 empty, row1 has start=100
+    start = _Flat.from_offsets(
+        np.array([100], np.int32), (1, 1, None), np.array([0, 0, 1], np.int64)
+    )
+    # alt_window for row1's single variant: a length-3 window [5,6,7]
+    aw = _win([5, 6, 7], [0, 3], [0, 0, 1])
+    win = _FlatVariantWindows({"start": start}, alt_window=aw)
+
+    dummy = DummyVariant(start=-1, alt=b"N")  # 1-byte alt
+    L = 5
+    out = win.fill_empty_groups(dummy, unk=4, flank_length=L)
+
+    # scalar: row0 filled with start=-1
+    s = out.fields["start"]
+    assert s.offsets.tolist() == [0, 1, 2]
+    assert s.data.tolist() == [-1, 100]
+    # alt_window: row0 dummy window len 2L + len("N") = 11, all unk=4
+    w = out.alt_window
+    assert w.var_offsets.tolist() == [0, 1, 2]
+    assert w.seq_offsets.tolist() == [0, 11, 14]   # dummy(11) then row1's window(3)
+    assert w.data[:11].tolist() == [4] * 11
+    assert w.data[11:].tolist() == [5, 6, 7]
+    assert w.data.dtype == np.int32
