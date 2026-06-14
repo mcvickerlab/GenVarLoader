@@ -1,6 +1,7 @@
 """Tests for atomic gvl.write and format_version stamping."""
 
 import json
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -111,3 +112,35 @@ def test_failure_leaves_no_partial_artifacts(synthetic_case, tmp_path):
 
     assert not dest.exists()
     assert list(dest.parent.glob(f"{dest.name}.tmp.*")) == []
+
+
+def test_empty_sample_intersection_raises_clear_error(
+    synthetic_case, bigwig_dir: Path, tmp_path
+):
+    """gvl.write raises a clear ValueError when variants and tracks share no samples.
+
+    Regression test for https://github.com/mcvickerlab/GenVarLoader/issues/225.
+    Without the guard, the crash was an opaque array-geometry error deep inside
+    _write_from_svar / Ragged.from_offsets with no mention of 'samples'.
+    """
+    # BigWig samples are "sample_0" / "sample_1"; VCF samples are different IDs.
+    bw = gvl.BigWigs(
+        "signal",
+        {
+            "sample_0": str(bigwig_dir / "sample_0.bw"),
+            "sample_1": str(bigwig_dir / "sample_1.bw"),
+        },
+    )
+    bed = synthetic_case.regions.select(
+        chrom=pl.col("chrom"),
+        chromStart=pl.col("start"),
+        chromEnd=pl.col("end"),
+    ).head(1)
+
+    with pytest.raises(ValueError, match="No samples remain after intersecting"):
+        gvl.write(
+            path=tmp_path / "empty_intersection.gvl",
+            bed=bed,
+            variants=str(synthetic_case.vcf_path),
+            tracks=[bw],
+        )
