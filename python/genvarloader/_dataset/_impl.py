@@ -1321,6 +1321,10 @@ class Dataset:
         # include_offsets); added to `total` just before the final reshape.
         offset_total = np.zeros(len(r_idx), dtype=np.int64)
         OFF = 8  # int64 offset entry
+        # Stored ploidy: this is the on-disk value (2 under unphased_union, not the
+        # folded 1). Only consumed by the haplotypes/annotated/tracks branches, which
+        # are unreachable under the flag; the "variants" branch re-derives the folded
+        # ploidy from n_variants(...) below. Don't reuse this for a variants-branch path.
         ploidy = self._seqs.n_variants.shape[-1] if isinstance(self._seqs, Haps) else 1
         # These are computed conditionally below; declared here to satisfy the type checker.
         hap_len_sum: NDArray[np.int64] = np.empty(0, dtype=np.int64)
