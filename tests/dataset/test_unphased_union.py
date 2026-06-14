@@ -197,7 +197,9 @@ def test_unphased_union_toggle_off_restores_diploid(snap_dataset):
     cleared_no_tracks.with_seqs("haplotypes")
 
 
-def test_unphased_union_composes_with_af_filter(filtered_svar, source_bed, ref_fasta, tmp_path):
+def test_unphased_union_composes_with_af_filter(
+    filtered_svar, source_bed, ref_fasta, tmp_path
+):
     """Union fold commutes with AF filtering: fold(AF-filtered) == AF-filtered-union."""
     import genvarloader as gvl
 
