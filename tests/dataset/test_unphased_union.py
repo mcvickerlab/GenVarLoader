@@ -176,3 +176,48 @@ def test_ragged_variants_union_folds(snap_dataset):
     import awkward as ak
 
     assert len(ak.to_list(out["alt"])) == 1
+
+
+def test_unphased_union_toggle_off_restores_diploid(snap_dataset):
+    """Clearing unphased_union=False restores ploidy 2 and allows phased output."""
+    # Step 1: enable union -> ploidy 1.
+    u = snap_dataset.with_seqs("variants").with_settings(unphased_union=True)
+    assert u.ploidy == 1
+    assert u.n_variants().shape[-1] == 1
+
+    # Step 2: clear the flag -> back to diploid.
+    cleared = u.with_settings(unphased_union=False)
+    assert cleared.ploidy == 2
+    assert cleared.n_variants().shape[-1] == 2
+
+    # Step 3: requesting a phased output must NOT raise an unphased_union ValueError.
+    # snap_dataset has tracks; disable them so with_seqs("haplotypes") is unambiguous.
+    cleared_no_tracks = cleared.with_tracks(False)
+    # This must not raise (the unphased_union flag is cleared).
+    cleared_no_tracks.with_seqs("haplotypes")
+
+
+def test_unphased_union_composes_with_af_filter(filtered_svar, source_bed, ref_fasta, tmp_path):
+    """Union fold commutes with AF filtering: fold(AF-filtered) == AF-filtered-union."""
+    import genvarloader as gvl
+
+    out = tmp_path / "af_union.gvl"
+    gvl.write(path=out, bed=source_bed, variants=filtered_svar, overwrite=True)
+
+    base = (
+        gvl.Dataset.open(out, reference=ref_fasta)
+        .with_seqs("variants")
+        .with_settings(var_fields=["alt", "ilen", "start", "AF"], min_af=0.3)
+    )
+    union = base.with_settings(unphased_union=True)
+
+    # Diploid AF-filtered n_variants shape: (R, S, 2)
+    n_base = base.n_variants()
+    assert n_base.shape[-1] == 2
+
+    # Union AF-filtered n_variants shape: (R, S, 1)
+    n_union = union.n_variants()
+    assert n_union.shape[-1] == 1
+
+    # The union count must equal the sum over the ploidy axis of the AF-filtered baseline.
+    np.testing.assert_array_equal(n_union[..., 0], n_base.sum(-1))
