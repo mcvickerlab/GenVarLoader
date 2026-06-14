@@ -1236,7 +1236,8 @@ class Dataset:
             if self._seqs.unphased_union:
                 # Fold the ploidy axis: union count per (region, sample) is the
                 # naive sum of per-haplotype counts (no dedup). ((...), 1)
-                n_vars = n_vars.sum(-1, keepdims=True)
+                # Keep int32 to match the method's return contract (sum() upcasts).
+                n_vars = n_vars.sum(-1, keepdims=True, dtype=np.int32)
 
         if squeeze:
             # (1, P) -> (P)

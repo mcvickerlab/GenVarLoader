@@ -61,6 +61,8 @@ def test_n_variants_collapses_to_union_count(snap_dataset):
     assert nu.shape[-1] == 1
     # Naive union count == sum of per-haplotype counts (no dedup).
     np.testing.assert_array_equal(nu[..., 0], n2.sum(-1))
+    # The folded result must keep the int32 return contract (sum() upcasts to int64).
+    assert nu.dtype == np.int32
 
 
 def test_n_variants_collapse_preserves_leading_shape(snap_dataset):
