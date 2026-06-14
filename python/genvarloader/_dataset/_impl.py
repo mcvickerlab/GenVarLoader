@@ -220,6 +220,7 @@ class Dataset:
         token_alphabet: bytes | None = None,
         unknown_token: int | None = None,
         dummy_variant: "DummyVariant | Literal[False] | None" = None,
+        unphased_union: bool | None = None,
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -269,6 +270,15 @@ class Dataset:
             kind with a dummy set raises. For token outputs (the ride-along ``flank_tokens``
             and the variant-window token buffers) the dummy entry is filled entirely with
             ``unknown_token``. Pass :code:`False` to disable.
+        unphased_union
+            When :code:`True`, fold the stored ``ploidy`` haplotypes onto a single haploid
+            sequence: the union of called ALTs per ``(region, sample)``. ``ds.ploidy`` and
+            ``n_variants(...)`` then report ploidy ``1``, and ``"variants"`` /
+            ``"variant-windows"`` output decode at ploidy ``1``. Phase is discarded (suited
+            to unphased somatic calls); ALT occurrences are concatenated across haplotypes
+            with no sort or dedup (a hom call appears once per haplotype). Requires a dataset
+            with genotypes and is incompatible with ``"haplotypes"`` / ``"annotated"``
+            output (raises). See issue #222.
         """
         to_evolve = {}
 
@@ -416,6 +426,14 @@ class Dataset:
                     )
                 haps = to_evolve.get("_seqs", self._seqs)
                 to_evolve["_seqs"] = replace(haps, dummy_variant=dummy_variant)
+
+        if unphased_union is not None:
+            if not isinstance(self._seqs, Haps):
+                raise ValueError(
+                    "unphased_union requires a dataset with genotypes (variants)."
+                )
+            haps = to_evolve.get("_seqs", self._seqs)
+            to_evolve["_seqs"] = replace(haps, unphased_union=unphased_union)
 
         # If any source state changed, rebuild _recon via the factory.
         if "_seqs" in to_evolve or "_tracks" in to_evolve:
