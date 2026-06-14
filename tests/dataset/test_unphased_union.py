@@ -71,3 +71,34 @@ def test_n_variants_collapse_preserves_leading_shape(snap_dataset):
     nu = u.n_variants()
     # Region/sample axes unchanged, only ploidy axis folded 2 -> 1.
     assert nu.shape == (*n2.shape[:-1], 1)
+
+
+@pytest.mark.parametrize("kind", ["haplotypes", "annotated"])
+def test_union_then_phased_seqs_raises(snap_dataset, kind):
+    # Flag set first, then request a phased sequence type via with_seqs.
+    u = snap_dataset.with_seqs("variants").with_settings(unphased_union=True)
+    with pytest.raises(ValueError, match="unphased_union"):
+        u.with_seqs(kind)
+
+
+@pytest.mark.parametrize("kind", ["haplotypes", "annotated"])
+def test_phased_seqs_then_union_raises(snap_dataset, kind):
+    # Phased sequence type first, then the flag via with_settings.
+    ds = snap_dataset.with_seqs(kind)
+    with pytest.raises(ValueError, match="unphased_union"):
+        ds.with_settings(unphased_union=True)
+
+
+def test_union_allows_variant_windows(snap_dataset):
+    # variant-windows is the supported output and must NOT raise.
+    ds = (
+        snap_dataset.with_seqs("variants")
+        .with_tracks(False)
+        .with_settings(unphased_union=True)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
+        )
+    )
+    assert ds._seqs.unphased_union is True

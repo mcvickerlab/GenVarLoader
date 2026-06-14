@@ -497,6 +497,18 @@ class Dataset:
                 "Output length must be ragged when the sequence type is variants."
             )
 
+        if (
+            isinstance(self._seqs, Haps)
+            and self._seqs.unphased_union
+            and self.sequence_type in ("haplotypes", "annotated")
+        ):
+            raise ValueError(
+                "unphased_union is incompatible with 'haplotypes'/'annotated' output"
+                " (a union of phased sequences is ill-defined). Use 'variant-windows'"
+                " or 'variants', or clear the flag with"
+                " with_settings(unphased_union=False)."
+            )
+
         if self.sequence_type == "variant-windows":
             haps = self._seqs
             if not isinstance(haps, Haps) or haps.window_opt is None:
@@ -697,6 +709,17 @@ class Dataset:
                 token_dtype=lut_dtype,
                 window_opt=window_opt,
                 unknown_token=window_opt.unknown_token,
+            )
+        if (
+            kind in ("haplotypes", "annotated")
+            and isinstance(new_seqs, Haps)
+            and new_seqs.unphased_union
+        ):
+            raise ValueError(
+                "unphased_union is incompatible with 'haplotypes'/'annotated' output"
+                " (a union of phased sequences is ill-defined). Use 'variant-windows'"
+                " or 'variants', or clear the flag with"
+                " with_settings(unphased_union=False)."
             )
         new_recon = _build_reconstructor(new_seqs, self._tracks, kind)
         return replace(self, _seqs=new_seqs, _seqs_kind=kind, _recon=new_recon)
