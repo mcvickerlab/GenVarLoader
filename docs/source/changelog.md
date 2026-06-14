@@ -37,6 +37,35 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.30.0 (2026-06-14)
+
+### Feat
+
+- **dataset**: fold haplotypes into ploidy-1 union in variant decode (#222)
+- **dataset**: reject haplotypes/annotated output under unphased_union (#222)
+- **dataset**: report ploidy=1 and fold n_variants under unphased_union (#222)
+- **dataset**: add unphased_union flag on Haps + with_settings (#222)
+
+### Fix
+
+- **dataset**: keep n_variants int32 under unphased_union fold (#222)
+
+### Refactor
+
+- **variants**: drop retired order-dependent germline-CCF inference (#222)
+
+### Perf
+
+- **threads**: tolerate malformed GVL_NUM_THREADS at import (#221)
+- **variant-windows**: single fused fetch for both-window decode (#221)
+- **flanks**: fuse 3 ref-window fetches into 1 via flank slicing (#221)
+- **reference**: dispatch get_reference kernel serial/parallel (#221)
+- **reference**: dispatch fetch kernel serial/parallel by per-thread bytes (#221)
+- **threads**: cap numba workers to cgroup cores + add dispatch predicate (#221)
+
 ## v0.29.0 (2026-06-13)
 
 ### Feat
