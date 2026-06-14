@@ -102,3 +102,65 @@ def test_union_allows_variant_windows(snap_dataset):
         )
     )
     assert ds._seqs.unphased_union is True
+
+
+def _windows_ds(snap_dataset, union: bool):
+    ds = snap_dataset.with_tracks(False).with_seqs("variants")
+    if union:
+        ds = ds.with_settings(unphased_union=True)
+    return ds.with_output_format("flat").with_seqs(
+        "variant-windows",
+        VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
+    )
+
+
+def test_variant_windows_union_collapses_ploidy_axis(snap_dataset):
+    ploidy = snap_dataset._seqs.genotypes.shape[-2]
+    assert ploidy == 2
+
+    u = _windows_ds(snap_dataset, union=True)
+    out = u[[[0, 1]], [[0, 1]]]  # out_reshape == (1, 2)
+    # Ploidy axis folded 2 -> 1; scalar field shape (1, 2, 1, None).
+    assert out.shape == (1, 2, 1, None)
+    # Window buffers carry the extra ragged window axis: (1, 2, 1, None, None).
+    assert out.ref_window.shape == (1, 2, 1, None, None)
+    assert out.alt_window.shape == (1, 2, 1, None, None)
+    # to_ragged must still work (offsets/data consistent after the fold).
+    out.ref_window.to_ragged()
+    out.alt_window.to_ragged()
+
+
+def test_variant_windows_union_count_matches_sum_over_haplotypes(snap_dataset):
+    baseline = _windows_ds(snap_dataset, union=False)
+    union = _windows_ds(snap_dataset, union=True)
+
+    r_idx = np.arange(min(4, snap_dataset.shape[0]))
+
+    # One array index + a slice over all samples => "combo" (outer-product)
+    # indexing, giving the (R, S) leading shape the assertions below expect.
+    # (Two equal-shaped arrays would pair element-wise, not outer-product.)
+    b = baseline[r_idx, :]  # shape (R, S, ploidy, None)
+    u = union[r_idx, :]  # shape (R, S, 1, None)
+
+    # Per (region, sample): total variants across both haplotypes == union count.
+    rb = b.fields["start"].to_ragged()  # Ragged (R, S, ploidy, ~v)
+    ru = u.fields["start"].to_ragged()  # Ragged (R, S, 1, ~v)
+    import awkward as ak
+
+    base_counts = ak.to_numpy(ak.sum(ak.num(rb, axis=-1), axis=-1))  # (R, S)
+    union_counts = ak.to_numpy(ak.sum(ak.num(ru, axis=-1), axis=-1))  # (R, S)
+    np.testing.assert_array_equal(union_counts, base_counts)
+
+
+def test_ragged_variants_union_folds(snap_dataset):
+    # The ragged "variants" output also honors the flag (decodes flat, then converts).
+    u = (
+        snap_dataset.with_tracks(False)
+        .with_seqs("variants")
+        .with_settings(unphased_union=True)
+    )
+    out = u[0, 0]  # RaggedVariants
+    # alt layout shape is (ploidy, ~v, ~l) for a single (region, sample); ploidy == 1.
+    import awkward as ak
+
+    assert len(ak.to_list(out["alt"])) == 1
