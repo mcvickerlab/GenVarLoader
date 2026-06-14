@@ -26,6 +26,14 @@ def test_resolve_uses_cgroup_affinity(monkeypatch):
     assert th._resolve_num_threads() == 52
 
 
+def test_resolve_malformed_env_falls_back_to_affinity(monkeypatch):
+    # a non-integer override must not break import; fall through to detection
+    monkeypatch.setenv("GVL_NUM_THREADS", "auto")
+    monkeypatch.setattr(numba, "get_num_threads", lambda: 208)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(52)))
+    assert th._resolve_num_threads() == 52
+
+
 def test_should_parallelize_threshold(monkeypatch):
     monkeypatch.setattr(numba, "get_num_threads", lambda: 4)
     thresh = 4 * th._MIN_BYTES_PER_THREAD

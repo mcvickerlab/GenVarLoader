@@ -22,7 +22,12 @@ def _resolve_num_threads() -> int:
     hard_max = numba.get_num_threads()
     env = os.environ.get("GVL_NUM_THREADS")
     if env:
-        return max(1, min(int(env), hard_max))
+        try:
+            return max(1, min(int(env), hard_max))
+        except ValueError:
+            # A malformed override (e.g. "auto") must not break `import
+            # genvarloader`; fall through to cgroup detection instead.
+            pass
     try:
         real = len(os.sched_getaffinity(0))  # respects cgroup cpuset (Linux)
     except AttributeError:
