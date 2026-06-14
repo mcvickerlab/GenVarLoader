@@ -855,7 +855,7 @@ def get_variants_flat(
         starts_v = np.asarray(haps.variants.start)[v_idxs]
         ilens_v = np.asarray(haps.variants.ilen)[v_idxs]
         regions = np.asarray(regions)
-        group_contigs = np.repeat(regions[:, 0], eff_ploidy)  # (b*p,)
+        group_contigs = np.repeat(regions[:, 0], eff_ploidy)  # (b*eff_ploidy,)
         v_contigs = np.repeat(group_contigs, np.diff(row_offsets))  # (n_var,)
 
         tok, off = compute_flank_tokens(

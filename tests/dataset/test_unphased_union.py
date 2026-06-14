@@ -151,6 +151,18 @@ def test_variant_windows_union_count_matches_sum_over_haplotypes(snap_dataset):
     union_counts = ak.to_numpy(ak.sum(ak.num(ru, axis=-1), axis=-1))  # (R, S)
     np.testing.assert_array_equal(union_counts, base_counts)
 
+    # Content check: the union's single row must be exactly hap-0's starts then
+    # hap-1's starts concatenated (the fold reorders nothing and drops nothing).
+    R, S = base_counts.shape
+    for i in range(R):
+        for j in range(S):
+            # baseline: concat across the ploidy axis, in haplotype order
+            expected = []
+            for p in range(rb.shape[2]):
+                expected.extend(ak.to_list(rb[i, j, p]))
+            got = ak.to_list(ru[i, j, 0])
+            assert got == expected, f"union row ({i},{j}) != concat of haplotype starts"
+
 
 def test_ragged_variants_union_folds(snap_dataset):
     # The ragged "variants" output also honors the flag (decodes flat, then converts).
