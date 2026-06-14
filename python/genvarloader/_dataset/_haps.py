@@ -270,6 +270,11 @@ class Haps(Reconstructor[_H]):
     """Token id for bytes outside ``token_alphabet`` (set with ``token_lut``)."""
     window_opt: VarWindowOpt | None = None
     """Options for variant-windows output mode. Set via ``with_seqs('variant-windows', opt)``."""
+    unphased_union: bool = False
+    """When True, fold the stored ``ploidy`` haplotypes onto a single haploid sequence
+    (union of called ALTs per region/sample) for variant/variant-windows output. Phase is
+    discarded; suited to unphased somatic calls. Set via ``with_settings(unphased_union=True)``.
+    See issue #222."""
 
     def __post_init__(self):
         self.n_variants = ak.num(self.genotypes, -1).to_numpy()

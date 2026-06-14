@@ -712,7 +712,19 @@ def get_variants_flat(
         if dosage_data is not None:
             dosage_data, _ = _compact_keep(dosage_data, unfiltered_row_offsets, keep)
 
-    shape: tuple[int | None, ...] = (b, ploidy, None)
+    # Unphased ploidy-1 union: fold the C-order (b, ploidy) rows onto b rows by
+    # keeping every ploidy-th offset. row_offsets has length b*ploidy + 1, so the
+    # slice yields b + 1 offsets that span each region/sample's variants across all
+    # stored haplotypes. v_idxs is untouched: hap-0's calls then hap-1's, concatenated
+    # (no sort, no dedup; a hom call appears once per haplotype). Safe because the
+    # downstream consumer is permutation-invariant (issue #222). eff_ploidy drives the
+    # output shape and per-variant contig broadcasting below.
+    eff_ploidy = ploidy
+    if haps.unphased_union:
+        row_offsets = np.ascontiguousarray(row_offsets[::ploidy])
+        eff_ploidy = 1
+
+    shape: tuple[int | None, ...] = (b, eff_ploidy, None)
 
     fields: dict[str, Any] = {}
 
@@ -771,9 +783,9 @@ def get_variants_flat(
         starts_v = np.asarray(haps.variants.start)[v_idxs]
         ilens_v = np.asarray(haps.variants.ilen)[v_idxs]
         regions = np.asarray(regions)
-        group_contigs = np.repeat(regions[:, 0], ploidy)
+        group_contigs = np.repeat(regions[:, 0], eff_ploidy)
         v_contigs = np.repeat(group_contigs, np.diff(row_offsets))
-        wshape = (b, ploidy, None, None)
+        wshape = (b, eff_ploidy, None, None)
         wfields = {k: v for k, v in fields.items() if k not in ("alt", "ref")}
         win = _FlatVariantWindows(wfields)
 
@@ -843,7 +855,7 @@ def get_variants_flat(
         starts_v = np.asarray(haps.variants.start)[v_idxs]
         ilens_v = np.asarray(haps.variants.ilen)[v_idxs]
         regions = np.asarray(regions)
-        group_contigs = np.repeat(regions[:, 0], ploidy)  # (b*p,)
+        group_contigs = np.repeat(regions[:, 0], eff_ploidy)  # (b*eff_ploidy,)
         v_contigs = np.repeat(group_contigs, np.diff(row_offsets))  # (n_var,)
 
         tok, off = compute_flank_tokens(
@@ -855,7 +867,7 @@ def get_variants_flat(
             haps.token_lut,
             row_offsets,
         )
-        flat.flank_tokens = _Flat.from_offsets(tok, (b, ploidy, None, 2 * L), off)
+        flat.flank_tokens = _Flat.from_offsets(tok, (b, eff_ploidy, None, 2 * L), off)
 
     # dummy-variant empty-group fill (scalars, alleles, and flank_tokens).
     if haps.dummy_variant is not None:

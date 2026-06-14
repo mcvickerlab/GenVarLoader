@@ -89,6 +89,7 @@ def captured_realign_tracks(bench_dataset):
 
 
 # NOTE: a ``captured_germline_ccfs`` fixture was intentionally dropped. The
-# committed chr22 GEUVADIS dataset has no CCF field, so ``_infer_germline_ccfs``
-# never fires (germline CCF inference is conditional). Task 5 relies on the
-# end-to-end variants benchmark for that path instead of a micro-bench.
+# committed chr22 GEUVADIS dataset has no CCF field, so the then-existing
+# ``_infer_germline_ccfs`` kernel never fired. That order-dependent germline-CCF
+# inference path has since been removed (#222); the end-to-end variants benchmark
+# is now the sole signal for the variant-assembly path.

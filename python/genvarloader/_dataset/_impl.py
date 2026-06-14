@@ -220,6 +220,7 @@ class Dataset:
         token_alphabet: bytes | None = None,
         unknown_token: int | None = None,
         dummy_variant: "DummyVariant | Literal[False] | None" = None,
+        unphased_union: bool | None = None,
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -269,6 +270,15 @@ class Dataset:
             kind with a dummy set raises. For token outputs (the ride-along ``flank_tokens``
             and the variant-window token buffers) the dummy entry is filled entirely with
             ``unknown_token``. Pass :code:`False` to disable.
+        unphased_union
+            When :code:`True`, fold the stored ``ploidy`` haplotypes onto a single haploid
+            sequence: the union of called ALTs per ``(region, sample)``. ``ds.ploidy`` and
+            ``n_variants(...)`` then report ploidy ``1``, and ``"variants"`` /
+            ``"variant-windows"`` output decode at ploidy ``1``. Phase is discarded (suited
+            to unphased somatic calls); ALT occurrences are concatenated across haplotypes
+            with no sort or dedup (a hom call appears once per haplotype). Requires a dataset
+            with genotypes and is incompatible with ``"haplotypes"`` / ``"annotated"``
+            output (raises). See issue #222.
         """
         to_evolve = {}
 
@@ -417,6 +427,14 @@ class Dataset:
                 haps = to_evolve.get("_seqs", self._seqs)
                 to_evolve["_seqs"] = replace(haps, dummy_variant=dummy_variant)
 
+        if unphased_union is not None:
+            if not isinstance(self._seqs, Haps):
+                raise ValueError(
+                    "unphased_union requires a dataset with genotypes (variants)."
+                )
+            haps = to_evolve.get("_seqs", self._seqs)
+            to_evolve["_seqs"] = replace(haps, unphased_union=unphased_union)
+
         # If any source state changed, rebuild _recon via the factory.
         if "_seqs" in to_evolve or "_tracks" in to_evolve:
             new_seqs = to_evolve.get("_seqs", self._seqs)
@@ -477,6 +495,18 @@ class Dataset:
         elif self.output_length == "variable" and self.sequence_type == "variants":
             raise ValueError(
                 "Output length must be ragged when the sequence type is variants."
+            )
+
+        if (
+            isinstance(self._seqs, Haps)
+            and self._seqs.unphased_union
+            and self.sequence_type in ("haplotypes", "annotated")
+        ):
+            raise ValueError(
+                "unphased_union is incompatible with 'haplotypes'/'annotated' output"
+                " (a union of phased sequences is ill-defined). Use 'variant-windows'"
+                " or 'variants', or clear the flag with"
+                " with_settings(unphased_union=False)."
             )
 
         if self.sequence_type == "variant-windows":
@@ -679,6 +709,17 @@ class Dataset:
                 token_dtype=lut_dtype,
                 window_opt=window_opt,
                 unknown_token=window_opt.unknown_token,
+            )
+        if (
+            kind in ("haplotypes", "annotated")
+            and isinstance(new_seqs, Haps)
+            and new_seqs.unphased_union
+        ):
+            raise ValueError(
+                "unphased_union is incompatible with 'haplotypes'/'annotated' output"
+                " (a union of phased sequences is ill-defined). Use 'variant-windows'"
+                " or 'variants', or clear the flag with"
+                " with_settings(unphased_union=False)."
             )
         new_recon = _build_reconstructor(new_seqs, self._tracks, kind)
         return replace(self, _seqs=new_seqs, _seqs_kind=kind, _recon=new_recon)
@@ -906,8 +947,14 @@ class Dataset:
 
     @property
     def ploidy(self) -> int | None:
-        """The ploidy of the dataset."""
+        """The ploidy of the dataset.
+
+        Reports ``1`` when ``unphased_union`` is set (the two stored haplotypes are
+        folded onto a single haploid sequence); otherwise the stored ploidy.
+        """
         if isinstance(self._seqs, Haps):
+            if self._seqs.unphased_union:
+                return 1
             return self._seqs.genotypes.shape[-2]
 
     @property
@@ -1209,6 +1256,11 @@ class Dataset:
         else:
             # ((...), P)
             n_vars = self._seqs.n_variants[r_idx, s_idx]
+            if self._seqs.unphased_union:
+                # Fold the ploidy axis: union count per (region, sample) is the
+                # naive sum of per-haplotype counts (no dedup). ((...), 1)
+                # Keep int32 to match the method's return contract (sum() upcasts).
+                n_vars = n_vars.sum(-1, keepdims=True, dtype=np.int32)
 
         if squeeze:
             # (1, P) -> (P)
@@ -1269,6 +1321,10 @@ class Dataset:
         # include_offsets); added to `total` just before the final reshape.
         offset_total = np.zeros(len(r_idx), dtype=np.int64)
         OFF = 8  # int64 offset entry
+        # Stored ploidy: this is the on-disk value (2 under unphased_union, not the
+        # folded 1). Only consumed by the haplotypes/annotated/tracks branches, which
+        # are unreachable under the flag; the "variants" branch re-derives the folded
+        # ploidy from n_variants(...) below. Don't reuse this for a variants-branch path.
         ploidy = self._seqs.n_variants.shape[-1] if isinstance(self._seqs, Haps) else 1
         # These are computed conditionally below; declared here to satisfy the type checker.
         hap_len_sum: NDArray[np.int64] = np.empty(0, dtype=np.int64)
