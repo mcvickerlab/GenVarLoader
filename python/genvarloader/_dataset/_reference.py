@@ -685,7 +685,29 @@ class RefDataset(Generic[T]):
         )
 
 
+@nb.njit(nogil=True, cache=True, inline="always")
+def _get_reference_row(i, regions, out_offsets, reference, ref_offsets, pad_char, out):
+    o_s, o_e = out_offsets[i], out_offsets[i + 1]
+    c_idx, start, end = regions[i, 0], regions[i, 1], regions[i, 2]
+    c_s = ref_offsets[c_idx]
+    c_e = ref_offsets[c_idx + 1]
+    padded_slice(reference[c_s:c_e], start, end, pad_char, out[o_s:o_e])
+
+
 @nb.njit(parallel=True, nogil=True, cache=True)
+def _get_reference_par(regions, out_offsets, reference, ref_offsets, pad_char, out):
+    for i in nb.prange(len(regions)):
+        _get_reference_row(i, regions, out_offsets, reference, ref_offsets, pad_char, out)
+    return out
+
+
+@nb.njit(nogil=True, cache=True)
+def _get_reference_ser(regions, out_offsets, reference, ref_offsets, pad_char, out):
+    for i in range(len(regions)):
+        _get_reference_row(i, regions, out_offsets, reference, ref_offsets, pad_char, out)
+    return out
+
+
 def get_reference(
     regions: NDArray[np.integer],
     out_offsets: NDArray[np.integer],
@@ -694,13 +716,12 @@ def get_reference(
     pad_char: int,
 ) -> NDArray[np.uint8]:
     out = np.empty(out_offsets[-1], np.uint8)
-    for i in nb.prange(len(regions)):
-        o_s, o_e = out_offsets[i], out_offsets[i + 1]
-        c_idx, start, end = regions[i, :3]
-        c_s = ref_offsets[c_idx]
-        c_e = ref_offsets[c_idx + 1]
-        padded_slice(reference[c_s:c_e], start, end, pad_char, out[o_s:o_e])
-    return out
+    kernel = (
+        _get_reference_par
+        if should_parallelize(int(out_offsets[-1]))
+        else _get_reference_ser
+    )
+    return kernel(regions, out_offsets, reference, ref_offsets, pad_char, out)
 
 
 def _fetch_spliced_ref(
