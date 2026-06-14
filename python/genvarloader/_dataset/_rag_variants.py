@@ -16,9 +16,9 @@ from awkward.contents import (
     NumpyArray,
     RegularArray,
 )
-from genoray._types import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
+from genoray._types import DOSAGE_TYPE, POS_TYPE
 from numpy.typing import NDArray
-from seqpro.rag import OFFSET_TYPE, Ragged, is_rag_dtype, lengths_to_offsets
+from seqpro.rag import Ragged, lengths_to_offsets
 from typing_extensions import Self
 
 from .._ragged import reverse_complement_masked
@@ -267,35 +267,6 @@ class RaggedVariants(ak.Array):
     def squeeze(self, axis: int | None = None, **kwargs) -> Self:
         """Squeeze first axis."""
         return self[0]
-
-    def infer_germline_ccfs_(
-        self, ccf_field: str = "dosages", max_ccf: float = 1.0
-    ) -> Self:
-        """Infer germline CCFs in-place.
-
-        Germline variants are identified by having missing CCFs i.e. they have a variant
-        index but missing CCFs. Missing CCFs are inferred to be :code:`max_ccf` - sum(overlapping CCFs).
-
-        Parameters
-        ----------
-        max_ccf
-            Maximum CCF value.
-        """
-        if not hasattr(self, ccf_field):
-            raise ValueError(f"Cannot infer germline CCFs without {ccf_field}.")
-
-        ccfs = self[ccf_field]
-        if not isinstance(ccfs, Ragged) or not is_rag_dtype(ccfs, DOSAGE_TYPE):
-            raise ValueError(f"{ccf_field} must be a Ragged array of {DOSAGE_TYPE}.")
-
-        _infer_germline_ccfs(
-            ccfs.data,
-            self.start.offsets,
-            self.start.data,
-            self.ilen.data,
-            max_ccf=max_ccf,
-        )
-        return self
 
     def to_packed(self) -> Self:
         """Pack all fields into contiguous, zero-based arrays.
@@ -573,107 +544,3 @@ def _alleles_to_nested_tensor(
 
 
 ak.behavior["*", RaggedVariants.__name__] = RaggedVariants
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def _infer_germline_ccfs(
-    ccfs: NDArray[DOSAGE_TYPE],
-    v_offsets: NDArray[OFFSET_TYPE],
-    v_starts: NDArray[POS_TYPE],
-    ilens: NDArray[np.int32],
-    max_ccf: float = 1.0,
-):
-    """Infer germline CCFs from the variant indices and variant starts. Updates CCFs in-place.
-
-    Germline variants are identified by having missing CCFs.
-    i.e. they have a variant index but missing CCFs. Germline CCFs are inferred
-    to be 1 - sum(overlapping somatic CCFs).
-
-    Parameters
-    ----------
-    ccfs
-        Shape: (alts) raveled view of ragged cancer cell fractions.
-    v_offsets
-        Shape: (alts + 1) offsets into :code:`ccfs`.
-    v_starts
-        Shape: (alts) 0-based start positions.
-    ilens
-        Shape: (alts) indel lengths.
-    max_ccf
-        Maximum cancer cell fraction.
-    """
-    n_sp = len(v_offsets) - 1
-    for o_idx in nb.prange(n_sp):
-        o_s, o_e = v_offsets[o_idx], v_offsets[o_idx + 1]
-        n_variants: int = o_e - o_s
-        if n_variants == 0:
-            continue
-
-        ccf = ccfs[o_s:o_e]
-        if not np.isnan(ccf).any():
-            continue
-        v_start = v_starts[o_s:o_e]
-        ilen = ilens[o_s:o_e]
-
-        v_end = (
-            v_start - np.minimum(0, ilen) + 1
-        )  # +1 for atomic variants, +shared_len for non-atomic
-        v_end_sorter = np.argsort(v_end)
-        v_end = v_end[v_end_sorter]
-
-        # sorted merge by starts then ends
-        # ends are marked by being negative
-        starts_ends = np.empty(n_variants * 2, POS_TYPE)
-        se_local_idx = np.empty(n_variants * 2, V_IDX_TYPE)
-        start_idx = 0
-        end_idx = 0
-        for i in range(n_variants * 2):
-            end = v_end[end_idx]
-            if start_idx < n_variants and v_start[start_idx] < end:
-                starts_ends[i] = v_start[start_idx]
-                se_local_idx[i] = start_idx
-                start_idx += 1
-            else:
-                starts_ends[i] = -end
-                se_local_idx[i] = v_end_sorter[end_idx]
-                end_idx += 1
-
-        running_ccf = DOSAGE_TYPE(0)
-        # use -1 to mark that we are not currently within a germline variant
-        g_idx = V_IDX_TYPE(-1)
-        # set g_end to maximum possible value
-        g_end = np.iinfo(POS_TYPE).max
-        for i in range(n_variants * 2):
-            pos: POS_TYPE = starts_ends[i]
-            local_idx: V_IDX_TYPE = se_local_idx[i]
-            pos_ccf: DOSAGE_TYPE = ccf[local_idx]
-            is_germ = np.isnan(pos_ccf)
-
-            # end of variant overlaps with end of current germline variant
-            #! without this we will decrement the running CCF before setting the germline CCF
-            # this is because tied ends are sorted by start, but the ends are 0-based exclusive
-            # so we need to set the germline CCF before we start any decrementing
-            if -pos >= g_end:
-                ccf[g_idx] = max_ccf - running_ccf
-                g_idx = -1
-                g_end = np.iinfo(POS_TYPE).max
-
-            # start of a germline variant
-            if is_germ and pos > 0:
-                # for now: check for overlapping variants and set to zero
-                # to correspond to behavior of haplotype reconstruction
-                # which only keeps first variant out of an overlapping set
-                # TODO: handle overlapping germline vars without excessive memory
-                # iterate over all g_ends, matching running ccf for each?
-                if g_idx != -1 and np.isnan(ccf[g_idx]):
-                    ccf[local_idx] = 0
-                    continue
-                g_idx = local_idx
-                # have to recompute the end because we sorted them above so the local idx points
-                # to the wrong place
-                g_end = pos - min(0, ilen[local_idx]) + 1
-            else:
-                # sign of pos, with 0 being positive
-                running_ccf += (2 * (pos >= 0) - 1) * pos_ccf
-
-        np.nan_to_num(ccf, copy=False, nan=max_ccf)
