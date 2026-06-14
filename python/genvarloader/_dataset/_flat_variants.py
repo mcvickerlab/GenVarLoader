@@ -762,6 +762,7 @@ def get_variants_flat(
         from ._flat_flanks import (
             compute_alt_window,
             compute_ref_window,
+            compute_windows,
             tokenize_alleles,
         )
 
@@ -776,22 +777,9 @@ def get_variants_flat(
         wfields = {k: v for k, v in fields.items() if k not in ("alt", "ref")}
         win = _FlatVariantWindows(wfields)
 
-        if opt.ref == "window":
-            rw = compute_ref_window(
-                haps.reference, v_contigs, starts_v, ilens_v, L, lut, row_offsets
-            )
-            rw.shape = wshape
-            win.ref_window = rw
-        else:  # "allele": bare tokenized ref allele
-            ref_bytes = np.asarray(haps.variants.ref.data).view(np.uint8)
-            ref_off = np.asarray(haps.variants.ref.offsets, np.int64)
-            ref_data, ref_seq_off = _gather_alleles(v_idxs, ref_bytes, ref_off)
-            rw = tokenize_alleles(ref_data, ref_seq_off, lut, row_offsets)
-            rw.shape = wshape
-            win.ref = rw
-
-        if opt.alt == "window":
-            aw = compute_alt_window(
+        if opt.ref == "window" and opt.alt == "window":
+            # Hot path: single fused fetch produces both windows.
+            rw, aw = compute_windows(
                 haps.reference,
                 v_contigs,
                 starts_v,
@@ -802,12 +790,43 @@ def get_variants_flat(
                 lut,
                 row_offsets,
             )
+            rw.shape = wshape
             aw.shape = wshape
+            win.ref_window = rw
             win.alt_window = aw
-        else:  # "allele": bare tokenized alt allele
-            aw = tokenize_alleles(alt_data, alt_seq_off, lut, row_offsets)
-            aw.shape = wshape
-            win.alt = aw
+        else:
+            if opt.ref == "window":
+                rw = compute_ref_window(
+                    haps.reference, v_contigs, starts_v, ilens_v, L, lut, row_offsets
+                )
+                rw.shape = wshape
+                win.ref_window = rw
+            else:  # "allele": bare tokenized ref allele
+                ref_bytes = np.asarray(haps.variants.ref.data).view(np.uint8)
+                ref_off = np.asarray(haps.variants.ref.offsets, np.int64)
+                ref_data, ref_seq_off = _gather_alleles(v_idxs, ref_bytes, ref_off)
+                rw = tokenize_alleles(ref_data, ref_seq_off, lut, row_offsets)
+                rw.shape = wshape
+                win.ref = rw
+
+            if opt.alt == "window":
+                aw = compute_alt_window(
+                    haps.reference,
+                    v_contigs,
+                    starts_v,
+                    ilens_v,
+                    alt_data,
+                    alt_seq_off,
+                    L,
+                    lut,
+                    row_offsets,
+                )
+                aw.shape = wshape
+                win.alt_window = aw
+            else:  # "allele": bare tokenized alt allele
+                aw = tokenize_alleles(alt_data, alt_seq_off, lut, row_offsets)
+                aw.shape = wshape
+                win.alt = aw
 
         if haps.dummy_variant is not None:
             win = win.fill_empty_groups(

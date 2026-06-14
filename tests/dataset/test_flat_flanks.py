@@ -708,6 +708,36 @@ def test_dummy_variant_windows_fill_empty_region_all_unk(snap_dataset):
         assert vals.tolist() == [4] * (ploidy * (2 * L + 1))
 
 
+def test_variant_windows_single_fetch_per_decode(snap_dataset, monkeypatch):
+    """ref=window, alt=window decode must call Reference.fetch exactly once."""
+    import genvarloader._dataset._reference as refmod
+    from genvarloader._dataset._flat_variants import VarWindowOpt
+
+    calls = {"n": 0}
+    orig = refmod.Reference.fetch
+
+    def spy(self, *a, **k):
+        calls["n"] += 1
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(refmod.Reference, "fetch", spy)
+
+    ds = (
+        snap_dataset.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
+        )
+    )
+    calls["n"] = 0
+    out = ds[[0, 1, 2], [0, 1, 2]]
+    assert out.ref_window is not None and out.alt_window is not None
+    assert calls["n"] == 1, (
+        f"expected 1 reference.fetch for both-window decode, got {calls['n']}"
+    )
+
+
 def test_no_awkward_on_dummy_window_hot_path(snap_dataset, monkeypatch):
     import awkward as ak
 

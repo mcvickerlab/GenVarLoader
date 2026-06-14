@@ -1,4 +1,9 @@
+# ruff: noqa: E402  cap_numba_threads() must run before any numba kernel imports
 import importlib.metadata
+
+from ._threads import cap_numba_threads
+
+cap_numba_threads()
 
 from seqpro.bed import read as read_bedlike
 from seqpro.bed import with_len as with_length
