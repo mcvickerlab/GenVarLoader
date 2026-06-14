@@ -24,6 +24,7 @@ from .._utils import is_dtype
 from ._indexing import is_str_arr, s2i
 from ._splice import SpliceMap, SplicePlan, build_splice_plan
 from ._utils import bed_to_regions, padded_slice
+from .._threads import should_parallelize
 
 INT64_MAX = np.iinfo(np.int64).max
 
@@ -131,7 +132,12 @@ class Reference:
         lengths = ends - starts
         offsets = lengths_to_offsets(lengths)
         seqs = np.empty(offsets[-1], np.uint8)
-        _fetch_impl(
+        kernel = (
+            _fetch_impl_par
+            if should_parallelize(int(offsets[-1]))
+            else _fetch_impl_ser
+        )
+        kernel(
             c_idxs,
             starts,
             ends,
@@ -147,21 +153,34 @@ class Reference:
         return seqs
 
 
+@nb.njit(nogil=True, cache=True, inline="always")
+def _fetch_row(
+    i, c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
+):
+    r_s, r_e = ref_offsets[c_idxs[i]], ref_offsets[c_idxs[i] + 1]
+    o_s, o_e = out_offsets[i], out_offsets[i + 1]
+    padded_slice(reference[r_s:r_e], starts[i], ends[i], pad_char, out[o_s:o_e])
+
+
 @nb.njit(parallel=True, nogil=True, cache=True)
-def _fetch_impl(
-    c_idxs: NDArray[np.integer],
-    starts: NDArray[np.integer],
-    ends: NDArray[np.integer],
-    reference: NDArray[np.integer],
-    ref_offsets: NDArray[np.integer],
-    pad_char: int,
-    out: NDArray[np.uint8],
-    out_offsets: NDArray[np.integer],
+def _fetch_impl_par(
+    c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
 ):
     for i in nb.prange(len(c_idxs)):
-        r_s, r_e = ref_offsets[c_idxs[i]], ref_offsets[c_idxs[i] + 1]
-        o_s, o_e = out_offsets[i], out_offsets[i + 1]
-        padded_slice(reference[r_s:r_e], starts[i], ends[i], pad_char, out[o_s:o_e])
+        _fetch_row(
+            i, c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
+        )
+    return out
+
+
+@nb.njit(nogil=True, cache=True)
+def _fetch_impl_ser(
+    c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
+):
+    for i in range(len(c_idxs)):
+        _fetch_row(
+            i, c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
+        )
     return out
 
 
