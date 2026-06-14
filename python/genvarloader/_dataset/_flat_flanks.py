@@ -27,6 +27,20 @@ def build_token_lut(alphabet: bytes, unknown_token: int) -> tuple[NDArray, np.dt
     return lut, np.dtype(dtype)
 
 
+def _slice_flanks(data: NDArray[np.uint8], rw_off: NDArray[np.int64], flank_len: int):
+    """Derive per-variant (f5, f3) flanks from a contiguous ref-window read
+    ``rw = [start-L, end+L)``. ``f5`` = first ``L`` bytes of each row, ``f3`` =
+    last ``L``. Byte-identical to fetching ``[start-L, start)`` / ``[end, end+L)``
+    separately: rows are always ``ref_len + 2L >= 2L + 1`` long so the two
+    fixed-``L`` windows never overlap, and ``padded_slice`` pads OOB by absolute
+    coordinate so boundary padding matches. Both returned arrays are ``(n, L)``.
+    """
+    cols = np.arange(flank_len)
+    f5 = data[rw_off[:-1, None] + cols]
+    f3 = data[rw_off[1:, None] - flank_len + cols]
+    return f5, f3
+
+
 def compute_flank_tokens(
     reference,
     v_contigs: NDArray[np.integer],  # (n_var,) contig id per variant
@@ -57,11 +71,10 @@ def compute_flank_tokens(
     starts = np.asarray(starts, np.int32)
     ilens = np.asarray(ilens, np.int32)
     ends = starts - np.minimum(ilens, 0) + 1
-    f5 = reference.fetch(v_contigs, starts - flank_len, starts).data.view(np.uint8)
-    f3 = reference.fetch(v_contigs, ends, ends + flank_len).data.view(np.uint8)
-    n = starts.shape[0]
-    f5 = f5.reshape(n, flank_len)
-    f3 = f3.reshape(n, flank_len)
+    rw = reference.fetch(v_contigs, starts - flank_len, ends + flank_len)
+    f5, f3 = _slice_flanks(
+        rw.data.view(np.uint8), np.asarray(rw.offsets, np.int64), flank_len
+    )  # each (n, L)
     flank_bytes = np.concatenate([f5, f3], axis=1)  # (n, 2L)
     tokens = lut[flank_bytes]  # vectorized 256-LUT gather -> lut.dtype
     return tokens.reshape(-1), np.asarray(row_offsets, np.int64)
@@ -130,11 +143,13 @@ def compute_alt_window(
     starts = np.asarray(starts, np.int32)
     ilens = np.asarray(ilens, np.int32)
     ends = starts - np.minimum(ilens, 0) + 1
-    f5 = reference.fetch(v_contigs, starts - flank_len, starts).data.view(np.uint8)
-    f3 = reference.fetch(v_contigs, ends, ends + flank_len).data.view(np.uint8)
+    rw = reference.fetch(v_contigs, starts - flank_len, ends + flank_len)
+    f5, f3 = _slice_flanks(
+        rw.data.view(np.uint8), np.asarray(rw.offsets, np.int64), flank_len
+    )  # each (n, L)
     alt_bytes, alt_off = _assemble_alt_windows(
-        np.ascontiguousarray(f5),
-        np.ascontiguousarray(f3),
+        np.ascontiguousarray(f5).reshape(-1),
+        np.ascontiguousarray(f3).reshape(-1),
         np.asarray(alt_data, np.uint8),
         np.asarray(alt_seq_off, np.int64),
         flank_len,
@@ -175,22 +190,32 @@ def compute_windows(
     flank_len: int,
     lut: NDArray,
     row_offsets: NDArray[np.int64],
-) -> tuple[_FlatWindow, _FlatWindow]:
+) -> tuple["_FlatWindow", "_FlatWindow"]:
     """ref_window = [start-L, end+L) read; alt_window = flank5 . alt . flank3.
-    Thin wrapper over compute_ref_window / compute_alt_window."""
-    return (
-        compute_ref_window(
-            reference, v_contigs, starts, ilens, flank_len, lut, row_offsets
-        ),
-        compute_alt_window(
-            reference,
-            v_contigs,
-            starts,
-            ilens,
-            alt_data,
-            alt_seq_off,
-            flank_len,
-            lut,
-            row_offsets,
-        ),
+
+    Single fused fetch: read the ref window once and derive the alt-window flanks
+    by slicing it, instead of the previous 3 separate ``reference.fetch`` calls.
+    Byte-identical to ``(compute_ref_window, compute_alt_window)``.
+    """
+    starts = np.asarray(starts, np.int32)
+    ilens = np.asarray(ilens, np.int32)
+    ends = starts - np.minimum(ilens, 0) + 1
+    rw = reference.fetch(v_contigs, starts - flank_len, ends + flank_len)
+    data = rw.data.view(np.uint8)
+    rw_off = np.asarray(rw.offsets, np.int64)
+    row_off = np.asarray(row_offsets, np.int64)
+
+    # ref window: tokenize the contiguous read directly.
+    ref_w = _FlatWindow(lut[data], rw_off, row_off, (None,))
+
+    # alt window: flank5 . alt . flank3 from sliced flanks.
+    f5, f3 = _slice_flanks(data, rw_off, flank_len)
+    alt_bytes, alt_off = _assemble_alt_windows(
+        np.ascontiguousarray(f5).reshape(-1),
+        np.ascontiguousarray(f3).reshape(-1),
+        np.asarray(alt_data, np.uint8),
+        np.asarray(alt_seq_off, np.int64),
+        flank_len,
     )
+    alt_w = _FlatWindow(lut[alt_bytes], alt_off, row_off, (None,))
+    return ref_w, alt_w
