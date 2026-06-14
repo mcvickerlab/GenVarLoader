@@ -40,3 +40,32 @@ def test_with_settings_unphased_union_requires_genotypes(
     ds = gvl.Dataset.open(out, reference=reference)
     with pytest.raises(ValueError, match="genotypes"):
         ds.with_settings(unphased_union=True)
+
+
+def test_ploidy_reports_one_under_union(snap_dataset):
+    baseline = snap_dataset.with_seqs("variants")
+    assert baseline.ploidy == 2  # stored diploid
+    u = baseline.with_settings(unphased_union=True)
+    assert u.ploidy == 1
+
+
+def test_n_variants_collapses_to_union_count(snap_dataset):
+    baseline = snap_dataset.with_seqs("variants")
+    # (R, S, ploidy)
+    n2 = baseline.n_variants()
+    assert n2.shape[-1] == 2
+
+    u = baseline.with_settings(unphased_union=True)
+    nu = u.n_variants()
+    # Folded to a single haploid slot.
+    assert nu.shape[-1] == 1
+    # Naive union count == sum of per-haplotype counts (no dedup).
+    np.testing.assert_array_equal(nu[..., 0], n2.sum(-1))
+
+
+def test_n_variants_collapse_preserves_leading_shape(snap_dataset):
+    u = snap_dataset.with_seqs("variants").with_settings(unphased_union=True)
+    n2 = snap_dataset.with_seqs("variants").n_variants()
+    nu = u.n_variants()
+    # Region/sample axes unchanged, only ploidy axis folded 2 -> 1.
+    assert nu.shape == (*n2.shape[:-1], 1)

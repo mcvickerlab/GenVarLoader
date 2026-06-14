@@ -924,8 +924,14 @@ class Dataset:
 
     @property
     def ploidy(self) -> int | None:
-        """The ploidy of the dataset."""
+        """The ploidy of the dataset.
+
+        Reports ``1`` when ``unphased_union`` is set (the two stored haplotypes are
+        folded onto a single haploid sequence); otherwise the stored ploidy.
+        """
         if isinstance(self._seqs, Haps):
+            if self._seqs.unphased_union:
+                return 1
             return self._seqs.genotypes.shape[-2]
 
     @property
@@ -1227,6 +1233,10 @@ class Dataset:
         else:
             # ((...), P)
             n_vars = self._seqs.n_variants[r_idx, s_idx]
+            if self._seqs.unphased_union:
+                # Fold the ploidy axis: union count per (region, sample) is the
+                # naive sum of per-haplotype counts (no dedup). ((...), 1)
+                n_vars = n_vars.sum(-1, keepdims=True)
 
         if squeeze:
             # (1, P) -> (P)
