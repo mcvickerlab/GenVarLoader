@@ -221,6 +221,12 @@ def write(
 
             samples.sort()
 
+            if len(samples) == 0:
+                raise ValueError(
+                    "No samples remain after intersecting variant samples with track"
+                    " samples. Check that sample IDs match across variants and tracks."
+                )
+
             logger.info(f"Using {len(samples)} samples.")
             metadata["samples"] = samples
             metadata["n_regions"] = gvl_bed.height
