@@ -40,6 +40,20 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.31.0 (2026-06-15)
+
+### Feat
+
+- **table**: ship polars-bio as the `table` extra
+- **table**: make gvl.Table an opt-in experimental feature
+
+### Fix
+
+- **write**: raise clear ValueError when variant/track sample intersection is empty (#225)
+
 ## v0.30.0 (2026-06-14)
 
 ### Feat
