@@ -34,8 +34,8 @@ class ExperimentalWarning(UserWarning):
 #: queries (a non-deterministic native-runtime issue observed on CPython 3.12 and
 #: 3.13; upstream https://github.com/biodatageeks/polars-bio/issues/395). It has
 #: been stable enough in production use to ship as an opt-in experimental feature.
-#: ``polars-bio`` is not a direct dependency of genvarloader; install it yourself
-#: (e.g. via the ``splice`` pixi environment) to use ``gvl.Table``.
+#: ``polars-bio`` is not a core dependency of genvarloader; install it via the
+#: ``table`` extra (``pip install genvarloader[table]``) to use ``gvl.Table``.
 _TABLE_EXPERIMENTAL_MSG = (
     "gvl.Table is an experimental feature and is not tested in CI. Its overlap "
     "backend, polars-bio, has intermittently segfaulted during overlap queries "
@@ -46,8 +46,8 @@ _TABLE_EXPERIMENTAL_MSG = (
 
 _POLARS_BIO_MISSING_MSG = (
     "gvl.Table requires the optional 'polars-bio' package, which is not "
-    "installed. Install it (e.g. `pip install polars-bio`, or use the 'splice' "
-    "pixi environment) to use gvl.Table."
+    "installed. Install it via the 'table' extra: "
+    "`pip install genvarloader[table]`."
 )
 
 
@@ -67,8 +67,8 @@ class Table:
         (``polars-bio``) has intermittently segfaulted the interpreter
         (`#395 <https://github.com/biodatageeks/polars-bio/issues/395>`_). It is
         stable enough for opt-in production use, but prefer :class:`BigWigs` when
-        possible. ``polars-bio`` is an optional dependency you must install
-        yourself.
+        possible. Install the overlap backend via the ``table`` extra:
+        ``pip install genvarloader[table]``.
     """
 
     name: str

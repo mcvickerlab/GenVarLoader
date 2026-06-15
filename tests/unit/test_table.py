@@ -11,7 +11,8 @@ from genvarloader.experimental import Table
 # queries (observed on CPython 3.12 and 3.13), which can crash the whole test
 # run. polars-bio is a transitive dependency, so an importorskip would not keep
 # these out of CI; instead they are opt-in via an env var. Set
-# GVL_TEST_EXPERIMENTAL=1 to run them locally (e.g. in the `splice` pixi env).
+# GVL_TEST_EXPERIMENTAL=1 to run them locally (requires the `table` extra:
+# `pip install genvarloader[table]`).
 # Upstream: https://github.com/biodatageeks/polars-bio/issues/395
 if not os.environ.get("GVL_TEST_EXPERIMENTAL"):
     pytest.skip(

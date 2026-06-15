@@ -317,7 +317,7 @@ Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (use
 - `gvl.to_nested_tensor(ragged)` — convert to a PyTorch nested tensor (requires `torch`).
 - `gvl.get_dummy_dataset()` — small in-memory dataset for examples/tests.
 - `gvl.RefDataset` — reference-only dataset (no genotypes).
-- `genvarloader.experimental.Table` — **experimental**, generic interval track from a DataFrame. Not re-exported at top level (import it explicitly) and not tested in CI. Requires the optional `polars-bio` package and emits an `ExperimentalWarning` on construction.
+- `genvarloader.experimental.Table` — **experimental**, generic interval track from a DataFrame. Not re-exported at top level (import it explicitly) and not tested in CI. Needs the `table` extra (`pip install genvarloader[table]`, which pulls in `polars-bio`) and emits an `ExperimentalWarning` on construction.
 - `gvl.data_registry.fetch(name)` — download public test/demo datasets.
 
 Full list lives in `python/genvarloader/__init__.py` `__all__`.

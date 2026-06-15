@@ -39,6 +39,10 @@ dependencies = [
 cli = ["genvarloader-cli>=0.1.0"]
 tbb = ['tbb']
 pyomp = ['pyomp']
+# Experimental gvl.Table interval-track backend. polars-bio has intermittently
+# segfaulted during overlap queries (biodatageeks/polars-bio#395), so it is kept
+# out of the core dependencies and shipped as an opt-in extra.
+table = ['polars-bio']
 
 [project.urls]
 source = "https://github.com/mcvickerlab/GenVarLoader"
