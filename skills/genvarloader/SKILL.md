@@ -98,7 +98,7 @@ gvl.write(
 
 Notable:
 - `bed`: path or polars DataFrame with `chrom, chromStart, chromEnd` (0-based). Optional `strand` (`+`/`-`/`.`) controls reverse-complement on read. Extra columns are preserved on `Dataset.regions`.
-- `tracks`: a `gvl.BigWigs`, `gvl.Table`, or a list of them. Each must have a unique `.name`. BigWigs need a sample→path mapping (dict or table with `sample`, `path` columns; see `BigWigs.from_table`).
+- `tracks`: a `gvl.BigWigs` (or a list of them), or the experimental `genvarloader.experimental.Table`. Each must have a unique `.name`. BigWigs need a sample→path mapping (dict or table with `sample`, `path` columns; see `BigWigs.from_table`).
 - `max_jitter`: max read-time jitter; pads stored data on both sides of every region by this many bases so `Dataset.with_settings(jitter=j)` works for any `j <= max_jitter`.
 - `extend_to_length=True` keeps reading past the BED end until every haplotype is ≥ the region length (matters when deletions would shorten output); set `False` for faster writes if shorter haps are acceptable.
 - Inner-joins samples across `variants` and all `tracks`.
@@ -317,7 +317,7 @@ Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (use
 - `gvl.to_nested_tensor(ragged)` — convert to a PyTorch nested tensor (requires `torch`).
 - `gvl.get_dummy_dataset()` — small in-memory dataset for examples/tests.
 - `gvl.RefDataset` — reference-only dataset (no genotypes).
-- `gvl.Table` — generic interval track from a DataFrame.
+- `genvarloader.experimental.Table` — **experimental**, generic interval track from a DataFrame. Not re-exported at top level (import it explicitly) and not tested in CI. Needs the `table` extra (`pip install genvarloader[table]`, which pulls in `polars-bio`) and emits an `ExperimentalWarning` on construction.
 - `gvl.data_registry.fetch(name)` — download public test/demo datasets.
 
 Full list lives in `python/genvarloader/__init__.py` `__all__`.

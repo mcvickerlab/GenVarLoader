@@ -32,7 +32,6 @@ from ._dummy import get_dummy_dataset
 from ._flat import _Flat as FlatRagged
 from ._flat import _FlatAnnotatedHaps as FlatAnnotatedHaps
 from ._ragged import RaggedAnnotatedHaps, RaggedIntervals
-from ._table import Table
 from ._torch import to_nested_tensor
 from ._types import AnnotatedHaps
 from ._variants._sitesonly import DatasetWithSites, SitesSchema, sites_vcf_to_table
@@ -65,7 +64,6 @@ __all__ = [
     "Repeat5p",
     "Repeat5pNormalized",
     "SitesSchema",
-    "Table",
     "VarWindowOpt",
     "data_registry",
     "get_dummy_dataset",
