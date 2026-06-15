@@ -1,19 +1,27 @@
+import os
 from pathlib import Path
 
 import genvarloader as gvl
 import numpy as np
 import polars as pl
 import pytest
-from genvarloader._table import Table
+from genvarloader.experimental import Table
 
-# gvl.Table is temporarily disabled (polars-bio backend intermittently segfaults
-# on CPython 3.12 and 3.13; polars-bio removed as a direct dependency, still
-# transitive via genoray). These Table-driven end-to-end write tests are skipped
-# until it is re-enabled.
+# gvl.Table is experimental and deliberately NOT exercised in CI (its polars-bio
+# overlap backend has intermittently segfaulted the interpreter on CPython 3.12
+# and 3.13). polars-bio is transitive, so these Table-driven end-to-end write
+# tests are opt-in via an env var rather than gated on the dependency. Set
+# GVL_TEST_EXPERIMENTAL=1 to run them locally.
 # Upstream: https://github.com/biodatageeks/polars-bio/issues/395
-pytestmark = pytest.mark.skip(
-    reason="gvl.Table temporarily disabled pending polars-bio segfault fix; see "
-    "https://github.com/biodatageeks/polars-bio/issues/395",
+if not os.environ.get("GVL_TEST_EXPERIMENTAL"):
+    pytest.skip(
+        "gvl.Table is experimental and not tested in CI; set "
+        "GVL_TEST_EXPERIMENTAL=1 to run these tests.",
+        allow_module_level=True,
+    )
+
+pytestmark = pytest.mark.filterwarnings(
+    "ignore::genvarloader._table.ExperimentalWarning"
 )
 
 
@@ -82,7 +90,7 @@ def test_write_with_mixed_bigwigs_and_table(tmp_path, bigwig_dir: Path):
         },
     )
     # Table sample IDs match the BigWigs sample IDs so the intersection is non-empty.
-    table = gvl.Table(
+    table = Table(
         "tab_signal",
         pl.DataFrame(
             {
@@ -108,7 +116,7 @@ def test_write_with_variants_and_tracks(tmp_path, vcf_dir: Path):
 
     vcf = VCF(vcf_dir / "filtered_source.vcf.gz")
     # VCF samples are s0, s1, s2 — Table must share at least one.
-    table = gvl.Table(
+    table = Table(
         "signal",
         pl.DataFrame(
             {

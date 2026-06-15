@@ -1,21 +1,31 @@
+import os
+
 import genvarloader as gvl
 import polars as pl
 import pytest
+from genvarloader.experimental import Table
 
-# gvl.Table is temporarily disabled (polars-bio backend intermittently segfaults
-# on CPython 3.12 and 3.13; polars-bio removed as a direct dependency, still
-# transitive via genoray). These Table-driven write tests are skipped until it
-# is re-enabled.
+# gvl.Table is experimental and deliberately NOT exercised in CI (its polars-bio
+# overlap backend has intermittently segfaulted the interpreter on CPython 3.12
+# and 3.13). polars-bio is transitive, so these Table-driven write tests are
+# opt-in via an env var rather than gated on the dependency. Set
+# GVL_TEST_EXPERIMENTAL=1 to run them locally.
 # Upstream: https://github.com/biodatageeks/polars-bio/issues/395
-pytestmark = pytest.mark.skip(
-    reason="gvl.Table temporarily disabled pending polars-bio segfault fix; see "
-    "https://github.com/biodatageeks/polars-bio/issues/395",
+if not os.environ.get("GVL_TEST_EXPERIMENTAL"):
+    pytest.skip(
+        "gvl.Table is experimental and not tested in CI; set "
+        "GVL_TEST_EXPERIMENTAL=1 to run these tests.",
+        allow_module_level=True,
+    )
+
+pytestmark = pytest.mark.filterwarnings(
+    "ignore::genvarloader._table.ExperimentalWarning"
 )
 
 
 def test_write_duplicate_track_names_rejected(tmp_path):
     bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [100]})
-    t1 = gvl.Table(
+    t1 = Table(
         "dup",
         pl.DataFrame(
             {
@@ -27,7 +37,7 @@ def test_write_duplicate_track_names_rejected(tmp_path):
             }
         ),
     )
-    t2 = gvl.Table(
+    t2 = Table(
         "dup",
         pl.DataFrame(
             {

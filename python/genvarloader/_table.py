@@ -6,6 +6,7 @@ Mirrors the :class:`BigWigs` reader API surface so that
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,29 +25,50 @@ if TYPE_CHECKING:
 CANONICAL_COLS = ("sample_id", "chrom", "start", "end", "value")
 
 
-#: ``gvl.Table`` is temporarily disabled: its backend, ``polars-bio``,
-#: intermittently segfaults the interpreter during overlap queries (a
-#: non-deterministic native-runtime issue observed on CPython 3.12 and 3.13).
-#: ``polars-bio`` has been removed from genvarloader's direct dependencies (it
-#: remains an indirect dependency of ``genoray``). Re-enable by reverting this
-#: commit once the upstream issue is resolved.
-#: Upstream: https://github.com/biodatageeks/polars-bio/issues/395
-_TABLE_DISABLED_MSG = (
-    "gvl.Table is temporarily disabled because its polars-bio backend "
-    "intermittently segfaults during overlap queries (upstream "
-    "https://github.com/biodatageeks/polars-bio/issues/395). Use gvl.BigWigs "
-    "for track input in the meantime."
+class ExperimentalWarning(UserWarning):
+    """Warning emitted when using an experimental, unsupported feature."""
+
+
+#: ``gvl.Table`` is **experimental** and not exercised in CI. Its overlap backend,
+#: ``polars-bio``, has intermittently segfaulted the interpreter during overlap
+#: queries (a non-deterministic native-runtime issue observed on CPython 3.12 and
+#: 3.13; upstream https://github.com/biodatageeks/polars-bio/issues/395). It has
+#: been stable enough in production use to ship as an opt-in experimental feature.
+#: ``polars-bio`` is not a direct dependency of genvarloader; install it yourself
+#: (e.g. via the ``splice`` pixi environment) to use ``gvl.Table``.
+_TABLE_EXPERIMENTAL_MSG = (
+    "gvl.Table is an experimental feature and is not tested in CI. Its overlap "
+    "backend, polars-bio, has intermittently segfaulted during overlap queries "
+    "(upstream https://github.com/biodatageeks/polars-bio/issues/395). It is "
+    "considered stable enough for opt-in production use, but prefer gvl.BigWigs "
+    "when possible."
 )
+
+_POLARS_BIO_MISSING_MSG = (
+    "gvl.Table requires the optional 'polars-bio' package, which is not "
+    "installed. Install it (e.g. `pip install polars-bio`, or use the 'splice' "
+    "pixi environment) to use gvl.Table."
+)
+
+
+def _import_polars_bio():
+    try:
+        import polars_bio as pb
+    except ImportError as e:  # pragma: no cover - exercised only without polars-bio
+        raise ImportError(_POLARS_BIO_MISSING_MSG) from e
+    return pb
 
 
 class Table:
     """Long-form interval track keyed by ``(sample_id, chrom, start, end, value)``.
 
     .. warning::
-        Temporarily disabled. Constructing a :class:`Table` raises
-        :class:`NotImplementedError` while the ``polars-bio`` segfault
-        (`#395 <https://github.com/biodatageeks/polars-bio/issues/395>`_) is
-        unresolved. Use :class:`BigWigs` for track input in the meantime.
+        **Experimental** and not tested in CI. The overlap backend
+        (``polars-bio``) has intermittently segfaulted the interpreter
+        (`#395 <https://github.com/biodatageeks/polars-bio/issues/395>`_). It is
+        stable enough for opt-in production use, but prefer :class:`BigWigs` when
+        possible. ``polars-bio`` is an optional dependency you must install
+        yourself.
     """
 
     name: str
@@ -59,7 +81,7 @@ class Table:
         data: pl.DataFrame | Mapping[str, pl.DataFrame],
         column_map: Mapping[str, str] | None = None,
     ) -> None:
-        raise NotImplementedError(_TABLE_DISABLED_MSG)
+        warnings.warn(_TABLE_EXPERIMENTAL_MSG, ExperimentalWarning, stacklevel=2)
         self.name = name
         df = self._normalize_input(data, column_map)
         df = df.cast(
@@ -162,7 +184,7 @@ class Table:
         sample: str | list[str] | None = None,
         **kwargs,
     ) -> NDArray[np.int32]:
-        import polars_bio as pb
+        pb = _import_polars_bio()
 
         # pb.set_option is idempotent; called per-method to avoid relying on import order.
         pb.set_option("datafusion.bio.coordinate_system_check", "false")
@@ -226,7 +248,7 @@ class Table:
         sample: str | list[str] | None = None,
         **kwargs,
     ) -> RaggedIntervals:
-        import polars_bio as pb
+        pb = _import_polars_bio()
         from seqpro.rag import Ragged
 
         from ._ragged import RaggedIntervals
