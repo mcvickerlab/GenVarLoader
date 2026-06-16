@@ -88,6 +88,7 @@ gvl.write(
     bed,
     variants=None,
     tracks=None,
+    annot_tracks=None,
     samples=None,
     max_jitter=None,
     overwrite=False,
@@ -99,15 +100,43 @@ gvl.write(
 Notable:
 - `bed`: path or polars DataFrame with `chrom, chromStart, chromEnd` (0-based). Optional `strand` (`+`/`-`/`.`) controls reverse-complement on read. Extra columns are preserved on `Dataset.regions`.
 - `tracks`: a `gvl.BigWigs` (or a list of them), or the experimental `genvarloader.experimental.Table`. Each must have a unique `.name`. BigWigs need a sample→path mapping (dict or table with `sample`, `path` columns; see `BigWigs.from_table`).
+- `annot_tracks`: `dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None` — sample-independent annotation tracks, written to `<path>/annot_intervals/<name>/`. Each value is either a path to an interval table/bigWig file, or a polars DataFrame/LazyFrame with BED-like columns (`chrom`, `chromStart`, `chromEnd`, `score`). DataFrame/LazyFrame and table-file sources use the polars-bio overlap backend and require the `table` extra (`pip install genvarloader[table]`), and emit an `ExperimentalWarning`. BigWig path sources do NOT require the `table` extra. Annotation tracks are sample-independent and can be read without a per-sample variant source.
 - `max_jitter`: max read-time jitter; pads stored data on both sides of every region by this many bases so `Dataset.with_settings(jitter=j)` works for any `j <= max_jitter`.
 - `extend_to_length=True` keeps reading past the BED end until every haplotype is ≥ the region length (matters when deletions would shorten output); set `False` for faster writes if shorter haps are acceptable.
 - Inner-joins samples across `variants` and all `tracks`.
+
+**Parallelism:** `gvl.write` now parallelizes over write categories. Variants are processed first (serially). Then per-sample `tracks` and `annot_tracks` run concurrently (joblib loky backend). The `max_mem` budget is divided across the concurrently-running categories.
 
 Source: `python/genvarloader/_dataset/_write.py`.
 
 **Atomic creation:** `gvl.write` builds into a private sibling temp directory and publishes via an atomic `os.replace`. A best-effort `filelock` avoids redundant rebuilds when parallel jobs share the same destination, but correctness relies on the rename — the lock is advisory only. **Datasets do not auto-rebuild**; if the on-disk artifact is missing or corrupt, re-run `gvl.write`.
 
 **Out-of-scope:** `genoray` `.gvi` index files and `pysam` `.fai`/`.gzi` index files are created by those libraries and are **not** covered by gvl's atomic/locked creation. Concurrent jobs that trigger index creation for those files depend on the upstream libraries' behavior.
+
+## `gvl.update` — add tracks to an existing dataset
+
+```python
+gvl.update(
+    dataset,          # str | Path | Dataset
+    tracks=None,      # IntervalTrack | Sequence[IntervalTrack] | None
+    annot_tracks=None,  # dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None
+    *,
+    overwrite=False,
+    max_mem="4g",
+) -> None
+```
+
+Adds tracks to an **existing** on-disk GVL dataset without rewriting it from scratch.
+
+- `dataset`: path to a dataset directory, or an opened `Dataset` (its `.path` is used). A live dataset can be read during `update`; it will not observe the new track until reopened.
+- `tracks`: per-sample `IntervalTrack` sources (`BigWigs`, experimental `Table`). The track's sample set must match the dataset's **exactly** (no missing, no extra); samples are reordered to dataset order automatically. Written to `<path>/intervals/<name>/`.
+- `annot_tracks`: sample-independent sources, identical to `gvl.write`'s `annot_tracks` (path to interval table, path to bigWig, or polars DataFrame/LazyFrame with BED-like columns). DataFrame/LazyFrame and table-file sources require the `table` extra and emit `ExperimentalWarning`; bigWig path sources do not. Written to `<path>/annot_intervals/<name>/`.
+- `overwrite=True`: replace a same-named existing track; `False` (default) raises `FileExistsError` if the name already exists.
+- `max_mem`: approximate memory budget, divided across concurrently-running categories.
+
+Each track subdirectory is published **atomically** (built into a temp sibling, then `os.replace`d into place), so a reader can never see a half-written track.
+
+Source: `python/genvarloader/_dataset/_write.py`.
 
 ## `Dataset.open` — key arguments
 
@@ -326,11 +355,12 @@ Full list lives in `python/genvarloader/__init__.py` `__all__`.
 
 ```
 ds.gvl/
-├── metadata.json          # version, samples, contigs, ploidy, max_jitter, svar_link?
-├── input_regions.arrow    # BED + region index map
-├── genotypes/             # variant_idxs.npy, dosages.npy, variants.arrow
-│                          # (absent when sourced from .svar; see svar_link)
-└── intervals/<track>/     # per-track interval data
+├── metadata.json              # version, samples, contigs, ploidy, max_jitter, svar_link?
+├── input_regions.arrow        # BED + region index map
+├── genotypes/                 # variant_idxs.npy, dosages.npy, variants.arrow
+│                              # (absent when sourced from .svar; see svar_link)
+├── intervals/<track>/         # per-sample track data (BigWigs / Table)
+└── annot_intervals/<track>/   # sample-independent annotation track data
 ```
 
 See `docs/source/format.md` for the full schema, versioning, and SVAR-link details.
@@ -347,6 +377,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 | On-disk format + SVAR resolution      | `docs/source/format.md`                                |
 | FAQ (`with_*` design, typing)         | `docs/source/faq.md`                                   |
 | Auto-generated reference              | `docs/source/api.md` → https://genvarloader.readthedocs.io |
+| `gvl.write` / `gvl.update` internals  | `python/genvarloader/_dataset/_write.py`               |
 | Track re-alignment internals          | `python/genvarloader/_dataset/_tracks.py`, `_reconstruct.py` |
 | Insertion fill internals              | `python/genvarloader/_dataset/_insertion_fill.py`      |
 | SVAR back-reference / migration       | `python/genvarloader/_dataset/_svar_link.py`           |
@@ -356,6 +387,9 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 
 ## Common gotchas
 
+- **`gvl.update` does not hot-reload open datasets.** A `Dataset` instance that was opened before `gvl.update` ran will not see the new track; reopen the dataset to pick it up. The update itself is safe to run while readers are active — each track is published atomically so a reader never sees a half-written track.
+- **`Dataset.write_annot_tracks` has been removed.** Use `gvl.update(dataset, annot_tracks={"name": source})` instead, or pass `annot_tracks=` to `gvl.write` at creation time.
+- **`annot_tracks` DataFrame/LazyFrame sources require the `table` extra.** `pip install genvarloader[table]` (pulls in `polars-bio`). BigWig path sources do **not** require this extra.
 - **Symbolic / breakend variants are rejected, not skipped.** Remove them before `gvl.write` — e.g. `bcftools view -e 'ALT~"<" || ALT~"\["'` (drop SVs and breakends), or construct the genoray reader with `filter=genoray.exprs.is_biallelic & ~genoray.exprs.is_symbolic & ~genoray.exprs.is_breakend`. SVAR inputs must be built from an already-filtered source, since gvl validates but cannot re-filter a materialized `.svar`.
 - Opening a genotypes-only dataset without a `reference=` defaults to the `"variants"` view (`RaggedVariants`), not `"haplotypes"`. Only `"variants"` is available without a reference; `with_seqs("haplotypes" | "annotated" | "reference")` raises `ValueError` if no reference was provided.
 - `with_insertion_fill` raises unless the dataset has both haplotypes AND tracks active.
