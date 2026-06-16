@@ -958,8 +958,6 @@ def _annot_intervals(
     - table path / DataFrame / LazyFrame (BED-like: chrom, chromStart, chromEnd, score)
       -> polars-bio overlap (experimental, requires the `table` extra).
     """
-    from .._ragged import RaggedIntervals
-
     if isinstance(source, (str, Path)) and Path(source).suffix.lower() in (
         ".bw",
         ".bigwig",

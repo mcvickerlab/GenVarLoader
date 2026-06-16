@@ -54,6 +54,13 @@ lint.ignore = ["E501"]
 
 [tool.pyrefly]
 project-includes = ["python/genvarloader", "tests"]
+# Resolve `genvarloader` to this checkout's `python/` source. Without an
+# explicit search-path, pyrefly's heuristics can resolve the package to a
+# different checkout (e.g. when this tree is a git worktree nested under the
+# main repo), type-checking stale sources and reporting phantom
+# unexpected-keyword/missing-attribute errors for newly added public API.
+search-path = ["python", "tests"]
+disable-search-path-heuristics = true
 # Heuristics disabled: pyrefly otherwise auto-excludes our maturin source dir
 # `python/` because the name collides with the site-packages heuristic.
 disable-project-excludes-heuristics = true
