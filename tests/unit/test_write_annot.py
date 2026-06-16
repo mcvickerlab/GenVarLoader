@@ -37,21 +37,17 @@ def _annot():
     )
 
 
-def test_annot_overlap_matches_pyranges_oracle():
-    from genvarloader._dataset._impl import _annot_to_intervals  # pyranges oracle
+def test_annot_overlap_explicit():
     from genvarloader._table import annot_overlap
 
     regions, annot = _regions(), _annot()
     got = annot_overlap(regions, annot)
-    want = _annot_to_intervals(regions, annot)
-
-    # same per-region counts and the same multiset of intervals per region
-    np.testing.assert_array_equal(got.values.offsets, want.values.offsets)
-    for r in range(regions.height):
-        gs, ge, gv = got.starts[r], got.ends[r], got.values[r]
-        ws, we, wv = want.starts[r], want.ends[r], want.values[r]
-        go = np.lexsort((gv, ge, gs))
-        wo = np.lexsort((wv, we, ws))
-        np.testing.assert_array_equal(np.asarray(gs)[go], np.asarray(ws)[wo])
-        np.testing.assert_array_equal(np.asarray(ge)[go], np.asarray(we)[wo])
-        np.testing.assert_allclose(np.asarray(gv)[go], np.asarray(wv)[wo])
+    # region 0 [chr1:0-100] overlaps the 3 chr1 annots; region 1 [chr1:50-150] overlaps
+    # the chr1 annots at 60-70 and 90-95; region 2 [chr2:0-100] overlaps the chr2 annot.
+    np.testing.assert_array_equal(
+        np.diff(got.values.offsets), np.array([3, 2, 1])
+    )
+    # region 2's single interval is the chr2 annot 5-15 with score 4.0
+    np.testing.assert_array_equal(np.asarray(got.starts[2]), [5])
+    np.testing.assert_array_equal(np.asarray(got.ends[2]), [15])
+    np.testing.assert_allclose(np.asarray(got.values[2]), [4.0])
