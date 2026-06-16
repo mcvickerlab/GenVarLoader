@@ -6,9 +6,11 @@ Date: 2026-06-16
 
 Three related changes to the dataset writing/updating surface:
 
-1. Add a unified `gvl.update(path_or_dataset, ...)` function for adding tracks to an
-   existing dataset on disk, analogous to `gvl.write()`. It replaces
-   `Dataset.write_annot_tracks` and adds post-hoc per-sample track addition.
+1. Add a unified `genvarloader.experimental.update(path_or_dataset, ...)` function for
+   adding tracks to an existing dataset on disk, analogous to `gvl.write()`. It
+   replaces `Dataset.write_annot_tracks` and adds post-hoc per-sample track addition.
+   It lives under `genvarloader.experimental` (alongside `Table`) because its annot
+   extraction depends on the polars-bio backend (see gating below).
 2. Make `gvl.write()` accept `annot_tracks` (sample-independent annotation tracks)
    in addition to the existing `tracks` (per-sample).
 3. Parallelize `gvl.write()` over its `variants`, `tracks`, and `annot_tracks`
@@ -69,10 +71,19 @@ A new leaf writer `_write_annot_track` produces a sample-less `RaggedIntervals`
 
 - table/DataFrame/LazyFrame source → **polars-bio** overlap against the dataset's
   region bed (the same machinery `gvl.Table` uses). Replaces and retires
-  `_annot_to_intervals` (pyranges).
+  `_annot_to_intervals` (pyranges). This path is **gated like `gvl.Table`**: it lazily
+  imports polars-bio via `_table._import_polars_bio` (raising the helpful
+  `pip install genvarloader[table]` error when missing) and emits
+  `ExperimentalWarning`. So a table/DataFrame annot source requires the `[table]`
+  extra and is experimental.
 - bigwig path source → **Rust per-region interval extraction** via the existing
   `BigWigs` backend (bigwig queries are already region-scoped, so no join is needed),
-  collapsed into a single sample-less interval set.
+  collapsed into a single sample-less interval set. This path is **not** gated — it
+  does not touch polars-bio and is fully supported core functionality.
+
+So in `gvl.write`, `annot_tracks` itself is a public, supported parameter, but the
+table/DataFrame source path is experimental + needs `[table]`, while the bigwig source
+path is core.
 
 ### `gvl.write()` parallelization
 
@@ -96,9 +107,9 @@ A new leaf writer `_write_annot_track` produces a sample-less `RaggedIntervals`
   temp dir is published atomically at the end. No per-track atomic rename inside
   `write`.
 
-### `gvl.update()`
+### `genvarloader.experimental.update()`
 
-Signature (public, exported as `gvl.update`):
+Signature (exported from `genvarloader.experimental`, **not** the top-level namespace):
 
 ```python
 def update(
@@ -111,6 +122,7 @@ def update(
 ) -> None:
 ```
 
+- Emits `ExperimentalWarning` on call (consistent with `gvl.Table`).
 - Accepts a path **or** a `Dataset` (extracts `.path`); does not require a live
   `Dataset` to be opened for use.
 - Reads the dataset's already-finalized region ends from disk (`input_regions.arrow` /
@@ -131,7 +143,8 @@ def update(
 
 ### Removed / unchanged API
 
-- **Removed:** `Dataset.write_annot_tracks` (subsumed by `gvl.update(..., annot_tracks=)`).
+- **Removed:** `Dataset.write_annot_tracks` (subsumed by
+  `genvarloader.experimental.update(..., annot_tracks=)`).
 - **Unchanged / out of scope:** `Dataset.write_transformed_track` and
   `Tracks.write_transformed_track` remain as the existing `NotImplementedError` stub.
 
@@ -144,21 +157,30 @@ Leaf writers shared by `write` and `update`:
 `write` calls these into its `atomic_dir` temp dataset; `update` calls them into a
 per-track temp dir and atomic-renames into the live dataset. A small orchestration
 helper encapsulates "run these category jobs with loky, dividing `max_mem`" and is
-shared by both.
+shared by both. `update` itself lives in `experimental/` and calls these shared
+writers; `write` stays in `_dataset/_write.py`.
 
 ## Affected files
 
 - `python/genvarloader/_dataset/_write.py` — `write` gains `annot_tracks` + parallel
-  orchestration; new `_write_annot_track`; new `update`; shared job-runner helper.
+  orchestration; new `_write_annot_track`; shared job-runner helper. The annot
+  table-source extraction routes through the polars-bio guard in `_table.py`.
+- `python/genvarloader/experimental/__init__.py` (or a new
+  `python/genvarloader/experimental/_update.py`) — `update` lives here; add to the
+  experimental `__all__`.
 - `python/genvarloader/_dataset/_impl.py` — remove `Dataset.write_annot_tracks`;
-  retire `_annot_to_intervals` (moved/replaced by polars-bio extraction).
-- `python/genvarloader/__init__.py` — export `update` (add to `__all__`).
-- `python/genvarloader/_table.py` — reuse/extract its polars-bio overlap helper for
-  the annot table path (avoid duplicating overlap setup).
-- `skills/genvarloader/SKILL.md` — document `gvl.update`, `annot_tracks`, removal of
-  `Dataset.write_annot_tracks`.
+  retire `_annot_to_intervals` (replaced by polars-bio extraction).
+- `python/genvarloader/_table.py` — reuse/extract its polars-bio overlap helper +
+  `_import_polars_bio`/`ExperimentalWarning` guard for the annot table path (avoid
+  duplicating overlap setup or the gating).
+- `python/genvarloader/__init__.py` — `update` is **not** added to the top-level
+  `__all__` (it stays under `experimental`).
+- `skills/genvarloader/SKILL.md` — document `genvarloader.experimental.update`,
+  `write`'s `annot_tracks`, the `[table]`-extra gating of table-source annots, and the
+  removal of `Dataset.write_annot_tracks`.
 - `docs/source/changelog.md` — note the API change.
-- `tests/integration/tracks/test_annot_tracks.py` — migrate to `gvl.update(...)`.
+- `tests/integration/tracks/test_annot_tracks.py` — migrate to
+  `genvarloader.experimental.update(...)`.
 
 ## Testing
 
@@ -179,10 +201,11 @@ shared by both.
 ## Risks
 
 - polars-bio overlap is the same backend flagged as intermittently segfaulting
-  (issue #395, tracked in memory). Annot extraction in `write`/`update` now depends on
-  it for table/DataFrame sources. The bigwig and per-sample (`BigWigs`) paths do not.
-  Consider whether annot table extraction should be behind the same opt-in/experimental
-  guard as `gvl.Table`, or gated to the `[table]` extra.
+  (issue #395, tracked in memory). Annot extraction for table/DataFrame sources now
+  depends on it, and is therefore gated behind the `[table]` extra +
+  `ExperimentalWarning` (same guard as `gvl.Table`), with `update` living entirely
+  under `genvarloader.experimental`. The bigwig and per-sample (`BigWigs`) paths do not
+  touch polars-bio.
 - loky + memmap writing across processes: each job writes its own subdir, so there is
   no shared-state hazard, but child processes must reconstruct readers (genoray /
   pyBigWig / polars-bio) independently. Confirm picklability of the job closures and
