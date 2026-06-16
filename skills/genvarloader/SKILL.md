@@ -118,7 +118,7 @@ Source: `python/genvarloader/_dataset/_write.py`.
 ```python
 gvl.update(
     dataset,          # str | Path | Dataset
-    tracks=None,      # IntervalTrack | Sequence[IntervalTrack] | None
+    tracks=None,      # BigWigs | Table | Sequence[BigWigs | Table] | None
     annot_tracks=None,  # dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None
     *,
     overwrite=False,
@@ -129,7 +129,7 @@ gvl.update(
 Adds tracks to an **existing** on-disk GVL dataset without rewriting it from scratch.
 
 - `dataset`: path to a dataset directory, or an opened `Dataset` (its `.path` is used). A live dataset can be read during `update`; it will not observe the new track until reopened.
-- `tracks`: per-sample `IntervalTrack` sources (`BigWigs`, experimental `Table`). The track's sample set must match the dataset's **exactly** (no missing, no extra); samples are reordered to dataset order automatically. Written to `<path>/intervals/<name>/`.
+- `tracks`: per-sample `BigWigs` or experimental `Table` sources. The track's sample set must match the dataset's **exactly** (no missing, no extra); samples are reordered to dataset order automatically. Written to `<path>/intervals/<track>/`.
 - `annot_tracks`: sample-independent sources, identical to `gvl.write`'s `annot_tracks` (path to interval table, path to bigWig, or polars DataFrame/LazyFrame with BED-like columns). DataFrame/LazyFrame and table-file sources require the `table` extra and emit `ExperimentalWarning`; bigWig path sources do not. Written to `<path>/annot_intervals/<name>/`.
 - `overwrite=True`: replace a same-named existing track; `False` (default) raises `FileExistsError` if the name already exists.
 - `max_mem`: approximate memory budget, divided across concurrently-running categories.

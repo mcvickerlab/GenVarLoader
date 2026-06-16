@@ -47,13 +47,18 @@
 
 ### Feat
 
-- **write**: `gvl.write` gains `annot_tracks=` — sample-independent annotation tracks written to `<path>/annot_intervals/<name>/`; accepts a path to an interval table or bigWig, or a polars DataFrame/LazyFrame with BED-like columns (`chrom`, `chromStart`, `chromEnd`, `score`). DataFrame/LazyFrame and table-file sources use the polars-bio overlap backend and require the `table` extra (`pip install genvarloader[table]`); bigWig path sources do not.
-- **write**: `gvl.write` now parallelizes over write categories — variants run first (serially), then per-sample `tracks` and `annot_tracks` run concurrently (joblib loky); `max_mem` is divided across the concurrently-running categories.
-- **update**: new `gvl.update(dataset, tracks=None, annot_tracks=None, *, overwrite=False, max_mem="4g")` adds tracks to an existing on-disk dataset. Accepts a path or an opened `Dataset`. Per-sample `tracks` require exact sample-set agreement (reordered to dataset order automatically); `annot_tracks` are sample-independent. Each track is published atomically; a live dataset can be read during update but won't see the new track until reopened. `overwrite=True` replaces a same-named existing track; default raises `FileExistsError`.
+- **write**: `gvl.write` gains `annot_tracks=` — sample-independent annotation tracks written to `<path>/annot_intervals/<name>/`
+  - accepts a path to an interval table or bigWig, or a polars DataFrame/LazyFrame with BED-like columns (`chrom`, `chromStart`, `chromEnd`, `score`)
+  - DataFrame/LazyFrame and table-file sources use the polars-bio overlap backend and require the `table` extra (`pip install genvarloader[table]`); bigWig path sources do not
+- **write**: `gvl.write` parallelizes over write categories — variants run first (serially), then per-sample `tracks` and `annot_tracks` run concurrently (joblib loky); `max_mem` is divided across the concurrently-running categories
+- **update**: new `gvl.update(dataset, tracks=None, annot_tracks=None, *, overwrite=False, max_mem="4g")` adds tracks to an existing on-disk dataset
+  - accepts a path or an opened `Dataset`; per-sample `tracks` require exact sample-set agreement (reordered to dataset order automatically); `annot_tracks` are sample-independent
+  - each track is published atomically; a live dataset can be read during update but won't see the new track until reopened
+  - `overwrite=True` replaces a same-named existing track; default raises `FileExistsError`
 
 ### Refactor
 
-- **update**: `Dataset.write_annot_tracks` removed; use `gvl.update(dataset, annot_tracks={"name": source})` or pass `annot_tracks=` to `gvl.write` at creation time.
+- **update**: `Dataset.write_annot_tracks` removed; use `gvl.update(dataset, annot_tracks={"name": source})` or pass `annot_tracks=` to `gvl.write` at creation time
 
 ## v0.31.0 (2026-06-15)
 
