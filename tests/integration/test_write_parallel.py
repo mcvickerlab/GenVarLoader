@@ -27,9 +27,7 @@ CONTIG_SIZES = [("chr1", 2_000_000), ("chr2", 2_000_000)]
 
 # Use chr1:100-200 — overlaps the first cluster of VCF variants (~POS 111).
 # The bigwig entries at chr1:[1-5) and chr1:[100-105) sit inside this window.
-BED = pl.DataFrame(
-    {"chrom": ["chr1"], "chromStart": [100], "chromEnd": [200]}
-)
+BED = pl.DataFrame({"chrom": ["chr1"], "chromStart": [100], "chromEnd": [200]})
 
 
 @pytest.fixture()
@@ -64,9 +62,7 @@ def annot_bw(tmp_path: Path) -> Path:
 
 def _load_intervals(ds_path: Path, subdir: str, name: str) -> np.ndarray:
     """Load intervals.npy from ``ds_path/<subdir>/<name>/intervals.npy``."""
-    return np.array(
-        np.memmap(ds_path / subdir / name / "intervals.npy", mode="r")
-    )
+    return np.array(np.memmap(ds_path / subdir / name / "intervals.npy", mode="r"))
 
 
 # ---------------------------------------------------------------------------

@@ -44,9 +44,7 @@ def test_annot_overlap_explicit():
     got = annot_overlap(regions, annot)
     # region 0 [chr1:0-100] overlaps the 3 chr1 annots; region 1 [chr1:50-150] overlaps
     # the chr1 annots at 60-70 and 90-95; region 2 [chr2:0-100] overlaps the chr2 annot.
-    np.testing.assert_array_equal(
-        np.diff(got.values.offsets), np.array([3, 2, 1])
-    )
+    np.testing.assert_array_equal(np.diff(got.values.offsets), np.array([3, 2, 1]))
     # region 2's single interval is the chr2 annot 5-15 with score 4.0
     np.testing.assert_array_equal(np.asarray(got.starts[2]), [5])
     np.testing.assert_array_equal(np.asarray(got.ends[2]), [15])

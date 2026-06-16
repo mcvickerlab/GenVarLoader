@@ -318,9 +318,13 @@ def write(
                 _tracks = list(tracks)
                 _bed = gvl_bed
 
-                def _tracks_job(mm: int, _tracks: list = _tracks, _bed: pl.DataFrame = _bed) -> None:
+                def _tracks_job(
+                    mm: int, _tracks: list = _tracks, _bed: pl.DataFrame = _bed
+                ) -> None:
                     for tr in _tracks:
-                        _write_track(path / "intervals" / tr.name, _bed, tr, samples, mm)
+                        _write_track(
+                            path / "intervals" / tr.name, _bed, tr, samples, mm
+                        )
 
                 jobs.append(_tracks_job)
 
@@ -330,7 +334,9 @@ def write(
                 ).select("chrom", "chromStart", "chromEnd")
                 _annots = dict(annot_tracks)
 
-                def _annot_job(mm: int, _annots: dict = _annots, _bed: pl.DataFrame = annot_bed) -> None:
+                def _annot_job(
+                    mm: int, _annots: dict = _annots, _bed: pl.DataFrame = annot_bed
+                ) -> None:
                     for name, source in _annots.items():
                         _write_annot_track(
                             path / "annot_intervals" / name, _bed, source, mm
@@ -390,7 +396,9 @@ def update(
             raise FileNotFoundError(f"{path} is not a GVL dataset (no metadata.json).")
 
         if tracks is None and annot_tracks is None:
-            raise ValueError("At least one of `tracks` or `annot_tracks` must be provided.")
+            raise ValueError(
+                "At least one of `tracks` or `annot_tracks` must be provided."
+            )
 
         meta = Metadata.model_validate_json((path / "metadata.json").read_text())
         contigs = meta.contigs
@@ -427,9 +435,13 @@ def update(
             (path / "intervals").mkdir(exist_ok=True)
             _tr = _tracks
 
-            def _tracks_job(mm: int, _tr: list = _tr, _bed: pl.DataFrame = sample_bed) -> None:
+            def _tracks_job(
+                mm: int, _tr: list = _tr, _bed: pl.DataFrame = sample_bed
+            ) -> None:
                 for tr in _tr:
-                    with atomic_dir(path / "intervals" / tr.name, overwrite=overwrite) as tmp:
+                    with atomic_dir(
+                        path / "intervals" / tr.name, overwrite=overwrite
+                    ) as tmp:
                         _write_track(tmp, _bed, tr, ds_samples, mm)
 
             jobs.append(_tracks_job)
@@ -438,9 +450,13 @@ def update(
             (path / "annot_intervals").mkdir(exist_ok=True)
             _annots = dict(annot_tracks)
 
-            def _annot_job(mm: int, _annots: dict = _annots, _bed: pl.DataFrame = annot_bed) -> None:
+            def _annot_job(
+                mm: int, _annots: dict = _annots, _bed: pl.DataFrame = annot_bed
+            ) -> None:
                 for name, source in _annots.items():
-                    with atomic_dir(path / "annot_intervals" / name, overwrite=overwrite) as tmp:
+                    with atomic_dir(
+                        path / "annot_intervals" / name, overwrite=overwrite
+                    ) as tmp:
                         _write_annot_track(tmp, _bed, source, mm)
 
             jobs.append(_annot_job)
@@ -1132,13 +1148,9 @@ def _annot_intervals_from_bigwig(
             out_ends.append(np.asarray(itvs.ends[r, 0], dtype=np.int32))
             out_values.append(np.asarray(itvs.values[r, 0], dtype=np.float32))
             lengths.append(len(s))
-    flat_starts = (
-        np.concatenate(out_starts) if out_starts else np.empty(0, np.int32)
-    )
+    flat_starts = np.concatenate(out_starts) if out_starts else np.empty(0, np.int32)
     flat_ends = np.concatenate(out_ends) if out_ends else np.empty(0, np.int32)
-    flat_values = (
-        np.concatenate(out_values) if out_values else np.empty(0, np.float32)
-    )
+    flat_values = np.concatenate(out_values) if out_values else np.empty(0, np.float32)
     offsets = lengths_to_offsets(np.asarray(lengths, np.int32))
     shape = (regions.height, None)
     return RaggedIntervals(

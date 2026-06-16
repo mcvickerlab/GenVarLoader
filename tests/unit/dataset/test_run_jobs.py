@@ -25,8 +25,12 @@ def test_run_jobs_two_jobs_loky_path(tmp_path: Path) -> None:
 
     assert file0.exists(), "job0 did not write its file"
     assert file1.exists(), "job1 did not write its file"
-    assert int(file0.read_text()) == 500, f"job0 got {file0.read_text()!r}, expected 500"
-    assert int(file1.read_text()) == 500, f"job1 got {file1.read_text()!r}, expected 500"
+    assert int(file0.read_text()) == 500, (
+        f"job0 got {file0.read_text()!r}, expected 500"
+    )
+    assert int(file1.read_text()) == 500, (
+        f"job1 got {file1.read_text()!r}, expected 500"
+    )
 
 
 def test_run_jobs_one_job_inline(tmp_path: Path) -> None:

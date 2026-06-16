@@ -62,7 +62,9 @@ def test_update_accepts_dataset_object(phased_vcf, ref_fasta, bigwigs, tmp_path)
     assert bigwigs.name in gvl.Dataset.open(out, ref_fasta).available_tracks
 
 
-def test_update_rejects_extra_or_missing_samples(phased_vcf, ref_fasta, bigwigs, tmp_path):
+def test_update_rejects_extra_or_missing_samples(
+    phased_vcf, ref_fasta, bigwigs, tmp_path
+):
     out = tmp_path / "ds"
     # Write dataset with only 2 samples; bigwigs has 3 → extra sample
     gvl.write(out, BED, variants=phased_vcf, samples=list(bigwigs.samples[:-1]))
@@ -72,7 +74,9 @@ def test_update_rejects_extra_or_missing_samples(phased_vcf, ref_fasta, bigwigs,
     # Write dataset with ALL 3 samples; bigwigs with 2 → missing sample
     out2 = tmp_path / "ds2"
     gvl.write(out2, BED, variants=phased_vcf)
-    subset_bw = gvl.BigWigs(bigwigs.name, {s: bigwigs.paths[s] for s in bigwigs.samples[:-1]})
+    subset_bw = gvl.BigWigs(
+        bigwigs.name, {s: bigwigs.paths[s] for s in bigwigs.samples[:-1]}
+    )
     with pytest.raises(ValueError, match="sample"):
         gvl.update(out2, tracks=subset_bw)
 
