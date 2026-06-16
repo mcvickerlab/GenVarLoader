@@ -34,7 +34,7 @@ from .._ragged import INTERVAL_DTYPE
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._svar_link import SvarLink
-from ._utils import bed_to_regions, splits_sum_le_value
+from ._utils import bed_to_regions, regions_to_bed, splits_sum_le_value
 
 
 DATASET_FORMAT_VERSION = SemanticVersion.parse("1.0.0")
@@ -62,6 +62,7 @@ def write(
     bed: str | Path | pl.DataFrame,
     variants: str | Path | Reader | None = None,
     tracks: "IntervalTrack | Sequence[IntervalTrack] | None" = None,
+    annot_tracks: "dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None" = None,
     samples: list[str] | None = None,
     max_jitter: int | None = None,
     overwrite: bool = False,
@@ -89,6 +90,14 @@ def write(
         An :class:`IntervalTrack` (e.g. :class:`BigWigs`, :class:`Table`) or a
         sequence of them. Each track must have a unique ``name``; the on-disk
         layout writes to ``<path>/intervals/<track.name>/``.
+    annot_tracks
+        Sample-independent annotation tracks, as a mapping of track name to source.
+        Each source is a path to an interval table, a path to a bigWig, or a polars
+        DataFrame/LazyFrame interpreted as a BED-like interval table (columns ``chrom``,
+        ``chromStart``, ``chromEnd``, ``score``). Table/DataFrame sources use the
+        polars-bio overlap backend and require the ``table`` extra
+        (``pip install genvarloader[table]``); they emit an ``ExperimentalWarning``.
+        bigWig sources do not. Written to ``<path>/annot_intervals/<name>/``.
     samples
         Samples to include in the dataset
     max_jitter
@@ -126,8 +135,10 @@ def write(
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
     try:
-        if variants is None and tracks is None:
-            raise ValueError("At least one of `variants` or `tracks` must be provided.")
+        if variants is None and tracks is None and annot_tracks is None:
+            raise ValueError(
+                "At least one of `variants`, `tracks`, or `annot_tracks` must be provided."
+            )
 
         if tracks is not None and not isinstance(tracks, (list, tuple)):
             tracks = [tracks]
@@ -288,6 +299,16 @@ def write(
                 logger.info("Writing track intervals.")
                 for tr in tracks:
                     _write_track(path / "intervals" / tr.name, gvl_bed, tr, samples, max_mem)
+
+            if annot_tracks is not None:
+                logger.info("Writing annotation tracks.")
+                annot_bed = regions_to_bed(
+                    np.load(path / "regions.npy"), contigs
+                ).select("chrom", "chromStart", "chromEnd")
+                for name, source in annot_tracks.items():
+                    _write_annot_track(
+                        path / "annot_intervals" / name, annot_bed, source, max_mem
+                    )
 
             _metadata = Metadata(**metadata)
             with open(path / "metadata.json", "w") as f:
