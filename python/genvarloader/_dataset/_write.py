@@ -926,6 +926,88 @@ def _write_ragged_intervals(out_dir: Path, itvs: "RaggedIntervals") -> None:
     out.flush()
 
 
+def _annot_intervals(
+    regions: pl.DataFrame,
+    source: "str | Path | pl.DataFrame | pl.LazyFrame",
+    max_mem: int,
+) -> "RaggedIntervals":
+    """Build a sample-less RaggedIntervals (n_regions, None) from an annotation source.
+
+    - bigwig path -> Rust per-region extraction (BigWigs), squeezed sample-less.
+    - table path / DataFrame / LazyFrame (BED-like: chrom, chromStart, chromEnd, score)
+      -> polars-bio overlap (experimental, requires the `table` extra).
+    """
+    from .._ragged import RaggedIntervals
+
+    if isinstance(source, (str, Path)) and Path(source).suffix.lower() in (
+        ".bw",
+        ".bigwig",
+    ):
+        return _annot_intervals_from_bigwig(regions, Path(source), max_mem)
+
+    if isinstance(source, pl.LazyFrame):
+        annot = source.collect()
+    elif isinstance(source, pl.DataFrame):
+        annot = source
+    else:
+        annot = sp.bed.read(str(source))
+
+    from .._table import annot_overlap
+
+    return annot_overlap(regions, annot)
+
+
+def _annot_intervals_from_bigwig(
+    regions: pl.DataFrame, path: Path, max_mem: int
+) -> "RaggedIntervals":
+    from seqpro.rag import Ragged
+
+    from .._bigwig import BigWigs
+    from .._ragged import RaggedIntervals
+
+    # single pseudo-sample; collapse its sample axis to produce a sample-less track
+    bw = BigWigs(name="__annot__", paths={"__annot__": str(path)})
+    out_starts, out_ends, out_values, lengths = [], [], [], []
+    for (contig,), part in regions.partition_by(
+        "chrom", as_dict=True, maintain_order=True
+    ).items():
+        contig = cast(str, contig)
+        starts = part["chromStart"].to_numpy()
+        ends = part["chromEnd"].to_numpy()
+        # (regions, 1)
+        itvs = bw.intervals(contig, starts, ends, sample="__annot__")
+        for r in range(part.height):
+            s = itvs.starts[r, 0]
+            out_starts.append(np.asarray(s, dtype=np.int32))
+            out_ends.append(np.asarray(itvs.ends[r, 0], dtype=np.int32))
+            out_values.append(np.asarray(itvs.values[r, 0], dtype=np.float32))
+            lengths.append(len(s))
+    flat_starts = (
+        np.concatenate(out_starts) if out_starts else np.empty(0, np.int32)
+    )
+    flat_ends = np.concatenate(out_ends) if out_ends else np.empty(0, np.int32)
+    flat_values = (
+        np.concatenate(out_values) if out_values else np.empty(0, np.float32)
+    )
+    offsets = lengths_to_offsets(np.asarray(lengths, np.int32))
+    shape = (regions.height, None)
+    return RaggedIntervals(
+        Ragged.from_offsets(flat_starts, shape, offsets),
+        Ragged.from_offsets(flat_ends, shape, offsets),
+        Ragged.from_offsets(flat_values, shape, offsets),
+    )
+
+
+def _write_annot_track(
+    out_dir: Path,
+    regions: pl.DataFrame,
+    source: "str | Path | pl.DataFrame | pl.LazyFrame",
+    max_mem: int,
+) -> None:
+    itvs = _annot_intervals(regions, source, max_mem)
+    _write_ragged_intervals(out_dir, itvs)
+
+
 def _write_track(
     out_dir: Path,
     bed: pl.DataFrame,
