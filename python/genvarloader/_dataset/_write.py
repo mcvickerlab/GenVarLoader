@@ -401,6 +401,12 @@ def update(
             tracks = [tracks]
         _tracks = list(tracks) if tracks is not None else []
 
+        names = [tr.name for tr in _tracks]
+        if len(set(names)) != len(names):
+            raise ValueError(
+                f"Duplicate track names: {names}. Each track must have a unique `name`."
+            )
+
         # validate strict sample-set agreement for per-sample tracks
         for tr in _tracks:
             if set(tr.samples) != set(ds_samples):

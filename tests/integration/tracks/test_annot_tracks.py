@@ -14,7 +14,6 @@ def test_write_with_annot_tracks(vcf_dir, bigwig_dir, ref_fasta, tmp_path):
     vcf = VCF(vcf_dir / "filtered_source.vcf.gz")
     gvl.write(out, bed, variants=vcf, annot_tracks={"sig": str(bigwig_dir / "sample_0.bw")})
     ds = gvl.Dataset.open(out, ref_fasta).with_seqs("annotated").with_tracks("sig", "tracks")
-    assert ds.available_tracks is not None
     assert "sig" in ds.available_tracks
 
 

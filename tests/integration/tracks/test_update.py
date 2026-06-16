@@ -69,6 +69,13 @@ def test_update_rejects_extra_or_missing_samples(phased_vcf, ref_fasta, bigwigs,
     with pytest.raises(ValueError, match="sample"):
         gvl.update(out, tracks=bigwigs)
 
+    # Write dataset with ALL 3 samples; bigwigs with 2 → missing sample
+    out2 = tmp_path / "ds2"
+    gvl.write(out2, BED, variants=phased_vcf)
+    subset_bw = gvl.BigWigs(bigwigs.name, {s: bigwigs.paths[s] for s in bigwigs.samples[:-1]})
+    with pytest.raises(ValueError, match="sample"):
+        gvl.update(out2, tracks=subset_bw)
+
 
 def test_update_overwrite(phased_vcf, ref_fasta, bigwigs, tmp_path):
     out = tmp_path / "ds"
