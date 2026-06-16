@@ -133,6 +133,12 @@ test-cov = { cmd = "pytest tests --cov --cov-report=term-missing --cov-report=ht
     "gen",
     "gen-1kg",
 ] }
+# Runs the suite with polars join row-order perturbed (see tests/_join_audit_plugin.py)
+# so any future order-unsafe polars join fails loudly. Opt-in; normal `test` is unaffected.
+test-join-audit = { cmd = "pytest tests -p tests._join_audit_plugin", depends-on = [
+    "gen",
+    "gen-1kg",
+] }
 typecheck = { cmd = "pyrefly check" }
 bench = { cmd = "pytest tests/benchmarks --codspeed -p no:cov" }
 bench-local = { cmd = "pytest tests/benchmarks --benchmark-only -p no:cov" }
