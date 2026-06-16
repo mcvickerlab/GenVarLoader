@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from .._types import IntervalTrack
+    from .._ragged import RaggedIntervals
 
 import awkward as ak
 import numpy as np
@@ -286,7 +287,7 @@ def write(
             if tracks is not None:
                 logger.info("Writing track intervals.")
                 for tr in tracks:
-                    _write_track(path, gvl_bed, tr, samples, max_mem)
+                    _write_track(path / "intervals" / tr.name, gvl_bed, tr, samples, max_mem)
 
             _metadata = Metadata(**metadata)
             with open(path / "metadata.json", "w") as f:
@@ -899,8 +900,34 @@ def _write_phased_variants_chunk(
     return v_idx_memmap_offset, offsets_memmap_offset, last_offset
 
 
+def _write_ragged_intervals(out_dir: Path, itvs: "RaggedIntervals") -> None:
+    """Write a RaggedIntervals (values/starts/ends share offsets) to out_dir as
+    intervals.npy + offsets.npy. Single-chunk writer used for annotation tracks."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = np.memmap(
+        out_dir / "intervals.npy",
+        dtype=INTERVAL_DTYPE,
+        mode="w+",
+        shape=itvs.values.data.shape,
+    )
+    out["start"] = itvs.starts.data
+    out["end"] = itvs.ends.data
+    out["value"] = itvs.values.data
+    out.flush()
+
+    offsets = itvs.values.offsets
+    out = np.memmap(
+        out_dir / "offsets.npy",
+        dtype=offsets.dtype,
+        mode="w+",
+        shape=len(offsets),
+    )
+    out[:] = offsets
+    out.flush()
+
+
 def _write_track(
-    path: Path,
+    out_dir: Path,
     bed: pl.DataFrame,
     track: "IntervalTrack",
     samples: list[str] | None,
@@ -967,7 +994,6 @@ def _write_track(
     pbar.close()
     bed = bed.with_columns(chunk=pl.lit(chunk_labels))
 
-    out_dir = path / "intervals" / track.name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     interval_offset = 0
