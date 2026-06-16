@@ -1,7 +1,7 @@
 import gc
 import json
 import warnings
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -20,6 +20,7 @@ from genoray._svar import dense2sparse
 from genoray._svar import _dense2sparse_with_length  # type: ignore[missing-module-attribute]
 from genoray._types import V_IDX_TYPE
 from genoray._utils import ContigNormalizer, format_memory, parse_memory
+from joblib import Parallel, delayed
 from loguru import logger
 from more_itertools import mark_ends
 from natsort import natsorted
@@ -38,6 +39,22 @@ from ._utils import bed_to_regions, regions_to_bed, splits_sum_le_value
 
 
 DATASET_FORMAT_VERSION = SemanticVersion.parse("1.0.0")
+
+
+def _run_jobs(jobs: "list[Callable[[int], None]]", max_mem: int) -> None:
+    """Run track/annot writer jobs, each called with a per-job max_mem budget.
+
+    0/1 real jobs run inline; otherwise jobs run concurrently on the loky
+    backend with the budget divided evenly so total peak stays under max_mem.
+    None entries in *jobs* are silently filtered out.
+    """
+    jobs = [j for j in jobs if j is not None]
+    if len(jobs) <= 1:
+        for j in jobs:
+            j(max_mem)
+        return
+    per = max(max_mem // len(jobs), 1)
+    Parallel(n_jobs=len(jobs), backend="loky")(delayed(j)(per) for j in jobs)
 """On-disk layout version for a gvl.write dataset directory. Bump MAJOR only when
 an existing dataset can no longer be read correctly by new code."""
 
@@ -295,20 +312,34 @@ def write(
 
             _write_regions(path, gvl_bed, contigs)
 
+            jobs: list[Callable[[int], None]] = []
             if tracks is not None:
-                logger.info("Writing track intervals.")
-                for tr in tracks:
-                    _write_track(path / "intervals" / tr.name, gvl_bed, tr, samples, max_mem)
+                _tracks = list(tracks)
+                _bed = gvl_bed
+
+                def _tracks_job(mm: int, _tracks: list = _tracks, _bed: pl.DataFrame = _bed) -> None:
+                    for tr in _tracks:
+                        _write_track(path / "intervals" / tr.name, _bed, tr, samples, mm)
+
+                jobs.append(_tracks_job)
 
             if annot_tracks is not None:
-                logger.info("Writing annotation tracks.")
                 annot_bed = regions_to_bed(
                     np.load(path / "regions.npy"), contigs
                 ).select("chrom", "chromStart", "chromEnd")
-                for name, source in annot_tracks.items():
-                    _write_annot_track(
-                        path / "annot_intervals" / name, annot_bed, source, max_mem
-                    )
+                _annots = dict(annot_tracks)
+
+                def _annot_job(mm: int, _annots: dict = _annots, _bed: pl.DataFrame = annot_bed) -> None:
+                    for name, source in _annots.items():
+                        _write_annot_track(
+                            path / "annot_intervals" / name, _bed, source, mm
+                        )
+
+                jobs.append(_annot_job)
+
+            if jobs:
+                logger.info(f"Writing {len(jobs)} track categor(ies).")
+                _run_jobs(jobs, max_mem)
 
             _metadata = Metadata(**metadata)
             with open(path / "metadata.json", "w") as f:
