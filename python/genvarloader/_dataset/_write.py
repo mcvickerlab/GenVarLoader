@@ -39,6 +39,8 @@ from ._utils import bed_to_regions, regions_to_bed, splits_sum_le_value
 
 
 DATASET_FORMAT_VERSION = SemanticVersion.parse("1.0.0")
+"""On-disk layout version for a gvl.write dataset directory. Bump MAJOR only when
+an existing dataset can no longer be read correctly by new code."""
 
 
 def _run_jobs(jobs: "list[Callable[[int], None]]", max_mem: int) -> None:
@@ -55,8 +57,6 @@ def _run_jobs(jobs: "list[Callable[[int], None]]", max_mem: int) -> None:
         return
     per = max(max_mem // len(jobs), 1)
     Parallel(n_jobs=len(jobs), backend="loky")(delayed(j)(per) for j in jobs)
-"""On-disk layout version for a gvl.write dataset directory. Bump MAJOR only when
-an existing dataset can no longer be read correctly by new code."""
 
 
 class Metadata(BaseModel, arbitrary_types_allowed=True):
