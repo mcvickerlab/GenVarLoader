@@ -473,9 +473,19 @@ class Tracks(Reconstructor[_T]):
         strack_dir = path / "intervals"
         atrack_dir = path / "annot_intervals"
 
+        def _is_track_dir(p: Path) -> bool:
+            return (
+                p.is_dir()
+                and ".tmp." not in p.name
+                and ".old." not in p.name
+                and not p.name.endswith(".lock")
+            )
+
         available_tracks: list[str] = []
         if strack_dir.exists():
             for p in strack_dir.iterdir():
+                if not _is_track_dir(p):
+                    continue
                 if len(list(p.iterdir())) == 0:
                     p.rmdir()
                 else:
@@ -485,6 +495,8 @@ class Tracks(Reconstructor[_T]):
         available_annots: list[str] = []
         if atrack_dir.exists():
             for p in atrack_dir.iterdir():
+                if not _is_track_dir(p):
+                    continue
                 if len(list(p.iterdir())) == 0:
                     p.rmdir()
                 else:

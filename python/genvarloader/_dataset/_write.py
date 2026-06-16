@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     from .._types import IntervalTrack
     from .._ragged import RaggedIntervals
+    from ._impl import Dataset
 
 import awkward as ak
 import numpy as np
@@ -346,6 +347,99 @@ def write(
                 f.write(_metadata.model_dump_json())
 
         logger.info("Finished writing.")
+    finally:
+        warnings.simplefilter("default")
+
+
+def update(
+    dataset: "str | Path | Dataset",
+    tracks: "IntervalTrack | Sequence[IntervalTrack] | None" = None,
+    annot_tracks: "dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None" = None,
+    *,
+    overwrite: bool = False,
+    max_mem: int | str = "4g",
+) -> None:
+    """Add tracks to an existing on-disk GVL dataset, analogous to :func:`write`.
+
+    Parameters
+    ----------
+    dataset
+        Path to a dataset directory, or an opened :class:`Dataset` (its ``.path`` is used).
+        A live dataset can be read while it is being updated; it will not observe the new
+        track until reopened.
+    tracks
+        Per-sample :class:`IntervalTrack` source(s) (:class:`BigWigs`, :class:`Table`),
+        written to ``<path>/intervals/<name>/``. The track's sample set must match the
+        dataset's exactly (no missing, no extra); samples are reordered to the dataset
+        order automatically.
+    annot_tracks
+        Sample-independent sources, identical to :func:`write`'s ``annot_tracks``, written
+        to ``<path>/annot_intervals/<name>/``.
+    overwrite
+        Replace a track of the same name if present; otherwise adding a duplicate name
+        raises ``FileExistsError``.
+    max_mem
+        Approximate memory budget, divided across concurrently-running categories.
+    """
+    warnings.simplefilter("ignore", RuntimeWarning)
+    try:
+        from ._impl import Dataset
+
+        path = Path(dataset.path if isinstance(dataset, Dataset) else dataset)
+        if not (path / "metadata.json").exists():
+            raise FileNotFoundError(f"{path} is not a GVL dataset (no metadata.json).")
+
+        if tracks is None and annot_tracks is None:
+            raise ValueError("At least one of `tracks` or `annot_tracks` must be provided.")
+
+        meta = Metadata.model_validate_json((path / "metadata.json").read_text())
+        contigs = meta.contigs
+        ds_samples = meta.samples
+        max_mem_b = parse_memory(max_mem)
+
+        if tracks is not None and not isinstance(tracks, (list, tuple)):
+            tracks = [tracks]
+        _tracks = list(tracks) if tracks is not None else []
+
+        # validate strict sample-set agreement for per-sample tracks
+        for tr in _tracks:
+            if set(tr.samples) != set(ds_samples):
+                missing = set(ds_samples) - set(tr.samples)
+                extra = set(tr.samples) - set(ds_samples)
+                raise ValueError(
+                    f"Track {tr.name!r} samples must exactly match the dataset's. "
+                    f"missing={missing or '{}'} extra={extra or '{}'}"
+                )
+
+        bed = regions_to_bed(np.load(path / "regions.npy"), contigs)
+        sample_bed = bed.select("chrom", "chromStart", "chromEnd")
+        annot_bed = sample_bed
+
+        jobs: list[Callable[[int], None]] = []
+
+        if _tracks:
+            (path / "intervals").mkdir(exist_ok=True)
+            _tr = _tracks
+
+            def _tracks_job(mm: int, _tr: list = _tr, _bed: pl.DataFrame = sample_bed) -> None:
+                for tr in _tr:
+                    with atomic_dir(path / "intervals" / tr.name, overwrite=overwrite) as tmp:
+                        _write_track(tmp, _bed, tr, ds_samples, mm)
+
+            jobs.append(_tracks_job)
+
+        if annot_tracks is not None:
+            (path / "annot_intervals").mkdir(exist_ok=True)
+            _annots = dict(annot_tracks)
+
+            def _annot_job(mm: int, _annots: dict = _annots, _bed: pl.DataFrame = annot_bed) -> None:
+                for name, source in _annots.items():
+                    with atomic_dir(path / "annot_intervals" / name, overwrite=overwrite) as tmp:
+                        _write_annot_track(tmp, _bed, source, mm)
+
+            jobs.append(_annot_job)
+
+        _run_jobs(jobs, max_mem_b)
     finally:
         warnings.simplefilter("default")
 
