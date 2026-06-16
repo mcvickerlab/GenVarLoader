@@ -41,6 +41,32 @@ jobs:
       - name: Test
         run: pixi run -e ${{ matrix.environment }} test
 
+  join-audit:
+    runs-on: ubuntu-latest
+    name: "polars join order audit (py312)"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup pixi
+        uses: prefix-dev/setup-pixi@v0.9.5
+        with:
+          pixi-version: v0.68.1
+          cache: true
+          environments: py312
+          locked: false
+      - name: Cache hg38 reference
+        uses: actions/cache@v4
+        with:
+          path: tests/data/fasta
+          # Minimal hg38 (chr21 + chr22) concatenated + bgzipped by
+          # tests/data/generate_1kg_ground_truth.py::provision_minimal_hg38.
+          # Keyed on the pinned UCSC chr21/chr22 sha256s; bump if those change.
+          key: hg38-chr21chr22-c979ca1e-05f9d97d
+      - name: Run pytest with polars join order perturbed
+        run: pixi run -e py312 test-join-audit
+
   coverage:
     runs-on: ubuntu-latest
     name: "coverage (py312)"
