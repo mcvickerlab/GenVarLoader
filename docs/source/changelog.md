@@ -43,22 +43,28 @@
 # Changelog
 
 
-## v0.32.0 (unreleased)
+# Changelog
+
+
+## v0.32.0 (2026-06-17)
 
 ### Feat
 
-- **write**: `gvl.write` gains `annot_tracks=` — sample-independent annotation tracks written to `<path>/annot_intervals/<name>/`
-  - accepts a path to an interval table or bigWig, or a polars DataFrame/LazyFrame with BED-like columns (`chrom`, `chromStart`, `chromEnd`, `score`)
-  - DataFrame/LazyFrame and table-file sources use the polars-bio overlap backend and require the `table` extra (`pip install genvarloader[table]`); bigWig path sources do not
-- **write**: `gvl.write` parallelizes over write categories — variants run first (serially), then per-sample `tracks` and `annot_tracks` run concurrently (joblib loky); `max_mem` is divided across the concurrently-running categories
-- **update**: new `gvl.update(dataset, tracks=None, annot_tracks=None, *, overwrite=False, max_mem="4g")` adds tracks to an existing on-disk dataset
-  - accepts a path or an opened `Dataset`; per-sample `tracks` require exact sample-set agreement (reordered to dataset order automatically); `annot_tracks` are sample-independent
-  - each track is published atomically; a live dataset can be read during update but won't see the new track until reopened
-  - `overwrite=True` replaces a same-named existing track; default raises `FileExistsError`
+- add gvl.update for atomic post-hoc track addition
+- parallelize gvl.write over track categories (variants first)
+- gvl.write accepts annot_tracks
+- polars-bio annotation extraction + bigwig annot source
+
+### Fix
+
+- guard duplicate track names in update; flat_ends symmetry; test polish
+- restore DATASET_FORMAT_VERSION attribute docstring placement
+- pyrefly search-path resolves local source; drop stale ignore and unused import
 
 ### Refactor
 
-- **update**: `Dataset.write_annot_tracks` removed; use `gvl.update(dataset, annot_tracks={"name": source})` or pass `annot_tracks=` to `gvl.write` at creation time
+- remove Dataset.write_annot_tracks and _annot_to_intervals
+- _write_track takes explicit out_dir; add _write_ragged_intervals
 
 ## v0.31.0 (2026-06-15)
 
