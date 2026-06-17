@@ -358,3 +358,81 @@ class Table:
         if missing := set(samples) - set(self.samples):
             raise ValueError(f"Sample(s) {missing} not found in Table.")
         return samples
+
+
+def annot_overlap(regions: pl.DataFrame, annot: pl.DataFrame) -> "RaggedIntervals":
+    """Sample-less interval overlap of `regions` (chrom/chromStart/chromEnd) against a
+    BED-like `annot` (chrom/chromStart/chromEnd/score), via polars-bio. Returns a
+    RaggedIntervals of shape (n_regions, None) ordered by (region, start). Experimental:
+    requires the `table` extra and emits ExperimentalWarning."""
+    import numpy as np
+    from seqpro.rag import Ragged
+
+    from ._ragged import RaggedIntervals
+    from ._utils import lengths_to_offsets, normalize_contig_name
+
+    warnings.warn(_TABLE_EXPERIMENTAL_MSG, ExperimentalWarning, stacklevel=2)
+    pb = _import_polars_bio()
+    pb.set_option("datafusion.bio.coordinate_system_check", "false")
+    pb.set_option("datafusion.bio.coordinate_system_zero_based", True)
+
+    # normalize annot contig names to the region naming (e.g. "1" -> "chr1")
+    reg_c = regions["chrom"].unique().to_list()
+    renamer = {
+        c: nc
+        for c in annot["chrom"].unique().to_list()
+        if (nc := normalize_contig_name(c, reg_c)) is not None
+    }
+    annot = annot.with_columns(chrom=pl.col("chrom").replace(renamer))
+
+    n_regions = regions.height
+    q = regions.with_row_index("_q").select(
+        "chrom",
+        pl.col("chromStart").alias("start"),
+        pl.col("chromEnd").alias("end"),
+        "_q",
+    )
+    db = annot.select(
+        "chrom",
+        pl.col("chromStart").alias("start"),
+        pl.col("chromEnd").alias("end"),
+        "score",
+    )
+    joined = pb.overlap(
+        q,
+        db,
+        cols1=["chrom", "start", "end"],
+        cols2=["chrom", "start", "end"],
+        output_type="polars.DataFrame",
+    )
+
+    shape = (n_regions, None)
+    if joined.height == 0:
+        offsets = lengths_to_offsets(np.zeros(n_regions, np.int32))
+        empty_i = np.empty(0, np.int32)
+        empty_f = np.empty(0, np.float32)
+        return RaggedIntervals(
+            Ragged.from_offsets(empty_i, shape, offsets),
+            Ragged.from_offsets(empty_i, shape, offsets),
+            Ragged.from_offsets(empty_f, shape, offsets),
+        )
+
+    # polars-bio suffixes query cols with _1 and database cols with _2 (see Table).
+    q_idx = joined["_q_1"].to_numpy()
+    j_starts = joined["start_2"].to_numpy()
+    order = np.lexsort((j_starts, q_idx))  # primary key = q_idx, then start
+    q_idx = q_idx[order]
+
+    counts = np.zeros(n_regions, np.int32)
+    uniq, cnt = np.unique(q_idx, return_counts=True)
+    counts[uniq] = cnt
+    offsets = lengths_to_offsets(counts)
+
+    starts = j_starts[order].astype(np.int32, copy=False)
+    ends = joined["end_2"].to_numpy()[order].astype(np.int32, copy=False)
+    values = joined["score_2"].to_numpy()[order].astype(np.float32, copy=False)
+    return RaggedIntervals(
+        Ragged.from_offsets(starts, shape, offsets),
+        Ragged.from_offsets(ends, shape, offsets),
+        Ragged.from_offsets(values, shape, offsets),
+    )

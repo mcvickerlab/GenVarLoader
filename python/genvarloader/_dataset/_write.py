@@ -1,13 +1,15 @@
 import gc
 import json
 import warnings
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from .._types import IntervalTrack
+    from .._ragged import RaggedIntervals
+    from ._impl import Dataset
 
 import awkward as ak
 import numpy as np
@@ -19,6 +21,7 @@ from genoray._svar import dense2sparse
 from genoray._svar import _dense2sparse_with_length  # type: ignore[missing-module-attribute]
 from genoray._types import V_IDX_TYPE
 from genoray._utils import ContigNormalizer, format_memory, parse_memory
+from joblib import Parallel, delayed
 from loguru import logger
 from more_itertools import mark_ends
 from natsort import natsorted
@@ -33,12 +36,28 @@ from .._ragged import INTERVAL_DTYPE
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._svar_link import SvarLink
-from ._utils import bed_to_regions, splits_sum_le_value
+from ._utils import bed_to_regions, regions_to_bed, splits_sum_le_value
 
 
 DATASET_FORMAT_VERSION = SemanticVersion.parse("1.0.0")
 """On-disk layout version for a gvl.write dataset directory. Bump MAJOR only when
 an existing dataset can no longer be read correctly by new code."""
+
+
+def _run_jobs(jobs: "list[Callable[[int], None]]", max_mem: int) -> None:
+    """Run track/annot writer jobs, each called with a per-job max_mem budget.
+
+    0/1 real jobs run inline; otherwise jobs run concurrently on the loky
+    backend with the budget divided evenly so total peak stays under max_mem.
+    None entries in *jobs* are silently filtered out.
+    """
+    jobs = [j for j in jobs if j is not None]
+    if len(jobs) <= 1:
+        for j in jobs:
+            j(max_mem)
+        return
+    per = max(max_mem // len(jobs), 1)
+    Parallel(n_jobs=len(jobs), backend="loky")(delayed(j)(per) for j in jobs)
 
 
 class Metadata(BaseModel, arbitrary_types_allowed=True):
@@ -61,6 +80,7 @@ def write(
     bed: str | Path | pl.DataFrame,
     variants: str | Path | Reader | None = None,
     tracks: "IntervalTrack | Sequence[IntervalTrack] | None" = None,
+    annot_tracks: "dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None" = None,
     samples: list[str] | None = None,
     max_jitter: int | None = None,
     overwrite: bool = False,
@@ -88,6 +108,14 @@ def write(
         An :class:`IntervalTrack` (e.g. :class:`BigWigs`, :class:`Table`) or a
         sequence of them. Each track must have a unique ``name``; the on-disk
         layout writes to ``<path>/intervals/<track.name>/``.
+    annot_tracks
+        Sample-independent annotation tracks, as a mapping of track name to source.
+        Each source is a path to an interval table, a path to a bigWig, or a polars
+        DataFrame/LazyFrame interpreted as a BED-like interval table (columns ``chrom``,
+        ``chromStart``, ``chromEnd``, ``score``). Table/DataFrame sources use the
+        polars-bio overlap backend and require the ``table`` extra
+        (``pip install genvarloader[table]``); they emit an ``ExperimentalWarning``.
+        bigWig sources do not. Written to ``<path>/annot_intervals/<name>/``.
     samples
         Samples to include in the dataset
     max_jitter
@@ -125,8 +153,10 @@ def write(
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
     try:
-        if variants is None and tracks is None:
-            raise ValueError("At least one of `variants` or `tracks` must be provided.")
+        if variants is None and tracks is None and annot_tracks is None:
+            raise ValueError(
+                "At least one of `variants`, `tracks`, or `annot_tracks` must be provided."
+            )
 
         if tracks is not None and not isinstance(tracks, (list, tuple)):
             tracks = [tracks]
@@ -283,16 +313,155 @@ def write(
 
             _write_regions(path, gvl_bed, contigs)
 
+            jobs: list[Callable[[int], None]] = []
             if tracks is not None:
-                logger.info("Writing track intervals.")
-                for tr in tracks:
-                    _write_track(path, gvl_bed, tr, samples, max_mem)
+                _tracks = list(tracks)
+                _bed = gvl_bed
+
+                def _tracks_job(
+                    mm: int, _tracks: list = _tracks, _bed: pl.DataFrame = _bed
+                ) -> None:
+                    for tr in _tracks:
+                        _write_track(
+                            path / "intervals" / tr.name, _bed, tr, samples, mm
+                        )
+
+                jobs.append(_tracks_job)
+
+            if annot_tracks is not None:
+                annot_bed = regions_to_bed(
+                    np.load(path / "regions.npy"), contigs
+                ).select("chrom", "chromStart", "chromEnd")
+                _annots = dict(annot_tracks)
+
+                def _annot_job(
+                    mm: int, _annots: dict = _annots, _bed: pl.DataFrame = annot_bed
+                ) -> None:
+                    for name, source in _annots.items():
+                        _write_annot_track(
+                            path / "annot_intervals" / name, _bed, source, mm
+                        )
+
+                jobs.append(_annot_job)
+
+            if jobs:
+                logger.info(f"Writing {len(jobs)} track categor(ies).")
+                _run_jobs(jobs, max_mem)
 
             _metadata = Metadata(**metadata)
             with open(path / "metadata.json", "w") as f:
                 f.write(_metadata.model_dump_json())
 
         logger.info("Finished writing.")
+    finally:
+        warnings.simplefilter("default")
+
+
+def update(
+    dataset: "str | Path | Dataset",
+    tracks: "IntervalTrack | Sequence[IntervalTrack] | None" = None,
+    annot_tracks: "dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None" = None,
+    *,
+    overwrite: bool = False,
+    max_mem: int | str = "4g",
+) -> None:
+    """Add tracks to an existing on-disk GVL dataset, analogous to :func:`write`.
+
+    Parameters
+    ----------
+    dataset
+        Path to a dataset directory, or an opened :class:`Dataset` (its ``.path`` is used).
+        A live dataset can be read while it is being updated; it will not observe the new
+        track until reopened.
+    tracks
+        Per-sample :class:`IntervalTrack` source(s) (:class:`BigWigs`, :class:`Table`),
+        written to ``<path>/intervals/<name>/``. The track's sample set must match the
+        dataset's exactly (no missing, no extra); samples are reordered to the dataset
+        order automatically.
+    annot_tracks
+        Sample-independent sources, identical to :func:`write`'s ``annot_tracks``, written
+        to ``<path>/annot_intervals/<name>/``.
+    overwrite
+        Replace a track of the same name if present; otherwise adding a duplicate name
+        raises ``FileExistsError``.
+    max_mem
+        Approximate memory budget, divided across concurrently-running categories.
+    """
+    warnings.simplefilter("ignore", RuntimeWarning)
+    try:
+        from ._impl import Dataset
+
+        path = Path(dataset.path if isinstance(dataset, Dataset) else dataset)
+        if not (path / "metadata.json").exists():
+            raise FileNotFoundError(f"{path} is not a GVL dataset (no metadata.json).")
+
+        if tracks is None and annot_tracks is None:
+            raise ValueError(
+                "At least one of `tracks` or `annot_tracks` must be provided."
+            )
+
+        meta = Metadata.model_validate_json((path / "metadata.json").read_text())
+        contigs = meta.contigs
+        ds_samples = meta.samples
+        max_mem_b = parse_memory(max_mem)
+
+        if tracks is not None and not isinstance(tracks, (list, tuple)):
+            tracks = [tracks]
+        _tracks = list(tracks) if tracks is not None else []
+
+        names = [tr.name for tr in _tracks]
+        if len(set(names)) != len(names):
+            raise ValueError(
+                f"Duplicate track names: {names}. Each track must have a unique `name`."
+            )
+
+        # validate strict sample-set agreement for per-sample tracks
+        for tr in _tracks:
+            if set(tr.samples) != set(ds_samples):
+                missing = set(ds_samples) - set(tr.samples)
+                extra = set(tr.samples) - set(ds_samples)
+                raise ValueError(
+                    f"Track {tr.name!r} samples must exactly match the dataset's. "
+                    f"missing={missing or '{}'} extra={extra or '{}'}"
+                )
+
+        bed = regions_to_bed(np.load(path / "regions.npy"), contigs)
+        sample_bed = bed.select("chrom", "chromStart", "chromEnd")
+        annot_bed = sample_bed
+
+        jobs: list[Callable[[int], None]] = []
+
+        if _tracks:
+            (path / "intervals").mkdir(exist_ok=True)
+            _tr = _tracks
+
+            def _tracks_job(
+                mm: int, _tr: list = _tr, _bed: pl.DataFrame = sample_bed
+            ) -> None:
+                for tr in _tr:
+                    with atomic_dir(
+                        path / "intervals" / tr.name, overwrite=overwrite
+                    ) as tmp:
+                        _write_track(tmp, _bed, tr, ds_samples, mm)
+
+            jobs.append(_tracks_job)
+
+        if annot_tracks is not None:
+            (path / "annot_intervals").mkdir(exist_ok=True)
+            _annots = dict(annot_tracks)
+
+            def _annot_job(
+                mm: int, _annots: dict = _annots, _bed: pl.DataFrame = annot_bed
+            ) -> None:
+                for name, source in _annots.items():
+                    with atomic_dir(
+                        path / "annot_intervals" / name, overwrite=overwrite
+                    ) as tmp:
+                        _write_annot_track(tmp, _bed, source, mm)
+
+            jobs.append(_annot_job)
+
+        _run_jobs(jobs, max_mem_b)
     finally:
         warnings.simplefilter("default")
 
@@ -899,8 +1068,110 @@ def _write_phased_variants_chunk(
     return v_idx_memmap_offset, offsets_memmap_offset, last_offset
 
 
+def _write_ragged_intervals(out_dir: Path, itvs: "RaggedIntervals") -> None:
+    """Write a RaggedIntervals (values/starts/ends share offsets) to out_dir as
+    intervals.npy + offsets.npy. Single-chunk writer used for annotation tracks."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = np.memmap(
+        out_dir / "intervals.npy",
+        dtype=INTERVAL_DTYPE,
+        mode="w+",
+        shape=itvs.values.data.shape,
+    )
+    out["start"] = itvs.starts.data
+    out["end"] = itvs.ends.data
+    out["value"] = itvs.values.data
+    out.flush()
+
+    offsets = itvs.values.offsets
+    out = np.memmap(
+        out_dir / "offsets.npy",
+        dtype=offsets.dtype,
+        mode="w+",
+        shape=len(offsets),
+    )
+    out[:] = offsets
+    out.flush()
+
+
+def _annot_intervals(
+    regions: pl.DataFrame,
+    source: "str | Path | pl.DataFrame | pl.LazyFrame",
+    max_mem: int,
+) -> "RaggedIntervals":
+    """Build a sample-less RaggedIntervals (n_regions, None) from an annotation source.
+
+    - bigwig path -> Rust per-region extraction (BigWigs), squeezed sample-less.
+    - table path / DataFrame / LazyFrame (BED-like: chrom, chromStart, chromEnd, score)
+      -> polars-bio overlap (experimental, requires the `table` extra).
+    """
+    if isinstance(source, (str, Path)) and Path(source).suffix.lower() in (
+        ".bw",
+        ".bigwig",
+    ):
+        return _annot_intervals_from_bigwig(regions, Path(source), max_mem)
+
+    if isinstance(source, pl.LazyFrame):
+        annot = source.collect()
+    elif isinstance(source, pl.DataFrame):
+        annot = source
+    else:
+        annot = sp.bed.read(str(source))
+
+    from .._table import annot_overlap
+
+    return annot_overlap(regions, annot)
+
+
+def _annot_intervals_from_bigwig(
+    regions: pl.DataFrame, path: Path, max_mem: int
+) -> "RaggedIntervals":
+    from seqpro.rag import Ragged
+
+    from .._bigwig import BigWigs
+    from .._ragged import RaggedIntervals
+
+    # single pseudo-sample; collapse its sample axis to produce a sample-less track
+    bw = BigWigs(name="__annot__", paths={"__annot__": str(path)})
+    out_starts, out_ends, out_values, lengths = [], [], [], []
+    for (contig,), part in regions.partition_by(
+        "chrom", as_dict=True, maintain_order=True
+    ).items():
+        contig = cast(str, contig)
+        starts = part["chromStart"].to_numpy()
+        ends = part["chromEnd"].to_numpy()
+        # (regions, 1)
+        itvs = bw.intervals(contig, starts, ends, sample="__annot__")
+        for r in range(part.height):
+            s = itvs.starts[r, 0]
+            out_starts.append(np.asarray(s, dtype=np.int32))
+            out_ends.append(np.asarray(itvs.ends[r, 0], dtype=np.int32))
+            out_values.append(np.asarray(itvs.values[r, 0], dtype=np.float32))
+            lengths.append(len(s))
+    flat_starts = np.concatenate(out_starts) if out_starts else np.empty(0, np.int32)
+    flat_ends = np.concatenate(out_ends) if out_ends else np.empty(0, np.int32)
+    flat_values = np.concatenate(out_values) if out_values else np.empty(0, np.float32)
+    offsets = lengths_to_offsets(np.asarray(lengths, np.int32))
+    shape = (regions.height, None)
+    return RaggedIntervals(
+        Ragged.from_offsets(flat_starts, shape, offsets),
+        Ragged.from_offsets(flat_ends, shape, offsets),
+        Ragged.from_offsets(flat_values, shape, offsets),
+    )
+
+
+def _write_annot_track(
+    out_dir: Path,
+    regions: pl.DataFrame,
+    source: "str | Path | pl.DataFrame | pl.LazyFrame",
+    max_mem: int,
+) -> None:
+    itvs = _annot_intervals(regions, source, max_mem)
+    _write_ragged_intervals(out_dir, itvs)
+
+
 def _write_track(
-    path: Path,
+    out_dir: Path,
     bed: pl.DataFrame,
     track: "IntervalTrack",
     samples: list[str] | None,
@@ -967,7 +1238,6 @@ def _write_track(
     pbar.close()
     bed = bed.with_columns(chunk=pl.lit(chunk_labels))
 
-    out_dir = path / "intervals" / track.name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     interval_offset = 0

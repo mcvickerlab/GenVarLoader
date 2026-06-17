@@ -8,14 +8,12 @@ from typing import Generic, Literal, NoReturn, TypeVar, overload
 import awkward as ak
 import numpy as np
 import polars as pl
-import seqpro as sp
 from loguru import logger
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
 from typing_extensions import Self, assert_never
 
 from .._ragged import (
-    INTERVAL_DTYPE,
     RaggedAnnotatedHaps,
     RaggedIntervals,
     RaggedSeqs,
@@ -23,10 +21,6 @@ from .._ragged import (
 )
 from .._torch import TORCH_AVAILABLE, TorchDataset, get_dataloader
 from .._types import AnnotatedHaps, Idx, StrIdx
-from .._utils import (
-    lengths_to_offsets,
-    normalize_contig_name,
-)
 from ._flat_variants import DummyVariant
 from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
 from ._insertion_fill import InsertionFill
@@ -43,7 +37,6 @@ from ._reconstruct import (
 from ._flat_variants import VarWindowOpt
 from ._reference import Reference
 from ._splice import SpliceMap
-from ._utils import regions_to_bed
 
 if TORCH_AVAILABLE:
     import torch
@@ -1545,73 +1538,6 @@ class Dataset:
 
         return replace(self, _tracks=new_tracks)  # type: ignore[bad-return]  # dataclasses.replace returns Self but pyrefly widens to base Dataset union
 
-    def write_annot_tracks(
-        self, tracks: dict[str, str | Path | pl.DataFrame], overwrite: bool = False
-    ) -> Self:
-        """Write annotation tracks to the dataset. Returns a new dataset with the
-        tracks available. Activate them with :meth:`with_tracks()`.
-
-        Parameters
-        ----------
-        tracks
-            Paths to the annotation tracks (or literal tables) in BED-like format.
-            Keys should be the track names and values should be the paths to the BED files
-            or polars.DataFrames.
-
-            .. note::
-                Only supports BED files for now.
-
-        overwrite
-            Whether to overwrite the existing tracks, by default False
-        """
-        if (
-            self.available_tracks is not None
-            and (exists := set(tracks) & set(self.available_tracks))
-            and not overwrite
-        ):
-            raise ValueError(f"Some tracks already exists in the dataset: {exists}")
-
-        for name, bedlike in tracks.items():
-            out_dir = self.path / "annot_intervals" / name
-            out_dir.mkdir(parents=True, exist_ok=True)
-
-            if isinstance(bedlike, str) or isinstance(bedlike, Path):
-                bedlike = sp.bed.read(bedlike)
-
-            # ensure the full_bed matches the order on-disk
-            full_bed = regions_to_bed(self._full_regions, self.contigs)
-            itvs = _annot_to_intervals(full_bed, bedlike)
-
-            out = np.memmap(
-                out_dir / "intervals.npy",
-                dtype=INTERVAL_DTYPE,
-                mode="w+",
-                shape=itvs.values.data.shape,
-            )
-            out["start"] = itvs.starts.data
-            out["end"] = itvs.ends.data
-            out["value"] = itvs.values.data
-            out.flush()
-
-            out = np.memmap(
-                out_dir / "offsets.npy",
-                dtype=itvs.values.offsets.dtype,
-                mode="w+",
-                shape=len(itvs.values.offsets),
-            )
-            out[:] = itvs.values.offsets
-            out.flush()
-
-        ds_tracks = Tracks.from_path(self.path, *self.full_shape).with_tracks(None)
-        # Re-activate the same tracks on the newly loaded ds_tracks object,
-        # then route through the factory to keep _recon consistent with view-state.
-        cur_active = self._tracks.active_tracks if self._tracks is not None else {}
-        new_tracks = (
-            ds_tracks.with_tracks(cur_active.keys()) if cur_active else ds_tracks
-        )
-        recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
-        return replace(self, _tracks=ds_tracks, _recon=recon)
-
     def to_torch_dataset(
         self, return_indices: bool, transform: Callable | None
     ) -> TorchDataset:
@@ -1866,36 +1792,6 @@ def _lazy_load_dosages(dataset: Dataset, haps: Haps) -> Haps:
     rag_shape = (*shape[1:], None)
     dosages = Ragged.from_offsets(dosages_mm, rag_shape, offsets.reshape(2, -1))
     return replace(haps, dosages=dosages)
-
-
-def _annot_to_intervals(regions: pl.DataFrame, annot: pl.DataFrame) -> RaggedIntervals:
-    # normalize contig names
-    reg_c = regions["chrom"].unique()
-    annot_c = annot["chrom"].unique()
-    renamer = (normalize_contig_name(c, reg_c) for c in annot_c)
-    renamer = {c: new_c for c, new_c in zip(annot_c, renamer) if new_c is not None}
-    annot = annot.with_columns(chrom=pl.col("chrom").replace(renamer))
-
-    # find intersection
-    intersect = sp.bed.from_pyr(
-        sp.bed.to_pyr(annot).join(sp.bed.to_pyr(regions.with_row_index()))
-    ).sort("index", "chrom", "chromStart")
-
-    # compute offsets, considering regions with no overlaps
-    i, nonzero_counts = np.unique(intersect["index"], return_counts=True)
-    counts = np.zeros(regions.height, dtype=np.int32)
-    counts[i] = nonzero_counts
-    offsets = lengths_to_offsets(counts)
-    shape = (len(offsets) - 1, None)
-
-    # convert to numpy intervals
-    itvs = np.empty(intersect.height, dtype=INTERVAL_DTYPE)
-    starts = Ragged.from_offsets(intersect["chromStart"].to_numpy(), shape, offsets)
-    ends = Ragged.from_offsets(intersect["chromEnd"].to_numpy(), shape, offsets)
-    values = Ragged.from_offsets(intersect["score"].to_numpy(), shape, offsets)
-    itvs = RaggedIntervals(starts, ends, values)
-
-    return itvs
 
 
 SEQ = TypeVar("SEQ", NDArray[np.bytes_], AnnotatedHaps, RaggedVariants)
