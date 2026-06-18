@@ -53,3 +53,41 @@ def test_realign_tracks_survives_with_len():
     ds2 = ds.with_len("variable")
     assert ds2.realign_tracks is False
     assert type(ds2._recon) is SeqsTracks
+
+
+def _vw_opt():
+    return gvl.VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
+
+
+def test_variant_windows_plus_float_tracks():
+    ds = gvl.get_dummy_dataset()
+    vw = (
+        ds.with_settings(realign_tracks=False)
+        .with_output_format("flat")
+        .with_seqs("variant-windows", _vw_opt())
+        .with_tracks(["read-depth"])  # default kind="tracks"
+    )
+    out = vw[[0, 1], [0, 1]]
+    assert isinstance(out, tuple) and len(out) == 2
+    windows, tracks = out
+    assert type(windows).__name__ == "_FlatVariantWindows"
+    assert type(tracks).__name__ == "_Flat"  # FlatRagged float track
+
+
+def test_variant_windows_plus_intervals():
+    ds = gvl.get_dummy_dataset()
+    vw = (
+        ds.with_settings(realign_tracks=False)
+        .with_output_format("flat")
+        .with_seqs("variant-windows", _vw_opt())
+        .with_tracks(["read-depth"], kind="intervals")
+    )
+    windows, itvs = vw[[0, 1], [0, 1]]
+    assert type(windows).__name__ == "_FlatVariantWindows"
+    assert type(itvs).__name__ == "FlatIntervals"
+
+
+def test_variant_windows_plus_tracks_requires_realign_false():
+    ds = gvl.get_dummy_dataset()  # tracks active by default, realign True
+    with pytest.raises(ValueError, match="realign"):
+        ds.with_output_format("flat").with_seqs("variant-windows", _vw_opt())
