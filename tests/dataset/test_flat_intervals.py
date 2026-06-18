@@ -1,4 +1,5 @@
 import awkward as ak
+import genvarloader as gvl
 import numpy as np
 
 from genvarloader._flat import _Flat
@@ -28,13 +29,8 @@ def test_flat_intervals_to_ragged_roundtrip():
 
 
 def test_flat_intervals_public_export():
-    import genvarloader as gvl
-
     assert gvl.FlatIntervals is FlatIntervals
     assert "FlatIntervals" in gvl.__all__
-
-
-import genvarloader as gvl
 
 
 def test_flat_intervals_end_to_end_matches_ragged():
@@ -75,3 +71,23 @@ def test_flat_intervals_multi_track_matches_ragged():
     # (batch, track, ~itv) C-order must match awkward concat order
     assert ak.to_list(back.starts) == ak.to_list(ri.starts)
     assert ak.to_list(back.values) == ak.to_list(ri.values)
+
+
+def test_flat_float_tracks_only_returns_flatragged():
+    ds = gvl.get_dummy_dataset()
+    flat = ds.with_seqs(None).with_tracks(["read-depth"]).with_output_format("flat")
+    out = flat[[0, 1], [0, 1]]
+    assert type(out).__name__ == "_Flat"  # FlatRagged
+    # round-trips to the ragged track values
+    rag = ds.with_seqs(None).with_tracks(["read-depth"])[[0, 1], [0, 1]]
+    assert ak.to_list(out.to_ragged()) == ak.to_list(rag)
+
+
+def test_flat_haps_plus_tracks_returns_flat_pair():
+    ds = gvl.get_dummy_dataset()
+    flat = (
+        ds.with_seqs("haplotypes").with_tracks(["read-depth"]).with_output_format("flat")
+    )
+    seqs, tracks = flat[[0, 1], [0, 1]]
+    assert type(seqs).__name__ == "_Flat"
+    assert type(tracks).__name__ == "_Flat"

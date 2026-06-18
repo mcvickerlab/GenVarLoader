@@ -54,6 +54,12 @@
 - parallelize gvl.write over track categories (variants first)
 - gvl.write accepts annot_tracks
 - polars-bio annotation extraction + bigwig annot source
+- **tracks**: `with_settings(realign_tracks=...)` toggles haplotype-coordinate track re-alignment (default `True`); `realign_tracks=False` returns reference-coordinate tracks/intervals and enables tracks alongside `variants` / `variant-windows`.
+- **flat**: `FlatIntervals` flat-buffer interval output for `with_tracks(kind="intervals")` + `with_output_format("flat")`; flat float tracks return `FlatRagged`.
+
+### Breaking
+
+- `kind="intervals"` with a variant-aware seq mode now requires `realign_tracks=False` (previously `haplotypes`+`intervals` silently returned un-realigned intervals). `with_insertion_fill` now raises when `realign_tracks=False`.
 
 ### Fix
 
