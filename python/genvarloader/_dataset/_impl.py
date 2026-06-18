@@ -29,7 +29,7 @@ from ._reconstruct import (
     Haps,
     HapsTracks,
     Ref,
-    RefTracks,
+    SeqsTracks,
     Tracks,
     TrackType,
     _build_reconstructor,
@@ -859,7 +859,7 @@ class Dataset:
         | Haps[RaggedAnnotatedHaps]
         | Haps[RaggedVariants]
         | Tracks
-        | RefTracks
+        | SeqsTracks
         | HapsTracks[RaggedSeqs, RaggedTracks]
         | HapsTracks[RaggedAnnotatedHaps, RaggedTracks]
         | HapsTracks[RaggedVariants, RaggedTracks]

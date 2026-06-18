@@ -305,15 +305,15 @@ def build_recon_splice_plan(
     """
     # Local import to avoid the dispatcher module being imported on every
     # query path.
-    from ._reconstruct import HapsTracks, RefTracks
+    from ._reconstruct import HapsTracks, SeqsTracks
 
     if isinstance(recon, HapsTracks):
         raise NotImplementedError(
             "Splicing of haplotypes + tracks (shape (b, t, p, ~l)) is not supported."
         )
-    if isinstance(recon, RefTracks):
+    if isinstance(recon, SeqsTracks):
         raise NotImplementedError(
-            "Splicing of reference + tracks is not yet supported."
+            "Splicing of sequences + un-realigned tracks is not supported."
         )
     if isinstance(recon, Tracks):
         # Tracks have deterministic per-region lengths (no haplotype indels).
