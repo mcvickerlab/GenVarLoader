@@ -32,3 +32,46 @@ def test_flat_intervals_public_export():
 
     assert gvl.FlatIntervals is FlatIntervals
     assert "FlatIntervals" in gvl.__all__
+
+
+import genvarloader as gvl
+
+
+def test_flat_intervals_end_to_end_matches_ragged():
+    ds = gvl.get_dummy_dataset()
+    idx = ([0, 1], [0, 1])
+
+    rag = ds.with_seqs(None).with_tracks(["read-depth"], kind="intervals")
+    flat = (
+        ds.with_seqs(None)
+        .with_tracks(["read-depth"], kind="intervals")
+        .with_output_format("flat")
+    )
+
+    ri = rag[idx]
+    fi = flat[idx]
+
+    assert type(fi).__name__ == "FlatIntervals"
+    assert isinstance(ri, gvl.RaggedIntervals)
+
+    back = fi.to_ragged()
+    assert ak.to_list(back.starts) == ak.to_list(ri.starts)
+    assert ak.to_list(back.ends) == ak.to_list(ri.ends)
+    assert ak.to_list(back.values) == ak.to_list(ri.values)
+
+
+def test_flat_intervals_multi_track_matches_ragged():
+    ds = gvl.get_dummy_dataset()
+    idx = ([0, 1, 2], [0, 1, 2])
+    names = ["read-depth", "annot"]
+
+    ri = ds.with_seqs(None).with_tracks(names, kind="intervals")[idx]
+    fi = (
+        ds.with_seqs(None)
+        .with_tracks(names, kind="intervals")
+        .with_output_format("flat")[idx]
+    )
+    back = fi.to_ragged()
+    # (batch, track, ~itv) C-order must match awkward concat order
+    assert ak.to_list(back.starts) == ak.to_list(ri.starts)
+    assert ak.to_list(back.values) == ak.to_list(ri.values)

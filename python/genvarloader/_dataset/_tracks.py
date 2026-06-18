@@ -15,7 +15,7 @@ from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
 from .._flat import _Flat
-from .._ragged import INTERVAL_DTYPE, RaggedIntervals, RaggedTracks
+from .._ragged import INTERVAL_DTYPE, FlatIntervals, RaggedIntervals, RaggedTracks
 from .._utils import lengths_to_offsets
 from ._indexing import DatasetIndexer
 from ._insertion_fill import InsertionFill, Repeat5p
@@ -579,7 +579,7 @@ class Tracks(Reconstructor[_T]):
                 idx, r_idx, regions, output_length, splice_plan=splice_plan
             )
         else:
-            out = self._call_intervals(idx)
+            out = self._call_intervals(idx, flat=flat)
         return cast(_T, out)
 
     def _call_float32(
@@ -688,8 +688,15 @@ class Tracks(Reconstructor[_T]):
             _Flat.from_offsets(out_buf, out_shape, splice_plan.permuted_out_offsets),
         )
 
-    def _call_intervals(self, idx: NDArray[np.integer]) -> RaggedIntervals:
+    def _call_intervals(
+        self, idx: NDArray[np.integer], flat: bool = False
+    ) -> RaggedIntervals | FlatIntervals:
         r_idx, s_idx = np.unravel_index(idx, (self.n_regions, self.n_samples))
+
+        if flat:
+            return build_flat_intervals(
+                self.active_tracks, self.intervals, r_idx, s_idx, self.n_samples
+            )
 
         # out = (batch tracks ~itvs)
         out_starts = []
@@ -743,3 +750,63 @@ class Tracks(Reconstructor[_T]):
             "Awkward-backed Ragged. See docs/superpowers/roadmap.md "
             '("Transformed track writing") for the revival plan.'
         )
+
+
+def build_flat_intervals(
+    active_tracks: dict[str, TrackType],
+    intervals: dict[str, RaggedIntervals],
+    r_idx: NDArray[np.integer],
+    s_idx: NDArray[np.integer],
+    n_samples: int,
+) -> FlatIntervals:
+    """Pure-numpy gather of per-(region, sample, track) intervals into a
+    :class:`FlatIntervals` of shape ``(batch, n_tracks, ~itvs)`` in C-order
+    (batch outer, track inner) — matching the awkward concat order of
+    :meth:`Tracks._call_intervals`.
+    """
+    B = len(r_idx)
+    T = len(active_tracks)
+
+    # Pass 1: gather each track's B groups in batch order (t, b layout).
+    tb_starts: list[NDArray] = []
+    tb_ends: list[NDArray] = []
+    tb_values: list[NDArray] = []
+    lengths_tb = np.empty((T, B), np.int64)
+    for t, (name, tracktype) in enumerate(active_tracks.items()):
+        itv = intervals[name]
+        if tracktype is TrackType.SAMPLE:
+            g = r_idx * n_samples + s_idx
+        else:
+            g = r_idx
+        off = np.asarray(itv.starts.offsets)
+        lo = off[g]
+        lens = (off[g + 1] - lo).astype(np.int64)
+        lengths_tb[t] = lens
+        pt_off = lengths_to_offsets(lens)
+        total = int(pt_off[-1])
+        src = np.repeat(lo - pt_off[:-1], lens) + np.arange(total, dtype=np.int64)
+        tb_starts.append(np.asarray(itv.starts.data)[src])
+        tb_ends.append(np.asarray(itv.ends.data)[src])
+        tb_values.append(np.asarray(itv.values.data)[src])
+
+    data_starts = np.concatenate(tb_starts) if tb_starts else np.empty(0, np.int32)
+    data_ends = np.concatenate(tb_ends) if tb_ends else np.empty(0, np.int32)
+    data_values = np.concatenate(tb_values) if tb_values else np.empty(0, np.float32)
+    offsets_tb = lengths_to_offsets(lengths_tb.ravel())  # (T*B + 1)
+
+    # Pass 2: reorder groups (t, b) -> (b, t). For output group (b, t) the
+    # source group in (t, b) layout is t*B + b.
+    perm = (np.arange(T)[None, :] * B + np.arange(B)[:, None]).ravel()  # (B*T,)
+    final_lengths = lengths_tb.ravel()[perm]
+    final_offsets = lengths_to_offsets(final_lengths)
+    total = int(final_offsets[-1])
+    src = np.repeat(offsets_tb[perm] - final_offsets[:-1], final_lengths) + np.arange(
+        total, dtype=np.int64
+    )
+
+    shape = (B, T, None)
+    return FlatIntervals(
+        starts=_Flat.from_offsets(data_starts[src], shape, final_offsets),
+        ends=_Flat.from_offsets(data_ends[src], shape, final_offsets),
+        values=_Flat.from_offsets(data_values[src], shape, final_offsets),
+    )
