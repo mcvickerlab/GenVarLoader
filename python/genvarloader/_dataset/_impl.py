@@ -894,9 +894,6 @@ class Dataset:
         | HapsTracks[RaggedSeqs, RaggedTracks]
         | HapsTracks[RaggedAnnotatedHaps, RaggedTracks]
         | HapsTracks[RaggedVariants, RaggedTracks]
-        | HapsTracks[RaggedSeqs, RaggedIntervals]
-        | HapsTracks[RaggedAnnotatedHaps, RaggedIntervals]
-        | HapsTracks[RaggedVariants, RaggedIntervals]
     )
     _rng: np.random.Generator
     output_format: Literal["ragged", "flat"] = "ragged"

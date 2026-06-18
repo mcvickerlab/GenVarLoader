@@ -56,6 +56,7 @@
 - polars-bio annotation extraction + bigwig annot source
 - **tracks**: `with_settings(realign_tracks=...)` toggles haplotype-coordinate track re-alignment (default `True`); `realign_tracks=False` returns reference-coordinate tracks/intervals and enables tracks alongside `variants` / `variant-windows`.
 - **flat**: `FlatIntervals` flat-buffer interval output for `with_tracks(kind="intervals")` + `with_output_format("flat")`; flat float tracks return `FlatRagged`.
+- **flat**: `with_seqs("reference").with_tracks(...).with_output_format("flat")` now returns `FlatRagged` sequences (previously returned awkward-backed sequences).
 
 ### Breaking
 
