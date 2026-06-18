@@ -16,6 +16,7 @@ from seqpro.rag import RDTYPE_co as RDTYPE
 from seqpro.rag import reverse_complement as _sp_reverse_complement
 from seqpro.rag import to_padded as _sp_to_padded
 
+from ._flat import _Flat
 from ._torch import TORCH_AVAILABLE
 from ._types import AnnotatedHaps
 
@@ -23,7 +24,7 @@ if TORCH_AVAILABLE or TYPE_CHECKING:
     import torch
     from torch.nested import nested_tensor_from_jagged as nt_jag
 
-__all__ = ["Ragged", "RaggedIntervals", "RaggedTracks"]
+__all__ = ["FlatIntervals", "Ragged", "RaggedIntervals", "RaggedTracks"]
 INTERVAL_DTYPE = np.dtype(
     [("start", np.int32), ("end", np.int32), ("value", np.float32)], align=True
 )
@@ -165,6 +166,46 @@ class RaggedIntervals:
         new_values = ak.concatenate([pad_value, self.values], axis=2)
 
         return RaggedIntervals(Ragged(new_starts), Ragged(new_ends), Ragged(new_values))
+
+
+@dataclass(slots=True)
+class FlatIntervals:
+    """Flat-buffer analog of :class:`RaggedIntervals` over three :class:`_Flat` s.
+
+    Pure-numpy ``(data, offsets, shape)`` per field; converts to the awkward-backed
+    :class:`RaggedIntervals` only via :meth:`to_ragged`. Returned by eager indexing
+    when ``with_tracks(kind="intervals")`` is combined with
+    ``with_output_format("flat")``.
+    """
+
+    starts: _Flat
+    ends: _Flat
+    values: _Flat
+
+    @property
+    def shape(self) -> tuple[int | None, ...]:
+        return self.values.shape
+
+    def to_ragged(self) -> RaggedIntervals:
+        return RaggedIntervals(
+            self.starts.to_ragged(),
+            self.ends.to_ragged(),
+            self.values.to_ragged(),
+        )
+
+    def reshape(self, shape: int | tuple[int, ...]) -> "FlatIntervals":
+        return FlatIntervals(
+            self.starts.reshape(shape),
+            self.ends.reshape(shape),
+            self.values.reshape(shape),
+        )
+
+    def squeeze(self, axis: int | None = None) -> "FlatIntervals":
+        return FlatIntervals(
+            self.starts.squeeze(axis),
+            self.ends.squeeze(axis),
+            self.values.squeeze(axis),
+        )
 
 
 class RagItvBatch(TypedDict):
