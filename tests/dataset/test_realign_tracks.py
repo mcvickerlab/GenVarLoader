@@ -1,5 +1,4 @@
 import awkward as ak
-import numpy as np
 import pytest
 
 import genvarloader as gvl
@@ -14,8 +13,10 @@ def test_default_haps_tracks_realigns():
 
 def test_realign_false_haps_tracks_uses_seqstracks_and_is_reference_coord():
     ds = gvl.get_dummy_dataset()
-    asis = ds.with_seqs("haplotypes").with_tracks(["read-depth"]).with_settings(
-        realign_tracks=False
+    asis = (
+        ds.with_seqs("haplotypes")
+        .with_tracks(["read-depth"])
+        .with_settings(realign_tracks=False)
     )
     assert type(asis._recon) is SeqsTracks
 
@@ -34,10 +35,9 @@ def test_intervals_plus_haplotypes_requires_realign_false():
 
 def test_intervals_plus_haplotypes_ok_when_realign_false():
     ds = gvl.get_dummy_dataset()
-    out = (
-        ds.with_settings(realign_tracks=False)
-        .with_tracks(["read-depth"], kind="intervals")[[0], [0]]
-    )
+    out = ds.with_settings(realign_tracks=False).with_tracks(
+        ["read-depth"], kind="intervals"
+    )[[0], [0]]
     seqs, itvs = out
     assert isinstance(itvs, gvl.RaggedIntervals)
 
