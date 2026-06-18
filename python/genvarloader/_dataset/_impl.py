@@ -214,6 +214,7 @@ class Dataset:
         unknown_token: int | None = None,
         dummy_variant: "DummyVariant | Literal[False] | None" = None,
         unphased_union: bool | None = None,
+        realign_tracks: bool | None = None,
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -272,6 +273,12 @@ class Dataset:
             with no sort or dedup (a hom call appears once per haplotype). Requires a dataset
             with genotypes and is incompatible with ``"haplotypes"`` / ``"annotated"``
             output (raises). See issue #222.
+        realign_tracks
+            Whether to re-align track values to haplotype coordinates when both
+            haplotypes and float tracks are active. Default ``True``. Set ``False``
+            for reference-coordinate (as-is) tracks; required ``False`` for
+            ``variant-windows`` + tracks and for ``kind="intervals"`` with any
+            variant-aware seq mode.
         """
         to_evolve = {}
 
@@ -428,12 +435,20 @@ class Dataset:
             haps = to_evolve.get("_seqs", self._seqs)
             to_evolve["_seqs"] = replace(haps, unphased_union=unphased_union)
 
+        if realign_tracks is not None:
+            to_evolve["realign_tracks"] = realign_tracks
+
         # If any source state changed, rebuild _recon via the factory.
-        if "_seqs" in to_evolve or "_tracks" in to_evolve:
+        if (
+            "_seqs" in to_evolve
+            or "_tracks" in to_evolve
+            or "realign_tracks" in to_evolve
+        ):
             new_seqs = to_evolve.get("_seqs", self._seqs)
             new_tracks = to_evolve.get("_tracks", self._tracks)
+            new_realign = to_evolve.get("realign_tracks", self.realign_tracks)
             to_evolve["_recon"] = _build_reconstructor(
-                new_seqs, new_tracks, self._seqs_kind
+                new_seqs, new_tracks, self._seqs_kind, new_realign
             )
 
         self = replace(self, **to_evolve)
@@ -560,6 +575,8 @@ class Dataset:
                 _seqs_kind=self._seqs_kind,
                 _recon=self._recon,
                 _rng=self._rng,
+                output_format=self.output_format,
+                realign_tracks=self.realign_tracks,
             )
         else:
             out = RaggedDataset(
@@ -581,6 +598,8 @@ class Dataset:
                 _seqs_kind=self._seqs_kind,
                 _recon=self._recon,
                 _rng=self._rng,
+                output_format=self.output_format,
+                realign_tracks=self.realign_tracks,
             )
 
         out._check_valid_state()
@@ -714,7 +733,9 @@ class Dataset:
                 " or 'variants', or clear the flag with"
                 " with_settings(unphased_union=False)."
             )
-        new_recon = _build_reconstructor(new_seqs, self._tracks, kind)
+        new_recon = _build_reconstructor(
+            new_seqs, self._tracks, kind, self.realign_tracks
+        )
         return replace(self, _seqs=new_seqs, _seqs_kind=kind, _recon=new_recon)
 
     def with_tracks(
@@ -766,7 +787,9 @@ class Dataset:
                 " result in a Dataset that cannot return anything."
             )
 
-        new_recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
+        new_recon = _build_reconstructor(
+            self._seqs, new_tracks, self._seqs_kind, self.realign_tracks
+        )
         return replace(self, _tracks=new_tracks, _recon=new_recon)
 
     def with_insertion_fill(
@@ -798,8 +821,16 @@ class Dataset:
                 "with_insertion_fill is only meaningful when tracks are active "
                 "(use with_tracks to activate tracks first)."
             )
+        if not self.realign_tracks:
+            raise ValueError(
+                "with_insertion_fill has no effect when realign_tracks=False"
+                " (insertion fill only applies during track re-alignment). Set"
+                " with_settings(realign_tracks=True) first, or drop the call."
+            )
         new_tracks = self._tracks.with_insertion_fill(fill)
-        new_recon = _build_reconstructor(self._seqs, new_tracks, self._seqs_kind)
+        new_recon = _build_reconstructor(
+            self._seqs, new_tracks, self._seqs_kind, self.realign_tracks
+        )
         return replace(self, _tracks=new_tracks, _recon=new_recon)
 
     def with_output_format(self, fmt: Literal["ragged", "flat"]) -> "Dataset":
@@ -872,6 +903,13 @@ class Dataset:
     """Container format for eager indexing. ``"ragged"`` (default) returns awkward-backed
     seqpro ``Ragged`` / ``RaggedVariants``; ``"flat"`` returns pure-numpy ``FlatRagged`` /
     ``FlatVariants`` with zero awkward on the hot path. See ``with_output_format``."""
+    realign_tracks: bool = True
+    """Whether to re-align track *values* to haplotype coordinates when both
+    haplotypes and float tracks (``kind="tracks"``) are active. ``True`` (default)
+    uses the indel-aware realignment kernel; ``False`` returns reference-coordinate
+    (as-is) tracks. Only affects ``Haps`` + float tracks; a no-op otherwise.
+    Required ``False`` for ``variant-windows`` + tracks and for ``kind="intervals"``
+    with any variant-aware seq mode."""
 
     @property
     def is_subset(self) -> bool:

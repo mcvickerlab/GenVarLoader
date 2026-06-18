@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from typing_extensions import assert_never
 
 from .._flat import _Flat
-from .._ragged import RaggedAnnotatedHaps, RaggedSeqs, RaggedTracks
+from .._ragged import RaggedAnnotatedHaps, RaggedIntervals, RaggedSeqs, RaggedTracks
 from .._utils import lengths_to_offsets
 from ._haps import _H, Haps, ReconstructionRequest, _NewH, _Variants
 from ._insertion_fill import Repeat5p
@@ -251,6 +251,7 @@ def _build_reconstructor(
         "haplotypes", "reference", "annotated", "variants", "variant-windows"
     ]
     | None,
+    realign_tracks: bool = True,
 ) -> Reconstructor:
     """Construct the reconstructor for the given (storage + view) state.
 
@@ -311,12 +312,27 @@ def _build_reconstructor(
         case Ref() as s, Tracks() as t:
             return SeqsTracks(seqs=s, tracks=t)
         case Haps() as s, Tracks() as t:
+            is_intervals = issubclass(t.kind, RaggedIntervals)
+            if is_intervals:
+                if realign_tracks:
+                    raise ValueError(
+                        "Track intervals cannot be re-aligned to haplotype"
+                        " coordinates. Set with_settings(realign_tracks=False) to"
+                        " return reference-coordinate (as-is) intervals."
+                    )
+                return SeqsTracks(seqs=s, tracks=t)
+            # Float tracks (RaggedTracks).
             if seqs_kind == "variant-windows":
-                raise ValueError(
-                    "with_seqs('variant-windows') does not support tracks; call"
-                    " with_tracks(False) to disable them before requesting windows."
-                )
-            return HapsTracks(haps=s, tracks=t)
+                if realign_tracks:
+                    raise ValueError(
+                        "with_seqs('variant-windows') with tracks requires"
+                        " with_settings(realign_tracks=False) (windows are"
+                        " reference-oriented; re-alignment is not supported)."
+                    )
+                return SeqsTracks(seqs=s, tracks=t)
+            if realign_tracks:
+                return HapsTracks(haps=s, tracks=t)
+            return SeqsTracks(seqs=s, tracks=t)
         case _:
             raise AssertionError(
                 f"unreachable: active_seqs={type(active_seqs).__name__}, "

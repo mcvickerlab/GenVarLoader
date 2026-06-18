@@ -639,7 +639,7 @@ def test_no_awkward_on_flank_hot_path(snap_dataset, monkeypatch):
 def test_variant_windows_rejects_active_tracks(snap_dataset):
     # snap_dataset has an active track; variant-windows + tracks must raise a
     # clear error (not a cryptic AssertionError from the haps+tracks path).
-    with pytest.raises(ValueError, match="does not support tracks"):
+    with pytest.raises(ValueError, match="variant-windows.*tracks"):
         snap_dataset.with_output_format("flat").with_seqs(
             "variant-windows",
             VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
