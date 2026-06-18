@@ -1,6 +1,6 @@
 """Reconstructor dispatcher.
 
-Houses the *compound* reconstructors (:class:`RefTracks`, :class:`HapsTracks`)
+Houses the *compound* reconstructors (:class:`SeqsTracks`, :class:`HapsTracks`)
 that combine a sequence source with tracks, plus the
 :func:`_build_reconstructor` factory.
 
@@ -13,16 +13,15 @@ modules for backward-compatible import paths.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 from einops import repeat
 from numpy.typing import NDArray
-from seqpro.rag import Ragged
 from typing_extensions import assert_never
 
 from .._flat import _Flat
-from .._ragged import RaggedAnnotatedHaps, RaggedSeqs, RaggedTracks
+from .._ragged import RaggedAnnotatedHaps, RaggedIntervals, RaggedSeqs, RaggedTracks
 from .._utils import lengths_to_offsets
 from ._haps import _H, Haps, ReconstructionRequest, _NewH, _Variants
 from ._insertion_fill import Repeat5p
@@ -43,7 +42,7 @@ __all__ = [
     "ReconstructionRequest",
     "Reconstructor",
     "Ref",
-    "RefTracks",
+    "SeqsTracks",
     "TrackType",
     "Tracks",
     "_Variants",
@@ -52,8 +51,12 @@ __all__ = [
 
 
 @dataclass(slots=True)
-class RefTracks(Reconstructor[tuple[Ragged[np.bytes_], _T]]):
-    seqs: Ref
+class SeqsTracks(Reconstructor[tuple[Any, _T]]):
+    """Any seq reconstructor (`Ref` or `Haps` in any kind) paired with
+    un-realigned `Tracks`. Seqs and tracks are computed independently; tracks
+    stay in reference coordinates (no haplotype re-alignment)."""
+
+    seqs: Ref | Haps
     tracks: Tracks[_T]
 
     def __call__(
@@ -67,10 +70,10 @@ class RefTracks(Reconstructor[tuple[Ragged[np.bytes_], _T]]):
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
         flat: bool = False,
-    ) -> tuple[Ragged[np.bytes_], _T]:
+    ) -> tuple[Any, _T]:
         if splice_plan is not None:
             raise NotImplementedError(
-                "Splicing of reference + tracks is not yet supported."
+                "Splicing of sequences + un-realigned tracks is not supported."
             )
         seqs = self.seqs(
             idx=idx,
@@ -80,6 +83,7 @@ class RefTracks(Reconstructor[tuple[Ragged[np.bytes_], _T]]):
             jitter=jitter,
             rng=rng,
             deterministic=deterministic,
+            flat=flat,
         )
         tracks = self.tracks(
             idx=idx,
@@ -89,6 +93,7 @@ class RefTracks(Reconstructor[tuple[Ragged[np.bytes_], _T]]):
             jitter=jitter,
             rng=rng,
             deterministic=deterministic,
+            flat=flat,
         )
         return seqs, tracks
 
@@ -246,6 +251,7 @@ def _build_reconstructor(
         "haplotypes", "reference", "annotated", "variants", "variant-windows"
     ]
     | None,
+    realign_tracks: bool = True,
 ) -> Reconstructor:
     """Construct the reconstructor for the given (storage + view) state.
 
@@ -304,14 +310,29 @@ def _build_reconstructor(
         case None, Tracks() as t:
             return t
         case Ref() as s, Tracks() as t:
-            return RefTracks(seqs=s, tracks=t)
+            return SeqsTracks(seqs=s, tracks=t)
         case Haps() as s, Tracks() as t:
+            is_intervals = issubclass(t.kind, RaggedIntervals)
+            if is_intervals:
+                if realign_tracks:
+                    raise ValueError(
+                        "Track intervals cannot be re-aligned to haplotype"
+                        " coordinates. Set with_settings(realign_tracks=False) to"
+                        " return reference-coordinate (as-is) intervals."
+                    )
+                return SeqsTracks(seqs=s, tracks=t)
+            # Float tracks (RaggedTracks).
             if seqs_kind == "variant-windows":
-                raise ValueError(
-                    "with_seqs('variant-windows') does not support tracks; call"
-                    " with_tracks(False) to disable them before requesting windows."
-                )
-            return HapsTracks(haps=s, tracks=t)
+                if realign_tracks:
+                    raise ValueError(
+                        "with_seqs('variant-windows') with tracks requires"
+                        " with_settings(realign_tracks=False) (windows are"
+                        " reference-oriented; re-alignment is not supported)."
+                    )
+                return SeqsTracks(seqs=s, tracks=t)
+            if realign_tracks:
+                return HapsTracks(haps=s, tracks=t)
+            return SeqsTracks(seqs=s, tracks=t)
         case _:
             raise AssertionError(
                 f"unreachable: active_seqs={type(active_seqs).__name__}, "

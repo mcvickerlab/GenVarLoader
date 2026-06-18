@@ -15,10 +15,11 @@ from genvarloader._dataset._reconstruct import (
     Haps,
     HapsTracks,
     Ref,
-    RefTracks,
+    SeqsTracks,
     Tracks,
     _build_reconstructor,
 )
+from genvarloader._ragged import RaggedTracks
 
 
 def _haps_mock(with_reference: bool = True) -> Haps:
@@ -35,6 +36,7 @@ def _ref_mock() -> Ref:
 def _tracks_mock() -> Tracks:
     m = Mock(spec=Tracks)
     m.active_tracks = ["dummy_track"]  # non-None signals "active"
+    m.kind = RaggedTracks  # real type so issubclass(t.kind, RaggedIntervals) works
     return m
 
 
@@ -69,7 +71,7 @@ def test_ref_and_tracks_returns_ref_tracks():
     seqs = _ref_mock()
     tracks = _tracks_mock()
     result = _build_reconstructor(seqs, tracks, "reference")
-    assert isinstance(result, RefTracks)
+    assert isinstance(result, SeqsTracks)
     assert result.seqs is seqs
     assert result.tracks is tracks
 
@@ -114,7 +116,7 @@ def test_tracks_inactive_with_seqs_returns_seqs_only():
     tracks = Mock(spec=Tracks)
     tracks.active_tracks = None  # user-deactivated
     result = _build_reconstructor(seqs, tracks, "haplotypes")
-    # Result should be the haps view (kind-resolved), not RefTracks/HapsTracks.
+    # Result should be the haps view (kind-resolved), not SeqsTracks/HapsTracks.
     assert isinstance(result, Haps)
 
 

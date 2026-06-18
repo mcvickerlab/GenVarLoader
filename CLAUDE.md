@@ -150,14 +150,18 @@ All commands require the `pixi` package manager. Use `pixi run -e dev <task>` fo
 # Generate test data (required before first test run)
 pixi run -e dev gen
 
-# Run all tests (pytest + cargo)
+# Run all tests (pytest + cargo) — runs the WHOLE tree (tests/dataset/, tests/unit/, etc.)
 pixi run -e dev test
 
 # Run a single pytest test
 pixi run -e dev pytest tests/dataset/test_dataset.py::test_name -v
 
-# Lint
-pixi run -e dev ruff check python/
+# Run a directory's tests (cover BOTH dataset and unit when changing shared code)
+pixi run -e dev pytest tests/dataset tests/unit -q
+
+# Lint (cover python/ AND tests/ — `python/` alone misses test-only issues like unused imports)
+pixi run -e dev ruff check python/ tests/
+pixi run -e dev ruff format python/ tests/
 pixi run -e dev typecheck
 
 # Build docs
@@ -165,6 +169,8 @@ pixi run -e docs doc
 ```
 
 The build system uses Maturin (Rust + Python). Rust code is compiled automatically when running tests via pixi.
+
+**Before pushing a change that renames/removes a public symbol or touches shared code, run the full tree** (`pixi run -e dev pytest tests -q`, or the full `pixi run -e dev test`). Scoped runs like `pytest tests/dataset` skip `tests/unit/` (e.g. `tests/unit/dataset/test_build_reconstructor.py`), so a stale reference there fails only in CI.
 
 ## Architecture
 

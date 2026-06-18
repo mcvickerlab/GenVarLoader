@@ -182,9 +182,13 @@ Scalar fields (`start`/`ilen`/`dosage`/`info[...]`) are still filled from `Dummy
 
 `"variant-windows"` requires a `VarWindowOpt` second argument (`with_seqs("variant-windows", gvl.VarWindowOpt(...))`), `with_output_format("flat")`, and a reference genome. It does **not** inherit flank settings from `with_settings`.
 
+`variant-windows` may be combined with tracks when `with_settings(realign_tracks=False)` is set; the returned tracks/intervals are reference-coordinate (as-is). Float tracks come back as `FlatRagged`, interval tracks as `FlatIntervals`.
+
 `with_tracks(tracks=..., kind=...)` selects tracks:
 - `tracks`: `None` (default), `False` (disable), a single name, or a list of names.
 - `kind`: `"tracks"` (re-aligned numeric values) or `"intervals"` (raw interval representation).
+
+Track **re-alignment** to haplotype coordinates is controlled by `with_settings(realign_tracks=True)` (default). Set `realign_tracks=False` for reference-coordinate ("as-is") tracks. `realign_tracks=False` is **required** for `kind="intervals"` with any variant-aware seq mode, and for `variant-windows` + tracks. `with_insertion_fill` requires `realign_tracks=True`.
 
 `with_len(L)` controls output shape:
 - `"ragged"` (default): returns `gvl.Ragged` (variable length per item).
@@ -198,7 +202,7 @@ Returns either a `RaggedDataset` or `ArrayDataset` (frozen dataclass views) base
 | `fmt`      | Container types returned                                                   | Default? |
 |------------|----------------------------------------------------------------------------|----------|
 | `"ragged"` | Awkward-backed `Ragged` / `RaggedVariants` / `RaggedAnnotatedHaps`         | Yes      |
-| `"flat"`   | Pure-numpy `FlatRagged` / `FlatVariants` / `FlatAnnotatedHaps`             | No       |
+| `"flat"`   | Pure-numpy `FlatRagged` / `FlatVariants` / `FlatAnnotatedHaps` / `FlatIntervals` | No       |
 
 In `"flat"` mode the hot path is zero-awkward; the returned containers carry `.data` (flat numpy array) and `.offsets` (int64). Every flat type has `.to_ragged()` back to its awkward-backed form. Densification escape hatches vary by type: `FlatRagged` has `.to_fixed(length)` and `.to_padded(pad_value)`; `FlatAnnotatedHaps` has `.to_fixed(length)` and `.to_padded()` (no arg — uses per-field pad defaults); `FlatVariants`/`FlatAlleles` expose only `.to_ragged()` (plus `.reshape`/`.squeeze`).
 
@@ -214,7 +218,7 @@ ragged = result.to_ragged()
 
 `with_output_format` is orthogonal to and composes with `with_len` and `subset_to`.
 
-**Scope note:** only seqs/haplotypes/annotated-haps/reference and variants outputs are flattened. Tracks and intervals are **not** yet flattened — they still return ragged containers in `"flat"` mode.
+**Scope note:** In `"flat"` mode, `kind="intervals"` tracks return `FlatIntervals` (`.to_ragged()` → `RaggedIntervals`; fields `.starts`/`.ends`/`.values` are each a `FlatRagged`). Float (numeric) tracks return `FlatRagged` in flat mode. Seqs/haplotypes/annotated-haps/reference and variants outputs are also flattened as before.
 
 **Flat variants extras — ride-along flank tokens and variant windows:**
 
@@ -337,6 +341,7 @@ Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (use
 - `gvl.read_bedlike(path)` / `gvl.with_length(bed, L)` — BED helpers (re-exported from `seqpro`).
 - `gvl.Ragged`, `gvl.RaggedAnnotatedHaps`, `gvl.RaggedVariants`, `gvl.RaggedIntervals` — ragged return containers.
 - `gvl.FlatRagged` — flat analog of `Ragged`: `.data` (flat numpy array), `.offsets` (int64), `.shape`. Methods: `.to_ragged()`, `.to_fixed(length)`, `.to_padded(pad_value)`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_flat.py`.
+- `gvl.FlatIntervals` — flat-buffer interval container returned by `with_tracks(kind="intervals")` + `with_output_format("flat")`. Fields `.starts`/`.ends`/`.values` are `FlatRagged`; `.to_ragged()` → `RaggedIntervals`; `.reshape(...)`, `.squeeze(...)`, `.shape`. Source: `python/genvarloader/_ragged.py`.
 - `gvl.FlatAnnotatedHaps` — flat analog of `RaggedAnnotatedHaps`: fields `.haps`, `.var_idxs`, `.ref_coords` (each a `FlatRagged`). Methods: `.to_ragged()`, `.to_fixed(length)`, `.to_padded()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_flat.py`.
 - `gvl.FlatVariants` — flat analog of `RaggedVariants`: `.fields` dict mapping field names to `FlatRagged` (scalar fields: `start`/`ilen`/`dosage`/info) or `FlatAlleles` (`alt`/`ref`). `.shape` delegates to `fields["start"].shape`. `.flank_tokens`: optional ride-along `FlatRagged` of shape `(b, p, ~v, 2L)` (set when `with_settings(flank_length=L, ...)` is configured; `None` otherwise). Methods: `.to_ragged()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_dataset/_flat_variants.py`.
 - `gvl.FlatAlleles` — two-level flat bytestring for allele fields: `.byte_data` (uint8), `.seq_offsets` (per-variant byte offsets, int64), `.var_offsets` (per-(batch×ploidy)-row variant offsets, int64), `.shape`. Methods: `.to_ragged()`, `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_dataset/_flat_variants.py`.
@@ -401,9 +406,10 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - `extend_to_length=False` at write time will produce haplotypes shorter than the BED region when deletions are present; downstream code must tolerate `<` region length.
 - Missing a `dosage` field on a `RaggedVariants` output you expected? Check `var_fields` — `dosage` must be requested explicitly even if `dosages.npy` exists on disk.
 - `FlatRagged` / `FlatVariants` offsets are **int64**. PyTorch nested tensors require int32 offsets — cast with `.astype(np.int32)` or `tensor.to(torch.int32)` before passing to `torch.nested.narrow`.
-- In `"flat"` mode, tracks and intervals are **not yet flattened** — they still return the same `Ragged`-backed containers as in `"ragged"` mode. Only seqs/haplotypes/annotated-haps/reference and variants outputs are affected.
+- `kind="intervals"` cannot be re-aligned: combining it with a variant-aware seq mode (`haplotypes`/`annotated`/`variants`/`variant-windows`) raises unless `with_settings(realign_tracks=False)`. (Breaking change: `haplotypes`+`intervals` previously returned un-realigned intervals silently under the default.)
+- `with_insertion_fill` raises when `realign_tracks=False`.
 - `with_seqs("variant-windows")` requires a `VarWindowOpt` second argument, `with_output_format("flat")`, and a reference genome. Querying in `"ragged"` mode raises. It does **not** inherit flank settings from `with_settings`.
-- **Flat variants/windows need tracks disabled.** `with_seqs("variant-windows", ...)` with active tracks raises (`call with_tracks(False)`). For the ride-along, `FlatVariants.flank_tokens` is only produced on the pure flat variants channel — with active tracks the variants output falls back to ragged `RaggedVariants` (no `flank_tokens`). Call `with_tracks(False)` for both.
+- **Flat ride-along flank tokens need tracks disabled.** `FlatVariants.flank_tokens` (ride-along on `"variants"` output) is only produced on the pure flat variants channel — with active tracks the variants output falls back to ragged `RaggedVariants` (no `flank_tokens`). Call `with_tracks(False)` for the ride-along. `"variant-windows"` may be combined with tracks via `with_settings(realign_tracks=False)` (tracks are returned reference-coordinate alongside the windows output).
 - Flank tokens (`FlatVariants.flank_tokens`) and variant windows (`FlatVariantWindows`) are **reference-oriented** — they are NOT reverse-complemented even when `rc_neg=True`. Only the alt/ref allele fields of `FlatVariants` / `RaggedVariants` are RC'd (not their scalar fields, not flank tokens, not windows).
 - Token dtype is `uint8` when max token id ≤ 255, else `int32`; offsets are `int64`.
 - `VarWindowOpt(ref="allele")` (bare allele mode) requires REF alleles on disk. `flank_length` ride-along on `FlatVariants` requires `token_alphabet` and `unknown_token` to be set together in the same or a prior `with_settings` call.

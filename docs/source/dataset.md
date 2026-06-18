@@ -110,3 +110,34 @@ $$L_{\text{out}} + 2 j \le \min(|\text{regions}|) + 2 j_{\text{max}}$$
 
 where $j$ is the current jitter and $j_{\text{max}}$ is the maximum jitter allowed by the [`Dataset`](api.md#genvarloader.Dataset). If you try to use a value greater than this the [`Dataset`](api.md#genvarloader.Dataset) will raise an error.
 :::
+
+## Track re-alignment (`realign_tracks`)
+
+When a [`Dataset`](api.md#genvarloader.Dataset) returns both haplotypes and tracks, indels cause the haplotype length to differ from the reference length. By default, track values are **re-aligned** to haplotype coordinates so that each base in the haplotype corresponds to the correct track value. This is controlled by `with_settings(realign_tracks=...)`.
+
+| `realign_tracks` | Behavior |
+|------------------|----------|
+| `True` (default) | Track values are re-aligned to haplotype coordinates (indel-aware). Required when `with_insertion_fill` is configured. |
+| `False`          | Track values are returned in reference coordinates (as-is, no indel re-alignment). |
+
+Set `realign_tracks=False` in two cases:
+
+1. **`kind="intervals"` with a variant-aware seq mode** (`"haplotypes"`, `"annotated"`, `"variants"`, `"variant-windows"`): interval tracks cannot be re-aligned, so `realign_tracks=False` is required. Combining `kind="intervals"` with a variant-aware seq mode without setting `realign_tracks=False` raises a `ValueError`.
+
+2. **`"variant-windows"` + tracks**: tracks must be reference-coordinate when used alongside the variant-windows output.
+
+```python
+ds = gvl.get_dummy_dataset()
+
+# Reference-coordinate float tracks alongside haplotypes
+ds_ref_tracks = ds.with_seqs("haplotypes").with_tracks(["read-depth"]).with_settings(realign_tracks=False)
+
+# Interval tracks alongside haplotypes (realign_tracks=False is required)
+ds_itvs = (
+    ds.with_seqs("haplotypes")
+    .with_tracks(["read-depth"], kind="intervals")
+    .with_settings(realign_tracks=False)
+)
+```
+
+In `"flat"` output mode (`with_output_format("flat")`), float tracks return `FlatRagged` and interval tracks (`kind="intervals"`) return [`FlatIntervals`](api.md#genvarloader.FlatIntervals), which carries `.starts`, `.ends`, `.values` as `FlatRagged` fields and converts back via `.to_ragged()` → [`RaggedIntervals`](api.md#genvarloader.RaggedIntervals).

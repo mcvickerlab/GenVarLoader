@@ -19,6 +19,7 @@ from typing_extensions import assert_never
 from .._flat import _Flat, _FlatAnnotatedHaps
 from ._flat_variants import _FlatVariants, _FlatVariantWindows
 from .._ragged import (
+    FlatIntervals,
     RaggedAnnotatedHaps,
     RaggedIntervals,
     _COMP,
@@ -138,7 +139,10 @@ def _reshape_outer(o, out_reshape: tuple[int, ...]):
     shape (which already ends in ``None``) would yield a double ragged axis.
     For those we drop the trailing ``None`` and pass only the outer dims.
     """
-    if isinstance(o, (_Flat, _FlatAnnotatedHaps, _FlatVariants, _FlatVariantWindows)):
+    if isinstance(
+        o,
+        (_Flat, _FlatAnnotatedHaps, _FlatVariants, _FlatVariantWindows, FlatIntervals),
+    ):
         # _FlatVariantWindows.shape mirrors _FlatVariants ((b, p, None) — one None,
         # taken from its scalar `start` field), so it shares this branch: drop the
         # single trailing None and pass only the outer fixed dims; reshape() re-appends
@@ -301,15 +305,15 @@ def build_recon_splice_plan(
     """
     # Local import to avoid the dispatcher module being imported on every
     # query path.
-    from ._reconstruct import HapsTracks, RefTracks
+    from ._reconstruct import HapsTracks, SeqsTracks
 
     if isinstance(recon, HapsTracks):
         raise NotImplementedError(
             "Splicing of haplotypes + tracks (shape (b, t, p, ~l)) is not supported."
         )
-    if isinstance(recon, RefTracks):
+    if isinstance(recon, SeqsTracks):
         raise NotImplementedError(
-            "Splicing of reference + tracks is not yet supported."
+            "Splicing of sequences + un-realigned tracks is not supported."
         )
     if isinstance(recon, Tracks):
         # Tracks have deterministic per-region lengths (no haplotype indels).
@@ -372,6 +376,7 @@ def reverse_complement_ragged(
     | _FlatAnnotatedHaps
     | _FlatVariants
     | _FlatVariantWindows
+    | FlatIntervals
     | RaggedVariants
     | RaggedIntervals,
     to_rc: NDArray[np.bool_],
@@ -380,10 +385,14 @@ def reverse_complement_ragged(
     | _FlatAnnotatedHaps
     | _FlatVariants
     | _FlatVariantWindows
+    | FlatIntervals
     | RaggedVariants
     | RaggedIntervals
 ):
     """Reverse-complement (or reverse) ragged outputs according to a per-row mask."""
+    if isinstance(rag, FlatIntervals):
+        # Intervals are not reverse-complemented (same as RaggedIntervals).
+        return rag
     if isinstance(rag, _FlatVariantWindows):
         # Windows are reference-oriented; reverse-complement is not applied.
         return rag
