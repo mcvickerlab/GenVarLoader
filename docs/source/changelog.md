@@ -46,6 +46,25 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.33.0 (2026-06-18)
+
+### Feat
+
+- realign_tracks setting decouples track re-alignment from seq mode
+- flat interval reconstruction via FlatIntervals
+- add FlatIntervals flat-buffer interval container
+
+### Fix
+
+- update RefTracks→SeqsTracks unit tests; pin flat seqs; trim dead union
+
+### Refactor
+
+- generalize RefTracks into SeqsTracks (seqs + un-realigned tracks)
+
 ## v0.32.0 (2026-06-17)
 
 ### Feat
