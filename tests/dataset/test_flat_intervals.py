@@ -86,7 +86,9 @@ def test_flat_float_tracks_only_returns_flatragged():
 def test_flat_haps_plus_tracks_returns_flat_pair():
     ds = gvl.get_dummy_dataset()
     flat = (
-        ds.with_seqs("haplotypes").with_tracks(["read-depth"]).with_output_format("flat")
+        ds.with_seqs("haplotypes")
+        .with_tracks(["read-depth"])
+        .with_output_format("flat")
     )
     seqs, tracks = flat[[0, 1], [0, 1]]
     assert type(seqs).__name__ == "_Flat"
