@@ -36,8 +36,8 @@ fn test_count_intervals(
 }
 
 #[rstest]
-#[case::one_itv_one_region("chr1", array![0], array![5], array![[0, 5], [0, 5],], array![1.0, 1.0])]
-#[case::two_itvs_one_region("chr1", array![0], array![105], array![[0, 5], [99, 105], [0, 5], [99, 105]], array![1.0, 2.0, 1.0, 2.0])]
+#[case::one_itv_one_region("chr1", array![0], array![5], array![[1, 5], [1, 5],], array![1.0, 1.0])]
+#[case::two_itvs_one_region("chr1", array![0], array![105], array![[1, 5], [100, 105], [1, 5], [100, 105]], array![1.0, 2.0, 1.0, 2.0])]
 fn test_intervals(
     bws: Vec<PathBuf>,
     #[case] chrom: &str,
