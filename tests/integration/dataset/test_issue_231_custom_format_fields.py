@@ -87,3 +87,48 @@ def test_var_field_data_loaded_only_when_requested(custom_field_ds, ref_fasta):
     assert np.asarray(rag.data).shape[0] == n_records
     # Still must not have been loaded as an INFO column.
     assert field_name not in haps2.variants.info
+
+
+def _open_variants(gvl_path, ref_fasta, field_name, **settings):
+    # "AF" must be in var_fields so it is eagerly loaded for AF-filter tests.
+    return (
+        gvl.Dataset.open(gvl_path, ref_fasta, rc_neg=False)
+        .with_len("ragged")
+        .with_seqs("variants")
+        .with_settings(var_fields=["alt", "ilen", "start", "dosage", "AF", field_name],
+                       **settings)
+    )
+
+
+def test_custom_field_present_in_ragged_variants(custom_field_ds, ref_fasta):
+    gvl_path, field_name, _ = custom_field_ds
+    ds = _open_variants(gvl_path, ref_fasta, field_name)
+    batch = ds[0, ds.samples[0]]
+    assert field_name in batch.fields
+    # dtype is the registered int16, not coerced.
+    flat = ak.to_numpy(ak.flatten(batch[field_name], axis=None))
+    assert flat.dtype == np.dtype(FIELD_DTYPE)
+    # Per-cell variant counts equal `start`'s (call-aligned with the genotypes).
+    assert ak.num(batch[field_name], -1).to_list() == ak.num(batch["start"], -1).to_list()
+
+
+def test_custom_field_matches_dosage_gather(custom_field_ds, ref_fasta):
+    """Custom field and dosages were written with identical arange values and
+    share the genotype offsets, so the gathered output must be elementwise equal."""
+    gvl_path, field_name, _ = custom_field_ds
+    ds = _open_variants(gvl_path, ref_fasta, field_name)
+    batch = ds[0, ds.samples[0]]
+    custom = ak.to_numpy(ak.flatten(batch[field_name], axis=None)).astype(np.float64)
+    dosage = ak.to_numpy(ak.flatten(batch["dosage"], axis=None)).astype(np.float64)
+    np.testing.assert_array_equal(custom, dosage)
+
+
+def test_custom_field_af_compaction_matches_dosage(custom_field_ds, ref_fasta):
+    """Under AF filtering the custom field is compacted with the SAME keep mask
+    as dosage, so they stay elementwise equal."""
+    gvl_path, field_name, _ = custom_field_ds
+    ds = _open_variants(gvl_path, ref_fasta, field_name, max_af=0.5)
+    batch = ds[0, ds.samples[0]]
+    custom = ak.to_numpy(ak.flatten(batch[field_name], axis=None)).astype(np.float64)
+    dosage = ak.to_numpy(ak.flatten(batch["dosage"], axis=None)).astype(np.float64)
+    np.testing.assert_array_equal(custom, dosage)
