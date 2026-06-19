@@ -12,7 +12,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tests._bigwig_corpus import DEFAULT_CONTIGS, make_synthetic_bigwigs
+from tests._bigwig_corpus import DEFAULT_CONTIGS, make_synthetic_bigwigs  # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "bigwig_corpus"
 
