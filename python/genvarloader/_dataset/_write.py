@@ -1162,12 +1162,54 @@ def _annot_intervals_from_bigwig(
     )
 
 
+def _write_annot_track_rust(
+    out_dir: Path,
+    regions: pl.DataFrame,
+    path: Path,
+    max_mem: int,
+) -> None:
+    from .._bigwig import BigWigs
+    from ..genvarloader import bigwig_write_track
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    bw = BigWigs(name="__annot__", paths={"__annot__": str(path)})
+    contigs: list[str] = []
+    starts_l: list[int] = []
+    ends_l: list[int] = []
+    for chrom, s, e in zip(
+        regions["chrom"].to_list(),
+        regions["chromStart"].to_list(),
+        regions["chromEnd"].to_list(),
+    ):
+        norm = normalize_contig_name(chrom, bw.contigs)
+        if norm is None:
+            raise ValueError(f"Contig {chrom!r} not found in bigWig {path}.")
+        contigs.append(norm)
+        starts_l.append(int(s))
+        ends_l.append(int(e))
+    bigwig_write_track(
+        [str(path)],
+        contigs,
+        np.asarray(starts_l, dtype=np.int32),
+        np.asarray(ends_l, dtype=np.int32),
+        int(max_mem),
+        str(out_dir),
+        True,
+    )
+
+
 def _write_annot_track(
     out_dir: Path,
     regions: pl.DataFrame,
     source: "str | Path | pl.DataFrame | pl.LazyFrame",
     max_mem: int,
 ) -> None:
+    if (
+        _rust_bigwig_write_enabled()
+        and isinstance(source, (str, Path))
+        and Path(source).suffix.lower() in (".bw", ".bigwig")
+    ):
+        return _write_annot_track_rust(out_dir, regions, Path(source), max_mem)
     itvs = _annot_intervals(regions, source, max_mem)
     _write_ragged_intervals(out_dir, itvs)
 
