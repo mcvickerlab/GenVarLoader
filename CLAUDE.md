@@ -236,6 +236,10 @@ In scope:
 
 When a change ships, update the relevant section of the skill and re-check the "Common gotchas" and "Where to look next" pointer table. The skill is published to https://www.skills.sh/ as `mcvickerlab/GenVarLoader` (installable via `npx skills add mcvickerlab/GenVarLoader`); keep it accurate against `main`.
 
+## Rust migration roadmap
+
+Any task that mentions "rust" (adding or porting Rust code, touching `src/`, or migrating numba/Python hot paths) **must** read `docs/roadmaps/rust-migration.md` before starting and update it as part of the work — tick completed tasks, record measurement results under the relevant checkpoint, and set the phase status marker (⬜/🚧/✅) + PR link. The roadmap is the source of truth for migration sequencing and the byte-identical parity contract.
+
 ## Development Notes
 
 - **Pixi environments**: Use `-e dev` for development, `-e docs` for documentation, `-e py310`/`py311`/`py312`/`py313` for Python version testing. Platform is linux-64.

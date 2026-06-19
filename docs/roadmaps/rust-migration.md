@@ -1,0 +1,187 @@
+# Roadmap: Migrate the GVL core to Rust
+
+**Status legend:** ⬜ not started · 🚧 in progress · ✅ done · ⏸️ blocked
+
+This is a living tracker. **Any work that touches the Rust migration must read this file
+first and update it as part of the change** — tick completed tasks, record measurements
+under the relevant checkpoint, and update the phase status marker + PR link.
+
+---
+
+## Goal & end state
+
+Migrate GenVarLoader's core data structures and algorithms from Python/numba to a
+self-contained **Rust crate** (`genvarloader`), cargo-testable and usable from Rust
+directly, wrapped by a **thin PyO3 binding**. Python keeps only the ergonomic surface —
+`Dataset` indexing sugar, torch integration, validation/error messages — and dispatches
+into Rust for everything else.
+
+**Why:**
+- Far faster `gvl.write()` / `update()` and likely faster `Dataset.__getitem__`.
+- A powerful type system enabling strong abstractions that shrink the code + testing surface.
+- Eliminate the ~35 numba kernels scattered across the read/write paths, collapsing the
+  bug surface.
+
+**Eventual scope:** seqpro (the `Ragged` data structure + rag ops) and genoray (VCF/PGEN
+variant & sparse-genotype IO) are sibling Python deps today. They are **in scope for the
+full Rust stack**, but sequenced last (Phase 6) and may graduate into their own roadmap.
+
+### Target crate layout
+
+Grown from today's `src/{lib,bigwig}.rs`:
+
+```
+src/
+├── lib.rs            # pymodule registration only
+├── ragged/           # ragged layout (offsets+data) + ops  ← Phase 1 beachhead
+├── genotypes/        # sparse genotype assembly
+├── variants/         # variant gather, flat/windowed views
+├── reconstruct/      # haplotype reconstruction
+├── tracks/           # track re-alignment, insertion-fill, splice
+├── reference/        # reference sequence assembly
+├── write/            # write/update pipeline
+├── bigwig.rs         # (existing)
+└── ffi/              # PyO3 bindings — the only place that touches Python
+```
+
+The crate is pure Rust + `ndarray`/`rayon`. `ffi/` is the seam where numpy arrays and
+`seqpro.Ragged` / `genoray` objects cross the boundary (zero-copy where possible). By
+Phase 6 the crate stops depending on Python seqpro/genoray entirely.
+
+---
+
+## The migration contract (strangler fig + byte-identical parity)
+
+Every unit follows the same loop, so the work is repetitive and low-surprise:
+
+1. **Implement** the unit in Rust on the native ragged layout.
+2. **Expose** it through `ffi/` with a Python-side switch (env var / flag) selecting Rust
+   vs the existing numba/Python impl.
+3. **Differential-test:** a reusable harness runs *both* impls on property-generated
+   inputs (built on `vcfixture` + numpy generators) and asserts **byte-identical** output
+   across the py310–313 × linux/macOS matrix. A unit only "lands" when parity holds.
+4. **Land:** flip the default to Rust and **delete the numba/Python impl in the same
+   bundled PR**. Remove the switch when the phase closes.
+
+`main` stays shippable at all times; every step is reversible until parity is proven;
+numba deletion is continuous rather than a big-bang at the end.
+
+**Standing CI invariant (not a per-phase gate):** abi3 wheels must keep building across
+py310–313 × linux/macOS as the Rust surface grows.
+
+**PR strategy:** each phase lands as one bundled PR (solo-maintainer preference). See
+[[feedback_pr_strategy]].
+
+---
+
+## Baseline metrics
+
+> Captured once in Phase 0. Every later gate compares against these numbers. Fill in when
+> Phase 0 lands.
+
+| Metric | Corpus | Baseline | Captured |
+|---|---|---|---|
+| `gvl.write()` wall-clock | 1kg chr21/chr22 (vcfixture tier) | _TBD_ | ⬜ |
+| `gvl.write()` peak RSS | 1kg chr21/chr22 (vcfixture tier) | _TBD_ | ⬜ |
+| `gvl.update()` wall-clock | 1kg chr21/chr22 (vcfixture tier) | _TBD_ | ⬜ |
+| `Dataset.__getitem__` throughput | dataloader bench + py-spy A/B | _TBD_ | ⬜ |
+
+Benchmark sources: dataloader bench lives on the `prefetching-dataloader` branch
+([[project_dataloader_bench]]); fixtures from vcfixture ([[project_vcfixture_migration]]).
+py-spy on macOS needs sudo — hand David a bash script, don't invoke it directly
+([[feedback_macos_profiling_handoff]]).
+
+---
+
+## Phases
+
+Each phase is one bundled PR and ends in a measure checkpoint.
+
+### Phase 0 — Foundation & harness ⬜
+_PR: —_
+
+- [ ] Restructure `src/` into the target module skeleton (empty modules + `ffi/` seam).
+- [ ] Build the reusable differential-test harness: run-both-assert-byte-identical +
+      property generators on top of `vcfixture` + numpy.
+- [ ] Wire `cargo test` into pixi dev tasks.
+- [ ] Confirm abi3 wheels build across py310–313 × linux/macOS (standing invariant).
+- [ ] Capture baselines (table above): `write()`/`update()` wall-clock + peak RSS,
+      `__getitem__` throughput.
+
+**Checkpoint:** harness green; baselines recorded in this file.
+
+### Phase 1 — Ragged primitives + layout (beachhead) ⬜
+_PR: —_
+
+The foundation everything sits on. Bottom-up.
+
+- [ ] Define the native ragged layout in Rust (offsets + data buffers).
+- [ ] Implement the ops gvl uses: lengths/offsets, slice, gather, `to_padded`,
+      reverse-complement helpers.
+- [ ] Zero-copy interop with `seqpro.Ragged` at the boundary (construct-from / view-as).
+- [ ] Remove `awkward` from the foundation layer.
+- [ ] Differential parity vs `_ragged.py` / current seqpro paths.
+
+**Checkpoint:** parity green. Foundational — no perf gate, but record incidental wins.
+Relevant prior work: [[project_ragged_assembly_bottleneck]].
+
+### Phase 2 — Genotype assembly + variant gather ⬜
+_PR: —_
+
+- [ ] Migrate `_dataset/_genotypes.py` kernels (6 numba) onto the Rust layout.
+- [ ] Migrate `_dataset/_flat_variants.py` kernels (7 numba).
+- [ ] Migrate `_dataset/_rag_variants.py` (1 numba); drop `awkward` from these hot paths.
+
+**Gate:** parity + `Dataset.__getitem__` throughput vs baseline (target speedup, no
+regression).
+
+### Phase 3 — Reconstruction + track realignment ⬜
+_PR: —_
+
+The numba bulk and the big read-path win.
+
+- [ ] Migrate `_dataset/_reconstruct.py` + `_dataset/_haps.py`.
+- [ ] Migrate `_dataset/_tracks.py` realign (6 numba) + `_dataset/_intervals.py` (4 numba).
+- [ ] Migrate `_dataset/_reference.py` (6 numba).
+- [ ] Migrate `_dataset/_insertion_fill.py` + `_dataset/_splice.py`.
+
+**Gate:** parity + `Dataset.__getitem__` throughput vs baseline.
+
+### Phase 4 — Write / update pipeline ⬜
+_PR: —_
+
+- [ ] Migrate `_dataset/_write.py`: variant normalization (left-align, bi-allelic,
+      atomize), genotype storage, interval extraction + realign.
+- [ ] Migrate remaining `_dataset/_utils.py` / `_flat_flanks.py` / `_variants/_sitesonly.py`
+      kernels touched by the write path.
+
+**Gate:** parity + `gvl.write()`/`update()` wall-clock + peak RSS vs baseline.
+
+### Phase 5 — Crate consolidation + thin-binding cleanup ⬜
+_PR: —_
+
+- [ ] Collapse the PyO3 surface so Python is a true shim (indexing sugar, torch,
+      validation/error messages only).
+- [ ] Delete all remaining core numba kernels (target: count = 0).
+- [ ] Confirm the crate is fully cargo-testable standalone.
+
+**Checkpoint:** core numba kernel count = 0; full perf re-baseline recorded here.
+
+### Phase 6 — Absorb seqpro / genoray (future) ⬜
+_PR: —_
+
+Sequenced last; a candidate to graduate into its own roadmap once Phases 0–5 land.
+
+- [ ] Bring ragged primitives fully in-house — drop the seqpro hot-path dependency.
+- [ ] Bring variant IO (genoray VCF/PGEN + sparse genotypes) into the Rust stack.
+
+**Checkpoint:** crate no longer depends on Python seqpro/genoray for core paths.
+
+---
+
+## Notes & decisions log
+
+- 2026-06-18: Roadmap created. Decisions: standalone crate + thin PyO3 binding;
+  bottom-up starting from ragged primitives; strangler-fig with byte-identical parity
+  gate; perf gates = write wall-clock+RSS and getitem throughput; seqpro/genoray in scope
+  but last.
