@@ -91,6 +91,18 @@ Benchmark sources: dataloader bench lives on the `prefetching-dataloader` branch
 py-spy on macOS needs sudo — hand David a bash script, don't invoke it directly
 ([[feedback_macos_profiling_handoff]]).
 
+### bigWig write-path slice (Phase 4 partial — NOT the full 1kg write baseline)
+
+> Corpus: synthetic chr21 (200k bp) / chr22 (150k bp), n_samples=8, density=0.05,
+> n_regions=2000, width=5000. Measured on macOS (Apple M-series), memray for RSS.
+> These rows are a bigWig-only write slice; the 1kg full-write baseline remains TBD.
+
+| Metric | Corpus | Legacy (baseline) | Rust (after) | Δ | Captured |
+|---|---|---|---|---|---|
+| `gvl.write()` bigWig wall-clock | synthetic chr21/chr22 slice | 1.502 s | 0.801 s | ~1.88× faster | ✅ |
+| `gvl.write()` peak RSS | synthetic chr21/chr22 slice | 3.538 GB | 3.386 GB | −4% (dominated by numba/llvmlite JIT ~3.2 GB) | ✅ |
+| `gvl.write()` total allocated | synthetic chr21/chr22 slice | 8.380 GB | 6.004 GB | ~28% less | ✅ |
+
 ---
 
 ## Phases
@@ -147,11 +159,12 @@ The numba bulk and the big read-path win.
 
 **Gate:** parity + `Dataset.__getitem__` throughput vs baseline.
 
-### Phase 4 — Write / update pipeline ⬜
-_PR: —_
+### Phase 4 — Write / update pipeline 🚧
+_PR: bigwig-streaming-write (TBD)_
 
 - [ ] Migrate `_dataset/_write.py`: variant normalization (left-align, bi-allelic,
       atomize), genotype storage, interval extraction + realign.
+  - [x] bigWig interval extraction for the write path — single-pass streaming Rust writer (this PR)
 - [ ] Migrate remaining `_dataset/_utils.py` / `_flat_flanks.py` / `_variants/_sitesonly.py`
       kernels touched by the write path.
 
@@ -185,3 +198,16 @@ Sequenced last; a candidate to graduate into its own roadmap once Phases 0–5 l
   bottom-up starting from ragged primitives; strangler-fig with byte-identical parity
   gate; perf gates = write wall-clock+RSS and getitem throughput; seqpro/genoray in scope
   but last.
+- 2026-06-19: Single-pass streaming bigWig writer landed (Phase 4 bigWig slice). The
+  Rust writer (`bigwig_write_track` via PyO3) streams all samples in one pass per region
+  and writes `intervals.npy` + `offsets.npy` without materialising per-sample arrays in
+  Python. Byte-identical parity vs the legacy Python orchestration was proven in Task 6
+  via differential tests across both `_write_track` (per-sample BigWigs) and
+  `_write_annot_track` (single-file annotation bigWig) paths. After parity confirmation,
+  the env-var gate (`GVL_RUST_BIGWIG_WRITE`) was removed and Rust made the unconditional
+  default; legacy Python orchestration retained only for non-BigWigs IntervalTracks (e.g.
+  Table). Bench config: synthetic chr21 (200k bp) / chr22 (150k bp), n_samples=8,
+  density=0.05, n_regions=2000, width=5000. Measured on macOS, memray for RSS.
+  Results: wall-clock 1.502 s → 0.801 s (~1.88× faster); peak RSS 3.538 GB → 3.386 GB
+  (−4%, dominated by numba/llvmlite JIT startup ~3.2 GB); total allocated 8.380 GB →
+  6.004 GB (~28% less).

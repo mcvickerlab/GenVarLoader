@@ -54,7 +54,9 @@ def main() -> None:
         t0 = time.perf_counter()
         _write_track(out, bed, track, samples, 4 << 30)
         dt = time.perf_counter() - t0
-    print(f"impl={args.impl} regions={bed.height} samples={len(samples)} wall={dt:.3f}s")
+    print(
+        f"impl={args.impl} regions={bed.height} samples={len(samples)} wall={dt:.3f}s"
+    )
 
 
 if __name__ == "__main__":

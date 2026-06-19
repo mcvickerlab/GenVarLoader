@@ -1,6 +1,5 @@
 import gc
 import json
-import os
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from importlib.metadata import version
@@ -1204,10 +1203,9 @@ def _write_annot_track(
     source: "str | Path | pl.DataFrame | pl.LazyFrame",
     max_mem: int,
 ) -> None:
-    if (
-        _rust_bigwig_write_enabled()
-        and isinstance(source, (str, Path))
-        and Path(source).suffix.lower() in (".bw", ".bigwig")
+    if isinstance(source, (str, Path)) and Path(source).suffix.lower() in (
+        ".bw",
+        ".bigwig",
     ):
         return _write_annot_track_rust(out_dir, regions, Path(source), max_mem)
     itvs = _annot_intervals(regions, source, max_mem)
@@ -1343,14 +1341,6 @@ def _write_track_legacy(
     out.flush()
 
 
-def _rust_bigwig_write_enabled() -> bool:
-    return os.environ.get("GVL_RUST_BIGWIG_WRITE", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-
-
 def _write_track_rust(
     out_dir: Path,
     bed: pl.DataFrame,
@@ -1400,7 +1390,7 @@ def _write_track(
 ):
     from .._bigwig import BigWigs
 
-    if isinstance(track, BigWigs) and _rust_bigwig_write_enabled():
+    if isinstance(track, BigWigs):
         _samples = samples if samples is not None else track.samples
         if missing := (set(_samples) - set(track.samples)):
             raise ValueError(f"Samples {missing} not found in track.")
