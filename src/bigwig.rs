@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bigtools::{BigWigRead, Value};
 use itertools::{izip, Itertools};
 use ndarray::prelude::*;
@@ -57,11 +57,14 @@ pub fn write_track(
                     let contig = &contigs[r];
                     let mut per_sample: RegionDecoded = Vec::with_capacity(n_samples);
                     for path in paths.iter() {
-                        let bw = readers
-                            .entry(path.clone())
-                            .or_insert_with(|| {
-                                BigWigRead::open_file(path).expect("Error opening file")
-                            });
+                        let bw = match readers.entry(path.clone()) {
+                            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                            std::collections::hash_map::Entry::Vacant(e) => {
+                                let reader = BigWigRead::open_file(path)
+                                    .with_context(|| format!("Error opening bigWig {}", path.display()))?;
+                                e.insert(reader)
+                            }
+                        };
                         let (max_len, name) = bw
                             .chroms()
                             .iter()
@@ -73,15 +76,15 @@ pub fn write_track(
                                 }
                             })
                             .exactly_one()
-                            .expect("Contig not found or multiple contigs match");
+                            .map_err(|_| anyhow::anyhow!("Contig {:?} not found or multiple contigs match in {}", contig, path.display()))?;
                         let r_start = starts[r].max(0) as u32;
                         let r_end = (ends[r] as u32).min(max_len);
                         let vals: Vec<Value> = bw
                             .get_interval(name.as_str(), r_start, r_end)
-                            .expect("Begin reading intervals")
+                            .with_context(|| format!("Error reading intervals for contig {:?} in {}", contig, path.display()))?
                             .into_iter()
-                            .map(|v| v.expect("Read interval"))
-                            .collect();
+                            .map(|v| v.with_context(|| "Error reading interval value"))
+                            .collect::<Result<Vec<_>>>()?;
                         per_sample.push(vals);
                     }
                     let region_bytes: usize =
