@@ -1855,9 +1855,6 @@ def _lazy_load_custom_fields(
     """
     import json as _json
 
-    from ._svar_link import _resolve_svar
-    from ._write import Metadata
-
     path = haps.path
     svar_meta_path = path / "genotypes" / "svar_meta.json"
     if not svar_meta_path.exists():
@@ -1872,13 +1869,11 @@ def _lazy_load_custom_fields(
 
     offset_path = path / "genotypes" / "offsets.npy"
 
-    meta = Metadata.model_validate_json((path / "metadata.json").read_text())
-    svar_link = meta.svar_link
-    if svar_link is not None:
-        svar_path = _resolve_svar(path, svar_link, None)
-    else:
-        legacy_link = path / "genotypes" / "link.svar"
-        svar_path = legacy_link.resolve()
+    # The resolved SVAR directory is already embedded in haps.variants.path
+    # (which was set to <svar_path>/index.arrow by Haps.from_path, respecting any
+    # svar_override). Using .parent avoids re-resolving from metadata and correctly
+    # handles the svar_override case that the legacy link.svar branch would miss.
+    svar_path = haps.variants.path.parent
 
     offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
     rag_shape = (*shape[1:], None)
