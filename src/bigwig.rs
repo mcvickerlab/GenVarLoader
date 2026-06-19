@@ -121,7 +121,7 @@ pub unsafe fn intervals(
                         unsafe {
                             coords_ptr
                                 .add((offset + i) * 2)
-                                .write(MaybeUninit::new(start - 1));
+                                .write(MaybeUninit::new(start));
                             coords_ptr
                                 .add((offset + i) * 2 + 1)
                                 .write(MaybeUninit::new(end));
