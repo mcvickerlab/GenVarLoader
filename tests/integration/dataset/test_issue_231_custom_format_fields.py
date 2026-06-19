@@ -67,3 +67,23 @@ def test_available_var_fields_lists_custom_field(custom_field_ds, ref_fasta):
     assert field_name in ds.available_var_fields
     # Listed exactly once.
     assert ds.available_var_fields.count(field_name) == 1
+
+
+def test_var_field_data_loaded_only_when_requested(custom_field_ds, ref_fasta):
+    gvl_path, field_name, n_records = custom_field_ds
+
+    # Not requested (default var_fields) -> not memmapped, not in info dict.
+    ds = gvl.Dataset.open(gvl_path, ref_fasta, rc_neg=False)
+    haps = ds._seqs  # type: ignore[attr-defined]
+    assert field_name not in haps.var_field_data
+    assert field_name not in haps.variants.info  # not loaded as an INFO column
+
+    # Requested -> memmapped into var_field_data with the registered dtype.
+    ds2 = ds.with_settings(var_fields=["alt", "ilen", "start", field_name])
+    haps2 = ds2._seqs  # type: ignore[attr-defined]
+    assert field_name in haps2.var_field_data
+    rag = haps2.var_field_data[field_name]
+    assert np.asarray(rag.data).dtype == np.dtype(FIELD_DTYPE)
+    assert np.asarray(rag.data).shape[0] == n_records
+    # Still must not have been loaded as an INFO column.
+    assert field_name not in haps2.variants.info
