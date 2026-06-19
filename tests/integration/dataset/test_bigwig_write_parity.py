@@ -1,6 +1,7 @@
 # tests/integration/dataset/test_bigwig_write_parity.py
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from genvarloader import BigWigs
@@ -19,6 +20,9 @@ def corpus(tmp_path_factory):
 def _assert_byte_identical(a: Path, b: Path):
     assert (a / "intervals.npy").read_bytes() == (b / "intervals.npy").read_bytes()
     assert (a / "offsets.npy").read_bytes() == (b / "offsets.npy").read_bytes()
+    # gate must not pass vacuously on empty output
+    offsets = np.memmap(a / "offsets.npy", dtype=np.int64, mode="r")
+    assert offsets[-1] > 0, "parity gate compared empty output — corpus produced no intervals"
 
 
 def test_per_sample_parity(corpus, tmp_path):
