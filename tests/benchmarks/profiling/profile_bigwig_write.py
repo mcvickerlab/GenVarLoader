@@ -39,6 +39,7 @@ def main() -> None:
     import tempfile
 
     import genvarloader as gvl
+    from genvarloader._dataset._write import _write_track
     from tests._bigwig_corpus import DEFAULT_CONTIGS, make_regions
 
     paths = sorted(CORPUS.glob("sample_*.bw"))
@@ -51,8 +52,6 @@ def main() -> None:
         out = Path(tmp) / "signal"
         out.mkdir()
         t0 = time.perf_counter()
-        from genvarloader._dataset._write import _write_track
-
         _write_track(out, bed, track, samples, 4 << 30)
         dt = time.perf_counter() - t0
     print(f"impl={args.impl} regions={bed.height} samples={len(samples)} wall={dt:.3f}s")
