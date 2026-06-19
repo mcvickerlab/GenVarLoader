@@ -49,6 +49,22 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.34.0 (2026-06-19)
+
+### Feat
+
+- gather custom FORMAT fields into RaggedVariants like dosage (#231)
+- **haps**: load custom FORMAT fields into Haps.var_field_data (#231)
+- discover genoray custom FORMAT fields in available_var_fields (#231)
+
+### Fix
+
+- off-by-one in bigWig interval start collapsed wide annot tracks (#233)
+- resolve svar override path in _lazy_load_custom_fields (#231)
+
 ## v0.33.0 (2026-06-18)
 
 ### Feat
