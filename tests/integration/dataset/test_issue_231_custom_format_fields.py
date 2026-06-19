@@ -36,7 +36,10 @@ def custom_field_ds(tmp_path, filtered_svar, source_bed):
 
     # Custom int16 field, values 0..n-1.
     mm = np.memmap(
-        svar_copy / f"{FIELD_NAME}.npy", dtype=FIELD_DTYPE, mode="w+", shape=(n_records,)
+        svar_copy / f"{FIELD_NAME}.npy",
+        dtype=FIELD_DTYPE,
+        mode="w+",
+        shape=(n_records,),
     )
     mm[:] = np.arange(n_records, dtype=FIELD_DTYPE)
     mm.flush()
@@ -95,8 +98,9 @@ def _open_variants(gvl_path, ref_fasta, field_name, **settings):
         gvl.Dataset.open(gvl_path, ref_fasta, rc_neg=False)
         .with_len("ragged")
         .with_seqs("variants")
-        .with_settings(var_fields=["alt", "ilen", "start", "dosage", "AF", field_name],
-                       **settings)
+        .with_settings(
+            var_fields=["alt", "ilen", "start", "dosage", "AF", field_name], **settings
+        )
     )
 
 
@@ -109,7 +113,9 @@ def test_custom_field_present_in_ragged_variants(custom_field_ds, ref_fasta):
     flat = ak.to_numpy(ak.flatten(batch[field_name], axis=None))
     assert flat.dtype == np.dtype(FIELD_DTYPE)
     # Per-cell variant counts equal `start`'s (call-aligned with the genotypes).
-    assert ak.num(batch[field_name], -1).to_list() == ak.num(batch["start"], -1).to_list()
+    assert (
+        ak.num(batch[field_name], -1).to_list() == ak.num(batch["start"], -1).to_list()
+    )
 
 
 def test_custom_field_matches_dosage_gather(custom_field_ds, ref_fasta):
