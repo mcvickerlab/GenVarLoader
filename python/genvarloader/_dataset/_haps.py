@@ -238,6 +238,18 @@ def _alt_layout_parts(
     return leaf, allele_offsets, group_offsets, ploidy
 
 
+def _svar_format_fields(svar_dir: Path) -> dict[str, np.dtype]:
+    """genoray custom per-call FORMAT fields: name -> dtype, from <svar>/metadata.json.
+
+    Returns {} when the metadata file is absent (non-SVAR / synthetic datasets).
+    """
+    meta = svar_dir / "metadata.json"
+    if not meta.is_file():
+        return {}
+    fields = json.loads(meta.read_text()).get("fields", {})
+    return {name: np.dtype(dt) for name, dt in fields.items()}
+
+
 @dataclass(slots=True)
 class Haps(Reconstructor[_H]):
     path: Path
@@ -290,12 +302,15 @@ class Haps(Reconstructor[_H]):
             schema_info_fields = list(self.variants.info.keys())
         has_dosage_file = self._has_dosage_file_on_disk()
 
-        self.available_var_fields = (
+        custom_fmt = _svar_format_fields(self.variants.path.parent)
+        base = (
             ["alt", "ilen", "start"]
             + schema_info_fields
             + (["ref"] if self.variants.ref is not None else [])
             + (["dosage"] if has_dosage_file else [])
         )
+        # Per-call FORMAT fields win over a same-named INFO column; list each once.
+        self.available_var_fields = base + [f for f in custom_fmt if f not in base]
 
         if (
             self.min_af is not None or self.max_af is not None
