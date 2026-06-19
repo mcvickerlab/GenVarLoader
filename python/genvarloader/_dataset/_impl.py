@@ -25,6 +25,7 @@ from ._flat_variants import DummyVariant
 from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
 from ._insertion_fill import InsertionFill
 from ._rag_variants import RaggedVariants
+from ._haps import _svar_format_fields
 from ._reconstruct import (
     Haps,
     HapsTracks,
@@ -332,19 +333,31 @@ class Dataset:
             if missing or not isinstance(self._seqs, Haps):
                 raise ValueError(f"Missing variant fields: {missing}")
             haps = to_evolve.get("_seqs", self._seqs)
+            # Discover custom FORMAT fields so we don't try to load them as INFO.
+            custom_fmt = _svar_format_fields(haps.variants.path.parent)
             # Lazily load any newly-requested info columns into the existing
             # _Variants struct (mutates haps.variants.info in place).
             builtin = {"alt", "ilen", "start", "ref", "dosage"}
             new_info_fields = [
                 f
                 for f in var_fields
-                if f not in builtin and f not in haps.variants.info
+                if f not in builtin
+                and f not in haps.variants.info
+                and f not in custom_fmt
             ]
             if new_info_fields:
                 haps.variants.load_info(new_info_fields)
             # Lazily memmap dosages if newly requested.
             if "dosage" in var_fields and haps.dosages is None:
                 haps = _lazy_load_dosages(self, haps)
+            # Lazily memmap custom FORMAT fields if newly requested.
+            new_custom_fields = {
+                f: custom_fmt[f]
+                for f in var_fields
+                if f in custom_fmt and f not in haps.var_field_data
+            }
+            if new_custom_fields:
+                haps = _lazy_load_custom_fields(self, haps, new_custom_fields)
             haps = replace(haps, var_fields=var_fields)
             to_evolve["_seqs"] = haps
 
@@ -1827,6 +1840,57 @@ def _lazy_load_dosages(dataset: Dataset, haps: Haps) -> Haps:
     rag_shape = (*shape[1:], None)
     dosages = Ragged.from_offsets(dosages_mm, rag_shape, offsets.reshape(2, -1))
     return replace(haps, dosages=dosages)
+
+
+def _lazy_load_custom_fields(
+    dataset: Dataset,
+    haps: Haps,
+    new_fields: dict[str, np.dtype],
+) -> Haps:
+    """Memmap custom FORMAT fields (Number=G, stored as <name>.npy) into
+    ``haps.var_field_data`` for fields that were not loaded at open time.
+
+    ``new_fields`` maps field name → numpy dtype (already confirmed present in
+    the SVAR metadata). Returns a new ``Haps`` with updated ``var_field_data``.
+    """
+    import json as _json
+
+    path = haps.path
+    svar_meta_path = path / "genotypes" / "svar_meta.json"
+    if not svar_meta_path.exists():
+        raise ValueError(
+            "Custom FORMAT fields requested but this dataset is not SVAR-backed."
+        )
+
+    with open(svar_meta_path) as f:
+        svar_meta = _json.load(f)
+    shape = tuple(svar_meta["shape"])
+    dtype = np.dtype(svar_meta["dtype"])
+
+    offset_path = path / "genotypes" / "offsets.npy"
+
+    # The resolved SVAR directory is already embedded in haps.variants.path
+    # (which was set to <svar_path>/index.arrow by Haps.from_path, respecting any
+    # svar_override). Using .parent avoids re-resolving from metadata and correctly
+    # handles the svar_override case that the legacy link.svar branch would miss.
+    svar_path = haps.variants.path.parent
+
+    offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
+    rag_shape = (*shape[1:], None)
+
+    updated_var_field_data = dict(haps.var_field_data)
+    for name, ftype in new_fields.items():
+        field_path = svar_path / f"{name}.npy"
+        if not field_path.exists():
+            raise ValueError(
+                f"Custom FORMAT field '{name}' registered in SVAR metadata but "
+                f"{field_path} does not exist."
+            )
+        field_mm = np.memmap(field_path, dtype=ftype, mode="r")
+        updated_var_field_data[name] = Ragged.from_offsets(
+            field_mm, rag_shape, offsets.reshape(2, -1)
+        )
+    return replace(haps, var_field_data=updated_var_field_data)
 
 
 SEQ = TypeVar("SEQ", NDArray[np.bytes_], AnnotatedHaps, RaggedVariants)

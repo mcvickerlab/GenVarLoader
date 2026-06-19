@@ -238,6 +238,18 @@ def _alt_layout_parts(
     return leaf, allele_offsets, group_offsets, ploidy
 
 
+def _svar_format_fields(svar_dir: Path) -> dict[str, np.dtype]:
+    """genoray custom per-call FORMAT fields: name -> dtype, from <svar>/metadata.json.
+
+    Returns {} when the metadata file is absent (non-SVAR / synthetic datasets).
+    """
+    meta = svar_dir / "metadata.json"
+    if not meta.is_file():
+        return {}
+    fields = json.loads(meta.read_text()).get("fields", {})
+    return {name: np.dtype(dt) for name, dt in fields.items()}
+
+
 @dataclass(slots=True)
 class Haps(Reconstructor[_H]):
     path: Path
@@ -258,6 +270,9 @@ class Haps(Reconstructor[_H]):
     max_af: float | None
     """The maximum allele frequency to keep."""
     var_fields: list[str] = field(default_factory=lambda: ["alt", "ilen", "start"])
+    var_field_data: dict[str, Ragged] = field(default_factory=dict)
+    """Custom per-call (Number=G) FORMAT fields requested via ``var_fields``,
+    memmapped on the genotype offsets. Parallel to ``dosages``. See issue #231."""
     dummy_variant: "DummyVariant | None" = None
     available_var_fields: list[str] = field(init=False)
     flank_length: int | None = None
@@ -290,12 +305,15 @@ class Haps(Reconstructor[_H]):
             schema_info_fields = list(self.variants.info.keys())
         has_dosage_file = self._has_dosage_file_on_disk()
 
-        self.available_var_fields = (
+        custom_fmt = _svar_format_fields(self.variants.path.parent)
+        base = (
             ["alt", "ilen", "start"]
             + schema_info_fields
             + (["ref"] if self.variants.ref is not None else [])
             + (["dosage"] if has_dosage_file else [])
         )
+        # Per-call FORMAT fields win over a same-named INFO column; list each once.
+        self.available_var_fields = base + [f for f in custom_fmt if f not in base]
 
         if (
             self.min_af is not None or self.max_af is not None
@@ -347,6 +365,7 @@ class Haps(Reconstructor[_H]):
 
         svar_meta_path = path / "genotypes" / "svar_meta.json"
         dosages = None
+        var_field_data: dict[str, Ragged] = {}
 
         if svar_meta_path.exists():
             with open(svar_meta_path) as f:
@@ -400,6 +419,17 @@ class Haps(Reconstructor[_H]):
                     dosages_mm, rag_shape, offsets.reshape(2, -1)
                 )
 
+            custom_fmt = _svar_format_fields(svar_path)
+            info_fields = info_fields - set(custom_fmt)
+            for name in var_fields:
+                if name in custom_fmt:
+                    field_mm = np.memmap(
+                        svar_path / f"{name}.npy", dtype=custom_fmt[name], mode="r"
+                    )
+                    var_field_data[name] = Ragged.from_offsets(
+                        field_mm, rag_shape, offsets.reshape(2, -1)
+                    )
+
             logger.info("Loading variant data.")
             variants = _Variants.from_table(
                 svar_path / "index.arrow", info_fields=info_fields
@@ -429,6 +459,7 @@ class Haps(Reconstructor[_H]):
             variants=variants,
             genotypes=genotypes,
             dosages=dosages,
+            var_field_data=var_field_data,
             kind=RaggedVariants,
             filter=filter,
             min_af=min_af,

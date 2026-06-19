@@ -754,9 +754,20 @@ def get_variants_flat(
     if dosage_data is not None:
         fields["dosage"] = _Flat.from_offsets(dosage_data, shape, row_offsets)
 
+    # Custom per-call FORMAT fields (issue #231): same gather/compaction as dosage.
+    for name, rag in haps.var_field_data.items():
+        if name not in haps.var_fields:
+            continue
+        cf_off = np.asarray(rag.offsets, np.int64)
+        cf_all = np.asarray(rag.data)
+        cf_data, _ = _gather_rows(geno_offset_idx, cf_off, cf_all)
+        if keep is not None:
+            cf_data, _ = _compact_keep(cf_data, unfiltered_row_offsets, keep)
+        fields[name] = _Flat.from_offsets(cf_data, shape, row_offsets)
+
     # other info fields
     for k in haps.var_fields:
-        if k in {"alt", "start", "ref", "ilen", "dosage"}:
+        if k in {"alt", "start", "ref", "ilen", "dosage"} or k in haps.var_field_data:
             continue
         info_data = np.asarray(haps.variants.info[k])[v_idxs]
         fields[k] = _Flat.from_offsets(info_data, shape, row_offsets)
