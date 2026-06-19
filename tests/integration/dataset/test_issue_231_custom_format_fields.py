@@ -132,3 +132,32 @@ def test_custom_field_af_compaction_matches_dosage(custom_field_ds, ref_fasta):
     custom = ak.to_numpy(ak.flatten(batch[field_name], axis=None)).astype(np.float64)
     dosage = ak.to_numpy(ak.flatten(batch["dosage"], axis=None)).astype(np.float64)
     np.testing.assert_array_equal(custom, dosage)
+
+
+def test_custom_field_present_in_flat_mode(custom_field_ds, ref_fasta):
+    gvl_path, field_name, _ = custom_field_ds
+    ds = (
+        gvl.Dataset.open(gvl_path, ref_fasta, rc_neg=False)
+        .with_len("ragged")
+        .with_seqs("variants")
+        .with_settings(var_fields=["alt", "ilen", "start", field_name])
+        .with_output_format("flat")
+    )
+    flat = ds[0, ds.samples[0]]  # _FlatVariants
+    assert field_name in flat.fields
+    # Re-wrapping to ragged keeps the field.
+    assert field_name in flat.to_ragged().fields
+
+
+def test_custom_field_present_in_variant_windows(custom_field_ds, ref_fasta):
+    gvl_path, field_name, _ = custom_field_ds
+    opt = gvl.VarWindowOpt(flank_length=3, token_alphabet=b"ACGT", unknown_token=4)
+    ds = (
+        gvl.Dataset.open(gvl_path, ref_fasta, rc_neg=False)
+        .with_len("ragged")
+        .with_seqs("variant-windows", opt)
+        .with_settings(var_fields=["alt", "ilen", "start", field_name])
+        .with_output_format("flat")
+    )
+    batch = ds[0, ds.samples[0]]
+    assert field_name in batch.fields
