@@ -63,6 +63,7 @@ class OpenRequest:
         self._validate_path()
         metadata = self._load_metadata()
         idxer, bed, regions = self._build_indexer(metadata)
+        self._warn_truncated_tracks(metadata, regions)
         reference = self._resolve_reference(metadata.contigs)
         seqs = self._build_seqs(metadata, reference, regions)
         tracks = self._build_tracks(len(regions), len(metadata.samples))
@@ -175,6 +176,26 @@ class OpenRequest:
             return None
         tracks = Tracks.from_path(self.path, n_regions, n_samples)
         return tracks.with_tracks(list(tracks.intervals))
+
+    def _warn_truncated_tracks(
+        self, metadata: Metadata, regions: NDArray[np.int32]
+    ) -> None:
+        """Warn when a dataset's stored track windows were truncated below the
+        input regions (variant+track datasets written before the chromEnd-floor
+        fix). Such datasets silently drop track signal past each region's
+        rightmost variant and must be rewritten with ``gvl.write``/``gvl.update``.
+        """
+        if not (self._has_genotypes() and self._has_intervals()):
+            return
+        stored = np.load(self.path / "regions.npy", mmap_mode="r")
+        floor = regions[:, 2] + (metadata.max_jitter or 0)
+        if bool((stored[:, 2] < floor).any()):
+            logger.warning(
+                f"Dataset at {self.path} (written by genvarloader "
+                f"{metadata.version}) has track windows truncated below its input "
+                f"regions: track signal past each region's rightmost variant is "
+                f"missing. Rewrite with `gvl.write` / `gvl.update` to fix."
+            )
 
     @staticmethod
     def _initial_seqs_kind(seqs: Haps | Ref | None) -> SeqsKind:

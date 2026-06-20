@@ -4,6 +4,7 @@ import pyBigWig
 import pytest
 import seqpro as sp
 from genoray import PGEN, VCF, SparseVar
+from loguru import logger
 
 import genvarloader as gvl
 
@@ -79,3 +80,47 @@ def test_annot_track_tail_not_truncated_by_variants(vcf_dir, ref_fasta, tmp_path
     # fully covered at the source value.
     assert np.count_nonzero(seg) == width
     assert np.allclose(seg, 0.5)
+
+
+def _capture_warnings():
+    msgs: list[str] = []
+    sink_id = logger.add(lambda m: msgs.append(str(m)), level="WARNING")
+    return msgs, sink_id
+
+
+def test_warns_on_truncated_track_window(vcf_dir, ref_fasta, tmp_path):
+    chr1_len = _chr1_len(ref_fasta)
+    bw_path = tmp_path / "sig.bw"
+    bw = pyBigWig.open(str(bw_path), "w")
+    bw.addHeader([("chr1", chr1_len)])
+    bw.addEntries(["chr1"], [0], ends=[chr1_len], values=[0.5])
+    bw.close()
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [100], "chromEnd": [chr1_len]})
+    out = tmp_path / "ds.gvl"
+    gvl.write(
+        out,
+        bed,
+        variants=VCF(vcf_dir / "filtered_source.vcf.gz"),
+        annot_tracks={"sig": str(bw_path)},
+        overwrite=True,
+    )
+
+    # A clean (post-fix) dataset must NOT warn.
+    clean_msgs, sid = _capture_warnings()
+    try:
+        gvl.Dataset.open(out, ref_fasta)
+    finally:
+        logger.remove(sid)
+    assert not any("truncat" in m.lower() for m in clean_msgs)
+
+    # Simulate a legacy writer: pull each stored chromEnd below the input window.
+    regions = np.load(out / "regions.npy")
+    regions[:, 2] = regions[:, 2] - 50
+    np.save(out / "regions.npy", regions)
+
+    dirty_msgs, sid = _capture_warnings()
+    try:
+        gvl.Dataset.open(out, ref_fasta)
+    finally:
+        logger.remove(sid)
+    assert any("truncat" in m.lower() for m in dirty_msgs)
