@@ -648,11 +648,14 @@ def _window_to_sparse(
 
 
 def _region_end(rag: Ragged, v_ends: NDArray, fallback_end: int) -> int:
-    """Per-region chromEnd = end position of the furthest retained variant.
+    """Per-region chromEnd, floored at the input window so tracks are never
+    stored over a truncated region.
 
     ``rag`` is a sparse ``(samples, ploidy, ~variants)`` Ragged of global
-    variant indices. Returns ``v_ends[max idx]`` across all haplotypes, or
-    ``fallback_end`` when no variant is retained (mirrors _write_from_svar).
+    variant indices. Returns ``max(fallback_end, v_ends[max idx])`` across all
+    haplotypes (the furthest retained variant end, but never below the input
+    window ``fallback_end``), or ``fallback_end`` when no variant is retained
+    (mirrors _write_from_svar).
     """
     if rag.data.size == 0:
         return int(fallback_end)
