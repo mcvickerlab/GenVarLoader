@@ -65,6 +65,18 @@ impl RustTable {
             .collect()
     }
 
+    /// Count interval overlaps for each (region, sample) pair.
+    ///
+    /// Returns a 2-D array of shape `(n_regions, n_sel)` where entry `[ri, sj]`
+    /// is the number of stored intervals that overlap `[q_starts[ri], q_ends[ri])`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `chrom_code >= n_contigs` (negative codes are treated as an
+    /// unknown contig and return zeros) or if any element of `sel_samples` is
+    /// `>= n_samples`.  Callers (the Python `Table`) must pass factor-encoded
+    /// codes derived from the Table's own sample / contig lists to satisfy
+    /// these preconditions.
     pub fn count(
         &self,
         chrom_code: i32,
@@ -80,6 +92,11 @@ impl RustTable {
         }
         let trees = self.build_trees(chrom_code as usize);
         for (sj, &s) in sel_samples.iter().enumerate() {
+            debug_assert!(
+                (s as usize) < trees.len(),
+                "sample code {s} out of range (n_samples={})",
+                trees.len()
+            );
             let tree = &trees[s as usize];
             for ri in 0..n_regions {
                 let c = tree.query_count(q_starts[ri], q_ends[ri] - 1) as i32;
