@@ -7,7 +7,32 @@ use std::path::PathBuf;
 fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(count_intervals, m)?)?;
     m.add_function(wrap_pyfunction!(intervals, m)?)?;
+    m.add_function(wrap_pyfunction!(bigwig_write_track, m)?)?;
     Ok(())
+}
+
+/// Write intervals.npy + offsets.npy for a bigWig track directly to `out_dir`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn bigwig_write_track(
+    paths: Vec<PathBuf>,
+    contigs: Vec<String>,
+    starts: PyReadonlyArray1<i32>,
+    ends: PyReadonlyArray1<i32>,
+    max_mem: usize,
+    out_dir: PathBuf,
+    sample_less: bool,
+) -> PyResult<()> {
+    bigwig::write_track(
+        &paths,
+        &contigs,
+        starts.as_array(),
+        ends.as_array(),
+        max_mem,
+        &out_dir,
+        sample_less,
+    )
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
 /// Count intervals from BigWig files.

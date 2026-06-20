@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
+    from .._bigwig import BigWigs
     from .._types import IntervalTrack
     from .._ragged import RaggedIntervals
     from ._impl import Dataset
@@ -1160,17 +1161,58 @@ def _annot_intervals_from_bigwig(
     )
 
 
+def _write_annot_track_rust(
+    out_dir: Path,
+    regions: pl.DataFrame,
+    path: Path,
+    max_mem: int,
+) -> None:
+    from .._bigwig import BigWigs
+    from ..genvarloader import bigwig_write_track
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    bw = BigWigs(name="__annot__", paths={"__annot__": str(path)})
+    contigs: list[str] = []
+    starts_l: list[int] = []
+    ends_l: list[int] = []
+    for chrom, s, e in zip(
+        regions["chrom"].to_list(),
+        regions["chromStart"].to_list(),
+        regions["chromEnd"].to_list(),
+    ):
+        norm = normalize_contig_name(chrom, bw.contigs)
+        if norm is None:
+            raise ValueError(f"Contig {chrom!r} not found in bigWig {path}.")
+        contigs.append(norm)
+        starts_l.append(int(s))
+        ends_l.append(int(e))
+    bigwig_write_track(
+        [str(path)],
+        contigs,
+        np.asarray(starts_l, dtype=np.int32),
+        np.asarray(ends_l, dtype=np.int32),
+        int(max_mem),
+        str(out_dir),
+        True,
+    )
+
+
 def _write_annot_track(
     out_dir: Path,
     regions: pl.DataFrame,
     source: "str | Path | pl.DataFrame | pl.LazyFrame",
     max_mem: int,
 ) -> None:
+    if isinstance(source, (str, Path)) and Path(source).suffix.lower() in (
+        ".bw",
+        ".bigwig",
+    ):
+        return _write_annot_track_rust(out_dir, regions, Path(source), max_mem)
     itvs = _annot_intervals(regions, source, max_mem)
     _write_ragged_intervals(out_dir, itvs)
 
 
-def _write_track(
+def _write_track_legacy(
     out_dir: Path,
     bed: pl.DataFrame,
     track: "IntervalTrack",
@@ -1297,3 +1339,60 @@ def _write_track(
     )
     out[-1] = offsets[-1]
     out.flush()
+
+
+def _write_track_rust(
+    out_dir: Path,
+    bed: pl.DataFrame,
+    track: "BigWigs",
+    samples: list[str],
+    max_mem: int,
+) -> None:
+    from ..genvarloader import bigwig_write_track
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # ordered sample paths (dataset/sample order)
+    paths = [track.paths[s] for s in samples]
+    # per-region normalized contig name, in bed row order (bed is contig-grouped)
+    contigs: list[str] = []
+    starts_l: list[int] = []
+    ends_l: list[int] = []
+    for chrom, s, e in zip(
+        bed["chrom"].to_list(),
+        bed["chromStart"].to_list(),
+        bed["chromEnd"].to_list(),
+    ):
+        norm = normalize_contig_name(chrom, track.contigs)
+        if norm is None:
+            raise ValueError(
+                f"Contig {chrom!r} not found in bigWig track {track.name!r}."
+            )
+        contigs.append(norm)
+        starts_l.append(int(s))
+        ends_l.append(int(e))
+    bigwig_write_track(
+        paths,
+        contigs,
+        np.asarray(starts_l, dtype=np.int32),
+        np.asarray(ends_l, dtype=np.int32),
+        int(max_mem),
+        str(out_dir),
+        False,
+    )
+
+
+def _write_track(
+    out_dir: Path,
+    bed: pl.DataFrame,
+    track: "IntervalTrack",
+    samples: list[str] | None,
+    max_mem: int,
+):
+    from .._bigwig import BigWigs
+
+    if isinstance(track, BigWigs):
+        _samples = samples if samples is not None else track.samples
+        if missing := (set(_samples) - set(track.samples)):
+            raise ValueError(f"Samples {missing} not found in track.")
+        return _write_track_rust(out_dir, bed, track, _samples, max_mem)
+    return _write_track_legacy(out_dir, bed, track, samples, max_mem)

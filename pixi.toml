@@ -148,6 +148,7 @@ profile-variants = { cmd = "py-spy record -o tests/benchmarks/profiling/variants
 memray-haps = { cmd = "memray run -fo tests/benchmarks/profiling/haps.memray.bin tests/benchmarks/profiling/profile.py --mode haplotypes" }
 memray-tracks = { cmd = "memray run -fo tests/benchmarks/profiling/tracks.memray.bin tests/benchmarks/profiling/profile.py --mode tracks" }
 memray-variants = { cmd = "memray run -fo tests/benchmarks/profiling/variants.memray.bin tests/benchmarks/profiling/profile.py --mode variants" }
+memray-bigwig-write = { cmd = "memray run -fo tests/benchmarks/profiling/bigwig_write.memray.bin tests/benchmarks/profiling/profile_bigwig_write.py --impl rust" }
 
 [feature.docs.tasks]
 install-e = "uv pip install -e /cellar/users/dlaub/projects/ML4GLand/SeqPro -e /cellar/users/dlaub/projects/genoray -e ."
