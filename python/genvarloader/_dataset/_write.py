@@ -1363,9 +1363,7 @@ def _write_track_rust(
     norm = cnorm.norm(bed["chrom"].to_list())
     if any(n is None for n in norm):
         bad = next(c for n, c in zip(norm, bed["chrom"].to_list()) if n is None)
-        raise ValueError(
-            f"Contig {bad!r} not found in bigWig track {track.name!r}."
-        )
+        raise ValueError(f"Contig {bad!r} not found in bigWig track {track.name!r}.")
     contigs = [str(n) for n in norm]
     starts = np.ascontiguousarray(bed["chromStart"].to_numpy(), dtype=np.int32)
     ends = np.ascontiguousarray(bed["chromEnd"].to_numpy(), dtype=np.int32)
@@ -1392,9 +1390,9 @@ def _write_track_table(
     # Use norm() to detect absent contigs (returns None); force those to -1.
     norm = track._cnorm.norm(bed["chrom"].to_list())
     chrom_codes = track._cnorm.c_idxs(bed["chrom"].to_numpy())
-    chrom_codes = np.where(
-        np.array([n is None for n in norm]), -1, chrom_codes
-    ).astype(np.int32)
+    chrom_codes = np.where(np.array([n is None for n in norm]), -1, chrom_codes).astype(
+        np.int32
+    )
     starts = np.ascontiguousarray(bed["chromStart"].to_numpy(), dtype=np.int32)
     ends = np.ascontiguousarray(bed["chromEnd"].to_numpy(), dtype=np.int32)
     track._rust.write_track(

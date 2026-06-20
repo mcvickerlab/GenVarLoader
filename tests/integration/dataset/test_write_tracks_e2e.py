@@ -3,7 +3,6 @@ from pathlib import Path
 import genvarloader as gvl
 import numpy as np
 import polars as pl
-import pytest
 from genvarloader import Table
 
 

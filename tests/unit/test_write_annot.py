@@ -1,6 +1,5 @@
 import numpy as np
 import polars as pl
-import pytest
 
 
 def _regions():
