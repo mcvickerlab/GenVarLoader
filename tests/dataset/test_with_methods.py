@@ -28,10 +28,9 @@ def base_ds(source_bed, vcf_dir, reference, tmp_path_factory):
     which omits tracks) so the with_tracks / with_seqs(None) tests have a track
     to exercise.
 
-    Tracks are provided via ``gvl.BigWigs`` (not ``gvl.Table``) to avoid leaving
-    the polars_bio C extension in a bad state, which segfaulted a downstream
-    ``gvl.write`` call on py312/py313 when these tests ran in the same session
-    as ``tests/integration/dataset/test_issue_153.py``.
+    Tracks are provided via ``gvl.BigWigs`` (not ``gvl.Table``) to keep this
+    fixture self-contained; ``gvl.Table`` now uses the Rust backend and no
+    longer requires polars-bio.
 
     Default state after open():
       - output_length = "ragged"
