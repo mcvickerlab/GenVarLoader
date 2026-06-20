@@ -3,6 +3,7 @@
 import numpy as np
 import polars as pl
 from genvarloader import Table
+from genvarloader._table import annot_overlap
 from genvarloader._utils import lengths_to_offsets
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -96,3 +97,84 @@ def test_count_and_intervals_match_oracle(
                 np.testing.assert_array_equal(itvs.starts.data[lo:hi], exp_s)
                 np.testing.assert_array_equal(itvs.ends.data[lo:hi], exp_e)
                 np.testing.assert_array_equal(itvs.values.data[lo:hi], exp_v)
+
+
+def _rand_annot(rng, n_contigs, n_intervals):
+    """Generate a random sample-less BED-like annot DataFrame."""
+    rows = []
+    for _ in range(n_intervals):
+        c = int(rng.integers(0, n_contigs))
+        start = int(rng.integers(0, 500))
+        width = int(rng.integers(1, 50))  # positive width only
+        rows.append((f"chr{c}", start, start + width, float(rng.random())))
+    return pl.DataFrame(
+        rows, schema=["chrom", "chromStart", "chromEnd", "score"], orient="row"
+    )
+
+
+@settings(max_examples=100, deadline=None)
+@given(
+    seed=st.integers(0, 2**32 - 1),
+    n_contigs=st.integers(1, 3),
+    n_intervals=st.integers(0, 40),
+    n_regions=st.integers(1, 6),
+)
+def test_annot_overlap_matches_oracle(seed, n_contigs, n_intervals, n_regions):
+    rng = np.random.default_rng(seed)
+    annot = _rand_annot(rng, n_contigs, n_intervals)
+
+    # Build random query regions (one contig per region for variety).
+    region_rows = []
+    for _ in range(n_regions):
+        c = int(rng.integers(0, n_contigs))
+        start = int(rng.integers(0, 500))
+        width = int(rng.integers(1, 100))
+        region_rows.append((f"chr{c}", start, start + width))
+    regions = pl.DataFrame(
+        region_rows, schema=["chrom", "chromStart", "chromEnd"], orient="row"
+    )
+
+    if annot.height == 0:
+        return  # empty annot: annot_overlap does not support it (Table has no samples)
+
+    # Call the function under test.
+    itvs = annot_overlap(regions, annot)
+
+    # Build oracle using the same internal Table that annot_overlap constructs, so
+    # that equal-start tie-breaking matches the polars stable sort on (chrom, sample_id, start).
+    annot_long = annot.select(
+        pl.lit("__annot__").alias("sample_id"),
+        "chrom",
+        pl.col("chromStart").alias("start"),
+        pl.col("chromEnd").alias("end"),
+        pl.col("score").alias("value"),
+    )
+    ref_table = Table("__annot__", annot_long)
+    # ref_table._df is sorted by (chrom, sample_id, start) — same as annot_overlap does.
+    stored = ref_table._df
+
+    r_chroms = regions["chrom"].to_list()
+    r_starts = regions["chromStart"].to_numpy()
+    r_ends = regions["chromEnd"].to_numpy()
+
+    for ri in range(n_regions):
+        contig = r_chroms[ri]
+        rs, re_ = int(r_starts[ri]), int(r_ends[ri])
+
+        # Oracle: filter stored_df by contig then apply half-open overlap mask.
+        sub = stored.filter(pl.col("chrom") == contig)
+        ts = sub["start"].to_numpy()
+        te = sub["end"].to_numpy()
+        tv = sub["value"].to_numpy()
+        mask = (ts < re_) & (te > rs)
+        exp_s = ts[mask].astype(np.int32)
+        exp_e = te[mask].astype(np.int32)
+        exp_v = tv[mask].astype(np.float32)
+
+        got_s = np.asarray(itvs.starts[ri], dtype=np.int32)
+        got_e = np.asarray(itvs.ends[ri], dtype=np.int32)
+        got_v = np.asarray(itvs.values[ri], dtype=np.float32)
+
+        np.testing.assert_array_equal(got_s, exp_s)
+        np.testing.assert_array_equal(got_e, exp_e)
+        np.testing.assert_array_equal(got_v, exp_v)
