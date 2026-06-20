@@ -253,6 +253,16 @@ def annot_overlap(regions: pl.DataFrame, annot: pl.DataFrame) -> "RaggedInterval
     from ._ragged import RaggedIntervals
     from ._utils import lengths_to_offsets
 
+    if annot.height == 0:
+        n_regions = regions.height
+        offsets = np.zeros(n_regions + 1, dtype=np.int64)
+        shape = (n_regions, None)
+        return RaggedIntervals(
+            Ragged.from_offsets(np.empty(0, dtype=np.int32), shape, offsets),
+            Ragged.from_offsets(np.empty(0, dtype=np.int32), shape, offsets),
+            Ragged.from_offsets(np.empty(0, dtype=np.float32), shape, offsets),
+        )
+
     annot_long = annot.select(
         pl.lit("__annot__").alias("sample_id"),
         "chrom",

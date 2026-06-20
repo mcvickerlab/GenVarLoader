@@ -23,7 +23,6 @@ struct ContigStore {
 
 #[pyclass]
 pub struct RustTable {
-    n_samples: usize,
     store: Vec<ContigStore>, // indexed by chrom_code (0..n_contigs)
 }
 
@@ -50,7 +49,7 @@ impl RustTable {
             cell.ends.push(ends[i]);
             cell.values.push(values[i]);
         }
-        RustTable { n_samples, store }
+        RustTable { store }
     }
 
     /// Build one COITree per sample for `chrom`. Intervals are stored half-open
