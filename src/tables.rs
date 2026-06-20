@@ -106,6 +106,44 @@ impl RustTable {
         out
     }
 
+    pub fn intervals_from_offsets(
+        &self,
+        chrom_code: i32,
+        q_starts: &[i32],
+        q_ends: &[i32],
+        sel_samples: &[i32],
+        offsets: &[i64],
+    ) -> (Array2<i32>, Array1<f32>) {
+        let n_total = *offsets.last().unwrap() as usize;
+        let mut coords = Array2::<i32>::zeros((n_total, 2));
+        let mut values = Array1::<f32>::zeros(n_total);
+        if chrom_code < 0 || n_total == 0 {
+            return (coords, values);
+        }
+        let chrom = chrom_code as usize;
+        let trees = self.build_trees(chrom);
+        let n_sel = sel_samples.len();
+        for ri in 0..q_starts.len() {
+            for (sj, &s) in sel_samples.iter().enumerate() {
+                let cell_idx = ri * n_sel + sj;
+                let base = offsets[cell_idx] as usize;
+                let tree = &trees[s as usize];
+                let mut idxs: Vec<u32> = Vec::new();
+                tree.query(q_starts[ri], q_ends[ri] - 1, |iv| idxs.push(iv.metadata));
+                // ascending stored index == ascending start (Table pre-sorted by start)
+                idxs.sort_unstable();
+                let cell = &self.store[chrom].samples[s as usize];
+                for (j, &k) in idxs.iter().enumerate() {
+                    let k = k as usize;
+                    coords[[base + j, 0]] = cell.starts[k];
+                    coords[[base + j, 1]] = cell.ends[k];
+                    values[base + j] = cell.values[k];
+                }
+            }
+        }
+        (coords, values)
+    }
+
     #[cfg(test)]
     fn n_in_cell(&self, chrom: usize, sample: usize) -> usize {
         self.store[chrom].samples[sample].starts.len()
@@ -181,5 +219,38 @@ mod tests {
         let t = toy();
         let got = t.count(-1, &[0i32], &[10i32], &[0i32]);
         assert_eq!(got, Array2::<i32>::zeros((1, 1)));
+    }
+
+    fn offsets_from_count(counts: &Array2<i32>) -> Vec<i64> {
+        let mut v = vec![0i64];
+        let mut acc = 0i64;
+        for r in 0..counts.nrows() {
+            for s in 0..counts.ncols() {
+                acc += counts[[r, s]] as i64;
+                v.push(acc);
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn intervals_from_offsets_ordered_and_correct() {
+        let t = toy();
+        let qs = [0i32, 5];
+        let qe = [60i32, 55];
+        let sel = [0i32, 1];
+        let counts = t.count(0, &qs, &qe, &sel);
+        let offsets = offsets_from_count(&counts);
+        let (coords, vals) = t.intervals_from_offsets(0, &qs, &qe, &sel, &offsets);
+
+        // cell (region0, sample0): intervals [0,10) v1 and [50,60) v2, sorted by start
+        assert_eq!(coords[[0, 0]], 0);
+        assert_eq!(coords[[0, 1]], 10);
+        assert_eq!(vals[0], 1.0);
+        assert_eq!(coords[[1, 0]], 50);
+        assert_eq!(coords[[1, 1]], 60);
+        assert_eq!(vals[1], 2.0);
+        // total length equals sum of counts
+        assert_eq!(vals.len(), counts.sum() as usize);
     }
 }
