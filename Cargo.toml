@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow = "1.0.102"
 bigtools = "0.5.6"
+coitrees = "0.4"
 itertools = "0.14.0"
 ndarray = "0.17.2"
 numpy = "0.28.0"

@@ -214,6 +214,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "coitrees"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "240f9610db0e586042f50260506972820ef10d5eb9a0e867a00f8cfe0a238be3"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -435,6 +441,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "bigtools",
+ "coitrees",
  "itertools 0.14.0",
  "ndarray",
  "numpy",
