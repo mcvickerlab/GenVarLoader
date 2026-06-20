@@ -648,15 +648,18 @@ def _window_to_sparse(
 
 
 def _region_end(rag: Ragged, v_ends: NDArray, fallback_end: int) -> int:
-    """Per-region chromEnd = end position of the furthest retained variant.
+    """Per-region chromEnd, floored at the input window so tracks are never
+    stored over a truncated region.
 
     ``rag`` is a sparse ``(samples, ploidy, ~variants)`` Ragged of global
-    variant indices. Returns ``v_ends[max idx]`` across all haplotypes, or
-    ``fallback_end`` when no variant is retained (mirrors _write_from_svar).
+    variant indices. Returns ``max(fallback_end, v_ends[max idx])`` across all
+    haplotypes (the furthest retained variant end, but never below the input
+    window ``fallback_end``), or ``fallback_end`` when no variant is retained
+    (mirrors _write_from_svar).
     """
     if rag.data.size == 0:
         return int(fallback_end)
-    return int(v_ends[int(rag.data.max())])
+    return max(int(fallback_end), int(v_ends[int(rag.data.max())]))
 
 
 def _region_ends_from_list(
@@ -669,7 +672,7 @@ def _region_ends_from_list(
             max_idx = max(max_idx, int(rag.data.max()))
     if max_idx < 0:
         return int(fallback_end)
-    return int(v_ends[max_idx])
+    return max(int(fallback_end), int(v_ends[max_idx]))
 
 
 def _vcf_region_chunks(
@@ -1031,7 +1034,9 @@ def _write_from_svar(
         ),
     )
 
-    return bed.with_columns(chromEnd=pl.Series(max_ends)), svar_link
+    return bed.with_columns(
+        chromEnd=pl.max_horizontal(pl.Series(max_ends), pl.col("chromEnd"))
+    ), svar_link
 
 
 def _write_phased_variants_chunk(
