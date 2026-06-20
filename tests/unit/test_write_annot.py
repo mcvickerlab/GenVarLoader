@@ -1,19 +1,6 @@
-import os
-
 import numpy as np
 import polars as pl
 import pytest
-
-# polars-bio is gated exactly like gvl.Table (see tests/unit/test_table.py).
-if not os.environ.get("GVL_TEST_EXPERIMENTAL"):
-    pytest.skip(
-        "annot polars-bio path is experimental; set GVL_TEST_EXPERIMENTAL=1 to run.",
-        allow_module_level=True,
-    )
-
-pytestmark = pytest.mark.filterwarnings(
-    "ignore::genvarloader._table.ExperimentalWarning"
-)
 
 
 def _regions():
