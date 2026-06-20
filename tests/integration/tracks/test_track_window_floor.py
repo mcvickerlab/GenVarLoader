@@ -124,3 +124,21 @@ def test_warns_on_truncated_track_window(vcf_dir, ref_fasta, tmp_path):
     finally:
         logger.remove(sid)
     assert any("truncat" in m.lower() for m in dirty_msgs)
+
+
+def test_dataset_regions_match_input_with_variants(vcf_dir, ref_fasta, tmp_path):
+    chr1_len = _chr1_len(ref_fasta)
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [100, 300],
+            "chromEnd": [250, chr1_len],
+        }
+    )
+    out = tmp_path / "ds.gvl"
+    gvl.write(
+        out, bed, variants=VCF(vcf_dir / "filtered_source.vcf.gz"), overwrite=True
+    )
+    ds = gvl.Dataset.open(out, ref_fasta)
+    got = ds.regions.select("chrom", "chromStart", "chromEnd")
+    assert got.to_dicts() == bed.to_dicts()
