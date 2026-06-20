@@ -114,10 +114,8 @@ def write(
         Sample-independent annotation tracks, as a mapping of track name to source.
         Each source is a path to an interval table, a path to a bigWig, or a polars
         DataFrame/LazyFrame interpreted as a BED-like interval table (columns ``chrom``,
-        ``chromStart``, ``chromEnd``, ``score``). Table/DataFrame sources use the
-        polars-bio overlap backend and require the ``table`` extra
-        (``pip install genvarloader[table]``); they emit an ``ExperimentalWarning``.
-        bigWig sources do not. Written to ``<path>/annot_intervals/<name>/``.
+        ``chromStart``, ``chromEnd``, ``score``). Table/DataFrame sources are served by
+        the Rust COITrees overlap backend. Written to ``<path>/annot_intervals/<name>/``.
     samples
         Samples to include in the dataset
     max_jitter
