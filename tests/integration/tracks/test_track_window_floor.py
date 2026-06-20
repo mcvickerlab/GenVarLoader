@@ -1,5 +1,6 @@
 import numpy as np
 import polars as pl
+import pyBigWig
 import pytest
 import seqpro as sp
 from genoray import PGEN, VCF, SparseVar
@@ -41,3 +42,40 @@ def test_stored_window_floored_to_input(
         f"{source}: stored chromEnd {regions[:, 2].tolist()} truncated below "
         f"input {input_end.tolist()}"
     )
+
+
+def test_annot_track_tail_not_truncated_by_variants(vcf_dir, ref_fasta, tmp_path):
+    chr1_len = _chr1_len(ref_fasta)
+    # Constant-signal bigWig over all of chr1: every position reads 0.5.
+    bw_path = tmp_path / "sig.bw"
+    bw = pyBigWig.open(str(bw_path), "w")
+    bw.addHeader([("chr1", chr1_len)])
+    bw.addEntries(["chr1"], [0], ends=[chr1_len], values=[0.5])
+    bw.close()
+
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [100], "chromEnd": [chr1_len]})
+    out = tmp_path / "ds.gvl"
+    gvl.write(
+        out,
+        bed,
+        variants=VCF(vcf_dir / "filtered_source.vcf.gz"),
+        annot_tracks={"sig": str(bw_path)},
+        overwrite=True,
+    )
+
+    fr = (
+        gvl.Dataset.open(out, ref_fasta)
+        .with_seqs(None)
+        .with_output_format("flat")
+        .with_settings(realign_tracks=False)
+        .with_tracks(["sig"])
+    )[0:1, 0]
+    data, offs = np.asarray(fr.data), np.asarray(fr.offsets)
+    seg = data[offs[0] : offs[1]]
+
+    width = chr1_len - 100
+    assert seg.shape[0] == width
+    # Pre-fix the tail past the rightmost variant reads back 0; post-fix it is
+    # fully covered at the source value.
+    assert np.count_nonzero(seg) == width
+    assert np.allclose(seg, 0.5)
