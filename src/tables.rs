@@ -1,7 +1,11 @@
 use anyhow::Result;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use ndarray::prelude::*;
+use numpy::{prelude::*, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::prelude::*;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::Path;
 
 /// One sample's intervals on one contig, sorted by start.
 #[derive(Default, Clone)]
@@ -144,9 +148,170 @@ impl RustTable {
         (coords, values)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_track_impl(
+        &self,
+        out_dir: &Path,
+        chrom_codes: &[i32],
+        q_starts: &[i32],
+        q_ends: &[i32],
+        sel_samples: &[i32],
+        max_mem: usize,
+    ) -> Result<()> {
+        std::fs::create_dir_all(out_dir)?;
+        let mut itv_w = BufWriter::new(File::create(out_dir.join("intervals.npy"))?);
+        let mut off_w = BufWriter::new(File::create(out_dir.join("offsets.npy"))?);
+
+        let n_regions = chrom_codes.len();
+        let mut acc: i64 = 0;
+        off_w.write_all(&acc.to_le_bytes())?; // leading 0
+
+        // Lazy per-contig trees, rebuilt when chrom_code changes (bed is contig-grouped).
+        let mut cur_chrom: i32 = -2;
+        let mut trees: Vec<BasicCOITree<u32, u32>> = Vec::new();
+
+        for ri in 0..n_regions {
+            let c = chrom_codes[ri];
+            if c != cur_chrom {
+                trees = if c < 0 {
+                    Vec::new()
+                } else {
+                    self.build_trees(c as usize)
+                };
+                cur_chrom = c;
+            }
+            // gather this region's overlaps for all selected samples
+            let mut region_rows: Vec<(i32, i32, f32)> = Vec::new();
+            let mut per_cell_counts: Vec<i64> = Vec::with_capacity(sel_samples.len());
+            for &s in sel_samples {
+                let mut start_count = 0i64;
+                if c >= 0 {
+                    let cell = &self.store[c as usize].samples[s as usize];
+                    let tree = &trees[s as usize];
+                    let mut idxs: Vec<u32> = Vec::new();
+                    tree.query(q_starts[ri], q_ends[ri] - 1, |iv| idxs.push(iv.metadata));
+                    idxs.sort_unstable();
+                    start_count = idxs.len() as i64;
+                    for &k in &idxs {
+                        let k = k as usize;
+                        region_rows.push((cell.starts[k], cell.ends[k], cell.values[k]));
+                    }
+                }
+                per_cell_counts.push(start_count);
+            }
+            // max_mem guard: one region's total materialized bytes
+            let region_bytes = region_rows.len() * 12;
+            if region_bytes > max_mem {
+                anyhow::bail!(
+                    "Memory usage per region exceeds max_mem ({} > {}).",
+                    region_bytes,
+                    max_mem
+                );
+            }
+            // write region rows (already in cell-major, start-sorted order)
+            for (s, e, v) in &region_rows {
+                itv_w.write_all(&s.to_le_bytes())?;
+                itv_w.write_all(&e.to_le_bytes())?;
+                itv_w.write_all(&v.to_le_bytes())?;
+            }
+            // write per-cell offsets
+            for n in per_cell_counts {
+                acc += n;
+                off_w.write_all(&acc.to_le_bytes())?;
+            }
+        }
+        itv_w.flush()?;
+        off_w.flush()?;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn n_in_cell(&self, chrom: usize, sample: usize) -> usize {
         self.store[chrom].samples[sample].starts.len()
+    }
+}
+
+#[pymethods]
+impl RustTable {
+    #[new]
+    fn py_new(
+        sample_codes: PyReadonlyArray1<i32>,
+        chrom_codes: PyReadonlyArray1<i32>,
+        starts: PyReadonlyArray1<i32>,
+        ends: PyReadonlyArray1<i32>,
+        values: PyReadonlyArray1<f32>,
+        n_samples: usize,
+        n_contigs: usize,
+    ) -> RustTable {
+        RustTable::build(
+            sample_codes.as_array(),
+            chrom_codes.as_array(),
+            starts.as_array(),
+            ends.as_array(),
+            values.as_array(),
+            n_samples,
+            n_contigs,
+        )
+    }
+
+    #[pyo3(name = "count")]
+    fn py_count<'py>(
+        &self,
+        py: Python<'py>,
+        chrom_code: i32,
+        starts: PyReadonlyArray1<i32>,
+        ends: PyReadonlyArray1<i32>,
+        sel_samples: PyReadonlyArray1<i32>,
+    ) -> Bound<'py, PyArray2<i32>> {
+        let out = self.count(
+            chrom_code,
+            starts.as_array().as_slice().unwrap(),
+            ends.as_array().as_slice().unwrap(),
+            sel_samples.as_array().as_slice().unwrap(),
+        );
+        out.into_pyarray(py)
+    }
+
+    #[pyo3(name = "intervals")]
+    fn py_intervals<'py>(
+        &self,
+        py: Python<'py>,
+        chrom_code: i32,
+        starts: PyReadonlyArray1<i32>,
+        ends: PyReadonlyArray1<i32>,
+        sel_samples: PyReadonlyArray1<i32>,
+        offsets: PyReadonlyArray1<i64>,
+    ) -> (Bound<'py, PyArray2<i32>>, Bound<'py, PyArray1<f32>>) {
+        let (coords, vals) = self.intervals_from_offsets(
+            chrom_code,
+            starts.as_array().as_slice().unwrap(),
+            ends.as_array().as_slice().unwrap(),
+            sel_samples.as_array().as_slice().unwrap(),
+            offsets.as_array().as_slice().unwrap(),
+        );
+        (coords.into_pyarray(py), vals.into_pyarray(py))
+    }
+
+    #[pyo3(name = "write_track")]
+    #[allow(clippy::too_many_arguments)]
+    fn py_write_track(
+        &self,
+        out_dir: std::path::PathBuf,
+        chrom_codes: PyReadonlyArray1<i32>,
+        starts: PyReadonlyArray1<i32>,
+        ends: PyReadonlyArray1<i32>,
+        sel_samples: PyReadonlyArray1<i32>,
+        max_mem: usize,
+    ) -> PyResult<()> {
+        self.write_track_impl(
+            &out_dir,
+            chrom_codes.as_array().as_slice().unwrap(),
+            starts.as_array().as_slice().unwrap(),
+            ends.as_array().as_slice().unwrap(),
+            sel_samples.as_array().as_slice().unwrap(),
+            max_mem,
+        )
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 }
 
@@ -252,5 +417,65 @@ mod tests {
         assert_eq!(vals[1], 2.0);
         // total length equals sum of counts
         assert_eq!(vals.len(), counts.sum() as usize);
+    }
+
+    #[test]
+    fn write_track_matches_oracle_bytes() {
+        let t = toy();
+        // two regions on chr0, one on chr1, in contig-grouped order
+        let chrom_codes = [0i32, 0, 1];
+        let qs = [0i32, 5, 0];
+        let qe = [60i32, 55, 5];
+        let sel = [0i32, 1];
+        let tmp = std::env::temp_dir().join("gvl_table_write_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        t.write_track_impl(&tmp, &chrom_codes, &qs, &qe, &sel, 1 << 30)
+            .unwrap();
+
+        // Oracle: per-contig count -> offsets -> intervals, concatenated in region order.
+        let mut exp_itv: Vec<u8> = Vec::new();
+        let mut exp_off: Vec<u8> = Vec::new();
+        let mut acc = 0i64;
+        exp_off.extend_from_slice(&acc.to_le_bytes());
+        // group regions by contig preserving order
+        let mut ri = 0usize;
+        while ri < chrom_codes.len() {
+            let c = chrom_codes[ri];
+            let mut rj = ri;
+            while rj < chrom_codes.len() && chrom_codes[rj] == c {
+                rj += 1;
+            }
+            let cs = &qs[ri..rj];
+            let ce = &qe[ri..rj];
+            let counts = t.count(c, cs, ce, &sel);
+            let offsets = offsets_from_count(&counts);
+            let (coords, vals) = t.intervals_from_offsets(c, cs, ce, &sel, &offsets);
+            for i in 0..vals.len() {
+                exp_itv.extend_from_slice(&coords[[i, 0]].to_le_bytes());
+                exp_itv.extend_from_slice(&coords[[i, 1]].to_le_bytes());
+                exp_itv.extend_from_slice(&vals[i].to_le_bytes());
+            }
+            for k in 0..counts.len() {
+                acc += counts.as_slice().unwrap()[k] as i64;
+                exp_off.extend_from_slice(&acc.to_le_bytes());
+            }
+            ri = rj;
+        }
+        let got_itv = std::fs::read(tmp.join("intervals.npy")).unwrap();
+        let got_off = std::fs::read(tmp.join("offsets.npy")).unwrap();
+        assert_eq!(got_itv, exp_itv, "intervals bytes mismatch");
+        assert_eq!(got_off, exp_off, "offsets bytes mismatch");
+    }
+
+    #[test]
+    fn write_track_errors_when_region_exceeds_max_mem() {
+        let t = toy();
+        let tmp = std::env::temp_dir().join("gvl_table_write_oom");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // region [0,60) on chr0 with both samples has >=1 interval -> exceeds 1 byte
+        let res = t.write_track_impl(&tmp, &[0i32], &[0i32], &[60i32], &[0i32, 1], 1);
+        assert!(res.is_err());
     }
 }
