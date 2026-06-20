@@ -1,30 +1,8 @@
-import os
-
 import numpy as np
 import polars as pl
 import pytest
+from genvarloader import Table
 from genvarloader._utils import lengths_to_offsets
-from genvarloader.experimental import Table
-
-# gvl.Table is experimental and deliberately NOT exercised in CI: its polars-bio
-# overlap backend has intermittently segfaulted the interpreter during overlap
-# queries (observed on CPython 3.12 and 3.13), which can crash the whole test
-# run. polars-bio is a transitive dependency, so an importorskip would not keep
-# these out of CI; instead they are opt-in via an env var. Set
-# GVL_TEST_EXPERIMENTAL=1 to run them locally (requires the `table` extra:
-# `pip install genvarloader[table]`).
-# Upstream: https://github.com/biodatageeks/polars-bio/issues/395
-if not os.environ.get("GVL_TEST_EXPERIMENTAL"):
-    pytest.skip(
-        "gvl.Table is experimental and not tested in CI; set "
-        "GVL_TEST_EXPERIMENTAL=1 to run these tests.",
-        allow_module_level=True,
-    )
-
-# Constructing a Table emits an ExperimentalWarning by design; silence it here.
-pytestmark = pytest.mark.filterwarnings(
-    "ignore::genvarloader._table.ExperimentalWarning"
-)
 
 
 def make_long_df():

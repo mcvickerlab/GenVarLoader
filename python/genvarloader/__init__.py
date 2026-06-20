@@ -29,6 +29,7 @@ from ._dataset._reference import RefDataset, Reference
 from ._dataset._svar_link import migrate_svar_link
 from ._dataset._write import get_splice_bed, update, write
 from ._dummy import get_dummy_dataset
+from ._table import Table
 from ._flat import _Flat as FlatRagged
 from ._flat import _FlatAnnotatedHaps as FlatAnnotatedHaps
 from ._ragged import FlatIntervals, RaggedAnnotatedHaps, RaggedIntervals
@@ -65,6 +66,7 @@ __all__ = [
     "Repeat5p",
     "Repeat5pNormalized",
     "SitesSchema",
+    "Table",
     "VarWindowOpt",
     "data_registry",
     "get_dummy_dataset",
