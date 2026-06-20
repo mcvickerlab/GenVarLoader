@@ -1,26 +1,7 @@
-import os
-
 import genvarloader as gvl
 import polars as pl
 import pytest
-from genvarloader.experimental import Table
-
-# gvl.Table is experimental and deliberately NOT exercised in CI (its polars-bio
-# overlap backend has intermittently segfaulted the interpreter on CPython 3.12
-# and 3.13). polars-bio is transitive, so these Table-driven write tests are
-# opt-in via an env var rather than gated on the dependency. Set
-# GVL_TEST_EXPERIMENTAL=1 to run them locally.
-# Upstream: https://github.com/biodatageeks/polars-bio/issues/395
-if not os.environ.get("GVL_TEST_EXPERIMENTAL"):
-    pytest.skip(
-        "gvl.Table is experimental and not tested in CI; set "
-        "GVL_TEST_EXPERIMENTAL=1 to run these tests.",
-        allow_module_level=True,
-    )
-
-pytestmark = pytest.mark.filterwarnings(
-    "ignore::genvarloader._table.ExperimentalWarning"
-)
+from genvarloader import Table
 
 
 def test_write_duplicate_track_names_rejected(tmp_path):

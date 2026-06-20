@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from .._bigwig import BigWigs
+    from .._table import Table
     from .._types import IntervalTrack
     from .._ragged import RaggedIntervals
     from ._impl import Dataset
@@ -113,10 +114,8 @@ def write(
         Sample-independent annotation tracks, as a mapping of track name to source.
         Each source is a path to an interval table, a path to a bigWig, or a polars
         DataFrame/LazyFrame interpreted as a BED-like interval table (columns ``chrom``,
-        ``chromStart``, ``chromEnd``, ``score``). Table/DataFrame sources use the
-        polars-bio overlap backend and require the ``table`` extra
-        (``pip install genvarloader[table]``); they emit an ``ExperimentalWarning``.
-        bigWig sources do not. Written to ``<path>/annot_intervals/<name>/``.
+        ``chromStart``, ``chromEnd``, ``score``). Table/DataFrame sources are served by
+        the Rust COITrees overlap backend. Written to ``<path>/annot_intervals/<name>/``.
     samples
         Samples to include in the dataset
     max_jitter
@@ -1109,7 +1108,7 @@ def _annot_intervals(
 
     - bigwig path -> Rust per-region extraction (BigWigs), squeezed sample-less.
     - table path / DataFrame / LazyFrame (BED-like: chrom, chromStart, chromEnd, score)
-      -> polars-bio overlap (experimental, requires the `table` extra).
+      -> Rust COITrees overlap.
     """
     if isinstance(source, (str, Path)) and Path(source).suffix.lower() in (
         ".bw",
@@ -1358,31 +1357,51 @@ def _write_track_rust(
     out_dir.mkdir(parents=True, exist_ok=True)
     # ordered sample paths (dataset/sample order)
     paths = [track.paths[s] for s in samples]
-    # per-region normalized contig name, in bed row order (bed is contig-grouped)
-    contigs: list[str] = []
-    starts_l: list[int] = []
-    ends_l: list[int] = []
-    for chrom, s, e in zip(
-        bed["chrom"].to_list(),
-        bed["chromStart"].to_list(),
-        bed["chromEnd"].to_list(),
-    ):
-        norm = normalize_contig_name(chrom, track.contigs)
-        if norm is None:
-            raise ValueError(
-                f"Contig {chrom!r} not found in bigWig track {track.name!r}."
-            )
-        contigs.append(norm)
-        starts_l.append(int(s))
-        ends_l.append(int(e))
+    # vectorized contig normalization (equivalent to per-row normalize_contig_name)
+    track_contigs = list(track.contigs)
+    cnorm = ContigNormalizer(track_contigs)
+    norm = cnorm.norm(bed["chrom"].to_list())
+    if any(n is None for n in norm):
+        bad = next(c for n, c in zip(norm, bed["chrom"].to_list()) if n is None)
+        raise ValueError(f"Contig {bad!r} not found in bigWig track {track.name!r}.")
+    contigs = [str(n) for n in norm]
+    starts = np.ascontiguousarray(bed["chromStart"].to_numpy(), dtype=np.int32)
+    ends = np.ascontiguousarray(bed["chromEnd"].to_numpy(), dtype=np.int32)
     bigwig_write_track(
         paths,
         contigs,
-        np.asarray(starts_l, dtype=np.int32),
-        np.asarray(ends_l, dtype=np.int32),
+        starts,
+        ends,
         int(max_mem),
         str(out_dir),
         False,
+    )
+
+
+def _write_track_table(
+    out_dir: Path,
+    bed: pl.DataFrame,
+    track: "Table",
+    samples: list[str],
+    max_mem: int,
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # bed is contig-grouped (sp.bed.sort). Map per-region chrom -> Table contig code.
+    # Use norm() to detect absent contigs (returns None); force those to -1.
+    norm = track._cnorm.norm(bed["chrom"].to_list())
+    chrom_codes = track._cnorm.c_idxs(bed["chrom"].to_numpy())
+    chrom_codes = np.where(np.array([n is None for n in norm]), -1, chrom_codes).astype(
+        np.int32
+    )
+    starts = np.ascontiguousarray(bed["chromStart"].to_numpy(), dtype=np.int32)
+    ends = np.ascontiguousarray(bed["chromEnd"].to_numpy(), dtype=np.int32)
+    track._rust.write_track(
+        str(out_dir),
+        np.ascontiguousarray(chrom_codes, dtype=np.int32),
+        starts,
+        ends,
+        track._sample_codes(samples),
+        int(max_mem),
     )
 
 
@@ -1394,10 +1413,16 @@ def _write_track(
     max_mem: int,
 ):
     from .._bigwig import BigWigs
+    from .._table import Table
 
     if isinstance(track, BigWigs):
         _samples = samples if samples is not None else track.samples
         if missing := (set(_samples) - set(track.samples)):
             raise ValueError(f"Samples {missing} not found in track.")
         return _write_track_rust(out_dir, bed, track, _samples, max_mem)
+    if isinstance(track, Table):
+        _samples = samples if samples is not None else track.samples
+        if missing := (set(_samples) - set(track.samples)):
+            raise ValueError(f"Samples {missing} not found in track.")
+        return _write_track_table(out_dir, bed, track, _samples, max_mem)
     return _write_track_legacy(out_dir, bed, track, samples, max_mem)

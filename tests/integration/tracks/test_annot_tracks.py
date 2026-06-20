@@ -1,9 +1,6 @@
-import os
-
 import awkward as ak
 import genvarloader as gvl
 import polars as pl
-import pytest
 from genoray import VCF
 
 
@@ -23,10 +20,6 @@ def test_write_with_annot_tracks(vcf_dir, bigwig_dir, ref_fasta, tmp_path):
     assert "sig" in ds.available_tracks
 
 
-@pytest.mark.skipif(
-    not os.environ.get("GVL_TEST_EXPERIMENTAL"),
-    reason="annot DataFrame source uses polars-bio; set GVL_TEST_EXPERIMENTAL=1",
-)
 def test_annot_tracks(vcf_dir, ref_fasta, tmp_path):
     out = tmp_path / "ds"
     bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [100], "chromEnd": [200]})

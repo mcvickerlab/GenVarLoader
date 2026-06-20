@@ -17,7 +17,7 @@
     :members: __init__, from_table
     :exclude-members: __new__
 
-.. autoclass:: genvarloader.experimental.Table
+.. autoclass:: genvarloader.Table
     :members:
     :exclude-members: __new__
 ```
