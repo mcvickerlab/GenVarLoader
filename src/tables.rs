@@ -1,4 +1,5 @@
 use anyhow::Result;
+use coitrees::{BasicCOITree, Interval, IntervalTree};
 use ndarray::prelude::*;
 use pyo3::prelude::*;
 
@@ -48,6 +49,46 @@ impl RustTable {
         RustTable { n_samples, store }
     }
 
+    /// Build one COITree per sample for `chrom`. Intervals are stored half-open
+    /// [start, end); coitrees is inclusive, so we store [start, end-1] and query
+    /// [qs, qe-1]. Metadata = index into the sample's sorted arrays.
+    fn build_trees(&self, chrom: usize) -> Vec<BasicCOITree<u32, u32>> {
+        self.store[chrom]
+            .samples
+            .iter()
+            .map(|cell| {
+                let ivs: Vec<Interval<u32>> = (0..cell.starts.len())
+                    .map(|k| Interval::new(cell.starts[k], cell.ends[k] - 1, k as u32))
+                    .collect();
+                BasicCOITree::new(&ivs)
+            })
+            .collect()
+    }
+
+    pub fn count(
+        &self,
+        chrom_code: i32,
+        q_starts: &[i32],
+        q_ends: &[i32],
+        sel_samples: &[i32],
+    ) -> Array2<i32> {
+        let n_regions = q_starts.len();
+        let n_sel = sel_samples.len();
+        let mut out = Array2::<i32>::zeros((n_regions, n_sel));
+        if chrom_code < 0 {
+            return out;
+        }
+        let trees = self.build_trees(chrom_code as usize);
+        for (sj, &s) in sel_samples.iter().enumerate() {
+            let tree = &trees[s as usize];
+            for ri in 0..n_regions {
+                let c = tree.query_count(q_starts[ri], q_ends[ri] - 1) as i32;
+                out[[ri, sj]] = c;
+            }
+        }
+        out
+    }
+
     #[cfg(test)]
     fn n_in_cell(&self, chrom: usize, sample: usize) -> usize {
         self.store[chrom].samples[sample].starts.len()
@@ -88,5 +129,40 @@ mod tests {
         assert_eq!(t.n_in_cell(0, 1), 1);
         assert_eq!(t.n_in_cell(1, 0), 1);
         assert_eq!(t.n_in_cell(1, 1), 0);
+    }
+
+    fn brute_count(t: &RustTable, chrom: usize, qs: &[i32], qe: &[i32], sel: &[i32]) -> Array2<i32> {
+        let mut out = Array2::<i32>::zeros((qs.len(), sel.len()));
+        for (sj, &s) in sel.iter().enumerate() {
+            let cell = &t.store[chrom].samples[s as usize];
+            for (ri, (&rs, &re)) in qs.iter().zip(qe).enumerate() {
+                let mut n = 0;
+                for k in 0..cell.starts.len() {
+                    if cell.starts[k] < re && cell.ends[k] > rs {
+                        n += 1;
+                    }
+                }
+                out[[ri, sj]] = n;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn count_matches_brute_force() {
+        let t = toy();
+        let qs = [0i32, 55, 5];
+        let qe = [15i32, 65, 55];
+        let sel = [0i32, 1];
+        let got = t.count(0, &qs, &qe, &sel);
+        let exp = brute_count(&t, 0, &qs, &qe, &sel);
+        assert_eq!(got, exp);
+    }
+
+    #[test]
+    fn count_unknown_contig_is_zeros() {
+        let t = toy();
+        let got = t.count(-1, &[0i32], &[10i32], &[0i32]);
+        assert_eq!(got, Array2::<i32>::zeros((1, 1)));
     }
 }
