@@ -99,8 +99,8 @@ gvl.write(
 
 Notable:
 - `bed`: path or polars DataFrame with `chrom, chromStart, chromEnd` (0-based). Optional `strand` (`+`/`-`/`.`) controls reverse-complement on read. Extra columns are preserved on `Dataset.regions`.
-- `tracks`: a `gvl.BigWigs` (or a list of them), or the experimental `genvarloader.experimental.Table`. Each must have a unique `.name`. BigWigs need a sample→path mapping (dict or table with `sample`, `path` columns; see `BigWigs.from_table`).
-- `annot_tracks`: `dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None` — sample-independent annotation tracks, written to `<path>/annot_intervals/<name>/`. Each value is either a path to an interval table/bigWig file, or a polars DataFrame/LazyFrame with BED-like columns (`chrom`, `chromStart`, `chromEnd`, `score`). DataFrame/LazyFrame and table-file sources use the polars-bio overlap backend and require the `table` extra (`pip install genvarloader[table]`), and emit an `ExperimentalWarning`. BigWig path sources do NOT require the `table` extra. Annotation tracks are sample-independent and can be read without a per-sample variant source.
+- `tracks`: a `gvl.BigWigs` (or a list of them), or a `gvl.Table`. Each must have a unique `.name`. BigWigs need a sample→path mapping (dict or table with `sample`, `path` columns; see `BigWigs.from_table`). `gvl.Table` is a core interval-track source backed by a Rust COITrees overlap engine (zero-based half-open coordinates); pass it directly as a `tracks=` or `annot_tracks=` source in `gvl.write`.
+- `annot_tracks`: `dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None` — sample-independent annotation tracks, written to `<path>/annot_intervals/<name>/`. Each value is either a path to an interval table/bigWig file, or a polars DataFrame/LazyFrame with BED-like columns (`chrom`, `chromStart`, `chromEnd`, `score`). Annotation tracks are sample-independent and can be read without a per-sample variant source.
 - `max_jitter`: max read-time jitter; pads stored data on both sides of every region by this many bases so `Dataset.with_settings(jitter=j)` works for any `j <= max_jitter`.
 - `extend_to_length=True` keeps reading past the BED end until every haplotype is ≥ the region length (matters when deletions would shorten output); set `False` for faster writes if shorter haps are acceptable.
 - Inner-joins samples across `variants` and all `tracks`.
@@ -129,8 +129,8 @@ gvl.update(
 Adds tracks to an **existing** on-disk GVL dataset without rewriting it from scratch.
 
 - `dataset`: path to a dataset directory, or an opened `Dataset` (its `.path` is used). A live dataset can be read during `update`; it will not observe the new track until reopened.
-- `tracks`: per-sample `BigWigs` or experimental `Table` sources. The track's sample set must match the dataset's **exactly** (no missing, no extra); samples are reordered to dataset order automatically. Written to `<path>/intervals/<track>/`.
-- `annot_tracks`: sample-independent sources, identical to `gvl.write`'s `annot_tracks` (path to interval table, path to bigWig, or polars DataFrame/LazyFrame with BED-like columns). DataFrame/LazyFrame and table-file sources require the `table` extra and emit `ExperimentalWarning`; bigWig path sources do not. Written to `<path>/annot_intervals/<name>/`.
+- `tracks`: per-sample `BigWigs` or `Table` sources. The track's sample set must match the dataset's **exactly** (no missing, no extra); samples are reordered to dataset order automatically. Written to `<path>/intervals/<track>/`.
+- `annot_tracks`: sample-independent sources, identical to `gvl.write`'s `annot_tracks` (path to interval table, path to bigWig, or polars DataFrame/LazyFrame with BED-like columns). Written to `<path>/annot_intervals/<name>/`.
 - `overwrite=True`: replace a same-named existing track; `False` (default) raises `FileExistsError` if the name already exists.
 - `max_mem`: approximate memory budget, divided across concurrently-running categories.
 
@@ -351,7 +351,7 @@ Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (use
 - `gvl.to_nested_tensor(ragged)` — convert to a PyTorch nested tensor (requires `torch`).
 - `gvl.get_dummy_dataset()` — small in-memory dataset for examples/tests.
 - `gvl.RefDataset` — reference-only dataset (no genotypes).
-- `genvarloader.experimental.Table` — **experimental**, generic interval track from a DataFrame. Not re-exported at top level (import it explicitly) and not tested in CI. Needs the `table` extra (`pip install genvarloader[table]`, which pulls in `polars-bio`) and emits an `ExperimentalWarning` on construction.
+- `gvl.Table` — core interval-track source backed by a Rust COITrees overlap engine. Zero-based half-open coordinates; positive-width intervals assumed. Usable directly as a `tracks=` or `annot_tracks=` source in `gvl.write` and `gvl.update`. No extra install required — ships as part of the core package. CI-covered via a brute-force numpy oracle + property tests.
 - `gvl.data_registry.fetch(name)` — download public test/demo datasets.
 
 Full list lives in `python/genvarloader/__init__.py` `__all__`.
@@ -394,7 +394,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 
 - **`gvl.update` does not hot-reload open datasets.** A `Dataset` instance that was opened before `gvl.update` ran will not see the new track; reopen the dataset to pick it up. The update itself is safe to run while readers are active — each track is published atomically so a reader never sees a half-written track.
 - **`Dataset.write_annot_tracks` has been removed.** Use `gvl.update(dataset, annot_tracks={"name": source})` instead, or pass `annot_tracks=` to `gvl.write` at creation time.
-- **`annot_tracks` DataFrame/LazyFrame sources require the `table` extra.** `pip install genvarloader[table]` (pulls in `polars-bio`). BigWig path sources do **not** require this extra.
+- **`gvl.Table` is a core public API.** No extra install required. It uses a Rust COITrees overlap engine and is CI-covered. Import it as `gvl.Table` (re-exported from the top-level package).
 - **Symbolic / breakend variants are rejected, not skipped.** Remove them before `gvl.write` — e.g. `bcftools view -e 'ALT~"<" || ALT~"\["'` (drop SVs and breakends), or construct the genoray reader with `filter=genoray.exprs.is_biallelic & ~genoray.exprs.is_symbolic & ~genoray.exprs.is_breakend`. SVAR inputs must be built from an already-filtered source, since gvl validates but cannot re-filter a materialized `.svar`.
 - Opening a genotypes-only dataset without a `reference=` defaults to the `"variants"` view (`RaggedVariants`), not `"haplotypes"`. Only `"variants"` is available without a reference; `with_seqs("haplotypes" | "annotated" | "reference")` raises `ValueError` if no reference was provided.
 - `with_insertion_fill` raises unless the dataset has both haplotypes AND tracks active.

@@ -165,6 +165,7 @@ _PR: bigwig-streaming-write (TBD)_
 - [ ] Migrate `_dataset/_write.py`: variant normalization (left-align, bi-allelic,
       atomize), genotype storage, interval extraction + realign.
   - [x] bigWig interval extraction for the write path — single-pass streaming Rust writer (this PR)
+  - [x] Table + annot overlap: COITrees Rust engine replaces polars-bio (this PR)
 - [ ] Migrate remaining `_dataset/_utils.py` / `_flat_flanks.py` / `_variants/_sitesonly.py`
       kernels touched by the write path.
 
@@ -211,3 +212,11 @@ Sequenced last; a candidate to graduate into its own roadmap once Phases 0–5 l
   Results: wall-clock 1.502 s → 0.801 s (~1.88× faster); peak RSS 3.538 GB → 3.386 GB
   (−4%, dominated by numba/llvmlite JIT startup ~3.2 GB); total allocated 8.380 GB →
   6.004 GB (~28% less).
+- 2026-06-19: Ported gvl.Table + annot_overlap off polars-bio onto a COITrees Rust
+  engine (`src/tables.rs`, `RustTable` PyO3 class). Fixes max_mem disrespect during
+  write/update (counting is exact, streaming writer bounds the working set to one
+  region's overlaps + one contig's trees), removes the non-deterministic polars-bio
+  segfault (#395), drops the `[table]` extra, and promotes Table from
+  `genvarloader.experimental` to the public API (now CI-covered via a brute-force
+  numpy oracle + property tests). Coordinates half-open/zero-based; positive-width
+  intervals assumed.

@@ -11501,7 +11501,6 @@ packages:
   - genvarloader-cli>=0.1.0 ; extra == 'cli'
   - tbb ; extra == 'tbb'
   - pyomp ; extra == 'pyomp'
-  - polars-bio ; extra == 'table'
   requires_python: '>=3.10,<3.14'
 - pypi: https://download-r2.pytorch.org/whl/cu126/torch-2.10.0%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl
   name: torch
