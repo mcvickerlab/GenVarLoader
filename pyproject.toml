@@ -119,6 +119,9 @@ bad-assignment = "warn"
 # TorchDataset alias is `type[...] | (lambda raising NotImplementedError)`
 # when torch is unavailable. Two sites; keep visible.
 not-a-type = "warn"
+# pyrefly resolves Ragged.from_offsets to _array.Ragged (which lacks str_offsets)
+# instead of _core.Ragged (which has it). Suppress to avoid blocking commits.
+unexpected-keyword = "warn"
 
 [tool.maturin]
 python-source = "python"
