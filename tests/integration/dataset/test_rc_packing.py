@@ -33,6 +33,7 @@ def _to_bytes(seq) -> bytes:
         return np.asarray(seq.data).tobytes()
     return np.asarray(seq).tobytes()
 
+
 # ---------------------------------------------------------------------------
 # Integration fixtures: write a fresh dataset into tmp so we don't mutate the
 # shared test fixtures, and can attach custom transcript_id / exon_number

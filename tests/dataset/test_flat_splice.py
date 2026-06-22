@@ -89,9 +89,18 @@ def test_ref_spliced_flat_byte_identity(phased_vcf_gvl, reference):
     t2_s0 = spliced[1, 0]
 
     # t1_s0 / t2_s0 may be a _core.Ragged (no .ravel()); extract flat bytes via .data
-    _to_flat = lambda x: np.asarray(x.data) if hasattr(x, "data") and not isinstance(x, np.ndarray) else np.asarray(x).ravel()
-    np.testing.assert_array_equal(_to_flat(t1_s0), exp_t1, err_msg="T1 ref spliced bytes")
-    np.testing.assert_array_equal(_to_flat(t2_s0), exp_t2, err_msg="T2 ref spliced bytes")
+    def _to_flat(x):
+        if hasattr(x, "data") and not isinstance(x, np.ndarray):
+            return np.asarray(x.data)
+        else:
+            return np.asarray(x).ravel()
+
+    np.testing.assert_array_equal(
+        _to_flat(t1_s0), exp_t1, err_msg="T1 ref spliced bytes"
+    )
+    np.testing.assert_array_equal(
+        _to_flat(t2_s0), exp_t2, err_msg="T2 ref spliced bytes"
+    )
 
 
 def test_haps_spliced_flat_byte_identity(phased_vcf_gvl, reference):

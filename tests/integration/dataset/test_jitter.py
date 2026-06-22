@@ -48,6 +48,7 @@ def test_jitter(dataset: gvl.RaggedDataset):
     annhaps = ds[no_var_display]
     # (b s p ~l) -> (b s p): take element 0 of each haplotype sequence
     import awkward as ak
+
     ref_coords_ak = annhaps.ref_coords.to_ak()
     actual_starts = ak.to_numpy(ref_coords_ak[..., 0])
     np.testing.assert_equal(actual_starts, desired_starts)

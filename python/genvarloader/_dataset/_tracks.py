@@ -7,7 +7,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
-import awkward as ak
 import numba as nb
 import numpy as np
 from einops import repeat
@@ -458,7 +457,7 @@ def _ragged_stack_tracks(tracks: "list[Ragged]") -> "Ragged":
     # Stack all per-track offsets into one matrix (n_tracks, n_batch+1).
     # np.diff over axis=1 gives lengths (n_tracks, n_batch).
     all_offsets = np.stack([t.offsets for t in tracks], axis=0)  # (n_tracks, n_batch+1)
-    lengths_tk = np.diff(all_offsets, axis=1)                     # (n_tracks, n_batch)
+    lengths_tk = np.diff(all_offsets, axis=1)  # (n_tracks, n_batch)
 
     # ------------------------------------------------------------------
     # 2. Interleaved lengths (n_batch, n_tracks) → flat, then offsets
@@ -466,8 +465,8 @@ def _ragged_stack_tracks(tracks: "list[Ragged]") -> "Ragged":
     # Transposing to (n_batch, n_tracks) and flattening gives the
     # segment order [batch0_track0, batch0_track1, …, batchN_track(T-1)],
     # which exactly matches ak.concatenate(axis=1) semantics.
-    out_lengths = lengths_tk.T.ravel()                            # (n_batch * n_tracks,)
-    out_offsets = lengths_to_offsets(out_lengths)                 # (n_batch*n_tracks + 1,)
+    out_lengths = lengths_tk.T.ravel()  # (n_batch * n_tracks,)
+    out_offsets = lengths_to_offsets(out_lengths)  # (n_batch*n_tracks + 1,)
     total = int(out_offsets[-1])
 
     # ------------------------------------------------------------------
@@ -484,24 +483,24 @@ def _ragged_stack_tracks(tracks: "list[Ragged]") -> "Ragged":
     # destination start length[r] times, giving us one output slot per
     # source element — fully vectorized via np.repeat + np.arange.
     for t_idx, t in enumerate(tracks):
-        dst_starts = out_offsets[t_idx::n_tracks][:n_batch]  # (n_batch,) destination starts
-        seg_lens   = lengths_tk[t_idx]                        # (n_batch,) lengths
+        dst_starts = out_offsets[t_idx::n_tracks][
+            :n_batch
+        ]  # (n_batch,) destination starts
+        seg_lens = lengths_tk[t_idx]  # (n_batch,) lengths
 
         # Build flat output indices for every element of track t_idx:
         # for segment r starting at dst_starts[r] with length seg_lens[r],
         # the output positions are dst_starts[r], dst_starts[r]+1, …
         # np.repeat(dst_starts, seg_lens) gives the base, and
         # np.arange over the cumulative offsets gives the per-element delta.
-        seg_offsets_src = all_offsets[t_idx, :n_batch]       # source starts in t.data
-        src_data_total  = int(seg_lens.sum())
+        seg_offsets_src = all_offsets[t_idx, :n_batch]  # source starts in t.data
+        src_data_total = int(seg_lens.sum())
         if src_data_total == 0:
             continue
 
         # Intra-segment offset (0,1,2,…,len-1 repeated per segment)
         intra = np.arange(src_data_total, dtype=np.int64)
-        intra -= np.repeat(
-            np.concatenate(([0], seg_lens[:-1].cumsum())), seg_lens
-        )
+        intra -= np.repeat(np.concatenate(([0], seg_lens[:-1].cumsum())), seg_lens)
 
         dst_idx = np.repeat(dst_starts, seg_lens) + intra
         src_idx = np.repeat(seg_offsets_src, seg_lens) + intra
