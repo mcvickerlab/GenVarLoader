@@ -33,7 +33,7 @@ def _share_offsets(rag: Ragged, offsets: NDArray) -> Ragged:
     if getattr(rag, "is_string", False):
         chars = rag.to_chars()
         return Ragged.from_offsets(
-            chars.data, rag.shape, offsets, str_offsets=chars.offsets
+            chars.data, rag.shape, offsets, str_offsets=chars._layout.offsets[-1]
         ).to_strings()
     return Ragged.from_offsets(rag.data, rag.shape, offsets)
 

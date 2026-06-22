@@ -142,3 +142,35 @@ def test_getitem_returns_raggedvariants():
     sub = rv[0]
     assert isinstance(sub, RaggedVariants)
     assert sub.alt.to_ak().to_list() == [[b"AC", b"G"]]
+
+
+def test_construct_asymmetric_alt_ref_indel():
+    """Regression: _share_offsets must use inner (char-level) offsets for opaque-string
+    fields, not the outer (variant-level) offsets. Asymmetric alt/ref lengths expose the
+    bug — the ref field would be reconstructed with wrong str_offsets, corrupting
+    .to_ak() output."""
+    # b=1, p=1, 2 variants:
+    #   variant 0: alt=b"A"  (len 1), ref=b"ACG" (len 3) → ilen = 1 - 3 = -2
+    #   variant 1: alt=b"GT" (len 2), ref=b"T"   (len 1) → ilen = 2 - 1 =  1
+    var_off = np.array([0, 2], np.int64)  # 1 group with 2 variants
+
+    # alt char Ragged: chars "A", "GT" → l_offsets [0,1,3], v_offsets [0,2]
+    alt_chars = np.frombuffer(b"AGT", dtype="S1").copy()
+    alt_l_off = np.array([0, 1, 3], np.int64)  # per-variant char boundaries
+    alt_v_off = np.array([0, 2], np.int64)  # 1 group, 2 variants
+    alt = Ragged.from_offsets(alt_chars, (1, 1, None, None), [alt_v_off, alt_l_off])
+
+    # ref char Ragged: chars "ACG", "T" → l_offsets [0,3,4], v_offsets [0,2]
+    ref_chars = np.frombuffer(b"ACGT", dtype="S1").copy()
+    ref_l_off = np.array(
+        [0, 3, 4], np.int64
+    )  # per-variant char boundaries (DIFFERENT from alt)
+    ref_v_off = np.array([0, 2], np.int64)
+    ref = Ragged.from_offsets(ref_chars, (1, 1, None, None), [ref_v_off, ref_l_off])
+
+    start = Ragged.from_offsets(np.array([10, 20], np.int32), (1, 1, None), var_off)
+    rv = RaggedVariants(alt=alt, start=start, ref=ref)
+
+    assert rv.alt.to_ak().to_list() == [[b"A", b"GT"]]
+    assert rv.ref.to_ak().to_list() == [[b"ACG", b"T"]]
+    assert rv.ilen.to_ak().to_list() == [[[-2, 1]]]
