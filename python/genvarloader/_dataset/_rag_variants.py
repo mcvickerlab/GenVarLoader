@@ -89,6 +89,11 @@ def _concat_string_ragged(base: Ragged, pad: Ragged) -> Ragged:
 
     base_var_off = np.asarray(base.offsets, dtype=np.int64)
     pad_var_off = np.asarray(pad.offsets, dtype=np.int64)
+    # `_rl.str_offsets` is a private seqpro `_core.Ragged` attribute that holds the
+    # inner (char-level) byte boundaries for an opaque-string Ragged.  No public
+    # accessor for inner char offsets exists yet.  NOTE: for an opaque-string field
+    # `_rl.str_offsets` is the correct handle — do NOT use `_layout.offsets[-1]`,
+    # which on an opaque field is the variant-level offsets, not the char-level ones.
     base_str_off = np.asarray(base._rl.str_offsets, dtype=np.int64)
     pad_str_off = np.asarray(pad._rl.str_offsets, dtype=np.int64)
 
@@ -423,13 +428,7 @@ class RaggedVariants:
 
             # Collect shared offsets from first field processed.
             if shared_offsets is None:
-                if is_allele:
-                    # Opaque-string: outer offsets are str_offsets level of to_chars' outer.
-                    # Actually for the record we need the variant-level offsets.
-                    # merged is opaque-string, its offsets = str_offsets (var-level offsets).
-                    shared_offsets = merged.offsets
-                else:
-                    shared_offsets = merged.offsets
+                shared_offsets = merged.offsets
             out_fields[f] = merged
 
         # Re-share offsets across all fields so from_fields value-equality check passes.

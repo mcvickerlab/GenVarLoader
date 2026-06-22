@@ -189,3 +189,26 @@ def test_pad_fills_empty_groups_only():
     out = rv.pad()
     assert out.alt.to_ak().to_list() == [[b"AC", b"G"], [b"N"], [b"TTT"]]
     assert out.start.to_ak().to_list() == [[[1, 2]], [[-1]], [[3]]]
+
+
+def test_pad_missing_pad_value_raises():
+    """pad() must raise ValueError when a field has no default pad value."""
+    var_off = np.array([0, 2, 2], np.int64)  # group 1 empty
+    char_off = np.array([0, 1, 2], np.int64)
+    alt = Ragged.from_offsets(
+        np.frombuffer(b"AC", "S1").copy(), (2, 1, None, None), [var_off, char_off]
+    )
+    start = Ragged.from_offsets(np.array([1, 2], np.int32), (2, 1, None), var_off)
+    qual = Ragged.from_offsets(
+        np.array([30.0, 40.0], np.float32), (2, 1, None), var_off
+    )
+    rv = RaggedVariants(
+        alt=alt,
+        start=start,
+        ilen=Ragged.from_offsets(np.zeros(2, np.int32), (2, 1, None), var_off),
+        qual=qual,
+    )
+    import pytest
+
+    with pytest.raises(ValueError, match="qual"):
+        rv.pad()  # no pad value supplied for "qual"
