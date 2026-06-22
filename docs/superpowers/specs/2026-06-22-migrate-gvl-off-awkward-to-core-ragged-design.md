@@ -80,7 +80,7 @@ awkward layout-munging helpers (`_pack_alleles`, `_decompose_alleles`,
 | `.ilen` (derived) | `ak.str.length(alt) - ak.str.length(ref)` | char-view `.lengths` difference |
 | `.end` | `start + ak.num(ref, -1)` / clipped ilen | char-view `.lengths` / clipped `ilen` |
 | `rc_` | `ak.where(mask, rc(a), a)` over a union | flat **allele-level R=1** view + `seqpro.rag.reverse_complement(view, comp_lut, mask=, copy=False)` in place (already prototyped as `reverse_complement_masked`) |
-| `to_packed` | `ak.to_packed` + canonical/non-canonical munging | per-field: string fields `to_chars() → to_packed()`; numeric fields `to_packed()`; rebuild record. (Record/opaque-string `to_packed` raises `NotImplementedError` — must `to_chars()` first.) |
+| `to_packed` | `ak.to_packed` + canonical/non-canonical munging | `self._rag.to_packed()` directly (record `to_packed`, made obligatory upstream — §4.C) |
 | `to_padded` | `ak_str.rpad` / `pad_none` + `fill_none` | `Ragged.to_padded` on the char view → dense `(b, p, v, l)` |
 | `pad` (≥1 variant/group) | `ak.pad_none(1)` + `fill_none` | min-length-1 ragged-axis insert with per-field/string sentinels (see §4, Decision A) |
 | nested-tensor batch | awkward layout walk | char-view `.data` + `.offsets` directly into `nt_jag` |
@@ -113,23 +113,25 @@ broadcast RegularArray of size 2 with size 4`). Fix so whole-record `to_ak()` wo
 `(b, p, ~v)` records. This restores the whole-record test oracle (per-field oracles already
 work and are the fallback). Add a regression test in seqpro.
 
-### C. (Optional) record / opaque-string `to_packed` ("Spec D")
-Currently raises `NotImplementedError` with the documented `to_chars()`-first workaround.
-GVL's `to_packed` uses the workaround, so this is **nice-to-have only**: implement upstream
-only if it meaningfully simplifies GVL's packing; otherwise defer.
+### C. Record / opaque-string `to_packed` ("Spec D") — required
+Currently raises `NotImplementedError`. Implement `to_packed` for record and
+opaque-string-under-axis Rageds in seqpro so GVL's `RaggedVariants.to_packed` packs the
+record directly (no `to_chars()` dance). Add seqpro tests. This lifts the §6.1 constraint;
+update §3's `to_packed` mapping to pack the record in one call.
 
 ### D. Delete the awkward backend (the payoff)
 Once GVL is awkward-free: delete `python/seqpro/rag/_array.py` + `_gufuncs.py`, relocate the
 awkward *interop helpers* still imported by `_ingest.py`/`__init__.py` (`unbox`, `RagParts`,
 `_parts_to_content`, `DTYPE_co`, `RDTYPE_co`) into a small `_ak_interop.py`, drop the dead
 `_array.Ragged` fallback in `_ops.to_packed` and the `_ArrayRagged` branch in
-`_core.is_rag_dtype`. (This relocation was prototyped during the audit and works.)
+`_core.is_rag_dtype`. (This relocation was prototyped during the audit and works.) Lands in
+the same seqpro PR as A–C.
 
-**Gate on deletion (D):** the audit ledger requires genvarformer's deferred GPU/CUDA
-subset (9 test files) to be run on a Linux+CUDA host before physically deleting `_array.py`.
-If that host isn't available during this effort, land A–C + the GVL migration first and
-split D into a follow-up seqpro PR once the GPU gate is met. A–C are independently shippable
-and are what unblock the rest.
+**Deletion is green-lit — not gated on the GPU run.** The audit ledger flagged
+genvarformer's GPU/CUDA test subset (9 files, not runnable on osx-arm64) as a pre-deletion
+check; we are explicitly **not** blocking on it. Any genvarformer GPU fallout is handled by
+its maintainers (also us) in a follow-up. Run the GPU subset opportunistically when a
+Linux+CUDA host is available.
 
 ## 5. GVL files & phasing (one branch, follows handoff Phases 1–3)
 
@@ -157,13 +159,14 @@ semantics must match today's exactly (multi-leading-axis indexing has edge cases
 
 **Phase 4 — verify & unblock.**
 `grep -rn -E "ak\.|import awkward" python/genvarloader --include='*.py'` → zero in production
-(only deliberate test/interop spots remain). Then execute §4.D in seqpro (subject to its GPU
-gate) and run all consumer suites against the `_array`-free seqpro.
+(only deliberate test/interop spots remain). Then execute §4.D in seqpro (delete `_array.py`)
+and run all consumer suites against the `_array`-free seqpro.
 
 ## 6. Constraints / gotchas (surfaced by probing — must hold in implementation)
 
-1. **`to_packed` is unsupported on records / string-under-axis fields** (`NotImplementedError`,
-   "Spec C"). Always `to_chars()` the string fields first; the char view packs fine.
+1. **`to_packed` on records / string-under-axis fields** raised `NotImplementedError` at probe
+   time ("Spec C"); **§4.C makes it obligatory upstream**, so GVL packs the record directly.
+   (The `to_chars()`-first view is the fallback only until §4.C lands.)
 2. **Whole-record `to_ak()` is buggy** on multi-leading-axis records (fixed by §4.B). Until
    that lands, tests compare **per-field** (`rv["alt"].to_ak()`), which works.
 3. **`reverse_complement` requires a single ragged axis** (rejects the R=2 char view:
@@ -194,10 +197,10 @@ gate) and run all consumer suites against the `_array`-free seqpro.
   (pre-push hook enforces both). Run the full tree before pushing (renames/shared code).
   Awkward retained as test-only oracle (per-field comparisons; whole-record once §4.B lands).
 - **seqpro:** own suite stays green (`pixi run -e dev pytest tests/` → 544 passed); add tests
-  for `concatenate` (§4.A) and the `to_ak` record fix (§4.B).
-- **Final gate (only with §4.D):** after deleting `_array.py`, GVL/genoray/genvarformer
-  suites all green against the `_array`-free seqpro, including the genvarformer GPU subset on
-  a Linux+CUDA host.
+  for `concatenate` (§4.A), the `to_ak` record fix (§4.B), and record `to_packed` (§4.C).
+- **Final gate (with §4.D):** after deleting `_array.py`, GVL/genoray/genvarformer CPU suites
+  all green against the `_array`-free seqpro. The genvarformer GPU/CUDA subset is run
+  opportunistically on a Linux+CUDA host (not a blocker — §4.D).
 - No new differential harness: we're swapping one already-Rust-backed impl for awkward, and
   the existing green suite already encodes byte-identical parity (it passed on both backends).
 
@@ -207,8 +210,8 @@ gate) and run all consumer suites against the `_array`-free seqpro.
   maintainer — keep-branch after the plan (see [[feedback_pr_strategy]]).
 - **Merge order:** seqpro PR (A–C) first or together; repoint GVL/genoray/genvarformer
   `pixi.toml` from local editable `{ path = "../SeqPro" }` to the released/merged seqpro
-  version before merging (handoff caveat). §4.D (awkward deletion) may be a follow-up seqpro
-  PR gated on the genvarformer GPU run.
+  version before merging (handoff caveat). §4.D (awkward deletion) lands in the same seqpro
+  PR as A–C.
 - **Docs:** update `SeqPro/skills/seqpro/SKILL.md` for `concatenate`; update GVL
   `skills/genvarloader/SKILL.md` only if `RaggedVariants`'s public behavior changes (method
   API is preserved; note any equality/RC semantics change). Add a note to
@@ -225,5 +228,6 @@ gate) and run all consumer suites against the `_array`-free seqpro.
 
 - **Indexing parity** (§6.4) is the highest-risk area; mitigate with oracle-based tests in
   `_indexing.py`/`_chunked.py` paths.
-- **GPU gate for §4.D** may not be runnable locally → split deletion into a follow-up.
+- **genvarformer GPU/CUDA paths** exercise `_core.Ragged` through flash-attn/Nested and
+  aren't run locally; deletion proceeds anyway (§4.D) — gvf maintainers handle any fallout.
 - **Cross-repo merge coupling** (pixi repoint) — follow the handoff caveat checklist.
