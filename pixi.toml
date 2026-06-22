@@ -88,8 +88,8 @@ numba = "==0.59.1"
 [feature.py310.pypi-dependencies]
 pyarrow = ">=21"
 hirola = "==0.3"
-seqpro = "==0.15.1"
-genoray = "==2.9.2"
+seqpro = { path = "../SeqPro", editable = true }
+genoray = { path = "../genoray", editable = true }
 polars = "==1.37.1"
 loguru = "*"
 natsort = "*"
