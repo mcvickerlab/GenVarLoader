@@ -411,45 +411,103 @@ def _ragged_stack_tracks(tracks: "list[Ragged]") -> "Ragged":
 
     Each input has canonical 1-D offsets after ``.to_packed()``.  We interleave the segments
     so that for region ``r`` the output has n_tracks consecutive ragged rows (one per track).
+
+    Implementation is fully vectorized — no Python loop over batch elements and no
+    per-element ``np.concatenate``.  The only loop is a bounded ``n_tracks`` pass to
+    scatter each track's segments into the pre-allocated output buffer.
+
+    Algorithm
+    ---------
+    1. Stack the per-track 1-D offsets into an ``(n_tracks, n_batch+1)`` matrix and derive
+       a ``(n_tracks, n_batch)`` lengths matrix.
+    2. Transpose to ``(n_batch, n_tracks)`` and flatten → interleaved lengths in C-order,
+       which is exactly the ``ak.concatenate(axis=1)`` segment order we need to reproduce.
+    3. Convert to offsets (cumsum) → ``out_offsets`` of length ``n_batch*n_tracks + 1``.
+    4. Allocate ``out_data`` of size ``total_elements`` in one shot.
+    5. For each track ``t`` (bounded loop over *n_tracks*, never over *n_batch*):
+       - Compute the destination start positions for all ``n_batch`` segments of that
+         track using the pre-computed ``out_offsets`` (index ``t, t+n_tracks, t+2*n_tracks, …``).
+       - Compute the source lengths for those segments from the stacked lengths matrix.
+       - Walk the batch dimension with a vectorised numpy repeat/arange gather, writing
+         all of track ``t``'s elements into ``out_data`` in a single pass via a boolean
+         mask or explicit index array — both O(total_data), no per-element call.
     """
-    from seqpro.rag._utils import lengths_to_offsets as sp_l2o
+    from seqpro.rag._core import Ragged as _CoreRagged, RaggedLayout
 
     if not tracks:
         raise ValueError("_ragged_stack_tracks: empty track list")
-    if len(tracks) == 1:
-        # Single track: just promote (batch, None) -> (batch, 1, None)
-        t = tracks[0]
-        n_batch = int(t.offsets.shape[0]) - 1  # canonical offsets has batch+1 entries
-        # Build shape (batch, 1, None): n_batch * 1 = n_batch rows in the inner offsets
-        # The offsets stay the same; we just change the shape metadata.
-        new_shape = (n_batch, 1, None)
-        from seqpro.rag._core import Ragged as _CoreRagged, RaggedLayout
-        new_layout = RaggedLayout(
-            data=t._rl.data,
-            offsets=list(t._layout.offsets),
-            shape=new_shape,
-            str_offsets=t._rl.str_offsets,
-        )
-        return _CoreRagged(new_layout)
 
     n_tracks = len(tracks)
     n_batch = int(tracks[0].offsets.shape[0]) - 1
 
-    # Interleave: for each region r, row for track t is tracks[t].data[off_t[r]:off_t[r+1]]
-    out_data_parts = []
-    out_lengths = np.empty(n_batch * n_tracks, dtype=np.int64)
+    if n_tracks == 1:
+        # Single track: just promote (batch, None) -> (batch, 1, None) by
+        # re-labelling the shape — no data copy needed.
+        t = tracks[0]
+        new_layout = RaggedLayout(
+            data=t._rl.data,
+            offsets=list(t._layout.offsets),
+            shape=(n_batch, 1, None),
+            str_offsets=t._rl.str_offsets,
+        )
+        return _CoreRagged(new_layout)
 
-    for r in range(n_batch):
-        for t_idx, t in enumerate(tracks):
-            off = t.offsets
-            lo, hi = int(off[r]), int(off[r + 1])
-            out_data_parts.append(t.data[lo:hi])
-            out_lengths[r * n_tracks + t_idx] = hi - lo
+    # ------------------------------------------------------------------
+    # 1. Vectorized lengths: (n_tracks, n_batch)
+    # ------------------------------------------------------------------
+    # Stack all per-track offsets into one matrix (n_tracks, n_batch+1).
+    # np.diff over axis=1 gives lengths (n_tracks, n_batch).
+    all_offsets = np.stack([t.offsets for t in tracks], axis=0)  # (n_tracks, n_batch+1)
+    lengths_tk = np.diff(all_offsets, axis=1)                     # (n_tracks, n_batch)
 
-    out_data = np.concatenate(out_data_parts) if out_data_parts else np.empty(0, dtype=tracks[0].data.dtype)
-    from seqpro.rag._utils import lengths_to_offsets as _l2o
-    out_offsets = _l2o(out_lengths.astype(np.int32))
-    from seqpro.rag._core import Ragged as _CoreRagged
+    # ------------------------------------------------------------------
+    # 2. Interleaved lengths (n_batch, n_tracks) → flat, then offsets
+    # ------------------------------------------------------------------
+    # Transposing to (n_batch, n_tracks) and flattening gives the
+    # segment order [batch0_track0, batch0_track1, …, batchN_track(T-1)],
+    # which exactly matches ak.concatenate(axis=1) semantics.
+    out_lengths = lengths_tk.T.ravel()                            # (n_batch * n_tracks,)
+    out_offsets = lengths_to_offsets(out_lengths)                 # (n_batch*n_tracks + 1,)
+    total = int(out_offsets[-1])
+
+    # ------------------------------------------------------------------
+    # 3. Allocate output buffer once
+    # ------------------------------------------------------------------
+    out_data = np.empty(total, dtype=tracks[0].data.dtype)
+
+    # ------------------------------------------------------------------
+    # 4. Scatter each track's data — loop is O(n_tracks), NOT O(n_batch)
+    # ------------------------------------------------------------------
+    # For track t, its segments land at flat indices t, t+n_tracks, …
+    # out_offsets[t::n_tracks] are the destination starts for all n_batch
+    # segments of track t.  We build a flat index array by repeating each
+    # destination start length[r] times, giving us one output slot per
+    # source element — fully vectorized via np.repeat + np.arange.
+    for t_idx, t in enumerate(tracks):
+        dst_starts = out_offsets[t_idx::n_tracks][:n_batch]  # (n_batch,) destination starts
+        seg_lens   = lengths_tk[t_idx]                        # (n_batch,) lengths
+
+        # Build flat output indices for every element of track t_idx:
+        # for segment r starting at dst_starts[r] with length seg_lens[r],
+        # the output positions are dst_starts[r], dst_starts[r]+1, …
+        # np.repeat(dst_starts, seg_lens) gives the base, and
+        # np.arange over the cumulative offsets gives the per-element delta.
+        seg_offsets_src = all_offsets[t_idx, :n_batch]       # source starts in t.data
+        src_data_total  = int(seg_lens.sum())
+        if src_data_total == 0:
+            continue
+
+        # Intra-segment offset (0,1,2,…,len-1 repeated per segment)
+        intra = np.arange(src_data_total, dtype=np.int64)
+        intra -= np.repeat(
+            np.concatenate(([0], seg_lens[:-1].cumsum())), seg_lens
+        )
+
+        dst_idx = np.repeat(dst_starts, seg_lens) + intra
+        src_idx = np.repeat(seg_offsets_src, seg_lens) + intra
+
+        out_data[dst_idx] = t.data[src_idx]
+
     return _CoreRagged.from_offsets(out_data, (n_batch, n_tracks, None), out_offsets)
 
 
