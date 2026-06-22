@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from genoray._svar import POS_TYPE
 from genvarloader import RaggedVariants
 from numpy.typing import NDArray
@@ -93,7 +92,6 @@ def rc_all():
     return ragv, to_rc, desired
 
 
-@pytest.mark.xfail(reason="rc_ ported in Task G3", strict=False)
 @parametrize_with_cases("ragv, to_rc, desired", cases=".", prefix="rc_")
 def test_rc(ragv: RaggedVariants, to_rc: NDArray[np.bool_], desired: RaggedVariants):
     rc_ragv = ragv.rc_(to_rc)

@@ -169,7 +169,61 @@ class RaggedVariants:
         return RaggedVariants.from_record(self._rag.to_packed())
 
     def rc_(self, to_rc: NDArray[np.bool_] | None = None) -> "RaggedVariants":
-        raise NotImplementedError("ported in Task G3")
+        from .._ragged import _COMP
+
+        from seqpro.rag import reverse_complement as _sp_reverse_complement
+
+        b = self.shape[0]
+        if to_rc is None:
+            to_rc = np.ones(b, np.bool_)
+        elif not np.asarray(to_rc).any():
+            return self
+
+        to_rc = np.asarray(to_rc, dtype=np.bool_)
+        p = self.shape[1]
+
+        rec: dict[str, Ragged] = {}
+        shared_var_off: NDArray | None = None
+
+        for f in self.fields:
+            field = self._rag[f]
+            if f in _ALLELE_FIELDS:
+                # field: opaque-string, shape (b, p, ~v)
+                chars = field.to_chars().to_packed()  # (b, p, ~v, ~l) S1
+                # _layout.offsets = [var_off (b*p+1,), char_off (n_alleles+1,)]
+                var_off = chars._layout.offsets[0]  # variant-level: (b*p+1,)
+                char_off = chars._layout.offsets[-1]  # char-level: (n_alleles+1,)
+                n_alleles = len(char_off) - 1
+
+                # Build a flat allele-level R=1 view on a copy of the data buffer.
+                data = chars.data.copy()
+                view = Ragged.from_offsets(data, (n_alleles, None), char_off)
+
+                # Expand to_rc (per-batch, size b) to per-allele (size n_alleles).
+                # Batch element i_b owns alleles var_off[i_b*p] .. var_off[(i_b+1)*p]-1.
+                batch_starts = np.arange(b, dtype=np.int64) * p
+                alleles_per_batch = var_off[batch_starts + p] - var_off[batch_starts]
+                allele_mask = np.repeat(to_rc, alleles_per_batch)
+
+                _sp_reverse_complement(view, _COMP, mask=allele_mask, copy=False)
+
+                # Rebuild as opaque-string field with the same shape and offsets.
+                rebuilt = Ragged.from_offsets(
+                    data, field.shape, var_off, str_offsets=char_off
+                )
+                if shared_var_off is None:
+                    shared_var_off = var_off
+                rec[f] = rebuilt
+            else:
+                rec[f] = field
+
+        # All fields must share the same outer (variant-level) offsets for from_fields.
+        # Non-allele fields from self._rag already share the record's offsets. After
+        # to_packed() the packed var_off may be a new object; re-share via _share_offsets.
+        if shared_var_off is not None:
+            rec = {k: _share_offsets(v, shared_var_off) for k, v in rec.items()}
+
+        return RaggedVariants.from_record(Ragged.from_fields(rec))
 
     def pad(
         self,

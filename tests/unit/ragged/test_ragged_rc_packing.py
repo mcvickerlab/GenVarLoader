@@ -60,6 +60,24 @@ def test_rc_returns_packed_buffer(rag: Ragged, to_rc: np.ndarray):
         assert got[i] == expected
 
 
+def test_rc_all_complements_and_reverses():
+    var_off = np.array([0, 1, 2], np.int64)  # 2 groups, 1 variant each
+    char_off = np.array([0, 2, 5], np.int64)
+    alt = SpRagged.from_offsets(
+        np.frombuffer(b"ACGTA", "S1").copy(),
+        (2, 1, None, None),
+        [var_off, char_off],
+    )
+    start = SpRagged.from_offsets(np.array([0, 0], np.int32), (2, 1, None), var_off)
+    rv = RaggedVariants(
+        alt=alt,
+        start=start,
+        ilen=SpRagged.from_offsets(np.zeros(2, np.int32), (2, 1, None), var_off),
+    )
+    out = rv.rc_(np.array([True, True]))
+    assert out.alt.to_ak().to_list() == [[b"GT"], [b"TAC"]]  # AC->GT, GTA->TAC
+
+
 def test_to_packed_after_slice_roundtrips():
     var_off = np.array([0, 2, 3, 4], np.int64)  # 3 groups (b=3,p=1)
     char_off = np.array([0, 2, 3, 6, 7], np.int64)
