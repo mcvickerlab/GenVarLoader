@@ -166,7 +166,7 @@ class RaggedVariants:
         return self[0]
 
     def to_packed(self) -> "RaggedVariants":
-        raise NotImplementedError("ported in Task G2")
+        return RaggedVariants.from_record(self._rag.to_packed())
 
     def rc_(self, to_rc: NDArray[np.bool_] | None = None) -> "RaggedVariants":
         raise NotImplementedError("ported in Task G3")

@@ -13,8 +13,10 @@ disk I/O.
 
 import awkward as ak
 import numpy as np
+from genvarloader import RaggedVariants
 from genvarloader._ragged import Ragged, reverse_complement
 from pytest_cases import parametrize_with_cases
+from seqpro.rag import Ragged as SpRagged
 
 
 def _buffer_matches_lengths(rag: Ragged) -> bool:
@@ -56,3 +58,24 @@ def test_rc_returns_packed_buffer(rag: Ragged, to_rc: np.ndarray):
     for i, flip in enumerate(to_rc):
         expected = rc[i] if flip else original[i]
         assert got[i] == expected
+
+
+def test_to_packed_after_slice_roundtrips():
+    var_off = np.array([0, 2, 3, 4], np.int64)  # 3 groups (b=3,p=1)
+    char_off = np.array([0, 2, 3, 6, 7], np.int64)
+    alt = SpRagged.from_offsets(
+        np.frombuffer(b"ACGTTTX", "S1").copy(),
+        (3, 1, None, None),
+        [var_off, char_off],
+    )
+    start = SpRagged.from_offsets(
+        np.array([1, 2, 3, 4], np.int32), (3, 1, None), var_off
+    )
+    rv = RaggedVariants(
+        alt=alt,
+        start=start,
+        ilen=SpRagged.from_offsets(np.zeros(4, np.int32), (3, 1, None), var_off),
+    )
+    sub = rv[np.array([2, 0])].to_packed()
+    assert sub.alt.to_ak().to_list() == [[b"X"], [b"AC", b"G"]]
+    assert sub.start.to_ak().to_list() == [[4], [1, 2]]
