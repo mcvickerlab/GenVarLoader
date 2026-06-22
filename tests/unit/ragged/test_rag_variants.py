@@ -172,3 +172,20 @@ def test_construct_asymmetric_alt_ref_indel():
     assert rv.alt.to_ak().to_list() == [[b"A", b"GT"]]
     assert rv.ref.to_ak().to_list() == [[b"ACG", b"T"]]
     assert rv.ilen.to_ak().to_list() == [[[-2, 1]]]
+
+
+def test_pad_fills_empty_groups_only():
+    var_off = np.array([0, 2, 2, 3], np.int64)  # group1 empty
+    char_off = np.array([0, 2, 3, 6], np.int64)
+    alt = Ragged.from_offsets(
+        np.frombuffer(b"ACGTTT", "S1").copy(), (3, 1, None, None), [var_off, char_off]
+    )
+    start = Ragged.from_offsets(np.array([1, 2, 3], np.int32), (3, 1, None), var_off)
+    rv = RaggedVariants(
+        alt=alt,
+        start=start,
+        ilen=Ragged.from_offsets(np.zeros(3, np.int32), (3, 1, None), var_off),
+    )
+    out = rv.pad()
+    assert out.alt.to_ak().to_list() == [[b"AC", b"G"], [b"N"], [b"TTT"]]
+    assert out.start.to_ak().to_list() == [[[1, 2]], [[-1]], [[3]]]

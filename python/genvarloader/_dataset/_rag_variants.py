@@ -7,6 +7,7 @@ import numpy as np
 from genoray._types import POS_TYPE
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
+from seqpro.rag import concatenate as _rag_concatenate
 
 from .._torch import TORCH_AVAILABLE, requires_torch
 
@@ -16,6 +17,159 @@ if TORCH_AVAILABLE:
 
 
 _ALLELE_FIELDS = ("alt", "ref")
+
+
+def _empty_group_pad(
+    field_rag: Ragged,
+    value: Any,
+    empty_mask: NDArray[np.bool_],
+    is_allele: bool = False,
+) -> Ragged:
+    """Return a Ragged with one sentinel element per empty group, zero for non-empty.
+
+    Loop-free: offsets built from empty_mask.astype(int64) via cumsum; data buffer
+    filled with `value` repeated empty_mask.sum() times.
+
+    For allele fields (is_allele=True), `value` is bytes; produces an opaque-string
+    Ragged with str_offsets matching the sentinel byte length.
+
+    Parameters
+    ----------
+    field_rag
+        The per-field Ragged to pad against.  Used only for shape/dtype.
+    value
+        Sentinel scalar.  For allele fields: bytes (e.g. b"N").
+    empty_mask
+        Flat bool array, length = number of groups (b*p).
+    is_allele
+        If True, treat value as bytes and produce an opaque-string Ragged.
+    """
+    n_empty = int(empty_mask.sum())
+    # Variant-level offsets: group i gets 1 element if empty_mask[i] else 0.
+    lengths = empty_mask.astype(np.int64)
+    offsets = np.empty(len(empty_mask) + 1, dtype=np.int64)
+    offsets[0] = 0
+    np.cumsum(lengths, out=offsets[1:])
+
+    if is_allele:
+        # value is bytes, e.g. b"N" (len L).
+        bval = value if isinstance(value, bytes) else value.encode()
+        L = len(bval)
+        # char data buffer: repeat the sentinel bytes for each empty group.
+        char_data = np.frombuffer(bval * n_empty, dtype="S1").copy()
+        # str_offsets: byte boundaries per variant — [0, L, 2L, ..., n_empty*L]
+        str_offsets = np.arange(n_empty + 1, dtype=np.int64) * L
+        # Shape: same as field_rag (opaque-string, has None at the variant ragged dim).
+        shape = field_rag.shape
+        return Ragged.from_offsets(char_data, shape, offsets, str_offsets=str_offsets)
+    else:
+        # Numeric sentinel.
+        dtype = field_rag.data.dtype
+        data = np.full(n_empty, value, dtype=dtype)
+        # Shape: same as field_rag (has a None for the ragged dim).
+        shape = field_rag.shape
+        return Ragged.from_offsets(data, shape, offsets)
+
+
+def _concat_string_ragged(base: Ragged, pad: Ragged) -> Ragged:
+    """Concatenate two opaque-string Rageds at the variant axis (loop-free).
+
+    For each group, appends pad variants after base variants. Merges variant-level
+    offsets, reorders char data, and builds new str_offsets. Works with any
+    opaque-string Ragged of shape (..., None) where the ragged axis is the variant axis.
+
+    seqpro.rag.concatenate does not support opaque-string fields (the nested
+    str_offsets structure requires special handling), so this helper fills that gap.
+    """
+    assert base.is_string and pad.is_string
+
+    # Pack both to canonical (zero-based, contiguous) layout.
+    base = base.to_packed()
+    pad = pad.to_packed()
+
+    base_var_off = np.asarray(base.offsets, dtype=np.int64)
+    pad_var_off = np.asarray(pad.offsets, dtype=np.int64)
+    base_str_off = np.asarray(base._rl.str_offsets, dtype=np.int64)
+    pad_str_off = np.asarray(pad._rl.str_offsets, dtype=np.int64)
+
+    n_groups = len(base_var_off) - 1
+    n_base_vars = int(base_var_off[-1])
+    n_pad_vars = int(pad_var_off[-1])
+
+    # New variant-level offsets: sum base and pad lengths per group.
+    base_var_lens = np.diff(base_var_off)
+    pad_var_lens = np.diff(pad_var_off)
+    new_var_lens = base_var_lens + pad_var_lens
+    new_var_off = np.empty(n_groups + 1, dtype=np.int64)
+    new_var_off[0] = 0
+    np.cumsum(new_var_lens, out=new_var_off[1:])
+    n_total_vars = int(new_var_off[-1])
+
+    # Per-variant char lengths from base and pad.
+    base_char_lens = np.diff(base_str_off)  # shape (n_base_vars,)
+    pad_char_lens = np.diff(pad_str_off)  # shape (n_pad_vars,)
+
+    # New per-variant char lengths: scatter base then pad into new positions.
+    # For base variant k (global), it belongs to group g[k]; its new position is
+    #   new_var_off[g[k]] + (k - base_var_off[g[k]])
+    # = k + (new_var_off[g[k]] - base_var_off[g[k]])
+    # Similarly for pad variants.
+    new_char_lens = np.empty(n_total_vars, dtype=np.int64)
+    base_dst_idx: NDArray[np.int64] | None = None
+    pad_dst_idx: NDArray[np.int64] | None = None
+
+    if n_base_vars > 0:
+        group_of_base = np.repeat(np.arange(n_groups, dtype=np.int64), base_var_lens)
+        shift = (new_var_off[:-1] - base_var_off[:-1])[group_of_base]
+        base_dst_idx = np.arange(n_base_vars, dtype=np.int64) + shift
+        new_char_lens[base_dst_idx] = base_char_lens
+
+    if n_pad_vars > 0:
+        group_of_pad = np.repeat(np.arange(n_groups, dtype=np.int64), pad_var_lens)
+        shift = (new_var_off[:-1] + base_var_lens - pad_var_off[:-1])[group_of_pad]
+        pad_dst_idx = np.arange(n_pad_vars, dtype=np.int64) + shift
+        new_char_lens[pad_dst_idx] = pad_char_lens
+
+    # Build new str_offsets (per-variant byte boundaries).
+    new_str_off = np.empty(n_total_vars + 1, dtype=np.int64)
+    new_str_off[0] = 0
+    if n_total_vars > 0:
+        np.cumsum(new_char_lens, out=new_str_off[1:])
+
+    # Build new char data by scattering base then pad chars into their new positions.
+    total_chars = int(new_str_off[-1]) if n_total_vars > 0 else 0
+    new_data = np.empty(total_chars, dtype="S1")
+
+    if total_chars > 0 and n_base_vars > 0 and int(base_str_off[-1]) > 0:
+        assert base_dst_idx is not None
+        # For each char in base: which base variant does it belong to?
+        variant_of_char = np.repeat(
+            np.arange(n_base_vars, dtype=np.int64), base_char_lens
+        )
+        # Offset within that variant.
+        char_off_in_var = (
+            np.arange(int(base_str_off[-1]), dtype=np.int64)
+            - base_str_off[variant_of_char]
+        )
+        # Destination in new_data.
+        dst = new_str_off[base_dst_idx[variant_of_char]] + char_off_in_var
+        new_data[dst] = base.data[np.arange(int(base_str_off[-1]))]
+
+    if total_chars > 0 and n_pad_vars > 0 and int(pad_str_off[-1]) > 0:
+        assert pad_dst_idx is not None
+        variant_of_char = np.repeat(
+            np.arange(n_pad_vars, dtype=np.int64), pad_char_lens
+        )
+        char_off_in_var = (
+            np.arange(int(pad_str_off[-1]), dtype=np.int64)
+            - pad_str_off[variant_of_char]
+        )
+        dst = new_str_off[pad_dst_idx[variant_of_char]] + char_off_in_var
+        new_data[dst] = pad.data[np.arange(int(pad_str_off[-1]))]
+
+    return Ragged.from_offsets(
+        new_data, base.shape, new_var_off, str_offsets=new_str_off
+    )
 
 
 def _as_opaque(rag: Ragged) -> Ragged:
@@ -233,7 +387,57 @@ class RaggedVariants:
         dosage: float = 0.0,
         **pad_values: Any,
     ) -> "RaggedVariants":
-        raise NotImplementedError("ported in Task G4")
+        if isinstance(allele, str):
+            allele = allele.encode()
+        all_pads: dict[str, Any] = {
+            "alt": allele,
+            "ref": allele,
+            "ilen": ilen,
+            "start": start,
+            "dosage": dosage,
+            **pad_values,
+        }
+        missing = set(self.fields) - set(all_pads)
+        if missing:
+            raise ValueError(f"Missing pad values for fields: {missing}")
+
+        # Flat bool mask: True where a group has zero variants.
+        empty = self._rag["start"].lengths.reshape(-1) == 0
+
+        out_fields: dict[str, Ragged] = {}
+        shared_offsets: NDArray | None = None
+
+        for f in self.fields:
+            base = self._rag[f]
+            is_allele = f in _ALLELE_FIELDS
+            pad_val = all_pads[f]
+            pad_rag = _empty_group_pad(base, pad_val, empty, is_allele=is_allele)
+
+            if is_allele:
+                # Opaque-string: use _concat_string_ragged (seqpro.rag.concatenate
+                # does not support the nested str_offsets structure of string Rageds).
+                merged = _concat_string_ragged(base, pad_rag)
+            else:
+                var_axis = base.rag_dim
+                merged = _rag_concatenate([base, pad_rag], axis=var_axis)
+
+            # Collect shared offsets from first field processed.
+            if shared_offsets is None:
+                if is_allele:
+                    # Opaque-string: outer offsets are str_offsets level of to_chars' outer.
+                    # Actually for the record we need the variant-level offsets.
+                    # merged is opaque-string, its offsets = str_offsets (var-level offsets).
+                    shared_offsets = merged.offsets
+                else:
+                    shared_offsets = merged.offsets
+            out_fields[f] = merged
+
+        # Re-share offsets across all fields so from_fields value-equality check passes.
+        assert shared_offsets is not None
+        out_fields = {
+            k: _share_offsets(v, shared_offsets) for k, v in out_fields.items()
+        }
+        return RaggedVariants.from_record(Ragged.from_fields(out_fields))
 
     @requires_torch
     def to_nested_tensor_batch(
