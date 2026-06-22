@@ -36,7 +36,7 @@ def test_no_extend_keeps_all_carried_variants():
     )
     # plain dense2sparse: every haplotype keeps exactly the variants it carries.
     # hap0 carries v0,v1 -> [0, 1]; hap1 carries v1 -> [1]
-    assert ak.to_list(rag) == [[[0, 1], [1]]]
+    assert ak.to_list(rag.to_ak()) == [[[0, 1], [1]]]
 
 
 def test_extend_trims_per_haplotype_to_length():
@@ -49,7 +49,7 @@ def test_extend_trims_per_haplotype_to_length():
     # hap1 carries v1 (a SNP at pos=5, past q_end=4) but has no deletion;
     # the length walk stops at q_end=4 without pulling in v1 (which starts
     # outside the query window). genoray returns [] for hap1.
-    assert ak.to_list(rag) == [[[0, 1], []]]
+    assert ak.to_list(rag.to_ak()) == [[[0, 1], []]]
 
 
 def test_extend_drops_unneeded_extension_for_full_length_haplotype():
@@ -66,4 +66,4 @@ def test_extend_drops_unneeded_extension_for_full_length_haplotype():
     )
     # Neither haplotype is shortened, so neither needs v1 (which starts at 5,
     # outside [0,4)). Both keep only v0.
-    assert ak.to_list(rag) == [[[0], [0]]]
+    assert ak.to_list(rag.to_ak()) == [[[0], [0]]]

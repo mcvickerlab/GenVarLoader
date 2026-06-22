@@ -70,7 +70,8 @@ def test_reverse_masked_int_matches_awkward():
     out = f.reverse_masked(mask)
     # awkward reference: reverse masked rows only
     rag = _rag(data.copy(), (3, None), off)
-    expected = ak.to_packed(ak.where(mask, rag[..., ::-1], rag))
+    rag_ak = rag.to_ak()
+    expected = ak.to_packed(ak.where(mask, rag_ak[..., ::-1], rag_ak))
     np.testing.assert_array_equal(out.data, ak.flatten(expected, None).to_numpy())
     np.testing.assert_array_equal(out.offsets, off)
 

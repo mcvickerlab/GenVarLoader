@@ -292,7 +292,7 @@ class Haps(Reconstructor[_H]):
     See issue #222."""
 
     def __post_init__(self):
-        self.n_variants = ak.num(self.genotypes, -1).to_numpy()
+        self.n_variants = self.genotypes.lengths
 
         # Discover available info fields from the on-disk schema, not from the
         # (possibly-filtered) loaded info dict. This way the user can see every
@@ -758,7 +758,7 @@ class Haps(Reconstructor[_H]):
             if self.max_af is not None:
                 keep &= geno_afs <= self.max_af
             _keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
-            genos = Ragged(ak.to_regular(genos[_keep], 1)).to_packed()
+            genos = Ragged(ak.to_regular(genos[_keep].to_ak(), 1)).to_packed()
             v_idxs = genos.data
 
         offsets = getattr(self.variants, kind).offsets  # int-typed, length n_variants+1

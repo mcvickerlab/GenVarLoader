@@ -153,16 +153,22 @@ class RaggedVariants(ak.Array):
         if ref is None and ilen is None:
             raise ValueError("Must provide one of refs or ilens.")
 
-        to_zip = {"alt": alt, "start": start}
+        def _to_ak(v):
+            """Convert _core.Ragged to ak.Array for use in ak.zip; ak.Arrays pass through."""
+            return v.to_ak() if isinstance(v, Ragged) else v
+
+        to_zip = {"alt": alt, "start": _to_ak(start)}
         if ref is not None:
             to_zip["ref"] = ref
         if ilen is not None:
-            to_zip["ilen"] = ilen
+            to_zip["ilen"] = _to_ak(ilen)
         if dosage is not None:
-            to_zip["dosage"] = dosage
+            to_zip["dosage"] = _to_ak(dosage)
 
         arr = ak.zip(
-            to_zip | kwargs, 1, parameters={"__record__": RaggedVariants.__name__}
+            {k: _to_ak(v) for k, v in (to_zip | kwargs).items()},
+            1,
+            parameters={"__record__": RaggedVariants.__name__},
         )
 
         super().__init__(arr)

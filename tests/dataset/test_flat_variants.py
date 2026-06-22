@@ -18,6 +18,7 @@ from genvarloader._flat import _Flat
 from genvarloader._dataset._haps import _build_allele_layout
 from genvarloader._ragged import reverse_complement  # the awkward reference
 from seqpro.rag import Ragged
+from seqpro.rag._array import Ragged as _ArrayRagged
 
 
 def _make_rv(alt_rows, ref_rows, starts, group_off, ploidy):
@@ -210,7 +211,7 @@ def test_to_packed_numeric_field_reorders_through_indexed_view():
     )
     fancy = RaggedVariants.from_ak(rv[np.array([2, 0])])
     start = fancy["start"]
-    assert isinstance(start, Ragged)
+    assert isinstance(start, (Ragged, _ArrayRagged))
     from awkward.contents import IndexedArray
 
     assert isinstance(start.layout, IndexedArray)

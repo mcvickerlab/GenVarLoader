@@ -23,9 +23,9 @@ def test_flat_intervals_to_ragged_roundtrip():
     assert fi.shape == (2, None)
     ri = fi.to_ragged()
     assert isinstance(ri, RaggedIntervals)
-    assert ak.to_list(ri.starts) == [[10], [20, 30]]
-    assert ak.to_list(ri.ends) == [[15], [25, 35]]
-    assert ak.to_list(ri.values) == [[1.0], [2.0, 3.0]]
+    assert ak.to_list(ri.starts.to_ak()) == [[10], [20, 30]]
+    assert ak.to_list(ri.ends.to_ak()) == [[15], [25, 35]]
+    assert ak.to_list(ri.values.to_ak()) == [[1.0], [2.0, 3.0]]
 
 
 def test_flat_intervals_public_export():
@@ -51,9 +51,9 @@ def test_flat_intervals_end_to_end_matches_ragged():
     assert isinstance(ri, gvl.RaggedIntervals)
 
     back = fi.to_ragged()
-    assert ak.to_list(back.starts) == ak.to_list(ri.starts)
-    assert ak.to_list(back.ends) == ak.to_list(ri.ends)
-    assert ak.to_list(back.values) == ak.to_list(ri.values)
+    assert ak.to_list(back.starts.to_ak()) == ak.to_list(ri.starts.to_ak())
+    assert ak.to_list(back.ends.to_ak()) == ak.to_list(ri.ends.to_ak())
+    assert ak.to_list(back.values.to_ak()) == ak.to_list(ri.values.to_ak())
 
 
 def test_flat_intervals_multi_track_matches_ragged():
@@ -69,8 +69,8 @@ def test_flat_intervals_multi_track_matches_ragged():
     )
     back = fi.to_ragged()
     # (batch, track, ~itv) C-order must match awkward concat order
-    assert ak.to_list(back.starts) == ak.to_list(ri.starts)
-    assert ak.to_list(back.values) == ak.to_list(ri.values)
+    assert ak.to_list(back.starts.to_ak()) == ak.to_list(ri.starts.to_ak())
+    assert ak.to_list(back.values.to_ak()) == ak.to_list(ri.values.to_ak())
 
 
 def test_flat_float_tracks_only_returns_flatragged():
@@ -80,7 +80,7 @@ def test_flat_float_tracks_only_returns_flatragged():
     assert type(out).__name__ == "_Flat"  # FlatRagged
     # round-trips to the ragged track values
     rag = ds.with_seqs(None).with_tracks(["read-depth"])[[0, 1], [0, 1]]
-    assert ak.to_list(out.to_ragged()) == ak.to_list(rag)
+    assert ak.to_list(out.to_ragged().to_ak()) == ak.to_list(rag.to_ak())
 
 
 def test_flat_haps_plus_tracks_returns_flat_pair():

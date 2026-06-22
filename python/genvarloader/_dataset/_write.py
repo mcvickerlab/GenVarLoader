@@ -898,7 +898,7 @@ def _write_phased_chunked(
         max_ends.append(region_end)
 
         var_idxs = ak.flatten(
-            ak.concatenate(ls_sparse, -1),
+            ak.concatenate([a.to_ak() for a in ls_sparse], -1),
             None,
         ).to_numpy()
         # (s p)
@@ -1005,7 +1005,7 @@ def _write_from_svar(
         # have a further end than v_idx == -1
         # * calling ak.max() means v_idxs is not a view of svar.genos.data
         # (r s p ~v) -> (r)
-        v_idxs = ak.max(sp_genos, -1).to_numpy().max((1, 2))
+        v_idxs = ak.max(sp_genos.to_ak(), -1).to_numpy().max((1, 2))
         c_max_ends = max_ends[contig_offset : contig_offset + df.height]
         if v_idxs.mask is np.ma.nomask:
             c_max_ends[:] = v_ends[v_idxs.data]
@@ -1148,11 +1148,17 @@ def _annot_intervals_from_bigwig(
         # (regions, 1)
         itvs = bw.intervals(contig, starts, ends, sample="__annot__")
         for r in range(part.height):
-            s = itvs.starts[r, 0]
-            out_starts.append(np.asarray(s, dtype=np.int32))
-            out_ends.append(np.asarray(itvs.ends[r, 0], dtype=np.int32))
-            out_values.append(np.asarray(itvs.values[r, 0], dtype=np.float32))
-            lengths.append(len(s))
+            # itvs.starts[r, 0] returns a (None,) _core.Ragged; extract flat data.
+            s = itvs.starts[r, 0].to_packed()
+            e = itvs.ends[r, 0].to_packed()
+            v = itvs.values[r, 0].to_packed()
+            s_data = s.data[s.offsets[0] : s.offsets[-1]]
+            e_data = e.data[e.offsets[0] : e.offsets[-1]]
+            v_data = v.data[v.offsets[0] : v.offsets[-1]]
+            out_starts.append(np.asarray(s_data, dtype=np.int32))
+            out_ends.append(np.asarray(e_data, dtype=np.int32))
+            out_values.append(np.asarray(v_data, dtype=np.float32))
+            lengths.append(len(s_data))
     flat_starts = np.concatenate(out_starts) if out_starts else np.empty(0, np.int32)
     flat_ends = np.concatenate(out_ends) if out_ends else np.empty(0, np.int32)
     flat_values = np.concatenate(out_values) if out_values else np.empty(0, np.float32)

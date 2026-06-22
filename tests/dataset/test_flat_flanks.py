@@ -244,7 +244,7 @@ def test_flank_tokens_end_to_end_matches_oracle(snap_dataset):
     v_contigs = np.repeat(np.repeat(region_contigs, ploidy), counts)
 
     expected = _flatten_lut_flanks(ref, v_contigs, starts, ilens, L, lut)  # (n_var, 2L)
-    got = np.asarray(flat.flank_tokens.to_ragged().data)  # (n_var, 2L)
+    got = np.asarray(flat.flank_tokens.to_ragged().data).reshape(-1, 2 * L)  # (n_var, 2L)
     np.testing.assert_array_equal(got, expected)
 
 
@@ -540,7 +540,7 @@ def test_flank_tokens_index_matrix(snap_dataset, idx):
     flat = flat_ds[idx]
     lut = flat_ds._seqs.token_lut
     expected = _oracle_flank_from_ragged(snap_dataset, idx, L, lut)
-    got = np.asarray(flat.flank_tokens.to_ragged().data)  # (n_var, 2L)
+    got = np.asarray(flat.flank_tokens.to_ragged().data).reshape(-1, 2 * L)  # (n_var, 2L)
     np.testing.assert_array_equal(got, expected)
 
 
@@ -576,7 +576,7 @@ def test_oob_flank_padding(snap_dataset):
     n_oob = L - min_start  # positions strictly outside [0, contig_end)
 
     flat = flat_ds[[0], [2]]
-    toks = np.asarray(flat.flank_tokens.to_ragged().data)  # (n_var, 2L)
+    toks = np.asarray(flat.flank_tokens.to_ragged().data).reshape(-1, 2 * L)  # (n_var, 2L)
     assert toks.size > 0, "expected non-empty token array"
     # The first n_oob tokens of flank5 for each variant must be unknown_token
     flank5 = toks[:, :L]
@@ -608,7 +608,7 @@ def test_flank_tokens_empty_region_row(snap_dataset):
     flat = flat_ds[[target], [0]]
     rg = flat.flank_tokens.to_ragged()
     # zero variants -> zero rows of flank token pairs
-    assert np.asarray(ak.flatten(rg, axis=None)).size == 0
+    assert np.asarray(rg.data).size == 0
 
 
 def test_no_awkward_on_flank_hot_path(snap_dataset, monkeypatch):
@@ -681,7 +681,7 @@ def test_dummy_flank_tokens_fills_empty_region_all_unk(snap_dataset):
     )
     flat = flat_ds[[target], [0]]
     rg = flat.flank_tokens.to_ragged()
-    toks = np.asarray(ak.flatten(rg, axis=None))
+    toks = np.asarray(rg.data)
     # one dummy variant per (region, sample, ploid) group => ploidy dummies, each 2L tokens
     assert toks.tolist() == [4] * (ploidy * 2 * L)
 

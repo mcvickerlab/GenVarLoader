@@ -36,10 +36,12 @@ def test_annot_tracks(vcf_dir, ref_fasta, tmp_path):
         .with_tracks("5ss", "tracks")
     )
     haps, tracks = annot_ds[:]
-    mask = haps.ref_coords == ak.Array(
+    ref_coords_ak = haps.ref_coords.to_ak()
+    tracks_ak = tracks.to_ak()
+    mask = ref_coords_ak == ak.Array(
         annot_ds.regions["chromStart"].to_numpy()[:, None, None]
     )
-    assert ak.all(tracks[:, :, 0][mask] == 1)
+    assert ak.all(tracks_ak[:, :, 0][mask] == 1)
 
 
 def test_annot_bigwig_wide_intervals_full_width(tmp_path):

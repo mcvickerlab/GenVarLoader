@@ -402,6 +402,58 @@ def shift_and_realign_track_sparse(
 
 
 # -----------------------------------------------------------------------------
+# Ragged helper: stack (batch, None) Rageds along a new track axis -> (batch, n_tracks, None)
+# -----------------------------------------------------------------------------
+
+
+def _ragged_stack_tracks(tracks: "list[Ragged]") -> "Ragged":
+    """Stack *n_tracks* ``(batch, None)`` Rageds into a single ``(batch, n_tracks, None)`` Ragged.
+
+    Each input has canonical 1-D offsets after ``.to_packed()``.  We interleave the segments
+    so that for region ``r`` the output has n_tracks consecutive ragged rows (one per track).
+    """
+    from seqpro.rag._utils import lengths_to_offsets as sp_l2o
+
+    if not tracks:
+        raise ValueError("_ragged_stack_tracks: empty track list")
+    if len(tracks) == 1:
+        # Single track: just promote (batch, None) -> (batch, 1, None)
+        t = tracks[0]
+        n_batch = int(t.offsets.shape[0]) - 1  # canonical offsets has batch+1 entries
+        # Build shape (batch, 1, None): n_batch * 1 = n_batch rows in the inner offsets
+        # The offsets stay the same; we just change the shape metadata.
+        new_shape = (n_batch, 1, None)
+        from seqpro.rag._core import Ragged as _CoreRagged, RaggedLayout
+        new_layout = RaggedLayout(
+            data=t._rl.data,
+            offsets=list(t._layout.offsets),
+            shape=new_shape,
+            str_offsets=t._rl.str_offsets,
+        )
+        return _CoreRagged(new_layout)
+
+    n_tracks = len(tracks)
+    n_batch = int(tracks[0].offsets.shape[0]) - 1
+
+    # Interleave: for each region r, row for track t is tracks[t].data[off_t[r]:off_t[r+1]]
+    out_data_parts = []
+    out_lengths = np.empty(n_batch * n_tracks, dtype=np.int64)
+
+    for r in range(n_batch):
+        for t_idx, t in enumerate(tracks):
+            off = t.offsets
+            lo, hi = int(off[r]), int(off[r + 1])
+            out_data_parts.append(t.data[lo:hi])
+            out_lengths[r * n_tracks + t_idx] = hi - lo
+
+    out_data = np.concatenate(out_data_parts) if out_data_parts else np.empty(0, dtype=tracks[0].data.dtype)
+    from seqpro.rag._utils import lengths_to_offsets as _l2o
+    out_offsets = _l2o(out_lengths.astype(np.int32))
+    from seqpro.rag._core import Ragged as _CoreRagged
+    return _CoreRagged.from_offsets(out_data, (n_batch, n_tracks, None), out_offsets)
+
+
+# -----------------------------------------------------------------------------
 # Tracks reconstructor (Python-level wrapper around the numba kernels above).
 # -----------------------------------------------------------------------------
 
@@ -699,9 +751,10 @@ class Tracks(Reconstructor[_T]):
             )
 
         # out = (batch tracks ~itvs)
-        out_starts = []
-        out_ends = []
-        out_values = []
+        # Collect per-track (batch, None) Rageds, then interleave into (batch, n_tracks, None).
+        per_track_starts: list[Ragged] = []
+        per_track_ends: list[Ragged] = []
+        per_track_values: list[Ragged] = []
 
         for name, tracktype in self.active_tracks.items():
             # (regions [samples] ~itvs)
@@ -712,15 +765,14 @@ class Tracks(Reconstructor[_T]):
             else:
                 # (batch ~itvs)
                 itvs = intervals[r_idx].to_packed()
-            # (batch 1 ~itvs)
-            out_starts.append(itvs.starts[:, None])
-            out_ends.append(itvs.ends[:, None])
-            out_values.append(itvs.values[:, None])
+            per_track_starts.append(itvs.starts)
+            per_track_ends.append(itvs.ends)
+            per_track_values.append(itvs.values)
 
-        # (batch tracks ~itvs)
-        starts = ak.concatenate(out_starts, axis=1)
-        ends = ak.concatenate(out_ends, axis=1)
-        values = ak.concatenate(out_values, axis=1)
+        # (batch tracks ~itvs) by interleaving n_tracks (batch, None) Rageds
+        starts = _ragged_stack_tracks(per_track_starts)
+        ends = _ragged_stack_tracks(per_track_ends)
+        values = _ragged_stack_tracks(per_track_values)
         return RaggedIntervals(starts, ends, values)
 
     def write_transformed_track(

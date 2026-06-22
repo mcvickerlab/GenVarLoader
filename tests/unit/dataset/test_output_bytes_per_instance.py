@@ -9,9 +9,13 @@ import numpy as np
 import pytest
 import genvarloader as gvl
 from seqpro.rag import Ragged
+from seqpro.rag._array import Ragged as _ArrayRagged
 
 from genvarloader._dataset._rag_variants import RaggedVariants
 from genvarloader._ragged import RaggedAnnotatedHaps
+
+# Either backend may appear depending on whether Ragged is _core or _array.
+_AnyRagged = (Ragged, _ArrayRagged)
 
 
 def _materialized_nbytes_per_instance(ds, r_arr, s_arr):
@@ -28,7 +32,7 @@ def _materialized_nbytes_per_instance(ds, r_arr, s_arr):
             # Sum bytes across all fields per instance.
             for fname in arr.fields:
                 field = arr[fname]
-                if isinstance(field, Ragged):
+                if isinstance(field, _AnyRagged):
                     # Numeric field: (b, p, ~v) — n_variants * itemsize.
                     # Ragged.offsets has b*p+1 entries.
                     lens = np.diff(field.offsets).reshape(n_inst, -1)
@@ -43,7 +47,7 @@ def _materialized_nbytes_per_instance(ds, r_arr, s_arr):
             for ragged_field in (arr.haps, arr.var_idxs, arr.ref_coords):
                 lens = np.diff(ragged_field.offsets).reshape(n_inst, -1)
                 totals += lens.sum(-1) * ragged_field.data.dtype.itemsize
-        elif isinstance(arr, Ragged):
+        elif isinstance(arr, _AnyRagged):
             # Ragged.offsets is (n_inst * ... + 1,); reshape lens to (n_inst, -1)
             lens = np.diff(arr.offsets)
             lens = lens.reshape(n_inst, -1)

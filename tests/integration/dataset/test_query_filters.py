@@ -105,8 +105,8 @@ def test_exonic_filter_haps_runs_through_query(haps_ds):
     h0 = haps_ds[:, :]
     h1 = haps_ds.with_settings(var_filter="exonic")[:, :]
     assert np.array_equal(
-        np.asarray(ak.num(h0, axis=-1)),
-        np.asarray(ak.num(h1, axis=-1)),
+        np.asarray(ak.num(h0.to_ak(), axis=-1)),
+        np.asarray(ak.num(h1.to_ak(), axis=-1)),
     )
 
 

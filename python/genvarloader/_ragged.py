@@ -100,10 +100,10 @@ class RaggedIntervals:
         return starts, ends, values
 
     def to_packed(self) -> RaggedIntervals:
-        """Apply :func:`ak.to_packed` to all arrays."""
-        starts = ak.to_packed(self.starts)
-        ends = ak.to_packed(self.ends)
-        values = ak.to_packed(self.values)
+        """Pack all arrays into contiguous buffers."""
+        starts = self.starts.to_packed()
+        ends = self.ends.to_packed()
+        values = self.values.to_packed()
         return RaggedIntervals(starts, ends, values)
 
     def to_nested_tensor_batch(
@@ -113,9 +113,9 @@ class RaggedIntervals:
         n_tracks = cast(int, self.values.shape[1])
         for t in range(n_tracks):
             # (batch tracks ... ~itv) -> (batch ... ~itv)
-            starts = ak.to_packed(self.starts[:, t])
-            ends = ak.to_packed(self.ends[:, t])
-            values = ak.to_packed(self.values[:, t])
+            starts = self.starts[:, t].to_packed()
+            ends = self.ends[:, t].to_packed()
+            values = self.values[:, t].to_packed()
 
             offsets = torch.from_numpy(values.offsets.astype(np.int32)).to(device)
             max_len = int(values.lengths.max())
@@ -155,15 +155,15 @@ class RaggedIntervals:
             np.full((b, t, 1), start, np.int32), regulararray=True
         )
         # (b t ~v)
-        new_starts = ak.concatenate([pad_start, self.starts], axis=2)
+        new_starts = ak.concatenate([pad_start, self.starts.to_ak()], axis=2)
         pad_end = ak.from_numpy(np.full((b, t, 1), end, np.int32), regulararray=True)
         # (b t ~v)
-        new_ends = ak.concatenate([pad_end, self.ends], axis=2)
+        new_ends = ak.concatenate([pad_end, self.ends.to_ak()], axis=2)
         pad_value = ak.from_numpy(
             np.full((b, t, 1), value, np.float32), regulararray=True
         )
         # (b t ~v)
-        new_values = ak.concatenate([pad_value, self.values], axis=2)
+        new_values = ak.concatenate([pad_value, self.values.to_ak()], axis=2)
 
         return RaggedIntervals(Ragged(new_starts), Ragged(new_ends), Ragged(new_values))
 

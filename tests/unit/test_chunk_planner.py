@@ -107,8 +107,10 @@ def _compare(a, b):
         _compare(a.var_idxs, b.var_idxs)
         _compare(a.ref_coords, b.ref_coords)
     elif isinstance(a, Ragged):
-        # Ragged slicing returns a view where .data may be the full backing
-        # array; compare only the actual content via offsets.
+        # Pack to canonical (1-D) offsets so that sliced views (which may carry 2-D
+        # gather offsets after _core indexing) compare correctly against direct lookups.
+        a = a.to_packed()
+        b = b.to_packed()
         np.testing.assert_array_equal(
             a.data[a.offsets[0] : a.offsets[-1]], b.data[b.offsets[0] : b.offsets[-1]]
         )
