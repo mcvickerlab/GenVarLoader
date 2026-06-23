@@ -306,10 +306,12 @@ class RaggedVariants:
 
     def __getitem__(self, idx: Any) -> "RaggedVariants":
         rag = self._rag
-        # For multi-leading-dim records, an integer idx would hit _getitem_record_rows
-        # which returns a dict of raw arrays rather than a Ragged. Convert to a tuple
-        # so _getitem_tuple_multidim is used instead, which preserves the RecordLayout.
-        if rag._is_record and rag.rag_dim > 1 and isinstance(idx, (int, np.integer)):
+        # For multi-leading-dim records, any non-tuple idx hits _getitem_record_rows
+        # which collapses leading fixed axes and drops ploidy for slice/array inputs.
+        # Convert to a 1-tuple so _getitem_tuple_multidim is used instead, which
+        # preserves unindexed leading axes: int collapses its axis (→ (p,~v)),
+        # slice/array keeps it (→ (n,p,~v)).
+        if rag._is_record and rag.rag_dim > 1 and not isinstance(idx, tuple):
             result = rag[(idx,)]
         else:
             result = rag[idx]

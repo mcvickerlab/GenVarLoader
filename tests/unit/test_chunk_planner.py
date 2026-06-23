@@ -86,13 +86,28 @@ def test_peak_chunk_bytes_reported():
 # ---------------------------------------------------------------------------
 
 
+def _rv_equal(a, b):
+    """Field-by-field equality for RaggedVariants using _core-native comparison."""
+    from genvarloader._dataset._rag_variants import RaggedVariants
+
+    assert isinstance(a, RaggedVariants), f"expected RaggedVariants, got {type(a)}"
+    assert isinstance(b, RaggedVariants), f"expected RaggedVariants, got {type(b)}"
+    assert a.fields == b.fields, f"fields mismatch: {a.fields} vs {b.fields}"
+    for name in a.fields:
+        a_list = a._rag[name].to_ak().to_list()
+        b_list = b._rag[name].to_ak().to_list()
+        assert a_list == b_list, (
+            f"RaggedVariants field {name!r} mismatch:\n  got:      {a_list}\n  expected: {b_list}"
+        )
+
+
 def _compare(a, b):
     """Recursive equality for ndarray, Ragged, RaggedAnnotatedHaps, AnnotatedHaps,
-    ak.Array (including RaggedVariants), and tuples thereof."""
+    RaggedVariants, and tuples thereof."""
     from seqpro.rag import Ragged
     from genvarloader._types import AnnotatedHaps
     from genvarloader._ragged import RaggedAnnotatedHaps
-    import awkward as ak
+    from genvarloader._dataset._rag_variants import RaggedVariants
 
     if isinstance(a, tuple):
         assert isinstance(b, tuple) and len(a) == len(b)
@@ -121,9 +136,9 @@ def _compare(a, b):
         _compare(a.haps, b.haps)
         _compare(a.var_idxs, b.var_idxs)
         _compare(a.ref_coords, b.ref_coords)
-    elif isinstance(a, ak.Array):
-        # Covers RaggedVariants (ak.Array subclass).
-        assert ak.to_list(a) == ak.to_list(b)
+    elif isinstance(a, RaggedVariants):
+        # Compare all fields natively without awkward.
+        _rv_equal(a, b)
     else:
         raise AssertionError(f"unsupported {type(a)}")
 
@@ -189,8 +204,6 @@ def test_plan_single_partial_batch_smaller_than_batch_size():
 def test_slice_chunk_flat_matches_direct(seq_kind):
     """slice_chunk on a flat chunk yields mini-batches whose .to_ragged()
     equals direct ragged indexing of the same instances."""
-    import awkward as ak
-
     import genvarloader as gvl
     from genvarloader._chunked import slice_chunk
 
@@ -214,7 +227,8 @@ def test_slice_chunk_flat_matches_direct(seq_kind):
         ref = ds[rr, ss]
         got = batch.to_ragged()
         if seq_kind == "variants":
-            assert ak.to_list(got) == ak.to_list(ref)
+            # Compare all RaggedVariants fields natively (_core, not ak.to_list).
+            _rv_equal(got, ref)
         elif seq_kind == "annotated":
             np.testing.assert_array_equal(
                 np.asarray(got.haps.data), np.asarray(ref.haps.data)

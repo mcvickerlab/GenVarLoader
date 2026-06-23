@@ -98,4 +98,6 @@ def test_to_packed_after_slice_roundtrips():
     )
     sub = rv[np.array([2, 0])].to_packed()
     assert sub.alt.to_ak().to_list() == [[b"X"], [b"AC", b"G"]]
-    assert sub.start.to_ak().to_list() == [[4], [1, 2]]
+    # After the fix, __getitem__ with an array preserves the ploidy axis (p=1):
+    # shape is (2,1,~v), so start.to_ak() is 3-level nested.
+    assert sub.start.to_ak().to_list() == [[[4]], [[1, 2]]]

@@ -256,3 +256,90 @@ def test_to_nested_tensor_batch_shapes():
     assert list(unbind[0].tolist()) == [65, 67]  # b"AC"
     assert list(unbind[1].tolist()) == [71]  # b"G"
     assert list(unbind[2].tolist()) == [84, 84, 84]  # b"TTT"
+
+
+# ---------------------------------------------------------------------------
+# Task G12: __getitem__ slice/array preserves leading fixed axes (ploidy)
+# ---------------------------------------------------------------------------
+
+
+def _make_rv_b3_p2():
+    """Build a RaggedVariants with shape (b=3, p=2, ~v) and known start values.
+
+    Layout (6 groups, b*p=6):
+      Group 0 (b0,p0): start=[10, 11] (2 variants)
+      Group 1 (b0,p1): start=[12]     (1 variant)
+      Group 2 (b1,p0): start=[20]     (1 variant)
+      Group 3 (b1,p1): start=[21, 22] (2 variants)
+      Group 4 (b2,p0): start=[30]     (1 variant)
+      Group 5 (b2,p1): start=[31]     (1 variant)
+
+    var_off = [0, 2, 3, 4, 6, 7, 8]  (cumsum of lens [2,1,1,2,1,1])
+    start data = [10,11, 12, 20, 21,22, 30, 31]  (8 values total)
+
+    alt alleles: b"A" for each variant (trivial, 8 alleles)
+    """
+    var_off = np.array([0, 2, 3, 4, 6, 7, 8], np.int64)
+    start_data = np.array([10, 11, 12, 20, 21, 22, 30, 31], np.int32)
+    start = Ragged.from_offsets(start_data, (3, 2, None), var_off)
+
+    # alt: 8 single-byte alleles, all b"A"
+    alt_chars = np.frombuffer(b"A" * 8, dtype="S1").copy()
+    # char_off: each allele is 1 char → [0,1,2,...,8]
+    alt_char_off = np.arange(9, dtype=np.int64)
+    alt = Ragged.from_offsets(alt_chars, (3, 2, None, None), [var_off, alt_char_off])
+
+    ilen = Ragged.from_offsets(np.zeros(8, np.int32), (3, 2, None), var_off)
+    return RaggedVariants(alt=alt, start=start, ilen=ilen)
+
+
+def test_getitem_slice_preserves_ploidy():
+    """rv[0:2] on a (b=3,p=2,~v) RaggedVariants must return shape (2,2,~v).
+
+    Hand-derived expected:
+      slice [0:2] selects b=0 and b=1:
+        b0 → [[10,11],[12]]
+        b1 → [[20],[21,22]]
+      So start.to_ak().to_list() == [[[10, 11], [12]], [[20], [21, 22]]]  (3-level, ploidy preserved)
+
+    Note: opaque-string alt.to_ak() flattens the b*p leading groups into one outer list
+    (seqpro Ragged behavior for string fields), so alt gives 4 groups = b*p = 2*2:
+      groups in layout order: (b0,p0)→2vars, (b0,p1)→1var, (b1,p0)→1var, (b1,p1)→2vars
+    """
+    rv = _make_rv_b3_p2()
+    sub = rv[0:2]
+    assert isinstance(sub, RaggedVariants)
+    assert sub.shape == (2, 2, None)
+    assert sub.start.to_ak().to_list() == [[[10, 11], [12]], [[20], [21, 22]]]
+    # opaque-string alt flattens b*p groups → 4 groups for (b=2,p=2)
+    assert sub.alt.to_ak().to_list() == [
+        [b"A", b"A"],
+        [b"A"],
+        [b"A"],
+        [b"A", b"A"],
+    ]
+
+
+def test_getitem_array_preserves_ploidy():
+    """rv[np.array([2, 0])] on a (b=3,p=2,~v) RaggedVariants must return shape (2,2,~v).
+
+    Hand-derived expected (selects b=2 then b=0):
+      b2 → [[30],[31]]
+      b0 → [[10,11],[12]]
+      So start.to_ak().to_list() == [[[30], [31]], [[10, 11], [12]]]  (3-level, ploidy preserved)
+
+    Note: opaque-string alt.to_ak() flattens b*p groups → 4 groups for (b=2,p=2):
+      layout order after gather [2,0]: (b2,p0)→1, (b2,p1)→1, (b0,p0)→2, (b0,p1)→1
+    """
+    rv = _make_rv_b3_p2()
+    sub = rv[np.array([2, 0])]
+    assert isinstance(sub, RaggedVariants)
+    assert sub.shape == (2, 2, None)
+    assert sub.start.to_ak().to_list() == [[[30], [31]], [[10, 11], [12]]]
+    # opaque-string alt flattens b*p groups → 4 groups for (b=2,p=2)
+    assert sub.alt.to_ak().to_list() == [
+        [b"A"],
+        [b"A"],
+        [b"A", b"A"],
+        [b"A"],
+    ]
