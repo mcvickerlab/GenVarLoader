@@ -1180,6 +1180,8 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 [[package]]
 name = "seqpro-core"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2828840fff2c76c199a75dc2ed705d1935c55f5755ab4b938d44924386b622d1"
 dependencies = [
  "ndarray",
  "rayon",
