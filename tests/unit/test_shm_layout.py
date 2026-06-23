@@ -134,9 +134,82 @@ def test_rag_variants_roundtrip():
         from genvarloader._dataset._rag_variants import RaggedVariants
 
         assert isinstance(views[0], RaggedVariants)
-        import awkward as ak
+        rt = views[0]
+        # Compare fields without awkward
+        np.testing.assert_array_equal(rt.alt.data, rv.alt.data)
+        np.testing.assert_array_equal(
+            np.asarray(rt.alt._rl.str_offsets), np.asarray(rv.alt._rl.str_offsets)
+        )
+        np.testing.assert_array_equal(rt.start.data, rv.start.data)
+        np.testing.assert_array_equal(
+            np.asarray(rt.start.offsets), np.asarray(rv.start.offsets)
+        )
+    finally:
+        shm.close()
+        shm.unlink()
 
-        assert ak.to_list(views[0]) == ak.to_list(rv)
+
+def test_rag_variants_roundtrip_asymmetric():
+    """Round-trip a RaggedVariants with asymmetric allele lengths (no dummy dataset).
+
+    Core unit test for _write_rag_variants / _read_rag_variants: build a synthetic
+    RaggedVariants with KNOWN byte buffers, write it to shm, read it back, and
+    assert exact byte/offset equality — no awkward required.
+    """
+    from seqpro.rag import Ragged
+    from genvarloader._dataset._rag_variants import RaggedVariants
+    from genvarloader._shm_layout import HEADER_RESERVED
+
+    # Two batches, ploidy=1: batch 0 has 2 variants, batch 1 has 1 variant.
+    # alt alleles: "AC" (2 bytes), "G" (1 byte), "TTT" (3 bytes)
+    var_off = np.array([0, 2, 3], np.int64)  # b*p=2 groups
+    char_off = np.array([0, 2, 3, 6], np.int64)  # 3 variants
+    alt_chars = np.frombuffer(b"ACGTTT", dtype="S1").copy()
+
+    b, p = 2, 1
+    alt = (
+        Ragged.from_offsets(alt_chars, (b * p, None, None), [var_off, char_off])
+        .to_strings()
+        .reshape(b, p, None)
+    )
+    start = Ragged.from_offsets(
+        np.array([10, 20, 30], np.int32), (b * p, None), var_off
+    ).reshape(b, p, None)
+    ilen = Ragged.from_offsets(
+        np.array([1, -1, 2], np.int32), (b * p, None), var_off
+    ).reshape(b, p, None)
+
+    rv = RaggedVariants(alt=alt, start=start, ilen=ilen)
+
+    capacity = HEADER_RESERVED + 4096
+    shm = SharedMemory(create=True, size=capacity)
+    try:
+        write_chunk(shm.buf, [rv], n_instances=b)
+        n_inst, views = read_chunk(shm.buf)
+
+        assert n_inst == b
+        assert len(views) == 1
+        rt = views[0]
+        assert isinstance(rt, RaggedVariants)
+
+        # alt: char data and both offset levels
+        np.testing.assert_array_equal(rt.alt.data, rv.alt.data)
+        np.testing.assert_array_equal(
+            np.asarray(rt.alt.offsets), np.asarray(rv.alt.offsets)
+        )
+        np.testing.assert_array_equal(
+            np.asarray(rt.alt._rl.str_offsets),
+            np.asarray(rv.alt._rl.str_offsets),
+        )
+        # start: data and offsets
+        np.testing.assert_array_equal(rt.start.data, rv.start.data)
+        np.testing.assert_array_equal(
+            np.asarray(rt.start.offsets), np.asarray(rv.start.offsets)
+        )
+        # ilen: data
+        np.testing.assert_array_equal(rt.ilen.data, rv.ilen.data)
+        # shape is preserved
+        assert rt.shape == rv.shape
     finally:
         shm.close()
         shm.unlink()
@@ -168,8 +241,7 @@ def test_flat_ragged_roundtrip():
 
 def test_flat_variants_roundtrip_matches_ragged():
     """Write a _FlatVariants, read back flat; its .to_ragged() equals the
-    RaggedVariants read of the SAME source written from the awkward path."""
-    import awkward as ak
+    RaggedVariants read of the SAME source written from the ragged path."""
     from multiprocessing.shared_memory import SharedMemory
 
     import genvarloader as gvl
@@ -180,7 +252,7 @@ def test_flat_variants_roundtrip_matches_ragged():
     s = np.array([0, 1, 0], dtype=np.int64)
 
     flat_fv = ds.with_output_format("flat")[r, s]  # _FlatVariants
-    ragged_rv = ds[r, s]  # RaggedVariants (awkward)
+    ragged_rv = ds[r, s]  # RaggedVariants
 
     cap = HEADER_RESERVED + 1024 * 1024
     shm = SharedMemory(create=True, size=cap)
@@ -190,7 +262,17 @@ def test_flat_variants_roundtrip_matches_ragged():
         from genvarloader._dataset._flat_variants import _FlatVariants
 
         assert isinstance(views[0], _FlatVariants)
-        assert ak.to_list(views[0].to_ragged()) == ak.to_list(ragged_rv)
+        rt = views[0].to_ragged()
+        # Compare fields without awkward
+        np.testing.assert_array_equal(rt.alt.data, ragged_rv.alt.data)
+        np.testing.assert_array_equal(
+            np.asarray(rt.alt._rl.str_offsets),
+            np.asarray(ragged_rv.alt._rl.str_offsets),
+        )
+        np.testing.assert_array_equal(rt.start.data, ragged_rv.start.data)
+        np.testing.assert_array_equal(
+            np.asarray(rt.start.offsets), np.asarray(ragged_rv.start.offsets)
+        )
     finally:
         shm.close()
         shm.unlink()

@@ -136,56 +136,43 @@ def _write_ragged(buf: memoryview, a, cursor: int) -> tuple[dict, int]:
 
 
 def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
-    """Write a RaggedVariants awkward array into buf.
+    """Write a RaggedVariants into buf via _core.Ragged buffers (no awkward).
 
     Layout per kind=2 block:
-      The descriptor's 'shape' carries [n_fields, regular_size (ploidy)] so the
-      reader can reconstruct the RegularArray wrapper. Each field is encoded
-      inline as a FieldDescriptor (see module docstring).
-    """
-    import awkward as ak
-    from awkward.contents import RegularArray, ListOffsetArray, NumpyArray
+      The descriptor's 'shape' carries [n_fields] so the reader knows how many
+      FieldDescriptors follow. Each field is encoded inline as a FieldDescriptor
+      (see module docstring). The byte layout is IDENTICAL to _write_flat_variants
+      so kind=2 descriptors are interchangeable across the flat and ragged paths.
 
+    For each field of rv._rag:
+      - Numeric (field_kind=0): outer_offsets = field.offsets (b*p+1 int64),
+        leaf_data = field.data.
+      - Alleles (field_kind=1): outer_offsets = field.offsets (b*p+1 int64),
+        inner_offsets = field._rl.str_offsets (n_variants+1 int64),
+        leaf_data = field.data (S1 bytes).
+    ploidy (regular_size) is rv.shape[1].
+    """
     fields = rv.fields
     n_fields = len(fields)
+    regular_size = int(rv.shape[1])  # ploidy
 
     field_descs: list[dict] = []
 
-    for field in fields:
-        f_layout = ak.to_layout(rv[field])
+    for fname in fields:
+        f = rv._rag[fname]
 
-        # Level 0: RegularArray(size=ploidy)
-        assert isinstance(f_layout, RegularArray), (
-            f"Expected RegularArray for field {field!r}"
-        )
-        regular_size = f_layout.size
-        # Level 1: ListOffsetArray (outer: groups of variants per (batch, ploid) cell)
-        outer = f_layout.content
-        assert isinstance(outer, ListOffsetArray), (
-            f"Expected outer ListOffsetArray for {field!r}"
-        )
-        outer_offsets = np.ascontiguousarray(outer.offsets.data)  # int64
+        outer_offsets = np.ascontiguousarray(f.offsets, dtype=np.int64)
+        leaf_data = np.ascontiguousarray(f.data)
 
-        inner_content = outer.content
-        if isinstance(inner_content, ListOffsetArray):
-            # Alleles field: (batch, ploidy, ~variants, ~allele_bytes)
-            inner = inner_content
-            inner_offsets = np.ascontiguousarray(inner.offsets.data)  # int64
-            leaf = inner.content
-            assert isinstance(leaf, NumpyArray), (
-                f"Expected NumpyArray leaf for {field!r} alleles"
-            )
-            leaf_data = np.ascontiguousarray(leaf.data)
-            field_kind = 1  # alleles
-        elif isinstance(inner_content, NumpyArray):
-            # Numeric field: (batch, ploidy, ~variants)
-            inner_offsets = np.empty(0, dtype=np.int64)
-            leaf_data = np.ascontiguousarray(inner_content.data)
-            field_kind = 0  # numeric
+        if getattr(f, "is_string", False):
+            # Allele field (opaque-string Ragged, shape (b, p, ~v)):
+            # _rl.str_offsets holds per-variant char boundaries (n_variants+1,).
+            inner_offsets = np.ascontiguousarray(f._rl.str_offsets, dtype=np.int64)
+            field_kind = 1
         else:
-            raise TypeError(
-                f"Unexpected layout for field {field!r}: {type(inner_content)}"
-            )
+            # Numeric field (shape (b, p, ~v)):
+            inner_offsets = np.empty(0, dtype=np.int64)
+            field_kind = 0
 
         cursor = _align(cursor)
         outer_off = cursor
@@ -214,7 +201,7 @@ def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
         )[...] = leaf_data.ravel()
         cursor += leaf_data.nbytes
 
-        name_bytes = field.encode("utf-8")
+        name_bytes = fname.encode("utf-8")
         field_descs.append(
             {
                 "field_kind": field_kind,
@@ -544,17 +531,25 @@ def _read_ragged(buf: memoryview, d: dict, copy: bool = True):
 
 
 def _read_rag_variants(buf: memoryview, d: dict, copy: bool = True):
-    import awkward as ak
-    from awkward.contents import RegularArray, ListOffsetArray, NumpyArray
-    from awkward.index import Index64
-    from ._dataset._rag_variants import RaggedVariants
+    """Reconstruct a RaggedVariants from a kind=2 descriptor via _core.Ragged (no awkward).
 
-    field_arrays: dict[str, ak.Array] = {}
+    For each field:
+      - Alleles (field_kind=1): rebuild as Ragged.from_offsets(char_data,
+        (b*p, None, None), [outer_offsets, inner_offsets]).to_strings().reshape(b, p, None).
+      - Numeric (field_kind=0): rebuild as Ragged.from_offsets(leaf, (b*p, None),
+        outer_offsets).reshape(b, p, None).
+    Fields share the same outer offsets object (required by Ragged.from_fields).
+    """
+    from seqpro.rag import Ragged
+    from ._dataset._rag_variants import RaggedVariants, _share_offsets
+
+    field_rags: dict[str, Ragged] = {}
+    shared_outer: np.ndarray | None = None
 
     for fd in d["_field_descs"]:
         fname = fd["name"]
         leaf_dtype = _dtype_from_bytes(fd["dtype_str"])
-        regular_size = fd["regular_size"]
+        regular_size = fd["regular_size"]  # ploidy
 
         n_outer = fd["outer_offsets_nbytes"] // 8
         outer_offsets = np.frombuffer(
@@ -571,27 +566,43 @@ def _read_rag_variants(buf: memoryview, d: dict, copy: bool = True):
             outer_offsets = outer_offsets.copy()
             leaf_data = leaf_data.copy()
 
+        # b*p = number of (batch, ploidy) cells = len(outer_offsets) - 1
+        b_times_p = len(outer_offsets) - 1
+        b = b_times_p // regular_size if regular_size else b_times_p
+
         if fd["field_kind"] == 1:
+            # Allele field: outer_offsets (variant-level) + inner_offsets (char-level)
             n_inner = fd["inner_offsets_nbytes"] // 8
             inner_offsets = np.frombuffer(
                 buf, dtype=np.int64, count=n_inner, offset=fd["inner_offsets_offset"]
             )
             if copy:
                 inner_offsets = inner_offsets.copy()
-            inner_loa = ListOffsetArray(
-                Index64(inner_offsets),
-                NumpyArray(leaf_data, parameters={"__array__": "byte"}),
-                parameters={"__array__": "bytestring"},
+            # Build S1-char Ragged with two ragged axes: (b*p, ~variants, ~chars)
+            # then collapse the char axis into opaque strings and reshape to (b, p, ~v).
+            rag = (
+                Ragged.from_offsets(
+                    leaf_data,
+                    (b_times_p, None, None),
+                    [outer_offsets, inner_offsets],
+                )
+                .to_strings()
+                .reshape(b, regular_size, None)
             )
-            outer_loa = ListOffsetArray(Index64(outer_offsets), inner_loa)
-            arr = ak.Array(RegularArray(outer_loa, regular_size))
         else:
-            outer_loa = ListOffsetArray(Index64(outer_offsets), NumpyArray(leaf_data))
-            arr = ak.Array(RegularArray(outer_loa, regular_size))
+            # Numeric field: (b*p, ~variants) → (b, p, ~variants)
+            rag = Ragged.from_offsets(
+                leaf_data, (b_times_p, None), outer_offsets
+            ).reshape(b, regular_size, None)
 
-        field_arrays[fname] = arr
+        # Share the same outer-offsets object across all fields (required by
+        # Ragged.from_fields which checks value equality; sharing avoids O(n) checks).
+        if shared_outer is None:
+            shared_outer = np.asarray(rag.offsets)
+        rag = _share_offsets(rag, shared_outer)
+        field_rags[fname] = rag
 
-    return RaggedVariants.from_ak(ak.zip(field_arrays, depth_limit=1))
+    return RaggedVariants.from_record(Ragged.from_fields(field_rags))
 
 
 def _flat_ploidy(shape) -> int:
