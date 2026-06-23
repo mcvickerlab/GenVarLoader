@@ -187,20 +187,27 @@ class _FlatWindow:
     shape: tuple[int | None, ...]
 
     def to_ragged(self):
-        import awkward as ak
-        from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
-        from awkward.index import Index
+        from seqpro.rag import Ragged
 
-        leaf = NumpyArray(np.ascontiguousarray(self.data))
-        l_content = ListOffsetArray(Index(np.asarray(self.seq_offsets, np.int64)), leaf)
-        vl_content = ListOffsetArray(
-            Index(np.asarray(self.var_offsets, np.int64)), l_content
-        )
-        node = vl_content
+        # Build a numeric Ragged with shape (b, p, ~v, ~w): two ragged axes.
+        # var_offsets: per-(b*p)-group variant boundaries (len b*p + 1)
+        # seq_offsets: per-variant window token boundaries (len n_variants + 1)
         fixed = [d for d in self.shape if d is not None]
-        for size in reversed(fixed[1:]):
-            node = RegularArray(node, size)
-        return ak.Array(node)
+        if len(fixed) >= 2:
+            p = fixed[-1]
+            b = (len(self.var_offsets) - 1) // p
+        else:
+            b = len(self.var_offsets) - 1
+            p = 1
+        data = np.ascontiguousarray(self.data)
+        return Ragged.from_offsets(
+            data,
+            (b, p, None, None),
+            [
+                np.asarray(self.var_offsets, np.int64),
+                np.asarray(self.seq_offsets, np.int64),
+            ],
+        )
 
     def reshape(self, shape) -> "_FlatWindow":
         if isinstance(shape, int):

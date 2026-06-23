@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import awkward as ak
 import genvarloader as gvl
 import numpy as np
 import pytest
@@ -42,10 +41,18 @@ def test_a0_flat_to_ragged_matches_ragged(snap_dataset, seqs, idx):
 
 
 def _rv_to_lists(rv: RaggedVariants) -> dict:
-    out = {"alt": ak.to_list(rv["alt"]), "start": ak.to_list(rv["start"])}
+    """Materialise a RaggedVariants to nested Python lists for equality checks.
+
+    Uses _core.Ragged's .to_ak().to_list() for opaque-string fields (alt/ref) and
+    .to_ak().to_list() for numeric fields (start, ilen, dosage, extras).
+    """
+    out = {
+        "alt": rv.alt.to_ak().to_list(),
+        "start": rv.start.to_ak().to_list(),
+    }
     for f in ("ref", "ilen", "dosage"):
         if f in rv.fields:
-            out[f] = ak.to_list(rv[f])
+            out[f] = rv._rag[f].to_ak().to_list()
     return out
 
 
@@ -72,7 +79,9 @@ def test_a_flat_variants_scalar_scalar_index_nonempty_matches_ragged(snap_datase
     # lists. (region=0, sample=2) is known to carry variants in snap_dataset.
     ds = snap_dataset.with_seqs("variants").with_tracks(False)
     ragged = ds[0, 2]
-    assert any(len(p) > 0 for p in ak.to_list(ragged["alt"])), "expected non-empty alt"
+    assert any(len(p) > 0 for p in ragged.alt.to_ak().to_list()), (
+        "expected non-empty alt"
+    )
     rewrapped = ds.with_output_format("flat")[0, 2].to_ragged()
     assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
 
@@ -154,6 +163,6 @@ def test_b_dummy_fill_no_empty_groups(snap_dataset):
     )
     idx = (np.arange(min(6, snap_dataset.shape[0])),)
     rv = ds[idx]
-    for ploid_groups in ak.to_list(rv["start"]):
+    for ploid_groups in rv.start.to_ak().to_list():
         for g in ploid_groups:
             assert len(g) >= 1
