@@ -5,7 +5,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Generic, Literal, NoReturn, TypeVar, overload
 
-import awkward as ak
 import numpy as np
 import polars as pl
 from loguru import logger
@@ -368,8 +367,8 @@ class Dataset:
             else:
                 sm, spliced_bed = SpliceMap.from_bed(splice_info, self._full_bed)
                 if (
-                    ak.max(sm.splice_map, None) >= self._idxer.n_regions
-                    or ak.min(sm.splice_map, None) < -self._idxer.n_regions
+                    sm.splice_map.to_packed().data.max() >= self._idxer.n_regions
+                    or sm.splice_map.to_packed().data.min() < -self._idxer.n_regions
                 ):
                     raise ValueError(
                         "Found indices in the splice map that are out of bounds for the dataset."

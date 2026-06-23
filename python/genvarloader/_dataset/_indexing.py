@@ -9,11 +9,11 @@ if TYPE_CHECKING:
 from dataclasses import dataclass, replace
 from typing import TypeGuard
 
-import awkward as ak
 import numpy as np
 from hirola import HashTable
 from numpy import integer
 from numpy.typing import NDArray
+from seqpro.rag import Ragged
 from typing_extensions import Self, assert_never
 
 from .._types import Idx, StrIdx
@@ -325,7 +325,7 @@ class SpliceIndexer:
     def _init(
         cls,
         names: Collection[str] | NDArray[np.str_],
-        splice_map: ak.Array,
+        splice_map: Ragged,
         dsi: DatasetIndexer,
     ) -> SpliceIndexer:
         # Kept for backward-compat callers; prefer SpliceMap.from_bed.
@@ -333,8 +333,8 @@ class SpliceIndexer:
 
         _names = np.asarray(names, dtype=np.str_)
         if (
-            ak.max(splice_map, None) >= dsi.n_regions
-            or ak.min(splice_map, None) < -dsi.n_regions
+            splice_map.to_packed().data.max() >= dsi.n_regions
+            or splice_map.to_packed().data.min() < -dsi.n_regions
         ):
             raise ValueError(
                 "Found indices in the splice map that are out of bounds for the dataset."
@@ -379,7 +379,7 @@ class SpliceIndexer:
 
         new_map = self.map.subset_to(rows) if rows is not None else self.map
         sub_dsi = self.dsi.subset_to(samples=samples)
-        region_idxs = ak.flatten(new_map.splice_map, None).to_numpy()
+        region_idxs = new_map.splice_map.to_packed().data
         eff_dsi = self.dsi.subset_to(regions=region_idxs, samples=samples)
 
         return replace(self, map=new_map, dsi=sub_dsi), eff_dsi
@@ -443,12 +443,9 @@ class SpliceIndexer:
 
         (r_idx, s_idx) = np.unravel_index(idx, self.full_shape)
         r_idx = self.map.full_splice_map[r_idx]
-        lengths = ak.count(r_idx, -1)
-        if not isinstance(lengths, np.integer):
-            lengths = lengths.to_numpy()
-        lengths = cast(NDArray[np.int64], lengths)
+        lengths = r_idx.lengths.astype(np.int64)
         offsets = lengths_to_offsets(lengths)
-        r_idx = ak.flatten(r_idx, -1).to_numpy()
+        r_idx = r_idx.to_packed().data
         s_idx = s_idx.repeat(lengths)
 
         ds_idx, *_ = self.dsi.parse_idx((r_idx, s_idx))
@@ -456,12 +453,12 @@ class SpliceIndexer:
         return ds_idx, squeeze, out_reshape, offsets, n_rows_sel, n_samples_sel
 
     @property
-    def splice_map(self) -> ak.Array:
+    def splice_map(self) -> Ragged:
         # Back-compat shim for direct readers; prefer .map.splice_map.
         return self.map.splice_map
 
     @property
-    def full_splice_map(self) -> ak.Array:
+    def full_splice_map(self) -> Ragged:
         return self.map.full_splice_map
 
     @property

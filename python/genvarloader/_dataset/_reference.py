@@ -5,7 +5,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Generic, Literal, TypeVar, cast, overload
 
-import awkward as ak
 import numba as nb
 import numpy as np
 import polars as pl
@@ -401,7 +400,7 @@ class RefDataset(Generic[T]):
         """Subset the dataset to a subset of regions (or transcripts, when spliced)."""
         if self._splice_map is not None:
             new_map = self._splice_map.subset_to(regions)
-            flat = ak.flatten(new_map.splice_map, None).to_numpy()
+            flat = new_map.splice_map.to_packed().data
             self._splice_map = new_map
             self._subset_bed = self.full_bed[flat]
             self._subset_regions = bed_to_regions(
