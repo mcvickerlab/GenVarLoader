@@ -20,24 +20,28 @@ def _expected_bytes(haps, idx, kind):
 
     Uses get_variants_flat (the canonical decode path) to materialise a
     _FlatVariants record, converts to RaggedVariants via to_ragged(), then sums
-    allele byte lengths via awkward's ak.num.
+    allele byte lengths via str_offsets on the opaque-string Ragged field.
 
-    The field type is ``b * p * var * bytes`` (four dimensions).  Awkward's
-    ``bytes`` type is special: ``axis=-1`` does NOT reach into byte content;
-    you must use explicit axis indices.  ``ak.num(field, axis=3)`` returns the
-    byte length of each allele string (shape ``(b, p, ~v)``); summing on
-    ``axis=2`` then gives total bytes per (b, p) instance.
+    The field is an opaque-string Ragged of shape ``(b, p, ~v)`` where each
+    element is a byte string.  ``field._rl.str_offsets`` gives cumulative byte
+    boundaries across all variants; ``np.diff`` gives per-variant byte lengths.
+    Segment-summing by ``field.offsets`` (variant-level groups) yields total
+    bytes per (b, p) pair.
     """
-    import awkward as ak
+    import numpy as np
 
     from genvarloader._dataset._flat_variants import get_variants_flat
 
     flat_v = get_variants_flat(haps, idx)
     ragv = flat_v.to_ragged()
-    field = getattr(ragv, kind)  # type: b * p * ~v * bytes
-    # axis=3: byte length of each allele string → shape (b, p, ~v)
-    # axis=2: sum across variants per (b, p) → shape (b, p)
-    return ak.sum(ak.num(field, axis=3), axis=2).to_numpy().ravel()
+    field = getattr(ragv, kind)  # opaque-string Ragged, shape (b, p, ~v)
+    str_off = np.asarray(field._rl.str_offsets, np.int64)
+    per_var_bytes = np.diff(str_off)  # byte length per allele string (flat)
+    var_off = np.asarray(field.offsets, np.int64)  # variant-group boundaries (b*p+1,)
+    csum = np.concatenate([[0], np.cumsum(per_var_bytes)])
+    # Segment-sum per (b, p) group
+    per_bp = csum[var_off[1:]] - csum[var_off[:-1]]
+    return per_bp.astype(np.int64)
 
 
 def test_allele_bytes_sum_matches_materialized_alt(ds):

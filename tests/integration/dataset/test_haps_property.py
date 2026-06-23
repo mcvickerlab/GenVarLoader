@@ -42,7 +42,6 @@ import tempfile
 from itertools import product
 from pathlib import Path
 
-import awkward as ak
 import genvarloader as gvl
 import numpy as np
 import polars as pl
@@ -289,7 +288,9 @@ def test_track1b_af_matches_vcf_oracle_on_session_case(synthetic_case):
         for sample in ds.samples:
             rv = ds[region, sample]
             for h in range(2):
-                for af in ak.to_list(rv.AF[h]):
+                # rv.AF is a Ragged of shape (p, ~v) after scalar squeeze;
+                # rv.AF[h] is a numpy array of AF values for haplotype h.
+                for af in rv.AF[h].tolist():
                     assert any(abs(af - a) < 1e-6 for a in oracle_af_set), (
                         f"rv.AF value {af!r} at region={region} sample={sample} "
                         f"hap={h} is not present in the VCF oracle AF array"
@@ -381,7 +382,9 @@ def test_af_and_dosage_consistent(case_inputs):
             for sample in ds.samples:
                 rv = ds[region, sample]
                 for h in range(2):
-                    for af in ak.to_list(rv.AF[h]):
+                    # rv.AF is a Ragged of shape (p, ~v) after scalar squeeze;
+                    # rv.AF[h] is a numpy array of AF values for haplotype h.
+                    for af in rv.AF[h].tolist():
                         assert 0.0 <= af <= 1.0, (
                             f"rv.AF {af!r} out of [0,1] at "
                             f"region={region} sample={sample} hap={h}"

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import awkward as ak
 import numpy as np
 
 from genvarloader import RaggedVariants
@@ -38,10 +37,13 @@ def test_flat_variants_to_ragged_matches_handbuilt():
     rv = fv.to_ragged()
 
     assert isinstance(rv, RaggedVariants)
-    # _build_allele_layout with ploidy=1 produces shape (b, p, ~v, ~l) = (2, 1, ~v, ~l)
-    assert ak.to_list(rv["alt"]) == [[[b"ACG", b"T"]], [[b"GG"]]]
-    assert ak.to_list(rv["ref"]) == [[[b"A", b"CC"]], [[b"T"]]]
-    assert ak.to_list(rv["start"]) == [[1, 5], [9]]
+    # rv.shape is (2, 1, None): alt/ref have (b=2, p=1, ~v) from _FlatAlleles.to_ragged();
+    # start has (2, None) since _Flat.to_ragged() with shape (2, None) returns (2, None).
+    # to_ak().to_list() for opaque-string (b, p, ~v) drops the p=1 axis → 2-level list.
+    # to_ak().to_list() for numeric (2, None) → 2-level list.
+    assert rv["alt"].to_ak().to_list() == [[b"ACG", b"T"], [b"GG"]]
+    assert rv["ref"].to_ak().to_list() == [[b"A", b"CC"], [b"T"]]
+    assert rv["start"].to_ak().to_list() == [[1, 5], [9]]
 
 
 def test_flat_variants_squeeze_leading_axis():
@@ -104,9 +106,10 @@ def test_flat_variants_squeeze_leading_axis():
     # to_ragged() still works correctly after squeeze
     rv = fv2.to_ragged()
     assert isinstance(rv, RaggedVariants)
-    assert ak.to_list(rv["alt"]) == [[[b"ACG", b"T"]], [[b"GG"]]]
-    assert ak.to_list(rv["ref"]) == [[[b"A", b"CC"]], [[b"T"]]]
-    assert ak.to_list(rv["start"]) == [[1, 5], [9]]
+    # Same to_ak() conventions as above (p=1 dropped for allele fields, start is (2, None)).
+    assert rv["alt"].to_ak().to_list() == [[b"ACG", b"T"], [b"GG"]]
+    assert rv["ref"].to_ak().to_list() == [[b"A", b"CC"], [b"T"]]
+    assert rv["start"].to_ak().to_list() == [[1, 5], [9]]
 
 
 def test_compact_keep_compacts_v_idxs_and_offsets():
@@ -142,14 +145,17 @@ def test_compact_keep_used_for_dosage_values():
 
 
 def test_flat_alleles_to_ragged_multidim_outer():
-    """_FlatAlleles.to_ragged() rebuilds the full regular-axis stack for shapes
-    with more than one leading fixed dim (b, s, p, ~v, ~l)."""
+    """_FlatAlleles.to_ragged() always returns (b, p, ~v) opaque-string Ragged,
+    using only the last two fixed dims as (b, p). Extra leading dims are collapsed
+    into b.  For shape (2, 1, 2, None): b_times_p=4, p=2, b=2 → (2, 2, ~v)."""
     # shape (2, 1, 2, None): b=2, s=1, p=2 -> 4 b*p rows.
     group_off = [0, 1, 1, 2, 2]  # rows: [v], [], [v], []
     alt = _alleles([b"AC", b"GGG"], group_off, ploidy=2)
     alt = _FlatAlleles(alt.byte_data, alt.seq_offsets, alt.var_offsets, (2, 1, 2, None))
     rv = alt.to_ragged()
-    assert ak.to_list(rv) == [[[[b"AC"], []]], [[[b"GGG"], []]]]
+    # to_ragged() produces shape (b=2, p=2, ~v) — extra s=1 dim is collapsed into b.
+    assert rv.shape == (2, 2, None)
+    assert rv.to_ak().to_list() == [[b"AC"], [], [b"GGG"], []]
 
 
 def test_public_flat_exports():
@@ -194,8 +200,6 @@ def test_fill_empty_seq_kernel():
 
 
 def test_fill_empty_groups_roundtrip():
-    import awkward as ak
-
     from genvarloader._dataset._flat_variants import (
         DummyVariant,
         _FlatAlleles,
@@ -217,15 +221,13 @@ def test_fill_empty_groups_roundtrip():
     filled = fv.fill_empty_groups(DummyVariant(start=-1, alt=b"N"))
     rv = filled.to_ragged()
     # empty rows now hold exactly the dummy; non-empty row unchanged
-    assert ak.to_list(rv["alt"]) == [[b"N"], [b"AC", b"G"], [b"N"]]
-    assert ak.to_list(rv["start"]) == [[-1], [5, 9], [-1]]
+    assert rv["alt"].to_ak().to_list() == [[b"N"], [b"AC", b"G"], [b"N"]]
+    assert rv["start"].to_ak().to_list() == [[-1], [5, 9], [-1]]
     # ilen: empty rows get DummyVariant default (ilen=0); non-empty row keeps original values
-    assert ak.to_list(rv["ilen"]) == [[0], [1, -1], [0]]
+    assert rv["ilen"].to_ak().to_list() == [[0], [1, -1], [0]]
 
 
 def test_fill_empty_groups_noop_when_no_empties():
-    import awkward as ak
-
     from genvarloader._dataset._flat_variants import (
         DummyVariant,
         _FlatAlleles,
@@ -244,8 +246,8 @@ def test_fill_empty_groups_noop_when_no_empties():
     ilen = _Flat.from_offsets(np.array([0, 0], np.int32), (2, None), group_off.copy())
     fv = _FlatVariants(fields={"alt": alt, "start": start, "ilen": ilen})
     filled = fv.fill_empty_groups(DummyVariant())
-    assert ak.to_list(filled.to_ragged()["alt"]) == [[b"A"], [b"G"]]
-    assert ak.to_list(filled.to_ragged()["start"]) == [[3], [7]]
+    assert filled.to_ragged()["alt"].to_ak().to_list() == [[b"A"], [b"G"]]
+    assert filled.to_ragged()["start"].to_ak().to_list() == [[3], [7]]
 
 
 def test_gather_rows_1d_vs_2d_dispatch():
@@ -326,7 +328,6 @@ def test_get_variants_flat_fills_empty_groups():
     this test builds a minimal synthetic Haps with controlled empty groups.
     Full integration coverage is deferred to Task 5.
     """
-    import awkward as ak
     from dataclasses import replace
     from pathlib import Path
 
@@ -380,7 +381,7 @@ def test_get_variants_flat_fills_empty_groups():
 
     # Without dummy: some groups are empty
     plain = get_variants_flat(haps, idx).to_ragged()
-    plain_starts = ak.to_list(plain["start"])
+    plain_starts = plain["start"].to_ak().to_list()
     # shape is (b=4, p=1, ~v): plain_starts = [[[10]], [[]], [[20, 30]], [[]]]
     # idx covers 4 (region, sample) combos; each outer row has p=1 ploidy group.
     assert any(len(g) == 0 for row in plain_starts for g in row)
@@ -389,7 +390,7 @@ def test_get_variants_flat_fills_empty_groups():
     haps_d = replace(haps, dummy_variant=DummyVariant(start=-1, alt=b"N", ref=b"N"))
     filled = get_variants_flat(haps_d, idx).to_ragged()
 
-    filled_starts = ak.to_list(filled["start"])
+    filled_starts = filled["start"].to_ak().to_list()
     for row in filled_starts:
         for g in row:
             assert len(g) >= 1, f"empty group found after fill: {filled_starts}"

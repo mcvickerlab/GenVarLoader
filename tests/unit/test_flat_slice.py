@@ -14,10 +14,19 @@ def _rag_eq(a, b):
     np.testing.assert_array_equal(np.asarray(a.offsets), np.asarray(b.offsets))
 
 
-def _ak_eq(a, b):
-    import awkward as ak
+def _rv_eq(a, b):
+    """Field-by-field equality for RaggedVariants."""
+    from genvarloader._dataset._rag_variants import RaggedVariants
 
-    assert ak.to_list(a) == ak.to_list(b)
+    assert isinstance(a, RaggedVariants) and isinstance(b, RaggedVariants), (
+        f"expected RaggedVariants, got {type(a)} and {type(b)}"
+    )
+    assert set(a.fields) == set(b.fields), (
+        f"field sets differ: {a.fields} vs {b.fields}"
+    )
+    for fname in a.fields:
+        fa, fb = a[fname], b[fname]
+        assert fa.to_ak().to_list() == fb.to_ak().to_list(), f"field {fname!r} mismatch"
 
 
 @pytest.mark.parametrize(
@@ -49,7 +58,7 @@ def test_flat_slice_matches_direct_index(seq_kind, sl):
         if sub.size == 0:
             assert len(got) == 0
         else:
-            _ak_eq(got, ragged_sub)
+            _rv_eq(got, ragged_sub)
     elif seq_kind == "annotated":
         if sub.size == 0:
             assert got.haps.shape[0] == 0
@@ -65,10 +74,10 @@ def test_flat_slice_matches_direct_index(seq_kind, sl):
 
 
 def got_len(x):
-    import awkward as ak
     from seqpro.rag import Ragged
+    from genvarloader._dataset._rag_variants import RaggedVariants
 
-    if isinstance(x, ak.Array):
+    if isinstance(x, RaggedVariants):
         return len(x)
     if isinstance(x, Ragged):
         return x.shape[0]

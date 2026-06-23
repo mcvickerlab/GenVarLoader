@@ -144,23 +144,21 @@ def test_compute_flank_tokens_unit(snap_dataset):
 
 
 def test_flat_window_to_ragged_roundtrip():
-    import awkward as ak
-
     # two groups (b=2, p=1), variant counts [2, 1]; window lens [3, 4 | 2]
     token_data = np.arange(3 + 4 + 2, dtype=np.uint8)
     seq_offsets = np.array([0, 3, 7, 9], dtype=np.int64)  # per-variant
     var_offsets = np.array([0, 2, 3], dtype=np.int64)  # per group
     shape = (2, 1, None, None)
     w = _FlatWindow(token_data, seq_offsets, var_offsets, shape)
-    rag = w.to_ragged()  # ak.Array (2, 1, ~v, ~win) — two ragged axes
-    assert rag.ndim == 4
+    rag = w.to_ragged()  # _core.Ragged (2, 1, ~v, ~win) — two ragged axes
+    assert len(rag.shape) == 4
     # element-identical content after wrapping
-    np.testing.assert_array_equal(
-        np.asarray(ak.flatten(rag, axis=None)).view(np.uint8), token_data
-    )
+    np.testing.assert_array_equal(np.asarray(rag.data).view(np.uint8), token_data)
     # structure preserved: variant counts per (b, p) and window length per variant
-    assert ak.to_list(ak.num(rag, axis=2)) == [[2], [1]]
-    assert ak.to_list(ak.num(rag, axis=3)) == [[[3, 4]], [[2]]]
+    assert rag.lengths.tolist() == [[2], [1]]
+    # inner lengths (window tokens per variant): np.diff of inner offsets
+    inner_lens = np.diff(np.asarray(rag._layout.offsets[-1], np.int64)).tolist()
+    assert inner_lens == [3, 4, 2]
 
 
 def _oracle_windows(
@@ -213,8 +211,6 @@ def test_compute_windows_unit(snap_dataset):
 
 
 def test_flank_tokens_end_to_end_matches_oracle(snap_dataset):
-    import awkward as ak
-
     L = 5
     flat_ds = (
         snap_dataset.with_seqs("variants")
@@ -238,9 +234,10 @@ def test_flank_tokens_end_to_end_matches_oracle(snap_dataset):
     ds_idx, _, _ = snap_dataset._idxer.parse_idx(idx)
     r_idx, _ = np.unravel_index(np.asarray(ds_idx), snap_dataset._idxer.full_shape)
     region_contigs = snap_dataset._full_regions[r_idx, 0]
-    counts = np.asarray(ak.flatten(ak.num(rag.start, axis=-1), axis=None))
-    starts = np.asarray(ak.flatten(rag.start, axis=None))
-    ilens = np.asarray(ak.flatten(rag.ilen, axis=None))
+    # rag.start is a _core.Ragged (b, p, ~v); .lengths gives per-group variant counts
+    counts = rag.start.lengths.ravel()
+    starts = np.asarray(rag.start.data)
+    ilens = np.asarray(rag.ilen.data)
     v_contigs = np.repeat(np.repeat(region_contigs, ploidy), counts)
 
     expected = _flatten_lut_flanks(ref, v_contigs, starts, ilens, L, lut)  # (n_var, 2L)
@@ -355,7 +352,6 @@ def test_variant_windows_matrix_fields(snap_dataset, ref_mode, alt_mode):
 
 def test_variant_windows_ref_window_alt_allele_oracle(snap_dataset):
     # The user's case: ref=window, alt=bare allele. Verify both against oracles.
-    import awkward as ak
     from genvarloader._dataset._flat_variants import VarWindowOpt
     from genvarloader._dataset._flat_flanks import build_token_lut
 
@@ -386,22 +382,24 @@ def test_variant_windows_ref_window_alt_allele_oracle(snap_dataset):
     ds_idx, _, _ = snap_dataset._idxer.parse_idx(idx)
     r_idx, _ = np.unravel_index(np.asarray(ds_idx), snap_dataset._idxer.full_shape)
     region_contigs = snap_dataset._full_regions[r_idx, 0]
-    counts = np.asarray(ak.flatten(ak.num(rv.start, axis=-1), axis=None))
-    starts = np.asarray(ak.flatten(rv.start, axis=None))
-    ilens = np.asarray(ak.flatten(rv.ilen, axis=None))
+    # rv.start is a _core.Ragged (b, p, ~v); .lengths gives per-group variant counts
+    counts = rv.start.lengths.ravel()
+    starts = np.asarray(rv.start.data)
+    ilens = np.asarray(rv.ilen.data)
     v_contigs = np.repeat(np.repeat(region_contigs, ploidy), counts)
     ends = starts - np.minimum(ilens, 0) + 1
 
     # ref window oracle: [start-L, end+L) read tokenized
     rw = ref.fetch(v_contigs, starts - L, ends + L)
     exp_ref = lut[rw.data.view(np.uint8)]
-    got_ref_flat = np.asarray(ak.flatten(out.ref_window.to_ragged(), axis=None))
+    got_ref_flat = np.asarray(out.ref_window.to_ragged().data)
     np.testing.assert_array_equal(got_ref_flat, exp_ref)
 
     # alt bare allele oracle: tokenized alt bytes (no flanks)
-    alt_bytes = np.asarray(ak.flatten(rv.alt, axis=None)).view(np.uint8)
+    # rv.alt is opaque-string Ragged; .data is S1 chars for all alleles concatenated
+    alt_bytes = np.asarray(rv.alt.data).view(np.uint8)
     exp_alt = lut[alt_bytes]
-    got_alt_flat = np.asarray(ak.flatten(out.alt.to_ragged(), axis=None))
+    got_alt_flat = np.asarray(out.alt.to_ragged().data)
     np.testing.assert_array_equal(got_alt_flat, exp_alt)
 
 
@@ -508,16 +506,15 @@ def test_public_exports():
 def _oracle_flank_from_ragged(dataset, idx, flank_len, lut):
     """Independent oracle: (n_var, 2L) flank tokens for ``dataset[idx]`` in flat
     flank-ride-along mode, computed from the ragged variants output + region contigs."""
-    import awkward as ak
-
     rag = dataset.with_seqs("variants").with_tracks(False)[idx]
     ploidy = dataset._seqs.genotypes.shape[-2]
     ds_idx, _, _ = dataset._idxer.parse_idx(idx)
     r_idx, _ = np.unravel_index(np.asarray(ds_idx), dataset._idxer.full_shape)
     region_contigs = dataset._full_regions[r_idx, 0]
-    counts = np.asarray(ak.flatten(ak.num(rag.start, axis=-1), axis=None))
-    starts = np.asarray(ak.flatten(rag.start, axis=None))
-    ilens = np.asarray(ak.flatten(rag.ilen, axis=None))
+    # rag.start is a _core.Ragged (b, p, ~v); .lengths gives per-group variant counts
+    counts = rag.start.lengths.ravel()
+    starts = np.asarray(rag.start.data)
+    ilens = np.asarray(rag.ilen.data)
     v_contigs = np.repeat(np.repeat(region_contigs, ploidy), counts)
     ref = dataset._seqs.reference
     return _flatten_lut_flanks(ref, v_contigs, starts, ilens, flank_len, lut)
@@ -566,11 +563,10 @@ def test_oob_flank_padding(snap_dataset):
         .with_output_format("flat")
         .with_settings(flank_length=L, token_alphabet=b"ACGT", unknown_token=4)
     )
-    import awkward as ak
-
     rag_ds = snap_dataset.with_seqs("variants").with_tracks(False)
     rag = rag_ds[[0], [2]]
-    starts = np.asarray(ak.flatten(rag.start, axis=None))
+    # rag.start is a _core.Ragged (b, p, ~v); .data is the flat variant start array
+    starts = np.asarray(rag.start.data)
     assert len(starts) > 0, "expected at least one variant in region 0 / sample 2"
     min_start = int(starts.min())
     # Confirm the variant actually crosses position 0
@@ -593,8 +589,6 @@ def test_oob_flank_padding(snap_dataset):
 
 def test_flank_tokens_empty_region_row(snap_dataset):
     """A (region, sample) with zero variants must produce a zero-length row."""
-    import awkward as ak
-
     L = 5
     flat_ds = (
         snap_dataset.with_seqs("variants")
@@ -606,7 +600,8 @@ def test_flank_tokens_empty_region_row(snap_dataset):
     target = None
     for r in range(snap_dataset._full_regions.shape[0]):
         rag = rag_ds[[r], [0]]
-        if int(ak.sum(ak.num(rag.start, axis=-1))) == 0:
+        # rag.start.lengths gives per-group variant counts; sum = total variants
+        if int(rag.start.lengths.sum()) == 0:
             target = r
             break
     if target is None:
@@ -660,12 +655,11 @@ def test_with_settings_stores_unknown_token(snap_dataset):
 
 
 def _find_empty_region(snap_dataset):
-    import awkward as ak
-
     rag_ds = snap_dataset.with_seqs("variants").with_tracks(False)
     for r in range(snap_dataset._full_regions.shape[0]):
         rag = rag_ds[[r], [0]]
-        if int(ak.sum(ak.num(rag.start, axis=-1))) == 0:
+        # rag.start.lengths gives per-group variant counts; sum = total variants
+        if int(rag.start.lengths.sum()) == 0:
             return r
     return None
 
@@ -692,8 +686,6 @@ def test_dummy_flank_tokens_fills_empty_region_all_unk(snap_dataset):
 
 
 def test_dummy_variant_windows_fill_empty_region_all_unk(snap_dataset):
-    import awkward as ak
-
     target = _find_empty_region(snap_dataset)
     if target is None:
         pytest.skip("no empty (region, sample) variant set in this fixture")
@@ -709,7 +701,8 @@ def test_dummy_variant_windows_fill_empty_region_all_unk(snap_dataset):
     flat = flat_ds[[target], [0]]
     # one dummy per (region, sample, ploid) group => ploidy dummies, each 2L+1 unknown tokens
     for w in (flat.ref_window, flat.alt_window):
-        vals = np.asarray(ak.flatten(w.to_ragged(), axis=None))
+        # w.to_ragged() is a _core.Ragged; .data is the flat token array
+        vals = np.asarray(w.to_ragged().data)
         assert vals.tolist() == [4] * (ploidy * (2 * L + 1))
 
 
@@ -744,6 +737,7 @@ def test_variant_windows_single_fetch_per_decode(snap_dataset, monkeypatch):
 
 
 def test_no_awkward_on_dummy_window_hot_path(snap_dataset, monkeypatch):
+    """The dummy-window decode path must not invoke awkward __getitem__."""
     import awkward as ak
 
     target = _find_empty_region(snap_dataset)
