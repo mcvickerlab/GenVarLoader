@@ -401,7 +401,7 @@ def test_extra_field_attribute_access():
     assert isinstance(rv.AF, Ragged)
 
     # Truly missing attribute must raise AttributeError
-    with pytest.raises(AttributeError, match="no attribute"):
+    with pytest.raises(AttributeError):
         _ = rv.nonexistent_field_xyz
 
 

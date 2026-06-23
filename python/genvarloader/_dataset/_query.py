@@ -119,8 +119,8 @@ def getitem(
         recon = tuple(_reshape_outer(o, out_reshape) for o in recon)
 
     if squeeze:
-        # (1 [p] l) -> ([p] l)
-        recon = tuple(o.squeeze(0) for o in recon)  # type: ignore[bad-argument-count]  # RaggedVariants.squeeze() takes no args; other kinds do — heterogeneous dispatch
+        # (1 [p] l) -> ([p] l); axis 0 is a singleton here, so squeeze(0) drops it.
+        recon = tuple(o.squeeze(0) for o in recon)
 
     if len(recon) == 1:
         recon = recon[0]

@@ -197,14 +197,14 @@ def _share_offsets(rag: Ragged, offsets: NDArray) -> Ragged:
     return Ragged.from_offsets(rag.data, rag.shape, offsets)
 
 
-class RaggedVariants:
+class RaggedVariants(Ragged):
     """Variable-length variants as a single record Ragged with shape
     (batch, ploidy, ~variants). ``alt``/``ref`` are opaque-string fields; ``start``
     and optional ``ilen``/``dosage``/extra fields are numeric. Guaranteed: ``alt``,
     ``start``, and one of ``ref``/``ilen``.
     """
 
-    __slots__ = ("_rag",)
+    __slots__ = ()
 
     def __init__(
         self,
@@ -228,62 +228,54 @@ class RaggedVariants:
             rec["dosage"] = _share_offsets(dosage, off)
         for k, v in fields.items():
             rec[k] = _share_offsets(v, off)
-        self._rag = Ragged.from_fields(rec)
+        super().__init__(Ragged.from_fields(rec))
 
     @classmethod
     def from_record(cls, rag: Ragged) -> "RaggedVariants":
-        """Wrap an existing record Ragged directly (no copy)."""
-        obj = cls.__new__(cls)
-        obj._rag = rag
+        """Wrap an existing record Ragged directly (no copy), preserving subclass."""
+        obj = object.__new__(cls)
+        obj._layout = rag._layout
         return obj
-
-    @property
-    def fields(self) -> list[str]:
-        return self._rag.fields
 
     def _alt_chars(self, field: str = "alt") -> Ragged:
         """Return the S1 char view (b,p,~v,~l) of an allele field."""
-        return self._rag[field].to_chars()
+        return self[field].to_chars()
 
     @property
     def alt(self) -> Ragged:
         """Alternative alleles (opaque-string Ragged, shape (b,p,~v))."""
-        return self._rag["alt"]
+        return self["alt"]
 
     @property
     def ref(self) -> Ragged:
         """Reference alleles (opaque-string Ragged, shape (b,p,~v))."""
-        return self._rag["ref"]
+        return self["ref"]
 
     @property
     def start(self) -> Ragged:
         """0-based start positions (numeric Ragged, shape (b,p,~v))."""
-        return self._rag["start"]
+        return self["start"]
 
     @property
     def dosage(self) -> Ragged:
         """Dosages (numeric Ragged, shape (b,p,~v))."""
-        return self._rag["dosage"]
-
-    @property
-    def shape(self) -> tuple[int | None, ...]:
-        return self._rag.shape
+        return self["dosage"]
 
     @property
     def ilen(self) -> Ragged:
         """Indel lengths. Infallible — derived from alt/ref char lengths when absent."""
         if "ilen" in self.fields:
-            return self._rag["ilen"]
+            return self["ilen"]
         # _rl.str_offsets gives per-variant byte boundaries for each opaque-string field.
         # np.diff produces a flat array of per-variant character counts.
-        alt_field = self._rag["alt"]
+        alt_field = self["alt"]
         alt_len = np.diff(alt_field._rl.str_offsets).astype(np.int32)
         if "ref" in self.fields:
-            ref_field = self._rag["ref"]
+            ref_field = self["ref"]
             ref_len = np.diff(ref_field._rl.str_offsets).astype(np.int32)
         else:
             ref_len = np.zeros_like(alt_len)
-        start = self._rag["start"]
+        start = self["start"]
         return Ragged.from_offsets(
             (alt_len - ref_len).astype(np.int32),
             start.shape,
@@ -294,59 +286,12 @@ class RaggedVariants:
     def end(self) -> Ragged:
         """0-based exclusive end positions."""
         if "ref" in self.fields:
-            ref_field = self._rag["ref"]
+            ref_field = self["ref"]
             ref_len = np.diff(ref_field._rl.str_offsets).astype(POS_TYPE)
             reflen = Ragged.from_offsets(ref_len, self.start.shape, self.start.offsets)
             return self.start + reflen
         ilen = self.ilen
         return self.start - np.clip(ilen, None, 0) + 1
-
-    def __len__(self) -> int:
-        return len(self._rag)
-
-    def __getitem__(self, idx: Any) -> Any:
-        rag = self._rag
-        # String key → field access: return the raw field Ragged, NOT a RaggedVariants.
-        if isinstance(idx, str):
-            return rag[idx]
-        # For multi-leading-dim records, any non-tuple idx hits _getitem_record_rows
-        # which collapses leading fixed axes and drops ploidy for slice/array inputs.
-        # Convert to a 1-tuple so _getitem_tuple_multidim is used instead, which
-        # preserves unindexed leading axes: int collapses its axis (→ (p,~v)),
-        # slice/array keeps it (→ (n,p,~v)).
-        if rag._is_record and rag.rag_dim > 1 and not isinstance(idx, tuple):
-            result = rag[(idx,)]
-        else:
-            result = rag[idx]
-        return RaggedVariants.from_record(result)
-
-    def __getattr__(self, name: str) -> Ragged:
-        # Only called when normal lookup (properties / __slots__) fails.
-        # Access _rag via object.__getattribute__ to avoid infinite recursion
-        # if _rag itself is missing during construction.
-        try:
-            rag = object.__getattribute__(self, "_rag")
-        except AttributeError:
-            raise AttributeError(
-                f"{type(self).__name__!r} object has no attribute {name!r}"
-            )
-        if name in rag.fields:
-            return rag[name]
-        raise AttributeError(
-            f"{type(self).__name__!r} object has no attribute {name!r}"
-        )
-
-    def reshape(self, shape: tuple[int | None, ...]) -> "RaggedVariants":
-        if isinstance(shape, tuple):
-            return RaggedVariants.from_record(self._rag.reshape(*shape))
-        return RaggedVariants.from_record(self._rag.reshape(shape))
-
-    def squeeze(self, axis: int | None = None, **kw: Any) -> "RaggedVariants":
-        """Squeeze first axis."""
-        return self[0]
-
-    def to_packed(self) -> "RaggedVariants":
-        return RaggedVariants.from_record(self._rag.to_packed())
 
     def rc_(self, to_rc: NDArray[np.bool_] | None = None) -> "RaggedVariants":
         from .._ragged import _COMP
@@ -366,7 +311,7 @@ class RaggedVariants:
         shared_var_off: NDArray | None = None
 
         for f in self.fields:
-            field = self._rag[f]
+            field = self[f]
             if f in _ALLELE_FIELDS:
                 # field: opaque-string, shape (b, p, ~v)
                 chars = field.to_chars().to_packed()  # (b, p, ~v, ~l) S1
@@ -398,7 +343,7 @@ class RaggedVariants:
                 rec[f] = field
 
         # All fields must share the same outer (variant-level) offsets for from_fields.
-        # Non-allele fields from self._rag already share the record's offsets. After
+        # Non-allele fields from self already share the record's offsets. After
         # to_packed() the packed var_off may be a new object; re-share via _share_offsets.
         if shared_var_off is not None:
             rec = {k: _share_offsets(v, shared_var_off) for k, v in rec.items()}
@@ -428,13 +373,13 @@ class RaggedVariants:
             raise ValueError(f"Missing pad values for fields: {missing}")
 
         # Flat bool mask: True where a group has zero variants.
-        empty = self._rag["start"].lengths.reshape(-1) == 0
+        empty = self["start"].lengths.reshape(-1) == 0
 
         out_fields: dict[str, Ragged] = {}
         shared_offsets: NDArray | None = None
 
         for f in self.fields:
-            base = self._rag[f]
+            base = self[f]
             is_allele = f in _ALLELE_FIELDS
             pad_val = all_pads[f]
             pad_rag = _empty_group_pad(base, pad_val, empty, is_allele=is_allele)
@@ -499,14 +444,14 @@ class RaggedVariants:
         from torch.nested import nested_tensor_from_jagged as nt_jag
 
         batch: "dict[str, NestedTensor | int]" = {}
-        batch["max_n_vars"] = int(self._rag["start"].lengths.max())
+        batch["max_n_vars"] = int(self["start"].lengths.max())
 
         # Shared variant-level offsets (int32 for torch) — computed once from the
         # first numeric field; all numeric fields share the same offsets object.
         var_offsets_t: "torch.Tensor | None" = None
 
         for f in self.fields:
-            field = self._rag[f]
+            field = self[f]
             if f in _ALLELE_FIELDS:
                 # Allele field: opaque-string (b, p, ~v) → char view (b, p, ~v, ~l).
                 # After to_chars().to_packed():

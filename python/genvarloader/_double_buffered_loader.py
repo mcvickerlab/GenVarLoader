@@ -50,8 +50,15 @@ def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
 
     from ._ragged import RaggedAnnotatedHaps
     from ._flat import _Flat, _FlatAnnotatedHaps
+    from ._dataset._rag_variants import RaggedVariants
 
     def _reshape_one(arr):
+        # RaggedVariants is a record Ragged that already carries the ploidy axis;
+        # it is now a Ragged subclass, so it would otherwise enter the generic
+        # `isinstance(arr, Ragged)` branch below, which assumes a single-field
+        # Ragged with .data/.offsets (invalid on a record). Leave it unchanged.
+        if isinstance(arr, RaggedVariants):
+            return arr
         if isinstance(arr, Ragged):
             n_groups = arr.shape[0]
             if (

@@ -409,3 +409,30 @@ def test_double_buffered_flat_consumer_avoids_awkward(file_backed_ds, monkeypatc
     # Draining must succeed without hitting the awkward reader.
     batches = list(base.to_dataloader(mode="double_buffered", copy=True, **common))
     assert batches  # produced something
+
+
+def test_reshape_ragged_for_chunk_leaves_raggedvariants_untouched():
+    """A RaggedVariants (record Ragged carrying ploidy) must pass through
+    _reshape_ragged_for_chunk unchanged — it must NOT enter the generic Ragged
+    ploidy-reshape branch (which assumes a single-field Ragged with .data/.offsets)."""
+    import numpy as np
+    from seqpro.rag import Ragged
+    from genvarloader import RaggedVariants
+    from genvarloader._double_buffered_loader import _reshape_ragged_for_chunk
+
+    alt = Ragged.from_offsets(
+        np.frombuffer(b"ACGT", dtype="S1").copy(),
+        (2, 1, None),
+        np.array([0, 1, 2], np.int64),
+        str_offsets=np.array([0, 2, 4], np.int64),
+    ).to_strings()
+    start = Ragged.from_offsets(
+        np.arange(2, dtype=np.int32), (2, 1, None), np.array([0, 1, 2], np.int64)
+    )
+    ilen = Ragged.from_offsets(
+        np.zeros(2, np.int32), (2, 1, None), np.array([0, 1, 2], np.int64)
+    )
+    rv = RaggedVariants(alt=alt, start=start, ilen=ilen)  # shape (2, 1, ~v)
+    out = _reshape_ragged_for_chunk([rv], n_instances=2)[0]
+    assert out is rv  # untouched
+    assert out.shape == (2, 1, None)

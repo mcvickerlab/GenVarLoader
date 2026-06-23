@@ -106,20 +106,12 @@ def _flatten_output(obj) -> dict[str, np.ndarray]:
         out["vidx_off"] = np.asarray(obj.var_idxs.offsets)
         out["pos_data"] = np.asarray(obj.ref_coords.data)
         out["pos_off"] = np.asarray(obj.ref_coords.offsets)
-    elif isinstance(obj, Ragged):
-        out["data"] = np.asarray(obj.data)
-        out["off"] = np.asarray(obj.offsets)
-    elif isinstance(obj, AnnotatedHaps):
-        out["haps"] = np.asarray(obj.haps)
-        out["var_idxs"] = np.asarray(obj.var_idxs)
-        out["ref_coords"] = np.asarray(obj.ref_coords)
     elif isinstance(obj, RaggedVariants):
-        # Serialize each field to plain arrays. Numeric fields -> data+offsets.
+        # RaggedVariants is now a Ragged subclass; must be checked before the
+        # generic Ragged branch below. Serialize each field to plain arrays.
         # alt/ref are opaque-string _core.Ragged (b, p, ~v): extract via char view.
         for fld in sorted(obj.fields):
-            # Access the underlying Ragged field directly (not via __getitem__ which
-            # returns a RaggedVariants wrapper for indexing support).
-            v = obj._rag[fld]
+            v = obj[fld]
             if fld in ("alt", "ref"):
                 # v is opaque-string Ragged(b, p, ~v). Convert to char view (b,p,~v,~l).
                 # _layout.offsets[0] = variant-level group offsets (len b*p+1)
@@ -134,6 +126,13 @@ def _flatten_output(obj) -> dict[str, np.ndarray]:
             else:
                 out[f"{fld}_data"] = np.asarray(v.data)
                 out[f"{fld}_off"] = np.asarray(v.offsets)
+    elif isinstance(obj, Ragged):
+        out["data"] = np.asarray(obj.data)
+        out["off"] = np.asarray(obj.offsets)
+    elif isinstance(obj, AnnotatedHaps):
+        out["haps"] = np.asarray(obj.haps)
+        out["var_idxs"] = np.asarray(obj.var_idxs)
+        out["ref_coords"] = np.asarray(obj.ref_coords)
     elif isinstance(obj, np.ndarray):
         out["arr"] = obj
     else:

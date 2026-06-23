@@ -52,7 +52,7 @@ def _rv_to_lists(rv: RaggedVariants) -> dict:
     }
     for f in ("ref", "ilen", "dosage"):
         if f in rv.fields:
-            out[f] = rv._rag[f].to_ak().to_list()
+            out[f] = rv[f].to_ak().to_list()
     return out
 
 

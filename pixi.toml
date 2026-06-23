@@ -88,7 +88,7 @@ numba = "==0.59.1"
 [feature.py310.pypi-dependencies]
 pyarrow = ">=21"
 hirola = "==0.3"
-seqpro = "==0.17.0"
+seqpro = "==0.18.0"
 genoray = "==2.12.3"
 polars = "==1.37.1"
 loguru = "*"
