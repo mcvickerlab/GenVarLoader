@@ -142,7 +142,7 @@ _PR: —_
 
 - [ ] Migrate `_dataset/_genotypes.py` kernels (6 numba) onto the Rust layout.
 - [ ] Migrate `_dataset/_flat_variants.py` kernels (7 numba).
-- [x] Migrate `_dataset/_rag_variants.py` (1 numba); drop `awkward` from these hot paths. (Done at the Python level: `RaggedVariants` now wraps a single record `seqpro.rag.Ragged`; numba kernel rewrite is pending.)
+- [x] Migrate `_dataset/_rag_variants.py`; drop `awkward` from these hot paths. (Done at the Python level: `RaggedVariants` now wraps a single record `seqpro.rag.Ragged`; no numba kernels remain in this file — any remaining numba rewrites are tracked in the unchecked items below.)
 
 **Gate:** parity + `Dataset.__getitem__` throughput vs baseline (target speedup, no
 regression).
