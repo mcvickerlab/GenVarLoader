@@ -10,6 +10,27 @@ import pytest
 pytest.importorskip("torch")
 
 import genvarloader as gvl
+from seqpro.rag import to_padded
+
+
+def _rv_eq(a, b):
+    """Field-by-field equality for RaggedVariants.
+
+    RaggedVariants is a record _core.Ragged wrapper (not an awkward array) and
+    has no __eq__, so compare each field's values via to_ak().to_list().
+    """
+    from genvarloader._dataset._rag_variants import RaggedVariants
+
+    assert isinstance(a, RaggedVariants) and isinstance(b, RaggedVariants), (
+        f"expected RaggedVariants, got {type(a)} and {type(b)}"
+    )
+    assert set(a.fields) == set(b.fields), (
+        f"field sets differ: {a.fields} vs {b.fields}"
+    )
+    for fname in a.fields:
+        assert a[fname].to_ak().to_list() == b[fname].to_ak().to_list(), (
+            f"field {fname!r} mismatch"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -67,9 +88,12 @@ def test_double_buffered_iter_matches_buffered(file_backed_ds, seq_kind):
                     err_msg=f"batch {i} element {j} mismatch",
                 )
         else:
+            # The seqs batch is a (possibly jagged) Ragged; densify offset-aware
+            # with a shared pad rather than np.asarray, which raises on jagged
+            # haplotypes ("cannot convert a jagged Ragged to a dense array").
             np.testing.assert_array_equal(
-                np.asarray(b),
-                np.asarray(d),
+                to_padded(b, b"N"),
+                to_padded(d, b"N"),
                 err_msg=f"batch {i} mismatch",
             )
 
@@ -125,9 +149,12 @@ def test_double_buffered_schema_settings_parity(file_backed_ds, seq_kind):
                     err_msg=f"batch {i} element {j} mismatch",
                 )
         else:
+            # The seqs batch is a (possibly jagged) Ragged; densify offset-aware
+            # with a shared pad rather than np.asarray, which raises on jagged
+            # haplotypes ("cannot convert a jagged Ragged to a dense array").
             np.testing.assert_array_equal(
-                np.asarray(b),
-                np.asarray(d),
+                to_padded(b, b"N"),
+                to_padded(d, b"N"),
                 err_msg=f"batch {i} mismatch",
             )
 
@@ -295,9 +322,6 @@ def test_double_buffered_flat_matches_ragged(file_backed_ds, seq_kind):
     not rebased), while the flat path rebases+trims; so compare via offset-aware
     to_padded()/to_list(), not raw .data/.offsets.
     """
-    import awkward as ak
-    from seqpro.rag import to_padded
-
     base = file_backed_ds.with_seqs(seq_kind).with_tracks(False)
     if seq_kind == "haplotypes":
         base = base.with_settings(deterministic=True)
@@ -318,7 +342,7 @@ def test_double_buffered_flat_matches_ragged(file_backed_ds, seq_kind):
     for i, (rb, fb) in enumerate(zip(ragged_batches, flat_batches)):
         got = fb.to_ragged()
         if seq_kind == "variants":
-            assert ak.to_list(got) == ak.to_list(rb), f"batch {i}"
+            _rv_eq(got, rb)
         else:
             np.testing.assert_array_equal(
                 to_padded(got, b"N"), to_padded(rb, b"N"), err_msg=f"batch {i}"
@@ -335,8 +359,6 @@ def test_double_buffered_flat_annotated_matches_ragged(file_backed_ds):
     equal. Compare each component offset-aware via to_padded() with a shared pad
     value per dtype.
     """
-    from seqpro.rag import to_padded
-
     base = (
         file_backed_ds.with_seqs("annotated")
         .with_tracks(False)

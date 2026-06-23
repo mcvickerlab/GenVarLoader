@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, Literal, overload
 
-import awkward as ak
 import numpy as np
 from loguru import logger
 from numpy.typing import NDArray
@@ -284,7 +283,7 @@ def tensor_from_maybe_bytes(
 
 
 @requires_torch
-def to_nested_tensor(rag: Ragged | ak.Array) -> torch.Tensor:
+def to_nested_tensor(rag: Ragged) -> torch.Tensor:
     """Convert a Ragged array to a PyTorch `nested tensor <https://pytorch.org/docs/stable/nested.html>`_. Will cast byte arrays
     (dtype "S1") to uint8.
 
@@ -293,9 +292,6 @@ def to_nested_tensor(rag: Ragged | ak.Array) -> torch.Tensor:
     rag
         Ragged array to convert.
     """
-    if isinstance(rag, ak.Array):
-        rag = Ragged(rag)
-
     if is_rag_dtype(rag, np.bytes_):
         rag = rag.view(np.uint8)
 

@@ -2,15 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
-import awkward as ak
-import awkward.operations.str as ak_str
 import numba as nb
 import numpy as np
-from awkward.contents import NumpyArray
 from numpy.typing import NDArray
 from phantom import Phantom
+import seqpro.rag as spr
 from seqpro.rag import Ragged, is_rag_dtype
 from seqpro.rag import RDTYPE_co as RDTYPE
 from seqpro.rag import reverse_complement as _sp_reverse_complement
@@ -37,7 +35,7 @@ class RaggedIntervals:
     values: Ragged[np.float32]
 
     def __getitem__(self, idx) -> RaggedIntervals:
-        out = RaggedIntervals(self.starts[idx], self.ends[idx], self.values[idx])  # type: ignore[bad-argument-type]  # Ragged.__getitem__ widens to Array per awkward stubs
+        out = RaggedIntervals(self.starts[idx], self.ends[idx], self.values[idx])  # type: ignore[bad-argument-type]  # _core.Ragged.__getitem__ return type widens to Array in stubs
         return out
 
     @property
@@ -100,10 +98,10 @@ class RaggedIntervals:
         return starts, ends, values
 
     def to_packed(self) -> RaggedIntervals:
-        """Apply :func:`ak.to_packed` to all arrays."""
-        starts = ak.to_packed(self.starts)
-        ends = ak.to_packed(self.ends)
-        values = ak.to_packed(self.values)
+        """Pack all arrays into contiguous buffers."""
+        starts = self.starts.to_packed()
+        ends = self.ends.to_packed()
+        values = self.values.to_packed()
         return RaggedIntervals(starts, ends, values)
 
     def to_nested_tensor_batch(
@@ -113,9 +111,9 @@ class RaggedIntervals:
         n_tracks = cast(int, self.values.shape[1])
         for t in range(n_tracks):
             # (batch tracks ... ~itv) -> (batch ... ~itv)
-            starts = ak.to_packed(self.starts[:, t])
-            ends = ak.to_packed(self.ends[:, t])
-            values = ak.to_packed(self.values[:, t])
+            starts = self.starts[:, t].to_packed()
+            ends = self.ends[:, t].to_packed()
+            values = self.values[:, t].to_packed()
 
             offsets = torch.from_numpy(values.offsets.astype(np.int32)).to(device)
             max_len = int(values.lengths.max())
@@ -150,29 +148,28 @@ class RaggedIntervals:
         b, t, *_ = self.values.shape
         b = cast(int, b)
         t = cast(int, t)
+        n = b * t
 
-        pad_start = ak.from_numpy(
-            np.full((b, t, 1), start, np.int32), regulararray=True
-        )
-        # (b t ~v)
-        new_starts = ak.concatenate([pad_start, self.starts], axis=2)
-        pad_end = ak.from_numpy(np.full((b, t, 1), end, np.int32), regulararray=True)
-        # (b t ~v)
-        new_ends = ak.concatenate([pad_end, self.ends], axis=2)
-        pad_value = ak.from_numpy(
-            np.full((b, t, 1), value, np.float32), regulararray=True
-        )
-        # (b t ~v)
-        new_values = ak.concatenate([pad_value, self.values], axis=2)
+        def _pad(val, dtype):
+            return Ragged.from_offsets(
+                np.full(n, val, dtype),
+                (b, t, None),
+                np.arange(n + 1, dtype=np.int64),
+            )
 
-        return RaggedIntervals(Ragged(new_starts), Ragged(new_ends), Ragged(new_values))
+        # (b t ~v): prepend one pad element per group
+        new_starts = spr.concatenate([_pad(start, np.int32), self.starts], axis=-1)
+        new_ends = spr.concatenate([_pad(end, np.int32), self.ends], axis=-1)
+        new_values = spr.concatenate([_pad(value, np.float32), self.values], axis=-1)
+
+        return RaggedIntervals(new_starts, new_ends, new_values)
 
 
 @dataclass(slots=True)
 class FlatIntervals:
     """Flat-buffer analog of :class:`RaggedIntervals` over three :class:`_Flat` s.
 
-    Pure-numpy ``(data, offsets, shape)`` per field; converts to the awkward-backed
+    Pure-numpy ``(data, offsets, shape)`` per field; converts to the
     :class:`RaggedIntervals` only via :meth:`to_ragged`. Returned by eager indexing
     when ``with_tracks(kind="intervals")`` is combined with
     ``with_output_format("flat")``.
@@ -299,10 +296,9 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
     The ragged axis will be padded to have the maximum length across all entries.
 
     Thin pass-through to :func:`seqpro.rag.to_padded` (seqpro 0.13+), a single-pass,
-    parallel flat-buffer densify-and-pad kernel that replaced the old awkward
-    ``ak_str.rpad`` / ``ak.pad_none`` + ``fill_none`` + ``to_numpy`` idiom. Output is
-    byte-identical for every dtype/pad gvl uses (S1, int32, float32); seqpro pads to
-    the batch maximum ``rag.lengths.max()`` when no explicit length is given.
+    parallel flat-buffer densify-and-pad kernel. Output is byte-identical for every
+    dtype/pad gvl uses (S1, int32, float32); seqpro pads to the batch maximum
+    ``rag.lengths.max()`` when no explicit length is given.
 
     Parameters
     ----------
@@ -326,42 +322,21 @@ def ufunc_comp_dna(seq: NDArray[np.uint8]) -> NDArray[np.uint8]:
     return _COMP[seq]
 
 
-def _ak_comp_dna_helper(layout, **kwargs):
-    if layout.is_numpy:
-        return NumpyArray(
-            ufunc_comp_dna(layout.data),
-            parameters=layout.parameters,
-        )
-
-
-T = TypeVar("T", bound=ak.Array)
-
-
-def reverse_complement(arr: T) -> T:
-    og_type = type(arr)
-    arr = ak.to_packed(arr)
-    arr = ak_str.reverse(ak.transform(_ak_comp_dna_helper, arr))
-    return og_type(arr)
-
-
 def reverse_complement_masked(
     rag: Ragged[np.bytes_], mask: NDArray[np.bool_]
 ) -> Ragged[np.bytes_]:
     """Masked reverse-complement of an S1 ragged batch, in place.
 
-    Flat-buffer replacement for the awkward idiom
-    ``Ragged(ak.to_packed(ak.where(mask, reverse_complement(rag), rag)))``: seqpro's
-    kernel touches only the ``mask``-selected rows, runs a single in-place pass per row,
-    and reuses ``rag``'s offsets. Reuses :data:`_COMP` (the same A<->T, C<->G table the
-    awkward path uses) so output is byte-identical.
+    seqpro's flat kernel touches only the ``mask``-selected rows, runs a single in-place
+    pass per row, and reuses ``rag``'s offsets. Uses :data:`_COMP` (the A<->T, C<->G
+    lookup table) so output is byte-identical to a naive per-row reverse-complement.
 
     Mutates ``rag`` in place (``copy=False``); only call on a freshly reconstructed batch
     the caller owns.
 
-    ``mask`` is one entry per outer query (e.g. per region); awkward's ``ak.where``
-    used to broadcast it across any inner fixed axes (e.g. ploidy) left-aligned. seqpro's
-    flat kernel wants one entry per flattened ragged row, so replicate the mask across the
-    inner axes in C order to match.
+    ``mask`` is one entry per outer query (e.g. per region); seqpro's flat kernel wants
+    one entry per flattened ragged row, so replicate the mask across any inner fixed axes
+    (e.g. ploidy) in C order to match.
     """
     mask = np.ascontiguousarray(mask, dtype=np.bool_).reshape(-1)
     n_rows = int(np.prod(rag.shape[: rag.rag_dim], dtype=np.int64))

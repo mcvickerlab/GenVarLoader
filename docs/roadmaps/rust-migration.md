@@ -131,7 +131,7 @@ The foundation everything sits on. Bottom-up.
 - [ ] Implement the ops gvl uses: lengths/offsets, slice, gather, `to_padded`,
       reverse-complement helpers.
 - [ ] Zero-copy interop with `seqpro.Ragged` at the boundary (construct-from / view-as).
-- [ ] Remove `awkward` from the foundation layer.
+- [x] Remove `awkward` from the foundation layer. (Done at the Python level: GVL migrated onto seqpro's Rust-backed `_core.Ragged`; Rust-crate kernel rewrite is a separate pending step.)
 - [ ] Differential parity vs `_ragged.py` / current seqpro paths.
 
 **Checkpoint:** parity green. Foundational — no perf gate, but record incidental wins.
@@ -142,7 +142,7 @@ _PR: —_
 
 - [ ] Migrate `_dataset/_genotypes.py` kernels (6 numba) onto the Rust layout.
 - [ ] Migrate `_dataset/_flat_variants.py` kernels (7 numba).
-- [ ] Migrate `_dataset/_rag_variants.py` (1 numba); drop `awkward` from these hot paths.
+- [x] Migrate `_dataset/_rag_variants.py`; drop `awkward` from these hot paths. (Done at the Python level: `RaggedVariants` now wraps a single record `seqpro.rag.Ragged`; no numba kernels remain in this file — any remaining numba rewrites are tracked in the unchecked items below.)
 
 **Gate:** parity + `Dataset.__getitem__` throughput vs baseline (target speedup, no
 regression).
@@ -220,3 +220,12 @@ Sequenced last; a candidate to graduate into its own roadmap once Phases 0–5 l
   `genvarloader.experimental` to the public API (now CI-covered via a brute-force
   numpy oracle + property tests). Coordinates half-open/zero-based; positive-width
   intervals assumed.
+- 2026-06-22: GVL migrated off `awkward` onto seqpro's Rust-backed `_core.Ragged` at
+  the Python level. `RaggedVariants` is now a thin wrapper over a single record
+  `seqpro.rag.Ragged` with opaque-string `alt`/`ref` fields, replacing its former
+  `awkward.Array` subclass foundation. seqpro gained `concatenate` (Rust kernel),
+  record `to_ak`/`to_packed`; seqpro's `_array.py` awkward backend was deleted (seqpro
+  is now `_core`-only). Consumer suites all green: GVL 806 passed, genoray 456 passed,
+  genvarformer CPU 371 passed. Note: this was a Python-level migration onto seqpro's
+  existing Rust-backed `_core.Ragged`; the Rust-crate rewrite of the ragged kernels
+  themselves (Phase 1 beachhead) is still pending. PR: TBD

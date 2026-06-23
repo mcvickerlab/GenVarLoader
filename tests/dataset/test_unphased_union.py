@@ -147,8 +147,10 @@ def test_variant_windows_union_count_matches_sum_over_haplotypes(snap_dataset):
     ru = u.fields["start"].to_ragged()  # Ragged (R, S, 1, ~v)
     import awkward as ak
 
-    base_counts = ak.to_numpy(ak.sum(ak.num(rb, axis=-1), axis=-1))  # (R, S)
-    union_counts = ak.to_numpy(ak.sum(ak.num(ru, axis=-1), axis=-1))  # (R, S)
+    rb_ak = rb.to_ak()
+    ru_ak = ru.to_ak()
+    base_counts = ak.to_numpy(ak.sum(ak.num(rb_ak, axis=-1), axis=-1))  # (R, S)
+    union_counts = ak.to_numpy(ak.sum(ak.num(ru_ak, axis=-1), axis=-1))  # (R, S)
     np.testing.assert_array_equal(union_counts, base_counts)
 
     # Content check: the union's single row must be exactly hap-0's starts then
@@ -159,8 +161,8 @@ def test_variant_windows_union_count_matches_sum_over_haplotypes(snap_dataset):
             # baseline: concat across the ploidy axis, in haplotype order
             expected = []
             for p in range(rb.shape[2]):
-                expected.extend(ak.to_list(rb[i, j, p]))
-            got = ak.to_list(ru[i, j, 0])
+                expected.extend(ak.to_list(rb_ak[i, j, p]))
+            got = ak.to_list(ru_ak[i, j, 0])
             assert got == expected, f"union row ({i},{j}) != concat of haplotype starts"
 
 

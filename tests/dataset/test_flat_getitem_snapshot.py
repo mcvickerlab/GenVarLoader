@@ -115,15 +115,22 @@ def _flatten_output(obj) -> dict[str, np.ndarray]:
         out["ref_coords"] = np.asarray(obj.ref_coords)
     elif isinstance(obj, RaggedVariants):
         # Serialize each field to plain arrays. Numeric fields -> data+offsets.
-        # alt/ref are doubly-nested bytes -> leaf bytes + both offset levels.
+        # alt/ref are opaque-string _core.Ragged (b, p, ~v): extract via char view.
         for fld in sorted(obj.fields):
-            v = obj[fld]
+            # Access the underlying Ragged field directly (not via __getitem__ which
+            # returns a RaggedVariants wrapper for indexing support).
+            v = obj._rag[fld]
             if fld in ("alt", "ref"):
-                lay = v.layout
-                out[f"{fld}_group_off"] = np.asarray(lay.content.offsets)
-                out[f"{fld}_allele_off"] = np.asarray(lay.content.content.offsets)
-                out[f"{fld}_bytes"] = np.asarray(lay.content.content.content.data)
-                out[f"{fld}_ploidy"] = np.asarray(lay.size)
+                # v is opaque-string Ragged(b, p, ~v). Convert to char view (b,p,~v,~l).
+                # _layout.offsets[0] = variant-level group offsets (len b*p+1)
+                # _layout.offsets[-1] = allele char offsets (len n_alleles+1)
+                chars = v.to_chars().to_packed()
+                out[f"{fld}_group_off"] = np.asarray(chars._layout.offsets[0], np.int64)
+                out[f"{fld}_allele_off"] = np.asarray(
+                    chars._layout.offsets[-1], np.int64
+                )
+                out[f"{fld}_bytes"] = chars.data.view(np.uint8)
+                out[f"{fld}_ploidy"] = np.asarray(v.shape[1])
             else:
                 out[f"{fld}_data"] = np.asarray(v.data)
                 out[f"{fld}_off"] = np.asarray(v.offsets)

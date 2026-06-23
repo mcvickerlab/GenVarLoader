@@ -25,6 +25,15 @@ import pysam
 import pytest
 from genoray import VCF
 
+
+def _to_bytes(seq) -> bytes:
+    """Extract raw bytes from a sequence result (numpy array or _core.Ragged)."""
+    if hasattr(seq, "data") and not isinstance(seq, np.ndarray):
+        # _core.Ragged: .data is the flat numpy buffer (S1 dtype)
+        return np.asarray(seq.data).tobytes()
+    return np.asarray(seq).tobytes()
+
+
 # ---------------------------------------------------------------------------
 # Integration fixtures: write a fresh dataset into tmp so we don't mutate the
 # shared test fixtures, and can attach custom transcript_id / exon_number
@@ -151,7 +160,7 @@ def test_spliced_reference_pos_strand_matches_fasta(spliced_ds: gvl.Dataset, ref
             start = row["chromStart"][0]
             end = row["chromEnd"][0]
             expected = fa.fetch(chrom, start, end).upper().encode()
-            got = spliced_ds[sp_idx, 0].tobytes()
+            got = _to_bytes(spliced_ds[sp_idx, 0])
             assert got == expected, (
                 f"pos-strand splice {sp_idx} ({chrom}:{start}-{end}): "
                 f"got {got[:15]}... expected {expected[:15]}..."
@@ -177,7 +186,7 @@ def test_spliced_reference_neg_strand_is_rc_of_fasta(
             end = row["chromEnd"][0]
             ref_seq = fa.fetch(chrom, start, end).upper().encode()
             expected = ref_seq.translate(comp)[::-1]  # reverse complement
-            got = spliced_ds[sp_idx, 0].tobytes()
+            got = _to_bytes(spliced_ds[sp_idx, 0])
             assert got == expected, (
                 f"neg-strand splice {sp_idx} ({chrom}:{start}-{end}): "
                 f"got {got[:15]}... expected {expected[:15]}..."
@@ -268,7 +277,7 @@ def test_multi_exon_spliced_matches_fasta_concat(multi_exon_ds_path, ref_fasta):
                     part = part.translate(comp)[::-1]
                 parts.append(part)
             expected = b"".join(parts)
-            got = ds[sp_idx, 0].tobytes()
+            got = _to_bytes(ds[sp_idx, 0])
             assert got == expected, (
                 f"splice {sp_idx} ({strand}): got {got[:20]}..., expected {expected[:20]}..."
             )

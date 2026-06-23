@@ -1,24 +1,14 @@
 """Unit tests for public utilities in ``genvarloader._ragged``.
 
 Covers the non-trivial helpers exposed by the module: the ``to_padded``
-free function (bytes path used by ``_dataset/_reference.py``), the
+free function (bytes path used by ``_dataset/_reference.py``), and the
 ``RaggedIntervals`` dataclass methods (``prepend_pad_itv``, indexing,
-reshape) and ``reverse_complement``.
-
-Note: the numeric branch of ``to_padded`` (anything that is not
-``np.bytes_``) currently raises inside ``Ragged.__init__`` because
-``ak.pad_none(..., clip=True)`` collapses the ragged dimension into a
-``RegularArray``. The bytes branch (``ak_str.rpad``) preserves the
-ragged structure and works as expected. The numeric path is exercised
-only by ``RaggedIntervals.to_padded`` / ``RaggedAnnotatedHaps.to_padded``
-— which are part of the public API but have no in-tree callers. Those
-methods are skipped here and called out in the task report.
+reshape).
 """
 
 import numpy as np
 from genvarloader._ragged import (
     RaggedIntervals,
-    reverse_complement,
     to_padded,
 )
 from seqpro.rag import Ragged
@@ -98,25 +88,6 @@ def test_ragged_intervals_prepend_pad_itv_adds_one_per_group():
     assert out.starts.to_ak().to_list() == [[[-7, 0, 10]], [[-7, 5]]]
     assert out.ends.to_ak().to_list() == [[[-8, 5, 20]], [[-8, 15]]]
     assert out.values.to_ak().to_list() == [[[9.0, 1.0, 2.0]], [[9.0, 3.0]]]
-
-
-def test_reverse_complement_direct():
-    """``reverse_complement`` runs against an awkward ragged byte array."""
-    data = np.frombuffer(b"ACGTNN", dtype="S1")
-    rag = Ragged.from_lengths(data, np.array([4, 2], dtype=np.int64))
-
-    rc = reverse_complement(rag.to_ak())
-
-    # ak_str returns bytes per row; ACGT -> ACGT, NN passes through unchanged
-    # because the C-level translation table maps only A<->T, C<->G and
-    # leaves other bytes as identity.
-    assert rc.to_list() == [b"ACGT", b"NN"]
-
-    # Asymmetric case: "AAAC" -> reverse complement -> "GTTT"
-    data2 = np.frombuffer(b"AAAC", dtype="S1")
-    rag2 = Ragged.from_lengths(data2, np.array([4], dtype=np.int64))
-    rc2 = reverse_complement(rag2.to_ak())
-    assert rc2.to_list() == [b"GTTT"]
 
 
 def test_to_padded_numeric_branch():

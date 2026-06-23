@@ -1,5 +1,5 @@
 """Flat-buffer analog of RaggedVariants: pure-numpy (data, offsets) per field,
-no awkward on the hot path. Converts to RaggedVariants only via to_ragged()."""
+all-numpy hot path. Converts to RaggedVariants only via to_ragged()."""
 
 from __future__ import annotations
 
@@ -67,37 +67,34 @@ class _FlatAlleles:
         return fixed[-1] if len(fixed) >= 2 else 1
 
     def to_ragged(self):
-        import awkward as ak
-        from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
-        from awkward.index import Index
+        from seqpro.rag import Ragged
 
-        # Build the ragged variant-row node (leaf -> bytestring -> variant-row
-        # ListOffsetArray) giving (n_groups, ~v, ~l) where n_groups =
-        # len(var_offsets) - 1. This mirrors the inner part of
-        # _build_allele_layout but WITHOUT the ploidy RegularArray wrap.
-        leaf = NumpyArray(
-            np.ascontiguousarray(self.byte_data, np.uint8),
-            parameters={"__array__": "byte"},
-        )
-        l_content = ListOffsetArray(
-            Index(np.asarray(self.seq_offsets, np.int64)),
-            leaf,
-            parameters={"__array__": "bytestring"},
-        )
-        vl_content = ListOffsetArray(
-            Index(np.asarray(self.var_offsets, np.int64)), l_content
-        )
-        # Wrap with RegularArrays for the INNER fixed dims (everything except the
-        # outermost, which is implied by the remaining group count). Shape-driven:
-        # this makes to_ragged() agnostic to ploidy after a scalar-scalar squeeze.
-        #   fixed=[b,p]   -> reversed([p])   -> RegularArray(vl,p) -> (b,p,~v,~l)
-        #   fixed=[p]     -> reversed([])    -> no wrap            -> (p,~v,~l)
-        #   fixed=[b,s,p] -> reversed([s,p]) -> nested             -> (b,s,p,~v,~l)
-        node = vl_content
+        # Build an opaque-string Ragged from flat buffers:
+        #   byte_data  — S1 char bytes
+        #   seq_offsets  — per-variant char boundaries (inner, len=n_variants+1)
+        #   var_offsets  — per-(b*p)-group variant boundaries (outer, len=b*p+1)
+        # Two ragged axes: (b*p, ~variants, ~chars) → collapse chars via
+        # to_strings() → (b*p, ~variants) opaque string → reshape to (b, p, ~v).
+        char_data = np.ascontiguousarray(self.byte_data).view(dtype="S1")
+        var_off = np.asarray(self.var_offsets, dtype=np.int64)
+        seq_off = np.asarray(self.seq_offsets, dtype=np.int64)
+        b_times_p = len(var_off) - 1
+
+        # Extract fixed dims: shape is (b, p, None) or (b*p, None).
         fixed = [d for d in self.shape if d is not None]
-        for size in reversed(fixed[1:]):
-            node = RegularArray(node, size)
-        return ak.Array(node)
+        if len(fixed) >= 2:
+            # Re-derive b from b*p and ploidy (last fixed dim).
+            p = fixed[-1]
+            b = b_times_p // p
+        else:
+            b = b_times_p
+            p = 1
+
+        return (
+            Ragged.from_offsets(char_data, (b_times_p, None, None), [var_off, seq_off])
+            .to_strings()
+            .reshape(b, p, None)
+        )
 
     def reverse_masked(self, mask: NDArray[np.bool_]) -> "_FlatAlleles":
         """DNA reverse-complement the mask-selected rows' alleles, in place.
@@ -179,9 +176,9 @@ class _FlatWindow:
     """Two-level flat token buffer for ref/alt windows, shape (b, p, ~v, ~win).
 
     Mirrors _FlatAlleles but `data` holds tokens (configured int dtype), not bytes,
-    so to_ragged() drops the byte/bytestring awkward parameters. Both inner axes
-    (variant count and window length) are ragged, so to_ragged() returns a raw
-    awkward Array (seqpro Ragged supports only one ragged axis).
+    so to_ragged() drops the byte/bytestring string parameters. Both inner axes
+    (variant count and window length) are ragged, so to_ragged() returns a numeric
+    two-ragged-axis _core.Ragged with shape (b, p, ~v, ~w).
     """
 
     data: NDArray  # tokens (uint8 or int32), flat
@@ -190,20 +187,27 @@ class _FlatWindow:
     shape: tuple[int | None, ...]
 
     def to_ragged(self):
-        import awkward as ak
-        from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
-        from awkward.index import Index
+        from seqpro.rag import Ragged
 
-        leaf = NumpyArray(np.ascontiguousarray(self.data))
-        l_content = ListOffsetArray(Index(np.asarray(self.seq_offsets, np.int64)), leaf)
-        vl_content = ListOffsetArray(
-            Index(np.asarray(self.var_offsets, np.int64)), l_content
-        )
-        node = vl_content
+        # Build a numeric Ragged with shape (b, p, ~v, ~w): two ragged axes.
+        # var_offsets: per-(b*p)-group variant boundaries (len b*p + 1)
+        # seq_offsets: per-variant window token boundaries (len n_variants + 1)
         fixed = [d for d in self.shape if d is not None]
-        for size in reversed(fixed[1:]):
-            node = RegularArray(node, size)
-        return ak.Array(node)
+        if len(fixed) >= 2:
+            p = fixed[-1]
+            b = (len(self.var_offsets) - 1) // p
+        else:
+            b = len(self.var_offsets) - 1
+            p = 1
+        data = np.ascontiguousarray(self.data)
+        return Ragged.from_offsets(
+            data,
+            (b, p, None, None),
+            [
+                np.asarray(self.var_offsets, np.int64),
+                np.asarray(self.seq_offsets, np.int64),
+            ],
+        )
 
     def reshape(self, shape) -> "_FlatWindow":
         if isinstance(shape, int):
@@ -656,8 +660,8 @@ def get_variants_flat(
     haps: "Haps", idx: NDArray[np.integer], regions=None
 ) -> "_FlatVariants | _FlatVariantWindows":
     """Flat-buffer analog of :meth:`Haps._get_variants`: builds a
-    :class:`_FlatVariants` with no awkward on the hot path. Re-wrapping the
-    result via :meth:`_FlatVariants.to_ragged` is byte-identical to the awkward
+    :class:`_FlatVariants` on the pure-numpy hot path. Re-wrapping the
+    result via :meth:`_FlatVariants.to_ragged` is byte-identical to the
     :class:`RaggedVariants` produced by ``_get_variants``.
 
     Replicates ONLY AF filtering (min_af/max_af); exonic filtering is not

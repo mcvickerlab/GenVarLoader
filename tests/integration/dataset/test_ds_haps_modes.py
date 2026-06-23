@@ -81,7 +81,12 @@ def test_reference_mode_returns_unaltered_reference(base_dataset, ref_fasta):
             # Sample-independence: every sample yields the same reference slice.
             seen = None
             for sample in ds.samples:
-                actual = sp.cast_seqs(ds[region, sample])
+                _seq = ds[region, sample]
+                # With _core.Ragged backend, ds[region, sample] may return a (1, L)
+                # Ragged; index [0] to get the 1-D sequence array.
+                if hasattr(_seq, "data") and not isinstance(_seq, np.ndarray):
+                    _seq = _seq[0]
+                actual = sp.cast_seqs(_seq)
                 np.testing.assert_equal(
                     actual,
                     desired,

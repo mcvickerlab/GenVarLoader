@@ -7,7 +7,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
-import awkward as ak
 import numba as nb
 import numpy as np
 from einops import repeat
@@ -402,6 +401,116 @@ def shift_and_realign_track_sparse(
 
 
 # -----------------------------------------------------------------------------
+# Ragged helper: stack (batch, None) Rageds along a new track axis -> (batch, n_tracks, None)
+# -----------------------------------------------------------------------------
+
+
+def _ragged_stack_tracks(tracks: "list[Ragged]") -> "Ragged":
+    """Stack *n_tracks* ``(batch, None)`` Rageds into a single ``(batch, n_tracks, None)`` Ragged.
+
+    Each input has canonical 1-D offsets after ``.to_packed()``.  We interleave the segments
+    so that for region ``r`` the output has n_tracks consecutive ragged rows (one per track).
+
+    Implementation is fully vectorized — no Python loop over batch elements and no
+    per-element ``np.concatenate``.  The only loop is a bounded ``n_tracks`` pass to
+    scatter each track's segments into the pre-allocated output buffer.
+
+    Algorithm
+    ---------
+    1. Stack the per-track 1-D offsets into an ``(n_tracks, n_batch+1)`` matrix and derive
+       a ``(n_tracks, n_batch)`` lengths matrix.
+    2. Transpose to ``(n_batch, n_tracks)`` and flatten → interleaved lengths in C-order,
+       which is the target segment order: [batch0_track0, batch0_track1, …, batchN_track(T-1)].
+    3. Convert to offsets (cumsum) → ``out_offsets`` of length ``n_batch*n_tracks + 1``.
+    4. Allocate ``out_data`` of size ``total_elements`` in one shot.
+    5. For each track ``t`` (bounded loop over *n_tracks*, never over *n_batch*):
+       - Compute the destination start positions for all ``n_batch`` segments of that
+         track using the pre-computed ``out_offsets`` (index ``t, t+n_tracks, t+2*n_tracks, …``).
+       - Compute the source lengths for those segments from the stacked lengths matrix.
+       - Walk the batch dimension with a vectorised numpy repeat/arange gather, writing
+         all of track ``t``'s elements into ``out_data`` in a single pass via a boolean
+         mask or explicit index array — both O(total_data), no per-element call.
+    """
+    from seqpro.rag._core import Ragged as _CoreRagged, RaggedLayout
+
+    if not tracks:
+        raise ValueError("_ragged_stack_tracks: empty track list")
+
+    n_tracks = len(tracks)
+    n_batch = int(tracks[0].offsets.shape[0]) - 1
+
+    if n_tracks == 1:
+        # Single track: just promote (batch, None) -> (batch, 1, None) by
+        # re-labelling the shape — no data copy needed.
+        t = tracks[0]
+        new_layout = RaggedLayout(
+            data=t._rl.data,
+            offsets=list(t._layout.offsets),
+            shape=(n_batch, 1, None),
+            str_offsets=t._rl.str_offsets,
+        )
+        return _CoreRagged(new_layout)
+
+    # ------------------------------------------------------------------
+    # 1. Vectorized lengths: (n_tracks, n_batch)
+    # ------------------------------------------------------------------
+    # Stack all per-track offsets into one matrix (n_tracks, n_batch+1).
+    # np.diff over axis=1 gives lengths (n_tracks, n_batch).
+    all_offsets = np.stack([t.offsets for t in tracks], axis=0)  # (n_tracks, n_batch+1)
+    lengths_tk = np.diff(all_offsets, axis=1)  # (n_tracks, n_batch)
+
+    # ------------------------------------------------------------------
+    # 2. Interleaved lengths (n_batch, n_tracks) → flat, then offsets
+    # ------------------------------------------------------------------
+    # Transposing to (n_batch, n_tracks) and flattening gives the
+    # segment order [batch0_track0, batch0_track1, …, batchN_track(T-1)],
+    # which gives the interleaved segment order: [batch0_track0, batch0_track1, …].
+    out_lengths = lengths_tk.T.ravel()  # (n_batch * n_tracks,)
+    out_offsets = lengths_to_offsets(out_lengths)  # (n_batch*n_tracks + 1,)
+    total = int(out_offsets[-1])
+
+    # ------------------------------------------------------------------
+    # 3. Allocate output buffer once
+    # ------------------------------------------------------------------
+    out_data = np.empty(total, dtype=tracks[0].data.dtype)
+
+    # ------------------------------------------------------------------
+    # 4. Scatter each track's data — loop is O(n_tracks), NOT O(n_batch)
+    # ------------------------------------------------------------------
+    # For track t, its segments land at flat indices t, t+n_tracks, …
+    # out_offsets[t::n_tracks] are the destination starts for all n_batch
+    # segments of track t.  We build a flat index array by repeating each
+    # destination start length[r] times, giving us one output slot per
+    # source element — fully vectorized via np.repeat + np.arange.
+    for t_idx, t in enumerate(tracks):
+        dst_starts = out_offsets[t_idx::n_tracks][
+            :n_batch
+        ]  # (n_batch,) destination starts
+        seg_lens = lengths_tk[t_idx]  # (n_batch,) lengths
+
+        # Build flat output indices for every element of track t_idx:
+        # for segment r starting at dst_starts[r] with length seg_lens[r],
+        # the output positions are dst_starts[r], dst_starts[r]+1, …
+        # np.repeat(dst_starts, seg_lens) gives the base, and
+        # np.arange over the cumulative offsets gives the per-element delta.
+        seg_offsets_src = all_offsets[t_idx, :n_batch]  # source starts in t.data
+        src_data_total = int(seg_lens.sum())
+        if src_data_total == 0:
+            continue
+
+        # Intra-segment offset (0,1,2,…,len-1 repeated per segment)
+        intra = np.arange(src_data_total, dtype=np.int64)
+        intra -= np.repeat(np.concatenate(([0], seg_lens[:-1].cumsum())), seg_lens)
+
+        dst_idx = np.repeat(dst_starts, seg_lens) + intra
+        src_idx = np.repeat(seg_offsets_src, seg_lens) + intra
+
+        out_data[dst_idx] = t.data[src_idx]
+
+    return _CoreRagged.from_offsets(out_data, (n_batch, n_tracks, None), out_offsets)
+
+
+# -----------------------------------------------------------------------------
 # Tracks reconstructor (Python-level wrapper around the numba kernels above).
 # -----------------------------------------------------------------------------
 
@@ -699,9 +808,10 @@ class Tracks(Reconstructor[_T]):
             )
 
         # out = (batch tracks ~itvs)
-        out_starts = []
-        out_ends = []
-        out_values = []
+        # Collect per-track (batch, None) Rageds, then interleave into (batch, n_tracks, None).
+        per_track_starts: list[Ragged] = []
+        per_track_ends: list[Ragged] = []
+        per_track_values: list[Ragged] = []
 
         for name, tracktype in self.active_tracks.items():
             # (regions [samples] ~itvs)
@@ -712,15 +822,14 @@ class Tracks(Reconstructor[_T]):
             else:
                 # (batch ~itvs)
                 itvs = intervals[r_idx].to_packed()
-            # (batch 1 ~itvs)
-            out_starts.append(itvs.starts[:, None])
-            out_ends.append(itvs.ends[:, None])
-            out_values.append(itvs.values[:, None])
+            per_track_starts.append(itvs.starts)
+            per_track_ends.append(itvs.ends)
+            per_track_values.append(itvs.values)
 
-        # (batch tracks ~itvs)
-        starts = ak.concatenate(out_starts, axis=1)
-        ends = ak.concatenate(out_ends, axis=1)
-        values = ak.concatenate(out_values, axis=1)
+        # (batch tracks ~itvs) by interleaving n_tracks (batch, None) Rageds
+        starts = _ragged_stack_tracks(per_track_starts)
+        ends = _ragged_stack_tracks(per_track_ends)
+        values = _ragged_stack_tracks(per_track_values)
         return RaggedIntervals(starts, ends, values)
 
     def write_transformed_track(
@@ -761,7 +870,7 @@ def build_flat_intervals(
 ) -> FlatIntervals:
     """Pure-numpy gather of per-(region, sample, track) intervals into a
     :class:`FlatIntervals` of shape ``(batch, n_tracks, ~itvs)`` in C-order
-    (batch outer, track inner) — matching the awkward concat order of
+    (batch outer, track inner) — matching the interleaved segment order of
     :meth:`Tracks._call_intervals`.
     """
     B = len(r_idx)

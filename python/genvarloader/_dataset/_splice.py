@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import cast
 
-import awkward as ak
 import numpy as np
 import polars as pl
 from hirola import HashTable
@@ -166,14 +164,14 @@ def build_splice_plan(
 class SpliceMap:
     """Sample-agnostic mapping from splice row → ordered region indices.
 
-    Owns the parsed splice BED, the name → row hash table, the awkward
+    Owns the parsed splice BED, the name → row hash table, the
     splice-map (rows → list[region_idx]), and any active row subset. Used by
     both `Dataset` (via `SpliceIndexer`) and `RefDataset`.
     """
 
     names: HashTable
-    splice_map: ak.Array
-    full_splice_map: ak.Array
+    splice_map: Ragged
+    full_splice_map: Ragged
     row_idxs: NDArray[np.intp]
     row_subset_idxs: NDArray[np.intp] | None = None
 
@@ -208,10 +206,7 @@ class SpliceMap:
 
         names = sp_bed["splice_id"].to_numpy().astype(np.str_)
         lengths = sp_bed["index"].list.len().to_numpy()
-        splice_map = Ragged.from_lengths(
-            sp_bed["index"].explode().to_numpy(), lengths
-        ).to_ak()
-        splice_map = cast(ak.Array, splice_map)
+        splice_map = Ragged.from_lengths(sp_bed["index"].explode().to_numpy(), lengths)
 
         rows = HashTable(max=len(names) * 2, dtype=names.dtype)  # type: ignore[bad-argument-type]  # hirola HashTable.max typed as numpy.Number but accepts int
         rows.add(names)
@@ -246,7 +241,7 @@ class SpliceMap:
         if rows is None:
             return self
         row_idxs = self._r_idx[self.row2idx(rows)]
-        splice_map = cast(ak.Array, self.full_splice_map[row_idxs])
+        splice_map = self.full_splice_map[row_idxs]
         return replace(self, splice_map=splice_map, row_subset_idxs=row_idxs)
 
     def to_full(self) -> Self:
@@ -285,12 +280,9 @@ class SpliceMap:
             local = local.ravel().astype(np.intp)
 
         abs_idx = self._r_idx[local]
-        sel = cast(ak.Array, self.full_splice_map[abs_idx])
-        lengths = ak.count(sel, -1)
-        if not isinstance(lengths, np.integer):
-            lengths = lengths.to_numpy()
-        lengths = cast(NDArray[np.int64], lengths)
+        sel = self.full_splice_map[abs_idx]
+        lengths = sel.lengths.astype(np.int64)
         offsets = lengths_to_offsets(lengths)
-        flat_region_idxs = ak.flatten(sel, -1).to_numpy().astype(np.intp)
+        flat_region_idxs = sel.to_packed().data.astype(np.intp)
 
         return flat_region_idxs, offsets, out_reshape, squeeze

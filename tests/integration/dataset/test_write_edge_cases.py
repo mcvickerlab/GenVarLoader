@@ -13,6 +13,7 @@ cases on the BED side:
 from pathlib import Path
 
 import genvarloader as gvl
+import numpy as np
 import polars as pl
 import pytest
 from genoray import VCF
@@ -152,11 +153,14 @@ def test_query_past_contig_end_pads_with_N(
     seqs = ds[1, 0]
     # ArrayDataset[reference] returns a numpy array of S1 bytes (or a ragged
     # wrapper). Materialize to a 1-D bytes view either way.
-    if hasattr(seqs, "to_padded"):
-        arr = seqs.to_padded()
+    if hasattr(seqs, "data") and not isinstance(seqs, np.ndarray):
+        # _core.Ragged: extract the flat data buffer directly
+        arr = np.asarray(seqs.data).reshape(-1)
+    elif hasattr(seqs, "to_padded"):
+        arr = seqs.to_padded(b"N")
     else:
-        arr = seqs
-    flat = bytes(arr.reshape(-1).tobytes())
+        arr = np.asarray(seqs).reshape(-1)
+    flat = bytes(arr.tobytes())
 
     assert len(flat) == region_len, (
         f"Expected query length {region_len}, got {len(flat)}"

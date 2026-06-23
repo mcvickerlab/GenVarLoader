@@ -5,7 +5,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Generic, Literal, NoReturn, TypeVar, overload
 
-import awkward as ak
 import numpy as np
 import polars as pl
 from loguru import logger
@@ -368,8 +367,8 @@ class Dataset:
             else:
                 sm, spliced_bed = SpliceMap.from_bed(splice_info, self._full_bed)
                 if (
-                    ak.max(sm.splice_map, None) >= self._idxer.n_regions
-                    or ak.min(sm.splice_map, None) < -self._idxer.n_regions
+                    sm.splice_map.to_packed().data.max() >= self._idxer.n_regions
+                    or sm.splice_map.to_packed().data.min() < -self._idxer.n_regions
                 ):
                     raise ValueError(
                         "Found indices in the splice map that are out of bounds for the dataset."
@@ -852,7 +851,7 @@ class Dataset:
         Parameters
         ----------
         fmt
-            ``"ragged"`` for awkward-backed ``Ragged``/``RaggedVariants`` (default),
+            ``"ragged"`` for ``_core.Ragged``-backed ``Ragged``/``RaggedVariants`` (default),
             or ``"flat"`` for pure-numpy ``FlatRagged``/``FlatVariants``.
         """
         if fmt not in ("ragged", "flat"):
@@ -910,9 +909,9 @@ class Dataset:
     )
     _rng: np.random.Generator
     output_format: Literal["ragged", "flat"] = "ragged"
-    """Container format for eager indexing. ``"ragged"`` (default) returns awkward-backed
-    seqpro ``Ragged`` / ``RaggedVariants``; ``"flat"`` returns pure-numpy ``FlatRagged`` /
-    ``FlatVariants`` with zero awkward on the hot path. See ``with_output_format``."""
+    """Container format for eager indexing. ``"ragged"`` (default) returns
+    seqpro ``_core.Ragged`` / ``RaggedVariants``; ``"flat"`` returns pure-numpy ``FlatRagged`` /
+    ``FlatVariants`` with zero allocations on the hot path. See ``with_output_format``."""
     realign_tracks: bool = True
     """Whether to re-align track *values* to haplotype coordinates when both
     haplotypes and float tracks (``kind="tracks"``) are active. ``True`` (default)

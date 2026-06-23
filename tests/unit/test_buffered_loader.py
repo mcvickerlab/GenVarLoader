@@ -7,6 +7,26 @@ import genvarloader as gvl
 pytest.importorskip("torch")
 
 
+def _rv_eq(a, b):
+    """Field-by-field equality for RaggedVariants.
+
+    RaggedVariants is a record _core.Ragged wrapper (not an awkward array) and
+    has no __eq__, so compare each field's values via to_ak().to_list().
+    """
+    from genvarloader._dataset._rag_variants import RaggedVariants
+
+    assert isinstance(a, RaggedVariants) and isinstance(b, RaggedVariants), (
+        f"expected RaggedVariants, got {type(a)} and {type(b)}"
+    )
+    assert set(a.fields) == set(b.fields), (
+        f"field sets differ: {a.fields} vs {b.fields}"
+    )
+    for fname in a.fields:
+        assert a[fname].to_ak().to_list() == b[fname].to_ak().to_list(), (
+            f"field {fname!r} mismatch"
+        )
+
+
 @pytest.mark.parametrize(
     "seq_kind", ["reference", "haplotypes", "annotated", "variants"]
 )
@@ -67,7 +87,6 @@ def test_buffered_flat_matches_ragged(seq_kind):
     Note: Ragged slicing returns non-copying views that keep the full backing
     buffer, so we compare via to_padded() which densifies only the valid rows.
     """
-    import awkward as ak
     from seqpro.rag import to_padded
 
     base = gvl.get_dummy_dataset().with_seqs(seq_kind).with_tracks(False)
@@ -86,7 +105,7 @@ def test_buffered_flat_matches_ragged(seq_kind):
     for rb, fb in zip(ragged_batches, flat_batches):
         got = fb.to_ragged()
         if seq_kind == "variants":
-            assert ak.to_list(got) == ak.to_list(rb)
+            _rv_eq(got, rb)
         elif seq_kind == "annotated":
             np.testing.assert_array_equal(
                 to_padded(got.haps, b"N"), to_padded(rb.haps, b"N")

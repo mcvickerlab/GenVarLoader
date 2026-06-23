@@ -4,7 +4,6 @@ Invariant: Dataset._output_bytes_per_instance(r, s) == nbytes of the actual
 dataset[r, s] output, summed over arrays returned for that instance.
 """
 
-import awkward as ak
 import numpy as np
 import pytest
 import genvarloader as gvl
@@ -26,18 +25,22 @@ def _materialized_nbytes_per_instance(ds, r_arr, s_arr):
     for arr in out:
         if isinstance(arr, RaggedVariants):
             # Sum bytes across all fields per instance.
+            ploidy = arr.shape[-2] if len(arr.shape) >= 3 else 1
             for fname in arr.fields:
                 field = arr[fname]
-                if isinstance(field, Ragged):
-                    # Numeric field: (b, p, ~v) — n_variants * itemsize.
-                    # Ragged.offsets has b*p+1 entries.
-                    lens = np.diff(field.offsets).reshape(n_inst, -1)
-                    totals += lens.sum(-1) * field.data.dtype.itemsize
+                if getattr(field, "is_string", False):
+                    # Opaque-string allele field (b, p, ~v): sum byte lengths of
+                    # all allele strings per instance via str_offsets.
+                    str_off = field._rl.str_offsets
+                    per_var_bytes = np.diff(np.asarray(str_off, np.int64))
+                    var_off = np.asarray(field.offsets, np.int64)  # (b*p+1,)
+                    csum = np.concatenate([[0], np.cumsum(per_var_bytes)])
+                    per_bp = csum[var_off[1:]] - csum[var_off[:-1]]
+                    totals += per_bp.reshape(n_inst, ploidy).sum(-1)
                 else:
-                    allele_lens = ak.str.length(field)
-                    per_ploid_bytes = ak.sum(allele_lens, axis=-1)
-                    per_inst_bytes = ak.sum(per_ploid_bytes, axis=-1).to_numpy()
-                    totals += per_inst_bytes.astype(np.int64)
+                    # Numeric field (b, p, ~v): n_variants * itemsize.
+                    lens = np.diff(np.asarray(field.offsets)).reshape(n_inst, -1)
+                    totals += lens.sum(-1) * field.data.dtype.itemsize
         elif isinstance(arr, RaggedAnnotatedHaps):
             # Sum bytes over all three Ragged fields (haps S1, var_idxs int32, ref_coords int32).
             for ragged_field in (arr.haps, arr.var_idxs, arr.ref_coords):

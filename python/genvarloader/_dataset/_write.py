@@ -13,7 +13,6 @@ if TYPE_CHECKING:
     from .._ragged import RaggedIntervals
     from ._impl import Dataset
 
-import awkward as ak
 import numpy as np
 import polars as pl
 import seqpro as sp
@@ -30,7 +29,8 @@ from natsort import natsorted
 from numpy.typing import NDArray
 from pydantic import BaseModel
 from pydantic_extra_types.semantic_version import SemanticVersion
-from seqpro.rag import Ragged
+import numpy.ma as ma
+from seqpro.rag import Ragged, concatenate as rag_concatenate
 from tqdm.auto import tqdm
 
 from .._atomic import atomic_dir
@@ -897,10 +897,7 @@ def _write_phased_chunked(
             pbar.set_description(desc)
         max_ends.append(region_end)
 
-        var_idxs = ak.flatten(
-            ak.concatenate(ls_sparse, -1),
-            None,
-        ).to_numpy()
+        var_idxs = rag_concatenate(ls_sparse, axis=-1).to_packed().data
         # (s p)
         lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
 
@@ -1003,15 +1000,27 @@ def _write_from_svar(
         sp_genos = Ragged.from_offsets(svar.genos.data, shape, out.reshape(2, -1))
         # this is fine if there aren't any overlapping variants that could make a v_idx < -1
         # have a further end than v_idx == -1
-        # * calling ak.max() means v_idxs is not a view of svar.genos.data
+        # * np.maximum.at allocates a new array, so v_idxs is not a view of svar.genos.data
         # (r s p ~v) -> (r)
-        v_idxs = ak.max(sp_genos, -1).to_numpy().max((1, 2))
+        _g = sp_genos.to_packed()
+        _flat, _off = _g.data, np.asarray(_g.offsets)
+        _n = _g.shape[0] * _g.shape[1] * _g.shape[2]
+        _lens = _off[1:] - _off[:-1]
+        _empty = _lens == 0
+        _per_group = np.full(_n, np.iinfo(_flat.dtype).min, dtype=_flat.dtype)
+        if len(_flat) > 0:
+            # group_ids[i] = which group flat[i] belongs to; np.maximum.at is correct
+            # for non-contiguous / empty groups unlike np.maximum.reduceat
+            _grp_ids = np.repeat(np.arange(_n, dtype=np.intp), _lens)
+            np.maximum.at(_per_group, _grp_ids, _flat)
+        v_idxs = (
+            ma.array(_per_group, mask=_empty)
+            .reshape(_g.shape[0], _g.shape[1], _g.shape[2])
+            .max((1, 2))
+        )
         c_max_ends = max_ends[contig_offset : contig_offset + df.height]
-        if v_idxs.mask is np.ma.nomask:
-            c_max_ends[:] = v_ends[v_idxs.data]
-        else:
-            c_max_ends[~v_idxs.mask] = v_ends[v_idxs.data[~v_idxs.mask]]
-            c_max_ends[v_idxs.mask] = df.filter(v_idxs.mask)["chromEnd"]
+        c_max_ends[~v_idxs.mask] = v_ends[v_idxs.data[~v_idxs.mask]]
+        c_max_ends[v_idxs.mask] = df.filter(v_idxs.mask)["chromEnd"]
         contig_offset += df.height
         pbar.update(df.height)
 
@@ -1148,11 +1157,17 @@ def _annot_intervals_from_bigwig(
         # (regions, 1)
         itvs = bw.intervals(contig, starts, ends, sample="__annot__")
         for r in range(part.height):
-            s = itvs.starts[r, 0]
-            out_starts.append(np.asarray(s, dtype=np.int32))
-            out_ends.append(np.asarray(itvs.ends[r, 0], dtype=np.int32))
-            out_values.append(np.asarray(itvs.values[r, 0], dtype=np.float32))
-            lengths.append(len(s))
+            # itvs.starts[r, 0] returns a (None,) _core.Ragged; extract flat data.
+            s = itvs.starts[r, 0].to_packed()
+            e = itvs.ends[r, 0].to_packed()
+            v = itvs.values[r, 0].to_packed()
+            s_data = s.data[s.offsets[0] : s.offsets[-1]]
+            e_data = e.data[e.offsets[0] : e.offsets[-1]]
+            v_data = v.data[v.offsets[0] : v.offsets[-1]]
+            out_starts.append(np.asarray(s_data, dtype=np.int32))
+            out_ends.append(np.asarray(e_data, dtype=np.int32))
+            out_values.append(np.asarray(v_data, dtype=np.float32))
+            lengths.append(len(s_data))
     flat_starts = np.concatenate(out_starts) if out_starts else np.empty(0, np.int32)
     flat_ends = np.concatenate(out_ends) if out_ends else np.empty(0, np.int32)
     flat_values = np.concatenate(out_values) if out_values else np.empty(0, np.float32)

@@ -1,9 +1,9 @@
 """Flat-buffer ragged transport used inside the getitem hot path.
 
-`_Flat` is a pure-numpy `(data, offsets, shape)` container. Unlike seqpro
-`Ragged` it never wraps an awkward array, so operating on it runs no awkward
-kernels. It converts to seqpro `Ragged` only via `to_ragged()`, called at the
-getitem return boundary when the caller requested ragged output.
+`_Flat` is a pure-numpy `(data, offsets, shape)` container that stays in
+numpy throughout the hot path. It converts to seqpro `Ragged` only via
+`to_ragged()`, called at the getitem return boundary when the caller
+requested ragged output.
 """
 
 from __future__ import annotations
@@ -124,7 +124,7 @@ class _Flat(Generic[RDTYPE]):
 
         ``mask`` is one entry per outer query; it is replicated across any inner
         fixed axes in C order to produce one entry per flattened ragged row,
-        matching the ``ak.where`` broadcast it replaces.
+        matching seqpro's flat-kernel broadcast convention.
         """
         m = np.ascontiguousarray(mask, np.bool_).reshape(-1)
         if m.size != self.n_rows:

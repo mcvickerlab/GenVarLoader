@@ -9,7 +9,6 @@ exercise the full Dataset.open path with a hand-crafted custom field.
 import json
 import shutil
 
-import awkward as ak
 import genvarloader as gvl
 import numpy as np
 import pytest
@@ -110,12 +109,10 @@ def test_custom_field_present_in_ragged_variants(custom_field_ds, ref_fasta):
     batch = ds[0, ds.samples[0]]
     assert field_name in batch.fields
     # dtype is the registered int16, not coerced.
-    flat = ak.to_numpy(ak.flatten(batch[field_name], axis=None))
+    flat = np.asarray(batch[field_name].data)
     assert flat.dtype == np.dtype(FIELD_DTYPE)
     # Per-cell variant counts equal `start`'s (call-aligned with the genotypes).
-    assert (
-        ak.num(batch[field_name], -1).to_list() == ak.num(batch["start"], -1).to_list()
-    )
+    assert batch[field_name].lengths.tolist() == batch["start"].lengths.tolist()
 
 
 def test_custom_field_matches_dosage_gather(custom_field_ds, ref_fasta):
@@ -124,8 +121,8 @@ def test_custom_field_matches_dosage_gather(custom_field_ds, ref_fasta):
     gvl_path, field_name, _ = custom_field_ds
     ds = _open_variants(gvl_path, ref_fasta, field_name)
     batch = ds[0, ds.samples[0]]
-    custom = ak.to_numpy(ak.flatten(batch[field_name], axis=None)).astype(np.float64)
-    dosage = ak.to_numpy(ak.flatten(batch["dosage"], axis=None)).astype(np.float64)
+    custom = np.asarray(batch[field_name].data).astype(np.float64)
+    dosage = np.asarray(batch["dosage"].data).astype(np.float64)
     np.testing.assert_array_equal(custom, dosage)
 
 
@@ -135,8 +132,8 @@ def test_custom_field_af_compaction_matches_dosage(custom_field_ds, ref_fasta):
     gvl_path, field_name, _ = custom_field_ds
     ds = _open_variants(gvl_path, ref_fasta, field_name, max_af=0.5)
     batch = ds[0, ds.samples[0]]
-    custom = ak.to_numpy(ak.flatten(batch[field_name], axis=None)).astype(np.float64)
-    dosage = ak.to_numpy(ak.flatten(batch["dosage"], axis=None)).astype(np.float64)
+    custom = np.asarray(batch[field_name].data).astype(np.float64)
+    dosage = np.asarray(batch["dosage"].data).astype(np.float64)
     np.testing.assert_array_equal(custom, dosage)
 
 
