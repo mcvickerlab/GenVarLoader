@@ -116,14 +116,14 @@ def slice_chunk(chunk_output, batch_size: int):
     """Yield mini-batches of size ``batch_size`` from a chunk-shaped output.
 
     Supports ndarray, seqpro.rag.Ragged, RaggedAnnotatedHaps, AnnotatedHaps,
-    RaggedVariants (ak.Array subclass), and tuples thereof.
+    RaggedVariants (record-Ragged wrapper), and tuples thereof.
     """
     from seqpro.rag import Ragged
     from ._types import AnnotatedHaps
     from ._ragged import RaggedAnnotatedHaps
     from ._flat import _Flat, _FlatAnnotatedHaps
     from ._dataset._flat_variants import _FlatVariants
-    import awkward as ak
+    from ._dataset._rag_variants import RaggedVariants
 
     _FLAT_TYPES = (_Flat, _FlatAnnotatedHaps, _FlatVariants)
 
@@ -133,8 +133,8 @@ def slice_chunk(chunk_output, batch_size: int):
             return arr.shape[0]
         if isinstance(arr, _FLAT_TYPES):
             return arr.shape[0]
-        if isinstance(arr, ak.Array):
-            # RaggedVariants is an ak.Array subclass; len() works.
+        if isinstance(arr, RaggedVariants):
+            # RaggedVariants is a record-Ragged wrapper; len() delegates to __len__.
             return len(arr)
         if isinstance(arr, AnnotatedHaps):
             return arr.haps.shape[0]
@@ -159,8 +159,8 @@ def slice_chunk(chunk_output, batch_size: int):
                 var_idxs=_slice_one(arr.var_idxs, start, stop),
                 ref_coords=_slice_one(arr.ref_coords, start, stop),
             )
-        if isinstance(arr, ak.Array):
-            # Covers RaggedVariants (ak.Array subclass) — slicing preserves the type.
+        if isinstance(arr, RaggedVariants):
+            # Covers RaggedVariants (record-Ragged wrapper) — slicing preserves the type.
             return arr[start:stop]
         raise TypeError(f"slice_chunk: unsupported array type {type(arr)}")
 
