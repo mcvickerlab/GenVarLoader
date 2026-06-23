@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from genoray._svar import POS_TYPE
 from genvarloader import RaggedVariants
 from numpy.typing import NDArray
@@ -208,7 +209,50 @@ def test_pad_missing_pad_value_raises():
         ilen=Ragged.from_offsets(np.zeros(2, np.int32), (2, 1, None), var_off),
         qual=qual,
     )
-    import pytest
-
     with pytest.raises(ValueError, match="qual"):
         rv.pad()  # no pad value supplied for "qual"
+
+
+# ---------------------------------------------------------------------------
+# Torch tests (Task G5): to_nested_tensor_batch
+# ---------------------------------------------------------------------------
+
+
+def test_to_nested_tensor_batch_shapes():
+    """to_nested_tensor_batch returns correct max_n_vars/max_alt_len and nested tensors."""
+    torch = pytest.importorskip("torch")
+
+    var_off = np.array([0, 2, 3], np.int64)  # b=2, p=1 → groups: [0,2), [2,3)
+    char_off = np.array([0, 2, 3, 6], np.int64)  # alt allele char boundaries: 2,1,3
+    alt = Ragged.from_offsets(
+        np.frombuffer(b"ACGTTT", "S1").copy(),
+        (2, 1, None, None),
+        [var_off, char_off],
+    )
+    start = Ragged.from_offsets(np.array([1, 2, 3], np.int32), (2, 1, None), var_off)
+    rv = RaggedVariants(
+        alt=alt,
+        start=start,
+        ilen=Ragged.from_offsets(np.zeros(3, np.int32), (2, 1, None), var_off),
+    ).to_packed()
+
+    out = rv.to_nested_tensor_batch()
+
+    # Scalar checks from brief
+    assert out["max_n_vars"] == 2  # group 0 has 2 variants
+    assert out["max_alt_len"] == 3  # longest allele is "TTT" (len 3)
+
+    # "alt" key must be a nested tensor (shape: b*p*~variants, ~alt_chars)
+    assert isinstance(out["alt"], torch.Tensor)
+    assert out["alt"].is_nested
+
+    # "start" key must be a nested tensor (shape: b*p, ~variants)
+    assert isinstance(out["start"], torch.Tensor)
+    assert out["start"].is_nested
+
+    # Verify actual char content: uint8 view of b"AC", b"G", b"TTT"
+    alts_nt = out["alt"]
+    unbind = alts_nt.unbind()
+    assert list(unbind[0].tolist()) == [65, 67]  # b"AC"
+    assert list(unbind[1].tolist()) == [71]  # b"G"
+    assert list(unbind[2].tolist()) == [84, 84, 84]  # b"TTT"

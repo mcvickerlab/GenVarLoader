@@ -444,4 +444,84 @@ class RaggedVariants:
         device: "str | torch.device" = "cpu",
         tokenizer: "Literal['seqpro'] | Callable[[NDArray[np.bytes_]], NDArray[np.integer]] | None" = None,
     ) -> "dict[str, NestedTensor | int]":
-        raise NotImplementedError("ported in Task G5")
+        """Convert a RaggedVariants object to a dictionary of nested tensors.
+
+        Numeric fields (``start``, ``ilen``, ``dosage``, any extra) are flattened
+        across the ploidy dimension so their shape is ``(batch * ploidy, ~variants)``.
+        Allele fields (``alt``, ``ref``) are flattened across both the ploidy and
+        variant dimensions so their shape is
+        ``(batch * ploidy * ~variants, ~alt_len)``.
+
+        Parameters
+        ----------
+        device
+            Device to move tensors to.
+        tokenizer
+            How to encode allele characters.
+
+            - ``"seqpro"`` — use ``seqpro.tokenize`` (ACGTN → 0 1 2 3 4).
+            - ``None`` — uint8 ASCII values (ACGTN → 65 67 71 84 78).
+            - Callable — called with the flat ``NDArray[np.bytes_]`` data,
+              returns an integer array of the same length.
+
+        Returns
+        -------
+        dict
+            - ``"alt"`` — nested tensor ``(batch*ploidy*~vars, ~alt_len)``
+            - ``"ref"`` — nested tensor ``(batch*ploidy*~vars, ~ref_len)`` (if present)
+            - numeric field keys — nested tensor ``(batch*ploidy, ~vars)``
+            - ``"max_n_vars"`` — int
+            - ``"max_alt_len"`` — int
+            - ``"max_ref_len"`` — int (if ``ref`` present)
+        """
+        import seqpro as sp
+        from torch.nested import nested_tensor_from_jagged as nt_jag
+
+        batch: "dict[str, NestedTensor | int]" = {}
+        batch["max_n_vars"] = int(self._rag["start"].lengths.max())
+
+        # Shared variant-level offsets (int32 for torch) — computed once from the
+        # first numeric field; all numeric fields share the same offsets object.
+        var_offsets_t: "torch.Tensor | None" = None
+
+        for f in self.fields:
+            field = self._rag[f]
+            if f in _ALLELE_FIELDS:
+                # Allele field: opaque-string (b, p, ~v) → char view (b, p, ~v, ~l).
+                # After to_chars().to_packed():
+                #   _layout.offsets = [var_off, char_off]
+                #   _layout.offsets[-1] = char_off: per-allele byte boundaries.
+                # NOTE: .offsets returns _layout.offsets[0] (variant-level), so we
+                # must use ._layout.offsets[-1] for the inner (char-level) boundaries.
+                chars = field.to_chars().to_packed()
+                char_off = np.asarray(chars._layout.offsets[-1], dtype=np.int64)
+                char_lens = np.diff(char_off)
+                max_len = int(char_lens.max()) if char_lens.size > 0 else 0
+                batch[f"max_{f}_len"] = max_len
+
+                if tokenizer is None:
+                    raw: "NDArray" = chars.data.view(np.uint8)
+                elif tokenizer == "seqpro":
+                    # ACGTN → 0 1 2 3 4 (unknown token = 4)
+                    raw = sp.tokenize(
+                        chars.data,
+                        dict(zip(sp.DNA.alphabet, range(4))),
+                        4,
+                    )
+                else:
+                    raw = tokenizer(chars.data)
+
+                data_t = torch.from_numpy(np.ascontiguousarray(raw)).to(device)
+                off_t = torch.from_numpy(char_off.astype(np.int32)).to(device)
+                batch[f] = nt_jag(data_t, off_t, max_seqlen=max_len)
+            else:
+                # Numeric field: shape (b, p, ~v), flattened to (b*p, ~v).
+                packed = field.to_packed()
+                if var_offsets_t is None:
+                    var_offsets_t = torch.from_numpy(
+                        np.asarray(packed.offsets, dtype=np.int32)
+                    ).to(device)
+                data_t = torch.from_numpy(np.ascontiguousarray(packed.data)).to(device)
+                batch[f] = nt_jag(data_t, var_offsets_t)
+
+        return batch
