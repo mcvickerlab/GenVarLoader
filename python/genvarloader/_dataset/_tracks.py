@@ -420,7 +420,7 @@ def _ragged_stack_tracks(tracks: "list[Ragged]") -> "Ragged":
     1. Stack the per-track 1-D offsets into an ``(n_tracks, n_batch+1)`` matrix and derive
        a ``(n_tracks, n_batch)`` lengths matrix.
     2. Transpose to ``(n_batch, n_tracks)`` and flatten → interleaved lengths in C-order,
-       which is exactly the ``ak.concatenate(axis=1)`` segment order we need to reproduce.
+       which is the target segment order: [batch0_track0, batch0_track1, …, batchN_track(T-1)].
     3. Convert to offsets (cumsum) → ``out_offsets`` of length ``n_batch*n_tracks + 1``.
     4. Allocate ``out_data`` of size ``total_elements`` in one shot.
     5. For each track ``t`` (bounded loop over *n_tracks*, never over *n_batch*):
@@ -464,7 +464,7 @@ def _ragged_stack_tracks(tracks: "list[Ragged]") -> "Ragged":
     # ------------------------------------------------------------------
     # Transposing to (n_batch, n_tracks) and flattening gives the
     # segment order [batch0_track0, batch0_track1, …, batchN_track(T-1)],
-    # which exactly matches ak.concatenate(axis=1) semantics.
+    # which gives the interleaved segment order: [batch0_track0, batch0_track1, …].
     out_lengths = lengths_tk.T.ravel()  # (n_batch * n_tracks,)
     out_offsets = lengths_to_offsets(out_lengths)  # (n_batch*n_tracks + 1,)
     total = int(out_offsets[-1])
@@ -870,7 +870,7 @@ def build_flat_intervals(
 ) -> FlatIntervals:
     """Pure-numpy gather of per-(region, sample, track) intervals into a
     :class:`FlatIntervals` of shape ``(batch, n_tracks, ~itvs)`` in C-order
-    (batch outer, track inner) — matching the awkward concat order of
+    (batch outer, track inner) — matching the interleaved segment order of
     :meth:`Tracks._call_intervals`.
     """
     B = len(r_idx)

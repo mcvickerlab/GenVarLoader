@@ -136,7 +136,7 @@ def _write_ragged(buf: memoryview, a, cursor: int) -> tuple[dict, int]:
 
 
 def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
-    """Write a RaggedVariants into buf via _core.Ragged buffers (no awkward).
+    """Write a RaggedVariants into buf via _core.Ragged buffers.
 
     Layout per kind=2 block:
       The descriptor's 'shape' carries [n_fields] so the reader knows how many
@@ -531,7 +531,7 @@ def _read_ragged(buf: memoryview, d: dict, copy: bool = True):
 
 
 def _read_rag_variants(buf: memoryview, d: dict, copy: bool = True):
-    """Reconstruct a RaggedVariants from a kind=2 descriptor via _core.Ragged (no awkward).
+    """Reconstruct a RaggedVariants from a kind=2 descriptor via _core.Ragged.
 
     For each field:
       - Alleles (field_kind=1): rebuild as Ragged.from_offsets(char_data,
@@ -613,7 +613,7 @@ def _flat_ploidy(shape) -> int:
 
 
 def _write_flat_variants(buf: memoryview, fv, cursor: int) -> tuple[dict, int]:
-    """Write a _FlatVariants into buf as a kind=2 block with NO awkward.
+    """Write a _FlatVariants into buf as a kind=2 block.
 
     Mirrors _write_rag_variants's byte layout but reads each field straight off
     the flat numpy buffers (`_Flat` scalars: outer offsets + leaf data;
@@ -621,7 +621,7 @@ def _write_flat_variants(buf: memoryview, fv, cursor: int) -> tuple[dict, int]:
 
     Fields are written in ``fv.fields`` dict-insertion order, which mirrors the
     field order produced by ``_write_rag_variants``, so the descriptor field
-    order is consistent across the flat and awkward write paths.
+    order is consistent across the flat and ragged write paths.
     """
     from ._dataset._flat_variants import _FlatAlleles
 
@@ -815,7 +815,7 @@ def read_chunk(
         (valid only while buf remains mapped and unmodified by the producer).
     flat
         If True, kinds 1/2/3 reconstruct ``_Flat`` / ``_FlatVariants`` /
-        ``_FlatAnnotatedHaps`` instead of the awkward-backed types
+        ``_FlatAnnotatedHaps`` instead of the eagerly-materialized types
         (``Ragged`` / ``RaggedVariants`` / ``RaggedAnnotatedHaps``).
 
     Returns (n_instances, [arrays...]) where arrays may be np.ndarray,

@@ -1,5 +1,5 @@
 """Flat-buffer analog of RaggedVariants: pure-numpy (data, offsets) per field,
-no awkward on the hot path. Converts to RaggedVariants only via to_ragged()."""
+all-numpy hot path. Converts to RaggedVariants only via to_ragged()."""
 
 from __future__ import annotations
 
@@ -176,7 +176,7 @@ class _FlatWindow:
     """Two-level flat token buffer for ref/alt windows, shape (b, p, ~v, ~win).
 
     Mirrors _FlatAlleles but `data` holds tokens (configured int dtype), not bytes,
-    so to_ragged() drops the byte/bytestring awkward parameters. Both inner axes
+    so to_ragged() drops the byte/bytestring string parameters. Both inner axes
     (variant count and window length) are ragged, so to_ragged() returns a numeric
     two-ragged-axis _core.Ragged with shape (b, p, ~v, ~w).
     """
@@ -660,8 +660,8 @@ def get_variants_flat(
     haps: "Haps", idx: NDArray[np.integer], regions=None
 ) -> "_FlatVariants | _FlatVariantWindows":
     """Flat-buffer analog of :meth:`Haps._get_variants`: builds a
-    :class:`_FlatVariants` with no awkward on the hot path. Re-wrapping the
-    result via :meth:`_FlatVariants.to_ragged` is byte-identical to the awkward
+    :class:`_FlatVariants` on the pure-numpy hot path. Re-wrapping the
+    result via :meth:`_FlatVariants.to_ragged` is byte-identical to the
     :class:`RaggedVariants` produced by ``_get_variants``.
 
     Replicates ONLY AF filtering (min_af/max_af); exonic filtering is not

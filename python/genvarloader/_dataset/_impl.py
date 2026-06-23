@@ -851,7 +851,7 @@ class Dataset:
         Parameters
         ----------
         fmt
-            ``"ragged"`` for awkward-backed ``Ragged``/``RaggedVariants`` (default),
+            ``"ragged"`` for ``_core.Ragged``-backed ``Ragged``/``RaggedVariants`` (default),
             or ``"flat"`` for pure-numpy ``FlatRagged``/``FlatVariants``.
         """
         if fmt not in ("ragged", "flat"):
@@ -909,9 +909,9 @@ class Dataset:
     )
     _rng: np.random.Generator
     output_format: Literal["ragged", "flat"] = "ragged"
-    """Container format for eager indexing. ``"ragged"`` (default) returns awkward-backed
-    seqpro ``Ragged`` / ``RaggedVariants``; ``"flat"`` returns pure-numpy ``FlatRagged`` /
-    ``FlatVariants`` with zero awkward on the hot path. See ``with_output_format``."""
+    """Container format for eager indexing. ``"ragged"`` (default) returns
+    seqpro ``_core.Ragged`` / ``RaggedVariants``; ``"flat"`` returns pure-numpy ``FlatRagged`` /
+    ``FlatVariants`` with zero allocations on the hot path. See ``with_output_format``."""
     realign_tracks: bool = True
     """Whether to re-align track *values* to haplotype coordinates when both
     haplotypes and float tracks (``kind="tracks"``) are active. ``True`` (default)

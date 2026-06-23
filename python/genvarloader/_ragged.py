@@ -35,7 +35,7 @@ class RaggedIntervals:
     values: Ragged[np.float32]
 
     def __getitem__(self, idx) -> RaggedIntervals:
-        out = RaggedIntervals(self.starts[idx], self.ends[idx], self.values[idx])  # type: ignore[bad-argument-type]  # Ragged.__getitem__ widens to Array per awkward stubs
+        out = RaggedIntervals(self.starts[idx], self.ends[idx], self.values[idx])  # type: ignore[bad-argument-type]  # _core.Ragged.__getitem__ return type widens to Array in stubs
         return out
 
     @property
@@ -169,7 +169,7 @@ class RaggedIntervals:
 class FlatIntervals:
     """Flat-buffer analog of :class:`RaggedIntervals` over three :class:`_Flat` s.
 
-    Pure-numpy ``(data, offsets, shape)`` per field; converts to the awkward-backed
+    Pure-numpy ``(data, offsets, shape)`` per field; converts to the
     :class:`RaggedIntervals` only via :meth:`to_ragged`. Returned by eager indexing
     when ``with_tracks(kind="intervals")`` is combined with
     ``with_output_format("flat")``.
@@ -296,10 +296,9 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
     The ragged axis will be padded to have the maximum length across all entries.
 
     Thin pass-through to :func:`seqpro.rag.to_padded` (seqpro 0.13+), a single-pass,
-    parallel flat-buffer densify-and-pad kernel that replaced the old awkward
-    ``ak_str.rpad`` / ``ak.pad_none`` + ``fill_none`` + ``to_numpy`` idiom. Output is
-    byte-identical for every dtype/pad gvl uses (S1, int32, float32); seqpro pads to
-    the batch maximum ``rag.lengths.max()`` when no explicit length is given.
+    parallel flat-buffer densify-and-pad kernel. Output is byte-identical for every
+    dtype/pad gvl uses (S1, int32, float32); seqpro pads to the batch maximum
+    ``rag.lengths.max()`` when no explicit length is given.
 
     Parameters
     ----------
@@ -328,19 +327,16 @@ def reverse_complement_masked(
 ) -> Ragged[np.bytes_]:
     """Masked reverse-complement of an S1 ragged batch, in place.
 
-    Flat-buffer replacement for the awkward idiom
-    ``Ragged(ak.to_packed(ak.where(mask, reverse_complement(rag), rag)))``: seqpro's
-    kernel touches only the ``mask``-selected rows, runs a single in-place pass per row,
-    and reuses ``rag``'s offsets. Reuses :data:`_COMP` (the same A<->T, C<->G table the
-    awkward path uses) so output is byte-identical.
+    seqpro's flat kernel touches only the ``mask``-selected rows, runs a single in-place
+    pass per row, and reuses ``rag``'s offsets. Uses :data:`_COMP` (the A<->T, C<->G
+    lookup table) so output is byte-identical to a naive per-row reverse-complement.
 
     Mutates ``rag`` in place (``copy=False``); only call on a freshly reconstructed batch
     the caller owns.
 
-    ``mask`` is one entry per outer query (e.g. per region); awkward's ``ak.where``
-    used to broadcast it across any inner fixed axes (e.g. ploidy) left-aligned. seqpro's
-    flat kernel wants one entry per flattened ragged row, so replicate the mask across the
-    inner axes in C order to match.
+    ``mask`` is one entry per outer query (e.g. per region); seqpro's flat kernel wants
+    one entry per flattened ragged row, so replicate the mask across any inner fixed axes
+    (e.g. ploidy) in C order to match.
     """
     mask = np.ascontiguousarray(mask, dtype=np.bool_).reshape(-1)
     n_rows = int(np.prod(rag.shape[: rag.rag_dim], dtype=np.int64))

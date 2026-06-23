@@ -1,7 +1,7 @@
 """Reference flank fetch + byte->int tokenization (sub-project C).
 
 Produces flat token buffers from already-gathered variant fields + the reference
-genome. No awkward on the hot path.
+genome. All-numpy hot path.
 """
 
 from __future__ import annotations

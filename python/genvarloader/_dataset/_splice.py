@@ -164,7 +164,7 @@ def build_splice_plan(
 class SpliceMap:
     """Sample-agnostic mapping from splice row → ordered region indices.
 
-    Owns the parsed splice BED, the name → row hash table, the awkward
+    Owns the parsed splice BED, the name → row hash table, the
     splice-map (rows → list[region_idx]), and any active row subset. Used by
     both `Dataset` (via `SpliceIndexer`) and `RefDataset`.
     """

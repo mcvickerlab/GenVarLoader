@@ -131,7 +131,7 @@ def getitem(
 def _reshape_outer(o, out_reshape: tuple[int, ...]):
     """Reshape the outer (leading) dims of a query output to ``out_reshape``.
 
-    Reshape conventions differ by type. An awkward ``Ragged`` (or
+    Reshape conventions differ by type. A ``Ragged`` (or
     ``RaggedAnnotatedHaps``) ``.reshape()`` takes the FULL new shape, including
     the trailing ragged ``None`` axis, so we pass ``out_reshape + o.shape[1:]``.
     By contrast ``_Flat``/``_FlatAnnotatedHaps`` ``.reshape()`` takes only the
