@@ -22,9 +22,11 @@ into Rust for everything else.
 - Eliminate the ~35 numba kernels scattered across the read/write paths, collapsing the
   bug surface.
 
-**Eventual scope:** seqpro (the `Ragged` data structure + rag ops) and genoray (VCF/PGEN
-variant & sparse-genotype IO) are sibling Python deps today. They are **in scope for the
-full Rust stack**, but sequenced last (Phase 6) and may graduate into their own roadmap.
+**Eventual scope:** seqpro's `Ragged` layout + ops are the **shared Rust ragged substrate**
+(`seqpro-core` rlib, pyo3-free) — GVL consumes them via a crate path-dep rather than
+reimplementing ragged primitives in-house (decision 2026-06-23, Phase 1). genoray
+(VCF/PGEN variant & sparse-genotype IO) remains in scope for the full Rust stack,
+sequenced last (Phase 6), and may graduate into its own roadmap.
 
 ### Target crate layout
 
@@ -33,7 +35,7 @@ Grown from today's `src/{lib,bigwig}.rs`:
 ```
 src/
 ├── lib.rs            # pymodule registration only
-├── ragged/           # ragged layout (offsets+data) + ops  ← Phase 1 beachhead
+├── ragged/           # bridge to seqpro-core (NOT a reimplementation)  ← Phase 1
 ├── genotypes/        # sparse genotype assembly
 ├── variants/         # variant gather, flat/windowed views
 ├── reconstruct/      # haplotype reconstruction
@@ -45,8 +47,10 @@ src/
 ```
 
 The crate is pure Rust + `ndarray`/`rayon`. `ffi/` is the seam where numpy arrays and
-`seqpro.Ragged` / `genoray` objects cross the boundary (zero-copy where possible). By
-Phase 6 the crate stops depending on Python seqpro/genoray entirely.
+`seqpro.Ragged` / `genoray` objects cross the boundary (zero-copy where possible).
+`src/ragged/` is a **bridge layer** to the `seqpro-core` rlib — it does not own the
+ragged implementation. By Phase 6 the crate stops depending on Python genoray for
+variant IO paths.
 
 ---
 
@@ -65,6 +69,10 @@ Every unit follows the same loop, so the work is repetitive and low-surprise:
 
 `main` stays shippable at all times; every step is reversible until parity is proven;
 numba deletion is continuous rather than a big-bang at the end.
+
+**Ragged substrate:** the ragged layout and core ops are **consumed from `seqpro-core`**
+(a pyo3-free rlib in the seqpro repo) via a Cargo path-dep, not reimplemented in GVL's
+own crate. GVL's `src/ragged/` is a bridge/adapter layer only.
 
 **Standing CI invariant (not a per-phase gate):** abi3 wheels must keep building across
 py310–313 × linux/macOS as the Rust surface grows.
@@ -122,20 +130,27 @@ _PR: —_
 
 **Checkpoint:** harness green; baselines recorded in this file.
 
-### Phase 1 — Ragged primitives + layout (beachhead) ⬜
-_PR: —_
+### Phase 1 — Ragged primitives + layout (beachhead) ✅
+_PRs: seqpro TBD, GVL TBD_
 
-The foundation everything sits on. Bottom-up.
+The foundation everything sits on. Realized via the `seqpro-core` shared substrate
+rather than a GVL-in-house reimplementation (see decision 2026-06-23). Bottom-up.
 
-- [ ] Define the native ragged layout in Rust (offsets + data buffers).
-- [ ] Implement the ops gvl uses: lengths/offsets, slice, gather, `to_padded`,
-      reverse-complement helpers.
-- [ ] Zero-copy interop with `seqpro.Ragged` at the boundary (construct-from / view-as).
-- [x] Remove `awkward` from the foundation layer. (Done at the Python level: GVL migrated onto seqpro's Rust-backed `_core.Ragged`; Rust-crate kernel rewrite is a separate pending step.)
-- [ ] Differential parity vs `_ragged.py` / current seqpro paths.
+- [x] Extract a pyo3-free `seqpro-core` rlib (crates/seqpro-core in the seqpro repo)
+      that owns the `Ragged` layout (offsets + data buffers) and its core ops.
+- [x] Port the last two numba ops to Rust inside `seqpro-core`: `to_padded` and
+      `reverse_complement`. seqpro's ragged layer is now numba-free.
+- [x] GVL consumes `seqpro-core` via a Cargo path-dep (editable; flip to
+      git/crates.io before shipping). `src/ragged/` is a bridge adapter, not a
+      reimplementation.
+- [x] Proof-point op (`to_padded`) rerouted through the shared `seqpro-core` kernel
+      in GVL with byte-identical parity confirmed.
+- [x] Remove `awkward` from the foundation layer. (GVL migrated onto seqpro's
+      Rust-backed `_core.Ragged`; `RaggedVariants` now wraps a single record
+      `seqpro.rag.Ragged`.)
 
-**Checkpoint:** parity green. Foundational — no perf gate, but record incidental wins.
-Relevant prior work: [[project_ragged_assembly_bottleneck]].
+**Checkpoint:** parity green (byte-identical `to_padded`). Foundational — no perf gate,
+but record incidental wins. Relevant prior work: [[project_ragged_assembly_bottleneck]].
 
 ### Phase 2 — Genotype assembly + variant gather ⬜
 _PR: —_
@@ -181,15 +196,16 @@ _PR: —_
 
 **Checkpoint:** core numba kernel count = 0; full perf re-baseline recorded here.
 
-### Phase 6 — Absorb seqpro / genoray (future) ⬜
+### Phase 6 — Absorb genoray (future) ⬜
 _PR: —_
 
 Sequenced last; a candidate to graduate into its own roadmap once Phases 0–5 land.
+seqpro-core remains the ragged substrate (decision 2026-06-23) — Phase 6 is
+narrowed to genoray (variant IO) only.
 
-- [ ] Bring ragged primitives fully in-house — drop the seqpro hot-path dependency.
 - [ ] Bring variant IO (genoray VCF/PGEN + sparse genotypes) into the Rust stack.
 
-**Checkpoint:** crate no longer depends on Python seqpro/genoray for core paths.
+**Checkpoint:** crate no longer depends on Python genoray for core variant IO paths.
 
 ---
 
@@ -229,3 +245,13 @@ Sequenced last; a candidate to graduate into its own roadmap once Phases 0–5 l
   genvarformer CPU 371 passed. Note: this was a Python-level migration onto seqpro's
   existing Rust-backed `_core.Ragged`; the Rust-crate rewrite of the ragged kernels
   themselves (Phase 1 beachhead) is still pending. PR: TBD
+- 2026-06-23: seqpro is the shared Rust ragged substrate. Extracted a pyo3-free
+  `seqpro-core` rlib (crates/seqpro-core) owning a borrowed `Ragged` layout +
+  ops; ported its last two numba kernels (`to_padded`, `reverse_complement`) to
+  Rust (seqpro rag layer now numba-free). Bumped seqpro's pymodule to pyo3 0.28 /
+  numpy 0.28 / ndarray 0.17 (hygiene; NOT required for the link — two pymodules
+  with different pyo3 versions coexist; the single-version rule is per-cdylib, and
+  the shared core is pyo3-free). GVL links seqpro-core via a path dep (editable;
+  flip to git/release before shipping) and routes its `to_padded` chokepoint
+  through the shared kernel (proof-point, byte-identical parity). Inverts Phase 6
+  (seqpro stays the substrate). PRs: seqpro TBD, GVL TBD.
