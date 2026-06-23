@@ -144,7 +144,7 @@ def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
       (see module docstring). The byte layout is IDENTICAL to _write_flat_variants
       so kind=2 descriptors are interchangeable across the flat and ragged paths.
 
-    For each field of rv._rag:
+    For each field of rv:
       - Numeric (field_kind=0): outer_offsets = field.offsets (b*p+1 int64),
         leaf_data = field.data.
       - Alleles (field_kind=1): outer_offsets = field.offsets (b*p+1 int64),
@@ -159,7 +159,7 @@ def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
     field_descs: list[dict] = []
 
     for fname in fields:
-        f = rv._rag[fname]
+        f = rv[fname]
 
         outer_offsets = np.ascontiguousarray(f.offsets, dtype=np.int64)
         leaf_data = np.ascontiguousarray(f.data)

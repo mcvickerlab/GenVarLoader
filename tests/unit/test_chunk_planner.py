@@ -94,8 +94,8 @@ def _rv_equal(a, b):
     assert isinstance(b, RaggedVariants), f"expected RaggedVariants, got {type(b)}"
     assert a.fields == b.fields, f"fields mismatch: {a.fields} vs {b.fields}"
     for name in a.fields:
-        a_list = a._rag[name].to_ak().to_list()
-        b_list = b._rag[name].to_ak().to_list()
+        a_list = a[name].to_ak().to_list()
+        b_list = b[name].to_ak().to_list()
         assert a_list == b_list, (
             f"RaggedVariants field {name!r} mismatch:\n  got:      {a_list}\n  expected: {b_list}"
         )
@@ -121,6 +121,10 @@ def _compare(a, b):
         _compare(a.haps, b.haps)
         _compare(a.var_idxs, b.var_idxs)
         _compare(a.ref_coords, b.ref_coords)
+    elif isinstance(a, RaggedVariants):
+        # RaggedVariants is now a Ragged subclass; check it before the generic
+        # Ragged branch, which can't handle record Rageds.
+        _rv_equal(a, b)
     elif isinstance(a, Ragged):
         # Pack to canonical (1-D) offsets so that sliced views (which may carry 2-D
         # gather offsets after _core indexing) compare correctly against direct lookups.
