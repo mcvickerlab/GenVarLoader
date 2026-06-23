@@ -90,6 +90,14 @@ missing-import = false
 # so it passes regardless of which env reports it (an inline ignore is unused,
 # and thus an error, in the envs that resolve the re-export correctly).
 missing-module-attribute = "warn"
+# seqpro/genoray Ragged exposes record fields via __getattr__ -> Ragged, so
+# pyrefly can resolve a method call on a Ragged-typed value (e.g.
+# `h_arr.tobytes()`, guarded by hasattr) as calling a Ragged field rather than
+# the real ndarray method. Runtime is correct; the false positive surfaces
+# inconsistently across environments (linux CI reports it, macOS does not), so
+# WARN rather than inline-ignore (which would be an unused-ignore error in the
+# env that resolves it correctly).
+not-callable = "warn"
 # Numpy / awkward / polars operator and iteration interop produces noisy
 # false positives. PR5 (Pipeline refactor) and PR8 will revisit.
 not-iterable = false
