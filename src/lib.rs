@@ -1,4 +1,5 @@
 pub mod bigwig;
+pub mod ragged;
 pub mod tables;
 use numpy::{prelude::*, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::prelude::*;
@@ -10,6 +11,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(intervals, m)?)?;
     m.add_function(wrap_pyfunction!(bigwig_write_track, m)?)?;
     m.add_class::<tables::RustTable>()?;
+    m.add_function(wrap_pyfunction!(ragged::ragged_to_padded, m)?)?;
     Ok(())
 }
 
