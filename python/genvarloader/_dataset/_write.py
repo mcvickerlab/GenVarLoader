@@ -1007,7 +1007,7 @@ def _write_from_svar(
         _n = _g.shape[0] * _g.shape[1] * _g.shape[2]
         _lens = _off[1:] - _off[:-1]
         _empty = _lens == 0
-        _per_group = np.empty(_n, dtype=_flat.dtype)
+        _per_group = np.full(_n, np.iinfo(_flat.dtype).min, dtype=_flat.dtype)
         if len(_flat) > 0:
             # group_ids[i] = which group flat[i] belongs to; np.maximum.at is correct
             # for non-contiguous / empty groups unlike np.maximum.reduceat
@@ -1019,11 +1019,8 @@ def _write_from_svar(
             .max((1, 2))
         )
         c_max_ends = max_ends[contig_offset : contig_offset + df.height]
-        if v_idxs.mask is np.ma.nomask:
-            c_max_ends[:] = v_ends[v_idxs.data]
-        else:
-            c_max_ends[~v_idxs.mask] = v_ends[v_idxs.data[~v_idxs.mask]]
-            c_max_ends[v_idxs.mask] = df.filter(v_idxs.mask)["chromEnd"]
+        c_max_ends[~v_idxs.mask] = v_ends[v_idxs.data[~v_idxs.mask]]
+        c_max_ends[v_idxs.mask] = df.filter(v_idxs.mask)["chromEnd"]
         contig_offset += df.height
         pbar.update(df.height)
 
