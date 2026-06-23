@@ -2,15 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
-import awkward as ak
-import awkward.operations.str as ak_str
 import numba as nb
 import numpy as np
-from awkward.contents import NumpyArray
 from numpy.typing import NDArray
 from phantom import Phantom
+import seqpro.rag as spr
 from seqpro.rag import Ragged, is_rag_dtype
 from seqpro.rag import RDTYPE_co as RDTYPE
 from seqpro.rag import reverse_complement as _sp_reverse_complement
@@ -150,22 +148,21 @@ class RaggedIntervals:
         b, t, *_ = self.values.shape
         b = cast(int, b)
         t = cast(int, t)
+        n = b * t
 
-        pad_start = ak.from_numpy(
-            np.full((b, t, 1), start, np.int32), regulararray=True
-        )
-        # (b t ~v)
-        new_starts = ak.concatenate([pad_start, self.starts.to_ak()], axis=2)
-        pad_end = ak.from_numpy(np.full((b, t, 1), end, np.int32), regulararray=True)
-        # (b t ~v)
-        new_ends = ak.concatenate([pad_end, self.ends.to_ak()], axis=2)
-        pad_value = ak.from_numpy(
-            np.full((b, t, 1), value, np.float32), regulararray=True
-        )
-        # (b t ~v)
-        new_values = ak.concatenate([pad_value, self.values.to_ak()], axis=2)
+        def _pad(val, dtype):
+            return Ragged.from_offsets(
+                np.full(n, val, dtype),
+                (b, t, None),
+                np.arange(n + 1, dtype=np.int64),
+            )
 
-        return RaggedIntervals(Ragged(new_starts), Ragged(new_ends), Ragged(new_values))
+        # (b t ~v): prepend one pad element per group
+        new_starts = spr.concatenate([_pad(start, np.int32), self.starts], axis=-1)
+        new_ends = spr.concatenate([_pad(end, np.int32), self.ends], axis=-1)
+        new_values = spr.concatenate([_pad(value, np.float32), self.values], axis=-1)
+
+        return RaggedIntervals(new_starts, new_ends, new_values)
 
 
 @dataclass(slots=True)
@@ -324,24 +321,6 @@ _COMP = np.frombuffer(bytes.maketrans(b"ACGT", b"TGCA"), np.uint8)
 @nb.vectorize(["u1(u1)"], nopython=True)
 def ufunc_comp_dna(seq: NDArray[np.uint8]) -> NDArray[np.uint8]:
     return _COMP[seq]
-
-
-def _ak_comp_dna_helper(layout, **kwargs):
-    if layout.is_numpy:
-        return NumpyArray(
-            ufunc_comp_dna(layout.data),
-            parameters=layout.parameters,
-        )
-
-
-T = TypeVar("T", bound=ak.Array)
-
-
-def reverse_complement(arr: T) -> T:
-    og_type = type(arr)
-    arr = ak.to_packed(arr)
-    arr = ak_str.reverse(ak.transform(_ak_comp_dna_helper, arr))
-    return og_type(arr)
 
 
 def reverse_complement_masked(

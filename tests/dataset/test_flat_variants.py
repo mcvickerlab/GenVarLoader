@@ -16,9 +16,15 @@ from genvarloader._dataset._flat_variants import (
 )
 from genvarloader._flat import _Flat
 from genvarloader._dataset._haps import _build_allele_layout
-from genvarloader._ragged import reverse_complement  # the awkward reference
 from seqpro.rag import Ragged
 from seqpro.rag._array import Ragged as _ArrayRagged
+
+_COMP_TABLE = bytes.maketrans(b"ACGTacgt", b"TGCAtgca")
+
+
+def _rc_bytes(seq: bytes) -> bytes:
+    """Pure-Python reverse-complement of a bytestring."""
+    return seq.translate(_COMP_TABLE)[::-1]
 
 
 def _make_rv(alt_rows, ref_rows, starts, group_off, ploidy):
@@ -40,10 +46,30 @@ def _make_rv(alt_rows, ref_rows, starts, group_off, ploidy):
 
 
 def _ref_rc(rv, to_rc):
-    """Old awkward idiom, computed independently."""
-    alt = ak.to_packed(ak.where(to_rc, reverse_complement(rv["alt"]), rv["alt"]))
-    ref = ak.to_packed(ak.where(to_rc, reverse_complement(rv["ref"]), rv["ref"]))
-    return alt, ref
+    """Pure-Python reference oracle: reverse-complement rows selected by ``to_rc``.
+
+    Works on awkward arrays (bytestring leaves); replaces the old
+    ``ak.where(to_rc, reverse_complement(rv[...]), rv[...])`` idiom.
+    """
+    rows_alt = ak.to_list(rv["alt"])
+    rows_ref = ak.to_list(rv["ref"])
+    # to_rc may be shorter than rows_alt when ploidy > 1; broadcast per-batch mask
+    n = len(rows_alt)
+    m = len(to_rc)
+    if m < n:
+        repeat = n // m
+        to_rc_expanded = np.repeat(to_rc, repeat)
+    else:
+        to_rc_expanded = np.asarray(to_rc, dtype=bool)
+    exp_alt = [
+        [_rc_bytes(a) for a in row] if flip else row
+        for row, flip in zip(rows_alt, to_rc_expanded)
+    ]
+    exp_ref = [
+        [_rc_bytes(r) for r in row] if flip else row
+        for row, flip in zip(rows_ref, to_rc_expanded)
+    ]
+    return ak.Array(exp_alt), ak.Array(exp_ref)
 
 
 @pytest.mark.parametrize(
