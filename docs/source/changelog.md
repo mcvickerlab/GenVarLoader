@@ -52,6 +52,59 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.35.0 (2026-06-23)
+
+### Feat
+
+- promote gvl.Table to public API; remove experimental subpackage
+- route Table/annot writes through Rust; vectorize contig norm
+- back gvl.Table with Rust COITrees engine; drop polars-bio
+- **rust**: streaming Table writer + PyO3 RustTable methods
+- **rust**: materialize ordered intervals from offsets
+- **rust**: COITrees overlap count for RustTable
+- **rust**: table interval store + RustTable::build
+- warn when opening datasets with variant-truncated track windows (#233)
+- route annotation bigWig writes through rust behind switch
+- route per-sample bigWig writes through rust behind GVL_RUST_BIGWIG_WRITE
+- PyO3 binding for bigwig_write_track
+- rust single-pass streaming bigWig write_track
+
+### Fix
+
+- **rag-variants**: string-key field access + __getattr__ for record fields
+- **rag-variants**: __getitem__ preserves leading fixed axes for slice/array indexing
+- **rag-variants**: _share_offsets uses inner char offsets for opaque-string fields
+- adapt GenVarLoader to rust-backed seqpro _core.Ragged backend
+- un-skip annot e2e test; guard empty annot; prune dead Rust field
+- floor track-write window at the input region (#233 follow-up)
+- silence E402 for required sys.path bootstrap in bench corpus builder
+- surface bigWig write_track I/O and contig errors as PyRuntimeError instead of panic
+
+### Refactor
+
+- **write**: drop unreachable nomask branch; defensive max init; test empty-group region max
+- **write**: per-region max + concat without awkward
+- **torch**: to_nested_tensor accepts _core.Ragged only
+- **chunked**: detect RaggedVariants by type, not ak.Array
+- **flat-variants**: build RaggedVariants via _core.Ragged
+- **haps**: allele layout returns _core.Ragged; AF filter without awkward
+- **splice**: splice_map as _core.Ragged; drop awkward aggregations
+- **ragged**: prepend_pad_itv via seqpro.rag.concatenate; drop awkward RC helpers
+- **shm**: serialize RaggedVariants via _core buffers (no awkward)
+- **rag-variants**: nested-tensor batch from char-view buffers; drop awkward walker
+- **rag-variants**: pad via seqpro.rag.concatenate (empty-group sentinels)
+- **rag-variants**: rc_ via flat allele-level reverse_complement_masked
+- **rag-variants**: to_packed via record Ragged; drop awkward packing helpers
+- **rag-variants**: record-Ragged wrapper skeleton (construction, access, indexing)
+- make rust the default bigWig write path; delete legacy + switch
+
+### Perf
+
+- vectorize _ragged_stack_tracks (remove per-batch Python loop on interval hot path)
+
 ## v0.34.0 (2026-06-19)
 
 ### Feat
