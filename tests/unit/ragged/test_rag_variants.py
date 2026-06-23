@@ -343,3 +343,83 @@ def test_getitem_array_preserves_ploidy():
         [b"A", b"A"],
         [b"A"],
     ]
+
+
+# ---------------------------------------------------------------------------
+# Task G15: string-key field access + __getattr__ for record fields
+# ---------------------------------------------------------------------------
+
+
+def _make_rv_with_extra_field():
+    """Build a (b=2, p=1, ~v) RaggedVariants with an extra field AF."""
+    var_off = np.array([0, 2, 3], np.int64)
+    char_off = np.array([0, 2, 3, 6], np.int64)
+    alt = Ragged.from_offsets(
+        np.frombuffer(b"ACGTTT", "S1").copy(), (2, 1, None, None), [var_off, char_off]
+    )
+    start = Ragged.from_offsets(np.array([10, 20, 30], np.int32), (2, 1, None), var_off)
+    af = Ragged.from_offsets(
+        np.array([0.1, 0.2, 0.3], np.float32), (2, 1, None), var_off
+    )
+    ilen = Ragged.from_offsets(np.zeros(3, np.int32), (2, 1, None), var_off)
+    return RaggedVariants(alt=alt, start=start, ilen=ilen, AF=af)
+
+
+def test_string_key_returns_field():
+    """rv["field"] must return the raw field Ragged, NOT a RaggedVariants."""
+    var_off = np.array([0, 2, 3], np.int64)
+    char_off = np.array([0, 2, 3, 6], np.int64)
+    alt = Ragged.from_offsets(
+        np.frombuffer(b"ACGTTT", "S1").copy(), (2, 1, None, None), [var_off, char_off]
+    )
+    start = Ragged.from_offsets(np.array([10, 20, 30], np.int32), (2, 1, None), var_off)
+    ilen = Ragged.from_offsets(np.zeros(3, np.int32), (2, 1, None), var_off)
+    rv = RaggedVariants(alt=alt, start=start, ilen=ilen)
+
+    start_via_key = rv["start"]
+    alt_via_key = rv["alt"]
+
+    # Must be a raw Ragged, not a RaggedVariants
+    assert isinstance(start_via_key, Ragged)
+    assert not isinstance(start_via_key, RaggedVariants)
+    assert isinstance(alt_via_key, Ragged)
+    assert not isinstance(alt_via_key, RaggedVariants)
+
+    # Values must match property access
+    assert start_via_key.to_ak().to_list() == rv.start.to_ak().to_list()
+    assert alt_via_key.to_ak().to_list() == rv.alt.to_ak().to_list()
+
+
+def test_extra_field_attribute_access():
+    """rv.AF must work for extra record fields (not defined as explicit properties)."""
+    rv = _make_rv_with_extra_field()
+
+    # rv.AF via __getattr__ should equal rv["AF"] via string-key access
+    assert rv.AF.to_ak().to_list() == rv["AF"].to_ak().to_list()
+
+    # Must be a Ragged (field access), not a RaggedVariants
+    assert isinstance(rv.AF, Ragged)
+
+    # Truly missing attribute must raise AttributeError
+    with pytest.raises(AttributeError, match="no attribute"):
+        _ = rv.nonexistent_field_xyz
+
+
+def test_positional_indexing_unaffected():
+    """int/slice/array indexing must still return RaggedVariants with correct shapes."""
+    rv = _make_rv_b3_p2()
+
+    # int collapses batch axis: (3,2,~v) → (2,~v) i.e. just p and variants
+    sub_int = rv[0]
+    assert isinstance(sub_int, RaggedVariants)
+    assert sub_int.shape[0] == 2  # ploidy preserved as leading dim
+
+    # slice preserves batch axis: (3,2,~v) → (2,2,~v)
+    sub_slice = rv[0:2]
+    assert isinstance(sub_slice, RaggedVariants)
+    assert sub_slice.shape == (2, 2, None)
+
+    # array gather preserves batch axis: (3,2,~v) → (2,2,~v)
+    sub_arr = rv[np.array([2, 0])]
+    assert isinstance(sub_arr, RaggedVariants)
+    assert sub_arr.shape == (2, 2, None)

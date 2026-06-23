@@ -304,8 +304,11 @@ class RaggedVariants:
     def __len__(self) -> int:
         return len(self._rag)
 
-    def __getitem__(self, idx: Any) -> "RaggedVariants":
+    def __getitem__(self, idx: Any) -> Any:
         rag = self._rag
+        # String key → field access: return the raw field Ragged, NOT a RaggedVariants.
+        if isinstance(idx, str):
+            return rag[idx]
         # For multi-leading-dim records, any non-tuple idx hits _getitem_record_rows
         # which collapses leading fixed axes and drops ploidy for slice/array inputs.
         # Convert to a 1-tuple so _getitem_tuple_multidim is used instead, which
@@ -316,6 +319,22 @@ class RaggedVariants:
         else:
             result = rag[idx]
         return RaggedVariants.from_record(result)
+
+    def __getattr__(self, name: str) -> Ragged:
+        # Only called when normal lookup (properties / __slots__) fails.
+        # Access _rag via object.__getattribute__ to avoid infinite recursion
+        # if _rag itself is missing during construction.
+        try:
+            rag = object.__getattribute__(self, "_rag")
+        except AttributeError:
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {name!r}"
+            )
+        if name in rag.fields:
+            return rag[name]
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
 
     def reshape(self, shape: tuple[int | None, ...]) -> "RaggedVariants":
         if isinstance(shape, tuple):
