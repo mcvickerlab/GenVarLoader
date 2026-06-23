@@ -12,7 +12,7 @@ import seqpro.rag as spr
 from seqpro.rag import Ragged, is_rag_dtype
 from seqpro.rag import RDTYPE_co as RDTYPE
 from seqpro.rag import reverse_complement as _sp_reverse_complement
-from seqpro.rag import to_padded as _sp_to_padded
+from .genvarloader import ragged_to_padded
 
 from ._flat import _Flat
 from ._torch import TORCH_AVAILABLE
@@ -292,26 +292,39 @@ class RaggedAnnotatedHaps:
 
 
 def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
-    """Convert this Ragged array to a rectilinear array by right-padding each entry with a value.
-    The ragged axis will be padded to have the maximum length across all entries.
+    """Densify a Ragged into a right-padded array via GVL's seqpro-core Rust bridge.
 
-    Thin pass-through to :func:`seqpro.rag.to_padded` (seqpro 0.13+), a single-pass,
-    parallel flat-buffer densify-and-pad kernel. Output is byte-identical for every
-    dtype/pad gvl uses (S1, int32, float32); seqpro pads to the batch maximum
-    ``rag.lengths.max()`` when no explicit length is given.
-
-    Parameters
-    ----------
-    rag
-        Ragged array to pad.
-    pad_value
-        Value to pad the entries with.
-
-    Returns
-    -------
-        Padded array.
+    Byte-identical to :func:`seqpro.rag.to_padded`; the inner row-copy runs in
+    the shared seqpro-core kernel (Rust->Rust, no Python-seqpro round-trip).
     """
-    return _sp_to_padded(rag, pad_value)
+    if rag._is_record:
+        raise NotImplementedError(
+            "to_padded is not defined on record-layout Ragged arrays."
+        )
+    rag_dim = rag.rag_dim
+    if any(d is not None for d in rag.shape[rag_dim + 1 :]):
+        raise ValueError(
+            f"to_padded requires the ragged axis to be last, got shape {rag.shape}."
+        )
+    if not rag.is_contiguous:
+        rag = spr.to_packed(rag)
+
+    offsets = np.ascontiguousarray(rag.offsets, dtype=np.int64)
+    n_rows = offsets.shape[0] - 1
+    out_len = int(rag.lengths.max()) if n_rows else 0
+
+    rag_data: NDArray[Any] = rag.data  # record layout rejected above
+    dtype = rag_data.dtype
+    out = np.full((n_rows, out_len), pad_value, dtype=dtype)
+    if n_rows and out_len:
+        data_u1 = np.ascontiguousarray(rag_data).reshape(-1).view(np.uint8)
+        out_u1 = out.reshape(-1).view(np.uint8)
+        ragged_to_padded(data_u1, offsets, out_u1, dtype.itemsize, out_len)
+
+    leading = rag.shape[:rag_dim]
+    if leading:
+        out = out.reshape((*leading, out_len))  # pyrefly: ignore[no-matching-overload]
+    return out
 
 
 _COMP = np.frombuffer(bytes.maketrans(b"ACGT", b"TGCA"), np.uint8)
