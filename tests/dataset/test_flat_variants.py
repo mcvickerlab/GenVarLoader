@@ -147,19 +147,33 @@ def test_rc_ploidy2_broadcast():
 
 
 def test_to_packed_contiguous():
-    """to_packed() on a canonical (contiguous, zero-based) RaggedVariants is idempotent
-    at the data level: same allele bytes, same start data."""
+    """to_packed() on a canonical (contiguous, zero-based) RaggedVariants preserves
+    content AND produces zero-based, contiguous offsets.
+
+    Input: b=2, p=1.  Row 0 has variants [ACG, T]; row 1 has [GG].
+    Expected alt content (hand-derived):  [[b'ACG', b'T'], [b'GG']]
+    Expected ref content (hand-derived):  [[b'A', b'CC'], [b'T']]
+    Expected starts (hand-derived):       [1, 5, 9]
+    The packing invariant: offsets start at 0 and the final offset equals the
+    total variant count (2+1=3), confirming the buffer is compact and zero-based.
+    """
     group_off = [0, 2, 3]
     rv = _make_rv(
         [b"ACG", b"T", b"GG"], [b"A", b"CC", b"T"], [1, 5, 9], group_off, ploidy=1
     )
     got = rv.to_packed()
-    # packed should have same byte content
-    assert _rv_alt_list(got) == [list(r) for r in _rv_alt_list(rv)]
-    assert _rv_ref_list(got) == [list(r) for r in _rv_ref_list(rv)]
+
+    # Content: hand-written expected values, NOT derived from calling to_packed().
+    assert _rv_alt_list(got) == [[b"ACG", b"T"], [b"GG"]]
+    assert _rv_ref_list(got) == [[b"A", b"CC"], [b"T"]]
     np.testing.assert_array_equal(
         np.asarray(got.start.data), np.array([1, 5, 9], np.int32)
     )
+
+    # Packing invariant: offsets must be zero-based and compact (last == n_variants).
+    packed_offsets = np.asarray(got.start.offsets)
+    assert packed_offsets[0] == 0, "packed offsets must start at 0"
+    assert packed_offsets[-1] == 3, "packed last offset must equal total variant count"
 
 
 def test_to_packed_ploidy2():

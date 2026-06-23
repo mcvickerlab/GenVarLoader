@@ -177,8 +177,8 @@ class _FlatWindow:
 
     Mirrors _FlatAlleles but `data` holds tokens (configured int dtype), not bytes,
     so to_ragged() drops the byte/bytestring awkward parameters. Both inner axes
-    (variant count and window length) are ragged, so to_ragged() returns a raw
-    awkward Array (seqpro Ragged supports only one ragged axis).
+    (variant count and window length) are ragged, so to_ragged() returns a numeric
+    two-ragged-axis _core.Ragged with shape (b, p, ~v, ~w).
     """
 
     data: NDArray  # tokens (uint8 or int32), flat
