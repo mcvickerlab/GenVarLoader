@@ -131,7 +131,7 @@ _PR: —_
 **Checkpoint:** harness green; baselines recorded in this file.
 
 ### Phase 1 — Ragged primitives + layout (beachhead) ✅
-_PRs: seqpro TBD, GVL TBD_
+_PRs: seqpro [ML4GLand/SeqPro#60](https://github.com/ML4GLand/SeqPro/pull/60), GVL [mcvickerlab/GenVarLoader#240](https://github.com/mcvickerlab/GenVarLoader/pull/240)_
 
 The foundation everything sits on. Realized via the `seqpro-core` shared substrate
 rather than a GVL-in-house reimplementation (see decision 2026-06-23). Bottom-up.
@@ -254,4 +254,4 @@ narrowed to genoray (variant IO) only.
   the shared core is pyo3-free). GVL links seqpro-core via a path dep (editable;
   flip to git/release before shipping) and routes its `to_padded` chokepoint
   through the shared kernel (proof-point, byte-identical parity). Inverts Phase 6
-  (seqpro stays the substrate). PRs: seqpro TBD, GVL TBD.
+  (seqpro stays the substrate). PRs: seqpro ML4GLand/SeqPro#60, GVL mcvickerlab/GenVarLoader#240.
