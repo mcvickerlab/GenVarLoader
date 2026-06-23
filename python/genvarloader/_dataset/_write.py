@@ -13,7 +13,6 @@ if TYPE_CHECKING:
     from .._ragged import RaggedIntervals
     from ._impl import Dataset
 
-import awkward as ak
 import numpy as np
 import polars as pl
 import seqpro as sp
@@ -30,7 +29,8 @@ from natsort import natsorted
 from numpy.typing import NDArray
 from pydantic import BaseModel
 from pydantic_extra_types.semantic_version import SemanticVersion
-from seqpro.rag import Ragged
+import numpy.ma as ma
+from seqpro.rag import Ragged, concatenate as rag_concatenate
 from tqdm.auto import tqdm
 
 from .._atomic import atomic_dir
@@ -897,10 +897,7 @@ def _write_phased_chunked(
             pbar.set_description(desc)
         max_ends.append(region_end)
 
-        var_idxs = ak.flatten(
-            ak.concatenate([a.to_ak() for a in ls_sparse], -1),
-            None,
-        ).to_numpy()
+        var_idxs = rag_concatenate(ls_sparse, axis=-1).to_packed().data
         # (s p)
         lengths = np.stack([a.lengths for a in ls_sparse], 0).sum(0)
 
@@ -1003,9 +1000,24 @@ def _write_from_svar(
         sp_genos = Ragged.from_offsets(svar.genos.data, shape, out.reshape(2, -1))
         # this is fine if there aren't any overlapping variants that could make a v_idx < -1
         # have a further end than v_idx == -1
-        # * calling ak.max() means v_idxs is not a view of svar.genos.data
+        # * np.maximum.at allocates a new array, so v_idxs is not a view of svar.genos.data
         # (r s p ~v) -> (r)
-        v_idxs = ak.max(sp_genos.to_ak(), -1).to_numpy().max((1, 2))
+        _g = sp_genos.to_packed()
+        _flat, _off = _g.data, np.asarray(_g.offsets)
+        _n = _g.shape[0] * _g.shape[1] * _g.shape[2]
+        _lens = _off[1:] - _off[:-1]
+        _empty = _lens == 0
+        _per_group = np.empty(_n, dtype=_flat.dtype)
+        if len(_flat) > 0:
+            # group_ids[i] = which group flat[i] belongs to; np.maximum.at is correct
+            # for non-contiguous / empty groups unlike np.maximum.reduceat
+            _grp_ids = np.repeat(np.arange(_n, dtype=np.intp), _lens)
+            np.maximum.at(_per_group, _grp_ids, _flat)
+        v_idxs = (
+            ma.array(_per_group, mask=_empty)
+            .reshape(_g.shape[0], _g.shape[1], _g.shape[2])
+            .max((1, 2))
+        )
         c_max_ends = max_ends[contig_offset : contig_offset + df.height]
         if v_idxs.mask is np.ma.nomask:
             c_max_ends[:] = v_ends[v_idxs.data]
