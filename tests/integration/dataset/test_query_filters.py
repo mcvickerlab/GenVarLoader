@@ -55,8 +55,12 @@ def haps_ds(svar_ds_path, ref_fasta):
 
 
 def _n_variants(rv) -> int:
-    """Total scalar variant count across a RaggedVariants result."""
-    return int(ak.sum(ak.count(rv.alt, axis=None)))
+    """Total scalar variant count across a RaggedVariants result.
+
+    ``rv.alt`` is an opaque-string _core.Ragged; its ``offsets[-1]`` equals the
+    total number of variant strings (one per position in the ragged tree).
+    """
+    return int(np.asarray(rv.alt.offsets, dtype=np.int64)[-1])
 
 
 def test_no_filter_yields_variants(vars_ds):
@@ -91,8 +95,9 @@ def test_af_empty_result_degenerates(vars_ds):
     """
     rv = vars_ds.with_settings(min_af=0.99, max_af=1.0)[:, :]
     assert _n_variants(rv) == 0
-    # Outer shape preserved: (n_regions, n_samples, ploidy, *var).
-    assert rv.alt.ndim == 4
+    # Outer shape preserved: (n_regions, n_samples, ploidy, ~var).
+    # rv.alt is an opaque-string _core.Ragged with 4 dims (3 fixed + 1 ragged).
+    assert len(rv.alt.shape) == 4
 
 
 def test_exonic_filter_haps_runs_through_query(haps_ds):
@@ -115,11 +120,11 @@ def test_subset_to_samples_reduces_outer_shape(vars_ds):
     one_sample = [vars_ds.samples[0]]
     sub = vars_ds.subset_to(samples=one_sample)
     rv = sub[:, :]
-    # Outer shape: (n_regions, n_samples_sub, ploidy, *var)
-    assert rv.alt.type.length == vars_ds.n_regions
+    # Outer shape: (n_regions, n_samples_sub, ploidy, ~var)
+    # rv.alt is an opaque-string _core.Ragged; shape[0] = n_regions, shape[1] = n_samples.
+    assert rv.alt.shape[0] == vars_ds.n_regions
     # Inner sample axis collapsed to 1.
-    counts = ak.num(rv.alt, axis=1)
-    assert ak.all(counts == 1)
+    assert rv.alt.shape[1] == 1
 
 
 def test_compose_subset_and_af_filter(vars_ds):

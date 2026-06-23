@@ -20,11 +20,8 @@ from typing import TYPE_CHECKING, Literal, TypeVar, cast
 if TYPE_CHECKING:
     from ._flat_variants import DummyVariant
 
-import awkward as ak
 import numpy as np
 import polars as pl
-from awkward.contents import ListOffsetArray, NumpyArray, RegularArray
-from awkward.index import Index
 from genoray._types import DOSAGE_TYPE, POS_TYPE, V_IDX_TYPE
 from genoray.exprs import ILEN
 from loguru import logger
@@ -197,8 +194,8 @@ def _build_allele_layout(
     allele_offsets: NDArray[np.integer],
     group_offsets: NDArray[np.integer],
     ploidy: int,
-) -> ak.Array:
-    """Wrap flat allele bytes + two offset levels into a (b, p, ~v, ~l) ak.Array.
+) -> Ragged:
+    """Wrap flat allele bytes + two offset levels into a (b, p, ~v, ~l) S1 Ragged.
 
     ``data`` is the contiguous allele byte buffer (uint8). ``allele_offsets`` are the
     per-variant byte boundaries (len n_alleles + 1). ``group_offsets`` are the
@@ -210,32 +207,13 @@ def _build_allele_layout(
     buf = np.ascontiguousarray(data)
     if not buf.flags.writeable:
         buf = buf.copy()
-    leaf = NumpyArray(buf, parameters={"__array__": "byte"})
-    l_content = ListOffsetArray(
-        Index(np.asarray(allele_offsets, np.int64)),
-        leaf,
-        parameters={"__array__": "bytestring"},
+    n_groups = group_offsets.size - 1
+    b = n_groups // ploidy
+    return Ragged.from_offsets(
+        buf.view("S1"),
+        (b, ploidy, None, None),
+        [np.asarray(group_offsets, np.int64), np.asarray(allele_offsets, np.int64)],
     )
-    vl_content = ListOffsetArray(Index(np.asarray(group_offsets, np.int64)), l_content)
-    pvl_content = RegularArray(vl_content, ploidy)
-    return ak.Array(pvl_content)
-
-
-def _alt_layout_parts(
-    arr: ak.Array,
-) -> tuple[NDArray[np.uint8], NDArray[np.int64], NDArray[np.int64], int]:
-    """Inverse of :func:`_build_allele_layout`: extract (leaf_uint8, allele_offsets,
-    group_offsets, ploidy) from a (b, p, ~v, ~l) allele ak.Array.
-
-    The returned ``leaf_uint8`` shares memory with ``arr``'s buffer, so mutating it
-    mutates ``arr`` in place.
-    """
-    lay = arr.layout
-    ploidy = int(lay.size)
-    group_offsets = np.asarray(lay.content.offsets, np.int64)
-    allele_offsets = np.asarray(lay.content.content.offsets, np.int64)
-    leaf = np.asarray(lay.content.content.content.data).view(np.uint8)
-    return leaf, allele_offsets, group_offsets, ploidy
 
 
 def _svar_format_fields(svar_dir: Path) -> dict[str, np.dtype]:
@@ -757,8 +735,15 @@ class Haps(Reconstructor[_H]):
                 keep &= geno_afs >= self.min_af
             if self.max_af is not None:
                 keep &= geno_afs <= self.max_af
-            _keep = Ragged.from_offsets(keep, genos.shape, genos.offsets)
-            genos = Ragged(ak.to_regular(genos[_keep].to_ak(), 1)).to_packed()
+            # Filter variants per group using the flat boolean mask.
+            # Build new offsets via cumsum-indexing (handles empty groups correctly).
+            filtered_data = genos.data[keep]
+            keep_int = keep.astype(np.int64)
+            csum = np.concatenate([[np.int64(0)], np.cumsum(keep_int, dtype=np.int64)])
+            new_offsets = csum[np.asarray(genos.offsets, np.int64)]
+            genos = Ragged.from_offsets(
+                filtered_data, genos.shape, new_offsets
+            ).to_packed()
             v_idxs = genos.data
 
         offsets = getattr(self.variants, kind).offsets  # int-typed, length n_variants+1
