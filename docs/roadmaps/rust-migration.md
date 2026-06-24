@@ -117,10 +117,14 @@ py-spy on macOS needs sudo — hand David a bash script, don't invoke it directl
 
 Each phase is one bundled PR and ends in a measure checkpoint.
 
-### Phase 0 — Foundation & harness ⬜
+### Phase 0 — Foundation & harness 🚧
 _PR: —_
 
-- [ ] Restructure `src/` into the target module skeleton (empty modules + `ffi/` seam).
+- [x] Restructure `src/` into the target module skeleton (empty modules + `ffi/` seam).
+      Created `src/ffi/mod.rs` (PyO3 boundary) + `src/intervals.rs` (pure ndarray core)
+      as the first live kernel (`intervals_to_tracks`) through the new seam. Renamed
+      the legacy bigwig `intervals` pyfunction to `bigwig_intervals` to free the name.
+      Commit: `917957b feat(ffi): Rust intervals_to_tracks + ffi seam module`.
 - [ ] Build the reusable differential-test harness: run-both-assert-byte-identical +
       property generators on top of `vcfixture` + numpy.
 - [ ] Wire `cargo test` into pixi dev tasks.
@@ -245,6 +249,12 @@ narrowed to genoray (variant IO) only.
   genvarformer CPU 371 passed. Note: this was a Python-level migration onto seqpro's
   existing Rust-backed `_core.Ragged`; the Rust-crate rewrite of the ragged kernels
   themselves (Phase 1 beachhead) is still pending. PR: TBD
+- 2026-06-23 (Phase 0): Created `src/ffi/` PyO3 seam + ported `intervals_to_tracks`
+  numba kernel to Rust (`src/intervals.rs`, pure ndarray, sequential, byte-identical
+  contract). Renamed legacy `intervals` pyfunction to `bigwig_intervals` to avoid
+  module name collision. 5 new cargo unit tests pass (basic paint, empty intervals,
+  end-clamp, break-on-start>=length, multi-query disjoint). Smoke import confirmed:
+  `[0. 2. 2. 0. 0.]`. This is the first real kernel through the new `ffi/` seam.
 - 2026-06-23: seqpro is the shared Rust ragged substrate. Extracted a pyo3-free
   `seqpro-core` rlib (crates/seqpro-core) owning a borrowed `Ragged` layout +
   ops; ported its last two numba kernels (`to_padded`, `reverse_complement`) to
