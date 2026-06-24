@@ -97,10 +97,13 @@ py310–313 × linux/macOS as the Rust surface grows.
 > getitem baseline captured on Carter (2026-06-23, gvl 0.35.0, `GVL_BACKEND` unset →
 > `intervals_to_tracks` default `rust`). `profile.py` now prints wall-clock + throughput;
 > py-spy needs no sudo on Linux (`ptrace_scope=0`). Secondary read paths on the same corpus:
-> **haplotypes 123.9 batch/s** (8.069 ms/batch), peak RSS 3.532 GB. **variants** mode is blocked
-> by a *separate, pre-existing* bug (`_FlatVariants` has no `to_fixed` in the fixed-length variants
-> read path) — unrelated to Phase 0; tracked separately. Peak RSS (~3.53 GB both modes) is
-> dominated by the numba/llvmlite JIT baseline (~3.2 GB), matching the bigWig write slice.
+> **haplotypes 123.9 batch/s** (8.069 ms/batch), peak RSS 3.532 GB; **variants 145.3 batch/s**
+> (6.884 ms/batch, variable-length — variants are ragged by definition, so `with_len` doesn't
+> apply). Peak RSS (~3.53 GB) is dominated by the numba/llvmlite JIT baseline (~3.2 GB), matching
+> the bigWig write slice. (Aside: a *mixed* `with_seqs("variants").with_tracks(...).with_len(L)`
+> query — fixed tracks alongside necessarily-ragged variants — currently `AttributeError`s because
+> the fixed-length exemption in `_query.py` checks `RaggedVariants` while the value is still
+> `_FlatVariants`; a one-line guard, not a Phase 0 gate.)
 >
 > The realistic corpus rebuild surfaced a **filtered-PGEN write bug**: `build_realistic.py` now
 > drops symbolic/breakend/multi-allelic variants at the **plink2** stage (`drop_unsupported_variants`)

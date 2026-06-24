@@ -36,7 +36,10 @@ def build(ds, mode: str):
     if mode == "tracks":
         return ds.with_seqs(None).with_tracks("read-depth").with_len(SEQLEN)
     if mode == "variants":
-        return ds.with_seqs("variants").with_len(SEQLEN)
+        # Variants are ragged by definition (allele lengths vary), so they are
+        # queried variable-length — `with_len` only makes sense for the seq/track
+        # outputs, which this mode doesn't request.
+        return ds.with_seqs("variants")
     raise SystemExit(f"unknown mode {mode!r}")
 
 
