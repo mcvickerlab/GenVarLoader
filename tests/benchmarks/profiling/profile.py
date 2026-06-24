@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from pathlib import Path
 
 # Force single numba thread BEFORE importing numba-backed code.
@@ -67,9 +68,20 @@ def main() -> None:
         f"mode={args.mode} threads={os.environ['NUMBA_NUM_THREADS']} "
         f"batches={args.n_batches} batch={n}"
     )
-    for i in range(args.n_batches + BURN_IN):
+    # Burn-in (numba JIT warm-up, cache priming) is excluded from the timing.
+    for _ in range(BURN_IN):
         _ = ds[regions, samples]
-    print("done")
+    t0 = time.perf_counter()
+    for _ in range(args.n_batches):
+        _ = ds[regions, samples]
+    wall = time.perf_counter() - t0
+    batches_per_s = args.n_batches / wall
+    print(
+        f"done wall={wall:.3f}s "
+        f"throughput={batches_per_s:.1f} batch/s "
+        f"({wall / args.n_batches * 1e3:.3f} ms/batch, "
+        f"{batches_per_s * n:.0f} item/s)"
+    )
 
 
 if __name__ == "__main__":

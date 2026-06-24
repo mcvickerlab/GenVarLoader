@@ -92,13 +92,30 @@ py310–313 × linux/macOS as the Rust surface grows.
 | `gvl.write()` wall-clock | 1kg chr21/chr22 (100 regions), macOS M-series | 1.143 s | ✅ |
 | `gvl.write()` peak RSS | 1kg chr21/chr22 (100 regions), macOS M-series | 3.593 GB | ✅ |
 | `gvl.update()` wall-clock | 1kg chr21/chr22 (vcfixture tier) | _TBD_ (smoke only: 0.022 s for a 60-row synthetic annot track — not a real workload) | ⬜ |
-| `Dataset.__getitem__` throughput (tracks mode = `intervals_to_tracks` read path) | `chr22_geuv` realistic bench (`build_realistic.py`) + py-spy/memray | _TBD_ — blocked on the `/carter` (`GVL_BENCH_SOURCE`) corpus source + macOS sudo; handed to David | ⬜ |
+| `Dataset.__getitem__` throughput (tracks mode = `intervals_to_tracks` read path) | `chr22_geuv` realistic bench (165 regions × 5 samples, chr22, read-depth; `SEQLEN=16384`, `BATCH=32`, 2000 batches, `NUMBA_NUM_THREADS=1`), Carter HPC (AMD EPYC 7543, linux-64) | **169.9 batch/s** (5.886 ms/batch, ~5.4k item/s); peak RSS **3.531 GB** | ✅ |
 
-> Driver scripts landed: `tests/benchmarks/profiling/profile_write.py` (`--op write`/`update`) and
-> `tests/benchmarks/profiling/baseline_getitem.sh` (py-spy hand-off). To finish the getitem rows:
-> build the realistic corpus (`pixi run -e dev python tests/benchmarks/data/build_realistic.py`,
-> needs `/carter` or `GVL_BENCH_SOURCE`), then `pixi run -e dev memray-tracks` (+`memray-haps`,
-> `memray-variants`) with `memray stats … | grep peak`, and `sudo bash …/baseline_getitem.sh`.
+> getitem baseline captured on Carter (2026-06-23, gvl 0.35.0, `GVL_BACKEND` unset →
+> `intervals_to_tracks` default `rust`). `profile.py` now prints wall-clock + throughput;
+> py-spy needs no sudo on Linux (`ptrace_scope=0`). Secondary read paths on the same corpus:
+> **haplotypes 123.9 batch/s** (8.069 ms/batch), peak RSS 3.532 GB. **variants** mode is blocked
+> by a *separate, pre-existing* bug (`_FlatVariants` has no `to_fixed` in the fixed-length variants
+> read path) — unrelated to Phase 0; tracked separately. Peak RSS (~3.53 GB both modes) is
+> dominated by the numba/llvmlite JIT baseline (~3.2 GB), matching the bigWig write slice.
+>
+> The realistic corpus rebuild surfaced a **filtered-PGEN write bug**: `build_realistic.py` now
+> drops symbolic/breakend/multi-allelic variants at the **plink2** stage (`drop_unsupported_variants`)
+> instead of via a genoray `filter=`, because a filtered genoray PGEN returns unfiltered-space
+> `var_idxs()` while `_index` is the filtered table, and `gvl.write`'s `_pgen_region_chunks` mixes
+> the two (IndexError + likely mis-indexed stored variants). Filed as
+> [d-laub/genoray#69](https://github.com/d-laub/genoray/issues/69); pre-filtering keeps both
+> coordinate spaces aligned.
+>
+> Driver scripts landed: `tests/benchmarks/profiling/profile_write.py` (`--op write`/`update`),
+> `tests/benchmarks/profiling/profile.py` (getitem; prints throughput), and
+> `tests/benchmarks/profiling/baseline_getitem.sh` (py-spy speedscope, no sudo on Linux).
+> Reproduce: build the corpus (`pixi run -e dev python tests/benchmarks/data/build_realistic.py`,
+> needs `/carter` or `GVL_BENCH_SOURCE`), then `pixi run -e dev python …/profile.py --mode tracks`
+> for throughput and `pixi run -e dev memray-tracks` (+`memray-haps`) with `memray stats …`.
 
 Benchmark sources: dataloader bench lives on the `prefetching-dataloader` branch
 ([[project_dataloader_bench]]); fixtures from vcfixture ([[project_vcfixture_migration]]).
@@ -123,7 +140,7 @@ py-spy on macOS needs sudo — hand David a bash script, don't invoke it directl
 
 Each phase is one bundled PR and ends in a measure checkpoint.
 
-### Phase 0 — Foundation & harness 🚧
+### Phase 0 — Foundation & harness ✅
 _PR: #241_
 
 - [x] Stand up the `ffi/` seam + first lazily-grown domain module (NOT an empty
@@ -148,14 +165,19 @@ _PR: #241_
       (`genvarloader-0.35.0-cp310-abi3-macosx_11_0_arm64.whl` builds clean; the
       py310–313 × linux/macOS release matrix is release-gated and unaffected by the
       pure-Rust additions). Commit `20cd4ef`.
-- [~] Capture baselines (table above): `write()` wall-clock + peak RSS captured;
-      `update()` (real workload) and `__getitem__` (tracks-mode = `intervals_to_tracks`
-      read path) throughput pending David's run (needs the `/carter` corpus source +
-      macOS sudo). Driver scripts landed (commit `0be2d67`).
+- [x] Capture baselines (table above): `write()` wall-clock + peak RSS captured;
+      `__getitem__` tracks-mode (`intervals_to_tracks` read path) throughput +
+      peak RSS captured on Carter (169.9 batch/s, 3.531 GB; haplotypes secondary
+      123.9 batch/s). Driver scripts landed (commit `0be2d67`); `profile.py` now
+      prints throughput, and the `chr22_geuv` corpus rebuild fixed a stale (0.25.0,
+      truncated-tracks) artifact + a filtered-PGEN write bug (now pre-filtered at
+      the plink2 stage; filed on genoray). The `update()` row stays ⬜: the only
+      landed driver runs a 60-row synthetic annot (smoke, not a real workload) — a
+      real write-path update baseline is deferred to Phase 4.
 
-**Checkpoint:** harness green; foundation + proof-point landed; getitem baseline
-row pending David's run (see Baseline metrics table). Marker stays 🚧 until those
-rows are filled.
+**Checkpoint:** harness green; foundation + proof-point landed; getitem (gate)
+baseline captured on Carter. `update()` remains a deferred smoke-only row (real
+workload is a Phase 4 write-path concern, not a Phase 0 gate).
 
 ### Phase 1 — Ragged primitives + layout (beachhead) ✅
 _PRs: seqpro [ML4GLand/SeqPro#60](https://github.com/ML4GLand/SeqPro/pull/60), GVL [mcvickerlab/GenVarLoader#240](https://github.com/mcvickerlab/GenVarLoader/pull/240)_
@@ -303,7 +325,8 @@ narrowed to genoray (variant IO) only.
   unchanged). Routed the production call site through dispatch (default `rust`; numba
   retained as parity reference). 5 cargo unit tests + a 100-example hypothesis parity
   gate + the read-path backstop all green; abi3 wheel builds; `gvl.write` 1kg baseline
-  captured (1.143 s / 3.593 GB); getitem/tracks baseline pending David's `/carter` run.
+  captured (1.143 s / 3.593 GB); getitem/tracks baseline captured on Carter
+  (169.9 batch/s, 3.531 GB peak) — Phase 0 ✅.
   Commits: `64e0836` `917957b` `ec4c15b` `ef4f91a` `ad82b31` `20cd4ef` `0be2d67`.
   Spec: docs/superpowers/specs/2026-06-23-rust-migration-phase-0-foundation-design.md.
 - 2026-06-23: seqpro is the shared Rust ragged substrate. Extracted a pyo3-free
