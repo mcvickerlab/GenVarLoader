@@ -340,12 +340,18 @@ pub fn reconstruct_haplotypes_from_sparse(
         let out_s = out_offsets[k] as usize;
         let out_e = out_offsets[k + 1] as usize;
 
-        // SAFETY: each k accesses a non-overlapping [out_s..out_e] slice
-        // (out_offsets is monotonically non-decreasing). The loop is serial.
+        // SAFETY: `out_offsets` is required by the calling contract to be monotonically
+        // non-decreasing, so consecutive (out_s, out_e) pairs are strictly non-overlapping
+        // address ranges within the same allocation.  Because the loop is serial there are
+        // no concurrent borrows, so constructing a `&mut [u8]` from each disjoint sub-range
+        // is free of aliasing UB.
         let out_chunk =
             unsafe { std::slice::from_raw_parts_mut(out_raw.add(out_s), out_e - out_s) };
         let out_view = ArrayViewMut1::from(out_chunk);
 
+        // SAFETY: same invariant as out_chunk — `out_offsets` non-decreasing guarantees
+        // each [out_s..out_e] is a disjoint sub-range; serial loop prevents concurrent
+        // aliasing.
         let av_view: Option<ArrayViewMut1<i32>> = av_raw.map(|p| {
             let chunk = unsafe {
                 std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s)
@@ -353,6 +359,9 @@ pub fn reconstruct_haplotypes_from_sparse(
             ArrayViewMut1::from(chunk)
         });
 
+        // SAFETY: same invariant as out_chunk — `out_offsets` non-decreasing guarantees
+        // each [out_s..out_e] is a disjoint sub-range; serial loop prevents concurrent
+        // aliasing.
         let ap_view: Option<ArrayViewMut1<i32>> = ap_raw.map(|p| {
             let chunk = unsafe {
                 std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s)
@@ -919,8 +928,10 @@ mod tests {
     }
 
     #[test]
-    fn batch_two_queries_two_haplotypes() {
-        // A trivial batch: 2 queries × 1 haplotype, no variants.
+    fn batch_correctness_two_queries() {
+        // Correctness check for the batch driver: 2 queries × 1 haplotype, no variants.
+        // The batch driver is intentionally serial-only — rayon parallelism is omitted
+        // because Python's GIL makes intra-call parallelism useless in practice.
         // Expected: each out chunk is just the corresponding ref slice.
         let reference = b"ACGTACGTACGT";
         let ref_ = arr1(reference.as_ref());
@@ -964,5 +975,68 @@ mod tests {
 
         assert_eq!(&out.as_slice().unwrap()[0..4], b"ACGT", "first region");
         assert_eq!(&out.as_slice().unwrap()[4..8], b"ACGT", "second region");
+    }
+
+    #[test]
+    fn batch_correctness_with_snp() {
+        // Correctness check for the batch driver with a SNP to exercise the
+        // variant-application path (not just reference-copy).
+        // Reference: "ACGTACGT" (8 bp, contig 0)
+        // Two regions: [0,4) and [4,8).
+        // One SNP at ref position 1 (C→T), present in haplotype 0 of query 0 only.
+        // Expected region 0: "ATGT" (SNP applied), region 1: "ACGT" (no variant).
+        let reference = b"ACGTACGT";
+        let ref_ = arr1(reference.as_ref());
+        let ref_offsets = arr1(&[0i64, 8]);
+
+        // One SNP: position 1, iLen 0 (substitution), alt allele b'T'
+        let v_starts = arr1::<i32>(&[1]);
+        let ilens = arr1::<i32>(&[0]);
+        let alt_alleles = arr1::<u8>(b"T");
+        // alt_offsets: [start_of_allele_0, end_of_allele_0] = [0, 1]
+        let alt_offsets = arr1(&[0i64, 1]);
+
+        // Two queries, one haplotype each
+        let regions = ndarray::arr2(&[[0i32, 0, 4], [0, 4, 8]]);
+        let shifts = ndarray::arr2(&[[0i32], [0]]);
+
+        // Query 0, hap 0: has the SNP at variant index 0
+        // Query 1, hap 0: no variants
+        // geno_offset_idx[query, hap] → index into geno_o_starts/stops
+        let geno_offset_idx = ndarray::arr2(&[[0i64], [1]]);
+        // For query 0 hap 0: variant block spans geno_v_idxs[0..1] → [0]
+        // For query 1 hap 0: empty block (start == stop)
+        let geno_o_starts = arr1(&[0i64, 1]);
+        let geno_o_stops = arr1(&[1i64, 1]);
+        let geno_v_idxs = arr1::<i32>(&[0]); // variant index 0 = the SNP
+
+        let out_offsets = arr1(&[0i64, 4, 8]);
+        let pad_char = b'N';
+
+        let mut out = ndarray::Array1::<u8>::from_elem(8, pad_char);
+        super::reconstruct_haplotypes_from_sparse(
+            out.view_mut(),
+            out_offsets.view(),
+            regions.view(),
+            shifts.view(),
+            geno_offset_idx.view(),
+            geno_o_starts.view(),
+            geno_o_stops.view(),
+            geno_v_idxs.view(),
+            v_starts.view(),
+            ilens.view(),
+            alt_alleles.view(),
+            alt_offsets.view(),
+            ref_.view(),
+            ref_offsets.view(),
+            pad_char,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(&out.as_slice().unwrap()[0..4], b"ATGT", "region 0 with SNP applied");
+        assert_eq!(&out.as_slice().unwrap()[4..8], b"ACGT", "region 1 reference-only");
     }
 }
