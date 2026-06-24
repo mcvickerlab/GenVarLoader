@@ -518,7 +518,7 @@ def _choose_exonic_variants_numba(
         ref_end: int = ends[query]
         for hap in nb.prange(ploidy):
             o_idx = geno_offset_idx[query, hap]
-            # Mirror filter_af's (2, n_slices) indexing (sibling kernel below).
+            # Handle both 1-D (n+1,) and 2-D (2, n_slices) geno_offsets forms.
             if geno_offsets.ndim == 1:
                 o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
             else:
@@ -596,61 +596,3 @@ def _choose_exonic_variants(
             keep[v] = True
         else:
             keep[v] = False
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def filter_af(
-    geno_offset_idx: NDArray[np.integer],
-    geno_offsets: NDArray[np.integer],
-    geno_v_idxs: NDArray[np.integer],
-    afs: NDArray[np.number],
-    min_af: float | None,
-    max_af: float | None,
-) -> tuple[NDArray[np.bool_], NDArray[OFFSET_TYPE]]:
-    """Filter variants based on allele frequency, marking them to keep or not."""
-
-    batch_size, ploidy = geno_offset_idx.shape
-
-    if geno_offsets.ndim == 1:
-        keep_offsets = geno_offsets.astype(OFFSET_TYPE)
-        n_variants = geno_offsets[-1]
-    else:
-        # (2, n_slices)
-        n_vars_per_slice = geno_offsets[1] - geno_offsets[0]
-        n_slices = len(n_vars_per_slice)
-        keep_offsets = np.empty(n_slices + 1, OFFSET_TYPE)
-        keep_offsets[0] = 0
-        acc = OFFSET_TYPE(0)
-        for i in range(n_slices):
-            acc += n_vars_per_slice[i]
-            keep_offsets[i + 1] = acc
-        n_variants = n_vars_per_slice.sum()
-
-    keep = np.full(n_variants, True, np.bool_)
-
-    if min_af is None and max_af is None:
-        return keep, keep_offsets
-
-    for query in nb.prange(batch_size):
-        for hap in range(ploidy):
-            # index for full sparse genos
-            o_idx = geno_offset_idx[query, hap]
-            if geno_offsets.ndim == 1:
-                o_s, o_e = geno_offsets[o_idx], geno_offsets[o_idx + 1]
-            else:
-                o_s, o_e = geno_offsets[:, o_idx]
-
-            k_idx = query * ploidy + hap
-            k_s, k_e = keep_offsets[k_idx], keep_offsets[k_idx + 1]
-
-            for v, k in zip(range(o_s, o_e), range(k_s, k_e)):
-                v_idx = geno_v_idxs[v]
-                v_af = afs[v_idx]
-
-                if min_af is not None:
-                    keep[k] &= v_af >= min_af
-
-                if max_af is not None:
-                    keep[k] &= v_af <= max_af
-
-    return keep, keep_offsets

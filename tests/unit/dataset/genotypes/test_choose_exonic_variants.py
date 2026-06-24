@@ -6,8 +6,7 @@ The function used to JIT-fail with
 ``geno_offsets[o_idx]`` (returning a length-2 row, not scalars) and
 then sliced ``geno_v_idxs[o_s:o_e]`` with those rows.
 
-Mirror the fix in the first loop + the sibling ``filter_af`` kernel
-which both branch on ``geno_offsets.ndim == 1``.
+Mirror the fix applied in the first loop, which branches on ``geno_offsets.ndim == 1``.
 """
 
 from __future__ import annotations
