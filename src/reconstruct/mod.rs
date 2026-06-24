@@ -616,6 +616,135 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Case 11: allele_start_idx == v_len → early-continue branch
+    //
+    // Exercises numba _genotypes.py:390-401 / Rust mod.rs:121-131:
+    //   the "else" shift sub-branch where allele_start_idx == v_len, causing
+    //   ref_idx to advance to v_ref_end and the variant to be skipped.
+    //
+    // Hand-derivation:
+    //   ref = [1..8], ref_start=0, shift=4, out_len=4
+    //   SNP at v_pos=3, ilen=0, allele=[88] (v_len=1)
+    //   --- shift handling (shifted=0 < shift=4) ---
+    //   ref_shift_dist = v_pos - ref_idx = 3 - 0 = 3
+    //   check 1: shifted + ref_shift_dist + v_len = 0+3+1 = 4  → NOT < 4, skip
+    //   check 2: shifted + ref_shift_dist = 3                  → NOT >= 4, skip
+    //   else: allele_start_idx = shift - shifted - ref_shift_dist = 4-0-3 = 1
+    //         shifted = 4  (numba:391 / Rust:124)
+    //         allele_start_idx(1) == v_len(1)                  → TRUE
+    //         ref_idx = v_ref_end = 3 - min(0,0) + 1 = 4
+    //         continue  (numba:397-401 / Rust:126-130)
+    //   --- after loop ---
+    //   shifted(4) == shift(4) → no extra advance
+    //   Final fill: ref_idx=4, unfilled=4, writable_ref=min(4,8-4)=4
+    //   out = ref[4..8] = [5,6,7,8]
+    // -------------------------------------------------------------------------
+    #[test]
+    fn allele_start_idx_eq_v_len_continue() {
+        let (out, _av, _ap) = run(
+            &[0],               // v_idxs: only variant 0
+            &[3],               // v_starts: variant 0 at pos 3
+            &[0],               // ilens: SNP, ilen=0
+            4,                  // shift=4
+            &[88u8],            // alt_allele
+            &[0i64, 1],         // alt_offsets
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            0,                  // ref_start
+            4,                  // out_len
+            0,                  // pad_char
+            None,
+            false,
+        );
+        // allele_start_idx(1) == v_len(1): variant skipped, ref_idx→4
+        // shifted=4 after continue, no further shift; final fills ref[4..8]=[5,6,7,8]
+        assert_eq!(out, vec![5, 6, 7, 8]);
+    }
+
+    // -------------------------------------------------------------------------
+    // Case 12: skip_variant_not_enough_distance
+    //
+    // Exercises numba _genotypes.py:377-380 / Rust mod.rs:108-112:
+    //   the "not enough distance" branch where shifted + ref_shift_dist + v_len < shift,
+    //   causing the variant to be skipped entirely without advancing ref_idx.
+    //
+    // Hand-derivation:
+    //   ref = [1..15], ref_start=0, shift=10, out_len=3
+    //   SNP at v_pos=3, ilen=0, allele=[77] (v_len=1)
+    //   --- shift handling (shifted=0 < shift=10) ---
+    //   ref_shift_dist = v_pos - ref_idx = 3 - 0 = 3
+    //   check 1: shifted + ref_shift_dist + v_len = 0+3+1 = 4 < 10  → TRUE
+    //            continue  (numba:379-380 / Rust:110-112)
+    //   --- after loop ---
+    //   shifted(0) < shift(10) → ref_idx += 10-0 = 10, min(10,15)=10, shifted=10
+    //   Final fill: ref_idx=10, unfilled=3, writable_ref=min(3,15-10)=3
+    //   out = ref[10..13] = [11,12,13]
+    // -------------------------------------------------------------------------
+    #[test]
+    fn skip_variant_not_enough_distance() {
+        let ref_: Vec<u8> = (1u8..=15).collect();
+        let (out, _av, _ap) = run(
+            &[0],               // v_idxs: only variant 0
+            &[3],               // v_starts: variant 0 at pos 3
+            &[0],               // ilens: SNP, ilen=0
+            10,                 // shift=10
+            &[77u8],            // alt_allele (never used)
+            &[0i64, 1],         // alt_offsets
+            &ref_,
+            0,                  // ref_start
+            3,                  // out_len
+            0,                  // pad_char
+            None,
+            false,
+        );
+        // variant skipped (0+3+1=4 < 10); after loop ref_idx=10; final fills [11,12,13]
+        assert_eq!(out, vec![11, 12, 13]);
+    }
+
+    // -------------------------------------------------------------------------
+    // Case 13: keep_mask_excludes_variant
+    //
+    // Exercises numba _genotypes.py:351-352 / Rust mod.rs:72-75:
+    //   keep=[false, true] so variant 0 is skipped and variant 1 is applied.
+    //
+    // Hand-derivation:
+    //   ref = [1,2,3,4,5], ref_start=0, shift=0, out_len=5
+    //   variant 0: pos=1, ilen=0, allele=[55]
+    //   variant 1: pos=3, ilen=0, allele=[99]
+    //   keep = [false, true]
+    //   --- v=0: keep[0]=false → continue (skipped entirely) ---
+    //   --- v=1: keep[1]=true → process ---
+    //   ref_len = v_pos(3) - ref_idx(0) = 3 → write ref[0..3]=[1,2,3]
+    //   allele=[99], writable_length=1 → write 99, out_idx=4
+    //   ref_idx = v_ref_end = 3 - min(0,0) + 1 = 4
+    //   Final fill: ref_idx=4, unfilled=1, writable_ref=min(1,5-4)=1
+    //   out[4] = ref[4] = 5
+    //   out = [1,2,3,99,5]
+    //   variant 0 (at pos 1, allele 55) NOT applied; variant 1 IS applied at pos 3.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn keep_mask_excludes_variant() {
+        let (out, av, _ap) = run(
+            &[0, 1],            // v_idxs: variants 0 and 1
+            &[1, 3],            // v_starts: variant 0 at pos 1, variant 1 at pos 3
+            &[0, 0],            // ilens: both SNPs
+            0,                  // shift=0
+            &[55u8, 99],        // alleles: 55 for v0, 99 for v1
+            &[0i64, 1, 2],      // alt_offsets
+            &[1, 2, 3, 4, 5],
+            0,                  // ref_start
+            5,                  // out_len
+            0,                  // pad_char
+            Some(&[false, true]), // keep mask: skip v0, apply v1
+            true,               // annotate
+        );
+        // variant 0 (pos=1, allele=55) excluded by keep mask: ref[1] NOT replaced
+        // variant 1 (pos=3, allele=99) applied: ref[3] replaced by 99
+        assert_eq!(out, vec![1, 2, 3, 99, 5]);
+        // annot_v_idxs: positions 0..3 are ref (-1), position 3 is variant 1, position 4 is ref (-1)
+        assert_eq!(av, vec![-1, -1, -1, 1, -1]);
+    }
+
+    // -------------------------------------------------------------------------
     // Case 10: annotated vs non-annotated produce identical out bytes
     // ref = [1,2,3,4,5], ref_start=0, variant at pos=2 (SNP)
     // -------------------------------------------------------------------------
