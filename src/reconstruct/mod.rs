@@ -930,8 +930,11 @@ mod tests {
     #[test]
     fn batch_correctness_two_queries() {
         // Correctness check for the batch driver: 2 queries × 1 haplotype, no variants.
-        // The batch driver is intentionally serial-only — rayon parallelism is omitted
-        // because Python's GIL makes intra-call parallelism useless in practice.
+        // The batch driver is intentionally serial-only: parity is this phase's only gate
+        // (throughput is recorded, not gated); the rayon parallel path is deferred to the
+        // throughput/fusion optimization pass.  The out/annotation buffers are written by
+        // disjoint per-(query,hap) slices, so this loop is rayon-parallelizable later via
+        // the same disjoint-chunk split used in src/reference/mod.rs get_reference.
         // Expected: each out chunk is just the corresponding ref slice.
         let reference = b"ACGTACGTACGT";
         let ref_ = arr1(reference.as_ref());
