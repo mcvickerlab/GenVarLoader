@@ -13,7 +13,6 @@ Prints: op=... corpus=1kg-chr21chr22 wall=<s>
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
 import tempfile
 import time

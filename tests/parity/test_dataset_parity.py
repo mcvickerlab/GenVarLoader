@@ -80,7 +80,9 @@ def test_track_getitem_identical_across_backends(tmp_path, monkeypatch):
     data_r, off_r = _read_track_array(ds, r_idx, s_idx)
 
     # --- byte-identical comparison ---
-    np.testing.assert_array_equal(off_n, off_r, err_msg="offsets differ across backends")
+    np.testing.assert_array_equal(
+        off_n, off_r, err_msg="offsets differ across backends"
+    )
     assert data_n.dtype == data_r.dtype == np.float32, (
         f"dtype mismatch: numba={data_n.dtype}, rust={data_r.dtype}"
     )

@@ -31,7 +31,9 @@ def intervals_to_tracks_inputs(draw):
         out_lengths.append(length)
 
         m = draw(st.integers(min_value=0, max_value=6))
-        cur = qstart + draw(st.integers(min_value=0, max_value=10))  # first start >= qstart
+        cur = qstart + draw(
+            st.integers(min_value=0, max_value=10)
+        )  # first start >= qstart
         for _ in range(m):
             width = draw(st.integers(min_value=1, max_value=20))
             itv_starts_all.append(cur)
@@ -39,7 +41,9 @@ def intervals_to_tracks_inputs(draw):
             itv_values_all.append(
                 draw(st.floats(width=32, allow_nan=False, allow_infinity=False))
             )
-            cur = cur + width + draw(st.integers(min_value=0, max_value=10))  # gap -> non-overlap
+            cur = (
+                cur + width + draw(st.integers(min_value=0, max_value=10))
+            )  # gap -> non-overlap
         counts.append(m)
 
     offset_idxs = np.arange(n_queries, dtype=np.int64)
@@ -50,4 +54,12 @@ def intervals_to_tracks_inputs(draw):
     itv_offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
     out_offsets = np.concatenate([[0], np.cumsum(out_lengths)]).astype(np.int64)
 
-    return offset_idxs, starts, itv_starts, itv_ends, itv_values, itv_offsets, out_offsets
+    return (
+        offset_idxs,
+        starts,
+        itv_starts,
+        itv_ends,
+        itv_values,
+        itv_offsets,
+        out_offsets,
+    )

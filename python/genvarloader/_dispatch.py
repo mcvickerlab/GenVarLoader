@@ -42,9 +42,7 @@ def get(name: str) -> Callable:
     if backend is None:
         backend = entry["default"]  # type: ignore[assignment]
     elif backend not in ("numba", "rust"):
-        raise ValueError(
-            f"GVL_BACKEND must be 'numba' or 'rust', got {backend!r}"
-        )
+        raise ValueError(f"GVL_BACKEND must be 'numba' or 'rust', got {backend!r}")
     return entry[backend]  # type: ignore[return-value]
 
 

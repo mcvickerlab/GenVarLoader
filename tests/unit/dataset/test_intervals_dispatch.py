@@ -12,7 +12,15 @@ def _known_case():
     itv_values = np.array([2.0], np.float32)
     itv_offsets = np.array([0, 1], np.int64)
     out_offsets = np.array([0, 5], np.int64)
-    return offset_idxs, starts, itv_starts, itv_ends, itv_values, itv_offsets, out_offsets
+    return (
+        offset_idxs,
+        starts,
+        itv_starts,
+        itv_ends,
+        itv_values,
+        itv_offsets,
+        out_offsets,
+    )
 
 
 @pytest.mark.parametrize("backend", ["numba", "rust"])
@@ -43,4 +51,5 @@ def test_wrapper_matches_known_result(backend, monkeypatch):
 
 def test_wrapper_is_registered():
     from genvarloader import _dispatch
+
     assert "intervals_to_tracks" in _dispatch.registered_names()
