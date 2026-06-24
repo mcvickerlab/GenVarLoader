@@ -201,24 +201,42 @@ pub fn reconstruct_haplotype_from_sparse(
     let unfilled_length = length - out_idx;
     if unfilled_length > 0 {
         // fill with reference sequence
+        // Mirror numba: `writable_ref = min(unfilled_length, len(ref) - ref_idx)`.
+        // When `ref_idx` has advanced past the contig end (e.g. a DEL whose
+        // ref_end exceeds contig_len), `len(ref) - ref_idx` is negative.
+        // In numpy, `out[out_idx : out_idx + negative] = …` is a no-op (empty
+        // slice), and the subsequent right-pad starts from
+        // `out_end_idx = out_idx + writable_ref` which can be < `out_idx`.
+        // We clamp `out_end_idx` to 0 (never negative address) to reproduce
+        // the same right-pad range.
         let writable_ref = unfilled_length.min(ref_.len() as i64 - ref_idx);
-        let out_end_idx = out_idx + writable_ref;
-        let ref_end_idx = ref_idx + writable_ref;
-        {
-            let os = out_idx as usize;
-            let oe = out_end_idx as usize;
-            let rs = ref_idx as usize;
-            let re = ref_end_idx as usize;
-            out.slice_mut(s![os..oe]).assign(&ref_.slice(s![rs..re]));
-            if let Some(ref mut av) = annot_v_idxs {
-                av.slice_mut(s![os..oe]).fill(-1);
-            }
-            if let Some(ref mut ap) = annot_ref_pos {
-                for (j, pos) in (os..oe).zip(rs..re) {
-                    ap[j] = pos as i32;
+        // Positive: copy ref bytes from ref_idx. Zero or negative: no-op.
+        let out_end_idx = if writable_ref > 0 {
+            let oe = out_idx + writable_ref;
+            let re = ref_idx + writable_ref;
+            {
+                let os = out_idx as usize;
+                let oe_u = oe as usize;
+                let rs = ref_idx as usize;
+                let re_u = re as usize;
+                out.slice_mut(s![os..oe_u]).assign(&ref_.slice(s![rs..re_u]));
+                if let Some(ref mut av) = annot_v_idxs {
+                    av.slice_mut(s![os..oe_u]).fill(-1);
+                }
+                if let Some(ref mut ap) = annot_ref_pos {
+                    for (j, pos) in (os..oe_u).zip(rs..re_u) {
+                        ap[j] = pos as i32;
+                    }
                 }
             }
-        }
+            oe
+        } else {
+            // writable_ref <= 0: ref exhausted or ref_idx past contig.
+            // out_end_idx = out_idx + writable_ref, clamped to 0 to stay
+            // in-bounds (matches numpy: `out[out_end_idx:]` where
+            // out_end_idx >= 0).
+            (out_idx + writable_ref).max(0)
+        };
 
         // right-pad
         if out_end_idx < length {
