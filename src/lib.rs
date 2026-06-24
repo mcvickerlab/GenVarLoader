@@ -1,8 +1,6 @@
 pub mod bigwig;
-pub mod ffi;
 pub mod ragged;
 pub mod tables;
-pub mod utils;
 use numpy::{prelude::*, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::prelude::*;
 use std::path::PathBuf;
@@ -14,7 +12,6 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bigwig_write_track, m)?)?;
     m.add_class::<tables::RustTable>()?;
     m.add_function(wrap_pyfunction!(ragged::ragged_to_padded, m)?)?;
-    m.add_function(wrap_pyfunction!(ffi::splits_sum_le_value, m)?)?;
     Ok(())
 }
 

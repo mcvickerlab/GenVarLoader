@@ -6,9 +6,7 @@ import polars as pl
 from genoray._utils import ContigNormalizer
 from numpy.typing import ArrayLike, NDArray
 
-from .._dispatch import get, register
 from .._types import DTYPE
-from ..genvarloader import splits_sum_le_value as _splits_sum_le_value_rust
 
 __all__ = []
 
@@ -142,10 +140,28 @@ def bed_to_regions(
 
 
 @nb.njit(nogil=True, cache=True)
-def _splits_sum_le_value_numba(
-    arr: NDArray[np.number], max_value: float
-) -> NDArray[np.intp]:
-    # (unchanged body, formerly `splits_sum_le_value`)
+def splits_sum_le_value(arr: NDArray[np.number], max_value: float) -> NDArray[np.intp]:
+    """Get index offsets for groups that sum to no more than a value.
+    Note that values greater than the maximum will be kept in their own group.
+
+    Parameters
+    ----------
+    arr : NDArray[np.number]
+        Array to split.
+    max_value : float
+        Maximum value.
+
+    Returns
+    -------
+    NDArray[np.intp]
+        Split indices.
+
+    Examples
+    --------
+    >>> splits_sum_le_value(np.array([5, 5, 11, 9, 2, 7]), 10)
+    # (5 5) (11) (9) (2 7)
+    array([0, 2, 3, 4, 6])
+    """
     indices = [0]
     current_sum = 0
     for idx, value in enumerate(arr):
@@ -155,32 +171,6 @@ def _splits_sum_le_value_numba(
             current_sum = value
     indices.append(len(arr))
     return np.array(indices, np.intp)
-
-
-register(
-    "splits_sum_le_value",
-    numba=_splits_sum_le_value_numba,
-    rust=_splits_sum_le_value_rust,
-    default="rust",
-)
-
-
-def splits_sum_le_value(
-    arr: NDArray[np.number], max_value: float
-) -> NDArray[np.intp]:
-    """Greedy split offsets for groups summing to no more than ``max_value``.
-
-    Dispatches to the numba or Rust backend via :mod:`genvarloader._dispatch`.
-    Both backends receive an int64-contiguous array + float scalar so their
-    output is byte-identical (see tests/parity).
-
-    Examples
-    --------
-    >>> splits_sum_le_value(np.array([5, 5, 11, 9, 2, 7]), 10)
-    array([0, 2, 3, 4, 6])
-    """
-    arr = np.ascontiguousarray(arr, dtype=np.int64)
-    return get("splits_sum_le_value")(arr, float(max_value))
 
 
 def reduceat_offsets(
