@@ -2,11 +2,14 @@ import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
+from .._dispatch import get, register
+from ..genvarloader import intervals_to_tracks as _intervals_to_tracks_rust
+
 __all__ = []
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
-def intervals_to_tracks(
+def _intervals_to_tracks_numba(
     offset_idxs: NDArray[np.integer],
     starts: NDArray[np.int32],
     itv_starts: NDArray[np.int32],
@@ -76,6 +79,50 @@ def intervals_to_tracks(
                 #! assumes intervals are sorted by start
                 # cannot break if parallelized
                 break
+
+
+register(
+    "intervals_to_tracks",
+    numba=_intervals_to_tracks_numba,
+    rust=_intervals_to_tracks_rust,
+    default="rust",
+)
+
+
+def intervals_to_tracks(
+    offset_idxs: NDArray[np.integer],
+    starts: NDArray[np.int32],
+    itv_starts: NDArray[np.int32],
+    itv_ends: NDArray[np.int32],
+    itv_values: NDArray[np.float32],
+    itv_offsets: NDArray[np.int64],
+    out: NDArray[np.float32],
+    out_offsets: NDArray[np.int64],
+) -> None:
+    """Paint base-pair-resolution tracks from intervals, writing ``out`` in place.
+
+    Dispatches to the numba or Rust backend via :mod:`genvarloader._dispatch`
+    (default ``rust``). Read-only inputs are coerced to canonical dtypes so both
+    backends receive byte-identical bytes (see tests/parity); ``out`` is passed
+    through untouched so in-place writes land in the caller's buffer.
+    """
+    offset_idxs = np.ascontiguousarray(offset_idxs, dtype=np.int64)
+    starts = np.ascontiguousarray(starts, dtype=np.int32)
+    itv_starts = np.ascontiguousarray(itv_starts, dtype=np.int32)
+    itv_ends = np.ascontiguousarray(itv_ends, dtype=np.int32)
+    itv_values = np.ascontiguousarray(itv_values, dtype=np.float32)
+    itv_offsets = np.ascontiguousarray(itv_offsets, dtype=np.int64)
+    out_offsets = np.ascontiguousarray(out_offsets, dtype=np.int64)
+    get("intervals_to_tracks")(
+        offset_idxs,
+        starts,
+        itv_starts,
+        itv_ends,
+        itv_values,
+        itv_offsets,
+        out,
+        out_offsets,
+    )
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
