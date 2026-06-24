@@ -115,6 +115,64 @@ def slice_pgen(samples: list[str], bed_path: Path) -> Path:
     return out_prefix.with_suffix(".pgen")
 
 
+def drop_unsupported_variants(pgen: Path) -> Path:
+    """Drop variants gvl can't reconstruct (multi-allelic / symbolic / breakend).
+
+    The full 1kGP chr22 PGEN carries symbolic SVs (``<DEL>``, ``<INS>``,
+    ``<INS:ME:ALU>``, …) and the odd breakend in these windows; gvl.write only
+    handles bi-allelic, non-symbolic, non-breakend records. We filter at the
+    plink2 stage (not via a genoray reader filter) so gvl reads an already-clean
+    PGEN: a genoray ``filter=`` makes ``var_idxs()`` return unfiltered-space
+    indices while ``_index`` is the filtered table, which gvl.write mixes up
+    (genoray issue — filtered PGEN coordinate spaces). Pre-filtering keeps both
+    spaces aligned.
+
+    Identifies unsupported records straight from the sliced ``.pvar`` ALT column
+    (symbolic = starts with ``<``; breakend = contains ``[``/``]`` or flanked by
+    ``.``; multi-allelic = comma in ALT) and re-runs plink2 ``--extract`` on the
+    keep IDs.
+    """
+    prefix = pgen.with_suffix("")
+    pvar = pgen.with_suffix(".pvar")
+    var = pl.read_csv(
+        pvar,
+        separator="\t",
+        comment_prefix="##",
+        schema_overrides={"#CHROM": pl.Utf8, "ID": pl.Utf8, "ALT": pl.Utf8},
+    )
+    alt = pl.col("ALT")
+    unsupported = (
+        alt.str.starts_with("<")  # symbolic
+        | alt.str.contains(r"[\[\]]")  # breakend mate-pair notation
+        | alt.str.starts_with(".")  # single breakend
+        | alt.str.ends_with(".")  # single breakend
+        | alt.str.contains(",")  # multi-allelic
+    )
+    keep_ids = var.filter(~unsupported)["ID"]
+    n_drop = var.height - keep_ids.len()
+    if n_drop == 0:
+        print("No unsupported variants to drop.")
+        return pgen
+    keep_file = DATA / "_keep_ids.txt"
+    keep_file.write_text("\n".join(keep_ids.to_list()) + "\n")
+    out_prefix = DATA / "chr22_5s_hapsafe"
+    run(
+        [
+            "plink2",
+            "--pfile",
+            str(prefix),
+            "--extract",
+            str(keep_file),
+            "--make-pgen",
+            "--out",
+            str(out_prefix),
+        ]
+    )
+    keep_file.unlink()
+    print(f"Dropped {n_drop} unsupported variants; kept {keep_ids.len()}.")
+    return out_prefix.with_suffix(".pgen")
+
+
 def copy_regions() -> Path:
     """Copy the chr22 egenes BED, capped to N_REGIONS rows."""
     bed = pl.read_csv(
@@ -232,6 +290,7 @@ def main() -> None:
     # to variants overlapping these benchmark windows.
     bed_path = copy_regions()
     pgen = slice_pgen(samples, bed_path)
+    pgen = drop_unsupported_variants(pgen)
     build_masked_reference(bed_path)
     build_dataset(samples, pgen, bed_path)
     print("Done.")

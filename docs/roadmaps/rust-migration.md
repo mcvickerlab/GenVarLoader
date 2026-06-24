@@ -89,10 +89,36 @@ py310–313 × linux/macOS as the Rust surface grows.
 
 | Metric | Corpus | Baseline | Captured |
 |---|---|---|---|
-| `gvl.write()` wall-clock | 1kg chr21/chr22 (vcfixture tier) | _TBD_ | ⬜ |
-| `gvl.write()` peak RSS | 1kg chr21/chr22 (vcfixture tier) | _TBD_ | ⬜ |
-| `gvl.update()` wall-clock | 1kg chr21/chr22 (vcfixture tier) | _TBD_ | ⬜ |
-| `Dataset.__getitem__` throughput | dataloader bench + py-spy A/B | _TBD_ | ⬜ |
+| `gvl.write()` wall-clock | 1kg chr21/chr22 (100 regions), macOS M-series | 1.143 s | ✅ |
+| `gvl.write()` peak RSS | 1kg chr21/chr22 (100 regions), macOS M-series | 3.593 GB | ✅ |
+| `gvl.update()` wall-clock | 1kg chr21/chr22 (vcfixture tier) | _TBD_ (smoke only: 0.022 s for a 60-row synthetic annot track — not a real workload) | ⬜ |
+| `Dataset.__getitem__` throughput (tracks mode = `intervals_to_tracks` read path) | `chr22_geuv` realistic bench (165 regions × 5 samples, chr22, read-depth; `SEQLEN=16384`, `BATCH=32`, 2000 batches, `NUMBA_NUM_THREADS=1`), Carter HPC (AMD EPYC 7543, linux-64) | **169.9 batch/s** (5.886 ms/batch, ~5.4k item/s); peak RSS **3.531 GB** | ✅ |
+
+> getitem baseline captured on Carter (2026-06-23, gvl 0.35.0, `GVL_BACKEND` unset →
+> `intervals_to_tracks` default `rust`). `profile.py` now prints wall-clock + throughput;
+> py-spy needs no sudo on Linux (`ptrace_scope=0`). Secondary read paths on the same corpus:
+> **haplotypes 123.9 batch/s** (8.069 ms/batch), peak RSS 3.532 GB; **variants 145.3 batch/s**
+> (6.884 ms/batch, variable-length — variants are ragged by definition, so `with_len` doesn't
+> apply). Peak RSS (~3.53 GB) is dominated by the numba/llvmlite JIT baseline (~3.2 GB), matching
+> the bigWig write slice. (Aside: a *mixed* `with_seqs("variants").with_tracks(...).with_len(L)`
+> query — fixed tracks alongside necessarily-ragged variants — currently `AttributeError`s because
+> the fixed-length exemption in `_query.py` checks `RaggedVariants` while the value is still
+> `_FlatVariants`; a one-line guard, not a Phase 0 gate.)
+>
+> The realistic corpus rebuild surfaced a **filtered-PGEN write bug**: `build_realistic.py` now
+> drops symbolic/breakend/multi-allelic variants at the **plink2** stage (`drop_unsupported_variants`)
+> instead of via a genoray `filter=`, because a filtered genoray PGEN returns unfiltered-space
+> `var_idxs()` while `_index` is the filtered table, and `gvl.write`'s `_pgen_region_chunks` mixes
+> the two (IndexError + likely mis-indexed stored variants). Filed as
+> [d-laub/genoray#69](https://github.com/d-laub/genoray/issues/69); pre-filtering keeps both
+> coordinate spaces aligned.
+>
+> Driver scripts landed: `tests/benchmarks/profiling/profile_write.py` (`--op write`/`update`),
+> `tests/benchmarks/profiling/profile.py` (getitem; prints throughput), and
+> `tests/benchmarks/profiling/baseline_getitem.sh` (py-spy speedscope, no sudo on Linux).
+> Reproduce: build the corpus (`pixi run -e dev python tests/benchmarks/data/build_realistic.py`,
+> needs `/carter` or `GVL_BENCH_SOURCE`), then `pixi run -e dev python …/profile.py --mode tracks`
+> for throughput and `pixi run -e dev memray-tracks` (+`memray-haps`) with `memray stats …`.
 
 Benchmark sources: dataloader bench lives on the `prefetching-dataloader` branch
 ([[project_dataloader_bench]]); fixtures from vcfixture ([[project_vcfixture_migration]]).
@@ -117,18 +143,44 @@ py-spy on macOS needs sudo — hand David a bash script, don't invoke it directl
 
 Each phase is one bundled PR and ends in a measure checkpoint.
 
-### Phase 0 — Foundation & harness ⬜
-_PR: —_
+### Phase 0 — Foundation & harness ✅
+_PR: #241_
 
-- [ ] Restructure `src/` into the target module skeleton (empty modules + `ffi/` seam).
-- [ ] Build the reusable differential-test harness: run-both-assert-byte-identical +
-      property generators on top of `vcfixture` + numpy.
-- [ ] Wire `cargo test` into pixi dev tasks.
-- [ ] Confirm abi3 wheels build across py310–313 × linux/macOS (standing invariant).
-- [ ] Capture baselines (table above): `write()`/`update()` wall-clock + peak RSS,
-      `__getitem__` throughput.
+- [x] Stand up the `ffi/` seam + first lazily-grown domain module (NOT an empty
+      skeleton — lazy growth, per the approved spec: a module is created only when it
+      holds real code). `src/ffi/mod.rs` (the only place new kernels touch PyO3) +
+      `src/intervals.rs` (pure ndarray core) carry the first live kernel
+      `intervals_to_tracks` through the new seam. Renamed the legacy bigwig `intervals`
+      pyfunction to `bigwig_intervals` to free the name. Backend-dispatch registry
+      (`python/genvarloader/_dispatch.py`, `GVL_BACKEND` override + per-kernel default)
+      routes the production call site (`_dataset/_intervals.py`, default `rust`).
+      Commits: `64e0836` (registry), `917957b` (ffi+kernel), `ec4c15b` (route).
+- [x] Build the reusable differential-test harness: run-both-assert-byte-identical
+      (`tests/parity/_harness.py`, return-value + in-place variants) + a hypothesis
+      property generator. Per-kernel gate (`test_intervals_to_tracks_parity`, 100
+      contract-valid examples) + a MEANINGFUL dataset-level read-path backstop
+      (`test_dataset_parity.py`: `ds[:, :]` track getitem byte-identical across
+      backends, with a spy asserting the kernel is actually invoked). Commits:
+      `ef4f91a`, `ad82b31`.
+- [x] Wire `cargo test` into pixi dev tasks (`cargo-test`, plus `memray-write`).
+      Commit `20cd4ef`.
+- [x] Confirm abi3 wheels build with the new `ffi/`+`intervals` modules
+      (`genvarloader-0.35.0-cp310-abi3-macosx_11_0_arm64.whl` builds clean; the
+      py310–313 × linux/macOS release matrix is release-gated and unaffected by the
+      pure-Rust additions). Commit `20cd4ef`.
+- [x] Capture baselines (table above): `write()` wall-clock + peak RSS captured;
+      `__getitem__` tracks-mode (`intervals_to_tracks` read path) throughput +
+      peak RSS captured on Carter (169.9 batch/s, 3.531 GB; haplotypes secondary
+      123.9 batch/s). Driver scripts landed (commit `0be2d67`); `profile.py` now
+      prints throughput, and the `chr22_geuv` corpus rebuild fixed a stale (0.25.0,
+      truncated-tracks) artifact + a filtered-PGEN write bug (now pre-filtered at
+      the plink2 stage; filed on genoray). The `update()` row stays ⬜: the only
+      landed driver runs a 60-row synthetic annot (smoke, not a real workload) — a
+      real write-path update baseline is deferred to Phase 4.
 
-**Checkpoint:** harness green; baselines recorded in this file.
+**Checkpoint:** harness green; foundation + proof-point landed; getitem (gate)
+baseline captured on Carter. `update()` remains a deferred smoke-only row (real
+workload is a Phase 4 write-path concern, not a Phase 0 gate).
 
 ### Phase 1 — Ragged primitives + layout (beachhead) ✅
 _PRs: seqpro [ML4GLand/SeqPro#60](https://github.com/ML4GLand/SeqPro/pull/60), GVL [mcvickerlab/GenVarLoader#240](https://github.com/mcvickerlab/GenVarLoader/pull/240)_
@@ -245,6 +297,41 @@ narrowed to genoray (variant IO) only.
   genvarformer CPU 371 passed. Note: this was a Python-level migration onto seqpro's
   existing Rust-backed `_core.Ragged`; the Rust-crate rewrite of the ragged kernels
   themselves (Phase 1 beachhead) is still pending. PR: TBD
+- 2026-06-23 (Phase 0 foundation landed): Backend-dispatch registry
+  (`python/genvarloader/_dispatch.py`, `GVL_BACKEND` global override + per-kernel
+  default; deleted wholesale in a later phase). New `src/ffi/` seam holds ALL PyO3
+  wrappers for migrated kernels; core Rust logic lives in lazily-grown domain modules
+  (`src/intervals.rs` first — NO empty skeleton, per the lazy-growth rule). Both-layer
+  parity harness in `tests/parity/` (`_harness.py` return-value + in-place variants;
+  per-kernel hypothesis gate; dataset-level read-path backstop). Dispatch rule: only
+  Python-entry kernels register; njit-internal leaves (e.g. `padded_slice`) migrate
+  with their caller's subtree.
+- 2026-06-23 (PROOF-POINT PIVOT): the spec/plan originally chose `splits_sum_le_value`
+  (`_dataset/_utils.py`, called at `_write.py:1280`). During execution we found it is
+  DEAD on the default path: `_write_track` routes `BigWigs`→`_write_track_rust` and
+  `Table`→`_write_track_table`, so `_write_track_legacy` (the only caller of
+  `splits_sum_le_value`) is unreachable for the only concrete public `IntervalTrack`
+  types. A `gvl.write` round-trip never hits it. The whole splits migration was reverted
+  (commit `45343b8`, keeping the registry + harness infra) and the proof-point re-picked
+  to `intervals_to_tracks` (`_dataset/_intervals.py`), which IS genuinely live: on the
+  default `Dataset.__getitem__` read path
+  (`__getitem__`→Tracks reconstructor→`_call_float32`→`intervals_to_tracks`) for any
+  track-bearing dataset, and a clean byte-identical port (integer offset/slice math;
+  float32 values copied, never reduced). Lesson baked into the dataset backstop: it
+  now SPIES on the kernel and asserts it is actually invoked + output is non-trivially
+  non-zero, so a vacuous pass (the failure mode the splits backstop had) is impossible.
+- 2026-06-23 (Phase 0 proof-point): ported `intervals_to_tracks` numba→Rust
+  (`src/intervals.rs`, pure ndarray, sequential — disjoint per-query out-slices make it
+  identical to numba's `prange`; mutates `out` in place via `PyReadwriteArray`). Renamed
+  the legacy bigwig `intervals` pyfunction to `bigwig_intervals` to free the name for
+  `pub mod intervals` (internal-only; the import was already aliased, public API
+  unchanged). Routed the production call site through dispatch (default `rust`; numba
+  retained as parity reference). 5 cargo unit tests + a 100-example hypothesis parity
+  gate + the read-path backstop all green; abi3 wheel builds; `gvl.write` 1kg baseline
+  captured (1.143 s / 3.593 GB); getitem/tracks baseline captured on Carter
+  (169.9 batch/s, 3.531 GB peak) — Phase 0 ✅.
+  Commits: `64e0836` `917957b` `ec4c15b` `ef4f91a` `ad82b31` `20cd4ef` `0be2d67`.
+  Spec: docs/superpowers/specs/2026-06-23-rust-migration-phase-0-foundation-design.md.
 - 2026-06-23: seqpro is the shared Rust ragged substrate. Extracted a pyo3-free
   `seqpro-core` rlib (crates/seqpro-core) owning a borrowed `Ragged` layout +
   ops; ported its last two numba kernels (`to_padded`, `reverse_complement`) to

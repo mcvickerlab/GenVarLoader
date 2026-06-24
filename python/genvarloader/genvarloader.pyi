@@ -31,7 +31,7 @@ def count_intervals(
         Shape = (regions, samples) Number of intervals per query.
     """
 
-def intervals(
+def bigwig_intervals(
     paths: Sequence[str | Path],
     contig: str,
     starts: NDArray[np.int32],
@@ -60,4 +60,22 @@ def intervals(
         Shape = (intervals, 2) Coordinates.
     values : NDArray[float32]
         Shape = (intervals) Values.
+    """
+
+def intervals_to_tracks(
+    offset_idxs: NDArray[np.int64],
+    starts: NDArray[np.int32],
+    itv_starts: NDArray[np.int32],
+    itv_ends: NDArray[np.int32],
+    itv_values: NDArray[np.float32],
+    itv_offsets: NDArray[np.int64],
+    out: NDArray[np.float32],
+    out_offsets: NDArray[np.int64],
+) -> None:
+    """Paint base-pair-resolution tracks from intervals, writing ``out`` in place.
+
+    Rust backend for the dispatched ``intervals_to_tracks`` kernel (byte-identical
+    to the numba reference in ``_dataset/_intervals.py``). Zeros ``out`` then, per
+    query, copies each interval's value into its base-pair slice. Assumes intervals
+    are sorted by start, non-overlapping, and start at >= the query start.
     """

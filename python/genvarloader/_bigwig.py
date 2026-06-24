@@ -13,7 +13,7 @@ from ._ragged import RaggedIntervals
 from ._types import Reader
 from ._utils import get_rel_starts, lengths_to_offsets, normalize_contig_name
 from .genvarloader import count_intervals as bw_count_intervals
-from .genvarloader import intervals as bw_intervals
+from .genvarloader import bigwig_intervals as bw_intervals
 
 
 class BigWigs(Reader):
