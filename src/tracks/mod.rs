@@ -377,20 +377,35 @@ pub fn shift_and_realign_track_sparse(
     // Numba: unfilled_length = length - out_idx
     let unfilled_length = length as i64 - out_idx;
     if unfilled_length > 0 {
+        // Mirror Task 5 (reconstruct/mod.rs:212-238): when a deletion's v_rel_end
+        // runs past the track end, track_idx > track.len() and writable_ref goes
+        // negative. Numpy treats out[out_idx : out_idx + negative] as a no-op
+        // empty slice; the subsequent zero-pad starts from
+        // out_end_idx = (out_idx + writable_ref).max(0).
+        // We guard the copy loop and clamp out_end_idx to 0.
         let writable_ref = unfilled_length.min(track.len() as i64 - track_idx);
-        let out_end_idx = out_idx + writable_ref;
-        let ref_end_idx = track_idx + writable_ref;
-        // Numba: out[out_idx:out_end_idx] = track[track_idx:ref_end_idx]
-        for i in 0..writable_ref as usize {
-            out[out_idx as usize + i] = track[track_idx as usize + i];
-        }
+        // Positive: copy track bytes. Zero or negative: no-op (mirrors numpy empty-slice).
+        let out_end_idx = if writable_ref > 0 {
+            let oe = out_idx + writable_ref;
+            let re = track_idx + writable_ref;
+            // Numba: out[out_idx:out_end_idx] = track[track_idx:ref_end_idx]
+            for i in 0..writable_ref as usize {
+                out[out_idx as usize + i] = track[track_idx as usize + i];
+            }
+            let _ = re; // ref_end_idx used only to bound the copy above
+            oe
+        } else {
+            // writable_ref <= 0: track exhausted or track_idx past end.
+            // out_end_idx = out_idx + writable_ref, clamped to 0 to stay in-bounds
+            // (matches numpy: `out[out_end_idx:]` where out_end_idx >= 0).
+            (out_idx + writable_ref).max(0)
+        };
         // Numba: if out_end_idx < length: out[out_end_idx:] = 0
         if out_end_idx < length as i64 {
             for i in out_end_idx as usize..length {
                 out[i] = 0.0_f32;
             }
         }
-        let _ = ref_end_idx; // suppress unused warning
     }
 }
 
@@ -1193,6 +1208,87 @@ mod tests {
         assert_eq!(result[3], 0.0f32, "trailing pad = 0.0");
     }
 
+    /// Deletion whose `v_rel_end` runs past track end — exercises the `writable_ref` clamp.
+    ///
+    /// This is the edge case fixed by the Task-9 writable_ref clamp: when a deletion
+    /// is so large that `v_rel_end` exceeds `track_len`, `track_idx` advances past the
+    /// end of `track` after the main loop, so `track.len() - track_idx` is negative.
+    /// Without the clamp, `0..writable_ref as usize` would panic (negative-as-usize wrap).
+    /// With the clamp, out_end_idx = (out_idx + writable_ref).max(0), so the copy is
+    /// skipped and out[out_end_idx..] is zero-padded — matching numba's empty-slice no-op.
+    ///
+    /// Setup:
+    ///   track = [1.0, 2.0, 3.0, 4.0, 5.0] (track_len=5), query_start=0, out_len=8
+    ///   variant at v_start=3, ilen=-3 → v_rel_pos=3, v_diff=-3, v_rel_end=3-(-3)+1=7
+    ///   v_len = max(0,-3)+1 = 1
+    ///
+    /// Main loop:
+    ///   track_len (ref to copy before variant) = v_rel_pos - track_idx = 3 - 0 = 3
+    ///   out_idx + track_len = 0 + 3 = 3 < 8 → copy track[0..3] → out[0..3] = [1,2,3]
+    ///   out_idx = 3
+    ///   writable_length = min(1, 8-3) = 1
+    ///   deletion (v_diff < 0), REPEAT_5P: out[3] = track[v_rel_pos=3] = 4.0; out_idx=4
+    ///   track_idx = v_rel_end = 7  (past track end = 5!)
+    ///
+    /// Trailing fill:
+    ///   unfilled_length = 8 - 4 = 4 > 0
+    ///   writable_ref = min(4, 5 - 7) = min(4, -2) = -2  (NEGATIVE)
+    ///   Clamp: out_end_idx = (4 + (-2)).max(0) = 2.max(0) = 2
+    ///   Zero-pad: out[2..8] — but wait, out_end_idx=2 < length=8
+    ///   So out[2..8] = 0.0; but out[0..4] are already written (3+1), and we zero-pad
+    ///   from out_end_idx=2 onward → out[2..8] = 0.0?
+    ///
+    ///   Wait — re-read: out_end_idx is computed relative to out_idx (=4), not absolute.
+    ///   out_end_idx = (out_idx + writable_ref).max(0) = (4 + (-2)).max(0) = 2
+    ///   out[out_end_idx..] = out[2..8] = 0.0 — this overwrites out[2] and out[3] too.
+    ///
+    ///   But numba's numpy semantics: `out[2:8] = 0` is exactly this: it zeros [2..8].
+    ///   So final out = [1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    ///
+    /// This matches numba exactly: out[0..3] from the copy, out[3] from REPEAT_5P = 4.0,
+    /// then trailing clamp zeros from out_end_idx=2 (which is 4 + -2 = 2 absolute) onward.
+    /// But out[2] was already 3.0 — numba would overwrite it with 0 too. ✓
+    #[test]
+    fn test_singular_deletion_past_track_end() {
+        // track_len=5, out_len=8, deletion at v_start=3 with ilen=-3
+        let track = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let v_starts = [3i32];
+        let ilens = [-3i32]; // v_diff=-3, v_rel_end = 3-(-3)+1 = 7 (past track_len=5)
+        let geno_v_idxs = [0i32];
+        let geno_offsets = [0i64, 1];
+
+        let result = run_singular(
+            &geno_v_idxs,
+            &geno_offsets,
+            0,
+            &v_starts,
+            &ilens,
+            0, // shift
+            &track,
+            0, // query_start
+            8, // out_len
+            &[0.0],
+            None,
+            REPEAT_5P,
+            0,
+            0,
+            0,
+        );
+
+        // Verify: no panic (the primary goal of the clamp fix).
+        // out[0..3] = track[0..3] (ref before variant)
+        assert_eq!(result[0], 1.0f32, "ref[0]");
+        assert_eq!(result[1], 2.0f32, "ref[1]");
+        // out_end_idx = (4 + -2).max(0) = 2 → zero-pad from index 2 onward
+        // (matches numba empty-slice no-op + right-pad from out_end_idx=2)
+        assert_eq!(result[2], 0.0f32, "zero-pad[2] (numba overwrites from out_end_idx=2)");
+        assert_eq!(result[3], 0.0f32, "zero-pad[3]");
+        assert_eq!(result[4], 0.0f32, "zero-pad[4]");
+        assert_eq!(result[5], 0.0f32, "zero-pad[5]");
+        assert_eq!(result[6], 0.0f32, "zero-pad[6]");
+        assert_eq!(result[7], 0.0f32, "zero-pad[7]");
+    }
+
     /// SNP (ilen=0) is SKIPPED — the output copies reference track straight through.
     ///
     /// Setup: track = [1.0, 2.0, 3.0, 4.0], query_start=0, out_len=4
@@ -1417,9 +1513,7 @@ mod tests {
     ) -> Vec<f32> {
         use ndarray::{Array1, Array2};
         let n_q = regions.len();
-        let n_groups = n_q * ploidy;
-
-        // Build (2, n_groups) offsets
+        // Build (2, n_q*ploidy) offsets
         let n = geno_offsets_1d.len() - 1;
         let o_starts: Vec<i64> = geno_offsets_1d[..n].to_vec();
         let o_stops: Vec<i64> = geno_offsets_1d[1..].to_vec();
@@ -1481,7 +1575,6 @@ mod tests {
             base_seed,
         );
 
-        let _ = n_groups; // suppress unused warning
         out_arr.to_vec()
     }
 
