@@ -174,3 +174,24 @@ def gather_alleles_inputs(draw):
         draw(st.lists(st.integers(0, n_unique - 1), min_size=m, max_size=m)), np.int32
     )
     return (v_idxs, allele_bytes, allele_offsets)
+
+
+@st.composite
+def compact_keep_inputs(draw, dtype):
+    """Generate (values[dtype], row_offsets int64, keep bool) for compact_keep tests."""
+    n_rows = draw(st.integers(1, 6))
+    counts = [draw(st.integers(0, 5)) for _ in range(n_rows)]
+    row_offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+    total = int(row_offsets[-1])
+    dt = np.dtype(dtype)
+    if np.issubdtype(dt, np.floating):
+        elements = st.floats(width=32, allow_nan=False, allow_infinity=False)
+    else:
+        elements = st.integers(0, 1000)
+    values = np.array(
+        draw(st.lists(elements, min_size=total, max_size=total)), dt
+    )
+    keep = np.array(
+        draw(st.lists(st.booleans(), min_size=total, max_size=total)), np.bool_
+    )
+    return (values, row_offsets, keep)

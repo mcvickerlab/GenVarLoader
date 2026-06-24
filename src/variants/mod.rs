@@ -74,6 +74,51 @@ pub fn gather_alleles(
     (data, seq_offsets)
 }
 
+/// Generic compact-keep core. Drops values where `keep[j]` is false and
+/// rebuilds row offsets. No `num_traits` dependency — uses `Vec<T>`.
+fn compact_keep_impl<T: Copy>(
+    values: ArrayView1<T>,
+    row_offsets: ArrayView1<i64>,
+    keep: ArrayView1<bool>,
+) -> (Array1<T>, Array1<i64>) {
+    let n_rows = row_offsets.len() - 1;
+    let mut new_offsets = Array1::<i64>::zeros(n_rows + 1);
+    let mut n_keep: i64 = 0;
+    for i in 0..n_rows {
+        for j in row_offsets[i] as usize..row_offsets[i + 1] as usize {
+            if keep[j] {
+                n_keep += 1;
+            }
+        }
+        new_offsets[i + 1] = n_keep;
+    }
+    let mut new_v: Vec<T> = Vec::with_capacity(n_keep as usize);
+    for j in 0..values.len() {
+        if keep[j] {
+            new_v.push(values[j]);
+        }
+    }
+    (Array1::from_vec(new_v), new_offsets)
+}
+
+/// Compact i32 values (variant indices). Mirrors numba `_compact_keep`.
+pub fn compact_keep_i32(
+    values: ArrayView1<i32>,
+    row_offsets: ArrayView1<i64>,
+    keep: ArrayView1<bool>,
+) -> (Array1<i32>, Array1<i64>) {
+    compact_keep_impl(values, row_offsets, keep)
+}
+
+/// Compact f32 values (dosage). Preserves float32 bit-pattern exactly.
+pub fn compact_keep_f32(
+    values: ArrayView1<f32>,
+    row_offsets: ArrayView1<i64>,
+    keep: ArrayView1<bool>,
+) -> (Array1<f32>, Array1<i64>) {
+    compact_keep_impl(values, row_offsets, keep)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +157,27 @@ mod tests {
         let (data, seq) = gather_alleles(v_idxs.view(), bytes.view(), offs.view());
         assert_eq!(data.to_vec(), vec![71, 65, 67, 71]);
         assert_eq!(seq.to_vec(), vec![0, 1, 3, 4]);
+    }
+
+    #[test]
+    fn test_compact_keep_i32() {
+        // 2 rows: [10, 11 | 12]; keep [T, F, T] → [10 | 12], offsets [0, 1, 2].
+        let vals = arr1(&[10i32, 11, 12]);
+        let off = arr1(&[0i64, 2, 3]);
+        let keep = arr1(&[true, false, true]);
+        let (v, o) = compact_keep_i32(vals.view(), off.view(), keep.view());
+        assert_eq!(v.to_vec(), vec![10, 12]);
+        assert_eq!(o.to_vec(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_compact_keep_f32() {
+        // 1 row: [0.25, 0.75, 0.5]; keep [T, F, T] → [0.25, 0.5], offsets [0, 2].
+        let vals = arr1(&[0.25f32, 0.75f32, 0.5f32]);
+        let off = arr1(&[0i64, 3]);
+        let keep = arr1(&[true, false, true]);
+        let (v, o) = compact_keep_f32(vals.view(), off.view(), keep.view());
+        assert_eq!(v.to_vec(), vec![0.25f32, 0.5f32]);
+        assert_eq!(o.to_vec(), vec![0i64, 2]);
     }
 }

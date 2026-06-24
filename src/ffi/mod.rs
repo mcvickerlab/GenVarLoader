@@ -142,3 +142,37 @@ pub fn gather_alleles<'py>(
     );
     (data.into_pyarray(py), seq.into_pyarray(py))
 }
+
+/// Compact i32 values under keep mask, rebuilding row offsets
+/// (see `variants::compact_keep_i32`).
+#[pyfunction]
+pub fn compact_keep_i32<'py>(
+    py: Python<'py>,
+    values: PyReadonlyArray1<i32>,
+    row_offsets: PyReadonlyArray1<i64>,
+    keep: PyReadonlyArray1<bool>,
+) -> (Bound<'py, PyArray1<i32>>, Bound<'py, PyArray1<i64>>) {
+    let (v, off) = variants::compact_keep_i32(
+        values.as_array(),
+        row_offsets.as_array(),
+        keep.as_array(),
+    );
+    (v.into_pyarray(py), off.into_pyarray(py))
+}
+
+/// Compact f32 values under keep mask, rebuilding row offsets
+/// (see `variants::compact_keep_f32`).
+#[pyfunction]
+pub fn compact_keep_f32<'py>(
+    py: Python<'py>,
+    values: PyReadonlyArray1<f32>,
+    row_offsets: PyReadonlyArray1<i64>,
+    keep: PyReadonlyArray1<bool>,
+) -> (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>) {
+    let (v, off) = variants::compact_keep_f32(
+        values.as_array(),
+        row_offsets.as_array(),
+        keep.as_array(),
+    );
+    (v.into_pyarray(py), off.into_pyarray(py))
+}

@@ -11,6 +11,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .._dispatch import get, register
+from ..genvarloader import compact_keep_f32 as _compact_keep_f32_rust
+from ..genvarloader import compact_keep_i32 as _compact_keep_i32_rust
 from ..genvarloader import gather_alleles as _gather_alleles_rust
 from ..genvarloader import gather_rows_f32 as _gather_rows_f32_rust
 from ..genvarloader import gather_rows_i32 as _gather_rows_i32_rust
@@ -530,10 +532,11 @@ def _gather_alleles(v_idxs, allele_bytes, allele_offsets):
 
 
 @nb.njit(nogil=True, cache=True)
-def _compact_keep(v_idxs, row_offsets, keep):  # pragma: no cover - njit
+def _compact_keep_numba(v_idxs, row_offsets, keep):  # pragma: no cover - njit
     """Drop variants where ``keep`` is False, rebuilding row offsets. The first
     param is per-variant values to compact -- either ``v_idxs`` itself or a
-    parallel array (e.g. gathered dosage values) sharing the same row layout."""
+    parallel array (e.g. gathered dosage values) sharing the same row layout.
+    Preserves the input dtype exactly (no down-cast)."""
     n_rows = row_offsets.shape[0] - 1
     new_offsets = np.empty(n_rows + 1, np.int64)
     new_offsets[0] = 0
@@ -550,6 +553,30 @@ def _compact_keep(v_idxs, row_offsets, keep):  # pragma: no cover - njit
             new_v[dst] = v_idxs[j]
             dst += 1
     return new_v, new_offsets
+
+
+register("compact_keep_i32", numba=_compact_keep_numba, rust=_compact_keep_i32_rust, default="rust")
+register("compact_keep_f32", numba=_compact_keep_numba, rust=_compact_keep_f32_rust, default="rust")
+
+
+def _compact_keep(v_idxs, row_offsets, keep):
+    """Dispatch compact-keep by dtype, preserving the input dtype without down-cast.
+
+    Routes int32 → compact_keep_i32 (Rust), float32 → compact_keep_f32 (Rust).
+    All other dtypes (e.g. int16, int64 custom FORMAT fields, issue #231) fall
+    back to the dtype-preserving numba kernel so values are never silently
+    coerced.
+    """
+    values = np.ascontiguousarray(v_idxs)
+    row_offsets = np.ascontiguousarray(row_offsets, np.int64)
+    keep = np.ascontiguousarray(keep, np.bool_)
+    if values.dtype == np.int32:
+        return get("compact_keep_i32")(values, row_offsets, keep)
+    if values.dtype == np.float32:
+        return get("compact_keep_f32")(values, row_offsets, keep)
+    # Arbitrary dtypes (custom FORMAT fields, e.g. int16, int64): dtype-preserving
+    # numba fallback — never down-cast.
+    return _compact_keep_numba(values, row_offsets, keep)
 
 
 def _gather_rows_numba(geno_offset_idx, geno_offsets, geno_v_idxs):
