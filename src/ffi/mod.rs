@@ -371,3 +371,21 @@ pub fn get_reference<'py>(
     );
     out.into_pyarray(py)
 }
+
+// ── DEBUG exports for PRNG parity tests (Task 7) ─────────────────────────────
+// These thin wrappers exist solely to make the Rust PRNG functions callable from
+// Python tests. They may be kept or removed after Task 8/9 review.
+
+/// [DEBUG] Rust xorshift64 — callable from Python for parity testing.
+/// Mirrors numba `_xorshift64` on `np.uint64`.
+#[pyfunction]
+pub fn _debug_xorshift64(x: u64) -> u64 {
+    crate::tracks::xorshift64(x)
+}
+
+/// [DEBUG] Rust hash4 — callable from Python for parity testing.
+/// Mirrors numba `_hash4` on `np.uint64`.
+#[pyfunction]
+pub fn _debug_hash4(a: u64, b: u64, c: u64, d: u64) -> u64 {
+    crate::tracks::hash4(a, b, c, d)
+}

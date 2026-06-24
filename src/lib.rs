@@ -6,6 +6,7 @@ pub mod ragged;
 pub mod reconstruct;
 pub mod reference;
 pub mod tables;
+pub mod tracks;
 pub mod variants;
 use numpy::{prelude::*, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::prelude::*;
@@ -34,6 +35,9 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::fill_empty_seq_i32, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::get_reference, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_from_sparse, m)?)?;
+    // DEBUG: PRNG parity exports (Task 7) — keep or remove after Task 8/9 review
+    m.add_function(wrap_pyfunction!(ffi::_debug_xorshift64, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::_debug_hash4, m)?)?;
     Ok(())
 }
 
