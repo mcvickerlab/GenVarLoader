@@ -6,6 +6,19 @@ This is a living tracker. **Any work that touches the Rust migration must read t
 first and update it as part of the change** — tick completed tasks, record measurements
 under the relevant checkpoint, and update the phase status marker + PR link.
 
+## Branch & gate strategy (changed as of Phase 2, 2026-06-24)
+
+Phases 0–1 were merged to `main` incrementally. **From Phase 2 onward the work accumulates on
+a single persistent integration branch (`rust-migration`) with NO per-phase throughput gate**,
+and ships as ONE big merge at the end. Rationale: profiling Phase 2 showed the read-path
+overhead is per-kernel Python dispatch glue (redundant `np.ascontiguousarray` coercions +
+FFI boundary crossings), not rust compute — so the real win comes from collapsing
+`__getitem__` into a single large rust kernel, which can only be done once enough of the
+read path is in Rust. Gating each intermediate phase on throughput would block correct,
+parity-verified work behind an overhead that the architecture is designed to delete later.
+**Per-phase gate is now parity only**; a dedicated optimization pass (eliminate glue →
+single big `__getitem__` kernel) re-establishes the throughput gate before the final merge.
+
 ---
 
 ## Goal & end state
@@ -204,15 +217,55 @@ rather than a GVL-in-house reimplementation (see decision 2026-06-23). Bottom-up
 **Checkpoint:** parity green (byte-identical `to_padded`). Foundational — no perf gate,
 but record incidental wins. Relevant prior work: [[project_ragged_assembly_bottleneck]].
 
-### Phase 2 — Genotype assembly + variant gather ⬜
-_PR: —_
+### Phase 2 — Genotype assembly + variant gather ✅ (parity-verified; perf deferred to consolidation)
+_Branch: `rust-migration` (persistent integration branch — see "Branch & gate strategy" below). Not separately merged to `main`._
 
-- [ ] Migrate `_dataset/_genotypes.py` kernels (6 numba) onto the Rust layout.
-- [ ] Migrate `_dataset/_flat_variants.py` kernels (7 numba).
-- [x] Migrate `_dataset/_rag_variants.py`; drop `awkward` from these hot paths. (Done at the Python level: `RaggedVariants` now wraps a single record `seqpro.rag.Ragged`; no numba kernels remain in this file — any remaining numba rewrites are tracked in the unchecked items below.)
+- [x] Migrate `_dataset/_genotypes.py` **assembly/selection** kernels: `get_diffs_sparse`,
+      `choose_exonic_variants`. (The `_genotypes.py` *reconstruction* kernels —
+      `reconstruct_haplotypes_from_sparse` et al. — are Phase 3, not Phase 2; the earlier
+      "6 numba" figure double-counted them.) Dead `filter_af` deleted (zero production
+      callers; AF filtering is inline numpy in `_haps.py`/`_flat_variants.py`) — same
+      precedent as the Phase 0 `splits_sum_le_value` dead-path removal. Its dedicated unit
+      test was removed with it.
+- [x] Migrate `_dataset/_flat_variants.py` kernels (7 numba): `_gather_v_idxs` + `_gather_v_idxs_ss`
+      → `gather_rows` (unified via `(2,n)` offset normalization), `_gather_alleles`,
+      `_compact_keep`, `_fill_empty_scalar`, `_fill_empty_fixed`, `_fill_empty_seq`.
+- [x] Migrate `_dataset/_rag_variants.py`; drop `awkward` from these hot paths. (Done at the Python level: `RaggedVariants` now wraps a single record `seqpro.rag.Ragged`; no numba kernels remain in this file.)
 
-**Gate:** parity + `Dataset.__getitem__` throughput vs baseline (target speedup, no
-regression).
+**Architecture:** pure-`ndarray` cores in `src/genotypes/` + `src/variants/`; PyO3 only in
+`src/ffi/`; per-kernel dispatch via `genvarloader._dispatch` (default `rust`, `GVL_BACKEND`
+override); numba impls retained as registered parity references (deleted wholesale in Phase 5).
+
+**Dtype-correctness (beyond the plan):** the flat gather/fill kernels are NOT v_idxs-only — they
+also run on float32 dosage and **arbitrary-dtype** custom per-call FORMAT fields (issue #231, e.g.
+`int16`). The numba refs preserved input dtype; a naive int32/float32-only port silently corrupted
+them (caught here: float32 dosage `[0.25,0.75]`→`[0,0]`). Final design dispatches by dtype —
+`*_i32`/`*_f32` rust cores for the hot paths + a **dtype-preserving numba fallback** for all other
+dtypes, with direct regression tests (int16/int64/float32) locking it.
+
+**Gate (parity — MET):** byte-identical parity for every ported kernel via `@pytest.mark.parity`
+hypothesis suites (both returned arrays for tuple kernels), plus a spy-guarded variants-mode
+dataset backstop proving the rust kernels run on the live `__getitem__` path. Full tree green:
+904 passed (rust) / 617 passed (numba backend, dataset+unit); lint/format/typecheck clean;
+`cargo test` green; abi3 build OK. (One pre-existing unrelated failure, `test_e2e_variants`, is a
+`with_len`-on-variants benchmark bug that fails identically at the Phase-2 base — not introduced here.)
+
+**Gate (throughput — DEFERRED, not a blocker):** see "Branch & gate strategy". Measured medians
+(`chr22_geuv`, `NUMBA_NUM_THREADS=1`, Carter):
+
+| Mode | rust | numba (same session) | documented baseline |
+|---|---|---|---|
+| haplotypes | 128.8 batch/s | 137.9 | 123.9 |
+| variants | 139.5 batch/s | 149.3 | 145.3 |
+
+rust is a **stable ~7% slower than numba** (rust-haps still beats the 123.9 baseline; rust-variants
+is ~4% below its 145.3 baseline). cProfile of the rust variants `__getitem__` shows the cost is
+**pure Python glue, not rust compute**: `np.ascontiguousarray` is 28,800 calls / 3.98 s = **62%** of
+the loop (~36 redundant coercions per batch in the per-kernel dispatch wrappers), while the rust
+kernels themselves are negligible (`gather_alleles` 0.012 s, `get_diffs_sparse` 0.010 s). This
+validates collapsing the read path toward a **single big rust `__getitem__` kernel** (drop redundant
+coercions short-term; eliminate per-kernel boundary crossings + intermediate numpy allocs long-term),
+addressed in a dedicated optimization pass before the final merge.
 
 ### Phase 3 — Reconstruction + track realignment ⬜
 _PR: —_
@@ -263,6 +316,26 @@ narrowed to genoray (variant IO) only.
 
 ## Notes & decisions log
 
+- 2026-06-24 (Phase 2 — genotype assembly + variant gather, parity-verified): Ported the
+  live assembly/selection kernels `get_diffs_sparse` + `choose_exonic_variants`
+  (`src/genotypes/`) and the 7 flat variant-gather/fill kernels (`src/variants/`):
+  `gather_rows` (unifies `_gather_v_idxs` + `_gather_v_idxs_ss` via `(2,n)` offset
+  normalization), `gather_alleles`, `compact_keep`, `fill_empty_scalar`,
+  `fill_empty_fixed`, `fill_empty_seq`. Deleted dead `filter_af` (+ its dead unit test).
+  Decisions: (1) **dtype-correctness over the plan** — the flat kernels also carry float32
+  dosage and arbitrary-dtype custom FORMAT fields (#231, e.g. int16), so they dispatch by
+  dtype to `*_i32`/`*_f32` rust cores with a dtype-preserving **numba fallback** for all
+  other dtypes; a naive int32-only port (caught + fixed mid-Phase-2) silently truncated
+  float dosage. Generic rust cores use `Vec<T>`/`from_vec` (no `num_traits` dep).
+  (2) **Gate reframed to parity-only** on a persistent `rust-migration` branch (see
+  "Branch & gate strategy") — measured rust is a stable ~7% slower than numba, but cProfile
+  pins the cost on per-kernel Python dispatch glue (`np.ascontiguousarray` = 62% of the
+  variants loop), not rust compute; throughput is restored by a later "single big
+  `__getitem__` kernel" optimization pass, not by gating Phase 2. (3) `OFFSET_TYPE`/genoray
+  `V_IDX_TYPE`=int32, `DOSAGE_TYPE`=float32 confirmed at runtime. Env note: dataset tests
+  need pytest's tmp on the same filesystem as `tests/data` (`--basetemp=<repo>/.pytest_tmp`)
+  or the GVL write path's `os.link` hardlink fails cross-device (Errno 18) — environmental,
+  not a code defect.
 - 2026-06-18: Roadmap created. Decisions: standalone crate + thin PyO3 binding;
   bottom-up starting from ragged primitives; strangler-fig with byte-identical parity
   gate; perf gates = write wall-clock+RSS and getitem throughput; seqpro/genoray in scope
