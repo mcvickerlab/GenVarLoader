@@ -10,6 +10,10 @@ import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
+from .._dispatch import get, register
+from ..genvarloader import gather_rows as _gather_rows_rust
+from ._genotypes import _as_starts_stops
+
 if TYPE_CHECKING:
     from ._haps import Haps
 
@@ -430,7 +434,7 @@ class _FlatVariants:
 
 
 @nb.njit(nogil=True, cache=True)
-def _gather_v_idxs(
+def _gather_v_idxs_numba(
     geno_offset_idx, geno_offsets, geno_v_idxs
 ):  # pragma: no cover - njit
     """Gather per-row variant indices: for each row's offset slice into the
@@ -461,7 +465,7 @@ def _gather_v_idxs(
 
 
 @nb.njit(nogil=True, cache=True)
-def _gather_v_idxs_ss(
+def _gather_v_idxs_ss_numba(
     geno_offset_idx, geno_starts, geno_stops, geno_v_idxs
 ):  # pragma: no cover - njit
     """Like :func:`_gather_v_idxs` but for non-contiguous (starts, stops) offsets.
@@ -535,21 +539,27 @@ def _compact_keep(v_idxs, row_offsets, keep):  # pragma: no cover - njit
     return new_v, new_offsets
 
 
+def _gather_rows_numba(geno_offset_idx, geno_offsets, geno_v_idxs):
+    # geno_offsets is the normalized (2, n) form.
+    return _gather_v_idxs_ss_numba(
+        geno_offset_idx, geno_offsets[0], geno_offsets[1], geno_v_idxs
+    )
+
+
+register("gather_rows", numba=_gather_rows_numba, rust=_gather_rows_rust, default="rust")
+
+
 def _gather_rows(
     geno_offset_idx: NDArray[np.intp],
     offsets: NDArray[np.int64],
     data: NDArray,
 ) -> tuple[NDArray, NDArray[np.int64]]:
-    """Dispatch to the correct gather kernel based on offset array shape.
-
-    ``offsets`` may be:
-    - 1-D ``(n + 1,)``: contiguous offsets — use :func:`_gather_v_idxs`.
-    - 2-D ``(2, n)``: non-contiguous starts/stops — use :func:`_gather_v_idxs_ss`.
-    """
-    if offsets.ndim == 1:
-        return _gather_v_idxs(geno_offset_idx, offsets, data)
-    else:
-        return _gather_v_idxs_ss(geno_offset_idx, offsets[0], offsets[1], data)
+    """Dispatch per-row variant-index gather (numba/rust), normalizing offsets."""
+    return get("gather_rows")(
+        np.ascontiguousarray(geno_offset_idx, np.int64),
+        _as_starts_stops(offsets),
+        np.ascontiguousarray(data, np.int32),
+    )
 
 
 @nb.njit(nogil=True, cache=True)

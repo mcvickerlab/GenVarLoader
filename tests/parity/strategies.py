@@ -134,3 +134,22 @@ def choose_exonic_variants_inputs(draw):
     twod = draw(st.booleans())
     offsets = goff if not twod else np.stack([goff[:-1], goff[1:]]).astype(np.int64)
     return (qstarts, qends, goi, gvi, offsets, vstarts, ilens)
+
+
+@st.composite
+def gather_rows_inputs(draw):
+    n_groups = draw(st.integers(1, 6))
+    counts = [draw(st.integers(0, 5)) for _ in range(n_groups)]
+    offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+    total = int(offsets[-1])
+    data = np.array(
+        draw(st.lists(st.integers(0, 1000), min_size=total, max_size=total)), np.int32
+    )
+    n_rows = draw(st.integers(1, 8))
+    goi = np.array(
+        draw(st.lists(st.integers(0, n_groups - 1), min_size=n_rows, max_size=n_rows)),
+        np.int64,
+    )
+    twod = draw(st.booleans())
+    off = offsets if not twod else np.stack([offsets[:-1], offsets[1:]]).astype(np.int64)
+    return (goi, off, data)

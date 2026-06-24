@@ -4,6 +4,7 @@ pub mod genotypes;
 pub mod intervals;
 pub mod ragged;
 pub mod tables;
+pub mod variants;
 use numpy::{prelude::*, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::prelude::*;
 use std::path::PathBuf;
@@ -18,6 +19,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::intervals_to_tracks, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::get_diffs_sparse, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::choose_exonic_variants, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::gather_rows, m)?)?;
     Ok(())
 }
 

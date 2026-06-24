@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 
 use crate::genotypes;
 use crate::intervals;
+use crate::variants;
 
 /// Per-(query, hap) reference-length diffs (see `genotypes::get_diffs_sparse`).
 /// `geno_offsets` is the normalized (2, n) int64 starts/stops array.
@@ -88,4 +89,22 @@ pub fn choose_exonic_variants<'py>(
         ilens.as_array(),
     );
     (keep.into_pyarray(py), koff.into_pyarray(py))
+}
+
+/// Per-row variant-index gather (see `variants::gather_rows`).
+#[pyfunction]
+pub fn gather_rows<'py>(
+    py: Python<'py>,
+    geno_offset_idx: PyReadonlyArray1<i64>,
+    geno_offsets: PyReadonlyArray2<i64>,
+    geno_v_idxs: PyReadonlyArray1<i32>,
+) -> (Bound<'py, PyArray1<i32>>, Bound<'py, PyArray1<i64>>) {
+    let go = geno_offsets.as_array();
+    let (v, off) = variants::gather_rows(
+        geno_offset_idx.as_array(),
+        go.row(0),
+        go.row(1),
+        geno_v_idxs.as_array(),
+    );
+    (v.into_pyarray(py), off.into_pyarray(py))
 }
