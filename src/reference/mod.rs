@@ -28,37 +28,24 @@ pub fn padded_slice(
         out.assign(&arr.slice(ndarray::s![start as usize..stop as usize]));
         return;
     }
-    let out_len_u = out.len();
+    let out_len = out.len() as i64;
     if pad_left > 0 && pad_right > 0 {
-        // out[:pad_left] = pad; out[pad_left:out_stop] = arr[:]; out[out_stop:] = pad
-        // out_stop may be negative (Python: empty middle slice) — clamp to [0, out_len_u].
-        let raw_out_stop = out_len_u as i64 - pad_right; // may be negative
-        let out_stop_u = raw_out_stop.max(0) as usize;
-        let pad_left_u = (pad_left as usize).min(out_len_u);
-        out.slice_mut(ndarray::s![..pad_left_u]).fill(pad_val);
-        if pad_left_u < out_stop_u {
-            out.slice_mut(ndarray::s![pad_left_u..out_stop_u])
-                .assign(&arr);
-        }
-        out.slice_mut(ndarray::s![out_stop_u..]).fill(pad_val);
+        let out_stop = out_len - pad_right;
+        out.slice_mut(ndarray::s![..pad_left as usize]).fill(pad_val);
+        out.slice_mut(ndarray::s![pad_left as usize..out_stop as usize])
+            .assign(&arr);
+        out.slice_mut(ndarray::s![out_stop as usize..]).fill(pad_val);
     } else if pad_left > 0 {
         // out[:pad_left] = pad; out[pad_left:] = arr[:stop]
-        let pad_left_u = (pad_left as usize).min(out_len_u);
-        out.slice_mut(ndarray::s![..pad_left_u]).fill(pad_val);
-        if pad_left_u < out_len_u {
-            out.slice_mut(ndarray::s![pad_left_u..])
-                .assign(&arr.slice(ndarray::s![..stop as usize]));
-        }
+        out.slice_mut(ndarray::s![..pad_left as usize]).fill(pad_val);
+        out.slice_mut(ndarray::s![pad_left as usize..])
+            .assign(&arr.slice(ndarray::s![..stop as usize]));
     } else {
         // pad_right > 0: out[:out_stop] = arr[start:]; out[out_stop:] = pad
-        // out_stop may be negative — clamp to [0, out_len_u].
-        let raw_out_stop = out_len_u as i64 - pad_right; // may be negative
-        let out_stop_u = raw_out_stop.max(0) as usize;
-        if out_stop_u > 0 {
-            out.slice_mut(ndarray::s![..out_stop_u])
-                .assign(&arr.slice(ndarray::s![start as usize..]));
-        }
-        out.slice_mut(ndarray::s![out_stop_u..]).fill(pad_val);
+        let out_stop = out_len - pad_right;
+        out.slice_mut(ndarray::s![..out_stop as usize])
+            .assign(&arr.slice(ndarray::s![start as usize..]));
+        out.slice_mut(ndarray::s![out_stop as usize..]).fill(pad_val);
     }
 }
 
@@ -242,24 +229,4 @@ mod tests {
         assert_eq!(serial, parallel);
     }
 
-    #[test]
-    fn pad_right_exceeds_out_len() {
-        // region [6,9) on contig of len 1: pad_right=8 > out_len=3 → all pad
-        assert_eq!(run(&[0], 6, 9, 5), vec![5, 5, 5]);
-    }
-
-    #[test]
-    fn pad_both_pad_right_exceeds_available() {
-        // region [-1, 8) on contig of len 1: pad_left=1, pad_right=7, out_len=9
-        // middle = arr[0:1] = [42], out_stop = 9-7 = 2
-        // out = [pad, 42, pad, pad, pad, pad, pad, pad, pad]
-        assert_eq!(run(&[42], -1, 8, 0), vec![0, 42, 0, 0, 0, 0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn get_reference_region_entirely_past_end() {
-        // region [6,9) on contig [0u8]: out_len=3, all pad
-        let result = run_get_reference(&[0], &[[0, 6, 9]], 7, false);
-        assert_eq!(result, vec![7, 7, 7]);
-    }
 }

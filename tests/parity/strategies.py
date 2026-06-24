@@ -329,7 +329,13 @@ def get_reference_inputs(draw):
     for i in range(n_regions):
         c = draw(st.integers(0, n_contigs - 1))
         clen = contig_lens[c]
-        # Restrict start < clen so the region overlaps the contig.
+        # Restrict start < clen so the region overlaps the contig.  numba's
+        # padded_slice raises ValueError when start >= clen (region entirely
+        # past the contig end): pad_right = end - clen > out_len triggers a
+        # size-mismatch in the ndarray assignment.  Both backends fail loudly
+        # on that degenerate input, so it is outside the byte-identity domain
+        # and is intentionally not generated here.  In production, BED regions
+        # are always clipped to contig bounds, so start >= clen never occurs.
         # Regions extending past the right edge (end > clen) are still generated.
         start = draw(st.integers(-5, clen - 1))
         length = draw(st.integers(0, clen + 5))
