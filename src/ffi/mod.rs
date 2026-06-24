@@ -248,3 +248,51 @@ pub fn fill_empty_fixed_f32<'py>(
     );
     (v.into_pyarray(py), off.into_pyarray(py))
 }
+
+/// Two-level dummy-fill for allele bytestrings (uint8).
+/// Returns `(new_data, new_var_offsets, new_seq_offsets)`.
+/// (see `variants::fill_empty_seq_u8`).
+#[pyfunction]
+pub fn fill_empty_seq_u8<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<u8>,
+    var_offsets: PyReadonlyArray1<i64>,
+    seq_offsets: PyReadonlyArray1<i64>,
+    dummy: PyReadonlyArray1<u8>,
+) -> (
+    Bound<'py, PyArray1<u8>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+) {
+    let (nd, nvar, nseq) = variants::fill_empty_seq_u8(
+        data.as_array(),
+        var_offsets.as_array(),
+        seq_offsets.as_array(),
+        dummy.as_array(),
+    );
+    (nd.into_pyarray(py), nvar.into_pyarray(py), nseq.into_pyarray(py))
+}
+
+/// Two-level dummy-fill for token windows (int32).
+/// Returns `(new_data, new_var_offsets, new_seq_offsets)`.
+/// (see `variants::fill_empty_seq_i32`).
+#[pyfunction]
+pub fn fill_empty_seq_i32<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<i32>,
+    var_offsets: PyReadonlyArray1<i64>,
+    seq_offsets: PyReadonlyArray1<i64>,
+    dummy: PyReadonlyArray1<i32>,
+) -> (
+    Bound<'py, PyArray1<i32>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+) {
+    let (nd, nvar, nseq) = variants::fill_empty_seq_i32(
+        data.as_array(),
+        var_offsets.as_array(),
+        seq_offsets.as_array(),
+        dummy.as_array(),
+    );
+    (nd.into_pyarray(py), nvar.into_pyarray(py), nseq.into_pyarray(py))
+}

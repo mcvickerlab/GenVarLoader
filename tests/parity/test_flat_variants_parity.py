@@ -7,6 +7,7 @@ from genvarloader._dataset._flat_variants import (
     _compact_keep,
     _fill_empty_fixed,
     _fill_empty_scalar,
+    _fill_empty_seq,
     _gather_rows,
 )
 from genvarloader._dataset._genotypes import _as_starts_stops
@@ -15,6 +16,7 @@ from tests.parity.strategies import (
     compact_keep_inputs,
     fill_empty_fixed_inputs,
     fill_empty_scalar_inputs,
+    fill_empty_seq_inputs,
     gather_alleles_inputs,
     gather_rows_inputs,
 )
@@ -190,3 +192,50 @@ def test_fill_empty_fixed_dtype_regression():
     assert out.dtype == np.int16, f"Expected int16, got {out.dtype}"
     np.testing.assert_array_equal(out, np.array([7, 8, 42, 42], np.int16))
     assert new_off.tolist() == [0, 1, 2]
+
+
+# ---------------------------------------------------------------------------
+# fill_empty_seq parity
+# ---------------------------------------------------------------------------
+
+
+@settings(deadline=None)
+@given(fill_empty_seq_inputs(dtype=np.uint8))
+def test_fill_empty_seq_u8_parity(inputs):
+    data, var_offsets, seq_offsets, dummy = inputs
+    assert_kernel_parity_tuple("fill_empty_seq_u8", data, var_offsets, seq_offsets, dummy)
+
+
+@settings(deadline=None)
+@given(fill_empty_seq_inputs(dtype=np.int32))
+def test_fill_empty_seq_i32_parity(inputs):
+    data, var_offsets, seq_offsets, dummy = inputs
+    assert_kernel_parity_tuple("fill_empty_seq_i32", data, var_offsets, seq_offsets, dummy)
+
+
+def test_fill_empty_seq_dtype_regression():
+    """_fill_empty_seq must preserve dtype for int32 token windows.
+
+    A single uint8-only Rust core would silently corrupt int32 token values
+    (e.g. token 999 → 0xE7 = 231 when truncated to uint8).
+    This test verifies that int32 token windows round-trip exactly through
+    the dispatch wrapper, including the dummy token in the empty slot.
+    """
+    # 2 rows: var_offsets [0,0,2] — row 0 is empty.
+    # Row 1: 2 variants with tokens [100, 200] and [300].
+    # seq_offsets: [0,2,3].
+    # dummy int32 token = 999 (> 255 — would be corrupted if truncated to uint8).
+    data = np.array([100, 200, 300], np.int32)
+    var_offsets = np.array([0, 0, 2], np.int64)
+    seq_offsets = np.array([0, 2, 3], np.int64)
+    dummy = np.array([999], np.int32)
+
+    nd, nvar, nseq = _fill_empty_seq(data, var_offsets, seq_offsets, dummy)
+
+    assert nd.dtype == np.int32, f"Expected int32, got {nd.dtype}"
+    # new_var: row 0 empty→1 dummy, row 1 has 2 vars → [0, 1, 3]
+    assert nvar.tolist() == [0, 1, 3], f"new_var wrong: {nvar.tolist()}"
+    # new_seq: dummy len=1, var0 len=2, var1 len=1 → [0, 1, 3, 4]
+    assert nseq.tolist() == [0, 1, 3, 4], f"new_seq wrong: {nseq.tolist()}"
+    # new_data: [999] (dummy), [100,200] (var0 tokens), [300] (var1 tokens)
+    np.testing.assert_array_equal(nd, np.array([999, 100, 200, 300], np.int32))

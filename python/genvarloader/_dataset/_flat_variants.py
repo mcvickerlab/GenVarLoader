@@ -17,6 +17,8 @@ from ..genvarloader import fill_empty_fixed_f32 as _fill_empty_fixed_f32_rust
 from ..genvarloader import fill_empty_fixed_i32 as _fill_empty_fixed_i32_rust
 from ..genvarloader import fill_empty_scalar_f32 as _fill_empty_scalar_f32_rust
 from ..genvarloader import fill_empty_scalar_i32 as _fill_empty_scalar_i32_rust
+from ..genvarloader import fill_empty_seq_i32 as _fill_empty_seq_i32_rust
+from ..genvarloader import fill_empty_seq_u8 as _fill_empty_seq_u8_rust
 from ..genvarloader import gather_alleles as _gather_alleles_rust
 from ..genvarloader import gather_rows_f32 as _gather_rows_f32_rust
 from ..genvarloader import gather_rows_i32 as _gather_rows_i32_rust
@@ -673,10 +675,10 @@ def _fill_empty_scalar(data, offsets, fill):
 
 
 @nb.njit(nogil=True, cache=True)
-def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):  # pragma: no cover - njit
+def _fill_empty_seq_numba(data, var_offsets, seq_offsets, dummy):  # pragma: no cover - njit
     """Two-level analogue of ``_fill_empty_scalar`` for allele bytestrings.
     Empty variant-rows receive one dummy allele of ``dummy`` bytes. Returns
-    ``(new_data, new_var_offsets, new_seq_offsets)``."""
+    ``(new_data, new_var_offsets, new_seq_offsets)``. Preserves ``data.dtype``."""
     n_rows = var_offsets.shape[0] - 1
     L = dummy.shape[0]
     new_var = np.empty(n_rows + 1, np.int64)
@@ -719,6 +721,39 @@ def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):  # pragma: no cover 
                     dptr += 1
                 vptr += 1
     return new_data, new_var, new_seq
+
+
+register(
+    "fill_empty_seq_u8",
+    numba=_fill_empty_seq_numba,
+    rust=_fill_empty_seq_u8_rust,
+    default="rust",
+)
+register(
+    "fill_empty_seq_i32",
+    numba=_fill_empty_seq_numba,
+    rust=_fill_empty_seq_i32_rust,
+    default="rust",
+)
+
+
+def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):
+    """Dtype-preserving dispatch for fill-empty-seq (two-level dummy-fill).
+
+    Routes uint8 (allele bytes) and int32 (token windows) to typed Rust cores.
+    All other dtypes fall back to the dtype-preserving numba kernel so values
+    are never silently down-cast.
+    """
+    data = np.ascontiguousarray(data)
+    var_offsets = np.ascontiguousarray(var_offsets, np.int64)
+    seq_offsets = np.ascontiguousarray(seq_offsets, np.int64)
+    dummy = np.ascontiguousarray(dummy, data.dtype)
+    if data.dtype == np.uint8:
+        return get("fill_empty_seq_u8")(data, var_offsets, seq_offsets, dummy)
+    if data.dtype == np.int32:
+        return get("fill_empty_seq_i32")(data, var_offsets, seq_offsets, dummy)
+    # Arbitrary dtype: preserve via numba fallback.
+    return _fill_empty_seq_numba(data, var_offsets, seq_offsets, dummy)
 
 
 @nb.njit(nogil=True, cache=True)

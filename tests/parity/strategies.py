@@ -251,3 +251,46 @@ def fill_empty_fixed_inputs(draw, dtype=np.int32):
     )
     fill_val = dt.type(fill)
     return (data, row_offsets, inner, fill_val)
+
+
+@st.composite
+def fill_empty_seq_inputs(draw, dtype=np.uint8):
+    """Generate (data[dtype], var_offsets int64, seq_offsets int64, dummy[dtype])
+    with at least one guaranteed empty row for fill_empty_seq tests.
+
+    Layout:
+    - var_offsets: b*p+1 boundaries over variant groups (one guaranteed empty).
+    - seq_offsets: per-variant byte/token boundaries (len = total_vars + 1).
+    - data: flat element array (len = seq_offsets[-1]).
+    - dummy: random sequence of length >= 1 in the given dtype.
+    """
+    dt = np.dtype(dtype)
+    if np.issubdtype(dt, np.unsignedinteger):
+        elements = st.integers(0, 255)
+    else:
+        elements = st.integers(-1000, 1000)
+
+    n_rows = draw(st.integers(2, 6))
+    # Number of variants per row (zero = empty row).
+    var_counts = [draw(st.integers(0, 4)) for _ in range(n_rows)]
+    # Force at least one empty row.
+    empty_idx = draw(st.integers(0, n_rows - 1))
+    var_counts[empty_idx] = 0
+    var_offsets = np.concatenate([[0], np.cumsum(var_counts)]).astype(np.int64)
+    total_vars = int(var_offsets[-1])
+
+    # Per-variant byte/token lengths.
+    var_lens = [draw(st.integers(0, 5)) for _ in range(total_vars)]
+    seq_offsets = np.concatenate([[0], np.cumsum(var_lens)]).astype(np.int64)
+    total_elems = int(seq_offsets[-1])
+    data = np.array(
+        draw(st.lists(elements, min_size=total_elems, max_size=total_elems)), dt
+    )
+
+    # Dummy sequence: length >= 1.
+    dummy_len = draw(st.integers(1, 4))
+    dummy = np.array(
+        draw(st.lists(elements, min_size=dummy_len, max_size=dummy_len)), dt
+    )
+
+    return (data, var_offsets, seq_offsets, dummy)
