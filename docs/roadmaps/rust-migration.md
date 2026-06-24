@@ -124,7 +124,7 @@ py-spy on macOS needs sudo — hand David a bash script, don't invoke it directl
 Each phase is one bundled PR and ends in a measure checkpoint.
 
 ### Phase 0 — Foundation & harness 🚧
-_PR: —_
+_PR: #241_
 
 - [x] Stand up the `ffi/` seam + first lazily-grown domain module (NOT an empty
       skeleton — lazy growth, per the approved spec: a module is created only when it
