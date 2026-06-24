@@ -13,9 +13,11 @@ from einops import repeat
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
+from .._dispatch import register
 from .._flat import _Flat
 from .._ragged import INTERVAL_DTYPE, FlatIntervals, RaggedIntervals, RaggedTracks
 from .._utils import lengths_to_offsets
+from ._genotypes import _as_starts_stops
 from ._indexing import DatasetIndexer
 from ._insertion_fill import InsertionFill, Repeat5p
 from ._intervals import intervals_to_tracks
@@ -398,6 +400,63 @@ def shift_and_realign_track_sparse(
 
         if out_end_idx < length:
             out[out_end_idx:] = 0
+
+
+# -----------------------------------------------------------------------------
+# Dispatch: register numba + Rust backends for shift_and_realign_tracks_sparse
+# -----------------------------------------------------------------------------
+
+from ..genvarloader import (  # noqa: E402
+    shift_and_realign_tracks_sparse as _shift_and_realign_tracks_sparse_rust,
+)
+
+
+def _shift_and_realign_tracks_sparse_rust_wrapper(
+    out: NDArray[np.floating],
+    out_offsets: NDArray[np.integer],
+    regions: NDArray[np.integer],
+    shifts: NDArray[np.integer],
+    geno_offset_idx: NDArray[np.integer],
+    geno_v_idxs: NDArray[np.integer],
+    geno_offsets: NDArray[np.integer],
+    v_starts: NDArray[np.integer],
+    ilens: NDArray[np.integer],
+    tracks: NDArray[np.floating],
+    track_offsets: NDArray[np.integer],
+    params: NDArray[np.float64],
+    keep: NDArray[np.bool_] | None = None,
+    keep_offsets: NDArray[np.integer] | None = None,
+    strategy_id: int = 0,
+    base_seed: np.uint64 = np.uint64(0),
+) -> None:
+    """Rust wrapper: normalizes geno_offsets to (2, n) form then dispatches."""
+    geno_offsets_2d = _as_starts_stops(geno_offsets)
+    _shift_and_realign_tracks_sparse_rust(
+        out=out,
+        out_offsets=np.asarray(out_offsets, dtype=np.int64),
+        regions=np.asarray(regions, dtype=np.int32),
+        shifts=np.asarray(shifts, dtype=np.int32),
+        geno_offset_idx=np.asarray(geno_offset_idx, dtype=np.int64),
+        geno_v_idxs=np.asarray(geno_v_idxs, dtype=np.int32),
+        geno_offsets=geno_offsets_2d,
+        v_starts=np.asarray(v_starts, dtype=np.int32),
+        ilens=np.asarray(ilens, dtype=np.int32),
+        tracks=np.asarray(tracks, dtype=np.float32),
+        track_offsets=np.asarray(track_offsets, dtype=np.int64),
+        params=np.asarray(params, dtype=np.float64),
+        keep=keep,
+        keep_offsets=np.asarray(keep_offsets, dtype=np.int64) if keep_offsets is not None else None,
+        strategy_id=int(strategy_id),
+        base_seed=int(base_seed),
+    )
+
+
+register(
+    "shift_and_realign_tracks_sparse",
+    numba=shift_and_realign_tracks_sparse,
+    rust=_shift_and_realign_tracks_sparse_rust_wrapper,
+    default="rust",
+)
 
 
 # -----------------------------------------------------------------------------

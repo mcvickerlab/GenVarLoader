@@ -372,6 +372,55 @@ pub fn get_reference<'py>(
     out.into_pyarray(py)
 }
 
+/// Shift and realign tracks for a batch of (query, hap) pairs in place (writes `out`).
+///
+/// `geno_offsets` is the normalized (2, n) int64 starts/stops array;
+/// internally split into `.row(0)` (starts) and `.row(1)` (stops).
+/// `keep_offsets` stays 1-D (batch*ploidy + 1) offsets array for the keep mask, or None.
+/// `params` is a 1-D f64 parameter array (one entry per track, indexed Python-side).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn shift_and_realign_tracks_sparse(
+    mut out: PyReadwriteArray1<f32>,
+    out_offsets: PyReadonlyArray1<i64>,
+    regions: PyReadonlyArray2<i32>,
+    shifts: PyReadonlyArray2<i32>,
+    geno_offset_idx: PyReadonlyArray2<i64>,
+    geno_v_idxs: PyReadonlyArray1<i32>,
+    geno_offsets: PyReadonlyArray2<i64>,
+    v_starts: PyReadonlyArray1<i32>,
+    ilens: PyReadonlyArray1<i32>,
+    tracks: PyReadonlyArray1<f32>,
+    track_offsets: PyReadonlyArray1<i64>,
+    params: PyReadonlyArray1<f64>,
+    keep: Option<PyReadonlyArray1<bool>>,
+    keep_offsets: Option<PyReadonlyArray1<i64>>,
+    strategy_id: i64,
+    base_seed: u64,
+) {
+    use crate::tracks;
+    let go = geno_offsets.as_array();
+    tracks::shift_and_realign_tracks_sparse(
+        out.as_array_mut(),
+        out_offsets.as_array(),
+        regions.as_array(),
+        shifts.as_array(),
+        geno_offset_idx.as_array(),
+        geno_v_idxs.as_array(),
+        go.row(0),
+        go.row(1),
+        v_starts.as_array(),
+        ilens.as_array(),
+        tracks.as_array(),
+        track_offsets.as_array(),
+        params.as_array(),
+        keep.as_ref().map(|k| k.as_array()),
+        keep_offsets.as_ref().map(|ko| ko.as_array()),
+        strategy_id,
+        base_seed,
+    );
+}
+
 // ── DEBUG exports for PRNG parity tests (Task 7) ─────────────────────────────
 // These thin wrappers exist solely to make the Rust PRNG functions callable from
 // Python tests. They may be kept or removed after Task 8/9 review.

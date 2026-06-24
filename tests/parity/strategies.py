@@ -348,6 +348,148 @@ def get_reference_inputs(draw):
 
 
 @st.composite
+def shift_and_realign_tracks_inputs(draw):  # noqa: C901
+    """Contract-valid inputs for shift_and_realign_tracks_sparse.
+
+    Returns ``(total_out_size, inputs_tuple)`` where inputs_tuple is everything
+    EXCEPT the out buffer (inserted at index 0 by the parity harness).
+
+    Exercises all five strategy IDs:
+      0 = REPEAT_5P
+      1 = REPEAT_5P_NORM
+      2 = CONSTANT
+      3 = FLANK_SAMPLE
+      4 = INTERPOLATE
+
+    Layout mirrors the numba batch driver signature:
+      out_offsets (b*p+1,), regions (b,3), shifts (b,p),
+      geno_offset_idx (b,p), geno_v_idxs, geno_offsets (2,n),
+      v_starts, ilens, tracks (ragged b*l), track_offsets (b+1),
+      params (f64), keep (optional), keep_offsets (optional),
+      strategy_id, base_seed.
+    """
+    # ── strategy ──────────────────────────────────────────────────────────────
+    strategy_id = draw(st.integers(min_value=0, max_value=4))
+    if strategy_id == 2:  # CONSTANT
+        param_val = draw(st.floats(width=64, allow_nan=False, allow_infinity=False))
+    elif strategy_id == 3:  # FLANK_SAMPLE
+        param_val = float(draw(st.integers(min_value=0, max_value=5)))
+    elif strategy_id == 4:  # INTERPOLATE — order in {1,2,3}
+        param_val = float(draw(st.integers(min_value=1, max_value=3)))
+    else:  # REPEAT_5P (0) or REPEAT_5P_NORM (1): param unused
+        param_val = 0.0
+    params = np.array([param_val], dtype=np.float64)
+
+    base_seed = np.uint64(
+        draw(st.integers(min_value=0, max_value=int(np.iinfo(np.uint64).max)))
+    )
+
+    # ── variants (SNP/ins/del mix) ─────────────────────────────────────────────
+    n_unique = draw(st.integers(min_value=1, max_value=8))
+    # v_starts sorted, in [0, 120] so they fit within track windows
+    v_starts_raw = sorted(
+        draw(
+            st.lists(st.integers(0, 120), min_size=n_unique, max_size=n_unique)
+        )
+    )
+    v_starts = np.array(v_starts_raw, dtype=np.int32)
+    # ilens: -3..3 for del/snp/ins mix; ensure at least one each
+    ilens = np.array(
+        draw(st.lists(st.integers(-3, 3), min_size=n_unique, max_size=n_unique)),
+        dtype=np.int32,
+    )
+
+    # ── regions & tracks ─────────────────────────────────────────────────────
+    n_q = draw(st.integers(1, 4))
+    ploidy = draw(st.integers(1, 2))
+    n_groups = n_q * ploidy
+
+    # Per-query: q_start in [0, 80], region length in [4, 40]
+    q_starts = [draw(st.integers(0, 80)) for _ in range(n_q)]
+    region_lengths = [draw(st.integers(4, 40)) for _ in range(n_q)]
+
+    regions = np.empty((n_q, 3), np.int32)
+    for i in range(n_q):
+        regions[i] = (0, q_starts[i], q_starts[i] + region_lengths[i])
+
+    # Track for each query: length = region_length + extra deletion headroom
+    # We give a bit of extra ref track beyond the region so deletions can read
+    # past the region end (production contract: track is always >= region length).
+    track_lengths = [max(rl + 10, 1) for rl in region_lengths]
+    track_offsets = np.concatenate([[0], np.cumsum(track_lengths)]).astype(np.int64)
+    total_track = int(track_offsets[-1])
+    tracks = draw(
+        st.lists(
+            st.floats(min_value=-1e3, max_value=1e3, allow_nan=False, allow_infinity=False),
+            min_size=total_track,
+            max_size=total_track,
+        ).map(lambda xs: np.array(xs, dtype=np.float32))
+    )
+
+    # ── sparse genotypes ──────────────────────────────────────────────────────
+    counts = [draw(st.integers(0, 4)) for _ in range(n_groups)]
+    geno_offsets_1d = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+    geno_offset_idx = np.arange(n_groups, dtype=np.int64).reshape(n_q, ploidy)
+    v_idx_list: list[int] = []
+    for c in counts:
+        idxs = sorted(
+            draw(st.lists(st.integers(0, n_unique - 1), min_size=c, max_size=c))
+        )
+        v_idx_list.extend(idxs)
+    geno_v_idxs = np.array(v_idx_list, dtype=np.int32)
+
+    # normalize geno_offsets to (2, n) form
+    geno_offsets_2d = np.stack(
+        [geno_offsets_1d[:-1], geno_offsets_1d[1:]]
+    ).astype(np.int64)
+
+    # ── out_offsets: (n_q * ploidy + 1,) ─────────────────────────────────────
+    # Each (query, hap) output has the same length as the region (no jitter here)
+    out_lengths = np.array(
+        [rl for rl in region_lengths for _ in range(ploidy)], dtype=np.int64
+    )
+    out_offsets = np.concatenate([[0], np.cumsum(out_lengths)]).astype(np.int64)
+    total_out = int(out_offsets[-1])
+
+    # ── shifts ────────────────────────────────────────────────────────────────
+    shifts = np.zeros((n_q, ploidy), dtype=np.int32)
+    for qi in range(n_q):
+        for h in range(ploidy):
+            shifts[qi, h] = draw(st.integers(0, max(0, region_lengths[qi] // 4)))
+
+    # ── optional keep mask ────────────────────────────────────────────────────
+    use_keep = draw(st.booleans())
+    total_v = int(geno_offsets_1d[-1])
+    if use_keep and total_v > 0:
+        keep = np.array(
+            draw(st.lists(st.booleans(), min_size=total_v, max_size=total_v)), np.bool_
+        )
+        keep_offsets = geno_offsets_1d.copy()
+    else:
+        keep = None
+        keep_offsets = None
+
+    inputs = (
+        out_offsets,             # (b*p+1,)
+        regions,                 # (b, 3)
+        shifts,                  # (b, p)
+        geno_offset_idx,         # (b, p)
+        geno_v_idxs,             # ragged variant idxs
+        geno_offsets_2d,         # (2, n)
+        v_starts,                # (n_unique,)
+        ilens,                   # (n_unique,)
+        tracks,                  # (total_track,) ragged
+        track_offsets,           # (b+1,)
+        params,                  # (1,) f64
+        keep,                    # optional bool
+        keep_offsets,            # optional i64
+        int(strategy_id),        # int
+        base_seed,               # np.uint64
+    )
+    return total_out, inputs
+
+
+@st.composite
 def reconstruct_haplotypes_inputs(draw, annotate=False):  # noqa: ARG001
     """Contract-valid inputs for reconstruct_haplotypes_from_sparse.
 

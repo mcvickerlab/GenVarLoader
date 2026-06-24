@@ -188,6 +188,317 @@ pub fn apply_insertion_fill(
     }
 }
 
+/// Shift and realign a single track to correspond to one haplotype.
+///
+/// Mirrors numba `shift_and_realign_track_sparse` (lines 230-401 of `_tracks.py`)
+/// statement-by-statement.
+///
+/// Three key differences from the haplotype reconstruction kernel:
+/// 1. SNPs (`v_diff == 0`) are SKIPPED — tracks match reference at SNP positions.
+/// 2. Insertions route to `apply_insertion_fill` UNLESS `strategy_id == REPEAT_5P`
+///    (which repeats `track[v_rel_pos]` directly).
+/// 3. Trailing fill pads with `0.0` (NOT a pad_char byte).
+///
+/// # Parameters
+/// - `offset_idx`: index into geno_o_starts/geno_o_stops for this (query, hap) pair
+/// - `geno_v_idxs`: flat variant index array
+/// - `geno_o_starts`, `geno_o_stops`: normalized (2, n) offsets split into two rows
+/// - `v_starts`: variant start positions (absolute genomic coordinates)
+/// - `ilens`: variant insertion-length differences (signed)
+/// - `shift`: total shift for this haplotype
+/// - `track`: reference track values for this query (f32 slice)
+/// - `query_start`: the genomic start of this query region
+/// - `out`: output slice to fill (length = haplotype output length)
+/// - `params`: per-strategy parameter (f64)
+/// - `keep`: optional boolean mask over the variant group for this (query, hap)
+/// - `strategy_id`: insertion-fill strategy
+/// - `base_seed`, `query`, `hap`: seed components for FlankSample strategy
+#[allow(clippy::too_many_arguments)]
+pub fn shift_and_realign_track_sparse(
+    offset_idx: usize,
+    geno_v_idxs: ndarray::ArrayView1<i32>,
+    geno_o_starts: ndarray::ArrayView1<i64>,
+    geno_o_stops: ndarray::ArrayView1<i64>,
+    v_starts: ndarray::ArrayView1<i32>,
+    ilens: ndarray::ArrayView1<i32>,
+    shift: i64,
+    track: ndarray::ArrayView1<f32>,
+    query_start: i64,
+    out: &mut ndarray::ArrayViewMut1<f32>,
+    params: ndarray::ArrayView1<f64>,
+    keep: Option<ndarray::ArrayView1<bool>>,
+    strategy_id: i64,
+    base_seed: u64,
+    query: u64,
+    hap: u64,
+) {
+    // Numba: o_s, o_e = geno_offsets[offset_idx], geno_offsets[offset_idx + 1]  (1-D branch)
+    //        or geno_offsets[:, offset_idx]  (2-D branch — normalized form)
+    // We receive the pre-split (2, n) rows directly.
+    let o_s = geno_o_starts[offset_idx] as usize;
+    let o_e = geno_o_stops[offset_idx] as usize;
+    let variant_idxs = &geno_v_idxs.as_slice().unwrap()[o_s..o_e];
+    let length = out.len();
+    let n_variants = variant_idxs.len();
+
+    if n_variants == 0 {
+        // Numba: out[:] = track[:length]
+        for i in 0..length {
+            out[i] = track[i];
+        }
+        return;
+    }
+
+    // Numba: track_idx = 0; out_idx = 0; shifted = 0
+    let mut track_idx: i64 = 0;
+    let mut out_idx: i64 = 0;
+    let mut shifted: i64 = 0;
+
+    for v in 0..n_variants {
+        // Numba: if keep is not None and not keep[v]: continue
+        if let Some(ref k) = keep {
+            if !k[v] {
+                continue;
+            }
+        }
+
+        let variant = variant_idxs[v] as usize;
+
+        // Numba: v_rel_pos = v_starts[variant] - query_start
+        let v_rel_pos = v_starts[variant] as i64 - query_start;
+        // Numba: v_diff = ilens[variant]
+        let v_diff = ilens[variant] as i64;
+        // Numba: v_rel_end = v_rel_pos - min(0, v_diff) + 1
+        let v_rel_end = v_rel_pos - v_diff.min(0) + 1;
+
+        // Numba: if v_diff < 0 and v_rel_pos < 0 and v_rel_end >= 0:
+        //            track_idx = v_rel_end; continue
+        if v_diff < 0 && v_rel_pos < 0 && v_rel_end >= 0 {
+            track_idx = v_rel_end;
+            continue;
+        }
+
+        // Numba: if v_rel_pos < track_idx: continue  (overlapping variant)
+        if v_rel_pos < track_idx {
+            continue;
+        }
+
+        // Numba: v_len = max(0, v_diff) + 1
+        let mut v_len = v_diff.max(0) + 1;
+
+        // Numba: if shifted < shift:
+        if shifted < shift {
+            let ref_shift_dist = v_rel_pos - track_idx;
+            // Numba: if shifted + ref_shift_dist + v_len < shift: continue
+            if shifted + ref_shift_dist + v_len < shift {
+                continue;
+            } else if shifted + ref_shift_dist >= shift {
+                // Numba: track_idx += shift - shifted; shifted = shift
+                track_idx += shift - shifted;
+                shifted = shift;
+            } else {
+                // ref + (some of) variant is enough to finish shift
+                // Numba: allele_start_idx = shift - shifted - ref_shift_dist; shifted = shift
+                let allele_start_idx = shift - shifted - ref_shift_dist;
+                shifted = shift;
+                // Numba: if allele_start_idx == v_len: track_idx = v_rel_end; continue
+                if allele_start_idx == v_len {
+                    track_idx = v_rel_end;
+                    continue;
+                }
+                // Numba: track_idx = v_rel_pos; v_len -= allele_start_idx
+                track_idx = v_rel_pos;
+                v_len -= allele_start_idx;
+            }
+        }
+
+        // Key difference 1: SNPs skipped for tracks (they match ref)
+        // Numba: if v_diff == 0: continue
+        if v_diff == 0 {
+            continue;
+        }
+
+        // Numba: track_len = v_rel_pos - track_idx
+        let track_len = v_rel_pos - track_idx;
+        // Numba: if out_idx + track_len >= length: break
+        if out_idx + track_len >= length as i64 {
+            break;
+        }
+        // Numba: out[out_idx:out_idx+track_len] = track[track_idx:track_idx+track_len]
+        for i in 0..track_len as usize {
+            out[out_idx as usize + i] = track[track_idx as usize + i];
+        }
+        out_idx += track_len;
+
+        // Numba: writable_length = min(v_len, length - out_idx)
+        let writable_length = (v_len.min(length as i64 - out_idx)) as usize;
+
+        // Key difference 2: insertions route to apply_insertion_fill unless REPEAT_5P
+        // Numba: if v_diff > 0 and strategy_id != _REPEAT_5P:
+        if v_diff > 0 && strategy_id != REPEAT_5P {
+            apply_insertion_fill(
+                out,
+                out_idx as usize,
+                writable_length,
+                v_len,
+                track,
+                v_rel_pos,
+                strategy_id,
+                params,
+                base_seed,
+                query,
+                hap,
+            );
+        } else {
+            // Numba: for i in range(writable_length): out[out_idx + i] = track[v_rel_pos]
+            // Deletions AND Repeat5p insertions: repeat track[v_rel_pos]
+            let val = track[v_rel_pos as usize];
+            for i in 0..writable_length {
+                out[out_idx as usize + i] = val;
+            }
+        }
+        out_idx += writable_length as i64;
+        track_idx = v_rel_end;
+
+        // Numba: if out_idx >= length: break
+        if out_idx >= length as i64 {
+            break;
+        }
+    }
+
+    // Numba: if shifted < shift: track_idx += shift - shifted; ...
+    if shifted < shift {
+        track_idx += shift - shifted;
+        track_idx = track_idx.min(track.len() as i64);
+        // shifted = shift;  (not used after this point)
+    }
+
+    // Key difference 3: trailing fill pads with 0.0 (NOT pad_char)
+    // Numba: unfilled_length = length - out_idx
+    let unfilled_length = length as i64 - out_idx;
+    if unfilled_length > 0 {
+        let writable_ref = unfilled_length.min(track.len() as i64 - track_idx);
+        let out_end_idx = out_idx + writable_ref;
+        let ref_end_idx = track_idx + writable_ref;
+        // Numba: out[out_idx:out_end_idx] = track[track_idx:ref_end_idx]
+        for i in 0..writable_ref as usize {
+            out[out_idx as usize + i] = track[track_idx as usize + i];
+        }
+        // Numba: if out_end_idx < length: out[out_end_idx:] = 0
+        if out_end_idx < length as i64 {
+            for i in out_end_idx as usize..length {
+                out[i] = 0.0_f32;
+            }
+        }
+        let _ = ref_end_idx; // suppress unused warning
+    }
+}
+
+/// Shift and realign tracks for a batch of (query, hap) pairs in place (writes `out`).
+///
+/// Mirrors numba `shift_and_realign_tracks_sparse` (lines 141-228 of `_tracks.py`)
+/// statement-by-statement. Serial-only (rayon deferred to Phase 5, matching Task 5
+/// precedent for initial parity verification).
+///
+/// # Parameters
+/// - `out`: flat output buffer (f32), written in place
+/// - `out_offsets`: ragged offsets into out, shape (n_q * ploidy + 1,)
+/// - `regions`: (n_q, 3) array of (contig_idx, start, end) per query
+/// - `shifts`: (n_q, ploidy) shift per (query, hap)
+/// - `geno_offset_idx`: (n_q, ploidy) indices into geno_o_starts/stops
+/// - `geno_v_idxs`: flat variant index array
+/// - `geno_o_starts`, `geno_o_stops`: normalized (2, n) offsets split into rows
+/// - `v_starts`: variant start positions
+/// - `ilens`: variant ilen differences
+/// - `tracks`: flat reference track buffer (f32), ragged by track_offsets
+/// - `track_offsets`: (n_q + 1,) offsets into tracks (one track per query)
+/// - `params`: per-strategy parameter (f64), shape (1,)
+/// - `keep`, `keep_offsets`: optional keep mask + 1-D offsets
+/// - `strategy_id`, `base_seed`: insertion-fill strategy parameters
+#[allow(clippy::too_many_arguments)]
+pub fn shift_and_realign_tracks_sparse(
+    mut out: ndarray::ArrayViewMut1<f32>,
+    out_offsets: ndarray::ArrayView1<i64>,
+    regions: ndarray::ArrayView2<i32>,
+    shifts: ndarray::ArrayView2<i32>,
+    geno_offset_idx: ndarray::ArrayView2<i64>,
+    geno_v_idxs: ndarray::ArrayView1<i32>,
+    geno_o_starts: ndarray::ArrayView1<i64>,
+    geno_o_stops: ndarray::ArrayView1<i64>,
+    v_starts: ndarray::ArrayView1<i32>,
+    ilens: ndarray::ArrayView1<i32>,
+    tracks: ndarray::ArrayView1<f32>,
+    track_offsets: ndarray::ArrayView1<i64>,
+    params: ndarray::ArrayView1<f64>,
+    keep: Option<ndarray::ArrayView1<bool>>,
+    keep_offsets: Option<ndarray::ArrayView1<i64>>,
+    strategy_id: i64,
+    base_seed: u64,
+) {
+    // Numba: n_regions, ploidy = geno_offset_idx.shape
+    let n_regions = geno_offset_idx.nrows();
+    let ploidy = geno_offset_idx.ncols();
+
+    // Numba: for query in nb.prange(n_regions):  (serial equivalent)
+    for query in 0..n_regions {
+        // Numba: t_s, t_e = track_offsets[query], track_offsets[query + 1]
+        let t_s = track_offsets[query] as usize;
+        let t_e = track_offsets[query + 1] as usize;
+        // Numba: q_track = tracks[t_s:t_e]
+        let q_track = tracks.slice(ndarray::s![t_s..t_e]);
+
+        // Numba: q_start = regions[query, 1]
+        let q_start = regions[[query, 1]] as i64;
+
+        // Numba: for hap in nb.prange(ploidy):  (serial equivalent)
+        for hap in 0..ploidy {
+            // Numba: o_idx = geno_offset_idx[query, hap]
+            let o_idx = geno_offset_idx[[query, hap]] as usize;
+
+            // Numba: k_idx = query * ploidy + hap
+            let k_idx = query * ploidy + hap;
+
+            // Numba: if keep is not None and keep_offsets is not None:
+            //            qh_keep = keep[keep_offsets[k_idx]:keep_offsets[k_idx+1]]
+            let qh_keep: Option<ndarray::ArrayView1<bool>> =
+                match (&keep, &keep_offsets) {
+                    (Some(k), Some(ko)) => {
+                        let ks = ko[k_idx] as usize;
+                        let ke = ko[k_idx + 1] as usize;
+                        Some(k.slice(ndarray::s![ks..ke]))
+                    }
+                    _ => None,
+                };
+
+            // Numba: out_s, out_e = out_offsets[k_idx], out_offsets[k_idx + 1]
+            let out_s = out_offsets[k_idx] as usize;
+            let out_e = out_offsets[k_idx + 1] as usize;
+            // Numba: qh_out = out[out_s:out_e]; qh_shifts = shifts[query, hap]
+            let mut qh_out = out.slice_mut(ndarray::s![out_s..out_e]);
+            let qh_shift = shifts[[query, hap]] as i64;
+
+            shift_and_realign_track_sparse(
+                o_idx,
+                geno_v_idxs,
+                geno_o_starts,
+                geno_o_stops,
+                v_starts,
+                ilens,
+                qh_shift,
+                q_track,
+                q_start,
+                &mut qh_out,
+                params,
+                qh_keep,
+                strategy_id,
+                base_seed,
+                query as u64,
+                hap as u64,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,5 +1048,518 @@ mod tests {
         for &v in &result {
             assert_eq!(v, 11.0f32, "REPEAT_5P: expected 11.0");
         }
+    }
+
+    // ================================================================== //
+    // shift_and_realign_track_sparse tests                                //
+    // ================================================================== //
+
+    /// Helper to build the split (2, n) offsets and call `shift_and_realign_track_sparse`.
+    fn run_singular(
+        geno_v_idxs: &[i32],
+        geno_offsets_1d: &[i64], // 1-D (n+1)
+        offset_idx: usize,
+        v_starts: &[i32],
+        ilens: &[i32],
+        shift: i64,
+        track: &[f32],
+        query_start: i64,
+        out_len: usize,
+        params: &[f64],
+        keep: Option<&[bool]>,
+        strategy_id: i64,
+        base_seed: u64,
+        query: u64,
+        hap: u64,
+    ) -> Vec<f32> {
+        use ndarray::Array1;
+        let n = geno_offsets_1d.len() - 1;
+        let o_starts: Vec<i64> = geno_offsets_1d[..n].to_vec();
+        let o_stops: Vec<i64> = geno_offsets_1d[1..].to_vec();
+
+        let gvi_arr = Array1::from_vec(geno_v_idxs.to_vec());
+        let os_arr = Array1::from_vec(o_starts);
+        let oe_arr = Array1::from_vec(o_stops);
+        let vs_arr = Array1::from_vec(v_starts.to_vec());
+        let il_arr = Array1::from_vec(ilens.to_vec());
+        let track_arr = Array1::from_vec(track.to_vec());
+        let params_arr = Array1::from_vec(params.to_vec());
+
+        let mut out_arr = Array1::<f32>::zeros(out_len);
+        {
+            let mut out_view = out_arr.view_mut();
+            let keep_arr_opt = keep.map(|k| Array1::from_vec(k.to_vec()));
+            let keep_view = keep_arr_opt.as_ref().map(|a| a.view());
+            shift_and_realign_track_sparse(
+                offset_idx,
+                gvi_arr.view(),
+                os_arr.view(),
+                oe_arr.view(),
+                vs_arr.view(),
+                il_arr.view(),
+                shift,
+                track_arr.view(),
+                query_start,
+                &mut out_view,
+                params_arr.view(),
+                keep_view,
+                strategy_id,
+                base_seed,
+                query,
+                hap,
+            );
+        }
+        out_arr.to_vec()
+    }
+
+    /// No variants → out = track[:length] (shift must be 0).
+    #[test]
+    fn test_singular_no_variants() {
+        // track = [1.0, 2.0, 3.0, 4.0, 5.0], no variants, out_len = 4
+        let track = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let geno_v_idxs: Vec<i32> = vec![];
+        let geno_offsets = vec![0i64, 0]; // one empty group
+        let v_starts: Vec<i32> = vec![];
+        let ilens: Vec<i32> = vec![];
+
+        let result = run_singular(
+            &geno_v_idxs,
+            &geno_offsets,
+            0,
+            &v_starts,
+            &ilens,
+            0, // shift
+            &track,
+            0, // query_start
+            4, // out_len
+            &[0.0],
+            None,
+            REPEAT_5P,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(result, [1.0f32, 2.0, 3.0, 4.0], "no variants: copy track[:length]");
+    }
+
+    /// Deletion: track[v_rel_pos] repeated for writable_length; track advances by
+    /// |v_rel_end|.
+    ///
+    /// Setup:
+    ///   track = [10.0, 20.0, 30.0, 40.0, 50.0], query_start = 0, out_len = 4
+    ///   variant at v_start=1, ilen=-2 → v_rel_pos=1, v_diff=-2, v_rel_end=4
+    ///   v_len = max(0,-2)+1 = 1
+    ///   Expected: track[0..1] = [10.0], then track[1] repeated 1 time = [20.0],
+    ///   then track[4:] = [50.0], padded 0.0 if needed.
+    ///   Actually: out[0] = track[0] = 10.0 (ref up to v_rel_pos=1, track_len=1-0=1)
+    ///             out[1] = track[v_rel_pos=1] = 20.0 (repeated 1 time = v_len=1)
+    ///             track_idx = v_rel_end = 4; out_idx = 2
+    ///             fill rest: track[4:] = [50.0] → out[2] = 50.0; out[3] = 0.0 (pad)
+    #[test]
+    fn test_singular_deletion() {
+        let track = [10.0f32, 20.0, 30.0, 40.0, 50.0];
+        let v_starts = [1i32]; // v_start = 1
+        let ilens = [-2i32]; // deletion of 2 → v_rel_end = 1 - (-2) + 1 = 4... wait
+        // v_rel_end = v_rel_pos - min(0, v_diff) + 1 = 1 - (-2) + 1 = 4
+        // Actually: v_rel_end = 1 - min(0, -2) + 1 = 1 - (-2) + 1 = 4
+        // v_len = max(0, -2) + 1 = 0 + 1 = 1
+        // track up to v_rel_pos=1: track[0..1] = [10.0], out[0] = 10.0
+        // v_len=1 repeated: out[1] = track[1] = 20.0
+        // track_idx = 4; remaining: track[4..5] = [50.0] → out[2] = 50.0
+        // out[3] = 0.0 (trailing pad)
+        let geno_v_idxs = [0i32];
+        let geno_offsets = [0i64, 1];
+
+        let result = run_singular(
+            &geno_v_idxs,
+            &geno_offsets,
+            0,
+            &v_starts,
+            &ilens,
+            0,
+            &track,
+            0,
+            4,
+            &[0.0],
+            None,
+            REPEAT_5P,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(result[0], 10.0f32, "ref before deletion");
+        assert_eq!(result[1], 20.0f32, "deletion: track[v_rel_pos] repeated");
+        assert_eq!(result[2], 50.0f32, "ref after deletion (track_idx=4)");
+        assert_eq!(result[3], 0.0f32, "trailing pad = 0.0");
+    }
+
+    /// SNP (ilen=0) is SKIPPED — the output copies reference track straight through.
+    ///
+    /// Setup: track = [1.0, 2.0, 3.0, 4.0], query_start=0, out_len=4
+    ///   variant at v_start=2, ilen=0 → SNP, should be skipped
+    ///   Expected: out = [1.0, 2.0, 3.0, 4.0] (identical to track, SNP doesn't interrupt)
+    #[test]
+    fn test_singular_snp_skipped() {
+        let track = [1.0f32, 2.0, 3.0, 4.0];
+        let v_starts = [2i32];
+        let ilens = [0i32]; // SNP
+        let geno_v_idxs = [0i32];
+        let geno_offsets = [0i64, 1];
+
+        let result = run_singular(
+            &geno_v_idxs,
+            &geno_offsets,
+            0,
+            &v_starts,
+            &ilens,
+            0,
+            &track,
+            0,
+            4,
+            &[0.0],
+            None,
+            REPEAT_5P,
+            0,
+            0,
+            0,
+        );
+        // SNP is skipped — output equals track[:length]
+        assert_eq!(result, [1.0f32, 2.0, 3.0, 4.0], "SNP must be skipped for tracks");
+    }
+
+    /// Insertion with REPEAT_5P strategy: repeated track[v_rel_pos].
+    ///
+    /// Setup: track = [5.0, 10.0, 15.0, 20.0, 25.0], query_start=0, out_len=6
+    ///   variant at v_start=1, ilen=+2 → v_rel_pos=1, v_diff=2, v_rel_end=2
+    ///   v_len = max(0,2)+1 = 3
+    ///   REPEAT_5P: repeat track[v_rel_pos=1]=10.0 for writable_length=min(3, 6-1)=3
+    ///   ref before: track[0..1] = [5.0] → out[0]
+    ///   insertion: out[1..4] = [10.0, 10.0, 10.0]
+    ///   track_idx = v_rel_end = 2; remaining: track[2..5] → out[4..6] = [15.0, 20.0]
+    #[test]
+    fn test_singular_insertion_repeat5p() {
+        let track = [5.0f32, 10.0, 15.0, 20.0, 25.0];
+        let v_starts = [1i32];
+        let ilens = [2i32]; // insertion
+        let geno_v_idxs = [0i32];
+        let geno_offsets = [0i64, 1];
+
+        let result = run_singular(
+            &geno_v_idxs,
+            &geno_offsets,
+            0,
+            &v_starts,
+            &ilens,
+            0,
+            &track,
+            0,
+            6,
+            &[0.0],
+            None,
+            REPEAT_5P,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(result[0], 5.0f32, "ref before insertion");
+        assert_eq!(result[1], 10.0f32, "insertion REPEAT_5P i=0");
+        assert_eq!(result[2], 10.0f32, "insertion REPEAT_5P i=1");
+        assert_eq!(result[3], 10.0f32, "insertion REPEAT_5P i=2");
+        assert_eq!(result[4], 15.0f32, "ref after insertion (track[2])");
+        assert_eq!(result[5], 20.0f32, "ref after insertion (track[3])");
+    }
+
+    /// Insertion with CONSTANT strategy: fills with params[0].
+    #[test]
+    fn test_singular_insertion_constant() {
+        let track = [5.0f32, 10.0, 15.0, 20.0];
+        let v_starts = [1i32];
+        let ilens = [1i32]; // insertion: v_len = 2
+        let geno_v_idxs = [0i32];
+        let geno_offsets = [0i64, 1];
+        let fill_val = 99.0f64;
+
+        // out_len=5: ref[0..1]=[5.0], ins[1..3]=[99.0,99.0], ref after=track[2..4]
+        let result = run_singular(
+            &geno_v_idxs,
+            &geno_offsets,
+            0,
+            &v_starts,
+            &ilens,
+            0,
+            &track,
+            0,
+            5,
+            &[fill_val],
+            None,
+            CONSTANT,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(result[0], 5.0f32, "ref before insertion");
+        assert_eq!(result[1], fill_val as f32, "CONSTANT fill i=0");
+        assert_eq!(result[2], fill_val as f32, "CONSTANT fill i=1");
+        assert_eq!(result[3], 15.0f32, "ref after insertion (track[2])");
+        assert_eq!(result[4], 20.0f32, "ref after insertion (track[3])");
+    }
+
+    /// Shift: when shift > 0, track values are consumed from a later position.
+    ///
+    /// track = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0], shift=2, no variants, out_len=4
+    /// Expected: track[2..6] = [2.0, 3.0, 4.0, 5.0]
+    #[test]
+    fn test_singular_shift_no_variants() {
+        // With no variants, shift > 0 is handled by the post-loop track_idx adjustment.
+        // Numba: if shifted < shift: track_idx += shift - shifted; ...
+        // But the loop is never entered, so shifted stays 0.
+        // Post-loop: track_idx = 0 + shift = 2; writable_ref = min(4, 6-2) = 4
+        let track = [0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let geno_v_idxs: Vec<i32> = vec![];
+        let geno_offsets = vec![0i64, 0]; // empty group
+        let v_starts: Vec<i32> = vec![];
+        let ilens: Vec<i32> = vec![];
+
+        // Note: numba says "guaranteed to have shift = 0" when n_variants == 0,
+        // so this tests the case where the variant list is empty BUT shift is 0.
+        // For non-zero shift with no variants, it's technically undefined (won't be
+        // called in production), but let's verify shift=0 with an offset.
+        let result = run_singular(
+            &geno_v_idxs,
+            &geno_offsets,
+            0,
+            &v_starts,
+            &ilens,
+            0, // shift=0 (no variants path)
+            &track,
+            0,
+            4,
+            &[0.0],
+            None,
+            REPEAT_5P,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(result, [0.0f32, 1.0, 2.0, 3.0], "no variants + shift=0: copy track[:4]");
+    }
+
+    /// Shift=2 with one insertion variant: verify shift-through-variant logic.
+    ///
+    /// track=[0,1,2,3,4,5,6], query_start=0, shift=2, out_len=4
+    /// Insertion at v_start=1, ilen=+3 → v_rel_pos=1, v_len=4
+    ///
+    /// ref_shift_dist = 1 - 0 = 1
+    /// shifted + ref_shift_dist + v_len = 0 + 1 + 4 = 5 >= shift=2, so NOT "need more"
+    /// shifted + ref_shift_dist = 0 + 1 = 1 < shift=2, so NOT "can finish without variant"
+    /// allele_start_idx = 2 - 0 - 1 = 1; shifted=2; allele_start_idx(1) != v_len(4)
+    /// track_idx = v_rel_pos = 1; v_len -= 1 → v_len = 3
+    ///
+    /// Then v_diff=3 > 0, strategy=REPEAT_5P: repeat track[v_rel_pos=1]=1.0 for writable=min(3,4)=3
+    /// out[0..3] = [1.0, 1.0, 1.0]; track_idx = v_rel_end = 2; out_idx = 3
+    /// fill rest: track[2:] → out[3] = track[2] = 2.0
+    #[test]
+    fn test_singular_shift_through_insertion() {
+        let track: Vec<f32> = (0..7).map(|x| x as f32).collect();
+        let v_starts = [1i32]; // insertion at pos 1
+        let ilens = [3i32]; // +3 → v_len = 4, v_rel_end = 1 - 0 + 1 = 2
+        let geno_v_idxs = [0i32];
+        let geno_offsets = [0i64, 1];
+
+        let result = run_singular(
+            &geno_v_idxs,
+            &geno_offsets,
+            0,
+            &v_starts,
+            &ilens,
+            2, // shift
+            &track,
+            0,
+            4,
+            &[0.0],
+            None,
+            REPEAT_5P,
+            0,
+            0,
+            0,
+        );
+        // shifted=2, allele_start_idx=1 ≠ v_len=4 → track_idx=1, v_len=3
+        // v_diff=3≠0 and REPEAT_5P: out[0..3] = track[v_rel_pos=1] = 1.0
+        // out[3] = track[2] = 2.0
+        assert_eq!(result[0], 1.0f32, "insertion repeat after shift");
+        assert_eq!(result[1], 1.0f32, "insertion repeat");
+        assert_eq!(result[2], 1.0f32, "insertion repeat");
+        assert_eq!(result[3], 2.0f32, "ref after insertion");
+    }
+
+    // ================================================================== //
+    // shift_and_realign_tracks_sparse (batch) tests                      //
+    // ================================================================== //
+
+    /// Helper for the batch function.
+    fn run_batch(
+        out_len: usize,
+        out_offsets: &[i64],
+        regions: &[[i32; 3]],
+        shifts: &[i32],   // flat, will be reshaped (n_q, ploidy)
+        geno_offset_idx: &[i64], // flat (n_q * ploidy)
+        geno_v_idxs: &[i32],
+        geno_offsets_1d: &[i64],
+        v_starts: &[i32],
+        ilens: &[i32],
+        tracks: &[f32],
+        track_offsets: &[i64],
+        params: &[f64],
+        keep: Option<(&[bool], &[i64])>,
+        strategy_id: i64,
+        base_seed: u64,
+        ploidy: usize,
+    ) -> Vec<f32> {
+        use ndarray::{Array1, Array2};
+        let n_q = regions.len();
+        let n_groups = n_q * ploidy;
+
+        // Build (2, n_groups) offsets
+        let n = geno_offsets_1d.len() - 1;
+        let o_starts: Vec<i64> = geno_offsets_1d[..n].to_vec();
+        let o_stops: Vec<i64> = geno_offsets_1d[1..].to_vec();
+
+        let regions_arr = Array2::from_shape_vec(
+            (n_q, 3),
+            regions.iter().flat_map(|r| r.iter().cloned()).collect(),
+        )
+        .unwrap();
+        let shifts_arr = Array2::from_shape_vec(
+            (n_q, ploidy),
+            shifts.to_vec(),
+        )
+        .unwrap();
+        let goi_arr = Array2::from_shape_vec(
+            (n_q, ploidy),
+            geno_offset_idx.to_vec(),
+        )
+        .unwrap();
+
+        let out_offsets_arr = Array1::from_vec(out_offsets.to_vec());
+        let gvi_arr = Array1::from_vec(geno_v_idxs.to_vec());
+        let os_arr = Array1::from_vec(o_starts);
+        let oe_arr = Array1::from_vec(o_stops);
+        let vs_arr = Array1::from_vec(v_starts.to_vec());
+        let il_arr = Array1::from_vec(ilens.to_vec());
+        let tracks_arr = Array1::from_vec(tracks.to_vec());
+        let to_arr = Array1::from_vec(track_offsets.to_vec());
+        let params_arr = Array1::from_vec(params.to_vec());
+
+        let mut out_arr = Array1::<f32>::zeros(out_len);
+
+        let (keep_arr_opt, keep_off_arr_opt) = if let Some((k, ko)) = keep {
+            (
+                Some(Array1::from_vec(k.to_vec())),
+                Some(Array1::from_vec(ko.to_vec())),
+            )
+        } else {
+            (None, None)
+        };
+
+        shift_and_realign_tracks_sparse(
+            out_arr.view_mut(),
+            out_offsets_arr.view(),
+            regions_arr.view(),
+            shifts_arr.view(),
+            goi_arr.view(),
+            gvi_arr.view(),
+            os_arr.view(),
+            oe_arr.view(),
+            vs_arr.view(),
+            il_arr.view(),
+            tracks_arr.view(),
+            to_arr.view(),
+            params_arr.view(),
+            keep_arr_opt.as_ref().map(|a| a.view()),
+            keep_off_arr_opt.as_ref().map(|a| a.view()),
+            strategy_id,
+            base_seed,
+        );
+
+        let _ = n_groups; // suppress unused warning
+        out_arr.to_vec()
+    }
+
+    /// Batch with 1 query, 1 hap, no variants → copies track.
+    #[test]
+    fn test_batch_single_no_variants() {
+        // track = [1.0, 2.0, 3.0, 4.0, 5.0] for query 0
+        let tracks = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let regions = [[0i32, 0, 4]]; // length=4
+        let shifts = [0i32];
+        let geno_offset_idx = [0i64]; // (1, 1)
+        let geno_v_idxs: Vec<i32> = vec![];
+        let geno_offsets = [0i64, 0]; // empty group
+        let v_starts: Vec<i32> = vec![];
+        let ilens: Vec<i32> = vec![];
+        let track_offsets = [0i64, 5];
+        let out_offsets = [0i64, 4];
+        let params = [0.0f64];
+
+        let result = run_batch(
+            4,
+            &out_offsets,
+            &regions,
+            &shifts,
+            &geno_offset_idx,
+            &geno_v_idxs,
+            &geno_offsets,
+            &v_starts,
+            &ilens,
+            &tracks,
+            &track_offsets,
+            &params,
+            None,
+            REPEAT_5P,
+            0,
+            1, // ploidy
+        );
+        assert_eq!(result, [1.0f32, 2.0, 3.0, 4.0], "batch single: copy track[:4]");
+    }
+
+    /// Batch with 2 queries, 1 hap each, SNPs — must pass through unchanged.
+    #[test]
+    fn test_batch_two_queries_snps() {
+        // query 0: track[0..3] = [1.0, 2.0, 3.0], SNP at pos 1 (skipped) → out=[1,2,3]
+        // query 1: track[3..6] = [4.0, 5.0, 6.0], no variants → out=[4,5,6]
+        let tracks = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let regions = [[0i32, 0, 3], [0, 10, 13]];
+        let shifts = [0i32, 0];
+        let geno_offset_idx = [0i64, 1]; // q0→group0, q1→group1
+        let geno_v_idxs = [0i32]; // query 0 has SNP variant 0
+        let v_starts = [1i32]; // v at pos 1 (within q0 [0,3))
+        let ilens = [0i32]; // SNP → should be skipped
+        let geno_offsets = [0i64, 1, 1]; // group0=[0..1], group1=[1..1]=empty
+        let track_offsets = [0i64, 3, 6];
+        let out_offsets = [0i64, 3, 6];
+        let params = [0.0f64];
+
+        let result = run_batch(
+            6,
+            &out_offsets,
+            &regions,
+            &shifts,
+            &geno_offset_idx,
+            &geno_v_idxs,
+            &geno_offsets,
+            &v_starts,
+            &ilens,
+            &tracks,
+            &track_offsets,
+            &params,
+            None,
+            REPEAT_5P,
+            0,
+            1,
+        );
+        // SNP skipped → query 0 output = track[0..3]
+        assert_eq!(result[..3], [1.0f32, 2.0, 3.0], "q0: SNP skipped, track copied");
+        // No variants in q1 → track[3..6]
+        assert_eq!(result[3..], [4.0f32, 5.0, 6.0], "q1: no variants, track copied");
     }
 }

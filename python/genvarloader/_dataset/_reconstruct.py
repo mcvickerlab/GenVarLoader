@@ -32,7 +32,8 @@ from ._protocol import Reconstructor
 from ._rag_variants import RaggedVariants
 from ._ref import Ref
 from ._splice import SplicePlan
-from ._tracks import _T, Tracks, TrackType, _NewT, shift_and_realign_tracks_sparse
+from ._tracks import _T, Tracks, TrackType, _NewT  # noqa: F401
+from .._dispatch import get as _dispatch_get
 
 # Re-exports for back-compat (callers historically imported these from
 # ``_reconstruct``):
@@ -207,7 +208,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                 )
 
                 _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
-                shift_and_realign_tracks_sparse(
+                _dispatch_get("shift_and_realign_tracks_sparse")(
                     out=_out,  # (b*p*l)
                     out_offsets=out_ofsts_per_t,  # (b*p+1)
                     regions=regions,  # (b, 3)
