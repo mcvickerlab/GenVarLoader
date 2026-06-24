@@ -137,13 +137,18 @@ def choose_exonic_variants_inputs(draw):
 
 
 @st.composite
-def gather_rows_inputs(draw):
+def gather_rows_inputs(draw, dtype=np.int32):
     n_groups = draw(st.integers(1, 6))
     counts = [draw(st.integers(0, 5)) for _ in range(n_groups)]
     offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
     total = int(offsets[-1])
+    dt = np.dtype(dtype)
+    if np.issubdtype(dt, np.floating):
+        elements = st.floats(width=32, allow_nan=False, allow_infinity=False)
+    else:
+        elements = st.integers(0, 1000)
     data = np.array(
-        draw(st.lists(st.integers(0, 1000), min_size=total, max_size=total)), np.int32
+        draw(st.lists(elements, min_size=total, max_size=total)), dt
     )
     n_rows = draw(st.integers(1, 8))
     goi = np.array(

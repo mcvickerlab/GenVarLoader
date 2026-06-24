@@ -91,20 +91,38 @@ pub fn choose_exonic_variants<'py>(
     (keep.into_pyarray(py), koff.into_pyarray(py))
 }
 
-/// Per-row variant-index gather (see `variants::gather_rows`).
+/// Per-row i32 gather — variant indices (see `variants::gather_rows_i32`).
 #[pyfunction]
-pub fn gather_rows<'py>(
+pub fn gather_rows_i32<'py>(
     py: Python<'py>,
     geno_offset_idx: PyReadonlyArray1<i64>,
     geno_offsets: PyReadonlyArray2<i64>,
-    geno_v_idxs: PyReadonlyArray1<i32>,
+    data: PyReadonlyArray1<i32>,
 ) -> (Bound<'py, PyArray1<i32>>, Bound<'py, PyArray1<i64>>) {
     let go = geno_offsets.as_array();
-    let (v, off) = variants::gather_rows(
+    let (v, off) = variants::gather_rows_i32(
         geno_offset_idx.as_array(),
         go.row(0),
         go.row(1),
-        geno_v_idxs.as_array(),
+        data.as_array(),
+    );
+    (v.into_pyarray(py), off.into_pyarray(py))
+}
+
+/// Per-row f32 gather — dosage values (see `variants::gather_rows_f32`).
+#[pyfunction]
+pub fn gather_rows_f32<'py>(
+    py: Python<'py>,
+    geno_offset_idx: PyReadonlyArray1<i64>,
+    geno_offsets: PyReadonlyArray2<i64>,
+    data: PyReadonlyArray1<f32>,
+) -> (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>) {
+    let go = geno_offsets.as_array();
+    let (v, off) = variants::gather_rows_f32(
+        geno_offset_idx.as_array(),
+        go.row(0),
+        go.row(1),
+        data.as_array(),
     );
     (v.into_pyarray(py), off.into_pyarray(py))
 }

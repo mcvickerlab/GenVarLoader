@@ -12,7 +12,8 @@ from numpy.typing import NDArray
 
 from .._dispatch import get, register
 from ..genvarloader import gather_alleles as _gather_alleles_rust
-from ..genvarloader import gather_rows as _gather_rows_rust
+from ..genvarloader import gather_rows_f32 as _gather_rows_f32_rust
+from ..genvarloader import gather_rows_i32 as _gather_rows_i32_rust
 from ._genotypes import _as_starts_stops
 
 if TYPE_CHECKING:
@@ -558,7 +559,8 @@ def _gather_rows_numba(geno_offset_idx, geno_offsets, geno_v_idxs):
     )
 
 
-register("gather_rows", numba=_gather_rows_numba, rust=_gather_rows_rust, default="rust")
+register("gather_rows_i32", numba=_gather_rows_numba, rust=_gather_rows_i32_rust, default="rust")
+register("gather_rows_f32", numba=_gather_rows_numba, rust=_gather_rows_f32_rust, default="rust")
 
 
 def _gather_rows(
@@ -566,12 +568,22 @@ def _gather_rows(
     offsets: NDArray[np.int64],
     data: NDArray,
 ) -> tuple[NDArray, NDArray[np.int64]]:
-    """Dispatch per-row variant-index gather (numba/rust), normalizing offsets."""
-    return get("gather_rows")(
-        np.ascontiguousarray(geno_offset_idx, np.int64),
-        _as_starts_stops(offsets),
-        np.ascontiguousarray(data, np.int32),
-    )
+    """Dispatch per-row gather (numba/rust), preserving data dtype.
+
+    Routes int32 and float32 to typed Rust cores; all other dtypes fall back to
+    the dtype-preserving numba kernel so values are never silently down-cast
+    (e.g. custom per-call FORMAT fields, issue #231).
+    """
+    goi = np.ascontiguousarray(geno_offset_idx, np.int64)
+    off2d = _as_starts_stops(offsets)
+    data = np.ascontiguousarray(data)
+    if data.dtype == np.int32:
+        return get("gather_rows_i32")(goi, off2d, data)
+    if data.dtype == np.float32:
+        return get("gather_rows_f32")(goi, off2d, data)
+    # Arbitrary custom-FORMAT-field dtypes (#231): no typed Rust core — use the
+    # dtype-preserving numba kernel directly so values are never down-cast.
+    return _gather_rows_numba(goi, off2d, data)
 
 
 @nb.njit(nogil=True, cache=True)
