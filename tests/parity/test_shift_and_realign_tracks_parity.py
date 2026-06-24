@@ -49,7 +49,7 @@ def _assert_parity(total_out: int, inputs: tuple) -> None:
     np.testing.assert_array_equal(out_n, out_r, err_msg="out mismatch (tracks)")
 
 
-@settings(deadline=None)
+@settings(deadline=None, max_examples=500)
 @given(shift_and_realign_tracks_inputs())
 def test_shift_and_realign_tracks_all_strategies(args):
     total_out, inputs = args
