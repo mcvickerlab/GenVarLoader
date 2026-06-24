@@ -2,7 +2,7 @@
 //!
 //! Mirrors `reconstruct_haplotype_from_sparse` in
 //! `python/genvarloader/_dataset/_genotypes.py:277-465` statement-by-statement.
-use ndarray::{s, ArrayView1, ArrayViewMut1};
+use ndarray::{s, ArrayView1, ArrayView2, ArrayViewMut1};
 
 /// Reconstruct a single haplotype from reference sequence and variants.
 ///
@@ -232,6 +232,131 @@ pub fn reconstruct_haplotype_from_sparse(
                 ap.slice_mut(s![ps..pe]).fill(i32::MAX);
             }
         }
+    }
+}
+
+/// Batch driver: reconstruct haplotypes for all (query, hap) pairs.
+///
+/// Mirrors `reconstruct_haplotypes_from_sparse` (plural) in
+/// `python/genvarloader/_dataset/_genotypes.py`.
+///
+/// # Parameters
+/// - `out` – flat output buffer, length = out_offsets[-1] (u8); written in place
+/// - `out_offsets` – shape (batch*ploidy + 1,) offsets into `out`
+/// - `regions` – shape (batch, 3) as (contig_idx, start, end) i32
+/// - `shifts` – shape (batch, ploidy) i32
+/// - `geno_offset_idx` – shape (batch, ploidy) i64 indices into geno_o_starts/stops
+/// - `geno_o_starts` – shape (n,) i64 — row(0) of normalized (2,n) geno_offsets
+/// - `geno_o_stops` – shape (n,) i64 — row(1) of normalized (2,n) geno_offsets
+/// - `geno_v_idxs` – flat sparse genotype variant indices i32
+/// - `v_starts` – variant genomic start positions i32
+/// - `ilens` – variant insertion lengths i32
+/// - `alt_alleles` – packed ALT allele bytes u8
+/// - `alt_offsets` – offsets into alt_alleles i64
+/// - `ref_` – packed reference bytes u8
+/// - `ref_offsets` – per-contig offsets into ref_ i64
+/// - `pad_char` – padding byte u8
+/// - `keep` – optional flat keep mask bool
+/// - `keep_offsets` – optional 1D (batch*ploidy + 1) offsets into keep i64
+/// - `annot_v_idxs` – optional annotation output i32 (same layout as out)
+/// - `annot_ref_pos` – optional annotation output i32 (same layout as out)
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_haplotypes_from_sparse(
+    mut out: ArrayViewMut1<u8>,
+    out_offsets: ArrayView1<i64>,
+    regions: ArrayView2<i32>,
+    shifts: ArrayView2<i32>,
+    geno_offset_idx: ArrayView2<i64>,
+    geno_o_starts: ArrayView1<i64>,
+    geno_o_stops: ArrayView1<i64>,
+    geno_v_idxs: ArrayView1<i32>,
+    v_starts: ArrayView1<i32>,
+    ilens: ArrayView1<i32>,
+    alt_alleles: ArrayView1<u8>,
+    alt_offsets: ArrayView1<i64>,
+    ref_: ArrayView1<u8>,
+    ref_offsets: ArrayView1<i64>,
+    pad_char: u8,
+    keep: Option<ArrayView1<bool>>,
+    keep_offsets: Option<ArrayView1<i64>>,
+    mut annot_v_idxs: Option<ArrayViewMut1<i32>>,
+    mut annot_ref_pos: Option<ArrayViewMut1<i32>>,
+) {
+    let batch_size = regions.nrows();
+    let ploidy = shifts.ncols();
+    let n_work = batch_size * ploidy;
+
+    let out_raw: *mut u8 = out.as_mut_ptr();
+    let av_raw: Option<*mut i32> = annot_v_idxs.as_mut().map(|a| a.as_mut_ptr());
+    let ap_raw: Option<*mut i32> = annot_ref_pos.as_mut().map(|a| a.as_mut_ptr());
+
+    for k in 0..n_work {
+        let query = k / ploidy;
+        let hap = k % ploidy;
+
+        // geno slice for this (query, hap)
+        let o_idx = geno_offset_idx[[query, hap]] as usize;
+        let o_s = geno_o_starts[o_idx] as usize;
+        let o_e = geno_o_stops[o_idx] as usize;
+        let qh_v_idxs = geno_v_idxs.slice(s![o_s..o_e]);
+
+        // keep slice
+        let qh_keep: Option<ArrayView1<bool>> =
+            if let (Some(ref k_arr), Some(ref ko)) = (&keep, &keep_offsets) {
+                let ks = ko[k] as usize;
+                let ke = ko[k + 1] as usize;
+                Some(k_arr.slice(s![ks..ke]))
+            } else {
+                None
+            };
+
+        // region info
+        let c_idx = regions[[query, 0]] as usize;
+        let c_s = ref_offsets[c_idx] as usize;
+        let c_e = ref_offsets[c_idx + 1] as usize;
+        let contig_ref = ref_.slice(s![c_s..c_e]);
+        let ref_start = regions[[query, 1]] as i64;
+        let shift = shifts[[query, hap]] as i64;
+
+        // out slice
+        let out_s = out_offsets[k] as usize;
+        let out_e = out_offsets[k + 1] as usize;
+
+        // SAFETY: each k accesses a non-overlapping [out_s..out_e] slice
+        // (out_offsets is monotonically non-decreasing). The loop is serial.
+        let out_chunk =
+            unsafe { std::slice::from_raw_parts_mut(out_raw.add(out_s), out_e - out_s) };
+        let out_view = ArrayViewMut1::from(out_chunk);
+
+        let av_view: Option<ArrayViewMut1<i32>> = av_raw.map(|p| {
+            let chunk = unsafe {
+                std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s)
+            };
+            ArrayViewMut1::from(chunk)
+        });
+
+        let ap_view: Option<ArrayViewMut1<i32>> = ap_raw.map(|p| {
+            let chunk = unsafe {
+                std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s)
+            };
+            ArrayViewMut1::from(chunk)
+        });
+
+        reconstruct_haplotype_from_sparse(
+            qh_v_idxs,
+            v_starts,
+            ilens,
+            shift,
+            alt_alleles,
+            alt_offsets,
+            contig_ref,
+            ref_start,
+            out_view,
+            pad_char,
+            qh_keep,
+            av_view,
+            ap_view,
+        );
     }
 }
 
@@ -773,5 +898,53 @@ mod tests {
             params.8, params.9, None, false,
         );
         assert_eq!(out_annot, out_plain, "annotated and non-annotated must produce identical out bytes");
+    }
+
+    #[test]
+    fn batch_two_queries_two_haplotypes() {
+        // A trivial batch: 2 queries × 1 haplotype, no variants.
+        // Expected: each out chunk is just the corresponding ref slice.
+        let reference = b"ACGTACGTACGT";
+        let ref_ = arr1(reference.as_ref());
+        let ref_offsets = arr1(&[0i64, 12]);
+        let v_starts = arr1::<i32>(&[]);
+        let ilens = arr1::<i32>(&[]);
+        let alt_alleles = arr1::<u8>(&[]);
+        let alt_offsets = arr1(&[0i64]);
+        // Two regions: [0,4) and [4,8) on contig 0
+        let regions = ndarray::arr2(&[[0i32, 0, 4], [0, 4, 8]]);
+        let shifts = ndarray::arr2(&[[0i32], [0]]);
+        let geno_offset_idx = ndarray::arr2(&[[0i64], [1]]);
+        let geno_o_starts = arr1(&[0i64, 0]);
+        let geno_o_stops = arr1(&[0i64, 0]);
+        let geno_v_idxs = arr1::<i32>(&[]);
+        let out_offsets = arr1(&[0i64, 4, 8]);
+        let pad_char = b'N';
+
+        let mut out = ndarray::Array1::<u8>::from_elem(8, pad_char);
+        super::reconstruct_haplotypes_from_sparse(
+            out.view_mut(),
+            out_offsets.view(),
+            regions.view(),
+            shifts.view(),
+            geno_offset_idx.view(),
+            geno_o_starts.view(),
+            geno_o_stops.view(),
+            geno_v_idxs.view(),
+            v_starts.view(),
+            ilens.view(),
+            alt_alleles.view(),
+            alt_offsets.view(),
+            ref_.view(),
+            ref_offsets.view(),
+            pad_char,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(&out.as_slice().unwrap()[0..4], b"ACGT", "first region");
+        assert_eq!(&out.as_slice().unwrap()[4..8], b"ACGT", "second region");
     }
 }

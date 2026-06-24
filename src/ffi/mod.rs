@@ -298,6 +298,57 @@ pub fn fill_empty_seq_i32<'py>(
     (nd.into_pyarray(py), nvar.into_pyarray(py), nseq.into_pyarray(py))
 }
 
+/// Reconstruct haplotypes for a batch of (query, hap) pairs in place (writes `out`).
+///
+/// `geno_offsets` is the normalized (2, n) int64 starts/stops array.
+/// `keep_offsets` is the 1-D (batch*ploidy + 1) offsets array for the keep mask, or None.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_haplotypes_from_sparse(
+    mut out: PyReadwriteArray1<u8>,
+    out_offsets: PyReadonlyArray1<i64>,
+    regions: PyReadonlyArray2<i32>,
+    shifts: PyReadonlyArray2<i32>,
+    geno_offset_idx: PyReadonlyArray2<i64>,
+    geno_offsets: PyReadonlyArray2<i64>,
+    geno_v_idxs: PyReadonlyArray1<i32>,
+    v_starts: PyReadonlyArray1<i32>,
+    ilens: PyReadonlyArray1<i32>,
+    alt_alleles: PyReadonlyArray1<u8>,
+    alt_offsets: PyReadonlyArray1<i64>,
+    ref_: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+    keep: Option<PyReadonlyArray1<bool>>,
+    keep_offsets: Option<PyReadonlyArray1<i64>>,
+    mut annot_v_idxs: Option<PyReadwriteArray1<i32>>,
+    mut annot_ref_pos: Option<PyReadwriteArray1<i32>>,
+) {
+    use crate::reconstruct;
+    let go = geno_offsets.as_array();
+    reconstruct::reconstruct_haplotypes_from_sparse(
+        out.as_array_mut(),
+        out_offsets.as_array(),
+        regions.as_array(),
+        shifts.as_array(),
+        geno_offset_idx.as_array(),
+        go.row(0),
+        go.row(1),
+        geno_v_idxs.as_array(),
+        v_starts.as_array(),
+        ilens.as_array(),
+        alt_alleles.as_array(),
+        alt_offsets.as_array(),
+        ref_.as_array(),
+        ref_offsets.as_array(),
+        pad_char,
+        keep.as_ref().map(|k| k.as_array()),
+        keep_offsets.as_ref().map(|ko| ko.as_array()),
+        annot_v_idxs.as_mut().map(|a| a.as_array_mut()),
+        annot_ref_pos.as_mut().map(|a| a.as_array_mut()),
+    );
+}
+
 /// Fetch padded reference rows for each region into one flat buffer.
 /// `regions[i] = (contig_idx, start, end)`. Mirrors numba `_get_reference_par/_ser`.
 #[pyfunction]

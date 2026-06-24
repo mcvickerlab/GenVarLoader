@@ -345,3 +345,127 @@ def get_reference_inputs(draw):
     pad_char = draw(st.integers(0, 255))
     parallel = draw(st.booleans())
     return regions, out_offsets, reference, ref_offsets, np.uint8(pad_char), parallel
+
+
+@st.composite
+def reconstruct_haplotypes_inputs(draw, annotate=False):  # noqa: ARG001
+    """Contract-valid inputs for reconstruct_haplotypes_from_sparse.
+
+    Returns ``(total_out_size, inputs_tuple)`` where inputs_tuple is everything
+    EXCEPT the out buffer (inserted at index 0 by the harness). The
+    ``annotate`` parameter is accepted but unused — the test file decides whether
+    to build annotation buffers.
+    """
+    from hypothesis.extra.numpy import arrays as hp_arrays
+
+    # ── reference (1–2 contigs) ─────────────────────────────────────────────
+    # Draw reference FIRST so we can constrain variant positions to be within
+    # the contig bounds (mirrors the production contract where variants always
+    # come from VCF records within the contig).
+    n_contigs = draw(st.integers(1, 2))
+    contig_lens = [draw(st.integers(10, 80)) for _ in range(n_contigs)]
+
+    # ── variants ──────────────────────────────────────────────────────────────
+    n_unique = draw(st.integers(min_value=1, max_value=6))
+    # Constrain v_starts to [0, min_contig_len - 1] so that ref[ref_idx:v_pos]
+    # never exceeds any contig's bounds. Variants are shared across all queries
+    # (which may reference different contigs), so we must be conservative and use
+    # the shortest contig's length as the upper bound. In production, variants are
+    # always within-contig; this constraint enforces that invariant.
+    min_contig_len = min(contig_lens)
+    v_starts_raw = draw(
+        st.lists(st.integers(0, min_contig_len - 1), min_size=n_unique, max_size=n_unique)
+    )
+    v_starts = np.sort(np.array(v_starts_raw, dtype=np.int32))
+    ilens = np.array(
+        draw(st.lists(st.integers(-3, 3), min_size=n_unique, max_size=n_unique)),
+        dtype=np.int32,
+    )
+    # atomized: alt_len = max(1, 1 + ilen)
+    alt_lens = np.maximum(1, 1 + ilens).astype(np.int64)
+    alt_offsets = np.concatenate([[np.int64(0)], np.cumsum(alt_lens)]).astype(np.int64)
+    total_alt = int(alt_offsets[-1])
+    alt_alleles = draw(hp_arrays(np.uint8, total_alt, elements=st.integers(65, 90)))
+    ref_offsets = np.concatenate([[np.int64(0)], np.cumsum(contig_lens)]).astype(np.int64)
+    reference = draw(
+        hp_arrays(np.uint8, int(ref_offsets[-1]), elements=st.integers(65, 90))
+    )
+
+    # ── sparse genotypes ──────────────────────────────────────────────────────
+    n_q = draw(st.integers(1, 3))
+    ploidy = draw(st.integers(1, 2))
+    n_groups = n_q * ploidy
+    counts = [draw(st.integers(0, 4)) for _ in range(n_groups)]
+    geno_offsets_1d = np.concatenate([[np.int64(0)], np.cumsum(counts)]).astype(np.int64)
+    geno_offset_idx = np.arange(n_groups, dtype=np.int64).reshape(n_q, ploidy)
+    v_idx_list: list[int] = []
+    for c in counts:
+        idxs = sorted(
+            draw(st.lists(st.integers(0, n_unique - 1), min_size=c, max_size=c))
+        )
+        v_idx_list.extend(idxs)
+    geno_v_idxs = np.array(v_idx_list, dtype=np.int32)
+
+    # ── regions: (contig_idx, start, end) ────────────────────────────────────
+    regions = np.empty((n_q, 3), np.int32)
+    region_lengths: list[int] = []
+    for i in range(n_q):
+        c = draw(st.integers(0, n_contigs - 1))
+        clen = contig_lens[c]
+        start = draw(st.integers(0, max(0, clen - 1)))
+        length = draw(st.integers(1, min(40, clen - start + 5)))
+        regions[i] = (c, start, start + length)
+        region_lengths.append(length)
+
+    # ── out_offsets: (n_q * ploidy + 1,) ─────────────────────────────────────
+    out_lengths_mat = np.array(region_lengths, dtype=np.int64)[:, None] * np.ones(
+        ploidy, dtype=np.int64
+    )  # (n_q, ploidy)
+    out_offsets = np.concatenate(
+        [np.array([np.int64(0)]), np.cumsum(out_lengths_mat.ravel())]
+    ).astype(np.int64)
+    total_out = int(out_offsets[-1])
+
+    # ── shifts ────────────────────────────────────────────────────────────────
+    shifts = np.zeros((n_q, ploidy), dtype=np.int32)
+    for qi in range(n_q):
+        for h in range(ploidy):
+            shifts[qi, h] = draw(st.integers(0, max(0, region_lengths[qi] // 4)))
+
+    # ── optional keep mask ────────────────────────────────────────────────────
+    use_keep = draw(st.booleans())
+    total_v = int(geno_offsets_1d[-1])
+    if use_keep and total_v > 0:
+        keep = np.array(
+            draw(st.lists(st.booleans(), min_size=total_v, max_size=total_v)), np.bool_
+        )
+        keep_offsets = geno_offsets_1d.copy()
+    else:
+        keep = None
+        keep_offsets = None
+
+    # normalize geno_offsets to (2, n) form (the registered backends accept this)
+    geno_offsets_2d = np.stack(
+        [geno_offsets_1d[:-1], geno_offsets_1d[1:]]
+    ).astype(np.int64)
+
+    inputs = (
+        out_offsets,
+        regions,
+        shifts,
+        geno_offset_idx,
+        geno_offsets_2d,
+        geno_v_idxs,
+        v_starts,
+        ilens,
+        alt_alleles,
+        alt_offsets,
+        reference,
+        ref_offsets,
+        np.uint8(78),  # pad_char = ord('N')
+        keep,
+        keep_offsets,
+        None,  # annot_v_idxs — caller fills for annotated path
+        None,  # annot_ref_pos — caller fills for annotated path
+    )
+    return total_out, inputs
