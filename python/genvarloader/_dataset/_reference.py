@@ -24,6 +24,8 @@ from ._indexing import is_str_arr, s2i
 from ._splice import SpliceMap, SplicePlan, build_splice_plan
 from ._utils import bed_to_regions, padded_slice
 from .._threads import should_parallelize
+from .._dispatch import get, register
+from ..genvarloader import get_reference as _get_reference_rust_ffi
 
 INT64_MAX = np.iinfo(np.int64).max
 
@@ -709,6 +711,26 @@ def _get_reference_ser(regions, out_offsets, reference, ref_offsets, pad_char, o
     return out
 
 
+def _get_reference_numba(regions, out_offsets, reference, ref_offsets, pad_char, parallel):
+    out = np.empty(out_offsets[-1], np.uint8)
+    kernel = _get_reference_par if parallel else _get_reference_ser
+    return kernel(regions, out_offsets, reference, ref_offsets, pad_char, out)
+
+
+def _get_reference_rust(regions, out_offsets, reference, ref_offsets, pad_char, parallel):
+    return _get_reference_rust_ffi(
+        np.ascontiguousarray(regions, np.int32),
+        np.ascontiguousarray(out_offsets, np.int64),
+        np.ascontiguousarray(reference, np.uint8),
+        np.ascontiguousarray(ref_offsets, np.int64),
+        int(pad_char),
+        bool(parallel),
+    )
+
+
+register("get_reference", numba=_get_reference_numba, rust=_get_reference_rust, default="rust")
+
+
 def get_reference(
     regions: NDArray[np.integer],
     out_offsets: NDArray[np.integer],
@@ -716,13 +738,8 @@ def get_reference(
     ref_offsets: NDArray[np.integer],
     pad_char: int,
 ) -> NDArray[np.uint8]:
-    out = np.empty(out_offsets[-1], np.uint8)
-    kernel = (
-        _get_reference_par
-        if should_parallelize(int(out_offsets[-1]))
-        else _get_reference_ser
-    )
-    return kernel(regions, out_offsets, reference, ref_offsets, pad_char, out)
+    parallel = should_parallelize(int(out_offsets[-1]))
+    return get("get_reference")(regions, out_offsets, reference, ref_offsets, pad_char, parallel)
 
 
 def _fetch_spliced_ref(

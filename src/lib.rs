@@ -31,6 +31,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::fill_empty_fixed_f32, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::fill_empty_seq_u8, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::fill_empty_seq_i32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::get_reference, m)?)?;
     Ok(())
 }
 

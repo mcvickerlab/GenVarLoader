@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 
 use crate::genotypes;
 use crate::intervals;
+use crate::reference;
 use crate::variants;
 
 /// Per-(query, hap) reference-length diffs (see `genotypes::get_diffs_sparse`).
@@ -295,4 +296,27 @@ pub fn fill_empty_seq_i32<'py>(
         dummy.as_array(),
     );
     (nd.into_pyarray(py), nvar.into_pyarray(py), nseq.into_pyarray(py))
+}
+
+/// Fetch padded reference rows for each region into one flat buffer.
+/// `regions[i] = (contig_idx, start, end)`. Mirrors numba `_get_reference_par/_ser`.
+#[pyfunction]
+pub fn get_reference<'py>(
+    py: Python<'py>,
+    regions: PyReadonlyArray2<i32>,
+    out_offsets: PyReadonlyArray1<i64>,
+    reference: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+    parallel: bool,
+) -> Bound<'py, PyArray1<u8>> {
+    let out = reference::get_reference(
+        regions.as_array(),
+        out_offsets.as_array(),
+        reference.as_array(),
+        ref_offsets.as_array(),
+        pad_char,
+        parallel,
+    );
+    out.into_pyarray(py)
 }

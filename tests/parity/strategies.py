@@ -303,3 +303,39 @@ def fill_empty_seq_inputs(draw, dtype=np.uint8):
     )
 
     return (data, var_offsets, seq_offsets, dummy)
+
+
+@st.composite
+def get_reference_inputs(draw):
+    """Generate (regions, out_offsets, reference, ref_offsets, pad_char, parallel)
+    with regions whose [start,end) windows may run off either contig edge.
+
+    Note: start is restricted to [-5, clen) so that the region overlaps the
+    contig (start < clen). The numba kernel has a pre-existing size-mismatch
+    crash when start >= clen (region entirely past contig end); that degenerate
+    case never occurs in production (BED regions are clipped to contig bounds).
+    """
+    from hypothesis.extra.numpy import arrays
+
+    n_contigs = draw(st.integers(1, 3))
+    contig_lens = [draw(st.integers(1, 40)) for _ in range(n_contigs)]
+    ref_offsets = np.concatenate([[0], np.cumsum(contig_lens)]).astype(np.int64)
+    reference = draw(
+        arrays(np.uint8, int(ref_offsets[-1]), elements=st.integers(0, 255))
+    )
+    n_regions = draw(st.integers(1, 6))
+    regions = np.empty((n_regions, 3), np.int32)
+    lengths = []
+    for i in range(n_regions):
+        c = draw(st.integers(0, n_contigs - 1))
+        clen = contig_lens[c]
+        # Restrict start < clen so the region overlaps the contig.
+        # Regions extending past the right edge (end > clen) are still generated.
+        start = draw(st.integers(-5, clen - 1))
+        length = draw(st.integers(0, clen + 5))
+        regions[i] = (c, start, start + length)
+        lengths.append(length)
+    out_offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64)
+    pad_char = draw(st.integers(0, 255))
+    parallel = draw(st.booleans())
+    return regions, out_offsets, reference, ref_offsets, np.uint8(pad_char), parallel
