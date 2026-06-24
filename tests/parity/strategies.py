@@ -195,3 +195,59 @@ def compact_keep_inputs(draw, dtype):
         draw(st.lists(st.booleans(), min_size=total, max_size=total)), np.bool_
     )
     return (values, row_offsets, keep)
+
+
+@st.composite
+def fill_empty_scalar_inputs(draw, dtype=np.int32):
+    """Generate (data[dtype], offsets int64, fill) with at least one empty row.
+
+    Guarantees at least one row has zero count so empty-row insertion is
+    exercised on every draw.
+    """
+    n_rows = draw(st.integers(2, 6))
+    counts = [draw(st.integers(0, 5)) for _ in range(n_rows)]
+    # Force one row to be empty so the empty-fill path is always exercised.
+    empty_idx = draw(st.integers(0, n_rows - 1))
+    counts[empty_idx] = 0
+    row_offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+    total = int(row_offsets[-1])
+    dt = np.dtype(dtype)
+    if np.issubdtype(dt, np.floating):
+        elements = st.floats(width=32, allow_nan=False, allow_infinity=False)
+        fill = draw(st.floats(width=32, allow_nan=False, allow_infinity=False))
+    else:
+        elements = st.integers(-1000, 1000)
+        fill = draw(st.integers(-1000, 1000))
+    data = np.array(
+        draw(st.lists(elements, min_size=total, max_size=total)), dt
+    )
+    fill_val = dt.type(fill)
+    return (data, row_offsets, fill_val)
+
+
+@st.composite
+def fill_empty_fixed_inputs(draw, dtype=np.int32):
+    """Generate (data[dtype], offsets int64, inner int, fill) with at least one
+    empty row for fill_empty_fixed tests.
+    """
+    n_rows = draw(st.integers(2, 6))
+    inner = draw(st.integers(1, 4))
+    counts = [draw(st.integers(0, 4)) for _ in range(n_rows)]
+    # Force one row to be empty.
+    empty_idx = draw(st.integers(0, n_rows - 1))
+    counts[empty_idx] = 0
+    row_offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+    total_vars = int(row_offsets[-1])
+    dt = np.dtype(dtype)
+    if np.issubdtype(dt, np.floating):
+        elements = st.floats(width=32, allow_nan=False, allow_infinity=False)
+        fill = draw(st.floats(width=32, allow_nan=False, allow_infinity=False))
+    else:
+        elements = st.integers(-1000, 1000)
+        fill = draw(st.integers(-1000, 1000))
+    data = np.array(
+        draw(st.lists(elements, min_size=total_vars * inner, max_size=total_vars * inner)),
+        dt,
+    )
+    fill_val = dt.type(fill)
+    return (data, row_offsets, inner, fill_val)

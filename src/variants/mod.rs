@@ -119,6 +119,107 @@ pub fn compact_keep_f32(
     compact_keep_impl(values, row_offsets, keep)
 }
 
+/// Generic fill-empty-scalar core. Each empty row gets one `fill` element;
+/// non-empty rows copy through unchanged. No `num_traits` needed — `from_elem`.
+fn fill_empty_scalar_impl<T: Copy>(
+    data: ArrayView1<T>,
+    offsets: ArrayView1<i64>,
+    fill: T,
+) -> (Array1<T>, Array1<i64>) {
+    let n_rows = offsets.len() - 1;
+    let mut new_offsets = Array1::<i64>::zeros(n_rows + 1);
+    for i in 0..n_rows {
+        let ln = offsets[i + 1] - offsets[i];
+        new_offsets[i + 1] = new_offsets[i] + if ln > 0 { ln } else { 1 };
+    }
+    let total = new_offsets[n_rows] as usize;
+    // Pre-fill with `fill` so empty-row slots are already correct; copy non-empty.
+    let mut new_data = Array1::<T>::from_elem(total, fill);
+    for i in 0..n_rows {
+        let s = offsets[i] as usize;
+        let e = offsets[i + 1] as usize;
+        let mut d = new_offsets[i] as usize;
+        if e != s {
+            for k in s..e {
+                new_data[d] = data[k];
+                d += 1;
+            }
+        }
+    }
+    (new_data, new_offsets)
+}
+
+/// Fill-empty-scalar for i32 data (variant start / ilen). Mirrors numba `_fill_empty_scalar`.
+pub fn fill_empty_scalar_i32(
+    data: ArrayView1<i32>,
+    offsets: ArrayView1<i64>,
+    fill: i32,
+) -> (Array1<i32>, Array1<i64>) {
+    fill_empty_scalar_impl(data, offsets, fill)
+}
+
+/// Fill-empty-scalar for f32 data (dosage). Mirrors numba `_fill_empty_scalar`.
+pub fn fill_empty_scalar_f32(
+    data: ArrayView1<f32>,
+    offsets: ArrayView1<i64>,
+    fill: f32,
+) -> (Array1<f32>, Array1<i64>) {
+    fill_empty_scalar_impl(data, offsets, fill)
+}
+
+/// Generic fill-empty-fixed core. Each empty row gets `inner` copies of `fill`;
+/// non-empty rows copy their `n_var * inner` elements through.
+fn fill_empty_fixed_impl<T: Copy>(
+    data: ArrayView1<T>,
+    offsets: ArrayView1<i64>,
+    inner: i64,
+    fill: T,
+) -> (Array1<T>, Array1<i64>) {
+    let n_rows = offsets.len() - 1;
+    let mut new_offsets = Array1::<i64>::zeros(n_rows + 1);
+    for i in 0..n_rows {
+        let nv = offsets[i + 1] - offsets[i];
+        new_offsets[i + 1] = new_offsets[i] + if nv > 0 { nv } else { 1 };
+    }
+    let total_vars = new_offsets[n_rows] as usize;
+    let inner_u = inner as usize;
+    let mut new_data = Array1::<T>::from_elem(total_vars * inner_u, fill);
+    let mut dptr = 0usize;
+    for i in 0..n_rows {
+        let vs = offsets[i] as usize;
+        let ve = offsets[i + 1] as usize;
+        if ve == vs {
+            dptr += inner_u; // already filled by from_elem
+        } else {
+            for k in vs * inner_u..ve * inner_u {
+                new_data[dptr] = data[k];
+                dptr += 1;
+            }
+        }
+    }
+    (new_data, new_offsets)
+}
+
+/// Fill-empty-fixed for i32 data (flank_tokens). Mirrors numba `_fill_empty_fixed`.
+pub fn fill_empty_fixed_i32(
+    data: ArrayView1<i32>,
+    offsets: ArrayView1<i64>,
+    inner: i64,
+    fill: i32,
+) -> (Array1<i32>, Array1<i64>) {
+    fill_empty_fixed_impl(data, offsets, inner, fill)
+}
+
+/// Fill-empty-fixed for f32 data. Mirrors numba `_fill_empty_fixed`.
+pub fn fill_empty_fixed_f32(
+    data: ArrayView1<f32>,
+    offsets: ArrayView1<i64>,
+    inner: i64,
+    fill: f32,
+) -> (Array1<f32>, Array1<i64>) {
+    fill_empty_fixed_impl(data, offsets, inner, fill)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +280,50 @@ mod tests {
         let (v, o) = compact_keep_f32(vals.view(), off.view(), keep.view());
         assert_eq!(v.to_vec(), vec![0.25f32, 0.5f32]);
         assert_eq!(o.to_vec(), vec![0i64, 2]);
+    }
+
+    #[test]
+    fn test_fill_empty_scalar_i32() {
+        // 3 rows: offsets [0,2,2,3] — middle row is empty.
+        // Non-empty rows: [10,11] and [20]. Empty row gets one fill (99).
+        let data = arr1(&[10i32, 11, 20]);
+        let offsets = arr1(&[0i64, 2, 2, 3]);
+        let (v, o) = fill_empty_scalar_i32(data.view(), offsets.view(), 99);
+        assert_eq!(v.to_vec(), vec![10, 11, 99, 20]);
+        assert_eq!(o.to_vec(), vec![0i64, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_fill_empty_scalar_f32() {
+        // 2 rows: offsets [0,1,1] — second row is empty. fill = -1.0.
+        let data = arr1(&[0.5f32]);
+        let offsets = arr1(&[0i64, 1, 1]);
+        let (v, o) = fill_empty_scalar_f32(data.view(), offsets.view(), -1.0f32);
+        assert_eq!(v.to_vec(), vec![0.5f32, -1.0f32]);
+        assert_eq!(o.to_vec(), vec![0i64, 1, 2]);
+    }
+
+    #[test]
+    fn test_fill_empty_fixed_i32() {
+        // 3 rows: offsets [0,2,2,3], inner=2 — middle row empty → 2 copies of fill.
+        // data = [10,11, 12,13, 20,21] (2 per variant for rows 0 and 2).
+        let data = arr1(&[10i32, 11, 12, 13, 20, 21]);
+        let offsets = arr1(&[0i64, 2, 2, 3]);
+        let (v, o) = fill_empty_fixed_i32(data.view(), offsets.view(), 2, 7);
+        // Row 0: 2 vars * 2 inner = 4 elems [10,11,12,13]
+        // Row 1: empty → 1 dummy var * 2 inner = 2 elems [7,7]
+        // Row 2: 1 var * 2 inner = 2 elems [20,21]
+        assert_eq!(v.to_vec(), vec![10, 11, 12, 13, 7, 7, 20, 21]);
+        assert_eq!(o.to_vec(), vec![0i64, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_fill_empty_fixed_f32() {
+        // 2 rows: offsets [0,1,1], inner=3 — second row empty.
+        let data = arr1(&[1.0f32, 2.0, 3.0]);
+        let offsets = arr1(&[0i64, 1, 1]);
+        let (v, o) = fill_empty_fixed_f32(data.view(), offsets.view(), 3, 0.0f32);
+        assert_eq!(v.to_vec(), vec![1.0f32, 2.0, 3.0, 0.0, 0.0, 0.0]);
+        assert_eq!(o.to_vec(), vec![0i64, 1, 2]);
     }
 }

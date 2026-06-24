@@ -176,3 +176,75 @@ pub fn compact_keep_f32<'py>(
     );
     (v.into_pyarray(py), off.into_pyarray(py))
 }
+
+/// Fill empty rows with one scalar sentinel (i32). Returns `(new_data, new_offsets)`.
+/// (see `variants::fill_empty_scalar_i32`).
+#[pyfunction]
+pub fn fill_empty_scalar_i32<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<i32>,
+    offsets: PyReadonlyArray1<i64>,
+    fill: i32,
+) -> (Bound<'py, PyArray1<i32>>, Bound<'py, PyArray1<i64>>) {
+    let (v, off) = variants::fill_empty_scalar_i32(
+        data.as_array(),
+        offsets.as_array(),
+        fill,
+    );
+    (v.into_pyarray(py), off.into_pyarray(py))
+}
+
+/// Fill empty rows with one scalar sentinel (f32). Returns `(new_data, new_offsets)`.
+/// (see `variants::fill_empty_scalar_f32`).
+#[pyfunction]
+pub fn fill_empty_scalar_f32<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<f32>,
+    offsets: PyReadonlyArray1<i64>,
+    fill: f32,
+) -> (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>) {
+    let (v, off) = variants::fill_empty_scalar_f32(
+        data.as_array(),
+        offsets.as_array(),
+        fill,
+    );
+    (v.into_pyarray(py), off.into_pyarray(py))
+}
+
+/// Fill empty rows with `inner` copies of sentinel (i32, fixed-stride).
+/// Returns `(new_data, new_offsets)`. (see `variants::fill_empty_fixed_i32`).
+#[pyfunction]
+pub fn fill_empty_fixed_i32<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<i32>,
+    offsets: PyReadonlyArray1<i64>,
+    inner: i64,
+    fill: i32,
+) -> (Bound<'py, PyArray1<i32>>, Bound<'py, PyArray1<i64>>) {
+    let (v, off) = variants::fill_empty_fixed_i32(
+        data.as_array(),
+        offsets.as_array(),
+        inner,
+        fill,
+    );
+    (v.into_pyarray(py), off.into_pyarray(py))
+}
+
+/// Fill empty rows with `inner` copies of sentinel (f32, fixed-stride).
+/// Returns `(new_data, new_offsets)`. (see `variants::fill_empty_fixed_f32`).
+#[pyfunction]
+pub fn fill_empty_fixed_f32<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<f32>,
+    offsets: PyReadonlyArray1<i64>,
+    inner: i64,
+    fill: f32,
+) -> (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>) {
+    let (v, off) = variants::fill_empty_fixed_f32(
+        data.as_array(),
+        offsets.as_array(),
+        inner,
+        fill,
+    );
+    (v.into_pyarray(py), off.into_pyarray(py))
+}

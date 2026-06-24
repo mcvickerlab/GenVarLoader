@@ -3,10 +3,21 @@ import pytest
 from hypothesis import given, settings
 
 from genvarloader._dataset import _flat_variants  # noqa: F401  (triggers register())
-from genvarloader._dataset._flat_variants import _compact_keep, _gather_rows
+from genvarloader._dataset._flat_variants import (
+    _compact_keep,
+    _fill_empty_fixed,
+    _fill_empty_scalar,
+    _gather_rows,
+)
 from genvarloader._dataset._genotypes import _as_starts_stops
 from tests.parity._harness import assert_kernel_parity_tuple
-from tests.parity.strategies import compact_keep_inputs, gather_alleles_inputs, gather_rows_inputs
+from tests.parity.strategies import (
+    compact_keep_inputs,
+    fill_empty_fixed_inputs,
+    fill_empty_scalar_inputs,
+    gather_alleles_inputs,
+    gather_rows_inputs,
+)
 
 pytestmark = pytest.mark.parity
 
@@ -105,3 +116,77 @@ def test_compact_keep_dtype_regression():
         out_i64, np.array([100_000_000_000, 300_000_000_000], np.int64)
     )
     assert off_i64.tolist() == [0, 1, 2]
+
+
+# ---------------------------------------------------------------------------
+# fill_empty_scalar parity
+# ---------------------------------------------------------------------------
+
+
+@settings(deadline=None)
+@given(fill_empty_scalar_inputs(dtype=np.int32))
+def test_fill_empty_scalar_i32_parity(inputs):
+    data, offsets, fill = inputs
+    assert_kernel_parity_tuple("fill_empty_scalar_i32", data, offsets, int(fill))
+
+
+@settings(deadline=None)
+@given(fill_empty_scalar_inputs(dtype=np.float32))
+def test_fill_empty_scalar_f32_parity(inputs):
+    data, offsets, fill = inputs
+    assert_kernel_parity_tuple("fill_empty_scalar_f32", data, offsets, float(fill))
+
+
+def test_fill_empty_scalar_dtype_regression():
+    """_fill_empty_scalar must preserve dtype — no down-cast for non-i32/f32.
+
+    int16 is a representative custom FORMAT field dtype (issue #231).
+    The empty row's fill slot must carry the int16 fill value exactly.
+    """
+    # offsets: 3 rows with middle row empty → [0, 2, 2, 3]
+    data = np.array([10, 20, 30], np.int16)
+    offsets = np.array([0, 2, 2, 3], np.int64)
+    fill = np.int16(99)
+    out, new_off = _fill_empty_scalar(data, offsets, fill)
+    assert out.dtype == np.int16, f"Expected int16, got {out.dtype}"
+    np.testing.assert_array_equal(out, np.array([10, 20, 99, 30], np.int16))
+    assert new_off.tolist() == [0, 2, 3, 4]
+
+
+# ---------------------------------------------------------------------------
+# fill_empty_fixed parity
+# ---------------------------------------------------------------------------
+
+
+@settings(deadline=None)
+@given(fill_empty_fixed_inputs(dtype=np.int32))
+def test_fill_empty_fixed_i32_parity(inputs):
+    data, offsets, inner, fill = inputs
+    assert_kernel_parity_tuple(
+        "fill_empty_fixed_i32", data, offsets, int(inner), int(fill)
+    )
+
+
+@settings(deadline=None)
+@given(fill_empty_fixed_inputs(dtype=np.float32))
+def test_fill_empty_fixed_f32_parity(inputs):
+    data, offsets, inner, fill = inputs
+    assert_kernel_parity_tuple(
+        "fill_empty_fixed_f32", data, offsets, int(inner), float(fill)
+    )
+
+
+def test_fill_empty_fixed_dtype_regression():
+    """_fill_empty_fixed must preserve dtype — no down-cast for non-i32/f32.
+
+    int16 is representative of custom FORMAT flank tokens (issue #231).
+    The empty row's `inner` fill slots must carry the int16 fill value exactly.
+    """
+    # 2 rows: offsets [0,1,1], inner=2 — second row empty.
+    data = np.array([7, 8], np.int16)  # 1 var * 2 inner
+    offsets = np.array([0, 1, 1], np.int64)
+    fill = np.int16(42)
+    out, new_off = _fill_empty_fixed(data, offsets, 2, fill)
+    assert out.dtype == np.int16, f"Expected int16, got {out.dtype}"
+    np.testing.assert_array_equal(out, np.array([7, 8, 42, 42], np.int16))
+    assert new_off.tolist() == [0, 1, 2]

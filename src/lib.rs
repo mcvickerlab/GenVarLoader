@@ -24,6 +24,10 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::gather_alleles, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::compact_keep_i32, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::compact_keep_f32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::fill_empty_scalar_i32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::fill_empty_scalar_f32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::fill_empty_fixed_i32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::fill_empty_fixed_f32, m)?)?;
     Ok(())
 }
 

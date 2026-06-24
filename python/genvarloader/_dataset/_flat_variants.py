@@ -13,6 +13,10 @@ from numpy.typing import NDArray
 from .._dispatch import get, register
 from ..genvarloader import compact_keep_f32 as _compact_keep_f32_rust
 from ..genvarloader import compact_keep_i32 as _compact_keep_i32_rust
+from ..genvarloader import fill_empty_fixed_f32 as _fill_empty_fixed_f32_rust
+from ..genvarloader import fill_empty_fixed_i32 as _fill_empty_fixed_i32_rust
+from ..genvarloader import fill_empty_scalar_f32 as _fill_empty_scalar_f32_rust
+from ..genvarloader import fill_empty_scalar_i32 as _fill_empty_scalar_i32_rust
 from ..genvarloader import gather_alleles as _gather_alleles_rust
 from ..genvarloader import gather_rows_f32 as _gather_rows_f32_rust
 from ..genvarloader import gather_rows_i32 as _gather_rows_i32_rust
@@ -614,9 +618,9 @@ def _gather_rows(
 
 
 @nb.njit(nogil=True, cache=True)
-def _fill_empty_scalar(data, offsets, fill):  # pragma: no cover - njit
+def _fill_empty_scalar_numba(data, offsets, fill):  # pragma: no cover - njit
     """Insert one ``fill`` element into each empty row; copy non-empty rows
-    through. Returns ``(new_data, new_offsets)``."""
+    through. Returns ``(new_data, new_offsets)``. Preserves ``data.dtype``."""
     n_rows = offsets.shape[0] - 1
     new_offsets = np.empty(n_rows + 1, np.int64)
     new_offsets[0] = 0
@@ -635,6 +639,37 @@ def _fill_empty_scalar(data, offsets, fill):  # pragma: no cover - njit
                 new_data[d] = data[k]
                 d += 1
     return new_data, new_offsets
+
+
+register(
+    "fill_empty_scalar_i32",
+    numba=_fill_empty_scalar_numba,
+    rust=_fill_empty_scalar_i32_rust,
+    default="rust",
+)
+register(
+    "fill_empty_scalar_f32",
+    numba=_fill_empty_scalar_numba,
+    rust=_fill_empty_scalar_f32_rust,
+    default="rust",
+)
+
+
+def _fill_empty_scalar(data, offsets, fill):
+    """Dtype-preserving dispatch for fill-empty-scalar.
+
+    Routes int32 and float32 to typed Rust cores; all other dtypes (e.g.
+    custom FORMAT fields, issue #231) fall back to the dtype-preserving numba
+    kernel so values are never silently down-cast.
+    """
+    data = np.ascontiguousarray(data)
+    offsets = np.ascontiguousarray(offsets, np.int64)
+    if data.dtype == np.int32:
+        return get("fill_empty_scalar_i32")(data, offsets, int(fill))
+    if data.dtype == np.float32:
+        return get("fill_empty_scalar_f32")(data, offsets, float(fill))
+    # Arbitrary dtype (custom FORMAT fields): preserve dtype via numba fallback.
+    return _fill_empty_scalar_numba(data, offsets, fill)
 
 
 @nb.njit(nogil=True, cache=True)
@@ -687,13 +722,13 @@ def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):  # pragma: no cover 
 
 
 @nb.njit(nogil=True, cache=True)
-def _fill_empty_fixed(data, offsets, inner, fill):  # pragma: no cover - njit
+def _fill_empty_fixed_numba(data, offsets, inner, fill):  # pragma: no cover - njit
     """Fixed-inner-stride analogue of ``_fill_empty_scalar`` for ``flank_tokens``.
 
     ``data`` holds ``n_var * inner`` tokens (variant-major); ``offsets`` are
     *variant-level* (``b*p + 1``). Each empty row receives one dummy variant of
     ``inner`` tokens all equal to ``fill``; non-empty rows pass through.
-    Returns ``(new_data, new_offsets)``."""
+    Returns ``(new_data, new_offsets)``. Preserves ``data.dtype``."""
     n_rows = offsets.shape[0] - 1
     new_offsets = np.empty(n_rows + 1, np.int64)
     new_offsets[0] = 0
@@ -715,6 +750,37 @@ def _fill_empty_fixed(data, offsets, inner, fill):  # pragma: no cover - njit
                 new_data[dptr] = data[k]
                 dptr += 1
     return new_data, new_offsets
+
+
+register(
+    "fill_empty_fixed_i32",
+    numba=_fill_empty_fixed_numba,
+    rust=_fill_empty_fixed_i32_rust,
+    default="rust",
+)
+register(
+    "fill_empty_fixed_f32",
+    numba=_fill_empty_fixed_numba,
+    rust=_fill_empty_fixed_f32_rust,
+    default="rust",
+)
+
+
+def _fill_empty_fixed(data, offsets, inner, fill):
+    """Dtype-preserving dispatch for fill-empty-fixed.
+
+    Routes int32 and float32 to typed Rust cores; all other dtypes (e.g.
+    custom FORMAT fields, issue #231) fall back to the dtype-preserving numba
+    kernel so values are never silently down-cast.
+    """
+    data = np.ascontiguousarray(data)
+    offsets = np.ascontiguousarray(offsets, np.int64)
+    if data.dtype == np.int32:
+        return get("fill_empty_fixed_i32")(data, offsets, int(inner), int(fill))
+    if data.dtype == np.float32:
+        return get("fill_empty_fixed_f32")(data, offsets, int(inner), float(fill))
+    # Arbitrary dtype (custom FORMAT fields): preserve dtype via numba fallback.
+    return _fill_empty_fixed_numba(data, offsets, inner, fill)
 
 
 def get_variants_flat(
