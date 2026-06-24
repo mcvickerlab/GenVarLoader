@@ -203,14 +203,18 @@ def test_fill_empty_fixed_dtype_regression():
 @given(fill_empty_seq_inputs(dtype=np.uint8))
 def test_fill_empty_seq_u8_parity(inputs):
     data, var_offsets, seq_offsets, dummy = inputs
-    assert_kernel_parity_tuple("fill_empty_seq_u8", data, var_offsets, seq_offsets, dummy)
+    assert_kernel_parity_tuple(
+        "fill_empty_seq_u8", data, var_offsets, seq_offsets, dummy
+    )
 
 
 @settings(deadline=None)
 @given(fill_empty_seq_inputs(dtype=np.int32))
 def test_fill_empty_seq_i32_parity(inputs):
     data, var_offsets, seq_offsets, dummy = inputs
-    assert_kernel_parity_tuple("fill_empty_seq_i32", data, var_offsets, seq_offsets, dummy)
+    assert_kernel_parity_tuple(
+        "fill_empty_seq_i32", data, var_offsets, seq_offsets, dummy
+    )
 
 
 def test_fill_empty_seq_dtype_regression():

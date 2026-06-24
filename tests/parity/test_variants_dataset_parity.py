@@ -43,13 +43,15 @@ def _compare_ragged_field(numba_field: Ragged, rust_field: Ragged, name: str) ->
         n_data = np.asarray(numba_field.data, dtype="S1")
         r_data = np.asarray(rust_field.data, dtype="S1")
         np.testing.assert_array_equal(
-            n_data, r_data,
+            n_data,
+            r_data,
             err_msg=f"allele char data differs for field '{name}'",
         )
         n_off = np.asarray(numba_field.offsets, dtype=np.int64)
         r_off = np.asarray(rust_field.offsets, dtype=np.int64)
         np.testing.assert_array_equal(
-            n_off, r_off,
+            n_off,
+            r_off,
             err_msg=f"allele offsets differ for field '{name}'",
         )
     else:
@@ -60,13 +62,15 @@ def _compare_ragged_field(numba_field: Ragged, rust_field: Ragged, name: str) ->
             f"rust={r_data.dtype}"
         )
         np.testing.assert_array_equal(
-            n_data, r_data,
+            n_data,
+            r_data,
             err_msg=f"data differs for numeric field '{name}'",
         )
         n_off = np.asarray(numba_field.offsets, dtype=np.int64)
         r_off = np.asarray(rust_field.offsets, dtype=np.int64)
         np.testing.assert_array_equal(
-            n_off, r_off,
+            n_off,
+            r_off,
             err_msg=f"offsets differ for numeric field '{name}'",
         )
 
@@ -87,7 +91,7 @@ def test_variants_getitem_parity_and_kernels_invoked(
     """
     # --- open dataset in variants mode ---
     ds = gvl.Dataset.open(phased_svar_gvl, reference=reference)
-    ds = ds.with_tracks(False)       # ensure return type is RaggedVariants directly
+    ds = ds.with_tracks(False)  # ensure return type is RaggedVariants directly
     ds = ds.with_seqs("variants")
 
     # --- install spy on the Rust gather_rows_i32 kernel ---
@@ -101,7 +105,9 @@ def test_variants_getitem_parity_and_kernels_invoked(
 
     # Re-register with the spied rust impl.
     orig_entry = dict(_dispatch._REGISTRY["gather_rows_i32"])
-    _dispatch.register("gather_rows_i32", numba=numba_fn, rust=_spy_rust, default="numba")
+    _dispatch.register(
+        "gather_rows_i32", numba=numba_fn, rust=_spy_rust, default="numba"
+    )
 
     try:
         # --- numba reference read ---
@@ -179,7 +185,9 @@ def test_variants_af_filter_parity(phased_svar_gvl, reference, monkeypatch):
         return rust_ck(*a, **k)
 
     orig_ck = dict(_dispatch._REGISTRY["compact_keep_i32"])
-    _dispatch.register("compact_keep_i32", numba=numba_ck, rust=_spy_ck, default="numba")
+    _dispatch.register(
+        "compact_keep_i32", numba=numba_ck, rust=_spy_ck, default="numba"
+    )
 
     try:
         monkeypatch.setenv("GVL_BACKEND", "numba")

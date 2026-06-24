@@ -451,7 +451,8 @@ def _gather_v_idxs_numba(
     sparse arrays, copy its values out into flat ``(data, offsets)``.
 
     ``geno_offsets`` must be 1-D contiguous (length n_rows + 1).  For the
-    non-contiguous (2, n_rows) starts/stops form use :func:`_gather_v_idxs_ss`.
+    non-contiguous (2, n_rows) starts/stops form use
+    :func:`_gather_v_idxs_ss_numba`.
     """
     n_rows = geno_offset_idx.shape[0]
     out_offsets = np.empty(n_rows + 1, np.int64)
@@ -478,7 +479,7 @@ def _gather_v_idxs_numba(
 def _gather_v_idxs_ss_numba(
     geno_offset_idx, geno_starts, geno_stops, geno_v_idxs
 ):  # pragma: no cover - njit
-    """Like :func:`_gather_v_idxs` but for non-contiguous (starts, stops) offsets.
+    """Like :func:`_gather_v_idxs_numba` but for non-contiguous (starts, stops) offsets.
 
     ``geno_starts`` and ``geno_stops`` are the two rows of a ``(2, n)`` offset
     array (``geno_starts = geno_offsets[0]``, ``geno_stops = geno_offsets[1]``).
@@ -503,7 +504,9 @@ def _gather_v_idxs_ss_numba(
 
 
 @nb.njit(nogil=True, cache=True)
-def _gather_alleles_numba(v_idxs, allele_bytes, allele_offsets):  # pragma: no cover - njit
+def _gather_alleles_numba(
+    v_idxs, allele_bytes, allele_offsets
+):  # pragma: no cover - njit
     """Gather variable-length allele bytestrings for ``v_idxs`` from the global
     allele byte buffer into flat ``(data, seq_offsets)``."""
     n = v_idxs.shape[0]
@@ -526,7 +529,12 @@ def _gather_alleles_numba(v_idxs, allele_bytes, allele_offsets):  # pragma: no c
     return data, seq_offsets
 
 
-register("gather_alleles", numba=_gather_alleles_numba, rust=_gather_alleles_rust, default="rust")
+register(
+    "gather_alleles",
+    numba=_gather_alleles_numba,
+    rust=_gather_alleles_rust,
+    default="rust",
+)
 
 
 def _gather_alleles(v_idxs, allele_bytes, allele_offsets):
@@ -561,8 +569,18 @@ def _compact_keep_numba(v_idxs, row_offsets, keep):  # pragma: no cover - njit
     return new_v, new_offsets
 
 
-register("compact_keep_i32", numba=_compact_keep_numba, rust=_compact_keep_i32_rust, default="rust")
-register("compact_keep_f32", numba=_compact_keep_numba, rust=_compact_keep_f32_rust, default="rust")
+register(
+    "compact_keep_i32",
+    numba=_compact_keep_numba,
+    rust=_compact_keep_i32_rust,
+    default="rust",
+)
+register(
+    "compact_keep_f32",
+    numba=_compact_keep_numba,
+    rust=_compact_keep_f32_rust,
+    default="rust",
+)
 
 
 def _compact_keep(v_idxs, row_offsets, keep):
@@ -592,8 +610,18 @@ def _gather_rows_numba(geno_offset_idx, geno_offsets, geno_v_idxs):
     )
 
 
-register("gather_rows_i32", numba=_gather_rows_numba, rust=_gather_rows_i32_rust, default="rust")
-register("gather_rows_f32", numba=_gather_rows_numba, rust=_gather_rows_f32_rust, default="rust")
+register(
+    "gather_rows_i32",
+    numba=_gather_rows_numba,
+    rust=_gather_rows_i32_rust,
+    default="rust",
+)
+register(
+    "gather_rows_f32",
+    numba=_gather_rows_numba,
+    rust=_gather_rows_f32_rust,
+    default="rust",
+)
 
 
 def _gather_rows(
@@ -675,7 +703,9 @@ def _fill_empty_scalar(data, offsets, fill):
 
 
 @nb.njit(nogil=True, cache=True)
-def _fill_empty_seq_numba(data, var_offsets, seq_offsets, dummy):  # pragma: no cover - njit
+def _fill_empty_seq_numba(
+    data, var_offsets, seq_offsets, dummy
+):  # pragma: no cover - njit
     """Two-level analogue of ``_fill_empty_scalar`` for allele bytestrings.
     Empty variant-rows receive one dummy allele of ``dummy`` bytes. Returns
     ``(new_data, new_var_offsets, new_seq_offsets)``. Preserves ``data.dtype``."""

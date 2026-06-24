@@ -66,16 +66,20 @@ def intervals_to_tracks_inputs(draw):
 
 
 @st.composite
-def _sparse_geno(draw, max_queries=4, max_ploidy=2, max_vars_per_group=5,
-                 max_total_unique=12):
+def _sparse_geno(
+    draw, max_queries=4, max_ploidy=2, max_vars_per_group=5, max_total_unique=12
+):
     """Shared sparse-genotype layout: returns
     (geno_offset_idx (q,p) int64, geno_v_idxs int32, geno_offsets (n+1,) int64,
      v_starts int32, ilens int32, q_starts int32, q_ends int32).
     geno_offset_idx is arange so each (q,p) row maps to its own offset slice."""
     n_unique = draw(st.integers(min_value=1, max_value=max_total_unique))
     v_starts = np.sort(
-        draw(st.lists(st.integers(0, 1000), min_size=n_unique, max_size=n_unique)
-             .map(np.array))
+        draw(
+            st.lists(st.integers(0, 1000), min_size=n_unique, max_size=n_unique).map(
+                np.array
+            )
+        )
     ).astype(np.int32)
     ilens = np.array(
         draw(st.lists(st.integers(-5, 5), min_size=n_unique, max_size=n_unique)),
@@ -88,8 +92,9 @@ def _sparse_geno(draw, max_queries=4, max_ploidy=2, max_vars_per_group=5,
     v_idx_list = []
     for c in counts:
         # sorted variant indices within a group (reconstruction assumes sorted pos)
-        idxs = sorted(draw(st.lists(st.integers(0, n_unique - 1),
-                                    min_size=c, max_size=c)))
+        idxs = sorted(
+            draw(st.lists(st.integers(0, n_unique - 1), min_size=c, max_size=c))
+        )
         v_idx_list.extend(idxs)
     geno_v_idxs = np.array(v_idx_list, dtype=np.int32)
     geno_offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
@@ -98,8 +103,15 @@ def _sparse_geno(draw, max_queries=4, max_ploidy=2, max_vars_per_group=5,
         draw(st.lists(st.integers(0, 800), min_size=n_q, max_size=n_q)), np.int32
     )
     q_ends = (q_starts + draw(st.integers(1, 200))).astype(np.int32)
-    return (geno_offset_idx, geno_v_idxs, geno_offsets, v_starts, ilens,
-            q_starts, q_ends)
+    return (
+        geno_offset_idx,
+        geno_v_idxs,
+        geno_offsets,
+        v_starts,
+        ilens,
+        q_starts,
+        q_ends,
+    )
 
 
 @st.composite
@@ -108,7 +120,6 @@ def get_diffs_sparse_inputs(draw):
     mode = draw(st.sampled_from(["plain", "keep", "query"]))
     twod = draw(st.booleans())
     offsets = goff if not twod else np.stack([goff[:-1], goff[1:]]).astype(np.int64)
-    n_groups = goi.size
     total = int(goff[-1])
     if mode == "plain":
         return (goi, gvi, offsets, ilens, None, None, None, None, None)
@@ -147,16 +158,16 @@ def gather_rows_inputs(draw, dtype=np.int32):
         elements = st.floats(width=32, allow_nan=False, allow_infinity=False)
     else:
         elements = st.integers(0, 1000)
-    data = np.array(
-        draw(st.lists(elements, min_size=total, max_size=total)), dt
-    )
+    data = np.array(draw(st.lists(elements, min_size=total, max_size=total)), dt)
     n_rows = draw(st.integers(1, 8))
     goi = np.array(
         draw(st.lists(st.integers(0, n_groups - 1), min_size=n_rows, max_size=n_rows)),
         np.int64,
     )
     twod = draw(st.booleans())
-    off = offsets if not twod else np.stack([offsets[:-1], offsets[1:]]).astype(np.int64)
+    off = (
+        offsets if not twod else np.stack([offsets[:-1], offsets[1:]]).astype(np.int64)
+    )
     return (goi, off, data)
 
 
@@ -188,9 +199,7 @@ def compact_keep_inputs(draw, dtype):
         elements = st.floats(width=32, allow_nan=False, allow_infinity=False)
     else:
         elements = st.integers(0, 1000)
-    values = np.array(
-        draw(st.lists(elements, min_size=total, max_size=total)), dt
-    )
+    values = np.array(draw(st.lists(elements, min_size=total, max_size=total)), dt)
     keep = np.array(
         draw(st.lists(st.booleans(), min_size=total, max_size=total)), np.bool_
     )
@@ -218,9 +227,7 @@ def fill_empty_scalar_inputs(draw, dtype=np.int32):
     else:
         elements = st.integers(-1000, 1000)
         fill = draw(st.integers(-1000, 1000))
-    data = np.array(
-        draw(st.lists(elements, min_size=total, max_size=total)), dt
-    )
+    data = np.array(draw(st.lists(elements, min_size=total, max_size=total)), dt)
     fill_val = dt.type(fill)
     return (data, row_offsets, fill_val)
 
@@ -246,7 +253,9 @@ def fill_empty_fixed_inputs(draw, dtype=np.int32):
         elements = st.integers(-1000, 1000)
         fill = draw(st.integers(-1000, 1000))
     data = np.array(
-        draw(st.lists(elements, min_size=total_vars * inner, max_size=total_vars * inner)),
+        draw(
+            st.lists(elements, min_size=total_vars * inner, max_size=total_vars * inner)
+        ),
         dt,
     )
     fill_val = dt.type(fill)
