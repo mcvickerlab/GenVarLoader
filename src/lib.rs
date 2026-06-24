@@ -3,6 +3,7 @@ pub mod ffi;
 pub mod genotypes;
 pub mod intervals;
 pub mod ragged;
+pub mod reference;
 pub mod tables;
 pub mod variants;
 use numpy::{prelude::*, PyArray1, PyArray2, PyReadonlyArray1};
