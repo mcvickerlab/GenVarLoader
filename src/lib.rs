@@ -3,6 +3,7 @@ pub mod ffi;
 pub mod genotypes;
 pub mod intervals;
 pub mod ragged;
+pub mod reconstruct;
 pub mod reference;
 pub mod tables;
 pub mod variants;
