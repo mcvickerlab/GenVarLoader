@@ -58,9 +58,14 @@ pub fn hash4(a: u64, b: u64, c: u64, d: u64) -> u64 {
 /// Mirrors numba `_apply_insertion_fill` (lines 56-138 of `_tracks.py`)
 /// statement-by-statement, including float promotion points:
 ///
-/// - `REPEAT_5P_NORM`: division is f32 / f32 (v_len cast to f32), result stored
-///   as f32. Mirrors numba where `track` is f32 and `v_len` is an int —
-///   numpy promotes f32/int → f32.
+/// - `REPEAT_5P_NORM`: numba computes `track[v_rel_pos] / v_len` in **f64**
+///   (`v_len` is int64; np.float32 / np.int64 → float64), then rounds to f32
+///   on store. We compute f32 / f32 directly: this is bit-identical to numba
+///   **only** because IEEE-754 division is double-rounding-safe (f64 mantissa
+///   53 bits ≥ 2·24+2 = 50, verified empirically over 42M cases). Do NOT
+///   generalize this f32-direct shortcut to multiply-add or multi-step
+///   accumulations — those are NOT double-rounding-safe; mirror numba's f64
+///   intermediate there.
 /// - `CONSTANT`: `params[0]` is f64; stored into f32 `out` (cast on store).
 /// - `INTERPOLATE`: all anchor/Lagrange arithmetic in f64 (`xs`, `ys` are f64);
 ///   `ys[j] = track[ref_idx]` promotes f32 → f64 on assignment; final `acc`
@@ -101,9 +106,11 @@ pub fn apply_insertion_fill(
             out[out_idx + i] = val;
         }
     } else if strategy_id == REPEAT_5P_NORM {
-        // Numba: val = track[v_rel_pos] / v_len
-        // track is f32, v_len is int → numpy promotes f32/int → f32.
-        // Mirror: cast v_len to f32, divide f32/f32 → f32.
+        // Numba: val = track[v_rel_pos] / v_len  (computed in f64; v_len is int64,
+        // so np.float32/np.int64 → float64), then stored into f32 out.
+        // We divide f32/f32 directly: bit-identical to numba because IEEE-754
+        // division is double-rounding-safe. Do NOT extend this shortcut to
+        // multiply-add or multi-op paths — use f64 intermediates there.
         let val = track[v_rel_pos as usize] / (v_len as f32);
         for i in 0..writable_length {
             out[out_idx + i] = val;
