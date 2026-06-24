@@ -85,8 +85,11 @@ def test_reference_mode_dataset_parity(phased_svar_gvl, reference, monkeypatch):
     available in the synthetic test case.
     """
     # --- open dataset in reference mode ---
+    # with_tracks is intentionally omitted: the fixture has no tracks, so
+    # with_seqs("reference") already returns Ragged[np.bytes_] directly without
+    # any with_tracks(False) call.  Calling it would only emit a spurious
+    # "Dataset has no tracks" warning and return self unchanged.
     ds = gvl.Dataset.open(phased_svar_gvl, reference=reference)
-    ds = ds.with_tracks(False)   # ensure return type is Ragged[np.bytes_] directly
     ds = ds.with_seqs("reference")
 
     # --- install spy on the Rust get_reference kernel ---
@@ -109,9 +112,22 @@ def test_reference_mode_dataset_parity(phased_svar_gvl, reference, monkeypatch):
         monkeypatch.setenv("GVL_BACKEND", "rust")
         out_rust = ds[:, :]
 
+        # Spy-wiring guard: capture count right after rust read.
+        # It must be > 0 here (proven below) and must not grow during the
+        # numba read (proven after it), confirming the spy is wired ONLY to
+        # the rust kernel and not to the numba path.
+        rust_call_count = calls["n"]
+
         # --- numba reference read ---
         monkeypatch.setenv("GVL_BACKEND", "numba")
         out_numba = ds[:, :]
+
+        # Spy-wiring guard: numba must NOT fire the rust spy.
+        assert calls["n"] == rust_call_count, (
+            f"get_reference spy fired during the numba read "
+            f"(count went from {rust_call_count} to {calls['n']}) — "
+            "the spy is wired to the numba path, which is a bug in the test setup."
+        )
 
     finally:
         # Restore the original registry entry unconditionally.
