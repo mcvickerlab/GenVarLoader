@@ -1,4 +1,6 @@
 pub mod bigwig;
+pub mod ffi;
+pub mod intervals;
 pub mod ragged;
 pub mod tables;
 use numpy::{prelude::*, PyArray1, PyArray2, PyReadonlyArray1};
@@ -8,10 +10,11 @@ use std::path::PathBuf;
 #[pymodule]
 fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(count_intervals, m)?)?;
-    m.add_function(wrap_pyfunction!(intervals, m)?)?;
+    m.add_function(wrap_pyfunction!(bigwig_intervals, m)?)?;
     m.add_function(wrap_pyfunction!(bigwig_write_track, m)?)?;
     m.add_class::<tables::RustTable>()?;
     m.add_function(wrap_pyfunction!(ragged::ragged_to_padded, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::intervals_to_tracks, m)?)?;
     Ok(())
 }
 
@@ -93,7 +96,7 @@ fn count_intervals<'py>(
 /// values : NDArray[float32]
 ///     Shape = (intervals) Values.
 #[pyfunction]
-fn intervals<'py>(
+fn bigwig_intervals<'py>(
     py: Python<'py>,
     paths: Vec<PathBuf>,
     contig: &str,
