@@ -1,5 +1,5 @@
 //! PyO3 boundary for migrated core kernels. The ONLY place new kernels touch Python.
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray1};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray1};
 use pyo3::prelude::*;
 
 use crate::genotypes;
@@ -60,4 +60,32 @@ pub fn intervals_to_tracks(
         out.as_array_mut(),
         out_offsets.as_array(),
     );
+}
+
+/// Exonic keep-mask (see `genotypes::choose_exonic_variants`). Returns
+/// `(keep: bool[n], keep_offsets: i64[n_groups+1])`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn choose_exonic_variants<'py>(
+    py: Python<'py>,
+    starts: PyReadonlyArray1<i32>,
+    ends: PyReadonlyArray1<i32>,
+    geno_offset_idx: PyReadonlyArray2<i64>,
+    geno_v_idxs: PyReadonlyArray1<i32>,
+    geno_offsets: PyReadonlyArray2<i64>,
+    v_starts: PyReadonlyArray1<i32>,
+    ilens: PyReadonlyArray1<i32>,
+) -> (Bound<'py, PyArray1<bool>>, Bound<'py, PyArray1<i64>>) {
+    let go = geno_offsets.as_array();
+    let (keep, koff) = genotypes::choose_exonic_variants(
+        starts.as_array(),
+        ends.as_array(),
+        geno_offset_idx.as_array(),
+        geno_v_idxs.as_array(),
+        go.row(0),
+        go.row(1),
+        v_starts.as_array(),
+        ilens.as_array(),
+    );
+    (keep.into_pyarray(py), koff.into_pyarray(py))
 }

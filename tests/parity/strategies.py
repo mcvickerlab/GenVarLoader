@@ -126,3 +126,11 @@ def get_diffs_sparse_inputs(draw):
         )
         keep_off = goff.copy()
     return (goi, gvi, offsets, ilens, keep, keep_off, qstarts, qends, vstarts)
+
+
+@st.composite
+def choose_exonic_variants_inputs(draw):
+    (goi, gvi, goff, vstarts, ilens, qstarts, qends) = draw(_sparse_geno())
+    twod = draw(st.booleans())
+    offsets = goff if not twod else np.stack([goff[:-1], goff[1:]]).astype(np.int64)
+    return (qstarts, qends, goi, gvi, offsets, vstarts, ilens)
