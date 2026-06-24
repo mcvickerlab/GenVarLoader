@@ -20,6 +20,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::get_diffs_sparse, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::choose_exonic_variants, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::gather_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::gather_alleles, m)?)?;
     Ok(())
 }
 

@@ -30,6 +30,33 @@ pub fn gather_rows(
     (v_idxs, out_offsets)
 }
 
+/// Gather variable-length allele bytestrings. Mirrors numba `_gather_alleles`.
+pub fn gather_alleles(
+    v_idxs: ArrayView1<i32>,
+    allele_bytes: ArrayView1<u8>,
+    allele_offsets: ArrayView1<i64>,
+) -> (Array1<u8>, Array1<i64>) {
+    let n = v_idxs.len();
+    let mut seq_offsets = Array1::<i64>::zeros(n + 1);
+    for i in 0..n {
+        let v = v_idxs[i] as usize;
+        seq_offsets[i + 1] = seq_offsets[i] + (allele_offsets[v + 1] - allele_offsets[v]);
+    }
+    let total = seq_offsets[n] as usize;
+    let mut data = Array1::<u8>::zeros(total);
+    let mut dst = 0usize;
+    for i in 0..n {
+        let v = v_idxs[i] as usize;
+        let s = allele_offsets[v] as usize;
+        let e = allele_offsets[v + 1] as usize;
+        for k in s..e {
+            data[dst] = allele_bytes[k];
+            dst += 1;
+        }
+    }
+    (data, seq_offsets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,5 +72,16 @@ mod tests {
         let (v, off) = gather_rows(goi.view(), o_starts.view(), o_stops.view(), data.view());
         assert_eq!(v.to_vec(), vec![12, 13, 14, 10, 11]);
         assert_eq!(off.to_vec(), vec![0, 3, 5]);
+    }
+
+    #[test]
+    fn test_gather_alleles_basic() {
+        // alleles: v0="AC"(65,67), v1="G"(71). gather [1,0,1].
+        let v_idxs = arr1(&[1i32, 0, 1]);
+        let bytes = arr1(&[65u8, 67, 71]);
+        let offs = arr1(&[0i64, 2, 3]);
+        let (data, seq) = gather_alleles(v_idxs.view(), bytes.view(), offs.view());
+        assert_eq!(data.to_vec(), vec![71, 65, 67, 71]);
+        assert_eq!(seq.to_vec(), vec![0, 1, 3, 4]);
     }
 }

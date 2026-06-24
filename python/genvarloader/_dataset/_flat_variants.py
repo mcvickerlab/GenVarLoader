@@ -11,6 +11,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .._dispatch import get, register
+from ..genvarloader import gather_alleles as _gather_alleles_rust
 from ..genvarloader import gather_rows as _gather_rows_rust
 from ._genotypes import _as_starts_stops
 
@@ -493,7 +494,7 @@ def _gather_v_idxs_ss_numba(
 
 
 @nb.njit(nogil=True, cache=True)
-def _gather_alleles(v_idxs, allele_bytes, allele_offsets):  # pragma: no cover - njit
+def _gather_alleles_numba(v_idxs, allele_bytes, allele_offsets):  # pragma: no cover - njit
     """Gather variable-length allele bytestrings for ``v_idxs`` from the global
     allele byte buffer into flat ``(data, seq_offsets)``."""
     n = v_idxs.shape[0]
@@ -514,6 +515,17 @@ def _gather_alleles(v_idxs, allele_bytes, allele_offsets):  # pragma: no cover -
             data[dst] = allele_bytes[k]
             dst += 1
     return data, seq_offsets
+
+
+register("gather_alleles", numba=_gather_alleles_numba, rust=_gather_alleles_rust, default="rust")
+
+
+def _gather_alleles(v_idxs, allele_bytes, allele_offsets):
+    return get("gather_alleles")(
+        np.ascontiguousarray(v_idxs, np.int32),
+        np.ascontiguousarray(allele_bytes, np.uint8),
+        np.ascontiguousarray(allele_offsets, np.int64),
+    )
 
 
 @nb.njit(nogil=True, cache=True)

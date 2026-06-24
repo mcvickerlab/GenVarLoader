@@ -108,3 +108,19 @@ pub fn gather_rows<'py>(
     );
     (v.into_pyarray(py), off.into_pyarray(py))
 }
+
+/// Gather allele bytestrings (see `variants::gather_alleles`).
+#[pyfunction]
+pub fn gather_alleles<'py>(
+    py: Python<'py>,
+    v_idxs: PyReadonlyArray1<i32>,
+    allele_bytes: PyReadonlyArray1<u8>,
+    allele_offsets: PyReadonlyArray1<i64>,
+) -> (Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>) {
+    let (data, seq) = variants::gather_alleles(
+        v_idxs.as_array(),
+        allele_bytes.as_array(),
+        allele_offsets.as_array(),
+    );
+    (data.into_pyarray(py), seq.into_pyarray(py))
+}

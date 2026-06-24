@@ -153,3 +153,19 @@ def gather_rows_inputs(draw):
     twod = draw(st.booleans())
     off = offsets if not twod else np.stack([offsets[:-1], offsets[1:]]).astype(np.int64)
     return (goi, off, data)
+
+
+@st.composite
+def gather_alleles_inputs(draw):
+    n_unique = draw(st.integers(1, 8))
+    lens = [draw(st.integers(0, 5)) for _ in range(n_unique)]
+    allele_offsets = np.concatenate([[0], np.cumsum(lens)]).astype(np.int64)
+    total = int(allele_offsets[-1])
+    allele_bytes = np.array(
+        draw(st.lists(st.integers(0, 255), min_size=total, max_size=total)), np.uint8
+    )
+    m = draw(st.integers(0, 10))
+    v_idxs = np.array(
+        draw(st.lists(st.integers(0, n_unique - 1), min_size=m, max_size=m)), np.int32
+    )
+    return (v_idxs, allele_bytes, allele_offsets)
