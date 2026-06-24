@@ -193,14 +193,14 @@ def test_variants_af_filter_parity(phased_svar_gvl, reference, monkeypatch):
         monkeypatch.setenv("GVL_BACKEND", "numba")
         try:
             out_numba = ds[:, :]
-        except (KeyError, Exception) as e:
-            # AF info not available on this dataset at read time.
-            if "AF" in str(e) or isinstance(e, KeyError):
-                pytest.skip(
-                    f"AF key missing in variant info at read time — "
-                    f"skipping compact_keep exercise ({type(e).__name__}: {e})"
-                )
-            raise
+        except KeyError as e:
+            # AF info genuinely missing from variant info at read time → skip.
+            # Any other exception propagates and fails loudly (don't mask a real
+            # AF-path regression as a skip).
+            pytest.skip(
+                f"AF key missing in variant info at read time — "
+                f"skipping compact_keep exercise ({type(e).__name__}: {e})"
+            )
 
         monkeypatch.setenv("GVL_BACKEND", "rust")
         out_rust = ds[:, :]
