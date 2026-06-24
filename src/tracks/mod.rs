@@ -8,7 +8,7 @@
 //! `apply_insertion_fill` mirrors `_apply_insertion_fill` in the same file
 //! (lines 56-138), statement-by-statement, including float promotion points.
 
-use ndarray::{ArrayView1, ArrayViewMut1};
+use ndarray::{Array1, ArrayView1, ArrayView2, ArrayViewMut1};
 
 // Strategy IDs — mirror _insertion_fill.py exactly.
 pub const REPEAT_5P: i64 = 0;
@@ -512,6 +512,139 @@ pub fn shift_and_realign_tracks_sparse(
             );
         }
     }
+}
+
+/// RLE-encode a ragged f32 track buffer into (starts, ends, values, offsets) intervals.
+///
+/// Mirrors numba `tracks_to_intervals` + `_scanned_mask` + `_compact_mask` in
+/// `python/genvarloader/_dataset/_intervals.py` lines 129-220, statement-by-statement.
+///
+/// # Algorithm (matches numba exactly)
+/// Two-pass:
+/// 1. For each query, compute `scanned_mask` (cumulative count of value-change positions)
+///    and store `n_intervals[query] = scanned_mask[-1]`.
+/// 2. Cumsum `n_intervals` into `interval_offsets` (i64, mirrors numba's `.cumsum()`).
+/// 3. Fill pass: for each query, recover run boundaries via `compact_mask`, then write
+///    starts/ends/values into the output arrays at `interval_offsets[query]`.
+///
+/// Key fidelity points:
+/// - `backward_mask[0] = true`, `backward_mask[i] = track[i-1] != track[i]` — exact f32 `!=`
+///   (bit-level, not ordered comparison).
+/// - `scanned_mask` = prefix-sum of `backward_mask` (i64 accumulation).
+/// - 0-value intervals ARE included (no filtering on value == 0.0, matches numba comment).
+/// - `starts` and `ends` are absolute genomic coords: `boundaries + regions[query, 1]`.
+/// - Output dtypes: starts/ends i32, values f32, offsets i64.
+pub fn tracks_to_intervals(
+    regions: ArrayView2<i32>,
+    tracks: ArrayView1<f32>,
+    track_offsets: ArrayView1<i64>,
+) -> (Array1<i32>, Array1<i32>, Array1<f32>, Array1<i64>) {
+    let n_queries = regions.nrows();
+
+    // --- Pass 1: count intervals per query ---
+    // Numba: n_intervals = np.empty(n_queries, np.int32)
+    // Numba: scanned_masks = np.empty_like(tracks, np.int64)
+    // We allocate a single flat scanned_masks buffer mirroring numba's layout.
+    let total_track_len = tracks.len();
+    let mut scanned_masks = vec![0i64; total_track_len];
+    let mut n_intervals = vec![0i32; n_queries];
+
+    for query in 0..n_queries {
+        let o_s = track_offsets[query] as usize;
+        let o_e = track_offsets[query + 1] as usize;
+        // Numba: if o_s == o_e: n_intervals[query] = 0; continue
+        if o_s == o_e {
+            n_intervals[query] = 0;
+            continue;
+        }
+        let track = &tracks.as_slice().unwrap()[o_s..o_e];
+        let scan = &mut scanned_masks[o_s..o_e];
+        // _scanned_mask: backward_mask[0]=True, backward_mask[i] = track[i-1] != track[i]
+        // cumsum into scan (i64 accumulator)
+        // Numba: out[:] = backward_mask.cumsum()
+        let mut acc: i64 = 0;
+        for i in 0..track.len() {
+            let bm = if i == 0 {
+                true
+            } else {
+                // Exact f32 != comparison (bit-level, matches numba)
+                track[i - 1] != track[i]
+            };
+            acc += bm as i64;
+            scan[i] = acc;
+        }
+        // n_intervals[query] = scanned_backward_mask[-1]
+        n_intervals[query] = scan[track.len() - 1] as i32;
+    }
+
+    // --- Two-pass cumsum: mirrors numba's n_intervals.cumsum() ---
+    // Numba:
+    //   interval_offsets = np.empty(n_queries + 1, np.int64)
+    //   interval_offsets[0] = 0
+    //   interval_offsets[1:] = n_intervals.cumsum()
+    let mut interval_offsets = vec![0i64; n_queries + 1];
+    let mut running: i64 = 0;
+    for q in 0..n_queries {
+        running += n_intervals[q] as i64;
+        interval_offsets[q + 1] = running;
+    }
+    let total_intervals = running as usize;
+
+    let mut all_starts = vec![0i32; total_intervals];
+    let mut all_ends = vec![0i32; total_intervals];
+    let mut all_values = vec![0.0f32; total_intervals];
+
+    // --- Pass 2: fill starts/ends/values ---
+    for query in 0..n_queries {
+        let o_s = track_offsets[query] as usize;
+        let o_e = track_offsets[query + 1] as usize;
+        // Numba: if o_s == o_e: continue
+        if o_s == o_e {
+            continue;
+        }
+        let track = &tracks.as_slice().unwrap()[o_s..o_e];
+        let scan = &scanned_masks[o_s..o_e];
+        let n_elems = scan.len();
+        let n_runs = scan[n_elems - 1] as usize;
+
+        // _compact_mask: recovers run-boundary indices
+        // Numba:
+        //   compacted_backward_mask = np.empty(n_runs + 1, np.int32)
+        //   compacted_backward_mask[-1] = n_elems
+        //   for i in prange(n_elems):
+        //       if i == 0: compacted_backward_mask[0] = 0
+        //       elif scan[i] != scan[i-1]: compacted_backward_mask[scan[i] - 1] = i
+        let mut compacted = vec![0i32; n_runs + 1];
+        compacted[n_runs] = n_elems as i32;
+        for i in 0..n_elems {
+            if i == 0 {
+                compacted[0] = 0;
+            } else if scan[i] != scan[i - 1] {
+                compacted[scan[i] as usize - 1] = i as i32;
+            }
+        }
+
+        // values = track[compacted[:-1]]
+        // starts/ends = compacted[:-1] + region_start, compacted[1:] + region_start
+        let s = interval_offsets[query] as usize;
+        let start = regions[[query, 1]]; // region start (absolute genomic coord)
+
+        // Numba: compacted_backward_mask += start  (in-place, then used for starts/ends)
+        // We apply the shift at write time to avoid mutating compacted.
+        let n = n_runs; // == len(values)
+        for k in 0..n {
+            all_starts[s + k] = compacted[k] + start;
+            all_ends[s + k] = compacted[k + 1] + start;
+            all_values[s + k] = track[compacted[k] as usize];
+        }
+    }
+
+    (
+        Array1::from_vec(all_starts),
+        Array1::from_vec(all_ends),
+        Array1::from_vec(all_values),
+        Array1::from_vec(interval_offsets),
+    )
 }
 
 #[cfg(test)]
@@ -1654,5 +1787,127 @@ mod tests {
         assert_eq!(result[..3], [1.0f32, 2.0, 3.0], "q0: SNP skipped, track copied");
         // No variants in q1 → track[3..6]
         assert_eq!(result[3..], [4.0f32, 5.0, 6.0], "q1: no variants, track copied");
+    }
+
+    // ================================================================== //
+    // tracks_to_intervals tests                                            //
+    // ================================================================== //
+
+    /// Hand-built RLE example with 3 queries:
+    /// - q0: empty (track_offsets[0]==track_offsets[1])  → 0 intervals
+    /// - q1: all-constant [5.0, 5.0, 5.0] at region [0, 10, 13] → 1 interval [10,13) val=5.0
+    /// - q2: two runs [1.0, 1.0, 2.0, 2.0, 2.0] at region [0, 20, 25] → 2 intervals
+    ///         [20,22) val=1.0  and  [22,25) val=2.0
+    ///
+    /// Expected offsets: [0, 0, 1, 3]
+    #[test]
+    fn test_tracks_to_intervals_hand_built() {
+        use super::tracks_to_intervals;
+        use ndarray::{Array1, Array2};
+
+        // regions: (n_queries, 3) — (contig_idx, start, end)
+        let regions_data = vec![
+            0i32, 0, 0,   // q0: empty length
+            0i32, 10, 13, // q1: [10, 13), length 3
+            0i32, 20, 25, // q2: [20, 25), length 5
+        ];
+        let regions = Array2::from_shape_vec((3, 3), regions_data).unwrap();
+
+        // tracks: q0 empty, q1 = [5,5,5], q2 = [1,1,2,2,2]
+        let tracks_data = vec![5.0f32, 5.0, 5.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+        let tracks = Array1::from_vec(tracks_data);
+
+        // track_offsets: [0, 0, 3, 8]
+        let track_offsets = Array1::from_vec(vec![0i64, 0, 3, 8]);
+
+        let (starts, ends, values, offsets) =
+            tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view());
+
+        // offsets: [0, 0, 1, 3]
+        assert_eq!(offsets.as_slice().unwrap(), &[0i64, 0, 1, 3], "offsets mismatch");
+
+        // Total intervals = 3
+        assert_eq!(starts.len(), 3);
+        assert_eq!(ends.len(), 3);
+        assert_eq!(values.len(), 3);
+
+        // q1: interval 0 → [10, 13), val=5.0
+        assert_eq!(starts[0], 10i32, "q1 start");
+        assert_eq!(ends[0], 13i32, "q1 end");
+        assert_eq!(values[0], 5.0f32, "q1 value");
+
+        // q2: interval 1 → [20, 22), val=1.0
+        assert_eq!(starts[1], 20i32, "q2[0] start");
+        assert_eq!(ends[1], 22i32, "q2[0] end");
+        assert_eq!(values[1], 1.0f32, "q2[0] value");
+
+        // q2: interval 2 → [22, 25), val=2.0
+        assert_eq!(starts[2], 22i32, "q2[1] start");
+        assert_eq!(ends[2], 25i32, "q2[1] end");
+        assert_eq!(values[2], 2.0f32, "q2[1] value");
+    }
+
+    /// All-constant single query: exactly 1 interval covering full range.
+    #[test]
+    fn test_tracks_to_intervals_all_constant() {
+        use super::tracks_to_intervals;
+        use ndarray::{Array1, Array2};
+
+        let regions = Array2::from_shape_vec((1, 3), vec![0i32, 100, 107]).unwrap();
+        let tracks = Array1::from_vec(vec![3.14f32; 7]);
+        let track_offsets = Array1::from_vec(vec![0i64, 7]);
+
+        let (starts, ends, values, offsets) =
+            tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view());
+
+        assert_eq!(offsets.as_slice().unwrap(), &[0i64, 1]);
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0], 100i32);
+        assert_eq!(ends[0], 107i32);
+        assert_eq!(values[0], 3.14f32);
+    }
+
+    /// Empty query: track_offsets[0] == track_offsets[1] → 0 intervals, no panic.
+    #[test]
+    fn test_tracks_to_intervals_empty_query() {
+        use super::tracks_to_intervals;
+        use ndarray::{Array1, Array2};
+
+        let regions = Array2::from_shape_vec((1, 3), vec![0i32, 50, 50]).unwrap();
+        let tracks = Array1::from_vec(vec![]);
+        let track_offsets = Array1::from_vec(vec![0i64, 0]);
+
+        let (starts, ends, values, offsets) =
+            tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view());
+
+        assert_eq!(offsets.as_slice().unwrap(), &[0i64, 0]);
+        assert_eq!(starts.len(), 0);
+        assert_eq!(ends.len(), 0);
+        assert_eq!(values.len(), 0);
+    }
+
+    /// Zero-value intervals ARE included (not filtered).
+    #[test]
+    fn test_tracks_to_intervals_zero_value_included() {
+        use super::tracks_to_intervals;
+        use ndarray::{Array1, Array2};
+
+        // track = [0.0, 0.0, 1.0, 0.0] → 3 intervals: [0,2)=0.0, [2,3)=1.0, [3,4)=0.0
+        let regions = Array2::from_shape_vec((1, 3), vec![0i32, 0, 4]).unwrap();
+        let tracks = Array1::from_vec(vec![0.0f32, 0.0, 1.0, 0.0]);
+        let track_offsets = Array1::from_vec(vec![0i64, 4]);
+
+        let (starts, ends, values, offsets) =
+            tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view());
+
+        assert_eq!(offsets.as_slice().unwrap(), &[0i64, 3]);
+        assert_eq!(starts.len(), 3, "must have 3 intervals including zero-value ones");
+        assert_eq!(values[0], 0.0f32, "first interval is zero-value");
+        assert_eq!(starts[0], 0i32);
+        assert_eq!(ends[0], 2i32);
+        assert_eq!(values[1], 1.0f32);
+        assert_eq!(values[2], 0.0f32, "third interval is zero-value");
+        assert_eq!(starts[2], 3i32);
+        assert_eq!(ends[2], 4i32);
     }
 }

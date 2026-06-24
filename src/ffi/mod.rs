@@ -421,6 +421,36 @@ pub fn shift_and_realign_tracks_sparse(
     );
 }
 
+/// RLE-encode a ragged f32 track buffer into (starts, ends, values, offsets).
+///
+/// Mirrors numba `tracks_to_intervals` in `_intervals.py` lines 129-195.
+/// Returns a 4-tuple `(all_starts: i32, all_ends: i32, all_values: f32, interval_offsets: i64)`.
+#[pyfunction]
+pub fn tracks_to_intervals<'py>(
+    py: Python<'py>,
+    regions: PyReadonlyArray2<i32>,
+    tracks: PyReadonlyArray1<f32>,
+    track_offsets: PyReadonlyArray1<i64>,
+) -> (
+    Bound<'py, PyArray1<i32>>,
+    Bound<'py, PyArray1<i32>>,
+    Bound<'py, PyArray1<f32>>,
+    Bound<'py, PyArray1<i64>>,
+) {
+    use crate::tracks;
+    let (starts, ends, values, offsets) = tracks::tracks_to_intervals(
+        regions.as_array(),
+        tracks.as_array(),
+        track_offsets.as_array(),
+    );
+    (
+        starts.into_pyarray(py),
+        ends.into_pyarray(py),
+        values.into_pyarray(py),
+        offsets.into_pyarray(py),
+    )
+}
+
 // ── DEBUG exports for PRNG parity tests (Task 7) ─────────────────────────────
 // These thin wrappers exist solely to make the Rust PRNG functions callable from
 // Python tests. They may be kept or removed after Task 8/9 review.

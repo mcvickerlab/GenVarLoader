@@ -306,6 +306,70 @@ def fill_empty_seq_inputs(draw, dtype=np.uint8):
 
 
 @st.composite
+def tracks_to_intervals_inputs(draw):
+    """Contract-valid inputs for ``tracks_to_intervals``.
+
+    Generates (regions, tracks, track_offsets) where:
+    - regions: (n_queries, 3) int32 with (contig_idx, start, end)
+    - tracks: flat f32 ragged array, one piecewise-constant run per query
+    - track_offsets: (n_queries + 1,) int64
+
+    Exercises: multi-run queries, all-constant (1 interval), and empty queries.
+    Includes a guaranteed empty query (track_offsets[q]==track_offsets[q+1]) and
+    a guaranteed all-constant query (single run, 1 interval).
+    """
+    n_queries = draw(st.integers(min_value=3, max_value=8))
+    regions_list: list[tuple[int, int, int]] = []
+    track_lengths: list[int] = []
+    tracks_parts: list[np.ndarray] = []
+
+    for qi in range(n_queries):
+        start = draw(st.integers(min_value=0, max_value=500))
+        # Force first query to be empty, second to be all-constant
+        if qi == 0:
+            length = 0
+        elif qi == 1:
+            length = draw(st.integers(min_value=1, max_value=20))
+        else:
+            length = draw(st.integers(min_value=0, max_value=40))
+
+        regions_list.append((0, start, start + length))
+        track_lengths.append(length)
+
+        if length == 0:
+            tracks_parts.append(np.empty(0, dtype=np.float32))
+        elif qi == 1:
+            # All-constant: single run
+            val = draw(st.floats(width=32, allow_nan=False, allow_infinity=False))
+            tracks_parts.append(np.full(length, val, dtype=np.float32))
+        else:
+            # Piecewise constant with interesting RLE structure
+            # Draw run boundaries: build runs by drawing lengths
+            buf = np.empty(length, dtype=np.float32)
+            pos = 0
+            while pos < length:
+                run_len = draw(st.integers(min_value=1, max_value=max(1, length - pos)))
+                run_len = min(run_len, length - pos)
+                val = draw(
+                    st.floats(
+                        min_value=-1e3,
+                        max_value=1e3,
+                        allow_nan=False,
+                        allow_infinity=False,
+                    )
+                )
+                buf[pos : pos + run_len] = val
+                pos += run_len
+            tracks_parts.append(buf)
+
+    regions = np.array(regions_list, dtype=np.int32)
+    track_offsets = np.concatenate([[0], np.cumsum(track_lengths)]).astype(np.int64)
+    tracks = np.concatenate(tracks_parts) if tracks_parts else np.empty(0, dtype=np.float32)
+
+    return regions, tracks, track_offsets
+
+
+@st.composite
 def get_reference_inputs(draw):
     """Generate (regions, out_offsets, reference, ref_offsets, pad_char, parallel)
     with regions whose [start,end) windows may run off either contig edge.
