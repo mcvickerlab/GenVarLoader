@@ -4,6 +4,7 @@ from numpy.typing import NDArray
 
 from .._dispatch import get, register
 from ..genvarloader import intervals_to_tracks as _intervals_to_tracks_rust
+from ..genvarloader import tracks_to_intervals as _tracks_to_intervals_rust
 
 __all__ = []
 
@@ -126,7 +127,7 @@ def intervals_to_tracks(
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
-def tracks_to_intervals(
+def _tracks_to_intervals_numba(
     regions: NDArray[np.int32],
     tracks: NDArray[np.float32],
     track_offsets: NDArray[np.int64],
@@ -193,6 +194,49 @@ def tracks_to_intervals(
         all_values[s : s + n] = values
 
     return all_starts, all_ends, all_values, interval_offsets
+
+
+register(
+    "tracks_to_intervals",
+    numba=_tracks_to_intervals_numba,
+    rust=_tracks_to_intervals_rust,
+    default="rust",
+)
+
+
+def tracks_to_intervals(
+    regions: NDArray[np.int32],
+    tracks: NDArray[np.float32],
+    track_offsets: NDArray[np.int64],
+) -> tuple[
+    NDArray[np.int32], NDArray[np.int32], NDArray[np.float32], NDArray[np.int64]
+]:
+    """RLE-encode a ragged f32 track buffer into (starts, ends, values, offsets) intervals.
+
+    Includes 0-value intervals (no filtering on value == 0.0). Dispatches to the numba
+    or Rust backend via :mod:`genvarloader._dispatch` (default ``rust``). Read-only inputs
+    are coerced to canonical dtypes so both backends receive byte-identical bytes.
+
+    Parameters
+    ----------
+    regions : NDArray[np.int32]
+        Shape = (n_queries, 3) Regions for each query (contig_idx, start, end).
+    tracks : NDArray[np.float32]
+        Shape = (total_track_len,) Ragged flat array of track values.
+    track_offsets : NDArray[np.int64]
+        Shape = (n_queries + 1,) Offsets into ragged track data.
+
+    Returns
+    -------
+    all_starts : NDArray[np.int32]
+    all_ends : NDArray[np.int32]
+    all_values : NDArray[np.float32]
+    interval_offsets : NDArray[np.int64]
+    """
+    regions = np.ascontiguousarray(regions, dtype=np.int32)
+    tracks = np.ascontiguousarray(tracks, dtype=np.float32)
+    track_offsets = np.ascontiguousarray(track_offsets, dtype=np.int64)
+    return get("tracks_to_intervals")(regions, tracks, track_offsets)
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)

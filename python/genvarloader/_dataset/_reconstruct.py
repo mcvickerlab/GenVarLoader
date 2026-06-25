@@ -12,6 +12,7 @@ modules for backward-compatible import paths.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
@@ -23,6 +24,7 @@ from typing_extensions import assert_never
 from .._flat import _Flat
 from .._ragged import RaggedAnnotatedHaps, RaggedIntervals, RaggedSeqs, RaggedTracks
 from .._utils import lengths_to_offsets
+from ._genotypes import _as_starts_stops
 from ._haps import _H, Haps, ReconstructionRequest, _NewH, _Variants
 from ._insertion_fill import Repeat5p
 from ._insertion_fill import lower as _lower_insertion_fills
@@ -32,7 +34,14 @@ from ._protocol import Reconstructor
 from ._rag_variants import RaggedVariants
 from ._ref import Ref
 from ._splice import SplicePlan
-from ._tracks import _T, Tracks, TrackType, _NewT, shift_and_realign_tracks_sparse
+from ._tracks import _T, Tracks, TrackType, _NewT  # noqa: F401
+from .._dispatch import get as _dispatch_get
+
+# Fused tracks entry (Task 14): intervals → scratch → realign, one FFI crossing.
+# Imported at module level so the spy in test_fused_tracks_parity can monkeypatch it.
+from ..genvarloader import (
+    intervals_and_realign_track_fused as intervals_and_realign_track_fused,
+)
 
 # Re-exports for back-compat (callers historically imported these from
 # ``_reconstruct``):
@@ -182,49 +191,108 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                     rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
                 )
 
+            _backend = os.environ.get("GVL_BACKEND", "rust")
+            # Pre-compute (2, n) geno_offsets once for the fused Rust path
+            # (avoids re-computing _as_starts_stops n_tracks times).
+            # Always initialized; only used when _backend == "rust".
+            _geno_offsets_2d = (
+                _as_starts_stops(self.haps.genotypes.offsets)
+                if _backend == "rust"
+                else None
+            )
+
             for track_ofst, (name, tracktype) in enumerate(
                 self.tracks.active_tracks.items()
             ):
                 intervals = self.tracks.intervals[name]
-
-                # ragged (b l)
-                _tracks = np.empty(track_ofsts_per_t[-1], np.float32)
 
                 if tracktype is TrackType.SAMPLE:
                     o_idx = idx
                 else:
                     o_idx = r_idx
 
-                intervals_to_tracks(
-                    offset_idxs=o_idx,  # (b)
-                    starts=regions[:, 1],  # (b)
-                    itv_starts=intervals.starts.data,
-                    itv_ends=intervals.ends.data,
-                    itv_values=intervals.values.data,
-                    itv_offsets=intervals.starts.offsets,
-                    out=_tracks,  # (b*l)
-                    out_offsets=track_ofsts_per_t,  # (b+1)
-                )
-
                 _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
-                shift_and_realign_tracks_sparse(
-                    out=_out,  # (b*p*l)
-                    out_offsets=out_ofsts_per_t,  # (b*p+1)
-                    regions=regions,  # (b, 3)
-                    shifts=shifts,  # (b p)
-                    geno_offset_idx=geno_idx,  # (b p)
-                    geno_v_idxs=self.haps.genotypes.data,  # (r*s*p*v)
-                    geno_offsets=self.haps.genotypes.offsets,  # (r*s*p+1)
-                    v_starts=self.haps.variants.start,  # (tot_v)
-                    ilens=self.haps.variants.ilen,  # (tot_v)
-                    tracks=_tracks,  # ragged (b l)
-                    track_offsets=track_ofsts_per_t,  # (b+1)
-                    params=strat_params[track_ofst],
-                    keep=keep,  # (b*p*v)
-                    keep_offsets=keep_offsets,  # (b*p+1)
-                    strategy_id=int(strat_ids[track_ofst]),
-                    base_seed=base_seed,
-                )
+
+                if _backend == "rust":
+                    # Fused path (Rust): one FFI crossing, no Python-side
+                    # intermediate buffer.  Replaces:
+                    #   _tracks = np.empty(...)                (audit T2)
+                    #   intervals_to_tracks(...)               (FFI crossing #3)
+                    #   shift_and_realign_tracks_sparse(...)   (FFI crossing #4)
+                    #
+                    # _out is a contiguous f32 slice of the pre-allocated `out`
+                    # buffer (np.empty, step=1).  No ascontiguousarray needed for
+                    # `out`; the fused entry writes in-place into its buffer.
+                    intervals_and_realign_track_fused(
+                        out=_out,
+                        out_offsets=np.ascontiguousarray(out_ofsts_per_t, np.int64),
+                        regions=np.ascontiguousarray(regions, np.int32),
+                        shifts=np.ascontiguousarray(shifts, np.int32),
+                        geno_offset_idx=np.ascontiguousarray(geno_idx, np.int64),
+                        geno_v_idxs=np.ascontiguousarray(
+                            self.haps.genotypes.data, np.int32
+                        ),
+                        geno_offsets=_geno_offsets_2d,
+                        v_starts=np.ascontiguousarray(
+                            self.haps.variants.start, np.int32
+                        ),
+                        ilens=np.ascontiguousarray(self.haps.variants.ilen, np.int32),
+                        offset_idxs=np.ascontiguousarray(o_idx, np.int64),
+                        itv_starts=np.ascontiguousarray(
+                            intervals.starts.data, np.int32
+                        ),
+                        itv_ends=np.ascontiguousarray(intervals.ends.data, np.int32),
+                        itv_values=np.ascontiguousarray(
+                            intervals.values.data, np.float32
+                        ),
+                        itv_offsets=np.ascontiguousarray(
+                            intervals.starts.offsets, np.int64
+                        ),
+                        track_offsets=np.ascontiguousarray(track_ofsts_per_t, np.int64),
+                        params=np.ascontiguousarray(
+                            strat_params[track_ofst], np.float64
+                        ),
+                        strategy_id=int(strat_ids[track_ofst]),
+                        base_seed=int(base_seed),
+                        keep=None
+                        if keep is None
+                        else np.ascontiguousarray(keep, np.bool_),
+                        keep_offsets=None
+                        if keep_offsets is None
+                        else np.ascontiguousarray(keep_offsets, np.int64),
+                    )
+                else:
+                    # Composed path (numba): two FFI crossings + one intermediate
+                    # buffer.  This is the oracle path; it remains untouched.
+                    _tracks = np.empty(track_ofsts_per_t[-1], np.float32)
+                    intervals_to_tracks(
+                        offset_idxs=o_idx,  # (b)
+                        starts=regions[:, 1],  # (b)
+                        itv_starts=intervals.starts.data,
+                        itv_ends=intervals.ends.data,
+                        itv_values=intervals.values.data,
+                        itv_offsets=intervals.starts.offsets,
+                        out=_tracks,  # (b*l)
+                        out_offsets=track_ofsts_per_t,  # (b+1)
+                    )
+                    _dispatch_get("shift_and_realign_tracks_sparse")(
+                        out=_out,  # (b*p*l)
+                        out_offsets=out_ofsts_per_t,  # (b*p+1)
+                        regions=regions,  # (b, 3)
+                        shifts=shifts,  # (b p)
+                        geno_offset_idx=geno_idx,  # (b p)
+                        geno_v_idxs=self.haps.genotypes.data,  # (r*s*p*v)
+                        geno_offsets=self.haps.genotypes.offsets,  # (r*s*p+1)
+                        v_starts=self.haps.variants.start,  # (tot_v)
+                        ilens=self.haps.variants.ilen,  # (tot_v)
+                        tracks=_tracks,  # ragged (b l)
+                        track_offsets=track_ofsts_per_t,  # (b+1)
+                        params=strat_params[track_ofst],
+                        keep=keep,  # (b*p*v)
+                        keep_offsets=keep_offsets,  # (b*p+1)
+                        strategy_id=int(strat_ids[track_ofst]),
+                        base_seed=base_seed,
+                    )
 
             out_shape = (
                 len(idx),

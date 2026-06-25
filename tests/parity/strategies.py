@@ -303,3 +303,383 @@ def fill_empty_seq_inputs(draw, dtype=np.uint8):
     )
 
     return (data, var_offsets, seq_offsets, dummy)
+
+
+@st.composite
+def tracks_to_intervals_inputs(draw):
+    """Contract-valid inputs for ``tracks_to_intervals``.
+
+    Generates (regions, tracks, track_offsets) where:
+    - regions: (n_queries, 3) int32 with (contig_idx, start, end)
+    - tracks: flat f32 ragged array, one piecewise-constant run per query
+    - track_offsets: (n_queries + 1,) int64
+
+    Exercises: multi-run queries, all-constant (1 interval), and empty queries.
+    Includes a guaranteed empty query (track_offsets[q]==track_offsets[q+1]) and
+    a guaranteed all-constant query (single run, 1 interval).
+    """
+    n_queries = draw(st.integers(min_value=3, max_value=8))
+    regions_list: list[tuple[int, int, int]] = []
+    track_lengths: list[int] = []
+    tracks_parts: list[np.ndarray] = []
+
+    for qi in range(n_queries):
+        start = draw(st.integers(min_value=0, max_value=500))
+        # Force first query to be empty, second to be all-constant
+        if qi == 0:
+            length = 0
+        elif qi == 1:
+            length = draw(st.integers(min_value=1, max_value=20))
+        else:
+            length = draw(st.integers(min_value=0, max_value=40))
+
+        regions_list.append((0, start, start + length))
+        track_lengths.append(length)
+
+        if length == 0:
+            tracks_parts.append(np.empty(0, dtype=np.float32))
+        elif qi == 1:
+            # All-constant: single run
+            val = draw(st.floats(width=32, allow_nan=False, allow_infinity=False))
+            tracks_parts.append(np.full(length, val, dtype=np.float32))
+        else:
+            # Piecewise constant with interesting RLE structure
+            # Draw run boundaries: build runs by drawing lengths
+            buf = np.empty(length, dtype=np.float32)
+            pos = 0
+            while pos < length:
+                run_len = draw(st.integers(min_value=1, max_value=max(1, length - pos)))
+                run_len = min(run_len, length - pos)
+                val = draw(
+                    st.floats(
+                        min_value=-1e3,
+                        max_value=1e3,
+                        allow_nan=False,
+                        allow_infinity=False,
+                    )
+                )
+                buf[pos : pos + run_len] = val
+                pos += run_len
+            tracks_parts.append(buf)
+
+    regions = np.array(regions_list, dtype=np.int32)
+    track_offsets = np.concatenate([[0], np.cumsum(track_lengths)]).astype(np.int64)
+    tracks = (
+        np.concatenate(tracks_parts) if tracks_parts else np.empty(0, dtype=np.float32)
+    )
+
+    return regions, tracks, track_offsets
+
+
+@st.composite
+def get_reference_inputs(draw):
+    """Generate (regions, out_offsets, reference, ref_offsets, pad_char, parallel)
+    with regions whose [start,end) windows may run off either contig edge.
+
+    Note: start is restricted to [-5, clen) so that the region overlaps the
+    contig (start < clen). The numba kernel has a pre-existing size-mismatch
+    crash when start >= clen (region entirely past contig end); that degenerate
+    case never occurs in production (BED regions are clipped to contig bounds).
+    """
+    from hypothesis.extra.numpy import arrays
+
+    n_contigs = draw(st.integers(1, 3))
+    contig_lens = [draw(st.integers(1, 40)) for _ in range(n_contigs)]
+    ref_offsets = np.concatenate([[0], np.cumsum(contig_lens)]).astype(np.int64)
+    reference = draw(
+        arrays(np.uint8, int(ref_offsets[-1]), elements=st.integers(0, 255))
+    )
+    n_regions = draw(st.integers(1, 6))
+    regions = np.empty((n_regions, 3), np.int32)
+    lengths = []
+    for i in range(n_regions):
+        c = draw(st.integers(0, n_contigs - 1))
+        clen = contig_lens[c]
+        # Restrict start < clen so the region overlaps the contig.  numba's
+        # padded_slice raises ValueError when start >= clen (region entirely
+        # past the contig end): pad_right = end - clen > out_len triggers a
+        # size-mismatch in the ndarray assignment.  Both backends fail loudly
+        # on that degenerate input, so it is outside the byte-identity domain
+        # and is intentionally not generated here.  In production, BED regions
+        # are always clipped to contig bounds, so start >= clen never occurs.
+        # Regions extending past the right edge (end > clen) are still generated.
+        start = draw(st.integers(-5, clen - 1))
+        length = draw(st.integers(0, clen + 5))
+        regions[i] = (c, start, start + length)
+        lengths.append(length)
+    out_offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64)
+    pad_char = draw(st.integers(0, 255))
+    parallel = draw(st.booleans())
+    return regions, out_offsets, reference, ref_offsets, np.uint8(pad_char), parallel
+
+
+@st.composite
+def shift_and_realign_tracks_inputs(draw):  # noqa: C901
+    """Contract-valid inputs for shift_and_realign_tracks_sparse.
+
+    Returns ``(total_out_size, inputs_tuple)`` where inputs_tuple is everything
+    EXCEPT the out buffer (inserted at index 0 by the parity harness).
+
+    Exercises all five strategy IDs:
+      0 = REPEAT_5P
+      1 = REPEAT_5P_NORM
+      2 = CONSTANT
+      3 = FLANK_SAMPLE
+      4 = INTERPOLATE
+
+    Layout mirrors the numba batch driver signature:
+      out_offsets (b*p+1,), regions (b,3), shifts (b,p),
+      geno_offset_idx (b,p), geno_v_idxs, geno_offsets (2,n),
+      v_starts, ilens, tracks (ragged b*l), track_offsets (b+1),
+      params (f64), keep (optional), keep_offsets (optional),
+      strategy_id, base_seed.
+    """
+    # ── strategy ──────────────────────────────────────────────────────────────
+    strategy_id = draw(st.integers(min_value=0, max_value=4))
+    if strategy_id == 2:  # CONSTANT
+        param_val = draw(st.floats(width=64, allow_nan=False, allow_infinity=False))
+    elif strategy_id == 3:  # FLANK_SAMPLE
+        param_val = float(draw(st.integers(min_value=0, max_value=5)))
+    elif strategy_id == 4:  # INTERPOLATE — order in {1,2,3}
+        param_val = float(draw(st.integers(min_value=1, max_value=3)))
+    else:  # REPEAT_5P (0) or REPEAT_5P_NORM (1): param unused
+        param_val = 0.0
+    params = np.array([param_val], dtype=np.float64)
+
+    base_seed = np.uint64(
+        draw(st.integers(min_value=0, max_value=int(np.iinfo(np.uint64).max)))
+    )
+
+    # ── variants (SNP/ins/del mix) ─────────────────────────────────────────────
+    n_unique = draw(st.integers(min_value=1, max_value=8))
+    # v_starts sorted, in [0, 120] so they fit within track windows
+    v_starts_raw = sorted(
+        draw(st.lists(st.integers(0, 120), min_size=n_unique, max_size=n_unique))
+    )
+    v_starts = np.array(v_starts_raw, dtype=np.int32)
+    # ilens: -3..3 for del/snp/ins mix; ensure at least one each
+    ilens = np.array(
+        draw(st.lists(st.integers(-3, 3), min_size=n_unique, max_size=n_unique)),
+        dtype=np.int32,
+    )
+
+    # ── regions & tracks ─────────────────────────────────────────────────────
+    n_q = draw(st.integers(1, 4))
+    ploidy = draw(st.integers(1, 2))
+    n_groups = n_q * ploidy
+
+    # Per-query: q_start in [0, 80], region length in [4, 40]
+    q_starts = [draw(st.integers(0, 80)) for _ in range(n_q)]
+    region_lengths = [draw(st.integers(4, 40)) for _ in range(n_q)]
+
+    regions = np.empty((n_q, 3), np.int32)
+    for i in range(n_q):
+        regions[i] = (0, q_starts[i], q_starts[i] + region_lengths[i])
+
+    # Track for each query: length = region_length + extra deletion headroom
+    # We give a bit of extra ref track beyond the region so deletions can read
+    # past the region end (production contract: track is always >= region length).
+    track_lengths = [max(rl + 10, 1) for rl in region_lengths]
+    track_offsets = np.concatenate([[0], np.cumsum(track_lengths)]).astype(np.int64)
+    total_track = int(track_offsets[-1])
+    tracks = draw(
+        st.lists(
+            st.floats(
+                min_value=-1e3, max_value=1e3, allow_nan=False, allow_infinity=False
+            ),
+            min_size=total_track,
+            max_size=total_track,
+        ).map(lambda xs: np.array(xs, dtype=np.float32))
+    )
+
+    # ── sparse genotypes ──────────────────────────────────────────────────────
+    counts = [draw(st.integers(0, 4)) for _ in range(n_groups)]
+    geno_offsets_1d = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+    geno_offset_idx = np.arange(n_groups, dtype=np.int64).reshape(n_q, ploidy)
+    v_idx_list: list[int] = []
+    for c in counts:
+        idxs = sorted(
+            draw(st.lists(st.integers(0, n_unique - 1), min_size=c, max_size=c))
+        )
+        v_idx_list.extend(idxs)
+    geno_v_idxs = np.array(v_idx_list, dtype=np.int32)
+
+    # normalize geno_offsets to (2, n) form
+    geno_offsets_2d = np.stack([geno_offsets_1d[:-1], geno_offsets_1d[1:]]).astype(
+        np.int64
+    )
+
+    # ── out_offsets: (n_q * ploidy + 1,) ─────────────────────────────────────
+    # Each (query, hap) output has the same length as the region (no jitter here)
+    out_lengths = np.array(
+        [rl for rl in region_lengths for _ in range(ploidy)], dtype=np.int64
+    )
+    out_offsets = np.concatenate([[0], np.cumsum(out_lengths)]).astype(np.int64)
+    total_out = int(out_offsets[-1])
+
+    # ── shifts ────────────────────────────────────────────────────────────────
+    shifts = np.zeros((n_q, ploidy), dtype=np.int32)
+    for qi in range(n_q):
+        for h in range(ploidy):
+            shifts[qi, h] = draw(st.integers(0, max(0, region_lengths[qi] // 4)))
+
+    # ── optional keep mask ────────────────────────────────────────────────────
+    use_keep = draw(st.booleans())
+    total_v = int(geno_offsets_1d[-1])
+    if use_keep and total_v > 0:
+        keep = np.array(
+            draw(st.lists(st.booleans(), min_size=total_v, max_size=total_v)), np.bool_
+        )
+        keep_offsets = geno_offsets_1d.copy()
+    else:
+        keep = None
+        keep_offsets = None
+
+    inputs = (
+        out_offsets,  # (b*p+1,)
+        regions,  # (b, 3)
+        shifts,  # (b, p)
+        geno_offset_idx,  # (b, p)
+        geno_v_idxs,  # ragged variant idxs
+        geno_offsets_2d,  # (2, n)
+        v_starts,  # (n_unique,)
+        ilens,  # (n_unique,)
+        tracks,  # (total_track,) ragged
+        track_offsets,  # (b+1,)
+        params,  # (1,) f64
+        keep,  # optional bool
+        keep_offsets,  # optional i64
+        int(strategy_id),  # int
+        base_seed,  # np.uint64
+    )
+    return total_out, inputs
+
+
+@st.composite
+def reconstruct_haplotypes_inputs(draw, annotate=False):  # noqa: ARG001
+    """Contract-valid inputs for reconstruct_haplotypes_from_sparse.
+
+    Returns ``(total_out_size, inputs_tuple)`` where inputs_tuple is everything
+    EXCEPT the out buffer (inserted at index 0 by the harness). The
+    ``annotate`` parameter is accepted but unused — the test file decides whether
+    to build annotation buffers.
+    """
+    from hypothesis.extra.numpy import arrays as hp_arrays
+
+    # ── reference (1–2 contigs) ─────────────────────────────────────────────
+    # Draw reference FIRST so we can constrain variant positions to be within
+    # the contig bounds (mirrors the production contract where variants always
+    # come from VCF records within the contig).
+    n_contigs = draw(st.integers(1, 2))
+    contig_lens = [draw(st.integers(10, 80)) for _ in range(n_contigs)]
+
+    # ── variants ──────────────────────────────────────────────────────────────
+    n_unique = draw(st.integers(min_value=1, max_value=6))
+    # Constrain v_starts to [0, min_contig_len - 1] so that ref[ref_idx:v_pos]
+    # never exceeds any contig's bounds. Variants are shared across all queries
+    # (which may reference different contigs), so we must be conservative and use
+    # the shortest contig's length as the upper bound. In production, variants are
+    # always within-contig; this constraint enforces that invariant.
+    min_contig_len = min(contig_lens)
+    v_starts_raw = draw(
+        st.lists(
+            st.integers(0, min_contig_len - 1), min_size=n_unique, max_size=n_unique
+        )
+    )
+    v_starts = np.sort(np.array(v_starts_raw, dtype=np.int32))
+    ilens = np.array(
+        draw(st.lists(st.integers(-3, 3), min_size=n_unique, max_size=n_unique)),
+        dtype=np.int32,
+    )
+    # atomized: alt_len = max(1, 1 + ilen)
+    alt_lens = np.maximum(1, 1 + ilens).astype(np.int64)
+    alt_offsets = np.concatenate([[np.int64(0)], np.cumsum(alt_lens)]).astype(np.int64)
+    total_alt = int(alt_offsets[-1])
+    alt_alleles = draw(hp_arrays(np.uint8, total_alt, elements=st.integers(65, 90)))
+    ref_offsets = np.concatenate([[np.int64(0)], np.cumsum(contig_lens)]).astype(
+        np.int64
+    )
+    reference = draw(
+        hp_arrays(np.uint8, int(ref_offsets[-1]), elements=st.integers(65, 90))
+    )
+
+    # ── sparse genotypes ──────────────────────────────────────────────────────
+    n_q = draw(st.integers(1, 3))
+    ploidy = draw(st.integers(1, 2))
+    n_groups = n_q * ploidy
+    counts = [draw(st.integers(0, 4)) for _ in range(n_groups)]
+    geno_offsets_1d = np.concatenate([[np.int64(0)], np.cumsum(counts)]).astype(
+        np.int64
+    )
+    geno_offset_idx = np.arange(n_groups, dtype=np.int64).reshape(n_q, ploidy)
+    v_idx_list: list[int] = []
+    for c in counts:
+        idxs = sorted(
+            draw(st.lists(st.integers(0, n_unique - 1), min_size=c, max_size=c))
+        )
+        v_idx_list.extend(idxs)
+    geno_v_idxs = np.array(v_idx_list, dtype=np.int32)
+
+    # ── regions: (contig_idx, start, end) ────────────────────────────────────
+    regions = np.empty((n_q, 3), np.int32)
+    region_lengths: list[int] = []
+    for i in range(n_q):
+        c = draw(st.integers(0, n_contigs - 1))
+        clen = contig_lens[c]
+        start = draw(st.integers(0, max(0, clen - 1)))
+        length = draw(st.integers(1, min(40, clen - start + 5)))
+        regions[i] = (c, start, start + length)
+        region_lengths.append(length)
+
+    # ── out_offsets: (n_q * ploidy + 1,) ─────────────────────────────────────
+    out_lengths_mat = np.array(region_lengths, dtype=np.int64)[:, None] * np.ones(
+        ploidy, dtype=np.int64
+    )  # (n_q, ploidy)
+    out_offsets = np.concatenate(
+        [np.array([np.int64(0)]), np.cumsum(out_lengths_mat.ravel())]
+    ).astype(np.int64)
+    total_out = int(out_offsets[-1])
+
+    # ── shifts ────────────────────────────────────────────────────────────────
+    shifts = np.zeros((n_q, ploidy), dtype=np.int32)
+    for qi in range(n_q):
+        for h in range(ploidy):
+            shifts[qi, h] = draw(st.integers(0, max(0, region_lengths[qi] // 4)))
+
+    # ── optional keep mask ────────────────────────────────────────────────────
+    use_keep = draw(st.booleans())
+    total_v = int(geno_offsets_1d[-1])
+    if use_keep and total_v > 0:
+        keep = np.array(
+            draw(st.lists(st.booleans(), min_size=total_v, max_size=total_v)), np.bool_
+        )
+        keep_offsets = geno_offsets_1d.copy()
+    else:
+        keep = None
+        keep_offsets = None
+
+    # normalize geno_offsets to (2, n) form (the registered backends accept this)
+    geno_offsets_2d = np.stack([geno_offsets_1d[:-1], geno_offsets_1d[1:]]).astype(
+        np.int64
+    )
+
+    inputs = (
+        out_offsets,
+        regions,
+        shifts,
+        geno_offset_idx,
+        geno_offsets_2d,
+        geno_v_idxs,
+        v_starts,
+        ilens,
+        alt_alleles,
+        alt_offsets,
+        reference,
+        ref_offsets,
+        np.uint8(78),  # pad_char = ord('N')
+        keep,
+        keep_offsets,
+        None,  # annot_v_idxs — caller fills for annotated path
+        None,  # annot_ref_pos — caller fills for annotated path
+    )
+    return total_out, inputs
