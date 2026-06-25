@@ -11,7 +11,8 @@ def intervals_to_tracks_inputs(draw):
     """Contract-valid inputs for ``intervals_to_tracks``.
 
     One interval-slice per query (offset_idxs = arange). Within a slice the
-    intervals are sorted, non-overlapping, and start at >= the query's start.
+    intervals are sorted and non-overlapping; the first interval may start
+    before the query's start (negative relative start) to cover #242.
     Covers empty slices, in-bounds paints, end-clamp (interval end past the
     out length), and break (interval start past the out length).
     """
@@ -31,9 +32,8 @@ def intervals_to_tracks_inputs(draw):
         out_lengths.append(length)
 
         m = draw(st.integers(min_value=0, max_value=6))
-        cur = qstart + draw(
-            st.integers(min_value=0, max_value=10)
-        )  # first start >= qstart
+        # first start may be below qstart (negative relative start; #242) or above
+        cur = qstart + draw(st.integers(min_value=-10, max_value=10))
         for _ in range(m):
             width = draw(st.integers(min_value=1, max_value=20))
             itv_starts_all.append(cur)
