@@ -158,7 +158,9 @@ impl RustTable {
         max_mem: usize,
     ) -> Result<()> {
         std::fs::create_dir_all(out_dir)?;
-        let mut itv_w = BufWriter::new(File::create(out_dir.join("intervals.npy"))?);
+        let mut starts_w = BufWriter::new(File::create(out_dir.join("starts.npy"))?);
+        let mut ends_w = BufWriter::new(File::create(out_dir.join("ends.npy"))?);
+        let mut values_w = BufWriter::new(File::create(out_dir.join("values.npy"))?);
         let mut off_w = BufWriter::new(File::create(out_dir.join("offsets.npy"))?);
 
         let n_regions = chrom_codes.len();
@@ -209,9 +211,9 @@ impl RustTable {
             }
             // write region rows (already in cell-major, start-sorted order)
             for (s, e, v) in &region_rows {
-                itv_w.write_all(&s.to_le_bytes())?;
-                itv_w.write_all(&e.to_le_bytes())?;
-                itv_w.write_all(&v.to_le_bytes())?;
+                starts_w.write_all(&s.to_le_bytes())?;
+                ends_w.write_all(&e.to_le_bytes())?;
+                values_w.write_all(&v.to_le_bytes())?;
             }
             // write per-cell offsets
             for n in per_cell_counts {
@@ -219,7 +221,9 @@ impl RustTable {
                 off_w.write_all(&acc.to_le_bytes())?;
             }
         }
-        itv_w.flush()?;
+        starts_w.flush()?;
+        ends_w.flush()?;
+        values_w.flush()?;
         off_w.flush()?;
         Ok(())
     }
@@ -433,7 +437,9 @@ mod tests {
             .unwrap();
 
         // Oracle: per-contig count -> offsets -> intervals, concatenated in region order.
-        let mut exp_itv: Vec<u8> = Vec::new();
+        let mut exp_starts: Vec<u8> = Vec::new();
+        let mut exp_ends: Vec<u8> = Vec::new();
+        let mut exp_values: Vec<u8> = Vec::new();
         let mut exp_off: Vec<u8> = Vec::new();
         let mut acc = 0i64;
         exp_off.extend_from_slice(&acc.to_le_bytes());
@@ -451,9 +457,9 @@ mod tests {
             let offsets = offsets_from_count(&counts);
             let (coords, vals) = t.intervals_from_offsets(c, cs, ce, &sel, &offsets);
             for i in 0..vals.len() {
-                exp_itv.extend_from_slice(&coords[[i, 0]].to_le_bytes());
-                exp_itv.extend_from_slice(&coords[[i, 1]].to_le_bytes());
-                exp_itv.extend_from_slice(&vals[i].to_le_bytes());
+                exp_starts.extend_from_slice(&coords[[i, 0]].to_le_bytes());
+                exp_ends.extend_from_slice(&coords[[i, 1]].to_le_bytes());
+                exp_values.extend_from_slice(&vals[i].to_le_bytes());
             }
             for k in 0..counts.len() {
                 acc += counts.as_slice().unwrap()[k] as i64;
@@ -461,9 +467,10 @@ mod tests {
             }
             ri = rj;
         }
-        let got_itv = std::fs::read(tmp.join("intervals.npy")).unwrap();
+        assert_eq!(std::fs::read(tmp.join("starts.npy")).unwrap(), exp_starts, "starts mismatch");
+        assert_eq!(std::fs::read(tmp.join("ends.npy")).unwrap(), exp_ends, "ends mismatch");
+        assert_eq!(std::fs::read(tmp.join("values.npy")).unwrap(), exp_values, "values mismatch");
         let got_off = std::fs::read(tmp.join("offsets.npy")).unwrap();
-        assert_eq!(got_itv, exp_itv, "intervals bytes mismatch");
         assert_eq!(got_off, exp_off, "offsets bytes mismatch");
     }
 
