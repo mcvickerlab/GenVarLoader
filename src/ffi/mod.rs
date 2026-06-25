@@ -581,6 +581,110 @@ pub fn tracks_to_intervals<'py>(
     )
 }
 
+/// Fused per-track __getitem__ kernel (Task 14).
+///
+/// Collapses two FFI crossings into one per track:
+///   1. ``intervals_to_tracks`` core: fills a Rust-side scratch buffer from
+///      stored intervals (replacing the Python ``_tracks = np.empty(...)``
+///      intermediate, audit T2).
+///   2. ``shift_and_realign_tracks_sparse`` core: reads the scratch and writes
+///      the caller's pre-allocated ``out`` slice.
+///
+/// The outer Python loop over n_tracks remains (bounded by track count, small).
+/// Each loop iteration now makes ONE FFI crossing instead of two, and allocates
+/// ZERO Python-side intermediates.
+///
+/// ``out`` is the per-track slice of the caller's pre-allocated output buffer
+/// (shape ``(b*p*l,)`` f32).  ``out_offsets`` gives ragged lengths into that
+/// slice for each (query, hap) pair.
+///
+/// ``offset_idxs`` is the per-query index array into ``itv_offsets`` (shape
+/// ``(b,)``); ``itv_offsets`` is 1-D ``(n_samples*n_regions + 1)`` int64.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn intervals_and_realign_track_fused(
+    mut out: PyReadwriteArray1<f32>,          // (b*p*l) — caller's per-track slice
+    out_offsets: PyReadonlyArray1<i64>,       // (b*p + 1)
+    regions: PyReadonlyArray2<i32>,           // (b, 3)
+    shifts: PyReadonlyArray2<i32>,            // (b, p)
+    geno_offset_idx: PyReadonlyArray2<i64>,   // (b, p)
+    geno_v_idxs: PyReadonlyArray1<i32>,       // (r*s*p*v)
+    geno_offsets: PyReadonlyArray2<i64>,      // (2, r*s*p)
+    v_starts: PyReadonlyArray1<i32>,          // (tot_v)
+    ilens: PyReadonlyArray1<i32>,             // (tot_v)
+    // intervals (reference-coordinate, for this track)
+    offset_idxs: PyReadonlyArray1<i64>,       // (b) — per-query index into itv_offsets
+    itv_starts: PyReadonlyArray1<i32>,         // (n_intervals)
+    itv_ends: PyReadonlyArray1<i32>,           // (n_intervals)
+    itv_values: PyReadonlyArray1<f32>,         // (n_intervals)
+    itv_offsets: PyReadonlyArray1<i64>,        // (n_samples*n_regions + 1)
+    track_offsets: PyReadonlyArray1<i64>,      // (b+1) — out_offsets for scratch buffer
+    // insertion-fill strategy
+    params: PyReadonlyArray1<f64>,
+    strategy_id: i64,
+    base_seed: u64,
+    keep: Option<PyReadonlyArray1<bool>>,
+    keep_offsets: Option<PyReadonlyArray1<i64>>,
+) -> PyResult<()> {
+    use crate::intervals;
+    use crate::tracks;
+
+    let go = geno_offsets.as_array();
+    let go_starts = go.row(0);
+    let go_stops = go.row(1);
+
+    let out_offsets_a = out_offsets.as_array();
+    let regions_a = regions.as_array();
+
+    // Determine scratch buffer size from track_offsets.
+    let track_offsets_a = track_offsets.as_array();
+    let scratch_len = track_offsets_a[track_offsets_a.len() - 1] as usize;
+
+    // Allocate Rust-side scratch buffer — replaces Python `_tracks = np.empty(...)`.
+    let mut scratch = ndarray::Array1::<f32>::zeros(scratch_len);
+
+    // Extract query starts (regions[:, 1]) as a contiguous owned array.
+    // regions_a.column(1) is a non-contiguous view (row-major storage); we
+    // must own/contiguify it before passing to intervals_to_tracks which
+    // expects a contiguous ArrayView1<i32>.
+    let q_starts: ndarray::Array1<i32> = regions_a.column(1).to_owned();
+
+    // Step 1: paint reference-coordinate intervals into scratch (reuses intervals core).
+    intervals::intervals_to_tracks(
+        offset_idxs.as_array(),
+        q_starts.view(),
+        itv_starts.as_array(),
+        itv_ends.as_array(),
+        itv_values.as_array(),
+        itv_offsets.as_array(),
+        scratch.view_mut(),
+        track_offsets_a,
+    );
+
+    // Step 2: shift and realign into caller's out slice (reuses tracks core).
+    tracks::shift_and_realign_tracks_sparse(
+        out.as_array_mut(),
+        out_offsets_a,
+        regions_a,
+        shifts.as_array(),
+        geno_offset_idx.as_array(),
+        geno_v_idxs.as_array(),
+        go_starts,
+        go_stops,
+        v_starts.as_array(),
+        ilens.as_array(),
+        scratch.view(),
+        track_offsets_a,
+        params.as_array(),
+        keep.as_ref().map(|k| k.as_array()),
+        keep_offsets.as_ref().map(|ko| ko.as_array()),
+        strategy_id,
+        base_seed,
+    );
+
+    Ok(())
+}
+
 // ── DEBUG exports for PRNG parity tests (Task 7) ─────────────────────────────
 // These thin wrappers exist solely to make the Rust PRNG functions callable from
 // Python tests. They may be kept or removed after Task 8/9 review.

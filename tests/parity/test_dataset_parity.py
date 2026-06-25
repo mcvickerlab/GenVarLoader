@@ -112,15 +112,20 @@ def test_track_getitem_identical_across_backends(tmp_path, monkeypatch):
 def test_tracks_realign_getitem_identical_across_backends(
     synthetic_case, tmp_path, monkeypatch
 ):
-    """Spy-guarded backstop for shift_and_realign_tracks_sparse dispatch wiring.
+    """Spy-guarded backstop for tracks realignment dispatch wiring (Task 11/14).
 
     Proves that materialising a haplotypes+tracks dataset (with indel-bearing
     genotypes) via ``ds[:, :]`` produces byte-identical track output across
     GVL_BACKEND=rust and GVL_BACKEND=numba, for every insertion-fill strategy.
 
-    The spy asserts that shift_and_realign_tracks_sparse is actually invoked
-    during the rust read (non-vacuous guard) and is NOT invoked during the
-    numba read (wiring guard — the spy is attached only to the rust fn).
+    After Task 14, the Rust path calls the fused entry
+    ``intervals_and_realign_track_fused`` (one FFI crossing per track) instead
+    of the composed ``shift_and_realign_tracks_sparse`` dispatch.  The spy
+    targets ``intervals_and_realign_track_fused`` on the Rust path.
+
+    The numba path continues to use the composed path (intervals_to_tracks
+    → shift_and_realign_tracks_sparse via dispatch); the parity check
+    (byte-identical output) remains the gate.
 
     Fixture geometry:
     - A fresh GVL dataset is built in tmp_path via gvl.write with both the
@@ -139,8 +144,7 @@ def test_tracks_realign_getitem_identical_across_backends(
     byte-identical comparison is re-run.
     """
     import genvarloader as gvl
-    import genvarloader._dispatch as _dispatch
-    import genvarloader._dataset._tracks  # noqa: F401 — triggers register("shift_and_realign_tracks_sparse")
+    import genvarloader._dataset._reconstruct as _recon_mod
     from genvarloader._dataset._insertion_fill import (
         Constant,
         FlankSample,
@@ -159,21 +163,20 @@ def test_tracks_realign_getitem_identical_across_backends(
     ds_base = gvl.Dataset.open(ds_dir, reference=ref)
     ds_base = ds_base.with_seqs("haplotypes").with_tracks("signal")
 
-    # --- install spy on the Rust shift_and_realign_tracks_sparse kernel ---
-    numba_fn, rust_fn = _dispatch.backends("shift_and_realign_tracks_sparse")
+    # --- install spy on the fused Rust entry ---
+    # After Task 14 the Rust path calls intervals_and_realign_track_fused
+    # directly (not via _dispatch), so we monkeypatch _recon_mod.
+    orig_fused = getattr(_recon_mod, "intervals_and_realign_track_fused", None)
+    assert orig_fused is not None, (
+        "intervals_and_realign_track_fused not found on _recon_mod — "
+        "ensure it is imported at module level in _reconstruct.py"
+    )
+
     calls: dict[str, int] = {"n": 0}
 
-    def _spy_rust(*a, **k):
+    def _spy_fused(*a, **k):
         calls["n"] += 1
-        return rust_fn(*a, **k)
-
-    orig_entry = dict(_dispatch._REGISTRY["shift_and_realign_tracks_sparse"])
-    _dispatch.register(
-        "shift_and_realign_tracks_sparse",
-        numba=numba_fn,
-        rust=_spy_rust,
-        default="numba",
-    )
+        return orig_fused(*a, **k)
 
     # All 5 insertion-fill strategies to cover.
     fill_strategies = [
@@ -184,79 +187,78 @@ def test_tracks_realign_getitem_identical_across_backends(
         Interpolate(order=1),
     ]
 
-    try:
-        for strategy in fill_strategies:
-            strategy_name = type(strategy).__name__
-            ds = ds_base.with_insertion_fill(strategy)
+    for strategy in fill_strategies:
+        strategy_name = type(strategy).__name__
+        ds = ds_base.with_insertion_fill(strategy)
 
-            calls["n"] = 0  # reset per-strategy counter
+        monkeypatch.setattr(_recon_mod, "intervals_and_realign_track_fused", _spy_fused)
+        calls["n"] = 0  # reset per-strategy counter
 
-            # --- rust read (spy active) ---
-            monkeypatch.setenv("GVL_BACKEND", "rust")
-            out_rust = ds[:, :]
+        # --- rust read (fused path, spy active) ---
+        monkeypatch.setenv("GVL_BACKEND", "rust")
+        out_rust = ds[:, :]
 
-            rust_call_count = calls["n"]
+        rust_call_count = calls["n"]
 
-            # --- numba read ---
-            monkeypatch.setenv("GVL_BACKEND", "numba")
-            out_numba = ds[:, :]
+        # --- numba read (composed path — spy must NOT fire) ---
+        monkeypatch.setenv("GVL_BACKEND", "numba")
+        out_numba = ds[:, :]
 
-            # Wiring guard: numba must NOT fire the rust spy.
-            assert calls["n"] == rust_call_count, (
-                f"[{strategy_name}] shift_and_realign_tracks_sparse spy fired during "
-                f"the numba read (count went from {rust_call_count} to {calls['n']}) "
-                "— spy is wired to the numba path, which is a bug in the test setup."
-            )
+        # Wiring guard: numba must NOT fire the fused spy.
+        assert calls["n"] == rust_call_count, (
+            f"[{strategy_name}] intervals_and_realign_track_fused spy fired during "
+            f"the numba read (count went from {rust_call_count} to {calls['n']}) "
+            "— spy is wired to the numba path, which is a bug."
+        )
 
-            # Anti-vacuous guard: rust path must have called the kernel.
-            assert rust_call_count > 0, (
-                f"[{strategy_name}] Rust shift_and_realign_tracks_sparse was NEVER "
-                f"invoked during the rust read (calls={rust_call_count}) — "
-                "the backstop is vacuous. Inspect the HapsTracks.__call__ path to "
-                "confirm shift_and_realign_tracks_sparse is dispatched via _dispatch.get."
-            )
+        # Anti-vacuous guard: fused entry must have been invoked.
+        assert rust_call_count > 0, (
+            f"[{strategy_name}] intervals_and_realign_track_fused was NEVER "
+            f"invoked during the rust read (calls={rust_call_count}) — "
+            "the backstop is vacuous. Inspect HapsTracks.__call__ to "
+            "confirm intervals_and_realign_track_fused is called on the Rust path."
+        )
 
-            # --- extract track arrays from the (haps, tracks) tuple ---
-            # out_rust and out_numba are (RaggedSeqs, RaggedTracks) tuples.
-            _, tracks_rust = out_rust
-            _, tracks_numba = out_numba
-            data_r = np.asarray(tracks_rust.data, dtype=np.float32)
-            off_r = np.asarray(tracks_rust.offsets, dtype=np.int64)
-            data_n = np.asarray(tracks_numba.data, dtype=np.float32)
-            off_n = np.asarray(tracks_numba.offsets, dtype=np.int64)
+        # --- extract track arrays from the (haps, tracks) tuple ---
+        # out_rust and out_numba are (RaggedSeqs, RaggedTracks) tuples.
+        _, tracks_rust = out_rust
+        _, tracks_numba = out_numba
+        data_r = np.asarray(tracks_rust.data, dtype=np.float32)
+        off_r = np.asarray(tracks_rust.offsets, dtype=np.int64)
+        data_n = np.asarray(tracks_numba.data, dtype=np.float32)
+        off_n = np.asarray(tracks_numba.offsets, dtype=np.int64)
 
-            # --- byte-identical comparison ---
-            np.testing.assert_array_equal(
-                off_n,
-                off_r,
-                err_msg=f"[{strategy_name}] track offsets differ across backends",
-            )
-            assert data_n.dtype == data_r.dtype == np.float32, (
-                f"[{strategy_name}] dtype mismatch: numba={data_n.dtype}, "
-                f"rust={data_r.dtype}"
-            )
-            np.testing.assert_array_equal(
-                data_n,
-                data_r,
-                err_msg=f"[{strategy_name}] track data differs across backends",
-            )
+        # --- byte-identical comparison ---
+        np.testing.assert_array_equal(
+            off_n,
+            off_r,
+            err_msg=f"[{strategy_name}] track offsets differ across backends",
+        )
+        assert data_n.dtype == data_r.dtype == np.float32, (
+            f"[{strategy_name}] dtype mismatch: numba={data_n.dtype}, "
+            f"rust={data_r.dtype}"
+        )
+        np.testing.assert_array_equal(
+            data_n,
+            data_r,
+            err_msg=f"[{strategy_name}] track data differs across backends",
+        )
 
-            # Non-triviality: at least some non-zero track values (not all-zero
-            # vacuous match).  Signal values are drawn from N(0,1) so near-zero
-            # is extremely unlikely but possible; we check the overall tensor.
-            assert data_r.size > 0, (
-                f"[{strategy_name}] Track output is empty — "
-                "regions may not overlap stored intervals."
-            )
-            # At least one realigned haplotype must differ from the input track
-            # values OR be non-zero — any non-zero value proves the track was
-            # painted from the BigWig intervals.
-            assert np.any(data_r != 0.0), (
-                f"[{strategy_name}] All realigned track values are 0 — "
-                "the BigWig intervals may not overlap the stored regions, "
-                "making this comparison vacuous."
-            )
+        # Non-triviality: at least some non-zero track values (not all-zero
+        # vacuous match).  Signal values are drawn from N(0,1) so near-zero
+        # is extremely unlikely but possible; we check the overall tensor.
+        assert data_r.size > 0, (
+            f"[{strategy_name}] Track output is empty — "
+            "regions may not overlap stored intervals."
+        )
+        # At least one realigned haplotype must differ from the input track
+        # values OR be non-zero — any non-zero value proves the track was
+        # painted from the BigWig intervals.
+        assert np.any(data_r != 0.0), (
+            f"[{strategy_name}] All realigned track values are 0 — "
+            "the BigWig intervals may not overlap the stored regions, "
+            "making this comparison vacuous."
+        )
 
-    finally:
-        # Unconditionally restore the original registry entry.
-        _dispatch._REGISTRY["shift_and_realign_tracks_sparse"] = orig_entry
+        # Restore original between strategies.
+        monkeypatch.setattr(_recon_mod, "intervals_and_realign_track_fused", orig_fused)
