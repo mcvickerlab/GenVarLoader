@@ -26,6 +26,7 @@ from ._dataset._insertion_fill import (
 )
 from ._dataset._rag_variants import RaggedVariants
 from ._dataset._reference import RefDataset, Reference
+from ._dataset._migrate import migrate
 from ._dataset._svar_link import migrate_svar_link
 from ._dataset._write import get_splice_bed, update, write
 from ._dummy import get_dummy_dataset
@@ -71,6 +72,7 @@ __all__ = [
     "data_registry",
     "get_dummy_dataset",
     "get_splice_bed",
+    "migrate",
     "migrate_svar_link",
     "read_bedlike",
     "sites_vcf_to_table",
