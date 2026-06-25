@@ -448,7 +448,14 @@ class SpliceIndexer:
         r_idx = r_idx.to_packed().data
         s_idx = s_idx.repeat(lengths)
 
-        ds_idx, *_ = self.dsi.parse_idx((r_idx, s_idx))
+        # At this point r_idx contains per-exon region positions (indices into
+        # full_region_idxs) and s_idx contains already-mapped on-disk sample
+        # indices (full_sample_idxs[sample_subset_idxs[...]]).  Calling
+        # self.dsi.parse_idx here would apply _s_idx a second time, corrupting
+        # the sample mapping when sample_subset_idxs is non-identity.  Instead,
+        # compute the flat storage index directly:
+        r_flat = self.dsi.full_region_idxs[r_idx]
+        ds_idx = np.ravel_multi_index((r_flat, s_idx), self.dsi.full_shape).ravel()
 
         return ds_idx, squeeze, out_reshape, offsets, n_rows_sel, n_samples_sel
 

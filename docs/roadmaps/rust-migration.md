@@ -171,7 +171,8 @@ _PR: #241_
 - [x] Build the reusable differential-test harness: run-both-assert-byte-identical
       (`tests/parity/_harness.py`, return-value + in-place variants) + a hypothesis
       property generator. Per-kernel gate (`test_intervals_to_tracks_parity`, 100
-      contract-valid examples) + a MEANINGFUL dataset-level read-path backstop
+      examples incl. sub-query interval starts — #242 fixed both backends to clip
+      to the query window) + a MEANINGFUL dataset-level read-path backstop
       (`test_dataset_parity.py`: `ds[:, :]` track getitem byte-identical across
       backends, with a spy asserting the kernel is actually invoked). Commits:
       `ef4f91a`, `ad82b31`.
@@ -193,7 +194,9 @@ _PR: #241_
 
 **Checkpoint:** harness green; foundation + proof-point landed; getitem (gate)
 baseline captured on Carter. `update()` remains a deferred smoke-only row (real
-workload is a Phase 4 write-path concern, not a Phase 0 gate).
+workload is a Phase 4 write-path concern, not a Phase 0 gate). The
+`intervals_to_tracks` sub-query-start contract gap (max_jitter>0 tracks, #242)
+is resolved: both kernels clip to the query window and parity covers it.
 
 ### Phase 1 — Ragged primitives + layout (beachhead) ✅
 _PRs: seqpro [ML4GLand/SeqPro#60](https://github.com/ML4GLand/SeqPro/pull/60), GVL [mcvickerlab/GenVarLoader#240](https://github.com/mcvickerlab/GenVarLoader/pull/240)_
@@ -279,10 +282,10 @@ as the registered parity reference for the consolidation pass (Phase 5).
 - [x] Task 13: Fused haplotypes `__getitem__` kernel — `reconstruct_haplotypes_fused` collapses 2 FFI crossings to 1 on the non-splice plain haps path. Dataset parity gate: byte-identical to composed numba oracle (37/37 parity tests pass). Annotated path and splice path remain on unfused dispatched kernels (documented in task-13-report.md).
 - [x] Task 14: Fused tracks `__getitem__` kernel — `intervals_and_realign_track_fused` chains `intervals_to_tracks` → `shift_and_realign_tracks_sparse` in 1 FFI crossing per track; Rust scratch buffer replaces Python `np.empty` intermediate. Dataset parity gate: byte-identical across all 5 insertion-fill strategies (39/39 parity tests pass; fixture uses max_jitter=0 per #242 contract).
 - [x] Task 15: Full-tree verification + roadmap + skill check (final-review fixes applied). Full tree green: 909 passed, 15 xfailed (11 added here + 4 pre-existing), 0 failed. Lint/format clean; cargo 85/85; abi3 wheel builds. See final-review section in task-15-report.md.
-- [ ] Migrate `_dataset/_reconstruct.py` + `_dataset/_haps.py` remaining paths.
-- [ ] Migrate `_dataset/_tracks.py` realign (6 numba) + `_dataset/_intervals.py` (4 numba).
-- [ ] Migrate `_dataset/_reference.py` (6 numba).
-- [ ] Migrate `_dataset/_insertion_fill.py` + `_dataset/_splice.py`.
+- [x] Migrate `_dataset/_reconstruct.py` + `_dataset/_haps.py` remaining paths. Annotated path now fused via `reconstruct_annotated_haplotypes_fused` (Phase 3 close-out, Task 4); splice path fused via `reconstruct_haplotypes_spliced_fused` (Phase 3 close-out, Task 5). Both byte-identical to the composed numba oracle. (The annotated+spliced intersection remains on the unfused dispatched rust core — still parity-gated and rust-by-default — with fusion deferred to Phase 5.)
+- [x] Migrate `_dataset/_tracks.py` realign (6 numba) + `_dataset/_intervals.py` (4 numba). Rust-default + fused (`intervals_and_realign_track_fused`); the #242 `intervals_to_tracks` clip fix merged from main (both backends). Remaining numba kernels are retained Phase-5-deletion parity references, not unmigrated paths.
+- [x] Migrate `_dataset/_reference.py` (6 numba). `Reference.fetch` rerouted through the dispatched rust `get_reference` (Phase 3 close-out, Task 3); the three zero-caller `_fetch_*` numba functions deleted. The live `_get_reference_*` numba kernels remain as Phase-5-deletion parity references.
+- [x] Migrate `_dataset/_insertion_fill.py` + `_dataset/_splice.py`. No numba kernels remain to migrate in `_insertion_fill.py`; splice reconstruction fused via `reconstruct_haplotypes_spliced_fused` (Phase 3 close-out, Task 5).
 
 **Gate (parity — MET):** byte-identical parity confirmed, with two documented numba-bug sub-domains excluded from the oracle via assume(False) in parity tests (consistent with the #242-family precedent):
   1. *start>=clen / #242-family*: get_dummy_dataset() (max_jitter=2) float-track tests trigger the intervals_to_tracks debug_assert panic; xfailed (strict=False) in 10 tests across test_output_bytes_per_instance.py, test_dummy_dataset_insertion_fill.py, test_flat_intervals.py, test_realign_tracks.py, test_seqs_tracks.py.
@@ -290,25 +293,80 @@ as the registered parity reference for the consolidation pass (Phase 5).
 
 **Gate (throughput — DEFERRED):** recorded only (see "Branch & gate strategy").
 
-#### Phase 3 throughput measurements
+#### Phase 3 throughput measurements (re-measured at close-out, 2026-06-25)
 
-> Corpus: `chr22_geuv.gvl` (max_jitter=0, 165 regions × 5 samples, chr22 read-depth, SEQLEN=16384,
-> BATCH=32, 500 batches, NUMBA_NUM_THREADS=1), Carter HPC (AMD EPYC 7543, linux-64).
-> Release build (`maturin develop --release`). Compared to Phase 0 baseline (169.9 tracks / 123.9 haps).
+> Harness: `tests/benchmarks/test_e2e.py` via **pytest-benchmark** — steady-state timing of eager
+> `ds[r, s]` (BATCH=32 region/sample pairs, `with_len(SEQLEN=16384)`), warmup excluded, 75–190 rounds
+> per test. Corpus `chr22_geuv.gvl` (max_jitter=0, 165 regions × 5 samples, chr22 read-depth).
+> `NUMBA_NUM_THREADS=1`, release build (`maturin develop --release`), HEAD `6af2dbb`, Carter HPC
+> (AMD EPYC 7543, linux-64). OPS = batch/s = 1 / mean.
 >
-> Note: release-build Rust is still slower than numba on these read paths (~2–3× gap).
-> cProfile of the Phase 2 variants path pinned the cost on Python glue
-> (`np.ascontiguousarray` = 62% of the loop), not Rust compute — fusing per-crossing calls
-> narrows the gap but does not eliminate it until a single big `__getitem__` kernel is built
-> in the optimization pass (Phase 5). These numbers are recorded but not gated.
+> ⚠️ **Not comparable to the prior table.** The old ~37 haps / ~20 tracks figures came from a
+> *different* harness (the 500-batch `benchmark_haps.py` script, since retired here). Read the
+> **rust ÷ numba ratio** measured on this one harness at one HEAD as the real signal, not the
+> absolute jump. Single-thread; both backends' batch drivers are serial (rayon deferred to Phase 5).
 
-| Mode | rust (release, Task 15) | numba (release, Task 15) | Phase 0 baseline (numba) |
+| Mode | rust (batch/s) | numba (batch/s) | rust ÷ numba |
 |---|---|---|---|
-| haplotypes (`reconstruct_haplotypes_fused`) | ~37 batch/s | ~77 batch/s | 123.9 batch/s |
-| tracks (`intervals_and_realign_track_fused`) | ~20 batch/s | ~33 batch/s | 169.9 batch/s |
+| tracks-only (`intervals_and_realign_track_fused`) | 173.2 | 192.2 | 0.90× |
+| tracks (seqs + `read-depth`) | 124.2 | 143.2 | 0.87× |
+| haplotypes (`reconstruct_haplotypes_fused`) | 122.1 | 143.6 | 0.85× |
+| annotated (`reconstruct_annotated_haplotypes_fused`) | 74.3 | 115.0 | 0.65× |
 
-> Peak RSS not re-measured in Task 15 (dominated by numba/llvmlite JIT ~3.2 GB, same as Phase 0;
-> no significant change expected from kernel-level fusion without eliminating the JIT entirely).
+> Fusion closed most of the prior ~2× gap: rust is now within ~10–17% of numba on the haplotype/track
+> paths. The **annotated** path (new this close-out, never previously timed) is the laggard at 0.65×
+> — it materializes 3× the data (haps bytes + var_idxs i32 + ref_coords i32). Recorded, not gated.
+
+##### Optimization targets (py-spy `--native` on the rust `ds[r,s]`, 43k samples; copy trace on one batch)
+
+The fusion removed the duplicate FFI crossings the Phase 2 cProfile flagged. A per-batch trace of
+every *copying* `np.ascontiguousarray` (monkeypatched over one `ds[r, s]`) then localized what remains.
+The hottest self-time leaf (`_aligned_strided_to_contig_size4`, ~20%) is **not** static-array churn —
+it is the track-interval marshalling below.
+
+1. **⚠️ SCALABILITY DEFECT (rust-only; not in numba): the fused track path copies the entire
+   per-sample-scale interval store into RAM every batch.** Track intervals are stored as an
+   **array-of-structs** memmap — record dtype `{start: i4, end: i4, value: f4}`, itemsize 12 — so
+   `intervals.{starts,ends,values}.data` are **strided field views** (stride 12, non-contiguous).
+   `_reconstruct.py:241-250`'s fused-rust branch wraps each in `np.ascontiguousarray(..., i4/f4)`,
+   which **materializes the whole track's record store** (all regions × samples) into a contiguous
+   copy on **every** `ds[r, s]` (3 × 3.6 MB on the toy corpus; **GB-scale and OOM at the >1M-sample
+   target**). The **numba** branch (`_reconstruct.py:271-274`) passes the same strided views
+   **directly with no copy** — numba reads strided arrays natively — so this is a rust-path
+   regression, not a pre-existing cost. **Fix (zero-copy, non-breaking):** have the Rust kernel read
+   the contiguous `(N,)` record buffer directly (reinterpret the 12-byte records / take a
+   `&[IntervalRecord]`) and stride to `.start/.end/.value` itself, instead of demanding three
+   contiguous SoA arrays. Alternative: store intervals struct-of-arrays on disk (format change).
+   This is simultaneously the #1 perf cost (the 20% leaf) **and** a correctness blocker for scale.
+
+   - **Same loaded-gun pattern, currently benign: the genotype memmap.** The fused kernels also wrap
+     the full `genotypes.data`/`offsets` memmap in `np.ascontiguousarray`. Today that is a **no-op**
+     (the genotype store is contiguous `int32`/`int64`, so it stays mmap, zero copy) — but it is the
+     identical footgun: any future code path that yields a non-contiguous or mistyped genotype view
+     would silently copy the entire sample-scale store. **Harden:** drop `ascontiguousarray` on the
+     memmapped per-sample-scale args; rely on contiguous-by-construction storage and let the FFI
+     **reject** non-contiguous input loudly rather than silently materializing GBs.
+
+2. **Per-batch re-cast of dataset-static per-variant arrays (cacheable; sub-linear in samples).**
+   `variants.start` is stored `int64` and re-cast to `int32` every batch (~0.59 MB × a few/batch here).
+   The per-variant / reference arrays (`v_starts`, `ilens`, `alt.{data,offsets}`, `reference`,
+   `ref_offsets`) grow only with the variant count (≲ a few billion germline variants even at 1M
+   samples → fits in ≥64 GB RAM), so these **may** be cached/typed **once** on the reconstructor —
+   unlike the per-sample-scale memmaps in (1), which must never be materialized. `reference.reference`
+   (50 MB) is already contiguous `u8`, so its `ascontiguousarray` is a verified no-op.
+
+3. **Output-buffer zeroing (`__memset_avx2` ~7.6%, 3 buffers on the annotated path).** The fused
+   kernels `Array1::zeros(total)` for `out_data` (+ `annot_v`, `annot_pos`). The core fully writes
+   every position for in-contract inputs, so an uninitialized allocation (`Array1::uninit` + a
+   full-write proof) drops the memset. Requires the trailing-fill coverage argument.
+
+4. **Per-call allocation churn (`brk`/`_int_malloc`/`malloc` ~6%)** and **`reverse_complement`
+   (~9% inclusive on the strand path, a numpy post-pass).** A reusable thread-local scratch pool
+   amortizes the former; folding strand RC into the kernel removes the latter. Lower priority than 1–3.
+
+> Target 1 is a correctness/scalability fix that should land **before** any >1M-sample run, independent
+> of the Phase 5 "one big `__getitem__` kernel" rewrite. Targets 2–4 are pure throughput and fold into
+> that rewrite. Peak RSS not re-measured (dominated by numba/llvmlite JIT ~3.2 GB, unchanged by fusion).
 
 ### Phase 4 — Write / update pipeline 🚧
 _PR: bigwig-streaming-write (TBD)_
@@ -346,6 +404,21 @@ narrowed to genoray (variant IO) only.
 ---
 
 ## Notes & decisions log
+
+- 2026-06-25 (Phase 3 close-out): Merged origin/main (#242 `intervals_to_tracks` clip fix via PR #244;
+  SpliceIndexer subset double-apply fix via PR #243) into the branch — the fused tracks kernel inherits
+  the clip fix (shared `intervals::intervals_to_tracks` core). Lifted ~10 obsolete #242 xfails +
+  #242-domain `assume(False)` guards → real passing max_jitter>0 coverage. Rerouted `Reference.fetch`
+  through the dispatched rust `get_reference`; deleted the three zero-caller `_fetch_*` numba functions.
+  Fused the annotated-haps (`reconstruct_annotated_haplotypes_fused`) and spliced-haps
+  (`reconstruct_haplotypes_spliced_fused`) read paths — both byte-identical to the composed numba oracle.
+  (The annotated+spliced intersection remains on the unfused dispatched rust core — still parity-gated and rust-by-default — with fusion deferred to Phase 5.)
+  Bumped seqpro 0.18→0.20.0 with `to_numpy(validate=False)` at guaranteed-uniform read-path sites.
+  Full tree green on both backends: rust 932 passed, 12 skipped, 5 xfailed, 0 failed; numba 932 passed,
+  12 skipped, 5 xfailed, 0 failed; cargo 88 passed. Remaining xfails (5): `test_e2e_variants`
+  (pre-existing, `_FlatVariants.to_fixed` missing); `test_haps_property` (2 tests, #199/#200
+  pre-existing); `test_indexing::test_parse_idx[missing]` (pre-existing); `test_ref_ds::test_getitem[no_regions]`
+  (pre-existing). Lint/format/typecheck clean; abi3 wheel builds (2 parity test files reformatted by ruff).
 
 - 2026-06-24 (Phase 3 — reconstruction + track realignment, parity-verified): Ported 8 kernel
   groups to Rust: `padded_slice` (pure cargo, Task 1), `get_reference` (Task 2), spliced-reference

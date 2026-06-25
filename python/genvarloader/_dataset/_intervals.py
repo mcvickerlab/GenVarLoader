@@ -24,7 +24,6 @@ def _intervals_to_tracks_numba(
     Assumptions:
     - intervals are sorted by start
     - intervals do not overlap
-    - no intervals start before query start
 
     Parameters
     ----------
@@ -70,16 +69,20 @@ def _intervals_to_tracks_numba(
 
         # if parallelized, a data race will occur if there are any overlapping intervals
         for interval in range(itv_s, itv_e):
-            #! assumes itv.start >= query_start
             start = itv_starts[interval] - query_start
             end = itv_ends[interval] - query_start
             value = itv_values[interval]
-            if start < length:
-                _out[start:end] = value
-            else:
+            if start >= length:
                 #! assumes intervals are sorted by start
                 # cannot break if parallelized
                 break
+            # Clip to the query window. Intervals may start before query_start
+            # (jitter-expanded storage vs. the per-read query origin; see #242)
+            # or end past it.
+            s = max(start, 0)
+            e = min(end, length)
+            if e > s:
+                _out[s:e] = value
 
 
 register(
