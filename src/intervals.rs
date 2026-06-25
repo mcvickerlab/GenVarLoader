@@ -5,8 +5,9 @@ use ndarray::{ArrayView1, ArrayViewMut1};
 /// Mirrors the numba kernel `intervals_to_tracks` exactly:
 /// - Zeroes the entire `out` buffer first.
 /// - Skips queries that have no intervals.
-/// - Replicates numpy slice semantics: end is clamped to `length`; no-op when
-///   `min(end, length) <= start`.
+/// - Replicates numpy slice semantics: start is clamped to 0 (intervals may
+///   begin before the query origin under max_jitter>0; see #242) and end is
+///   clamped to `length`; no-op when `min(end, length) <= max(start, 0)`.
 /// - Breaks out of the interval loop when `start >= length` (intervals are
 ///   sorted by start, so all subsequent intervals are also out of range).
 /// - Values are copied (f32 → f32), never reduced.
