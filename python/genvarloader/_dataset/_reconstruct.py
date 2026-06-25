@@ -234,10 +234,8 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                             self.haps.genotypes.data, np.int32, "geno_v_idxs"
                         ),
                         geno_offsets=_geno_offsets_2d,
-                        v_starts=np.ascontiguousarray(
-                            self.haps.variants.start, np.int32
-                        ),
-                        ilens=np.ascontiguousarray(self.haps.variants.ilen, np.int32),
+                        v_starts=self.haps.ffi_static.v_starts,
+                        ilens=self.haps.ffi_static.ilens,
                         offset_idxs=np.ascontiguousarray(o_idx, np.int64),
                         itv_starts=_ffi_array(
                             intervals.starts.data, np.int32, "itv_starts"
