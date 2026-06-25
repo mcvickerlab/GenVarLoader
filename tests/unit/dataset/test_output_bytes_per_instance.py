@@ -12,11 +12,6 @@ from seqpro.rag import Ragged
 from genvarloader._dataset._rag_variants import RaggedVariants
 from genvarloader._ragged import RaggedAnnotatedHaps
 
-_REASON_242 = (
-    "mcvickerlab/GenVarLoader#242 — intervals_to_tracks itv.start<query_start "
-    "contract violation; both backends; fix deferred to separate PR"
-)
-
 
 def _materialized_nbytes_per_instance(ds, r_arr, s_arr):
     """Compute actual nbytes by indexing the dataset and measuring."""
@@ -140,7 +135,6 @@ def test_variants_with_info_column_exact():
     np.testing.assert_array_equal(got, expected)
 
 
-@pytest.mark.xfail(strict=False, reason=_REASON_242)
 def test_haplotypes_plus_tracks_exact():
     ds = (
         gvl.get_dummy_dataset()
@@ -156,7 +150,6 @@ def test_haplotypes_plus_tracks_exact():
     np.testing.assert_array_equal(got, expected)
 
 
-@pytest.mark.xfail(strict=False, reason=_REASON_242)
 def test_reference_plus_tracks_exact():
     ds = gvl.get_dummy_dataset().with_seqs("reference")
     if not ds.active_tracks:
