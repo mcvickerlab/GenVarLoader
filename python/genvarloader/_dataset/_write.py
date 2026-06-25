@@ -46,6 +46,27 @@ DATASET_FORMAT_VERSION = SemanticVersion.parse("2.0.0")
 an existing dataset can no longer be read correctly by new code."""
 
 
+def _check_dataset_format_version(meta: "Metadata", path: Path) -> None:
+    """Validate a dataset's on-disk format version against the supported major.
+
+    Pre-versioning datasets (``format_version is None``) and any older major are
+    treated as needing migration. A newer major means the reader is too old.
+    """
+    fv = meta.format_version
+    current = DATASET_FORMAT_VERSION
+    if fv is None or fv.major < current.major:
+        raise ValueError(
+            f"Dataset at {path} uses format version {fv} but this genvarloader "
+            f"expects {current}. Run `genvarloader.migrate({str(path)!r})` to "
+            f"upgrade it in place."
+        )
+    if fv.major > current.major:
+        raise ValueError(
+            f"Dataset at {path} was written by a newer genvarloader (format "
+            f"version {fv} > supported {current}). Upgrade genvarloader."
+        )
+
+
 def _run_jobs(jobs: "list[Callable[[int], None]]", max_mem: int) -> None:
     """Run track/annot writer jobs, each called with a per-job max_mem budget.
 
