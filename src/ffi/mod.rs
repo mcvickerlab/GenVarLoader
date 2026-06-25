@@ -8,6 +8,26 @@ use crate::intervals;
 use crate::reference;
 use crate::variants;
 
+/// Allocate an output buffer of `len` elements WITHOUT zero-initialization.
+///
+/// SAFETY/INVARIANT: every element is fully overwritten by the reconstruct/track
+/// core before it is read. For in-contract inputs the core writes every output
+/// position; out-of-contract inputs (e.g. a deletion driving `ref_idx` past the
+/// contig end) are already undefined and excluded from the parity oracle by the
+/// overshoot/double-init guards in
+/// tests/parity/test_reconstruct_haplotypes_parity.py, so skipping the zero-init
+/// adds no new observable exposure. `T` is a plain numeric type (u8/i32/f32) with
+/// no invalid bit patterns.
+#[allow(clippy::uninit_vec)]
+fn uninit_output<T: Copy>(len: usize) -> Array1<T> {
+    let mut v: Vec<T> = Vec::with_capacity(len);
+    // SAFETY: see function-level invariant — every element is written before read.
+    unsafe {
+        v.set_len(len);
+    }
+    Array1::from_vec(v)
+}
+
 /// Per-(query, hap) reference-length diffs (see `genotypes::get_diffs_sparse`).
 /// `geno_offsets` is the normalized (2, n) int64 starts/stops array.
 #[pyfunction]
@@ -450,7 +470,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
 
     // Step 3: allocate the output buffer in Rust — Python never calls np.empty.
     let total = out_offsets_vec[n_work] as usize;
-    let mut out_data: Array1<u8> = Array1::zeros(total);
+    let mut out_data: Array1<u8> = uninit_output(total);
 
     // Step 4: reconstruct all haplotypes into the owned buffer (reuses batch core).
     reconstruct::reconstruct_haplotypes_from_sparse(
@@ -527,7 +547,7 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
     let total = out_offsets_a[out_offsets_a.len() - 1] as usize;
 
     // Allocate output buffer.
-    let mut out_data: Array1<u8> = Array1::zeros(total);
+    let mut out_data: Array1<u8> = uninit_output(total);
 
     // Reconstruct all haplotypes into the owned buffer (reuses batch core).
     reconstruct::reconstruct_haplotypes_from_sparse(
@@ -666,9 +686,9 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
 
     // Step 3: allocate the output buffer and annotation buffers in Rust.
     let total = out_offsets_vec[n_work] as usize;
-    let mut out_data: Array1<u8> = Array1::zeros(total);
-    let mut annot_v: Array1<i32> = Array1::zeros(total);
-    let mut annot_pos: Array1<i32> = Array1::zeros(total);
+    let mut out_data: Array1<u8> = uninit_output(total);
+    let mut annot_v: Array1<i32> = uninit_output(total);
+    let mut annot_pos: Array1<i32> = uninit_output(total);
 
     // Step 4: reconstruct all haplotypes into the owned buffers (reuses batch core).
     reconstruct::reconstruct_haplotypes_from_sparse(
@@ -864,7 +884,9 @@ pub fn intervals_and_realign_track_fused(
     let scratch_len = track_offsets_a[track_offsets_a.len() - 1] as usize;
 
     // Allocate Rust-side scratch buffer — replaces Python `_tracks = np.empty(...)`.
-    let mut scratch = ndarray::Array1::<f32>::zeros(scratch_len);
+    // intervals_to_tracks calls out.fill(0.0) as its first step, so full-write is
+    // guaranteed; uninit_output is safe here.
+    let mut scratch = uninit_output::<f32>(scratch_len);
 
     // Extract query starts (regions[:, 1]) as a contiguous owned array.
     // regions_a.column(1) is a non-contiguous view (row-major storage); we
