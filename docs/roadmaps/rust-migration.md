@@ -317,32 +317,56 @@ as the registered parity reference for the consolidation pass (Phase 5).
 > paths. The **annotated** path (new this close-out, never previously timed) is the laggard at 0.65×
 > — it materializes 3× the data (haps bytes + var_idxs i32 + ref_coords i32). Recorded, not gated.
 
-##### Phase 5 optimization targets (py-spy `--native` on the rust annotated `ds[r,s]`, 43k samples)
+##### Optimization targets (py-spy `--native` on the rust `ds[r,s]`, 43k samples; copy trace on one batch)
 
-The fusion removed the duplicate FFI crossings the Phase 2 cProfile flagged; what remains, ranked:
+The fusion removed the duplicate FFI crossings the Phase 2 cProfile flagged. A per-batch trace of
+every *copying* `np.ascontiguousarray` (monkeypatched over one `ds[r, s]`) then localized what remains.
+The hottest self-time leaf (`_aligned_strided_to_contig_size4`, ~20%) is **not** static-array churn —
+it is the track-interval marshalling below.
 
-1. **Per-batch `np.ascontiguousarray` re-marshalling of dataset-static arrays (~21% inclusive; the
-   single hottest self-time leaf is numpy's `_aligned_strided_to_contig_size4` at 20%).** The fused
-   wrappers in `_haps.py` re-coerce `self.genotypes.data`, `self.variants.start`, `self.variants.ilen`,
-   `self.variants.alt.{data,offsets}`, `self.reference.reference`, `self.reference.offsets` to
-   contiguous/typed arrays on **every** `ds[r,s]`, though these are dataset-invariant. **Fix:** hoist
-   these conversions to a one-time cache on the `Haps`/reconstructor object; only `regions`, `shifts`,
-   `geno_offset_idx`, and `keep` are genuinely per-batch. Highest-leverage, lowest-risk win.
-2. **Output-buffer zeroing (`__memset_avx2` ~7.6% with 3 buffers in the annotated path).** The fused
-   kernels `Array1::zeros(total)` for `out_data` (+ `annot_v`, `annot_pos`). The reconstruct core fully
-   writes every position for in-contract inputs, so an uninitialized allocation (`Array1::uninit` +
-   guaranteed full-write proof) would drop the memset. Requires the trailing-fill coverage argument.
-3. **Per-call allocation churn (`brk`/`_int_malloc`/`malloc` ~6% combined).** Per-batch buffer
-   allocation; a reusable thread-local scratch pool would amortize it (also helps target 2).
-4. **`reverse_complement` (~9% inclusive on the annotated/strand path).** Done as a numpy post-pass;
-   folding strand RC into the kernel for `strand == -1` regions would remove a full output-sized pass.
-   Lower priority than 1–3.
+1. **⚠️ SCALABILITY DEFECT (rust-only; not in numba): the fused track path copies the entire
+   per-sample-scale interval store into RAM every batch.** Track intervals are stored as an
+   **array-of-structs** memmap — record dtype `{start: i4, end: i4, value: f4}`, itemsize 12 — so
+   `intervals.{starts,ends,values}.data` are **strided field views** (stride 12, non-contiguous).
+   `_reconstruct.py:241-250`'s fused-rust branch wraps each in `np.ascontiguousarray(..., i4/f4)`,
+   which **materializes the whole track's record store** (all regions × samples) into a contiguous
+   copy on **every** `ds[r, s]` (3 × 3.6 MB on the toy corpus; **GB-scale and OOM at the >1M-sample
+   target**). The **numba** branch (`_reconstruct.py:271-274`) passes the same strided views
+   **directly with no copy** — numba reads strided arrays natively — so this is a rust-path
+   regression, not a pre-existing cost. **Fix (zero-copy, non-breaking):** have the Rust kernel read
+   the contiguous `(N,)` record buffer directly (reinterpret the 12-byte records / take a
+   `&[IntervalRecord]`) and stride to `.start/.end/.value` itself, instead of demanding three
+   contiguous SoA arrays. Alternative: store intervals struct-of-arrays on disk (format change).
+   This is simultaneously the #1 perf cost (the 20% leaf) **and** a correctness blocker for scale.
 
-> A single big `__getitem__` kernel (the Phase 5 "one crossing" goal) subsumes targets 1–3; target 1
-> alone is a cheap incremental win that does not require the full kernel rewrite.
->
-> Peak RSS not re-measured (dominated by numba/llvmlite JIT ~3.2 GB, same as Phase 0; kernel-level
-> fusion doesn't change it without eliminating the JIT entirely).
+   - **Same loaded-gun pattern, currently benign: the genotype memmap.** The fused kernels also wrap
+     the full `genotypes.data`/`offsets` memmap in `np.ascontiguousarray`. Today that is a **no-op**
+     (the genotype store is contiguous `int32`/`int64`, so it stays mmap, zero copy) — but it is the
+     identical footgun: any future code path that yields a non-contiguous or mistyped genotype view
+     would silently copy the entire sample-scale store. **Harden:** drop `ascontiguousarray` on the
+     memmapped per-sample-scale args; rely on contiguous-by-construction storage and let the FFI
+     **reject** non-contiguous input loudly rather than silently materializing GBs.
+
+2. **Per-batch re-cast of dataset-static per-variant arrays (cacheable; sub-linear in samples).**
+   `variants.start` is stored `int64` and re-cast to `int32` every batch (~0.59 MB × a few/batch here).
+   The per-variant / reference arrays (`v_starts`, `ilens`, `alt.{data,offsets}`, `reference`,
+   `ref_offsets`) grow only with the variant count (≲ a few billion germline variants even at 1M
+   samples → fits in ≥64 GB RAM), so these **may** be cached/typed **once** on the reconstructor —
+   unlike the per-sample-scale memmaps in (1), which must never be materialized. `reference.reference`
+   (50 MB) is already contiguous `u8`, so its `ascontiguousarray` is a verified no-op.
+
+3. **Output-buffer zeroing (`__memset_avx2` ~7.6%, 3 buffers on the annotated path).** The fused
+   kernels `Array1::zeros(total)` for `out_data` (+ `annot_v`, `annot_pos`). The core fully writes
+   every position for in-contract inputs, so an uninitialized allocation (`Array1::uninit` + a
+   full-write proof) drops the memset. Requires the trailing-fill coverage argument.
+
+4. **Per-call allocation churn (`brk`/`_int_malloc`/`malloc` ~6%)** and **`reverse_complement`
+   (~9% inclusive on the strand path, a numpy post-pass).** A reusable thread-local scratch pool
+   amortizes the former; folding strand RC into the kernel removes the latter. Lower priority than 1–3.
+
+> Target 1 is a correctness/scalability fix that should land **before** any >1M-sample run, independent
+> of the Phase 5 "one big `__getitem__` kernel" rewrite. Targets 2–4 are pure throughput and fold into
+> that rewrite. Peak RSS not re-measured (dominated by numba/llvmlite JIT ~3.2 GB, unchanged by fusion).
 
 ### Phase 4 — Write / update pipeline 🚧
 _PR: bigwig-streaming-write (TBD)_
