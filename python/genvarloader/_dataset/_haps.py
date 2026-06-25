@@ -47,6 +47,7 @@ from ._genotypes import (
     get_diffs_sparse,
     reconstruct_haplotypes_from_sparse,
 )
+from ._utils import _ffi_array
 from ._protocol import Reconstructor
 from ._rag_variants import RaggedVariants
 from ._reference import Reference
@@ -236,6 +237,20 @@ def _svar_format_fields(svar_dir: Path) -> dict[str, np.dtype]:
 
 
 @dataclass(slots=True)
+class _HapsFfiStatic:
+    """FFI-ready, contiguous, correctly-typed sub-linear arrays consumed by the
+    fused kernels. Grows only with the variant/reference count (sub-linear in
+    samples), so it is cached for the lifetime of the Haps reconstructor."""
+
+    v_starts: NDArray[np.int32]
+    ilens: NDArray[np.int32]
+    alt_alleles: NDArray[np.uint8]
+    alt_offsets: NDArray[np.int64]
+    ref: "NDArray[np.uint8] | None"
+    ref_offsets: "NDArray[np.int64] | None"
+
+
+@dataclass(slots=True)
 class Haps(Reconstructor[_H]):
     path: Path
     """The path to the GVL dataset."""
@@ -260,6 +275,7 @@ class Haps(Reconstructor[_H]):
     memmapped on the genotype offsets. Parallel to ``dosages``. See issue #231."""
     dummy_variant: "DummyVariant | None" = None
     available_var_fields: list[str] = field(init=False)
+    _ffi_static: "_HapsFfiStatic | None" = field(default=None, init=False)
     flank_length: int | None = None
     """Number of reference flank bases on each side for flank/window tokenization. ``0``/``None`` disables."""
     token_lut: NDArray | None = None
@@ -307,6 +323,27 @@ class Haps(Reconstructor[_H]):
                 "Either this dataset is not backed by an SVAR file, or the SVAR file has not had AFs cached yet."
                 + "Doing this automatically is not yet supported."
             )
+
+    @property
+    def ffi_static(self) -> _HapsFfiStatic:
+        """Lazily-computed, cached FFI-ready sub-linear arrays (see _HapsFfiStatic)."""
+        if self._ffi_static is None:
+            ref = self.reference
+            self._ffi_static = _HapsFfiStatic(
+                v_starts=np.ascontiguousarray(self.variants.start, np.int32),
+                ilens=np.ascontiguousarray(self.variants.ilen, np.int32),
+                alt_alleles=np.ascontiguousarray(
+                    self.variants.alt.data.view(np.uint8), np.uint8
+                ),
+                alt_offsets=np.ascontiguousarray(self.variants.alt.offsets, np.int64),
+                ref=None
+                if ref is None
+                else np.ascontiguousarray(ref.reference, np.uint8),
+                ref_offsets=None
+                if ref is None
+                else np.ascontiguousarray(ref.offsets, np.int64),
+            )
+        return self._ffi_static
 
     def _has_dosage_file_on_disk(self) -> bool:
         """True iff the linked SVAR contains a dosages.npy.
@@ -793,17 +830,15 @@ class Haps(Reconstructor[_H]):
                     shifts=np.ascontiguousarray(req.shifts, np.int32),
                     geno_offset_idx=np.ascontiguousarray(req.geno_offset_idx, np.int64),
                     geno_offsets=_as_starts_stops(self.genotypes.offsets),
-                    geno_v_idxs=np.ascontiguousarray(self.genotypes.data, np.int32),
-                    v_starts=np.ascontiguousarray(self.variants.start, np.int32),
-                    ilens=np.ascontiguousarray(self.variants.ilen, np.int32),
-                    alt_alleles=np.ascontiguousarray(
-                        self.variants.alt.data.view(np.uint8), np.uint8
+                    geno_v_idxs=_ffi_array(
+                        self.genotypes.data, np.int32, "geno_v_idxs"
                     ),
-                    alt_offsets=np.ascontiguousarray(
-                        self.variants.alt.offsets, np.int64
-                    ),
-                    ref_=np.ascontiguousarray(self.reference.reference, np.uint8),
-                    ref_offsets=np.ascontiguousarray(self.reference.offsets, np.int64),
+                    v_starts=self.ffi_static.v_starts,
+                    ilens=self.ffi_static.ilens,
+                    alt_alleles=self.ffi_static.alt_alleles,
+                    alt_offsets=self.ffi_static.alt_offsets,
+                    ref_=self.ffi_static.ref,
+                    ref_offsets=self.ffi_static.ref_offsets,
                     pad_char=np.uint8(self.reference.pad_char),
                     output_length=_fused_output_length,
                     keep=None
@@ -866,15 +901,13 @@ class Haps(Reconstructor[_H]):
                     splice_plan.permuted_out_offsets, np.int64
                 ),
                 geno_offsets=_as_starts_stops(self.genotypes.offsets),
-                geno_v_idxs=np.ascontiguousarray(self.genotypes.data, np.int32),
-                v_starts=np.ascontiguousarray(self.variants.start, np.int32),
-                ilens=np.ascontiguousarray(self.variants.ilen, np.int32),
-                alt_alleles=np.ascontiguousarray(
-                    self.variants.alt.data.view(np.uint8), np.uint8
-                ),
-                alt_offsets=np.ascontiguousarray(self.variants.alt.offsets, np.int64),
-                ref_=np.ascontiguousarray(self.reference.reference, np.uint8),
-                ref_offsets=np.ascontiguousarray(self.reference.offsets, np.int64),
+                geno_v_idxs=_ffi_array(self.genotypes.data, np.int32, "geno_v_idxs"),
+                v_starts=self.ffi_static.v_starts,
+                ilens=self.ffi_static.ilens,
+                alt_alleles=self.ffi_static.alt_alleles,
+                alt_offsets=self.ffi_static.alt_offsets,
+                ref_=self.ffi_static.ref,
+                ref_offsets=self.ffi_static.ref_offsets,
                 pad_char=np.uint8(self.reference.pad_char),
                 keep=None
                 if keep_perm is None
@@ -955,19 +988,15 @@ class Haps(Reconstructor[_H]):
                             req.geno_offset_idx, np.int64
                         ),
                         geno_offsets=_as_starts_stops(self.genotypes.offsets),
-                        geno_v_idxs=np.ascontiguousarray(self.genotypes.data, np.int32),
-                        v_starts=np.ascontiguousarray(self.variants.start, np.int32),
-                        ilens=np.ascontiguousarray(self.variants.ilen, np.int32),
-                        alt_alleles=np.ascontiguousarray(
-                            self.variants.alt.data.view(np.uint8), np.uint8
+                        geno_v_idxs=_ffi_array(
+                            self.genotypes.data, np.int32, "geno_v_idxs"
                         ),
-                        alt_offsets=np.ascontiguousarray(
-                            self.variants.alt.offsets, np.int64
-                        ),
-                        ref_=np.ascontiguousarray(self.reference.reference, np.uint8),
-                        ref_offsets=np.ascontiguousarray(
-                            self.reference.offsets, np.int64
-                        ),
+                        v_starts=self.ffi_static.v_starts,
+                        ilens=self.ffi_static.ilens,
+                        alt_alleles=self.ffi_static.alt_alleles,
+                        alt_offsets=self.ffi_static.alt_offsets,
+                        ref_=self.ffi_static.ref,
+                        ref_offsets=self.ffi_static.ref_offsets,
                         pad_char=np.uint8(self.reference.pad_char),
                         output_length=_fused_output_length,
                         keep=None

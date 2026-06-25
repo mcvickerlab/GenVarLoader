@@ -34,16 +34,37 @@ from seqpro.rag import Ragged, concatenate as rag_concatenate
 from tqdm.auto import tqdm
 
 from .._atomic import atomic_dir
-from .._ragged import INTERVAL_DTYPE
+from .._ragged import INTERVAL_DTYPE  # noqa: F401  # Task 3 migration reader imports this
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._svar_link import SvarLink
 from ._utils import bed_to_regions, regions_to_bed, splits_sum_le_value
 
 
-DATASET_FORMAT_VERSION = SemanticVersion.parse("1.0.0")
+DATASET_FORMAT_VERSION = SemanticVersion.parse("2.0.0")
 """On-disk layout version for a gvl.write dataset directory. Bump MAJOR only when
 an existing dataset can no longer be read correctly by new code."""
+
+
+def _check_dataset_format_version(meta: "Metadata", path: Path) -> None:
+    """Validate a dataset's on-disk format version against the supported major.
+
+    Pre-versioning datasets (``format_version is None``) and any older major are
+    treated as needing migration. A newer major means the reader is too old.
+    """
+    fv = meta.format_version
+    current = DATASET_FORMAT_VERSION
+    if fv is None or fv.major < current.major:
+        raise ValueError(
+            f"Dataset at {path} uses format version {fv} but this genvarloader "
+            f"expects {current}. Run `genvarloader.migrate({str(path)!r})` to "
+            f"upgrade it in place."
+        )
+    if fv.major > current.major:
+        raise ValueError(
+            f"Dataset at {path} was written by a newer genvarloader (format "
+            f"version {fv} > supported {current}). Upgrade genvarloader."
+        )
 
 
 def _run_jobs(jobs: "list[Callable[[int], None]]", max_mem: int) -> None:
@@ -1084,18 +1105,17 @@ def _write_phased_variants_chunk(
 
 def _write_ragged_intervals(out_dir: Path, itvs: "RaggedIntervals") -> None:
     """Write a RaggedIntervals (values/starts/ends share offsets) to out_dir as
-    intervals.npy + offsets.npy. Single-chunk writer used for annotation tracks."""
+    struct-of-arrays: starts/ends/values.npy + offsets.npy. Single-chunk writer
+    used for annotation tracks (format 2.0)."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = np.memmap(
-        out_dir / "intervals.npy",
-        dtype=INTERVAL_DTYPE,
-        mode="w+",
-        shape=itvs.values.data.shape,
-    )
-    out["start"] = itvs.starts.data
-    out["end"] = itvs.ends.data
-    out["value"] = itvs.values.data
-    out.flush()
+    for name, data, dt in (
+        ("starts", itvs.starts.data, np.int32),
+        ("ends", itvs.ends.data, np.int32),
+        ("values", itvs.values.data, np.float32),
+    ):
+        out = np.memmap(out_dir / f"{name}.npy", dtype=dt, mode="w+", shape=data.shape)
+        out[:] = data
+        out.flush()
 
     offsets = itvs.values.offsets
     out = np.memmap(
@@ -1320,18 +1340,22 @@ def _write_track_legacy(
         )
 
         pbar.set_description(f"Writing intervals for {part.height} regions on {contig}")
-        out = np.memmap(
-            out_dir / "intervals.npy",
-            dtype=INTERVAL_DTYPE,
-            mode="w+" if interval_offset == 0 else "r+",
-            shape=intervals.values.data.shape,
-            offset=interval_offset,
-        )
-        out["start"] = intervals.starts.data
-        out["end"] = intervals.ends.data
-        out["value"] = intervals.values.data
-        out.flush()
-        interval_offset += out.nbytes
+        n = intervals.values.data.shape[0]
+        for name, data, dt in (
+            ("starts", intervals.starts.data, np.int32),
+            ("ends", intervals.ends.data, np.int32),
+            ("values", intervals.values.data, np.float32),
+        ):
+            out = np.memmap(
+                out_dir / f"{name}.npy",
+                dtype=dt,
+                mode="w+" if interval_offset == 0 else "r+",
+                shape=n,
+                offset=interval_offset * np.dtype(dt).itemsize,
+            )
+            out[:] = data
+            out.flush()
+        interval_offset += n
 
         offsets = intervals.values.offsets
         offsets += last_offset

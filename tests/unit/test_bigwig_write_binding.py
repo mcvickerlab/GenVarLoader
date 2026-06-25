@@ -3,7 +3,6 @@ from pathlib import Path
 
 import numpy as np
 
-from genvarloader._ragged import INTERVAL_DTYPE
 from genvarloader.genvarloader import bigwig_write_track
 
 
@@ -16,10 +15,15 @@ def test_bigwig_write_binding_roundtrip(tmp_path):
     out = tmp_path
     bigwig_write_track(paths, contigs, starts, ends, 1 << 30, str(out), False)
 
-    itvs = np.memmap(out / "intervals.npy", dtype=INTERVAL_DTYPE, mode="r")
+    starts_arr = np.memmap(out / "starts.npy", dtype=np.int32, mode="r")
+    ends_arr = np.memmap(out / "ends.npy", dtype=np.int32, mode="r")
+    values_arr = np.memmap(out / "values.npy", dtype=np.float32, mode="r")
     offsets = np.memmap(out / "offsets.npy", dtype=np.int64, mode="r")
     # 2 regions x 2 samples -> offsets length 5
     assert len(offsets) == 2 * 2 + 1
     assert offsets[0] == 0
-    assert offsets[-1] == len(itvs)
-    assert itvs.dtype == INTERVAL_DTYPE
+    assert offsets[-1] == len(starts_arr)
+    assert len(starts_arr) == len(ends_arr) == len(values_arr)
+    assert starts_arr.dtype == np.int32
+    assert ends_arr.dtype == np.int32
+    assert values_arr.dtype == np.float32

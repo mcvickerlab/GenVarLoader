@@ -36,9 +36,7 @@ def test_write_annot_track_rust_byte_matches_legacy(tmp_path):
     # rust
     _write._write_annot_track_rust(rust_dir, regions, bw, max_mem=2**30)
 
-    assert (legacy_dir / "intervals.npy").read_bytes() == (
-        rust_dir / "intervals.npy"
-    ).read_bytes()
-    assert (legacy_dir / "offsets.npy").read_bytes() == (
-        rust_dir / "offsets.npy"
-    ).read_bytes()
+    for name in ("starts.npy", "ends.npy", "values.npy", "offsets.npy"):
+        assert (legacy_dir / name).read_bytes() == (rust_dir / name).read_bytes(), (
+            f"{name} bytes mismatch between legacy and rust writers"
+        )

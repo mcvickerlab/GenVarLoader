@@ -37,7 +37,9 @@ pub fn write_track(
     let starts = starts.as_slice().expect("starts contiguous");
     let ends = ends.as_slice().expect("ends contiguous");
 
-    let mut itv_writer = BufWriter::new(File::create(out_dir.join("intervals.npy"))?);
+    let mut starts_writer = BufWriter::new(File::create(out_dir.join("starts.npy"))?);
+    let mut ends_writer = BufWriter::new(File::create(out_dir.join("ends.npy"))?);
+    let mut values_writer = BufWriter::new(File::create(out_dir.join("values.npy"))?);
     // offsets accumulated in memory; region-major, sample-minor; final total appended.
     let mut offsets: Vec<i64> = Vec::with_capacity(n_regions * n_samples + 1);
     offsets.push(0);
@@ -105,9 +107,9 @@ pub fn write_track(
             let per_sample = region?;
             for sample_vals in per_sample {
                 for v in sample_vals {
-                    itv_writer.write_all(&(v.start as i32).to_le_bytes())?;
-                    itv_writer.write_all(&(v.end as i32).to_le_bytes())?;
-                    itv_writer.write_all(&v.value.to_le_bytes())?;
+                    starts_writer.write_all(&(v.start as i32).to_le_bytes())?;
+                    ends_writer.write_all(&(v.end as i32).to_le_bytes())?;
+                    values_writer.write_all(&v.value.to_le_bytes())?;
                     acc += 1;
                 }
                 offsets.push(acc);
@@ -115,7 +117,9 @@ pub fn write_track(
         }
         batch_start = batch_end;
     }
-    itv_writer.flush()?;
+    starts_writer.flush()?;
+    ends_writer.flush()?;
+    values_writer.flush()?;
 
     let mut off_writer = BufWriter::new(File::create(out_dir.join("offsets.npy"))?);
     for o in &offsets {
@@ -316,15 +320,18 @@ mod tests {
         }
         .unwrap();
 
-        // Expected intervals.npy bytes: [i32 start, i32 end, f32 value] per row.
-        let mut expected = Vec::new();
+        // Expected SoA bytes: separate i32 starts, i32 ends, f32 values.
+        let mut exp_starts = Vec::new();
+        let mut exp_ends = Vec::new();
+        let mut exp_values = Vec::new();
         for i in 0..vals.len() {
-            expected.extend_from_slice(&(coords[[i, 0]] as i32).to_le_bytes());
-            expected.extend_from_slice(&(coords[[i, 1]] as i32).to_le_bytes());
-            expected.extend_from_slice(&vals[i].to_le_bytes());
+            exp_starts.extend_from_slice(&(coords[[i, 0]] as i32).to_le_bytes());
+            exp_ends.extend_from_slice(&(coords[[i, 1]] as i32).to_le_bytes());
+            exp_values.extend_from_slice(&vals[i].to_le_bytes());
         }
-        let got = fs::read(tmp.join("intervals.npy")).unwrap();
-        assert_eq!(got, expected, "intervals.npy bytes mismatch");
+        assert_eq!(fs::read(tmp.join("starts.npy")).unwrap(), exp_starts, "starts mismatch");
+        assert_eq!(fs::read(tmp.join("ends.npy")).unwrap(), exp_ends, "ends mismatch");
+        assert_eq!(fs::read(tmp.join("values.npy")).unwrap(), exp_values, "values mismatch");
 
         // Expected offsets.npy bytes: i64 little-endian, full offsets vec.
         let mut expected_off = Vec::new();

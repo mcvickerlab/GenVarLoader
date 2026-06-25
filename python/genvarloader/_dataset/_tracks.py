@@ -15,7 +15,7 @@ from seqpro.rag import Ragged
 
 from .._dispatch import register
 from .._flat import _Flat
-from .._ragged import INTERVAL_DTYPE, FlatIntervals, RaggedIntervals, RaggedTracks
+from .._ragged import FlatIntervals, RaggedIntervals, RaggedTracks
 from .._utils import lengths_to_offsets
 from ._genotypes import _as_starts_stops
 from ._indexing import DatasetIndexer
@@ -709,19 +709,13 @@ class Tracks(Reconstructor[_T]):
             shape = (n_regions, None)
         else:
             shape = (n_regions, n_samples, None)
-        itvs = np.memmap(
-            path / "intervals.npy",
-            dtype=INTERVAL_DTYPE,
-            mode="r",
-        )
-        offsets = np.memmap(
-            path / "offsets.npy",
-            dtype=np.int64,
-            mode="r",
-        )
-        starts = Ragged.from_offsets(itvs["start"], shape, offsets)
-        ends = Ragged.from_offsets(itvs["end"], shape, offsets)
-        values = Ragged.from_offsets(itvs["value"], shape, offsets)
+        starts_data = np.memmap(path / "starts.npy", dtype=np.int32, mode="r")
+        ends_data = np.memmap(path / "ends.npy", dtype=np.int32, mode="r")
+        values_data = np.memmap(path / "values.npy", dtype=np.float32, mode="r")
+        offsets = np.memmap(path / "offsets.npy", dtype=np.int64, mode="r")
+        starts = Ragged.from_offsets(starts_data, shape, offsets)
+        ends = Ragged.from_offsets(ends_data, shape, offsets)
+        values = Ragged.from_offsets(values_data, shape, offsets)
         return RaggedIntervals(starts, ends, values)
 
     def to_kind(self, kind: type[_NewT]) -> Tracks[_NewT]:
