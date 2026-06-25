@@ -9,6 +9,7 @@ All fixtures skip the whole module if the committed dataset is absent.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -44,10 +45,22 @@ def _batch_indices(ds, n: int):
 def captured_haplotypes(bench_dataset):
     ds = bench_dataset.with_seqs("haplotypes").with_len(SEQLEN)
     r, s = _batch_indices(ds, BATCH)
-    recon = capture_first_call(
-        targets=[(_haps, "reconstruct_haplotypes_from_sparse")],
-        thunk=lambda: ds[r, s],
-    )
+    # Task 13 (Phase 3): the rust default path now calls reconstruct_haplotypes_fused
+    # (one FFI crossing) rather than reconstruct_haplotypes_from_sparse.  Force the
+    # numba path to capture args that are compatible with the per-kernel benchmark
+    # (test_reconstruct_haplotypes_from_sparse benchmarks the raw dispatch entry).
+    old_backend = os.environ.get("GVL_BACKEND")
+    os.environ["GVL_BACKEND"] = "numba"
+    try:
+        recon = capture_first_call(
+            targets=[(_haps, "reconstruct_haplotypes_from_sparse")],
+            thunk=lambda: ds[r, s],
+        )
+    finally:
+        if old_backend is None:
+            os.environ.pop("GVL_BACKEND", None)
+        else:
+            os.environ["GVL_BACKEND"] = old_backend
     return recon
 
 
