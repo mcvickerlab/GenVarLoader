@@ -445,7 +445,9 @@ def _shift_and_realign_tracks_sparse_rust_wrapper(
         track_offsets=np.asarray(track_offsets, dtype=np.int64),
         params=np.asarray(params, dtype=np.float64),
         keep=keep,
-        keep_offsets=np.asarray(keep_offsets, dtype=np.int64) if keep_offsets is not None else None,
+        keep_offsets=np.asarray(keep_offsets, dtype=np.int64)
+        if keep_offsets is not None
+        else None,
         strategy_id=int(strategy_id),
         base_seed=int(base_seed),
     )

@@ -103,9 +103,7 @@ def test_reference_mode_dataset_parity(phased_svar_gvl, reference, monkeypatch):
         return rust_fn(*a, **k)
 
     orig_entry = dict(_dispatch._REGISTRY["get_reference"])
-    _dispatch.register(
-        "get_reference", numba=numba_fn, rust=_spy_rust, default="numba"
-    )
+    _dispatch.register("get_reference", numba=numba_fn, rust=_spy_rust, default="numba")
 
     try:
         # --- rust read (spy active) ---

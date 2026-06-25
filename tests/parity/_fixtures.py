@@ -61,9 +61,7 @@ def _make_session_bigwigs(bw_dir: Path, seed: int = 42) -> dict[str, str]:
             for contig, length in _SESSION_CONTIGS.items():
                 # ~5 % density → one interval per ~20 bp
                 n = max(2, int(length * 0.05))
-                starts = np.unique(
-                    rng.integers(0, length - 1, size=n).astype(np.int64)
-                )
+                starts = np.unique(rng.integers(0, length - 1, size=n).astype(np.int64))
                 starts.sort()
                 ends = np.empty_like(starts)
                 ends[:-1] = starts[1:]
@@ -132,7 +130,7 @@ def build_haps_tracks_dataset(work_dir: Path, svar_path: Path) -> Path:
                 1010685,  # overlaps GAGA→G deletion on chr1
                 1110686,  # overlaps A→TTT insertion on chr1
                 1210686,  # overlaps C→G SNP on chr1 (mixed indels)
-                14360,    # overlaps chr2 SNP region
+                14360,  # overlaps chr2 SNP region
                 1110686,  # chr2 G→A/T multiallelic (indel neighbours)
             ],
             "chromEnd": [

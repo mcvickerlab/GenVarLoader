@@ -711,13 +711,17 @@ def _get_reference_ser(regions, out_offsets, reference, ref_offsets, pad_char, o
     return out
 
 
-def _get_reference_numba(regions, out_offsets, reference, ref_offsets, pad_char, parallel):
+def _get_reference_numba(
+    regions, out_offsets, reference, ref_offsets, pad_char, parallel
+):
     out = np.empty(out_offsets[-1], np.uint8)
     kernel = _get_reference_par if parallel else _get_reference_ser
     return kernel(regions, out_offsets, reference, ref_offsets, pad_char, out)
 
 
-def _get_reference_rust(regions, out_offsets, reference, ref_offsets, pad_char, parallel):
+def _get_reference_rust(
+    regions, out_offsets, reference, ref_offsets, pad_char, parallel
+):
     return _get_reference_rust_ffi(
         np.ascontiguousarray(regions, np.int32),
         np.ascontiguousarray(out_offsets, np.int64),
@@ -728,7 +732,12 @@ def _get_reference_rust(regions, out_offsets, reference, ref_offsets, pad_char, 
     )
 
 
-register("get_reference", numba=_get_reference_numba, rust=_get_reference_rust, default="rust")
+register(
+    "get_reference",
+    numba=_get_reference_numba,
+    rust=_get_reference_rust,
+    default="rust",
+)
 
 
 def get_reference(
@@ -739,7 +748,9 @@ def get_reference(
     pad_char: int,
 ) -> NDArray[np.uint8]:
     parallel = should_parallelize(int(out_offsets[-1]))
-    return get("get_reference")(regions, out_offsets, reference, ref_offsets, pad_char, parallel)
+    return get("get_reference")(
+        regions, out_offsets, reference, ref_offsets, pad_char, parallel
+    )
 
 
 def _fetch_spliced_ref(

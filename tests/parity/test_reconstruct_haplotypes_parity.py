@@ -7,7 +7,6 @@ import pytest
 from hypothesis import assume, given, settings
 
 from genvarloader._dataset import _genotypes  # noqa: F401 — triggers register()
-from tests.parity._harness import assert_inplace_kernel_parity
 from tests.parity.strategies import reconstruct_haplotypes_inputs
 
 pytestmark = pytest.mark.parity

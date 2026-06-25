@@ -778,10 +778,14 @@ class Haps(Reconstructor[_H]):
                 _out_per = (req.out_offsets[1:] - req.out_offsets[:-1]).reshape(
                     req.shifts.shape
                 )
-                if np.array_equal(_out_per.astype(np.int64), req.hap_lengths.astype(np.int64)):
+                if np.array_equal(
+                    _out_per.astype(np.int64), req.hap_lengths.astype(np.int64)
+                ):
                     _fused_output_length = np.int64(-1)  # ragged mode
                 else:
-                    _fused_output_length = np.int64(int(req.out_offsets[1] - req.out_offsets[0]))
+                    _fused_output_length = np.int64(
+                        int(req.out_offsets[1] - req.out_offsets[0])
+                    )
                 out_data, out_offsets = reconstruct_haplotypes_fused(
                     regions=np.ascontiguousarray(req.regions, np.int32),
                     shifts=np.ascontiguousarray(req.shifts, np.int32),
@@ -793,12 +797,16 @@ class Haps(Reconstructor[_H]):
                     alt_alleles=np.ascontiguousarray(
                         self.variants.alt.data.view(np.uint8), np.uint8
                     ),
-                    alt_offsets=np.ascontiguousarray(self.variants.alt.offsets, np.int64),
+                    alt_offsets=np.ascontiguousarray(
+                        self.variants.alt.offsets, np.int64
+                    ),
                     ref_=np.ascontiguousarray(self.reference.reference, np.uint8),
                     ref_offsets=np.ascontiguousarray(self.reference.offsets, np.int64),
                     pad_char=np.uint8(self.reference.pad_char),
                     output_length=_fused_output_length,
-                    keep=None if req.keep is None else np.ascontiguousarray(req.keep, np.bool_),
+                    keep=None
+                    if req.keep is None
+                    else np.ascontiguousarray(req.keep, np.bool_),
                     keep_offsets=None
                     if req.keep_offsets is None
                     else np.ascontiguousarray(req.keep_offsets, np.int64),

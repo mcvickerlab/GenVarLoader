@@ -364,7 +364,9 @@ def tracks_to_intervals_inputs(draw):
 
     regions = np.array(regions_list, dtype=np.int32)
     track_offsets = np.concatenate([[0], np.cumsum(track_lengths)]).astype(np.int64)
-    tracks = np.concatenate(tracks_parts) if tracks_parts else np.empty(0, dtype=np.float32)
+    tracks = (
+        np.concatenate(tracks_parts) if tracks_parts else np.empty(0, dtype=np.float32)
+    )
 
     return regions, tracks, track_offsets
 
@@ -452,9 +454,7 @@ def shift_and_realign_tracks_inputs(draw):  # noqa: C901
     n_unique = draw(st.integers(min_value=1, max_value=8))
     # v_starts sorted, in [0, 120] so they fit within track windows
     v_starts_raw = sorted(
-        draw(
-            st.lists(st.integers(0, 120), min_size=n_unique, max_size=n_unique)
-        )
+        draw(st.lists(st.integers(0, 120), min_size=n_unique, max_size=n_unique))
     )
     v_starts = np.array(v_starts_raw, dtype=np.int32)
     # ilens: -3..3 for del/snp/ins mix; ensure at least one each
@@ -484,7 +484,9 @@ def shift_and_realign_tracks_inputs(draw):  # noqa: C901
     total_track = int(track_offsets[-1])
     tracks = draw(
         st.lists(
-            st.floats(min_value=-1e3, max_value=1e3, allow_nan=False, allow_infinity=False),
+            st.floats(
+                min_value=-1e3, max_value=1e3, allow_nan=False, allow_infinity=False
+            ),
             min_size=total_track,
             max_size=total_track,
         ).map(lambda xs: np.array(xs, dtype=np.float32))
@@ -503,9 +505,9 @@ def shift_and_realign_tracks_inputs(draw):  # noqa: C901
     geno_v_idxs = np.array(v_idx_list, dtype=np.int32)
 
     # normalize geno_offsets to (2, n) form
-    geno_offsets_2d = np.stack(
-        [geno_offsets_1d[:-1], geno_offsets_1d[1:]]
-    ).astype(np.int64)
+    geno_offsets_2d = np.stack([geno_offsets_1d[:-1], geno_offsets_1d[1:]]).astype(
+        np.int64
+    )
 
     # ── out_offsets: (n_q * ploidy + 1,) ─────────────────────────────────────
     # Each (query, hap) output has the same length as the region (no jitter here)
@@ -534,21 +536,21 @@ def shift_and_realign_tracks_inputs(draw):  # noqa: C901
         keep_offsets = None
 
     inputs = (
-        out_offsets,             # (b*p+1,)
-        regions,                 # (b, 3)
-        shifts,                  # (b, p)
-        geno_offset_idx,         # (b, p)
-        geno_v_idxs,             # ragged variant idxs
-        geno_offsets_2d,         # (2, n)
-        v_starts,                # (n_unique,)
-        ilens,                   # (n_unique,)
-        tracks,                  # (total_track,) ragged
-        track_offsets,           # (b+1,)
-        params,                  # (1,) f64
-        keep,                    # optional bool
-        keep_offsets,            # optional i64
-        int(strategy_id),        # int
-        base_seed,               # np.uint64
+        out_offsets,  # (b*p+1,)
+        regions,  # (b, 3)
+        shifts,  # (b, p)
+        geno_offset_idx,  # (b, p)
+        geno_v_idxs,  # ragged variant idxs
+        geno_offsets_2d,  # (2, n)
+        v_starts,  # (n_unique,)
+        ilens,  # (n_unique,)
+        tracks,  # (total_track,) ragged
+        track_offsets,  # (b+1,)
+        params,  # (1,) f64
+        keep,  # optional bool
+        keep_offsets,  # optional i64
+        int(strategy_id),  # int
+        base_seed,  # np.uint64
     )
     return total_out, inputs
 
@@ -580,7 +582,9 @@ def reconstruct_haplotypes_inputs(draw, annotate=False):  # noqa: ARG001
     # always within-contig; this constraint enforces that invariant.
     min_contig_len = min(contig_lens)
     v_starts_raw = draw(
-        st.lists(st.integers(0, min_contig_len - 1), min_size=n_unique, max_size=n_unique)
+        st.lists(
+            st.integers(0, min_contig_len - 1), min_size=n_unique, max_size=n_unique
+        )
     )
     v_starts = np.sort(np.array(v_starts_raw, dtype=np.int32))
     ilens = np.array(
@@ -592,7 +596,9 @@ def reconstruct_haplotypes_inputs(draw, annotate=False):  # noqa: ARG001
     alt_offsets = np.concatenate([[np.int64(0)], np.cumsum(alt_lens)]).astype(np.int64)
     total_alt = int(alt_offsets[-1])
     alt_alleles = draw(hp_arrays(np.uint8, total_alt, elements=st.integers(65, 90)))
-    ref_offsets = np.concatenate([[np.int64(0)], np.cumsum(contig_lens)]).astype(np.int64)
+    ref_offsets = np.concatenate([[np.int64(0)], np.cumsum(contig_lens)]).astype(
+        np.int64
+    )
     reference = draw(
         hp_arrays(np.uint8, int(ref_offsets[-1]), elements=st.integers(65, 90))
     )
@@ -602,7 +608,9 @@ def reconstruct_haplotypes_inputs(draw, annotate=False):  # noqa: ARG001
     ploidy = draw(st.integers(1, 2))
     n_groups = n_q * ploidy
     counts = [draw(st.integers(0, 4)) for _ in range(n_groups)]
-    geno_offsets_1d = np.concatenate([[np.int64(0)], np.cumsum(counts)]).astype(np.int64)
+    geno_offsets_1d = np.concatenate([[np.int64(0)], np.cumsum(counts)]).astype(
+        np.int64
+    )
     geno_offset_idx = np.arange(n_groups, dtype=np.int64).reshape(n_q, ploidy)
     v_idx_list: list[int] = []
     for c in counts:
@@ -651,9 +659,9 @@ def reconstruct_haplotypes_inputs(draw, annotate=False):  # noqa: ARG001
         keep_offsets = None
 
     # normalize geno_offsets to (2, n) form (the registered backends accept this)
-    geno_offsets_2d = np.stack(
-        [geno_offsets_1d[:-1], geno_offsets_1d[1:]]
-    ).astype(np.int64)
+    geno_offsets_2d = np.stack([geno_offsets_1d[:-1], geno_offsets_1d[1:]]).astype(
+        np.int64
+    )
 
     inputs = (
         out_offsets,

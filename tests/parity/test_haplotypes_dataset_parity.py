@@ -84,9 +84,7 @@ def _compare_ragged_bytes(
     )
 
 
-def _compare_ragged_int(
-    numba_out: Ragged, rust_out: Ragged, name: str
-) -> None:
+def _compare_ragged_int(numba_out: Ragged, rust_out: Ragged, name: str) -> None:
     """Assert that two Ragged integer arrays are identical."""
     n_data = np.asarray(numba_out.data)
     r_data = np.asarray(rust_out.data)

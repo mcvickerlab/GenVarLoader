@@ -40,9 +40,7 @@ def test_xorshift64_parity(x: int) -> None:
     """Rust xorshift64 must equal numba _xorshift64 for every uint64 input."""
     expected = int(_xorshift64_numba(np.uint64(x)))
     got = _xorshift64_rust(x)
-    assert got == expected, (
-        f"xorshift64({x:#x}): rust={got:#x} numba={expected:#x}"
-    )
+    assert got == expected, f"xorshift64({x:#x}): rust={got:#x} numba={expected:#x}"
 
 
 # ── hash4 ─────────────────────────────────────────────────────────────────────

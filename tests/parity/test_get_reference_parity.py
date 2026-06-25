@@ -13,5 +13,11 @@ pytestmark = pytest.mark.parity
 def test_get_reference_parity(inputs):
     regions, out_offsets, reference, ref_offsets, pad_char, parallel = inputs
     assert_kernel_parity(
-        "get_reference", regions, out_offsets, reference, ref_offsets, pad_char, parallel
+        "get_reference",
+        regions,
+        out_offsets,
+        reference,
+        ref_offsets,
+        pad_char,
+        parallel,
     )
