@@ -320,26 +320,34 @@ as the registered parity reference for the consolidation pass (Phase 5).
 #### Phase 3 throughput re-measurement after the zero-copy read-path optimization (2026-06-25)
 
 > Re-measured on branch `zero-copy-scale-safe-readpath` (format 2.0 SoA storage + zero-copy FFI guard +
-> sub-linear cache + uninit output buffers; optimization targets 1–3 above). Same harness
-> (`tests/benchmarks/test_e2e.py`, pytest-benchmark, BATCH=32, `with_len(16384)`, `NUMBA_NUM_THREADS=1`,
-> release build), same corpus `chr22_geuv.gvl` (migrated in place to 2.0 via `gvl.migrate`), Carter HPC.
-> ⚠️ **Absolute batch/s are NOT comparable to the close-out table above** — both backends measured
-> 3–5× higher here, i.e. the box was far less loaded this run. Read only the **rust ÷ numba ratio**.
+> sub-linear cache + uninit output buffers; optimization targets 1–3 above), corpus `chr22_geuv.gvl`
+> (migrated in place to 2.0 via `gvl.migrate`), `with_len(16384)`, BATCH=32, `NUMBA_NUM_THREADS=1`,
+> release build, Carter HPC (AMD EPYC 7543, linux-64).
+>
+> **De-noised harness (this measurement onward):** `_bench_indexing` now uses `benchmark.pedantic` with
+> `iterations=10, rounds=50` — each timed sample folds 10 `ds[r, s]` calls so per-batch OS-scheduler
+> jitter averages out (pedantic divides by `iterations`, so the figure stays per-batch). This collapsed
+> the tracks-only stddev from ~0.22 ms to ~0.08 ms and made the **min** (cleanest CPU-bound estimate)
+> reproducible to <1% across runs. Ratios below are **min rust ÷ min numba** (ms/batch).
+>
+> ⚠️ **Absolute batch/s are NOT comparable to the close-out table above** (different machine load).
+> Read the **ratio**. The earlier "tracks-only is noise-dominated" note was **wrong** — once de-noised,
+> the tracks-only gap is a stable, real ~0.63× regression (see target 5 below).
 
-| Mode | rust (batch/s) | numba (batch/s) | rust ÷ numba | prior ratio (close-out) |
+| Mode | rust min (ms) | numba min (ms) | rust ÷ numba | batch/s (rust / numba) |
 |---|---|---|---|---|
-| tracks-only (`intervals_and_realign_track_fused`) | 535.9 | 829.1 | 0.65× | 0.90× |
-| tracks (seqs + `read-depth`) | 274.2 | 280.2 | 0.98× | 0.87× |
-| haplotypes (`reconstruct_haplotypes_fused`) | 260.3 | 287.2 | 0.91× | 0.85× |
-| annotated (`reconstruct_annotated_haplotypes_fused`) | 168.9 | 171.6 | 0.98× | 0.65× |
+| tracks-only (`intervals_and_realign_track_fused`) | 1.70 | 1.07 | **0.63×** (rust slower) | 566 / 897 |
+| tracks (seqs + `read-depth`) | 3.40 | 3.25 | 0.95× | 275 / 286 |
+| haplotypes (`reconstruct_haplotypes_fused`) | 3.45 | 3.27 | 0.94× | 270 / 288 |
+| annotated (`reconstruct_annotated_haplotypes_fused`) | 5.34 | 9.00 | **1.68×** (rust faster) | 174 / 103 |
 
-> The zero-copy interval marshalling closed the gap on the paths that actually carried the per-batch
-> interval copy: **annotated 0.65×→0.98×**, **tracks 0.87×→0.98×**, **haplotypes 0.85×→0.91×** — rust is
-> now at/near numba parity there. The **tracks-only** path regressed in ratio (0.90×→0.65×); it is the
-> shortest test (~1.2–1.9 ms/batch) where per-batch fixed Python dispatch dominates and variance is
-> highest (rust spread 1.70–2.41 ms), so this ratio is noise-dominated rather than a real algorithmic
-> regression — the heavier paths all improved. Recorded, not gated; rayon batch parallelism is deferred
-> to Phase 5.
+> The zero-copy interval marshalling + uninit buffers made the **annotated** path (3× output data:
+> haps + var_idxs i32 + ref_coords i32) genuinely **faster than numba** (1.68×) — the close-out laggard
+> is now the clearest rust win. **tracks** and **haplotypes** sit at near-parity (0.94–0.95×). The
+> **tracks-only** path is the real remaining single-threaded deficit at **0.63×**: it is the cheapest
+> path (~1.1–1.7 ms) so the rust-side per-batch fixed cost (FFI marshalling + Python glue, no sequence
+> work to amortize it) dominates. Profiled for the next round of targets (5–7 below). Recorded, not
+> gated; rayon batch parallelism is deferred to Phase 5 — single-thread parity first.
 
 ##### Optimization targets (py-spy `--native` on the rust `ds[r,s]`, 43k samples; copy trace on one batch)
 
@@ -413,6 +421,69 @@ it is the track-interval marshalling below.
 > Target 1 is a correctness/scalability fix that should land **before** any >1M-sample run, independent
 > of the Phase 5 "one big `__getitem__` kernel" rewrite. Targets 2–4 are pure throughput and fold into
 > that rewrite. Peak RSS not re-measured (dominated by numba/llvmlite JIT ~3.2 GB, unchanged by fusion).
+
+##### Optimization targets — round 2 (post-format-2.0; profiled 2026-06-25 with `perf`, no `--native`)
+
+> **Profiling method (use this, not py-spy `--native`).** py-spy `--native` slows the deep-stack
+> haplotype paths ~10× (it stops the process to unwind native frames every sample) — it timed out at
+> even 3.5k batches. **`perf` on the Python process is the tool:** no sudo needed on Carter
+> (`perf_event_paranoid=2` permits user-space sampling of your own process; software event so no kernel
+> access), near-zero overhead (tracks-only ran at 552 vs 565 batch/s under perf), and it resolves the
+> `genvarloader.abi3.so` Rust symbols from the `.so` symbol table for a flat self-time profile:
+>
+>     NUMBA_NUM_THREADS=1 perf record -F 999 -o p.data -- .pixi/envs/dev/bin/python \
+>         tests/benchmarks/profiling/profile.py --mode <mode> --n-batches 12000
+>     perf report --stdio --no-children -i p.data        # flat self-time, Rust symbols resolved
+>
+> `profile.py` now has `--mode {haplotypes,annotated,tracks,tracks-seqs,variants,variant-windows}`. Run
+> 8–25k batches so steady-state drowns the one-time import/JIT (which py-spy/perf both sample). Flat
+> self-time pinpoints hot symbols without call graphs; for caller attribution add `debug =
+> "line-tables-only"` + frame pointers to a profiling cargo profile (Rust release has neither by
+> default), or use py-spy **without** `--native` for the Python-side inclusive tree. A separate
+> Rust-only criterion harness is only worth building if we want to micro-optimize a kernel in isolation
+> from FFI/Python — the in-process flat profile was conclusive for every target below.
+
+The de-noised benchmark (above) exposed a real **tracks-only 0.63×** deficit and showed **annotated is
+already 1.68×** (rust wins). Profiling each path the user cares about (tracks-only, haplotypes,
+variants/variant-windows) localized the remaining single-thread work:
+
+5. **⬜ tracks-only 0.63× — per-interval `ndarray` slicing in `intervals::intervals_to_tracks`
+   (rust-specific, highest value).** `perf` self-time on the tracks-only path:
+   `intervals_to_tracks` 31% + `ndarray::slice_mut` **11%** + `ndarray::do_slice` **9.5%** ≈ **20.5%
+   spent in ndarray slice machinery**, from `out.slice_mut(s![a..b]).fill(value)` in the inner loop
+   (`src/intervals.rs:66`) and the `out.fill(0.0)` prelude. numba compiles `out[a:b] = value` to a
+   direct memset and pays none of this. **Fix:** hoist `out.as_slice_mut()` (the buffer is contiguous)
+   once and write `out_slice[a..b].fill(value)` / `out_slice.fill(0.0)` on the raw `&mut [f32]`,
+   dropping the per-interval `SliceInfo` construction + bounds-check. Expected to reclaim most of the
+   20% and close the tracks-only gap; also speeds the combined tracks path (shared kernel). This is the
+   single clearest path to **rust > numba single-threaded** on the cheapest read.
+
+6. **⬜ Strand reverse-complement post-pass (`reverse_complement_ragged` / `_flat.reverse_masked`) —
+   backend-agnostic, biggest throughput sink on the seq paths.** Self-time (py-spy, no `--native`):
+   **haplotypes ~19% self / ~28% inclusive**, **variants ~15% / ~16%**, **tracks-only ~10%**. Every
+   negative-strand region triggers a Python/numpy RC pass *after* reconstruction. numba pays it too, so
+   it is not the rust↔numba gap — but it is the largest single-thread throughput lever left and it must
+   go before parallelization (else we parallelize a numpy pass). **Fix:** fold strand RC into the Rust
+   reconstruct/track kernels — emit negative-strand regions already reverse-complemented (write the
+   output buffer back-to-front with complemented bytes), deleting the `reverse_complement_ragged` step
+   in `_query.py`. This is roadmap target 4's RC half, now quantified and promoted.
+
+7. **⬜ variant-windows — Python-overhead / GC-bound, not kernel-bound.** `perf` flat self-time shows
+   no dominant Rust kernel; the cost is the interpreter + allocator: `_PyEval_EvalFrameDefault` ~8.5%,
+   GC (`gc_collect_main` + `deduce_unreachable` + `visit_reachable` + `dict_traverse`) **~14% combined**,
+   dict/attr lookups, and dynamic-symbol lookup (`do_lookup_x`/`_dl_lookup_symbol_x` ~2.3%, from the
+   per-call ctypes/cffi binding). The flat-windows assembly allocates many small objects per batch
+   (`_FlatWindow`/`FlatRagged`/scalar-field dataclasses). **Fix direction:** cut per-batch object churn
+   in `_dataset/_flat_variants.py` / `_flat_flanks.py` (reuse buffers, fewer wrapper objects, assemble
+   the token buffers in one Rust call returning flat arrays) so GC pressure drops. Lower priority than
+   5–6; revisit under the Phase 5 single-big-kernel rewrite.
+
+> **Sequencing for follow-up PRs:** (5) lands first and standalone — small, rust-only, closes the one
+> path where rust is clearly slower. (6) is the biggest absolute throughput win and unblocks honest
+> parallel numbers; it is a larger change (kernel RC + delete the numpy pass) and should be its own PR
+> with byte-identical parity gating. (7) folds into the Phase 5 rewrite. Only after (5)+(6) put rust
+> ahead single-threaded do we add rayon batch parallelism (Phase 5) — parallelizing first would just
+> scale the numpy RC pass and the ndarray slicing.
 
 ### Phase 4 — Write / update pipeline 🚧
 _PR: bigwig-streaming-write (TBD)_
