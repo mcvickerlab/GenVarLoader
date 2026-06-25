@@ -132,55 +132,19 @@ class Reference:
 
         lengths = ends - starts
         offsets = lengths_to_offsets(lengths)
-        seqs = np.empty(offsets[-1], np.uint8)
-        kernel = (
-            _fetch_impl_par if should_parallelize(int(offsets[-1])) else _fetch_impl_ser
+        regions = np.stack(
+            [
+                np.asarray(c_idxs, np.int32),
+                np.asarray(starts, np.int32),
+                np.asarray(ends, np.int32),
+            ],
+            axis=1,
         )
-        kernel(
-            c_idxs,
-            starts,
-            ends,
-            self.reference,
-            self.offsets,
-            self.pad_char,
-            seqs,
-            offsets,
+        seqs = get_reference(
+            regions, offsets, self.reference, self.offsets, int(self.pad_char)
         )
-
         seqs = Ragged.from_offsets(seqs.view("S1"), (len(contigs), None), offsets)
-
         return seqs
-
-
-@nb.njit(nogil=True, cache=True, inline="always")
-def _fetch_row(
-    i, c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
-):
-    r_s, r_e = ref_offsets[c_idxs[i]], ref_offsets[c_idxs[i] + 1]
-    o_s, o_e = out_offsets[i], out_offsets[i + 1]
-    padded_slice(reference[r_s:r_e], starts[i], ends[i], pad_char, out[o_s:o_e])
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def _fetch_impl_par(
-    c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
-):
-    for i in nb.prange(len(c_idxs)):
-        _fetch_row(
-            i, c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
-        )
-    return out
-
-
-@nb.njit(nogil=True, cache=True)
-def _fetch_impl_ser(
-    c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
-):
-    for i in range(len(c_idxs)):
-        _fetch_row(
-            i, c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
-        )
-    return out
 
 
 T = TypeVar("T", NDArray[np.bytes_], RaggedSeqs)
