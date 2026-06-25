@@ -282,10 +282,10 @@ as the registered parity reference for the consolidation pass (Phase 5).
 - [x] Task 13: Fused haplotypes `__getitem__` kernel — `reconstruct_haplotypes_fused` collapses 2 FFI crossings to 1 on the non-splice plain haps path. Dataset parity gate: byte-identical to composed numba oracle (37/37 parity tests pass). Annotated path and splice path remain on unfused dispatched kernels (documented in task-13-report.md).
 - [x] Task 14: Fused tracks `__getitem__` kernel — `intervals_and_realign_track_fused` chains `intervals_to_tracks` → `shift_and_realign_tracks_sparse` in 1 FFI crossing per track; Rust scratch buffer replaces Python `np.empty` intermediate. Dataset parity gate: byte-identical across all 5 insertion-fill strategies (39/39 parity tests pass; fixture uses max_jitter=0 per #242 contract).
 - [x] Task 15: Full-tree verification + roadmap + skill check (final-review fixes applied). Full tree green: 909 passed, 15 xfailed (11 added here + 4 pre-existing), 0 failed. Lint/format clean; cargo 85/85; abi3 wheel builds. See final-review section in task-15-report.md.
-- [ ] Migrate `_dataset/_reconstruct.py` + `_dataset/_haps.py` remaining paths.
-- [ ] Migrate `_dataset/_tracks.py` realign (6 numba) + `_dataset/_intervals.py` (4 numba).
-- [ ] Migrate `_dataset/_reference.py` (6 numba).
-- [ ] Migrate `_dataset/_insertion_fill.py` + `_dataset/_splice.py`.
+- [x] Migrate `_dataset/_reconstruct.py` + `_dataset/_haps.py` remaining paths. Annotated path now fused via `reconstruct_annotated_haplotypes_fused` (Phase 3 close-out, Task 4); splice path fused via `reconstruct_haplotypes_spliced_fused` (Phase 3 close-out, Task 5). Both byte-identical to the composed numba oracle.
+- [x] Migrate `_dataset/_tracks.py` realign (6 numba) + `_dataset/_intervals.py` (4 numba). Rust-default + fused (`intervals_and_realign_track_fused`); the #242 `intervals_to_tracks` clip fix merged from main (both backends). Remaining numba kernels are retained Phase-5-deletion parity references, not unmigrated paths.
+- [x] Migrate `_dataset/_reference.py` (6 numba). `Reference.fetch` rerouted through the dispatched rust `get_reference` (Phase 3 close-out, Task 3); the three zero-caller `_fetch_*` numba functions deleted. The live `_get_reference_*` numba kernels remain as Phase-5-deletion parity references.
+- [x] Migrate `_dataset/_insertion_fill.py` + `_dataset/_splice.py`. No numba kernels remain to migrate in `_insertion_fill.py`; splice reconstruction fused via `reconstruct_haplotypes_spliced_fused` (Phase 3 close-out, Task 5).
 
 **Gate (parity — MET):** byte-identical parity confirmed, with two documented numba-bug sub-domains excluded from the oracle via assume(False) in parity tests (consistent with the #242-family precedent):
   1. *start>=clen / #242-family*: get_dummy_dataset() (max_jitter=2) float-track tests trigger the intervals_to_tracks debug_assert panic; xfailed (strict=False) in 10 tests across test_output_bytes_per_instance.py, test_dummy_dataset_insertion_fill.py, test_flat_intervals.py, test_realign_tracks.py, test_seqs_tracks.py.
@@ -349,6 +349,20 @@ narrowed to genoray (variant IO) only.
 ---
 
 ## Notes & decisions log
+
+- 2026-06-25 (Phase 3 close-out): Merged origin/main (#242 `intervals_to_tracks` clip fix via PR #244;
+  SpliceIndexer subset double-apply fix via PR #243) into the branch — the fused tracks kernel inherits
+  the clip fix (shared `intervals::intervals_to_tracks` core). Lifted ~10 obsolete #242 xfails +
+  #242-domain `assume(False)` guards → real passing max_jitter>0 coverage. Rerouted `Reference.fetch`
+  through the dispatched rust `get_reference`; deleted the three zero-caller `_fetch_*` numba functions.
+  Fused the annotated-haps (`reconstruct_annotated_haplotypes_fused`) and spliced-haps
+  (`reconstruct_haplotypes_spliced_fused`) read paths — both byte-identical to the composed numba oracle.
+  Bumped seqpro 0.18→0.20.0 with `to_numpy(validate=False)` at guaranteed-uniform read-path sites.
+  Full tree green on both backends: rust 932 passed, 12 skipped, 5 xfailed, 0 failed; numba 932 passed,
+  12 skipped, 5 xfailed, 0 failed; cargo 88 passed. Remaining xfails (5): `test_e2e_variants`
+  (pre-existing, `_FlatVariants.to_fixed` missing); `test_haps_property` (2 tests, #199/#200
+  pre-existing); `test_indexing::test_parse_idx[missing]` (pre-existing); `test_ref_ds::test_getitem[no_regions]`
+  (pre-existing). Lint/format/typecheck clean; abi3 wheel builds (2 parity test files reformatted by ruff).
 
 - 2026-06-24 (Phase 3 — reconstruction + track realignment, parity-verified): Ported 8 kernel
   groups to Rust: `padded_slice` (pure cargo, Task 1), `get_reference` (Task 2), spliced-reference
