@@ -15,8 +15,9 @@ from pathlib import Path
 import pytest
 
 import genvarloader as gvl
+from genvarloader import _dispatch as _gvl_dispatch
 from genvarloader._dataset import _haps, _reconstruct, _tracks
-from tests.benchmarks._capture import capture_first_call
+from tests.benchmarks._capture import CapturedCall, capture_first_call
 from tests.benchmarks._indices import batch_indices
 
 DATA = Path(__file__).resolve().parent / "data"
@@ -91,14 +92,47 @@ def captured_intervals_to_tracks(bench_dataset):
 def captured_realign_tracks(bench_dataset):
     # shift_and_realign_tracks_sparse only fires on the haplotype+tracks path
     # (_reconstruct.py); the tracks-only path (_tracks.py) never realigns.
+    #
+    # Task 14 (Phase 3): the rust default path now calls
+    # intervals_and_realign_track_fused (one FFI crossing) rather than the
+    # composed numba path, so shift_and_realign_tracks_sparse is no longer a
+    # module-level attribute on _reconstruct — capture_first_call's setattr
+    # trick cannot intercept the call.  The numba composed path reaches the
+    # kernel via _dispatch_get() → _REGISTRY[...]["numba"], which holds a
+    # direct function reference that bypasses the module attribute.  We force
+    # GVL_BACKEND=numba, then patch the registry entry directly so the recorder
+    # wraps the exact callable that _dispatch_get returns (which is also
+    # _tracks.shift_and_realign_tracks_sparse — the same object the benchmark
+    # replays).
     ds = (
         bench_dataset.with_seqs("haplotypes").with_tracks("read-depth").with_len(SEQLEN)
     )
     r, s = _batch_indices(ds, BATCH)
-    return capture_first_call(
-        targets=[(_reconstruct, "shift_and_realign_tracks_sparse")],
-        thunk=lambda: ds[r, s],
-    )
+    old_backend = os.environ.get("GVL_BACKEND")
+    os.environ["GVL_BACKEND"] = "numba"
+    entry = _gvl_dispatch._REGISTRY["shift_and_realign_tracks_sparse"]
+    original = entry["numba"]
+    captured: list[CapturedCall] = []
+
+    def recorder(*args, **kwargs):
+        if not captured:
+            captured.append(CapturedCall(args=args, kwargs=dict(kwargs)))
+        return original(*args, **kwargs)
+
+    entry["numba"] = recorder
+    try:
+        ds[r, s]
+    finally:
+        entry["numba"] = original
+        if old_backend is None:
+            os.environ.pop("GVL_BACKEND", None)
+        else:
+            os.environ["GVL_BACKEND"] = old_backend
+    if not captured:
+        raise RuntimeError(
+            "shift_and_realign_tracks_sparse was never called while running the thunk"
+        )
+    return captured[0]
 
 
 # NOTE: a ``captured_germline_ccfs`` fixture was intentionally dropped. The
