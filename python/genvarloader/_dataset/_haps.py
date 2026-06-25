@@ -40,6 +40,7 @@ from ..genvarloader import (
     reconstruct_haplotypes_fused as reconstruct_haplotypes_fused,
 )
 from ._genotypes import (
+    _as_starts_stops,
     choose_exonic_variants,
     get_diffs_sparse,
     reconstruct_haplotypes_from_sparse,
@@ -785,14 +786,7 @@ class Haps(Reconstructor[_H]):
                     regions=np.ascontiguousarray(req.regions, np.int32),
                     shifts=np.ascontiguousarray(req.shifts, np.int32),
                     geno_offset_idx=np.ascontiguousarray(req.geno_offset_idx, np.int64),
-                    geno_offsets=np.ascontiguousarray(
-                        self.genotypes.offsets
-                        if self.genotypes.offsets.ndim == 2
-                        else np.stack(
-                            [self.genotypes.offsets[:-1], self.genotypes.offsets[1:]]
-                        ),
-                        np.int64,
-                    ),
+                    geno_offsets=_as_starts_stops(self.genotypes.offsets),
                     geno_v_idxs=np.ascontiguousarray(self.genotypes.data, np.int32),
                     v_starts=np.ascontiguousarray(self.variants.start, np.int32),
                     ilens=np.ascontiguousarray(self.variants.ilen, np.int32),

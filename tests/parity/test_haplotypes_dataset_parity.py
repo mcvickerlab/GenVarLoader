@@ -17,11 +17,13 @@ Two output modes are covered:
 Spliced-haplotypes note:
   The parity fixture (phased_svar_gvl) is not opened with splice_info, so the
   splice branch (_reconstruct_haplotypes splice path) is NOT exercised here.
-  However, both the spliced and unspliced paths call the same dispatched
-  reconstruct_haplotypes_from_sparse wrapper (see _haps.py:768, 803), so the
-  kernel dispatch entry point is covered by the unspliced path.  A dedicated
-  spliced fixture would require a GTF / transcript-ID column that the current
-  synthetic case does not provide; see the "Spliced coverage TODO" comment below.
+  The rust non-splice unspliced haps path now uses ``reconstruct_haplotypes_fused``
+  (a direct fused Rust entry — Task 13) rather than the composed dispatched
+  ``reconstruct_haplotypes_from_sparse`` pair.  The splice path and annotated
+  path still use the composed dispatched ``reconstruct_haplotypes_from_sparse``
+  wrapper.  A dedicated spliced fixture would require a GTF / transcript-ID
+  column that the current synthetic case does not provide; see the "Spliced
+  coverage TODO" comment below.
 
 Numba SystemError note:
   The numba parallel=True reconstruct driver is known to raise SystemError on

@@ -147,3 +147,107 @@ def test_fused_haps_dataset_parity(phased_svar_gvl, reference, monkeypatch):
 
     # --- byte-identical comparison (fused Rust vs. composed numba) ---
     _compare_ragged_bytes(out_numba, out_rust, name="haplotypes (fused)")
+
+
+# ---------------------------------------------------------------------------
+# Fixed-length parity gate — exercises the output_length >= 0 fused branch
+# ---------------------------------------------------------------------------
+
+
+def test_fused_haps_dataset_parity_fixed_length(
+    phased_svar_gvl, reference, monkeypatch
+):
+    """Fused reconstruct_haplotypes_fused (fixed-length arm) is byte-identical to
+    composed numba oracle.
+
+    Requests a fixed output_length via ``Dataset.with_len(N)``, which causes
+    ``_prepare_request`` to emit equally-spaced ``out_offsets`` so that
+    ``out_offsets[1] - out_offsets[0] == N``.  The fused entry then receives
+    ``output_length=N`` (>= 0) rather than -1 (ragged mode), exercising the
+    fixed-length prefix-sum arm of ``reconstruct_haplotypes_fused``.
+
+    The dataset regions are 20 bp wide (SEQ_LEN=20 in the synthetic fixture)
+    with max_jitter=2.  A fixed output_length of 15 is safely below the
+    minimum region length, so no jitter expansion is needed and the
+    ``with_len`` call succeeds without raising.
+
+    Spy guard and non-vacuity check mirror the ragged test above.
+    The comparison is on numpy arrays (fixed-length path returns an ndarray,
+    not a Ragged, because the query layer calls ``_Flat.to_fixed``).
+    """
+    # --- open dataset in fixed-length haplotypes mode ---
+    # SEQ_LEN=20, so output_length=15 is safely below the minimum region length.
+    FIXED_LEN = 15
+    ds = gvl.Dataset.open(phased_svar_gvl, reference=reference)
+    ds = ds.with_seqs("haplotypes").with_len(FIXED_LEN)
+
+    # --- install spy on reconstruct_haplotypes_fused ---
+    orig_fused = getattr(_haps_mod, "reconstruct_haplotypes_fused", None)
+    assert orig_fused is not None, (
+        "reconstruct_haplotypes_fused not found on _haps_mod — "
+        "ensure it is imported at module level in _haps.py"
+    )
+
+    calls: dict[str, int] = {"n": 0}
+
+    def _spy_fused(*a, **k):
+        calls["n"] += 1
+        return orig_fused(*a, **k)
+
+    monkeypatch.setattr(_haps_mod, "reconstruct_haplotypes_fused", _spy_fused)
+
+    # --- rust read (spy active, fixed-length fused path) ---
+    monkeypatch.setenv("GVL_BACKEND", "rust")
+    out_rust = ds[:, :]
+
+    rust_call_count = calls["n"]
+
+    # --- numba read (composed path — spy must NOT fire) ---
+    monkeypatch.setenv("GVL_BACKEND", "numba")
+    out_numba = ds[:, :]
+
+    # Wiring guard: numba must NOT fire the fused spy
+    assert calls["n"] == rust_call_count, (
+        f"reconstruct_haplotypes_fused spy fired during the numba read "
+        f"(count went from {rust_call_count} to {calls['n']}) — "
+        "the fused entry is being called on the numba path, which is a bug."
+    )
+
+    # Anti-vacuous guard: fused entry must have been invoked at least once
+    assert rust_call_count > 0, (
+        f"reconstruct_haplotypes_fused was NEVER invoked during the rust read "
+        f"(calls={rust_call_count}) — the backstop is vacuous. "
+        "Ensure _haps._reconstruct_haplotypes calls reconstruct_haplotypes_fused "
+        "on the non-splice path when GVL_BACKEND=rust."
+    )
+
+    # --- type + shape sanity ---
+    # Fixed-length output returns a numpy ndarray, not a Ragged.
+    assert isinstance(out_rust, np.ndarray), (
+        f"Expected ndarray from fixed-length haplotypes mode, got {type(out_rust)}"
+    )
+    assert isinstance(out_numba, np.ndarray), (
+        f"Expected ndarray from fixed-length haplotypes mode, got {type(out_numba)}"
+    )
+    # Last axis must be the fixed output length.
+    assert out_rust.shape[-1] == FIXED_LEN, (
+        f"Expected last axis == {FIXED_LEN}, got shape {out_rust.shape}"
+    )
+
+    # --- sanity: non-trivial output (contains real bases, not all 'N') ---
+    data_u8 = out_rust.view(np.uint8)
+    assert data_u8.size > 0, (
+        "Fixed-length haplotypes output has zero bytes — the comparison is vacuous."
+    )
+    n_pad = np.uint8(ord("N"))
+    assert np.any(data_u8 != n_pad), (
+        "Fixed-length haplotypes output is entirely 'N' padding — non-padding "
+        "bases are required to prove the comparison is meaningful."
+    )
+
+    # --- byte-identical comparison (fused fixed-length Rust vs. composed numba) ---
+    np.testing.assert_array_equal(
+        out_numba,
+        out_rust,
+        err_msg="fixed-length haplotype data differs across backends",
+    )
