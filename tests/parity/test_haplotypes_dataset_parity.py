@@ -236,9 +236,7 @@ def test_annotated_haplotypes_mode_dataset_parity(
         calls["n"] += 1
         return orig_fused(*a, **k)
 
-    monkeypatch.setattr(
-        _haps_mod, "reconstruct_annotated_haplotypes_fused", _spy_fused
-    )
+    monkeypatch.setattr(_haps_mod, "reconstruct_annotated_haplotypes_fused", _spy_fused)
 
     # --- rust read (spy active) ---
     monkeypatch.setenv("GVL_BACKEND", "rust")

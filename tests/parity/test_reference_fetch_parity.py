@@ -42,9 +42,7 @@ def test_reference_fetch_parity(reference, monkeypatch):
         _dispatch._REGISTRY["get_reference"] = orig
 
     assert rust_calls > 0, "rust get_reference never invoked via fetch — vacuous"
-    np.testing.assert_array_equal(
-        np.asarray(out_numba.data), np.asarray(out_rust.data)
-    )
+    np.testing.assert_array_equal(np.asarray(out_numba.data), np.asarray(out_rust.data))
     np.testing.assert_array_equal(
         np.asarray(out_numba.offsets, np.int64),
         np.asarray(out_rust.offsets, np.int64),
