@@ -293,25 +293,56 @@ as the registered parity reference for the consolidation pass (Phase 5).
 
 **Gate (throughput — DEFERRED):** recorded only (see "Branch & gate strategy").
 
-#### Phase 3 throughput measurements
+#### Phase 3 throughput measurements (re-measured at close-out, 2026-06-25)
 
-> Corpus: `chr22_geuv.gvl` (max_jitter=0, 165 regions × 5 samples, chr22 read-depth, SEQLEN=16384,
-> BATCH=32, 500 batches, NUMBA_NUM_THREADS=1), Carter HPC (AMD EPYC 7543, linux-64).
-> Release build (`maturin develop --release`). Compared to Phase 0 baseline (169.9 tracks / 123.9 haps).
+> Harness: `tests/benchmarks/test_e2e.py` via **pytest-benchmark** — steady-state timing of eager
+> `ds[r, s]` (BATCH=32 region/sample pairs, `with_len(SEQLEN=16384)`), warmup excluded, 75–190 rounds
+> per test. Corpus `chr22_geuv.gvl` (max_jitter=0, 165 regions × 5 samples, chr22 read-depth).
+> `NUMBA_NUM_THREADS=1`, release build (`maturin develop --release`), HEAD `6af2dbb`, Carter HPC
+> (AMD EPYC 7543, linux-64). OPS = batch/s = 1 / mean.
 >
-> Note: release-build Rust is still slower than numba on these read paths (~2–3× gap).
-> cProfile of the Phase 2 variants path pinned the cost on Python glue
-> (`np.ascontiguousarray` = 62% of the loop), not Rust compute — fusing per-crossing calls
-> narrows the gap but does not eliminate it until a single big `__getitem__` kernel is built
-> in the optimization pass (Phase 5). These numbers are recorded but not gated.
+> ⚠️ **Not comparable to the prior table.** The old ~37 haps / ~20 tracks figures came from a
+> *different* harness (the 500-batch `benchmark_haps.py` script, since retired here). Read the
+> **rust ÷ numba ratio** measured on this one harness at one HEAD as the real signal, not the
+> absolute jump. Single-thread; both backends' batch drivers are serial (rayon deferred to Phase 5).
 
-| Mode | rust (release, Task 15) | numba (release, Task 15) | Phase 0 baseline (numba) |
+| Mode | rust (batch/s) | numba (batch/s) | rust ÷ numba |
 |---|---|---|---|
-| haplotypes (`reconstruct_haplotypes_fused`) | ~37 batch/s | ~77 batch/s | 123.9 batch/s |
-| tracks (`intervals_and_realign_track_fused`) | ~20 batch/s | ~33 batch/s | 169.9 batch/s |
+| tracks-only (`intervals_and_realign_track_fused`) | 173.2 | 192.2 | 0.90× |
+| tracks (seqs + `read-depth`) | 124.2 | 143.2 | 0.87× |
+| haplotypes (`reconstruct_haplotypes_fused`) | 122.1 | 143.6 | 0.85× |
+| annotated (`reconstruct_annotated_haplotypes_fused`) | 74.3 | 115.0 | 0.65× |
 
-> Peak RSS not re-measured in Task 15 (dominated by numba/llvmlite JIT ~3.2 GB, same as Phase 0;
-> no significant change expected from kernel-level fusion without eliminating the JIT entirely).
+> Fusion closed most of the prior ~2× gap: rust is now within ~10–17% of numba on the haplotype/track
+> paths. The **annotated** path (new this close-out, never previously timed) is the laggard at 0.65×
+> — it materializes 3× the data (haps bytes + var_idxs i32 + ref_coords i32). Recorded, not gated.
+
+##### Phase 5 optimization targets (py-spy `--native` on the rust annotated `ds[r,s]`, 43k samples)
+
+The fusion removed the duplicate FFI crossings the Phase 2 cProfile flagged; what remains, ranked:
+
+1. **Per-batch `np.ascontiguousarray` re-marshalling of dataset-static arrays (~21% inclusive; the
+   single hottest self-time leaf is numpy's `_aligned_strided_to_contig_size4` at 20%).** The fused
+   wrappers in `_haps.py` re-coerce `self.genotypes.data`, `self.variants.start`, `self.variants.ilen`,
+   `self.variants.alt.{data,offsets}`, `self.reference.reference`, `self.reference.offsets` to
+   contiguous/typed arrays on **every** `ds[r,s]`, though these are dataset-invariant. **Fix:** hoist
+   these conversions to a one-time cache on the `Haps`/reconstructor object; only `regions`, `shifts`,
+   `geno_offset_idx`, and `keep` are genuinely per-batch. Highest-leverage, lowest-risk win.
+2. **Output-buffer zeroing (`__memset_avx2` ~7.6% with 3 buffers in the annotated path).** The fused
+   kernels `Array1::zeros(total)` for `out_data` (+ `annot_v`, `annot_pos`). The reconstruct core fully
+   writes every position for in-contract inputs, so an uninitialized allocation (`Array1::uninit` +
+   guaranteed full-write proof) would drop the memset. Requires the trailing-fill coverage argument.
+3. **Per-call allocation churn (`brk`/`_int_malloc`/`malloc` ~6% combined).** Per-batch buffer
+   allocation; a reusable thread-local scratch pool would amortize it (also helps target 2).
+4. **`reverse_complement` (~9% inclusive on the annotated/strand path).** Done as a numpy post-pass;
+   folding strand RC into the kernel for `strand == -1` regions would remove a full output-sized pass.
+   Lower priority than 1–3.
+
+> A single big `__getitem__` kernel (the Phase 5 "one crossing" goal) subsumes targets 1–3; target 1
+> alone is a cheap incremental win that does not require the full kernel rewrite.
+>
+> Peak RSS not re-measured (dominated by numba/llvmlite JIT ~3.2 GB, same as Phase 0; kernel-level
+> fusion doesn't change it without eliminating the JIT entirely).
 
 ### Phase 4 — Write / update pipeline 🚧
 _PR: bigwig-streaming-write (TBD)_
