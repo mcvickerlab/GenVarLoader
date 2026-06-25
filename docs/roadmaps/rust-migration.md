@@ -158,7 +158,8 @@ _PR: #241_
 - [x] Build the reusable differential-test harness: run-both-assert-byte-identical
       (`tests/parity/_harness.py`, return-value + in-place variants) + a hypothesis
       property generator. Per-kernel gate (`test_intervals_to_tracks_parity`, 100
-      contract-valid examples) + a MEANINGFUL dataset-level read-path backstop
+      examples incl. sub-query interval starts — #242 fixed both backends to clip
+      to the query window) + a MEANINGFUL dataset-level read-path backstop
       (`test_dataset_parity.py`: `ds[:, :]` track getitem byte-identical across
       backends, with a spy asserting the kernel is actually invoked). Commits:
       `ef4f91a`, `ad82b31`.
@@ -180,7 +181,9 @@ _PR: #241_
 
 **Checkpoint:** harness green; foundation + proof-point landed; getitem (gate)
 baseline captured on Carter. `update()` remains a deferred smoke-only row (real
-workload is a Phase 4 write-path concern, not a Phase 0 gate).
+workload is a Phase 4 write-path concern, not a Phase 0 gate). The
+`intervals_to_tracks` sub-query-start contract gap (max_jitter>0 tracks, #242)
+is resolved: both kernels clip to the query window and parity covers it.
 
 ### Phase 1 — Ragged primitives + layout (beachhead) ✅
 _PRs: seqpro [ML4GLand/SeqPro#60](https://github.com/ML4GLand/SeqPro/pull/60), GVL [mcvickerlab/GenVarLoader#240](https://github.com/mcvickerlab/GenVarLoader/pull/240)_

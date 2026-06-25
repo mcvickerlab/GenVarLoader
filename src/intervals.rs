@@ -5,8 +5,9 @@ use ndarray::{ArrayView1, ArrayViewMut1};
 /// Mirrors the numba kernel `intervals_to_tracks` exactly:
 /// - Zeroes the entire `out` buffer first.
 /// - Skips queries that have no intervals.
-/// - Replicates numpy slice semantics: end is clamped to `length`; no-op when
-///   `min(end, length) <= start`.
+/// - Replicates numpy slice semantics: start is clamped to 0 (intervals may
+///   begin before the query origin under max_jitter>0; see #242) and end is
+///   clamped to `length`; no-op when `min(end, length) <= max(start, 0)`.
 /// - Breaks out of the interval loop when `start >= length` (intervals are
 ///   sorted by start, so all subsequent intervals are also out of range).
 /// - Values are copied (f32 → f32), never reduced.
@@ -49,20 +50,20 @@ pub fn intervals_to_tracks(
             let end = itv_ends[interval] as i64 - query_start;
             let value = itv_values[interval];
 
-            if start < length {
-                // Replicate numpy slice semantics: clamp end, no-op if empty.
-                // Contract guarantees start >= 0, so no negative-index wrap.
-                debug_assert!(start >= 0, "itv.start must be >= query_start per contract");
-                let clamped_end = end.min(length);
-                if clamped_end > start {
-                    let a = out_s + start as usize;
-                    let b = out_s + clamped_end as usize;
-                    out.slice_mut(ndarray::s![a..b]).fill(value);
-                }
-            } else {
+            if start >= length {
                 // start >= length: intervals are sorted, all remaining are
                 // also out of range — break.
                 break;
+            }
+            // Clip to the query window. Intervals may start before query_start
+            // (jitter-expanded interval storage vs. the per-read query origin;
+            // see issue #242) or end past it. No negative-index wrap.
+            let s = start.max(0);
+            let e = end.min(length);
+            if e > s {
+                let a = out_s + s as usize;
+                let b = out_s + e as usize;
+                out.slice_mut(ndarray::s![a..b]).fill(value);
             }
         }
     }
@@ -167,6 +168,29 @@ mod tests {
             &[0, 5],
         );
         assert_eq!(result, vec![0.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// #242: interval starts before query_start, fully covers the window.
+    #[test]
+    fn test_interval_starts_before_query_full_cover() {
+        // query_start=100, interval [96,114) on length-10 out -> all 5.0
+        let result = run(&[0], &[100], &[96], &[114], &[5.0], &[0, 1], 10, &[0, 10]);
+        assert_eq!(result, vec![5.0; 10]);
+    }
+
+    /// #242: partial left overlap -> clipped at 0.
+    #[test]
+    fn test_interval_starts_before_query_partial() {
+        // query_start=10, interval [8,13) on length-5 out -> [5,5,5,0,0]
+        let result = run(&[0], &[10], &[8], &[13], &[5.0], &[0, 1], 5, &[0, 5]);
+        assert_eq!(result, vec![5.0, 5.0, 5.0, 0.0, 0.0]);
+    }
+
+    /// #242: interval ends at/below query_start -> no paint.
+    #[test]
+    fn test_interval_fully_left_of_query() {
+        let result = run(&[0], &[10], &[2], &[6], &[5.0], &[0, 1], 5, &[0, 5]);
+        assert_eq!(result, vec![0.0; 5]);
     }
 
     /// Multi-query disjoint: two queries with different offset_idxs/out slices
