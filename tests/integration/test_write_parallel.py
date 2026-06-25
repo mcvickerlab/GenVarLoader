@@ -60,9 +60,28 @@ def annot_bw(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _load_intervals(ds_path: Path, subdir: str, name: str) -> np.ndarray:
-    """Load intervals.npy from ``ds_path/<subdir>/<name>/intervals.npy``."""
-    return np.array(np.memmap(ds_path / subdir / name / "intervals.npy", mode="r"))
+def _load_intervals(ds_path: Path, subdir: str, name: str) -> dict[str, np.ndarray]:
+    """Load SoA interval arrays from ``ds_path/<subdir>/<name>/``.
+
+    Returns a dict with keys ``starts``, ``ends``, ``values``, ``offsets``
+    containing the raw memmapped arrays for starts.npy, ends.npy, values.npy,
+    and offsets.npy respectively.  Callers compare all four arrays so that
+    the parallel and sequential write paths are verified to be byte-identical
+    across every SoA file.
+    """
+    track_dir = ds_path / subdir / name
+    return {
+        "starts": np.array(
+            np.memmap(track_dir / "starts.npy", dtype=np.int32, mode="r")
+        ),
+        "ends": np.array(np.memmap(track_dir / "ends.npy", dtype=np.int32, mode="r")),
+        "values": np.array(
+            np.memmap(track_dir / "values.npy", dtype=np.float32, mode="r")
+        ),
+        "offsets": np.array(
+            np.memmap(track_dir / "offsets.npy", dtype=np.int64, mode="r")
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -99,18 +118,20 @@ def test_parallel_write_matches_sequential(
     vcf3 = VCF(vcf_dir / "filtered_source.vcf.gz")
     gvl.write(c_dir, BED, variants=vcf3, annot_tracks={"ann": annot_bw})
 
-    # --- compare track bytes ---
+    # --- compare track bytes (starts, ends, values, offsets) ---
     a_track = _load_intervals(a_dir, "intervals", "signal")
     b_track = _load_intervals(b_dir, "intervals", "signal")
-    assert np.array_equal(a_track, b_track), (
-        f"Track intervals differ between parallel (a) and sequential (b):\n"
-        f"a={a_track}\nb={b_track}"
-    )
+    for arr_name in ("starts", "ends", "values", "offsets"):
+        assert np.array_equal(a_track[arr_name], b_track[arr_name]), (
+            f"Track {arr_name}.npy differs between parallel (a) and sequential (b):\n"
+            f"a={a_track[arr_name]}\nb={b_track[arr_name]}"
+        )
 
-    # --- compare annot bytes ---
+    # --- compare annot bytes (starts, ends, values, offsets) ---
     a_annot = _load_intervals(a_dir, "annot_intervals", "ann")
     c_annot = _load_intervals(c_dir, "annot_intervals", "ann")
-    assert np.array_equal(a_annot, c_annot), (
-        f"Annot intervals differ between parallel (a) and sequential (c):\n"
-        f"a={a_annot}\nc={c_annot}"
-    )
+    for arr_name in ("starts", "ends", "values", "offsets"):
+        assert np.array_equal(a_annot[arr_name], c_annot[arr_name]), (
+            f"Annot {arr_name}.npy differs between parallel (a) and sequential (c):\n"
+            f"a={a_annot[arr_name]}\nc={c_annot[arr_name]}"
+        )
