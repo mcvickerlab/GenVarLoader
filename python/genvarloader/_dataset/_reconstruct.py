@@ -35,6 +35,7 @@ from ._rag_variants import RaggedVariants
 from ._ref import Ref
 from ._splice import SplicePlan
 from ._tracks import _T, Tracks, TrackType, _NewT  # noqa: F401
+from ._utils import _ffi_array
 from .._dispatch import get as _dispatch_get
 
 # Fused tracks entry (Task 14): intervals → scratch → realign, one FFI crossing.
@@ -229,8 +230,8 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                         regions=np.ascontiguousarray(regions, np.int32),
                         shifts=np.ascontiguousarray(shifts, np.int32),
                         geno_offset_idx=np.ascontiguousarray(geno_idx, np.int64),
-                        geno_v_idxs=np.ascontiguousarray(
-                            self.haps.genotypes.data, np.int32
+                        geno_v_idxs=_ffi_array(
+                            self.haps.genotypes.data, np.int32, "geno_v_idxs"
                         ),
                         geno_offsets=_geno_offsets_2d,
                         v_starts=np.ascontiguousarray(
@@ -238,15 +239,15 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                         ),
                         ilens=np.ascontiguousarray(self.haps.variants.ilen, np.int32),
                         offset_idxs=np.ascontiguousarray(o_idx, np.int64),
-                        itv_starts=np.ascontiguousarray(
-                            intervals.starts.data, np.int32
+                        itv_starts=_ffi_array(
+                            intervals.starts.data, np.int32, "itv_starts"
                         ),
-                        itv_ends=np.ascontiguousarray(intervals.ends.data, np.int32),
-                        itv_values=np.ascontiguousarray(
-                            intervals.values.data, np.float32
+                        itv_ends=_ffi_array(intervals.ends.data, np.int32, "itv_ends"),
+                        itv_values=_ffi_array(
+                            intervals.values.data, np.float32, "itv_values"
                         ),
-                        itv_offsets=np.ascontiguousarray(
-                            intervals.starts.offsets, np.int64
+                        itv_offsets=_ffi_array(
+                            intervals.starts.offsets, np.int64, "itv_offsets"
                         ),
                         track_offsets=np.ascontiguousarray(track_ofsts_per_t, np.int64),
                         params=np.ascontiguousarray(

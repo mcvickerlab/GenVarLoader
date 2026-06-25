@@ -11,6 +11,29 @@ from .._types import DTYPE
 __all__ = []
 
 
+def _ffi_array(arr: np.ndarray, dtype, name: str) -> np.ndarray:
+    """Assert a per-sample-scale FFI argument crosses zero-copy.
+
+    Returns ``arr`` unchanged iff it is C-contiguous with exactly ``dtype``;
+    otherwise raises a precise ``ValueError`` naming ``name``. This replaces a
+    silent ``np.ascontiguousarray`` that would copy the whole per-sample-scale
+    memmap (GB-scale at the >1M-sample design target). Use it ONLY for
+    sample-scale memmap args; batch-bounded arrays may keep coercing.
+    """
+    dt = np.dtype(dtype)
+    if not arr.flags["C_CONTIGUOUS"]:
+        raise ValueError(
+            f"FFI argument {name!r} must be C-contiguous to cross zero-copy; got "
+            f"a non-contiguous array (coercing would force a sample-scale copy)."
+        )
+    if arr.dtype != dt:
+        raise ValueError(
+            f"FFI argument {name!r} must have dtype {dt}; got {arr.dtype} "
+            f"(coercing would force a sample-scale cast/copy)."
+        )
+    return arr
+
+
 @nb.njit(nogil=True, cache=True)
 def padded_slice(
     arr: NDArray[DTYPE],

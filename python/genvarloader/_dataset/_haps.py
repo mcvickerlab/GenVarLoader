@@ -47,6 +47,7 @@ from ._genotypes import (
     get_diffs_sparse,
     reconstruct_haplotypes_from_sparse,
 )
+from ._utils import _ffi_array
 from ._protocol import Reconstructor
 from ._rag_variants import RaggedVariants
 from ._reference import Reference
@@ -793,7 +794,9 @@ class Haps(Reconstructor[_H]):
                     shifts=np.ascontiguousarray(req.shifts, np.int32),
                     geno_offset_idx=np.ascontiguousarray(req.geno_offset_idx, np.int64),
                     geno_offsets=_as_starts_stops(self.genotypes.offsets),
-                    geno_v_idxs=np.ascontiguousarray(self.genotypes.data, np.int32),
+                    geno_v_idxs=_ffi_array(
+                        self.genotypes.data, np.int32, "geno_v_idxs"
+                    ),
                     v_starts=np.ascontiguousarray(self.variants.start, np.int32),
                     ilens=np.ascontiguousarray(self.variants.ilen, np.int32),
                     alt_alleles=np.ascontiguousarray(
@@ -866,7 +869,7 @@ class Haps(Reconstructor[_H]):
                     splice_plan.permuted_out_offsets, np.int64
                 ),
                 geno_offsets=_as_starts_stops(self.genotypes.offsets),
-                geno_v_idxs=np.ascontiguousarray(self.genotypes.data, np.int32),
+                geno_v_idxs=_ffi_array(self.genotypes.data, np.int32, "geno_v_idxs"),
                 v_starts=np.ascontiguousarray(self.variants.start, np.int32),
                 ilens=np.ascontiguousarray(self.variants.ilen, np.int32),
                 alt_alleles=np.ascontiguousarray(
@@ -955,7 +958,9 @@ class Haps(Reconstructor[_H]):
                             req.geno_offset_idx, np.int64
                         ),
                         geno_offsets=_as_starts_stops(self.genotypes.offsets),
-                        geno_v_idxs=np.ascontiguousarray(self.genotypes.data, np.int32),
+                        geno_v_idxs=_ffi_array(
+                            self.genotypes.data, np.int32, "geno_v_idxs"
+                        ),
                         v_starts=np.ascontiguousarray(self.variants.start, np.int32),
                         ilens=np.ascontiguousarray(self.variants.ilen, np.int32),
                         alt_alleles=np.ascontiguousarray(
