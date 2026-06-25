@@ -77,5 +77,6 @@ def intervals_to_tracks(
     Rust backend for the dispatched ``intervals_to_tracks`` kernel (byte-identical
     to the numba reference in ``_dataset/_intervals.py``). Zeros ``out`` then, per
     query, copies each interval's value into its base-pair slice. Assumes intervals
-    are sorted by start, non-overlapping, and start at >= the query start.
+    are sorted by start and non-overlapping; interval starts before the query start
+    are clipped to the query window (per #242).
     """
