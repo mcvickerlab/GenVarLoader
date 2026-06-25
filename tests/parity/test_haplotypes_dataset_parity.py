@@ -19,9 +19,10 @@ Spliced-haplotypes note:
   splice branch (_reconstruct_haplotypes splice path) is NOT exercised here.
   The rust non-splice unspliced haps path now uses ``reconstruct_haplotypes_fused``
   (a direct fused Rust entry — Task 13) rather than the composed dispatched
-  ``reconstruct_haplotypes_from_sparse`` pair.  The splice path and annotated
-  path still use the composed dispatched ``reconstruct_haplotypes_from_sparse``
-  wrapper.  A dedicated spliced fixture would require a GTF / transcript-ID
+  ``reconstruct_haplotypes_from_sparse`` pair.  The annotated non-splice rust path
+  now uses ``reconstruct_annotated_haplotypes_fused`` (Task 4).  The splice paths
+  still use the composed dispatched ``reconstruct_haplotypes_from_sparse`` wrapper.
+  A dedicated spliced fixture would require a GTF / transcript-ID
   column that the current synthetic case does not provide; see the "Spliced
   coverage TODO" comment below.
 
@@ -45,7 +46,6 @@ import pytest
 import genvarloader as gvl
 import genvarloader._dataset._genotypes  # noqa: F401 — triggers register("reconstruct_haplotypes_from_sparse")
 import genvarloader._dataset._haps as _haps_mod
-import genvarloader._dispatch as _dispatch
 from genvarloader._ragged import RaggedAnnotatedHaps
 from seqpro.rag import Ragged
 
@@ -224,50 +224,46 @@ def test_annotated_haplotypes_mode_dataset_parity(
     ds = gvl.Dataset.open(phased_svar_gvl, reference=reference)
     ds = ds.with_seqs("annotated")
 
-    # --- install spy on the Rust reconstruct_haplotypes_from_sparse kernel ---
-    numba_fn, rust_fn = _dispatch.backends("reconstruct_haplotypes_from_sparse")
+    # --- install spy on the fused Rust reconstruct_annotated_haplotypes_fused entry ---
+    # After Task 4, the non-splice rust path calls reconstruct_annotated_haplotypes_fused
+    # (module-level name in _haps_mod) rather than the composed dispatched
+    # reconstruct_haplotypes_from_sparse.  The numba path goes through the
+    # composed dispatch and never calls reconstruct_annotated_haplotypes_fused.
+    orig_fused = _haps_mod.reconstruct_annotated_haplotypes_fused
     calls: dict[str, int] = {"n": 0}
 
-    def _spy_rust(*a, **k):
+    def _spy_fused(*a, **k):
         calls["n"] += 1
-        return rust_fn(*a, **k)
+        return orig_fused(*a, **k)
 
-    orig_entry = dict(_dispatch._REGISTRY["reconstruct_haplotypes_from_sparse"])
-    _dispatch.register(
-        "reconstruct_haplotypes_from_sparse",
-        numba=numba_fn,
-        rust=_spy_rust,
-        default="numba",
+    monkeypatch.setattr(
+        _haps_mod, "reconstruct_annotated_haplotypes_fused", _spy_fused
     )
 
-    try:
-        # --- rust read (spy active) ---
-        monkeypatch.setenv("GVL_BACKEND", "rust")
-        out_rust = ds[:, :]
+    # --- rust read (spy active) ---
+    monkeypatch.setenv("GVL_BACKEND", "rust")
+    out_rust = ds[:, :]
 
-        rust_call_count = calls["n"]
+    rust_call_count = calls["n"]
 
-        # --- numba read ---
-        monkeypatch.setenv("GVL_BACKEND", "numba")
-        out_numba = ds[:, :]
+    # --- numba read ---
+    monkeypatch.setenv("GVL_BACKEND", "numba")
+    out_numba = ds[:, :]
 
-        # Spy-wiring guard: numba must NOT fire the rust spy.
-        assert calls["n"] == rust_call_count, (
-            f"reconstruct_haplotypes_from_sparse spy fired during the numba read "
-            f"(count went from {rust_call_count} to {calls['n']}) — "
-            "the spy is wired to the numba path, which is a bug in the test setup."
-        )
-
-    finally:
-        _dispatch._REGISTRY["reconstruct_haplotypes_from_sparse"] = orig_entry
+    # Spy-wiring guard: numba must NOT fire the fused spy.
+    assert calls["n"] == rust_call_count, (
+        f"reconstruct_annotated_haplotypes_fused spy fired during the numba read "
+        f"(count went from {rust_call_count} to {calls['n']}) — "
+        "the fused spy is being triggered by the numba path, which is a bug."
+    )
 
     # --- anti-vacuous guard ---
     assert calls["n"] > 0, (
-        f"Rust reconstruct_haplotypes_from_sparse was NEVER invoked during the "
+        f"Rust reconstruct_annotated_haplotypes_fused was NEVER invoked during the "
         f"rust read (calls={calls['n']}) — the annotated backstop is vacuous. "
         "Inspect the annotated read path to confirm "
-        "reconstruct_haplotypes_from_sparse is still dispatched via _dispatch.get "
-        "on the Dataset.__getitem__ → _reconstruct_annotated_haplotypes code path."
+        "reconstruct_annotated_haplotypes_fused is called on the non-splice rust path "
+        "in _haps._reconstruct_annotated_haplotypes."
     )
 
     # --- type sanity ---
