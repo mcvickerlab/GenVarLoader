@@ -687,7 +687,10 @@ pub fn intervals_and_realign_track_fused(
 
 // ── DEBUG exports for PRNG parity tests (Task 7) ─────────────────────────────
 // These thin wrappers exist solely to make the Rust PRNG functions callable from
-// Python tests. They may be kept or removed after Task 8/9 review.
+// Python tests. Decision (final-review, Task 15): KEEP permanently as the direct
+// PRNG parity guard. The njit-internal xorshift64/hash4 leaves have no other
+// Python entry point, so these are the only way to assert byte-identity of the
+// PRNG core from test_prng_parity.py. Do NOT remove.
 
 /// [DEBUG] Rust xorshift64 — callable from Python for parity testing.
 /// Mirrors numba `_xorshift64` on `np.uint64`.
