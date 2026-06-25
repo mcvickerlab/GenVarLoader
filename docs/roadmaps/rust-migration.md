@@ -317,6 +317,30 @@ as the registered parity reference for the consolidation pass (Phase 5).
 > paths. The **annotated** path (new this close-out, never previously timed) is the laggard at 0.65×
 > — it materializes 3× the data (haps bytes + var_idxs i32 + ref_coords i32). Recorded, not gated.
 
+#### Phase 3 throughput re-measurement after the zero-copy read-path optimization (2026-06-25)
+
+> Re-measured on branch `zero-copy-scale-safe-readpath` (format 2.0 SoA storage + zero-copy FFI guard +
+> sub-linear cache + uninit output buffers; optimization targets 1–3 above). Same harness
+> (`tests/benchmarks/test_e2e.py`, pytest-benchmark, BATCH=32, `with_len(16384)`, `NUMBA_NUM_THREADS=1`,
+> release build), same corpus `chr22_geuv.gvl` (migrated in place to 2.0 via `gvl.migrate`), Carter HPC.
+> ⚠️ **Absolute batch/s are NOT comparable to the close-out table above** — both backends measured
+> 3–5× higher here, i.e. the box was far less loaded this run. Read only the **rust ÷ numba ratio**.
+
+| Mode | rust (batch/s) | numba (batch/s) | rust ÷ numba | prior ratio (close-out) |
+|---|---|---|---|---|
+| tracks-only (`intervals_and_realign_track_fused`) | 535.9 | 829.1 | 0.65× | 0.90× |
+| tracks (seqs + `read-depth`) | 274.2 | 280.2 | 0.98× | 0.87× |
+| haplotypes (`reconstruct_haplotypes_fused`) | 260.3 | 287.2 | 0.91× | 0.85× |
+| annotated (`reconstruct_annotated_haplotypes_fused`) | 168.9 | 171.6 | 0.98× | 0.65× |
+
+> The zero-copy interval marshalling closed the gap on the paths that actually carried the per-batch
+> interval copy: **annotated 0.65×→0.98×**, **tracks 0.87×→0.98×**, **haplotypes 0.85×→0.91×** — rust is
+> now at/near numba parity there. The **tracks-only** path regressed in ratio (0.90×→0.65×); it is the
+> shortest test (~1.2–1.9 ms/batch) where per-batch fixed Python dispatch dominates and variance is
+> highest (rust spread 1.70–2.41 ms), so this ratio is noise-dominated rather than a real algorithmic
+> regression — the heavier paths all improved. Recorded, not gated; rayon batch parallelism is deferred
+> to Phase 5.
+
 ##### Optimization targets (py-spy `--native` on the rust `ds[r,s]`, 43k samples; copy trace on one batch)
 
 The fusion removed the duplicate FFI crossings the Phase 2 cProfile flagged. A per-batch trace of
@@ -324,7 +348,16 @@ every *copying* `np.ascontiguousarray` (monkeypatched over one `ds[r, s]`) then 
 The hottest self-time leaf (`_aligned_strided_to_contig_size4`, ~20%) is **not** static-array churn —
 it is the track-interval marshalling below.
 
-1. **⚠️ SCALABILITY DEFECT (rust-only; not in numba): the fused track path copies the entire
+1. **✅ ADDRESSED (format 2.0; branch `zero-copy-scale-safe-readpath`, PR TBD).** Resolved via the chosen "struct-of-arrays on disk"
+   alternative: track intervals are now stored as three contiguous files `starts/ends/values.npy`
+   sharing `offsets.npy` (format `2.0.0`, gated open + `gvl.migrate`). The contiguous memmaps cross
+   the Python→Rust boundary zero-copy; the per-batch `np.ascontiguousarray` that materialized the
+   whole record store is replaced by `_ffi_array` (cross zero-copy or raise loudly). The genotype
+   "loaded gun" is hardened the same way (`_ffi_array` on `genotypes.data`). The scale-guard test
+   (`tests/integration/test_scale_guard.py`) locks the defect closed — it fails if any per-batch
+   `np.ascontiguousarray` materializes a sample-scale memmap on the read path. Original analysis below.
+
+   **⚠️ SCALABILITY DEFECT (rust-only; not in numba): the fused track path copies the entire
    per-sample-scale interval store into RAM every batch.** Track intervals are stored as an
    **array-of-structs** memmap — record dtype `{start: i4, end: i4, value: f4}`, itemsize 12 — so
    `intervals.{starts,ends,values}.data` are **strided field views** (stride 12, non-contiguous).
@@ -347,7 +380,13 @@ it is the track-interval marshalling below.
      memmapped per-sample-scale args; rely on contiguous-by-construction storage and let the FFI
      **reject** non-contiguous input loudly rather than silently materializing GBs.
 
-2. **Per-batch re-cast of dataset-static per-variant arrays (cacheable; sub-linear in samples).**
+2. **✅ ADDRESSED (branch `zero-copy-scale-safe-readpath`, PR TBD).** The sub-linear per-variant/reference arrays (`v_starts` int32,
+   `ilens`, `alt.{data,offsets}`, `ref`, `ref_offsets`) are now computed once and cached on the
+   `Haps` reconstructor (`_HapsFfiStatic`, `Haps.ffi_static`), dropping the per-batch
+   `int64→int32` recast of `v_starts` and the other coercions. The genotype-memmap hardening from
+   target 1 (drop `ascontiguousarray`, reject loudly via `_ffi_array`) also shipped here. Original below.
+
+   **Per-batch re-cast of dataset-static per-variant arrays (cacheable; sub-linear in samples).**
    `variants.start` is stored `int64` and re-cast to `int32` every batch (~0.59 MB × a few/batch here).
    The per-variant / reference arrays (`v_starts`, `ilens`, `alt.{data,offsets}`, `reference`,
    `ref_offsets`) grow only with the variant count (≲ a few billion germline variants even at 1M
@@ -355,7 +394,14 @@ it is the track-interval marshalling below.
    unlike the per-sample-scale memmaps in (1), which must never be materialized. `reference.reference`
    (50 MB) is already contiguous `u8`, so its `ascontiguousarray` is a verified no-op.
 
-3. **Output-buffer zeroing (`__memset_avx2` ~7.6%, 3 buffers on the annotated path).** The fused
+3. **✅ ADDRESSED (branch `zero-copy-scale-safe-readpath`, PR TBD).** The fused kernels now allocate `out_data`/`annot_v`/`annot_pos` (and
+   the tracks scratch) via `uninit_output<T>` instead of `Array1::zeros`, dropping the memset. The
+   full-write proof holds: the reconstruct core writes every in-contract position, out-of-contract
+   inputs are already excluded from the parity oracle (overshoot/double-init guards), and
+   `intervals_to_tracks` does `out.fill(0.0)` as its first step so the scratch is full-write too.
+   Isolated in its own commit for independent revert. Original below.
+
+   **Output-buffer zeroing (`__memset_avx2` ~7.6%, 3 buffers on the annotated path).** The fused
    kernels `Array1::zeros(total)` for `out_data` (+ `annot_v`, `annot_pos`). The core fully writes
    every position for in-contract inputs, so an uninitialized allocation (`Array1::uninit` + a
    full-write proof) drops the memset. Requires the trailing-fill coverage argument.
@@ -404,6 +450,19 @@ narrowed to genoray (variant IO) only.
 ---
 
 ## Notes & decisions log
+
+- 2026-06-25 (zero-copy scale-safe read path; branch `zero-copy-scale-safe-readpath`, PR TBD): Addressed
+  Phase 3 optimization targets 1–3. **Breaking on-disk change** — track-interval storage converted from
+  array-of-structs (`intervals.npy`, `INTERVAL_DTYPE` itemsize 12, strided field views) to struct-of-arrays
+  (`starts/ends/values.npy` sharing `offsets.npy`), across all four writers (Python single-chunk + chunked,
+  Rust bigwig + table) and the reader; `DATASET_FORMAT_VERSION` bumped `1.0.0`→`2.0.0`. Added an open-time
+  version gate and `gvl.migrate(path)` (streaming, idempotent, crash-safe in-place AoS→SoA; new public
+  symbol in `__all__`). Replaced the per-batch `np.ascontiguousarray` on per-sample-scale interval/genotype
+  memmaps with `_ffi_array` (cross zero-copy or raise loudly); locked closed by `tests/integration/test_scale_guard.py`.
+  Cached the sub-linear per-variant/reference arrays once on `Haps` (`_HapsFfiStatic`). Dropped the zero-init
+  of fully-overwritten fused output buffers (`uninit_output<T>`), isolated for independent revert. Byte-identical
+  parity held on both backends; throughput re-measured (rust at/near numba parity on the heavy tracks/annotated/haps
+  paths — see re-measurement block). The pre-built `chr22_geuv.gvl` bench corpus was migrated in place to 2.0.
 
 - 2026-06-25 (Phase 3 close-out): Merged origin/main (#242 `intervals_to_tracks` clip fix via PR #244;
   SpliceIndexer subset double-apply fix via PR #243) into the branch — the fused tracks kernel inherits

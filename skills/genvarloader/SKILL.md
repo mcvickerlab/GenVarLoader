@@ -163,7 +163,9 @@ Scalar fields (`start`/`ilen`/`dosage`/`info[...]`) are still filled from `Dummy
 
 **`with_settings(unphased_union=...)`** — fold the stored diploid haplotypes onto a single haploid sequence: the union of called ALTs per `(region, sample)`. When `True`, `ds.ploidy` reports `1` (instead of the stored `2`); `n_variants(...)` reports a single ploidy slot (shape `(..., 1)`), with counts equal to the naive per-haplotype sum (a hom call appears twice — once per haplotype — with no dedup). `"variants"` and `"variant-windows"` output decode at ploidy `1`; ALT occurrences are concatenated across haplotypes with no sort and no dedup. Phase is discarded — intended for haploid somatic modeling of unphased somatic calls. Requires a dataset with genotypes (raises `ValueError` on reference-only datasets). Incompatible with `"haplotypes"` / `"annotated"` output — `with_seqs("haplotypes")` or `with_seqs("annotated")` (or setting this flag while one of those is the active output kind) raises `ValueError`. See issue #222.
 
-**Format validation:** `Dataset.open` validates the dataset's `format_version` and structural integrity (file presence + sizes). An incompatible or corrupt dataset raises a `ValueError` instructing regeneration with `gvl.write`. Datasets do **not** auto-rebuild.
+**Format validation:** `Dataset.open` validates the dataset's `format_version` and structural integrity (file presence + sizes). A corrupt dataset raises a `ValueError` instructing regeneration with `gvl.write`. Datasets do **not** auto-rebuild.
+
+**Format version gate (2.0):** the current on-disk format is **2.0.0**. Opening a dataset written by genvarloader **< 2.0** (or any unversioned dataset) raises a `ValueError` whose message points at `gvl.migrate(path)`; a dataset written by a *newer* major raises a `ValueError` telling you to upgrade genvarloader. Run `gvl.migrate(path)` **once** to upgrade a pre-2.0 dataset in place — it is streaming (peak extra disk is one track's interval store), idempotent, and crash-safe (metadata is bumped only after every track's struct-of-arrays files are durable, then the old array-of-structs files are deleted). It converts the track-interval storage only; genotypes, regions, and reference are untouched.
 
 - **`var_fields: list[str] | None`** — Variant fields to include on `RaggedVariants` output. Defaults to the minimum useful set `["alt", "ilen", "start"]`. Pass additional names (e.g. `"ref"`, `"dosage"`, or any numeric info column in the source variants table) to load them eagerly at open time. Must be a subset of `Dataset.available_var_fields`. Can be reconfigured later via `Dataset.with_settings(var_fields=...)`, which lazily loads any newly-requested columns. `"dosage"` must be requested explicitly — it is *not* added automatically even when `dosages.npy` exists on disk. Beyond the built-ins (`alt`, `start`, `ref`, `ilen`, `dosage`) and per-variant INFO columns, a genoray `.svar` may register arbitrary per-call (`Number=G`) FORMAT fields in `<svar>/metadata.json["fields"]`; these appear in `Dataset.available_var_fields` and can be requested via `Dataset.open(..., var_fields=[...])` or `with_settings(var_fields=[...])`. Each surfaces in `variants`, `variant-windows`, and `flat` outputs as a per-call ragged field aligned with the genotypes. A FORMAT field shadows a same-named INFO column.
 
@@ -348,6 +350,7 @@ Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (use
 - `gvl.FlatVariantWindows` — returned by `with_seqs("variant-windows", VarWindowOpt(...))` in flat mode. `.fields`: dict of scalar `FlatRagged` (`start`/`ilen`/`dosage`/info; raw byte alleles are dropped). Per-allele token buffers — exactly one of `.ref_window` (flanked ref window, `"window"` mode) or `.ref` (bare ref allele tokens, `"allele"` mode) is set; same for `.alt_window` / `.alt`. Each non-None buffer is a two-level token buffer (internal `_FlatWindow`, not the public `FlatRagged`) of shape `(b, p, ~v, ~len)` with its own `.to_ragged()`. The container's `.shape` delegates to `fields["start"].shape`. Methods: `.to_ragged()` (returns dict of ragged parts), `.reshape(shape)`, `.squeeze(axis)`. Source: `python/genvarloader/_dataset/_flat_variants.py`.
 - `gvl.VarWindowOpt` — frozen config dataclass for `with_seqs("variant-windows", ...)`. Fields: `flank_length` (int), `token_alphabet` (bytes), `unknown_token` (int), `ref` ∈ `{"window","allele"}`, `alt` ∈ `{"window","allele"}`. `ref` and `alt` are chosen independently. `"window"` = flanked + tokenized reference read (ref) or flank·alt·flank assembly (alt); `"allele"` = bare tokenized allele with no flanks. Source: `python/genvarloader/_dataset/_flat_variants.py`.
 - `gvl.DummyVariant` — frozen dataclass used with `with_settings(dummy_variant=...)`. Fields and defaults: `start: int = -1`, `ilen: int = 0`, `dosage: float = 0.0`, `ref: bytes = b"N"`, `alt: bytes = b"N"`, `info: dict = {}`. Unspecified `info` keys default to `0` for integer columns and `NaN` for float columns. Source: `python/genvarloader/_dataset/_flat_variants.py`.
+- `gvl.migrate(path)` — upgrade a pre-2.0 (array-of-structs) dataset to format 2.0 (struct-of-arrays) **in place**. Streaming, idempotent, crash-safe; converts `intervals/<track>/` and `annot_intervals/<track>/` interval storage and bumps `metadata.json`. A no-op (with leftover-AoS cleanup) on an already-2.0 dataset. Source: `python/genvarloader/_dataset/_migrate.py`. (Distinct from `gvl.migrate_svar_link`, which upgrades legacy SVAR symlink layouts.)
 - `gvl.to_nested_tensor(ragged)` — convert to a PyTorch nested tensor (requires `torch`).
 - `gvl.get_dummy_dataset()` — small in-memory dataset for examples/tests.
 - `gvl.RefDataset` — reference-only dataset (no genotypes).
@@ -368,6 +371,8 @@ ds.gvl/
 └── annot_intervals/<track>/   # sample-independent annotation track data
 ```
 
+In **format 2.0**, each `intervals/<track>/` (and `annot_intervals/<track>/`) directory stores its intervals as **struct-of-arrays** — three contiguous files `starts.npy` (int32), `ends.npy` (int32), `values.npy` (float32), sharing one `offsets.npy` (int64) — replacing the format 1.x single `intervals.npy` record array. This lets the contiguous memmaps cross the Python→Rust boundary zero-copy. Upgrade a 1.x dataset with `gvl.migrate(path)` (see the format version gate above).
+
 See `docs/source/format.md` for the full schema, versioning, and SVAR-link details.
 
 ## Where to look next
@@ -386,12 +391,14 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 | Track re-alignment internals          | `python/genvarloader/_dataset/_tracks.py`, `_reconstruct.py` |
 | Insertion fill internals              | `python/genvarloader/_dataset/_insertion_fill.py`      |
 | SVAR back-reference / migration       | `python/genvarloader/_dataset/_svar_link.py`           |
+| Format 1.x → 2.0 migration internals  | `python/genvarloader/_dataset/_migrate.py`             |
 | Flat-buffer ragged containers         | `python/genvarloader/_flat.py`                         |
 | Flat variants + alleles types         | `python/genvarloader/_dataset/_flat_variants.py`       |
 | Flank fetch + tokenization + windows  | `python/genvarloader/_dataset/_flat_flanks.py`         |
 
 ## Common gotchas
 
+- **Pre-2.0 datasets must be migrated once before opening.** `Dataset.open` rejects any dataset written by genvarloader < 2.0 (or unversioned) with a `ValueError` pointing at `gvl.migrate(path)`. Run it once (in place, idempotent, crash-safe). A dataset written by a *newer* major raises a different `ValueError` asking you to upgrade genvarloader. Note `gvl.migrate` (format upgrade) is **not** the same as `gvl.migrate_svar_link` (SVAR symlink-layout upgrade).
 - **`gvl.update` does not hot-reload open datasets.** A `Dataset` instance that was opened before `gvl.update` ran will not see the new track; reopen the dataset to pick it up. The update itself is safe to run while readers are active — each track is published atomically so a reader never sees a half-written track.
 - **`Dataset.write_annot_tracks` has been removed.** Use `gvl.update(dataset, annot_tracks={"name": source})` instead, or pass `annot_tracks=` to `gvl.write` at creation time.
 - **`gvl.Table` is a core public API.** No extra install required. It uses a Rust COITrees overlap engine and is CI-covered. Import it as `gvl.Table` (re-exported from the top-level package).
