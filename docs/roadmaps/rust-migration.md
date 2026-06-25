@@ -268,7 +268,7 @@ coercions short-term; eliminate per-kernel boundary crossings + intermediate num
 addressed in a dedicated optimization pass before the final merge.
 
 ### Phase 3 — Reconstruction + track realignment ✅ (parity-verified; throughput recorded)
-<!-- PR: TBD -->
+_PR: [#245](https://github.com/mcvickerlab/GenVarLoader/pull/245) → rust-migration_
 
 The numba bulk and the big read-path win. Ported 8 kernel groups behind dispatch (reference,
 haplotype reconstruct singular+batch, PRNG, insertion-fill, track realignment, RLE) plus fused
