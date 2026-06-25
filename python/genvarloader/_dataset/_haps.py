@@ -12,6 +12,7 @@ Houses:
 from __future__ import annotations
 
 import json
+import os
 import warnings
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -35,6 +36,9 @@ from .._ragged import RaggedAnnotatedHaps, RaggedSeqs
 from ._flat_variants import _FlatVariantWindows, VarWindowOpt
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
+from ..genvarloader import (
+    reconstruct_haplotypes_fused as reconstruct_haplotypes_fused,
+)
 from ._genotypes import (
     choose_exonic_variants,
     get_diffs_sparse,
@@ -762,9 +766,56 @@ class Haps(Reconstructor[_H]):
         assert self.reference is not None
 
         if req.splice_plan is None:
+            shape = (*req.shifts.shape, None)
+            # --- fused path (Rust only): one FFI crossing, no Python-side np.empty ---
+            # Detect backend: default for "reconstruct_haplotypes_from_sparse" is "rust".
+            _backend = os.environ.get("GVL_BACKEND", "rust")
+            if _backend == "rust":
+                # Detect ragged vs fixed-length output from req.out_offsets.
+                # Ragged: out_lengths == hap_lengths (per-hap variable length).
+                # Fixed:  out_lengths is all the same constant value.
+                _out_per = (req.out_offsets[1:] - req.out_offsets[:-1]).reshape(
+                    req.shifts.shape
+                )
+                if np.array_equal(_out_per.astype(np.int64), req.hap_lengths.astype(np.int64)):
+                    _fused_output_length = np.int64(-1)  # ragged mode
+                else:
+                    _fused_output_length = np.int64(int(req.out_offsets[1] - req.out_offsets[0]))
+                out_data, out_offsets = reconstruct_haplotypes_fused(
+                    regions=np.ascontiguousarray(req.regions, np.int32),
+                    shifts=np.ascontiguousarray(req.shifts, np.int32),
+                    geno_offset_idx=np.ascontiguousarray(req.geno_offset_idx, np.int64),
+                    geno_offsets=np.ascontiguousarray(
+                        self.genotypes.offsets
+                        if self.genotypes.offsets.ndim == 2
+                        else np.stack(
+                            [self.genotypes.offsets[:-1], self.genotypes.offsets[1:]]
+                        ),
+                        np.int64,
+                    ),
+                    geno_v_idxs=np.ascontiguousarray(self.genotypes.data, np.int32),
+                    v_starts=np.ascontiguousarray(self.variants.start, np.int32),
+                    ilens=np.ascontiguousarray(self.variants.ilen, np.int32),
+                    alt_alleles=np.ascontiguousarray(
+                        self.variants.alt.data.view(np.uint8), np.uint8
+                    ),
+                    alt_offsets=np.ascontiguousarray(self.variants.alt.offsets, np.int64),
+                    ref_=np.ascontiguousarray(self.reference.reference, np.uint8),
+                    ref_offsets=np.ascontiguousarray(self.reference.offsets, np.int64),
+                    pad_char=np.uint8(self.reference.pad_char),
+                    output_length=_fused_output_length,
+                    keep=None if req.keep is None else np.ascontiguousarray(req.keep, np.bool_),
+                    keep_offsets=None
+                    if req.keep_offsets is None
+                    else np.ascontiguousarray(req.keep_offsets, np.int64),
+                )
+                return cast(
+                    "Ragged[np.bytes_]",
+                    _Flat.from_offsets(out_data, shape, out_offsets).view("S1"),
+                )
+            # --- composed path (numba) ---
             out_data = np.empty(req.out_offsets[-1], np.uint8)
             out_offsets = np.asarray(req.out_offsets, np.int64)
-            shape = (*req.shifts.shape, None)
             reconstruct_haplotypes_from_sparse(
                 geno_offset_idx=req.geno_offset_idx,
                 out=out_data,

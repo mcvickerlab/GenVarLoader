@@ -267,12 +267,16 @@ validates collapsing the read path toward a **single big rust `__getitem__` kern
 coercions short-term; eliminate per-kernel boundary crossings + intermediate numpy allocs long-term),
 addressed in a dedicated optimization pass before the final merge.
 
-### Phase 3 — Reconstruction + track realignment ⬜
+### Phase 3 — Reconstruction + track realignment 🚧
 _PR: —_
 
 The numba bulk and the big read-path win.
 
-- [ ] Migrate `_dataset/_reconstruct.py` + `_dataset/_haps.py`.
+- [x] Task 12: Audit `__getitem__` glue (2 FFI crossings → inventory; `docs/roadmaps/phase-3-getitem-glue-audit.md`).
+- [x] Task 13: Fused haplotypes `__getitem__` kernel — `reconstruct_haplotypes_fused` collapses 2 FFI crossings to 1 on the non-splice plain haps path. Dataset parity gate: byte-identical to composed numba oracle (37/37 parity tests pass). Annotated path and splice path remain on unfused dispatched kernels (documented in task-13-report.md). Throughput measurement deferred to Task 15.
+- [ ] Task 14: Fused tracks `__getitem__` kernel.
+- [ ] Task 15: Full-tree verification + roadmap + skill check.
+- [ ] Migrate `_dataset/_reconstruct.py` + `_dataset/_haps.py` remaining paths.
 - [ ] Migrate `_dataset/_tracks.py` realign (6 numba) + `_dataset/_intervals.py` (4 numba).
 - [ ] Migrate `_dataset/_reference.py` (6 numba).
 - [ ] Migrate `_dataset/_insertion_fill.py` + `_dataset/_splice.py`.

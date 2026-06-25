@@ -42,6 +42,7 @@ import pytest
 
 import genvarloader as gvl
 import genvarloader._dataset._genotypes  # noqa: F401 — triggers register("reconstruct_haplotypes_from_sparse")
+import genvarloader._dataset._haps as _haps_mod
 import genvarloader._dispatch as _dispatch
 from genvarloader._ragged import RaggedAnnotatedHaps
 from seqpro.rag import Ragged
@@ -112,17 +113,23 @@ def _compare_ragged_int(
 def test_haplotypes_mode_dataset_parity(phased_svar_gvl, reference, monkeypatch):
     """Flips GVL_BACKEND numba<->rust through the real haplotypes getitem path.
 
-    The spy asserts that the Rust reconstruct_haplotypes_from_sparse kernel is
-    actually invoked (non-vacuous guard).  The ragged output is compared
-    byte-identically between backends, and a non-triviality check ensures the
-    comparison is meaningful.
+    After Task 13 fusion, the rust non-splice default path calls
+    ``reconstruct_haplotypes_fused`` (a direct Rust entry, one FFI crossing)
+    instead of the composed ``get_diffs_sparse`` + ``reconstruct_haplotypes_from_sparse``
+    pair.  The spy therefore tracks ``_haps_mod.reconstruct_haplotypes_fused``
+    for the rust read.  The numba path still uses the composed dispatch
+    (``reconstruct_haplotypes_from_sparse``), so the fused spy must NOT fire
+    during the numba read — confirmed by the wiring guard.
+
+    The ragged output is compared byte-identically between backends, and a
+    non-triviality check ensures the comparison is meaningful.
 
     Spliced coverage TODO: the phased_svar_gvl fixture does not carry
     splice_info, so only the unspliced branch (_reconstruct_haplotypes without
-    splice_plan) is exercised here.  Both the spliced and unspliced branches
-    call the same dispatched reconstruct_haplotypes_from_sparse entry point
-    (see _haps.py:768, 803).  Add a spliced fixture once a GTF / transcript-ID
-    column is available in the synthetic test case.
+    splice_plan) is exercised here.  The splice path still calls the composed
+    (unfused) dispatched reconstruct_haplotypes_from_sparse entry point
+    (see _haps.py splice-plan branch).  Add a spliced fixture once a GTF /
+    transcript-ID column is available in the synthetic test case.
     """
     # --- open dataset in haplotypes mode ---
     # with_tracks is intentionally omitted: the fixture has no tracks, so
@@ -130,55 +137,45 @@ def test_haplotypes_mode_dataset_parity(phased_svar_gvl, reference, monkeypatch)
     ds = gvl.Dataset.open(phased_svar_gvl, reference=reference)
     ds = ds.with_seqs("haplotypes")
 
-    # --- install spy on the Rust reconstruct_haplotypes_from_sparse kernel ---
-    # Save the original registry entry so we can restore it unconditionally.
-    numba_fn, rust_fn = _dispatch.backends("reconstruct_haplotypes_from_sparse")
+    # --- install spy on the fused Rust reconstruct_haplotypes_fused entry ---
+    # After Task 13, the non-splice rust path calls reconstruct_haplotypes_fused
+    # (module-level name in _haps_mod) rather than the dispatched
+    # reconstruct_haplotypes_from_sparse.  The numba path goes through the
+    # composed dispatch and never calls reconstruct_haplotypes_fused.
+    orig_fused = _haps_mod.reconstruct_haplotypes_fused
     calls: dict[str, int] = {"n": 0}
 
-    def _spy_rust(*a, **k):
+    def _spy_fused(*a, **k):
         calls["n"] += 1
-        return rust_fn(*a, **k)
+        return orig_fused(*a, **k)
 
-    orig_entry = dict(_dispatch._REGISTRY["reconstruct_haplotypes_from_sparse"])
-    _dispatch.register(
-        "reconstruct_haplotypes_from_sparse",
-        numba=numba_fn,
-        rust=_spy_rust,
-        default="numba",
+    monkeypatch.setattr(_haps_mod, "reconstruct_haplotypes_fused", _spy_fused)
+
+    # --- rust read (spy active) ---
+    monkeypatch.setenv("GVL_BACKEND", "rust")
+    out_rust = ds[:, :]
+
+    # Spy-wiring guard: capture count right after rust read.
+    rust_call_count = calls["n"]
+
+    # --- numba read ---
+    monkeypatch.setenv("GVL_BACKEND", "numba")
+    out_numba = ds[:, :]
+
+    # Spy-wiring guard: numba must NOT fire the fused spy.
+    assert calls["n"] == rust_call_count, (
+        f"reconstruct_haplotypes_fused spy fired during the numba read "
+        f"(count went from {rust_call_count} to {calls['n']}) — "
+        "the fused spy is being triggered by the numba path, which is a bug."
     )
-
-    try:
-        # --- rust read (spy active) ---
-        monkeypatch.setenv("GVL_BACKEND", "rust")
-        out_rust = ds[:, :]
-
-        # Spy-wiring guard: capture count right after rust read.
-        # Must be > 0 here (proven below) and must not grow during numba read
-        # (proven after), confirming the spy is wired ONLY to the rust kernel.
-        rust_call_count = calls["n"]
-
-        # --- numba read ---
-        monkeypatch.setenv("GVL_BACKEND", "numba")
-        out_numba = ds[:, :]
-
-        # Spy-wiring guard: numba must NOT fire the rust spy.
-        assert calls["n"] == rust_call_count, (
-            f"reconstruct_haplotypes_from_sparse spy fired during the numba read "
-            f"(count went from {rust_call_count} to {calls['n']}) — "
-            "the spy is wired to the numba path, which is a bug in the test setup."
-        )
-
-    finally:
-        # Restore the original registry entry unconditionally.
-        _dispatch._REGISTRY["reconstruct_haplotypes_from_sparse"] = orig_entry
 
     # --- anti-vacuous guard ---
     assert calls["n"] > 0, (
-        f"Rust reconstruct_haplotypes_from_sparse was NEVER invoked during the "
+        f"Rust reconstruct_haplotypes_fused was NEVER invoked during the "
         f"rust read (calls={calls['n']}) — the backstop is vacuous. "
         "Inspect the haplotypes read path to confirm "
-        "reconstruct_haplotypes_from_sparse is still dispatched via _dispatch.get "
-        "on the Dataset.__getitem__ → _reconstruct_haplotypes code path."
+        "reconstruct_haplotypes_fused is called on the non-splice rust path "
+        "in _haps._reconstruct_haplotypes."
     )
 
     # --- sanity: output must be non-trivial ---

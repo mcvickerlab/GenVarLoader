@@ -1,4 +1,5 @@
 //! PyO3 boundary for migrated core kernels. The ONLY place new kernels touch Python.
+use ndarray::Array1;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray1};
 use pyo3::prelude::*;
 
@@ -347,6 +348,135 @@ pub fn reconstruct_haplotypes_from_sparse(
         annot_v_idxs.as_mut().map(|a| a.as_array_mut()),
         annot_ref_pos.as_mut().map(|a| a.as_array_mut()),
     );
+}
+
+/// Fused haplotypes __getitem__ kernel (Task 13).
+///
+/// Collapses two FFI crossings into one:
+///   1. Compute per-haplotype length diffs (``get_diffs_sparse`` logic).
+///   2. Allocate the output buffer and offset array in Rust from the computed diffs.
+///   3. Run ``reconstruct_haplotypes_from_sparse`` logic.
+///   4. Return ``(out_data: Array1<u8>, out_offsets: Array1<i64>)`` — ready for
+///      wrapping into ``_Flat.from_offsets(...).view("S1")`` with no further coercions.
+///
+/// ``output_length``:
+///   - ``-1`` → ragged mode (each haplotype gets its natural length = ref_len + diff).
+///   - ``>= 0`` → fixed-length mode (every haplotype is padded/truncated to this length).
+///
+/// ``geno_offsets`` is the normalized ``(2, n)`` int64 starts/stops array (same
+/// layout as the existing ``reconstruct_haplotypes_from_sparse`` FFI entry).
+///
+/// Annotation buffers are not supported in the fused entry (annotated path
+/// remains on the unfused dispatch wrappers — see Task 13 report for rationale).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_haplotypes_fused<'py>(
+    py: Python<'py>,
+    regions: PyReadonlyArray2<i32>,
+    shifts: PyReadonlyArray2<i32>,
+    geno_offset_idx: PyReadonlyArray2<i64>,
+    geno_offsets: PyReadonlyArray2<i64>,
+    geno_v_idxs: PyReadonlyArray1<i32>,
+    v_starts: PyReadonlyArray1<i32>,
+    ilens: PyReadonlyArray1<i32>,
+    alt_alleles: PyReadonlyArray1<u8>,
+    alt_offsets: PyReadonlyArray1<i64>,
+    ref_: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+    output_length: i64,
+    keep: Option<PyReadonlyArray1<bool>>,
+    keep_offsets: Option<PyReadonlyArray1<i64>>,
+) -> (Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>) {
+    use crate::genotypes;
+    use crate::reconstruct;
+
+    let go = geno_offsets.as_array();
+    let go_starts = go.row(0);
+    let go_stops = go.row(1);
+
+    let regions_a = regions.as_array();
+    let shifts_a = shifts.as_array();
+    let geno_offset_idx_a = geno_offset_idx.as_array();
+    let geno_v_idxs_a = geno_v_idxs.as_array();
+    let v_starts_a = v_starts.as_array();
+    let ilens_a = ilens.as_array();
+
+    let (batch_size, ploidy) = geno_offset_idx_a.dim();
+    let n_work = batch_size * ploidy;
+
+    // Step 1: compute per-haplotype length diffs (reuses get_diffs_sparse core).
+    // Mirrors _haps.py _haplotype_ilens exactly: pass q_starts/q_ends/v_starts so
+    // partial deletions that span a query boundary are correctly clipped.
+    // q_starts = regions[:, 1], q_ends = regions[:, 2] (both already in regions_a).
+    // v_starts is the same array passed in — it is the per-variant genomic start.
+    let q_starts_owned: ndarray::Array1<i32> = regions_a.column(1).to_owned();
+    let q_ends_owned: ndarray::Array1<i32> = regions_a.column(2).to_owned();
+    let diffs = genotypes::get_diffs_sparse(
+        geno_offset_idx_a,
+        geno_v_idxs_a,
+        go_starts,
+        go_stops,
+        ilens_a,
+        keep.as_ref().map(|a| a.as_array()),
+        keep_offsets.as_ref().map(|a| a.as_array()),
+        Some(q_starts_owned.view()), // q_starts = regions[:, 1]
+        Some(q_ends_owned.view()),   // q_ends   = regions[:, 2]
+        Some(v_starts_a),            // v_starts = per-variant genomic starts
+    );
+
+    // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
+    // Mirrors the Python side: out_lengths = hap_lengths (or fixed output_length).
+    // hap_lengths = regions[:, 2] - regions[:, 1] + diffs  (end - start + diff)
+    // out_offsets shape: (n_work + 1,)
+    let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
+    {
+        let mut acc: i64 = 0;
+        out_offsets_vec[0] = 0;
+        for k in 0..n_work {
+            let query = k / ploidy;
+            let hap = k % ploidy;
+            let len: i64 = if output_length >= 0 {
+                output_length
+            } else {
+                let ref_len = (regions_a[[query, 2]] - regions_a[[query, 1]]) as i64;
+                let diff = diffs[[query, hap]] as i64;
+                (ref_len + diff).max(0)
+            };
+            acc += len;
+            out_offsets_vec[k + 1] = acc;
+        }
+    }
+
+    // Step 3: allocate the output buffer in Rust — Python never calls np.empty.
+    let total = out_offsets_vec[n_work] as usize;
+    let mut out_data: Array1<u8> = Array1::zeros(total);
+
+    // Step 4: reconstruct all haplotypes into the owned buffer (reuses batch core).
+    reconstruct::reconstruct_haplotypes_from_sparse(
+        out_data.view_mut(),
+        out_offsets_vec.view(),
+        regions_a,
+        shifts_a,
+        geno_offset_idx_a,
+        go_starts,
+        go_stops,
+        geno_v_idxs_a,
+        v_starts_a,
+        ilens_a,
+        alt_alleles.as_array(),
+        alt_offsets.as_array(),
+        ref_.as_array(),
+        ref_offsets.as_array(),
+        pad_char,
+        keep.as_ref().map(|k| k.as_array()),
+        keep_offsets.as_ref().map(|ko| ko.as_array()),
+        None, // annot_v_idxs — not supported in fused plain path
+        None, // annot_ref_pos — not supported in fused plain path
+    );
+
+    // Step 5: return owned arrays — Python wraps them with no further coercions.
+    (out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py))
 }
 
 /// Fetch padded reference rows for each region into one flat buffer.
