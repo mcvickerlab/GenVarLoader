@@ -531,7 +531,7 @@ class RefDataset(Generic[T]):
         elif self.output_length == "variable":
             out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))
         else:
-            out = ref.to_numpy()
+            out = ref.to_numpy(validate=False)
 
         if squeeze:
             out = out.squeeze(0)
