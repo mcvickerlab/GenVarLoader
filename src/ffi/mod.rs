@@ -479,6 +479,83 @@ pub fn reconstruct_haplotypes_fused<'py>(
     (out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py))
 }
 
+/// Fused spliced-haplotype reconstruction: reconstruct in one FFI crossing using
+/// precomputed output offsets.
+///
+/// Unlike ``reconstruct_haplotypes_fused``, the Python splice path already computes
+/// the permutation and output offsets (``splice_plan.permuted_out_offsets``), so
+/// this kernel takes ``out_offsets`` as a direct parameter and skips Steps 1-2
+/// (no ``get_diffs_sparse``, no offset loop). This makes it simpler than the
+/// plain fused entry.
+///
+/// ``permuted_regions`` is shape ``(n_perm, 3)`` where each row is
+/// ``[contig_idx, start, end]`` after splice permutation.
+/// ``out_offsets`` is ``permuted_out_offsets`` from the Python splice plan
+/// (length ``n_perm + 1``).
+/// ``geno_offsets`` is the normalized ``(2, n)`` int64 starts/stops array.
+///
+/// Returns ``out_data`` (u8 flat buffer). The caller already holds ``out_offsets``
+/// so it is NOT returned — Python wraps with ``_Flat.from_offsets``.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_haplotypes_spliced_fused<'py>(
+    py: Python<'py>,
+    permuted_regions: PyReadonlyArray2<i32>,
+    flat_shifts: PyReadonlyArray2<i32>,
+    flat_geno_offset_idx: PyReadonlyArray2<i64>,
+    out_offsets: PyReadonlyArray1<i64>,
+    geno_offsets: PyReadonlyArray2<i64>,
+    geno_v_idxs: PyReadonlyArray1<i32>,
+    v_starts: PyReadonlyArray1<i32>,
+    ilens: PyReadonlyArray1<i32>,
+    alt_alleles: PyReadonlyArray1<u8>,
+    alt_offsets: PyReadonlyArray1<i64>,
+    ref_: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+    keep: Option<PyReadonlyArray1<bool>>,
+    keep_offsets: Option<PyReadonlyArray1<i64>>,
+) -> Bound<'py, PyArray1<u8>> {
+    use crate::reconstruct;
+
+    let go = geno_offsets.as_array();
+    let go_starts = go.row(0);
+    let go_stops = go.row(1);
+
+    // out_offsets are precomputed by the Python splice plan — use them directly.
+    let out_offsets_a = out_offsets.as_array();
+    let total = out_offsets_a[out_offsets_a.len() - 1] as usize;
+
+    // Allocate output buffer.
+    let mut out_data: Array1<u8> = Array1::zeros(total);
+
+    // Reconstruct all haplotypes into the owned buffer (reuses batch core).
+    reconstruct::reconstruct_haplotypes_from_sparse(
+        out_data.view_mut(),
+        out_offsets_a,
+        permuted_regions.as_array(),
+        flat_shifts.as_array(),
+        flat_geno_offset_idx.as_array(),
+        go_starts,
+        go_stops,
+        geno_v_idxs.as_array(),
+        v_starts.as_array(),
+        ilens.as_array(),
+        alt_alleles.as_array(),
+        alt_offsets.as_array(),
+        ref_.as_array(),
+        ref_offsets.as_array(),
+        pad_char,
+        keep.as_ref().map(|k| k.as_array()),
+        keep_offsets.as_ref().map(|ko| ko.as_array()),
+        None, // annot_v_idxs — not used in splice path
+        None, // annot_ref_pos — not used in splice path
+    );
+
+    // Return out_data only — Python already holds out_offsets (no round-trip).
+    out_data.into_pyarray(py)
+}
+
 /// Fused annotated-haplotype reconstruction: diffs + offsets + reconstruct in one FFI crossing.
 ///
 /// Identical to ``reconstruct_haplotypes_fused`` but ALSO fills per-nucleotide
