@@ -54,3 +54,27 @@ def test_annotated_no_memmap_copy(track_dataset_path, reference, _no_memmap_copi
     )
     _ = ds[0, 0]
     assert _no_memmap_copies == [], f"sample-scale memmap copies: {_no_memmap_copies}"
+
+
+def test_haps_and_tracks_no_memmap_copy(
+    track_dataset_path, reference, _no_memmap_copies
+):
+    ds = (
+        gvl.Dataset.open(track_dataset_path, reference=reference)
+        .with_seqs("haplotypes")
+        .with_tracks("cov")
+    )
+    _ = ds[0, 0]
+    assert _no_memmap_copies == [], f"sample-scale memmap copies: {_no_memmap_copies}"
+
+
+def test_annotated_and_tracks_no_memmap_copy(
+    track_dataset_path, reference, _no_memmap_copies
+):
+    ds = (
+        gvl.Dataset.open(track_dataset_path, reference=reference)
+        .with_seqs("annotated")
+        .with_tracks("cov")
+    )
+    _ = ds[0, 0]
+    assert _no_memmap_copies == [], f"sample-scale memmap copies: {_no_memmap_copies}"
