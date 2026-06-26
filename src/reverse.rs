@@ -51,8 +51,16 @@ pub fn rc_flat_rows_inplace(
         let e = offsets[i + 1] as usize;
         let row = &mut data[s..e];
         row.reverse();
+        // Replace LUT gather (COMP[*b]) with branchless arithmetic so LLVM can
+        // auto-vectorize. Logic: A↔T uses XOR 21 (0x15), C↔G uses XOR 4 (0x04);
+        // identity for all other bytes.  Produces byte-identical output to COMP.
+        // wrapping_neg() converts bool-as-0/1 to SIMD-style 0x00/0xFF mask so
+        // the AND idiom is recognized by the loop vectorizer.
         for b in row.iter_mut() {
-            *b = COMP[*b as usize];
+            let v = *b;
+            let at = (((v == b'A') | (v == b'T')) as u8).wrapping_neg(); // 0xFF if A/T
+            let cg = (((v == b'C') | (v == b'G')) as u8).wrapping_neg(); // 0xFF if C/G
+            *b = v ^ (at & 21) ^ (cg & 4);
         }
     }
 }
@@ -120,5 +128,18 @@ mod tests {
         let offsets = array![0i64, 0, 2]; // first row empty
         rc_flat_rows_inplace(&mut data, offsets.view(), array![true, false].view());
         assert_eq!(&data, b"AC");
+    }
+
+    /// Exhaustive regression: arithmetic complement must match COMP table for every
+    /// possible byte value 0..=255.  A 1-element row reverses to itself, so this
+    /// isolates the complement pass from the reverse pass.
+    #[test]
+    fn arith_complement_matches_comp_for_all_256_bytes() {
+        for b in 0u8..=255 {
+            let mut row = [b];
+            let off = array![0i64, 1];
+            rc_flat_rows_inplace(&mut row, off.view(), array![true].view());
+            assert_eq!(row[0], COMP[b as usize], "byte {b}");
+        }
     }
 }
