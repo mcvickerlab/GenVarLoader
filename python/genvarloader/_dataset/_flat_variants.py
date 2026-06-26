@@ -28,6 +28,7 @@ from ..genvarloader import fill_empty_seq_u8 as _fill_empty_seq_u8_rust
 from ..genvarloader import gather_alleles as _gather_alleles_rust
 from ..genvarloader import gather_rows_f32 as _gather_rows_f32_rust
 from ..genvarloader import gather_rows_i32 as _gather_rows_i32_rust
+from ..genvarloader import rc_alleles as _rc_alleles_rust_kernel
 from ._genotypes import _as_starts_stops
 
 if TYPE_CHECKING:
@@ -932,6 +933,48 @@ register(
     "assemble_variant_buffers",
     numba=_assemble_variant_buffers_numba_entry,
     rust=_assemble_variant_buffers_rust,
+    default="rust",
+)
+
+
+def _rc_alleles_reference(byte_data, seq_offsets, var_offsets, to_rc_row):
+    """Reference backend: seqpro reverse_complement_masked on a flat allele view.
+
+    `to_rc_row` is the per-(b*p) row mask (already ploidy-broadcast); expand to
+    per-allele via `var_offsets`, then RC each masked allele in place. Mutates
+    `byte_data` in place; byte-identical to `rc_alleles_inplace`.
+    """
+    from seqpro.rag import Ragged
+
+    from .._ragged import reverse_complement_masked
+
+    seq_off = np.ascontiguousarray(seq_offsets, np.int64)
+    var_off = np.ascontiguousarray(var_offsets, np.int64)
+    row_mask = np.ascontiguousarray(to_rc_row, np.bool_).reshape(-1)
+    if not row_mask.any():
+        return
+    per_allele = np.repeat(row_mask, np.diff(var_off))
+    n_alleles = len(seq_off) - 1
+    view = Ragged.from_offsets(byte_data.view("S1"), (n_alleles, None), seq_off)
+    reverse_complement_masked(view, per_allele)  # mutates byte_data in place
+
+
+def _rc_alleles_rust(byte_data, seq_offsets, var_offsets, to_rc_row):
+    assert byte_data.dtype == np.uint8 and byte_data.flags.c_contiguous, (
+        "rc_alleles requires a contiguous uint8 byte_data for in-place RC"
+    )
+    _rc_alleles_rust_kernel(
+        byte_data,
+        np.ascontiguousarray(seq_offsets, np.int64),
+        np.ascontiguousarray(var_offsets, np.int64),
+        np.ascontiguousarray(to_rc_row, np.bool_),
+    )
+
+
+register(
+    "rc_alleles",
+    numba=_rc_alleles_reference,
+    rust=_rc_alleles_rust,
     default="rust",
 )
 
