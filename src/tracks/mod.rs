@@ -454,13 +454,25 @@ pub fn shift_and_realign_tracks_sparse(
     let n_regions = geno_offset_idx.nrows();
     let ploidy = geno_offset_idx.ncols();
 
+    // Hoist contiguous raw slices once to eliminate ndarray::do_slice call overhead
+    // in the inner (query, hap) loop.  The prior interval-kernel fix (src/intervals.rs)
+    // applied the same pattern: out.as_slice_mut().unwrap() once, then index [a..b]
+    // directly.  Here we do the same for out, tracks, and keep.
+    // geno_v_idxs already uses .as_slice().unwrap() (inner fn line 240) — same contract.
+    let out_flat = out.as_slice_mut().expect("out must be contiguous (C-order)");
+    let tracks_flat = tracks.as_slice().expect("tracks must be contiguous (C-order)");
+    // Hoist keep flat option once (avoids repeated .as_slice() per hap).
+    let keep_flat: Option<&[bool]> =
+        keep.as_ref().map(|k| k.as_slice().expect("keep must be contiguous (C-order)"));
+
     // Numba: for query in nb.prange(n_regions):  (serial equivalent)
     for query in 0..n_regions {
         // Numba: t_s, t_e = track_offsets[query], track_offsets[query + 1]
         let t_s = track_offsets[query] as usize;
         let t_e = track_offsets[query + 1] as usize;
         // Numba: q_track = tracks[t_s:t_e]
-        let q_track = tracks.slice(ndarray::s![t_s..t_e]);
+        // ArrayView1::from(&slice) is cheaper than tracks.slice(s![..]) — no do_slice call.
+        let q_track = ndarray::ArrayView1::from(&tracks_flat[t_s..t_e]);
 
         // Numba: q_start = regions[query, 1]
         let q_start = regions[[query, 1]] as i64;
@@ -475,12 +487,14 @@ pub fn shift_and_realign_tracks_sparse(
 
             // Numba: if keep is not None and keep_offsets is not None:
             //            qh_keep = keep[keep_offsets[k_idx]:keep_offsets[k_idx+1]]
+            // ArrayView1::from(&slice[..]) avoids the do_slice call that
+            // k.slice(s![ks..ke]) would generate.
             let qh_keep: Option<ndarray::ArrayView1<bool>> =
-                match (&keep, &keep_offsets) {
-                    (Some(k), Some(ko)) => {
+                match (&keep_flat, &keep_offsets) {
+                    (Some(k_flat), Some(ko)) => {
                         let ks = ko[k_idx] as usize;
                         let ke = ko[k_idx + 1] as usize;
-                        Some(k.slice(ndarray::s![ks..ke]))
+                        Some(ndarray::ArrayView1::from(&k_flat[ks..ke]))
                     }
                     _ => None,
                 };
@@ -489,7 +503,9 @@ pub fn shift_and_realign_tracks_sparse(
             let out_s = out_offsets[k_idx] as usize;
             let out_e = out_offsets[k_idx + 1] as usize;
             // Numba: qh_out = out[out_s:out_e]; qh_shifts = shifts[query, hap]
-            let mut qh_out = out.slice_mut(ndarray::s![out_s..out_e]);
+            // ArrayViewMut1::from(&mut slice[..]) avoids the do_slice call that
+            // out.slice_mut(s![out_s..out_e]) would generate.
+            let mut qh_out = ndarray::ArrayViewMut1::from(&mut out_flat[out_s..out_e]);
             let qh_shift = shifts[[query, hap]] as i64;
 
             shift_and_realign_track_sparse(

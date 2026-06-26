@@ -7,11 +7,15 @@ use ndarray::{Array1, Array2, ArrayView1};
 /// Apply a 256-entry byte->token lookup table. `out[i] = lut[bytes[i]]`.
 /// Mirrors numpy `lut[bytes]`. `Tok` is the token dtype (u8 or i32).
 pub fn tokenize<Tok: Copy>(bytes: ArrayView1<u8>, lut: ArrayView1<Tok>) -> Array1<Tok> {
-    let n = bytes.len();
-    let mut out: Vec<Tok> = Vec::with_capacity(n);
-    for i in 0..n {
-        out.push(lut[bytes[i] as usize]);
-    }
+    let bytes_s = bytes.as_slice().expect("tokenize: bytes must be contiguous");
+    let lut_s = lut.as_slice().expect("tokenize: lut must be contiguous");
+    // One upfront assertion lets the compiler prove every `b as usize` (< 256) is
+    // in-bounds for lut_s, eliminating the per-element bounds check.
+    assert!(lut_s.len() >= 256, "tokenize: lut must have >= 256 entries");
+    // Using raw slices instead of ArrayView1 removes the per-element ndarray stride
+    // multiply (imul rax, stride) that appeared in the indexed loop. collect() uses
+    // TrustedLen and pre-allocates, removing the per-element Vec capacity check.
+    let out: Vec<Tok> = bytes_s.iter().map(|&b| lut_s[b as usize]).collect();
     Array1::from_vec(out)
 }
 
@@ -26,17 +30,21 @@ pub fn slice_flanks(
     flank_len: usize,
 ) -> (Array1<u8>, Array1<u8>) {
     let n = rw_off.len() - 1;
+    // Hoist contiguous slices upfront: eliminates the per-element ndarray stride
+    // multiply (imul) and bounds check (cmp/jae) that appeared in both inner
+    // k-loops. Using raw &[u8]/&[i64] lets LLVM see the loop as a plain copy.
+    let data_s = data.as_slice().expect("slice_flanks: data must be contiguous");
+    let rw_off_s = rw_off.as_slice().expect("slice_flanks: rw_off must be contiguous");
     let mut f5: Vec<u8> = Vec::with_capacity(n * flank_len);
     let mut f3: Vec<u8> = Vec::with_capacity(n * flank_len);
     for i in 0..n {
-        let s = rw_off[i] as usize;
-        let e = rw_off[i + 1] as usize;
-        for k in 0..flank_len {
-            f5.push(data[s + k]);
-        }
-        for k in 0..flank_len {
-            f3.push(data[e - flank_len + k]);
-        }
+        let s = rw_off_s[i] as usize;
+        let e = rw_off_s[i + 1] as usize;
+        // extend_from_slice replaces flank_len individual push calls with a
+        // single slice-bounds check + memcpy, removing the per-byte capacity
+        // check and enabling vectorisation.
+        f5.extend_from_slice(&data_s[s..s + flank_len]);
+        f3.extend_from_slice(&data_s[e - flank_len..e]);
     }
     (Array1::from_vec(f5), Array1::from_vec(f3))
 }
@@ -52,25 +60,34 @@ pub fn assemble_alt_window(
     flank_len: usize,
 ) -> (Array1<u8>, Array1<i64>) {
     let n = alt_seq_off.len() - 1;
-    let mut out_off = Array1::<i64>::zeros(n + 1);
+    // Hoist contiguous slices upfront: eliminates per-element ndarray stride
+    // multiply (imul) and bounds checks (cmp/jae) in both the offset-build loop
+    // and the assembly loop. Raw &[T] lets LLVM see the inner copies as plain
+    // memcpy, matching the slice_flanks pattern already applied to this file.
+    let f5_s = f5.as_slice().expect("assemble_alt_window: f5 must be contiguous");
+    let f3_s = f3.as_slice().expect("assemble_alt_window: f3 must be contiguous");
+    let alt_data_s =
+        alt_data.as_slice().expect("assemble_alt_window: alt_data must be contiguous");
+    let alt_seq_off_s =
+        alt_seq_off.as_slice().expect("assemble_alt_window: alt_seq_off must be contiguous");
+
+    let mut out_off: Vec<i64> = Vec::with_capacity(n + 1);
+    out_off.push(0);
     for i in 0..n {
-        let alt_len = alt_seq_off[i + 1] - alt_seq_off[i];
-        out_off[i + 1] = out_off[i] + 2 * flank_len as i64 + alt_len;
+        let alt_len = alt_seq_off_s[i + 1] - alt_seq_off_s[i];
+        out_off.push(out_off[i] + 2 * flank_len as i64 + alt_len);
     }
     let total = out_off[n] as usize;
     let mut out: Vec<u8> = Vec::with_capacity(total);
     for i in 0..n {
-        for k in 0..flank_len {
-            out.push(f5[i * flank_len + k]);
-        }
-        for k in alt_seq_off[i] as usize..alt_seq_off[i + 1] as usize {
-            out.push(alt_data[k]);
-        }
-        for k in 0..flank_len {
-            out.push(f3[i * flank_len + k]);
-        }
+        // extend_from_slice: single bounds check + memcpy, not per-byte push.
+        out.extend_from_slice(&f5_s[i * flank_len..(i + 1) * flank_len]);
+        let a = alt_seq_off_s[i] as usize;
+        let b = alt_seq_off_s[i + 1] as usize;
+        out.extend_from_slice(&alt_data_s[a..b]);
+        out.extend_from_slice(&f3_s[i * flank_len..(i + 1) * flank_len]);
     }
-    (Array1::from_vec(out), out_off)
+    (Array1::from_vec(out), Array1::from_vec(out_off))
 }
 
 /// Fetch the per-variant reference window `[start-L, end+L)` into one flat
