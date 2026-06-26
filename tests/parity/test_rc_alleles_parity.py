@@ -4,7 +4,6 @@ from hypothesis import strategies as st
 
 from genvarloader._dataset import _flat_variants  # noqa: F401  (registers rc_alleles)
 from genvarloader import _dispatch
-from genvarloader._dataset._flat_variants import _FlatAlleles
 
 _ACGTN = np.frombuffer(b"ACGTN", np.uint8)
 
@@ -18,8 +17,11 @@ def _allele_batch(draw):
     lens = [draw(st.integers(0, 5)) for _ in range(n_alleles)]
     seq_offsets = np.concatenate([[0], np.cumsum(lens)]).astype(np.int64)
     total = int(seq_offsets[-1])
-    data = _ACGTN[draw(st.lists(st.integers(0, 4), min_size=total, max_size=total))] \
-        if total else np.zeros(0, np.uint8)
+    data = (
+        _ACGTN[draw(st.lists(st.integers(0, 4), min_size=total, max_size=total))]
+        if total
+        else np.zeros(0, np.uint8)
+    )
     data = np.ascontiguousarray(data, np.uint8)
     mask = np.array([draw(st.booleans()) for _ in range(n_rows)], np.bool_)
     return data, seq_offsets, var_offsets, mask

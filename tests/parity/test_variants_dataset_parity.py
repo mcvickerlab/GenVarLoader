@@ -331,7 +331,9 @@ def test_neg_strand_variants_rc_parity_and_kernel_invoked(
 
     ds_dir = build_strand_mixed_dataset(tmp_path, synthetic_case.svar_path)
     ref = gvl.Reference.from_path(synthetic_case.ref_path, in_memory=False)
-    ds = gvl.Dataset.open(ds_dir, reference=ref).with_tracks(False).with_seqs("variants")
+    ds = (
+        gvl.Dataset.open(ds_dir, reference=ref).with_tracks(False).with_seqs("variants")
+    )
 
     # Non-vacuity: fixture must carry −strand regions (rc_neg defaults True).
     assert np.any(ds._full_regions[:, 3] == -1), "fixture has no −strand regions"
