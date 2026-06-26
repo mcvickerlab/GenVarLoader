@@ -60,25 +60,34 @@ pub fn assemble_alt_window(
     flank_len: usize,
 ) -> (Array1<u8>, Array1<i64>) {
     let n = alt_seq_off.len() - 1;
-    let mut out_off = Array1::<i64>::zeros(n + 1);
+    // Hoist contiguous slices upfront: eliminates per-element ndarray stride
+    // multiply (imul) and bounds checks (cmp/jae) in both the offset-build loop
+    // and the assembly loop. Raw &[T] lets LLVM see the inner copies as plain
+    // memcpy, matching the slice_flanks pattern already applied to this file.
+    let f5_s = f5.as_slice().expect("assemble_alt_window: f5 must be contiguous");
+    let f3_s = f3.as_slice().expect("assemble_alt_window: f3 must be contiguous");
+    let alt_data_s =
+        alt_data.as_slice().expect("assemble_alt_window: alt_data must be contiguous");
+    let alt_seq_off_s =
+        alt_seq_off.as_slice().expect("assemble_alt_window: alt_seq_off must be contiguous");
+
+    let mut out_off: Vec<i64> = Vec::with_capacity(n + 1);
+    out_off.push(0);
     for i in 0..n {
-        let alt_len = alt_seq_off[i + 1] - alt_seq_off[i];
-        out_off[i + 1] = out_off[i] + 2 * flank_len as i64 + alt_len;
+        let alt_len = alt_seq_off_s[i + 1] - alt_seq_off_s[i];
+        out_off.push(out_off[i] + 2 * flank_len as i64 + alt_len);
     }
     let total = out_off[n] as usize;
     let mut out: Vec<u8> = Vec::with_capacity(total);
     for i in 0..n {
-        for k in 0..flank_len {
-            out.push(f5[i * flank_len + k]);
-        }
-        for k in alt_seq_off[i] as usize..alt_seq_off[i + 1] as usize {
-            out.push(alt_data[k]);
-        }
-        for k in 0..flank_len {
-            out.push(f3[i * flank_len + k]);
-        }
+        // extend_from_slice: single bounds check + memcpy, not per-byte push.
+        out.extend_from_slice(&f5_s[i * flank_len..(i + 1) * flank_len]);
+        let a = alt_seq_off_s[i] as usize;
+        let b = alt_seq_off_s[i + 1] as usize;
+        out.extend_from_slice(&alt_data_s[a..b]);
+        out.extend_from_slice(&f3_s[i * flank_len..(i + 1) * flank_len]);
     }
-    (Array1::from_vec(out), out_off)
+    (Array1::from_vec(out), Array1::from_vec(out_off))
 }
 
 /// Fetch the per-variant reference window `[start-L, end+L)` into one flat
