@@ -16,6 +16,76 @@ _SESSION_CONTIGS = {"chr1": 1_300_000, "chr2": 1_300_000}
 _SESSION_SAMPLES = ["s0", "s1", "s2"]
 
 
+# Contigs and samples for the jittered-track fixture (§242 regression coverage).
+_JITTER_CONTIGS = {"chr21": 200_000, "chr22": 150_000}
+_JITTER_SAMPLES = ["s0", "s1", "s2"]
+# Constant BigWig signal value per sample: s0→1.0, s1→2.0, s2→3.0.
+# Hand-computable: for any region [start, end), sample j yields [j+1.0] * (end-start).
+_JITTER_SIGNAL_PER_SAMPLE: dict[str, float] = {
+    s: float(i + 1) for i, s in enumerate(_JITTER_SAMPLES)
+}
+
+
+def build_track_dataset_jittered(work_dir: Path, max_jitter: int) -> Path:
+    """Write a track-only GVL dataset with ``max_jitter > 0`` for #242 parity coverage.
+
+    Signal design
+    -------------
+    Each sample has a SINGLE constant BigWig interval covering the ENTIRE contig
+    (s0=1.0, s1=2.0, s2=3.0).  Any read window is fully covered, so the expected
+    track over any region [start, end) with jitter=0 is just the per-sample constant
+    repeated for ``(end - start)`` positions — trivially hand-computable.
+
+    #242 condition
+    --------------
+    ``gvl.write`` clips BigWig intervals to the jitter-EXPANDED window
+    ``[chromStart - max_jitter, chromEnd + max_jitter]``, so the stored interval
+    start is ``chromStart - max_jitter < chromStart``.  ``Dataset.open`` queries
+    at the ORIGINAL ``chromStart``.  This means ``itv.start < query_start`` — the
+    exact boundary condition that PR #244 fixed in both kernels.
+
+    Regions are placed well inside contig bounds so the expanded write window
+    ``[chromStart - max_jitter, chromEnd + max_jitter]`` never underflows (all
+    chromStarts ≥ 1000, so expanded start ≥ 996 ≥ 0 for max_jitter ≤ 1000).
+    """
+    import polars as pl
+
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    bw_dir = work_dir / "bw"
+    bw_dir.mkdir(exist_ok=True)
+
+    header = [(c, length) for c, length in _JITTER_CONTIGS.items()]
+    sample_to_bw: dict[str, str] = {}
+    for sample, value in _JITTER_SIGNAL_PER_SAMPLE.items():
+        bw_path = bw_dir / f"{sample}.bw"
+        with pyBigWig.open(str(bw_path), "w") as bw:
+            bw.addHeader(header, maxZooms=0)
+            for contig, length in _JITTER_CONTIGS.items():
+                # Single interval covering the entire contig → constant signal everywhere.
+                bw.addEntries([contig], [0], ends=[int(length)], values=[float(value)])
+        sample_to_bw[sample] = str(bw_path)
+
+    track = gvl.BigWigs("signal", sample_to_bw)
+
+    # Three regions spanning two contigs, already in natural sort order
+    # (chr21 before chr22, ascending chromStart within contig).  This keeps
+    # regions.npy and input_regions.arrow in the same row order so the
+    # r_idx_map alignment in the test is trivially [0, 1, 2].
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr21", "chr21", "chr22"],
+            "chromStart": [1000, 5000, 1000],
+            "chromEnd": [1020, 5020, 1020],
+        }
+    )
+
+    out = work_dir / "jittered_ds.gvl"
+    gvl.write(path=out, bed=bed, tracks=track, max_jitter=max_jitter, overwrite=True)
+    return out
+
+
 def build_track_dataset(work_dir: Path) -> Path:
     """Write a small track-only GVL dataset and return its path.
 
