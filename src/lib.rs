@@ -33,6 +33,8 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::fill_empty_fixed_f32, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::fill_empty_seq_u8, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::fill_empty_seq_i32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::assemble_variant_buffers_u8, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::assemble_variant_buffers_i32, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::get_reference, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_from_sparse, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_fused, m)?)?;
