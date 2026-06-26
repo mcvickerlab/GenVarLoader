@@ -51,7 +51,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Write intervals.npy + offsets.npy for a bigWig track directly to `out_dir`.
+/// Write SoA starts/ends/values.npy + offsets.npy for a bigWig track directly to `out_dir`.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn bigwig_write_track(
