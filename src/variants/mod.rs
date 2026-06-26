@@ -1,4 +1,5 @@
 //! Flat variant gather/fill cores (pure ndarray). PyO3 lives in `crate::ffi`.
+pub mod windows;
 use ndarray::{Array1, ArrayView1};
 
 /// Generic per-row gather core. `T: Copy` — no num-traits needed.

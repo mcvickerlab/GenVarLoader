@@ -218,3 +218,88 @@ def test_variants_af_filter_parity(phased_svar_gvl, reference, monkeypatch):
 
     for field_name in out_numba.fields:
         _compare_ragged_field(out_numba[field_name], out_rust[field_name], field_name)
+
+
+# ---------------------------------------------------------------------------
+# variant-windows cross-backend parity
+# ---------------------------------------------------------------------------
+
+
+def _compare_flat_window(n_win, r_win, name: str) -> None:
+    """Assert that two _FlatWindow objects are byte-identical.
+
+    Compares data tokens (dtype + values), seq_offsets, and var_offsets.
+    """
+    n_data = np.asarray(n_win.data)
+    r_data = np.asarray(r_win.data)
+    assert n_data.dtype == r_data.dtype, (
+        f"{name}.data dtype mismatch: numba={n_data.dtype}, rust={r_data.dtype}"
+    )
+    np.testing.assert_array_equal(
+        n_data, r_data, err_msg=f"{name}.data mismatch across backends"
+    )
+    n_seq = np.asarray(n_win.seq_offsets, np.int64)
+    r_seq = np.asarray(r_win.seq_offsets, np.int64)
+    np.testing.assert_array_equal(
+        n_seq, r_seq, err_msg=f"{name}.seq_offsets mismatch across backends"
+    )
+    n_var = np.asarray(n_win.var_offsets, np.int64)
+    r_var = np.asarray(r_win.var_offsets, np.int64)
+    np.testing.assert_array_equal(
+        n_var, r_var, err_msg=f"{name}.var_offsets mismatch across backends"
+    )
+
+
+def test_variant_windows_getitem_parity_across_backends(
+    phased_svar_gvl, reference, monkeypatch
+):
+    """variant-windows __getitem__ must be byte-identical across numba/rust backends.
+
+    Closes the coverage gap identified in the Task 7 review: the windows wiring
+    uses ``setattr(win, name, fw)`` for each kernel dict key, so a wrong key name
+    would silently drop the window with no crash.  This test proves the windows
+    output is non-empty AND byte-identical end-to-end on both backends.
+    """
+    from genvarloader import VarWindowOpt
+
+    ds = gvl.Dataset.open(phased_svar_gvl, reference=reference)
+    ds = (
+        ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
+        )
+    )
+
+    monkeypatch.setenv("GVL_BACKEND", "numba")
+    out_numba = ds[[0, 1], [0, 1]]
+
+    monkeypatch.setenv("GVL_BACKEND", "rust")
+    out_rust = ds[[0, 1], [0, 1]]
+
+    # Both outputs must have the same window fields present.
+    assert (out_numba.ref_window is None) == (out_rust.ref_window is None), (
+        "ref_window presence differs across backends: "
+        f"numba={out_numba.ref_window is not None}, rust={out_rust.ref_window is not None}"
+    )
+    assert (out_numba.alt_window is None) == (out_rust.alt_window is None), (
+        "alt_window presence differs across backends: "
+        f"numba={out_numba.alt_window is not None}, rust={out_rust.alt_window is not None}"
+    )
+
+    if out_numba.ref_window is not None:
+        _compare_flat_window(out_numba.ref_window, out_rust.ref_window, "ref_window")
+    if out_numba.alt_window is not None:
+        _compare_flat_window(out_numba.alt_window, out_rust.alt_window, "alt_window")
+
+    # Anti-vacuous: at least one window field must be present and non-empty.
+    present = [w for w in (out_numba.ref_window, out_numba.alt_window) if w is not None]
+    assert len(present) > 0, (
+        "No window fields present in the numba output — test is vacuous. "
+        "Check that VarWindowOpt.ref/alt defaults produce at least one window."
+    )
+    assert any(np.asarray(w.data).size > 0 for w in present), (
+        "All window data arrays are empty — no variants in the indexed batch. "
+        "The cross-backend comparison is vacuous."
+    )

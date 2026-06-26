@@ -2,6 +2,9 @@
 use ndarray::Array1;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray1};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
+
+use crate::variants::windows::{assemble_variants_mode, assemble_windows_mode, VariantBufs};
 
 use crate::genotypes;
 use crate::intervals;
@@ -317,6 +320,156 @@ pub fn fill_empty_seq_i32<'py>(
         dummy.as_array(),
     );
     (nd.into_pyarray(py), nvar.into_pyarray(py), nseq.into_pyarray(py))
+}
+
+/// Build the `{name: (data, seq_offsets)}` dict from assembled buffers.
+fn bufs_to_pydict<'py, Tok: numpy::Element + Copy>(
+    py: Python<'py>,
+    bufs: VariantBufs<Tok>,
+) -> Bound<'py, PyDict> {
+    let d = PyDict::new(py);
+    for (name, data, off) in bufs.byte_bufs {
+        d.set_item(name, (data.into_pyarray(py), off.into_pyarray(py)))
+            .unwrap();
+    }
+    for (name, data, off) in bufs.tok_bufs {
+        d.set_item(name, (data.into_pyarray(py), off.into_pyarray(py)))
+            .unwrap();
+    }
+    d
+}
+
+/// Monomorphized assembly entry. `Tok` is the token dtype; `mode` selects
+/// variants (0) vs windows (1). See module docs in `variants::windows`.
+#[allow(clippy::too_many_arguments)]
+fn assemble_variant_buffers_impl<'py, Tok: numpy::Element + Copy>(
+    py: Python<'py>,
+    mode: i64,
+    v_idxs: PyReadonlyArray1<i32>,
+    row_offsets: PyReadonlyArray1<i64>,
+    alt_global: PyReadonlyArray1<u8>,
+    alt_off_global: PyReadonlyArray1<i64>,
+    ref_global: Option<PyReadonlyArray1<u8>>,
+    ref_off_global: Option<PyReadonlyArray1<i64>>,
+    want_ref_bytes: bool,
+    want_flank: bool,
+    ref_mode: i64,
+    alt_mode: i64,
+    flank_len: i64,
+    lut: Option<PyReadonlyArray1<Tok>>,
+    v_contigs: PyReadonlyArray1<i32>,
+    v_starts: PyReadonlyArray1<i32>,
+    ilens: PyReadonlyArray1<i32>,
+    reference: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+) -> Bound<'py, PyDict> {
+    let rg = ref_global.as_ref().map(|a| a.as_array());
+    let ro = ref_off_global.as_ref().map(|a| a.as_array());
+    let lut_v = lut.as_ref().map(|a| a.as_array());
+    let bufs = if mode == 0 {
+        assemble_variants_mode::<Tok>(
+            v_idxs.as_array(),
+            row_offsets.as_array(),
+            alt_global.as_array(),
+            alt_off_global.as_array(),
+            if want_ref_bytes { rg } else { None },
+            if want_ref_bytes { ro } else { None },
+            want_flank,
+            flank_len,
+            lut_v,
+            v_contigs.as_array(),
+            v_starts.as_array(),
+            ilens.as_array(),
+            reference.as_array(),
+            ref_offsets.as_array(),
+            pad_char,
+        )
+    } else {
+        assemble_windows_mode::<Tok>(
+            v_idxs.as_array(),
+            row_offsets.as_array(),
+            ref_mode,
+            alt_mode,
+            alt_global.as_array(),
+            alt_off_global.as_array(),
+            rg,
+            ro,
+            flank_len,
+            lut_v.expect("windows mode requires a token LUT"),
+            v_contigs.as_array(),
+            v_starts.as_array(),
+            ilens.as_array(),
+            reference.as_array(),
+            ref_offsets.as_array(),
+            pad_char,
+        )
+    };
+    bufs_to_pydict(py, bufs)
+}
+
+/// u8-token assembly (token_dtype == uint8). See `assemble_variant_buffers_impl`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_variant_buffers_u8<'py>(
+    py: Python<'py>,
+    mode: i64,
+    v_idxs: PyReadonlyArray1<i32>,
+    row_offsets: PyReadonlyArray1<i64>,
+    alt_global: PyReadonlyArray1<u8>,
+    alt_off_global: PyReadonlyArray1<i64>,
+    ref_global: Option<PyReadonlyArray1<u8>>,
+    ref_off_global: Option<PyReadonlyArray1<i64>>,
+    want_ref_bytes: bool,
+    want_flank: bool,
+    ref_mode: i64,
+    alt_mode: i64,
+    flank_len: i64,
+    lut: Option<PyReadonlyArray1<u8>>,
+    v_contigs: PyReadonlyArray1<i32>,
+    v_starts: PyReadonlyArray1<i32>,
+    ilens: PyReadonlyArray1<i32>,
+    reference: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+) -> Bound<'py, PyDict> {
+    assemble_variant_buffers_impl::<u8>(
+        py, mode, v_idxs, row_offsets, alt_global, alt_off_global, ref_global,
+        ref_off_global, want_ref_bytes, want_flank, ref_mode, alt_mode, flank_len,
+        lut, v_contigs, v_starts, ilens, reference, ref_offsets, pad_char,
+    )
+}
+
+/// i32-token assembly (token_dtype == int32). See `assemble_variant_buffers_impl`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_variant_buffers_i32<'py>(
+    py: Python<'py>,
+    mode: i64,
+    v_idxs: PyReadonlyArray1<i32>,
+    row_offsets: PyReadonlyArray1<i64>,
+    alt_global: PyReadonlyArray1<u8>,
+    alt_off_global: PyReadonlyArray1<i64>,
+    ref_global: Option<PyReadonlyArray1<u8>>,
+    ref_off_global: Option<PyReadonlyArray1<i64>>,
+    want_ref_bytes: bool,
+    want_flank: bool,
+    ref_mode: i64,
+    alt_mode: i64,
+    flank_len: i64,
+    lut: Option<PyReadonlyArray1<i32>>,
+    v_contigs: PyReadonlyArray1<i32>,
+    v_starts: PyReadonlyArray1<i32>,
+    ilens: PyReadonlyArray1<i32>,
+    reference: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+) -> Bound<'py, PyDict> {
+    assemble_variant_buffers_impl::<i32>(
+        py, mode, v_idxs, row_offsets, alt_global, alt_off_global, ref_global,
+        ref_off_global, want_ref_bytes, want_flank, ref_mode, alt_mode, flank_len,
+        lut, v_contigs, v_starts, ilens, reference, ref_offsets, pad_char,
+    )
 }
 
 /// Reconstruct haplotypes for a batch of (query, hap) pairs in place (writes `out`).
