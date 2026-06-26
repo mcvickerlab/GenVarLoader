@@ -102,9 +102,9 @@ py310–313 × linux/macOS as the Rust surface grows.
 
 | Metric | Corpus | Baseline | Captured |
 |---|---|---|---|
-| `gvl.write()` wall-clock | 1kg chr21/chr22 (100 regions), macOS M-series | 1.143 s | ✅ |
-| `gvl.write()` peak RSS | 1kg chr21/chr22 (100 regions), macOS M-series | 3.593 GB | ✅ |
-| `gvl.update()` wall-clock | 1kg chr21/chr22 (vcfixture tier) | _TBD_ (smoke only: 0.022 s for a 60-row synthetic annot track — not a real workload) | ⬜ |
+| `gvl.write()` wall-clock | 1kg chr21/chr22 (100 regions), macOS M-series | 1.143 s (**superseded for comparison** — macOS/1kg-VCF; see Phase 4 Carter re-baseline) | ✅ |
+| `gvl.write()` peak RSS | 1kg chr21/chr22 (100 regions), macOS M-series | 3.593 GB (**superseded for comparison** — macOS/1kg-VCF; see Phase 4 Carter re-baseline) | ✅ |
+| `gvl.update()` wall-clock | 1kg chr21/chr22 (vcfixture tier) | ~~_TBD_ (smoke only: 0.022 s for a 60-row synthetic annot track — not a real workload)~~ **Phase 4 re-baseline (Carter, chr22_geuv): 0.081 s** (peak RSS 3.519 GB whole-process — dominated by base-dataset write; see Phase 4 gate footnote ¹) | ✅ |
 | `Dataset.__getitem__` throughput (tracks mode = `intervals_to_tracks` read path) | `chr22_geuv` realistic bench (165 regions × 5 samples, chr22, read-depth; `SEQLEN=16384`, `BATCH=32`, 2000 batches, `NUMBA_NUM_THREADS=1`), Carter HPC (AMD EPYC 7543, linux-64) | **169.9 batch/s** (5.886 ms/batch, ~5.4k item/s); peak RSS **3.531 GB** | ✅ |
 
 > getitem baseline captured on Carter (2026-06-23, gvl 0.35.0, `GVL_BACKEND` unset →
@@ -665,17 +665,41 @@ variants/variant-windows) localized the remaining single-thread work:
 > (negligible self-time). The ffi fused trampoline (8.97% aggregate) was not a direct target.
 > **Rayon batch parallelism (Phase 5) is the next lever.**
 
-### Phase 4 — Write / update pipeline 🚧
-_PR: bigwig-streaming-write (TBD)_
+### Phase 4 — Write / update pipeline ✅
+_PR: [#253](https://github.com/mcvickerlab/GenVarLoader/pull/253)_
 
-- [ ] Migrate `_dataset/_write.py`: variant normalization (left-align, bi-allelic,
-      atomize), genotype storage, interval extraction + realign.
-  - [x] bigWig interval extraction for the write path — single-pass streaming Rust writer (this PR)
-  - [x] Table + annot overlap: COITrees Rust engine replaces polars-bio (this PR)
-- [ ] Migrate remaining `_dataset/_utils.py` / `_flat_flanks.py` / `_variants/_sitesonly.py`
-      kernels touched by the write path.
+The default `gvl.write()` / `gvl.update()` path is fully Rust-backed; the write path is numba-free.
 
-**Gate:** parity + `gvl.write()`/`update()` wall-clock + peak RSS vs baseline.
+- [x] bigWig interval extraction — single-pass streaming Rust writer (SoA `starts/ends/values.npy`).
+- [x] Table + annot overlap — COITrees Rust engine.
+- [x] Deleted the dead `_write_track_legacy` + `splits_sum_le_value` (the last write-path numba),
+      reachable only via custom `IntervalTrack` types (none exist; `IntervalTrack` is unexported).
+      Unsupported track types now raise `TypeError`.
+- **Variant normalization (left-align, bi-allelic, atomize) is NOT GVL work** — it is a user
+  precondition (`bcftools norm` / `plink2 --normalize`); the write path only validates/rejects
+  non-conforming records. Struck from Phase 4 scope.
+- **Genotype storage / variant IO (genoray `dense2sparse`) deferred to Phase 6 (absorb genoray).**
+
+**Gate (parity — MET):** write-path parity = the landed differential tests (bigWig byte-identical;
+Table COITrees numpy-oracle + property). Full tree green on both backends.
+
+**Gate (throughput/RSS — Carter re-baseline, chr22_geuv):**
+
+| Op | corpus | wall-clock | peak RSS |
+|---|---|---|---|
+| `gvl.write()` (PGEN variants + BigWigs track) | chr22_geuv (5 samples × 165 e-gene regions, chr22) | 1.934 s | 3.520 GB |
+| `gvl.update()` (add per-sample BigWigs track) | chr22_geuv | 0.081 s | 3.519 GB ¹ |
+
+> Carter HPC (AMD EPYC 7543, linux-64), `NUMBA_NUM_THREADS=1`, release build, HEAD `32132c9`. The
+> write path is already Rust-only (Python/numba orchestration deleted at landing), so there is no
+> live numba A/B; these are the canonical Phase 4 numbers. The old 1.143 s / 3.593 GB write figure
+> was macOS / 1kg-VCF and is **not comparable**.
+>
+> ¹ The `gvl.update()` peak RSS (3.519 GB) is a whole-process figure: the measurement driver builds
+> the base dataset (untimed `gvl.write`) then runs the timed `gvl.update` in the **same process**,
+> so the memray process-peak is dominated by the base-dataset write (≈ the write() peak above). Only
+> the update wall-clock (0.081 s) is isolated to `gvl.update`; its marginal RSS is not measured by
+> this driver.
 
 ### Phase 5 — Crate consolidation + thin-binding cleanup ⬜
 _PR: —_
@@ -701,6 +725,16 @@ narrowed to genoray (variant IO) only.
 ---
 
 ## Notes & decisions log
+
+- 2026-06-26 (Phase 4 close-out; branch `phase-4-close-out`, PR [#253](https://github.com/mcvickerlab/GenVarLoader/pull/253)): Investigation found the
+  default write/update path already fully Rust-backed (bigWig streaming writer + COITrees table;
+  variant IO via genoray). The roadmap's "variant normalization" bullet was a mischaracterization —
+  GVL never normalizes (it is a bcftools/plink2 user precondition); genotype storage is genoray
+  (→ Phase 6). Deleted the only remaining write-path numba (`splits_sum_le_value` + the dead
+  `_write_track_legacy`; unsupported `IntervalTrack` types now `TypeError`). Captured canonical
+  Carter chr22_geuv write/update wall-clock + peak RSS (no live numba A/B — orchestration was
+  deleted at landing). Full tree green both backends; cargo + lint/format/typecheck clean; abi3
+  builds. Phase 4 ✅.
 
 - 2026-06-25 (round-3 instruction-level kernel tuning; branch `opt/round3-instruction-tuning`, [PR #252](https://github.com/mcvickerlab/GenVarLoader/pull/252)):
   Instruction-count pass over 7 hot kernels identified by the Task-3 `perf` flat-profile (full

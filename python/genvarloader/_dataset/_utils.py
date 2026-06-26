@@ -162,40 +162,6 @@ def bed_to_regions(
     return bed.select(cols).to_numpy()
 
 
-@nb.njit(nogil=True, cache=True)
-def splits_sum_le_value(arr: NDArray[np.number], max_value: float) -> NDArray[np.intp]:
-    """Get index offsets for groups that sum to no more than a value.
-    Note that values greater than the maximum will be kept in their own group.
-
-    Parameters
-    ----------
-    arr : NDArray[np.number]
-        Array to split.
-    max_value : float
-        Maximum value.
-
-    Returns
-    -------
-    NDArray[np.intp]
-        Split indices.
-
-    Examples
-    --------
-    >>> splits_sum_le_value(np.array([5, 5, 11, 9, 2, 7]), 10)
-    # (5 5) (11) (9) (2 7)
-    array([0, 2, 3, 4, 6])
-    """
-    indices = [0]
-    current_sum = 0
-    for idx, value in enumerate(arr):
-        current_sum += value
-        if current_sum > max_value:
-            indices.append(idx)
-            current_sum = value
-    indices.append(len(arr))
-    return np.array(indices, np.intp)
-
-
 def reduceat_offsets(
     ufunc: np.ufunc, arr: NDArray[DTYPE], offsets: NDArray[np.integer], axis: int = 0
 ) -> NDArray[DTYPE]:

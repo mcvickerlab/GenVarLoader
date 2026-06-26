@@ -10,7 +10,6 @@ from genvarloader._dataset._utils import (
     padded_slice,
     reduceat_offsets,
     regions_to_bed,
-    splits_sum_le_value,
 )
 
 
@@ -76,11 +75,6 @@ def test_padded_slice_left_and_right_pad():
     res = padded_slice(arr, -2, 5, pad_val=-1, out=out)
     # start=-2 -> pad_left=2, stop=5 -> pad_right=2, middle = arr
     np.testing.assert_array_equal(res, np.array([-1, -1, 1, 2, 3, -1, -1]))
-
-
-def test_splits_sum_le_value_docstring_example():
-    out = splits_sum_le_value(np.array([5, 5, 11, 9, 2, 7]), 10)
-    np.testing.assert_array_equal(out, np.array([0, 2, 3, 4, 6]))
 
 
 def test_regions_to_bed_and_back_roundtrip():
