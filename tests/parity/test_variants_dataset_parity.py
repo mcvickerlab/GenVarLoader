@@ -20,7 +20,10 @@ import pytest
 import genvarloader as gvl
 import genvarloader._dataset._flat_variants  # noqa: F401 — triggers register()
 import genvarloader._dispatch as _dispatch
+from genvarloader._dataset._flat_variants import DummyVariant
 from seqpro.rag import Ragged
+
+from ._fixtures import build_strand_mixed_dataset
 
 pytestmark = pytest.mark.parity
 
@@ -303,3 +306,76 @@ def test_variant_windows_getitem_parity_across_backends(
         "All window data arrays are empty — no variants in the indexed batch. "
         "The cross-backend comparison is vacuous."
     )
+
+
+# ---------------------------------------------------------------------------
+# Neg-strand variants parity + dummy-fill coverage (Task 6)
+# ---------------------------------------------------------------------------
+
+
+def _read_variants_both_backends(ds, monkeypatch):
+    """Read ds[:, :] under numba then rust; return (out_numba, out_rust)."""
+    monkeypatch.setenv("GVL_BACKEND", "numba")
+    out_numba = ds[:, :]
+    monkeypatch.setenv("GVL_BACKEND", "rust")
+    out_rust = ds[:, :]
+    return out_numba, out_rust
+
+
+def test_neg_strand_variants_rc_parity_and_kernel_invoked(
+    tmp_path, synthetic_case, monkeypatch
+):
+    """variants-mode neg-strand RC is byte-identical across backends, and the
+    rust rc_alleles kernel actually fires on the live read (non-vacuous)."""
+    import genvarloader as gvl
+
+    ds_dir = build_strand_mixed_dataset(tmp_path, synthetic_case.svar_path)
+    ref = gvl.Reference.from_path(synthetic_case.ref_path, in_memory=False)
+    ds = gvl.Dataset.open(ds_dir, reference=ref).with_tracks(False).with_seqs("variants")
+
+    # Non-vacuity: fixture must carry −strand regions (rc_neg defaults True).
+    assert np.any(ds._full_regions[:, 3] == -1), "fixture has no −strand regions"
+
+    # Spy on the rust rc_alleles to prove it runs on the live neg-strand path.
+    numba_fn, rust_fn = _dispatch.backends("rc_alleles")
+    calls = {"n": 0}
+
+    def _spy_rust(*a, **k):
+        calls["n"] += 1
+        return rust_fn(*a, **k)
+
+    orig_entry = dict(_dispatch._REGISTRY["rc_alleles"])
+    _dispatch.register("rc_alleles", numba=numba_fn, rust=_spy_rust, default="rust")
+    try:
+        out_numba, out_rust = _read_variants_both_backends(ds, monkeypatch)
+    finally:
+        _dispatch._REGISTRY["rc_alleles"] = orig_entry
+
+    assert calls["n"] > 0, (
+        "rust rc_alleles was never invoked on the neg-strand variants read — "
+        "the backstop is vacuous. Confirm a variant overlaps a −strand region; if "
+        "the synthetic variant set does not, extend build_strand_mixed_dataset with a "
+        "−strand region positioned over a known variant."
+    )
+    for field_name in out_numba.fields:
+        _compare_ragged_field(out_numba[field_name], out_rust[field_name], field_name)
+
+
+def test_neg_strand_variants_custom_dummy_parity(tmp_path, synthetic_case, monkeypatch):
+    """A custom non-palindromic dummy (alt/ref = b'AC') filled into empty groups on
+    a −strand read is RC'd identically by rust and the seqpro reference."""
+    import genvarloader as gvl
+
+    ds_dir = build_strand_mixed_dataset(tmp_path, synthetic_case.svar_path)
+    ref = gvl.Reference.from_path(synthetic_case.ref_path, in_memory=False)
+    ds = (
+        gvl.Dataset.open(ds_dir, reference=ref)
+        .with_tracks(False)
+        .with_seqs("variants")
+        .with_settings(dummy_variant=DummyVariant(alt=b"AC", ref=b"AC"))
+    )
+    assert np.any(ds._full_regions[:, 3] == -1), "fixture has no −strand regions"
+
+    out_numba, out_rust = _read_variants_both_backends(ds, monkeypatch)
+    for field_name in out_numba.fields:
+        _compare_ragged_field(out_numba[field_name], out_rust[field_name], field_name)
