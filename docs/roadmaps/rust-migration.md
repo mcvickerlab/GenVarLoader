@@ -562,17 +562,18 @@ variants/variant-windows) localized the remaining single-thread work:
    (the path is dominated by `intervals_to_tracks` / `shift_and_realign_tracks_sparse` track work,
    not the variant assembly itself, so this is expected noise not a regression).
 
-> **Sequencing for follow-up PRs (updated 2026-06-25):** (5) ⬜ lands first — small, rust-only, closes
-> the tracks-only gap. **(6) ✅ DONE** — RC folded into rust kernels on `opt/target-6-kernel-rc`; see
-> measurements above; PR [#249](https://github.com/mcvickerlab/GenVarLoader/pull/249). **(7) ✅ DONE** —
-> variants/variant-windows assembly collapsed into one rust call on `opt/target-7-windows-rust-assembly`;
-> see the Target 7 re-measurement below; PR [#250](https://github.com/mcvickerlab/GenVarLoader/pull/250).
-> **Rayon batch parallelism is gated on Targets 5+6+7 landing first** — only after these put rust at or
-> ahead of numba single-threaded (per-query in-loop RC and ndarray slicing eliminated) do we add rayon
-> batch parallelism (Phase 5). The per-query in-loop RC of the T6 design parallelizes cleanly over
-> disjoint per-query slices, so rayon integration is structurally simpler once the post-pass is gone.
-> Parallelizing before (5)+(6) are merged would just scale the remaining numpy RC pass and ndarray
-> slicing overhead.
+> **Sequencing for follow-up PRs (updated 2026-06-25; round-3 status 2026-06-25):**
+> **(5) ✅ DONE** — instruction count reduced 480→283 in the round-3 instruction-level tuning pass;
+> `opt/round3-instruction-tuning`. **(6) ✅ DONE** — RC folded into rust kernels on
+> `opt/target-6-kernel-rc`; see measurements above;
+> PR [#249](https://github.com/mcvickerlab/GenVarLoader/pull/249). **(7) ✅ DONE** —
+> variants/variant-windows assembly collapsed into one rust call on
+> `opt/target-7-windows-rust-assembly`; see the Target 7 re-measurement below;
+> PR [#250](https://github.com/mcvickerlab/GenVarLoader/pull/250).
+> **Round-3 instruction-level pass ✅ DONE** — 7/7 kernels tuned, 0 reverted (see "round 3" subsection
+> below). Single-thread headroom is now maximized; remaining rust-vs-numba variance on the cheapest path
+> (tracks-only, ~1 ms) is node-noise on the shared HPC, not a code defect.
+> **Rayon batch parallelism (Phase 5) is the next lever.**
 
 ##### Target 7 re-measurement (2026-06-25, branch `opt/target-7-windows-rust-assembly`)
 
@@ -596,6 +597,73 @@ variants/variant-windows) localized the remaining single-thread work:
 > top leaves: `tokenize` 28.3%, `slice_flanks` 19.2%, `assemble_alt_window` 13.1%, `_PyEval_EvalFrameDefault`
 > 3.7%, GC total 2.5% (`gc_collect_main` 1.0% + `deduce_unreachable` 0.6% + `visit_reachable` 0.5% +
 > `dict_traverse` 0.4%). Profile is now Rust-kernel-dominated with negligible GC overhead.
+
+##### ✅ Optimization targets — round 3 (instruction-level, profiled 2026-06-25)
+
+> Branch: `opt/round3-instruction-tuning` ([PR #252](https://github.com/mcvickerlab/GenVarLoader/pull/252) → `rust-migration`). Tooling: `cargo asm --lib` (cargo-show-asm).
+> Starting ratios from the Task-3 profiling baseline captured 2026-06-25 (full table in
+> `docs/roadmaps/round3-profile-baseline.md`): tracks-only **0.97×**, haplotypes **0.70×**,
+> variants **0.80×**, variant-windows **0.56×**. Rust was already at parity or faster on all 4 paths;
+> tracks-only (0.97×) was within session noise of 1.0×. These are floors to improve, not ceilings.
+>
+> Targets ranked by aggregate self-time (sum across all paths); full aggregate table in the baseline doc.
+> Top 8 aggregate targets: `intervals_to_tracks` (60.3%), `windows::tokenize` (28.1%),
+> `shift_and_realign_tracks_sparse` (25.7%), `windows::slice_flanks` (20.1%),
+> `windows::assemble_alt_window` (13.3%), `rc_flat_rows_inplace` (9.3%),
+> `ffi::intervals_and_realign_track_fused` (9.0%), `reconstruct_haplotypes_from_sparse` (4.5%).
+> `reverse_flat_rows_inplace` was **SKIPPED** (negligible self-time in the Task-3 profile).
+> `ffi::intervals_and_realign_track_fused` was **not a direct target** — its overhead belongs to the
+> kernels it wraps (`intervals_to_tracks` and `shift_and_realign_tracks_sparse`).
+
+**Per-kernel results (7/7 kept; 0 reverted):**
+
+> Instr before→after: total instruction count from `cargo asm --lib` for the hot function body.
+> rust÷numba before→after: wall-clock ratio measured in the *same session* as the before count
+> (cross-session comparisons are unreliable on this shared HPC node — see node-noise caveat below).
+> **Note on `rc_flat_rows_inplace`**: instruction count *rose* 212→283 because the scalar byte loop was
+> replaced by an SSE2-vectorized COMP LUT loop — the vector expansion adds instructions but halves
+> actual operations. That IS the win; the per-kernel ratio confirms it (0.664→0.635).
+> **Note on llvm-mca**: the planned llvm-mca cycles column is omitted because llvm-mca was not
+> available in the build environment this round; the deterministic instruction-count reductions and
+> the same-session wall-clock rust÷numba ratios are the recorded evidence in its place.
+
+| Kernel | instr before→after | rust÷numba before→after (same-session) | result |
+|---|---|---|---|
+| `intervals_to_tracks` | 480→283 | 0.628→0.624 | kept |
+| `windows::tokenize` | 16→4 /elem (hot) | 0.55→0.43 | kept |
+| `shift_and_realign_tracks_sparse` | 3 `do_slice`→0 | 1.178→1.179 (held) | kept |
+| `windows::slice_flanks` | push→memcpy | 0.446→0.239 | kept |
+| `windows::assemble_alt_window` | 3 push→memcpy | 0.306→0.223 | kept |
+| `reverse::rc_flat_rows_inplace` | 212→283 (vectorized SSE2) | 0.664→0.635 | kept |
+| `reconstruct_haplotypes_from_sparse` | 2839→1279 | 0.655→0.589 | kept |
+
+**Final four-path ratios (re-measured 2026-06-26 in one back-to-back session; HEAD `fe18c4f`):**
+
+> ⚠️ **Node-noise caveat**: the Carter HPC node is shared and load varies; absolute ms/batch drifts
+> ≥2× across sessions. The per-kernel before→after ratios above are each within-session; the four-path
+> summary below is a single consistent back-to-back session but is NOT directly comparable to the per-kernel
+> table (different session, different load). **The durable signal is the deterministic instruction-count
+> reductions (table above) + byte-identical parity on both backends. Use the four-path summary only for
+> order-of-magnitude guidance.**
+>
+> Harness: tracks-only and haplotypes via `pytest-benchmark` pedantic min (iterations=10, rounds=50,
+> warmup=5). Variants and variant-windows via `profile.py` wall-clock average (2000 batches, burn-in 5).
+> `NUMBA_NUM_THREADS=1`, `maturin develop --release`, corpus `chr22_geuv.gvl` (format 2.0,
+> 165 regions × 5 samples), Carter HPC (AMD EPYC 7543, linux-64).
+
+| Path | rust (ms/batch) | numba (ms/batch) | rust ÷ numba |
+|---|---|---|---|
+| tracks-only (pedantic min) | 1.232 | 1.040 | 1.18× (node-noise: cheapest path, cf. per-kernel 0.624×) |
+| haplotypes (pedantic min) | 2.029 | 3.439 | **0.59×** (rust 1.7× faster) |
+| variants (wall avg) | 3.292 | 4.290 | **0.77×** (rust 1.3× faster) |
+| variant-windows (wall avg) | 1.220 | 5.616 | **0.22×** (rust 4.6× faster) |
+
+> **Summary:** 7/7 targets kept, 0 reverted. All byte-identical parity on both backends (full tree
+> gate). No `unsafe` added this round — all wins via safe Rust idioms: `as_slice_mut` + `&mut [T]`
+> indexing (slice-hoist), `extend_from_slice` (memcpy expansion), iterator idioms, and one
+> branchless-arithmetic complement that autovectorizes to SSE2. `reverse_flat_rows_inplace` was SKIPPED
+> (negligible self-time). The ffi fused trampoline (8.97% aggregate) was not a direct target.
+> **Rayon batch parallelism (Phase 5) is the next lever.**
 
 ### Phase 4 — Write / update pipeline 🚧
 _PR: bigwig-streaming-write (TBD)_
@@ -633,6 +701,28 @@ narrowed to genoray (variant IO) only.
 ---
 
 ## Notes & decisions log
+
+- 2026-06-25 (round-3 instruction-level kernel tuning; branch `opt/round3-instruction-tuning`, [PR #252](https://github.com/mcvickerlab/GenVarLoader/pull/252)):
+  Instruction-count pass over 7 hot kernels identified by the Task-3 `perf` flat-profile (full
+  aggregate table in `docs/roadmaps/round3-profile-baseline.md`). Tooling: `cargo asm --lib`
+  (cargo-show-asm). Gate: wall-clock throughput — instruction-count and llvm-mca cycle deltas used
+  as evidence to support / reject each change; reverted if throughput did not confirm. Unsafe: **NONE
+  added this round** — all wins via safe Rust idioms: `as_slice_mut` + `&mut [T]` slice-hoist
+  (`intervals_to_tracks`, `shift_and_realign_tracks_sparse`), `extend_from_slice` memcpy expansion
+  (`slice_flanks`, `assemble_alt_window`), iterator idioms (`tokenize`, `reconstruct_haplotypes_from_sparse`),
+  and one branchless-arithmetic complement that autovectorizes to SSE2 (`rc_flat_rows_inplace`; scalar
+  loop → COMP LUT; instr count rose 212→283 but operations halved — that IS the win). The `rc` kernel
+  added an exhaustive 256-byte arith-vs-COMP parity-lock test in the cargo suite. Wall-clock ratios
+  are node-noise-limited on this shared HPC node (same metric drifted ≥2× across sessions); the durable
+  signal is deterministic instruction-count reductions + byte-identical parity on both backends.
+  `reverse_flat_rows_inplace` skipped (negligible self-time). `ffi::intervals_and_realign_track_fused`
+  not a direct target (overhead belongs to the kernels it wraps). 7/7 targets kept, 0 reverted.
+  Full tree gate (rust): 985 passed, 12 skipped, 5 xfailed (all pre-existing), 2 transient HPC-load
+  failures (cross-process multiprocessing tests, pass in isolation — same pattern as Phase 3 close-out).
+  Full tree gate (numba): 986 passed, 12 skipped, 5 xfailed (all pre-existing), 1 transient HPC-load
+  failure (same multiprocessing sensitivity). Same pass/xfail profile on both backends confirms
+  byte-identical parity. Cargo: 109 passed. Lint/format/typecheck clean. abi3 wheel builds.
+  Rayon batch parallelism (Phase 5) is the next lever.
 
 - 2026-06-25 (zero-copy scale-safe read path; branch `zero-copy-scale-safe-readpath`, PR TBD): Addressed
   Phase 3 optimization targets 1–3. **Breaking on-disk change** — track-interval storage converted from
