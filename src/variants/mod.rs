@@ -82,17 +82,17 @@ pub fn gather_alleles(
 /// `var_offsets` per-(b*p)-row allele boundaries (len n_rows + 1)
 /// `to_rc_row`   per-(b*p)-row bool mask (len n_rows)
 ///
-/// Expands the row mask to a per-allele mask via `var_offsets`, then delegates
-/// to `reverse::rc_flat_rows_inplace` (reverse + `COMP`), matching the Python
-/// `np.repeat(per_bp, np.diff(var_offsets))` expansion byte-for-byte.
+/// Single fused pass: for each masked `(b*p)` row, reverse-complements each of
+/// its alleles directly via `reverse::rc_row`. `var_offsets` partition the
+/// alleles by row (contiguous, disjoint), so this RCs exactly the alleles the
+/// old per-allele-mask delegation did, in the same order — byte-identical —
+/// without the intermediate `Vec<bool>` alloc or the second full-allele scan.
 pub fn rc_alleles_inplace(
     byte_data: &mut [u8],
     seq_offsets: ndarray::ArrayView1<i64>,
     var_offsets: ndarray::ArrayView1<i64>,
     to_rc_row: ndarray::ArrayView1<bool>,
 ) {
-    let n_alleles = seq_offsets.len() - 1;
-    let mut per_allele = vec![false; n_alleles];
     for g in 0..to_rc_row.len() {
         if !to_rc_row[g] {
             continue;
@@ -100,11 +100,11 @@ pub fn rc_alleles_inplace(
         let a0 = var_offsets[g] as usize;
         let a1 = var_offsets[g + 1] as usize;
         for a in a0..a1 {
-            per_allele[a] = true;
+            let s = seq_offsets[a] as usize;
+            let e = seq_offsets[a + 1] as usize;
+            crate::reverse::rc_row(&mut byte_data[s..e]);
         }
     }
-    let per_allele = ndarray::Array1::from_vec(per_allele);
-    crate::reverse::rc_flat_rows_inplace(byte_data, seq_offsets, per_allele.view());
 }
 
 /// Generic compact-keep core. Drops values where `keep[j]` is false and
