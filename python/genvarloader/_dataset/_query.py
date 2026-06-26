@@ -304,21 +304,11 @@ def _getitem_spliced(
     )
 
     if view.rc_neg and to_rc_per_elem is not None:
+        # Spliced output is never a variant type (spliced variants are rejected
+        # upstream in Haps.__call__). On numba the post-pass RCs the seq/annotated
+        # kinds; on rust those kinds fold RC in-kernel, so this is a no-op there.
         if _active_backend() == "numba":
-            # Numba: RC handled entirely by post-pass for all kinds.
             recon = tuple(reverse_complement_ragged(r, to_rc_per_elem) for r in recon)
-        else:
-            # Rust: flat-seq kinds folded RC in-kernel (or Python-side inside the
-            # reconstructor).  Spliced output is never a variant type, so this
-            # branch is effectively a no-op, but we keep the guard symmetric
-            # with the unspliced path for correctness.
-            _VARIANT_TYPES_S = (RaggedVariants, _FlatVariants, _FlatVariantWindows)
-            recon = tuple(
-                reverse_complement_ragged(r, to_rc_per_elem)
-                if isinstance(r, _VARIANT_TYPES_S)
-                else r
-                for r in recon
-            )
 
     # Rewrap each per-element Ragged with the plan's group_offsets to expose
     # one contiguous spliced element per (row, sample[, inner]) cell. Collapse
