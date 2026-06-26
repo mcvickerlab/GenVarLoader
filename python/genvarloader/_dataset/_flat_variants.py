@@ -1006,24 +1006,14 @@ def get_variants_flat(
 
     shape: tuple[int | None, ...] = (b, eff_ploidy, None)
 
+    opt = haps.window_opt
+
+    # --- Build scalar (non-allele) fields shared between both return paths ---
     fields: dict[str, Any] = {}
 
-    # alt: ALWAYS (required)
-    alt_bytes = np.asarray(haps.variants.alt.data).view(np.uint8)
-    alt_off = np.asarray(haps.variants.alt.offsets, np.int64)
-    alt_data, alt_seq_off = _gather_alleles(v_idxs, alt_bytes, alt_off)
-    fields["alt"] = _FlatAlleles(alt_data, alt_seq_off, row_offsets, shape)
-
-    # start: ALWAYS (added unconditionally by _get_variants)
+    # start: ALWAYS
     start_data = np.asarray(haps.variants.start)[v_idxs]
     fields["start"] = _Flat.from_offsets(start_data, shape, row_offsets)
-
-    # ref: if "ref" in var_fields
-    if "ref" in haps.var_fields:
-        ref_bytes = np.asarray(haps.variants.ref.data).view(np.uint8)
-        ref_off = np.asarray(haps.variants.ref.offsets, np.int64)
-        ref_data, ref_seq_off = _gather_alleles(v_idxs, ref_bytes, ref_off)
-        fields["ref"] = _FlatAlleles(ref_data, ref_seq_off, row_offsets, shape)
 
     # ilen: if "ilen" in var_fields
     if "ilen" in haps.var_fields:
@@ -1052,113 +1042,134 @@ def get_variants_flat(
         info_data = np.asarray(haps.variants.info[k])[v_idxs]
         fields[k] = _Flat.from_offsets(info_data, shape, row_offsets)
 
-    flat = _FlatVariants(fields)
+    # --- Step 1: Compute shared kernel inputs ---
+    stat = haps.ffi_static
+    needs_fetch = (
+        regions is not None
+        and haps.token_lut is not None
+        and (
+            (issubclass(haps.kind, _FlatVariantWindows) and opt is not None)
+            or bool(haps.flank_length)
+        )
+    )
+    if needs_fetch:
+        regions_arr = np.asarray(regions)
+        group_contigs = np.repeat(regions_arr[:, 0], eff_ploidy)
+        v_contigs = np.repeat(group_contigs, np.diff(row_offsets)).astype(np.int32)
+    else:
+        v_contigs = np.zeros(len(v_idxs), np.int32)
 
-    # variant-windows kind: emit per-allele window/allele token buffers (a
-    # different output type) and return early.
-    opt = haps.window_opt
+    ref_present = "ref" in haps.var_fields and haps.variants.ref is not None
+    ref_global = ref_off_global = None
+    if ref_present or (
+        issubclass(haps.kind, _FlatVariantWindows)
+        and opt is not None
+        and (opt.ref == "allele")
+    ):
+        ref_global = np.asarray(haps.variants.ref.data).view(np.uint8)
+        ref_off_global = np.asarray(haps.variants.ref.offsets, np.int64)
+
+    # --- Step 2: variant-windows kind: emit per-allele token buffers (early return) ---
     if (
         regions is not None
         and issubclass(haps.kind, _FlatVariantWindows)
         and opt is not None
     ):
-        from ._flat_flanks import (
-            compute_alt_window,
-            compute_ref_window,
-            compute_windows,
-            tokenize_alleles,
-        )
-
         L = opt.flank_length
-        lut = haps.token_lut
-        starts_v = np.asarray(haps.variants.start)[v_idxs]
-        ilens_v = np.asarray(haps.variants.ilen)[v_idxs]
-        regions = np.asarray(regions)
-        group_contigs = np.repeat(regions[:, 0], eff_ploidy)
-        v_contigs = np.repeat(group_contigs, np.diff(row_offsets))
+        ref_mode = 1 if opt.ref == "window" else 2
+        alt_mode = 1 if opt.alt == "window" else 2
+        bufs = get("assemble_variant_buffers")(
+            1,  # windows mode
+            v_idxs,
+            row_offsets,
+            stat.alt_alleles,
+            stat.alt_offsets,
+            ref_global,
+            ref_off_global,
+            False,  # want_ref_bytes (windows mode emits tokens, not raw bytes)
+            False,  # want_flank
+            ref_mode,
+            alt_mode,
+            L,
+            haps.token_lut,
+            v_contigs,
+            stat.v_starts,
+            stat.ilens,
+            stat.ref,
+            stat.ref_offsets,
+            haps.reference.pad_char,
+        )
         wshape = (b, eff_ploidy, None, None)
         wfields = {k: v for k, v in fields.items() if k not in ("alt", "ref")}
         win = _FlatVariantWindows(wfields)
-
-        if opt.ref == "window" and opt.alt == "window":
-            # Hot path: single fused fetch produces both windows.
-            rw, aw = compute_windows(
-                haps.reference,
-                v_contigs,
-                starts_v,
-                ilens_v,
-                alt_data,
-                alt_seq_off,
-                L,
-                lut,
-                row_offsets,
-            )
-            rw.shape = wshape
-            aw.shape = wshape
-            win.ref_window = rw
-            win.alt_window = aw
-        else:
-            if opt.ref == "window":
-                rw = compute_ref_window(
-                    haps.reference, v_contigs, starts_v, ilens_v, L, lut, row_offsets
-                )
-                rw.shape = wshape
-                win.ref_window = rw
-            else:  # "allele": bare tokenized ref allele
-                ref_bytes = np.asarray(haps.variants.ref.data).view(np.uint8)
-                ref_off = np.asarray(haps.variants.ref.offsets, np.int64)
-                ref_data, ref_seq_off = _gather_alleles(v_idxs, ref_bytes, ref_off)
-                rw = tokenize_alleles(ref_data, ref_seq_off, lut, row_offsets)
-                rw.shape = wshape
-                win.ref = rw
-
-            if opt.alt == "window":
-                aw = compute_alt_window(
-                    haps.reference,
-                    v_contigs,
-                    starts_v,
-                    ilens_v,
-                    alt_data,
-                    alt_seq_off,
-                    L,
-                    lut,
-                    row_offsets,
-                )
-                aw.shape = wshape
-                win.alt_window = aw
-            else:  # "allele": bare tokenized alt allele
-                aw = tokenize_alleles(alt_data, alt_seq_off, lut, row_offsets)
-                aw.shape = wshape
-                win.alt = aw
-
+        for name, (data, seq_off) in bufs.items():
+            fw = _FlatWindow(data, np.asarray(seq_off, np.int64), row_offsets, wshape)
+            setattr(win, name, fw)
         if haps.dummy_variant is not None:
             win = win.fill_empty_groups(
                 haps.dummy_variant, unk=haps.unknown_token, flank_length=L
             )
-
         return win
 
-    # ride-along flank tokens on the plain variants output.
-    if haps.flank_length and haps.token_lut is not None and regions is not None:
-        from ._flat_flanks import compute_flank_tokens
+    # --- Step 3: plain-variants path: route allele bytes + flank tokens through kernel ---
+    want_flank = bool(
+        haps.flank_length and haps.token_lut is not None and regions is not None
+    )
+    L = haps.flank_length or 0
+    bufs = get("assemble_variant_buffers")(
+        0,  # variants mode
+        v_idxs,
+        row_offsets,
+        stat.alt_alleles,
+        stat.alt_offsets,
+        ref_global,
+        ref_off_global,
+        ref_present,  # want_ref_bytes
+        want_flank,
+        0,  # ref_mode (unused in variants mode)
+        0,  # alt_mode (unused)
+        L,
+        haps.token_lut,
+        v_contigs,
+        stat.v_starts,
+        stat.ilens,
+        stat.ref if stat.ref is not None else np.zeros(0, np.uint8),
+        stat.ref_offsets if stat.ref_offsets is not None else np.zeros(1, np.int64),
+        haps.reference.pad_char if haps.reference is not None else 0,
+    )
 
-        L = haps.flank_length
-        starts_v = np.asarray(haps.variants.start)[v_idxs]
-        ilens_v = np.asarray(haps.variants.ilen)[v_idxs]
-        regions = np.asarray(regions)
-        group_contigs = np.repeat(regions[:, 0], eff_ploidy)  # (b*eff_ploidy,)
-        v_contigs = np.repeat(group_contigs, np.diff(row_offsets))  # (n_var,)
+    # Build fields in ORIGINAL insertion order (alt FIRST, then start, ref, rest).
+    # Prepend alt; reconstruct from scalar fields inserting ref after start.
+    final_fields: dict[str, Any] = {}
+    alt_data, alt_seq_off = bufs["alt"]
+    final_fields["alt"] = _FlatAlleles(
+        np.asarray(alt_data, np.uint8),
+        np.asarray(alt_seq_off, np.int64),
+        row_offsets,
+        shape,
+    )
+    for k, v in fields.items():
+        if k == "start":
+            final_fields["start"] = v
+            # Insert ref immediately after start (original order: alt, start, ref, ilen, ...)
+            if "ref" in bufs:
+                ref_data, ref_seq_off = bufs["ref"]
+                final_fields["ref"] = _FlatAlleles(
+                    np.asarray(ref_data, np.uint8),
+                    np.asarray(ref_seq_off, np.int64),
+                    row_offsets,
+                    shape,
+                )
+        else:
+            final_fields[k] = v
 
-        tok, off = compute_flank_tokens(
-            haps.reference,
-            v_contigs,
-            starts_v,
-            ilens_v,
-            L,
-            haps.token_lut,
-            row_offsets,
+    flat = _FlatVariants(final_fields)
+
+    if "flank_tokens" in bufs:
+        tok, off = bufs["flank_tokens"]
+        flat.flank_tokens = _Flat.from_offsets(
+            tok, (b, eff_ploidy, None, 2 * L), np.asarray(off, np.int64)
         )
-        flat.flank_tokens = _Flat.from_offsets(tok, (b, eff_ploidy, None, 2 * L), off)
 
     # dummy-variant empty-group fill (scalars, alleles, and flank_tokens).
     if haps.dummy_variant is not None:
