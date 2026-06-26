@@ -105,6 +105,11 @@ pub fn get_reference(
         }
     }
     if let Some(to_rc) = to_rc {
+        debug_assert_eq!(
+            to_rc.len(),
+            out_offsets.len() - 1,
+            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        );
         crate::reverse::rc_flat_rows_inplace(
             out.as_slice_mut().unwrap(),
             out_offsets,

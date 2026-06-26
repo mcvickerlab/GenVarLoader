@@ -498,6 +498,11 @@ pub fn reconstruct_haplotypes_fused<'py>(
 
     // Step 4b: optional in-kernel reverse-complement (one bool per (query, hap) work item).
     if let Some(to_rc) = to_rc.as_ref() {
+        debug_assert_eq!(
+            to_rc.as_array().len(),
+            out_offsets_vec.len() - 1,
+            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        );
         crate::reverse::rc_flat_rows_inplace(
             out_data.as_slice_mut().unwrap(),
             out_offsets_vec.view(),
@@ -587,6 +592,11 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
     // out_offsets_a is the permuted per-element offsets array (splice_plan.permuted_out_offsets),
     // so each masked element is RC'd in its own byte range — matching the to_rc_per_elem post-pass.
     if let Some(to_rc) = to_rc.as_ref() {
+        debug_assert_eq!(
+            to_rc.as_array().len(),
+            out_offsets_a.len() - 1,
+            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        );
         crate::reverse::rc_flat_rows_inplace(
             out_data.as_slice_mut().unwrap(),
             out_offsets_a,
@@ -738,6 +748,11 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
 
     if let Some(to_rc) = to_rc.as_ref() {
         let m = to_rc.as_array();
+        debug_assert_eq!(
+            m.len(),
+            out_offsets_vec.len() - 1,
+            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        );
         crate::reverse::rc_flat_rows_inplace(out_data.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
         crate::reverse::reverse_flat_rows_inplace(annot_v.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
         crate::reverse::reverse_flat_rows_inplace(annot_pos.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
@@ -961,6 +976,11 @@ pub fn intervals_and_realign_track_fused(
 
     // Step 3: optional in-place reverse for negative-strand tracks (reverse only, no complement).
     if let Some(to_rc) = to_rc.as_ref() {
+        debug_assert_eq!(
+            to_rc.as_array().len(),
+            out_offsets.as_array().len() - 1,
+            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        );
         crate::reverse::reverse_flat_rows_inplace(
             out.as_slice_mut().unwrap(),
             out_offsets.as_array(),
