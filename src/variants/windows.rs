@@ -30,17 +30,21 @@ pub fn slice_flanks(
     flank_len: usize,
 ) -> (Array1<u8>, Array1<u8>) {
     let n = rw_off.len() - 1;
+    // Hoist contiguous slices upfront: eliminates the per-element ndarray stride
+    // multiply (imul) and bounds check (cmp/jae) that appeared in both inner
+    // k-loops. Using raw &[u8]/&[i64] lets LLVM see the loop as a plain copy.
+    let data_s = data.as_slice().expect("slice_flanks: data must be contiguous");
+    let rw_off_s = rw_off.as_slice().expect("slice_flanks: rw_off must be contiguous");
     let mut f5: Vec<u8> = Vec::with_capacity(n * flank_len);
     let mut f3: Vec<u8> = Vec::with_capacity(n * flank_len);
     for i in 0..n {
-        let s = rw_off[i] as usize;
-        let e = rw_off[i + 1] as usize;
-        for k in 0..flank_len {
-            f5.push(data[s + k]);
-        }
-        for k in 0..flank_len {
-            f3.push(data[e - flank_len + k]);
-        }
+        let s = rw_off_s[i] as usize;
+        let e = rw_off_s[i + 1] as usize;
+        // extend_from_slice replaces flank_len individual push calls with a
+        // single slice-bounds check + memcpy, removing the per-byte capacity
+        // check and enabling vectorisation.
+        f5.extend_from_slice(&data_s[s..s + flank_len]);
+        f3.extend_from_slice(&data_s[e - flank_len..e]);
     }
     (Array1::from_vec(f5), Array1::from_vec(f3))
 }
