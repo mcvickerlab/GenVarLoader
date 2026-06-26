@@ -498,6 +498,23 @@ variants/variant-windows) localized the remaining single-thread work:
    gating; deletion is Phase 5). `_FlatVariantWindows` remains never-RC'd. Plan:
    `docs/superpowers/plans/2026-06-25-rust-variant-rc-fold.md`.
 
+   **✅ rc_alleles_inplace fused (follow-up, 2026-06-26).** The #251
+   `variants::rc_alleles_inplace` kernel was not in the round-3 (#252) target list; this
+   pass fused its row→allele mask expansion and `rc_flat_rows_inplace` delegation into a
+   single pass via the shared `reverse::rc_row` helper, eliminating a per-call `Vec<bool>`
+   alloc+memset, an `Array1::from_vec` wrap, and a redundant full-allele rescan (`cargo asm`
+   confirms zero heap allocations and no `call rc_flat` remain). The per-function `cargo asm`
+   count *rose* 186→308 — not a regression but an inlining artifact: `rc_row` is `#[inline]`,
+   so its SIMD reverse+complement body now counts inside `rc_alleles_inplace`'s own asm
+   instead of behind a `call`, while per-call call-graph work (caller + callee body + heap
+   alloc, ~515 before) collapses to one inlined allocation-free pass. Gated on parity +
+   alloc/rescan removal + no throughput regression (this path fires only on negative-strand
+   variants / `RaggedVariants` reads — wall-clock noise-dominated, NOT round-3's
+   throughput-improvement gate): variants-path rust÷numba held 0.723→0.728 (same session,
+   both backends, within shared-node noise); `rc_flat_rows_inplace` asm unchanged after the
+   extract (283→283, label churn only). Byte-identical parity on both backends. Spec/plan:
+   `docs/superpowers/{specs/2026-06-26-rc-alleles-instruction-tuning-design,plans/2026-06-26-rc-alleles-instruction-tuning}.md`.
+
    **Re-measured ratios (post-Target-6, 2026-06-25):**
 
    > Harness: `tests/benchmarks/test_e2e.py` via pytest-benchmark, same `pedantic` config as the
