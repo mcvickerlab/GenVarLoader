@@ -880,6 +880,7 @@ pub fn intervals_and_realign_track_fused(
     base_seed: u64,
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
+    to_rc: Option<PyReadonlyArray1<bool>>,
 ) -> PyResult<()> {
     use crate::intervals;
     use crate::tracks;
@@ -939,10 +940,20 @@ pub fn intervals_and_realign_track_fused(
         base_seed,
     );
 
+    // Step 3: optional in-place reverse for negative-strand tracks (reverse only, no complement).
+    if let Some(to_rc) = to_rc.as_ref() {
+        crate::reverse::reverse_flat_rows_inplace(
+            out.as_slice_mut().unwrap(),
+            out_offsets.as_array(),
+            to_rc.as_array(),
+        );
+    }
+
     Ok(())
 }
 
 // ── Task 3: guard test — drives rc_flat_rows_inplace on a synthetic hap buffer ─
+// ── Task 4: guard test — drives reverse_flat_rows_inplace::<f32> (reverse only) ─
 #[cfg(test)]
 mod tests {
     #[test]
@@ -952,6 +963,15 @@ mod tests {
         let to_rc = ndarray::array![true];
         crate::reverse::rc_flat_rows_inplace(&mut out, offsets.view(), to_rc.view());
         assert_eq!(&out, b"TACGT"); // revcomp(ACGTA)
+    }
+
+    #[test]
+    fn track_buffer_rc_is_reverse_only() {
+        let mut out = vec![1.0f32, 2.0, 3.0];
+        let offsets = ndarray::array![0i64, 3];
+        let to_rc = ndarray::array![true];
+        crate::reverse::reverse_flat_rows_inplace(&mut out, offsets.view(), to_rc.view());
+        assert_eq!(out, vec![3.0, 2.0, 1.0]); // no value transform
     }
 }
 

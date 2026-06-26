@@ -259,6 +259,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                         keep_offsets=None
                         if keep_offsets is None
                         else np.ascontiguousarray(keep_offsets, np.int64),
+                        to_rc=None,
                     )
                 else:
                     # Composed path (numba): two FFI crossings + one intermediate
