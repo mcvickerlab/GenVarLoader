@@ -168,7 +168,9 @@ pixi run -e dev typecheck
 pixi run -e docs doc
 ```
 
-The build system uses Maturin (Rust + Python). Rust code is compiled automatically when running tests via pixi.
+The build system uses Maturin (Rust + Python).
+
+**IMPORTANT — rebuild Rust before testing Rust changes:** `pixi run -e dev pytest` (and `pixi run -e dev test`) do **not** rebuild the Rust extension. After editing anything in `src/`, run `pixi run -e dev maturin develop --release` first, or pytest silently imports the *stale* compiled extension — parity/integration tests then pass or fail against the old binary, not your change. (`cargo test`/`cargo-test` compile from source and are unaffected; this only bites the Python tests that import the extension.)
 
 **Before pushing a change that renames/removes a public symbol or touches shared code, run the full tree** (`pixi run -e dev pytest tests -q`, or the full `pixi run -e dev test`). Scoped runs like `pytest tests/dataset` skip `tests/unit/` (e.g. `tests/unit/dataset/test_build_reconstructor.py`), so a stale reference there fails only in CI.
 

@@ -772,7 +772,7 @@ narrowed to genoray (variant IO) only.
   Subset gate on `tests/dataset tests/unit tests/parity` — rust: 709/6/2, numba: 709/6/2
   (identical profiles, parity confirmed). Cargo: 114 passed. Lint/format/typecheck clean
   (one branch-introduced test file reformatted by ruff). Phase 5 🚧 (W1 done; W2–W9 remain).
-  Issue tracking the overshoot: (issue: TODO — file before PR).
+  Issue tracking the overshoot: #255.
 
 - 2026-06-26 (Phase 4 close-out; branch `phase-4-close-out`, PR [#253](https://github.com/mcvickerlab/GenVarLoader/pull/253)): Investigation found the
   default write/update path already fully Rust-backed (bigWig streaming writer + COITrees table;
