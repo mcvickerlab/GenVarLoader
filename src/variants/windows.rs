@@ -7,11 +7,15 @@ use ndarray::{Array1, Array2, ArrayView1};
 /// Apply a 256-entry byte->token lookup table. `out[i] = lut[bytes[i]]`.
 /// Mirrors numpy `lut[bytes]`. `Tok` is the token dtype (u8 or i32).
 pub fn tokenize<Tok: Copy>(bytes: ArrayView1<u8>, lut: ArrayView1<Tok>) -> Array1<Tok> {
-    let n = bytes.len();
-    let mut out: Vec<Tok> = Vec::with_capacity(n);
-    for i in 0..n {
-        out.push(lut[bytes[i] as usize]);
-    }
+    let bytes_s = bytes.as_slice().expect("tokenize: bytes must be contiguous");
+    let lut_s = lut.as_slice().expect("tokenize: lut must be contiguous");
+    // One upfront assertion lets the compiler prove every `b as usize` (< 256) is
+    // in-bounds for lut_s, eliminating the per-element bounds check.
+    assert!(lut_s.len() >= 256, "tokenize: lut must have >= 256 entries");
+    // Using raw slices instead of ArrayView1 removes the per-element ndarray stride
+    // multiply (imul rax, stride) that appeared in the indexed loop. collect() uses
+    // TrustedLen and pre-allocates, removing the per-element Vec capacity check.
+    let out: Vec<Tok> = bytes_s.iter().map(|&b| lut_s[b as usize]).collect();
     Array1::from_vec(out)
 }
 
