@@ -17,8 +17,12 @@ from ..genvarloader import fill_empty_fixed_f32 as _fill_empty_fixed_f32_rust
 from ..genvarloader import fill_empty_fixed_i32 as _fill_empty_fixed_i32_rust
 from ..genvarloader import fill_empty_scalar_f32 as _fill_empty_scalar_f32_rust
 from ..genvarloader import fill_empty_scalar_i32 as _fill_empty_scalar_i32_rust
-from ..genvarloader import assemble_variant_buffers_i32 as _assemble_variant_buffers_i32_rust
-from ..genvarloader import assemble_variant_buffers_u8 as _assemble_variant_buffers_u8_rust
+from ..genvarloader import (
+    assemble_variant_buffers_i32 as _assemble_variant_buffers_i32_rust,
+)
+from ..genvarloader import (
+    assemble_variant_buffers_u8 as _assemble_variant_buffers_u8_rust,
+)
 from ..genvarloader import fill_empty_seq_i32 as _fill_empty_seq_i32_rust
 from ..genvarloader import fill_empty_seq_u8 as _fill_empty_seq_u8_rust
 from ..genvarloader import gather_alleles as _gather_alleles_rust

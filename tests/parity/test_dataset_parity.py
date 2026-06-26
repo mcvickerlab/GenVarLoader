@@ -262,3 +262,59 @@ def test_tracks_realign_getitem_identical_across_backends(
 
         # Restore original between strategies.
         monkeypatch.setattr(_recon_mod, "intervals_and_realign_track_fused", orig_fused)
+
+
+# ---------------------------------------------------------------------------
+# variant-windows live-path spy
+# ---------------------------------------------------------------------------
+
+
+def test_assemble_variant_buffers_runs_on_live_windows_path(
+    phased_svar_gvl, reference, monkeypatch
+):
+    """The rust mega-call must actually fire on the windows __getitem__ path.
+
+    Installs a counting spy on the registered ``rust`` entry of
+    ``assemble_variant_buffers``, opens a variant-windows dataset, indexes a
+    batch, and asserts the spy was invoked at least once.  Guards against a
+    vacuous parity pass caused by the kernel not being wired into the live
+    ``__getitem__`` path (e.g. silently bypassed or short-circuited).
+    """
+    import genvarloader as gvl
+    import genvarloader._dataset._flat_variants  # noqa: F401 — triggers register()
+    import genvarloader._dispatch as _dispatch
+    from genvarloader import VarWindowOpt
+
+    ds = gvl.Dataset.open(phased_svar_gvl, reference=reference)
+    ds = (
+        ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
+        )
+    )
+
+    # Install a counting spy on the rust entry of assemble_variant_buffers.
+    numba_fn, rust_fn = _dispatch.backends("assemble_variant_buffers")
+    calls: dict[str, int] = {"n": 0}
+
+    def _spy_rust(*a, **k):
+        calls["n"] += 1
+        return rust_fn(*a, **k)
+
+    orig_entry = dict(_dispatch._REGISTRY["assemble_variant_buffers"])
+    _dispatch.register(
+        "assemble_variant_buffers", numba=numba_fn, rust=_spy_rust, default="rust"
+    )
+    try:
+        monkeypatch.setenv("GVL_BACKEND", "rust")
+        _ = ds[[0, 1], [0, 1]]
+    finally:
+        _dispatch._REGISTRY["assemble_variant_buffers"] = orig_entry
+
+    assert calls["n"] > 0, (
+        "assemble_variant_buffers was NEVER invoked on the live variant-windows "
+        f"__getitem__ path (calls={calls['n']}) — the backstop is vacuous. "
+        "Inspect get_variants_flat to confirm the kernel is called on the windows branch."
+    )
