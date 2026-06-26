@@ -505,7 +505,7 @@ def reconstruct_haplotype_from_sparse(
     unfilled_length = length - out_idx
     if unfilled_length > 0:
         # fill with reference sequence
-        writable_ref = min(unfilled_length, len(ref) - ref_idx)
+        writable_ref = max(0, min(unfilled_length, len(ref) - ref_idx))
         out_end_idx = out_idx + writable_ref
         ref_end_idx = ref_idx + writable_ref
         out[out_idx:out_end_idx] = ref[ref_idx:ref_end_idx]
