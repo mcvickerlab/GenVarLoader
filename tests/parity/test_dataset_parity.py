@@ -333,12 +333,12 @@ def _compare_strand_outputs(numba_out, rust_out, kind: str) -> None:
 
 @pytest.mark.parametrize(
     "kind",
-    ["reference", "haplotypes", "annotated", "tracks", "tracks-seqs"],
+    ["reference", "haplotypes", "annotated", "tracks", "tracks-seqs", "haps-tracks"],
 )
 def test_neg_strand_parity(kind, tmp_path, synthetic_case, monkeypatch):
     """Mixed +/− strand regions produce byte-identical output across GVL_BACKEND.
 
-    Covers five output kinds over a fresh variants+tracks+strand dataset with
+    Covers six output kinds over a fresh variants+tracks+strand dataset with
     ``max_jitter=0``.  Both backends currently apply RC as a Python post-pass
     before kernel-level RC wiring (Task 8) lands.
 
@@ -346,6 +346,13 @@ def test_neg_strand_parity(kind, tmp_path, synthetic_case, monkeypatch):
     annotations (no GTF / transcript-ID column).  The non-vacuity assertion
     that RC genuinely fires and produces the correct complement+reverse lives in
     ``test_negative_strand_actually_reverse_complements``.
+
+    The ``"haps-tracks"`` kind covers the ``HapsTracks`` reconstructor
+    (``with_seqs("haplotypes").with_tracks("signal")``), which routes through
+    ``intervals_and_realign_track_fused``.  That kernel performs an in-kernel
+    f32 REVERSE for negative-strand rows (rust path); the numba oracle applies
+    the reverse as a Python post-pass.  Byte-identical output across backends
+    proves the two paths agree.
     """
     import genvarloader as gvl
 
@@ -360,6 +367,13 @@ def test_neg_strand_parity(kind, tmp_path, synthetic_case, monkeypatch):
     elif kind == "tracks-seqs":
         ds = gvl.Dataset.open(ds_dir, reference=ref)
         ds = ds.with_seqs("reference").with_tracks("signal")
+    elif kind == "haps-tracks":
+        # Haplotypes + realigned tracks: routes through HapsTracks reconstructor.
+        # intervals_and_realign_track_fused reverses track values in-kernel on
+        # the rust path for negative-strand rows; the numba oracle reverses via
+        # the Python post-pass in _query._getitem_unspliced.
+        ds = gvl.Dataset.open(ds_dir, reference=ref)
+        ds = ds.with_seqs("haplotypes").with_tracks("signal")
     else:
         # "reference", "haplotypes", "annotated"
         ds = gvl.Dataset.open(ds_dir, reference=ref)

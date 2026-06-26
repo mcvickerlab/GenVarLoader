@@ -45,11 +45,6 @@ from ..genvarloader import (
 )
 
 
-def _active_backend() -> str:
-    """Return the active GVL backend name (``"rust"`` by default)."""
-    return os.environ.get("GVL_BACKEND", "rust")
-
-
 # Re-exports for back-compat (callers historically imported these from
 # ``_reconstruct``):
 __all__ = [
