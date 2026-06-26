@@ -75,6 +75,38 @@ pub fn gather_alleles(
     (data, seq_offsets)
 }
 
+/// Reverse-complement the alleles of mask-selected `(b*p)` rows, in place.
+///
+/// `byte_data`   contiguous allele bytes (mutated in place)
+/// `seq_offsets` per-allele byte boundaries (len n_alleles + 1)
+/// `var_offsets` per-(b*p)-row allele boundaries (len n_rows + 1)
+/// `to_rc_row`   per-(b*p)-row bool mask (len n_rows)
+///
+/// Expands the row mask to a per-allele mask via `var_offsets`, then delegates
+/// to `reverse::rc_flat_rows_inplace` (reverse + `COMP`), matching the Python
+/// `np.repeat(per_bp, np.diff(var_offsets))` expansion byte-for-byte.
+pub fn rc_alleles_inplace(
+    byte_data: &mut [u8],
+    seq_offsets: ndarray::ArrayView1<i64>,
+    var_offsets: ndarray::ArrayView1<i64>,
+    to_rc_row: ndarray::ArrayView1<bool>,
+) {
+    let n_alleles = seq_offsets.len() - 1;
+    let mut per_allele = vec![false; n_alleles];
+    for g in 0..to_rc_row.len() {
+        if !to_rc_row[g] {
+            continue;
+        }
+        let a0 = var_offsets[g] as usize;
+        let a1 = var_offsets[g + 1] as usize;
+        for a in a0..a1 {
+            per_allele[a] = true;
+        }
+    }
+    let per_allele = ndarray::Array1::from_vec(per_allele);
+    crate::reverse::rc_flat_rows_inplace(byte_data, seq_offsets, per_allele.view());
+}
+
 /// Generic compact-keep core. Drops values where `keep[j]` is false and
 /// rebuilds row offsets. No `num_traits` dependency — uses `Vec<T>`.
 fn compact_keep_impl<T: Copy>(
@@ -442,5 +474,40 @@ mod tests {
         assert_eq!(nseq.to_vec(), vec![0i64, 1, 3, 6]);
         // new_data: [999] (dummy), [10,20] (var0), [30,40,50] (var1)
         assert_eq!(nd.to_vec(), vec![999i32, 10, 20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn rc_alleles_rcs_only_masked_rows() {
+        // 2 rows. row0 (masked) has 2 alleles: "AC","G". row1 (unmasked): "TT".
+        // seq_offsets delimit alleles: [0,2,3,5]; var_offsets delimit rows: [0,2,3].
+        let mut data = b"ACGTT".to_vec();
+        let seq_offsets = ndarray::array![0i64, 2, 3, 5];
+        let var_offsets = ndarray::array![0i64, 2, 3];
+        let to_rc_row = ndarray::array![true, false];
+        rc_alleles_inplace(&mut data, seq_offsets.view(), var_offsets.view(), to_rc_row.view());
+        // row0: "AC"->"GT", "G"->"C"; row1 "TT" untouched.
+        assert_eq!(&data, b"GTCTT");
+    }
+
+    #[test]
+    fn rc_alleles_all_false_is_noop() {
+        let mut data = b"ACG".to_vec();
+        let seq_offsets = ndarray::array![0i64, 1, 3];
+        let var_offsets = ndarray::array![0i64, 2];
+        let to_rc_row = ndarray::array![false];
+        rc_alleles_inplace(&mut data, seq_offsets.view(), var_offsets.view(), to_rc_row.view());
+        assert_eq!(&data, b"ACG");
+    }
+
+    #[test]
+    fn rc_alleles_handles_empty_allele_and_n() {
+        // 1 masked row, 2 alleles: "" (empty) and "ACN".
+        let mut data = b"ACN".to_vec();
+        let seq_offsets = ndarray::array![0i64, 0, 3];
+        let var_offsets = ndarray::array![0i64, 2];
+        let to_rc_row = ndarray::array![true];
+        rc_alleles_inplace(&mut data, seq_offsets.view(), var_offsets.view(), to_rc_row.view());
+        // "" stays ""; "ACN" -> revcomp -> "NGT".
+        assert_eq!(&data, b"NGT");
     }
 }

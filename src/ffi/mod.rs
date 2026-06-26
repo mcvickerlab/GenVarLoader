@@ -1201,6 +1201,23 @@ mod tests {
 // Python entry point, so these are the only way to assert byte-identity of the
 // PRNG core from test_prng_parity.py. Do NOT remove.
 
+/// In-place reverse-complement of the alleles of mask-selected `(b*p)` rows.
+/// See `crate::variants::rc_alleles_inplace`.
+#[pyfunction]
+pub fn rc_alleles(
+    mut byte_data: PyReadwriteArray1<u8>,
+    seq_offsets: PyReadonlyArray1<i64>,
+    var_offsets: PyReadonlyArray1<i64>,
+    to_rc_row: PyReadonlyArray1<bool>,
+) {
+    crate::variants::rc_alleles_inplace(
+        byte_data.as_slice_mut().unwrap(),
+        seq_offsets.as_array(),
+        var_offsets.as_array(),
+        to_rc_row.as_array(),
+    );
+}
+
 /// [DEBUG] Rust xorshift64 — callable from Python for parity testing.
 /// Mirrors numba `_xorshift64` on `np.uint64`.
 #[pyfunction]

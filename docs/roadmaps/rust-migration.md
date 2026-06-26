@@ -488,6 +488,16 @@ variants/variant-windows) localized the remaining single-thread work:
    both backends (byte-identical parity). Branch: `opt/target-6-kernel-rc`, Carter HPC
    (AMD EPYC 7543, linux-64), HEAD `02497cf`.
 
+   **✅ Variant-allele RC folded (follow-up, 2026-06-25).** The two deferred kinds
+   (`RaggedVariants` + `_FlatVariants`) no longer route variant-allele RC through the
+   seqpro post-pass with per-batch ragged object churn; a gvl rust kernel
+   (`variants::rc_alleles_inplace`, FFI `rc_alleles`, dispatch `rc_alleles` default
+   rust) RCs the raw `_FlatAlleles` buffers in place, applied AFTER dummy-fill so
+   ordering stays byte-identical (custom non-palindromic dummy alleles covered). The
+   seqpro implementation is retained as the registered reference backend (parity + perf
+   gating; deletion is Phase 5). `_FlatVariantWindows` remains never-RC'd. Plan:
+   `docs/superpowers/plans/2026-06-25-rust-variant-rc-fold.md`.
+
    **Re-measured ratios (post-Target-6, 2026-06-25):**
 
    > Harness: `tests/benchmarks/test_e2e.py` via pytest-benchmark, same `pedantic` config as the

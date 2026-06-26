@@ -28,6 +28,7 @@ from ..genvarloader import fill_empty_seq_u8 as _fill_empty_seq_u8_rust
 from ..genvarloader import gather_alleles as _gather_alleles_rust
 from ..genvarloader import gather_rows_f32 as _gather_rows_f32_rust
 from ..genvarloader import gather_rows_i32 as _gather_rows_i32_rust
+from ..genvarloader import rc_alleles as _rc_alleles_rust_kernel
 from ._genotypes import _as_starts_stops
 
 if TYPE_CHECKING:
@@ -119,26 +120,18 @@ class _FlatAlleles:
     def reverse_masked(self, mask: NDArray[np.bool_]) -> "_FlatAlleles":
         """DNA reverse-complement the mask-selected rows' alleles, in place.
 
-        ``mask`` is one entry per region (length ``b``); it is broadcast across
-        ploidy then across each (b*p) row's variant count, exactly matching
-        ``RaggedVariants.rc_`` (``np.repeat(to_rc, ploidy)`` then
-        ``np.repeat(per_bp, np.diff(group_off))``).
+        ``mask`` is one entry per region (length ``b``); broadcast across ploidy
+        to a per-(b*p) row mask, then expanded per-allele inside the dispatched
+        ``rc_alleles`` kernel (rust default, seqpro reference).
         """
-        from seqpro.rag import Ragged
-
-        from .._ragged import reverse_complement_masked
-
         m = np.ascontiguousarray(mask, np.bool_).reshape(-1)
-        # per-(b*p) mask: broadcast each region's flag across ploidy
-        per_bp = np.repeat(m, self.ploidy)
-        # per-allele mask: repeat each row's flag across its variant count
-        per_allele = np.repeat(per_bp, np.diff(self.var_offsets))
-        view = Ragged.from_offsets(
-            self.byte_data.view("S1"),
-            (per_allele.size, None),
+        per_bp = np.repeat(m, self.ploidy)  # per-(b*p) row mask
+        get("rc_alleles")(
+            self.byte_data,
             np.asarray(self.seq_offsets, np.int64),
+            np.asarray(self.var_offsets, np.int64),
+            per_bp,
         )
-        reverse_complement_masked(view, per_allele)  # mutates byte_data in place
         return self
 
     def reshape(self, shape: int | tuple[int, ...]) -> "_FlatAlleles":
@@ -932,6 +925,48 @@ register(
     "assemble_variant_buffers",
     numba=_assemble_variant_buffers_numba_entry,
     rust=_assemble_variant_buffers_rust,
+    default="rust",
+)
+
+
+def _rc_alleles_reference(byte_data, seq_offsets, var_offsets, to_rc_row):
+    """Reference backend: seqpro reverse_complement_masked on a flat allele view.
+
+    `to_rc_row` is the per-(b*p) row mask (already ploidy-broadcast); expand to
+    per-allele via `var_offsets`, then RC each masked allele in place. Mutates
+    `byte_data` in place; byte-identical to `rc_alleles_inplace`.
+    """
+    from seqpro.rag import Ragged
+
+    from .._ragged import reverse_complement_masked
+
+    seq_off = np.ascontiguousarray(seq_offsets, np.int64)
+    var_off = np.ascontiguousarray(var_offsets, np.int64)
+    row_mask = np.ascontiguousarray(to_rc_row, np.bool_).reshape(-1)
+    if not row_mask.any():
+        return
+    per_allele = np.repeat(row_mask, np.diff(var_off))
+    n_alleles = len(seq_off) - 1
+    view = Ragged.from_offsets(byte_data.view("S1"), (n_alleles, None), seq_off)
+    reverse_complement_masked(view, per_allele)  # mutates byte_data in place
+
+
+def _rc_alleles_rust(byte_data, seq_offsets, var_offsets, to_rc_row):
+    assert byte_data.dtype == np.uint8 and byte_data.flags.c_contiguous, (
+        "rc_alleles requires a contiguous uint8 byte_data for in-place RC"
+    )
+    _rc_alleles_rust_kernel(
+        byte_data,
+        np.ascontiguousarray(seq_offsets, np.int64),
+        np.ascontiguousarray(var_offsets, np.int64),
+        np.ascontiguousarray(to_rc_row, np.bool_),
+    )
+
+
+register(
+    "rc_alleles",
+    numba=_rc_alleles_reference,
+    rust=_rc_alleles_rust,
     default="rust",
 )
 
