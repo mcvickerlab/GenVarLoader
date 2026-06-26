@@ -847,6 +847,7 @@ class Haps(Reconstructor[_H]):
                     keep_offsets=None
                     if req.keep_offsets is None
                     else np.ascontiguousarray(req.keep_offsets, np.int64),
+                    to_rc=None,
                 )
                 return cast(
                     "Ragged[np.bytes_]",

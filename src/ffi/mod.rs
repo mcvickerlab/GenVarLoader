@@ -407,6 +407,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
     output_length: i64,
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
+    to_rc: Option<PyReadonlyArray1<bool>>,
 ) -> (Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>) {
     use crate::genotypes;
     use crate::reconstruct;
@@ -494,6 +495,15 @@ pub fn reconstruct_haplotypes_fused<'py>(
         None, // annot_v_idxs — not supported in fused plain path
         None, // annot_ref_pos — not supported in fused plain path
     );
+
+    // Step 4b: optional in-kernel reverse-complement (one bool per (query, hap) work item).
+    if let Some(to_rc) = to_rc.as_ref() {
+        crate::reverse::rc_flat_rows_inplace(
+            out_data.as_slice_mut().unwrap(),
+            out_offsets_vec.view(),
+            to_rc.as_array(),
+        );
+    }
 
     // Step 5: return owned arrays — Python wraps them with no further coercions.
     (out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py))
@@ -930,6 +940,19 @@ pub fn intervals_and_realign_track_fused(
     );
 
     Ok(())
+}
+
+// ── Task 3: guard test — drives rc_flat_rows_inplace on a synthetic hap buffer ─
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn haplotype_buffer_rc_is_revcomp_of_forward() {
+        let mut out = b"ACGTA".to_vec(); // pretend reconstructed forward bytes
+        let offsets = ndarray::array![0i64, 5];
+        let to_rc = ndarray::array![true];
+        crate::reverse::rc_flat_rows_inplace(&mut out, offsets.view(), to_rc.view());
+        assert_eq!(&out, b"TACGT"); // revcomp(ACGTA)
+    }
 }
 
 // ── DEBUG exports for PRNG parity tests (Task 7) ─────────────────────────────
