@@ -458,7 +458,7 @@ variants/variant-windows) localized the remaining single-thread work:
    20% and close the tracks-only gap; also speeds the combined tracks path (shared kernel). This is the
    single clearest path to **rust > numba single-threaded** on the cheapest read.
 
-   **✅ ADDRESSED (branch `opt/target-5-intervals-slice`, PR: <link pending>).** Raw-slice form
+   **✅ ADDRESSED (branch `opt/target-5-intervals-slice`, PR [#248](https://github.com/mcvickerlab/GenVarLoader/pull/248)).** Raw-slice form
    landed (no `unsafe` needed): `out.as_slice_mut()` hoisted once before the interval loop,
    inner-loop body rewritten to `out_slice[a..b].fill(value)` / `out_slice.fill(0.0)` on
    `&mut [f32]`, dropping per-interval `SliceInfo` construction + bounds-check. Rust min
