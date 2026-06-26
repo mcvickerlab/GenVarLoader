@@ -545,6 +545,7 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
     pad_char: u8,
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
+    to_rc: Option<PyReadonlyArray1<bool>>,
 ) -> Bound<'py, PyArray1<u8>> {
     use crate::reconstruct;
 
@@ -581,6 +582,17 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
         None, // annot_v_idxs — not used in splice path
         None, // annot_ref_pos — not used in splice path
     );
+
+    // Optional in-place RC per permuted element (negative-strand haplotypes).
+    // out_offsets_a is the permuted per-element offsets array (splice_plan.permuted_out_offsets),
+    // so each masked element is RC'd in its own byte range — matching the to_rc_per_elem post-pass.
+    if let Some(to_rc) = to_rc.as_ref() {
+        crate::reverse::rc_flat_rows_inplace(
+            out_data.as_slice_mut().unwrap(),
+            out_offsets_a,
+            to_rc.as_array(),
+        );
+    }
 
     // Return out_data only — Python already holds out_offsets (no round-trip).
     out_data.into_pyarray(py)
@@ -961,6 +973,7 @@ pub fn intervals_and_realign_track_fused(
 
 // ── Task 3: guard test — drives rc_flat_rows_inplace on a synthetic hap buffer ─
 // ── Task 4: guard test — drives reverse_flat_rows_inplace::<f32> (reverse only) ─
+// ── Task 6: guard test — proves per-element masking over permuted offsets ────────
 #[cfg(test)]
 mod tests {
     #[test]
@@ -979,6 +992,17 @@ mod tests {
         let to_rc = ndarray::array![true];
         crate::reverse::reverse_flat_rows_inplace(&mut out, offsets.view(), to_rc.view());
         assert_eq!(out, vec![3.0, 2.0, 1.0]); // no value transform
+    }
+
+    #[test]
+    fn spliced_rc_applies_per_element_over_permuted_offsets() {
+        // two permuted elements: "ACG" (rc) and "TTT" (not rc)
+        let mut out = b"ACGTTT".to_vec();
+        let offsets = ndarray::array![0i64, 3, 6];
+        let to_rc = ndarray::array![true, false];
+        crate::reverse::rc_flat_rows_inplace(&mut out, offsets.view(), to_rc.view());
+        assert_eq!(&out[0..3], b"CGT"); // revcomp(ACG)
+        assert_eq!(&out[3..6], b"TTT"); // untouched
     }
 
     #[test]

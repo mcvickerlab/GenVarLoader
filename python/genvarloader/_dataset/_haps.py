@@ -916,6 +916,7 @@ class Haps(Reconstructor[_H]):
                 keep_offsets=None
                 if keep_offsets_perm is None
                 else np.ascontiguousarray(keep_offsets_perm, np.int64),
+                to_rc=None,
             )
         else:
             # Numba composed path — unchanged oracle.
