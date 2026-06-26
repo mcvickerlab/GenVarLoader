@@ -257,7 +257,7 @@ class _RefShim:
         out_offsets = lengths_to_offsets(lengths)
         regions = np.stack([contigs, starts, ends], axis=1).astype(np.int32)
         data = _get_reference_ffi(
-            regions, out_offsets, self._ref, self._off, self._pad, False
+            regions, out_offsets, self._ref, self._off, self._pad, False, None
         )
         return Ragged.from_offsets(data.view("S1"), (n, None), out_offsets)
 

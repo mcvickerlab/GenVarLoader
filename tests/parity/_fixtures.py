@@ -79,6 +79,55 @@ def _make_session_bigwigs(bw_dir: Path, seed: int = 42) -> dict[str, str]:
     return paths
 
 
+def build_strand_mixed_dataset(work_dir: Path, svar_path: Path) -> Path:
+    """Write a variants+tracks GVL dataset with mixed + and − strand regions.
+
+    Strand layout (index → region → strand):
+      0: chr1:1010685-1010705  strand=+1  (overlaps GAGA→G deletion on chr1)
+      1: chr1:1110686-1110706  strand=−1  (non-vacuity anchor: GAATGTAAGACGCAGCGTGC)
+      2: chr1:1210686-1210706  strand=+1
+      3: chr2:14360-14380      strand=−1
+      4: chr2:1110686-1110706  strand=+1
+
+    Region 1 (the first -strand region) carries a non-palindromic reference
+    sequence so the non-vacuity assertion in
+    ``test_negative_strand_actually_reverse_complements`` reliably fires.
+
+    ``max_jitter=0`` satisfies the ``intervals_to_tracks`` Rust kernel contract
+    (stored interval starts must equal the query region starts).
+    """
+    from genoray import SparseVar
+    import polars as pl
+
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    bw_dir = work_dir / "bw"
+    sample_to_bw = _make_session_bigwigs(bw_dir, seed=42)
+    track = gvl.BigWigs("signal", sample_to_bw)
+    sv = SparseVar(svar_path)
+
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1", "chr2", "chr2"],
+            "chromStart": [1010685, 1110686, 1210686, 14360, 1110686],
+            "chromEnd": [1010705, 1110706, 1210706, 14380, 1110706],
+            "strand": ["+", "-", "+", "-", "+"],
+        }
+    )
+
+    out = work_dir / "strand_ds.gvl"
+    gvl.write(
+        path=out,
+        bed=bed,
+        variants=sv,
+        tracks=track,
+        max_jitter=0,
+        overwrite=True,
+    )
+    return out
+
+
 def build_haps_tracks_dataset(work_dir: Path, svar_path: Path) -> Path:
     """Write a variants+tracks GVL dataset and return its path.
 

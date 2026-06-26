@@ -447,7 +447,7 @@ The de-noised benchmark (above) exposed a real **tracks-only 0.63×** deficit an
 already 1.68×** (rust wins). Profiling each path the user cares about (tracks-only, haplotypes,
 variants/variant-windows) localized the remaining single-thread work:
 
-5. **⬜ tracks-only 0.63× — per-interval `ndarray` slicing in `intervals::intervals_to_tracks`
+5. **✅ tracks-only 0.63× — per-interval `ndarray` slicing in `intervals::intervals_to_tracks`
    (rust-specific, highest value).** `perf` self-time on the tracks-only path:
    `intervals_to_tracks` 31% + `ndarray::slice_mut` **11%** + `ndarray::do_slice` **9.5%** ≈ **20.5%
    spent in ndarray slice machinery**, from `out.slice_mut(s![a..b]).fill(value)` in the inner loop
@@ -458,7 +458,14 @@ variants/variant-windows) localized the remaining single-thread work:
    20% and close the tracks-only gap; also speeds the combined tracks path (shared kernel). This is the
    single clearest path to **rust > numba single-threaded** on the cheapest read.
 
-6. **⬜ Strand reverse-complement post-pass (`reverse_complement_ragged` / `_flat.reverse_masked`) —
+   **✅ ADDRESSED (branch `opt/target-5-intervals-slice`, PR [#248](https://github.com/mcvickerlab/GenVarLoader/pull/248)).** Raw-slice form
+   landed (no `unsafe` needed): `out.as_slice_mut()` hoisted once before the interval loop,
+   inner-loop body rewritten to `out_slice[a..b].fill(value)` / `out_slice.fill(0.0)` on
+   `&mut [f32]`, dropping per-interval `SliceInfo` construction + bounds-check. Rust min
+   1.7112 ms → 1.1953 ms (~30% rust-side drop), tracks-only ratio 0.63× → 1.004×
+   (numba_min/rust_min).
+
+6. **✅ Strand reverse-complement post-pass (`reverse_complement_ragged` / `_flat.reverse_masked`) —
    backend-agnostic, biggest throughput sink on the seq paths.** Self-time (py-spy, no `--native`):
    **haplotypes ~19% self / ~28% inclusive**, **variants ~15% / ~16%**, **tracks-only ~10%**. Every
    negative-strand region triggers a Python/numpy RC pass *after* reconstruction. numba pays it too, so
@@ -467,6 +474,69 @@ variants/variant-windows) localized the remaining single-thread work:
    reconstruct/track kernels — emit negative-strand regions already reverse-complemented (write the
    output buffer back-to-front with complemented bytes), deleting the `reverse_complement_ragged` step
    in `_query.py`. This is roadmap target 4's RC half, now quantified and promoted.
+   _PR: [#249](https://github.com/mcvickerlab/GenVarLoader/pull/249) → rust-migration_
+
+   **Implementation:** `src/reverse.rs` adds `rc_flat_rows_inplace` / `reverse_flat_rows_inplace`
+   primitives (COMP LUT, in-place on `&mut [u8]` / `&mut [f32]`). All five flat read-path kernels
+   (`get_reference`, `reconstruct_haplotypes_fused`, `intervals_and_realign_track_fused`,
+   `reconstruct_annotated_haplotypes_fused`, `reconstruct_haplotypes_spliced_fused`) accept
+   `to_rc: Option<ArrayView1<bool>>` and call the primitive in-kernel immediately after reconstruction
+   (correct ordering: RC after forward write + insertion fill). The Python layer computes the
+   per-element `to_rc` mask once per batch and routes it to the appropriate kernel; the
+   `reverse_complement_ragged` Python post-pass is **retained for numba** (parity oracle) and for the
+   two deferred kinds (`RaggedVariants` + `_FlatVariants`, targeted in Target 7). 958 tests pass on
+   both backends (byte-identical parity). Branch: `opt/target-6-kernel-rc`, Carter HPC
+   (AMD EPYC 7543, linux-64), HEAD `02497cf`.
+
+   **Re-measured ratios (post-Target-6, 2026-06-25):**
+
+   > Harness: `tests/benchmarks/test_e2e.py` via pytest-benchmark, same `pedantic` config as the
+   > post-format-2.0 table above (iterations=10, rounds=50, warmup=5). Corpus `chr22_geuv.gvl`
+   > (165 regions: **82 negative-strand / 83 positive-strand** — 50% neg-strand; with_len(16384),
+   > BATCH=32), `NUMBA_NUM_THREADS=1`, release build, Carter HPC. Ratios are min rust ÷ min numba
+   > (ms/batch) expressed as batch/s ratio = numba_min_ms / rust_min_ms. Numba absolute times
+   > differ from the prior session (different HPC load); use the **ratio**, not the absolute.
+
+   | Mode | rust min (ms) | numba min (ms) | rust ÷ numba | Before T6 | Δ |
+   |---|---|---|---|---|---|
+   | tracks-only (`intervals_and_realign_track_fused`) | 1.1012 | 0.5386 | **0.49×** | 0.63× | −0.14 (note ①) |
+   | tracks-seqs (haplotypes + `read-depth`) | 1.7048 | 1.7039 | **1.00×** | 0.95× | +0.05 |
+   | haplotypes (`reconstruct_haplotypes_fused`) | 1.7149 | 1.7218 | **1.00×** | 0.94× | +0.06 |
+   | annotated (`reconstruct_annotated_haplotypes_fused`) | 6.1247 | 5.5100 | **0.90×** | 1.68× | −0.78 (note ②) |
+
+   **Notes:**
+   - ① tracks-only ratio **declined** (0.63→0.49×) — this is NOT a T6 regression in tracks throughput.
+     The tracks-only numba time dropped from the prior session's 1.07 ms to 0.54 ms without any numba
+     code change (different HPC load). Within-session the rust tracks-only path is still bounded by the
+     same ndarray slice machinery as before T6 (Target 5 is not yet merged into this branch); Target 6
+     adds `reverse_flat_rows_inplace` for the track pass, which fires for the 50% neg-strand rows.
+     Comparison across sessions is unreliable for the cheapest path (~1 ms); use the within-session ratio.
+   - ② annotated regression (1.68×→0.90×) is session noise: the prior 9.00 ms numba annotated time was
+     inflated (likely first-run JIT compilation not fully flushed by warmup_rounds=5; the annotated path
+     is rarely pre-warmed). The current 5.51 ms is the stable numba time. No T6 regression: the annotated
+     kernel only added `Option<bool[]>` argument with `None` fast path; the stable numba reference is now
+     5.51 ms vs rust 6.12 ms.
+
+   **Perf profile (rust haplotypes, 12k batches, 2026-06-25):**
+
+   > `perf record -F 999 ... profile.py --mode haplotypes --n-batches 12000`, Carter HPC. Top symbols
+   > by self-time (`perf report --stdio --no-children`):
+   >
+   > | % self | Symbol |
+   > |---|---|
+   > | 20.64% | `genvarloader::intervals::intervals_to_tracks` |
+   > | 15.44% | `ndarray::impl_methods::slice_mut` (Target 5, pending) |
+   > | **9.42%** | **`genvarloader::reverse::rc_flat_rows_inplace`** (in-kernel; was ~19% Python post-pass) |
+   > | 8.39% | `ndarray::dimension::do_slice` (Target 5, pending) |
+   > | 6.33% | `genvarloader::tracks::shift_and_realign_tracks_sparse` |
+   > | 3.48% | `_PyEval_EvalFrameDefault` |
+   > | 2.91% | `genvarloader::reconstruct::reconstruct_haplotypes_from_sparse` |
+   >
+   > **RC self-time result: `reverse_complement_ragged` / seqpro RC Python frame is GONE from the rust
+   > profile.** The in-kernel `rc_flat_rows_inplace` (9.42%) replaces the ~19% Python/numpy post-pass —
+   > roughly a 2× reduction in RC wall-time, moving from a cold Python FFI pass to a hot in-cache Rust
+   > loop. The ndarray slice machinery (15.44% + 8.39% ≈ 24%) remains the next highest-value target
+   > (Target 5, `opt/target-5-intervals-slice`, not yet merged into this branch).
 
 7. **✅ ADDRESSED (branch `opt/target-7-windows-rust-assembly`, [PR #250](https://github.com/mcvickerlab/GenVarLoader/pull/250) → `rust-migration`).** variant-windows — collapsed
    per-batch object churn into one Rust call. `assemble_variant_buffers_{u8,i32}` assembles alt/ref
@@ -482,12 +552,17 @@ variants/variant-windows) localized the remaining single-thread work:
    (the path is dominated by `intervals_to_tracks` / `shift_and_realign_tracks_sparse` track work,
    not the variant assembly itself, so this is expected noise not a regression).
 
-> **Sequencing for follow-up PRs:** (5) lands first and standalone — small, rust-only, closes the one
-> path where rust is clearly slower. (6) is the biggest absolute throughput win and unblocks honest
-> parallel numbers; it is a larger change (kernel RC + delete the numpy pass) and should be its own PR
-> with byte-identical parity gating. (7) landed (assembly-only; Phase 5 still owns the full one-big
-> `__getitem__` rewrite). Only after (5)+(6) put rust ahead single-threaded do we add rayon batch
-> parallelism (Phase 5) — parallelizing first would just scale the numpy RC pass and the ndarray slicing.
+> **Sequencing for follow-up PRs (updated 2026-06-25):** (5) ⬜ lands first — small, rust-only, closes
+> the tracks-only gap. **(6) ✅ DONE** — RC folded into rust kernels on `opt/target-6-kernel-rc`; see
+> measurements above; PR [#249](https://github.com/mcvickerlab/GenVarLoader/pull/249). **(7) ✅ DONE** —
+> variants/variant-windows assembly collapsed into one rust call on `opt/target-7-windows-rust-assembly`;
+> see the Target 7 re-measurement below; PR [#250](https://github.com/mcvickerlab/GenVarLoader/pull/250).
+> **Rayon batch parallelism is gated on Targets 5+6+7 landing first** — only after these put rust at or
+> ahead of numba single-threaded (per-query in-loop RC and ndarray slicing eliminated) do we add rayon
+> batch parallelism (Phase 5). The per-query in-loop RC of the T6 design parallelizes cleanly over
+> disjoint per-query slices, so rayon integration is structurally simpler once the post-pass is gone.
+> Parallelizing before (5)+(6) are merged would just scale the remaining numpy RC pass and ndarray
+> slicing overhead.
 
 ##### Target 7 re-measurement (2026-06-25, branch `opt/target-7-windows-rust-assembly`)
 

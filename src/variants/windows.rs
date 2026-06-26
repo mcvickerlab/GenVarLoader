@@ -108,6 +108,7 @@ pub fn fetch_windows(
         ref_offsets,
         pad_char,
         false, // serial: disjoint output already; this is per-variant fanout
+        None,  // to_rc: window/flank fetch is always forward; strand RC handled elsewhere
     );
     (data, rw_off)
 }

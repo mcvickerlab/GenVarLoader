@@ -60,6 +60,7 @@ pub fn get_reference(
     ref_offsets: ArrayView1<i64>,
     pad_char: u8,
     parallel: bool,
+    to_rc: Option<ArrayView1<bool>>,
 ) -> Array1<u8> {
     let total = out_offsets[out_offsets.len() - 1] as usize;
     let mut out = Array1::<u8>::zeros(total);
@@ -102,6 +103,18 @@ pub fn get_reference(
         for (i, &(s, e)) in bounds.iter().enumerate() {
             row(i, &mut out_slice[s..e]);
         }
+    }
+    if let Some(to_rc) = to_rc {
+        debug_assert_eq!(
+            to_rc.len(),
+            out_offsets.len() - 1,
+            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        );
+        crate::reverse::rc_flat_rows_inplace(
+            out.as_slice_mut().unwrap(),
+            out_offsets,
+            to_rc,
+        );
     }
     out
 }
@@ -175,6 +188,7 @@ mod tests {
             ref_offsets.view(),
             pad,
             parallel,
+            None,
         )
         .to_vec()
     }
@@ -216,6 +230,7 @@ mod tests {
             ref_offsets.view(),
             0,
             false,
+            None,
         );
         assert_eq!(result.to_vec(), vec![10, 20, 40, 50]);
     }
@@ -229,4 +244,23 @@ mod tests {
         assert_eq!(serial, parallel);
     }
 
+    #[test]
+    fn get_reference_applies_rc_when_masked() {
+        // contig "ACGTAA"; region [0,3) -> forward "ACG" -> revcomp "CGT" (non-palindrome)
+        let reference = ndarray::array![b'A', b'C', b'G', b'T', b'A', b'A'];
+        let ref_offsets = ndarray::array![0i64, 6];
+        let regions = ndarray::array![[0i32, 0, 3]];
+        let out_offsets = ndarray::array![0i64, 3];
+        let to_rc = ndarray::array![true];
+        let out = get_reference(
+            regions.view(),
+            out_offsets.view(),
+            reference.view(),
+            ref_offsets.view(),
+            b'N',
+            false,
+            Some(to_rc.view()),
+        );
+        assert_eq!(out.to_vec(), b"CGT".to_vec());
+    }
 }
