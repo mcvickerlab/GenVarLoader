@@ -37,7 +37,22 @@ pub fn reverse_flat_rows_inplace<T: Copy>(
     }
 }
 
-/// Reverse AND complement bytes within each masked row via `COMP`.
+/// Reverse a single row of bytes then DNA-complement it in place via the
+/// branchless ACGT↔TGCA arithmetic (identity for every other byte; A/T = XOR
+/// 0x15, C/G = XOR 0x04). `#[inline]` so callers (rc_flat_rows_inplace,
+/// rc_alleles_inplace) inline it back to the prior codegen.
+#[inline]
+pub(crate) fn rc_row(row: &mut [u8]) {
+    row.reverse();
+    for b in row.iter_mut() {
+        let v = *b;
+        let at = (((v == b'A') | (v == b'T')) as u8).wrapping_neg(); // 0xFF if A/T
+        let cg = (((v == b'C') | (v == b'G')) as u8).wrapping_neg(); // 0xFF if C/G
+        *b = v ^ (at & 21) ^ (cg & 4);
+    }
+}
+
+/// Reverse AND complement bytes within each masked row via `rc_row`.
 pub fn rc_flat_rows_inplace(
     data: &mut [u8],
     offsets: ArrayView1<i64>,
@@ -49,19 +64,7 @@ pub fn rc_flat_rows_inplace(
         }
         let s = offsets[i] as usize;
         let e = offsets[i + 1] as usize;
-        let row = &mut data[s..e];
-        row.reverse();
-        // Replace LUT gather (COMP[*b]) with branchless arithmetic so LLVM can
-        // auto-vectorize. Logic: A↔T uses XOR 21 (0x15), C↔G uses XOR 4 (0x04);
-        // identity for all other bytes.  Produces byte-identical output to COMP.
-        // wrapping_neg() converts bool-as-0/1 to SIMD-style 0x00/0xFF mask so
-        // the AND idiom is recognized by the loop vectorizer.
-        for b in row.iter_mut() {
-            let v = *b;
-            let at = (((v == b'A') | (v == b'T')) as u8).wrapping_neg(); // 0xFF if A/T
-            let cg = (((v == b'C') | (v == b'G')) as u8).wrapping_neg(); // 0xFF if C/G
-            *b = v ^ (at & 21) ^ (cg & 4);
-        }
+        rc_row(&mut data[s..e]);
     }
 }
 
