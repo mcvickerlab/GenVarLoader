@@ -36,6 +36,7 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
         flat: bool = False,
+        to_rc: "NDArray[np.bool_] | None" = None,
     ) -> Ragged[np.bytes_]:
         batch_size = len(idx)
 
@@ -52,13 +53,14 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
             # (b+1)
             out_offsets = lengths_to_offsets(out_lengths)
 
-            # ragged (b ~l)
+            # ragged (b ~l) — on Rust backend, RC is folded into the kernel.
             ref = get_reference(
                 regions=regions,
                 out_offsets=out_offsets,
                 reference=self.reference.reference,
                 ref_offsets=self.reference.offsets,
                 pad_char=self.reference.pad_char,
+                to_rc=to_rc,
             )  # uint8 flat buffer
 
             return cast(
@@ -67,10 +69,12 @@ class Ref(Reconstructor[Ragged[np.bytes_]]):
             )
 
         # Spliced path: delegate to the shared kernel-dispatch helper.
+        # to_rc is the permuted per-element mask from _getitem_spliced.
         return _fetch_spliced_ref(
             regions=regions,
             plan=splice_plan,
             reference=self.reference.reference,
             ref_offsets=self.reference.offsets,
             pad_char=self.reference.pad_char,
+            to_rc=to_rc,
         )

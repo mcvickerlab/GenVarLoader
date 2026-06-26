@@ -5,6 +5,7 @@ pub mod intervals;
 pub mod ragged;
 pub mod reconstruct;
 pub mod reference;
+pub mod reverse;
 pub mod tables;
 pub mod tracks;
 pub mod variants;

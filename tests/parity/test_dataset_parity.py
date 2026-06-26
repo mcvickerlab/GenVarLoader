@@ -1,6 +1,6 @@
 """Dataset read-path parity backstops for track kernels.
 
-Covers two cases:
+Covers three cases:
 
 1. ``intervals_to_tracks`` only (track-only dataset, no variants):
    Proves that flipping GVL_BACKEND produces byte-identical tracks through
@@ -9,6 +9,18 @@ Covers two cases:
 2. ``shift_and_realign_tracks_sparse`` (haplotypes+tracks dataset with indels):
    Proves that the dispatch wiring for the realignment kernel is correct
    end-to-end, across every insertion-fill strategy.
+
+3. Strand=−1 parity backstops (Task 7 — pre-wiring safety net):
+   Proves that flipping GVL_BACKEND produces byte-identical output for datasets
+   with mixed + and − strand regions, across all five output kinds
+   (reference, haplotypes, annotated, tracks, tracks-seqs) in the UNSPLICED
+   path, and across the four splice-capable kinds (reference, haplotypes,
+   annotated, tracks) in the SPLICED path.  Both backends currently apply RC as
+   a Python post-pass in ``_query._getitem_unspliced`` / ``_getitem_spliced``;
+   these tests establish the regression net that Task 8 kernel-level RC wiring
+   must keep green.  Each path also carries a non-vacuity assertion (output
+   differs from the forward orientation AND equals the exact reverse-complement
+   on a non-palindromic −strand region/transcript).
 """
 
 from __future__ import annotations
@@ -16,7 +28,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tests.parity._fixtures import build_haps_tracks_dataset, build_track_dataset
+from tests.parity._fixtures import (
+    build_haps_tracks_dataset,
+    build_strand_mixed_dataset,
+    build_track_dataset,
+)
 
 pytestmark = pytest.mark.parity
 
@@ -262,3 +278,359 @@ def test_tracks_realign_getitem_identical_across_backends(
 
         # Restore original between strategies.
         monkeypatch.setattr(_recon_mod, "intervals_and_realign_track_fused", orig_fused)
+
+
+# ---------------------------------------------------------------------------
+# Strand=−1 parity backstops (Task 7 — pre-wiring safety net)
+# ---------------------------------------------------------------------------
+#
+# Both backends currently apply reverse-complement as a Python post-pass
+# (``_query._getitem_unspliced`` calls ``reverse_complement_ragged`` after the
+# reconstructor returns).  These tests prove byte-identical output before any
+# kernel-level RC wiring (Task 8) is done, establishing the regression net.
+# Task 8 must keep every parametrize case below green.
+#
+# Kinds covered: reference, haplotypes, annotated, tracks, tracks-seqs.
+# Spliced variants are excluded: the fixture has no transcript annotations.
+
+
+def _compare_strand_outputs(numba_out, rust_out, kind: str) -> None:
+    """Assert byte-identical output between backends.
+
+    Handles Ragged (reference/haplotypes/tracks), RaggedAnnotatedHaps
+    (annotated), and tuple[Ragged, Ragged] (tracks-seqs).
+    """
+    from genvarloader._ragged import RaggedAnnotatedHaps
+
+    def _cmp_one(n, r, label: str) -> None:
+        np.testing.assert_array_equal(
+            np.asarray(n.data),
+            np.asarray(r.data),
+            err_msg=f"[{kind}] {label}: data differs across backends",
+        )
+        np.testing.assert_array_equal(
+            np.asarray(n.offsets, dtype=np.int64),
+            np.asarray(r.offsets, dtype=np.int64),
+            err_msg=f"[{kind}] {label}: offsets differ across backends",
+        )
+
+    def _cmp(n, r, label: str) -> None:
+        if isinstance(n, RaggedAnnotatedHaps):
+            assert isinstance(r, RaggedAnnotatedHaps)
+            _cmp_one(n.haps, r.haps, f"{label}.haps")
+            _cmp_one(n.var_idxs, r.var_idxs, f"{label}.var_idxs")
+            _cmp_one(n.ref_coords, r.ref_coords, f"{label}.ref_coords")
+        else:
+            _cmp_one(n, r, label)
+
+    if isinstance(numba_out, tuple):
+        assert isinstance(rust_out, tuple) and len(numba_out) == len(rust_out)
+        for i, (n, r) in enumerate(zip(numba_out, rust_out)):
+            _cmp(n, r, f"component[{i}]")
+    else:
+        _cmp(numba_out, rust_out, "output")
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["reference", "haplotypes", "annotated", "tracks", "tracks-seqs", "haps-tracks"],
+)
+def test_neg_strand_parity(kind, tmp_path, synthetic_case, monkeypatch):
+    """Mixed +/− strand regions produce byte-identical output across GVL_BACKEND.
+
+    Covers six output kinds over a fresh variants+tracks+strand dataset with
+    ``max_jitter=0``.  Both backends currently apply RC as a Python post-pass
+    before kernel-level RC wiring (Task 8) lands.
+
+    Spliced variants are excluded: the strand fixture has no transcript
+    annotations (no GTF / transcript-ID column).  The non-vacuity assertion
+    that RC genuinely fires and produces the correct complement+reverse lives in
+    ``test_negative_strand_actually_reverse_complements``.
+
+    The ``"haps-tracks"`` kind covers the ``HapsTracks`` reconstructor
+    (``with_seqs("haplotypes").with_tracks("signal")``), which routes through
+    ``intervals_and_realign_track_fused``.  That kernel performs an in-kernel
+    f32 REVERSE for negative-strand rows (rust path); the numba oracle applies
+    the reverse as a Python post-pass.  Byte-identical output across backends
+    proves the two paths agree.
+    """
+    import genvarloader as gvl
+
+    ds_dir = build_strand_mixed_dataset(tmp_path, synthetic_case.svar_path)
+    ref = gvl.Reference.from_path(synthetic_case.ref_path, in_memory=False)
+
+    # Open and configure the dataset for the kind under test.
+    if kind == "tracks":
+        # Open without reference so no seq mode is auto-activated by Dataset.open.
+        ds = gvl.Dataset.open(ds_dir)
+        ds = ds.with_seqs(None).with_tracks("signal")
+    elif kind == "tracks-seqs":
+        ds = gvl.Dataset.open(ds_dir, reference=ref)
+        ds = ds.with_seqs("reference").with_tracks("signal")
+    elif kind == "haps-tracks":
+        # Haplotypes + realigned tracks: routes through HapsTracks reconstructor.
+        # intervals_and_realign_track_fused reverses track values in-kernel on
+        # the rust path for negative-strand rows; the numba oracle reverses via
+        # the Python post-pass in _query._getitem_unspliced.
+        ds = gvl.Dataset.open(ds_dir, reference=ref)
+        ds = ds.with_seqs("haplotypes").with_tracks("signal")
+    else:
+        # "reference", "haplotypes", "annotated"
+        ds = gvl.Dataset.open(ds_dir, reference=ref)
+        ds = ds.with_seqs(kind).with_tracks(False)  # type: ignore[arg-type]
+
+    # Non-vacuity guard: fixture must have -strand regions.
+    neg_mask = ds._full_regions[:, 3] == -1
+    assert np.any(neg_mask), (
+        f"[{kind}] Fixture has no -strand regions; parity test is vacuous."
+    )
+
+    # --- numba read ---
+    monkeypatch.setenv("GVL_BACKEND", "numba")
+    out_numba = ds[:, :]
+
+    # --- rust read ---
+    monkeypatch.setenv("GVL_BACKEND", "rust")
+    out_rust = ds[:, :]
+
+    # --- byte-identical comparison ---
+    _compare_strand_outputs(out_numba, out_rust, kind)
+
+
+def test_negative_strand_actually_reverse_complements(
+    tmp_path, synthetic_case, monkeypatch
+):
+    """Non-vacuity: a −strand region's bytes differ from the forward-oriented
+    bytes AND equal the exact reverse-complement.
+
+    Uses reference mode so all samples share the same deterministic reference
+    sequence, making the before/after comparison unambiguous.
+
+    Fixture geometry: region 1 (chr1:1110686-1110706, strand=−1) carries the
+    reference sequence GAATGTAAGACGCAGCGTGC — a non-palindrome whose RC is
+    GCACGCTGCGTCTTACATTC — so both guards reliably fire.
+    """
+    import genvarloader as gvl
+    from seqpro.rag import reverse_complement
+
+    from genvarloader._ragged import _COMP
+
+    ds_dir = build_strand_mixed_dataset(tmp_path, synthetic_case.svar_path)
+    ref = gvl.Reference.from_path(synthetic_case.ref_path, in_memory=False)
+
+    ds = gvl.Dataset.open(ds_dir, reference=ref)
+    ds = ds.with_seqs("reference").with_tracks(False)
+
+    neg_mask = ds._full_regions[:, 3] == -1
+    assert np.any(neg_mask), (
+        "No -strand regions in fixture; non-vacuity test is vacuous."
+    )
+    neg_idx = int(np.where(neg_mask)[0][0])  # first -strand region (index 1)
+
+    monkeypatch.setenv("GVL_BACKEND", "rust")
+
+    # Forward-oriented reference at the -strand region (RC disabled).
+    ds_fwd = ds.with_settings(rc_neg=False)
+    fwd = ds_fwd[neg_idx, 0]  # Ragged[S1], shape (None,)
+
+    # RC-applied output (rc_neg=True by default).
+    out = ds[neg_idx, 0]  # Ragged[S1], shape (None,)
+
+    fwd_bytes = np.asarray(fwd.data).tobytes()
+    out_bytes = np.asarray(out.data).tobytes()
+
+    # Compute the reverse-complement of the forward sequence up front so the
+    # palindrome self-check below can use it.
+    # For a (None,)-shaped Ragged, rag_dim=0 → 1 row → mask has exactly one entry.
+    mask = np.array([True], dtype=bool)
+    rc_fwd = reverse_complement(fwd, _COMP, mask=mask, copy=True)
+    rc_fwd_bytes = np.asarray(rc_fwd.data).tobytes()
+
+    # Self-check: the anchor region must be non-palindromic, else Guard 1 is
+    # silently unreliable (out == fwd would be expected even if RC fired).
+    assert fwd_bytes != rc_fwd_bytes, (
+        f"Anchor -strand region {neg_idx} is palindromic (fwd == rc(fwd)) — "
+        "non-vacuity Guard 1 is unreliable; pick a different anchor region."
+    )
+
+    # Guard 1: RC must have changed bytes (non-palindrome check).
+    assert out_bytes != fwd_bytes, (
+        f"RC had NO effect on -strand region {neg_idx}: output is byte-identical "
+        "to the forward-oriented sequence.  The region may be a palindrome, or "
+        "rc_neg=True is not being applied on the read path."
+    )
+
+    # Guard 2: output must equal the exact reverse-complement of the forward seq.
+    assert out_bytes == rc_fwd_bytes, (
+        f"Output for -strand region {neg_idx} is NOT the exact reverse-complement "
+        "of the forward-oriented sequence.\n"
+        "  forward : "
+        f"{bytes(np.asarray(fwd.data).view(np.uint8)).decode('ascii')!r}\n"
+        "  rc(fwd) : "
+        f"{bytes(np.asarray(rc_fwd.data).view(np.uint8)).decode('ascii')!r}\n"
+        "  output  : "
+        f"{bytes(np.asarray(out.data).view(np.uint8)).decode('ascii')!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Strand=−1 SPLICED parity backstops (Task 7 — pre-wiring safety net)
+# ---------------------------------------------------------------------------
+#
+# Splice mode is activated the same way as test_spliced_haplotypes_parity.py:
+# inject a synthetic ``transcript_id`` column onto ``ds._full_bed`` and call
+# ``with_settings(splice_info="transcript_id")`` — no GTF / transcript-ID
+# storage is required.
+#
+# The 5 strand-mixed regions (strand [+,-,+,-,+]) are grouped into 4
+# transcripts (BED order), arranged so the spliced negative-strand RC path is
+# genuinely exercised:
+#   T1: [0]    chr1 +          single-exon positive
+#   T2: [1]    chr1 -          single-exon PURE NEGATIVE (non-vacuity anchor)
+#   T3: [2,3]  chr1 +, chr2 -  multi-exon containing a negative exon
+#   T4: [4]    chr2 +          single-exon positive
+#
+# RC is applied per-exon (``_query._getitem_spliced`` reverse-complements each
+# element before regrouping into transcripts), so the spliced output of the
+# single-exon T2 is the exact RC of its forward orientation — which makes the
+# non-vacuity Guard 2 (output == revcomp(forward)) hold cleanly.  T3 exercises
+# per-exon RC inside a genuine multi-exon (cross-contig) splice.
+_SPLICE_TRANSCRIPT_IDS = ["T1", "T2", "T3", "T3", "T4"]
+# T2 is the second transcript in BED order → spliced index 1.
+_NEG_TRANSCRIPT_IDX = 1
+
+
+def _open_strand_spliced(ds_dir, ref, kind: str):
+    """Open the strand-mixed dataset in spliced mode for ``kind``.
+
+    Returns the spliced Dataset (or raises if the kind cannot be spliced).
+    """
+    from dataclasses import replace
+
+    import polars as pl
+
+    import genvarloader as gvl
+
+    if kind == "tracks":
+        ds = gvl.Dataset.open(ds_dir)
+        ds = ds.with_seqs(None).with_tracks("signal")
+    else:
+        # "reference", "haplotypes", "annotated"
+        ds = gvl.Dataset.open(ds_dir, reference=ref)
+        ds = ds.with_seqs(kind).with_tracks(False)  # type: ignore[arg-type]
+
+    sub_bed = ds._full_bed.with_columns(
+        pl.Series("transcript_id", _SPLICE_TRANSCRIPT_IDS)
+    )
+    ds = replace(ds, _full_bed=sub_bed).with_settings(splice_info="transcript_id")
+    assert ds.is_spliced, f"[{kind}] dataset should be in spliced mode"
+    return ds
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["reference", "haplotypes", "annotated", "tracks"],
+)
+def test_neg_strand_spliced_parity(kind, tmp_path, synthetic_case, monkeypatch):
+    """Spliced mixed +/− strand transcripts: byte-identical across GVL_BACKEND.
+
+    Covers the four splice-capable output kinds (reference, haplotypes,
+    annotated, tracks).  ``tracks-seqs`` is intentionally excluded: the splice
+    path raises ``NotImplementedError`` for ``SeqsTracks`` ("Splicing of
+    sequences + un-realigned tracks is not supported"), so there is no spliced
+    tracks-seqs combo to compare.
+
+    Both backends currently apply RC per-exon as a Python post-pass in
+    ``_query._getitem_spliced`` before kernel-level RC wiring (Task 8) lands.
+    """
+    import genvarloader as gvl
+
+    ds_dir = build_strand_mixed_dataset(tmp_path, synthetic_case.svar_path)
+    ref = gvl.Reference.from_path(synthetic_case.ref_path, in_memory=False)
+    ds = _open_strand_spliced(ds_dir, ref, kind)
+
+    # The negative-strand anchor transcript (T2) must really be -strand.
+    neg_transcript = ds.spliced_regions[_NEG_TRANSCRIPT_IDX]
+    assert "-" in neg_transcript["strand"].item(0), (
+        f"[{kind}] anchor transcript is not negative-strand; test is vacuous."
+    )
+
+    # --- numba read ---
+    monkeypatch.setenv("GVL_BACKEND", "numba")
+    out_numba = ds[:, :]
+
+    # --- rust read ---
+    monkeypatch.setenv("GVL_BACKEND", "rust")
+    out_rust = ds[:, :]
+
+    # --- byte-identical comparison ---
+    _compare_strand_outputs(out_numba, out_rust, f"spliced/{kind}")
+
+
+def test_negative_strand_spliced_reverse_complements(
+    tmp_path, synthetic_case, monkeypatch
+):
+    """Non-vacuity for the spliced path: a −strand transcript's bytes differ
+    from the forward-oriented bytes AND equal the exact reverse-complement.
+
+    Uses spliced reference mode and the single-exon pure-negative transcript T2
+    (region chr1:1110686-1110706, reference GAATGTAAGACGCAGCGTGC, a
+    non-palindrome).  Because T2 has exactly one exon, per-exon RC of the whole
+    transcript equals the reverse-complement of its forward orientation, so the
+    Guard 2 check is unambiguous.
+    """
+    import genvarloader as gvl
+    from seqpro.rag import reverse_complement
+
+    from genvarloader._ragged import _COMP
+
+    ds_dir = build_strand_mixed_dataset(tmp_path, synthetic_case.svar_path)
+    ref = gvl.Reference.from_path(synthetic_case.ref_path, in_memory=False)
+    ds = _open_strand_spliced(ds_dir, ref, "reference")
+
+    t_idx = _NEG_TRANSCRIPT_IDX
+    assert "-" in ds.spliced_regions[t_idx]["strand"].item(0), (
+        "Anchor spliced transcript is not negative-strand; test is vacuous."
+    )
+
+    monkeypatch.setenv("GVL_BACKEND", "rust")
+
+    # Forward-oriented spliced transcript (RC disabled).
+    ds_fwd = ds.with_settings(rc_neg=False)
+    fwd = ds_fwd[t_idx, 0]  # Ragged[S1], shape (None,)
+
+    # RC-applied spliced transcript (rc_neg=True by default).
+    out = ds[t_idx, 0]  # Ragged[S1], shape (None,)
+
+    fwd_bytes = np.asarray(fwd.data).tobytes()
+    out_bytes = np.asarray(out.data).tobytes()
+
+    # For a single-exon (None,)-shaped Ragged, rag_dim=0 → 1 row → 1 mask entry.
+    mask = np.array([True], dtype=bool)
+    rc_fwd = reverse_complement(fwd, _COMP, mask=mask, copy=True)
+    rc_fwd_bytes = np.asarray(rc_fwd.data).tobytes()
+
+    # Self-check: anchor transcript must be non-palindromic.
+    assert fwd_bytes != rc_fwd_bytes, (
+        f"Anchor spliced transcript {t_idx} is palindromic (fwd == rc(fwd)) — "
+        "non-vacuity Guard 1 is unreliable; pick a different anchor transcript."
+    )
+
+    # Guard 1: RC must have changed bytes.
+    assert out_bytes != fwd_bytes, (
+        f"RC had NO effect on spliced -strand transcript {t_idx}: output is "
+        "byte-identical to the forward-oriented sequence.  rc_neg=True may not "
+        "be applied on the spliced read path."
+    )
+
+    # Guard 2: output must equal the exact reverse-complement of the forward seq.
+    assert out_bytes == rc_fwd_bytes, (
+        f"Output for spliced -strand transcript {t_idx} is NOT the exact "
+        "reverse-complement of the forward-oriented sequence.\n"
+        "  forward : "
+        f"{bytes(np.asarray(fwd.data).view(np.uint8)).decode('ascii')!r}\n"
+        "  rc(fwd) : "
+        f"{bytes(np.asarray(rc_fwd.data).view(np.uint8)).decode('ascii')!r}\n"
+        "  output  : "
+        f"{bytes(np.asarray(out.data).view(np.uint8)).decode('ascii')!r}"
+    )

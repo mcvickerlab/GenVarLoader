@@ -733,6 +733,7 @@ class Tracks(Reconstructor[_T]):
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
         flat: bool = False,
+        to_rc: "NDArray[np.bool_] | None" = None,
     ) -> _T:
         if splice_plan is not None and not issubclass(self.kind, RaggedTracks):
             raise NotImplementedError(
@@ -740,7 +741,7 @@ class Tracks(Reconstructor[_T]):
             )
         if issubclass(self.kind, RaggedTracks):
             out = self._call_float32(
-                idx, r_idx, regions, output_length, splice_plan=splice_plan
+                idx, r_idx, regions, output_length, splice_plan=splice_plan, to_rc=to_rc
             )
         else:
             out = self._call_intervals(idx, flat=flat)
@@ -753,7 +754,10 @@ class Tracks(Reconstructor[_T]):
         regions: NDArray[np.int32],
         output_length: Literal["ragged", "variable"] | int,
         splice_plan: SplicePlan | None = None,
+        to_rc: "NDArray[np.bool_] | None" = None,
     ) -> RaggedTracks:
+        import os as _os
+
         batch_size = len(idx)
 
         if isinstance(output_length, int):
@@ -795,8 +799,19 @@ class Tracks(Reconstructor[_T]):
                 )
 
             out_shape = (len(idx), len(self.active_tracks), None)
-            # flat (b t l)
-            return cast(RaggedTracks, _Flat.from_offsets(out, out_shape, out_offsets))
+            result = _Flat.from_offsets(out, out_shape, out_offsets)
+
+            # On the Rust backend, apply reversal in Python (intervals_to_tracks
+            # has no to_rc; no indel realignment is needed here).  Each query's
+            # n_tracks rows share the same to_rc value, so repeat across tracks.
+            if _os.environ.get("GVL_BACKEND", "rust") == "rust" and to_rc is not None:
+                n_tracks = len(self.active_tracks)
+                to_rc_expanded = np.ascontiguousarray(
+                    np.repeat(to_rc, n_tracks), np.bool_
+                )
+                result = result.reverse_masked(to_rc_expanded, comp=None)
+
+            return cast(RaggedTracks, result)
 
         # ---- splice plan path ----
         assert not isinstance(output_length, int), (
@@ -847,10 +862,19 @@ class Tracks(Reconstructor[_T]):
 
         # Per-element flat (caller rewraps with group_offsets via _regroup).
         out_shape = (splice_plan.permuted_lengths.shape[0], None)
-        return cast(
-            RaggedTracks,
-            _Flat.from_offsets(out_buf, out_shape, splice_plan.permuted_out_offsets),
+        result_spliced = _Flat.from_offsets(
+            out_buf, out_shape, splice_plan.permuted_out_offsets
         )
+
+        # On the Rust backend, apply per-element reversal in Python (no fused
+        # kernel with to_rc for standalone tracks).  to_rc is already the
+        # permuted per-element mask from _getitem_spliced.
+        if _os.environ.get("GVL_BACKEND", "rust") == "rust" and to_rc is not None:
+            result_spliced = result_spliced.reverse_masked(
+                np.ascontiguousarray(to_rc, np.bool_), comp=None
+            )
+
+        return cast(RaggedTracks, result_spliced)
 
     def _call_intervals(
         self, idx: NDArray[np.integer], flat: bool = False

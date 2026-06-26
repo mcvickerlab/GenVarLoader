@@ -407,6 +407,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
     output_length: i64,
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
+    to_rc: Option<PyReadonlyArray1<bool>>,
 ) -> (Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>) {
     use crate::genotypes;
     use crate::reconstruct;
@@ -495,6 +496,20 @@ pub fn reconstruct_haplotypes_fused<'py>(
         None, // annot_ref_pos — not supported in fused plain path
     );
 
+    // Step 4b: optional in-kernel reverse-complement (one bool per (query, hap) work item).
+    if let Some(to_rc) = to_rc.as_ref() {
+        debug_assert_eq!(
+            to_rc.as_array().len(),
+            out_offsets_vec.len() - 1,
+            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        );
+        crate::reverse::rc_flat_rows_inplace(
+            out_data.as_slice_mut().unwrap(),
+            out_offsets_vec.view(),
+            to_rc.as_array(),
+        );
+    }
+
     // Step 5: return owned arrays — Python wraps them with no further coercions.
     (out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py))
 }
@@ -535,6 +550,7 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
     pad_char: u8,
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
+    to_rc: Option<PyReadonlyArray1<bool>>,
 ) -> Bound<'py, PyArray1<u8>> {
     use crate::reconstruct;
 
@@ -571,6 +587,22 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
         None, // annot_v_idxs — not used in splice path
         None, // annot_ref_pos — not used in splice path
     );
+
+    // Optional in-place RC per permuted element (negative-strand haplotypes).
+    // out_offsets_a is the permuted per-element offsets array (splice_plan.permuted_out_offsets),
+    // so each masked element is RC'd in its own byte range — matching the to_rc_per_elem post-pass.
+    if let Some(to_rc) = to_rc.as_ref() {
+        debug_assert_eq!(
+            to_rc.as_array().len(),
+            out_offsets_a.len() - 1,
+            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        );
+        crate::reverse::rc_flat_rows_inplace(
+            out_data.as_slice_mut().unwrap(),
+            out_offsets_a,
+            to_rc.as_array(),
+        );
+    }
 
     // Return out_data only — Python already holds out_offsets (no round-trip).
     out_data.into_pyarray(py)
@@ -618,6 +650,7 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
     output_length: i64,
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
+    to_rc: Option<PyReadonlyArray1<bool>>,
 ) -> (
     Bound<'py, PyArray1<u8>>,
     Bound<'py, PyArray1<i32>>,
@@ -713,6 +746,17 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
         Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
     );
 
+    if let Some(to_rc) = to_rc.as_ref() {
+        let m = to_rc.as_array();
+        debug_assert_eq!(
+            m.len(),
+            out_offsets_vec.len() - 1,
+            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        );
+        crate::reverse::rc_flat_rows_inplace(out_data.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
+        crate::reverse::reverse_flat_rows_inplace(annot_v.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
+        crate::reverse::reverse_flat_rows_inplace(annot_pos.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
+    }
     // Step 5: return owned arrays — Python wraps them with no further coercions.
     (
         out_data.into_pyarray(py),
@@ -733,6 +777,7 @@ pub fn get_reference<'py>(
     ref_offsets: PyReadonlyArray1<i64>,
     pad_char: u8,
     parallel: bool,
+    to_rc: Option<PyReadonlyArray1<bool>>,
 ) -> Bound<'py, PyArray1<u8>> {
     let out = reference::get_reference(
         regions.as_array(),
@@ -741,6 +786,7 @@ pub fn get_reference<'py>(
         ref_offsets.as_array(),
         pad_char,
         parallel,
+        to_rc.as_ref().map(|a| a.as_array()),
     );
     out.into_pyarray(py)
 }
@@ -868,6 +914,7 @@ pub fn intervals_and_realign_track_fused(
     base_seed: u64,
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
+    to_rc: Option<PyReadonlyArray1<bool>>,
 ) -> PyResult<()> {
     use crate::intervals;
     use crate::tracks;
@@ -927,7 +974,71 @@ pub fn intervals_and_realign_track_fused(
         base_seed,
     );
 
+    // Step 3: optional in-place reverse for negative-strand tracks (reverse only, no complement).
+    if let Some(to_rc) = to_rc.as_ref() {
+        debug_assert_eq!(
+            to_rc.as_array().len(),
+            out_offsets.as_array().len() - 1,
+            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        );
+        crate::reverse::reverse_flat_rows_inplace(
+            out.as_slice_mut().unwrap(),
+            out_offsets.as_array(),
+            to_rc.as_array(),
+        );
+    }
+
     Ok(())
+}
+
+// ── Task 3: guard test — drives rc_flat_rows_inplace on a synthetic hap buffer ─
+// ── Task 4: guard test — drives reverse_flat_rows_inplace::<f32> (reverse only) ─
+// ── Task 6: guard test — proves per-element masking over permuted offsets ────────
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn haplotype_buffer_rc_is_revcomp_of_forward() {
+        let mut out = b"ACGTA".to_vec(); // pretend reconstructed forward bytes
+        let offsets = ndarray::array![0i64, 5];
+        let to_rc = ndarray::array![true];
+        crate::reverse::rc_flat_rows_inplace(&mut out, offsets.view(), to_rc.view());
+        assert_eq!(&out, b"TACGT"); // revcomp(ACGTA)
+    }
+
+    #[test]
+    fn track_buffer_rc_is_reverse_only() {
+        let mut out = vec![1.0f32, 2.0, 3.0];
+        let offsets = ndarray::array![0i64, 3];
+        let to_rc = ndarray::array![true];
+        crate::reverse::reverse_flat_rows_inplace(&mut out, offsets.view(), to_rc.view());
+        assert_eq!(out, vec![3.0, 2.0, 1.0]); // no value transform
+    }
+
+    #[test]
+    fn spliced_rc_applies_per_element_over_permuted_offsets() {
+        // two permuted elements: "ACG" (rc) and "TTT" (not rc)
+        let mut out = b"ACGTTT".to_vec();
+        let offsets = ndarray::array![0i64, 3, 6];
+        let to_rc = ndarray::array![true, false];
+        crate::reverse::rc_flat_rows_inplace(&mut out, offsets.view(), to_rc.view());
+        assert_eq!(&out[0..3], b"CGT"); // revcomp(ACG)
+        assert_eq!(&out[3..6], b"TTT"); // untouched
+    }
+
+    #[test]
+    fn annotated_rc_complements_bytes_reverses_indices() {
+        let mut bytes = b"ACG".to_vec();          // revcomp -> "CGT"
+        let mut vidx = vec![5i32, 6, 7];          // reverse -> [7,6,5]
+        let mut rpos = vec![100i32, 101, 102];    // reverse -> [102,101,100]
+        let offsets = ndarray::array![0i64, 3];
+        let m = ndarray::array![true];
+        crate::reverse::rc_flat_rows_inplace(&mut bytes, offsets.view(), m.view());
+        crate::reverse::reverse_flat_rows_inplace(&mut vidx, offsets.view(), m.view());
+        crate::reverse::reverse_flat_rows_inplace(&mut rpos, offsets.view(), m.view());
+        assert_eq!(&bytes, b"CGT");
+        assert_eq!(vidx, vec![7, 6, 5]);
+        assert_eq!(rpos, vec![102, 101, 100]);
+    }
 }
 
 // ── DEBUG exports for PRNG parity tests (Task 7) ─────────────────────────────

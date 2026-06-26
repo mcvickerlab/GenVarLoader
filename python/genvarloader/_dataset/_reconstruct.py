@@ -44,6 +44,7 @@ from ..genvarloader import (
     intervals_and_realign_track_fused as intervals_and_realign_track_fused,
 )
 
+
 # Re-exports for back-compat (callers historically imported these from
 # ``_reconstruct``):
 __all__ = [
@@ -80,6 +81,7 @@ class SeqsTracks(Reconstructor[tuple[Any, _T]]):
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
         flat: bool = False,
+        to_rc: "NDArray[np.bool_] | None" = None,
     ) -> tuple[Any, _T]:
         if splice_plan is not None:
             raise NotImplementedError(
@@ -94,6 +96,7 @@ class SeqsTracks(Reconstructor[tuple[Any, _T]]):
             rng=rng,
             deterministic=deterministic,
             flat=flat,
+            to_rc=to_rc,
         )
         tracks = self.tracks(
             idx=idx,
@@ -104,6 +107,7 @@ class SeqsTracks(Reconstructor[tuple[Any, _T]]):
             rng=rng,
             deterministic=deterministic,
             flat=flat,
+            to_rc=to_rc,
         )
         return seqs, tracks
 
@@ -131,6 +135,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
         flat: bool = False,
+        to_rc: "NDArray[np.bool_] | None" = None,
     ) -> tuple[_H, _T]:
         if splice_plan is not None:
             raise NotImplementedError(
@@ -147,6 +152,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                 output_length=output_length,
                 rng=rng,
                 deterministic=deterministic,
+                to_rc=to_rc,
             )
         )
 
@@ -224,6 +230,14 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                     # _out is a contiguous f32 slice of the pre-allocated `out`
                     # buffer (np.empty, step=1).  No ascontiguousarray needed for
                     # `out`; the fused entry writes in-place into its buffer.
+                    # Expand per-query to_rc to per-(query, hap) for the track kernel.
+                    # out_ofsts_per_t is (b*p+1); ploidy = geno_idx.shape[-1].
+                    _ploidy = geno_idx.shape[-1]
+                    _to_rc_hap = (
+                        None
+                        if to_rc is None
+                        else np.ascontiguousarray(np.repeat(to_rc, _ploidy), np.bool_)
+                    )
                     intervals_and_realign_track_fused(
                         out=_out,
                         out_offsets=np.ascontiguousarray(out_ofsts_per_t, np.int64),
@@ -259,6 +273,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                         keep_offsets=None
                         if keep_offsets is None
                         else np.ascontiguousarray(keep_offsets, np.int64),
+                        to_rc=_to_rc_hap,
                     )
                 else:
                     # Composed path (numba): two FFI crossings + one intermediate
