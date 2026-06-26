@@ -761,6 +761,108 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
     out_data.into_pyarray(py)
 }
 
+/// Fused annotated spliced-haplotype reconstruction: the annotated counterpart of
+/// `reconstruct_haplotypes_spliced_fused`. Reconstructs in one FFI crossing using
+/// precomputed splice output offsets AND fills the two per-nucleotide annotation
+/// arrays (variant index, reference coordinate).
+///
+/// Like the non-annotated splice entry, the Python splice plan already computes the
+/// permutation and `out_offsets` (`splice_plan.permuted_out_offsets`), so this kernel
+/// takes `out_offsets` directly and skips `get_diffs_sparse` / the offset loop.
+///
+/// On `to_rc`, each masked permuted element is reverse-complemented in place
+/// (`rc_flat_rows_inplace` on the sequence bytes) and its annotation rows are reversed
+/// in place (`reverse_flat_rows_inplace`, no complement) — byte-identical to
+/// `_FlatAnnotatedHaps.reverse_masked(mask, _COMP)`.
+///
+/// Returns `(out_data, annot_v, annot_pos)`. `out_offsets` is held by the caller and
+/// not returned (matches `reconstruct_haplotypes_spliced_fused`).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_annotated_haplotypes_spliced_fused<'py>(
+    py: Python<'py>,
+    permuted_regions: PyReadonlyArray2<i32>,
+    flat_shifts: PyReadonlyArray2<i32>,
+    flat_geno_offset_idx: PyReadonlyArray2<i64>,
+    out_offsets: PyReadonlyArray1<i64>,
+    geno_offsets: PyReadonlyArray2<i64>,
+    geno_v_idxs: PyReadonlyArray1<i32>,
+    v_starts: PyReadonlyArray1<i32>,
+    ilens: PyReadonlyArray1<i32>,
+    alt_alleles: PyReadonlyArray1<u8>,
+    alt_offsets: PyReadonlyArray1<i64>,
+    ref_: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+    keep: Option<PyReadonlyArray1<bool>>,
+    keep_offsets: Option<PyReadonlyArray1<i64>>,
+    to_rc: Option<PyReadonlyArray1<bool>>,
+) -> (
+    Bound<'py, PyArray1<u8>>,
+    Bound<'py, PyArray1<i32>>,
+    Bound<'py, PyArray1<i32>>,
+) {
+    use crate::reconstruct;
+
+    let go = geno_offsets.as_array();
+    let go_starts = go.row(0);
+    let go_stops = go.row(1);
+
+    // out_offsets are precomputed by the Python splice plan — use them directly.
+    let out_offsets_a = out_offsets.as_array();
+    let total = out_offsets_a[out_offsets_a.len() - 1] as usize;
+
+    // Allocate the sequence + annotation buffers.
+    let mut out_data: Array1<u8> = uninit_output(total);
+    let mut annot_v: Array1<i32> = uninit_output(total);
+    let mut annot_pos: Array1<i32> = uninit_output(total);
+
+    // Reconstruct all haplotypes + annotations into the owned buffers (reuses batch core).
+    reconstruct::reconstruct_haplotypes_from_sparse(
+        out_data.view_mut(),
+        out_offsets_a,
+        permuted_regions.as_array(),
+        flat_shifts.as_array(),
+        flat_geno_offset_idx.as_array(),
+        go_starts,
+        go_stops,
+        geno_v_idxs.as_array(),
+        v_starts.as_array(),
+        ilens.as_array(),
+        alt_alleles.as_array(),
+        alt_offsets.as_array(),
+        ref_.as_array(),
+        ref_offsets.as_array(),
+        pad_char,
+        keep.as_ref().map(|k| k.as_array()),
+        keep_offsets.as_ref().map(|ko| ko.as_array()),
+        Some(annot_v.view_mut()),   // annot_v_idxs — variant index per nucleotide
+        Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
+    );
+
+    // Optional in-place RC per permuted element. Sequence bytes are reverse-complemented;
+    // annotation rows are reversed only (no complement) — matching
+    // _FlatAnnotatedHaps.reverse_masked. out_offsets_a is the permuted per-element
+    // offsets array, so each masked element is transformed in its own byte range.
+    if let Some(to_rc) = to_rc.as_ref() {
+        let m = to_rc.as_array();
+        debug_assert_eq!(
+            m.len(),
+            out_offsets_a.len() - 1,
+            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        );
+        crate::reverse::rc_flat_rows_inplace(out_data.as_slice_mut().unwrap(), out_offsets_a, m);
+        crate::reverse::reverse_flat_rows_inplace(annot_v.as_slice_mut().unwrap(), out_offsets_a, m);
+        crate::reverse::reverse_flat_rows_inplace(annot_pos.as_slice_mut().unwrap(), out_offsets_a, m);
+    }
+
+    (
+        out_data.into_pyarray(py),
+        annot_v.into_pyarray(py),
+        annot_pos.into_pyarray(py),
+    )
+}
+
 /// Fused annotated-haplotype reconstruction: diffs + offsets + reconstruct in one FFI crossing.
 ///
 /// Identical to ``reconstruct_haplotypes_fused`` but ALSO fills per-nucleotide

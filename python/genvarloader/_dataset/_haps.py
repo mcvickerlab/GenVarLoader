@@ -38,6 +38,7 @@ from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
 from ..genvarloader import (
     reconstruct_annotated_haplotypes_fused as reconstruct_annotated_haplotypes_fused,
+    reconstruct_annotated_haplotypes_spliced_fused as reconstruct_annotated_haplotypes_spliced_fused,
     reconstruct_haplotypes_fused as reconstruct_haplotypes_fused,
     reconstruct_haplotypes_spliced_fused as reconstruct_haplotypes_spliced_fused,
 )
@@ -1102,35 +1103,75 @@ class Haps(Reconstructor[_H]):
             self._permute_request_for_splice(req)
         )
         splice_plan = req.splice_plan
-
-        total = int(splice_plan.permuted_out_offsets[-1])
-        out_buf = np.empty(total, np.uint8)
-        annot_v_buf = np.empty(total, V_IDX_TYPE)
-        annot_pos_buf = np.empty(total, np.int32)
-
-        reconstruct_haplotypes_from_sparse(
-            geno_offset_idx=flat_geno_idx.reshape(-1, 1),
-            out=out_buf,
-            out_offsets=splice_plan.permuted_out_offsets,
-            regions=permuted_regions,
-            shifts=flat_shifts.reshape(-1, 1),
-            geno_offsets=self.genotypes.offsets,
-            geno_v_idxs=self.genotypes.data,
-            v_starts=self.variants.start,
-            ilens=self.variants.ilen,
-            alt_alleles=self.variants.alt.data.view(np.uint8),
-            alt_offsets=self.variants.alt.offsets,
-            ref=self.reference.reference,
-            ref_offsets=self.reference.offsets,
-            pad_char=self.reference.pad_char,
-            keep=keep_perm,
-            keep_offsets=keep_offsets_perm,
-            annot_v_idxs=annot_v_buf,
-            annot_ref_pos=annot_pos_buf,
-        )
-
         per_elem_shape = (splice_plan.permuted_lengths.shape[0], None)
         off = splice_plan.permuted_out_offsets
+
+        _backend = os.environ.get("GVL_BACKEND", "rust")
+        if _backend == "rust":
+            # Fused path: one FFI crossing. RC is folded in-kernel (sequence bytes
+            # reverse-complemented, annotation rows reversed), so there is NO Python
+            # reverse_masked post-pass. to_rc is already in permuted per-element order
+            # (from _getitem_spliced), and _getitem_spliced treats the rust output as
+            # already-RC'd (its post-pass is numba-only).
+            _to_rc_spliced = (
+                None if to_rc is None else np.ascontiguousarray(to_rc, np.bool_)
+            )
+            out_buf, annot_v_buf, annot_pos_buf = (
+                reconstruct_annotated_haplotypes_spliced_fused(
+                    permuted_regions=np.ascontiguousarray(permuted_regions, np.int32),
+                    flat_shifts=np.ascontiguousarray(
+                        flat_shifts.reshape(-1, 1), np.int32
+                    ),
+                    flat_geno_offset_idx=np.ascontiguousarray(
+                        flat_geno_idx.reshape(-1, 1), np.int64
+                    ),
+                    out_offsets=np.ascontiguousarray(off, np.int64),
+                    geno_offsets=_as_starts_stops(self.genotypes.offsets),
+                    geno_v_idxs=_ffi_array(self.genotypes.data, np.int32, "geno_v_idxs"),
+                    v_starts=self.ffi_static.v_starts,
+                    ilens=self.ffi_static.ilens,
+                    alt_alleles=self.ffi_static.alt_alleles,
+                    alt_offsets=self.ffi_static.alt_offsets,
+                    ref_=self.ffi_static.ref,
+                    ref_offsets=self.ffi_static.ref_offsets,
+                    pad_char=np.uint8(self.reference.pad_char),
+                    keep=None
+                    if keep_perm is None
+                    else np.ascontiguousarray(keep_perm, np.bool_),
+                    keep_offsets=None
+                    if keep_offsets_perm is None
+                    else np.ascontiguousarray(keep_offsets_perm, np.int64),
+                    to_rc=_to_rc_spliced,
+                )
+            )
+        else:
+            # Numba composed oracle path. RC is applied externally in
+            # _getitem_spliced (numba branch), so no to_rc / RC is applied here.
+            total = int(off[-1])
+            out_buf = np.empty(total, np.uint8)
+            annot_v_buf = np.empty(total, V_IDX_TYPE)
+            annot_pos_buf = np.empty(total, np.int32)
+            reconstruct_haplotypes_from_sparse(
+                geno_offset_idx=flat_geno_idx.reshape(-1, 1),
+                out=out_buf,
+                out_offsets=off,
+                regions=permuted_regions,
+                shifts=flat_shifts.reshape(-1, 1),
+                geno_offsets=self.genotypes.offsets,
+                geno_v_idxs=self.genotypes.data,
+                v_starts=self.variants.start,
+                ilens=self.variants.ilen,
+                alt_alleles=self.variants.alt.data.view(np.uint8),
+                alt_offsets=self.variants.alt.offsets,
+                ref=self.reference.reference,
+                ref_offsets=self.reference.offsets,
+                pad_char=self.reference.pad_char,
+                keep=keep_perm,
+                keep_offsets=keep_offsets_perm,
+                annot_v_idxs=annot_v_buf,
+                annot_ref_pos=annot_pos_buf,
+            )
+
         haps_rag = cast(
             "Ragged[np.bytes_]",
             _Flat.from_offsets(out_buf, per_elem_shape, off).view("S1"),
@@ -1143,17 +1184,6 @@ class Haps(Reconstructor[_H]):
             "Ragged[np.int32]",
             _Flat.from_offsets(annot_pos_buf, per_elem_shape, off),
         )
-
-        # Annotated spliced path always uses numba reconstruct (no fused Rust
-        # kernel for annotated+splice).  On the Rust backend, fold RC in Python
-        # here so the post-pass can skip it (matching the non-spliced behaviour).
-        if os.environ.get("GVL_BACKEND", "rust") == "rust" and to_rc is not None:
-            from .._ragged import _COMP
-
-            fa = _FlatAnnotatedHaps(haps_rag, annot_v_rag, annot_pos_rag)
-            fa = fa.reverse_masked(to_rc, _COMP)
-            return fa.haps, fa.var_idxs, fa.ref_coords
-
         return haps_rag, annot_v_rag, annot_pos_rag
 
     def _permute_request_for_splice(
