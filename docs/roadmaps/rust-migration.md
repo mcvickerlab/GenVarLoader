@@ -468,7 +468,7 @@ variants/variant-windows) localized the remaining single-thread work:
    output buffer back-to-front with complemented bytes), deleting the `reverse_complement_ragged` step
    in `_query.py`. This is roadmap target 4's RC half, now quantified and promoted.
 
-7. **✅ ADDRESSED (branch `opt/target-7-windows-rust-assembly`, PR TBD).** variant-windows — collapsed
+7. **✅ ADDRESSED (branch `opt/target-7-windows-rust-assembly`, [PR #250](https://github.com/mcvickerlab/GenVarLoader/pull/250) → `rust-migration`).** variant-windows — collapsed
    per-batch object churn into one Rust call. `assemble_variant_buffers_{u8,i32}` assembles alt/ref
    byte windows + flank tokens in one FFI crossing (`src/ffi/mod.rs`, cores in `src/variants/windows.rs`), replacing the
    `_FlatWindow`/`FlatRagged`/scalar-field dataclass construction loop in `_flat_variants.py` /
