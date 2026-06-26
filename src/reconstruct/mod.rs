@@ -629,6 +629,35 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Case: deletion drives ref_idx past the contig end (overshoot).
+    // ref = [1,2,3,4] (len 4), ref_start=0, out_len=8.
+    // variant at pos=2, ilen=-5, allele=[50] (anchor).
+    //   v_ref_end = 2 - min(0,-5) + 1 = 8  → ref_idx advances to 8 (> len 4).
+    // Processing: ref[0..2]=[1,2], allele=[50] → out_idx=3.
+    // Final clause: unfilled=5, ref exhausted (writable_ref = min(5, 4-8) = -4 <= 0).
+    // CORRECT: no ref left → pad the whole tail → [1,2,50,0,0,0,0,0].
+    // (Pre-fix rust over-pads from index 0 → all zeros.)
+    // -------------------------------------------------------------------------
+    #[test]
+    fn overshoot_ref_past_contig() {
+        let (out, _av, _ap) = run(
+            &[0],
+            &[2],          // v_pos=2
+            &[-5],         // ilen=-5 (deletion past contig end)
+            0,             // shift
+            &[50u8],       // anchor allele
+            &[0i64, 1],
+            &[1, 2, 3, 4], // ref, len 4
+            0,             // ref_start
+            8,             // out_len
+            0,             // pad_char
+            None,
+            false,
+        );
+        assert_eq!(out, vec![1, 2, 50, 0, 0, 0, 0, 0]);
+    }
+
+    // -------------------------------------------------------------------------
     // Case 7: overlapping ALTs — only first applied
     // ref = [1,2,3,4,5], ref_start=0, out_len=5
     // v_idxs=[0,1]: two variants both at pos=2, but second has v_pos < ref_idx after first
