@@ -200,6 +200,83 @@ pub fn assemble_variants_mode<Tok: Copy>(
     VariantBufs { byte_bufs, tok_bufs }
 }
 
+/// `variant-windows` assembly tail. `ref_mode`/`alt_mode`: 1 = flanked window
+/// (`[start-L,end+L)` for ref; `flank5.alt.flank3` for alt), 2 = bare tokenized
+/// allele. Produces only token buffers (scalar fields are handled Python-side).
+/// Mirrors the windows branch of `get_variants_flat` (incl. the single fused
+/// fetch shared by ref_window + alt_window).
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_windows_mode<Tok: Copy>(
+    v_idxs: ArrayView1<i32>,
+    _row_offsets: ArrayView1<i64>,
+    ref_mode: i64,
+    alt_mode: i64,
+    alt_global: ArrayView1<u8>,
+    alt_off_global: ArrayView1<i64>,
+    ref_global: Option<ArrayView1<u8>>,
+    ref_off_global: Option<ArrayView1<i64>>,
+    flank_len: i64,
+    lut: ArrayView1<Tok>,
+    v_contigs: ArrayView1<i32>,
+    v_starts: ArrayView1<i32>,
+    ilens: ArrayView1<i32>,
+    reference: ArrayView1<u8>,
+    ref_offsets: ArrayView1<i64>,
+    pad_char: u8,
+) -> VariantBufs<Tok> {
+    let mut tok_bufs = Vec::new();
+    let l = flank_len as usize;
+
+    // alt alleles are always gathered (needed for alt window or bare alt).
+    let (alt_data, alt_seq_off) =
+        crate::variants::gather_alleles(v_idxs, alt_global, alt_off_global);
+
+    // One fused fetch if either side needs a window read.
+    let need_fetch = ref_mode == 1 || alt_mode == 1;
+    let fetched = if need_fetch {
+        let (starts_v, ilens_v) = gather_starts_ilens(v_idxs, v_starts, ilens);
+        Some(fetch_windows(
+            v_contigs, starts_v.view(), ilens_v.view(), flank_len, reference, ref_offsets,
+            pad_char,
+        ))
+    } else {
+        None
+    };
+
+    // ref side (ordered first to match Python field insertion order).
+    if ref_mode == 1 {
+        let (rw_data, rw_off) = fetched.as_ref().expect("ref window needs a fetch");
+        let tok = tokenize(rw_data.view(), lut);
+        tok_bufs.push(("ref_window", tok, rw_off.clone()));
+    } else if ref_mode == 2 {
+        let rg = ref_global.expect("bare ref allele needs ref byte buffer");
+        let ro = ref_off_global.expect("bare ref allele needs ref offsets");
+        let (ref_data, ref_seq_off) = crate::variants::gather_alleles(v_idxs, rg, ro);
+        let tok = tokenize(ref_data.view(), lut);
+        tok_bufs.push(("ref", tok, ref_seq_off));
+    }
+
+    // alt side.
+    if alt_mode == 1 {
+        let (rw_data, rw_off) = fetched.as_ref().expect("alt window needs a fetch");
+        let (f5, f3) = slice_flanks(rw_data.view(), rw_off.view(), l);
+        let (alt_bytes, alt_off) = assemble_alt_window(
+            f5.view(),
+            f3.view(),
+            alt_data.view(),
+            alt_seq_off.view(),
+            l,
+        );
+        let tok = tokenize(alt_bytes.view(), lut);
+        tok_bufs.push(("alt_window", tok, alt_off));
+    } else if alt_mode == 2 {
+        let tok = tokenize(alt_data.view(), lut);
+        tok_bufs.push(("alt", tok, alt_seq_off));
+    }
+
+    VariantBufs { byte_bufs: Vec::new(), tok_bufs }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,6 +382,95 @@ mod tests {
         );
         assert_eq!(data.to_vec(), vec![4u8, 5, 6, 7, 8]);
         assert_eq!(rw_off.to_vec(), vec![0i64, 5]);
+    }
+
+    #[test]
+    fn test_assemble_windows_mode_both_windows() {
+        use ndarray::Array1 as A1;
+        // Global alt alleles: v0="A"(65). offsets [0,1].
+        let alt_global = arr1(&[65u8]);
+        let alt_off = arr1(&[0i64, 1]);
+        let v_idxs = arr1(&[0i32]);
+        let row_offsets = arr1(&[0i64, 1]);
+        let reference: A1<u8> = A1::from_vec((0u8..20).collect());
+        let ref_offsets = arr1(&[0i64, 20]);
+        let v_starts = arr1(&[5i32]);
+        let ilens = arr1(&[0i32]);
+        let v_contigs = arr1(&[0i32]);
+        let lut: A1<u8> = A1::from_vec((0u8..=255).collect()); // identity
+
+        let bufs = assemble_windows_mode::<u8>(
+            v_idxs.view(),
+            row_offsets.view(),
+            1, // ref_mode = window
+            1, // alt_mode = window
+            alt_global.view(),
+            alt_off.view(),
+            None,
+            None,
+            1, // flank_len
+            lut.view(),
+            v_contigs.view(),
+            v_starts.view(),
+            ilens.view(),
+            reference.view(),
+            ref_offsets.view(),
+            b'N',
+        );
+        // SNP start=5 ilen=0 → end=6; read [4,7) = [4,5,6]. L=1.
+        // ref_window tokens (identity) = [4,5,6], off [0,3].
+        // alt_window = f5[4] . alt[65] . f3[6] = [4,65,6], off [0,3].
+        assert_eq!(bufs.byte_bufs.len(), 0);
+        let names: Vec<&str> = bufs.tok_bufs.iter().map(|t| t.0).collect();
+        assert_eq!(names, vec!["ref_window", "alt_window"]);
+        assert_eq!(bufs.tok_bufs[0].1.to_vec(), vec![4u8, 5, 6]);
+        assert_eq!(bufs.tok_bufs[0].2.to_vec(), vec![0i64, 3]);
+        assert_eq!(bufs.tok_bufs[1].1.to_vec(), vec![4u8, 65, 6]);
+        assert_eq!(bufs.tok_bufs[1].2.to_vec(), vec![0i64, 3]);
+    }
+
+    #[test]
+    fn test_assemble_windows_mode_bare_alleles() {
+        use ndarray::Array1 as A1;
+        // alt v0="AC"(65,67); ref v0="G"(71).
+        let alt_global = arr1(&[65u8, 67]);
+        let alt_off = arr1(&[0i64, 2]);
+        let ref_global = arr1(&[71u8]);
+        let ref_off = arr1(&[0i64, 1]);
+        let v_idxs = arr1(&[0i32]);
+        let row_offsets = arr1(&[0i64, 1]);
+        let reference: A1<u8> = A1::from_vec((0u8..20).collect());
+        let ref_offsets = arr1(&[0i64, 20]);
+        let v_starts = arr1(&[5i32]);
+        let ilens = arr1(&[0i32]);
+        let v_contigs = arr1(&[0i32]);
+        let lut: A1<u8> = A1::from_vec((0u8..=255).collect());
+
+        let bufs = assemble_windows_mode::<u8>(
+            v_idxs.view(),
+            row_offsets.view(),
+            2, // ref_mode = allele (bare)
+            2, // alt_mode = allele (bare)
+            alt_global.view(),
+            alt_off.view(),
+            Some(ref_global.view()),
+            Some(ref_off.view()),
+            1,
+            lut.view(),
+            v_contigs.view(),
+            v_starts.view(),
+            ilens.view(),
+            reference.view(),
+            ref_offsets.view(),
+            b'N',
+        );
+        let names: Vec<&str> = bufs.tok_bufs.iter().map(|t| t.0).collect();
+        assert_eq!(names, vec!["ref", "alt"]);
+        // bare ref tokens = [71], off [0,1]; bare alt tokens = [65,67], off [0,2].
+        assert_eq!(bufs.tok_bufs[0].1.to_vec(), vec![71u8]);
+        assert_eq!(bufs.tok_bufs[0].2.to_vec(), vec![0i64, 1]);
+        assert_eq!(bufs.tok_bufs[1].1.to_vec(), vec![65u8, 67]);
+        assert_eq!(bufs.tok_bufs[1].2.to_vec(), vec![0i64, 2]);
     }
 
     #[test]
