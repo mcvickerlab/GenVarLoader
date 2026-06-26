@@ -163,8 +163,13 @@ def build_strand_mixed_dataset(work_dir: Path, svar_path: Path) -> Path:
     sequence so the non-vacuity assertion in
     ``test_negative_strand_actually_reverse_complements`` reliably fires.
 
-    ``max_jitter=0`` satisfies the ``intervals_to_tracks`` Rust kernel contract
-    (stored interval starts must equal the query region starts).
+    ``max_jitter=0`` is used here for the simplest deterministic geometry (no
+    jitter expansion, so stored interval starts equal query starts).  The #242
+    boundary condition (stored interval starts preceding the query start) was
+    fixed in both ``intervals_to_tracks`` kernels via the left-clip
+    ``s = max(itv.start - query_start, 0)`` (PR #244; #242 CLOSED).
+    End-to-end max_jitter>0 parity is covered by
+    ``test_tracks_max_jitter_intervals_parity_and_oracle``.
     """
     from genoray import SparseVar
     import polars as pl
@@ -204,25 +209,22 @@ def build_haps_tracks_dataset(work_dir: Path, svar_path: Path) -> Path:
     Uses the caller-supplied SparseVar file (which must cover chr1/chr2
     with samples s0/s1/s2, as produced by the session-level build_case
     fixture).  Synthetic BigWig tracks are written with matching samples
-    and contigs.  The dataset is written with **max_jitter=0** to ensure
-    that stored interval starts always equal the region query starts,
-    satisfying the ``intervals_to_tracks`` Rust contract
-    (``itv_start >= query_start``).
+    and contigs.  The dataset is written with **max_jitter=0** for the
+    simplest deterministic geometry: no jitter expansion, so stored
+    interval starts equal the query starts.  This keeps the fixture
+    focused on what it exists to test — variants (including indels) that
+    trigger ``shift_and_realign_tracks_sparse``.
 
-    Background on the landmine
-    --------------------------
-    When ``max_jitter > 0``, ``gvl.write`` / ``gvl.update`` clip BigWig
-    intervals to the jitter-**expanded** boundaries stored in
-    ``regions.npy`` (``chromStart - max_jitter``).  But
-    ``Dataset.open`` derives ``_full_regions`` from the **original**
-    ``input_regions.arrow`` boundaries (``chromStart``).  The gap of
-    ``max_jitter`` bp means stored interval starts are
-    ``chromStart - max_jitter < chromStart = query_start``, which
-    violates the contract and triggers a ``PanicException`` in the Rust
-    ``intervals_to_tracks`` kernel.  Setting ``max_jitter=0`` eliminates
-    the gap.  The variants (including indels) still trigger
-    ``shift_and_realign_tracks_sparse``, which is what this fixture exists
-    to test.
+    #242 / PR #244
+    --------------
+    The boundary condition where stored interval starts precede the query
+    start (``itv.start < query_start``) was root-caused and fixed in both
+    ``intervals_to_tracks`` kernels via the left-clip
+    ``s = max(itv.start - query_start, 0)`` (PR #244; #242 CLOSED).
+    ``max_jitter=0`` here is retained only for the simplest deterministic
+    geometry, not because of any live panic or contract violation.
+    End-to-end max_jitter>0 parity is covered by
+    ``test_tracks_max_jitter_intervals_parity_and_oracle``.
 
     Returns the path to the written dataset directory.
     """
@@ -263,8 +265,11 @@ def build_haps_tracks_dataset(work_dir: Path, svar_path: Path) -> Path:
     )
 
     out = work_dir / "ds.gvl"
-    # max_jitter=0: no jitter expansion → interval starts == query starts
-    # → the intervals_to_tracks Rust contract is satisfied.
+    # max_jitter=0: simplest deterministic geometry (no jitter expansion).
+    # #242 is fixed via the intervals_to_tracks left-clip (PR #244, #242 CLOSED);
+    # max_jitter=0 here keeps interval starts == query starts for straightforward
+    # indel-realignment testing. See test_tracks_max_jitter_intervals_parity_and_oracle
+    # for max_jitter>0 end-to-end parity coverage.
     gvl.write(
         path=out,
         bed=bed,

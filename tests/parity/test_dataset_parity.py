@@ -157,9 +157,9 @@ def test_tracks_max_jitter_intervals_parity_and_oracle(tmp_path, monkeypatch):
     import genvarloader as gvl
 
     MAX_JITTER = 4
-    REGION_LEN = 20   # chromEnd - chromStart for every fixture region
+    REGION_LEN = 20  # chromEnd - chromStart for every fixture region
     N_REGIONS = 3
-    N_SAMPLES = 3     # s0, s1, s2
+    N_SAMPLES = 3  # s0, s1, s2
 
     ds_dir = build_track_dataset_jittered(tmp_path, max_jitter=MAX_JITTER)
 
@@ -167,11 +167,11 @@ def test_tracks_max_jitter_intervals_parity_and_oracle(tmp_path, monkeypatch):
     # regions.npy[:,1] = chromStart - max_jitter (expanded at write time).
     # input_regions.arrow chromStart = original un-expanded chromStart.
     # r_idx_map[i] = sorted position (row in regions.npy) of original input row i.
-    regions = np.load(ds_dir / "regions.npy")        # shape (N_REGIONS, 4), int32
+    regions = np.load(ds_dir / "regions.npy")  # shape (N_REGIONS, 4), int32
     input_bed = pl.read_ipc(ds_dir / "input_regions.arrow")
-    r_idx_map = input_bed["r_idx_map"].to_numpy()     # original_row → sorted_pos
+    r_idx_map = input_bed["r_idx_map"].to_numpy()  # original_row → sorted_pos
     orig_starts = input_bed["chromStart"].to_numpy()
-    stored_starts_aligned = regions[r_idx_map, 1]     # stored starts per original row
+    stored_starts_aligned = regions[r_idx_map, 1]  # stored starts per original row
     assert np.any(stored_starts_aligned < orig_starts), (
         "Non-vacuity guard FAILED: no stored region start is < the original chromStart. "
         f"stored (aligned)={stored_starts_aligned.tolist()}, orig={orig_starts.tolist()}. "
@@ -279,13 +279,13 @@ def test_tracks_realign_getitem_identical_across_backends(
     - A fresh GVL dataset is built in tmp_path via gvl.write with both the
       session SparseVar variants (which contain indels on chr1/chr2) and a
       synthetic BigWig ``signal`` track for samples s0/s1/s2.
-    - max_jitter=0 is used to avoid the pre-existing intervals_to_tracks
-      landmine: with max_jitter>0, gvl.write clips BigWig intervals to the
-      jitter-expanded region boundaries (chromStart - max_jitter), but
-      Dataset.open derives _full_regions from the original chromStart.  The
-      gap of max_jitter bp causes stored interval starts to precede the
-      query start, violating the Rust kernel contract and triggering a
-      PanicException.  With max_jitter=0 the boundaries match exactly.
+    - max_jitter=0 is used for the simplest deterministic geometry.  Bug
+      #242 (stored interval starts < query start when max_jitter>0) was
+      fixed in both ``intervals_to_tracks`` kernels via the left-clip
+      ``s = max(itv_start - query_start, 0)`` (PR #244; #242 CLOSED).
+      max_jitter=0 here keeps interval starts == query starts so the test
+      stays focused on the indel-realignment path; max_jitter>0 end-to-end
+      parity is covered by ``test_tracks_max_jitter_intervals_parity_and_oracle``.
 
     Fill strategies covered: all 5 (Repeat5p, Repeat5pNormalized, Constant,
     FlankSample, Interpolate).  Each is set via with_insertion_fill and the
