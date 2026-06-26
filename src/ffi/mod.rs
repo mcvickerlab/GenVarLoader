@@ -733,6 +733,7 @@ pub fn get_reference<'py>(
     ref_offsets: PyReadonlyArray1<i64>,
     pad_char: u8,
     parallel: bool,
+    to_rc: Option<PyReadonlyArray1<bool>>,
 ) -> Bound<'py, PyArray1<u8>> {
     let out = reference::get_reference(
         regions.as_array(),
@@ -741,6 +742,7 @@ pub fn get_reference<'py>(
         ref_offsets.as_array(),
         pad_char,
         parallel,
+        to_rc.as_ref().map(|a| a.as_array()),
     );
     out.into_pyarray(py)
 }

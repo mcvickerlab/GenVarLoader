@@ -684,7 +684,7 @@ def _get_reference_numba(
 
 
 def _get_reference_rust(
-    regions, out_offsets, reference, ref_offsets, pad_char, parallel
+    regions, out_offsets, reference, ref_offsets, pad_char, parallel, to_rc=None
 ):
     return _get_reference_rust_ffi(
         np.ascontiguousarray(regions, np.int32),
@@ -693,6 +693,7 @@ def _get_reference_rust(
         np.ascontiguousarray(ref_offsets, np.int64),
         int(pad_char),
         bool(parallel),
+        to_rc,
     )
 
 
