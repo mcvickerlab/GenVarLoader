@@ -598,7 +598,7 @@ variants/variant-windows) localized the remaining single-thread work:
 > `dict_traverse` 0.4%). Profile is now Rust-kernel-dominated with negligible GC overhead.
 
 ### Phase 4 — Write / update pipeline ✅
-_PR: phase-4-close-out (PR pending)_
+_PR: [#253](https://github.com/mcvickerlab/GenVarLoader/pull/253)_
 
 The default `gvl.write()` / `gvl.update()` path is fully Rust-backed; the write path is numba-free.
 
@@ -658,7 +658,7 @@ narrowed to genoray (variant IO) only.
 
 ## Notes & decisions log
 
-- 2026-06-26 (Phase 4 close-out; branch `phase-4-close-out`, PR <pending>): Investigation found the
+- 2026-06-26 (Phase 4 close-out; branch `phase-4-close-out`, PR [#253](https://github.com/mcvickerlab/GenVarLoader/pull/253)): Investigation found the
   default write/update path already fully Rust-backed (bigWig streaming writer + COITrees table;
   variant IO via genoray). The roadmap's "variant normalization" bullet was a mischaracterization —
   GVL never normalizes (it is a bcftools/plink2 user precondition); genotype storage is genoray
