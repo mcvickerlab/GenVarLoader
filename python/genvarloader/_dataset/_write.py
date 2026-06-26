@@ -1251,7 +1251,6 @@ def _write_annot_track(
     _write_ragged_intervals(out_dir, itvs)
 
 
-
 def _write_track_rust(
     out_dir: Path,
     bed: pl.DataFrame,
