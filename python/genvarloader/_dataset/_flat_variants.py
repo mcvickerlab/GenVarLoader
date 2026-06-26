@@ -17,6 +17,8 @@ from ..genvarloader import fill_empty_fixed_f32 as _fill_empty_fixed_f32_rust
 from ..genvarloader import fill_empty_fixed_i32 as _fill_empty_fixed_i32_rust
 from ..genvarloader import fill_empty_scalar_f32 as _fill_empty_scalar_f32_rust
 from ..genvarloader import fill_empty_scalar_i32 as _fill_empty_scalar_i32_rust
+from ..genvarloader import assemble_variant_buffers_i32 as _assemble_variant_buffers_i32_rust
+from ..genvarloader import assemble_variant_buffers_u8 as _assemble_variant_buffers_u8_rust
 from ..genvarloader import fill_empty_seq_i32 as _fill_empty_seq_i32_rust
 from ..genvarloader import fill_empty_seq_u8 as _fill_empty_seq_u8_rust
 from ..genvarloader import gather_alleles as _gather_alleles_rust
@@ -846,6 +848,88 @@ def _fill_empty_fixed(data, offsets, inner, fill):
         return get("fill_empty_fixed_f32")(data, offsets, int(inner), float(fill))
     # Arbitrary dtype (custom FORMAT fields): preserve dtype via numba fallback.
     return _fill_empty_fixed_numba(data, offsets, inner, fill)
+
+
+def _assemble_variant_buffers_numba_entry(*args, **kwargs):
+    """Lazy wrapper for _assemble_variant_buffers_numba to avoid circular import.
+
+    ``_flat_flanks`` imports ``_FlatWindow`` from ``_flat_variants`` at module
+    level, so ``_flat_variants`` cannot import from ``_flat_flanks`` at module
+    level. This thin wrapper defers the import to call time.
+    """
+    from ._flat_flanks import _assemble_variant_buffers_numba
+
+    return _assemble_variant_buffers_numba(*args, **kwargs)
+
+
+def _assemble_variant_buffers_rust(
+    mode,
+    v_idxs,
+    row_offsets,
+    alt_global,
+    alt_off_global,
+    ref_global,
+    ref_off_global,
+    want_ref_bytes,
+    want_flank,
+    ref_mode,
+    alt_mode,
+    flank_len,
+    lut,
+    v_contigs,
+    v_starts,
+    ilens,
+    reference,
+    ref_offsets,
+    pad_char,
+):
+    """Dtype-selecting shim: routes to assemble_variant_buffers_u8/i32 by lut dtype.
+
+    If ``lut`` is None (variants mode with no flank tokens), defaults to the u8
+    monomorphization (token buffers are empty so dtype is irrelevant).
+    """
+    if lut is None:
+        fn = _assemble_variant_buffers_u8_rust
+        lut_arr = None
+    else:
+        lut_arr = np.asarray(lut)
+        if lut_arr.dtype == np.uint8:
+            fn = _assemble_variant_buffers_u8_rust
+            lut_arr = np.ascontiguousarray(lut_arr, np.uint8)
+        else:
+            fn = _assemble_variant_buffers_i32_rust
+            lut_arr = np.ascontiguousarray(lut_arr, np.int32)
+    return fn(
+        int(mode),
+        np.ascontiguousarray(v_idxs, np.int32),
+        np.ascontiguousarray(row_offsets, np.int64),
+        np.ascontiguousarray(alt_global, np.uint8),
+        np.ascontiguousarray(alt_off_global, np.int64),
+        None if ref_global is None else np.ascontiguousarray(ref_global, np.uint8),
+        None
+        if ref_off_global is None
+        else np.ascontiguousarray(ref_off_global, np.int64),
+        bool(want_ref_bytes),
+        bool(want_flank),
+        int(ref_mode),
+        int(alt_mode),
+        int(flank_len),
+        lut_arr,
+        np.ascontiguousarray(v_contigs, np.int32),
+        np.ascontiguousarray(v_starts, np.int32),
+        np.ascontiguousarray(ilens, np.int32),
+        np.ascontiguousarray(reference, np.uint8),
+        np.ascontiguousarray(ref_offsets, np.int64),
+        int(pad_char),
+    )
+
+
+register(
+    "assemble_variant_buffers",
+    numba=_assemble_variant_buffers_numba_entry,
+    rust=_assemble_variant_buffers_rust,
+    default="rust",
+)
 
 
 def get_variants_flat(

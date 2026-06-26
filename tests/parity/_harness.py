@@ -70,3 +70,36 @@ def assert_kernel_parity_tuple(name: str, *inputs) -> None:
         assert a.dtype == b.dtype, f"{name}[{i}]: dtype {a.dtype} != {b.dtype}"
         assert a.shape == b.shape, f"{name}[{i}]: shape {a.shape} != {b.shape}"
         np.testing.assert_array_equal(a, b)
+
+
+def assert_kernel_parity_dict(name: str, *inputs) -> None:
+    """Parity for kernels that RETURN a dict of ``{name: (data, seq_offsets)}``.
+
+    Asserts both backends produce identical key sets, and for each key the
+    ``(data, seq_offsets)`` pair is byte-identical (dtype, shape, values).
+    """
+    numba_fn, rust_fn = _dispatch.backends(name)
+    got_numba = numba_fn(*inputs)
+    got_rust = rust_fn(*inputs)
+    assert set(got_numba.keys()) == set(got_rust.keys()), (
+        f"{name}: dict keys {set(got_numba.keys())} != {set(got_rust.keys())}"
+    )
+    for k in sorted(got_numba.keys()):
+        nb_data, nb_off = got_numba[k]
+        rs_data, rs_off = got_rust[k]
+        nb_data = np.asarray(nb_data)
+        rs_data = np.asarray(rs_data)
+        nb_off = np.asarray(nb_off, np.int64)
+        rs_off = np.asarray(rs_off, np.int64)
+        assert nb_data.dtype == rs_data.dtype, (
+            f"{name}['{k}'].data: dtype {nb_data.dtype} != {rs_data.dtype}"
+        )
+        assert nb_data.shape == rs_data.shape, (
+            f"{name}['{k}'].data: shape {nb_data.shape} != {rs_data.shape}"
+        )
+        np.testing.assert_array_equal(
+            nb_data, rs_data, err_msg=f"{name}['{k}'].data mismatch"
+        )
+        np.testing.assert_array_equal(
+            nb_off, rs_off, err_msg=f"{name}['{k}'].offsets mismatch"
+        )
