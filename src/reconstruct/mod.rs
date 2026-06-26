@@ -43,6 +43,14 @@ pub fn reconstruct_haplotype_from_sparse(
     let length = out.len() as i64;
     let n_variants = v_idxs.len();
 
+    // Hoist contiguous-slice pointers once so the hot loops use direct byte ops
+    // (fill/copy_from_slice) instead of ndarray's stride/do_slice dispatch path.
+    let out_flat: &mut [u8] = out.as_slice_mut().unwrap();
+    let ref_flat: &[u8] = ref_.as_slice().unwrap();
+    let alt_flat: &[u8] = alt_alleles.as_slice().unwrap();
+    let mut av_flat: Option<&mut [i32]> = annot_v_idxs.as_mut().and_then(|a| a.as_slice_mut());
+    let mut ap_flat: Option<&mut [i32]> = annot_ref_pos.as_mut().and_then(|a| a.as_slice_mut());
+
     // where to get next reference subsequence
     let mut ref_idx: i64 = ref_start;
     // where to put next subsequence
@@ -57,12 +65,12 @@ pub fn reconstruct_haplotype_from_sparse(
         let pad_len = pad_len_raw - shifted;
         let s = out_idx as usize;
         let e = (out_idx + pad_len) as usize;
-        out.slice_mut(s![s..e]).fill(pad_char);
-        if let Some(ref mut av) = annot_v_idxs {
-            av.slice_mut(s![s..e]).fill(-1);
+        out_flat[s..e].fill(pad_char);
+        if let Some(av) = av_flat.as_deref_mut() {
+            av[s..e].fill(-1);
         }
-        if let Some(ref mut ap) = annot_ref_pos {
-            ap.slice_mut(s![s..e]).fill(-1);
+        if let Some(ap) = ap_flat.as_deref_mut() {
+            ap[s..e].fill(-1);
         }
         out_idx += pad_len;
         ref_idx = 0;
@@ -81,7 +89,7 @@ pub fn reconstruct_haplotype_from_sparse(
         let ao_s = alt_offsets[variant] as usize;
         let ao_e = alt_offsets[variant + 1] as usize;
         // full allele slice; may be sub-sliced below for shift consumption
-        let allele_full = alt_alleles.slice(s![ao_s..ao_e]);
+        let allele_full = &alt_flat[ao_s..ao_e];
         let v_len_full = allele_full.len() as i64;
         // +1 assumes atomized variants, exactly 1 nt shared between REF and ALT
         let v_ref_end: i64 = v_pos - 0i64.min(v_diff) + 1;
@@ -137,7 +145,7 @@ pub fn reconstruct_haplotype_from_sparse(
         }
 
         // Working allele slice (may start at allele_start_idx after shift consumption)
-        let allele = allele_full.slice(s![allele_start_idx as usize..]);
+        let allele = &allele_full[allele_start_idx as usize..];
         let v_len = allele.len() as i64;
 
         // add reference sequence
@@ -152,11 +160,11 @@ pub fn reconstruct_haplotype_from_sparse(
             let oe = (out_idx + ref_len) as usize;
             let rs = ref_idx as usize;
             let re = (ref_idx + ref_len) as usize;
-            out.slice_mut(s![os..oe]).assign(&ref_.slice(s![rs..re]));
-            if let Some(ref mut av) = annot_v_idxs {
-                av.slice_mut(s![os..oe]).fill(-1);
+            out_flat[os..oe].copy_from_slice(&ref_flat[rs..re]);
+            if let Some(av) = av_flat.as_deref_mut() {
+                av[os..oe].fill(-1);
             }
-            if let Some(ref mut ap) = annot_ref_pos {
+            if let Some(ap) = ap_flat.as_deref_mut() {
                 // arange(ref_idx, ref_idx + ref_len)
                 for (j, pos) in (os..oe).zip(rs..re) {
                     ap[j] = pos as i32;
@@ -170,13 +178,12 @@ pub fn reconstruct_haplotype_from_sparse(
         {
             let os = out_idx as usize;
             let oe = (out_idx + writable_length) as usize;
-            out.slice_mut(s![os..oe])
-                .assign(&allele.slice(s![..writable_length as usize]));
-            if let Some(ref mut av) = annot_v_idxs {
-                av.slice_mut(s![os..oe]).fill(variant as i32);
+            out_flat[os..oe].copy_from_slice(&allele[..writable_length as usize]);
+            if let Some(av) = av_flat.as_deref_mut() {
+                av[os..oe].fill(variant as i32);
             }
-            if let Some(ref mut ap) = annot_ref_pos {
-                ap.slice_mut(s![os..oe]).fill(v_pos as i32);
+            if let Some(ap) = ap_flat.as_deref_mut() {
+                ap[os..oe].fill(v_pos as i32);
             }
         }
         out_idx += writable_length;
@@ -192,7 +199,7 @@ pub fn reconstruct_haplotype_from_sparse(
     if shifted < shift {
         // need to shift the rest of the track
         ref_idx += shift - shifted;
-        ref_idx = ref_idx.min(ref_.len() as i64);
+        ref_idx = ref_idx.min(ref_flat.len() as i64);
         shifted = shift;
     }
     let _ = shifted; // used above, silence unused-assign warning
@@ -209,7 +216,7 @@ pub fn reconstruct_haplotype_from_sparse(
         // `out_end_idx = out_idx + writable_ref` which can be < `out_idx`.
         // We clamp `out_end_idx` to 0 (never negative address) to reproduce
         // the same right-pad range.
-        let writable_ref = unfilled_length.min(ref_.len() as i64 - ref_idx);
+        let writable_ref = unfilled_length.min(ref_flat.len() as i64 - ref_idx);
         // Positive: copy ref bytes from ref_idx. Zero or negative: no-op.
         let out_end_idx = if writable_ref > 0 {
             let oe = out_idx + writable_ref;
@@ -219,11 +226,11 @@ pub fn reconstruct_haplotype_from_sparse(
                 let oe_u = oe as usize;
                 let rs = ref_idx as usize;
                 let re_u = re as usize;
-                out.slice_mut(s![os..oe_u]).assign(&ref_.slice(s![rs..re_u]));
-                if let Some(ref mut av) = annot_v_idxs {
-                    av.slice_mut(s![os..oe_u]).fill(-1);
+                out_flat[os..oe_u].copy_from_slice(&ref_flat[rs..re_u]);
+                if let Some(av) = av_flat.as_deref_mut() {
+                    av[os..oe_u].fill(-1);
                 }
-                if let Some(ref mut ap) = annot_ref_pos {
+                if let Some(ap) = ap_flat.as_deref_mut() {
                     for (j, pos) in (os..oe_u).zip(rs..re_u) {
                         ap[j] = pos as i32;
                     }
@@ -242,12 +249,12 @@ pub fn reconstruct_haplotype_from_sparse(
         if out_end_idx < length {
             let pe = length as usize;
             let ps = out_end_idx as usize;
-            out.slice_mut(s![ps..pe]).fill(pad_char);
-            if let Some(ref mut av) = annot_v_idxs {
-                av.slice_mut(s![ps..pe]).fill(-1);
+            out_flat[ps..pe].fill(pad_char);
+            if let Some(av) = av_flat.as_deref_mut() {
+                av[ps..pe].fill(-1);
             }
-            if let Some(ref mut ap) = annot_ref_pos {
-                ap.slice_mut(s![ps..pe]).fill(i32::MAX);
+            if let Some(ap) = ap_flat.as_deref_mut() {
+                ap[ps..pe].fill(i32::MAX);
             }
         }
     }
