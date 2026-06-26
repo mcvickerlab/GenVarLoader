@@ -207,15 +207,8 @@ pub fn reconstruct_haplotype_from_sparse(
     // fill rest with reference sequence and right-pad with Ns
     let unfilled_length = length - out_idx;
     if unfilled_length > 0 {
-        // fill with reference sequence
-        // Mirror numba: `writable_ref = min(unfilled_length, len(ref) - ref_idx)`.
-        // When `ref_idx` has advanced past the contig end (e.g. a DEL whose
-        // ref_end exceeds contig_len), `len(ref) - ref_idx` is negative.
-        // In numpy, `out[out_idx : out_idx + negative] = …` is a no-op (empty
-        // slice), and the subsequent right-pad starts from
-        // `out_end_idx = out_idx + writable_ref` which can be < `out_idx`.
-        // We clamp `out_end_idx` to 0 (never negative address) to reproduce
-        // the same right-pad range.
+        // fill with reference sequence; when ref_idx is past the contig end,
+        // writable_ref <= 0 and the tail out[out_idx..length] is right-padded.
         let writable_ref = unfilled_length.min(ref_flat.len() as i64 - ref_idx);
         // Positive: copy ref bytes from ref_idx. Zero or negative: no-op.
         let out_end_idx = if writable_ref > 0 {
@@ -238,11 +231,12 @@ pub fn reconstruct_haplotype_from_sparse(
             }
             oe
         } else {
-            // writable_ref <= 0: ref exhausted or ref_idx past contig.
-            // out_end_idx = out_idx + writable_ref, clamped to 0 to stay
-            // in-bounds (matches numpy: `out[out_end_idx:]` where
-            // out_end_idx >= 0).
-            (out_idx + writable_ref).max(0)
+            // writable_ref <= 0: ref exhausted (ref_idx at/after contig end).
+            // No reference bytes remain to copy, so the entire unfilled tail
+            // out[out_idx..length] must be padded. Clamp out_end_idx to out_idx
+            // (NOT 0) so the right-pad below fills exactly out[out_idx..length]
+            // and never overwrites already-written positions.
+            out_idx
         };
 
         // right-pad
