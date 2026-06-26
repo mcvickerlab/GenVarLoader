@@ -15,15 +15,17 @@ def test_overshoot_pads_full_tail():
     # out_len=8: [1,2] ref + [50] allele, then ref exhausted -> pad rest with 0.
     out = np.full(8, 255, dtype=np.uint8)  # 0xFF sentinel: catches unwritten positions
     reconstruct_haplotype_from_sparse(
-        np.array([0], dtype=np.int32),        # v_idxs
-        np.array([2], dtype=np.int32),        # v_starts
-        np.array([-5], dtype=np.int32),       # ilens
-        0,                                    # shift
-        np.array([50], dtype=np.uint8),       # alt_alleles
-        np.array([0, 1], dtype=np.int64),     # alt_offsets
+        np.array([0], dtype=np.int32),  # v_idxs
+        np.array([2], dtype=np.int32),  # v_starts
+        np.array([-5], dtype=np.int32),  # ilens
+        0,  # shift
+        np.array([50], dtype=np.uint8),  # alt_alleles
+        np.array([0, 1], dtype=np.int64),  # alt_offsets
         np.array([1, 2, 3, 4], dtype=np.uint8),  # ref
-        0,                                    # ref_start
-        out,                                  # out
-        0,                                    # pad_char
+        0,  # ref_start
+        out,  # out
+        0,  # pad_char
     )
-    np.testing.assert_array_equal(out, np.array([1, 2, 50, 0, 0, 0, 0, 0], dtype=np.uint8))
+    np.testing.assert_array_equal(
+        out, np.array([1, 2, 50, 0, 0, 0, 0, 0], dtype=np.uint8)
+    )
