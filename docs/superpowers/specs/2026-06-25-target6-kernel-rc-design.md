@@ -63,9 +63,8 @@ Out of scope:
   different (reverse allele order within each row **and** complement allele bytes over the
   nested ragged allele structure, `RaggedVariants.rc_`) and lives in the `src/variants/`
   gather path that Target 7 is concurrently rewriting. Target 6 leaves a slimmed
-  `reverse_complement_ragged` call **only** for this case on the rust path; Target 7 absorbs
-  it. (`reverse_complement_ragged` itself is **not** deleted in Target 6 — see the corrected
-  "Python-side changes" section: it remains the numba oracle.)
+  `reverse_complement_ragged` husk handling only this case; Target 7 absorbs it and deletes
+  the husk.
 - **`variant-windows` and `intervals`** — reference-oriented, RC is a no-op today and stays a
   no-op.
 
@@ -122,46 +121,33 @@ and the scale guard cannot regress.
 full forward write (fills already placed), so it sees the exact final post-fill bytes the
 current post-pass sees. No interleaving with fill logic.
 
-**Rust files touched:** `src/ffi/mod.rs` (5 fused kernel signatures + call sites:
-haplotypes, annotated, spliced, tracks, reference), `src/reference/mod.rs` (the
-`get_reference` core, which applies the primitive), and the new `src/reverse.rs` (with cargo
-unit tests). The reconstruct/track cores are **not** modified — RC is applied at the FFI
-layer over the assembled flat buffer after the core returns, so the hottest code stays
-untouched.
+**Rust files touched:** `src/ffi/mod.rs` (6 kernel signatures + call sites), the
+reconstruct/track/reference cores under `src/{reconstruct,tracks,intervals,reference}/`, and
+the new `src/reverse.rs` (with cargo unit tests).
 
-## Python-side changes (backend-conditional post-pass)
+## Python-side changes & deletion plan
 
-**Correction to the handoff:** `reverse_complement_ragged` is **not** deleted in Target 6.
-It is the *only* thing that reverse-complements the numba composed path, which is retained as
-the parity oracle (backend is selected *inside* each recon method via
-`os.environ.get("GVL_BACKEND", "rust")`). Deleting it would make the oracle produce wrong
-output. Instead the post-pass becomes **backend-and-kind-conditional**: the rust kernels fold
-RC in-kernel, so the rust path skips the post-pass for the five flat kinds; the numba path
-keeps it unchanged. The post-pass + function are deleted later, when numba is removed.
-
-- **`_query.py::_getitem_unspliced`** (`:188-190`): compute `to_rc`, thread it through
-  `view.recon(..., to_rc=...)` into the rust kernels, and replace the unconditional post-pass
-  with:
-  - numba backend → `reverse_complement_ragged(r, to_rc)` for every kind (unchanged oracle);
-  - rust backend → `reverse_complement_ragged` applied **only** to `RaggedVariants` (deferred
-    to Target 7); all flat-seq kinds are already RC'd in-kernel.
+- **`_query.py::_getitem_unspliced`** (`:188-190`): delete the
+  `reverse_complement_ragged` post-pass; compute `to_rc` and thread it through
+  `view.recon(...)` into the kernels. Only the deferred `RaggedVariants` case still routes
+  through the husk.
 - **`_query.py::_getitem_spliced`** (`:259-280`): keep the permuted `to_rc_per_elem`
-  computation, pass it into `view.recon(..., to_rc=to_rc_per_elem)`, and apply the same
-  backend guard (spliced output is never `RaggedVariants`, so the rust branch is a no-op).
-- **`_query.py::reverse_complement_ragged`** (`:374-410`): **unchanged** — remains the full
-  oracle for all kinds.
-- **`_reference.py`** (`:438-444`): same backend guard for the standalone RefDataset spliced
-  path — rust threads `to_rc_perm` into `_fetch_spliced_ref`/`get_reference`; numba keeps
-  `per_elem.reverse_masked(to_rc_perm, comp=_COMP)`. (Third RC site, missed by the handoff,
-  now in-scope.) Mirror in `_ref.py` for the unspliced reference call.
-- **Reconstructors** (`Haps`, `Ref`, `Tracks`, `HapsTracks`, `SeqsTracks`, annotated) and the
-  `Reconstructor.__call__` protocol gain a trailing `to_rc: NDArray[np.bool_] | None = None`
-  parameter, forwarded to the FFI kernel on the rust branch and ignored on the numba branch.
-  A shared `_active_backend()` helper makes the `_query.py` guard match what the recon methods
-  used. Mask flows: region-compute → recon → kernel.
-- **Stray-caller check:** `grep -rn reverse_complement_ragged python/` and
-  `grep -rn reverse_masked python/` confirm the only RC left on the **rust** path is the
-  `RaggedVariants` branch (plus the numba-guarded oracle calls).
+  computation, but hand its result to the kernel via the splice plan / recon call instead of
+  to `reverse_complement_ragged`.
+- **`_query.py::reverse_complement_ragged`** (`:374-410`): shrink to the **husk** — only the
+  `RaggedVariants` branch survives (`return rag.rc_(to_rc)`); delete the `_Flat`,
+  `_FlatAnnotatedHaps`, and no-op branches. Add `# TODO(target-7)` noting Target 7 absorbs
+  and deletes it.
+- **`_reference.py`** (`:438-444`): delete the spliced-reference
+  `per_elem.reverse_masked(to_rc_perm, comp=_COMP)` post-pass; thread `to_rc_perm` into
+  `_fetch_spliced_ref` / the reference kernel. (Third RC site, missed by the handoff, now
+  in-scope.)
+- **Reconstructors** (`Haps`, `Ref`, `Tracks`, `HapsTracks`, `SeqsTracks`, annotated) gain a
+  `to_rc` parameter on their recon entry that they forward to the FFI kernel. Exact signature
+  confirmed when reading `_reconstruct.py`; principle: mask flows region-compute → recon →
+  kernel, and the only Python RC left anywhere is the variants husk.
+- **No stray callers:** `grep -rn reverse_complement_ragged python/` and
+  `grep -rn reverse_masked python/` confirm nothing else depends on the deleted paths.
 
 ## Parity, tests & perf gate
 

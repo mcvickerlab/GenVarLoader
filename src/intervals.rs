@@ -24,7 +24,10 @@ pub fn intervals_to_tracks(
     out_offsets: ArrayView1<i64>,
 ) {
     // Step 1: zero the whole output buffer, exactly like `out[:] = 0.0`.
-    out.fill(0.0);
+    // The out buffer is freshly allocated and contiguous; address it as a raw
+    // &mut [f32] so per-interval writes avoid ndarray SliceInfo construction.
+    let out_slice = out.as_slice_mut().unwrap();
+    out_slice.fill(0.0);
 
     let n_queries = starts.len();
 
@@ -63,7 +66,7 @@ pub fn intervals_to_tracks(
             if e > s {
                 let a = out_s + s as usize;
                 let b = out_s + e as usize;
-                out.slice_mut(ndarray::s![a..b]).fill(value);
+                out_slice[a..b].fill(value);
             }
         }
     }
