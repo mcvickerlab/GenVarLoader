@@ -590,7 +590,7 @@ variants/variant-windows) localized the remaining single-thread work:
 
 ##### ✅ Optimization targets — round 3 (instruction-level, profiled 2026-06-25)
 
-> Branch: `opt/round3-instruction-tuning`. Tooling: `cargo asm --lib` (cargo-show-asm).
+> Branch: `opt/round3-instruction-tuning` ([PR #252](https://github.com/mcvickerlab/GenVarLoader/pull/252) → `rust-migration`). Tooling: `cargo asm --lib` (cargo-show-asm).
 > Starting ratios from the Task-3 profiling baseline captured 2026-06-25 (full table in
 > `docs/roadmaps/round3-profile-baseline.md`): tracks-only **0.97×**, haplotypes **0.70×**,
 > variants **0.80×**, variant-windows **0.56×**. Rust was already at parity or faster on all 4 paths;
@@ -692,7 +692,7 @@ narrowed to genoray (variant IO) only.
 
 ## Notes & decisions log
 
-- 2026-06-25 (round-3 instruction-level kernel tuning; branch `opt/round3-instruction-tuning`):
+- 2026-06-25 (round-3 instruction-level kernel tuning; branch `opt/round3-instruction-tuning`, [PR #252](https://github.com/mcvickerlab/GenVarLoader/pull/252)):
   Instruction-count pass over 7 hot kernels identified by the Task-3 `perf` flat-profile (full
   aggregate table in `docs/roadmaps/round3-profile-baseline.md`). Tooling: `cargo asm --lib`
   (cargo-show-asm). Gate: wall-clock throughput — instruction-count and llvm-mca cycle deltas used
