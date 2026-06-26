@@ -628,6 +628,7 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
     output_length: i64,
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
+    to_rc: Option<PyReadonlyArray1<bool>>,
 ) -> (
     Bound<'py, PyArray1<u8>>,
     Bound<'py, PyArray1<i32>>,
@@ -723,6 +724,12 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
         Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
     );
 
+    if let Some(to_rc) = to_rc.as_ref() {
+        let m = to_rc.as_array();
+        crate::reverse::rc_flat_rows_inplace(out_data.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
+        crate::reverse::reverse_flat_rows_inplace(annot_v.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
+        crate::reverse::reverse_flat_rows_inplace(annot_pos.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
+    }
     // Step 5: return owned arrays — Python wraps them with no further coercions.
     (
         out_data.into_pyarray(py),
@@ -972,6 +979,21 @@ mod tests {
         let to_rc = ndarray::array![true];
         crate::reverse::reverse_flat_rows_inplace(&mut out, offsets.view(), to_rc.view());
         assert_eq!(out, vec![3.0, 2.0, 1.0]); // no value transform
+    }
+
+    #[test]
+    fn annotated_rc_complements_bytes_reverses_indices() {
+        let mut bytes = b"ACG".to_vec();          // revcomp -> "CGT"
+        let mut vidx = vec![5i32, 6, 7];          // reverse -> [7,6,5]
+        let mut rpos = vec![100i32, 101, 102];    // reverse -> [102,101,100]
+        let offsets = ndarray::array![0i64, 3];
+        let m = ndarray::array![true];
+        crate::reverse::rc_flat_rows_inplace(&mut bytes, offsets.view(), m.view());
+        crate::reverse::reverse_flat_rows_inplace(&mut vidx, offsets.view(), m.view());
+        crate::reverse::reverse_flat_rows_inplace(&mut rpos, offsets.view(), m.view());
+        assert_eq!(&bytes, b"CGT");
+        assert_eq!(vidx, vec![7, 6, 5]);
+        assert_eq!(rpos, vec![102, 101, 100]);
     }
 }
 
