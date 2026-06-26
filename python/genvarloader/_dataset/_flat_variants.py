@@ -120,26 +120,18 @@ class _FlatAlleles:
     def reverse_masked(self, mask: NDArray[np.bool_]) -> "_FlatAlleles":
         """DNA reverse-complement the mask-selected rows' alleles, in place.
 
-        ``mask`` is one entry per region (length ``b``); it is broadcast across
-        ploidy then across each (b*p) row's variant count, exactly matching
-        ``RaggedVariants.rc_`` (``np.repeat(to_rc, ploidy)`` then
-        ``np.repeat(per_bp, np.diff(group_off))``).
+        ``mask`` is one entry per region (length ``b``); broadcast across ploidy
+        to a per-(b*p) row mask, then expanded per-allele inside the dispatched
+        ``rc_alleles`` kernel (rust default, seqpro reference).
         """
-        from seqpro.rag import Ragged
-
-        from .._ragged import reverse_complement_masked
-
         m = np.ascontiguousarray(mask, np.bool_).reshape(-1)
-        # per-(b*p) mask: broadcast each region's flag across ploidy
-        per_bp = np.repeat(m, self.ploidy)
-        # per-allele mask: repeat each row's flag across its variant count
-        per_allele = np.repeat(per_bp, np.diff(self.var_offsets))
-        view = Ragged.from_offsets(
-            self.byte_data.view("S1"),
-            (per_allele.size, None),
+        per_bp = np.repeat(m, self.ploidy)  # per-(b*p) row mask
+        get("rc_alleles")(
+            self.byte_data,
             np.asarray(self.seq_offsets, np.int64),
+            np.asarray(self.var_offsets, np.int64),
+            per_bp,
         )
-        reverse_complement_masked(view, per_allele)  # mutates byte_data in place
         return self
 
     def reshape(self, shape: int | tuple[int, ...]) -> "_FlatAlleles":

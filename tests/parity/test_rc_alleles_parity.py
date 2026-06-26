@@ -4,6 +4,7 @@ from hypothesis import strategies as st
 
 from genvarloader._dataset import _flat_variants  # noqa: F401  (registers rc_alleles)
 from genvarloader import _dispatch
+from genvarloader._dataset._flat_variants import _FlatAlleles
 
 _ACGTN = np.frombuffer(b"ACGTN", np.uint8)
 
@@ -22,6 +23,32 @@ def _allele_batch(draw):
     data = np.ascontiguousarray(data, np.uint8)
     mask = np.array([draw(st.booleans()) for _ in range(n_rows)], np.bool_)
     return data, seq_offsets, var_offsets, mask
+
+
+def test_flat_alleles_reverse_masked_uses_rc_alleles(monkeypatch):
+    """_FlatAlleles.reverse_masked must call the dispatched rc_alleles kernel."""
+    from genvarloader._dataset._flat_variants import _FlatAlleles
+    from genvarloader._dataset import _flat_variants as fv
+
+    calls = {"n": 0}
+    real = _dispatch.get
+
+    def spy(name):
+        if name == "rc_alleles":
+            calls["n"] += 1
+        return real(name)
+
+    monkeypatch.setattr(fv, "get", spy)
+
+    # one row (b=1, ploidy=1), two alleles "AC","G".
+    byte_data = np.frombuffer(b"ACG", np.uint8).copy()
+    seq_offsets = np.array([0, 2, 3], np.int64)
+    var_offsets = np.array([0, 2], np.int64)
+    fa = _FlatAlleles(byte_data, seq_offsets, var_offsets, (1, 1, None))
+    fa.reverse_masked(np.array([True], np.bool_))
+    assert calls["n"] == 1
+    # "AC"->"GT", "G"->"C"
+    assert fa.byte_data.tobytes() == b"GTC"
 
 
 @settings(max_examples=200, deadline=None)
