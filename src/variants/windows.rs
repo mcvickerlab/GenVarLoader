@@ -2,7 +2,7 @@
 //! PyO3 lives in `crate::ffi`. Mirrors the Python helpers in
 //! `_dataset/_flat_flanks.py` (`tokenize_alleles`, `_slice_flanks`,
 //! `_assemble_alt_windows`, `compute_*`) — byte-identical by construction.
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// Apply a 256-entry byte->token lookup table. `out[i] = lut[bytes[i]]`.
 /// Mirrors numpy `lut[bytes]`. `Tok` is the token dtype (u8 or i32).
@@ -73,6 +73,45 @@ pub fn assemble_alt_window(
     (Array1::from_vec(out), out_off)
 }
 
+/// Fetch the per-variant reference window `[start-L, end+L)` into one flat
+/// buffer, with `ends = starts - min(ilen, 0) + 1`. Returns `(data, rw_off)`
+/// where `rw_off` are per-variant byte boundaries (len `n+1`). Reuses
+/// `reference::get_reference`'s padded core (absolute-coordinate OOB padding).
+/// Mirrors `reference.fetch(v_contigs, starts-L, ends+L)`.
+pub fn fetch_windows(
+    v_contigs: ArrayView1<i32>,
+    starts_v: ArrayView1<i32>,
+    ilens_v: ArrayView1<i32>,
+    flank_len: i64,
+    reference: ArrayView1<u8>,
+    ref_offsets: ArrayView1<i64>,
+    pad_char: u8,
+) -> (Array1<u8>, Array1<i64>) {
+    let n = starts_v.len();
+    let mut regions = Array2::<i32>::zeros((n, 3));
+    let mut rw_off = Array1::<i64>::zeros(n + 1);
+    for i in 0..n {
+        let start = starts_v[i] as i64;
+        let ilen = ilens_v[i] as i64;
+        let end = start - ilen.min(0) + 1;
+        let rstart = start - flank_len;
+        let rend = end + flank_len;
+        regions[[i, 0]] = v_contigs[i];
+        regions[[i, 1]] = rstart as i32;
+        regions[[i, 2]] = rend as i32;
+        rw_off[i + 1] = rw_off[i] + (rend - rstart);
+    }
+    let data = crate::reference::get_reference(
+        regions.view(),
+        rw_off.view(),
+        reference,
+        ref_offsets,
+        pad_char,
+        false, // serial: disjoint output already; this is per-variant fanout
+    );
+    (data, rw_off)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +170,52 @@ mod tests {
         // var1: 20, 67,71, 21  (2*1 + 2 = 4 bytes)
         assert_eq!(out.to_vec(), vec![10u8, 65, 11, 20, 67, 71, 21]);
         assert_eq!(off.to_vec(), vec![0i64, 3, 7]);
+    }
+
+    #[test]
+    fn test_fetch_windows() {
+        use ndarray::Array1 as A1;
+        // Single contig reference: bytes 0..20.
+        let reference: A1<u8> = A1::from_vec((0u8..20).collect());
+        let ref_offsets = arr1(&[0i64, 20]);
+        // 1 variant, contig 0, start=5, ilen=0 (SNP) → end = 5 - 0 + 1 = 6.
+        // L=2 → read [start-L, end+L) = [3, 8) → bytes [3,4,5,6,7].
+        let v_contigs = arr1(&[0i32]);
+        let starts = arr1(&[5i32]);
+        let ilens = arr1(&[0i32]);
+        let (data, rw_off) = fetch_windows(
+            v_contigs.view(),
+            starts.view(),
+            ilens.view(),
+            2,
+            reference.view(),
+            ref_offsets.view(),
+            b'N',
+        );
+        assert_eq!(data.to_vec(), vec![3u8, 4, 5, 6, 7]);
+        assert_eq!(rw_off.to_vec(), vec![0i64, 5]);
+    }
+
+    #[test]
+    fn test_fetch_windows_deletion_widens() {
+        use ndarray::Array1 as A1;
+        let reference: A1<u8> = A1::from_vec((0u8..20).collect());
+        let ref_offsets = arr1(&[0i64, 20]);
+        // ilen=-2 (2bp deletion) → end = start - (-2) + 1 = start + 3.
+        // start=5, L=1 → read [4, 9) → bytes [4,5,6,7,8] (len 5).
+        let v_contigs = arr1(&[0i32]);
+        let starts = arr1(&[5i32]);
+        let ilens = arr1(&[-2i32]);
+        let (data, rw_off) = fetch_windows(
+            v_contigs.view(),
+            starts.view(),
+            ilens.view(),
+            1,
+            reference.view(),
+            ref_offsets.view(),
+            b'N',
+        );
+        assert_eq!(data.to_vec(), vec![4u8, 5, 6, 7, 8]);
+        assert_eq!(rw_off.to_vec(), vec![0i64, 5]);
     }
 }
