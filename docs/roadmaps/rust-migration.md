@@ -467,7 +467,7 @@ variants/variant-windows) localized the remaining single-thread work:
    reconstruct/track kernels — emit negative-strand regions already reverse-complemented (write the
    output buffer back-to-front with complemented bytes), deleting the `reverse_complement_ragged` step
    in `_query.py`. This is roadmap target 4's RC half, now quantified and promoted.
-   _PR: _(pending)__
+   _PR: [#249](https://github.com/mcvickerlab/GenVarLoader/pull/249) → rust-migration_
 
    **Implementation:** `src/reverse.rs` adds `rc_flat_rows_inplace` / `reverse_flat_rows_inplace`
    primitives (COMP LUT, in-place on `&mut [u8]` / `&mut [f32]`). All five flat read-path kernels
@@ -543,7 +543,7 @@ variants/variant-windows) localized the remaining single-thread work:
 
 > **Sequencing for follow-up PRs (updated 2026-06-25):** (5) ⬜ lands first — small, rust-only, closes
 > the tracks-only gap. **(6) ✅ DONE** — RC folded into rust kernels on `opt/target-6-kernel-rc`; see
-> measurements above; PR _(pending)_. (7) ⬜ folds into the Phase 5 rewrite.
+> measurements above; PR [#249](https://github.com/mcvickerlab/GenVarLoader/pull/249). (7) ⬜ folds into the Phase 5 rewrite.
 > **Rayon batch parallelism is gated on Targets 5+6+7 landing first** — only after these put rust at or
 > ahead of numba single-threaded (per-query in-loop RC and ndarray slicing eliminated) do we add rayon
 > batch parallelism (Phase 5). The per-query in-loop RC of the T6 design parallelizes cleanly over
