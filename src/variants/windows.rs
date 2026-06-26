@@ -2,7 +2,7 @@
 //! PyO3 lives in `crate::ffi`. Mirrors the Python helpers in
 //! `_dataset/_flat_flanks.py` (`tokenize_alleles`, `_slice_flanks`,
 //! `_assemble_alt_windows`, `compute_*`) — byte-identical by construction.
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1};
 
 /// Apply a 256-entry byte->token lookup table. `out[i] = lut[bytes[i]]`.
 /// Mirrors numpy `lut[bytes]`. `Tok` is the token dtype (u8 or i32).
