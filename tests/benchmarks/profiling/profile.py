@@ -59,7 +59,7 @@ def build(ds, mode: str):
                 "variant-windows",
                 gvl.VarWindowOpt(
                     flank_length=128,
-                    token_alphabet=sp.DNA.alphabet,
+                    token_alphabet=sp.DNA.alphabet.encode(),
                     unknown_token=len(sp.DNA),
                     ref="window",
                     alt="window",

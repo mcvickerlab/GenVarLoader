@@ -468,22 +468,49 @@ variants/variant-windows) localized the remaining single-thread work:
    output buffer back-to-front with complemented bytes), deleting the `reverse_complement_ragged` step
    in `_query.py`. This is roadmap target 4's RC half, now quantified and promoted.
 
-7. **⬜ variant-windows — Python-overhead / GC-bound, not kernel-bound.** `perf` flat self-time shows
-   no dominant Rust kernel; the cost is the interpreter + allocator: `_PyEval_EvalFrameDefault` ~8.5%,
-   GC (`gc_collect_main` + `deduce_unreachable` + `visit_reachable` + `dict_traverse`) **~14% combined**,
-   dict/attr lookups, and dynamic-symbol lookup (`do_lookup_x`/`_dl_lookup_symbol_x` ~2.3%, from the
-   per-call ctypes/cffi binding). The flat-windows assembly allocates many small objects per batch
-   (`_FlatWindow`/`FlatRagged`/scalar-field dataclasses). **Fix direction:** cut per-batch object churn
-   in `_dataset/_flat_variants.py` / `_flat_flanks.py` (reuse buffers, fewer wrapper objects, assemble
-   the token buffers in one Rust call returning flat arrays) so GC pressure drops. Lower priority than
-   5–6; revisit under the Phase 5 single-big-kernel rewrite.
+7. **✅ ADDRESSED (branch `opt/target-7-windows-rust-assembly`, PR TBD).** variant-windows — collapsed
+   per-batch object churn into one Rust call. `assemble_variant_buffers_{u8,i32}` assembles alt/ref
+   byte windows + flank tokens in one FFI crossing (`src/ffi/mod.rs`, cores in `src/variants/windows.rs`), replacing the
+   `_FlatWindow`/`FlatRagged`/scalar-field dataclass construction loop in `_flat_variants.py` /
+   `_flat_flanks.py`. GC self-time (`gc_collect_main` + `deduce_unreachable` + `visit_reachable` +
+   `dict_traverse`) dropped from **~14% → ~2.5%** of flat self-time; the profile top is now dominated
+   by the Rust kernels (`tokenize` 28%, `slice_flanks` 19%, `assemble_alt_window` 13%) and
+   `_PyEval_EvalFrameDefault` ~3.7%. variant-windows throughput: **rust 1.83× faster than numba**
+   (2.38 ms/batch vs 4.37 ms/batch; profile.py wall-clock, 2000 batches, `NUMBA_NUM_THREADS=1`,
+   HEAD `bd957b7`, Carter HPC AMD EPYC 7543, linux-64). Bare variants mode: rust **0.84×** of numba
+   (3.75 ms/batch vs 3.15 ms/batch) — slightly slower, within run-to-run noise on this shared node
+   (the path is dominated by `intervals_to_tracks` / `shift_and_realign_tracks_sparse` track work,
+   not the variant assembly itself, so this is expected noise not a regression).
 
 > **Sequencing for follow-up PRs:** (5) lands first and standalone — small, rust-only, closes the one
 > path where rust is clearly slower. (6) is the biggest absolute throughput win and unblocks honest
 > parallel numbers; it is a larger change (kernel RC + delete the numpy pass) and should be its own PR
-> with byte-identical parity gating. (7) folds into the Phase 5 rewrite. Only after (5)+(6) put rust
-> ahead single-threaded do we add rayon batch parallelism (Phase 5) — parallelizing first would just
-> scale the numpy RC pass and the ndarray slicing.
+> with byte-identical parity gating. (7) landed (assembly-only; Phase 5 still owns the full one-big
+> `__getitem__` rewrite). Only after (5)+(6) put rust ahead single-threaded do we add rayon batch
+> parallelism (Phase 5) — parallelizing first would just scale the numpy RC pass and the ndarray slicing.
+
+##### Target 7 re-measurement (2026-06-25, branch `opt/target-7-windows-rust-assembly`)
+
+> **Harness:** `tests/benchmarks/profiling/profile.py` wall-clock average (2000 batches, burn-in 5),
+> not pytest-benchmark pedantic min — `test_e2e_variants` is xfailed (pre-existing `_FlatVariants.to_fixed`
+> gap) so no pedantic-min is available for the variants paths. `NUMBA_NUM_THREADS=1`, release build
+> (`maturin develop --release`), HEAD `bd957b7`, `chr22_geuv.gvl` (format 2.0, 165 regions × 5 samples),
+> Carter HPC (AMD EPYC 7543, linux-64).
+
+| Mode | rust (ms/batch) | numba (ms/batch) | rust ÷ numba | note |
+|---|---|---|---|---|
+| variant-windows | 2.38 | 4.37 | **1.83×** (rust faster) | assembly collapsed to one Rust call |
+| variants (bare alleles) | 3.75 | 3.15 | 0.84× (within noise) | dominated by track work, not variant assembly |
+
+> variant-windows is now the **clearest rust win in isolation**: 1.83× over numba, GC share ~2.5% vs ~14% baseline.
+> The bare-variants path is noise-level (the reconstruction cost is track/haplotype work, not the variant
+> gather kernels). Full tree 967 passed / 21 skipped / 4 xfailed on both backends (HEAD `bd957b7`);
+> byte-identical parity confirmed via `assemble_variant_buffers` mode-matrix + live-path spy.
+
+> **perf flat self-time (variant-windows, rust, 12000 batches):**
+> top leaves: `tokenize` 28.3%, `slice_flanks` 19.2%, `assemble_alt_window` 13.1%, `_PyEval_EvalFrameDefault`
+> 3.7%, GC total 2.5% (`gc_collect_main` 1.0% + `deduce_unreachable` 0.6% + `visit_reachable` 0.5% +
+> `dict_traverse` 0.4%). Profile is now Rust-kernel-dominated with negligible GC overhead.
 
 ### Phase 4 — Write / update pipeline 🚧
 _PR: bigwig-streaming-write (TBD)_
