@@ -743,6 +743,37 @@ narrowed to genoray (variant IO) only.
 
 ## Notes & decisions log
 
+- 2026-06-26 (Phase 5 W1 — trailing-fill overshoot fix + parity gate; branch `phase-5-w1`):
+  Fixed the trailing-fill overshoot divergence in **all four kernels** that advance `ref_idx`
+  past the contig end (deletion whose `v_ref_end > contig_len`):
+  (1) **Rust haplotype kernel** (`src/reconstruct/mod.rs`): when `writable_ref <= 0` the old
+  code set `out_end_idx = (out_idx + writable_ref).max(0)` which could be `< out_idx`, causing
+  the right-pad `out[out_end_idx..length]` to silently overwrite already-written positions.
+  Fixed by clamping to `out_end_idx = out_idx` — the whole unfilled tail `out[out_idx..length]`
+  is now padded, never less.
+  (2) **Numba haplotype kernel** (`python/genvarloader/_dataset/_genotypes.py`): replaced
+  `writable_ref = min(unfilled_length, len(ref) - ref_idx)` (could be negative) with
+  `writable_ref = max(0, min(unfilled_length, len(ref) - ref_idx))` so `out_end_idx` is
+  never below `out_idx`.
+  (3) **Rust track kernel** (`src/tracks/mod.rs`): same overshoot family — when
+  `writable_ref <= 0` the else-branch now clamps to `out_idx` (mirrors the haplotype fix).
+  (4) **Numba track kernel** (`python/genvarloader/_dataset/_tracks.py`): same `max(0, ...)`
+  guard on `writable_ref`.
+  Both kernels now write byte-identically across the full input domain including the
+  overshoot sub-domain. **Parity gates updated:** Guards 1–3 removed from
+  `tests/parity/test_reconstruct_haplotypes_parity.py` (overshoot pre-check,
+  `try/except SystemError`, double-init sentinel), and the `SystemError` guard removed from
+  `tests/parity/test_shift_and_realign_tracks_parity.py`. These sub-domains are now
+  first-class parity-covered inputs.
+  **Note:** the `pixi run -e dev pytest` command does NOT auto-rebuild the Rust extension;
+  `maturin develop --release` must be run explicitly before testing Rust changes (else the old
+  binary runs and tests fail on the pre-fix behavior — caught and fixed during this W1 run).
+  Full tree gate (rust backend): 993 passed, 12 skipped, 5 xfailed, 0 failed.
+  Subset gate on `tests/dataset tests/unit tests/parity` — rust: 709/6/2, numba: 709/6/2
+  (identical profiles, parity confirmed). Cargo: 114 passed. Lint/format/typecheck clean
+  (one branch-introduced test file reformatted by ruff). Phase 5 🚧 (W1 done; W2–W9 remain).
+  Issue tracking the overshoot: #255.
+
 - 2026-06-26 (Phase 4 close-out; branch `phase-4-close-out`, PR [#253](https://github.com/mcvickerlab/GenVarLoader/pull/253)): Investigation found the
   default write/update path already fully Rust-backed (bigWig streaming writer + COITrees table;
   variant IO via genoray). The roadmap's "variant normalization" bullet was a mischaracterization —

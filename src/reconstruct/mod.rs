@@ -207,15 +207,8 @@ pub fn reconstruct_haplotype_from_sparse(
     // fill rest with reference sequence and right-pad with Ns
     let unfilled_length = length - out_idx;
     if unfilled_length > 0 {
-        // fill with reference sequence
-        // Mirror numba: `writable_ref = min(unfilled_length, len(ref) - ref_idx)`.
-        // When `ref_idx` has advanced past the contig end (e.g. a DEL whose
-        // ref_end exceeds contig_len), `len(ref) - ref_idx` is negative.
-        // In numpy, `out[out_idx : out_idx + negative] = …` is a no-op (empty
-        // slice), and the subsequent right-pad starts from
-        // `out_end_idx = out_idx + writable_ref` which can be < `out_idx`.
-        // We clamp `out_end_idx` to 0 (never negative address) to reproduce
-        // the same right-pad range.
+        // fill with reference sequence; when ref_idx is past the contig end,
+        // writable_ref <= 0 and the tail out[out_idx..length] is right-padded.
         let writable_ref = unfilled_length.min(ref_flat.len() as i64 - ref_idx);
         // Positive: copy ref bytes from ref_idx. Zero or negative: no-op.
         let out_end_idx = if writable_ref > 0 {
@@ -238,11 +231,12 @@ pub fn reconstruct_haplotype_from_sparse(
             }
             oe
         } else {
-            // writable_ref <= 0: ref exhausted or ref_idx past contig.
-            // out_end_idx = out_idx + writable_ref, clamped to 0 to stay
-            // in-bounds (matches numpy: `out[out_end_idx:]` where
-            // out_end_idx >= 0).
-            (out_idx + writable_ref).max(0)
+            // writable_ref <= 0: ref exhausted (ref_idx at/after contig end).
+            // No reference bytes remain to copy, so the entire unfilled tail
+            // out[out_idx..length] must be padded. Clamp out_end_idx to out_idx
+            // (NOT 0) so the right-pad below fills exactly out[out_idx..length]
+            // and never overwrites already-written positions.
+            out_idx
         };
 
         // right-pad
@@ -626,6 +620,35 @@ mod tests {
         assert_eq!(out, vec![6, 7, 0, 0, 0]);
         // trailing pad annot_ref_pos must be i32::MAX
         assert_eq!(&ap[2..], &[i32::MAX, i32::MAX, i32::MAX]);
+    }
+
+    // -------------------------------------------------------------------------
+    // Case: deletion drives ref_idx past the contig end (overshoot).
+    // ref = [1,2,3,4] (len 4), ref_start=0, out_len=8.
+    // variant at pos=2, ilen=-5, allele=[50] (anchor).
+    //   v_ref_end = 2 - min(0,-5) + 1 = 8  → ref_idx advances to 8 (> len 4).
+    // Processing: ref[0..2]=[1,2], allele=[50] → out_idx=3.
+    // Final clause: unfilled=5, ref exhausted (writable_ref = min(5, 4-8) = -4 <= 0).
+    // CORRECT: no ref left → pad the whole tail → [1,2,50,0,0,0,0,0].
+    // (Pre-fix rust over-pads from index 0 → all zeros.)
+    // -------------------------------------------------------------------------
+    #[test]
+    fn overshoot_ref_past_contig() {
+        let (out, _av, _ap) = run(
+            &[0],
+            &[2],          // v_pos=2
+            &[-5],         // ilen=-5 (deletion past contig end)
+            0,             // shift
+            &[50u8],       // anchor allele
+            &[0i64, 1],
+            &[1, 2, 3, 4], // ref, len 4
+            0,             // ref_start
+            8,             // out_len
+            0,             // pad_char
+            None,
+            false,
+        );
+        assert_eq!(out, vec![1, 2, 50, 0, 0, 0, 0, 0]);
     }
 
     // -------------------------------------------------------------------------

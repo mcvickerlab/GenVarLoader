@@ -393,7 +393,7 @@ def shift_and_realign_track_sparse(
     # fill rest with track and pad with 0
     unfilled_length = length - out_idx
     if unfilled_length > 0:
-        writable_ref = min(unfilled_length, len(track) - track_idx)
+        writable_ref = max(0, min(unfilled_length, len(track) - track_idx))
         out_end_idx = out_idx + writable_ref
         ref_end_idx = track_idx + writable_ref
         out[out_idx:out_end_idx] = track[track_idx:ref_end_idx]
