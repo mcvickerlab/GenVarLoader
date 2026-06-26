@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -427,21 +428,25 @@ class RefDataset(Generic[T]):
         # Delegate kernel dispatch to the shared helper (eliminates duplication
         # with Ref.__call__'s splice branch). Returns a per-element _Flat (n_elements, None)
         # already in permuted write order.
+        to_rc_perm: "NDArray[np.bool_] | None" = None
+        if self.rc_neg:
+            to_rc_unperm = regions[:, 3] == -1
+            if to_rc_unperm.any():
+                to_rc_perm = to_rc_unperm[plan.permutation]
+
         per_elem = _fetch_spliced_ref(
             regions=regions,
             plan=plan,
             reference=self.reference.reference,
             ref_offsets=self.reference.offsets,
             pad_char=self.reference.pad_char,
+            to_rc=to_rc_perm,  # Rust: RC done in kernel; numba: handled below
         )
 
-        if self.rc_neg:
-            to_rc_unperm = regions[:, 3] == -1
-            if to_rc_unperm.any():
-                from .._ragged import _COMP
+        if to_rc_perm is not None and os.environ.get("GVL_BACKEND", "rust") == "numba":
+            from .._ragged import _COMP
 
-                to_rc_perm = to_rc_unperm[plan.permutation]
-                per_elem = per_elem.reverse_masked(to_rc_perm, comp=_COMP)
+            per_elem = per_elem.reverse_masked(to_rc_perm, comp=_COMP)
 
         # Rewrap with group_offsets at (n_rows, None) — skip the (n_rows, 1, None)
         # + squeeze(1) trick since RefDataset has no sample axis.
@@ -507,21 +512,26 @@ class RefDataset(Generic[T]):
         out_offsets = lengths_to_offsets(out_lengths)
 
         # ragged (b ~l)
+        # On the Rust backend, RC is folded into the kernel via to_rc.
+        # On the numba backend, get_reference ignores to_rc and the post-RC
+        # below preserves the original behaviour.
+        _to_rc_arr = regions[:, 3] == -1
+        _to_rc: "NDArray[np.bool_] | None" = _to_rc_arr if _to_rc_arr.any() else None
         ref = get_reference(
             regions=regions,
             out_offsets=out_offsets,
             reference=self.reference.reference,
             ref_offsets=self.reference.offsets,
             pad_char=self.reference.pad_char,
+            to_rc=_to_rc,
         ).view("S1")
 
         ref = cast(
             Ragged[np.bytes_], Ragged.from_offsets(ref, (batch_size, None), out_offsets)
         )
 
-        to_rc = regions[:, 3] == -1
-        if to_rc.any():
-            ref = reverse_complement_masked(ref, to_rc)
+        if _to_rc is not None and os.environ.get("GVL_BACKEND", "rust") == "numba":
+            ref = reverse_complement_masked(ref, _to_rc)
 
         if out_reshape is not None:
             ref = ref.reshape(out_reshape)
@@ -711,11 +721,30 @@ def get_reference(
     reference: NDArray[np.integer],
     ref_offsets: NDArray[np.integer],
     pad_char: int,
+    to_rc: "NDArray[np.bool_] | None" = None,
 ) -> NDArray[np.uint8]:
+    """Fetch reference-genome bytes for a batch of regions.
+
+    ``to_rc`` is a per-query boolean mask (True = reverse-complement that query).
+    On the Rust backend the mask is consumed in-kernel; on the numba backend it
+    is silently ignored and the caller is responsible for any post-pass RC.
+
+    The call is routed through the :func:`._dispatch.get` registry so that
+    tests can spy on the underlying backend functions via
+    :func:`._dispatch.register`.
+    """
     parallel = should_parallelize(int(out_offsets[-1]))
-    return get("get_reference")(
-        regions, out_offsets, reference, ref_offsets, pad_char, parallel
-    )
+    fn = get("get_reference")  # honours test monkeypatches
+    _backend = os.environ.get("GVL_BACKEND", "rust")
+    if _backend == "rust":
+        # Rust kernel accepts to_rc as its 7th positional arg.
+        _to_rc = None if to_rc is None else np.ascontiguousarray(to_rc, np.bool_)
+        return fn(
+            regions, out_offsets, reference, ref_offsets, pad_char, parallel, _to_rc
+        )
+    else:
+        # Numba kernel does not accept to_rc; post-pass handles RC.
+        return fn(regions, out_offsets, reference, ref_offsets, pad_char, parallel)
 
 
 def _fetch_spliced_ref(
@@ -724,12 +753,17 @@ def _fetch_spliced_ref(
     reference: NDArray[np.uint8],
     ref_offsets: NDArray[np.int64],
     pad_char: int,
+    to_rc: "NDArray[np.bool_] | None" = None,
 ) -> "_Flat[np.bytes_]":
     """Fetch reference bytes in splice-permuted order, returning a per-element
     flat ragged of shape ``(n_elements, None)``.
 
     This is the kernel-dispatch core shared by :class:`Ref.__call__`'s splice
     branch and :meth:`RefDataset._getitem_spliced`.
+
+    ``to_rc`` is the permuted per-element boolean mask (True = RC that element).
+    On the Rust backend it is passed into the ``get_reference`` kernel directly;
+    on numba the caller's post-pass handles it.
     """
     permuted_regions = regions[plan.permutation]
     raw = get_reference(
@@ -738,6 +772,7 @@ def _fetch_spliced_ref(
         reference=reference,
         ref_offsets=ref_offsets,
         pad_char=pad_char,
+        to_rc=to_rc,
     )  # uint8 flat buffer
     n_elements = plan.permuted_lengths.shape[0]
     return cast(

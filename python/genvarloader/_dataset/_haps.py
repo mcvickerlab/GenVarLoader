@@ -583,6 +583,7 @@ class Haps(Reconstructor[_H]):
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
         flat: bool = False,
+        to_rc: "NDArray[np.bool_] | None" = None,
     ) -> _H:
         if issubclass(self.kind, (RaggedVariants, _FlatVariantWindows)):
             if splice_plan is not None:
@@ -611,6 +612,7 @@ class Haps(Reconstructor[_H]):
                 rng=rng,
                 deterministic=deterministic,
                 splice_plan=splice_plan,
+                to_rc=to_rc,
             )
             return haps
 
@@ -622,6 +624,7 @@ class Haps(Reconstructor[_H]):
         rng: np.random.Generator,
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
+        to_rc: "NDArray[np.bool_] | None" = None,
     ) -> tuple[
         _H,
         NDArray[np.intp],
@@ -642,9 +645,11 @@ class Haps(Reconstructor[_H]):
 
         # (b p l), (b p l), (b p l)
         if issubclass(self.kind, RaggedSeqs):
-            out = self._reconstruct_haplotypes(req)
+            out = self._reconstruct_haplotypes(req, to_rc=to_rc)
         elif issubclass(self.kind, RaggedAnnotatedHaps):
-            haps, annot_v_idx, annot_pos = self._reconstruct_annotated_haplotypes(req)
+            haps, annot_v_idx, annot_pos = self._reconstruct_annotated_haplotypes(
+                req, to_rc=to_rc
+            )
             out = _FlatAnnotatedHaps(haps, annot_v_idx, annot_pos)
         elif issubclass(self.kind, RaggedVariants):
             if splice_plan is not None:
@@ -801,7 +806,11 @@ class Haps(Reconstructor[_H]):
         csum = np.concatenate([[0], np.cumsum(v_lens, dtype=np.int64)])
         return csum[group_offsets[1:]] - csum[group_offsets[:-1]]
 
-    def _reconstruct_haplotypes(self, req: ReconstructionRequest) -> Ragged[np.bytes_]:
+    def _reconstruct_haplotypes(
+        self,
+        req: ReconstructionRequest,
+        to_rc: "NDArray[np.bool_] | None" = None,
+    ) -> Ragged[np.bytes_]:
         """Reconstruct haplotype byte sequences from sparse genotypes."""
         assert self.reference is not None
 
@@ -825,6 +834,14 @@ class Haps(Reconstructor[_H]):
                     _fused_output_length = np.int64(
                         int(req.out_offsets[1] - req.out_offsets[0])
                     )
+                # Expand per-query to_rc → per-(query, hap) for the fused kernel.
+                # req.shifts.shape == (b, ploidy); np.repeat broadcasts (b,) → (b*p,).
+                _ploidy = req.shifts.shape[1] if req.shifts.ndim > 1 else 1
+                _to_rc_hap = (
+                    None
+                    if to_rc is None
+                    else np.ascontiguousarray(np.repeat(to_rc, _ploidy), np.bool_)
+                )
                 out_data, out_offsets = reconstruct_haplotypes_fused(
                     regions=np.ascontiguousarray(req.regions, np.int32),
                     shifts=np.ascontiguousarray(req.shifts, np.int32),
@@ -847,7 +864,7 @@ class Haps(Reconstructor[_H]):
                     keep_offsets=None
                     if req.keep_offsets is None
                     else np.ascontiguousarray(req.keep_offsets, np.int64),
-                    to_rc=None,
+                    to_rc=_to_rc_hap,
                 )
                 return cast(
                     "Ragged[np.bytes_]",
@@ -892,6 +909,11 @@ class Haps(Reconstructor[_H]):
 
         if _backend == "rust":
             # Fused path: one FFI crossing, Python already holds out_offsets.
+            # to_rc is already in permuted per-element order (passed from
+            # _getitem_spliced as to_rc_per_elem = to_rc_flat[plan.permutation]).
+            _to_rc_spliced = (
+                None if to_rc is None else np.ascontiguousarray(to_rc, np.bool_)
+            )
             out_buf = reconstruct_haplotypes_spliced_fused(
                 permuted_regions=np.ascontiguousarray(permuted_regions, np.int32),
                 flat_shifts=np.ascontiguousarray(flat_shifts.reshape(-1, 1), np.int32),
@@ -916,7 +938,7 @@ class Haps(Reconstructor[_H]):
                 keep_offsets=None
                 if keep_offsets_perm is None
                 else np.ascontiguousarray(keep_offsets_perm, np.int64),
-                to_rc=None,
+                to_rc=_to_rc_spliced,
             )
         else:
             # Numba composed path — unchanged oracle.
@@ -952,7 +974,9 @@ class Haps(Reconstructor[_H]):
         )
 
     def _reconstruct_annotated_haplotypes(
-        self, req: ReconstructionRequest
+        self,
+        req: ReconstructionRequest,
+        to_rc: "NDArray[np.bool_] | None" = None,
     ) -> tuple[Ragged[np.bytes_], Ragged[V_IDX_TYPE], Ragged[np.int32]]:
         """Reconstruct haplotypes plus per-nucleotide annotations.
 
@@ -982,6 +1006,13 @@ class Haps(Reconstructor[_H]):
                     _fused_output_length = np.int64(
                         int(req.out_offsets[1] - req.out_offsets[0])
                     )
+                # Expand per-query to_rc → per-(query, hap) for the fused kernel.
+                _ploidy = req.shifts.shape[1] if req.shifts.ndim > 1 else 1
+                _to_rc_hap = (
+                    None
+                    if to_rc is None
+                    else np.ascontiguousarray(np.repeat(to_rc, _ploidy), np.bool_)
+                )
                 out_data, annot_v_data, annot_pos_data, out_offsets = (
                     reconstruct_annotated_haplotypes_fused(
                         regions=np.ascontiguousarray(req.regions, np.int32),
@@ -1007,7 +1038,7 @@ class Haps(Reconstructor[_H]):
                         keep_offsets=None
                         if req.keep_offsets is None
                         else np.ascontiguousarray(req.keep_offsets, np.int64),
-                        to_rc=None,
+                        to_rc=_to_rc_hap,
                     )
                 )
                 return (
@@ -1112,6 +1143,17 @@ class Haps(Reconstructor[_H]):
             "Ragged[np.int32]",
             _Flat.from_offsets(annot_pos_buf, per_elem_shape, off),
         )
+
+        # Annotated spliced path always uses numba reconstruct (no fused Rust
+        # kernel for annotated+splice).  On the Rust backend, fold RC in Python
+        # here so the post-pass can skip it (matching the non-spliced behaviour).
+        if os.environ.get("GVL_BACKEND", "rust") == "rust" and to_rc is not None:
+            from .._ragged import _COMP
+
+            fa = _FlatAnnotatedHaps(haps_rag, annot_v_rag, annot_pos_rag)
+            fa = fa.reverse_masked(to_rc, _COMP)
+            return fa.haps, fa.var_idxs, fa.ref_coords
+
         return haps_rag, annot_v_rag, annot_pos_rag
 
     def _permute_request_for_splice(
