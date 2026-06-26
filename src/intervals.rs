@@ -23,6 +23,17 @@ pub fn intervals_to_tracks(
     mut out: ArrayViewMut1<f32>,
     out_offsets: ArrayView1<i64>,
 ) {
+    // Hoist all inputs to raw slices before any loop — eliminates ndarray's
+    // per-element stride multiplication and bounds-check branches that would
+    // otherwise appear in every inner-loop iteration.
+    let offset_idxs = offset_idxs.as_slice().unwrap();
+    let starts = starts.as_slice().unwrap();
+    let itv_starts = itv_starts.as_slice().unwrap();
+    let itv_ends = itv_ends.as_slice().unwrap();
+    let itv_values = itv_values.as_slice().unwrap();
+    let itv_offsets = itv_offsets.as_slice().unwrap();
+    let out_offsets = out_offsets.as_slice().unwrap();
+
     // Step 1: zero the whole output buffer, exactly like `out[:] = 0.0`.
     // The out buffer is freshly allocated and contiguous; address it as a raw
     // &mut [f32] so per-interval writes avoid ndarray SliceInfo construction.
