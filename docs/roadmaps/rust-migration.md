@@ -447,7 +447,7 @@ The de-noised benchmark (above) exposed a real **tracks-only 0.63×** deficit an
 already 1.68×** (rust wins). Profiling each path the user cares about (tracks-only, haplotypes,
 variants/variant-windows) localized the remaining single-thread work:
 
-5. **⬜ tracks-only 0.63× — per-interval `ndarray` slicing in `intervals::intervals_to_tracks`
+5. **✅ tracks-only 0.63× — per-interval `ndarray` slicing in `intervals::intervals_to_tracks`
    (rust-specific, highest value).** `perf` self-time on the tracks-only path:
    `intervals_to_tracks` 31% + `ndarray::slice_mut` **11%** + `ndarray::do_slice` **9.5%** ≈ **20.5%
    spent in ndarray slice machinery**, from `out.slice_mut(s![a..b]).fill(value)` in the inner loop
@@ -457,6 +457,13 @@ variants/variant-windows) localized the remaining single-thread work:
    dropping the per-interval `SliceInfo` construction + bounds-check. Expected to reclaim most of the
    20% and close the tracks-only gap; also speeds the combined tracks path (shared kernel). This is the
    single clearest path to **rust > numba single-threaded** on the cheapest read.
+
+   **✅ ADDRESSED (branch `opt/target-5-intervals-slice`, PR: <link pending>).** Raw-slice form
+   landed (no `unsafe` needed): `out.as_slice_mut()` hoisted once before the interval loop,
+   inner-loop body rewritten to `out_slice[a..b].fill(value)` / `out_slice.fill(0.0)` on
+   `&mut [f32]`, dropping per-interval `SliceInfo` construction + bounds-check. Rust min
+   1.7112 ms → 1.1953 ms (~30% rust-side drop), tracks-only ratio 0.63× → 1.004×
+   (numba_min/rust_min).
 
 6. **⬜ Strand reverse-complement post-pass (`reverse_complement_ragged` / `_flat.reverse_masked`) —
    backend-agnostic, biggest throughput sink on the seq paths.** Self-time (py-spy, no `--native`):
