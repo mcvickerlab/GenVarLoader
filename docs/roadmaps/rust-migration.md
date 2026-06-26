@@ -282,7 +282,7 @@ as the registered parity reference for the consolidation pass (Phase 5).
 - [x] Task 13: Fused haplotypes `__getitem__` kernel — `reconstruct_haplotypes_fused` collapses 2 FFI crossings to 1 on the non-splice plain haps path. Dataset parity gate: byte-identical to composed numba oracle (37/37 parity tests pass). Annotated path and splice path remain on unfused dispatched kernels (documented in task-13-report.md).
 - [x] Task 14: Fused tracks `__getitem__` kernel — `intervals_and_realign_track_fused` chains `intervals_to_tracks` → `shift_and_realign_tracks_sparse` in 1 FFI crossing per track; Rust scratch buffer replaces Python `np.empty` intermediate. Dataset parity gate: byte-identical across all 5 insertion-fill strategies (39/39 parity tests pass; fixture uses max_jitter=0 per #242 contract).
 - [x] Task 15: Full-tree verification + roadmap + skill check (final-review fixes applied). Full tree green: 909 passed, 15 xfailed (11 added here + 4 pre-existing), 0 failed. Lint/format clean; cargo 85/85; abi3 wheel builds. See final-review section in task-15-report.md.
-- [x] Migrate `_dataset/_reconstruct.py` + `_dataset/_haps.py` remaining paths. Annotated path now fused via `reconstruct_annotated_haplotypes_fused` (Phase 3 close-out, Task 4); splice path fused via `reconstruct_haplotypes_spliced_fused` (Phase 3 close-out, Task 5). Both byte-identical to the composed numba oracle. (The annotated+spliced intersection remains on the unfused dispatched rust core — still parity-gated and rust-by-default — with fusion deferred to Phase 5.)
+- [x] Migrate `_dataset/_reconstruct.py` + `_dataset/_haps.py` remaining paths. Annotated path now fused via `reconstruct_annotated_haplotypes_fused` (Phase 3 close-out, Task 4); splice path fused via `reconstruct_haplotypes_spliced_fused` (Phase 3 close-out, Task 5). Both byte-identical to the composed numba oracle. The annotated+spliced intersection is now fused via `reconstruct_annotated_haplotypes_spliced_fused` (Phase 5 W3): one FFI crossing, RC folded in-kernel (bytes reverse-complemented, both annotation arrays reversed), byte-identical to the composed numba oracle, covered by `tests/parity/test_annotated_spliced_haplotypes_parity.py`.
 - [x] Migrate `_dataset/_tracks.py` realign (6 numba) + `_dataset/_intervals.py` (4 numba). Rust-default + fused (`intervals_and_realign_track_fused`); the #242 `intervals_to_tracks` clip fix merged from main (both backends). Remaining numba kernels are retained Phase-5-deletion parity references, not unmigrated paths.
 - [x] Migrate `_dataset/_reference.py` (6 numba). `Reference.fetch` rerouted through the dispatched rust `get_reference` (Phase 3 close-out, Task 3); the three zero-caller `_fetch_*` numba functions deleted. The live `_get_reference_*` numba kernels remain as Phase-5-deletion parity references.
 - [x] Migrate `_dataset/_insertion_fill.py` + `_dataset/_splice.py`. No numba kernels remain to migrate in `_insertion_fill.py`; splice reconstruction fused via `reconstruct_haplotypes_spliced_fused` (Phase 3 close-out, Task 5).
@@ -774,6 +774,20 @@ narrowed to genoray (variant IO) only.
   (one branch-introduced test file reformatted by ruff). Phase 5 🚧 (W1 done; W2–W9 remain).
   Issue tracking the overshoot: #255.
 
+- 2026-06-26 (Phase 5 W3 — annotated+spliced fusion; branch `phase-5-w3`, PR: TODO):
+  Fused the fourth and final reconstruction combination — annotated+spliced haplotypes — via
+  `reconstruct_annotated_haplotypes_spliced_fused` (new kernel in `src/reconstruct/mod.rs`).
+  One FFI crossing total: RC is folded in-kernel (bytes reverse-complemented via the existing
+  COMP LUT; both annotation arrays reversed in-place), eliminating the prior three-kernel
+  dispatch sequence (`reconstruct_haplotypes_spliced_fused` → `rc_flat_rows_inplace` →
+  `reverse_flat_rows_inplace × 2`). All four reconstruction combinations now cross the FFI
+  boundary exactly once on the rust backend: (1) plain haps via `reconstruct_haplotypes_fused`,
+  (2) annotated haps via `reconstruct_annotated_haplotypes_fused`, (3) spliced haps via
+  `reconstruct_haplotypes_spliced_fused`, (4) annotated+spliced haps via
+  `reconstruct_annotated_haplotypes_spliced_fused`. Byte-identical to the composed numba oracle;
+  parity gate: `tests/parity/test_annotated_spliced_haplotypes_parity.py`. Numba remains the
+  oracle (deletion deferred to W5/W6). Phase 5 🚧 (W1, W3 done; W2, W4–W9 remain).
+
 - 2026-06-26 (Phase 4 close-out; branch `phase-4-close-out`, PR [#253](https://github.com/mcvickerlab/GenVarLoader/pull/253)): Investigation found the
   default write/update path already fully Rust-backed (bigWig streaming writer + COITrees table;
   variant IO via genoray). The roadmap's "variant normalization" bullet was a mischaracterization —
@@ -826,7 +840,7 @@ narrowed to genoray (variant IO) only.
   through the dispatched rust `get_reference`; deleted the three zero-caller `_fetch_*` numba functions.
   Fused the annotated-haps (`reconstruct_annotated_haplotypes_fused`) and spliced-haps
   (`reconstruct_haplotypes_spliced_fused`) read paths — both byte-identical to the composed numba oracle.
-  (The annotated+spliced intersection remains on the unfused dispatched rust core — still parity-gated and rust-by-default — with fusion deferred to Phase 5.)
+  The annotated+spliced intersection is now fused via `reconstruct_annotated_haplotypes_spliced_fused` (Phase 5 W3): one FFI crossing, RC folded in-kernel (bytes reverse-complemented, both annotation arrays reversed), byte-identical to the composed numba oracle, covered by `tests/parity/test_annotated_spliced_haplotypes_parity.py`.
   Bumped seqpro 0.18→0.20.0 with `to_numpy(validate=False)` at guaranteed-uniform read-path sites.
   Full tree green on both backends: rust 932 passed, 12 skipped, 5 xfailed, 0 failed; numba 932 passed,
   12 skipped, 5 xfailed, 0 failed; cargo 88 passed. Remaining xfails (5): `test_e2e_variants`

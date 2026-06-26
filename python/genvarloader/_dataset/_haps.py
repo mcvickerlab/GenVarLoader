@@ -1127,7 +1127,9 @@ class Haps(Reconstructor[_H]):
                     ),
                     out_offsets=np.ascontiguousarray(off, np.int64),
                     geno_offsets=_as_starts_stops(self.genotypes.offsets),
-                    geno_v_idxs=_ffi_array(self.genotypes.data, np.int32, "geno_v_idxs"),
+                    geno_v_idxs=_ffi_array(
+                        self.genotypes.data, np.int32, "geno_v_idxs"
+                    ),
                     v_starts=self.ffi_static.v_starts,
                     ilens=self.ffi_static.ilens,
                     alt_alleles=self.ffi_static.alt_alleles,
