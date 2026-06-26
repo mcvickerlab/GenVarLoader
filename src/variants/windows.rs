@@ -112,6 +112,94 @@ pub fn fetch_windows(
     (data, rw_off)
 }
 
+/// Assembled flat buffers returned by the mode orchestrators. `byte_bufs` carry
+/// raw allele bytes (u8); `tok_bufs` carry LUT-applied tokens (`Tok`). Each
+/// tuple is `(field_name, data, seq_offsets)`.
+pub struct VariantBufs<Tok> {
+    pub byte_bufs: Vec<(&'static str, Array1<u8>, Array1<i64>)>,
+    pub tok_bufs: Vec<(&'static str, Array1<Tok>, Array1<i64>)>,
+}
+
+/// Gather per-selected-variant `start`/`ilen` from the GLOBAL arrays via `v_idxs`.
+fn gather_starts_ilens(
+    v_idxs: ArrayView1<i32>,
+    v_starts: ArrayView1<i32>,
+    ilens: ArrayView1<i32>,
+) -> (Array1<i32>, Array1<i32>) {
+    let n = v_idxs.len();
+    let mut s = Array1::<i32>::zeros(n);
+    let mut il = Array1::<i32>::zeros(n);
+    for i in 0..n {
+        let v = v_idxs[i] as usize;
+        s[i] = v_starts[v];
+        il[i] = ilens[v];
+    }
+    (s, il)
+}
+
+/// Plain-`variants` assembly tail: raw alt bytes (always), raw ref bytes
+/// (optional), `flank_tokens` ride-along (optional). Mirrors the variants tail
+/// of `get_variants_flat` (gather_alleles + compute_flank_tokens).
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_variants_mode<Tok: Copy>(
+    v_idxs: ArrayView1<i32>,
+    row_offsets: ArrayView1<i64>,
+    alt_global: ArrayView1<u8>,
+    alt_off_global: ArrayView1<i64>,
+    ref_global: Option<ArrayView1<u8>>,
+    ref_off_global: Option<ArrayView1<i64>>,
+    want_flank: bool,
+    flank_len: i64,
+    lut: Option<ArrayView1<Tok>>,
+    v_contigs: ArrayView1<i32>,
+    v_starts: ArrayView1<i32>,
+    ilens: ArrayView1<i32>,
+    reference: ArrayView1<u8>,
+    ref_offsets: ArrayView1<i64>,
+    pad_char: u8,
+) -> VariantBufs<Tok> {
+    let mut byte_bufs = Vec::new();
+    let mut tok_bufs = Vec::new();
+
+    let (alt_data, alt_seq_off) =
+        crate::variants::gather_alleles(v_idxs, alt_global, alt_off_global);
+    byte_bufs.push(("alt", alt_data, alt_seq_off));
+
+    if let (Some(rg), Some(ro)) = (ref_global, ref_off_global) {
+        let (ref_data, ref_seq_off) = crate::variants::gather_alleles(v_idxs, rg, ro);
+        byte_bufs.push(("ref", ref_data, ref_seq_off));
+    }
+
+    if want_flank {
+        let lut = lut.expect("flank tokens requested but no token LUT supplied");
+        let (starts_v, ilens_v) = gather_starts_ilens(v_idxs, v_starts, ilens);
+        let (rw_data, rw_off) = fetch_windows(
+            v_contigs, starts_v.view(), ilens_v.view(), flank_len, reference, ref_offsets,
+            pad_char,
+        );
+        let l = flank_len as usize;
+        let (f5, f3) = slice_flanks(rw_data.view(), rw_off.view(), l);
+        // Concatenate [f5 | f3] per variant (2L tokens, variant-major), tokenize.
+        let n = f5.len() / l;
+        let mut flank_bytes: Vec<u8> = Vec::with_capacity(n * 2 * l);
+        for i in 0..n {
+            for k in 0..l {
+                flank_bytes.push(f5[i * l + k]);
+            }
+            for k in 0..l {
+                flank_bytes.push(f3[i * l + k]);
+            }
+        }
+        let fb = Array1::from_vec(flank_bytes);
+        let tok = tokenize(fb.view(), lut);
+        // flank_tokens offsets are the variant-level row_offsets (fixed 2L inner
+        // axis carried separately Python-side as a trailing regular dim).
+        tok_bufs.push(("flank_tokens", tok, row_offsets.to_owned()));
+    }
+
+    VariantBufs { byte_bufs, tok_bufs }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +305,57 @@ mod tests {
         );
         assert_eq!(data.to_vec(), vec![4u8, 5, 6, 7, 8]);
         assert_eq!(rw_off.to_vec(), vec![0i64, 5]);
+    }
+
+    #[test]
+    fn test_assemble_variants_mode_alt_and_flank() {
+        use ndarray::Array1 as A1;
+        // Global alleles: v0="A"(65), v1="CG"(67,71). offsets [0,1,3].
+        let alt_global = arr1(&[65u8, 67, 71]);
+        let alt_off = arr1(&[0i64, 1, 3]);
+        // Select v_idxs [1, 0] in one row.
+        let v_idxs = arr1(&[1i32, 0]);
+        let row_offsets = arr1(&[0i64, 2]);
+        // Reference 0..20, single contig. v_starts/ilens are GLOBAL (indexed by v_idx).
+        let reference: A1<u8> = A1::from_vec((0u8..20).collect());
+        let ref_offsets = arr1(&[0i64, 20]);
+        let v_starts = arr1(&[5i32, 8]); // global per-variant
+        let ilens = arr1(&[0i32, 0]);
+        let v_contigs = arr1(&[0i32, 0]); // per-selected-variant contig
+        // L=1, token LUT: identity-ish u8 (byte value -> itself for the test).
+        let lut: A1<u8> = A1::from_vec((0u8..=255).collect());
+
+        let bufs = assemble_variants_mode::<u8>(
+            v_idxs.view(),
+            row_offsets.view(),
+            alt_global.view(),
+            alt_off.view(),
+            None, // no ref alleles
+            None,
+            true, // want_flank
+            1,    // flank_len
+            Some(lut.view()),
+            v_contigs.view(),
+            v_starts.view(),
+            ilens.view(),
+            reference.view(),
+            ref_offsets.view(),
+            b'N',
+        );
+        // byte_bufs: only "alt". v_idxs [1,0] → "CG" then "A" → [67,71,65], off [0,2,3].
+        assert_eq!(bufs.byte_bufs.len(), 1);
+        let (name, data, off) = &bufs.byte_bufs[0];
+        assert_eq!(*name, "alt");
+        assert_eq!(data.to_vec(), vec![67u8, 71, 65]);
+        assert_eq!(off.to_vec(), vec![0i64, 2, 3]);
+        // tok_bufs: only "flank_tokens". Each variant: [f5(1) | f3(1)] = 2 tokens.
+        // var0 = v_idx 1: start=8, ilen=0 → end=9, read [7,10) = [7,8,9]; f5=[7], f3=[9].
+        // var1 = v_idx 0: start=5, ilen=0 → end=6, read [4,7) = [4,5,6]; f5=[4], f3=[6].
+        // tokens (identity lut) = [7,9, 4,6]; offsets = row_offsets [0,2].
+        assert_eq!(bufs.tok_bufs.len(), 1);
+        let (tname, tdata, toff) = &bufs.tok_bufs[0];
+        assert_eq!(*tname, "flank_tokens");
+        assert_eq!(tdata.to_vec(), vec![7u8, 9, 4, 6]);
+        assert_eq!(toff.to_vec(), vec![0i64, 2]);
     }
 }
