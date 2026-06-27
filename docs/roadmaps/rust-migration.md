@@ -749,7 +749,7 @@ _PR: —_
 >
 > **Key finding — threshold gate held serial on this corpus:** the `should_parallelize` gate
 > (`_MIN_BYTES_PER_THREAD = 1 MiB`, threshold = `GVL_NUM_THREADS × 1 MiB`) never fired for
-> any mode at N≥4. Batch output is ~1–3 MiB << N × 1 MiB at all thread counts tested. All
+> any mode at N≥4. Batch output is ~1–3 MiB vs. N × 1 MiB threshold (borderline at N=2; well below at N≥4). All
 > modes ran serial; the thread sweep (1/2/4/8/all-96) shows ratios within 0.95–1.10× of the
 > serial baseline — pure node noise. This is correct behavior, not a failure.
 >

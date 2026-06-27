@@ -86,10 +86,16 @@ return total_bytes >= num_threads() * _MIN_BYTES_PER_THREAD
 `num_threads()` reads `GVL_NUM_THREADS` (or cgroup CPU count). The small benchmark corpus
 (BATCH=32, SEQLEN=16384) produces at most ~2 MiB of output per batch:
 
+**Batch composition:** Each batch is BATCH=32 (region, sample) index pairs (see `tests/benchmarks/_indices.py`).
+The corpus has 5 samples with ploidy 2 (diploid), so each region-sample pair yields 2 haplotype sequences.
+Output-byte figures are therefore:
+`n_pairs × haplotypes_per_sample × seqlen` for haplotypes, and
+`n_pairs × seqlen × bytes_per_element` for f32 tracks.
+
 | Mode | Output bytes per batch | Threshold at N threads | Parallel? |
 |------|----------------------|------------------------|-----------|
-| haplotypes (32 × 2 haps × 16384 bytes) | 1,048,576 B (1 MiB) | N × 1 MiB | No at N≥2; borderline at N=1 |
-| tracks f32 (32 × 16384 × 4 bytes) | 2,097,152 B (2 MiB) | N × 1 MiB | Borderline at N=2 only |
+| haplotypes (32 pairs × 2 haps/sample × 16384 bytes/hap) | 1,048,576 B (1 MiB) | N × 1 MiB | No at N≥2; borderline at N=1 |
+| tracks f32 (32 pairs × 16384 positions × 4 bytes/f32) | 2,097,152 B (2 MiB) | N × 1 MiB | Borderline at N=2 only |
 | annotated (haps + 2 × i32 arrays) | ~3 MiB | N × 1 MiB | No at N≥4 |
 | variants (ragged, variable) | ~few MiB | N × 1 MiB | No at N≥8 |
 
