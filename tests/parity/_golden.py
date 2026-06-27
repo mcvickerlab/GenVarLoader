@@ -145,3 +145,182 @@ def replay_dict(name: str, cases: list) -> None:
             _eq(f"{name}#{ci}:{k}.data", 0, np.asarray(got[k][0]), np.asarray(golden[k][0]))
             _eq(f"{name}#{ci}:{k}.off", 1,
                 np.asarray(got[k][1], np.int64), np.asarray(golden[k][1], np.int64))
+
+
+# ---------------------------------------------------------------------------
+# Dataset-level output serialization (flatten + compare)
+# ---------------------------------------------------------------------------
+
+
+def flatten_output(out):
+    """Serialize a Dataset.__getitem__ result to a dict of arrays for golden storage.
+
+    Handles:
+      - seqpro.rag.Ragged         → {"kind":"ragged", "data":..., "offsets":...}
+      - RaggedAnnotatedHaps        → {"kind":"annot", "haps_data":..., ...}
+      - RaggedVariants             → {"kind":"ragged_variants", "field_names":[...], "fields":{...}}
+      - _FlatVariantWindows        → {"kind":"flat_variant_windows", "windows":{...}}
+      - plain ndarray              → {"kind":"array", "data":...}
+      - tuple thereof              → {"kind":"tuple", "items":[...]}
+    """
+    from seqpro.rag import Ragged
+    from genvarloader._ragged import RaggedAnnotatedHaps
+
+    # Lazily import to avoid circular imports at module level
+    try:
+        from genvarloader._dataset._rag_variants import RaggedVariants as _RaggedVariants
+    except Exception:
+        _RaggedVariants = None
+
+    try:
+        from genvarloader._dataset._flat_variants import _FlatVariantWindows as _FVW
+    except Exception:
+        _FVW = None
+
+    # RaggedAnnotatedHaps must come before Ragged (it's a subclass of Ragged)
+    if isinstance(out, RaggedAnnotatedHaps):
+        return {
+            "kind": "annot",
+            "haps_data": np.asarray(out.haps.data),
+            "haps_offsets": np.asarray(out.haps.offsets, np.int64),
+            "var_idxs_data": np.asarray(out.var_idxs.data),
+            "var_idxs_offsets": np.asarray(out.var_idxs.offsets, np.int64),
+            "ref_coords_data": np.asarray(out.ref_coords.data),
+            "ref_coords_offsets": np.asarray(out.ref_coords.offsets, np.int64),
+        }
+
+    # RaggedVariants must come before Ragged (it's a subclass)
+    if _RaggedVariants is not None and isinstance(out, _RaggedVariants):
+        flat_fields: dict = {}
+        for fname in out.fields:
+            f = out[fname]
+            is_str = bool(getattr(f, "is_string", False))
+            flat_fields[fname] = {
+                "is_string": is_str,
+                "data": np.asarray(f.data, dtype="S1") if is_str else np.asarray(f.data),
+                "offsets": np.asarray(f.offsets, np.int64),
+            }
+        return {
+            "kind": "ragged_variants",
+            "field_names": list(out.fields),
+            "fields": flat_fields,
+        }
+
+    if _FVW is not None and isinstance(out, _FVW):
+        flat_wins: dict = {}
+        for wname in ("ref_window", "alt_window", "ref", "alt"):
+            w = getattr(out, wname, None)
+            if w is not None:
+                flat_wins[wname] = {
+                    "data": np.asarray(w.data),
+                    "seq_offsets": np.asarray(w.seq_offsets, np.int64),
+                    "var_offsets": np.asarray(w.var_offsets, np.int64),
+                }
+        return {"kind": "flat_variant_windows", "windows": flat_wins}
+
+    if isinstance(out, Ragged):
+        return {
+            "kind": "ragged",
+            "data": np.asarray(out.data),
+            "offsets": np.asarray(out.offsets, np.int64),
+        }
+
+    if isinstance(out, tuple):
+        return {"kind": "tuple", "items": [flatten_output(o) for o in out]}
+
+    return {"kind": "array", "data": np.asarray(out)}
+
+
+def _assert_flat_eq(got_flat, exp_flat, name: str) -> None:
+    """Recursively assert two flattened dicts are byte-identical."""
+    got_kind = got_flat["kind"] if isinstance(got_flat, dict) else type(got_flat).__name__
+    exp_kind = exp_flat["kind"] if isinstance(exp_flat, dict) else type(exp_flat).__name__
+    assert got_kind == exp_kind, f"{name}: kind {got_kind!r} != {exp_kind!r}"
+    kind = got_flat["kind"]
+
+    if kind == "ragged":
+        _eq(name + ".data", 0, got_flat["data"], exp_flat["data"])
+        _eq(name + ".offsets", 0, got_flat["offsets"], exp_flat["offsets"])
+
+    elif kind == "annot":
+        for key in ("haps_data", "haps_offsets", "var_idxs_data", "var_idxs_offsets",
+                    "ref_coords_data", "ref_coords_offsets"):
+            _eq(f"{name}.{key}", 0, got_flat[key], exp_flat[key])
+
+    elif kind == "array":
+        _eq(name + ".data", 0, got_flat["data"], exp_flat["data"])
+
+    elif kind == "tuple":
+        gi, ei = got_flat["items"], exp_flat["items"]
+        assert len(gi) == len(ei), f"{name}: tuple len {len(gi)} != {len(ei)}"
+        for i, (g, e) in enumerate(zip(gi, ei)):
+            _assert_flat_eq(g, e, f"{name}[{i}]")
+
+    elif kind == "ragged_variants":
+        gf, ef = got_flat["fields"], exp_flat["fields"]
+        assert set(gf) == set(ef), f"{name}: field names {set(gf)} != {set(ef)}"
+        for fname in ef:
+            g, e = gf[fname], ef[fname]
+            assert g["is_string"] == e["is_string"], f"{name}.{fname}: is_string mismatch"
+            _eq(f"{name}.{fname}.data", 0, g["data"], e["data"])
+            _eq(f"{name}.{fname}.offsets", 0, g["offsets"], e["offsets"])
+
+    elif kind == "flat_variant_windows":
+        gw, ew = got_flat["windows"], exp_flat["windows"]
+        assert set(gw) == set(ew), f"{name}: windows {set(gw)} != {set(ew)}"
+        for wname in ew:
+            g, e = gw[wname], ew[wname]
+            _eq(f"{name}.{wname}.data", 0, g["data"], e["data"])
+            _eq(f"{name}.{wname}.seq_offsets", 0, g["seq_offsets"], e["seq_offsets"])
+            _eq(f"{name}.{wname}.var_offsets", 0, g["var_offsets"], e["var_offsets"])
+
+    else:
+        raise ValueError(f"Unknown kind {kind!r}")
+
+
+def assert_output_matches_golden(out, golden) -> None:
+    """Assert a fresh Dataset output equals a frozen golden (byte-identical)."""
+    got_flat = flatten_output(out)
+    _assert_flat_eq(got_flat, golden, "output")
+
+
+def save_flat_golden(name: str, out) -> None:
+    """Flatten ``out`` and save as a single-item golden for dataset-level replay."""
+    save_golden(name, [flatten_output(out)])
+
+
+def load_flat_golden(name: str):
+    """Load a single flattened dataset golden saved via ``save_flat_golden``."""
+    return load_golden(name)[0]
+
+
+def make_kernel_spy(kernel_name: str):
+    """Install a counting spy on the dispatch-registered rust callable.
+
+    Returns ``(spy_fn, calls_dict, restore_fn)``. Call ``restore_fn()`` to undo.
+    The caller does NOT need to import ``genvarloader._dispatch``.
+
+    The spy fires whenever dispatch routes to the rust callable — i.e., under
+    the default rust backend with no ``GVL_BACKEND`` override. Appropriate for
+    converted parity tests that have removed ``GVL_BACKEND`` flips but still
+    need a non-vacuity guard.
+
+    Stage-B note: this helper uses ``_dispatch`` internally; updating
+    ``_golden.py`` here (one place) is sufficient when ``_dispatch`` is deleted.
+    """
+    from genvarloader import _dispatch as _disp
+
+    numba_fn, rust_fn = _disp.backends(kernel_name)
+    orig = dict(_disp._REGISTRY[kernel_name])
+    calls: dict = {"n": 0}
+
+    def spy(*a, **k):
+        calls["n"] += 1
+        return rust_fn(*a, **k)
+
+    _disp.register(kernel_name, numba=numba_fn, rust=spy, default=str(orig["default"]))
+
+    def restore():
+        _disp._REGISTRY[kernel_name] = orig
+
+    return spy, calls, restore

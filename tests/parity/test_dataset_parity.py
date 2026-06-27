@@ -3,24 +3,19 @@
 Covers three cases:
 
 1. ``intervals_to_tracks`` only (track-only dataset, no variants):
-   Proves that flipping GVL_BACKEND produces byte-identical tracks through
-   the real Dataset.__getitem__ path.
+   Proves that the rust backend produces output matching the frozen golden
+   through the real Dataset.__getitem__ path.
 
 2. ``shift_and_realign_tracks_sparse`` (haplotypes+tracks dataset with indels):
    Proves that the dispatch wiring for the realignment kernel is correct
    end-to-end, across every insertion-fill strategy.
 
 3. Strand=−1 parity backstops (Task 7 — pre-wiring safety net):
-   Proves that flipping GVL_BACKEND produces byte-identical output for datasets
-   with mixed + and − strand regions, across all five output kinds
-   (reference, haplotypes, annotated, tracks, tracks-seqs) in the UNSPLICED
-   path, and across the four splice-capable kinds (reference, haplotypes,
-   annotated, tracks) in the SPLICED path.  Both backends currently apply RC as
-   a Python post-pass in ``_query._getitem_unspliced`` / ``_getitem_spliced``;
-   these tests establish the regression net that Task 8 kernel-level RC wiring
-   must keep green.  Each path also carries a non-vacuity assertion (output
-   differs from the forward orientation AND equals the exact reverse-complement
-   on a non-palindromic −strand region/transcript).
+   Proves that the rust backend produces byte-identical output matching the
+   frozen golden for datasets with mixed + and − strand regions, across all
+   five output kinds (reference, haplotypes, annotated, tracks, tracks-seqs)
+   in the UNSPLICED path, and across the four splice-capable kinds in the
+   SPLICED path.  Analytical non-vacuity tests (RC guard) are also included.
 """
 
 from __future__ import annotations
@@ -28,6 +23,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from tests.parity import _golden
 from tests.parity._fixtures import (
     _JITTER_SIGNAL_PER_SAMPLE,
     build_haps_tracks_dataset,
@@ -39,35 +35,15 @@ from tests.parity._fixtures import (
 pytestmark = pytest.mark.parity
 
 
-def _read_track_array(
-    ds, r_idx: np.ndarray, s_idx: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return (data, offsets) from the RaggedTracks produced by ds[r_idx, s_idx].
-
-    Dataset.open with no reference and no variants + with_tracks("signal") returns
-    a RaggedTracks directly from __getitem__.  RaggedTracks is a Ragged[np.float32]
-    so it carries .data (flat float32 buffer) and .offsets (int64).
-    """
-    result = ds[r_idx, s_idx]
-    # result is RaggedTracks (a seqpro Ragged[np.float32]) when no seqs are configured
-    data = np.asarray(result.data, dtype=np.float32)
-    offsets = np.asarray(result.offsets, dtype=np.int64)
-    return data, offsets
-
-
 def test_track_getitem_identical_across_backends(tmp_path, monkeypatch):
-    ds_dir = build_track_dataset(tmp_path)
-
     import genvarloader as gvl
     import genvarloader._dataset._reconstruct as _recon_mod
     import genvarloader._dataset._tracks as _tracks_mod
 
+    ds_dir = build_track_dataset(tmp_path)
     ds = gvl.Dataset.open(ds_dir)
-    # tracks-only dataset: with_tracks enables the signal track explicitly
     ds = ds.with_tracks("signal")
 
-    # Use slice(None) for both dims so Dataset uses "basic" indexing (cross-product)
-    # which returns shape (n_regions, n_samples, n_tracks, ~length).
     r_idx = slice(None)
     s_idx = slice(None)
 
@@ -78,7 +54,6 @@ def test_track_getitem_identical_across_backends(tmp_path, monkeypatch):
         def spy(*a, **k):
             calls["n"] += 1
             return orig(*a, **k)
-
         return spy
 
     # Patch BOTH call-site modules; the track-only path uses _tracks_mod
@@ -89,37 +64,25 @@ def test_track_getitem_identical_across_backends(tmp_path, monkeypatch):
         _recon_mod, "intervals_to_tracks", _make_spy(_recon_mod.intervals_to_tracks)
     )
 
-    # --- numba read ---
-    monkeypatch.setenv("GVL_BACKEND", "numba")
-    data_n, off_n = _read_track_array(ds, r_idx, s_idx)
+    # --- read (default rust backend) ---
+    result = ds[r_idx, s_idx]
 
     # Backstop guard: kernel must have been called at least once
     assert calls["n"] > 0, (
-        f"intervals_to_tracks was NEVER called during the numba read "
+        f"intervals_to_tracks was NEVER called during the read "
         f"(calls={calls['n']}) — the backstop is vacuous. "
         "Inspect the read path and confirm the track reconstructor is active."
     )
 
-    # --- rust read ---
-    monkeypatch.setenv("GVL_BACKEND", "rust")
-    data_r, off_r = _read_track_array(ds, r_idx, s_idx)
-
-    # --- byte-identical comparison ---
-    np.testing.assert_array_equal(
-        off_n, off_r, err_msg="offsets differ across backends"
-    )
-    assert data_n.dtype == data_r.dtype == np.float32, (
-        f"dtype mismatch: numba={data_n.dtype}, rust={data_r.dtype}"
-    )
-    np.testing.assert_array_equal(
-        data_n, data_r, err_msg="track data differs across backends"
-    )
-
-    # Sanity: the read painted real non-zero signal (not an all-zero vacuous match)
-    assert np.any(data_n != 0.0), (
+    # Sanity: the read painted real non-zero signal
+    data = np.asarray(result.data, dtype=np.float32)
+    assert np.any(data != 0.0), (
         "Track data is all-zero — regions may not overlap synthetic intervals. "
         "Non-zero signal is required to prove the comparison is meaningful."
     )
+
+    # --- replay against frozen golden ---
+    _golden.assert_output_matches_golden(result, _golden.load_flat_golden("ds_tracks"))
 
 
 # ---------------------------------------------------------------------------
@@ -127,9 +90,9 @@ def test_track_getitem_identical_across_backends(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_tracks_max_jitter_intervals_parity_and_oracle(tmp_path, monkeypatch):
-    """End-to-end regression for #242: max_jitter>0 track reads are byte-identical
-    across backends and match the hand-computed oracle.
+def test_tracks_max_jitter_intervals_parity_and_oracle(tmp_path):
+    """End-to-end regression for #242: max_jitter>0 track reads match the golden
+    and the hand-computed positional oracle.
 
     Bug #242 root cause
     -------------------
@@ -145,8 +108,7 @@ def test_tracks_max_jitter_intervals_parity_and_oracle(tmp_path, monkeypatch):
     - **Non-vacuity**: at least one ``regions.npy[:,1]`` (stored start) is
       strictly ``<`` the corresponding ``input_regions.arrow`` chromStart
       (original start), proving the #242 boundary condition is exercised.
-    - **Byte-identity**: numba and rust produce identical ``.data`` and
-      ``.offsets`` for the whole dataset read.
+    - **Golden replay**: output matches the frozen golden.
     - **Positional oracle**: each individual (region, sample) track SLICE
       exactly equals ``np.full(REGION_LEN, sample_constant)`` — catches sample
       misordering / spatial misplacement that a count-based check would miss.
@@ -164,9 +126,6 @@ def test_tracks_max_jitter_intervals_parity_and_oracle(tmp_path, monkeypatch):
     ds_dir = build_track_dataset_jittered(tmp_path, max_jitter=MAX_JITTER)
 
     # --- Non-vacuity guard: stored start < original chromStart (#242 condition) ---
-    # regions.npy[:,1] = chromStart - max_jitter (expanded at write time).
-    # input_regions.arrow chromStart = original un-expanded chromStart.
-    # r_idx_map[i] = sorted position (row in regions.npy) of original input row i.
     regions = np.load(ds_dir / "regions.npy")  # shape (N_REGIONS, 4), int32
     input_bed = pl.read_ipc(ds_dir / "input_regions.arrow")
     r_idx_map = input_bed["r_idx_map"].to_numpy()  # original_row → sorted_pos
@@ -178,7 +137,7 @@ def test_tracks_max_jitter_intervals_parity_and_oracle(tmp_path, monkeypatch):
         "The max_jitter expansion is not exercising the #242 boundary condition."
     )
 
-    # --- Open dataset; assert default jitter == 0 (deterministic read) ---
+    # --- Open dataset ---
     ds = gvl.Dataset.open(ds_dir)
     ds = ds.with_tracks("signal")
     assert ds.jitter == 0, (
@@ -186,48 +145,25 @@ def test_tracks_max_jitter_intervals_parity_and_oracle(tmp_path, monkeypatch):
         f"got {ds.jitter}."
     )
 
-    # --- Backend reads (rust FIRST — rust is the oracle-reference output) ---
-    monkeypatch.setenv("GVL_BACKEND", "rust")
-    result_rust = ds[:, :]
-    rust_t = result_rust[1] if isinstance(result_rust, tuple) else result_rust
-    data_r = np.asarray(rust_t.data, dtype=np.float32)
-    off_r = np.asarray(rust_t.offsets, dtype=np.int64)
+    # --- Read (default rust backend) ---
+    result = ds[:, :]
+    tracks_t = result[1] if isinstance(result, tuple) else result
+    data = np.asarray(tracks_t.data, dtype=np.float32)
+    off = np.asarray(tracks_t.offsets, dtype=np.int64)
 
-    monkeypatch.setenv("GVL_BACKEND", "numba")
-    result_numba = ds[:, :]
-    numba_t = result_numba[1] if isinstance(result_numba, tuple) else result_numba
-    data_n = np.asarray(numba_t.data, dtype=np.float32)
-    off_n = np.asarray(numba_t.offsets, dtype=np.int64)
-
-    # --- Byte-identical comparison ---
-    np.testing.assert_array_equal(
-        off_n, off_r, err_msg="track offsets differ across backends"
-    )
-    assert data_n.dtype == data_r.dtype == np.float32, (
-        f"dtype mismatch: numba={data_n.dtype}, rust={data_r.dtype}"
-    )
-    np.testing.assert_array_equal(
-        data_n, data_r, err_msg="track data differs across backends"
-    )
+    # --- Golden replay ---
+    _golden.assert_output_matches_golden(result, _golden.load_flat_golden("ds_tracks_jitter"))
 
     # --- Positional, hand-computed oracle ---
-    # Each sample has a single constant BigWig interval [0, contig_len) at a
-    # distinct value (s0=1.0, s1=2.0, s2=3.0).  With jitter=0 every read window
-    # [chromStart, chromStart+REGION_LEN) is fully covered, so each (region,
-    # sample) slice is exactly REGION_LEN copies of the sample's constant.
-    #
-    # ds[:, :] returns a Ragged of shape (n_regions, n_samples, n_tracks=1, None);
-    # the leading dims flatten in C-order, so with one track the flat row index
-    # is `region * N_SAMPLES + sample` (verified against .offsets / .shape).
     sample_consts = [np.float32(v) for v in _JITTER_SIGNAL_PER_SAMPLE.values()]
-    assert off_r.size - 1 == N_REGIONS * N_SAMPLES, (
-        f"Expected {N_REGIONS * N_SAMPLES} track rows, got {off_r.size - 1}; "
+    assert off.size - 1 == N_REGIONS * N_SAMPLES, (
+        f"Expected {N_REGIONS * N_SAMPLES} track rows, got {off.size - 1}; "
         "the (region, sample) layout assumption is wrong."
     )
     for region in range(N_REGIONS):
         for sample in range(N_SAMPLES):
             row = region * N_SAMPLES + sample
-            seg = data_r[off_r[row] : off_r[row + 1]]
+            seg = data[off[row] : off[row + 1]]
             expected = np.full(REGION_LEN, sample_consts[sample], dtype=np.float32)
             np.testing.assert_array_equal(
                 seg,
@@ -239,15 +175,14 @@ def test_tracks_max_jitter_intervals_parity_and_oracle(tmp_path, monkeypatch):
                 ),
             )
 
-    # Total output size = N_REGIONS × N_SAMPLES × REGION_LEN
     total_expected = N_REGIONS * N_SAMPLES * REGION_LEN  # 3 × 3 × 20 = 180
-    assert data_r.size == total_expected, (
-        f"Output data size {data_r.size} != expected {total_expected} "
+    assert data.size == total_expected, (
+        f"Output data size {data.size} != expected {total_expected} "
         f"({N_REGIONS} regions × {N_SAMPLES} samples × {REGION_LEN} positions)."
     )
 
     # --- Non-triviality ---
-    assert np.any(data_r != 0.0), (
+    assert np.any(data != 0.0), (
         "All track values are 0.0 — constant BigWig signal is not reaching the output."
     )
 
@@ -263,33 +198,12 @@ def test_tracks_realign_getitem_identical_across_backends(
     """Spy-guarded backstop for tracks realignment dispatch wiring (Task 11/14).
 
     Proves that materialising a haplotypes+tracks dataset (with indel-bearing
-    genotypes) via ``ds[:, :]`` produces byte-identical track output across
-    GVL_BACKEND=rust and GVL_BACKEND=numba, for every insertion-fill strategy.
+    genotypes) via ``ds[:, :]`` produces output matching the frozen golden,
+    for every insertion-fill strategy.
 
     After Task 14, the Rust path calls the fused entry
-    ``intervals_and_realign_track_fused`` (one FFI crossing per track) instead
-    of the composed ``shift_and_realign_tracks_sparse`` dispatch.  The spy
-    targets ``intervals_and_realign_track_fused`` on the Rust path.
-
-    The numba path continues to use the composed path (intervals_to_tracks
-    → shift_and_realign_tracks_sparse via dispatch); the parity check
-    (byte-identical output) remains the gate.
-
-    Fixture geometry:
-    - A fresh GVL dataset is built in tmp_path via gvl.write with both the
-      session SparseVar variants (which contain indels on chr1/chr2) and a
-      synthetic BigWig ``signal`` track for samples s0/s1/s2.
-    - max_jitter=0 is used for the simplest deterministic geometry.  Bug
-      #242 (stored interval starts < query start when max_jitter>0) was
-      fixed in both ``intervals_to_tracks`` kernels via the left-clip
-      ``s = max(itv_start - query_start, 0)`` (PR #244; #242 CLOSED).
-      max_jitter=0 here keeps interval starts == query starts so the test
-      stays focused on the indel-realignment path; max_jitter>0 end-to-end
-      parity is covered by ``test_tracks_max_jitter_intervals_parity_and_oracle``.
-
-    Fill strategies covered: all 5 (Repeat5p, Repeat5pNormalized, Constant,
-    FlankSample, Interpolate).  Each is set via with_insertion_fill and the
-    byte-identical comparison is re-run.
+    ``intervals_and_realign_track_fused`` (one FFI crossing per track).
+    The spy targets this entry.
     """
     import genvarloader as gvl
     import genvarloader._dataset._reconstruct as _recon_mod
@@ -301,19 +215,11 @@ def test_tracks_realign_getitem_identical_across_backends(
         Repeat5pNormalized,
     )
 
-    # --- build fixture: fresh variants+tracks dataset with max_jitter=0 ---
     ds_dir = build_haps_tracks_dataset(tmp_path, synthetic_case.svar_path)
-
-    # Open with the session reference so haplotype reconstruction runs.
-    # Use synthetic_case.ref_path to get the same reference used to build
-    # the variants, not the pre-committed tests/data/fasta reference.
     ref = gvl.Reference.from_path(synthetic_case.ref_path, in_memory=False)
     ds_base = gvl.Dataset.open(ds_dir, reference=ref)
     ds_base = ds_base.with_seqs("haplotypes").with_tracks("signal")
 
-    # --- install spy on the fused Rust entry ---
-    # After Task 14 the Rust path calls intervals_and_realign_track_fused
-    # directly (not via _dispatch), so we monkeypatch _recon_mod.
     orig_fused = getattr(_recon_mod, "intervals_and_realign_track_fused", None)
     assert orig_fused is not None, (
         "intervals_and_realign_track_fused not found on _recon_mod — "
@@ -326,7 +232,6 @@ def test_tracks_realign_getitem_identical_across_backends(
         calls["n"] += 1
         return orig_fused(*a, **k)
 
-    # All 5 insertion-fill strategies to cover.
     fill_strategies = [
         Repeat5p(),
         Repeat5pNormalized(),
@@ -342,71 +247,33 @@ def test_tracks_realign_getitem_identical_across_backends(
         monkeypatch.setattr(_recon_mod, "intervals_and_realign_track_fused", _spy_fused)
         calls["n"] = 0  # reset per-strategy counter
 
-        # --- rust read (fused path, spy active) ---
-        monkeypatch.setenv("GVL_BACKEND", "rust")
-        out_rust = ds[:, :]
+        # --- read (default rust backend, spy active) ---
+        out = ds[:, :]
 
-        rust_call_count = calls["n"]
-
-        # --- numba read (composed path — spy must NOT fire) ---
-        monkeypatch.setenv("GVL_BACKEND", "numba")
-        out_numba = ds[:, :]
-
-        # Wiring guard: numba must NOT fire the fused spy.
-        assert calls["n"] == rust_call_count, (
-            f"[{strategy_name}] intervals_and_realign_track_fused spy fired during "
-            f"the numba read (count went from {rust_call_count} to {calls['n']}) "
-            "— spy is wired to the numba path, which is a bug."
-        )
-
-        # Anti-vacuous guard: fused entry must have been invoked.
-        assert rust_call_count > 0, (
+        # Anti-vacuous guard
+        assert calls["n"] > 0, (
             f"[{strategy_name}] intervals_and_realign_track_fused was NEVER "
-            f"invoked during the rust read (calls={rust_call_count}) — "
+            f"invoked during the read (calls={calls['n']}) — "
             "the backstop is vacuous. Inspect HapsTracks.__call__ to "
             "confirm intervals_and_realign_track_fused is called on the Rust path."
         )
 
-        # --- extract track arrays from the (haps, tracks) tuple ---
-        # out_rust and out_numba are (RaggedSeqs, RaggedTracks) tuples.
-        _, tracks_rust = out_rust
-        _, tracks_numba = out_numba
-        data_r = np.asarray(tracks_rust.data, dtype=np.float32)
-        off_r = np.asarray(tracks_rust.offsets, dtype=np.int64)
-        data_n = np.asarray(tracks_numba.data, dtype=np.float32)
-        off_n = np.asarray(tracks_numba.offsets, dtype=np.int64)
-
-        # --- byte-identical comparison ---
-        np.testing.assert_array_equal(
-            off_n,
-            off_r,
-            err_msg=f"[{strategy_name}] track offsets differ across backends",
-        )
-        assert data_n.dtype == data_r.dtype == np.float32, (
-            f"[{strategy_name}] dtype mismatch: numba={data_n.dtype}, "
-            f"rust={data_r.dtype}"
-        )
-        np.testing.assert_array_equal(
-            data_n,
-            data_r,
-            err_msg=f"[{strategy_name}] track data differs across backends",
-        )
-
-        # Non-triviality: at least some non-zero track values (not all-zero
-        # vacuous match).  Signal values are drawn from N(0,1) so near-zero
-        # is extremely unlikely but possible; we check the overall tensor.
+        # --- extract tracks for non-triviality check ---
+        _, tracks_out = out
+        data_r = np.asarray(tracks_out.data, dtype=np.float32)
         assert data_r.size > 0, (
             f"[{strategy_name}] Track output is empty — "
             "regions may not overlap stored intervals."
         )
-        # At least one realigned haplotype must differ from the input track
-        # values OR be non-zero — any non-zero value proves the track was
-        # painted from the BigWig intervals.
         assert np.any(data_r != 0.0), (
             f"[{strategy_name}] All realigned track values are 0 — "
             "the BigWig intervals may not overlap the stored regions, "
             "making this comparison vacuous."
         )
+
+        # --- replay against frozen golden ---
+        golden_name = f"ds_haps_tracks_{strategy_name}"
+        _golden.assert_output_matches_golden(out, _golden.load_flat_golden(golden_name))
 
         # Restore original between strategies.
         monkeypatch.setattr(_recon_mod, "intervals_and_realign_track_fused", orig_fused)
@@ -418,19 +285,16 @@ def test_tracks_realign_getitem_identical_across_backends(
 
 
 def test_assemble_variant_buffers_runs_on_live_windows_path(
-    phased_svar_gvl, reference, monkeypatch
+    phased_svar_gvl, reference
 ):
     """The rust mega-call must actually fire on the windows __getitem__ path.
 
     Installs a counting spy on the registered ``rust`` entry of
     ``assemble_variant_buffers``, opens a variant-windows dataset, indexes a
-    batch, and asserts the spy was invoked at least once.  Guards against a
-    vacuous parity pass caused by the kernel not being wired into the live
-    ``__getitem__`` path (e.g. silently bypassed or short-circuited).
+    batch, and asserts the spy was invoked at least once.
     """
     import genvarloader as gvl
     import genvarloader._dataset._flat_variants  # noqa: F401 — triggers register()
-    import genvarloader._dispatch as _dispatch
     from genvarloader import VarWindowOpt
 
     ds = gvl.Dataset.open(phased_svar_gvl, reference=reference)
@@ -443,23 +307,11 @@ def test_assemble_variant_buffers_runs_on_live_windows_path(
         )
     )
 
-    # Install a counting spy on the rust entry of assemble_variant_buffers.
-    numba_fn, rust_fn = _dispatch.backends("assemble_variant_buffers")
-    calls: dict[str, int] = {"n": 0}
-
-    def _spy_rust(*a, **k):
-        calls["n"] += 1
-        return rust_fn(*a, **k)
-
-    orig_entry = dict(_dispatch._REGISTRY["assemble_variant_buffers"])
-    _dispatch.register(
-        "assemble_variant_buffers", numba=numba_fn, rust=_spy_rust, default="rust"
-    )
+    spy, calls, restore = _golden.make_kernel_spy("assemble_variant_buffers")
     try:
-        monkeypatch.setenv("GVL_BACKEND", "rust")
         _ = ds[[0, 1], [0, 1]]
     finally:
-        _dispatch._REGISTRY["assemble_variant_buffers"] = orig_entry
+        restore()
 
     assert calls["n"] > 0, (
         "assemble_variant_buffers was NEVER invoked on the live variant-windows "
@@ -471,99 +323,59 @@ def test_assemble_variant_buffers_runs_on_live_windows_path(
 # ---------------------------------------------------------------------------
 # Strand=−1 parity backstops (Task 7 — pre-wiring safety net)
 # ---------------------------------------------------------------------------
-#
-# Both backends currently apply reverse-complement as a Python post-pass
-# (``_query._getitem_unspliced`` calls ``reverse_complement_ragged`` after the
-# reconstructor returns).  These tests prove byte-identical output before any
-# kernel-level RC wiring (Task 8) is done, establishing the regression net.
-# Task 8 must keep every parametrize case below green.
-#
-# Kinds covered: reference, haplotypes, annotated, tracks, tracks-seqs.
-# Spliced variants are excluded: the fixture has no transcript annotations.
+
+_SPLICE_TRANSCRIPT_IDS = ["T1", "T2", "T3", "T3", "T4"]
+_NEG_TRANSCRIPT_IDX = 1
 
 
-def _compare_strand_outputs(numba_out, rust_out, kind: str) -> None:
-    """Assert byte-identical output between backends.
+def _open_strand_spliced(ds_dir, ref, kind: str):
+    """Open the strand-mixed dataset in spliced mode for ``kind``."""
+    from dataclasses import replace
 
-    Handles Ragged (reference/haplotypes/tracks), RaggedAnnotatedHaps
-    (annotated), and tuple[Ragged, Ragged] (tracks-seqs).
-    """
-    from genvarloader._ragged import RaggedAnnotatedHaps
+    import polars as pl
 
-    def _cmp_one(n, r, label: str) -> None:
-        np.testing.assert_array_equal(
-            np.asarray(n.data),
-            np.asarray(r.data),
-            err_msg=f"[{kind}] {label}: data differs across backends",
-        )
-        np.testing.assert_array_equal(
-            np.asarray(n.offsets, dtype=np.int64),
-            np.asarray(r.offsets, dtype=np.int64),
-            err_msg=f"[{kind}] {label}: offsets differ across backends",
-        )
+    import genvarloader as gvl
 
-    def _cmp(n, r, label: str) -> None:
-        if isinstance(n, RaggedAnnotatedHaps):
-            assert isinstance(r, RaggedAnnotatedHaps)
-            _cmp_one(n.haps, r.haps, f"{label}.haps")
-            _cmp_one(n.var_idxs, r.var_idxs, f"{label}.var_idxs")
-            _cmp_one(n.ref_coords, r.ref_coords, f"{label}.ref_coords")
-        else:
-            _cmp_one(n, r, label)
-
-    if isinstance(numba_out, tuple):
-        assert isinstance(rust_out, tuple) and len(numba_out) == len(rust_out)
-        for i, (n, r) in enumerate(zip(numba_out, rust_out)):
-            _cmp(n, r, f"component[{i}]")
+    if kind == "tracks":
+        ds = gvl.Dataset.open(ds_dir)
+        ds = ds.with_seqs(None).with_tracks("signal")
     else:
-        _cmp(numba_out, rust_out, "output")
+        ds = gvl.Dataset.open(ds_dir, reference=ref)
+        ds = ds.with_seqs(kind).with_tracks(False)  # type: ignore[arg-type]
+
+    sub_bed = ds._full_bed.with_columns(
+        pl.Series("transcript_id", _SPLICE_TRANSCRIPT_IDS)
+    )
+    ds = replace(ds, _full_bed=sub_bed).with_settings(splice_info="transcript_id")
+    assert ds.is_spliced, f"[{kind}] dataset should be in spliced mode"
+    return ds
 
 
 @pytest.mark.parametrize(
     "kind",
     ["reference", "haplotypes", "annotated", "tracks", "tracks-seqs", "haps-tracks"],
 )
-def test_neg_strand_parity(kind, tmp_path, synthetic_case, monkeypatch):
-    """Mixed +/− strand regions produce byte-identical output across GVL_BACKEND.
+def test_neg_strand_parity(kind, tmp_path, synthetic_case):
+    """Mixed +/− strand regions produce output matching the frozen golden.
 
     Covers six output kinds over a fresh variants+tracks+strand dataset with
-    ``max_jitter=0``.  Both backends currently apply RC as a Python post-pass
-    before kernel-level RC wiring (Task 8) lands.
-
-    Spliced variants are excluded: the strand fixture has no transcript
-    annotations (no GTF / transcript-ID column).  The non-vacuity assertion
-    that RC genuinely fires and produces the correct complement+reverse lives in
-    ``test_negative_strand_actually_reverse_complements``.
-
-    The ``"haps-tracks"`` kind covers the ``HapsTracks`` reconstructor
-    (``with_seqs("haplotypes").with_tracks("signal")``), which routes through
-    ``intervals_and_realign_track_fused``.  That kernel performs an in-kernel
-    f32 REVERSE for negative-strand rows (rust path); the numba oracle applies
-    the reverse as a Python post-pass.  Byte-identical output across backends
-    proves the two paths agree.
+    ``max_jitter=0``.
     """
     import genvarloader as gvl
 
     ds_dir = build_strand_mixed_dataset(tmp_path, synthetic_case.svar_path)
     ref = gvl.Reference.from_path(synthetic_case.ref_path, in_memory=False)
 
-    # Open and configure the dataset for the kind under test.
     if kind == "tracks":
-        # Open without reference so no seq mode is auto-activated by Dataset.open.
         ds = gvl.Dataset.open(ds_dir)
         ds = ds.with_seqs(None).with_tracks("signal")
     elif kind == "tracks-seqs":
         ds = gvl.Dataset.open(ds_dir, reference=ref)
         ds = ds.with_seqs("reference").with_tracks("signal")
     elif kind == "haps-tracks":
-        # Haplotypes + realigned tracks: routes through HapsTracks reconstructor.
-        # intervals_and_realign_track_fused reverses track values in-kernel on
-        # the rust path for negative-strand rows; the numba oracle reverses via
-        # the Python post-pass in _query._getitem_unspliced.
         ds = gvl.Dataset.open(ds_dir, reference=ref)
         ds = ds.with_seqs("haplotypes").with_tracks("signal")
     else:
-        # "reference", "haplotypes", "annotated"
         ds = gvl.Dataset.open(ds_dir, reference=ref)
         ds = ds.with_seqs(kind).with_tracks(False)  # type: ignore[arg-type]
 
@@ -573,30 +385,19 @@ def test_neg_strand_parity(kind, tmp_path, synthetic_case, monkeypatch):
         f"[{kind}] Fixture has no -strand regions; parity test is vacuous."
     )
 
-    # --- numba read ---
-    monkeypatch.setenv("GVL_BACKEND", "numba")
-    out_numba = ds[:, :]
+    # --- read (default rust backend) ---
+    out = ds[:, :]
 
-    # --- rust read ---
-    monkeypatch.setenv("GVL_BACKEND", "rust")
-    out_rust = ds[:, :]
-
-    # --- byte-identical comparison ---
-    _compare_strand_outputs(out_numba, out_rust, kind)
+    # --- replay against frozen golden ---
+    safe_kind = kind.replace("-", "_")
+    _golden.assert_output_matches_golden(out, _golden.load_flat_golden(f"ds_neg_strand_{safe_kind}"))
 
 
 def test_negative_strand_actually_reverse_complements(
-    tmp_path, synthetic_case, monkeypatch
+    tmp_path, synthetic_case
 ):
     """Non-vacuity: a −strand region's bytes differ from the forward-oriented
     bytes AND equal the exact reverse-complement.
-
-    Uses reference mode so all samples share the same deterministic reference
-    sequence, making the before/after comparison unambiguous.
-
-    Fixture geometry: region 1 (chr1:1110686-1110706, strand=−1) carries the
-    reference sequence GAATGTAAGACGCAGCGTGC — a non-palindrome whose RC is
-    GCACGCTGCGTCTTACATTC — so both guards reliably fire.
     """
     import genvarloader as gvl
     from seqpro.rag import reverse_complement
@@ -615,8 +416,6 @@ def test_negative_strand_actually_reverse_complements(
     )
     neg_idx = int(np.where(neg_mask)[0][0])  # first -strand region (index 1)
 
-    monkeypatch.setenv("GVL_BACKEND", "rust")
-
     # Forward-oriented reference at the -strand region (RC disabled).
     ds_fwd = ds.with_settings(rc_neg=False)
     fwd = ds_fwd[neg_idx, 0]  # Ragged[S1], shape (None,)
@@ -627,21 +426,17 @@ def test_negative_strand_actually_reverse_complements(
     fwd_bytes = np.asarray(fwd.data).tobytes()
     out_bytes = np.asarray(out.data).tobytes()
 
-    # Compute the reverse-complement of the forward sequence up front so the
-    # palindrome self-check below can use it.
-    # For a (None,)-shaped Ragged, rag_dim=0 → 1 row → mask has exactly one entry.
     mask = np.array([True], dtype=bool)
     rc_fwd = reverse_complement(fwd, _COMP, mask=mask, copy=True)
     rc_fwd_bytes = np.asarray(rc_fwd.data).tobytes()
 
-    # Self-check: the anchor region must be non-palindromic, else Guard 1 is
-    # silently unreliable (out == fwd would be expected even if RC fired).
+    # Self-check: the anchor region must be non-palindromic.
     assert fwd_bytes != rc_fwd_bytes, (
         f"Anchor -strand region {neg_idx} is palindromic (fwd == rc(fwd)) — "
         "non-vacuity Guard 1 is unreliable; pick a different anchor region."
     )
 
-    # Guard 1: RC must have changed bytes (non-palindrome check).
+    # Guard 1: RC must have changed bytes.
     assert out_bytes != fwd_bytes, (
         f"RC had NO effect on -strand region {neg_idx}: output is byte-identical "
         "to the forward-oriented sequence.  The region may be a palindrome, or "
@@ -664,72 +459,17 @@ def test_negative_strand_actually_reverse_complements(
 # ---------------------------------------------------------------------------
 # Strand=−1 SPLICED parity backstops (Task 7 — pre-wiring safety net)
 # ---------------------------------------------------------------------------
-#
-# Splice mode is activated the same way as test_spliced_haplotypes_parity.py:
-# inject a synthetic ``transcript_id`` column onto ``ds._full_bed`` and call
-# ``with_settings(splice_info="transcript_id")`` — no GTF / transcript-ID
-# storage is required.
-#
-# The 5 strand-mixed regions (strand [+,-,+,-,+]) are grouped into 4
-# transcripts (BED order), arranged so the spliced negative-strand RC path is
-# genuinely exercised:
-#   T1: [0]    chr1 +          single-exon positive
-#   T2: [1]    chr1 -          single-exon PURE NEGATIVE (non-vacuity anchor)
-#   T3: [2,3]  chr1 +, chr2 -  multi-exon containing a negative exon
-#   T4: [4]    chr2 +          single-exon positive
-#
-# RC is applied per-exon (``_query._getitem_spliced`` reverse-complements each
-# element before regrouping into transcripts), so the spliced output of the
-# single-exon T2 is the exact RC of its forward orientation — which makes the
-# non-vacuity Guard 2 (output == revcomp(forward)) hold cleanly.  T3 exercises
-# per-exon RC inside a genuine multi-exon (cross-contig) splice.
-_SPLICE_TRANSCRIPT_IDS = ["T1", "T2", "T3", "T3", "T4"]
-# T2 is the second transcript in BED order → spliced index 1.
-_NEG_TRANSCRIPT_IDX = 1
-
-
-def _open_strand_spliced(ds_dir, ref, kind: str):
-    """Open the strand-mixed dataset in spliced mode for ``kind``.
-
-    Returns the spliced Dataset (or raises if the kind cannot be spliced).
-    """
-    from dataclasses import replace
-
-    import polars as pl
-
-    import genvarloader as gvl
-
-    if kind == "tracks":
-        ds = gvl.Dataset.open(ds_dir)
-        ds = ds.with_seqs(None).with_tracks("signal")
-    else:
-        # "reference", "haplotypes", "annotated"
-        ds = gvl.Dataset.open(ds_dir, reference=ref)
-        ds = ds.with_seqs(kind).with_tracks(False)  # type: ignore[arg-type]
-
-    sub_bed = ds._full_bed.with_columns(
-        pl.Series("transcript_id", _SPLICE_TRANSCRIPT_IDS)
-    )
-    ds = replace(ds, _full_bed=sub_bed).with_settings(splice_info="transcript_id")
-    assert ds.is_spliced, f"[{kind}] dataset should be in spliced mode"
-    return ds
 
 
 @pytest.mark.parametrize(
     "kind",
     ["reference", "haplotypes", "annotated", "tracks"],
 )
-def test_neg_strand_spliced_parity(kind, tmp_path, synthetic_case, monkeypatch):
-    """Spliced mixed +/− strand transcripts: byte-identical across GVL_BACKEND.
+def test_neg_strand_spliced_parity(kind, tmp_path, synthetic_case):
+    """Spliced mixed +/− strand transcripts: output matches the frozen golden.
 
     Covers the four splice-capable output kinds (reference, haplotypes,
-    annotated, tracks).  ``tracks-seqs`` is intentionally excluded: the splice
-    path raises ``NotImplementedError`` for ``SeqsTracks`` ("Splicing of
-    sequences + un-realigned tracks is not supported"), so there is no spliced
-    tracks-seqs combo to compare.
-
-    Both backends currently apply RC per-exon as a Python post-pass in
-    ``_query._getitem_spliced`` before kernel-level RC wiring (Task 8) lands.
+    annotated, tracks).
     """
     import genvarloader as gvl
 
@@ -743,29 +483,18 @@ def test_neg_strand_spliced_parity(kind, tmp_path, synthetic_case, monkeypatch):
         f"[{kind}] anchor transcript is not negative-strand; test is vacuous."
     )
 
-    # --- numba read ---
-    monkeypatch.setenv("GVL_BACKEND", "numba")
-    out_numba = ds[:, :]
+    # --- read (default rust backend) ---
+    out = ds[:, :]
 
-    # --- rust read ---
-    monkeypatch.setenv("GVL_BACKEND", "rust")
-    out_rust = ds[:, :]
-
-    # --- byte-identical comparison ---
-    _compare_strand_outputs(out_numba, out_rust, f"spliced/{kind}")
+    # --- replay against frozen golden ---
+    _golden.assert_output_matches_golden(out, _golden.load_flat_golden(f"ds_neg_strand_spliced_{kind}"))
 
 
 def test_negative_strand_spliced_reverse_complements(
-    tmp_path, synthetic_case, monkeypatch
+    tmp_path, synthetic_case
 ):
     """Non-vacuity for the spliced path: a −strand transcript's bytes differ
     from the forward-oriented bytes AND equal the exact reverse-complement.
-
-    Uses spliced reference mode and the single-exon pure-negative transcript T2
-    (region chr1:1110686-1110706, reference GAATGTAAGACGCAGCGTGC, a
-    non-palindrome).  Because T2 has exactly one exon, per-exon RC of the whole
-    transcript equals the reverse-complement of its forward orientation, so the
-    Guard 2 check is unambiguous.
     """
     import genvarloader as gvl
     from seqpro.rag import reverse_complement
@@ -781,8 +510,6 @@ def test_negative_strand_spliced_reverse_complements(
         "Anchor spliced transcript is not negative-strand; test is vacuous."
     )
 
-    monkeypatch.setenv("GVL_BACKEND", "rust")
-
     # Forward-oriented spliced transcript (RC disabled).
     ds_fwd = ds.with_settings(rc_neg=False)
     fwd = ds_fwd[t_idx, 0]  # Ragged[S1], shape (None,)
@@ -793,7 +520,6 @@ def test_negative_strand_spliced_reverse_complements(
     fwd_bytes = np.asarray(fwd.data).tobytes()
     out_bytes = np.asarray(out.data).tobytes()
 
-    # For a single-exon (None,)-shaped Ragged, rag_dim=0 → 1 row → 1 mask entry.
     mask = np.array([True], dtype=bool)
     rc_fwd = reverse_complement(fwd, _COMP, mask=mask, copy=True)
     rc_fwd_bytes = np.asarray(rc_fwd.data).tobytes()
