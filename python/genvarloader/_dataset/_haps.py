@@ -843,9 +843,7 @@ class Haps(Reconstructor[_H]):
                 shifts=np.ascontiguousarray(req.shifts, np.int32),
                 geno_offset_idx=np.ascontiguousarray(req.geno_offset_idx, np.int64),
                 geno_offsets=_as_starts_stops(self.genotypes.offsets),
-                geno_v_idxs=_ffi_array(
-                    self.genotypes.data, np.int32, "geno_v_idxs"
-                ),
+                geno_v_idxs=_ffi_array(self.genotypes.data, np.int32, "geno_v_idxs"),
                 v_starts=self.ffi_static.v_starts,
                 ilens=self.ffi_static.ilens,
                 alt_alleles=self.ffi_static.alt_alleles,
@@ -956,9 +954,7 @@ class Haps(Reconstructor[_H]):
                 reconstruct_annotated_haplotypes_fused(
                     regions=np.ascontiguousarray(req.regions, np.int32),
                     shifts=np.ascontiguousarray(req.shifts, np.int32),
-                    geno_offset_idx=np.ascontiguousarray(
-                        req.geno_offset_idx, np.int64
-                    ),
+                    geno_offset_idx=np.ascontiguousarray(req.geno_offset_idx, np.int64),
                     geno_offsets=_as_starts_stops(self.genotypes.offsets),
                     geno_v_idxs=_ffi_array(
                         self.genotypes.data, np.int32, "geno_v_idxs"
@@ -1014,17 +1010,13 @@ class Haps(Reconstructor[_H]):
         out_buf, annot_v_buf, annot_pos_buf = (
             reconstruct_annotated_haplotypes_spliced_fused(
                 permuted_regions=np.ascontiguousarray(permuted_regions, np.int32),
-                flat_shifts=np.ascontiguousarray(
-                    flat_shifts.reshape(-1, 1), np.int32
-                ),
+                flat_shifts=np.ascontiguousarray(flat_shifts.reshape(-1, 1), np.int32),
                 flat_geno_offset_idx=np.ascontiguousarray(
                     flat_geno_idx.reshape(-1, 1), np.int64
                 ),
                 out_offsets=np.ascontiguousarray(off, np.int64),
                 geno_offsets=_as_starts_stops(self.genotypes.offsets),
-                geno_v_idxs=_ffi_array(
-                    self.genotypes.data, np.int32, "geno_v_idxs"
-                ),
+                geno_v_idxs=_ffi_array(self.genotypes.data, np.int32, "geno_v_idxs"),
                 v_starts=self.ffi_static.v_starts,
                 ilens=self.ffi_static.ilens,
                 alt_alleles=self.ffi_static.alt_alleles,

@@ -6,7 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
@@ -441,92 +440,6 @@ class _FlatVariants:
         return out
 
 
-@nb.njit(nogil=True, cache=True)
-def _gather_v_idxs_numba(
-    geno_offset_idx, geno_offsets, geno_v_idxs
-):  # pragma: no cover - njit
-    """Gather per-row variant indices: for each row's offset slice into the
-    sparse arrays, copy its values out into flat ``(data, offsets)``.
-
-    ``geno_offsets`` must be 1-D contiguous (length n_rows + 1).  For the
-    non-contiguous (2, n_rows) starts/stops form use
-    :func:`_gather_v_idxs_ss_numba`.
-    """
-    n_rows = geno_offset_idx.shape[0]
-    out_offsets = np.empty(n_rows + 1, np.int64)
-    out_offsets[0] = 0
-    for i in range(n_rows):
-        goi = geno_offset_idx[i]
-        out_offsets[i + 1] = out_offsets[i] + (
-            geno_offsets[goi + 1] - geno_offsets[goi]
-        )
-    total = out_offsets[n_rows]
-    v_idxs = np.empty(total, geno_v_idxs.dtype)
-    dst = 0
-    for i in range(n_rows):
-        goi = geno_offset_idx[i]
-        s = geno_offsets[goi]
-        e = geno_offsets[goi + 1]
-        for k in range(s, e):
-            v_idxs[dst] = geno_v_idxs[k]
-            dst += 1
-    return v_idxs, out_offsets
-
-
-@nb.njit(nogil=True, cache=True)
-def _gather_v_idxs_ss_numba(
-    geno_offset_idx, geno_starts, geno_stops, geno_v_idxs
-):  # pragma: no cover - njit
-    """Like :func:`_gather_v_idxs_numba` but for non-contiguous (starts, stops) offsets.
-
-    ``geno_starts`` and ``geno_stops`` are the two rows of a ``(2, n)`` offset
-    array (``geno_starts = geno_offsets[0]``, ``geno_stops = geno_offsets[1]``).
-    """
-    n_rows = geno_offset_idx.shape[0]
-    out_offsets = np.empty(n_rows + 1, np.int64)
-    out_offsets[0] = 0
-    for i in range(n_rows):
-        goi = geno_offset_idx[i]
-        out_offsets[i + 1] = out_offsets[i] + (geno_stops[goi] - geno_starts[goi])
-    total = out_offsets[n_rows]
-    v_idxs = np.empty(total, geno_v_idxs.dtype)
-    dst = 0
-    for i in range(n_rows):
-        goi = geno_offset_idx[i]
-        s = geno_starts[goi]
-        e = geno_stops[goi]
-        for k in range(s, e):
-            v_idxs[dst] = geno_v_idxs[k]
-            dst += 1
-    return v_idxs, out_offsets
-
-
-@nb.njit(nogil=True, cache=True)
-def _gather_alleles_numba(
-    v_idxs, allele_bytes, allele_offsets
-):  # pragma: no cover - njit
-    """Gather variable-length allele bytestrings for ``v_idxs`` from the global
-    allele byte buffer into flat ``(data, seq_offsets)``."""
-    n = v_idxs.shape[0]
-    seq_offsets = np.empty(n + 1, np.int64)
-    seq_offsets[0] = 0
-    for i in range(n):
-        v = v_idxs[i]
-        seq_offsets[i + 1] = seq_offsets[i] + (
-            allele_offsets[v + 1] - allele_offsets[v]
-        )
-    data = np.empty(seq_offsets[n], np.uint8)
-    dst = 0
-    for i in range(n):
-        v = v_idxs[i]
-        s = allele_offsets[v]
-        e = allele_offsets[v + 1]
-        for k in range(s, e):
-            data[dst] = allele_bytes[k]
-            dst += 1
-    return data, seq_offsets
-
-
 def _gather_alleles(v_idxs, allele_bytes, allele_offsets):
     return _gather_alleles_rust(
         np.ascontiguousarray(v_idxs, np.int32),
@@ -535,27 +448,39 @@ def _gather_alleles(v_idxs, allele_bytes, allele_offsets):
     )
 
 
-@nb.njit(nogil=True, cache=True)
-def _compact_keep_numba(v_idxs, row_offsets, keep):  # pragma: no cover - njit
-    """Drop variants where ``keep`` is False, rebuilding row offsets. The first
-    param is per-variant values to compact -- either ``v_idxs`` itself or a
-    parallel array (e.g. gathered dosage values) sharing the same row layout.
-    Preserves the input dtype exactly (no down-cast)."""
+def _gather_rows_numpy(geno_offset_idx, off2d, data):
+    """Dtype-preserving row gather for arbitrary dtypes (numpy fallback)."""
+    geno_starts = off2d[0]
+    geno_stops = off2d[1]
+    n_rows = geno_offset_idx.shape[0]
+    out_offsets = np.empty(n_rows + 1, np.int64)
+    out_offsets[0] = 0
+    for i in range(n_rows):
+        goi = int(geno_offset_idx[i])
+        out_offsets[i + 1] = out_offsets[i] + (geno_stops[goi] - geno_starts[goi])
+    total = int(out_offsets[n_rows])
+    out_data = np.empty(total, data.dtype)
+    dst = 0
+    for i in range(n_rows):
+        goi = int(geno_offset_idx[i])
+        s = int(geno_starts[goi])
+        e = int(geno_stops[goi])
+        out_data[dst : dst + (e - s)] = data[s:e]
+        dst += e - s
+    return out_data, out_offsets
+
+
+def _compact_keep_numpy(v_idxs, row_offsets, keep):
+    """Dtype-preserving compact-keep for arbitrary dtypes (numpy fallback)."""
     n_rows = row_offsets.shape[0] - 1
     new_offsets = np.empty(n_rows + 1, np.int64)
     new_offsets[0] = 0
-    n_keep = 0
     for i in range(n_rows):
-        for j in range(row_offsets[i], row_offsets[i + 1]):
-            if keep[j]:
-                n_keep += 1
-        new_offsets[i + 1] = n_keep
+        cnt = int(np.count_nonzero(keep[row_offsets[i] : row_offsets[i + 1]]))
+        new_offsets[i + 1] = new_offsets[i] + cnt
+    n_keep = int(new_offsets[n_rows])
     new_v = np.empty(n_keep, v_idxs.dtype)
-    dst = 0
-    for j in range(v_idxs.shape[0]):
-        if keep[j]:
-            new_v[dst] = v_idxs[j]
-            dst += 1
+    new_v[:] = v_idxs[keep]
     return new_v, new_offsets
 
 
@@ -564,7 +489,7 @@ def _compact_keep(v_idxs, row_offsets, keep):
 
     Routes int32 → compact_keep_i32 (Rust), float32 → compact_keep_f32 (Rust).
     All other dtypes (e.g. int16, int64 custom FORMAT fields, issue #231) fall
-    back to the dtype-preserving numba kernel so values are never silently
+    back to the dtype-preserving numpy kernel so values are never silently
     coerced.
     """
     values = np.ascontiguousarray(v_idxs)
@@ -575,15 +500,8 @@ def _compact_keep(v_idxs, row_offsets, keep):
     if values.dtype == np.float32:
         return _compact_keep_f32_rust(values, row_offsets, keep)
     # Arbitrary dtypes (custom FORMAT fields, e.g. int16, int64): dtype-preserving
-    # numba fallback — never down-cast.
-    return _compact_keep_numba(values, row_offsets, keep)
-
-
-def _gather_rows_numba(geno_offset_idx, geno_offsets, geno_v_idxs):
-    # geno_offsets is the normalized (2, n) form.
-    return _gather_v_idxs_ss_numba(
-        geno_offset_idx, geno_offsets[0], geno_offsets[1], geno_v_idxs
-    )
+    # numpy fallback — never down-cast.
+    return _compact_keep_numpy(values, row_offsets, keep)
 
 
 def _gather_rows(
@@ -594,7 +512,7 @@ def _gather_rows(
     """Dispatch per-row gather (numba/rust), preserving data dtype.
 
     Routes int32 and float32 to typed Rust cores; all other dtypes fall back to
-    the dtype-preserving numba kernel so values are never silently down-cast
+    the dtype-preserving numpy kernel so values are never silently down-cast
     (e.g. custom per-call FORMAT fields, issue #231).
     """
     goi = np.ascontiguousarray(geno_offset_idx, np.int64)
@@ -605,31 +523,26 @@ def _gather_rows(
     if data.dtype == np.float32:
         return _gather_rows_f32_rust(goi, off2d, data)
     # Arbitrary custom-FORMAT-field dtypes (#231): no typed Rust core — use the
-    # dtype-preserving numba kernel directly so values are never down-cast.
-    return _gather_rows_numba(goi, off2d, data)
+    # dtype-preserving numpy kernel directly so values are never down-cast.
+    return _gather_rows_numpy(goi, off2d, data)
 
 
-@nb.njit(nogil=True, cache=True)
-def _fill_empty_scalar_numba(data, offsets, fill):  # pragma: no cover - njit
-    """Insert one ``fill`` element into each empty row; copy non-empty rows
-    through. Returns ``(new_data, new_offsets)``. Preserves ``data.dtype``."""
+def _fill_empty_scalar_numpy(data, offsets, fill):
+    """Dtype-preserving fill-empty-scalar for arbitrary dtypes (numpy fallback)."""
     n_rows = offsets.shape[0] - 1
+    lengths = np.diff(offsets)
+    new_lengths = np.where(lengths > 0, lengths, 1)
     new_offsets = np.empty(n_rows + 1, np.int64)
     new_offsets[0] = 0
-    for i in range(n_rows):
-        ln = offsets[i + 1] - offsets[i]
-        new_offsets[i + 1] = new_offsets[i] + (ln if ln > 0 else 1)
+    new_offsets[1:] = np.cumsum(new_lengths)
     new_data = np.empty(new_offsets[n_rows], data.dtype)
     for i in range(n_rows):
-        s = offsets[i]
-        e = offsets[i + 1]
-        d = new_offsets[i]
+        s, e = int(offsets[i]), int(offsets[i + 1])
+        d = int(new_offsets[i])
         if e == s:
             new_data[d] = fill
         else:
-            for k in range(s, e):
-                new_data[d] = data[k]
-                d += 1
+            new_data[d : d + (e - s)] = data[s:e]
     return new_data, new_offsets
 
 
@@ -637,7 +550,7 @@ def _fill_empty_scalar(data, offsets, fill):
     """Dtype-preserving dispatch for fill-empty-scalar.
 
     Routes int32 and float32 to typed Rust cores; all other dtypes (e.g.
-    custom FORMAT fields, issue #231) fall back to the dtype-preserving numba
+    custom FORMAT fields, issue #231) fall back to the dtype-preserving numpy
     kernel so values are never silently down-cast.
     """
     data = np.ascontiguousarray(data)
@@ -646,57 +559,48 @@ def _fill_empty_scalar(data, offsets, fill):
         return _fill_empty_scalar_i32_rust(data, offsets, int(fill))
     if data.dtype == np.float32:
         return _fill_empty_scalar_f32_rust(data, offsets, float(fill))
-    # Arbitrary dtype (custom FORMAT fields): preserve dtype via numba fallback.
-    return _fill_empty_scalar_numba(data, offsets, fill)
+    # Arbitrary dtype (custom FORMAT fields): preserve dtype via numpy fallback.
+    return _fill_empty_scalar_numpy(data, offsets, fill)
 
 
-@nb.njit(nogil=True, cache=True)
-def _fill_empty_seq_numba(
-    data, var_offsets, seq_offsets, dummy
-):  # pragma: no cover - njit
-    """Two-level analogue of ``_fill_empty_scalar`` for allele bytestrings.
-    Empty variant-rows receive one dummy allele of ``dummy`` bytes. Returns
-    ``(new_data, new_var_offsets, new_seq_offsets)``. Preserves ``data.dtype``."""
+def _fill_empty_seq_numpy(data, var_offsets, seq_offsets, dummy):
+    """Dtype-preserving fill-empty-seq for arbitrary dtypes (numpy fallback)."""
     n_rows = var_offsets.shape[0] - 1
     L = dummy.shape[0]
+    nv_lengths = np.diff(var_offsets)
+    new_var_lengths = np.where(nv_lengths > 0, nv_lengths, 1)
     new_var = np.empty(n_rows + 1, np.int64)
     new_var[0] = 0
-    for i in range(n_rows):
-        nv = var_offsets[i + 1] - var_offsets[i]
-        new_var[i + 1] = new_var[i] + (nv if nv > 0 else 1)
-    total_vars = new_var[n_rows]
+    new_var[1:] = np.cumsum(new_var_lengths)
+    total_vars = int(new_var[n_rows])
     new_seq = np.empty(total_vars + 1, np.int64)
     new_seq[0] = 0
     vptr = 0
     for i in range(n_rows):
-        vs = var_offsets[i]
-        ve = var_offsets[i + 1]
+        vs, ve = int(var_offsets[i]), int(var_offsets[i + 1])
         if ve == vs:
             new_seq[vptr + 1] = new_seq[vptr] + L
             vptr += 1
         else:
             for v in range(vs, ve):
-                vlen = seq_offsets[v + 1] - seq_offsets[v]
+                vlen = int(seq_offsets[v + 1]) - int(seq_offsets[v])
                 new_seq[vptr + 1] = new_seq[vptr] + vlen
                 vptr += 1
-    new_data = np.empty(new_seq[total_vars], data.dtype)
+    total_bytes = int(new_seq[total_vars])
+    new_data = np.empty(total_bytes, data.dtype)
     vptr = 0
     dptr = 0
     for i in range(n_rows):
-        vs = var_offsets[i]
-        ve = var_offsets[i + 1]
+        vs, ve = int(var_offsets[i]), int(var_offsets[i + 1])
         if ve == vs:
-            for k in range(L):
-                new_data[dptr] = dummy[k]
-                dptr += 1
+            new_data[dptr : dptr + L] = dummy
+            dptr += L
             vptr += 1
         else:
             for v in range(vs, ve):
-                bs = seq_offsets[v]
-                be = seq_offsets[v + 1]
-                for k in range(bs, be):
-                    new_data[dptr] = data[k]
-                    dptr += 1
+                bs, be = int(seq_offsets[v]), int(seq_offsets[v + 1])
+                new_data[dptr : dptr + (be - bs)] = data[bs:be]
+                dptr += be - bs
                 vptr += 1
     return new_data, new_var, new_seq
 
@@ -705,7 +609,7 @@ def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):
     """Dtype-preserving dispatch for fill-empty-seq (two-level dummy-fill).
 
     Routes uint8 (allele bytes) and int32 (token windows) to typed Rust cores.
-    All other dtypes fall back to the dtype-preserving numba kernel so values
+    All other dtypes fall back to the dtype-preserving numpy kernel so values
     are never silently down-cast.
     """
     data = np.ascontiguousarray(data)
@@ -716,38 +620,30 @@ def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):
         return _fill_empty_seq_u8_rust(data, var_offsets, seq_offsets, dummy)
     if data.dtype == np.int32:
         return _fill_empty_seq_i32_rust(data, var_offsets, seq_offsets, dummy)
-    # Arbitrary dtype: preserve via numba fallback.
-    return _fill_empty_seq_numba(data, var_offsets, seq_offsets, dummy)
+    # Arbitrary dtype: preserve via numpy fallback.
+    return _fill_empty_seq_numpy(data, var_offsets, seq_offsets, dummy)
 
 
-@nb.njit(nogil=True, cache=True)
-def _fill_empty_fixed_numba(data, offsets, inner, fill):  # pragma: no cover - njit
-    """Fixed-inner-stride analogue of ``_fill_empty_scalar`` for ``flank_tokens``.
-
-    ``data`` holds ``n_var * inner`` tokens (variant-major); ``offsets`` are
-    *variant-level* (``b*p + 1``). Each empty row receives one dummy variant of
-    ``inner`` tokens all equal to ``fill``; non-empty rows pass through.
-    Returns ``(new_data, new_offsets)``. Preserves ``data.dtype``."""
+def _fill_empty_fixed_numpy(data, offsets, inner, fill):
+    """Dtype-preserving fill-empty-fixed for arbitrary dtypes (numpy fallback)."""
     n_rows = offsets.shape[0] - 1
+    lengths = np.diff(offsets)
+    new_lengths = np.where(lengths > 0, lengths, 1)
     new_offsets = np.empty(n_rows + 1, np.int64)
     new_offsets[0] = 0
-    for i in range(n_rows):
-        nv = offsets[i + 1] - offsets[i]
-        new_offsets[i + 1] = new_offsets[i] + (nv if nv > 0 else 1)
-    total_vars = new_offsets[n_rows]
+    new_offsets[1:] = np.cumsum(new_lengths)
+    total_vars = int(new_offsets[n_rows])
     new_data = np.empty(total_vars * inner, data.dtype)
     dptr = 0
     for i in range(n_rows):
-        vs = offsets[i]
-        ve = offsets[i + 1]
+        vs, ve = int(offsets[i]), int(offsets[i + 1])
         if ve == vs:
-            for _ in range(inner):
-                new_data[dptr] = fill
-                dptr += 1
+            new_data[dptr : dptr + inner] = fill
+            dptr += inner
         else:
-            for k in range(vs * inner, ve * inner):
-                new_data[dptr] = data[k]
-                dptr += 1
+            n = int(ve - vs) * inner
+            new_data[dptr : dptr + n] = data[vs * inner : ve * inner]
+            dptr += n
     return new_data, new_offsets
 
 
@@ -755,7 +651,7 @@ def _fill_empty_fixed(data, offsets, inner, fill):
     """Dtype-preserving dispatch for fill-empty-fixed.
 
     Routes int32 and float32 to typed Rust cores; all other dtypes (e.g.
-    custom FORMAT fields, issue #231) fall back to the dtype-preserving numba
+    custom FORMAT fields, issue #231) fall back to the dtype-preserving numpy
     kernel so values are never silently down-cast.
     """
     data = np.ascontiguousarray(data)
@@ -764,8 +660,8 @@ def _fill_empty_fixed(data, offsets, inner, fill):
         return _fill_empty_fixed_i32_rust(data, offsets, int(inner), int(fill))
     if data.dtype == np.float32:
         return _fill_empty_fixed_f32_rust(data, offsets, int(inner), float(fill))
-    # Arbitrary dtype (custom FORMAT fields): preserve dtype via numba fallback.
-    return _fill_empty_fixed_numba(data, offsets, inner, fill)
+    # Arbitrary dtype (custom FORMAT fields): preserve dtype via numpy fallback.
+    return _fill_empty_fixed_numpy(data, offsets, inner, fill)
 
 
 def _assemble_variant_buffers_numba_entry(*args, **kwargs):
@@ -1120,3 +1016,29 @@ def get_variants_flat(
         flat = flat.fill_empty_groups(haps.dummy_variant, unk=haps.unknown_token)
 
     return flat
+
+
+def _gather_v_idxs_ss_numba(geno_offset_idx, geno_starts, geno_stops, geno_v_idxs):
+    """Gather variant-index rows using starts/stops 2D form.
+
+    Pure Python fallback (no numba). Name retained for test backward-compatibility.
+    Returns (v_idxs, offsets) where offsets has shape (n_rows+1,).
+    """
+    n_rows = geno_offset_idx.shape[0]
+    out_offsets = np.empty(n_rows + 1, np.int64)
+    out_offsets[0] = 0
+    for i in range(n_rows):
+        goi = int(geno_offset_idx[i])
+        out_offsets[i + 1] = out_offsets[i] + (
+            int(geno_stops[goi]) - int(geno_starts[goi])
+        )
+    total = int(out_offsets[n_rows])
+    out_data = np.empty(total, geno_v_idxs.dtype)
+    dst = 0
+    for i in range(n_rows):
+        goi = int(geno_offset_idx[i])
+        s = int(geno_starts[goi])
+        e = int(geno_stops[goi])
+        out_data[dst : dst + (e - s)] = geno_v_idxs[s:e]
+        dst += e - s
+    return out_data, out_offsets

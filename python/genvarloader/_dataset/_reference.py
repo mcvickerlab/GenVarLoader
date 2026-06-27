@@ -5,7 +5,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Generic, Literal, TypeVar, cast, overload
 
-import numba as nb
 import numpy as np
 import polars as pl
 from genoray._utils import ContigNormalizer
@@ -22,7 +21,7 @@ from .._types import Idx, StrIdx
 from .._utils import is_dtype
 from ._indexing import is_str_arr, s2i
 from ._splice import SpliceMap, SplicePlan, build_splice_plan
-from ._utils import bed_to_regions, padded_slice
+from ._utils import bed_to_regions
 from .._threads import should_parallelize
 from ..genvarloader import get_reference as _get_reference_rust_ffi
 
@@ -438,7 +437,7 @@ class RefDataset(Generic[T]):
             reference=self.reference.reference,
             ref_offsets=self.reference.offsets,
             pad_char=self.reference.pad_char,
-            to_rc=to_rc_perm,  # Rust: RC done in kernel; numba: handled below
+            to_rc=to_rc_perm,  # Rust: RC done in kernel
         )
 
         # Rewrap with group_offsets at (n_rows, None) — skip the (n_rows, 1, None)
@@ -506,7 +505,7 @@ class RefDataset(Generic[T]):
 
         # ragged (b ~l)
         # On the Rust backend, RC is folded into the kernel via to_rc.
-        # On the numba backend, get_reference ignores to_rc and the post-RC
+        # get_reference handles to_rc in kernel (Rust)
         # below preserves the original behaviour.
         _to_rc_arr = regions[:, 3] == -1
         _to_rc: "NDArray[np.bool_] | None" = _to_rc_arr if _to_rc_arr.any() else None
@@ -648,41 +647,6 @@ class RefDataset(Generic[T]):
         )
 
 
-@nb.njit(nogil=True, cache=True, inline="always")
-def _get_reference_row(i, regions, out_offsets, reference, ref_offsets, pad_char, out):
-    o_s, o_e = out_offsets[i], out_offsets[i + 1]
-    c_idx, start, end = regions[i, 0], regions[i, 1], regions[i, 2]
-    c_s = ref_offsets[c_idx]
-    c_e = ref_offsets[c_idx + 1]
-    padded_slice(reference[c_s:c_e], start, end, pad_char, out[o_s:o_e])
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def _get_reference_par(regions, out_offsets, reference, ref_offsets, pad_char, out):
-    for i in nb.prange(len(regions)):
-        _get_reference_row(
-            i, regions, out_offsets, reference, ref_offsets, pad_char, out
-        )
-    return out
-
-
-@nb.njit(nogil=True, cache=True)
-def _get_reference_ser(regions, out_offsets, reference, ref_offsets, pad_char, out):
-    for i in range(len(regions)):
-        _get_reference_row(
-            i, regions, out_offsets, reference, ref_offsets, pad_char, out
-        )
-    return out
-
-
-def _get_reference_numba(
-    regions, out_offsets, reference, ref_offsets, pad_char, parallel
-):
-    out = np.empty(out_offsets[-1], np.uint8)
-    kernel = _get_reference_par if parallel else _get_reference_ser
-    return kernel(regions, out_offsets, reference, ref_offsets, pad_char, out)
-
-
 def _get_reference_rust(
     regions, out_offsets, reference, ref_offsets, pad_char, parallel, to_rc=None
 ):
@@ -733,7 +697,7 @@ def _fetch_spliced_ref(
 
     ``to_rc`` is the permuted per-element boolean mask (True = RC that element).
     On the Rust backend it is passed into the ``get_reference`` kernel directly;
-    on numba the caller's post-pass handles it.
+    the Rust backend handles it in-kernel.
     """
     permuted_regions = regions[plan.permutation]
     raw = get_reference(
@@ -792,3 +756,30 @@ if TORCH_AVAILABLE:
 
 else:
     TorchDataset = no_torch_error
+
+
+def _get_reference_row(i, regions, out_offsets, reference, ref_offsets, pad_char, out):
+    """Extract a single reference row with padding (pure Python fallback)."""
+    from ._utils import padded_slice
+
+    o_s, o_e = out_offsets[i], out_offsets[i + 1]
+    c_idx, start, end = int(regions[i, 0]), int(regions[i, 1]), int(regions[i, 2])
+    c_s = int(ref_offsets[c_idx])
+    c_e = int(ref_offsets[c_idx + 1])
+    padded_slice(reference[c_s:c_e], start, end, pad_char, out[o_s:o_e])
+
+
+def _get_reference_ser(regions, out_offsets, reference, ref_offsets, pad_char, out):
+    """Extract reference rows serially (pure Python fallback)."""
+    for i in range(len(regions)):
+        _get_reference_row(
+            i, regions, out_offsets, reference, ref_offsets, pad_char, out
+        )
+    return out
+
+
+def _get_reference_par(regions, out_offsets, reference, ref_offsets, pad_char, out):
+    """Extract reference rows (parallel flavor; falls back to serial in pure Python)."""
+    return _get_reference_ser(
+        regions, out_offsets, reference, ref_offsets, pad_char, out
+    )

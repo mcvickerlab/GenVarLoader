@@ -34,7 +34,6 @@ from ._splice import SplicePlan, build_splice_plan
 from ._tracks import Tracks
 
 
-
 @dataclass(frozen=True, slots=True)
 class QueryView:
     """Typed view over the Dataset state needed to answer a query.
@@ -199,9 +198,7 @@ def _getitem_unspliced(
         # reverse_complement_ragged; RaggedVariants is Target 7.)
         _VARIANT_TYPES = (RaggedVariants, _FlatVariants, _FlatVariantWindows)
         recon = tuple(
-            reverse_complement_ragged(r, to_rc)
-            if isinstance(r, _VARIANT_TYPES)
-            else r
+            reverse_complement_ragged(r, to_rc) if isinstance(r, _VARIANT_TYPES) else r
             for r in recon
         )
 

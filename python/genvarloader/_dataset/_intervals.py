@@ -1,4 +1,3 @@
-import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
@@ -6,82 +5,6 @@ from ..genvarloader import intervals_to_tracks as _intervals_to_tracks_rust
 from ..genvarloader import tracks_to_intervals as _tracks_to_intervals_rust
 
 __all__ = []
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def _intervals_to_tracks_numba(
-    offset_idxs: NDArray[np.integer],
-    starts: NDArray[np.int32],
-    itv_starts: NDArray[np.int32],
-    itv_ends: NDArray[np.int32],
-    itv_values: NDArray[np.float32],
-    itv_offsets: NDArray[np.int64],
-    out: NDArray[np.float32],
-    out_offsets: NDArray[np.int64],
-):
-    """Convert intervals to tracks at base-pair resolution.
-    Assumptions:
-    - intervals are sorted by start
-    - intervals do not overlap
-
-    Parameters
-    ----------
-    offset_idxs : NDArray[np.intp]
-        Shape = (batch) Indexes into offsets.
-    starts : NDArray[np.int32]
-        Shape = (batch) Starts for each query.
-    itv_starts : NDArray[np.int32]
-        Shape = (n_intervals) Starts for each interval.
-    itv_ends : NDArray[np.int32]
-        Shape = (n_intervals) Ends for each interval.
-    itv_values : NDArray[np.float32]
-        Shape = (n_intervals) Values for each interval.
-    itv_offsets : NDArray[np.uint32]
-        Shape = (n_slices + 1) Offsets into intervals and values.
-        For a GVL Dataset, n_interval_sets = n_samples * n_regions with that layout.
-    out : NDArray[np.float32]
-        Shape = (batch*length) Output tracks.
-    out_offsets : NDArray[np.int64]
-        Shape = (batch + 1) Offsets into output tracks.
-
-    Returns
-    -------
-    data : NDArray[np.float32]
-        Ragged shape = (batch*length) Values for ragged array of tracks.
-    offsets : NDArray[np.int32]
-        Shape = (batch + 1) Offsets for ragged array of tracks.
-    """
-    n_queries = len(starts)
-    out[:] = 0.0
-    for query in nb.prange(n_queries):
-        idx = offset_idxs[query]
-        itv_s, itv_e = itv_offsets[idx], itv_offsets[idx + 1]
-        n_intervals = itv_e - itv_s
-        if n_intervals == 0:
-            continue
-
-        out_s, out_e = out_offsets[query], out_offsets[query + 1]
-        length = out_e - out_s
-        _out = out[out_s:out_e]
-
-        query_start = starts[query]
-
-        # if parallelized, a data race will occur if there are any overlapping intervals
-        for interval in range(itv_s, itv_e):
-            start = itv_starts[interval] - query_start
-            end = itv_ends[interval] - query_start
-            value = itv_values[interval]
-            if start >= length:
-                #! assumes intervals are sorted by start
-                # cannot break if parallelized
-                break
-            # Clip to the query window. Intervals may start before query_start
-            # (jitter-expanded storage vs. the per-read query origin; see #242)
-            # or end past it.
-            s = max(start, 0)
-            e = min(end, length)
-            if e > s:
-                _out[s:e] = value
 
 
 def intervals_to_tracks(
@@ -96,10 +19,9 @@ def intervals_to_tracks(
 ) -> None:
     """Paint base-pair-resolution tracks from intervals, writing ``out`` in place.
 
-    Dispatches to the numba or Rust backend via :mod:`genvarloader._dispatch`
-    (default ``rust``). Read-only inputs are coerced to canonical dtypes so both
-    backends receive byte-identical bytes (see tests/parity); ``out`` is passed
-    through untouched so in-place writes land in the caller's buffer.
+    Dispatches to the Rust backend. Read-only inputs are coerced to canonical dtypes so
+    the backend receives byte-identical bytes; ``out`` is passed through untouched so
+    in-place writes land in the caller's buffer.
     """
     offset_idxs = np.ascontiguousarray(offset_idxs, dtype=np.int64)
     starts = np.ascontiguousarray(starts, dtype=np.int32)
@@ -120,76 +42,6 @@ def intervals_to_tracks(
     )
 
 
-@nb.njit(parallel=True, nogil=True, cache=True)
-def _tracks_to_intervals_numba(
-    regions: NDArray[np.int32],
-    tracks: NDArray[np.float32],
-    track_offsets: NDArray[np.int64],
-) -> tuple[
-    NDArray[np.int32], NDArray[np.int32], NDArray[np.float32], NDArray[np.int64]
-]:
-    """Convert tracks to intervals. Note that this will include 0-value intervals.
-
-    Parameters
-    ----------
-    regions : NDArray[np.int32]
-        Shape = (n_queries, 3) Regions for each query.
-    tracks : NDArray[np.float32]
-        Shape = (n_queries*query_length) Ragged array of tracks.
-    offsets : NDArray[np.int64]
-        Shape = (n_queries + 1) Offsets into ragged track data.
-
-    Returns
-    -------
-    out : NDArray[np.void]
-        Shape = (n_intervals) Intervals.
-
-    Notes
-    -----
-    Implementation closely follows [CUDA RLE](https://erkaman.github.io/posts/cuda_rle.html).
-    """
-    n_queries = len(regions)
-
-    n_intervals = np.empty(n_queries, np.int32)
-    scanned_masks = np.empty_like(tracks, np.int64)
-    for query in nb.prange(n_queries):
-        o_s = track_offsets[query]
-        o_e = track_offsets[query + 1]
-        if o_s == o_e:
-            n_intervals[query] = 0
-            continue
-        track = tracks[o_s:o_e]
-        scanned_backward_mask = scanned_masks[o_s:o_e]
-        _scanned_mask(track, scanned_backward_mask)
-        n_intervals[query] = scanned_backward_mask[-1]
-
-    interval_offsets = np.empty(n_queries + 1, np.int64)
-    interval_offsets[0] = 0
-    interval_offsets[1:] = n_intervals.cumsum()
-
-    all_starts = np.empty(interval_offsets[-1], np.int32)
-    all_ends = np.empty(interval_offsets[-1], np.int32)
-    all_values = np.empty(interval_offsets[-1], np.float32)
-    for query in nb.prange(n_queries):
-        o_s = track_offsets[query]
-        o_e = track_offsets[query + 1]
-        if o_s == o_e:
-            continue
-        scanned_backward_mask = scanned_masks[o_s:o_e]
-        compacted_backward_mask = _compact_mask(scanned_backward_mask)
-        track = tracks[o_s:o_e]
-        values = track[compacted_backward_mask[:-1]]
-        s = interval_offsets[query]
-        start = regions[query, 1]
-        compacted_backward_mask += start
-        n = len(values)
-        all_starts[s : s + n] = compacted_backward_mask[:-1]
-        all_ends[s : s + n] = compacted_backward_mask[1:]
-        all_values[s : s + n] = values
-
-    return all_starts, all_ends, all_values, interval_offsets
-
-
 def tracks_to_intervals(
     regions: NDArray[np.int32],
     tracks: NDArray[np.float32],
@@ -199,8 +51,7 @@ def tracks_to_intervals(
 ]:
     """RLE-encode a ragged f32 track buffer into (starts, ends, values, offsets) intervals.
 
-    Includes 0-value intervals (no filtering on value == 0.0). Dispatches to the numba
-    or Rust backend via :mod:`genvarloader._dispatch` (default ``rust``). Read-only inputs
+    Includes 0-value intervals (no filtering on value == 0.0). Dispatches to the Rust backend. Read-only inputs
     are coerced to canonical dtypes so both backends receive byte-identical bytes.
 
     Parameters
@@ -223,28 +74,3 @@ def tracks_to_intervals(
     tracks = np.ascontiguousarray(tracks, dtype=np.float32)
     track_offsets = np.ascontiguousarray(track_offsets, dtype=np.int64)
     return _tracks_to_intervals_rust(regions, tracks, track_offsets)
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def _scanned_mask(track: NDArray[np.float32], out: NDArray[np.int64]):
-    backward_mask = np.empty(len(track), np.bool_)
-    backward_mask[0] = True
-    backward_mask[1:] = track[:-1] != track[1:]
-    out[:] = backward_mask.cumsum()
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def _compact_mask(
-    scanned_backward_mask: NDArray[np.int64],
-):
-    n_elems = len(scanned_backward_mask)
-    n_runs = scanned_backward_mask[-1]
-    compacted_backward_mask = np.empty(n_runs + 1, np.int32)
-    compacted_backward_mask[-1] = n_elems
-    for i in nb.prange(n_elems):
-        if i == 0:
-            compacted_backward_mask[i] = 0
-        # 0 < i < n_elems - 1
-        elif scanned_backward_mask[i] != scanned_backward_mask[i - 1]:
-            compacted_backward_mask[scanned_backward_mask[i] - 1] = i
-    return compacted_backward_mask

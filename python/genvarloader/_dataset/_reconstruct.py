@@ -32,7 +32,13 @@ from ._protocol import Reconstructor
 from ._rag_variants import RaggedVariants
 from ._ref import Ref
 from ._splice import SplicePlan
-from ._tracks import _T, Tracks, TrackType, _NewT, _shift_and_realign_tracks_sparse_rust_wrapper  # noqa: F401
+from ._tracks import (
+    _T,
+    Tracks,
+    TrackType,
+    _NewT,
+    _shift_and_realign_tracks_sparse_rust_wrapper,
+)  # noqa: F401
 from ._utils import _ffi_array
 
 # Fused tracks entry (Task 14): intervals → scratch → realign, one FFI crossing.
@@ -252,14 +258,10 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                         intervals.starts.offsets, np.int64, "itv_offsets"
                     ),
                     track_offsets=np.ascontiguousarray(track_ofsts_per_t, np.int64),
-                    params=np.ascontiguousarray(
-                        strat_params[track_ofst], np.float64
-                    ),
+                    params=np.ascontiguousarray(strat_params[track_ofst], np.float64),
                     strategy_id=int(strat_ids[track_ofst]),
                     base_seed=int(base_seed),
-                    keep=None
-                    if keep is None
-                    else np.ascontiguousarray(keep, np.bool_),
+                    keep=None if keep is None else np.ascontiguousarray(keep, np.bool_),
                     keep_offsets=None
                     if keep_offsets is None
                     else np.ascontiguousarray(keep_offsets, np.int64),

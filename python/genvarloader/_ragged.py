@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
-import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 from phantom import Phantom
@@ -330,7 +329,6 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
 _COMP = np.frombuffer(bytes.maketrans(b"ACGT", b"TGCA"), np.uint8)
 
 
-@nb.vectorize(["u1(u1)"], nopython=True)
 def ufunc_comp_dna(seq: NDArray[np.uint8]) -> NDArray[np.uint8]:
     return _COMP[seq]
 
