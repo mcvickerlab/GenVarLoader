@@ -5,9 +5,12 @@ RUN MANUALLY while numba is still installed (Stage A):
     pixi run -e dev python -m tests.parity.generate_goldens
 
 For each kernel: draw N deterministic examples, compute the golden from RUST,
-and assert the numba oracle agrees BEFORE saving. After numba deletion this
-script still regenerates from rust (the numba cross-check is skipped if the
-backend is gone).
+and assert the numba oracle agrees BEFORE saving.
+
+*** DANGER (post-W5): numba was DELETED in W5. Re-running this script now freezes
+rust == rust with NO oracle cross-check — a silent rust==rust freeze that defeats
+the parity contract. Only regenerate on a numba-PRESENT checkout (a commit at or
+before the Stage-A snapshot, with numba installed), or the goldens are meaningless. ***
 
 Verified signatures / out_index values (ground-truthed against existing parity tests):
 

@@ -11,6 +11,11 @@ Each test:
   4. Saves the rust output as a frozen golden.
 
 Normal test runs skip all tests in this file.
+
+*** DANGER (post-W5): numba was DELETED in W5, so the GVL_BACKEND flip + oracle
+cross-check (steps 2-3) no longer fire. Regenerating now would freeze rust == rust
+with no oracle — meaningless goldens. Only regenerate on a numba-PRESENT checkout
+(at or before the Stage-A snapshot). ***
 """
 
 from __future__ import annotations
