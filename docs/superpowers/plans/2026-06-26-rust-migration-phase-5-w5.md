@@ -753,32 +753,41 @@ Expected: full tree green; no `import numba` remains (`rtk grep -rn "import numb
 - Modify: `pyproject.toml` (remove `numba>=…`; remove `@nb.njit`/`@numba.njit` coverage exclusions; remove the `parity: byte-identical numba-vs-rust` marker description if it names numba), `pixi.toml` (remove `numba = "==0.59.1"` from the py310 feature and any other env).
 - Create: `tests/parity/test_import_no_numba.py`.
 
-- [ ] **Step 1: Write the import-guard test**
+**RELAXED GUARD (user decision 2026-06-27):** `import genvarloader` still pulls numba+llvmlite transitively via seqpro 0.20.0 (eager numba import in seqpro itself), which genvarloader cannot control. So the guard asserts genvarloader's OWN source is numba-free (achievable + verified), NOT the whole import graph. A seqpro follow-up issue tracks the eager import (it blocks the full W6 RSS drop).
+
+- [ ] **Step 1: Write the own-code import-guard test**
 
 ```python
 # tests/parity/test_import_no_numba.py
-"""Importing genvarloader must not pull numba or llvmlite."""
-import subprocess
-import sys
+"""genvarloader's OWN modules must not import numba (Phase 5 W5).
+
+NOTE: `import genvarloader` may still pull numba transitively via seqpro
+(seqpro 0.20.0 eagerly imports numba). That is outside genvarloader's control;
+this guard asserts genvarloader's own source is numba-free. See the seqpro
+follow-up issue for the transitive import and the W6 RSS impact.
+"""
+from __future__ import annotations
+
+import pathlib
+
+import genvarloader
 
 
-def test_import_pulls_neither_numba_nor_llvmlite():
-    code = (
-        "import sys; import genvarloader; "
-        "bad=[m for m in ('numba','llvmlite') if m in sys.modules]; "
-        "assert not bad, bad; print('ok')"
-    )
-    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    assert "ok" in r.stdout
+def test_genvarloader_own_code_imports_no_numba():
+    pkg_dir = pathlib.Path(genvarloader.__file__).parent
+    offenders: list[str] = []
+    for py in pkg_dir.rglob("*.py"):
+        for ln, line in enumerate(py.read_text().splitlines(), 1):
+            s = line.strip()
+            if s.startswith("import numba") or s.startswith("from numba"):
+                offenders.append(f"{py.relative_to(pkg_dir)}:{ln}: {s}")
+    assert not offenders, "genvarloader modules import numba:\n" + "\n".join(offenders)
 ```
 
-(Subprocess so the assertion sees a clean interpreter, not the test session that may have imported numba transitively.)
+- [ ] **Step 2: Run it (expect PASS — B3 already removed all numba from genvarloader), then drop genvarloader's DIRECT numba dep**
 
-- [ ] **Step 2: Run it (expect FAIL until deps/clean), then remove deps**
-
-Run: `pixi run -e dev pytest tests/parity/test_import_no_numba.py -q --basetemp=$(pwd)/.pytest_tmp`
-If it fails because numba is still importable in the env, that's fine — remove `numba` from `pyproject.toml`/`pixi.toml`, re-solve the env (`pixi install`), and rebuild. The guard asserts it isn't *imported*, which should already hold once B3 lands; the dep removal ensures it isn't *installed*.
+Run: `pixi run -e dev pytest tests/parity/test_import_no_numba.py -q --basetemp=$(pwd)/.pytest_tmp` → PASS.
+Then remove genvarloader's OWN `numba` dependency from `pyproject.toml` and `pixi.toml` (genvarloader no longer uses it directly). NOTE: numba will likely remain INSTALLED in the env because seqpro depends on it — that is expected and fine; the own-code guard does not require numba to be absent from the environment. Re-solve (`pixi install`) and confirm the env still builds. Do NOT remove numba if doing so breaks the seqpro dependency solve — if seqpro pins numba, just remove genvarloader's direct declaration and leave the transitive one.
 
 - [ ] **Step 3: Full tree + guard gate**
 

@@ -821,8 +821,13 @@ narrowed to genoray (variant IO) only.
   - `_intervals.py`: deleted `_intervals_to_tracks_numba`, `_tracks_to_intervals_numba`,
     `_scanned_mask`, `_compact_mask`; restored `intervals_to_tracks` dispatch wrapper.
   `grep -r 'import numba|@nb.njit|nb.prange' python/genvarloader/` = 0 matches.
-  Full test tree gate: 624 passed, 5 skipped, 2 xfailed. Lint/format/typecheck clean.
-  Phase 5 🚧 (W1–W5 done; W6–W9 remain).
+  Full test tree gate (controller-verified): 686 passed, 35 skipped, 2 xfailed. Lint/format/typecheck clean.
+  CAVEAT (seqpro transitive numba): `import genvarloader` still pulls numba+llvmlite
+  via seqpro 0.20.0 (eager numba import in seqpro/_numba.py + transforms/tmm.py).
+  genvarloader's OWN code is numba-free; the no-numba-in-import-graph win + the W6
+  ~3.2 GB JIT-RSS drop require a seqpro fix (lazy/remove numba) — filed as a seqpro
+  follow-up. B4's import-guard asserts genvarloader's own modules are numba-free.
+  Phase 5 🚧 (W1–W4 done; W5 in progress — snapshot+numba-deletion done, rayon pending).
 
 - 2026-06-26 (Phase 5 W4 — final single-thread numba-vs-rust `__getitem__` A/B; branch `phase-5-w4`, PR #259):
   Benchmark-only gate (no code) before the W5 consolidation. Measured rust AND numba **single-thread, same
