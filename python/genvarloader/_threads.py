@@ -1,47 +1,53 @@
-"""Cgroup-aware numba thread cap + a per-thread dispatch predicate.
+"""Cgroup-aware thread-count resolver + rayon pool initializer.
 
-numba.get_num_threads() reports host logical CPUs, not the cgroup allocation
-(e.g. 208 reported vs. 52 allocated). Forking the misdetected count makes
-parallel=True regions pay a flat ~37 ms fork-join for trivial work. We cap the
-worker count down to the real allocation once at import, and route copy kernels
-to a serial variant unless there is enough work to amortize the fork-join.
+Resolves the effective worker count from GVL_NUM_THREADS or the
+cgroup cpuset (Linux sched_getaffinity). Seeds RAYON_NUM_THREADS so
+rayon's global pool picks it up on first use. Must run before the
+first rust parallel call (rayon reads the env var at global-pool init
+time). Idempotent.
 """
 
 from __future__ import annotations
 
 import os
 
-import numba
-
-# Parallel only pays off when each worker gets at least this many bytes to copy.
-# Below `num_threads * _MIN_BYTES_PER_THREAD` total, the serial kernel wins.
 _MIN_BYTES_PER_THREAD = 1 << 20  # 1 MiB
+_NUM_THREADS: int | None = None
+
+
+def _detect_cpus() -> int:
+    try:
+        return max(1, len(os.sched_getaffinity(0)))  # respects cgroup cpuset (Linux)
+    except AttributeError:
+        return max(1, os.cpu_count() or 1)
 
 
 def _resolve_num_threads() -> int:
-    hard_max = numba.get_num_threads()
     env = os.environ.get("GVL_NUM_THREADS")
     if env:
         try:
-            return max(1, min(int(env), hard_max))
+            return max(1, int(env))
         except ValueError:
-            # A malformed override (e.g. "auto") must not break `import
-            # genvarloader`; fall through to cgroup detection instead.
             pass
-    try:
-        real = len(os.sched_getaffinity(0))  # respects cgroup cpuset (Linux)
-    except AttributeError:
-        real = os.cpu_count() or 1  # non-Linux fallback
-    return max(1, min(real, hard_max))
+    return _detect_cpus()
 
 
-def cap_numba_threads() -> int:
-    """Cap numba's parallel worker count to the resolved value. Idempotent."""
-    n = _resolve_num_threads()
-    numba.set_num_threads(n)
-    return n
+def cap_threads() -> int:
+    """Resolve worker count once and pin rayon's pool via RAYON_NUM_THREADS.
+
+    Must run before the first rust parallel call (rayon reads RAYON_NUM_THREADS
+    at global-pool init). Idempotent.
+    """
+    global _NUM_THREADS
+    if _NUM_THREADS is None:
+        _NUM_THREADS = _resolve_num_threads()
+        os.environ.setdefault("RAYON_NUM_THREADS", str(_NUM_THREADS))
+    return _NUM_THREADS
+
+
+def num_threads() -> int:
+    return cap_threads()
 
 
 def should_parallelize(total_bytes: int) -> bool:
-    """True iff a copy of `total_bytes` is large enough to justify fork-join."""
-    return total_bytes >= numba.get_num_threads() * _MIN_BYTES_PER_THREAD
+    return total_bytes >= num_threads() * _MIN_BYTES_PER_THREAD

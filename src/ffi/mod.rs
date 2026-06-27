@@ -46,6 +46,7 @@ pub fn get_diffs_sparse<'py>(
     q_starts: Option<PyReadonlyArray1<i32>>,
     q_ends: Option<PyReadonlyArray1<i32>>,
     v_starts: Option<PyReadonlyArray1<i32>>,
+    parallel: bool,
 ) -> Bound<'py, PyArray2<i32>> {
     let go = geno_offsets.as_array();
     let diffs = genotypes::get_diffs_sparse(
@@ -59,6 +60,7 @@ pub fn get_diffs_sparse<'py>(
         q_starts.as_ref().map(|a| a.as_array()),
         q_ends.as_ref().map(|a| a.as_array()),
         v_starts.as_ref().map(|a| a.as_array()),
+        parallel,
     );
     diffs.into_pyarray(py)
 }
@@ -75,6 +77,7 @@ pub fn intervals_to_tracks(
     itv_offsets: PyReadonlyArray1<i64>,
     mut out: PyReadwriteArray1<f32>,
     out_offsets: PyReadonlyArray1<i64>,
+    parallel: bool,
 ) {
     intervals::intervals_to_tracks(
         offset_idxs.as_array(),
@@ -85,6 +88,7 @@ pub fn intervals_to_tracks(
         itv_offsets.as_array(),
         out.as_array_mut(),
         out_offsets.as_array(),
+        parallel,
     );
 }
 
@@ -476,6 +480,7 @@ pub fn assemble_variant_buffers_i32<'py>(
 ///
 /// `geno_offsets` is the normalized (2, n) int64 starts/stops array.
 /// `keep_offsets` is the 1-D (batch*ploidy + 1) offsets array for the keep mask, or None.
+/// `parallel` enables rayon batch parallelism (caller computes `should_parallelize`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_from_sparse(
@@ -497,6 +502,7 @@ pub fn reconstruct_haplotypes_from_sparse(
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     mut annot_v_idxs: Option<PyReadwriteArray1<i32>>,
     mut annot_ref_pos: Option<PyReadwriteArray1<i32>>,
+    parallel: bool,
 ) {
     use crate::reconstruct;
     let go = geno_offsets.as_array();
@@ -520,6 +526,7 @@ pub fn reconstruct_haplotypes_from_sparse(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         annot_v_idxs.as_mut().map(|a| a.as_array_mut()),
         annot_ref_pos.as_mut().map(|a| a.as_array_mut()),
+        parallel,
     );
 }
 
@@ -541,6 +548,7 @@ pub fn reconstruct_haplotypes_from_sparse(
 ///
 /// Annotation buffers are not supported in the fused entry (annotated path
 /// remains on the unfused dispatch wrappers — see Task 13 report for rationale).
+/// `parallel` enables rayon batch parallelism (caller computes `should_parallelize`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_fused<'py>(
@@ -561,6 +569,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     to_rc: Option<PyReadonlyArray1<bool>>,
+    parallel: bool,
 ) -> (Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>) {
     use crate::genotypes;
     use crate::reconstruct;
@@ -597,6 +606,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
         Some(q_starts_owned.view()), // q_starts = regions[:, 1]
         Some(q_ends_owned.view()),   // q_ends   = regions[:, 2]
         Some(v_starts_a),            // v_starts = per-variant genomic starts
+        parallel,
     );
 
     // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
@@ -647,6 +657,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         None, // annot_v_idxs — not supported in fused plain path
         None, // annot_ref_pos — not supported in fused plain path
+        parallel,
     );
 
     // Step 4b: optional in-kernel reverse-complement (one bool per (query, hap) work item).
@@ -684,6 +695,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
 ///
 /// Returns ``out_data`` (u8 flat buffer). The caller already holds ``out_offsets``
 /// so it is NOT returned — Python wraps with ``_Flat.from_offsets``.
+/// `parallel` enables rayon batch parallelism (caller computes `should_parallelize`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_spliced_fused<'py>(
@@ -704,6 +716,7 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     to_rc: Option<PyReadonlyArray1<bool>>,
+    parallel: bool,
 ) -> Bound<'py, PyArray1<u8>> {
     use crate::reconstruct;
 
@@ -739,6 +752,7 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         None, // annot_v_idxs — not used in splice path
         None, // annot_ref_pos — not used in splice path
+        parallel,
     );
 
     // Optional in-place RC per permuted element (negative-strand haplotypes).
@@ -777,6 +791,7 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
 ///
 /// Returns `(out_data, annot_v, annot_pos)`. `out_offsets` is held by the caller and
 /// not returned (matches `reconstruct_haplotypes_spliced_fused`).
+/// `parallel` enables rayon batch parallelism (caller computes `should_parallelize`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_annotated_haplotypes_spliced_fused<'py>(
@@ -797,6 +812,7 @@ pub fn reconstruct_annotated_haplotypes_spliced_fused<'py>(
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     to_rc: Option<PyReadonlyArray1<bool>>,
+    parallel: bool,
 ) -> (
     Bound<'py, PyArray1<u8>>,
     Bound<'py, PyArray1<i32>>,
@@ -838,6 +854,7 @@ pub fn reconstruct_annotated_haplotypes_spliced_fused<'py>(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         Some(annot_v.view_mut()),   // annot_v_idxs — variant index per nucleotide
         Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
+        parallel,
     );
 
     // Optional in-place RC per permuted element. Sequence bytes are reverse-complemented;
@@ -886,6 +903,7 @@ pub fn reconstruct_annotated_haplotypes_spliced_fused<'py>(
 ///
 /// Annotation buffers are not supported in the plain ``reconstruct_haplotypes_fused``
 /// entry; this function is its annotated counterpart.
+/// `parallel` enables rayon batch parallelism (caller computes `should_parallelize`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_annotated_haplotypes_fused<'py>(
@@ -906,6 +924,7 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     to_rc: Option<PyReadonlyArray1<bool>>,
+    parallel: bool,
 ) -> (
     Bound<'py, PyArray1<u8>>,
     Bound<'py, PyArray1<i32>>,
@@ -947,6 +966,7 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
         Some(q_starts_owned.view()), // q_starts = regions[:, 1]
         Some(q_ends_owned.view()),   // q_ends   = regions[:, 2]
         Some(v_starts_a),            // v_starts = per-variant genomic starts
+        parallel,
     );
 
     // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
@@ -999,6 +1019,7 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         Some(annot_v.view_mut()),   // annot_v_idxs — variant index per nucleotide
         Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
+        parallel,
     );
 
     if let Some(to_rc) = to_rc.as_ref() {
@@ -1071,6 +1092,7 @@ pub fn shift_and_realign_tracks_sparse(
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     strategy_id: i64,
     base_seed: u64,
+    parallel: bool,
 ) {
     use crate::tracks;
     let go = geno_offsets.as_array();
@@ -1092,6 +1114,7 @@ pub fn shift_and_realign_tracks_sparse(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         strategy_id,
         base_seed,
+        parallel,
     );
 }
 
@@ -1105,6 +1128,7 @@ pub fn tracks_to_intervals<'py>(
     regions: PyReadonlyArray2<i32>,
     tracks: PyReadonlyArray1<f32>,
     track_offsets: PyReadonlyArray1<i64>,
+    parallel: bool,
 ) -> (
     Bound<'py, PyArray1<i32>>,
     Bound<'py, PyArray1<i32>>,
@@ -1116,6 +1140,7 @@ pub fn tracks_to_intervals<'py>(
         regions.as_array(),
         tracks.as_array(),
         track_offsets.as_array(),
+        parallel,
     );
     (
         starts.into_pyarray(py),
@@ -1170,6 +1195,7 @@ pub fn intervals_and_realign_track_fused(
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     to_rc: Option<PyReadonlyArray1<bool>>,
+    parallel: bool,
 ) -> PyResult<()> {
     use crate::intervals;
     use crate::tracks;
@@ -1206,6 +1232,7 @@ pub fn intervals_and_realign_track_fused(
         itv_offsets.as_array(),
         scratch.view_mut(),
         track_offsets_a,
+        parallel,
     );
 
     // Step 2: shift and realign into caller's out slice (reuses tracks core).
@@ -1227,6 +1254,7 @@ pub fn intervals_and_realign_track_fused(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         strategy_id,
         base_seed,
+        parallel,
     );
 
     // Step 3: optional in-place reverse for negative-strand tracks (reverse only, no complement).

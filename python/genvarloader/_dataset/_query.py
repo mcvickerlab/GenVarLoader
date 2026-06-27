@@ -8,7 +8,6 @@ functions in this module take it explicitly and don't depend on a full
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Literal, cast, overload
 
@@ -33,11 +32,6 @@ from ._rag_variants import RaggedVariants
 from ._ref import Ref
 from ._splice import SplicePlan, build_splice_plan
 from ._tracks import Tracks
-
-
-def _active_backend() -> str:
-    """Return the active GVL backend (``"rust"`` by default)."""
-    return os.environ.get("GVL_BACKEND", "rust")
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,22 +191,16 @@ def _getitem_unspliced(
         recon = (recon,)
 
     if view.rc_neg and to_rc is not None:
-        if _active_backend() == "numba":
-            # Numba: RC handled entirely by post-pass for all kinds.
-            recon = tuple(reverse_complement_ragged(r, to_rc) for r in recon)
-        else:
-            # Rust: flat-seq kinds (bytes, tracks, annotated-haps) have RC
-            # folded into the kernel or handled Python-side inside the
-            # reconstructor.  Variant types have no in-kernel RC and are
-            # deferred here.  (_FlatVariantWindows RC is a no-op in
-            # reverse_complement_ragged; RaggedVariants is Target 7.)
-            _VARIANT_TYPES = (RaggedVariants, _FlatVariants, _FlatVariantWindows)
-            recon = tuple(
-                reverse_complement_ragged(r, to_rc)
-                if isinstance(r, _VARIANT_TYPES)
-                else r
-                for r in recon
-            )
+        # Rust: flat-seq kinds (bytes, tracks, annotated-haps) have RC
+        # folded into the kernel or handled Python-side inside the
+        # reconstructor.  Variant types have no in-kernel RC and are
+        # deferred here.  (_FlatVariantWindows RC is a no-op in
+        # reverse_complement_ragged; RaggedVariants is Target 7.)
+        _VARIANT_TYPES = (RaggedVariants, _FlatVariants, _FlatVariantWindows)
+        recon = tuple(
+            reverse_complement_ragged(r, to_rc) if isinstance(r, _VARIANT_TYPES) else r
+            for r in recon
+        )
 
     return recon, squeeze, out_reshape
 
@@ -302,13 +290,6 @@ def _getitem_spliced(
     recon = cast(
         tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
     )
-
-    if view.rc_neg and to_rc_per_elem is not None:
-        # Spliced output is never a variant type (spliced variants are rejected
-        # upstream in Haps.__call__). On numba the post-pass RCs the seq/annotated
-        # kinds; on rust those kinds fold RC in-kernel, so this is a no-op there.
-        if _active_backend() == "numba":
-            recon = tuple(reverse_complement_ragged(r, to_rc_per_elem) for r in recon)
 
     # Rewrap each per-element Ragged with the plan's group_offsets to expose
     # one contiguous spliced element per (row, sample[, inner]) cell. Collapse

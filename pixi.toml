@@ -83,6 +83,11 @@ basenji2-pytorch = ">=0.1.2"
 [feature.py310.dependencies]
 python = "3.10.*"
 numpy = "1.26.*"
+# numba kept as a CONDA pin only because seqpro (a hard dep) eagerly imports
+# numba, and only the conda build ships a working libllvmlite.so in this env —
+# the PyPI numba/llvmlite wheel fails to load here. genvarloader's OWN code is
+# numba-free (see tests/parity/test_import_no_numba.py); this pin is purely to
+# keep seqpro's transitive numba working. Drop once seqpro stops importing numba.
 numba = "==0.59.1"
 
 [feature.py310.pypi-dependencies]

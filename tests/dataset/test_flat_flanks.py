@@ -714,22 +714,17 @@ def test_variant_windows_single_fetch_per_decode(snap_dataset, monkeypatch):
     Reference.fetch), so we assert the dispatched kernel fires exactly once per
     both-window decode.
     """
-    from genvarloader import _dispatch
+    import genvarloader._dataset._flat_variants as _fv
     from genvarloader._dataset._flat_variants import VarWindowOpt
 
     calls = {"n": 0}
-    entry = _dispatch._REGISTRY["assemble_variant_buffers"]
-    real = {"numba": entry["numba"], "rust": entry["rust"]}
+    real_fn = _fv._assemble_variant_buffers_rust
 
-    def _make_spy(fn):
-        def spy(*a, **k):
-            calls["n"] += 1
-            return fn(*a, **k)
+    def spy(*a, **k):
+        calls["n"] += 1
+        return real_fn(*a, **k)
 
-        return spy
-
-    monkeypatch.setitem(entry, "numba", _make_spy(real["numba"]))
-    monkeypatch.setitem(entry, "rust", _make_spy(real["rust"]))
+    monkeypatch.setattr(_fv, "_assemble_variant_buffers_rust", spy)
 
     ds = (
         snap_dataset.with_tracks(False)

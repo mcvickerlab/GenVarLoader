@@ -1,6 +1,5 @@
 from collections.abc import Sequence
 
-import numba as nb
 import numpy as np
 import polars as pl
 from genoray._utils import ContigNormalizer
@@ -32,43 +31,6 @@ def _ffi_array(arr: np.ndarray, dtype, name: str) -> np.ndarray:
             f"(coercing would force a sample-scale cast/copy)."
         )
     return arr
-
-
-@nb.njit(nogil=True, cache=True)
-def padded_slice(
-    arr: NDArray[DTYPE],
-    start: int,
-    stop: int,
-    pad_val: int,
-    out: NDArray[DTYPE],
-) -> NDArray[DTYPE]:
-    if start >= stop:
-        return out
-    elif stop < 0:
-        out[:] = pad_val
-        return out
-
-    pad_left = -min(0, start)
-    pad_right = max(0, stop - len(arr))
-
-    if pad_left == 0 and pad_right == 0:
-        out[:] = arr[start:stop]
-        return out
-
-    if pad_left > 0 and pad_right > 0:
-        out_stop = len(out) - pad_right
-        out[:pad_left] = pad_val
-        out[pad_left:out_stop] = arr[:]
-        out[out_stop:] = pad_val
-    elif pad_left > 0:
-        out[:pad_left] = pad_val
-        out[pad_left:] = arr[:stop]
-    elif pad_right > 0:
-        out_stop = len(out) - pad_right
-        out[:out_stop] = arr[start:]
-        out[out_stop:] = pad_val
-
-    return out
 
 
 def oidx_to_raveled_idx(row_idx: ArrayLike, col_idx: ArrayLike, shape: tuple[int, int]):
@@ -146,7 +108,7 @@ def bed_to_regions(
         # versions where it doesn't, the strand column survives the
         # ``select(...)`` call as Categorical, and ``to_numpy()`` on a frame
         # mixing ``Int32`` + ``Categorical`` collapses to ``dtype=object``,
-        # which downstream numba kernels reject with
+        # which downstream kernels reject with
         # ``non-precise type array(pyobject)``. Casting to Utf8 first keeps
         # the strand column numeric and the regions array stays ``int32``.
         cols.append(
@@ -205,3 +167,40 @@ def reduceat_offsets(
     identity_indices = tuple(identity_indices)
     out_arr[identity_indices] = ufunc.identity
     return out_arr.swapaxes(axis, -1)
+
+
+def padded_slice(
+    arr,
+    start: int,
+    stop: int,
+    pad_val: int,
+    out,
+):
+    """Slice arr into out with padding on left/right if start<0 or stop>len(arr)."""
+    if start >= stop:
+        return out
+    elif stop < 0:
+        out[:] = pad_val
+        return out
+
+    pad_left = -min(0, start)
+    pad_right = max(0, stop - len(arr))
+
+    if pad_left == 0 and pad_right == 0:
+        out[:] = arr[start:stop]
+        return out
+
+    if pad_left > 0 and pad_right > 0:
+        out_stop = len(out) - pad_right
+        out[:pad_left] = pad_val
+        out[pad_left:out_stop] = arr[:]
+        out[out_stop:] = pad_val
+    elif pad_left > 0:
+        out[:pad_left] = pad_val
+        out[pad_left:] = arr[:stop]
+    elif pad_right > 0:
+        out_stop = len(out) - pad_right
+        out[:out_stop] = arr[start:]
+        out[out_stop:] = pad_val
+
+    return out

@@ -1,65 +1,55 @@
-"""Direct numba-vs-rust parity test for xorshift64 and hash4 PRNG primitives.
+"""Direct rust parity test for xorshift64 and hash4 PRNG primitives.
 
-This is the highest-priority parity guard for the FlankSample fill strategy
-(Tasks 8/9). If Rust and numba diverge by even one bit here, FlankSample output
-will diverge downstream.
+Known-vector tests run directly against the Rust debug exports.  The
+hypothesis-driven numba-comparison tests have been replaced with frozen-golden
+replay (goldens generated in generate_goldens.py, cross-checked against numba at
+generation time).
 
 The Rust functions are exposed as DEBUG exports (`_debug_xorshift64`,
-`_debug_hash4`) in the genvarloader extension module. These may be kept or
-removed after Task 8/9 review.
+`_debug_hash4`) in the genvarloader extension module.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
-from hypothesis import given, settings
-from hypothesis import strategies as st
 
-# Import Rust debug exports from the compiled extension module.
 from genvarloader.genvarloader import _debug_hash4 as _hash4_rust
 from genvarloader.genvarloader import _debug_xorshift64 as _xorshift64_rust
-
-# Import numba implementations from _tracks.py.  They are @nb.njit functions;
-# calling them from Python forces a first-call JIT compile — that is expected.
-from genvarloader._dataset._tracks import _hash4 as _hash4_numba
-from genvarloader._dataset._tracks import _xorshift64 as _xorshift64_numba
+from tests.parity import _golden
 
 pytestmark = pytest.mark.parity
 
 UINT64_MAX = 2**64 - 1
-uint64_strategy = st.integers(0, UINT64_MAX)
 
 
-# ── xorshift64 ────────────────────────────────────────────────────────────────
+# ── frozen-golden replay ───────────────────────────────────────────────────────
 
 
-@settings(max_examples=500, deadline=None)
-@given(uint64_strategy)
-def test_xorshift64_parity(x: int) -> None:
-    """Rust xorshift64 must equal numba _xorshift64 for every uint64 input."""
-    expected = int(_xorshift64_numba(np.uint64(x)))
-    got = _xorshift64_rust(x)
-    assert got == expected, f"xorshift64({x:#x}): rust={got:#x} numba={expected:#x}"
+def test_xorshift64_golden():
+    """Rust xorshift64 must equal the frozen golden (cross-checked vs numba at freeze time)."""
+    cases = _golden.load_golden("prng_xorshift64")
+    assert cases, "empty golden"
+    for ci, (inputs, golden) in enumerate(cases):
+        (x,) = inputs
+        got = np.uint64(_xorshift64_rust(int(x)))
+        exp = np.uint64(golden)
+        assert got == exp, (
+            f"xorshift64 case {ci}: input={x:#x} got={got:#x} exp={exp:#x}"
+        )
 
 
-# ── hash4 ─────────────────────────────────────────────────────────────────────
-
-
-@settings(max_examples=500, deadline=None)
-@given(uint64_strategy, uint64_strategy, uint64_strategy, uint64_strategy)
-def test_hash4_parity(a: int, b: int, c: int, d: int) -> None:
-    """Rust hash4 must equal numba _hash4 for every (a,b,c,d) uint64 quadruple.
-
-    Passes np.uint64 args to numba so it uses uint64 semantics (wrapping
-    arithmetic); compares against Python int() of the result to avoid any
-    uint64 vs Python-int comparison issues.
-    """
-    expected = int(_hash4_numba(np.uint64(a), np.uint64(b), np.uint64(c), np.uint64(d)))
-    got = _hash4_rust(a, b, c, d)
-    assert got == expected, (
-        f"hash4({a:#x}, {b:#x}, {c:#x}, {d:#x}): rust={got:#x} numba={expected:#x}"
-    )
+def test_hash4_golden():
+    """Rust hash4 must equal the frozen golden (cross-checked vs numba at freeze time)."""
+    cases = _golden.load_golden("prng_hash4")
+    assert cases, "empty golden"
+    for ci, (inputs, golden) in enumerate(cases):
+        a, b, c, d = inputs
+        got = np.uint64(_hash4_rust(int(a), int(b), int(c), int(d)))
+        exp = np.uint64(golden)
+        assert got == exp, (
+            f"hash4 case {ci}: ({a:#x},{b:#x},{c:#x},{d:#x}) got={got:#x} exp={exp:#x}"
+        )
 
 
 # ── smoke: fixed known vectors ─────────────────────────────────────────────────

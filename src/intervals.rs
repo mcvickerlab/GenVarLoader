@@ -1,4 +1,5 @@
 use ndarray::{ArrayView1, ArrayViewMut1};
+use rayon::prelude::*;
 
 /// Paint base-pair-resolution tracks from pre-sorted intervals.
 ///
@@ -11,8 +12,10 @@ use ndarray::{ArrayView1, ArrayViewMut1};
 /// - Breaks out of the interval loop when `start >= length` (intervals are
 ///   sorted by start, so all subsequent intervals are also out of range).
 /// - Values are copied (f32 → f32), never reduced.
-/// - Sequential over queries — per-query out slices are disjoint, so the
-///   result equals numba's prange result without any need for rayon here.
+///
+/// When `parallel=true` the outer query loop is dispatched via rayon using the
+/// split_at_mut cursor idiom (same as C1/C2) so per-query out slices are
+/// provably disjoint — no raw `*mut` in the closure.
 pub fn intervals_to_tracks(
     offset_idxs: ArrayView1<i64>,
     starts: ArrayView1<i32>,
@@ -22,6 +25,7 @@ pub fn intervals_to_tracks(
     itv_offsets: ArrayView1<i64>,
     mut out: ArrayViewMut1<f32>,
     out_offsets: ArrayView1<i64>,
+    parallel: bool,
 ) {
     // Hoist all inputs to raw slices before any loop — eliminates ndarray's
     // per-element stride multiplication and bounds-check branches that would
@@ -42,20 +46,21 @@ pub fn intervals_to_tracks(
 
     let n_queries = starts.len();
 
-    for query in 0..n_queries {
+    // Inner per-query paint logic. Takes a mutable slice for this query's
+    // output region (already offset-addressed) plus the query index.
+    // All read-only slices are captured by shared reference — they are
+    // Send+Sync so this closure is safe to use in rayon.
+    let paint_query = |query: usize, out_chunk: &mut [f32]| {
         let idx = offset_idxs[query] as usize;
         let itv_s = itv_offsets[idx] as usize;
         let itv_e = itv_offsets[idx + 1] as usize;
 
         if itv_s == itv_e {
-            // No intervals for this query — out slice stays 0.
-            continue;
+            // No intervals for this query — out slice stays 0 (already zeroed).
+            return;
         }
 
-        let out_s = out_offsets[query] as usize;
-        let out_e = out_offsets[query + 1] as usize;
-        // length as i64 to do signed arithmetic below.
-        let length = (out_e - out_s) as i64;
+        let length = out_chunk.len() as i64;
         let query_start = starts[query] as i64;
 
         for interval in itv_s..itv_e {
@@ -71,14 +76,51 @@ pub fn intervals_to_tracks(
             }
             // Clip to the query window. Intervals may start before query_start
             // (jitter-expanded interval storage vs. the per-read query origin;
-            // see issue #242) or end past it. No negative-index wrap.
+            // see issue #242) or end past it. Keep s/e as i64 until after the
+            // guard so that negative values don't wrap when cast to usize.
             let s = start.max(0);
             let e = end.min(length);
             if e > s {
-                let a = out_s + s as usize;
-                let b = out_s + e as usize;
-                out_slice[a..b].fill(value);
+                out_chunk[s as usize..e as usize].fill(value);
             }
+        }
+    };
+
+    if parallel {
+        // Build disjoint per-query mutable slices using the split_at_mut
+        // cursor idiom (mirrors C1 reconstruct_haplotypes_from_sparse).
+        let bounds: Vec<(usize, usize)> = (0..n_queries)
+            .map(|q| (out_offsets[q] as usize, out_offsets[q + 1] as usize))
+            .collect();
+
+        let mut out_chunks: Vec<&mut [f32]> = Vec::with_capacity(n_queries);
+        {
+            let mut rest = &mut out_slice[..];
+            let mut cursor = 0usize;
+            for &(s, e) in &bounds {
+                debug_assert!(
+                    s >= cursor && e >= s,
+                    "out_offsets must be monotonically non-decreasing (got s={s}, e={e}, cursor={cursor})"
+                );
+                let (_, tail) = rest.split_at_mut(s - cursor);
+                let (mid, tail2) = tail.split_at_mut(e - s);
+                out_chunks.push(mid);
+                rest = tail2;
+                cursor = e;
+            }
+        }
+
+        out_chunks
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(query, out_chunk)| {
+                paint_query(query, out_chunk);
+            });
+    } else {
+        for query in 0..n_queries {
+            let out_s = out_offsets[query] as usize;
+            let out_e = out_offsets[query + 1] as usize;
+            paint_query(query, &mut out_slice[out_s..out_e]);
         }
     }
 }
@@ -109,6 +151,7 @@ mod tests {
             Array1::from_vec(itv_offsets.to_vec()).view(),
             out.view_mut(),
             Array1::from_vec(out_offsets.to_vec()).view(),
+            false, // serial path — unit tests don't need rayon overhead
         );
         out.to_vec()
     }

@@ -13,7 +13,6 @@ dependencies = [
     "seqpro>=0.20",
     "genoray>=2.12.3,<3",
     "numpy",
-    "numba>=0.59.1",
     "loguru",
     "natsort",
     "polars>=1.37.1",
@@ -112,8 +111,8 @@ bad-override = "warn"
 # Mostly the same ArrayDataset / RaggedDataset return-shape drift plus a few
 # polymorphic-return sites that PR5/PR6 will narrow. Keep visible as WARN.
 bad-return = "warn"
-# numba ITYPE default + a default arg mismatch in a small kernel; revisit
-# in PR8 once the surrounding code stabilizes.
+# Default arg mismatch at a few call sites; revisit in PR8 once the
+# surrounding code stabilizes.
 bad-function-definition = "warn"
 # Six call sites with overload friction (seqpro.cast_seqs, Dataset.open,
 # numpy.reshape, genoray.get_record_info). Surface but don't block.
@@ -148,7 +147,7 @@ filterwarnings = [
 ]
 markers = [
     "slow: mark test as slow (deselect with '-m \"not slow\"')",
-    "parity: byte-identical numba-vs-rust differential tests (Rust migration)",
+    "parity: rust-vs-frozen-golden differential tests (Rust migration)",
 ]
 
 [tool.coverage.run]
@@ -168,8 +167,6 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
     "\\.\\.\\.",
-    "@nb.njit",
-    "@numba.njit",
     "raise ImportError\\(\"PyTorch is not available",
 ]
 

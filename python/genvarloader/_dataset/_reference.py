@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Generic, Literal, TypeVar, cast, overload
 
-import numba as nb
 import numpy as np
 import polars as pl
 from genoray._utils import ContigNormalizer
@@ -17,15 +15,14 @@ from typing_extensions import Self
 
 from .._flat import _Flat
 from .._fasta_cache import ensure_cache
-from .._ragged import RaggedSeqs, reverse_complement_masked, to_padded
+from .._ragged import RaggedSeqs, to_padded
 from .._torch import TORCH_AVAILABLE, get_dataloader, no_torch_error
 from .._types import Idx, StrIdx
 from .._utils import is_dtype
 from ._indexing import is_str_arr, s2i
 from ._splice import SpliceMap, SplicePlan, build_splice_plan
-from ._utils import bed_to_regions, padded_slice
+from ._utils import bed_to_regions
 from .._threads import should_parallelize
-from .._dispatch import get, register
 from ..genvarloader import get_reference as _get_reference_rust_ffi
 
 INT64_MAX = np.iinfo(np.int64).max
@@ -440,13 +437,8 @@ class RefDataset(Generic[T]):
             reference=self.reference.reference,
             ref_offsets=self.reference.offsets,
             pad_char=self.reference.pad_char,
-            to_rc=to_rc_perm,  # Rust: RC done in kernel; numba: handled below
+            to_rc=to_rc_perm,  # Rust: RC done in kernel
         )
-
-        if to_rc_perm is not None and os.environ.get("GVL_BACKEND", "rust") == "numba":
-            from .._ragged import _COMP
-
-            per_elem = per_elem.reverse_masked(to_rc_perm, comp=_COMP)
 
         # Rewrap with group_offsets at (n_rows, None) — skip the (n_rows, 1, None)
         # + squeeze(1) trick since RefDataset has no sample axis.
@@ -513,7 +505,7 @@ class RefDataset(Generic[T]):
 
         # ragged (b ~l)
         # On the Rust backend, RC is folded into the kernel via to_rc.
-        # On the numba backend, get_reference ignores to_rc and the post-RC
+        # get_reference handles to_rc in kernel (Rust)
         # below preserves the original behaviour.
         _to_rc_arr = regions[:, 3] == -1
         _to_rc: "NDArray[np.bool_] | None" = _to_rc_arr if _to_rc_arr.any() else None
@@ -529,9 +521,6 @@ class RefDataset(Generic[T]):
         ref = cast(
             Ragged[np.bytes_], Ragged.from_offsets(ref, (batch_size, None), out_offsets)
         )
-
-        if _to_rc is not None and os.environ.get("GVL_BACKEND", "rust") == "numba":
-            ref = reverse_complement_masked(ref, _to_rc)
 
         if out_reshape is not None:
             ref = ref.reshape(out_reshape)
@@ -658,41 +647,6 @@ class RefDataset(Generic[T]):
         )
 
 
-@nb.njit(nogil=True, cache=True, inline="always")
-def _get_reference_row(i, regions, out_offsets, reference, ref_offsets, pad_char, out):
-    o_s, o_e = out_offsets[i], out_offsets[i + 1]
-    c_idx, start, end = regions[i, 0], regions[i, 1], regions[i, 2]
-    c_s = ref_offsets[c_idx]
-    c_e = ref_offsets[c_idx + 1]
-    padded_slice(reference[c_s:c_e], start, end, pad_char, out[o_s:o_e])
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def _get_reference_par(regions, out_offsets, reference, ref_offsets, pad_char, out):
-    for i in nb.prange(len(regions)):
-        _get_reference_row(
-            i, regions, out_offsets, reference, ref_offsets, pad_char, out
-        )
-    return out
-
-
-@nb.njit(nogil=True, cache=True)
-def _get_reference_ser(regions, out_offsets, reference, ref_offsets, pad_char, out):
-    for i in range(len(regions)):
-        _get_reference_row(
-            i, regions, out_offsets, reference, ref_offsets, pad_char, out
-        )
-    return out
-
-
-def _get_reference_numba(
-    regions, out_offsets, reference, ref_offsets, pad_char, parallel
-):
-    out = np.empty(out_offsets[-1], np.uint8)
-    kernel = _get_reference_par if parallel else _get_reference_ser
-    return kernel(regions, out_offsets, reference, ref_offsets, pad_char, out)
-
-
 def _get_reference_rust(
     regions, out_offsets, reference, ref_offsets, pad_char, parallel, to_rc=None
 ):
@@ -707,14 +661,6 @@ def _get_reference_rust(
     )
 
 
-register(
-    "get_reference",
-    numba=_get_reference_numba,
-    rust=_get_reference_rust,
-    default="rust",
-)
-
-
 def get_reference(
     regions: NDArray[np.integer],
     out_offsets: NDArray[np.integer],
@@ -726,25 +672,13 @@ def get_reference(
     """Fetch reference-genome bytes for a batch of regions.
 
     ``to_rc`` is a per-query boolean mask (True = reverse-complement that query).
-    On the Rust backend the mask is consumed in-kernel; on the numba backend it
-    is silently ignored and the caller is responsible for any post-pass RC.
-
-    The call is routed through the :func:`._dispatch.get` registry so that
-    tests can spy on the underlying backend functions via
-    :func:`._dispatch.register`.
+    The mask is consumed in-kernel by the Rust backend.
     """
     parallel = should_parallelize(int(out_offsets[-1]))
-    fn = get("get_reference")  # honours test monkeypatches
-    _backend = os.environ.get("GVL_BACKEND", "rust")
-    if _backend == "rust":
-        # Rust kernel accepts to_rc as its 7th positional arg.
-        _to_rc = None if to_rc is None else np.ascontiguousarray(to_rc, np.bool_)
-        return fn(
-            regions, out_offsets, reference, ref_offsets, pad_char, parallel, _to_rc
-        )
-    else:
-        # Numba kernel does not accept to_rc; post-pass handles RC.
-        return fn(regions, out_offsets, reference, ref_offsets, pad_char, parallel)
+    _to_rc = None if to_rc is None else np.ascontiguousarray(to_rc, np.bool_)
+    return _get_reference_rust(
+        regions, out_offsets, reference, ref_offsets, pad_char, parallel, _to_rc
+    )
 
 
 def _fetch_spliced_ref(
@@ -763,7 +697,7 @@ def _fetch_spliced_ref(
 
     ``to_rc`` is the permuted per-element boolean mask (True = RC that element).
     On the Rust backend it is passed into the ``get_reference`` kernel directly;
-    on numba the caller's post-pass handles it.
+    the Rust backend handles it in-kernel.
     """
     permuted_regions = regions[plan.permutation]
     raw = get_reference(
@@ -822,3 +756,30 @@ if TORCH_AVAILABLE:
 
 else:
     TorchDataset = no_torch_error
+
+
+def _get_reference_row(i, regions, out_offsets, reference, ref_offsets, pad_char, out):
+    """Extract a single reference row with padding (pure Python fallback)."""
+    from ._utils import padded_slice
+
+    o_s, o_e = out_offsets[i], out_offsets[i + 1]
+    c_idx, start, end = int(regions[i, 0]), int(regions[i, 1]), int(regions[i, 2])
+    c_s = int(ref_offsets[c_idx])
+    c_e = int(ref_offsets[c_idx + 1])
+    padded_slice(reference[c_s:c_e], start, end, pad_char, out[o_s:o_e])
+
+
+def _get_reference_ser(regions, out_offsets, reference, ref_offsets, pad_char, out):
+    """Extract reference rows serially (pure Python fallback)."""
+    for i in range(len(regions)):
+        _get_reference_row(
+            i, regions, out_offsets, reference, ref_offsets, pad_char, out
+        )
+    return out
+
+
+def _get_reference_par(regions, out_offsets, reference, ref_offsets, pad_char, out):
+    """Extract reference rows (parallel flavor; falls back to serial in pure Python)."""
+    return _get_reference_ser(
+        regions, out_offsets, reference, ref_offsets, pad_char, out
+    )

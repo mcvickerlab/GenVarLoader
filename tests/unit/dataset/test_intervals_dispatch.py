@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from genvarloader._dataset._intervals import intervals_to_tracks
 
 
@@ -23,9 +22,7 @@ def _known_case():
     )
 
 
-@pytest.mark.parametrize("backend", ["numba", "rust"])
-def test_wrapper_matches_known_result(backend, monkeypatch):
-    monkeypatch.setenv("GVL_BACKEND", backend)
+def test_wrapper_matches_known_result():
     (
         offset_idxs,
         starts,
@@ -47,9 +44,3 @@ def test_wrapper_matches_known_result(backend, monkeypatch):
         out_offsets,
     )
     np.testing.assert_array_equal(out, np.array([0, 2, 2, 0, 0], np.float32))
-
-
-def test_wrapper_is_registered():
-    from genvarloader import _dispatch
-
-    assert "intervals_to_tracks" in _dispatch.registered_names()

@@ -12,7 +12,6 @@ modules for backward-compatible import paths.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
@@ -29,14 +28,18 @@ from ._haps import _H, Haps, ReconstructionRequest, _NewH, _Variants
 from ._insertion_fill import Repeat5p
 from ._insertion_fill import lower as _lower_insertion_fills
 from ._flat_variants import _FlatVariantWindows
-from ._intervals import intervals_to_tracks
 from ._protocol import Reconstructor
 from ._rag_variants import RaggedVariants
 from ._ref import Ref
 from ._splice import SplicePlan
-from ._tracks import _T, Tracks, TrackType, _NewT  # noqa: F401
+from ._tracks import (
+    _T,
+    Tracks,
+    TrackType,
+    _NewT,
+)  # noqa: F401
 from ._utils import _ffi_array
-from .._dispatch import get as _dispatch_get
+from .._threads import should_parallelize
 
 # Fused tracks entry (Task 14): intervals → scratch → realign, one FFI crossing.
 # Imported at module level so the spy in test_fused_tracks_parity can monkeypatch it.
@@ -198,15 +201,9 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                     rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
                 )
 
-            _backend = os.environ.get("GVL_BACKEND", "rust")
             # Pre-compute (2, n) geno_offsets once for the fused Rust path
             # (avoids re-computing _as_starts_stops n_tracks times).
-            # Always initialized; only used when _backend == "rust".
-            _geno_offsets_2d = (
-                _as_starts_stops(self.haps.genotypes.offsets)
-                if _backend == "rust"
-                else None
-            )
+            _geno_offsets_2d = _as_starts_stops(self.haps.genotypes.offsets)
 
             for track_ofst, (name, tracktype) in enumerate(
                 self.tracks.active_tracks.items()
@@ -220,93 +217,57 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
 
                 _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
 
-                if _backend == "rust":
-                    # Fused path (Rust): one FFI crossing, no Python-side
-                    # intermediate buffer.  Replaces:
-                    #   _tracks = np.empty(...)                (audit T2)
-                    #   intervals_to_tracks(...)               (FFI crossing #3)
-                    #   shift_and_realign_tracks_sparse(...)   (FFI crossing #4)
-                    #
-                    # _out is a contiguous f32 slice of the pre-allocated `out`
-                    # buffer (np.empty, step=1).  No ascontiguousarray needed for
-                    # `out`; the fused entry writes in-place into its buffer.
-                    # Expand per-query to_rc to per-(query, hap) for the track kernel.
-                    # out_ofsts_per_t is (b*p+1); ploidy = geno_idx.shape[-1].
-                    _ploidy = geno_idx.shape[-1]
-                    _to_rc_hap = (
-                        None
-                        if to_rc is None
-                        else np.ascontiguousarray(np.repeat(to_rc, _ploidy), np.bool_)
-                    )
-                    intervals_and_realign_track_fused(
-                        out=_out,
-                        out_offsets=np.ascontiguousarray(out_ofsts_per_t, np.int64),
-                        regions=np.ascontiguousarray(regions, np.int32),
-                        shifts=np.ascontiguousarray(shifts, np.int32),
-                        geno_offset_idx=np.ascontiguousarray(geno_idx, np.int64),
-                        geno_v_idxs=_ffi_array(
-                            self.haps.genotypes.data, np.int32, "geno_v_idxs"
-                        ),
-                        geno_offsets=_geno_offsets_2d,
-                        v_starts=self.haps.ffi_static.v_starts,
-                        ilens=self.haps.ffi_static.ilens,
-                        offset_idxs=np.ascontiguousarray(o_idx, np.int64),
-                        itv_starts=_ffi_array(
-                            intervals.starts.data, np.int32, "itv_starts"
-                        ),
-                        itv_ends=_ffi_array(intervals.ends.data, np.int32, "itv_ends"),
-                        itv_values=_ffi_array(
-                            intervals.values.data, np.float32, "itv_values"
-                        ),
-                        itv_offsets=_ffi_array(
-                            intervals.starts.offsets, np.int64, "itv_offsets"
-                        ),
-                        track_offsets=np.ascontiguousarray(track_ofsts_per_t, np.int64),
-                        params=np.ascontiguousarray(
-                            strat_params[track_ofst], np.float64
-                        ),
-                        strategy_id=int(strat_ids[track_ofst]),
-                        base_seed=int(base_seed),
-                        keep=None
-                        if keep is None
-                        else np.ascontiguousarray(keep, np.bool_),
-                        keep_offsets=None
-                        if keep_offsets is None
-                        else np.ascontiguousarray(keep_offsets, np.int64),
-                        to_rc=_to_rc_hap,
-                    )
-                else:
-                    # Composed path (numba): two FFI crossings + one intermediate
-                    # buffer.  This is the oracle path; it remains untouched.
-                    _tracks = np.empty(track_ofsts_per_t[-1], np.float32)
-                    intervals_to_tracks(
-                        offset_idxs=o_idx,  # (b)
-                        starts=regions[:, 1],  # (b)
-                        itv_starts=intervals.starts.data,
-                        itv_ends=intervals.ends.data,
-                        itv_values=intervals.values.data,
-                        itv_offsets=intervals.starts.offsets,
-                        out=_tracks,  # (b*l)
-                        out_offsets=track_ofsts_per_t,  # (b+1)
-                    )
-                    _dispatch_get("shift_and_realign_tracks_sparse")(
-                        out=_out,  # (b*p*l)
-                        out_offsets=out_ofsts_per_t,  # (b*p+1)
-                        regions=regions,  # (b, 3)
-                        shifts=shifts,  # (b p)
-                        geno_offset_idx=geno_idx,  # (b p)
-                        geno_v_idxs=self.haps.genotypes.data,  # (r*s*p*v)
-                        geno_offsets=self.haps.genotypes.offsets,  # (r*s*p+1)
-                        v_starts=self.haps.variants.start,  # (tot_v)
-                        ilens=self.haps.variants.ilen,  # (tot_v)
-                        tracks=_tracks,  # ragged (b l)
-                        track_offsets=track_ofsts_per_t,  # (b+1)
-                        params=strat_params[track_ofst],
-                        keep=keep,  # (b*p*v)
-                        keep_offsets=keep_offsets,  # (b*p+1)
-                        strategy_id=int(strat_ids[track_ofst]),
-                        base_seed=base_seed,
-                    )
+                # Fused path (Rust): one FFI crossing, no Python-side
+                # intermediate buffer.  Replaces:
+                #   _tracks = np.empty(...)                (audit T2)
+                #   intervals_to_tracks(...)               (FFI crossing #3)
+                #   shift_and_realign_tracks_sparse(...)   (FFI crossing #4)
+                #
+                # _out is a contiguous f32 slice of the pre-allocated `out`
+                # buffer (np.empty, step=1).  No ascontiguousarray needed for
+                # `out`; the fused entry writes in-place into its buffer.
+                # Expand per-query to_rc to per-(query, hap) for the track kernel.
+                # out_ofsts_per_t is (b*p+1); ploidy = geno_idx.shape[-1].
+                _ploidy = geno_idx.shape[-1]
+                _to_rc_hap = (
+                    None
+                    if to_rc is None
+                    else np.ascontiguousarray(np.repeat(to_rc, _ploidy), np.bool_)
+                )
+                intervals_and_realign_track_fused(
+                    out=_out,
+                    out_offsets=np.ascontiguousarray(out_ofsts_per_t, np.int64),
+                    regions=np.ascontiguousarray(regions, np.int32),
+                    shifts=np.ascontiguousarray(shifts, np.int32),
+                    geno_offset_idx=np.ascontiguousarray(geno_idx, np.int64),
+                    geno_v_idxs=_ffi_array(
+                        self.haps.genotypes.data, np.int32, "geno_v_idxs"
+                    ),
+                    geno_offsets=_geno_offsets_2d,
+                    v_starts=self.haps.ffi_static.v_starts,
+                    ilens=self.haps.ffi_static.ilens,
+                    offset_idxs=np.ascontiguousarray(o_idx, np.int64),
+                    itv_starts=_ffi_array(
+                        intervals.starts.data, np.int32, "itv_starts"
+                    ),
+                    itv_ends=_ffi_array(intervals.ends.data, np.int32, "itv_ends"),
+                    itv_values=_ffi_array(
+                        intervals.values.data, np.float32, "itv_values"
+                    ),
+                    itv_offsets=_ffi_array(
+                        intervals.starts.offsets, np.int64, "itv_offsets"
+                    ),
+                    track_offsets=np.ascontiguousarray(track_ofsts_per_t, np.int64),
+                    params=np.ascontiguousarray(strat_params[track_ofst], np.float64),
+                    strategy_id=int(strat_ids[track_ofst]),
+                    base_seed=int(base_seed),
+                    keep=None if keep is None else np.ascontiguousarray(keep, np.bool_),
+                    keep_offsets=None
+                    if keep_offsets is None
+                    else np.ascontiguousarray(keep_offsets, np.int64),
+                    to_rc=_to_rc_hap,
+                    parallel=should_parallelize(int(out_ofsts_per_t[-1]) * 4),
+                )
 
             out_shape = (
                 len(idx),

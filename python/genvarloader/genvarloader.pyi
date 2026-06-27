@@ -71,6 +71,7 @@ def intervals_to_tracks(
     itv_offsets: NDArray[np.int64],
     out: NDArray[np.float32],
     out_offsets: NDArray[np.int64],
+    parallel: bool,
 ) -> None:
     """Paint base-pair-resolution tracks from intervals, writing ``out`` in place.
 

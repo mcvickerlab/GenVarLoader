@@ -9,13 +9,11 @@ All fixtures skip the whole module if the committed dataset is absent.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 import genvarloader as gvl
-from genvarloader import _dispatch as _gvl_dispatch
 from genvarloader._dataset import _haps, _reconstruct, _tracks
 from tests.benchmarks._capture import CapturedCall, capture_first_call
 from tests.benchmarks._indices import batch_indices
@@ -46,22 +44,12 @@ def _batch_indices(ds, n: int):
 def captured_haplotypes(bench_dataset):
     ds = bench_dataset.with_seqs("haplotypes").with_len(SEQLEN)
     r, s = _batch_indices(ds, BATCH)
-    # Task 13 (Phase 3): the rust default path now calls reconstruct_haplotypes_fused
-    # (one FFI crossing) rather than reconstruct_haplotypes_from_sparse.  Force the
-    # numba path to capture args that are compatible with the per-kernel benchmark
-    # (test_reconstruct_haplotypes_from_sparse benchmarks the raw dispatch entry).
-    old_backend = os.environ.get("GVL_BACKEND")
-    os.environ["GVL_BACKEND"] = "numba"
-    try:
-        recon = capture_first_call(
-            targets=[(_haps, "reconstruct_haplotypes_from_sparse")],
-            thunk=lambda: ds[r, s],
-        )
-    finally:
-        if old_backend is None:
-            os.environ.pop("GVL_BACKEND", None)
-        else:
-            os.environ["GVL_BACKEND"] = old_backend
+    # Capture the rust reconstruct_haplotypes_from_sparse call by temporarily
+    # wrapping the module-level attribute so capture_first_call can intercept it.
+    recon = capture_first_call(
+        targets=[(_haps, "reconstruct_haplotypes_from_sparse")],
+        thunk=lambda: ds[r, s],
+    )
     return recon
 
 
@@ -93,25 +81,16 @@ def captured_realign_tracks(bench_dataset):
     # shift_and_realign_tracks_sparse only fires on the haplotype+tracks path
     # (_reconstruct.py); the tracks-only path (_tracks.py) never realigns.
     #
-    # Task 14 (Phase 3): the rust default path now calls
-    # intervals_and_realign_track_fused (one FFI crossing) rather than the
-    # composed numba path, so shift_and_realign_tracks_sparse is no longer a
-    # module-level attribute on _reconstruct — capture_first_call's setattr
-    # trick cannot intercept the call.  The numba composed path reaches the
-    # kernel via _dispatch_get() → _REGISTRY[...]["numba"], which holds a
-    # direct function reference that bypasses the module attribute.  We force
-    # GVL_BACKEND=numba, then patch the registry entry directly so the recorder
-    # wraps the exact callable that _dispatch_get returns (which is also
-    # _tracks.shift_and_realign_tracks_sparse — the same object the benchmark
-    # replays).
+    # The rust path calls _shift_and_realign_tracks_sparse_rust_wrapper, which
+    # is not a module-level attribute accessible via capture_first_call's setattr
+    # trick.  Instead, we patch _reconstruct._shift_and_realign_tracks_sparse_rust_wrapper
+    # directly with a recording wrapper so the exact callable the benchmark
+    # replays is captured.
     ds = (
         bench_dataset.with_seqs("haplotypes").with_tracks("read-depth").with_len(SEQLEN)
     )
     r, s = _batch_indices(ds, BATCH)
-    old_backend = os.environ.get("GVL_BACKEND")
-    os.environ["GVL_BACKEND"] = "numba"
-    entry = _gvl_dispatch._REGISTRY["shift_and_realign_tracks_sparse"]
-    original = entry["numba"]
+    original = _reconstruct._shift_and_realign_tracks_sparse_rust_wrapper
     captured: list[CapturedCall] = []
 
     def recorder(*args, **kwargs):
@@ -119,15 +98,11 @@ def captured_realign_tracks(bench_dataset):
             captured.append(CapturedCall(args=args, kwargs=dict(kwargs)))
         return original(*args, **kwargs)
 
-    entry["numba"] = recorder
+    _reconstruct._shift_and_realign_tracks_sparse_rust_wrapper = recorder
     try:
         ds[r, s]
     finally:
-        entry["numba"] = original
-        if old_backend is None:
-            os.environ.pop("GVL_BACKEND", None)
-        else:
-            os.environ["GVL_BACKEND"] = old_backend
+        _reconstruct._shift_and_realign_tracks_sparse_rust_wrapper = original
     if not captured:
         raise RuntimeError(
             "shift_and_realign_tracks_sparse was never called while running the thunk"

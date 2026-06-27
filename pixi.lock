@@ -6175,6 +6175,9 @@ packages:
   license: Apache-2.0 WITH LLVM-exception
   license_family: Apache
   purls: []
+  run_exports:
+    weak:
+    - libllvm14 >=14.0.6,<14.1.0a0
   size: 31484415
   timestamp: 1690557554081
 - conda: https://conda.anaconda.org/conda-forge/linux-64/libllvm22-22.1.5-hf7376ad_1.conda
@@ -6653,6 +6656,7 @@ packages:
   license_family: BSD
   purls:
   - pkg:pypi/llvmlite?source=hash-mapping
+  run_exports: {}
   size: 3328102
   timestamp: 1706921747584
 - conda: https://conda.anaconda.org/conda-forge/linux-64/lz4-c-1.10.0-h5888daf_1.conda
@@ -6970,6 +6974,7 @@ packages:
   license_family: BSD
   purls:
   - pkg:pypi/numba?source=hash-mapping
+  run_exports: {}
   size: 4313101
   timestamp: 1711475336305
 - conda: https://conda.anaconda.org/conda-forge/linux-64/numpy-1.26.4-py310hb13e2d6_0.conda
@@ -10382,6 +10387,9 @@ packages:
   license: Apache-2.0 WITH LLVM-exception
   license_family: Apache
   purls: []
+  run_exports:
+    weak:
+    - libllvm14 >=14.0.6,<14.1.0a0
   size: 20571387
   timestamp: 1690559110016
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/liblzma-5.8.3-h8088a28_0.conda
@@ -10556,6 +10564,7 @@ packages:
   license_family: BSD
   purls:
   - pkg:pypi/llvmlite?source=hash-mapping
+  run_exports: {}
   size: 306724
   timestamp: 1706921994701
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/lz4-c-1.10.0-h286801f_1.conda
@@ -10797,6 +10806,7 @@ packages:
   license_family: BSD
   purls:
   - pkg:pypi/numba?source=hash-mapping
+  run_exports: {}
   size: 4292616
   timestamp: 1711475805806
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/numpy-1.26.4-py310hd45542a_0.conda
@@ -11492,7 +11502,6 @@ packages:
   - seqpro>=0.20
   - genoray>=2.12.3,<3
   - numpy
-  - numba>=0.59.1
   - loguru
   - natsort
   - polars>=1.37.1

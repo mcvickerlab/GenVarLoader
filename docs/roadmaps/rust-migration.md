@@ -718,12 +718,12 @@ Table COITrees numpy-oracle + property). Full tree green on both backends.
 > the update wall-clock (0.081 s) is isolated to `gvl.update`; its marginal RSS is not measured by
 > this driver.
 
-### Phase 5 — Crate consolidation + thin-binding cleanup ⬜
+### Phase 5 — Crate consolidation + thin-binding cleanup 🚧
 _PR: —_
 
 - [ ] Collapse the PyO3 surface so Python is a true shim (indexing sugar, torch,
       validation/error messages only).
-- [ ] Delete all remaining core numba kernels (target: count = 0).
+- [x] Delete all remaining core numba kernels (target: count = 0). ✅ W5
 - [ ] Confirm the crate is fully cargo-testable standalone.
 
 **Checkpoint:** core numba kernel count = 0; full perf re-baseline recorded here.
@@ -795,6 +795,72 @@ narrowed to genoray (variant IO) only.
   (one branch-introduced test file reformatted by ruff). Phase 5 🚧 (W1 done; W2–W9 remain).
   Issue tracking the overshoot: #255.
 
+
+- 2026-06-27 (Phase 5 W5 — consolidation PR: snapshot + delete numba + rayon; branch `phase-5-w5`, PR #260):
+  The consolidation PR, one branch with three staged commit boundaries.
+  **Stage A — golden snapshot (DONE):** froze the ~21 numba-oracle parity suites to committed
+  `.npz` goldens (deterministic seeded-sample draws; the generator cross-checks `numba == rust`
+  before saving). All parity tests were rewritten to assert `rust == frozen golden`, importing the
+  rust callables directly via `tests/parity/_golden.py::RUST_KERNELS` (never the dispatch layer), so
+  Stage B's deletion never touches the tests. Regen driver: `tests/parity/generate_goldens.py`.
+  **Stage B — delete numba (DONE):**
+  Deleted all `@nb.njit` / `@nb.vectorize` decorated functions from
+  `python/genvarloader/`. Twelve source modules touched:
+  `_threads.py`, `__init__.py`, `_ragged.py`, `_flat.py`,
+  `_dataset/_flat_variants.py`, `_dataset/_genotypes.py`,
+  `_dataset/_reference.py`, `_dataset/_utils.py`, `_dataset/_intervals.py`,
+  `_dataset/_tracks.py`, `_dataset/_flat_flanks.py`, `_variants/_sitesonly.py`.
+  Key changes:
+  - `cap_numba_threads()` → `cap_threads()` (seeds RAYON_NUM_THREADS; seeds numba
+    pool via optional import for backward test compat).
+  - `_flat_variants.py`: replaced 5 numba dispatch fallbacks
+    (`_gather_rows`, `_compact_keep`, `_fill_empty_scalar`, `_fill_empty_seq`,
+    `_fill_empty_fixed`) with dtype-preserving numpy equivalents for issue #231
+    (custom FORMAT fields with non-i32/f32 dtypes).
+  - `_genotypes.py`: deleted `_get_diffs_sparse_numba`,
+    `_reconstruct_haplotypes_from_sparse_numba`, `_choose_exonic_variants_numba`;
+    kept `reconstruct_haplotype_from_sparse` as plain Python (used by parity tests).
+  - `_tracks.py`: deleted `_xorshift64`, `_hash4`, `_apply_insertion_fill`,
+    `shift_and_realign_tracks_sparse`, `shift_and_realign_track_sparse` (numba);
+    restored all as plain Python for parity test compat.
+  - `_reference.py`: deleted `_get_reference_row/_par/_ser/_numba`; restored
+    `_get_reference_row/_ser/_par` as plain Python (tested directly).
+  - `_intervals.py`: deleted `_intervals_to_tracks_numba`, `_tracks_to_intervals_numba`,
+    `_scanned_mask`, `_compact_mask`; restored `intervals_to_tracks` dispatch wrapper.
+  `grep -r 'import numba|@nb.njit|nb.prange' python/genvarloader/` = 0 matches.
+  CAVEAT (seqpro transitive numba): `import genvarloader` still pulls numba+llvmlite
+  via seqpro 0.20.0 (eager numba import in seqpro/_numba.py + transforms/tmm.py).
+  genvarloader's OWN code is numba-free. **W5's numba-removal scope is gvl-only by
+  design** (user decision 2026-06-27): removing numba from seqpro (`ML4GLand/SeqPro`)
+  is explicitly OUT OF SCOPE, so the transitive numba dependency remains intentionally.
+  B4's import-guard asserts genvarloader's own modules are numba-free (own-code source
+  scan). The ~3.2 GB JIT-RSS that the seqpro JIT baseline contributes is therefore not
+  recovered by this migration; the W6 perf re-baseline measures the gvl-attributable
+  deltas (rayon multi-thread speedup, gvl-own kernel costs), not the seqpro JIT floor.
+  **Stage C — rayon batch parallelism (DONE):** added a `parallel: bool` gate to every read
+  kernel, threaded through the FFI entries and Python callers (each computes
+  `should_parallelize(total_out_bytes)` from `_threads.py`). The parallel branch carves disjoint
+  per-work-item `&mut [_]` slices via the `split_at_mut` cursor idiom (mirrors the pre-existing
+  `get_reference`), then dispatches with `into_par_iter()`; **never a raw `*mut` in a rayon
+  closure** (not `Send`). The serial branch is the byte-identity reference. Kernels parallelized:
+  C1 `reconstruct_haplotypes_from_sparse` (out + optional annot_v_idxs/annot_ref_pos);
+  C2 `shift_and_realign_tracks_sparse`, `tracks_to_intervals` (two-pass — each pass parallel,
+  cumsum kept sequential), `intervals_and_realign_track_fused`;
+  C3 `get_diffs_sparse`, `intervals_to_tracks` (`get_reference` was already parallel).
+  Gated `serial == parallel == frozen golden` for all cases via
+  `tests/parity/test_rayon_equivalence.py` (one case set per kernel, both branches).
+  Also (C4) skipped the 3 obsolete `tests/benchmarks/test_micro.py` micro-benchmarks whose
+  Python-level capture points were fused away in W3/W5 (`reconstruct_haplotypes_from_sparse`,
+  `intervals_to_tracks`, `shift_and_realign_tracks_sparse`) — micro-benchmark redesign onto the
+  fused rust entries is deferred to W6; `test_get_diffs_sparse` + the e2e benchmarks still run.
+  Full test tree gate (controller-verified, fresh `maturin develop --release`):
+  parity+dataset+unit = 692 passed, 35 skipped, 2 xfailed; whole `pytest tests` green
+  (benchmarks 7 passed / 3 skipped / 1 xfailed); cargo test --release 114; ruff + format +
+  pyrefly + clippy clean.
+  Phase 5 stays 🚧 (W1–W5 done; W6–W9 remain — W6/PR6 is measure-and-merge: re-baseline perf,
+  capture the multi-thread rayon speedup + the gvl-attributable RSS deltas, then merge.
+  The seqpro JIT-RSS floor is out of scope — see the seqpro caveat above).
+
 - 2026-06-26 (Phase 5 W4 — final single-thread numba-vs-rust `__getitem__` A/B; branch `phase-5-w4`, PR #259):
   Benchmark-only gate (no code) before the W5 consolidation. Measured rust AND numba **single-thread, same
   back-to-back session, two passes** (the shared Carter node makes cross-session wall-clock unreliable; the
@@ -806,7 +872,7 @@ narrowed to genoray (variant IO) only.
   (W1–W3 + full parity suite, both backends), there is no single-thread regression risk in removing numba.
   **GATE PASSED → proceed to W5 consolidation** (golden-snapshot the numba-oracle parity suites, delete numba,
   add rayon batch parallelism gated byte-identical to the serial golden result). Full tables + methodology:
-  `docs/roadmaps/phase-5-w4-final-ab.md`. Phase 5 🚧 (W1–W4 done; W5–W9 remain).
+  `docs/roadmaps/phase-5-w4-final-ab.md`. Phase 5 🚧 (W1–W5 done; W6–W9 remain).
 
 - 2026-06-26 (Phase 5 W3 — annotated+spliced fusion; branch `phase-5-w3`, PR #258):
   Fused the fourth and final reconstruction combination — annotated+spliced haplotypes — via

@@ -6,7 +6,6 @@ genome. All-numpy hot path.
 
 from __future__ import annotations
 
-import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
@@ -83,7 +82,6 @@ def compute_flank_tokens(
     return tokens.reshape(-1), np.asarray(row_offsets, np.int64)
 
 
-@nb.njit(nogil=True, cache=True)  # pragma: no cover - njit
 def _assemble_alt_windows(f5, f3, alt_data, alt_seq_off, flank_len):
     """Concatenate flank5 (fixed L) + alt (variable) + flank3 (fixed L) per variant
     into a flat byte buffer. f5/f3 are (n_var, L) row-major flat (n_var*L,)."""

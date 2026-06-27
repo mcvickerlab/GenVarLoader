@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Generic
 
-import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 from seqpro.rag import RDTYPE_co as RDTYPE
@@ -19,19 +18,12 @@ from seqpro.rag import Ragged
 from seqpro.rag import to_padded as _sp_to_padded
 
 
-@nb.njit(parallel=True, cache=True)
-def _reverse_rows_masked(data, offsets, mask):  # pragma: no cover - njit
+def _reverse_rows_masked(data, offsets, mask):
     n = mask.shape[0]
-    for i in nb.prange(n):
+    for i in range(n):
         if mask[i]:
-            lo = offsets[i]
-            hi = offsets[i + 1] - 1
-            while lo < hi:
-                tmp = data[lo]
-                data[lo] = data[hi]
-                data[hi] = tmp
-                lo += 1
-                hi -= 1
+            s, e = int(offsets[i]), int(offsets[i + 1])
+            data[s:e] = data[s:e][::-1]
 
 
 @dataclass(slots=True, frozen=True)

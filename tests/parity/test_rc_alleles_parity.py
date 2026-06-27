@@ -1,65 +1,48 @@
+"""rc_alleles: rust vs frozen golden (oracle frozen Phase 5 W5).
+
+The hypothesis-driven numba-comparison test has been replaced with frozen-golden
+replay.  The dispatch-call-count smoke test is preserved using make_kernel_spy
+(which keeps _dispatch usage inside _golden.py, not here).
+"""
+
+from __future__ import annotations
+
 import numpy as np
-from hypothesis import given, settings
-from hypothesis import strategies as st
+import pytest
 
-from genvarloader._dataset import _flat_variants  # noqa: F401  (registers rc_alleles)
-from genvarloader import _dispatch
+from tests.parity import _golden
 
-_ACGTN = np.frombuffer(b"ACGTN", np.uint8)
+pytestmark = pytest.mark.parity
 
 
-@st.composite
-def _allele_batch(draw):
-    n_rows = draw(st.integers(1, 4))
-    alleles_per_row = [draw(st.integers(0, 3)) for _ in range(n_rows)]
-    var_offsets = np.concatenate([[0], np.cumsum(alleles_per_row)]).astype(np.int64)
-    n_alleles = int(var_offsets[-1])
-    lens = [draw(st.integers(0, 5)) for _ in range(n_alleles)]
-    seq_offsets = np.concatenate([[0], np.cumsum(lens)]).astype(np.int64)
-    total = int(seq_offsets[-1])
-    data = (
-        _ACGTN[draw(st.lists(st.integers(0, 4), min_size=total, max_size=total))]
-        if total
-        else np.zeros(0, np.uint8)
-    )
-    data = np.ascontiguousarray(data, np.uint8)
-    mask = np.array([draw(st.booleans()) for _ in range(n_rows)], np.bool_)
-    return data, seq_offsets, var_offsets, mask
-
-
-def test_flat_alleles_reverse_masked_uses_rc_alleles(monkeypatch):
+def test_flat_alleles_reverse_masked_uses_rc_alleles():
     """_FlatAlleles.reverse_masked must call the dispatched rc_alleles kernel."""
     from genvarloader._dataset._flat_variants import _FlatAlleles
-    from genvarloader._dataset import _flat_variants as fv
 
-    calls = {"n": 0}
-    real = _dispatch.get
-
-    def spy(name):
-        if name == "rc_alleles":
-            calls["n"] += 1
-        return real(name)
-
-    monkeypatch.setattr(fv, "get", spy)
-
-    # one row (b=1, ploidy=1), two alleles "AC","G".
-    byte_data = np.frombuffer(b"ACG", np.uint8).copy()
-    seq_offsets = np.array([0, 2, 3], np.int64)
-    var_offsets = np.array([0, 2], np.int64)
-    fa = _FlatAlleles(byte_data, seq_offsets, var_offsets, (1, 1, None))
-    fa.reverse_masked(np.array([True], np.bool_))
-    assert calls["n"] == 1
-    # "AC"->"GT", "G"->"C"
-    assert fa.byte_data.tobytes() == b"GTC"
+    spy, calls, restore = _golden.make_kernel_spy("rc_alleles")
+    try:
+        # one row (b=1, ploidy=1), two alleles "AC","G".
+        byte_data = np.frombuffer(b"ACG", np.uint8).copy()
+        seq_offsets = np.array([0, 2, 3], np.int64)
+        var_offsets = np.array([0, 2], np.int64)
+        fa = _FlatAlleles(byte_data, seq_offsets, var_offsets, (1, 1, None))
+        fa.reverse_masked(np.array([True], np.bool_))
+        assert calls["n"] == 1
+        # "AC"->"GT", "G"->"C"
+        assert fa.byte_data.tobytes() == b"GTC"
+    finally:
+        restore()
 
 
-@settings(max_examples=200, deadline=None)
-@given(batch=_allele_batch())
-def test_rc_alleles_rust_matches_reference(batch):
-    data, seq_offsets, var_offsets, mask = batch
-    numba_fn, rust_fn = _dispatch.backends("rc_alleles")
-    a = data.copy()
-    b = data.copy()
-    numba_fn(a, seq_offsets, var_offsets, mask)
-    rust_fn(b, seq_offsets, var_offsets, mask)
-    assert a.tobytes() == b.tobytes()
+def test_rc_alleles_golden():
+    """Rust rc_alleles must equal the frozen golden (cross-checked vs numba at freeze time)."""
+    cases = _golden.load_golden("rc_alleles")
+    assert cases, "empty golden"
+    rust_fn = _golden.RUST_KERNELS["rc_alleles"]
+    for ci, (inputs, golden) in enumerate(cases):
+        init_data, seq_offsets, var_offsets, mask = inputs
+        buf = np.ascontiguousarray(init_data, np.uint8)
+        rust_fn(buf, seq_offsets, var_offsets, mask)
+        np.testing.assert_array_equal(
+            buf, golden, err_msg=f"rc_alleles case {ci} mismatch"
+        )
