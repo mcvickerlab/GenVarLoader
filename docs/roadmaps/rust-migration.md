@@ -720,10 +720,10 @@ Table COITrees numpy-oracle + property). Full tree green on both backends.
 > the update wall-clock (0.081 s) is isolated to `gvl.update`; its marginal RSS is not measured by
 > this driver.
 
-### Phase 5 — Crate consolidation + thin-binding cleanup 🚧
+### Phase 5 — Crate consolidation + thin-binding cleanup ✅
 _PR: —_
 
-- [ ] Collapse the PyO3 surface so Python is a true shim (indexing sugar, torch,
+- [x] Collapse the PyO3 surface so Python is a true shim (indexing sugar, torch,
       validation/error messages only).
       > W6 audit verdict (2026-06-27): **shim is already thin — bucket-2 is empty**.
       > All per-batch Python steps are indexing sugar, FFI typing guards, or Python-side
@@ -731,14 +731,16 @@ _PR: —_
       > The single-big-kernel collapse is not warranted as Phase 5 work.
       > Full audit: `docs/roadmaps/phase-5-w6-thin-shim-audit.md`
 - [x] Delete all remaining core numba kernels (target: count = 0). ✅ W5
-- [ ] Confirm the crate is fully cargo-testable standalone.
+- [x] Confirm the crate is fully cargo-testable standalone.
       > **Verified 2026-06-27 (Task 2, branch `phase-5-w6-wrapup`):** plain `cargo test --release`
       > from the repo root (no pixi, no `PYO3_PYTHON`, no env vars) passes on the first attempt —
       > already-standalone case. Pass count: **114 passed (3 suites)**. Canonical invocation:
       > `cargo test --release`
       > No `Cargo.toml` / `.cargo/config.toml` edits were needed or made.
 
-**Checkpoint:** core numba kernel count = 0; full perf re-baseline recorded here.
+**Checkpoint:** ✅ core numba kernel count = 0; cargo-testable standalone confirmed; seqpro-core 0.1.0 on crates.io confirmed; full perf re-baseline recorded here. Full gate (2026-06-27): whole-tree pytest 973 passed / 44 skipped / 5 xfailed (parity+dataset+unit subset: 692/35/2 — matches W5 baseline exactly); cargo 114 passed; ruff/format/pyrefly/clippy clean (warnings only, 0 errors); abi3 wheel builds. Phase 5 marker set ✅.
+
+**Optimization track (re-filed, not a Phase 5 blocker):** the Task-1 thin-shim audit noted two micro-opt opportunities that did not qualify as Phase 5 shim collapse (bucket-2 is empty): (a) `_as_starts_stops` helper in `_reconstruct.py` allocates a small tuple each call and could be cached; (b) `GVL_NUM_THREADS` env-var parsing is re-read each batch and could be cached on the reconstructor. Both are sub-millisecond amortized-cost items. They are tracked here as a future optimization pass (not gating the Phase 5 ✅ verdict).
 
 #### W6 perf re-baseline: rayon serial-vs-multithread speedup + RSS (2026-06-27)
 
@@ -789,6 +791,34 @@ narrowed to genoray (variant IO) only.
 ---
 
 ## Notes & decisions log
+
+- 2026-06-27 (Phase 5 W6 — wrap-up: thin-shim audit + cargo-standalone + seqpro-core + perf re-baseline; branch `phase-5-w6-wrapup`):
+  Four parallel threads closed Phase 5:
+  **(A) Thin-shim audit (Task 1, commit `0932374`):** Classified every Python step over the
+  PyO3 FFI surface. **Verdict: shim is already thin — bucket-2 (collapsible glue) is empty.**
+  33 registered FFI entries, 5 fused `__getitem__` kernels; `_dispatch.py` absent; zero numba
+  imports in `python/genvarloader/`. The single-big-kernel collapse is not warranted as Phase 5
+  work. Full audit: `docs/roadmaps/phase-5-w6-thin-shim-audit.md`.
+  **(B) cargo-testable standalone (Task 2, commit `ac052f7`):** `cargo test --release` from the
+  repo root (no pixi, no `PYO3_PYTHON`, no env vars) passes on the first attempt — already
+  standalone. 114 passed (3 suites). No `Cargo.toml` / `.cargo/config.toml` edits needed.
+  **(C) seqpro-core 0.1.0 on crates.io (Task 3, commit `0968a0f`):** Confirmed
+  `seqpro-core = "0.1"` resolves from `registry+https://github.com/rust-lang/crates.io-index`
+  (checksum in `Cargo.lock`); no path-dep or `[patch]` override. Stale Phase 1 note corrected.
+  **(D) W6 perf re-baseline (Task 4, commits `6611540` + `e47d128`):** Rayon serial-vs-multithread
+  speedup curve recorded. Key finding: the `should_parallelize` threshold gate (`_MIN_BYTES_PER_THREAD = 1 MiB`)
+  held serial on the test corpus for all 6 modes — all runs serial, thread-sweep ratios within node
+  noise (~±10%). This is correct behavior (batch output ~1–3 MiB; threshold = N × 1 MiB; production
+  batches with SEQLEN≥131072 or BATCH≥256 will cross it). No engaged-parallelism speedup captured
+  here; real rust-vs-numba speedup evidence is in `docs/roadmaps/phase-5-w4-final-ab.md` (rust
+  parity-or-better on all modes). Peak RSS 3.525 GB in all cases (floor = seqpro JIT ~3.2 GB).
+  **(Gate):** Whole-tree pytest 973 passed / 44 skipped / 5 xfailed (parity+dataset+unit 692/35/2 —
+  matches W5 baseline exactly); cargo 114 passed; ruff/format/pyrefly/clippy clean (0 errors);
+  abi3 wheel builds. **Phase 5 marker set ✅.** The `rust-migration → master` merge is left to the
+  maintainer (no-squash per project policy).
+  Two micro-opt items from the Task-1 audit (`_as_starts_stops` tuple alloc, `GVL_NUM_THREADS`
+  re-read per batch) re-filed as a future optimization-track entry (not Phase 5 blockers; see
+  "Optimization track" note in the Phase 5 section).
 
 - 2026-06-26 (Phase 5 W2 — #242 stale landmine comments corrected + max_jitter>0 parity gate; branch `phase-5-w2`):
   Investigation (`.superpowers/sdd/w2-investigation.md`) confirmed that #242 was already
