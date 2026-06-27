@@ -59,6 +59,15 @@ def load_golden(name: str) -> list:
 def _build_rust_kernels() -> dict[str, Callable]:
     from genvarloader import genvarloader as _ext  # compiled extension
 
+    # Kernels whose registered rust= is a Python wrapper (not a bare FFI function):
+    # import the same wrapper the register() call used.
+    from genvarloader._dataset._reference import (
+        _get_reference_rust,  # wraps _ext.get_reference; normalises dtypes + int(pad_char)
+    )
+    from genvarloader._dataset._tracks import (
+        _shift_and_realign_tracks_sparse_rust_wrapper,  # wraps _ext.shift_and_realign_tracks_sparse
+    )
+
     table: dict[str, Callable] = {
         "intervals_to_tracks": _ext.intervals_to_tracks,
         "tracks_to_intervals": _ext.tracks_to_intervals,
@@ -75,9 +84,12 @@ def _build_rust_kernels() -> dict[str, Callable]:
         "fill_empty_fixed_f32": _ext.fill_empty_fixed_f32,
         "fill_empty_seq_u8": _ext.fill_empty_seq_u8,
         "fill_empty_seq_i32": _ext.fill_empty_seq_i32,
-        "get_reference": _ext.get_reference,
+        # These two registered rust= is a Python wrapper, NOT the bare FFI function.
+        # Using the wrapper ensures correct input normalisation (dtypes, int casts, etc.)
+        # and keeps RUST_KERNELS in sync with the dispatch table (per the note above).
+        "get_reference": _get_reference_rust,
+        "shift_and_realign_tracks_sparse": _shift_and_realign_tracks_sparse_rust_wrapper,
         "reconstruct_haplotypes_from_sparse": _ext.reconstruct_haplotypes_from_sparse,
-        "shift_and_realign_tracks_sparse": _ext.shift_and_realign_tracks_sparse,
         "rc_alleles": _ext.rc_alleles,
     }
     # NOTE: kernels whose `rust=` is a PYTHON WRAPPER (not a bare extension fn) —
