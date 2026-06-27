@@ -46,6 +46,7 @@ from ._genotypes import (
     choose_exonic_variants,
     get_diffs_sparse,
 )
+from .._threads import should_parallelize
 from ._utils import _ffi_array
 from ._protocol import Reconstructor
 from ._rag_variants import RaggedVariants
@@ -859,6 +860,7 @@ class Haps(Reconstructor[_H]):
                 if req.keep_offsets is None
                 else np.ascontiguousarray(req.keep_offsets, np.int64),
                 to_rc=_to_rc_hap,
+                parallel=should_parallelize(int(req.out_offsets[-1])),
             )
             return cast(
                 "Ragged[np.bytes_]",
@@ -904,6 +906,7 @@ class Haps(Reconstructor[_H]):
             if keep_offsets_perm is None
             else np.ascontiguousarray(keep_offsets_perm, np.int64),
             to_rc=_to_rc_spliced,
+            parallel=should_parallelize(int(splice_plan.permuted_out_offsets[-1])),
         )
 
         return cast(
@@ -974,6 +977,7 @@ class Haps(Reconstructor[_H]):
                     if req.keep_offsets is None
                     else np.ascontiguousarray(req.keep_offsets, np.int64),
                     to_rc=_to_rc_hap,
+                    parallel=should_parallelize(int(req.out_offsets[-1])),
                 )
             )
             return (
@@ -1031,6 +1035,7 @@ class Haps(Reconstructor[_H]):
                 if keep_offsets_perm is None
                 else np.ascontiguousarray(keep_offsets_perm, np.int64),
                 to_rc=_to_rc_spliced,
+                parallel=should_parallelize(int(off[-1])),
             )
         )
 

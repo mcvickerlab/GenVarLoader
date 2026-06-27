@@ -73,6 +73,16 @@ def _build_rust_kernels() -> dict[str, Callable]:
         _rc_alleles_rust,  # Python wrapper: asserts contiguous uint8 then calls ext
     )
 
+    # Shim for reconstruct_haplotypes_from_sparse: the FFI now requires `parallel`
+    # but existing replay_inplace callers don't pass it. Default to False (serial)
+    # so existing golden replays are byte-identical to the pre-C1 implementation.
+    # The rayon-equivalence test explicitly passes parallel=True to exercise the
+    # parallel branch.
+    _rhfs_raw = _ext.reconstruct_haplotypes_from_sparse
+
+    def _reconstruct_haplotypes_from_sparse_shim(*args, parallel: bool = False, **kwargs):
+        return _rhfs_raw(*args, parallel=parallel, **kwargs)
+
     table: dict[str, Callable] = {
         "intervals_to_tracks": _ext.intervals_to_tracks,
         "tracks_to_intervals": _ext.tracks_to_intervals,
@@ -94,7 +104,9 @@ def _build_rust_kernels() -> dict[str, Callable]:
         # and keeps RUST_KERNELS in sync with the dispatch table.
         "get_reference": _get_reference_rust,
         "shift_and_realign_tracks_sparse": _shift_and_realign_tracks_sparse_rust_wrapper,
-        "reconstruct_haplotypes_from_sparse": _ext.reconstruct_haplotypes_from_sparse,
+        # Shim adds `parallel=False` default so existing replay_inplace callers
+        # (which don't pass parallel) continue to work unchanged.
+        "reconstruct_haplotypes_from_sparse": _reconstruct_haplotypes_from_sparse_shim,
         # rc_alleles: registered rust= is _rc_alleles_rust (wrapper); use wrapper here.
         "rc_alleles": _rc_alleles_rust,
         # assemble_variant_buffers: registered rust= is _assemble_variant_buffers_rust

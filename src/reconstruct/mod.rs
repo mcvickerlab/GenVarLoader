@@ -3,6 +3,7 @@
 //! Mirrors `reconstruct_haplotype_from_sparse` in
 //! `python/genvarloader/_dataset/_genotypes.py:277-465` statement-by-statement.
 use ndarray::{s, ArrayView1, ArrayView2, ArrayViewMut1};
+use rayon::prelude::*;
 
 /// Reconstruct a single haplotype from reference sequence and variants.
 ///
@@ -279,6 +280,7 @@ pub fn reconstruct_haplotype_from_sparse(
 /// - `keep_offsets` – optional 1D (batch*ploidy + 1) offsets into keep i64
 /// - `annot_v_idxs` – optional annotation output i32 (same layout as out)
 /// - `annot_ref_pos` – optional annotation output i32 (same layout as out)
+/// - `parallel` – if true, use rayon to process work items concurrently
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_from_sparse(
     mut out: ArrayViewMut1<u8>,
@@ -300,16 +302,18 @@ pub fn reconstruct_haplotypes_from_sparse(
     keep_offsets: Option<ArrayView1<i64>>,
     mut annot_v_idxs: Option<ArrayViewMut1<i32>>,
     mut annot_ref_pos: Option<ArrayViewMut1<i32>>,
+    parallel: bool,
 ) {
     let batch_size = regions.nrows();
     let ploidy = shifts.ncols();
     let n_work = batch_size * ploidy;
 
-    let out_raw: *mut u8 = out.as_mut_ptr();
-    let av_raw: Option<*mut i32> = annot_v_idxs.as_mut().map(|a| a.as_mut_ptr());
-    let ap_raw: Option<*mut i32> = annot_ref_pos.as_mut().map(|a| a.as_mut_ptr());
-
-    for k in 0..n_work {
+    // Per-k inner work: given disjoint output slices, call the single-haplotype kernel.
+    // All read-only ArrayViews are Send+Sync so the closure can borrow them freely.
+    let do_work = |k: usize,
+                   out_view: ArrayViewMut1<u8>,
+                   av_view: Option<ArrayViewMut1<i32>>,
+                   ap_view: Option<ArrayViewMut1<i32>>| {
         let query = k / ploidy;
         let hap = k % ploidy;
 
@@ -337,39 +341,6 @@ pub fn reconstruct_haplotypes_from_sparse(
         let ref_start = regions[[query, 1]] as i64;
         let shift = shifts[[query, hap]] as i64;
 
-        // out slice
-        let out_s = out_offsets[k] as usize;
-        let out_e = out_offsets[k + 1] as usize;
-
-        // SAFETY: `out_offsets` is required by the calling contract to be monotonically
-        // non-decreasing, so consecutive (out_s, out_e) pairs are strictly non-overlapping
-        // address ranges within the same allocation.  Because the loop is serial there are
-        // no concurrent borrows, so constructing a `&mut [u8]` from each disjoint sub-range
-        // is free of aliasing UB.
-        let out_chunk =
-            unsafe { std::slice::from_raw_parts_mut(out_raw.add(out_s), out_e - out_s) };
-        let out_view = ArrayViewMut1::from(out_chunk);
-
-        // SAFETY: same invariant as out_chunk — `out_offsets` non-decreasing guarantees
-        // each [out_s..out_e] is a disjoint sub-range; serial loop prevents concurrent
-        // aliasing.
-        let av_view: Option<ArrayViewMut1<i32>> = av_raw.map(|p| {
-            let chunk = unsafe {
-                std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s)
-            };
-            ArrayViewMut1::from(chunk)
-        });
-
-        // SAFETY: same invariant as out_chunk — `out_offsets` non-decreasing guarantees
-        // each [out_s..out_e] is a disjoint sub-range; serial loop prevents concurrent
-        // aliasing.
-        let ap_view: Option<ArrayViewMut1<i32>> = ap_raw.map(|p| {
-            let chunk = unsafe {
-                std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s)
-            };
-            ArrayViewMut1::from(chunk)
-        });
-
         reconstruct_haplotype_from_sparse(
             qh_v_idxs,
             v_starts,
@@ -385,6 +356,158 @@ pub fn reconstruct_haplotypes_from_sparse(
             av_view,
             ap_view,
         );
+    };
+
+    if parallel {
+        // Build disjoint per-k mutable slices for all active buffers using the
+        // proven split_at_mut chain idiom (mirrors get_reference in reference/mod.rs).
+        // &mut [_] slices are Send, unlike raw *mut pointers — safe for rayon closures.
+        let bounds: Vec<(usize, usize)> = (0..n_work)
+            .map(|k| (out_offsets[k] as usize, out_offsets[k + 1] as usize))
+            .collect();
+
+        let out_slice = out.as_slice_mut().unwrap();
+        let mut out_chunks: Vec<&mut [u8]> = Vec::with_capacity(n_work);
+        {
+            let mut rest = &mut out_slice[..];
+            let mut cursor = 0usize;
+            for &(s, e) in &bounds {
+                let (_, tail) = rest.split_at_mut(s - cursor);
+                let (mid, tail2) = tail.split_at_mut(e - s);
+                out_chunks.push(mid);
+                rest = tail2;
+                cursor = e;
+            }
+        }
+
+        // Carve annotation buffers only when they are Some.
+        let av_chunks: Option<Vec<&mut [i32]>> = annot_v_idxs.as_mut().map(|av| {
+            let av_slice = av.as_slice_mut().unwrap();
+            let mut chunks: Vec<&mut [i32]> = Vec::with_capacity(n_work);
+            let mut rest = &mut av_slice[..];
+            let mut cursor = 0usize;
+            for &(s, e) in &bounds {
+                let (_, tail) = rest.split_at_mut(s - cursor);
+                let (mid, tail2) = tail.split_at_mut(e - s);
+                chunks.push(mid);
+                rest = tail2;
+                cursor = e;
+            }
+            chunks
+        });
+
+        let ap_chunks: Option<Vec<&mut [i32]>> = annot_ref_pos.as_mut().map(|ap| {
+            let ap_slice = ap.as_slice_mut().unwrap();
+            let mut chunks: Vec<&mut [i32]> = Vec::with_capacity(n_work);
+            let mut rest = &mut ap_slice[..];
+            let mut cursor = 0usize;
+            for &(s, e) in &bounds {
+                let (_, tail) = rest.split_at_mut(s - cursor);
+                let (mid, tail2) = tail.split_at_mut(e - s);
+                chunks.push(mid);
+                rest = tail2;
+                cursor = e;
+            }
+            chunks
+        });
+
+        // Zip all chunk vecs and dispatch in parallel.
+        // Handle the four combinations of av/ap presence.
+        match (av_chunks, ap_chunks) {
+            (Some(avc), Some(apc)) => {
+                out_chunks
+                    .into_par_iter()
+                    .zip(avc.into_par_iter())
+                    .zip(apc.into_par_iter())
+                    .enumerate()
+                    .for_each(|(k, ((out_chunk, av_chunk), ap_chunk))| {
+                        do_work(
+                            k,
+                            ArrayViewMut1::from(out_chunk),
+                            Some(ArrayViewMut1::from(av_chunk)),
+                            Some(ArrayViewMut1::from(ap_chunk)),
+                        );
+                    });
+            }
+            (Some(avc), None) => {
+                out_chunks
+                    .into_par_iter()
+                    .zip(avc.into_par_iter())
+                    .enumerate()
+                    .for_each(|(k, (out_chunk, av_chunk))| {
+                        do_work(
+                            k,
+                            ArrayViewMut1::from(out_chunk),
+                            Some(ArrayViewMut1::from(av_chunk)),
+                            None,
+                        );
+                    });
+            }
+            (None, Some(apc)) => {
+                out_chunks
+                    .into_par_iter()
+                    .zip(apc.into_par_iter())
+                    .enumerate()
+                    .for_each(|(k, (out_chunk, ap_chunk))| {
+                        do_work(
+                            k,
+                            ArrayViewMut1::from(out_chunk),
+                            None,
+                            Some(ArrayViewMut1::from(ap_chunk)),
+                        );
+                    });
+            }
+            (None, None) => {
+                out_chunks
+                    .into_par_iter()
+                    .enumerate()
+                    .for_each(|(k, out_chunk)| {
+                        do_work(k, ArrayViewMut1::from(out_chunk), None, None);
+                    });
+            }
+        }
+    } else {
+        // Serial path: use raw pointers for disjoint sub-range access, exactly as before.
+        // The serial loop prevents concurrent aliasing.
+        let out_raw: *mut u8 = out.as_mut_ptr();
+        let av_raw: Option<*mut i32> = annot_v_idxs.as_mut().map(|a| a.as_mut_ptr());
+        let ap_raw: Option<*mut i32> = annot_ref_pos.as_mut().map(|a| a.as_mut_ptr());
+
+        for k in 0..n_work {
+            let out_s = out_offsets[k] as usize;
+            let out_e = out_offsets[k + 1] as usize;
+
+            // SAFETY: `out_offsets` is required by the calling contract to be monotonically
+            // non-decreasing, so consecutive (out_s, out_e) pairs are strictly non-overlapping
+            // address ranges within the same allocation.  Because the loop is serial there are
+            // no concurrent borrows, so constructing a `&mut [u8]` from each disjoint sub-range
+            // is free of aliasing UB.
+            let out_chunk =
+                unsafe { std::slice::from_raw_parts_mut(out_raw.add(out_s), out_e - out_s) };
+            let out_view = ArrayViewMut1::from(out_chunk);
+
+            // SAFETY: same invariant as out_chunk — `out_offsets` non-decreasing guarantees
+            // each [out_s..out_e] is a disjoint sub-range; serial loop prevents concurrent
+            // aliasing.
+            let av_view: Option<ArrayViewMut1<i32>> = av_raw.map(|p| {
+                let chunk = unsafe {
+                    std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s)
+                };
+                ArrayViewMut1::from(chunk)
+            });
+
+            // SAFETY: same invariant as out_chunk — `out_offsets` non-decreasing guarantees
+            // each [out_s..out_e] is a disjoint sub-range; serial loop prevents concurrent
+            // aliasing.
+            let ap_view: Option<ArrayViewMut1<i32>> = ap_raw.map(|p| {
+                let chunk = unsafe {
+                    std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s)
+                };
+                ArrayViewMut1::from(chunk)
+            });
+
+            do_work(k, out_view, av_view, ap_view);
+        }
     }
 }
 
@@ -1004,6 +1127,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert_eq!(&out.as_slice().unwrap()[0..4], b"ACGT", "first region");
@@ -1067,6 +1191,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert_eq!(&out.as_slice().unwrap()[0..4], b"ATGT", "region 0 with SNP applied");

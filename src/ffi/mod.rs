@@ -476,6 +476,7 @@ pub fn assemble_variant_buffers_i32<'py>(
 ///
 /// `geno_offsets` is the normalized (2, n) int64 starts/stops array.
 /// `keep_offsets` is the 1-D (batch*ploidy + 1) offsets array for the keep mask, or None.
+/// `parallel` enables rayon batch parallelism (caller computes `should_parallelize`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_from_sparse(
@@ -497,6 +498,7 @@ pub fn reconstruct_haplotypes_from_sparse(
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     mut annot_v_idxs: Option<PyReadwriteArray1<i32>>,
     mut annot_ref_pos: Option<PyReadwriteArray1<i32>>,
+    parallel: bool,
 ) {
     use crate::reconstruct;
     let go = geno_offsets.as_array();
@@ -520,6 +522,7 @@ pub fn reconstruct_haplotypes_from_sparse(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         annot_v_idxs.as_mut().map(|a| a.as_array_mut()),
         annot_ref_pos.as_mut().map(|a| a.as_array_mut()),
+        parallel,
     );
 }
 
@@ -541,6 +544,7 @@ pub fn reconstruct_haplotypes_from_sparse(
 ///
 /// Annotation buffers are not supported in the fused entry (annotated path
 /// remains on the unfused dispatch wrappers — see Task 13 report for rationale).
+/// `parallel` enables rayon batch parallelism (caller computes `should_parallelize`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_fused<'py>(
@@ -561,6 +565,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     to_rc: Option<PyReadonlyArray1<bool>>,
+    parallel: bool,
 ) -> (Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>) {
     use crate::genotypes;
     use crate::reconstruct;
@@ -647,6 +652,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         None, // annot_v_idxs — not supported in fused plain path
         None, // annot_ref_pos — not supported in fused plain path
+        parallel,
     );
 
     // Step 4b: optional in-kernel reverse-complement (one bool per (query, hap) work item).
@@ -684,6 +690,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
 ///
 /// Returns ``out_data`` (u8 flat buffer). The caller already holds ``out_offsets``
 /// so it is NOT returned — Python wraps with ``_Flat.from_offsets``.
+/// `parallel` enables rayon batch parallelism (caller computes `should_parallelize`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_spliced_fused<'py>(
@@ -704,6 +711,7 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     to_rc: Option<PyReadonlyArray1<bool>>,
+    parallel: bool,
 ) -> Bound<'py, PyArray1<u8>> {
     use crate::reconstruct;
 
@@ -739,6 +747,7 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         None, // annot_v_idxs — not used in splice path
         None, // annot_ref_pos — not used in splice path
+        parallel,
     );
 
     // Optional in-place RC per permuted element (negative-strand haplotypes).
@@ -777,6 +786,7 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
 ///
 /// Returns `(out_data, annot_v, annot_pos)`. `out_offsets` is held by the caller and
 /// not returned (matches `reconstruct_haplotypes_spliced_fused`).
+/// `parallel` enables rayon batch parallelism (caller computes `should_parallelize`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_annotated_haplotypes_spliced_fused<'py>(
@@ -797,6 +807,7 @@ pub fn reconstruct_annotated_haplotypes_spliced_fused<'py>(
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     to_rc: Option<PyReadonlyArray1<bool>>,
+    parallel: bool,
 ) -> (
     Bound<'py, PyArray1<u8>>,
     Bound<'py, PyArray1<i32>>,
@@ -838,6 +849,7 @@ pub fn reconstruct_annotated_haplotypes_spliced_fused<'py>(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         Some(annot_v.view_mut()),   // annot_v_idxs — variant index per nucleotide
         Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
+        parallel,
     );
 
     // Optional in-place RC per permuted element. Sequence bytes are reverse-complemented;
@@ -886,6 +898,7 @@ pub fn reconstruct_annotated_haplotypes_spliced_fused<'py>(
 ///
 /// Annotation buffers are not supported in the plain ``reconstruct_haplotypes_fused``
 /// entry; this function is its annotated counterpart.
+/// `parallel` enables rayon batch parallelism (caller computes `should_parallelize`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_annotated_haplotypes_fused<'py>(
@@ -906,6 +919,7 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     to_rc: Option<PyReadonlyArray1<bool>>,
+    parallel: bool,
 ) -> (
     Bound<'py, PyArray1<u8>>,
     Bound<'py, PyArray1<i32>>,
@@ -999,6 +1013,7 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         Some(annot_v.view_mut()),   // annot_v_idxs — variant index per nucleotide
         Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
+        parallel,
     );
 
     if let Some(to_rc) = to_rc.as_ref() {

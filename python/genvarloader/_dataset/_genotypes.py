@@ -7,6 +7,7 @@ from ..genvarloader import get_diffs_sparse as _get_diffs_sparse_rust
 from ..genvarloader import (
     reconstruct_haplotypes_from_sparse as _reconstruct_haplotypes_from_sparse_rust,
 )
+from .._threads import should_parallelize
 
 
 def _as_starts_stops(offsets: NDArray[np.integer]) -> NDArray[np.int64]:
@@ -67,6 +68,8 @@ def reconstruct_haplotypes_from_sparse(
 
     Dispatches to the Rust backend. Normalizes array dtypes and layouts before dispatch.
     """
+    total_out_bytes = int(np.asarray(out_offsets)[-1])
+    parallel = should_parallelize(total_out_bytes)
     _reconstruct_haplotypes_from_sparse_rust(
         out,
         np.ascontiguousarray(out_offsets, np.int64),
@@ -86,6 +89,7 @@ def reconstruct_haplotypes_from_sparse(
         None if keep_offsets is None else np.ascontiguousarray(keep_offsets, np.int64),
         annot_v_idxs,
         annot_ref_pos,
+        parallel,
     )
 
 
