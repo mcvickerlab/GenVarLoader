@@ -774,7 +774,7 @@ narrowed to genoray (variant IO) only.
   (one branch-introduced test file reformatted by ruff). Phase 5 🚧 (W1 done; W2–W9 remain).
   Issue tracking the overshoot: #255.
 
-- 2026-06-26 (Phase 5 W4 — final single-thread numba-vs-rust `__getitem__` A/B; branch `phase-5-w4`, PR TODO):
+- 2026-06-26 (Phase 5 W4 — final single-thread numba-vs-rust `__getitem__` A/B; branch `phase-5-w4`, PR #259):
   Benchmark-only gate (no code) before the W5 consolidation. Measured rust AND numba **single-thread, same
   back-to-back session, two passes** (the shared Carter node makes cross-session wall-clock unreliable; the
   durable signal is byte-identical parity + same-session improve-or-hold — see [[gvl-rust-perf-gate-shared-node-noise]]).
