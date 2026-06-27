@@ -1,5 +1,6 @@
 # tests/parity/test_golden_infra.py
 """Self-tests for the golden snapshot/replay infrastructure."""
+
 from __future__ import annotations
 
 import numpy as np

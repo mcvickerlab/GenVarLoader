@@ -63,4 +63,6 @@ def test_reference_mode_dataset_parity(phased_svar_gvl, reference):
     )
 
     # --- replay against frozen golden ---
-    _golden.assert_output_matches_golden(out, _golden.load_flat_golden("ds_reference_mode"))
+    _golden.assert_output_matches_golden(
+        out, _golden.load_flat_golden("ds_reference_mode")
+    )

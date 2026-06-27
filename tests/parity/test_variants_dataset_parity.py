@@ -32,9 +32,7 @@ pytestmark = pytest.mark.parity
 # ---------------------------------------------------------------------------
 
 
-def test_variants_getitem_parity_and_kernels_invoked(
-    phased_svar_gvl, reference
-):
+def test_variants_getitem_parity_and_kernels_invoked(phased_svar_gvl, reference):
     """Rust variants output matches the frozen golden.
 
     The spy asserts that the Rust gather_rows_i32 kernel is actually invoked
@@ -122,9 +120,7 @@ def test_variants_af_filter_parity(phased_svar_gvl, reference):
 # ---------------------------------------------------------------------------
 
 
-def test_variant_windows_getitem_parity_across_backends(
-    phased_svar_gvl, reference
-):
+def test_variant_windows_getitem_parity_across_backends(phased_svar_gvl, reference):
     """variant-windows __getitem__ must match the frozen golden.
 
     Proves the windows output is non-empty AND byte-identical to the golden
@@ -156,7 +152,9 @@ def test_variant_windows_getitem_parity_across_backends(
     )
 
     # --- replay against frozen golden ---
-    _golden.assert_output_matches_golden(out, _golden.load_flat_golden("ds_variant_windows"))
+    _golden.assert_output_matches_golden(
+        out, _golden.load_flat_golden("ds_variant_windows")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -164,9 +162,7 @@ def test_variant_windows_getitem_parity_across_backends(
 # ---------------------------------------------------------------------------
 
 
-def test_neg_strand_variants_rc_parity_and_kernel_invoked(
-    tmp_path, synthetic_case
-):
+def test_neg_strand_variants_rc_parity_and_kernel_invoked(tmp_path, synthetic_case):
     """variants-mode neg-strand RC output matches the frozen golden, and the
     rust rc_alleles kernel actually fires on the live read (non-vacuous)."""
     ds_dir = build_strand_mixed_dataset(tmp_path, synthetic_case.svar_path)
@@ -192,7 +188,9 @@ def test_neg_strand_variants_rc_parity_and_kernel_invoked(
     )
 
     # --- replay against frozen golden ---
-    _golden.assert_output_matches_golden(out, _golden.load_flat_golden("ds_neg_strand_variants"))
+    _golden.assert_output_matches_golden(
+        out, _golden.load_flat_golden("ds_neg_strand_variants")
+    )
 
 
 def test_neg_strand_variants_custom_dummy_parity(tmp_path, synthetic_case):
@@ -211,4 +209,6 @@ def test_neg_strand_variants_custom_dummy_parity(tmp_path, synthetic_case):
     out = ds[:, :]
 
     # --- replay against frozen golden ---
-    _golden.assert_output_matches_golden(out, _golden.load_flat_golden("ds_neg_strand_variants_dummy"))
+    _golden.assert_output_matches_golden(
+        out, _golden.load_flat_golden("ds_neg_strand_variants_dummy")
+    )

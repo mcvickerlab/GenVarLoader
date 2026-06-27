@@ -44,4 +44,3 @@ def test_wrapper_matches_known_result():
         out_offsets,
     )
     np.testing.assert_array_equal(out, np.array([0, 2, 2, 0, 0], np.float32))
-

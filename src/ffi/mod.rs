@@ -1086,6 +1086,7 @@ pub fn shift_and_realign_tracks_sparse(
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     strategy_id: i64,
     base_seed: u64,
+    parallel: bool,
 ) {
     use crate::tracks;
     let go = geno_offsets.as_array();
@@ -1107,6 +1108,7 @@ pub fn shift_and_realign_tracks_sparse(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         strategy_id,
         base_seed,
+        parallel,
     );
 }
 
@@ -1120,6 +1122,7 @@ pub fn tracks_to_intervals<'py>(
     regions: PyReadonlyArray2<i32>,
     tracks: PyReadonlyArray1<f32>,
     track_offsets: PyReadonlyArray1<i64>,
+    parallel: bool,
 ) -> (
     Bound<'py, PyArray1<i32>>,
     Bound<'py, PyArray1<i32>>,
@@ -1131,6 +1134,7 @@ pub fn tracks_to_intervals<'py>(
         regions.as_array(),
         tracks.as_array(),
         track_offsets.as_array(),
+        parallel,
     );
     (
         starts.into_pyarray(py),
@@ -1185,6 +1189,7 @@ pub fn intervals_and_realign_track_fused(
     keep: Option<PyReadonlyArray1<bool>>,
     keep_offsets: Option<PyReadonlyArray1<i64>>,
     to_rc: Option<PyReadonlyArray1<bool>>,
+    parallel: bool,
 ) -> PyResult<()> {
     use crate::intervals;
     use crate::tracks;
@@ -1242,6 +1247,7 @@ pub fn intervals_and_realign_track_fused(
         keep_offsets.as_ref().map(|ko| ko.as_array()),
         strategy_id,
         base_seed,
+        parallel,
     );
 
     // Step 3: optional in-place reverse for negative-strand tracks (reverse only, no complement).

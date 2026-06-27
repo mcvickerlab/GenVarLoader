@@ -82,7 +82,9 @@ def test_fused_haps_dataset_parity(phased_svar_gvl, reference, monkeypatch):
     )
 
     # --- replay against frozen golden ---
-    _golden.assert_output_matches_golden(out, _golden.load_flat_golden("ds_haplotypes_mode"))
+    _golden.assert_output_matches_golden(
+        out, _golden.load_flat_golden("ds_haplotypes_mode")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -150,4 +152,6 @@ def test_fused_haps_dataset_parity_fixed_length(
     )
 
     # --- replay against frozen golden ---
-    _golden.assert_output_matches_golden(out, _golden.load_flat_golden("ds_haps_fixed_len"))
+    _golden.assert_output_matches_golden(
+        out, _golden.load_flat_golden("ds_haps_fixed_len")
+    )

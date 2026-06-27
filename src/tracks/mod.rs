@@ -9,6 +9,7 @@
 //! (lines 56-138), statement-by-statement, including float promotion points.
 
 use ndarray::{Array1, ArrayView1, ArrayView2, ArrayViewMut1};
+use rayon::prelude::*;
 
 // Strategy IDs — mirror _insertion_fill.py exactly.
 pub const REPEAT_5P: i64 = 0;
@@ -450,10 +451,12 @@ pub fn shift_and_realign_tracks_sparse(
     keep_offsets: Option<ndarray::ArrayView1<i64>>,
     strategy_id: i64,
     base_seed: u64,
+    parallel: bool,
 ) {
     // Numba: n_regions, ploidy = geno_offset_idx.shape
     let n_regions = geno_offset_idx.nrows();
     let ploidy = geno_offset_idx.ncols();
+    let n_work = n_regions * ploidy;
 
     // Hoist contiguous raw slices once to eliminate ndarray::do_slice call overhead
     // in the inner (query, hap) loop.  The prior interval-kernel fix (src/intervals.rs)
@@ -466,67 +469,137 @@ pub fn shift_and_realign_tracks_sparse(
     let keep_flat: Option<&[bool]> =
         keep.as_ref().map(|k| k.as_slice().expect("keep must be contiguous (C-order)"));
 
-    // Numba: for query in nb.prange(n_regions):  (serial equivalent)
-    for query in 0..n_regions {
-        // Numba: t_s, t_e = track_offsets[query], track_offsets[query + 1]
-        let t_s = track_offsets[query] as usize;
-        let t_e = track_offsets[query + 1] as usize;
-        // Numba: q_track = tracks[t_s:t_e]
-        // ArrayView1::from(&slice) is cheaper than tracks.slice(s![..]) — no do_slice call.
-        let q_track = ndarray::ArrayView1::from(&tracks_flat[t_s..t_e]);
+    if parallel {
+        // Build disjoint per-k mutable output slices using the split_at_mut cursor
+        // idiom (mirrors C1 reconstruct_haplotypes_from_sparse parallel path).
+        let bounds: Vec<(usize, usize)> = (0..n_work)
+            .map(|k| (out_offsets[k] as usize, out_offsets[k + 1] as usize))
+            .collect();
 
-        // Numba: q_start = regions[query, 1]
-        let q_start = regions[[query, 1]] as i64;
+        let mut out_chunks: Vec<&mut [f32]> = Vec::with_capacity(n_work);
+        {
+            let mut rest = &mut out_flat[..];
+            let mut cursor = 0usize;
+            for &(s, e) in &bounds {
+                debug_assert!(
+                    s >= cursor && e >= s,
+                    "out_offsets must be monotonically non-decreasing (got s={s}, e={e}, cursor={cursor})"
+                );
+                let (_, tail) = rest.split_at_mut(s - cursor);
+                let (mid, tail2) = tail.split_at_mut(e - s);
+                out_chunks.push(mid);
+                rest = tail2;
+                cursor = e;
+            }
+        }
 
-        // Numba: for hap in nb.prange(ploidy):  (serial equivalent)
-        for hap in 0..ploidy {
-            // Numba: o_idx = geno_offset_idx[query, hap]
-            let o_idx = geno_offset_idx[[query, hap]] as usize;
+        out_chunks
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(k, out_chunk)| {
+                let query = k / ploidy;
+                let hap = k % ploidy;
 
-            // Numba: k_idx = query * ploidy + hap
-            let k_idx = query * ploidy + hap;
+                let t_s = track_offsets[query] as usize;
+                let t_e = track_offsets[query + 1] as usize;
+                let q_track = ndarray::ArrayView1::from(&tracks_flat[t_s..t_e]);
+                let q_start = regions[[query, 1]] as i64;
+                let o_idx = geno_offset_idx[[query, hap]] as usize;
+                let qh_shift = shifts[[query, hap]] as i64;
 
-            // Numba: if keep is not None and keep_offsets is not None:
-            //            qh_keep = keep[keep_offsets[k_idx]:keep_offsets[k_idx+1]]
-            // ArrayView1::from(&slice[..]) avoids the do_slice call that
-            // k.slice(s![ks..ke]) would generate.
-            let qh_keep: Option<ndarray::ArrayView1<bool>> =
-                match (&keep_flat, &keep_offsets) {
-                    (Some(k_flat), Some(ko)) => {
-                        let ks = ko[k_idx] as usize;
-                        let ke = ko[k_idx + 1] as usize;
-                        Some(ndarray::ArrayView1::from(&k_flat[ks..ke]))
-                    }
-                    _ => None,
-                };
+                let qh_keep: Option<ndarray::ArrayView1<bool>> =
+                    match (&keep_flat, &keep_offsets) {
+                        (Some(k_flat), Some(ko)) => {
+                            let ks = ko[k] as usize;
+                            let ke = ko[k + 1] as usize;
+                            Some(ndarray::ArrayView1::from(&k_flat[ks..ke]))
+                        }
+                        _ => None,
+                    };
 
-            // Numba: out_s, out_e = out_offsets[k_idx], out_offsets[k_idx + 1]
-            let out_s = out_offsets[k_idx] as usize;
-            let out_e = out_offsets[k_idx + 1] as usize;
-            // Numba: qh_out = out[out_s:out_e]; qh_shifts = shifts[query, hap]
-            // ArrayViewMut1::from(&mut slice[..]) avoids the do_slice call that
-            // out.slice_mut(s![out_s..out_e]) would generate.
-            let mut qh_out = ndarray::ArrayViewMut1::from(&mut out_flat[out_s..out_e]);
-            let qh_shift = shifts[[query, hap]] as i64;
+                let mut qh_out = ndarray::ArrayViewMut1::from(out_chunk);
+                shift_and_realign_track_sparse(
+                    o_idx,
+                    geno_v_idxs,
+                    geno_o_starts,
+                    geno_o_stops,
+                    v_starts,
+                    ilens,
+                    qh_shift,
+                    q_track,
+                    q_start,
+                    &mut qh_out,
+                    params,
+                    qh_keep,
+                    strategy_id,
+                    base_seed,
+                    query as u64,
+                    hap as u64,
+                );
+            });
+    } else {
+        // Serial path: Numba: for query in nb.prange(n_regions):  (serial equivalent)
+        for query in 0..n_regions {
+            // Numba: t_s, t_e = track_offsets[query], track_offsets[query + 1]
+            let t_s = track_offsets[query] as usize;
+            let t_e = track_offsets[query + 1] as usize;
+            // Numba: q_track = tracks[t_s:t_e]
+            // ArrayView1::from(&slice) is cheaper than tracks.slice(s![..]) — no do_slice call.
+            let q_track = ndarray::ArrayView1::from(&tracks_flat[t_s..t_e]);
 
-            shift_and_realign_track_sparse(
-                o_idx,
-                geno_v_idxs,
-                geno_o_starts,
-                geno_o_stops,
-                v_starts,
-                ilens,
-                qh_shift,
-                q_track,
-                q_start,
-                &mut qh_out,
-                params,
-                qh_keep,
-                strategy_id,
-                base_seed,
-                query as u64,
-                hap as u64,
-            );
+            // Numba: q_start = regions[query, 1]
+            let q_start = regions[[query, 1]] as i64;
+
+            // Numba: for hap in nb.prange(ploidy):  (serial equivalent)
+            for hap in 0..ploidy {
+                // Numba: o_idx = geno_offset_idx[query, hap]
+                let o_idx = geno_offset_idx[[query, hap]] as usize;
+
+                // Numba: k_idx = query * ploidy + hap
+                let k_idx = query * ploidy + hap;
+
+                // Numba: if keep is not None and keep_offsets is not None:
+                //            qh_keep = keep[keep_offsets[k_idx]:keep_offsets[k_idx+1]]
+                // ArrayView1::from(&slice[..]) avoids the do_slice call that
+                // k.slice(s![ks..ke]) would generate.
+                let qh_keep: Option<ndarray::ArrayView1<bool>> =
+                    match (&keep_flat, &keep_offsets) {
+                        (Some(k_flat), Some(ko)) => {
+                            let ks = ko[k_idx] as usize;
+                            let ke = ko[k_idx + 1] as usize;
+                            Some(ndarray::ArrayView1::from(&k_flat[ks..ke]))
+                        }
+                        _ => None,
+                    };
+
+                // Numba: out_s, out_e = out_offsets[k_idx], out_offsets[k_idx + 1]
+                let out_s = out_offsets[k_idx] as usize;
+                let out_e = out_offsets[k_idx + 1] as usize;
+                // Numba: qh_out = out[out_s:out_e]; qh_shifts = shifts[query, hap]
+                // ArrayViewMut1::from(&mut slice[..]) avoids the do_slice call that
+                // out.slice_mut(s![out_s..out_e]) would generate.
+                let mut qh_out = ndarray::ArrayViewMut1::from(&mut out_flat[out_s..out_e]);
+                let qh_shift = shifts[[query, hap]] as i64;
+
+                shift_and_realign_track_sparse(
+                    o_idx,
+                    geno_v_idxs,
+                    geno_o_starts,
+                    geno_o_stops,
+                    v_starts,
+                    ilens,
+                    qh_shift,
+                    q_track,
+                    q_start,
+                    &mut qh_out,
+                    params,
+                    qh_keep,
+                    strategy_id,
+                    base_seed,
+                    query as u64,
+                    hap as u64,
+                );
+            }
         }
     }
 }
@@ -555,6 +628,7 @@ pub fn tracks_to_intervals(
     regions: ArrayView2<i32>,
     tracks: ArrayView1<f32>,
     track_offsets: ArrayView1<i64>,
+    parallel: bool,
 ) -> (Array1<i32>, Array1<i32>, Array1<f32>, Array1<i64>) {
     let n_queries = regions.nrows();
 
@@ -566,32 +640,79 @@ pub fn tracks_to_intervals(
     let mut scanned_masks = vec![0i64; total_track_len];
     let mut n_intervals = vec![0i32; n_queries];
 
-    for query in 0..n_queries {
-        let o_s = track_offsets[query] as usize;
-        let o_e = track_offsets[query + 1] as usize;
-        // Numba: if o_s == o_e: n_intervals[query] = 0; continue
-        if o_s == o_e {
-            n_intervals[query] = 0;
-            continue;
+    if parallel {
+        // Build disjoint per-query mutable slices of scanned_masks (variable-size
+        // chunks per query) using the split_at_mut cursor idiom (mirrors C1).
+        let track_bounds: Vec<(usize, usize)> = (0..n_queries)
+            .map(|q| (track_offsets[q] as usize, track_offsets[q + 1] as usize))
+            .collect();
+
+        let mut scan_chunks: Vec<&mut [i64]> = Vec::with_capacity(n_queries);
+        {
+            let mut rest = &mut scanned_masks[..];
+            let mut cursor = 0usize;
+            for &(s, e) in &track_bounds {
+                let (_, tail) = rest.split_at_mut(s - cursor);
+                let (mid, tail2) = tail.split_at_mut(e - s);
+                scan_chunks.push(mid);
+                rest = tail2;
+                cursor = e;
+            }
         }
-        let track = &tracks.as_slice().unwrap()[o_s..o_e];
-        let scan = &mut scanned_masks[o_s..o_e];
-        // _scanned_mask: backward_mask[0]=True, backward_mask[i] = track[i-1] != track[i]
-        // cumsum into scan (i64 accumulator)
-        // Numba: out[:] = backward_mask.cumsum()
-        let mut acc: i64 = 0;
-        for i in 0..track.len() {
-            let bm = if i == 0 {
-                true
-            } else {
-                // Exact f32 != comparison (bit-level, matches numba)
-                track[i - 1] != track[i]
-            };
-            acc += bm as i64;
-            scan[i] = acc;
+
+        let tracks_slice = tracks.as_slice().unwrap();
+        scan_chunks
+            .into_par_iter()
+            .zip(n_intervals.par_iter_mut())
+            .enumerate()
+            .for_each(|(query, (scan, n_int))| {
+                let o_s = track_offsets[query] as usize;
+                let o_e = track_offsets[query + 1] as usize;
+                if o_s == o_e {
+                    *n_int = 0;
+                    return;
+                }
+                let track = &tracks_slice[o_s..o_e];
+                let mut acc: i64 = 0;
+                for i in 0..track.len() {
+                    let bm = if i == 0 {
+                        true
+                    } else {
+                        track[i - 1] != track[i]
+                    };
+                    acc += bm as i64;
+                    scan[i] = acc;
+                }
+                *n_int = scan[track.len() - 1] as i32;
+            });
+    } else {
+        for query in 0..n_queries {
+            let o_s = track_offsets[query] as usize;
+            let o_e = track_offsets[query + 1] as usize;
+            // Numba: if o_s == o_e: n_intervals[query] = 0; continue
+            if o_s == o_e {
+                n_intervals[query] = 0;
+                continue;
+            }
+            let track = &tracks.as_slice().unwrap()[o_s..o_e];
+            let scan = &mut scanned_masks[o_s..o_e];
+            // _scanned_mask: backward_mask[0]=True, backward_mask[i] = track[i-1] != track[i]
+            // cumsum into scan (i64 accumulator)
+            // Numba: out[:] = backward_mask.cumsum()
+            let mut acc: i64 = 0;
+            for i in 0..track.len() {
+                let bm = if i == 0 {
+                    true
+                } else {
+                    // Exact f32 != comparison (bit-level, matches numba)
+                    track[i - 1] != track[i]
+                };
+                acc += bm as i64;
+                scan[i] = acc;
+            }
+            // n_intervals[query] = scanned_backward_mask[-1]
+            n_intervals[query] = scan[track.len() - 1] as i32;
         }
-        // n_intervals[query] = scanned_backward_mask[-1]
-        n_intervals[query] = scan[track.len() - 1] as i32;
     }
 
     // --- Two-pass cumsum: mirrors numba's n_intervals.cumsum() ---
@@ -599,6 +720,7 @@ pub fn tracks_to_intervals(
     //   interval_offsets = np.empty(n_queries + 1, np.int64)
     //   interval_offsets[0] = 0
     //   interval_offsets[1:] = n_intervals.cumsum()
+    // (stays sequential — prefix-sum has a data dependency chain)
     let mut interval_offsets = vec![0i64; n_queries + 1];
     let mut running: i64 = 0;
     for q in 0..n_queries {
@@ -612,47 +734,119 @@ pub fn tracks_to_intervals(
     let mut all_values = vec![0.0f32; total_intervals];
 
     // --- Pass 2: fill starts/ends/values ---
-    for query in 0..n_queries {
-        let o_s = track_offsets[query] as usize;
-        let o_e = track_offsets[query + 1] as usize;
-        // Numba: if o_s == o_e: continue
-        if o_s == o_e {
-            continue;
-        }
-        let track = &tracks.as_slice().unwrap()[o_s..o_e];
-        let scan = &scanned_masks[o_s..o_e];
-        let n_elems = scan.len();
-        let n_runs = scan[n_elems - 1] as usize;
+    if parallel {
+        // Build disjoint per-query mutable slices from all_starts/ends/values using
+        // interval_offsets (which have already been computed sequentially above).
+        let itv_bounds: Vec<(usize, usize)> = (0..n_queries)
+            .map(|q| (interval_offsets[q] as usize, interval_offsets[q + 1] as usize))
+            .collect();
 
-        // _compact_mask: recovers run-boundary indices
-        // Numba:
-        //   compacted_backward_mask = np.empty(n_runs + 1, np.int32)
-        //   compacted_backward_mask[-1] = n_elems
-        //   for i in prange(n_elems):
-        //       if i == 0: compacted_backward_mask[0] = 0
-        //       elif scan[i] != scan[i-1]: compacted_backward_mask[scan[i] - 1] = i
-        let mut compacted = vec![0i32; n_runs + 1];
-        compacted[n_runs] = n_elems as i32;
-        for i in 0..n_elems {
-            if i == 0 {
-                compacted[0] = 0;
-            } else if scan[i] != scan[i - 1] {
-                compacted[scan[i] as usize - 1] = i as i32;
+        let mut starts_chunks: Vec<&mut [i32]> = Vec::with_capacity(n_queries);
+        let mut ends_chunks: Vec<&mut [i32]> = Vec::with_capacity(n_queries);
+        let mut values_chunks: Vec<&mut [f32]> = Vec::with_capacity(n_queries);
+
+        {
+            let mut rest_s = &mut all_starts[..];
+            let mut rest_e = &mut all_ends[..];
+            let mut rest_v = &mut all_values[..];
+            let mut cursor = 0usize;
+            for &(s, e) in &itv_bounds {
+                let (_, tail_s) = rest_s.split_at_mut(s - cursor);
+                let (mid_s, tail_s2) = tail_s.split_at_mut(e - s);
+                starts_chunks.push(mid_s);
+                rest_s = tail_s2;
+
+                let (_, tail_e) = rest_e.split_at_mut(s - cursor);
+                let (mid_e, tail_e2) = tail_e.split_at_mut(e - s);
+                ends_chunks.push(mid_e);
+                rest_e = tail_e2;
+
+                let (_, tail_v) = rest_v.split_at_mut(s - cursor);
+                let (mid_v, tail_v2) = tail_v.split_at_mut(e - s);
+                values_chunks.push(mid_v);
+                rest_v = tail_v2;
+
+                cursor = e;
             }
         }
 
-        // values = track[compacted[:-1]]
-        // starts/ends = compacted[:-1] + region_start, compacted[1:] + region_start
-        let s = interval_offsets[query] as usize;
-        let start = regions[[query, 1]]; // region start (absolute genomic coord)
+        let tracks_slice = tracks.as_slice().unwrap();
+        starts_chunks
+            .into_par_iter()
+            .zip(ends_chunks.into_par_iter())
+            .zip(values_chunks.into_par_iter())
+            .enumerate()
+            .for_each(|(query, ((s_chunk, e_chunk), v_chunk))| {
+                let o_s = track_offsets[query] as usize;
+                let o_e = track_offsets[query + 1] as usize;
+                if o_s == o_e {
+                    return;
+                }
+                let track = &tracks_slice[o_s..o_e];
+                let scan = &scanned_masks[o_s..o_e];
+                let n_elems = scan.len();
+                let n_runs = scan[n_elems - 1] as usize;
 
-        // Numba: compacted_backward_mask += start  (in-place, then used for starts/ends)
-        // We apply the shift at write time to avoid mutating compacted.
-        let n = n_runs; // == len(values)
-        for k in 0..n {
-            all_starts[s + k] = compacted[k] + start;
-            all_ends[s + k] = compacted[k + 1] + start;
-            all_values[s + k] = track[compacted[k] as usize];
+                let mut compacted = vec![0i32; n_runs + 1];
+                compacted[n_runs] = n_elems as i32;
+                for i in 0..n_elems {
+                    if i == 0 {
+                        compacted[0] = 0;
+                    } else if scan[i] != scan[i - 1] {
+                        compacted[scan[i] as usize - 1] = i as i32;
+                    }
+                }
+
+                let start = regions[[query, 1]];
+                for k in 0..n_runs {
+                    s_chunk[k] = compacted[k] + start;
+                    e_chunk[k] = compacted[k + 1] + start;
+                    v_chunk[k] = track[compacted[k] as usize];
+                }
+            });
+    } else {
+        for query in 0..n_queries {
+            let o_s = track_offsets[query] as usize;
+            let o_e = track_offsets[query + 1] as usize;
+            // Numba: if o_s == o_e: continue
+            if o_s == o_e {
+                continue;
+            }
+            let track = &tracks.as_slice().unwrap()[o_s..o_e];
+            let scan = &scanned_masks[o_s..o_e];
+            let n_elems = scan.len();
+            let n_runs = scan[n_elems - 1] as usize;
+
+            // _compact_mask: recovers run-boundary indices
+            // Numba:
+            //   compacted_backward_mask = np.empty(n_runs + 1, np.int32)
+            //   compacted_backward_mask[-1] = n_elems
+            //   for i in prange(n_elems):
+            //       if i == 0: compacted_backward_mask[0] = 0
+            //       elif scan[i] != scan[i-1]: compacted_backward_mask[scan[i] - 1] = i
+            let mut compacted = vec![0i32; n_runs + 1];
+            compacted[n_runs] = n_elems as i32;
+            for i in 0..n_elems {
+                if i == 0 {
+                    compacted[0] = 0;
+                } else if scan[i] != scan[i - 1] {
+                    compacted[scan[i] as usize - 1] = i as i32;
+                }
+            }
+
+            // values = track[compacted[:-1]]
+            // starts/ends = compacted[:-1] + region_start, compacted[1:] + region_start
+            let s = interval_offsets[query] as usize;
+            let start = regions[[query, 1]]; // region start (absolute genomic coord)
+
+            // Numba: compacted_backward_mask += start  (in-place, then used for starts/ends)
+            // We apply the shift at write time to avoid mutating compacted.
+            let n = n_runs; // == len(values)
+            for k in 0..n {
+                all_starts[s + k] = compacted[k] + start;
+                all_ends[s + k] = compacted[k + 1] + start;
+                all_values[s + k] = track[compacted[k] as usize];
+            }
         }
     }
 
@@ -1692,6 +1886,7 @@ mod tests {
         strategy_id: i64,
         base_seed: u64,
         ploidy: usize,
+        parallel: bool,
     ) -> Vec<f32> {
         use ndarray::{Array1, Array2};
         let n_q = regions.len();
@@ -1755,6 +1950,7 @@ mod tests {
             keep_off_arr_opt.as_ref().map(|a| a.view()),
             strategy_id,
             base_seed,
+            parallel,
         );
 
         out_arr.to_vec()
@@ -1793,6 +1989,7 @@ mod tests {
             REPEAT_5P,
             0,
             1, // ploidy
+            false,
         );
         assert_eq!(result, [1.0f32, 2.0, 3.0, 4.0], "batch single: copy track[:4]");
     }
@@ -1831,6 +2028,7 @@ mod tests {
             REPEAT_5P,
             0,
             1,
+            false,
         );
         // SNP skipped → query 0 output = track[0..3]
         assert_eq!(result[..3], [1.0f32, 2.0, 3.0], "q0: SNP skipped, track copied");
@@ -1870,7 +2068,7 @@ mod tests {
         let track_offsets = Array1::from_vec(vec![0i64, 0, 3, 8]);
 
         let (starts, ends, values, offsets) =
-            tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view());
+            tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view(), false);
 
         // offsets: [0, 0, 1, 3]
         assert_eq!(offsets.as_slice().unwrap(), &[0i64, 0, 1, 3], "offsets mismatch");
@@ -1907,7 +2105,7 @@ mod tests {
         let track_offsets = Array1::from_vec(vec![0i64, 7]);
 
         let (starts, ends, values, offsets) =
-            tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view());
+            tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view(), false);
 
         assert_eq!(offsets.as_slice().unwrap(), &[0i64, 1]);
         assert_eq!(starts.len(), 1);
@@ -1927,7 +2125,7 @@ mod tests {
         let track_offsets = Array1::from_vec(vec![0i64, 0]);
 
         let (starts, ends, values, offsets) =
-            tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view());
+            tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view(), false);
 
         assert_eq!(offsets.as_slice().unwrap(), &[0i64, 0]);
         assert_eq!(starts.len(), 0);
@@ -1947,7 +2145,7 @@ mod tests {
         let track_offsets = Array1::from_vec(vec![0i64, 4]);
 
         let (starts, ends, values, offsets) =
-            tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view());
+            tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view(), false);
 
         assert_eq!(offsets.as_slice().unwrap(), &[0i64, 3]);
         assert_eq!(starts.len(), 3, "must have 3 intervals including zero-value ones");

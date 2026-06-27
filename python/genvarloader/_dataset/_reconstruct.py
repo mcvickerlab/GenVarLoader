@@ -39,6 +39,7 @@ from ._tracks import (
     _NewT,
 )  # noqa: F401
 from ._utils import _ffi_array
+from .._threads import should_parallelize
 
 # Fused tracks entry (Task 14): intervals → scratch → realign, one FFI crossing.
 # Imported at module level so the spy in test_fused_tracks_parity can monkeypatch it.
@@ -265,6 +266,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                     if keep_offsets is None
                     else np.ascontiguousarray(keep_offsets, np.int64),
                     to_rc=_to_rc_hap,
+                    parallel=should_parallelize(int(out_ofsts_per_t[-1]) * 4),
                 )
 
             out_shape = (

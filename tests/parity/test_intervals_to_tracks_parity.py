@@ -1,4 +1,5 @@
 """intervals_to_tracks: rust vs frozen golden (oracle frozen Phase 5 W5)."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -15,6 +16,8 @@ def test_intervals_to_tracks_golden():
     _golden.replay_inplace(
         "intervals_to_tracks",
         cases,
-        out_factory=lambda inputs: np.zeros(int(np.asarray(inputs[-1])[-1]), np.float32),
+        out_factory=lambda inputs: np.zeros(
+            int(np.asarray(inputs[-1])[-1]), np.float32
+        ),
         out_index=6,
     )

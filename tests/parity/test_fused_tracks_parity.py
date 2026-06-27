@@ -76,6 +76,7 @@ def test_fused_tracks_dataset_parity(synthetic_case, tmp_path, monkeypatch):
             def spy(*a, **k):
                 c["n"] += 1
                 return orig(*a, **k)
+
             return spy
 
         spy_fn = _make_spy(orig_fused)

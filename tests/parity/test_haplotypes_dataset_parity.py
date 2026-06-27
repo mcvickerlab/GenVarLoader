@@ -79,7 +79,9 @@ def test_haplotypes_mode_dataset_parity(phased_svar_gvl, reference, monkeypatch)
     )
 
     # --- replay against frozen golden ---
-    _golden.assert_output_matches_golden(out, _golden.load_flat_golden("ds_haplotypes_mode"))
+    _golden.assert_output_matches_golden(
+        out, _golden.load_flat_golden("ds_haplotypes_mode")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -141,4 +143,6 @@ def test_annotated_haplotypes_mode_dataset_parity(
     )
 
     # --- replay against frozen golden ---
-    _golden.assert_output_matches_golden(out, _golden.load_flat_golden("ds_annotated_mode"))
+    _golden.assert_output_matches_golden(
+        out, _golden.load_flat_golden("ds_annotated_mode")
+    )

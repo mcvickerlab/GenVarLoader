@@ -3,6 +3,7 @@ from numpy.typing import NDArray
 
 from ..genvarloader import intervals_to_tracks as _intervals_to_tracks_rust
 from ..genvarloader import tracks_to_intervals as _tracks_to_intervals_rust
+from .._threads import should_parallelize
 
 __all__ = []
 
@@ -73,4 +74,7 @@ def tracks_to_intervals(
     regions = np.ascontiguousarray(regions, dtype=np.int32)
     tracks = np.ascontiguousarray(tracks, dtype=np.float32)
     track_offsets = np.ascontiguousarray(track_offsets, dtype=np.int64)
-    return _tracks_to_intervals_rust(regions, tracks, track_offsets)
+    total_bytes = int(track_offsets[-1]) * 4  # f32 = 4 bytes per element
+    return _tracks_to_intervals_rust(
+        regions, tracks, track_offsets, should_parallelize(total_bytes)
+    )

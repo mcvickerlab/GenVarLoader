@@ -5,6 +5,7 @@ NOTE: `import genvarloader` may still pull numba transitively via seqpro
 this guard asserts genvarloader's own source is numba-free. See the seqpro
 follow-up issue for the transitive import and the W6 RSS impact.
 """
+
 from __future__ import annotations
 
 import pathlib

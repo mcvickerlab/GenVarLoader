@@ -33,4 +33,6 @@ def test_reference_fetch_parity(reference):
     assert calls["n"] > 0, "rust get_reference never invoked via fetch — vacuous"
 
     # --- replay against frozen golden ---
-    _golden.assert_output_matches_golden(out, _golden.load_flat_golden("ds_reference_fetch"))
+    _golden.assert_output_matches_golden(
+        out, _golden.load_flat_golden("ds_reference_fetch")
+    )

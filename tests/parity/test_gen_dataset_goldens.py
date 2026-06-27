@@ -12,6 +12,7 @@ Each test:
 
 Normal test runs skip all tests in this file.
 """
+
 from __future__ import annotations
 
 import os
@@ -39,7 +40,9 @@ from tests.parity._fixtures import (
 pytestmark = pytest.mark.parity
 
 GEN = os.environ.get("GVL_GEN_GOLDENS") == "1"
-skip_unless_gen = pytest.mark.skipif(not GEN, reason="set GVL_GEN_GOLDENS=1 to generate")
+skip_unless_gen = pytest.mark.skipif(
+    not GEN, reason="set GVL_GEN_GOLDENS=1 to generate"
+)
 
 
 def _oracle_check(out_numba, out_rust, name: str) -> None:
@@ -62,6 +65,7 @@ def _gen(name: str, monkeypatch, build_fn):
 # ---------------------------------------------------------------------------
 # Haplotypes-mode (non-splice) and fused-haps — share ds_haplotypes_mode
 # ---------------------------------------------------------------------------
+
 
 @skip_unless_gen
 def test_gen_haplotypes_mode(phased_svar_gvl, reference, monkeypatch):
@@ -93,10 +97,15 @@ def test_gen_haps_fixed_len(phased_svar_gvl, reference, monkeypatch):
 # Spliced haplotypes
 # ---------------------------------------------------------------------------
 
+
 @skip_unless_gen
 def test_gen_spliced_haps(phased_svar_gvl, reference, monkeypatch):
     """Generates ds_spliced_haps: haplotypes + splice (T1=[0,1], T2=[2,3])."""
-    ds = gvl.Dataset.open(phased_svar_gvl, reference=reference).with_seqs("haplotypes").with_tracks(False)
+    ds = (
+        gvl.Dataset.open(phased_svar_gvl, reference=reference)
+        .with_seqs("haplotypes")
+        .with_tracks(False)
+    )
     n = 4
     sub_bed = ds._full_bed[:n].with_columns(
         pl.Series("transcript_id", ["T1", "T1", "T2", "T2"])
@@ -110,10 +119,15 @@ def test_gen_spliced_haps(phased_svar_gvl, reference, monkeypatch):
 # Annotated spliced haplotypes
 # ---------------------------------------------------------------------------
 
+
 @skip_unless_gen
 def test_gen_annotated_spliced(phased_svar_gvl, reference, monkeypatch):
     """Generates ds_annotated_spliced: annotated + spliced with mixed strands."""
-    ds = gvl.Dataset.open(phased_svar_gvl, reference=reference).with_seqs("annotated").with_tracks(False)
+    ds = (
+        gvl.Dataset.open(phased_svar_gvl, reference=reference)
+        .with_seqs("annotated")
+        .with_tracks(False)
+    )
     n = 4
     sub_bed = ds._full_bed[:n].with_columns(
         pl.Series("transcript_id", ["T1", "T1", "T2", "T2"]),
@@ -127,6 +141,7 @@ def test_gen_annotated_spliced(phased_svar_gvl, reference, monkeypatch):
 # ---------------------------------------------------------------------------
 # Track-only datasets
 # ---------------------------------------------------------------------------
+
 
 @skip_unless_gen
 def test_gen_tracks(tmp_path, monkeypatch):
@@ -149,19 +164,28 @@ def test_gen_tracks_jitter(tmp_path, monkeypatch):
 # Haps+tracks (5 fill strategies) — shared by test_dataset_parity and test_fused_tracks_parity
 # ---------------------------------------------------------------------------
 
+
 @skip_unless_gen
-@pytest.mark.parametrize("strategy_name", [
-    "Repeat5p",
-    "Repeat5pNormalized",
-    "Constant",
-    "FlankSample",
-    "Interpolate",
-])
+@pytest.mark.parametrize(
+    "strategy_name",
+    [
+        "Repeat5p",
+        "Repeat5pNormalized",
+        "Constant",
+        "FlankSample",
+        "Interpolate",
+    ],
+)
 def test_gen_haps_tracks(strategy_name, tmp_path, synthetic_case, monkeypatch):
     """Generates ds_haps_tracks_{strategy}: haps+tracks with each fill strategy."""
     from genvarloader._dataset._insertion_fill import (
-        Constant, FlankSample, Interpolate, Repeat5p, Repeat5pNormalized,
+        Constant,
+        FlankSample,
+        Interpolate,
+        Repeat5p,
+        Repeat5pNormalized,
     )
+
     strat_map = {
         "Repeat5p": Repeat5p(),
         "Repeat5pNormalized": Repeat5pNormalized(),
@@ -186,6 +210,7 @@ def test_gen_haps_tracks(strategy_name, tmp_path, synthetic_case, monkeypatch):
 # Reference mode
 # ---------------------------------------------------------------------------
 
+
 @skip_unless_gen
 def test_gen_reference_mode(phased_svar_gvl, reference, monkeypatch):
     """Generates ds_reference_mode: reference mode on phased_svar_gvl."""
@@ -199,12 +224,17 @@ def test_gen_reference_fetch(reference, monkeypatch):
     contigs = reference.contigs[:1]
     starts = np.array([0], dtype=np.int64)
     ends = np.array([50], dtype=np.int64)
-    _gen("ds_reference_fetch", monkeypatch, lambda: reference.fetch(contigs, starts, ends))
+    _gen(
+        "ds_reference_fetch",
+        monkeypatch,
+        lambda: reference.fetch(contigs, starts, ends),
+    )
 
 
 # ---------------------------------------------------------------------------
 # Variants mode
 # ---------------------------------------------------------------------------
+
 
 @skip_unless_gen
 def test_gen_variants(phased_svar_gvl, reference, monkeypatch):
@@ -255,7 +285,14 @@ def test_gen_variant_windows(phased_svar_gvl, reference, monkeypatch):
 # Neg-strand parity (6 kinds, unspliced)
 # ---------------------------------------------------------------------------
 
-_NEG_STRAND_KINDS = ["reference", "haplotypes", "annotated", "tracks", "tracks-seqs", "haps-tracks"]
+_NEG_STRAND_KINDS = [
+    "reference",
+    "haplotypes",
+    "annotated",
+    "tracks",
+    "tracks-seqs",
+    "haps-tracks",
+]
 
 
 @skip_unless_gen
@@ -268,9 +305,17 @@ def test_gen_neg_strand(kind, tmp_path, synthetic_case, monkeypatch):
     if kind == "tracks":
         ds = gvl.Dataset.open(ds_dir).with_seqs(None).with_tracks("signal")
     elif kind == "tracks-seqs":
-        ds = gvl.Dataset.open(ds_dir, reference=ref).with_seqs("reference").with_tracks("signal")
+        ds = (
+            gvl.Dataset.open(ds_dir, reference=ref)
+            .with_seqs("reference")
+            .with_tracks("signal")
+        )
     elif kind == "haps-tracks":
-        ds = gvl.Dataset.open(ds_dir, reference=ref).with_seqs("haplotypes").with_tracks("signal")
+        ds = (
+            gvl.Dataset.open(ds_dir, reference=ref)
+            .with_seqs("haplotypes")
+            .with_tracks("signal")
+        )
     else:
         ds = gvl.Dataset.open(ds_dir, reference=ref).with_seqs(kind).with_tracks(False)
 
@@ -313,6 +358,7 @@ def test_gen_neg_strand_spliced(kind, tmp_path, synthetic_case, monkeypatch):
 # Neg-strand variants
 # ---------------------------------------------------------------------------
 
+
 @skip_unless_gen
 def test_gen_neg_strand_variants(tmp_path, synthetic_case, monkeypatch):
     """Generates ds_neg_strand_variants: variants on mixed-strand dataset."""
@@ -328,6 +374,7 @@ def test_gen_neg_strand_variants(tmp_path, synthetic_case, monkeypatch):
 def test_gen_neg_strand_variants_dummy(tmp_path, synthetic_case, monkeypatch):
     """Generates ds_neg_strand_variants_dummy: variants with custom DummyVariant."""
     from genvarloader._dataset._flat_variants import DummyVariant
+
     ds_dir = build_strand_mixed_dataset(tmp_path, synthetic_case.svar_path)
     ref = gvl.Reference.from_path(synthetic_case.ref_path, in_memory=False)
     ds = (

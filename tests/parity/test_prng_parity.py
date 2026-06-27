@@ -34,7 +34,9 @@ def test_xorshift64_golden():
         (x,) = inputs
         got = np.uint64(_xorshift64_rust(int(x)))
         exp = np.uint64(golden)
-        assert got == exp, f"xorshift64 case {ci}: input={x:#x} got={got:#x} exp={exp:#x}"
+        assert got == exp, (
+            f"xorshift64 case {ci}: input={x:#x} got={got:#x} exp={exp:#x}"
+        )
 
 
 def test_hash4_golden():

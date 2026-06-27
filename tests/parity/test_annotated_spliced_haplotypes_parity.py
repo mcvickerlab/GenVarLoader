@@ -90,4 +90,6 @@ def test_annotated_spliced_haplotypes_parity(phased_svar_gvl, reference, monkeyp
     )
 
     # --- replay against frozen golden ---
-    _golden.assert_output_matches_golden(out, _golden.load_flat_golden("ds_annotated_spliced"))
+    _golden.assert_output_matches_golden(
+        out, _golden.load_flat_golden("ds_annotated_spliced")
+    )

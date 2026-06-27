@@ -6,6 +6,7 @@ the numba oracle at generation time (see generate_goldens.py). Replay imports
 rust callables DIRECTLY — never via _dispatch — so these tests survive the
 numba/dispatch deletion in Stage B.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -80,12 +81,23 @@ def _build_rust_kernels() -> dict[str, Callable]:
     # parallel branch.
     _rhfs_raw = _ext.reconstruct_haplotypes_from_sparse
 
-    def _reconstruct_haplotypes_from_sparse_shim(*args, parallel: bool = False, **kwargs):
+    def _reconstruct_haplotypes_from_sparse_shim(
+        *args, parallel: bool = False, **kwargs
+    ):
         return _rhfs_raw(*args, parallel=parallel, **kwargs)
+
+    # Shim for tracks_to_intervals: FFI now requires `parallel` but existing
+    # replay_tuple callers don't pass it. Default to False (serial) so existing
+    # golden replays stay byte-identical. The rayon-equivalence test explicitly
+    # passes parallel=True/False to exercise both branches.
+    _tti_raw = _ext.tracks_to_intervals
+
+    def _tracks_to_intervals_shim(*args, parallel: bool = False, **kwargs):
+        return _tti_raw(*args, parallel=parallel, **kwargs)
 
     table: dict[str, Callable] = {
         "intervals_to_tracks": _ext.intervals_to_tracks,
-        "tracks_to_intervals": _ext.tracks_to_intervals,
+        "tracks_to_intervals": _tracks_to_intervals_shim,
         "get_diffs_sparse": _ext.get_diffs_sparse,
         "choose_exonic_variants": _ext.choose_exonic_variants,
         "gather_alleles": _ext.gather_alleles,
@@ -139,12 +151,16 @@ def replay_tuple(name: str, cases: list) -> None:
         got = fn(*inputs)
         got = got if isinstance(got, tuple) else (got,)
         gold = golden if isinstance(golden, tuple) else (golden,)
-        assert len(got) == len(gold), f"{name}#{ci}: tuple len {len(got)} != {len(gold)}"
+        assert len(got) == len(gold), (
+            f"{name}#{ci}: tuple len {len(got)} != {len(gold)}"
+        )
         for j, (a, b) in enumerate(zip(got, gold)):
             _eq(f"{name}#{ci}", j, a, b)
 
 
-def replay_inplace(name: str, cases: list, out_factory: Callable, out_index: int) -> None:
+def replay_inplace(
+    name: str, cases: list, out_factory: Callable, out_index: int
+) -> None:
     fn = RUST_KERNELS[name]
     for ci, (inputs, golden) in enumerate(cases):
         out = out_factory(inputs)
@@ -160,9 +176,18 @@ def replay_dict(name: str, cases: list) -> None:
         got = fn(*inputs)
         assert set(got) == set(golden), f"{name}#{ci}: keys {set(got)} != {set(golden)}"
         for k in sorted(golden):
-            _eq(f"{name}#{ci}:{k}.data", 0, np.asarray(got[k][0]), np.asarray(golden[k][0]))
-            _eq(f"{name}#{ci}:{k}.off", 1,
-                np.asarray(got[k][1], np.int64), np.asarray(golden[k][1], np.int64))
+            _eq(
+                f"{name}#{ci}:{k}.data",
+                0,
+                np.asarray(got[k][0]),
+                np.asarray(golden[k][0]),
+            )
+            _eq(
+                f"{name}#{ci}:{k}.off",
+                1,
+                np.asarray(got[k][1], np.int64),
+                np.asarray(golden[k][1], np.int64),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +211,9 @@ def flatten_output(out):
 
     # Lazily import to avoid circular imports at module level
     try:
-        from genvarloader._dataset._rag_variants import RaggedVariants as _RaggedVariants
+        from genvarloader._dataset._rag_variants import (
+            RaggedVariants as _RaggedVariants,
+        )
     except Exception:
         _RaggedVariants = None
 
@@ -215,7 +242,9 @@ def flatten_output(out):
             is_str = bool(getattr(f, "is_string", False))
             flat_fields[fname] = {
                 "is_string": is_str,
-                "data": np.asarray(f.data, dtype="S1") if is_str else np.asarray(f.data),
+                "data": np.asarray(f.data, dtype="S1")
+                if is_str
+                else np.asarray(f.data),
                 "offsets": np.asarray(f.offsets, np.int64),
             }
         return {
@@ -251,8 +280,12 @@ def flatten_output(out):
 
 def _assert_flat_eq(got_flat, exp_flat, name: str) -> None:
     """Recursively assert two flattened dicts are byte-identical."""
-    got_kind = got_flat["kind"] if isinstance(got_flat, dict) else type(got_flat).__name__
-    exp_kind = exp_flat["kind"] if isinstance(exp_flat, dict) else type(exp_flat).__name__
+    got_kind = (
+        got_flat["kind"] if isinstance(got_flat, dict) else type(got_flat).__name__
+    )
+    exp_kind = (
+        exp_flat["kind"] if isinstance(exp_flat, dict) else type(exp_flat).__name__
+    )
     assert got_kind == exp_kind, f"{name}: kind {got_kind!r} != {exp_kind!r}"
     kind = got_flat["kind"]
 
@@ -261,8 +294,14 @@ def _assert_flat_eq(got_flat, exp_flat, name: str) -> None:
         _eq(name + ".offsets", 0, got_flat["offsets"], exp_flat["offsets"])
 
     elif kind == "annot":
-        for key in ("haps_data", "haps_offsets", "var_idxs_data", "var_idxs_offsets",
-                    "ref_coords_data", "ref_coords_offsets"):
+        for key in (
+            "haps_data",
+            "haps_offsets",
+            "var_idxs_data",
+            "var_idxs_offsets",
+            "ref_coords_data",
+            "ref_coords_offsets",
+        ):
             _eq(f"{name}.{key}", 0, got_flat[key], exp_flat[key])
 
     elif kind == "array":
@@ -279,7 +318,9 @@ def _assert_flat_eq(got_flat, exp_flat, name: str) -> None:
         assert set(gf) == set(ef), f"{name}: field names {set(gf)} != {set(ef)}"
         for fname in ef:
             g, e = gf[fname], ef[fname]
-            assert g["is_string"] == e["is_string"], f"{name}.{fname}: is_string mismatch"
+            assert g["is_string"] == e["is_string"], (
+                f"{name}.{fname}: is_string mismatch"
+            )
             _eq(f"{name}.{fname}.data", 0, g["data"], e["data"])
             _eq(f"{name}.{fname}.offsets", 0, g["offsets"], e["offsets"])
 
@@ -323,15 +364,37 @@ def make_kernel_spy(kernel_name: str):
     # Extra modules have the same attr bound via a direct import; we must patch
     # each alias so the spy intercepts all call sites.
     _KERNEL_SITES: dict[str, tuple[str, str, list[str]]] = {
-        "get_reference": ("genvarloader._dataset._reference", "_get_reference_rust", []),
-        "assemble_variant_buffers": ("genvarloader._dataset._flat_variants", "_assemble_variant_buffers_rust", []),
-        "gather_rows_i32": ("genvarloader._dataset._flat_variants", "_gather_rows_i32_rust", []),
-        "compact_keep_i32": ("genvarloader._dataset._flat_variants", "_compact_keep_i32_rust", []),
-        "rc_alleles": ("genvarloader._dataset._flat_variants", "_rc_alleles_rust", ["genvarloader._dataset._rag_variants"]),
+        "get_reference": (
+            "genvarloader._dataset._reference",
+            "_get_reference_rust",
+            [],
+        ),
+        "assemble_variant_buffers": (
+            "genvarloader._dataset._flat_variants",
+            "_assemble_variant_buffers_rust",
+            [],
+        ),
+        "gather_rows_i32": (
+            "genvarloader._dataset._flat_variants",
+            "_gather_rows_i32_rust",
+            [],
+        ),
+        "compact_keep_i32": (
+            "genvarloader._dataset._flat_variants",
+            "_compact_keep_i32_rust",
+            [],
+        ),
+        "rc_alleles": (
+            "genvarloader._dataset._flat_variants",
+            "_rc_alleles_rust",
+            ["genvarloader._dataset._rag_variants"],
+        ),
     }
 
     if kernel_name not in _KERNEL_SITES:
-        raise KeyError(f"make_kernel_spy: no site registered for {kernel_name!r}; known: {sorted(_KERNEL_SITES)}")
+        raise KeyError(
+            f"make_kernel_spy: no site registered for {kernel_name!r}; known: {sorted(_KERNEL_SITES)}"
+        )
 
     mod_name, attr_name, extra_mod_names = _KERNEL_SITES[kernel_name]
     mod = importlib.import_module(mod_name)

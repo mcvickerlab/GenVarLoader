@@ -56,6 +56,7 @@ def _shift_and_realign_tracks_sparse_rust_wrapper(
     keep_offsets: NDArray[np.integer] | None = None,
     strategy_id: int = 0,
     base_seed: np.uint64 = np.uint64(0),
+    parallel: bool = False,
 ) -> None:
     """Rust wrapper: normalizes geno_offsets to (2, n) form then dispatches."""
     geno_offsets_2d = _as_starts_stops(geno_offsets)
@@ -78,6 +79,7 @@ def _shift_and_realign_tracks_sparse_rust_wrapper(
         else None,
         strategy_id=int(strategy_id),
         base_seed=int(base_seed),
+        parallel=parallel,
     )
 
 

@@ -53,6 +53,7 @@ def test_track_getitem_identical_across_backends(tmp_path, monkeypatch):
         def spy(*a, **k):
             calls["n"] += 1
             return orig(*a, **k)
+
         return spy
 
     # The track-only path calls intervals_to_tracks via _tracks_mod (the
@@ -150,7 +151,9 @@ def test_tracks_max_jitter_intervals_parity_and_oracle(tmp_path):
     off = np.asarray(tracks_t.offsets, dtype=np.int64)
 
     # --- Golden replay ---
-    _golden.assert_output_matches_golden(result, _golden.load_flat_golden("ds_tracks_jitter"))
+    _golden.assert_output_matches_golden(
+        result, _golden.load_flat_golden("ds_tracks_jitter")
+    )
 
     # --- Positional, hand-computed oracle ---
     sample_consts = [np.float32(v) for v in _JITTER_SIGNAL_PER_SAMPLE.values()]
@@ -282,9 +285,7 @@ def test_tracks_realign_getitem_identical_across_backends(
 # ---------------------------------------------------------------------------
 
 
-def test_assemble_variant_buffers_runs_on_live_windows_path(
-    phased_svar_gvl, reference
-):
+def test_assemble_variant_buffers_runs_on_live_windows_path(phased_svar_gvl, reference):
     """The rust mega-call must actually fire on the windows __getitem__ path.
 
     Installs a counting spy on the registered ``rust`` entry of
@@ -388,12 +389,12 @@ def test_neg_strand_parity(kind, tmp_path, synthetic_case):
 
     # --- replay against frozen golden ---
     safe_kind = kind.replace("-", "_")
-    _golden.assert_output_matches_golden(out, _golden.load_flat_golden(f"ds_neg_strand_{safe_kind}"))
+    _golden.assert_output_matches_golden(
+        out, _golden.load_flat_golden(f"ds_neg_strand_{safe_kind}")
+    )
 
 
-def test_negative_strand_actually_reverse_complements(
-    tmp_path, synthetic_case
-):
+def test_negative_strand_actually_reverse_complements(tmp_path, synthetic_case):
     """Non-vacuity: a −strand region's bytes differ from the forward-oriented
     bytes AND equal the exact reverse-complement.
     """
@@ -485,12 +486,12 @@ def test_neg_strand_spliced_parity(kind, tmp_path, synthetic_case):
     out = ds[:, :]
 
     # --- replay against frozen golden ---
-    _golden.assert_output_matches_golden(out, _golden.load_flat_golden(f"ds_neg_strand_spliced_{kind}"))
+    _golden.assert_output_matches_golden(
+        out, _golden.load_flat_golden(f"ds_neg_strand_spliced_{kind}")
+    )
 
 
-def test_negative_strand_spliced_reverse_complements(
-    tmp_path, synthetic_case
-):
+def test_negative_strand_spliced_reverse_complements(tmp_path, synthetic_case):
     """Non-vacuity for the spliced path: a −strand transcript's bytes differ
     from the forward-oriented bytes AND equal the exact reverse-complement.
     """

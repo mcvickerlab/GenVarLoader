@@ -1,4 +1,5 @@
 """flat_variants kernels: rust vs frozen golden (oracle frozen Phase 5 W5)."""
+
 from __future__ import annotations
 
 import numpy as np
