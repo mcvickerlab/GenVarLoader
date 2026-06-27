@@ -83,7 +83,6 @@ basenji2-pytorch = ">=0.1.2"
 [feature.py310.dependencies]
 python = "3.10.*"
 numpy = "1.26.*"
-numba = "==0.59.1"
 
 [feature.py310.pypi-dependencies]
 pyarrow = ">=21"
