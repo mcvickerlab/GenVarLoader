@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Generic, overload
 
-import numba as nb
 import numpy as np
 import pandera.polars as pa
 import polars as pl
@@ -285,7 +284,6 @@ EXISTED = np.uint8(2)
 
 
 # * fixed length, SNPs only
-@nb.njit(parallel=True, nogil=True, cache=True)
 def apply_site_only_variants(
     haps: NDArray[np.uint8],  # (b p ~l)
     v_idxs: NDArray[np.int32],  # (b p ~l)
@@ -297,8 +295,8 @@ def apply_site_only_variants(
     batch_size, ploidy, _ = haps.shape
     flags = np.empty((batch_size, ploidy), dtype=np.uint8)
 
-    for b in nb.prange(batch_size):
-        for p in nb.prange(ploidy):
+    for b in range(batch_size):
+        for p in range(ploidy):
             bp_hap = haps[b, p]
             bp_idx = v_idxs[b, p]
             bp_ref_coord = ref_coords[b, p]

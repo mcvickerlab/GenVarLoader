@@ -5,7 +5,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Generic, Literal, TypeVar, cast, overload
 
-import numba as nb
 import numpy as np
 import polars as pl
 from genoray._utils import ContigNormalizer
@@ -16,14 +15,15 @@ from typing_extensions import Self
 
 from .._flat import _Flat
 from .._fasta_cache import ensure_cache
-from .._ragged import RaggedSeqs, reverse_complement_masked, to_padded
+from .._ragged import RaggedSeqs, to_padded
 from .._torch import TORCH_AVAILABLE, get_dataloader, no_torch_error
 from .._types import Idx, StrIdx
 from .._utils import is_dtype
 from ._indexing import is_str_arr, s2i
 from ._splice import SpliceMap, SplicePlan, build_splice_plan
-from ._utils import bed_to_regions, padded_slice
+from ._utils import bed_to_regions
 from .._threads import should_parallelize
+from ..genvarloader import get_reference as _get_reference_rust_ffi
 
 INT64_MAX = np.iinfo(np.int64).max
 
@@ -130,55 +130,19 @@ class Reference:
 
         lengths = ends - starts
         offsets = lengths_to_offsets(lengths)
-        seqs = np.empty(offsets[-1], np.uint8)
-        kernel = (
-            _fetch_impl_par if should_parallelize(int(offsets[-1])) else _fetch_impl_ser
+        regions = np.stack(
+            [
+                np.asarray(c_idxs, np.int32),
+                np.asarray(starts, np.int32),
+                np.asarray(ends, np.int32),
+            ],
+            axis=1,
         )
-        kernel(
-            c_idxs,
-            starts,
-            ends,
-            self.reference,
-            self.offsets,
-            self.pad_char,
-            seqs,
-            offsets,
+        seqs = get_reference(
+            regions, offsets, self.reference, self.offsets, int(self.pad_char)
         )
-
         seqs = Ragged.from_offsets(seqs.view("S1"), (len(contigs), None), offsets)
-
         return seqs
-
-
-@nb.njit(nogil=True, cache=True, inline="always")
-def _fetch_row(
-    i, c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
-):
-    r_s, r_e = ref_offsets[c_idxs[i]], ref_offsets[c_idxs[i] + 1]
-    o_s, o_e = out_offsets[i], out_offsets[i + 1]
-    padded_slice(reference[r_s:r_e], starts[i], ends[i], pad_char, out[o_s:o_e])
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def _fetch_impl_par(
-    c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
-):
-    for i in nb.prange(len(c_idxs)):
-        _fetch_row(
-            i, c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
-        )
-    return out
-
-
-@nb.njit(nogil=True, cache=True)
-def _fetch_impl_ser(
-    c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
-):
-    for i in range(len(c_idxs)):
-        _fetch_row(
-            i, c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
-        )
-    return out
 
 
 T = TypeVar("T", NDArray[np.bytes_], RaggedSeqs)
@@ -461,21 +425,20 @@ class RefDataset(Generic[T]):
         # Delegate kernel dispatch to the shared helper (eliminates duplication
         # with Ref.__call__'s splice branch). Returns a per-element _Flat (n_elements, None)
         # already in permuted write order.
+        to_rc_perm: "NDArray[np.bool_] | None" = None
+        if self.rc_neg:
+            to_rc_unperm = regions[:, 3] == -1
+            if to_rc_unperm.any():
+                to_rc_perm = to_rc_unperm[plan.permutation]
+
         per_elem = _fetch_spliced_ref(
             regions=regions,
             plan=plan,
             reference=self.reference.reference,
             ref_offsets=self.reference.offsets,
             pad_char=self.reference.pad_char,
+            to_rc=to_rc_perm,  # Rust: RC done in kernel
         )
-
-        if self.rc_neg:
-            to_rc_unperm = regions[:, 3] == -1
-            if to_rc_unperm.any():
-                from .._ragged import _COMP
-
-                to_rc_perm = to_rc_unperm[plan.permutation]
-                per_elem = per_elem.reverse_masked(to_rc_perm, comp=_COMP)
 
         # Rewrap with group_offsets at (n_rows, None) — skip the (n_rows, 1, None)
         # + squeeze(1) trick since RefDataset has no sample axis.
@@ -541,21 +504,23 @@ class RefDataset(Generic[T]):
         out_offsets = lengths_to_offsets(out_lengths)
 
         # ragged (b ~l)
+        # On the Rust backend, RC is folded into the kernel via to_rc.
+        # get_reference handles to_rc in kernel (Rust)
+        # below preserves the original behaviour.
+        _to_rc_arr = regions[:, 3] == -1
+        _to_rc: "NDArray[np.bool_] | None" = _to_rc_arr if _to_rc_arr.any() else None
         ref = get_reference(
             regions=regions,
             out_offsets=out_offsets,
             reference=self.reference.reference,
             ref_offsets=self.reference.offsets,
             pad_char=self.reference.pad_char,
+            to_rc=_to_rc,
         ).view("S1")
 
         ref = cast(
             Ragged[np.bytes_], Ragged.from_offsets(ref, (batch_size, None), out_offsets)
         )
-
-        to_rc = regions[:, 3] == -1
-        if to_rc.any():
-            ref = reverse_complement_masked(ref, to_rc)
 
         if out_reshape is not None:
             ref = ref.reshape(out_reshape)
@@ -565,7 +530,7 @@ class RefDataset(Generic[T]):
         elif self.output_length == "variable":
             out = to_padded(ref, pad_value=bytes([self.reference.pad_char]))
         else:
-            out = ref.to_numpy()
+            out = ref.to_numpy(validate=False)
 
         if squeeze:
             out = out.squeeze(0)
@@ -682,31 +647,18 @@ class RefDataset(Generic[T]):
         )
 
 
-@nb.njit(nogil=True, cache=True, inline="always")
-def _get_reference_row(i, regions, out_offsets, reference, ref_offsets, pad_char, out):
-    o_s, o_e = out_offsets[i], out_offsets[i + 1]
-    c_idx, start, end = regions[i, 0], regions[i, 1], regions[i, 2]
-    c_s = ref_offsets[c_idx]
-    c_e = ref_offsets[c_idx + 1]
-    padded_slice(reference[c_s:c_e], start, end, pad_char, out[o_s:o_e])
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def _get_reference_par(regions, out_offsets, reference, ref_offsets, pad_char, out):
-    for i in nb.prange(len(regions)):
-        _get_reference_row(
-            i, regions, out_offsets, reference, ref_offsets, pad_char, out
-        )
-    return out
-
-
-@nb.njit(nogil=True, cache=True)
-def _get_reference_ser(regions, out_offsets, reference, ref_offsets, pad_char, out):
-    for i in range(len(regions)):
-        _get_reference_row(
-            i, regions, out_offsets, reference, ref_offsets, pad_char, out
-        )
-    return out
+def _get_reference_rust(
+    regions, out_offsets, reference, ref_offsets, pad_char, parallel, to_rc=None
+):
+    return _get_reference_rust_ffi(
+        np.ascontiguousarray(regions, np.int32),
+        np.ascontiguousarray(out_offsets, np.int64),
+        np.ascontiguousarray(reference, np.uint8),
+        np.ascontiguousarray(ref_offsets, np.int64),
+        int(pad_char),
+        bool(parallel),
+        to_rc,
+    )
 
 
 def get_reference(
@@ -715,14 +667,18 @@ def get_reference(
     reference: NDArray[np.integer],
     ref_offsets: NDArray[np.integer],
     pad_char: int,
+    to_rc: "NDArray[np.bool_] | None" = None,
 ) -> NDArray[np.uint8]:
-    out = np.empty(out_offsets[-1], np.uint8)
-    kernel = (
-        _get_reference_par
-        if should_parallelize(int(out_offsets[-1]))
-        else _get_reference_ser
+    """Fetch reference-genome bytes for a batch of regions.
+
+    ``to_rc`` is a per-query boolean mask (True = reverse-complement that query).
+    The mask is consumed in-kernel by the Rust backend.
+    """
+    parallel = should_parallelize(int(out_offsets[-1]))
+    _to_rc = None if to_rc is None else np.ascontiguousarray(to_rc, np.bool_)
+    return _get_reference_rust(
+        regions, out_offsets, reference, ref_offsets, pad_char, parallel, _to_rc
     )
-    return kernel(regions, out_offsets, reference, ref_offsets, pad_char, out)
 
 
 def _fetch_spliced_ref(
@@ -731,12 +687,17 @@ def _fetch_spliced_ref(
     reference: NDArray[np.uint8],
     ref_offsets: NDArray[np.int64],
     pad_char: int,
+    to_rc: "NDArray[np.bool_] | None" = None,
 ) -> "_Flat[np.bytes_]":
     """Fetch reference bytes in splice-permuted order, returning a per-element
     flat ragged of shape ``(n_elements, None)``.
 
     This is the kernel-dispatch core shared by :class:`Ref.__call__`'s splice
     branch and :meth:`RefDataset._getitem_spliced`.
+
+    ``to_rc`` is the permuted per-element boolean mask (True = RC that element).
+    On the Rust backend it is passed into the ``get_reference`` kernel directly;
+    the Rust backend handles it in-kernel.
     """
     permuted_regions = regions[plan.permutation]
     raw = get_reference(
@@ -745,6 +706,7 @@ def _fetch_spliced_ref(
         reference=reference,
         ref_offsets=ref_offsets,
         pad_char=pad_char,
+        to_rc=to_rc,
     )  # uint8 flat buffer
     n_elements = plan.permuted_lengths.shape[0]
     return cast(
@@ -794,3 +756,30 @@ if TORCH_AVAILABLE:
 
 else:
     TorchDataset = no_torch_error
+
+
+def _get_reference_row(i, regions, out_offsets, reference, ref_offsets, pad_char, out):
+    """Extract a single reference row with padding (pure Python fallback)."""
+    from ._utils import padded_slice
+
+    o_s, o_e = out_offsets[i], out_offsets[i + 1]
+    c_idx, start, end = int(regions[i, 0]), int(regions[i, 1]), int(regions[i, 2])
+    c_s = int(ref_offsets[c_idx])
+    c_e = int(ref_offsets[c_idx + 1])
+    padded_slice(reference[c_s:c_e], start, end, pad_char, out[o_s:o_e])
+
+
+def _get_reference_ser(regions, out_offsets, reference, ref_offsets, pad_char, out):
+    """Extract reference rows serially (pure Python fallback)."""
+    for i in range(len(regions)):
+        _get_reference_row(
+            i, regions, out_offsets, reference, ref_offsets, pad_char, out
+        )
+    return out
+
+
+def _get_reference_par(regions, out_offsets, reference, ref_offsets, pad_char, out):
+    """Extract reference rows (parallel flavor; falls back to serial in pure Python)."""
+    return _get_reference_ser(
+        regions, out_offsets, reference, ref_offsets, pad_char, out
+    )

@@ -6,10 +6,12 @@ genome. All-numpy hot path.
 
 from __future__ import annotations
 
-import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
+from .._ragged import Ragged
+from .._utils import lengths_to_offsets
+from ..genvarloader import get_reference as _get_reference_ffi
 from ._flat_variants import _FlatWindow
 
 
@@ -80,7 +82,6 @@ def compute_flank_tokens(
     return tokens.reshape(-1), np.asarray(row_offsets, np.int64)
 
 
-@nb.njit(nogil=True, cache=True)  # pragma: no cover - njit
 def _assemble_alt_windows(f5, f3, alt_data, alt_seq_off, flank_len):
     """Concatenate flank5 (fixed L) + alt (variable) + flank3 (fixed L) per variant
     into a flat byte buffer. f5/f3 are (n_var, L) row-major flat (n_var*L,)."""
@@ -219,3 +220,137 @@ def compute_windows(
     )
     alt_w = _FlatWindow(lut[alt_bytes], alt_off, row_off, (None,))
     return ref_w, alt_w
+
+
+class _RefShim:
+    """Minimal reference-object shim wrapping raw (reference, ref_offsets) arrays.
+
+    Implements the ``.fetch(contigs, starts, ends)`` interface used by
+    ``compute_flank_tokens``, ``compute_ref_window``, and ``compute_alt_window``,
+    backed by the ``get_reference`` FFI call so behavior is byte-identical to a
+    ``Reference`` object (same padded-slice logic, same OOB padding).
+    """
+
+    def __init__(
+        self,
+        reference: NDArray[np.uint8],
+        ref_offsets: NDArray[np.int64],
+        pad_char: int,
+    ) -> None:
+        self._ref = np.ascontiguousarray(reference, np.uint8)
+        self._off = np.ascontiguousarray(ref_offsets, np.int64)
+        self._pad = int(pad_char)
+
+    def fetch(
+        self,
+        contigs: NDArray[np.integer],
+        starts: NDArray[np.integer],
+        ends: NDArray[np.integer],
+    ) -> "Ragged":
+        contigs = np.ascontiguousarray(contigs, np.int32)
+        starts = np.ascontiguousarray(starts, np.int32)
+        ends = np.ascontiguousarray(ends, np.int32)
+        n = len(contigs)
+        lengths = np.asarray(ends - starts, np.int64)
+        out_offsets = lengths_to_offsets(lengths)
+        regions = np.stack([contigs, starts, ends], axis=1).astype(np.int32)
+        data = _get_reference_ffi(
+            regions, out_offsets, self._ref, self._off, self._pad, False, None
+        )
+        return Ragged.from_offsets(data.view("S1"), (n, None), out_offsets)
+
+
+def _assemble_variant_buffers_numba(
+    mode: int,
+    v_idxs: NDArray[np.int32],
+    row_offsets: NDArray[np.int64],
+    alt_global: NDArray[np.uint8],
+    alt_off_global: NDArray[np.int64],
+    ref_global: "NDArray[np.uint8] | None",
+    ref_off_global: "NDArray[np.int64] | None",
+    want_ref_bytes: bool,
+    want_flank: bool,
+    ref_mode: int,
+    alt_mode: int,
+    flank_len: int,
+    lut: "NDArray | None",
+    v_contigs: NDArray[np.int32],
+    v_starts: NDArray[np.int32],
+    ilens: NDArray[np.int32],
+    reference: NDArray[np.uint8],
+    ref_offsets: NDArray[np.int64],
+    pad_char: int,
+) -> "dict[str, tuple[NDArray, NDArray[np.int64]]]":
+    """Numba/numpy oracle for assemble_variant_buffers: composes existing helpers.
+
+    Mirrors the Rust ``assemble_variants_mode`` / ``assemble_windows_mode`` logic,
+    producing the same ``{name: (data, seq_offsets)}`` dict contract. Used as the
+    parity reference in ``assert_kernel_parity_dict``. Does NOT re-implement any
+    sub-kernel logic — delegates entirely to the registered helpers.
+    """
+    from ._flat_variants import _gather_alleles
+
+    v_idxs = np.ascontiguousarray(v_idxs, np.int32)
+    row_offsets = np.ascontiguousarray(row_offsets, np.int64)
+    alt_global = np.ascontiguousarray(alt_global, np.uint8)
+    alt_off_global = np.ascontiguousarray(alt_off_global, np.int64)
+
+    out: dict[str, tuple[NDArray, NDArray[np.int64]]] = {}
+
+    if mode == 0:  # variants mode
+        alt_data, alt_seq_off = _gather_alleles(v_idxs, alt_global, alt_off_global)
+        out["alt"] = (alt_data, alt_seq_off)
+
+        if want_ref_bytes and ref_global is not None and ref_off_global is not None:
+            rg = np.ascontiguousarray(ref_global, np.uint8)
+            ro = np.ascontiguousarray(ref_off_global, np.int64)
+            ref_data, ref_seq_off = _gather_alleles(v_idxs, rg, ro)
+            out["ref"] = (ref_data, ref_seq_off)
+
+        if want_flank:
+            # v_starts / ilens are GLOBAL per-variant arrays; gather by v_idxs.
+            starts_v = np.asarray(v_starts, np.int32)[v_idxs]
+            ilens_v = np.asarray(ilens, np.int32)[v_idxs]
+            ref_shim = _RefShim(reference, ref_offsets, pad_char)
+            tok, off = compute_flank_tokens(
+                ref_shim, v_contigs, starts_v, ilens_v, flank_len, lut, row_offsets
+            )
+            out["flank_tokens"] = (tok, off)
+
+    else:  # windows mode
+        alt_data, alt_seq_off = _gather_alleles(v_idxs, alt_global, alt_off_global)
+        # v_starts / ilens are GLOBAL; gather by v_idxs before passing to helpers.
+        starts_v = np.asarray(v_starts, np.int32)[v_idxs]
+        ilens_v = np.asarray(ilens, np.int32)[v_idxs]
+        ref_shim = _RefShim(reference, ref_offsets, pad_char)
+
+        if ref_mode == 1:  # flanked ref window: [start-L, end+L)
+            rw = compute_ref_window(
+                ref_shim, v_contigs, starts_v, ilens_v, flank_len, lut, row_offsets
+            )
+            out["ref_window"] = (rw.data, rw.seq_offsets)
+        elif ref_mode == 2:  # bare tokenized ref allele (no flanks)
+            rg = np.ascontiguousarray(ref_global, np.uint8)
+            ro = np.ascontiguousarray(ref_off_global, np.int64)
+            ref_data, ref_seq_off = _gather_alleles(v_idxs, rg, ro)
+            rw = tokenize_alleles(ref_data, ref_seq_off, lut, row_offsets)
+            out["ref"] = (rw.data, rw.seq_offsets)
+
+        if alt_mode == 1:  # flanked alt window: flank5 . alt . flank3
+            aw = compute_alt_window(
+                ref_shim,
+                v_contigs,
+                starts_v,
+                ilens_v,
+                alt_data,
+                alt_seq_off,
+                flank_len,
+                lut,
+                row_offsets,
+            )
+            out["alt_window"] = (aw.data, aw.seq_offsets)
+        elif alt_mode == 2:  # bare tokenized alt allele (no flanks)
+            aw = tokenize_alleles(alt_data, alt_seq_off, lut, row_offsets)
+            out["alt"] = (aw.data, aw.seq_offsets)
+
+    return out

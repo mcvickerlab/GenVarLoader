@@ -33,20 +33,55 @@ BURN_IN = 5
 def build(ds, mode: str):
     if mode == "haplotypes":
         return ds.with_seqs("haplotypes").with_len(SEQLEN)
+    if mode == "annotated":
+        return ds.with_seqs("annotated").with_len(SEQLEN)
     if mode == "tracks":
+        # tracks-only: no sequences (the cheapest path; per-batch fixed cost dominates).
         return ds.with_seqs(None).with_tracks("read-depth").with_len(SEQLEN)
+    if mode == "tracks-seqs":
+        # haplotypes + re-aligned tracks together.
+        return ds.with_seqs("haplotypes").with_tracks("read-depth").with_len(SEQLEN)
     if mode == "variants":
         # Variants are ragged by definition (allele lengths vary), so they are
         # queried variable-length — `with_len` only makes sense for the seq/track
         # outputs, which this mode doesn't request.
         return ds.with_seqs("variants")
+    if mode == "variant-windows":
+        # Tokenized per-variant ref/alt windows (flat-only; needs a reference).
+        import seqpro as sp
+
+        import genvarloader as gvl
+
+        return (
+            ds.with_tracks(False)
+            .with_output_format("flat")
+            .with_seqs(
+                "variant-windows",
+                gvl.VarWindowOpt(
+                    flank_length=128,
+                    token_alphabet=sp.DNA.alphabet.encode(),
+                    unknown_token=len(sp.DNA),
+                    ref="window",
+                    alt="window",
+                ),
+            )
+        )
     raise SystemExit(f"unknown mode {mode!r}")
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument(
-        "--mode", choices=["haplotypes", "tracks", "variants"], required=True
+        "--mode",
+        choices=[
+            "haplotypes",
+            "annotated",
+            "tracks",
+            "tracks-seqs",
+            "variants",
+            "variant-windows",
+        ],
+        required=True,
     )
     p.add_argument("--n-batches", type=int, default=N_BATCHES)
     args = p.parse_args()

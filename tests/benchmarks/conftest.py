@@ -15,7 +15,7 @@ import pytest
 
 import genvarloader as gvl
 from genvarloader._dataset import _haps, _reconstruct, _tracks
-from tests.benchmarks._capture import capture_first_call
+from tests.benchmarks._capture import CapturedCall, capture_first_call
 from tests.benchmarks._indices import batch_indices
 
 DATA = Path(__file__).resolve().parent / "data"
@@ -44,6 +44,8 @@ def _batch_indices(ds, n: int):
 def captured_haplotypes(bench_dataset):
     ds = bench_dataset.with_seqs("haplotypes").with_len(SEQLEN)
     r, s = _batch_indices(ds, BATCH)
+    # Capture the rust reconstruct_haplotypes_from_sparse call by temporarily
+    # wrapping the module-level attribute so capture_first_call can intercept it.
     recon = capture_first_call(
         targets=[(_haps, "reconstruct_haplotypes_from_sparse")],
         thunk=lambda: ds[r, s],
@@ -78,14 +80,34 @@ def captured_intervals_to_tracks(bench_dataset):
 def captured_realign_tracks(bench_dataset):
     # shift_and_realign_tracks_sparse only fires on the haplotype+tracks path
     # (_reconstruct.py); the tracks-only path (_tracks.py) never realigns.
+    #
+    # The rust path calls _shift_and_realign_tracks_sparse_rust_wrapper, which
+    # is not a module-level attribute accessible via capture_first_call's setattr
+    # trick.  Instead, we patch _reconstruct._shift_and_realign_tracks_sparse_rust_wrapper
+    # directly with a recording wrapper so the exact callable the benchmark
+    # replays is captured.
     ds = (
         bench_dataset.with_seqs("haplotypes").with_tracks("read-depth").with_len(SEQLEN)
     )
     r, s = _batch_indices(ds, BATCH)
-    return capture_first_call(
-        targets=[(_reconstruct, "shift_and_realign_tracks_sparse")],
-        thunk=lambda: ds[r, s],
-    )
+    original = _reconstruct._shift_and_realign_tracks_sparse_rust_wrapper
+    captured: list[CapturedCall] = []
+
+    def recorder(*args, **kwargs):
+        if not captured:
+            captured.append(CapturedCall(args=args, kwargs=dict(kwargs)))
+        return original(*args, **kwargs)
+
+    _reconstruct._shift_and_realign_tracks_sparse_rust_wrapper = recorder
+    try:
+        ds[r, s]
+    finally:
+        _reconstruct._shift_and_realign_tracks_sparse_rust_wrapper = original
+    if not captured:
+        raise RuntimeError(
+            "shift_and_realign_tracks_sparse was never called while running the thunk"
+        )
+    return captured[0]
 
 
 # NOTE: a ``captured_germline_ccfs`` fixture was intentionally dropped. The

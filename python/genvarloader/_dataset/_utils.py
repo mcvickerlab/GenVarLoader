@@ -1,6 +1,5 @@
 from collections.abc import Sequence
 
-import numba as nb
 import numpy as np
 import polars as pl
 from genoray._utils import ContigNormalizer
@@ -11,41 +10,27 @@ from .._types import DTYPE
 __all__ = []
 
 
-@nb.njit(nogil=True, cache=True)
-def padded_slice(
-    arr: NDArray[DTYPE],
-    start: int,
-    stop: int,
-    pad_val: int,
-    out: NDArray[DTYPE],
-) -> NDArray[DTYPE]:
-    if start >= stop:
-        return out
-    elif stop < 0:
-        out[:] = pad_val
-        return out
+def _ffi_array(arr: np.ndarray, dtype, name: str) -> np.ndarray:
+    """Assert a per-sample-scale FFI argument crosses zero-copy.
 
-    pad_left = -min(0, start)
-    pad_right = max(0, stop - len(arr))
-
-    if pad_left == 0 and pad_right == 0:
-        out[:] = arr[start:stop]
-        return out
-
-    if pad_left > 0 and pad_right > 0:
-        out_stop = len(out) - pad_right
-        out[:pad_left] = pad_val
-        out[pad_left:out_stop] = arr[:]
-        out[out_stop:] = pad_val
-    elif pad_left > 0:
-        out[:pad_left] = pad_val
-        out[pad_left:] = arr[:stop]
-    elif pad_right > 0:
-        out_stop = len(out) - pad_right
-        out[:out_stop] = arr[start:]
-        out[out_stop:] = pad_val
-
-    return out
+    Returns ``arr`` unchanged iff it is C-contiguous with exactly ``dtype``;
+    otherwise raises a precise ``ValueError`` naming ``name``. This replaces a
+    silent ``np.ascontiguousarray`` that would copy the whole per-sample-scale
+    memmap (GB-scale at the >1M-sample design target). Use it ONLY for
+    sample-scale memmap args; batch-bounded arrays may keep coercing.
+    """
+    dt = np.dtype(dtype)
+    if not arr.flags["C_CONTIGUOUS"]:
+        raise ValueError(
+            f"FFI argument {name!r} must be C-contiguous to cross zero-copy; got "
+            f"a non-contiguous array (coercing would force a sample-scale copy)."
+        )
+    if arr.dtype != dt:
+        raise ValueError(
+            f"FFI argument {name!r} must have dtype {dt}; got {arr.dtype} "
+            f"(coercing would force a sample-scale cast/copy)."
+        )
+    return arr
 
 
 def oidx_to_raveled_idx(row_idx: ArrayLike, col_idx: ArrayLike, shape: tuple[int, int]):
@@ -123,7 +108,7 @@ def bed_to_regions(
         # versions where it doesn't, the strand column survives the
         # ``select(...)`` call as Categorical, and ``to_numpy()`` on a frame
         # mixing ``Int32`` + ``Categorical`` collapses to ``dtype=object``,
-        # which downstream numba kernels reject with
+        # which downstream kernels reject with
         # ``non-precise type array(pyobject)``. Casting to Utf8 first keeps
         # the strand column numeric and the regions array stays ``int32``.
         cols.append(
@@ -137,40 +122,6 @@ def bed_to_regions(
         cols.append(pl.col("strand").cast(pl.Int32))
 
     return bed.select(cols).to_numpy()
-
-
-@nb.njit(nogil=True, cache=True)
-def splits_sum_le_value(arr: NDArray[np.number], max_value: float) -> NDArray[np.intp]:
-    """Get index offsets for groups that sum to no more than a value.
-    Note that values greater than the maximum will be kept in their own group.
-
-    Parameters
-    ----------
-    arr : NDArray[np.number]
-        Array to split.
-    max_value : float
-        Maximum value.
-
-    Returns
-    -------
-    NDArray[np.intp]
-        Split indices.
-
-    Examples
-    --------
-    >>> splits_sum_le_value(np.array([5, 5, 11, 9, 2, 7]), 10)
-    # (5 5) (11) (9) (2 7)
-    array([0, 2, 3, 4, 6])
-    """
-    indices = [0]
-    current_sum = 0
-    for idx, value in enumerate(arr):
-        current_sum += value
-        if current_sum > max_value:
-            indices.append(idx)
-            current_sum = value
-    indices.append(len(arr))
-    return np.array(indices, np.intp)
 
 
 def reduceat_offsets(
@@ -216,3 +167,40 @@ def reduceat_offsets(
     identity_indices = tuple(identity_indices)
     out_arr[identity_indices] = ufunc.identity
     return out_arr.swapaxes(axis, -1)
+
+
+def padded_slice(
+    arr,
+    start: int,
+    stop: int,
+    pad_val: int,
+    out,
+):
+    """Slice arr into out with padding on left/right if start<0 or stop>len(arr)."""
+    if start >= stop:
+        return out
+    elif stop < 0:
+        out[:] = pad_val
+        return out
+
+    pad_left = -min(0, start)
+    pad_right = max(0, stop - len(arr))
+
+    if pad_left == 0 and pad_right == 0:
+        out[:] = arr[start:stop]
+        return out
+
+    if pad_left > 0 and pad_right > 0:
+        out_stop = len(out) - pad_right
+        out[:pad_left] = pad_val
+        out[pad_left:out_stop] = arr[:]
+        out[out_stop:] = pad_val
+    elif pad_left > 0:
+        out[:pad_left] = pad_val
+        out[pad_left:] = arr[:stop]
+    elif pad_right > 0:
+        out_stop = len(out) - pad_right
+        out[:out_stop] = arr[start:]
+        out[out_stop:] = pad_val
+
+    return out

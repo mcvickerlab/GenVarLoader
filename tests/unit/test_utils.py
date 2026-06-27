@@ -1,7 +1,7 @@
 import numpy as np
 import polars as pl
 from genoray._utils import ContigNormalizer
-from genvarloader._dataset._utils import bed_to_regions, splits_sum_le_value
+from genvarloader._dataset._utils import bed_to_regions
 from genvarloader._utils import normalize_contig_name
 from pytest_cases import parametrize_with_cases
 
@@ -58,14 +58,6 @@ def test_bed_to_regions_no_strand_defaults_to_plus() -> None:
     regions = bed_to_regions(bed, ContigNormalizer(["chr1"]))
     assert regions.dtype == np.int32
     np.testing.assert_array_equal(regions, np.array([[0, 100, 200, 1]], np.int32))
-
-
-def test_splits_sum_le_value():
-    max_size = 10
-    sizes = np.array([3, 5, 2, 4, 7, 5, 2], np.int32)
-    splits = splits_sum_le_value(sizes, max_size)
-    np.testing.assert_equal(splits, np.array([0, 3, 4, 5, 7], np.intp))
-    np.testing.assert_array_less(np.add.reduceat(sizes, splits[:-1]), max_size + 1)
 
 
 def contig_match():

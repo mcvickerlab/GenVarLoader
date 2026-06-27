@@ -1,9 +1,9 @@
-# ruff: noqa: E402  cap_numba_threads() must run before any numba kernel imports
+# ruff: noqa: E402  cap_threads() must run before the first rust parallel call
 import importlib.metadata
 
-from ._threads import cap_numba_threads
+from ._threads import cap_threads
 
-cap_numba_threads()
+cap_threads()
 
 from seqpro.bed import read as read_bedlike
 from seqpro.bed import with_len as with_length
@@ -26,6 +26,7 @@ from ._dataset._insertion_fill import (
 )
 from ._dataset._rag_variants import RaggedVariants
 from ._dataset._reference import RefDataset, Reference
+from ._dataset._migrate import migrate
 from ._dataset._svar_link import migrate_svar_link
 from ._dataset._write import get_splice_bed, update, write
 from ._dummy import get_dummy_dataset
@@ -71,6 +72,7 @@ __all__ = [
     "data_registry",
     "get_dummy_dataset",
     "get_splice_bed",
+    "migrate",
     "migrate_svar_link",
     "read_bedlike",
     "sites_vcf_to_table",

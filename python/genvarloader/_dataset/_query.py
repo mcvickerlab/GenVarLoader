@@ -171,6 +171,10 @@ def _getitem_unspliced(
     regions[:, 1] += jitter_off
     regions[:, 2] = regions[:, 1] + lengths
 
+    to_rc: NDArray[np.bool_] | None = (
+        view.full_regions[r_idx, 3] == -1 if view.rc_neg else None
+    )
+
     recon = view.recon(
         idx=ds_idx,
         r_idx=r_idx,
@@ -180,14 +184,23 @@ def _getitem_unspliced(
         rng=view.rng,
         deterministic=view.deterministic,
         flat=view.flat_output,
+        to_rc=to_rc,
     )
 
     if not isinstance(recon, tuple):
         recon = (recon,)
 
-    if view.rc_neg:
-        to_rc: NDArray[np.bool_] = view.full_regions[r_idx, 3] == -1
-        recon = tuple(reverse_complement_ragged(r, to_rc) for r in recon)
+    if view.rc_neg and to_rc is not None:
+        # Rust: flat-seq kinds (bytes, tracks, annotated-haps) have RC
+        # folded into the kernel or handled Python-side inside the
+        # reconstructor.  Variant types have no in-kernel RC and are
+        # deferred here.  (_FlatVariantWindows RC is a no-op in
+        # reverse_complement_ragged; RaggedVariants is Target 7.)
+        _VARIANT_TYPES = (RaggedVariants, _FlatVariants, _FlatVariantWindows)
+        recon = tuple(
+            reverse_complement_ragged(r, to_rc) if isinstance(r, _VARIANT_TYPES) else r
+            for r in recon
+        )
 
     return recon, squeeze, out_reshape
 
@@ -237,30 +250,10 @@ def _getitem_spliced(
         n_samples=n_samples_sel,
     )
 
-    recon = view.recon(
-        idx=ds_idx,
-        r_idx=r_idx,
-        regions=regions,
-        output_length="ragged",
-        jitter=view.jitter,
-        rng=view.rng,
-        deterministic=view.deterministic,
-        splice_plan=plan,
-        flat=view.flat_output,
-    )
-
-    if not isinstance(recon, tuple):
-        recon = (recon,)
-
-    recon = cast(
-        tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
-    )
-
+    # Compute the permuted per-element to_rc mask (used for both the in-kernel
+    # pass and the post-pass guard below).
+    to_rc_per_elem: NDArray[np.bool_] | None = None
     if view.rc_neg:
-        # Permute the per-region to_rc mask the same way the plan permuted
-        # the kernel queries. The plan acts on a flattened (B, *inner_fixed)
-        # k-index, so first replicate to_rc across the inner axes, then
-        # gather via plan.permutation.
         B = regions.shape[0]
         n_k = int(plan.permutation.shape[0])
         inner_factor, rem = divmod(n_k, B)
@@ -276,8 +269,27 @@ def _getitem_spliced(
             # (B, E) C-order: same value across the inner axis for a given
             # query. np.repeat gives (B*E,) in (query, inner) C-order.
             to_rc_flat = np.repeat(to_rc_unperm, inner_factor)
-        to_rc_per_elem: NDArray[np.bool_] = to_rc_flat[plan.permutation]
-        recon = tuple(reverse_complement_ragged(r, to_rc_per_elem) for r in recon)
+        to_rc_per_elem = to_rc_flat[plan.permutation]
+
+    recon = view.recon(
+        idx=ds_idx,
+        r_idx=r_idx,
+        regions=regions,
+        output_length="ragged",
+        jitter=view.jitter,
+        rng=view.rng,
+        deterministic=view.deterministic,
+        splice_plan=plan,
+        flat=view.flat_output,
+        to_rc=to_rc_per_elem,
+    )
+
+    if not isinstance(recon, tuple):
+        recon = (recon,)
+
+    recon = cast(
+        tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...], recon
+    )
 
     # Rewrap each per-element Ragged with the plan's group_offsets to expose
     # one contiguous spliced element per (row, sample[, inner]) cell. Collapse

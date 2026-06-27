@@ -71,11 +71,13 @@ def intervals_to_tracks(
     itv_offsets: NDArray[np.int64],
     out: NDArray[np.float32],
     out_offsets: NDArray[np.int64],
+    parallel: bool,
 ) -> None:
     """Paint base-pair-resolution tracks from intervals, writing ``out`` in place.
 
     Rust backend for the dispatched ``intervals_to_tracks`` kernel (byte-identical
     to the numba reference in ``_dataset/_intervals.py``). Zeros ``out`` then, per
     query, copies each interval's value into its base-pair slice. Assumes intervals
-    are sorted by start, non-overlapping, and start at >= the query start.
+    are sorted by start and non-overlapping; interval starts before the query start
+    are clipped to the query window (per #242).
     """

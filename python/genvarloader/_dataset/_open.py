@@ -24,7 +24,7 @@ from ._reconstruct import Haps, Ref, Tracks, _build_reconstructor
 from ._reference import Reference
 from ._utils import bed_to_regions
 from ._validate import validate_dataset
-from ._write import Metadata
+from ._write import Metadata, _check_dataset_format_version
 
 if TYPE_CHECKING:
     from ._impl import RaggedDataset
@@ -103,6 +103,7 @@ class OpenRequest:
     def _load_metadata(self) -> Metadata:
         with _py_open(self.path / "metadata.json") as f:
             metadata = Metadata.model_validate_json(f.read())
+        _check_dataset_format_version(metadata, self.path)
         validate_dataset(metadata, self.path)
         return metadata
 

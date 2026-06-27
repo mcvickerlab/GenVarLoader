@@ -7,15 +7,15 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
-import numba as nb
 import numpy as np
 from einops import repeat
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
 from .._flat import _Flat
-from .._ragged import INTERVAL_DTYPE, FlatIntervals, RaggedIntervals, RaggedTracks
+from .._ragged import FlatIntervals, RaggedIntervals, RaggedTracks
 from .._utils import lengths_to_offsets
+from ._genotypes import _as_starts_stops
 from ._indexing import DatasetIndexer
 from ._insertion_fill import InsertionFill, Repeat5p
 from ._intervals import intervals_to_tracks
@@ -34,112 +34,12 @@ _FLANK_SAMPLE = 3
 _INTERPOLATE = 4
 
 
-@nb.njit(nogil=True, cache=True, inline="always")
-def _xorshift64(x: np.uint64) -> np.uint64:
-    """Single round of xorshift64. Pure function — safe in parallel."""
-    x ^= x << np.uint64(13)
-    x ^= x >> np.uint64(7)
-    x ^= x << np.uint64(17)
-    return x
+from ..genvarloader import (  # noqa: E402
+    shift_and_realign_tracks_sparse as _shift_and_realign_tracks_sparse_rust,
+)
 
 
-@nb.njit(nogil=True, cache=True, inline="always")
-def _hash4(a: np.uint64, b: np.uint64, c: np.uint64, d: np.uint64) -> np.uint64:
-    """Hash four uint64 values into one. Used as a per-position deterministic seed."""
-    h = a
-    h = _xorshift64(h ^ b)
-    h = _xorshift64(h ^ c)
-    h = _xorshift64(h ^ d)
-    return h
-
-
-@nb.njit(nogil=True, cache=True, inline="always")
-def _apply_insertion_fill(
-    out: NDArray[np.floating],
-    out_idx: int,
-    writable_length: int,
-    v_len: int,
-    track: NDArray[np.floating],
-    v_rel_pos: int,
-    strategy_id: int,
-    params: NDArray[np.float64],
-    base_seed: np.uint64,
-    query: int,
-    hap: int,
-):
-    """Write `writable_length` values at out[out_idx:] according to strategy.
-
-    v_len is the total length of the insertion stretch (v_diff + 1); the kernel
-    may truncate the actual write to writable_length when running out of output.
-    """
-    track_len = len(track)
-
-    # The _REPEAT_5P branch is unreachable from the outer kernel (which short-circuits
-    # this strategy before calling). Kept for completeness and direct-helper-call safety.
-    if strategy_id == _REPEAT_5P:
-        val = track[v_rel_pos]
-        for i in range(writable_length):
-            out[out_idx + i] = val
-
-    elif strategy_id == _REPEAT_5P_NORM:
-        val = track[v_rel_pos] / v_len
-        for i in range(writable_length):
-            out[out_idx + i] = val
-
-    elif strategy_id == _CONSTANT:
-        val = params[0]
-        for i in range(writable_length):
-            out[out_idx + i] = val
-
-    elif strategy_id == _FLANK_SAMPLE:
-        width = np.int64(params[0])
-        pool_lo = max(0, v_rel_pos - width)
-        pool_hi = min(track_len - 1, v_rel_pos + width)
-        pool_size = pool_hi - pool_lo + 1
-        for i in range(writable_length):
-            seed = _hash4(
-                base_seed,
-                np.uint64(query),
-                np.uint64(hap),
-                np.uint64(out_idx + i),
-            )
-            offset = np.int64(seed % np.uint64(pool_size))
-            out[out_idx + i] = track[pool_lo + offset]
-
-    elif strategy_id == _INTERPOLATE:
-        order = np.int64(params[0])
-        # Number of anchor values per side: ceil((order+1)/2)
-        k = (order + 1 + 1) // 2  # ceil((order+1)/2)
-        # Anchors: 5' side at x = 0, -1, -2, ...; 3' side at x = v_len, v_len+1, ...
-        n_anchors = 2 * k
-        xs = np.empty(n_anchors, dtype=np.float64)
-        ys = np.empty(n_anchors, dtype=np.float64)
-        for j in range(k):
-            ref_idx = v_rel_pos - j
-            ref_idx = max(ref_idx, 0)
-            xs[j] = -float(j)
-            ys[j] = track[ref_idx]
-        for j in range(k):
-            ref_idx = v_rel_pos + 1 + j
-            ref_idx = min(ref_idx, track_len - 1)
-            xs[k + j] = float(v_len) + float(j)
-            ys[k + j] = track[ref_idx]
-        # Lagrange interpolation at each output position in [0, writable_length)
-        for i in range(writable_length):
-            x = float(i)
-            acc = 0.0
-            for a in range(n_anchors):
-                term = ys[a]
-                for b in range(n_anchors):
-                    if b == a:
-                        continue
-                    term *= (x - xs[b]) / (xs[a] - xs[b])
-                acc += term
-            out[out_idx + i] = acc
-
-
-@nb.njit(parallel=True, nogil=True, cache=True)
-def shift_and_realign_tracks_sparse(
+def _shift_and_realign_tracks_sparse_rust_wrapper(
     out: NDArray[np.floating],
     out_offsets: NDArray[np.integer],
     regions: NDArray[np.integer],
@@ -156,248 +56,31 @@ def shift_and_realign_tracks_sparse(
     keep_offsets: NDArray[np.integer] | None = None,
     strategy_id: int = 0,
     base_seed: np.uint64 = np.uint64(0),
-):
-    """Shift and realign tracks to correspond to haplotypes.
-
-    Parameters
-    ----------
-    out : NDArray[np.float32]
-        Ragged array with shape (batch, ploidy). Shifted and re-aligned tracks.
-    out_offsets : NDArray[np.int64]
-        Shape = (batch*ploidy + 1) Offsets into out.
-    regions : NDArray[np.int32]
-        Shape = (batch, 3) Regions, each is (contig_idx, start, end).
-    shifts : NDArray[np.int32]
-        Shape = (batch, ploidy) Shifts for each haplotype.
-    geno_offset_idx : NDArray[np.intp]
-        Shape = (batch, ploidy) Indices into offsets for each region.
-    geno_v_idxs : NDArray[np.int32]
-        Shape = (variants) Indices of variants.
-    geno_offsets : NDArray[np.uint32]
-        Shape = (tot_regions*samples*ploidy + 1) Offsets into variant idxs.
-    positions : NDArray[np.int32]
-        Shape = (total_variants) Positions of variants.
-    sizes : NDArray[np.int32]
-        Shape = (total_variants) Sizes of variants.
-    tracks : NDArray[np.float32]
-        Shape = (batch*ploidy*length) Tracks.
-    track_offsets : NDArray[np.int64]
-        Shape = (batch + 1) Offsets into tracks.
-    keep : Optional[NDArray[np.bool_]]
-        Shape = (batch*ploidy*variants) Keep mask for genotypes.
-    keep_offsets : Optional[NDArray[np.int64]]
-        Shape = (batch*ploidy + 1) Offsets into keep.
-    """
-    n_regions, ploidy = geno_offset_idx.shape
-    for query in nb.prange(n_regions):
-        t_s, t_e = track_offsets[query], track_offsets[query + 1]
-        q_track = tracks[t_s:t_e]
-        # assumes start is never altered upstream by differing hap lengths (true for left-aligned variants)
-        q_start = regions[query, 1]
-
-        for hap in nb.prange(ploidy):
-            o_idx = geno_offset_idx[query, hap]
-
-            k_idx = query * ploidy + hap
-            if keep is not None and keep_offsets is not None:
-                qh_keep = keep[keep_offsets[k_idx] : keep_offsets[k_idx + 1]]
-            else:
-                qh_keep = None
-
-            out_s, out_e = out_offsets[k_idx], out_offsets[k_idx + 1]
-            qh_out = out[out_s:out_e]
-            qh_shifts = shifts[query, hap]
-
-            shift_and_realign_track_sparse(
-                offset_idx=o_idx,
-                geno_v_idxs=geno_v_idxs,
-                geno_offsets=geno_offsets,
-                v_starts=v_starts,
-                ilens=ilens,
-                shift=qh_shifts,
-                track=q_track,
-                query_start=q_start,
-                out=qh_out,
-                params=params,
-                keep=qh_keep,
-                strategy_id=strategy_id,
-                base_seed=base_seed,
-                query=query,
-                hap=hap,
-            )
-
-
-@nb.njit(nogil=True, cache=True)
-def shift_and_realign_track_sparse(
-    offset_idx: int,
-    geno_v_idxs: NDArray[np.integer],
-    geno_offsets: NDArray[np.integer],
-    v_starts: NDArray[np.integer],
-    ilens: NDArray[np.integer],
-    shift: int,
-    track: NDArray[np.floating],
-    query_start: int,
-    out: NDArray[np.floating],
-    params: NDArray[np.float64],
-    keep: NDArray[np.bool_] | None = None,
-    strategy_id: int = 0,
-    base_seed: np.uint64 = np.uint64(0),
-    query: int = 0,
-    hap: int = 0,
-):
-    """Shift and realign a track to correspond to a haplotype.
-
-    Parameters
-    ----------
-    offset_idx : NDArray[np.int32]
-        Shape = (n_variants) Genotypes of variants.
-    positions : NDArray[np.int32]
-        Shape = (total_variants) Positions of variants.
-    sizes : NDArray[np.int32]
-        Shape = (total_variants) Sizes of variants.
-    shift : int
-        Total amount to shift by.
-    track : NDArray[np.float32]
-        Shape = (length) Track.
-    out : NDArray[np.uint8]
-        Shape = (out_length) Shifted and re-aligned track.
-    keep : Optional[NDArray[np.bool_]]
-        Shape = (n_variants) Keep mask for genotypes.
-    """
-    if geno_offsets.ndim == 1:
-        o_s, o_e = geno_offsets[offset_idx], geno_offsets[offset_idx + 1]
-    else:
-        o_s, o_e = geno_offsets[:, offset_idx]
-    _variant_idxs = geno_v_idxs[o_s:o_e]
-    length = len(out)
-    n_variants = len(_variant_idxs)
-
-    if n_variants == 0:
-        # guaranteed to have shift = 0
-        out[:] = track[:length]
-        return
-
-    # where to get next track value
-    track_idx = 0
-    # where to put next value
-    out_idx = 0
-    # how much we've shifted
-    shifted = 0
-
-    for v in range(n_variants):
-        if keep is not None and not keep[v]:
-            continue
-
-        variant: np.int32 = _variant_idxs[v]
-
-        # position of variant relative to ref from fetch(contig, start, q_end)
-        # i.e. has been put into same coordinate system as ref_idx
-        v_rel_pos = v_starts[variant] - query_start
-        v_diff = ilens[variant]
-        # +1 assumes atomized variants, exactly 1 nt shared between REF and ALT
-        v_rel_end = v_rel_pos - min(0, v_diff) + 1
-
-        # variant is a DEL spanning start
-        if v_diff < 0 and v_rel_pos < 0 and v_rel_end >= 0:
-            track_idx = v_rel_end
-            continue
-
-        # overlapping variants
-        # v_rel_pos < ref_idx only if we see an ALT at a given position a second
-        # time or more. We'll do what bcftools consensus does and only use the
-        # first ALT variant we find.
-        if v_rel_pos < track_idx:
-            continue
-
-        v_len = max(0, v_diff) + 1
-
-        # handle shift
-        if shifted < shift:
-            ref_shift_dist = v_rel_pos - track_idx
-            # need more than variant to finish shift
-            if shifted + ref_shift_dist + v_len < shift:
-                # skip the variant
-                continue
-            # can finish shift without using variant
-            elif shifted + ref_shift_dist >= shift:
-                track_idx += shift - shifted
-                shifted = shift
-                # can still use the variant and whatever ref is left between
-                # ref_idx and the variant
-            # ref + (some of) variant is enough to finish shift
-            else:
-                # how much left to shift - amount of ref we can use
-                allele_start_idx = shift - shifted - ref_shift_dist
-                shifted = shift
-                #! without if statement, parallel=True can cause a SystemError!
-                # * parallel jit cannot handle changes in array dimension.
-                # * without this, allele can change from a 1D array to a 0D
-                # * array.
-                if allele_start_idx == v_len:
-                    # consume track up to end of variant
-                    track_idx = v_rel_end
-                    continue
-                # consume track up to start of variant
-                track_idx = v_rel_pos
-                # adjust variant length
-                v_len -= allele_start_idx
-
-        # SNPs (but not MNPs because we don't have ALT length, MNPs are not atomic)
-        # skipped because for tracks they always match the reference
-        if v_diff == 0:
-            continue
-
-        # add track values up to variant
-        track_len = v_rel_pos - track_idx
-        if out_idx + track_len >= length:
-            # track will get written by final clause
-            # handles case where extraneous variants downstream of the haplotype were provided
-            break
-        out[out_idx : out_idx + track_len] = track[track_idx : track_idx + track_len]
-        out_idx += track_len
-
-        # indels (substitutions are skipped above and then handled by above clause)
-        writable_length = min(v_len, length - out_idx)
-        if v_diff > 0 and strategy_id != _REPEAT_5P:
-            _apply_insertion_fill(
-                out=out,
-                out_idx=out_idx,
-                writable_length=writable_length,
-                v_len=v_len,
-                track=track,
-                v_rel_pos=v_rel_pos,
-                strategy_id=strategy_id,
-                params=params,
-                base_seed=base_seed,
-                query=query,
-                hap=hap,
-            )
-        else:
-            # Deletions and Repeat5p insertions: original behavior.
-            for i in range(writable_length):
-                out[out_idx + i] = track[v_rel_pos]
-        out_idx += writable_length
-        track_idx = v_rel_end
-
-        if out_idx >= length:
-            break
-
-    if shifted < shift:
-        # need to shift the rest of the track
-        track_idx += shift - shifted
-        track_idx = min(track_idx, len(track))
-        shifted = shift
-
-    # fill rest with track and pad with 0
-    unfilled_length = length - out_idx
-    if unfilled_length > 0:
-        writable_ref = min(unfilled_length, len(track) - track_idx)
-        out_end_idx = out_idx + writable_ref
-        ref_end_idx = track_idx + writable_ref
-        out[out_idx:out_end_idx] = track[track_idx:ref_end_idx]
-
-        if out_end_idx < length:
-            out[out_end_idx:] = 0
+    parallel: bool = False,
+) -> None:
+    """Rust wrapper: normalizes geno_offsets to (2, n) form then dispatches."""
+    geno_offsets_2d = _as_starts_stops(geno_offsets)
+    _shift_and_realign_tracks_sparse_rust(
+        out=out,
+        out_offsets=np.asarray(out_offsets, dtype=np.int64),
+        regions=np.asarray(regions, dtype=np.int32),
+        shifts=np.asarray(shifts, dtype=np.int32),
+        geno_offset_idx=np.asarray(geno_offset_idx, dtype=np.int64),
+        geno_v_idxs=np.asarray(geno_v_idxs, dtype=np.int32),
+        geno_offsets=geno_offsets_2d,
+        v_starts=np.asarray(v_starts, dtype=np.int32),
+        ilens=np.asarray(ilens, dtype=np.int32),
+        tracks=np.asarray(tracks, dtype=np.float32),
+        track_offsets=np.asarray(track_offsets, dtype=np.int64),
+        params=np.asarray(params, dtype=np.float64),
+        keep=keep,
+        keep_offsets=np.asarray(keep_offsets, dtype=np.int64)
+        if keep_offsets is not None
+        else None,
+        strategy_id=int(strategy_id),
+        base_seed=int(base_seed),
+        parallel=parallel,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -511,7 +194,7 @@ def _ragged_stack_tracks(tracks: "list[Ragged]") -> "Ragged":
 
 
 # -----------------------------------------------------------------------------
-# Tracks reconstructor (Python-level wrapper around the numba kernels above).
+# Tracks reconstructor.
 # -----------------------------------------------------------------------------
 
 
@@ -648,19 +331,13 @@ class Tracks(Reconstructor[_T]):
             shape = (n_regions, None)
         else:
             shape = (n_regions, n_samples, None)
-        itvs = np.memmap(
-            path / "intervals.npy",
-            dtype=INTERVAL_DTYPE,
-            mode="r",
-        )
-        offsets = np.memmap(
-            path / "offsets.npy",
-            dtype=np.int64,
-            mode="r",
-        )
-        starts = Ragged.from_offsets(itvs["start"], shape, offsets)
-        ends = Ragged.from_offsets(itvs["end"], shape, offsets)
-        values = Ragged.from_offsets(itvs["value"], shape, offsets)
+        starts_data = np.memmap(path / "starts.npy", dtype=np.int32, mode="r")
+        ends_data = np.memmap(path / "ends.npy", dtype=np.int32, mode="r")
+        values_data = np.memmap(path / "values.npy", dtype=np.float32, mode="r")
+        offsets = np.memmap(path / "offsets.npy", dtype=np.int64, mode="r")
+        starts = Ragged.from_offsets(starts_data, shape, offsets)
+        ends = Ragged.from_offsets(ends_data, shape, offsets)
+        values = Ragged.from_offsets(values_data, shape, offsets)
         return RaggedIntervals(starts, ends, values)
 
     def to_kind(self, kind: type[_NewT]) -> Tracks[_NewT]:
@@ -678,6 +355,7 @@ class Tracks(Reconstructor[_T]):
         deterministic: bool,
         splice_plan: SplicePlan | None = None,
         flat: bool = False,
+        to_rc: "NDArray[np.bool_] | None" = None,
     ) -> _T:
         if splice_plan is not None and not issubclass(self.kind, RaggedTracks):
             raise NotImplementedError(
@@ -685,7 +363,7 @@ class Tracks(Reconstructor[_T]):
             )
         if issubclass(self.kind, RaggedTracks):
             out = self._call_float32(
-                idx, r_idx, regions, output_length, splice_plan=splice_plan
+                idx, r_idx, regions, output_length, splice_plan=splice_plan, to_rc=to_rc
             )
         else:
             out = self._call_intervals(idx, flat=flat)
@@ -698,6 +376,7 @@ class Tracks(Reconstructor[_T]):
         regions: NDArray[np.int32],
         output_length: Literal["ragged", "variable"] | int,
         splice_plan: SplicePlan | None = None,
+        to_rc: "NDArray[np.bool_] | None" = None,
     ) -> RaggedTracks:
         batch_size = len(idx)
 
@@ -740,8 +419,19 @@ class Tracks(Reconstructor[_T]):
                 )
 
             out_shape = (len(idx), len(self.active_tracks), None)
-            # flat (b t l)
-            return cast(RaggedTracks, _Flat.from_offsets(out, out_shape, out_offsets))
+            result = _Flat.from_offsets(out, out_shape, out_offsets)
+
+            # Apply reversal in Python (intervals_to_tracks has no to_rc; no indel
+            # realignment is needed here).  Each query's n_tracks rows share the
+            # same to_rc value, so repeat across tracks.
+            if to_rc is not None:
+                n_tracks = len(self.active_tracks)
+                to_rc_expanded = np.ascontiguousarray(
+                    np.repeat(to_rc, n_tracks), np.bool_
+                )
+                result = result.reverse_masked(to_rc_expanded, comp=None)
+
+            return cast(RaggedTracks, result)
 
         # ---- splice plan path ----
         assert not isinstance(output_length, int), (
@@ -792,10 +482,19 @@ class Tracks(Reconstructor[_T]):
 
         # Per-element flat (caller rewraps with group_offsets via _regroup).
         out_shape = (splice_plan.permuted_lengths.shape[0], None)
-        return cast(
-            RaggedTracks,
-            _Flat.from_offsets(out_buf, out_shape, splice_plan.permuted_out_offsets),
+        result_spliced = _Flat.from_offsets(
+            out_buf, out_shape, splice_plan.permuted_out_offsets
         )
+
+        # Apply per-element reversal in Python (no fused kernel with to_rc for
+        # standalone tracks).  to_rc is already the permuted per-element mask
+        # from _getitem_spliced.
+        if to_rc is not None:
+            result_spliced = result_spliced.reverse_masked(
+                np.ascontiguousarray(to_rc, np.bool_), comp=None
+            )
+
+        return cast(RaggedTracks, result_spliced)
 
     def _call_intervals(
         self, idx: NDArray[np.integer], flat: bool = False
@@ -919,3 +618,209 @@ def build_flat_intervals(
         ends=_Flat.from_offsets(data_ends[src], shape, final_offsets),
         values=_Flat.from_offsets(data_values[src], shape, final_offsets),
     )
+
+
+def _xorshift64(x: int) -> int:
+    """Single round of xorshift64 (pure Python). Safe and deterministic."""
+    x = int(x) & 0xFFFFFFFFFFFFFFFF
+    x ^= (x << 13) & 0xFFFFFFFFFFFFFFFF
+    x ^= (x >> 7) & 0xFFFFFFFFFFFFFFFF
+    x ^= (x << 17) & 0xFFFFFFFFFFFFFFFF
+    return x & 0xFFFFFFFFFFFFFFFF
+
+
+def _hash4(a: int, b: int, c: int, d: int) -> int:
+    """Hash four uint64 values into one (pure Python fallback)."""
+    h = int(a) & 0xFFFFFFFFFFFFFFFF
+    h = _xorshift64(h ^ (int(b) & 0xFFFFFFFFFFFFFFFF))
+    h = _xorshift64(h ^ (int(c) & 0xFFFFFFFFFFFFFFFF))
+    h = _xorshift64(h ^ (int(d) & 0xFFFFFFFFFFFFFFFF))
+    return h
+
+
+def _apply_insertion_fill(
+    out,
+    out_idx: int,
+    writable_length: int,
+    v_len: int,
+    track,
+    v_rel_pos: int,
+    strategy_id: int,
+    params,
+    base_seed: int = 0,
+    query: int = 0,
+    hap: int = 0,
+):
+    """Write writable_length values at out[out_idx:] according to insertion-fill strategy.
+
+    Pure Python fallback (no numba). Used by shift_and_realign_track_sparse.
+    """
+    import numpy as np
+
+    track_len = len(track)
+
+    if strategy_id == _REPEAT_5P:
+        out[out_idx : out_idx + writable_length] = track[v_rel_pos]
+
+    elif strategy_id == _REPEAT_5P_NORM:
+        out[out_idx : out_idx + writable_length] = track[v_rel_pos] / v_len
+
+    elif strategy_id == _CONSTANT:
+        out[out_idx : out_idx + writable_length] = params[0]
+
+    elif strategy_id == _FLANK_SAMPLE:
+        width = int(params[0])
+        pool_lo = max(0, v_rel_pos - width)
+        pool_hi = min(track_len - 1, v_rel_pos + width)
+        pool_size = pool_hi - pool_lo + 1
+        for i in range(writable_length):
+            seed = _hash4(base_seed, query, hap, out_idx + i)
+            offset = seed % pool_size
+            out[out_idx + i] = track[pool_lo + offset]
+
+    elif strategy_id == _INTERPOLATE:
+        order = int(params[0])
+        k = (order + 1 + 1) // 2
+        n_anchors = 2 * k
+        xs = np.empty(n_anchors, dtype=np.float64)
+        ys = np.empty(n_anchors, dtype=np.float64)
+        for j in range(k):
+            ref_idx = max(v_rel_pos - j, 0)
+            xs[j] = -float(j)
+            ys[j] = track[ref_idx]
+        for j in range(k):
+            ref_idx = min(v_rel_pos + 1 + j, track_len - 1)
+            xs[k + j] = float(v_len) + float(j)
+            ys[k + j] = track[ref_idx]
+        for i in range(writable_length):
+            x = float(i)
+            acc = 0.0
+            for a in range(n_anchors):
+                term = float(ys[a])
+                for b in range(n_anchors):
+                    if b == a:
+                        continue
+                    term *= (x - xs[b]) / (xs[a] - xs[b])
+                acc += term
+            out[out_idx + i] = acc
+
+
+def shift_and_realign_track_sparse(
+    offset_idx: int,
+    geno_v_idxs,
+    geno_offsets,
+    v_starts,
+    ilens,
+    shift: int,
+    track,
+    query_start: int,
+    out,
+    params,
+    keep=None,
+    strategy_id: int = 0,
+    base_seed: int = 0,
+    query: int = 0,
+    hap: int = 0,
+):
+    """Shift and realign a single track to correspond to a haplotype.
+
+    Pure Python fallback (no numba). Used directly by parity/unit tests.
+    Use :func:`_shift_and_realign_tracks_sparse_rust_wrapper` for batched Rust path.
+    """
+    if geno_offsets.ndim == 1:
+        o_s, o_e = int(geno_offsets[offset_idx]), int(geno_offsets[offset_idx + 1])
+    else:
+        o_s, o_e = int(geno_offsets[0, offset_idx]), int(geno_offsets[1, offset_idx])
+    _variant_idxs = geno_v_idxs[o_s:o_e]
+    length = len(out)
+    n_variants = len(_variant_idxs)
+
+    if n_variants == 0:
+        out[:] = track[:length]
+        return
+
+    track_idx = 0
+    out_idx = 0
+    shifted = 0
+
+    for v in range(n_variants):
+        if keep is not None and not keep[v]:
+            continue
+
+        variant = int(_variant_idxs[v])
+        v_rel_pos = int(v_starts[variant]) - query_start
+        v_diff = int(ilens[variant])
+        v_rel_end = v_rel_pos - min(0, v_diff) + 1
+
+        if v_diff < 0 and v_rel_pos < 0 and v_rel_end >= 0:
+            track_idx = v_rel_end
+            continue
+
+        if v_rel_pos < track_idx:
+            continue
+
+        v_len = max(0, v_diff) + 1
+
+        if shifted < shift:
+            ref_shift_dist = v_rel_pos - track_idx
+            if shifted + ref_shift_dist + v_len < shift:
+                continue
+            elif shifted + ref_shift_dist >= shift:
+                track_idx += shift - shifted
+                shifted = shift
+            else:
+                allele_start_idx = shift - shifted - ref_shift_dist
+                shifted = shift
+                if allele_start_idx == v_len:
+                    track_idx = v_rel_end
+                    continue
+                track_idx = v_rel_pos
+                v_len -= allele_start_idx
+
+        if v_diff == 0:
+            continue
+
+        track_len = v_rel_pos - track_idx
+        if out_idx + track_len >= length:
+            break
+        out[out_idx : out_idx + track_len] = track[track_idx : track_idx + track_len]
+        out_idx += track_len
+
+        writable_length = min(v_len, length - out_idx)
+        if v_diff > 0 and strategy_id != _REPEAT_5P:
+            _apply_insertion_fill(
+                out=out,
+                out_idx=out_idx,
+                writable_length=writable_length,
+                v_len=v_len,
+                track=track,
+                v_rel_pos=v_rel_pos,
+                strategy_id=strategy_id,
+                params=params,
+                base_seed=base_seed,
+                query=query,
+                hap=hap,
+            )
+        else:
+            for i in range(writable_length):
+                out[out_idx + i] = track[v_rel_pos]
+        out_idx += writable_length
+        track_idx = v_rel_end
+
+        if out_idx >= length:
+            break
+
+    if shifted < shift:
+        track_idx += shift - shifted
+        track_idx = min(track_idx, len(track))
+        shifted = shift
+
+    unfilled_length = length - out_idx
+    if unfilled_length > 0:
+        writable_ref = max(0, min(unfilled_length, len(track) - track_idx))
+        out_end_idx = out_idx + writable_ref
+        ref_end_idx = track_idx + writable_ref
+        out[out_idx:out_end_idx] = track[track_idx:ref_end_idx]
+
+        if out_end_idx < length:
+            out[out_end_idx:] = 0

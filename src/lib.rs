@@ -1,8 +1,14 @@
 pub mod bigwig;
 pub mod ffi;
+pub mod genotypes;
 pub mod intervals;
 pub mod ragged;
+pub mod reconstruct;
+pub mod reference;
+pub mod reverse;
 pub mod tables;
+pub mod tracks;
+pub mod variants;
 use numpy::{prelude::*, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::prelude::*;
 use std::path::PathBuf;
@@ -15,10 +21,38 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<tables::RustTable>()?;
     m.add_function(wrap_pyfunction!(ragged::ragged_to_padded, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::intervals_to_tracks, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::get_diffs_sparse, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::choose_exonic_variants, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::gather_rows_i32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::gather_rows_f32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::gather_alleles, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::compact_keep_i32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::compact_keep_f32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::fill_empty_scalar_i32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::fill_empty_scalar_f32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::fill_empty_fixed_i32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::fill_empty_fixed_f32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::fill_empty_seq_u8, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::fill_empty_seq_i32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::assemble_variant_buffers_u8, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::assemble_variant_buffers_i32, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::rc_alleles, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::get_reference, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_from_sparse, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_fused, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::reconstruct_annotated_haplotypes_fused, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_spliced_fused, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::reconstruct_annotated_haplotypes_spliced_fused, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::shift_and_realign_tracks_sparse, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::tracks_to_intervals, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::intervals_and_realign_track_fused, m)?)?;
+    // DEBUG: PRNG parity exports (Task 7) — keep or remove after Task 8/9 review
+    m.add_function(wrap_pyfunction!(ffi::_debug_xorshift64, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::_debug_hash4, m)?)?;
     Ok(())
 }
 
-/// Write intervals.npy + offsets.npy for a bigWig track directly to `out_dir`.
+/// Write SoA starts/ends/values.npy + offsets.npy for a bigWig track directly to `out_dir`.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn bigwig_write_track(

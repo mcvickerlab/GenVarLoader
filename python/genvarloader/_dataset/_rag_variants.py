@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 from seqpro.rag import Ragged
 from seqpro.rag import concatenate as _rag_concatenate
 
+from ._flat_variants import _rc_alleles_rust
 from .._torch import TORCH_AVAILABLE, requires_torch
 
 if TORCH_AVAILABLE:
@@ -294,10 +295,6 @@ class RaggedVariants(Ragged):
         return self.start - np.clip(ilen, None, 0) + 1
 
     def rc_(self, to_rc: NDArray[np.bool_] | None = None) -> "RaggedVariants":
-        from .._ragged import _COMP
-
-        from seqpro.rag import reverse_complement as _sp_reverse_complement
-
         b = self.shape[0]
         if to_rc is None:
             to_rc = np.ones(b, np.bool_)
@@ -320,9 +317,8 @@ class RaggedVariants(Ragged):
                 char_off = chars._layout.offsets[-1]  # char-level: (n_alleles+1,)
                 n_alleles = len(char_off) - 1
 
-                # Build a flat allele-level R=1 view on a copy of the data buffer.
+                # Copy the data buffer; rc_alleles mutates it in place.
                 data = chars.data.copy()
-                view = Ragged.from_offsets(data, (n_alleles, None), char_off)
 
                 # Expand to_rc (per-batch, size b) to per-allele (size n_alleles).
                 # Batch element i_b owns alleles var_off[i_b*p] .. var_off[(i_b+1)*p]-1.
@@ -330,7 +326,12 @@ class RaggedVariants(Ragged):
                 alleles_per_batch = var_off[batch_starts + p] - var_off[batch_starts]
                 allele_mask = np.repeat(to_rc, alleles_per_batch)
 
-                _sp_reverse_complement(view, _COMP, mask=allele_mask, copy=False)
+                _rc_alleles_rust(
+                    data.view(np.uint8),
+                    np.asarray(char_off, np.int64),
+                    np.arange(n_alleles + 1, dtype=np.int64),
+                    allele_mask,
+                )
 
                 # Rebuild as opaque-string field with the same shape and offsets.
                 rebuilt = Ragged.from_offsets(

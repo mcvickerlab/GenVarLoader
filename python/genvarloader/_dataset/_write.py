@@ -34,16 +34,37 @@ from seqpro.rag import Ragged, concatenate as rag_concatenate
 from tqdm.auto import tqdm
 
 from .._atomic import atomic_dir
-from .._ragged import INTERVAL_DTYPE
+from .._ragged import INTERVAL_DTYPE  # noqa: F401  # Task 3 migration reader imports this
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._svar_link import SvarLink
-from ._utils import bed_to_regions, regions_to_bed, splits_sum_le_value
+from ._utils import bed_to_regions, regions_to_bed
 
 
-DATASET_FORMAT_VERSION = SemanticVersion.parse("1.0.0")
+DATASET_FORMAT_VERSION = SemanticVersion.parse("2.0.0")
 """On-disk layout version for a gvl.write dataset directory. Bump MAJOR only when
 an existing dataset can no longer be read correctly by new code."""
+
+
+def _check_dataset_format_version(meta: "Metadata", path: Path) -> None:
+    """Validate a dataset's on-disk format version against the supported major.
+
+    Pre-versioning datasets (``format_version is None``) and any older major are
+    treated as needing migration. A newer major means the reader is too old.
+    """
+    fv = meta.format_version
+    current = DATASET_FORMAT_VERSION
+    if fv is None or fv.major < current.major:
+        raise ValueError(
+            f"Dataset at {path} uses format version {fv} but this genvarloader "
+            f"expects {current}. Run `genvarloader.migrate({str(path)!r})` to "
+            f"upgrade it in place."
+        )
+    if fv.major > current.major:
+        raise ValueError(
+            f"Dataset at {path} was written by a newer genvarloader (format "
+            f"version {fv} > supported {current}). Upgrade genvarloader."
+        )
 
 
 def _run_jobs(jobs: "list[Callable[[int], None]]", max_mem: int) -> None:
@@ -1084,18 +1105,17 @@ def _write_phased_variants_chunk(
 
 def _write_ragged_intervals(out_dir: Path, itvs: "RaggedIntervals") -> None:
     """Write a RaggedIntervals (values/starts/ends share offsets) to out_dir as
-    intervals.npy + offsets.npy. Single-chunk writer used for annotation tracks."""
+    struct-of-arrays: starts/ends/values.npy + offsets.npy. Single-chunk writer
+    used for annotation tracks (format 2.0)."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = np.memmap(
-        out_dir / "intervals.npy",
-        dtype=INTERVAL_DTYPE,
-        mode="w+",
-        shape=itvs.values.data.shape,
-    )
-    out["start"] = itvs.starts.data
-    out["end"] = itvs.ends.data
-    out["value"] = itvs.values.data
-    out.flush()
+    for name, data, dt in (
+        ("starts", itvs.starts.data, np.int32),
+        ("ends", itvs.ends.data, np.int32),
+        ("values", itvs.values.data, np.float32),
+    ):
+        out = np.memmap(out_dir / f"{name}.npy", dtype=dt, mode="w+", shape=data.shape)
+        out[:] = data
+        out.flush()
 
     offsets = itvs.values.offsets
     out = np.memmap(
@@ -1231,135 +1251,6 @@ def _write_annot_track(
     _write_ragged_intervals(out_dir, itvs)
 
 
-def _write_track_legacy(
-    out_dir: Path,
-    bed: pl.DataFrame,
-    track: "IntervalTrack",
-    samples: list[str] | None,
-    max_mem: int,
-):
-    if samples is None:
-        _samples = track.samples
-    else:
-        if missing := (set(samples) - set(track.samples)):
-            raise ValueError(f"Samples {missing} not found in track.")
-        _samples = samples
-
-    MEM_PER_INTERVAL = (
-        12 * 2
-    )  # start u32, end u32, value f32, times 2 for intermediate copies
-    chunk_labels = np.empty(bed.height, np.uint32)
-    chunk_offsets: dict[int, NDArray[np.int64]] = {}
-    n_chunks = 0
-    last_chunk_offset = 0
-    pbar = tqdm(total=bed["chrom"].n_unique())
-    for (contig,), part in bed.partition_by(
-        "chrom", as_dict=True, include_key=False, maintain_order=True
-    ).items():
-        pbar.set_description(f"Calculating memory usage for {part.height} regions")
-        contig = cast(str, contig)
-        _contig = normalize_contig_name(contig, track.contigs)
-        if _contig is not None:
-            starts = part["chromStart"].to_numpy()
-            ends = part["chromEnd"].to_numpy()
-
-            # (regions, samples)
-            n_per_query = track.count_intervals(contig, starts, ends, sample=_samples)
-            # (regions)
-            mem_per_r = n_per_query.sum(1) * MEM_PER_INTERVAL
-
-            if np.any(mem_per_r > max_mem):
-                # TODO subset by samples as well if needed
-                raise NotImplementedError(
-                    f"""Memory usage per region exceeds maximum of {max_mem / 1e9} GB.
-                    Largest amount needed for a single region is {mem_per_r.max() / 1e9} GB, set
-                    `max_mem` to this value or higher. Otherwise, chunking by region and sample is
-                    not yet implemented."""
-                )
-
-            split_offsets = splits_sum_le_value(mem_per_r, max_mem)
-            split_lengths = np.diff(split_offsets)
-            for i in range(len(split_lengths)):
-                o_s, o_e = split_offsets[i], split_offsets[i + 1]
-                chunk_idx = n_chunks + i
-                chunk_offsets[chunk_idx] = lengths_to_offsets(
-                    n_per_query[o_s:o_e].ravel()
-                )
-            first_chunk_idx = n_chunks
-            last_chunk_idx = n_chunks + len(split_lengths)
-            _chunk_labels = np.arange(
-                first_chunk_idx, last_chunk_idx, dtype=np.uint32
-            ).repeat(split_lengths)
-            chunk_labels[last_chunk_offset : last_chunk_offset + len(_chunk_labels)] = (
-                _chunk_labels
-            )
-            n_chunks += len(split_lengths)
-            last_chunk_offset += len(_chunk_labels)
-        pbar.update()
-    pbar.close()
-    bed = bed.with_columns(chunk=pl.lit(chunk_labels))
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    interval_offset = 0
-    offset_offset = 0
-    last_offset = 0
-    pbar = tqdm(total=bed["chunk"].n_unique())
-    for (chunk_idx,), part in bed.partition_by(
-        "chunk", as_dict=True, include_key=False, maintain_order=True
-    ).items():
-        chunk_idx = cast(int, chunk_idx)
-        contig = cast(str, part[0, "chrom"])
-        pbar.set_description(f"Reading intervals for {part.height} regions on {contig}")
-        starts = part["chromStart"].to_numpy()
-        ends = part["chromEnd"].to_numpy()
-        _offsets = chunk_offsets[chunk_idx]
-
-        intervals = track._intervals_from_offsets(
-            contig, starts, ends, _offsets, sample=_samples
-        )
-
-        pbar.set_description(f"Writing intervals for {part.height} regions on {contig}")
-        out = np.memmap(
-            out_dir / "intervals.npy",
-            dtype=INTERVAL_DTYPE,
-            mode="w+" if interval_offset == 0 else "r+",
-            shape=intervals.values.data.shape,
-            offset=interval_offset,
-        )
-        out["start"] = intervals.starts.data
-        out["end"] = intervals.ends.data
-        out["value"] = intervals.values.data
-        out.flush()
-        interval_offset += out.nbytes
-
-        offsets = intervals.values.offsets
-        offsets += last_offset
-        last_offset = offsets[-1]
-        out = np.memmap(
-            out_dir / "offsets.npy",
-            dtype=offsets.dtype,
-            mode="w+" if offset_offset == 0 else "r+",
-            shape=len(offsets) - 1,
-            offset=offset_offset,
-        )
-        out[:] = offsets[:-1]
-        out.flush()
-        offset_offset += out.nbytes
-        pbar.update()
-    pbar.close()
-
-    out = np.memmap(
-        out_dir / "offsets.npy",
-        dtype=offsets.dtype,
-        mode="r+",
-        shape=1,
-        offset=offset_offset,
-    )
-    out[-1] = offsets[-1]
-    out.flush()
-
-
 def _write_track_rust(
     out_dir: Path,
     bed: pl.DataFrame,
@@ -1440,4 +1331,7 @@ def _write_track(
         if missing := (set(_samples) - set(track.samples)):
             raise ValueError(f"Samples {missing} not found in track.")
         return _write_track_table(out_dir, bed, track, _samples, max_mem)
-    return _write_track_legacy(out_dir, bed, track, samples, max_mem)
+    raise TypeError(
+        f"Unsupported track type {type(track).__name__!r}; "
+        "tracks must be a genvarloader.BigWigs or genvarloader.Table."
+    )

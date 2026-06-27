@@ -36,22 +36,20 @@ def test_write_with_table_only_roundtrip(tmp_path):
     out = tmp_path / "ds.gvl"
     gvl.write(path=out, bed=bed, tracks=table)
 
-    # Sanity: the dataset directory has the expected per-track folder.
-    assert (out / "intervals" / "signal" / "intervals.npy").exists()
-    assert (out / "intervals" / "signal" / "offsets.npy").exists()
+    # Sanity: the dataset directory has the expected per-track SoA files.
+    sig_dir = out / "intervals" / "signal"
+    for name in ("starts.npy", "ends.npy", "values.npy", "offsets.npy"):
+        assert (sig_dir / name).exists()
 
     # Read intervals back and confirm values round-trip.
-    INTERVAL_DTYPE = np.dtype(
-        [("start", np.int32), ("end", np.int32), ("value", np.float32)],
-        align=True,
-    )
-    arr = np.memmap(
-        out / "intervals" / "signal" / "intervals.npy", dtype=INTERVAL_DTYPE, mode="r"
-    )
+    starts = np.memmap(sig_dir / "starts.npy", dtype=np.int32, mode="r")
+    ends = np.memmap(sig_dir / "ends.npy", dtype=np.int32, mode="r")
+    values = np.memmap(sig_dir / "values.npy", dtype=np.float32, mode="r")
     # Both samples + both regions should produce 4 intervals total.
-    assert arr.shape[0] == 4
-    values = sorted(float(v) for v in arr["value"])
-    assert values == [1.0, 2.0, 3.0, 4.0]
+    assert len(starts) == 4
+    assert len(ends) == 4
+    assert len(values) == 4
+    assert sorted(float(v) for v in values) == [1.0, 2.0, 3.0, 4.0]
 
 
 def test_write_with_mixed_bigwigs_and_table(tmp_path, bigwig_dir: Path):
@@ -87,8 +85,10 @@ def test_write_with_mixed_bigwigs_and_table(tmp_path, bigwig_dir: Path):
     out = tmp_path / "mixed.gvl"
     gvl.write(path=out, bed=bed, tracks=[bw, table])
 
-    assert (out / "intervals" / "bw_signal" / "intervals.npy").exists()
-    assert (out / "intervals" / "tab_signal" / "intervals.npy").exists()
+    for track_name in ("bw_signal", "tab_signal"):
+        track_dir = out / "intervals" / track_name
+        for name in ("starts.npy", "ends.npy", "values.npy", "offsets.npy"):
+            assert (track_dir / name).exists()
 
 
 def test_write_with_variants_and_tracks(tmp_path, vcf_dir: Path):
@@ -121,8 +121,9 @@ def test_write_with_variants_and_tracks(tmp_path, vcf_dir: Path):
     gvl.write(path=out, bed=bed, variants=vcf, tracks=table)
 
     assert (out / "genotypes").is_dir()
-    assert (out / "intervals" / "signal" / "intervals.npy").exists()
-    assert (out / "intervals" / "signal" / "offsets.npy").exists()
+    sig_dir = out / "intervals" / "signal"
+    for name in ("starts.npy", "ends.npy", "values.npy", "offsets.npy"):
+        assert (sig_dir / name).exists()
 
     import json
 

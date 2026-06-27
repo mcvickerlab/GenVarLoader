@@ -83,12 +83,17 @@ basenji2-pytorch = ">=0.1.2"
 [feature.py310.dependencies]
 python = "3.10.*"
 numpy = "1.26.*"
+# numba kept as a CONDA pin only because seqpro (a hard dep) eagerly imports
+# numba, and only the conda build ships a working libllvmlite.so in this env —
+# the PyPI numba/llvmlite wheel fails to load here. genvarloader's OWN code is
+# numba-free (see tests/parity/test_import_no_numba.py); this pin is purely to
+# keep seqpro's transitive numba working. Drop once seqpro stops importing numba.
 numba = "==0.59.1"
 
 [feature.py310.pypi-dependencies]
 pyarrow = ">=21"
 hirola = "==0.3"
-seqpro = "==0.18.0"
+seqpro = "==0.20.0"
 genoray = "==2.12.3"
 polars = "==1.37.1"
 loguru = "*"
@@ -142,9 +147,14 @@ test-join-audit = { cmd = "pytest tests -p tests._join_audit_plugin", depends-on
 typecheck = { cmd = "pyrefly check" }
 bench = { cmd = "pytest tests/benchmarks --codspeed -p no:cov" }
 bench-local = { cmd = "pytest tests/benchmarks --benchmark-only -p no:cov" }
-profile-haps = { cmd = "py-spy record -o tests/benchmarks/profiling/haps.speedscope.json -f speedscope -- python tests/benchmarks/profiling/profile.py --mode haplotypes" }
-profile-tracks = { cmd = "py-spy record -o tests/benchmarks/profiling/tracks.speedscope.json -f speedscope -- python tests/benchmarks/profiling/profile.py --mode tracks" }
-profile-variants = { cmd = "py-spy record -o tests/benchmarks/profiling/variants.speedscope.json -f speedscope -- python tests/benchmarks/profiling/profile.py --mode variants" }
+# perf on the Python process (NOT py-spy --native, which slows deep-stack paths ~10x).
+# No sudo on Carter (perf_event_paranoid=2 allows user-space sampling of own process);
+# resolves genvarloader.abi3.so Rust symbols. View with:
+#   perf report --stdio --no-children -i tests/benchmarks/profiling/<mode>.perf.data
+# $CONDA_PREFIX/bin/python = the active pixi env interpreter (perf must exec the right one).
+profile-haps = { cmd = "perf record -F 999 -o tests/benchmarks/profiling/haps.perf.data -- $CONDA_PREFIX/bin/python tests/benchmarks/profiling/profile.py --mode haplotypes --n-batches 12000" }
+profile-tracks = { cmd = "perf record -F 999 -o tests/benchmarks/profiling/tracks.perf.data -- $CONDA_PREFIX/bin/python tests/benchmarks/profiling/profile.py --mode tracks --n-batches 12000" }
+profile-variants = { cmd = "perf record -F 999 -o tests/benchmarks/profiling/variants.perf.data -- $CONDA_PREFIX/bin/python tests/benchmarks/profiling/profile.py --mode variants --n-batches 12000" }
 memray-haps = { cmd = "memray run -fo tests/benchmarks/profiling/haps.memray.bin tests/benchmarks/profiling/profile.py --mode haplotypes" }
 memray-tracks = { cmd = "memray run -fo tests/benchmarks/profiling/tracks.memray.bin tests/benchmarks/profiling/profile.py --mode tracks" }
 memray-variants = { cmd = "memray run -fo tests/benchmarks/profiling/variants.memray.bin tests/benchmarks/profiling/profile.py --mode variants" }

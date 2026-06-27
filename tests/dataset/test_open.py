@@ -30,6 +30,7 @@ def _write_minimal_metadata(path: Path, *, ploidy: int | None = None) -> None:
         "max_jitter": 0,
         "ploidy": ploidy,
         "version": None,
+        "format_version": "2.0.0",
         "svar_link": None,
     }
     (path / "metadata.json").write_text(json.dumps(meta))

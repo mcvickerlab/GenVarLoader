@@ -16,8 +16,8 @@ def test_metadata_has_format_version_field():
     assert m.format_version is None
 
 
-def test_dataset_format_version_is_1_0_0():
-    assert str(DATASET_FORMAT_VERSION) == "1.0.0"
+def test_dataset_format_version_is_2_0_0():
+    assert str(DATASET_FORMAT_VERSION) == "2.0.0"
 
 
 def test_write_stamps_format_version():
@@ -28,7 +28,7 @@ def test_write_stamps_format_version():
         format_version=DATASET_FORMAT_VERSION,
     ).model_dump_json()
     back = Metadata.model_validate_json(raw)
-    assert str(back.format_version) == "1.0.0"
+    assert str(back.format_version) == "2.0.0"
 
 
 def test_write_is_atomic_no_temp_left(phased_vcf_gvl):
@@ -87,7 +87,7 @@ def test_format_version_stamped_on_disk(synthetic_case, tmp_path):
     )
 
     meta = json.loads((dest / "metadata.json").read_text())
-    assert meta["format_version"] == "1.0.0"
+    assert meta["format_version"] == "2.0.0"
 
 
 def test_failure_leaves_no_partial_artifacts(synthetic_case, tmp_path):

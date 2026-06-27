@@ -6,9 +6,28 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-import numba as nb
 import numpy as np
 from numpy.typing import NDArray
+
+from ..genvarloader import compact_keep_f32 as _compact_keep_f32_rust
+from ..genvarloader import compact_keep_i32 as _compact_keep_i32_rust
+from ..genvarloader import fill_empty_fixed_f32 as _fill_empty_fixed_f32_rust
+from ..genvarloader import fill_empty_fixed_i32 as _fill_empty_fixed_i32_rust
+from ..genvarloader import fill_empty_scalar_f32 as _fill_empty_scalar_f32_rust
+from ..genvarloader import fill_empty_scalar_i32 as _fill_empty_scalar_i32_rust
+from ..genvarloader import (
+    assemble_variant_buffers_i32 as _assemble_variant_buffers_i32_rust,
+)
+from ..genvarloader import (
+    assemble_variant_buffers_u8 as _assemble_variant_buffers_u8_rust,
+)
+from ..genvarloader import fill_empty_seq_i32 as _fill_empty_seq_i32_rust
+from ..genvarloader import fill_empty_seq_u8 as _fill_empty_seq_u8_rust
+from ..genvarloader import gather_alleles as _gather_alleles_rust
+from ..genvarloader import gather_rows_f32 as _gather_rows_f32_rust
+from ..genvarloader import gather_rows_i32 as _gather_rows_i32_rust
+from ..genvarloader import rc_alleles as _rc_alleles_rust_kernel
+from ._genotypes import _as_starts_stops
 
 if TYPE_CHECKING:
     from ._haps import Haps
@@ -99,26 +118,18 @@ class _FlatAlleles:
     def reverse_masked(self, mask: NDArray[np.bool_]) -> "_FlatAlleles":
         """DNA reverse-complement the mask-selected rows' alleles, in place.
 
-        ``mask`` is one entry per region (length ``b``); it is broadcast across
-        ploidy then across each (b*p) row's variant count, exactly matching
-        ``RaggedVariants.rc_`` (``np.repeat(to_rc, ploidy)`` then
-        ``np.repeat(per_bp, np.diff(group_off))``).
+        ``mask`` is one entry per region (length ``b``); broadcast across ploidy
+        to a per-(b*p) row mask, then expanded per-allele inside the dispatched
+        ``rc_alleles`` kernel (rust default, seqpro reference).
         """
-        from seqpro.rag import Ragged
-
-        from .._ragged import reverse_complement_masked
-
         m = np.ascontiguousarray(mask, np.bool_).reshape(-1)
-        # per-(b*p) mask: broadcast each region's flag across ploidy
-        per_bp = np.repeat(m, self.ploidy)
-        # per-allele mask: repeat each row's flag across its variant count
-        per_allele = np.repeat(per_bp, np.diff(self.var_offsets))
-        view = Ragged.from_offsets(
-            self.byte_data.view("S1"),
-            (per_allele.size, None),
+        per_bp = np.repeat(m, self.ploidy)  # per-(b*p) row mask
+        _rc_alleles_rust(
+            self.byte_data,
             np.asarray(self.seq_offsets, np.int64),
+            np.asarray(self.var_offsets, np.int64),
+            per_bp,
         )
-        reverse_complement_masked(view, per_allele)  # mutates byte_data in place
         return self
 
     def reshape(self, shape: int | tuple[int, ...]) -> "_FlatAlleles":
@@ -429,110 +440,68 @@ class _FlatVariants:
         return out
 
 
-@nb.njit(nogil=True, cache=True)
-def _gather_v_idxs(
-    geno_offset_idx, geno_offsets, geno_v_idxs
-):  # pragma: no cover - njit
-    """Gather per-row variant indices: for each row's offset slice into the
-    sparse arrays, copy its values out into flat ``(data, offsets)``.
+def _gather_alleles(v_idxs, allele_bytes, allele_offsets):
+    return _gather_alleles_rust(
+        np.ascontiguousarray(v_idxs, np.int32),
+        np.ascontiguousarray(allele_bytes, np.uint8),
+        np.ascontiguousarray(allele_offsets, np.int64),
+    )
 
-    ``geno_offsets`` must be 1-D contiguous (length n_rows + 1).  For the
-    non-contiguous (2, n_rows) starts/stops form use :func:`_gather_v_idxs_ss`.
-    """
+
+def _gather_rows_numpy(geno_offset_idx, off2d, data):
+    """Dtype-preserving row gather for arbitrary dtypes (numpy fallback)."""
+    geno_starts = off2d[0]
+    geno_stops = off2d[1]
     n_rows = geno_offset_idx.shape[0]
     out_offsets = np.empty(n_rows + 1, np.int64)
     out_offsets[0] = 0
     for i in range(n_rows):
-        goi = geno_offset_idx[i]
-        out_offsets[i + 1] = out_offsets[i] + (
-            geno_offsets[goi + 1] - geno_offsets[goi]
-        )
-    total = out_offsets[n_rows]
-    v_idxs = np.empty(total, geno_v_idxs.dtype)
-    dst = 0
-    for i in range(n_rows):
-        goi = geno_offset_idx[i]
-        s = geno_offsets[goi]
-        e = geno_offsets[goi + 1]
-        for k in range(s, e):
-            v_idxs[dst] = geno_v_idxs[k]
-            dst += 1
-    return v_idxs, out_offsets
-
-
-@nb.njit(nogil=True, cache=True)
-def _gather_v_idxs_ss(
-    geno_offset_idx, geno_starts, geno_stops, geno_v_idxs
-):  # pragma: no cover - njit
-    """Like :func:`_gather_v_idxs` but for non-contiguous (starts, stops) offsets.
-
-    ``geno_starts`` and ``geno_stops`` are the two rows of a ``(2, n)`` offset
-    array (``geno_starts = geno_offsets[0]``, ``geno_stops = geno_offsets[1]``).
-    """
-    n_rows = geno_offset_idx.shape[0]
-    out_offsets = np.empty(n_rows + 1, np.int64)
-    out_offsets[0] = 0
-    for i in range(n_rows):
-        goi = geno_offset_idx[i]
+        goi = int(geno_offset_idx[i])
         out_offsets[i + 1] = out_offsets[i] + (geno_stops[goi] - geno_starts[goi])
-    total = out_offsets[n_rows]
-    v_idxs = np.empty(total, geno_v_idxs.dtype)
+    total = int(out_offsets[n_rows])
+    out_data = np.empty(total, data.dtype)
     dst = 0
     for i in range(n_rows):
-        goi = geno_offset_idx[i]
-        s = geno_starts[goi]
-        e = geno_stops[goi]
-        for k in range(s, e):
-            v_idxs[dst] = geno_v_idxs[k]
-            dst += 1
-    return v_idxs, out_offsets
+        goi = int(geno_offset_idx[i])
+        s = int(geno_starts[goi])
+        e = int(geno_stops[goi])
+        out_data[dst : dst + (e - s)] = data[s:e]
+        dst += e - s
+    return out_data, out_offsets
 
 
-@nb.njit(nogil=True, cache=True)
-def _gather_alleles(v_idxs, allele_bytes, allele_offsets):  # pragma: no cover - njit
-    """Gather variable-length allele bytestrings for ``v_idxs`` from the global
-    allele byte buffer into flat ``(data, seq_offsets)``."""
-    n = v_idxs.shape[0]
-    seq_offsets = np.empty(n + 1, np.int64)
-    seq_offsets[0] = 0
-    for i in range(n):
-        v = v_idxs[i]
-        seq_offsets[i + 1] = seq_offsets[i] + (
-            allele_offsets[v + 1] - allele_offsets[v]
-        )
-    data = np.empty(seq_offsets[n], np.uint8)
-    dst = 0
-    for i in range(n):
-        v = v_idxs[i]
-        s = allele_offsets[v]
-        e = allele_offsets[v + 1]
-        for k in range(s, e):
-            data[dst] = allele_bytes[k]
-            dst += 1
-    return data, seq_offsets
-
-
-@nb.njit(nogil=True, cache=True)
-def _compact_keep(v_idxs, row_offsets, keep):  # pragma: no cover - njit
-    """Drop variants where ``keep`` is False, rebuilding row offsets. The first
-    param is per-variant values to compact -- either ``v_idxs`` itself or a
-    parallel array (e.g. gathered dosage values) sharing the same row layout."""
+def _compact_keep_numpy(v_idxs, row_offsets, keep):
+    """Dtype-preserving compact-keep for arbitrary dtypes (numpy fallback)."""
     n_rows = row_offsets.shape[0] - 1
     new_offsets = np.empty(n_rows + 1, np.int64)
     new_offsets[0] = 0
-    n_keep = 0
     for i in range(n_rows):
-        for j in range(row_offsets[i], row_offsets[i + 1]):
-            if keep[j]:
-                n_keep += 1
-        new_offsets[i + 1] = n_keep
+        cnt = int(np.count_nonzero(keep[row_offsets[i] : row_offsets[i + 1]]))
+        new_offsets[i + 1] = new_offsets[i] + cnt
+    n_keep = int(new_offsets[n_rows])
     new_v = np.empty(n_keep, v_idxs.dtype)
-    dst = 0
-    for j in range(v_idxs.shape[0]):
-        if keep[j]:
-            new_v[dst] = v_idxs[j]
-            dst += 1
+    new_v[:] = v_idxs[keep]
     return new_v, new_offsets
+
+
+def _compact_keep(v_idxs, row_offsets, keep):
+    """Dispatch compact-keep by dtype, preserving the input dtype without down-cast.
+
+    Routes int32 → compact_keep_i32 (Rust), float32 → compact_keep_f32 (Rust).
+    All other dtypes (e.g. int16, int64 custom FORMAT fields, issue #231) fall
+    back to the dtype-preserving numpy kernel so values are never silently
+    coerced.
+    """
+    values = np.ascontiguousarray(v_idxs)
+    row_offsets = np.ascontiguousarray(row_offsets, np.int64)
+    keep = np.ascontiguousarray(keep, np.bool_)
+    if values.dtype == np.int32:
+        return _compact_keep_i32_rust(values, row_offsets, keep)
+    if values.dtype == np.float32:
+        return _compact_keep_f32_rust(values, row_offsets, keep)
+    # Arbitrary dtypes (custom FORMAT fields, e.g. int16, int64): dtype-preserving
+    # numpy fallback — never down-cast.
+    return _compact_keep_numpy(values, row_offsets, keep)
 
 
 def _gather_rows(
@@ -540,120 +509,267 @@ def _gather_rows(
     offsets: NDArray[np.int64],
     data: NDArray,
 ) -> tuple[NDArray, NDArray[np.int64]]:
-    """Dispatch to the correct gather kernel based on offset array shape.
+    """Dispatch per-row gather (numba/rust), preserving data dtype.
 
-    ``offsets`` may be:
-    - 1-D ``(n + 1,)``: contiguous offsets — use :func:`_gather_v_idxs`.
-    - 2-D ``(2, n)``: non-contiguous starts/stops — use :func:`_gather_v_idxs_ss`.
+    Routes int32 and float32 to typed Rust cores; all other dtypes fall back to
+    the dtype-preserving numpy kernel so values are never silently down-cast
+    (e.g. custom per-call FORMAT fields, issue #231).
     """
-    if offsets.ndim == 1:
-        return _gather_v_idxs(geno_offset_idx, offsets, data)
-    else:
-        return _gather_v_idxs_ss(geno_offset_idx, offsets[0], offsets[1], data)
+    goi = np.ascontiguousarray(geno_offset_idx, np.int64)
+    off2d = _as_starts_stops(offsets)
+    data = np.ascontiguousarray(data)
+    if data.dtype == np.int32:
+        return _gather_rows_i32_rust(goi, off2d, data)
+    if data.dtype == np.float32:
+        return _gather_rows_f32_rust(goi, off2d, data)
+    # Arbitrary custom-FORMAT-field dtypes (#231): no typed Rust core — use the
+    # dtype-preserving numpy kernel directly so values are never down-cast.
+    return _gather_rows_numpy(goi, off2d, data)
 
 
-@nb.njit(nogil=True, cache=True)
-def _fill_empty_scalar(data, offsets, fill):  # pragma: no cover - njit
-    """Insert one ``fill`` element into each empty row; copy non-empty rows
-    through. Returns ``(new_data, new_offsets)``."""
+def _fill_empty_scalar_numpy(data, offsets, fill):
+    """Dtype-preserving fill-empty-scalar for arbitrary dtypes (numpy fallback)."""
     n_rows = offsets.shape[0] - 1
+    lengths = np.diff(offsets)
+    new_lengths = np.where(lengths > 0, lengths, 1)
     new_offsets = np.empty(n_rows + 1, np.int64)
     new_offsets[0] = 0
-    for i in range(n_rows):
-        ln = offsets[i + 1] - offsets[i]
-        new_offsets[i + 1] = new_offsets[i] + (ln if ln > 0 else 1)
+    new_offsets[1:] = np.cumsum(new_lengths)
     new_data = np.empty(new_offsets[n_rows], data.dtype)
     for i in range(n_rows):
-        s = offsets[i]
-        e = offsets[i + 1]
-        d = new_offsets[i]
+        s, e = int(offsets[i]), int(offsets[i + 1])
+        d = int(new_offsets[i])
         if e == s:
             new_data[d] = fill
         else:
-            for k in range(s, e):
-                new_data[d] = data[k]
-                d += 1
+            new_data[d : d + (e - s)] = data[s:e]
     return new_data, new_offsets
 
 
-@nb.njit(nogil=True, cache=True)
-def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):  # pragma: no cover - njit
-    """Two-level analogue of ``_fill_empty_scalar`` for allele bytestrings.
-    Empty variant-rows receive one dummy allele of ``dummy`` bytes. Returns
-    ``(new_data, new_var_offsets, new_seq_offsets)``."""
+def _fill_empty_scalar(data, offsets, fill):
+    """Dtype-preserving dispatch for fill-empty-scalar.
+
+    Routes int32 and float32 to typed Rust cores; all other dtypes (e.g.
+    custom FORMAT fields, issue #231) fall back to the dtype-preserving numpy
+    kernel so values are never silently down-cast.
+    """
+    data = np.ascontiguousarray(data)
+    offsets = np.ascontiguousarray(offsets, np.int64)
+    if data.dtype == np.int32:
+        return _fill_empty_scalar_i32_rust(data, offsets, int(fill))
+    if data.dtype == np.float32:
+        return _fill_empty_scalar_f32_rust(data, offsets, float(fill))
+    # Arbitrary dtype (custom FORMAT fields): preserve dtype via numpy fallback.
+    return _fill_empty_scalar_numpy(data, offsets, fill)
+
+
+def _fill_empty_seq_numpy(data, var_offsets, seq_offsets, dummy):
+    """Dtype-preserving fill-empty-seq for arbitrary dtypes (numpy fallback)."""
     n_rows = var_offsets.shape[0] - 1
     L = dummy.shape[0]
+    nv_lengths = np.diff(var_offsets)
+    new_var_lengths = np.where(nv_lengths > 0, nv_lengths, 1)
     new_var = np.empty(n_rows + 1, np.int64)
     new_var[0] = 0
-    for i in range(n_rows):
-        nv = var_offsets[i + 1] - var_offsets[i]
-        new_var[i + 1] = new_var[i] + (nv if nv > 0 else 1)
-    total_vars = new_var[n_rows]
+    new_var[1:] = np.cumsum(new_var_lengths)
+    total_vars = int(new_var[n_rows])
     new_seq = np.empty(total_vars + 1, np.int64)
     new_seq[0] = 0
     vptr = 0
     for i in range(n_rows):
-        vs = var_offsets[i]
-        ve = var_offsets[i + 1]
+        vs, ve = int(var_offsets[i]), int(var_offsets[i + 1])
         if ve == vs:
             new_seq[vptr + 1] = new_seq[vptr] + L
             vptr += 1
         else:
             for v in range(vs, ve):
-                vlen = seq_offsets[v + 1] - seq_offsets[v]
+                vlen = int(seq_offsets[v + 1]) - int(seq_offsets[v])
                 new_seq[vptr + 1] = new_seq[vptr] + vlen
                 vptr += 1
-    new_data = np.empty(new_seq[total_vars], data.dtype)
+    total_bytes = int(new_seq[total_vars])
+    new_data = np.empty(total_bytes, data.dtype)
     vptr = 0
     dptr = 0
     for i in range(n_rows):
-        vs = var_offsets[i]
-        ve = var_offsets[i + 1]
+        vs, ve = int(var_offsets[i]), int(var_offsets[i + 1])
         if ve == vs:
-            for k in range(L):
-                new_data[dptr] = dummy[k]
-                dptr += 1
+            new_data[dptr : dptr + L] = dummy
+            dptr += L
             vptr += 1
         else:
             for v in range(vs, ve):
-                bs = seq_offsets[v]
-                be = seq_offsets[v + 1]
-                for k in range(bs, be):
-                    new_data[dptr] = data[k]
-                    dptr += 1
+                bs, be = int(seq_offsets[v]), int(seq_offsets[v + 1])
+                new_data[dptr : dptr + (be - bs)] = data[bs:be]
+                dptr += be - bs
                 vptr += 1
     return new_data, new_var, new_seq
 
 
-@nb.njit(nogil=True, cache=True)
-def _fill_empty_fixed(data, offsets, inner, fill):  # pragma: no cover - njit
-    """Fixed-inner-stride analogue of ``_fill_empty_scalar`` for ``flank_tokens``.
+def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):
+    """Dtype-preserving dispatch for fill-empty-seq (two-level dummy-fill).
 
-    ``data`` holds ``n_var * inner`` tokens (variant-major); ``offsets`` are
-    *variant-level* (``b*p + 1``). Each empty row receives one dummy variant of
-    ``inner`` tokens all equal to ``fill``; non-empty rows pass through.
-    Returns ``(new_data, new_offsets)``."""
+    Routes uint8 (allele bytes) and int32 (token windows) to typed Rust cores.
+    All other dtypes fall back to the dtype-preserving numpy kernel so values
+    are never silently down-cast.
+    """
+    data = np.ascontiguousarray(data)
+    var_offsets = np.ascontiguousarray(var_offsets, np.int64)
+    seq_offsets = np.ascontiguousarray(seq_offsets, np.int64)
+    dummy = np.ascontiguousarray(dummy, data.dtype)
+    if data.dtype == np.uint8:
+        return _fill_empty_seq_u8_rust(data, var_offsets, seq_offsets, dummy)
+    if data.dtype == np.int32:
+        return _fill_empty_seq_i32_rust(data, var_offsets, seq_offsets, dummy)
+    # Arbitrary dtype: preserve via numpy fallback.
+    return _fill_empty_seq_numpy(data, var_offsets, seq_offsets, dummy)
+
+
+def _fill_empty_fixed_numpy(data, offsets, inner, fill):
+    """Dtype-preserving fill-empty-fixed for arbitrary dtypes (numpy fallback)."""
     n_rows = offsets.shape[0] - 1
+    lengths = np.diff(offsets)
+    new_lengths = np.where(lengths > 0, lengths, 1)
     new_offsets = np.empty(n_rows + 1, np.int64)
     new_offsets[0] = 0
-    for i in range(n_rows):
-        nv = offsets[i + 1] - offsets[i]
-        new_offsets[i + 1] = new_offsets[i] + (nv if nv > 0 else 1)
-    total_vars = new_offsets[n_rows]
+    new_offsets[1:] = np.cumsum(new_lengths)
+    total_vars = int(new_offsets[n_rows])
     new_data = np.empty(total_vars * inner, data.dtype)
     dptr = 0
     for i in range(n_rows):
-        vs = offsets[i]
-        ve = offsets[i + 1]
+        vs, ve = int(offsets[i]), int(offsets[i + 1])
         if ve == vs:
-            for _ in range(inner):
-                new_data[dptr] = fill
-                dptr += 1
+            new_data[dptr : dptr + inner] = fill
+            dptr += inner
         else:
-            for k in range(vs * inner, ve * inner):
-                new_data[dptr] = data[k]
-                dptr += 1
+            n = int(ve - vs) * inner
+            new_data[dptr : dptr + n] = data[vs * inner : ve * inner]
+            dptr += n
     return new_data, new_offsets
+
+
+def _fill_empty_fixed(data, offsets, inner, fill):
+    """Dtype-preserving dispatch for fill-empty-fixed.
+
+    Routes int32 and float32 to typed Rust cores; all other dtypes (e.g.
+    custom FORMAT fields, issue #231) fall back to the dtype-preserving numpy
+    kernel so values are never silently down-cast.
+    """
+    data = np.ascontiguousarray(data)
+    offsets = np.ascontiguousarray(offsets, np.int64)
+    if data.dtype == np.int32:
+        return _fill_empty_fixed_i32_rust(data, offsets, int(inner), int(fill))
+    if data.dtype == np.float32:
+        return _fill_empty_fixed_f32_rust(data, offsets, int(inner), float(fill))
+    # Arbitrary dtype (custom FORMAT fields): preserve dtype via numpy fallback.
+    return _fill_empty_fixed_numpy(data, offsets, inner, fill)
+
+
+def _assemble_variant_buffers_numba_entry(*args, **kwargs):
+    """Lazy wrapper for _assemble_variant_buffers_numba to avoid circular import.
+
+    ``_flat_flanks`` imports ``_FlatWindow`` from ``_flat_variants`` at module
+    level, so ``_flat_variants`` cannot import from ``_flat_flanks`` at module
+    level. This thin wrapper defers the import to call time.
+    """
+    from ._flat_flanks import _assemble_variant_buffers_numba
+
+    return _assemble_variant_buffers_numba(*args, **kwargs)
+
+
+def _assemble_variant_buffers_rust(
+    mode,
+    v_idxs,
+    row_offsets,
+    alt_global,
+    alt_off_global,
+    ref_global,
+    ref_off_global,
+    want_ref_bytes,
+    want_flank,
+    ref_mode,
+    alt_mode,
+    flank_len,
+    lut,
+    v_contigs,
+    v_starts,
+    ilens,
+    reference,
+    ref_offsets,
+    pad_char,
+):
+    """Dtype-selecting shim: routes to assemble_variant_buffers_u8/i32 by lut dtype.
+
+    If ``lut`` is None (variants mode with no flank tokens), defaults to the u8
+    monomorphization (token buffers are empty so dtype is irrelevant).
+    """
+    if lut is None:
+        fn = _assemble_variant_buffers_u8_rust
+        lut_arr = None
+    else:
+        lut_arr = np.asarray(lut)
+        if lut_arr.dtype == np.uint8:
+            fn = _assemble_variant_buffers_u8_rust
+            lut_arr = np.ascontiguousarray(lut_arr, np.uint8)
+        else:
+            fn = _assemble_variant_buffers_i32_rust
+            lut_arr = np.ascontiguousarray(lut_arr, np.int32)
+    return fn(
+        int(mode),
+        np.ascontiguousarray(v_idxs, np.int32),
+        np.ascontiguousarray(row_offsets, np.int64),
+        np.ascontiguousarray(alt_global, np.uint8),
+        np.ascontiguousarray(alt_off_global, np.int64),
+        None if ref_global is None else np.ascontiguousarray(ref_global, np.uint8),
+        None
+        if ref_off_global is None
+        else np.ascontiguousarray(ref_off_global, np.int64),
+        bool(want_ref_bytes),
+        bool(want_flank),
+        int(ref_mode),
+        int(alt_mode),
+        int(flank_len),
+        lut_arr,
+        np.ascontiguousarray(v_contigs, np.int32),
+        np.ascontiguousarray(v_starts, np.int32),
+        np.ascontiguousarray(ilens, np.int32),
+        np.ascontiguousarray(reference, np.uint8),
+        np.ascontiguousarray(ref_offsets, np.int64),
+        int(pad_char),
+    )
+
+
+def _rc_alleles_reference(byte_data, seq_offsets, var_offsets, to_rc_row):
+    """Reference backend: seqpro reverse_complement_masked on a flat allele view.
+
+    `to_rc_row` is the per-(b*p) row mask (already ploidy-broadcast); expand to
+    per-allele via `var_offsets`, then RC each masked allele in place. Mutates
+    `byte_data` in place; byte-identical to `rc_alleles_inplace`.
+    """
+    from seqpro.rag import Ragged
+
+    from .._ragged import reverse_complement_masked
+
+    seq_off = np.ascontiguousarray(seq_offsets, np.int64)
+    var_off = np.ascontiguousarray(var_offsets, np.int64)
+    row_mask = np.ascontiguousarray(to_rc_row, np.bool_).reshape(-1)
+    if not row_mask.any():
+        return
+    per_allele = np.repeat(row_mask, np.diff(var_off))
+    n_alleles = len(seq_off) - 1
+    view = Ragged.from_offsets(byte_data.view("S1"), (n_alleles, None), seq_off)
+    reverse_complement_masked(view, per_allele)  # mutates byte_data in place
+
+
+def _rc_alleles_rust(byte_data, seq_offsets, var_offsets, to_rc_row):
+    assert byte_data.dtype == np.uint8 and byte_data.flags.c_contiguous, (
+        "rc_alleles requires a contiguous uint8 byte_data for in-place RC"
+    )
+    _rc_alleles_rust_kernel(
+        byte_data,
+        np.ascontiguousarray(seq_offsets, np.int64),
+        np.ascontiguousarray(var_offsets, np.int64),
+        np.ascontiguousarray(to_rc_row, np.bool_),
+    )
 
 
 def get_variants_flat(
@@ -730,24 +846,14 @@ def get_variants_flat(
 
     shape: tuple[int | None, ...] = (b, eff_ploidy, None)
 
+    opt = haps.window_opt
+
+    # --- Build scalar (non-allele) fields shared between both return paths ---
     fields: dict[str, Any] = {}
 
-    # alt: ALWAYS (required)
-    alt_bytes = np.asarray(haps.variants.alt.data).view(np.uint8)
-    alt_off = np.asarray(haps.variants.alt.offsets, np.int64)
-    alt_data, alt_seq_off = _gather_alleles(v_idxs, alt_bytes, alt_off)
-    fields["alt"] = _FlatAlleles(alt_data, alt_seq_off, row_offsets, shape)
-
-    # start: ALWAYS (added unconditionally by _get_variants)
+    # start: ALWAYS
     start_data = np.asarray(haps.variants.start)[v_idxs]
     fields["start"] = _Flat.from_offsets(start_data, shape, row_offsets)
-
-    # ref: if "ref" in var_fields
-    if "ref" in haps.var_fields:
-        ref_bytes = np.asarray(haps.variants.ref.data).view(np.uint8)
-        ref_off = np.asarray(haps.variants.ref.offsets, np.int64)
-        ref_data, ref_seq_off = _gather_alleles(v_idxs, ref_bytes, ref_off)
-        fields["ref"] = _FlatAlleles(ref_data, ref_seq_off, row_offsets, shape)
 
     # ilen: if "ilen" in var_fields
     if "ilen" in haps.var_fields:
@@ -776,116 +882,163 @@ def get_variants_flat(
         info_data = np.asarray(haps.variants.info[k])[v_idxs]
         fields[k] = _Flat.from_offsets(info_data, shape, row_offsets)
 
-    flat = _FlatVariants(fields)
+    # --- Step 1: Compute shared kernel inputs ---
+    stat = haps.ffi_static
+    needs_fetch = (
+        regions is not None
+        and haps.token_lut is not None
+        and (
+            (issubclass(haps.kind, _FlatVariantWindows) and opt is not None)
+            or bool(haps.flank_length)
+        )
+    )
+    if needs_fetch:
+        regions_arr = np.asarray(regions)
+        group_contigs = np.repeat(regions_arr[:, 0], eff_ploidy)
+        v_contigs = np.repeat(group_contigs, np.diff(row_offsets)).astype(np.int32)
+    else:
+        v_contigs = np.zeros(len(v_idxs), np.int32)
 
-    # variant-windows kind: emit per-allele window/allele token buffers (a
-    # different output type) and return early.
-    opt = haps.window_opt
+    ref_present = "ref" in haps.var_fields and haps.variants.ref is not None
+    ref_global = ref_off_global = None
+    if ref_present or (
+        issubclass(haps.kind, _FlatVariantWindows)
+        and opt is not None
+        and (opt.ref == "allele")
+    ):
+        ref_global = np.asarray(haps.variants.ref.data).view(np.uint8)
+        ref_off_global = np.asarray(haps.variants.ref.offsets, np.int64)
+
+    # --- Step 2: variant-windows kind: emit per-allele token buffers (early return) ---
     if (
         regions is not None
         and issubclass(haps.kind, _FlatVariantWindows)
         and opt is not None
     ):
-        from ._flat_flanks import (
-            compute_alt_window,
-            compute_ref_window,
-            compute_windows,
-            tokenize_alleles,
-        )
-
         L = opt.flank_length
-        lut = haps.token_lut
-        starts_v = np.asarray(haps.variants.start)[v_idxs]
-        ilens_v = np.asarray(haps.variants.ilen)[v_idxs]
-        regions = np.asarray(regions)
-        group_contigs = np.repeat(regions[:, 0], eff_ploidy)
-        v_contigs = np.repeat(group_contigs, np.diff(row_offsets))
+        ref_mode = 1 if opt.ref == "window" else 2
+        alt_mode = 1 if opt.alt == "window" else 2
+        bufs = _assemble_variant_buffers_rust(
+            1,  # windows mode
+            v_idxs,
+            row_offsets,
+            stat.alt_alleles,
+            stat.alt_offsets,
+            ref_global,
+            ref_off_global,
+            False,  # want_ref_bytes (windows mode emits tokens, not raw bytes)
+            False,  # want_flank
+            ref_mode,
+            alt_mode,
+            L,
+            haps.token_lut,
+            v_contigs,
+            stat.v_starts,
+            stat.ilens,
+            stat.ref,
+            stat.ref_offsets,
+            haps.reference.pad_char,
+        )
         wshape = (b, eff_ploidy, None, None)
         wfields = {k: v for k, v in fields.items() if k not in ("alt", "ref")}
         win = _FlatVariantWindows(wfields)
-
-        if opt.ref == "window" and opt.alt == "window":
-            # Hot path: single fused fetch produces both windows.
-            rw, aw = compute_windows(
-                haps.reference,
-                v_contigs,
-                starts_v,
-                ilens_v,
-                alt_data,
-                alt_seq_off,
-                L,
-                lut,
-                row_offsets,
-            )
-            rw.shape = wshape
-            aw.shape = wshape
-            win.ref_window = rw
-            win.alt_window = aw
-        else:
-            if opt.ref == "window":
-                rw = compute_ref_window(
-                    haps.reference, v_contigs, starts_v, ilens_v, L, lut, row_offsets
-                )
-                rw.shape = wshape
-                win.ref_window = rw
-            else:  # "allele": bare tokenized ref allele
-                ref_bytes = np.asarray(haps.variants.ref.data).view(np.uint8)
-                ref_off = np.asarray(haps.variants.ref.offsets, np.int64)
-                ref_data, ref_seq_off = _gather_alleles(v_idxs, ref_bytes, ref_off)
-                rw = tokenize_alleles(ref_data, ref_seq_off, lut, row_offsets)
-                rw.shape = wshape
-                win.ref = rw
-
-            if opt.alt == "window":
-                aw = compute_alt_window(
-                    haps.reference,
-                    v_contigs,
-                    starts_v,
-                    ilens_v,
-                    alt_data,
-                    alt_seq_off,
-                    L,
-                    lut,
-                    row_offsets,
-                )
-                aw.shape = wshape
-                win.alt_window = aw
-            else:  # "allele": bare tokenized alt allele
-                aw = tokenize_alleles(alt_data, alt_seq_off, lut, row_offsets)
-                aw.shape = wshape
-                win.alt = aw
-
+        for name, (data, seq_off) in bufs.items():
+            fw = _FlatWindow(data, np.asarray(seq_off, np.int64), row_offsets, wshape)
+            setattr(win, name, fw)
         if haps.dummy_variant is not None:
             win = win.fill_empty_groups(
                 haps.dummy_variant, unk=haps.unknown_token, flank_length=L
             )
-
         return win
 
-    # ride-along flank tokens on the plain variants output.
-    if haps.flank_length and haps.token_lut is not None and regions is not None:
-        from ._flat_flanks import compute_flank_tokens
+    # --- Step 3: plain-variants path: route allele bytes + flank tokens through kernel ---
+    want_flank = bool(
+        haps.flank_length and haps.token_lut is not None and regions is not None
+    )
+    L = haps.flank_length or 0
+    bufs = _assemble_variant_buffers_rust(
+        0,  # variants mode
+        v_idxs,
+        row_offsets,
+        stat.alt_alleles,
+        stat.alt_offsets,
+        ref_global,
+        ref_off_global,
+        ref_present,  # want_ref_bytes
+        want_flank,
+        0,  # ref_mode (unused in variants mode)
+        0,  # alt_mode (unused)
+        L,
+        haps.token_lut,
+        v_contigs,
+        stat.v_starts,
+        stat.ilens,
+        stat.ref if stat.ref is not None else np.zeros(0, np.uint8),
+        stat.ref_offsets if stat.ref_offsets is not None else np.zeros(1, np.int64),
+        haps.reference.pad_char if haps.reference is not None else 0,
+    )
 
-        L = haps.flank_length
-        starts_v = np.asarray(haps.variants.start)[v_idxs]
-        ilens_v = np.asarray(haps.variants.ilen)[v_idxs]
-        regions = np.asarray(regions)
-        group_contigs = np.repeat(regions[:, 0], eff_ploidy)  # (b*eff_ploidy,)
-        v_contigs = np.repeat(group_contigs, np.diff(row_offsets))  # (n_var,)
+    # Build fields in ORIGINAL insertion order (alt FIRST, then start, ref, rest).
+    # Prepend alt; reconstruct from scalar fields inserting ref after start.
+    final_fields: dict[str, Any] = {}
+    alt_data, alt_seq_off = bufs["alt"]
+    final_fields["alt"] = _FlatAlleles(
+        np.asarray(alt_data, np.uint8),
+        np.asarray(alt_seq_off, np.int64),
+        row_offsets,
+        shape,
+    )
+    for k, v in fields.items():
+        if k == "start":
+            final_fields["start"] = v
+            # Insert ref immediately after start (original order: alt, start, ref, ilen, ...)
+            if "ref" in bufs:
+                ref_data, ref_seq_off = bufs["ref"]
+                final_fields["ref"] = _FlatAlleles(
+                    np.asarray(ref_data, np.uint8),
+                    np.asarray(ref_seq_off, np.int64),
+                    row_offsets,
+                    shape,
+                )
+        else:
+            final_fields[k] = v
 
-        tok, off = compute_flank_tokens(
-            haps.reference,
-            v_contigs,
-            starts_v,
-            ilens_v,
-            L,
-            haps.token_lut,
-            row_offsets,
+    flat = _FlatVariants(final_fields)
+
+    if "flank_tokens" in bufs:
+        tok, off = bufs["flank_tokens"]
+        flat.flank_tokens = _Flat.from_offsets(
+            tok, (b, eff_ploidy, None, 2 * L), np.asarray(off, np.int64)
         )
-        flat.flank_tokens = _Flat.from_offsets(tok, (b, eff_ploidy, None, 2 * L), off)
 
     # dummy-variant empty-group fill (scalars, alleles, and flank_tokens).
     if haps.dummy_variant is not None:
         flat = flat.fill_empty_groups(haps.dummy_variant, unk=haps.unknown_token)
 
     return flat
+
+
+def _gather_v_idxs_ss_numba(geno_offset_idx, geno_starts, geno_stops, geno_v_idxs):
+    """Gather variant-index rows using starts/stops 2D form.
+
+    Pure Python fallback (no numba). Name retained for test backward-compatibility.
+    Returns (v_idxs, offsets) where offsets has shape (n_rows+1,).
+    """
+    n_rows = geno_offset_idx.shape[0]
+    out_offsets = np.empty(n_rows + 1, np.int64)
+    out_offsets[0] = 0
+    for i in range(n_rows):
+        goi = int(geno_offset_idx[i])
+        out_offsets[i + 1] = out_offsets[i] + (
+            int(geno_stops[goi]) - int(geno_starts[goi])
+        )
+    total = int(out_offsets[n_rows])
+    out_data = np.empty(total, geno_v_idxs.dtype)
+    dst = 0
+    for i in range(n_rows):
+        goi = int(geno_offset_idx[i])
+        s = int(geno_starts[goi])
+        e = int(geno_stops[goi])
+        out_data[dst : dst + (e - s)] = geno_v_idxs[s:e]
+        dst += e - s
+    return out_data, out_offsets

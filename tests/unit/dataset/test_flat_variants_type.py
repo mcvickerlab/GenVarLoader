@@ -273,7 +273,7 @@ def test_gather_rows_1d_vs_2d_dispatch():
     """
     from genvarloader._dataset._flat_variants import (
         _gather_rows,
-        _gather_v_idxs_ss,
+        _gather_v_idxs_ss_numba,
     )
 
     geno_v_idxs = np.array([10, 11, 20, 21, 22, 30], np.int32)
@@ -308,8 +308,8 @@ def test_gather_rows_1d_vs_2d_dispatch():
     np.testing.assert_array_equal(v_1d, v_2d, err_msg="1D and 2D v_idxs disagree")
     np.testing.assert_array_equal(off_1d, off_2d, err_msg="1D and 2D offsets disagree")
 
-    # Also test _gather_v_idxs_ss directly against the golden value
-    v_ss, off_ss = _gather_v_idxs_ss(
+    # Also test _gather_v_idxs_ss_numba directly against the golden value
+    v_ss, off_ss = _gather_v_idxs_ss_numba(
         geno_offset_idx, offsets_2d[0], offsets_2d[1], geno_v_idxs
     )
     np.testing.assert_array_equal(

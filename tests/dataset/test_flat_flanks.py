@@ -707,18 +707,24 @@ def test_dummy_variant_windows_fill_empty_region_all_unk(snap_dataset):
 
 
 def test_variant_windows_single_fetch_per_decode(snap_dataset, monkeypatch):
-    """ref=window, alt=window decode must call Reference.fetch exactly once."""
-    import genvarloader._dataset._reference as refmod
+    """Both-window decode must invoke the assemble_variant_buffers kernel exactly once.
+
+    The single fused fetch+assemble invariant moved into the kernel in Target 7
+    (reference read now lives inside the Rust/numba kernel rather than Python
+    Reference.fetch), so we assert the dispatched kernel fires exactly once per
+    both-window decode.
+    """
+    import genvarloader._dataset._flat_variants as _fv
     from genvarloader._dataset._flat_variants import VarWindowOpt
 
     calls = {"n": 0}
-    orig = refmod.Reference.fetch
+    real_fn = _fv._assemble_variant_buffers_rust
 
-    def spy(self, *a, **k):
+    def spy(*a, **k):
         calls["n"] += 1
-        return orig(self, *a, **k)
+        return real_fn(*a, **k)
 
-    monkeypatch.setattr(refmod.Reference, "fetch", spy)
+    monkeypatch.setattr(_fv, "_assemble_variant_buffers_rust", spy)
 
     ds = (
         snap_dataset.with_tracks(False)
@@ -732,7 +738,7 @@ def test_variant_windows_single_fetch_per_decode(snap_dataset, monkeypatch):
     out = ds[[0, 1, 2], [0, 1, 2]]
     assert out.ref_window is not None and out.alt_window is not None
     assert calls["n"] == 1, (
-        f"expected 1 reference.fetch for both-window decode, got {calls['n']}"
+        f"expected 1 assemble_variant_buffers kernel call for both-window decode, got {calls['n']}"
     )
 
 
