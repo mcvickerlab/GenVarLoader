@@ -38,19 +38,16 @@ fill_empty_fixed_i32/f32: inner and fill args must be Python int/float.
 get_reference: registered rust= is _get_reference_rust wrapper (normalises dtypes,
   converts pad_char to int). RUST_KERNELS entry updated in _golden.py to match.
 """
+
 from __future__ import annotations
 
 import numpy as np
 
-from genvarloader import _dispatch
+try:
+    from genvarloader import _dispatch
+except ImportError:
+    _dispatch = None
 
-# Import modules to trigger register() calls in _dispatch._REGISTRY before
-# _have_numba() or any _dispatch.backends() call is made.
-from genvarloader._dataset import _flat_variants  # noqa: F401
-from genvarloader._dataset import _genotypes  # noqa: F401
-from genvarloader._dataset import _intervals  # noqa: F401
-from genvarloader._dataset import _reference  # noqa: F401
-from genvarloader._dataset import _tracks  # noqa: F401
 from genvarloader._dataset._genotypes import _as_starts_stops
 from tests.parity import _golden, strategies
 
@@ -138,36 +135,81 @@ def _pre_fill_empty_fixed_f32(inp):
 #   shape   = RETURN | TUPLE — how the rust callable returns its result
 #   preprocess_fn: callable(raw_inp) → normalised_inp, or None for no-op
 SPEC: list[tuple] = [
-    ("get_diffs_sparse",
-     strategies.get_diffs_sparse_inputs(),       TUPLE,  200, _pre_get_diffs_sparse),
-    ("choose_exonic_variants",
-     strategies.choose_exonic_variants_inputs(),  TUPLE,  200, _pre_choose_exonic),
-    ("gather_rows_i32",
-     strategies.gather_rows_inputs(np.int32),     TUPLE,  100, _pre_gather_rows),
-    ("gather_rows_f32",
-     strategies.gather_rows_inputs(np.float32),   TUPLE,  100, _pre_gather_rows),
-    ("gather_alleles",
-     strategies.gather_alleles_inputs(),          TUPLE,  100, _pre_gather_alleles),
-    ("compact_keep_i32",
-     strategies.compact_keep_inputs(np.int32),    TUPLE,  100, None),
-    ("compact_keep_f32",
-     strategies.compact_keep_inputs(np.float32),  TUPLE,  100, None),
-    ("fill_empty_scalar_i32",
-     strategies.fill_empty_scalar_inputs(np.int32),   TUPLE, 100, _pre_fill_empty_scalar_i32),
-    ("fill_empty_scalar_f32",
-     strategies.fill_empty_scalar_inputs(np.float32), TUPLE, 100, _pre_fill_empty_scalar_f32),
-    ("fill_empty_fixed_i32",
-     strategies.fill_empty_fixed_inputs(np.int32),    TUPLE, 100, _pre_fill_empty_fixed_i32),
-    ("fill_empty_fixed_f32",
-     strategies.fill_empty_fixed_inputs(np.float32),  TUPLE, 100, _pre_fill_empty_fixed_f32),
-    ("fill_empty_seq_u8",
-     strategies.fill_empty_seq_inputs(np.uint8),  TUPLE,  100, None),
-    ("fill_empty_seq_i32",
-     strategies.fill_empty_seq_inputs(np.int32),  TUPLE,  100, None),
-    ("tracks_to_intervals",
-     strategies.tracks_to_intervals_inputs(),     TUPLE,  200, None),
-    ("get_reference",
-     strategies.get_reference_inputs(),           RETURN, 200, None),
+    (
+        "get_diffs_sparse",
+        strategies.get_diffs_sparse_inputs(),
+        TUPLE,
+        200,
+        _pre_get_diffs_sparse,
+    ),
+    (
+        "choose_exonic_variants",
+        strategies.choose_exonic_variants_inputs(),
+        TUPLE,
+        200,
+        _pre_choose_exonic,
+    ),
+    (
+        "gather_rows_i32",
+        strategies.gather_rows_inputs(np.int32),
+        TUPLE,
+        100,
+        _pre_gather_rows,
+    ),
+    (
+        "gather_rows_f32",
+        strategies.gather_rows_inputs(np.float32),
+        TUPLE,
+        100,
+        _pre_gather_rows,
+    ),
+    (
+        "gather_alleles",
+        strategies.gather_alleles_inputs(),
+        TUPLE,
+        100,
+        _pre_gather_alleles,
+    ),
+    ("compact_keep_i32", strategies.compact_keep_inputs(np.int32), TUPLE, 100, None),
+    ("compact_keep_f32", strategies.compact_keep_inputs(np.float32), TUPLE, 100, None),
+    (
+        "fill_empty_scalar_i32",
+        strategies.fill_empty_scalar_inputs(np.int32),
+        TUPLE,
+        100,
+        _pre_fill_empty_scalar_i32,
+    ),
+    (
+        "fill_empty_scalar_f32",
+        strategies.fill_empty_scalar_inputs(np.float32),
+        TUPLE,
+        100,
+        _pre_fill_empty_scalar_f32,
+    ),
+    (
+        "fill_empty_fixed_i32",
+        strategies.fill_empty_fixed_inputs(np.int32),
+        TUPLE,
+        100,
+        _pre_fill_empty_fixed_i32,
+    ),
+    (
+        "fill_empty_fixed_f32",
+        strategies.fill_empty_fixed_inputs(np.float32),
+        TUPLE,
+        100,
+        _pre_fill_empty_fixed_f32,
+    ),
+    ("fill_empty_seq_u8", strategies.fill_empty_seq_inputs(np.uint8), TUPLE, 100, None),
+    (
+        "fill_empty_seq_i32",
+        strategies.fill_empty_seq_inputs(np.int32),
+        TUPLE,
+        100,
+        None,
+    ),
+    ("tracks_to_intervals", strategies.tracks_to_intervals_inputs(), TUPLE, 200, None),
+    ("get_reference", strategies.get_reference_inputs(), RETURN, 200, None),
 ]
 
 # INPLACE_SPEC: (name, strategy, n, out_factory, out_index)
@@ -227,9 +269,7 @@ def _assert_oracle(name: str, a, b) -> None:
     if isinstance(a, tuple):
         assert len(a) == len(b), f"{name}: tuple len {len(a)} != {len(b)}"
         for i, (x, y) in enumerate(zip(a, b)):
-            np.testing.assert_array_equal(
-                x, y, err_msg=f"{name}[{i}] oracle mismatch"
-            )
+            np.testing.assert_array_equal(x, y, err_msg=f"{name}[{i}] oracle mismatch")
     elif isinstance(a, dict):
         assert set(a) == set(b), f"{name}: dict keys mismatch {set(a)} vs {set(b)}"
         for k in a:
@@ -242,6 +282,8 @@ def _assert_oracle(name: str, a, b) -> None:
 
 
 def _have_numba(name: str) -> bool:
+    if _dispatch is None:
+        return False
     try:
         _dispatch.backends(name)
         return True
@@ -281,7 +323,9 @@ def gen_inplace_kernels() -> None:
             # intervals_to_tracks yields the 7-element inputs tuple directly.
             if isinstance(ex, tuple) and len(ex) == 2 and np.isscalar(ex[0]):
                 total_out, inputs = ex
-                of = lambda _inp, t=total_out: out_factory(t)
+
+                def of(_inp, t=total_out):
+                    return out_factory(t)
             else:
                 inputs = ex
                 of = out_factory
@@ -324,9 +368,25 @@ def gen_prng() -> None:
 
     # Representative uint64 inputs: 0, 1, small values, mid-range, near-max.
     xs_inputs: list[int] = [
-        0, 1, 2, 42, 255, 256, 65535, 65536,
-        0xDEAD, 0xBEEF, 0xDEADBEEF, 0xCAFEBABEDEAD,
-        2**32 - 1, 2**32, 2**48, 2**63 - 1, 2**63, UINT64_MAX - 1, UINT64_MAX,
+        0,
+        1,
+        2,
+        42,
+        255,
+        256,
+        65535,
+        65536,
+        0xDEAD,
+        0xBEEF,
+        0xDEADBEEF,
+        0xCAFEBABEDEAD,
+        2**32 - 1,
+        2**32,
+        2**48,
+        2**63 - 1,
+        2**63,
+        UINT64_MAX - 1,
+        UINT64_MAX,
     ] + list(range(1000, 1100))  # 100 sequential values for sequential patterns
 
     xs_cases = []
@@ -359,7 +419,9 @@ def gen_prng() -> None:
     h4_cases = []
     for a, b, c, d in h4_quads:
         rust_out = int(_hash4_rust(a, b, c, d))
-        numba_out = int(_hash4_numba(np.uint64(a), np.uint64(b), np.uint64(c), np.uint64(d)))
+        numba_out = int(
+            _hash4_numba(np.uint64(a), np.uint64(b), np.uint64(c), np.uint64(d))
+        )
         if rust_out != numba_out:
             raise AssertionError(
                 f"hash4({a:#x},{b:#x},{c:#x},{d:#x}): rust={rust_out:#x} numba={numba_out:#x}"
@@ -372,6 +434,7 @@ def gen_prng() -> None:
 # ---------------------------------------------------------------------------
 # rc_alleles: freeze in-place RC golden
 # ---------------------------------------------------------------------------
+
 
 def _rc_alleles_batch_strategy():
     """Composite strategy mirroring the test_rc_alleles_parity._allele_batch."""
@@ -438,13 +501,18 @@ def gen_rc_alleles() -> None:
 # assemble_variant_buffers: freeze fixed parametrised cases
 # ---------------------------------------------------------------------------
 
+
 def gen_assemble_variant_buffers() -> None:
     """Freeze all parametrised assemble_variant_buffers cases.
 
     Mirrors the exact inputs from test_assemble_variant_buffers_parity.py so the
     golden covers the same mode matrix without re-running numba at test time.
     """
-    nb_fn = _dispatch.backends("assemble_variant_buffers")[0] if _have_numba("assemble_variant_buffers") else None
+    nb_fn = (
+        _dispatch.backends("assemble_variant_buffers")[0]
+        if _have_numba("assemble_variant_buffers")
+        else None
+    )
     rust_fn = _golden.RUST_KERNELS["assemble_variant_buffers"]
 
     def _reference():
@@ -481,32 +549,71 @@ def gen_assemble_variant_buffers() -> None:
             row_offsets = np.array([0, 3], np.int64)
             v_contigs = np.zeros(3, np.int32)
             inp = (
-                1, v_idxs, row_offsets,
-                alt_data, alt_off, ref_data, ref_off,
-                False, False, ref_mode, alt_mode, 2, lut,
-                v_contigs, v_starts, ilens, ref, ref_offsets, ord("N"),
+                1,
+                v_idxs,
+                row_offsets,
+                alt_data,
+                alt_off,
+                ref_data,
+                ref_off,
+                False,
+                False,
+                ref_mode,
+                alt_mode,
+                2,
+                lut,
+                v_contigs,
+                v_starts,
+                ilens,
+                ref,
+                ref_offsets,
+                ord("N"),
             )
             r = _normalize(rust_fn(*inp))
             if nb_fn is not None:
-                _assert_oracle("assemble_variant_buffers/windows", _normalize(nb_fn(*inp)), r)
+                _assert_oracle(
+                    "assemble_variant_buffers/windows", _normalize(nb_fn(*inp)), r
+                )
             cases.append((inp, r))
 
     # test_variants_mode_matrix: tok_dtype × (want_ref, want_flank)
     for tok_dtype in [np.uint8, np.int32]:
-        for want_ref, want_flank in [(False, False), (True, False), (False, True), (True, True)]:
+        for want_ref, want_flank in [
+            (False, False),
+            (True, False),
+            (False, True),
+            (True, True),
+        ]:
             lut = _lut(tok_dtype) if want_flank else None
             v_idxs = np.array([2, 0, 1], np.int32)
             row_offsets = np.array([0, 1, 3], np.int64)
             v_contigs = np.zeros(3, np.int32)
             inp = (
-                0, v_idxs, row_offsets,
-                alt_data, alt_off, ref_data, ref_off,
-                want_ref, want_flank, 0, 0, 2, lut,
-                v_contigs, v_starts, ilens, ref, ref_offsets, ord("N"),
+                0,
+                v_idxs,
+                row_offsets,
+                alt_data,
+                alt_off,
+                ref_data,
+                ref_off,
+                want_ref,
+                want_flank,
+                0,
+                0,
+                2,
+                lut,
+                v_contigs,
+                v_starts,
+                ilens,
+                ref,
+                ref_offsets,
+                ord("N"),
             )
             r = _normalize(rust_fn(*inp))
             if nb_fn is not None:
-                _assert_oracle("assemble_variant_buffers/variants", _normalize(nb_fn(*inp)), r)
+                _assert_oracle(
+                    "assemble_variant_buffers/variants", _normalize(nb_fn(*inp)), r
+                )
             cases.append((inp, r))
 
     # test_empty_selection: (mode, ref_mode, alt_mode)
@@ -516,10 +623,25 @@ def gen_assemble_variant_buffers() -> None:
         row_offsets = np.array([0, 0], np.int64)
         v_contigs = np.array([], np.int32)
         inp = (
-            mode, v_idxs, row_offsets,
-            alt_data, alt_off, ref_data, ref_off,
-            False, (mode == 0), ref_mode, alt_mode, 2, lut,
-            v_contigs, v_starts, ilens, ref, ref_offsets, ord("N"),
+            mode,
+            v_idxs,
+            row_offsets,
+            alt_data,
+            alt_off,
+            ref_data,
+            ref_off,
+            False,
+            (mode == 0),
+            ref_mode,
+            alt_mode,
+            2,
+            lut,
+            v_contigs,
+            v_starts,
+            ilens,
+            ref,
+            ref_offsets,
+            ord("N"),
         )
         r = _normalize(rust_fn(*inp))
         if nb_fn is not None:

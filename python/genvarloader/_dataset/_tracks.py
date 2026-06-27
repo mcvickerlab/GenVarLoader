@@ -452,8 +452,6 @@ def _shift_and_realign_tracks_sparse_rust_wrapper(
     )
 
 
-
-
 # -----------------------------------------------------------------------------
 # Ragged helper: stack (batch, None) Rageds along a new track axis -> (batch, n_tracks, None)
 # -----------------------------------------------------------------------------
