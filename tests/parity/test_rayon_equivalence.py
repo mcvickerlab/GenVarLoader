@@ -13,9 +13,11 @@ from tests.parity import _golden
 
 pytestmark = pytest.mark.parity
 
-# The bare FFI function (not the Python wrapper) is stored in RUST_KERNELS.
-# It accepts parallel as a keyword argument (PyO3 registers all pyfunction args
-# as keyword-capable).
+# RUST_KERNELS stores the thin C1 shim that wraps the bare FFI function with a
+# `parallel=False` default (so existing golden replays stay serial); it forwards
+# *args and `parallel` straight through to the FFI. The FFI accepts `parallel` as
+# a keyword argument (PyO3 registers all pyfunction args as keyword-capable), so
+# passing parallel=True/False here exercises both branches.
 _fn = _golden.RUST_KERNELS["reconstruct_haplotypes_from_sparse"]
 
 

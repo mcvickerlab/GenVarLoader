@@ -372,6 +372,14 @@ pub fn reconstruct_haplotypes_from_sparse(
             let mut rest = &mut out_slice[..];
             let mut cursor = 0usize;
             for &(s, e) in &bounds {
+                // Contract: `out_offsets` is monotonically non-decreasing, so each
+                // work item's range starts at or after the previous one's end. This
+                // guarantees `s - cursor` does not underflow and the carved slices
+                // are disjoint. The same `bounds` drives the annotation carves below.
+                debug_assert!(
+                    s >= cursor && e >= s,
+                    "out_offsets must be monotonically non-decreasing (got s={s}, e={e}, cursor={cursor})"
+                );
                 let (_, tail) = rest.split_at_mut(s - cursor);
                 let (mid, tail2) = tail.split_at_mut(e - s);
                 out_chunks.push(mid);
