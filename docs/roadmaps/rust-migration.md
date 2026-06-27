@@ -208,9 +208,11 @@ rather than a GVL-in-house reimplementation (see decision 2026-06-23). Bottom-up
       that owns the `Ragged` layout (offsets + data buffers) and its core ops.
 - [x] Port the last two numba ops to Rust inside `seqpro-core`: `to_padded` and
       `reverse_complement`. seqpro's ragged layer is now numba-free.
-- [x] GVL consumes `seqpro-core` via a Cargo path-dep (editable; flip to
-      git/crates.io before shipping). `src/ragged/` is a bridge adapter, not a
-      reimplementation.
+- [x] GVL consumes `seqpro-core` via a crates.io registry dep (`seqpro-core = "0.1"`,
+      resolves to `0.1.0` from `registry+https://github.com/rust-lang/crates.io-index`,
+      checksum verified in `Cargo.lock`). No path dep or `[patch]` override — the
+      shipping prerequisite is already satisfied. `src/ragged/` is a bridge adapter,
+      not a reimplementation.
 - [x] Proof-point op (`to_padded`) rerouted through the shared `seqpro-core` kernel
       in GVL with byte-identical parity confirmed.
 - [x] Remove `awkward` from the foundation layer. (GVL migrated onto seqpro's
@@ -1105,7 +1107,8 @@ narrowed to genoray (variant IO) only.
   Rust (seqpro rag layer now numba-free). Bumped seqpro's pymodule to pyo3 0.28 /
   numpy 0.28 / ndarray 0.17 (hygiene; NOT required for the link — two pymodules
   with different pyo3 versions coexist; the single-version rule is per-cdylib, and
-  the shared core is pyo3-free). GVL links seqpro-core via a path dep (editable;
-  flip to git/release before shipping) and routes its `to_padded` chokepoint
+  the shared core is pyo3-free). GVL links seqpro-core via the crates.io registry
+  dep (`seqpro-core 0.1.0`, verified in `Cargo.lock`; no path dep or `[patch]`
+  override — shipping prerequisite already satisfied) and routes its `to_padded` chokepoint
   through the shared kernel (proof-point, byte-identical parity). Inverts Phase 6
   (seqpro stays the substrate). PRs: seqpro ML4GLand/SeqPro#60, GVL mcvickerlab/GenVarLoader#240.
