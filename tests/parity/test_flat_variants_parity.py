@@ -1,8 +1,9 @@
+"""flat_variants kernels: rust vs frozen golden (oracle frozen Phase 5 W5)."""
+from __future__ import annotations
+
 import numpy as np
 import pytest
-from hypothesis import given, settings
 
-from genvarloader._dataset import _flat_variants  # noqa: F401  (triggers register())
 from genvarloader._dataset._flat_variants import (
     _compact_keep,
     _fill_empty_fixed,
@@ -10,42 +11,85 @@ from genvarloader._dataset._flat_variants import (
     _fill_empty_seq,
     _gather_rows,
 )
-from genvarloader._dataset._genotypes import _as_starts_stops
-from tests.parity._harness import assert_kernel_parity_tuple
-from tests.parity.strategies import (
-    compact_keep_inputs,
-    fill_empty_fixed_inputs,
-    fill_empty_scalar_inputs,
-    fill_empty_seq_inputs,
-    gather_alleles_inputs,
-    gather_rows_inputs,
-)
+from tests.parity import _golden
 
 pytestmark = pytest.mark.parity
 
 
-@settings(deadline=None)
-@given(gather_rows_inputs(dtype=np.int32))
-def test_gather_rows_parity(inputs):
-    goi, offsets, data = inputs
-    assert_kernel_parity_tuple(
-        "gather_rows_i32",
-        np.ascontiguousarray(goi, np.int64),
-        _as_starts_stops(offsets),
-        np.ascontiguousarray(data, np.int32),
-    )
+# ---------------------------------------------------------------------------
+# Golden replay tests (one per golden name)
+# ---------------------------------------------------------------------------
 
 
-@settings(deadline=None)
-@given(gather_rows_inputs(dtype=np.float32))
-def test_gather_rows_f32_parity(inputs):
-    goi, offsets, data = inputs
-    assert_kernel_parity_tuple(
-        "gather_rows_f32",
-        np.ascontiguousarray(goi, np.int64),
-        _as_starts_stops(offsets),
-        np.ascontiguousarray(data, np.float32),
-    )
+def test_gather_rows_i32_golden():
+    cases = _golden.load_golden("gather_rows_i32")
+    assert cases, "empty golden"
+    _golden.replay_tuple("gather_rows_i32", cases)
+
+
+def test_gather_rows_f32_golden():
+    cases = _golden.load_golden("gather_rows_f32")
+    assert cases, "empty golden"
+    _golden.replay_tuple("gather_rows_f32", cases)
+
+
+def test_gather_alleles_golden():
+    cases = _golden.load_golden("gather_alleles")
+    assert cases, "empty golden"
+    _golden.replay_tuple("gather_alleles", cases)
+
+
+def test_compact_keep_i32_golden():
+    cases = _golden.load_golden("compact_keep_i32")
+    assert cases, "empty golden"
+    _golden.replay_tuple("compact_keep_i32", cases)
+
+
+def test_compact_keep_f32_golden():
+    cases = _golden.load_golden("compact_keep_f32")
+    assert cases, "empty golden"
+    _golden.replay_tuple("compact_keep_f32", cases)
+
+
+def test_fill_empty_scalar_i32_golden():
+    cases = _golden.load_golden("fill_empty_scalar_i32")
+    assert cases, "empty golden"
+    _golden.replay_tuple("fill_empty_scalar_i32", cases)
+
+
+def test_fill_empty_scalar_f32_golden():
+    cases = _golden.load_golden("fill_empty_scalar_f32")
+    assert cases, "empty golden"
+    _golden.replay_tuple("fill_empty_scalar_f32", cases)
+
+
+def test_fill_empty_fixed_i32_golden():
+    cases = _golden.load_golden("fill_empty_fixed_i32")
+    assert cases, "empty golden"
+    _golden.replay_tuple("fill_empty_fixed_i32", cases)
+
+
+def test_fill_empty_fixed_f32_golden():
+    cases = _golden.load_golden("fill_empty_fixed_f32")
+    assert cases, "empty golden"
+    _golden.replay_tuple("fill_empty_fixed_f32", cases)
+
+
+def test_fill_empty_seq_u8_golden():
+    cases = _golden.load_golden("fill_empty_seq_u8")
+    assert cases, "empty golden"
+    _golden.replay_tuple("fill_empty_seq_u8", cases)
+
+
+def test_fill_empty_seq_i32_golden():
+    cases = _golden.load_golden("fill_empty_seq_i32")
+    assert cases, "empty golden"
+    _golden.replay_tuple("fill_empty_seq_i32", cases)
+
+
+# ---------------------------------------------------------------------------
+# Dtype regression tests (no hypothesis, no dispatch)
+# ---------------------------------------------------------------------------
 
 
 def test_gather_rows_dtype_regression():
@@ -65,32 +109,6 @@ def test_gather_rows_dtype_regression():
     assert out_i64.dtype == np.int64, f"Expected int64, got {out_i64.dtype}"
     np.testing.assert_array_equal(out_i64, data_i64)
     assert off_i64.tolist() == [0, 2]
-
-
-@settings(deadline=None)
-@given(gather_alleles_inputs())
-def test_gather_alleles_parity(inputs):
-    v_idxs, allele_bytes, allele_offsets = inputs
-    assert_kernel_parity_tuple(
-        "gather_alleles",
-        np.ascontiguousarray(v_idxs, np.int32),
-        np.ascontiguousarray(allele_bytes, np.uint8),
-        np.ascontiguousarray(allele_offsets, np.int64),
-    )
-
-
-@settings(deadline=None)
-@given(compact_keep_inputs(np.int32))
-def test_compact_keep_i32_parity(inputs):
-    values, row_offsets, keep = inputs
-    assert_kernel_parity_tuple("compact_keep_i32", values, row_offsets, keep)
-
-
-@settings(deadline=None)
-@given(compact_keep_inputs(np.float32))
-def test_compact_keep_f32_parity(inputs):
-    values, row_offsets, keep = inputs
-    assert_kernel_parity_tuple("compact_keep_f32", values, row_offsets, keep)
 
 
 def test_compact_keep_dtype_regression():
@@ -120,25 +138,6 @@ def test_compact_keep_dtype_regression():
     assert off_i64.tolist() == [0, 1, 2]
 
 
-# ---------------------------------------------------------------------------
-# fill_empty_scalar parity
-# ---------------------------------------------------------------------------
-
-
-@settings(deadline=None)
-@given(fill_empty_scalar_inputs(dtype=np.int32))
-def test_fill_empty_scalar_i32_parity(inputs):
-    data, offsets, fill = inputs
-    assert_kernel_parity_tuple("fill_empty_scalar_i32", data, offsets, int(fill))
-
-
-@settings(deadline=None)
-@given(fill_empty_scalar_inputs(dtype=np.float32))
-def test_fill_empty_scalar_f32_parity(inputs):
-    data, offsets, fill = inputs
-    assert_kernel_parity_tuple("fill_empty_scalar_f32", data, offsets, float(fill))
-
-
 def test_fill_empty_scalar_dtype_regression():
     """_fill_empty_scalar must preserve dtype — no down-cast for non-i32/f32.
 
@@ -155,29 +154,6 @@ def test_fill_empty_scalar_dtype_regression():
     assert new_off.tolist() == [0, 2, 3, 4]
 
 
-# ---------------------------------------------------------------------------
-# fill_empty_fixed parity
-# ---------------------------------------------------------------------------
-
-
-@settings(deadline=None)
-@given(fill_empty_fixed_inputs(dtype=np.int32))
-def test_fill_empty_fixed_i32_parity(inputs):
-    data, offsets, inner, fill = inputs
-    assert_kernel_parity_tuple(
-        "fill_empty_fixed_i32", data, offsets, int(inner), int(fill)
-    )
-
-
-@settings(deadline=None)
-@given(fill_empty_fixed_inputs(dtype=np.float32))
-def test_fill_empty_fixed_f32_parity(inputs):
-    data, offsets, inner, fill = inputs
-    assert_kernel_parity_tuple(
-        "fill_empty_fixed_f32", data, offsets, int(inner), float(fill)
-    )
-
-
 def test_fill_empty_fixed_dtype_regression():
     """_fill_empty_fixed must preserve dtype — no down-cast for non-i32/f32.
 
@@ -192,29 +168,6 @@ def test_fill_empty_fixed_dtype_regression():
     assert out.dtype == np.int16, f"Expected int16, got {out.dtype}"
     np.testing.assert_array_equal(out, np.array([7, 8, 42, 42], np.int16))
     assert new_off.tolist() == [0, 1, 2]
-
-
-# ---------------------------------------------------------------------------
-# fill_empty_seq parity
-# ---------------------------------------------------------------------------
-
-
-@settings(deadline=None)
-@given(fill_empty_seq_inputs(dtype=np.uint8))
-def test_fill_empty_seq_u8_parity(inputs):
-    data, var_offsets, seq_offsets, dummy = inputs
-    assert_kernel_parity_tuple(
-        "fill_empty_seq_u8", data, var_offsets, seq_offsets, dummy
-    )
-
-
-@settings(deadline=None)
-@given(fill_empty_seq_inputs(dtype=np.int32))
-def test_fill_empty_seq_i32_parity(inputs):
-    data, var_offsets, seq_offsets, dummy = inputs
-    assert_kernel_parity_tuple(
-        "fill_empty_seq_i32", data, var_offsets, seq_offsets, dummy
-    )
 
 
 def test_fill_empty_seq_dtype_regression():
