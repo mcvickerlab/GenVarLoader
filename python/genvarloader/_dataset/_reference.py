@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -17,7 +16,7 @@ from typing_extensions import Self
 
 from .._flat import _Flat
 from .._fasta_cache import ensure_cache
-from .._ragged import RaggedSeqs, reverse_complement_masked, to_padded
+from .._ragged import RaggedSeqs, to_padded
 from .._torch import TORCH_AVAILABLE, get_dataloader, no_torch_error
 from .._types import Idx, StrIdx
 from .._utils import is_dtype
@@ -442,11 +441,6 @@ class RefDataset(Generic[T]):
             to_rc=to_rc_perm,  # Rust: RC done in kernel; numba: handled below
         )
 
-        if to_rc_perm is not None and os.environ.get("GVL_BACKEND", "rust") == "numba":
-            from .._ragged import _COMP
-
-            per_elem = per_elem.reverse_masked(to_rc_perm, comp=_COMP)
-
         # Rewrap with group_offsets at (n_rows, None) — skip the (n_rows, 1, None)
         # + squeeze(1) trick since RefDataset has no sample axis.
         ref = cast(
@@ -528,9 +522,6 @@ class RefDataset(Generic[T]):
         ref = cast(
             Ragged[np.bytes_], Ragged.from_offsets(ref, (batch_size, None), out_offsets)
         )
-
-        if _to_rc is not None and os.environ.get("GVL_BACKEND", "rust") == "numba":
-            ref = reverse_complement_masked(ref, _to_rc)
 
         if out_reshape is not None:
             ref = ref.reshape(out_reshape)
