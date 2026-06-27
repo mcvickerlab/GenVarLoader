@@ -1,11 +1,16 @@
 //! Genotype assembly/selection cores (pure ndarray). PyO3 lives in `crate::ffi`.
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use rayon::prelude::*;
 
 /// Per-(query, hap) reference-length diffs. Mirrors the numba
 /// `get_diffs_sparse` exactly. `o_starts`/`o_stops` are the two rows of the
 /// normalized (2, n) offset array: `o_s = o_starts[o_idx]`, `o_e = o_stops[o_idx]`.
 /// Length sums stay far within i32 for real variants; accumulate in i64 and
 /// truncate on store to mirror numpy's `int32`-slot assignment.
+///
+/// When `parallel=true` the outer query×hap loop is dispatched via rayon
+/// `par_chunks_mut` over the flat output buffer. Each chunk is exactly one
+/// `(query, hap)` cell, so the writes are provably disjoint.
 #[allow(clippy::too_many_arguments)]
 pub fn get_diffs_sparse(
     geno_offset_idx: ArrayView2<i64>,
@@ -18,77 +23,102 @@ pub fn get_diffs_sparse(
     q_starts: Option<ArrayView1<i32>>,
     q_ends: Option<ArrayView1<i32>>,
     v_starts: Option<ArrayView1<i32>>,
+    parallel: bool,
 ) -> Array2<i32> {
     let (n_queries, ploidy) = geno_offset_idx.dim();
+    let n_work = n_queries * ploidy;
     let mut diffs = Array2::<i32>::zeros((n_queries, ploidy));
+
+    // Closure computing the diff for work item k=(query*ploidy+hap).
+    // All read-only ArrayViews are Send+Sync; the output cell is carved via
+    // par_chunks_mut so each chunk covers exactly one i32 — provably disjoint.
     let has_query = q_starts.is_some() && q_ends.is_some() && v_starts.is_some();
     let has_keep = keep.is_some() && keep_offsets.is_some();
 
-    for query in 0..n_queries {
-        for hap in 0..ploidy {
-            let o_idx = geno_offset_idx[[query, hap]] as usize;
-            let o_s = o_starts[o_idx] as usize;
-            let o_e = o_stops[o_idx] as usize;
-            let n_variants = o_e - o_s;
+    let compute = |k: usize| -> i32 {
+        let query = k / ploidy;
+        let hap = k % ploidy;
+        let o_idx = geno_offset_idx[[query, hap]] as usize;
+        let o_s = o_starts[o_idx] as usize;
+        let o_e = o_stops[o_idx] as usize;
+        let n_variants = o_e - o_s;
 
-            if n_variants == 0 {
-                diffs[[query, hap]] = 0;
-            } else if has_query {
-                let qs = q_starts.unwrap();
-                let qe = q_ends.unwrap();
-                let vs = v_starts.unwrap();
-                let q_start = qs[query] as i64;
-                let q_end = qe[query] as i64;
-                let mut ref_idx = q_start;
-                let mut acc: i64 = 0;
-                for v in o_s..o_e {
-                    if has_keep {
-                        let kp = keep.unwrap();
-                        let ko = keep_offsets.unwrap();
-                        let k_s = ko[query * ploidy + hap] as usize;
-                        if !kp[k_s + (v - o_s)] {
-                            continue;
-                        }
-                    }
-                    let v_idx = geno_v_idxs[v] as usize;
-                    let v_start = vs[v_idx] as i64;
-                    let mut v_ilen = ilens[v_idx] as i64;
-                    let v_end = v_start - v_ilen.min(0) + 1;
-                    if v_end <= q_start {
+        if n_variants == 0 {
+            0
+        } else if has_query {
+            let qs = q_starts.unwrap();
+            let qe = q_ends.unwrap();
+            let vs = v_starts.unwrap();
+            let q_start = qs[query] as i64;
+            let q_end = qe[query] as i64;
+            let mut ref_idx = q_start;
+            let mut acc: i64 = 0;
+            for v in o_s..o_e {
+                if has_keep {
+                    let kp = keep.unwrap();
+                    let ko = keep_offsets.unwrap();
+                    let k_s = ko[query * ploidy + hap] as usize;
+                    if !kp[k_s + (v - o_s)] {
                         continue;
                     }
-                    if v_start >= q_end {
-                        break;
-                    }
-                    if v_start >= q_start && v_start < ref_idx {
-                        continue;
-                    }
-                    ref_idx = ref_idx.max(v_end);
-                    if v_ilen < 0 {
-                        v_ilen += (q_start - v_start - 1).max(0);
-                    }
-                    v_ilen += (v_end - q_end).max(0);
-                    acc += v_ilen;
                 }
-                diffs[[query, hap]] = acc as i32;
-            } else if has_keep {
-                let kp = keep.unwrap();
-                let ko = keep_offsets.unwrap();
-                let k_s = ko[query * ploidy + hap] as usize;
-                let mut sum: i64 = 0;
-                for (j, v) in (o_s..o_e).enumerate() {
-                    if kp[k_s + j] {
-                        sum += ilens[geno_v_idxs[v] as usize] as i64;
-                    }
+                let v_idx = geno_v_idxs[v] as usize;
+                let v_start = vs[v_idx] as i64;
+                let mut v_ilen = ilens[v_idx] as i64;
+                let v_end = v_start - v_ilen.min(0) + 1;
+                if v_end <= q_start {
+                    continue;
                 }
-                diffs[[query, hap]] = sum as i32;
-            } else {
-                let mut sum: i64 = 0;
-                for v in o_s..o_e {
+                if v_start >= q_end {
+                    break;
+                }
+                if v_start >= q_start && v_start < ref_idx {
+                    continue;
+                }
+                ref_idx = ref_idx.max(v_end);
+                if v_ilen < 0 {
+                    v_ilen += (q_start - v_start - 1).max(0);
+                }
+                v_ilen += (v_end - q_end).max(0);
+                acc += v_ilen;
+            }
+            acc as i32
+        } else if has_keep {
+            let kp = keep.unwrap();
+            let ko = keep_offsets.unwrap();
+            let k_s = ko[query * ploidy + hap] as usize;
+            let mut sum: i64 = 0;
+            for (j, v) in (o_s..o_e).enumerate() {
+                if kp[k_s + j] {
                     sum += ilens[geno_v_idxs[v] as usize] as i64;
                 }
-                diffs[[query, hap]] = sum as i32;
             }
+            sum as i32
+        } else {
+            let mut sum: i64 = 0;
+            for v in o_s..o_e {
+                sum += ilens[geno_v_idxs[v] as usize] as i64;
+            }
+            sum as i32
+        }
+    };
+
+    if parallel {
+        // Each chunk is exactly one i32 cell (chunk_size=1), so writes are
+        // provably disjoint — safe for rayon. &mut [i32] is Send.
+        diffs
+            .as_slice_mut()
+            .unwrap()
+            .par_chunks_mut(1)
+            .enumerate()
+            .for_each(|(k, cell)| {
+                cell[0] = compute(k);
+            });
+    } else {
+        for k in 0..n_work {
+            let query = k / ploidy;
+            let hap = k % ploidy;
+            diffs[[query, hap]] = compute(k);
         }
     }
     diffs
@@ -161,6 +191,7 @@ mod tests {
         let d = get_diffs_sparse(
             goi.view(), v_idxs.view(), o_starts.view(), o_stops.view(),
             ilens.view(), None, None, None, None, None,
+            false, // serial — unit tests don't need rayon overhead
         );
         assert_eq!(d[[0, 0]], 1);
     }
@@ -175,6 +206,7 @@ mod tests {
         let d = get_diffs_sparse(
             goi.view(), v_idxs.view(), o_starts.view(), o_stops.view(),
             ilens.view(), None, None, None, None, None,
+            false, // serial — unit tests don't need rayon overhead
         );
         assert_eq!(d[[0, 0]], 0);
     }

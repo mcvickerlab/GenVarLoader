@@ -95,10 +95,28 @@ def _build_rust_kernels() -> dict[str, Callable]:
     def _tracks_to_intervals_shim(*args, parallel: bool = False, **kwargs):
         return _tti_raw(*args, parallel=parallel, **kwargs)
 
+    # Shim for intervals_to_tracks: FFI now requires `parallel` but existing
+    # replay_inplace callers don't pass it. Default to False (serial) so
+    # existing golden replays stay byte-identical. The rayon-equivalence test
+    # explicitly passes parallel=True/False to exercise both branches.
+    _itt_raw = _ext.intervals_to_tracks
+
+    def _intervals_to_tracks_shim(*args, parallel: bool = False, **kwargs):
+        return _itt_raw(*args, parallel=parallel, **kwargs)
+
+    # Shim for get_diffs_sparse: FFI now requires `parallel` but existing
+    # replay_tuple callers don't pass it. Default to False (serial) so existing
+    # golden replays stay byte-identical. The rayon-equivalence test explicitly
+    # passes parallel=True/False to exercise both branches.
+    _gds_raw = _ext.get_diffs_sparse
+
+    def _get_diffs_sparse_shim(*args, parallel: bool = False, **kwargs):
+        return _gds_raw(*args, parallel=parallel, **kwargs)
+
     table: dict[str, Callable] = {
-        "intervals_to_tracks": _ext.intervals_to_tracks,
+        "intervals_to_tracks": _intervals_to_tracks_shim,
         "tracks_to_intervals": _tracks_to_intervals_shim,
-        "get_diffs_sparse": _ext.get_diffs_sparse,
+        "get_diffs_sparse": _get_diffs_sparse_shim,
         "choose_exonic_variants": _ext.choose_exonic_variants,
         "gather_alleles": _ext.gather_alleles,
         "gather_rows_i32": _ext.gather_rows_i32,

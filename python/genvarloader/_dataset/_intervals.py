@@ -31,6 +31,8 @@ def intervals_to_tracks(
     itv_values = np.ascontiguousarray(itv_values, dtype=np.float32)
     itv_offsets = np.ascontiguousarray(itv_offsets, dtype=np.int64)
     out_offsets = np.ascontiguousarray(out_offsets, dtype=np.int64)
+    # out is f32; total output bytes used to decide parallelism threshold.
+    total_out_bytes = int(out_offsets[-1]) * 4
     _intervals_to_tracks_rust(
         offset_idxs,
         starts,
@@ -40,6 +42,7 @@ def intervals_to_tracks(
         itv_offsets,
         out,
         out_offsets,
+        should_parallelize(total_out_bytes),
     )
 
 

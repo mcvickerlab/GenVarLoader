@@ -31,8 +31,12 @@ def get_diffs_sparse(
     v_starts: NDArray[np.integer] | None = None,
 ) -> NDArray[np.int32]:
     """Per-(query, hap) reference-length diffs; dispatches to Rust."""
+    goi = np.ascontiguousarray(geno_offset_idx, np.int64)
+    # output is (n_queries, ploidy) int32 — each cell is 4 bytes
+    total_out_bytes = int(goi.shape[0]) * int(goi.shape[1]) * 4
+    parallel = should_parallelize(total_out_bytes)
     return _get_diffs_sparse_rust(
-        np.ascontiguousarray(geno_offset_idx, np.int64),
+        goi,
         np.ascontiguousarray(geno_v_idxs, np.int32),
         _as_starts_stops(geno_offsets),
         np.ascontiguousarray(ilens, np.int32),
@@ -41,6 +45,7 @@ def get_diffs_sparse(
         None if q_starts is None else np.ascontiguousarray(q_starts, np.int32),
         None if q_ends is None else np.ascontiguousarray(q_ends, np.int32),
         None if v_starts is None else np.ascontiguousarray(v_starts, np.int32),
+        parallel,
     )
 
 

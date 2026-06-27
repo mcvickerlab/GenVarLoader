@@ -46,6 +46,7 @@ pub fn get_diffs_sparse<'py>(
     q_starts: Option<PyReadonlyArray1<i32>>,
     q_ends: Option<PyReadonlyArray1<i32>>,
     v_starts: Option<PyReadonlyArray1<i32>>,
+    parallel: bool,
 ) -> Bound<'py, PyArray2<i32>> {
     let go = geno_offsets.as_array();
     let diffs = genotypes::get_diffs_sparse(
@@ -59,6 +60,7 @@ pub fn get_diffs_sparse<'py>(
         q_starts.as_ref().map(|a| a.as_array()),
         q_ends.as_ref().map(|a| a.as_array()),
         v_starts.as_ref().map(|a| a.as_array()),
+        parallel,
     );
     diffs.into_pyarray(py)
 }
@@ -75,6 +77,7 @@ pub fn intervals_to_tracks(
     itv_offsets: PyReadonlyArray1<i64>,
     mut out: PyReadwriteArray1<f32>,
     out_offsets: PyReadonlyArray1<i64>,
+    parallel: bool,
 ) {
     intervals::intervals_to_tracks(
         offset_idxs.as_array(),
@@ -85,6 +88,7 @@ pub fn intervals_to_tracks(
         itv_offsets.as_array(),
         out.as_array_mut(),
         out_offsets.as_array(),
+        parallel,
     );
 }
 
@@ -602,6 +606,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
         Some(q_starts_owned.view()), // q_starts = regions[:, 1]
         Some(q_ends_owned.view()),   // q_ends   = regions[:, 2]
         Some(v_starts_a),            // v_starts = per-variant genomic starts
+        parallel,
     );
 
     // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
@@ -961,6 +966,7 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
         Some(q_starts_owned.view()), // q_starts = regions[:, 1]
         Some(q_ends_owned.view()),   // q_ends   = regions[:, 2]
         Some(v_starts_a),            // v_starts = per-variant genomic starts
+        parallel,
     );
 
     // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
@@ -1226,6 +1232,7 @@ pub fn intervals_and_realign_track_fused(
         itv_offsets.as_array(),
         scratch.view_mut(),
         track_offsets_a,
+        parallel,
     );
 
     // Step 2: shift and realign into caller's out slice (reuses tracks core).
