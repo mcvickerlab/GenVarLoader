@@ -4,13 +4,16 @@ arguments captured from a real reconstruction (see conftest.py)."""
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from genvarloader._dataset._genotypes import (
     get_diffs_sparse,
     reconstruct_haplotypes_from_sparse,
 )
 from genvarloader._dataset._intervals import intervals_to_tracks
-from genvarloader._dataset._tracks import shift_and_realign_tracks_sparse
+from genvarloader._dataset._tracks import (
+    _shift_and_realign_tracks_sparse_rust_wrapper as shift_and_realign_tracks_sparse,
+)
 
 
 def _warm_and_run(benchmark, fn, captured):
@@ -35,6 +38,9 @@ def test_get_diffs_sparse(benchmark, captured_diffs):
     assert result.size > 0
 
 
+@pytest.mark.skip(
+    reason="kernel fused into rust (W3/W5); micro-benchmark pending redesign — W6"
+)
 def test_reconstruct_haplotypes_from_sparse(benchmark, captured_haplotypes):
     # returns None; writes into the preallocated `out` buffer
     _warm_and_run(benchmark, reconstruct_haplotypes_from_sparse, captured_haplotypes)
@@ -42,6 +48,9 @@ def test_reconstruct_haplotypes_from_sparse(benchmark, captured_haplotypes):
     assert out is not None and np.asarray(out).size > 0
 
 
+@pytest.mark.skip(
+    reason="kernel fused into rust (W3/W5); micro-benchmark pending redesign — W6"
+)
 def test_intervals_to_tracks(benchmark, captured_intervals_to_tracks):
     # returns None; writes into the preallocated `out` buffer
     _warm_and_run(benchmark, intervals_to_tracks, captured_intervals_to_tracks)
@@ -49,6 +58,9 @@ def test_intervals_to_tracks(benchmark, captured_intervals_to_tracks):
     assert out is not None and np.asarray(out).size > 0
 
 
+@pytest.mark.skip(
+    reason="kernel fused into rust (W3/W5); micro-benchmark pending redesign — W6"
+)
 def test_shift_and_realign_tracks_sparse(benchmark, captured_realign_tracks):
     # returns None; writes into the preallocated `out` buffer
     _warm_and_run(benchmark, shift_and_realign_tracks_sparse, captured_realign_tracks)
