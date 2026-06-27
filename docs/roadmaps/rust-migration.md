@@ -796,7 +796,7 @@ narrowed to genoray (variant IO) only.
   Issue tracking the overshoot: #255.
 
 
-- 2026-06-27 (Phase 5 W5 — consolidation PR: snapshot + delete numba + rayon; branch `phase-5-w5`, PR #TODO):
+- 2026-06-27 (Phase 5 W5 — consolidation PR: snapshot + delete numba + rayon; branch `phase-5-w5`, PR #260):
   The consolidation PR, one branch with three staged commit boundaries.
   **Stage A — golden snapshot (DONE):** froze the ~21 numba-oracle parity suites to committed
   `.npz` goldens (deterministic seeded-sample draws; the generator cross-checks `numba == rust`
@@ -830,10 +830,13 @@ narrowed to genoray (variant IO) only.
   `grep -r 'import numba|@nb.njit|nb.prange' python/genvarloader/` = 0 matches.
   CAVEAT (seqpro transitive numba): `import genvarloader` still pulls numba+llvmlite
   via seqpro 0.20.0 (eager numba import in seqpro/_numba.py + transforms/tmm.py).
-  genvarloader's OWN code is numba-free; the no-numba-in-import-graph win + the W6
-  ~3.2 GB JIT-RSS drop require a seqpro fix (lazy/remove numba) — tracked as a seqpro
-  follow-up (to be filed). B4's import-guard asserts genvarloader's own modules are
-  numba-free (own-code source scan, since seqpro's eager import can't be removed here).
+  genvarloader's OWN code is numba-free. **W5's numba-removal scope is gvl-only by
+  design** (user decision 2026-06-27): removing numba from seqpro (`ML4GLand/SeqPro`)
+  is explicitly OUT OF SCOPE, so the transitive numba dependency remains intentionally.
+  B4's import-guard asserts genvarloader's own modules are numba-free (own-code source
+  scan). The ~3.2 GB JIT-RSS that the seqpro JIT baseline contributes is therefore not
+  recovered by this migration; the W6 perf re-baseline measures the gvl-attributable
+  deltas (rayon multi-thread speedup, gvl-own kernel costs), not the seqpro JIT floor.
   **Stage C — rayon batch parallelism (DONE):** added a `parallel: bool` gate to every read
   kernel, threaded through the FFI entries and Python callers (each computes
   `should_parallelize(total_out_bytes)` from `_threads.py`). The parallel branch carves disjoint
@@ -855,7 +858,8 @@ narrowed to genoray (variant IO) only.
   (benchmarks 7 passed / 3 skipped / 1 xfailed); cargo test --release 114; ruff + format +
   pyrefly + clippy clean.
   Phase 5 stays 🚧 (W1–W5 done; W6–W9 remain — W6/PR6 is measure-and-merge: re-baseline perf,
-  capture the multi-thread rayon speedup + the seqpro-blocked JIT-RSS drop, then merge).
+  capture the multi-thread rayon speedup + the gvl-attributable RSS deltas, then merge.
+  The seqpro JIT-RSS floor is out of scope — see the seqpro caveat above).
 
 - 2026-06-26 (Phase 5 W4 — final single-thread numba-vs-rust `__getitem__` A/B; branch `phase-5-w4`, PR #259):
   Benchmark-only gate (no code) before the W5 consolidation. Measured rust AND numba **single-thread, same
