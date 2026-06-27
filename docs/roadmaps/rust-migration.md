@@ -774,7 +774,7 @@ narrowed to genoray (variant IO) only.
   (one branch-introduced test file reformatted by ruff). Phase 5 🚧 (W1 done; W2–W9 remain).
   Issue tracking the overshoot: #255.
 
-- 2026-06-26 (Phase 5 W3 — annotated+spliced fusion; branch `phase-5-w3`, PR: TODO):
+- 2026-06-26 (Phase 5 W3 — annotated+spliced fusion; branch `phase-5-w3`, PR #258):
   Fused the fourth and final reconstruction combination — annotated+spliced haplotypes — via
   `reconstruct_annotated_haplotypes_spliced_fused` (new kernel in `src/reconstruct/mod.rs`).
   One FFI crossing total: RC is folded in-kernel (bytes reverse-complemented via the existing
