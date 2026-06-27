@@ -723,6 +723,11 @@ _PR: —_
 
 - [ ] Collapse the PyO3 surface so Python is a true shim (indexing sugar, torch,
       validation/error messages only).
+      > W6 audit verdict (2026-06-27): **shim is already thin — bucket-2 is empty**.
+      > All per-batch Python steps are indexing sugar, FFI typing guards, or Python-side
+      > RNG; the five fused kernels each cross the FFI boundary exactly once.
+      > The single-big-kernel collapse is not warranted as Phase 5 work.
+      > Full audit: `docs/roadmaps/phase-5-w6-thin-shim-audit.md`
 - [x] Delete all remaining core numba kernels (target: count = 0). ✅ W5
 - [ ] Confirm the crate is fully cargo-testable standalone.
 
@@ -795,6 +800,19 @@ narrowed to genoray (variant IO) only.
   (one branch-introduced test file reformatted by ruff). Phase 5 🚧 (W1 done; W2–W9 remain).
   Issue tracking the overshoot: #255.
 
+
+- 2026-06-27 (Phase 5 W6 — thin-shim audit; branch `phase-5-w6-wrapup`):
+  Audited the Python layer over the PyO3 FFI surface to determine whether collapsible
+  glue remains. **Verdict: shim is already thin — bucket-2 is empty.** All per-batch
+  Python steps classify as Bucket 1 (indexing sugar, FFI typing guards, Python-side RNG,
+  output format massaging) or Bucket 3 (one FFI crossing via a fused kernel). The
+  dispatch layer (`_dispatch.py`) is confirmed absent; zero numba imports in
+  `python/genvarloader/`. FFI surface: 33 registered entries, 5 fused `__getitem__`
+  kernels. The Phase 3 optimization targets (`_ffi_array` zero-copy guard,
+  `_HapsFfiStatic` caching, uninit buffers) are all implemented. The single-big-kernel
+  collapse is not warranted as Phase 5 work — the five fused kernels already express
+  one FFI crossing per reconstruction path. Full audit:
+  `docs/roadmaps/phase-5-w6-thin-shim-audit.md`. Phase 5 🚧 (W1–W6 done; W7–W9 remain).
 
 - 2026-06-27 (Phase 5 W5 — consolidation PR: snapshot + delete numba + rayon; branch `phase-5-w5`, PR #260):
   The consolidation PR, one branch with three staged commit boundaries.
