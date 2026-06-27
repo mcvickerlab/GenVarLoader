@@ -740,6 +740,41 @@ _PR: —_
 
 **Checkpoint:** core numba kernel count = 0; full perf re-baseline recorded here.
 
+#### W6 perf re-baseline: rayon serial-vs-multithread speedup + RSS (2026-06-27)
+
+> Full methodology, per-mode tables, and conclusions: [`docs/roadmaps/phase-5-w6-perf-rebaseline.md`](phase-5-w6-perf-rebaseline.md)
+>
+> HEAD `0968a0f`, corpus `chr22_geuv.gvl` (format 2.0, 165 regions × 5 samples, BATCH=32,
+> SEQLEN=16384), Carter HPC (Intel Xeon E5-4650 v3, 96 CPUs, linux-64), `maturin develop --release`.
+>
+> **Key finding — threshold gate held serial on this corpus:** the `should_parallelize` gate
+> (`_MIN_BYTES_PER_THREAD = 1 MiB`, threshold = `GVL_NUM_THREADS × 1 MiB`) never fired for
+> any mode at N≥4. Batch output is ~1–3 MiB << N × 1 MiB at all thread counts tested. All
+> modes ran serial; the thread sweep (1/2/4/8/all-96) shows ratios within 0.95–1.10× of the
+> serial baseline — pure node noise. This is correct behavior, not a failure.
+>
+> **Speedup curve (serial÷parallel; all within node noise ~±10%):**
+>
+> | Mode | T=2 | T=4 | T=8 | T=all (96) |
+> |------|----:|----:|----:|----------:|
+> | tracks-only (pedantic min) | 1.10× | 1.04× | 1.04× | 1.10× |
+> | tracks/haplotypes (pedantic min) | 1.06× | 1.03× | 1.06× | 1.06× |
+> | annotated (pedantic min) | 1.09× | 1.06× | 0.95× | 1.09× |
+> | variants (wall avg) | 0.98× | 1.03× | 1.02× | 1.01× |
+> | variant-windows (wall avg) | 1.01× | 0.98× | 0.99× | 1.00× |
+>
+> **Peak RSS (serial vs parallel/unset):** 3.525 GB in all cases — 0 gvl-attributable delta.
+> Floor is seqpro transitive JIT (~3.2 GB), unchanged by thread count (serial path throughout).
+>
+> **Rayon correctness:** `serial == parallel == frozen golden` for all kernels (W5 parity gate,
+> `test_rayon_equivalence.py`). The threshold gate is the only reason rayon was not exercised
+> here; production-scale batches (SEQLEN≥131072 or BATCH≥256) will cross it.
+>
+> **Numba A/B unavailable** (deleted in W5). Final single-thread rust-vs-numba figures in
+> [`docs/roadmaps/phase-5-w4-final-ab.md`](phase-5-w4-final-ab.md): rust parity-or-better
+> on every mode (tracks-only 1.07×, haplotypes/tracks-seqs 1.66×, annotated 1.43×, variants
+> 1.38×, variant-windows 4.58×).
+
 ### Phase 6 — Absorb genoray (future) ⬜
 _PR: —_
 
