@@ -1,11 +1,10 @@
 """Cgroup-aware thread-count resolver + rayon pool initializer.
 
 Resolves the effective worker count from GVL_NUM_THREADS or the
-cgroup cpuset (Linux sched_getaffinity), capped by the number of CPUs
-available (or numba's thread pool size if numba is installed).
-Seeds RAYON_NUM_THREADS so rayon's global pool picks it up on first
-use.  Must run before the first rust parallel call (rayon reads the
-env var at global-pool init time). Idempotent.
+cgroup cpuset (Linux sched_getaffinity). Seeds RAYON_NUM_THREADS so
+rayon's global pool picks it up on first use. Must run before the
+first rust parallel call (rayon reads the env var at global-pool init
+time). Idempotent.
 """
 
 from __future__ import annotations
@@ -23,26 +22,12 @@ def _detect_cpus() -> int:
         return max(1, os.cpu_count() or 1)
 
 
-def _max_threads() -> int:
-    """Upper bound on usable threads: CPU count, or numba's pool size if available."""
-    try:
-        import numba  # noqa: F401 (optional; still in venv during migration)
-
-        return max(1, numba.get_num_threads())
-    except Exception:
-        return _detect_cpus()
-
-
 def _resolve_num_threads() -> int:
     env = os.environ.get("GVL_NUM_THREADS")
     if env:
         try:
-            n = int(env)
-            # Cap to available CPUs / numba pool so users can't over-subscribe.
-            return max(1, min(n, _max_threads()))
+            return max(1, int(env))
         except ValueError:
-            # A malformed override (e.g. "auto") must not break `import
-            # genvarloader`; fall through to detection instead.
             pass
     return _detect_cpus()
 
@@ -65,6 +50,4 @@ def num_threads() -> int:
 
 
 def should_parallelize(total_bytes: int) -> bool:
-    """True iff a copy of `total_bytes` is large enough to justify fork-join."""
-    n = _max_threads()
-    return total_bytes >= n * _MIN_BYTES_PER_THREAD
+    return total_bytes >= num_threads() * _MIN_BYTES_PER_THREAD

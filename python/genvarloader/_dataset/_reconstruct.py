@@ -37,7 +37,6 @@ from ._tracks import (
     Tracks,
     TrackType,
     _NewT,
-    _shift_and_realign_tracks_sparse_rust_wrapper,
 )  # noqa: F401
 from ._utils import _ffi_array
 
