@@ -13,7 +13,6 @@ from einops import repeat
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
-from .._dispatch import register
 from .._flat import _Flat
 from .._ragged import FlatIntervals, RaggedIntervals, RaggedTracks
 from .._utils import lengths_to_offsets
@@ -453,12 +452,6 @@ def _shift_and_realign_tracks_sparse_rust_wrapper(
     )
 
 
-register(
-    "shift_and_realign_tracks_sparse",
-    numba=shift_and_realign_tracks_sparse,
-    rust=_shift_and_realign_tracks_sparse_rust_wrapper,
-    default="rust",
-)
 
 
 # -----------------------------------------------------------------------------

@@ -10,7 +10,6 @@ import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
-from .._dispatch import get, register
 from ..genvarloader import compact_keep_f32 as _compact_keep_f32_rust
 from ..genvarloader import compact_keep_i32 as _compact_keep_i32_rust
 from ..genvarloader import fill_empty_fixed_f32 as _fill_empty_fixed_f32_rust
@@ -126,7 +125,7 @@ class _FlatAlleles:
         """
         m = np.ascontiguousarray(mask, np.bool_).reshape(-1)
         per_bp = np.repeat(m, self.ploidy)  # per-(b*p) row mask
-        get("rc_alleles")(
+        _rc_alleles_rust(
             self.byte_data,
             np.asarray(self.seq_offsets, np.int64),
             np.asarray(self.var_offsets, np.int64),
@@ -528,16 +527,8 @@ def _gather_alleles_numba(
     return data, seq_offsets
 
 
-register(
-    "gather_alleles",
-    numba=_gather_alleles_numba,
-    rust=_gather_alleles_rust,
-    default="rust",
-)
-
-
 def _gather_alleles(v_idxs, allele_bytes, allele_offsets):
-    return get("gather_alleles")(
+    return _gather_alleles_rust(
         np.ascontiguousarray(v_idxs, np.int32),
         np.ascontiguousarray(allele_bytes, np.uint8),
         np.ascontiguousarray(allele_offsets, np.int64),
@@ -568,20 +559,6 @@ def _compact_keep_numba(v_idxs, row_offsets, keep):  # pragma: no cover - njit
     return new_v, new_offsets
 
 
-register(
-    "compact_keep_i32",
-    numba=_compact_keep_numba,
-    rust=_compact_keep_i32_rust,
-    default="rust",
-)
-register(
-    "compact_keep_f32",
-    numba=_compact_keep_numba,
-    rust=_compact_keep_f32_rust,
-    default="rust",
-)
-
-
 def _compact_keep(v_idxs, row_offsets, keep):
     """Dispatch compact-keep by dtype, preserving the input dtype without down-cast.
 
@@ -594,9 +571,9 @@ def _compact_keep(v_idxs, row_offsets, keep):
     row_offsets = np.ascontiguousarray(row_offsets, np.int64)
     keep = np.ascontiguousarray(keep, np.bool_)
     if values.dtype == np.int32:
-        return get("compact_keep_i32")(values, row_offsets, keep)
+        return _compact_keep_i32_rust(values, row_offsets, keep)
     if values.dtype == np.float32:
-        return get("compact_keep_f32")(values, row_offsets, keep)
+        return _compact_keep_f32_rust(values, row_offsets, keep)
     # Arbitrary dtypes (custom FORMAT fields, e.g. int16, int64): dtype-preserving
     # numba fallback — never down-cast.
     return _compact_keep_numba(values, row_offsets, keep)
@@ -607,20 +584,6 @@ def _gather_rows_numba(geno_offset_idx, geno_offsets, geno_v_idxs):
     return _gather_v_idxs_ss_numba(
         geno_offset_idx, geno_offsets[0], geno_offsets[1], geno_v_idxs
     )
-
-
-register(
-    "gather_rows_i32",
-    numba=_gather_rows_numba,
-    rust=_gather_rows_i32_rust,
-    default="rust",
-)
-register(
-    "gather_rows_f32",
-    numba=_gather_rows_numba,
-    rust=_gather_rows_f32_rust,
-    default="rust",
-)
 
 
 def _gather_rows(
@@ -638,9 +601,9 @@ def _gather_rows(
     off2d = _as_starts_stops(offsets)
     data = np.ascontiguousarray(data)
     if data.dtype == np.int32:
-        return get("gather_rows_i32")(goi, off2d, data)
+        return _gather_rows_i32_rust(goi, off2d, data)
     if data.dtype == np.float32:
-        return get("gather_rows_f32")(goi, off2d, data)
+        return _gather_rows_f32_rust(goi, off2d, data)
     # Arbitrary custom-FORMAT-field dtypes (#231): no typed Rust core — use the
     # dtype-preserving numba kernel directly so values are never down-cast.
     return _gather_rows_numba(goi, off2d, data)
@@ -670,20 +633,6 @@ def _fill_empty_scalar_numba(data, offsets, fill):  # pragma: no cover - njit
     return new_data, new_offsets
 
 
-register(
-    "fill_empty_scalar_i32",
-    numba=_fill_empty_scalar_numba,
-    rust=_fill_empty_scalar_i32_rust,
-    default="rust",
-)
-register(
-    "fill_empty_scalar_f32",
-    numba=_fill_empty_scalar_numba,
-    rust=_fill_empty_scalar_f32_rust,
-    default="rust",
-)
-
-
 def _fill_empty_scalar(data, offsets, fill):
     """Dtype-preserving dispatch for fill-empty-scalar.
 
@@ -694,9 +643,9 @@ def _fill_empty_scalar(data, offsets, fill):
     data = np.ascontiguousarray(data)
     offsets = np.ascontiguousarray(offsets, np.int64)
     if data.dtype == np.int32:
-        return get("fill_empty_scalar_i32")(data, offsets, int(fill))
+        return _fill_empty_scalar_i32_rust(data, offsets, int(fill))
     if data.dtype == np.float32:
-        return get("fill_empty_scalar_f32")(data, offsets, float(fill))
+        return _fill_empty_scalar_f32_rust(data, offsets, float(fill))
     # Arbitrary dtype (custom FORMAT fields): preserve dtype via numba fallback.
     return _fill_empty_scalar_numba(data, offsets, fill)
 
@@ -752,20 +701,6 @@ def _fill_empty_seq_numba(
     return new_data, new_var, new_seq
 
 
-register(
-    "fill_empty_seq_u8",
-    numba=_fill_empty_seq_numba,
-    rust=_fill_empty_seq_u8_rust,
-    default="rust",
-)
-register(
-    "fill_empty_seq_i32",
-    numba=_fill_empty_seq_numba,
-    rust=_fill_empty_seq_i32_rust,
-    default="rust",
-)
-
-
 def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):
     """Dtype-preserving dispatch for fill-empty-seq (two-level dummy-fill).
 
@@ -778,9 +713,9 @@ def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):
     seq_offsets = np.ascontiguousarray(seq_offsets, np.int64)
     dummy = np.ascontiguousarray(dummy, data.dtype)
     if data.dtype == np.uint8:
-        return get("fill_empty_seq_u8")(data, var_offsets, seq_offsets, dummy)
+        return _fill_empty_seq_u8_rust(data, var_offsets, seq_offsets, dummy)
     if data.dtype == np.int32:
-        return get("fill_empty_seq_i32")(data, var_offsets, seq_offsets, dummy)
+        return _fill_empty_seq_i32_rust(data, var_offsets, seq_offsets, dummy)
     # Arbitrary dtype: preserve via numba fallback.
     return _fill_empty_seq_numba(data, var_offsets, seq_offsets, dummy)
 
@@ -816,20 +751,6 @@ def _fill_empty_fixed_numba(data, offsets, inner, fill):  # pragma: no cover - n
     return new_data, new_offsets
 
 
-register(
-    "fill_empty_fixed_i32",
-    numba=_fill_empty_fixed_numba,
-    rust=_fill_empty_fixed_i32_rust,
-    default="rust",
-)
-register(
-    "fill_empty_fixed_f32",
-    numba=_fill_empty_fixed_numba,
-    rust=_fill_empty_fixed_f32_rust,
-    default="rust",
-)
-
-
 def _fill_empty_fixed(data, offsets, inner, fill):
     """Dtype-preserving dispatch for fill-empty-fixed.
 
@@ -840,9 +761,9 @@ def _fill_empty_fixed(data, offsets, inner, fill):
     data = np.ascontiguousarray(data)
     offsets = np.ascontiguousarray(offsets, np.int64)
     if data.dtype == np.int32:
-        return get("fill_empty_fixed_i32")(data, offsets, int(inner), int(fill))
+        return _fill_empty_fixed_i32_rust(data, offsets, int(inner), int(fill))
     if data.dtype == np.float32:
-        return get("fill_empty_fixed_f32")(data, offsets, int(inner), float(fill))
+        return _fill_empty_fixed_f32_rust(data, offsets, int(inner), float(fill))
     # Arbitrary dtype (custom FORMAT fields): preserve dtype via numba fallback.
     return _fill_empty_fixed_numba(data, offsets, inner, fill)
 
@@ -921,14 +842,6 @@ def _assemble_variant_buffers_rust(
     )
 
 
-register(
-    "assemble_variant_buffers",
-    numba=_assemble_variant_buffers_numba_entry,
-    rust=_assemble_variant_buffers_rust,
-    default="rust",
-)
-
-
 def _rc_alleles_reference(byte_data, seq_offsets, var_offsets, to_rc_row):
     """Reference backend: seqpro reverse_complement_masked on a flat allele view.
 
@@ -961,14 +874,6 @@ def _rc_alleles_rust(byte_data, seq_offsets, var_offsets, to_rc_row):
         np.ascontiguousarray(var_offsets, np.int64),
         np.ascontiguousarray(to_rc_row, np.bool_),
     )
-
-
-register(
-    "rc_alleles",
-    numba=_rc_alleles_reference,
-    rust=_rc_alleles_rust,
-    default="rust",
-)
 
 
 def get_variants_flat(
@@ -1117,7 +1022,7 @@ def get_variants_flat(
         L = opt.flank_length
         ref_mode = 1 if opt.ref == "window" else 2
         alt_mode = 1 if opt.alt == "window" else 2
-        bufs = get("assemble_variant_buffers")(
+        bufs = _assemble_variant_buffers_rust(
             1,  # windows mode
             v_idxs,
             row_offsets,
@@ -1155,7 +1060,7 @@ def get_variants_flat(
         haps.flank_length and haps.token_lut is not None and regions is not None
     )
     L = haps.flank_length or 0
-    bufs = get("assemble_variant_buffers")(
+    bufs = _assemble_variant_buffers_rust(
         0,  # variants mode
         v_idxs,
         row_offsets,

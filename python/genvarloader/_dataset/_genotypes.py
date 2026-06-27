@@ -3,7 +3,6 @@ import numpy as np
 from numpy.typing import NDArray
 from seqpro.rag import OFFSET_TYPE
 
-from .._dispatch import get, register
 from ..genvarloader import choose_exonic_variants as _choose_exonic_variants_rust
 from ..genvarloader import get_diffs_sparse as _get_diffs_sparse_rust
 from ..genvarloader import (
@@ -125,14 +124,6 @@ def _as_starts_stops(offsets: NDArray[np.integer]) -> NDArray[np.int64]:
     return np.ascontiguousarray(o, dtype=np.int64)
 
 
-register(
-    "get_diffs_sparse",
-    numba=_get_diffs_sparse_numba,
-    rust=_get_diffs_sparse_rust,
-    default="rust",
-)
-
-
 def get_diffs_sparse(
     geno_offset_idx: NDArray[np.integer],
     geno_v_idxs: NDArray[np.integer],
@@ -145,7 +136,7 @@ def get_diffs_sparse(
     v_starts: NDArray[np.integer] | None = None,
 ) -> NDArray[np.int32]:
     """Per-(query, hap) reference-length diffs; dispatches numba/rust."""
-    return get("get_diffs_sparse")(
+    return _get_diffs_sparse_rust(
         np.ascontiguousarray(geno_offset_idx, np.int64),
         np.ascontiguousarray(geno_v_idxs, np.int32),
         _as_starts_stops(geno_offsets),
@@ -277,14 +268,6 @@ def _reconstruct_haplotypes_from_sparse_numba(
             )
 
 
-register(
-    "reconstruct_haplotypes_from_sparse",
-    numba=_reconstruct_haplotypes_from_sparse_numba,
-    rust=_reconstruct_haplotypes_from_sparse_rust,
-    default="rust",
-)
-
-
 def reconstruct_haplotypes_from_sparse(
     out: NDArray[np.uint8],
     out_offsets: NDArray[np.integer],
@@ -311,7 +294,7 @@ def reconstruct_haplotypes_from_sparse(
     and layouts before dispatch. See ``_reconstruct_haplotypes_from_sparse_numba``
     for the full parameter documentation.
     """
-    get("reconstruct_haplotypes_from_sparse")(
+    _reconstruct_haplotypes_from_sparse_rust(
         out,
         np.ascontiguousarray(out_offsets, np.int64),
         np.ascontiguousarray(regions, np.int32),
@@ -600,14 +583,6 @@ def _choose_exonic_variants_numba(
     return keep, keep_offsets
 
 
-register(
-    "choose_exonic_variants",
-    numba=_choose_exonic_variants_numba,
-    rust=_choose_exonic_variants_rust,
-    default="rust",
-)
-
-
 def choose_exonic_variants(
     starts: NDArray[np.integer],
     ends: NDArray[np.integer],
@@ -618,7 +593,7 @@ def choose_exonic_variants(
     ilens: NDArray[np.integer],
 ) -> tuple[NDArray[np.bool_], NDArray[OFFSET_TYPE]]:
     """Exonic keep-mask; dispatches numba/rust. keep_offsets dtype == OFFSET_TYPE."""
-    keep, keep_offsets = get("choose_exonic_variants")(
+    keep, keep_offsets = _choose_exonic_variants_rust(
         np.ascontiguousarray(starts, np.int32),
         np.ascontiguousarray(ends, np.int32),
         np.ascontiguousarray(geno_offset_idx, np.int64),

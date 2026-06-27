@@ -301,32 +301,43 @@ def load_flat_golden(name: str):
 
 
 def make_kernel_spy(kernel_name: str):
-    """Install a counting spy on the dispatch-registered rust callable.
+    """Install a counting spy on the direct rust callable at its production call site.
 
     Returns ``(spy_fn, calls_dict, restore_fn)``. Call ``restore_fn()`` to undo.
-    The caller does NOT need to import ``genvarloader._dispatch``.
-
-    The spy fires whenever dispatch routes to the rust callable — i.e., under
-    the default rust backend with no ``GVL_BACKEND`` override. Appropriate for
-    converted parity tests that have removed ``GVL_BACKEND`` flips but still
-    need a non-vacuity guard.
-
-    Stage-B note: this helper uses ``_dispatch`` internally; updating
-    ``_golden.py`` here (one place) is sufficient when ``_dispatch`` is deleted.
     """
-    from genvarloader import _dispatch as _disp
+    import importlib
 
-    numba_fn, rust_fn = _disp.backends(kernel_name)
-    orig = dict(_disp._REGISTRY[kernel_name])
+    # Each entry is (primary_module, attr_name, [extra_modules_to_also_patch]).
+    # Extra modules have the same attr bound via a direct import; we must patch
+    # each alias so the spy intercepts all call sites.
+    _KERNEL_SITES: dict[str, tuple[str, str, list[str]]] = {
+        "get_reference": ("genvarloader._dataset._reference", "_get_reference_rust", []),
+        "assemble_variant_buffers": ("genvarloader._dataset._flat_variants", "_assemble_variant_buffers_rust", []),
+        "gather_rows_i32": ("genvarloader._dataset._flat_variants", "_gather_rows_i32_rust", []),
+        "compact_keep_i32": ("genvarloader._dataset._flat_variants", "_compact_keep_i32_rust", []),
+        "rc_alleles": ("genvarloader._dataset._flat_variants", "_rc_alleles_rust", ["genvarloader._dataset._rag_variants"]),
+    }
+
+    if kernel_name not in _KERNEL_SITES:
+        raise KeyError(f"make_kernel_spy: no site registered for {kernel_name!r}; known: {sorted(_KERNEL_SITES)}")
+
+    mod_name, attr_name, extra_mod_names = _KERNEL_SITES[kernel_name]
+    mod = importlib.import_module(mod_name)
+    orig = getattr(mod, attr_name)
     calls: dict = {"n": 0}
 
     def spy(*a, **k):
         calls["n"] += 1
-        return rust_fn(*a, **k)
+        return orig(*a, **k)
 
-    _disp.register(kernel_name, numba=numba_fn, rust=spy, default=str(orig["default"]))
+    setattr(mod, attr_name, spy)
+    extra_mods = [importlib.import_module(m) for m in extra_mod_names]
+    for em in extra_mods:
+        setattr(em, attr_name, spy)
 
     def restore():
-        _disp._REGISTRY[kernel_name] = orig
+        setattr(mod, attr_name, orig)
+        for em in extra_mods:
+            setattr(em, attr_name, orig)
 
     return spy, calls, restore

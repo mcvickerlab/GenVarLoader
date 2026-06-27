@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 import genvarloader as gvl
-from genvarloader import _dispatch as _gvl_dispatch
 from genvarloader._dataset import _haps, _reconstruct, _tracks
 from tests.benchmarks._capture import CapturedCall, capture_first_call
 from tests.benchmarks._indices import batch_indices
@@ -108,10 +107,7 @@ def captured_realign_tracks(bench_dataset):
         bench_dataset.with_seqs("haplotypes").with_tracks("read-depth").with_len(SEQLEN)
     )
     r, s = _batch_indices(ds, BATCH)
-    old_backend = os.environ.get("GVL_BACKEND")
-    os.environ["GVL_BACKEND"] = "numba"
-    entry = _gvl_dispatch._REGISTRY["shift_and_realign_tracks_sparse"]
-    original = entry["numba"]
+    original = _reconstruct._shift_and_realign_tracks_sparse_rust_wrapper
     captured: list[CapturedCall] = []
 
     def recorder(*args, **kwargs):
@@ -119,15 +115,11 @@ def captured_realign_tracks(bench_dataset):
             captured.append(CapturedCall(args=args, kwargs=dict(kwargs)))
         return original(*args, **kwargs)
 
-    entry["numba"] = recorder
+    _reconstruct._shift_and_realign_tracks_sparse_rust_wrapper = recorder
     try:
         ds[r, s]
     finally:
-        entry["numba"] = original
-        if old_backend is None:
-            os.environ.pop("GVL_BACKEND", None)
-        else:
-            os.environ["GVL_BACKEND"] = old_backend
+        _reconstruct._shift_and_realign_tracks_sparse_rust_wrapper = original
     if not captured:
         raise RuntimeError(
             "shift_and_realign_tracks_sparse was never called while running the thunk"

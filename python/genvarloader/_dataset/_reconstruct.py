@@ -34,9 +34,8 @@ from ._protocol import Reconstructor
 from ._rag_variants import RaggedVariants
 from ._ref import Ref
 from ._splice import SplicePlan
-from ._tracks import _T, Tracks, TrackType, _NewT  # noqa: F401
+from ._tracks import _T, Tracks, TrackType, _NewT, _shift_and_realign_tracks_sparse_rust_wrapper  # noqa: F401
 from ._utils import _ffi_array
-from .._dispatch import get as _dispatch_get
 
 # Fused tracks entry (Task 14): intervals → scratch → realign, one FFI crossing.
 # Imported at module level so the spy in test_fused_tracks_parity can monkeypatch it.
@@ -289,7 +288,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                         out=_tracks,  # (b*l)
                         out_offsets=track_ofsts_per_t,  # (b+1)
                     )
-                    _dispatch_get("shift_and_realign_tracks_sparse")(
+                    _shift_and_realign_tracks_sparse_rust_wrapper(
                         out=_out,  # (b*p*l)
                         out_offsets=out_ofsts_per_t,  # (b*p+1)
                         regions=regions,  # (b, 3)

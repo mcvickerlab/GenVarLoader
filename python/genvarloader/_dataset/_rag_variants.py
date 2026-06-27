@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 from seqpro.rag import Ragged
 from seqpro.rag import concatenate as _rag_concatenate
 
-from .._dispatch import get
+from ._flat_variants import _rc_alleles_rust
 from .._torch import TORCH_AVAILABLE, requires_torch
 
 if TORCH_AVAILABLE:
@@ -326,7 +326,7 @@ class RaggedVariants(Ragged):
                 alleles_per_batch = var_off[batch_starts + p] - var_off[batch_starts]
                 allele_mask = np.repeat(to_rc, alleles_per_batch)
 
-                get("rc_alleles")(
+                _rc_alleles_rust(
                     data.view(np.uint8),
                     np.asarray(char_off, np.int64),
                     np.arange(n_alleles + 1, dtype=np.int64),

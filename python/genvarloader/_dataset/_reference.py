@@ -25,7 +25,6 @@ from ._indexing import is_str_arr, s2i
 from ._splice import SpliceMap, SplicePlan, build_splice_plan
 from ._utils import bed_to_regions, padded_slice
 from .._threads import should_parallelize
-from .._dispatch import get, register
 from ..genvarloader import get_reference as _get_reference_rust_ffi
 
 INT64_MAX = np.iinfo(np.int64).max
@@ -707,14 +706,6 @@ def _get_reference_rust(
     )
 
 
-register(
-    "get_reference",
-    numba=_get_reference_numba,
-    rust=_get_reference_rust,
-    default="rust",
-)
-
-
 def get_reference(
     regions: NDArray[np.integer],
     out_offsets: NDArray[np.integer],
@@ -726,25 +717,13 @@ def get_reference(
     """Fetch reference-genome bytes for a batch of regions.
 
     ``to_rc`` is a per-query boolean mask (True = reverse-complement that query).
-    On the Rust backend the mask is consumed in-kernel; on the numba backend it
-    is silently ignored and the caller is responsible for any post-pass RC.
-
-    The call is routed through the :func:`._dispatch.get` registry so that
-    tests can spy on the underlying backend functions via
-    :func:`._dispatch.register`.
+    The mask is consumed in-kernel by the Rust backend.
     """
     parallel = should_parallelize(int(out_offsets[-1]))
-    fn = get("get_reference")  # honours test monkeypatches
-    _backend = os.environ.get("GVL_BACKEND", "rust")
-    if _backend == "rust":
-        # Rust kernel accepts to_rc as its 7th positional arg.
-        _to_rc = None if to_rc is None else np.ascontiguousarray(to_rc, np.bool_)
-        return fn(
-            regions, out_offsets, reference, ref_offsets, pad_char, parallel, _to_rc
-        )
-    else:
-        # Numba kernel does not accept to_rc; post-pass handles RC.
-        return fn(regions, out_offsets, reference, ref_offsets, pad_char, parallel)
+    _to_rc = None if to_rc is None else np.ascontiguousarray(to_rc, np.bool_)
+    return _get_reference_rust(
+        regions, out_offsets, reference, ref_offsets, pad_char, parallel, _to_rc
+    )
 
 
 def _fetch_spliced_ref(

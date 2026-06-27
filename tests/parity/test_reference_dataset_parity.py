@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 
 import genvarloader as gvl
-import genvarloader._dataset._reference  # noqa: F401 — triggers register("get_reference")
 
 from tests.parity import _golden
 
@@ -44,9 +43,8 @@ def test_reference_mode_dataset_parity(phased_svar_gvl, reference):
     assert calls["n"] > 0, (
         f"Rust get_reference was NEVER invoked during the read "
         f"(calls={calls['n']}) — the backstop is vacuous. "
-        "Inspect the reference read path to confirm get_reference is still "
-        "dispatched via _dispatch.get on the Dataset.__getitem__ → "
-        "_getitem_unspliced code path."
+        "Inspect the reference read path to confirm _get_reference_rust is still "
+        "called on the Dataset.__getitem__ → _getitem_unspliced code path."
     )
 
     # --- sanity: output must be non-trivial ---

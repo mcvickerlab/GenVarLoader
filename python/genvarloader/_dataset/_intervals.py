@@ -2,7 +2,6 @@ import numba as nb
 import numpy as np
 from numpy.typing import NDArray
 
-from .._dispatch import get, register
 from ..genvarloader import intervals_to_tracks as _intervals_to_tracks_rust
 from ..genvarloader import tracks_to_intervals as _tracks_to_intervals_rust
 
@@ -85,14 +84,6 @@ def _intervals_to_tracks_numba(
                 _out[s:e] = value
 
 
-register(
-    "intervals_to_tracks",
-    numba=_intervals_to_tracks_numba,
-    rust=_intervals_to_tracks_rust,
-    default="rust",
-)
-
-
 def intervals_to_tracks(
     offset_idxs: NDArray[np.integer],
     starts: NDArray[np.int32],
@@ -117,7 +108,7 @@ def intervals_to_tracks(
     itv_values = np.ascontiguousarray(itv_values, dtype=np.float32)
     itv_offsets = np.ascontiguousarray(itv_offsets, dtype=np.int64)
     out_offsets = np.ascontiguousarray(out_offsets, dtype=np.int64)
-    get("intervals_to_tracks")(
+    _intervals_to_tracks_rust(
         offset_idxs,
         starts,
         itv_starts,
@@ -199,14 +190,6 @@ def _tracks_to_intervals_numba(
     return all_starts, all_ends, all_values, interval_offsets
 
 
-register(
-    "tracks_to_intervals",
-    numba=_tracks_to_intervals_numba,
-    rust=_tracks_to_intervals_rust,
-    default="rust",
-)
-
-
 def tracks_to_intervals(
     regions: NDArray[np.int32],
     tracks: NDArray[np.float32],
@@ -239,7 +222,7 @@ def tracks_to_intervals(
     regions = np.ascontiguousarray(regions, dtype=np.int32)
     tracks = np.ascontiguousarray(tracks, dtype=np.float32)
     track_offsets = np.ascontiguousarray(track_offsets, dtype=np.int64)
-    return get("tracks_to_intervals")(regions, tracks, track_offsets)
+    return _tracks_to_intervals_rust(regions, tracks, track_offsets)
 
 
 @nb.njit(parallel=True, nogil=True, cache=True)
