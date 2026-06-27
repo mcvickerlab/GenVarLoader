@@ -730,6 +730,11 @@ _PR: —_
       > Full audit: `docs/roadmaps/phase-5-w6-thin-shim-audit.md`
 - [x] Delete all remaining core numba kernels (target: count = 0). ✅ W5
 - [ ] Confirm the crate is fully cargo-testable standalone.
+      > **Verified 2026-06-27 (Task 2, branch `phase-5-w6-wrapup`):** plain `cargo test --release`
+      > from the repo root (no pixi, no `PYO3_PYTHON`, no env vars) passes on the first attempt —
+      > already-standalone case. Pass count: **114 passed (3 suites)**. Canonical invocation:
+      > `cargo test --release`
+      > No `Cargo.toml` / `.cargo/config.toml` edits were needed or made.
 
 **Checkpoint:** core numba kernel count = 0; full perf re-baseline recorded here.
 
