@@ -37,7 +37,6 @@ pytestmark = pytest.mark.parity
 
 def test_track_getitem_identical_across_backends(tmp_path, monkeypatch):
     import genvarloader as gvl
-    import genvarloader._dataset._reconstruct as _recon_mod
     import genvarloader._dataset._tracks as _tracks_mod
 
     ds_dir = build_track_dataset(tmp_path)
@@ -56,12 +55,11 @@ def test_track_getitem_identical_across_backends(tmp_path, monkeypatch):
             return orig(*a, **k)
         return spy
 
-    # Patch BOTH call-site modules; the track-only path uses _tracks_mod
+    # The track-only path calls intervals_to_tracks via _tracks_mod (the
+    # haps+tracks path uses the fused intervals_and_realign_track_fused in
+    # _reconstruct, which is covered by test_fused_tracks_parity).
     monkeypatch.setattr(
         _tracks_mod, "intervals_to_tracks", _make_spy(_tracks_mod.intervals_to_tracks)
-    )
-    monkeypatch.setattr(
-        _recon_mod, "intervals_to_tracks", _make_spy(_recon_mod.intervals_to_tracks)
     )
 
     # --- read (default rust backend) ---
