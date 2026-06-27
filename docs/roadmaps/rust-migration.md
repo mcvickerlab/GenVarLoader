@@ -774,6 +774,19 @@ narrowed to genoray (variant IO) only.
   (one branch-introduced test file reformatted by ruff). Phase 5 🚧 (W1 done; W2–W9 remain).
   Issue tracking the overshoot: #255.
 
+- 2026-06-26 (Phase 5 W4 — final single-thread numba-vs-rust `__getitem__` A/B; branch `phase-5-w4`, PR TODO):
+  Benchmark-only gate (no code) before the W5 consolidation. Measured rust AND numba **single-thread, same
+  back-to-back session, two passes** (the shared Carter node makes cross-session wall-clock unreliable; the
+  durable signal is byte-identical parity + same-session improve-or-hold — see [[gvl-rust-perf-gate-shared-node-noise]]).
+  Two tools agreed: `test_e2e.py` pedantic-min and `profile.py` steady-state throughput. **Result — rust is
+  parity-or-better on every mode** (speedup = numba÷rust, higher ⇒ rust faster): haplotypes ~1.65×, tracks-seqs
+  ~1.65×, annotated ~1.4×, variants ~1.4×, variant-windows ~4.6×; the pure tracks-only path ~1.05× (effectively
+  parity — fixed per-batch IO cost, not kernel-bound; rust never behind). Combined with byte-identical parity
+  (W1–W3 + full parity suite, both backends), there is no single-thread regression risk in removing numba.
+  **GATE PASSED → proceed to W5 consolidation** (golden-snapshot the numba-oracle parity suites, delete numba,
+  add rayon batch parallelism gated byte-identical to the serial golden result). Full tables + methodology:
+  `docs/roadmaps/phase-5-w4-final-ab.md`. Phase 5 🚧 (W1–W4 done; W5–W9 remain).
+
 - 2026-06-26 (Phase 5 W3 — annotated+spliced fusion; branch `phase-5-w3`, PR #258):
   Fused the fourth and final reconstruction combination — annotated+spliced haplotypes — via
   `reconstruct_annotated_haplotypes_spliced_fused` (new kernel in `src/reconstruct/mod.rs`).
