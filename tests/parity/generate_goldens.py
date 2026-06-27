@@ -304,9 +304,241 @@ def gen_inplace_kernels() -> None:
         print(f"  {name}: {len(cases)} cases")
 
 
+# ---------------------------------------------------------------------------
+# PRNG primitives (xorshift64 / hash4): deterministic scalar table
+# ---------------------------------------------------------------------------
+
+UINT64_MAX = 2**64 - 1
+
+
+def gen_prng() -> None:
+    """Freeze xorshift64 and hash4 golden tables.
+
+    Deterministic inputs; no hypothesis required here — we pick a fixed list of
+    representative uint64 values and cross-check rust vs numba at generation time.
+    """
+    from genvarloader._dataset._tracks import _hash4 as _hash4_numba
+    from genvarloader._dataset._tracks import _xorshift64 as _xorshift64_numba
+    from genvarloader.genvarloader import _debug_hash4 as _hash4_rust
+    from genvarloader.genvarloader import _debug_xorshift64 as _xorshift64_rust
+
+    # Representative uint64 inputs: 0, 1, small values, mid-range, near-max.
+    xs_inputs: list[int] = [
+        0, 1, 2, 42, 255, 256, 65535, 65536,
+        0xDEAD, 0xBEEF, 0xDEADBEEF, 0xCAFEBABEDEAD,
+        2**32 - 1, 2**32, 2**48, 2**63 - 1, 2**63, UINT64_MAX - 1, UINT64_MAX,
+    ] + list(range(1000, 1100))  # 100 sequential values for sequential patterns
+
+    xs_cases = []
+    for x in xs_inputs:
+        rust_out = int(_xorshift64_rust(x))
+        numba_out = int(_xorshift64_numba(np.uint64(x)))
+        if rust_out != numba_out:
+            raise AssertionError(
+                f"xorshift64({x:#x}): rust={rust_out:#x} numba={numba_out:#x}"
+            )
+        xs_cases.append(((x,), np.uint64(rust_out)))
+    _golden.save_golden("prng_xorshift64", xs_cases)
+    print(f"  prng_xorshift64: {len(xs_cases)} cases")
+
+    # hash4: representative (a, b, c, d) quadruples.
+    h4_quads: list[tuple[int, int, int, int]] = [
+        (0, 0, 0, 0),
+        (1, 2, 3, 4),
+        (0xDEADBEEF, 0xCAFE, 0xBABE, 1),
+        (UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX),
+        (2**63, 0, 0, 0),
+        (1, 0, 0, 0),
+        (0, 1, 0, 0),
+        (0, 0, 1, 0),
+        (0, 0, 0, 1),
+        (42, 43, 44, 45),
+        (2**32, 2**32 + 1, 2**32 + 2, 2**32 + 3),
+    ] + [(i, i + 1, i + 2, i + 3) for i in range(100, 150)]
+
+    h4_cases = []
+    for a, b, c, d in h4_quads:
+        rust_out = int(_hash4_rust(a, b, c, d))
+        numba_out = int(_hash4_numba(np.uint64(a), np.uint64(b), np.uint64(c), np.uint64(d)))
+        if rust_out != numba_out:
+            raise AssertionError(
+                f"hash4({a:#x},{b:#x},{c:#x},{d:#x}): rust={rust_out:#x} numba={numba_out:#x}"
+            )
+        h4_cases.append(((a, b, c, d), np.uint64(rust_out)))
+    _golden.save_golden("prng_hash4", h4_cases)
+    print(f"  prng_hash4: {len(h4_cases)} cases")
+
+
+# ---------------------------------------------------------------------------
+# rc_alleles: freeze in-place RC golden
+# ---------------------------------------------------------------------------
+
+def _rc_alleles_batch_strategy():
+    """Composite strategy mirroring the test_rc_alleles_parity._allele_batch."""
+    from hypothesis import strategies as st
+
+    _ACGTN = np.frombuffer(b"ACGTN", np.uint8)
+
+    @st.composite
+    def _allele_batch(draw):
+        n_rows = draw(st.integers(1, 4))
+        alleles_per_row = [draw(st.integers(0, 3)) for _ in range(n_rows)]
+        var_offsets = np.concatenate([[0], np.cumsum(alleles_per_row)]).astype(np.int64)
+        n_alleles = int(var_offsets[-1])
+        lens = [draw(st.integers(0, 5)) for _ in range(n_alleles)]
+        seq_offsets = np.concatenate([[0], np.cumsum(lens)]).astype(np.int64)
+        total = int(seq_offsets[-1])
+        data = (
+            _ACGTN[draw(st.lists(st.integers(0, 4), min_size=total, max_size=total))]
+            if total
+            else np.zeros(0, np.uint8)
+        )
+        data = np.ascontiguousarray(data, np.uint8)
+        mask = np.array([draw(st.booleans()) for _ in range(n_rows)], np.bool_)
+        return data, seq_offsets, var_offsets, mask
+
+    return _allele_batch()
+
+
+def gen_rc_alleles() -> None:
+    """Freeze rc_alleles golden: store (initial_byte_data, seq_off, var_off, mask) → result."""
+    nb_fn = _dispatch.backends("rc_alleles")[0] if _have_numba("rc_alleles") else None
+    rust_fn = _golden.RUST_KERNELS["rc_alleles"]
+    strat = _rc_alleles_batch_strategy()
+    examples = _golden.collect_examples(strat, 200)
+    cases = []
+    for raw in examples:
+        data, seq_offsets, var_offsets, mask = raw
+        # Normalise inputs (mirrors _rc_alleles_rust wrapper requirements)
+        data = np.ascontiguousarray(data, np.uint8)
+        seq_offsets = np.ascontiguousarray(seq_offsets, np.int64)
+        var_offsets = np.ascontiguousarray(var_offsets, np.int64)
+        mask = np.ascontiguousarray(mask, np.bool_)
+
+        # Run Rust on a copy (in-place mutation)
+        buf_r = data.copy()
+        rust_fn(buf_r, seq_offsets, var_offsets, mask)
+
+        # Cross-check against numba oracle
+        if nb_fn is not None:
+            buf_n = data.copy()
+            nb_fn(buf_n, seq_offsets, var_offsets, mask)
+            np.testing.assert_array_equal(
+                buf_n, buf_r, err_msg="rc_alleles oracle mismatch"
+            )
+
+        # Store: inputs include initial data so replay can copy it
+        cases.append(((data, seq_offsets, var_offsets, mask), buf_r))
+
+    _golden.save_golden("rc_alleles", cases)
+    print(f"  rc_alleles: {len(cases)} cases")
+
+
+# ---------------------------------------------------------------------------
+# assemble_variant_buffers: freeze fixed parametrised cases
+# ---------------------------------------------------------------------------
+
+def gen_assemble_variant_buffers() -> None:
+    """Freeze all parametrised assemble_variant_buffers cases.
+
+    Mirrors the exact inputs from test_assemble_variant_buffers_parity.py so the
+    golden covers the same mode matrix without re-running numba at test time.
+    """
+    nb_fn = _dispatch.backends("assemble_variant_buffers")[0] if _have_numba("assemble_variant_buffers") else None
+    rust_fn = _golden.RUST_KERNELS["assemble_variant_buffers"]
+
+    def _reference():
+        bases = np.frombuffer(b"ACGT", np.uint8)
+        ref = np.tile(bases, 10).astype(np.uint8)
+        ref_offsets = np.array([0, ref.size], np.int64)
+        return ref, ref_offsets
+
+    def _lut(dtype):
+        lut = np.full(256, 4, dtype)
+        for i, b in enumerate(b"ACGT"):
+            lut[b] = i
+        return lut
+
+    def _globals():
+        alt_data = np.frombuffer(b"ACGT", np.uint8)
+        alt_off = np.array([0, 1, 3, 4], np.int64)
+        ref_data = np.frombuffer(b"CGAA", np.uint8)
+        ref_off = np.array([0, 1, 2, 4], np.int64)
+        v_starts = np.array([5, 12, 20], np.int32)
+        ilens = np.array([0, -1, 1], np.int32)
+        return alt_data, alt_off, ref_data, ref_off, v_starts, ilens
+
+    cases = []
+
+    ref, ref_offsets = _reference()
+    alt_data, alt_off, ref_data, ref_off, v_starts, ilens = _globals()
+
+    # test_windows_mode_matrix: tok_dtype × (ref_mode, alt_mode)
+    for tok_dtype in [np.uint8, np.int32]:
+        for ref_mode, alt_mode in [(1, 1), (1, 2), (2, 1), (2, 2)]:
+            lut = _lut(tok_dtype)
+            v_idxs = np.array([0, 1, 2], np.int32)
+            row_offsets = np.array([0, 3], np.int64)
+            v_contigs = np.zeros(3, np.int32)
+            inp = (
+                1, v_idxs, row_offsets,
+                alt_data, alt_off, ref_data, ref_off,
+                False, False, ref_mode, alt_mode, 2, lut,
+                v_contigs, v_starts, ilens, ref, ref_offsets, ord("N"),
+            )
+            r = _normalize(rust_fn(*inp))
+            if nb_fn is not None:
+                _assert_oracle("assemble_variant_buffers/windows", _normalize(nb_fn(*inp)), r)
+            cases.append((inp, r))
+
+    # test_variants_mode_matrix: tok_dtype × (want_ref, want_flank)
+    for tok_dtype in [np.uint8, np.int32]:
+        for want_ref, want_flank in [(False, False), (True, False), (False, True), (True, True)]:
+            lut = _lut(tok_dtype) if want_flank else None
+            v_idxs = np.array([2, 0, 1], np.int32)
+            row_offsets = np.array([0, 1, 3], np.int64)
+            v_contigs = np.zeros(3, np.int32)
+            inp = (
+                0, v_idxs, row_offsets,
+                alt_data, alt_off, ref_data, ref_off,
+                want_ref, want_flank, 0, 0, 2, lut,
+                v_contigs, v_starts, ilens, ref, ref_offsets, ord("N"),
+            )
+            r = _normalize(rust_fn(*inp))
+            if nb_fn is not None:
+                _assert_oracle("assemble_variant_buffers/variants", _normalize(nb_fn(*inp)), r)
+            cases.append((inp, r))
+
+    # test_empty_selection: (mode, ref_mode, alt_mode)
+    for mode, ref_mode, alt_mode in [(0, 0, 0), (1, 1, 1)]:
+        lut = _lut(np.uint8)
+        v_idxs = np.array([], np.int32)
+        row_offsets = np.array([0, 0], np.int64)
+        v_contigs = np.array([], np.int32)
+        inp = (
+            mode, v_idxs, row_offsets,
+            alt_data, alt_off, ref_data, ref_off,
+            False, (mode == 0), ref_mode, alt_mode, 2, lut,
+            v_contigs, v_starts, ilens, ref, ref_offsets, ord("N"),
+        )
+        r = _normalize(rust_fn(*inp))
+        if nb_fn is not None:
+            _assert_oracle("assemble_variant_buffers/empty", _normalize(nb_fn(*inp)), r)
+        cases.append((inp, r))
+
+    _golden.save_golden("assemble_variant_buffers", cases)
+    print(f"  assemble_variant_buffers: {len(cases)} cases")
+
+
 if __name__ == "__main__":
     print("Generating value-kernel goldens...")
     gen_value_kernels()
     print("Generating in-place-kernel goldens...")
     gen_inplace_kernels()
+    print("Generating PRNG goldens...")
+    gen_prng()
+    print("Generating rc_alleles golden...")
+    gen_rc_alleles()
+    print("Generating assemble_variant_buffers golden...")
+    gen_assemble_variant_buffers()
     print("Done.")

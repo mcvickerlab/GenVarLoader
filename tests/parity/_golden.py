@@ -68,6 +68,11 @@ def _build_rust_kernels() -> dict[str, Callable]:
         _shift_and_realign_tracks_sparse_rust_wrapper,  # wraps _ext.shift_and_realign_tracks_sparse
     )
 
+    from genvarloader._dataset._flat_variants import (
+        _assemble_variant_buffers_rust,  # Python wrapper: routes to u8/i32 by lut dtype
+        _rc_alleles_rust,  # Python wrapper: asserts contiguous uint8 then calls ext
+    )
+
     table: dict[str, Callable] = {
         "intervals_to_tracks": _ext.intervals_to_tracks,
         "tracks_to_intervals": _ext.tracks_to_intervals,
@@ -84,17 +89,18 @@ def _build_rust_kernels() -> dict[str, Callable]:
         "fill_empty_fixed_f32": _ext.fill_empty_fixed_f32,
         "fill_empty_seq_u8": _ext.fill_empty_seq_u8,
         "fill_empty_seq_i32": _ext.fill_empty_seq_i32,
-        # These two registered rust= is a Python wrapper, NOT the bare FFI function.
+        # These registered rust= callables are Python wrappers, NOT bare FFI functions.
         # Using the wrapper ensures correct input normalisation (dtypes, int casts, etc.)
-        # and keeps RUST_KERNELS in sync with the dispatch table (per the note above).
+        # and keeps RUST_KERNELS in sync with the dispatch table.
         "get_reference": _get_reference_rust,
         "shift_and_realign_tracks_sparse": _shift_and_realign_tracks_sparse_rust_wrapper,
         "reconstruct_haplotypes_from_sparse": _ext.reconstruct_haplotypes_from_sparse,
-        "rc_alleles": _ext.rc_alleles,
+        # rc_alleles: registered rust= is _rc_alleles_rust (wrapper); use wrapper here.
+        "rc_alleles": _rc_alleles_rust,
+        # assemble_variant_buffers: registered rust= is _assemble_variant_buffers_rust
+        # (dtype-selecting shim: routes to u8/i32 monomorphization by lut dtype).
+        "assemble_variant_buffers": _assemble_variant_buffers_rust,
     }
-    # NOTE: kernels whose `rust=` is a PYTHON WRAPPER (not a bare extension fn) —
-    # e.g. assemble_variant_buffers (u8/i32 dtype dispatch). Add those by importing
-    # the SAME wrapper the registration used; ground-truth against the register() call.
     return table
 
 
