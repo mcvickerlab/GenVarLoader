@@ -743,6 +743,27 @@ narrowed to genoray (variant IO) only.
 
 ## Notes & decisions log
 
+- 2026-06-26 (Phase 5 W2 — #242 stale landmine comments corrected + max_jitter>0 parity gate; branch `phase-5-w2`):
+  Investigation (`.superpowers/sdd/w2-investigation.md`) confirmed that #242 was already
+  root-caused and fully fixed end-to-end: both ``intervals_to_tracks`` kernels (Rust and
+  numba) apply the left-clip ``s = max(itv.start - query_start, 0); e = min(end, length)``
+  merged via PR #244 (ancestor of ``rust-migration``); #242 is CLOSED. The clip is
+  functionally correct — the stored jitter-expanded write window always fully covers any
+  jittered query of the original region length, so the clip never truncates real signal.
+  The upstream coordinate rewrite (storing intervals at ``chromStart`` rather than
+  ``chromStart - max_jitter``) was intentionally SKIPPED: the clip is the correct fix, not
+  a mask over a remaining defect. W2 added the end-to-end max_jitter>0 numba-vs-rust
+  dataset parity test with a hand-computed oracle
+  (``test_tracks_max_jitter_intervals_parity_and_oracle``, Task 1, commit ``5d3aa7d``).
+  W2 also corrected three stale "PanicException landmine" / "violates the contract" comment
+  blocks in ``tests/parity/_fixtures.py`` (``build_haps_tracks_dataset`` and
+  ``build_strand_mixed_dataset`` docstrings + inline comment) and
+  ``tests/parity/test_dataset_parity.py``
+  (``test_tracks_realign_getitem_identical_across_backends`` fixture-geometry note): the
+  accurate framing is that #242 is fixed and ``max_jitter=0`` in those fixtures is retained
+  only for the simplest deterministic geometry, not because of any live panic. Phase 5 🚧
+  (W3–W9 remain).
+
 - 2026-06-26 (Phase 5 W1 — trailing-fill overshoot fix + parity gate; branch `phase-5-w1`):
   Fixed the trailing-fill overshoot divergence in **all four kernels** that advance `ref_idx`
   past the contig end (deletion whose `v_ref_end > contig_len`):

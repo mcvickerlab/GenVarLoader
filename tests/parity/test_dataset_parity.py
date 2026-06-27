@@ -29,9 +29,11 @@ import numpy as np
 import pytest
 
 from tests.parity._fixtures import (
+    _JITTER_SIGNAL_PER_SAMPLE,
     build_haps_tracks_dataset,
     build_strand_mixed_dataset,
     build_track_dataset,
+    build_track_dataset_jittered,
 )
 
 pytestmark = pytest.mark.parity
@@ -121,6 +123,136 @@ def test_track_getitem_identical_across_backends(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# max_jitter > 0 end-to-end parity + oracle (#242 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_tracks_max_jitter_intervals_parity_and_oracle(tmp_path, monkeypatch):
+    """End-to-end regression for #242: max_jitter>0 track reads are byte-identical
+    across backends and match the hand-computed oracle.
+
+    Bug #242 root cause
+    -------------------
+    ``gvl.write`` clips BigWig intervals to the jitter-expanded write window
+    ``[chromStart - max_jitter, chromEnd + max_jitter]``, so stored interval
+    starts equal ``chromStart - max_jitter``.  ``Dataset.open`` derives query
+    starts from the ORIGINAL ``chromStart`` (``input_regions.arrow``), so
+    ``itv_start - query_start = -max_jitter`` — a negative offset.
+    Fix (PR #244): both kernels now clip ``s = max(itv_start - query_start, 0)``.
+
+    Guards
+    ------
+    - **Non-vacuity**: at least one ``regions.npy[:,1]`` (stored start) is
+      strictly ``<`` the corresponding ``input_regions.arrow`` chromStart
+      (original start), proving the #242 boundary condition is exercised.
+    - **Byte-identity**: numba and rust produce identical ``.data`` and
+      ``.offsets`` for the whole dataset read.
+    - **Positional oracle**: each individual (region, sample) track SLICE
+      exactly equals ``np.full(REGION_LEN, sample_constant)`` — catches sample
+      misordering / spatial misplacement that a count-based check would miss.
+    - **Non-triviality**: at least one output value is non-zero.
+    """
+    import polars as pl
+
+    import genvarloader as gvl
+
+    MAX_JITTER = 4
+    REGION_LEN = 20  # chromEnd - chromStart for every fixture region
+    N_REGIONS = 3
+    N_SAMPLES = 3  # s0, s1, s2
+
+    ds_dir = build_track_dataset_jittered(tmp_path, max_jitter=MAX_JITTER)
+
+    # --- Non-vacuity guard: stored start < original chromStart (#242 condition) ---
+    # regions.npy[:,1] = chromStart - max_jitter (expanded at write time).
+    # input_regions.arrow chromStart = original un-expanded chromStart.
+    # r_idx_map[i] = sorted position (row in regions.npy) of original input row i.
+    regions = np.load(ds_dir / "regions.npy")  # shape (N_REGIONS, 4), int32
+    input_bed = pl.read_ipc(ds_dir / "input_regions.arrow")
+    r_idx_map = input_bed["r_idx_map"].to_numpy()  # original_row → sorted_pos
+    orig_starts = input_bed["chromStart"].to_numpy()
+    stored_starts_aligned = regions[r_idx_map, 1]  # stored starts per original row
+    assert np.any(stored_starts_aligned < orig_starts), (
+        "Non-vacuity guard FAILED: no stored region start is < the original chromStart. "
+        f"stored (aligned)={stored_starts_aligned.tolist()}, orig={orig_starts.tolist()}. "
+        "The max_jitter expansion is not exercising the #242 boundary condition."
+    )
+
+    # --- Open dataset; assert default jitter == 0 (deterministic read) ---
+    ds = gvl.Dataset.open(ds_dir)
+    ds = ds.with_tracks("signal")
+    assert ds.jitter == 0, (
+        f"Expected ds.jitter == 0 after Dataset.open (deterministic default), "
+        f"got {ds.jitter}."
+    )
+
+    # --- Backend reads (rust FIRST — rust is the oracle-reference output) ---
+    monkeypatch.setenv("GVL_BACKEND", "rust")
+    result_rust = ds[:, :]
+    rust_t = result_rust[1] if isinstance(result_rust, tuple) else result_rust
+    data_r = np.asarray(rust_t.data, dtype=np.float32)
+    off_r = np.asarray(rust_t.offsets, dtype=np.int64)
+
+    monkeypatch.setenv("GVL_BACKEND", "numba")
+    result_numba = ds[:, :]
+    numba_t = result_numba[1] if isinstance(result_numba, tuple) else result_numba
+    data_n = np.asarray(numba_t.data, dtype=np.float32)
+    off_n = np.asarray(numba_t.offsets, dtype=np.int64)
+
+    # --- Byte-identical comparison ---
+    np.testing.assert_array_equal(
+        off_n, off_r, err_msg="track offsets differ across backends"
+    )
+    assert data_n.dtype == data_r.dtype == np.float32, (
+        f"dtype mismatch: numba={data_n.dtype}, rust={data_r.dtype}"
+    )
+    np.testing.assert_array_equal(
+        data_n, data_r, err_msg="track data differs across backends"
+    )
+
+    # --- Positional, hand-computed oracle ---
+    # Each sample has a single constant BigWig interval [0, contig_len) at a
+    # distinct value (s0=1.0, s1=2.0, s2=3.0).  With jitter=0 every read window
+    # [chromStart, chromStart+REGION_LEN) is fully covered, so each (region,
+    # sample) slice is exactly REGION_LEN copies of the sample's constant.
+    #
+    # ds[:, :] returns a Ragged of shape (n_regions, n_samples, n_tracks=1, None);
+    # the leading dims flatten in C-order, so with one track the flat row index
+    # is `region * N_SAMPLES + sample` (verified against .offsets / .shape).
+    sample_consts = [np.float32(v) for v in _JITTER_SIGNAL_PER_SAMPLE.values()]
+    assert off_r.size - 1 == N_REGIONS * N_SAMPLES, (
+        f"Expected {N_REGIONS * N_SAMPLES} track rows, got {off_r.size - 1}; "
+        "the (region, sample) layout assumption is wrong."
+    )
+    for region in range(N_REGIONS):
+        for sample in range(N_SAMPLES):
+            row = region * N_SAMPLES + sample
+            seg = data_r[off_r[row] : off_r[row + 1]]
+            expected = np.full(REGION_LEN, sample_consts[sample], dtype=np.float32)
+            np.testing.assert_array_equal(
+                seg,
+                expected,
+                err_msg=(
+                    f"Positional oracle mismatch at region {region}, sample "
+                    f"{sample} (row {row}): expected constant "
+                    f"{sample_consts[sample]} over {REGION_LEN} positions."
+                ),
+            )
+
+    # Total output size = N_REGIONS × N_SAMPLES × REGION_LEN
+    total_expected = N_REGIONS * N_SAMPLES * REGION_LEN  # 3 × 3 × 20 = 180
+    assert data_r.size == total_expected, (
+        f"Output data size {data_r.size} != expected {total_expected} "
+        f"({N_REGIONS} regions × {N_SAMPLES} samples × {REGION_LEN} positions)."
+    )
+
+    # --- Non-triviality ---
+    assert np.any(data_r != 0.0), (
+        "All track values are 0.0 — constant BigWig signal is not reaching the output."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Haplotypes+tracks realignment backstop
 # ---------------------------------------------------------------------------
 
@@ -147,13 +279,13 @@ def test_tracks_realign_getitem_identical_across_backends(
     - A fresh GVL dataset is built in tmp_path via gvl.write with both the
       session SparseVar variants (which contain indels on chr1/chr2) and a
       synthetic BigWig ``signal`` track for samples s0/s1/s2.
-    - max_jitter=0 is used to avoid the pre-existing intervals_to_tracks
-      landmine: with max_jitter>0, gvl.write clips BigWig intervals to the
-      jitter-expanded region boundaries (chromStart - max_jitter), but
-      Dataset.open derives _full_regions from the original chromStart.  The
-      gap of max_jitter bp causes stored interval starts to precede the
-      query start, violating the Rust kernel contract and triggering a
-      PanicException.  With max_jitter=0 the boundaries match exactly.
+    - max_jitter=0 is used for the simplest deterministic geometry.  Bug
+      #242 (stored interval starts < query start when max_jitter>0) was
+      fixed in both ``intervals_to_tracks`` kernels via the left-clip
+      ``s = max(itv_start - query_start, 0)`` (PR #244; #242 CLOSED).
+      max_jitter=0 here keeps interval starts == query starts so the test
+      stays focused on the indel-realignment path; max_jitter>0 end-to-end
+      parity is covered by ``test_tracks_max_jitter_intervals_parity_and_oracle``.
 
     Fill strategies covered: all 5 (Repeat5p, Repeat5pNormalized, Constant,
     FlankSample, Interpolate).  Each is set via with_insertion_fill and the
