@@ -19,6 +19,8 @@
 #      `PyO3/maturin-action` invocation with `-i python3.14t`).
 #   6. Replace the final maturin `upload` step with the `uv publish` +
 #      dry-run summary block.
+#   7. Re-add the workflow-level `env: CARGO_HTTP_MULTIPLEXING: 'false'` block
+#      (works around HTTP/2 framing flakes during `cargo metadata` under QEMU).
 
 name: Publish
 
@@ -50,6 +52,14 @@ on:
 
 permissions:
   contents: read
+
+# Force cargo's curl to use HTTP/1.1 for crates.io. Under QEMU emulation (the
+# cross-arch musllinux/manylinux builds) HTTP/2 multiplexing flakes with
+# "curl failed: [16] Error in the HTTP2 framing layer" during `cargo metadata`,
+# which fails the wheel build before any of our code compiles. maturin-action
+# forwards CARGO_*-prefixed env into the build container.
+env:
+  CARGO_HTTP_MULTIPLEXING: 'false'
 
 jobs:
   linux:
