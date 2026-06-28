@@ -55,6 +55,121 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.36.0 (2026-06-28)
+
+### Feat
+
+- **rayon**: parallelize get_diffs_sparse + intervals_to_tracks (C3)
+- **rayon**: parallelize shift_and_realign_tracks_sparse and tracks_to_intervals (Task C2)
+- **rayon**: parallelize reconstruct_haplotypes_from_sparse with rayon batch parallelism
+- delete numba backend — rust-only read path (Phase 5 W5)
+- **rust**: fuse annotated+spliced haplotype reconstruction into one FFI crossing (Phase 5 W3)
+- register rc_alleles dispatch (rust default, seqpro reference)
+- **rust**: rc_alleles PyO3 wrapper + registration
+- **rust**: rc_alleles_inplace core for variant-allele RC
+- **rust**: debug_assert to_rc mask length in kernel RC blocks
+- fold strand RC into rust kernels; numba post-pass retained as oracle
+- **rust**: optional in-kernel RC for spliced haplotype kernel
+- **rust**: optional in-kernel RC for annotated haplotype kernel
+- **rust**: optional in-kernel reverse for track realign kernel
+- **rust**: optional in-kernel RC for reconstruct_haplotypes_fused
+- **rust**: optional in-kernel RC for get_reference
+- **rust**: in-place reverse/reverse-complement primitives for read path
+- **py**: assemble_variant_buffers numba oracle, rust shim, and dict parity harness
+- **ffi**: assemble_variant_buffers_{u8,i32} pyfunctions
+- **variants**: assemble_windows_mode (token windows + bare alleles)
+- **variants**: assemble_variants_mode (alt/ref bytes + flank tokens)
+- **variants**: add fetch_windows reference-read helper
+- **variants**: add tokenize/slice_flanks/assemble_alt_window cores
+- **ffi**: zero-copy boundary guard for sample-scale memmaps
+- **migrate**: add gvl.migrate for 1.x AoS -> 2.0 SoA
+- **open**: gate dataset open on format_version major
+- **format**: store track intervals as struct-of-arrays (gvl 2.0)
+- **intervals**: route intervals_to_tracks through backend dispatch (default rust)
+- **ffi**: Rust intervals_to_tracks + ffi seam module
+- **utils**: route splits_sum_le_value through backend dispatch (default rust)
+- **ffi**: Rust splits_sum_le_value + ffi seam module
+- **dispatch**: backend registry for Rust migration strangler window
+- **ragged**: route to_padded through seqpro-core Rust bridge
+- **rust**: consume seqpro-core via rlib; add ragged_to_padded bridge
+
+### Fix
+
+- **rayon**: debug_assert offset monotonicity in C1 carve; correct test comment
+- **env**: keep conda numba pin (seqpro needs working libllvmlite); guard stays own-code
+- **threads**: remove conditional numba import; update thread tests for pure-OS detection
+- **test**: drop stale _recon_mod.intervals_to_tracks spy (B2 removed that import)
+- **test**: restore generate_goldens regeneration; clean dead GVL_BACKEND in bench conftest (W5 B1)
+- **reconstruct,tracks**: pad full tail in numba trailing-fill on ref overshoot
+- **reconstruct**: pad full tail when ref exhausted, not from index 0
+- **test**: add __init__.py to disambiguate test_write collision; ruff fmt
+- **variants**: drop unused ArrayView2 import
+- **indexing**: SpliceIndexer.parse_idx double-applies sample-subset map
+- **intervals**: clip sub-query interval starts in both kernels (#242)
+- **tracks**: clamp writable_ref when deletion extends past track end
+- **reconstruct**: guard non-annotated parity test against numba SystemError; correct rayon-deferral comment
+- **reconstruct**: strengthen SAFETY comments; rename batch test to match serial-only impl
+- **reconstruct**: clamp writable_ref when ref_idx past contig end; skip numba annotated flake
+- **reference**: revert padded_slice leniency — mirror numba's loud failure for start>=clen (parity twin)
+- **test**: update stale _gather_v_idxs_ss import after Task 5 rename; lint/docstring cleanup
+- **variants**: gather_rows must preserve data dtype (dosage/custom fields)
+- **bench**: profile variants variable-length (with_len is meaningless for variants)
+- **stub**: sync genvarloader.pyi — bigwig_intervals rename + intervals_to_tracks
+- **test**: drop stale rv._rag access in flat_mode_equivalence after Ragged subclass refactor
+- **dispatch**: guard isinstance(Ragged) sites for RaggedVariants subclass
+
+### Refactor
+
+- delete numba kernels; numpy fallbacks for #231 dtype paths
+- **backend**: B2 — collapse backend-conditional branches; delete GVL_BACKEND/_active_backend
+- **dispatch**: B1 — replace all get() call sites with direct rust calls, delete _dispatch
+- **rust**: extract reverse::rc_row shared helper
+- **write**: delete dead legacy track path + splits_sum_le_value
+- drop unreachable spliced variant-RC guard
+- route variant-allele RC through dispatched rc_alleles kernel
+- **genotypes**: delete dead filter_af kernel + its dead test (superseded by inline numpy)
+- **variants**: RaggedVariants subclasses Ragged, drop _rag composition
+
+### Perf
+
+- **rust**: fuse rc_alleles_inplace — 186→308 instrs (rc_row inlined), drop Vec<bool> alloc + rescan
+- **rust**: tune reconstruct_haplotypes_from_sparse — 2839→1279 instrs, 0.655→0.589 rust÷numba
+- **rust**: tune rc_flat_rows_inplace — 212→283 instrs (vectorized), 0.664→0.635 rust÷numba
+- **rust**: tune assemble_alt_window — 518→727 asm lines (memcpy-expanded), 35→30 cmp/jae/imul, 1.146→0.835 ms/batch
+- **rust**: tune slice_flanks — 389→429 total instrs (hot-path: byte-loop→memcpy), 2.115→1.136 ms/batch
+- **rust**: tune shift_and_realign_tracks_sparse — 550→605 lines (3 do_slice calls→0 in hot path), ratio 1.178→1.179
+- **rust**: tune tokenize — 16→4 hot instr/elem, 0.55→0.43 rust÷numba
+- **rust**: tune intervals_to_tracks — 480→283 instrs, 0.628→0.624 rust÷numba
+- **intervals**: paint tracks via raw contiguous slice
+- **variants**: route windows/variants assembly through one rust call
+- **ffi**: skip zero-init of fully-overwritten fused output buffers
+- **haps**: cache FFI-ready sub-linear per-variant arrays
+- **reconstruct**: fused spliced-haps __getitem__ kernel (dataset parity)
+- **reconstruct**: fused annotated-haps __getitem__ kernel (dataset parity)
+- **reference**: route Reference.fetch through rust get_reference; drop dead _fetch_* numba
+- **tracks**: fused tracks __getitem__ kernel (dataset parity; throughput recorded)
+- **reconstruct**: fused haplotypes __getitem__ kernel (dataset parity; throughput recorded)
+- **intervals**: port tracks_to_intervals RLE numba->rust (parity, default rust)
+- **tracks**: port shift_and_realign_tracks_sparse (parity, default rust)
+- **tracks**: port apply_insertion_fill (4 strategies) core (cargo-tested)
+- **tracks**: port xorshift64/hash4 PRNG (direct numba parity)
+- **reconstruct**: port reconstruct_haplotypes_from_sparse batch (parity, default rust)
+- **reconstruct**: port reconstruct_haplotype_from_sparse core (cargo-tested)
+- **reference**: port get_reference numba->rust (parity, default rust)
+- **reference**: port padded_slice numba->rust core (cargo-tested)
+- **variants**: port _fill_empty_seq numba->rust (u8/i32, dtype-preserving)
+- **variants**: port _fill_empty_scalar + _fill_empty_fixed numba->rust (dtype-preserving)
+- **variants**: port _compact_keep numba->rust (i32/f32, dtype-preserving)
+- **variants**: port _gather_alleles numba->rust (parity-gated)
+- **variants**: port _gather_v_idxs(+_ss) numba->rust as gather_rows (parity)
+- **genotypes**: port choose_exonic_variants numba->rust (parity-gated)
+- **genotypes**: port get_diffs_sparse numba->rust (parity-gated)
+- **roadmap**: capture getitem read-path baseline on Carter; Phase 0 ✅
+- write/update (1kg) + getitem (profile.py) baseline drivers
+
 ## v0.35.0 (2026-06-23)
 
 ### Feat
