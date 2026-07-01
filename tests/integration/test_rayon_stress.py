@@ -33,8 +33,12 @@ PER_LAUNCH_TIMEOUT_S = 120
 
 def _iterate_dataset(ds_path: str, reference_path: str, iters: int) -> int:
     """Worker body (must be importable/picklable for spawn). Returns bytes touched."""
-    # Force the parallel path and oversubscribe: many rayon threads per worker.
+    # Force the parallel path and oversubscribe with a fixed per-worker thread
+    # count. cap_threads() OVERWRITES RAYON_NUM_THREADS with GVL's resolved cap,
+    # so GVL_NUM_THREADS=8 (not a bare RAYON_NUM_THREADS) is what pins each worker
+    # to 8 rayon threads → N_WORKERS*8 threads regardless of host core count.
     os.environ["GVL_FORCE_PARALLEL"] = "1"
+    os.environ["GVL_NUM_THREADS"] = "8"
     os.environ["RAYON_NUM_THREADS"] = "8"
     ds = gvl.Dataset.open(Path(ds_path), reference=Path(reference_path)).with_seqs(
         "haplotypes"
