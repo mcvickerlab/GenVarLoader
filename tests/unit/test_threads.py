@@ -1,3 +1,4 @@
+import math
 import os
 
 import pytest
@@ -76,3 +77,51 @@ def test_force_parallel_unset(monkeypatch):
     monkeypatch.delenv("GVL_NUM_THREADS", raising=False)
     _constrain_detected_cpus(monkeypatch, 4)
     assert th.should_parallelize(0) is False
+
+
+def test_cgroup_quota_v2_parses_cpu_max(monkeypatch, tmp_path):
+    f = tmp_path / "cpu.max"
+    f.write_text("1530000 100000\n")  # 15.3 cores
+    monkeypatch.setattr(th, "_CGROUP_V2_CPU_MAX", f)
+    monkeypatch.setattr(th, "_CGROUP_V1_QUOTA", tmp_path / "nope_quota")
+    monkeypatch.setattr(th, "_CGROUP_V1_PERIOD", tmp_path / "nope_period")
+    assert th._cgroup_cpu_quota() == math.ceil(1530000 / 100000)  # 16
+
+
+def test_cgroup_quota_v2_max_is_none(monkeypatch, tmp_path):
+    f = tmp_path / "cpu.max"
+    f.write_text("max 100000\n")  # unlimited
+    monkeypatch.setattr(th, "_CGROUP_V2_CPU_MAX", f)
+    monkeypatch.setattr(th, "_CGROUP_V1_QUOTA", tmp_path / "nope_quota")
+    monkeypatch.setattr(th, "_CGROUP_V1_PERIOD", tmp_path / "nope_period")
+    assert th._cgroup_cpu_quota() is None
+
+
+def test_cgroup_quota_v1_fallback(monkeypatch, tmp_path):
+    q = tmp_path / "cfs_quota_us"
+    p = tmp_path / "cfs_period_us"
+    q.write_text("800000\n")
+    p.write_text("100000\n")
+    monkeypatch.setattr(th, "_CGROUP_V2_CPU_MAX", tmp_path / "absent")
+    monkeypatch.setattr(th, "_CGROUP_V1_QUOTA", q)
+    monkeypatch.setattr(th, "_CGROUP_V1_PERIOD", p)
+    assert th._cgroup_cpu_quota() == 8
+
+
+def test_cgroup_quota_none_when_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(th, "_CGROUP_V2_CPU_MAX", tmp_path / "absent1")
+    monkeypatch.setattr(th, "_CGROUP_V1_QUOTA", tmp_path / "absent2")
+    monkeypatch.setattr(th, "_CGROUP_V1_PERIOD", tmp_path / "absent3")
+    assert th._cgroup_cpu_quota() is None
+
+
+def test_detect_cpus_takes_min_of_affinity_and_quota(monkeypatch, tmp_path):
+    _constrain_detected_cpus(monkeypatch, 16)  # affinity reports 16
+    monkeypatch.setattr(th, "_cgroup_cpu_quota", lambda: 15)
+    assert th._detect_cpus() == 15
+
+
+def test_detect_cpus_ignores_quota_when_none(monkeypatch):
+    _constrain_detected_cpus(monkeypatch, 16)
+    monkeypatch.setattr(th, "_cgroup_cpu_quota", lambda: None)
+    assert th._detect_cpus() == 16
