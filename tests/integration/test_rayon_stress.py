@@ -22,6 +22,9 @@ import genvarloader as gvl
 
 pytestmark = pytest.mark.slow
 
+# Tuning: if a slow CI box trips the timeout WITHOUT a real hang, lower
+# ITERS_PER_WORKER/LAUNCHES or raise PER_LAUNCH_TIMEOUT_S — never remove the
+# timeout (it is the deadlock detector). Keep N_WORKERS*RAYON_NUM_THREADS > cores.
 N_WORKERS = 5
 ITERS_PER_WORKER = 40
 LAUNCHES = 4
@@ -83,7 +86,6 @@ def test_concurrent_spawn_workers_do_not_deadlock(stress_dataset):
                 )
                 for _ in range(N_WORKERS)
             ]
-            results: list[int] = []
             try:
                 results = [f.result(timeout=PER_LAUNCH_TIMEOUT_S) for f in futs]
             except FTimeoutError:
@@ -91,4 +93,5 @@ def test_concurrent_spawn_workers_do_not_deadlock(stress_dataset):
                     f"launch {launch}: worker did not finish within "
                     f"{PER_LAUNCH_TIMEOUT_S}s — likely the #263 rayon deadlock."
                 )
+                raise  # unreachable (pytest.fail raises); marks branch NoReturn for pyrefly
             assert all(r > 0 for r in results)
