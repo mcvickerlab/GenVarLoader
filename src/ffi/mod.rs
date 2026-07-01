@@ -49,19 +49,31 @@ pub fn get_diffs_sparse<'py>(
     parallel: bool,
 ) -> Bound<'py, PyArray2<i32>> {
     let go = geno_offsets.as_array();
-    let diffs = genotypes::get_diffs_sparse(
-        geno_offset_idx.as_array(),
-        geno_v_idxs.as_array(),
-        go.row(0),
-        go.row(1),
-        ilens.as_array(),
-        keep.as_ref().map(|a| a.as_array()),
-        keep_offsets.as_ref().map(|a| a.as_array()),
-        q_starts.as_ref().map(|a| a.as_array()),
-        q_ends.as_ref().map(|a| a.as_array()),
-        v_starts.as_ref().map(|a| a.as_array()),
-        parallel,
-    );
+    let go_starts = go.row(0);
+    let go_stops = go.row(1);
+    let geno_offset_idx_a = geno_offset_idx.as_array();
+    let geno_v_idxs_a = geno_v_idxs.as_array();
+    let ilens_a = ilens.as_array();
+    let keep_a = keep.as_ref().map(|a| a.as_array());
+    let keep_offsets_a = keep_offsets.as_ref().map(|a| a.as_array());
+    let q_starts_a = q_starts.as_ref().map(|a| a.as_array());
+    let q_ends_a = q_ends.as_ref().map(|a| a.as_array());
+    let v_starts_a = v_starts.as_ref().map(|a| a.as_array());
+    let diffs = py.detach(move || {
+        genotypes::get_diffs_sparse(
+            geno_offset_idx_a,
+            geno_v_idxs_a,
+            go_starts,
+            go_stops,
+            ilens_a,
+            keep_a,
+            keep_offsets_a,
+            q_starts_a,
+            q_ends_a,
+            v_starts_a,
+            parallel,
+        )
+    });
     diffs.into_pyarray(py)
 }
 
@@ -69,6 +81,7 @@ pub fn get_diffs_sparse<'py>(
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn intervals_to_tracks(
+    py: Python<'_>,
     offset_idxs: PyReadonlyArray1<i64>,
     starts: PyReadonlyArray1<i32>,
     itv_starts: PyReadonlyArray1<i32>,
@@ -79,17 +92,27 @@ pub fn intervals_to_tracks(
     out_offsets: PyReadonlyArray1<i64>,
     parallel: bool,
 ) {
-    intervals::intervals_to_tracks(
-        offset_idxs.as_array(),
-        starts.as_array(),
-        itv_starts.as_array(),
-        itv_ends.as_array(),
-        itv_values.as_array(),
-        itv_offsets.as_array(),
-        out.as_array_mut(),
-        out_offsets.as_array(),
-        parallel,
-    );
+    let offset_idxs_a = offset_idxs.as_array();
+    let starts_a = starts.as_array();
+    let itv_starts_a = itv_starts.as_array();
+    let itv_ends_a = itv_ends.as_array();
+    let itv_values_a = itv_values.as_array();
+    let itv_offsets_a = itv_offsets.as_array();
+    let out_a = out.as_array_mut();
+    let out_offsets_a = out_offsets.as_array();
+    py.detach(move || {
+        intervals::intervals_to_tracks(
+            offset_idxs_a,
+            starts_a,
+            itv_starts_a,
+            itv_ends_a,
+            itv_values_a,
+            itv_offsets_a,
+            out_a,
+            out_offsets_a,
+            parallel,
+        );
+    });
 }
 
 /// Exonic keep-mask (see `genotypes::choose_exonic_variants`). Returns
@@ -484,6 +507,7 @@ pub fn assemble_variant_buffers_i32<'py>(
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_from_sparse(
+    py: Python<'_>,
     mut out: PyReadwriteArray1<u8>,
     out_offsets: PyReadonlyArray1<i64>,
     regions: PyReadonlyArray2<i32>,
@@ -506,28 +530,48 @@ pub fn reconstruct_haplotypes_from_sparse(
 ) {
     use crate::reconstruct;
     let go = geno_offsets.as_array();
-    reconstruct::reconstruct_haplotypes_from_sparse(
-        out.as_array_mut(),
-        out_offsets.as_array(),
-        regions.as_array(),
-        shifts.as_array(),
-        geno_offset_idx.as_array(),
-        go.row(0),
-        go.row(1),
-        geno_v_idxs.as_array(),
-        v_starts.as_array(),
-        ilens.as_array(),
-        alt_alleles.as_array(),
-        alt_offsets.as_array(),
-        ref_.as_array(),
-        ref_offsets.as_array(),
-        pad_char,
-        keep.as_ref().map(|k| k.as_array()),
-        keep_offsets.as_ref().map(|ko| ko.as_array()),
-        annot_v_idxs.as_mut().map(|a| a.as_array_mut()),
-        annot_ref_pos.as_mut().map(|a| a.as_array_mut()),
-        parallel,
-    );
+    let go_starts = go.row(0);
+    let go_stops = go.row(1);
+    let out_a = out.as_array_mut();
+    let out_offsets_a = out_offsets.as_array();
+    let regions_a = regions.as_array();
+    let shifts_a = shifts.as_array();
+    let geno_offset_idx_a = geno_offset_idx.as_array();
+    let geno_v_idxs_a = geno_v_idxs.as_array();
+    let v_starts_a = v_starts.as_array();
+    let ilens_a = ilens.as_array();
+    let alt_alleles_a = alt_alleles.as_array();
+    let alt_offsets_a = alt_offsets.as_array();
+    let ref_a = ref_.as_array();
+    let ref_offsets_a = ref_offsets.as_array();
+    let keep_a = keep.as_ref().map(|k| k.as_array());
+    let keep_offsets_a = keep_offsets.as_ref().map(|ko| ko.as_array());
+    let annot_v_idxs_a = annot_v_idxs.as_mut().map(|a| a.as_array_mut());
+    let annot_ref_pos_a = annot_ref_pos.as_mut().map(|a| a.as_array_mut());
+    py.detach(move || {
+        reconstruct::reconstruct_haplotypes_from_sparse(
+            out_a,
+            out_offsets_a,
+            regions_a,
+            shifts_a,
+            geno_offset_idx_a,
+            go_starts,
+            go_stops,
+            geno_v_idxs_a,
+            v_starts_a,
+            ilens_a,
+            alt_alleles_a,
+            alt_offsets_a,
+            ref_a,
+            ref_offsets_a,
+            pad_char,
+            keep_a,
+            keep_offsets_a,
+            annot_v_idxs_a,
+            annot_ref_pos_a,
+            parallel,
+        );
+    });
 }
 
 /// Fused haplotypes __getitem__ kernel (Task 13).
@@ -584,95 +628,106 @@ pub fn reconstruct_haplotypes_fused<'py>(
     let geno_v_idxs_a = geno_v_idxs.as_array();
     let v_starts_a = v_starts.as_array();
     let ilens_a = ilens.as_array();
+    let alt_alleles_a = alt_alleles.as_array();
+    let alt_offsets_a = alt_offsets.as_array();
+    let ref_a = ref_.as_array();
+    let ref_offsets_a = ref_offsets.as_array();
+    let keep_a = keep.as_ref().map(|a| a.as_array());
+    let keep_offsets_a = keep_offsets.as_ref().map(|a| a.as_array());
+    let to_rc_a = to_rc.as_ref().map(|a| a.as_array());
 
     let (batch_size, ploidy) = geno_offset_idx_a.dim();
     let n_work = batch_size * ploidy;
 
-    // Step 1: compute per-haplotype length diffs (reuses get_diffs_sparse core).
-    // Mirrors _haps.py _haplotype_ilens exactly: pass q_starts/q_ends/v_starts so
-    // partial deletions that span a query boundary are correctly clipped.
-    // q_starts = regions[:, 1], q_ends = regions[:, 2] (both already in regions_a).
-    // v_starts is the same array passed in — it is the per-variant genomic start.
-    let q_starts_owned: ndarray::Array1<i32> = regions_a.column(1).to_owned();
-    let q_ends_owned: ndarray::Array1<i32> = regions_a.column(2).to_owned();
-    let diffs = genotypes::get_diffs_sparse(
-        geno_offset_idx_a,
-        geno_v_idxs_a,
-        go_starts,
-        go_stops,
-        ilens_a,
-        keep.as_ref().map(|a| a.as_array()),
-        keep_offsets.as_ref().map(|a| a.as_array()),
-        Some(q_starts_owned.view()), // q_starts = regions[:, 1]
-        Some(q_ends_owned.view()),   // q_ends   = regions[:, 2]
-        Some(v_starts_a),            // v_starts = per-variant genomic starts
-        parallel,
-    );
+    let (out_data, out_offsets_vec) = py.detach(move || {
+        // Step 1: compute per-haplotype length diffs (reuses get_diffs_sparse core).
+        // Mirrors _haps.py _haplotype_ilens exactly: pass q_starts/q_ends/v_starts so
+        // partial deletions that span a query boundary are correctly clipped.
+        // q_starts = regions[:, 1], q_ends = regions[:, 2] (both already in regions_a).
+        // v_starts is the same array passed in — it is the per-variant genomic start.
+        let q_starts_owned: ndarray::Array1<i32> = regions_a.column(1).to_owned();
+        let q_ends_owned: ndarray::Array1<i32> = regions_a.column(2).to_owned();
+        let diffs = genotypes::get_diffs_sparse(
+            geno_offset_idx_a,
+            geno_v_idxs_a,
+            go_starts,
+            go_stops,
+            ilens_a,
+            keep_a,
+            keep_offsets_a,
+            Some(q_starts_owned.view()), // q_starts = regions[:, 1]
+            Some(q_ends_owned.view()),   // q_ends   = regions[:, 2]
+            Some(v_starts_a),            // v_starts = per-variant genomic starts
+            parallel,
+        );
 
-    // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
-    // Mirrors the Python side: out_lengths = hap_lengths (or fixed output_length).
-    // hap_lengths = regions[:, 2] - regions[:, 1] + diffs  (end - start + diff)
-    // out_offsets shape: (n_work + 1,)
-    let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
-    {
-        let mut acc: i64 = 0;
-        out_offsets_vec[0] = 0;
-        for k in 0..n_work {
-            let query = k / ploidy;
-            let hap = k % ploidy;
-            let len: i64 = if output_length >= 0 {
-                output_length
-            } else {
-                let ref_len = (regions_a[[query, 2]] - regions_a[[query, 1]]) as i64;
-                let diff = diffs[[query, hap]] as i64;
-                (ref_len + diff).max(0)
-            };
-            acc += len;
-            out_offsets_vec[k + 1] = acc;
+        // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
+        // Mirrors the Python side: out_lengths = hap_lengths (or fixed output_length).
+        // hap_lengths = regions[:, 2] - regions[:, 1] + diffs  (end - start + diff)
+        // out_offsets shape: (n_work + 1,)
+        let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
+        {
+            let mut acc: i64 = 0;
+            out_offsets_vec[0] = 0;
+            for k in 0..n_work {
+                let query = k / ploidy;
+                let hap = k % ploidy;
+                let len: i64 = if output_length >= 0 {
+                    output_length
+                } else {
+                    let ref_len = (regions_a[[query, 2]] - regions_a[[query, 1]]) as i64;
+                    let diff = diffs[[query, hap]] as i64;
+                    (ref_len + diff).max(0)
+                };
+                acc += len;
+                out_offsets_vec[k + 1] = acc;
+            }
         }
-    }
 
-    // Step 3: allocate the output buffer in Rust — Python never calls np.empty.
-    let total = out_offsets_vec[n_work] as usize;
-    let mut out_data: Array1<u8> = uninit_output(total);
+        // Step 3: allocate the output buffer in Rust — Python never calls np.empty.
+        let total = out_offsets_vec[n_work] as usize;
+        let mut out_data: Array1<u8> = uninit_output(total);
 
-    // Step 4: reconstruct all haplotypes into the owned buffer (reuses batch core).
-    reconstruct::reconstruct_haplotypes_from_sparse(
-        out_data.view_mut(),
-        out_offsets_vec.view(),
-        regions_a,
-        shifts_a,
-        geno_offset_idx_a,
-        go_starts,
-        go_stops,
-        geno_v_idxs_a,
-        v_starts_a,
-        ilens_a,
-        alt_alleles.as_array(),
-        alt_offsets.as_array(),
-        ref_.as_array(),
-        ref_offsets.as_array(),
-        pad_char,
-        keep.as_ref().map(|k| k.as_array()),
-        keep_offsets.as_ref().map(|ko| ko.as_array()),
-        None, // annot_v_idxs — not supported in fused plain path
-        None, // annot_ref_pos — not supported in fused plain path
-        parallel,
-    );
-
-    // Step 4b: optional in-kernel reverse-complement (one bool per (query, hap) work item).
-    if let Some(to_rc) = to_rc.as_ref() {
-        debug_assert_eq!(
-            to_rc.as_array().len(),
-            out_offsets_vec.len() - 1,
-            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
-        );
-        crate::reverse::rc_flat_rows_inplace(
-            out_data.as_slice_mut().unwrap(),
+        // Step 4: reconstruct all haplotypes into the owned buffer (reuses batch core).
+        reconstruct::reconstruct_haplotypes_from_sparse(
+            out_data.view_mut(),
             out_offsets_vec.view(),
-            to_rc.as_array(),
+            regions_a,
+            shifts_a,
+            geno_offset_idx_a,
+            go_starts,
+            go_stops,
+            geno_v_idxs_a,
+            v_starts_a,
+            ilens_a,
+            alt_alleles_a,
+            alt_offsets_a,
+            ref_a,
+            ref_offsets_a,
+            pad_char,
+            keep_a,
+            keep_offsets_a,
+            None, // annot_v_idxs — not supported in fused plain path
+            None, // annot_ref_pos — not supported in fused plain path
+            parallel,
         );
-    }
+
+        // Step 4b: optional in-kernel reverse-complement (one bool per (query, hap) work item).
+        if let Some(to_rc) = to_rc_a.as_ref() {
+            debug_assert_eq!(
+                to_rc.len(),
+                out_offsets_vec.len() - 1,
+                "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+            );
+            crate::reverse::rc_flat_rows_inplace(
+                out_data.as_slice_mut().unwrap(),
+                out_offsets_vec.view(),
+                *to_rc,
+            );
+        }
+
+        (out_data, out_offsets_vec)
+    });
 
     // Step 5: return owned arrays — Python wraps them with no further coercions.
     (out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py))
@@ -726,50 +781,68 @@ pub fn reconstruct_haplotypes_spliced_fused<'py>(
 
     // out_offsets are precomputed by the Python splice plan — use them directly.
     let out_offsets_a = out_offsets.as_array();
-    let total = out_offsets_a[out_offsets_a.len() - 1] as usize;
+    let permuted_regions_a = permuted_regions.as_array();
+    let flat_shifts_a = flat_shifts.as_array();
+    let flat_geno_offset_idx_a = flat_geno_offset_idx.as_array();
+    let geno_v_idxs_a = geno_v_idxs.as_array();
+    let v_starts_a = v_starts.as_array();
+    let ilens_a = ilens.as_array();
+    let alt_alleles_a = alt_alleles.as_array();
+    let alt_offsets_a = alt_offsets.as_array();
+    let ref_a = ref_.as_array();
+    let ref_offsets_a = ref_offsets.as_array();
+    let keep_a = keep.as_ref().map(|k| k.as_array());
+    let keep_offsets_a = keep_offsets.as_ref().map(|ko| ko.as_array());
+    let to_rc_a = to_rc.as_ref().map(|a| a.as_array());
 
-    // Allocate output buffer.
-    let mut out_data: Array1<u8> = uninit_output(total);
+    let out_data = py.detach(move || {
+        let total = out_offsets_a[out_offsets_a.len() - 1] as usize;
 
-    // Reconstruct all haplotypes into the owned buffer (reuses batch core).
-    reconstruct::reconstruct_haplotypes_from_sparse(
-        out_data.view_mut(),
-        out_offsets_a,
-        permuted_regions.as_array(),
-        flat_shifts.as_array(),
-        flat_geno_offset_idx.as_array(),
-        go_starts,
-        go_stops,
-        geno_v_idxs.as_array(),
-        v_starts.as_array(),
-        ilens.as_array(),
-        alt_alleles.as_array(),
-        alt_offsets.as_array(),
-        ref_.as_array(),
-        ref_offsets.as_array(),
-        pad_char,
-        keep.as_ref().map(|k| k.as_array()),
-        keep_offsets.as_ref().map(|ko| ko.as_array()),
-        None, // annot_v_idxs — not used in splice path
-        None, // annot_ref_pos — not used in splice path
-        parallel,
-    );
+        // Allocate output buffer.
+        let mut out_data: Array1<u8> = uninit_output(total);
 
-    // Optional in-place RC per permuted element (negative-strand haplotypes).
-    // out_offsets_a is the permuted per-element offsets array (splice_plan.permuted_out_offsets),
-    // so each masked element is RC'd in its own byte range — matching the to_rc_per_elem post-pass.
-    if let Some(to_rc) = to_rc.as_ref() {
-        debug_assert_eq!(
-            to_rc.as_array().len(),
-            out_offsets_a.len() - 1,
-            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
-        );
-        crate::reverse::rc_flat_rows_inplace(
-            out_data.as_slice_mut().unwrap(),
+        // Reconstruct all haplotypes into the owned buffer (reuses batch core).
+        reconstruct::reconstruct_haplotypes_from_sparse(
+            out_data.view_mut(),
             out_offsets_a,
-            to_rc.as_array(),
+            permuted_regions_a,
+            flat_shifts_a,
+            flat_geno_offset_idx_a,
+            go_starts,
+            go_stops,
+            geno_v_idxs_a,
+            v_starts_a,
+            ilens_a,
+            alt_alleles_a,
+            alt_offsets_a,
+            ref_a,
+            ref_offsets_a,
+            pad_char,
+            keep_a,
+            keep_offsets_a,
+            None, // annot_v_idxs — not used in splice path
+            None, // annot_ref_pos — not used in splice path
+            parallel,
         );
-    }
+
+        // Optional in-place RC per permuted element (negative-strand haplotypes).
+        // out_offsets_a is the permuted per-element offsets array (splice_plan.permuted_out_offsets),
+        // so each masked element is RC'd in its own byte range — matching the to_rc_per_elem post-pass.
+        if let Some(to_rc) = to_rc_a.as_ref() {
+            debug_assert_eq!(
+                to_rc.len(),
+                out_offsets_a.len() - 1,
+                "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+            );
+            crate::reverse::rc_flat_rows_inplace(
+                out_data.as_slice_mut().unwrap(),
+                out_offsets_a,
+                *to_rc,
+            );
+        }
+
+        out_data
+    });
 
     // Return out_data only — Python already holds out_offsets (no round-trip).
     out_data.into_pyarray(py)
@@ -826,52 +899,70 @@ pub fn reconstruct_annotated_haplotypes_spliced_fused<'py>(
 
     // out_offsets are precomputed by the Python splice plan — use them directly.
     let out_offsets_a = out_offsets.as_array();
-    let total = out_offsets_a[out_offsets_a.len() - 1] as usize;
+    let permuted_regions_a = permuted_regions.as_array();
+    let flat_shifts_a = flat_shifts.as_array();
+    let flat_geno_offset_idx_a = flat_geno_offset_idx.as_array();
+    let geno_v_idxs_a = geno_v_idxs.as_array();
+    let v_starts_a = v_starts.as_array();
+    let ilens_a = ilens.as_array();
+    let alt_alleles_a = alt_alleles.as_array();
+    let alt_offsets_a = alt_offsets.as_array();
+    let ref_a = ref_.as_array();
+    let ref_offsets_a = ref_offsets.as_array();
+    let keep_a = keep.as_ref().map(|k| k.as_array());
+    let keep_offsets_a = keep_offsets.as_ref().map(|ko| ko.as_array());
+    let to_rc_a = to_rc.as_ref().map(|a| a.as_array());
 
-    // Allocate the sequence + annotation buffers.
-    let mut out_data: Array1<u8> = uninit_output(total);
-    let mut annot_v: Array1<i32> = uninit_output(total);
-    let mut annot_pos: Array1<i32> = uninit_output(total);
+    let (out_data, annot_v, annot_pos) = py.detach(move || {
+        let total = out_offsets_a[out_offsets_a.len() - 1] as usize;
 
-    // Reconstruct all haplotypes + annotations into the owned buffers (reuses batch core).
-    reconstruct::reconstruct_haplotypes_from_sparse(
-        out_data.view_mut(),
-        out_offsets_a,
-        permuted_regions.as_array(),
-        flat_shifts.as_array(),
-        flat_geno_offset_idx.as_array(),
-        go_starts,
-        go_stops,
-        geno_v_idxs.as_array(),
-        v_starts.as_array(),
-        ilens.as_array(),
-        alt_alleles.as_array(),
-        alt_offsets.as_array(),
-        ref_.as_array(),
-        ref_offsets.as_array(),
-        pad_char,
-        keep.as_ref().map(|k| k.as_array()),
-        keep_offsets.as_ref().map(|ko| ko.as_array()),
-        Some(annot_v.view_mut()),   // annot_v_idxs — variant index per nucleotide
-        Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
-        parallel,
-    );
+        // Allocate the sequence + annotation buffers.
+        let mut out_data: Array1<u8> = uninit_output(total);
+        let mut annot_v: Array1<i32> = uninit_output(total);
+        let mut annot_pos: Array1<i32> = uninit_output(total);
 
-    // Optional in-place RC per permuted element. Sequence bytes are reverse-complemented;
-    // annotation rows are reversed only (no complement) — matching
-    // _FlatAnnotatedHaps.reverse_masked. out_offsets_a is the permuted per-element
-    // offsets array, so each masked element is transformed in its own byte range.
-    if let Some(to_rc) = to_rc.as_ref() {
-        let m = to_rc.as_array();
-        debug_assert_eq!(
-            m.len(),
-            out_offsets_a.len() - 1,
-            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        // Reconstruct all haplotypes + annotations into the owned buffers (reuses batch core).
+        reconstruct::reconstruct_haplotypes_from_sparse(
+            out_data.view_mut(),
+            out_offsets_a,
+            permuted_regions_a,
+            flat_shifts_a,
+            flat_geno_offset_idx_a,
+            go_starts,
+            go_stops,
+            geno_v_idxs_a,
+            v_starts_a,
+            ilens_a,
+            alt_alleles_a,
+            alt_offsets_a,
+            ref_a,
+            ref_offsets_a,
+            pad_char,
+            keep_a,
+            keep_offsets_a,
+            Some(annot_v.view_mut()),   // annot_v_idxs — variant index per nucleotide
+            Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
+            parallel,
         );
-        crate::reverse::rc_flat_rows_inplace(out_data.as_slice_mut().unwrap(), out_offsets_a, m);
-        crate::reverse::reverse_flat_rows_inplace(annot_v.as_slice_mut().unwrap(), out_offsets_a, m);
-        crate::reverse::reverse_flat_rows_inplace(annot_pos.as_slice_mut().unwrap(), out_offsets_a, m);
-    }
+
+        // Optional in-place RC per permuted element. Sequence bytes are reverse-complemented;
+        // annotation rows are reversed only (no complement) — matching
+        // _FlatAnnotatedHaps.reverse_masked. out_offsets_a is the permuted per-element
+        // offsets array, so each masked element is transformed in its own byte range.
+        if let Some(to_rc) = to_rc_a.as_ref() {
+            let m = *to_rc;
+            debug_assert_eq!(
+                m.len(),
+                out_offsets_a.len() - 1,
+                "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+            );
+            crate::reverse::rc_flat_rows_inplace(out_data.as_slice_mut().unwrap(), out_offsets_a, m);
+            crate::reverse::reverse_flat_rows_inplace(annot_v.as_slice_mut().unwrap(), out_offsets_a, m);
+            crate::reverse::reverse_flat_rows_inplace(annot_pos.as_slice_mut().unwrap(), out_offsets_a, m);
+        }
+
+        (out_data, annot_v, annot_pos)
+    });
 
     (
         out_data.into_pyarray(py),
@@ -944,95 +1035,107 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
     let geno_v_idxs_a = geno_v_idxs.as_array();
     let v_starts_a = v_starts.as_array();
     let ilens_a = ilens.as_array();
+    let alt_alleles_a = alt_alleles.as_array();
+    let alt_offsets_a = alt_offsets.as_array();
+    let ref_a = ref_.as_array();
+    let ref_offsets_a = ref_offsets.as_array();
+    let keep_a = keep.as_ref().map(|a| a.as_array());
+    let keep_offsets_a = keep_offsets.as_ref().map(|a| a.as_array());
+    let to_rc_a = to_rc.as_ref().map(|a| a.as_array());
 
     let (batch_size, ploidy) = geno_offset_idx_a.dim();
     let n_work = batch_size * ploidy;
 
-    // Step 1: compute per-haplotype length diffs (reuses get_diffs_sparse core).
-    // Mirrors _haps.py _haplotype_ilens exactly: pass q_starts/q_ends/v_starts so
-    // partial deletions that span a query boundary are correctly clipped.
-    // q_starts = regions[:, 1], q_ends = regions[:, 2] (both already in regions_a).
-    // v_starts is the same array passed in — it is the per-variant genomic start.
-    let q_starts_owned: ndarray::Array1<i32> = regions_a.column(1).to_owned();
-    let q_ends_owned: ndarray::Array1<i32> = regions_a.column(2).to_owned();
-    let diffs = genotypes::get_diffs_sparse(
-        geno_offset_idx_a,
-        geno_v_idxs_a,
-        go_starts,
-        go_stops,
-        ilens_a,
-        keep.as_ref().map(|a| a.as_array()),
-        keep_offsets.as_ref().map(|a| a.as_array()),
-        Some(q_starts_owned.view()), // q_starts = regions[:, 1]
-        Some(q_ends_owned.view()),   // q_ends   = regions[:, 2]
-        Some(v_starts_a),            // v_starts = per-variant genomic starts
-        parallel,
-    );
-
-    // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
-    // Mirrors the Python side: out_lengths = hap_lengths (or fixed output_length).
-    // hap_lengths = regions[:, 2] - regions[:, 1] + diffs  (end - start + diff)
-    // out_offsets shape: (n_work + 1,)
-    let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
-    {
-        let mut acc: i64 = 0;
-        out_offsets_vec[0] = 0;
-        for k in 0..n_work {
-            let query = k / ploidy;
-            let hap = k % ploidy;
-            let len: i64 = if output_length >= 0 {
-                output_length
-            } else {
-                let ref_len = (regions_a[[query, 2]] - regions_a[[query, 1]]) as i64;
-                let diff = diffs[[query, hap]] as i64;
-                (ref_len + diff).max(0)
-            };
-            acc += len;
-            out_offsets_vec[k + 1] = acc;
-        }
-    }
-
-    // Step 3: allocate the output buffer and annotation buffers in Rust.
-    let total = out_offsets_vec[n_work] as usize;
-    let mut out_data: Array1<u8> = uninit_output(total);
-    let mut annot_v: Array1<i32> = uninit_output(total);
-    let mut annot_pos: Array1<i32> = uninit_output(total);
-
-    // Step 4: reconstruct all haplotypes into the owned buffers (reuses batch core).
-    reconstruct::reconstruct_haplotypes_from_sparse(
-        out_data.view_mut(),
-        out_offsets_vec.view(),
-        regions_a,
-        shifts_a,
-        geno_offset_idx_a,
-        go_starts,
-        go_stops,
-        geno_v_idxs_a,
-        v_starts_a,
-        ilens_a,
-        alt_alleles.as_array(),
-        alt_offsets.as_array(),
-        ref_.as_array(),
-        ref_offsets.as_array(),
-        pad_char,
-        keep.as_ref().map(|k| k.as_array()),
-        keep_offsets.as_ref().map(|ko| ko.as_array()),
-        Some(annot_v.view_mut()),   // annot_v_idxs — variant index per nucleotide
-        Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
-        parallel,
-    );
-
-    if let Some(to_rc) = to_rc.as_ref() {
-        let m = to_rc.as_array();
-        debug_assert_eq!(
-            m.len(),
-            out_offsets_vec.len() - 1,
-            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+    let (out_data, annot_v, annot_pos, out_offsets_vec) = py.detach(move || {
+        // Step 1: compute per-haplotype length diffs (reuses get_diffs_sparse core).
+        // Mirrors _haps.py _haplotype_ilens exactly: pass q_starts/q_ends/v_starts so
+        // partial deletions that span a query boundary are correctly clipped.
+        // q_starts = regions[:, 1], q_ends = regions[:, 2] (both already in regions_a).
+        // v_starts is the same array passed in — it is the per-variant genomic start.
+        let q_starts_owned: ndarray::Array1<i32> = regions_a.column(1).to_owned();
+        let q_ends_owned: ndarray::Array1<i32> = regions_a.column(2).to_owned();
+        let diffs = genotypes::get_diffs_sparse(
+            geno_offset_idx_a,
+            geno_v_idxs_a,
+            go_starts,
+            go_stops,
+            ilens_a,
+            keep_a,
+            keep_offsets_a,
+            Some(q_starts_owned.view()), // q_starts = regions[:, 1]
+            Some(q_ends_owned.view()),   // q_ends   = regions[:, 2]
+            Some(v_starts_a),            // v_starts = per-variant genomic starts
+            parallel,
         );
-        crate::reverse::rc_flat_rows_inplace(out_data.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
-        crate::reverse::reverse_flat_rows_inplace(annot_v.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
-        crate::reverse::reverse_flat_rows_inplace(annot_pos.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
-    }
+
+        // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
+        // Mirrors the Python side: out_lengths = hap_lengths (or fixed output_length).
+        // hap_lengths = regions[:, 2] - regions[:, 1] + diffs  (end - start + diff)
+        // out_offsets shape: (n_work + 1,)
+        let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
+        {
+            let mut acc: i64 = 0;
+            out_offsets_vec[0] = 0;
+            for k in 0..n_work {
+                let query = k / ploidy;
+                let hap = k % ploidy;
+                let len: i64 = if output_length >= 0 {
+                    output_length
+                } else {
+                    let ref_len = (regions_a[[query, 2]] - regions_a[[query, 1]]) as i64;
+                    let diff = diffs[[query, hap]] as i64;
+                    (ref_len + diff).max(0)
+                };
+                acc += len;
+                out_offsets_vec[k + 1] = acc;
+            }
+        }
+
+        // Step 3: allocate the output buffer and annotation buffers in Rust.
+        let total = out_offsets_vec[n_work] as usize;
+        let mut out_data: Array1<u8> = uninit_output(total);
+        let mut annot_v: Array1<i32> = uninit_output(total);
+        let mut annot_pos: Array1<i32> = uninit_output(total);
+
+        // Step 4: reconstruct all haplotypes into the owned buffers (reuses batch core).
+        reconstruct::reconstruct_haplotypes_from_sparse(
+            out_data.view_mut(),
+            out_offsets_vec.view(),
+            regions_a,
+            shifts_a,
+            geno_offset_idx_a,
+            go_starts,
+            go_stops,
+            geno_v_idxs_a,
+            v_starts_a,
+            ilens_a,
+            alt_alleles_a,
+            alt_offsets_a,
+            ref_a,
+            ref_offsets_a,
+            pad_char,
+            keep_a,
+            keep_offsets_a,
+            Some(annot_v.view_mut()),   // annot_v_idxs — variant index per nucleotide
+            Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
+            parallel,
+        );
+
+        if let Some(to_rc) = to_rc_a.as_ref() {
+            let m = *to_rc;
+            debug_assert_eq!(
+                m.len(),
+                out_offsets_vec.len() - 1,
+                "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+            );
+            crate::reverse::rc_flat_rows_inplace(out_data.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
+            crate::reverse::reverse_flat_rows_inplace(annot_v.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
+            crate::reverse::reverse_flat_rows_inplace(annot_pos.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
+        }
+
+        (out_data, annot_v, annot_pos, out_offsets_vec)
+    });
+
     // Step 5: return owned arrays — Python wraps them with no further coercions.
     (
         out_data.into_pyarray(py),
@@ -1055,15 +1158,22 @@ pub fn get_reference<'py>(
     parallel: bool,
     to_rc: Option<PyReadonlyArray1<bool>>,
 ) -> Bound<'py, PyArray1<u8>> {
-    let out = reference::get_reference(
-        regions.as_array(),
-        out_offsets.as_array(),
-        reference.as_array(),
-        ref_offsets.as_array(),
-        pad_char,
-        parallel,
-        to_rc.as_ref().map(|a| a.as_array()),
-    );
+    let regions_a = regions.as_array();
+    let out_offsets_a = out_offsets.as_array();
+    let reference_a = reference.as_array();
+    let ref_offsets_a = ref_offsets.as_array();
+    let to_rc_a = to_rc.as_ref().map(|a| a.as_array());
+    let out = py.detach(move || {
+        reference::get_reference(
+            regions_a,
+            out_offsets_a,
+            reference_a,
+            ref_offsets_a,
+            pad_char,
+            parallel,
+            to_rc_a,
+        )
+    });
     out.into_pyarray(py)
 }
 
@@ -1076,6 +1186,7 @@ pub fn get_reference<'py>(
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn shift_and_realign_tracks_sparse(
+    py: Python<'_>,
     mut out: PyReadwriteArray1<f32>,
     out_offsets: PyReadonlyArray1<i64>,
     regions: PyReadonlyArray2<i32>,
@@ -1096,26 +1207,43 @@ pub fn shift_and_realign_tracks_sparse(
 ) {
     use crate::tracks;
     let go = geno_offsets.as_array();
-    tracks::shift_and_realign_tracks_sparse(
-        out.as_array_mut(),
-        out_offsets.as_array(),
-        regions.as_array(),
-        shifts.as_array(),
-        geno_offset_idx.as_array(),
-        geno_v_idxs.as_array(),
-        go.row(0),
-        go.row(1),
-        v_starts.as_array(),
-        ilens.as_array(),
-        tracks.as_array(),
-        track_offsets.as_array(),
-        params.as_array(),
-        keep.as_ref().map(|k| k.as_array()),
-        keep_offsets.as_ref().map(|ko| ko.as_array()),
-        strategy_id,
-        base_seed,
-        parallel,
-    );
+    let go_starts = go.row(0);
+    let go_stops = go.row(1);
+    let out_a = out.as_array_mut();
+    let out_offsets_a = out_offsets.as_array();
+    let regions_a = regions.as_array();
+    let shifts_a = shifts.as_array();
+    let geno_offset_idx_a = geno_offset_idx.as_array();
+    let geno_v_idxs_a = geno_v_idxs.as_array();
+    let v_starts_a = v_starts.as_array();
+    let ilens_a = ilens.as_array();
+    let tracks_a = tracks.as_array();
+    let track_offsets_a = track_offsets.as_array();
+    let params_a = params.as_array();
+    let keep_a = keep.as_ref().map(|k| k.as_array());
+    let keep_offsets_a = keep_offsets.as_ref().map(|ko| ko.as_array());
+    py.detach(move || {
+        tracks::shift_and_realign_tracks_sparse(
+            out_a,
+            out_offsets_a,
+            regions_a,
+            shifts_a,
+            geno_offset_idx_a,
+            geno_v_idxs_a,
+            go_starts,
+            go_stops,
+            v_starts_a,
+            ilens_a,
+            tracks_a,
+            track_offsets_a,
+            params_a,
+            keep_a,
+            keep_offsets_a,
+            strategy_id,
+            base_seed,
+            parallel,
+        );
+    });
 }
 
 /// RLE-encode a ragged f32 track buffer into (starts, ends, values, offsets).
@@ -1136,12 +1264,12 @@ pub fn tracks_to_intervals<'py>(
     Bound<'py, PyArray1<i64>>,
 ) {
     use crate::tracks;
-    let (starts, ends, values, offsets) = tracks::tracks_to_intervals(
-        regions.as_array(),
-        tracks.as_array(),
-        track_offsets.as_array(),
-        parallel,
-    );
+    let regions_a = regions.as_array();
+    let tracks_a = tracks.as_array();
+    let track_offsets_a = track_offsets.as_array();
+    let (starts, ends, values, offsets) = py.detach(move || {
+        tracks::tracks_to_intervals(regions_a, tracks_a, track_offsets_a, parallel)
+    });
     (
         starts.into_pyarray(py),
         ends.into_pyarray(py),
@@ -1172,6 +1300,7 @@ pub fn tracks_to_intervals<'py>(
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn intervals_and_realign_track_fused(
+    py: Python<'_>,
     mut out: PyReadwriteArray1<f32>,          // (b*p*l) — caller's per-track slice
     out_offsets: PyReadonlyArray1<i64>,       // (b*p + 1)
     regions: PyReadonlyArray2<i32>,           // (b, 3)
@@ -1206,70 +1335,87 @@ pub fn intervals_and_realign_track_fused(
 
     let out_offsets_a = out_offsets.as_array();
     let regions_a = regions.as_array();
-
-    // Determine scratch buffer size from track_offsets.
     let track_offsets_a = track_offsets.as_array();
-    let scratch_len = track_offsets_a[track_offsets_a.len() - 1] as usize;
+    let mut out_a = out.as_array_mut();
+    let shifts_a = shifts.as_array();
+    let geno_offset_idx_a = geno_offset_idx.as_array();
+    let geno_v_idxs_a = geno_v_idxs.as_array();
+    let v_starts_a = v_starts.as_array();
+    let ilens_a = ilens.as_array();
+    let offset_idxs_a = offset_idxs.as_array();
+    let itv_starts_a = itv_starts.as_array();
+    let itv_ends_a = itv_ends.as_array();
+    let itv_values_a = itv_values.as_array();
+    let itv_offsets_a = itv_offsets.as_array();
+    let params_a = params.as_array();
+    let keep_a = keep.as_ref().map(|k| k.as_array());
+    let keep_offsets_a = keep_offsets.as_ref().map(|ko| ko.as_array());
+    let to_rc_a = to_rc.as_ref().map(|a| a.as_array());
 
-    // Allocate Rust-side scratch buffer — replaces Python `_tracks = np.empty(...)`.
-    // intervals_to_tracks calls out.fill(0.0) as its first step, so full-write is
-    // guaranteed; uninit_output is safe here.
-    let mut scratch = uninit_output::<f32>(scratch_len);
+    py.detach(move || {
+        // Determine scratch buffer size from track_offsets.
+        let scratch_len = track_offsets_a[track_offsets_a.len() - 1] as usize;
 
-    // Extract query starts (regions[:, 1]) as a contiguous owned array.
-    // regions_a.column(1) is a non-contiguous view (row-major storage); we
-    // must own/contiguify it before passing to intervals_to_tracks which
-    // expects a contiguous ArrayView1<i32>.
-    let q_starts: ndarray::Array1<i32> = regions_a.column(1).to_owned();
+        // Allocate Rust-side scratch buffer — replaces Python `_tracks = np.empty(...)`.
+        // intervals_to_tracks calls out.fill(0.0) as its first step, so full-write is
+        // guaranteed; uninit_output is safe here.
+        let mut scratch = uninit_output::<f32>(scratch_len);
 
-    // Step 1: paint reference-coordinate intervals into scratch (reuses intervals core).
-    intervals::intervals_to_tracks(
-        offset_idxs.as_array(),
-        q_starts.view(),
-        itv_starts.as_array(),
-        itv_ends.as_array(),
-        itv_values.as_array(),
-        itv_offsets.as_array(),
-        scratch.view_mut(),
-        track_offsets_a,
-        parallel,
-    );
+        // Extract query starts (regions[:, 1]) as a contiguous owned array.
+        // regions_a.column(1) is a non-contiguous view (row-major storage); we
+        // must own/contiguify it before passing to intervals_to_tracks which
+        // expects a contiguous ArrayView1<i32>.
+        let q_starts: ndarray::Array1<i32> = regions_a.column(1).to_owned();
 
-    // Step 2: shift and realign into caller's out slice (reuses tracks core).
-    tracks::shift_and_realign_tracks_sparse(
-        out.as_array_mut(),
-        out_offsets_a,
-        regions_a,
-        shifts.as_array(),
-        geno_offset_idx.as_array(),
-        geno_v_idxs.as_array(),
-        go_starts,
-        go_stops,
-        v_starts.as_array(),
-        ilens.as_array(),
-        scratch.view(),
-        track_offsets_a,
-        params.as_array(),
-        keep.as_ref().map(|k| k.as_array()),
-        keep_offsets.as_ref().map(|ko| ko.as_array()),
-        strategy_id,
-        base_seed,
-        parallel,
-    );
-
-    // Step 3: optional in-place reverse for negative-strand tracks (reverse only, no complement).
-    if let Some(to_rc) = to_rc.as_ref() {
-        debug_assert_eq!(
-            to_rc.as_array().len(),
-            out_offsets.as_array().len() - 1,
-            "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+        // Step 1: paint reference-coordinate intervals into scratch (reuses intervals core).
+        intervals::intervals_to_tracks(
+            offset_idxs_a,
+            q_starts.view(),
+            itv_starts_a,
+            itv_ends_a,
+            itv_values_a,
+            itv_offsets_a,
+            scratch.view_mut(),
+            track_offsets_a,
+            parallel,
         );
-        crate::reverse::reverse_flat_rows_inplace(
-            out.as_slice_mut().unwrap(),
-            out_offsets.as_array(),
-            to_rc.as_array(),
+
+        // Step 2: shift and realign into caller's out slice (reuses tracks core).
+        tracks::shift_and_realign_tracks_sparse(
+            out_a.view_mut(),
+            out_offsets_a,
+            regions_a,
+            shifts_a,
+            geno_offset_idx_a,
+            geno_v_idxs_a,
+            go_starts,
+            go_stops,
+            v_starts_a,
+            ilens_a,
+            scratch.view(),
+            track_offsets_a,
+            params_a,
+            keep_a,
+            keep_offsets_a,
+            strategy_id,
+            base_seed,
+            parallel,
         );
-    }
+
+        // Step 3: optional in-place reverse for negative-strand tracks (reverse only, no complement).
+        if let Some(to_rc) = to_rc_a.as_ref() {
+            debug_assert_eq!(
+                to_rc.len(),
+                out_offsets_a.len() - 1,
+                "to_rc mask length must equal number of output rows (offsets.len() - 1)"
+            );
+            crate::reverse::reverse_flat_rows_inplace(
+                out_a.as_slice_mut().unwrap(),
+                out_offsets_a,
+                *to_rc,
+            );
+        }
+    });
 
     Ok(())
 }
