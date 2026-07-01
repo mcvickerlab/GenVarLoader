@@ -89,12 +89,14 @@ def test_variants_af_filter_parity(phased_svar_gvl, reference):
             f"AF filtering unavailable on this dataset — skipping compact_keep "
             f"exercise ({type(e).__name__}: {e})"
         )
+        raise  # unreachable; NoReturn marker for pyrefly
 
     # Load golden — may not exist if AF was unavailable at generation time.
     try:
         golden = _golden.load_flat_golden("ds_variants_af")
     except FileNotFoundError:
         pytest.skip("ds_variants_af golden not generated (AF unavailable at gen time)")
+        raise  # unreachable; NoReturn marker for pyrefly
 
     spy_fn, ck_calls, restore = _golden.make_kernel_spy("compact_keep_i32")
     try:

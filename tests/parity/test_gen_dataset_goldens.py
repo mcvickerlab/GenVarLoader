@@ -260,11 +260,13 @@ def test_gen_variants_af(phased_svar_gvl, reference, monkeypatch):
         ds = ds_base.with_seqs("variants").with_settings(min_af=0.1, max_af=0.9)
     except Exception as e:
         pytest.skip(f"AF filtering unavailable: {e}")
+        raise  # unreachable (skip raises); tells pyrefly this branch is NoReturn
     try:
         monkeypatch.setenv("GVL_BACKEND", "numba")
         out_numba = ds[:, :]
     except KeyError as e:
         pytest.skip(f"AF key missing: {e}")
+        raise  # unreachable; NoReturn marker for pyrefly
     monkeypatch.setenv("GVL_BACKEND", "rust")
     out_rust = ds[:, :]
     _oracle_check(out_numba, out_rust, "ds_variants_af")
