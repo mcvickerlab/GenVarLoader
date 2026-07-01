@@ -50,13 +50,22 @@ def variant_track_dataset(source_bed, vcf_dir, reference, tmp_path: Path):
 
 
 def _materialize(ds):
-    """Reduce a getitem result to a list of numpy arrays for comparison."""
+    """Reduce a getitem result to a list of numpy arrays for comparison.
+
+    For ragged outputs we compare BOTH the flat data buffer and the offsets
+    (row boundaries), so a same-bytes/different-layout difference cannot slip
+    through the byte-identical equivalence check.
+    """
     out = ds[:, :]
     items = out if isinstance(out, tuple) else (out,)
     arrays = []
     for it in items:
-        # Ragged-like objects expose .data; dense are ndarrays already.
+        # Ragged-like objects expose .data (flat buffer) and .offsets (row
+        # boundaries); dense arrays are ndarrays already.
         arrays.append(np.asarray(getattr(it, "data", it)))
+        offsets = getattr(it, "offsets", None)
+        if offsets is not None:
+            arrays.append(np.asarray(offsets))
     return arrays
 
 
