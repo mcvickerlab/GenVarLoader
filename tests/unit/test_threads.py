@@ -125,3 +125,21 @@ def test_detect_cpus_ignores_quota_when_none(monkeypatch):
     _constrain_detected_cpus(monkeypatch, 16)
     monkeypatch.setattr(th, "_cgroup_cpu_quota", lambda: None)
     assert th._detect_cpus() == 16
+
+
+def test_cap_threads_overwrites_ambient_rayon(monkeypatch):
+    # An ambient RAYON_NUM_THREADS (base image) must NOT win over GVL's count.
+    monkeypatch.setenv("RAYON_NUM_THREADS", "16")
+    monkeypatch.setattr(th, "_NUM_THREADS", None)
+    monkeypatch.setenv("GVL_NUM_THREADS", "4")
+    n = th.cap_threads()
+    assert n == 4
+    assert os.environ["RAYON_NUM_THREADS"] == "4"
+
+
+def test_cap_threads_sets_when_unset(monkeypatch):
+    monkeypatch.delenv("RAYON_NUM_THREADS", raising=False)
+    monkeypatch.setattr(th, "_NUM_THREADS", None)
+    monkeypatch.setenv("GVL_NUM_THREADS", "3")
+    th.cap_threads()
+    assert os.environ["RAYON_NUM_THREADS"] == "3"

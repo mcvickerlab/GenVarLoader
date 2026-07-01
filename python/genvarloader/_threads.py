@@ -5,6 +5,14 @@ cgroup cpuset (Linux sched_getaffinity). Seeds RAYON_NUM_THREADS so
 rayon's global pool picks it up on first use. Must run before the
 first rust parallel call (rayon reads the env var at global-pool init
 time). Idempotent.
+
+Environment variables:
+- GVL_NUM_THREADS: Set worker count explicitly (default: cgroup cpuset or
+  os.cpu_count). Overrides cgroup detection.
+- GVL_FORCE_PARALLEL: Force parallelization even for small inputs
+  (default: use size threshold). Set to a truthy value (1, true, yes, on).
+- RAYON_NUM_THREADS: Overwritten by cap_threads with GVL's resolved count.
+  An inherited value (e.g. from a base image) does not win.
 """
 
 from __future__ import annotations
@@ -94,13 +102,16 @@ def _resolve_num_threads() -> int:
 def cap_threads() -> int:
     """Resolve worker count once and pin rayon's pool via RAYON_NUM_THREADS.
 
-    Must run before the first rust parallel call (rayon reads RAYON_NUM_THREADS
-    at global-pool init). Idempotent.
+    Overwrites any ambient RAYON_NUM_THREADS: an inherited value (e.g. from a
+    base image) must not defeat GVL's cgroup-aware cap (issue #263). Users who
+    want explicit control set GVL_NUM_THREADS. Must run before the first rust
+    parallel call (rayon reads RAYON_NUM_THREADS at global-pool init).
+    Idempotent.
     """
     global _NUM_THREADS
     if _NUM_THREADS is None:
         _NUM_THREADS = _resolve_num_threads()
-        os.environ.setdefault("RAYON_NUM_THREADS", str(_NUM_THREADS))
+        os.environ["RAYON_NUM_THREADS"] = str(_NUM_THREADS)
     return _NUM_THREADS
 
 
