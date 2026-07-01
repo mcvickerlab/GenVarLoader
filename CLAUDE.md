@@ -238,6 +238,18 @@ In scope:
 
 When a change ships, update the relevant section of the skill and re-check the "Common gotchas" and "Where to look next" pointer table. The skill is published to https://www.skills.sh/ as `mcvickerlab/GenVarLoader` (installable via `npx skills add mcvickerlab/GenVarLoader`); keep it accurate against `main`.
 
+## Docs audit before feature/breaking-change PRs
+
+Before opening any PR that adds a user-facing feature or makes a breaking change, audit and update the user-facing docs so they stay consistent with the code:
+
+- `README.md` (features, installation, requirements)
+- `docs/source/*.md` — especially `faq.md`, `write.md`, `dataset.md`, `format.md`, `index.md`
+- `skills/genvarloader/SKILL.md` (see "Maintaining the `genvarloader` skill" above)
+
+Check for: now-false claims (deleted backends, removed deps, changed defaults, renamed/removed symbols), new user-facing config or environment variables that need documenting, and changed installation/preprocessing (bcftools/plink2) requirements.
+
+The auto-generated `docs/source/changelog.md` (built from commit messages via `changelog.md.j2`) does **not** count as documentation — never treat a changelog entry as a substitute for prose docs. This gate complements the skill-maintenance rule above: public-API changes must update the skill, and any user-facing change must also keep the prose docs true.
+
 ## Rust migration roadmap
 
 Any task that mentions "rust" (adding or porting Rust code, touching `src/`, or migrating numba/Python hot paths) **must** read `docs/roadmaps/rust-migration.md` before starting and update it as part of the work — tick completed tasks, record measurement results under the relevant checkpoint, and set the phase status marker (⬜/🚧/✅) + PR link. The roadmap is the source of truth for migration sequencing and the byte-identical parity contract.
