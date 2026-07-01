@@ -24,7 +24,7 @@ ragged = gvl.Ragged.from_offsets(data, shape, offsets)
 # ]
 ```
 
-Ragged arrays are subclasses of [Awkward Arrays](https://github.com/scikit-hep/awkward), so anything you can do with Awkward Arrays you can do with Ragged arrays. Within GVL, we use numba JIT'd functions to compute on the ragged objects' buffers directly since it's relatively straightforward (i.e. iterating over the rows of `data` via the `offsets` array).
+Ragged arrays are backed by [`seqpro`](https://github.com/ML4GLand/SeqPro)'s `Ragged` type (a Rust-backed `_core.Ragged`). GVL computes on the `data` and `offsets` buffers directly in Rust, which is relatively straightforward (i.e. iterating over the rows of `data` via the `offsets` array). (Earlier releases subclassed [Awkward Arrays](https://github.com/scikit-hep/awkward); GVL no longer depends on `awkward`.)
 
 .. note::
 
@@ -62,6 +62,14 @@ bcftools view -Hp $vcf | wc -l
 # for PLINK
 plink2 --pgen-info $prefix
 ```
+
+## How do I control how many threads GVL uses?
+
+GVL's read path (haplotype reconstruction and track re-alignment) is parallelized in Rust with [rayon](https://github.com/rayon-rs/rayon). By default it uses one worker per available CPU, detected from the Linux cgroup cpuset (`sched_getaffinity`) so it respects container limits, and falling back to `os.cpu_count()` elsewhere. Three environment variables tune this:
+
+- **`GVL_NUM_THREADS`** — set the worker count explicitly (e.g. `GVL_NUM_THREADS=4`). Overrides cgroup detection. Resolved once, on first use, so set it before your first GVL call.
+- **`GVL_FORCE_PARALLEL`** — set to a truthy value (`1`, `true`, `yes`, `on`) to force the multithreaded paths even on small inputs. By default GVL runs small inputs serially because thread overhead would dominate; this bypasses that size gate. Mainly useful for benchmarking.
+- **`RAYON_NUM_THREADS`** — GVL **overwrites** this with its own resolved count so an inherited value (e.g. baked into a base image) can't defeat the cgroup-aware cap. To size the pool yourself, use `GVL_NUM_THREADS` instead.
 
 ## How can I get personalized protein/spliced RNA sequences?
 

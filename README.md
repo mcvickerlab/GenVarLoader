@@ -25,7 +25,7 @@ Documentation is available [here](https://genvarloader.readthedocs.io/). See our
 pip install genvarloader
 ```
 
-A PyTorch dependency is **not** included since it may require [special instructions](https://pytorch.org/get-started/locally/). `tbb` and/or `pyomp` are optional dependencies but highly recommended as they can improve throughput for parallelized numba code.
+A PyTorch dependency is **not** included since it may require [special instructions](https://pytorch.org/get-started/locally/). GenVarLoader parallelizes its data-loading hot paths in Rust (rayon) out of the box, with no extra dependencies required; you can tune the worker count with the `GVL_NUM_THREADS` environment variable (see the [FAQ](https://genvarloader.readthedocs.io/en/latest/faq.html)).
 
 ## Contributing
 

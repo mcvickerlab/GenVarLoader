@@ -7,6 +7,8 @@
 
 .. autofunction:: write
 
+.. autofunction:: update
+
 .. autofunction:: get_splice_bed
 
 .. autofunction:: read_bedlike
@@ -22,6 +24,44 @@
     :exclude-members: __new__
 ```
 
+## Insertion fill
+
+Strategies controlling how re-aligned track values are filled across inserted bases (indels). Pass an instance to [`gvl.Dataset.with_insertion_fill()`](#genvarloader.Dataset.with_insertion_fill). `InsertionFill` is the abstract base; instantiate one of the concrete strategies.
+
+```{eval-rst}
+.. currentmodule:: genvarloader
+
+.. autoclass:: InsertionFill
+    :members:
+
+.. autoclass:: Constant
+    :members:
+
+.. autoclass:: FlankSample
+    :members:
+
+.. autoclass:: Interpolate
+    :members:
+
+.. autoclass:: Repeat5p
+    :members:
+
+.. autoclass:: Repeat5pNormalized
+    :members:
+```
+
+## Dataset maintenance
+
+Utilities for upgrading on-disk datasets written by older GVL versions.
+
+```{eval-rst}
+.. currentmodule:: genvarloader
+
+.. autofunction:: migrate
+
+.. autofunction:: migrate_svar_link
+```
+
 ## Reading
 
 ### Personalized data
@@ -34,6 +74,12 @@
     :exclude-members: __init__
 
 .. autofunction:: get_dummy_dataset
+
+.. autoclass:: DummyVariant
+    :members:
+
+.. autoclass:: VarWindowOpt
+    :members:
 
 .. autoclass:: RaggedDataset
     :exclude-members: __new__, __init__
@@ -102,4 +148,44 @@ Classes that GVL Datasets may return.
 .. autoclass:: RaggedIntervals
     :members:
     :exclude-members: __init__
+```
+
+### Flat containers
+
+Returned in place of the ragged containers when a Dataset uses [`with_output_format("flat")`](#genvarloader.Dataset.with_output_format). Each carries flat `data`/`offsets` buffers and a `to_ragged()` escape hatch back to the ragged form.
+
+```{eval-rst}
+.. currentmodule:: genvarloader
+
+.. autoclass:: FlatRagged
+    :members:
+    :exclude-members: __init__
+
+.. autoclass:: FlatAnnotatedHaps
+    :members:
+    :exclude-members: __init__
+
+.. autoclass:: FlatIntervals
+    :members:
+    :exclude-members: __init__
+
+.. autoclass:: FlatVariants
+    :members:
+    :exclude-members: __init__
+
+.. autoclass:: FlatAlleles
+    :members:
+    :exclude-members: __init__
+
+.. autoclass:: FlatVariantWindows
+    :members:
+    :exclude-members: __init__
+```
+
+### PyTorch interop
+
+```{eval-rst}
+.. currentmodule:: genvarloader
+
+.. autofunction:: to_nested_tensor
 ```
