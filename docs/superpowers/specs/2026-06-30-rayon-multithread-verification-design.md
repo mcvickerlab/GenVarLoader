@@ -35,7 +35,7 @@ Non-goals: rewriting the getitem dispatch, changing the on-disk format, or touch
 
 ## Design
 
-Four workstreams in one bundled PR. #4 (root-cause fix beyond `allow_threads`) is **contingent** on the harness reproducing a hang.
+One bundled PR. Workstreams 1–5 ship unconditionally; #6 (root-cause fix beyond `allow_threads`) is **contingent** on the harness reproducing a hang.
 
 ### 1. Force-parallel override — `python/genvarloader/_threads.py`
 
@@ -99,7 +99,18 @@ This removes "GIL held across the parallel region" as a variable and lets other 
 
 **(c) `cap_threads` unit tests** (`tests/unit/test_threads.py`, extend). Cover: `GVL_FORCE_PARALLEL` truthy/falsy parsing; `RAYON_NUM_THREADS` is **overwritten** not preserved; `_cgroup_cpu_quota()` parses v2 `cpu.max` (quota and `"max"`), v1 quota/period, and returns `None` on missing files; effective count = `min(affinity, quota)`.
 
-### 5. Contingent: root-cause fix beyond `allow_threads`
+### 5. Pre-existing pyrefly hook failures — `tests/parity/`
+
+The pre-commit `pyrefly` hook currently fails on `unbound-name` errors that predate this work and block every commit:
+
+- `tests/parity/test_gen_dataset_goldens.py:265,270` — `ds`, `out_numba`
+- `tests/parity/test_variants_dataset_parity.py:101,115` — `ds`, `golden`
+
+Root cause: a variable is assigned inside a `try` whose `except` branch calls `pytest.skip(...)`. pyrefly does not model `pytest.skip` as `NoReturn`, so it treats the `except` path as falling through, leaving the variable possibly-unbound at its later use.
+
+Fix by making each skipping `except` branch **visibly terminate** so flow analysis sees the variable as bound — e.g. follow `pytest.skip(...)` with a bare `raise` (unreachable at runtime, since `skip` raises; statically marks the branch `NoReturn`). **No inline `# pyrefly: ignore`** — per the env-drift gotcha, inline ignores that become unused in some environments break CI via `unused-ignore`. Verify with `pixi run -e dev typecheck` reporting zero errors, and confirm the pre-commit hook passes without `--no-verify`.
+
+### 6. Contingent: root-cause fix beyond `allow_threads`
 
 Only if the stress harness still reproduces a hang **after** the cap fix and `allow_threads`. Driven by systematic-debugging on the reproducer. Suspect order, given the lock-free audit: (a) a dependency's rayon usage on the shared global pool (e.g. bigtools during track reads); (b) rayon global-pool init races under contention. Left as a spec-level placeholder — no speculative code without harness evidence.
 
@@ -111,7 +122,8 @@ Rust rebuilt (`maturin develop --release`) before any Python test that imports t
 - `pixi run -e dev pytest tests/parity/test_rayon_equivalence.py -q` — serial==parallel==golden stays byte-identical after `allow_threads`.
 - `pixi run -e dev pytest tests/unit/test_threads.py -q` — cap/quota/force-parallel unit tests.
 - `pixi run -e dev pytest tests/integration/test_rayon_stress.py -q` — stress reproducer (slow tier; run explicitly).
-- Full tree `pixi run -e dev pytest tests -q` + `ruff check python/ tests/` + `typecheck` before push (shared-code change touches `_threads.py`).
+- `pixi run -e dev typecheck` — zero pyrefly errors; the pre-commit hook passes **without** `--no-verify` (confirms the parity `unbound-name` fixes).
+- Full tree `pixi run -e dev pytest tests -q` + `ruff check python/ tests/` before push (shared-code change touches `_threads.py`).
 
 ## Risks & mitigations
 
