@@ -243,10 +243,16 @@ When a change ships, update the relevant section of the skill and re-check the "
 Before opening any PR that adds a user-facing feature or makes a breaking change, audit and update the user-facing docs so they stay consistent with the code:
 
 - `README.md` (features, installation, requirements)
-- `docs/source/*.md` — especially `faq.md`, `write.md`, `dataset.md`, `format.md`, `index.md`
+- `docs/source/*.md` — especially `api.md`, `faq.md`, `write.md`, `dataset.md`, `format.md`, `index.md`
 - `skills/genvarloader/SKILL.md` (see "Maintaining the `genvarloader` skill" above)
 
 Check for: now-false claims (deleted backends, removed deps, changed defaults, renamed/removed symbols), new user-facing config or environment variables that need documenting, and changed installation/preprocessing (bcftools/plink2) requirements.
+
+**`api.md` must stay in sync with `__all__`.** Every symbol exported in `python/genvarloader/__init__.py`'s `__all__` needs an autodoc entry in `docs/source/api.md`; adding a public symbol without one silently drops it from the rendered API reference. Quick check:
+
+```bash
+python -c "import re,genvarloader as g; api=open('docs/source/api.md').read(); print('MISSING:', [n for n in g.__all__ if n not in api] or 'none')"
+```
 
 The auto-generated `docs/source/changelog.md` (built from commit messages via `changelog.md.j2`) does **not** count as documentation — never treat a changelog entry as a substitute for prose docs. This gate complements the skill-maintenance rule above: public-API changes must update the skill, and any user-facing change must also keep the prose docs true.
 
