@@ -14,6 +14,13 @@ import os
 _MIN_BYTES_PER_THREAD = 1 << 20  # 1 MiB
 _NUM_THREADS: int | None = None
 
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _force_parallel() -> bool:
+    """True iff GVL_FORCE_PARALLEL is set to a truthy value (read live)."""
+    return os.environ.get("GVL_FORCE_PARALLEL", "").strip().lower() in _TRUTHY
+
 
 def _detect_cpus() -> int:
     try:
@@ -50,4 +57,8 @@ def num_threads() -> int:
 
 
 def should_parallelize(total_bytes: int) -> bool:
+    # GVL_FORCE_PARALLEL bypasses the size gate so the multithreaded paths run
+    # on small inputs (tests, repro harnesses). See issue #263.
+    if _force_parallel():
+        return True
     return total_bytes >= num_threads() * _MIN_BYTES_PER_THREAD

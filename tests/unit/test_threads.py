@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 import genvarloader._threads as th
 
 
@@ -48,3 +50,29 @@ def test_should_parallelize_threshold(monkeypatch):
     thresh = 4 * th._MIN_BYTES_PER_THREAD
     assert th.should_parallelize(thresh - 1) is False
     assert th.should_parallelize(thresh) is True
+
+
+@pytest.mark.parametrize("val", ["1", "true", "TRUE", "yes", "on", "On"])
+def test_force_parallel_truthy(monkeypatch, val):
+    monkeypatch.setenv("GVL_FORCE_PARALLEL", val)
+    # Below the byte threshold, but forced on → parallel.
+    assert th.should_parallelize(0) is True
+
+
+@pytest.mark.parametrize("val", ["0", "false", "no", "off", "", "banana"])
+def test_force_parallel_falsy_falls_back_to_threshold(monkeypatch, val):
+    monkeypatch.setattr(th, "_NUM_THREADS", None)
+    monkeypatch.delenv("GVL_NUM_THREADS", raising=False)
+    monkeypatch.setenv("GVL_FORCE_PARALLEL", val)
+    _constrain_detected_cpus(monkeypatch, 4)
+    # Not forced → normal size gate applies.
+    assert th.should_parallelize(0) is False
+    assert th.should_parallelize(4 * th._MIN_BYTES_PER_THREAD) is True
+
+
+def test_force_parallel_unset(monkeypatch):
+    monkeypatch.delenv("GVL_FORCE_PARALLEL", raising=False)
+    monkeypatch.setattr(th, "_NUM_THREADS", None)
+    monkeypatch.delenv("GVL_NUM_THREADS", raising=False)
+    _constrain_detected_cpus(monkeypatch, 4)
+    assert th.should_parallelize(0) is False
