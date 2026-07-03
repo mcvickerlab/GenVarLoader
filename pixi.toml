@@ -93,8 +93,13 @@ numba = "==0.59.1"
 [feature.py310.pypi-dependencies]
 pyarrow = ">=21"
 hirola = "==0.3"
-seqpro = "==0.20.0"
-genoray = "==2.12.3"
+seqpro = "==0.21.1"
+# Dev-wiring (release-gated): genoray svar-2 (v2.15.0, main merged in) as a pre-built
+# cp310 wheel. Editable path-install would require genoray's rust-htslib C toolchain
+# (cxx-compiler/clangdev/zlib/LIBCLANG_PATH) inside this env; Plan 3 never edits genoray,
+# so a frozen wheel is equivalent. Rebuild via `pixi run -e py310 maturin build --release`
+# in the genoray checkout if genoray changes. Flip to the PyPI release at merge.
+genoray = { path = "/carter/users/dlaub/projects/genoray/target/wheels/genoray-2.15.0-cp310-cp310-manylinux_2_28_x86_64.whl" }
 polars = "==1.37.1"
 loguru = "*"
 natsort = "*"

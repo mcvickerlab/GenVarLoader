@@ -19,6 +19,7 @@ ndarray = "0.17.2"
 numpy = "0.28.0"
 rayon = "1.12.0"
 seqpro-core = "0.1"
+svar2-codec = { path = "/carter/users/dlaub/projects/genoray/svar2-codec" }
 
 [features]
 extension-module = ["pyo3/extension-module"]
