@@ -80,21 +80,31 @@ No design surface. Abort a removal if that worktree reports uncommitted work.
 `SparseVar2Source.realign_tracks` (the region→R·S track expansion) has no end-to-end
 test; only the Rust driver unit test `svar2_track_realign_del` exists.
 
-**Oracle: option (a)** — gvl's own SVAR1 `shift_and_realign_tracks_sparse`, fed the
-variants materialized from genoray `SparseVar2.decode`. It is a fully independent,
-already-trusted code path (9 passing tests) and mirrors how
-`tests/test_svar2_reconstruct.py` validates against a separate oracle. We reject the
-pure-Python-consensus option (b): a second implementation to get right, and weaker than
-reusing the trusted kernel.
+**Oracle: gvl's SVAR1 _pure-Python_ `shift_and_realign_track_sparse`
+(`_dataset/_tracks.py:708`), fed the variants materialized from genoray
+`SparseVar2.decode`.** This is the strongest low-cost oracle and resolves the handoff's
+(a)/(b) tension:
+- It reuses *trusted* SVAR1 realign logic — including the DEL-anchor branch already
+  present at `_tracks.py:755` — so we don't hand-roll a second track-shift
+  implementation (the weakness of a fresh pure-Python consensus).
+- It is a **pure-Python** implementation, genuinely independent of the SVAR2 **Rust**
+  kernel under test (`shift_and_realign_tracks_from_svar2`, a closure refactor of the
+  *Rust* SVAR1 kernel — a different implementation from this Python fallback).
+- Setup is trivial: build a synthetic single-hap genotype layout from decode records —
+  `geno_v_idxs = arange(n_h)`, `geno_offsets = [0, n_h]`, `v_starts = pos_h`,
+  `ilens = ilen_h` — mirroring how `test_svar2_reconstruct.py` feeds decode records to
+  its oracle.
 
 **Construction:**
-- Reuse the store builder from `tests/test_svar2_reconstruct.py`.
+- Reuse the store builder + `decode_batch` extraction from
+  `tests/test_svar2_reconstruct.py`.
 - Use **DEL-only variants** so insertion-fill is bypassed and the strategy choice is
-  irrelevant (any valid `strategy_id`/`params` works — borrow from an existing gvl
-  track test).
-- Define a per-region reference track (f32); realign through the SVAR2 adapter path and
-  through the SVAR1 oracle fed the decoded variants.
-- **Assert per-`(r,s,p)`** equality between the two.
+  irrelevant (any valid `strategy_id`/`params` works — track realign is ilen-only for
+  DELs).
+- Define a per-region reference track (f32); realign through the SVAR2 adapter path
+  (`SparseVar2Source.realign_tracks`) and, per hap, through the pure-Python oracle fed
+  that hap's decoded `(pos, ilen)` with `shift=0` and `out` sized to the hap length.
+- **Assert per-`(r,s,p)`** float equality between the two (`np.testing.assert_allclose`).
 
 Place alongside `tests/test_svar2_reconstruct.py`.
 
