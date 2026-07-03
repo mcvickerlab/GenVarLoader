@@ -5,34 +5,41 @@
 use ndarray::{s, ArrayView1, ArrayView2, ArrayViewMut1};
 use rayon::prelude::*;
 
-/// Reconstruct a single haplotype from reference sequence and variants.
+/// Single-haplotype inner kernel, generic over the variant source.
 ///
-/// Single-haplotype inner kernel. Mirror of numba
-/// `reconstruct_haplotype_from_sparse` (`_genotypes.py:277-465`).
+/// Mirror of numba `reconstruct_haplotype_from_sparse` (`_genotypes.py:277-465`), with
+/// the per-variant reads factored out behind the `provide` closure so the same loop
+/// body can be driven by either the SVAR 1.0 global variant table
+/// (`reconstruct_haplotype_from_sparse`) or the SVAR2 two-channel (var_key ⋈ dense)
+/// source (`reconstruct_haplotypes_from_svar2`). **Do not change the reconstruction
+/// math here** — only the data source differs between call sites.
 ///
 /// # Parameters
-/// - `v_idxs`      – indices into the full variant table for this haplotype (i32)
-/// - `v_starts`    – genomic start position of each variant (i32, indexed by variant)
-/// - `ilens`       – insertion-length (ilen = alt_len − ref_len + 1) per variant (i32)
+/// - `n_variants`  – number of variants this haplotype sees, i.e. `0..n_variants` are
+///                   valid indices into `provide`
+/// - `provide`     – `Fn(v) -> (v_pos, v_diff, allele, annot_id)` for `v in 0..n_variants`:
+///                   `v_pos` genomic start, `v_diff` ilen (`alt_len - ref_len` for
+///                   atomized variants), `allele` the full ALT allele bytes (borrowed or
+///                   owned via `Cow`), `annot_id` the value written into `annot_v_idxs`
+///                   when the variant is applied. The named lifetime `'a` ties the
+///                   returned `Cow`'s borrow to the driver-call scope (`alt_flat` for
+///                   SVAR1; `lut_bytes` for SVAR2) — using `Cow<'_, ...>` here instead
+///                   would force a higher-ranked bound that fails to unify across the
+///                   two call sites.
 /// - `shift`       – total amount to shift by (i64)
-/// - `alt_alleles` – packed ALT allele bytes for all variants (u8)
-/// - `alt_offsets` – byte offsets into `alt_alleles`; length = total_variants + 1 (i64)
 /// - `ref_`        – reference contig bytes (u8)
 /// - `ref_start`   – start position into the reference; may be negative (i64)
 /// - `out`         – output buffer to fill (u8, length = desired haplotype length)
 /// - `pad_char`    – byte used for padding where reference is unavailable
 /// - `keep`        – optional per-haplotype-variant mask; `None` means use all
-/// - `annot_v_idxs`  – optional annotation: variant index per output position (i32; -1 = ref/pad)
+/// - `annot_v_idxs`  – optional annotation: `annot_id` per output position (i32; -1 = ref/pad)
 /// - `annot_ref_pos` – optional annotation: reference position per output position (i32;
 ///                     -1 = leading pad, i32::MAX = trailing pad)
 #[allow(clippy::too_many_arguments)]
-pub fn reconstruct_haplotype_from_sparse(
-    v_idxs: ArrayView1<i32>,
-    v_starts: ArrayView1<i32>,
-    ilens: ArrayView1<i32>,
+fn reconstruct_haplotype_core<'a>(
+    n_variants: usize,
+    provide: impl Fn(usize) -> (i64, i64, std::borrow::Cow<'a, [u8]>, i32),
     shift: i64,
-    alt_alleles: ArrayView1<u8>,
-    alt_offsets: ArrayView1<i64>,
     ref_: ArrayView1<u8>,
     ref_start: i64,
     mut out: ArrayViewMut1<u8>,
@@ -42,13 +49,11 @@ pub fn reconstruct_haplotype_from_sparse(
     mut annot_ref_pos: Option<ArrayViewMut1<i32>>,
 ) {
     let length = out.len() as i64;
-    let n_variants = v_idxs.len();
 
     // Hoist contiguous-slice pointers once so the hot loops use direct byte ops
     // (fill/copy_from_slice) instead of ndarray's stride/do_slice dispatch path.
     let out_flat: &mut [u8] = out.as_slice_mut().unwrap();
     let ref_flat: &[u8] = ref_.as_slice().unwrap();
-    let alt_flat: &[u8] = alt_alleles.as_slice().unwrap();
     let mut av_flat: Option<&mut [i32]> = annot_v_idxs.as_mut().and_then(|a| a.as_slice_mut());
     let mut ap_flat: Option<&mut [i32]> = annot_ref_pos.as_mut().and_then(|a| a.as_slice_mut());
 
@@ -84,13 +89,8 @@ pub fn reconstruct_haplotype_from_sparse(
             }
         }
 
-        let variant = v_idxs[v] as usize;
-        let v_pos = v_starts[variant] as i64;
-        let v_diff = ilens[variant] as i64;
-        let ao_s = alt_offsets[variant] as usize;
-        let ao_e = alt_offsets[variant + 1] as usize;
-        // full allele slice; may be sub-sliced below for shift consumption
-        let allele_full = &alt_flat[ao_s..ao_e];
+        let (v_pos, v_diff, allele_cow, annot_id) = provide(v);
+        let allele_full: &[u8] = allele_cow.as_ref();
         let v_len_full = allele_full.len() as i64;
         // +1 assumes atomized variants, exactly 1 nt shared between REF and ALT
         let v_ref_end: i64 = v_pos - 0i64.min(v_diff) + 1;
@@ -181,7 +181,7 @@ pub fn reconstruct_haplotype_from_sparse(
             let oe = (out_idx + writable_length) as usize;
             out_flat[os..oe].copy_from_slice(&allele[..writable_length as usize]);
             if let Some(av) = av_flat.as_deref_mut() {
-                av[os..oe].fill(variant as i32);
+                av[os..oe].fill(annot_id);
             }
             if let Some(ap) = ap_flat.as_deref_mut() {
                 ap[os..oe].fill(v_pos as i32);
@@ -253,6 +253,69 @@ pub fn reconstruct_haplotype_from_sparse(
             }
         }
     }
+}
+
+/// Reconstruct a single haplotype from reference sequence and variants (SVAR 1.0
+/// global variant table). Thin wrapper over [`reconstruct_haplotype_core`]: builds a
+/// closure that indexes the global table and delegates. **Behavior is unchanged** from
+/// before the closure-source refactor — this only changes where the per-variant data
+/// comes from.
+///
+/// # Parameters
+/// - `v_idxs`      – indices into the full variant table for this haplotype (i32)
+/// - `v_starts`    – genomic start position of each variant (i32, indexed by variant)
+/// - `ilens`       – insertion-length (ilen = alt_len − ref_len + 1) per variant (i32)
+/// - `shift`       – total amount to shift by (i64)
+/// - `alt_alleles` – packed ALT allele bytes for all variants (u8)
+/// - `alt_offsets` – byte offsets into `alt_alleles`; length = total_variants + 1 (i64)
+/// - `ref_`        – reference contig bytes (u8)
+/// - `ref_start`   – start position into the reference; may be negative (i64)
+/// - `out`         – output buffer to fill (u8, length = desired haplotype length)
+/// - `pad_char`    – byte used for padding where reference is unavailable
+/// - `keep`        – optional per-haplotype-variant mask; `None` means use all
+/// - `annot_v_idxs`  – optional annotation: variant index per output position (i32; -1 = ref/pad)
+/// - `annot_ref_pos` – optional annotation: reference position per output position (i32;
+///                     -1 = leading pad, i32::MAX = trailing pad)
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_haplotype_from_sparse(
+    v_idxs: ArrayView1<i32>,
+    v_starts: ArrayView1<i32>,
+    ilens: ArrayView1<i32>,
+    shift: i64,
+    alt_alleles: ArrayView1<u8>,
+    alt_offsets: ArrayView1<i64>,
+    ref_: ArrayView1<u8>,
+    ref_start: i64,
+    out: ArrayViewMut1<u8>,
+    pad_char: u8,
+    keep: Option<ArrayView1<bool>>,
+    annot_v_idxs: Option<ArrayViewMut1<i32>>,
+    annot_ref_pos: Option<ArrayViewMut1<i32>>,
+) {
+    let alt_flat: &[u8] = alt_alleles.as_slice().unwrap();
+    let provide = |v: usize| {
+        let variant = v_idxs[v] as usize;
+        let ao_s = alt_offsets[variant] as usize;
+        let ao_e = alt_offsets[variant + 1] as usize;
+        (
+            v_starts[variant] as i64,
+            ilens[variant] as i64,
+            std::borrow::Cow::Borrowed(&alt_flat[ao_s..ao_e]),
+            variant as i32,
+        )
+    };
+    reconstruct_haplotype_core(
+        v_idxs.len(),
+        provide,
+        shift,
+        ref_,
+        ref_start,
+        out,
+        pad_char,
+        keep,
+        annot_v_idxs,
+        annot_ref_pos,
+    );
 }
 
 /// Batch driver: reconstruct haplotypes for all (query, hap) pairs.
@@ -498,9 +561,7 @@ pub fn reconstruct_haplotypes_from_sparse(
             // each [out_s..out_e] is a disjoint sub-range; serial loop prevents concurrent
             // aliasing.
             let av_view: Option<ArrayViewMut1<i32>> = av_raw.map(|p| {
-                let chunk = unsafe {
-                    std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s)
-                };
+                let chunk = unsafe { std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s) };
                 ArrayViewMut1::from(chunk)
             });
 
@@ -508,9 +569,307 @@ pub fn reconstruct_haplotypes_from_sparse(
             // each [out_s..out_e] is a disjoint sub-range; serial loop prevents concurrent
             // aliasing.
             let ap_view: Option<ArrayViewMut1<i32>> = ap_raw.map(|p| {
-                let chunk = unsafe {
-                    std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s)
-                };
+                let chunk = unsafe { std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s) };
+                ArrayViewMut1::from(chunk)
+            });
+
+            do_work(k, out_view, av_view, ap_view);
+        }
+    }
+}
+
+/// Batch driver: reconstruct haplotypes for all (query, hap) pairs from the SVAR2
+/// two-channel (var_key ⋈ dense) source. Mirrors
+/// [`reconstruct_haplotypes_from_sparse`]'s parallel/serial disjoint-slice carving
+/// exactly — only the per-work-item variant source and decode differ. Additive: SVAR
+/// 1.0's `reconstruct_haplotype[s]_from_sparse` are untouched by this function.
+///
+/// # Parameters
+/// - `out` – flat output buffer, length = out_offsets[-1] (u8); written in place
+/// - `out_offsets` – shape (batch*ploidy + 1,) offsets into `out`
+/// - `regions` – shape (batch, 3) as (contig_idx, start, end) i32
+/// - `shifts` – shape (batch, ploidy) i32
+/// - `vk_pos` / `vk_key` – this hap's `var_key` channel: position + uniform key (i32)
+/// - `vk_off` – shape (n_work + 1) CSR offsets into `vk_pos`/`vk_key`, indexed by flat
+///   work index `k = query * ploidy + hap`
+/// - `dense_pos` / `dense_key` – the shared `dense` channel: position + uniform key (i32)
+/// - `dense_range` – shape (batch, 2) as `[ds, de)`, the window into `dense_pos`/`dense_key`
+///   for each query row
+/// - `dense_present` – packed presence bits over the dense window, LSB-first per byte (u8)
+/// - `dense_present_off` – shape (n_work + 1) BIT offsets into `dense_present`, indexed by
+///   flat work index `k`
+/// - `lut_bytes` / `lut_off` – long-allele-bank bytes + CSR offsets, for `Lookup` keys
+/// - `ref_` – packed reference bytes u8
+/// - `ref_offsets` – per-contig offsets into ref_ i64
+/// - `pad_char` – padding byte u8
+/// - `annot_v_idxs` – optional annotation output i32 (same layout as out); the value
+///   written per applied variant is its sequential index within the merged per-hap list
+///   (`0..merged.len()`), not a global variant id (SVAR2 has no global variant table)
+/// - `annot_ref_pos` – optional annotation output i32 (same layout as out)
+/// - `parallel` – if true, use rayon to process work items concurrently
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_haplotypes_from_svar2(
+    mut out: ArrayViewMut1<u8>,
+    out_offsets: ArrayView1<i64>,
+    regions: ArrayView2<i32>,
+    shifts: ArrayView2<i32>,
+    vk_pos: ArrayView1<i32>,
+    vk_key: ArrayView1<i32>,
+    vk_off: ArrayView1<i64>,
+    dense_pos: ArrayView1<i32>,
+    dense_key: ArrayView1<i32>,
+    dense_range: ArrayView2<i32>,
+    dense_present: ArrayView1<u8>,
+    dense_present_off: ArrayView1<i64>,
+    lut_bytes: ArrayView1<u8>,
+    lut_off: ArrayView1<i64>,
+    ref_: ArrayView1<u8>,
+    ref_offsets: ArrayView1<i64>,
+    pad_char: u8,
+    mut annot_v_idxs: Option<ArrayViewMut1<i32>>,
+    mut annot_ref_pos: Option<ArrayViewMut1<i32>>,
+    parallel: bool,
+) {
+    let batch_size = regions.nrows();
+    let ploidy = shifts.ncols();
+    let n_work = batch_size * ploidy;
+
+    // Hoist contiguous-slice pointers once, exactly as SVAR1's do_work captures
+    // read-only views — these are Send+Sync so the rayon parallel path is unchanged.
+    let vk_pos_s: &[i32] = vk_pos.as_slice().unwrap();
+    let vk_key_s: &[i32] = vk_key.as_slice().unwrap();
+    let dense_pos_s: &[i32] = dense_pos.as_slice().unwrap();
+    let dense_key_s: &[i32] = dense_key.as_slice().unwrap();
+    let dense_present_s: &[u8] = dense_present.as_slice().unwrap();
+    let lut_bytes_s: &[u8] = lut_bytes.as_slice().unwrap();
+    let lut_off_s: &[i64] = lut_off.as_slice().unwrap();
+
+    // Per-k inner work: merge this hap's var_key ⋈ dense entries, then reconstruct via
+    // the shared core with a decode closure. All read-only ArrayViews/slices are
+    // Send+Sync so the closure can borrow them freely.
+    let do_work = |k: usize,
+                   out_view: ArrayViewMut1<u8>,
+                   av_view: Option<ArrayViewMut1<i32>>,
+                   ap_view: Option<ArrayViewMut1<i32>>| {
+        let query = k / ploidy;
+        let hap = k % ploidy;
+
+        // region/ref
+        let c_idx = regions[[query, 0]] as usize;
+        let c_s = ref_offsets[c_idx] as usize;
+        let c_e = ref_offsets[c_idx + 1] as usize;
+        let contig_ref = ref_.slice(s![c_s..c_e]);
+        let ref_start = regions[[query, 1]] as i64;
+        let shift = shifts[[query, hap]] as i64;
+
+        // var_key window for this hap
+        let vk_lo = vk_off[k] as usize;
+        let vk_hi = vk_off[k + 1] as usize;
+
+        // dense window for this query
+        let ds = dense_range[[query, 0]] as usize;
+        let de = dense_range[[query, 1]] as usize;
+
+        // presence bits for this hap start at bit `dense_present_off[k]`
+        let base_bit = dense_present_off[k] as usize;
+        let present_bit = |j: usize| -> bool {
+            let bit = base_bit + j;
+            (dense_present_s[bit / 8] >> (bit % 8)) & 1 == 1 // LSB-first within each byte
+        };
+
+        let merged = crate::svar2::merge_hap(
+            vk_pos_s,
+            vk_key_s,
+            vk_lo,
+            vk_hi,
+            dense_pos_s,
+            dense_key_s,
+            ds,
+            de,
+            present_bit,
+        );
+
+        let contig_ref_s: &[u8] = contig_ref.as_slice().unwrap();
+        let provide = |v: usize| {
+            let (pos, key) = merged[v];
+            let (v_diff, allele) = crate::svar2::decode_alt(key, lut_bytes_s, lut_off_s);
+            // A pure DEL decodes to an empty ALT: genoray stores no anchor base in the key
+            // (recovered from the reference downstream). But the reconstruction kernel writes
+            // `allele_full` as the replacement and advances ref by |v_diff|+1, so it needs the
+            // anchor base = ref[pos] present; an empty allele would delete the anchor too
+            // (off-by-one: -(|v_diff|+1) instead of -|v_diff|). SNP/INS/Lookup alleles are
+            // already non-empty and pass through unchanged.
+            let allele = if allele.is_empty() {
+                std::borrow::Cow::Borrowed(&contig_ref_s[pos as usize..pos as usize + 1])
+            } else {
+                allele
+            };
+            (pos as i64, v_diff, allele, v as i32)
+        };
+
+        reconstruct_haplotype_core(
+            merged.len(),
+            provide,
+            shift,
+            contig_ref,
+            ref_start,
+            out_view,
+            pad_char,
+            None, // keep: SVAR2 has no per-haplotype keep mask
+            av_view,
+            ap_view,
+        );
+    };
+
+    if parallel {
+        // Build disjoint per-k mutable slices for all active buffers using the
+        // proven split_at_mut chain idiom (mirrors get_reference in reference/mod.rs).
+        // &mut [_] slices are Send, unlike raw *mut pointers — safe for rayon closures.
+        let bounds: Vec<(usize, usize)> = (0..n_work)
+            .map(|k| (out_offsets[k] as usize, out_offsets[k + 1] as usize))
+            .collect();
+
+        let out_slice = out.as_slice_mut().unwrap();
+        let mut out_chunks: Vec<&mut [u8]> = Vec::with_capacity(n_work);
+        {
+            let mut rest = &mut out_slice[..];
+            let mut cursor = 0usize;
+            for &(s, e) in &bounds {
+                // Contract: `out_offsets` is monotonically non-decreasing, so each
+                // work item's range starts at or after the previous one's end. This
+                // guarantees `s - cursor` does not underflow and the carved slices
+                // are disjoint. The same `bounds` drives the annotation carves below.
+                debug_assert!(
+                    s >= cursor && e >= s,
+                    "out_offsets must be monotonically non-decreasing (got s={s}, e={e}, cursor={cursor})"
+                );
+                let (_, tail) = rest.split_at_mut(s - cursor);
+                let (mid, tail2) = tail.split_at_mut(e - s);
+                out_chunks.push(mid);
+                rest = tail2;
+                cursor = e;
+            }
+        }
+
+        // Carve annotation buffers only when they are Some.
+        let av_chunks: Option<Vec<&mut [i32]>> = annot_v_idxs.as_mut().map(|av| {
+            let av_slice = av.as_slice_mut().unwrap();
+            let mut chunks: Vec<&mut [i32]> = Vec::with_capacity(n_work);
+            let mut rest = &mut av_slice[..];
+            let mut cursor = 0usize;
+            for &(s, e) in &bounds {
+                let (_, tail) = rest.split_at_mut(s - cursor);
+                let (mid, tail2) = tail.split_at_mut(e - s);
+                chunks.push(mid);
+                rest = tail2;
+                cursor = e;
+            }
+            chunks
+        });
+
+        let ap_chunks: Option<Vec<&mut [i32]>> = annot_ref_pos.as_mut().map(|ap| {
+            let ap_slice = ap.as_slice_mut().unwrap();
+            let mut chunks: Vec<&mut [i32]> = Vec::with_capacity(n_work);
+            let mut rest = &mut ap_slice[..];
+            let mut cursor = 0usize;
+            for &(s, e) in &bounds {
+                let (_, tail) = rest.split_at_mut(s - cursor);
+                let (mid, tail2) = tail.split_at_mut(e - s);
+                chunks.push(mid);
+                rest = tail2;
+                cursor = e;
+            }
+            chunks
+        });
+
+        // Zip all chunk vecs and dispatch in parallel.
+        // Handle the four combinations of av/ap presence.
+        match (av_chunks, ap_chunks) {
+            (Some(avc), Some(apc)) => {
+                out_chunks
+                    .into_par_iter()
+                    .zip(avc.into_par_iter())
+                    .zip(apc.into_par_iter())
+                    .enumerate()
+                    .for_each(|(k, ((out_chunk, av_chunk), ap_chunk))| {
+                        do_work(
+                            k,
+                            ArrayViewMut1::from(out_chunk),
+                            Some(ArrayViewMut1::from(av_chunk)),
+                            Some(ArrayViewMut1::from(ap_chunk)),
+                        );
+                    });
+            }
+            (Some(avc), None) => {
+                out_chunks
+                    .into_par_iter()
+                    .zip(avc.into_par_iter())
+                    .enumerate()
+                    .for_each(|(k, (out_chunk, av_chunk))| {
+                        do_work(
+                            k,
+                            ArrayViewMut1::from(out_chunk),
+                            Some(ArrayViewMut1::from(av_chunk)),
+                            None,
+                        );
+                    });
+            }
+            (None, Some(apc)) => {
+                out_chunks
+                    .into_par_iter()
+                    .zip(apc.into_par_iter())
+                    .enumerate()
+                    .for_each(|(k, (out_chunk, ap_chunk))| {
+                        do_work(
+                            k,
+                            ArrayViewMut1::from(out_chunk),
+                            None,
+                            Some(ArrayViewMut1::from(ap_chunk)),
+                        );
+                    });
+            }
+            (None, None) => {
+                out_chunks
+                    .into_par_iter()
+                    .enumerate()
+                    .for_each(|(k, out_chunk)| {
+                        do_work(k, ArrayViewMut1::from(out_chunk), None, None);
+                    });
+            }
+        }
+    } else {
+        // Serial path: use raw pointers for disjoint sub-range access, exactly as before.
+        // The serial loop prevents concurrent aliasing.
+        let out_raw: *mut u8 = out.as_mut_ptr();
+        let av_raw: Option<*mut i32> = annot_v_idxs.as_mut().map(|a| a.as_mut_ptr());
+        let ap_raw: Option<*mut i32> = annot_ref_pos.as_mut().map(|a| a.as_mut_ptr());
+
+        for k in 0..n_work {
+            let out_s = out_offsets[k] as usize;
+            let out_e = out_offsets[k + 1] as usize;
+
+            // SAFETY: `out_offsets` is required by the calling contract to be monotonically
+            // non-decreasing, so consecutive (out_s, out_e) pairs are strictly non-overlapping
+            // address ranges within the same allocation.  Because the loop is serial there are
+            // no concurrent borrows, so constructing a `&mut [u8]` from each disjoint sub-range
+            // is free of aliasing UB.
+            let out_chunk =
+                unsafe { std::slice::from_raw_parts_mut(out_raw.add(out_s), out_e - out_s) };
+            let out_view = ArrayViewMut1::from(out_chunk);
+
+            // SAFETY: same invariant as out_chunk — `out_offsets` non-decreasing guarantees
+            // each [out_s..out_e] is a disjoint sub-range; serial loop prevents concurrent
+            // aliasing.
+            let av_view: Option<ArrayViewMut1<i32>> = av_raw.map(|p| {
+                let chunk = unsafe { std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s) };
+                ArrayViewMut1::from(chunk)
+            });
+
+            // SAFETY: same invariant as out_chunk — `out_offsets` non-decreasing guarantees
+            // each [out_s..out_e] is a disjoint sub-range; serial loop prevents concurrent
+            // aliasing.
+            let ap_view: Option<ArrayViewMut1<i32>> = ap_raw.map(|p| {
+                let chunk = unsafe { std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s) };
                 ArrayViewMut1::from(chunk)
             });
 
@@ -595,9 +954,9 @@ mod tests {
             &[],     // alt_alleles
             &[0i64], // alt_offsets (1 sentinel for 0 variants)
             &[10, 20, 30, 40, 50],
-            1,  // ref_start
-            3,  // out_len
-            0,  // pad_char
+            1, // ref_start
+            3, // out_len
+            0, // pad_char
             None,
             false,
         );
@@ -627,7 +986,11 @@ mod tests {
         );
         assert_eq!(out, vec![9, 9, 1, 2, 3]);
         assert_eq!(&av[..2], &[-1i32, -1]);
-        assert_eq!(&ap[..2], &[-1i32, -1], "leading pad annot_ref_pos must be -1");
+        assert_eq!(
+            &ap[..2],
+            &[-1i32, -1],
+            "leading pad annot_ref_pos must be -1"
+        );
         assert_eq!(&ap[2..], &[0i32, 1, 2]);
     }
 
@@ -644,14 +1007,14 @@ mod tests {
         // variant at pos=2 (G→T), ilen=0 → v_ref_end = 2 - 0 + 1 = 3
         // out: A C [T] T A
         let (out, av, _ap) = run(
-            &[0],        // v_idxs: only variant 0
-            &[2],        // v_starts: variant 0 is at pos 2
-            &[0],        // ilens: SNP, no length change
-            0,           // shift
-            &[84u8],     // alt_alleles: T
-            &[0i64, 1],  // alt_offsets
+            &[0],                  // v_idxs: only variant 0
+            &[2],                  // v_starts: variant 0 is at pos 2
+            &[0],                  // ilens: SNP, no length change
+            0,                     // shift
+            &[84u8],               // alt_alleles: T
+            &[0i64, 1],            // alt_offsets
             &[65, 67, 71, 84, 65], // A C G T A
-            0,           // ref_start
+            0,                     // ref_start
             5,
             0,
             None,
@@ -676,8 +1039,8 @@ mod tests {
     fn two_bp_insertion() {
         let (out, _av, _ap) = run(
             &[0],
-            &[2],        // variant 0 at pos 2
-            &[2],        // ilen=+2
+            &[2], // variant 0 at pos 2
+            &[2], // ilen=+2
             0,
             &[10u8, 11, 12],
             &[0i64, 3],
@@ -705,10 +1068,10 @@ mod tests {
     fn deletion() {
         let (out, _av, _ap) = run(
             &[0],
-            &[2],        // variant 0 at pos 2
-            &[-2],       // ilen=-2
+            &[2],  // variant 0 at pos 2
+            &[-2], // ilen=-2
             0,
-            &[30u8],     // anchor allele byte
+            &[30u8], // anchor allele byte
             &[0i64, 1],
             &[1, 2, 3, 4, 5, 6, 7],
             0,
@@ -735,13 +1098,13 @@ mod tests {
     fn del_spanning_ref_start() {
         let (out, _av, ap) = run(
             &[0],
-            &[1],        // v_pos=1
-            &[-3],       // ilen=-3
+            &[1],  // v_pos=1
+            &[-3], // ilen=-3
             0,
             &[99u8],
             &[0i64, 1],
             &[1, 2, 3, 4, 5, 6, 7],
-            3,           // ref_start=3
+            3, // ref_start=3
             5,
             0,
             None,
@@ -767,10 +1130,10 @@ mod tests {
     fn overshoot_ref_past_contig() {
         let (out, _av, _ap) = run(
             &[0],
-            &[2],          // v_pos=2
-            &[-5],         // ilen=-5 (deletion past contig end)
-            0,             // shift
-            &[50u8],       // anchor allele
+            &[2],    // v_pos=2
+            &[-5],   // ilen=-5 (deletion past contig end)
+            0,       // shift
+            &[50u8], // anchor allele
             &[0i64, 1],
             &[1, 2, 3, 4], // ref, len 4
             0,             // ref_start
@@ -793,9 +1156,9 @@ mod tests {
     #[test]
     fn overlapping_alts_first_applied() {
         let (out, _av, _ap) = run(
-            &[0, 1],     // v_idxs: variants 0 then 1
-            &[2, 2],     // both at pos=2
-            &[0, 0],     // both SNPs
+            &[0, 1], // v_idxs: variants 0 then 1
+            &[2, 2], // both at pos=2
+            &[0, 0], // both SNPs
             0,
             &[20u8, 30], // alleles: 20 and 30
             &[0i64, 1, 2],
@@ -844,9 +1207,9 @@ mod tests {
         // out_len=5: [3, 99, 88, 5, 6]
         let (out, _av, _ap) = run(
             &[0],
-            &[3],        // v_pos=3
-            &[1],        // ilen=+1
-            2,           // shift=2
+            &[3], // v_pos=3
+            &[1], // ilen=+1
+            2,    // shift=2
             &[99u8, 88],
             &[0i64, 2],
             &[1, 2, 3, 4, 5, 6],
@@ -878,8 +1241,8 @@ mod tests {
         let (out, _av, _ap) = run(
             &[0],
             &[3],
-            &[1],        // ilen=+1, allele 2 bytes
-            4,           // shift=4
+            &[1], // ilen=+1, allele 2 bytes
+            4,    // shift=4
             &[99u8, 88],
             &[0i64, 2],
             &[1, 2, 3, 4, 5, 6, 7, 8],
@@ -955,16 +1318,16 @@ mod tests {
     #[test]
     fn allele_start_idx_eq_v_len_continue() {
         let (out, _av, _ap) = run(
-            &[0],               // v_idxs: only variant 0
-            &[3],               // v_starts: variant 0 at pos 3
-            &[0],               // ilens: SNP, ilen=0
-            4,                  // shift=4
-            &[88u8],            // alt_allele
-            &[0i64, 1],         // alt_offsets
+            &[0],       // v_idxs: only variant 0
+            &[3],       // v_starts: variant 0 at pos 3
+            &[0],       // ilens: SNP, ilen=0
+            4,          // shift=4
+            &[88u8],    // alt_allele
+            &[0i64, 1], // alt_offsets
             &[1, 2, 3, 4, 5, 6, 7, 8],
-            0,                  // ref_start
-            4,                  // out_len
-            0,                  // pad_char
+            0, // ref_start
+            4, // out_len
+            0, // pad_char
             None,
             false,
         );
@@ -996,16 +1359,16 @@ mod tests {
     fn skip_variant_not_enough_distance() {
         let ref_: Vec<u8> = (1u8..=15).collect();
         let (out, _av, _ap) = run(
-            &[0],               // v_idxs: only variant 0
-            &[3],               // v_starts: variant 0 at pos 3
-            &[0],               // ilens: SNP, ilen=0
-            10,                 // shift=10
-            &[77u8],            // alt_allele (never used)
-            &[0i64, 1],         // alt_offsets
+            &[0],       // v_idxs: only variant 0
+            &[3],       // v_starts: variant 0 at pos 3
+            &[0],       // ilens: SNP, ilen=0
+            10,         // shift=10
+            &[77u8],    // alt_allele (never used)
+            &[0i64, 1], // alt_offsets
             &ref_,
-            0,                  // ref_start
-            3,                  // out_len
-            0,                  // pad_char
+            0, // ref_start
+            3, // out_len
+            0, // pad_char
             None,
             false,
         );
@@ -1037,18 +1400,18 @@ mod tests {
     #[test]
     fn keep_mask_excludes_variant() {
         let (out, av, _ap) = run(
-            &[0, 1],            // v_idxs: variants 0 and 1
-            &[1, 3],            // v_starts: variant 0 at pos 1, variant 1 at pos 3
-            &[0, 0],            // ilens: both SNPs
-            0,                  // shift=0
-            &[55u8, 99],        // alleles: 55 for v0, 99 for v1
-            &[0i64, 1, 2],      // alt_offsets
+            &[0, 1],       // v_idxs: variants 0 and 1
+            &[1, 3],       // v_starts: variant 0 at pos 1, variant 1 at pos 3
+            &[0, 0],       // ilens: both SNPs
+            0,             // shift=0
+            &[55u8, 99],   // alleles: 55 for v0, 99 for v1
+            &[0i64, 1, 2], // alt_offsets
             &[1, 2, 3, 4, 5],
-            0,                  // ref_start
-            5,                  // out_len
-            0,                  // pad_char
+            0,                    // ref_start
+            5,                    // out_len
+            0,                    // pad_char
             Some(&[false, true]), // keep mask: skip v0, apply v1
-            true,               // annotate
+            true,                 // annotate
         );
         // variant 0 (pos=1, allele=55) excluded by keep mask: ref[1] NOT replaced
         // variant 1 (pos=3, allele=99) applied: ref[3] replaced by 99
@@ -1064,28 +1427,29 @@ mod tests {
     #[test]
     fn annotated_vs_non_annotated_identical_out() {
         let params = (
-            &[0i32][..],   // v_idxs
-            &[2i32][..],   // v_starts
-            &[0i32][..],   // ilens
-            0i64,          // shift
-            &[77u8][..],   // alt_alleles
-            &[0i64, 1][..],// alt_offsets
-            &[1u8,2,3,4,5][..], // ref_
-            0i64,          // ref_start
-            5usize,        // out_len
-            0u8,           // pad_char
+            &[0i32][..],            // v_idxs
+            &[2i32][..],            // v_starts
+            &[0i32][..],            // ilens
+            0i64,                   // shift
+            &[77u8][..],            // alt_alleles
+            &[0i64, 1][..],         // alt_offsets
+            &[1u8, 2, 3, 4, 5][..], // ref_
+            0i64,                   // ref_start
+            5usize,                 // out_len
+            0u8,                    // pad_char
         );
         let (out_annot, _, _) = run(
-            params.0, params.1, params.2, params.3,
-            params.4, params.5, params.6, params.7,
+            params.0, params.1, params.2, params.3, params.4, params.5, params.6, params.7,
             params.8, params.9, None, true,
         );
         let (out_plain, _, _) = run(
-            params.0, params.1, params.2, params.3,
-            params.4, params.5, params.6, params.7,
+            params.0, params.1, params.2, params.3, params.4, params.5, params.6, params.7,
             params.8, params.9, None, false,
         );
-        assert_eq!(out_annot, out_plain, "annotated and non-annotated must produce identical out bytes");
+        assert_eq!(
+            out_annot, out_plain,
+            "annotated and non-annotated must produce identical out bytes"
+        );
     }
 
     #[test]
@@ -1202,7 +1566,160 @@ mod tests {
             false,
         );
 
-        assert_eq!(&out.as_slice().unwrap()[0..4], b"ATGT", "region 0 with SNP applied");
-        assert_eq!(&out.as_slice().unwrap()[4..8], b"ACGT", "region 1 reference-only");
+        assert_eq!(
+            &out.as_slice().unwrap()[0..4],
+            b"ATGT",
+            "region 0 with SNP applied"
+        );
+        assert_eq!(
+            &out.as_slice().unwrap()[4..8],
+            b"ACGT",
+            "region 1 reference-only"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // SVAR2 driver: one region (R=1), one sample-slot (S=1), one ploid (P=1) →
+    // n_work = 1, k = query = hap = 0. Hand-built two-channel input: a SNP in the
+    // var_key channel and a pure DEL in the dense channel (with its presence bit set),
+    // exercising both the merge and the decode paths in a single call.
+    //
+    // ref = "ACGTACGT" (8 bp, positions 0..8: A C G T A C G T)
+    // var_key: SNP at pos=1 (ref 'C' -> 'T'), Inline key, decode_alt -> (v_diff=0, "T")
+    // dense:   pure DEL at pos=4, ilen=-1, decode_alt -> (v_diff=-1, "" empty). The driver's
+    //          `provide` closure substitutes the anchor base ref[pos]='A' for the empty ALT
+    //          (genoray stores no anchor in the key; the kernel needs it, else the anchor is
+    //          deleted too). So the DEL contributes allele="A" and deletes the following 'C'.
+    // merge_hap orders by position: v=0 is the SNP (pos=1), v=1 is the DEL (pos=4).
+    //
+    // Hand derivation of reconstruct_haplotype_core(n_variants=2, ..., shift=0):
+    //   start: ref_idx=0, out_idx=0 (ref_start=0, not negative: no leading pad)
+    //   v=0 (SNP, pos=1, v_diff=0, allele="T", v_len_full=1):
+    //     v_ref_end = 1 - min(0,0) + 1 = 2
+    //     not a DEL-spanning-start case; pos(1) >= ref_idx(0); shift=0 so no shift branch
+    //     ref_len = 1-0 = 1 -> out[0..1] = ref[0..1] = "A"; out_idx=1
+    //     writable_length = min(1, 8-1)=1 -> out[1..2] = "T"; out_idx=2
+    //     ref_idx = v_ref_end = 2
+    //   v=1 (DEL, pos=4, v_diff=-1, allele="A" (anchor = ref[4])):
+    //     v_ref_end = 4 - min(0,-1) + 1 = 4+1+1 = 6
+    //     pos(4) >= ref_idx(2); shift=0 so no shift branch
+    //     ref_len = 4-2 = 2 -> out[2..4] = ref[2..4] = "GT"; out_idx=4
+    //     writable_length = min(1, 8-4) = 1 -> out[4..5] = "A"; out_idx=5
+    //     ref_idx = v_ref_end = 6  (ref 'C' at pos 5 is skipped = deleted)
+    //   tail: unfilled_length = 8-5 = 3; writable_ref = min(3, 8-6) = 2
+    //     -> out[5..7] = ref[6..8] = "GT"; out_end_idx=7
+    //     right-pad out[7..8] with pad_char 'N'
+    //   out = "A" + "T" + "GT" + "A" + "GT" + "N" = "ATGTAGTN"
+    //   (haplotype = ref with SNP C->T at pos1 and the 'C' at pos5 deleted)
+    #[test]
+    fn svar2_reconstruct_snp_and_del() {
+        let reference = b"ACGTACGT";
+        let ref_ = arr1(reference.as_ref());
+        let ref_offsets = arr1(&[0i64, 8]);
+
+        // One region on contig 0, one sample-slot, one ploid -> n_work = 1.
+        let regions = ndarray::arr2(&[[0i32, 0, 8]]);
+        let shifts = ndarray::arr2(&[[0i32]]);
+
+        // var_key channel: one SNP at pos=1 (Inline key, 1-base ALT "T").
+        let snp_key = svar2_codec::encode_alt_inline(b"T", 0) as i32;
+        let vk_pos = arr1(&[1i32]);
+        let vk_key = arr1(&[snp_key]);
+        let vk_off = arr1(&[0i64, 1]);
+
+        // dense channel: one pure DEL (1bp) at pos=4, present for this hap.
+        let del_key = svar2_codec::encode_pure_del(-1) as i32;
+        let dense_pos = arr1(&[4i32]);
+        let dense_key = arr1(&[del_key]);
+        let dense_range = ndarray::arr2(&[[0i32, 1]]);
+        // Presence bits, LSB-first: bit 0 (this hap's only dense entry) is set.
+        let dense_present = arr1(&[0b0000_0001u8]);
+        let dense_present_off = arr1(&[0i64, 1]);
+
+        // No long-allele-bank lookups exercised in this test.
+        let lut_bytes = arr1::<u8>(&[]);
+        let lut_off = arr1(&[0i64]);
+
+        let out_offsets = arr1(&[0i64, 8]);
+        let pad_char = b'N';
+        let mut out = Array1::<u8>::from_elem(8, pad_char);
+
+        super::reconstruct_haplotypes_from_svar2(
+            out.view_mut(),
+            out_offsets.view(),
+            regions.view(),
+            shifts.view(),
+            vk_pos.view(),
+            vk_key.view(),
+            vk_off.view(),
+            dense_pos.view(),
+            dense_key.view(),
+            dense_range.view(),
+            dense_present.view(),
+            dense_present_off.view(),
+            lut_bytes.view(),
+            lut_off.view(),
+            ref_.view(),
+            ref_offsets.view(),
+            pad_char,
+            None,
+            None,
+            false, // serial
+        );
+
+        assert_eq!(out.as_slice().unwrap(), b"ATGTAGTN");
+    }
+
+    // Regression guard for the pure-DEL anchor fix: a lone 1bp DEL must delete exactly
+    // one base (the one AFTER the anchor), not two. ref="ACGT", DEL at pos=1 (ilen=-1):
+    // keep anchor 'C' at pos1, delete 'G' at pos2 -> "ACT" + right-pad 'N' = "ACTN".
+    #[test]
+    fn svar2_pure_del_keeps_anchor() {
+        let reference = b"ACGT";
+        let ref_ = arr1(reference.as_ref());
+        let ref_offsets = arr1(&[0i64, 4]);
+        let regions = ndarray::arr2(&[[0i32, 0, 4]]);
+        let shifts = ndarray::arr2(&[[0i32]]);
+
+        // No var_key entries; a single dense pure DEL at pos=1.
+        let vk_pos = arr1::<i32>(&[]);
+        let vk_key = arr1::<i32>(&[]);
+        let vk_off = arr1(&[0i64, 0]);
+        let del_key = svar2_codec::encode_pure_del(-1) as i32;
+        let dense_pos = arr1(&[1i32]);
+        let dense_key = arr1(&[del_key]);
+        let dense_range = ndarray::arr2(&[[0i32, 1]]);
+        let dense_present = arr1(&[0b0000_0001u8]);
+        let dense_present_off = arr1(&[0i64, 1]);
+        let lut_bytes = arr1::<u8>(&[]);
+        let lut_off = arr1(&[0i64]);
+        let out_offsets = arr1(&[0i64, 4]);
+        let pad_char = b'N';
+        let mut out = Array1::<u8>::from_elem(4, pad_char);
+
+        super::reconstruct_haplotypes_from_svar2(
+            out.view_mut(),
+            out_offsets.view(),
+            regions.view(),
+            shifts.view(),
+            vk_pos.view(),
+            vk_key.view(),
+            vk_off.view(),
+            dense_pos.view(),
+            dense_key.view(),
+            dense_range.view(),
+            dense_present.view(),
+            dense_present_off.view(),
+            lut_bytes.view(),
+            lut_off.view(),
+            ref_.view(),
+            ref_offsets.view(),
+            pad_char,
+            None,
+            None,
+            false,
+        );
+
+        assert_eq!(out.as_slice().unwrap(), b"ACTN");
     }
 }
