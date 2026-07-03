@@ -4,6 +4,7 @@
 
 use std::borrow::Cow;
 
+use ndarray::{Array2, ArrayView2};
 use svar2_codec::{decode_key, DecodedKey};
 
 /// Decode one uniform key into `(v_diff, allele)`, resolving long-INS via the LUT
@@ -47,6 +48,72 @@ pub fn merge_hap(
     }
     a.sort_by_key(|&(p, _)| p); // stable; var_key pushed first keeps it ahead on ties
     a
+}
+
+/// Per-hap applied-ilen diff for the two-source path, mirroring
+/// `genotypes::get_diffs_sparse`'s q_start/q_end-clipped branch. Used to size the fused
+/// SVAR2 reconstruct/track outputs. Serial (n is tiny; the fused callers already parallelize
+/// the heavy reconstruct pass).
+#[allow(clippy::too_many_arguments)]
+pub fn hap_diffs_svar2(
+    regions: ArrayView2<i32>, // (n_q, 3)
+    ploidy: usize,
+    vk_pos: &[i32],
+    vk_key: &[i32],
+    vk_off: &[i64], // (n_work+1)
+    dense_pos: &[i32],
+    dense_key: &[i32],
+    dense_range: ArrayView2<i32>, // (n_q, 2)
+    dense_present: &[u8],
+    dense_present_off: &[i64], // (n_work+1) BIT offsets
+    lut_bytes: &[u8],
+    lut_off: &[i64],
+) -> Array2<i32> {
+    let n_q = regions.nrows();
+    let mut diffs = Array2::<i32>::zeros((n_q, ploidy));
+    for k in 0..(n_q * ploidy) {
+        let query = k / ploidy;
+        let hap = k % ploidy;
+        let vk_lo = vk_off[k] as usize;
+        let vk_hi = vk_off[k + 1] as usize;
+        let ds = dense_range[[query, 0]] as usize;
+        let de = dense_range[[query, 1]] as usize;
+        let base_bit = dense_present_off[k] as usize;
+        let present_bit = |j: usize| -> bool {
+            let bit = base_bit + j;
+            (dense_present[bit / 8] >> (bit % 8)) & 1 == 1
+        };
+        let merged = merge_hap(vk_pos, vk_key, vk_lo, vk_hi, dense_pos, dense_key, ds, de, present_bit);
+        if merged.is_empty() {
+            continue;
+        }
+        let q_start = regions[[query, 1]] as i64;
+        let q_end = regions[[query, 2]] as i64;
+        let mut ref_idx = q_start;
+        let mut acc: i64 = 0;
+        for &(pos, key) in &merged {
+            let v_start = pos as i64;
+            let (mut v_ilen, _allele) = decode_alt(key, lut_bytes, lut_off);
+            let v_end = v_start - v_ilen.min(0) + 1;
+            if v_end <= q_start {
+                continue;
+            }
+            if v_start >= q_end {
+                break;
+            }
+            if v_start >= q_start && v_start < ref_idx {
+                continue;
+            }
+            ref_idx = ref_idx.max(v_end);
+            if v_ilen < 0 {
+                v_ilen += (q_start - v_start - 1).max(0);
+            }
+            v_ilen += (v_end - q_end).max(0);
+            acc += v_ilen;
+        }
+        diffs[[query, hap]] = acc as i32;
+    }
+    diffs
 }
 
 #[cfg(test)]
@@ -104,5 +171,47 @@ mod tests {
             merged,
             vec![(10, 100), (15, 150), (20, 200), (20, 250), (30, 300)]
         );
+    }
+
+    #[test]
+    fn test_hap_diffs_svar2_snp_and_del() {
+        // 1 query, 1 hap, region [0, 100). Two var_key entries, no dense entries:
+        // a SNP at pos 10 (ilen 0) and a single-base DEL at pos 20 (ilen -1), both
+        // fully inside the region. Expected diff = 0 + (-1) = -1.
+        let regions = ndarray::array![[0i32, 0, 100]];
+        let ploidy = 1usize;
+
+        let vk_pos = [10i32, 20];
+        let vk_key = [
+            svar2_codec::encode_alt_inline(b"A", 0) as i32,
+            svar2_codec::encode_pure_del(-1) as i32,
+        ];
+        let vk_off: [i64; 2] = [0, 2];
+
+        let dense_pos: [i32; 0] = [];
+        let dense_key: [i32; 0] = [];
+        let dense_range = ndarray::array![[0i32, 0]];
+        let dense_present: [u8; 0] = [];
+        let dense_present_off: [i64; 2] = [0, 0];
+
+        let lut_bytes: [u8; 0] = [];
+        let lut_off: [i64; 0] = [];
+
+        let diffs = hap_diffs_svar2(
+            regions.view(),
+            ploidy,
+            &vk_pos,
+            &vk_key,
+            &vk_off,
+            &dense_pos,
+            &dense_key,
+            dense_range.view(),
+            &dense_present,
+            &dense_present_off,
+            &lut_bytes,
+            &lut_off,
+        );
+
+        assert_eq!(diffs[[0, 0]], -1);
     }
 }

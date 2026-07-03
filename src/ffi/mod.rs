@@ -1,6 +1,8 @@
 //! PyO3 boundary for migrated core kernels. The ONLY place new kernels touch Python.
 use ndarray::Array1;
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray1};
+use numpy::{
+    IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray1,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -204,11 +206,8 @@ pub fn compact_keep_i32<'py>(
     row_offsets: PyReadonlyArray1<i64>,
     keep: PyReadonlyArray1<bool>,
 ) -> (Bound<'py, PyArray1<i32>>, Bound<'py, PyArray1<i64>>) {
-    let (v, off) = variants::compact_keep_i32(
-        values.as_array(),
-        row_offsets.as_array(),
-        keep.as_array(),
-    );
+    let (v, off) =
+        variants::compact_keep_i32(values.as_array(), row_offsets.as_array(), keep.as_array());
     (v.into_pyarray(py), off.into_pyarray(py))
 }
 
@@ -221,11 +220,8 @@ pub fn compact_keep_f32<'py>(
     row_offsets: PyReadonlyArray1<i64>,
     keep: PyReadonlyArray1<bool>,
 ) -> (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>) {
-    let (v, off) = variants::compact_keep_f32(
-        values.as_array(),
-        row_offsets.as_array(),
-        keep.as_array(),
-    );
+    let (v, off) =
+        variants::compact_keep_f32(values.as_array(), row_offsets.as_array(), keep.as_array());
     (v.into_pyarray(py), off.into_pyarray(py))
 }
 
@@ -238,11 +234,7 @@ pub fn fill_empty_scalar_i32<'py>(
     offsets: PyReadonlyArray1<i64>,
     fill: i32,
 ) -> (Bound<'py, PyArray1<i32>>, Bound<'py, PyArray1<i64>>) {
-    let (v, off) = variants::fill_empty_scalar_i32(
-        data.as_array(),
-        offsets.as_array(),
-        fill,
-    );
+    let (v, off) = variants::fill_empty_scalar_i32(data.as_array(), offsets.as_array(), fill);
     (v.into_pyarray(py), off.into_pyarray(py))
 }
 
@@ -255,11 +247,7 @@ pub fn fill_empty_scalar_f32<'py>(
     offsets: PyReadonlyArray1<i64>,
     fill: f32,
 ) -> (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>) {
-    let (v, off) = variants::fill_empty_scalar_f32(
-        data.as_array(),
-        offsets.as_array(),
-        fill,
-    );
+    let (v, off) = variants::fill_empty_scalar_f32(data.as_array(), offsets.as_array(), fill);
     (v.into_pyarray(py), off.into_pyarray(py))
 }
 
@@ -273,12 +261,7 @@ pub fn fill_empty_fixed_i32<'py>(
     inner: i64,
     fill: i32,
 ) -> (Bound<'py, PyArray1<i32>>, Bound<'py, PyArray1<i64>>) {
-    let (v, off) = variants::fill_empty_fixed_i32(
-        data.as_array(),
-        offsets.as_array(),
-        inner,
-        fill,
-    );
+    let (v, off) = variants::fill_empty_fixed_i32(data.as_array(), offsets.as_array(), inner, fill);
     (v.into_pyarray(py), off.into_pyarray(py))
 }
 
@@ -292,12 +275,7 @@ pub fn fill_empty_fixed_f32<'py>(
     inner: i64,
     fill: f32,
 ) -> (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>) {
-    let (v, off) = variants::fill_empty_fixed_f32(
-        data.as_array(),
-        offsets.as_array(),
-        inner,
-        fill,
-    );
+    let (v, off) = variants::fill_empty_fixed_f32(data.as_array(), offsets.as_array(), inner, fill);
     (v.into_pyarray(py), off.into_pyarray(py))
 }
 
@@ -322,7 +300,11 @@ pub fn fill_empty_seq_u8<'py>(
         seq_offsets.as_array(),
         dummy.as_array(),
     );
-    (nd.into_pyarray(py), nvar.into_pyarray(py), nseq.into_pyarray(py))
+    (
+        nd.into_pyarray(py),
+        nvar.into_pyarray(py),
+        nseq.into_pyarray(py),
+    )
 }
 
 /// Two-level dummy-fill for token windows (int32).
@@ -346,7 +328,11 @@ pub fn fill_empty_seq_i32<'py>(
         seq_offsets.as_array(),
         dummy.as_array(),
     );
-    (nd.into_pyarray(py), nvar.into_pyarray(py), nseq.into_pyarray(py))
+    (
+        nd.into_pyarray(py),
+        nvar.into_pyarray(py),
+        nseq.into_pyarray(py),
+    )
 }
 
 /// Build the `{name: (data, seq_offsets)}` dict from assembled buffers.
@@ -461,9 +447,26 @@ pub fn assemble_variant_buffers_u8<'py>(
     pad_char: u8,
 ) -> Bound<'py, PyDict> {
     assemble_variant_buffers_impl::<u8>(
-        py, mode, v_idxs, row_offsets, alt_global, alt_off_global, ref_global,
-        ref_off_global, want_ref_bytes, want_flank, ref_mode, alt_mode, flank_len,
-        lut, v_contigs, v_starts, ilens, reference, ref_offsets, pad_char,
+        py,
+        mode,
+        v_idxs,
+        row_offsets,
+        alt_global,
+        alt_off_global,
+        ref_global,
+        ref_off_global,
+        want_ref_bytes,
+        want_flank,
+        ref_mode,
+        alt_mode,
+        flank_len,
+        lut,
+        v_contigs,
+        v_starts,
+        ilens,
+        reference,
+        ref_offsets,
+        pad_char,
     )
 }
 
@@ -493,9 +496,26 @@ pub fn assemble_variant_buffers_i32<'py>(
     pad_char: u8,
 ) -> Bound<'py, PyDict> {
     assemble_variant_buffers_impl::<i32>(
-        py, mode, v_idxs, row_offsets, alt_global, alt_off_global, ref_global,
-        ref_off_global, want_ref_bytes, want_flank, ref_mode, alt_mode, flank_len,
-        lut, v_contigs, v_starts, ilens, reference, ref_offsets, pad_char,
+        py,
+        mode,
+        v_idxs,
+        row_offsets,
+        alt_global,
+        alt_off_global,
+        ref_global,
+        ref_off_global,
+        want_ref_bytes,
+        want_flank,
+        ref_mode,
+        alt_mode,
+        flank_len,
+        lut,
+        v_contigs,
+        v_starts,
+        ilens,
+        reference,
+        ref_offsets,
+        pad_char,
     )
 }
 
@@ -733,6 +753,270 @@ pub fn reconstruct_haplotypes_fused<'py>(
     (out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py))
 }
 
+/// Fused SVAR2 two-source haplotype reconstruction: merge each hap's `var_key` ⋈
+/// `dense` channels and decode via `svar2-codec` inline (no materialized global
+/// variant table), sizing and allocating the output buffer in Rust — one FFI
+/// crossing, mirrors `reconstruct_haplotypes_fused` above.
+///
+/// `output_length`:
+///   - ``-1`` → ragged mode (each haplotype gets its natural length = ref_len + diff).
+///   - ``>= 0`` → fixed-length mode (every haplotype is padded/truncated to this length).
+///
+/// No annotation, no to_rc — first cut minimal, mirrors the plain fused path.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_haplotypes_from_svar2<'py>(
+    py: Python<'py>,
+    regions: PyReadonlyArray2<i32>,
+    shifts: PyReadonlyArray2<i32>,
+    vk_pos: PyReadonlyArray1<i32>,
+    vk_key: PyReadonlyArray1<i32>,
+    vk_off: PyReadonlyArray1<i64>,
+    dense_pos: PyReadonlyArray1<i32>,
+    dense_key: PyReadonlyArray1<i32>,
+    dense_range: PyReadonlyArray2<i32>,
+    dense_present: PyReadonlyArray1<u8>,
+    dense_present_off: PyReadonlyArray1<i64>,
+    lut_bytes: PyReadonlyArray1<u8>,
+    lut_off: PyReadonlyArray1<i64>,
+    ref_: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+    output_length: i64,
+    parallel: bool,
+) -> (Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>) {
+    use crate::reconstruct;
+    use crate::svar2;
+
+    let regions_a = regions.as_array();
+    let shifts_a = shifts.as_array();
+    let vk_pos_a = vk_pos.as_array();
+    let vk_key_a = vk_key.as_array();
+    let vk_off_a = vk_off.as_array();
+    let dense_pos_a = dense_pos.as_array();
+    let dense_key_a = dense_key.as_array();
+    let dense_range_a = dense_range.as_array();
+    let dense_present_a = dense_present.as_array();
+    let dense_present_off_a = dense_present_off.as_array();
+    let lut_bytes_a = lut_bytes.as_array();
+    let lut_off_a = lut_off.as_array();
+    let ref_a = ref_.as_array();
+    let ref_offsets_a = ref_offsets.as_array();
+
+    let ploidy = shifts_a.ncols();
+    let n_q = regions_a.nrows();
+    let n_work = n_q * ploidy;
+
+    let (out_data, out_offsets_vec) = py.detach(move || {
+        // Step 1: compute per-haplotype length diffs via the two-source diff core.
+        let vk_pos_s: &[i32] = vk_pos_a.as_slice().unwrap();
+        let vk_key_s: &[i32] = vk_key_a.as_slice().unwrap();
+        let vk_off_s: &[i64] = vk_off_a.as_slice().unwrap();
+        let dense_pos_s: &[i32] = dense_pos_a.as_slice().unwrap();
+        let dense_key_s: &[i32] = dense_key_a.as_slice().unwrap();
+        let dense_present_s: &[u8] = dense_present_a.as_slice().unwrap();
+        let dense_present_off_s: &[i64] = dense_present_off_a.as_slice().unwrap();
+        let lut_bytes_s: &[u8] = lut_bytes_a.as_slice().unwrap();
+        let lut_off_s: &[i64] = lut_off_a.as_slice().unwrap();
+
+        let diffs = svar2::hap_diffs_svar2(
+            regions_a,
+            ploidy,
+            vk_pos_s,
+            vk_key_s,
+            vk_off_s,
+            dense_pos_s,
+            dense_key_s,
+            dense_range_a,
+            dense_present_s,
+            dense_present_off_s,
+            lut_bytes_s,
+            lut_off_s,
+        );
+
+        // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
+        let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
+        {
+            let mut acc: i64 = 0;
+            out_offsets_vec[0] = 0;
+            for k in 0..n_work {
+                let query = k / ploidy;
+                let hap = k % ploidy;
+                let len: i64 = if output_length >= 0 {
+                    output_length
+                } else {
+                    let ref_len = (regions_a[[query, 2]] - regions_a[[query, 1]]) as i64;
+                    let diff = diffs[[query, hap]] as i64;
+                    (ref_len + diff).max(0)
+                };
+                acc += len;
+                out_offsets_vec[k + 1] = acc;
+            }
+        }
+
+        // Step 3: allocate the output buffer in Rust — Python never calls np.empty.
+        let total = out_offsets_vec[n_work] as usize;
+        let mut out_data: Array1<u8> = uninit_output(total);
+
+        // Step 4: reconstruct all haplotypes into the owned buffer.
+        reconstruct::reconstruct_haplotypes_from_svar2(
+            out_data.view_mut(),
+            out_offsets_vec.view(),
+            regions_a,
+            shifts_a,
+            vk_pos_a,
+            vk_key_a,
+            vk_off_a,
+            dense_pos_a,
+            dense_key_a,
+            dense_range_a,
+            dense_present_a,
+            dense_present_off_a,
+            lut_bytes_a,
+            lut_off_a,
+            ref_a,
+            ref_offsets_a,
+            pad_char,
+            None, // annot_v_idxs — not supported in fused plain path
+            None, // annot_ref_pos — not supported in fused plain path
+            parallel,
+        );
+
+        (out_data, out_offsets_vec)
+    });
+
+    (out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py))
+}
+
+/// Fused SVAR2 two-source track shift+realign: merge each hap's `var_key` ⋈ `dense`
+/// channels and decode via `svar2-codec` inline, sizing and allocating the output
+/// buffer in Rust — one FFI crossing, mirrors `reconstruct_haplotypes_from_svar2`
+/// above but for f32 tracks (see `tracks::shift_and_realign_tracks_from_svar2`).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn shift_and_realign_tracks_from_svar2<'py>(
+    py: Python<'py>,
+    regions: PyReadonlyArray2<i32>,
+    shifts: PyReadonlyArray2<i32>,
+    vk_pos: PyReadonlyArray1<i32>,
+    vk_key: PyReadonlyArray1<i32>,
+    vk_off: PyReadonlyArray1<i64>,
+    dense_pos: PyReadonlyArray1<i32>,
+    dense_key: PyReadonlyArray1<i32>,
+    dense_range: PyReadonlyArray2<i32>,
+    dense_present: PyReadonlyArray1<u8>,
+    dense_present_off: PyReadonlyArray1<i64>,
+    lut_bytes: PyReadonlyArray1<u8>,
+    lut_off: PyReadonlyArray1<i64>,
+    tracks: PyReadonlyArray1<f32>,
+    track_offsets: PyReadonlyArray1<i64>,
+    params: PyReadonlyArray1<f64>,
+    strategy_id: i64,
+    base_seed: u64,
+    parallel: bool,
+) -> (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>) {
+    use crate::svar2;
+    use crate::tracks;
+
+    let regions_a = regions.as_array();
+    let shifts_a = shifts.as_array();
+    let vk_pos_a = vk_pos.as_array();
+    let vk_key_a = vk_key.as_array();
+    let vk_off_a = vk_off.as_array();
+    let dense_pos_a = dense_pos.as_array();
+    let dense_key_a = dense_key.as_array();
+    let dense_range_a = dense_range.as_array();
+    let dense_present_a = dense_present.as_array();
+    let dense_present_off_a = dense_present_off.as_array();
+    let lut_bytes_a = lut_bytes.as_array();
+    let lut_off_a = lut_off.as_array();
+    let tracks_a = tracks.as_array();
+    let track_offsets_a = track_offsets.as_array();
+    let params_a = params.as_array();
+
+    let ploidy = shifts_a.ncols();
+    let n_q = regions_a.nrows();
+    let n_work = n_q * ploidy;
+
+    let (out_data, out_offsets_vec) = py.detach(move || {
+        // Step 1: compute per-haplotype length diffs via the two-source diff core
+        // (a realigned track has haplotype length = ref_len + diff, same as reconstruct).
+        let vk_pos_s: &[i32] = vk_pos_a.as_slice().unwrap();
+        let vk_key_s: &[i32] = vk_key_a.as_slice().unwrap();
+        let vk_off_s: &[i64] = vk_off_a.as_slice().unwrap();
+        let dense_pos_s: &[i32] = dense_pos_a.as_slice().unwrap();
+        let dense_key_s: &[i32] = dense_key_a.as_slice().unwrap();
+        let dense_present_s: &[u8] = dense_present_a.as_slice().unwrap();
+        let dense_present_off_s: &[i64] = dense_present_off_a.as_slice().unwrap();
+        let lut_bytes_s: &[u8] = lut_bytes_a.as_slice().unwrap();
+        let lut_off_s: &[i64] = lut_off_a.as_slice().unwrap();
+
+        let diffs = svar2::hap_diffs_svar2(
+            regions_a,
+            ploidy,
+            vk_pos_s,
+            vk_key_s,
+            vk_off_s,
+            dense_pos_s,
+            dense_key_s,
+            dense_range_a,
+            dense_present_s,
+            dense_present_off_s,
+            lut_bytes_s,
+            lut_off_s,
+        );
+
+        // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
+        let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
+        {
+            let mut acc: i64 = 0;
+            out_offsets_vec[0] = 0;
+            for k in 0..n_work {
+                let query = k / ploidy;
+                let hap = k % ploidy;
+                let ref_len = (regions_a[[query, 2]] - regions_a[[query, 1]]) as i64;
+                let diff = diffs[[query, hap]] as i64;
+                let len: i64 = (ref_len + diff).max(0);
+                acc += len;
+                out_offsets_vec[k + 1] = acc;
+            }
+        }
+
+        // Step 3: allocate the output buffer in Rust — Python never calls np.empty.
+        // f32 track fill writes every position it needs; zeros is a safe default.
+        let total = out_offsets_vec[n_work] as usize;
+        let mut out_data: Array1<f32> = Array1::<f32>::zeros(total);
+
+        // Step 4: realign all tracks into the owned buffer.
+        tracks::shift_and_realign_tracks_from_svar2(
+            out_data.view_mut(),
+            out_offsets_vec.view(),
+            regions_a,
+            shifts_a,
+            vk_pos_a,
+            vk_key_a,
+            vk_off_a,
+            dense_pos_a,
+            dense_key_a,
+            dense_range_a,
+            dense_present_a,
+            dense_present_off_a,
+            lut_bytes_a,
+            lut_off_a,
+            tracks_a,
+            track_offsets_a,
+            params_a,
+            strategy_id,
+            base_seed,
+            parallel,
+        );
+
+        (out_data, out_offsets_vec)
+    });
+
+    (out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py))
+}
+
 /// Fused spliced-haplotype reconstruction: reconstruct in one FFI crossing using
 /// precomputed output offsets.
 ///
@@ -940,7 +1224,7 @@ pub fn reconstruct_annotated_haplotypes_spliced_fused<'py>(
             pad_char,
             keep_a,
             keep_offsets_a,
-            Some(annot_v.view_mut()),   // annot_v_idxs — variant index per nucleotide
+            Some(annot_v.view_mut()), // annot_v_idxs — variant index per nucleotide
             Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
             parallel,
         );
@@ -956,9 +1240,21 @@ pub fn reconstruct_annotated_haplotypes_spliced_fused<'py>(
                 out_offsets_a.len() - 1,
                 "to_rc mask length must equal number of output rows (offsets.len() - 1)"
             );
-            crate::reverse::rc_flat_rows_inplace(out_data.as_slice_mut().unwrap(), out_offsets_a, m);
-            crate::reverse::reverse_flat_rows_inplace(annot_v.as_slice_mut().unwrap(), out_offsets_a, m);
-            crate::reverse::reverse_flat_rows_inplace(annot_pos.as_slice_mut().unwrap(), out_offsets_a, m);
+            crate::reverse::rc_flat_rows_inplace(
+                out_data.as_slice_mut().unwrap(),
+                out_offsets_a,
+                m,
+            );
+            crate::reverse::reverse_flat_rows_inplace(
+                annot_v.as_slice_mut().unwrap(),
+                out_offsets_a,
+                m,
+            );
+            crate::reverse::reverse_flat_rows_inplace(
+                annot_pos.as_slice_mut().unwrap(),
+                out_offsets_a,
+                m,
+            );
         }
 
         (out_data, annot_v, annot_pos)
@@ -1116,7 +1412,7 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
             pad_char,
             keep_a,
             keep_offsets_a,
-            Some(annot_v.view_mut()),   // annot_v_idxs — variant index per nucleotide
+            Some(annot_v.view_mut()), // annot_v_idxs — variant index per nucleotide
             Some(annot_pos.view_mut()), // annot_ref_pos — reference coordinate per nucleotide
             parallel,
         );
@@ -1128,9 +1424,21 @@ pub fn reconstruct_annotated_haplotypes_fused<'py>(
                 out_offsets_vec.len() - 1,
                 "to_rc mask length must equal number of output rows (offsets.len() - 1)"
             );
-            crate::reverse::rc_flat_rows_inplace(out_data.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
-            crate::reverse::reverse_flat_rows_inplace(annot_v.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
-            crate::reverse::reverse_flat_rows_inplace(annot_pos.as_slice_mut().unwrap(), out_offsets_vec.view(), m);
+            crate::reverse::rc_flat_rows_inplace(
+                out_data.as_slice_mut().unwrap(),
+                out_offsets_vec.view(),
+                m,
+            );
+            crate::reverse::reverse_flat_rows_inplace(
+                annot_v.as_slice_mut().unwrap(),
+                out_offsets_vec.view(),
+                m,
+            );
+            crate::reverse::reverse_flat_rows_inplace(
+                annot_pos.as_slice_mut().unwrap(),
+                out_offsets_vec.view(),
+                m,
+            );
         }
 
         (out_data, annot_v, annot_pos, out_offsets_vec)
@@ -1301,22 +1609,22 @@ pub fn tracks_to_intervals<'py>(
 #[allow(clippy::too_many_arguments)]
 pub fn intervals_and_realign_track_fused(
     py: Python<'_>,
-    mut out: PyReadwriteArray1<f32>,          // (b*p*l) — caller's per-track slice
-    out_offsets: PyReadonlyArray1<i64>,       // (b*p + 1)
-    regions: PyReadonlyArray2<i32>,           // (b, 3)
-    shifts: PyReadonlyArray2<i32>,            // (b, p)
-    geno_offset_idx: PyReadonlyArray2<i64>,   // (b, p)
-    geno_v_idxs: PyReadonlyArray1<i32>,       // (r*s*p*v)
-    geno_offsets: PyReadonlyArray2<i64>,      // (2, r*s*p)
-    v_starts: PyReadonlyArray1<i32>,          // (tot_v)
-    ilens: PyReadonlyArray1<i32>,             // (tot_v)
+    mut out: PyReadwriteArray1<f32>, // (b*p*l) — caller's per-track slice
+    out_offsets: PyReadonlyArray1<i64>, // (b*p + 1)
+    regions: PyReadonlyArray2<i32>,  // (b, 3)
+    shifts: PyReadonlyArray2<i32>,   // (b, p)
+    geno_offset_idx: PyReadonlyArray2<i64>, // (b, p)
+    geno_v_idxs: PyReadonlyArray1<i32>, // (r*s*p*v)
+    geno_offsets: PyReadonlyArray2<i64>, // (2, r*s*p)
+    v_starts: PyReadonlyArray1<i32>, // (tot_v)
+    ilens: PyReadonlyArray1<i32>,    // (tot_v)
     // intervals (reference-coordinate, for this track)
-    offset_idxs: PyReadonlyArray1<i64>,       // (b) — per-query index into itv_offsets
-    itv_starts: PyReadonlyArray1<i32>,         // (n_intervals)
-    itv_ends: PyReadonlyArray1<i32>,           // (n_intervals)
-    itv_values: PyReadonlyArray1<f32>,         // (n_intervals)
-    itv_offsets: PyReadonlyArray1<i64>,        // (n_samples*n_regions + 1)
-    track_offsets: PyReadonlyArray1<i64>,      // (b+1) — out_offsets for scratch buffer
+    offset_idxs: PyReadonlyArray1<i64>, // (b) — per-query index into itv_offsets
+    itv_starts: PyReadonlyArray1<i32>,  // (n_intervals)
+    itv_ends: PyReadonlyArray1<i32>,    // (n_intervals)
+    itv_values: PyReadonlyArray1<f32>,  // (n_intervals)
+    itv_offsets: PyReadonlyArray1<i64>, // (n_samples*n_regions + 1)
+    track_offsets: PyReadonlyArray1<i64>, // (b+1) — out_offsets for scratch buffer
     // insertion-fill strategy
     params: PyReadonlyArray1<f64>,
     strategy_id: i64,
@@ -1456,9 +1764,9 @@ mod tests {
 
     #[test]
     fn annotated_rc_complements_bytes_reverses_indices() {
-        let mut bytes = b"ACG".to_vec();          // revcomp -> "CGT"
-        let mut vidx = vec![5i32, 6, 7];          // reverse -> [7,6,5]
-        let mut rpos = vec![100i32, 101, 102];    // reverse -> [102,101,100]
+        let mut bytes = b"ACG".to_vec(); // revcomp -> "CGT"
+        let mut vidx = vec![5i32, 6, 7]; // reverse -> [7,6,5]
+        let mut rpos = vec![100i32, 101, 102]; // reverse -> [102,101,100]
         let offsets = ndarray::array![0i64, 3];
         let m = ndarray::array![true];
         crate::reverse::rc_flat_rows_inplace(&mut bytes, offsets.view(), m.view());

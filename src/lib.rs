@@ -39,12 +39,26 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::assemble_variant_buffers_i32, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::rc_alleles, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::get_reference, m)?)?;
-    m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_from_sparse, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::reconstruct_haplotypes_from_sparse,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_fused, m)?)?;
-    m.add_function(wrap_pyfunction!(ffi::reconstruct_annotated_haplotypes_fused, m)?)?;
-    m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_spliced_fused, m)?)?;
-    m.add_function(wrap_pyfunction!(ffi::reconstruct_annotated_haplotypes_spliced_fused, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_from_svar2, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::reconstruct_annotated_haplotypes_fused,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::reconstruct_haplotypes_spliced_fused,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::reconstruct_annotated_haplotypes_spliced_fused,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(ffi::shift_and_realign_tracks_sparse, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::shift_and_realign_tracks_from_svar2, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::tracks_to_intervals, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::intervals_and_realign_track_fused, m)?)?;
     // DEBUG: PRNG parity exports (Task 7) — keep or remove after Task 8/9 review
