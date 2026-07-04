@@ -98,10 +98,12 @@ both cohorts.
 
 `du` on the four stores:
 
+Apparent sizes (`du -sb`); decimal labels (MB = 10⁶ B, GB = 10⁹ B):
+
 | Store | SVAR1 (`.svar`) | SVAR2 (`.svar2`) | SVAR2 / SVAR1 | SVAR2 advantage |
 | --- | --- | --- | --- | --- |
-| germline (3202 smp) | 1.1 G (1,149,533,941 B) | 178 M (202,842,586 B) | 0.176× | **5.67× smaller** |
-| somatic (16007 smp) | 50 M (55,578,073 B) | 34 M (38,184,053 B) | 0.687× | **1.46× smaller** |
+| germline (3202 smp) | 1,149,533,941 B (1.15 GB) | 202,842,586 B (203 MB) | 0.176× | **5.67× smaller** |
+| somatic (16007 smp) | 55,578,073 B (55.6 MB) | 38,184,053 B (38.2 MB) | 0.687× | **1.46× smaller** |
 
 SVAR2 wins on size for **both** cohorts. The germline win is dramatic (5.7×): 1000G
 carries many **common, high-allele-frequency** variants, which SVAR2's cost model routes
