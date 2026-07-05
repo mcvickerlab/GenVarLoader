@@ -37,6 +37,7 @@ from .._atomic import atomic_dir
 from .._ragged import INTERVAL_DTYPE  # noqa: F401  # Task 3 migration reader imports this
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
+from ._svar2_link import Svar2Link
 from ._svar_link import SvarLink
 from ._utils import bed_to_regions, regions_to_bed
 
@@ -92,6 +93,7 @@ class Metadata(BaseModel, arbitrary_types_allowed=True):
     version: SemanticVersion | None = None
     format_version: SemanticVersion | None = None
     svar_link: SvarLink | None = None
+    svar2_link: Svar2Link | None = None
 
     @property
     def n_samples(self) -> int:
