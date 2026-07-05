@@ -216,6 +216,13 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
         }
         dense_present_off.push(bit_acc as i64);
     }
+    // The reused kernels read `dense_present[bit/8]` for EVERY window entry of
+    // every hap, so the buffer must always be ceil(total_bits/8) bytes — even
+    // when the last hap's window bits are all zero (the in-loop grow-on-set
+    // above only extends up to the highest SET bit, leaving a trailing all-zero
+    // byte unallocated → OOB panic downstream). genoray byte-sizes its presence
+    // arrays via div_ceil unconditionally; match that here.
+    dense_present.resize(bit_acc.div_ceil(8), 0);
 
     FlatChannels {
         vk_pos,
@@ -374,5 +381,66 @@ mod tests {
         // LSB-first -> byte 0 = 0b01.
         assert_eq!(flat.dense_present, vec![0b01]);
         assert_eq!(flat.dense_present_off, vec![0, 2]);
+    }
+
+    #[test]
+    fn test_split_to_flat_trailing_zero_byte_is_allocated() {
+        use genoray_core::query::KeyRef;
+
+        // Regression for the OOB defect: `dense_present` must always be
+        // ceil(total_bits/8) bytes, even when the trailing byte is entirely
+        // zero. 12 haps (ploidy=1, n_regions=12), each with a 1-entry dense/snp
+        // window and no dense/indel -> 12 combined presence bits spanning 2
+        // bytes. Only haps 0 and 3 carry the entry (both in byte 0); haps 8..12
+        // (byte 1) are all UNSET. The grow-on-set path alone would leave byte 1
+        // unallocated, so the reused kernels' `dense_present[bit/8]` read for
+        // hap 8..12 would panic.
+        let n = 12usize;
+
+        // genoray's own bitstream: window size 1 per hap, bits set at 0 and 3.
+        let mut dense_snp_present = vec![0u8; n.div_ceil(8)]; // 2 bytes
+        dense_snp_present[0] = 0b0000_1001; // bits 0 and 3
+        let dense_snp_present_off: Vec<usize> = (0..=n).collect();
+
+        let br = BatchResultSplit {
+            n_regions: n,
+            n_samples: 1,
+            ploidy: 1,
+            vk: vec![],
+            vk_off: vec![0; n + 1],
+            dense_snp: vec![KeyRef {
+                position: 42,
+                key: 7,
+            }],
+            dense_snp_range: vec![(0, 1); n], // every query points at the lone entry
+            dense_snp_present,
+            dense_snp_present_off,
+            dense_indel: vec![],
+            dense_indel_range: vec![(0, 0); n], // no indel window
+            dense_indel_present: vec![],
+            dense_indel_present_off: vec![0; n + 1],
+        };
+
+        // Must not panic.
+        let flat = split_to_flat(&br);
+
+        // Buffer sized to ceil(total_bits/8) = ceil(12/8) = 2, NOT just up to
+        // the highest set bit (byte 0).
+        assert_eq!(flat.dense_present.len(), 2);
+        assert_eq!(flat.dense_present, vec![0b0000_1001, 0b0000_0000]);
+        // 12 haps, each contributing exactly 1 combined presence bit.
+        assert_eq!(*flat.dense_present_off.last().unwrap(), n as i64);
+        assert_eq!(
+            flat.dense_present.len(),
+            (*flat.dense_present_off.last().unwrap() as usize).div_ceil(8)
+        );
+
+        // The set bits land exactly where expected (haps 0 and 3), and the
+        // trailing-byte haps are unset — proving no shift/corruption.
+        for h in 0..n {
+            let want = h == 0 || h == 3;
+            let got = genoray_core::bits_get_bit(&flat.dense_present, h);
+            assert_eq!(got, want, "hap {h} presence bit");
+        }
     }
 }
