@@ -236,6 +236,89 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
     }
 }
 
+/// Per-hap decoded variant SoA, matching genoray's `decode_hap` output layout —
+/// see [`decode_variants_from_split`].
+pub struct VariantsSoa {
+    /// Per-variant (flat, hap-major) 0-based start position.
+    pub pos: Vec<i32>,
+    /// Per-variant (flat) `ilen` (ALT len - 1 for inline/lookup keys, negative
+    /// deletion length for pure-deletion keys).
+    pub ilen: Vec<i32>,
+    /// Concatenated ALT bytes for all variants (pure-deletion ALT is empty).
+    pub alt_bytes: Vec<u8>,
+    /// Per-variant byte offsets into `alt_bytes`, len = `total_variants + 1`.
+    pub str_off: Vec<i64>,
+    /// Per-hap offsets into `pos`/`ilen`/`str_off`'s variant axis, len = `H + 1`.
+    pub var_off: Vec<i64>,
+}
+
+/// Per-hap decode of a read-bound split into the [`VariantsSoa`], mirroring
+/// genoray's `decode_hap`: merge each hap's `vk` with its present-dense entries
+/// (position-sorted, `vk` before dense, snp before indel — see [`merge_hap`] via
+/// [`split_to_flat`]), then decode each merged key via [`decode_alt`]. There is
+/// NO overlap/clip filter here — the gather already restricts to overlapping
+/// variants, unlike [`hap_diffs_svar2`]/reconstruct's ref_idx-consumed clipping,
+/// which only matters for sizing a fixed-length output buffer.
+pub fn decode_variants_from_split(
+    br: &BatchResultSplit,
+    lut_bytes: &[u8],
+    lut_off: &[i64],
+) -> VariantsSoa {
+    let flat = split_to_flat(br);
+    let ploidy = br.ploidy;
+    let n_q = br.n_regions;
+    let h_count = n_q * ploidy;
+
+    let mut pos: Vec<i32> = Vec::new();
+    let mut ilen: Vec<i32> = Vec::new();
+    let mut alt_bytes: Vec<u8> = Vec::new();
+    let mut str_off: Vec<i64> = vec![0];
+    let mut var_off: Vec<i64> = Vec::with_capacity(h_count + 1);
+    var_off.push(0);
+
+    for h in 0..h_count {
+        let q = h / ploidy;
+        let vk_lo = flat.vk_off[h] as usize;
+        let vk_hi = flat.vk_off[h + 1] as usize;
+        let ds = flat.dense_range[q * 2] as usize;
+        let de = flat.dense_range[q * 2 + 1] as usize;
+        let base_bit = flat.dense_present_off[h] as usize;
+        let present_bit = |k: usize| -> bool {
+            let bit = base_bit + k;
+            (flat.dense_present[bit / 8] >> (bit % 8)) & 1 == 1
+        };
+
+        let merged = merge_hap(
+            &flat.vk_pos,
+            &flat.vk_key,
+            vk_lo,
+            vk_hi,
+            &flat.dense_pos,
+            &flat.dense_key,
+            ds,
+            de,
+            present_bit,
+        );
+
+        for &(p, key) in &merged {
+            let (il, alt) = decode_alt(key, lut_bytes, lut_off);
+            pos.push(p as i32);
+            ilen.push(il as i32);
+            alt_bytes.extend_from_slice(&alt);
+            str_off.push(alt_bytes.len() as i64);
+        }
+        var_off.push(pos.len() as i64);
+    }
+
+    VariantsSoa {
+        pos,
+        ilen,
+        alt_bytes,
+        str_off,
+        var_off,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +525,53 @@ mod tests {
             let got = genoray_core::bits_get_bit(&flat.dense_present, h);
             assert_eq!(got, want, "hap {h} presence bit");
         }
+    }
+
+    #[test]
+    fn test_decode_variants_from_split_merges_and_decodes() {
+        use genoray_core::query::KeyRef;
+
+        // 1 region, 1 sample (read-bound), ploidy 1 -> 1 hap. var_key: SNP at
+        // pos 5 (inline ALT "T"). dense_snp: one entry at pos 8, PRESENT for
+        // this hap (inline ALT "G"). dense_indel: one entry at pos 12, PRESENT
+        // for this hap (pure DEL, ilen -2, empty ALT).
+        let vk_key = svar2_codec::encode_alt_inline(b"T", 0);
+        let dense_snp_key = svar2_codec::encode_alt_inline(b"G", 0);
+        let dense_indel_key = svar2_codec::encode_pure_del(-2);
+
+        let br = BatchResultSplit {
+            n_regions: 1,
+            n_samples: 1,
+            ploidy: 1,
+            vk: vec![KeyRef {
+                position: 5,
+                key: vk_key,
+            }],
+            vk_off: vec![0, 1],
+            dense_snp: vec![KeyRef {
+                position: 8,
+                key: dense_snp_key,
+            }],
+            dense_snp_range: vec![(0, 1)],
+            dense_snp_present: vec![0b1],
+            dense_snp_present_off: vec![0, 1],
+            dense_indel: vec![KeyRef {
+                position: 12,
+                key: dense_indel_key,
+            }],
+            dense_indel_range: vec![(0, 1)],
+            dense_indel_present: vec![0b1],
+            dense_indel_present_off: vec![0, 1],
+        };
+
+        let soa = decode_variants_from_split(&br, &[], &[0]);
+
+        // Position-sorted: var_key SNP@5, dense/snp@8, dense/indel@12.
+        assert_eq!(soa.var_off, vec![0, 3]);
+        assert_eq!(soa.pos, vec![5, 8, 12]);
+        assert_eq!(soa.ilen, vec![0, 0, -2]);
+        assert_eq!(soa.alt_bytes, b"TG".to_vec());
+        // Pure-del ALT is empty -> the 3rd variant's [start, end) is [2, 2).
+        assert_eq!(soa.str_off, vec![0, 1, 2, 2]);
     }
 }

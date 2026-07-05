@@ -1211,6 +1211,90 @@ pub fn shift_and_realign_tracks_from_svar2_readbound<'py>(
     Ok((out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py)))
 }
 
+/// Read-bound SVAR2 variants decode: gather off a query-only genoray `Svar2Store`
+/// reader with NO interval-search-tree rebuild and NO dense-union rebuild
+/// (`genoray_core::query::gather_haps_readbound`), then decode each hap's merged
+/// `var_key ⋈ dense` keys via [`crate::svar2::decode_variants_from_split`] — one
+/// FFI crossing, mirroring genoray's `decode_hap` (no overlap/clip filter; the
+/// gather already restricts to overlapping variants).
+///
+/// See [`reconstruct_haplotypes_from_svar2_readbound`] for the shared
+/// `region_starts`/`orig_samples`/`vk_*_range`/`dense_*_range` argument semantics
+/// (the per-query outputs of `SparseVar2.find_ranges`, flattened region-major,
+/// sample-minor). `ploidy` is passed explicitly (there is no `shifts` array to
+/// infer it from here). Returns the `RaggedVariants` SoA: `(pos, ilen, alt_bytes,
+/// str_off, var_off)`; see
+/// `python/genvarloader/_dataset/_svar2_store_py.py::build_readbound_variants`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn decode_variants_from_svar2_readbound<'py>(
+    py: Python<'py>,
+    store: PyRef<'py, crate::svar2::store::Svar2Store>,
+    contig: &str,
+    region_starts: PyReadonlyArray1<u32>,
+    orig_samples: PyReadonlyArray1<i64>,
+    vk_snp_range: PyReadonlyArray2<i64>,
+    vk_indel_range: PyReadonlyArray2<i64>,
+    dense_snp_range: PyReadonlyArray2<i64>,
+    dense_indel_range: PyReadonlyArray2<i64>,
+    ploidy: usize,
+) -> PyResult<(
+    Bound<'py, PyArray1<i32>>,
+    Bound<'py, PyArray1<i32>>,
+    Bound<'py, PyArray1<u8>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+)> {
+    use crate::svar2;
+
+    let reader = store.reader(contig).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("contig {contig} not in store"))
+    })?;
+
+    let region_starts_v: Vec<u32> = region_starts.as_array().to_vec();
+    let orig_samples_v: Vec<usize> = orig_samples
+        .as_array()
+        .iter()
+        .map(|&x| x as usize)
+        .collect();
+    let to_pairs = |a: numpy::ndarray::ArrayView2<i64>| -> Vec<(usize, usize)> {
+        a.rows()
+            .into_iter()
+            .map(|r| (r[0] as usize, r[1] as usize))
+            .collect()
+    };
+    let vk_snp_range_v = to_pairs(vk_snp_range.as_array());
+    let vk_indel_range_v = to_pairs(vk_indel_range.as_array());
+    let dense_snp_range_v = to_pairs(dense_snp_range.as_array());
+    let dense_indel_range_v = to_pairs(dense_indel_range.as_array());
+
+    let soa = py.detach(move || {
+        let br = genoray_core::query::gather_haps_readbound(
+            reader,
+            &region_starts_v,
+            &orig_samples_v,
+            &vk_snp_range_v,
+            &vk_indel_range_v,
+            &dense_snp_range_v,
+            &dense_indel_range_v,
+            ploidy,
+        );
+
+        let (lut_bytes, lut_off_u64) = reader.lut_arrays();
+        let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
+
+        svar2::decode_variants_from_split(&br, &lut_bytes, &lut_off)
+    });
+
+    Ok((
+        Array1::from_vec(soa.pos).into_pyarray(py),
+        Array1::from_vec(soa.ilen).into_pyarray(py),
+        Array1::from_vec(soa.alt_bytes).into_pyarray(py),
+        Array1::from_vec(soa.str_off).into_pyarray(py),
+        Array1::from_vec(soa.var_off).into_pyarray(py),
+    ))
+}
+
 /// Fused SVAR2 two-source track shift+realign: merge each hap's `var_key` ⋈ `dense`
 /// channels and decode via `svar2-codec` inline, sizing and allocating the output
 /// buffer in Rust — one FFI crossing, mirrors `reconstruct_haplotypes_from_svar2`
