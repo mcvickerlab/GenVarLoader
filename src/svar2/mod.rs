@@ -4,6 +4,7 @@
 
 use std::borrow::Cow;
 
+use genoray_core::query::BatchResultSplit;
 use ndarray::{Array2, ArrayView2};
 use svar2_codec::{decode_key, DecodedKey};
 
@@ -128,6 +129,106 @@ pub fn hap_diffs_svar2(
     diffs
 }
 
+/// The flat, single-dense-channel layout consumed by [`hap_diffs_svar2`] /
+/// `reconstruct::reconstruct_haplotypes_from_svar2` — see [`split_to_flat`].
+pub struct FlatChannels {
+    pub vk_pos: Vec<i32>,
+    pub vk_key: Vec<i32>,
+    pub vk_off: Vec<i64>,
+    pub dense_pos: Vec<i32>,
+    pub dense_key: Vec<i32>,
+    /// Flat, length `n_q*2`; view as `(n_q, 2)` at the call site.
+    pub dense_range: Vec<i32>,
+    pub dense_present: Vec<u8>,
+    pub dense_present_off: Vec<i64>,
+}
+
+/// Marshal a read-bound [`BatchResultSplit`] (genoray's per-class-split dense
+/// channels) into the flat single-dense-channel layout that the already-validated
+/// [`hap_diffs_svar2`] / `reconstruct::reconstruct_haplotypes_from_svar2` kernels
+/// consume — so read-bound gather can reuse those kernels unchanged instead of
+/// duplicating the merge/decode logic for a three-source layout.
+///
+/// Per query `q` the combined dense window is `dense_snp[q] ++ dense_indel[q]`
+/// (SNP entries first — matches genoray's `merge_keys(vec![vk, dense_snp,
+/// dense_indel])` tie order, where the dense side is `dense_snp` before
+/// `dense_indel`). Per hap the combined presence bits are `snp_bits ++
+/// indel_bits` over that combined window, LSB-first packed into one bitstream,
+/// so `dense_present_off`/`dense_range` line up with `dense_pos`/`dense_key`
+/// exactly like the union path's single dense channel.
+pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
+    let ploidy = br.ploidy;
+    let n_q = br.n_regions; // n_samples == 1 for read-bound gather
+    let h_count = n_q * ploidy;
+
+    let vk_pos: Vec<i32> = br.vk.iter().map(|k| k.position as i32).collect();
+    let vk_key: Vec<i32> = br.vk.iter().map(|k| k.key as i32).collect();
+    let vk_off: Vec<i64> = br.vk_off.iter().map(|&o| o as i64).collect();
+
+    let mut dense_pos: Vec<i32> = Vec::new();
+    let mut dense_key: Vec<i32> = Vec::new();
+    let mut dense_range: Vec<i32> = Vec::with_capacity(n_q * 2);
+    for q in 0..n_q {
+        let base = dense_pos.len() as i32;
+        let (ss, se) = br.dense_snp_range[q];
+        for j in ss..se {
+            dense_pos.push(br.dense_snp[j].position as i32);
+            dense_key.push(br.dense_snp[j].key as i32);
+        }
+        let (is_, ie) = br.dense_indel_range[q];
+        for j in is_..ie {
+            dense_pos.push(br.dense_indel[j].position as i32);
+            dense_key.push(br.dense_indel[j].key as i32);
+        }
+        dense_range.push(base);
+        dense_range.push(dense_pos.len() as i32);
+    }
+
+    let mut dense_present: Vec<u8> = Vec::new();
+    let mut dense_present_off: Vec<i64> = Vec::with_capacity(h_count + 1);
+    let mut bit_acc: usize = 0;
+    dense_present_off.push(0);
+    for h in 0..h_count {
+        let q = h / ploidy;
+        let (ss, se) = br.dense_snp_range[q];
+        let (is_, ie) = br.dense_indel_range[q];
+        let snp_base = br.dense_snp_present_off[h];
+        for k in 0..(se - ss) {
+            if genoray_core::bits_get_bit(&br.dense_snp_present, snp_base + k) {
+                let byte = bit_acc / 8;
+                if dense_present.len() <= byte {
+                    dense_present.resize(byte + 1, 0);
+                }
+                dense_present[byte] |= 1 << (bit_acc % 8);
+            }
+            bit_acc += 1;
+        }
+        let indel_base = br.dense_indel_present_off[h];
+        for k in 0..(ie - is_) {
+            if genoray_core::bits_get_bit(&br.dense_indel_present, indel_base + k) {
+                let byte = bit_acc / 8;
+                if dense_present.len() <= byte {
+                    dense_present.resize(byte + 1, 0);
+                }
+                dense_present[byte] |= 1 << (bit_acc % 8);
+            }
+            bit_acc += 1;
+        }
+        dense_present_off.push(bit_acc as i64);
+    }
+
+    FlatChannels {
+        vk_pos,
+        vk_key,
+        vk_off,
+        dense_pos,
+        dense_key,
+        dense_range,
+        dense_present,
+        dense_present_off,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +326,53 @@ mod tests {
         );
 
         assert_eq!(diffs[[0, 0]], -1);
+    }
+
+    #[test]
+    fn test_split_to_flat_marshals_readbound_split() {
+        use genoray_core::query::KeyRef;
+
+        // ploidy=1, n_regions=1: one vk key, one dense_snp entry (present for
+        // this hap), one dense_indel entry (absent for this hap).
+        let br = BatchResultSplit {
+            n_regions: 1,
+            n_samples: 1,
+            ploidy: 1,
+            vk: vec![KeyRef {
+                position: 5,
+                key: 100,
+            }],
+            vk_off: vec![0, 1],
+            dense_snp: vec![KeyRef {
+                position: 10,
+                key: 200,
+            }],
+            dense_snp_range: vec![(0, 1)],
+            dense_snp_present: vec![0b1], // present
+            dense_snp_present_off: vec![0, 1],
+            dense_indel: vec![KeyRef {
+                position: 15,
+                key: 300,
+            }],
+            dense_indel_range: vec![(0, 1)],
+            dense_indel_present: vec![0b0], // absent
+            dense_indel_present_off: vec![0, 1],
+        };
+
+        let flat = split_to_flat(&br);
+
+        assert_eq!(flat.vk_pos, vec![5]);
+        assert_eq!(flat.vk_key, vec![100]);
+        assert_eq!(flat.vk_off, vec![0, 1]);
+
+        // Combined dense window: snp entries first, then indel entries.
+        assert_eq!(flat.dense_pos, vec![10, 15]);
+        assert_eq!(flat.dense_key, vec![200, 300]);
+        assert_eq!(flat.dense_range, vec![0, 2]);
+
+        // Combined presence bits: snp bit (present) then indel bit (absent),
+        // LSB-first -> byte 0 = 0b01.
+        assert_eq!(flat.dense_present, vec![0b01]);
+        assert_eq!(flat.dense_present_off, vec![0, 2]);
     }
 }

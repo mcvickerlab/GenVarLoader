@@ -47,6 +47,10 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_fused, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_from_svar2, m)?)?;
     m.add_function(wrap_pyfunction!(
+        ffi::reconstruct_haplotypes_from_svar2_readbound,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         ffi::reconstruct_annotated_haplotypes_fused,
         m
     )?)?;
