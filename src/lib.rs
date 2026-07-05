@@ -67,6 +67,10 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ffi::shift_and_realign_tracks_from_svar2,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::shift_and_realign_tracks_from_svar2_readbound,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(ffi::tracks_to_intervals, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::intervals_and_realign_track_fused, m)?)?;
     // DEBUG: PRNG parity exports (Task 7) — keep or remove after Task 8/9 review

@@ -1050,6 +1050,167 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
     Ok((out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py)))
 }
 
+/// Read-bound SVAR2 track re-alignment: gather off a query-only genoray
+/// `Svar2Store` reader with NO interval-search-tree rebuild and NO dense-union
+/// rebuild (`genoray_core::query::gather_haps_readbound`), marshal the split
+/// result into the flat layout via [`crate::svar2::split_to_flat`], then reuse
+/// the byte-validated [`shift_and_realign_tracks_from_svar2`] kernel unchanged —
+/// one FFI crossing, byte-identical to the union-path oracle.
+///
+/// See [`reconstruct_haplotypes_from_svar2_readbound`] for the shared
+/// `region_starts`/`orig_samples`/`vk_*_range`/`dense_*_range`/`region_bounds`
+/// argument semantics (the per-query outputs of `SparseVar2.find_ranges`,
+/// flattened region-major, sample-minor); see
+/// `python/genvarloader/_dataset/_svar2_store_py.py::build_readbound_tracks`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn shift_and_realign_tracks_from_svar2_readbound<'py>(
+    py: Python<'py>,
+    store: PyRef<'py, crate::svar2::store::Svar2Store>,
+    contig: &str,
+    region_starts: PyReadonlyArray1<u32>,
+    orig_samples: PyReadonlyArray1<i64>,
+    vk_snp_range: PyReadonlyArray2<i64>,
+    vk_indel_range: PyReadonlyArray2<i64>,
+    dense_snp_range: PyReadonlyArray2<i64>,
+    dense_indel_range: PyReadonlyArray2<i64>,
+    region_bounds: PyReadonlyArray2<i32>,
+    shifts: PyReadonlyArray2<i32>,
+    tracks: PyReadonlyArray1<f32>,
+    track_offsets: PyReadonlyArray1<i64>,
+    params: PyReadonlyArray1<f64>,
+    strategy_id: i64,
+    base_seed: u64,
+    parallel: bool,
+) -> PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>)> {
+    use crate::svar2;
+    use crate::tracks;
+
+    let reader = store.reader(contig).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("contig {contig} not in store"))
+    })?;
+
+    let shifts_a = shifts.as_array();
+    let ploidy = shifts_a.ncols();
+    let region_bounds_a = region_bounds.as_array();
+    let n_q = region_bounds_a.nrows();
+
+    // Build `regions` (n_q, 3) as [contig_idx=0, start, end).
+    let mut regions = Array2::<i32>::zeros((n_q, 3));
+    for q in 0..n_q {
+        regions[[q, 1]] = region_bounds_a[[q, 0]];
+        regions[[q, 2]] = region_bounds_a[[q, 1]];
+    }
+
+    let region_starts_v: Vec<u32> = region_starts.as_array().to_vec();
+    let orig_samples_v: Vec<usize> = orig_samples
+        .as_array()
+        .iter()
+        .map(|&x| x as usize)
+        .collect();
+    let to_pairs = |a: numpy::ndarray::ArrayView2<i64>| -> Vec<(usize, usize)> {
+        a.rows()
+            .into_iter()
+            .map(|r| (r[0] as usize, r[1] as usize))
+            .collect()
+    };
+    let vk_snp_range_v = to_pairs(vk_snp_range.as_array());
+    let vk_indel_range_v = to_pairs(vk_indel_range.as_array());
+    let dense_snp_range_v = to_pairs(dense_snp_range.as_array());
+    let dense_indel_range_v = to_pairs(dense_indel_range.as_array());
+
+    let tracks_a = tracks.as_array();
+    let track_offsets_a = track_offsets.as_array();
+    let params_a = params.as_array();
+
+    let (out_data, out_offsets_vec) = py.detach(move || {
+        let br = genoray_core::query::gather_haps_readbound(
+            reader,
+            &region_starts_v,
+            &orig_samples_v,
+            &vk_snp_range_v,
+            &vk_indel_range_v,
+            &dense_snp_range_v,
+            &dense_indel_range_v,
+            ploidy,
+        );
+
+        let (lut_bytes, lut_off_u64) = reader.lut_arrays();
+        let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
+
+        let flat = svar2::split_to_flat(&br);
+        let dense_range_a =
+            numpy::ndarray::ArrayView2::from_shape((n_q, 2), &flat.dense_range).unwrap();
+
+        // Step 1: size via the same two-source diff core the union path uses.
+        let diffs = svar2::hap_diffs_svar2(
+            regions.view(),
+            ploidy,
+            &flat.vk_pos,
+            &flat.vk_key,
+            &flat.vk_off,
+            &flat.dense_pos,
+            &flat.dense_key,
+            dense_range_a,
+            &flat.dense_present,
+            &flat.dense_present_off,
+            &lut_bytes,
+            &lut_off,
+        );
+
+        // Step 2: per-haplotype output lengths and prefix-sum offsets — tracks
+        // always size to ref_len + diff (no `output_length` override).
+        let n_work = n_q * ploidy;
+        let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
+        {
+            let mut acc: i64 = 0;
+            out_offsets_vec[0] = 0;
+            for k in 0..n_work {
+                let query = k / ploidy;
+                let hap = k % ploidy;
+                let ref_len = (regions[[query, 2]] - regions[[query, 1]]) as i64;
+                let diff = diffs[[query, hap]] as i64;
+                let len: i64 = (ref_len + diff).max(0);
+                acc += len;
+                out_offsets_vec[k + 1] = acc;
+            }
+        }
+
+        // Step 3: allocate the output buffer in Rust.
+        let total = out_offsets_vec[n_work] as usize;
+        let mut out_data: Array1<f32> = Array1::<f32>::zeros(total);
+
+        // Step 4: realign — reuse the byte-validated union-path kernel unchanged,
+        // now fed the read-bound gather's flat channels.
+        tracks::shift_and_realign_tracks_from_svar2(
+            out_data.view_mut(),
+            out_offsets_vec.view(),
+            regions.view(),
+            shifts_a,
+            numpy::ndarray::ArrayView1::from(flat.vk_pos.as_slice()),
+            numpy::ndarray::ArrayView1::from(flat.vk_key.as_slice()),
+            numpy::ndarray::ArrayView1::from(flat.vk_off.as_slice()),
+            numpy::ndarray::ArrayView1::from(flat.dense_pos.as_slice()),
+            numpy::ndarray::ArrayView1::from(flat.dense_key.as_slice()),
+            dense_range_a,
+            numpy::ndarray::ArrayView1::from(flat.dense_present.as_slice()),
+            numpy::ndarray::ArrayView1::from(flat.dense_present_off.as_slice()),
+            numpy::ndarray::ArrayView1::from(lut_bytes.as_slice()),
+            numpy::ndarray::ArrayView1::from(lut_off.as_slice()),
+            tracks_a,
+            track_offsets_a,
+            params_a,
+            strategy_id,
+            base_seed,
+            parallel,
+        );
+
+        (out_data, out_offsets_vec)
+    });
+
+    Ok((out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py)))
+}
+
 /// Fused SVAR2 two-source track shift+realign: merge each hap's `var_key` ⋈ `dense`
 /// channels and decode via `svar2-codec` inline, sizing and allocating the output
 /// buffer in Rust — one FFI crossing, mirrors `reconstruct_haplotypes_from_svar2`
