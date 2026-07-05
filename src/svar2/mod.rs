@@ -7,6 +7,8 @@ use std::borrow::Cow;
 use ndarray::{Array2, ArrayView2};
 use svar2_codec::{decode_key, DecodedKey};
 
+pub mod store;
+
 /// Decode one uniform key into `(v_diff, allele)`, resolving long-INS via the LUT
 /// arrays. Mirrors genoray's `decode_keyref`.
 pub fn decode_alt<'a>(key: u32, lut_bytes: &'a [u8], lut_off: &[i64]) -> (i64, Cow<'a, [u8]>) {
@@ -83,7 +85,17 @@ pub fn hap_diffs_svar2(
             let bit = base_bit + j;
             (dense_present[bit / 8] >> (bit % 8)) & 1 == 1
         };
-        let merged = merge_hap(vk_pos, vk_key, vk_lo, vk_hi, dense_pos, dense_key, ds, de, present_bit);
+        let merged = merge_hap(
+            vk_pos,
+            vk_key,
+            vk_lo,
+            vk_hi,
+            dense_pos,
+            dense_key,
+            ds,
+            de,
+            present_bit,
+        );
         if merged.is_empty() {
             continue;
         }

@@ -16,16 +16,17 @@ bigtools = "0.5.6"
 coitrees = "0.4"
 itertools = "0.14.0"
 ndarray = "0.17.2"
-numpy = "0.28.0"
+numpy = "0.29.0"
 rayon = "1.12.0"
 seqpro-core = "0.1"
 svar2-codec = { path = "/carter/users/dlaub/projects/genoray/svar2-codec" }
+genoray_core = { path = "/carter/users/dlaub/projects/genoray", package = "genoray", default-features = false }
 
 [features]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies.pyo3]
-version = "0.28.3"
+version = "0.29"
 features = ["abi3-py310"]
 
 [dev-dependencies]
