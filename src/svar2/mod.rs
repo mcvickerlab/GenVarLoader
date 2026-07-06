@@ -165,8 +165,15 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
     let vk_key: Vec<i32> = br.vk.iter().map(|k| k.key as i32).collect();
     let vk_off: Vec<i64> = br.vk_off.iter().map(|&o| o as i64).collect();
 
-    let mut dense_pos: Vec<i32> = Vec::new();
-    let mut dense_key: Vec<i32> = Vec::new();
+    let dense_total: usize = (0..n_q)
+        .map(|q| {
+            let (ss, se) = br.dense_snp_range[q];
+            let (is_, ie) = br.dense_indel_range[q];
+            (se - ss) + (ie - is_)
+        })
+        .sum();
+    let mut dense_pos: Vec<i32> = Vec::with_capacity(dense_total);
+    let mut dense_key: Vec<i32> = Vec::with_capacity(dense_total);
     let mut dense_range: Vec<i32> = Vec::with_capacity(n_q * 2);
     for q in 0..n_q {
         let base = dense_pos.len() as i32;
@@ -184,7 +191,15 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
         dense_range.push(dense_pos.len() as i32);
     }
 
-    let mut dense_present: Vec<u8> = Vec::new();
+    let total_bits: usize = (0..h_count)
+        .map(|h| {
+            let q = h / ploidy;
+            let (ss, se) = br.dense_snp_range[q];
+            let (is_, ie) = br.dense_indel_range[q];
+            (se - ss) + (ie - is_)
+        })
+        .sum();
+    let mut dense_present: Vec<u8> = vec![0u8; total_bits.div_ceil(8)];
     let mut dense_present_off: Vec<i64> = Vec::with_capacity(h_count + 1);
     let mut bit_acc: usize = 0;
     dense_present_off.push(0);
@@ -195,22 +210,14 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
         let snp_base = br.dense_snp_present_off[h];
         for k in 0..(se - ss) {
             if genoray_core::bits_get_bit(&br.dense_snp_present, snp_base + k) {
-                let byte = bit_acc / 8;
-                if dense_present.len() <= byte {
-                    dense_present.resize(byte + 1, 0);
-                }
-                dense_present[byte] |= 1 << (bit_acc % 8);
+                dense_present[bit_acc / 8] |= 1 << (bit_acc % 8);
             }
             bit_acc += 1;
         }
         let indel_base = br.dense_indel_present_off[h];
         for k in 0..(ie - is_) {
             if genoray_core::bits_get_bit(&br.dense_indel_present, indel_base + k) {
-                let byte = bit_acc / 8;
-                if dense_present.len() <= byte {
-                    dense_present.resize(byte + 1, 0);
-                }
-                dense_present[byte] |= 1 << (bit_acc % 8);
+                dense_present[bit_acc / 8] |= 1 << (bit_acc % 8);
             }
             bit_acc += 1;
         }
@@ -269,10 +276,16 @@ pub fn decode_variants_from_split(
     let n_q = br.n_regions;
     let h_count = n_q * ploidy;
 
-    let mut pos: Vec<i32> = Vec::new();
-    let mut ilen: Vec<i32> = Vec::new();
-    let mut alt_bytes: Vec<u8> = Vec::new();
-    let mut str_off: Vec<i64> = vec![0];
+    // Upper bound on total merged variants across all haps: every vk entry plus
+    // every dense window entry (present or not). Over-reserving is harmless.
+    let vk_total = flat.vk_off[h_count] as usize;
+    let dense_bits = flat.dense_present_off[h_count] as usize;
+    let cap = vk_total + dense_bits;
+    let mut pos: Vec<i32> = Vec::with_capacity(cap);
+    let mut ilen: Vec<i32> = Vec::with_capacity(cap);
+    let mut alt_bytes: Vec<u8> = Vec::with_capacity(cap);
+    let mut str_off: Vec<i64> = Vec::with_capacity(cap + 1);
+    str_off.push(0);
     let mut var_off: Vec<i64> = Vec::with_capacity(h_count + 1);
     var_off.push(0);
 
