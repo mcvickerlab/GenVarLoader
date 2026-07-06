@@ -777,12 +777,72 @@ _PR: —_
 > on every mode (tracks-only 1.07×, haplotypes/tracks-seqs 1.66×, annotated 1.43×, variants
 > 1.38×, variant-windows 4.58×).
 
+### Phase 6a — SVAR2 read-bound dataset wiring (genoray query-only) ✅
+_PR: TBD (branch `svar2-m6b-kernel`)_
+_Specs: `docs/superpowers/plans/2026-07-04-svar2-genoray-readbound-gather.md` (genoray side),
+`docs/superpowers/plans/2026-07-04-svar2-gvl-readbound-wiring.md` (this side); earlier design
+specs `docs/superpowers/plans/2026-07-03-svar2-genoray-search-gather-split.md` and
+`docs/superpowers/plans/2026-07-03-svar2-gvl-dataset-wiring.md`._
+
+A scoped slice of Phase 6, pulled forward: genoray's newer `.svar2` sparse variant format
+becomes a `gvl.write` variant source and a live `Dataset` read backend, wired via a
+**read-bound** path rather than the general genoray-VCF/PGEN absorption Phase 6 describes below.
+gvl links `genoray_core` (query-only, `default-features = false` — no htslib conversion path)
+as a Rust path-dep, the first place gvl's Rust crate depends on genoray's Rust core directly.
+
+- [x] `_svar2_link.py` (`Svar2Link`/`Svar2Fingerprint`/`_resolve_svar2`/`_verify_svar2_fingerprint`,
+      mirrors `_svar_link.py`) + `Metadata.svar2_link` field.
+- [x] `_write_from_svar2`: write-time 6-array ranges cache (`vk_snp_range`, `vk_indel_range`,
+      `dense_snp_range`, `dense_indel_range`, `region_starts`, `sample_cols`, all int64) under
+      `genotypes/svar2_ranges/` + `svar2_meta.json`, sized to the dataset's **selected** samples;
+      `.svar2` write dispatch in `_write.py`. Same-POS-tie `max_ends` under-extension excluded
+      from parity — SVAR1-side bug, not introduced here (see
+      `docs/known-issues/svar1-max-ends-tie-underextension.md`).
+- [x] `genoray_core` path-dep + `Svar2Store` pyclass (opens one `ContigReader` per contig once,
+      at `Dataset.open` — the SVAR2 analog of SVAR1's cached FFI statics).
+- [x] Read-bound haplotype kernel: `reconstruct_haplotypes_from_svar2_readbound` — one FFI call,
+      `gather_haps_readbound` + `merge_hap3`, builds **zero** interval-search trees and **zero**
+      dense unions per read (structural guarantee, not just measured).
+- [x] Read-bound track re-alignment kernel: `shift_and_realign_tracks_from_svar2_readbound`.
+- [x] Read-bound variants/variant-windows decode kernel: `decode_variants_from_svar2_readbound`
+      (+ `hap_diffs_from_svar2_readbound` for jitter-shift computation).
+- [x] Dataset read dispatch: `Svar2Haps` reconstructor, `source` discriminant, `Dataset.open(svar2=...)`
+      override mirroring `svar=`. Live `overlap_batch`/union dispatch in `_svar2_source.py` retired
+      (kept only as the parity oracle for tests).
+- [x] Guard matrix (Phase-1 scope; raise `NotImplementedError`, not silent mis-compute): spliced
+      output, `var_filter="exonic"`, `min_af`/`max_af`, `annotated` haplotypes, in-kernel `to_rc`,
+      `unphased_union`, `"variant-windows"`, fixed-length (`int output_length`) haplotype-realigned
+      tracks, `variants` output with jitter (write `max_jitter>0` or read `jitter>0` — the
+      readbound variants decode has no right-clip), and multi-contig `FlankSample` track fills
+      (contig-local vs. global fill-seed query index divergence).
+- [x] Docs/skill audit (this task): `skills/genvarloader/SKILL.md`, `docs/source/{write,format,faq}.md`,
+      `README.md`; `api.md` ↔ `__all__` gate confirmed clean (no new public symbol — `svar2=` is a
+      parameter, not an exported name).
+
+**Gate (parity — MET):** all four output modes (haplotypes, tracks, variants, variant-windows*)
+byte-identical to the `.svar`/union-oracle (`SparseVar2Source.reconstruct`/`realign_tracks`, genoray
+`decode`) across `tests/dataset/test_svar2_dataset.py`, `test_svar2_readbound_{haps,tracks,variants,diffs}.py`,
+`test_write_svar2.py` — 31/31 passed. (*`"variant-windows"` is guarded `NotImplementedError` for
+`.svar2` in Phase 1, so its parity claim covers `variants`, not the flat-window mode.) One documented,
+intentional non-identity: for a pure deletion, `.svar2` decodes the atomized empty ALT (`b""`) where
+`.svar` reports the VCF anchor base (`b"G"` for `GTA>G`) — a genoray format convention; reconstructed
+haplotype bytes are unaffected (see `docs/source/format.md` "`.svar2` variants ALT convention").
+Full-tree regression: SVAR1 path byte-unchanged (additive-only change).
+
+**Checkpoint:** `.svar2` is a supported `gvl.write` source and `Dataset` read backend with a
+structurally read-bound query path (no per-read tree build, no per-read dense union), on-disk
+smaller than `.svar` especially for large cohorts. Remaining genoray absorption (VCF/PGEN ingest,
+`.svar`→Rust, `.svar2` conversion/write path) stays in Phase 6 below.
+
 ### Phase 6 — Absorb genoray (future) ⬜
 _PR: —_
 
 Sequenced last; a candidate to graduate into its own roadmap once Phases 0–5 land.
 seqpro-core remains the ragged substrate (decision 2026-06-23) — Phase 6 is
-narrowed to genoray (variant IO) only.
+narrowed to genoray (variant IO) only. Phase 6a above already pulled the `.svar2`
+**read-only query** surface (`genoray_core`, `default-features = false`) into the Rust
+stack as a scoped precursor; Phase 6 covers the remaining VCF/PGEN ingest and
+conversion/write paths.
 
 - [ ] Bring variant IO (genoray VCF/PGEN + sparse genotypes) into the Rust stack.
 
@@ -791,6 +851,41 @@ narrowed to genoray (variant IO) only.
 ---
 
 ## Notes & decisions log
+
+- 2026-07-05 (Phase 6a — SVAR2 read-bound dataset wiring; branch `svar2-m6b-kernel`):
+  `.svar2` (genoray's newer sparse variant format) is now a `gvl.write` variant source and a
+  live `Dataset` read backend, wired end-to-end: write-time 6-array ranges cache
+  (`genotypes/svar2_ranges/`, sized to the dataset's selected samples, mirrors SVAR1's
+  `offsets.npy`/`svar_meta.json` pattern) + `Svar2Link` back-reference/fingerprint
+  (mirrors `SvarLink`, keyed on file-count + byte-size since `.svar2` exposes no cheap
+  `variant_idxs.npy` analogue); a new `genoray_core` Rust path-dep (query-only,
+  `default-features = false` — no htslib) backing a `Svar2Store` pyclass opened once at
+  `Dataset.open`; three read-bound all-Rust kernels
+  (`reconstruct_haplotypes_from_svar2_readbound`, `shift_and_realign_tracks_from_svar2_readbound`,
+  `decode_variants_from_svar2_readbound` + a `hap_diffs_from_svar2_readbound` helper for jitter
+  shifts) that gather directly off the write-time cache via `gather_haps_readbound` + a new
+  `merge_hap3` (var_key ⋈ dense_snp ⋈ dense_indel) — **no interval-search-tree build and no
+  dense-union rebuild per read**, unlike the existing union-based `SparseVar2Source`
+  (`overlap_batch`) path, which is retired from live dispatch and kept only as the parity
+  oracle. All four output modes parity-tested against that oracle / SVAR1:
+  `tests/dataset/test_svar2_dataset.py` + `test_svar2_readbound_{haps,tracks,variants,diffs}.py`
+  + `test_write_svar2.py`, 31/31 passed. Phase-1 scope excludes (guarded
+  `NotImplementedError`, not silent mis-compute): splicing, `var_filter="exonic"`,
+  `min_af`/`max_af`, `annotated` haplotypes, in-kernel `to_rc`, `unphased_union`,
+  `"variant-windows"`, fixed-length haplotype-realigned tracks, `variants` output with any
+  jitter (write or read), and multi-contig `FlankSample` track fills. One intentional,
+  documented non-identity vs. SVAR1: pure-deletion ALT bytes (`.svar2` emits the atomized
+  empty ALT `b""`; `.svar` emits the VCF anchor base) — a genoray format convention that does
+  not affect reconstructed haplotype bytes. The pre-existing SVAR1 same-POS-tie `max_ends`
+  under-extension bug (`docs/known-issues/svar1-max-ends-tie-underextension.md`) is excluded
+  from the `.svar2` write-path max_ends parity check, same as the rest of the SVAR1 parity
+  suite. Specs: `docs/superpowers/plans/2026-07-03-svar2-genoray-search-gather-split.md`,
+  `docs/superpowers/plans/2026-07-03-svar2-gvl-dataset-wiring.md`,
+  `docs/superpowers/plans/2026-07-04-svar2-genoray-readbound-gather.md` (genoray side),
+  `docs/superpowers/plans/2026-07-04-svar2-gvl-readbound-wiring.md` (this side, Phase 6a
+  above). Docs/skill updated (`skills/genvarloader/SKILL.md`,
+  `docs/source/{write,format,faq}.md`, `README.md`); `api.md` ↔ `__all__` gate confirmed
+  clean (no new public symbol — `svar2=` is a keyword argument, not an exported name).
 
 - 2026-06-27 (Phase 5 W6 — wrap-up: thin-shim audit + cargo-standalone + seqpro-core + perf re-baseline; branch `phase-5-w6-wrapup`):
   Four parallel threads closed Phase 5:

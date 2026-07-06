@@ -15,7 +15,7 @@ GenVarLoader provides a fast, memory efficient data structure for training seque
 - Generate haplotypes up to 1,000 times faster than reading a FASTA file
 - Generate tracks up to 450 times faster than reading a BigWig
 - **Supports indels** and re-aligns tracks to haplotypes that have them
-- Extensible to new file formats: drop a feature request! Currently supports VCF, PGEN, and BigWig
+- Extensible to new file formats: drop a feature request! Currently supports VCF, PGEN, BigWig, and [genoray](https://github.com/mcvickerlab/genoray)'s sparse `.svar`/`.svar2` variant stores
 
 Documentation is available [here](https://genvarloader.readthedocs.io/). See our [preprint](https://www.biorxiv.org/content/10.1101/2025.01.15.633240) for benchmarking and implementation details.
 

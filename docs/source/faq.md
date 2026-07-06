@@ -71,6 +71,17 @@ GVL's read path (haplotype reconstruction and track re-alignment) is parallelize
 - **`GVL_FORCE_PARALLEL`** — set to a truthy value (`1`, `true`, `yes`, `on`) to force the multithreaded paths even on small inputs. By default GVL runs small inputs serially because thread overhead would dominate; this bypasses that size gate. Mainly useful for benchmarking.
 - **`RAYON_NUM_THREADS`** — GVL **overwrites** this with its own resolved count so an inherited value (e.g. baked into a base image) can't defeat the cgroup-aware cap. To size the pool yourself, use `GVL_NUM_THREADS` instead.
 
+## Should I use `.svar` or `.svar2` as my variant source?
+
+Both are sparse columnar variant archives from [`genoray`](https://github.com/mcvickerlab/genoray) that `gvl.write(variants=...)` accepts alongside BCF/PGEN; see [write.md](write.md) for how to build one. The two differ in their read-time behavior:
+
+- **`.svar`** reconstructs by building an interval search tree over the queried window and a per-read dense union of the overlapping variants.
+- **`.svar2`** reconstructs via a **read-bound** path: `gvl.write` caches small per-`(region, sample, ploid)` variant-key ranges at write time, and `Dataset.__getitem__` gathers directly off that cache and calls all-Rust kernels — it builds **no interval search tree and no dense union per read**. `.svar2` stores are also typically smaller on disk than `.svar`, especially for large cohorts.
+
+`.svar2` is Phase-1 scope: a handful of combinations (spliced output, `annotated` haplotypes, `min_af`/`max_af`, `var_filter="exonic"`, in-kernel `to_rc`, `unphased_union`, `"variant-windows"`, fixed-length haplotype-realigned tracks, `variants` output with jitter, and multi-contig `FlankSample` track fills) aren't wired yet and raise `NotImplementedError` rather than silently mis-computing. See the `genvarloader` skill's `.svar2` section or `docs/source/format.md` for the full list. Everything else — haplotypes, tracks, and variants at any supported jitter/output-length combination — is byte-identical between the two backends.
+
+One documented difference in raw output: for a pure deletion, `with_seqs("variants")` on a `.svar` dataset reports the VCF anchor base as ALT (e.g. `b"G"` for `GTA>G`), while a `.svar2` dataset reports the atomized empty ALT (`b""`) — a genoray `.svar2` format convention, not a bug. Reconstructed haplotypes are unaffected; only `RaggedVariants.alt` differs, and only for pure-deletion records.
+
 ## How can I get personalized protein/spliced RNA sequences?
 
 This is not yet supported but on GVL's roadmap for the near future. Keep an eye out in future releases!

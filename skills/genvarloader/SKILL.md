@@ -80,6 +80,30 @@ dense2sparse(VCF("normed.bcf"), "normed.svar")  # writes a .svar/ directory
 
 SVARs are resolved at `Dataset.open` time via `metadata.json` → caller `svar=` arg → recorded relative path → recorded absolute path → sibling `*.svar`. See `docs/source/format.md` ("SVAR resolution at open time") and `_dataset/_svar_link.py`. Legacy symlink-based SVAR layouts: run `gvl.migrate_svar_link(path)` once to upgrade.
 
+## `.svar2` — the read-bound sparse variant format
+
+`.svar2` is genoray's newer sparse columnar variant store. Pass it to `gvl.write` exactly like a `.svar`, BCF, or PGEN — `gvl.write(path, bed, variants="cohort.svar2")` or `variants=SparseVar2("cohort.svar2")`. Like `.svar`, the dataset stores a back-reference (`metadata.json` → `svar2_link`) instead of duplicating per-variant arrays, so the `.svar2` store must remain accessible at read time.
+
+Unlike `.svar` (whose read path builds an interval search tree + a per-read dense-union over the queried window), a `.svar2`-backed dataset reconstructs via a **read-bound** path: `gvl.write` caches small per-`(region, sample, ploid)` variant-key ranges under `<dataset>/genotypes/svar2_ranges/` (sized to the dataset's *selected* samples, not the full `.svar2` cohort), and at read time gvl gathers directly off that cache and calls all-Rust kernels — **no interval-search-tree build and no dense-union rebuild per read**. `.svar2` stores are also typically smaller on disk than `.svar`, especially for large cohorts. See `docs/source/faq.md`.
+
+`.svar2` is resolved at `Dataset.open` time in the same order as `.svar`: caller `svar2=` arg → recorded relative path → recorded absolute path → sibling `*.svar2`. `Dataset.open(path, svar2=<override>)` mirrors `svar=`. See `docs/source/format.md` ("`.svar2` resolution at open time").
+
+**Phase-1 scope — unsupported combinations raise `NotImplementedError`.** `.svar2`-backed datasets support all four output modes (`haplotypes`, `variants`, `variant-windows`, and haplotype-realigned `tracks`) byte-identical to the `.svar`/union-oracle backend, but the following are not yet wired for `.svar2` and raise a clear error instead of silently mis-computing:
+- Spliced output.
+- The `var_filter="exonic"` (keep-mask) variant filter.
+- `min_af` / `max_af` filtering.
+- `annotated` haplotypes (`with_seqs("annotated")`).
+- In-kernel reverse-complement (`to_rc`).
+- `unphased_union`.
+- `with_seqs("variant-windows")` (the flat-window variant mode).
+- Fixed-length (integer `output_length`) haplotype-realigned **track** output (plain haplotype output at a fixed length is fine — only the track kernel is guarded).
+- `variants` output on a dataset written with `max_jitter>0` or read with `jitter>0` (the read-bound variants decode does not right-clip to the post-jitter window; haplotypes and tracks are unaffected and support jitter fully).
+- `FlankSample` insertion-fill for tracks spanning **multiple contigs** in one query (single-contig queries and non-seeded fills like the default `Repeat5p` are exact).
+
+**`variants` ALT bytes differ from `.svar` for pure deletions (format convention, not a bug).** For a pure deletion (e.g. VCF `GTA>G`), `with_seqs("variants")` on a `.svar` dataset yields the VCF anchor base as ALT (`b"G"`), while a `.svar2` dataset yields the atomized empty ALT (`b""`) — this is how genoray's `.svar2` format represents pure deletions. Reconstructed **haplotypes are byte-identical** between the two backends (both consume the ALT identically when building sequence); only the raw `RaggedVariants.alt` bytes differ for pure-deletion records. See `docs/source/faq.md`.
+
+Symbolic/breakend variants are rejected the same as `.svar`, but for `.svar2` the rejection happens **upstream, at `.svar2` conversion time** (the store format cannot represent them) — a `.svar2` must be built from an already-filtered source; gvl cannot re-filter a materialized `.svar2` any more than it can a materialized `.svar`.
+
 ## `gvl.write` — key arguments
 
 ```python
@@ -149,11 +173,11 @@ gvl.Dataset.open(
     splice_info=None,                    # see "Spliced haplotypes"
     var_filter=None,                     # None | "exonic"
     var_fields=None,                     # list[str] | None — see below
-    *, svar=None,
+    *, svar=None, svar2=None,
 )
 ```
 
-Without `reference=`, a genotypes-only dataset opens with the **`"variants"`** view by default (yielding `RaggedVariants`) — `Dataset.open(path)` just works, no `with_seqs` needed. The `"haplotypes"`, `"annotated"`, and `"reference"` views all require a reference; requesting one via `with_seqs` on a reference-less dataset raises a clear `ValueError`. `svar=` overrides the recorded SVAR location.
+Without `reference=`, a genotypes-only dataset opens with the **`"variants"`** view by default (yielding `RaggedVariants`) — `Dataset.open(path)` just works, no `with_seqs` needed. The `"haplotypes"`, `"annotated"`, and `"reference"` views all require a reference; requesting one via `with_seqs` on a reference-less dataset raises a clear `ValueError`. `svar=` overrides the recorded SVAR location; `svar2=` mirrors it for a `.svar2`-backed dataset.
 
 **`with_settings(dummy_variant=...)`** — inserts a `gvl.DummyVariant` into every **empty** `(region, sample, ploid)` variant group so that every group has at least one variant. Only fills groups that are empty; non-empty groups are unchanged. Valid for both `"variants"` and `"variant-windows"` output kinds; indexing raises `ValueError` if `dummy_variant` is set and the output kind is any other kind (`"haplotypes"`, `"annotated"`, `"reference"`, or no seqs) — the check is order-independent with `with_seqs`. `False` disables dummy padding; `None` (default) leaves the current setting unchanged. Setting `dummy_variant=False` when the output is an unsupported kind is a harmless no-op.
 
@@ -367,6 +391,7 @@ ds.gvl/
 ├── input_regions.arrow        # BED + region index map
 ├── genotypes/                 # variant_idxs.npy, dosages.npy, variants.arrow
 │                              # (absent when sourced from .svar; see svar_link)
+│                              # svar2_ranges/ present iff sourced from .svar2 (see svar2_link)
 ├── intervals/<track>/         # per-sample track data (BigWigs / Table)
 └── annot_intervals/<track>/   # sample-independent annotation track data
 ```
@@ -391,6 +416,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 | Track re-alignment internals          | `python/genvarloader/_dataset/_tracks.py`, `_reconstruct.py` |
 | Insertion fill internals              | `python/genvarloader/_dataset/_insertion_fill.py`      |
 | SVAR back-reference / migration       | `python/genvarloader/_dataset/_svar_link.py`           |
+| `.svar2` back-reference / read-bound wiring | `python/genvarloader/_dataset/_svar2_link.py`, `_svar2_haps.py` |
 | Format 1.x → 2.0 migration internals  | `python/genvarloader/_dataset/_migrate.py`             |
 | Flat-buffer ragged containers         | `python/genvarloader/_flat.py`                         |
 | Flat variants + alleles types         | `python/genvarloader/_dataset/_flat_variants.py`       |
@@ -402,7 +428,9 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - **`gvl.update` does not hot-reload open datasets.** A `Dataset` instance that was opened before `gvl.update` ran will not see the new track; reopen the dataset to pick it up. The update itself is safe to run while readers are active — each track is published atomically so a reader never sees a half-written track.
 - **`Dataset.write_annot_tracks` has been removed.** Use `gvl.update(dataset, annot_tracks={"name": source})` instead, or pass `annot_tracks=` to `gvl.write` at creation time.
 - **`gvl.Table` is a core public API.** No extra install required. It uses a Rust COITrees overlap engine and is CI-covered. Import it as `gvl.Table` (re-exported from the top-level package).
-- **Symbolic / breakend variants are rejected, not skipped.** Remove them before `gvl.write` — e.g. `bcftools view -e 'ALT~"<" || ALT~"\["'` (drop SVs and breakends), or construct the genoray reader with `filter=genoray.exprs.is_biallelic & ~genoray.exprs.is_symbolic & ~genoray.exprs.is_breakend`. SVAR inputs must be built from an already-filtered source, since gvl validates but cannot re-filter a materialized `.svar`.
+- **Symbolic / breakend variants are rejected, not skipped.** Remove them before `gvl.write` — e.g. `bcftools view -e 'ALT~"<" || ALT~"\["'` (drop SVs and breakends), or construct the genoray reader with `filter=genoray.exprs.is_biallelic & ~genoray.exprs.is_symbolic & ~genoray.exprs.is_breakend`. SVAR inputs must be built from an already-filtered source, since gvl validates but cannot re-filter a materialized `.svar`. For `.svar2` the same variants are rejected **upstream at `.svar2` conversion time** (genoray), not at `gvl.write` time — the store format cannot represent them at all.
+- **`.svar2` has a Phase-1 unsupported-combination matrix.** Spliced output, `var_filter="exonic"`, `min_af`/`max_af`, `annotated` haplotypes, in-kernel `to_rc`, `unphased_union`, `"variant-windows"`, fixed-length haplotype-realigned tracks, `variants` output with jitter (`max_jitter>0` at write or `jitter>0` at read), and multi-contig `FlankSample` track fills all raise `NotImplementedError` on a `.svar2`-backed dataset instead of silently mis-computing. See "`.svar2` — the read-bound sparse variant format" above.
+- **`.svar2` `variants` ALT bytes differ from `.svar` for pure deletions.** `.svar` keeps the VCF anchor base (`b"G"` for `GTA>G`); `.svar2` decodes the atomized empty ALT (`b""`). Reconstructed haplotypes are byte-identical either way — only raw `RaggedVariants.alt` differs for pure-deletion records.
 - Opening a genotypes-only dataset without a `reference=` defaults to the `"variants"` view (`RaggedVariants`), not `"haplotypes"`. Only `"variants"` is available without a reference; `with_seqs("haplotypes" | "annotated" | "reference")` raises `ValueError` if no reference was provided.
 - `with_insertion_fill` raises unless the dataset has both haplotypes AND tracks active.
 - `min_af` / `max_af` raise unless the dataset is SVAR-backed.
