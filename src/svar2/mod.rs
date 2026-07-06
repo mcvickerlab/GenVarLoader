@@ -289,38 +289,62 @@ pub fn decode_variants_from_split(
     let mut var_off: Vec<i64> = Vec::with_capacity(h_count + 1);
     var_off.push(0);
 
-    for h in 0..h_count {
-        let q = h / ploidy;
-        let vk_lo = flat.vk_off[h] as usize;
-        let vk_hi = flat.vk_off[h + 1] as usize;
+    // `q = h / ploidy` is loop-invariant across each hap's ploidy-many
+    // iterations; the original per-h division (`h / ploidy`, `ploidy` a
+    // runtime value LLVM can't strength-reduce) recomputed it on every
+    // iteration via a full integer division. Iterate `q` in the outer loop
+    // and track `h` with a plain running counter instead — this visits the
+    // exact same `(h, q)` pairs in the exact same order (h = 0, 1, 2, ...,
+    // h_count-1, with q = h/ploidy for each), so it's byte-identical, and it
+    // also hoists the per-query `ds`/`de` window lookup out of the
+    // ploidy-many-times-redundant per-hap load.
+    let mut h = 0usize;
+    for q in 0..n_q {
         let ds = flat.dense_range[q * 2] as usize;
         let de = flat.dense_range[q * 2 + 1] as usize;
-        let base_bit = flat.dense_present_off[h] as usize;
-        let present_bit = |k: usize| -> bool {
-            let bit = base_bit + k;
-            (flat.dense_present[bit / 8] >> (bit % 8)) & 1 == 1
-        };
+        for _hap in 0..ploidy {
+            let vk_lo = flat.vk_off[h] as usize;
+            let vk_hi = flat.vk_off[h + 1] as usize;
+            let base_bit = flat.dense_present_off[h] as usize;
+            let present_bit = |k: usize| -> bool {
+                let bit = base_bit + k;
+                // SAFETY: `merge_hap` only ever calls `present_bit(k)` for `k`
+                // in `0..(de - ds)` (see its `(ds..de).enumerate()` loop), so
+                // `bit` ranges over `[base_bit, base_bit + (de - ds))` =
+                // `[dense_present_off[h], dense_present_off[h + 1])`. Per
+                // `split_to_flat`, `de - ds` (from `dense_range`, built per
+                // query `q`) and `dense_present_off[h + 1] -
+                // dense_present_off[h]` (built per hap `h`, replicated
+                // `ploidy` times per query) are both exactly the same
+                // per-query dense-window width, so this range is always `<=
+                // dense_present_off[h_count] = total_bits`, and
+                // `dense_present` is sized `total_bits.div_ceil(8)` bytes —
+                // so `bit / 8` is always in bounds.
+                (unsafe { *flat.dense_present.get_unchecked(bit / 8) } >> (bit % 8)) & 1 == 1
+            };
 
-        let merged = merge_hap(
-            &flat.vk_pos,
-            &flat.vk_key,
-            vk_lo,
-            vk_hi,
-            &flat.dense_pos,
-            &flat.dense_key,
-            ds,
-            de,
-            present_bit,
-        );
+            let merged = merge_hap(
+                &flat.vk_pos,
+                &flat.vk_key,
+                vk_lo,
+                vk_hi,
+                &flat.dense_pos,
+                &flat.dense_key,
+                ds,
+                de,
+                present_bit,
+            );
 
-        for &(p, key) in &merged {
-            let (il, alt) = decode_alt(key, lut_bytes, lut_off);
-            pos.push(p as i32);
-            ilen.push(il as i32);
-            alt_bytes.extend_from_slice(&alt);
-            str_off.push(alt_bytes.len() as i64);
+            for &(p, key) in &merged {
+                let (il, alt) = decode_alt(key, lut_bytes, lut_off);
+                pos.push(p as i32);
+                ilen.push(il as i32);
+                alt_bytes.extend_from_slice(&alt);
+                str_off.push(alt_bytes.len() as i64);
+            }
+            var_off.push(pos.len() as i64);
+            h += 1;
         }
-        var_off.push(pos.len() as i64);
     }
 
     VariantsSoa {
@@ -586,5 +610,72 @@ mod tests {
         assert_eq!(soa.alt_bytes, b"TG".to_vec());
         // Pure-del ALT is empty -> the 3rd variant's [start, end) is [2, 2).
         assert_eq!(soa.str_off, vec![0, 1, 2, 2]);
+    }
+
+    /// Exercises the two things the asm-inspection pass touched: (1) `q =
+    /// h / ploidy` computed via an incrementing counter instead of a division
+    /// (needs `ploidy > 1` so some consecutive haps share a `q`, which the
+    /// single-hap tests above never trigger), and (2) the `present_bit`
+    /// closure's now-`get_unchecked` read of `dense_present`, with a mix of
+    /// present/absent bits whose per-hap `base_bit` windows straddle a byte
+    /// boundary (hap 1's 5-bit window covers global bits 5..10, i.e. bytes 0
+    /// and 1).
+    #[test]
+    fn test_decode_variants_from_split_byte_identical_presence_edge() {
+        use genoray_core::query::KeyRef;
+
+        let k = |b: &[u8]| svar2_codec::encode_alt_inline(b, 0);
+
+        // 2 regions x ploidy 2 = 4 haps, no var_key entries (isolates the
+        // dense/present-bit path). Region 0's dense window is 3 snp + 2 indel
+        // (width 5, shared by haps 0 & 1); region 1's is 3 snp + 0 indel
+        // (width 3, shared by haps 2 & 3). Combined presence bitstream is 16
+        // bits = 2 bytes, with hap 1's window (global bits 5..10) crossing
+        // the byte-0/byte-1 boundary at bit 8.
+        let br = BatchResultSplit {
+            n_regions: 2,
+            n_samples: 1,
+            ploidy: 2,
+            vk: vec![],
+            vk_off: vec![0, 0, 0, 0, 0],
+            dense_snp: vec![
+                KeyRef { position: 10, key: k(b"A") },
+                KeyRef { position: 11, key: k(b"C") },
+                KeyRef { position: 12, key: k(b"G") },
+                KeyRef { position: 50, key: k(b"T") },
+                KeyRef { position: 51, key: k(b"A") },
+                KeyRef { position: 52, key: k(b"C") },
+            ],
+            dense_snp_range: vec![(0, 3), (3, 6)],
+            // Per-hap snp-bit widths 3,3,3,3 -> offsets 0,3,6,9,12. Bitstream
+            // (idx0..11): 1,0,1, 0,1,0, 1,1,0, 0,0,1 -> byte0 = 0b1101_0101
+            // (bits0-7: 1,0,1,0,1,0,1,1 -> 1+4+16+64+128=213), byte1 low
+            // nibble (bits8-11: 0,0,0,1 -> 8).
+            dense_snp_present: vec![213, 8],
+            dense_snp_present_off: vec![0, 3, 6, 9, 12],
+            dense_indel: vec![
+                KeyRef { position: 13, key: svar2_codec::encode_pure_del(-2) },
+                KeyRef { position: 14, key: svar2_codec::encode_pure_del(-5) },
+            ],
+            dense_indel_range: vec![(0, 2), (2, 2)],
+            // Per-hap indel-bit widths 2,2,0,0 -> offsets 0,2,4,4,4.
+            // Bitstream (idx0..3): 1,0, 0,1 -> byte0 = 0b1001 (1+8=9).
+            dense_indel_present: vec![9],
+            dense_indel_present_off: vec![0, 2, 4, 4, 4],
+        };
+
+        let soa = decode_variants_from_split(&br, &[], &[0]);
+
+        // hap0 (q0): snp present [1,0,1] -> keeps pos10("A"),pos12("G");
+        //   indel present [1,0] -> keeps pos13(ilen -2).
+        // hap1 (q0): snp present [0,1,0] -> keeps pos11("C");
+        //   indel present [0,1] -> keeps pos14(ilen -5).
+        // hap2 (q1): snp present [1,1,0] -> keeps pos50("T"),pos51("A").
+        // hap3 (q1): snp present [0,0,1] -> keeps pos52("C").
+        assert_eq!(soa.pos, vec![10, 12, 13, 11, 14, 50, 51, 52]);
+        assert_eq!(soa.ilen, vec![0, 0, -2, 0, -5, 0, 0, 0]);
+        assert_eq!(soa.alt_bytes, b"AGCTAC".to_vec());
+        assert_eq!(soa.str_off, vec![0, 1, 2, 2, 3, 3, 4, 5, 6]);
+        assert_eq!(soa.var_off, vec![0, 3, 5, 7, 8]);
     }
 }
