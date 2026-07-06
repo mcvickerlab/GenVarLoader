@@ -1,5 +1,7 @@
+import errno
 import gc
 import json
+import shutil
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from importlib.metadata import version
@@ -629,6 +631,23 @@ def _reject_unsupported_variants(index: pl.DataFrame, source: str) -> None:
         )
 
 
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Hardlink ``src`` → ``dst`` to avoid duplicating the (possibly large) variant
+    index, falling back to a copy when the two live on different filesystems.
+
+    ``Path.hardlink_to`` raises ``OSError(EXDEV)`` across filesystem boundaries
+    (e.g. writing a dataset under ``/tmp`` from a source on a network mount). The
+    copy produces byte-identical content, so same-filesystem writes keep the
+    zero-copy hardlink and cross-device writes still succeed.
+    """
+    try:
+        dst.hardlink_to(src)
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+        shutil.copyfile(src, dst)
+
+
 def _write_from_vcf(
     path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int, extend_to_length: bool
 ):
@@ -641,7 +660,7 @@ def _write_from_vcf(
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    (out_dir / "variants.arrow").hardlink_to(vcf._index_path())
+    _link_or_copy(vcf._index_path(), out_dir / "variants.arrow")
 
     return _write_phased_chunked(
         out_dir, bed, _vcf_region_chunks(bed, vcf, max_mem, extend_to_length)
@@ -820,7 +839,7 @@ def _write_from_pgen(
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    (out_dir / "variants.arrow").hardlink_to(pgen._index_path())
+    _link_or_copy(pgen._index_path(), out_dir / "variants.arrow")
 
     return _write_phased_chunked(
         out_dir, bed, _pgen_region_chunks(bed, pgen, max_mem, extend_to_length)
