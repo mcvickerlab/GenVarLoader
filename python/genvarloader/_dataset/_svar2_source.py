@@ -1,12 +1,16 @@
-"""SVAR2 two-source reconstruction adapter.
+"""SVAR2 two-source reconstruction adapter — parity oracle only (not a live read path).
 
 Bridges genoray ``SparseVar2.overlap_batch``'s raw two-channel dict to gvl's SVAR2 kernels
 (``reconstruct_haplotypes_from_svar2`` / ``shift_and_realign_tracks_from_svar2``), decoding
-``var_key ⋈ dense`` inline with no intermediate variant table. Additive to the SVAR 1.0 path.
+``var_key ⋈ dense`` inline with no intermediate variant table. This is the *union* path
+(genoray ``overlap_batch``, whole-cohort).
 
-TODO(svar2-dataset-dispatch): wiring this into ``Haps``/``Dataset`` (an svar2-source flag on the
-dataset that routes reconstruction here) is deferred — it touches the central SVAR 1.0 reconstructor.
-This adapter is self-contained and is validated end-to-end in tests against genoray's decode oracle.
+Live dataset dispatch is NOT wired through here. ``Dataset`` reconstruction for ``.svar2``-backed
+datasets is handled by the read-bound path in ``Svar2Haps`` (``_svar2_haps.py``), which gathers off
+the write-time ranges cache and calls the ``*_from_svar2_readbound`` kernels — no interval-search-tree
+rebuild and no dense-union rebuild per read. This ``SparseVar2Source`` adapter is retained solely as
+the byte-identical *parity oracle* the read-bound kernels are tested against (see
+``tests/dataset/test_svar2_readbound_*.py``); it is not imported on any live read path.
 """
 
 from __future__ import annotations
