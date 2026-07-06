@@ -45,8 +45,10 @@ from ..genvarloader import (
     decode_variants_from_svar2_readbound,
     hap_diffs_from_svar2_readbound,
     reconstruct_haplotypes_from_svar2_readbound,
+    shift_and_realign_tracks_from_svar2_readbound,
 )
 from ._flat_variants import _FlatVariantWindows
+from ._intervals import intervals_to_tracks
 from ._haps import _H, Haps, _Variants
 from ._rag_variants import RaggedVariants
 from ._reference import Reference
@@ -420,6 +422,105 @@ class Svar2Haps(Haps[_H]):
             np.asarray(idx, np.intp)[:, None], P, axis=1
         )  # svar2 placeholder; 7c re-slices the cache from idx.
         return out, geno_offset_idx, shifts, diffs, hap_lengths, None, None
+
+    # ---- tracks (7c) ----
+
+    def realign_track_block(
+        self,
+        idx: NDArray[np.integer],
+        o_idx: NDArray[np.integer],
+        regions: NDArray[np.integer],
+        shifts: NDArray[np.int32],
+        track_lengths: NDArray[np.integer],
+        intervals,
+        params: NDArray[np.float64],
+        strategy_id: int,
+        base_seed: int,
+    ) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
+        """Haplotype-realign ONE track for a query block, returning a flat f32
+        buffer + offsets in global ``(b, P)`` C-order (row = ``q * P + p``).
+
+        The two-step SVAR2 track path (there is no fused interval→realign kernel):
+
+        1. **Materialize** the per-query reference-space track window from
+           ``intervals`` via the standalone :func:`intervals_to_tracks` FFI. Each
+           window starts at ``regions[q, 1]`` and spans ``track_lengths[q]`` ref
+           bases (= region length + max deletion across ploidy), exactly the
+           ``tracks``/``track_offsets`` input the realign kernel expects (one
+           window per query; all P haps of a query share it).
+        2. **Realign** to haplotype coordinates via
+           :func:`shift_and_realign_tracks_from_svar2_readbound`, cache-sliced per
+           contig group EXACTLY like :meth:`get_haps_and_shifts` slices for haps.
+
+        ``o_idx`` selects the interval row per query (``idx`` for SAMPLE tracks,
+        ``r_idx`` otherwise). Per-hap output length is ``ref_len + diff`` (the
+        kernel's native sizing), so the stitched offsets equal the haps'
+        ``hap_lengths`` in the same order.
+        """
+        assert self.store is not None
+        regions = np.asarray(regions, np.int32)
+        P = int(self.genotypes.shape[-2])
+        b = len(idx)
+        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
+        r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
+        contig_ids = regions[:, 0].astype(np.int64)
+        groups = self._contig_groups(contig_ids)
+
+        params_c = np.ascontiguousarray(params, np.float64)
+        o_idx = np.asarray(o_idx)
+        track_lengths = np.asarray(track_lengths, np.int64)
+
+        cat_data: list[NDArray[np.float32]] = []
+        cat_lens: list[NDArray[np.int64]] = []
+        cat_query_order: list[NDArray[np.intp]] = []
+        for ci, qsel in groups:
+            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
+
+            # (1) materialize ref-space track windows for this group's queries.
+            tl_g = track_lengths[qsel]
+            track_ofsts_g = lengths_to_offsets(tl_g, np.int64)
+            tracks_buf = np.empty(int(track_ofsts_g[-1]), np.float32)
+            intervals_to_tracks(
+                offset_idxs=o_idx[qsel],
+                starts=regions[qsel, 1],
+                itv_starts=intervals.starts.data,
+                itv_ends=intervals.ends.data,
+                itv_values=intervals.values.data,
+                itv_offsets=intervals.starts.offsets,
+                out=tracks_buf,
+                out_offsets=track_ofsts_g,
+            )
+
+            # (2) realign to haplotype coordinates (cache-sliced, per contig).
+            g_shifts = np.ascontiguousarray(shifts[qsel], np.int32)
+            g_total = int(track_ofsts_g[-1])
+            out_data, out_off = shift_and_realign_tracks_from_svar2_readbound(
+                self.store,
+                self.ds_contigs[ci],
+                gi[0],
+                gi[1],
+                gi[2],
+                gi[3],
+                gi[4],
+                gi[5],
+                gi[6],
+                g_shifts,
+                np.ascontiguousarray(tracks_buf, np.float32),
+                track_ofsts_g,
+                params_c,
+                np.int64(strategy_id),
+                np.uint64(base_seed),
+                should_parallelize(g_total * 4),
+            )
+            cat_data.append(np.asarray(out_data, np.float32))
+            cat_lens.append(np.diff(np.asarray(out_off, np.int64)))
+            cat_query_order.append(qsel)
+
+        data = np.concatenate(cat_data) if cat_data else np.zeros(0, np.float32)
+        lens = np.concatenate(cat_lens) if cat_lens else np.zeros(0, np.int64)
+        grouped_off = lengths_to_offsets(lens, np.int64)
+        perm = self._inverse_row_perm(cat_query_order, b, P)
+        return _ragged_arange_gather(data, grouped_off, perm)
 
     # ---- variants ----
 

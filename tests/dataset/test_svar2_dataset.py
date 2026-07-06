@@ -124,6 +124,148 @@ def test_svar2_haplotypes_match_svar1(tmp_path, bed, svar_fixture, svar2_fixture
     assert np.array_equal(a.data.view("u1"), b.data.view("u1"))
 
 
+def _make_bigwig(path: Path, contig: str, length: int, seed: int) -> None:
+    """Write a dense per-bp BigWig over ``contig`` (deterministic given ``seed``)."""
+    import pyBigWig
+
+    rng = np.random.default_rng(seed)
+    starts = list(range(length))
+    ends = list(range(1, length + 1))
+    values = [float(v) for v in rng.standard_normal(length).astype(np.float32)]
+    with pyBigWig.open(str(path), "w") as bw:
+        bw.addHeader([(contig, length)], maxZooms=0)
+        bw.addEntries([contig] * length, starts, ends=ends, values=values)
+
+
+@pytest.fixture(scope="module")
+def bigwig_fixture(tmp_path_factory):
+    """Per-sample BigWigs over chr1 (len 40) -> a SAMPLE-indexed gvl.BigWigs track."""
+    bw_dir = tmp_path_factory.mktemp("svar2_bw")
+    paths = {}
+    for i, s in enumerate(["S0", "S1"]):
+        p = bw_dir / f"{s}.bw"
+        _make_bigwig(p, "chr1", 40, seed=100 + i)
+        paths[s] = str(p)
+    return gvl.BigWigs("signal", paths)
+
+
+def test_svar2_tracks_match_svar1(
+    tmp_path, bed, svar_fixture, svar2_fixture, bigwig_fixture, _src
+):
+    """Haplotype-realigned tracks byte-identical (f32, NaN-equal) to SVAR1.
+
+    Both datasets are written from the SAME VCF + SAME BigWig track; at read the
+    SVAR1 backend realigns via the fused kernel and the SVAR2 backend
+    (``Svar2Haps`` + ``HapsTracks._call_svar2``) realigns via the split
+    ``intervals_to_tracks`` + ``shift_and_realign_tracks_from_svar2_readbound``
+    path. deterministic=True + max_jitter=0 => shifts=0, so parity is exact.
+    """
+    from genoray import SparseVar, SparseVar2
+
+    _bcf, ref = _src
+    d1 = tmp_path / "t1.gvl"
+    d2 = tmp_path / "t2.gvl"
+    gvl.write(
+        d1,
+        bed,
+        variants=SparseVar(svar_fixture),
+        tracks=bigwig_fixture,
+        samples=None,
+        max_jitter=0,
+        overwrite=True,
+    )
+    gvl.write(
+        d2,
+        bed,
+        variants=SparseVar2(svar2_fixture),
+        tracks=bigwig_fixture,
+        samples=None,
+        max_jitter=0,
+        overwrite=True,
+    )
+    ds1 = gvl.Dataset.open(d1, reference=ref)
+    ds2 = gvl.Dataset.open(d2, reference=ref)
+
+    # HapsTracks (seqs active by default) -> (haps, tracks) tuple.
+    _h1, a = ds1.with_tracks("signal")[:, :]
+    _h2, b = ds2.with_tracks("signal")[:, :]
+
+    ao, bo = np.asarray(a.offsets), np.asarray(b.offsets)
+    assert np.array_equal(ao, bo), (
+        f"track offsets differ: svar1={ao.tolist()} svar2={bo.tolist()}"
+    )
+    ad, bd = np.asarray(a.data, np.float32), np.asarray(b.data, np.float32)
+    assert np.allclose(ad, bd, equal_nan=True), "track data differ"
+
+
+def test_svar2_tracks_match_svar1_multicontig(
+    tmp_path, svar_fixture2, svar2_fixture2, _src2
+):
+    """Realigned tracks byte-identical to SVAR1 across a TWO-contig, out-of-order
+    bed -- exercises ``_call_svar2``'s contig-group split + inverse row-perm
+    stitching for the track path (single-contig fast path bypassed)."""
+    import pyBigWig
+
+    from genoray import SparseVar, SparseVar2
+
+    _bcf, ref = _src2
+    bw_dir = tmp_path / "bw_mc"
+    bw_dir.mkdir()
+    paths = {}
+    for i, s in enumerate(["S0", "S1"]):
+        p = bw_dir / f"{s}.bw"
+        rng = np.random.default_rng(200 + i)
+        with pyBigWig.open(str(p), "w") as bw:
+            bw.addHeader([("chr1", 40), ("chr2", 40)], maxZooms=0)
+            for contig in ("chr1", "chr2"):
+                vals = [float(v) for v in rng.standard_normal(40).astype(np.float32)]
+                bw.addEntries(
+                    [contig] * 40, list(range(40)), ends=list(range(1, 41)), values=vals
+                )
+        paths[s] = str(p)
+    track = gvl.BigWigs("signal", paths)
+
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr2", "chr1", "chr2", "chr1"],
+            "chromStart": [0, 0, 10, 5],
+            "chromEnd": [40, 40, 40, 20],
+        }
+    )
+    d1 = tmp_path / "tmc1.gvl"
+    d2 = tmp_path / "tmc2.gvl"
+    gvl.write(
+        d1,
+        bed,
+        variants=SparseVar(svar_fixture2),
+        tracks=track,
+        samples=None,
+        max_jitter=0,
+        overwrite=True,
+    )
+    gvl.write(
+        d2,
+        bed,
+        variants=SparseVar2(svar2_fixture2),
+        tracks=track,
+        samples=None,
+        max_jitter=0,
+        overwrite=True,
+    )
+    ds1 = gvl.Dataset.open(d1, reference=ref)
+    ds2 = gvl.Dataset.open(d2, reference=ref)
+
+    _h1, a = ds1.with_tracks("signal")[:, :]
+    _h2, b = ds2.with_tracks("signal")[:, :]
+
+    ao, bo = np.asarray(a.offsets), np.asarray(b.offsets)
+    assert np.array_equal(ao, bo), (
+        f"track offsets differ: svar1={ao.tolist()} svar2={bo.tolist()}"
+    )
+    ad, bd = np.asarray(a.data, np.float32), np.asarray(b.data, np.float32)
+    assert np.allclose(ad, bd, equal_nan=True), "track data differ"
+
+
 def _assert_ragged_equal(a, b, name: str) -> None:
     ao, bo = np.asarray(a.offsets), np.asarray(b.offsets)
     assert np.array_equal(ao, bo), (

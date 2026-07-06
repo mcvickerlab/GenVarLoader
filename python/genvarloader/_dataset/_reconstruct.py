@@ -140,6 +140,24 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
         flat: bool = False,
         to_rc: "NDArray[np.bool_] | None" = None,
     ) -> tuple[_H, _T]:
+        # SVAR2 read path (Task 7c): route to the split materialize→realign
+        # kernel. The isinstance guard keeps the SVAR1 body below byte-unchanged.
+        from ._svar2_haps import Svar2Haps
+
+        if isinstance(self.haps, Svar2Haps):
+            return self._call_svar2(
+                idx,
+                r_idx,
+                regions,
+                output_length,
+                jitter,
+                rng,
+                deterministic,
+                splice_plan,
+                flat,
+                to_rc,
+            )
+
         if splice_plan is not None:
             raise NotImplementedError(
                 "Splicing of haplotypes + tracks (shape (b, t, p, ~l)) is not "
@@ -285,6 +303,137 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
         tracks = cast(_T, tracks)
 
         return haps, tracks
+
+    def _call_svar2(
+        self,
+        idx: NDArray[np.integer],  # (b)
+        r_idx: NDArray[np.integer],  # (b)
+        regions: NDArray[np.int32],  # (b 3)
+        output_length: Literal["ragged", "variable"] | int,
+        jitter: int,
+        rng: np.random.Generator,
+        deterministic: bool,
+        splice_plan: SplicePlan | None = None,
+        flat: bool = False,
+        to_rc: "NDArray[np.bool_] | None" = None,
+    ) -> tuple[_H, _T]:
+        """SVAR2 haplotype-realigned tracks (see :class:`Svar2Haps`).
+
+        Produces the SAME ``(b, t, p, ~l)`` ``_Flat`` layout the SVAR1
+        :meth:`__call__` above produces — the per-track ``_out`` slices are filled
+        byte-identically, only the interval→realign step is SPLIT into the two
+        standalone SVAR2 kernels (``intervals_to_tracks`` +
+        ``shift_and_realign_tracks_from_svar2_readbound``) instead of the fused
+        SVAR1 kernel. Haps come from the shared ``get_haps_and_shifts`` 7-tuple.
+        """
+        from ._svar2_haps import Svar2Haps
+
+        haps_recon = cast(Svar2Haps, self.haps)
+
+        if splice_plan is not None:
+            raise NotImplementedError(
+                "Splicing of haplotypes + tracks is not supported for svar2 "
+                "datasets yet."
+            )
+        # The realign kernel has no in-kernel reverse-complement.
+        if to_rc is not None and bool(np.asarray(to_rc).any()):
+            raise NotImplementedError(
+                "In-kernel reverse-complement is not supported for svar2 "
+                "haplotype-realigned tracks."
+            )
+
+        lengths = regions[:, 2] - regions[:, 1]
+
+        # ragged (b p l), (b p), (b p), (b p), (b p), None, None
+        haps, _geno_idx, shifts, diffs, hap_lengths, _keep, _keep_offsets = (
+            haps_recon.get_haps_and_shifts(
+                idx=idx,
+                regions=regions,
+                output_length=output_length,
+                rng=rng,
+                deterministic=deterministic,
+                to_rc=to_rc,
+            )
+        )
+
+        if issubclass(self.tracks.kind, RaggedTracks):
+            # The readbound track kernel always sizes each hap to ref_len + diff
+            # (no output_length override), so a fixed-length request cannot be
+            # honored byte-identically. Guard rather than silently mis-size.
+            if isinstance(output_length, int):
+                raise NotImplementedError(
+                    "Fixed-length (int output_length) haplotype-realigned tracks "
+                    "are not supported for svar2 datasets yet; use ragged/variable "
+                    "output."
+                )
+            # (b p) — ragged output: hap output length == hap_lengths.
+            out_lengths = hap_lengths
+            # (b) = lengths (b) + max deletion length across ploidy (b p) -> (b)
+            track_lengths = lengths - diffs.clip(max=0).min(1)
+
+            # (b*p+1)
+            out_ofsts_per_t = lengths_to_offsets(out_lengths)
+            n_per_track: int = out_ofsts_per_t[-1]
+            # ragged (b t p l)
+            out = np.empty(len(self.tracks.active_tracks) * n_per_track, np.float32)
+            out_lens = repeat(
+                out_lengths, "b p -> b t p", t=len(self.tracks.active_tracks)
+            )
+            out_offsets = lengths_to_offsets(out_lens)
+
+            # Lower per-track strategies into numba-friendly arrays.
+            strat_list = [
+                self.tracks.insertion_fill.get(name, Repeat5p())
+                for name in self.tracks.active_tracks
+            ]
+            strat_ids, strat_params = _lower_insertion_fills(strat_list)
+            # Base seed identical to the SVAR1 path (idx-xor when deterministic).
+            if deterministic:
+                base_seed = np.uint64(
+                    np.bitwise_xor.reduce(idx.astype(np.uint64, copy=False))
+                )
+            else:
+                base_seed = np.uint64(
+                    rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
+                )
+
+            for track_ofst, (name, tracktype) in enumerate(
+                self.tracks.active_tracks.items()
+            ):
+                intervals = self.tracks.intervals[name]
+                o_idx = idx if tracktype is TrackType.SAMPLE else r_idx
+
+                _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
+                block_data, _block_off = haps_recon.realign_track_block(
+                    idx=idx,
+                    o_idx=o_idx,
+                    regions=regions,
+                    shifts=shifts,
+                    track_lengths=track_lengths,
+                    intervals=intervals,
+                    params=np.ascontiguousarray(strat_params[track_ofst], np.float64),
+                    strategy_id=int(strat_ids[track_ofst]),
+                    base_seed=int(base_seed),
+                )
+                # block_data is (b, P) C-ordered with per-hap lengths == hap_lengths,
+                # so its offsets equal out_ofsts_per_t; copy into the track slice.
+                _out[:] = block_data
+
+            out_shape = (
+                len(idx),
+                len(self.tracks.active_tracks),
+                self.haps.genotypes.shape[-2],
+                None,
+            )
+
+            # flat (b t p l)
+            tracks = _Flat.from_offsets(out, out_shape, out_offsets)
+
+        else:
+            tracks = self.tracks._call_intervals(idx)
+
+        tracks = cast(_T, tracks)
+        return cast(_H, haps), tracks
 
 
 def _build_reconstructor(
