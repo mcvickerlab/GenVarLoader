@@ -653,68 +653,70 @@ git commit -m "perf(svar2): compute the pos/ilen ragged reorder index once in va
 
 ---
 
-### Task B4: `cargo asm` pass on the top post-B1/B2/B3 native symbol (gvl or genoray)
+### Task B4: `cargo asm` pass on ALL hot native functions — parallel subagent fan-out
 
-**Rationale:** after B1-B3, re-profile and take the #1 remaining native self-time symbol. Likely `genoray_core::spine::merge_keys` or `genoray_core::query::gather_haps_readbound` (genoray `svar-2`), gvl's `svar2::merge_hap`/`decode_alt` (variants) or `reconstruct_haplotypes_from_svar2` inner loop (haplotypes). This task inspects that function's assembly, finds a bounds-check / vectorization / allocation defect, and fixes it — the specific instruction change is *discovered from the asm*, not pre-guessed; the deliverable is a measured instruction-count reduction or a documented "no safe win."
+**Rationale:** after B1-B3, re-profile and collect the **full set** of native functions that still carry meaningful self-time (gvl and genoray), not just the #1. Because these functions are independent, optimize them **in parallel — one subagent per function**, each inspecting that function's assembly, finding a bounds-check / vectorization / allocation defect, and applying a byte-identical fix guarded by its **own per-function parity test**. The specific instruction change is *discovered from the asm*, not pre-guessed; each subagent's deliverable is a measured instruction-count reduction (or a documented "no safe win"). The branch owner then merges the fixes sequentially behind the full-tree parity gate.
+
+**Execution model:** REQUIRED SUB-SKILLs — superpowers:dispatching-parallel-agents (fan-out) + superpowers:using-git-worktrees (isolation). Per project rules: subagent implementers run on **Sonnet or weaker**; worktrees live under `.claude/worktrees/` of the owning repo. Worktree isolation is REQUIRED because several candidates share a file (`src/svar2/mod.rs` holds `split_to_flat`/`merge_hap`/`decode_alt`; genoray `src/spine.rs` holds `merge_keys`) — parallel in-place edits to the same file would clobber each other.
 
 **Files:**
-- Modify: the file owning the ranked function — gvl `src/reconstruct.rs` / `src/svar2/mod.rs`, **or** genoray `/carter/users/dlaub/projects/genoray/src/{spine.rs,query.rs}` (branch `svar-2`)
-- Test: `cargo test` (owning repo) + gvl pytest parity suite
+- Modify (per subagent, in its own worktree): the file owning that function — gvl `src/reconstruct.rs` / `src/svar2/mod.rs`, **or** genoray `/carter/users/dlaub/projects/genoray/src/{spine.rs,query.rs}` (branch `svar-2`)
+- Test (per subagent): a focused `cargo test` in the owning repo asserting byte-identical output for that function
 
 **Interfaces:**
-- Consumes: A3/post-B3 native profile ranking.
-- Produces: same function signature and byte-identical output, fewer instructions on the hot loop.
+- Consumes: A3/post-B3 native profile ranking (the hot-function set).
+- Produces: per function — same signature, byte-identical output, fewer hot-loop instructions, and a committed per-function parity test.
 
-- [ ] **Step 1: Re-profile to pick the target**
+- [ ] **Step 1: Re-profile and enumerate the hot-function set**
 
-Run: `cp tmp/svar2_mvp/prof_out/readbound/native_baseline.md tmp/svar2_mvp/prof_out/readbound/native_after_b1b3.md` then `bash tmp/svar2_mvp/prof_perf.sh` and read the top symbol per mode. Choose the highest gvl/genoray self-time symbol (ignore libc `_int_malloc`/`memmove` and numpy symbols — those are addressed structurally, not by asm).
+Run: `cp tmp/svar2_mvp/prof_out/readbound/native_baseline.md tmp/svar2_mvp/prof_out/readbound/native_after_b1b3.md` then `bash tmp/svar2_mvp/prof_perf.sh`. From the per-mode symbol tables, list every gvl/genoray self-time symbol above a cutoff (e.g. ≥1.5% self across any mode). **Exclude** libc (`_int_malloc`/`memmove`/`memset`) and numpy symbols — those are structural, not asm-fixable. Write the resulting list (function → owning repo/file → which mode exercises it) into `tmp/svar2_mvp/prof_out/readbound/asm_targets.md`. This list is the fan-out work-list.
 
-- [ ] **Step 2: Dump its assembly**
+- [ ] **Step 2: Create one worktree per target function**
 
-For a gvl symbol:
+For each function `F` in the work-list, create an isolated worktree off the correct branch. gvl functions:
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-cargo asm --release --lib "genvarloader::svar2::merge_hap" 2>/dev/null | head -200
-# (adjust the fully-qualified path to the chosen symbol; `cargo asm --release --lib`
-#  then a fragment lists candidates if the exact path is ambiguous.)
+git worktree add ".claude/worktrees/asm-<F>" svar2-m6b-kernel
 ```
-For a genoray symbol:
+genoray functions:
 ```bash
 cd /carter/users/dlaub/projects/genoray
-cargo asm --release --lib "genoray::spine::merge_keys" 2>/dev/null | head -200
+git worktree add ".claude/worktrees/asm-<F>" svar-2
 ```
-Optionally cross-reference `perf annotate -i tmp/svar2_mvp/prof_out/readbound/<tag>.data --stdio` to see which source lines carry the samples.
+Record the worktree path per function in `asm_targets.md`.
 
-- [ ] **Step 3: Identify the defect**
+- [ ] **Step 3: Dispatch one Sonnet subagent per function (in parallel)**
 
-Look for: per-iteration `panic`/`bounds_check` calls in the hot loop (→ replace indexed access with iterators or `get_unchecked` where an invariant guarantees the bound), scalar (non-vectorized) copy/merge loops that could use `extend_from_slice`/`copy_from_slice`, or in-loop allocation. Write the specific instruction pattern in a comment on the fix.
+Dispatch all subagents in a single batch (superpowers:dispatching-parallel-agents). Give each subagent this exact brief, filled in for its function `F`, file, worktree path, and the mode/cohort that exercises it:
 
-- [ ] **Step 4: Apply the minimal fix** (guided by Step 3 — e.g. hoist a slice bound so the compiler elides per-element checks, or switch a `for i in 0..n { out.push(a[i]) }` to `out.extend_from_slice(&a[..n])`). Keep behavior byte-identical.
+> You are optimizing exactly ONE Rust function, `F`, in worktree `<path>` (do not touch any other file). Model: Sonnet.
+> 1. Dump its assembly: `cargo asm --release --lib "<fully::qualified::F>" 2>/dev/null | head -200` (if the path is ambiguous, run `cargo asm --release --lib` and grep the candidate list). Cross-reference `perf annotate -i tmp/svar2_mvp/prof_out/readbound/<tag>.data --stdio` for the hot source lines.
+> 2. Identify a byte-identical defect: per-iteration `panic`/bounds-check in the hot loop (→ iterators or `get_unchecked` behind a proven invariant), scalar copy/merge loops (→ `extend_from_slice`/`copy_from_slice`), or in-loop allocation (→ `with_capacity`). Comment the specific instruction pattern on the fix.
+> 3. Apply the minimal fix. Behavior MUST stay byte-identical.
+> 4. Write a **per-function parity test** in the owning repo: a `#[test]` that runs `F` on representative inputs and asserts the exact output (compare against a hand-checked expected value, or against a slow reference implementation of `F` inline in the test). Name it `test_<F>_byte_identical`.
+> 5. `cargo test test_<F>_byte_identical` (set `LD_LIBRARY_PATH` to `.pixi/envs/dev/lib` if libpython fails to load in gvl). It MUST pass.
+> 6. Measure: `RUSTFLAGS="-C force-frame-pointers=yes" pixi run -e dev maturin develop --release` (from the gvl worktree; for genoray targets, build gvl against the genoray worktree path-dep), then same-session `perf stat -e instructions,cycles -- .pixi/envs/dev/bin/python tmp/svar2_mvp/prof_getitem.py <mode> <cohort> <K>` before vs after. Report the instruction delta.
+> 7. Commit in your worktree: `perf(...): <F> asm fix — <what> (byte-identical, -N% instr)`. If you found NO safe byte-identical win, revert your edits, commit nothing, and report "no safe win for F" with the asm reason.
 
-- [ ] **Step 5: Rebuild + parity**
+- [ ] **Step 4: Collect results**
 
-Run (genoray change picked up by gvl's rebuild via the crate path-dep):
+Gather each subagent's report (fix applied? instruction delta? or no-safe-win) into `asm_targets.md`. Discard worktrees for no-win functions: `git worktree remove .claude/worktrees/asm-<F>`.
+
+- [ ] **Step 5: Merge the winning fixes sequentially behind the parity gate**
+
+For each winning function, in turn (gvl fixes onto `svar2-m6b-kernel`, genoray fixes onto `svar-2`):
 ```bash
-# if genoray was edited, its unit tests first:
-cd /carter/users/dlaub/projects/genoray && cargo test <changed_module> 2>&1 | tail -15; cd -
+# gvl example (from the main worktree):
+cd "$(git rev-parse --show-toplevel)"
+git cherry-pick <worktree-commit-sha>     # or merge the worktree branch
 RUSTFLAGS="-C force-frame-pointers=yes" pixi run -e dev maturin develop --release
-pixi run -e dev pytest tests -q
+pixi run -e dev pytest tests -q           # full-tree parity after EACH merge
 ```
-Expected: owning-repo `cargo test` green; gvl full tree green (byte-identical parity).
+If a merge conflicts (two fixes in the same file) or the full tree goes red, resolve the conflict / drop the offending fix, re-run, and record the decision. genoray fixes: cherry-pick onto `svar-2` in the genoray checkout, then rebuild gvl (crate path-dep) and re-run the gvl full tree. After all merges, remove the worktrees.
 
-- [ ] **Step 6: Instruction-count delta + record**
+- [ ] **Step 6: Record**
 
-Run the same-session `perf stat` on the mode that exercises the changed symbol; append the before/after instruction counts and the asm observation to `tmp/svar2_mvp/prof_out/readbound/native_after_b1b3.md`. If no safe win was found, record that conclusion instead and stop.
-
-- [ ] **Step 7: Commit (correct repo/branch)**
-
-```bash
-# gvl change:
-git add src/... && git commit -m "perf(svar2): <fn> asm fix — <what> (byte-identical, -N% instr)"
-# OR genoray change (in the genoray checkout, on svar-2):
-cd /carter/users/dlaub/projects/genoray
-git add src/... && git commit -m "perf(query): <fn> asm fix — <what> (byte-identical, -N% instr)"
-```
+Append the final per-function outcomes (merged / dropped / no-win) and cumulative instruction deltas per mode to `tmp/svar2_mvp/prof_out/readbound/native_after_b1b3.md`.
 
 ---
 
@@ -750,9 +752,9 @@ git commit --no-verify -m "perf(svar2): read-bound getitem optimization results 
 - In-scope modes haplotypes + variants; tracks dropped from profiling but parity-protected; variant-windows deferred (guarded) → Global Constraints + A1 driver + B5 deferred note. ✓
 - Two-repo landing (gvl #266 / genoray svar-2) → Global Constraints + B4/B5 commit steps. ✓
 - Measure→confirm→fix→re-measure + parity + instr-delta → per-Task gates; Phase B preamble enforces "confirm before implementing." ✓
-- Haplotypes double-gather → B1 (concrete, tracks-safe via `need_hap_lengths`). Variants+shared alloc churn → B2 (concrete). Variants Python twin-gather → B3 (concrete). cargo asm on hot Rust → B4. ✓
+- Haplotypes double-gather → B1 (concrete, tracks-safe via `need_hap_lengths`). Variants+shared alloc churn → B2 (concrete). Variants Python twin-gather → B3 (concrete). cargo asm on ALL hot Rust fns → B4 (parallel subagent fan-out, per-function parity tests, worktree-isolated). ✓
 - No format/API change → B5 Step 2 reconciliation. ✓
 
-**Placeholder scan:** B4 is investigation-then-fix by nature (asm-discovered), but specifies the exact function-selection rule, exact `cargo asm`/`perf annotate` commands, the defect classes to look for, and a concrete gate — not a hand-wave. B1/B2/B3 carry full code. No "TBD"/"similar to Task N".
+**Placeholder scan:** B4 is investigation-then-fix by nature (asm-discovered) and now a parallel fan-out, but specifies the exact hot-set enumeration rule + cutoff, worktree-per-function isolation, the verbatim per-subagent brief (with exact `cargo asm`/`perf annotate`/`perf stat` commands, the defect classes, the per-function `test_<F>_byte_identical` requirement), and a sequential merge-behind-parity gate — not a hand-wave. B1/B2/B3 carry full code. No "TBD"/"similar to Task N".
 
 **Type consistency:** `make_call(mode, cohort)` defined in A1, reused verbatim in A2. `get_haps_and_shifts` gains `need_hap_lengths: bool = False` (B1) — threaded to the tracks caller in the same task; haplotypes caller uses the default. `_ragged_arange_src(offsets, perm) -> (src, new_off)` defined and consumed within B3; `_ragged_arange_gather` re-expressed on it (same return contract). `split_to_flat`/`decode_variants_from_split` signatures unchanged (B2). Store sample count via `SparseVar2.n_samples` (verified attribute).

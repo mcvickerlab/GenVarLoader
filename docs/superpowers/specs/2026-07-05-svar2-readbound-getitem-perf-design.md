@@ -113,10 +113,17 @@ concrete candidates to **confirm against the profile before touching**:
   `_ragged_arange_gather` permutation passes — vectorize / drop copies where the
   profile justifies.
 - **Rust hot fns via `cargo asm`:** likely `svar2::split_to_flat` (AoS→SoA copy),
-  `gather_haps_readbound`, `merge_keys`, `hap_diffs_svar2`, and the
-  `reconstruct_haplotypes_from_svar2` inner kernel. `cargo asm` targets:
-  bounds-check elision, autovectorization of copy/merge loops, alloc churn
-  (`SpecFromIter`/`_int_malloc` were hot even in the old run).
+  `svar2::merge_hap`/`decode_alt`, `gather_haps_readbound`, `merge_keys`,
+  `hap_diffs_svar2`, and the `reconstruct_haplotypes_from_svar2` inner kernel.
+  `cargo asm` targets: bounds-check elision, autovectorization of copy/merge
+  loops, alloc churn (`SpecFromIter`/`_int_malloc` were hot even in the old run).
+  Because these functions are independent, the `cargo asm` phase **fans out one
+  subagent per hot function in parallel** (Sonnet implementers, each in its own
+  git worktree so same-file edits don't clobber), and **each fix carries its own
+  per-function parity test** (a focused `cargo test` asserting byte-identical
+  output on representative inputs) alongside the instruction-count delta. The
+  branch owner then merges the worktree fixes sequentially behind the full-tree
+  parity gate, dropping any that regress or fail parity.
 
 ## 7. Measurement discipline & parity gate
 
@@ -140,7 +147,10 @@ Per hard-won project lessons (shared-node noise):
    tables, per mode × cohort) under `tmp/svar2_mvp/prof_out/`.
 2. Confirmed optimizations implemented: gvl-side on `svar2-m6b-kernel` (#266),
    genoray-side on `svar-2` — each parity-gated, each with a recorded
-   same-session instruction-count delta.
+   same-session instruction-count delta. The `cargo asm` phase is executed as a
+   **parallel subagent fan-out** (one worktree-isolated Sonnet subagent per hot
+   function, each with a per-function parity test), merged sequentially behind
+   the full-tree parity gate.
 3. `pyinstrument` added to `pixi.toml`.
 4. No format/API/doc-surface changes (read-path internals only), so the
    skill/api.md/docs gates do not apply; the genoray roadmap needs no milestone
