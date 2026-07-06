@@ -1050,6 +1050,106 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
     Ok((out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py)))
 }
 
+/// Read-bound SVAR2 per-hap ilen diffs: the same gather
+/// (`genoray_core::query::gather_haps_readbound` + [`crate::svar2::split_to_flat`]) as
+/// [`reconstruct_haplotypes_from_svar2_readbound`], but stops after
+/// [`crate::svar2::hap_diffs_svar2`] and returns just the `(n_q, ploidy)` diffs —
+/// no reconstruct sizing/allocation/kernel pass. Used by the dataset read path to
+/// compute random jitter shifts from diffs BEFORE reconstructing (mirrors how the
+/// SVAR1 path derives shifts from diffs in `_prepare_request`).
+///
+/// See [`reconstruct_haplotypes_from_svar2_readbound`] for the shared
+/// `region_starts`/`orig_samples`/`vk_*_range`/`dense_*_range`/`region_bounds`
+/// argument semantics (the per-query outputs of `SparseVar2.find_ranges`,
+/// flattened region-major, sample-minor); see
+/// `python/genvarloader/_dataset/_svar2_store_py.py::build_readbound_diffs`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn hap_diffs_from_svar2_readbound<'py>(
+    py: Python<'py>,
+    store: PyRef<'py, crate::svar2::store::Svar2Store>,
+    contig: &str,
+    region_starts: PyReadonlyArray1<u32>,
+    orig_samples: PyReadonlyArray1<i64>,
+    vk_snp_range: PyReadonlyArray2<i64>,
+    vk_indel_range: PyReadonlyArray2<i64>,
+    dense_snp_range: PyReadonlyArray2<i64>,
+    dense_indel_range: PyReadonlyArray2<i64>,
+    region_bounds: PyReadonlyArray2<i32>,
+    ploidy: usize,
+) -> PyResult<Bound<'py, PyArray2<i32>>> {
+    use crate::svar2;
+
+    let reader = store.reader(contig).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("contig {contig} not in store"))
+    })?;
+
+    let region_bounds_a = region_bounds.as_array();
+    let n_q = region_bounds_a.nrows();
+
+    // Build `regions` (n_q, 3) as [contig_idx=0, start, end) — matches the
+    // reconstruct-readbound FFI's convention.
+    let mut regions = Array2::<i32>::zeros((n_q, 3));
+    for q in 0..n_q {
+        regions[[q, 1]] = region_bounds_a[[q, 0]];
+        regions[[q, 2]] = region_bounds_a[[q, 1]];
+    }
+
+    let region_starts_v: Vec<u32> = region_starts.as_array().to_vec();
+    let orig_samples_v: Vec<usize> = orig_samples
+        .as_array()
+        .iter()
+        .map(|&x| x as usize)
+        .collect();
+    let to_pairs = |a: numpy::ndarray::ArrayView2<i64>| -> Vec<(usize, usize)> {
+        a.rows()
+            .into_iter()
+            .map(|r| (r[0] as usize, r[1] as usize))
+            .collect()
+    };
+    let vk_snp_range_v = to_pairs(vk_snp_range.as_array());
+    let vk_indel_range_v = to_pairs(vk_indel_range.as_array());
+    let dense_snp_range_v = to_pairs(dense_snp_range.as_array());
+    let dense_indel_range_v = to_pairs(dense_indel_range.as_array());
+
+    let diffs = py.detach(move || {
+        let br = genoray_core::query::gather_haps_readbound(
+            reader,
+            &region_starts_v,
+            &orig_samples_v,
+            &vk_snp_range_v,
+            &vk_indel_range_v,
+            &dense_snp_range_v,
+            &dense_indel_range_v,
+            ploidy,
+        );
+
+        let (lut_bytes, lut_off_u64) = reader.lut_arrays();
+        let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
+
+        let flat = svar2::split_to_flat(&br);
+        let dense_range_a =
+            numpy::ndarray::ArrayView2::from_shape((n_q, 2), &flat.dense_range).unwrap();
+
+        svar2::hap_diffs_svar2(
+            regions.view(),
+            ploidy,
+            &flat.vk_pos,
+            &flat.vk_key,
+            &flat.vk_off,
+            &flat.dense_pos,
+            &flat.dense_key,
+            dense_range_a,
+            &flat.dense_present,
+            &flat.dense_present_off,
+            &lut_bytes,
+            &lut_off,
+        )
+    });
+
+    Ok(diffs.into_pyarray(py))
+}
+
 /// Read-bound SVAR2 track re-alignment: gather off a query-only genoray
 /// `Svar2Store` reader with NO interval-search-tree rebuild and NO dense-union
 /// rebuild (`genoray_core::query::gather_haps_readbound`), marshal the split

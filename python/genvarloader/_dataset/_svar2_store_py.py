@@ -21,6 +21,7 @@ from .._flat import _Flat
 from ..genvarloader import (
     Svar2Store,
     decode_variants_from_svar2_readbound,
+    hap_diffs_from_svar2_readbound,
     reconstruct_haplotypes_from_svar2_readbound,
     shift_and_realign_tracks_from_svar2_readbound,
 )
@@ -113,6 +114,73 @@ def build_readbound_haps(
     return cast(
         "Ragged[np.bytes_]", _Flat.from_offsets(out_data, shape, out_offsets).view("S1")
     )
+
+
+def build_readbound_diffs(
+    svar2: "SparseVar2",
+    contig: str,
+    regions,  # iterable of (start, end), length R
+) -> "NDArray[np.int32]":
+    """Per-hap ilen diffs over ``regions`` via the read-bound kernel, WITHOUT
+    reconstructing haplotypes.
+
+    Mirrors ``build_readbound_haps``'s query order (region-major, sample-minor:
+    ``q = r*S + s``) and gather-input construction, but stops after
+    ``svar2::hap_diffs_svar2`` — no ``ref``/``pad_char``/``shifts``/reconstruct
+    pass. Used by the dataset read path to compute random jitter shifts from
+    diffs BEFORE reconstructing (mirrors how the SVAR1 path derives shifts from
+    diffs in ``_prepare_request``).
+
+    Returns the ``(R*S, P)`` diffs array (query order region-major, sample-minor).
+    """
+    reg = [(int(s), int(e)) for s, e in regions]
+    R = len(reg)
+    S = svar2.n_samples
+    P = svar2.ploidy
+
+    d = svar2.find_ranges(
+        contig, [s for s, _ in reg], [e for _, e in reg], samples=None
+    )
+
+    region_starts_r = np.asarray(d["region_starts"], np.int64)  # (R,)
+    sample_cols = np.asarray(d["sample_cols"], np.int64)  # (S,)
+    # vk_*_range rows are already (R, S, P) row-major == query-major (q = r*S+s,
+    # row = q*P + p), so they pass through unchanged.
+    vk_snp_range = np.ascontiguousarray(d["vk_snp_range"], np.int64)  # (R*S*P, 2)
+    vk_indel_range = np.ascontiguousarray(d["vk_indel_range"], np.int64)
+    dense_snp_range_r = np.asarray(d["dense_snp_range"], np.int64)  # (R, 2)
+    dense_indel_range_r = np.asarray(d["dense_indel_range"], np.int64)  # (R, 2)
+
+    region_starts = np.repeat(region_starts_r, S).astype(np.uint32)  # (n_q,)
+    orig_samples = np.tile(sample_cols, R)  # (n_q,)
+    dense_snp_range = np.ascontiguousarray(
+        np.repeat(dense_snp_range_r, S, axis=0), np.int64
+    )  # (n_q, 2)
+    dense_indel_range = np.ascontiguousarray(
+        np.repeat(dense_indel_range_r, S, axis=0), np.int64
+    )  # (n_q, 2)
+
+    reg_arr = np.asarray(reg, np.int32).reshape(R, 2)
+    region_bounds = np.ascontiguousarray(
+        np.repeat(reg_arr, S, axis=0), np.int32
+    )  # (n_q, 2)
+
+    store = Svar2Store(str(svar2.path), svar2.contigs, svar2.n_samples, svar2.ploidy)
+
+    diffs = hap_diffs_from_svar2_readbound(
+        store,
+        contig,
+        region_starts,
+        orig_samples,
+        vk_snp_range,
+        vk_indel_range,
+        dense_snp_range,
+        dense_indel_range,
+        region_bounds,
+        P,
+    )
+
+    return cast("NDArray[np.int32]", diffs)
 
 
 def build_readbound_tracks(
