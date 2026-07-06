@@ -25,7 +25,7 @@ from .._ragged import RaggedAnnotatedHaps, RaggedIntervals, RaggedSeqs, RaggedTr
 from .._utils import lengths_to_offsets
 from ._genotypes import _as_starts_stops
 from ._haps import _H, Haps, ReconstructionRequest, _NewH, _Variants
-from ._insertion_fill import Repeat5p
+from ._insertion_fill import FLANK_SAMPLE, Repeat5p
 from ._insertion_fill import lower as _lower_insertion_fills
 from ._flat_variants import _FlatVariantWindows
 from ._protocol import Reconstructor
@@ -335,6 +335,14 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                 "Splicing of haplotypes + tracks is not supported for svar2 "
                 "datasets yet."
             )
+        # Annotated haps are out of scope for svar2 (matches Svar2Haps.__call__).
+        # HapsTracks routes here BEFORE Svar2Haps's own annotated guard, and
+        # get_haps_and_shifts returns plain Ragged[S1] regardless of kind, so
+        # without this an annotated view would silently yield non-annotated haps.
+        if issubclass(self.haps.kind, RaggedAnnotatedHaps):
+            raise NotImplementedError(
+                "svar2 datasets do not support with_seqs('annotated') with tracks yet."
+            )
         # The realign kernel has no in-kernel reverse-complement.
         if to_rc is not None and bool(np.asarray(to_rc).any()):
             raise NotImplementedError(
@@ -387,6 +395,29 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                 for name in self.tracks.active_tracks
             ]
             strat_ids, strat_params = _lower_insertion_fills(strat_list)
+
+            # FIX 1 guard: FlankSample (the only seed-dependent fill) diverges
+            # from SVAR1 across MULTIPLE contigs. SVAR1 realigns the whole batch
+            # in ONE fused call, so the fill hash `hash4(base_seed, query, hap,
+            # out_idx+i)` uses the GLOBAL row `query`. `_call_svar2` calls the
+            # readbound kernel once PER CONTIG GROUP, where `query = k/ploidy` is
+            # contig-LOCAL, so a global row landing at a different local position
+            # gets different fill offsets in inserted regions. base_seed matches
+            # (both derive from the full idx); only the per-query index diverges.
+            # Single-contig is exact (local == global); non-seeded fills (Repeat5p
+            # etc.) are exact regardless. Proper fix (follow-up): pass a per-group
+            # global-query-offset into the FFI so the kernel seeds with the global
+            # row index; for now, guard.
+            n_contig_groups = int(np.unique(regions[:, 0]).size)
+            if n_contig_groups > 1 and bool((strat_ids == FLANK_SAMPLE).any()):
+                raise NotImplementedError(
+                    "svar2 haplotype-realigned tracks with a seed-dependent "
+                    "insertion fill (FlankSample) across multiple contigs are not "
+                    "yet supported: the per-contig-group kernel calls seed the fill "
+                    "with a contig-local query index that diverges from the "
+                    "single-batch SVAR1 path. Use a single-contig query, or a "
+                    "non-seeded insertion fill (e.g. the default Repeat5p)."
+                )
             # Base seed identical to the SVAR1 path (idx-xor when deterministic).
             if deterministic:
                 base_seed = np.uint64(

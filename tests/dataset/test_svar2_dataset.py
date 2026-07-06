@@ -266,6 +266,66 @@ def test_svar2_tracks_match_svar1_multicontig(
     assert np.allclose(ad, bd, equal_nan=True), "track data differ"
 
 
+def test_svar2_flanksample_multicontig_guard(tmp_path, svar2_fixture2, _src2):
+    """FlankSample (seed-dependent fill) + MULTI-contig must raise, not silently
+    diverge from SVAR1.
+
+    ``_call_svar2`` realigns per contig group, seeding the fill with a
+    contig-LOCAL query index; SVAR1 seeds with the GLOBAL row. For a seed-only
+    fill (FlankSample) this diverges across >1 contig, so it is guarded. (The
+    single-contig and default-Repeat5p paths remain exact -- see the parity tests
+    above, which never set a fill.)
+    """
+    import pyBigWig
+
+    from genoray import SparseVar2
+
+    from genvarloader._dataset._insertion_fill import FlankSample
+
+    _bcf, ref = _src2
+    bw_dir = tmp_path / "bw_fs"
+    bw_dir.mkdir()
+    paths = {}
+    for i, s in enumerate(["S0", "S1"]):
+        p = bw_dir / f"{s}.bw"
+        rng = np.random.default_rng(300 + i)
+        with pyBigWig.open(str(p), "w") as bw:
+            bw.addHeader([("chr1", 40), ("chr2", 40)], maxZooms=0)
+            for contig in ("chr1", "chr2"):
+                vals = [float(v) for v in rng.standard_normal(40).astype(np.float32)]
+                bw.addEntries(
+                    [contig] * 40, list(range(40)), ends=list(range(1, 41)), values=vals
+                )
+        paths[s] = str(p)
+    track = gvl.BigWigs("signal", paths)
+
+    # Interleaved chr2/chr1 bed -> >1 contig group.
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr2", "chr1"],
+            "chromStart": [0, 0],
+            "chromEnd": [40, 40],
+        }
+    )
+    d = tmp_path / "fs.gvl"
+    gvl.write(
+        d,
+        bed,
+        variants=SparseVar2(svar2_fixture2),
+        tracks=track,
+        samples=None,
+        max_jitter=0,
+        overwrite=True,
+    )
+    ds = (
+        gvl.Dataset.open(d, reference=ref)
+        .with_tracks("signal")
+        .with_insertion_fill({"signal": FlankSample(flank_width=3)})
+    )
+    with pytest.raises(NotImplementedError, match="FlankSample"):
+        ds[:, :]
+
+
 def _assert_ragged_equal(a, b, name: str) -> None:
     ao, bo = np.asarray(a.offsets), np.asarray(b.offsets)
     assert np.array_equal(ao, bo), (
