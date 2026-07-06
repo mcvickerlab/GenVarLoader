@@ -834,6 +834,25 @@ structurally read-bound query path (no per-read tree build, no per-read dense un
 smaller than `.svar` especially for large cohorts. Remaining genoray absorption (VCF/PGEN ingest,
 `.svar`→Rust, `.svar2` conversion/write path) stays in Phase 6 below.
 
+**Benchmark (MVP chr21, `/carter/users/dlaub/projects/svar2_mvp`, relocated 2026-07-05; drivers
+`bench_readbound.py`/`prof_svar2_read.py`, live outside the repo):** matched `.svar`/`.svar2`
+datasets, warm `Dataset[:, :]` variants read, same-session relative (absolute wall-clock is not
+comparable across allocations on shared Carter nodes).
+- **On-disk store size:** germline (3202-sample cohort) `.svar2` **5.67× smaller** (193 MB vs 1.1 GB);
+  somatic (16007-sample) **1.46× smaller** (36 MB vs 53 MB). The `.svar2` advantage grows with cohort.
+- **perf DSO split (the success criterion — MET):** `perf record`/`report` of the warm SVAR2 read
+  loop shows **zero** `SearchTree::build`, `dense_union`, or `overlap_batch` samples. The only
+  `genoray_core` symbols are `gather_haps_readbound` + `merge_keys` (the read-bound gather); the rest
+  is `genvarloader::svar2::{split_to_flat,decode_variants_from_split}` + numpy cache-slicing
+  (`PyArray_Repeat`/`mapiter_get`). This is the flip the wiring was designed for: the earlier E1
+  profiling found the union (`overlap_batch`) path spent ~80% in genoray `SearchTree::build`
+  (rebuilt per read); the read-bound path builds none.
+- **Latency (small workloads):** on 30 regions × 100–200 samples the SVAR2 variants read is ~3.4×
+  *slower* than SVAR1 (germline 1.5 ms vs 0.45 ms; somatic 2.0 ms vs 0.60 ms) — per-read Python/numpy
+  cache-slicing overhead dominates at this scale. The structural win (no per-read tree/union rebuild,
+  smaller store) is what pays off at cohort scale and for the union path's contig-wide-stride concern;
+  a fair large-workload latency sweep is a follow-up.
+
 ### Phase 6 — Absorb genoray (future) ⬜
 _PR: —_
 
