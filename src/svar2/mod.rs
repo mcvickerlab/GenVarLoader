@@ -238,12 +238,10 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
             h += 1;
         }
     }
-    // The reused kernels read `dense_present[bit/8]` for EVERY window entry of
-    // every hap, so the buffer must always be ceil(total_bits/8) bytes — even
-    // when the last hap's window bits are all zero (the in-loop grow-on-set
-    // above only extends up to the highest SET bit, leaving a trailing all-zero
-    // byte unallocated → OOB panic downstream). genoray byte-sizes its presence
-    // arrays via div_ceil unconditionally; match that here.
+    // `dense_present` was pre-sized to `total_bits.div_ceil(8)` above, and the
+    // fill loop increments `bit_acc` exactly `total_bits` times, so this resize
+    // is a defensive no-op (kept to document the ceil-byte invariant the reused
+    // kernels rely on: they read `dense_present[bit/8]` for every window entry).
     dense_present.resize(bit_acc.div_ceil(8), 0);
 
     FlatChannels {

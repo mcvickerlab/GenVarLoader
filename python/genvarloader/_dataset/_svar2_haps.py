@@ -392,7 +392,12 @@ class Svar2Haps(Haps[_H]):
 
             hap_lengths = (lengths[:, None] + diffs).astype(np.int32)
         else:
-            diffs = np.zeros((b, P), np.int32)  # placeholder (unused downstream)
+            diffs = np.zeros(
+                (b, P), np.int32
+            )  # diffs discarded by __call__ (only caller reaching this branch)
+            # hap_lengths below still feeds g_total -> should_parallelize (a perf
+            # heuristic only; never affects output bytes), so the ref-length
+            # placeholder is byte-identical-safe.
             hap_lengths = np.broadcast_to(
                 lengths[:, None].astype(np.int32), (b, P)
             ).copy()
