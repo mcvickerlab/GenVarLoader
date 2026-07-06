@@ -5,6 +5,7 @@
 cProfile ranks Python functions by cumulative time; pyinstrument gives a
 low-overhead statistical wall-clock call tree as a cross-check (cProfile's own
 per-call overhead can distort tiny hot loops)."""
+
 import cProfile
 import io
 import pstats
@@ -28,6 +29,7 @@ def main(mode, cohort, K):
     print("```\n" + s.getvalue() + "```\n")
 
     from pyinstrument import Profiler
+
     p = Profiler(interval=0.0005)
     p.start()
     for _ in range(K):

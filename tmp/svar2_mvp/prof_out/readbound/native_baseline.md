@@ -4,7 +4,11 @@
 2026-07-06 02:29:29.559 | INFO     | genvarloader._dataset._write:write:196 - Writing dataset to tmp/svar2_mvp/prof_out/readbound/germline_haplotypes.gvl
 2026-07-06 02:29:29.577 | INFO     | genvarloader._dataset._write:write:288 - Using 3202 samples.
 2026-07-06 02:29:29.577 | INFO     | genvarloader._dataset._write:write:293 - Writing genotypes.
-  0%|          | 0/3 [00:00<?, ? region/s]Processing svar2 ranges for 3 regions on chr21:   0%|          | 0/3 [00:00<?, ? region/s]Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:00<00:00,  4.86 region/s]Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:00<00:00,  4.86 region/s]
+
+  0%|          | 0/3 [00:00<?, ? region/s]
+Processing svar2 ranges for 3 regions on chr21:   0%|          | 0/3 [00:00<?, ? region/s]
+Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:00<00:00,  4.86 region/s]
+Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:00<00:00,  4.86 region/s]
 2026-07-06 02:29:30.376 | INFO     | genvarloader._dataset._write:write:388 - Finished writing.
 2026-07-06 02:29:30.516 | INFO     | genvarloader._dataset._open:resolve:95 - Opened dataset:
 Unspliced GVL dataset at tmp/svar2_mvp/prof_out/readbound/germline_haplotypes.gvl
@@ -121,7 +125,11 @@ Tracks available: None
 2026-07-06 02:31:23.981 | INFO     | genvarloader._dataset._write:write:196 - Writing dataset to tmp/svar2_mvp/prof_out/readbound/germline_variants.gvl
 2026-07-06 02:31:23.999 | INFO     | genvarloader._dataset._write:write:288 - Using 3202 samples.
 2026-07-06 02:31:23.999 | INFO     | genvarloader._dataset._write:write:293 - Writing genotypes.
-  0%|          | 0/3 [00:00<?, ? region/s]Processing svar2 ranges for 3 regions on chr21:   0%|          | 0/3 [00:00<?, ? region/s]Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:00<00:00,  4.87 region/s]Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:00<00:00,  4.87 region/s]
+
+  0%|          | 0/3 [00:00<?, ? region/s]
+Processing svar2 ranges for 3 regions on chr21:   0%|          | 0/3 [00:00<?, ? region/s]
+Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:00<00:00,  4.87 region/s]
+Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:00<00:00,  4.87 region/s]
 2026-07-06 02:31:24.788 | INFO     | genvarloader._dataset._write:write:388 - Finished writing.
 2026-07-06 02:31:24.926 | INFO     | genvarloader._dataset._open:resolve:95 - Opened dataset:
 Unspliced GVL dataset at tmp/svar2_mvp/prof_out/readbound/germline_variants.gvl
@@ -238,7 +246,11 @@ Tracks available: None
 2026-07-06 02:33:35.183 | INFO     | genvarloader._dataset._write:write:196 - Writing dataset to tmp/svar2_mvp/prof_out/readbound/somatic_haplotypes.gvl
 2026-07-06 02:33:35.209 | INFO     | genvarloader._dataset._write:write:288 - Using 16007 samples.
 2026-07-06 02:33:35.210 | INFO     | genvarloader._dataset._write:write:293 - Writing genotypes.
-  0%|          | 0/3 [00:00<?, ? region/s]Processing svar2 ranges for 3 regions on chr21:   0%|          | 0/3 [00:00<?, ? region/s]Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:03<00:00,  1.31s/ region]Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:03<00:00,  1.31s/ region]
+
+  0%|          | 0/3 [00:00<?, ? region/s]
+Processing svar2 ranges for 3 regions on chr21:   0%|          | 0/3 [00:00<?, ? region/s]
+Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:03<00:00,  1.31s/ region]
+Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:03<00:00,  1.31s/ region]
 2026-07-06 02:33:40.613 | INFO     | genvarloader._dataset._write:write:388 - Finished writing.
 2026-07-06 02:33:40.745 | INFO     | genvarloader._dataset._open:resolve:95 - Opened dataset:
 Unspliced GVL dataset at tmp/svar2_mvp/prof_out/readbound/somatic_haplotypes.gvl
@@ -355,7 +367,11 @@ Tracks available: None
 2026-07-06 02:35:45.163 | INFO     | genvarloader._dataset._write:write:196 - Writing dataset to tmp/svar2_mvp/prof_out/readbound/somatic_variants.gvl
 2026-07-06 02:35:45.196 | INFO     | genvarloader._dataset._write:write:288 - Using 16007 samples.
 2026-07-06 02:35:45.196 | INFO     | genvarloader._dataset._write:write:293 - Writing genotypes.
-  0%|          | 0/3 [00:00<?, ? region/s]Processing svar2 ranges for 3 regions on chr21:   0%|          | 0/3 [00:00<?, ? region/s]Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:04<00:00,  1.35s/ region]Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:04<00:00,  1.35s/ region]
+
+  0%|          | 0/3 [00:00<?, ? region/s]
+Processing svar2 ranges for 3 regions on chr21:   0%|          | 0/3 [00:00<?, ? region/s]
+Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:04<00:00,  1.35s/ region]
+Processing svar2 ranges for 3 regions on chr21: 100%|██████████| 3/3 [00:04<00:00,  1.35s/ region]
 2026-07-06 02:35:51.800 | INFO     | genvarloader._dataset._write:write:388 - Finished writing.
 2026-07-06 02:35:51.933 | INFO     | genvarloader._dataset._open:resolve:95 - Opened dataset:
 Unspliced GVL dataset at tmp/svar2_mvp/prof_out/readbound/somatic_variants.gvl

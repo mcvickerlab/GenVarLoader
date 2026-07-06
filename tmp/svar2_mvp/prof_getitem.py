@@ -7,6 +7,7 @@ attribute cleanly.
 gvl.write + Dataset.open run ONCE (we profile the READ, not the write). Prints
 per_call_s over K warm calls. Tracks mode is out of scope; variant-windows is
 guarded NotImplementedError in Svar2Haps and cannot be profiled yet."""
+
 import sys
 import time
 from pathlib import Path
@@ -21,11 +22,13 @@ WORK = Path("tmp/svar2_mvp/prof_out/readbound")
 
 
 def _bed():
-    return pl.DataFrame({
-        "chrom": [CHROM] * len(REGIONS),
-        "chromStart": [s for s, _ in REGIONS],
-        "chromEnd": [e for _, e in REGIONS],
-    })
+    return pl.DataFrame(
+        {
+            "chrom": [CHROM] * len(REGIONS),
+            "chromStart": [s for s, _ in REGIONS],
+            "chromEnd": [e for _, e in REGIONS],
+        }
+    )
 
 
 def make_call(mode, cohort):
@@ -38,10 +41,16 @@ def make_call(mode, cohort):
     ds_path = WORK / f"{cohort}_{mode}.gvl"
     WORK.mkdir(parents=True, exist_ok=True)
 
-    gvl.write(ds_path, _bed(), variants=SparseVar2(f"{prefix}.svar2"),
-              samples=None, max_jitter=0, overwrite=True)
+    gvl.write(
+        ds_path,
+        _bed(),
+        variants=SparseVar2(f"{prefix}.svar2"),
+        samples=None,
+        max_jitter=0,
+        overwrite=True,
+    )
     ds = gvl.Dataset.open(ds_path, reference=REF)
-    view = ds.with_seqs(mode)   # "haplotypes" or "variants"
+    view = ds.with_seqs(mode)  # "haplotypes" or "variants"
 
     R = len(REGIONS)
 
