@@ -290,3 +290,46 @@ def test_readbound_dense_snp_matches_union_oracle(svar2_store_dense_snp):
     assert np.array_equal(
         np.asarray(oracle.data).view("u1"), np.asarray(rb.data).view("u1")
     )
+
+
+def _svar2_haps_dataset(tmp_path: Path, svar2_store: Path):
+    """Build a full gvl Dataset over the ``svar2_store`` fixture and return its
+    haplotypes view (Svar2Haps-backed).
+
+    Lifted/adapted from ``test_svar2_dataset.py::_open_pair`` -- this file has no
+    existing fixture that yields a live gvl.Dataset (only bare genoray stores),
+    so this helper builds the minimal one needed to exercise Svar2Haps through
+    the public Dataset API.
+    """
+    import polars as pl
+    from genoray import SparseVar2
+
+    import genvarloader as gvl
+
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [40]})
+    ref = svar2_store.parent / "ref.fa"
+    d = tmp_path / "ds.gvl"
+    gvl.write(d, bed, variants=SparseVar2(svar2_store), samples=None, overwrite=True)
+    return gvl.Dataset.open(d, reference=ref).with_seqs("haplotypes")
+
+
+def test_deterministic_haps_read_skips_pre_reconstruct_diffs(
+    tmp_path: Path, svar2_store: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A deterministic (shifts=0) haplotypes read must NOT call the separate
+    hap_diffs readbound kernel -- reconstruct sizes itself internally. Guards the
+    double-gather regression."""
+    import genvarloader._dataset._svar2_haps as m
+
+    calls = {"diffs": 0}
+    real = m.hap_diffs_from_svar2_readbound
+
+    def counting(*a, **k):
+        calls["diffs"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(m, "hap_diffs_from_svar2_readbound", counting)
+
+    ds2 = _svar2_haps_dataset(tmp_path, svar2_store)
+    ds2[:, :]
+    assert calls["diffs"] == 0

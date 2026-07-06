@@ -313,6 +313,7 @@ class Svar2Haps(Haps[_H]):
             deterministic=deterministic,
             splice_plan=splice_plan,
             to_rc=to_rc,
+            need_hap_lengths=False,
         )
         return cast(_H, haps)
 
@@ -325,6 +326,7 @@ class Svar2Haps(Haps[_H]):
         deterministic: bool,
         splice_plan: "SplicePlan | None" = None,
         to_rc: "NDArray[np.bool_] | None" = None,
+        need_hap_lengths: bool = True,
     ) -> tuple[
         Ragged[np.bytes_],
         NDArray[np.intp],
@@ -351,33 +353,47 @@ class Svar2Haps(Haps[_H]):
 
         groups = self._contig_groups(contig_ids)
 
-        # --- diffs (per contig group, stitched back to (b, P) query order) ---
-        diffs = np.empty((b, P), np.int32)
-        for ci, qsel in groups:
-            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-            d = hap_diffs_from_svar2_readbound(
-                self.store,
-                self.ds_contigs[ci],
-                gi[0],
-                gi[1],
-                gi[2],
-                gi[3],
-                gi[4],
-                gi[5],
-                gi[6],
-                P,
-            )
-            diffs[qsel] = np.asarray(d, np.int32).reshape(len(qsel), P)
+        # diffs are needed pre-reconstruct ONLY to (a) bound randomized jitter
+        # shifts, or (b) return hap_lengths/diffs to a caller that uses them
+        # (the tracks path). A deterministic/ragged haplotypes read needs
+        # neither: reconstruct sizes itself internally. Avoid the redundant
+        # gather+split+diffs in that (common warm-read) case.
+        randomized = not (deterministic or isinstance(output_length, str))
+        need_diffs = randomized or need_hap_lengths
 
-        hap_lengths = (lengths[:, None] + diffs).astype(np.int32)
+        # --- diffs (per contig group, stitched back to (b, P) query order) ---
+        if need_diffs:
+            diffs = np.empty((b, P), np.int32)
+            for ci, qsel in groups:
+                gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
+                d = hap_diffs_from_svar2_readbound(
+                    self.store,
+                    self.ds_contigs[ci],
+                    gi[0],
+                    gi[1],
+                    gi[2],
+                    gi[3],
+                    gi[4],
+                    gi[5],
+                    gi[6],
+                    P,
+                )
+                diffs[qsel] = np.asarray(d, np.int32).reshape(len(qsel), P)
+
+            hap_lengths = (lengths[:, None] + diffs).astype(np.int32)
+        else:
+            diffs = np.zeros((b, P), np.int32)  # placeholder (unused downstream)
+            hap_lengths = np.broadcast_to(
+                lengths[:, None].astype(np.int32), (b, P)
+            ).copy()
 
         # --- shifts (single rng draw; mirrors Haps._prepare_request) ---
-        if deterministic or isinstance(output_length, str):
-            shifts = np.zeros((b, P), np.int32)
-        else:
+        if randomized:
             max_shift = diffs.clip(min=0)
             max_shift = max_shift + (lengths - output_length).clip(min=0)[:, None]
             shifts = rng.integers(0, max_shift + 1, dtype=np.int32)
+        else:
+            shifts = np.zeros((b, P), np.int32)
 
         ffi_out_len = (
             np.int64(-1) if isinstance(output_length, str) else np.int64(output_length)
