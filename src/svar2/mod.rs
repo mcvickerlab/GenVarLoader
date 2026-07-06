@@ -284,15 +284,26 @@ pub fn decode_variants_from_split(
     lut_bytes: &[u8],
     lut_off: &[i64],
 ) -> VariantsSoa {
-    let flat = split_to_flat(br);
+    // Fused decode straight from the split gather result: NO `split_to_flat`
+    // marshaling copy, and NO per-hap `merge_hap` Vec+sort. The three per-hap
+    // runs (var_key, present dense-snp, present dense-indel) are each already
+    // position-sorted, so we stream a 3-way merge, decoding each key as we go.
+    //
+    // NOTE: dense keys are hap-independent, so pre-decoding them once per query
+    // and copying across haps was tried (to kill the apparent per-(hap,variant)
+    // re-decode). It REGRESSED — dense-SNP `decode_alt` is a 2-bit->1-byte no-op,
+    // cheaper than the pre-decoded slice-copy + its allocation, so inline decode
+    // wins. The real variant cost is the gather bit-extraction + the unavoidable
+    // per-hap alt-byte emit, not the decode. (Measured 2026-07-06.)
+    use genoray_core::bits_get_bit;
     let ploidy = br.ploidy;
     let n_q = br.n_regions;
     let h_count = n_q * ploidy;
 
-    // Upper bound on total merged variants across all haps: every vk entry plus
-    // every dense window entry (present or not). Over-reserving is harmless.
-    let vk_total = flat.vk_off[h_count] as usize;
-    let dense_bits = flat.dense_present_off[h_count] as usize;
+    // Upper bound on total merged variants: every vk entry plus every dense
+    // present bit (over-reserving is harmless).
+    let vk_total = br.vk_off[h_count];
+    let dense_bits = br.dense_snp_present_off[h_count] + br.dense_indel_present_off[h_count];
     let cap = vk_total + dense_bits;
     let mut pos: Vec<i32> = Vec::with_capacity(cap);
     let mut ilen: Vec<i32> = Vec::with_capacity(cap);
@@ -302,59 +313,56 @@ pub fn decode_variants_from_split(
     let mut var_off: Vec<i64> = Vec::with_capacity(h_count + 1);
     var_off.push(0);
 
-    // `q = h / ploidy` is loop-invariant across each hap's ploidy-many
-    // iterations; the original per-h division (`h / ploidy`, `ploidy` a
-    // runtime value LLVM can't strength-reduce) recomputed it on every
-    // iteration via a full integer division. Iterate `q` in the outer loop
-    // and track `h` with a plain running counter instead — this visits the
-    // exact same `(h, q)` pairs in the exact same order (h = 0, 1, 2, ...,
-    // h_count-1, with q = h/ploidy for each), so it's byte-identical, and it
-    // also hoists the per-query `ds`/`de` window lookup out of the
-    // ploidy-many-times-redundant per-hap load.
     let mut h = 0usize;
     for q in 0..n_q {
-        let ds = flat.dense_range[q * 2] as usize;
-        let de = flat.dense_range[q * 2 + 1] as usize;
+        let (ss, se) = br.dense_snp_range[q];
+        let (is_, ie) = br.dense_indel_range[q];
         for _hap in 0..ploidy {
-            let vk_lo = flat.vk_off[h] as usize;
-            let vk_hi = flat.vk_off[h + 1] as usize;
-            let base_bit = flat.dense_present_off[h] as usize;
-            let present_bit = |k: usize| -> bool {
-                let bit = base_bit + k;
-                debug_assert!(
-                    bit / 8 < flat.dense_present.len(),
-                    "decode_variants_from_split present_bit OOB: bit/8={} len={}",
-                    bit / 8,
-                    flat.dense_present.len()
-                );
-                // SAFETY: `merge_hap` only ever calls `present_bit(k)` for `k`
-                // in `0..(de - ds)` (see its `(ds..de).enumerate()` loop), so
-                // `bit` ranges over `[base_bit, base_bit + (de - ds))` =
-                // `[dense_present_off[h], dense_present_off[h + 1])`. Per
-                // `split_to_flat`, `de - ds` (from `dense_range`, built per
-                // query `q`) and `dense_present_off[h + 1] -
-                // dense_present_off[h]` (built per hap `h`, replicated
-                // `ploidy` times per query) are both exactly the same
-                // per-query dense-window width, so this range is always `<=
-                // dense_present_off[h_count] = total_bits`, and
-                // `dense_present` is sized `total_bits.div_ceil(8)` bytes —
-                // so `bit / 8` is always in bounds.
-                (unsafe { *flat.dense_present.get_unchecked(bit / 8) } >> (bit % 8)) & 1 == 1
-            };
+            let vk_lo = br.vk_off[h];
+            let vk_hi = br.vk_off[h + 1];
+            let snp_base = br.dense_snp_present_off[h];
+            let indel_base = br.dense_indel_present_off[h];
 
-            let merged = merge_hap(
-                &flat.vk_pos,
-                &flat.vk_key,
-                vk_lo,
-                vk_hi,
-                &flat.dense_pos,
-                &flat.dense_key,
-                ds,
-                de,
-                present_bit,
-            );
-
-            for &(p, key) in &merged {
+            // 3-way merge, position-sorted. On equal positions the priority is
+            // var_key < dense-snp < dense-indel, exactly the stable-sort tie
+            // order of the previous collect-then-sort `merge_hap` (var_key
+            // pushed first, then dense-snp, then dense-indel). Byte-identical.
+            let mut i_vk = vk_lo;
+            let mut i_sn = ss;
+            let mut i_in = is_;
+            loop {
+                // Advance dense pointers to the next PRESENT entry. Pointers are
+                // monotonic, so total skip work is O(window) per hap, not O(n^2).
+                while i_sn < se && !bits_get_bit(&br.dense_snp_present, snp_base + (i_sn - ss)) {
+                    i_sn += 1;
+                }
+                while i_in < ie
+                    && !bits_get_bit(&br.dense_indel_present, indel_base + (i_in - is_))
+                {
+                    i_in += 1;
+                }
+                let has_vk = i_vk < vk_hi;
+                let has_sn = i_sn < se;
+                let has_in = i_in < ie;
+                if !has_vk && !has_sn && !has_in {
+                    break;
+                }
+                let p_vk = if has_vk { br.vk[i_vk].position } else { u32::MAX };
+                let p_sn = if has_sn { br.dense_snp[i_sn].position } else { u32::MAX };
+                let p_in = if has_in { br.dense_indel[i_in].position } else { u32::MAX };
+                let (p, key) = if has_vk && p_vk <= p_sn && p_vk <= p_in {
+                    let e = &br.vk[i_vk];
+                    i_vk += 1;
+                    (e.position, e.key)
+                } else if has_sn && p_sn <= p_in {
+                    let e = &br.dense_snp[i_sn];
+                    i_sn += 1;
+                    (e.position, e.key)
+                } else {
+                    let e = &br.dense_indel[i_in];
+                    i_in += 1;
+                    (e.position, e.key)
+                };
                 let (il, alt) = decode_alt(key, lut_bytes, lut_off);
                 pos.push(p as i32);
                 ilen.push(il as i32);
