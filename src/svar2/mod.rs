@@ -308,6 +308,12 @@ pub fn decode_variants_from_split(
             let base_bit = flat.dense_present_off[h] as usize;
             let present_bit = |k: usize| -> bool {
                 let bit = base_bit + k;
+                debug_assert!(
+                    bit / 8 < flat.dense_present.len(),
+                    "decode_variants_from_split present_bit OOB: bit/8={} len={}",
+                    bit / 8,
+                    flat.dense_present.len()
+                );
                 // SAFETY: `merge_hap` only ever calls `present_bit(k)` for `k`
                 // in `0..(de - ds)` (see its `(ds..de).enumerate()` loop), so
                 // `bit` ranges over `[base_bit, base_bit + (de - ds))` =
