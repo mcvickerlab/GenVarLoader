@@ -44,6 +44,13 @@ implementation composes two already-validated kernels; **no new Rust**.
 - `ref="window"` with `alt ∈ {"window", "allele"}`.
 - Single-contig (fast path) and multi-contig (contig-group stitch).
 - Empty (region, sample, ploid) groups with `dummy_variant` fill.
+- **`unphased_union`** for **both** svar2 decode modes (`variants` and
+  `variant-windows`) — the ploidy-1 union view (issue #222). The same offset
+  fold serves both, so `variants` mode gets it too (avoids a confusing
+  "union works for windows but not plain variants" gap). SVAR1 supports union
+  for these two modes; svar2 now matches. Haplotypes/annotated + union remain
+  blocked at `with_seqs` (a union of phased sequences is ill-defined) — that
+  guard is in `_impl.py`, unchanged.
 
 **Out of scope** (existing guards stay in force; each must raise, not silently
 diverge):
@@ -56,10 +63,10 @@ diverge):
 - `max_jitter > 0` at write or `jitter > 0` at read — the read-bound decode has
   no right-clip, so a padded/slid window over-includes variants past the
   (unpadded) read window. Same issue and same guard as svar2 `variants`.
-- `min_af`/`max_af`, `unphased_union`, spliced, annotated, in-kernel
-  reverse-complement — all already guarded (`_guard_unsupported` +
-  `__call__`). Note: SVAR1 *does* support `unphased_union` + variant-windows,
-  but svar2 guards `unphased_union` wholesale; that remains deferred.
+- `min_af`/`max_af`, spliced, annotated, in-kernel reverse-complement — all
+  already guarded (`_guard_unsupported` + `__call__`). (`unphased_union` is now
+  **in scope** — see above — so it is removed from `_guard_unsupported`; the
+  haplotypes/annotated + union block stays in `_impl.py`.)
 - No on-disk **format** change, no **public API** signature change
   (`with_seqs`/`VarWindowOpt` are unchanged; this only makes an existing kind
   reachable for svar2).
@@ -88,14 +95,25 @@ required for the config to arrive.
    `(pos, ilen, alt_bytes, str_off, var_off)`. These per-variant arrays are the
    already-gathered analog of SVAR1's global arrays.
 
+1a. **unphased_union fold** (when `self.unphased_union`): the group's `var_off`
+   has `len(qsel) * P + 1` entries in row = `q*P + p` order (the P haps of a
+   query are contiguous). Fold to `len(qsel) + 1` by keeping every P-th offset:
+   `row_offsets = np.ascontiguousarray(var_off[::P])`, and set the group's
+   effective ploidy `p_eff = 1`. This concatenates hap-0's variants then
+   hap-1's per query — no sort, no dedup, `v_idxs`/`pos`/`ilen`/`alt_bytes`
+   untouched. Identical to SVAR1 `get_variants_flat` (lines ~842–845). When not
+   union, `row_offsets = var_off` and `p_eff = P`. The window/scalar output
+   `shape` uses `p_eff` (`(b, p_eff, None[, None])`) and the group stitch uses
+   `_inverse_row_perm(cat_query_order, b, p_eff)`.
+
 2. **Assemble windows** (existing kernel, identity gather): call
    `_assemble_variant_buffers_rust` with:
 
    | kernel arg | svar2 value |
    |---|---|
    | `mode` | `1` (windows) |
-   | `v_idxs` | `np.arange(n_var, dtype=np.int32)` (identity — data is pre-gathered) |
-   | `row_offsets` | `var_off` (per-`(len(qsel)*P)`-row variant boundaries) |
+   | `v_idxs` | `np.arange(n_var, dtype=np.int32)` (identity — data is pre-gathered; spans ALL variants incl. both haps, unaffected by the union fold) |
+   | `row_offsets` | the (possibly folded) `row_offsets` from step 1a |
    | `alt_global`, `alt_off_global` | `alt_bytes`, `str_off` |
    | `ref_global`, `ref_off_global` | `None`, `None` (`ref="allele"` blocked upstream) |
    | `want_ref_bytes`, `want_flank` | `False`, `False` |
@@ -157,8 +175,21 @@ Replace the NotImplementedError branch with:
 2. `return cast(_H, self._reconstruct_variant_windows(idx, regions))`.
 
 `_guard_unsupported(splice_plan)` is called first (as today), covering
-splice/exonic/min_af/max_af/unphased_union. `to_rc` is not applicable to
-variant-windows (reference-oriented; RC intentionally unsupported for the kind).
+splice/exonic/min_af/max_af (the `unphased_union` clause is **removed** from
+`_guard_unsupported` — see below). `to_rc` is not applicable to variant-windows
+(reference-oriented; RC intentionally unsupported for the kind).
+
+### `_reconstruct_variants` gets the same fold
+
+Because `unphased_union` is enabled for svar2 `variants` too, add step-1a's fold
+to the existing `Svar2Haps._reconstruct_variants` as well: within each group,
+`row_offsets = var_off[::P]` and `p_eff = 1` when `self.unphased_union` (else
+unchanged), use `p_eff` for the `shape` and the stitch perm. The decoded
+`pos`/`ilen`/`alt` data and the identity relationship are untouched — only the
+per-row grouping changes. Remove the `unphased_union` clause from
+`_guard_unsupported` so both decode modes reach the fold; the haplotypes/tracks
+paths never set the flag (blocked at `with_seqs`), so removing the guard cannot
+mis-route them.
 
 ## 4. Parity strategy
 
@@ -204,6 +235,19 @@ differ. Split the gate:
    with the "right-clip" message for variant-windows (mirrors the existing
    `test_svar2_variants_jitter_guard_raises`).
 
+6. **unphased_union** (both modes) — against a matched SVAR1 dataset with
+   `with_settings(unphased_union=True)`:
+   - `variants` mode: `start`/`ilen` byte-identical to SVAR1 union (the fold is
+     order-preserving and drops nothing, so hap-0-then-hap-1 concat matches);
+     ALT compared to the svar2 decode oracle folded the same way (SVAR1 ALT
+     differs for deletions, per §4.2). Ploidy axis folds 2→1 (`shape[-2] == 1`).
+     Also assert the union row equals hap-0's decode concatenated with hap-1's.
+   - `variant-windows` mode: `ref_window` byte-identical to SVAR1 union
+     `ref_window`; `alt`/`alt_window` vs the numpy oracle applied to the folded
+     svar2 decode. `to_ragged()` succeeds (offsets consistent post-fold).
+   - Multi-contig + union together (interleaved fixture) to lock the
+     `p_eff=1` stitch perm.
+
 Backends: run the parity tests under both `GVL_BACKEND` values where the shim
 dispatches (as the existing svar2 suite does), since `_assemble_variant_buffers`
 is registered with rust + numba.
@@ -244,8 +288,6 @@ Public API surface is unchanged, but svar2's **supported-mode matrix** changes
   intermediate buffers, but that is a perf optimization to pursue only after
   profiling the live path (consistent with the read-bound perf design's
   measure-first discipline). Not in this work.
-- `unphased_union` + variant-windows for svar2 (SVAR1 supports it; svar2 guards
-  `unphased_union` wholesale).
 - `ref="allele"` for svar2 (would require the decode to also return REF bytes,
   or reconstructing REF from `reference[start:start+ref_len]` where
   `ref_len = len(alt) - ilen`; a genoray-touching or extra-work change, deferred).
@@ -256,6 +298,8 @@ Public API surface is unchanged, but svar2's **supported-mode matrix** changes
   - new `_reconstruct_variant_windows(self, idx, regions)`;
   - `__call__`: replace the NotImplementedError branch with the jitter guard +
     dispatch;
+  - `_reconstruct_variants`: add the unphased_union fold (`p_eff`);
+  - `_guard_unsupported`: remove the `unphased_union` clause;
   - imports: `_assemble_variant_buffers_rust`, `_FlatWindow` (from
     `_flat_variants`), and reuse existing `_ragged_arange_src` /
     `_ragged_arange_gather_2level` / `_inverse_row_perm`.
