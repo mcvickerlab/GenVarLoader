@@ -144,6 +144,11 @@ class Svar2Haps(Haps[_H]):
     """The .svar2 store's contig names (used to open the store's ContigReaders)."""
     ds_contigs: list[str] = field(default_factory=list)
     """The dataset's contig names (``regions[:, 0]`` indexes into this)."""
+    max_jitter: int = 0
+    """The dataset's write-time max_jitter. When > 0 the cache's per-query ranges
+    were computed over a max_jitter-padded window, which over-includes variants past
+    the (unpadded) read window in variants mode (the decode kernel has no right-clip);
+    guarded below."""
 
     def __post_init__(self):
         # Deliberately does NOT call Haps.__post_init__ (that reads an SVAR1
@@ -165,6 +170,9 @@ class Svar2Haps(Haps[_H]):
         svar2_override: Path | str | None,
         contigs: list[str],
         kind: type = RaggedVariants,
+        min_af: float | None = None,
+        max_af: float | None = None,
+        max_jitter: int = 0,
     ) -> "Svar2Haps":
         ranges_dir = path / "genotypes" / "svar2_ranges"
         with open(ranges_dir / "svar2_meta.json") as f:
@@ -232,12 +240,13 @@ class Svar2Haps(Haps[_H]):
             dosages=None,
             kind=cast("type[_H]", kind),
             filter=None,
-            min_af=None,
-            max_af=None,
+            min_af=min_af,
+            max_af=max_af,
             store=store,
             cache=cache,
             store_contigs=list(sv.contigs),
             ds_contigs=list(contigs),
+            max_jitter=max_jitter,
         )
 
     # ---- reconstructor entry ----
@@ -261,6 +270,22 @@ class Svar2Haps(Haps[_H]):
             if issubclass(self.kind, _FlatVariantWindows):
                 raise NotImplementedError(
                     "svar2 datasets do not support with_seqs('variant-windows') yet."
+                )
+            # ``decode_variants_from_svar2_readbound`` has NO right-clip: it emits
+            # every gathered variant that passes the left-clip. The cache's per-query
+            # ranges cover the read window ONLY when it equals the write window --
+            # i.e. no jitter anywhere. max_jitter>0 pads the cache at WRITE (so even
+            # a jitter=0 read over-includes variants in (end, end+max_jitter]); a
+            # jitter>0 read narrows/slides the window at READ. Guard on BOTH.
+            # (Haplotypes/tracks are unaffected: their kernel right-clips to q_end.)
+            if self.max_jitter > 0 or jitter > 0:
+                raise NotImplementedError(
+                    "variants output for svar2 datasets written with max_jitter>0"
+                    f" (here max_jitter={self.max_jitter}) or read with jitter>0"
+                    f" (here jitter={jitter}) is not yet supported: the read-bound"
+                    " variants decode does not right-clip to the post-jitter window."
+                    " Use max_jitter=0 at write and jitter=0 at read, or use"
+                    " haplotypes/tracks modes."
                 )
             # RaggedVariants: RC is applied by the caller (_getitem_unspliced),
             # so to_rc is intentionally ignored here (mirrors SVAR1 Haps).

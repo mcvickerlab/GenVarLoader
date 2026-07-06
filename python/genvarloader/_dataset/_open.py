@@ -150,9 +150,7 @@ class OpenRequest:
         if self._has_genotypes():
             if metadata.ploidy is None:
                 raise ValueError("Malformed dataset: found genotypes but not ploidy.")
-            svar2_meta = (
-                self.path / "genotypes" / "svar2_ranges" / "svar2_meta.json"
-            )
+            svar2_meta = self.path / "genotypes" / "svar2_ranges" / "svar2_meta.json"
             seqs: Haps | Ref | None
             if svar2_meta.exists():
                 from ._svar2_haps import Svar2Haps
@@ -165,6 +163,9 @@ class OpenRequest:
                     svar2_link=metadata.svar2_link,
                     svar2_override=self.svar2,
                     contigs=metadata.contigs,
+                    min_af=self.min_af,
+                    max_af=self.max_af,
+                    max_jitter=metadata.max_jitter,
                 )
             else:
                 seqs = Haps.from_path(
