@@ -44,22 +44,22 @@ class SparseVar2Source:
         P = int(d["ploidy"])
         reg = np.asarray(regions, dtype=np.int32).reshape(R, 2)
         # (R*S, 3): contig_idx=0, start, end — repeat each query region S times.
-        reg_rs = np.repeat(reg, S, axis=0)                       # (R*S, 2)
+        reg_rs = np.repeat(reg, S, axis=0)  # (R*S, 2)
         regions_gvl = np.zeros((R * S, 3), dtype=np.int32)
         regions_gvl[:, 1:] = reg_rs
         dense_range_gvl = np.ascontiguousarray(
             np.repeat(np.asarray(d["dense_range"], np.int32), S, axis=0), np.int32
-        )                                                        # (R*S, 2)
+        )  # (R*S, 2)
         return d, R, S, P, regions_gvl, dense_range_gvl
 
     def reconstruct(
         self,
         contig: str,
-        regions,                                   # iterable of (start, end), length R
-        ref_: "NDArray[np.uint8]",                 # the contig reference bytes
-        ref_offsets: "NDArray[np.int64]",          # e.g. np.array([0, len(ref_)])
+        regions,  # iterable of (start, end), length R
+        ref_: "NDArray[np.uint8]",  # the contig reference bytes
+        ref_offsets: "NDArray[np.int64]",  # e.g. np.array([0, len(ref_)])
         pad_char: int,
-        shifts: "NDArray[np.int32] | None" = None, # (R*S, P); None -> zeros
+        shifts: "NDArray[np.int32] | None" = None,  # (R*S, P); None -> zeros
         output_length: int = -1,
         parallel: bool = False,
     ) -> "Ragged[np.bytes_]":
@@ -89,14 +89,17 @@ class SparseVar2Source:
             parallel,
         )
         shape = (R, S, P, None)
-        return cast("Ragged[np.bytes_]", _Flat.from_offsets(out_data, shape, out_offsets).view("S1"))
+        return cast(
+            "Ragged[np.bytes_]",
+            _Flat.from_offsets(out_data, shape, out_offsets).view("S1"),
+        )
 
     def realign_tracks(
         self,
         contig: str,
         regions,
-        tracks: "NDArray[np.float32]",             # flat per-query track buffer
-        track_offsets: "NDArray[np.int64]",        # (R+1) offsets into tracks
+        tracks: "NDArray[np.float32]",  # flat per-query track buffer
+        track_offsets: "NDArray[np.int64]",  # (R+1) offsets into tracks
         params: "NDArray[np.float64]",
         strategy_id: int,
         base_seed: int,
@@ -113,7 +116,13 @@ class SparseVar2Source:
         # (= r*S+s), so expand the R track windows to R*S by repeating each S times.
         t = np.asarray(tracks, np.float32)
         toff = np.asarray(track_offsets, np.int64)
-        tracks_rs = np.concatenate([t[toff[r]:toff[r + 1]] for r in range(R) for _ in range(S)]) if R else t
+        tracks_rs = (
+            np.concatenate(
+                [t[toff[r] : toff[r + 1]] for r in range(R) for _ in range(S)]
+            )
+            if R
+            else t
+        )
         lengths = np.repeat(np.diff(toff), S)
         track_offsets_rs = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64)
         out_data, out_offsets = shift_and_realign_tracks_from_svar2(
@@ -137,4 +146,6 @@ class SparseVar2Source:
             parallel,
         )
         shape = (R, S, P, None)
-        return cast("Ragged[np.float32]", _Flat.from_offsets(out_data, shape, out_offsets))
+        return cast(
+            "Ragged[np.float32]", _Flat.from_offsets(out_data, shape, out_offsets)
+        )

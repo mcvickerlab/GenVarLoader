@@ -6,6 +6,7 @@ py-spy/perf attribute time to that path only.
 Prints: per_call_s=<median-ish mean over K warm calls>
 For svar1, the 3-region .gvl is written ONCE before the loop (we profile the
 query, not gvl.write)."""
+
 import sys
 import time
 
@@ -19,6 +20,7 @@ REGIONS = [(20_000_000, 20_001_000), (30_000_000, 30_000_500), (40_000_000, 40_0
 
 def _ref():
     import pysam
+
     rb = pysam.FastaFile(REF).fetch(CHROM).encode()
     return np.frombuffer(rb, np.uint8), np.array([0, len(rb)], np.int64)
 
@@ -26,12 +28,15 @@ def _ref():
 def make_svar2(cohort):
     from genoray import SparseVar2
     from genvarloader._dataset._svar2_source import SparseVar2Source
+
     src = SparseVar2Source(SparseVar2(f"{W}/{cohort}.svar2"))
     ru, ro = _ref()
 
     def call():
-        src.reconstruct(CHROM, REGIONS, ru, ro, pad_char=ord("N"),
-                        shifts=None, output_length=-1)
+        src.reconstruct(
+            CHROM, REGIONS, ru, ro, pad_char=ord("N"), shifts=None, output_length=-1
+        )
+
     return call
 
 
@@ -39,16 +44,22 @@ def make_svar1(cohort):
     import polars as pl
     import genvarloader as gvl
     from genoray import SparseVar2
+
     n_s = SparseVar2(f"{W}/{cohort}.svar2").n_samples
-    bed = pl.DataFrame({"chrom": [CHROM] * len(REGIONS),
-                        "chromStart": [s for s, _ in REGIONS],
-                        "chromEnd": [e for _, e in REGIONS]})
+    bed = pl.DataFrame(
+        {
+            "chrom": [CHROM] * len(REGIONS),
+            "chromStart": [s for s, _ in REGIONS],
+            "chromEnd": [e for _, e in REGIONS],
+        }
+    )
     ds_path = f"{W}/{cohort}.gvl"
     gvl.write(ds_path, bed, variants=f"{W}/{cohort}.svar", overwrite=True)  # ONCE
     ds_hap = gvl.Dataset.open(ds_path, reference=REF).with_seqs("haplotypes")
 
     def call():
-        ds_hap[:len(REGIONS), :n_s]
+        ds_hap[: len(REGIONS), :n_s]
+
     return call
 
 

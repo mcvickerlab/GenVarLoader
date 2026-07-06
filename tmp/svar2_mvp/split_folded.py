@@ -3,6 +3,7 @@ self-time by LEAF frame. A leaf frame is Python iff it contains '.py:'.
 
   python split_folded.py <folded.txt>
 """
+
 import sys
 from collections import Counter
 
@@ -34,8 +35,11 @@ def main(path):
                 nat += n
     tot = py + nat
     if tot == 0:
-        print("no samples parsed"); return
-    print(f"python_pct={100 * py / tot:.1f} native_pct={100 * nat / tot:.1f} total_samples={tot}")
+        print("no samples parsed")
+        return
+    print(
+        f"python_pct={100 * py / tot:.1f} native_pct={100 * nat / tot:.1f} total_samples={tot}"
+    )
     print("top-15 leaf frames (self-time):")
     for leaf, n in leaves.most_common(15):
         print(f"  {100 * n / tot:5.1f}%  [{classed[leaf]:6s}]  {leaf}")

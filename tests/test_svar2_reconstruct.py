@@ -47,8 +47,15 @@ def svar2_store(tmp_path_factory) -> Path:
 
     out = d / "store"
     _core.run_conversion_pipeline(
-        str(bcf), str(ref), ["chr1"], str(out), ["S0", "S1"],
-        25_000, 2, 1, 8 * 1024 * 1024,
+        str(bcf),
+        str(ref),
+        ["chr1"],
+        str(out),
+        ["S0", "S1"],
+        25_000,
+        2,
+        1,
+        8 * 1024 * 1024,
     )
     assert (out / "meta.json").exists(), "conversion did not finish"
     return out
@@ -104,8 +111,8 @@ def test_svar2_two_source_matches_decode_oracle(svar2_store):
         np.frombuffer(ref_bytes, np.uint8),
         np.array([0, len(ref_bytes)], np.int64),
         pad_char=ord("N"),
-        shifts=None,          # no jitter
-        output_length=-1,     # ragged
+        shifts=None,  # no jitter
+        output_length=-1,  # ragged
         parallel=False,
     )
     ts_data = np.asarray(hap_rag.data).view("S1").tobytes()
@@ -116,7 +123,7 @@ def test_svar2_two_source_matches_decode_oracle(svar2_store):
     R, So, Po = int(raw["n_regions"]), int(raw["n_samples"]), int(raw["ploidy"])
     assert (R, So, Po) == (1, S, P)
     H = R * So * Po
-    off = np.asarray(raw["off"])          # (H+1,) per-hap variant offsets
+    off = np.asarray(raw["off"])  # (H+1,) per-hap variant offsets
     str_off = np.asarray(raw["str_off"])  # per-variant allele-byte offsets
     d_pos = np.asarray(raw["pos"])
     d_ilen = np.asarray(raw["ilen"])

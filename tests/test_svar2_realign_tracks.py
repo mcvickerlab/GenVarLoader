@@ -47,8 +47,15 @@ def svar2_del_store(tmp_path_factory) -> Path:
 
     out = d / "store"
     _core.run_conversion_pipeline(
-        str(bcf), str(ref), ["chr1"], str(out), ["S0", "S1"],
-        25_000, 2, 1, 8 * 1024 * 1024,
+        str(bcf),
+        str(ref),
+        ["chr1"],
+        str(out),
+        ["S0", "S1"],
+        25_000,
+        2,
+        1,
+        8 * 1024 * 1024,
     )
     assert (out / "meta.json").exists(), "conversion did not finish"
     return out
@@ -73,7 +80,7 @@ def test_svar2_realign_tracks_matches_svar1_oracle(svar2_del_store):
     rng = np.random.default_rng(0)
     track = rng.random(region_len).astype(np.float32)
 
-    strategy_id = 0            # irrelevant for DEL-only (insertion-fill unused)
+    strategy_id = 0  # irrelevant for DEL-only (insertion-fill unused)
     params = np.zeros(1, np.float64)
     base_seed = 0
 
@@ -82,12 +89,12 @@ def test_svar2_realign_tracks_matches_svar1_oracle(svar2_del_store):
     out_rag = src.realign_tracks(
         contig,
         regions,
-        track,                                  # flat per-region track buffer
-        np.array([0, region_len], np.int64),    # (R+1) offsets
+        track,  # flat per-region track buffer
+        np.array([0, region_len], np.int64),  # (R+1) offsets
         params,
         strategy_id,
         base_seed,
-        shifts=None,                            # no jitter
+        shifts=None,  # no jitter
         parallel=False,
     )
 
@@ -95,7 +102,7 @@ def test_svar2_realign_tracks_matches_svar1_oracle(svar2_del_store):
     raw = sv._readers[contig].decode_batch([(q_start, q_end)])
     R, So, Po = int(raw["n_regions"]), int(raw["n_samples"]), int(raw["ploidy"])
     assert (R, So, Po) == (1, S, P)
-    off = np.asarray(raw["off"])        # (H+1,) per-hap variant offsets
+    off = np.asarray(raw["off"])  # (H+1,) per-hap variant offsets
     d_pos = np.asarray(raw["pos"])
     d_ilen = np.asarray(raw["ilen"])
 
@@ -112,7 +119,7 @@ def test_svar2_realign_tracks_matches_svar1_oracle(svar2_del_store):
 
     for s in range(S):
         for p in range(P):
-            h = (0 * S + s) * P + p                # region-major h=(r*S+s)*P+p
+            h = (0 * S + s) * P + p  # region-major h=(r*S+s)*P+p
             gi0, gi1 = int(off[h]), int(off[h + 1])
             pos_h = np.ascontiguousarray(d_pos[gi0:gi1], np.int32)
             ilen_h = np.ascontiguousarray(d_ilen[gi0:gi1], np.int32)
@@ -148,7 +155,10 @@ def test_svar2_realign_tracks_matches_svar1_oracle(svar2_del_store):
                 hap=h,
             )
             np.testing.assert_allclose(
-                got, expected, rtol=0, atol=0,
+                got,
+                expected,
+                rtol=0,
+                atol=0,
                 err_msg=f"(s={s},p={p}) SVAR2 track != SVAR1 oracle "
-                        f"(pos={pos_h.tolist()}, ilen={ilen_h.tolist()})",
+                f"(pos={pos_h.tolist()}, ilen={ilen_h.tolist()})",
             )

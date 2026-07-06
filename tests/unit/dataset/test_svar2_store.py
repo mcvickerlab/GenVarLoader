@@ -41,8 +41,15 @@ def svar2_store(tmp_path_factory) -> Path:
 
     out = d / "cohort.svar2"
     _core.run_conversion_pipeline(
-        str(bcf), str(ref), ["chr1"], str(out), ["S0", "S1"],
-        25_000, 2, 1, 8 * 1024 * 1024,
+        str(bcf),
+        str(ref),
+        ["chr1"],
+        str(out),
+        ["S0", "S1"],
+        25_000,
+        2,
+        1,
+        8 * 1024 * 1024,
     )
     assert (out / "meta.json").exists(), "conversion did not finish"
     return out
