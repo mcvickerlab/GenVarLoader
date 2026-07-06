@@ -77,14 +77,14 @@ class _Svar2Cache:
     sample_cols: NDArray[np.int64]
 
 
-def _ragged_arange_gather(
-    data: NDArray, offsets: NDArray[np.integer], perm: NDArray[np.integer]
-) -> tuple[NDArray, NDArray[np.int64]]:
-    """Reorder the rows of a 1-level ragged array ``(data, offsets)`` by ``perm``.
+def _ragged_arange_src(
+    offsets: NDArray[np.integer], perm: NDArray[np.integer]
+) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
+    """Source-row index + new offsets for a 1-level ragged reorder by ``perm``.
 
-    ``offsets`` has length ``n_rows + 1``; ``perm`` is the new row order
-    (final row ``i`` == old row ``perm[i]``). Fully vectorized (no Python loop
-    over rows). Returns ``(new_data, new_offsets)``.
+    ``new_data == data[src]``; ``src`` and ``new_off`` depend only on
+    ``(offsets, perm)`` — so callers reordering several parallel data arrays by
+    the same key compute this ONCE and index each array.
     """
     offsets = np.asarray(offsets, np.int64)
     lens = np.diff(offsets)
@@ -92,9 +92,19 @@ def _ragged_arange_gather(
     new_off = lengths_to_offsets(new_lens, np.int64)
     n = int(new_off[-1])
     if n == 0:
-        return data[:0].copy(), new_off
+        return np.zeros(0, np.int64), new_off
     within = np.arange(n, dtype=np.int64) - np.repeat(new_off[:-1], new_lens)
     src = np.repeat(offsets[perm], new_lens) + within
+    return src, new_off
+
+
+def _ragged_arange_gather(
+    data: NDArray, offsets: NDArray[np.integer], perm: NDArray[np.integer]
+) -> tuple[NDArray, NDArray[np.int64]]:
+    """Reorder the rows of a 1-level ragged array ``(data, offsets)`` by ``perm``."""
+    src, new_off = _ragged_arange_src(offsets, perm)
+    if src.size == 0:
+        return data[:0].copy(), new_off
     return data[src], new_off
 
 
@@ -598,8 +608,13 @@ class Svar2Haps(Haps[_H]):
 
         perm = self._inverse_row_perm(cat_query_order, b, P)
 
-        pos_g, var_off_g = _ragged_arange_gather(pos_c, grouped_var_off, perm)
-        ilen_g, _ = _ragged_arange_gather(ilen_c, grouped_var_off, perm)
+        src, var_off_g = _ragged_arange_src(grouped_var_off, perm)
+        if src.size == 0:
+            pos_g = pos_c[:0].copy()
+            ilen_g = ilen_c[:0].copy()
+        else:
+            pos_g = pos_c[src]
+            ilen_g = ilen_c[src]
         alt_g, alt_var_off_g, alt_str_off_g = _ragged_arange_gather_2level(
             alt_c, grouped_var_off, grouped_str_off, perm
         )
