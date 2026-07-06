@@ -191,37 +191,52 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
         dense_range.push(dense_pos.len() as i32);
     }
 
-    let total_bits: usize = (0..h_count)
-        .map(|h| {
-            let q = h / ploidy;
+    // Per query `q`, every one of its `ploidy` haps has the exact same dense
+    // window width `(se - ss) + (ie - is_)` — so summing per-h widths over
+    // `0..h_count` (which recomputes `q = h / ploidy` via a runtime-value
+    // hardware division on *every* h) is equivalent to summing the per-q
+    // width once and multiplying by `ploidy`. Same total, no per-h division.
+    let total_bits: usize = (0..n_q)
+        .map(|q| {
             let (ss, se) = br.dense_snp_range[q];
             let (is_, ie) = br.dense_indel_range[q];
-            (se - ss) + (ie - is_)
+            ((se - ss) + (ie - is_)) * ploidy
         })
         .sum();
     let mut dense_present: Vec<u8> = vec![0u8; total_bits.div_ceil(8)];
     let mut dense_present_off: Vec<i64> = Vec::with_capacity(h_count + 1);
     let mut bit_acc: usize = 0;
     dense_present_off.push(0);
-    for h in 0..h_count {
-        let q = h / ploidy;
+    // Same hoist as `decode_variants_from_split`: `q = h / ploidy` is
+    // loop-invariant across each hap's ploidy-many iterations, so iterate `q`
+    // in the outer loop and track `h` with a plain running counter instead of
+    // recomputing `h / ploidy` (a runtime division) on every hap. Visits the
+    // exact same `(h, q)` pairs in the exact same order (h = 0, 1, ...,
+    // h_count-1, q = h/ploidy for each) — byte-identical — and also hoists the
+    // per-query `(ss, se)`/`(is_, ie)` window lookup out of the
+    // ploidy-many-times-redundant per-hap load.
+    let mut h = 0usize;
+    for q in 0..n_q {
         let (ss, se) = br.dense_snp_range[q];
         let (is_, ie) = br.dense_indel_range[q];
-        let snp_base = br.dense_snp_present_off[h];
-        for k in 0..(se - ss) {
-            if genoray_core::bits_get_bit(&br.dense_snp_present, snp_base + k) {
-                dense_present[bit_acc / 8] |= 1 << (bit_acc % 8);
+        for _hap in 0..ploidy {
+            let snp_base = br.dense_snp_present_off[h];
+            for k in 0..(se - ss) {
+                if genoray_core::bits_get_bit(&br.dense_snp_present, snp_base + k) {
+                    dense_present[bit_acc / 8] |= 1 << (bit_acc % 8);
+                }
+                bit_acc += 1;
             }
-            bit_acc += 1;
-        }
-        let indel_base = br.dense_indel_present_off[h];
-        for k in 0..(ie - is_) {
-            if genoray_core::bits_get_bit(&br.dense_indel_present, indel_base + k) {
-                dense_present[bit_acc / 8] |= 1 << (bit_acc % 8);
+            let indel_base = br.dense_indel_present_off[h];
+            for k in 0..(ie - is_) {
+                if genoray_core::bits_get_bit(&br.dense_indel_present, indel_base + k) {
+                    dense_present[bit_acc / 8] |= 1 << (bit_acc % 8);
+                }
+                bit_acc += 1;
             }
-            bit_acc += 1;
+            dense_present_off.push(bit_acc as i64);
+            h += 1;
         }
-        dense_present_off.push(bit_acc as i64);
     }
     // The reused kernels read `dense_present[bit/8]` for EVERY window entry of
     // every hap, so the buffer must always be ceil(total_bits/8) bytes — even
@@ -568,6 +583,67 @@ mod tests {
             let got = genoray_core::bits_get_bit(&flat.dense_present, h);
             assert_eq!(got, want, "hap {h} presence bit");
         }
+    }
+
+    #[test]
+    fn test_split_to_flat_ploidy_gt1_reuses_per_query_window_across_haps() {
+        use genoray_core::query::KeyRef;
+
+        // Regression for the q=h/ploidy hoist: ploidy=2, n_regions=2 (h_count=4)
+        // so each query's dense_snp/dense_indel window is shared by 2 haps, but
+        // each hap has its own presence bits at its own `*_present_off` offset.
+        // This exercises the outer-q/inner-hap loop restructuring (the old code
+        // recomputed `q = h / ploidy` per hap via a runtime division; the new
+        // code hoists the per-query window lookup out of the hap loop) — proving
+        // it doesn't mix up which hap's presence bits attach to which query's
+        // window. The 12 combined presence bits (3/hap * 4 haps) also cross a
+        // byte boundary with mixed set/unset bits, like the trailing-zero test,
+        // but here across queries+haps instead of a single-bit-per-hap window.
+        let dense_snp: Vec<KeyRef> = (0..4)
+            .map(|i| KeyRef {
+                position: 10 + i,
+                key: 200 + i,
+            })
+            .collect();
+        let dense_indel: Vec<KeyRef> = (0..2)
+            .map(|i| KeyRef {
+                position: 50 + i,
+                key: 500 + i,
+            })
+            .collect();
+
+        let br = BatchResultSplit {
+            n_regions: 2,
+            n_samples: 1,
+            ploidy: 2,
+            vk: vec![],
+            vk_off: vec![0; 5],
+            dense_snp,
+            // query 0 owns snp[0..2), query 1 owns snp[2..4) — width 2/query,
+            // shared by both of that query's haps.
+            dense_snp_range: vec![(0, 2), (2, 4)],
+            // hap0 bits(0,1)=(1,0), hap1 bits(2,3)=(0,1), hap2 bits(4,5)=(1,1),
+            // hap3 bits(6,7)=(0,0) -> byte 0b0011_1001.
+            dense_snp_present: vec![0b0011_1001],
+            dense_snp_present_off: vec![0, 2, 4, 6, 8],
+            dense_indel,
+            // query 0 owns indel[0..1), query 1 owns indel[1..2) — width 1/query.
+            dense_indel_range: vec![(0, 1), (1, 2)],
+            // hap0=1, hap1=0, hap2=1, hap3=1 -> byte 0b0000_1101.
+            dense_indel_present: vec![0b0000_1101],
+            dense_indel_present_off: vec![0, 1, 2, 3, 4],
+        };
+
+        let flat = split_to_flat(&br);
+
+        // snp-then-indel per query, queries in order.
+        assert_eq!(flat.dense_pos, vec![10, 11, 50, 12, 13, 51]);
+        assert_eq!(flat.dense_key, vec![200, 201, 500, 202, 203, 501]);
+        assert_eq!(flat.dense_range, vec![0, 3, 3, 6]);
+
+        // 4 haps * 3 bits/hap = 12 bits -> 2 bytes, spanning a byte boundary.
+        assert_eq!(flat.dense_present_off, vec![0, 3, 6, 9, 12]);
+        assert_eq!(flat.dense_present, vec![0b1101_0101, 0b0000_1001]);
     }
 
     #[test]
