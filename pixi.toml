@@ -19,6 +19,13 @@ splice = { features = ["notebook", "basenji2", "py310", "splice"] }
 [target.osx-arm64.activation.env]
 RUSTFLAGS = "-C link-arg=-rpath -C link-arg=$CONDA_PREFIX/lib"
 
+# Prepend the env's lib dir so its libstdc++/libpython win over any system libs
+# an HPC module may have placed earlier on LD_LIBRARY_PATH (e.g. an older gcc
+# libstdc++ lacking GLIBCXX_3.4.30, which breaks llvmlite in spawned workers and
+# libpython loading in `cargo test` binaries).
+[target.linux-64.activation.env]
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+
 [dependencies]
 python = "<3.14"
 uv = "*"
@@ -51,7 +58,7 @@ plink2 = "*"
 genvarloader = { path = ".", editable = true, extras = ["cli"] }
 # Test-only: needed by the property/fixture tests across the whole py3xx matrix
 # (not a genvarloader runtime dep, so it must live here, not just in py310).
-vcfixture = ">=0.5.0"
+vcfixture = ">=0.6.0,<0.7"
 
 [feature.docs.dependencies]
 pandoc = "*"
@@ -118,7 +125,7 @@ pooch = "*"
 awkward = "*"
 pydantic = ">=2,<3"
 hypothesis = "*"
-vcfixture = ">=0.5.0"
+vcfixture = ">=0.6.0,<0.7"
 filelock = "*"
 
 [feature.py311.dependencies]
