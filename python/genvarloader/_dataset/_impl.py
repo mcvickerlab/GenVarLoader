@@ -102,6 +102,7 @@ class Dataset:
         var_filter: Literal["exonic"] | None = None,
         *,
         svar: str | Path | None = None,
+        svar2: str | Path | None = None,
     ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]: ...
     @staticmethod
     @overload
@@ -120,6 +121,7 @@ class Dataset:
         var_filter: Literal["exonic"] | None = None,
         *,
         svar: str | Path | None = None,
+        svar2: str | Path | None = None,
     ) -> RaggedDataset[RaggedSeqs, MaybeRTRK]: ...
     @staticmethod
     def open(
@@ -137,6 +139,7 @@ class Dataset:
         var_filter: Literal["exonic"] | None = None,
         *,
         svar: str | Path | None = None,
+        svar2: str | Path | None = None,
     ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]:
         """Open a dataset from a path. If no reference genome is provided, the dataset cannot yield sequences.
         Will initialize the dataset such that it will return tracks and haplotypes (reference sequences if no genotypes) if possible.
@@ -179,6 +182,10 @@ class Dataset:
             Override the recorded SVAR location. Use when the original SVAR has
             moved and the dataset cannot find it via the stored relative/absolute
             path or by sibling discovery.
+        svar2
+            Override the recorded ``.svar2`` location. Use when the original
+            ``.svar2`` store has moved and the dataset cannot find it via the
+            stored relative/absolute path or by sibling discovery.
         """
         from ._open import OpenRequest
 
@@ -196,6 +203,7 @@ class Dataset:
             splice_info=splice_info,
             var_filter=var_filter,
             svar=svar,
+            svar2=svar2,
         ).resolve()
 
     def with_settings(

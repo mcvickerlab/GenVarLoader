@@ -56,6 +56,7 @@ class OpenRequest:
     splice_info: str | tuple[str, str] | None = None
     var_filter: Literal["exonic"] | None = None
     svar: str | Path | None = None
+    svar2: str | Path | None = None
     var_fields: list[str] | None = None
 
     def resolve(self) -> RaggedDataset:
@@ -149,19 +150,36 @@ class OpenRequest:
         if self._has_genotypes():
             if metadata.ploidy is None:
                 raise ValueError("Malformed dataset: found genotypes but not ploidy.")
-            seqs = Haps.from_path(
-                path=self.path,
-                reference=reference,
-                regions=regions,
-                samples=metadata.samples,
-                ploidy=metadata.ploidy,
-                version=metadata.version,
-                svar_link=metadata.svar_link,
-                svar_override=self.svar,
-                min_af=self.min_af,
-                max_af=self.max_af,
-                var_fields=self.var_fields,
+            svar2_meta = (
+                self.path / "genotypes" / "svar2_ranges" / "svar2_meta.json"
             )
+            seqs: Haps | Ref | None
+            if svar2_meta.exists():
+                from ._svar2_haps import Svar2Haps
+
+                seqs = Svar2Haps.from_path(
+                    path=self.path,
+                    reference=reference,
+                    samples=metadata.samples,
+                    ploidy=metadata.ploidy,
+                    svar2_link=metadata.svar2_link,
+                    svar2_override=self.svar2,
+                    contigs=metadata.contigs,
+                )
+            else:
+                seqs = Haps.from_path(
+                    path=self.path,
+                    reference=reference,
+                    regions=regions,
+                    samples=metadata.samples,
+                    ploidy=metadata.ploidy,
+                    version=metadata.version,
+                    svar_link=metadata.svar_link,
+                    svar_override=self.svar,
+                    min_af=self.min_af,
+                    max_af=self.max_af,
+                    var_fields=self.var_fields,
+                )
             if reference is None:
                 logger.warning(
                     "No reference: dataset only has genotypes but no reference was given."
