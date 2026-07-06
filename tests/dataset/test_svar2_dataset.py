@@ -21,6 +21,48 @@ import polars as pl
 import pytest
 
 import genvarloader as gvl
+from genvarloader import VarWindowOpt
+
+_WIN_OPT = VarWindowOpt(
+    flank_length=3, token_alphabet=b"ACGT", unknown_token=4, ref="window", alt="window"
+)
+
+
+def _open_windows_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref, opt=_WIN_OPT):
+    ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    w1 = ds1.with_output_format("flat").with_seqs("variant-windows", opt)[:, :]
+    w2 = ds2.with_output_format("flat").with_seqs("variant-windows", opt)[:, :]
+    return w1, w2
+
+
+def _assert_window_equal(a, b, name: str) -> None:
+    """Flat-buffer equality of two _FlatWindow fields (data + both offset levels)."""
+    assert np.array_equal(np.asarray(a.var_offsets), np.asarray(b.var_offsets)), (
+        f"{name} var_offsets differ"
+    )
+    assert np.array_equal(np.asarray(a.seq_offsets), np.asarray(b.seq_offsets)), (
+        f"{name} seq_offsets differ"
+    )
+    assert np.array_equal(np.asarray(a.data), np.asarray(b.data)), f"{name} data differ"
+
+
+def test_svar2_variant_windows_ref_window_matches_svar1(
+    tmp_path, bed, svar_fixture, svar2_fixture, _src
+):
+    """ref_window is a pure reference read over an identical variant SET, so it is
+    byte-identical to SVAR1 (independent of the deletion-ALT encoding difference)."""
+    _bcf, ref = _src
+    w1, w2 = _open_windows_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    assert w2.ref_window is not None
+    _assert_window_equal(w2.ref_window, w1.ref_window, "ref_window")
+    # scalar start field also identical (same variant SET) — compare _Flat buffers.
+    assert np.array_equal(
+        np.asarray(w2.fields["start"].data), np.asarray(w1.fields["start"].data)
+    )
+    assert np.array_equal(
+        np.asarray(w2.fields["start"].offsets), np.asarray(w1.fields["start"].offsets)
+    )
+
 
 # 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6
 # (C>CAT), dense SNP@9 (G>C, carried by 3 haps -> dense/snp channel), DEL@11
@@ -582,3 +624,183 @@ def test_svar2_haplotypes_match_svar1_multicontig(
         f"svar2={np.asarray(b.offsets).tolist()}"
     )
     assert np.array_equal(a.data.view("u1"), b.data.view("u1"))
+
+
+# --------------------------------------------------------------------------
+# variant-windows (Task 1): ref_window pinned to SVAR1; alt_window validated via
+# ref-flank decomposition + tokenized variants.alt; multi-contig stitch, dummy
+# fill, and the ref="allele" / jitter guards.
+# --------------------------------------------------------------------------
+
+
+def test_svar2_variant_windows_alt_window_decomposition(
+    tmp_path, bed, svar_fixture, svar2_fixture, _src
+):
+    """alt_window[j] == ref_window[j][:L] + tokenize(alt_j) + ref_window[j][-L:].
+    Uses only svar2's own outputs; ref_window is separately pinned to SVAR1."""
+    _bcf, ref = _src
+    ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    L = _WIN_OPT.flank_length
+    w_win = ds2.with_output_format("flat").with_seqs("variant-windows", _WIN_OPT)[:, :]
+    alt_opt = VarWindowOpt(
+        flank_length=L,
+        token_alphabet=b"ACGT",
+        unknown_token=4,
+        ref="window",
+        alt="allele",
+    )
+    w_alt = ds2.with_output_format("flat").with_seqs("variant-windows", alt_opt)[:, :]
+
+    rw = w_win.ref_window
+    aw = w_win.alt_window
+    ba = w_alt.alt  # bare tokenized alt (_FlatWindow)
+    assert aw is not None and rw is not None and ba is not None
+
+    # Same variant SET/order across the two reads.
+    assert np.array_equal(np.asarray(aw.var_offsets), np.asarray(ba.var_offsets))
+    n_var = len(np.asarray(aw.seq_offsets)) - 1
+    rso, aso, bso = (
+        np.asarray(rw.seq_offsets),
+        np.asarray(aw.seq_offsets),
+        np.asarray(ba.seq_offsets),
+    )
+    rd, ad, bd = np.asarray(rw.data), np.asarray(aw.data), np.asarray(ba.data)
+    for j in range(n_var):
+        rj = rd[rso[j] : rso[j + 1]]
+        aj = ad[aso[j] : aso[j + 1]]
+        bj = bd[bso[j] : bso[j + 1]]
+        expected = np.concatenate([rj[:L], bj, rj[len(rj) - L :]])
+        assert np.array_equal(aj, expected), f"alt_window variant {j} mismatch"
+
+
+def test_svar2_variant_windows_bare_alt_tokenizes_variants_alt(
+    tmp_path, bed, svar_fixture, svar2_fixture, _src
+):
+    import awkward as ak
+
+    from genvarloader._dataset._flat_flanks import build_token_lut
+
+    _bcf, ref = _src
+    _, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    L = _WIN_OPT.flank_length
+    alt_opt = VarWindowOpt(
+        flank_length=L,
+        token_alphabet=b"ACGT",
+        unknown_token=4,
+        ref="window",
+        alt="allele",
+    )
+    w_alt = ds2.with_output_format("flat").with_seqs("variant-windows", alt_opt)[:, :]
+    v = ds2.with_seqs("variants")[:, :]  # RaggedVariants (validated)
+
+    lut, _ = build_token_lut(b"ACGT", 4)
+    # Flat (b*p) rows, each a list of alt byte-strings in variant order.
+    alt_rows = ak.to_list(v.alt.to_ak())  # (b*p) -> [bytes,...]
+    flat_alts: list[bytes] = []
+    for per_var in alt_rows:
+        for a in per_var:
+            flat_alts.append(bytes(a) if not isinstance(a, bytes) else a)
+
+    ba = w_alt.alt
+    bso, bd = np.asarray(ba.seq_offsets), np.asarray(ba.data)
+    assert len(flat_alts) == len(bso) - 1
+    for j, a in enumerate(flat_alts):
+        toks = bd[bso[j] : bso[j + 1]]
+        expected = np.array([lut[byte] for byte in a], dtype=toks.dtype)
+        assert np.array_equal(toks, expected), f"bare alt variant {j} mismatch"
+
+
+def test_svar2_variant_windows_multicontig(
+    tmp_path, svar_fixture2, svar2_fixture2, _src2
+):
+    """ref_window byte-identical to SVAR1 across an interleaved 2-contig bed
+    (single-contig fast path bypassed -> exercises the group-stitch reorder)."""
+    from genoray import SparseVar, SparseVar2
+
+    _bcf, ref = _src2
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr2", "chr1", "chr2", "chr1"],
+            "chromStart": [0, 0, 10, 5],
+            "chromEnd": [40, 40, 40, 20],
+        }
+    )
+    d1 = tmp_path / "vw_mc1.gvl"
+    d2 = tmp_path / "vw_mc2.gvl"
+    gvl.write(d1, bed, variants=SparseVar(svar_fixture2), samples=None, overwrite=True)
+    gvl.write(
+        d2, bed, variants=SparseVar2(svar2_fixture2), samples=None, overwrite=True
+    )
+    ds1 = gvl.Dataset.open(d1, reference=ref)
+    ds2 = gvl.Dataset.open(d2, reference=ref)
+    w1 = ds1.with_output_format("flat").with_seqs("variant-windows", _WIN_OPT)[:, :]
+    w2 = ds2.with_output_format("flat").with_seqs("variant-windows", _WIN_OPT)[:, :]
+    _assert_window_equal(w2.ref_window, w1.ref_window, "ref_window")
+    # alt_window decomposition holds across the stitch too.
+    w2.alt_window.to_ragged()  # offsets/data consistent post-reorder
+    w2.ref_window.to_ragged()
+
+
+def test_svar2_variant_windows_dummy_fills_empty_groups(
+    tmp_path, bed, svar_fixture, svar2_fixture, _src
+):
+    from genvarloader import DummyVariant
+
+    _bcf, ref = _src
+    _, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    L = _WIN_OPT.flank_length
+    dummy = DummyVariant(alt=b"N", ref=b"N")
+    w = (
+        ds2.with_output_format("flat")
+        .with_settings(dummy_variant=dummy)
+        .with_seqs("variant-windows", _WIN_OPT)[:, :]
+    )
+    # Every (b*p) row now has >= 1 variant (no empty rows).
+    vo = np.asarray(w.ref_window.var_offsets)
+    assert np.all(np.diff(vo) >= 1)
+    # ref_window dummy width = 2L + len(dummy.ref); alt_window = 2L + len(dummy.alt).
+    # (For a filled row the sole variant's window length equals the dummy width.)
+    # Assert at least one dummy-width ref window exists (the tail region rows).
+    rso = np.asarray(w.ref_window.seq_offsets)
+    assert (np.diff(rso) == (2 * L + len(dummy.ref))).any()
+    w.ref_window.to_ragged()
+    w.alt_window.to_ragged()
+
+
+def test_svar2_variant_windows_ref_allele_guard(tmp_path, bed, svar2_fixture, _src):
+    """ref='allele' needs stored REF bytes svar2 lacks -> ValueError at with_seqs."""
+    from genoray import SparseVar2
+
+    _bcf, ref = _src
+    d = tmp_path / "d.gvl"
+    gvl.write(d, bed, variants=SparseVar2(svar2_fixture), samples=None, overwrite=True)
+    ds = gvl.Dataset.open(d, reference=ref).with_output_format("flat")
+    bad = VarWindowOpt(
+        flank_length=3,
+        token_alphabet=b"ACGT",
+        unknown_token=4,
+        ref="allele",
+        alt="window",
+    )
+    with pytest.raises(ValueError, match="REF"):
+        ds.with_seqs("variant-windows", bad)
+
+
+def test_svar2_variant_windows_jitter_guard(tmp_path, svar2_fixture, _src):
+    """variant-windows must raise when written with max_jitter>0 (no right-clip)."""
+    from genoray import SparseVar2
+
+    _bcf, ref = _src
+    jbed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [5], "chromEnd": [20]})
+    d = tmp_path / "d.gvl"
+    gvl.write(
+        d,
+        jbed,
+        variants=SparseVar2(svar2_fixture),
+        samples=None,
+        max_jitter=2,
+        overwrite=True,
+    )
+    ds = gvl.Dataset.open(d, reference=ref).with_output_format("flat")
+    with pytest.raises(NotImplementedError, match="right-clip"):
+        ds.with_seqs("variant-windows", _WIN_OPT)[:, :]

@@ -47,7 +47,11 @@ from ..genvarloader import (
     reconstruct_haplotypes_from_svar2_readbound,
     shift_and_realign_tracks_from_svar2_readbound,
 )
-from ._flat_variants import _FlatVariantWindows
+from ._flat_variants import (
+    _FlatVariantWindows,
+    _FlatWindow,
+    _assemble_variant_buffers_rust,
+)
 from ._intervals import intervals_to_tracks
 from ._haps import _H, Haps, _Variants
 from ._rag_variants import RaggedVariants
@@ -279,26 +283,18 @@ class Svar2Haps(Haps[_H]):
         self._guard_unsupported(splice_plan)
 
         if issubclass(self.kind, (RaggedVariants, _FlatVariantWindows)):
-            if issubclass(self.kind, _FlatVariantWindows):
-                raise NotImplementedError(
-                    "svar2 datasets do not support with_seqs('variant-windows') yet."
-                )
-            # ``decode_variants_from_svar2_readbound`` has NO right-clip: it emits
-            # every gathered variant that passes the left-clip. The cache's per-query
-            # ranges cover the read window ONLY when it equals the write window --
-            # i.e. no jitter anywhere. max_jitter>0 pads the cache at WRITE (so even
-            # a jitter=0 read over-includes variants in (end, end+max_jitter]); a
-            # jitter>0 read narrows/slides the window at READ. Guard on BOTH.
-            # (Haplotypes/tracks are unaffected: their kernel right-clips to q_end.)
+            # variants AND variant-windows decode variants; the read-bound decode
+            # has NO right-clip, so max_jitter>0 / jitter>0 would over-include
+            # variants past the (unpadded) read window. Guard both modes.
             if self.max_jitter > 0 or jitter > 0:
                 raise NotImplementedError(
-                    "variants output for svar2 datasets written with max_jitter>0"
-                    f" (here max_jitter={self.max_jitter}) or read with jitter>0"
-                    f" (here jitter={jitter}) is not yet supported: the read-bound"
-                    " variants decode does not right-clip to the post-jitter window."
-                    " Use max_jitter=0 at write and jitter=0 at read, or use"
-                    " haplotypes/tracks modes."
+                    "variants/variant-windows output for svar2 datasets written with"
+                    f" max_jitter>0 (here max_jitter={self.max_jitter}) or read with"
+                    f" jitter>0 (here jitter={jitter}) is not yet supported: the"
+                    " read-bound decode does not right-clip to the post-jitter window."
                 )
+            if issubclass(self.kind, _FlatVariantWindows):
+                return cast(_H, self._reconstruct_variant_windows(idx, regions))
             # RaggedVariants: RC is applied by the caller (_getitem_unspliced),
             # so to_rc is intentionally ignored here (mirrors SVAR1 Haps).
             return cast(_H, self._reconstruct_variants(idx, regions))
@@ -650,6 +646,150 @@ class Svar2Haps(Haps[_H]):
             alt_g.view("S1"), shape, alt_var_off_g, str_offsets=alt_str_off_g
         )
         return RaggedVariants(alt=alt_r, start=pos_r, ilen=ilen_r)
+
+    def _reconstruct_variant_windows(
+        self, idx: NDArray[np.integer], regions: NDArray[np.integer]
+    ) -> _FlatVariantWindows:
+        """Variant-windows for svar2: decode variants per contig group, then run the
+        shared ``assemble_variant_buffers`` window kernel over the decoded arrays via
+        an identity gather. ``ref="allele"`` is blocked upstream, so ref is always a
+        reference-read window; ``alt`` follows ``window_opt.alt``.
+        """
+        assert self.window_opt is not None and self.token_lut is not None
+        assert self.reference is not None
+        from typing import Any
+
+        opt = self.window_opt
+        L = opt.flank_length
+        ref_mode = 1  # ref="window" (ref="allele" rejected in with_seqs)
+        alt_mode = 1 if opt.alt == "window" else 2
+        include_ilen = "ilen" in self.var_fields
+
+        regions = np.asarray(regions, np.int32)
+        P = int(self.genotypes.shape[-2])
+        b = len(idx)
+        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
+        r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
+        contig_ids = regions[:, 0].astype(np.int64)
+        groups = self._contig_groups(contig_ids)
+
+        p_eff = P  # unphased_union fold (Task 3) sets this to 1 per group.
+
+        cat_row_off: list[NDArray[np.int64]] = []  # per-group var boundaries
+        cat_pos: list[NDArray[np.int32]] = []
+        cat_ilen: list[NDArray[np.int32]] = []
+        cat_query_order: list[NDArray[np.intp]] = []
+        # name -> per-group (token_data, per-variant seq offsets)
+        win_data: dict[str, list[NDArray]] = {}
+        win_seq_off: dict[str, list[NDArray[np.int64]]] = {}
+
+        for ci, qsel in groups:
+            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
+            pos, ilen, alt_bytes, str_off, var_off = (
+                decode_variants_from_svar2_readbound(
+                    self.store,
+                    self.ds_contigs[ci],
+                    gi[0],
+                    gi[1],
+                    gi[2],
+                    gi[3],
+                    gi[4],
+                    gi[5],
+                    P,
+                )
+            )
+            pos = np.asarray(pos, np.int32)
+            ilen = np.asarray(ilen, np.int32)
+            alt_bytes = np.asarray(alt_bytes, np.uint8)
+            str_off = np.asarray(str_off, np.int64)
+            var_off = np.asarray(var_off, np.int64)
+
+            row_off = var_off  # Task 3: fold to var_off[::P] under unphased_union.
+            n_var = int(len(pos))
+            ref_, ref_offsets = self._ref_for_contig(ci)
+            bufs = _assemble_variant_buffers_rust(
+                1,  # windows mode
+                np.arange(n_var, dtype=np.int32),  # identity v_idxs (data pre-gathered)
+                row_off,
+                alt_bytes,  # alt_global
+                str_off,  # alt_off_global
+                None,  # ref_global (ref="window")
+                None,  # ref_off_global
+                False,  # want_ref_bytes
+                False,  # want_flank
+                ref_mode,
+                alt_mode,
+                L,
+                self.token_lut,
+                np.zeros(n_var, np.int32),  # v_contigs (single-contig ref slice)
+                pos,  # v_starts
+                ilen,  # ilens
+                ref_,
+                ref_offsets,
+                self.reference.pad_char,
+            )
+
+            cat_row_off.append(row_off)
+            cat_pos.append(pos)
+            cat_ilen.append(ilen)
+            cat_query_order.append(qsel)
+            for name, (data, seq_off) in bufs.items():
+                win_data.setdefault(name, []).append(np.asarray(data))
+                win_seq_off.setdefault(name, []).append(np.asarray(seq_off, np.int64))
+
+        shape: tuple[int | None, ...] = (b, p_eff, None)
+        wshape: tuple[int | None, ...] = (b, p_eff, None, None)
+
+        # Single contig group: grouped order already equals global (b, p_eff) order.
+        if len(cat_pos) == 1:
+            row_off = cat_row_off[0]
+            fields: dict[str, Any] = {
+                "start": _Flat.from_offsets(cat_pos[0], shape, row_off)
+            }
+            if include_ilen:
+                fields["ilen"] = _Flat.from_offsets(cat_ilen[0], shape, row_off)
+            win = _FlatVariantWindows(fields)
+            for name in win_data:
+                setattr(
+                    win,
+                    name,
+                    _FlatWindow(
+                        win_data[name][0], win_seq_off[name][0], row_off, wshape
+                    ),
+                )
+        else:
+            perm = self._inverse_row_perm(cat_query_order, b, p_eff)
+            grouped_row_off = lengths_to_offsets(
+                np.concatenate([np.diff(r) for r in cat_row_off]), np.int64
+            )
+            pos_c = np.concatenate(cat_pos)
+            ilen_c = np.concatenate(cat_ilen)
+            src, row_off_g = _ragged_arange_src(grouped_row_off, perm)
+            if src.size == 0:
+                pos_g = pos_c[:0].copy()
+                ilen_g = ilen_c[:0].copy()
+            else:
+                pos_g = pos_c[src]
+                ilen_g = ilen_c[src]
+            fields = {"start": _Flat.from_offsets(pos_g, shape, row_off_g)}
+            if include_ilen:
+                fields["ilen"] = _Flat.from_offsets(ilen_g, shape, row_off_g)
+            win = _FlatVariantWindows(fields)
+            for name in win_data:
+                data_c = np.concatenate(win_data[name])
+                grouped_seq_off = lengths_to_offsets(
+                    np.concatenate([np.diff(s) for s in win_seq_off[name]]), np.int64
+                )
+                nd, nvar, nseq = _ragged_arange_gather_2level(
+                    data_c, grouped_row_off, grouped_seq_off, perm
+                )
+                setattr(win, name, _FlatWindow(nd, nseq, nvar, wshape))
+
+        if self.dummy_variant is not None:
+            win = win.fill_empty_groups(
+                self.dummy_variant, unk=self.unknown_token, flank_length=L
+            )
+        return win
 
     # ---- helpers ----
 
