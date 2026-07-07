@@ -131,7 +131,9 @@ ALT bytes depending on the backing store: `.svar` reports the VCF anchor base (`
 `.svar2` reports the atomized empty ALT (`b""`) — a genoray `.svar2` format convention, not a
 bug. Both stores consume the ALT identically when reconstructing haplotype sequence, so
 `with_seqs("haplotypes")` / `with_seqs("annotated")` output is byte-identical between the two
-backends; only `RaggedVariants.alt` differs, and only for pure-deletion records.
+backends; only `RaggedVariants.alt` differs, and only for pure-deletion records. The same holds
+for `with_seqs("variant-windows")`: `ref_window` is byte-identical between the backends, while the
+`alt`/`alt_window` fields differ only for pure-deletion records (the same empty-vs-anchor ALT).
 
 ## Format changelog
 

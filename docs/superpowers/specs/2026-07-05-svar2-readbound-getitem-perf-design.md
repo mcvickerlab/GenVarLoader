@@ -45,9 +45,11 @@ Shared Rust spine (candidates for `cargo asm`): gvl-side
 
 **Out of scope:** the guarded-`NotImplementedError` modes (annotated, spliced,
 `min_af`/`max_af`, in-kernel RC, `unphased_union`, variant-windows,
-`max_jitter>0` variants); any on-disk **format** or **public API** change; the
-union oracle (`SparseVar2Source`, `overlap_batch`) except as the parity oracle;
-`gvl.write` (the write-time ranges cache producer).
+`max_jitter>0` variants — `unphased_union` and variant-windows have since been
+*implemented*, see `2026-07-06-svar2-variant-windows-design.md`; the perf/fusion
+work this doc scopes remains deferred for both); any on-disk **format** or
+**public API** change; the union oracle (`SparseVar2Source`, `overlap_batch`)
+except as the parity oracle; `gvl.write` (the write-time ranges cache producer).
 
 ## 3. Landing targets (two repos)
 
