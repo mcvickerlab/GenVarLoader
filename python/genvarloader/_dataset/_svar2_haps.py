@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 from genoray._types import POS_TYPE, V_IDX_TYPE
@@ -660,7 +660,6 @@ class Svar2Haps(Haps[_H]):
         """
         assert self.window_opt is not None and self.token_lut is not None
         assert self.reference is not None
-        from typing import Any
 
         opt = self.window_opt
         L = opt.flank_length
@@ -811,6 +810,10 @@ class Svar2Haps(Haps[_H]):
             raise NotImplementedError(
                 "min_af/max_af filtering is not supported for svar2 datasets yet."
             )
+        # No unphased_union guard: variants/variant-windows honor it via the
+        # ploidy-1 fold in their reconstructors; haplotypes/annotated + union is
+        # blocked upstream in _impl.py, and the haps/track spine ignores union
+        # (same as SVAR1), so no path reaches here needing a union guard.
 
     def _contig_groups(
         self, contig_ids: NDArray[np.int64]
