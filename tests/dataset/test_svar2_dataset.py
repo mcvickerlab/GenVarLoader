@@ -398,6 +398,21 @@ def test_svar2_variants_positions_match_svar1(
     _assert_ragged_equal(a.ilen.to_packed(), b.ilen.to_packed(), "ilen")
 
 
+def test_svar2_variants_unphased_union_matches_svar1(
+    tmp_path, bed, svar_fixture, svar2_fixture, _src
+):
+    """Ploidy-1 union: start/ilen byte-identical to SVAR1 union (order-preserving
+    fold, no dedup). ALT differs by encoding, so ALT is not compared to SVAR1."""
+    _bcf, ref = _src
+    ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    a = ds1.with_seqs("variants").with_settings(unphased_union=True)[:, :]
+    b = ds2.with_seqs("variants").with_settings(unphased_union=True)[:, :]
+    # Ploidy axis folded 2 -> 1.
+    assert a.start.shape[-2] == 1 and b.start.shape[-2] == 1
+    _assert_ragged_equal(a.start.to_packed(), b.start.to_packed(), "start")
+    _assert_ragged_equal(a.ilen.to_packed(), b.ilen.to_packed(), "ilen")
+
+
 def test_svar2_variants_match_svar2_oracle(
     tmp_path, bed, svar_fixture, svar2_fixture, _src
 ):

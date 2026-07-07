@@ -565,6 +565,7 @@ class Svar2Haps(Haps[_H]):
         r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
         contig_ids = regions[:, 0].astype(np.int64)
         groups = self._contig_groups(contig_ids)
+        p_eff = 1 if self.unphased_union else P
 
         cat_var_lens: list[NDArray[np.int64]] = []
         cat_pos: list[NDArray[np.int32]] = []
@@ -588,6 +589,8 @@ class Svar2Haps(Haps[_H]):
                 )
             )
             var_off = np.asarray(var_off, np.int64)
+            if self.unphased_union:
+                var_off = np.ascontiguousarray(var_off[::P])
             str_off = np.asarray(str_off, np.int64)
             cat_var_lens.append(np.diff(var_off))
             cat_pos.append(np.asarray(pos, np.int32))
@@ -600,7 +603,7 @@ class Svar2Haps(Haps[_H]):
         # so the reorder is the identity and every concatenate is a 1-element no-op.
         # Skip both (the numpy reorder otherwise dominates single-contig reads).
         if len(cat_pos) == 1:
-            shape = (b, P, None)
+            shape = (b, p_eff, None)
             var_off_g = lengths_to_offsets(cat_var_lens[0], np.int64)
             str_off_g = lengths_to_offsets(cat_var_bytelen[0], np.int64)
             return RaggedVariants(
@@ -626,7 +629,7 @@ class Svar2Haps(Haps[_H]):
         )
         grouped_str_off = lengths_to_offsets(var_bytelen, np.int64)
 
-        perm = self._inverse_row_perm(cat_query_order, b, P)
+        perm = self._inverse_row_perm(cat_query_order, b, p_eff)
 
         src, var_off_g = _ragged_arange_src(grouped_var_off, perm)
         if src.size == 0:
@@ -639,7 +642,7 @@ class Svar2Haps(Haps[_H]):
             alt_c, grouped_var_off, grouped_str_off, perm
         )
 
-        shape = (b, P, None)
+        shape = (b, p_eff, None)
         pos_r = Ragged.from_offsets(pos_g, shape, var_off_g)
         ilen_r = Ragged.from_offsets(ilen_g, shape, var_off_g)
         alt_r = Ragged.from_offsets(
@@ -805,10 +808,6 @@ class Svar2Haps(Haps[_H]):
         if self.min_af is not None or self.max_af is not None:
             raise NotImplementedError(
                 "min_af/max_af filtering is not supported for svar2 datasets yet."
-            )
-        if self.unphased_union:
-            raise NotImplementedError(
-                "unphased_union is not supported for svar2 datasets yet."
             )
 
     def _contig_groups(
