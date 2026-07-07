@@ -756,6 +756,77 @@ def test_svar2_variant_windows_multicontig(
     w2.ref_window.to_ragged()
 
 
+def test_svar2_variant_windows_unphased_union(
+    tmp_path, bed, svar_fixture, svar2_fixture, _src
+):
+    """Union folds ploidy 2->1 for windows; ref_window still byte-identical to
+    SVAR1 union, and the union row is hap-0's windows then hap-1's, concatenated."""
+    _bcf, ref = _src
+    ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    w1 = (
+        ds1.with_output_format("flat")
+        .with_seqs("variant-windows", _WIN_OPT)
+        .with_settings(unphased_union=True)[:, :]
+    )
+    w2 = (
+        ds2.with_output_format("flat")
+        .with_seqs("variant-windows", _WIN_OPT)
+        .with_settings(unphased_union=True)[:, :]
+    )
+    # Ploidy axis folded 2 -> 1. Scalar shape is (R,S,p_eff,None) so ploidy is at
+    # [-2]; window shape is (R,S,p_eff,None,None) so ploidy is at [-3].
+    assert w2.fields["start"].shape[-2] == 1
+    assert w2.ref_window.shape[-3] == 1
+    _assert_window_equal(w2.ref_window, w1.ref_window, "ref_window")
+    # Union row count == sum over haplotypes: compare to the non-union var counts.
+    nu = np.asarray(w2.ref_window.var_offsets)
+    w2_diploid = ds2.with_output_format("flat").with_seqs("variant-windows", _WIN_OPT)[
+        :, :
+    ]
+    nd = np.asarray(w2_diploid.ref_window.var_offsets)
+    P = int(ds2._seqs.genotypes.shape[-2])
+    # Folded per-row counts == sum of the P per-hap counts (rows q*P+p are contiguous).
+    diploid_counts = np.diff(nd).reshape(-1, P).sum(1)
+    union_counts = np.diff(nu)
+    assert np.array_equal(union_counts, diploid_counts)
+    w2.ref_window.to_ragged()
+    w2.alt_window.to_ragged()
+
+
+def test_svar2_variant_windows_union_multicontig(
+    tmp_path, svar_fixture2, svar2_fixture2, _src2
+):
+    from genoray import SparseVar, SparseVar2
+
+    _bcf, ref = _src2
+    bed = pl.DataFrame(
+        {"chrom": ["chr2", "chr1"], "chromStart": [0, 0], "chromEnd": [40, 40]}
+    )
+    d1 = tmp_path / "vwu_mc1.gvl"
+    d2 = tmp_path / "vwu_mc2.gvl"
+    gvl.write(d1, bed, variants=SparseVar(svar_fixture2), samples=None, overwrite=True)
+    gvl.write(
+        d2, bed, variants=SparseVar2(svar2_fixture2), samples=None, overwrite=True
+    )
+    ds1 = gvl.Dataset.open(d1, reference=ref)
+    ds2 = gvl.Dataset.open(d2, reference=ref)
+    w1 = (
+        ds1.with_output_format("flat")
+        .with_seqs("variant-windows", _WIN_OPT)
+        .with_settings(unphased_union=True)[:, :]
+    )
+    w2 = (
+        ds2.with_output_format("flat")
+        .with_seqs("variant-windows", _WIN_OPT)
+        .with_settings(unphased_union=True)[:, :]
+    )
+    assert w2.ref_window.shape[-3] == 1  # window ploidy axis
+    _assert_window_equal(
+        w2.ref_window, w1.ref_window, "ref_window (union, multicontig)"
+    )
+    w2.alt_window.to_ragged()
+
+
 def test_svar2_variant_windows_dummy_fills_empty_groups(
     tmp_path, bed, svar_fixture, svar2_fixture, _src
 ):

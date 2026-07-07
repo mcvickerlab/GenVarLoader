@@ -676,7 +676,7 @@ class Svar2Haps(Haps[_H]):
         contig_ids = regions[:, 0].astype(np.int64)
         groups = self._contig_groups(contig_ids)
 
-        p_eff = P  # unphased_union fold (Task 3) sets this to 1 per group.
+        p_eff = 1 if self.unphased_union else P
 
         cat_row_off: list[NDArray[np.int64]] = []  # per-group var boundaries
         cat_pos: list[NDArray[np.int32]] = []
@@ -707,7 +707,9 @@ class Svar2Haps(Haps[_H]):
             str_off = np.asarray(str_off, np.int64)
             var_off = np.asarray(var_off, np.int64)
 
-            row_off = var_off  # Task 3: fold to var_off[::P] under unphased_union.
+            row_off = (
+                np.ascontiguousarray(var_off[::P]) if self.unphased_union else var_off
+            )
             n_var = int(len(pos))
             ref_, ref_offsets = self._ref_for_contig(ci)
             bufs = _assemble_variant_buffers_rust(
