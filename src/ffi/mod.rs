@@ -960,8 +960,7 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
     let ref_offsets_a = ref_offsets.as_array();
 
     let (out_data, out_offsets_vec) = py.detach(move || {
-        let br = genoray_core::query::gather_haps_readbound(
-            reader,
+        let rb = genoray_core::query::HapRanges::new(
             &region_starts_v,
             &orig_samples_v,
             &vk_snp_range_v,
@@ -970,6 +969,7 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
             &dense_indel_range_v,
             ploidy,
         );
+        let br = genoray_core::query::gather_haps_readbound(reader, &rb);
 
         let (lut_bytes, lut_off_u64) = reader.lut_arrays();
         let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
@@ -1113,8 +1113,7 @@ pub fn hap_diffs_from_svar2_readbound<'py>(
     let dense_indel_range_v = to_pairs(dense_indel_range.as_array());
 
     let diffs = py.detach(move || {
-        let br = genoray_core::query::gather_haps_readbound(
-            reader,
+        let rb = genoray_core::query::HapRanges::new(
             &region_starts_v,
             &orig_samples_v,
             &vk_snp_range_v,
@@ -1123,6 +1122,7 @@ pub fn hap_diffs_from_svar2_readbound<'py>(
             &dense_indel_range_v,
             ploidy,
         );
+        let br = genoray_core::query::gather_haps_readbound(reader, &rb);
 
         let (lut_bytes, lut_off_u64) = reader.lut_arrays();
         let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
@@ -1224,8 +1224,7 @@ pub fn shift_and_realign_tracks_from_svar2_readbound<'py>(
     let params_a = params.as_array();
 
     let (out_data, out_offsets_vec) = py.detach(move || {
-        let br = genoray_core::query::gather_haps_readbound(
-            reader,
+        let rb = genoray_core::query::HapRanges::new(
             &region_starts_v,
             &orig_samples_v,
             &vk_snp_range_v,
@@ -1234,6 +1233,7 @@ pub fn shift_and_realign_tracks_from_svar2_readbound<'py>(
             &dense_indel_range_v,
             ploidy,
         );
+        let br = genoray_core::query::gather_haps_readbound(reader, &rb);
 
         let (lut_bytes, lut_off_u64) = reader.lut_arrays();
         let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
@@ -1369,8 +1369,7 @@ pub fn decode_variants_from_svar2_readbound<'py>(
     let dense_indel_range_v = to_pairs(dense_indel_range.as_array());
 
     let soa = py.detach(move || {
-        let br = genoray_core::query::gather_haps_readbound(
-            reader,
+        let rb = genoray_core::query::HapRanges::new(
             &region_starts_v,
             &orig_samples_v,
             &vk_snp_range_v,
@@ -1379,6 +1378,7 @@ pub fn decode_variants_from_svar2_readbound<'py>(
             &dense_indel_range_v,
             ploidy,
         );
+        let br = genoray_core::query::gather_haps_readbound(reader, &rb);
 
         let (lut_bytes, lut_off_u64) = reader.lut_arrays();
         let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
