@@ -21,12 +21,11 @@ import seqpro as sp
 from genoray import PGEN, VCF, Reader, SparseVar, SparseVar2
 from genoray import exprs as _gexprs
 from genoray._svar import dense2sparse
-from genoray._svar import _dense2sparse_with_length  # type: ignore[missing-module-attribute]
+from genoray._svar._convert import _dense2sparse_with_length
 from genoray._types import V_IDX_TYPE
 from genoray._utils import ContigNormalizer, format_memory, parse_memory
 from joblib import Parallel, delayed
 from loguru import logger
-from more_itertools import mark_ends
 from natsort import natsorted
 from numpy.typing import NDArray
 from pydantic import BaseModel
@@ -741,18 +740,18 @@ def _vcf_region_chunks(
         contig = cast(str, contig)
         starts = df["chromStart"].to_numpy()
         ends = df["chromEnd"].to_numpy()
-        # unextended in-range variant indices, split per region
-        v_idx, v_offsets = vcf._var_idxs(contig, starts, ends)
-        unextended_idxs = np.array_split(v_idx.astype(V_IDX_TYPE), v_offsets[1:-1])
 
         contig_desc = f"Processing genotypes for {df.height} regions on contig {contig}"
         first_in_contig = True
 
+        unextended_idxs: list[NDArray] = []
         if extend_to_length:
             region_iter = vcf._chunk_ranges_with_length(
                 contig, starts, ends, max_mem, VCF.Genos8
             )
         else:
+            v_idx, v_offsets = vcf._var_idxs(contig, starts, ends)
+            unextended_idxs = np.array_split(v_idx.astype(V_IDX_TYPE), v_offsets[1:-1])
             # one generator per region; VCF.chunk takes a single range
             region_iter = (
                 vcf.chunk(contig, s, e, max_mem, VCF.Genos8)
@@ -762,33 +761,25 @@ def _vcf_region_chunks(
         for ri, range_ in enumerate(region_iter):
             q_start = int(starts[ri])
             q_end = int(ends[ri])
-            reg_unext = unextended_idxs[ri]
             desc = contig_desc if first_in_contig else None
             first_in_contig = False
 
             if extend_to_length:
-                # assemble the full window across memory-chunks
-                chunk_genos_list: list[NDArray] = []
-                n_ext_total = 0
-                for _, is_last, (chunk_genos, _chunk_end, n_ext) in mark_ends(range_):
-                    chunk_genos_list.append(chunk_genos)
-                    if is_last:
-                        n_ext_total = n_ext
-                genos = np.concatenate(chunk_genos_list, axis=-1)
+                genos_list: list[NDArray] = []
+                idx_list: list[NDArray] = []
+                for chunk_genos, _chunk_end, chunk_idxs in range_:
+                    genos_list.append(chunk_genos)
+                    idx_list.append(chunk_idxs.astype(V_IDX_TYPE))
+                genos = np.concatenate(genos_list, axis=-1)
+                var_idxs = (
+                    np.concatenate(idx_list)
+                    if idx_list
+                    else np.empty(0, dtype=V_IDX_TYPE)
+                )
 
-                if reg_unext.size == 0 and n_ext_total == 0:
-                    # empty region: no variants for any sample
-                    yield [dense2sparse(genos, reg_unext)], q_end, desc
+                if var_idxs.size == 0:
+                    yield [dense2sparse(genos, var_idxs)], q_end, desc
                     continue
-
-                if n_ext_total > 0:
-                    ext_start = int(reg_unext[-1]) + 1
-                    ext_idxs = np.arange(
-                        ext_start, ext_start + n_ext_total, dtype=V_IDX_TYPE
-                    )
-                    var_idxs = np.concatenate([reg_unext, ext_idxs])
-                else:
-                    var_idxs = reg_unext
 
                 v_starts = (pos[var_idxs] - 1).astype(np.int32)
                 ilens = ilen_all[var_idxs].astype(np.int32)
@@ -798,6 +789,7 @@ def _vcf_region_chunks(
                 region_end = _region_end(rag, v_ends, q_end)
                 yield [rag], region_end, desc
             else:
+                reg_unext = unextended_idxs[ri]
                 # no extension: convert each chunk independently with plain
                 # dense2sparse; var_idxs are exactly the unextended in-range ones
                 ls_sparse: list[Ragged] = []
