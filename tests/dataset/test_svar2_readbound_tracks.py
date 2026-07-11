@@ -1,8 +1,8 @@
 """Parity test for the read-bound SVAR2 track re-alignment kernel (Task 5).
 
-Oracle: ``SparseVar2Source.realign_tracks`` (genoray ``overlap_batch``, eager
+Oracle: ``SparseVar2Source.realign_tracks`` (genoray ``_overlap_batch``, eager
 dense-union path). Under test: ``build_readbound_tracks`` (genoray
-``find_ranges`` + one Rust FFI call via
+``_find_ranges`` + one Rust FFI call via
 ``genoray_core::query::gather_haps_readbound`` -> ``svar2::split_to_flat`` ->
 the SAME validated ``shift_and_realign_tracks_from_svar2`` kernel the oracle
 uses).
@@ -102,7 +102,7 @@ def test_readbound_tracks_match_union_oracle(svar2_store, regions):
     # with the dense indels) so this parity test genuinely exercises the dense
     # path for tracks. Without this, a future cost-model change could silently
     # demote the SNP to var_key and the test would still pass while covering less.
-    d = sv.find_ranges(contig, [0], [40], samples=None)
+    d = sv._find_ranges(contig, [0], [40], samples=None)
     snp_win = int(
         np.asarray(d["dense_snp_range"])[0, 1] - np.asarray(d["dense_snp_range"])[0, 0]
     )

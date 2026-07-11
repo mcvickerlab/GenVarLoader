@@ -2,7 +2,7 @@ from collections.abc import Sequence
 
 import numpy as np
 import polars as pl
-from genoray._utils import ContigNormalizer
+from genoray._contigs import ContigNormalizer
 from numpy.typing import ArrayLike, NDArray
 
 from .._types import DTYPE

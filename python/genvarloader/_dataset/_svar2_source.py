@@ -1,9 +1,9 @@
 """SVAR2 two-source reconstruction adapter — parity oracle only (not a live read path).
 
-Bridges genoray ``SparseVar2.overlap_batch``'s raw two-channel dict to gvl's SVAR2 kernels
+Bridges genoray ``SparseVar2._overlap_batch``'s raw two-channel dict to gvl's SVAR2 kernels
 (``reconstruct_haplotypes_from_svar2`` / ``shift_and_realign_tracks_from_svar2``), decoding
 ``var_key ⋈ dense`` inline with no intermediate variant table. This is the *union* path
-(genoray ``overlap_batch``, whole-cohort).
+(genoray ``_overlap_batch``, whole-cohort).
 
 Live dataset dispatch is NOT wired through here. ``Dataset`` reconstruction for ``.svar2``-backed
 datasets is handled by the read-bound path in ``Svar2Haps`` (``_svar2_haps.py``), which gathers off
@@ -38,7 +38,7 @@ class SparseVar2Source:
         self.svar2 = svar2
 
     def _query(self, contig, regions):
-        d = self.svar2.overlap_batch(contig, [(int(s), int(e)) for s, e in regions])
+        d = self.svar2._overlap_batch(contig, [(int(s), int(e)) for s, e in regions])
         R = int(d["n_regions"])
         S = int(d["n_samples"])
         P = int(d["ploidy"])

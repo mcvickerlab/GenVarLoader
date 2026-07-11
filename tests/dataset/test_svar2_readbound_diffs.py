@@ -189,7 +189,7 @@ def test_readbound_diffs_dense_snp_matches_implied_haps(svar2_store_dense_snp):
     assert (sv.n_samples, sv.ploidy) == (2, 2)
 
     # Routing sanity: the SNP@10 (0-based 9) must be in the dense/snp table.
-    d = sv.find_ranges(contig, [0], [40], samples=None)
+    d = sv._find_ranges(contig, [0], [40], samples=None)
     dense_snp_range = np.asarray(d["dense_snp_range"])  # (R, 2)
     snp_win = int(dense_snp_range[0, 1] - dense_snp_range[0, 0])
     assert snp_win >= 1, (

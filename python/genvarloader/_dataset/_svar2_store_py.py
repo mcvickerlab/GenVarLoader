@@ -4,8 +4,8 @@ NO interval-search-tree rebuild and NO dense-union rebuild.
 
 Byte-identical to the existing union-path oracle (``SparseVar2Source.reconstruct``,
 ``_svar2_source.py``), which calls ``reconstruct_haplotypes_from_svar2`` over
-``SparseVar2.overlap_batch``'s eagerly-unioned dense channel. This module instead
-marshals ``SparseVar2.find_ranges``'s per-class-split ranges through
+``SparseVar2._overlap_batch``'s eagerly-unioned dense channel. This module instead
+marshals ``SparseVar2._find_ranges``'s per-class-split ranges through
 ``genoray_core::query::gather_haps_readbound`` -> ``svar2::split_to_flat`` (Rust side)
 and reuses that same validated kernel — see ``reconstruct_haplotypes_from_svar2_readbound``
 in ``src/ffi/mod.rs``.
@@ -49,15 +49,15 @@ def build_readbound_haps(
 
     Mirrors ``SparseVar2Source.reconstruct``'s signature/return shape exactly (query
     order region-major, sample-minor: ``q = r*S + s``), but drives
-    ``SparseVar2.find_ranges`` (search-only, no dense union) + one Rust FFI call
-    instead of ``overlap_batch``'s eager per-region dense union.
+    ``SparseVar2._find_ranges`` (search-only, no dense union) + one Rust FFI call
+    instead of ``_overlap_batch``'s eager per-region dense union.
     """
     reg = [(int(s), int(e)) for s, e in regions]
     R = len(reg)
     S = svar2.n_samples
     P = svar2.ploidy
 
-    d = svar2.find_ranges(
+    d = svar2._find_ranges(
         contig, [s for s, _ in reg], [e for _, e in reg], samples=None
     )
 
@@ -138,7 +138,7 @@ def build_readbound_diffs(
     S = svar2.n_samples
     P = svar2.ploidy
 
-    d = svar2.find_ranges(
+    d = svar2._find_ranges(
         contig, [s for s, _ in reg], [e for _, e in reg], samples=None
     )
 
@@ -199,15 +199,15 @@ def build_readbound_tracks(
 
     Mirrors ``SparseVar2Source.realign_tracks``'s signature/return shape exactly
     (query order region-major, sample-minor: ``q = r*S + s``), but drives
-    ``SparseVar2.find_ranges`` (search-only, no dense union) + one Rust FFI call
-    instead of ``overlap_batch``'s eager per-region dense union.
+    ``SparseVar2._find_ranges`` (search-only, no dense union) + one Rust FFI call
+    instead of ``_overlap_batch``'s eager per-region dense union.
     """
     reg = [(int(s), int(e)) for s, e in regions]
     R = len(reg)
     S = svar2.n_samples
     P = svar2.ploidy
 
-    d = svar2.find_ranges(
+    d = svar2._find_ranges(
         contig, [s for s, _ in reg], [e for _, e in reg], samples=None
     )
 
@@ -288,7 +288,7 @@ def build_readbound_variants(
     read-bound kernel.
 
     Mirrors ``SparseVar2.decode``'s return shape exactly (region-major,
-    sample-minor: ``q = r*S + s``), but drives ``SparseVar2.find_ranges``
+    sample-minor: ``q = r*S + s``), but drives ``SparseVar2._find_ranges``
     (search-only, no dense union) + one Rust FFI call instead of
     ``decode_batch``'s eager per-region dense union. Unlike
     ``build_readbound_haps``/``build_readbound_tracks`` there is no reconstruct
@@ -303,7 +303,7 @@ def build_readbound_variants(
     S = svar2.n_samples
     P = svar2.ploidy
 
-    d = svar2.find_ranges(
+    d = svar2._find_ranges(
         contig, [s for s, _ in reg], [e for _, e in reg], samples=None
     )
 

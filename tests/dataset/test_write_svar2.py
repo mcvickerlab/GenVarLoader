@@ -119,11 +119,13 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
     assert region_starts.shape == (bed.height,)
 
     # ---- FIX 1: verify cache CONTENTS (not just shapes/keys) against a direct
-    # find_ranges call over the same regions. gvl sorts the written samples, so
-    # replay find_ranges with the sorted sample list to match slot ordering.
+    # _find_ranges call over the same regions. gvl sorts the written samples, so
+    # replay _find_ranges with the sorted sample list to match slot ordering.
     # This LOCKS the row-major (R, S, P) reshape and per-contig layout: a
     # scrambled / mis-transposed cache would fail loudly here.
-    sorted_samples = sorted(svar2.samples)  # what gvl.write wrote (samples.sort())
+    sorted_samples = sorted(
+        svar2.available_samples
+    )  # what gvl.write wrote (samples.sort())
     S, P = len(sorted_samples), svar2.ploidy
 
     def mm(name: str) -> np.ndarray:
@@ -142,7 +144,9 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
 
     # sample_cols is written with np.save (has a .npy header): read with np.load.
     sample_cols = np.load(rd / "sample_cols.npy")
-    assert sample_cols.tolist() == [svar2.samples.index(s) for s in sorted_samples]
+    assert sample_cols.tolist() == [
+        svar2.available_samples.index(s) for s in sorted_samples
+    ]
 
     contig_offset = 0
     for (c,), df in bed.partition_by(
@@ -150,7 +154,7 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
     ).items():
         rc = df.height
         lo, hi = contig_offset, contig_offset + rc
-        d = svar2.find_ranges(
+        d = svar2._find_ranges(
             c,
             df["chromStart"].to_numpy(),
             df["chromEnd"].to_numpy(),
@@ -160,7 +164,7 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
         np.testing.assert_array_equal(
             region_starts_full[lo:hi], np.asarray(d["region_starts"], np.int64)
         )
-        # vk ranges: reshape (rc, S, P, 2) -> (rc*S*P, 2) must equal find_ranges'
+        # vk ranges: reshape (rc, S, P, 2) -> (rc*S*P, 2) must equal _find_ranges'
         # row-major (R*S*P, 2). This pins the reshape done in _write_from_svar2.
         np.testing.assert_array_equal(
             vk_snp[lo:hi].reshape(rc * S * P, 2),

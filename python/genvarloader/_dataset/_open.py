@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Literal, cast
 import numpy as np
 import polars as pl
 import seqpro as sp
-from genoray._utils import ContigNormalizer
+from genoray._contigs import ContigNormalizer
 from loguru import logger
 from numpy.typing import NDArray
 

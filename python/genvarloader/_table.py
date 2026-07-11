@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import polars as pl
-from genoray._utils import ContigNormalizer
+from genoray._contigs import ContigNormalizer
 
 if TYPE_CHECKING:
     from numpy.typing import ArrayLike, NDArray

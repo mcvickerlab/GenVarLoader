@@ -9,7 +9,7 @@ import pandera.polars as pa
 import polars as pl
 import seqpro as sp
 from genoray import VCF
-from genoray._utils import ContigNormalizer
+from genoray._contigs import ContigNormalizer
 from numpy.typing import NDArray
 
 from .._dataset._impl import SEQ, ArrayDataset, MaybeTRK

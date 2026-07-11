@@ -7,7 +7,7 @@ from typing import Generic, Literal, TypeVar, cast, overload
 
 import numpy as np
 import polars as pl
-from genoray._utils import ContigNormalizer
+from genoray._contigs import ContigNormalizer
 from hirola import HashTable
 from numpy.typing import ArrayLike, NDArray
 from seqpro.rag import Ragged, lengths_to_offsets

@@ -1,7 +1,7 @@
 """Parity test for the read-bound SVAR2 haplotype kernel (Task 4).
 
-Oracle: ``SparseVar2Source.reconstruct`` (genoray ``overlap_batch``, eager dense-union
-path). Under test: ``build_readbound_haps`` (genoray ``find_ranges`` + one Rust FFI call
+Oracle: ``SparseVar2Source.reconstruct`` (genoray ``_overlap_batch``, eager dense-union
+path). Under test: ``build_readbound_haps`` (genoray ``_find_ranges`` + one Rust FFI call
 via ``genoray_core::query::gather_haps_readbound`` -> ``svar2::split_to_flat`` ->
 the SAME validated ``reconstruct_haplotypes_from_svar2`` kernel the oracle uses).
 
@@ -231,7 +231,7 @@ def test_readbound_dense_snp_matches_union_oracle(svar2_store_dense_snp):
     """A SNP routed into dense/snp must reconstruct byte-identically.
 
     Also sanity-checks (before asserting parity) that the SNP actually landed in
-    dense/snp — i.e. ``find_ranges``' ``dense_snp_range`` is a non-empty window
+    dense/snp — i.e. ``_find_ranges``' ``dense_snp_range`` is a non-empty window
     for a region covering it — so this test genuinely exercises split_to_flat's
     snp-block path rather than silently falling back to the var_key channel.
     """
@@ -250,7 +250,7 @@ def test_readbound_dense_snp_matches_union_oracle(svar2_store_dense_snp):
 
     # Routing sanity: the SNP@10 (0-based 9) must be in the dense/snp table, so a
     # region spanning it has a non-empty dense_snp window.
-    d = sv.find_ranges(contig, [0], [40], samples=None)
+    d = sv._find_ranges(contig, [0], [40], samples=None)
     dense_snp_range = np.asarray(d["dense_snp_range"])  # (R, 2)
     dense_indel_range = np.asarray(d["dense_indel_range"])  # (R, 2)
     snp_win = int(dense_snp_range[0, 1] - dense_snp_range[0, 0])

@@ -18,12 +18,13 @@ if TYPE_CHECKING:
 import numpy as np
 import polars as pl
 import seqpro as sp
-from genoray import PGEN, VCF, Reader, SparseVar, SparseVar2
+from genoray import PGEN, VCF, SparseVar, SparseVar2
 from genoray import exprs as _gexprs
 from genoray._svar import dense2sparse
 from genoray._svar._convert import _dense2sparse_with_length
 from genoray._types import V_IDX_TYPE
-from genoray._utils import ContigNormalizer, format_memory, parse_memory
+from genoray._contigs import ContigNormalizer
+from genoray._utils import format_memory, parse_memory
 from joblib import Parallel, delayed
 from loguru import logger
 from natsort import natsorted
@@ -104,7 +105,7 @@ class Metadata(BaseModel, arbitrary_types_allowed=True):
 def write(
     path: str | Path,
     bed: str | Path | pl.DataFrame,
-    variants: str | Path | Reader | None = None,
+    variants: str | Path | VCF | PGEN | SparseVar | SparseVar2 | None = None,
     tracks: "IntervalTrack | Sequence[IntervalTrack] | None" = None,
     annot_tracks: "dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None" = None,
     samples: list[str] | None = None,
@@ -235,10 +236,7 @@ def write(
                         )
 
                 if available_samples is None:
-                    if isinstance(variants, SparseVar2):
-                        available_samples = set(variants.samples)
-                    else:
-                        available_samples = set(variants.available_samples)
+                    available_samples = set(variants.available_samples)
 
                 # Eagerly load the variant index so max_mem accounting is honest.
                 # VCF and PGEN both support lazy-index construction; without this,
@@ -1113,7 +1111,7 @@ def _svar2_region_max_ends(
     follow-up.
     """
     R, S_all, P = len(starts), svar2.n_samples, svar2.ploidy
-    sel = [svar2.samples.index(s) for s in samples]
+    sel = [svar2.available_samples.index(s) for s in samples]
     dec = svar2.decode(contig, list(zip(starts.tolist(), ends.tolist())))
     pos_arr = dec.data["pos"]
     ilen_arr = dec.data["ilen"]
@@ -1163,7 +1161,9 @@ def _write_from_svar2(
     )
     region_starts = np.memmap(out_dir / "region_starts.npy", np.int64, "w+", shape=(R,))
     # sample_cols: selected slot -> original sample index (same for every contig).
-    sample_cols = np.asarray([svar2.samples.index(s) for s in samples], np.int64)
+    sample_cols = np.asarray(
+        [svar2.available_samples.index(s) for s in samples], np.int64
+    )
     np.save(out_dir / "sample_cols.npy", sample_cols)
 
     with open(out_dir / "svar2_meta.json", "w") as f:
@@ -1195,9 +1195,9 @@ def _write_from_svar2(
         # extend_to_length fixed-output-length write-time handling is out of
         # scope for this Phase-1 wiring; the read-bound kernel does its own
         # output-length sizing at read time regardless of this flag.
-        d = svar2.find_ranges(c, starts, ends, samples=samples)
+        d = svar2._find_ranges(c, starts, ends, samples=samples)
 
-        # find_ranges returns row-major (R*S*P, 2) for vk ranges; reshape into (R,S,P,2).
+        # _find_ranges returns row-major (R*S*P, 2) for vk ranges; reshape into (R,S,P,2).
         vk_snp[lo:hi] = np.asarray(d["vk_snp_range"], np.int64).reshape(rc, S, P, 2)
         vk_indel[lo:hi] = np.asarray(d["vk_indel_range"], np.int64).reshape(rc, S, P, 2)
         dense_snp[lo:hi] = np.asarray(d["dense_snp_range"], np.int64).reshape(rc, 2)
