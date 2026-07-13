@@ -106,7 +106,7 @@ def _assert_variants_match(oracle, rb) -> None:
 def test_readbound_variants_match_decode_oracle(svar2_store, regions):
     import genoray
 
-    from genvarloader._dataset._svar2_store_py import build_readbound_variants
+    from tests._oracles.svar2_readbound_inputs import build_readbound_variants
 
     contig = "chr1"
 
@@ -177,7 +177,7 @@ def test_readbound_variants_dense_snp_match_decode_oracle(svar2_store_dense_snp)
     """
     import genoray
 
-    from genvarloader._dataset._svar2_store_py import build_readbound_variants
+    from tests._oracles.svar2_readbound_inputs import build_readbound_variants
 
     contig = "chr1"
 

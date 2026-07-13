@@ -90,8 +90,8 @@ def _synthetic_track_inputs(regions, seed=0):
 def test_readbound_tracks_match_union_oracle(svar2_store, regions):
     import genoray
 
-    from genvarloader._dataset._svar2_source import SparseVar2Source
-    from genvarloader._dataset._svar2_store_py import build_readbound_tracks
+    from tests._oracles.svar2_source import SparseVar2Source
+    from tests._oracles.svar2_readbound_inputs import build_readbound_tracks
 
     contig = "chr1"
     sv = genoray.SparseVar2(str(svar2_store))
@@ -159,8 +159,8 @@ def test_readbound_tracks_match_union_oracle_with_shifts(svar2_store):
     """Non-trivial per-hap jitter shifts must also match byte-for-byte."""
     import genoray
 
-    from genvarloader._dataset._svar2_source import SparseVar2Source
-    from genvarloader._dataset._svar2_store_py import build_readbound_tracks
+    from tests._oracles.svar2_source import SparseVar2Source
+    from tests._oracles.svar2_readbound_inputs import build_readbound_tracks
 
     contig = "chr1"
     regions = [(0, 40), (5, 20)]

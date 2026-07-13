@@ -117,7 +117,7 @@ def _implied_diffs(regions, ref_arr, ref_offsets, sv, contig) -> np.ndarray:
     Query order matches ``build_readbound_haps``/``build_readbound_diffs``:
     region-major, sample-minor (``q = r*S + s``), hap-minor within a query.
     """
-    from genvarloader._dataset._svar2_store_py import build_readbound_haps
+    from tests._oracles.svar2_readbound_inputs import build_readbound_haps
 
     S, P = sv.n_samples, sv.ploidy
     R = len(regions)
@@ -154,7 +154,7 @@ def _implied_diffs(regions, ref_arr, ref_offsets, sv, contig) -> np.ndarray:
 def test_readbound_diffs_matches_implied_haps(svar2_store, regions):
     import genoray
 
-    from genvarloader._dataset._svar2_store_py import build_readbound_diffs
+    from tests._oracles.svar2_readbound_inputs import build_readbound_diffs
 
     contig = "chr1"
     ref_bytes = _REF.encode()
@@ -178,7 +178,7 @@ def test_readbound_diffs_dense_snp_matches_implied_haps(svar2_store_dense_snp):
     reconstruct kernel implies."""
     import genoray
 
-    from genvarloader._dataset._svar2_store_py import build_readbound_diffs
+    from tests._oracles.svar2_readbound_inputs import build_readbound_diffs
 
     contig = "chr1"
     ref_bytes = _REF.encode()

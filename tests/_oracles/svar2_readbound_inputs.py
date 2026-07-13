@@ -3,7 +3,7 @@ query-only genoray ``Svar2Store`` (``genoray_core::query::gather_haps_readbound`
 NO interval-search-tree rebuild and NO dense-union rebuild.
 
 Byte-identical to the existing union-path oracle (``SparseVar2Source.reconstruct``,
-``_svar2_source.py``), which calls ``reconstruct_haplotypes_from_svar2`` over
+``svar2_source.py``), which calls ``reconstruct_haplotypes_from_svar2`` over
 ``SparseVar2._overlap_batch``'s eagerly-unioned dense channel. This module instead
 marshals ``SparseVar2._find_ranges``'s per-class-split ranges through
 ``genoray_core::query::gather_haps_readbound`` -> ``svar2::split_to_flat`` (Rust side)
@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
-from .._flat import _Flat
-from ..genvarloader import (
+from genvarloader._flat import _Flat
+from genvarloader.genvarloader import (
     Svar2Store,
     decode_variants_from_svar2_readbound,
     hap_diffs_from_svar2_readbound,
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from seqpro.rag import Ragged
 
-    from ._rag_variants import RaggedVariants
+    from genvarloader._dataset._rag_variants import RaggedVariants
 
 
 def build_readbound_haps(
@@ -243,7 +243,7 @@ def build_readbound_tracks(
     # `tracks`/`track_offsets` are per-REGION (R of them), but the kernel reads
     # `track_offsets` by `query` (= r*S+s) — expand the R track windows to R*S
     # by repeating each region's window S times (mirrors
-    # `SparseVar2Source.realign_tracks`, `_svar2_source.py:108-114`).
+    # `SparseVar2Source.realign_tracks`, `tests/_oracles/svar2_source.py`).
     t = np.asarray(tracks, np.float32)
     toff = np.asarray(track_offsets, np.int64)
     tracks_rs = (
@@ -296,7 +296,7 @@ def build_readbound_variants(
     variant set has no output-length dependency on the query region bounds (no
     overlap/clip filter; the gather already restricts to overlapping variants).
     """
-    from ._rag_variants import RaggedVariants
+    from genvarloader._dataset._rag_variants import RaggedVariants
 
     reg = [(int(s), int(e)) for s, e in regions]
     R = len(reg)

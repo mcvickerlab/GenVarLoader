@@ -92,7 +92,7 @@ def _consensus(ref: bytes, pos, ilen, alleles, q_start: int, q_end: int) -> byte
 
 def test_svar2_two_source_matches_decode_oracle(svar2_store):
     import genoray
-    from genvarloader._dataset._svar2_source import SparseVar2Source
+    from tests._oracles.svar2_source import SparseVar2Source
 
     contig = "chr1"
     q_start, q_end = 0, 40

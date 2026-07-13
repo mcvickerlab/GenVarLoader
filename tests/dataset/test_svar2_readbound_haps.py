@@ -72,8 +72,8 @@ def svar2_store(tmp_path_factory) -> Path:
 def test_readbound_matches_union_oracle(svar2_store, regions):
     import genoray
 
-    from genvarloader._dataset._svar2_source import SparseVar2Source
-    from genvarloader._dataset._svar2_store_py import build_readbound_haps
+    from tests._oracles.svar2_source import SparseVar2Source
+    from tests._oracles.svar2_readbound_inputs import build_readbound_haps
 
     contig = "chr1"
     ref_bytes = _REF.encode()
@@ -140,7 +140,7 @@ def test_readbound_haps_noncontiguous_ref_raises(svar2_store):
     used to inject a strided array here -- this calls
     ``reconstruct_haplotypes_from_svar2_readbound`` directly, replaying the same
     ``_find_ranges`` marshalling ``build_readbound_haps`` does internally (see
-    ``genvarloader/_dataset/_svar2_store_py.py::build_readbound_haps``), but with a
+    ``tests/_oracles/svar2_readbound_inputs.py::build_readbound_haps``), but with a
     genuinely non-contiguous ``ref_``.
     """
     import genoray
@@ -215,8 +215,8 @@ def test_readbound_matches_union_oracle_with_shifts(svar2_store):
     """Non-trivial per-hap jitter shifts must also match byte-for-byte."""
     import genoray
 
-    from genvarloader._dataset._svar2_source import SparseVar2Source
-    from genvarloader._dataset._svar2_store_py import build_readbound_haps
+    from tests._oracles.svar2_source import SparseVar2Source
+    from tests._oracles.svar2_readbound_inputs import build_readbound_haps
 
     contig = "chr1"
     regions = [(0, 40), (5, 20)]
@@ -317,8 +317,8 @@ def test_readbound_dense_snp_matches_union_oracle(svar2_store_dense_snp):
     """
     import genoray
 
-    from genvarloader._dataset._svar2_source import SparseVar2Source
-    from genvarloader._dataset._svar2_store_py import build_readbound_haps
+    from tests._oracles.svar2_source import SparseVar2Source
+    from tests._oracles.svar2_readbound_inputs import build_readbound_haps
 
     contig = "chr1"
     ref_bytes = _REF.encode()

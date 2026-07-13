@@ -63,7 +63,7 @@ def svar2_del_store(tmp_path_factory) -> Path:
 
 def test_svar2_realign_tracks_matches_svar1_oracle(svar2_del_store):
     import genoray
-    from genvarloader._dataset._svar2_source import SparseVar2Source
+    from tests._oracles.svar2_source import SparseVar2Source
     from genvarloader._dataset._tracks import shift_and_realign_track_sparse
 
     contig = "chr1"

@@ -425,7 +425,7 @@ def test_svar2_variants_match_svar2_oracle(
     """
     from genoray import SparseVar2
 
-    from genvarloader._dataset._svar2_store_py import build_readbound_variants
+    from tests._oracles.svar2_readbound_inputs import build_readbound_variants
 
     _bcf, ref = _src
     _, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)

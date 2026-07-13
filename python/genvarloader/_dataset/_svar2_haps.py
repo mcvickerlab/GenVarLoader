@@ -13,7 +13,7 @@ the read-bound Rust kernels (``reconstruct_haplotypes_from_svar2_readbound`` /
 ``decode_variants_from_svar2_readbound`` / ``hap_diffs_from_svar2_readbound``).
 
 The FFI-input shaping + output wrapping mirror
-``_svar2_store_py.build_readbound_*`` exactly; the only difference is the source
+``tests/_oracles/svar2_readbound_inputs.build_readbound_*`` (test oracle) exactly; the only difference is the source
 of the per-query ranges (this module slices the on-disk cache for the specific
 ``(r_q, si_q)`` block, whereas the helpers call ``SparseVar2._find_ranges`` over
 the full cohort).

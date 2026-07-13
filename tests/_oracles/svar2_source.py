@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 from seqpro.rag import Ragged
 
-from .._flat import _Flat
-from ..genvarloader import (
+from genvarloader._flat import _Flat
+from genvarloader.genvarloader import (
     reconstruct_haplotypes_from_svar2,
     shift_and_realign_tracks_from_svar2,
 )
