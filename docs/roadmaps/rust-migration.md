@@ -811,23 +811,31 @@ as a Rust path-dep, the first place gvl's Rust crate depends on genoray's Rust c
       (kept only as the parity oracle for tests).
 - [x] Guard matrix (Phase-1 scope; raise `NotImplementedError`, not silent mis-compute): spliced
       output, `var_filter="exonic"`, `min_af`/`max_af`, `annotated` haplotypes, in-kernel `to_rc`,
-      `unphased_union`, `"variant-windows"`, fixed-length (`int output_length`) haplotype-realigned
-      tracks, `variants` output with jitter (write `max_jitter>0` or read `jitter>0` — the
-      readbound variants decode has no right-clip), and multi-contig `FlankSample` track fills
-      (contig-local vs. global fill-seed query index divergence).
+      fixed-length (`int output_length`) haplotype-realigned tracks, `variants`/`variant-windows`
+      output with jitter (write `max_jitter>0` or read `jitter>0` — the readbound variants decode
+      has no right-clip), `extend_to_length=False` at write time, and multi-contig `FlankSample`
+      track fills (contig-local vs. global fill-seed query index divergence). **Now supported**
+      (moved off the guard list this pass): `unphased_union` and `"variant-windows"` output for
+      both `"variants"` and `"variant-windows"`, plus `var_fields`-selected store INFO/FORMAT
+      fields — see the field-routing task line below.
+- [x] var_fields → .svar2 store INFO/FORMAT field routing (plan
+      2026-07-12-svar2-info-format-field-routing.md).
 - [x] Docs/skill audit (this task): `skills/genvarloader/SKILL.md`, `docs/source/{write,format,faq}.md`,
       `README.md`; `api.md` ↔ `__all__` gate confirmed clean (no new public symbol — `svar2=` is a
       parameter, not an exported name).
 
-**Gate (parity — MET):** all four output modes (haplotypes, tracks, variants, variant-windows*)
+**Gate (parity — MET):** all four output modes (haplotypes, tracks, variants, variant-windows)
 byte-identical to the `.svar`/union-oracle (`SparseVar2Source.reconstruct`/`realign_tracks`, genoray
 `decode`) across `tests/dataset/test_svar2_dataset.py`, `test_svar2_readbound_{haps,tracks,variants,diffs}.py`,
-`test_write_svar2.py` — 31/31 passed. (*`"variant-windows"` is guarded `NotImplementedError` for
-`.svar2` in Phase 1, so its parity claim covers `variants`, not the flat-window mode.) One documented,
-intentional non-identity: for a pure deletion, `.svar2` decodes the atomized empty ALT (`b""`) where
-`.svar` reports the VCF anchor base (`b"G"` for `GTA>G`) — a genoray format convention; reconstructed
-haplotype bytes are unaffected (see `docs/source/format.md` "`.svar2` variants ALT convention").
-Full-tree regression: SVAR1 path byte-unchanged (additive-only change).
+`test_write_svar2.py`, `test_svar2_fields_read.py` — 55/55 passed (`variant-windows` parity is
+covered by `test_svar2_readbound_variants.py` and `test_svar2_fields_read.py`, not just `variants`).
+One documented, intentional non-identity: for a pure deletion, `.svar2` decodes the atomized empty
+ALT (`b""`) where `.svar` reports the VCF anchor base (`b"G"` for `GTA>G`) — a genoray format
+convention; reconstructed haplotype bytes are unaffected (see `docs/source/format.md` "`.svar2`
+variants ALT convention"). Also excluded from the write-path `max_ends` parity check: the
+pre-existing SVAR1 same-POS-tie under-extension bug
+(`docs/known-issues/svar1-max-ends-tie-underextension.md`) — a documented SVAR1-side defect, not a
+`.svar2` regression. Full-tree regression: SVAR1 path byte-unchanged (additive-only change).
 
 **Checkpoint:** `.svar2` is a supported `gvl.write` source and `Dataset` read backend with a
 structurally read-bound query path (no per-read tree build, no per-read dense union), on-disk
@@ -853,6 +861,18 @@ comparable across allocations on shared Carter nodes).
   smaller store) is what pays off at cohort scale and for the union path's contig-wide-stride concern;
   a fair large-workload latency sweep is a follow-up.
 
+#### ⛔ Release gate (do NOT merge until genoray is released)
+
+This branch is dev-wired to a local genoray checkout and cannot build off this
+machine. PyPI genoray tops out at 2.15.0; the INFO/FORMAT field-read +
+read-bound gather API lives on genoray main (unreleased). Flip ALL of these at
+genoray release, then re-run the full py3xx matrix:
+
+- `Cargo.toml`: `svar2-codec` / `genoray_core` path-deps → published crates.io versions.
+- `pixi.toml` [feature.py310.pypi-dependencies]: `genoray = { path = ".../dist/*.whl" }` → `genoray = "==<release>"`.
+- `pyproject.toml`: `"genoray"` (unpinned) → `"genoray>=<release>,<next-major>"`.
+- Verify the version-floor bumps already made are intended: numpy 0.29, pyo3 0.29, seqpro 0.21.1.
+
 ### Phase 6 — Absorb genoray (future) ⬜
 _PR: —_
 
@@ -870,6 +890,23 @@ conversion/write paths.
 ---
 
 ## Notes & decisions log
+
+- 2026-07-13 (Phase 6a — final pre-merge hardening pass; branch `svar2-m6b-kernel`):
+  Shipped scope grew past the 2026-07-05 entry below: `unphased_union` (both `"variants"` and
+  `"variant-windows"`), `"variant-windows"` output itself, and `var_fields`-selected `.svar2`
+  store INFO/FORMAT field routing (`rv["AF"]` / `win.fields["AF"]`, plan
+  `2026-07-12-svar2-info-format-field-routing.md`) are all done and parity-tested — none of
+  the three remain on the guard list. This pass also landed a round of correctness/perf
+  hardening with no behavior change to already-shipped modes: a serial-unsafe carve-path
+  guard (`debug_assert` monotonicity check), Python-reachable Rust panics converted to
+  `PyValueError` (non-contiguous/OOB input), a new `extend_to_length=False` guard for `.svar2`
+  write sources (raises `NotImplementedError` — was previously silently accepted), a
+  vectorized write-time `max_ends` computation (byte-identical), relocation of the
+  `SparseVar2Source` union-based oracle out of the shipped package into `tests/`, removal of
+  dead `annot_*` capability from the readbound haps kernel, a hoisted shared `present_bit`
+  helper, and a typecheck-task path fix. Full `.svar2` suite (`test_svar2_dataset.py`,
+  `test_svar2_readbound_{haps,tracks,variants,diffs}.py`, `test_write_svar2.py`,
+  `test_svar2_fields_read.py`) — 55/55 passed.
 
 - 2026-07-05 (Phase 6a — SVAR2 read-bound dataset wiring; branch `svar2-m6b-kernel`):
   `.svar2` (genoray's newer sparse variant format) is now a `gvl.write` variant source and a

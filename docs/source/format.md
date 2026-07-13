@@ -135,6 +135,28 @@ backends; only `RaggedVariants.alt` differs, and only for pure-deletion records.
 for `with_seqs("variant-windows")`: `ref_window` is byte-identical between the backends, while the
 `alt`/`alt_window` fields differ only for pure-deletion records (the same empty-vs-anchor ALT).
 
+## `.svar2` Phase-1 unsupported combinations
+
+A `.svar2`-backed dataset supports all four output modes (`haplotypes`, `variants`,
+`variant-windows`, and haplotype-realigned `tracks`), `unphased_union`, and
+`var_fields`-selected store INFO/FORMAT fields (on both `"variants"` and `"variant-windows"`).
+The following combinations are Phase-1 scope and raise `NotImplementedError` (or, for
+`extend_to_length`, at write time) instead of silently mis-computing:
+
+- Spliced output.
+- The `var_filter="exonic"` (keep-mask) variant filter.
+- `min_af` / `max_af` filtering (`.svar` only; see "Should I use `.svar` or `.svar2`" in the FAQ).
+- `annotated` haplotypes (`with_seqs("annotated")`).
+- `VarWindowOpt(ref="allele")` (bare-allele REF mode; REF alleles aren't stored in `.svar2`).
+- In-kernel reverse-complement (`to_rc`).
+- Fixed-length (integer `output_length`) haplotype-realigned **track** output.
+- `variants` / `variant-windows` output on a dataset written with `max_jitter>0` or read with
+  `jitter>0` (the read-bound decode does not right-clip to the post-jitter window).
+- `gvl.write(..., extend_to_length=False)` for a `.svar2` variant source.
+- `FlankSample` insertion-fill for tracks spanning multiple contigs in one query.
+
+See the `genvarloader` skill's `.svar2` section for the full narrative and `var_fields` semantics.
+
 ## Format changelog
 
 | Version | Change |
@@ -142,7 +164,7 @@ for `with_seqs("variant-windows")`: `ref_window` is byte-identical between the b
 | `< 0.18.0` | Variant coordinates stored 0-based. |
 | `0.18.0` | Variant coordinates switched to 1-based. |
 | `0.25.0` | `metadata.json` gains `svar_link`; old `genotypes/link.svar` symlink layout deprecated. `Metadata.version` typed as `SemanticVersion` (on-disk JSON unchanged). |
-| (unreleased) | `metadata.json` gains `svar2_link`; `.svar2` accepted as a `gvl.write` variant source, cached under `genotypes/svar2_ranges/` and read via a read-bound, all-Rust path. |
+| `0.37.0` | `metadata.json` gains `svar2_link`; `.svar2` accepted as a `gvl.write` variant source, cached under `genotypes/svar2_ranges/` and read via a read-bound, all-Rust path. |
 
 > **Upgrading legacy datasets.** A dataset written before `0.25.0` that was built from an
 > `.svar` will still open (with a `DeprecationWarning`). Run
