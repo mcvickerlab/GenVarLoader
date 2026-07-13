@@ -1177,7 +1177,6 @@ def _write_from_svar2(
     dense_indel = np.memmap(
         out_dir / "dense_indel_range.npy", np.int64, "w+", shape=(R, 2)
     )
-    region_starts = np.memmap(out_dir / "region_starts.npy", np.int64, "w+", shape=(R,))
     # sample_cols: selected slot -> original sample index (same for every contig).
     sample_cols = np.asarray(
         [svar2.available_samples.index(s) for s in samples], np.int64
@@ -1191,7 +1190,6 @@ def _write_from_svar2(
                 "vk_indel_range": {"shape": [R, S, P, 2], "dtype": "<i8"},
                 "dense_snp_range": {"shape": [R, 2], "dtype": "<i8"},
                 "dense_indel_range": {"shape": [R, 2], "dtype": "<i8"},
-                "region_starts": {"shape": [R], "dtype": "<i8"},
                 "sample_cols": {"shape": [S], "dtype": "<i8"},
                 "ploidy": P,
             },
@@ -1219,7 +1217,6 @@ def _write_from_svar2(
         vk_indel[lo:hi] = np.asarray(d["vk_indel_range"], np.int64).reshape(rc, S, P, 2)
         dense_snp[lo:hi] = np.asarray(d["dense_snp_range"], np.int64).reshape(rc, 2)
         dense_indel[lo:hi] = np.asarray(d["dense_indel_range"], np.int64).reshape(rc, 2)
-        region_starts[lo:hi] = np.asarray(d["region_starts"], np.int64).reshape(rc)
 
         # max_ends: SVAR1 parity, per region end of the max-position variant
         # over the selected samples' haplotypes (see _svar2_region_max_ends).
@@ -1228,7 +1225,7 @@ def _write_from_svar2(
         contig_offset += df.height
         pbar.update(df.height)
     pbar.close()
-    for mm in (vk_snp, vk_indel, dense_snp, dense_indel, region_starts):
+    for mm in (vk_snp, vk_indel, dense_snp, dense_indel):
         mm.flush()
 
     from ._svar2_link import make_svar2_link

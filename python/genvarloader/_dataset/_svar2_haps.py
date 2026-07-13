@@ -84,16 +84,15 @@ class _Svar2Cache:
 
     ``vk_*_range`` are ``(R, S, P, 2)`` (per region/sample/ploid byte windows into
     the store's var_key tables); ``dense_*_range`` are ``(R, 2)`` (per-region,
-    sample-independent); ``region_starts`` is ``(R,)`` (write-time starts; kept for
-    parity/debug, NOT fed to the FFI — the read path uses post-jitter starts);
-    ``sample_cols`` is ``(S,)`` (selected slot -> original store sample index).
+    sample-independent); ``sample_cols`` is ``(S,)`` (selected slot -> original
+    store sample index). Per-query starts are recomputed post-jitter at read time,
+    so they are not cached here.
     """
 
     vk_snp_range: NDArray[np.int64]
     vk_indel_range: NDArray[np.int64]
     dense_snp_range: NDArray[np.int64]
     dense_indel_range: NDArray[np.int64]
-    region_starts: NDArray[np.int64]
     sample_cols: NDArray[np.int64]
 
 
@@ -229,7 +228,7 @@ class Svar2Haps(Haps[_H]):
                 ranges_dir / name, dtype=np.int64, mode="r", shape=tuple(shape)
             )
 
-        R = int(meta["region_starts"]["shape"][0])
+        R = int(meta["dense_snp_range"]["shape"][0])
         S = int(meta["vk_snp_range"]["shape"][1])
         P = int(meta["ploidy"])
         if P != ploidy:
@@ -244,7 +243,6 @@ class Svar2Haps(Haps[_H]):
             dense_indel_range=_mm(
                 "dense_indel_range.npy", meta["dense_indel_range"]["shape"]
             ),
-            region_starts=_mm("region_starts.npy", meta["region_starts"]["shape"]),
             sample_cols=np.load(ranges_dir / "sample_cols.npy"),
         )
 

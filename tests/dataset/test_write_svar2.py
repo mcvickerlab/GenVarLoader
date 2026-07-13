@@ -102,7 +102,6 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
         "vk_indel_range",
         "dense_snp_range",
         "dense_indel_range",
-        "region_starts",
         "sample_cols",
     }
     assert meta["ploidy"] == svar2.ploidy
@@ -111,12 +110,6 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
     assert md["svar2_link"] is not None
     assert md["ploidy"] == svar2.ploidy
     Svar2Link.model_validate(md["svar2_link"])  # shape check
-
-    region_starts_shape = tuple(meta["region_starts"]["shape"])
-    region_starts = np.memmap(
-        rd / "region_starts.npy", dtype=np.int64, mode="r", shape=region_starts_shape
-    )
-    assert region_starts.shape == (bed.height,)
 
     # ---- FIX 1: verify cache CONTENTS (not just shapes/keys) against a direct
     # _find_ranges call over the same regions. gvl sorts the written samples, so
@@ -140,7 +133,6 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
     vk_indel = mm("vk_indel_range")  # (R, S, P, 2)
     dense_snp = mm("dense_snp_range")  # (R, 2)
     dense_indel = mm("dense_indel_range")  # (R, 2)
-    region_starts_full = mm("region_starts")  # (R,)
 
     # sample_cols is written with np.save (has a .npy header): read with np.load.
     sample_cols = np.load(rd / "sample_cols.npy")
@@ -159,10 +151,6 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
             df["chromStart"].to_numpy(),
             df["chromEnd"].to_numpy(),
             samples=sorted_samples,
-        )
-        # region_starts: exact per-contig match (upcast int32 -> int64).
-        np.testing.assert_array_equal(
-            region_starts_full[lo:hi], np.asarray(d["region_starts"], np.int64)
         )
         # vk ranges: reshape (rc, S, P, 2) -> (rc*S*P, 2) must equal _find_ranges'
         # row-major (R*S*P, 2). This pins the reshape done in _write_from_svar2.
