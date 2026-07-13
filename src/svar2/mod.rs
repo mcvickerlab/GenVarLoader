@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use genoray_core::query::BatchResultSplit;
+use genoray_core::query::{dense_abs_row, unpack_vk_src, BatchResultSplit, FieldView};
 use ndarray::{Array2, ArrayView2};
 use svar2_codec::{decode_key, DecodedKey};
 
@@ -257,6 +257,17 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
     }
 }
 
+/// One INFO/FORMAT field's on-disk sidecars, opened for gather. `views` is
+/// indexed by [`genoray_core::layout::FieldSub::all`] order (VkSnp, VkIndel,
+/// DenseSnp, DenseIndel); `FieldView` owns its mmap, so this needs no lifetime.
+pub struct FieldGather {
+    pub views: [FieldView; 4],
+    pub is_format: bool,
+    /// `dtype.width_bytes()`; consumed by the FFI caller (Task 1.3), not here.
+    pub width: usize,
+    pub cohort_n_samples: usize,
+}
+
 /// Per-hap decoded variant SoA, matching genoray's `decode_hap` output layout —
 /// see [`decode_variants_from_split`].
 pub struct VariantsSoa {
@@ -280,11 +291,16 @@ pub struct VariantsSoa {
 /// NO overlap/clip filter here — the gather already restricts to overlapping
 /// variants, unlike [`hap_diffs_svar2`]/reconstruct's ref_idx-consumed clipping,
 /// which only matters for sizing a fixed-length output buffer.
+#[allow(clippy::too_many_arguments)]
 pub fn decode_variants_from_split(
     br: &BatchResultSplit,
     lut_bytes: &[u8],
     lut_off: &[i64],
-) -> VariantsSoa {
+    fields: &[FieldGather],
+    on_disk_snp: &[Range<usize>],
+    on_disk_indel: &[Range<usize>],
+    orig_samples: &[usize],
+) -> (VariantsSoa, Vec<Vec<u8>>) {
     // Fused decode straight from the split gather result: NO `split_to_flat`
     // marshaling copy, and NO per-hap `merge_hap` Vec+sort. The three per-hap
     // runs (var_key, present dense-snp, present dense-indel) are each already
@@ -313,6 +329,7 @@ pub fn decode_variants_from_split(
     str_off.push(0);
     let mut var_off: Vec<i64> = Vec::with_capacity(h_count + 1);
     var_off.push(0);
+    let mut field_bufs: Vec<Vec<u8>> = (0..fields.len()).map(|_| Vec::new()).collect();
 
     let mut h = 0usize;
     for q in 0..n_q {
@@ -351,37 +368,80 @@ pub fn decode_variants_from_split(
                 let p_vk = if has_vk { br.vk[i_vk].position } else { u32::MAX };
                 let p_sn = if has_sn { br.dense_snp[i_sn].position } else { u32::MAX };
                 let p_in = if has_in { br.dense_indel[i_in].position } else { u32::MAX };
-                let (p, key) = if has_vk && p_vk <= p_sn && p_vk <= p_in {
+                let (p, key, chan, cidx) = if has_vk && p_vk <= p_sn && p_vk <= p_in {
                     let e = &br.vk[i_vk];
+                    let out = (e.position, e.key, 0u8, i_vk);
                     i_vk += 1;
-                    (e.position, e.key)
+                    out
                 } else if has_sn && p_sn <= p_in {
                     let e = &br.dense_snp[i_sn];
+                    let out = (e.position, e.key, 1u8, i_sn);
                     i_sn += 1;
-                    (e.position, e.key)
+                    out
                 } else {
                     let e = &br.dense_indel[i_in];
+                    let out = (e.position, e.key, 2u8, i_in);
                     i_in += 1;
-                    (e.position, e.key)
+                    out
                 };
                 let (il, alt) = decode_alt(key, lut_bytes, lut_off);
                 pos.push(p as i32);
                 ilen.push(il as i32);
                 alt_bytes.extend_from_slice(&alt);
                 str_off.push(alt_bytes.len() as i64);
+
+                if !fields.is_empty() {
+                    debug_assert!(
+                        !br.vk_src.is_empty(),
+                        "fields requested but `br` was produced without provenance \
+                         (use gather_haps_readbound_src, not gather_haps_readbound)"
+                    );
+                    // Resolve (sub_ix, row) for this emitted variant.
+                    let (sub_ix, row, is_dense) = match chan {
+                        0 => {
+                            let (is_indel, call_idx) = unpack_vk_src(br.vk_src[cidx]);
+                            (if is_indel { 1 } else { 0 }, call_idx, false)
+                        }
+                        1 => (
+                            2,
+                            dense_abs_row(&on_disk_snp[q], &br.dense_snp_range[q], cidx),
+                            true,
+                        ),
+                        _ => (
+                            3,
+                            dense_abs_row(&on_disk_indel[q], &br.dense_indel_range[q], cidx),
+                            true,
+                        ),
+                    };
+                    for (fi, f) in fields.iter().enumerate() {
+                        // var_key entries are already per-(variant, sample) CALLS, so a
+                        // FORMAT value is indexed by the call index directly. Only the
+                        // DENSE channel, which is variant-major over the whole cohort,
+                        // needs the sample stride.
+                        let elem = if is_dense && f.is_format {
+                            row * f.cohort_n_samples + orig_samples[q]
+                        } else {
+                            row
+                        };
+                        field_bufs[fi].extend_from_slice(f.views[sub_ix].bytes_at(elem));
+                    }
+                }
             }
             var_off.push(pos.len() as i64);
             h += 1;
         }
     }
 
-    VariantsSoa {
-        pos,
-        ilen,
-        alt_bytes,
-        str_off,
-        var_off,
-    }
+    (
+        VariantsSoa {
+            pos,
+            ilen,
+            alt_bytes,
+            str_off,
+            var_off,
+        },
+        field_bufs,
+    )
 }
 
 #[cfg(test)]
@@ -694,7 +754,7 @@ mod tests {
             ..Default::default()
         };
 
-        let soa = decode_variants_from_split(&br, &[], &[0]);
+        let (soa, _bufs) = decode_variants_from_split(&br, &[], &[0], &[], &[], &[], &[]);
 
         // Position-sorted: var_key SNP@5, dense/snp@8, dense/indel@12.
         assert_eq!(soa.var_off, vec![0, 3]);
@@ -758,7 +818,7 @@ mod tests {
             ..Default::default()
         };
 
-        let soa = decode_variants_from_split(&br, &[], &[0]);
+        let (soa, _bufs) = decode_variants_from_split(&br, &[], &[0], &[], &[], &[], &[]);
 
         // hap0 (q0): snp present [1,0,1] -> keeps pos10("A"),pos12("G");
         //   indel present [1,0] -> keeps pos13(ilen -2).
@@ -771,5 +831,94 @@ mod tests {
         assert_eq!(soa.alt_bytes, b"AGCTAC".to_vec());
         assert_eq!(soa.str_off, vec![0, 1, 2, 2, 3, 3, 4, 5, 6]);
         assert_eq!(soa.var_off, vec![0, 3, 5, 7, 8]);
+    }
+
+    /// Build 4 FieldViews over an identity i32 store: element i has value i.
+    /// Returns the TempDir too — it must outlive the views (dropping it deletes the mmapped files).
+    fn make_identity_i32_fields() -> (tempfile::TempDir, Vec<FieldGather>) {
+        use genoray_core::field::StorageDtype;
+        use genoray_core::layout::{ContigPaths, FieldSub};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_str().unwrap();
+        let paths = ContigPaths::new(base, "chr1");
+
+        const N: usize = 8; // enough for call idx 5 and dense row 3
+        let bytes: Vec<u8> = (0..N as i32).flat_map(|i| i.to_le_bytes()).collect();
+
+        let mut views = Vec::with_capacity(4);
+        for sub in FieldSub::all() {
+            let p = paths.field_values("info", "X", sub);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, &bytes).unwrap();
+            views.push(FieldView::open(&paths, "info", "X", sub, StorageDtype::I32, 1).unwrap());
+        }
+        let views: [FieldView; 4] = views.try_into().map_err(|_| ()).unwrap();
+
+        (
+            tmp,
+            vec![FieldGather {
+                views,
+                is_format: false, // INFO -> element index is the row itself
+                width: 4,
+                cohort_n_samples: 1,
+            }],
+        )
+    }
+
+    #[test]
+    fn test_decode_fields_provenance_identity() {
+        use genoray_core::query::{pack_vk_src, KeyRef};
+
+        // One query, ploidy 1.
+        //   var_key entry  at pos 10, provenance = (snp, call idx 5)
+        //   dense-snp entry at pos 20, output window 0..1, ON-DISK window 3..4 -> abs row 3
+        let br = BatchResultSplit {
+            n_regions: 1,
+            n_samples: 1,
+            ploidy: 1,
+            vk: vec![KeyRef {
+                position: 10,
+                key: svar2_codec::encode_pure_del(-1),
+            }],
+            vk_off: vec![0, 1],
+            vk_src: vec![pack_vk_src(false, 5)],
+            dense_snp: vec![KeyRef {
+                position: 20,
+                key: svar2_codec::encode_pure_del(-1),
+            }],
+            dense_snp_range: vec![0..1],
+            dense_snp_present: vec![0b1],
+            dense_snp_present_off: vec![0, 1],
+            dense_indel: vec![],
+            dense_indel_range: vec![0..0],
+            dense_indel_present: vec![],
+            dense_indel_present_off: vec![0, 0],
+            ..Default::default()
+        };
+
+        let (_tmp, fields) = make_identity_i32_fields(); // keep _tmp alive: it owns the tempdir
+
+        let (soa, bufs) = decode_variants_from_split(
+            &br,
+            &[],
+            &[0i64],
+            &fields,
+            &[3..4], // on_disk_snp: the dense-snp window really lives at rows 3..4 on disk
+            &[0..0], // on_disk_indel
+            &[0],    // orig_samples
+        );
+
+        // var_key (pos 10) sorts before dense (pos 20).
+        assert_eq!(soa.pos, vec![10, 20]);
+
+        // Identity store => value == source row.
+        //   var_key  -> sub VkSnp,    call idx 5 -> 5
+        //   dense-snp-> sub DenseSnp, abs row  3 -> 3   (proves the on-disk offset is applied)
+        let vals: Vec<i32> = bufs[0]
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(vals, vec![5, 3]);
     }
 }

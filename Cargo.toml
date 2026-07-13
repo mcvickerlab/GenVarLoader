@@ -31,6 +31,7 @@ features = ["abi3-py310"]
 
 [dev-dependencies]
 rstest = "0.26.1"
+tempfile = "3"
 
 # Perf call-graph attribution only (`perf report --children`). Inherits release
 # codegen and adds line tables + frame pointers. NEVER the gate artifact — all

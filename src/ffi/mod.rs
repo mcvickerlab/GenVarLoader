@@ -1368,7 +1368,9 @@ pub fn decode_variants_from_svar2_readbound<'py>(
         let (lut_bytes, lut_off_u64) = reader.lut_arrays();
         let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
 
-        svar2::decode_variants_from_split(&br, &lut_bytes, &lut_off)
+        let (soa, _field_bufs) =
+            svar2::decode_variants_from_split(&br, &lut_bytes, &lut_off, &[], &[], &[], &[]);
+        soa
     });
 
     Ok((

@@ -532,6 +532,7 @@ dependencies = [
  "rstest",
  "seqpro-core",
  "svar2-codec",
+ "tempfile",
 ]
 
 [[package]]
