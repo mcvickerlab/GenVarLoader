@@ -159,7 +159,7 @@ test-join-audit = { cmd = "pytest tests -p tests._join_audit_plugin", depends-on
     "gen",
     "gen-1kg",
 ] }
-typecheck = { cmd = "pyrefly check" }
+typecheck = { cmd = "pyrefly check python/genvarloader tests" }
 bench = { cmd = "pytest tests/benchmarks --codspeed -p no:cov" }
 bench-local = { cmd = "pytest tests/benchmarks --benchmark-only -p no:cov" }
 # perf on the Python process (NOT py-spy --native, which slows deep-stack paths ~10x).
