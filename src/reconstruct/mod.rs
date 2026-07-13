@@ -704,6 +704,15 @@ pub fn reconstruct_haplotypes_from_svar2(
             // (off-by-one: -(|v_diff|+1) instead of -|v_diff|). SNP/INS/Lookup alleles are
             // already non-empty and pass through unchanged.
             let allele = if allele.is_empty() {
+                // The anchor base is `ref[pos]`. Valid gathered variants are within-contig
+                // records (`pos < contig_ref_s.len()`); a `pos` past the contig end can only
+                // come from a corrupt store. Assert it in debug/test builds rather than
+                // silently reading OOB (release keeps the raw slice for speed).
+                debug_assert!(
+                    (pos as usize) < contig_ref_s.len(),
+                    "pure-DEL anchor position {pos} is beyond contig ref length {} (corrupt store?)",
+                    contig_ref_s.len()
+                );
                 std::borrow::Cow::Borrowed(&contig_ref_s[pos as usize..pos as usize + 1])
             } else {
                 allele

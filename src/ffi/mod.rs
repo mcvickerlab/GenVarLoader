@@ -987,32 +987,16 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
     // gated here.
     require_contiguous_1d(&ref_, "ref_")?;
 
-    // Guard the pure-DEL anchor-base read inside
+    // NOTE: the pure-DEL anchor-base read inside
     // `reconstruct::reconstruct_haplotypes_from_svar2`
-    // (`&contig_ref_s[pos as usize..pos as usize + 1]`, src/reconstruct/mod.rs), which
-    // panics (index out of bounds) if `pos >= contig_ref_s.len()`. genoray's
-    // `find_ranges`/`gather_haps_readbound` gather off a half-open interval overlap
-    // search tree built from each query's `[q_start, q_end)`, so every variant
-    // gathered for query `q` is guaranteed `pos < q_end == region_bounds[q, 1]` (the
-    // same bound this readbound convention hands the search tree — see
-    // `genoray::_svar2_batch._find_ranges` / `genoray_core::query::gather::find_ranges`).
-    // Bounding the query window against the contig length here therefore
-    // transitively bounds every gathered variant's anchor read — no need to inspect
-    // post-gather positions, and no risk of rejecting a valid query.
-    {
-        let ref_offsets_check = ref_offsets.as_array();
-        if let (Some(&c_s), Some(&c_e)) = (ref_offsets_check.get(0), ref_offsets_check.get(1)) {
-            let contig_ref_len = c_e - c_s;
-            for q in 0..n_q {
-                let region_end = region_bounds_a[[q, 1]] as i64;
-                if region_end > contig_ref_len {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "region end {region_end} exceeds contig {contig} length {contig_ref_len}"
-                    )));
-                }
-            }
-        }
-    }
+    // (`&contig_ref_s[pos as usize..pos as usize + 1]`, src/reconstruct/mod.rs) is
+    // in-bounds for all valid input: gathered variants come from within-contig records
+    // so `pos < contig_ref_len` always holds. It is NOT bounded here by the query
+    // window: gvl regions legitimately extend past the contig end (jitter / max_jitter
+    // padding, right-padded with `pad_char`), so `region_bounds[q, 1] > contig_ref_len`
+    // is a normal, valid read — rejecting it would break SVAR1 parity. The only way to
+    // reach the anchor OOB is a corrupt store (a variant `pos >= contig_len`); that is
+    // caught by a `debug_assert!` at the read site (fires in test/debug builds).
 
     let ref_a = ref_.as_array();
     let ref_offsets_a = ref_offsets.as_array();
