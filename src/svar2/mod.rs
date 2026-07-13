@@ -257,9 +257,23 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
     }
 }
 
-/// One INFO/FORMAT field's on-disk sidecars, opened for gather. `views` is
-/// indexed by [`genoray_core::layout::FieldSub::all`] order (VkSnp, VkIndel,
-/// DenseSnp, DenseIndel); `FieldView` owns its mmap, so this needs no lifetime.
+/// One INFO/FORMAT field's on-disk sidecars, opened for gather.
+///
+/// Contracts the caller MUST uphold when constructing this:
+///  * `views` must be opened in [`genoray_core::layout::FieldSub::all`] order
+///    (VkSnp, VkIndel, DenseSnp, DenseIndel) — `decode_variants_from_split`
+///    indexes into it positionally, not by name. `FieldView` owns its mmap,
+///    so this needs no lifetime.
+///  * `cohort_n_samples` MUST equal the `n_samples` passed to
+///    `FieldView::open` for every view in `views`. If they diverge, the dense
+///    FORMAT stride computed here (`row * cohort_n_samples + orig_sample`)
+///    silently disagrees with how the on-disk store was laid out — no panic,
+///    just wrong values.
+///  * `FieldView::bytes_at` panics on an empty sub-stream. This is only safe
+///    because an empty sub-stream implies no emitted record ever resolves to
+///    it (e.g. a store with zero indel calls never routes a variant to
+///    `VkIndel`/`DenseIndel`). A future constructor that opens a placeholder
+///    view for a sub-stream that CAN be referenced must not rely on this.
 pub struct FieldGather {
     pub views: [FieldView; 4],
     pub is_format: bool,
@@ -329,7 +343,26 @@ pub fn decode_variants_from_split(
     str_off.push(0);
     let mut var_off: Vec<i64> = Vec::with_capacity(h_count + 1);
     var_off.push(0);
-    let mut field_bufs: Vec<Vec<u8>> = (0..fields.len()).map(|_| Vec::new()).collect();
+    let mut field_bufs: Vec<Vec<u8>> = fields
+        .iter()
+        .map(|f| Vec::with_capacity(cap * f.width))
+        .collect();
+
+    // A `BatchResultSplit` without provenance (`gather_haps_readbound`, not
+    // `_src`) leaves `vk_src` empty; indexing it below would panic with an
+    // opaque out-of-bounds error instead of naming the real cause. Check once,
+    // O(1), instead of a per-variant `debug_assert` in the hot loop — this is
+    // an unconditional `assert_eq!` (matches genoray's own contract check in
+    // `BatchResultSplit`) so it fires in release builds too, before any wrong
+    // provenance can attach a field value to the wrong variant.
+    if !fields.is_empty() {
+        assert_eq!(
+            br.vk_src.len(),
+            br.vk.len(),
+            "fields require a BatchResultSplit from gather_haps_readbound_src \
+             (vk_src must be populated 1:1 with vk)"
+        );
+    }
 
     let mut h = 0usize;
     for q in 0..n_q {
@@ -391,11 +424,6 @@ pub fn decode_variants_from_split(
                 str_off.push(alt_bytes.len() as i64);
 
                 if !fields.is_empty() {
-                    debug_assert!(
-                        !br.vk_src.is_empty(),
-                        "fields requested but `br` was produced without provenance \
-                         (use gather_haps_readbound_src, not gather_haps_readbound)"
-                    );
                     // Resolve (sub_ix, row) for this emitted variant.
                     let (sub_ix, row, is_dense) = match chan {
                         0 => {
@@ -833,7 +861,14 @@ mod tests {
         assert_eq!(soa.var_off, vec![0, 3, 5, 7, 8]);
     }
 
-    /// Build 4 FieldViews over an identity i32 store: element i has value i.
+    /// Build 4 FieldViews over a store where each sub-stream's content is
+    /// distinguishable: element `i` of sub-stream `sub_ix` (in
+    /// `FieldSub::all()` order, i.e. `[VkSnp=0, VkIndel=1, DenseSnp=2,
+    /// DenseIndel=3]`) has value `100 * sub_ix + i`. A test that decodes value
+    /// `V` therefore reveals BOTH which sub-stream (`V / 100`) and which row
+    /// (`V % 100`) the decoder attributed to that variant — a same-content
+    /// store (as an earlier version of this fixture used) cannot distinguish
+    /// "read the right sub-stream" from "read some sub-stream".
     /// Returns the TempDir too — it must outlive the views (dropping it deletes the mmapped files).
     fn make_identity_i32_fields() -> (tempfile::TempDir, Vec<FieldGather>) {
         use genoray_core::field::StorageDtype;
@@ -843,11 +878,13 @@ mod tests {
         let base = tmp.path().to_str().unwrap();
         let paths = ContigPaths::new(base, "chr1");
 
-        const N: usize = 8; // enough for call idx 5 and dense row 3
-        let bytes: Vec<u8> = (0..N as i32).flat_map(|i| i.to_le_bytes()).collect();
+        const N: usize = 8; // enough for call idx 5 and dense row 3/4
 
         let mut views = Vec::with_capacity(4);
-        for sub in FieldSub::all() {
+        for (sub_ix, sub) in FieldSub::all().into_iter().enumerate() {
+            let bytes: Vec<u8> = (0..N as i32)
+                .flat_map(|i| (100 * sub_ix as i32 + i).to_le_bytes())
+                .collect();
             let p = paths.field_values("info", "X", sub);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(&p, &bytes).unwrap();
@@ -870,9 +907,108 @@ mod tests {
     fn test_decode_fields_provenance_identity() {
         use genoray_core::query::{pack_vk_src, KeyRef};
 
-        // One query, ploidy 1.
-        //   var_key entry  at pos 10, provenance = (snp, call idx 5)
-        //   dense-snp entry at pos 20, output window 0..1, ON-DISK window 3..4 -> abs row 3
+        // One query, ploidy 1, all four provenance channels represented:
+        //   var_key SNP   entry at pos 10, provenance = (snp,   call idx 5)  -> sub VkSnp=0
+        //   var_key indel entry at pos 15, provenance = (indel, call idx 2)  -> sub VkIndel=1
+        //   dense-snp     entry at pos 20, output window 0..1, ON-DISK window 3..4 -> abs row 3, sub DenseSnp=2
+        //   dense-indel   entry at pos 25, output window 0..1, ON-DISK window 4..5 -> abs row 4, sub DenseIndel=3
+        let br = BatchResultSplit {
+            n_regions: 1,
+            n_samples: 1,
+            ploidy: 1,
+            vk: vec![
+                KeyRef {
+                    position: 10,
+                    key: svar2_codec::encode_pure_del(-1),
+                },
+                KeyRef {
+                    position: 15,
+                    key: svar2_codec::encode_pure_del(-1),
+                },
+            ],
+            vk_off: vec![0, 2],
+            vk_src: vec![pack_vk_src(false, 5), pack_vk_src(true, 2)],
+            dense_snp: vec![KeyRef {
+                position: 20,
+                key: svar2_codec::encode_pure_del(-1),
+            }],
+            dense_snp_range: vec![0..1],
+            dense_snp_present: vec![0b1],
+            dense_snp_present_off: vec![0, 1],
+            dense_indel: vec![KeyRef {
+                position: 25,
+                key: svar2_codec::encode_pure_del(-1),
+            }],
+            dense_indel_range: vec![0..1],
+            dense_indel_present: vec![0b1],
+            dense_indel_present_off: vec![0, 1],
+            ..Default::default()
+        };
+
+        let (_tmp, fields) = make_identity_i32_fields(); // keep _tmp alive: it owns the tempdir
+
+        let (soa, bufs) = decode_variants_from_split(
+            &br,
+            &[],
+            &[0i64],
+            &fields,
+            &[3..4], // on_disk_snp: the dense-snp window really lives at rows 3..4 on disk
+            &[4..5], // on_disk_indel: the dense-indel window really lives at rows 4..5 on disk
+            &[0],    // orig_samples
+        );
+
+        // Position-sorted: var_key(10,15) before dense(20,25); snp before indel on ties (none here).
+        assert_eq!(soa.pos, vec![10, 15, 20, 25]);
+
+        // value = 100*sub_ix + row, so each decoded value pins BOTH the
+        // sub-stream routing and the row/offset arithmetic for its channel:
+        //   var_key snp   -> sub 0, call idx 5 -> 100*0+5   = 5
+        //   var_key indel -> sub 1, call idx 2 -> 100*1+2   = 102
+        //   dense-snp     -> sub 2, abs row  3 -> 100*2+3   = 203
+        //   dense-indel   -> sub 3, abs row  4 -> 100*3+4   = 304
+        let vals: Vec<i32> = bufs[0]
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(vals, vec![5, 102, 203, 304]);
+    }
+
+    #[test]
+    fn test_decode_fields_format_dense_stride_and_var_key_unstrided() {
+        use genoray_core::field::StorageDtype;
+        use genoray_core::layout::{ContigPaths, FieldSub};
+        use genoray_core::query::{pack_vk_src, KeyRef};
+
+        // A FORMAT field over a 3-sample cohort. Store is plain identity
+        // (element i has value i) across all four subs — this test isolates
+        // the *stride* arithmetic, not sub-stream routing (that's pinned by
+        // `test_decode_fields_provenance_identity`).
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_str().unwrap();
+        let paths = ContigPaths::new(base, "chr1");
+
+        const N: usize = 16; // covers dense elem 3*3+2=11 and var_key call idx 5
+        let bytes: Vec<u8> = (0..N as i32).flat_map(|i| i.to_le_bytes()).collect();
+
+        let mut views = Vec::with_capacity(4);
+        for sub in FieldSub::all() {
+            let p = paths.field_values("format", "DP", sub);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, &bytes).unwrap();
+            // n_samples passed to `open` MUST match `cohort_n_samples` below.
+            views.push(FieldView::open(&paths, "format", "DP", sub, StorageDtype::I32, 3).unwrap());
+        }
+        let views: [FieldView; 4] = views.try_into().map_err(|_| ()).unwrap();
+
+        let fields = vec![FieldGather {
+            views,
+            is_format: true,
+            width: 4,
+            cohort_n_samples: 3,
+        }];
+
+        // var_key SNP entry at pos 10, call idx 5; dense-snp entry at pos 20,
+        // output window 0..1, ON-DISK window 3..4 -> abs row 3.
         let br = BatchResultSplit {
             n_regions: 1,
             n_samples: 1,
@@ -897,28 +1033,29 @@ mod tests {
             ..Default::default()
         };
 
-        let (_tmp, fields) = make_identity_i32_fields(); // keep _tmp alive: it owns the tempdir
-
         let (soa, bufs) = decode_variants_from_split(
             &br,
             &[],
             &[0i64],
             &fields,
-            &[3..4], // on_disk_snp: the dense-snp window really lives at rows 3..4 on disk
+            &[3..4], // on_disk_snp
             &[0..0], // on_disk_indel
-            &[0],    // orig_samples
+            &[2],    // orig_samples: this query's original cohort sample index is 2
         );
 
-        // var_key (pos 10) sorts before dense (pos 20).
         assert_eq!(soa.pos, vec![10, 20]);
 
-        // Identity store => value == source row.
-        //   var_key  -> sub VkSnp,    call idx 5 -> 5
-        //   dense-snp-> sub DenseSnp, abs row  3 -> 3   (proves the on-disk offset is applied)
         let vals: Vec<i32> = bufs[0]
             .chunks_exact(4)
             .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
             .collect();
-        assert_eq!(vals, vec![5, 3]);
+        // var_key FORMAT is UNSTRIDED: a var_key entry is already a per-CALL
+        // value, so the element index is the call index directly (5), NOT
+        // `call_idx * cohort_n_samples + orig_sample` (5*3+2=17). This pins
+        // the `is_dense && f.is_format` gate — the part most likely to
+        // silently regress.
+        // dense FORMAT IS strided: abs row 3, orig_sample 2, cohort_n_samples 3
+        // -> element 3*3+2 = 11.
+        assert_eq!(vals, vec![5, 11]);
     }
 }
