@@ -59,7 +59,22 @@ from ._reference import Reference
 from ._svar2_link import Svar2Link, _resolve_svar2, _verify_svar2_fingerprint
 
 if TYPE_CHECKING:
+    from genoray._svar2_fields import StoredField
+
     from ._splice import SplicePlan
+
+
+_BUILTIN_VAR_FIELDS: frozenset[str] = frozenset(
+    {"alt", "ilen", "start", "ref", "dosage"}
+)
+"""Variant-field keys the reconstructors handle natively (never store fields)."""
+
+
+def _field_spec(sf: "StoredField") -> tuple[str, str, str]:
+    """(category, name, dtype_str) as the Rust FFI expects it."""
+    from genoray._svar2_fields import _META_DTYPE
+
+    return (sf.category, sf.name, _META_DTYPE[sf.dtype])
 
 
 @dataclass(slots=True)
@@ -165,13 +180,21 @@ class Svar2Haps(Haps[_H]):
     were computed over a max_jitter-padded window, which over-includes variants past
     the (unpadded) read window in variants mode (the decode kernel has no right-clip);
     guarded below."""
+    store_fields: dict[str, "StoredField"] = field(default_factory=dict)
+    """The .svar2 store's INFO/FORMAT field manifest, keyed by field key.
+
+    Populated from ``SparseVar2.available_fields``. These keys are additionally
+    advertised in ``available_var_fields`` so users can request them via ``var_fields``.
+    """
 
     def __post_init__(self):
         # Deliberately does NOT call Haps.__post_init__ (that reads an SVAR1
         # variants table / AF cache which svar2 has no analogue for). Set only
         # the init=False fields the base machinery reads.
         self.n_variants = self.genotypes.lengths
-        self.available_var_fields = ["alt", "ilen", "start"]
+        self.available_var_fields = ["alt", "ilen", "start"] + [
+            k for k in self.store_fields if k not in _BUILTIN_VAR_FIELDS
+        ]
 
     # ---- construction ----
 
@@ -227,6 +250,7 @@ class Svar2Haps(Haps[_H]):
 
         sv = SparseVar2(str(svar2_path))
         store = Svar2Store(str(svar2_path), sv.contigs, sv.n_samples, sv.ploidy)
+        store_fields = dict(sv.available_fields)
 
         # Minimal base-Haps fields. genotypes carries only the (R, S, P, None)
         # shape (so ploidy = shape[-2] and n_variants.shape are available); its
@@ -263,6 +287,7 @@ class Svar2Haps(Haps[_H]):
             store_contigs=list(sv.contigs),
             ds_contigs=list(contigs),
             max_jitter=max_jitter,
+            store_fields=store_fields,
         )
 
     # ---- reconstructor entry ----

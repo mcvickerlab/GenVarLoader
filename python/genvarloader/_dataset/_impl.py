@@ -339,34 +339,47 @@ class Dataset:
             missing = list(set(var_fields) - set(self.available_var_fields))
             if missing or not isinstance(self._seqs, Haps):
                 raise ValueError(f"Missing variant fields: {missing}")
-            haps = to_evolve.get("_seqs", self._seqs)
-            # Discover custom FORMAT fields so we don't try to load them as INFO.
-            custom_fmt = _svar_format_fields(haps.variants.path.parent)
-            # Lazily load any newly-requested info columns into the existing
-            # _Variants struct (mutates haps.variants.info in place).
-            builtin = {"alt", "ilen", "start", "ref", "dosage"}
-            new_info_fields = [
-                f
-                for f in var_fields
-                if f not in builtin
-                and f not in haps.variants.info
-                and f not in custom_fmt
-            ]
-            if new_info_fields:
-                haps.variants.load_info(new_info_fields)
-            # Lazily memmap dosages if newly requested.
-            if "dosage" in var_fields and haps.dosages is None:
-                haps = _lazy_load_dosages(self, haps)
-            # Lazily memmap custom FORMAT fields if newly requested.
-            new_custom_fields = {
-                f: custom_fmt[f]
-                for f in var_fields
-                if f in custom_fmt and f not in haps.var_field_data
-            }
-            if new_custom_fields:
-                haps = _lazy_load_custom_fields(self, haps, new_custom_fields)
-            haps = replace(haps, var_fields=var_fields)
-            to_evolve["_seqs"] = haps
+
+            from ._svar2_haps import Svar2Haps
+
+            if isinstance(self._seqs, Svar2Haps):
+                # SVAR2 field values are read on demand by the decode kernel
+                # (decode_variants_from_svar2_readbound); there is no SVAR1 variants
+                # table to lazily load INFO/dosage/custom-FORMAT columns from — this
+                # reconstructor's `variants` is a dummy placeholder.
+                haps = replace(
+                    to_evolve.get("_seqs", self._seqs), var_fields=var_fields
+                )
+                to_evolve["_seqs"] = haps
+            else:
+                haps = to_evolve.get("_seqs", self._seqs)
+                # Discover custom FORMAT fields so we don't try to load them as INFO.
+                custom_fmt = _svar_format_fields(haps.variants.path.parent)
+                # Lazily load any newly-requested info columns into the existing
+                # _Variants struct (mutates haps.variants.info in place).
+                builtin = {"alt", "ilen", "start", "ref", "dosage"}
+                new_info_fields = [
+                    f
+                    for f in var_fields
+                    if f not in builtin
+                    and f not in haps.variants.info
+                    and f not in custom_fmt
+                ]
+                if new_info_fields:
+                    haps.variants.load_info(new_info_fields)
+                # Lazily memmap dosages if newly requested.
+                if "dosage" in var_fields and haps.dosages is None:
+                    haps = _lazy_load_dosages(self, haps)
+                # Lazily memmap custom FORMAT fields if newly requested.
+                new_custom_fields = {
+                    f: custom_fmt[f]
+                    for f in var_fields
+                    if f in custom_fmt and f not in haps.var_field_data
+                }
+                if new_custom_fields:
+                    haps = _lazy_load_custom_fields(self, haps, new_custom_fields)
+                haps = replace(haps, var_fields=var_fields)
+                to_evolve["_seqs"] = haps
 
         if splice_info is not None:
             if splice_info is False:
