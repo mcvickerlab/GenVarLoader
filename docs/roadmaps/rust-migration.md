@@ -778,7 +778,7 @@ _PR: —_
 > 1.38×, variant-windows 4.58×).
 
 ### Phase 6a — SVAR2 read-bound dataset wiring (genoray query-only) ✅
-_PR: TBD (branch `svar2-m6b-kernel`)_
+_PR: [#266](https://github.com/mcvickerlab/GenVarLoader/pull/266) (branch `svar2-m6b-kernel`) — ⛔ release-gated on the genoray publish (see below)_
 _Specs: `docs/superpowers/plans/2026-07-04-svar2-genoray-readbound-gather.md` (genoray side),
 `docs/superpowers/plans/2026-07-04-svar2-gvl-readbound-wiring.md` (this side); earlier design
 specs `docs/superpowers/plans/2026-07-03-svar2-genoray-search-gather-split.md` and
