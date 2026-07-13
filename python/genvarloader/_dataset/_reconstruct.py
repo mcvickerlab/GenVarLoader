@@ -409,7 +409,8 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             # Single-contig is exact (local == global); non-seeded fills (Repeat5p
             # etc.) are exact regardless. Proper fix (follow-up): pass a per-group
             # global-query-offset into the FFI so the kernel seeds with the global
-            # row index; for now, guard.
+            # row index; for now, guard. Tracked in
+            # https://github.com/mcvickerlab/GenVarLoader/issues/267.
             n_contig_groups = int(np.unique(regions[:, 0]).size)
             if n_contig_groups > 1 and bool((strat_ids == FLANK_SAMPLE).any()):
                 raise NotImplementedError(
