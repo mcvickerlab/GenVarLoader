@@ -1132,9 +1132,10 @@ def _svar2_region_max_ends(
         # by pos then by end; recover end = pos + ext on unpack.
         ext_var = 1 - np.minimum(ilen_arr, 0)  # small: 1 + deletion length
         SHIFT = 21
-        assert int(ext_var.max(initial=0)) < (1 << SHIFT), (
-            "variant footprint exceeds tie-break packing width"
-        )
+        # raise (not assert) so it still fails fast under `python -O`: a pathological
+        # >~2 Mb deletion footprint would otherwise silently corrupt the packed key.
+        if int(ext_var.max(initial=0)) >= (1 << SHIFT):
+            raise ValueError("variant footprint exceeds tie-break packing width")
         key = (pos_arr << SHIFT) | ext_var
         key_k = key[keep]
         region_k = region_of_var[keep]
