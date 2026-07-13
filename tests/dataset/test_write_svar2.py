@@ -396,3 +396,41 @@ def test_svar2_region_max_ends_matches_reference(svar2_store: Path):
     assert (got != ends.astype(np.int32)).any(), (
         f"test is vacuous: no region extended (got={got.tolist()}, ends={ends.tolist()})"
     )
+
+
+def test_svar2_region_max_ends_large_positions():
+    """Regression: the composite key must pack a BOUNDED tie-break, not the
+    absolute end. A variant past ~2 Mb (real chromosomes are hundreds of Mb)
+    must not overflow the packing / assert-fail. Uses a stub whose decode returns
+    large positions so we can exercise realistic coordinates without a huge store.
+    """
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from genvarloader._dataset._write import _svar2_region_max_ends
+
+    # 2 regions x 1 sample x ploidy 1 = 2 haps, 1 variant each:
+    #   region 0: SNP  at pos 3_000_000 (ilen 0)  -> end 3_000_001
+    #   region 1: DEL  at pos 5_000_000 (ilen -2) -> end 5_000_003
+    class _StubSvar2:
+        n_samples = 1
+        ploidy = 1
+        available_samples = ["S0"]
+
+        def decode(self, contig, regions):
+            return SimpleNamespace(
+                data={
+                    "pos": np.array([3_000_000, 5_000_000], np.int64),
+                    "ilen": np.array([0, -2], np.int64),
+                },
+                offsets=np.array([0, 1, 2], np.int64),
+            )
+
+    svar2 = _StubSvar2()
+    starts = np.array([0, 0], np.int64)
+    ends = np.array([10, 10], np.int64)  # small chromEnd so both variants extend
+    got = _svar2_region_max_ends(svar2, "chrBig", starts, ends, ["S0"])
+    ref = _reference_region_max_ends(svar2, "chrBig", starts, ends, ["S0"])
+    np.testing.assert_array_equal(got, ref)
+    np.testing.assert_array_equal(got, np.array([3_000_001, 5_000_003], np.int32))

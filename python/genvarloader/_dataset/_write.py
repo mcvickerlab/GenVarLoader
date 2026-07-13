@@ -1125,19 +1125,25 @@ def _svar2_region_max_ends(
         s_of_hap = (np.arange(n_hap) // P) % S_all
         keep = np.isin(s_of_hap[hap_of_var], sel)  # only selected samples
         region_of_var = hap_of_var // (S_all * P)
-        end_var = (pos_arr + 1) - np.minimum(ilen_arr, 0)  # 0-based -> 1-based, extend on DEL
+        # end = pos + ext, where ext = 1 - min(ilen, 0) (1-based bump plus the
+        # deletion extension: SNP/INS -> 1, DEL -> 1 + |ilen|). Pack the BOUNDED
+        # `ext` into the low bits, NOT the absolute `end` (which is ~pos-sized and
+        # would overflow past ~2 Mb into any contig), so the composite key orders
+        # by pos then by end; recover end = pos + ext on unpack.
+        ext_var = 1 - np.minimum(ilen_arr, 0)  # small: 1 + deletion length
         SHIFT = 21
-        assert int(end_var.max(initial=0)) < (1 << SHIFT), (
-            "end exceeds tie-break packing width"
+        assert int(ext_var.max(initial=0)) < (1 << SHIFT), (
+            "variant footprint exceeds tie-break packing width"
         )
-        key = (pos_arr << SHIFT) | end_var
+        key = (pos_arr << SHIFT) | ext_var
         key_k = key[keep]
         region_k = region_of_var[keep]
         if key_k.size:
             best = np.full(R, -1, np.int64)
             np.maximum.at(best, region_k, key_k)  # per-region max composite key
             has = best >= 0
-            out[has] = best[has] & ((1 << SHIFT) - 1)  # unpack end
+            # end = pos + ext = (key >> SHIFT) + (key & mask)
+            out[has] = (best[has] >> SHIFT) + (best[has] & ((1 << SHIFT) - 1))
     return out.astype(np.int32)
 
 
