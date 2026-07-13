@@ -3,6 +3,7 @@
 //! intermediate variant table. Additive to the SVAR 1.0 global-table path.
 
 use std::borrow::Cow;
+use std::ops::Range;
 
 use genoray_core::query::BatchResultSplit;
 use ndarray::{Array2, ArrayView2};
@@ -167,8 +168,8 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
 
     let dense_total: usize = (0..n_q)
         .map(|q| {
-            let (ss, se) = br.dense_snp_range[q];
-            let (is_, ie) = br.dense_indel_range[q];
+            let Range { start: ss, end: se } = br.dense_snp_range[q].clone();
+            let Range { start: is_, end: ie } = br.dense_indel_range[q].clone();
             (se - ss) + (ie - is_)
         })
         .sum();
@@ -177,12 +178,12 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
     let mut dense_range: Vec<i32> = Vec::with_capacity(n_q * 2);
     for q in 0..n_q {
         let base = dense_pos.len() as i32;
-        let (ss, se) = br.dense_snp_range[q];
+        let Range { start: ss, end: se } = br.dense_snp_range[q].clone();
         for j in ss..se {
             dense_pos.push(br.dense_snp[j].position as i32);
             dense_key.push(br.dense_snp[j].key as i32);
         }
-        let (is_, ie) = br.dense_indel_range[q];
+        let Range { start: is_, end: ie } = br.dense_indel_range[q].clone();
         for j in is_..ie {
             dense_pos.push(br.dense_indel[j].position as i32);
             dense_key.push(br.dense_indel[j].key as i32);
@@ -198,8 +199,8 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
     // width once and multiplying by `ploidy`. Same total, no per-h division.
     let total_bits: usize = (0..n_q)
         .map(|q| {
-            let (ss, se) = br.dense_snp_range[q];
-            let (is_, ie) = br.dense_indel_range[q];
+            let Range { start: ss, end: se } = br.dense_snp_range[q].clone();
+            let Range { start: is_, end: ie } = br.dense_indel_range[q].clone();
             ((se - ss) + (ie - is_)) * ploidy
         })
         .sum();
@@ -217,8 +218,8 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
     // ploidy-many-times-redundant per-hap load.
     let mut h = 0usize;
     for q in 0..n_q {
-        let (ss, se) = br.dense_snp_range[q];
-        let (is_, ie) = br.dense_indel_range[q];
+        let Range { start: ss, end: se } = br.dense_snp_range[q].clone();
+        let Range { start: is_, end: ie } = br.dense_indel_range[q].clone();
         for _hap in 0..ploidy {
             let snp_base = br.dense_snp_present_off[h];
             for k in 0..(se - ss) {
@@ -315,8 +316,8 @@ pub fn decode_variants_from_split(
 
     let mut h = 0usize;
     for q in 0..n_q {
-        let (ss, se) = br.dense_snp_range[q];
-        let (is_, ie) = br.dense_indel_range[q];
+        let Range { start: ss, end: se } = br.dense_snp_range[q].clone();
+        let Range { start: is_, end: ie } = br.dense_indel_range[q].clone();
         for _hap in 0..ploidy {
             let vk_lo = br.vk_off[h];
             let vk_hi = br.vk_off[h + 1];
@@ -501,16 +502,17 @@ mod tests {
                 position: 10,
                 key: 200,
             }],
-            dense_snp_range: vec![(0, 1)],
+            dense_snp_range: vec![0..1],
             dense_snp_present: vec![0b1], // present
             dense_snp_present_off: vec![0, 1],
             dense_indel: vec![KeyRef {
                 position: 15,
                 key: 300,
             }],
-            dense_indel_range: vec![(0, 1)],
+            dense_indel_range: vec![0..1],
             dense_indel_present: vec![0b0], // absent
             dense_indel_present_off: vec![0, 1],
+            ..Default::default()
         };
 
         let flat = split_to_flat(&br);
@@ -559,13 +561,14 @@ mod tests {
                 position: 42,
                 key: 7,
             }],
-            dense_snp_range: vec![(0, 1); n], // every query points at the lone entry
+            dense_snp_range: vec![0..1; n], // every query points at the lone entry
             dense_snp_present,
             dense_snp_present_off,
             dense_indel: vec![],
-            dense_indel_range: vec![(0, 0); n], // no indel window
+            dense_indel_range: vec![0..0; n], // no indel window
             dense_indel_present: vec![],
             dense_indel_present_off: vec![0; n + 1],
+            ..Default::default()
         };
 
         // Must not panic.
@@ -627,17 +630,18 @@ mod tests {
             dense_snp,
             // query 0 owns snp[0..2), query 1 owns snp[2..4) — width 2/query,
             // shared by both of that query's haps.
-            dense_snp_range: vec![(0, 2), (2, 4)],
+            dense_snp_range: vec![0..2, 2..4],
             // hap0 bits(0,1)=(1,0), hap1 bits(2,3)=(0,1), hap2 bits(4,5)=(1,1),
             // hap3 bits(6,7)=(0,0) -> byte 0b0011_1001.
             dense_snp_present: vec![0b0011_1001],
             dense_snp_present_off: vec![0, 2, 4, 6, 8],
             dense_indel,
             // query 0 owns indel[0..1), query 1 owns indel[1..2) — width 1/query.
-            dense_indel_range: vec![(0, 1), (1, 2)],
+            dense_indel_range: vec![0..1, 1..2],
             // hap0=1, hap1=0, hap2=1, hap3=1 -> byte 0b0000_1101.
             dense_indel_present: vec![0b0000_1101],
             dense_indel_present_off: vec![0, 1, 2, 3, 4],
+            ..Default::default()
         };
 
         let flat = split_to_flat(&br);
@@ -677,16 +681,17 @@ mod tests {
                 position: 8,
                 key: dense_snp_key,
             }],
-            dense_snp_range: vec![(0, 1)],
+            dense_snp_range: vec![0..1],
             dense_snp_present: vec![0b1],
             dense_snp_present_off: vec![0, 1],
             dense_indel: vec![KeyRef {
                 position: 12,
                 key: dense_indel_key,
             }],
-            dense_indel_range: vec![(0, 1)],
+            dense_indel_range: vec![0..1],
             dense_indel_present: vec![0b1],
             dense_indel_present_off: vec![0, 1],
+            ..Default::default()
         };
 
         let soa = decode_variants_from_split(&br, &[], &[0]);
@@ -734,7 +739,7 @@ mod tests {
                 KeyRef { position: 51, key: k(b"A") },
                 KeyRef { position: 52, key: k(b"C") },
             ],
-            dense_snp_range: vec![(0, 3), (3, 6)],
+            dense_snp_range: vec![0..3, 3..6],
             // Per-hap snp-bit widths 3,3,3,3 -> offsets 0,3,6,9,12. Bitstream
             // (idx0..11): 1,0,1, 0,1,0, 1,1,0, 0,0,1 -> byte0 = 0b1101_0101
             // (bits0-7: 1,0,1,0,1,0,1,1 -> 1+4+16+64+128=213), byte1 low
@@ -745,11 +750,12 @@ mod tests {
                 KeyRef { position: 13, key: svar2_codec::encode_pure_del(-2) },
                 KeyRef { position: 14, key: svar2_codec::encode_pure_del(-5) },
             ],
-            dense_indel_range: vec![(0, 2), (2, 2)],
+            dense_indel_range: vec![0..2, 2..2],
             // Per-hap indel-bit widths 2,2,0,0 -> offsets 0,2,4,4,4.
             // Bitstream (idx0..3): 1,0, 0,1 -> byte0 = 0b1001 (1+8=9).
             dense_indel_present: vec![9],
             dense_indel_present_off: vec![0, 2, 4, 4, 4],
+            ..Default::default()
         };
 
         let soa = decode_variants_from_split(&br, &[], &[0]);

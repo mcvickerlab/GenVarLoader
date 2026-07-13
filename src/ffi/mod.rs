@@ -5,6 +5,7 @@ use numpy::{
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::ops::Range;
 
 use crate::variants::windows::{assemble_variants_mode, assemble_windows_mode, VariantBufs};
 
@@ -31,6 +32,14 @@ fn uninit_output<T: Copy>(len: usize) -> Array1<T> {
         v.set_len(len);
     }
     Array1::from_vec(v)
+}
+
+/// Marshal a `(n, 2)` int64 array of `[start, end)` pairs into `Range<usize>`s.
+fn arr2_to_ranges(a: numpy::ndarray::ArrayView2<i64>) -> Vec<Range<usize>> {
+    a.rows()
+        .into_iter()
+        .map(|r| (r[0] as usize)..(r[1] as usize))
+        .collect()
 }
 
 /// Per-(query, hap) reference-length diffs (see `genotypes::get_diffs_sparse`).
@@ -945,16 +954,10 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
         .iter()
         .map(|&x| x as usize)
         .collect();
-    let to_pairs = |a: numpy::ndarray::ArrayView2<i64>| -> Vec<(usize, usize)> {
-        a.rows()
-            .into_iter()
-            .map(|r| (r[0] as usize, r[1] as usize))
-            .collect()
-    };
-    let vk_snp_range_v = to_pairs(vk_snp_range.as_array());
-    let vk_indel_range_v = to_pairs(vk_indel_range.as_array());
-    let dense_snp_range_v = to_pairs(dense_snp_range.as_array());
-    let dense_indel_range_v = to_pairs(dense_indel_range.as_array());
+    let vk_snp_range_v = arr2_to_ranges(vk_snp_range.as_array());
+    let vk_indel_range_v = arr2_to_ranges(vk_indel_range.as_array());
+    let dense_snp_range_v = arr2_to_ranges(dense_snp_range.as_array());
+    let dense_indel_range_v = arr2_to_ranges(dense_indel_range.as_array());
 
     let ref_a = ref_.as_array();
     let ref_offsets_a = ref_offsets.as_array();
@@ -1101,16 +1104,10 @@ pub fn hap_diffs_from_svar2_readbound<'py>(
         .iter()
         .map(|&x| x as usize)
         .collect();
-    let to_pairs = |a: numpy::ndarray::ArrayView2<i64>| -> Vec<(usize, usize)> {
-        a.rows()
-            .into_iter()
-            .map(|r| (r[0] as usize, r[1] as usize))
-            .collect()
-    };
-    let vk_snp_range_v = to_pairs(vk_snp_range.as_array());
-    let vk_indel_range_v = to_pairs(vk_indel_range.as_array());
-    let dense_snp_range_v = to_pairs(dense_snp_range.as_array());
-    let dense_indel_range_v = to_pairs(dense_indel_range.as_array());
+    let vk_snp_range_v = arr2_to_ranges(vk_snp_range.as_array());
+    let vk_indel_range_v = arr2_to_ranges(vk_indel_range.as_array());
+    let dense_snp_range_v = arr2_to_ranges(dense_snp_range.as_array());
+    let dense_indel_range_v = arr2_to_ranges(dense_indel_range.as_array());
 
     let diffs = py.detach(move || {
         let rb = genoray_core::query::HapRanges::new(
@@ -1208,16 +1205,10 @@ pub fn shift_and_realign_tracks_from_svar2_readbound<'py>(
         .iter()
         .map(|&x| x as usize)
         .collect();
-    let to_pairs = |a: numpy::ndarray::ArrayView2<i64>| -> Vec<(usize, usize)> {
-        a.rows()
-            .into_iter()
-            .map(|r| (r[0] as usize, r[1] as usize))
-            .collect()
-    };
-    let vk_snp_range_v = to_pairs(vk_snp_range.as_array());
-    let vk_indel_range_v = to_pairs(vk_indel_range.as_array());
-    let dense_snp_range_v = to_pairs(dense_snp_range.as_array());
-    let dense_indel_range_v = to_pairs(dense_indel_range.as_array());
+    let vk_snp_range_v = arr2_to_ranges(vk_snp_range.as_array());
+    let vk_indel_range_v = arr2_to_ranges(vk_indel_range.as_array());
+    let dense_snp_range_v = arr2_to_ranges(dense_snp_range.as_array());
+    let dense_indel_range_v = arr2_to_ranges(dense_indel_range.as_array());
 
     let tracks_a = tracks.as_array();
     let track_offsets_a = track_offsets.as_array();
@@ -1357,16 +1348,10 @@ pub fn decode_variants_from_svar2_readbound<'py>(
         .iter()
         .map(|&x| x as usize)
         .collect();
-    let to_pairs = |a: numpy::ndarray::ArrayView2<i64>| -> Vec<(usize, usize)> {
-        a.rows()
-            .into_iter()
-            .map(|r| (r[0] as usize, r[1] as usize))
-            .collect()
-    };
-    let vk_snp_range_v = to_pairs(vk_snp_range.as_array());
-    let vk_indel_range_v = to_pairs(vk_indel_range.as_array());
-    let dense_snp_range_v = to_pairs(dense_snp_range.as_array());
-    let dense_indel_range_v = to_pairs(dense_indel_range.as_array());
+    let vk_snp_range_v = arr2_to_ranges(vk_snp_range.as_array());
+    let vk_indel_range_v = arr2_to_ranges(vk_indel_range.as_array());
+    let dense_snp_range_v = arr2_to_ranges(dense_snp_range.as_array());
+    let dense_indel_range_v = arr2_to_ranges(dense_indel_range.as_array());
 
     let soa = py.detach(move || {
         let rb = genoray_core::query::HapRanges::new(
