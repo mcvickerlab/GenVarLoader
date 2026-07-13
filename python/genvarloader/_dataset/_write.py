@@ -1106,34 +1106,38 @@ def _svar2_region_max_ends(
     otherwise every extension would be off by one (masked in most regions
     because the un-extended ``chromEnd`` already dominates the max).
 
-    This is O(R * len(samples) * ploidy) Python iteration over decoded records --
-    acceptable for correctness/tests; vectorize for large-cohort write perf as a
-    follow-up.
+    Vectorized as a per-region scatter-max over a ``(pos << 21) | end`` composite
+    key, which reproduces the pos-then-end tie-break exactly (a single haplotype
+    never carries two variants at the same position, so a global per-region max
+    over the selected samples' variants equals the original per-hap-argmax loop).
     """
     R, S_all, P = len(starts), svar2.n_samples, svar2.ploidy
-    sel = [svar2.available_samples.index(s) for s in samples]
+    sel = np.asarray([svar2.available_samples.index(s) for s in samples], np.int64)
     dec = svar2.decode(contig, list(zip(starts.tolist(), ends.tolist())))
-    pos_arr = dec.data["pos"]
-    ilen_arr = dec.data["ilen"]
-    off = np.asarray(dec.offsets)
+    pos_arr = np.asarray(dec.data["pos"], np.int64)
+    ilen_arr = np.asarray(dec.data["ilen"], np.int64)
+    off = np.asarray(dec.offsets, np.int64)  # length R*S_all*P + 1
     out = np.asarray(ends, np.int64).copy()  # default = chromEnd
-    for r in range(R):
-        best_pos, best_end = -1, -1
-        for s in sel:
-            for p in range(P):
-                h = (r * S_all + s) * P + p
-                a, b = int(off[h]), int(off[h + 1])
-                if a == b:
-                    continue
-                seg_pos = pos_arr[a:b]
-                seg_ilen = ilen_arr[a:b]
-                j = int(np.argmax(seg_pos))  # highest-position variant in this hap
-                p_pos = int(seg_pos[j])
-                p_end = (p_pos + 1) - min(int(seg_ilen[j]), 0)  # +1: 0-based -> 1-based
-                if p_pos > best_pos or (p_pos == best_pos and p_end > best_end):
-                    best_pos, best_end = p_pos, p_end
-        if best_pos >= 0:
-            out[r] = best_end
+    if pos_arr.size:
+        n_hap = R * S_all * P
+        counts = np.diff(off)  # variants per hap
+        hap_of_var = np.repeat(np.arange(n_hap), counts)  # region-major hap per variant
+        s_of_hap = (np.arange(n_hap) // P) % S_all
+        keep = np.isin(s_of_hap[hap_of_var], sel)  # only selected samples
+        region_of_var = hap_of_var // (S_all * P)
+        end_var = (pos_arr + 1) - np.minimum(ilen_arr, 0)  # 0-based -> 1-based, extend on DEL
+        SHIFT = 21
+        assert int(end_var.max(initial=0)) < (1 << SHIFT), (
+            "end exceeds tie-break packing width"
+        )
+        key = (pos_arr << SHIFT) | end_var
+        key_k = key[keep]
+        region_k = region_of_var[keep]
+        if key_k.size:
+            best = np.full(R, -1, np.int64)
+            np.maximum.at(best, region_k, key_k)  # per-region max composite key
+            has = best >= 0
+            out[has] = best[has] & ((1 << SHIFT) - 1)  # unpack end
     return out.astype(np.int32)
 
 

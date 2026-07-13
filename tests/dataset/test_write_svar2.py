@@ -338,3 +338,61 @@ def test_svar2_extend_to_length_false_raises(svar2_store: Path, tmp_path: Path):
             extend_to_length=False,
             overwrite=True,
         )
+
+
+def _reference_region_max_ends(svar2, contig, starts, ends, samples):
+    """Byte-for-byte copy of the ORIGINAL _svar2_region_max_ends triple-loop,
+    kept here as the oracle that pins the vectorized rewrite byte-identical."""
+    import numpy as np
+
+    R, S_all, P = len(starts), svar2.n_samples, svar2.ploidy
+    sel = [svar2.available_samples.index(s) for s in samples]
+    dec = svar2.decode(contig, list(zip(starts.tolist(), ends.tolist())))
+    pos_arr = dec.data["pos"]
+    ilen_arr = dec.data["ilen"]
+    off = np.asarray(dec.offsets)
+    out = np.asarray(ends, np.int64).copy()
+    for r in range(R):
+        best_pos, best_end = -1, -1
+        for s in sel:
+            for p in range(P):
+                h = (r * S_all + s) * P + p
+                a, b = int(off[h]), int(off[h + 1])
+                if a == b:
+                    continue
+                seg_pos = pos_arr[a:b]
+                seg_ilen = ilen_arr[a:b]
+                j = int(np.argmax(seg_pos))
+                p_pos = int(seg_pos[j])
+                p_end = (p_pos + 1) - min(int(seg_ilen[j]), 0)
+                if p_pos > best_pos or (p_pos == best_pos and p_end > best_end):
+                    best_pos, best_end = p_pos, p_end
+        if best_pos >= 0:
+            out[r] = best_end
+    return out.astype(np.int32)
+
+
+def test_svar2_region_max_ends_matches_reference(svar2_store: Path):
+    """Vectorized _svar2_region_max_ends must equal the original per-hap loop,
+    including the pos-then-end tie-break and the empty-region default = chromEnd."""
+    from genoray import SparseVar2
+
+    from genvarloader._dataset._write import _svar2_region_max_ends
+
+    svar2 = SparseVar2(svar2_store)
+    # Overlaps the DEL at 0-based POS 11 with varying windows + a no-variant
+    # region ([20,30]) so both the extension and keep-chromEnd branches run.
+    starts = np.array([0, 0, 5, 12, 20], dtype=np.int64)
+    ends = np.array([15, 20, 10, 13, 30], dtype=np.int64)
+    samples = list(svar2.available_samples)
+
+    got = _svar2_region_max_ends(svar2, "chr1", starts, ends, samples)
+    ref = _reference_region_max_ends(svar2, "chr1", starts, ends, samples)
+    np.testing.assert_array_equal(got, ref)
+
+    # Anti-vacuity: at least one region must be EXTENDED past its chromEnd (the
+    # DEL at POS 11 extends windows that overlap it), else the test only checks
+    # the trivial default path.
+    assert (got != ends.astype(np.int32)).any(), (
+        f"test is vacuous: no region extended (got={got.tolist()}, ends={ends.tolist()})"
+    )
