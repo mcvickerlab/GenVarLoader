@@ -907,8 +907,6 @@ pub fn reconstruct_haplotypes_from_svar2<'py>(
             ref_a,
             ref_offsets_a,
             pad_char,
-            None, // annot_v_idxs — not supported in fused plain path
-            None, // annot_ref_pos — not supported in fused plain path
             parallel,
         );
 
@@ -1081,8 +1079,6 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
             ref_a,
             ref_offsets_a,
             pad_char,
-            None,
-            None,
             parallel,
         );
 

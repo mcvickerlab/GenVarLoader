@@ -606,11 +606,12 @@ pub fn reconstruct_haplotypes_from_sparse(
 /// - `ref_` – packed reference bytes u8
 /// - `ref_offsets` – per-contig offsets into ref_ i64
 /// - `pad_char` – padding byte u8
-/// - `annot_v_idxs` – optional annotation output i32 (same layout as out); the value
-///   written per applied variant is its sequential index within the merged per-hap list
-///   (`0..merged.len()`), not a global variant id (SVAR2 has no global variant table)
-/// - `annot_ref_pos` – optional annotation output i32 (same layout as out)
 /// - `parallel` – if true, use rayon to process work items concurrently
+///
+/// SVAR2 read-bound haplotypes are never annotated (annotated `.svar2` output is
+/// `NotImplementedError`-guarded), so this kernel produces only un-annotated
+/// sequence; the shared `reconstruct_haplotype_core` still carries the optional
+/// annotation outputs for the SVAR1 path.
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_from_svar2(
     mut out: ArrayViewMut1<u8>,
@@ -630,8 +631,6 @@ pub fn reconstruct_haplotypes_from_svar2(
     ref_: ArrayView1<u8>,
     ref_offsets: ArrayView1<i64>,
     pad_char: u8,
-    mut annot_v_idxs: Option<ArrayViewMut1<i32>>,
-    mut annot_ref_pos: Option<ArrayViewMut1<i32>>,
     parallel: bool,
 ) {
     let batch_size = regions.nrows();
@@ -651,10 +650,7 @@ pub fn reconstruct_haplotypes_from_svar2(
     // Per-k inner work: merge this hap's var_key ⋈ dense entries, then reconstruct via
     // the shared core with a decode closure. All read-only ArrayViews/slices are
     // Send+Sync so the closure can borrow them freely.
-    let do_work = |k: usize,
-                   out_view: ArrayViewMut1<u8>,
-                   av_view: Option<ArrayViewMut1<i32>>,
-                   ap_view: Option<ArrayViewMut1<i32>>| {
+    let do_work = |k: usize, out_view: ArrayViewMut1<u8>| {
         let query = k / ploidy;
         let hap = k % ploidy;
 
@@ -729,8 +725,8 @@ pub fn reconstruct_haplotypes_from_svar2(
             out_view,
             pad_char,
             None, // keep: SVAR2 has no per-haplotype keep mask
-            av_view,
-            ap_view,
+            None, // annot_v_idxs: SVAR2 read-bound haps are never annotated
+            None, // annot_ref_pos: SVAR2 read-bound haps are never annotated
         );
     };
 
@@ -764,98 +760,18 @@ pub fn reconstruct_haplotypes_from_svar2(
             }
         }
 
-        // Carve annotation buffers only when they are Some.
-        let av_chunks: Option<Vec<&mut [i32]>> = annot_v_idxs.as_mut().map(|av| {
-            let av_slice = av.as_slice_mut().unwrap();
-            let mut chunks: Vec<&mut [i32]> = Vec::with_capacity(n_work);
-            let mut rest = &mut av_slice[..];
-            let mut cursor = 0usize;
-            for &(s, e) in &bounds {
-                let (_, tail) = rest.split_at_mut(s - cursor);
-                let (mid, tail2) = tail.split_at_mut(e - s);
-                chunks.push(mid);
-                rest = tail2;
-                cursor = e;
-            }
-            chunks
-        });
-
-        let ap_chunks: Option<Vec<&mut [i32]>> = annot_ref_pos.as_mut().map(|ap| {
-            let ap_slice = ap.as_slice_mut().unwrap();
-            let mut chunks: Vec<&mut [i32]> = Vec::with_capacity(n_work);
-            let mut rest = &mut ap_slice[..];
-            let mut cursor = 0usize;
-            for &(s, e) in &bounds {
-                let (_, tail) = rest.split_at_mut(s - cursor);
-                let (mid, tail2) = tail.split_at_mut(e - s);
-                chunks.push(mid);
-                rest = tail2;
-                cursor = e;
-            }
-            chunks
-        });
-
-        // Zip all chunk vecs and dispatch in parallel.
-        // Handle the four combinations of av/ap presence.
-        match (av_chunks, ap_chunks) {
-            (Some(avc), Some(apc)) => {
-                out_chunks
-                    .into_par_iter()
-                    .zip(avc.into_par_iter())
-                    .zip(apc.into_par_iter())
-                    .enumerate()
-                    .for_each(|(k, ((out_chunk, av_chunk), ap_chunk))| {
-                        do_work(
-                            k,
-                            ArrayViewMut1::from(out_chunk),
-                            Some(ArrayViewMut1::from(av_chunk)),
-                            Some(ArrayViewMut1::from(ap_chunk)),
-                        );
-                    });
-            }
-            (Some(avc), None) => {
-                out_chunks
-                    .into_par_iter()
-                    .zip(avc.into_par_iter())
-                    .enumerate()
-                    .for_each(|(k, (out_chunk, av_chunk))| {
-                        do_work(
-                            k,
-                            ArrayViewMut1::from(out_chunk),
-                            Some(ArrayViewMut1::from(av_chunk)),
-                            None,
-                        );
-                    });
-            }
-            (None, Some(apc)) => {
-                out_chunks
-                    .into_par_iter()
-                    .zip(apc.into_par_iter())
-                    .enumerate()
-                    .for_each(|(k, (out_chunk, ap_chunk))| {
-                        do_work(
-                            k,
-                            ArrayViewMut1::from(out_chunk),
-                            None,
-                            Some(ArrayViewMut1::from(ap_chunk)),
-                        );
-                    });
-            }
-            (None, None) => {
-                out_chunks
-                    .into_par_iter()
-                    .enumerate()
-                    .for_each(|(k, out_chunk)| {
-                        do_work(k, ArrayViewMut1::from(out_chunk), None, None);
-                    });
-            }
-        }
+        // SVAR2 read-bound haps are never annotated, so dispatch the un-annotated
+        // work items straight across rayon.
+        out_chunks
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(k, out_chunk)| {
+                do_work(k, ArrayViewMut1::from(out_chunk));
+            });
     } else {
         // Serial path: use raw pointers for disjoint sub-range access, exactly as before.
         // The serial loop prevents concurrent aliasing.
         let out_raw: *mut u8 = out.as_mut_ptr();
-        let av_raw: Option<*mut i32> = annot_v_idxs.as_mut().map(|a| a.as_mut_ptr());
-        let ap_raw: Option<*mut i32> = annot_ref_pos.as_mut().map(|a| a.as_mut_ptr());
 
         for k in 0..n_work {
             let out_s = out_offsets[k] as usize;
@@ -872,25 +788,7 @@ pub fn reconstruct_haplotypes_from_svar2(
             // is free of aliasing UB.
             let out_chunk =
                 unsafe { std::slice::from_raw_parts_mut(out_raw.add(out_s), out_e - out_s) };
-            let out_view = ArrayViewMut1::from(out_chunk);
-
-            // SAFETY: same invariant as out_chunk — `out_offsets` non-decreasing guarantees
-            // each [out_s..out_e] is a disjoint sub-range; serial loop prevents concurrent
-            // aliasing.
-            let av_view: Option<ArrayViewMut1<i32>> = av_raw.map(|p| {
-                let chunk = unsafe { std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s) };
-                ArrayViewMut1::from(chunk)
-            });
-
-            // SAFETY: same invariant as out_chunk — `out_offsets` non-decreasing guarantees
-            // each [out_s..out_e] is a disjoint sub-range; serial loop prevents concurrent
-            // aliasing.
-            let ap_view: Option<ArrayViewMut1<i32>> = ap_raw.map(|p| {
-                let chunk = unsafe { std::slice::from_raw_parts_mut(p.add(out_s), out_e - out_s) };
-                ArrayViewMut1::from(chunk)
-            });
-
-            do_work(k, out_view, av_view, ap_view);
+            do_work(k, ArrayViewMut1::from(out_chunk));
         }
     }
 }
@@ -1679,8 +1577,6 @@ mod tests {
             ref_.view(),
             ref_offsets.view(),
             pad_char,
-            None,
-            None,
             false, // serial
         );
 
@@ -1732,8 +1628,6 @@ mod tests {
             ref_.view(),
             ref_offsets.view(),
             pad_char,
-            None,
-            None,
             false,
         );
 
