@@ -14,9 +14,24 @@ from this repo's own decode output). Coordinate convention: VCF ``POS`` is
 Fixture routing (self-asserted below via ``SparseVar2._find_ranges``, not
 assumed):
     - chr1:3 (0-based 2), A>G -- carried by exactly ONE haplotype (S0/hap0)
-      out of 6 in the cohort -> cost model routes this to the VAR_KEY channel.
+      out of 6 in the cohort -> cost model routes this to the VAR_KEY channel
+      (VkSnp, call_idx 0 -- first non-empty hap-column in the var_key stream).
+    - chr1:8 (0-based 7), AT>A (deletion) -- carried by exactly ONE haplotype
+      (S2/hap0) -> VAR_KEY channel, VkIndel sub-stream (the fixture was
+      previously all-SNV, leaving VkIndel/DenseIndel dead in this oracle).
     - chr1:10 (0-based 9), G>C -- carried by ALL 6 haplotypes (hom in every
-      sample) -> cost model routes this to the DENSE channel.
+      sample) -> cost model routes this to the DENSE channel (DenseSnp, on-disk
+      row 0, the first dense-routed SNP on the contig).
+    - chr1:13 (0-based 12), T>A -- carried by exactly ONE haplotype (S1/hap1)
+      -> VAR_KEY channel, VkSnp call_idx 1 (a *later* hap-column than chr1:3's
+      call_idx 0): pins that call_idx is NOT hardcoded to 0 end-to-end.
+    - chr1:16 (0-based 15), T>C -- carried by ALL 6 haplotypes -> DENSE
+      channel, DenseSnp on-disk row 1 (the second dense-routed SNP): a region
+      query that includes this but excludes chr1:10 (see Test 5, region 3)
+      resolves an on-disk dense row via a nonzero ``on_disk.start`` offset,
+      pinning ``dense_abs_row`` is not hardcoded to row 0 end-to-end.
+    - chr1:18 (0-based 17), GC>G (deletion) -- carried by ALL 6 haplotypes ->
+      DENSE channel, DenseIndel sub-stream.
     - chr2:5 (0-based 4), A>T -- carried by exactly ONE haplotype (S1/hap0)
       -> VAR_KEY channel, on the second contig.
 
@@ -40,9 +55,14 @@ import pytest
 
 # --- fixture: 2 contigs, 3 samples, ploidy 2 (6 haplotypes/contig) ----------
 
-_REF1 = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"  # chr1, 40bp; idx2='A', idx9='G'
+_REF1 = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"  # chr1, 40bp
+# idx2='A' (pos3), idx7:9='AT' (pos8-9), idx9='G' (pos10), idx12='T' (pos13),
+# idx15='T' (pos16), idx17:19='GC' (pos18-19) -- all within the first 20bp, so
+# the pre-existing chr1:20-40 window (Test 5, region 2) stays variant-free.
 _REF2 = "ACGT" * 7 + "AC"  # chr2, 30bp; idx4='A'
-assert len(_REF1) == 40 and _REF1[2] == "A" and _REF1[9] == "G"
+assert len(_REF1) == 40
+assert _REF1[2] == "A" and _REF1[7:9] == "AT" and _REF1[9] == "G"
+assert _REF1[12] == "T" and _REF1[15] == "T" and _REF1[17:19] == "GC"
 assert len(_REF2) == 30 and _REF2[4] == "A"
 
 _VCF = """\
@@ -55,7 +75,11 @@ _VCF = """\
 ##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1\tS2
 chr1\t3\t.\tA\tG\t.\t.\tAF=0.1;NS=5\tGT:DP\t1|0:10\t0|0:20\t0|0:30
+chr1\t8\t.\tAT\tA\t.\t.\tAF=0.55;NS=4\tGT:DP\t0|0:14\t0|0:24\t1|0:34
 chr1\t10\t.\tG\tC\t.\t.\tNS=6\tGT:DP\t1|1:11\t1|1:21\t1|1:31
+chr1\t13\t.\tT\tA\t.\t.\tAF=0.66;NS=7\tGT:DP\t0|0:15\t0|1:25\t0|0:35
+chr1\t16\t.\tT\tC\t.\t.\tAF=0.77;NS=3\tGT:DP\t1|1:16\t1|1:26\t1|1:36
+chr1\t18\t.\tGC\tG\t.\t.\tAF=0.88;NS=1\tGT:DP\t1|1:17\t1|1:27\t1|1:37
 chr2\t5\t.\tA\tT\t.\t.\tAF=0.42;NS=2\tGT:DP\t0|0:12\t1|0:22\t0|0:32
 """
 
@@ -430,15 +454,19 @@ def test_svar2_variant_windows_fields(
 
     oracle, samples = oracle_and_samples
     _bcf, ref = _src
-    # Interleaved across contigs (chr2, chr1, chr1) -> >1 contig group, so the
-    # multi-contig branch of _reconstruct_variant_windows actually runs (not
-    # just the single-group fast path). Region 0 covers the chr2 variant;
-    # region 1 covers both chr1 variants; region 2 (chr1:20-40) has NONE.
+    # Interleaved across contigs (chr2, chr1, chr1, chr1) -> >1 contig group,
+    # so the multi-contig branch of _reconstruct_variant_windows actually runs
+    # (not just the single-group fast path). Region 0 covers the chr2 variant;
+    # region 1 covers all 5 chr1:0-20 variants; region 2 (chr1:20-40) has
+    # NONE (variant-free, dummy-fill case); region 3 (chr1:12-20) covers only
+    # chr1:13/16/18 -- excluding chr1:10 (the first DenseSnp on-disk row)
+    # forces the DenseSnp window here to resolve chr1:16 via a NONZERO
+    # `on_disk.start` offset, pinning `dense_abs_row` end-to-end.
     bed = pl.DataFrame(
         {
-            "chrom": ["chr2", "chr1", "chr1"],
-            "chromStart": [0, 0, 20],
-            "chromEnd": [15, 20, 40],
+            "chrom": ["chr2", "chr1", "chr1", "chr1"],
+            "chromStart": [0, 0, 20, 12],
+            "chromEnd": [15, 20, 40, 20],
         }
     )
     ds = _build_dataset(tmp_path, "d5.gvl", bed, svar2_fields_store, ref)
@@ -486,6 +514,7 @@ def test_svar2_variant_windows_fields(
     region_keys = {
         0: [k for k in oracle if k[0] == "chr2"],
         1: [k for k in oracle if k[0] == "chr1" and k[1] < 20],
+        3: [k for k in oracle if k[0] == "chr1" and 12 <= k[1] < 20],
     }
     for r, keys in region_keys.items():
         for s_i in range(S):
@@ -572,3 +601,76 @@ def test_svar2_dataset_open_var_fields(
     rv = ds[:, :]
     sv = genoray.SparseVar2(str(svar2_fields_store))
     _assert_diploid_fields(rv, ["chr1"], samples, oracle, sv)
+
+
+# --- Test 7: unknown var_fields name must raise, not be silently dropped -----
+
+
+def test_svar2_dataset_open_unknown_var_field_raises(
+    tmp_path, svar2_fields_store, _src
+):
+    """A typo'd/unsupported field name in ``var_fields`` must raise, mirroring
+    ``with_settings(var_fields=...)`` (``_impl.py``) and SVAR1's
+    ``Haps.from_path``. Before the fix, ``Svar2Haps.from_path`` silently
+    filtered unknown names out of ``_requested_store_fields`` -- the dataset
+    opened successfully, ``active_var_fields`` reported the typo as "active",
+    and the output simply lacked it (no error, no warning).
+    """
+    import genoray
+    import genvarloader as gvl
+
+    _bcf, ref = _src
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [40]})
+    d = tmp_path / "d7.gvl"
+    gvl.write(
+        d,
+        bed,
+        variants=genoray.SparseVar2(svar2_fields_store),
+        samples=None,
+        overwrite=True,
+    )
+
+    with pytest.raises(ValueError, match="Missing variant fields"):
+        gvl.Dataset.open(d, reference=ref, var_fields=["alt", "start", "TYPO"])
+
+    # "ref" is a builtin var-field name elsewhere but SVAR2 doesn't provide it.
+    with pytest.raises(ValueError, match="Missing variant fields"):
+        gvl.Dataset.open(d, reference=ref, var_fields=["ref"])
+
+
+# --- Test 8: _output_bytes_per_instance must not KeyError on a store field --
+
+
+def test_svar2_output_bytes_per_instance_with_store_field(
+    tmp_path, svar2_fields_store, _src
+):
+    """``_output_bytes_per_instance`` (the buffered/double_buffered dataloader
+    sizing path, ``_torch.py``'s ``_resolve_buffered_inputs`` ->
+    ``get_dataloader(mode=...)``) must not crash when an INFO/FORMAT store
+    field is requested. Before the fix, its ``else`` branch always did
+    ``haps_obj.variants.info[f].dtype`` -- but ``Svar2Haps.variants`` is the
+    dummy placeholder with ``info={}``, so any store field name raised
+    ``KeyError`` there, turning a previously-working path into a crash.
+    """
+    import genoray
+    import genvarloader as gvl
+
+    _bcf, ref = _src
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [40]})
+    d = tmp_path / "d8.gvl"
+    gvl.write(
+        d,
+        bed,
+        variants=genoray.SparseVar2(svar2_fields_store),
+        samples=None,
+        overwrite=True,
+    )
+
+    ds = (
+        gvl.Dataset.open(d, reference=ref)
+        .with_seqs("variants")
+        .with_settings(var_fields=_VAR_FIELDS, deterministic=True)
+    )
+    out = ds._output_bytes_per_instance()
+    assert out.shape == ds.shape
+    assert (out >= 0).all()

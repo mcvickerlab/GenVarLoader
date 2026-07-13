@@ -1454,7 +1454,14 @@ class Dataset:
                     total += per_ploid.reshape(-1, ploidy).sum(-1)
                 else:
                     # INFO column: numeric, known dtype from on-disk schema.
-                    info_dtype = haps_obj.variants.info[f].dtype
+                    # Svar2Haps.variants is a dummy placeholder (info={}) --
+                    # store fields' dtypes live in the store manifest instead.
+                    from ._svar2_haps import Svar2Haps
+
+                    if isinstance(haps_obj, Svar2Haps) and f in haps_obj.store_fields:
+                        info_dtype = haps_obj.store_fields[f].dtype
+                    else:
+                        info_dtype = haps_obj.variants.info[f].dtype
                     total += n_vars_total * info_dtype.itemsize
             if include_offsets:
                 # RaggedVariants (kind=2) writes, per field: outer offsets

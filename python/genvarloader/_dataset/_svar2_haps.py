@@ -258,6 +258,10 @@ class Svar2Haps(Haps[_H]):
         store = Svar2Store(str(svar2_path), sv.contigs, sv.n_samples, sv.ploidy)
         store_fields = dict(sv.available_fields)
 
+        allowed = {"alt", "ilen", "start"} | set(store_fields)
+        if missing := [f for f in var_fields if f not in allowed]:
+            raise ValueError(f"Missing variant fields: {missing}")
+
         # Minimal base-Haps fields. genotypes carries only the (R, S, P, None)
         # shape (so ploidy = shape[-2] and n_variants.shape are available); its
         # data is empty (svar2 has no per-region sparse genotype store).
