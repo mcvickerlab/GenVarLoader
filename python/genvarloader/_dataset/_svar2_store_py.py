@@ -327,16 +327,19 @@ def build_readbound_variants(
 
     store = Svar2Store(str(svar2.path), svar2.contigs, svar2.n_samples, svar2.ploidy)
 
-    pos, ilen, alt_bytes, str_off, var_off = decode_variants_from_svar2_readbound(
-        store,
-        contig,
-        region_starts,
-        orig_samples,
-        vk_snp_range,
-        vk_indel_range,
-        dense_snp_range,
-        dense_indel_range,
-        P,
+    pos, ilen, alt_bytes, str_off, var_off, _field_bufs, _field_itemsizes = (
+        decode_variants_from_svar2_readbound(
+            store,
+            contig,
+            region_starts,
+            orig_samples,
+            vk_snp_range,
+            vk_indel_range,
+            dense_snp_range,
+            dense_indel_range,
+            P,
+            [],
+        )
     )
 
     from seqpro.rag import Ragged

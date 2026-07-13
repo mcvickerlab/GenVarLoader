@@ -1313,8 +1313,19 @@ pub fn shift_and_realign_tracks_from_svar2_readbound<'py>(
 /// `region_starts`/`orig_samples`/`vk_*_range`/`dense_*_range` argument semantics
 /// (the per-query outputs of `SparseVar2.find_ranges`, flattened region-major,
 /// sample-minor). `ploidy` is passed explicitly (there is no `shifts` array to
-/// infer it from here). Returns the `RaggedVariants` SoA: `(pos, ilen, alt_bytes,
-/// str_off, var_off)`; see
+/// infer it from here).
+///
+/// `fields` is a list of `(category, name, dtype_str)` triples (`category` is
+/// `"info"` or `"format"`; `dtype_str` is genoray's `StorageDtype` meta string,
+/// e.g. `"i32"`), and may be empty. When non-empty, this opens the four
+/// `FieldSub`-keyed `FieldView`s per field and gathers their bytes alongside the
+/// variant decode via the var_key-provenance-tracking
+/// `genoray_core::query::gather_haps_readbound_src` (plain `gather_haps_readbound`
+/// is used when `fields` is empty, since it doesn't need that provenance).
+///
+/// Returns the `RaggedVariants` SoA `(pos, ilen, alt_bytes, str_off, var_off)`
+/// plus, per requested field in `fields` order, a flat `u8` byte buffer and its
+/// per-value itemsize (`field_bufs`, `field_itemsizes`); see
 /// `python/genvarloader/_dataset/_svar2_store_py.py::build_readbound_variants`.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
@@ -1329,14 +1340,20 @@ pub fn decode_variants_from_svar2_readbound<'py>(
     dense_snp_range: PyReadonlyArray2<i64>,
     dense_indel_range: PyReadonlyArray2<i64>,
     ploidy: usize,
+    fields: Vec<(String, String, String)>,
 ) -> PyResult<(
     Bound<'py, PyArray1<i32>>,
     Bound<'py, PyArray1<i32>>,
     Bound<'py, PyArray1<u8>>,
     Bound<'py, PyArray1<i64>>,
     Bound<'py, PyArray1<i64>>,
+    Vec<Bound<'py, PyArray1<u8>>>,
+    Vec<usize>,
 )> {
     use crate::svar2;
+    use genoray_core::field::StorageDtype;
+    use genoray_core::layout::{ContigPaths, FieldSub};
+    use genoray_core::query::FieldView;
 
     let reader = store.reader(contig).ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(format!("contig {contig} not in store"))
@@ -1353,7 +1370,47 @@ pub fn decode_variants_from_svar2_readbound<'py>(
     let dense_snp_range_v = arr2_to_ranges(dense_snp_range.as_array());
     let dense_indel_range_v = arr2_to_ranges(dense_indel_range.as_array());
 
-    let soa = py.detach(move || {
+    let n_samples = reader.n_samples();
+    let paths = ContigPaths::new(store.store_path(), contig);
+
+    let gathers: Vec<svar2::FieldGather> = fields
+        .iter()
+        .map(|(cat, name, dtype_str)| {
+            let dtype = StorageDtype::from_meta_str(dtype_str).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "field {name}: unknown storage dtype {dtype_str:?}"
+                ))
+            })?;
+            let width = dtype.width_bytes().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "field {name}: unresolved dtype"
+                ))
+            })?;
+            // views MUST be in FieldSub::all() order — FieldGather indexes them by sub_ix.
+            let mut views = Vec::with_capacity(4);
+            for sub in FieldSub::all() {
+                views.push(
+                    FieldView::open(&paths, cat, name, sub, dtype, n_samples).map_err(|e| {
+                        pyo3::exceptions::PyIOError::new_err(format!("open field {name}: {e}"))
+                    })?,
+                );
+            }
+            let views: [FieldView; 4] = views
+                .try_into()
+                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("expected 4 field views"))?;
+            Ok(svar2::FieldGather {
+                views,
+                is_format: cat == "format",
+                width,
+                cohort_n_samples: n_samples,
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let itemsizes: Vec<usize> = gathers.iter().map(|g| g.width).collect();
+    let has_fields = !gathers.is_empty();
+
+    let (soa, field_bufs) = py.detach(move || {
         let rb = genoray_core::query::HapRanges::new(
             &region_starts_v,
             &orig_samples_v,
@@ -1363,15 +1420,33 @@ pub fn decode_variants_from_svar2_readbound<'py>(
             &dense_indel_range_v,
             ploidy,
         );
-        let br = genoray_core::query::gather_haps_readbound(reader, &rb);
+        // Field gather needs var_key provenance (vk_src), which ONLY the _src
+        // variant populates.
+        let br = if has_fields {
+            genoray_core::query::gather_haps_readbound_src(reader, &rb)
+        } else {
+            genoray_core::query::gather_haps_readbound(reader, &rb)
+        };
 
         let (lut_bytes, lut_off_u64) = reader.lut_arrays();
         let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
 
-        let (soa, _field_bufs) =
-            svar2::decode_variants_from_split(&br, &lut_bytes, &lut_off, &[], &[], &[], &[]);
-        soa
+        svar2::decode_variants_from_split(
+            &br,
+            &lut_bytes,
+            &lut_off,
+            &gathers,
+            // ON-DISK dense windows (from find_ranges / HapRanges), NOT br's output windows.
+            &dense_snp_range_v,
+            &dense_indel_range_v,
+            &orig_samples_v,
+        )
     });
+
+    let field_out: Vec<Bound<'py, PyArray1<u8>>> = field_bufs
+        .into_iter()
+        .map(|b| Array1::from_vec(b).into_pyarray(py))
+        .collect();
 
     Ok((
         Array1::from_vec(soa.pos).into_pyarray(py),
@@ -1379,6 +1454,8 @@ pub fn decode_variants_from_svar2_readbound<'py>(
         Array1::from_vec(soa.alt_bytes).into_pyarray(py),
         Array1::from_vec(soa.str_off).into_pyarray(py),
         Array1::from_vec(soa.var_off).into_pyarray(py),
+        field_out,
+        itemsizes,
     ))
 }
 

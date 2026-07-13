@@ -575,7 +575,7 @@ class Svar2Haps(Haps[_H]):
         cat_query_order: list[NDArray[np.intp]] = []
         for ci, qsel in groups:
             gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-            pos, ilen, alt_bytes, str_off, var_off = (
+            pos, ilen, alt_bytes, str_off, var_off, _field_bufs, _field_itemsizes = (
                 decode_variants_from_svar2_readbound(
                     self.store,
                     self.ds_contigs[ci],
@@ -586,6 +586,7 @@ class Svar2Haps(Haps[_H]):
                     gi[4],
                     gi[5],
                     P,
+                    [],
                 )
             )
             var_off = np.asarray(var_off, np.int64)
@@ -687,7 +688,7 @@ class Svar2Haps(Haps[_H]):
 
         for ci, qsel in groups:
             gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-            pos, ilen, alt_bytes, str_off, var_off = (
+            pos, ilen, alt_bytes, str_off, var_off, _field_bufs, _field_itemsizes = (
                 decode_variants_from_svar2_readbound(
                     self.store,
                     self.ds_contigs[ci],
@@ -698,6 +699,7 @@ class Svar2Haps(Haps[_H]):
                     gi[4],
                     gi[5],
                     P,
+                    [],
                 )
             )
             pos = np.asarray(pos, np.int32)
