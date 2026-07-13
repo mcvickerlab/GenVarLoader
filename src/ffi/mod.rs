@@ -42,6 +42,26 @@ fn arr2_to_ranges(a: numpy::ndarray::ArrayView2<i64>) -> Vec<Range<usize>> {
         .collect()
 }
 
+/// Validate that a Python-supplied 1-D array is C-contiguous, or return a Python
+/// `ValueError`. Some SVAR2 readbound kernels below slice these arrays and then
+/// call `.as_slice()`/`.as_slice_mut()` on the result; a non-contiguous view (e.g.
+/// a strided `a[::2]` slice) makes that call panic — a Rust panic surfaces to
+/// Python as an uncatchable `pyo3_runtime.PanicException`, not a normal exception
+/// — instead of raising. Validate at the FFI boundary so a bad input surfaces as a
+/// clean `ValueError`. Only apply this to arrays actually consumed via
+/// `.as_slice()` on a stride-preserving view downstream; arrays consumed via
+/// `.as_array()` + direct ndarray indexing, `arr2_to_ranges`, or `.to_vec()` are
+/// already stride-safe and must NOT be gated here (doing so would reject
+/// currently-valid strided inputs).
+fn require_contiguous_1d<T: numpy::Element>(
+    arr: &PyReadonlyArray1<T>,
+    name: &str,
+) -> PyResult<()> {
+    arr.as_slice().map(|_| ()).map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(format!("`{name}` must be C-contiguous"))
+    })
+}
+
 /// Per-(query, hap) reference-length diffs (see `genotypes::get_diffs_sparse`).
 /// `geno_offsets` is the normalized (2, n) int64 starts/stops array.
 #[pyfunction]
@@ -960,6 +980,40 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
     let dense_snp_range_v = arr2_to_ranges(dense_snp_range.as_array());
     let dense_indel_range_v = arr2_to_ranges(dense_indel_range.as_array());
 
+    // `ref_` is sliced (`ref_.slice(s![c_s..c_e])`) and then `.as_slice().unwrap()`'d
+    // inside `reconstruct::reconstruct_haplotypes_from_svar2` (src/reconstruct/mod.rs) —
+    // a non-contiguous `ref_` (e.g. `ref_[::2]`) panics there. `ref_offsets` is only
+    // ever indexed directly (`ref_offsets[c_idx]`), which is stride-safe, so it is not
+    // gated here.
+    require_contiguous_1d(&ref_, "ref_")?;
+
+    // Guard the pure-DEL anchor-base read inside
+    // `reconstruct::reconstruct_haplotypes_from_svar2`
+    // (`&contig_ref_s[pos as usize..pos as usize + 1]`, src/reconstruct/mod.rs), which
+    // panics (index out of bounds) if `pos >= contig_ref_s.len()`. genoray's
+    // `find_ranges`/`gather_haps_readbound` gather off a half-open interval overlap
+    // search tree built from each query's `[q_start, q_end)`, so every variant
+    // gathered for query `q` is guaranteed `pos < q_end == region_bounds[q, 1]` (the
+    // same bound this readbound convention hands the search tree — see
+    // `genoray::_svar2_batch._find_ranges` / `genoray_core::query::gather::find_ranges`).
+    // Bounding the query window against the contig length here therefore
+    // transitively bounds every gathered variant's anchor read — no need to inspect
+    // post-gather positions, and no risk of rejecting a valid query.
+    {
+        let ref_offsets_check = ref_offsets.as_array();
+        if let (Some(&c_s), Some(&c_e)) = (ref_offsets_check.get(0), ref_offsets_check.get(1)) {
+            let contig_ref_len = c_e - c_s;
+            for q in 0..n_q {
+                let region_end = region_bounds_a[[q, 1]] as i64;
+                if region_end > contig_ref_len {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "region end {region_end} exceeds contig {contig} length {contig_ref_len}"
+                    )));
+                }
+            }
+        }
+    }
+
     let ref_a = ref_.as_array();
     let ref_offsets_a = ref_offsets.as_array();
 
@@ -1210,6 +1264,13 @@ pub fn shift_and_realign_tracks_from_svar2_readbound<'py>(
     let vk_indel_range_v = arr2_to_ranges(vk_indel_range.as_array());
     let dense_snp_range_v = arr2_to_ranges(dense_snp_range.as_array());
     let dense_indel_range_v = arr2_to_ranges(dense_indel_range.as_array());
+
+    // `tracks` is `.as_slice().expect("tracks must be contiguous (C-order)")`'d inside
+    // `tracks::shift_and_realign_tracks_from_svar2` (src/tracks/mod.rs) — a
+    // non-contiguous `tracks` (e.g. `tracks[::2]`) panics there. `track_offsets` and
+    // `params` are only ever indexed directly (`track_offsets[query]`, `params[0]`),
+    // which is stride-safe, so neither is gated here.
+    require_contiguous_1d(&tracks, "tracks")?;
 
     let tracks_a = tracks.as_array();
     let track_offsets_a = track_offsets.as_array();

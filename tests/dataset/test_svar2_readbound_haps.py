@@ -131,6 +131,86 @@ def test_readbound_matches_union_oracle(svar2_store, regions):
         pytest.fail("data mismatch but no single hap slice differed (offset bug?)")
 
 
+def test_readbound_haps_noncontiguous_ref_raises(svar2_store):
+    """A non-C-contiguous ``ref_`` view must surface as ``ValueError``, not a Rust
+    panic.
+
+    ``build_readbound_haps`` (the Python oracle wrapper) defensively
+    ``np.ascontiguousarray``s ``ref_`` before handing it to the FFI, so it can't be
+    used to inject a strided array here -- this calls
+    ``reconstruct_haplotypes_from_svar2_readbound`` directly, replaying the same
+    ``_find_ranges`` marshalling ``build_readbound_haps`` does internally (see
+    ``genvarloader/_dataset/_svar2_store_py.py::build_readbound_haps``), but with a
+    genuinely non-contiguous ``ref_``.
+    """
+    import genoray
+
+    from genvarloader.genvarloader import (
+        Svar2Store,
+        reconstruct_haplotypes_from_svar2_readbound,
+    )
+
+    contig = "chr1"
+    regions = [(0, 40)]
+    ref_bytes = _REF.encode()
+    ref_offsets = np.array([0, len(ref_bytes)], np.int64)
+
+    # A strided (non-contiguous) view carrying the same bytes as `_REF`: double up
+    # each byte, then stride over every other one to recover the original values.
+    doubled = np.repeat(np.frombuffer(ref_bytes, np.uint8), 2)
+    ref_strided = doubled[::2]
+    assert ref_strided.flags["C_CONTIGUOUS"] is False
+    assert bytes(ref_strided) == ref_bytes
+
+    sv = genoray.SparseVar2(str(svar2_store))
+    S, P = sv.n_samples, sv.ploidy
+
+    d = sv._find_ranges(
+        contig, [s for s, _ in regions], [e for _, e in regions], samples=None
+    )
+    region_starts_r = np.asarray(d["region_starts"], np.int64)
+    sample_cols = np.asarray(d["sample_cols"], np.int64)
+    vk_snp_range = np.ascontiguousarray(d["vk_snp_range"], np.int64)
+    vk_indel_range = np.ascontiguousarray(d["vk_indel_range"], np.int64)
+    dense_snp_range_r = np.asarray(d["dense_snp_range"], np.int64)
+    dense_indel_range_r = np.asarray(d["dense_indel_range"], np.int64)
+
+    R = len(regions)
+    n_q = R * S
+    region_starts = np.repeat(region_starts_r, S).astype(np.uint32)
+    orig_samples = np.tile(sample_cols, R)
+    dense_snp_range = np.ascontiguousarray(
+        np.repeat(dense_snp_range_r, S, axis=0), np.int64
+    )
+    dense_indel_range = np.ascontiguousarray(
+        np.repeat(dense_indel_range_r, S, axis=0), np.int64
+    )
+    reg_arr = np.asarray(regions, np.int32).reshape(R, 2)
+    region_bounds = np.ascontiguousarray(np.repeat(reg_arr, S, axis=0), np.int32)
+    shifts_a = np.zeros((n_q, P), dtype=np.int32)
+
+    store = Svar2Store(str(sv.path), sv.contigs, sv.n_samples, sv.ploidy)
+
+    with pytest.raises(ValueError):
+        reconstruct_haplotypes_from_svar2_readbound(
+            store,
+            contig,
+            region_starts,
+            orig_samples,
+            vk_snp_range,
+            vk_indel_range,
+            dense_snp_range,
+            dense_indel_range,
+            region_bounds,
+            shifts_a,
+            ref_strided,
+            ref_offsets,
+            np.uint8(ord("N")),
+            np.int64(-1),
+            False,
+        )
+
+
 def test_readbound_matches_union_oracle_with_shifts(svar2_store):
     """Non-trivial per-hap jitter shifts must also match byte-for-byte."""
     import genoray
