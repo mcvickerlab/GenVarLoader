@@ -672,10 +672,7 @@ pub fn reconstruct_haplotypes_from_svar2(
 
         // presence bits for this hap start at bit `dense_present_off[k]`
         let base_bit = dense_present_off[k] as usize;
-        let present_bit = |j: usize| -> bool {
-            let bit = base_bit + j;
-            (dense_present_s[bit / 8] >> (bit % 8)) & 1 == 1 // LSB-first within each byte
-        };
+        let present_bit = |j: usize| crate::svar2::present_bit(dense_present_s, base_bit, j);
 
         let merged = crate::svar2::merge_hap(
             vk_pos_s,

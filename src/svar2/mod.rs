@@ -26,6 +26,16 @@ pub fn decode_alt<'a>(key: u32, lut_bytes: &'a [u8], lut_off: &[i64]) -> (i64, C
     }
 }
 
+/// LSB-first presence-bit lookup into a packed presence bitmap: returns whether bit
+/// `base_bit + j` of `dense_present` is set, indexed from the least-significant bit
+/// within each byte. Shared by the haplotype (`reconstruct`) and track (`tracks`)
+/// per-hap `merge_hap` calls, which both read a hap's presence window this way.
+#[inline]
+pub fn present_bit(dense_present: &[u8], base_bit: usize, j: usize) -> bool {
+    let bit = base_bit + j;
+    (dense_present[bit / 8] >> (bit % 8)) & 1 == 1
+}
+
 /// Merge one hap's `var_key` slice with its carried `dense` set-bits into a single
 /// position-sorted `(pos, key)` list (stable: var_key before dense on ties, matching
 /// genoray's merge). `dense` is region `r`'s `[ds, de)` window; `present` are this hap's
