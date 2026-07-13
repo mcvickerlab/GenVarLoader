@@ -9,11 +9,15 @@ use pyo3::prelude::*;
 #[pyclass]
 pub struct Svar2Store {
     readers: HashMap<String, ContigReader>,
+    store_path: String,
 }
 
 impl Svar2Store {
     pub fn reader(&self, contig: &str) -> Option<&ContigReader> {
         self.readers.get(contig)
+    }
+    pub fn store_path(&self) -> &str {
+        &self.store_path
     }
 }
 
@@ -32,7 +36,11 @@ impl Svar2Store {
                 .map_err(|e| PyIOError::new_err(format!("open contig {c}: {e}")))?;
             readers.insert(c, r);
         }
-        Ok(Self { readers })
+        let store_path = store_path.to_string();
+        Ok(Self {
+            readers,
+            store_path,
+        })
     }
 
     fn contigs(&self) -> Vec<String> {
