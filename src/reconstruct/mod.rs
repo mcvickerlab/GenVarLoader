@@ -547,6 +547,10 @@ pub fn reconstruct_haplotypes_from_sparse(
         for k in 0..n_work {
             let out_s = out_offsets[k] as usize;
             let out_e = out_offsets[k + 1] as usize;
+            debug_assert!(
+                out_e >= out_s,
+                "out_offsets must be monotonically non-decreasing (got out_s={out_s}, out_e={out_e})"
+            );
 
             // SAFETY: `out_offsets` is required by the calling contract to be monotonically
             // non-decreasing, so consecutive (out_s, out_e) pairs are strictly non-overlapping
@@ -847,6 +851,10 @@ pub fn reconstruct_haplotypes_from_svar2(
         for k in 0..n_work {
             let out_s = out_offsets[k] as usize;
             let out_e = out_offsets[k + 1] as usize;
+            debug_assert!(
+                out_e >= out_s,
+                "out_offsets must be monotonically non-decreasing (got out_s={out_s}, out_e={out_e})"
+            );
 
             // SAFETY: `out_offsets` is required by the calling contract to be monotonically
             // non-decreasing, so consecutive (out_s, out_e) pairs are strictly non-overlapping
