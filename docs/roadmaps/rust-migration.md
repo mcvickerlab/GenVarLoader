@@ -811,13 +811,20 @@ as a Rust path-dep, the first place gvl's Rust crate depends on genoray's Rust c
       (kept only as the parity oracle for tests).
 - [x] Guard matrix (Phase-1 scope; raise `NotImplementedError`, not silent mis-compute): spliced
       output, `var_filter="exonic"`, `min_af`/`max_af`, `annotated` haplotypes, in-kernel `to_rc`,
-      fixed-length (`int output_length`) haplotype-realigned tracks, `variants`/`variant-windows`
+      fixed-length (`int output_length`) haplotype-realigned tracks, and `variants`/`variant-windows`
       output with jitter (write `max_jitter>0` or read `jitter>0` — the readbound variants decode
-      has no right-clip), `extend_to_length=False` at write time, and multi-contig `FlankSample`
-      track fills (contig-local vs. global fill-seed query index divergence). **Now supported**
+      has no right-clip), plus `extend_to_length=False` at write time. **Now supported**
       (moved off the guard list this pass): `unphased_union` and `"variant-windows"` output for
       both `"variants"` and `"variant-windows"`, plus `var_fields`-selected store INFO/FORMAT
       fields — see the field-routing task line below.
+- [x] Multi-contig `FlankSample` (seed-dependent) track fills (issue
+      [#267](https://github.com/mcvickerlab/GenVarLoader/issues/267)): the read-bound track kernel
+      is called once per contig group, so `k / ploidy` is a contig-LOCAL query index; the fill hash
+      `hash4(base_seed, query, hap, out_idx+i)` needs the GLOBAL batch row to match the single fused
+      SVAR1 call. `realign_track_block` now passes each group's global row indices into the FFI
+      (`global_query`) and `shift_and_realign_tracks_from_svar2` seeds with those (identity `None`
+      preserves the single-call/union path byte-for-byte). Guard lifted; parity locked by
+      `test_svar2_dataset.py::test_svar2_flanksample_multicontig_matches_svar1`.
 - [x] var_fields → .svar2 store INFO/FORMAT field routing (plan
       2026-07-12-svar2-info-format-field-routing.md).
 - [x] Docs/skill audit (this task): `skills/genvarloader/SKILL.md`, `docs/source/{write,format,faq}.md`,
@@ -890,6 +897,18 @@ conversion/write paths.
 ---
 
 ## Notes & decisions log
+
+- 2026-07-13 (Phase 6a — issue [#267](https://github.com/mcvickerlab/GenVarLoader/issues/267)
+  multi-contig `FlankSample` fill-seed; branch `svar2-m6b-kernel`): lifted the last read-path guard.
+  `_call_svar2` realigns per contig group, so the kernel's `k / ploidy` query index is contig-LOCAL;
+  the FlankSample fill hash `hash4(base_seed, query, hap, out_idx+i)` needs the GLOBAL batch row to
+  match the single fused SVAR1 call, which diverged whenever a contig appeared at >1 global row.
+  Fix: `shift_and_realign_tracks_from_svar2` takes an optional `query_seed` (local→global row map);
+  the read-bound FFI wrapper threads a new `global_query` arg (each group's `qsel`) and Python passes
+  it in `realign_track_block`. `None`/single-fused-call and non-seeded fills (Repeat5p etc.) stay
+  byte-identical. Guard test converted to parity
+  (`test_svar2_flanksample_multicontig_matches_svar1`, verified non-vacuous: fails with the local
+  index). Full tree green; SVAR1 path byte-unchanged (additive `Option` param).
 
 - 2026-07-13 (Phase 6a — final pre-merge hardening pass; branch `svar2-m6b-kernel`):
   Shipped scope grew past the 2026-07-05 entry below: `unphased_union` (both `"variants"` and

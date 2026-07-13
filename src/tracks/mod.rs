@@ -693,6 +693,13 @@ pub fn shift_and_realign_tracks_sparse(
 /// - `track_offsets`: (n_q + 1,) offsets into tracks (one track per query)
 /// - `params`: per-strategy parameter (f64), shape (1,)
 /// - `strategy_id`, `base_seed`: insertion-fill strategy parameters
+/// - `query_seed`: optional (n_q,) map from the LOCAL query index (`k / ploidy`)
+///   to the GLOBAL batch row used as the FlankSample fill-seed `query` component.
+///   `None` seeds with the local index (identity), which is exact for a
+///   single-call/single-group batch. Callers that split one logical batch across
+///   several kernel invocations (e.g. the SVAR2 read-bound path's per-contig-group
+///   loop) MUST pass the group's global row indices so seed-dependent fills match
+///   the single fused SVAR1 call. See GenVarLoader issue #267.
 /// - `parallel`: if true, use rayon to process work items concurrently
 #[allow(clippy::too_many_arguments)]
 pub fn shift_and_realign_tracks_from_svar2(
@@ -715,6 +722,7 @@ pub fn shift_and_realign_tracks_from_svar2(
     params: ndarray::ArrayView1<f64>,
     strategy_id: i64,
     base_seed: u64,
+    query_seed: Option<ndarray::ArrayView1<i64>>,
     parallel: bool,
 ) {
     let ploidy = shifts.ncols();
@@ -739,6 +747,14 @@ pub fn shift_and_realign_tracks_from_svar2(
     let do_work = |k: usize, out_chunk: &mut [f32]| {
         let query = k / ploidy;
         let hap = k % ploidy;
+
+        // FlankSample fill-seed `query` component: GLOBAL batch row when a
+        // `query_seed` map is supplied (multi-call/per-group batches), else the
+        // local index (exact for a single fused call). See issue #267.
+        let q_seed = match query_seed {
+            Some(qs) => qs[query] as u64,
+            None => query as u64,
+        };
 
         let t_s = track_offsets[query] as usize;
         let t_e = track_offsets[query + 1] as usize;
@@ -788,7 +804,7 @@ pub fn shift_and_realign_tracks_from_svar2(
             None, // keep: SVAR2 has no per-haplotype keep mask
             strategy_id,
             base_seed,
-            query as u64,
+            q_seed,
             hap as u64,
         );
     };
@@ -2542,6 +2558,7 @@ mod tests {
             params.view(),
             REPEAT_5P,
             0,
+            None, // query_seed: single call, local index is the global row
             false, // serial
         );
 

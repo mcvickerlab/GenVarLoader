@@ -308,19 +308,22 @@ def test_svar2_tracks_match_svar1_multicontig(
     assert np.allclose(ad, bd, equal_nan=True), "track data differ"
 
 
-def test_svar2_flanksample_multicontig_guard(tmp_path, svar2_fixture2, _src2):
-    """FlankSample (seed-dependent fill) + MULTI-contig must raise, not silently
-    diverge from SVAR1.
+def test_svar2_flanksample_multicontig_matches_svar1(
+    tmp_path, svar_fixture2, svar2_fixture2, _src2
+):
+    """FlankSample (seed-dependent fill) + MULTI-contig is byte-identical to SVAR1.
 
-    ``_call_svar2`` realigns per contig group, seeding the fill with a
-    contig-LOCAL query index; SVAR1 seeds with the GLOBAL row. For a seed-only
-    fill (FlankSample) this diverges across >1 contig, so it is guarded. (The
-    single-contig and default-Repeat5p paths remain exact -- see the parity tests
-    above, which never set a fill.)
+    ``_call_svar2`` realigns per contig group, so ``k / ploidy`` is a contig-LOCAL
+    query index; SVAR1 realigns the whole batch in one fused call and seeds the
+    FlankSample fill hash with the GLOBAL row. Issue #267 makes the read-bound
+    path pass each group's global row indices (``global_query``) into the FFI so
+    the kernel seeds with the global row too. Without the fix the chr1 group's
+    queries (which land at global rows 1, 3 in the interleaved bed) would seed off
+    local indices 0, 1 and diverge in every inserted region.
     """
     import pyBigWig
 
-    from genoray import SparseVar2
+    from genoray import SparseVar, SparseVar2
 
     from genvarloader._dataset._insertion_fill import FlankSample
 
@@ -341,17 +344,28 @@ def test_svar2_flanksample_multicontig_guard(tmp_path, svar2_fixture2, _src2):
         paths[s] = str(p)
     track = gvl.BigWigs("signal", paths)
 
-    # Interleaved chr2/chr1 bed -> >1 contig group.
+    # Interleaved chr2/chr1 bed -> >1 contig group, with each contig appearing at
+    # multiple GLOBAL rows so local != global for the fill seed.
     bed = pl.DataFrame(
         {
-            "chrom": ["chr2", "chr1"],
-            "chromStart": [0, 0],
-            "chromEnd": [40, 40],
+            "chrom": ["chr2", "chr1", "chr2", "chr1"],
+            "chromStart": [0, 0, 10, 5],
+            "chromEnd": [40, 40, 40, 20],
         }
     )
-    d = tmp_path / "fs.gvl"
+    d1 = tmp_path / "fs1.gvl"
+    d2 = tmp_path / "fs2.gvl"
     gvl.write(
-        d,
+        d1,
+        bed,
+        variants=SparseVar(svar_fixture2),
+        tracks=track,
+        samples=None,
+        max_jitter=0,
+        overwrite=True,
+    )
+    gvl.write(
+        d2,
         bed,
         variants=SparseVar2(svar2_fixture2),
         tracks=track,
@@ -359,13 +373,27 @@ def test_svar2_flanksample_multicontig_guard(tmp_path, svar2_fixture2, _src2):
         max_jitter=0,
         overwrite=True,
     )
-    ds = (
-        gvl.Dataset.open(d, reference=ref)
+    fill = {"signal": FlankSample(flank_width=3)}
+    ds1 = (
+        gvl.Dataset.open(d1, reference=ref)
         .with_tracks("signal")
-        .with_insertion_fill({"signal": FlankSample(flank_width=3)})
+        .with_insertion_fill(fill)
     )
-    with pytest.raises(NotImplementedError, match="FlankSample"):
-        ds[:, :]
+    ds2 = (
+        gvl.Dataset.open(d2, reference=ref)
+        .with_tracks("signal")
+        .with_insertion_fill(fill)
+    )
+
+    _h1, a = ds1[:, :]
+    _h2, b = ds2[:, :]
+
+    ao, bo = np.asarray(a.offsets), np.asarray(b.offsets)
+    assert np.array_equal(ao, bo), (
+        f"track offsets differ: svar1={ao.tolist()} svar2={bo.tolist()}"
+    )
+    ad, bd = np.asarray(a.data, np.float32), np.asarray(b.data, np.float32)
+    assert np.allclose(ad, bd, equal_nan=True), "FlankSample track data differ"
 
 
 def _assert_ragged_equal(a, b, name: str) -> None:

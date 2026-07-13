@@ -153,7 +153,9 @@ The following combinations are Phase-1 scope and raise `NotImplementedError` (or
 - `variants` / `variant-windows` output on a dataset written with `max_jitter>0` or read with
   `jitter>0` (the read-bound decode does not right-clip to the post-jitter window).
 - `gvl.write(..., extend_to_length=False)` for a `.svar2` variant source.
-- `FlankSample` insertion-fill for tracks spanning multiple contigs in one query.
+
+(Multi-contig `FlankSample` track fills are now supported and byte-identical to the `.svar`
+backend — issue #267.)
 
 See the `genvarloader` skill's `.svar2` section for the full narrative and `var_fields` semantics.
 

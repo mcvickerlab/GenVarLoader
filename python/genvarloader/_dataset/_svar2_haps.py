@@ -572,6 +572,12 @@ class Svar2Haps(Haps[_H]):
                 params_c,
                 np.int64(strategy_id),
                 np.uint64(base_seed),
+                # GLOBAL batch row per local query: this group's queries land at
+                # positions `qsel` in the full (b, P) batch. The kernel seeds the
+                # FlankSample fill with this (not the contig-local `k / ploidy`),
+                # so the per-contig-group split matches the single fused SVAR1
+                # call byte-for-byte (issue #267).
+                np.ascontiguousarray(qsel, np.int64),
                 should_parallelize(g_total * 4),
             )
             cat_data.append(np.asarray(out_data, np.float32))

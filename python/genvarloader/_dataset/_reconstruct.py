@@ -25,7 +25,7 @@ from .._ragged import RaggedAnnotatedHaps, RaggedIntervals, RaggedSeqs, RaggedTr
 from .._utils import lengths_to_offsets
 from ._genotypes import _as_starts_stops
 from ._haps import _H, Haps, ReconstructionRequest, _NewH, _Variants
-from ._insertion_fill import FLANK_SAMPLE, Repeat5p
+from ._insertion_fill import Repeat5p
 from ._insertion_fill import lower as _lower_insertion_fills
 from ._flat_variants import _FlatVariantWindows
 from ._protocol import Reconstructor
@@ -396,31 +396,15 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             ]
             strat_ids, strat_params = _lower_insertion_fills(strat_list)
 
-            # Multi-contig FlankSample track fills seed the fill value off a
-            # contig-local query index, which diverges from the global fill seed
-            # across a batch; guarded until the fill-seed index is made global.
-            # SVAR1 realigns the whole batch
-            # in ONE fused call, so the fill hash `hash4(base_seed, query, hap,
-            # out_idx+i)` uses the GLOBAL row `query`. `_call_svar2` calls the
-            # readbound kernel once PER CONTIG GROUP, where `query = k/ploidy` is
-            # contig-LOCAL, so a global row landing at a different local position
-            # gets different fill offsets in inserted regions. base_seed matches
-            # (both derive from the full idx); only the per-query index diverges.
-            # Single-contig is exact (local == global); non-seeded fills (Repeat5p
-            # etc.) are exact regardless. Proper fix (follow-up): pass a per-group
-            # global-query-offset into the FFI so the kernel seeds with the global
-            # row index; for now, guard. Tracked in
-            # https://github.com/mcvickerlab/GenVarLoader/issues/267.
-            n_contig_groups = int(np.unique(regions[:, 0]).size)
-            if n_contig_groups > 1 and bool((strat_ids == FLANK_SAMPLE).any()):
-                raise NotImplementedError(
-                    "svar2 haplotype-realigned tracks with a seed-dependent "
-                    "insertion fill (FlankSample) across multiple contigs are not "
-                    "yet supported: the per-contig-group kernel calls seed the fill "
-                    "with a contig-local query index that diverges from the "
-                    "single-batch SVAR1 path. Use a single-contig query, or a "
-                    "non-seeded insertion fill (e.g. the default Repeat5p)."
-                )
+            # Seed-dependent (FlankSample) fills stay byte-identical to the single
+            # fused SVAR1 call across a multi-contig batch: SVAR1 realigns the
+            # whole batch in ONE call, so the fill hash `hash4(base_seed, query,
+            # hap, out_idx+i)` uses the GLOBAL row `query`. `_call_svar2` calls the
+            # readbound kernel once PER CONTIG GROUP where `k / ploidy` is
+            # contig-LOCAL, so `realign_track_block` passes the group's global row
+            # indices into the FFI (`global_query`) and the kernel seeds with those
+            # instead of the local index. `base_seed` already matches (both derive
+            # from the full idx). Fixed in issue #267.
             # Base seed identical to the SVAR1 path (idx-xor when deterministic).
             if deterministic:
                 base_seed = np.uint64(

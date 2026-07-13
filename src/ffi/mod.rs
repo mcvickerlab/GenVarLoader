@@ -1213,6 +1213,7 @@ pub fn shift_and_realign_tracks_from_svar2_readbound<'py>(
     params: PyReadonlyArray1<f64>,
     strategy_id: i64,
     base_seed: u64,
+    global_query: PyReadonlyArray1<i64>,
     parallel: bool,
 ) -> PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>)> {
     use crate::svar2;
@@ -1255,6 +1256,11 @@ pub fn shift_and_realign_tracks_from_svar2_readbound<'py>(
     let tracks_a = tracks.as_array();
     let track_offsets_a = track_offsets.as_array();
     let params_a = params.as_array();
+    // (n_q,) LOCAL query -> GLOBAL batch row map for the FlankSample fill seed;
+    // the read-bound path calls this kernel once per contig group, so the local
+    // `k / ploidy` index would otherwise diverge from the single fused SVAR1 call
+    // (issue #267).
+    let global_query_a = global_query.as_array();
 
     let (out_data, out_offsets_vec) = py.detach(move || {
         let rb = genoray_core::query::HapRanges::new(
@@ -1335,6 +1341,7 @@ pub fn shift_and_realign_tracks_from_svar2_readbound<'py>(
             params_a,
             strategy_id,
             base_seed,
+            Some(global_query_a),
             parallel,
         );
 
@@ -1621,6 +1628,9 @@ pub fn shift_and_realign_tracks_from_svar2<'py>(
             params_a,
             strategy_id,
             base_seed,
+            // Single fused call over the whole batch: `k / ploidy` IS the global
+            // row, so the FlankSample seed needs no remap (issue #267).
+            None,
             parallel,
         );
 

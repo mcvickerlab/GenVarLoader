@@ -272,6 +272,8 @@ def build_readbound_tracks(
         np.ascontiguousarray(params, np.float64),
         np.int64(strategy_id),
         np.uint64(base_seed),
+        # Single FFI call over the whole block: local query == global row (#267).
+        np.arange(n_q, dtype=np.int64),
         parallel,
     )
 
