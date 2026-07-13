@@ -136,7 +136,9 @@ def oracle_and_samples(_src) -> tuple[dict[tuple[str, int], dict], list[str]]:
     return _build_oracle(bcf)
 
 
-def _build_dataset(tmp_path: Path, name: str, bed: pl.DataFrame, store: Path, ref: Path):
+def _build_dataset(
+    tmp_path: Path, name: str, bed: pl.DataFrame, store: Path, ref: Path
+):
     import genvarloader as gvl
     from genoray import SparseVar2
 
@@ -428,9 +430,16 @@ def test_svar2_variant_windows_fields(
 
     oracle, samples = oracle_and_samples
     _bcf, ref = _src
-    # Region 0 covers both chr1 variants; region 1 (chr1:20-40) has NONE.
+    # Interleaved across contigs (chr2, chr1, chr1) -> >1 contig group, so the
+    # multi-contig branch of _reconstruct_variant_windows actually runs (not
+    # just the single-group fast path). Region 0 covers the chr2 variant;
+    # region 1 covers both chr1 variants; region 2 (chr1:20-40) has NONE.
     bed = pl.DataFrame(
-        {"chrom": ["chr1", "chr1"], "chromStart": [0, 20], "chromEnd": [20, 40]}
+        {
+            "chrom": ["chr2", "chr1", "chr1"],
+            "chromStart": [0, 0, 20],
+            "chromEnd": [15, 20, 40],
+        }
     )
     ds = _build_dataset(tmp_path, "d5.gvl", bed, svar2_fields_store, ref)
     opt = gvl.VarWindowOpt(flank_length=3, token_alphabet=b"ACGT", unknown_token=4)
@@ -457,40 +466,109 @@ def test_svar2_variant_windows_fields(
         g = (r * S + s_i) * P + p_i
         return int(start_off[g]), int(start_off[g + 1])
 
-    # Region 0: real variants, checked against the oracle exactly as in the
-    # diploid RaggedVariants test.
-    for s_i in range(S):
-        for p_i in range(P):
-            lo, hi = _group(0, s_i, p_i)
-            for i in range(lo, hi):
-                pos0 = int(start_data[i])
-                key = ("chr1", pos0)
-                assert key in oracle, f"decoded variant not in oracle: {key}"
-                exp = oracle[key]
-                if exp["AF"] is None:
-                    assert af_data[i] != af_data[i], (
-                        f"expected NaN AF at {key}, got {af_data[i]}"
-                    )
-                else:
-                    assert af_data[i] == pytest.approx(exp["AF"], abs=1e-6)
-                assert ns_data[i] == exp["NS"]
-                assert (s_i, p_i) in exp["carriers"], (
-                    f"decoded a call not marked as carrier: {key} sample={samples[s_i]}"
-                )
-                assert dp_data[i] == exp["carriers"][(s_i, p_i)]
+    def _assert_dummy_fill(lo: int, hi: int, where: str) -> None:
+        assert hi - lo == 1, (
+            f"expected exactly 1 dummy variant in the empty group ({where}), "
+            f"got {hi - lo}"
+        )
+        assert af_data[lo] != af_data[lo], (
+            f"expected NaN AF fill for the empty group ({where}), got {af_data[lo]}"
+        )
+        assert ns_data[lo] == 0, f"expected 0 NS fill ({where}), got {ns_data[lo]}"
+        assert dp_data[lo] == 0, f"expected 0 DP fill ({where}), got {dp_data[lo]}"
 
-    # Region 1: variant-free -> the dummy fill must appear (exactly 1 entry per
-    # group), with the documented fill values: NaN for the float AF column, 0
-    # for the integer NS/DP columns (DummyVariant.info was left empty).
+    # Regions 0 (chr2:0-15) and 1 (chr1:0-20) carry real oracle variants, but
+    # NOT every (sample, hap) is a carrier of every variant in a region (e.g.
+    # chr2:5 has exactly one carrier) -- so a (sample, hap) group with no
+    # carried variant in that region still gets the dummy fill, same as a
+    # wholly variant-free region. Compute, per region, which oracle keys fall
+    # in it, then check each group against exactly the keys it carries.
+    region_keys = {
+        0: [k for k in oracle if k[0] == "chr2"],
+        1: [k for k in oracle if k[0] == "chr1" and k[1] < 20],
+    }
+    for r, keys in region_keys.items():
+        for s_i in range(S):
+            for p_i in range(P):
+                lo, hi = _group(r, s_i, p_i)
+                expected_keys = {k for k in keys if (s_i, p_i) in oracle[k]["carriers"]}
+                if not expected_keys:
+                    _assert_dummy_fill(
+                        lo, hi, f"region {r}, sample {samples[s_i]}, hap {p_i}"
+                    )
+                    continue
+                assert hi - lo == len(expected_keys), (
+                    f"expected {len(expected_keys)} variant(s) for region {r}, "
+                    f"sample {samples[s_i]}, hap {p_i}, got {hi - lo}"
+                )
+                seen_pos: set[int] = set()
+                for i in range(lo, hi):
+                    pos0 = int(start_data[i])
+                    key = (keys[0][0], pos0)
+                    assert key in expected_keys, (
+                        f"decoded variant not expected as a carrier here: {key} "
+                        f"sample={samples[s_i]} hap={p_i}"
+                    )
+                    seen_pos.add(pos0)
+                    exp = oracle[key]
+                    if exp["AF"] is None:
+                        assert af_data[i] != af_data[i], (
+                            f"expected NaN AF at {key}, got {af_data[i]}"
+                        )
+                    else:
+                        assert af_data[i] == pytest.approx(exp["AF"], abs=1e-6)
+                    assert ns_data[i] == exp["NS"]
+                    assert dp_data[i] == exp["carriers"][(s_i, p_i)]
+                assert seen_pos == {k[1] for k in expected_keys}
+
+    # Region 2 (chr1:20-40): variant-free -> the dummy fill must appear
+    # (exactly 1 entry per group), with the documented fill values: NaN for
+    # the float AF column, 0 for the integer NS/DP columns (DummyVariant.info
+    # was left empty).
     for s_i in range(S):
         for p_i in range(P):
-            lo, hi = _group(1, s_i, p_i)
-            assert hi - lo == 1, (
-                f"expected exactly 1 dummy variant in the empty group "
-                f"(region 1, sample {samples[s_i]}, hap {p_i}), got {hi - lo}"
-            )
-            assert af_data[lo] != af_data[lo], (
-                f"expected NaN AF fill for the empty group, got {af_data[lo]}"
-            )
-            assert ns_data[lo] == 0, f"expected 0 NS fill, got {ns_data[lo]}"
-            assert dp_data[lo] == 0, f"expected 0 DP fill, got {dp_data[lo]}"
+            lo, hi = _group(2, s_i, p_i)
+            _assert_dummy_fill(lo, hi, f"region 2, sample {samples[s_i]}, hap {p_i}")
+
+
+# --- Test 6: Dataset.open(var_fields=...) entry point (not with_settings) ---
+
+
+def test_svar2_dataset_open_var_fields(
+    tmp_path, svar2_fields_store, oracle_and_samples, _src
+):
+    """``Dataset.open``'s own ``var_fields`` kwarg must actually route to the
+    svar2 reconstructor. This is a different code path from
+    ``with_settings(var_fields=...)`` (exercised by every other test in this
+    file): ``Dataset.open`` forwards ``var_fields`` to ``Svar2Haps.from_path``
+    directly, which previously had no such parameter, so the field was
+    silently dropped -- advertised in ``available_var_fields`` but absent from
+    the actual output (no error, no warning).
+    """
+    import genoray
+    import genvarloader as gvl
+
+    oracle, samples = oracle_and_samples
+    _bcf, ref = _src
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [40]})
+    d = tmp_path / "d6.gvl"
+    gvl.write(
+        d,
+        bed,
+        variants=genoray.SparseVar2(svar2_fields_store),
+        samples=None,
+        overwrite=True,
+    )
+
+    ds = gvl.Dataset.open(d, reference=ref, var_fields=_VAR_FIELDS).with_seqs(
+        "variants"
+    )
+    assert "NS" in ds.available_var_fields
+    assert ds.active_var_fields == _VAR_FIELDS, (
+        f"Dataset.open(var_fields=...) did not take effect: "
+        f"{ds.active_var_fields} != {_VAR_FIELDS}"
+    )
+
+    rv = ds[:, :]
+    sv = genoray.SparseVar2(str(svar2_fields_store))
+    _assert_diploid_fields(rv, ["chr1"], samples, oracle, sv)

@@ -212,7 +212,13 @@ class Svar2Haps(Haps[_H]):
         min_af: float | None = None,
         max_af: float | None = None,
         max_jitter: int = 0,
+        var_fields: list[str] | None = None,
     ) -> "Svar2Haps":
+        # Default var_fields for loading. var_fields=None means "use the default
+        # set" — mirrors Haps.from_path's resolution.
+        if var_fields is None:
+            var_fields = ["alt", "ilen", "start"]
+
         ranges_dir = path / "genotypes" / "svar2_ranges"
         with open(ranges_dir / "svar2_meta.json") as f:
             meta = json.load(f)
@@ -288,6 +294,7 @@ class Svar2Haps(Haps[_H]):
             ds_contigs=list(contigs),
             max_jitter=max_jitter,
             store_fields=store_fields,
+            var_fields=var_fields,
         )
 
     # ---- reconstructor entry ----
@@ -599,6 +606,30 @@ class Svar2Haps(Haps[_H]):
         dtypes = [self.store_fields[k].dtype for k in keys]
         return keys, specs, dtypes
 
+    def _type_field_bufs(
+        self,
+        bufs: list[NDArray],
+        isizes: list[int],
+        keys: list[str],
+        dtypes: list[np.dtype],
+    ) -> list[NDArray]:
+        """View each raw ``uint8`` field buffer the decode kernel returned as its
+        store dtype.
+
+        Guards that the kernel's reported itemsize agrees with the store
+        manifest -- a store/kernel disagreement, not an internal invariant, so
+        this raises ``ValueError`` (not an assertion).
+        """
+        typed = []
+        for j, dt in enumerate(dtypes):
+            if isizes[j] != dt.itemsize:
+                raise ValueError(
+                    f"field {keys[j]!r}: kernel itemsize {isizes[j]} != "
+                    f"store dtype {dt} itemsize {dt.itemsize}"
+                )
+            typed.append(np.asarray(bufs[j], np.uint8).view(dt))
+        return typed
+
     def _reconstruct_variants(
         self, idx: NDArray[np.integer], regions: NDArray[np.integer]
     ) -> RaggedVariants:
@@ -647,15 +678,9 @@ class Svar2Haps(Haps[_H]):
             cat_var_bytelen.append(np.diff(str_off))
             cat_query_order.append(qsel)
 
-            typed = []
-            for j, dt in enumerate(field_dtypes):
-                if field_isizes[j] != dt.itemsize:
-                    raise AssertionError(
-                        f"field {req_keys[j]!r}: kernel itemsize {field_isizes[j]} != "
-                        f"store dtype {dt} itemsize {dt.itemsize}"
-                    )
-                typed.append(np.asarray(field_bufs[j], np.uint8).view(dt))
-            cat_fields.append(typed)
+            cat_fields.append(
+                self._type_field_bufs(field_bufs, field_isizes, req_keys, field_dtypes)
+            )
 
         # Single contig group: grouped order already equals global (b, P) order,
         # so the reorder is the identity and every concatenate is a 1-element no-op.
@@ -817,15 +842,9 @@ class Svar2Haps(Haps[_H]):
                 win_data.setdefault(name, []).append(np.asarray(data))
                 win_seq_off.setdefault(name, []).append(np.asarray(seq_off, np.int64))
 
-            typed = []
-            for j, dt in enumerate(field_dtypes):
-                if field_isizes[j] != dt.itemsize:
-                    raise AssertionError(
-                        f"field {req_keys[j]!r}: kernel itemsize {field_isizes[j]} != "
-                        f"store dtype {dt} itemsize {dt.itemsize}"
-                    )
-                typed.append(np.asarray(field_bufs[j], np.uint8).view(dt))
-            cat_fields.append(typed)
+            cat_fields.append(
+                self._type_field_bufs(field_bufs, field_isizes, req_keys, field_dtypes)
+            )
 
         shape: tuple[int | None, ...] = (b, p_eff, None)
         wshape: tuple[int | None, ...] = (b, p_eff, None, None)

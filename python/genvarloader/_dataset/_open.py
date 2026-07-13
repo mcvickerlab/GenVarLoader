@@ -166,6 +166,7 @@ class OpenRequest:
                     min_af=self.min_af,
                     max_af=self.max_af,
                     max_jitter=metadata.max_jitter,
+                    var_fields=self.var_fields,
                 )
             else:
                 seqs = Haps.from_path(
