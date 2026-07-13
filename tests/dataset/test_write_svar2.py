@@ -313,3 +313,28 @@ def test_write_svar2_max_ends_same_pos_tie(
         f"same-POS tie: svar2 max_ends {chrom_end_2.tolist()} != "
         f"svar1 max_ends {chrom_end_1.tolist()}"
     )
+
+
+def test_svar2_extend_to_length_false_raises(svar2_store: Path, tmp_path: Path):
+    """extend_to_length=False is unsupported for a .svar2 source: it must raise
+    NotImplementedError, not silently produce an extended dataset."""
+    from genoray import SparseVar2
+
+    svar2 = SparseVar2(svar2_store)
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [0, 5],
+            "chromEnd": [20, 15],
+        }
+    )
+    out = tmp_path / "ds.gvl"
+    with pytest.raises(NotImplementedError, match="extend_to_length"):
+        gvl.write(
+            out,
+            bed,
+            variants=svar2,
+            samples=None,
+            extend_to_length=False,
+            overwrite=True,
+        )

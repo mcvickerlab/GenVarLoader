@@ -1147,6 +1147,14 @@ def _write_from_svar2(
     # symbolic/breakend variants are rejected upstream at .svar2 conversion; the
     # store cannot represent them, and SparseVar2 exposes no index to re-check.
 
+    if not extend_to_length:
+        raise NotImplementedError(
+            "extend_to_length=False is not supported for a .svar2 variant source: "
+            "the read-bound kernel always sizes haplotype output at read time and "
+            "the write-time ranges cache is built for the extended chromEnd. Use a "
+            ".svar/VCF/PGEN source if you need un-extended haplotypes."
+        )
+
     out_dir = path / "genotypes" / "svar2_ranges"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1192,9 +1200,8 @@ def _write_from_svar2(
         rc = df.height
         starts = df["chromStart"].to_numpy()
         ends = df["chromEnd"].to_numpy()
-        # Write-time fixed-output-length (extend_to_length) handling is not
-        # supported for a `.svar2` source; the read-bound kernel sizes
-        # haplotype output at read time regardless of this flag.
+        # extend_to_length is validated at function entry (False raises); the
+        # read-bound kernel sizes haplotype output at read time.
         d = svar2._find_ranges(c, starts, ends, samples=samples)
 
         # _find_ranges returns row-major (R*S*P, 2) for vk ranges; reshape into (R,S,P,2).
