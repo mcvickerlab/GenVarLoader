@@ -72,10 +72,9 @@ Use BCF/PGEN directly when you have a one-off dataset and don't need AF filterin
 Create an SVAR from a normalized VCF/PGEN with `genoray`:
 
 ```python
-from genoray._svar import dense2sparse
-from genoray import VCF
+from genoray import VCF, SparseVar
 
-dense2sparse(VCF("normed.bcf"), "normed.svar")  # writes a .svar/ directory
+SparseVar.from_vcf("normed.svar", VCF("normed.bcf"), max_mem="4g")  # writes a .svar/ directory
 ```
 
 SVARs are resolved at `Dataset.open` time via `metadata.json` → caller `svar=` arg → recorded relative path → recorded absolute path → sibling `*.svar`. See `docs/source/format.md` ("SVAR resolution at open time") and `_dataset/_svar_link.py`. Legacy symlink-based SVAR layouts: run `gvl.migrate_svar_link(path)` once to upgrade.

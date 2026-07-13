@@ -86,11 +86,13 @@ This dataset would have both haplotypes and two tracks (`pos` and `neg`) availab
 Besides BCF/VCF and PGEN, `variants=` also accepts a genoray sparse columnar variant store — either the original `.svar` format or the newer `.svar2` format. Build one from a normalized VCF/BCF with `genoray`:
 
 ```python
-from genoray import VCF, SparseVar2
-from genoray._svar import dense2sparse
+from genoray import VCF, SparseVar, SparseVar2
 
-dense2sparse(VCF("normed.bcf"), "all_chroms.svar")           # writes a .svar/ directory
-SparseVar2.from_vcf("all_chroms.svar2", "normed.bcf")         # writes a .svar2/ directory
+# .svar (SVAR1): a VCF reader + a memory budget
+SparseVar.from_vcf("all_chroms.svar", VCF("normed.bcf"), max_mem="4g")
+
+# .svar2 (SVAR2): the VCF/BCF path + a reference FASTA (or no_reference=True)
+SparseVar2.from_vcf("all_chroms.svar2", "normed.bcf", reference="ref.fa")
 ```
 
 Then pass the resulting store to `gvl.write`:
