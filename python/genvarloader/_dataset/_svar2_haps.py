@@ -580,6 +580,25 @@ class Svar2Haps(Haps[_H]):
 
     # ---- variants ----
 
+    def _requested_store_fields(
+        self,
+    ) -> tuple[list[str], list[tuple[str, str, str]], list[np.dtype]]:
+        """The store INFO/FORMAT fields requested via ``var_fields``.
+
+        Returns ``(keys, specs, dtypes)`` where ``specs`` is what the decode kernel
+        expects and ``keys``/``dtypes`` are positionally parallel to the field
+        buffers it returns. Builtin names (alt/start/ilen/ref/dosage) always mean the
+        builtin, even if the store happens to carry a field of the same name.
+        """
+        keys = [
+            f
+            for f in self.var_fields
+            if f not in _BUILTIN_VAR_FIELDS and f in self.store_fields
+        ]
+        specs = [_field_spec(self.store_fields[k]) for k in keys]
+        dtypes = [self.store_fields[k].dtype for k in keys]
+        return keys, specs, dtypes
+
     def _reconstruct_variants(
         self, idx: NDArray[np.integer], regions: NDArray[np.integer]
     ) -> RaggedVariants:
@@ -592,13 +611,7 @@ class Svar2Haps(Haps[_H]):
         groups = self._contig_groups(contig_ids)
         p_eff = 1 if self.unphased_union else P
 
-        req_keys = [
-            f
-            for f in self.var_fields
-            if f not in _BUILTIN_VAR_FIELDS and f in self.store_fields
-        ]
-        field_specs = [_field_spec(self.store_fields[k]) for k in req_keys]
-        field_dtypes = [self.store_fields[k].dtype for k in req_keys]
+        req_keys, field_specs, field_dtypes = self._requested_store_fields()
 
         cat_var_lens: list[NDArray[np.int64]] = []
         cat_pos: list[NDArray[np.int32]] = []
@@ -736,17 +749,20 @@ class Svar2Haps(Haps[_H]):
 
         p_eff = 1 if self.unphased_union else P
 
+        req_keys, field_specs, field_dtypes = self._requested_store_fields()
+
         cat_row_off: list[NDArray[np.int64]] = []  # per-group var boundaries
         cat_pos: list[NDArray[np.int32]] = []
         cat_ilen: list[NDArray[np.int32]] = []
         cat_query_order: list[NDArray[np.intp]] = []
+        cat_fields: list[list[NDArray]] = []
         # name -> per-group (token_data, per-variant seq offsets)
         win_data: dict[str, list[NDArray]] = {}
         win_seq_off: dict[str, list[NDArray[np.int64]]] = {}
 
         for ci, qsel in groups:
             gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-            pos, ilen, alt_bytes, str_off, var_off, _field_bufs, _field_itemsizes = (
+            pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
                 decode_variants_from_svar2_readbound(
                     self.store,
                     self.ds_contigs[ci],
@@ -757,7 +773,7 @@ class Svar2Haps(Haps[_H]):
                     gi[4],
                     gi[5],
                     P,
-                    [],
+                    field_specs,
                 )
             )
             pos = np.asarray(pos, np.int32)
@@ -801,6 +817,16 @@ class Svar2Haps(Haps[_H]):
                 win_data.setdefault(name, []).append(np.asarray(data))
                 win_seq_off.setdefault(name, []).append(np.asarray(seq_off, np.int64))
 
+            typed = []
+            for j, dt in enumerate(field_dtypes):
+                if field_isizes[j] != dt.itemsize:
+                    raise AssertionError(
+                        f"field {req_keys[j]!r}: kernel itemsize {field_isizes[j]} != "
+                        f"store dtype {dt} itemsize {dt.itemsize}"
+                    )
+                typed.append(np.asarray(field_bufs[j], np.uint8).view(dt))
+            cat_fields.append(typed)
+
         shape: tuple[int | None, ...] = (b, p_eff, None)
         wshape: tuple[int | None, ...] = (b, p_eff, None, None)
 
@@ -812,6 +838,8 @@ class Svar2Haps(Haps[_H]):
             }
             if include_ilen:
                 fields["ilen"] = _Flat.from_offsets(cat_ilen[0], shape, row_off)
+            for j, k in enumerate(req_keys):
+                fields[k] = _Flat.from_offsets(cat_fields[0][j], shape, row_off)
             win = _FlatVariantWindows(fields)
             for name in win_data:
                 setattr(
@@ -838,6 +866,14 @@ class Svar2Haps(Haps[_H]):
             fields = {"start": _Flat.from_offsets(pos_g, shape, row_off_g)}
             if include_ilen:
                 fields["ilen"] = _Flat.from_offsets(ilen_g, shape, row_off_g)
+            for j, k in enumerate(req_keys):
+                fc = (
+                    np.concatenate([g[j] for g in cat_fields])
+                    if cat_fields
+                    else np.zeros(0, field_dtypes[j])
+                )
+                fg = fc[:0].copy() if src.size == 0 else fc[src]
+                fields[k] = _Flat.from_offsets(fg, shape, row_off_g)
             win = _FlatVariantWindows(fields)
             for name in win_data:
                 data_c = np.concatenate(win_data[name])
