@@ -603,7 +603,7 @@ pub fn reconstruct_haplotypes_from_sparse(
     });
 }
 
-/// Fused haplotypes __getitem__ kernel (Task 13).
+/// Fused haplotypes __getitem__ kernel.
 ///
 /// Collapses two FFI crossings into one:
 ///   1. Compute per-haplotype length diffs (``get_diffs_sparse`` logic).
@@ -620,7 +620,8 @@ pub fn reconstruct_haplotypes_from_sparse(
 /// layout as the existing ``reconstruct_haplotypes_from_sparse`` FFI entry).
 ///
 /// Annotation buffers are not supported in the fused entry (annotated path
-/// remains on the unfused dispatch wrappers — see Task 13 report for rationale).
+/// remains on the unfused dispatch wrappers, which carry the extra
+/// `annot_*` output buffers this fused entry does not allocate).
 /// `parallel` enables rayon batch parallelism (caller computes `should_parallelize`).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
@@ -771,7 +772,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
 ///   - ``-1`` → ragged mode (each haplotype gets its natural length = ref_len + diff).
 ///   - ``>= 0`` → fixed-length mode (every haplotype is padded/truncated to this length).
 ///
-/// No annotation, no to_rc — first cut minimal, mirrors the plain fused path.
+/// No annotation, no to_rc; mirrors the plain fused path.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_from_svar2<'py>(
@@ -2157,7 +2158,7 @@ pub fn tracks_to_intervals<'py>(
     )
 }
 
-/// Fused per-track __getitem__ kernel (Task 14).
+/// Fused per-track __getitem__ kernel.
 ///
 /// Collapses two FFI crossings into one per track:
 ///   1. ``intervals_to_tracks`` core: fills a Rust-side scratch buffer from
@@ -2299,9 +2300,9 @@ pub fn intervals_and_realign_track_fused(
     Ok(())
 }
 
-// ── Task 3: guard test — drives rc_flat_rows_inplace on a synthetic hap buffer ─
-// ── Task 4: guard test — drives reverse_flat_rows_inplace::<f32> (reverse only) ─
-// ── Task 6: guard test — proves per-element masking over permuted offsets ────────
+// ── guard test — drives rc_flat_rows_inplace on a synthetic hap buffer ─
+// ── guard test — drives reverse_flat_rows_inplace::<f32> (reverse only) ─
+// ── guard test — proves per-element masking over permuted offsets ────────
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2349,9 +2350,9 @@ mod tests {
     }
 }
 
-// ── DEBUG exports for PRNG parity tests (Task 7) ─────────────────────────────
+// ── DEBUG exports for PRNG parity tests ─────────────────────────────
 // These thin wrappers exist solely to make the Rust PRNG functions callable from
-// Python tests. Decision (final-review, Task 15): KEEP permanently as the direct
+// Python tests. Decision: KEEP permanently as the direct
 // PRNG parity guard. The njit-internal xorshift64/hash4 leaves have no other
 // Python entry point, so these are the only way to assert byte-identity of the
 // PRNG core from test_prng_parity.py. Do NOT remove.

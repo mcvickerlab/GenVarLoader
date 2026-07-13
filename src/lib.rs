@@ -78,7 +78,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(ffi::tracks_to_intervals, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::intervals_and_realign_track_fused, m)?)?;
-    // DEBUG: PRNG parity exports (Task 7) — keep or remove after Task 8/9 review
+    // DEBUG: PRNG parity exports used by the Python parity tests.
     m.add_function(wrap_pyfunction!(ffi::_debug_xorshift64, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::_debug_hash4, m)?)?;
     Ok(())

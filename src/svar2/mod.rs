@@ -277,7 +277,7 @@ pub fn split_to_flat(br: &BatchResultSplit) -> FlatChannels {
 pub struct FieldGather {
     pub views: [FieldView; 4],
     pub is_format: bool,
-    /// `dtype.width_bytes()`; consumed by the FFI caller (Task 1.3), not here.
+    /// `dtype.width_bytes()`; consumed by the FFI caller, not here.
     pub width: usize,
     pub cohort_n_samples: usize,
 }
@@ -797,7 +797,7 @@ mod tests {
     /// h / ploidy` computed via an incrementing counter instead of a division
     /// (needs `ploidy > 1` so some consecutive haps share a `q`, which the
     /// single-hap tests above never trigger), and (2) the `present_bit`
-    /// closure's now-`get_unchecked` read of `dense_present`, with a mix of
+    /// closure's read of `dense_present`, with a mix of
     /// present/absent bits whose per-hap `base_bit` windows straddle a byte
     /// boundary (hap 1's 5-bit window covers global bits 5..10, i.e. bytes 0
     /// and 1).

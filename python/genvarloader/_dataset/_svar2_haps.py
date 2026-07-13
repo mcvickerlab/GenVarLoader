@@ -18,9 +18,10 @@ of the per-query ranges (this module slices the on-disk cache for the specific
 ``(r_q, si_q)`` block, whereas the helpers call ``SparseVar2._find_ranges`` over
 the full cohort).
 
-Out of scope for this plan (guarded with ``NotImplementedError``): spliced
-output, ``filter == "exonic"`` (keep mask), ``min_af``/``max_af``, annotated
-haps, in-kernel reverse-complement, and ``unphased_union``.
+Out of scope (guarded with ``NotImplementedError``): spliced output,
+``filter == "exonic"`` (keep mask), ``min_af``/``max_af``, annotated haps, and
+in-kernel reverse-complement. (``unphased_union`` and ``variant-windows`` ARE
+supported.)
 """
 
 from __future__ import annotations
@@ -380,7 +381,7 @@ class Svar2Haps(Haps[_H]):
     ]:
         """Reconstruct haplotypes + return the SVAR1-shaped 7-tuple.
 
-        The tracks follow-up (7c) reuses this for the shared shifts/diffs/
+        Track re-alignment reuses this for the shared shifts/diffs/
         hap_lengths; ``geno_offset_idx`` is a placeholder for svar2 (the cache is
         re-sliced from ``idx`` there), and ``keep``/``keep_offsets`` are None.
         """
@@ -483,10 +484,10 @@ class Svar2Haps(Haps[_H]):
 
         geno_offset_idx = np.repeat(
             np.asarray(idx, np.intp)[:, None], P, axis=1
-        )  # svar2 placeholder; 7c re-slices the cache from idx.
+        )  # svar2 placeholder; realign_track_block re-slices the cache from idx.
         return out, geno_offset_idx, shifts, diffs, hap_lengths, None, None
 
-    # ---- tracks (7c) ----
+    # ---- tracks ----
 
     def realign_track_block(
         self,
@@ -637,6 +638,21 @@ class Svar2Haps(Haps[_H]):
     def _reconstruct_variants(
         self, idx: NDArray[np.integer], regions: NDArray[np.integer]
     ) -> RaggedVariants:
+        """Decode the per-query variant records (SoA) for a query block.
+
+        Parameters
+        ----------
+        idx
+            Flat ``(region, sample)`` query indices for the block.
+        regions
+            ``(n_regions, 3)`` array of ``(contig_id, start, end)``.
+
+        Returns
+        -------
+        RaggedVariants
+            Per-query ragged variant records (position, indel length, ALT
+            bytes, and any requested INFO/FORMAT fields).
+        """
         regions = np.asarray(regions, np.int32)
         P = int(self.genotypes.shape[-2])
         b = len(idx)

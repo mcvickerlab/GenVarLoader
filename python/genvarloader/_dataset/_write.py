@@ -36,7 +36,7 @@ from seqpro.rag import Ragged, concatenate as rag_concatenate
 from tqdm.auto import tqdm
 
 from .._atomic import atomic_dir
-from .._ragged import INTERVAL_DTYPE  # noqa: F401  # Task 3 migration reader imports this
+from .._ragged import INTERVAL_DTYPE  # noqa: F401  # kept for the migration reader import
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._svar2_link import Svar2Link
@@ -1192,9 +1192,9 @@ def _write_from_svar2(
         rc = df.height
         starts = df["chromStart"].to_numpy()
         ends = df["chromEnd"].to_numpy()
-        # extend_to_length fixed-output-length write-time handling is out of
-        # scope for this Phase-1 wiring; the read-bound kernel does its own
-        # output-length sizing at read time regardless of this flag.
+        # Write-time fixed-output-length (extend_to_length) handling is not
+        # supported for a `.svar2` source; the read-bound kernel sizes
+        # haplotype output at read time regardless of this flag.
         d = svar2._find_ranges(c, starts, ends, samples=samples)
 
         # _find_ranges returns row-major (R*S*P, 2) for vk ranges; reshape into (R,S,P,2).

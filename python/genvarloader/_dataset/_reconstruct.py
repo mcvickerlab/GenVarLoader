@@ -41,7 +41,7 @@ from ._tracks import (
 from ._utils import _ffi_array
 from .._threads import should_parallelize
 
-# Fused tracks entry (Task 14): intervals → scratch → realign, one FFI crossing.
+# Fused tracks entry: intervals → scratch → realign, one FFI crossing.
 # Imported at module level so the spy in test_fused_tracks_parity can monkeypatch it.
 from ..genvarloader import (
     intervals_and_realign_track_fused as intervals_and_realign_track_fused,
@@ -140,7 +140,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
         flat: bool = False,
         to_rc: "NDArray[np.bool_] | None" = None,
     ) -> tuple[_H, _T]:
-        # SVAR2 read path (Task 7c): route to the split materialize→realign
+        # SVAR2 read path: route to the split materialize→realign
         # kernel. The isinstance guard keeps the SVAR1 body below byte-unchanged.
         from ._svar2_haps import Svar2Haps
 
@@ -396,8 +396,10 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             ]
             strat_ids, strat_params = _lower_insertion_fills(strat_list)
 
-            # FIX 1 guard: FlankSample (the only seed-dependent fill) diverges
-            # from SVAR1 across MULTIPLE contigs. SVAR1 realigns the whole batch
+            # Multi-contig FlankSample track fills seed the fill value off a
+            # contig-local query index, which diverges from the global fill seed
+            # across a batch; guarded until the fill-seed index is made global.
+            # SVAR1 realigns the whole batch
             # in ONE fused call, so the fill hash `hash4(base_seed, query, hap,
             # out_idx+i)` uses the GLOBAL row `query`. `_call_svar2` calls the
             # readbound kernel once PER CONTIG GROUP, where `query = k/ploidy` is

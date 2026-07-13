@@ -473,8 +473,8 @@ pub fn shift_and_realign_track_sparse(
 /// Shift and realign tracks for a batch of (query, hap) pairs in place (writes `out`).
 ///
 /// Mirrors numba `shift_and_realign_tracks_sparse` (lines 141-228 of `_tracks.py`)
-/// statement-by-statement. Serial-only (rayon deferred to Phase 5, matching Task 5
-/// precedent for initial parity verification).
+/// statement-by-statement. Serial-only (rayon deferred) for initial parity
+/// verification.
 ///
 /// # Parameters
 /// - `out`: flat output buffer (f32), written in place
@@ -2464,7 +2464,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------ //
-    // shift_and_realign_tracks_from_svar2 (Task 4 Part C)                //
+    // shift_and_realign_tracks_from_svar2                                //
     // ------------------------------------------------------------------ //
 
     /// SVAR2 two-source track driver: a single pure DEL, carried entirely in the

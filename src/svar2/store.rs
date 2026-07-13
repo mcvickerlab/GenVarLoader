@@ -13,9 +13,11 @@ pub struct Svar2Store {
 }
 
 impl Svar2Store {
+    /// Returns the cached `ContigReader` for `contig`, if one was opened.
     pub fn reader(&self, contig: &str) -> Option<&ContigReader> {
         self.readers.get(contig)
     }
+    /// Returns the filesystem path the store was opened from.
     pub fn store_path(&self) -> &str {
         &self.store_path
     }
@@ -23,6 +25,7 @@ impl Svar2Store {
 
 #[pymethods]
 impl Svar2Store {
+    /// Opens one query-only `ContigReader` per contig under `store_path`.
     #[new]
     fn new(
         store_path: &str,
@@ -43,6 +46,7 @@ impl Svar2Store {
         })
     }
 
+    /// Returns the sorted list of contigs with an opened reader.
     fn contigs(&self) -> Vec<String> {
         let mut v: Vec<String> = self.readers.keys().cloned().collect();
         v.sort();
