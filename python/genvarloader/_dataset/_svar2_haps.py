@@ -592,15 +592,24 @@ class Svar2Haps(Haps[_H]):
         groups = self._contig_groups(contig_ids)
         p_eff = 1 if self.unphased_union else P
 
+        req_keys = [
+            f
+            for f in self.var_fields
+            if f not in _BUILTIN_VAR_FIELDS and f in self.store_fields
+        ]
+        field_specs = [_field_spec(self.store_fields[k]) for k in req_keys]
+        field_dtypes = [self.store_fields[k].dtype for k in req_keys]
+
         cat_var_lens: list[NDArray[np.int64]] = []
         cat_pos: list[NDArray[np.int32]] = []
         cat_ilen: list[NDArray[np.int32]] = []
         cat_alt: list[NDArray[np.uint8]] = []
         cat_var_bytelen: list[NDArray[np.int64]] = []
         cat_query_order: list[NDArray[np.intp]] = []
+        cat_fields: list[list[NDArray]] = []
         for ci, qsel in groups:
             gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-            pos, ilen, alt_bytes, str_off, var_off, _field_bufs, _field_itemsizes = (
+            pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
                 decode_variants_from_svar2_readbound(
                     self.store,
                     self.ds_contigs[ci],
@@ -611,7 +620,7 @@ class Svar2Haps(Haps[_H]):
                     gi[4],
                     gi[5],
                     P,
-                    [],
+                    field_specs,
                 )
             )
             var_off = np.asarray(var_off, np.int64)
@@ -625,6 +634,16 @@ class Svar2Haps(Haps[_H]):
             cat_var_bytelen.append(np.diff(str_off))
             cat_query_order.append(qsel)
 
+            typed = []
+            for j, dt in enumerate(field_dtypes):
+                if field_isizes[j] != dt.itemsize:
+                    raise AssertionError(
+                        f"field {req_keys[j]!r}: kernel itemsize {field_isizes[j]} != "
+                        f"store dtype {dt} itemsize {dt.itemsize}"
+                    )
+                typed.append(np.asarray(field_bufs[j], np.uint8).view(dt))
+            cat_fields.append(typed)
+
         # Single contig group: grouped order already equals global (b, P) order,
         # so the reorder is the identity and every concatenate is a 1-element no-op.
         # Skip both (the numpy reorder otherwise dominates single-contig reads).
@@ -632,12 +651,17 @@ class Svar2Haps(Haps[_H]):
             shape = (b, p_eff, None)
             var_off_g = lengths_to_offsets(cat_var_lens[0], np.int64)
             str_off_g = lengths_to_offsets(cat_var_bytelen[0], np.int64)
+            extra = {
+                k: Ragged.from_offsets(cat_fields[0][j], shape, var_off_g)
+                for j, k in enumerate(req_keys)
+            }
             return RaggedVariants(
                 alt=Ragged.from_offsets(
                     cat_alt[0].view("S1"), shape, var_off_g, str_offsets=str_off_g
                 ),
                 start=Ragged.from_offsets(cat_pos[0], shape, var_off_g),
                 ilen=Ragged.from_offsets(cat_ilen[0], shape, var_off_g),
+                **extra,
             )
 
         # Concatenate grouped outputs, then permute hap-rows back to global order.
@@ -674,7 +698,16 @@ class Svar2Haps(Haps[_H]):
         alt_r = Ragged.from_offsets(
             alt_g.view("S1"), shape, alt_var_off_g, str_offsets=alt_str_off_g
         )
-        return RaggedVariants(alt=alt_r, start=pos_r, ilen=ilen_r)
+        extra = {}
+        for j, k in enumerate(req_keys):
+            fc = (
+                np.concatenate([g[j] for g in cat_fields])
+                if cat_fields
+                else np.zeros(0, field_dtypes[j])
+            )
+            fg = fc[:0].copy() if src.size == 0 else fc[src]
+            extra[k] = Ragged.from_offsets(fg, shape, var_off_g)
+        return RaggedVariants(alt=alt_r, start=pos_r, ilen=ilen_r, **extra)
 
     def _reconstruct_variant_windows(
         self, idx: NDArray[np.integer], regions: NDArray[np.integer]
