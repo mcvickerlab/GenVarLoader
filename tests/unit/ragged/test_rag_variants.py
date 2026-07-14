@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from genoray._svar import POS_TYPE
+from genoray._types import POS_TYPE
 from genvarloader import RaggedVariants
 from numpy.typing import NDArray
 from pytest_cases import parametrize_with_cases

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
-from genoray._utils import ContigNormalizer
+from genoray._contigs import ContigNormalizer
 from genvarloader._dataset._utils import (
     bed_to_regions,
     oidx_to_raveled_idx,

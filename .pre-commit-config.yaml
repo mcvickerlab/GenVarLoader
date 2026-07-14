@@ -23,7 +23,7 @@ repos:
     # (e.g. from `pixi global install pyrefly`) would otherwise be picked
     # up by `git push` outside of a `pixi run` context and resolve the
     # wrong Python interpreter.
-    entry: pixi run -e dev pyrefly check
+    entry: pixi run -e dev pyrefly check python/genvarloader tests
     language: system
     pass_filenames: false
   - id: pixi-lock

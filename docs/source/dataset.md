@@ -141,3 +141,32 @@ ds_itvs = (
 ```
 
 In `"flat"` output mode (`with_output_format("flat")`), float tracks return `FlatRagged` and interval tracks (`kind="intervals"`) return [`FlatIntervals`](api.md#genvarloader.FlatIntervals), which carries `.starts`, `.ends`, `.values` as `FlatRagged` fields and converts back via `.to_ragged()` → [`RaggedIntervals`](api.md#genvarloader.RaggedIntervals).
+
+## Variant fields (`var_fields`)
+
+`Dataset.open(..., var_fields=[...])` (and `Dataset.with_settings(var_fields=[...])`) selects which
+per-variant fields load onto `"variants"` and `"variant-windows"` output, beyond the default
+`["alt", "ilen", "start"]`. Requested names must be a subset of `Dataset.available_var_fields`.
+
+For a BCF/PGEN/`.svar`-backed dataset the available fields are the built-ins (`alt`, `start`,
+`ref`, `ilen`, `dosage`) plus any per-variant INFO columns or per-call FORMAT fields the source
+carries.
+
+For a **`.svar2`-backed** dataset, `available_var_fields` is narrower:
+`["alt", "ilen", "start"]` plus whichever scalar-numeric INFO/FORMAT fields the `.svar2` store was
+written with (via `genoray.SparseVar2.from_vcf(info_fields=[...], format_fields=[...])`) —
+**`"ref"` and `"dosage"` are not valid `var_fields` for `.svar2` and requesting either raises**.
+A requested store field shows up on both output kinds:
+
+```python
+ds = gvl.Dataset.open("ds.gvl", reference="ref.fa", var_fields=["AF"])
+
+rv = ds.with_seqs("variants")[0, 0]
+rv["AF"]  # per-variant AF values, aligned with rv.alt/.start/.ilen
+
+win = ds.with_seqs("variant-windows", gvl.VarWindowOpt(...)).with_output_format("flat")[0, 0]
+win.fields["AF"]  # same field, alongside win.fields["start"]/["ilen"]
+```
+
+See the `genvarloader` skill's `.svar2` `var_fields` section for the field-provenance and
+dummy-fill details.

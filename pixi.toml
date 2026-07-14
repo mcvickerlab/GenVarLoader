@@ -19,6 +19,13 @@ splice = { features = ["notebook", "basenji2", "py310", "splice"] }
 [target.osx-arm64.activation.env]
 RUSTFLAGS = "-C link-arg=-rpath -C link-arg=$CONDA_PREFIX/lib"
 
+# Prepend the env's lib dir so its libstdc++/libpython win over any system libs
+# an HPC module may have placed earlier on LD_LIBRARY_PATH (e.g. an older gcc
+# libstdc++ lacking GLIBCXX_3.4.30, which breaks llvmlite in spawned workers and
+# libpython loading in `cargo test` binaries).
+[target.linux-64.activation.env]
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+
 [dependencies]
 python = "<3.14"
 uv = "*"
@@ -40,6 +47,7 @@ icecream = "*"
 hypothesis = "*"
 filelock = "*"
 memray = "*"
+pyinstrument = "*"
 patchelf = "*"
 pyrefly = "*"
 
@@ -50,7 +58,7 @@ plink2 = "*"
 genvarloader = { path = ".", editable = true, extras = ["cli"] }
 # Test-only: needed by the property/fixture tests across the whole py3xx matrix
 # (not a genvarloader runtime dep, so it must live here, not just in py310).
-vcfixture = ">=0.5.0"
+vcfixture = ">=0.6.0,<0.7"
 
 [feature.docs.dependencies]
 pandoc = "*"
@@ -93,8 +101,10 @@ numba = "==0.59.1"
 [feature.py310.pypi-dependencies]
 pyarrow = ">=21"
 hirola = "==0.3"
-seqpro = "==0.20.0"
-genoray = "==2.12.3"
+seqpro = "==0.21.1"
+# genoray >=3.0.0 (first release with the INFO/FORMAT field-read API) as the prebuilt
+# abi3 wheel from PyPI — one cp310-abi3 wheel covers py310-313 on both platforms.
+genoray = ">=3.0.0,<4"
 polars = "==1.37.1"
 loguru = "*"
 natsort = "*"
@@ -112,7 +122,7 @@ pooch = "*"
 awkward = "*"
 pydantic = ">=2,<3"
 hypothesis = "*"
-vcfixture = ">=0.5.0"
+vcfixture = ">=0.6.0,<0.7"
 filelock = "*"
 
 [feature.py311.dependencies]
@@ -144,7 +154,7 @@ test-join-audit = { cmd = "pytest tests -p tests._join_audit_plugin", depends-on
     "gen",
     "gen-1kg",
 ] }
-typecheck = { cmd = "pyrefly check" }
+typecheck = { cmd = "pyrefly check python/genvarloader tests" }
 bench = { cmd = "pytest tests/benchmarks --codspeed -p no:cov" }
 bench-local = { cmd = "pytest tests/benchmarks --benchmark-only -p no:cov" }
 # perf on the Python process (NOT py-spy --native, which slows deep-stack paths ~10x).

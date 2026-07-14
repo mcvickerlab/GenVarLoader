@@ -6,7 +6,7 @@ from pathlib import Path
 
 import genvarloader as gvl
 import pysam
-from vcfixture import ReferenceBuilder, VcfBuilder
+from vcfixture import ReferenceBuilder, Seq, VcfBuilder, VcfVersion
 
 
 def _tiny_spec_and_doc():
@@ -17,9 +17,11 @@ def _tiny_spec_and_doc():
         .set_base("chr1", 99, "A")  # 0-based; REF for the record below
         .build()
     )
-    b = VcfBuilder(samples=["s0", "s1"], contigs=[("chr1", 200)], fileformat="VCFv4.0")
+    b = VcfBuilder(
+        samples=["s0", "s1"], contigs=[("chr1", 200)], version=VcfVersion.V4_1
+    )
     b.fmt("GT")
-    b.record("chr1", 100, ref="A", alt=["C"], gt=["0|1", "1|1"])  # 1-based pos
+    b.record("chr1", 100, ref="A", alt=[Seq("C")], gt=["0|1", "1|1"])  # 1-based pos
     return ref, b.build()
 
 

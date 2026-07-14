@@ -6,6 +6,7 @@ pub mod ragged;
 pub mod reconstruct;
 pub mod reference;
 pub mod reverse;
+pub mod svar2;
 pub mod tables;
 pub mod tracks;
 pub mod variants;
@@ -19,6 +20,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bigwig_intervals, m)?)?;
     m.add_function(wrap_pyfunction!(bigwig_write_track, m)?)?;
     m.add_class::<tables::RustTable>()?;
+    m.add_class::<svar2::store::Svar2Store>()?;
     m.add_function(wrap_pyfunction!(ragged::ragged_to_padded, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::intervals_to_tracks, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::get_diffs_sparse, m)?)?;
@@ -38,15 +40,45 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::assemble_variant_buffers_i32, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::rc_alleles, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::get_reference, m)?)?;
-    m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_from_sparse, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::reconstruct_haplotypes_from_sparse,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_fused, m)?)?;
-    m.add_function(wrap_pyfunction!(ffi::reconstruct_annotated_haplotypes_fused, m)?)?;
-    m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_spliced_fused, m)?)?;
-    m.add_function(wrap_pyfunction!(ffi::reconstruct_annotated_haplotypes_spliced_fused, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_from_svar2, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::reconstruct_haplotypes_from_svar2_readbound,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(ffi::hap_diffs_from_svar2_readbound, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::reconstruct_annotated_haplotypes_fused,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::reconstruct_haplotypes_spliced_fused,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::reconstruct_annotated_haplotypes_spliced_fused,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(ffi::shift_and_realign_tracks_sparse, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::shift_and_realign_tracks_from_svar2,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::shift_and_realign_tracks_from_svar2_readbound,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        ffi::decode_variants_from_svar2_readbound,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(ffi::tracks_to_intervals, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::intervals_and_realign_track_fused, m)?)?;
-    // DEBUG: PRNG parity exports (Task 7) — keep or remove after Task 8/9 review
+    // DEBUG: PRNG parity exports used by the Python parity tests.
     m.add_function(wrap_pyfunction!(ffi::_debug_xorshift64, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::_debug_hash4, m)?)?;
     Ok(())

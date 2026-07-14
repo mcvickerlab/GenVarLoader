@@ -1,5 +1,7 @@
+import errno
 import gc
 import json
+import shutil
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from importlib.metadata import version
@@ -16,15 +18,15 @@ if TYPE_CHECKING:
 import numpy as np
 import polars as pl
 import seqpro as sp
-from genoray import PGEN, VCF, Reader, SparseVar
+from genoray import PGEN, VCF, SparseVar, SparseVar2
 from genoray import exprs as _gexprs
 from genoray._svar import dense2sparse
-from genoray._svar import _dense2sparse_with_length  # type: ignore[missing-module-attribute]
+from genoray._svar._convert import _dense2sparse_with_length
 from genoray._types import V_IDX_TYPE
-from genoray._utils import ContigNormalizer, format_memory, parse_memory
+from genoray._contigs import ContigNormalizer
+from genoray._utils import format_memory, parse_memory
 from joblib import Parallel, delayed
 from loguru import logger
-from more_itertools import mark_ends
 from natsort import natsorted
 from numpy.typing import NDArray
 from pydantic import BaseModel
@@ -34,9 +36,10 @@ from seqpro.rag import Ragged, concatenate as rag_concatenate
 from tqdm.auto import tqdm
 
 from .._atomic import atomic_dir
-from .._ragged import INTERVAL_DTYPE  # noqa: F401  # Task 3 migration reader imports this
+from .._ragged import INTERVAL_DTYPE  # noqa: F401  # kept for the migration reader import
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
+from ._svar2_link import Svar2Link
 from ._svar_link import SvarLink
 from ._utils import bed_to_regions, regions_to_bed
 
@@ -92,6 +95,7 @@ class Metadata(BaseModel, arbitrary_types_allowed=True):
     version: SemanticVersion | None = None
     format_version: SemanticVersion | None = None
     svar_link: SvarLink | None = None
+    svar2_link: Svar2Link | None = None
 
     @property
     def n_samples(self) -> int:
@@ -101,7 +105,7 @@ class Metadata(BaseModel, arbitrary_types_allowed=True):
 def write(
     path: str | Path,
     bed: str | Path | pl.DataFrame,
-    variants: str | Path | Reader | None = None,
+    variants: str | Path | VCF | PGEN | SparseVar | SparseVar2 | None = None,
     tracks: "IntervalTrack | Sequence[IntervalTrack] | None" = None,
     annot_tracks: "dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None" = None,
     samples: list[str] | None = None,
@@ -224,6 +228,8 @@ def write(
                         variants = VCF(variants)
                     elif variants.is_dir() and variants.suffix == ".svar":
                         variants = SparseVar(variants)
+                    elif variants.is_dir() and variants.suffix == ".svar2":
+                        variants = SparseVar2(variants)
                     else:
                         raise ValueError(
                             f"File {variants} has an unrecognized file extension. Please provide either a VCF or PGEN file.`"
@@ -327,6 +333,11 @@ def write(
                         path, gvl_bed, variants, samples, extend_to_length
                     )
                     metadata["svar_link"] = _svar_link
+                elif isinstance(variants, SparseVar2):
+                    gvl_bed, _svar2_link = _write_from_svar2(
+                        path, gvl_bed, variants, samples, extend_to_length
+                    )
+                    metadata["svar2_link"] = _svar2_link
                 metadata["ploidy"] = variants.ploidy
                 # free memory
                 del variants
@@ -617,6 +628,23 @@ def _reject_unsupported_variants(index: pl.DataFrame, source: str) -> None:
         )
 
 
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Hardlink ``src`` → ``dst`` to avoid duplicating the (possibly large) variant
+    index, falling back to a copy when the two live on different filesystems.
+
+    ``Path.hardlink_to`` raises ``OSError(EXDEV)`` across filesystem boundaries
+    (e.g. writing a dataset under ``/tmp`` from a source on a network mount). The
+    copy produces byte-identical content, so same-filesystem writes keep the
+    zero-copy hardlink and cross-device writes still succeed.
+    """
+    try:
+        dst.hardlink_to(src)
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+        shutil.copyfile(src, dst)
+
+
 def _write_from_vcf(
     path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int, extend_to_length: bool
 ):
@@ -629,7 +657,7 @@ def _write_from_vcf(
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    (out_dir / "variants.arrow").hardlink_to(vcf._index_path())
+    _link_or_copy(vcf._index_path(), out_dir / "variants.arrow")
 
     return _write_phased_chunked(
         out_dir, bed, _vcf_region_chunks(bed, vcf, max_mem, extend_to_length)
@@ -710,18 +738,18 @@ def _vcf_region_chunks(
         contig = cast(str, contig)
         starts = df["chromStart"].to_numpy()
         ends = df["chromEnd"].to_numpy()
-        # unextended in-range variant indices, split per region
-        v_idx, v_offsets = vcf._var_idxs(contig, starts, ends)
-        unextended_idxs = np.array_split(v_idx.astype(V_IDX_TYPE), v_offsets[1:-1])
 
         contig_desc = f"Processing genotypes for {df.height} regions on contig {contig}"
         first_in_contig = True
 
+        unextended_idxs: list[NDArray] = []
         if extend_to_length:
             region_iter = vcf._chunk_ranges_with_length(
                 contig, starts, ends, max_mem, VCF.Genos8
             )
         else:
+            v_idx, v_offsets = vcf._var_idxs(contig, starts, ends)
+            unextended_idxs = np.array_split(v_idx.astype(V_IDX_TYPE), v_offsets[1:-1])
             # one generator per region; VCF.chunk takes a single range
             region_iter = (
                 vcf.chunk(contig, s, e, max_mem, VCF.Genos8)
@@ -731,33 +759,25 @@ def _vcf_region_chunks(
         for ri, range_ in enumerate(region_iter):
             q_start = int(starts[ri])
             q_end = int(ends[ri])
-            reg_unext = unextended_idxs[ri]
             desc = contig_desc if first_in_contig else None
             first_in_contig = False
 
             if extend_to_length:
-                # assemble the full window across memory-chunks
-                chunk_genos_list: list[NDArray] = []
-                n_ext_total = 0
-                for _, is_last, (chunk_genos, _chunk_end, n_ext) in mark_ends(range_):
-                    chunk_genos_list.append(chunk_genos)
-                    if is_last:
-                        n_ext_total = n_ext
-                genos = np.concatenate(chunk_genos_list, axis=-1)
+                genos_list: list[NDArray] = []
+                idx_list: list[NDArray] = []
+                for chunk_genos, _chunk_end, chunk_idxs in range_:
+                    genos_list.append(chunk_genos)
+                    idx_list.append(chunk_idxs.astype(V_IDX_TYPE))
+                genos = np.concatenate(genos_list, axis=-1)
+                var_idxs = (
+                    np.concatenate(idx_list)
+                    if idx_list
+                    else np.empty(0, dtype=V_IDX_TYPE)
+                )
 
-                if reg_unext.size == 0 and n_ext_total == 0:
-                    # empty region: no variants for any sample
-                    yield [dense2sparse(genos, reg_unext)], q_end, desc
+                if var_idxs.size == 0:
+                    yield [dense2sparse(genos, var_idxs)], q_end, desc
                     continue
-
-                if n_ext_total > 0:
-                    ext_start = int(reg_unext[-1]) + 1
-                    ext_idxs = np.arange(
-                        ext_start, ext_start + n_ext_total, dtype=V_IDX_TYPE
-                    )
-                    var_idxs = np.concatenate([reg_unext, ext_idxs])
-                else:
-                    var_idxs = reg_unext
 
                 v_starts = (pos[var_idxs] - 1).astype(np.int32)
                 ilens = ilen_all[var_idxs].astype(np.int32)
@@ -767,6 +787,7 @@ def _vcf_region_chunks(
                 region_end = _region_end(rag, v_ends, q_end)
                 yield [rag], region_end, desc
             else:
+                reg_unext = unextended_idxs[ri]
                 # no extension: convert each chunk independently with plain
                 # dense2sparse; var_idxs are exactly the unextended in-range ones
                 ls_sparse: list[Ragged] = []
@@ -808,7 +829,7 @@ def _write_from_pgen(
     out_dir = path / "genotypes"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    (out_dir / "variants.arrow").hardlink_to(pgen._index_path())
+    _link_or_copy(pgen._index_path(), out_dir / "variants.arrow")
 
     return _write_phased_chunked(
         out_dir, bed, _pgen_region_chunks(bed, pgen, max_mem, extend_to_length)
@@ -1066,6 +1087,154 @@ def _write_from_svar(
     return bed.with_columns(
         chromEnd=pl.max_horizontal(pl.Series(max_ends), pl.col("chromEnd"))
     ), svar_link
+
+
+def _svar2_region_max_ends(
+    svar2: SparseVar2,
+    contig: str,
+    starts: NDArray[np.integer],
+    ends: NDArray[np.integer],
+    samples: list[str],
+) -> NDArray[np.int32]:
+    """SVAR1 parity: per region, the end (``pos - min(ilen, 0)``) of the
+    highest-position variant over the SELECTED samples' haplotypes. Regions with
+    no variants keep their original ``chromEnd``.
+
+    ``SparseVar2.decode`` reports 0-based ``pos`` (unlike ``SparseVar.index``'s
+    1-based VCF ``POS``, which SVAR1's ``v_ends`` formula is written against), so
+    ``pos`` is converted to 1-based here before applying the same formula --
+    otherwise every extension would be off by one (masked in most regions
+    because the un-extended ``chromEnd`` already dominates the max).
+
+    Vectorized as a per-region scatter-max over a ``(pos << 21) | end`` composite
+    key, which reproduces the pos-then-end tie-break exactly (a single haplotype
+    never carries two variants at the same position, so a global per-region max
+    over the selected samples' variants equals the original per-hap-argmax loop).
+    """
+    R, S_all, P = len(starts), svar2.n_samples, svar2.ploidy
+    sel = np.asarray([svar2.available_samples.index(s) for s in samples], np.int64)
+    dec = svar2.decode(contig, list(zip(starts.tolist(), ends.tolist())))
+    pos_arr = np.asarray(dec.data["pos"], np.int64)
+    ilen_arr = np.asarray(dec.data["ilen"], np.int64)
+    off = np.asarray(dec.offsets, np.int64)  # length R*S_all*P + 1
+    out = np.asarray(ends, np.int64).copy()  # default = chromEnd
+    if pos_arr.size:
+        n_hap = R * S_all * P
+        counts = np.diff(off)  # variants per hap
+        hap_of_var = np.repeat(np.arange(n_hap), counts)  # region-major hap per variant
+        s_of_hap = (np.arange(n_hap) // P) % S_all
+        keep = np.isin(s_of_hap[hap_of_var], sel)  # only selected samples
+        region_of_var = hap_of_var // (S_all * P)
+        # end = pos + ext, where ext = 1 - min(ilen, 0) (1-based bump plus the
+        # deletion extension: SNP/INS -> 1, DEL -> 1 + |ilen|). Pack the BOUNDED
+        # `ext` into the low bits, NOT the absolute `end` (which is ~pos-sized and
+        # would overflow past ~2 Mb into any contig), so the composite key orders
+        # by pos then by end; recover end = pos + ext on unpack.
+        ext_var = 1 - np.minimum(ilen_arr, 0)  # small: 1 + deletion length
+        SHIFT = 21
+        # raise (not assert) so it still fails fast under `python -O`: a pathological
+        # >~2 Mb deletion footprint would otherwise silently corrupt the packed key.
+        if int(ext_var.max(initial=0)) >= (1 << SHIFT):
+            raise ValueError("variant footprint exceeds tie-break packing width")
+        key = (pos_arr << SHIFT) | ext_var
+        key_k = key[keep]
+        region_k = region_of_var[keep]
+        if key_k.size:
+            best = np.full(R, -1, np.int64)
+            np.maximum.at(best, region_k, key_k)  # per-region max composite key
+            has = best >= 0
+            # end = pos + ext = (key >> SHIFT) + (key & mask)
+            out[has] = (best[has] >> SHIFT) + (best[has] & ((1 << SHIFT) - 1))
+    return out.astype(np.int32)
+
+
+def _write_from_svar2(
+    path: Path,
+    bed: pl.DataFrame,
+    svar2: SparseVar2,
+    samples: list[str],
+    extend_to_length: bool,
+) -> tuple[pl.DataFrame, Svar2Link]:
+    # symbolic/breakend variants are rejected upstream at .svar2 conversion; the
+    # store cannot represent them, and SparseVar2 exposes no index to re-check.
+
+    if not extend_to_length:
+        raise NotImplementedError(
+            "extend_to_length=False is not supported for a .svar2 variant source: "
+            "the read-bound kernel always sizes haplotype output at read time and "
+            "the write-time ranges cache is built for the extended chromEnd. Use a "
+            ".svar/VCF/PGEN source if you need un-extended haplotypes."
+        )
+
+    out_dir = path / "genotypes" / "svar2_ranges"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    R, S, P = bed.height, len(samples), svar2.ploidy
+    vk_snp = np.memmap(out_dir / "vk_snp_range.npy", np.int64, "w+", shape=(R, S, P, 2))
+    vk_indel = np.memmap(
+        out_dir / "vk_indel_range.npy", np.int64, "w+", shape=(R, S, P, 2)
+    )
+    dense_snp = np.memmap(out_dir / "dense_snp_range.npy", np.int64, "w+", shape=(R, 2))
+    dense_indel = np.memmap(
+        out_dir / "dense_indel_range.npy", np.int64, "w+", shape=(R, 2)
+    )
+    # sample_cols: selected slot -> original sample index (same for every contig).
+    sample_cols = np.asarray(
+        [svar2.available_samples.index(s) for s in samples], np.int64
+    )
+    np.save(out_dir / "sample_cols.npy", sample_cols)
+
+    with open(out_dir / "svar2_meta.json", "w") as f:
+        json.dump(
+            {
+                "vk_snp_range": {"shape": [R, S, P, 2], "dtype": "<i8"},
+                "vk_indel_range": {"shape": [R, S, P, 2], "dtype": "<i8"},
+                "dense_snp_range": {"shape": [R, 2], "dtype": "<i8"},
+                "dense_indel_range": {"shape": [R, 2], "dtype": "<i8"},
+                "sample_cols": {"shape": [S], "dtype": "<i8"},
+                "ploidy": P,
+            },
+            f,
+        )
+
+    max_ends = np.empty(R, np.int32)
+    contig_offset = 0
+    pbar = tqdm(total=R, unit=" region")
+    for (c,), df in bed.partition_by(
+        "chrom", as_dict=True, maintain_order=True
+    ).items():
+        c = cast(str, c)
+        pbar.set_description(f"Processing svar2 ranges for {df.height} regions on {c}")
+        lo, hi = contig_offset, contig_offset + df.height
+        rc = df.height
+        starts = df["chromStart"].to_numpy()
+        ends = df["chromEnd"].to_numpy()
+        # extend_to_length is validated at function entry (False raises); the
+        # read-bound kernel sizes haplotype output at read time.
+        d = svar2._find_ranges(c, starts, ends, samples=samples)
+
+        # _find_ranges returns row-major (R*S*P, 2) for vk ranges; reshape into (R,S,P,2).
+        vk_snp[lo:hi] = np.asarray(d["vk_snp_range"], np.int64).reshape(rc, S, P, 2)
+        vk_indel[lo:hi] = np.asarray(d["vk_indel_range"], np.int64).reshape(rc, S, P, 2)
+        dense_snp[lo:hi] = np.asarray(d["dense_snp_range"], np.int64).reshape(rc, 2)
+        dense_indel[lo:hi] = np.asarray(d["dense_indel_range"], np.int64).reshape(rc, 2)
+
+        # max_ends: SVAR1 parity, per region end of the max-position variant
+        # over the selected samples' haplotypes (see _svar2_region_max_ends).
+        max_ends[lo:hi] = _svar2_region_max_ends(svar2, c, starts, ends, samples)
+
+        contig_offset += df.height
+        pbar.update(df.height)
+    pbar.close()
+    for mm in (vk_snp, vk_indel, dense_snp, dense_indel):
+        mm.flush()
+
+    from ._svar2_link import make_svar2_link
+
+    svar2_link = make_svar2_link(path, svar2.path)
+    return bed.with_columns(
+        chromEnd=pl.max_horizontal(pl.Series(max_ends), pl.col("chromEnd"))
+    ), svar2_link
 
 
 def _write_phased_variants_chunk(

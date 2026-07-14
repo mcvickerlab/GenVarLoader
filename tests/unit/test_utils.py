@@ -1,6 +1,6 @@
 import numpy as np
 import polars as pl
-from genoray._utils import ContigNormalizer
+from genoray._contigs import ContigNormalizer
 from genvarloader._dataset._utils import bed_to_regions
 from genvarloader._utils import normalize_contig_name
 from pytest_cases import parametrize_with_cases

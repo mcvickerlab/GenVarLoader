@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
-from vcfixture import Number, ReferenceBuilder, Type, VcfBuilder
+from vcfixture import Number, ReferenceBuilder, Seq, Type, VcfBuilder, VcfVersion
 
 SEQ_LEN = 20
 
@@ -317,11 +317,11 @@ def session_reference():
 def session_document(spec):
     """Fixed standardized source document (relabel of the Phase-1 source VCF).
 
-    Replaces Phase-1 ``_synthetic.build_source_vcf``. VCFv4.0 is used so the
+    Replaces Phase-1 ``_synthetic.build_source_vcf``. VCFv4.1 is used so the
     Number=. INFO fields parse under the noodles VCF reader SparseVar relies on.
     """
     contigs = list(_SESSION_CONTIGS)
-    b = VcfBuilder(samples=["s0", "s1", "s2"], contigs=contigs, fileformat="VCFv4.0")
+    b = VcfBuilder(samples=["s0", "s1", "s2"], contigs=contigs, version=VcfVersion.V4_1)
     b.info("NS", Number.ONE, Type.INTEGER)
     b.info("AN", Number.ONE, Type.INTEGER)
     b.info("AC", Number.DOT, Type.INTEGER)
@@ -339,23 +339,25 @@ def session_document(spec):
     b.filter("s50", "Less than 50% of samples have data")
 
     # chr1 block (relabeled from chr19).
-    b.record("chr1", 111, ref="N", alt=["C"], gt=["0|0", "0|0", "0/1"])
-    b.record("chr1", 1010696, ref="GAGA", alt=["G"], gt=["1|0", "0|0", "0/0"])
-    b.record("chr1", 1010696, ref="GAGACGG", alt=["G"], gt=["0|0", "0|0", "0/1"])
-    b.record("chr1", 1010696, ref="GAGACGGGGCC", alt=["G"], gt=["0|1", "1|1", "0/0"])
-    b.record("chr1", 1110696, ref="A", alt=["TTT"], gt=["0|1", "1|1", "0/0"])
-    b.record("chr1", 1110696, ref="A", alt=["G"], gt=["0|0", "0|0", "0/1"])
-    b.record("chr1", 1210696, ref="C", alt=["G"], gt=["1|.", "0/1", "1|1"])
-    b.record("chr1", 1210696, ref="C", alt=["G"], gt=[".|1", "0|0", "0/0"])
-    b.record("chr1", 1210697, ref="T", alt=["G"], gt=["0/0", "1|0", "0/1"])
-    b.record("chr1", 1210697, ref="T", alt=["A"], gt=["0/0", "1|0", "0/1"])
+    b.record("chr1", 111, ref="N", alt=[Seq("C")], gt=["0|0", "0|0", "0/1"])
+    b.record("chr1", 1010696, ref="GAGA", alt=[Seq("G")], gt=["1|0", "0|0", "0/0"])
+    b.record("chr1", 1010696, ref="GAGACGG", alt=[Seq("G")], gt=["0|0", "0|0", "0/1"])
+    b.record(
+        "chr1", 1010696, ref="GAGACGGGGCC", alt=[Seq("G")], gt=["0|1", "1|1", "0/0"]
+    )
+    b.record("chr1", 1110696, ref="A", alt=[Seq("TTT")], gt=["0|1", "1|1", "0/0"])
+    b.record("chr1", 1110696, ref="A", alt=[Seq("G")], gt=["0|0", "0|0", "0/1"])
+    b.record("chr1", 1210696, ref="C", alt=[Seq("G")], gt=["1|.", "0/1", "1|1"])
+    b.record("chr1", 1210696, ref="C", alt=[Seq("G")], gt=[".|1", "0|0", "0/0"])
+    b.record("chr1", 1210697, ref="T", alt=[Seq("G")], gt=["0/0", "1|0", "0/1"])
+    b.record("chr1", 1210697, ref="T", alt=[Seq("A")], gt=["0/0", "1|0", "0/1"])
 
     # chr2 block (relabeled from chr20) — carries INFO/IDs/FILTERs.
     b.record(
         "chr2",
         14370,
         ref="N",
-        alt=["A"],
+        alt=[Seq("A")],
         ids=["rs6054257"],
         qual=29.0,
         filter=(),
@@ -366,7 +368,7 @@ def session_document(spec):
         "chr2",
         17330,
         ref="N",
-        alt=["A"],
+        alt=[Seq("A")],
         qual=3.0,
         filter=["q10"],
         gt=["0|0", "0|1", "0/0"],
@@ -376,7 +378,7 @@ def session_document(spec):
         "chr2",
         1110696,
         ref="G",
-        alt=["A", "T"],
+        alt=[Seq("A"), Seq("T")],
         ids=["rs6040355"],
         qual=67.0,
         filter=(),
@@ -387,7 +389,7 @@ def session_document(spec):
         "chr2",
         1234567,
         ref="A",
-        alt=["GA", "AC"],
+        alt=[Seq("GA"), Seq("AC")],
         ids=["microsat1"],
         qual=50.0,
         filter=(),

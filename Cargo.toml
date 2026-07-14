@@ -16,19 +16,25 @@ bigtools = "0.5.6"
 coitrees = "0.4"
 itertools = "0.14.0"
 ndarray = "0.17.2"
-numpy = "0.28.0"
+numpy = "0.29.0"
 rayon = "1.12.0"
 seqpro-core = "0.1"
+# genoray crates are pulled straight from GitHub (no crates.io publish). Cargo finds
+# each package by name inside the repo — no in-repo path is given or needed. Bump `rev`
+# to pull newer genoray code; both crates must share the same rev (one clone, one repo).
+svar2-codec = { git = "https://github.com/d-laub/genoray.git", rev = "4ec0216bdaae0ac34212f07c13e60355d320ad74" }
+genoray_core = { git = "https://github.com/d-laub/genoray.git", rev = "4ec0216bdaae0ac34212f07c13e60355d320ad74", package = "genoray", default-features = false }
 
 [features]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies.pyo3]
-version = "0.28.3"
+version = "0.29"
 features = ["abi3-py310"]
 
 [dev-dependencies]
 rstest = "0.26.1"
+tempfile = "3"
 
 # Perf call-graph attribution only (`perf report --children`). Inherits release
 # codegen and adds line tables + frame pointers. NEVER the gate artifact — all

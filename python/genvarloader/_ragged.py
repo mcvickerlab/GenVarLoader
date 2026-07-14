@@ -322,7 +322,7 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
 
     leading = rag.shape[:rag_dim]
     if leading:
-        out = out.reshape((*leading, out_len))  # pyrefly: ignore[no-matching-overload]
+        out = out.reshape((*leading, out_len))
     return out
 
 

@@ -80,3 +80,31 @@ gvl.write(
 ```
 
 This dataset would have both haplotypes and two tracks (`pos` and `neg`) available for samples that exist in both `all_chroms.bcf` and the BigWig tables (i.e. `gvl.write()` performs an inner join on samples).
+
+## Variants from a genoray sparse store (`.svar` / `.svar2`)
+
+Besides BCF/VCF and PGEN, `variants=` also accepts a genoray sparse columnar variant store — either the original `.svar` format or the newer `.svar2` format. Build one from a normalized VCF/BCF with `genoray`:
+
+```python
+from genoray import VCF, SparseVar, SparseVar2
+
+# .svar (SVAR1): a VCF reader + a memory budget
+SparseVar.from_vcf("all_chroms.svar", VCF("normed.bcf"), max_mem="4g")
+
+# .svar2 (SVAR2): the VCF/BCF path + a reference FASTA (or no_reference=True)
+SparseVar2.from_vcf("all_chroms.svar2", "normed.bcf", reference="ref.fa")
+```
+
+Then pass the resulting store to `gvl.write`:
+
+```python
+gvl.write(
+    path="1000_genomes_haplotypes.gvl",
+    bed="tiling_windows.bed",
+    variants="all_chroms.svar2",  # or "all_chroms.svar", or a SparseVar/SparseVar2 instance
+)
+```
+
+Both formats store a back-reference in the dataset's `metadata.json` instead of duplicating per-variant arrays, so the source store must remain accessible when the dataset is later opened with [`gvl.Dataset.open()`](api.md#genvarloader.Dataset.open) (override its location with `svar=`/`svar2=` if it has moved).
+
+`.svar2` additionally produces a small write-time cache under `<path>/genotypes/svar2_ranges/` and reads back through an all-Rust, read-bound path with no interval-search-tree build and no dense-union rebuild per read — see [the FAQ](faq.md) for the read-path and on-disk-size tradeoffs, and [the format reference](format.md) for the on-disk layout. `.svar2` currently has a Phase-1 scope: a handful of output combinations (splicing, `annotated` haplotypes, `min_af`/`max_af`, etc.) aren't wired yet and raise `NotImplementedError` — see the `genvarloader` skill or `format.md` for the full list.

@@ -5,7 +5,7 @@ import polars as pl
 import seqpro as sp
 from einops import repeat
 from genoray._types import POS_TYPE
-from genoray._utils import ContigNormalizer
+from genoray._contigs import ContigNormalizer
 from natsort import natsorted
 
 from ._dataset._impl import RaggedDataset

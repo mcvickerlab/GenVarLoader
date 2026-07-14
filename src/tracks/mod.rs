@@ -189,10 +189,17 @@ pub fn apply_insertion_fill(
     }
 }
 
-/// Shift and realign a single track to correspond to one haplotype.
+/// Shift and realign a single track to correspond to one haplotype, generic over the
+/// variant source.
 ///
-/// Mirrors numba `shift_and_realign_track_sparse` (lines 230-401 of `_tracks.py`)
-/// statement-by-statement.
+/// Mirrors numba `shift_and_realign_track_sparse` (lines 230-401 of `_tracks.py`), with
+/// the per-variant reads factored out behind the `provide` closure so the same loop body
+/// can be driven by either the SVAR 1.0 global variant table
+/// (`shift_and_realign_track_sparse`) or the SVAR2 two-channel (var_key ⋈ dense) source
+/// (`shift_and_realign_tracks_from_svar2`). **Do not change the realignment math
+/// here** — only the data source differs between call sites. Unlike the reconstruction
+/// core, there is no allele/annotation plumbing and no anchor fix: a DEL implicitly
+/// writes `track[v_rel_pos]` via the `else` branch below.
 ///
 /// Three key differences from the haplotype reconstruction kernel:
 /// 1. SNPs (`v_diff == 0`) are SKIPPED — tracks match reference at SNP positions.
@@ -201,11 +208,10 @@ pub fn apply_insertion_fill(
 /// 3. Trailing fill pads with `0.0` (NOT a pad_char byte).
 ///
 /// # Parameters
-/// - `offset_idx`: index into geno_o_starts/geno_o_stops for this (query, hap) pair
-/// - `geno_v_idxs`: flat variant index array
-/// - `geno_o_starts`, `geno_o_stops`: normalized (2, n) offsets split into two rows
-/// - `v_starts`: variant start positions (absolute genomic coordinates)
-/// - `ilens`: variant insertion-length differences (signed)
+/// - `n_variants`: number of variants this haplotype sees, i.e. `0..n_variants` are
+///   valid indices into `provide`
+/// - `provide`: `Fn(v) -> (v_start_abs, v_diff)` for `v in 0..n_variants`: `v_start_abs`
+///   genomic start, `v_diff` ilen (signed)
 /// - `shift`: total shift for this haplotype
 /// - `track`: reference track values for this query (f32 slice)
 /// - `query_start`: the genomic start of this query region
@@ -215,13 +221,9 @@ pub fn apply_insertion_fill(
 /// - `strategy_id`: insertion-fill strategy
 /// - `base_seed`, `query`, `hap`: seed components for FlankSample strategy
 #[allow(clippy::too_many_arguments)]
-pub fn shift_and_realign_track_sparse(
-    offset_idx: usize,
-    geno_v_idxs: ndarray::ArrayView1<i32>,
-    geno_o_starts: ndarray::ArrayView1<i64>,
-    geno_o_stops: ndarray::ArrayView1<i64>,
-    v_starts: ndarray::ArrayView1<i32>,
-    ilens: ndarray::ArrayView1<i32>,
+fn shift_and_realign_track_core(
+    n_variants: usize,
+    provide: impl Fn(usize) -> (i64, i64), // (v_start_abs, v_diff)
     shift: i64,
     track: ndarray::ArrayView1<f32>,
     query_start: i64,
@@ -233,14 +235,7 @@ pub fn shift_and_realign_track_sparse(
     query: u64,
     hap: u64,
 ) {
-    // Numba: o_s, o_e = geno_offsets[offset_idx], geno_offsets[offset_idx + 1]  (1-D branch)
-    //        or geno_offsets[:, offset_idx]  (2-D branch — normalized form)
-    // We receive the pre-split (2, n) rows directly.
-    let o_s = geno_o_starts[offset_idx] as usize;
-    let o_e = geno_o_stops[offset_idx] as usize;
-    let variant_idxs = &geno_v_idxs.as_slice().unwrap()[o_s..o_e];
     let length = out.len();
-    let n_variants = variant_idxs.len();
 
     if n_variants == 0 {
         // Numba: out[:] = track[:length]
@@ -263,12 +258,11 @@ pub fn shift_and_realign_track_sparse(
             }
         }
 
-        let variant = variant_idxs[v] as usize;
+        let (v_start, v_diff) = provide(v);
 
         // Numba: v_rel_pos = v_starts[variant] - query_start
-        let v_rel_pos = v_starts[variant] as i64 - query_start;
-        // Numba: v_diff = ilens[variant]
-        let v_diff = ilens[variant] as i64;
+        let v_rel_pos = v_start - query_start;
+        // v_diff already i64
         // Numba: v_rel_end = v_rel_pos - min(0, v_diff) + 1
         let v_rel_end = v_rel_pos - v_diff.min(0) + 1;
 
@@ -411,11 +405,76 @@ pub fn shift_and_realign_track_sparse(
     }
 }
 
+/// Shift and realign a single track to correspond to one haplotype (SVAR 1.0 global
+/// variant table). Thin wrapper over [`shift_and_realign_track_core`]: builds a closure
+/// that indexes the global table and delegates. **Behavior is unchanged** from before
+/// the closure-source refactor — this only changes where the per-variant data comes
+/// from.
+///
+/// # Parameters
+/// - `offset_idx`: index into geno_o_starts/geno_o_stops for this (query, hap) pair
+/// - `geno_v_idxs`: flat variant index array
+/// - `geno_o_starts`, `geno_o_stops`: normalized (2, n) offsets split into two rows
+/// - `v_starts`: variant start positions (absolute genomic coordinates)
+/// - `ilens`: variant insertion-length differences (signed)
+/// - `shift`: total shift for this haplotype
+/// - `track`: reference track values for this query (f32 slice)
+/// - `query_start`: the genomic start of this query region
+/// - `out`: output slice to fill (length = haplotype output length)
+/// - `params`: per-strategy parameter (f64)
+/// - `keep`: optional boolean mask over the variant group for this (query, hap)
+/// - `strategy_id`: insertion-fill strategy
+/// - `base_seed`, `query`, `hap`: seed components for FlankSample strategy
+#[allow(clippy::too_many_arguments)]
+pub fn shift_and_realign_track_sparse(
+    offset_idx: usize,
+    geno_v_idxs: ndarray::ArrayView1<i32>,
+    geno_o_starts: ndarray::ArrayView1<i64>,
+    geno_o_stops: ndarray::ArrayView1<i64>,
+    v_starts: ndarray::ArrayView1<i32>,
+    ilens: ndarray::ArrayView1<i32>,
+    shift: i64,
+    track: ndarray::ArrayView1<f32>,
+    query_start: i64,
+    out: &mut ndarray::ArrayViewMut1<f32>,
+    params: ndarray::ArrayView1<f64>,
+    keep: Option<ndarray::ArrayView1<bool>>,
+    strategy_id: i64,
+    base_seed: u64,
+    query: u64,
+    hap: u64,
+) {
+    // Numba: o_s, o_e = geno_offsets[offset_idx], geno_offsets[offset_idx + 1]  (1-D branch)
+    //        or geno_offsets[:, offset_idx]  (2-D branch — normalized form)
+    // We receive the pre-split (2, n) rows directly.
+    let o_s = geno_o_starts[offset_idx] as usize;
+    let o_e = geno_o_stops[offset_idx] as usize;
+    let variant_idxs = &geno_v_idxs.as_slice().unwrap()[o_s..o_e];
+    let provide = |v: usize| {
+        let variant = variant_idxs[v] as usize;
+        (v_starts[variant] as i64, ilens[variant] as i64)
+    };
+    shift_and_realign_track_core(
+        variant_idxs.len(),
+        provide,
+        shift,
+        track,
+        query_start,
+        out,
+        params,
+        keep,
+        strategy_id,
+        base_seed,
+        query,
+        hap,
+    );
+}
+
 /// Shift and realign tracks for a batch of (query, hap) pairs in place (writes `out`).
 ///
 /// Mirrors numba `shift_and_realign_tracks_sparse` (lines 141-228 of `_tracks.py`)
-/// statement-by-statement. Serial-only (rayon deferred to Phase 5, matching Task 5
-/// precedent for initial parity verification).
+/// statement-by-statement. Serial-only (rayon deferred) for initial parity
+/// verification.
 ///
 /// # Parameters
 /// - `out`: flat output buffer (f32), written in place
@@ -463,11 +522,16 @@ pub fn shift_and_realign_tracks_sparse(
     // applied the same pattern: out.as_slice_mut().unwrap() once, then index [a..b]
     // directly.  Here we do the same for out, tracks, and keep.
     // geno_v_idxs already uses .as_slice().unwrap() (inner fn line 240) — same contract.
-    let out_flat = out.as_slice_mut().expect("out must be contiguous (C-order)");
-    let tracks_flat = tracks.as_slice().expect("tracks must be contiguous (C-order)");
+    let out_flat = out
+        .as_slice_mut()
+        .expect("out must be contiguous (C-order)");
+    let tracks_flat = tracks
+        .as_slice()
+        .expect("tracks must be contiguous (C-order)");
     // Hoist keep flat option once (avoids repeated .as_slice() per hap).
-    let keep_flat: Option<&[bool]> =
-        keep.as_ref().map(|k| k.as_slice().expect("keep must be contiguous (C-order)"));
+    let keep_flat: Option<&[bool]> = keep
+        .as_ref()
+        .map(|k| k.as_slice().expect("keep must be contiguous (C-order)"));
 
     if parallel {
         // Build disjoint per-k mutable output slices using the split_at_mut cursor
@@ -507,15 +571,14 @@ pub fn shift_and_realign_tracks_sparse(
                 let o_idx = geno_offset_idx[[query, hap]] as usize;
                 let qh_shift = shifts[[query, hap]] as i64;
 
-                let qh_keep: Option<ndarray::ArrayView1<bool>> =
-                    match (&keep_flat, &keep_offsets) {
-                        (Some(k_flat), Some(ko)) => {
-                            let ks = ko[k] as usize;
-                            let ke = ko[k + 1] as usize;
-                            Some(ndarray::ArrayView1::from(&k_flat[ks..ke]))
-                        }
-                        _ => None,
-                    };
+                let qh_keep: Option<ndarray::ArrayView1<bool>> = match (&keep_flat, &keep_offsets) {
+                    (Some(k_flat), Some(ko)) => {
+                        let ks = ko[k] as usize;
+                        let ke = ko[k + 1] as usize;
+                        Some(ndarray::ArrayView1::from(&k_flat[ks..ke]))
+                    }
+                    _ => None,
+                };
 
                 let mut qh_out = ndarray::ArrayViewMut1::from(out_chunk);
                 shift_and_realign_track_sparse(
@@ -562,15 +625,14 @@ pub fn shift_and_realign_tracks_sparse(
                 //            qh_keep = keep[keep_offsets[k_idx]:keep_offsets[k_idx+1]]
                 // ArrayView1::from(&slice[..]) avoids the do_slice call that
                 // k.slice(s![ks..ke]) would generate.
-                let qh_keep: Option<ndarray::ArrayView1<bool>> =
-                    match (&keep_flat, &keep_offsets) {
-                        (Some(k_flat), Some(ko)) => {
-                            let ks = ko[k_idx] as usize;
-                            let ke = ko[k_idx + 1] as usize;
-                            Some(ndarray::ArrayView1::from(&k_flat[ks..ke]))
-                        }
-                        _ => None,
-                    };
+                let qh_keep: Option<ndarray::ArrayView1<bool>> = match (&keep_flat, &keep_offsets) {
+                    (Some(k_flat), Some(ko)) => {
+                        let ks = ko[k_idx] as usize;
+                        let ke = ko[k_idx + 1] as usize;
+                        Some(ndarray::ArrayView1::from(&k_flat[ks..ke]))
+                    }
+                    _ => None,
+                };
 
                 // Numba: out_s, out_e = out_offsets[k_idx], out_offsets[k_idx + 1]
                 let out_s = out_offsets[k_idx] as usize;
@@ -600,6 +662,195 @@ pub fn shift_and_realign_tracks_sparse(
                     hap as u64,
                 );
             }
+        }
+    }
+}
+
+/// Shift and realign tracks for a batch of (query, hap) pairs from the SVAR2
+/// two-channel (var_key ⋈ dense) source. Mirrors
+/// [`shift_and_realign_tracks_sparse`]'s parallel/serial disjoint-slice carving
+/// exactly — only the per-work-item variant source and decode differ. Additive: SVAR
+/// 1.0's `shift_and_realign_track[s]_sparse` are untouched by this function. Unlike
+/// [`crate::reconstruct::reconstruct_haplotypes_from_svar2`], there are no annotation
+/// buffers here (tracks never had them), so the carving is out-chunks only.
+///
+/// # Parameters
+/// - `out`: flat output buffer (f32), written in place
+/// - `out_offsets`: ragged offsets into out, shape (n_q * ploidy + 1,)
+/// - `regions`: (n_q, 3) array of (contig_idx, start, end) per query
+/// - `shifts`: (n_q, ploidy) shift per (query, hap)
+/// - `vk_pos` / `vk_key`: this hap's `var_key` channel: position + uniform key (i32)
+/// - `vk_off`: shape (n_work + 1) CSR offsets into `vk_pos`/`vk_key`, indexed by flat
+///   work index `k = query * ploidy + hap`
+/// - `dense_pos` / `dense_key`: the shared `dense` channel: position + uniform key (i32)
+/// - `dense_range`: shape (n_q, 2) as `[ds, de)`, the window into `dense_pos`/`dense_key`
+///   for each query row
+/// - `dense_present`: packed presence bits over the dense window, LSB-first per byte (u8)
+/// - `dense_present_off`: shape (n_work + 1) BIT offsets into `dense_present`, indexed by
+///   flat work index `k`
+/// - `lut_bytes` / `lut_off`: long-allele-bank bytes + CSR offsets, for `Lookup` keys
+/// - `tracks`: flat reference track buffer (f32), ragged by track_offsets
+/// - `track_offsets`: (n_q + 1,) offsets into tracks (one track per query)
+/// - `params`: per-strategy parameter (f64), shape (1,)
+/// - `strategy_id`, `base_seed`: insertion-fill strategy parameters
+/// - `query_seed`: optional (n_q,) map from the LOCAL query index (`k / ploidy`)
+///   to the GLOBAL batch row used as the FlankSample fill-seed `query` component.
+///   `None` seeds with the local index (identity), which is exact for a
+///   single-call/single-group batch. Callers that split one logical batch across
+///   several kernel invocations (e.g. the SVAR2 read-bound path's per-contig-group
+///   loop) MUST pass the group's global row indices so seed-dependent fills match
+///   the single fused SVAR1 call. See GenVarLoader issue #267.
+/// - `parallel`: if true, use rayon to process work items concurrently
+#[allow(clippy::too_many_arguments)]
+pub fn shift_and_realign_tracks_from_svar2(
+    mut out: ndarray::ArrayViewMut1<f32>,
+    out_offsets: ndarray::ArrayView1<i64>,
+    regions: ndarray::ArrayView2<i32>,
+    shifts: ndarray::ArrayView2<i32>,
+    vk_pos: ndarray::ArrayView1<i32>,
+    vk_key: ndarray::ArrayView1<i32>,
+    vk_off: ndarray::ArrayView1<i64>,
+    dense_pos: ndarray::ArrayView1<i32>,
+    dense_key: ndarray::ArrayView1<i32>,
+    dense_range: ndarray::ArrayView2<i32>,
+    dense_present: ndarray::ArrayView1<u8>,
+    dense_present_off: ndarray::ArrayView1<i64>,
+    lut_bytes: ndarray::ArrayView1<u8>,
+    lut_off: ndarray::ArrayView1<i64>,
+    tracks: ndarray::ArrayView1<f32>,
+    track_offsets: ndarray::ArrayView1<i64>,
+    params: ndarray::ArrayView1<f64>,
+    strategy_id: i64,
+    base_seed: u64,
+    query_seed: Option<ndarray::ArrayView1<i64>>,
+    parallel: bool,
+) {
+    let ploidy = shifts.ncols();
+    let n_work = regions.nrows() * ploidy;
+
+    // Hoist contiguous-slice pointers once, exactly as the SVAR1 driver hoists
+    // `tracks_flat` — these are Send+Sync so the rayon parallel path is unchanged.
+    let vk_pos_s: &[i32] = vk_pos.as_slice().unwrap();
+    let vk_key_s: &[i32] = vk_key.as_slice().unwrap();
+    let dense_pos_s: &[i32] = dense_pos.as_slice().unwrap();
+    let dense_key_s: &[i32] = dense_key.as_slice().unwrap();
+    let dense_present_s: &[u8] = dense_present.as_slice().unwrap();
+    let lut_bytes_s: &[u8] = lut_bytes.as_slice().unwrap();
+    let lut_off_s: &[i64] = lut_off.as_slice().unwrap();
+    let tracks_flat: &[f32] = tracks
+        .as_slice()
+        .expect("tracks must be contiguous (C-order)");
+
+    // Per-k inner work: merge this hap's var_key ⋈ dense entries, then realign via the
+    // shared core with a decode closure. All read-only ArrayViews/slices are Send+Sync
+    // so the closure can borrow them freely.
+    let do_work = |k: usize, out_chunk: &mut [f32]| {
+        let query = k / ploidy;
+        let hap = k % ploidy;
+
+        // FlankSample fill-seed `query` component: GLOBAL batch row when a
+        // `query_seed` map is supplied (multi-call/per-group batches), else the
+        // local index (exact for a single fused call). See issue #267.
+        let q_seed = match query_seed {
+            Some(qs) => qs[query] as u64,
+            None => query as u64,
+        };
+
+        let t_s = track_offsets[query] as usize;
+        let t_e = track_offsets[query + 1] as usize;
+        let q_track = ndarray::ArrayView1::from(&tracks_flat[t_s..t_e]);
+        let q_start = regions[[query, 1]] as i64;
+        let qh_shift = shifts[[query, hap]] as i64;
+
+        // var_key window for this hap
+        let vk_lo = vk_off[k] as usize;
+        let vk_hi = vk_off[k + 1] as usize;
+
+        // dense window for this query
+        let ds = dense_range[[query, 0]] as usize;
+        let de = dense_range[[query, 1]] as usize;
+
+        // presence bits for this hap start at bit `dense_present_off[k]`
+        let base_bit = dense_present_off[k] as usize;
+        let present_bit = |j: usize| crate::svar2::present_bit(dense_present_s, base_bit, j);
+
+        let merged = crate::svar2::merge_hap(
+            vk_pos_s,
+            vk_key_s,
+            vk_lo,
+            vk_hi,
+            dense_pos_s,
+            dense_key_s,
+            ds,
+            de,
+            present_bit,
+        );
+
+        let provide = |v: usize| {
+            let (pos, key) = merged[v];
+            let (v_diff, _allele) = crate::svar2::decode_alt(key, lut_bytes_s, lut_off_s);
+            (pos as i64, v_diff)
+        };
+
+        let mut qh_out = ndarray::ArrayViewMut1::from(out_chunk);
+        shift_and_realign_track_core(
+            merged.len(),
+            provide,
+            qh_shift,
+            q_track,
+            q_start,
+            &mut qh_out,
+            params,
+            None, // keep: SVAR2 has no per-haplotype keep mask
+            strategy_id,
+            base_seed,
+            q_seed,
+            hap as u64,
+        );
+    };
+
+    if parallel {
+        // Build disjoint per-k mutable output slices using the split_at_mut cursor
+        // idiom (mirrors shift_and_realign_tracks_sparse's parallel path).
+        let bounds: Vec<(usize, usize)> = (0..n_work)
+            .map(|k| (out_offsets[k] as usize, out_offsets[k + 1] as usize))
+            .collect();
+
+        let out_flat = out
+            .as_slice_mut()
+            .expect("out must be contiguous (C-order)");
+        let mut out_chunks: Vec<&mut [f32]> = Vec::with_capacity(n_work);
+        {
+            let mut rest = &mut out_flat[..];
+            let mut cursor = 0usize;
+            for &(s, e) in &bounds {
+                debug_assert!(
+                    s >= cursor && e >= s,
+                    "out_offsets must be monotonically non-decreasing (got s={s}, e={e}, cursor={cursor})"
+                );
+                let (_, tail) = rest.split_at_mut(s - cursor);
+                let (mid, tail2) = tail.split_at_mut(e - s);
+                out_chunks.push(mid);
+                rest = tail2;
+                cursor = e;
+            }
+        }
+
+        out_chunks
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(k, out_chunk)| {
+                do_work(k, out_chunk);
+            });
+    } else {
+        // Serial path.
+        let out_flat = out
+            .as_slice_mut()
+            .expect("out must be contiguous (C-order)");
+        for k in 0..n_work {
+            let out_s = out_offsets[k] as usize;
+            let out_e = out_offsets[k + 1] as usize;
+            do_work(k, &mut out_flat[out_s..out_e]);
         }
     }
 }
@@ -738,7 +989,12 @@ pub fn tracks_to_intervals(
         // Build disjoint per-query mutable slices from all_starts/ends/values using
         // interval_offsets (which have already been computed sequentially above).
         let itv_bounds: Vec<(usize, usize)> = (0..n_queries)
-            .map(|q| (interval_offsets[q] as usize, interval_offsets[q + 1] as usize))
+            .map(|q| {
+                (
+                    interval_offsets[q] as usize,
+                    interval_offsets[q + 1] as usize,
+                )
+            })
             .collect();
 
         let mut starts_chunks: Vec<&mut [i32]> = Vec::with_capacity(n_queries);
@@ -861,7 +1117,7 @@ pub fn tracks_to_intervals(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::Array1;
+    use ndarray::{arr1, Array1};
 
     /// Expected values hand-derived from the numba algorithm (verified by running
     /// the Python reference implementation with np.uint64 arithmetic).
@@ -972,7 +1228,10 @@ mod tests {
         );
         assert_eq!(result.len(), writable_length);
         for &v in &result {
-            assert_eq!(v, expected_val, "REPEAT_5P_NORM: expected {expected_val}, got {v}");
+            assert_eq!(
+                v, expected_val,
+                "REPEAT_5P_NORM: expected {expected_val}, got {v}"
+            );
         }
         // Sum preservation check
         let sum: f32 = result.iter().sum();
@@ -1090,7 +1349,10 @@ mod tests {
             hap,
         );
 
-        assert_eq!(result, expected, "FLANK_SAMPLE: result did not match expected");
+        assert_eq!(
+            result, expected,
+            "FLANK_SAMPLE: result did not match expected"
+        );
 
         // Spot-check the first index by computing hash4 explicitly:
         // hash4(42, 7, 1, 0):
@@ -1192,7 +1454,9 @@ mod tests {
                 for a in 0..2usize {
                     let mut term = ys[a];
                     for b in 0..2usize {
-                        if b == a { continue; }
+                        if b == a {
+                            continue;
+                        }
                         term *= (x - xs[b]) / (xs[a] - xs[b]);
                     }
                     acc += term;
@@ -1217,9 +1481,15 @@ mod tests {
 
         assert_eq!(result.len(), writable_length);
         // Endpoint check: at i=0, result should equal ys[0]=track[v_rel_pos]=4.0
-        assert_eq!(result[0], 4.0f32, "order=1 left endpoint must equal track[v_rel_pos]");
+        assert_eq!(
+            result[0], 4.0f32,
+            "order=1 left endpoint must equal track[v_rel_pos]"
+        );
         for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(got, exp, "INTERPOLATE order=1 at i={i}: got {got}, expected {exp}");
+            assert_eq!(
+                got, exp,
+                "INTERPOLATE order=1 at i={i}: got {got}, expected {exp}"
+            );
         }
     }
 
@@ -1256,7 +1526,9 @@ mod tests {
                 for a in 0..n {
                     let mut term = ys[a];
                     for b in 0..n {
-                        if b == a { continue; }
+                        if b == a {
+                            continue;
+                        }
                         term *= (x - xs[b]) / (xs[a] - xs[b]);
                     }
                     acc += term;
@@ -1280,9 +1552,15 @@ mod tests {
         );
 
         // At x=0, result should equal ys[0] = track[v_rel_pos] = 4.0
-        assert_eq!(result[0], 4.0f32, "order=2 left endpoint must equal track[v_rel_pos]");
+        assert_eq!(
+            result[0], 4.0f32,
+            "order=2 left endpoint must equal track[v_rel_pos]"
+        );
         for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(got, exp, "INTERPOLATE order=2 at i={i}: got {got}, expected {exp}");
+            assert_eq!(
+                got, exp,
+                "INTERPOLATE order=2 at i={i}: got {got}, expected {exp}"
+            );
         }
     }
 
@@ -1318,7 +1596,9 @@ mod tests {
                 for a in 0..n {
                     let mut term = ys[a];
                     for b in 0..n {
-                        if b == a { continue; }
+                        if b == a {
+                            continue;
+                        }
                         term *= (x - xs[b]) / (xs[a] - xs[b]);
                     }
                     acc += term;
@@ -1342,9 +1622,15 @@ mod tests {
         );
 
         // At x=0, result should equal track[v_rel_pos]=5.0
-        assert_eq!(result[0], 5.0f32, "order=3 left endpoint must equal track[v_rel_pos]");
+        assert_eq!(
+            result[0], 5.0f32,
+            "order=3 left endpoint must equal track[v_rel_pos]"
+        );
         for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(got, exp, "INTERPOLATE order=3 at i={i}: got {got}, expected {exp}");
+            assert_eq!(
+                got, exp,
+                "INTERPOLATE order=3 at i={i}: got {got}, expected {exp}"
+            );
         }
     }
 
@@ -1390,7 +1676,9 @@ mod tests {
         for a in 0..2 {
             let mut term = ys[a];
             for b in 0..2 {
-                if b == a { continue; }
+                if b == a {
+                    continue;
+                }
                 term *= (x - xs[b]) / (xs[a] - xs[b]);
             }
             acc += term;
@@ -1498,7 +1786,11 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(result, [1.0f32, 2.0, 3.0, 4.0], "no variants: copy track[:length]");
+        assert_eq!(
+            result,
+            [1.0f32, 2.0, 3.0, 4.0],
+            "no variants: copy track[:length]"
+        );
     }
 
     /// Deletion: track[v_rel_pos] repeated for writable_length; track advances by
@@ -1519,13 +1811,13 @@ mod tests {
         let track = [10.0f32, 20.0, 30.0, 40.0, 50.0];
         let v_starts = [1i32]; // v_start = 1
         let ilens = [-2i32]; // deletion of 2 → v_rel_end = 1 - (-2) + 1 = 4... wait
-        // v_rel_end = v_rel_pos - min(0, v_diff) + 1 = 1 - (-2) + 1 = 4
-        // Actually: v_rel_end = 1 - min(0, -2) + 1 = 1 - (-2) + 1 = 4
-        // v_len = max(0, -2) + 1 = 0 + 1 = 1
-        // track up to v_rel_pos=1: track[0..1] = [10.0], out[0] = 10.0
-        // v_len=1 repeated: out[1] = track[1] = 20.0
-        // track_idx = 4; remaining: track[4..5] = [50.0] → out[2] = 50.0
-        // out[3] = 0.0 (trailing pad)
+                             // v_rel_end = v_rel_pos - min(0, v_diff) + 1 = 1 - (-2) + 1 = 4
+                             // Actually: v_rel_end = 1 - min(0, -2) + 1 = 1 - (-2) + 1 = 4
+                             // v_len = max(0, -2) + 1 = 0 + 1 = 1
+                             // track up to v_rel_pos=1: track[0..1] = [10.0], out[0] = 10.0
+                             // v_len=1 repeated: out[1] = track[1] = 20.0
+                             // track_idx = 4; remaining: track[4..5] = [50.0] → out[2] = 50.0
+                             // out[3] = 0.0 (trailing pad)
         let geno_v_idxs = [0i32];
         let geno_offsets = [0i64, 1];
 
@@ -1605,8 +1897,14 @@ mod tests {
         // out[0..4] from main loop; zero-pad covers out[4..8] from out_idx (not index 2).
         assert_eq!(result[0], 1.0f32, "ref[0]");
         assert_eq!(result[1], 2.0f32, "ref[1]");
-        assert_eq!(result[2], 3.0f32, "ref[2] — must NOT be overwritten by zero-pad");
-        assert_eq!(result[3], 4.0f32, "deletion REPEAT_5P value — must NOT be overwritten");
+        assert_eq!(
+            result[2], 3.0f32,
+            "ref[2] — must NOT be overwritten by zero-pad"
+        );
+        assert_eq!(
+            result[3], 4.0f32,
+            "deletion REPEAT_5P value — must NOT be overwritten"
+        );
         assert_eq!(result[4], 0.0f32, "zero-pad[4]");
         assert_eq!(result[5], 0.0f32, "zero-pad[5]");
         assert_eq!(result[6], 0.0f32, "zero-pad[6]");
@@ -1696,7 +1994,11 @@ mod tests {
             0,
         );
         // SNP is skipped — output equals track[:length]
-        assert_eq!(result, [1.0f32, 2.0, 3.0, 4.0], "SNP must be skipped for tracks");
+        assert_eq!(
+            result,
+            [1.0f32, 2.0, 3.0, 4.0],
+            "SNP must be skipped for tracks"
+        );
     }
 
     /// Insertion with REPEAT_5P strategy: repeated track[v_rel_pos].
@@ -1813,7 +2115,11 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(result, [0.0f32, 1.0, 2.0, 3.0], "no variants + shift=0: copy track[:4]");
+        assert_eq!(
+            result,
+            [0.0f32, 1.0, 2.0, 3.0],
+            "no variants + shift=0: copy track[:4]"
+        );
     }
 
     /// Shift=2 with one insertion variant: verify shift-through-variant logic.
@@ -1873,7 +2179,7 @@ mod tests {
         out_len: usize,
         out_offsets: &[i64],
         regions: &[[i32; 3]],
-        shifts: &[i32],   // flat, will be reshaped (n_q, ploidy)
+        shifts: &[i32],          // flat, will be reshaped (n_q, ploidy)
         geno_offset_idx: &[i64], // flat (n_q * ploidy)
         geno_v_idxs: &[i32],
         geno_offsets_1d: &[i64],
@@ -1900,16 +2206,8 @@ mod tests {
             regions.iter().flat_map(|r| r.iter().cloned()).collect(),
         )
         .unwrap();
-        let shifts_arr = Array2::from_shape_vec(
-            (n_q, ploidy),
-            shifts.to_vec(),
-        )
-        .unwrap();
-        let goi_arr = Array2::from_shape_vec(
-            (n_q, ploidy),
-            geno_offset_idx.to_vec(),
-        )
-        .unwrap();
+        let shifts_arr = Array2::from_shape_vec((n_q, ploidy), shifts.to_vec()).unwrap();
+        let goi_arr = Array2::from_shape_vec((n_q, ploidy), geno_offset_idx.to_vec()).unwrap();
 
         let out_offsets_arr = Array1::from_vec(out_offsets.to_vec());
         let gvi_arr = Array1::from_vec(geno_v_idxs.to_vec());
@@ -1991,7 +2289,11 @@ mod tests {
             1, // ploidy
             false,
         );
-        assert_eq!(result, [1.0f32, 2.0, 3.0, 4.0], "batch single: copy track[:4]");
+        assert_eq!(
+            result,
+            [1.0f32, 2.0, 3.0, 4.0],
+            "batch single: copy track[:4]"
+        );
     }
 
     /// Batch with 2 queries, 1 hap each, SNPs — must pass through unchanged.
@@ -2031,9 +2333,17 @@ mod tests {
             false,
         );
         // SNP skipped → query 0 output = track[0..3]
-        assert_eq!(result[..3], [1.0f32, 2.0, 3.0], "q0: SNP skipped, track copied");
+        assert_eq!(
+            result[..3],
+            [1.0f32, 2.0, 3.0],
+            "q0: SNP skipped, track copied"
+        );
         // No variants in q1 → track[3..6]
-        assert_eq!(result[3..], [4.0f32, 5.0, 6.0], "q1: no variants, track copied");
+        assert_eq!(
+            result[3..],
+            [4.0f32, 5.0, 6.0],
+            "q1: no variants, track copied"
+        );
     }
 
     // ================================================================== //
@@ -2054,7 +2364,7 @@ mod tests {
 
         // regions: (n_queries, 3) — (contig_idx, start, end)
         let regions_data = vec![
-            0i32, 0, 0,   // q0: empty length
+            0i32, 0, 0, // q0: empty length
             0i32, 10, 13, // q1: [10, 13), length 3
             0i32, 20, 25, // q2: [20, 25), length 5
         ];
@@ -2071,7 +2381,11 @@ mod tests {
             tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view(), false);
 
         // offsets: [0, 0, 1, 3]
-        assert_eq!(offsets.as_slice().unwrap(), &[0i64, 0, 1, 3], "offsets mismatch");
+        assert_eq!(
+            offsets.as_slice().unwrap(),
+            &[0i64, 0, 1, 3],
+            "offsets mismatch"
+        );
 
         // Total intervals = 3
         assert_eq!(starts.len(), 3);
@@ -2148,7 +2462,11 @@ mod tests {
             tracks_to_intervals(regions.view(), tracks.view(), track_offsets.view(), false);
 
         assert_eq!(offsets.as_slice().unwrap(), &[0i64, 3]);
-        assert_eq!(starts.len(), 3, "must have 3 intervals including zero-value ones");
+        assert_eq!(
+            starts.len(),
+            3,
+            "must have 3 intervals including zero-value ones"
+        );
         assert_eq!(values[0], 0.0f32, "first interval is zero-value");
         assert_eq!(starts[0], 0i32);
         assert_eq!(ends[0], 2i32);
@@ -2156,5 +2474,94 @@ mod tests {
         assert_eq!(values[2], 0.0f32, "third interval is zero-value");
         assert_eq!(starts[2], 3i32);
         assert_eq!(ends[2], 4i32);
+    }
+
+    // ------------------------------------------------------------------ //
+    // shift_and_realign_tracks_from_svar2                                //
+    // ------------------------------------------------------------------ //
+
+    /// SVAR2 two-source track driver: a single pure DEL, carried entirely in the
+    /// `dense` channel (no `var_key` entries), realigns a track identically to the
+    /// SVAR1 kernel's `test_singular_deletion` case above (same track, v_start, ilen,
+    /// strategy_id=REPEAT_5P — any strategy_id works for a DEL, since v_diff<0 always
+    /// takes the `else` branch and repeats `track[v_rel_pos]`, bypassing
+    /// `apply_insertion_fill` entirely; REPEAT_5P is reused here only to match that
+    /// existing test's derivation for an easy cross-check).
+    ///
+    /// Setup: R=1, S=1 (ploidy=1) -> n_work=1.
+    ///   track = [10.0, 20.0, 30.0, 40.0, 50.0], query_start = 0, out_len = 4
+    ///   dense pure DEL at pos=1, ilen=-2 — `svar2_codec::encode_pure_del(x)` round-trips
+    ///   through `decode_alt` to `v_diff = x` (see `DecodedKey::PureDel { ilen }`), so
+    ///   `encode_pure_del(-2)` below yields `v_diff = -2` to match the derivation.
+    ///
+    /// Hand-derivation (identical math to `test_singular_deletion`):
+    ///   v_rel_pos = 1 - 0 = 1; v_diff = -2
+    ///   v_rel_end = v_rel_pos - min(0, v_diff) + 1 = 1 - (-2) + 1 = 4
+    ///   v_len = max(0, -2) + 1 = 1
+    ///   track_len = v_rel_pos - track_idx = 1 - 0 = 1 -> out[0] = track[0] = 10.0
+    ///   writable_length = min(1, 4-1) = 1; v_diff<0 -> else branch:
+    ///     out[1] = track[v_rel_pos=1] = 20.0
+    ///   track_idx = v_rel_end = 4; out_idx = 2
+    ///   tail: unfilled_length = 4-2 = 2; writable_ref = min(2, track.len()(5)-4) = 1
+    ///     -> out[2] = track[4] = 50.0; out_end_idx = 3
+    ///   out[3] = 0.0 (trailing pad, out_end_idx(3) < length(4))
+    ///   expected out = [10.0, 20.0, 50.0, 0.0]
+    #[test]
+    fn svar2_track_realign_del() {
+        let track = arr1(&[10.0f32, 20.0, 30.0, 40.0, 50.0]);
+        let track_offsets = arr1(&[0i64, 5]);
+
+        // One region on contig 0 (unused by tracks beyond regions[[q,1]]=query_start),
+        // one sample-slot, one ploid -> n_work = 1.
+        let regions = ndarray::arr2(&[[0i32, 0, 4]]);
+        let shifts = ndarray::arr2(&[[0i32]]);
+
+        // No var_key entries for this hap.
+        let vk_pos = arr1::<i32>(&[]);
+        let vk_key = arr1::<i32>(&[]);
+        let vk_off = arr1(&[0i64, 0]);
+
+        // dense channel: one pure DEL (ilen=-2) at pos=1, present for this hap.
+        let del_key = svar2_codec::encode_pure_del(-2) as i32;
+        let dense_pos = arr1(&[1i32]);
+        let dense_key = arr1(&[del_key]);
+        let dense_range = ndarray::arr2(&[[0i32, 1]]);
+        // Presence bits, LSB-first: bit 0 (this hap's only dense entry) is set.
+        let dense_present = arr1(&[0b0000_0001u8]);
+        let dense_present_off = arr1(&[0i64, 1]);
+
+        // No long-allele-bank lookups exercised in this test.
+        let lut_bytes = arr1::<u8>(&[]);
+        let lut_off = arr1(&[0i64]);
+
+        let out_offsets = arr1(&[0i64, 4]);
+        let params = arr1(&[0.0f64]);
+        let mut out = Array1::<f32>::zeros(4);
+
+        shift_and_realign_tracks_from_svar2(
+            out.view_mut(),
+            out_offsets.view(),
+            regions.view(),
+            shifts.view(),
+            vk_pos.view(),
+            vk_key.view(),
+            vk_off.view(),
+            dense_pos.view(),
+            dense_key.view(),
+            dense_range.view(),
+            dense_present.view(),
+            dense_present_off.view(),
+            lut_bytes.view(),
+            lut_off.view(),
+            track.view(),
+            track_offsets.view(),
+            params.view(),
+            REPEAT_5P,
+            0,
+            None, // query_seed: single call, local index is the global row
+            false, // serial
+        );
+
+        assert_eq!(out.as_slice().unwrap(), &[10.0f32, 20.0, 50.0, 0.0]);
     }
 }
