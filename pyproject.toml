@@ -11,9 +11,8 @@ license = { file = "LICENSE.txt" }
 requires-python = ">=3.10,<3.14" # >= 3.14 blocked by pyarrow/genoray
 dependencies = [
     "seqpro>=0.20",
-    # Unpinned for dev: gvl is being built against genoray main (unreleased field-read API),
-    # whose pyproject still reports 2.15.0. Re-pin (>=3,<4 or the new floor) at genoray release.
-    "genoray",
+    # >=3.0.0 is the first release carrying the INFO/FORMAT field-read API gvl relies on.
+    "genoray>=3.0.0,<4",
     "numpy",
     "loguru",
     "natsort",

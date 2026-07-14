@@ -102,14 +102,9 @@ numba = "==0.59.1"
 pyarrow = ">=21"
 hirola = "==0.3"
 seqpro = "==0.21.1"
-# Dev-wiring (release-gated): genoray MAIN (unreleased INFO/FORMAT field-read API) as a
-# pre-built abi3 wheel. Editable path-install would require genoray's rust-htslib C toolchain
-# (cxx-compiler/clangdev/zlib/LIBCLANG_PATH) inside this env; we never edit genoray, so a
-# frozen wheel is equivalent. Rebuild via, in the genoray checkout:
-#   pixi run --manifest-path ci/wheel/pixi.toml build && ... repair   # -> dist/*.whl
-# The wheel reports 2.15.0 (genoray's version was never bumped past the 3.0.0 tag), hence the
-# dropped version constraint in pyproject.toml. Flip both to the PyPI release at merge.
-genoray = { path = "/carter/users/dlaub/projects/genoray/dist/genoray-2.15.0-cp310-abi3-manylinux_2_28_x86_64.whl" }
+# genoray >=3.0.0 (first release with the INFO/FORMAT field-read API) as the prebuilt
+# abi3 wheel from PyPI — one cp310-abi3 wheel covers py310-313 on both platforms.
+genoray = ">=3.0.0,<4"
 polars = "==1.37.1"
 loguru = "*"
 natsort = "*"
