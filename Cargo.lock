@@ -501,6 +501,7 @@ dependencies = [
 [[package]]
 name = "genoray"
 version = "0.1.0"
+source = "git+https://github.com/d-laub/genoray.git?rev=82668a69349a42f8968d6291875e50cf14eb04b7#82668a69349a42f8968d6291875e50cf14eb04b7"
 dependencies = [
  "bytemuck",
  "crossbeam-channel",
@@ -1477,6 +1478,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 [[package]]
 name = "svar2-codec"
 version = "0.1.0"
+source = "git+https://github.com/d-laub/genoray.git?rev=82668a69349a42f8968d6291875e50cf14eb04b7#82668a69349a42f8968d6291875e50cf14eb04b7"
 
 [[package]]
 name = "syn"
