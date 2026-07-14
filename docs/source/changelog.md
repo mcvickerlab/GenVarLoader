@@ -58,6 +58,92 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.37.0 (2026-07-14)
+
+### BREAKING CHANGE
+
+- requires genoray>=3; VCF/PGEN _chunk_ranges_with_length now
+both yield (data, end, chunk_idxs).
+
+### Feat
+
+- **svar2**: route INFO/FORMAT fields into variant-windows output
+- **svar2**: route INFO/FORMAT fields into RaggedVariants
+- **svar2**: discover store INFO/FORMAT fields and skip SVAR1 lazy-loading
+- **svar2**: decode_variants_from_svar2_readbound returns INFO/FORMAT field buffers
+- **svar2**: field-byte gather with vk_src/dense provenance in split decode
+- **svar2**: Svar2Store retains store_path for field-sidecar paths
+- adopt genoray 3.0.0 API (privatized SVAR2 FFI, available_samples, no Reader, ContigNormalizer moved)
+- consume reconciled genoray chunk_idxs contract (genoray 3.0)
+- **svar2**: unphased_union for variant-windows (ploidy-1 fold)
+- **svar2**: unphased_union for variants mode (ploidy-1 fold)
+- **svar2**: variant-windows read path (ref=window, alt window/allele)
+- **dataset**: svar2 haplotype-realigned tracks via HapsTracks
+- **dataset**: Svar2Haps reconstructor + svar2 read dispatch (haplotypes, variants)
+- **rust**: read-bound svar2 per-hap diffs FFI (for jitter shift computation)
+- **rust**: read-bound svar2 variants/variant-windows decode
+- **rust**: read-bound svar2 track re-alignment kernel
+- **svar2**: read-bound haplotype kernel (one all-Rust FFI call)
+- **rust**: link genoray_core (query-only) + Svar2Store pyclass
+- **write**: _write_from_svar2 6-array ranges cache + dispatch
+- **dataset**: Svar2Link resolution/fingerprint + Metadata.svar2_link
+- **svar2**: additive Python SVAR2 reconstruction adapter (gvl M6b)
+- **svar2**: PyO3 fused wrappers for two-source reconstruct/realign (gvl M6b)
+- **svar2**: two-source track realign driver (gvl M6b)
+- **svar2**: two-source reconstruct driver via closure source (gvl M6b)
+- **svar2**: per-hap var_key⋈dense merge + key decode source (gvl M6b)
+- **threads**: add GVL_FORCE_PARALLEL to bypass the size gate
+
+### Fix
+
+- **svar2**: global fill-seed for multi-contig FlankSample tracks (#267)
+- **svar2**: raise (not assert) on max_ends packing-width overflow
+- **svar2**: pack bounded tie-break in max_ends key (fix >2Mb overflow)
+- **svar2**: reject extend_to_length=False for .svar2 sources
+- **svar2**: drop over-strict anchor region guard; assert at read site
+- **svar2**: raise PyValueError on non-contiguous / OOB Python input
+- **svar2**: guard serial unsafe carve path with monotonicity debug_assert
+- **svar2**: validate open(var_fields=), size buffered output, de-degenerate oracle
+- **svar2**: honor Dataset.open(var_fields=) and cover multi-contig windows fields
+- **write**: copy variant index across filesystems on EXDEV
+- **dataset**: guard svar2 FlankSample multi-contig + annotated tracks
+- **dataset**: svar2 min_af/max_af guard + variants jitter guard + coverage
+- **svar2**: byte-size split_to_flat presence buffer; cover dense_snp + byte boundary
+- **threads**: overwrite ambient RAYON_NUM_THREADS with resolved cap (#263)
+- **threads**: honor CFS cpu quota in CPU detection (#263)
+
+### Refactor
+
+- **svar2**: hoist shared present_bit to svar2::present_bit
+- **svar2**: drop dead annot_* capability from readbound haps kernel
+- **svar2**: move test-only oracles out of the shipped package
+- **svar2**: drop unused region_starts from the ranges cache
+- **svar2**: migrate gvl read-bound Rust to genoray Range<usize> API
+- **svar2**: adopt genoray HapRanges for gather_haps_readbound
+- **svar2**: hoist Any import + document union guard omission
+- **dataset**: retire svar2 live overlap_batch dispatch (oracle-only)
+
+### Perf
+
+- **svar2**: vectorize _svar2_region_max_ends (byte-identical)
+- **svar2**: fuse variant decode, stream-merge from gather
+- **svar2**: skip identity row-reorder for single-contig getitem
+- **svar2**: read-bound getitem optimization results summary
+- **svar2**: split_to_flat asm fix — hoist q=h/ploidy division out of hot loops (byte-identical)
+- **svar2**: debug_assert guard for decode_variants_from_split get_unchecked invariant
+- **svar2**: decode_variants_from_split asm fix — hoist q=h/ploidy div, unchecked present_bit (byte-identical)
+- **svar2**: re-profile native layer after B1-B3; enumerate cargo-asm work-list
+- **svar2**: compute the pos/ilen ragged reorder index once in variants decode
+- **svar2**: pre-size split_to_flat + decode_variants_from_split allocations (byte-identical)
+- **svar2**: skip redundant pre-reconstruct gather for deterministic haplotype reads
+- **svar2**: native-layer baseline profile (perf DSO/symbol/callgraph + instr reference)
+- **svar2**: Python-layer baseline profile (cProfile + pyinstrument)
+- **svar2**: live read-bound Dataset.__getitem__ profiling driver + pyinstrument
+- **ffi**: release the GIL around rayon parallel regions
+
 ## v0.36.0 (2026-06-28)
 
 ### Feat
