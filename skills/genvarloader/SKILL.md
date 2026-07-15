@@ -118,6 +118,8 @@ gvl.write(
     overwrite=False,
     max_mem="4g",
     extend_to_length=True,
+    progress_callback=None,
+    progress_path=None,
 )
 ```
 
@@ -127,6 +129,7 @@ Notable:
 - `annot_tracks`: `dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None` — sample-independent annotation tracks, written to `<path>/annot_intervals/<name>/`. Each value is either a path to an interval table/bigWig file, or a polars DataFrame/LazyFrame with BED-like columns (`chrom`, `chromStart`, `chromEnd`, `score`). Annotation tracks are sample-independent and can be read without a per-sample variant source.
 - `max_jitter`: max read-time jitter; pads stored data on both sides of every region by this many bases so `Dataset.with_settings(jitter=j)` works for any `j <= max_jitter`.
 - `extend_to_length=True` keeps reading past the BED end until every haplotype is ≥ the region length (matters when deletions would shorten output); set `False` for faster writes if shorter haps are acceptable. **Not supported for a `.svar2` variant source** — `extend_to_length=False` raises `NotImplementedError` there; only BCF/PGEN/`.svar` sources may disable it.
+- `progress_callback`: a `gvl.ProgressCallback`, receiving immutable `gvl.ProgressEvent(phase, completed, total, unit, state, message)` values. `progress_path` selects a `gvl.JsonProgressSink` atomic `nf-seqlab.progress/v1` JSON snapshot. If the path is omitted, `NF_SEQLAB_PROGRESS_PATH`, `_FILE`, `_SNAPSHOT_PATH`, `_DIR`, or the `NF_SEQLAB_PROGRESS` shorthand selects it; the remaining `NF_SEQLAB_PROGRESS_*` variables add Nextflow identity. Managed progress disables native `tqdm`; observer failures are logged and isolated. In-flight events reserve 100, and the sole `state="complete"` / `percent=100` event is emitted only after the published dataset's `metadata.json` is readable. Keep snapshots outside the atomically published dataset directory.
 - Inner-joins samples across `variants` and all `tracks`.
 
 **Parallelism:** `gvl.write` now parallelizes over write categories. Variants are processed first (serially). Then per-sample `tracks` and `annot_tracks` run concurrently (joblib loky backend). The `max_mem` budget is divided across the concurrently-running categories.

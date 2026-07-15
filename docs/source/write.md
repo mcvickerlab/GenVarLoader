@@ -81,6 +81,50 @@ gvl.write(
 
 This dataset would have both haplotypes and two tracks (`pos` and `neg`) available for samples that exist in both `all_chroms.bcf` and the BigWig tables (i.e. `gvl.write()` performs an inner join on samples).
 
+### Managed progress
+
+Pass a [`ProgressCallback`](api.md#genvarloader.ProgressCallback) to consume
+structured progress events, or pass a path to atomically replace a JSON snapshot:
+
+```python
+events = []
+gvl.write(
+    "dataset.gvl",
+    "regions.bed",
+    variants="cohort.bcf",
+    progress_callback=events.append,
+)
+
+gvl.write(
+    "dataset.gvl",
+    "regions.bed",
+    variants="cohort.bcf",
+    progress_path="work/gvl-progress.json",
+)
+```
+
+When `progress_path` is omitted, `NF_SEQLAB_PROGRESS_PATH`,
+`NF_SEQLAB_PROGRESS_FILE`, or `NF_SEQLAB_PROGRESS_SNAPSHOT_PATH` selects the same JSON sink;
+`NF_SEQLAB_PROGRESS_DIR` selects a directory for `.nf-seqlab-progress.json`,
+and `NF_SEQLAB_PROGRESS` accepts a path or a boolean-like enable/disable value.
+The remaining `NF_SEQLAB_PROGRESS_*` variables annotate the v1 snapshot with
+Nextflow run, process, file, task, and attempt identity. Keep the snapshot
+outside the destination dataset directory because the dataset itself is
+published atomically at the end of the write.
+
+A managed callback or sink suppresses GenVarLoader's native `tqdm` animation;
+with neither an explicit value nor a progress environment variable, the existing
+progress bar is unchanged. If both a callback and a snapshot are configured,
+both receive each event.
+
+Each [`ProgressEvent`](api.md#genvarloader.ProgressEvent) contains `phase`,
+`completed`, `total`, `unit`, `state`, `percent`, and an optional `message`.
+JSON snapshots use schema `nf-seqlab.progress/v1`. In-flight writer events
+reserve 100%; the single `state="complete"`, `percent=100` event is sent
+only after the final dataset has been published and its `metadata.json` is
+readable. Callback and snapshot failures are logged and isolated from the data
+write.
+
 ## Variants from a genoray sparse store (`.svar` / `.svar2`)
 
 Besides BCF/VCF and PGEN, `variants=` also accepts a genoray sparse columnar variant store — either the original `.svar` format or the newer `.svar2` format. Build one from a normalized VCF/BCF with `genoray`:

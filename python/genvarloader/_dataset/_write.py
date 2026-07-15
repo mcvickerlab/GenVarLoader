@@ -1,6 +1,7 @@
 import errno
 import gc
 import json
+import os
 import shutil
 import warnings
 from collections.abc import Callable, Iterator, Sequence
@@ -36,6 +37,7 @@ from seqpro.rag import Ragged, concatenate as rag_concatenate
 from tqdm.auto import tqdm
 
 from .._atomic import atomic_dir
+from .._progress import ProgressCallback, ProgressEvent, _resolve_progress
 from .._ragged import INTERVAL_DTYPE  # noqa: F401  # kept for the migration reader import
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
@@ -47,6 +49,73 @@ from ._utils import bed_to_regions, regions_to_bed
 DATASET_FORMAT_VERSION = SemanticVersion.parse("2.0.0")
 """On-disk layout version for a gvl.write dataset directory. Bump MAJOR only when
 an existing dataset can no longer be read correctly by new code."""
+
+
+class _ProgressReporter:
+    """Turn loop increments into structured in-flight progress events."""
+
+    def __init__(self, callback: ProgressCallback, total: int) -> None:
+        self._callback = callback
+        self.total = total
+        self.completed = 0
+        self._failed = False
+
+    def _emit(self, event: ProgressEvent) -> None:
+        if self._failed:
+            return
+        try:
+            self._callback(event)
+        except Exception as exc:
+            self._failed = True
+            logger.warning(f"Progress callback failed; disabling it: {exc!r}")
+
+    def start(self) -> None:
+        self._emit(
+            ProgressEvent(phase="write", completed=0, total=self.total, unit="regions")
+        )
+
+    def advance(self, amount: int, message: str | None = None) -> None:
+        completed = self.completed + amount
+        if completed > self.total:
+            raise ValueError("progress completed count exceeds total")
+        self.completed = completed
+        if completed < self.total:
+            self._emit(
+                ProgressEvent(
+                    phase="write",
+                    completed=completed,
+                    total=self.total,
+                    unit="regions",
+                    message=message,
+                )
+            )
+
+    def complete(self) -> None:
+        self.completed = self.total
+        self._emit(
+            ProgressEvent(
+                phase="finalize",
+                completed=self.total,
+                total=self.total,
+                unit="regions",
+                state="complete",
+                message="Finished writing dataset",
+            )
+        )
+
+
+def _update_progress(
+    pbar: Any | None,
+    progress: _ProgressReporter | None,
+    amount: int,
+    message: str | None = None,
+) -> None:
+    if progress is not None:
+        progress.advance(amount, message)
+        return
+    if message is not None:
+        pbar.set_description(message)
+    pbar.update(amount)
 
 
 def _check_dataset_format_version(meta: "Metadata", path: Path) -> None:
@@ -113,6 +182,8 @@ def write(
     overwrite: bool = False,
     max_mem: int | str = "4g",
     extend_to_length: bool = True,
+    progress_callback: ProgressCallback | None = None,
+    progress_path: str | Path | None = None,
 ):
     """Write a GVL dataset.
 
@@ -162,6 +233,13 @@ def write(
         Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
         haplotypes shorter than the intervals is acceptable, in which case they will be padded with reference bases when appropriate.
         Disabling this also reduces the amount of data read/written and is faster to run.
+    progress_callback
+        Optional :data:`ProgressCallback` for structured progress events.
+    progress_path
+        Optional path for atomic ``nf-seqlab.progress/v1`` JSON snapshots. The
+        ``NF_SEQLAB_PROGRESS_*`` environment variables select and annotate the
+        same sink when this is omitted. Managed progress disables the native
+        progress bars. Callback failures are logged and do not fail the write.
 
     Notes
     -----
@@ -175,6 +253,8 @@ def write(
     creation. Concurrent jobs that trigger index creation for those files depend on the
     upstream libraries' behavior.
     """
+    progress_callback = _resolve_progress(progress_callback, progress_path)
+    reporter: _ProgressReporter | None = None
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
     try:
@@ -209,6 +289,9 @@ def write(
                 bed = sp.bed.read(bed)
 
             gvl_bed, contigs, input_to_sorted_idx_map = _prep_bed(bed, max_jitter)
+            if progress_callback is not None:
+                reporter = _ProgressReporter(progress_callback, gvl_bed.height)
+                reporter.start()
             bed.with_columns(r_idx_map=pl.Series(input_to_sorted_idx_map)).write_ipc(
                 path / "input_regions.arrow"
             )
@@ -321,21 +404,31 @@ def write(
                 if isinstance(variants, VCF):
                     variants.set_samples(samples)
                     gvl_bed = _write_from_vcf(
-                        path, gvl_bed, variants, effective_max_mem, extend_to_length
+                        path,
+                        gvl_bed,
+                        variants,
+                        effective_max_mem,
+                        extend_to_length,
+                        reporter,
                     )
                 elif isinstance(variants, PGEN):
                     variants.set_samples(samples)
                     gvl_bed = _write_from_pgen(
-                        path, gvl_bed, variants, effective_max_mem, extend_to_length
+                        path,
+                        gvl_bed,
+                        variants,
+                        effective_max_mem,
+                        extend_to_length,
+                        reporter,
                     )
                 elif isinstance(variants, SparseVar):
                     gvl_bed, _svar_link = _write_from_svar(
-                        path, gvl_bed, variants, samples, extend_to_length
+                        path, gvl_bed, variants, samples, extend_to_length, reporter
                     )
                     metadata["svar_link"] = _svar_link
                 elif isinstance(variants, SparseVar2):
                     gvl_bed, _svar2_link = _write_from_svar2(
-                        path, gvl_bed, variants, samples, extend_to_length
+                        path, gvl_bed, variants, samples, extend_to_length, reporter
                     )
                     metadata["svar2_link"] = _svar2_link
                 metadata["ploidy"] = variants.ploidy
@@ -383,7 +476,12 @@ def write(
             _metadata = Metadata(**metadata)
             with open(path / "metadata.json", "w") as f:
                 f.write(_metadata.model_dump_json())
+                f.flush()
+                os.fsync(f.fileno())
 
+        Metadata.model_validate_json((dest / "metadata.json").read_text())
+        if reporter is not None:
+            reporter.complete()
         logger.info("Finished writing.")
     finally:
         warnings.simplefilter("default")
@@ -646,7 +744,12 @@ def _link_or_copy(src: Path, dst: Path) -> None:
 
 
 def _write_from_vcf(
-    path: Path, bed: pl.DataFrame, vcf: VCF, max_mem: int, extend_to_length: bool
+    path: Path,
+    bed: pl.DataFrame,
+    vcf: VCF,
+    max_mem: int,
+    extend_to_length: bool,
+    progress: _ProgressReporter | None = None,
 ):
     assert vcf._index is not None, (
         "caller must load the VCF index before _write_from_vcf"
@@ -660,7 +763,10 @@ def _write_from_vcf(
     _link_or_copy(vcf._index_path(), out_dir / "variants.arrow")
 
     return _write_phased_chunked(
-        out_dir, bed, _vcf_region_chunks(bed, vcf, max_mem, extend_to_length)
+        out_dir,
+        bed,
+        _vcf_region_chunks(bed, vcf, max_mem, extend_to_length),
+        progress,
     )
 
 
@@ -811,7 +917,12 @@ def _vcf_region_chunks(
 
 
 def _write_from_pgen(
-    path: Path, bed: pl.DataFrame, pgen: PGEN, max_mem: int, extend_to_length: bool
+    path: Path,
+    bed: pl.DataFrame,
+    pgen: PGEN,
+    max_mem: int,
+    extend_to_length: bool,
+    progress: _ProgressReporter | None = None,
 ):
     assert pgen._index is not None, (
         "caller must init the PGEN index before _write_from_pgen"
@@ -832,7 +943,10 @@ def _write_from_pgen(
     _link_or_copy(pgen._index_path(), out_dir / "variants.arrow")
 
     return _write_phased_chunked(
-        out_dir, bed, _pgen_region_chunks(bed, pgen, max_mem, extend_to_length)
+        out_dir,
+        bed,
+        _pgen_region_chunks(bed, pgen, max_mem, extend_to_length),
+        progress,
     )
 
 
@@ -920,6 +1034,7 @@ def _write_phased_chunked(
     out_dir: Path,
     bed: pl.DataFrame,
     region_iter: Iterator[tuple[list[Ragged], Any, str | None]],
+    progress: _ProgressReporter | None = None,
 ) -> pl.DataFrame:
     """Aggregate per-region sparse genotype chunks and write them to ``out_dir``.
 
@@ -931,12 +1046,10 @@ def _write_phased_chunked(
     offset_memmap_offsets = 0
     last_offset = 0
     max_ends: list[Any] = []
-    pbar = tqdm(total=bed.height, unit=" region")
+    pbar = tqdm(total=bed.height, unit=" region") if progress is None else None
     first_no_variant_warning = True
 
     for ls_sparse, region_end, desc in region_iter:
-        if desc is not None:
-            pbar.set_description(desc)
         max_ends.append(region_end)
 
         var_idxs = rag_concatenate(ls_sparse, axis=-1).to_packed().data
@@ -963,8 +1076,9 @@ def _write_phased_chunked(
             offset_memmap_offsets,
             last_offset,
         )
-        pbar.update()
-    pbar.close()
+        _update_progress(pbar, progress, 1, desc)
+    if pbar is not None:
+        pbar.close()
 
     out = np.memmap(
         out_dir / "offsets.npy",
@@ -985,6 +1099,7 @@ def _write_from_svar(
     svar: SparseVar,
     samples: list[str],
     extend_to_length: bool,
+    progress: _ProgressReporter | None = None,
 ) -> tuple[pl.DataFrame, SvarLink]:
     _reject_unsupported_variants(svar.index, "SVAR")
 
@@ -1006,16 +1121,14 @@ def _write_from_svar(
     )["end"].to_numpy()
     max_ends = np.empty(bed.height, np.int32)
     contig_offset = 0
-    pbar = tqdm(total=bed.height, unit=" region")
+    pbar = tqdm(total=bed.height, unit=" region") if progress is None else None
     first_no_variant_warning = True
 
     for (c,), df in bed.partition_by(
         "chrom", as_dict=True, maintain_order=True
     ).items():
         c = cast(str, c)
-        pbar.set_description(
-            f"Processing genotypes for {df.height} regions on contig {c}"
-        )
+        desc = f"Processing genotypes for {df.height} regions on contig {c}"
         # set offsets
         # (2 r s p)
         out = offsets[:, contig_offset : contig_offset + df.height]
@@ -1064,12 +1177,11 @@ def _write_from_svar(
         c_max_ends[~v_idxs.mask] = v_ends[v_idxs.data[~v_idxs.mask]]
         c_max_ends[v_idxs.mask] = df.filter(v_idxs.mask)["chromEnd"]
         contig_offset += df.height
-        pbar.update(df.height)
+        _update_progress(pbar, progress, df.height, desc)
 
-    pbar.close()
+    if pbar is not None:
+        pbar.close()
     offsets.flush()
-
-    import os
 
     from ._svar_link import SvarFingerprint
 
@@ -1154,6 +1266,7 @@ def _write_from_svar2(
     svar2: SparseVar2,
     samples: list[str],
     extend_to_length: bool,
+    progress: _ProgressReporter | None = None,
 ) -> tuple[pl.DataFrame, Svar2Link]:
     # symbolic/breakend variants are rejected upstream at .svar2 conversion; the
     # store cannot represent them, and SparseVar2 exposes no index to re-check.
@@ -1199,12 +1312,12 @@ def _write_from_svar2(
 
     max_ends = np.empty(R, np.int32)
     contig_offset = 0
-    pbar = tqdm(total=R, unit=" region")
+    pbar = tqdm(total=R, unit=" region") if progress is None else None
     for (c,), df in bed.partition_by(
         "chrom", as_dict=True, maintain_order=True
     ).items():
         c = cast(str, c)
-        pbar.set_description(f"Processing svar2 ranges for {df.height} regions on {c}")
+        desc = f"Processing svar2 ranges for {df.height} regions on {c}"
         lo, hi = contig_offset, contig_offset + df.height
         rc = df.height
         starts = df["chromStart"].to_numpy()
@@ -1224,8 +1337,9 @@ def _write_from_svar2(
         max_ends[lo:hi] = _svar2_region_max_ends(svar2, c, starts, ends, samples)
 
         contig_offset += df.height
-        pbar.update(df.height)
-    pbar.close()
+        _update_progress(pbar, progress, df.height, desc)
+    if pbar is not None:
+        pbar.close()
     for mm in (vk_snp, vk_indel, dense_snp, dense_indel):
         mm.flush()
 
