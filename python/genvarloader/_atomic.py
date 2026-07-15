@@ -2,10 +2,10 @@
 
 The single primitive both the `.gvlfa` FASTA cache and `gvl.write` dataset
 directories need: build into a private sibling temp dir, then publish it to the
-destination. New destinations use one atomic `os.replace`. Portable overwrite of
-a non-empty directory requires move-aside-then-rename, with rollback if publishing
-the new directory fails. A best-effort `filelock` avoids redundant builds but is
-not required for data integrity.
+destination with an atomic `os.replace`. A best-effort `filelock` avoids N
+redundant concurrent builds, but is never required for correctness — the atomic
+rename is the correctness guarantee, so a lock timeout or a silent network-FS
+no-op simply means "build anyway".
 """
 
 from __future__ import annotations
@@ -35,40 +35,21 @@ class SkipPublish(Exception):  # noqa: N818 - control-flow sentinel, not an erro
     """
 
 
-def _publish(
-    tmp: Path,
-    dest: Path,
-    *,
-    overwrite: bool,
-    require_publish: bool,
-) -> None:
+def _publish(tmp: Path, dest: Path, *, overwrite: bool) -> None:
     """Move `tmp` into place at `dest` as atomically as the filesystem allows."""
     if dest.exists():
         if not overwrite:
             # A racing builder published `dest` while we built. Discard ours and
-            # Reuse callers can let the other publisher win when content is
-            # interchangeable; strict callers raise below.
+            # let theirs win: for the FASTA cache the content is byte-identical so
+            # this is harmless; for a dataset write it is first-writer-wins.
             shutil.rmtree(tmp, ignore_errors=True)
-            if require_publish:
-                raise FileExistsError(
-                    f"{dest} was published by another writer before this build "
-                    "completed."
-                )
             return
         aside = dest.with_name(f"{dest.name}.old.{uuid4().hex[:8]}")
         try:
             os.replace(dest, aside)
         except FileNotFoundError:
             aside = None  # another writer already moved/removed dest
-        try:
-            os.replace(tmp, dest)
-        except BaseException as publish_error:
-            if aside is not None:
-                try:
-                    os.replace(aside, dest)
-                except BaseException as rollback_error:
-                    raise publish_error from rollback_error
-            raise
+        os.replace(tmp, dest)
         if aside is not None:
             shutil.rmtree(aside, ignore_errors=True)
     else:
@@ -82,16 +63,13 @@ def atomic_dir(
     overwrite: bool = False,
     lock: bool = True,
     timeout: float = DEFAULT_LOCK_TIMEOUT,
-    require_publish: bool = False,
 ) -> Iterator[Path]:
     """Yield a private temp dir to build into; atomically publish it to `dest`.
 
     On clean exit the temp dir is `os.replace`-d into `dest`. On `SkipPublish`
     the temp dir is removed and `dest` is left untouched. On any other exception
     the temp dir is removed and the exception propagates; `dest` is never
-    partially written. During overwrite, readers can briefly observe ``dest`` as
-    absent between the move-aside and publish renames. A publish failure restores
-    the old directory; if rollback also fails, its sibling backup is preserved.
+    partially written.
 
     Parameters
     ----------
@@ -104,9 +82,6 @@ def atomic_dir(
         Acquire a best-effort `<dest>.lock` to avoid redundant concurrent builds.
     timeout
         Seconds to wait for the lock before logging and proceeding anyway.
-    require_publish
-        Raise :class:`FileExistsError` if another writer publishes ``dest``
-        before this build. By default, discard this build and reuse the winner.
     """
     dest = Path(dest)
     if dest.exists() and not overwrite:
@@ -136,16 +111,7 @@ def atomic_dir(
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     else:
-        try:
-            _publish(
-                tmp,
-                dest,
-                overwrite=overwrite,
-                require_publish=require_publish,
-            )
-        except BaseException:
-            shutil.rmtree(tmp, ignore_errors=True)
-            raise
+        _publish(tmp, dest, overwrite=overwrite)
     finally:
         if flock is not None:
             lock_path = Path(str(dest) + ".lock")
