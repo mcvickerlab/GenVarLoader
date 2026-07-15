@@ -1,5 +1,9 @@
+import os
+from pathlib import Path
+
 import pytest
 
+from genvarloader import _atomic
 from genvarloader._atomic import SkipPublish, atomic_dir
 
 
@@ -53,6 +57,96 @@ def test_overwrite_replaces_existing_dir(tmp_path):
     assert (dest / "new.bin").read_bytes() == b"new"
     assert not (dest / "old.bin").exists()
     assert list(tmp_path.glob("artifact.old.*")) == []
+
+
+def test_overwrite_retains_old_tree_during_unavoidable_publish_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    dest = tmp_path / "artifact"
+    dest.mkdir()
+    (dest / "old.bin").write_bytes(b"old")
+    real_replace = os.replace
+    observed_handoff: list[tuple[bool, bytes]] = []
+
+    def inspect_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]):
+        src_path, dst_path = Path(src), Path(dst)
+        if src_path.name.startswith("artifact.tmp.") and dst_path == dest:
+            backups = list(tmp_path.glob("artifact.old.*"))
+            assert len(backups) == 1
+            observed_handoff.append((dest.exists(), (backups[0] / "old.bin").read_bytes()))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(_atomic.os, "replace", inspect_replace)
+
+    with atomic_dir(dest, overwrite=True, lock=False) as tmp:
+        (tmp / "new.bin").write_bytes(b"new")
+
+    assert observed_handoff == [(False, b"old")]
+    assert (dest / "new.bin").read_bytes() == b"new"
+    assert list(tmp_path.glob("artifact.old.*")) == []
+
+
+def test_overwrite_publish_failure_restores_old_dest_and_cleans_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    dest = tmp_path / "artifact"
+    dest.mkdir()
+    (dest / "old.bin").write_bytes(b"old")
+    real_replace = os.replace
+    replace_count = 0
+
+    def fail_new_publish(src: str | os.PathLike[str], dst: str | os.PathLike[str]):
+        nonlocal replace_count
+        replace_count += 1
+        if replace_count == 2:
+            raise OSError("publish failed")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(_atomic.os, "replace", fail_new_publish)
+
+    with pytest.raises(OSError, match="publish failed"):
+        with atomic_dir(dest, overwrite=True, lock=False) as tmp:
+            (tmp / "new.bin").write_bytes(b"new")
+
+    assert (dest / "old.bin").read_bytes() == b"old"
+    assert list(tmp_path.glob("artifact.tmp.*")) == []
+    assert list(tmp_path.glob("artifact.old.*")) == []
+
+
+def test_overwrite_rollback_failure_preserves_backup_and_cleans_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    dest = tmp_path / "artifact"
+    dest.mkdir()
+    (dest / "old.bin").write_bytes(b"old")
+    real_replace = os.replace
+    replace_count = 0
+
+    def fail_publish_and_rollback(
+        src: str | os.PathLike[str], dst: str | os.PathLike[str]
+    ) -> None:
+        nonlocal replace_count
+        replace_count += 1
+        if replace_count == 2:
+            raise OSError("publish failed")
+        if replace_count == 3:
+            raise OSError("rollback failed")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(_atomic.os, "replace", fail_publish_and_rollback)
+
+    with pytest.raises(OSError, match="publish failed") as exc_info:
+        with atomic_dir(dest, overwrite=True, lock=False) as tmp:
+            (tmp / "new.bin").write_bytes(b"new")
+
+    backups = list(tmp_path.glob("artifact.old.*"))
+    assert replace_count == 3
+    assert not dest.exists()
+    assert len(backups) == 1
+    assert (backups[0] / "old.bin").read_bytes() == b"old"
+    assert list(tmp_path.glob("artifact.tmp.*")) == []
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert str(exc_info.value.__cause__) == "rollback failed"
 
 
 def test_skip_publish_leaves_dest_untouched(tmp_path):

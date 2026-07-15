@@ -1,3 +1,4 @@
+import asyncio
 import errno
 import gc
 import json
@@ -5,9 +6,10 @@ import os
 import shutil
 import warnings
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import CancelledError as FuturesCancelledError
 from importlib.metadata import version
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from .._bigwig import BigWigs
@@ -100,6 +102,44 @@ class _ProgressReporter:
                 unit="regions",
                 state="complete",
                 message="Finished writing dataset",
+            )
+        )
+
+    def stop(
+        self,
+        state: Literal["failed", "cancelled"],
+        message: str | None = None,
+    ) -> None:
+        completed = min(self.completed, self.total - 1)
+        self._emit(
+            ProgressEvent(
+                phase="write",
+                completed=completed,
+                total=self.total,
+                unit="regions",
+                state=state,
+                message=message,
+            )
+        )
+
+
+def _stop_progress(
+    reporter: _ProgressReporter | None,
+    callback: ProgressCallback | None,
+    state: Literal["failed", "cancelled"],
+    message: str,
+) -> None:
+    if reporter is not None:
+        reporter.stop(state, message)
+    elif callback is not None:
+        callback(
+            ProgressEvent(
+                phase="write",
+                completed=0,
+                total=None,
+                unit="regions",
+                state=state,
+                message=message,
             )
         )
 
@@ -236,24 +276,34 @@ def write(
     progress_callback
         Optional :data:`ProgressCallback` for structured progress events.
     progress_path
-        Optional path for atomic ``nf-seqlab.progress/v1`` JSON snapshots. The
-        ``NF_SEQLAB_PROGRESS_*`` environment variables select and annotate the
-        same sink when this is omitted. Managed progress disables the native
-        progress bars. Callback failures are logged and do not fail the write.
+        Optional path for atomic structured-progress JSON snapshots. Standalone
+        sinks use the generic GenVarLoader schema; a complete managed identity
+        uses ``nf-seqlab.progress/v1``. The ``NF_SEQLAB_PROGRESS_*`` environment
+        variables select and annotate the same sink when this is omitted. The
+        snapshot path must be outside ``path`` and outside its reserved
+        ``<path>.lock`` sibling subtree, derived from the original output spelling
+        before symlink resolution. Structured progress disables the native progress
+        bars. Observer failures are logged and do not fail the write.
 
     Notes
     -----
-    The dataset directory is built atomically: all data is written to a private sibling
-    temp directory and published via :func:`os.replace`. A best-effort ``filelock``
-    prevents redundant parallel rebuilds, but correctness relies on the atomic rename —
-    the lock is advisory only.
+    The dataset directory is built in a private sibling temp directory. New
+    destinations are published with one :func:`os.replace`; overwrite uses a
+    rollback-safe move-aside-then-rename sequence, during which readers can briefly
+    observe the destination as absent. A best-effort ``filelock`` prevents redundant
+    parallel rebuilds but is advisory only.
 
     Out of scope: ``genoray`` ``.gvi`` index files and ``pysam`` ``.fai``/``.gzi`` index
     files are created by those libraries and are not covered by gvl's atomic/locked
     creation. Concurrent jobs that trigger index creation for those files depend on the
     upstream libraries' behavior.
     """
-    progress_callback = _resolve_progress(progress_callback, progress_path)
+    dest = Path(path)
+    progress_callback = _resolve_progress(
+        progress_callback,
+        progress_path,
+        output_path=dest,
+    )
     reporter: _ProgressReporter | None = None
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
@@ -283,8 +333,7 @@ def write(
             "version": SemanticVersion.parse(version("genvarloader")),
             "format_version": DATASET_FORMAT_VERSION,
         }
-        dest = Path(path)
-        with atomic_dir(dest, overwrite=overwrite) as path:
+        with atomic_dir(dest, overwrite=overwrite, require_publish=True) as path:
             if isinstance(bed, (str, Path)):
                 bed = sp.bed.read(bed)
 
@@ -483,6 +532,17 @@ def write(
         if reporter is not None:
             reporter.complete()
         logger.info("Finished writing.")
+    except (KeyboardInterrupt, asyncio.CancelledError, FuturesCancelledError) as exc:
+        _stop_progress(
+            reporter,
+            progress_callback,
+            "cancelled",
+            str(exc) or "Dataset write cancelled",
+        )
+        raise
+    except Exception as exc:
+        _stop_progress(reporter, progress_callback, "failed", str(exc))
+        raise
     finally:
         warnings.simplefilter("default")
 

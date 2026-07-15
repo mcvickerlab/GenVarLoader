@@ -1,3 +1,7 @@
+import asyncio
+import threading
+from concurrent.futures import CancelledError as FuturesCancelledError
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +11,7 @@ import pytest
 from genoray._svar import dense2sparse
 
 import genvarloader as gvl
+from genvarloader import _atomic
 from genvarloader import ProgressEvent
 from genvarloader._dataset import _write
 from genvarloader._dataset._write import (
@@ -224,4 +229,232 @@ def test_write_isolates_callback_failure(
     assert (
         Metadata.model_validate_json((dest / "metadata.json").read_text()).n_regions
         == 3
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_state"),
+    [
+        (RuntimeError("track failed"), "failed"),
+        (KeyboardInterrupt("cancelled"), "cancelled"),
+        (asyncio.CancelledError("async cancelled"), "cancelled"),
+        (FuturesCancelledError("future cancelled"), "cancelled"),
+    ],
+)
+def test_write_emits_terminal_event_on_failure_or_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+    expected_state: str,
+):
+    dest = tmp_path / "dataset.gvl"
+    events: list[ProgressEvent] = []
+
+    def fail_track(*_args, **_kwargs) -> None:
+        raise error
+
+    monkeypatch.setattr(_write, "_write_track", fail_track)
+
+    with pytest.raises(type(error), match=str(error)):
+        gvl.write(dest, _bed(), tracks=_track(), progress_callback=events.append)
+
+    assert [event.state for event in events] == ["running", expected_state]
+    assert events[-1].completed == 0
+    assert events[-1].total == 3
+    assert events[-1].percent == 0
+    assert events[-1].message == str(error)
+    assert not dest.exists()
+
+
+def test_write_emits_indeterminate_terminal_event_before_total_is_known(
+    tmp_path: Path,
+):
+    dest = tmp_path / "dataset.gvl"
+    events: list[ProgressEvent] = []
+
+    with pytest.raises(ValueError, match="At least one"):
+        gvl.write(dest, _bed(), progress_callback=events.append)
+
+    assert len(events) == 1
+    assert events[0].state == "failed"
+    assert events[0].completed == 0
+    assert events[0].total is None
+    assert events[0].percent is None
+    assert events[0].message is not None
+    assert not dest.exists()
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled"])
+def test_unsuccessful_terminal_keeps_total_without_reporting_completion(state: str):
+    events: list[ProgressEvent] = []
+    reporter = _ProgressReporter(events.append, total=2)
+    reporter.start()
+    reporter.advance(2)
+
+    reporter.stop(state, "publication did not finish")  # type: ignore[arg-type]
+
+    assert events[-1].state == state
+    assert events[-1].completed == 1
+    assert events[-1].total == 2
+    assert events[-1].percent == 50
+
+
+@pytest.mark.parametrize("via_environment", [False, True])
+def test_write_rejects_progress_snapshot_inside_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    via_environment: bool,
+):
+    dest = tmp_path / "dataset.gvl"
+    snapshot = dest / "progress.json"
+    kwargs = {}
+    if via_environment:
+        monkeypatch.setenv("NF_SEQLAB_PROGRESS_PATH", str(snapshot))
+    else:
+        kwargs["progress_path"] = snapshot
+    monkeypatch.setattr(_write, "_write_track", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(ValueError, match="outside the dataset destination"):
+        gvl.write(dest, _bed(), tracks=_track(), **kwargs)
+
+    assert not dest.exists()
+    assert not snapshot.exists()
+
+
+@pytest.mark.parametrize("via_environment", [False, True])
+def test_write_rejects_progress_snapshot_at_reserved_lock_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    via_environment: bool,
+):
+    dest = tmp_path / "dataset.gvl"
+    snapshot = Path(f"{dest}.lock")
+    kwargs = {}
+    if via_environment:
+        monkeypatch.setenv("NF_SEQLAB_PROGRESS_PATH", str(snapshot))
+    else:
+        kwargs["progress_path"] = snapshot
+    monkeypatch.setattr(_write, "_write_track", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(ValueError, match="reserved dataset lock path"):
+        gvl.write(dest, _bed(), tracks=_track(), **kwargs)
+
+    assert not dest.exists()
+    assert not snapshot.exists()
+
+
+@pytest.mark.parametrize("via_environment", [False, True])
+def test_write_rejects_progress_snapshot_beneath_reserved_lock_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    via_environment: bool,
+):
+    dest = tmp_path / "dataset.gvl"
+    reserved_lock = Path(f"{dest}.lock")
+    snapshot = reserved_lock / "progress.json"
+    kwargs = {}
+    if via_environment:
+        monkeypatch.setenv("NF_SEQLAB_PROGRESS_PATH", str(snapshot))
+    else:
+        kwargs["progress_path"] = snapshot
+    monkeypatch.setattr(_write, "_write_track", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(ValueError, match="reserved dataset lock path"):
+        gvl.write(dest, _bed(), tracks=_track(), **kwargs)
+
+    assert not dest.exists()
+    assert not reserved_lock.exists()
+
+
+@pytest.mark.parametrize("via_environment", [False, True])
+@pytest.mark.parametrize("beneath_lock", [False, True], ids=["exact", "descendant"])
+def test_write_rejects_reserved_lock_paths_for_symlink_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    via_environment: bool,
+    beneath_lock: bool,
+):
+    target_parent = tmp_path / "target"
+    target_parent.mkdir()
+    target = target_parent / "dataset.gvl"
+    dest = tmp_path / "dataset-link.gvl"
+    dest.symlink_to(target, target_is_directory=True)
+    reserved_lock = Path(f"{dest}.lock")
+    snapshot = reserved_lock / "progress.json" if beneath_lock else reserved_lock
+    kwargs = {}
+    if via_environment:
+        monkeypatch.setenv("NF_SEQLAB_PROGRESS_PATH", str(snapshot))
+    else:
+        kwargs["progress_path"] = snapshot
+    monkeypatch.setattr(_write, "_write_track", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(ValueError, match="reserved dataset lock path"):
+        gvl.write(dest, _bed(), tracks=_track(), **kwargs)
+
+    assert dest.is_symlink()
+    assert not target.exists()
+    assert not reserved_lock.exists()
+
+
+def test_concurrent_write_only_publisher_reports_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    dest = tmp_path / "dataset.gvl"
+    first_inside_write = threading.Event()
+    release_first = threading.Event()
+    second_waiting_for_lock = threading.Event()
+    shared_lock = threading.Lock()
+    acquire_count = 0
+    acquire_count_lock = threading.Lock()
+
+    class CoordinatedFileLock:
+        def __init__(self, _path: str) -> None:
+            pass
+
+        def acquire(self, timeout: float) -> None:
+            nonlocal acquire_count
+            with acquire_count_lock:
+                acquire_count += 1
+                if acquire_count == 2:
+                    second_waiting_for_lock.set()
+            if not shared_lock.acquire(timeout=timeout):
+                raise _atomic.Timeout
+
+        def release(self) -> None:
+            shared_lock.release()
+
+    def write_track(_path, bed, *_args) -> None:
+        if bed.height == 1:
+            first_inside_write.set()
+            assert release_first.wait(timeout=5)
+
+    monkeypatch.setattr(_atomic, "FileLock", CoordinatedFileLock)
+    monkeypatch.setattr(_write, "_write_track", write_track)
+
+    first_events: list[ProgressEvent] = []
+    second_events: list[ProgressEvent] = []
+
+    def run(bed: pl.DataFrame, events: list[ProgressEvent]) -> BaseException | None:
+        try:
+            gvl.write(dest, bed, tracks=_track(), progress_callback=events.append)
+        except BaseException as exc:
+            return exc
+        return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(run, _bed().head(1), first_events)
+        assert first_inside_write.wait(timeout=5)
+        second = pool.submit(run, _bed().head(2), second_events)
+        assert second_waiting_for_lock.wait(timeout=5)
+        release_first.set()
+        first_error = first.result(timeout=5)
+        second_error = second.result(timeout=5)
+
+    assert first_error is None
+    assert isinstance(second_error, FileExistsError)
+    assert [event.state for event in first_events] == ["running", "complete"]
+    assert all(event.state != "complete" for event in second_events)
+    assert (
+        Metadata.model_validate_json((dest / "metadata.json").read_text()).n_regions
+        == 1
     )

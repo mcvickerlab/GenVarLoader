@@ -107,23 +107,47 @@ When `progress_path` is omitted, `NF_SEQLAB_PROGRESS_PATH`,
 `NF_SEQLAB_PROGRESS_FILE`, or `NF_SEQLAB_PROGRESS_SNAPSHOT_PATH` selects the same JSON sink;
 `NF_SEQLAB_PROGRESS_DIR` selects a directory for `.nf-seqlab-progress.json`,
 and `NF_SEQLAB_PROGRESS` accepts a path or a boolean-like enable/disable value.
-The remaining `NF_SEQLAB_PROGRESS_*` variables annotate the v1 snapshot with
-Nextflow run, process, file, task, and attempt identity. Keep the snapshot
-outside the destination dataset directory because the dataset itself is
-published atomically at the end of the write.
+The remaining `NF_SEQLAB_PROGRESS_*` variables annotate the snapshot with
+Nextflow run, process, file, task, and attempt identity. The snapshot path must
+be outside the destination dataset directory; paths at or below the destination,
+the reserved sibling `<destination>.lock`, or anything beneath that lock path are
+rejected before either path is created. The lock sibling is derived from the
+original destination spelling before symlink resolution, matching dataset
+publication locking.
 
-A managed callback or sink suppresses GenVarLoader's native `tqdm` animation;
+A structured callback or sink suppresses GenVarLoader's native `tqdm` animation;
 with neither an explicit value nor a progress environment variable, the existing
 progress bar is unchanged. If both a callback and a snapshot are configured,
-both receive each event.
+the callback receives every event exactly. JSON writes are coalesced to at most
+four in-flight updates per second, while the first update and every terminal
+update are written immediately. Snapshot publication is serialized per sink;
+once a terminal event is published it remains final and later events are ignored.
 
 Each [`ProgressEvent`](api.md#genvarloader.ProgressEvent) contains `phase`,
 `completed`, `total`, `unit`, `state`, `percent`, and an optional `message`.
-JSON snapshots use schema `nf-seqlab.progress/v1`. In-flight writer events
-reserve 100%; the single `state="complete"`, `percent=100` event is sent
-only after the final dataset has been published and its `metadata.json` is
-readable. Callback and snapshot failures are logged and isolated from the data
-write.
+Construction rejects blank phase/unit labels, non-integer counts (including
+booleans), and states outside `running`, `complete`, `failed`, and `cancelled`.
+`complete` requires a known total with `completed == total`; every other state
+must remain strictly below a known total.
+Without a full managed identity, JSON snapshots use the generic
+`schema_version=1`, `source="genvarloader"` schema. A positive attempt plus all
+run, stage, process, file, parent-file, and task fields selects
+`nf-seqlab.progress/v1`; a missing, blank, or whitespace-only parent file ID
+falls back to the file ID. Its terminal success state is `"completed"`. Callback
+events always use `state="complete"`. In-flight writer events reserve 100%; the
+single successful `percent=100` event is sent only after this writer publishes
+the final dataset and re-reads its `metadata.json`. Errors emit terminal
+`"failed"`; `KeyboardInterrupt`, `asyncio.CancelledError`, and
+`concurrent.futures.CancelledError` emit terminal `"cancelled"`, all without 100%.
+Late failure or cancellation retains the known total and caps `completed` below
+it; exact `completed == total` is reserved for published success. Callback and
+snapshot failures are logged and isolated from the data write.
+
+New dataset paths are published with one atomic rename. With `overwrite=True`,
+portable replacement of a non-empty directory uses move-aside-then-rename, so
+readers can briefly observe the destination as absent. If publishing the new
+directory fails, GenVarLoader restores the old one; if rollback itself fails,
+the old directory remains preserved under its sibling `.old.*` backup path.
 
 ## Variants from a genoray sparse store (`.svar` / `.svar2`)
 

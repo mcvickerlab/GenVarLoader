@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,11 +16,12 @@ from typing import Literal, TypeAlias
 from loguru import logger
 
 ProgressState: TypeAlias = Literal["running", "complete", "failed", "cancelled"]
+_PROGRESS_STATES = frozenset({"running", "complete", "failed", "cancelled"})
 
 
 @dataclass(frozen=True, slots=True)
 class ProgressEvent:
-    """One immutable update for a long-running artifact operation."""
+    """One immutable, schema-validated artifact progress update."""
 
     phase: str
     completed: int
@@ -28,17 +31,32 @@ class ProgressEvent:
     message: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.phase:
-            raise ValueError("phase must not be empty")
-        if not self.unit:
-            raise ValueError("unit must not be empty")
+        if not isinstance(self.phase, str) or not self.phase.strip():
+            raise ValueError("phase must be a nonblank string")
+        if not isinstance(self.unit, str) or not self.unit.strip():
+            raise ValueError("unit must be a nonblank string")
+        if not isinstance(self.completed, int) or isinstance(self.completed, bool):
+            raise ValueError("completed must be an integer")
+        if self.total is not None and (
+            not isinstance(self.total, int) or isinstance(self.total, bool)
+        ):
+            raise ValueError("total must be an integer or None")
+        if not isinstance(self.state, str) or self.state not in _PROGRESS_STATES:
+            raise ValueError(
+                "state must be one of: running, complete, failed, cancelled"
+            )
         if self.completed < 0:
             raise ValueError("completed must be >= 0")
         if self.total is not None:
             if self.total <= 0:
                 raise ValueError("total must be > 0 when provided")
-            if self.completed > self.total:
-                raise ValueError("completed must not exceed total")
+        if self.state == "complete":
+            if self.total is None or self.completed != self.total:
+                raise ValueError(
+                    "complete progress requires a known total and completed == total"
+                )
+        elif self.total is not None and self.completed >= self.total:
+            raise ValueError("non-complete progress must remain below total")
 
     @property
     def percent(self) -> float | None:
@@ -51,6 +69,7 @@ class ProgressEvent:
 ProgressCallback: TypeAlias = Callable[[ProgressEvent], None]
 
 _SNAPSHOT_NAME = ".nf-seqlab-progress.json"
+_SNAPSHOT_MIN_INTERVAL_SECONDS = 0.25
 _IDENTITY_ENV = {
     "run_id": "NF_SEQLAB_PROGRESS_RUN_ID",
     "stage_id": "NF_SEQLAB_PROGRESS_STAGE_ID",
@@ -85,7 +104,13 @@ def _snapshot_path(
 
 
 class JsonProgressSink:
-    """Atomically replace one ``nf-seqlab.progress/v1`` JSON snapshot."""
+    """Atomically replace one throttled structured-progress JSON snapshot.
+
+    A standalone sink writes the generic GenVarLoader schema. When every managed
+    identity field and a positive attempt are configured, it writes the
+    ``nf-seqlab.progress/v1`` schema instead. Publication is serialized per sink;
+    terminal events are immediate and final, while running events are throttled.
+    """
 
     def __init__(
         self,
@@ -96,7 +121,8 @@ class JsonProgressSink:
         self.path = Path(path)
         env = os.environ if environ is None else environ
         self._identity = {field: env.get(name) for field, name in _IDENTITY_ENV.items()}
-        if self._identity["parent_file_id"] is None:
+        parent_file_id = self._identity["parent_file_id"]
+        if parent_file_id is None or not parent_file_id.strip():
             self._identity["parent_file_id"] = self._identity["file_id"]
         attempt = env.get("NF_SEQLAB_PROGRESS_ATTEMPT")
         try:
@@ -104,21 +130,71 @@ class JsonProgressSink:
         except ValueError:
             logger.warning(f"Ignoring invalid NF_SEQLAB_PROGRESS_ATTEMPT={attempt!r}")
             self._attempt = None
+        if self._attempt is not None and self._attempt < 1:
+            logger.warning(f"Ignoring invalid NF_SEQLAB_PROGRESS_ATTEMPT={attempt!r}")
+            self._attempt = None
+        self._managed = self._attempt is not None and all(
+            value is not None and value.strip() for value in self._identity.values()
+        )
+        self._clock: Callable[[], float] = time.monotonic
+        self._min_interval_seconds = _SNAPSHOT_MIN_INTERVAL_SECONDS
+        self._last_write_at: float | None = None
+        self._publication_lock = threading.Lock()
+        self._terminal_published = False
 
     def __call__(self, event: ProgressEvent) -> None:
-        payload = {
-            "schema": "nf-seqlab.progress/v1",
-            **self._identity,
-            "attempt": self._attempt,
-            "state": event.state,
-            "phase": event.phase,
-            "completed": event.completed,
-            "total": event.total,
-            "unit": event.unit,
-            "percent": event.percent,
-            "message": event.message,
-            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        }
+        with self._publication_lock:
+            if self._terminal_published:
+                return
+            now = self._clock()
+            if (
+                event.state == "running"
+                and self._last_write_at is not None
+                and now - self._last_write_at < self._min_interval_seconds
+            ):
+                return
+
+            self._write(event)
+            self._last_write_at = now
+            self._terminal_published = event.state != "running"
+
+    def _write(self, event: ProgressEvent) -> None:
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if self._managed:
+            payload = {
+                "schema": "nf-seqlab.progress/v1",
+                **self._identity,
+                "attempt": self._attempt,
+                "state": "completed" if event.state == "complete" else event.state,
+                "phase": event.phase,
+                "completed": event.completed,
+                "total": event.total,
+                "unit": event.unit,
+                "percent": event.percent,
+                "message": event.message,
+                "updated_at": timestamp,
+            }
+        else:
+            identity: dict[str, str | int] = {
+                field: value
+                for field, value in self._identity.items()
+                if value is not None and value.strip()
+            }
+            if self._attempt is not None:
+                identity["attempt"] = self._attempt
+            payload = {
+                "schema_version": 1,
+                "source": "genvarloader",
+                "identity": identity,
+                "state": event.state,
+                "phase": event.phase,
+                "completed": event.completed,
+                "total": event.total,
+                "unit": event.unit,
+                "percent": event.percent,
+                "message": event.message,
+                "timestamp": timestamp,
+            }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path: Path | None = None
         try:
@@ -164,6 +240,7 @@ def _resolve_progress(
     progress_path: str | Path | None = None,
     *,
     environ: Mapping[str, str] | None = None,
+    output_path: str | Path | None = None,
 ) -> ProgressCallback | None:
     """Combine an explicit callback with an explicit or environment JSON sink."""
     env = os.environ if environ is None else environ
@@ -171,11 +248,24 @@ def _resolve_progress(
     if progress_callback is not None:
         callbacks.append(progress_callback)
     if path := _snapshot_path(progress_path, env):
+        if output_path is not None:
+            original_output = Path(output_path)
+            output = original_output.resolve()
+            snapshot = path.resolve()
+            reserved_lock = Path(str(original_output) + ".lock").resolve()
+            if snapshot == reserved_lock or reserved_lock in snapshot.parents:
+                raise ValueError(
+                    "progress snapshot path must be outside the reserved dataset "
+                    f"lock path {reserved_lock}: {path}"
+                )
+            if snapshot == output or output in snapshot.parents:
+                raise ValueError(
+                    "progress snapshot path must be outside the dataset "
+                    f"destination {output_path}: {path}"
+                )
         callbacks.append(JsonProgressSink(path, environ=env))
     if not callbacks:
         return None
-    if len(callbacks) == 1:
-        return callbacks[0]
     return _ProgressFanout(callbacks)
 
 
