@@ -73,7 +73,9 @@ def test_overwrite_retains_old_tree_during_unavoidable_publish_gap(
         if src_path.name.startswith("artifact.tmp.") and dst_path == dest:
             backups = list(tmp_path.glob("artifact.old.*"))
             assert len(backups) == 1
-            observed_handoff.append((dest.exists(), (backups[0] / "old.bin").read_bytes()))
+            observed_handoff.append(
+                (dest.exists(), (backups[0] / "old.bin").read_bytes())
+            )
         real_replace(src, dst)
 
     monkeypatch.setattr(_atomic.os, "replace", inspect_replace)

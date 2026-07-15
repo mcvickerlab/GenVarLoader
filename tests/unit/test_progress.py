@@ -90,7 +90,9 @@ def test_progress_event_complete_requires_exact_known_total(
 
 @pytest.mark.parametrize("state", ["running", "failed", "cancelled"])
 def test_progress_event_noncomplete_state_must_remain_below_known_total(state: str):
-    with pytest.raises(ValueError, match="non-complete progress must remain below total"):
+    with pytest.raises(
+        ValueError, match="non-complete progress must remain below total"
+    ):
         ProgressEvent(
             phase="write",
             completed=2,

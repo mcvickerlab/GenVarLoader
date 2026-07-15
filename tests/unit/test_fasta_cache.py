@@ -260,8 +260,7 @@ def test_concurrent_legacy_migrations_reuse_published_destination(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
-            pool.submit(fc.migrate_legacy, local_fa, legacy, gvlfa)
-            for _ in range(2)
+            pool.submit(fc.migrate_legacy, local_fa, legacy, gvlfa) for _ in range(2)
         ]
         metadata = [future.result(timeout=5) for future in futures]
 
@@ -325,8 +324,7 @@ def test_queued_migrator_reuses_publication_and_leaves_replacement(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
-            pool.submit(fc.migrate_legacy, local_fa, legacy, gvlfa)
-            for _ in range(2)
+            pool.submit(fc.migrate_legacy, local_fa, legacy, gvlfa) for _ in range(2)
         ]
         metadata = [future.result(timeout=5) for future in futures]
 
@@ -440,9 +438,7 @@ def test_migrate_legacy_cleanup_claim_failure_is_nonfatal(
     real_replace = fc.os.replace
 
     def fail_cleanup_claim(src, dst):
-        if Path(src) == legacy and Path(dst).name.startswith(
-            f"{legacy.name}.cleanup."
-        ):
+        if Path(src) == legacy and Path(dst).name.startswith(f"{legacy.name}.cleanup."):
             raise PermissionError("cleanup claim denied")
         real_replace(src, dst)
 

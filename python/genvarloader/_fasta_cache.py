@@ -271,9 +271,7 @@ def _restore_cleanup_candidate(candidate: Path, legacy_gvl: Path) -> None:
 
 
 def _cleanup_legacy_source(legacy_gvl: Path, source_identity: os.stat_result) -> None:
-    candidate = legacy_gvl.with_name(
-        f"{legacy_gvl.name}.cleanup.{uuid4().hex[:8]}"
-    )
+    candidate = legacy_gvl.with_name(f"{legacy_gvl.name}.cleanup.{uuid4().hex[:8]}")
     try:
         os.replace(legacy_gvl, candidate)
     except OSError as exc:
