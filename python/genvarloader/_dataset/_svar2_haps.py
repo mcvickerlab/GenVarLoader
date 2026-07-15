@@ -18,10 +18,9 @@ of the per-query ranges (this module slices the on-disk cache for the specific
 ``(r_q, si_q)`` block, whereas the helpers call ``SparseVar2._find_ranges`` over
 the full cohort).
 
-Out of scope (guarded with ``NotImplementedError``): spliced output,
-``filter == "exonic"`` (keep mask), ``min_af``/``max_af``, annotated haps, and
-in-kernel reverse-complement. (``unphased_union`` and ``variant-windows`` ARE
-supported.)
+Out of scope (guarded with ``NotImplementedError``): ``min_af``/``max_af``,
+annotated haps, and exonic filtering for non-haplotype outputs.
+(``unphased_union`` and ``variant-windows`` ARE supported.)
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
 from .._flat import _Flat
-from .._ragged import RaggedAnnotatedHaps
+from .._ragged import RaggedAnnotatedHaps, _COMP
 from .._threads import should_parallelize
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
@@ -120,11 +119,25 @@ def _ragged_arange_src(
 def _ragged_arange_gather(
     data: NDArray, offsets: NDArray[np.integer], perm: NDArray[np.integer]
 ) -> tuple[NDArray, NDArray[np.int64]]:
-    """Reorder the rows of a 1-level ragged array ``(data, offsets)`` by ``perm``."""
-    src, new_off = _ragged_arange_src(offsets, perm)
-    if src.size == 0:
+    """Reorder the rows of a 1-level ragged array ``(data, offsets)`` by ``perm``.
+
+    Copies each permuted row's byte span into the output with a single
+    ``np.concatenate`` over per-row slices. This is ~50x faster on the spliced
+    haplotype path than the byte-level fancy-index form (``data[src]`` with
+    ``src = arange(n_bytes) - repeat(...)``): the Python-level work scales with
+    the number of rows (``len(perm)``), not the number of output bytes, while
+    the byte movement itself stays a single C-level copy. ``_ragged_arange_src``
+    keeps the index-based form for the two-source variants path, which needs the
+    explicit ``src`` to co-index several parallel arrays.
+    """
+    offsets = np.asarray(offsets, np.int64)
+    perm = np.asarray(perm, np.intp)
+    new_off = lengths_to_offsets(np.diff(offsets)[perm], np.int64)
+    if int(new_off[-1]) == 0:
         return data[:0].copy(), new_off
-    return data[src], new_off
+    starts = offsets[perm].tolist()
+    ends = offsets[perm + 1].tolist()
+    return np.concatenate([data[s:e] for s, e in zip(starts, ends)]), new_off
 
 
 def _ragged_arange_gather_2level(
@@ -318,6 +331,16 @@ class Svar2Haps(Haps[_H]):
         self._guard_unsupported(splice_plan)
 
         if issubclass(self.kind, (RaggedVariants, _FlatVariantWindows)):
+            if splice_plan is not None:
+                raise NotImplementedError(
+                    "Spliced output is not supported for the 'variants' or "
+                    "'variant-windows' sequence types."
+                )
+            if self.filter == "exonic":
+                raise NotImplementedError(
+                    "var_filter='exonic' is currently supported only for "
+                    "SVAR2 haplotype output."
+                )
             # variants AND variant-windows decode variants; the read-bound decode
             # has NO right-clip, so max_jitter>0 / jitter>0 would over-include
             # variants past the (unpadded) read window. Guard both modes.
@@ -339,24 +362,78 @@ class Svar2Haps(Haps[_H]):
                 "svar2 datasets do not support with_seqs('annotated') yet."
             )
 
-        # Haplotypes: RC would need to be folded in-kernel; the read-bound haps
-        # kernel has no to_rc param, so any real RC is unsupported here.
-        if to_rc is not None and bool(np.asarray(to_rc).any()):
-            raise NotImplementedError(
-                "In-kernel reverse-complement is not supported for svar2 haplotypes."
-            )
-
         haps, *_ = self.get_haps_and_shifts(
             idx=idx,
             regions=regions,
             output_length=output_length,
             rng=rng,
             deterministic=deterministic,
-            splice_plan=splice_plan,
-            to_rc=to_rc,
+            splice_plan=None,
+            to_rc=None,
             need_hap_lengths=False,
         )
-        return cast(_H, haps)
+
+        if splice_plan is None and (to_rc is None or not bool(np.asarray(to_rc).any())):
+            return cast(_H, haps)
+
+        if splice_plan is None:
+            data = np.asarray(haps.data)
+            offsets = np.asarray(haps.offsets, np.int64)
+            shape = haps.shape
+        else:
+            data, offsets = _ragged_arange_gather(
+                np.asarray(haps.data),
+                np.asarray(haps.offsets, np.int64),
+                splice_plan.permutation,
+            )
+            shape = (len(splice_plan.permutation), None)
+
+        flat = _Flat.from_offsets(data, shape, offsets).view("S1")
+        if to_rc is not None and bool(np.asarray(to_rc).any()):
+            flat = flat.reverse_masked(np.asarray(to_rc, np.bool_), comp=_COMP)
+        return cast(_H, flat)
+
+    def haplotype_lengths_for_plan(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+    ) -> NDArray[np.int32]:
+        """Compute per-query SVAR2 haplotype lengths for a splice plan."""
+        regions = np.asarray(regions, np.int32)
+        lengths = regions[:, 2] - regions[:, 1]
+        return (lengths[:, None] + self._haplotype_diffs(idx, regions)).astype(
+            np.int32, copy=False
+        )
+
+    def _haplotype_diffs(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+    ) -> NDArray[np.int32]:
+        """Return ``(query, ploidy)`` SVAR2 length deltas."""
+        regions = np.asarray(regions, np.int32)
+        ploidy = int(self.genotypes.shape[-2])
+        r_all, s_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
+        r_q, si_q = np.unravel_index(np.asarray(idx), (r_all, s_all))
+        groups = self._contig_groups(regions[:, 0].astype(np.int64))
+        diffs = np.empty((len(idx), ploidy), np.int32)
+        for ci, qsel in groups:
+            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], ploidy)
+            d = hap_diffs_from_svar2_readbound(
+                self.store,
+                self.ds_contigs[ci],
+                gi[0],
+                gi[1],
+                gi[2],
+                gi[3],
+                gi[4],
+                gi[5],
+                gi[6],
+                ploidy,
+                self.filter == "exonic",
+            )
+            diffs[qsel] = np.asarray(d, np.int32).reshape(len(qsel), ploidy)
+        return diffs
 
     def get_haps_and_shifts(
         self,
@@ -369,7 +446,7 @@ class Svar2Haps(Haps[_H]):
         to_rc: "NDArray[np.bool_] | None" = None,
         need_hap_lengths: bool = True,
     ) -> tuple[
-        Ragged[np.bytes_],
+        _Flat[np.bytes_],
         NDArray[np.intp],
         NDArray[np.int32],
         NDArray[np.int32],
@@ -384,6 +461,11 @@ class Svar2Haps(Haps[_H]):
         re-sliced from ``idx`` there), and ``keep``/``keep_offsets`` are None.
         """
         self._guard_unsupported(splice_plan)
+        if splice_plan is not None:
+            raise NotImplementedError(
+                "Svar2Haps.__call__ owns splice permutation; "
+                "get_haps_and_shifts expects splice_plan=None."
+            )
         regions = np.asarray(regions, np.int32)
         P = int(self.genotypes.shape[-2])
         b = len(idx)
@@ -404,22 +486,7 @@ class Svar2Haps(Haps[_H]):
 
         # --- diffs (per contig group, stitched back to (b, P) query order) ---
         if need_diffs:
-            diffs = np.empty((b, P), np.int32)
-            for ci, qsel in groups:
-                gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-                d = hap_diffs_from_svar2_readbound(
-                    self.store,
-                    self.ds_contigs[ci],
-                    gi[0],
-                    gi[1],
-                    gi[2],
-                    gi[3],
-                    gi[4],
-                    gi[5],
-                    gi[6],
-                    P,
-                )
-                diffs[qsel] = np.asarray(d, np.int32).reshape(len(qsel), P)
+            diffs = self._haplotype_diffs(idx, regions)
 
             hap_lengths = (lengths[:, None] + diffs).astype(np.int32)
         else:
@@ -473,6 +540,7 @@ class Svar2Haps(Haps[_H]):
                 np.uint8(self.reference.pad_char),  # type: ignore[union-attr]  # reference guaranteed for haplotypes
                 ffi_out_len,
                 should_parallelize(g_total),
+                self.filter == "exonic",
             )
             cat_data.append(np.asarray(g_data, np.uint8))
             cat_hap_lens.append(np.diff(np.asarray(g_off, np.int64)))
@@ -519,6 +587,11 @@ class Svar2Haps(Haps[_H]):
         kernel's native sizing), so the stitched offsets equal the haps'
         ``hap_lengths`` in the same order.
         """
+        if self.filter == "exonic":
+            raise NotImplementedError(
+                "SVAR2 exonic filtering with haplotype-realigned tracks is not "
+                "supported yet."
+            )
         assert self.store is not None
         regions = np.asarray(regions, np.int32)
         P = int(self.genotypes.shape[-2])
@@ -937,14 +1010,6 @@ class Svar2Haps(Haps[_H]):
     # ---- helpers ----
 
     def _guard_unsupported(self, splice_plan: "SplicePlan | None") -> None:
-        if splice_plan is not None:
-            raise NotImplementedError(
-                "Spliced output is not supported for svar2 datasets yet."
-            )
-        if self.filter == "exonic":
-            raise NotImplementedError(
-                "var_filter='exonic' (keep mask) is not supported for svar2 yet."
-            )
         if self.min_af is not None or self.max_af is not None:
             raise NotImplementedError(
                 "min_af/max_af filtering is not supported for svar2 datasets yet."

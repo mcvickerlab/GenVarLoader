@@ -632,6 +632,7 @@ pub fn reconstruct_haplotypes_from_svar2(
     ref_offsets: ArrayView1<i64>,
     pad_char: u8,
     parallel: bool,
+    filter_exonic: bool,
 ) {
     let batch_size = regions.nrows();
     let ploidy = shifts.ncols();
@@ -674,7 +675,7 @@ pub fn reconstruct_haplotypes_from_svar2(
         let base_bit = dense_present_off[k] as usize;
         let present_bit = |j: usize| crate::svar2::present_bit(dense_present_s, base_bit, j);
 
-        let merged = crate::svar2::merge_hap(
+        let mut merged = crate::svar2::merge_hap(
             vk_pos_s,
             vk_key_s,
             vk_lo,
@@ -685,6 +686,16 @@ pub fn reconstruct_haplotypes_from_svar2(
             de,
             present_bit,
         );
+
+        if filter_exonic {
+            let ref_end = regions[[query, 2]] as i64;
+            merged.retain(|&(pos, key)| {
+                let v_start = pos as i64;
+                let (v_ilen, _allele) = crate::svar2::decode_alt(key, lut_bytes_s, lut_off_s);
+                let v_end = v_start - v_ilen.min(0) + 1;
+                v_start >= ref_start && v_end <= ref_end
+            });
+        }
 
         let contig_ref_s: &[u8] = contig_ref.as_slice().unwrap();
         let provide = |v: usize| {
@@ -1575,6 +1586,7 @@ mod tests {
             ref_offsets.view(),
             pad_char,
             false, // serial
+            false, // exonic filtering disabled
         );
 
         assert_eq!(out.as_slice().unwrap(), b"ATGTAGTN");
@@ -1625,6 +1637,7 @@ mod tests {
             ref_.view(),
             ref_offsets.view(),
             pad_char,
+            false,
             false,
         );
 

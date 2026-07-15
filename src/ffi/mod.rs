@@ -862,6 +862,7 @@ pub fn reconstruct_haplotypes_from_svar2<'py>(
             dense_present_off_s,
             lut_bytes_s,
             lut_off_s,
+            false,
         );
 
         // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
@@ -908,6 +909,7 @@ pub fn reconstruct_haplotypes_from_svar2<'py>(
             ref_offsets_a,
             pad_char,
             parallel,
+            false,
         );
 
         (out_data, out_offsets_vec)
@@ -927,7 +929,24 @@ pub fn reconstruct_haplotypes_from_svar2<'py>(
 /// `dense_snp_range`/`dense_indel_range` are the per-query outputs of
 /// `SparseVar2.find_ranges` (flattened region-major, sample-minor); see
 /// `python/genvarloader/_dataset/_svar2_store_py.py::build_readbound_haps`.
-#[pyfunction]
+#[pyfunction(signature = (
+    store,
+    contig,
+    region_starts,
+    orig_samples,
+    vk_snp_range,
+    vk_indel_range,
+    dense_snp_range,
+    dense_indel_range,
+    region_bounds,
+    shifts,
+    ref_,
+    ref_offsets,
+    pad_char,
+    output_length,
+    parallel,
+    filter_exonic = false,
+))]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
     py: Python<'py>,
@@ -946,6 +965,7 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
     pad_char: u8,
     output_length: i64,
     parallel: bool,
+    filter_exonic: bool,
 ) -> PyResult<(Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>)> {
     use crate::reconstruct;
     use crate::svar2;
@@ -1032,6 +1052,7 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
             &flat.dense_present_off,
             &lut_bytes,
             &lut_off,
+            filter_exonic,
         );
 
         // Step 2: per-haplotype output lengths and prefix-sum offsets.
@@ -1080,6 +1101,7 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
             ref_offsets_a,
             pad_char,
             parallel,
+            filter_exonic,
         );
 
         (out_data, out_offsets_vec)
@@ -1101,7 +1123,19 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
 /// argument semantics (the per-query outputs of `SparseVar2.find_ranges`,
 /// flattened region-major, sample-minor); see
 /// `python/genvarloader/_dataset/_svar2_store_py.py::build_readbound_diffs`.
-#[pyfunction]
+#[pyfunction(signature = (
+    store,
+    contig,
+    region_starts,
+    orig_samples,
+    vk_snp_range,
+    vk_indel_range,
+    dense_snp_range,
+    dense_indel_range,
+    region_bounds,
+    ploidy,
+    filter_exonic = false,
+))]
 #[allow(clippy::too_many_arguments)]
 pub fn hap_diffs_from_svar2_readbound<'py>(
     py: Python<'py>,
@@ -1115,6 +1149,7 @@ pub fn hap_diffs_from_svar2_readbound<'py>(
     dense_indel_range: PyReadonlyArray2<i64>,
     region_bounds: PyReadonlyArray2<i32>,
     ploidy: usize,
+    filter_exonic: bool,
 ) -> PyResult<Bound<'py, PyArray2<i32>>> {
     use crate::svar2;
 
@@ -1176,6 +1211,7 @@ pub fn hap_diffs_from_svar2_readbound<'py>(
             &flat.dense_present_off,
             &lut_bytes,
             &lut_off,
+            filter_exonic,
         )
     });
 
@@ -1295,6 +1331,7 @@ pub fn shift_and_realign_tracks_from_svar2_readbound<'py>(
             &flat.dense_present_off,
             &lut_bytes,
             &lut_off,
+            false,
         );
 
         // Step 2: per-haplotype output lengths and prefix-sum offsets — tracks
@@ -1584,6 +1621,7 @@ pub fn shift_and_realign_tracks_from_svar2<'py>(
             dense_present_off_s,
             lut_bytes_s,
             lut_off_s,
+            false,
         );
 
         // Step 2: compute per-haplotype output lengths and prefix-sum offsets.

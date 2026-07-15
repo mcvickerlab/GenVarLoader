@@ -166,6 +166,61 @@ def test_svar2_haplotypes_match_svar1(tmp_path, bed, svar_fixture, svar2_fixture
     assert np.array_equal(a.data.view("u1"), b.data.view("u1"))
 
 
+def test_svar2_spliced_minus_strand_haplotypes_match_svar1(
+    tmp_path, svar_fixture, svar2_fixture, _src
+):
+    """SVAR2 splicing, exonic filtering, and minus-strand RC match SVAR1."""
+    _bcf, ref = _src
+    splice_bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [0, 20, 5],
+            "chromEnd": [13, 40, 20],
+            "strand": ["-", "-", "+"],
+            "transcript_id": ["Tneg", "Tneg", "Tplus"],
+            "exon_number": [1, 2, 1],
+        }
+    )
+    ds1, ds2 = _open_pair(tmp_path, splice_bed, svar_fixture, svar2_fixture, ref)
+    settings = {
+        "splice_info": ("transcript_id", "exon_number"),
+        "var_filter": "exonic",
+    }
+    a = ds1.with_settings(**settings).with_seqs("haplotypes")[:, :]
+    b = ds2.with_settings(**settings).with_seqs("haplotypes")[:, :]
+
+    assert np.array_equal(np.asarray(a.offsets), np.asarray(b.offsets))
+    assert np.array_equal(a.data.view("u1"), b.data.view("u1"))
+
+    forward = ds2.with_settings(rc_neg=False, **settings).with_seqs("haplotypes")[0, 0]
+    reverse = ds2.with_settings(**settings).with_seqs("haplotypes")[0, 0]
+    assert not np.array_equal(forward.data.view("u1"), reverse.data.view("u1"))
+
+
+def test_svar2_exonic_filter_haplotypes_match_svar1(
+    tmp_path, svar_fixture, svar2_fixture, _src
+):
+    """SVAR2 drops a deletion whose REF span crosses the region boundary."""
+    _bcf, ref = _src
+    exon = pl.DataFrame(
+        {
+            "chrom": ["chr1"],
+            "chromStart": [0],
+            "chromEnd": [13],
+        }
+    )
+    ds1, ds2 = _open_pair(tmp_path, exon, svar_fixture, svar2_fixture, ref)
+    a = ds1.with_settings(var_filter="exonic").with_seqs("haplotypes")[:, :]
+    b = ds2.with_settings(var_filter="exonic").with_seqs("haplotypes")[:, :]
+
+    assert np.array_equal(np.asarray(a.offsets), np.asarray(b.offsets))
+    assert np.array_equal(a.data.view("u1"), b.data.view("u1"))
+
+    unfiltered = ds2.with_seqs("haplotypes")[0, 0]
+    filtered = ds2.with_settings(var_filter="exonic").with_seqs("haplotypes")[0, 0]
+    assert not np.array_equal(unfiltered.data.view("u1"), filtered.data.view("u1"))
+
+
 def _make_bigwig(path: Path, contig: str, length: int, seed: int) -> None:
     """Write a dense per-bp BigWig over ``contig`` (deterministic given ``seed``)."""
     import pyBigWig
@@ -508,8 +563,8 @@ def test_svar2_min_af_guard_raises_with_settings(tmp_path, bed, svar2_fixture, _
         ds.with_seqs("haplotypes")[:, :]
 
 
-def test_svar2_splice_and_rc_guards_raise(tmp_path, bed, svar2_fixture, _src):
-    """splice_plan and a real (all-True) in-kernel to_rc must raise for haplotypes."""
+def test_svar2_direct_reverse_complement(tmp_path, bed, svar2_fixture, _src):
+    """Direct SVAR2 reconstruction reverse-complements every selected haplotype."""
     from genoray import SparseVar2
 
     _bcf, ref = _src
@@ -523,20 +578,24 @@ def test_svar2_splice_and_rc_guards_raise(tmp_path, bed, svar2_fixture, _src):
     regions = ds._full_regions[[0]].copy()
     rng = np.random.default_rng(0)
 
-    with pytest.raises(NotImplementedError, match="[Ss]plice"):
-        recon(idx, r_idx, regions, "ragged", 0, rng, True, splice_plan=object())
+    forward = recon(idx, r_idx, regions, "ragged", 0, rng, True)
+    reverse = recon(
+        idx,
+        r_idx,
+        regions,
+        "ragged",
+        0,
+        rng,
+        True,
+        to_rc=np.ones(len(idx), np.bool_),
+    )
 
-    with pytest.raises(NotImplementedError, match="reverse-complement"):
-        recon(
-            idx,
-            r_idx,
-            regions,
-            "ragged",
-            0,
-            rng,
-            True,
-            to_rc=np.ones(len(idx), np.bool_),
-        )
+    comp = bytes.maketrans(b"ACGTacgt", b"TGCAtgca")
+    assert np.array_equal(forward.offsets, reverse.offsets)
+    for i in range(forward.n_rows):
+        start, end = map(int, forward.offsets[i : i + 2])
+        expected = bytes(forward.data[start:end]).translate(comp)[::-1]
+        assert bytes(reverse.data[start:end]) == expected
 
 
 def test_svar2_variants_jitter_guard_raises(tmp_path, svar2_fixture, _src):
