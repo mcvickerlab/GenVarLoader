@@ -15,9 +15,11 @@ from hashlib import blake2b
 from importlib.metadata import version
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 import numpy as np
 import pysam
+from filelock import FileLock
 from loguru import logger
 from pydantic import BaseModel
 from pydantic_extra_types.semantic_version import SemanticVersion
@@ -196,41 +198,185 @@ def _fingerprints_match(stored: Fingerprint, source_fa: Path) -> bool:
     return fingerprint(source_fa).digest == stored.digest
 
 
+def _matching_published_cache(
+    gvlfa_dir: Path, contigs: dict[str, int], fp: Fingerprint
+) -> FastaCache | None:
+    try:
+        meta = FastaCache.model_validate_json(
+            (gvlfa_dir / METADATA_FILENAME).read_text()
+        )
+    except (OSError, ValueError):
+        return None
+    _check_format_version(meta, gvlfa_dir)
+    if (
+        meta.contigs != contigs
+        or meta.fingerprint != fp
+        or not _data_size_ok(gvlfa_dir, meta)
+    ):
+        return None
+    return meta
+
+
+def _same_source_identity(before: os.stat_result, after: os.stat_result) -> bool:
+    return (
+        os.path.samestat(before, after)
+        and before.st_size == after.st_size
+        and before.st_mtime_ns == after.st_mtime_ns
+        and before.st_ctime_ns == after.st_ctime_ns
+    )
+
+
+def _same_cleanup_identity(before: os.stat_result, after: os.stat_result) -> bool:
+    # Renaming changes ctime on POSIX, so cleanup compares only inode identity and
+    # content-relevant metadata that remain stable across the private-name claim.
+    return (
+        os.path.samestat(before, after)
+        and before.st_size == after.st_size
+        and before.st_mtime_ns == after.st_mtime_ns
+    )
+
+
+def _restore_cleanup_candidate(candidate: Path, legacy_gvl: Path) -> None:
+    """Restore a displaced replacement without overwriting a newer pathname."""
+    try:
+        os.link(candidate, legacy_gvl, follow_symlinks=False)
+    except FileExistsError:
+        logger.warning(
+            f"Could not restore replaced legacy cache to {legacy_gvl} because a "
+            f"new file appeared there; preserving it at {candidate}."
+        )
+        return
+    except OSError as exc:
+        if os.name == "nt":
+            try:
+                os.rename(candidate, legacy_gvl)
+            except OSError as rename_exc:
+                logger.warning(
+                    f"Could not restore replaced legacy cache to {legacy_gvl}; "
+                    f"preserving it at {candidate}: {rename_exc!r}"
+                )
+            return
+        logger.warning(
+            f"Could not restore replaced legacy cache to {legacy_gvl}; "
+            f"preserving it at {candidate}: {exc!r}"
+        )
+        return
+    try:
+        candidate.unlink()
+    except OSError as exc:
+        logger.warning(
+            f"Could not remove restored cleanup candidate {candidate}; both it and "
+            f"the public legacy cache {legacy_gvl} remain: {exc!r}"
+        )
+
+
+def _cleanup_legacy_source(legacy_gvl: Path, source_identity: os.stat_result) -> None:
+    candidate = legacy_gvl.with_name(f"{legacy_gvl.name}.cleanup.{uuid4().hex[:8]}")
+    try:
+        os.replace(legacy_gvl, candidate)
+    except OSError as exc:
+        logger.warning(
+            f"Could not claim legacy cache for cleanup at {legacy_gvl}; leaving "
+            f"post-publication cleanup unresolved: {exc!r}"
+        )
+        return
+
+    try:
+        candidate_identity = candidate.stat()
+    except OSError as exc:
+        logger.warning(
+            f"Could not inspect cleanup candidate {candidate}; preserving it after "
+            f"destination publication: {exc!r}"
+        )
+        return
+    if _same_cleanup_identity(source_identity, candidate_identity):
+        try:
+            candidate.unlink()
+        except OSError as exc:
+            logger.warning(
+                f"Could not remove cleanup candidate {candidate}; preserving it "
+                f"after destination publication: {exc!r}"
+            )
+        return
+
+    logger.info(
+        f"Legacy cache {legacy_gvl} was replaced during migration; restoring the "
+        "replacement."
+    )
+    _restore_cleanup_candidate(candidate, legacy_gvl)
+
+
 def migrate_legacy(
     source_fa: str | Path, legacy_gvl: str | Path, gvlfa_dir: str | Path
 ) -> FastaCache:
     """Upgrade a legacy flat .gvl cache to a .gvlfa dir by reusing its bytes.
 
     Reads contig lengths and fingerprints the source *before* touching the legacy
-    file, so a missing/unreadable source aborts without disturbing it. If the legacy
-    bytes don't match the current source's expected size (i.e. the legacy cache is
-    stale or truncated), the legacy file is left untouched and a fresh cache is built
-    from the source instead of reusing untrustworthy bytes.
+    file, then holds a source-specific lock while opening and identity-checking the
+    legacy source, copying from that bound descriptor, publishing, and atomically
+    claiming the source under a private name for identity-safe cleanup. Immediately
+    after acquiring that lock, queued callers reuse a matching published cache before
+    inspecting any still-present legacy pathname. A replacement at the legacy path is
+    restored without clobbering anything newer. Once publication commits, cleanup
+    errors are warning-only and leave recoverable bytes at the public source, private
+    candidate, or both. A missing/unreadable source or failed publication therefore
+    leaves the legacy file untouched. If the legacy bytes don't match the current
+    source's expected size (i.e. the legacy cache is stale or truncated), the legacy
+    file is left untouched and a fresh cache is built from the source instead of
+    reusing untrustworthy bytes.
     """
     source_fa = Path(source_fa)
     legacy_gvl = Path(legacy_gvl)
     gvlfa_dir = Path(gvlfa_dir)
     contigs = _contig_lengths(source_fa)  # raises here if source is unreadable
     fp = fingerprint(source_fa)
-    if legacy_gvl.stat().st_size != sum(contigs.values()):
-        logger.info(
-            f"Legacy cache {legacy_gvl} size does not match source {source_fa}; "
-            "ignoring stale legacy bytes and building a fresh cache."
-        )
-        return build(source_fa, gvlfa_dir)
-    meta_holder: dict[str, FastaCache] = {}
-    with atomic_dir(gvlfa_dir, overwrite=True) as tmp:
-        shutil.move(str(legacy_gvl), str(tmp / DATA_FILENAME))
-        meta = FastaCache(
-            format_version=FORMAT_VERSION,
-            genvarloader_version=_gvl_version(),
-            contigs=contigs,
-            source=_source_hints(source_fa, gvlfa_dir),
-            fingerprint=fp,
-        )
-        (tmp / METADATA_FILENAME).write_text(meta.model_dump_json())
-        meta_holder["meta"] = meta
-    return meta_holder["meta"]
+    source_lock = FileLock(f"{legacy_gvl}.lock")
+    with source_lock:
+        if meta := _matching_published_cache(gvlfa_dir, contigs, fp):
+            return meta
+        try:
+            source_identity = legacy_gvl.stat()
+        except FileNotFoundError:
+            if meta := _matching_published_cache(gvlfa_dir, contigs, fp):
+                return meta
+            raise
+
+        if source_identity.st_size != sum(contigs.values()):
+            logger.info(
+                f"Legacy cache {legacy_gvl} size does not match source {source_fa}; "
+                "ignoring stale legacy bytes and building a fresh cache."
+            )
+            return build(source_fa, gvlfa_dir)
+
+        meta_holder: dict[str, FastaCache] = {}
+        with open(legacy_gvl, "rb") as legacy_source:
+            opened_identity = os.fstat(legacy_source.fileno())
+            if not _same_source_identity(source_identity, opened_identity):
+                raise RuntimeError(
+                    f"Legacy cache {legacy_gvl} changed before it could be opened "
+                    "safely."
+                )
+
+            with atomic_dir(gvlfa_dir, overwrite=True) as tmp:
+                with open(tmp / DATA_FILENAME, "wb") as staged_data:
+                    shutil.copyfileobj(legacy_source, staged_data)
+                copied_identity = os.fstat(legacy_source.fileno())
+                if not _same_source_identity(source_identity, copied_identity):
+                    raise RuntimeError(
+                        f"Legacy cache {legacy_gvl} changed while it was being copied."
+                    )
+                meta = FastaCache(
+                    format_version=FORMAT_VERSION,
+                    genvarloader_version=_gvl_version(),
+                    contigs=contigs,
+                    source=_source_hints(source_fa, gvlfa_dir),
+                    fingerprint=fp,
+                )
+                (tmp / METADATA_FILENAME).write_text(meta.model_dump_json())
+                meta_holder["meta"] = meta
+
+        _cleanup_legacy_source(legacy_gvl, source_identity)
+        return meta_holder["meta"]
 
 
 def _cache_dir_for(source_fa: Path) -> Path:

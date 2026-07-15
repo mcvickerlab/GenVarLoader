@@ -1,11 +1,35 @@
+import builtins
 import shutil
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
 import pysam
 import pytest
 
+import genvarloader._atomic as atomic
 import genvarloader._fasta_cache as fc
+
+
+@contextmanager
+def _capture_warnings():
+    messages = []
+    sink_id = fc.logger.add(
+        lambda message: messages.append(message.record["message"]), level="WARNING"
+    )
+    try:
+        yield messages
+    finally:
+        fc.logger.remove(sink_id)
+
+
+def _sharing_violation(path: Path) -> PermissionError:
+    error = PermissionError(13, "sharing violation", str(path))
+    error.winerror = 32  # type: ignore[attr-defined]
+    return error
 
 
 def _write(path: Path, data: bytes) -> Path:
@@ -173,6 +197,356 @@ def test_migrate_legacy_reuses_bytes_and_removes_old(tmp_path, local_fa):
     assert meta.contigs == fc._contig_lengths(local_fa)
     _, source, status = fc.load(gvlfa)
     assert status == "fresh" and source == local_fa.resolve()
+
+
+def test_migrate_legacy_publish_failure_preserves_source_and_previous_cache(
+    tmp_path, local_fa, monkeypatch
+):
+    staging = tmp_path / "staging.gvlfa"
+    fc.build(local_fa, staging)
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    shutil.move(str(staging / fc.DATA_FILENAME), str(legacy))
+    legacy_bytes = legacy.read_bytes()
+
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    gvlfa.mkdir()
+    previous = gvlfa / "previous-cache"
+    previous.write_text("keep me")
+    real_replace = atomic.os.replace
+
+    def fail_new_publish(src, dst):
+        src_path, dst_path = Path(src), Path(dst)
+        if dst_path == gvlfa and ".tmp." in src_path.name:
+            raise OSError("publish failed")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(atomic.os, "replace", fail_new_publish)
+
+    with pytest.raises(OSError, match="publish failed"):
+        fc.migrate_legacy(local_fa, legacy, gvlfa)
+
+    assert legacy.read_bytes() == legacy_bytes
+    assert previous.read_text() == "keep me"
+    assert list(tmp_path.glob(f"{gvlfa.name}.tmp.*")) == []
+    assert list(tmp_path.glob(f"{gvlfa.name}.old.*")) == []
+
+
+def test_concurrent_legacy_migrations_reuse_published_destination(
+    tmp_path, local_fa, monkeypatch
+):
+    staging = tmp_path / "staging.gvlfa"
+    fc.build(local_fa, staging)
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    shutil.move(str(staging / fc.DATA_FILENAME), str(legacy))
+    legacy_bytes = legacy.read_bytes()
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+
+    real_fingerprint = fc.fingerprint
+    both_ready = threading.Barrier(2)
+
+    def synchronized_fingerprint(path):
+        result = real_fingerprint(path)
+        both_ready.wait(timeout=5)
+        return result
+
+    real_copyfileobj = fc.shutil.copyfileobj
+
+    def slow_legacy_copy(src, dst, *args, **kwargs):
+        time.sleep(0.25)
+        return real_copyfileobj(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(fc, "fingerprint", synchronized_fingerprint)
+    monkeypatch.setattr(fc.shutil, "copyfileobj", slow_legacy_copy)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(fc.migrate_legacy, local_fa, legacy, gvlfa) for _ in range(2)
+        ]
+        metadata = [future.result(timeout=5) for future in futures]
+
+    assert metadata[0] == metadata[1]
+    assert not legacy.exists()
+    assert (gvlfa / fc.DATA_FILENAME).read_bytes() == legacy_bytes
+
+
+def test_queued_migrator_reuses_publication_and_leaves_replacement(
+    tmp_path, local_fa, monkeypatch
+):
+    staging = tmp_path / "staging.gvlfa"
+    fc.build(local_fa, staging)
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    shutil.move(str(staging / fc.DATA_FILENAME), str(legacy))
+    original_bytes = legacy.read_bytes()
+    replacement_bytes = b"R" * len(original_bytes)
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+
+    real_source_lock = fc.FileLock
+    source_lock_entries = 0
+    source_lock_entries_guard = threading.Lock()
+    waiter_queued = threading.Event()
+
+    class ObservedSourceLock:
+        def __init__(self, path):
+            self._lock = real_source_lock(path)
+
+        def __enter__(self):
+            nonlocal source_lock_entries
+            with source_lock_entries_guard:
+                source_lock_entries += 1
+                if source_lock_entries == 2:
+                    waiter_queued.set()
+            return self._lock.__enter__()
+
+        def __exit__(self, *args):
+            return self._lock.__exit__(*args)
+
+    real_atomic_dir = fc.atomic_dir
+    publication_calls = 0
+    publication_calls_guard = threading.Lock()
+
+    @contextmanager
+    def replace_source_after_first_publish(*args, **kwargs):
+        nonlocal publication_calls
+        with publication_calls_guard:
+            publication_calls += 1
+            is_first_publication = publication_calls == 1
+        with real_atomic_dir(*args, **kwargs) as tmp:
+            if is_first_publication:
+                assert waiter_queued.wait(timeout=5)
+            yield tmp
+        if is_first_publication:
+            replacement = tmp_path / "queued-replacement.gvl"
+            replacement.write_bytes(replacement_bytes)
+            replacement.replace(legacy)
+
+    monkeypatch.setattr(fc, "FileLock", ObservedSourceLock)
+    monkeypatch.setattr(fc, "atomic_dir", replace_source_after_first_publish)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(fc.migrate_legacy, local_fa, legacy, gvlfa) for _ in range(2)
+        ]
+        metadata = [future.result(timeout=5) for future in futures]
+
+    assert metadata[0] == metadata[1]
+    assert publication_calls == 1
+    assert (gvlfa / fc.DATA_FILENAME).read_bytes() == original_bytes
+    assert legacy.read_bytes() == replacement_bytes
+
+
+def test_migrate_legacy_does_not_unlink_post_publish_replacement(
+    tmp_path, local_fa, monkeypatch
+):
+    staging = tmp_path / "staging.gvlfa"
+    fc.build(local_fa, staging)
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    shutil.move(str(staging / fc.DATA_FILENAME), str(legacy))
+    legacy_bytes = legacy.read_bytes()
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    real_atomic_dir = fc.atomic_dir
+    replacement_bytes = b"replacement legacy cache"
+
+    @contextmanager
+    def replace_source_after_publish(*args, **kwargs):
+        with real_atomic_dir(*args, **kwargs) as tmp:
+            yield tmp
+        replacement = tmp_path / "replacement.gvl"
+        replacement.write_bytes(replacement_bytes)
+        replacement.replace(legacy)
+
+    monkeypatch.setattr(fc, "atomic_dir", replace_source_after_publish)
+
+    fc.migrate_legacy(local_fa, legacy, gvlfa)
+
+    assert legacy.read_bytes() == replacement_bytes
+    assert (gvlfa / fc.DATA_FILENAME).read_bytes() == legacy_bytes
+
+
+def test_migrate_legacy_rejects_replacement_immediately_before_copy_open(
+    tmp_path, local_fa, monkeypatch
+):
+    staging = tmp_path / "staging.gvlfa"
+    fc.build(local_fa, staging)
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    shutil.move(str(staging / fc.DATA_FILENAME), str(legacy))
+    legacy_bytes = legacy.read_bytes()
+    replacement = tmp_path / "replacement-before-open.gvl"
+    replacement_bytes = b"R" * len(legacy_bytes)
+    replacement.write_bytes(replacement_bytes)
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    real_open = builtins.open
+    replaced = False
+
+    def replace_before_copy_open(file, mode="r", *args, **kwargs):
+        nonlocal replaced
+        if file == legacy and mode == "rb" and not replaced:
+            replacement.replace(legacy)
+            replaced = True
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", replace_before_copy_open)
+
+    with pytest.raises(RuntimeError, match="changed before it could be opened"):
+        fc.migrate_legacy(local_fa, legacy, gvlfa)
+
+    assert replaced
+    assert legacy.read_bytes() == replacement_bytes
+    assert not gvlfa.exists()
+
+
+def test_migrate_legacy_cleanup_does_not_unlink_replacement_after_identity_check(
+    tmp_path, local_fa, monkeypatch
+):
+    staging = tmp_path / "staging.gvlfa"
+    fc.build(local_fa, staging)
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    shutil.move(str(staging / fc.DATA_FILENAME), str(legacy))
+    legacy_bytes = legacy.read_bytes()
+    replacement = tmp_path / "replacement-before-unlink.gvl"
+    replacement_bytes = b"replacement after identity check"
+    replacement.write_bytes(replacement_bytes)
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    real_unlink = Path.unlink
+    replaced = False
+
+    def replace_before_cleanup_unlink(path, *args, **kwargs):
+        nonlocal replaced
+        is_cleanup_candidate = path.name.startswith(f"{legacy.name}.cleanup.")
+        if not replaced and (path == legacy or is_cleanup_candidate):
+            replacement.replace(legacy)
+            replaced = True
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", replace_before_cleanup_unlink)
+
+    fc.migrate_legacy(local_fa, legacy, gvlfa)
+
+    assert replaced
+    assert legacy.read_bytes() == replacement_bytes
+    assert (gvlfa / fc.DATA_FILENAME).read_bytes() == legacy_bytes
+
+
+def test_migrate_legacy_cleanup_claim_failure_is_nonfatal(
+    tmp_path, local_fa, monkeypatch
+):
+    staging = tmp_path / "staging.gvlfa"
+    fc.build(local_fa, staging)
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    shutil.move(str(staging / fc.DATA_FILENAME), str(legacy))
+    legacy_bytes = legacy.read_bytes()
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    real_replace = fc.os.replace
+
+    def fail_cleanup_claim(src, dst):
+        if Path(src) == legacy and Path(dst).name.startswith(f"{legacy.name}.cleanup."):
+            raise PermissionError("cleanup claim denied")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(fc.os, "replace", fail_cleanup_claim)
+
+    with _capture_warnings() as warnings:
+        meta = fc.migrate_legacy(local_fa, legacy, gvlfa)
+
+    assert meta.contigs == fc._contig_lengths(local_fa)
+    assert legacy.read_bytes() == legacy_bytes
+    assert (gvlfa / fc.DATA_FILENAME).read_bytes() == legacy_bytes
+    assert any("claim legacy cache for cleanup" in warning for warning in warnings)
+
+
+def test_migrate_legacy_cleanup_candidate_stat_failure_is_nonfatal(
+    tmp_path, local_fa, monkeypatch
+):
+    staging = tmp_path / "staging.gvlfa"
+    fc.build(local_fa, staging)
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    shutil.move(str(staging / fc.DATA_FILENAME), str(legacy))
+    legacy_bytes = legacy.read_bytes()
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    real_stat = Path.stat
+
+    def fail_cleanup_stat(path, *args, **kwargs):
+        if path.name.startswith(f"{legacy.name}.cleanup."):
+            raise PermissionError("cleanup candidate is busy")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_cleanup_stat)
+
+    with _capture_warnings() as warnings:
+        fc.migrate_legacy(local_fa, legacy, gvlfa)
+
+    candidates = list(tmp_path.glob(f"{legacy.name}.cleanup.*"))
+    assert len(candidates) == 1
+    assert candidates[0].read_bytes() == legacy_bytes
+    assert (gvlfa / fc.DATA_FILENAME).read_bytes() == legacy_bytes
+    assert any("inspect cleanup candidate" in warning for warning in warnings)
+
+
+def test_migrate_legacy_cleanup_unlink_sharing_violation_is_nonfatal(
+    tmp_path, local_fa, monkeypatch
+):
+    staging = tmp_path / "staging.gvlfa"
+    fc.build(local_fa, staging)
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    shutil.move(str(staging / fc.DATA_FILENAME), str(legacy))
+    legacy_bytes = legacy.read_bytes()
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    real_unlink = Path.unlink
+
+    def fail_cleanup_unlink(path, *args, **kwargs):
+        if path.name.startswith(f"{legacy.name}.cleanup."):
+            raise _sharing_violation(path)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_cleanup_unlink)
+
+    with _capture_warnings() as warnings:
+        fc.migrate_legacy(local_fa, legacy, gvlfa)
+
+    candidates = list(tmp_path.glob(f"{legacy.name}.cleanup.*"))
+    assert len(candidates) == 1
+    assert candidates[0].read_bytes() == legacy_bytes
+    assert (gvlfa / fc.DATA_FILENAME).read_bytes() == legacy_bytes
+    assert any("remove cleanup candidate" in warning for warning in warnings)
+
+
+def test_migrate_legacy_restore_unlink_failure_preserves_both_links(
+    tmp_path, local_fa, monkeypatch
+):
+    staging = tmp_path / "staging.gvlfa"
+    fc.build(local_fa, staging)
+    legacy = local_fa.with_name(local_fa.name + fc.LEGACY_SUFFIX)
+    shutil.move(str(staging / fc.DATA_FILENAME), str(legacy))
+    legacy_bytes = legacy.read_bytes()
+    replacement_bytes = b"replacement blocked by a Windows-style sharing violation"
+    gvlfa = local_fa.with_name(local_fa.name + fc.GVLFA_SUFFIX)
+    real_atomic_dir = fc.atomic_dir
+    real_unlink = Path.unlink
+
+    @contextmanager
+    def replace_source_after_publish(*args, **kwargs):
+        with real_atomic_dir(*args, **kwargs) as tmp:
+            yield tmp
+        replacement = tmp_path / "replacement-for-restore.gvl"
+        replacement.write_bytes(replacement_bytes)
+        replacement.replace(legacy)
+
+    def fail_cleanup_unlink(path, *args, **kwargs):
+        if path.name.startswith(f"{legacy.name}.cleanup."):
+            raise _sharing_violation(path)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(fc, "atomic_dir", replace_source_after_publish)
+    monkeypatch.setattr(Path, "unlink", fail_cleanup_unlink)
+
+    with _capture_warnings() as warnings:
+        fc.migrate_legacy(local_fa, legacy, gvlfa)
+
+    candidates = list(tmp_path.glob(f"{legacy.name}.cleanup.*"))
+    assert legacy.read_bytes() == replacement_bytes
+    assert len(candidates) == 1
+    assert candidates[0].read_bytes() == replacement_bytes
+    assert (gvlfa / fc.DATA_FILENAME).read_bytes() == legacy_bytes
+    assert any("remove restored cleanup candidate" in warning for warning in warnings)
 
 
 def test_migrate_legacy_aborts_before_move_if_source_unreadable(tmp_path):

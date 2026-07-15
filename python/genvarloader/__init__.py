@@ -32,6 +32,7 @@ from ._dataset._write import get_splice_bed, update, write
 from ._dummy import get_dummy_dataset
 from ._flat import _Flat as FlatRagged
 from ._flat import _FlatAnnotatedHaps as FlatAnnotatedHaps
+from ._progress import JsonProgressSink, ProgressCallback, ProgressEvent
 from ._ragged import FlatIntervals, RaggedAnnotatedHaps, RaggedIntervals
 from ._table import Table
 from ._torch import to_nested_tensor
@@ -57,6 +58,9 @@ __all__ = [
     "FlatVariants",
     "InsertionFill",
     "Interpolate",
+    "JsonProgressSink",
+    "ProgressCallback",
+    "ProgressEvent",
     "Ragged",
     "RaggedAnnotatedHaps",
     "RaggedDataset",
