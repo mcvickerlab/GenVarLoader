@@ -61,6 +61,1082 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.37.0 (2026-07-15)
+
+### BREAKING CHANGE
+
+- requires genoray>=3; VCF/PGEN _chunk_ranges_with_length now
+both yield (data, end, chunk_idxs).
+
+### Feat
+
+- **write**: add structured progress reporting
+- **svar2**: route INFO/FORMAT fields into variant-windows output
+- **svar2**: route INFO/FORMAT fields into RaggedVariants
+- **svar2**: discover store INFO/FORMAT fields and skip SVAR1 lazy-loading
+- **svar2**: decode_variants_from_svar2_readbound returns INFO/FORMAT field buffers
+- **svar2**: field-byte gather with vk_src/dense provenance in split decode
+- **svar2**: Svar2Store retains store_path for field-sidecar paths
+- adopt genoray 3.0.0 API (privatized SVAR2 FFI, available_samples, no Reader, ContigNormalizer moved)
+- consume reconciled genoray chunk_idxs contract (genoray 3.0)
+- **svar2**: unphased_union for variant-windows (ploidy-1 fold)
+- **svar2**: unphased_union for variants mode (ploidy-1 fold)
+- **svar2**: variant-windows read path (ref=window, alt window/allele)
+- **dataset**: svar2 haplotype-realigned tracks via HapsTracks
+- **dataset**: Svar2Haps reconstructor + svar2 read dispatch (haplotypes, variants)
+- **rust**: read-bound svar2 per-hap diffs FFI (for jitter shift computation)
+- **rust**: read-bound svar2 variants/variant-windows decode
+- **rust**: read-bound svar2 track re-alignment kernel
+- **svar2**: read-bound haplotype kernel (one all-Rust FFI call)
+- **rust**: link genoray_core (query-only) + Svar2Store pyclass
+- **write**: _write_from_svar2 6-array ranges cache + dispatch
+- **dataset**: Svar2Link resolution/fingerprint + Metadata.svar2_link
+- **svar2**: additive Python SVAR2 reconstruction adapter (gvl M6b)
+- **svar2**: PyO3 fused wrappers for two-source reconstruct/realign (gvl M6b)
+- **svar2**: two-source track realign driver (gvl M6b)
+- **svar2**: two-source reconstruct driver via closure source (gvl M6b)
+- **svar2**: per-hap var_key⋈dense merge + key decode source (gvl M6b)
+- **threads**: add GVL_FORCE_PARALLEL to bypass the size gate
+
+### Fix
+
+- **deps**: bump genoray to Windows-compatible rev
+- **write**: harden structured progress publication
+- **svar2**: global fill-seed for multi-contig FlankSample tracks (#267)
+- **svar2**: raise (not assert) on max_ends packing-width overflow
+- **svar2**: pack bounded tie-break in max_ends key (fix >2Mb overflow)
+- **svar2**: reject extend_to_length=False for .svar2 sources
+- **svar2**: drop over-strict anchor region guard; assert at read site
+- **svar2**: raise PyValueError on non-contiguous / OOB Python input
+- **svar2**: guard serial unsafe carve path with monotonicity debug_assert
+- **svar2**: validate open(var_fields=), size buffered output, de-degenerate oracle
+- **svar2**: honor Dataset.open(var_fields=) and cover multi-contig windows fields
+- **write**: copy variant index across filesystems on EXDEV
+- **dataset**: guard svar2 FlankSample multi-contig + annotated tracks
+- **dataset**: svar2 min_af/max_af guard + variants jitter guard + coverage
+- **svar2**: byte-size split_to_flat presence buffer; cover dense_snp + byte boundary
+- **threads**: overwrite ambient RAYON_NUM_THREADS with resolved cap (#263)
+- **threads**: honor CFS cpu quota in CPU detection (#263)
+
+### Refactor
+
+- **svar2**: hoist shared present_bit to svar2::present_bit
+- **svar2**: drop dead annot_* capability from readbound haps kernel
+- **svar2**: move test-only oracles out of the shipped package
+- **svar2**: drop unused region_starts from the ranges cache
+- **svar2**: migrate gvl read-bound Rust to genoray Range<usize> API
+- **svar2**: adopt genoray HapRanges for gather_haps_readbound
+- **svar2**: hoist Any import + document union guard omission
+- **dataset**: retire svar2 live overlap_batch dispatch (oracle-only)
+
+### Perf
+
+- **svar2**: vectorize _svar2_region_max_ends (byte-identical)
+- **svar2**: fuse variant decode, stream-merge from gather
+- **svar2**: skip identity row-reorder for single-contig getitem
+- **svar2**: read-bound getitem optimization results summary
+- **svar2**: split_to_flat asm fix — hoist q=h/ploidy division out of hot loops (byte-identical)
+- **svar2**: debug_assert guard for decode_variants_from_split get_unchecked invariant
+- **svar2**: decode_variants_from_split asm fix — hoist q=h/ploidy div, unchecked present_bit (byte-identical)
+- **svar2**: re-profile native layer after B1-B3; enumerate cargo-asm work-list
+- **svar2**: compute the pos/ilen ragged reorder index once in variants decode
+- **svar2**: pre-size split_to_flat + decode_variants_from_split allocations (byte-identical)
+- **svar2**: skip redundant pre-reconstruct gather for deterministic haplotype reads
+- **svar2**: native-layer baseline profile (perf DSO/symbol/callgraph + instr reference)
+- **svar2**: Python-layer baseline profile (cProfile + pyinstrument)
+- **svar2**: live read-bound Dataset.__getitem__ profiling driver + pyinstrument
+- **ffi**: release the GIL around rayon parallel regions
+
+## v0.36.0 (2026-06-28)
+
+### Feat
+
+- **rayon**: parallelize get_diffs_sparse + intervals_to_tracks (C3)
+- **rayon**: parallelize shift_and_realign_tracks_sparse and tracks_to_intervals (Task C2)
+- **rayon**: parallelize reconstruct_haplotypes_from_sparse with rayon batch parallelism
+- delete numba backend — rust-only read path (Phase 5 W5)
+- **rust**: fuse annotated+spliced haplotype reconstruction into one FFI crossing (Phase 5 W3)
+- register rc_alleles dispatch (rust default, seqpro reference)
+- **rust**: rc_alleles PyO3 wrapper + registration
+- **rust**: rc_alleles_inplace core for variant-allele RC
+- **rust**: debug_assert to_rc mask length in kernel RC blocks
+- fold strand RC into rust kernels; numba post-pass retained as oracle
+- **rust**: optional in-kernel RC for spliced haplotype kernel
+- **rust**: optional in-kernel RC for annotated haplotype kernel
+- **rust**: optional in-kernel reverse for track realign kernel
+- **rust**: optional in-kernel RC for reconstruct_haplotypes_fused
+- **rust**: optional in-kernel RC for get_reference
+- **rust**: in-place reverse/reverse-complement primitives for read path
+- **py**: assemble_variant_buffers numba oracle, rust shim, and dict parity harness
+- **ffi**: assemble_variant_buffers_{u8,i32} pyfunctions
+- **variants**: assemble_windows_mode (token windows + bare alleles)
+- **variants**: assemble_variants_mode (alt/ref bytes + flank tokens)
+- **variants**: add fetch_windows reference-read helper
+- **variants**: add tokenize/slice_flanks/assemble_alt_window cores
+- **ffi**: zero-copy boundary guard for sample-scale memmaps
+- **migrate**: add gvl.migrate for 1.x AoS -> 2.0 SoA
+- **open**: gate dataset open on format_version major
+- **format**: store track intervals as struct-of-arrays (gvl 2.0)
+- **intervals**: route intervals_to_tracks through backend dispatch (default rust)
+- **ffi**: Rust intervals_to_tracks + ffi seam module
+- **utils**: route splits_sum_le_value through backend dispatch (default rust)
+- **ffi**: Rust splits_sum_le_value + ffi seam module
+- **dispatch**: backend registry for Rust migration strangler window
+- **ragged**: route to_padded through seqpro-core Rust bridge
+- **rust**: consume seqpro-core via rlib; add ragged_to_padded bridge
+
+### Fix
+
+- **rayon**: debug_assert offset monotonicity in C1 carve; correct test comment
+- **env**: keep conda numba pin (seqpro needs working libllvmlite); guard stays own-code
+- **threads**: remove conditional numba import; update thread tests for pure-OS detection
+- **test**: drop stale _recon_mod.intervals_to_tracks spy (B2 removed that import)
+- **test**: restore generate_goldens regeneration; clean dead GVL_BACKEND in bench conftest (W5 B1)
+- **reconstruct,tracks**: pad full tail in numba trailing-fill on ref overshoot
+- **reconstruct**: pad full tail when ref exhausted, not from index 0
+- **test**: add __init__.py to disambiguate test_write collision; ruff fmt
+- **variants**: drop unused ArrayView2 import
+- **indexing**: SpliceIndexer.parse_idx double-applies sample-subset map
+- **intervals**: clip sub-query interval starts in both kernels (#242)
+- **tracks**: clamp writable_ref when deletion extends past track end
+- **reconstruct**: guard non-annotated parity test against numba SystemError; correct rayon-deferral comment
+- **reconstruct**: strengthen SAFETY comments; rename batch test to match serial-only impl
+- **reconstruct**: clamp writable_ref when ref_idx past contig end; skip numba annotated flake
+- **reference**: revert padded_slice leniency — mirror numba's loud failure for start>=clen (parity twin)
+- **test**: update stale _gather_v_idxs_ss import after Task 5 rename; lint/docstring cleanup
+- **variants**: gather_rows must preserve data dtype (dosage/custom fields)
+- **bench**: profile variants variable-length (with_len is meaningless for variants)
+- **stub**: sync genvarloader.pyi — bigwig_intervals rename + intervals_to_tracks
+- **test**: drop stale rv._rag access in flat_mode_equivalence after Ragged subclass refactor
+- **dispatch**: guard isinstance(Ragged) sites for RaggedVariants subclass
+
+### Refactor
+
+- delete numba kernels; numpy fallbacks for #231 dtype paths
+- **backend**: B2 — collapse backend-conditional branches; delete GVL_BACKEND/_active_backend
+- **dispatch**: B1 — replace all get() call sites with direct rust calls, delete _dispatch
+- **rust**: extract reverse::rc_row shared helper
+- **write**: delete dead legacy track path + splits_sum_le_value
+- drop unreachable spliced variant-RC guard
+- route variant-allele RC through dispatched rc_alleles kernel
+- **genotypes**: delete dead filter_af kernel + its dead test (superseded by inline numpy)
+- **variants**: RaggedVariants subclasses Ragged, drop _rag composition
+
+### Perf
+
+- **rust**: fuse rc_alleles_inplace — 186→308 instrs (rc_row inlined), drop Vec<bool> alloc + rescan
+- **rust**: tune reconstruct_haplotypes_from_sparse — 2839→1279 instrs, 0.655→0.589 rust÷numba
+- **rust**: tune rc_flat_rows_inplace — 212→283 instrs (vectorized), 0.664→0.635 rust÷numba
+- **rust**: tune assemble_alt_window — 518→727 asm lines (memcpy-expanded), 35→30 cmp/jae/imul, 1.146→0.835 ms/batch
+- **rust**: tune slice_flanks — 389→429 total instrs (hot-path: byte-loop→memcpy), 2.115→1.136 ms/batch
+- **rust**: tune shift_and_realign_tracks_sparse — 550→605 lines (3 do_slice calls→0 in hot path), ratio 1.178→1.179
+- **rust**: tune tokenize — 16→4 hot instr/elem, 0.55→0.43 rust÷numba
+- **rust**: tune intervals_to_tracks — 480→283 instrs, 0.628→0.624 rust÷numba
+- **intervals**: paint tracks via raw contiguous slice
+- **variants**: route windows/variants assembly through one rust call
+- **ffi**: skip zero-init of fully-overwritten fused output buffers
+- **haps**: cache FFI-ready sub-linear per-variant arrays
+- **reconstruct**: fused spliced-haps __getitem__ kernel (dataset parity)
+- **reconstruct**: fused annotated-haps __getitem__ kernel (dataset parity)
+- **reference**: route Reference.fetch through rust get_reference; drop dead _fetch_* numba
+- **tracks**: fused tracks __getitem__ kernel (dataset parity; throughput recorded)
+- **reconstruct**: fused haplotypes __getitem__ kernel (dataset parity; throughput recorded)
+- **intervals**: port tracks_to_intervals RLE numba->rust (parity, default rust)
+- **tracks**: port shift_and_realign_tracks_sparse (parity, default rust)
+- **tracks**: port apply_insertion_fill (4 strategies) core (cargo-tested)
+- **tracks**: port xorshift64/hash4 PRNG (direct numba parity)
+- **reconstruct**: port reconstruct_haplotypes_from_sparse batch (parity, default rust)
+- **reconstruct**: port reconstruct_haplotype_from_sparse core (cargo-tested)
+- **reference**: port get_reference numba->rust (parity, default rust)
+- **reference**: port padded_slice numba->rust core (cargo-tested)
+- **variants**: port _fill_empty_seq numba->rust (u8/i32, dtype-preserving)
+- **variants**: port _fill_empty_scalar + _fill_empty_fixed numba->rust (dtype-preserving)
+- **variants**: port _compact_keep numba->rust (i32/f32, dtype-preserving)
+- **variants**: port _gather_alleles numba->rust (parity-gated)
+- **variants**: port _gather_v_idxs(+_ss) numba->rust as gather_rows (parity)
+- **genotypes**: port choose_exonic_variants numba->rust (parity-gated)
+- **genotypes**: port get_diffs_sparse numba->rust (parity-gated)
+- **roadmap**: capture getitem read-path baseline on Carter; Phase 0 ✅
+- write/update (1kg) + getitem (profile.py) baseline drivers
+
+## v0.35.0 (2026-06-23)
+
+### Feat
+
+- promote gvl.Table to public API; remove experimental subpackage
+- route Table/annot writes through Rust; vectorize contig norm
+- back gvl.Table with Rust COITrees engine; drop polars-bio
+- **rust**: streaming Table writer + PyO3 RustTable methods
+- **rust**: materialize ordered intervals from offsets
+- **rust**: COITrees overlap count for RustTable
+- **rust**: table interval store + RustTable::build
+- warn when opening datasets with variant-truncated track windows (#233)
+
+### Fix
+
+- **rag-variants**: string-key field access + __getattr__ for record fields
+- **rag-variants**: __getitem__ preserves leading fixed axes for slice/array indexing
+- **rag-variants**: _share_offsets uses inner char offsets for opaque-string fields
+- adapt GenVarLoader to rust-backed seqpro _core.Ragged backend
+- un-skip annot e2e test; guard empty annot; prune dead Rust field
+- floor track-write window at the input region (#233 follow-up)
+
+### Refactor
+
+- **write**: drop unreachable nomask branch; defensive max init; test empty-group region max
+- **write**: per-region max + concat without awkward
+- **torch**: to_nested_tensor accepts _core.Ragged only
+- **chunked**: detect RaggedVariants by type, not ak.Array
+- **flat-variants**: build RaggedVariants via _core.Ragged
+- **haps**: allele layout returns _core.Ragged; AF filter without awkward
+- **splice**: splice_map as _core.Ragged; drop awkward aggregations
+- **ragged**: prepend_pad_itv via seqpro.rag.concatenate; drop awkward RC helpers
+- **shm**: serialize RaggedVariants via _core buffers (no awkward)
+- **rag-variants**: nested-tensor batch from char-view buffers; drop awkward walker
+- **rag-variants**: pad via seqpro.rag.concatenate (empty-group sentinels)
+- **rag-variants**: rc_ via flat allele-level reverse_complement_masked
+- **rag-variants**: to_packed via record Ragged; drop awkward packing helpers
+- **rag-variants**: record-Ragged wrapper skeleton (construction, access, indexing)
+
+### Perf
+
+- vectorize _ragged_stack_tracks (remove per-batch Python loop on interval hot path)
+
+## v0.34.0 (2026-06-19)
+
+### Feat
+
+- route annotation bigWig writes through rust behind switch
+- route per-sample bigWig writes through rust behind GVL_RUST_BIGWIG_WRITE
+- PyO3 binding for bigwig_write_track
+- rust single-pass streaming bigWig write_track
+- gather custom FORMAT fields into RaggedVariants like dosage (#231)
+- **haps**: load custom FORMAT fields into Haps.var_field_data (#231)
+- discover genoray custom FORMAT fields in available_var_fields (#231)
+
+### Fix
+
+- silence E402 for required sys.path bootstrap in bench corpus builder
+- surface bigWig write_track I/O and contig errors as PyRuntimeError instead of panic
+- off-by-one in bigWig interval start collapsed wide annot tracks (#233)
+- resolve svar override path in _lazy_load_custom_fields (#231)
+
+### Refactor
+
+- make rust the default bigWig write path; delete legacy + switch
+
+## v0.33.0 (2026-06-18)
+
+### Feat
+
+- realign_tracks setting decouples track re-alignment from seq mode
+- flat interval reconstruction via FlatIntervals
+- add FlatIntervals flat-buffer interval container
+
+### Fix
+
+- update RefTracks→SeqsTracks unit tests; pin flat seqs; trim dead union
+
+### Refactor
+
+- generalize RefTracks into SeqsTracks (seqs + un-realigned tracks)
+
+## v0.32.0 (2026-06-17)
+
+### Feat
+
+- add gvl.update for atomic post-hoc track addition
+- parallelize gvl.write over track categories (variants first)
+- gvl.write accepts annot_tracks
+- polars-bio annotation extraction + bigwig annot source
+
+### Fix
+
+- guard duplicate track names in update; flat_ends symmetry; test polish
+- restore DATASET_FORMAT_VERSION attribute docstring placement
+- pyrefly search-path resolves local source; drop stale ignore and unused import
+
+### Refactor
+
+- remove Dataset.write_annot_tracks and _annot_to_intervals
+- _write_track takes explicit out_dir; add _write_ragged_intervals
+
+## v0.31.0 (2026-06-15)
+
+### Feat
+
+- **table**: ship polars-bio as the `table` extra
+- **table**: make gvl.Table an opt-in experimental feature
+
+### Fix
+
+- **write**: raise clear ValueError when variant/track sample intersection is empty (#225)
+
+## v0.30.0 (2026-06-14)
+
+### Feat
+
+- **dataset**: fold haplotypes into ploidy-1 union in variant decode (#222)
+- **dataset**: reject haplotypes/annotated output under unphased_union (#222)
+- **dataset**: report ploidy=1 and fold n_variants under unphased_union (#222)
+- **dataset**: add unphased_union flag on Haps + with_settings (#222)
+
+### Fix
+
+- **dataset**: keep n_variants int32 under unphased_union fold (#222)
+
+### Refactor
+
+- **variants**: drop retired order-dependent germline-CCF inference (#222)
+
+### Perf
+
+- **threads**: tolerate malformed GVL_NUM_THREADS at import (#221)
+- **variant-windows**: single fused fetch for both-window decode (#221)
+- **flanks**: fuse 3 ref-window fetches into 1 via flank slicing (#221)
+- **reference**: dispatch get_reference kernel serial/parallel (#221)
+- **reference**: dispatch fetch kernel serial/parallel by per-thread bytes (#221)
+- **threads**: cap numba workers to cgroup cores + add dispatch predicate (#221)
+
+## v0.29.0 (2026-06-13)
+
+### Feat
+
+- **flat**: dummy padding for flank_tokens and variant-windows in get_variants_flat
+- **flat**: thread unknown_token onto Haps for dummy token fill
+- **flat**: fill_empty_groups fills flank_tokens with unknown_token
+- **flat**: _FlatVariantWindows.fill_empty_groups (all-unknown_token dummy)
+- **flat**: _fill_empty_fixed kernel for flank_tokens empty-row dummy fill
+- **flat**: double_buffered carries flat buffers without awkward re-wrap
+- **flat**: slice_chunk handles flat containers
+- **flat**: shm write/read flat types (kind 1/2/3) without awkward
+- **flat**: instance-axis __getitem__ on flat containers
+- **flat**: with_settings(dummy_variant=...) + export DummyVariant + non-variant guard
+- **flat**: Haps.dummy_variant + apply empty-group fill in get_variants_flat
+- **flat**: DummyVariant + empty-group fill kernels + fill_empty_groups
+- **flat**: export FlatVariantWindows and VarWindowOpt
+- **flat**: VarWindowOpt-driven per-allele variant-windows (window|allele matrix)
+- **flat**: VarWindowOpt + per-allele window/allele computation + optional window fields
+- **flat**: register variant-windows kind end-to-end
+- **flat**: attach flank_tokens / emit windows from get_variants_flat
+- **flat**: ref/alt window assembly + tokenization
+- **flat**: _FlatWindow + _FlatVariantWindows two-level token types
+- **flat**: compute ride-along flank tokens from reference
+- **flat**: thread flank_length + token LUT settings onto Haps
+- **flat**: byte->int token LUT builder for flank tokenization
+- **flat**: A flat variant decode (get_variants_flat) with no awkward
+- **flat**: A0 flat passthrough for seqs/haps/annot/reference outputs
+- **flat**: output_format field + with_output_format + QueryView.flat_output
+- **flat**: export FlatRagged/FlatAnnotatedHaps/FlatVariants/FlatAlleles
+- **flat**: _FlatVariants/_FlatAlleles types with to_ragged()
+
+### Fix
+
+- **torch**: reject variant-windows output over buffered transport up front
+- **flat**: allow dummy_variant with variant-windows output kind
+- **flat**: _fill_empty_seq preserves input dtype for token windows
+- **flat**: reject flat+buffered variants with flank tokens at construction
+- **flat**: harden _FlatVariants slice for flank_tokens; test polish
+- **flat**: with_settings(dummy_variant=False) is a no-op on non-variant datasets
+- **flat**: narrow _seqs to Haps before flank-field replace (pyrefly)
+- **flat**: clear error for variant-windows + active tracks; drop dead alias
+- **flat**: clear error for VarWindowOpt(ref='allele') on REF-less dataset
+- **flat**: clearer splice-unsupported messages for variant-windows
+- **flat**: windows reshape must keep ploidy dim ([1:-1] not [1:-2])
+- **flat**: guard flank-without-LUT, document Haps fields, test validation paths
+- **flat**: shape-driven _FlatAlleles.to_ragged fixes scalar-scalar squeeze byte-identity
+- **flat**: _FlatAlleles.reshape re-appends ragged axis; docstrings + 2D-index test
+- **flat**: add _FlatAlleles.squeeze so _FlatVariants.squeeze works
+
+### Refactor
+
+- **flat**: clarify flat-variant reader names; annotated shm round-trip test
+- **flat**: retire awkward _get_variants; ragged variants decode via flat path
+- **flat**: normalize _FlatVariants.reshape shape arg; drop redundant import
+
+## v0.28.0 (2026-06-08)
+
+### Feat
+
+- **variants**: numba allele-pack kernel + layout decomposition for non-canonical views
+- **write**: reject symbolic/breakend variants from SVAR inputs
+- **write**: reject symbolic/breakend variants from PGEN inputs
+- **write**: reject symbolic/breakend variants from VCF inputs
+- **write**: add consolidated unsupported-variant validator
+
+### Fix
+
+- **variants**: rc_() on sliced/reordered views via materialized copy
+- **variants**: to_packed() handles sliced/reordered alt/ref via numba kernel
+- **open**: default to variants when genotypes have no reference
+- **write**: validate VCF variants before creating output directory
+
+## v0.27.0 (2026-06-05)
+
+### Feat
+
+- **_open**: validate dataset format version + integrity on open
+- **_write**: atomic dataset creation + format_version in Metadata
+- **_fasta_cache**: publish cache atomically via atomic_dir + locked double-check
+- **_atomic**: add atomic_dir directory-publish primitive
+- **fasta**: use .gvlfa cache module and accept .gvlfa input
+- **_fasta_cache**: add ensure_cache orchestrator and dispatch
+- **_fasta_cache**: migrate legacy .gvl caches by reusing bytes
+- **_fasta_cache**: add build, load, and validity guards
+- **_fasta_cache**: add source hints and three-way resolution
+- **_fasta_cache**: add FastaCache models and fingerprint
+
+### Fix
+
+- **torch**: warn when BatchSampler overrides explicit batch_size
+- **torch**: buffered modes honor drop_last=False
+- **torch**: do not forward drop_last to DataLoader in default mode
+- **chunked**: keep trailing partial batch in ChunkPlanner
+- **test_fasta**: move mid-file imports to top (E402, CI lint)
+- **_fasta_cache**: guard legacy migration against stale/truncated bytes
+- **_fasta_cache**: raise on format-too-new sibling cache instead of silent downgrade
+
+### Refactor
+
+- **_write**: use plain with-atomic_dir; restore warnings filter; add atomicity + format_version on-disk tests
+- **reference**: build cache via ensure_cache, accept .gvlfa
+- **_fasta_cache**: fix progress bar advance and tighten load status type
+
+## v0.26.0 (2026-06-01)
+
+### Feat
+
+- **query**: flat-aware getitem boundary (legacy Ragged still supported)
+- **flat**: masked reverse/RC on flat buffers
+- **flat**: _Flat numpy ragged transport (no awkward kernels)
+- **write**: add _window_to_sparse dense->sparse dispatch helper
+- **bench**: log CPU/system/microarch info for all benchmarks
+- **bench**: add MiB/s bandwidth plot; trim 1KG regression test data
+- **bench**: add 3x4 small-multiples results plot
+- **bench**: add bench.py thread-pinned orchestration
+- **bench**: add CSV header/append helpers
+- **bench**: add per-cell measurement protocol
+- **bench**: add exact output-bytes table helper
+- **bench**: add BED resize + per-region-length dataset prep
+- **bench**: enumerate deduped dataloader bench cells
+- **bench**: scaffold dataloader bench axis constants
+- mode='double_buffered' dataloader happy path
+- **producer**: subprocess entrypoint for double_buffered mode
+- **shm**: Ragged and RaggedVariants serialization
+- **shm**: hand-rolled slot header + dense round-trip
+- mode='buffered' dataloader
+- **chunked**: ChunkPlanner and slice_chunk
+- **dataset**: _output_bytes_per_instance tracks branch
+- **dataset**: _output_bytes_per_instance variants branch with var_fields
+- **dataset**: _output_bytes_per_instance annotated branch
+- **dataset**: _output_bytes_per_instance reference + haplotypes
+- **haps**: add _allele_bytes_sum for exact variant footprint
+- **dataset**: with_settings lazily loads new var_fields
+- **open**: Dataset.open accepts var_fields, forwards to Haps.from_path
+- **haps**: from_path honors var_fields for lazy info+dosage loading
+- **haps**: _Variants.load_info lazily extends info dict
+- **haps**: _Variants.from_table accepts info_fields filter
+- **haps**: add _Variants.available_info_fields schema peek
+- **reconstruct**: promote view-state to explicit _seqs_kind field
+- **reconstruct**: add _build_reconstructor factory
+- **splice**: Tracks._call_float32 accepts SplicePlan
+- **splice**: Haps._get_haplotypes accepts SplicePlan
+- **splice**: Ref.__call__ accepts optional SplicePlan for zero-copy spliced layout
+- **splice**: add SplicePlan + build_splice_plan helper
+- **refds**: support with_settings(splice_info) and spliced subset_to
+- **refds**: implement spliced __getitem__ via SpliceMap + _cat_length
+- **refds**: add splice_info field and is_spliced/spliced_regions
+- **splice**: add sample-agnostic SpliceMap
+
+### Fix
+
+- **write**: handle empty regions in no-extend VCF path; assert chunk/index alignment
+- **table**: temporarily disable gvl.Table to avoid polars-bio segfault
+- **double_buffered**: release producer+shm per loader, not at process exit
+- **double_buffered**: serialize RaggedAnnotatedHaps (annotated output)
+- **double_buffered**: size shm slots for serialized ragged footprint
+- **bench**: open datasets with hg38 reference; revert out-of-scope _open.py change
+- **double_buffered**: replay all Dataset settings in producer subprocess
+- **sitesonly**: use correct genoray VCF.get_record_info kwargs (fields= not attrs=)
+- **ragged**: to_padded numeric branch handles clip=True RegularArray output
+- **torch**: forward generator from DataLoader through to RandomSampler for reproducible shuffle
+- **dataset**: with_settings(rng=...) maps to _rng dataclass field
+- inline offset computation in filter_af 2-D path; reorder test_torch imports
+- **rag_variants**: accept positional axis arg in RaggedVariants.squeeze
+- **haps**: gate dosage output by var_fields (#191)
+- **utils**: copy read-only inputs in idx_like_to_array
+- **types**: annotate Fasta.pad as bytes | None
+- **Dataset.open**: promote to haplotypes before with_settings(splice_info)
+- **choose_exonic_variants**: use (2, n_slices) indexing for 2-D offsets
+- **with_settings**: propagate var_filter to _recon, preserving kind
+
+### Refactor
+
+- **variants**: remove orphaned _rc_helper/_rc_numba_helper
+- **haps**: extract _build_allele_layout/_alt_layout_parts helpers
+- **query**: overloads for reverse_complement_ragged/pad match flat runtime contract
+- **flat**: document + guard reverse_masked comp as DNA-RC mode selector
+- **write**: assemble full PGEN windows, dispatch via _window_to_sparse, fix max_ends
+- **write**: assemble full VCF windows, dispatch via _window_to_sparse, fix max_ends
+- trim dead code and over-commenting per CLAUDE.md
+- **types**: remove stale type:ignore and annotate the rest
+- **naming**: rename SplicePlan.perm -> SplicePlan.permutation
+- **naming**: standardize geno_offset_idxs -> geno_offset_idx
+- **naming**: rename rsp_idx -> region_sample_ploid_idx
+- **dataset**: split _reconstruct.py + extract _query.py via QueryView (PR6)
+- **reconstruct**: delete dead body of write_transformed_track + add roadmap
+- **reconstruct**: ReconstructionRequest + restructure _get_haplotypes
+- **open**: extract OpenRequest + decompose Dataset.open
+- **write**: extract shared phased-chunked writer for VCF/PGEN
+- **impl**: migrate _impl.py from attrs to stdlib dataclass
+- **reconstruct**: migrate _reconstruct.py from attrs to stdlib dataclass
+- **reference**: migrate _reference.py from attrs to stdlib dataclass
+- **indexing**: migrate _indexing.py from attrs to stdlib dataclass
+- **splice**: migrate _splice.py from attrs to stdlib dataclass
+- **insertion-fill**: migrate _insertion_fill.py from attrs to stdlib dataclass
+- **ragged**: migrate _ragged.py from attrs to stdlib dataclass
+- **variants**: migrate _records.py from attrs to stdlib dataclass
+- **types**: migrate _types.py from attrs to stdlib dataclass
+- **impl**: route remaining _recon construction/checks through view-state
+- **impl**: sequence_type returns the _seqs_kind field directly
+- **impl**: collapse with_settings _recon propagation via factory
+- **impl**: simplify with_tracks via factory + active_tracks check
+- **impl**: simplify with_seqs via _seqs_kind + factory
+- **impl**: route Dataset.open construction through factory
+- **splice**: Dataset spliced path uses SplicePlan
+- **splice**: RefDataset spliced path uses SplicePlan
+- **splice**: compose SpliceIndexer from SpliceMap + DatasetIndexer
+- **splice**: annotate SpliceMap method signatures
+- **splice**: clean up _splice imports per review
+- **splice**: move _cat_length helpers to _splice module
+- **Dataset.open**: delegate splice_info/var_filter to with_settings
+
+### Perf
+
+- **haps**: seqpro to_packed for _allele_bytes_sum gather
+- **variants**: field-wise RaggedVariants.to_packed (seqpro + layout rebuild)
+- **variants**: flat in-place rc_ via seqpro reverse_complement_masked
+- **variants**: seqpro to_packed for allele/genotype/dosage gathers
+- **getitem**: remove dead legacy branches + guard awkward out of hot path + A/B write-up
+- **variants**: documented awkward-native limit for RaggedVariants (Task 10)
+- **splice**: flat-buffer spliced reconstruction + _regroup (Task 9)
+- **reconstruct**: _Flat tracks in HapsTracks; RefTracks flat via leaves
+- **ref**: return _Flat from reference reconstruction
+- **haps**: return _Flat / _FlatAnnotatedHaps from reconstruction
+- **tracks**: return _Flat from float32 reconstruction
+- **bench**: 10x profiling iterations (N_BATCHES=2000) + sudo py-spy script
+- **ragged**: delegate to_padded to seqpro 0.13 flat-buffer kernel
+- **rc**: flat-buffer reverse-complement via seqpro 0.12.1
+- **bench**: open hg38 reference as memmap (in_memory=False)
+
+## v0.25.0 (2026-05-21)
+
+### Feat
+
+- add migrate_svar_link for upgrading legacy datasets
+- **dataset**: wire svar_link resolver into Haps.from_path; Dataset.open(svar=)
+- **dataset**: add _resolve_svar and _verify_fingerprint
+- **write**: record SvarLink in metadata, drop link.svar symlink
+- **dataset**: add SvarLink / SvarFingerprint pydantic models
+- **write**: subtract genoray nbytes from max_mem; warn when index dominates
+
+### Fix
+
+- ndim guard on geno_offsets in choose_exonic_variants second loop
+- **write**: clarify max_mem docstring and skip index-accounting log for SparseVar
+- **write**: eager-load variant index for accurate max_mem accounting
+
+### Refactor
+
+- **dataset**: switch Haps.from_path version compare to SemanticVersion
+- **dataset**: use SemanticVersion in Metadata, add svar_link field
+
+## v0.24.1 (2026-05-13)
+
+### Fix
+
+- bump genoray, VCF bug
+
+## v0.24.0 (2026-05-12)
+
+### Feat
+
+- Dataset.with_insertion_fill + public API exports
+- route per-track insertion fill into HapsTracks kernel call
+- per-track insertion-fill on Tracks reconstructor
+- kernel-level insertion-fill strategy dispatch
+- add InsertionFill strategy classes and lowering helper
+
+### Fix
+
+- bump genoray
+- **insertion-fill**: strengthen tests, Self return type, clearer error
+- **insertion-fill**: lazy fallback to Repeat5p for unpopulated insertion_fill
+- **insertion-fill**: derive base_seed from full idx array, use full uint64 range
+- **insertion-fill**: require params, document fallback, broaden flank-sample tests
+- **insertion-fill**: non-instantiable base, tighter MAX_PARAMS, add test coverage
+
+## v0.23.1 (2026-05-11)
+
+### Fix
+
+- **perf**: benchmarks
+- **perf**: bench gvl.Table query algs
+- **perf**: use single polars-bio overlap (no xprod) in gvl.Table
+- types
+
+### Refactor
+
+- **perf**: vectorize scatter, use replace_strict and lexsort in gvl.Table
+
+## 0.23.0 (2026-05-09)
+
+### Feat
+
+- generalize gvl.write() to accept Table tracks
+- rename write() param bigwigs= -> tracks=, support mixed sequences
+- Table._intervals_from_offsets via polars_bio.overlap
+- Table.count_intervals via polars_bio.count_overlaps
+- add Table.from_path for csv/tsv/parquet/arrow files
+- add Table skeleton with long-form DataFrame init
+- add IntervalTrack Protocol for unified track sources
+- export get_splice_bed from package root
+- add get_splice_bed for GTF→splicing-BED conversion
+
+### Fix
+
+- normalize contig names in Table; correct unavail set warning
+- cast chrom and strand to Utf8 in get_splice_bed
+
+### Refactor
+
+- rename _write_bigwigs -> _write_track
+- tighten IntervalTrack Protocol annotation and docstring
+
+## 0.22.3 (2026-05-08)
+
+### Fix
+
+- **ci**: exclude _impl.py from debug-statements hook (match syntax)
+- **deps**: bump seqpro to 0.11.0 and genoray to 2.3.0
+- **_utils**: handle Categorical strand in bed_to_regions
+
+## 0.22.2 (2026-04-28)
+
+### Fix
+
+- make tbb and pyomp optional dependencies
+
+## 0.22.1 (2026-04-22)
+
+### Fix
+
+- skip overlapping variants in get_diffs_sparse to match reconstruction logic
+
+## 0.22.0 (2026-04-20)
+
+### Fix
+
+- scope RUSTFLAGS rpath to osx-arm64 only
+- support osx-arm64, add contributing instructions
+- enable cargo test for PyO3 extension crate
+- correct ploidy interleaving in _cat_length
+- pack ak.where results in _rc to prevent buffer leak
+
+## 0.21.4 (2026-03-26)
+
+### Fix
+
+- chained subset_to y str names
+
+## 0.21.3 (2026-03-25)
+
+### Fix
+
+- repeated subset_to
+
+## 0.21.2 (2026-03-17)
+
+### Fix
+
+- repeated subset_to
+- bump genoray
+
+## 0.21.1 (2026-03-09)
+
+### Fix
+
+- bump genoray
+
+## 0.21.0 (2026-02-26)
+
+### Feat
+
+- add option to extend lengths or not for gvl.write() fix: contig normalization
+
+### Fix
+
+- add cli as optional dependency
+
+## 0.20.0 (2026-02-05)
+
+### Feat
+
+- support python 3.13
+- upgrade to genoray 2
+
+### Fix
+
+- numba weirdness
+
+## 0.19.1 (2025-12-20)
+
+### Fix
+
+- **perf**: upgrade genoray for (much) faster writes. test: idempotent fixutres in test_ds_haps
+
+## 0.19.0 (2025-12-03)
+
+### Feat
+
+- allow subsetting by region name. fix: convert eligible ak.Array to sp.rag.Ragged for gvl.RaggedVariants whenever possible
+
+## 0.18.3 (2025-11-09)
+
+### Fix
+
+- **perf**: faster reverse complementing
+
+## 0.18.2 (2025-11-03)
+
+### Fix
+
+- correctly parse and load variant fields (skip duplicates)
+- use ak.str.length instead of ak.num to get ref and alt lengths. docs: shape docstring
+
+## 0.18.1 (2025-10-23)
+
+### Fix
+
+- track file format version
+
+## 0.18.0 (2025-10-22)
+
+### Feat
+
+- make RaggedVariants an Awkward Array subclass supporting arbitrary additional fields.
+
+## 0.17.0 (2025-08-22)
+
+### Feat
+
+- use new seqpro.Ragged interface
+- method to obtain the number of variants per region,sample,haplotype.
+- support for reverse complementing alt alleles of RaggedVariants
+- ragvariant methods for pytorch, fix squeeze for scalar indexing, upstream genoray fix for extending genotypes from PGEN, (perf) batched contig normalization
+- subsetting for RefDataset
+
+### Fix
+
+- right shape for double slice indexing
+- shape/broadcasting bug for reverse complementing variants
+- **perf**: breaking changes to ragged data layout from seqpro to eliminate copies when converting non-contiguous ragged data to/from awkward arrays.
+- when ref not passed to Dataset.open, emit a warning instead of error and let ds return raggedvariants
+- refdataset transforms with indices
+
+## 0.16.0 (2025-06-05)
+
+### Feat
+
+- make DatasetWithSites return both wild-type and mutant haplotypes
+
+### Fix
+
+- transform not applied when dataset returns single item. docs: add basenji2 evaluation
+- use genoray>=0.12. docs: basenji2 eval
+- ensure samples are re-ordered by subset_to if necessary
+- Let GVL recognize bgz-compressed VCFs
+- pad ref_coords with max value for dtype to ensure ref coords are sorted
+- remove transform arg for dummy dataset
+- finish deprecating the transform setting on Dataset, which was moved to dataloading functionality
+- PR #101, ensure variable length output corresponds to ArrayDataset
+- update genoray pixi version
+- permit ragged output for dataloading, emitting a warning instead of raising an error
+- constrain genoray for breaking changes
+- make sure exonic filter gets applied. style: adhere to pre-commit
+- exons are already in reverse order for negative stranded genes
+- torch dataset issues
+- bump seqpro to 0.4.2
+
+## 0.15.0 (2025-05-23)
+
+### Feat
+
+- add reference property to Dataset and add path attribute to Reference
+- add RefDataset to work with one or more reference genomes. Also change internal indexing to never materialize a full dataset index, dramatically reducing memory usage to support datasets with 1M+ regions. BREAKING CHANGE: move returning indices and transforms to torch API, since these features are generally unnecessary for non-dataloading contexts.
+- sites-only changes for QoL. fix: consider output length < region length for sites overlap
+- allow tracks to pass-through dataset with sites since SNPs have no affect on them
+- **wip**: pad ragged annotated ref coords with max dtype value. pass sanity checks.
+- **wip**: change ref_coord annotation so that right-pad values have position MAX_I32
+- type-safe Dataset, passes all tests.
+- refactor Dataset implementation to be (almost) fully type-safe.
+- **wip**: sites-only variants
+- **wip**: use sp.bed functions.
+- **wip**: small updates
+- apply sites-only SNPs, filtering non-SNPs out from VCFs.
+- sites-only classes, intersecting them with Datasets, and obtaining information necessary to apply variants.
+- add annot track to dummy dataset
+- **wip**: initial implementation for read/write annotation tracks, incorporating them along the track dimension.
+- deprecate unphased variants
+- **wip**: dosages/CCFs on ragged variants
+- prototype of returning ragged variants from Dataset
+
+### Fix
+
+- shape of single item from RefDataset
+- update init for seqpro bump
+- bump seqpro to 0.4.0 which includes basic gtf ops
+- update dummy dataset for changes to Reference. docs: add more docstrings
+- virtual indexing for splice indexer
+- jittering by folding it into data (re)construction
+- contig offset mapping for in-memory reference and incrementing offset when writing cache
+- bump genoray version to handle unsorted PVAR contigs
+- bump genoray version for filtered PGEN fix
+- ensure annot tracks match on-disk ordering
+- update for internal breaking changes
+- check for SNPs
+- bump genoray so bioconda pgenlib is valid
+- pass all tests
+- internal breaking changes
+- treat POS as 1-based to match VCF spec
+- type annotations
+- type annotation
+- contig naming for reference fasta.
+- contig normalization
+- pass all tests.
+- pass tests.
+- pass tests.
+- Dataset.open returns highest complexity ds by default (haps + all tracks, sorted).
+- use pandera polars not pandas
+- correct manipulation of active tracks
+- dummy dataset
+- wrong germline ccfs for 3rd germline variant and beyond
+- wrong geno path
+- parsing SVAR metadata, bump genoray
+
+### Refactor
+
+- use genoray
+
+## 0.14.4 (2025-05-12)
+
+### Fix
+
+- data corruption when rc_helper is parallelized
+
+## 0.14.3 (2025-05-10)
+
+### Fix
+
+- data corruption when rc_helper is parallelized
+- bump genoray to 0.10.3
+- bounds checking on ds regions vs. reference contig lengths
+- map contig names appropriately for bounds checking on ds regions + ref
+
+## 0.14.2 (2025-05-08)
+
+### Fix
+
+- unpack tuple for contig names when writing PGEN
+- **wip**: handle queries on contigs that do not exist in source variants
+- remove print statement gvl write
+
+### Refactor
+
+- remove dead code
+
+## 0.14.1 (2025-05-02)
+
+### Fix
+
+- wrong assumed shapes when checking regions with no variants
+
+## 0.14.0 (2025-05-01)
+
+### Feat
+
+- expose the Reference class and allow it to be passed to Dataset.open to avoid data duplication. feat: begin work for returning variant info
+- SVAR support passes all tests
+- expose the Reference class and allow it to be passed to Dataset.open to avoid data duplication. feat: begin work for returning variant info
+
+### Fix
+
+- dummy data
+- dummy data with Ragged sparsegenotypes
+- continue migrating to seqpro Ragged, enable logger at module level, add warnings about potential reference genome mismatches
+- add spanning dels to test and fix hap ilens for this case
+- dummy data
+- dummy data with Ragged sparsegenotypes
+
+## 0.13.0 (2025-04-30)
+
+### Feat
+
+- SVAR support passes all tests
+- SVAR support passes all tests
+- SVAR support passes all tests
+
+### Fix
+
+- continue migrating to seqpro Ragged, enable logger at module level, add warnings about potential reference genome mismatches
+- add spanning dels to test and fix hap ilens for this case
+- continue migrating to seqpro Ragged, enable logger at module level, add warnings about potential reference genome mismatches
+- add spanning dels to test and fix hap ilens for this case
+- variant index -> variant info mapping
+- add spanning dels to test and fix hap ilens for this case
+- parsing splice info and returning single item instead of list
+- update spliced_bed in with_settings for splice_info
+
+## 0.12.0 (2025-04-18)
+
+### Feat
+
+- remove Variants from public API. lets variants be a path and automatically infer if it is a VCF or PGEN
+- automatically write or update genoray VCF index to be GVL compatible during write
+- use genoray for variant I/O
+
+## 0.11.0 (2025-04-09)
+
+### Feat
+
+- change format of variant file indices so they can be one file, change naming to add .gvi extension to source.
+
+### Refactor
+
+- let starts and ends be optional for variant queries
+
+## 0.10.8 (2025-04-08)
+
+### Fix
+
+- reverse helper wrong when parallel=True
+- reverse helper wrong when parallel=True
+
+## 0.10.7 (2025-04-04)
+
+### Fix
+
+- pass all tests.
+
+## 0.10.6 (2025-04-04)
+
+### Feat
+
+- add members to conveniently inspect dataset splicing info.
+- move indices and transformation to torch dataset/dataloader API since these are generally never needed outside that context. feat: fully functional zero-copy splicing mechanics. fix: bug in rev and rev comp causing garbage output.
+
+### Fix
+
+- bug in rev and rev comp causing garbage output for negative stranded data.
+- __getitem__ type annotations for StrIdx
+- spliced i2d_map
+
+## 0.10.5 (2025-04-01)
+
+### Fix
+
+- (breaks experimental API) rename dosage to CCF and adjust alg to handle missing CCF from e.g. germline variants.
+
+## 0.10.4 (2025-04-01)
+
+### Fix
+
+- hotfix for indexer usage
+
+## 0.10.3 (2025-04-01)
+
+### Fix
+
+- shape of dataset return values.
+
+## 0.10.2 (2025-04-01)
+
+### Fix
+
+- pass relevant tests.
+- faster VCF reading.
+
+## 0.10.1 (2025-03-25)
+
+### Fix
+
+- bump polars version, breaking changes upstream.
+
+## 0.10.0 (2025-03-21)
+
+### Feat
+
+- type-safe Dataset, passes all tests.
+- refactor Dataset implementation to be (almost) fully type-safe.
+- **wip**: testing spliced return values
+- initial prototype for splicing.
+
+### Fix
+
+- Dataset.open returns highest complexity ds by default (haps + all tracks, sorted).
+
+## 0.9.0 (2025-03-06)
+
+### Feat
+
+- option to return ragged data from gvl.Dataset. output_length is set dynamically. fix: hap reconstruction matches bcftools. change default for Dataset.deterministic from False to True. change track output from a list of arrays to having a track dimension i.e. from shape (b [p] l) to (b t [p] l). docs: add dataset.md, faq.md and overhaul geuvadis.ipynb to be simpler and reflect changes in API.
+
+## 0.8.1 (2025-02-12)
+
+### Fix
+
+- incorrect mask from get_keep_mask_for_length (#37)
+
+## 0.8.0 (2025-02-05)
+
+### Feat
+
+- sequence annotations
+
+## v0.7.3 (2025-01-27)
+
+### Feat
+
+- allow subset_to() to accept boolean masks and polars Series
+- allow subset_to() to accept boolean masks and polars Series
+
+### Fix
+
+- add test for subset_to
+- add test for subset_to
+- update tests to match internal API changes
+- update tests to match internal API changes
+- bug in mark_keep_variants with spanning deletions.
+
+## v0.7.2 (2025-01-26)
+
+### Fix
+
+- change loop order to only open files once.
+- respect memory limits when writing bigwig data.
+- online docs notebook syntax highlightning
+- better docs.
+
+## v0.7.1 (2025-01-17)
+
+### Fix
+
+- bump version
+- scalar dataset indexing, region_indices order, updated docs, hotfixes
+
 ## v0.37.0 (2026-07-14)
 
 ### BREAKING CHANGE
