@@ -82,6 +82,7 @@ pub fn hap_diffs_svar2(
     dense_present_off: &[i64], // (n_work+1) BIT offsets
     lut_bytes: &[u8],
     lut_off: &[i64],
+    filter_exonic: bool,
 ) -> Array2<i32> {
     let n_q = regions.nrows();
     let mut diffs = Array2::<i32>::zeros((n_q, ploidy));
@@ -119,6 +120,9 @@ pub fn hap_diffs_svar2(
             let v_start = pos as i64;
             let (mut v_ilen, _allele) = decode_alt(key, lut_bytes, lut_off);
             let v_end = v_start - v_ilen.min(0) + 1;
+            if filter_exonic && (v_start < q_start || v_end > q_end) {
+                continue;
+            }
             if v_end <= q_start {
                 continue;
             }
@@ -576,6 +580,7 @@ mod tests {
             &dense_present_off,
             &lut_bytes,
             &lut_off,
+            false,
         );
 
         assert_eq!(diffs[[0, 0]], -1);
