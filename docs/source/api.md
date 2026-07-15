@@ -15,14 +15,6 @@
 
 .. autofunction:: with_length
 
-.. autoclass:: ProgressEvent
-    :members:
-
-.. autodata:: ProgressCallback
-
-.. autoclass:: JsonProgressSink
-    :members:
-
 .. autoclass:: BigWigs
     :members: __init__, from_table
     :exclude-members: __new__
