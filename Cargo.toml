@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anyhow = "1.0.102"
-bigtools = "0.5.6"
+bigtools = "0.5.8"
 coitrees = "0.4"
 itertools = "0.14.0"
 ndarray = "0.17.2"
@@ -23,7 +23,7 @@ seqpro-core = "0.1"
 # each package by name inside the repo — no in-repo path is given or needed. Bump `rev`
 # to pull newer genoray code; both crates must share the same rev (one clone, one repo).
 svar2-codec = { git = "https://github.com/d-laub/genoray.git", rev = "66ba734b85fcf1326008d66b33c052c7cf278a9f" }
-genoray_core = { git = "https://github.com/d-laub/genoray.git", rev = "66ba734b85fcf1326008d66b33c052c7cf278a9f", package = "genoray", default-features = false }
+genoray_core = { git = "https://github.com/d-laub/genoray.git", rev = "66ba734b85fcf1326008d66b33c052c7cf278a9f", package = "genoray", default-features = false, features = ["conversion"] }
 
 [features]
 extension-module = ["pyo3/extension-module"]

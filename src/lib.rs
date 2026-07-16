@@ -6,6 +6,7 @@ pub mod ragged;
 pub mod reconstruct;
 pub mod reference;
 pub mod reverse;
+pub mod svar1;
 pub mod svar2;
 pub mod tables;
 pub mod tracks;

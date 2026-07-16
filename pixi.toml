@@ -25,6 +25,9 @@ RUSTFLAGS = "-C link-arg=-rpath -C link-arg=$CONDA_PREFIX/lib"
 # libpython loading in `cargo test` binaries).
 [target.linux-64.activation.env]
 LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+# genoray_core's `conversion` feature builds vendored htslib (hts-sys) whose
+# mandatory bindgen step needs conda's libclang. Mirror genoray's pixi setup.
+LIBCLANG_PATH = "$CONDA_PREFIX/lib"
 
 [dependencies]
 python = "<3.14"
@@ -50,6 +53,9 @@ memray = "*"
 pyinstrument = "*"
 patchelf = "*"
 pyrefly = "*"
+# libclang for hts-sys's mandatory bindgen step (genoray_core `conversion` feature).
+# Pinned to 18: newer majors make bindgen 0.69 emit broken struct layouts (per genoray).
+clangdev = "18.*"
 
 [target.linux-64.dependencies]
 plink2 = "*"
