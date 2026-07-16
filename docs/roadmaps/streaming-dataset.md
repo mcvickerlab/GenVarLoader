@@ -113,8 +113,9 @@ Notes:
 
 - **#277 is the one judgement call.** It only needs the *synchronous* skeleton, so it could start
   today — but it edits the same two files #275 rewrites. Stack it on #275 rather than racing it.
-- **#278 carries a hard external blocker** (genoray release-gate) independent of #275; its spec
-  can be written now, but the impl waits on a genoray release regardless of wave.
+- **#278 has no external blocker.** genoray is a **git dependency pinned to a `rev`**, not a
+  crates.io release — an unpublished `genoray_core::query` API is reached by bumping the rev.
+  #278 sequences on #275 like the other backends. See CLAUDE.md → Development Notes.
 - **#276 and #279 are the widest parallel slot** — different source families (htslib vs bigtools),
   no shared kernels.
 
@@ -124,8 +125,8 @@ Notes:
   (completed; byte-identical parity, strangler-fig loop, differential-test harness).
 - **SVAR2 read-bound precedent (the SVAR2-backend template):** rust-migration Phase 6a —
   `genoray_core::query` (`ContigReader`/`find_ranges`/`gather_haps_readbound`/`decode_hap`) +
-  `reconstruct_haplotypes_from_svar2_readbound`. ⛔ genoray release-gate applies (dev-wired,
-  unpublished).
+  `reconstruct_haplotypes_from_svar2_readbound`. Reached by bumping the genoray git `rev` — no
+  release needed (CLAUDE.md → Development Notes).
 - **genoray Rust absorption:** rust-migration Phase 6 (⬜) — VCF/PGEN ingest into the Rust stack;
   enabling the `conversion` feature here overlaps that work (htslib producers).
 - **Prefetching dataloader prior art:** the existing `buffered`/`double_buffered` torch
