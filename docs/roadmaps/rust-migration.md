@@ -827,6 +827,13 @@ as a Rust path-dep, the first place gvl's Rust crate depends on genoray's Rust c
       `test_svar2_dataset.py::test_svar2_flanksample_multicontig_matches_svar1`.
 - [x] var_fields → .svar2 store INFO/FORMAT field routing (plan
       2026-07-12-svar2-info-format-field-routing.md).
+- [x] Spliced exonic haplotype output (moved off the guard-matrix list above): read-bound spliced
+      haplotypes are now supported (`Svar2Haps.__call__` splice branch), landed in two steps —
+      #272 (`feat(svar2): support spliced exonic haplotypes` + a vectorized per-row slice/concatenate
+      re-order replacing a byte-level fancy-index gather) and #273 (scatter-write: the kernel now
+      writes each row directly at its final spliced address, deleting the Python re-order pass
+      entirely). Byte-identical to SVAR1 including a new multi-contig scattered-destination
+      regression test. See the 2026-07-16 decisions-log entry below for the perf numbers.
 - [x] Docs/skill audit (this task): `skills/genvarloader/SKILL.md`, `docs/source/{write,format,faq}.md`,
       `README.md`; `api.md` ↔ `__all__` gate confirmed clean (no new public symbol — `svar2=` is a
       parameter, not an exported name).
@@ -897,6 +904,49 @@ conversion/write paths.
 ---
 
 ## Notes & decisions log
+
+- 2026-07-16 (Phase 6a follow-up — SVAR2 spliced haplotype scatter-write; issue
+  [#273](https://github.com/mcvickerlab/GenVarLoader/issues/273); branch
+  `worktree-spike+svar2-splice-profile`; PR: _not yet opened — controller opens after final
+  review_): SVAR2 spliced haplotype reads (added on top of Phase 6a by #272,
+  `feat(svar2): support spliced exonic haplotypes`) now write kernel output directly at each
+  element's final spliced address instead of reconstructing in region order and re-ordering the
+  output bytes in Python afterward — the same "permute metadata, not bytes" trick SVAR1's fused
+  spliced kernel already uses. #272 first replaced a byte-level fancy-index re-order with a
+  per-row slice + `np.concatenate` (189 ms → 23 ms on the chr22 165-transcript × 5-sample
+  benchmark below); a follow-up spike (2026-07-16) profiled the remainder and found the
+  concatenate itself (`_ragged_arange_gather`) was **13.7 ms of the still-remaining 10.2 ms
+  svar2-vs-svar1 gap** — ~9× the memcpy floor for the same 13.2 MB, i.e. per-row numpy dispatch
+  overhead across 6600 rows, not bandwidth. #273 deletes that pass: the Rust core now takes
+  per-row `(start, end)` `out_bounds` instead of a gap-free offsets array (the parallel carve
+  sorts by ascending start so it tolerates gaps from interleaved contig-group destinations), a
+  new out-param FFI entry (`reconstruct_haplotypes_from_svar2_readbound_into`) scatters each
+  contig group straight into one shared Python-allocated buffer and skips the diffs sizing pass
+  entirely (sizes come from the bounds), and RC is folded into the same call via
+  `rc_bounded_rows_inplace`. Byte-identical to SVAR1: existing spliced parity suite plus a new
+  multi-contig regression test (`test_svar2_spliced_haplotypes_match_svar1_multicontig`) — the
+  chr22 benchmark and prior spliced tests are single-contig and never exercised
+  scattered/gapped destinations, which only a multi-contig splice produces.
+
+  **Perf (same-session minimums, both backends in one process,
+  `tests/benchmarks/test_e2e_svar_splice.py`, pytest-benchmark, chr22 165 transcripts × 5
+  samples × ploidy 2, Carter HPC):**
+
+  | Measurement | svar1 min (ms) | svar2 min (ms) | svar2 ÷ svar1 |
+  |---|---|---|---|
+  | Before (spike baseline, 2026-07-16, min of 25 reps) | 25.15 | 35.33 | 1.41× (slower) |
+  | After this change — run 1 | 23.5821 | 16.7493 | **0.71×** (faster) |
+  | After this change — run 2 | 23.4241 | 16.7050 | **0.71×** (faster) |
+
+  Target was ≈1.0× or better (projection ≈0.8×, ~20 ms); the measured result **beats the
+  projection** — svar2 spliced reads are now ~30% *faster* than svar1's minimum, not merely at
+  parity. Two consecutive runs agree closely (svar2 min 16.70–16.75 ms, svar1 min 23.42–23.58 ms),
+  both parity tests (`test_svar1_svar2_spliced_parity`) passing. Deliberately left unmeasured
+  post-change and out of scope (spec §4): the spliced path's double gather (once to size the
+  plan, once to reconstruct; ~3.44 ms pre-change) — flagged only as a follow-up *if* post-change
+  numbers didn't meet target; since the result already beats target, no follow-up is filed.
+  Spec/plan: `docs/superpowers/specs/2026-07-16-svar2-spliced-scatter-write-design.md`,
+  `docs/superpowers/plans/2026-07-16-svar2-spliced-scatter-write.md`.
 
 - 2026-07-13 (Phase 6a — issue [#267](https://github.com/mcvickerlab/GenVarLoader/issues/267)
   multi-contig `FlankSample` fill-seed; branch `svar2-m6b-kernel`): lifted the last read-path guard.
