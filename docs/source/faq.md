@@ -107,6 +107,23 @@ Example of spliced gvl.write() and enabling splicing
 
 Example of SeqPro translate for RNA and AA -->
 
+## Can I use gvl without writing a dataset first?
+
+Yes, for haplotype output from a `.svar` (SparseVar) variant source: [`gvl.StreamingDataset`](api.md#genvarloader.StreamingDataset) reconstructs haplotype batches directly from a live `.svar` store, with no [`gvl.write()`](api.md#genvarloader.write) call and no `.gvl` directory written to disk.
+
+```python
+sds = gvl.StreamingDataset(
+    "rois.bed", reference="ref.fa", variants="normed.svar"
+).with_seqs("haplotypes")
+
+for data, region_idxs, sample_idxs in sds.to_dataloader(batch_size=32):
+    ...
+```
+
+Haplotype output is byte-identical to writing a dataset and indexing it (`gvl.write(...)` + `Dataset.open(...)[r, s]`, at `jitter=0`) — you're trading the write step for a slower per-epoch read, since `StreamingDataset` re-reads the live store on every window instead of hitting a pre-indexed on-disk dataset. It's a good fit for one-shot inference or when you can't afford (or don't want) the preprocessing step; for repeated-epoch training, a written [`Dataset`](api.md#genvarloader.Dataset) is still faster.
+
+`StreamingDataset` is currently narrower than `Dataset`: `.svar` variant sources only (VCF, PGEN, and `.svar2` raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0` only, ragged output only, and it's **iterable-only** — `sds[r, s]` and `sds.to_torch_dataset()` raise `TypeError`, use `sds.to_dataloader(...)` instead. Iteration is region-major, batched so each read stays within one contig; `to_dataloader(..., return_indices=True)` (the default) rides along `(region_idxs, sample_idxs)` in your original BED-row order. See the `genvarloader` skill for the full scope.
+
 ## Why aren't the methods `with_len()`, `with_seqs()`, etc. combined into `with_settings()`?
 
 These methods modify the type of output returned by a `gvl.Dataset`. In order to allow type checkers like mypy and pyright to know how these settings modify state, they are given their own methods. As a result, if you use a type checker, you will have access to an improved developer workflow with compile-time errors for many common issues. For example, using an incompatible transform or unpacking return values into the wrong number of arguments.

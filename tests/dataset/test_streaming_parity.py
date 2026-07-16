@@ -12,6 +12,8 @@ order, not sorted-storage order.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -72,3 +74,14 @@ def test_no_map_style_access(svar1_multicontig_fixture):
         sds.to_torch_dataset()
     with pytest.raises(TypeError):
         _ = sds[0, 0]
+
+
+def test_streamingdataset_is_public_and_documented():
+    """Task 6 gate: `StreamingDataset` must be exported from the top-level
+    `genvarloader` package and documented in `docs/source/api.md` -- CLAUDE.md's
+    "api.md must stay in sync with `__all__`" rule."""
+    assert "StreamingDataset" in gvl.__all__
+    assert hasattr(gvl, "StreamingDataset")
+    # tests/dataset/test_streaming_parity.py -> repo root is 2 parents up.
+    api_md = Path(__file__).parents[2] / "docs" / "source" / "api.md"
+    assert "StreamingDataset" in api_md.read_text()

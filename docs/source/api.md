@@ -88,6 +88,16 @@ Utilities for upgrading on-disk datasets written by older GVL versions.
     :exclude-members: __new__, __init__
 ```
 
+### Streaming (write-free)
+
+```{eval-rst}
+.. currentmodule:: genvarloader
+
+.. autoclass:: StreamingDataset
+    :members: __init__, shape, with_seqs, to_dataloader
+    :exclude-members: __new__
+```
+
 ### Reference genome(s)
 
 ```{eval-rst}
