@@ -57,7 +57,7 @@ only** (no map-style random access).
 
 | Plan | Scope | Status |
 |---|---|---|
-| `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — branch `streaming-dataset` (draft PR) |
+| `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — PR [#274](https://github.com/mcvickerlab/GenVarLoader/pull/274) |
 | _TBD (Plan 2)_ | Double-buffer engine (crossbeam producer/consumer, window sizing, `num_workers` shard) | ⬜ |
 | _TBD (Plan 3/4)_ | VCF backend / PGEN backend | ⬜ |
 | _TBD (Plan 5)_ | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
