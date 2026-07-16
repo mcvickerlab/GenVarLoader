@@ -37,3 +37,37 @@ def test_plan_is_region_major_and_covers_grid():
     assert flat_s.tolist() == [0, 1, 0, 1, 0, 1]
     assert len(sds) == 6
     assert sds.shape == (3, 2)
+
+
+def test_sort_order_is_duplicate_safe():
+    # two identical rows (same chrom/chromStart/chromEnd) among distinct ones.
+    # A value-based join on all BED columns fans out on the duplicate pair,
+    # corrupting `_sort_order`'s length/contents; a positional row-index carry
+    # through the sort must not.
+    n_samples = 2
+    rows = [
+        {"chrom": "chr1", "chromStart": 30, "chromEnd": 40},
+        {"chrom": "chr1", "chromStart": 10, "chromEnd": 20},
+        {"chrom": "chr1", "chromStart": 10, "chromEnd": 20},  # duplicate of row 1
+        {"chrom": "chr1", "chromStart": 20, "chromEnd": 30},
+    ]
+    bed = _bed(rows)
+    n_regions = len(rows)
+
+    def stub(r_idx, s_idx):
+        return np.stack([r_idx, s_idx], axis=1)
+
+    sds = StreamingDataset(
+        bed, contigs=["chr1"], n_samples=n_samples, ploidy=2, _reconstruct_window=stub
+    )
+
+    assert len(sds._sort_order) == n_regions
+    assert set(sds._sort_order.tolist()) == set(range(n_regions))
+
+    assert len(sds) == n_regions * n_samples
+
+    batches = list(sds)
+    flat_r = np.concatenate([b[1] for b in batches])
+    flat_s = np.concatenate([b[2] for b in batches])
+    cells = set(zip(flat_r.tolist(), flat_s.tolist()))
+    assert cells == {(r, s) for r in range(n_regions) for s in range(n_samples)}

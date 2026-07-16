@@ -29,18 +29,12 @@ class StreamingDataset:
 
     def __init__(self, regions, *, contigs, n_samples, ploidy, _reconstruct_window):
         bed = regions if isinstance(regions, pl.DataFrame) else sp.bed.read(regions)
-        sorted_bed = sp.bed.sort(bed)
-        # record original-row order so emitted indices refer to the user's input order
-        order = (
-            bed.with_row_index("_r")
-            .join(
-                sorted_bed.with_row_index("_sorted"), on=list(bed.columns), how="right"
-            )
-            .sort("_sorted")["_r"]
-            .to_numpy()
-            .astype(np.intp)
-        )
-        regs = bed_to_regions(sorted_bed, ContigNormalizer(contigs))
+        # record original-row order so emitted indices refer to the user's input order.
+        # Positional (row-index carried through the sort), not value-based: a join on
+        # BED columns would fan out on duplicate rows and corrupt `_sort_order`.
+        sorted_bed = sp.bed.sort(bed.with_row_index("_r"))
+        order = sorted_bed["_r"].to_numpy().astype(np.intp)
+        regs = bed_to_regions(sorted_bed.drop("_r"), ContigNormalizer(contigs))
         object.__setattr__(self, "_bed", bed)
         object.__setattr__(self, "_regions", regs)
         object.__setattr__(self, "_sort_order", order)
