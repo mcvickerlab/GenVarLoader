@@ -57,7 +57,7 @@ only** (no map-style random access).
 
 | Plan | Scope | Status |
 |---|---|---|
-| `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | 🚧 ready to execute |
+| `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — branch `streaming-dataset` (draft PR) |
 | _TBD (Plan 2)_ | Double-buffer engine (crossbeam producer/consumer, window sizing, `num_workers` shard) | ⬜ |
 | _TBD (Plan 3/4)_ | VCF backend / PGEN backend | ⬜ |
 | _TBD (Plan 5)_ | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
@@ -68,13 +68,27 @@ only** (no map-style random access).
 > prerequisite and moves first. The first working slice is a synchronous walking skeleton; the
 > crossbeam double-buffer is a separate throughput plan layered on top once parity is locked.
 
-- ⬜ **htslib / `conversion` enablement + wheel matrix** — `features=["conversion"]`; prove abi3
-  wheels; decide default-vs-optional gating. Shared prerequisite (build-risk spike). _Walking-skeleton Task 1_
-- ⬜ **Framework skeleton** — Python `StreamingDataset` (IterableDataset, region-major scheduler,
-  index-carrying batches, `to_dataloader`); reuse `_buffered_loader.py` patterns. _Walking-skeleton Task 2_
-- ⬜ **SVAR1 backend (synchronous)** — `Svar1Store` pyclass + window read → existing
-  `reconstruct_haplotypes_from_sparse`; byte-identical parity. _Walking-skeleton Tasks 3–6_
+- ✅ **htslib / `conversion` enablement + wheel matrix** — `features=["conversion"]` enabled; abi3
+  `cp310-abi3` wheel builds with htslib **statically** linked (no dynamic hts/libdeflate), so no
+  optional-gating fallback was needed. Two unanticipated build fixes were required: **bigtools
+  0.5.6→0.5.8** (hts-sys wants `libdeflate-sys ^1.21`, bigtools 0.5.6 pinned 0.13 — both declare
+  `links = "libdeflate"`, a hard Cargo resolver conflict) and **`clangdev` 18 + `LIBCLANG_PATH`**
+  in `pixi.toml` for hts-sys's mandatory bindgen (mirrors genoray's own pixi setup; 18 pinned
+  because newer clang breaks bindgen 0.69 layouts). _Walking-skeleton Task 1_
+- ✅ **Framework skeleton** — Python `StreamingDataset` (IterableDataset, region-major scheduler,
+  index-carrying batches in the user's original bed-row order, `to_dataloader`). Batches are
+  contig-grouped so every Rust call is single-contig. _Walking-skeleton Tasks 2, 5_
+- ✅ **SVAR1 backend (synchronous)** — `Svar1Store` pyclass + `read_window` → existing
+  `reconstruct_haplotypes_from_sparse` via a new `reconstruct_haplotypes_svar1` FFI.
+  **Byte-identical parity** vs `gvl.write()`+`Dataset.open()[r,s]` across an unsorted,
+  interleaved multi-contig bed (12 regions × 3 samples) through a real `DataLoader`.
+  Public `gvl.StreamingDataset` + docs shipped. _Walking-skeleton Tasks 3–6_
 - ⬜ **Double-buffer engine** — crossbeam producer/consumer, generic `StreamBackend`. _Plan 2_
+  - ⚠️ **Inherited perf/scale debt from the walking skeleton — fold into Plan 2:** the per-contig
+    static variant table crosses the FFI as Python **lists** (`.tolist()`, ~10M `int` objects for
+    a human chr1) and `read_window` **clones the whole contig table on every batch**; it also
+    re-opens `Svar1RecordSource` and walks the whole contig per batch (O(records × batch)), and
+    holds the GIL during the record walk. Fix with `PyReadonlyArray1` + slices/`Arc`.
 - ⬜ **VCF backend / PGEN backend / output modes / docs** — _Plans 3–5; docs folded per plan._
 
 ## Pointers

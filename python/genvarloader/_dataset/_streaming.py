@@ -40,7 +40,9 @@ class StreamingDataset:
     """
 
     _bed: pl.DataFrame
-    _regions: NDArray[np.int32]  # (n_regions, 3) sorted (contig_idx, start, end)
+    # (n_regions, 4) sorted: (contig_idx, start, end, strand). Only cols 0-2 are
+    # read here; `bed_to_regions` returns the 4th (strand) column.
+    _regions: NDArray[np.int32]
     _sort_order: NDArray[np.intp]  # maps sorted position -> original bed row
     contigs: list[str]
     n_samples: int
@@ -369,6 +371,16 @@ class _Svar1Backend:
                 continue
 
             first = int(np.argmax(mask))
+            # The per-contig slices below assume this contig's rows are one
+            # CONTIGUOUS block starting at `first`. That holds for a SparseVar
+            # built from a position-sorted VCF, but if it were ever violated the
+            # failure mode is a silently WRONG per-contig POS/REF/ALT table --
+            # parity breaks with no error. Fail fast instead.
+            if not mask[first : first + n_local].all():
+                raise ValueError(
+                    f"SVAR index rows for contig {c!r} are not contiguous; "
+                    "the streaming SVAR1 backend requires a position-sorted store."
+                )
             contig_start = int(idx["index"][first])
             pos_c = v_starts[first : first + n_local].astype(np.uint32).tolist()
 
@@ -443,7 +455,7 @@ class _Svar1Backend:
             self._alt_offsets,
             ref_bytes,
             ref_offsets,
-            ord("N"),
+            self._ref.pad_char,
             True,
         )
         batch = len(r_idx)
