@@ -223,8 +223,10 @@ indices**:
   → htslib) that must keep the abi3 wheel matrix (py310–313 × linux/macOS, +windows if targeted)
   green. This is a first-class build-system task, not an afterthought: verify cross-compilation,
   static-vs-dynamic htslib linking, and wheel size before committing to the backend work. If the
-  wheel matrix proves untenable, the fallback is to gate the VCF/PGEN backends behind an optional
-  feature/extra and keep SVAR1 (mmap, no htslib) in the default build.
+  wheel matrix proves untenable, the fallback is to gate all three RecordSource backends behind an
+  optional feature/extra. Note a truly htslib-free SVAR1 default is **not** free: genoray's SVAR1
+  reader is itself `conversion`-gated, so it would require a bespoke gvl-side ungated mmap reader
+  mirroring the SVAR2 `ContigReader` — extra work justified only if the wheel matrix forces it.
 - **genoray release-gate.** The SVAR2 read-bound path (rust-migration Phase 6a, PR #266) is
   already dev-wired to a local genoray checkout; PyPI/crates.io genoray does not yet publish the
   query/conversion API this effort needs. This spec cannot ship until genoray publishes; track
@@ -258,17 +260,33 @@ indices**:
 
 Parallelizable once the framework skeleton lands:
 
-1. **Framework skeleton** — Python `StreamingDataset` (IterableDataset, `with_*`, `to_dataloader`,
+> **Correction (2026-07-15, from interface recon).** genoray's `Svar1RecordSource` and its
+> `RecordSource`/`RawRecord` trait are `#[cfg(feature="conversion")]`-gated, and
+> `conversion = ["dep:rust-htslib","dep:zstd"]`. gvl links `genoray_core` with
+> `default-features=false`, so **none** of the three RecordSource readers compile in today.
+> Enabling `conversion` (htslib) is therefore a **shared prerequisite for all three backends,
+> including SVAR1** — it moves ahead of the backends. Reusing genoray's gated SVAR1 cursor (vs.
+> writing a bespoke ungated gvl-side mmap reader) is the YAGNI choice since htslib is enabled
+> anyway. `Svar1RecordSource` is a forward-only cursor (biallelic-collapsed `gt`), which suits a
+> region-major sweep; `RawRecord` lacks ILEN (derive `alts[0].len()-ref.len()`). The pure-mmap
+> `Svar2Store` pyclass is the wiring template. `IterableDataset` precedents already exist in
+> `_buffered_loader.py`/`_double_buffered_loader.py` — reuse them.
+
+1. **htslib / `conversion` enablement + wheel matrix** — add `features=["conversion"]` to the
+   `genoray_core` dep; prove the abi3 wheel matrix (py310–313 × linux/macOS) still builds; decide
+   default-vs-optional-feature gating. Shared prerequisite; front-loaded to retire the build risk.
+2. **Framework skeleton** — Python `StreamingDataset` (IterableDataset, `with_*`, `to_dataloader`,
    `len`, index-carrying batches) + region-major scheduler + the generic `StreamBackend`
-   producer/consumer engine (crossbeam, slot recycling). Depends on nothing; unblocks the rest.
-2. **SVAR1 backend** — `Svar1Window` buffer + `Svar1RecordSource` producer + consumer wiring to
-   `reconstruct_haplotypes_from_sparse`. No htslib. First backend to reach parity (cheapest).
-3. **htslib enablement + wheel matrix** — turn on `conversion`, prove the abi3 wheel matrix,
-   decide default-vs-optional-feature gating. Build-system risk retired here before 4.
+   producer/consumer engine (crossbeam, slot recycling). Reuses `_buffered_loader.py` patterns.
+3. **SVAR1 backend** — `Svar1Window` buffer + `Svar1RecordSource` producer + consumer wiring to
+   `reconstruct_haplotypes_from_sparse`. First backend to reach parity (simplest: mmap, already
+   sparse, biallelic).
 4. **VCF backend** — `VcfRecordSource` producer + sparse-encode; parity via `vcfixture`.
 5. **PGEN backend** — `PgenRecordSource`/`PvarReader` producer + sparse-encode; parity.
 6. **Output modes + settings** — annotated/variants modes, `with_len`, `min_af`/`max_af`,
    `var_fields`, `rc_neg`, jitter window; parity per mode.
 7. **Docs/skill** — `__all__` + `api.md` entry + `SKILL.md` section + prose docs (dataset/faq),
    documenting the write-free workflow, ordering, and perf tradeoffs.
-```
+
+The first working vertical slice (walking skeleton) is chunks 1→2→3 restricted to haplotype
+output over `.svar`; that is the subject of the first implementation plan.

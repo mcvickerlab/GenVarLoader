@@ -49,26 +49,33 @@ only** (no map-style random access).
 
 | Spec | Scope | Status |
 |---|---|---|
-| `docs/superpowers/specs/2026-07-15-streaming-dataset-vcf-pgen-svar1-design.md` | Shared framework + VCF/PGEN/SVAR1 backend | 🚧 design (pending review) |
+| `docs/superpowers/specs/2026-07-15-streaming-dataset-vcf-pgen-svar1-design.md` | Shared framework + VCF/PGEN/SVAR1 backend | ✅ approved |
 | _TBD_ | SVAR2 backend (SVAR2-style buffer + read-bound kernels) behind the framework | ⬜ |
 | _TBD_ | Interval (BigWigs/Table) streaming + variant+interval mixed scheduler | ⬜ |
 
-## Tasks (spec A — framework + VCF/PGEN/SVAR1)
+## Plans (spec A)
 
-_Detail + parallelizable chunks in the spec above; plans/PRs TBD._
+| Plan | Scope | Status |
+|---|---|---|
+| `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | 🚧 ready to execute |
+| _TBD (Plan 2)_ | Double-buffer engine (crossbeam producer/consumer, window sizing, `num_workers` shard) | ⬜ |
+| _TBD (Plan 3/4)_ | VCF backend / PGEN backend | ⬜ |
+| _TBD (Plan 5)_ | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
 
-- ⬜ **Framework skeleton** — Python `StreamingDataset` (IterableDataset, `with_*`,
-  `to_dataloader`, `len`, index-carrying batches) + region-major scheduler + generic
-  `StreamBackend` crossbeam producer/consumer engine. _Plan: TBD · PR: TBD_
-- ⬜ **SVAR1 backend** — `Svar1Window` buffer + `Svar1RecordSource` producer → sparse reconstruct
-  (no htslib; first to parity). _Plan: TBD · PR: TBD_
-- ⬜ **htslib enablement + wheel matrix** — turn on `conversion`; prove abi3 wheels; decide
-  default-vs-optional gating. _Plan: TBD · PR: TBD_
-- ⬜ **VCF backend** — `VcfRecordSource` producer + sparse-encode; `vcfixture` parity. _Plan: TBD · PR: TBD_
-- ⬜ **PGEN backend** — `PgenRecordSource`/`PvarReader` producer + sparse-encode; parity. _Plan: TBD · PR: TBD_
-- ⬜ **Output modes + settings** — annotated/variants, `with_len`, `min_af`/`max_af`,
-  `var_fields`, `rc_neg`, jitter window; parity per mode. _Plan: TBD · PR: TBD_
-- ⬜ **Docs / skill** — `__all__` + `api.md` + `SKILL.md` + prose. _PR: TBD_
+## Tasks (spec A — corrected ordering)
+
+> **Correction:** SVAR1's reader is `conversion`-gated (htslib), so htslib enablement is a shared
+> prerequisite and moves first. The first working slice is a synchronous walking skeleton; the
+> crossbeam double-buffer is a separate throughput plan layered on top once parity is locked.
+
+- ⬜ **htslib / `conversion` enablement + wheel matrix** — `features=["conversion"]`; prove abi3
+  wheels; decide default-vs-optional gating. Shared prerequisite (build-risk spike). _Walking-skeleton Task 1_
+- ⬜ **Framework skeleton** — Python `StreamingDataset` (IterableDataset, region-major scheduler,
+  index-carrying batches, `to_dataloader`); reuse `_buffered_loader.py` patterns. _Walking-skeleton Task 2_
+- ⬜ **SVAR1 backend (synchronous)** — `Svar1Store` pyclass + window read → existing
+  `reconstruct_haplotypes_from_sparse`; byte-identical parity. _Walking-skeleton Tasks 3–6_
+- ⬜ **Double-buffer engine** — crossbeam producer/consumer, generic `StreamBackend`. _Plan 2_
+- ⬜ **VCF backend / PGEN backend / output modes / docs** — _Plans 3–5; docs folded per plan._
 
 ## Pointers
 
