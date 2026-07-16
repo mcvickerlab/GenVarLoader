@@ -256,9 +256,13 @@ python -c "import re,genvarloader as g; api=open('docs/source/api.md').read(); p
 
 The auto-generated `docs/source/changelog.md` (built from commit messages via `changelog.md.j2`) does **not** count as documentation — never treat a changelog entry as a substitute for prose docs. This gate complements the skill-maintenance rule above: public-API changes must update the skill, and any user-facing change must also keep the prose docs true.
 
-## Rust migration roadmap
+## Roadmaps
 
-Any task that mentions "rust" (adding or porting Rust code, touching `src/`, or migrating numba/Python hot paths) **must** read `docs/roadmaps/rust-migration.md` before starting and update it as part of the work — tick completed tasks, record measurement results under the relevant checkpoint, and set the phase status marker (⬜/🚧/✅) + PR link. The roadmap is the source of truth for migration sequencing and the byte-identical parity contract.
+Active roadmaps live in `docs/roadmaps/`. **Any task covered by an active roadmap must read it before starting and update it as part of the work** — tick completed tasks, set the status marker (⬜/🚧/✅), and add spec/plan/PR pointers. Keep each roadmap brief: high-level summary + task list only, pushing detail into linked specs/plans/PRs.
+
+- **`docs/roadmaps/streaming-dataset.md`** — the write-free, Rust-first streaming `StreamingDataset` effort (async double-buffered variant streaming). Read + update it for any work on that feature or its Rust engine.
+
+The completed Rust-migration effort is archived at **`docs/archive/roadmaps/rust-migration.md`** (+ its `phase-*.md` supporting docs). It is no longer a live tracker, but remains the reference for the **byte-identical parity contract** and the strangler-fig migration conventions that new Rust work still follows.
 
 ## Development Notes
 
