@@ -4,7 +4,7 @@ import copy
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable, Literal
 
 import numpy as np
 import polars as pl
@@ -13,12 +13,31 @@ from genoray._contigs import ContigNormalizer
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
+from .._torch import requires_torch
+from .._variants._utils import path_is_pgen, path_is_vcf
 from ._utils import bed_to_regions
+
+if TYPE_CHECKING:
+    import torch.utils.data as td
 
 
 @dataclass(frozen=True, slots=True)
 class StreamingDataset:
-    """Write-free, iterable-only dataset. Region-major iteration; no random access."""
+    """Write-free, iterable-only dataset. Region-major iteration; no random access.
+
+    Two ways to construct:
+
+    - Public API: ``StreamingDataset(regions, reference=..., variants=<path>)``.
+      ``variants`` is classified by path suffix, mirroring :func:`gvl.write`'s
+      classification (``_write.py``): a ``.svar`` directory (a genoray
+      ``SparseVar``/SVAR1 store) is supported in this plan; VCF, PGEN, and
+      ``.svar2`` (SVAR2) inputs raise :class:`NotImplementedError` (later
+      plans). Only ``jitter=0`` (the default) is supported in this plan.
+    - Internal/test-oriented: ``StreamingDataset(regions, contigs=..., n_samples=...,
+      ploidy=..., _reconstruct_window=...)`` injects a reconstruction callback
+      directly, bypassing variant-source classification. Used by
+      ``test_streaming_scheduler.py`` and ``test_svar1_window.py``.
+    """
 
     _bed: pl.DataFrame
     _regions: NDArray[np.int32]  # (n_regions, 3) sorted (contig_idx, start, end)
@@ -29,7 +48,78 @@ class StreamingDataset:
     _reconstruct_window: Callable[[NDArray[np.intp], NDArray[np.intp]], object]
     _batch_size: int = 1
 
-    def __init__(self, regions, *, contigs, n_samples, ploidy, _reconstruct_window):
+    def __init__(
+        self,
+        regions,
+        reference: str | Path | None = None,
+        variants: str | Path | None = None,
+        *,
+        jitter: int = 0,
+        contigs: list[str] | None = None,
+        n_samples: int | None = None,
+        ploidy: int | None = None,
+        _reconstruct_window: Callable[[NDArray[np.intp], NDArray[np.intp]], object]
+        | None = None,
+    ):
+        if _reconstruct_window is not None:
+            # Internal/test-oriented path: caller injects the reconstruction
+            # callback directly and must supply everything it would otherwise
+            # be derived from.
+            if contigs is None or n_samples is None or ploidy is None:
+                raise ValueError(
+                    "StreamingDataset(_reconstruct_window=...) requires "
+                    "`contigs`, `n_samples`, and `ploidy` to be supplied "
+                    "explicitly."
+                )
+        elif variants is not None:
+            # Public API path: classify `variants` and build the backend.
+            if reference is None:
+                raise ValueError(
+                    "StreamingDataset(...) requires `reference` to reconstruct "
+                    "haplotypes."
+                )
+            if jitter != 0:
+                raise NotImplementedError(
+                    "StreamingDataset read-time jitter is not implemented yet; "
+                    "only jitter=0 (the default) is supported in this plan."
+                )
+
+            p = Path(variants)
+            if p.is_dir() and p.suffix == ".svar":
+                from genoray import SparseVar
+
+                contigs = SparseVar(str(p)).contigs
+                backend = _Svar1Backend(p, reference, contigs, regions)
+                n_samples = backend.n_samples
+                ploidy = backend.ploidy
+                _reconstruct_window = backend.reconstruct_window
+            elif p.is_dir() and p.suffix == ".svar2":
+                raise NotImplementedError(
+                    f"StreamingDataset does not support SVAR2 stores yet ({p}); "
+                    "this is a later plan. Use a SparseVar (.svar) store for now."
+                )
+            elif path_is_pgen(p):
+                raise NotImplementedError(
+                    f"StreamingDataset does not support PGEN input yet ({p}); "
+                    "this is a later plan. Use a SparseVar (.svar) store for now."
+                )
+            elif path_is_vcf(p):
+                raise NotImplementedError(
+                    f"StreamingDataset does not support VCF input yet ({p}); "
+                    "this is a later plan. Use a SparseVar (.svar) store for now."
+                )
+            else:
+                raise ValueError(
+                    f"variants={p} has an unrecognized file type; expected a "
+                    "VCF, PGEN, or SparseVar (.svar) store."
+                )
+        else:
+            raise ValueError(
+                "StreamingDataset(...) requires either `variants` (a path to a "
+                "VCF, PGEN, or SparseVar/.svar store, public API) or "
+                "`_reconstruct_window` (injected-callback, internal/test API)."
+            )
+
         bed = regions if isinstance(regions, pl.DataFrame) else sp.bed.read(regions)
         # record original-row order so emitted indices refer to the user's input order.
         # Positional (row-index carried through the sort), not value-based: a join on
@@ -61,19 +151,143 @@ class StreamingDataset:
         return new
 
     def _plan(self) -> Iterator[tuple[NDArray[np.intp], NDArray[np.intp]]]:
-        # region-major flat index over (n_regions, n_samples): sample varies fastest.
+        # region-major flat index over (n_regions, n_samples): sample varies
+        # fastest, WITHIN a contig -- batches never cross a contig boundary
+        # (`_Svar1Backend.reconstruct_window` requires a single-contig batch).
+        # `self._regions` is sorted by (contig_idx, start), so each contig's
+        # regions form one contiguous run of sorted-region indices.
         n_regions, n_samples = self.shape
-        flat = np.arange(n_regions * n_samples, dtype=np.intp)
-        for start in range(0, flat.size, self._batch_size):
-            chunk = flat[start : start + self._batch_size]
-            r_idx, s_idx = np.unravel_index(chunk, (n_regions, n_samples))
-            yield r_idx.astype(np.intp), s_idx.astype(np.intp)
+        if n_regions == 0:
+            return
+        contig_idxs = self._regions[:, 0]
+        run_bounds = np.flatnonzero(np.diff(contig_idxs)) + 1
+        run_starts = np.concatenate(([0], run_bounds))
+        run_ends = np.concatenate((run_bounds, [n_regions]))
+        for r_lo, r_hi in zip(run_starts, run_ends):
+            n_run_regions = int(r_hi - r_lo)
+            flat = np.arange(n_run_regions * n_samples, dtype=np.intp)
+            for start in range(0, flat.size, self._batch_size):
+                chunk = flat[start : start + self._batch_size]
+                r_local, s_idx = np.unravel_index(chunk, (n_run_regions, n_samples))
+                r_idx = (r_local + r_lo).astype(np.intp)
+                yield r_idx, s_idx.astype(np.intp)
 
     def __iter__(self) -> Iterator[tuple]:
         for r_idx, s_idx in self._plan():
             data = self._reconstruct_window(r_idx, s_idx)
             # map sorted region positions back to the user's original bed rows
             yield (data, self._sort_order[r_idx], s_idx)
+
+    def with_seqs(self, kind: Literal["haplotypes"]) -> "StreamingDataset":
+        """Select the sequence output kind. Only ``"haplotypes"`` is supported
+        in this plan; reference, annotated, and variants output are later
+        plans."""
+        if kind != "haplotypes":
+            raise NotImplementedError(
+                f"StreamingDataset.with_seqs({kind!r}) is not implemented yet; "
+                'only "haplotypes" is supported in this plan. Reference, '
+                "annotated, and variants output are later plans."
+            )
+        return copy.copy(self)
+
+    def __getitem__(self, idx) -> None:
+        raise TypeError(
+            "StreamingDataset is iterable-only; use to_dataloader() instead of "
+            "map-style indexing."
+        )
+
+    def to_torch_dataset(self, *args, **kwargs) -> None:
+        raise TypeError(
+            "StreamingDataset is iterable-only; use to_dataloader() instead of "
+            "to_torch_dataset() (there is no random-access torch Dataset for a "
+            "streaming source)."
+        )
+
+    @requires_torch
+    def to_dataloader(
+        self,
+        batch_size: int = 1,
+        num_workers: int = 0,
+        return_indices: bool = True,
+        *,
+        collate_fn: Callable | None = None,
+        pin_memory: bool = False,
+        timeout: float = 0,
+        worker_init_fn: Callable | None = None,
+        multiprocessing_context: Callable | None = None,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool = False,
+        pin_memory_device: str = "",
+    ) -> "td.DataLoader":
+        """Wrap this ``StreamingDataset`` in a PyTorch
+        :class:`DataLoader <torch.utils.data.DataLoader>`. Requires PyTorch to
+        be installed.
+
+        Parameters
+        ----------
+        batch_size
+            Number of ``(region, sample)`` cells per yielded batch.
+        num_workers
+            Must be 0. ``StreamingDataset`` iteration is itself the
+            concurrency strategy (mirrors :meth:`Dataset.to_dataloader`'s
+            ``mode="buffered"``/``"double_buffered"`` restriction); worker-process
+            sharding of the plan is a later plan.
+        return_indices
+            If ``True`` (the default), yield ``(data, region_idxs, sample_idxs)``
+            tuples; if ``False``, yield ``data`` alone.
+        """
+        if num_workers > 0:
+            raise ValueError(
+                "StreamingDataset.to_dataloader: num_workers>0 is not "
+                "implemented yet; the loader IS the concurrency strategy for "
+                "StreamingDataset (mirrors gvl.Dataset.to_dataloader's "
+                "buffered/double_buffered modes, which impose the same "
+                "restriction). Use num_workers=0."
+            )
+
+        import torch.utils.data as td
+
+        inner = _make_streaming_torch_dataset(self, batch_size, return_indices)
+        return td.DataLoader(
+            inner,
+            batch_size=None,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=pin_memory,
+            timeout=timeout,
+            worker_init_fn=worker_init_fn,
+            multiprocessing_context=multiprocessing_context,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+            pin_memory_device=pin_memory_device,
+        )
+
+
+def _make_streaming_torch_dataset(
+    dataset: StreamingDataset, batch_size: int, return_indices: bool
+) -> "td.IterableDataset":
+    """IterableDataset wrapper for `StreamingDataset`, mirroring the
+    `make_buffered_dataset` pattern in `_buffered_loader.py`: `__iter__`
+    drives `dataset`'s own iteration (batched), and `return_indices` toggles
+    whether index arrays ride along -- kept out of `StreamingDataset.__iter__`
+    itself so `list(sds)` (used by Tasks 2/4's tests) keeps yielding 3-tuples
+    regardless of how a DataLoader wraps it.
+    """
+    import torch.utils.data as td
+
+    class _StreamingTorchDataset(td.IterableDataset):
+        def __iter__(self):
+            for data, r_idx, s_idx in dataset._with_batch_size(batch_size):
+                if return_indices:
+                    yield data, r_idx, s_idx
+                else:
+                    yield data
+
+        def __len__(self) -> int:
+            n = len(dataset)
+            return -(-n // batch_size)  # ceil division
+
+    return _StreamingTorchDataset()
 
 
 class _Svar1Backend:

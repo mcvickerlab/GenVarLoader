@@ -117,11 +117,26 @@ impl Svar1Store {
                 .next_record()
                 .map_err(|e| anyhow::anyhow!("svar1 read (contig {contig}): {e:?}"))?;
             let Some(rec) = rec else { break };
+            let li = local_i as usize;
             let global_v = t.contig_start as i32 + local_i;
             local_i += 1;
             let pos = rec.pos as i32;
+            // A variant is relevant to `[lo, hi)` if its REFERENCE SPAN reaches
+            // into the window -- not merely if its POS falls inside it. A
+            // deletion starting before `lo` still deletes bases *within* the
+            // window, so a naive `pos >= lo` filter silently drops it and the
+            // haplotype comes back too long. Mirror the overlap test the
+            // reconstruct kernel itself applies (`genotypes::get_diffs_sparse`):
+            //   v_end = v_start - min(ilen, 0) + 1
+            //   relevant iff v_end > q_start && v_start < q_end
+            // ILEN comes from the per-contig REF/ALT CSR lengths (local index),
+            // which are parallel to the records walked here.
+            let ref_len = (t.ref_offsets[li + 1] - t.ref_offsets[li]) as i32;
+            let alt_len = (t.alt_offsets[li + 1] - t.alt_offsets[li]) as i32;
+            let ilen = alt_len - ref_len;
+            let v_end = pos - ilen.min(0) + 1;
             for (bi, (&(lo, hi), &s)) in region_bounds.iter().zip(samples).enumerate() {
-                if pos < lo || pos >= hi {
+                if v_end <= lo || pos >= hi {
                     continue;
                 }
                 let row_base = bi * ploidy;

@@ -27,6 +27,7 @@ from ._dataset._insertion_fill import (
 from ._dataset._rag_variants import RaggedVariants
 from ._dataset._reference import RefDataset, Reference
 from ._dataset._migrate import migrate
+from ._dataset._streaming import StreamingDataset
 from ._dataset._svar_link import migrate_svar_link
 from ._dataset._write import get_splice_bed, update, write
 from ._dummy import get_dummy_dataset
@@ -67,6 +68,7 @@ __all__ = [
     "Repeat5p",
     "Repeat5pNormalized",
     "SitesSchema",
+    "StreamingDataset",
     "Table",
     "VarWindowOpt",
     "data_registry",
