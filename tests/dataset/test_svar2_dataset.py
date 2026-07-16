@@ -728,6 +728,57 @@ def test_svar2_haplotypes_match_svar1_multicontig(
     assert np.array_equal(a.data.view("u1"), b.data.view("u1"))
 
 
+def test_svar2_spliced_haplotypes_match_svar1_multicontig(
+    tmp_path, svar_fixture2, svar2_fixture2, _src2
+):
+    """Spliced haplotypes byte-identical to SVAR1 when transcripts span TWO contigs.
+
+    Splice order is (splice_row, sample, ploid, element), but SVAR2 reconstructs
+    per contig group — so each group's rows land at NON-contiguous destinations
+    interleaved with the other group's. Single-contig spliced tests (and the chr22
+    benchmark) never produce that layout, so this is the only guard on the
+    scattered-destination path. Minus strand is included so the RC pass is
+    exercised on scattered rows too.
+    """
+    from genoray import SparseVar, SparseVar2
+
+    _bcf, ref = _src2
+    # Interleaved contigs, out of sorted order; Tb is minus-strand and multi-exon.
+    splice_bed = pl.DataFrame(
+        {
+            "chrom": ["chr2", "chr1", "chr2", "chr1"],
+            "chromStart": [0, 0, 20, 5],
+            "chromEnd": [13, 13, 40, 20],
+            "strand": ["+", "-", "+", "-"],
+            "transcript_id": ["Ta", "Tb", "Ta", "Tb"],
+            "exon_number": [1, 1, 2, 2],
+        }
+    )
+    d1 = tmp_path / "mcs1.gvl"
+    d2 = tmp_path / "mcs2.gvl"
+    gvl.write(
+        d1, splice_bed, variants=SparseVar(svar_fixture2), samples=None, overwrite=True
+    )
+    gvl.write(
+        d2,
+        splice_bed,
+        variants=SparseVar2(svar2_fixture2),
+        samples=None,
+        overwrite=True,
+    )
+    settings = {"splice_info": ("transcript_id", "exon_number"), "var_filter": "exonic"}
+    ds1 = gvl.Dataset.open(d1, reference=ref, **settings).with_seqs("haplotypes")
+    ds2 = gvl.Dataset.open(d2, reference=ref, **settings).with_seqs("haplotypes")
+
+    a = ds1[:, :]
+    b = ds2[:, :]
+    assert np.array_equal(np.asarray(a.offsets), np.asarray(b.offsets)), (
+        f"offsets differ: svar1={np.asarray(a.offsets).tolist()} "
+        f"svar2={np.asarray(b.offsets).tolist()}"
+    )
+    assert np.array_equal(a.data.view("u1"), b.data.view("u1"))
+
+
 # --------------------------------------------------------------------------
 # variant-windows (Task 1): ref_window pinned to SVAR1; alt_window validated via
 # ref-flank decomposition + tokenized variants.alt; multi-contig stitch, dummy
