@@ -22,6 +22,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bigwig_write_track, m)?)?;
     m.add_class::<tables::RustTable>()?;
     m.add_class::<svar2::store::Svar2Store>()?;
+    m.add_class::<svar1::store::Svar1Store>()?;
     m.add_function(wrap_pyfunction!(ragged::ragged_to_padded, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::intervals_to_tracks, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::get_diffs_sparse, m)?)?;
