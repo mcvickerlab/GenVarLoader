@@ -119,9 +119,13 @@ fused entry does.
 passed to the kernel; the `reverse_masked` post-pass goes away.
 
 The reconstruct call is currently reached via `get_haps_and_shifts`, which raises on
-`splice_plan is not None`. Factor the group loop into a shared internal helper
-parameterized by destination bounds (`None` = today's allocate-and-return), so the
-spliced and unspliced paths share one obvious code path rather than forking.
+`splice_plan is not None`. Give the spliced path its own `_reconstruct_spliced`
+method rather than parameterizing `get_haps_and_shifts` by destination bounds: the
+two paths call *different* FFI entries (allocate-and-self-size vs scatter-into) and
+differ on shifts (spliced is always zero — `_getitem_spliced` asserts `jitter == 0`
+and `deterministic`) and on sizing. What they genuinely share — the per-group cache
+slice and reference slice — is already factored into `_gather_inputs` and
+`_ref_for_contig`, so a shared loop helper would add indirection over three lines.
 
 Deletes: the splice-path use of `_ragged_arange_gather` (`_svar2_haps.py:384`).
 The helper itself stays — the unspliced and variants paths still use it.
