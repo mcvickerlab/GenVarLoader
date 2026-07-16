@@ -2,7 +2,7 @@
 //! buffer. Used by the read-path kernels to emit negative-strand output already
 //! reverse-complemented, replacing the Python RC post-pass on the rust backend.
 
-use ndarray::ArrayView1;
+use ndarray::{ArrayView1, ArrayView2};
 
 /// ACGT<->TGCA complement, identity for every other byte. Mirrors
 /// `bytes.maketrans(b"ACGT", b"TGCA")` (python/genvarloader/_ragged.py).
@@ -64,6 +64,21 @@ pub fn rc_flat_rows_inplace(
         }
         let s = offsets[i] as usize;
         let e = offsets[i + 1] as usize;
+        rc_row(&mut data[s..e]);
+    }
+}
+
+/// Reverse AND complement bytes within each masked row, addressed by explicit
+/// `(start, end)` bounds. The scattered-destination counterpart of
+/// [`rc_flat_rows_inplace`]: rows need not be contiguous or in ascending order,
+/// which is what a spliced SVAR2 scatter write produces.
+pub fn rc_bounded_rows_inplace(data: &mut [u8], bounds: ArrayView2<i64>, to_rc: ArrayView1<bool>) {
+    for i in 0..to_rc.len() {
+        if !to_rc[i] {
+            continue;
+        }
+        let s = bounds[[i, 0]] as usize;
+        let e = bounds[[i, 1]] as usize;
         rc_row(&mut data[s..e]);
     }
 }
@@ -144,5 +159,21 @@ mod tests {
             rc_flat_rows_inplace(&mut row, off.view(), array![true].view());
             assert_eq!(row[0], COMP[b as usize], "byte {b}");
         }
+    }
+
+    #[test]
+    fn rc_bounded_rows_handles_scattered_rows() {
+        use ndarray::arr2;
+        // Two rows at scattered destinations with an untouched gap between them.
+        // Layout: [row0 "ACGT" @ 0..4]["--" gap 4..6][row1 "AACC" @ 6..10]
+        let mut data = b"ACGT--AACC".to_vec();
+        let bounds = arr2(&[[6i64, 10], [0i64, 4]]);
+        let to_rc = array![true, false];
+
+        super::rc_bounded_rows_inplace(&mut data, bounds.view(), to_rc.view());
+
+        // Row 0 of the mask addresses bytes 6..10 ("AACC" -> RC -> "GGTT").
+        // Row 1 is unmasked; the gap must be untouched.
+        assert_eq!(&data, b"ACGT--GGTT");
     }
 }
