@@ -1112,6 +1112,169 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
     Ok((out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py)))
 }
 
+/// Scatter-write variant of [`reconstruct_haplotypes_from_svar2_readbound`]: writes
+/// each (query, hap) row into `out` at the caller-supplied `out_bounds[k] = (start, end)`
+/// instead of allocating a contiguous buffer and returning it.
+///
+/// This is how the SVAR2 spliced read reaches SVAR1's "fused" behavior: the Python
+/// splice plan already knows every row's final address, so each contig group scatters
+/// straight into the shared output buffer — no post-kernel re-order, no extra copy.
+/// `out_bounds` rows are pairwise disjoint but NOT contiguous or ordered: a group's
+/// rows interleave with the other contig groups' rows.
+///
+/// Unlike the allocating entry, this skips `hap_diffs_svar2` — that pass exists only
+/// to size the output, and sizes come from `out_bounds` here.
+///
+/// `to_rc` (per row, kernel row order) reverse-complements negative-strand rows in
+/// place after reconstruction, mirroring `reconstruct_haplotypes_spliced_fused`.
+#[pyfunction(signature = (
+    out,
+    out_bounds,
+    store,
+    contig,
+    region_starts,
+    orig_samples,
+    vk_snp_range,
+    vk_indel_range,
+    dense_snp_range,
+    dense_indel_range,
+    region_bounds,
+    shifts,
+    ref_,
+    ref_offsets,
+    pad_char,
+    to_rc,
+    parallel,
+    filter_exonic = false,
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_haplotypes_from_svar2_readbound_into<'py>(
+    py: Python<'py>,
+    mut out: PyReadwriteArray1<u8>,
+    out_bounds: PyReadonlyArray2<i64>,
+    store: PyRef<'py, crate::svar2::store::Svar2Store>,
+    contig: &str,
+    region_starts: PyReadonlyArray1<u32>,
+    orig_samples: PyReadonlyArray1<i64>,
+    vk_snp_range: PyReadonlyArray2<i64>,
+    vk_indel_range: PyReadonlyArray2<i64>,
+    dense_snp_range: PyReadonlyArray2<i64>,
+    dense_indel_range: PyReadonlyArray2<i64>,
+    region_bounds: PyReadonlyArray2<i32>,
+    shifts: PyReadonlyArray2<i32>,
+    ref_: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+    to_rc: Option<PyReadonlyArray1<bool>>,
+    parallel: bool,
+    filter_exonic: bool,
+) -> PyResult<()> {
+    use crate::reconstruct;
+    use crate::svar2;
+
+    let reader = store.reader(contig).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("contig {contig} not in store"))
+    })?;
+
+    let shifts_a = shifts.as_array();
+    let ploidy = shifts_a.ncols();
+    let region_bounds_a = region_bounds.as_array();
+    let n_q = region_bounds_a.nrows();
+
+    if out_bounds.as_array().nrows() != n_q * ploidy {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "out_bounds must have n_q*ploidy = {} rows, got {}",
+            n_q * ploidy,
+            out_bounds.as_array().nrows()
+        )));
+    }
+
+    // Build `regions` (n_q, 3) as [contig_idx=0, start, end) — `ref_` is the
+    // single contig slice the caller passed in (ref_offsets = [0, len]).
+    let mut regions = Array2::<i32>::zeros((n_q, 3));
+    for q in 0..n_q {
+        regions[[q, 1]] = region_bounds_a[[q, 0]];
+        regions[[q, 2]] = region_bounds_a[[q, 1]];
+    }
+
+    let region_starts_v: Vec<u32> = region_starts.as_array().to_vec();
+    let orig_samples_v: Vec<usize> = orig_samples
+        .as_array()
+        .iter()
+        .map(|&x| x as usize)
+        .collect();
+    let vk_snp_range_v = arr2_to_ranges(vk_snp_range.as_array());
+    let vk_indel_range_v = arr2_to_ranges(vk_indel_range.as_array());
+    let dense_snp_range_v = arr2_to_ranges(dense_snp_range.as_array());
+    let dense_indel_range_v = arr2_to_ranges(dense_indel_range.as_array());
+
+    // See the allocating entry: `ref_` is sliced then `.as_slice().unwrap()`'d inside
+    // the kernel, so a non-contiguous view would panic there.
+    require_contiguous_1d(&ref_, "ref_")?;
+
+    let ref_a = ref_.as_array();
+    let ref_offsets_a = ref_offsets.as_array();
+    let out_bounds_a = out_bounds.as_array();
+    let to_rc_a = to_rc.as_ref().map(|a| a.as_array());
+    let out_a = out.as_array_mut();
+
+    py.detach(move || {
+        let rb = genoray_core::query::HapRanges::new(
+            &region_starts_v,
+            &orig_samples_v,
+            &vk_snp_range_v,
+            &vk_indel_range_v,
+            &dense_snp_range_v,
+            &dense_indel_range_v,
+            ploidy,
+        );
+        let br = genoray_core::query::gather_haps_readbound(reader, &rb);
+
+        let (lut_bytes, lut_off_u64) = reader.lut_arrays();
+        let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
+
+        let flat = svar2::split_to_flat(&br);
+        let dense_range_a =
+            numpy::ndarray::ArrayView2::from_shape((n_q, 2), &flat.dense_range).unwrap();
+
+        // No sizing pass: `out_bounds` already carries every row's destination, so
+        // `hap_diffs_svar2` (needed only to build out_offsets) is skipped entirely.
+        let mut out_a = out_a;
+        reconstruct::reconstruct_haplotypes_from_svar2(
+            out_a.view_mut(),
+            out_bounds_a,
+            regions.view(),
+            shifts_a,
+            numpy::ndarray::ArrayView1::from(flat.vk_pos.as_slice()),
+            numpy::ndarray::ArrayView1::from(flat.vk_key.as_slice()),
+            numpy::ndarray::ArrayView1::from(flat.vk_off.as_slice()),
+            numpy::ndarray::ArrayView1::from(flat.dense_pos.as_slice()),
+            numpy::ndarray::ArrayView1::from(flat.dense_key.as_slice()),
+            dense_range_a,
+            numpy::ndarray::ArrayView1::from(flat.dense_present.as_slice()),
+            numpy::ndarray::ArrayView1::from(flat.dense_present_off.as_slice()),
+            numpy::ndarray::ArrayView1::from(lut_bytes.as_slice()),
+            numpy::ndarray::ArrayView1::from(lut_off.as_slice()),
+            ref_a,
+            ref_offsets_a,
+            pad_char,
+            parallel,
+            filter_exonic,
+        );
+
+        // In-place RC of negative-strand rows, mirroring the SVAR1 fused splice entry.
+        if let Some(to_rc) = to_rc_a.as_ref() {
+            crate::reverse::rc_bounded_rows_inplace(
+                out_a.as_slice_mut().unwrap(),
+                out_bounds_a,
+                *to_rc,
+            );
+        }
+    });
+
+    Ok(())
+}
+
 /// Read-bound SVAR2 per-hap ilen diffs: the same gather
 /// (`genoray_core::query::gather_haps_readbound` + [`crate::svar2::split_to_flat`]) as
 /// [`reconstruct_haplotypes_from_svar2_readbound`], but stops after
