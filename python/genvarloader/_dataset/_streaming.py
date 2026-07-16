@@ -275,17 +275,23 @@ def _make_streaming_torch_dataset(
     """
     import torch.utils.data as td
 
+    batched = dataset._with_batch_size(batch_size)
+
     class _StreamingTorchDataset(td.IterableDataset):
         def __iter__(self):
-            for data, r_idx, s_idx in dataset._with_batch_size(batch_size):
+            for data, r_idx, s_idx in batched:
                 if return_indices:
                     yield data, r_idx, s_idx
                 else:
                     yield data
 
         def __len__(self) -> int:
-            n = len(dataset)
-            return -(-n // batch_size)  # ceil division
+            # NOT `ceil(len(dataset) / batch_size)`: `_plan` batches within each
+            # contig run, so every run's last batch may be partial and the true
+            # count is `sum(ceil(run_cells / batch_size))`. Count the plan itself
+            # (it only materializes small index arrays) so `len(dl)` -- which
+            # DataLoader forwards here -- matches the batches actually yielded.
+            return sum(1 for _ in batched._plan())
 
     return _StreamingTorchDataset()
 
@@ -313,6 +319,7 @@ class _Svar1Backend:
 
         from ..genvarloader import Svar1Store
         from ._haps import _canonicalize_variant_table, _variant_arrays_from_table
+        from ._write import _reject_unsupported_variants
         from ._reference import Reference
 
         self._contigs = list(contigs)
@@ -332,6 +339,14 @@ class _Svar1Backend:
         )
 
         idx = sv.index.sort("index")
+        # Same "valid inputs only" contract `gvl.write` enforces (validated, not
+        # fixed up). This is load-bearing here, not just parity-cosmetic: the
+        # Rust window read derives ILEN from REF/ALT byte lengths, which only
+        # agrees with the kernel's ILEN column for bi-allelic, non-symbolic
+        # records -- a `<DEL>` would give `len("<DEL>") - 1 = +4` and silently
+        # under-include a large deletion. Must run BEFORE canonicalization,
+        # which collapses the list-typed ALT this check inspects.
+        _reject_unsupported_variants(idx, "SparseVar (.svar)")
         idx = _canonicalize_variant_table(idx)
         v_starts, ilens, ref, alt = _variant_arrays_from_table(idx, one_based=True)
         if ref is None:
