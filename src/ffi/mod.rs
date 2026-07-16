@@ -783,6 +783,141 @@ pub fn reconstruct_haplotypes_fused<'py>(
     (out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py))
 }
 
+/// Streaming SVAR1 window reconstruction: read one contig's window directly from
+/// a live `.svar` store (`Svar1Store::read_window`, which walks
+/// `Svar1RecordSource::next_record` — no on-disk `variant_idxs.npy`/`offsets.npy`
+/// genotype CSR memmap involved), build the sparse CSR, and reconstruct
+/// haplotypes via the same `reconstruct_haplotypes_from_sparse` core as
+/// `reconstruct_haplotypes_fused` above. Ragged output only (no fixed-length,
+/// keep/exonic, or to_rc support — out of scope for the streaming walking
+/// skeleton). `region_bounds`/`ref_`/`ref_offsets` are all relative to the ONE
+/// `contig` given: `regions[:, 0]` is hardcoded to 0 and `ref_offsets` is
+/// expected to be a single-contig `[0, contig_len]` slice (see
+/// `_Svar1Backend.reconstruct_window` on the Python side, which slices the
+/// multi-contig `Reference` down to one contig before calling in).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_haplotypes_svar1<'py>(
+    py: Python<'py>,
+    store: PyRef<'_, crate::svar1::store::Svar1Store>,
+    contig: &str,
+    region_bounds: PyReadonlyArray2<i32>, // (b, 2) = (start, end), 0-based half-open
+    sample_idx: PyReadonlyArray1<i64>,    // (b,) sample index per batch row
+    v_starts: PyReadonlyArray1<i32>,      // GLOBAL static table (from SparseVar.index)
+    ilens: PyReadonlyArray1<i32>,
+    alt_alleles: PyReadonlyArray1<u8>,
+    alt_offsets: PyReadonlyArray1<i64>,
+    ref_: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+    parallel: bool,
+) -> PyResult<(Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>)> {
+    use crate::genotypes;
+    use crate::reconstruct;
+
+    let rb = region_bounds.as_array();
+    let batch_size = rb.nrows();
+    let bounds: Vec<(i32, i32)> = (0..batch_size).map(|i| (rb[[i, 0]], rb[[i, 1]])).collect();
+    let samples: Vec<usize> = sample_idx
+        .as_array()
+        .iter()
+        .map(|&s| s as usize)
+        .collect();
+
+    let sparse = store
+        .read_window(contig, &bounds, &samples)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let ploidy = store.ploidy();
+    let n_work = batch_size * ploidy;
+
+    // regions (b,3) — contig_idx hardcoded to 0: this is a single-contig call,
+    // and the caller is expected to hand in ref_/ref_offsets already sliced to
+    // just this one contig (offsets = [0, contig_len]).
+    let mut regions_arr = Array2::<i32>::zeros((batch_size, 3));
+    for (i, &(s, e)) in bounds.iter().enumerate() {
+        regions_arr[[i, 1]] = s;
+        regions_arr[[i, 2]] = e;
+    }
+    let shifts_arr = Array2::<i32>::zeros((batch_size, ploidy)); // jitter=0 in this plan
+
+    let v_starts_a = v_starts.as_array();
+    let ilens_a = ilens.as_array();
+    let alt_alleles_a = alt_alleles.as_array();
+    let alt_offsets_a = alt_offsets.as_array();
+    let ref_a = ref_.as_array();
+    let ref_offsets_a = ref_offsets.as_array();
+
+    let (out_data, out_offsets_vec) = py.detach(move || {
+        let o_starts_arr = Array1::from_vec(sparse.o_starts);
+        let o_stops_arr = Array1::from_vec(sparse.o_stops);
+        let geno_v_idxs_arr = Array1::from_vec(sparse.geno_v_idxs);
+        let geno_offset_idx = sparse.geno_offset_idx;
+
+        let q_starts_owned: Array1<i32> = regions_arr.column(1).to_owned();
+        let q_ends_owned: Array1<i32> = regions_arr.column(2).to_owned();
+        let diffs = genotypes::get_diffs_sparse(
+            geno_offset_idx.view(),
+            geno_v_idxs_arr.view(),
+            o_starts_arr.view(),
+            o_stops_arr.view(),
+            ilens_a,
+            None,
+            None,
+            Some(q_starts_owned.view()),
+            Some(q_ends_owned.view()),
+            Some(v_starts_a),
+            parallel,
+        );
+
+        // out_offsets prefix-sum — ragged output only (mirrors
+        // reconstruct_haplotypes_fused's output_length < 0 branch).
+        let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
+        {
+            let mut acc: i64 = 0;
+            out_offsets_vec[0] = 0;
+            for k in 0..n_work {
+                let query = k / ploidy;
+                let hap = k % ploidy;
+                let ref_len = (regions_arr[[query, 2]] - regions_arr[[query, 1]]) as i64;
+                let diff = diffs[[query, hap]] as i64;
+                let len = (ref_len + diff).max(0);
+                acc += len;
+                out_offsets_vec[k + 1] = acc;
+            }
+        }
+
+        let total = out_offsets_vec[n_work] as usize;
+        let mut out_data: Array1<u8> = uninit_output(total);
+
+        reconstruct::reconstruct_haplotypes_from_sparse(
+            out_data.view_mut(),
+            out_offsets_vec.view(),
+            regions_arr.view(),
+            shifts_arr.view(),
+            geno_offset_idx.view(),
+            o_starts_arr.view(),
+            o_stops_arr.view(),
+            geno_v_idxs_arr.view(),
+            v_starts_a,
+            ilens_a,
+            alt_alleles_a,
+            alt_offsets_a,
+            ref_a,
+            ref_offsets_a,
+            pad_char,
+            None, // keep
+            None, // keep_offsets
+            None, // annot_v_idxs — not supported in the streaming path
+            None, // annot_ref_pos — not supported in the streaming path
+            parallel,
+        );
+
+        (out_data, out_offsets_vec)
+    });
+
+    Ok((out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py)))
+}
+
 /// Fused SVAR2 two-source haplotype reconstruction: merge each hap's `var_key` ⋈
 /// `dense` channels and decode via `svar2-codec` inline (no materialized global
 /// variant table), sizing and allocating the output buffer in Rust — one FFI
