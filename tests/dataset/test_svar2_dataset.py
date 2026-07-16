@@ -734,24 +734,32 @@ def test_svar2_spliced_haplotypes_match_svar1_multicontig(
     """Spliced haplotypes byte-identical to SVAR1 when transcripts span TWO contigs.
 
     Splice order is (splice_row, sample, ploid, element), but SVAR2 reconstructs
-    per contig group — so each group's rows land at NON-contiguous destinations
-    interleaved with the other group's. Single-contig spliced tests (and the chr22
-    benchmark) never produce that layout, so this is the only guard on the
-    scattered-destination path. Minus strand is included so the RC pass is
-    exercised on scattered rows too.
+    per contig group — so each group's rows land at destinations that are both
+    non-monotonic AND gapped: the chr2 group (Ta + Tc) is split into two blocks
+    with the chr1 group's (Tb) block sandwiched between them, because splice
+    order runs Ta -> Tb -> Tc. The Rust carve must tolerate destination gaps
+    (bytes owned by another call interleaved within a single contig group's
+    scatter), and that's only exercised with 3+ transcripts alternating contigs.
+    A single-contig fast path or a plain 2-transcript, 2-contig bed never
+    produces a gap — each contig's block stays contiguous, just reordered
+    relative to the other contig. Tb and Tc are both minus-strand, and Tc's
+    rows land in the gapped (chr2) group, so the RC pass (rc_bounded_rows_inplace)
+    is exercised on genuinely gapped destinations, not just scattered ones.
     """
     from genoray import SparseVar, SparseVar2
 
     _bcf, ref = _src2
-    # Interleaved contigs, out of sorted order; Tb is minus-strand and multi-exon.
+    # 3 transcripts alternating contigs (Ta:chr2, Tb:chr1, Tc:chr2) so splice
+    # order (Ta -> Tb -> Tc) splits chr2's group (Ta ∪ Tc) around chr1's (Tb)
+    # block -> gapped destinations. Tb and Tc are minus-strand.
     splice_bed = pl.DataFrame(
         {
-            "chrom": ["chr2", "chr1", "chr2", "chr1"],
-            "chromStart": [0, 0, 20, 5],
-            "chromEnd": [13, 13, 40, 20],
-            "strand": ["+", "-", "+", "-"],
-            "transcript_id": ["Ta", "Tb", "Ta", "Tb"],
-            "exon_number": [1, 1, 2, 2],
+            "chrom": ["chr2", "chr1", "chr2", "chr1", "chr2", "chr2"],
+            "chromStart": [0, 0, 20, 5, 5, 25],
+            "chromEnd": [13, 13, 40, 20, 18, 45],
+            "strand": ["+", "-", "+", "-", "-", "-"],
+            "transcript_id": ["Ta", "Tb", "Ta", "Tb", "Tc", "Tc"],
+            "exon_number": [1, 1, 2, 2, 1, 2],
         }
     )
     d1 = tmp_path / "mcs1.gvl"
