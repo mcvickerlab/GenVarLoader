@@ -890,9 +890,10 @@ pub fn reconstruct_haplotypes_from_svar2<'py>(
         let mut out_data: Array1<u8> = uninit_output(total);
 
         // Step 4: reconstruct all haplotypes into the owned buffer.
+        let out_bounds = reconstruct::bounds_from_offsets(out_offsets_vec.view());
         reconstruct::reconstruct_haplotypes_from_svar2(
             out_data.view_mut(),
-            out_offsets_vec.view(),
+            out_bounds.view(),
             regions_a,
             shifts_a,
             vk_pos_a,
@@ -1082,9 +1083,10 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
 
         // Step 4: reconstruct — reuse the byte-validated union-path kernel
         // unchanged, now fed the read-bound gather's flat channels.
+        let out_bounds = reconstruct::bounds_from_offsets(out_offsets_vec.view());
         reconstruct::reconstruct_haplotypes_from_svar2(
             out_data.view_mut(),
-            out_offsets_vec.view(),
+            out_bounds.view(),
             regions.view(),
             shifts_a,
             numpy::ndarray::ArrayView1::from(flat.vk_pos.as_slice()),
