@@ -62,6 +62,65 @@ fn require_contiguous_1d<T: numpy::Element>(
     })
 }
 
+/// Validate a caller-supplied `out_bounds` (scatter-write destinations) before it is
+/// handed to `reconstruct::reconstruct_haplotypes_from_svar2`, whose contract
+/// requires rows to be in-range, pairwise-disjoint `(start, end)` byte ranges within
+/// `out`. That kernel does not check this itself (its serial path does
+/// `std::slice::from_raw_parts_mut(out_raw.add(out_s), out_e - out_s)` with no bound
+/// against `out.len()`, and its parallel `split_at_mut` chain only `debug_assert!`s
+/// disjointness) — this is the ONLY read-bound FFI entry whose `out_bounds` values
+/// come straight from Python rather than being computed by Rust itself
+/// (`reconstruct::bounds_from_offsets` over a kernel-sized offsets array), so unlike
+/// every sibling entry they cannot be trusted by construction. An out-of-range row is
+/// a silent out-of-bounds write; an overlapping row is, under the parallel path with
+/// the GIL released (`py.detach`), a silent aliasing race — both genuine UB, not a
+/// clean error, if left unchecked.
+///
+/// Checks, in order:
+/// 1. every row satisfies `0 <= start <= end <= out_len` (cheap, O(n));
+/// 2. rows are pairwise disjoint, via a sort-by-start + running-max-end sweep
+///    (O(n log n) — tens of microseconds at the ~thousands-of-rows scale this path
+///    runs at, negligible next to the reconstruct work it guards).
+///
+/// Pure-Rust core (no `pyo3` error type) so it is unit-testable without a GIL /
+/// initialized interpreter; the `#[pyfunction]` call site maps `Err(String)` to a
+/// `PyValueError`.
+fn check_disjoint_bounds_within(
+    out_bounds: numpy::ndarray::ArrayView2<i64>,
+    out_len: usize,
+) -> Result<(), String> {
+    let out_len = out_len as i64;
+    for k in 0..out_bounds.nrows() {
+        let s = out_bounds[[k, 0]];
+        let e = out_bounds[[k, 1]];
+        if s < 0 || s > e || e > out_len {
+            return Err(format!(
+                "out_bounds[{k}] = ({s}, {e}) is invalid for out.len() = {out_len}; every row must satisfy 0 <= start <= end <= out.len()"
+            ));
+        }
+    }
+
+    let mut order: Vec<usize> = (0..out_bounds.nrows()).collect();
+    order.sort_unstable_by_key(|&k| out_bounds[[k, 0]]);
+    let mut max_end: i64 = i64::MIN;
+    let mut max_end_k: usize = usize::MAX;
+    for &k in &order {
+        let s = out_bounds[[k, 0]];
+        let e = out_bounds[[k, 1]];
+        if s < max_end {
+            return Err(format!(
+                "out_bounds rows must be pairwise disjoint: row {k} = ({s}, {e}) overlaps row {max_end_k} which ends at {max_end}"
+            ));
+        }
+        if e > max_end {
+            max_end = e;
+            max_end_k = k;
+        }
+    }
+
+    Ok(())
+}
+
 /// Per-(query, hap) reference-length diffs (see `genotypes::get_diffs_sparse`).
 /// `geno_offsets` is the normalized (2, n) int64 starts/stops array.
 #[pyfunction]
@@ -1189,6 +1248,23 @@ pub fn reconstruct_haplotypes_from_svar2_readbound_into<'py>(
         )));
     }
 
+    // `out_bounds` values come straight from Python (unlike every sibling entry's
+    // Rust-computed offsets) — validate range + disjointness before `py.detach`, or
+    // a bad row is a silent OOB write / aliasing race instead of a clean error.
+    // See `check_disjoint_bounds_within` for the full rationale.
+    check_disjoint_bounds_within(out_bounds.as_array(), out.as_array().len())
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+    if let Some(to_rc) = to_rc.as_ref() {
+        if to_rc.as_array().len() != n_q * ploidy {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "to_rc must have n_q*ploidy = {} rows, got {}",
+                n_q * ploidy,
+                to_rc.as_array().len()
+            )));
+        }
+    }
+
     // Build `regions` (n_q, 3) as [contig_idx=0, start, end) — `ref_` is the
     // single contig slice the caller passed in (ref_offsets = [0, len]).
     let mut regions = Array2::<i32>::zeros((n_q, 3));
@@ -1211,6 +1287,15 @@ pub fn reconstruct_haplotypes_from_svar2_readbound_into<'py>(
     // See the allocating entry: `ref_` is sliced then `.as_slice().unwrap()`'d inside
     // the kernel, so a non-contiguous view would panic there.
     require_contiguous_1d(&ref_, "ref_")?;
+
+    // NOTE: same reasoning as the allocating entry's NOTE above the pure-DEL anchor
+    // read applies unchanged here — this entry calls the identical
+    // `reconstruct::reconstruct_haplotypes_from_svar2` kernel, fed by the same
+    // `gather_haps_readbound(reader, &rb)` gather off the same `store`/`contig`, so
+    // gathered variants are the same within-contig records (`pos < contig_ref_len`
+    // always holds) and `region_bounds` carries the same jitter-past-contig-end
+    // semantics. The anchor-base read is in-bounds for all valid input; a corrupt
+    // store is caught by the same `debug_assert!` at the read site.
 
     let ref_a = ref_.as_array();
     let ref_offsets_a = ref_offsets.as_array();
@@ -2601,6 +2686,54 @@ mod tests {
         assert_eq!(&bytes, b"CGT");
         assert_eq!(vidx, vec![7, 6, 5]);
         assert_eq!(rpos, vec![102, 101, 100]);
+    }
+
+    // ── guard tests — check_disjoint_bounds_within (Finding 1, PR #273 review) ──
+
+    #[test]
+    fn disjoint_bounds_accepts_in_range_nonoverlapping_rows() {
+        // scattered (not row-ordered), matches the spliced scatter-write shape.
+        let bounds = ndarray::arr2(&[[6i64, 10], [0, 4], [4, 6]]);
+        assert!(super::check_disjoint_bounds_within(bounds.view(), 10).is_ok());
+    }
+
+    #[test]
+    fn disjoint_bounds_accepts_adjacent_zero_length_rows() {
+        // two empty rows at the same offset write zero bytes each — no aliasing.
+        let bounds = ndarray::arr2(&[[3i64, 3], [3, 3], [0, 3]]);
+        assert!(super::check_disjoint_bounds_within(bounds.view(), 5).is_ok());
+    }
+
+    #[test]
+    fn disjoint_bounds_rejects_end_past_out_len() {
+        let bounds = ndarray::arr2(&[[0i64, 4], [4, 11]]);
+        let msg = super::check_disjoint_bounds_within(bounds.view(), 10).unwrap_err();
+        assert!(msg.contains("out_bounds[1] = (4, 11)"), "{msg}");
+        assert!(msg.contains("out.len() = 10"), "{msg}");
+    }
+
+    #[test]
+    fn disjoint_bounds_rejects_negative_start() {
+        let bounds = ndarray::arr2(&[[-1i64, 4]]);
+        let msg = super::check_disjoint_bounds_within(bounds.view(), 10).unwrap_err();
+        assert!(msg.contains("out_bounds[0] = (-1, 4)"));
+    }
+
+    #[test]
+    fn disjoint_bounds_rejects_start_after_end() {
+        let bounds = ndarray::arr2(&[[5i64, 2]]);
+        let msg = super::check_disjoint_bounds_within(bounds.view(), 10).unwrap_err();
+        assert!(msg.contains("out_bounds[0] = (5, 2)"));
+    }
+
+    #[test]
+    fn disjoint_bounds_rejects_overlapping_rows() {
+        // row 0 = [0, 6), row 1 = [4, 8): overlap in [4, 6), a Python-side indexing
+        // bug that would otherwise race under py.detach in the parallel path.
+        let bounds = ndarray::arr2(&[[0i64, 6], [4, 8]]);
+        let msg = super::check_disjoint_bounds_within(bounds.view(), 10).unwrap_err();
+        assert!(msg.contains("pairwise disjoint"), "{msg}");
+        assert!(msg.contains("row 1 = (4, 8)"), "{msg}");
     }
 }
 
