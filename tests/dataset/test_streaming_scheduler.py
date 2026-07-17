@@ -17,14 +17,16 @@ def test_plan_is_region_major_and_covers_grid():
     seen = []
 
     def stub(r_idx, s_idx):
+        # Cartesian window callback: r_idx and s_idx are independent index sets
+        # (not parallel arrays of the same length), C-order (region, sample).
         seen.append((tuple(r_idx), tuple(s_idx)))
-        return np.stack([r_idx, s_idx], axis=1)  # fake "data"
+        rr, ss = np.meshgrid(r_idx, s_idx, indexing="ij")
+        return np.stack([rr.ravel(), ss.ravel()], axis=1)  # fake "data"
 
     sds = StreamingDataset(
         bed, contigs=["chr1"], n_samples=2, ploidy=2, _reconstruct_window=stub
     )
-    sds = sds._with_batch_size(2)
-    batches = list(sds)
+    batches = list(sds.to_iter(batch_size=2))
     # region order is sorted by (contig,start): input starts 30,10,20 -> sorted r order 1,2,0
     # region-major flat index over (n_regions=3, n_samples=2): r sorted-inner sample
     flat_r = np.concatenate([b[1] for b in batches])
@@ -55,7 +57,8 @@ def test_sort_order_is_duplicate_safe():
     n_regions = len(rows)
 
     def stub(r_idx, s_idx):
-        return np.stack([r_idx, s_idx], axis=1)
+        rr, ss = np.meshgrid(r_idx, s_idx, indexing="ij")
+        return np.stack([rr.ravel(), ss.ravel()], axis=1)
 
     sds = StreamingDataset(
         bed, contigs=["chr1"], n_samples=n_samples, ploidy=2, _reconstruct_window=stub
@@ -66,7 +69,7 @@ def test_sort_order_is_duplicate_safe():
 
     assert len(sds) == n_regions * n_samples
 
-    batches = list(sds)
+    batches = list(sds.to_iter())
     flat_r = np.concatenate([b[1] for b in batches])
     flat_s = np.concatenate([b[2] for b in batches])
     cells = set(zip(flat_r.tolist(), flat_s.tolist()))

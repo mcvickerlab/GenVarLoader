@@ -94,7 +94,7 @@ Utilities for upgrading on-disk datasets written by older GVL versions.
 .. currentmodule:: genvarloader
 
 .. autoclass:: StreamingDataset
-    :members: __init__, shape, with_seqs, to_dataloader
+    :members: __init__, shape, samples, with_seqs, to_iter, to_torch_dataset, to_dataloader, n_batches
     :exclude-members: __new__
 ```
 

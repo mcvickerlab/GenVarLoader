@@ -36,10 +36,15 @@ class StreamingDataset:
     - Internal/test-oriented: ``StreamingDataset(regions, contigs=..., n_samples=...,
       ploidy=..., _reconstruct_window=...)`` injects a reconstruction callback
       directly, bypassing variant-source classification. Used by
-      ``test_streaming_scheduler.py`` and ``test_svar1_window.py``.
+      ``test_streaming_scheduler.py`` and ``test_svar1_window.py``. ``samples`` may
+      be supplied too; when omitted, placeholder names ``"0", "1", ...`` are used
+      (this path never touches a real sample list).
+
+    ``sample_idx`` means "index into :attr:`samples`" (lexicographically-sorted
+    sample names, matching :func:`gvl.write`'s convention) -- NOT a variant store's
+    native column order. See :attr:`samples`.
     """
 
-    _bed: pl.DataFrame
     # (n_regions, 4) sorted: (contig_idx, start, end, strand). Only cols 0-2 are
     # read here; `bed_to_regions` returns the 4th (strand) column.
     _regions: NDArray[np.int32]
@@ -48,7 +53,18 @@ class StreamingDataset:
     n_samples: int
     ploidy: int
     _reconstruct_window: Callable[[NDArray[np.intp], NDArray[np.intp]], object]
-    _batch_size: int = 1
+    # Sample names in `sample_idx` order (lexicographically sorted -- see `samples`).
+    _samples: list[str]
+    # Regions per read window. Window >> batch is the point: one Rust call per window
+    # amortizes the search + page faults across many batches.
+    #
+    # 64 is a pragmatic default, NOT a measured knee: a sweep (window_regions in
+    # {1, 4, 16, 64, 256, 1024}) showed wall-clock improving monotonically with fewer
+    # windows and flattening past ~64, with everything beyond that inside this shared
+    # node's run-to-run noise. entries_touched was exactly flat across every setting,
+    # confirming I/O is windowing-invariant, as designed. See
+    # docs/roadmaps/streaming-dataset.md (Plan 2 Task 4) for the full sweep narrative.
+    _window_regions: int = 64
 
     def __init__(
         self,
@@ -60,6 +76,7 @@ class StreamingDataset:
         contigs: list[str] | None = None,
         n_samples: int | None = None,
         ploidy: int | None = None,
+        samples: list[str] | None = None,
         _reconstruct_window: Callable[[NDArray[np.intp], NDArray[np.intp]], object]
         | None = None,
     ):
@@ -73,6 +90,12 @@ class StreamingDataset:
                     "`contigs`, `n_samples`, and `ploidy` to be supplied "
                     "explicitly."
                 )
+            # `samples` is optional here: this path is for scheduling/window-plan
+            # tests that don't exercise real sample identity. Placeholder names
+            # keep `.samples` well-defined without forcing every such test to
+            # supply a real sample list.
+            if samples is None:
+                samples = [str(i) for i in range(n_samples)]
         elif variants is not None:
             # Public API path: classify `variants` and build the backend.
             if reference is None:
@@ -94,6 +117,7 @@ class StreamingDataset:
                 backend = _Svar1Backend(p, reference, contigs, regions)
                 n_samples = backend.n_samples
                 ploidy = backend.ploidy
+                samples = backend._sample_names
                 _reconstruct_window = backend.reconstruct_window
             elif p.is_dir() and p.suffix == ".svar2":
                 raise NotImplementedError(
@@ -129,56 +153,128 @@ class StreamingDataset:
         sorted_bed = sp.bed.sort(bed.with_row_index("_r"))
         order = sorted_bed["_r"].to_numpy().astype(np.intp)
         regs = bed_to_regions(sorted_bed.drop("_r"), ContigNormalizer(contigs))
-        object.__setattr__(self, "_bed", bed)
         object.__setattr__(self, "_regions", regs)
         object.__setattr__(self, "_sort_order", order)
         object.__setattr__(self, "contigs", list(contigs))
         object.__setattr__(self, "n_samples", int(n_samples))
         object.__setattr__(self, "ploidy", int(ploidy))
         object.__setattr__(self, "_reconstruct_window", _reconstruct_window)
-        object.__setattr__(self, "_batch_size", 1)
+        object.__setattr__(self, "_samples", list(samples))
+        # Single source of truth: pull the default from the field declaration above
+        # instead of duplicating the literal here. `slots=True` means the class-level
+        # default is NOT auto-applied to instances (there is no class attribute to
+        # fall back on -- only `__dataclass_fields__` knows it), and this class defines
+        # its own `__init__` so the dataclass-generated one (which *would* apply it)
+        # never runs. Editing the field's default above now actually changes behavior.
+        object.__setattr__(
+            self,
+            "_window_regions",
+            type(self).__dataclass_fields__["_window_regions"].default,
+        )
 
     @property
     def shape(self) -> tuple[int, int]:
         return (len(self._regions), self.n_samples)
 
+    @property
+    def samples(self) -> list[str]:
+        """The samples in the dataset, in ``sample_idx`` order.
+
+        Lexicographically sorted (matching :func:`gvl.write`'s convention and
+        :attr:`Dataset.samples <genvarloader.Dataset.samples>`) -- **not** the
+        variant store's native (e.g. VCF column) order. ``to_iter``'s
+        ``sample_idxs`` index into this list: ``samples[i]`` is the sample whose
+        data arrives at ``sample_idx == i``.
+        """
+        return list(self._samples)
+
     def __len__(self) -> int:
         return len(self._regions) * self.n_samples
 
-    def _with_batch_size(self, batch_size: int) -> "StreamingDataset":
-        # dataclasses.replace() would re-invoke __init__ (which doesn't accept
-        # every field as a kwarg), so shallow-copy and mutate the frozen instance.
-        new = copy.copy(self)
-        object.__setattr__(new, "_batch_size", int(batch_size))
-        return new
-
     def _plan(self) -> Iterator[tuple[NDArray[np.intp], NDArray[np.intp]]]:
-        # region-major flat index over (n_regions, n_samples): sample varies
-        # fastest, WITHIN a contig -- batches never cross a contig boundary
-        # (`_Svar1Backend.reconstruct_window` requires a single-contig batch).
-        # `self._regions` is sorted by (contig_idx, start), so each contig's
-        # regions form one contiguous run of sorted-region indices.
+        """Yield one WINDOW per step: (region_idxs, sample_idxs), cartesian.
+
+        Region-major, single-contig per window (`self._regions` is sorted by
+        (contig_idx, start), so each contig's regions are one contiguous run). Every
+        sample is read per window -- variant stores return all samples per range read
+        essentially for free, so the effective item order is region-major,
+        sample-inner. NOT pairwise: `StreamingDataset` has no `__getitem__`, so the
+        traversal is a fixed cartesian sweep and the window is the read granularity.
+        """
         n_regions, n_samples = self.shape
         if n_regions == 0:
             return
+        all_samples = np.arange(n_samples, dtype=np.intp)
         contig_idxs = self._regions[:, 0]
         run_bounds = np.flatnonzero(np.diff(contig_idxs)) + 1
         run_starts = np.concatenate(([0], run_bounds))
         run_ends = np.concatenate((run_bounds, [n_regions]))
         for r_lo, r_hi in zip(run_starts, run_ends):
-            n_run_regions = int(r_hi - r_lo)
-            flat = np.arange(n_run_regions * n_samples, dtype=np.intp)
-            for start in range(0, flat.size, self._batch_size):
-                chunk = flat[start : start + self._batch_size]
-                r_local, s_idx = np.unravel_index(chunk, (n_run_regions, n_samples))
-                r_idx = (r_local + r_lo).astype(np.intp)
-                yield r_idx, s_idx.astype(np.intp)
+            for w_lo in range(int(r_lo), int(r_hi), self._window_regions):
+                w_hi = min(w_lo + self._window_regions, int(r_hi))
+                yield np.arange(w_lo, w_hi, dtype=np.intp), all_samples
 
-    def __iter__(self) -> Iterator[tuple]:
+    def _iter_batches(self, batch_size: int) -> Iterator[tuple]:
+        """Drive the plan and slice each reconstructed window into batches.
+
+        The window is the READ granularity; a batch is a slice of it. Batches may span
+        window boundaries only in the sense that a window's trailing partial batch is
+        emitted as-is -- windows never split a (region, sample) cell.
+        """
         for r_idx, s_idx in self._plan():
             data = self._reconstruct_window(r_idx, s_idx)
-            # map sorted region positions back to the user's original bed rows
-            yield (data, self._sort_order[r_idx], s_idx)
+            # Window rows are C-order (region, sample): row bi = ri*n_samples + si.
+            n_s = len(s_idx)
+            flat_r = np.repeat(self._sort_order[r_idx], n_s)
+            flat_s = np.tile(s_idx, len(r_idx))
+            n_rows = len(flat_r)
+            for lo in range(0, n_rows, batch_size):
+                hi = min(lo + batch_size, n_rows)
+                yield data[lo:hi], flat_r[lo:hi], flat_s[lo:hi]
+
+    def to_iter(
+        self, batch_size: int = 1, return_indices: bool = True
+    ) -> Iterator[tuple]:
+        """Iterate haplotype batches. **This is the one iteration entry point** --
+        :meth:`to_torch_dataset` and :meth:`to_dataloader` are thin wrappers over it,
+        and there is no ``__iter__`` (one and only one obvious way).
+
+        Iteration is a fixed cartesian sweep of BED regions x samples in a
+        data-layout-optimal order (region-major for variants). There is no random
+        access and no ad-hoc query: ``sds[r, s]`` raises :class:`TypeError`.
+
+        Parameters
+        ----------
+        batch_size
+            Number of ``(region, sample)`` cells per yielded batch. Batches are slices
+            of a much larger read *window*; ``batch_size`` does not affect I/O
+            granularity.
+        return_indices
+            If ``True`` (the default), yield ``(data, region_idxs, sample_idxs)``;
+            if ``False``, yield ``data`` alone. Indices are in the caller's **original
+            BED-row order** (not sorted-storage order), matching ``gvl.Dataset[r, s]``.
+        """
+        for data, r_idx, s_idx in self._iter_batches(batch_size):
+            if return_indices:
+                yield data, r_idx, s_idx
+            else:
+                yield data
+
+    def n_batches(self, batch_size: int) -> int:
+        """Number of batches :meth:`to_iter` will yield at ``batch_size``.
+
+        NOT ``ceil(len(self) / batch_size)``: the plan batches *within* each window,
+        so every window's last batch may be partial. Counting the plan is cheap (it
+        only materializes small index arrays).
+        """
+        return sum(1 for _ in self._iter_batch_spans(batch_size))
+
+    def _iter_batch_spans(self, batch_size: int) -> Iterator[int]:
+        """Batch sizes the plan will yield, without reconstructing anything."""
+        for r_idx, s_idx in self._plan():
+            n_rows = len(r_idx) * len(s_idx)
+            for lo in range(0, n_rows, batch_size):
+                yield min(lo + batch_size, n_rows) - lo
 
     def with_seqs(self, kind: Literal["haplotypes"]) -> "StreamingDataset":
         """Select the sequence output kind. Only ``"haplotypes"`` is supported
@@ -194,16 +290,30 @@ class StreamingDataset:
 
     def __getitem__(self, idx) -> None:
         raise TypeError(
-            "StreamingDataset is iterable-only; use to_dataloader() instead of "
-            "map-style indexing."
+            "StreamingDataset is iterable-only; use to_iter() instead of map-style "
+            "indexing. Iteration order is fixed by the data layout, so there is no "
+            "random access."
         )
 
-    def to_torch_dataset(self, *args, **kwargs) -> None:
-        raise TypeError(
-            "StreamingDataset is iterable-only; use to_dataloader() instead of "
-            "to_torch_dataset() (there is no random-access torch Dataset for a "
-            "streaming source)."
-        )
+    @requires_torch
+    def to_torch_dataset(
+        self, batch_size: int = 1, return_indices: bool = True
+    ) -> "td.IterableDataset":
+        """Wrap :meth:`to_iter` in a torch :class:`IterableDataset`. Thin wrapper --
+        all the work is in ``to_iter``. Named to match
+        :meth:`Dataset.to_torch_dataset` (same concept, same name)."""
+        import torch.utils.data as td
+
+        sds = self
+
+        class _StreamingTorchDataset(td.IterableDataset):
+            def __iter__(self):
+                return sds.to_iter(batch_size, return_indices)
+
+            def __len__(self) -> int:
+                return sds.n_batches(batch_size)
+
+        return _StreamingTorchDataset()
 
     @requires_torch
     def to_dataloader(
@@ -221,38 +331,30 @@ class StreamingDataset:
         persistent_workers: bool = False,
         pin_memory_device: str = "",
     ) -> "td.DataLoader":
-        """Wrap this ``StreamingDataset`` in a PyTorch
-        :class:`DataLoader <torch.utils.data.DataLoader>`. Requires PyTorch to
-        be installed.
+        """Wrap :meth:`to_torch_dataset` in a torch
+        :class:`DataLoader <torch.utils.data.DataLoader>`. Thin wrapper.
 
         Parameters
         ----------
-        batch_size
-            Number of ``(region, sample)`` cells per yielded batch.
         num_workers
-            Must be 0. ``StreamingDataset`` iteration is itself the
-            concurrency strategy (mirrors :meth:`Dataset.to_dataloader`'s
-            ``mode="buffered"``/``"double_buffered"`` restriction); worker-process
-            sharding of the plan is a later plan.
-        return_indices
-            If ``True`` (the default), yield ``(data, region_idxs, sample_idxs)``
-            tuples; if ``False``, yield ``data`` alone.
+            Must be 0. ``StreamingDataset``'s own engine IS the concurrency strategy
+            (mirrors :meth:`Dataset.to_dataloader`'s ``buffered``/``double_buffered``
+            restriction); worker-process sharding of the window plan is a later plan.
         """
         if num_workers > 0:
             raise ValueError(
-                "StreamingDataset.to_dataloader: num_workers>0 is not "
-                "implemented yet; the loader IS the concurrency strategy for "
+                "StreamingDataset.to_dataloader: num_workers>0 is not implemented "
+                "yet; the streaming engine IS the concurrency strategy for "
                 "StreamingDataset (mirrors gvl.Dataset.to_dataloader's "
-                "buffered/double_buffered modes, which impose the same "
-                "restriction). Use num_workers=0."
+                "buffered/double_buffered modes, which impose the same restriction). "
+                "Use num_workers=0."
             )
 
         import torch.utils.data as td
 
-        inner = _make_streaming_torch_dataset(self, batch_size, return_indices)
         return td.DataLoader(
-            inner,
-            batch_size=None,
+            self.to_torch_dataset(batch_size, return_indices),
+            batch_size=None,  # the dataset yields pre-assembled batches
             num_workers=num_workers,
             collate_fn=collate_fn,
             pin_memory=pin_memory,
@@ -263,39 +365,6 @@ class StreamingDataset:
             persistent_workers=persistent_workers,
             pin_memory_device=pin_memory_device,
         )
-
-
-def _make_streaming_torch_dataset(
-    dataset: StreamingDataset, batch_size: int, return_indices: bool
-) -> "td.IterableDataset":
-    """IterableDataset wrapper for `StreamingDataset`, mirroring the
-    `make_buffered_dataset` pattern in `_buffered_loader.py`: `__iter__`
-    drives `dataset`'s own iteration (batched), and `return_indices` toggles
-    whether index arrays ride along -- kept out of `StreamingDataset.__iter__`
-    itself so `list(sds)` (used by Tasks 2/4's tests) keeps yielding 3-tuples
-    regardless of how a DataLoader wraps it.
-    """
-    import torch.utils.data as td
-
-    batched = dataset._with_batch_size(batch_size)
-
-    class _StreamingTorchDataset(td.IterableDataset):
-        def __iter__(self):
-            for data, r_idx, s_idx in batched:
-                if return_indices:
-                    yield data, r_idx, s_idx
-                else:
-                    yield data
-
-        def __len__(self) -> int:
-            # NOT `ceil(len(dataset) / batch_size)`: `_plan` batches within each
-            # contig run, so every run's last batch may be partial and the true
-            # count is `sum(ceil(run_cells / batch_size))`. Count the plan itself
-            # (it only materializes small index arrays) so `len(dl)` -- which
-            # DataLoader forwards here -- matches the batches actually yielded.
-            return sum(1 for _ in batched._plan())
-
-    return _StreamingTorchDataset()
 
 
 class _Svar1Backend:
@@ -327,7 +396,24 @@ class _Svar1Backend:
         self._contigs = list(contigs)
 
         sv = SparseVar(str(svar_path))
-        self.n_samples = len(sv.available_samples)
+        # `gvl.write()` always lexicographically sorts sample names
+        # (`_write.py`'s unconditional `samples.sort()`), so `gvl.Dataset`'s
+        # sample index `s` means "the s-th name in sorted order" -- NOT the
+        # store's native (VCF column) order. `sample_idx` must mean the same
+        # thing here for parity with `gvl.Dataset.open(...)[r, s]` to hold
+        # (see `to_iter`'s docstring). Toy fixtures with <=3 single-digit
+        # sample names never exposed this because sort order and native
+        # order coincide there; a 20-sample "S0".."S19" fixture does not
+        # (lexicographically "S10" < "S2"). `_phys_sample_idx[i]` is the
+        # store's native column for the i-th name in sorted order; every
+        # sample index that crosses into Rust must go through it first.
+        native_samples = sv.available_samples
+        self._sample_names = sorted(native_samples)
+        _name_to_phys = {name: i for i, name in enumerate(native_samples)}
+        self._phys_sample_idx = np.array(
+            [_name_to_phys[s] for s in self._sample_names], dtype=np.int64
+        )
+        self.n_samples = len(self._sample_names)
         self.ploidy = sv.ploidy
 
         self._ref = Reference.from_path(reference_path, self._contigs)
@@ -342,12 +428,12 @@ class _Svar1Backend:
 
         idx = sv.index.sort("index")
         # Same "valid inputs only" contract `gvl.write` enforces (validated, not
-        # fixed up). This is load-bearing here, not just parity-cosmetic: the
-        # Rust window read derives ILEN from REF/ALT byte lengths, which only
-        # agrees with the kernel's ILEN column for bi-allelic, non-symbolic
-        # records -- a `<DEL>` would give `len("<DEL>") - 1 = +4` and silently
-        # under-include a large deletion. Must run BEFORE canonicalization,
-        # which collapses the list-typed ALT this check inspects.
+        # fixed up). This is load-bearing here, not just parity-cosmetic: `ilens`
+        # (used both to derive `v_ends` for the range search and by the
+        # reconstruct kernel itself) and `alt` are only meaningful for
+        # bi-allelic, non-symbolic records -- a `<DEL>` ALT would corrupt both the
+        # window's overlap bound and the reconstructed sequence. Must run BEFORE
+        # canonicalization, which collapses the list-typed ALT this check inspects.
         _reject_unsupported_variants(idx, "SparseVar (.svar)")
         idx = _canonicalize_variant_table(idx)
         v_starts, ilens, ref, alt = _variant_arrays_from_table(idx, one_based=True)
@@ -358,68 +444,82 @@ class _Svar1Backend:
         self._alt_alleles = np.ascontiguousarray(alt.data.view(np.uint8), np.uint8)
         self._alt_offsets = np.ascontiguousarray(alt.offsets, np.int64)
 
-        self._store = Svar1Store(
-            str(svar_path), self._contigs, self.n_samples, self.ploidy
-        )
+        self._store = Svar1Store(str(svar_path), self.n_samples, self.ploidy)
 
+        # Per contig: register three scalars and cache the contig-local u32 arrays the
+        # range search borrows. The arrays stay HERE (numpy) and cross per call as
+        # zero-copy PyReadonlyArray1 -- nothing variant-scale is duplicated into Rust.
+        # (The old skeleton pushed the whole POS/REF/ALT table across as Python lists
+        # via .tolist() -- ~10M int objects for a human chr1 -- purely to feed
+        # Svar1RecordSource's constructor. No record source, no table.)
         chrom = idx["CHROM"].cast(pl.Utf8).to_numpy()
+        # v_end = POS_1based - min(ILEN, 0); genoray's `_var_end_expr()` convention
+        # (genoray/_var_ranges.py) -- and what `_write.py`'s `v_ends` uses too, via
+        # the SAME raw `idx["POS"]` column (1-based; `_canonicalize_variant_table`
+        # never touches POS, so pre/post-canonicalization values are identical).
+        # MUST be the raw 1-based POS, NOT `v_starts` (already `-1`'d to 0-based by
+        # `_variant_arrays_from_table(one_based=True)`) -- subtracting the already-
+        # decremented start silently produces a 0-length exclusive end for every SNP
+        # (`v_end == v_start` instead of `v_start + 1`), which drops the variant
+        # whenever a query's lower bound lands exactly on it. NOT the kernel's
+        # `v_start - min(ilen,0) + 1` either -- that `+1` lives inside
+        # get_diffs_sparse and is a different convention.
+        v_ends_all = (idx["POS"].to_numpy() - np.minimum(ilens, 0)).astype(np.uint32)
+        self._contig_arrays: dict[
+            str, tuple[NDArray[np.uint32], NDArray[np.uint32]]
+        ] = {}
+
         for c in self._contigs:
             mask = chrom == c
             n_local = int(mask.sum())
             if n_local == 0:
-                self._store.set_contig_table(c, 0, 0, [], [], [0], [], [0])
+                self._store.set_contig_meta(c, 0, 0, 0)
+                self._contig_arrays[c] = (
+                    np.empty(0, np.uint32),
+                    np.empty(0, np.uint32),
+                )
                 continue
 
             first = int(np.argmax(mask))
-            # The per-contig slices below assume this contig's rows are one
-            # CONTIGUOUS block starting at `first`. That holds for a SparseVar
-            # built from a position-sorted VCF, but if it were ever violated the
-            # failure mode is a silently WRONG per-contig POS/REF/ALT table --
-            # parity breaks with no error. Fail fast instead.
+            # The per-contig slices below assume this contig's rows are one CONTIGUOUS
+            # block starting at `first`. True for a SparseVar built from a
+            # position-sorted VCF; if violated the failure mode is a silently WRONG
+            # per-contig table -- parity breaks with no error. Fail fast instead.
             if not mask[first : first + n_local].all():
                 raise ValueError(
                     f"SVAR index rows for contig {c!r} are not contiguous; "
                     "the streaming SVAR1 backend requires a position-sorted store."
                 )
+
+            vs_c = np.ascontiguousarray(v_starts[first : first + n_local], np.uint32)
+            ve_c = np.ascontiguousarray(v_ends_all[first : first + n_local], np.uint32)
+            # genoray's `var_ranges` binary-searches a `SearchTree` built over `vs_c`
+            # and documents its input as ascending -- but enforces nothing beyond a
+            # length `debug_assert`. A non-ascending POS within this contig (e.g. a
+            # VCF sorted by contig but not by position) passes the contiguity check
+            # above and then yields silently WRONG variant ranges with no error --
+            # truncated haplotypes, no exception. Fail fast instead, same as above.
+            if n_local > 1 and not (np.diff(vs_c.astype(np.int64)) >= 0).all():
+                raise ValueError(
+                    f"SVAR index POS for contig {c!r} is not ascending; "
+                    "the streaming SVAR1 backend requires a position-sorted store."
+                )
+            # Python's var_ranges convention: max(v_ends - v_starts). Exactly 1 larger
+            # than search::overlap_range's `>=` bound -- an OVER-estimate, which only
+            # widens the candidate window and is provably overshoot-safe. Do not
+            # subtract 1; UNDER-estimating would be a correctness bug.
+            max_v_len = int((ve_c.astype(np.int64) - vs_c.astype(np.int64)).max())
             contig_start = int(idx["index"][first])
-            pos_c = v_starts[first : first + n_local].astype(np.uint32).tolist()
 
-            r_s, r_e = int(ref.offsets[first]), int(ref.offsets[first + n_local])
-            ref_bytes_c = ref.data.view(np.uint8)[r_s:r_e].tolist()
-            ref_offsets_c = (
-                (ref.offsets[first : first + n_local + 1] - r_s)
-                .astype(np.int64)
-                .tolist()
-            )
-
-            a_s, a_e = int(alt.offsets[first]), int(alt.offsets[first + n_local])
-            alt_bytes_c = alt.data.view(np.uint8)[a_s:a_e].tolist()
-            alt_offsets_c = (
-                (alt.offsets[first : first + n_local + 1] - a_s)
-                .astype(np.int64)
-                .tolist()
-            )
-
-            self._store.set_contig_table(
-                c,
-                contig_start,
-                n_local,
-                pos_c,
-                ref_bytes_c,
-                ref_offsets_c,
-                alt_bytes_c,
-                alt_offsets_c,
-            )
+            self._store.set_contig_meta(c, contig_start, n_local, max_v_len)
+            self._contig_arrays[c] = (vs_c, ve_c)
 
     def reconstruct_window(
         self, r_idx: NDArray[np.intp], s_idx: NDArray[np.intp]
     ) -> Ragged:
-        """Reconstruct haplotypes for one batch of `(region, sample)` pairs.
-
-        This plan (Task 4 / walking-skeleton scope) requires every row in a
-        batch to share one region -- i.e. one contig; `StreamingDataset`
-        batches a single region's samples per call, which satisfies this.
-        Returns a `Ragged[np.bytes_]` (S1) of shape `(batch, ploidy, ~length)`.
+        """Reconstruct one CARTESIAN window: every region in `r_idx` x every sample in
+        `s_idx`, single-contig. Returns a `Ragged[np.bytes_]` (S1) of shape
+        `(len(r_idx) * len(s_idx), ploidy, ~length)`, C-order (region, sample).
         """
         from ..genvarloader import reconstruct_haplotypes_svar1
 
@@ -430,25 +530,40 @@ class _Svar1Backend:
         contig_idx = int(contig_idxs[0])
         if not np.all(contig_idxs == contig_idx):
             raise ValueError(
-                "_Svar1Backend.reconstruct_window: batch spans multiple "
-                "contigs; this plan only supports single-contig batches "
-                "(one region's samples per call)."
+                "_Svar1Backend.reconstruct_window: window spans multiple contigs; "
+                "every Rust call must be single-contig (the scheduler groups by contig)."
             )
         contig_name = self._contigs[contig_idx]
+        vs_c, ve_c = self._contig_arrays[contig_name]
 
         region_bounds = np.ascontiguousarray(self._regions[r_idx, 1:3], np.int32)
 
-        ref_c_idx = self._ref.c_map.contigs.index(contig_name)
-        c_s = int(self._ref.offsets[ref_c_idx])
-        c_e = int(self._ref.offsets[ref_c_idx + 1])
-        ref_bytes = np.ascontiguousarray(self._ref.reference[c_s:c_e], np.uint8)
-        ref_offsets = np.array([0, c_e - c_s], dtype=np.int64)
+        # `contig_idx` already indexes `self._contigs`, and `Reference.from_path`
+        # (called with `self._contigs` in `__init__`) builds `offsets` in that same
+        # order -- so `contig_idx` indexes `self._ref` directly, no name lookup
+        # needed. Previously this did `self._ref.c_map.contigs.index(contig_name)`,
+        # which is both redundant (same answer as `contig_idx`) AND a bug:
+        # `Reference.from_path` normalizes contig names to the FASTA's naming style
+        # (UCSC "chr1" vs Ensembl "1"), so a store using one style paired with a
+        # FASTA in the other style made `contig_name` absent from
+        # `c_map.contigs`, raising `ValueError`. See `Reference._contig_slice`'s
+        # docstring and `Svar2Haps._ref_for_contig` for the shared convention.
+        ref_bytes, ref_offsets = self._ref._contig_slice(contig_idx)
+
+        # `s_idx` is a PUBLIC index (sorted-name order, matching `gvl.Dataset`);
+        # the store's genotype CSR is laid out in native (VCF column) order, so
+        # translate before crossing into Rust. See `__init__`'s comment on
+        # `_phys_sample_idx`. Output row order is unaffected -- only which
+        # physical column each row reads from changes.
+        phys_s_idx = self._phys_sample_idx[s_idx]
 
         data, offsets = reconstruct_haplotypes_svar1(
             self._store,
             contig_name,
+            vs_c,
+            ve_c,
             region_bounds,
-            np.ascontiguousarray(s_idx, np.int64),
+            np.ascontiguousarray(phys_s_idx, np.int64),
             self._v_starts,
             self._ilens,
             self._alt_alleles,
@@ -458,7 +573,7 @@ class _Svar1Backend:
             self._ref.pad_char,
             True,
         )
-        batch = len(r_idx)
+        batch = len(r_idx) * len(s_idx)
         return Ragged.from_offsets(
             data.view("S1"), (batch, self.ploidy, None), np.asarray(offsets, np.int64)
         )

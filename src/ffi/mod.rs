@@ -783,26 +783,35 @@ pub fn reconstruct_haplotypes_fused<'py>(
     (out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py))
 }
 
-/// Streaming SVAR1 window reconstruction: read one contig's window directly from
-/// a live `.svar` store (`Svar1Store::read_window`, which walks
-/// `Svar1RecordSource::next_record` — no on-disk `variant_idxs.npy`/`offsets.npy`
-/// genotype CSR memmap involved), build the sparse CSR, and reconstruct
-/// haplotypes via the same `reconstruct_haplotypes_from_sparse` core as
-/// `reconstruct_haplotypes_fused` above. Ragged output only (no fixed-length,
-/// keep/exonic, or to_rc support — out of scope for the streaming walking
-/// skeleton). `region_bounds`/`ref_`/`ref_offsets` are all relative to the ONE
-/// `contig` given: `regions[:, 0]` is hardcoded to 0 and `ref_offsets` is
-/// expected to be a single-contig `[0, contig_len]` slice (see
-/// `_Svar1Backend.reconstruct_window` on the Python side, which slices the
-/// multi-contig `Reference` down to one contig before calling in).
+/// Streaming SVAR1 WINDOW reconstruction: read one cartesian window
+/// (`regions x samples x ploidy`) directly from a live `.svar` store via genoray's
+/// ungated `svar1_query` (two binary-search stages, no record walk), then reconstruct
+/// via the same `reconstruct_haplotypes_from_sparse` core as
+/// `reconstruct_haplotypes_fused`.
+///
+/// The whole read runs INSIDE `py.detach` — `store` is `PyRef<'py, _>` so the reader
+/// borrow survives into the closure, exactly like
+/// `reconstruct_haplotypes_from_svar2_readbound`. (The pre-window skeleton used
+/// `PyRef<'_, _>` and had to read under the GIL.)
+///
+/// `geno_v_idxs` is the `variant_idxs` mmap slice itself — zero copy, no materialized
+/// buffer. Ragged output only (no fixed-length, keep/exonic, or to_rc). `regions[:, 0]`
+/// is hardcoded to 0: this is a single-contig call and `ref_`/`ref_offsets` are expected
+/// pre-sliced to `[0, contig_len]`.
+///
+/// `v_starts_c`/`v_ends_c` are CONTIG-LOCAL (u32) and feed the range search;
+/// `v_starts`/`ilens` are the GLOBAL static table the kernel indexes with the returned
+/// ids. Both are borrowed, never copied.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_svar1<'py>(
     py: Python<'py>,
-    store: PyRef<'_, crate::svar1::store::Svar1Store>,
+    store: PyRef<'py, crate::svar1::store::Svar1Store>,
     contig: &str,
-    region_bounds: PyReadonlyArray2<i32>, // (b, 2) = (start, end), 0-based half-open
-    sample_idx: PyReadonlyArray1<i64>,    // (b,) sample index per batch row
+    v_starts_c: PyReadonlyArray1<u32>, // contig-local 0-based starts, ascending
+    v_ends_c: PyReadonlyArray1<u32>,   // contig-local exclusive ends
+    region_bounds: PyReadonlyArray2<i32>, // (r, 2) = (start, end), 0-based half-open
+    sample_idx: PyReadonlyArray1<i64>,    // (s,) absolute sample indices
     v_starts: PyReadonlyArray1<i32>,      // GLOBAL static table (from SparseVar.index)
     ilens: PyReadonlyArray1<i32>,
     alt_alleles: PyReadonlyArray1<u8>,
@@ -815,30 +824,50 @@ pub fn reconstruct_haplotypes_svar1<'py>(
     use crate::genotypes;
     use crate::reconstruct;
 
+    // `ref_` is sliced then `.as_slice()`'d inside the reconstruct core; a strided view
+    // would panic there as an uncatchable PanicException. `ref_offsets` is only indexed
+    // directly (stride-safe) and must NOT be gated.
+    require_contiguous_1d(&ref_, "ref_")?;
+    // `v_starts_c`/`v_ends_c` are borrowed as `&[u32]` (no copy — see below); that
+    // requires `.as_slice()` on the view, which panics on a strided input. Gate here
+    // so a non-contiguous array surfaces as a clean ValueError instead.
+    require_contiguous_1d(&v_starts_c, "v_starts_c")?;
+    require_contiguous_1d(&v_ends_c, "v_ends_c")?;
+
     let rb = region_bounds.as_array();
-    let batch_size = rb.nrows();
-    let bounds: Vec<(i32, i32)> = (0..batch_size).map(|i| (rb[[i, 0]], rb[[i, 1]])).collect();
-    let samples: Vec<usize> = sample_idx
-        .as_array()
-        .iter()
-        .map(|&s| s as usize)
+    let n_regions = rb.nrows();
+    let regions_v: Vec<(u32, u32)> = (0..n_regions)
+        .map(|i| (rb[[i, 0]].max(0) as u32, rb[[i, 1]].max(0) as u32))
         .collect();
-
-    let sparse = store
-        .read_window(contig, &bounds, &samples)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let samples_v: Vec<usize> = sample_idx.as_array().iter().map(|&s| s as usize).collect();
+    let n_samples = samples_v.len();
     let ploidy = store.ploidy();
-    let n_work = batch_size * ploidy;
+    let batch = n_regions * n_samples;
+    let n_work = batch * ploidy;
 
-    // regions (b,3) — contig_idx hardcoded to 0: this is a single-contig call,
-    // and the caller is expected to hand in ref_/ref_offsets already sliced to
-    // just this one contig (offsets = [0, contig_len]).
-    let mut regions_arr = Array2::<i32>::zeros((batch_size, 3));
-    for (i, &(s, e)) in bounds.iter().enumerate() {
-        regions_arr[[i, 1]] = s;
-        regions_arr[[i, 2]] = e;
+    // Expand the cartesian product into one kernel `regions` row per (region, sample),
+    // C-order (region, sample) so it lines up with find_ranges' output.
+    let mut regions_arr = Array2::<i32>::zeros((batch, 3));
+    for ri in 0..n_regions {
+        for si in 0..n_samples {
+            let bi = ri * n_samples + si;
+            regions_arr[[bi, 1]] = rb[[ri, 0]];
+            regions_arr[[bi, 2]] = rb[[ri, 1]];
+        }
     }
-    let shifts_arr = Array2::<i32>::zeros((batch_size, ploidy)); // jitter=0 in this plan
+    let shifts_arr = Array2::<i32>::zeros((batch, ploidy)); // jitter=0 in this plan
+
+    // ZERO COPY: borrow contig-local starts/ends as slices straight from the numpy
+    // buffers (contiguity guaranteed by the guards above) — no per-window copy of
+    // these whole-contig, variant-scale arrays.
+    let v_starts_c_a = v_starts_c.as_array();
+    let v_ends_c_a = v_ends_c.as_array();
+    let v_starts_c_s: &[u32] = v_starts_c_a
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above");
+    let v_ends_c_s: &[u32] = v_ends_c_a
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above");
 
     let v_starts_a = v_starts.as_array();
     let ilens_a = ilens.as_array();
@@ -847,17 +876,34 @@ pub fn reconstruct_haplotypes_svar1<'py>(
     let ref_a = ref_.as_array();
     let ref_offsets_a = ref_offsets.as_array();
 
-    let (out_data, out_offsets_vec) = py.detach(move || {
-        let o_starts_arr = Array1::from_vec(sparse.o_starts);
-        let o_stops_arr = Array1::from_vec(sparse.o_stops);
-        let geno_v_idxs_arr = Array1::from_vec(sparse.geno_v_idxs);
-        let geno_offset_idx = sparse.geno_offset_idx;
+    // `store` is PyRef<'py>, so this borrow outlives the detach.
+    let store_ref: &crate::svar1::store::Svar1Store = &store;
+
+    let result = py.detach(move || -> anyhow::Result<(Array1<u8>, Array1<i64>)> {
+        let w = store_ref.read_window(
+            contig,
+            v_starts_c_s,
+            v_ends_c_s,
+            &regions_v,
+            &samples_v,
+        )?;
+
+        // ZERO COPY: the kernel's sparse index input IS the store's mmap. Goes through
+        // `Svar1Store::geno_v_idxs()` (not `reader().variant_idxs()` inline) so the
+        // borrow contract has one call site that `src/svar1/store.rs`'s
+        // `geno_v_idxs_borrows_the_mmap_not_a_copy` unit test can pin down.
+        let geno_v_idxs = store_ref.geno_v_idxs();
+        let geno_v_idxs_view = numpy::ndarray::ArrayView1::from(geno_v_idxs);
+
+        let o_starts_arr = Array1::from_vec(w.o_starts);
+        let o_stops_arr = Array1::from_vec(w.o_stops);
+        let geno_offset_idx = w.geno_offset_idx;
 
         let q_starts_owned: Array1<i32> = regions_arr.column(1).to_owned();
         let q_ends_owned: Array1<i32> = regions_arr.column(2).to_owned();
         let diffs = genotypes::get_diffs_sparse(
             geno_offset_idx.view(),
-            geno_v_idxs_arr.view(),
+            geno_v_idxs_view,
             o_starts_arr.view(),
             o_stops_arr.view(),
             ilens_a,
@@ -869,19 +915,16 @@ pub fn reconstruct_haplotypes_svar1<'py>(
             parallel,
         );
 
-        // out_offsets prefix-sum — ragged output only (mirrors
-        // reconstruct_haplotypes_fused's output_length < 0 branch).
+        // out_offsets prefix-sum — ragged output only.
         let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
         {
             let mut acc: i64 = 0;
-            out_offsets_vec[0] = 0;
             for k in 0..n_work {
                 let query = k / ploidy;
                 let hap = k % ploidy;
                 let ref_len = (regions_arr[[query, 2]] - regions_arr[[query, 1]]) as i64;
                 let diff = diffs[[query, hap]] as i64;
-                let len = (ref_len + diff).max(0);
-                acc += len;
+                acc += (ref_len + diff).max(0);
                 out_offsets_vec[k + 1] = acc;
             }
         }
@@ -897,7 +940,7 @@ pub fn reconstruct_haplotypes_svar1<'py>(
             geno_offset_idx.view(),
             o_starts_arr.view(),
             o_stops_arr.view(),
-            geno_v_idxs_arr.view(),
+            geno_v_idxs_view,
             v_starts_a,
             ilens_a,
             alt_alleles_a,
@@ -912,10 +955,20 @@ pub fn reconstruct_haplotypes_svar1<'py>(
             parallel,
         );
 
-        (out_data, out_offsets_vec)
+        Ok((out_data, out_offsets_vec))
     });
 
+    let (out_data, out_offsets_vec) =
+        result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
     Ok((out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py)))
+}
+
+/// Test hook: CSR entries spanned by SVAR1 window reads on this thread. See
+/// `crate::svar1::store::csr_entries_touched`.
+#[pyfunction]
+pub fn svar1_csr_entries_touched() -> usize {
+    crate::svar1::store::csr_entries_touched()
 }
 
 /// Fused SVAR2 two-source haplotype reconstruction: merge each hap's `var_key` ⋈

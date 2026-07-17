@@ -114,6 +114,32 @@ class Reference:
     def contigs(self) -> list[str]:
         return self.c_map.contigs
 
+    def _contig_slice(
+        self, contig_idx: int
+    ) -> tuple[NDArray[np.uint8], NDArray[np.int64]]:
+        """The single-contig reference byte slice + ``[0, len]`` offsets that Rust
+        haplotype-reconstruction kernels want.
+
+        ``contig_idx`` indexes ``self.offsets`` directly -- NOT a name lookup through
+        ``c_map``. ``offsets`` is built in the order of the ``contigs`` argument given
+        to :meth:`from_path` (whatever order the *caller* used, e.g. a dataset's or a
+        streaming backend's own contig list), independent of how those names get
+        normalized to the FASTA's naming style (UCSC vs Ensembl). So any caller that
+        already knows a region's ``contig_idx`` in that same list-order can pull the
+        slice directly, with no re-lookup by (possibly differently-styled) name.
+
+        This mapping only holds when this ``Reference`` was built with
+        ``in_memory=True`` and the same ``contigs`` list passed to :meth:`from_path`;
+        with ``in_memory=False``, ``offsets`` stays in full-FASTA order over all
+        contigs and ``contig_idx`` will not line up with the caller's list order
+        (see `GH #285 <https://github.com/mcvickerlab/GenVarLoader/issues/285>`_).
+        """
+        o_s = int(self.offsets[contig_idx])
+        o_e = int(self.offsets[contig_idx + 1])
+        ref_ = np.ascontiguousarray(self.reference[o_s:o_e], np.uint8)
+        ref_offsets = np.array([0, o_e - o_s], np.int64)
+        return ref_, ref_offsets
+
     def fetch(
         self, contigs: ArrayLike, starts: ArrayLike = 0, ends: ArrayLike = INT64_MAX
     ) -> Ragged[np.bytes_]:

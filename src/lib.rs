@@ -6,6 +6,7 @@ pub mod ragged;
 pub mod reconstruct;
 pub mod reference;
 pub mod reverse;
+pub mod stream;
 pub mod svar1;
 pub mod svar2;
 pub mod tables;
@@ -48,6 +49,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_fused, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_svar1, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::svar1_csr_entries_touched, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_from_svar2, m)?)?;
     m.add_function(wrap_pyfunction!(
         ffi::reconstruct_haplotypes_from_svar2_readbound,

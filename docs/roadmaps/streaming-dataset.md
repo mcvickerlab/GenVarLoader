@@ -23,22 +23,39 @@ only** (no map-style random access).
 - **A shared framework, one backend per source family.** The Python `StreamingDataset` surface,
   the region-major scheduler, and the async producer/consumer engine are generic over a
   `StreamBackend` trait. Each variant format plugs in its own buffer + kernels.
+- **Iterable-only, fixed cartesian traversal.** No `__getitem__`, no ad-hoc queries: a
+  `StreamingDataset` is a fixed cartesian sweep of BED × samples in an order *we* choose from the
+  data layout. `to_iter()` is the one entry point; `to_torch_dataset()`/`to_dataloader()` are thin
+  wrappers. This is what makes the double buffer unconditionally safe — the next window is always
+  known, so prefetch is never speculative. ("Pairwise" `(region, sample)` reads are a map-style
+  artifact of `gvl.Dataset` and have no place here.)
+- **Window ≫ batch; the window is the read granularity.** One backend read per *window*
+  (R regions × all samples × ploidy, cartesian); a batch is a *slice* of the reconstructed window,
+  never its own read.
 - **Two buffer styles (do not cross-convert).**
-  - VCF/PGEN/SVAR1 → **SVAR1-style window buffer** (local static variant table + per-hap sparse
-    indices) → existing `reconstruct_haplotypes_from_sparse`.
+  - VCF/PGEN → **SVAR1-style window buffer** (owned: decoded local static variant table + per-hap
+    sparse indices) → existing `reconstruct_haplotypes_from_sparse`.
+  - SVAR1 → the **degenerate** case of that buffer: offsets only. Its on-disk layout is *already*
+    hap-major sparse CSR of sorted global variant ids, so `geno_v_idxs` is borrowed straight from
+    the `variant_idxs` mmap — nothing is materialized and there is nothing to decode.
   - SVAR2 → **SVAR2-style buffer** (flat `vk_*/dense_*/lut_*` channels, keys decoded inline) →
     existing `reconstruct_haplotypes_from_svar2_readbound`. No SVAR2→SVAR1 conversion.
 - **Buffer variants, not haplotypes.** A fixed-size, allocated-once double (ping-pong) buffer
-  holds a large window (≫ batch) of bulk-decoded variants; reconstruction consumes a *slice* per
-  batch. Variants are tiny vs. haplotypes; each compressed block / mmap page is touched once.
-- **Concurrency: `std::thread` + `crossbeam_channel::bounded`** (ping-pong / N-slot ring, slot
-  recycling), rayon inside stages. **Not tokio** — mmap + CPU-bound decode has no async-I/O await
-  points. Mirrors genoray's `orchestrator.rs` conversion pipeline. (tokio reserved for a future
-  remote/object-store extension.)
+  holds a large window (≫ batch); reconstruction consumes a *slice* per batch. Variants are tiny
+  vs. haplotypes. For VCF/PGEN the win is amortizing **decode**; for SVAR1 there is no decode and
+  the win is **hiding I/O (page-fault) latency** — the page cache does not prefetch on an
+  application's access pattern, but a producer thread on a known traversal does.
+- **Concurrency: `std::thread` + `crossbeam_channel::bounded`**, rayon inside stages. **Not
+  tokio** — mmap + CPU-bound decode has no async-I/O await points. genoray's `orchestrator.rs` is
+  the template for *named per-stage threads, bounded channels, close-by-`Sender`-drop shutdown,
+  and join-everything-then-classify-panics* — but **not** for slot recycling, which it does not do
+  (it allocates each chunk fresh and drops it). Recycling is net-new design here. (tokio reserved
+  for a future remote/object-store extension.)
 - **Rust-first, bypass the genoray Python API.** Build on `genoray_core` + `svar2-codec`
-  (+ `bigtools`). VCF/PGEN/SVAR1 require enabling `genoray_core`'s `conversion` feature
-  (pulls rust-htslib/C htslib) — a first-class abi3-wheel-matrix risk. SVAR2 uses the
-  already-linked `genoray_core::query` surface.
+  (+ `bigtools`). VCF/PGEN require `genoray_core`'s `conversion` feature (rust-htslib/C htslib;
+  already enabled and statically linked into the abi3 wheel). SVAR2 uses the already-linked
+  `genoray_core::query` surface. **SVAR1 uses the ungated `svar1_query` surface** (a genoray
+  prerequisite — see Tasks) and needs no htslib.
 - **Reuse reconstruction kernels + output types**; the buffer duck-types the kernels' sparse
   inputs. **Byte-identical parity** with `gvl.write()` + `Dataset[r, s]` (modulo jitter/rng) is
   the correctness oracle.
@@ -49,7 +66,8 @@ only** (no map-style random access).
 
 | Spec | Scope | Status |
 |---|---|---|
-| `docs/superpowers/specs/2026-07-15-streaming-dataset-vcf-pgen-svar1-design.md` | Shared framework + VCF/PGEN/SVAR1 backend | ✅ approved |
+| `docs/superpowers/specs/2026-07-15-streaming-dataset-vcf-pgen-svar1-design.md` | Shared framework + VCF/PGEN/SVAR1 backend | ✅ approved (⚠️ partly superseded — see below) |
+| `docs/superpowers/specs/2026-07-16-streaming-svar1-window-engine-design.md` | SVAR1 window reads (ungated genoray `svar1_query`) + double-buffer engine + `to_iter` surface. **Supersedes spec A**'s SVAR1-producer, decode-amortization, slot-recycling, release-gate, and `IterableDataset` claims. | ✅ approved — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275), PR [#282](https://github.com/mcvickerlab/GenVarLoader/pull/282) |
 | _TBD_ — issue [#278](https://github.com/mcvickerlab/GenVarLoader/issues/278) | SVAR2 backend (SVAR2-style buffer + read-bound kernels) behind the framework | ⬜ |
 | _TBD_ — issue [#279](https://github.com/mcvickerlab/GenVarLoader/issues/279) | Interval (BigWigs/Table) streaming + variant+interval mixed scheduler | ⬜ |
 
@@ -58,15 +76,23 @@ only** (no map-style random access).
 | Plan | Scope | Status |
 |---|---|---|
 | `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — PR [#274](https://github.com/mcvickerlab/GenVarLoader/pull/274) |
-| _TBD (Plan 2)_ — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) | Double-buffer engine (crossbeam producer/consumer, window sizing, `num_workers` shard) | ⬜ |
+| `docs/superpowers/plans/2026-07-16-streaming-svar1-window-engine.md` | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275). Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Tasks 2-4 done; Task 5's generic `StreamBackend`/`run_windows` engine done, SVAR1 wiring split to follow-up issue [#283](https://github.com/mcvickerlab/GenVarLoader/issues/283) |
 | _TBD (Plan 3/4)_ — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend | ⬜ |
 | _TBD (Plan 5)_ — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
 
 ## Tasks (spec A — corrected ordering)
 
-> **Correction:** SVAR1's reader is `conversion`-gated (htslib), so htslib enablement is a shared
-> prerequisite and moves first. The first working slice is a synchronous walking skeleton; the
-> crossbeam double-buffer is a separate throughput plan layered on top once parity is locked.
+> **Correction (2026-07-15):** htslib enablement moved first as a shared prerequisite. The first
+> working slice is a synchronous walking skeleton; the crossbeam double-buffer is a separate
+> throughput plan layered on top once parity is locked.
+>
+> **Correction (2026-07-16, Plan 2 design):** "SVAR1's reader is `conversion`-gated, so htslib is
+> a prerequisite **for SVAR1**" was true only of the *conversion* reader. SVAR1 needs a **query**
+> API, and its files are headerless raw mmap buffers — so the correct SVAR1 path is **ungated and
+> htslib-free** (new genoray `svar1_query`). htslib remains a genuine prerequisite for VCF/PGEN
+> (#276) only. `conversion` **stays enabled** in gvl regardless: it already builds green with
+> static htslib and Plans 3/4 need it, so dropping and re-adding would churn `Cargo.toml` +
+> `pixi.toml`'s `LIBCLANG_PATH` twice.
 
 - ✅ **htslib / `conversion` enablement + wheel matrix** — `features=["conversion"]` enabled; abi3
   `cp310-abi3` wheel builds with htslib **statically** linked (no dynamic hts/libdeflate), so no
@@ -83,13 +109,210 @@ only** (no map-style random access).
   **Byte-identical parity** vs `gvl.write()`+`Dataset.open()[r,s]` across an unsorted,
   interleaved multi-contig bed (12 regions × 3 samples) through a real `DataLoader`.
   Public `gvl.StreamingDataset` + docs shipped. _Walking-skeleton Tasks 3–6_
-- ⬜ **Double-buffer engine** — crossbeam producer/consumer, generic `StreamBackend`. _Plan 2_ —
+- ✅ **genoray prerequisite: ungated `svar1_query`** — `Svar1Reader` + `var_ranges` +
+  cartesian `find_ranges` in genoray, ungated (memmap2 + bytemuck + the existing `search.rs`; no
+  htslib). **Root cause of the skeleton's SVAR1 debt:** genoray has an ungated Rust *query* API
+  for SVAR2 (`genoray_core::query`) and **none for SVAR1**, so the skeleton reached for the
+  conversion-gated `Svar1RecordSource` — a *conversion-pipeline record producer*, not a query API.
+  Stage A is nearly free (`search::overlap_range` already ports Python's `var_ranges`; nobody
+  wired it to SVAR1); Stage B is two `partition_point`s per hap. Consumed via a `rev` bump — **not
+  a release gate** (see Development Notes in CLAUDE.md). Folded into Task 2 below (rev
+  `e07477e687c913f9605fc79ea251f1bb3b177aa9`) after Task 1 came back blocked on the same drifted
+  `Svar1RecordSource` call site Task 2 deletes. _Plan 2, chunk 1_ —
+  genoray issue [#123](https://github.com/d-laub/genoray/issues/123)
+- 🚧 **SVAR1 window reads + double-buffer engine + `to_iter` surface** — crossbeam
+  producer/consumer, generic `StreamBackend`. _Plan 2_ —
   issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275)
-  - ⚠️ **Inherited perf/scale debt from the walking skeleton — fold into Plan 2:** the per-contig
-    static variant table crosses the FFI as Python **lists** (`.tolist()`, ~10M `int` objects for
-    a human chr1) and `read_window` **clones the whole contig table on every batch**; it also
-    re-opens `Svar1RecordSource` and walks the whole contig per batch (O(records × batch)), and
-    holds the GIL during the record walk. Fix with `PyReadonlyArray1` + slices/`Arc`.
+  - ✅ **Task 2 (read path): `Svar1Store` rewritten on `svar1_query`.** `read_window` is now two
+    binary-search stages (`var_ranges` + `find_ranges`) inside `py.detach`, GIL-free;
+    `geno_v_idxs` is `Svar1Reader::variant_idxs()` itself (zero copy). `Svar1RecordSource`,
+    `ContigTable`, `set_contig_table`, and every `.tolist()`/per-batch clone are deleted, not
+    optimized. Window is now the read granularity (`regions x samples x ploidy`, cartesian);
+    `StreamingDataset._plan`/`_iter_batches` slice batches out of a window instead of driving
+    pairwise reads. Byte-identical parity verified
+    (`tests/dataset/test_streaming_parity.py::test_streaming_matches_written_all_cells`).
+  - ✅ **Task 3 (`to_iter` surface): one iteration entry point.** `StreamingDataset` is now a
+    plain frozen dataclass (no `__iter__`); `to_iter(batch_size, return_indices)` is the sole
+    traversal method, with `n_batches`/`_iter_batch_spans` counting it without reconstructing.
+    `to_torch_dataset()` no longer raises -- it wraps `to_iter` in an `IterableDataset` (matching
+    `Dataset.to_torch_dataset`'s name/concept); `to_dataloader()` wraps `to_torch_dataset`.
+    `__getitem__` still raises `TypeError` (iterable-only). `_batch_size`/`_with_batch_size`
+    deleted -- `batch_size` is a `to_iter` argument, not instance state.
+  - ✅🚧 **Task 5 (double-buffer engine): generic engine landed; SVAR1 wiring split out.**
+    New `src/stream/mod.rs`: `StreamBackend` trait (`fn fill(&self, &WindowSpec, &mut
+    Self::Buffer) -> anyhow::Result<()>`) + `run_windows(backend, windows, n_slots,
+    consume)` — gvl's **first threading primitive** (previously zero `std::thread`/
+    crossbeam/`unsafe impl Send+Sync` in `src/`). Producer/consumer over
+    `crossbeam_channel::bounded` (added `crossbeam-channel = "0.5.15"`, matching
+    genoray's pin), 2-slot ping-pong recycling (net-new vs. genoray's orchestrator,
+    which allocates fresh and drops — an N-slot ring is deferred to profiling
+    evidence), shutdown by `Sender` drop, join-everything-then-classify-panics. 5
+    adversarial unit tests (plan-order yield, slot-cap recycling, producer-error,
+    consumer-error, empty-plan), each run 20x in `--release` with zero hangs/failures.
+    - **Compile-fix vs. the spec's literal listing:** the spec's `run_windows` body
+      borrowed `tx_filled`/`rx_free` into a non-`move` `spawn_scoped` closure and then
+      tried to move/drop them afterward — doesn't borrow-check. Fixed by moving both
+      entirely into the producer closure (`move ||`), making it their sole owner; no
+      clone of either is ever held back in the outer scope. This is a *stronger*
+      version of the shutdown-safety property the spec asked for (orchestrator.rs's
+      hazard is a stray `Sender` clone kept around for introspection — this design has
+      no extra clone to forget to drop, so the hazard can't occur by construction).
+    - **Step 5 (wire `StreamBackend` for `Svar1Store`, route
+      `reconstruct_haplotypes_svar1` through `run_windows`) — SPLIT into a follow-up
+      task, per the plan's own pre-authorized escape hatch.** Reasoning: today
+      `reconstruct_haplotypes_svar1` is one Rust call per window, and Python's
+      `_plan()`/`_iter_batches()` (`_dataset/_streaming.py`) drives the window loop
+      *synchronously* — each `to_iter()` step blocks on one FFI call, gets one
+      window's data back, slices it into batches, and only then asks for the next
+      window. For the double-buffer engine to produce any real overlap, window N+1's
+      fetch has to happen *while Python is busy with window N* — which means the
+      producer thread must outlive a single FFI call and persist across `to_iter()`
+      steps, with some Python-visible handle (a new pyclass wrapping a receiver, most
+      likely) that `_iter_batches` polls instead of calling
+      `reconstruct_haplotypes_svar1` directly. That's a new ownership/lifetime model
+      (a background thread tied to the `StreamingDataset`/iterator's lifetime, not a
+      single call), plus GIL re-acquisition to build `PyArray`s from data produced on
+      the producer thread, plus deciding what `Svar1Store: StreamBackend`'s `Buffer`
+      actually is (offsets-only via `read_window`, or the fully-reconstructed
+      `(data, offsets)` output — the two halves currently live in one `py.detach`
+      block in `src/ffi/mod.rs`, and splitting them changes what work each stage
+      overlaps). Restructuring the FFI's window loop, `Svar1Store`'s ownership of
+      per-contig arrays, and `_streaming.py`'s iteration protocol together, in one
+      task, risked rushing exactly the parity-critical surface
+      (`test_streaming_parity.py`, `test_scale_parity_still_byte_identical`) this
+      whole effort is gated on. Tasks 2 + 4 (window-granular reads + the deterministic
+      entries-touched gate) are the asymptotic fix and are already landed,
+      independently valuable, and unaffected by this split — the double-buffer
+      engine's benefit (overlapping producer I/O with consumer reconstruct) is a
+      separate, separately-measured effect that this split defers rather than drops.
+      Step 6 (cold-page-cache overlap measurement) is skipped for the same reason —
+      it only makes sense once Step 5's wiring exists; no overlap number is reported
+      here to avoid fabricating one.
+    - **Follow-up: issue [#283](https://github.com/mcvickerlab/GenVarLoader/issues/283).**
+      Wire `Svar1Store` as a `StreamBackend` and move `StreamingDataset`'s window loop
+      into Rust behind a Python-visible iterator/handle, so `to_iter()` actually
+      overlaps producer I/O with consumer reconstruct. Should re-decide the `Buffer`
+      split (offsets-only vs. fully-reconstructed) as its first step, since that
+      decision shapes the GIL-crossing design. Cold-page-cache overlap measurement
+      (the deferred Step 6) belongs to this follow-up, not to #275.
+  - ⚠️ **Inherited perf/scale debt from the walking skeleton — DELETED, not fixed, by Task 2.**
+    All of it was downstream of the one wrong dependency above, so the rewrite removed it rather
+    than optimizing it. (a) `Svar1RecordSource::new` was **O(all CSR entries)** — it eagerly
+    inverted the contig's whole hap-major CSR — and the skeleton called it **per batch**; the real
+    cost was far worse than the O(records × batch) walk alone. (b) The `.tolist()` per-contig
+    table (~10M `int` objects for a human chr1) and `set_contig_table` existed **only** to feed
+    that constructor → gone with it, not converted to `PyReadonlyArray1`. (c) The per-batch
+    `t.pos.clone()` et al. existed only because the constructor took its vectors **by value** →
+    gone with it, not fixed with slices/`Arc`. (d) The GIL-held walk (old `src/ffi/mod.rs:826`,
+    *before* the `py.detach`) is fixed by the `Svar2Store` template — the reader now borrows across
+    `py.detach` (`store: PyRef<'py, _>`).
+  - ⚠️ The skeleton **conflated window and batch** (one Rust call per batch). That conflation is
+    what produced both the per-batch contig walk and the apparent need for pairwise reads. Task 2
+    fixes this: the window (`_window_regions`, default 64) is now the read granularity and a batch
+    is a slice of it.
+  - ✅ **Task 4 (deterministic scale gate): `svar1_csr_entries_touched()` counter +
+    `tests/dataset/test_streaming_scale.py`.** A `thread_local!` `Cell<usize>` in
+    `src/svar1/store.rs` (mirrors genoray's `search::search_tree_build_count`) sums
+    `stop - start` over `read_window`'s `find_ranges` output on every call; exposed via
+    `svar1_csr_entries_touched()` (`src/ffi/mod.rs` + `src/lib.rs`). **The gate is this
+    counter, not wall-clock** — this node is too noisy for absolute timings (standing
+    perf-gate convention). New 200-variant x 20-sample, single-contig scale fixture
+    (`scale_fixture`) makes "touches the whole contig" vs "touches the window" differ by
+    orders of magnitude, which the 40bp toy fixtures could not observe.
+    - **Before (skeleton) — a reasoned argument, not a measured number:** the counter
+      didn't exist pre-rewrite, so there is no direct old-code measurement to quote.
+      Reasoned from the already-landed Task 2 description of what was deleted:
+      `Svar1RecordSource::new` inverted the whole contig CSR *per batch*, so
+      entries-touched *would have been* ≈100% of the store regardless of window —
+      presented here as the motivating argument for the gate, not as a measured
+      before/after pair.
+    - **After (Task 2 rewrite, measured directly):** total CSR entries in the
+      200-variant/20-sample scale store = 3978; a single narrow 1-region/100bp window
+      touches 146 (3.7%, gate asserts `< 25%`) — proportional to the window's
+      variants, not the store's.
+    - **Batch-size invariance confirmed:** `svar1_csr_entries_touched()` delta is
+      bit-identical across `batch_size` in `{1, 8, 64}` for the same window plan — a
+      batch is a slice of the window, never its own read.
+    - **Scale guard is a Rust unit test, not Python RSS:** the original `ru_maxrss`
+      guard was flake-prone *and* blind — a `.to_vec()` regression on `geno_v_idxs`
+      allocates only a few KB, far below `ru_maxrss`'s page-granularity high-water
+      mark, so it could never fail on the defect it named. Replaced with
+      `geno_v_idxs_borrows_the_mmap_not_a_copy` in `src/svar1/store.rs`, asserting
+      pointer identity between the slice `reconstruct_haplotypes_svar1` hands the
+      kernel and `Svar1Reader::variant_idxs()` — deterministic, fails immediately on
+      an owned copy.
+    - **`_window_regions` default — re-measured, correcting an invalid sweep:** the
+      first pass swept `{1, 4, 16, 64, 256}` against the 20-region pytest
+      `scale_fixture` and claimed wr=64 as "the knee" from wr=256 matching it exactly
+      — but the fixture is only 20 regions, so any `window_regions >= 20` collapses
+      the whole bed into **one window**; wr=64 and wr=256 were byte-for-byte the same
+      execution path, and the "no further improvement" observation was arithmetic,
+      not measurement. Re-swept `{1, 4, 16, 64, 256, 1024}` against a purpose-built
+      2000-region/400kb-contig fixture where wr=256 and wr=1024 are genuinely
+      unsaturated (8 and 2 windows respectively), best-of-3 per setting across 3
+      independent sessions. `entries_touched` was **exactly flat** (40453) in every
+      session at every setting — I/O is windowing-invariant, as designed. Wall-clock
+      (**secondary color only, never the gate**) dropped sharply and monotonically
+      from wr=1 through wr=64 (session-average best ≈0.84s → ≈0.19s, ~4.5x); wr=256
+      and wr=1024 kept improving but only another ~5–11%, on the same order as this
+      shared node's run-to-run noise (a single setting's 3 repeats can span up to
+      ~2x). Honest read: this fixture does not resolve a hard knee above wr=64 — the
+      steep early elbow is real and lands at 64, and anything past it is
+      noise-level on this node. Kept **`_window_regions = 64`**: it captures
+      essentially all the measured gain, and since a window is regions × *all*
+      samples, a larger `window_regions` grows the per-call working set with no
+      measured compensating benefit here — a pragmatic small default, not an invented
+      knee.
+    - **Dataclass default was inert — fixed:** `__init__` unconditionally
+      `object.__setattr__`'d `_window_regions` to a hardcoded `64`, so the field's
+      default (and its justification comment) never reached a constructed instance —
+      editing the field default silently did nothing. Fixed by pulling the default
+      from `type(self).__dataclass_fields__["_window_regions"].default` in `__init__`
+      instead of duplicating the literal, making the field declaration the single
+      source of truth.
+    - **Unrelated bug found and fixed en route — split into its own commit:**
+      `_Svar1Backend` indexed samples by the `.svar` store's native (VCF column)
+      order, but `gvl.write()` always lexicographically sorts sample names
+      (`_write.py`'s unconditional `samples.sort()`). The existing toy fixtures (≤3
+      single-digit sample names) never exposed this because sort order and native
+      order coincide there; the new 20-sample `"S0".."S19"` scale fixture does not
+      (`"S10" < "S2"` lexicographically) and `test_scale_parity_still_byte_identical`
+      caught it immediately. Fixed by sorting sample names at `_Svar1Backend`
+      construction and translating every public (sorted-order) `sample_idx` to the
+      store's physical column index (`_phys_sample_idx`) before it crosses into Rust
+      — output row order is unaffected, only which physical column each row reads.
+      This is a real, user-visible correctness fix, so it landed as its own
+      `fix(streaming):` commit rather than folded into the `test:` commit that found
+      it, so it gets a changelog entry.
+    - **Memory-scaling concern — filed as issue
+      [#284](https://github.com/mcvickerlab/GenVarLoader/issues/284):** a window is
+      regions × **all samples**, so peak memory scales with cohort size and
+      `_window_regions` cannot bound it (no value ≥ 1 helps — the sample dimension is
+      never chunked). Not independently re-measured here (the scale fixture's 20
+      samples don't exercise this). Note #283 (engine wiring) doubles the resident
+      window count on top of this, so the two interact.
+    - **Final whole-branch review fix wave, before opening the PR:** (1) `fix:`
+      `_Svar1Backend.reconstruct_window` looked up `ref_c_idx` by re-searching
+      `self._ref.c_map.contigs` for the STORE's contig name, but
+      `Reference.from_path` normalizes `c_map` to the FASTA's own naming style
+      (UCSC vs Ensembl) — a store/FASTA pair using different styles raised a bare
+      `ValueError`. `contig_idx` already indexes `self._contigs` in the same order
+      `Reference.from_path` builds `offsets`, so the lookup was both redundant and
+      wrong; replaced with a new shared `Reference._contig_slice(contig_idx)` (also
+      now used by `Svar2Haps._ref_for_contig`), and added a mixed-naming-style
+      regression test (`test_streaming_handles_mixed_contig_naming_style`) verified
+      to fail pre-fix. Pre-existing (from the walking skeleton), not introduced by
+      this plan. (2) `feat:` added `StreamingDataset.samples` (sorted sample names,
+      matching `Dataset.samples`) and documented the `sample_idx` sorted-order
+      convention next to the existing region-order docs (`faq.md`, `dataset.md`,
+      the skill) — previously the convention from the Task 5 sample-order fix above
+      was correct internally but invisible to users, who had no way to look up a
+      `sample_idx`'s name without reaching for the store's native order (wrong) or
+      re-deriving the sort themselves. (3) minor cleanups: dead `_bed` field
+      removed, `_window_regions`' comment trimmed to its conclusion (the
+      2000-region sweep fixture it cited isn't committed), and stale
+      "contig-grouped batches" test comments updated to say "window" (assertions
+      unchanged). See PR [#282](https://github.com/mcvickerlab/GenVarLoader/pull/282).
 - ⬜ **VCF backend / PGEN backend** — _Plan 3/4_ —
   issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276)
 - ⬜ **Output-mode breadth + docs** — _Plan 5; docs folded in_ —
@@ -97,15 +320,18 @@ only** (no map-style random access).
 
 ## Sequencing
 
-**#275 (double-buffer engine) is the keystone** — it defines the generic `StreamBackend` trait
-that every other backend implements, and it rewrites the same `src/ffi/mod.rs` +
-`_dataset/_streaming.py` surface the other tasks would build on. Land it first; work started
-against the skeleton's shape gets rewritten.
+**#275 is the keystone** — it defines the generic `StreamBackend` trait that every other backend
+implements, and it rewrites the same `src/ffi/mod.rs` + `_dataset/_streaming.py` surface the other
+tasks would build on. Land it first; work started against the skeleton's shape gets rewritten.
+
+**#275 is itself gated on a genoray PR** (ungated `svar1_query`) — a cross-repo prerequisite, not
+a release gate: merge it to genoray `main`, then bump gvl's `rev`. Start there.
 
 | Wave | Work | Parallel? |
 |---|---|---|
 | **Now** | Spec B ([#278](https://github.com/mcvickerlab/GenVarLoader/issues/278)), spec C ([#279](https://github.com/mcvickerlab/GenVarLoader/issues/279)) — **writing only** | ✅ docs-only, no code conflict with #275 |
-| **1** | [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) double-buffer engine + skeleton perf debt | ⛔ serial — blocks everything below |
+| **0** | **genoray: ungated `svar1_query`** ([genoray#123](https://github.com/d-laub/genoray/issues/123)) → merge to genoray `main` → bump gvl's `rev` | ⛔ cross-repo prerequisite — gates #275 |
+| **1** | [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) SVAR1 window reads + double-buffer engine + `to_iter` | ⛔ serial — blocks everything below |
 | **2** | [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) VCF/PGEN · [#278](https://github.com/mcvickerlab/GenVarLoader/issues/278) SVAR2 impl · [#279](https://github.com/mcvickerlab/GenVarLoader/issues/279) interval impl | ✅ one backend each, behind the trait |
 | **3** | [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) output-mode breadth | ✅ orthogonal to backends (kernel/output dispatch, not buffers) |
 
@@ -127,6 +353,13 @@ Notes:
   `genoray_core::query` (`ContigReader`/`find_ranges`/`gather_haps_readbound`/`decode_hap`) +
   `reconstruct_haplotypes_from_svar2_readbound`. Reached by bumping the genoray git `rev` — no
   release needed (CLAUDE.md → Development Notes).
+- **SVAR1 query precedent (the SVAR1-backend template):** genoray's ungated `svar1_query` —
+  `Svar1Reader` + `var_ranges` (a thin wrapper over the pre-existing `search::overlap_range`) +
+  cartesian `find_ranges`. Mirrors the Python `SparseVar.var_ranges` → `_find_starts_ends` →
+  `Ragged.from_offsets` path (`_var_ranges.py`, `_svar/_core.py`, `_svar/_kernels.py`), which is
+  what `gvl.write()` itself already calls (`_write.py:1023-1027`). ⚠️ **Not**
+  `svar1_reader::Svar1RecordSource` — that is the conversion pipeline's record producer
+  (forward-only, O(all CSR entries) at construction) and is the wrong tool for a query.
 - **genoray Rust absorption:** rust-migration Phase 6 (⬜) — VCF/PGEN ingest into the Rust stack;
   enabling the `conversion` feature here overlaps that work (htslib producers).
 - **Prefetching dataloader prior art:** the existing `buffered`/`double_buffered` torch
