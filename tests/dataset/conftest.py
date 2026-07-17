@@ -167,6 +167,67 @@ def svar1_multicontig_fixture(tmp_path_factory) -> Svar1MultiContigFixture:
     )
 
 
+@dataclass(slots=True)
+class Svar1MixedNamingFixture:
+    """Regression fixture for the `ref_c_idx` contig-naming-style bug: the `.svar`
+    store/VCF uses UCSC-style contig names (``chr1``) while one of the two
+    references provided uses Ensembl style (``1``, no prefix). `Reference.from_path`
+    documents mixed UCSC/Ensembl naming as supported (it normalizes contig names to
+    match the FASTA), so a correct `StreamingDataset` must handle this pairing.
+
+    `reference_chr_path` names its single contig ``chr1`` (matches the store) and
+    is used to build/open the comparison `gvl.Dataset`; `reference_ensembl_path`
+    names it ``1`` and is the one actually fed to `StreamingDataset` under test --
+    same underlying sequence, different naming style, so streamed output must
+    still be byte-identical to the written-and-opened comparison dataset."""
+
+    svar_path: Path
+    reference_ensembl_path: Path
+    reference_chr_path: Path
+    contigs: list[str]
+    bed: pl.DataFrame
+    dataset_path: Path
+
+
+@pytest.fixture(scope="module")
+def svar1_mixed_naming_fixture(tmp_path_factory) -> Svar1MixedNamingFixture:
+    from genoray import SparseVar, VCF
+
+    d = tmp_path_factory.mktemp("svar1_mixed_naming_src")
+    ref_chr = d / "ref_chr.fa"
+    ref_chr.write_text(f">chr1\n{_SVAR1_STREAM_REF}\n")
+    subprocess.run(["samtools", "faidx", str(ref_chr)], check=True)
+
+    ref_ensembl = d / "ref_ensembl.fa"
+    ref_ensembl.write_text(f">1\n{_SVAR1_STREAM_REF}\n")
+    subprocess.run(["samtools", "faidx", str(ref_ensembl)], check=True)
+
+    vcf = d / "in.vcf"
+    vcf.write_text(_SVAR1_STREAM_VCF)  # contig "chr1", UCSC-style, like the store
+    bcf = d / "in.bcf"
+    subprocess.run(["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True)
+    subprocess.run(["bcftools", "index", str(bcf)], check=True)
+
+    svar_path = tmp_path_factory.mktemp("svar1_mixed_naming_store") / "store.svar"
+    SparseVar.from_vcf(
+        svar_path, VCF(bcf), max_mem="1g", samples=["S0", "S1"], overwrite=True
+    )
+
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [40]})
+
+    out = tmp_path_factory.mktemp("svar1_mixed_naming_ds") / "d1.gvl"
+    gvl.write(out, bed, variants=SparseVar(svar_path), samples=None, overwrite=True)
+
+    return Svar1MixedNamingFixture(
+        svar_path=svar_path,
+        reference_ensembl_path=ref_ensembl,
+        reference_chr_path=ref_chr,
+        contigs=["chr1"],
+        bed=bed,
+        dataset_path=out,
+    )
+
+
 @pytest.fixture(scope="session")
 def snap_dataset(source_bed, vcf_dir, reference, tmp_path_factory):
     """Phased VCF dataset with a "5ss" BigWig track, opened with a reference.

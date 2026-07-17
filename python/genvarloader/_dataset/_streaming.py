@@ -523,11 +523,17 @@ class _Svar1Backend:
 
         region_bounds = np.ascontiguousarray(self._regions[r_idx, 1:3], np.int32)
 
-        ref_c_idx = self._ref.c_map.contigs.index(contig_name)
-        c_s = int(self._ref.offsets[ref_c_idx])
-        c_e = int(self._ref.offsets[ref_c_idx + 1])
-        ref_bytes = np.ascontiguousarray(self._ref.reference[c_s:c_e], np.uint8)
-        ref_offsets = np.array([0, c_e - c_s], dtype=np.int64)
+        # `contig_idx` already indexes `self._contigs`, and `Reference.from_path`
+        # (called with `self._contigs` in `__init__`) builds `offsets` in that same
+        # order -- so `contig_idx` indexes `self._ref` directly, no name lookup
+        # needed. Previously this did `self._ref.c_map.contigs.index(contig_name)`,
+        # which is both redundant (same answer as `contig_idx`) AND a bug:
+        # `Reference.from_path` normalizes contig names to the FASTA's naming style
+        # (UCSC "chr1" vs Ensembl "1"), so a store using one style paired with a
+        # FASTA in the other style made `contig_name` absent from
+        # `c_map.contigs`, raising `ValueError`. See `Reference.contig_slice`'s
+        # docstring and `Svar2Haps._ref_for_contig` for the shared convention.
+        ref_bytes, ref_offsets = self._ref.contig_slice(contig_idx)
 
         # `s_idx` is a PUBLIC index (sorted-name order, matching `gvl.Dataset`);
         # the store's genotype CSR is laid out in native (VCF column) order, so

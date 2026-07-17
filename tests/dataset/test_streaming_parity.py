@@ -141,3 +141,44 @@ def test_streamingdataset_is_public_and_documented():
     # tests/dataset/test_streaming_parity.py -> repo root is 2 parents up.
     api_md = Path(__file__).parents[2] / "docs" / "source" / "api.md"
     assert "StreamingDataset" in api_md.read_text()
+
+
+def test_streaming_handles_mixed_contig_naming_style(svar1_mixed_naming_fixture):
+    """Regression test (final-review Finding 1): `_Svar1Backend.reconstruct_window`
+    used to look up `self._ref.c_map.contigs.index(contig_name)`, where
+    `contig_name` is the STORE's (unnormalized) contig name. But `Reference.from_path`
+    normalizes its `c_map` to the FASTA's own naming style (UCSC `chr1` vs Ensembl
+    `1`), so pairing a UCSC-style `.svar` store with an Ensembl-style FASTA (or vice
+    versa) made `contig_name` absent from `c_map.contigs`, raising a bare
+    `ValueError: 'chr1' is not in list` with no context -- even though
+    `Reference.from_path` explicitly documents this pairing as supported, and the
+    written path (`gvl.write` + `Dataset.open`) already handles it correctly.
+
+    `svar1_mixed_naming_fixture` pairs a UCSC-style `.svar` store (`chr1`) with an
+    Ensembl-style FASTA (`1`, no prefix) to reproduce the pairing; the comparison
+    `gvl.Dataset` is opened with a same-sequence UCSC-style FASTA (`chr1`) to prove
+    streamed output is still byte-identical despite the naming mismatch.
+    """
+    f = svar1_mixed_naming_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_ensembl_path, variants=f.svar_path
+    ).with_seqs("haplotypes")
+    written = gvl.Dataset.open(
+        f.dataset_path, reference=f.reference_chr_path
+    ).with_seqs("haplotypes")
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            streamed = data[i]
+            expected = written[r, s]
+            for h in range(sds.ploidy):
+                np.testing.assert_array_equal(
+                    np.asarray(streamed[h]), np.asarray(expected[h])
+                )
+            seen.add((r, s))
+
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
