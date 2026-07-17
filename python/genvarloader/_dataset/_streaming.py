@@ -110,7 +110,7 @@ class StreamingDataset:
     # The split read/generate backend (real SVAR1 path). When set, _iter_batches
     # generates per batch (output bounded by batch_size). The injected
     # `_reconstruct_window` remains a whole-window TEST seam used when `_backend` is None.
-    _backend: object = None
+    _backend: _Svar1Backend | None = None
 
     def __init__(
         self,
@@ -442,9 +442,10 @@ class _Svar1Backend:
     """Streaming SVAR1 read backend: reconstructs haplotypes for a batch of
     ``(r_idx, s_idx)`` directly from a live ``.svar`` store, with no on-disk
     gvl dataset. Wraps `Svar1Store`/`svar1_read_window`/`svar1_generate_batch`
-    (Rust) -- an instance is meant to be passed as
-    `StreamingDataset(_backend=...)` so `_iter_batches` can read a window's
-    offsets once (`read_window`) and generate each batch slice separately
+    (Rust) -- an instance is assigned to `StreamingDataset._backend`
+    internally by the `.svar` construction branch (not a public `__init__`
+    kwarg) so `_iter_batches` can read a window's offsets once
+    (`read_window`) and generate each batch slice separately
     (`generate_batch`), bounding peak output by `batch_size` (issue #284).
 
     The static variant table (positions/ILEN/ALT alleles, GLOBAL across

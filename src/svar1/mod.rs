@@ -11,13 +11,12 @@ pub mod store;
 ///
 /// A window is CARTESIAN: `n_regions x n_samples x ploidy`. `o_starts`/`o_stops` are
 /// `n_regions * n_samples * ploidy` long in C-order `(region, sample, ploid)` —
-/// absolute indices into `variant_idxs`. `geno_offset_idx` is
-/// `(n_regions * n_samples, ploidy)` and maps batch row `bi = ri * n_samples + si`
-/// and hap `p` to CSR row `bi * ploidy + p`.
+/// absolute indices into `variant_idxs`. The batch-row -> CSR-row map is the identity
+/// `bi * ploidy + p`, so callers (e.g. `svar1_generate_batch`) rebuild it locally over
+/// just their batch slice rather than carrying a window-scale copy here.
 pub struct Svar1Window {
     pub o_starts: Vec<i64>,
     pub o_stops: Vec<i64>,
-    pub geno_offset_idx: ndarray::Array2<i64>,
 }
 
 #[cfg(test)]

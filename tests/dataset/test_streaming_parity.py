@@ -166,7 +166,7 @@ def test_streamingdataset_is_public_and_documented():
 
 
 def test_streaming_handles_mixed_contig_naming_style(svar1_mixed_naming_fixture):
-    """Regression test (final-review Finding 1): `_Svar1Backend.reconstruct_window`
+    """Regression test (final-review Finding 1): `_Svar1Backend.generate_batch`
     used to look up `self._ref.c_map.contigs.index(contig_name)`, where
     `contig_name` is the STORE's (unnormalized) contig name. But `Reference.from_path`
     normalizes its `c_map` to the FASTA's own naming style (UCSC `chr1` vs Ensembl
