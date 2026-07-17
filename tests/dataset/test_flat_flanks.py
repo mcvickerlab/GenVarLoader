@@ -511,6 +511,35 @@ def test_varwindowopt_alphabet_accepts_str_bytes_and_nucleotidealphabet():
     np.testing.assert_array_equal(lut_bytes, lut_alpha)
 
 
+def test_build_token_lut_accepts_str_bytes_and_nucleotidealphabet():
+    """``build_token_lut`` normalizes str / bytes / NucleotideAlphabet identically.
+
+    Regression for #292: the ``with_settings(token_alphabet=...)`` ride-along path
+    forwards the alphabet straight to ``build_token_lut``, so a ``str`` (e.g. the
+    documented ``sp.DNA.alphabet``) previously crashed with ``IndexError``.
+    """
+    import seqpro as sp
+
+    lut_bytes, dt_bytes = build_token_lut(b"ACGT", 4)
+    lut_str, dt_str = build_token_lut("ACGT", 4)
+    lut_alpha, dt_alpha = build_token_lut(sp.alphabets.DNA, 4)
+
+    np.testing.assert_array_equal(lut_bytes, lut_str)
+    np.testing.assert_array_equal(lut_bytes, lut_alpha)
+    assert dt_bytes == dt_str == dt_alpha
+
+
+def test_normalize_token_alphabet_helper():
+    """The shared normalization helper maps every accepted type to ``bytes``."""
+    import seqpro as sp
+
+    from genvarloader._dataset._flat_variants import _normalize_token_alphabet
+
+    assert _normalize_token_alphabet(b"ACGT") == b"ACGT"
+    assert _normalize_token_alphabet("ACGT") == b"ACGT"
+    assert _normalize_token_alphabet(sp.alphabets.DNA) == b"ACGT"
+
+
 def test_public_exports():
     import genvarloader as gvl
 
