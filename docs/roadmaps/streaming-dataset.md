@@ -67,7 +67,7 @@ only** (no map-style random access).
 | Spec | Scope | Status |
 |---|---|---|
 | `docs/superpowers/specs/2026-07-15-streaming-dataset-vcf-pgen-svar1-design.md` | Shared framework + VCF/PGEN/SVAR1 backend | ✅ approved (⚠️ partly superseded — see below) |
-| `docs/superpowers/specs/2026-07-16-streaming-svar1-window-engine-design.md` | SVAR1 window reads (ungated genoray `svar1_query`) + double-buffer engine + `to_iter` surface. **Supersedes spec A**'s SVAR1-producer, decode-amortization, slot-recycling, release-gate, and `IterableDataset` claims. | 🚧 pending review — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) |
+| `docs/superpowers/specs/2026-07-16-streaming-svar1-window-engine-design.md` | SVAR1 window reads (ungated genoray `svar1_query`) + double-buffer engine + `to_iter` surface. **Supersedes spec A**'s SVAR1-producer, decode-amortization, slot-recycling, release-gate, and `IterableDataset` claims. | ✅ approved — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275), PR [#282](https://github.com/mcvickerlab/GenVarLoader/pull/282) |
 | _TBD_ — issue [#278](https://github.com/mcvickerlab/GenVarLoader/issues/278) | SVAR2 backend (SVAR2-style buffer + read-bound kernels) behind the framework | ⬜ |
 | _TBD_ — issue [#279](https://github.com/mcvickerlab/GenVarLoader/issues/279) | Interval (BigWigs/Table) streaming + variant+interval mixed scheduler | ⬜ |
 
@@ -116,7 +116,8 @@ only** (no map-style random access).
   conversion-gated `Svar1RecordSource` — a *conversion-pipeline record producer*, not a query API.
   Stage A is nearly free (`search::overlap_range` already ports Python's `var_ranges`; nobody
   wired it to SVAR1); Stage B is two `partition_point`s per hap. Consumed via a `rev` bump — **not
-  a release gate** (see Development Notes in CLAUDE.md). _Plan 2, chunk 1_
+  a release gate** (see Development Notes in CLAUDE.md). _Plan 2, chunk 1_ —
+  genoray issue [#123](https://github.com/d-laub/genoray/issues/123)
 - ⬜ **SVAR1 window reads + double-buffer engine + `to_iter` surface** — crossbeam
   producer/consumer, generic `StreamBackend`. _Plan 2_ —
   issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275)
@@ -150,7 +151,7 @@ a release gate: merge it to genoray `main`, then bump gvl's `rev`. Start there.
 | Wave | Work | Parallel? |
 |---|---|---|
 | **Now** | Spec B ([#278](https://github.com/mcvickerlab/GenVarLoader/issues/278)), spec C ([#279](https://github.com/mcvickerlab/GenVarLoader/issues/279)) — **writing only** | ✅ docs-only, no code conflict with #275 |
-| **0** | **genoray: ungated `svar1_query`** (+ merge to genoray `main`, bump gvl's `rev`) | ⛔ cross-repo prerequisite — gates #275 |
+| **0** | **genoray: ungated `svar1_query`** ([genoray#123](https://github.com/d-laub/genoray/issues/123)) → merge to genoray `main` → bump gvl's `rev` | ⛔ cross-repo prerequisite — gates #275 |
 | **1** | [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) SVAR1 window reads + double-buffer engine + `to_iter` | ⛔ serial — blocks everything below |
 | **2** | [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) VCF/PGEN · [#278](https://github.com/mcvickerlab/GenVarLoader/issues/278) SVAR2 impl · [#279](https://github.com/mcvickerlab/GenVarLoader/issues/279) interval impl | ✅ one backend each, behind the trait |
 | **3** | [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) output-mode breadth | ✅ orthogonal to backends (kernel/output dispatch, not buffers) |
