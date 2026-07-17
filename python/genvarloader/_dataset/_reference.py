@@ -67,12 +67,19 @@ class Reference:
             List of contig names to load. If None, all contigs in the FASTA file are loaded.
             Can be either UCSC or Ensembl style (i.e. with or without the "chr" prefix) and
             will be handled appropriately to match the underlying FASTA.
+
+            .. note::
+                Reordering or subsetting contigs requires ``in_memory=True``. With
+                ``in_memory=False`` the memory-mapped reference stays in FASTA order, so
+                ``contigs`` must be None or exactly the full FASTA contig order; anything
+                else raises :class:`ValueError`.
         in_memory
             Whether to load the reference genome into memory. If True, the reference genome
             is loaded into memory. If False, the reference genome is read on-demand from a
             memory mapped array. This will still be much faster than reading from FASTA but
             slower than keeping it in memory. This is useful if you need to work with many
-            reference genomes or have very limited RAM.
+            reference genomes or have very limited RAM. Because the memory map preserves
+            FASTA order, ``in_memory=False`` cannot reorder or subset ``contigs`` (see above).
         """
         path = Path(fasta)
         meta, data_path = ensure_cache(fasta)
@@ -106,6 +113,15 @@ class Reference:
                 offset += o_e - o_s
             offsets = lengths_to_offsets(np.array([full_contigs[c] for c in contigs]))
         else:
+            if contigs != list(full_contigs):
+                raise ValueError(
+                    "in_memory=False cannot reorder or subset contigs: the"
+                    " memory-mapped reference stays in FASTA order, so a"
+                    " reordered/subset `contigs` would index the wrong contig's"
+                    " bytes. Pass in_memory=True to materialize the requested"
+                    " contig order in memory, or omit `contigs` to keep the full"
+                    " FASTA."
+                )
             reference = ref_mmap
 
         return cls(path, reference, offsets, pad_char, c_map)
