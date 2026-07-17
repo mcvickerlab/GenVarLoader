@@ -375,7 +375,7 @@ sds = gvl.StreamingDataset(
     "rois.bed", reference="ref.fa", variants="normed.svar"
 ).with_seqs("haplotypes")
 
-for data, region_idxs, sample_idxs in sds.to_dataloader(batch_size=32):
+for data, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
     ...  # data: Ragged[S1], shape (batch, ploidy, ~length)
 ```
 
@@ -384,11 +384,11 @@ for data, region_idxs, sample_idxs in sds.to_dataloader(batch_size=32):
 - `with_seqs("haplotypes")` only — no `"reference"`/`"annotated"`/`"variants"` output modes.
 - `jitter=0` only (the default); non-zero raises `NotImplementedError`.
 - Ragged output only (no `with_len`/`with_output_format("flat")`).
-- **Iterable-only, no random access** — `sds[r, s]` and `sds.to_torch_dataset()` both raise `TypeError`. Use `sds.to_dataloader(...)`.
+- **Iterable-only, no random access** — `sds[r, s]` raises `TypeError`. `to_iter(batch_size=...)` is the one entry point; `to_torch_dataset()` and `to_dataloader()` are thin wrappers over it. There is no `__iter__`.
 - `to_dataloader(num_workers=0)` only — `num_workers > 0` raises `ValueError` (worker-process sharding is a later plan).
 - Same variant preconditions as `gvl.write`: normalized, bi-allelic, non-symbolic, non-breakend, left-aligned/atomized — **validated (raises `ValueError`), not fixed up**.
 
-**Iteration order:** region-major, batched so a single call never spans more than one contig (`_Svar1Backend.reconstruct_window` requires single-contig batches). `to_dataloader(..., return_indices=True)` (the default) yields `(data, region_idxs, sample_idxs)`; the indices are in the **caller's original BED-row order** (not sorted-storage order), matching `gvl.Dataset[r, s]` indexing.
+**Iteration order:** region-major, batched so a single call never spans more than one contig (`_Svar1Backend.reconstruct_window` requires single-contig batches). `to_iter(..., return_indices=True)` (the default) yields `(data, region_idxs, sample_idxs)`; the indices are in the **caller's original BED-row order** (not sorted-storage order), matching `gvl.Dataset[r, s]` indexing.
 
 **Tradeoff vs a written dataset:** zero preprocessing and zero disk footprint, but slower per-epoch — each window re-reads the live `.svar` store rather than hitting a pre-indexed on-disk dataset. Prefer a written `gvl.Dataset` for repeated-epoch training; reach for `StreamingDataset` for one-shot/inference workloads or when you can't afford (or don't want) the `gvl.write()` step.
 
@@ -485,7 +485,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - `dummy_variant` padding applies to **both `"variants"` and `"variant-windows"`** outputs. Setting `dummy_variant=<DummyVariant>` and then indexing with any other kind (`"haplotypes"`, `"annotated"`, `"reference"`, or no seqs) raises `ValueError`. For token fields (`flank_tokens`, `ref_window`/`alt_window`, bare `ref`/`alt`), the dummy fill is all-`unknown_token` — the `DummyVariant.ref`/`.alt` bytes only set the dummy allele's byte-length, not the token value. `dummy_variant=False` with an unsupported output kind is silently ignored.
 - A non-`b"N"` `DummyVariant.alt` (or `.ref`) **is reverse-complemented** on negative-strand regions, exactly like a real variant allele. The default `b"N"` is rc-invariant; use it if you want a strand-neutral sentinel.
 - `unphased_union=True` + `with_seqs("haplotypes")` / `with_seqs("annotated")` raises — `unphased_union` only applies to `"variants"` / `"variant-windows"` output.
-- **`gvl.StreamingDataset` is iterable-only and `.svar`-only.** `sds[r, s]` and `sds.to_torch_dataset()` raise `TypeError` — use `sds.to_dataloader(...)`. VCF/PGEN/`.svar2` variant sources, non-`"haplotypes"` `with_seqs` kinds, `jitter != 0`, and `num_workers > 0` all raise `NotImplementedError`/`ValueError`. See "`gvl.StreamingDataset` — write-free streaming (SVAR1 only)" above.
+- **`gvl.StreamingDataset` is iterable-only and `.svar`-only.** `sds[r, s]` raises `TypeError` — use `sds.to_iter(...)` (or `to_dataloader(...)` for torch); there is no `__iter__`. VCF/PGEN/`.svar2` variant sources, non-`"haplotypes"` `with_seqs` kinds, `jitter != 0`, and `num_workers > 0` all raise `NotImplementedError`/`ValueError`. See "`gvl.StreamingDataset` — write-free streaming (SVAR1 only)" above.
 
 ## Maintaining this skill
 

@@ -183,9 +183,13 @@ sds = gvl.StreamingDataset(
     "rois.bed", reference="ref.fa", variants="normed.svar"
 ).with_seqs("haplotypes")
 
-for data, region_idxs, sample_idxs in sds.to_dataloader(batch_size=32):
+for data, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
     ...  # data: Ragged[S1], shape (batch, ploidy, ~length)
 ```
+
+`to_iter` is the one iteration entry point; `to_torch_dataset()` and `to_dataloader()`
+are thin wrappers over it. There is no `__iter__` and no random access — `sds[r, s]`
+raises `TypeError`, because iteration order is fixed by the data layout.
 
 Haplotype output is byte-identical to `gvl.write(...)` followed by `Dataset.open(...)[r, s]`
 (at `jitter=0`). It trades that write step for a slower per-epoch read, since every window
@@ -196,5 +200,5 @@ rather not pay for the write.
 `StreamingDataset` is currently more limited than `Dataset`: `.svar` variant sources only
 (VCF/PGEN/`.svar2` raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0`
 only, ragged output only, and **iterable-only** — `sds[r, s]` raises `TypeError`; use
-`sds.to_dataloader(...)`. See the `genvarloader` skill for the full list of what's not yet
-wired.
+`sds.to_iter(...)` (or `to_dataloader(...)` for torch). See the `genvarloader` skill for the
+full list of what's not yet wired.

@@ -48,7 +48,6 @@ class StreamingDataset:
     n_samples: int
     ploidy: int
     _reconstruct_window: Callable[[NDArray[np.intp], NDArray[np.intp]], object]
-    _batch_size: int = 1
     # Regions per read window. Window >> batch is the whole point: one Rust call per
     # window amortizes the search + page faults across many batches. 64 is a
     # placeholder default -- Task 4 measures and replaces it.
@@ -140,7 +139,6 @@ class StreamingDataset:
         object.__setattr__(self, "n_samples", int(n_samples))
         object.__setattr__(self, "ploidy", int(ploidy))
         object.__setattr__(self, "_reconstruct_window", _reconstruct_window)
-        object.__setattr__(self, "_batch_size", 1)
         object.__setattr__(self, "_window_regions", 64)
 
     @property
@@ -149,13 +147,6 @@ class StreamingDataset:
 
     def __len__(self) -> int:
         return len(self._regions) * self.n_samples
-
-    def _with_batch_size(self, batch_size: int) -> "StreamingDataset":
-        # dataclasses.replace() would re-invoke __init__ (which doesn't accept
-        # every field as a kwarg), so shallow-copy and mutate the frozen instance.
-        new = copy.copy(self)
-        object.__setattr__(new, "_batch_size", int(batch_size))
-        return new
 
     def _plan(self) -> Iterator[tuple[NDArray[np.intp], NDArray[np.intp]]]:
         """Yield one WINDOW per step: (region_idxs, sample_idxs), cartesian.
@@ -198,8 +189,49 @@ class StreamingDataset:
                 hi = min(lo + batch_size, n_rows)
                 yield data[lo:hi], flat_r[lo:hi], flat_s[lo:hi]
 
-    def __iter__(self) -> Iterator[tuple]:
-        yield from self._iter_batches(self._batch_size)
+    def to_iter(
+        self, batch_size: int = 1, return_indices: bool = True
+    ) -> Iterator[tuple]:
+        """Iterate haplotype batches. **This is the one iteration entry point** --
+        :meth:`to_torch_dataset` and :meth:`to_dataloader` are thin wrappers over it,
+        and there is no ``__iter__`` (one and only one obvious way).
+
+        Iteration is a fixed cartesian sweep of BED regions x samples in a
+        data-layout-optimal order (region-major for variants). There is no random
+        access and no ad-hoc query: ``sds[r, s]`` raises :class:`TypeError`.
+
+        Parameters
+        ----------
+        batch_size
+            Number of ``(region, sample)`` cells per yielded batch. Batches are slices
+            of a much larger read *window*; ``batch_size`` does not affect I/O
+            granularity.
+        return_indices
+            If ``True`` (the default), yield ``(data, region_idxs, sample_idxs)``;
+            if ``False``, yield ``data`` alone. Indices are in the caller's **original
+            BED-row order** (not sorted-storage order), matching ``gvl.Dataset[r, s]``.
+        """
+        for data, r_idx, s_idx in self._iter_batches(batch_size):
+            if return_indices:
+                yield data, r_idx, s_idx
+            else:
+                yield data
+
+    def n_batches(self, batch_size: int) -> int:
+        """Number of batches :meth:`to_iter` will yield at ``batch_size``.
+
+        NOT ``ceil(len(self) / batch_size)``: the plan batches *within* each window,
+        so every window's last batch may be partial. Counting the plan is cheap (it
+        only materializes small index arrays).
+        """
+        return sum(1 for _ in self._iter_batch_spans(batch_size))
+
+    def _iter_batch_spans(self, batch_size: int) -> Iterator[int]:
+        """Batch sizes the plan will yield, without reconstructing anything."""
+        for r_idx, s_idx in self._plan():
+            n_rows = len(r_idx) * len(s_idx)
+            for lo in range(0, n_rows, batch_size):
+                yield min(lo + batch_size, n_rows) - lo
 
     def with_seqs(self, kind: Literal["haplotypes"]) -> "StreamingDataset":
         """Select the sequence output kind. Only ``"haplotypes"`` is supported
@@ -215,16 +247,30 @@ class StreamingDataset:
 
     def __getitem__(self, idx) -> None:
         raise TypeError(
-            "StreamingDataset is iterable-only; use to_dataloader() instead of "
-            "map-style indexing."
+            "StreamingDataset is iterable-only; use to_iter() instead of map-style "
+            "indexing. Iteration order is fixed by the data layout, so there is no "
+            "random access."
         )
 
-    def to_torch_dataset(self, *args, **kwargs) -> None:
-        raise TypeError(
-            "StreamingDataset is iterable-only; use to_dataloader() instead of "
-            "to_torch_dataset() (there is no random-access torch Dataset for a "
-            "streaming source)."
-        )
+    @requires_torch
+    def to_torch_dataset(
+        self, batch_size: int = 1, return_indices: bool = True
+    ) -> "td.IterableDataset":
+        """Wrap :meth:`to_iter` in a torch :class:`IterableDataset`. Thin wrapper --
+        all the work is in ``to_iter``. Named to match
+        :meth:`Dataset.to_torch_dataset` (same concept, same name)."""
+        import torch.utils.data as td
+
+        sds = self
+
+        class _StreamingTorchDataset(td.IterableDataset):
+            def __iter__(self):
+                return sds.to_iter(batch_size, return_indices)
+
+            def __len__(self) -> int:
+                return sds.n_batches(batch_size)
+
+        return _StreamingTorchDataset()
 
     @requires_torch
     def to_dataloader(
@@ -242,38 +288,30 @@ class StreamingDataset:
         persistent_workers: bool = False,
         pin_memory_device: str = "",
     ) -> "td.DataLoader":
-        """Wrap this ``StreamingDataset`` in a PyTorch
-        :class:`DataLoader <torch.utils.data.DataLoader>`. Requires PyTorch to
-        be installed.
+        """Wrap :meth:`to_torch_dataset` in a torch
+        :class:`DataLoader <torch.utils.data.DataLoader>`. Thin wrapper.
 
         Parameters
         ----------
-        batch_size
-            Number of ``(region, sample)`` cells per yielded batch.
         num_workers
-            Must be 0. ``StreamingDataset`` iteration is itself the
-            concurrency strategy (mirrors :meth:`Dataset.to_dataloader`'s
-            ``mode="buffered"``/``"double_buffered"`` restriction); worker-process
-            sharding of the plan is a later plan.
-        return_indices
-            If ``True`` (the default), yield ``(data, region_idxs, sample_idxs)``
-            tuples; if ``False``, yield ``data`` alone.
+            Must be 0. ``StreamingDataset``'s own engine IS the concurrency strategy
+            (mirrors :meth:`Dataset.to_dataloader`'s ``buffered``/``double_buffered``
+            restriction); worker-process sharding of the window plan is a later plan.
         """
         if num_workers > 0:
             raise ValueError(
-                "StreamingDataset.to_dataloader: num_workers>0 is not "
-                "implemented yet; the loader IS the concurrency strategy for "
+                "StreamingDataset.to_dataloader: num_workers>0 is not implemented "
+                "yet; the streaming engine IS the concurrency strategy for "
                 "StreamingDataset (mirrors gvl.Dataset.to_dataloader's "
-                "buffered/double_buffered modes, which impose the same "
-                "restriction). Use num_workers=0."
+                "buffered/double_buffered modes, which impose the same restriction). "
+                "Use num_workers=0."
             )
 
         import torch.utils.data as td
 
-        inner = _make_streaming_torch_dataset(self, batch_size, return_indices)
         return td.DataLoader(
-            inner,
-            batch_size=None,
+            self.to_torch_dataset(batch_size, return_indices),
+            batch_size=None,  # the dataset yields pre-assembled batches
             num_workers=num_workers,
             collate_fn=collate_fn,
             pin_memory=pin_memory,
@@ -284,47 +322,6 @@ class StreamingDataset:
             persistent_workers=persistent_workers,
             pin_memory_device=pin_memory_device,
         )
-
-
-def _make_streaming_torch_dataset(
-    dataset: StreamingDataset, batch_size: int, return_indices: bool
-) -> "td.IterableDataset":
-    """IterableDataset wrapper for `StreamingDataset`, mirroring the
-    `make_buffered_dataset` pattern in `_buffered_loader.py`: `__iter__`
-    drives `dataset`'s own iteration (batched), and `return_indices` toggles
-    whether index arrays ride along -- kept out of `StreamingDataset.__iter__`
-    itself so `list(sds)` (used by Tasks 2/4's tests) keeps yielding 3-tuples
-    regardless of how a DataLoader wraps it.
-    """
-    import torch.utils.data as td
-
-    batched = dataset._with_batch_size(batch_size)
-
-    class _StreamingTorchDataset(td.IterableDataset):
-        def __iter__(self):
-            for data, r_idx, s_idx in batched:
-                if return_indices:
-                    yield data, r_idx, s_idx
-                else:
-                    yield data
-
-        def __len__(self) -> int:
-            # NOT `ceil(len(dataset) / batch_size)`: `_plan` yields one WINDOW per
-            # step (region_idxs, all samples), and `_iter_batches` slices each
-            # window's cells into batches independently, so every window's last
-            # batch may be partial. The true count is
-            # `sum(ceil(window_cells / batch_size))`. Compute this from `_plan()`
-            # directly (it only materializes small index arrays -- no
-            # reconstruction) rather than draining `_iter_batches`, so `len(dl)` --
-            # which DataLoader forwards here -- matches the batches actually
-            # yielded without redoing every read just to count them.
-            total = 0
-            for r_idx, s_idx in batched._plan():
-                n_rows = len(r_idx) * len(s_idx)
-                total += -(-n_rows // batch_size)  # ceil division
-            return total
-
-    return _StreamingTorchDataset()
 
 
 class _Svar1Backend:

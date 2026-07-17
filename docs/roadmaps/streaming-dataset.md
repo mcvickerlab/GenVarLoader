@@ -76,7 +76,7 @@ only** (no map-style random access).
 | Plan | Scope | Status |
 |---|---|---|
 | `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — PR [#274](https://github.com/mcvickerlab/GenVarLoader/pull/274) |
-| _TBD (Plan 2)_ — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Task 2 (read path) done; double-buffer engine + `to_iter` remain |
+| _TBD (Plan 2)_ — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Task 2 (read path) + Task 3 (`to_iter` surface) done; double-buffer engine remains |
 | _TBD (Plan 3/4)_ — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend | ⬜ |
 | _TBD (Plan 5)_ — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
 
@@ -131,8 +131,15 @@ only** (no map-style random access).
     `StreamingDataset._plan`/`_iter_batches` slice batches out of a window instead of driving
     pairwise reads. Byte-identical parity verified
     (`tests/dataset/test_streaming_parity.py::test_streaming_matches_written_all_cells`).
-  - ⬜ Double-buffer engine + `to_iter` surface (crossbeam producer/consumer) — not yet started;
-    Task 2 only replaced the synchronous read path.
+  - ✅ **Task 3 (`to_iter` surface): one iteration entry point.** `StreamingDataset` is now a
+    plain frozen dataclass (no `__iter__`); `to_iter(batch_size, return_indices)` is the sole
+    traversal method, with `n_batches`/`_iter_batch_spans` counting it without reconstructing.
+    `to_torch_dataset()` no longer raises -- it wraps `to_iter` in an `IterableDataset` (matching
+    `Dataset.to_torch_dataset`'s name/concept); `to_dataloader()` wraps `to_torch_dataset`.
+    `__getitem__` still raises `TypeError` (iterable-only). `_batch_size`/`_with_batch_size`
+    deleted -- `batch_size` is a `to_iter` argument, not instance state.
+  - ⬜ Double-buffer engine (crossbeam producer/consumer) — not yet started; `to_iter` still
+    drives the synchronous `_iter_batches`/`_plan` read path Task 2 built.
   - ⚠️ **Inherited perf/scale debt from the walking skeleton — DELETED, not fixed, by Task 2.**
     All of it was downstream of the one wrong dependency above, so the rewrite removed it rather
     than optimizing it. (a) `Svar1RecordSource::new` was **O(all CSR entries)** — it eagerly

@@ -116,13 +116,13 @@ sds = gvl.StreamingDataset(
     "rois.bed", reference="ref.fa", variants="normed.svar"
 ).with_seqs("haplotypes")
 
-for data, region_idxs, sample_idxs in sds.to_dataloader(batch_size=32):
+for data, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
     ...
 ```
 
 Haplotype output is byte-identical to writing a dataset and indexing it (`gvl.write(...)` + `Dataset.open(...)[r, s]`, at `jitter=0`) — you're trading the write step for a slower per-epoch read, since `StreamingDataset` re-reads the live store on every window instead of hitting a pre-indexed on-disk dataset. It's a good fit for one-shot inference or when you can't afford (or don't want) the preprocessing step; for repeated-epoch training, a written [`Dataset`](api.md#genvarloader.Dataset) is still faster.
 
-`StreamingDataset` is currently narrower than `Dataset`: `.svar` variant sources only (VCF, PGEN, and `.svar2` raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0` only, ragged output only, and it's **iterable-only** — `sds[r, s]` and `sds.to_torch_dataset()` raise `TypeError`, use `sds.to_dataloader(...)` instead. Iteration is region-major, batched so each read stays within one contig; `to_dataloader(..., return_indices=True)` (the default) rides along `(region_idxs, sample_idxs)` in your original BED-row order. See the `genvarloader` skill for the full scope.
+`StreamingDataset` is currently narrower than `Dataset`: `.svar` variant sources only (VCF, PGEN, and `.svar2` raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0` only, ragged output only, and it's **iterable-only** — `sds[r, s]` raises `TypeError` because iteration order is fixed by the data layout. `sds.to_iter(...)` is the one entry point; `to_torch_dataset()` and `to_dataloader()` are thin wrappers over it. Iteration is region-major, read one window at a time so each read stays within one contig; `to_iter(..., return_indices=True)` (the default) rides along `(region_idxs, sample_idxs)` in your original BED-row order. See the `genvarloader` skill for the full scope.
 
 ## Why aren't the methods `with_len()`, `with_seqs()`, etc. combined into `with_settings()`?
 

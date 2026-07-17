@@ -30,9 +30,11 @@ def _assert_streamed_matches_written(backend, bed, contigs, written) -> None:
         n_samples=backend.n_samples,
         ploidy=backend.ploidy,
         _reconstruct_window=backend.reconstruct_window,
-    )._with_batch_size(backend.n_samples)
+    )
 
-    batches = list(sds)  # one region, all samples in one batch
+    batches = list(
+        sds.to_iter(batch_size=backend.n_samples)
+    )  # one region, all samples in one batch
     assert len(batches) == 1
     data, r_idx, s_idx = batches[0]
     assert len(r_idx) == backend.n_samples

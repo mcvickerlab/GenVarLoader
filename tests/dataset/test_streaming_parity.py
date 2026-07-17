@@ -70,10 +70,66 @@ def test_no_map_style_access(svar1_multicontig_fixture):
     f = svar1_multicontig_fixture
     sds = gvl.StreamingDataset(f.bed, reference=f.reference_path, variants=f.svar_path)
 
-    with pytest.raises(TypeError):
-        sds.to_torch_dataset()
+    # to_torch_dataset() no longer raises -- it returns an IterableDataset wrapping
+    # to_iter(). Only random access is refused.
     with pytest.raises(TypeError):
         _ = sds[0, 0]
+
+
+def test_to_iter_is_the_one_entry_point(svar1_multicontig_fixture):
+    """`to_iter` is the single iteration API. `__iter__` is REMOVED -- one and only
+    one obvious way to do it; `to_torch_dataset`/`to_dataloader` wrap `to_iter`."""
+    f = svar1_multicontig_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path
+    ).with_seqs("haplotypes")
+
+    assert not hasattr(sds, "__iter__"), "__iter__ must be removed; use to_iter()"
+    with pytest.raises(TypeError):
+        next(iter(sds))
+
+    batches = list(sds.to_iter(batch_size=4))
+    assert len(batches) > 0
+    data, r_idx, s_idx = batches[0]
+    assert len(r_idx) == len(s_idx)
+
+
+def test_to_iter_return_indices_false_yields_data_only(svar1_multicontig_fixture):
+    f = svar1_multicontig_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path
+    ).with_seqs("haplotypes")
+    first = next(iter(sds.to_iter(batch_size=2, return_indices=False)))
+    assert not isinstance(first, tuple), "return_indices=False must yield data alone"
+
+
+def test_to_torch_dataset_wraps_to_iter(svar1_multicontig_fixture):
+    """`to_torch_dataset` now RETURNS an IterableDataset (it used to raise TypeError,
+    because StreamingDataset itself was one). Same name as Dataset.to_torch_dataset."""
+    import torch.utils.data as td
+
+    f = svar1_multicontig_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path
+    ).with_seqs("haplotypes")
+    tds = sds.to_torch_dataset(batch_size=4)
+    assert isinstance(tds, td.IterableDataset)
+    assert len(list(tds)) == len(list(sds.to_iter(batch_size=4)))
+
+
+def test_to_iter_covers_every_cell_exactly_once(svar1_multicontig_fixture):
+    """Window/batch separation must not drop or duplicate cells."""
+    f = svar1_multicontig_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path
+    ).with_seqs("haplotypes")
+    seen = []
+    for _data, r_idx, s_idx in sds.to_iter(batch_size=3):
+        seen.extend(zip(r_idx.tolist(), s_idx.tolist()))
+    n_regions, n_samples = sds.shape
+    assert sorted(seen) == sorted(
+        (r, s) for r in range(n_regions) for s in range(n_samples)
+    )
 
 
 def test_streamingdataset_is_public_and_documented():
