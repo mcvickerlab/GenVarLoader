@@ -142,12 +142,29 @@ def test_entries_touched_is_flat_across_batch_size(scale_fixture):
     )
 
 
-def test_peak_rss_is_flat_in_cohort_size(tmp_path):
-    """THE #284 GATE. At fixed batch_size, peak RSS growth across a full sweep must NOT
-    scale with the number of samples: per-batch generation caps output at batch_size,
-    and the offsets buffer is max_mem-bounded. Whole-window generation (the old path)
-    would grow output ~linearly in n_samples and blow this."""
-    import resource
+def test_generate_batch_output_is_flat_in_cohort_size(tmp_path):
+    """THE #284 GATE, as a DETERMINISTIC counter -- not `ru_maxrss` (an earlier version
+    of this test used a `ru_maxrss` before/after delta across `to_iter` sweeps; it
+    measured 0B at both 50 and 400 samples, even up to 20000 samples / batch_size=4096
+    in exploratory testing, because the tiny fixture's output never crosses a page
+    boundary. That guard was BLIND -- it could not fail on the defect it named -- so it
+    was replaced with this one. See the module docstring for the same lesson learned
+    about the prior `ru_maxrss` scale guard.)
+
+    `_Svar1Backend.generate_batch(r_idx, s_idx, o_starts, o_stops, lo, hi)` allocates
+    its output for exactly the `hi - lo` rows sliced IN -- the batch rows are chosen
+    before generation, not after. So the returned `Ragged`'s total byte count IS the
+    backend's internal peak output allocation for that call. At a fixed `batch_size`,
+    that byte count depends only on the batch's rows (region lengths x ploidy), never
+    on how many samples the *window* covers.
+
+    A whole-window regression (the #284 defect) would instead generate output for
+    every sample in the window before slicing a batch out of it, so the returned
+    array's size (or the backend's peak allocation) would scale with `len(s_idx)` --
+    i.e. with the cohort size. This test proves the window covers the full cohort
+    (`len(s_idx) == n_samples`) while the generated batch's byte count stays IDENTICAL
+    between a 50-sample and a 400-sample cohort.
+    """
     import subprocess
 
     import numpy as np
@@ -172,6 +189,9 @@ def test_peak_rss_is_flat_in_cohort_size(tmp_path):
         ]
         pos = np.sort(rng.choice(np.arange(2, 3998), 200, replace=False))
         for p in pos:
+            # SNP-only (REF=A/ALT=G, no indels): every haplotype's length equals the
+            # region's length regardless of genotype, so batch output bytes are
+            # deterministic across cohorts of different size.
             gts = "\t".join(
                 f"{rng.integers(0, 2)}|{rng.integers(0, 2)}" for _ in range(n_samples)
             )
@@ -192,7 +212,7 @@ def test_peak_rss_is_flat_in_cohort_size(tmp_path):
         )
         return svar, ref
 
-    def peak_growth(n_samples: int) -> int:
+    def batch_output_bytes(n_samples: int) -> int:
         svar, ref = build(n_samples)
         bed = pl.DataFrame(
             {
@@ -204,27 +224,38 @@ def test_peak_rss_is_flat_in_cohort_size(tmp_path):
         sds = gvl.StreamingDataset(bed, reference=ref, variants=svar).with_seqs(
             "haplotypes"
         )
-        list(sds.to_iter(batch_size=4))  # warm up allocator
-        before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        for _ in range(3):
-            list(sds.to_iter(batch_size=4))
-        after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        return (after - before) * 1024  # KiB -> bytes on Linux
+        backend = sds._backend
+        assert backend is not None, (
+            "test requires the real SVAR1 backend, not the whole-window test seam"
+        )
 
-    small = peak_growth(50)
-    large = peak_growth(400)
-    # NOTE on measurement limitation: ru_maxrss is a process-global MONOTONIC
-    # high-water mark. If the peak was already reached during the small-cohort
-    # sweep (or an earlier test in this session), both deltas can measure ~0,
-    # which makes this assertion vacuously true rather than a real discriminator
-    # between flat and linear growth. See the module docstring for the history of
-    # a prior ru_maxrss guard removed for exactly this "blind" failure mode --
-    # inspect the printed deltas below when re-validating this gate.
-    print(f"[rss-gate] small(n=50) delta={small}B large(n=400) delta={large}B")
-    # 8x the cohort must NOT produce ~8x the peak growth; per-batch output is flat.
-    assert large < max(small, 8 * 1024 * 1024) * 2, (
-        f"peak RSS growth scaled with cohort (50->{small}B, 400->{large}B) -- "
-        "whole-window output materialization has returned"
+        r_idx, s_idx = next(iter(sds._plan()))
+        # Under default max_mem the first (and only, at this fixture size) window
+        # covers the WHOLE cohort -- prove that, so a batch staying flat below is
+        # actually evidence of per-batch generation, not just a tiny window.
+        assert len(s_idx) == n_samples, (
+            f"expected the window to cover the whole cohort ({n_samples} samples), "
+            f"got {len(s_idx)} -- test no longer proves what it claims"
+        )
+
+        o_starts, o_stops = backend.read_window(r_idx, s_idx)
+        batch_size = 4
+        assert batch_size <= len(r_idx) * len(s_idx)
+        data = backend.generate_batch(r_idx, s_idx, o_starts, o_stops, 0, batch_size)
+        return int(data.data.nbytes)
+
+    bytes_50 = batch_output_bytes(50)
+    bytes_400 = batch_output_bytes(400)
+    print(f"[batch-output-gate] n=50 bytes={bytes_50} n=400 bytes={bytes_400}")
+
+    assert bytes_50 > 0, "counter is not wired (batch produced no output)"
+    # A whole-window regression (issue #284) would make generated output scale with
+    # len(s_idx) == n_samples; per-batch generation makes it depend only on
+    # batch_size, so 50 and 400 samples must produce EXACTLY the same batch output
+    # size (the fixture is SNP-only, so haplotype length == region length always).
+    assert bytes_400 == bytes_50, (
+        f"batch output bytes scaled with cohort size (50->{bytes_50}B, "
+        f"400->{bytes_400}B) -- whole-window output materialization has returned"
     )
 
 
