@@ -50,17 +50,17 @@ only** (no map-style random access).
 | Spec | Scope | Status |
 |---|---|---|
 | `docs/superpowers/specs/2026-07-15-streaming-dataset-vcf-pgen-svar1-design.md` | Shared framework + VCF/PGEN/SVAR1 backend | ✅ approved |
-| _TBD_ | SVAR2 backend (SVAR2-style buffer + read-bound kernels) behind the framework | ⬜ |
-| _TBD_ | Interval (BigWigs/Table) streaming + variant+interval mixed scheduler | ⬜ |
+| _TBD_ — issue [#278](https://github.com/mcvickerlab/GenVarLoader/issues/278) | SVAR2 backend (SVAR2-style buffer + read-bound kernels) behind the framework | ⬜ |
+| _TBD_ — issue [#279](https://github.com/mcvickerlab/GenVarLoader/issues/279) | Interval (BigWigs/Table) streaming + variant+interval mixed scheduler | ⬜ |
 
 ## Plans (spec A)
 
 | Plan | Scope | Status |
 |---|---|---|
 | `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — PR [#274](https://github.com/mcvickerlab/GenVarLoader/pull/274) |
-| _TBD (Plan 2)_ | Double-buffer engine (crossbeam producer/consumer, window sizing, `num_workers` shard) | ⬜ |
-| _TBD (Plan 3/4)_ | VCF backend / PGEN backend | ⬜ |
-| _TBD (Plan 5)_ | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
+| _TBD (Plan 2)_ — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) | Double-buffer engine (crossbeam producer/consumer, window sizing, `num_workers` shard) | ⬜ |
+| _TBD (Plan 3/4)_ — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend | ⬜ |
+| _TBD (Plan 5)_ — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
 
 ## Tasks (spec A — corrected ordering)
 
@@ -83,13 +83,41 @@ only** (no map-style random access).
   **Byte-identical parity** vs `gvl.write()`+`Dataset.open()[r,s]` across an unsorted,
   interleaved multi-contig bed (12 regions × 3 samples) through a real `DataLoader`.
   Public `gvl.StreamingDataset` + docs shipped. _Walking-skeleton Tasks 3–6_
-- ⬜ **Double-buffer engine** — crossbeam producer/consumer, generic `StreamBackend`. _Plan 2_
+- ⬜ **Double-buffer engine** — crossbeam producer/consumer, generic `StreamBackend`. _Plan 2_ —
+  issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275)
   - ⚠️ **Inherited perf/scale debt from the walking skeleton — fold into Plan 2:** the per-contig
     static variant table crosses the FFI as Python **lists** (`.tolist()`, ~10M `int` objects for
     a human chr1) and `read_window` **clones the whole contig table on every batch**; it also
     re-opens `Svar1RecordSource` and walks the whole contig per batch (O(records × batch)), and
     holds the GIL during the record walk. Fix with `PyReadonlyArray1` + slices/`Arc`.
-- ⬜ **VCF backend / PGEN backend / output modes / docs** — _Plans 3–5; docs folded per plan._
+- ⬜ **VCF backend / PGEN backend** — _Plan 3/4_ —
+  issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276)
+- ⬜ **Output-mode breadth + docs** — _Plan 5; docs folded in_ —
+  issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277)
+
+## Sequencing
+
+**#275 (double-buffer engine) is the keystone** — it defines the generic `StreamBackend` trait
+that every other backend implements, and it rewrites the same `src/ffi/mod.rs` +
+`_dataset/_streaming.py` surface the other tasks would build on. Land it first; work started
+against the skeleton's shape gets rewritten.
+
+| Wave | Work | Parallel? |
+|---|---|---|
+| **Now** | Spec B ([#278](https://github.com/mcvickerlab/GenVarLoader/issues/278)), spec C ([#279](https://github.com/mcvickerlab/GenVarLoader/issues/279)) — **writing only** | ✅ docs-only, no code conflict with #275 |
+| **1** | [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) double-buffer engine + skeleton perf debt | ⛔ serial — blocks everything below |
+| **2** | [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) VCF/PGEN · [#278](https://github.com/mcvickerlab/GenVarLoader/issues/278) SVAR2 impl · [#279](https://github.com/mcvickerlab/GenVarLoader/issues/279) interval impl | ✅ one backend each, behind the trait |
+| **3** | [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) output-mode breadth | ✅ orthogonal to backends (kernel/output dispatch, not buffers) |
+
+Notes:
+
+- **#277 is the one judgement call.** It only needs the *synchronous* skeleton, so it could start
+  today — but it edits the same two files #275 rewrites. Stack it on #275 rather than racing it.
+- **#278 has no external blocker.** genoray is a **git dependency pinned to a `rev`**, not a
+  crates.io release — an unpublished `genoray_core::query` API is reached by bumping the rev.
+  #278 sequences on #275 like the other backends. See CLAUDE.md → Development Notes.
+- **#276 and #279 are the widest parallel slot** — different source families (htslib vs bigtools),
+  no shared kernels.
 
 ## Pointers
 
@@ -97,8 +125,8 @@ only** (no map-style random access).
   (completed; byte-identical parity, strangler-fig loop, differential-test harness).
 - **SVAR2 read-bound precedent (the SVAR2-backend template):** rust-migration Phase 6a —
   `genoray_core::query` (`ContigReader`/`find_ranges`/`gather_haps_readbound`/`decode_hap`) +
-  `reconstruct_haplotypes_from_svar2_readbound`. ⛔ genoray release-gate applies (dev-wired,
-  unpublished).
+  `reconstruct_haplotypes_from_svar2_readbound`. Reached by bumping the genoray git `rev` — no
+  release needed (CLAUDE.md → Development Notes).
 - **genoray Rust absorption:** rust-migration Phase 6 (⬜) — VCF/PGEN ingest into the Rust stack;
   enabling the `conversion` feature here overlaps that work (htslib producers).
 - **Prefetching dataloader prior art:** the existing `buffered`/`double_buffered` torch

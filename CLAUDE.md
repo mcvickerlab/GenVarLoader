@@ -266,6 +266,11 @@ The completed Rust-migration effort is archived at **`docs/archive/roadmaps/rust
 
 ## Development Notes
 
+- **genoray crates are git dependencies — never wait on a release.** `genoray_core` and
+  `svar2-codec` are pulled from GitHub pinned to a `rev` (see `Cargo.toml`); genoray is not
+  published to crates.io. **An unreleased/unpublished genoray API is never a blocker** — to use
+  new genoray code, bump the `rev`. Both crates must share the same rev (one clone, one repo).
+  Do not describe genoray work as gated on a "genoray release".
 - **Pixi environments**: Use `-e dev` for development, `-e docs` for documentation, `-e py310`/`py311`/`py312`/`py313` for Python version testing. Platform is linux-64.
 - **Ruff config**: E501 (line length) is ignored.
 - **Pyrefly**: Configured permissively; type annotations follow patterns in `_types.py`.
