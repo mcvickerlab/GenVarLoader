@@ -298,7 +298,7 @@ only** (no map-style random access).
       (UCSC vs Ensembl) — a store/FASTA pair using different styles raised a bare
       `ValueError`. `contig_idx` already indexes `self._contigs` in the same order
       `Reference.from_path` builds `offsets`, so the lookup was both redundant and
-      wrong; replaced with a new shared `Reference.contig_slice(contig_idx)` (also
+      wrong; replaced with a new shared `Reference._contig_slice(contig_idx)` (also
       now used by `Svar2Haps._ref_for_contig`), and added a mixed-naming-style
       regression test (`test_streaming_handles_mixed_contig_naming_style`) verified
       to fail pre-fix. Pre-existing (from the walking skeleton), not introduced by
