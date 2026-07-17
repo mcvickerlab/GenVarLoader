@@ -55,7 +55,7 @@ impl Svar1Store {
 
     /// Zero-copy borrow of the sparse genotype variant-index array -- the
     /// `geno_v_idxs` handed to the reconstruction kernel by
-    /// `reconstruct_haplotypes_svar1` (`src/ffi/mod.rs`). MUST stay a borrow of the
+    /// `svar1_generate_batch` (`src/ffi/mod.rs`). MUST stay a borrow of the
     /// reader's mmap'd `variant_idxs`, never an owned copy: a per-window `.to_vec()`
     /// here would silently reintroduce the sample-scale materialization the #275
     /// rewrite exists to avoid. That regression is invisible to an RSS high-water-mark
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn geno_v_idxs_borrows_the_mmap_not_a_copy() {
         // The scale-guard defect this catches: `Svar1Store::geno_v_idxs()` (or the
-        // `reconstruct_haplotypes_svar1` call site that uses it) reintroducing an
+        // `svar1_generate_batch` call site that uses it) reintroducing an
         // owned copy via `.to_vec()`. Pointer identity fails deterministically on
         // that regression; an RSS high-water-mark test cannot -- the copy is a few
         // KB, far below `ru_maxrss`'s page-granularity noise floor, so it never moves
@@ -275,5 +275,22 @@ mod tests {
         for (s, e) in w.o_starts.iter().zip(&w.o_stops) {
             assert_eq!(s, e, "empty contig must give in-bounds zero-length rows");
         }
+    }
+
+    #[test]
+    fn read_window_offsets_are_absolute_and_row_major() {
+        // Same 4-hap fixture as read_window_is_cartesian_and_borrows_the_mmap.
+        let tmp = tempfile::tempdir().unwrap();
+        write_raw::<i32>(tmp.path(), "variant_idxs.npy", &[0, 0, 1, 1]);
+        write_raw::<i64>(tmp.path(), "offsets.npy", &[0, 1, 1, 3, 4]);
+        let mut store = super::Svar1Store::open_meta(tmp.path().to_str().unwrap(), 2, 2).unwrap();
+        store.set_contig_meta_rs("chr1", 0, 2, 1);
+        let w = store
+            .read_window("chr1", &[10, 20], &[11, 21], &[(0, 30)], &[0, 1])
+            .unwrap();
+        // A batch [lo=1, hi=2) (row 1 only) selects CSR rows [1*2 .. 2*2) = [2, 4):
+        // o_starts[2..4] = [1, 3], o_stops[2..4] = [3, 4]  -> hap2, hap3.
+        assert_eq!(&w.o_starts[2..4], &[1, 3]);
+        assert_eq!(&w.o_stops[2..4], &[3, 4]);
     }
 }

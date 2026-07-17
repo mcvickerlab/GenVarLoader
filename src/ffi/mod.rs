@@ -859,36 +859,68 @@ pub fn reconstruct_haplotypes_fused<'py>(
     (out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py))
 }
 
-/// Streaming SVAR1 WINDOW reconstruction: read one cartesian window
-/// (`regions x samples x ploidy`) directly from a live `.svar` store via genoray's
-/// ungated `svar1_query` (two binary-search stages, no record walk), then reconstruct
-/// via the same `reconstruct_haplotypes_from_sparse` core as
-/// `reconstruct_haplotypes_fused`.
-///
-/// The whole read runs INSIDE `py.detach` — `store` is `PyRef<'py, _>` so the reader
-/// borrow survives into the closure, exactly like
-/// `reconstruct_haplotypes_from_svar2_readbound`. (The pre-window skeleton used
-/// `PyRef<'_, _>` and had to read under the GIL.)
-///
-/// `geno_v_idxs` is the `variant_idxs` mmap slice itself — zero copy, no materialized
-/// buffer. Ragged output only (no fixed-length, keep/exonic, or to_rc). `regions[:, 0]`
-/// is hardcoded to 0: this is a single-contig call and `ref_`/`ref_offsets` are expected
-/// pre-sliced to `[0, contig_len]`.
-///
-/// `v_starts_c`/`v_ends_c` are CONTIG-LOCAL (u32) and feed the range search;
-/// `v_starts`/`ilens` are the GLOBAL static table the kernel indexes with the returned
-/// ids. Both are borrowed, never copied.
+/// Read ONE cartesian window's sparse-genotype offsets from a live `.svar` store via
+/// genoray's ungated `svar1_query` (two binary-search stages, no record walk). Returns
+/// `(o_starts, o_stops)`, each `n_regions * n_samples * ploidy` long in C-order
+/// `(region, sample, ploid)` — ABSOLUTE indices into the store's `variant_idxs` mmap.
+/// Generation is a SEPARATE call (`svar1_generate_batch`) so output is batch-bounded,
+/// never whole-window (issue #284). Runs inside `py.detach`; `store` is `PyRef<'py>`.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-pub fn reconstruct_haplotypes_svar1<'py>(
+pub fn svar1_read_window<'py>(
     py: Python<'py>,
     store: PyRef<'py, crate::svar1::store::Svar1Store>,
     contig: &str,
-    v_starts_c: PyReadonlyArray1<u32>, // contig-local 0-based starts, ascending
-    v_ends_c: PyReadonlyArray1<u32>,   // contig-local exclusive ends
-    region_bounds: PyReadonlyArray2<i32>, // (r, 2) = (start, end), 0-based half-open
-    sample_idx: PyReadonlyArray1<i64>,    // (s,) absolute sample indices
-    v_starts: PyReadonlyArray1<i32>,      // GLOBAL static table (from SparseVar.index)
+    v_starts_c: PyReadonlyArray1<u32>,
+    v_ends_c: PyReadonlyArray1<u32>,
+    region_bounds: PyReadonlyArray2<i32>,
+    sample_idx: PyReadonlyArray1<i64>,
+) -> PyResult<(Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<i64>>)> {
+    require_contiguous_1d(&v_starts_c, "v_starts_c")?;
+    require_contiguous_1d(&v_ends_c, "v_ends_c")?;
+
+    let rb = region_bounds.as_array();
+    let n_regions = rb.nrows();
+    let regions_v: Vec<(u32, u32)> = (0..n_regions)
+        .map(|i| (rb[[i, 0]].max(0) as u32, rb[[i, 1]].max(0) as u32))
+        .collect();
+    let samples_v: Vec<usize> = sample_idx.as_array().iter().map(|&s| s as usize).collect();
+
+    let v_starts_c_a = v_starts_c.as_array();
+    let v_ends_c_a = v_ends_c.as_array();
+    let v_starts_c_s: &[u32] = v_starts_c_a
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above");
+    let v_ends_c_s: &[u32] = v_ends_c_a
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above");
+
+    let store_ref: &crate::svar1::store::Svar1Store = &store;
+
+    let result = py.detach(move || -> anyhow::Result<(Array1<i64>, Array1<i64>)> {
+        let w = store_ref.read_window(contig, v_starts_c_s, v_ends_c_s, &regions_v, &samples_v)?;
+        Ok((Array1::from_vec(w.o_starts), Array1::from_vec(w.o_stops)))
+    });
+
+    let (o_starts, o_stops) =
+        result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok((o_starts.into_pyarray(py), o_stops.into_pyarray(py)))
+}
+
+/// Generate haplotypes for ONE batch of window rows. `o_starts_b`/`o_stops_b` are the
+/// CSR-row offsets for exactly this batch (length `n_rows * ploidy`, ABSOLUTE indices
+/// into `variant_idxs`); `region_bounds_b` is `(n_rows, 2)`, already expanded per
+/// (region, sample). Output is `n_rows`-bounded — the #284 fix. `geno_v_idxs` is the
+/// shared `variant_idxs` mmap (zero copy). Ragged output only, jitter=0.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn svar1_generate_batch<'py>(
+    py: Python<'py>,
+    store: PyRef<'py, crate::svar1::store::Svar1Store>,
+    o_starts_b: PyReadonlyArray1<i64>,
+    o_stops_b: PyReadonlyArray1<i64>,
+    region_bounds_b: PyReadonlyArray2<i32>,
+    v_starts: PyReadonlyArray1<i32>,
     ilens: PyReadonlyArray1<i32>,
     alt_alleles: PyReadonlyArray1<u8>,
     alt_offsets: PyReadonlyArray1<i64>,
@@ -900,51 +932,34 @@ pub fn reconstruct_haplotypes_svar1<'py>(
     use crate::genotypes;
     use crate::reconstruct;
 
-    // `ref_` is sliced then `.as_slice()`'d inside the reconstruct core; a strided view
-    // would panic there as an uncatchable PanicException. `ref_offsets` is only indexed
-    // directly (stride-safe) and must NOT be gated.
     require_contiguous_1d(&ref_, "ref_")?;
-    // `v_starts_c`/`v_ends_c` are borrowed as `&[u32]` (no copy — see below); that
-    // requires `.as_slice()` on the view, which panics on a strided input. Gate here
-    // so a non-contiguous array surfaces as a clean ValueError instead.
-    require_contiguous_1d(&v_starts_c, "v_starts_c")?;
-    require_contiguous_1d(&v_ends_c, "v_ends_c")?;
+    require_contiguous_1d(&o_starts_b, "o_starts_b")?;
+    require_contiguous_1d(&o_stops_b, "o_stops_b")?;
 
-    let rb = region_bounds.as_array();
-    let n_regions = rb.nrows();
-    let regions_v: Vec<(u32, u32)> = (0..n_regions)
-        .map(|i| (rb[[i, 0]].max(0) as u32, rb[[i, 1]].max(0) as u32))
-        .collect();
-    let samples_v: Vec<usize> = sample_idx.as_array().iter().map(|&s| s as usize).collect();
-    let n_samples = samples_v.len();
+    let rb = region_bounds_b.as_array();
+    let batch = rb.nrows();
     let ploidy = store.ploidy();
-    let batch = n_regions * n_samples;
     let n_work = batch * ploidy;
 
-    // Expand the cartesian product into one kernel `regions` row per (region, sample),
-    // C-order (region, sample) so it lines up with find_ranges' output.
+    // Per-row region bounds (already (region, sample)-expanded on the Python side).
     let mut regions_arr = Array2::<i32>::zeros((batch, 3));
-    for ri in 0..n_regions {
-        for si in 0..n_samples {
-            let bi = ri * n_samples + si;
-            regions_arr[[bi, 1]] = rb[[ri, 0]];
-            regions_arr[[bi, 2]] = rb[[ri, 1]];
+    for bi in 0..batch {
+        regions_arr[[bi, 1]] = rb[[bi, 0]];
+        regions_arr[[bi, 2]] = rb[[bi, 1]];
+    }
+    let shifts_arr = Array2::<i32>::zeros((batch, ploidy)); // jitter=0
+
+    // Local identity map over THIS batch's rows: batch row bi, hap p -> local CSR row
+    // bi*ploidy + p, indexing o_starts_b/o_stops_b (which are already the batch slice).
+    let mut geno_offset_idx = Array2::<i64>::zeros((batch, ploidy));
+    for bi in 0..batch {
+        for p in 0..ploidy {
+            geno_offset_idx[[bi, p]] = (bi * ploidy + p) as i64;
         }
     }
-    let shifts_arr = Array2::<i32>::zeros((batch, ploidy)); // jitter=0 in this plan
 
-    // ZERO COPY: borrow contig-local starts/ends as slices straight from the numpy
-    // buffers (contiguity guaranteed by the guards above) — no per-window copy of
-    // these whole-contig, variant-scale arrays.
-    let v_starts_c_a = v_starts_c.as_array();
-    let v_ends_c_a = v_ends_c.as_array();
-    let v_starts_c_s: &[u32] = v_starts_c_a
-        .as_slice()
-        .expect("contiguity checked by require_contiguous_1d above");
-    let v_ends_c_s: &[u32] = v_ends_c_a
-        .as_slice()
-        .expect("contiguity checked by require_contiguous_1d above");
-
+    let o_starts_a = o_starts_b.as_array();
+    let o_stops_a = o_stops_b.as_array();
     let v_starts_a = v_starts.as_array();
     let ilens_a = ilens.as_array();
     let alt_alleles_a = alt_alleles.as_array();
@@ -952,36 +967,20 @@ pub fn reconstruct_haplotypes_svar1<'py>(
     let ref_a = ref_.as_array();
     let ref_offsets_a = ref_offsets.as_array();
 
-    // `store` is PyRef<'py>, so this borrow outlives the detach.
     let store_ref: &crate::svar1::store::Svar1Store = &store;
 
     let result = py.detach(move || -> anyhow::Result<(Array1<u8>, Array1<i64>)> {
-        let w = store_ref.read_window(
-            contig,
-            v_starts_c_s,
-            v_ends_c_s,
-            &regions_v,
-            &samples_v,
-        )?;
-
-        // ZERO COPY: the kernel's sparse index input IS the store's mmap. Goes through
-        // `Svar1Store::geno_v_idxs()` (not `reader().variant_idxs()` inline) so the
-        // borrow contract has one call site that `src/svar1/store.rs`'s
-        // `geno_v_idxs_borrows_the_mmap_not_a_copy` unit test can pin down.
+        // ZERO COPY: kernel sparse input IS the store's mmap (see geno_v_idxs contract).
         let geno_v_idxs = store_ref.geno_v_idxs();
         let geno_v_idxs_view = numpy::ndarray::ArrayView1::from(geno_v_idxs);
-
-        let o_starts_arr = Array1::from_vec(w.o_starts);
-        let o_stops_arr = Array1::from_vec(w.o_stops);
-        let geno_offset_idx = w.geno_offset_idx;
 
         let q_starts_owned: Array1<i32> = regions_arr.column(1).to_owned();
         let q_ends_owned: Array1<i32> = regions_arr.column(2).to_owned();
         let diffs = genotypes::get_diffs_sparse(
             geno_offset_idx.view(),
             geno_v_idxs_view,
-            o_starts_arr.view(),
-            o_stops_arr.view(),
+            o_starts_a,
+            o_stops_a,
             ilens_a,
             None,
             None,
@@ -991,7 +990,6 @@ pub fn reconstruct_haplotypes_svar1<'py>(
             parallel,
         );
 
-        // out_offsets prefix-sum — ragged output only.
         let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
         {
             let mut acc: i64 = 0;
@@ -1014,8 +1012,8 @@ pub fn reconstruct_haplotypes_svar1<'py>(
             regions_arr.view(),
             shifts_arr.view(),
             geno_offset_idx.view(),
-            o_starts_arr.view(),
-            o_stops_arr.view(),
+            o_starts_a,
+            o_stops_a,
             geno_v_idxs_view,
             v_starts_a,
             ilens_a,
@@ -1026,8 +1024,8 @@ pub fn reconstruct_haplotypes_svar1<'py>(
             pad_char,
             None, // keep
             None, // keep_offsets
-            None, // annot_v_idxs — not supported in the streaming path
-            None, // annot_ref_pos — not supported in the streaming path
+            None, // annot_v_idxs
+            None, // annot_ref_pos
             parallel,
         );
 
@@ -1036,7 +1034,6 @@ pub fn reconstruct_haplotypes_svar1<'py>(
 
     let (out_data, out_offsets_vec) =
         result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
     Ok((out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py)))
 }
 
