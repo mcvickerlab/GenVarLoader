@@ -36,7 +36,13 @@ class StreamingDataset:
     - Internal/test-oriented: ``StreamingDataset(regions, contigs=..., n_samples=...,
       ploidy=..., _reconstruct_window=...)`` injects a reconstruction callback
       directly, bypassing variant-source classification. Used by
-      ``test_streaming_scheduler.py`` and ``test_svar1_window.py``.
+      ``test_streaming_scheduler.py`` and ``test_svar1_window.py``. ``samples`` may
+      be supplied too; when omitted, placeholder names ``"0", "1", ...`` are used
+      (this path never touches a real sample list).
+
+    ``sample_idx`` means "index into :attr:`samples`" (lexicographically-sorted
+    sample names, matching :func:`gvl.write`'s convention) -- NOT a variant store's
+    native column order. See :attr:`samples`.
     """
 
     # (n_regions, 4) sorted: (contig_idx, start, end, strand). Only cols 0-2 are
@@ -47,6 +53,8 @@ class StreamingDataset:
     n_samples: int
     ploidy: int
     _reconstruct_window: Callable[[NDArray[np.intp], NDArray[np.intp]], object]
+    # Sample names in `sample_idx` order (lexicographically sorted -- see `samples`).
+    _samples: list[str]
     # Regions per read window. Window >> batch is the point: one Rust call per window
     # amortizes the search + page faults across many batches.
     #
@@ -68,6 +76,7 @@ class StreamingDataset:
         contigs: list[str] | None = None,
         n_samples: int | None = None,
         ploidy: int | None = None,
+        samples: list[str] | None = None,
         _reconstruct_window: Callable[[NDArray[np.intp], NDArray[np.intp]], object]
         | None = None,
     ):
@@ -81,6 +90,12 @@ class StreamingDataset:
                     "`contigs`, `n_samples`, and `ploidy` to be supplied "
                     "explicitly."
                 )
+            # `samples` is optional here: this path is for scheduling/window-plan
+            # tests that don't exercise real sample identity. Placeholder names
+            # keep `.samples` well-defined without forcing every such test to
+            # supply a real sample list.
+            if samples is None:
+                samples = [str(i) for i in range(n_samples)]
         elif variants is not None:
             # Public API path: classify `variants` and build the backend.
             if reference is None:
@@ -102,6 +117,7 @@ class StreamingDataset:
                 backend = _Svar1Backend(p, reference, contigs, regions)
                 n_samples = backend.n_samples
                 ploidy = backend.ploidy
+                samples = backend._sample_names
                 _reconstruct_window = backend.reconstruct_window
             elif p.is_dir() and p.suffix == ".svar2":
                 raise NotImplementedError(
@@ -143,6 +159,7 @@ class StreamingDataset:
         object.__setattr__(self, "n_samples", int(n_samples))
         object.__setattr__(self, "ploidy", int(ploidy))
         object.__setattr__(self, "_reconstruct_window", _reconstruct_window)
+        object.__setattr__(self, "_samples", list(samples))
         # Single source of truth: pull the default from the field declaration above
         # instead of duplicating the literal here. `slots=True` means the class-level
         # default is NOT auto-applied to instances (there is no class attribute to
@@ -158,6 +175,18 @@ class StreamingDataset:
     @property
     def shape(self) -> tuple[int, int]:
         return (len(self._regions), self.n_samples)
+
+    @property
+    def samples(self) -> list[str]:
+        """The samples in the dataset, in ``sample_idx`` order.
+
+        Lexicographically sorted (matching :func:`gvl.write`'s convention and
+        :attr:`Dataset.samples <genvarloader.Dataset.samples>`) -- **not** the
+        variant store's native (e.g. VCF column) order. ``to_iter``'s
+        ``sample_idxs`` index into this list: ``samples[i]`` is the sample whose
+        data arrives at ``sample_idx == i``.
+        """
+        return list(self._samples)
 
     def __len__(self) -> int:
         return len(self._regions) * self.n_samples

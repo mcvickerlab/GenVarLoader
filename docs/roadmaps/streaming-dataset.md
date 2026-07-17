@@ -291,6 +291,28 @@ only** (no map-style random access).
       never chunked). Not independently re-measured here (the scale fixture's 20
       samples don't exercise this). Note #283 (engine wiring) doubles the resident
       window count on top of this, so the two interact.
+    - **Final whole-branch review fix wave, before opening the PR:** (1) `fix:`
+      `_Svar1Backend.reconstruct_window` looked up `ref_c_idx` by re-searching
+      `self._ref.c_map.contigs` for the STORE's contig name, but
+      `Reference.from_path` normalizes `c_map` to the FASTA's own naming style
+      (UCSC vs Ensembl) — a store/FASTA pair using different styles raised a bare
+      `ValueError`. `contig_idx` already indexes `self._contigs` in the same order
+      `Reference.from_path` builds `offsets`, so the lookup was both redundant and
+      wrong; replaced with a new shared `Reference.contig_slice(contig_idx)` (also
+      now used by `Svar2Haps._ref_for_contig`), and added a mixed-naming-style
+      regression test (`test_streaming_handles_mixed_contig_naming_style`) verified
+      to fail pre-fix. Pre-existing (from the walking skeleton), not introduced by
+      this plan. (2) `feat:` added `StreamingDataset.samples` (sorted sample names,
+      matching `Dataset.samples`) and documented the `sample_idx` sorted-order
+      convention next to the existing region-order docs (`faq.md`, `dataset.md`,
+      the skill) — previously the convention from the Task 5 sample-order fix above
+      was correct internally but invisible to users, who had no way to look up a
+      `sample_idx`'s name without reaching for the store's native order (wrong) or
+      re-deriving the sort themselves. (3) minor cleanups: dead `_bed` field
+      removed, `_window_regions`' comment trimmed to its conclusion (the
+      2000-region sweep fixture it cited isn't committed), and stale
+      "contig-grouped batches" test comments updated to say "window" (assertions
+      unchanged). See PR [#282](https://github.com/mcvickerlab/GenVarLoader/pull/282).
 - ⬜ **VCF backend / PGEN backend** — _Plan 3/4_ —
   issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276)
 - ⬜ **Output-mode breadth + docs** — _Plan 5; docs folded in_ —

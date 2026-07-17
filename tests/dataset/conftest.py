@@ -228,6 +228,73 @@ def svar1_mixed_naming_fixture(tmp_path_factory) -> Svar1MixedNamingFixture:
     )
 
 
+# Samples in NATIVE VCF column order deliberately not already lexicographically
+# sorted ("S10" < "S2" lexicographically, but S10 is declared before S2 here) --
+# see `sample_idx` semantics fixture below. Single diagnostic SNP at chr1:3 (A>G,
+# 0-based pos 2): S1 and S10 are homozygous REF ("A"), S2 is homozygous ALT ("G"),
+# so the three samples are distinguishable by the base at that position without
+# needing 3-way-distinct genotypes.
+_SVAR1_SAMPLE_ORDER_VCF = """\
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=40>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS10\tS2\tS1
+chr1\t3\t.\tA\tG\t.\t.\t.\tGT\t0|0\t1|1\t0|0
+"""
+
+
+@dataclass(slots=True)
+class Svar1SampleOrderFixture:
+    """Regression fixture for `StreamingDataset.samples`: native VCF column order
+    (S10, S2, S1) differs from lexicographic order (S1, S10, S2), and a diagnostic
+    SNP distinguishes S2 (ALT="G") from S1/S10 (REF="A") at 0-based position 2.
+    `expected_base_by_sorted_name` gives the expected byte at that position, keyed
+    by sorted sample name, so a test can check `sds.samples[i]`'s reconstructed
+    data against the *name*, not just against a re-sorted list (which would be
+    tautological)."""
+
+    svar_path: Path
+    reference_path: Path
+    contigs: list[str]
+    bed: pl.DataFrame
+    diagnostic_pos: int  # 0-based position of the diagnostic SNP
+    expected_base_by_sorted_name: dict[str, bytes]
+
+
+@pytest.fixture(scope="module")
+def svar1_sample_order_fixture(tmp_path_factory) -> Svar1SampleOrderFixture:
+    from genoray import SparseVar, VCF
+
+    d = tmp_path_factory.mktemp("svar1_sample_order_src")
+    ref = d / "ref.fa"
+    ref.write_text(f">chr1\n{_SVAR1_STREAM_REF}\n")
+    subprocess.run(["samtools", "faidx", str(ref)], check=True)
+
+    vcf = d / "in.vcf"
+    vcf.write_text(_SVAR1_SAMPLE_ORDER_VCF)
+    bcf = d / "in.bcf"
+    subprocess.run(["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True)
+    subprocess.run(["bcftools", "index", str(bcf)], check=True)
+
+    svar_path = tmp_path_factory.mktemp("svar1_sample_order_store") / "store.svar"
+    # `samples=` here is the store's NATIVE column order -- deliberately the same
+    # (non-lexicographic) order as the VCF header, not pre-sorted.
+    SparseVar.from_vcf(
+        svar_path, VCF(bcf), max_mem="1g", samples=["S10", "S2", "S1"], overwrite=True
+    )
+
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [40]})
+
+    return Svar1SampleOrderFixture(
+        svar_path=svar_path,
+        reference_path=ref,
+        contigs=["chr1"],
+        bed=bed,
+        diagnostic_pos=2,
+        expected_base_by_sorted_name={"S1": b"A", "S10": b"A", "S2": b"G"},
+    )
+
+
 @pytest.fixture(scope="session")
 def snap_dataset(source_bed, vcf_dir, reference, tmp_path_factory):
     """Phased VCF dataset with a "5ss" BigWig track, opened with a reference.

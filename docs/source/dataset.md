@@ -200,5 +200,7 @@ rather not pay for the write.
 `StreamingDataset` is currently more limited than `Dataset`: `.svar` variant sources only
 (VCF/PGEN/`.svar2` raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0`
 only, ragged output only, and **iterable-only** — `sds[r, s]` raises `TypeError`; use
-`sds.to_iter(...)` (or `to_dataloader(...)` for torch). See the `genvarloader` skill for the
+`sds.to_iter(...)` (or `to_dataloader(...)` for torch). `sample_idxs` index into
+`sds.samples` (lexicographically-sorted sample names, matching `gvl.write()`), not the
+variant store's native column order. See the `genvarloader` skill for the
 full list of what's not yet wired.

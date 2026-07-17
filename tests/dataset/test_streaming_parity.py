@@ -184,3 +184,54 @@ def test_streaming_handles_mixed_contig_naming_style(svar1_mixed_naming_fixture)
     assert seen == {
         (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
     }
+
+
+def test_samples_property_matches_written_dataset(svar1_multicontig_fixture):
+    """`StreamingDataset.samples` must mirror `Dataset.samples` -- lexicographically
+    sorted sample names, the same order `gvl.write()` uses and the same order
+    `sample_idx` indexes into."""
+    f = svar1_multicontig_fixture
+    sds = gvl.StreamingDataset(f.bed, reference=f.reference_path, variants=f.svar_path)
+    written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+
+    assert sds.samples == written.samples
+    assert sds.samples == sorted(sds.samples), (
+        "samples must be lexicographically sorted"
+    )
+
+
+def test_samples_property_indexes_actual_sample_identity(svar1_sample_order_fixture):
+    """Non-tautological check for Finding 2: `sds.samples[i]` must genuinely be the
+    NAME of the sample whose data arrives at `sample_idx == i` -- not merely "a
+    sorted list of names" (which would pass even if `samples` and `sample_idx`
+    disagreed on order, as long as `samples` itself happened to be sorted).
+
+    `svar1_sample_order_fixture` declares samples in native VCF column order
+    (S10, S2, S1) -- NOT lexicographic order -- with a diagnostic SNP that makes S2
+    distinguishable from S1/S10 by reconstructed sequence content alone. If
+    `sample_idx` and `samples` ever disagreed (e.g. one used native order, the
+    other sorted order), this test would catch it by reading the wrong base at the
+    diagnostic position for at least one sample.
+    """
+    f = svar1_sample_order_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path
+    ).with_seqs("haplotypes")
+
+    assert sorted(f.expected_base_by_sorted_name) == sds.samples
+
+    seen_samples = set()
+    for data, _r_idx, s_idx in sds.to_iter(batch_size=1):
+        for i in range(len(s_idx)):
+            s = int(s_idx[i])
+            name = sds.samples[s]
+            base = bytes(np.asarray(data[i][0])[f.diagnostic_pos])
+            assert base == f.expected_base_by_sorted_name[name], (
+                f"sds.samples[{s}] = {name!r}, but the haplotype actually "
+                f"delivered at sample_idx={s} has base {base!r} at the "
+                f"diagnostic position, not {f.expected_base_by_sorted_name[name]!r} "
+                f"as expected for {name!r}"
+            )
+            seen_samples.add(name)
+
+    assert seen_samples == set(sds.samples)
