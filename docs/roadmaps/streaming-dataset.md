@@ -76,7 +76,7 @@ only** (no map-style random access).
 | Plan | Scope | Status |
 |---|---|---|
 | `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — PR [#274](https://github.com/mcvickerlab/GenVarLoader/pull/274) |
-| _TBD (Plan 2)_ — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Tasks 2-4 done; Task 5's generic `StreamBackend`/`run_windows` engine done, SVAR1 wiring split to a follow-up task |
+| `docs/superpowers/plans/2026-07-16-streaming-svar1-window-engine.md` | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275). Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Tasks 2-4 done; Task 5's generic `StreamBackend`/`run_windows` engine done, SVAR1 wiring split to follow-up issue [#283](https://github.com/mcvickerlab/GenVarLoader/issues/283) |
 | _TBD (Plan 3/4)_ — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend | ⬜ |
 | _TBD (Plan 5)_ — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
 
@@ -188,12 +188,13 @@ only** (no map-style random access).
       Step 6 (cold-page-cache overlap measurement) is skipped for the same reason —
       it only makes sense once Step 5's wiring exists; no overlap number is reported
       here to avoid fabricating one.
-    - **Follow-up task (not yet filed as a plan step):** wire `Svar1Store` as a
-      `StreamBackend` and move `StreamingDataset`'s window loop into Rust behind a
-      Python-visible iterator/handle, so `to_iter()` actually overlaps producer I/O
-      with consumer reconstruct. Should re-decide the `Buffer` split (offsets-only vs.
-      fully-reconstructed) as its first step, since that decision shapes the
-      GIL-crossing design.
+    - **Follow-up: issue [#283](https://github.com/mcvickerlab/GenVarLoader/issues/283).**
+      Wire `Svar1Store` as a `StreamBackend` and move `StreamingDataset`'s window loop
+      into Rust behind a Python-visible iterator/handle, so `to_iter()` actually
+      overlaps producer I/O with consumer reconstruct. Should re-decide the `Buffer`
+      split (offsets-only vs. fully-reconstructed) as its first step, since that
+      decision shapes the GIL-crossing design. Cold-page-cache overlap measurement
+      (the deferred Step 6) belongs to this follow-up, not to #275.
   - ⚠️ **Inherited perf/scale debt from the walking skeleton — DELETED, not fixed, by Task 2.**
     All of it was downstream of the one wrong dependency above, so the rewrite removed it rather
     than optimizing it. (a) `Svar1RecordSource::new` was **O(all CSR entries)** — it eagerly
@@ -283,11 +284,13 @@ only** (no map-style random access).
       This is a real, user-visible correctness fix, so it landed as its own
       `fix(streaming):` commit rather than folded into the `test:` commit that found
       it, so it gets a changelog entry.
-    - **Memory-scaling concern (reported, not addressed — out of scope for Task 4):** a
-      window is regions × **all samples**, so peak memory scales with cohort size and
-      `_window_regions` cannot bound it. Not independently re-measured here (the scale
-      fixture's 20 samples don't exercise this), consistent with the existing tracked
-      concern; flagging again for whoever picks up sample-dimension chunking.
+    - **Memory-scaling concern — filed as issue
+      [#284](https://github.com/mcvickerlab/GenVarLoader/issues/284):** a window is
+      regions × **all samples**, so peak memory scales with cohort size and
+      `_window_regions` cannot bound it (no value ≥ 1 helps — the sample dimension is
+      never chunked). Not independently re-measured here (the scale fixture's 20
+      samples don't exercise this). Note #283 (engine wiring) doubles the resident
+      window count on top of this, so the two interact.
 - ⬜ **VCF backend / PGEN backend** — _Plan 3/4_ —
   issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276)
 - ⬜ **Output-mode breadth + docs** — _Plan 5; docs folded in_ —
