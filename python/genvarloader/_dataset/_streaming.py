@@ -21,6 +21,18 @@ if TYPE_CHECKING:
     import torch.utils.data as td
 
 
+def _parse_max_mem(max_mem: str | int) -> int:
+    """Bytes from an int or a size string like '512MB' / '1g' / '2GiB'."""
+    if isinstance(max_mem, int):
+        return int(max_mem)
+    s = str(max_mem).strip().lower().replace("ib", "b")
+    units = {"b": 1, "kb": 1024, "mb": 1024**2, "gb": 1024**3, "tb": 1024**4}
+    for suffix in ("tb", "gb", "mb", "kb", "b"):
+        if s.endswith(suffix):
+            return int(float(s[: -len(suffix)]) * units[suffix])
+    return int(float(s))  # bare number = bytes
+
+
 @dataclass(frozen=True, slots=True)
 class StreamingDataset:
     """Write-free, iterable-only dataset. Region-major iteration; no random access.
@@ -55,16 +67,20 @@ class StreamingDataset:
     _reconstruct_window: Callable[[NDArray[np.intp], NDArray[np.intp]], object]
     # Sample names in `sample_idx` order (lexicographically sorted -- see `samples`).
     _samples: list[str]
-    # Regions per read window. Window >> batch is the point: one Rust call per window
-    # amortizes the search + page faults across many batches.
+    # Read-window sizing, DERIVED from `max_mem` in __init__ (not user-set directly).
+    # The window (regions x sample-chunk x ploidy) is the READ granularity; its offsets
+    # buffer is what `max_mem` bounds. Per-batch generation (Task 3) bounds OUTPUT
+    # separately by batch_size, so neither term scales with cohort size.
     #
-    # 64 is a pragmatic default, NOT a measured knee: a sweep (window_regions in
+    # 64 is a pragmatic REGION_TARGET, NOT a measured knee: a sweep (window_regions in
     # {1, 4, 16, 64, 256, 1024}) showed wall-clock improving monotonically with fewer
     # windows and flattening past ~64, with everything beyond that inside this shared
     # node's run-to-run noise. entries_touched was exactly flat across every setting,
     # confirming I/O is windowing-invariant, as designed. See
     # docs/roadmaps/streaming-dataset.md (Plan 2 Task 4) for the full sweep narrative.
     _window_regions: int = 64
+    _window_samples: int = 1
+    _max_mem_bytes: int = 512 * 1024 * 1024
 
     def __init__(
         self,
@@ -73,6 +89,7 @@ class StreamingDataset:
         variants: str | Path | None = None,
         *,
         jitter: int = 0,
+        max_mem: str | int = "512MB",
         contigs: list[str] | None = None,
         n_samples: int | None = None,
         ploidy: int | None = None,
@@ -160,17 +177,26 @@ class StreamingDataset:
         object.__setattr__(self, "ploidy", int(ploidy))
         object.__setattr__(self, "_reconstruct_window", _reconstruct_window)
         object.__setattr__(self, "_samples", list(samples))
-        # Single source of truth: pull the default from the field declaration above
-        # instead of duplicating the literal here. `slots=True` means the class-level
-        # default is NOT auto-applied to instances (there is no class attribute to
-        # fall back on -- only `__dataclass_fields__` knows it), and this class defines
-        # its own `__init__` so the dataclass-generated one (which *would* apply it)
-        # never runs. Editing the field's default above now actually changes behavior.
-        object.__setattr__(
-            self,
-            "_window_regions",
-            type(self).__dataclass_fields__["_window_regions"].default,
-        )
+        # Derive the read-window sizing from `max_mem`, NOT from the field defaults
+        # above (those are just fallback literals for `__dataclass_fields__`; `slots=True`
+        # means there's no class attribute to fall back on at runtime, and this class
+        # defines its own `__init__` so the dataclass-generated one never runs). The
+        # offsets buffer is `window_regions * window_samples * ploidy * 16 B`
+        # (o_start + o_stop, i64 each); bound it by `max_mem` so peak memory stays
+        # independent of cohort size, keeping whole sample sets when they fit and
+        # holding regions at the measured amortization knee (REGION_TARGET=64).
+        max_mem_bytes = _parse_max_mem(max_mem)
+        n_slots = 1  # PR 1 is single-window-resident; PR 2 (engine) sets 2 (ping-pong).
+        cell_bytes = (
+            int(ploidy) * 16
+        )  # o_start + o_stop, i64 each, per (region,sample,ploid)
+        max_cells = max(1, max_mem_bytes // (cell_bytes * n_slots))
+        window_samples = max(1, min(int(n_samples), max_cells))
+        region_target = 64  # measured read-amortization knee; see roadmap Plan 2.
+        window_regions = max(1, min(region_target, max_cells // window_samples))
+        object.__setattr__(self, "_max_mem_bytes", max_mem_bytes)
+        object.__setattr__(self, "_window_samples", int(window_samples))
+        object.__setattr__(self, "_window_regions", int(window_regions))
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -192,19 +218,15 @@ class StreamingDataset:
         return len(self._regions) * self.n_samples
 
     def _plan(self) -> Iterator[tuple[NDArray[np.intp], NDArray[np.intp]]]:
-        """Yield one WINDOW per step: (region_idxs, sample_idxs), cartesian.
-
-        Region-major, single-contig per window (`self._regions` is sorted by
-        (contig_idx, start), so each contig's regions are one contiguous run). Every
-        sample is read per window -- variant stores return all samples per range read
-        essentially for free, so the effective item order is region-major,
-        sample-inner. NOT pairwise: `StreamingDataset` has no `__getitem__`, so the
-        traversal is a fixed cartesian sweep and the window is the read granularity.
+        """Yield one WINDOW per step: (region_idxs, sample_chunk), cartesian,
+        single-contig. Both the region axis (`_window_regions`) and the sample axis
+        (`_window_samples`) are chunked so the offsets buffer stays within `max_mem`
+        regardless of cohort size. NOT pairwise: the traversal is a fixed cartesian
+        sweep and the window is the read granularity.
         """
         n_regions, n_samples = self.shape
         if n_regions == 0:
             return
-        all_samples = np.arange(n_samples, dtype=np.intp)
         contig_idxs = self._regions[:, 0]
         run_bounds = np.flatnonzero(np.diff(contig_idxs)) + 1
         run_starts = np.concatenate(([0], run_bounds))
@@ -212,7 +234,10 @@ class StreamingDataset:
         for r_lo, r_hi in zip(run_starts, run_ends):
             for w_lo in range(int(r_lo), int(r_hi), self._window_regions):
                 w_hi = min(w_lo + self._window_regions, int(r_hi))
-                yield np.arange(w_lo, w_hi, dtype=np.intp), all_samples
+                r_idx = np.arange(w_lo, w_hi, dtype=np.intp)
+                for s_lo in range(0, n_samples, self._window_samples):
+                    s_hi = min(s_lo + self._window_samples, n_samples)
+                    yield r_idx, np.arange(s_lo, s_hi, dtype=np.intp)
 
     def _iter_batches(self, batch_size: int) -> Iterator[tuple]:
         """Drive the plan and slice each reconstructed window into batches.
