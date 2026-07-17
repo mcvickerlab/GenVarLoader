@@ -76,7 +76,7 @@ only** (no map-style random access).
 | Plan | Scope | Status |
 |---|---|---|
 | `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — PR [#274](https://github.com/mcvickerlab/GenVarLoader/pull/274) |
-| _TBD (Plan 2)_ — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Task 2 (read path) + Task 3 (`to_iter` surface) done; double-buffer engine remains |
+| _TBD (Plan 2)_ — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Tasks 2-4 done; Task 5's generic `StreamBackend`/`run_windows` engine done, SVAR1 wiring split to a follow-up task |
 | _TBD (Plan 3/4)_ — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend | ⬜ |
 | _TBD (Plan 5)_ — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
 
@@ -138,8 +138,62 @@ only** (no map-style random access).
     `Dataset.to_torch_dataset`'s name/concept); `to_dataloader()` wraps `to_torch_dataset`.
     `__getitem__` still raises `TypeError` (iterable-only). `_batch_size`/`_with_batch_size`
     deleted -- `batch_size` is a `to_iter` argument, not instance state.
-  - ⬜ Double-buffer engine (crossbeam producer/consumer) — not yet started; `to_iter` still
-    drives the synchronous `_iter_batches`/`_plan` read path Task 2 built.
+  - ✅🚧 **Task 5 (double-buffer engine): generic engine landed; SVAR1 wiring split out.**
+    New `src/stream/mod.rs`: `StreamBackend` trait (`fn fill(&self, &WindowSpec, &mut
+    Self::Buffer) -> anyhow::Result<()>`) + `run_windows(backend, windows, n_slots,
+    consume)` — gvl's **first threading primitive** (previously zero `std::thread`/
+    crossbeam/`unsafe impl Send+Sync` in `src/`). Producer/consumer over
+    `crossbeam_channel::bounded` (added `crossbeam-channel = "0.5.15"`, matching
+    genoray's pin), 2-slot ping-pong recycling (net-new vs. genoray's orchestrator,
+    which allocates fresh and drops — an N-slot ring is deferred to profiling
+    evidence), shutdown by `Sender` drop, join-everything-then-classify-panics. 5
+    adversarial unit tests (plan-order yield, slot-cap recycling, producer-error,
+    consumer-error, empty-plan), each run 20x in `--release` with zero hangs/failures.
+    - **Compile-fix vs. the spec's literal listing:** the spec's `run_windows` body
+      borrowed `tx_filled`/`rx_free` into a non-`move` `spawn_scoped` closure and then
+      tried to move/drop them afterward — doesn't borrow-check. Fixed by moving both
+      entirely into the producer closure (`move ||`), making it their sole owner; no
+      clone of either is ever held back in the outer scope. This is a *stronger*
+      version of the shutdown-safety property the spec asked for (orchestrator.rs's
+      hazard is a stray `Sender` clone kept around for introspection — this design has
+      no extra clone to forget to drop, so the hazard can't occur by construction).
+    - **Step 5 (wire `StreamBackend` for `Svar1Store`, route
+      `reconstruct_haplotypes_svar1` through `run_windows`) — SPLIT into a follow-up
+      task, per the plan's own pre-authorized escape hatch.** Reasoning: today
+      `reconstruct_haplotypes_svar1` is one Rust call per window, and Python's
+      `_plan()`/`_iter_batches()` (`_dataset/_streaming.py`) drives the window loop
+      *synchronously* — each `to_iter()` step blocks on one FFI call, gets one
+      window's data back, slices it into batches, and only then asks for the next
+      window. For the double-buffer engine to produce any real overlap, window N+1's
+      fetch has to happen *while Python is busy with window N* — which means the
+      producer thread must outlive a single FFI call and persist across `to_iter()`
+      steps, with some Python-visible handle (a new pyclass wrapping a receiver, most
+      likely) that `_iter_batches` polls instead of calling
+      `reconstruct_haplotypes_svar1` directly. That's a new ownership/lifetime model
+      (a background thread tied to the `StreamingDataset`/iterator's lifetime, not a
+      single call), plus GIL re-acquisition to build `PyArray`s from data produced on
+      the producer thread, plus deciding what `Svar1Store: StreamBackend`'s `Buffer`
+      actually is (offsets-only via `read_window`, or the fully-reconstructed
+      `(data, offsets)` output — the two halves currently live in one `py.detach`
+      block in `src/ffi/mod.rs`, and splitting them changes what work each stage
+      overlaps). Restructuring the FFI's window loop, `Svar1Store`'s ownership of
+      per-contig arrays, and `_streaming.py`'s iteration protocol together, in one
+      task, risked rushing exactly the parity-critical surface
+      (`test_streaming_parity.py`, `test_scale_parity_still_byte_identical`) this
+      whole effort is gated on. Tasks 2 + 4 (window-granular reads + the deterministic
+      entries-touched gate) are the asymptotic fix and are already landed,
+      independently valuable, and unaffected by this split — the double-buffer
+      engine's benefit (overlapping producer I/O with consumer reconstruct) is a
+      separate, separately-measured effect that this split defers rather than drops.
+      Step 6 (cold-page-cache overlap measurement) is skipped for the same reason —
+      it only makes sense once Step 5's wiring exists; no overlap number is reported
+      here to avoid fabricating one.
+    - **Follow-up task (not yet filed as a plan step):** wire `Svar1Store` as a
+      `StreamBackend` and move `StreamingDataset`'s window loop into Rust behind a
+      Python-visible iterator/handle, so `to_iter()` actually overlaps producer I/O
+      with consumer reconstruct. Should re-decide the `Buffer` split (offsets-only vs.
+      fully-reconstructed) as its first step, since that decision shapes the
+      GIL-crossing design.
   - ⚠️ **Inherited perf/scale debt from the walking skeleton — DELETED, not fixed, by Task 2.**
     All of it was downstream of the one wrong dependency above, so the rewrite removed it rather
     than optimizing it. (a) `Svar1RecordSource::new` was **O(all CSR entries)** — it eagerly

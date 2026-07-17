@@ -626,6 +626,7 @@ dependencies = [
  "bigtools",
  "bytemuck",
  "coitrees",
+ "crossbeam-channel",
  "genoray",
  "itertools 0.14.0",
  "ndarray",
