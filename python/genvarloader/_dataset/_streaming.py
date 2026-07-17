@@ -353,7 +353,24 @@ class _Svar1Backend:
         self._contigs = list(contigs)
 
         sv = SparseVar(str(svar_path))
-        self.n_samples = len(sv.available_samples)
+        # `gvl.write()` always lexicographically sorts sample names
+        # (`_write.py`'s unconditional `samples.sort()`), so `gvl.Dataset`'s
+        # sample index `s` means "the s-th name in sorted order" -- NOT the
+        # store's native (VCF column) order. `sample_idx` must mean the same
+        # thing here for parity with `gvl.Dataset.open(...)[r, s]` to hold
+        # (see `to_iter`'s docstring). Toy fixtures with <=3 single-digit
+        # sample names never exposed this because sort order and native
+        # order coincide there; a 20-sample "S0".."S19" fixture does not
+        # (lexicographically "S10" < "S2"). `_phys_sample_idx[i]` is the
+        # store's native column for the i-th name in sorted order; every
+        # sample index that crosses into Rust must go through it first.
+        native_samples = sv.available_samples
+        self._sample_names = sorted(native_samples)
+        _name_to_phys = {name: i for i, name in enumerate(native_samples)}
+        self._phys_sample_idx = np.array(
+            [_name_to_phys[s] for s in self._sample_names], dtype=np.int64
+        )
+        self.n_samples = len(self._sample_names)
         self.ploidy = sv.ploidy
 
         self._ref = Reference.from_path(reference_path, self._contigs)
@@ -484,13 +501,20 @@ class _Svar1Backend:
         ref_bytes = np.ascontiguousarray(self._ref.reference[c_s:c_e], np.uint8)
         ref_offsets = np.array([0, c_e - c_s], dtype=np.int64)
 
+        # `s_idx` is a PUBLIC index (sorted-name order, matching `gvl.Dataset`);
+        # the store's genotype CSR is laid out in native (VCF column) order, so
+        # translate before crossing into Rust. See `__init__`'s comment on
+        # `_phys_sample_idx`. Output row order is unaffected -- only which
+        # physical column each row reads from changes.
+        phys_s_idx = self._phys_sample_idx[s_idx]
+
         data, offsets = reconstruct_haplotypes_svar1(
             self._store,
             contig_name,
             vs_c,
             ve_c,
             region_bounds,
-            np.ascontiguousarray(s_idx, np.int64),
+            np.ascontiguousarray(phys_s_idx, np.int64),
             self._v_starts,
             self._ilens,
             self._alt_alleles,
