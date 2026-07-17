@@ -17,8 +17,11 @@ def test_plan_is_region_major_and_covers_grid():
     seen = []
 
     def stub(r_idx, s_idx):
+        # Cartesian window callback: r_idx and s_idx are independent index sets
+        # (not parallel arrays of the same length), C-order (region, sample).
         seen.append((tuple(r_idx), tuple(s_idx)))
-        return np.stack([r_idx, s_idx], axis=1)  # fake "data"
+        rr, ss = np.meshgrid(r_idx, s_idx, indexing="ij")
+        return np.stack([rr.ravel(), ss.ravel()], axis=1)  # fake "data"
 
     sds = StreamingDataset(
         bed, contigs=["chr1"], n_samples=2, ploidy=2, _reconstruct_window=stub
@@ -55,7 +58,8 @@ def test_sort_order_is_duplicate_safe():
     n_regions = len(rows)
 
     def stub(r_idx, s_idx):
-        return np.stack([r_idx, s_idx], axis=1)
+        rr, ss = np.meshgrid(r_idx, s_idx, indexing="ij")
+        return np.stack([rr.ravel(), ss.ravel()], axis=1)
 
     sds = StreamingDataset(
         bed, contigs=["chr1"], n_samples=n_samples, ploidy=2, _reconstruct_window=stub

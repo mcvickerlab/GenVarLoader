@@ -22,8 +22,8 @@ seqpro-core = "0.1"
 # genoray crates are pulled straight from GitHub (no crates.io publish). Cargo finds
 # each package by name inside the repo — no in-repo path is given or needed. Bump `rev`
 # to pull newer genoray code; both crates must share the same rev (one clone, one repo).
-svar2-codec = { git = "https://github.com/d-laub/genoray.git", rev = "66ba734b85fcf1326008d66b33c052c7cf278a9f" }
-genoray_core = { git = "https://github.com/d-laub/genoray.git", rev = "66ba734b85fcf1326008d66b33c052c7cf278a9f", package = "genoray", default-features = false, features = ["conversion"] }
+svar2-codec = { git = "https://github.com/d-laub/genoray.git", rev = "e07477e687c913f9605fc79ea251f1bb3b177aa9" }
+genoray_core = { git = "https://github.com/d-laub/genoray.git", rev = "e07477e687c913f9605fc79ea251f1bb3b177aa9", package = "genoray", default-features = false, features = ["conversion"] }
 
 [features]
 extension-module = ["pyo3/extension-module"]
@@ -33,6 +33,7 @@ version = "0.29"
 features = ["abi3-py310"]
 
 [dev-dependencies]
+bytemuck = "1"
 rstest = "0.26.1"
 tempfile = "3"
 

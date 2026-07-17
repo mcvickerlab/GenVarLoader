@@ -76,7 +76,7 @@ only** (no map-style random access).
 | Plan | Scope | Status |
 |---|---|---|
 | `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — PR [#274](https://github.com/mcvickerlab/GenVarLoader/pull/274) |
-| _TBD (Plan 2)_ — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | ⬜ |
+| _TBD (Plan 2)_ — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275) | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Task 2 (read path) done; double-buffer engine + `to_iter` remain |
 | _TBD (Plan 3/4)_ — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend | ⬜ |
 | _TBD (Plan 5)_ — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
 
@@ -109,31 +109,45 @@ only** (no map-style random access).
   **Byte-identical parity** vs `gvl.write()`+`Dataset.open()[r,s]` across an unsorted,
   interleaved multi-contig bed (12 regions × 3 samples) through a real `DataLoader`.
   Public `gvl.StreamingDataset` + docs shipped. _Walking-skeleton Tasks 3–6_
-- ⬜ **genoray prerequisite: ungated `svar1_query`** — `Svar1Reader` + `var_ranges` +
+- ✅ **genoray prerequisite: ungated `svar1_query`** — `Svar1Reader` + `var_ranges` +
   cartesian `find_ranges` in genoray, ungated (memmap2 + bytemuck + the existing `search.rs`; no
   htslib). **Root cause of the skeleton's SVAR1 debt:** genoray has an ungated Rust *query* API
   for SVAR2 (`genoray_core::query`) and **none for SVAR1**, so the skeleton reached for the
   conversion-gated `Svar1RecordSource` — a *conversion-pipeline record producer*, not a query API.
   Stage A is nearly free (`search::overlap_range` already ports Python's `var_ranges`; nobody
   wired it to SVAR1); Stage B is two `partition_point`s per hap. Consumed via a `rev` bump — **not
-  a release gate** (see Development Notes in CLAUDE.md). _Plan 2, chunk 1_ —
+  a release gate** (see Development Notes in CLAUDE.md). Folded into Task 2 below (rev
+  `e07477e687c913f9605fc79ea251f1bb3b177aa9`) after Task 1 came back blocked on the same drifted
+  `Svar1RecordSource` call site Task 2 deletes. _Plan 2, chunk 1_ —
   genoray issue [#123](https://github.com/d-laub/genoray/issues/123)
-- ⬜ **SVAR1 window reads + double-buffer engine + `to_iter` surface** — crossbeam
+- 🚧 **SVAR1 window reads + double-buffer engine + `to_iter` surface** — crossbeam
   producer/consumer, generic `StreamBackend`. _Plan 2_ —
   issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275)
-  - ⚠️ **Inherited perf/scale debt from the walking skeleton — DELETED, not fixed, by Plan 2.**
-    All of it is downstream of the one wrong dependency above, so the rewrite removes it rather
-    than optimizing it. (a) `Svar1RecordSource::new` is **O(all CSR entries)** — it eagerly
-    inverts the contig's whole hap-major CSR — and the skeleton calls it **per batch**; the real
-    cost is far worse than the O(records × batch) walk alone. (b) The `.tolist()` per-contig table
-    (~10M `int` objects for a human chr1) and `set_contig_table` exist **only** to feed that
-    constructor → gone with it, not converted to `PyReadonlyArray1`. (c) The per-batch
-    `t.pos.clone()` et al. exist only because the constructor takes its vectors **by value** →
-    gone with it, not fixed with slices/`Arc`. (d) The GIL-held walk (`src/ffi/mod.rs:826`,
-    *before* the `py.detach` at `:850`) is fixed by the `Svar2Store` template — borrow the reader
-    across `py.detach`.
-  - ⚠️ The skeleton **conflates window and batch** (one Rust call per batch). That conflation is
-    what produced both the per-batch contig walk and the apparent need for pairwise reads.
+  - ✅ **Task 2 (read path): `Svar1Store` rewritten on `svar1_query`.** `read_window` is now two
+    binary-search stages (`var_ranges` + `find_ranges`) inside `py.detach`, GIL-free;
+    `geno_v_idxs` is `Svar1Reader::variant_idxs()` itself (zero copy). `Svar1RecordSource`,
+    `ContigTable`, `set_contig_table`, and every `.tolist()`/per-batch clone are deleted, not
+    optimized. Window is now the read granularity (`regions x samples x ploidy`, cartesian);
+    `StreamingDataset._plan`/`_iter_batches` slice batches out of a window instead of driving
+    pairwise reads. Byte-identical parity verified
+    (`tests/dataset/test_streaming_parity.py::test_streaming_matches_written_all_cells`).
+  - ⬜ Double-buffer engine + `to_iter` surface (crossbeam producer/consumer) — not yet started;
+    Task 2 only replaced the synchronous read path.
+  - ⚠️ **Inherited perf/scale debt from the walking skeleton — DELETED, not fixed, by Task 2.**
+    All of it was downstream of the one wrong dependency above, so the rewrite removed it rather
+    than optimizing it. (a) `Svar1RecordSource::new` was **O(all CSR entries)** — it eagerly
+    inverted the contig's whole hap-major CSR — and the skeleton called it **per batch**; the real
+    cost was far worse than the O(records × batch) walk alone. (b) The `.tolist()` per-contig
+    table (~10M `int` objects for a human chr1) and `set_contig_table` existed **only** to feed
+    that constructor → gone with it, not converted to `PyReadonlyArray1`. (c) The per-batch
+    `t.pos.clone()` et al. existed only because the constructor took its vectors **by value** →
+    gone with it, not fixed with slices/`Arc`. (d) The GIL-held walk (old `src/ffi/mod.rs:826`,
+    *before* the `py.detach`) is fixed by the `Svar2Store` template — the reader now borrows across
+    `py.detach` (`store: PyRef<'py, _>`).
+  - ⚠️ The skeleton **conflated window and batch** (one Rust call per batch). That conflation is
+    what produced both the per-batch contig walk and the apparent need for pairwise reads. Task 2
+    fixes this: the window (`_window_regions`, default 64) is now the read granularity and a batch
+    is a slice of it.
 - ⬜ **VCF backend / PGEN backend** — _Plan 3/4_ —
   issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276)
 - ⬜ **Output-mode breadth + docs** — _Plan 5; docs folded in_ —
