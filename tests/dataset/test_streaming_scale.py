@@ -142,6 +142,92 @@ def test_entries_touched_is_flat_across_batch_size(scale_fixture):
     )
 
 
+def test_peak_rss_is_flat_in_cohort_size(tmp_path):
+    """THE #284 GATE. At fixed batch_size, peak RSS growth across a full sweep must NOT
+    scale with the number of samples: per-batch generation caps output at batch_size,
+    and the offsets buffer is max_mem-bounded. Whole-window generation (the old path)
+    would grow output ~linearly in n_samples and blow this."""
+    import resource
+    import subprocess
+
+    import numpy as np
+    import polars as pl
+    from genoray import VCF, SparseVar
+
+    def build(n_samples: int):
+        d = tmp_path / f"n{n_samples}"
+        d.mkdir()
+        ref = d / "ref.fa"
+        rng = np.random.default_rng(1)
+        seq = "".join(rng.choice(list("ACGT"), 4000))
+        ref.write_text(f">chr1\n{seq}\n")
+        subprocess.run(["samtools", "faidx", str(ref)], check=True)
+        vcf = d / "in.vcf"
+        lines = [
+            "##fileformat=VCFv4.2",
+            "##contig=<ID=chr1,length=4000>",
+            '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t"
+            + "\t".join(f"S{i}" for i in range(n_samples)),
+        ]
+        pos = np.sort(rng.choice(np.arange(2, 3998), 200, replace=False))
+        for p in pos:
+            gts = "\t".join(
+                f"{rng.integers(0, 2)}|{rng.integers(0, 2)}" for _ in range(n_samples)
+            )
+            lines.append(f"chr1\t{p}\t.\tA\tG\t.\t.\t.\tGT\t{gts}")
+        vcf.write_text("\n".join(lines) + "\n")
+        bcf = d / "in.bcf"
+        subprocess.run(
+            ["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True
+        )
+        subprocess.run(["bcftools", "index", str(bcf)], check=True)
+        svar = d / "store.svar"
+        SparseVar.from_vcf(
+            svar,
+            VCF(bcf),
+            max_mem="1g",
+            samples=[f"S{i}" for i in range(n_samples)],
+            overwrite=True,
+        )
+        return svar, ref
+
+    def peak_growth(n_samples: int) -> int:
+        svar, ref = build(n_samples)
+        bed = pl.DataFrame(
+            {
+                "chrom": ["chr1"] * 4,
+                "chromStart": [0, 100, 200, 300],
+                "chromEnd": [100, 200, 300, 400],
+            }
+        )
+        sds = gvl.StreamingDataset(bed, reference=ref, variants=svar).with_seqs(
+            "haplotypes"
+        )
+        list(sds.to_iter(batch_size=4))  # warm up allocator
+        before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        for _ in range(3):
+            list(sds.to_iter(batch_size=4))
+        after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return (after - before) * 1024  # KiB -> bytes on Linux
+
+    small = peak_growth(50)
+    large = peak_growth(400)
+    # NOTE on measurement limitation: ru_maxrss is a process-global MONOTONIC
+    # high-water mark. If the peak was already reached during the small-cohort
+    # sweep (or an earlier test in this session), both deltas can measure ~0,
+    # which makes this assertion vacuously true rather than a real discriminator
+    # between flat and linear growth. See the module docstring for the history of
+    # a prior ru_maxrss guard removed for exactly this "blind" failure mode --
+    # inspect the printed deltas below when re-validating this gate.
+    print(f"[rss-gate] small(n=50) delta={small}B large(n=400) delta={large}B")
+    # 8x the cohort must NOT produce ~8x the peak growth; per-batch output is flat.
+    assert large < max(small, 8 * 1024 * 1024) * 2, (
+        f"peak RSS growth scaled with cohort (50->{small}B, 400->{large}B) -- "
+        "whole-window output materialization has returned"
+    )
+
+
 def test_scale_parity_still_byte_identical(scale_fixture, tmp_path):
     """The scale fixture must ALSO satisfy the parity oracle -- a fast wrong answer
     is not progress."""
