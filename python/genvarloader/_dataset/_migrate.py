@@ -63,17 +63,14 @@ def _migrate_track(track_dir: Path) -> None:
 
 
 def migrate(path: str | Path) -> None:
-    """Migrate a GVL dataset's track intervals from format 1.x (array-of-structs)
-    to format 2.0 (struct-of-arrays), in place.
+    """Migrate a GVL dataset's track intervals from format 1.x (array-of-structs) to format 2.0 (struct-of-arrays), in place.
 
     Streaming and crash-safe: peak extra disk is one track's interval store.
     Genotypes, regions, and reference are untouched. Idempotent — a no-op (with
     leftover-AoS cleanup) on a dataset that is already 2.0.
 
-    Parameters
-    ----------
-    path
-        Path to the GVL dataset directory.
+    Args:
+        path: Path to the GVL dataset directory.
     """
     path = Path(path)
     meta_path = path / "metadata.json"

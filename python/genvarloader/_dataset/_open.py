@@ -201,9 +201,9 @@ class OpenRequest:
     def _warn_truncated_tracks(
         self, metadata: Metadata, regions: NDArray[np.int32]
     ) -> None:
-        """Warn when a dataset's stored track windows were truncated below the
-        input regions (variant+track datasets written before the chromEnd-floor
-        fix). Such datasets silently drop track signal past each region's
+        """Warn when a dataset's stored track windows were truncated below the input regions (variant+track datasets written before the chromEnd-floor fix).
+
+        Such datasets silently drop track signal past each region's
         rightmost variant and must be rewritten with ``gvl.write``/``gvl.update``.
         """
         if not (self._has_genotypes() and self._has_intervals()):

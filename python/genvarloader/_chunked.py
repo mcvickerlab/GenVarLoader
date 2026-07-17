@@ -1,5 +1,4 @@
-"""Chunk planner: groups (r, s) pairs into per-slot chunks aligned to
-mini-batch boundaries."""
+"""Chunk planner: groups (r, s) pairs into per-slot chunks aligned to mini-batch boundaries."""
 
 from __future__ import annotations
 

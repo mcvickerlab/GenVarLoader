@@ -82,8 +82,7 @@ def getitem(
         ...,
     ]
 ):
-    """Top-level eager query. Dispatches to the (un)spliced helpers and then
-    applies the shape-massaging steps (pad / to_numpy, reshape, squeeze)."""
+    """Top-level eager query. Dispatches to the (un)spliced helpers and then applies the shape-massaging steps (pad / to_numpy, reshape, squeeze)."""
     if is_str_arr(idx) and view.idxer.r2i_map is None:
         raise ValueError("Cannot query regions by name because no region name was set.")
 
@@ -557,8 +556,7 @@ def _regroup(
     group_offsets: NDArray[np.int64],
     out_shape: tuple[int | None, ...],
 ) -> _Flat | _FlatAnnotatedHaps | Ragged | RaggedAnnotatedHaps:
-    """Rewrap a per-element flat ragged (or Ragged) with grouped offsets so
-    each cell holds one contiguous spliced element.
+    """Rewrap a per-element flat ragged (or Ragged) with grouped offsets so each cell holds one contiguous spliced element.
 
     Both branches share the same data buffer; only the outer offsets / shape
     change.

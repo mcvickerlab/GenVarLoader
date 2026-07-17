@@ -42,32 +42,26 @@ class Fasta(Reader):
     ) -> None:
         """Read sequences from a FASTA file.
 
-        Parameters
-        ----------
-        name : str
-            Name of the reader, for example `'seq'`.
-        path : Union[str, Path]
-            Path to the FASTA file or a `.gvlfa` cache directory.
-        pad : Optional[str], optional
-            A single character which, if passed, will pad out-of-bound ranges with this
-            value. By default no padding is done and out-of-bound ranges raise an error.
-        alphabet : str, sp.NucleotideAlphabet, sp.AminoAlphabet, optional
-            Alphabet to use for the sequences. If not passed, defaults to DNA.
-        in_memory : bool, optional
-            Whether to load the sequences into memory. If `True`, the sequences will be
-            loaded into memory and the FASTA file will be closed. If `False`, the sequences
-            will be read from the FASTA file on demand. Defaults to `False`.
-        cache : bool, optional
-            Whether to cache the sequences to disk. If `True`, the sequences are written
-            to a sibling `.gvlfa` directory (a self-describing, fingerprint-validated
-            cache). Defaults to `False`. Only used if `in_memory` is `True`. A legacy
-            `.fa.gvl` cache, if present, is migrated automatically. A `.gvlfa` directory
-            may also be passed directly as `path`.
+        Args:
+            name (str): Name of the reader, for example `'seq'`.
+            path (Union[str, Path]): Path to the FASTA file or a `.gvlfa` cache directory.
+            pad (Optional[str], optional): A single character which, if passed, will pad
+                out-of-bound ranges with this value. By default no padding is done and
+                out-of-bound ranges raise an error.
+            alphabet (str, sp.NucleotideAlphabet, sp.AminoAlphabet, optional): Alphabet to use
+                for the sequences. If not passed, defaults to DNA.
+            in_memory (bool, optional): Whether to load the sequences into memory. If `True`,
+                the sequences will be loaded into memory and the FASTA file will be closed. If
+                `False`, the sequences will be read from the FASTA file on demand. Defaults to
+                `False`.
+            cache (bool, optional): Whether to cache the sequences to disk. If `True`, the
+                sequences are written to a sibling `.gvlfa` directory (a self-describing,
+                fingerprint-validated cache). Defaults to `False`. Only used if `in_memory` is
+                `True`. A legacy `.fa.gvl` cache, if present, is migrated automatically. A
+                `.gvlfa` directory may also be passed directly as `path`.
 
-        Raises
-        ------
-        ValueError
-            If pad value is not a single character.
+        Raises:
+            ValueError: If pad value is not a single character.
         """
         self.name = name
         path = Path(path)
@@ -176,26 +170,18 @@ class Fasta(Reader):
     ) -> NDArray[np.bytes_]:
         """Read a sequence from a FASTA file.
 
-        Parameters
-        ----------
-        contig : str
-            Name of the contig/chromosome.
-        starts : ArrayLike
-            Start coordinates, 0-based.
-        ends : ArrayLike
-            End coordinates, 0-based exclusive.
-        **kwargs
-            Not used.
+        Args:
+            contig (str): Name of the contig/chromosome.
+            starts (ArrayLike): Start coordinates, 0-based.
+            ends (ArrayLike): End coordinates, 0-based exclusive.
+            **kwargs: Not used.
 
-        Returns
-        -------
-        NDArray[np.bytes_]
-            Shape: (length). Sequence corresponding to the given genomic coordinates.
+        Returns:
+            NDArray[np.bytes_]: Shape: (length). Sequence corresponding to the given genomic
+                coordinates.
 
-        Raises
-        ------
-        ValueError
-            Coordinates are out-of-bounds and pad value is not set.
+        Raises:
+            ValueError: Coordinates are out-of-bounds and pad value is not set.
         """
         _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:

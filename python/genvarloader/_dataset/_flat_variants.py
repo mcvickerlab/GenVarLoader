@@ -1,5 +1,7 @@
-"""Flat-buffer analog of RaggedVariants: pure-numpy (data, offsets) per field,
-all-numpy hot path. Converts to RaggedVariants only via to_ragged()."""
+"""Flat-buffer analog of RaggedVariants: pure-numpy (data, offsets) per field, all-numpy hot path.
+
+Converts to RaggedVariants only via to_ragged().
+"""
 
 from __future__ import annotations
 
@@ -36,9 +38,11 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class DummyVariant:
-    """Per-field values for the dummy variant inserted into empty
-    (region, sample, ploid) groups. Unspecified info fields default to ``0``
-    for integer columns and ``NaN`` for float columns."""
+    """Per-field values for the dummy variant inserted into empty (region, sample, ploid) groups.
+
+    Unspecified info fields default to ``0`` for integer columns and ``NaN``
+    for float columns.
+    """
 
     start: int = -1
     ilen: int = 0
@@ -332,7 +336,8 @@ class _FlatVariantWindows:
 
         Scalar fields take ``DummyVariant`` values; window fields take ``unk``.
         Window length: ``2*flank_length + len(dummy allele)`` for ref/alt
-        windows, ``len(dummy allele)`` for bare ref/alt alleles."""
+        windows, ``len(dummy allele)`` for bare ref/alt alleles.
+        """
         from .._flat import _Flat
 
         new_fields: dict[str, Any] = {}
@@ -355,8 +360,11 @@ class _FlatVariantWindows:
 
 @dataclass(slots=True)
 class _FlatVariants:
-    """Flat analog of RaggedVariants. `fields` maps field name -> _Flat (scalar
-    fields: start/ilen/dosage/info) or _FlatAlleles (alt/ref)."""
+    """Flat analog of RaggedVariants.
+
+    `fields` maps field name -> _Flat (scalar fields: start/ilen/dosage/info)
+    or _FlatAlleles (alt/ref).
+    """
 
     fields: dict[str, Any] = field(default_factory=dict)
     flank_tokens: Any = (
@@ -425,10 +433,12 @@ class _FlatVariants:
     def fill_empty_groups(
         self, dummy: "DummyVariant", unk: int | None = None
     ) -> "_FlatVariants":
-        """Insert one dummy variant into each empty (b*p) group; non-empty
-        groups are unchanged. Every field shares the same empty-row pattern, so
+        """Insert one dummy variant into each empty (b*p) group; non-empty groups are unchanged.
+
+        Every field shares the same empty-row pattern, so
         the rebuilt offsets stay consistent across fields. When ``flank_tokens``
-        is present, its empty rows are filled with ``2L`` ``unk`` tokens."""
+        is present, its empty rows are filled with ``2L`` ``unk`` tokens.
+        """
         from .._flat import _Flat
 
         new_fields: dict[str, Any] = {}
@@ -791,10 +801,10 @@ def _rc_alleles_rust(byte_data, seq_offsets, var_offsets, to_rc_row):
 def get_variants_flat(
     haps: "Haps", idx: NDArray[np.integer], regions=None
 ) -> "_FlatVariants | _FlatVariantWindows":
-    """Flat-buffer analog of :meth:`Haps._get_variants`: builds a
-    :class:`_FlatVariants` on the pure-numpy hot path. Re-wrapping the
-    result via :meth:`_FlatVariants.to_ragged` is byte-identical to the
-    :class:`RaggedVariants` produced by ``_get_variants``.
+    """Flat-buffer analog of :meth:`Haps._get_variants`: builds a :class:`_FlatVariants` on the pure-numpy hot path.
+
+    Re-wrapping the result via :meth:`_FlatVariants.to_ragged` is byte-identical
+    to the :class:`RaggedVariants` produced by ``_get_variants``.
 
     Replicates ONLY AF filtering (min_af/max_af); exonic filtering is not
     threaded into the variants output (its ``keep``/``keep_offsets`` params are

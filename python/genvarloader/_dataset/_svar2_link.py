@@ -107,22 +107,16 @@ def _verify_svar2_fingerprint(svar2_path: Path, link: Svar2Link | None) -> None:
 
 
 def make_svar2_link(gvl_path: Path, svar2_path: Path) -> Svar2Link:
-    """Build a :class:`Svar2Link` recording the on-disk relationship between
-    a gvl dataset and the ``.svar2`` store it reads from.
+    """Build a :class:`Svar2Link` recording the on-disk relationship between a gvl dataset and the ``.svar2`` store it reads from.
 
-    Parameters
-    ----------
-    gvl_path
-        Path to the gvl dataset directory.
-    svar2_path
-        Path to the ``.svar2`` store the dataset links to.
+    Args:
+        gvl_path: Path to the gvl dataset directory.
+        svar2_path: Path to the ``.svar2`` store the dataset links to.
 
-    Returns
-    -------
-    Svar2Link
-        Relative/absolute paths to the store plus its fingerprint
-        (file count and total byte size), used to detect a moved or
-        modified store on open.
+    Returns:
+        Svar2Link: Relative/absolute paths to the store plus its fingerprint
+            (file count and total byte size), used to detect a moved or
+            modified store on open.
     """
     svar2_resolved = svar2_path.resolve()
     n_files, store_bytes = _svar2_store_fingerprint(svar2_resolved)

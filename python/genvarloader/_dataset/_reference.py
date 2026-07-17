@@ -30,8 +30,10 @@ INT64_MAX = np.iinfo(np.int64).max
 
 @dataclass(slots=True)
 class Reference:
-    """A reference genome kept in-memory. Typically this is only instantiated to be
-    passed to :meth:`Dataset.open <genvarloader.Dataset.open>` and avoid data duplication.
+    """A reference genome kept in-memory.
+
+    Typically this is only instantiated to be passed to :meth:`Dataset.open
+    <genvarloader.Dataset.open>` and avoid data duplication.
 
     .. note::
         Do not instantiate this class directly. Use :meth:`Reference.from_path` instead.
@@ -56,30 +58,26 @@ class Reference:
     ):
         """Load a reference genome from a FASTA file.
 
-        Parameters
-        ----------
-        fasta
-            Path to a ``.fa``/``.fa.bgz`` FASTA file or an existing ``.gvlfa``
-            cache directory. When a FASTA path is given, a sibling ``.gvlfa``
-            cache is built on first use and reused on subsequent calls; a legacy
-            ``.fa.gvl`` flat cache is automatically migrated to the new format.
-        contigs
-            List of contig names to load. If None, all contigs in the FASTA file are loaded.
-            Can be either UCSC or Ensembl style (i.e. with or without the "chr" prefix) and
-            will be handled appropriately to match the underlying FASTA.
+        Args:
+            fasta: Path to a ``.fa``/``.fa.bgz`` FASTA file or an existing ``.gvlfa``
+                cache directory. When a FASTA path is given, a sibling ``.gvlfa``
+                cache is built on first use and reused on subsequent calls; a legacy
+                ``.fa.gvl`` flat cache is automatically migrated to the new format.
+            contigs: List of contig names to load. If None, all contigs in the FASTA file are loaded.
+                Can be either UCSC or Ensembl style (i.e. with or without the "chr" prefix) and
+                will be handled appropriately to match the underlying FASTA.
 
-            .. note::
-                Reordering or subsetting contigs requires ``in_memory=True``. With
-                ``in_memory=False`` the memory-mapped reference stays in FASTA order, so
-                ``contigs`` must be None or exactly the full FASTA contig order; anything
-                else raises :class:`ValueError`.
-        in_memory
-            Whether to load the reference genome into memory. If True, the reference genome
-            is loaded into memory. If False, the reference genome is read on-demand from a
-            memory mapped array. This will still be much faster than reading from FASTA but
-            slower than keeping it in memory. This is useful if you need to work with many
-            reference genomes or have very limited RAM. Because the memory map preserves
-            FASTA order, ``in_memory=False`` cannot reorder or subset ``contigs`` (see above).
+                .. note::
+                    Reordering or subsetting contigs requires ``in_memory=True``. With
+                    ``in_memory=False`` the memory-mapped reference stays in FASTA order, so
+                    ``contigs`` must be None or exactly the full FASTA contig order; anything
+                    else raises :class:`ValueError`.
+            in_memory: Whether to load the reference genome into memory. If True, the reference genome
+                is loaded into memory. If False, the reference genome is read on-demand from a
+                memory mapped array. This will still be much faster than reading from FASTA but
+                slower than keeping it in memory. This is useful if you need to work with many
+                reference genomes or have very limited RAM. Because the memory map preserves
+                FASTA order, ``in_memory=False`` cannot reorder or subset ``contigs`` (see above).
         """
         path = Path(fasta)
         meta, data_path = ensure_cache(fasta)
@@ -558,13 +556,10 @@ class RefDataset(Generic[T]):
     ) -> TorchDataset:
         """Convert the dataset to a PyTorch dataset.
 
-        Parameters
-        ----------
-        return_indices
-            If True, the dataset will return the indices of the regions in the reference genome.
-        transform
-            A function to transform the data. Should accept a numpy array of S1 with shape (batch_size, length).
-            If return_indices is true, the function should accept a tuple of (sequences, indices).
+        Args:
+            return_indices: If True, the dataset will return the indices of the regions in the reference genome.
+            transform: A function to transform the data. Should accept a numpy array of S1 with shape (batch_size, length).
+                If return_indices is true, the function should accept a tuple of (sequences, indices).
         """
         if self.output_length == "ragged":
             raise ValueError(
@@ -593,56 +588,40 @@ class RefDataset(Generic[T]):
         return_indices: bool = False,
         transform: Callable | None = None,
     ) -> td.DataLoader:
-        """Convert the dataset to a PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
-        :class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
-        Requires PyTorch to be installed.
+        """Convert the dataset to a PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`.
 
-        Parameters
-        ----------
-        batch_size
-            How many samples per batch to load.
-        shuffle
-            Set to True to have the data reshuffled at every epoch.
-        sampler
-            Defines the strategy to draw samples from the dataset. Can be any :py:class:`Iterable <typing.Iterable>` with :code:`__len__` implemented. If specified, shuffle must not be specified.
+        The parameters are the same as a :class:`DataLoader <torch.utils.data.DataLoader>`
+        with a few omissions e.g. :code:`batch_sampler`. Requires PyTorch to be installed.
 
-            .. important::
-                Do not provide a :class:`BatchSampler <torch.utils.data.BatchSampler>` here. GVL Datasets use multithreading when indexed with batches of indices to avoid the overhead of multi-processing.
-                To leverage this, GVL will automatically wrap the :code:`sampler` with a :class:`BatchSampler <torch.utils.data.BatchSampler>`
-                so that lists of indices are given to the GVL Dataset instead of one index at a time. See `this post <https://discuss.pytorch.org/t/dataloader-sample-by-slices-from-dataset/113005>`_
-                for more information.
-        num_workers
-            How many subprocesses to use for dataloading. :code:`0` means that the data will be loaded in the main process.
+        Args:
+            batch_size: How many samples per batch to load.
+            shuffle: Set to True to have the data reshuffled at every epoch.
+            sampler: Defines the strategy to draw samples from the dataset. Can be any :py:class:`Iterable <typing.Iterable>` with :code:`__len__` implemented. If specified, shuffle must not be specified.
 
-            .. tip::
-                For GenVarLoader, it is generally best to set this to 0 or 1 since almost everything in
-                GVL is multithreaded. However, if you are using a transform that is compute intensive and single threaded, there may
-                be a benefit to setting this > 1.
-        collate_fn
-            Merges a list of samples to form a mini-batch of Tensor(s).
-        pin_memory
-            If :code:`True`, the data loader will copy Tensors into device/CUDA pinned memory before returning them. If your data elements are a custom type, or your :code:`collate_fn` returns a batch that is a custom type, see the example below.
-        drop_last
-            Set to :code:`True` to drop the last incomplete batch, if the dataset size is not divisible by the batch size. If :code:`False` and the size of dataset is not divisible by the batch size, then the last batch will be smaller.
-        timeout
-            If positive, the timeout value for collecting a batch from workers. Should always be non-negative.
-        worker_init_fn
-            If not :code:`None`, this will be called on each worker subprocess with the worker id (an int in :code:`[0, num_workers - 1]`) as input, after seeding and before data loading.
-        multiprocessing_context
-            If :code:`None`, the default multiprocessing context of your operating system will be used.
-        generator
-            If not :code:`None`, this RNG will be used by RandomSampler to generate random indexes and multiprocessing to generate :code:`base_seed` for workers.
-        prefetch_factor
-            Number of batches loaded in advance by each worker. 2 means there will be a total of 2 * num_workers batches prefetched across all workers. (default value depends on the set value for num_workers. If value of num_workers=0 default is None. Otherwise, if value of num_workers > 0 default is 2).
-        persistent_workers
-            If :code:`True`, the data loader will not shut down the worker processes after a dataset has been consumed once. This allows to maintain the workers Dataset instances alive.
-        pin_memory_device
-            The device to :code:`pin_memory` to if :code:`pin_memory` is :code:`True`.
-        return_indices
-            If True, the dataset will return the indices of the regions in the reference genome.
-        transform
-            A function to transform the data. Should accept a numpy array of S1 with shape (batch_size, length).
-            If return_indices is true, the function should accept a tuple of (sequences, indices).
+                .. important::
+                    Do not provide a :class:`BatchSampler <torch.utils.data.BatchSampler>` here. GVL Datasets use multithreading when indexed with batches of indices to avoid the overhead of multi-processing.
+                    To leverage this, GVL will automatically wrap the :code:`sampler` with a :class:`BatchSampler <torch.utils.data.BatchSampler>`
+                    so that lists of indices are given to the GVL Dataset instead of one index at a time. See `this post <https://discuss.pytorch.org/t/dataloader-sample-by-slices-from-dataset/113005>`_
+                    for more information.
+            num_workers: How many subprocesses to use for dataloading. :code:`0` means that the data will be loaded in the main process.
+
+                .. tip::
+                    For GenVarLoader, it is generally best to set this to 0 or 1 since almost everything in
+                    GVL is multithreaded. However, if you are using a transform that is compute intensive and single threaded, there may
+                    be a benefit to setting this > 1.
+            collate_fn: Merges a list of samples to form a mini-batch of Tensor(s).
+            pin_memory: If :code:`True`, the data loader will copy Tensors into device/CUDA pinned memory before returning them. If your data elements are a custom type, or your :code:`collate_fn` returns a batch that is a custom type, see the example below.
+            drop_last: Set to :code:`True` to drop the last incomplete batch, if the dataset size is not divisible by the batch size. If :code:`False` and the size of dataset is not divisible by the batch size, then the last batch will be smaller.
+            timeout: If positive, the timeout value for collecting a batch from workers. Should always be non-negative.
+            worker_init_fn: If not :code:`None`, this will be called on each worker subprocess with the worker id (an int in :code:`[0, num_workers - 1]`) as input, after seeding and before data loading.
+            multiprocessing_context: If :code:`None`, the default multiprocessing context of your operating system will be used.
+            generator: If not :code:`None`, this RNG will be used by RandomSampler to generate random indexes and multiprocessing to generate :code:`base_seed` for workers.
+            prefetch_factor: Number of batches loaded in advance by each worker. 2 means there will be a total of 2 * num_workers batches prefetched across all workers. (default value depends on the set value for num_workers. If value of num_workers=0 default is None. Otherwise, if value of num_workers > 0 default is 2).
+            persistent_workers: If :code:`True`, the data loader will not shut down the worker processes after a dataset has been consumed once. This allows to maintain the workers Dataset instances alive.
+            pin_memory_device: The device to :code:`pin_memory` to if :code:`pin_memory` is :code:`True`.
+            return_indices: If True, the dataset will return the indices of the regions in the reference genome.
+            transform: A function to transform the data. Should accept a numpy array of S1 with shape (batch_size, length).
+                If return_indices is true, the function should accept a tuple of (sequences, indices).
         """
         return get_dataloader(
             dataset=self.to_torch_dataset(return_indices, transform),
@@ -705,8 +684,7 @@ def _fetch_spliced_ref(
     pad_char: int,
     to_rc: "NDArray[np.bool_] | None" = None,
 ) -> "_Flat[np.bytes_]":
-    """Fetch reference bytes in splice-permuted order, returning a per-element
-    flat ragged of shape ``(n_elements, None)``.
+    """Fetch reference bytes in splice-permuted order, returning a per-element flat ragged of shape ``(n_elements, None)``.
 
     This is the kernel-dispatch core shared by :class:`Ref.__call__`'s splice
     branch and :meth:`RefDataset._getitem_spliced`.
