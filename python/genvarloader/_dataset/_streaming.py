@@ -93,6 +93,10 @@ class StreamingDataset:
     _window_regions: int = 64
     _window_samples: int = 1
     _max_mem_bytes: int = 512 * 1024 * 1024
+    # The split read/generate backend (real SVAR1 path). When set, _iter_batches
+    # generates per batch (output bounded by batch_size). The injected
+    # `_reconstruct_window` remains a whole-window TEST seam used when `_backend` is None.
+    _backend: object = None
 
     def __init__(
         self,
@@ -109,6 +113,10 @@ class StreamingDataset:
         _reconstruct_window: Callable[[NDArray[np.intp], NDArray[np.intp]], object]
         | None = None,
     ):
+        # Every construction path must define this: the injected-callback (test) path
+        # leaves it None; the real `.svar` branch below sets it to the `_Svar1Backend`
+        # instance.
+        _backend_obj = None
         if _reconstruct_window is not None:
             # Internal/test-oriented path: caller injects the reconstruction
             # callback directly and must supply everything it would otherwise
@@ -147,7 +155,8 @@ class StreamingDataset:
                 n_samples = backend.n_samples
                 ploidy = backend.ploidy
                 samples = backend._sample_names
-                _reconstruct_window = backend.reconstruct_window
+                _reconstruct_window = None
+                _backend_obj = backend
             elif p.is_dir() and p.suffix == ".svar2":
                 raise NotImplementedError(
                     f"StreamingDataset does not support SVAR2 stores yet ({p}); "
@@ -189,6 +198,7 @@ class StreamingDataset:
         object.__setattr__(self, "ploidy", int(ploidy))
         object.__setattr__(self, "_reconstruct_window", _reconstruct_window)
         object.__setattr__(self, "_samples", list(samples))
+        object.__setattr__(self, "_backend", _backend_obj)
         # Derive the read-window sizing from `max_mem`, NOT from the field defaults
         # above (those are just fallback literals for `__dataclass_fields__`; `slots=True`
         # means there's no class attribute to fall back on at runtime, and this class
@@ -252,22 +262,32 @@ class StreamingDataset:
                     yield r_idx, np.arange(s_lo, s_hi, dtype=np.intp)
 
     def _iter_batches(self, batch_size: int) -> Iterator[tuple]:
-        """Drive the plan and slice each reconstructed window into batches.
+        """Drive the plan; generate each window PER BATCH so output is batch-bounded.
 
-        The window is the READ granularity; a batch is a slice of it. Batches may span
-        window boundaries only in the sense that a window's trailing partial batch is
-        emitted as-is -- windows never split a (region, sample) cell.
+        The window is the READ granularity; a batch is the GENERATION granularity. For
+        the real SVAR1 backend this reads a window's offsets once, then reconstructs
+        each batch_size slice separately (issue #284). The injected `_reconstruct_window`
+        path (tests) reconstructs the whole window and slices -- memory-unbounded, but
+        only ever used with tiny fixtures.
         """
         for r_idx, s_idx in self._plan():
-            data = self._reconstruct_window(r_idx, s_idx)
-            # Window rows are C-order (region, sample): row bi = ri*n_samples + si.
             n_s = len(s_idx)
             flat_r = np.repeat(self._sort_order[r_idx], n_s)
             flat_s = np.tile(s_idx, len(r_idx))
             n_rows = len(flat_r)
-            for lo in range(0, n_rows, batch_size):
-                hi = min(lo + batch_size, n_rows)
-                yield data[lo:hi], flat_r[lo:hi], flat_s[lo:hi]
+            if self._backend is not None:
+                o_starts, o_stops = self._backend.read_window(r_idx, s_idx)
+                for lo in range(0, n_rows, batch_size):
+                    hi = min(lo + batch_size, n_rows)
+                    data = self._backend.generate_batch(
+                        r_idx, s_idx, o_starts, o_stops, lo, hi
+                    )
+                    yield data, flat_r[lo:hi], flat_s[lo:hi]
+            else:
+                data = self._reconstruct_window(r_idx, s_idx)
+                for lo in range(0, n_rows, batch_size):
+                    hi = min(lo + batch_size, n_rows)
+                    yield data[lo:hi], flat_r[lo:hi], flat_s[lo:hi]
 
     def to_iter(
         self, batch_size: int = 1, return_indices: bool = True
@@ -407,9 +427,11 @@ class StreamingDataset:
 class _Svar1Backend:
     """Streaming SVAR1 read backend: reconstructs haplotypes for a batch of
     ``(r_idx, s_idx)`` directly from a live ``.svar`` store, with no on-disk
-    gvl dataset. Wraps `Svar1Store`/`reconstruct_haplotypes_svar1` (Rust) --
-    a `.reconstruct_window` bound method is meant to be passed as
-    `StreamingDataset(_reconstruct_window=...)`.
+    gvl dataset. Wraps `Svar1Store`/`svar1_read_window`/`svar1_generate_batch`
+    (Rust) -- an instance is meant to be passed as
+    `StreamingDataset(_backend=...)` so `_iter_batches` can read a window's
+    offsets once (`read_window`) and generate each batch slice separately
+    (`generate_batch`), bounding peak output by `batch_size` (issue #284).
 
     The static variant table (positions/ILEN/ALT alleles, GLOBAL across
     contigs) is read once at construction from ``SparseVar(path).index``; only
@@ -551,14 +573,15 @@ class _Svar1Backend:
             self._store.set_contig_meta(c, contig_start, n_local, max_v_len)
             self._contig_arrays[c] = (vs_c, ve_c)
 
-    def reconstruct_window(
+    def read_window(
         self, r_idx: NDArray[np.intp], s_idx: NDArray[np.intp]
-    ) -> Ragged:
-        """Reconstruct one CARTESIAN window: every region in `r_idx` x every sample in
-        `s_idx`, single-contig. Returns a `Ragged[np.bytes_]` (S1) of shape
-        `(len(r_idx) * len(s_idx), ploidy, ~length)`, C-order (region, sample).
+    ) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
+        """Read one window's CSR offsets: every region in `r_idx` x every sample in
+        `s_idx`, single-contig. Returns (o_starts, o_stops), each
+        `len(r_idx) * len(s_idx) * ploidy`, C-order (region, sample, ploid) -- absolute
+        indices into the store's variant_idxs mmap. No haplotypes are generated here.
         """
-        from ..genvarloader import reconstruct_haplotypes_svar1
+        from ..genvarloader import svar1_read_window
 
         r_idx = np.asarray(r_idx, dtype=np.intp)
         s_idx = np.asarray(s_idx, dtype=np.intp)
@@ -567,14 +590,49 @@ class _Svar1Backend:
         contig_idx = int(contig_idxs[0])
         if not np.all(contig_idxs == contig_idx):
             raise ValueError(
-                "_Svar1Backend.reconstruct_window: window spans multiple contigs; "
-                "every Rust call must be single-contig (the scheduler groups by contig)."
+                "_Svar1Backend.read_window: window spans multiple contigs; "
+                "every Rust call must be single-contig."
             )
         contig_name = self._contigs[contig_idx]
         vs_c, ve_c = self._contig_arrays[contig_name]
-
         region_bounds = np.ascontiguousarray(self._regions[r_idx, 1:3], np.int32)
 
+        # `s_idx` is a PUBLIC index (sorted-name order, matching `gvl.Dataset`);
+        # the store's genotype CSR is laid out in native (VCF column) order, so
+        # translate before crossing into Rust. See `__init__`'s comment on
+        # `_phys_sample_idx`. Output row order is unaffected -- only which
+        # physical column each row reads from changes.
+        phys_s_idx = self._phys_sample_idx[s_idx]
+
+        o_starts, o_stops = svar1_read_window(
+            self._store,
+            contig_name,
+            vs_c,
+            ve_c,
+            region_bounds,
+            np.ascontiguousarray(phys_s_idx, np.int64),
+        )
+        return np.asarray(o_starts, np.int64), np.asarray(o_stops, np.int64)
+
+    def generate_batch(
+        self,
+        r_idx: NDArray[np.intp],
+        s_idx: NDArray[np.intp],
+        o_starts: NDArray[np.int64],
+        o_stops: NDArray[np.int64],
+        lo: int,
+        hi: int,
+    ) -> Ragged:
+        """Generate haplotypes for window rows [lo:hi] (C-order (region, sample)).
+        Output is (hi-lo)-bounded -- NEVER the whole window (issue #284). `o_starts`/
+        `o_stops` are the whole window's offsets (from `read_window`); this slices the
+        CSR rows [lo*ploidy : hi*ploidy] and the matching per-row region bounds.
+        """
+        from ..genvarloader import svar1_generate_batch
+
+        r_idx = np.asarray(r_idx, dtype=np.intp)
+        s_idx = np.asarray(s_idx, dtype=np.intp)
+        n_s = len(s_idx)
         # `contig_idx` already indexes `self._contigs`, and `Reference.from_path`
         # (called with `self._contigs` in `__init__`) builds `offsets` in that same
         # order -- so `contig_idx` indexes `self._ref` directly, no name lookup
@@ -585,22 +643,22 @@ class _Svar1Backend:
         # FASTA in the other style made `contig_name` absent from
         # `c_map.contigs`, raising `ValueError`. See `Reference._contig_slice`'s
         # docstring and `Svar2Haps._ref_for_contig` for the shared convention.
+        contig_idx = int(self._regions[r_idx[0], 0])
         ref_bytes, ref_offsets = self._ref._contig_slice(contig_idx)
 
-        # `s_idx` is a PUBLIC index (sorted-name order, matching `gvl.Dataset`);
-        # the store's genotype CSR is laid out in native (VCF column) order, so
-        # translate before crossing into Rust. See `__init__`'s comment on
-        # `_phys_sample_idx`. Output row order is unaffected -- only which
-        # physical column each row reads from changes.
-        phys_s_idx = self._phys_sample_idx[s_idx]
+        # Per (region, sample) row bounds for rows [lo:hi], C-order (region, sample):
+        # window row bi = ri*n_s + si -> region r_idx[bi // n_s].
+        rows = np.arange(lo, hi)
+        region_bounds_b = np.ascontiguousarray(
+            self._regions[r_idx[rows // n_s], 1:3], np.int32
+        )
+        o_lo, o_hi = lo * self.ploidy, hi * self.ploidy
 
-        data, offsets = reconstruct_haplotypes_svar1(
+        data, offsets = svar1_generate_batch(
             self._store,
-            contig_name,
-            vs_c,
-            ve_c,
-            region_bounds,
-            np.ascontiguousarray(phys_s_idx, np.int64),
+            np.ascontiguousarray(o_starts[o_lo:o_hi], np.int64),
+            np.ascontiguousarray(o_stops[o_lo:o_hi], np.int64),
+            region_bounds_b,
             self._v_starts,
             self._ilens,
             self._alt_alleles,
@@ -610,7 +668,7 @@ class _Svar1Backend:
             self._ref.pad_char,
             True,
         )
-        batch = len(r_idx) * len(s_idx)
+        n_rows = hi - lo
         return Ragged.from_offsets(
-            data.view("S1"), (batch, self.ploidy, None), np.asarray(offsets, np.int64)
+            data.view("S1"), (n_rows, self.ploidy, None), np.asarray(offsets, np.int64)
         )
