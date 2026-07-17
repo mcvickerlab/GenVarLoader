@@ -9,15 +9,26 @@
 //! the prefetch is speculation-free. (VCF/PGEN backends, #276, DO have decode to
 //! amortize — that is the other half of the premise.)
 //!
-//! Pattern cribbed from genoray's `orchestrator.rs`: named per-stage threads, a
-//! `crossbeam_channel::bounded` for backpressure, shutdown by `Sender` drop, and
-//! join-everything-then-classify-panics (early-returning on a producer error would
-//! leave the consumer blocked on `recv()` forever).
+//! Pattern cribbed from genoray's `orchestrator.rs`: named per-stage threads, shutdown
+//! by `Sender` drop, and join-everything-then-classify-panics (early-returning on a
+//! producer error would leave the consumer blocked on `recv()` forever). Both channels
+//! use `crossbeam_channel::bounded`, but the total buffer count is fixed at `n_slots`,
+//! so neither channel can ever actually fill to capacity — `bounded` and `unbounded`
+//! are behaviorally identical here. The real backpressure is the free-slot pool: the
+//! producer can't get more than `n_slots` windows ahead of the consumer because it has
+//! to receive a recycled slot back from `rx_free` before it can fill another.
 //!
 //! **Slot recycling is NET-NEW here** — genoray does *not* recycle (it allocates each
 //! chunk fresh and drops it). We return drained slots to the producer so memory is
 //! capped at `n_slots * slot_bytes` regardless of plan length. Start with 2 slots
 //! (ping-pong); promote to an N-slot ring only on profiling evidence.
+//!
+//! **Status: groundwork, no production caller yet.** `run_windows`/`StreamBackend` are
+//! exercised only by the unit tests in this module. Wiring `Svar1Store` as a
+//! `StreamBackend` and routing the SVAR1 read path through this engine is Task 5's
+//! Step 5, deliberately split into a follow-up (see
+//! `docs/roadmaps/streaming-dataset.md`); VCF/PGEN backends (#276) are also expected
+//! to land on this engine later.
 
 use crossbeam_channel::bounded;
 
@@ -72,6 +83,23 @@ where
     }
 
     std::thread::scope(|scope| -> anyhow::Result<()> {
+        // Force this closure to OWN `tx_free`/`rx_filled` (not merely borrow them) --
+        // do this FIRST, before anything that could panic. `std::thread::scope` catches
+        // a panicking closure's unwind internally via `catch_unwind`, and it does so
+        // *before* it waits for spawned threads to finish. If `tx_free`/`rx_filled`
+        // were left as bare locals of `run_windows` and only borrowed here, a panic in
+        // `consume` below would unwind this closure's frame without dropping them --
+        // they live one frame further up, in `run_windows` itself, which only unwinds
+        // *after* `thread::scope` finishes its wait loop. `tx_free` would stay alive
+        // through that wait, and the producer's `rx_free.recv()` would block forever
+        // waiting for a slot nothing will ever send: `run_windows` deadlocks and never
+        // returns. Moving them here means the panic's unwind drops them as part of
+        // unwinding *this* closure, so the producer's `recv()` sees the channel close,
+        // returns `Ok(())`, and the wait loop completes. Regression test:
+        // `consumer_panic_does_not_hang_producer`.
+        let tx_free = tx_free;
+        let rx_filled = rx_filled;
+
         // `tx_filled` and `rx_free` are MOVED into the producer -- it is their sole
         // owner, full stop. No clone of either is ever held back in this scope, so
         // when the producer thread returns (success, `fill` error, or `?` early-exit)
@@ -168,16 +196,132 @@ mod tests {
     #[test]
     fn engine_recycles_slots_and_caps_live_buffers() {
         // Slot recycling is NET-NEW here (genoray's orchestrator does not recycle --
-        // it allocates fresh and drops). With 2 slots, at most 2 buffers exist for
-        // the whole run regardless of window count.
-        let be = CountingBackend { fills: AtomicUsize::new(0) };
+        // it allocates fresh and drops). With 2 slots, at most 2 buffers should ever be
+        // *constructed* for the whole run, regardless of window count -- that's the
+        // actual claim in this test's name. Counting `consume` calls (as the previous
+        // version of this test did) doesn't prove that: an implementation that
+        // allocated a fresh buffer per window and never recycled anything would produce
+        // an identical `n == 50`. So instead count `Buffer::default()` constructions via
+        // a counting buffer type, and assert that count is capped at `n_slots`.
+        //
+        // The counter is a `static` scoped to this function (not module-level), so no
+        // other test can read or perturb it even under parallel `cargo test` execution;
+        // still reset it at the top in case this test is ever run more than once (e.g.
+        // under a retry harness).
+        static CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
+        CONSTRUCTIONS.store(0, Ordering::SeqCst);
+
+        #[derive(Debug)]
+        struct CountedBuffer(Vec<usize>);
+        impl Default for CountedBuffer {
+            fn default() -> Self {
+                CONSTRUCTIONS.fetch_add(1, Ordering::SeqCst);
+                CountedBuffer(Vec::new())
+            }
+        }
+
+        struct RecyclingBackend;
+        impl StreamBackend for RecyclingBackend {
+            type Buffer = CountedBuffer;
+            fn fill(&self, w: &WindowSpec, slot: &mut Self::Buffer) -> anyhow::Result<()> {
+                slot.0.clear();
+                slot.0.extend(w.r_lo..w.r_hi);
+                Ok(())
+            }
+        }
+
+        let be = RecyclingBackend;
         let mut n = 0;
         run_windows(&be, &windows(50), 2, |_slot| {
             n += 1;
             Ok(())
         })
         .unwrap();
-        assert_eq!(n, 50);
+        assert_eq!(n, 50, "every window must still be delivered to consume");
+        assert_eq!(
+            CONSTRUCTIONS.load(Ordering::SeqCst),
+            2,
+            "buffer construction count must stay capped at n_slots regardless of plan length"
+        );
+    }
+
+    /// Regression test for the deadlock fixed alongside this test: an unwinding panic
+    /// in `consume` used to leave `tx_free`/`rx_filled` alive as bare locals of
+    /// `run_windows`, only *borrowed* (not owned) by the `thread::scope` closure.
+    /// `std::thread::scope` catches that closure's panic internally, *before* it waits
+    /// for spawned threads to finish -- so those locals never dropped in time, `tx_free`
+    /// stayed alive, and the producer's `rx_free.recv()` blocked forever waiting for a
+    /// slot nothing would ever send. Empirically reproduced before the fix: the run
+    /// below hung with exactly 2 fills completed (the 2 prefilled slots) and never
+    /// returned.
+    ///
+    /// This must show up as a clean, bounded *failure* if the defect regresses, not as
+    /// a hang that stalls the whole test binary -- so the risky call runs on its own
+    /// detached thread, and this test thread only waits on it with a generous timeout.
+    /// If the defect is back, `recv_timeout` times out, the detached thread is leaked
+    /// harmlessly (process exit doesn't wait on it), and the assertion below fails.
+    #[test]
+    fn consumer_panic_does_not_hang_producer() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // Suppress the panic's default backtrace/message noise on stderr -- we are
+        // deliberately triggering this panic and asserting on the outcome, not
+        // debugging it.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let be = CountingBackend { fills: AtomicUsize::new(0) };
+            // 200 windows, matching the size of plan the defect was reproduced against.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_windows(&be, &windows(200), 2, |_slot| {
+                    panic!("deliberate consumer panic");
+                })
+            }));
+            let _ = done_tx.send(result.is_err());
+        });
+
+        let finished = done_rx.recv_timeout(Duration::from_secs(10)).unwrap_or(false);
+        std::panic::set_hook(prev_hook);
+        assert!(
+            finished,
+            "run_windows must not hang when `consume` panics -- it must unwind (with the \
+             panic surfacing to the caller) within the timeout instead of deadlocking"
+        );
+    }
+
+    /// The `bail!("streaming producer thread panicked")` branch (producer.join() ==
+    /// Err, i.e. the producer thread itself panicked rather than `fill()` returning an
+    /// `Err`) was reachable but untested. Unlike the consumer-panic case above, this
+    /// path does not depend on the ownership fix: a panicking `spawn_scoped` thread
+    /// unwinds and drops its own owned locals (including `tx_filled`, moved into it)
+    /// regardless, so the consumer's `rx_filled.recv()` sees the channel close and the
+    /// join always completes -- no timeout guard needed here.
+    #[test]
+    fn producer_panic_surfaces_as_err_not_hang() {
+        struct PanickingBackend;
+        impl StreamBackend for PanickingBackend {
+            type Buffer = Vec<usize>;
+            fn fill(&self, _w: &WindowSpec, _slot: &mut Self::Buffer) -> anyhow::Result<()> {
+                panic!("deliberate producer panic");
+            }
+        }
+
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_windows(&PanickingBackend, &windows(3), 2, |_slot| Ok(()))
+        }));
+        std::panic::set_hook(prev_hook);
+
+        let r = outcome.expect(
+            "run_windows itself must not panic -- the producer's panic must be caught by \
+             `.join()` and reported as an Err",
+        );
+        assert!(r.is_err(), "producer panic must surface as an Err");
+        assert!(format!("{:?}", r.unwrap_err()).contains("streaming producer thread panicked"));
     }
 
     #[test]
