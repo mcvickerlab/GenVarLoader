@@ -828,6 +828,11 @@ pub fn reconstruct_haplotypes_svar1<'py>(
     // would panic there as an uncatchable PanicException. `ref_offsets` is only indexed
     // directly (stride-safe) and must NOT be gated.
     require_contiguous_1d(&ref_, "ref_")?;
+    // `v_starts_c`/`v_ends_c` are borrowed as `&[u32]` (no copy — see below); that
+    // requires `.as_slice()` on the view, which panics on a strided input. Gate here
+    // so a non-contiguous array surfaces as a clean ValueError instead.
+    require_contiguous_1d(&v_starts_c, "v_starts_c")?;
+    require_contiguous_1d(&v_ends_c, "v_ends_c")?;
 
     let rb = region_bounds.as_array();
     let n_regions = rb.nrows();
@@ -852,8 +857,17 @@ pub fn reconstruct_haplotypes_svar1<'py>(
     }
     let shifts_arr = Array2::<i32>::zeros((batch, ploidy)); // jitter=0 in this plan
 
-    let v_starts_c_v: Vec<u32> = v_starts_c.as_array().to_vec();
-    let v_ends_c_v: Vec<u32> = v_ends_c.as_array().to_vec();
+    // ZERO COPY: borrow contig-local starts/ends as slices straight from the numpy
+    // buffers (contiguity guaranteed by the guards above) — no per-window copy of
+    // these whole-contig, variant-scale arrays.
+    let v_starts_c_a = v_starts_c.as_array();
+    let v_ends_c_a = v_ends_c.as_array();
+    let v_starts_c_s: &[u32] = v_starts_c_a
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above");
+    let v_ends_c_s: &[u32] = v_ends_c_a
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above");
 
     let v_starts_a = v_starts.as_array();
     let ilens_a = ilens.as_array();
@@ -868,8 +882,8 @@ pub fn reconstruct_haplotypes_svar1<'py>(
     let result = py.detach(move || -> anyhow::Result<(Array1<u8>, Array1<i64>)> {
         let w = store_ref.read_window(
             contig,
-            &v_starts_c_v,
-            &v_ends_c_v,
+            v_starts_c_s,
+            v_ends_c_s,
             &regions_v,
             &samples_v,
         )?;

@@ -436,6 +436,17 @@ class _Svar1Backend:
 
             vs_c = np.ascontiguousarray(v_starts[first : first + n_local], np.uint32)
             ve_c = np.ascontiguousarray(v_ends_all[first : first + n_local], np.uint32)
+            # genoray's `var_ranges` binary-searches a `SearchTree` built over `vs_c`
+            # and documents its input as ascending -- but enforces nothing beyond a
+            # length `debug_assert`. A non-ascending POS within this contig (e.g. a
+            # VCF sorted by contig but not by position) passes the contiguity check
+            # above and then yields silently WRONG variant ranges with no error --
+            # truncated haplotypes, no exception. Fail fast instead, same as above.
+            if n_local > 1 and not (np.diff(vs_c.astype(np.int64)) >= 0).all():
+                raise ValueError(
+                    f"SVAR index POS for contig {c!r} is not ascending; "
+                    "the streaming SVAR1 backend requires a position-sorted store."
+                )
             # Python's var_ranges convention: max(v_ends - v_starts). Exactly 1 larger
             # than search::overlap_range's `>=` bound -- an OVER-estimate, which only
             # widens the candidate window and is provably overshoot-safe. Do not
