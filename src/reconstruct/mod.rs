@@ -2,7 +2,7 @@
 //!
 //! Mirrors `reconstruct_haplotype_from_sparse` in
 //! `python/genvarloader/_dataset/_genotypes.py:277-465` statement-by-statement.
-use ndarray::{s, ArrayView1, ArrayView2, ArrayViewMut1};
+use ndarray::{s, Array2, ArrayView1, ArrayView2, ArrayViewMut1};
 use rayon::prelude::*;
 
 /// Single-haplotype inner kernel, generic over the variant source.
@@ -589,8 +589,12 @@ pub fn reconstruct_haplotypes_from_sparse(
 /// 1.0's `reconstruct_haplotype[s]_from_sparse` are untouched by this function.
 ///
 /// # Parameters
-/// - `out` – flat output buffer, length = out_offsets[-1] (u8); written in place
-/// - `out_offsets` – shape (batch*ploidy + 1,) offsets into `out`
+/// - `out` – flat output buffer (u8); written in place at each row's `out_bounds`
+/// - `out_bounds` – shape (batch*ploidy, 2) as `[start, end)` byte ranges into `out`,
+///   one row per flat work index `k = query * ploidy + hap`; rows are pairwise
+///   disjoint but need not be contiguous or in row order (see
+///   [`bounds_from_offsets`] for the gap-free adapter, and the scatter-write FFI
+///   entry for the caller-supplied-destinations case)
 /// - `regions` – shape (batch, 3) as (contig_idx, start, end) i32
 /// - `shifts` – shape (batch, ploidy) i32
 /// - `vk_pos` / `vk_key` – this hap's `var_key` channel: position + uniform key (i32)
@@ -615,7 +619,7 @@ pub fn reconstruct_haplotypes_from_sparse(
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_from_svar2(
     mut out: ArrayViewMut1<u8>,
-    out_offsets: ArrayView1<i64>,
+    out_bounds: ArrayView2<i64>,
     regions: ArrayView2<i32>,
     shifts: ArrayView2<i32>,
     vk_pos: ArrayView1<i32>,
@@ -636,7 +640,13 @@ pub fn reconstruct_haplotypes_from_svar2(
 ) {
     let batch_size = regions.nrows();
     let ploidy = shifts.ncols();
-    let n_work = batch_size * ploidy;
+    // n_work comes from out_bounds: the caller owns the row->destination mapping.
+    let n_work = out_bounds.nrows();
+    debug_assert_eq!(
+        n_work,
+        batch_size * ploidy,
+        "out_bounds must have one row per (query, hap)"
+    );
 
     // Hoist contiguous-slice pointers once, exactly as SVAR1's do_work captures
     // read-only views — these are Send+Sync so the rayon parallel path is unchanged.
@@ -743,26 +753,44 @@ pub fn reconstruct_haplotypes_from_svar2(
         // proven split_at_mut chain idiom (mirrors get_reference in reference/mod.rs).
         // &mut [_] slices are Send, unlike raw *mut pointers — safe for rayon closures.
         let bounds: Vec<(usize, usize)> = (0..n_work)
-            .map(|k| (out_offsets[k] as usize, out_offsets[k + 1] as usize))
+            .map(|k| (out_bounds[[k, 0]] as usize, out_bounds[[k, 1]] as usize))
             .collect();
 
+        // Destinations are caller-supplied and may be scattered (a spliced read
+        // interleaves this contig group's rows with other groups'), so carve in
+        // ascending-start order rather than row order. The chain's cursor only
+        // moves forward; gaps are bytes owned by another call and are skipped.
+        //
+        // Tie-break on `(start, end)`, not `start` alone: `sort_unstable` gives no
+        // guarantee for equal keys, and equal starts are exactly what a zero-length
+        // row produces in a gap-free layout (its bounds are `(off[j], off[j])`, same
+        // start as the following row `(off[j], off[j+1])`). If the tie happens to
+        // sort the non-empty row first, its end advances the cursor past the
+        // zero-length row's start, which then underflows `s - cursor` below. Sorting
+        // by `(start, end)` puts the zero-length row first deterministically,
+        // matching `check_disjoint_bounds_within` in `ffi/mod.rs`, whose overlap
+        // sweep MUST use the identical tie-break for the two to keep agreeing on
+        // which layouts are valid.
+        let mut order: Vec<usize> = (0..n_work).collect();
+        order.sort_unstable_by_key(|&k| bounds[k]);
+
         let out_slice = out.as_slice_mut().unwrap();
-        let mut out_chunks: Vec<&mut [u8]> = Vec::with_capacity(n_work);
+        let mut out_chunks: Vec<(usize, &mut [u8])> = Vec::with_capacity(n_work);
         {
             let mut rest = &mut out_slice[..];
             let mut cursor = 0usize;
-            for &(s, e) in &bounds {
-                // Contract: `out_offsets` is monotonically non-decreasing, so each
-                // work item's range starts at or after the previous one's end. This
-                // guarantees `s - cursor` does not underflow and the carved slices
-                // are disjoint. The same `bounds` drives the annotation carves below.
+            for &k in &order {
+                let (s, e) = bounds[k];
+                // Contract: `out_bounds` rows are pairwise disjoint. Walking them in
+                // ascending-start order then guarantees `s - cursor` does not
+                // underflow and the carved slices are disjoint.
                 debug_assert!(
                     s >= cursor && e >= s,
-                    "out_offsets must be monotonically non-decreasing (got s={s}, e={e}, cursor={cursor})"
+                    "out_bounds must be pairwise disjoint and non-empty (got s={s}, e={e}, cursor={cursor})"
                 );
                 let (_, tail) = rest.split_at_mut(s - cursor);
                 let (mid, tail2) = tail.split_at_mut(e - s);
-                out_chunks.push(mid);
+                out_chunks.push((k, mid));
                 rest = tail2;
                 cursor = e;
             }
@@ -770,35 +798,43 @@ pub fn reconstruct_haplotypes_from_svar2(
 
         // SVAR2 read-bound haps are never annotated, so dispatch the un-annotated
         // work items straight across rayon.
-        out_chunks
-            .into_par_iter()
-            .enumerate()
-            .for_each(|(k, out_chunk)| {
-                do_work(k, ArrayViewMut1::from(out_chunk));
-            });
+        out_chunks.into_par_iter().for_each(|(k, out_chunk)| {
+            do_work(k, ArrayViewMut1::from(out_chunk));
+        });
     } else {
         // Serial path: use raw pointers for disjoint sub-range access, exactly as before.
         // The serial loop prevents concurrent aliasing.
         let out_raw: *mut u8 = out.as_mut_ptr();
 
         for k in 0..n_work {
-            let out_s = out_offsets[k] as usize;
-            let out_e = out_offsets[k + 1] as usize;
+            let out_s = out_bounds[[k, 0]] as usize;
+            let out_e = out_bounds[[k, 1]] as usize;
             debug_assert!(
                 out_e >= out_s,
-                "out_offsets must be monotonically non-decreasing (got out_s={out_s}, out_e={out_e})"
+                "out_bounds rows must be non-empty (got out_s={out_s}, out_e={out_e})"
             );
 
-            // SAFETY: `out_offsets` is required by the calling contract to be monotonically
-            // non-decreasing, so consecutive (out_s, out_e) pairs are strictly non-overlapping
-            // address ranges within the same allocation.  Because the loop is serial there are
-            // no concurrent borrows, so constructing a `&mut [u8]` from each disjoint sub-range
-            // is free of aliasing UB.
+            // SAFETY: `out_bounds` rows are required by the calling contract to be
+            // pairwise disjoint address ranges within the same allocation. Because the
+            // loop is serial there are no concurrent borrows, so constructing a
+            // `&mut [u8]` from each disjoint sub-range is free of aliasing UB.
             let out_chunk =
                 unsafe { std::slice::from_raw_parts_mut(out_raw.add(out_s), out_e - out_s) };
             do_work(k, ArrayViewMut1::from(out_chunk));
         }
     }
+}
+
+/// Per-row `(start, end)` destination bounds from a gap-free `(n_work + 1,)` offsets
+/// array — the adapter for callers that let the kernel size its own contiguous output.
+pub fn bounds_from_offsets(out_offsets: ArrayView1<i64>) -> Array2<i64> {
+    let n = out_offsets.len() - 1;
+    let mut bounds = Array2::<i64>::zeros((n, 2));
+    for k in 0..n {
+        bounds[[k, 0]] = out_offsets[k];
+        bounds[[k, 1]] = out_offsets[k + 1];
+    }
+    bounds
 }
 
 #[cfg(test)]
@@ -1563,13 +1599,13 @@ mod tests {
         let lut_bytes = arr1::<u8>(&[]);
         let lut_off = arr1(&[0i64]);
 
-        let out_offsets = arr1(&[0i64, 8]);
+        let out_bounds = ndarray::arr2(&[[0i64, 8]]);
         let pad_char = b'N';
         let mut out = Array1::<u8>::from_elem(8, pad_char);
 
         super::reconstruct_haplotypes_from_svar2(
             out.view_mut(),
-            out_offsets.view(),
+            out_bounds.view(),
             regions.view(),
             shifts.view(),
             vk_pos.view(),
@@ -1615,13 +1651,13 @@ mod tests {
         let dense_present_off = arr1(&[0i64, 1]);
         let lut_bytes = arr1::<u8>(&[]);
         let lut_off = arr1(&[0i64]);
-        let out_offsets = arr1(&[0i64, 4]);
+        let out_bounds = ndarray::arr2(&[[0i64, 4]]);
         let pad_char = b'N';
         let mut out = Array1::<u8>::from_elem(4, pad_char);
 
         super::reconstruct_haplotypes_from_svar2(
             out.view_mut(),
-            out_offsets.view(),
+            out_bounds.view(),
             regions.view(),
             shifts.view(),
             vk_pos.view(),
@@ -1642,5 +1678,137 @@ mod tests {
         );
 
         assert_eq!(out.as_slice().unwrap(), b"ACTN");
+    }
+
+    /// Scatter write: rows given non-monotonic, gapped destinations must land exactly
+    /// where `out_bounds` says, leaving the gap untouched. Row 0 is written AFTER
+    /// row 1 in the buffer, mirroring a multi-contig spliced read where one group's
+    /// rows interleave with another's.
+    #[test]
+    fn svar2_scatter_write_honors_out_bounds() {
+        for parallel in [false, true] {
+            let reference = b"ACGT";
+            let ref_ = arr1(reference.as_ref());
+            let ref_offsets = arr1(&[0i64, 4]);
+            // Two identical single-hap queries on contig 0.
+            let regions = ndarray::arr2(&[[0i32, 0, 4], [0i32, 0, 4]]);
+            let shifts = ndarray::arr2(&[[0i32], [0i32]]);
+
+            // No variants at all -> each row is the bare reference "ACGT".
+            let vk_pos = arr1::<i32>(&[]);
+            let vk_key = arr1::<i32>(&[]);
+            let vk_off = arr1(&[0i64, 0, 0]);
+            let dense_pos = arr1::<i32>(&[]);
+            let dense_key = arr1::<i32>(&[]);
+            let dense_range = ndarray::arr2(&[[0i32, 0], [0i32, 0]]);
+            let dense_present = arr1::<u8>(&[]);
+            let dense_present_off = arr1(&[0i64, 0, 0]);
+            let lut_bytes = arr1::<u8>(&[]);
+            let lut_off = arr1(&[0i64]);
+
+            let pad_char = b'N';
+            // Buffer: [row1 @ 0..4][gap 4..6 = another group's rows][row0 @ 6..10]
+            let mut out = Array1::<u8>::from_elem(10, b'-');
+            let out_bounds = ndarray::arr2(&[[6i64, 10], [0i64, 4]]);
+
+            super::reconstruct_haplotypes_from_svar2(
+                out.view_mut(),
+                out_bounds.view(),
+                regions.view(),
+                shifts.view(),
+                vk_pos.view(),
+                vk_key.view(),
+                vk_off.view(),
+                dense_pos.view(),
+                dense_key.view(),
+                dense_range.view(),
+                dense_present.view(),
+                dense_present_off.view(),
+                lut_bytes.view(),
+                lut_off.view(),
+                ref_.view(),
+                ref_offsets.view(),
+                pad_char,
+                parallel,
+                false,
+            );
+
+            assert_eq!(
+                out.as_slice().unwrap(),
+                b"ACGT--ACGT",
+                "parallel={parallel}: rows must land at their out_bounds, gap untouched"
+            );
+        }
+    }
+
+    /// Guard for Finding 1 (PR #273 review): a zero-length row sharing its `start`
+    /// with a non-empty row must carve correctly regardless of the two rows'
+    /// relative `k` (work-item) order. Sorting the carve order by `start` alone ties
+    /// on equal starts; `sort_unstable` breaks such ties by original position, so
+    /// when the NON-empty row happens to sit at a lower `k` than the zero-length row
+    /// sharing its start, the non-empty row is carved first, its end becomes the
+    /// running cursor, and the zero-length row then computes `s - cursor` with
+    /// `s == cursor`'s old value < the advanced cursor — an underflow panic in the
+    /// parallel `split_at_mut` chain (the serial path's `debug_assert!` would fire
+    /// identically in a debug build). Row order here is deliberately: k=0 non-empty
+    /// "ACGT" landing at [4, 8), k=1 zero-length region landing at [4, 4) — exactly
+    /// the ordering that reproduces the bug pre-fix (see the code review finding for
+    /// why the naive `[[X,X],[X,Y]]` ordering can pass "by luck").
+    #[test]
+    fn svar2_scatter_write_accepts_zero_length_row_tied_with_nonempty_start() {
+        for parallel in [false, true] {
+            let reference = b"ACGT";
+            let ref_ = arr1(reference.as_ref());
+            let ref_offsets = arr1(&[0i64, 4]);
+            // k=0: full-window query -> "ACGT" (non-empty, dest starts at 4).
+            // k=1: zero-width region (start == end) -> empty hap (dest is [4, 4),
+            // tied with k=0's start).
+            let regions = ndarray::arr2(&[[0i32, 0, 4], [0i32, 2, 2]]);
+            let shifts = ndarray::arr2(&[[0i32], [0i32]]);
+
+            let vk_pos = arr1::<i32>(&[]);
+            let vk_key = arr1::<i32>(&[]);
+            let vk_off = arr1(&[0i64, 0, 0]);
+            let dense_pos = arr1::<i32>(&[]);
+            let dense_key = arr1::<i32>(&[]);
+            let dense_range = ndarray::arr2(&[[0i32, 0], [0i32, 0]]);
+            let dense_present = arr1::<u8>(&[]);
+            let dense_present_off = arr1(&[0i64, 0, 0]);
+            let lut_bytes = arr1::<u8>(&[]);
+            let lut_off = arr1(&[0i64]);
+
+            let pad_char = b'N';
+            // Buffer: [gap 0..4 = another group's rows][k=0 "ACGT" @ 4..8][k=1 empty @ 4..4]
+            let mut out = Array1::<u8>::from_elem(8, b'-');
+            let out_bounds = ndarray::arr2(&[[4i64, 8], [4i64, 4]]);
+
+            super::reconstruct_haplotypes_from_svar2(
+                out.view_mut(),
+                out_bounds.view(),
+                regions.view(),
+                shifts.view(),
+                vk_pos.view(),
+                vk_key.view(),
+                vk_off.view(),
+                dense_pos.view(),
+                dense_key.view(),
+                dense_range.view(),
+                dense_present.view(),
+                dense_present_off.view(),
+                lut_bytes.view(),
+                lut_off.view(),
+                ref_.view(),
+                ref_offsets.view(),
+                pad_char,
+                parallel,
+                false,
+            );
+
+            assert_eq!(
+                out.as_slice().unwrap(),
+                b"----ACGT",
+                "parallel={parallel}: nonempty row must carve correctly with a tied zero-length row present"
+            );
+        }
     }
 }

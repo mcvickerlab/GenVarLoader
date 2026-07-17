@@ -64,6 +64,19 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.38.0 (2026-07-16)
+
+### Feat
+
+- **svar2**: support spliced exonic haplotypes
+
+### Perf
+
+- **svar2**: vectorize spliced haplotype row reorder
+
 ## v0.37.0 (2026-07-15)
 
 ### BREAKING CHANGE
