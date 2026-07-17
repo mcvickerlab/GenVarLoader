@@ -6,21 +6,32 @@ genome. All-numpy hot path.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 from numpy.typing import NDArray
 
 from .._ragged import Ragged
 from .._utils import lengths_to_offsets
 from ..genvarloader import get_reference as _get_reference_ffi
-from ._flat_variants import _FlatWindow
+from ._flat_variants import _FlatWindow, _normalize_token_alphabet
+
+if TYPE_CHECKING:
+    import seqpro as sp
 
 
-def build_token_lut(alphabet: bytes, unknown_token: int) -> tuple[NDArray, np.dtype]:
+def build_token_lut(
+    alphabet: "str | bytes | sp.NucleotideAlphabet", unknown_token: int
+) -> tuple[NDArray, np.dtype]:
     """Build a 256-entry byte->token lookup table (seqpro-style).
 
-    Every byte value in ``alphabet`` maps to its position; every other byte
-    (including ``N`` and padded out-of-bounds positions) maps to ``unknown_token``.
+    ``alphabet`` accepts a ``str``, ``bytes``, or ``seqpro.NucleotideAlphabet`` (e.g.
+    ``seqpro.alphabets.DNA``) and is normalized to ``bytes`` (see
+    :func:`_normalize_token_alphabet`). Every byte value in the alphabet maps to its
+    position; every other byte (including ``N`` and padded out-of-bounds positions)
+    maps to ``unknown_token``.
     """
+    alphabet = _normalize_token_alphabet(alphabet)
     max_token = max(len(alphabet) - 1, unknown_token)
     dtype = np.uint8 if max_token <= np.iinfo(np.uint8).max else np.int32
     lut = np.full(256, unknown_token, dtype=dtype)

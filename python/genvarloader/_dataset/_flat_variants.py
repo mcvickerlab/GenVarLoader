@@ -247,6 +247,22 @@ class _FlatWindow:
         )
 
 
+def _normalize_token_alphabet(alphabet: "str | bytes | sp.NucleotideAlphabet") -> bytes:
+    """Normalize a token alphabet to the raw ``bytes`` downstream consumers expect.
+
+    Accepts a ``str``, ``bytes``, or ``seqpro.NucleotideAlphabet`` (e.g.
+    ``seqpro.alphabets.DNA``). Each byte's position is its token id, so ordering is
+    preserved verbatim. Shared by ``VarWindowOpt.__post_init__`` and
+    ``build_token_lut`` so both the ``VarWindowOpt`` and ``with_settings`` paths
+    normalize identically (see #291, #292).
+    """
+    if isinstance(alphabet, sp.NucleotideAlphabet):
+        return alphabet.alphabet.encode("ascii")
+    if isinstance(alphabet, str):
+        return alphabet.encode("ascii")
+    return alphabet
+
+
 @dataclass(frozen=True)
 class VarWindowOpt:
     """Options for ``with_seqs('variant-windows')``.
@@ -270,14 +286,10 @@ class VarWindowOpt:
 
     def __post_init__(self) -> None:
         # Normalize to the raw byte alphabet so downstream consumers (e.g.
-        # ``build_token_lut``) only ever see ``bytes``. Position in the byte
-        # string is the token id, so ordering is preserved verbatim.
-        alphabet = self.token_alphabet
-        if isinstance(alphabet, sp.NucleotideAlphabet):
-            alphabet = alphabet.alphabet.encode("ascii")
-        elif isinstance(alphabet, str):
-            alphabet = alphabet.encode("ascii")
-        object.__setattr__(self, "token_alphabet", alphabet)
+        # ``build_token_lut``) only ever see ``bytes``.
+        object.__setattr__(
+            self, "token_alphabet", _normalize_token_alphabet(self.token_alphabet)
+        )
 
 
 _WINDOW_FIELD_NAMES = ("ref_window", "alt_window", "ref", "alt")

@@ -67,6 +67,33 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.39.0 (2026-07-17)
+
+### Feat
+
+- **flat-variants**: accept str/bytes/NucleotideAlphabet for VarWindowOpt.token_alphabet
+- **svar2**: support spliced variant records
+- **svar2**: scatter-write FFI entry for read-bound haplotypes
+- **reverse**: rc_bounded_rows_inplace for scattered rows
+
+### Fix
+
+- **svar2**: deterministic tie-break for scatter-write bounds sort
+- **svar2**: validate out_bounds and to_rc in scatter-write FFI entry
+- **reference**: reject in_memory=False with reordered/subset contigs (#285)
+
+### Refactor
+
+- **svar2**: per-row destination bounds in the reconstruct core
+
+### Perf
+
+- **svar2**: vectorize build_splice_plan permutation
+- **svar2**: scatter-write spliced haplotypes, no Python re-order
+
 ## v0.38.0 (2026-07-16)
 
 ### Feat

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Generic, Literal, NoReturn, TypeVar, overload
+from typing import TYPE_CHECKING, Generic, Literal, NoReturn, TypeVar, overload
 
 import numpy as np
 import polars as pl
@@ -37,6 +37,9 @@ from ._reconstruct import (
 from ._flat_variants import VarWindowOpt
 from ._reference import Reference
 from ._splice import SpliceMap
+
+if TYPE_CHECKING:
+    import seqpro as sp
 
 if TORCH_AVAILABLE:
     import torch
@@ -208,7 +211,7 @@ class Dataset:
         splice_info: str | tuple[str, str] | Literal[False] | None = None,
         var_filter: Literal[False, "exonic"] | None = None,
         flank_length: int | None = None,
-        token_alphabet: bytes | None = None,
+        token_alphabet: "str | bytes | sp.NucleotideAlphabet | None" = None,
         unknown_token: int | None = None,
         dummy_variant: "DummyVariant | Literal[False] | None" = None,
         unphased_union: bool | None = None,
@@ -237,8 +240,10 @@ class Dataset:
             var_filter: Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
             flank_length: Number of reference-sequence bases to fetch as flanks around each variant. Stored on
                 the :class:`Haps` reconstructor for use by the flat-window output mode.
-            token_alphabet: Byte string whose characters define the token alphabet (e.g. ``b"ACGT"``). Position ``i``
-                in the string maps to integer token ``i``. Must be supplied together with *unknown_token*.
+            token_alphabet: Characters that define the token alphabet (e.g. ``b"ACGT"``, ``"ACGT"``, or
+                ``seqpro.alphabets.DNA``). Accepts a :class:`str`, :class:`bytes`, or
+                :class:`seqpro.NucleotideAlphabet` and is normalized to ``bytes``; position ``i``
+                in the alphabet maps to integer token ``i``. Must be supplied together with *unknown_token*.
             unknown_token: Integer token to assign to any byte not present in *token_alphabet*. Must be supplied
                 together with *token_alphabet*.
             dummy_variant: A :class:`DummyVariant` to insert into empty (region, sample, ploid) variant
