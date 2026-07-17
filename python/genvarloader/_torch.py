@@ -284,13 +284,12 @@ def tensor_from_maybe_bytes(
 
 @requires_torch
 def to_nested_tensor(rag: Ragged) -> torch.Tensor:
-    """Convert a Ragged array to a PyTorch `nested tensor <https://pytorch.org/docs/stable/nested.html>`_. Will cast byte arrays
-    (dtype "S1") to uint8.
+    """Convert a Ragged array to a PyTorch `nested tensor <https://pytorch.org/docs/stable/nested.html>`_.
 
-    Parameters
-    ----------
-    rag
-        Ragged array to convert.
+    Will cast byte arrays (dtype "S1") to uint8.
+
+    Args:
+        rag: Ragged array to convert.
     """
     if is_rag_dtype(rag, np.bytes_):
         rag = rag.view(np.uint8)
@@ -345,28 +344,22 @@ if TORCH_AVAILABLE:
     class StratifiedSampler(td.Sampler[np.intp]):
         """Stratified sampler for GVL datasets. This ensures that each batch has the most diversity of samples possible.
 
-        Parameters
-        ----------
-        n_regions : int
-            Number of regions.
-        n_samples : int
-            Number of samples.
-        shuffle : bool, optional
-            Whether to shuffle the dataset, by default False.
-        seed : int, optional
-            Random seed, by default None.
+        Args:
+            n_regions (int): Number of regions.
+            n_samples (int): Number of samples.
+            shuffle (bool, optional): Whether to shuffle the dataset, by default False.
+            seed (int, optional): Random seed, by default None.
 
-        Examples
-        --------
-        >>> n_regions = 10
-        >>> n_samples = 100
-        >>> batch_size = 7
-        >>> sampler = torch.utils.data.BatchSampler(
-                gvl.StratifiedSampler(n_regions, n_samples),
-                batch_size,
-                drop_last=True,
-            )
-        >>> dl = ds.to_dataloader(sampler=sampler)
+        Examples:
+            >>> n_regions = 10
+            >>> n_samples = 100
+            >>> batch_size = 7
+            >>> sampler = torch.utils.data.BatchSampler(
+                    gvl.StratifiedSampler(n_regions, n_samples),
+                    batch_size,
+                    drop_last=True,
+                )
+            >>> dl = ds.to_dataloader(sampler=sampler)
         """
 
         ds_idx: NDArray[np.intp]

@@ -103,7 +103,6 @@ def _write_dense(buf: memoryview, a: np.ndarray, cursor: int) -> tuple[dict, int
 
 def _write_ragged(buf: memoryview, a, cursor: int) -> tuple[dict, int]:
     """Write a seqpro.rag.Ragged into buf. Returns descriptor dict and new cursor."""
-
     data_arr = np.ascontiguousarray(a.data)
     off_arr = np.ascontiguousarray(a.offsets)
 
@@ -606,8 +605,7 @@ def _read_rag_variants(buf: memoryview, d: dict, copy: bool = True):
 
 
 def _flat_ploidy(shape) -> int:
-    """Ploidy (RegularArray.size) for a flat field shape: the last fixed dim
-    when there are >=2 fixed dims, else 1."""
+    """Ploidy (RegularArray.size) for a flat field shape: the last fixed dim when there are >=2 fixed dims, else 1."""
     fixed = [d for d in shape if d is not None]
     return fixed[-1] if len(fixed) >= 2 else 1
 
@@ -805,22 +803,19 @@ def read_chunk(
 ) -> tuple[int, list]:
     """Read arrays from the shared-memory slot.
 
-    Parameters
-    ----------
-    buf
-        The memoryview of the shared-memory slot.
-    copy
-        If True (default), returned arrays own their data (safe to use after
-        the slot is released). If False, arrays are zero-copy views into buf
-        (valid only while buf remains mapped and unmodified by the producer).
-    flat
-        If True, kinds 1/2/3 reconstruct ``_Flat`` / ``_FlatVariants`` /
-        ``_FlatAnnotatedHaps`` instead of the eagerly-materialized types
-        (``Ragged`` / ``RaggedVariants`` / ``RaggedAnnotatedHaps``).
+    Args:
+        buf: The memoryview of the shared-memory slot.
+        copy: If True (default), returned arrays own their data (safe to use after
+            the slot is released). If False, arrays are zero-copy views into buf
+            (valid only while buf remains mapped and unmodified by the producer).
+        flat: If True, kinds 1/2/3 reconstruct ``_Flat`` / ``_FlatVariants`` /
+            ``_FlatAnnotatedHaps`` instead of the eagerly-materialized types
+            (``Ragged`` / ``RaggedVariants`` / ``RaggedAnnotatedHaps``).
 
-    Returns (n_instances, [arrays...]) where arrays may be np.ndarray,
-    seqpro.rag.Ragged, RaggedVariants, _Flat, _FlatVariants, or
-    _FlatAnnotatedHaps depending on the ``flat`` flag.
+    Returns:
+        (n_instances, [arrays...]) where arrays may be np.ndarray,
+        seqpro.rag.Ragged, RaggedVariants, _Flat, _FlatVariants, or
+        _FlatAnnotatedHaps depending on the ``flat`` flag.
     """
     n_inst, payload_bytes, n_arrays = _PREAMBLE.unpack_from(buf, 0)
     cursor = _PREAMBLE.size

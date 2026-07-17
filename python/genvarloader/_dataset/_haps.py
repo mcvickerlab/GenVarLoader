@@ -109,18 +109,13 @@ class _Variants:
         one_based: bool = True,
         info_fields: set[str] | None = None,
     ):
-        """
-        Loads variant info from a table. Must always have POS, ILEN, and ALT.
+        """Loads variant info from a table. Must always have POS, ILEN, and ALT.
 
-        Parameters
-        ----------
-        path : str | Path
-            The path to the variants table.
-        one_based : bool, optional
-            Whether the variants are one-based, by default False.
-        info_fields
-            Optional whitelist of numeric column names to load as info.
-            If ``None`` (default), load every numeric column except POS/ILEN.
+        Args:
+            path (str | Path): The path to the variants table.
+            one_based (bool, optional): Whether the variants are one-based, by default False.
+            info_fields: Optional whitelist of numeric column names to load as info.
+                If ``None`` (default), load every numeric column except POS/ILEN.
         """
         path = Path(path).resolve()
         variants = pl.read_ipc(path, memory_map=False)
@@ -168,8 +163,7 @@ class _Variants:
 
     @staticmethod
     def available_info_fields(path: str | Path) -> list[str]:
-        """Return numeric column names that would be loaded as info, without
-        materializing any data.
+        """Return numeric column names that would be loaded as info, without materializing any data.
 
         ``POS`` and ``ILEN`` are excluded — they're positional, not info.
         """
@@ -225,7 +219,7 @@ def _build_allele_layout(
 
 
 def _svar_format_fields(svar_dir: Path) -> dict[str, np.dtype]:
-    """genoray custom per-call FORMAT fields: name -> dtype, from <svar>/metadata.json.
+    """Genoray custom per-call FORMAT fields: name -> dtype, from <svar>/metadata.json.
 
     Returns {} when the metadata file is absent (non-SVAR / synthetic datasets).
     """
@@ -238,9 +232,11 @@ def _svar_format_fields(svar_dir: Path) -> dict[str, np.dtype]:
 
 @dataclass(slots=True)
 class _HapsFfiStatic:
-    """FFI-ready, contiguous, correctly-typed sub-linear arrays consumed by the
-    fused kernels. Grows only with the variant/reference count (sub-linear in
-    samples), so it is cached for the lifetime of the Haps reconstructor."""
+    """FFI-ready, contiguous, correctly-typed sub-linear arrays consumed by the fused kernels.
+
+    Grows only with the variant/reference count (sub-linear in
+    samples), so it is cached for the lifetime of the Haps reconstructor.
+    """
 
     v_starts: NDArray[np.int32]
     ilens: NDArray[np.int32]
@@ -536,8 +532,9 @@ class Haps(Reconstructor[_H]):
         idx: NDArray[np.integer],
         regions: NDArray[np.int32],
     ) -> NDArray[np.int32]:
-        """Compute ``(B, P)`` per-query haplotype lengths without running the
-        full reconstruction. Used by the spliced path to size buffers and
+        """Compute ``(B, P)`` per-query haplotype lengths without running the full reconstruction.
+
+        Used by the spliced path to size buffers and
         build a ``SplicePlan`` before the kernel is invoked.
 
         The body mirrors the length-calculation prefix of
@@ -767,8 +764,7 @@ class Haps(Reconstructor[_H]):
     def _allele_bytes_sum(
         self, idx: NDArray[np.integer], kind: Literal["alt", "ref"]
     ) -> NDArray[np.int64]:
-        """Exact total bytes of the selected variants' `kind` allele payload, per
-        instance flattened over ploidy.
+        """Exact total bytes of the selected variants' `kind` allele payload, per instance flattened over ploidy.
 
         Returns shape (len(idx) * ploidy,) of int64. O(|selected variants|);
         does not touch allele payload bytes — only the RaggedAlleles offsets.

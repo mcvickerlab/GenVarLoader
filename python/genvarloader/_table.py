@@ -245,9 +245,11 @@ class Table:
 
 
 def annot_overlap(regions: pl.DataFrame, annot: pl.DataFrame) -> "RaggedIntervals":
-    """Sample-less interval overlap of `regions` (chrom/chromStart/chromEnd) against a
-    BED-like `annot` (chrom/chromStart/chromEnd/score). Returns a RaggedIntervals of
-    shape (n_regions, None) ordered by (region, start), via the Rust COITrees backend."""
+    """Sample-less interval overlap of `regions` (chrom/chromStart/chromEnd) against a BED-like `annot` (chrom/chromStart/chromEnd/score).
+
+    Returns a RaggedIntervals of shape (n_regions, None) ordered by (region, start),
+    via the Rust COITrees backend.
+    """
     from seqpro.rag import Ragged
 
     from ._ragged import RaggedIntervals

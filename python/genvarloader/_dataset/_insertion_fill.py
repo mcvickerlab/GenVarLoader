@@ -42,10 +42,8 @@ class Repeat5pNormalized(InsertionFill):
 class Constant(InsertionFill):
     """Write a fixed value at every inserted position.
 
-    Parameters
-    ----------
-    value
-        Value to write. Defaults to NaN.
+    Args:
+        value: Value to write. Defaults to NaN.
     """
 
     value: float = float("nan")
@@ -53,14 +51,13 @@ class Constant(InsertionFill):
 
 @dataclass(slots=True)
 class FlankSample(InsertionFill):
-    """Sample (with replacement) from the 2*flank_width+1 reference values
-    centered at the variant POS. Each inserted position samples independently.
+    """Sample (with replacement) from the 2*flank_width+1 reference values centered at the variant POS.
+
+    Each inserted position samples independently.
     Out-of-bounds neighbors are clamped to in-bounds values.
 
-    Parameters
-    ----------
-    flank_width
-        Half-width of the flanking pool. Must be >= 0.
+    Args:
+        flank_width: Half-width of the flanking pool. Must be >= 0.
     """
 
     flank_width: int = 5
@@ -78,10 +75,8 @@ class Interpolate(InsertionFill):
     order=2,3: Lagrange polynomial through ceil((order+1)/2) reference values
     on each side of the variant, clamped at boundaries.
 
-    Parameters
-    ----------
-    order
-        Polynomial order. Must be in {1, 2, 3}.
+    Args:
+        order: Polynomial order. Must be in {1, 2, 3}.
     """
 
     order: int = 1
@@ -96,16 +91,13 @@ def lower(
 ) -> tuple[NDArray[np.int8], NDArray[np.float64]]:
     """Pack strategy instances into numba-friendly arrays.
 
-    Returns
-    -------
-    strategy_ids
-        Shape (n,), int8. One enum value per strategy.
-    params
-        Shape (n, MAX_PARAMS), float64. Per-strategy parameter slots:
-        - Repeat5p / Repeat5pNormalized: unused (all zeros).
-        - Constant: [value].
-        - FlankSample: [flank_width].
-        - Interpolate: [order].
+    Returns:
+        strategy_ids: Shape (n,), int8. One enum value per strategy.
+        params: Shape (n, MAX_PARAMS), float64. Per-strategy parameter slots:
+            - Repeat5p / Repeat5pNormalized: unused (all zeros).
+            - Constant: [value].
+            - FlankSample: [flank_width].
+            - Interpolate: [order].
     """
     n = len(strategies)
     ids = np.empty(n, dtype=np.int8)

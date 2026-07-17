@@ -273,6 +273,7 @@ All work on the write-free `StreamingDataset` effort (anything touching `python/
 
 - **Pixi environments**: Use `-e dev` for development, `-e docs` for documentation, `-e py310`/`py311`/`py312`/`py313` for Python version testing. Platform is linux-64.
 - **Ruff config**: E501 (line length) is ignored.
+- **Docstrings**: Google style, enforced by ruff's pydocstyle rules (`[tool.ruff] lint.pydocstyle.convention = "google"`) on `python/genvarloader/` only. The `D1xx` missing-docstring rules are off — style is enforced on docstrings that exist, not their presence. New/edited docstrings in the package must be Google-style (`Args:`/`Returns:`/`Raises:` with colons, no NumPy `----` underlines). Sphinx renders them via napoleon (`napoleon_google_docstring = True`). Run `python scripts/docstring_style.py --check python/genvarloader` to verify no NumPy/mixed docstrings remain.
 - **Pyrefly**: Configured permissively; type annotations follow patterns in `_types.py`.
 - **Conventional commits**: Project uses commitizen for versioning.
 - **Test markers**: `@pytest.mark.slow` for slow tests (excluded by default).

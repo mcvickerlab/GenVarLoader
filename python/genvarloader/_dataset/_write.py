@@ -116,64 +116,52 @@ def write(
 ):
     """Write a GVL dataset.
 
-    Parameters
-    ----------
-    path
-        Path to write the dataset to.
-    bed
-        :func:`BED-like <genvarloader.read_bedlike()>` file or DataFrame of regions satisfying the BED3+ specification.
-        Specifically, it must have columns 'chrom', 'chromStart', and 'chromEnd'. If 'strand' is present, its values must be either '+' or '-'.
-        Negative stranded regions will be reverse complemented during sequence and/or track reconstruction.
-    variants
-        A :code:`genoray` VCF or PGEN instance (:code:`genoray` is a GVL dependency so it will be import-able). All variants must be
-        left-aligned, bi-allelic, and atomized. Multi-allelic variants can be included by splitting
-        them into bi-allelic half-calls. For VCFs, the `bcftools norm <https://samtools.github.io/bcftools/bcftools.html#norm>`_
-        command can do all of this normalization. Likewise, see the `PLINK2 documentation <https://www.cog-genomics.org/plink/2.0>`_
-        for PGEN files. Commands of interest include :code:`--make-bpgen` for splitting variants,
-        :code:`--normalize` for left-aligning and atomizing overlapping variants, and :code:`--ref-from-fa` for REF allele correction.
-    tracks
-        An :class:`IntervalTrack` (e.g. :class:`BigWigs`, :class:`Table`) or a
-        sequence of them. Each track must have a unique ``name``; the on-disk
-        layout writes to ``<path>/intervals/<track.name>/``.
-    annot_tracks
-        Sample-independent annotation tracks, as a mapping of track name to source.
-        Each source is a path to an interval table, a path to a bigWig, or a polars
-        DataFrame/LazyFrame interpreted as a BED-like interval table (columns ``chrom``,
-        ``chromStart``, ``chromEnd``, ``score``). Table/DataFrame sources are served by
-        the Rust COITrees overlap backend. Written to ``<path>/annot_intervals/<name>/``.
-    samples
-        Samples to include in the dataset
-    max_jitter
-        Maximum jitter to add to the regions
-    overwrite
-        Whether to overwrite an existing dataset
-    max_mem
-        Approximate maximum total memory to use, including the genoray variant
-        index. The reader's index is loaded eagerly at the start of
-        :func:`write` (for :class:`~genoray.VCF` and :class:`~genoray.PGEN`)
-        so that :attr:`~genoray.VCF.nbytes` reflects its true size; that value
-        is subtracted from ``max_mem`` to determine the budget available for
-        genotype chunking. A :class:`ValueError` is raised if the remaining
-        budget is too small to fit even a single variant chunk. Otherwise
-        ``max_mem`` is a soft limit on overall usage and may be exceeded by
-        a small amount.
-    extend_to_length
-        Whether to continue reading/writing variants until all haplotypes have a length at least as long as the intervals in `bed`.
-        Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
-        haplotypes shorter than the intervals is acceptable, in which case they will be padded with reference bases when appropriate.
-        Disabling this also reduces the amount of data read/written and is faster to run.
+    Args:
+        path: Path to write the dataset to.
+        bed: :func:`BED-like <genvarloader.read_bedlike()>` file or DataFrame of regions satisfying the BED3+ specification.
+            Specifically, it must have columns 'chrom', 'chromStart', and 'chromEnd'. If 'strand' is present, its values must be either '+' or '-'.
+            Negative stranded regions will be reverse complemented during sequence and/or track reconstruction.
+        variants: A :code:`genoray` VCF or PGEN instance (:code:`genoray` is a GVL dependency so it will be import-able). All variants must be
+            left-aligned, bi-allelic, and atomized. Multi-allelic variants can be included by splitting
+            them into bi-allelic half-calls. For VCFs, the `bcftools norm <https://samtools.github.io/bcftools/bcftools.html#norm>`_
+            command can do all of this normalization. Likewise, see the `PLINK2 documentation <https://www.cog-genomics.org/plink/2.0>`_
+            for PGEN files. Commands of interest include :code:`--make-bpgen` for splitting variants,
+            :code:`--normalize` for left-aligning and atomizing overlapping variants, and :code:`--ref-from-fa` for REF allele correction.
+        tracks: An :class:`IntervalTrack` (e.g. :class:`BigWigs`, :class:`Table`) or a
+            sequence of them. Each track must have a unique ``name``; the on-disk
+            layout writes to ``<path>/intervals/<track.name>/``.
+        annot_tracks: Sample-independent annotation tracks, as a mapping of track name to source.
+            Each source is a path to an interval table, a path to a bigWig, or a polars
+            DataFrame/LazyFrame interpreted as a BED-like interval table (columns ``chrom``,
+            ``chromStart``, ``chromEnd``, ``score``). Table/DataFrame sources are served by
+            the Rust COITrees overlap backend. Written to ``<path>/annot_intervals/<name>/``.
+        samples: Samples to include in the dataset
+        max_jitter: Maximum jitter to add to the regions
+        overwrite: Whether to overwrite an existing dataset
+        max_mem: Approximate maximum total memory to use, including the genoray variant
+            index. The reader's index is loaded eagerly at the start of
+            :func:`write` (for :class:`~genoray.VCF` and :class:`~genoray.PGEN`)
+            so that :attr:`~genoray.VCF.nbytes` reflects its true size; that value
+            is subtracted from ``max_mem`` to determine the budget available for
+            genotype chunking. A :class:`ValueError` is raised if the remaining
+            budget is too small to fit even a single variant chunk. Otherwise
+            ``max_mem`` is a soft limit on overall usage and may be exceeded by
+            a small amount.
+        extend_to_length: Whether to continue reading/writing variants until all haplotypes have a length at least as long as the intervals in `bed`.
+            Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
+            haplotypes shorter than the intervals is acceptable, in which case they will be padded with reference bases when appropriate.
+            Disabling this also reduces the amount of data read/written and is faster to run.
 
-    Notes
-    -----
-    The dataset directory is built atomically: all data is written to a private sibling
-    temp directory and published via :func:`os.replace`. A best-effort ``filelock``
-    prevents redundant parallel rebuilds, but correctness relies on the atomic rename —
-    the lock is advisory only.
+    Notes:
+        The dataset directory is built atomically: all data is written to a private sibling
+        temp directory and published via :func:`os.replace`. A best-effort ``filelock``
+        prevents redundant parallel rebuilds, but correctness relies on the atomic rename —
+        the lock is advisory only.
 
-    Out of scope: ``genoray`` ``.gvi`` index files and ``pysam`` ``.fai``/``.gzi`` index
-    files are created by those libraries and are not covered by gvl's atomic/locked
-    creation. Concurrent jobs that trigger index creation for those files depend on the
-    upstream libraries' behavior.
+        Out of scope: ``genoray`` ``.gvi`` index files and ``pysam`` ``.fai``/``.gzi`` index
+        files are created by those libraries and are not covered by gvl's atomic/locked
+        creation. Concurrent jobs that trigger index creation for those files depend on the
+        upstream libraries' behavior.
     """
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
@@ -399,25 +387,19 @@ def update(
 ) -> None:
     """Add tracks to an existing on-disk GVL dataset, analogous to :func:`write`.
 
-    Parameters
-    ----------
-    dataset
-        Path to a dataset directory, or an opened :class:`Dataset` (its ``.path`` is used).
-        A live dataset can be read while it is being updated; it will not observe the new
-        track until reopened.
-    tracks
-        Per-sample :class:`IntervalTrack` source(s) (:class:`BigWigs`, :class:`Table`),
-        written to ``<path>/intervals/<name>/``. The track's sample set must match the
-        dataset's exactly (no missing, no extra); samples are reordered to the dataset
-        order automatically.
-    annot_tracks
-        Sample-independent sources, identical to :func:`write`'s ``annot_tracks``, written
-        to ``<path>/annot_intervals/<name>/``.
-    overwrite
-        Replace a track of the same name if present; otherwise adding a duplicate name
-        raises ``FileExistsError``.
-    max_mem
-        Approximate memory budget, divided across concurrently-running categories.
+    Args:
+        dataset: Path to a dataset directory, or an opened :class:`Dataset` (its ``.path`` is used).
+            A live dataset can be read while it is being updated; it will not observe the new
+            track until reopened.
+        tracks: Per-sample :class:`IntervalTrack` source(s) (:class:`BigWigs`, :class:`Table`),
+            written to ``<path>/intervals/<name>/``. The track's sample set must match the
+            dataset's exactly (no missing, no extra); samples are reordered to the dataset
+            order automatically.
+        annot_tracks: Sample-independent sources, identical to :func:`write`'s ``annot_tracks``, written
+            to ``<path>/annot_intervals/<name>/``.
+        overwrite: Replace a track of the same name if present; otherwise adding a duplicate name
+            raises ``FileExistsError``.
+        max_mem: Approximate memory budget, divided across concurrently-running categories.
     """
     warnings.simplefilter("ignore", RuntimeWarning)
     try:
@@ -511,18 +493,13 @@ def get_splice_bed(
     chromosome (natural order) and ``chromStart``. Pass it directly to
     :func:`gvl.write` for splicing datasets.
 
-    Parameters
-    ----------
-    gtf
-        Path to a GTF file (gzipped or plain) accepted by :func:`seqpro.gtf.scan`.
-    contigs
-        If provided, keep only rows whose ``seqname`` is in this list.
-    transcript_support_level
-        If a string, require the GTF ``transcript_support_level`` attribute to
-        equal it. ``None`` disables the filter.
-    require_multiple_of_3
-        If ``True``, keep only transcripts whose summed CDS length is a
-        multiple of 3.
+    Args:
+        gtf: Path to a GTF file (gzipped or plain) accepted by :func:`seqpro.gtf.scan`.
+        contigs: If provided, keep only rows whose ``seqname`` is in this list.
+        transcript_support_level: If a string, require the GTF ``transcript_support_level`` attribute to
+            equal it. ``None`` disables the filter.
+        require_multiple_of_3: If ``True``, keep only transcripts whose summed CDS length is a
+            multiple of 3.
     """
     lf = sp.gtf.scan(gtf)
 
@@ -629,8 +606,7 @@ def _reject_unsupported_variants(index: pl.DataFrame, source: str) -> None:
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:
-    """Hardlink ``src`` → ``dst`` to avoid duplicating the (possibly large) variant
-    index, falling back to a copy when the two live on different filesystems.
+    """Hardlink ``src`` → ``dst`` to avoid duplicating the (possibly large) variant index, falling back to a copy when the two live on different filesystems.
 
     ``Path.hardlink_to`` raises ``OSError(EXDEV)`` across filesystem boundaries
     (e.g. writing a dataset under ``/tmp`` from a source on a network mount). The
@@ -696,8 +672,7 @@ def _window_to_sparse(
 
 
 def _region_end(rag: Ragged, v_ends: NDArray, fallback_end: int) -> int:
-    """Per-region chromEnd, floored at the input window so tracks are never
-    stored over a truncated region.
+    """Per-region chromEnd, floored at the input window so tracks are never stored over a truncated region.
 
     ``rag`` is a sparse ``(samples, ploidy, ~variants)`` Ragged of global
     variant indices. Returns ``max(fallback_end, v_ends[max idx])`` across all
@@ -1096,9 +1071,7 @@ def _svar2_region_max_ends(
     ends: NDArray[np.integer],
     samples: list[str],
 ) -> NDArray[np.int32]:
-    """SVAR1 parity: per region, the end (``pos - min(ilen, 0)``) of the
-    highest-position variant over the SELECTED samples' haplotypes. Regions with
-    no variants keep their original ``chromEnd``.
+    """SVAR1 parity: per region, the end (``pos - min(ilen, 0)``) of the highest-position variant over the SELECTED samples' haplotypes. Regions with no variants keep their original ``chromEnd``.
 
     ``SparseVar2.decode`` reports 0-based ``pos`` (unlike ``SparseVar.index``'s
     1-based VCF ``POS``, which SVAR1's ``v_ends`` formula is written against), so
@@ -1273,9 +1246,7 @@ def _write_phased_variants_chunk(
 
 
 def _write_ragged_intervals(out_dir: Path, itvs: "RaggedIntervals") -> None:
-    """Write a RaggedIntervals (values/starts/ends share offsets) to out_dir as
-    struct-of-arrays: starts/ends/values.npy + offsets.npy. Single-chunk writer
-    used for annotation tracks (format 2.0)."""
+    """Write a RaggedIntervals (values/starts/ends share offsets) to out_dir as struct-of-arrays: starts/ends/values.npy + offsets.npy. Single-chunk writer used for annotation tracks (format 2.0)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     for name, data, dt in (
         ("starts", itvs.starts.data, np.int32),

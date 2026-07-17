@@ -42,9 +42,9 @@ def _cleanup(shms: list, producer_ref) -> None:
 
 
 def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
-    """Re-introduce the ploidy axis on any Ragged / _Flat that the shm reader
-    flattened to (n_groups, None). _FlatVariants / RaggedVariants already carry
-    ploidy (regular_size) and are left unchanged.
+    """Re-introduce the ploidy axis on any Ragged / _Flat that the shm reader flattened to (n_groups, None).
+
+    _FlatVariants / RaggedVariants already carry ploidy (regular_size) and are left unchanged.
     """
     from seqpro.rag import Ragged
 
@@ -342,23 +342,17 @@ def make_double_buffered_dataset(
 ) -> "td.IterableDataset":
     """Create a PyTorch IterableDataset backed by the double-buffered producer.
 
-    Parameters
-    ----------
-    dataset:
-        The gvl Dataset to read from (must be file-backed).
-    batch_size:
-        Mini-batch size.
-    slot_bytes:
-        Byte budget per shared-memory slot (= buffer_bytes / 2).
-    bytes_per_instance:
-        2-D array of shape (n_regions, n_samples) with per-instance byte costs.
-    flat_r, flat_s:
-        Flattened region/sample indices for the epoch.
-    copy:
-        If True (default), batches own their data. If False, zero-copy views
-        are returned — valid only until the next batch is yielded.
-    heartbeat_seconds:
-        Seconds to wait per slot before checking producer liveness.
+    Args:
+        dataset: The gvl Dataset to read from (must be file-backed).
+        batch_size: Mini-batch size.
+        slot_bytes: Byte budget per shared-memory slot (= buffer_bytes / 2).
+        bytes_per_instance: 2-D array of shape (n_regions, n_samples) with per-instance byte
+            costs.
+        flat_r: Flattened region indices for the epoch.
+        flat_s: Flattened sample indices for the epoch.
+        copy: If True (default), batches own their data. If False, zero-copy views
+            are returned — valid only until the next batch is yielded.
+        heartbeat_seconds: Seconds to wait per slot before checking producer liveness.
     """
     import torch.utils.data as td
 

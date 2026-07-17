@@ -144,51 +144,41 @@ class Dataset:
         svar: str | Path | None = None,
         svar2: str | Path | None = None,
     ) -> RaggedDataset[MaybeRSEQ, MaybeRTRK]:
-        """Open a dataset from a path. If no reference genome is provided, the dataset cannot yield sequences.
+        """Open a dataset from a path.
+
+        If no reference genome is provided, the dataset cannot yield sequences.
         Will initialize the dataset such that it will return tracks and haplotypes (reference sequences if no genotypes) if possible.
         If tracks are available, they will be set to be returned in alphabetical order.
 
-        Parameters
-        ----------
-        path
-            Path to a dataset.
-        reference
-            Path to a reference genome.
-        jitter
-            Amount of jitter to use, cannot be more than the maximum jitter of the dataset.
-        rng
-            Random seed or np.random.Generator for any stochastic operations.
-        deterministic
-            Whether to use randomized or deterministic algorithms. If set to True, this will disable random
-            shifting of longer-than-requested haplotypes.
-        rc_neg
-            Whether to reverse-complement sequences and reverse tracks on negative strands.
-        min_af
-            The minimum allele frequency to include in the dataset. If dataset is not backed by SVAR genotypes, this will raise an error.
-        max_af
-            The maximum allele frequency to include in the dataset. If dataset is not backed by SVAR genotypes, this will raise an error.
-        var_fields
-            The variant fields to include in the dataset. Defaults to the
-            minimum useful set ``["alt", "ilen", "start"]``. Pass additional
-            field names (e.g. ``"ref"``, ``"dosage"``, or any info column
-            present in the source variants table) to load them eagerly at open
-            time. Must be a subset of :attr:`available_var_fields`.
-        splice_info
-            A string or tuple of strings representing the splice information to use.
-            If a string, it will be used as the transcript ID and the exons are expected to be in order.
-            If a tuple of strings, the first string will be used as the transcript ID and the second string will be used as the exon number.
-            If a dictionary, the keys will be used as the transcript ID and the values should be the row number for each exon, in order.
-            If False, splicing will be disabled.
-        var_filter
-            Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
-        svar
-            Override the recorded SVAR location. Use when the original SVAR has
-            moved and the dataset cannot find it via the stored relative/absolute
-            path or by sibling discovery.
-        svar2
-            Override the recorded ``.svar2`` location. Use when the original
-            ``.svar2`` store has moved and the dataset cannot find it via the
-            stored relative/absolute path or by sibling discovery.
+        Args:
+            path: Path to a dataset.
+            reference: Path to a reference genome.
+            jitter: Amount of jitter to use, cannot be more than the maximum jitter of the dataset.
+            rng: Random seed or np.random.Generator for any stochastic operations.
+            deterministic: Whether to use randomized or deterministic algorithms. If set to True, this will disable random
+                shifting of longer-than-requested haplotypes.
+            rc_neg: Whether to reverse-complement sequences and reverse tracks on negative strands.
+            min_af: The minimum allele frequency to include in the dataset. If dataset is not backed by SVAR genotypes, this will raise an error.
+            max_af: The maximum allele frequency to include in the dataset. If dataset is not backed by SVAR genotypes, this will raise an error.
+            var_fields: The variant fields to include in the dataset. Defaults to the
+                minimum useful set ``["alt", "ilen", "start"]``. Pass additional
+                field names (e.g. ``"ref"``, ``"dosage"``, or any info column
+                present in the source variants table) to load them eagerly at open
+                time. Must be a subset of :attr:`available_var_fields`.
+            region_names: The name of the column in the region-of-interest table (BED) to
+                use as the region names.
+            splice_info: A string or tuple of strings representing the splice information to use.
+                If a string, it will be used as the transcript ID and the exons are expected to be in order.
+                If a tuple of strings, the first string will be used as the transcript ID and the second string will be used as the exon number.
+                If a dictionary, the keys will be used as the transcript ID and the values should be the row number for each exon, in order.
+                If False, splicing will be disabled.
+            var_filter: Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
+            svar: Override the recorded SVAR location. Use when the original SVAR has
+                moved and the dataset cannot find it via the stored relative/absolute
+                path or by sibling discovery.
+            svar2: Override the recorded ``.svar2`` location. Use when the original
+                ``.svar2`` store has moved and the dataset cannot find it via the
+                stored relative/absolute path or by sibling discovery.
         """
         from ._open import OpenRequest
 
@@ -229,69 +219,53 @@ class Dataset:
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
-        Parameters
-        ----------
-        jitter
-            How much jitter to use. Must be non-negative and <= the :attr:`max_jitter <genvarloader.Dataset.max_jitter>` of the dataset.
-        rng
-            Random seed or np.random.Generator for non-deterministic operations e.g. jittering and shifting longer-than-requested haplotypes.
-        deterministic
-            Whether to use randomized or deterministic algorithms. If set to True, this will disable random
-            shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
-            and always apply the highest CCF group. Note that for unphased variants, this will mean not all possible haplotypes
-            can be returned.
-        rc_neg
-            Whether to reverse-complement sequences and reverse tracks on negative strands.
-        min_af
-            The minimum allele frequency to include in the dataset. If set to :code:`False`, disables this filter.
-            If dataset is not backed by SVAR genotypes, this will raise an error.
-        max_af
-            The maximum allele frequency to include in the dataset. If set to :code:`False`, disables this filter.
-            If dataset is not backed by SVAR genotypes, this will raise an error.
-        var_fields
-            The variant fields to include in the dataset.
-        splice_info
-            A string or tuple of strings representing the splice information to use.
-            If a string, it will be used as the transcript ID and the exons are expected to be in order.
-            If a tuple of strings, the first string will be used as the transcript ID and the second string will be used as the exon number.
-            If a dictionary, the keys will be used as the transcript ID and the values should be the row number for each exon, in order.
-            If False, splicing will be disabled.
-        var_filter
-            Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
-        flank_length
-            Number of reference-sequence bases to fetch as flanks around each variant. Stored on
-            the :class:`Haps` reconstructor for use by the flat-window output mode.
-        token_alphabet
-            Characters that define the token alphabet (e.g. ``b"ACGT"``, ``"ACGT"``, or
-            ``seqpro.alphabets.DNA``). Accepts a :class:`str`, :class:`bytes`, or
-            :class:`seqpro.NucleotideAlphabet` and is normalized to ``bytes``; position ``i``
-            in the alphabet maps to integer token ``i``. Must be supplied together with *unknown_token*.
-        unknown_token
-            Integer token to assign to any byte not present in *token_alphabet*. Must be supplied
-            together with *token_alphabet*.
-        dummy_variant
-            A :class:`DummyVariant` to insert into empty (region, sample, ploid) variant
-            groups so every group has at least one variant. Valid for the ``"variants"``
-            and ``"variant-windows"`` outputs (see
-            :meth:`with_seqs <genvarloader.Dataset.with_seqs>`); indexing any other output
-            kind with a dummy set raises. For token outputs (the ride-along ``flank_tokens``
-            and the variant-window token buffers) the dummy entry is filled entirely with
-            ``unknown_token``. Pass :code:`False` to disable.
-        unphased_union
-            When :code:`True`, fold the stored ``ploidy`` haplotypes onto a single haploid
-            sequence: the union of called ALTs per ``(region, sample)``. ``ds.ploidy`` and
-            ``n_variants(...)`` then report ploidy ``1``, and ``"variants"`` /
-            ``"variant-windows"`` output decode at ploidy ``1``. Phase is discarded (suited
-            to unphased somatic calls); ALT occurrences are concatenated across haplotypes
-            with no sort or dedup (a hom call appears once per haplotype). Requires a dataset
-            with genotypes and is incompatible with ``"haplotypes"`` / ``"annotated"``
-            output (raises). See issue #222.
-        realign_tracks
-            Whether to re-align track values to haplotype coordinates when both
-            haplotypes and float tracks are active. Default ``True``. Set ``False``
-            for reference-coordinate (as-is) tracks; required ``False`` for
-            ``variant-windows`` + tracks and for ``kind="intervals"`` with any
-            variant-aware seq mode.
+        Args:
+            jitter: How much jitter to use. Must be non-negative and <= the :attr:`max_jitter <genvarloader.Dataset.max_jitter>` of the dataset.
+            rng: Random seed or np.random.Generator for non-deterministic operations e.g. jittering and shifting longer-than-requested haplotypes.
+            deterministic: Whether to use randomized or deterministic algorithms. If set to True, this will disable random
+                shifting of longer-than-requested haplotypes and, for unphased variants, will enable deterministic variant assignment
+                and always apply the highest CCF group. Note that for unphased variants, this will mean not all possible haplotypes
+                can be returned.
+            rc_neg: Whether to reverse-complement sequences and reverse tracks on negative strands.
+            min_af: The minimum allele frequency to include in the dataset. If set to :code:`False`, disables this filter.
+                If dataset is not backed by SVAR genotypes, this will raise an error.
+            max_af: The maximum allele frequency to include in the dataset. If set to :code:`False`, disables this filter.
+                If dataset is not backed by SVAR genotypes, this will raise an error.
+            var_fields: The variant fields to include in the dataset.
+            splice_info: A string or tuple of strings representing the splice information to use.
+                If a string, it will be used as the transcript ID and the exons are expected to be in order.
+                If a tuple of strings, the first string will be used as the transcript ID and the second string will be used as the exon number.
+                If a dictionary, the keys will be used as the transcript ID and the values should be the row number for each exon, in order.
+                If False, splicing will be disabled.
+            var_filter: Whether to filter variants. If set to :code:`"exonic"`, only exonic variants will be applied.
+            flank_length: Number of reference-sequence bases to fetch as flanks around each variant. Stored on
+                the :class:`Haps` reconstructor for use by the flat-window output mode.
+            token_alphabet: Characters that define the token alphabet (e.g. ``b"ACGT"``, ``"ACGT"``, or
+                ``seqpro.alphabets.DNA``). Accepts a :class:`str`, :class:`bytes`, or
+                :class:`seqpro.NucleotideAlphabet` and is normalized to ``bytes``; position ``i``
+                in the alphabet maps to integer token ``i``. Must be supplied together with *unknown_token*.
+            unknown_token: Integer token to assign to any byte not present in *token_alphabet*. Must be supplied
+                together with *token_alphabet*.
+            dummy_variant: A :class:`DummyVariant` to insert into empty (region, sample, ploid) variant
+                groups so every group has at least one variant. Valid for the ``"variants"``
+                and ``"variant-windows"`` outputs (see
+                :meth:`with_seqs <genvarloader.Dataset.with_seqs>`); indexing any other output
+                kind with a dummy set raises. For token outputs (the ride-along ``flank_tokens``
+                and the variant-window token buffers) the dummy entry is filled entirely with
+                ``unknown_token``. Pass :code:`False` to disable.
+            unphased_union: When :code:`True`, fold the stored ``ploidy`` haplotypes onto a single haploid
+                sequence: the union of called ALTs per ``(region, sample)``. ``ds.ploidy`` and
+                ``n_variants(...)`` then report ploidy ``1``, and ``"variants"`` /
+                ``"variant-windows"`` output decode at ploidy ``1``. Phase is discarded (suited
+                to unphased somatic calls); ALT occurrences are concatenated across haplotypes
+                with no sort or dedup (a hom call appears once per haplotype). Requires a dataset
+                with genotypes and is incompatible with ``"haplotypes"`` / ``"annotated"``
+                output (raises). See issue #222.
+            realign_tracks: Whether to re-align track values to haplotype coordinates when both
+                haplotypes and float tracks are active. Default ``True``. Set ``False``
+                for reference-coordinate (as-is) tracks; required ``False`` for
+                ``variant-windows`` + tracks and for ``kind="intervals"`` with any
+                variant-aware seq mode.
         """
         to_evolve = {}
 
@@ -568,12 +542,10 @@ class Dataset:
     ) -> ArrayDataset | RaggedDataset:
         """Modify the output length of the dataset, returning a new dataset without modifying the old one.
 
-        Parameters
-        ----------
-        output_length
-            The output length. Can be set to :code:`"ragged"` or :code:`"variable"` to allow for variable length sequences.
-            If set to an integer, all sequences will be padded or truncated to this length. See the
-            `online documentation <https://genvarloader.readthedocs.io/en/latest/dataset.html>`_ for more information.
+        Args:
+            output_length: The output length. Can be set to :code:`"ragged"` or :code:`"variable"` to allow for variable length sequences.
+                If set to an integer, all sequences will be padded or truncated to this length. See the
+                `online documentation <https://genvarloader.readthedocs.io/en/latest/dataset.html>`_ for more information.
         """
         if isinstance(output_length, int) or output_length == "variable":
             if isinstance(output_length, int):
@@ -652,7 +624,9 @@ class Dataset:
         | None,
         window_opt: "VarWindowOpt | None" = None,
     ):
-        """Return a new dataset with the specified sequence type. The sequence type can be one of the following:
+        """Return a new dataset with the specified sequence type.
+
+        The sequence type can be one of the following:
 
         - :code:`"reference"`: reference sequences.
         - :code:`"haplotypes"`: personalized haplotype sequences.
@@ -696,11 +670,12 @@ class Dataset:
         If the Dataset's output length is :code:`"ragged"`, then annotated haplotypes will be :class:`~genvarloader._ragged.RaggedAnnotatedHaps` where each
         field is a Ragged array instead of NumPy arrays.
 
-        Parameters
-        ----------
-        kind
-            The type of sequences to return. Can be one of :code:`"reference"`, :code:`"haplotypes"`, :code:`"annotated"`, :code:`"variants"`, or :code:`None`
-            to return no sequences.
+        Args:
+            kind: The type of sequences to return. Can be one of :code:`"reference"`, :code:`"haplotypes"`, :code:`"annotated"`, :code:`"variants"`, or :code:`None`
+                to return no sequences.
+            window_opt: Required when :code:`kind="variant-windows"`. A :class:`VarWindowOpt`
+                configuring the flank length, token alphabet, and unknown token used to
+                extract fixed-length windows around each variant.
         """
         # Validate the requested kind against storage state.
         if kind is None:
@@ -783,10 +758,12 @@ class Dataset:
     ):
         """Modify which tracks to return, returning a new dataset without modifying the old one.
 
-        Parameters
-        ----------
-        tracks
-            The tracks to return. Can be a (list of) track names or :code:`False` to return no tracks."""
+        Args:
+            tracks: The tracks to return. Can be a (list of) track names or :code:`False` to return no tracks.
+            kind: The container type to return tracks as: :code:`"tracks"` for :class:`RaggedTracks`
+                or :code:`"intervals"` for :class:`RaggedIntervals`. If :code:`None`, keeps the
+                dataset's current track container kind.
+        """
         if self._tracks is None:
             logger.warning("Dataset has no tracks, so this method has no effect.")
             return self
@@ -840,12 +817,10 @@ class Dataset:
         when the reconstructor is :class:`HapsTracks`). Pure-reference and
         pure-haplotype datasets have no insertion fill to configure.
 
-        Parameters
-        ----------
-        fill
-            Either a single :class:`InsertionFill` strategy applied to every
-            active track, or a dict mapping track name to strategy. Tracks not
-            in the dict fall back to :class:`Repeat5p`.
+        Args:
+            fill: Either a single :class:`InsertionFill` strategy applied to every
+                active track, or a dict mapping track name to strategy. Tracks not
+                in the dict fall back to :class:`Repeat5p`.
         """
         if self._tracks is None:
             raise ValueError("Dataset has no tracks; cannot configure insertion fill.")
@@ -874,11 +849,9 @@ class Dataset:
     def with_output_format(self, fmt: Literal["ragged", "flat"]) -> "Dataset":
         """Return a copy that yields ``fmt`` containers from eager indexing.
 
-        Parameters
-        ----------
-        fmt
-            ``"ragged"`` for ``_core.Ragged``-backed ``Ragged``/``RaggedVariants`` (default),
-            or ``"flat"`` for pure-numpy ``FlatRagged``/``FlatVariants``.
+        Args:
+            fmt: ``"ragged"`` for ``_core.Ragged``-backed ``Ragged``/``RaggedVariants`` (default),
+                or ``"flat"`` for pure-numpy ``FlatRagged``/``FlatVariants``.
         """
         if fmt not in ("ragged", "flat"):
             raise ValueError(f"output_format must be 'ragged' or 'flat', got {fmt!r}.")
@@ -985,8 +958,11 @@ class Dataset:
 
     @property
     def regions(self) -> pl.DataFrame:
-        """The input regions in the dataset as they were provided to :func:`gvl.write() <genvarloader.write()>` i.e. with all BED columns plus any
-        extra columns that were present."""
+        """The input regions in the dataset.
+
+        As they were provided to :func:`gvl.write() <genvarloader.write()>` i.e. with all BED columns plus any
+        extra columns that were present.
+        """
         if self._idxer.region_subset_idxs is None:
             return self._full_bed
         return self._full_bed[self._idxer.region_subset_idxs]
@@ -1025,7 +1001,7 @@ class Dataset:
 
     @property
     def shape(self) -> tuple[int, int]:
-        """Return the shape of the dataset. :code:`(n_rows, n_samples)`"""
+        """Return the shape of the dataset: :code:`(n_rows, n_samples)`."""
         if self._sp_idxer is None:
             return self._idxer.shape
         else:
@@ -1033,7 +1009,7 @@ class Dataset:
 
     @property
     def full_shape(self) -> tuple[int, int]:
-        """Return the full shape of the dataset, ignoring any subsetting. :code:`(n_rows, n_samples)`"""
+        """Return the full shape of the dataset, ignoring any subsetting: :code:`(n_rows, n_samples)`."""
         if self._sp_idxer is None:
             return self._idxer.full_shape
         else:
@@ -1148,58 +1124,55 @@ class Dataset:
         regions: StrIdx | None = None,
         samples: StrIdx | None = None,
     ) -> Self:
-        """Subset the dataset to specific regions and/or samples by index or a boolean mask. If regions or samples
-        are not provided, the corresponding dimension will not be subset.
+        """Subset the dataset to specific regions and/or samples by index or a boolean mask.
 
-        Parameters
-        ----------
-        regions
-            The regions to subset to.
-        samples
-            The samples to subset to.
+        If regions or samples are not provided, the corresponding dimension will not be subset.
 
-        Examples
-        --------
-        Subsetting to the first 10 regions:
+        Args:
+            regions: The regions to subset to.
+            samples: The samples to subset to.
 
-        .. code-block:: python
+        Examples:
+            Subsetting to the first 10 regions:
 
-            ds.subset_to(slice(10))
+            .. code-block:: python
 
-        Subsetting to the 2nd and 4th samples:
+                ds.subset_to(slice(10))
 
-        .. code-block:: python
+            Subsetting to the 2nd and 4th samples:
 
-            ds.subset_to(samples=[1, 3])
+            .. code-block:: python
+
+                ds.subset_to(samples=[1, 3])
 
 
-        Subsetting to chromosome 1, assuming it's labeled :code:`"chr1"`:
+            Subsetting to chromosome 1, assuming it's labeled :code:`"chr1"`:
 
-        .. code-block:: python
+            .. code-block:: python
 
-            r_idx = ds.regions["chrom"] == "chr1"
-            ds.subset_to(regions=r_idx)
-
-
-        Subsetting to regions labeled by a column "split", assuming "split" existed in the input regions:
-
-        .. code-block:: python
-
-            r_idx = ds.regions["split"] == "train"
-            ds.subset_to(regions=r_idx)
+                r_idx = ds.regions["chrom"] == "chr1"
+                ds.subset_to(regions=r_idx)
 
 
-        Subsetting to the intersection with another set of regions:
+            Subsetting to regions labeled by a column "split", assuming "split" existed in the input regions:
 
-        .. code-block:: python
+            .. code-block:: python
 
-            import seqpro as sp
+                r_idx = ds.regions["split"] == "train"
+                ds.subset_to(regions=r_idx)
 
-            regions = gvl.read_bedlike("regions.bed")
-            regions_pr = sp.bed.to_pyr(regions)
-            ds_regions_pr = sp.bed.to_pyr(ds.regions.with_row_index())
-            r_idx = ds_regions_pr.overlap(regions_pr).df["index"].to_numpy()
-            ds.subset_to(regions=r_idx)
+
+            Subsetting to the intersection with another set of regions:
+
+            .. code-block:: python
+
+                import seqpro as sp
+
+                regions = gvl.read_bedlike("regions.bed")
+                regions_pr = sp.bed.to_pyr(regions)
+                ds_regions_pr = sp.bed.to_pyr(ds.regions.with_row_index())
+                r_idx = ds_regions_pr.overlap(regions_pr).df["index"].to_numpy()
+                ds.subset_to(regions=r_idx)
         """
         if regions is None and samples is None:
             return self
@@ -1232,20 +1205,18 @@ class Dataset:
         regions: Idx | None = None,
         samples: Idx | str | Sequence[str] | None = None,
     ) -> NDArray[np.int32] | None:
-        """The lengths of jitter-extended haplotypes for specified regions and samples. If the dataset is
-        not phased or not deterministic, this will return :code:`None` because the haplotypes are not guaranteed to be
+        """The lengths of jitter-extended haplotypes for specified regions and samples.
+
+        If the dataset is not phased or not deterministic, this will return :code:`None` because the haplotypes are not guaranteed to be
         a consistent length due to randomness in what variants are used.
 
         .. note::
 
             Currently not implemented for spliced datasets.
 
-        Parameters
-        ----------
-        regions
-            Regions to compute haplotype lengths for.
-        samples
-            Samples to compute haplotype lengths for.
+        Args:
+            regions: Regions to compute haplotype lengths for.
+            samples: Samples to compute haplotype lengths for.
         """
         if self._sp_idxer is not None:
             raise NotImplementedError(
@@ -1295,15 +1266,11 @@ class Dataset:
     ) -> NDArray[np.int32]:
         """The number of variants in the dataset for specified regions and samples.
 
-        Parameters
-        ----------
-        regions
-            Regions to compute the number of variants for.
-        samples
-            Samples to compute the number of variants for.
+        Args:
+            regions: Regions to compute the number of variants for.
+            samples: Samples to compute the number of variants for.
 
-        Returns
-        -------
+        Returns:
             Array with shape (..., ploidy). The number of variants in the dataset for the specified regions and samples.
             If the dataset does not have genotypes, this will return :code:`None`.
         """
@@ -1345,26 +1312,29 @@ class Dataset:
         *,
         include_offsets: bool = False,
     ) -> NDArray[np.int64]:
-        """Exact bytes one (region, sample) instance materializes to under the
-        current schema. Shape: (n_instances,) of int64.
+        """Exact bytes one (region, sample) instance materializes to under the current schema.
 
-        Parameters
-        ----------
-        include_offsets
-            If ``False`` (default), return the *payload* bytes — the
-            ``numpy.nbytes`` of the materialized output. If ``True``, add the
-            per-instance share of the int64 offset/lengths arrays that the
-            shared-memory chunk serialization writes alongside the payload
-            (see ``_shm_layout.write_chunk``): ``8 * ploidy`` per ragged
-            output array (outer offsets) and, for ``variants`` ``alt``/``ref``
-            fields, ``8 * n_variants`` (inner allele offsets). This is the
-            footprint that must fit in a ``double_buffered`` slot; payload
-            alone undersizes the slot for ragged outputs. The per-chunk
-            ``+1`` offset terminators and 8-byte alignment padding are not
-            included here — they are absorbed by the slot's fixed slack.
+        Shape: (n_instances,) of int64.
 
-        Raises NotImplementedError for spliced datasets. Raises ValueError for
-        non-deterministic datasets when with_seqs is in {"haplotypes", "annotated"}.
+        Args:
+            regions: Regions to compute output bytes for.
+            samples: Samples to compute output bytes for.
+            include_offsets: If ``False`` (default), return the *payload* bytes — the
+                ``numpy.nbytes`` of the materialized output. If ``True``, add the
+                per-instance share of the int64 offset/lengths arrays that the
+                shared-memory chunk serialization writes alongside the payload
+                (see ``_shm_layout.write_chunk``): ``8 * ploidy`` per ragged
+                output array (outer offsets) and, for ``variants`` ``alt``/``ref``
+                fields, ``8 * n_variants`` (inner allele offsets). This is the
+                footprint that must fit in a ``double_buffered`` slot; payload
+                alone undersizes the slot for ragged outputs. The per-chunk
+                ``+1`` offset terminators and 8-byte alignment padding are not
+                included here — they are absorbed by the slot's fixed slack.
+
+        Raises:
+            NotImplementedError: For spliced datasets.
+            ValueError: For non-deterministic datasets when with_seqs is in
+                {"haplotypes", "annotated"}.
         """
         if self._sp_idxer is not None:
             raise NotImplementedError(
@@ -1523,15 +1493,11 @@ class Dataset:
     ) -> NDArray[np.int32]:
         """The number of intervals in the dataset for specified regions and samples.
 
-        Parameters
-        ----------
-        regions
-            Regions to compute the number of intervals for.
-        samples
-            Samples to compute the number of intervals for.
+        Args:
+            regions: Regions to compute the number of intervals for.
+            samples: Samples to compute the number of intervals for.
 
-        Returns
-        -------
+        Returns:
             Array with shape (..., tracks). The number of intervals in the dataset for the specified regions and samples.
             If the dataset does not have intervals, this will return :code:`None`.
         """
@@ -1581,24 +1547,18 @@ class Dataset:
     ) -> ArrayDataset | RaggedDataset:
         """Write transformed tracks to the dataset.
 
-        Parameters
-        ----------
-        new_track
-            The name of the new track.
-        existing_track
-            The name of the existing track to transform.
-        transform
-            A function to apply to the existing track to get a new, transformed track.
-            This will be done in chunks such that the tracks provided will not exceed :code:`max_mem`.
-            The arguments given to the transform will be the region and sample indices as numpy arrays
-            and the tracks themselves as a :class:`Ragged` array with
-            shape (regions, samples). The tracks must be a :class:`Ragged` array since regions may be
-            different lengths to accommodate indels. This function should then return the transformed
-            tracks as a :class:`Ragged` array with the same shape and lengths.
-        max_mem
-            The maximum memory to use in bytes, by default 1 GiB (2**30 bytes)
-        overwrite
-            Whether to overwrite the existing track, by default False
+        Args:
+            new_track: The name of the new track.
+            existing_track: The name of the existing track to transform.
+            transform: A function to apply to the existing track to get a new, transformed track.
+                This will be done in chunks such that the tracks provided will not exceed :code:`max_mem`.
+                The arguments given to the transform will be the region and sample indices as numpy arrays
+                and the tracks themselves as a :class:`Ragged` array with
+                shape (regions, samples). The tracks must be a :class:`Ragged` array since regions may be
+                different lengths to accommodate indels. This function should then return the transformed
+                tracks as a :class:`Ragged` array with the same shape and lengths.
+            max_mem: The maximum memory to use in bytes, by default 1 GiB (2**30 bytes)
+            overwrite: Whether to overwrite the existing track, by default False
         """
         if self._tracks is None:
             raise ValueError("Dataset has no tracks to transform.")
@@ -1621,20 +1581,19 @@ class Dataset:
     def to_torch_dataset(
         self, return_indices: bool, transform: Callable | None
     ) -> TorchDataset:
-        """Convert the dataset to a PyTorch :class:`Dataset <torch.utils.data.Dataset>`. Requires PyTorch to be installed.
+        """Convert the dataset to a PyTorch :class:`Dataset <torch.utils.data.Dataset>`.
 
-        Parameters
-        ----------
-        return_indices
-            Whether to append arrays of row and sample indices of the non-subset dataset to each batch.
-        transform
-            The transform to apply to each batch of data. The transform should take input matching the output of the dataset and can
-            return anything that can be converted to a PyTorch tensor. In combination with indices, this allows you to combine arbitrary
-            row- and sample-specific data with dataset output on-the-fly.
+        Requires PyTorch to be installed.
 
-            .. note::
-                Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
-                dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
+        Args:
+            return_indices: Whether to append arrays of row and sample indices of the non-subset dataset to each batch.
+            transform: The transform to apply to each batch of data. The transform should take input matching the output of the dataset and can
+                return anything that can be converted to a PyTorch tensor. In combination with indices, this allows you to combine arbitrary
+                row- and sample-specific data with dataset output on-the-fly.
+
+                .. note::
+                    Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
+                    dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
         """
         if self.output_length == "ragged":
             logger.warning(
@@ -1666,75 +1625,55 @@ class Dataset:
         copy: bool = True,
         heartbeat_seconds: float = 60.0,
     ) -> td.DataLoader:
-        """Convert the dataset to a PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`. The parameters are the same as a
-        :class:`DataLoader <torch.utils.data.DataLoader>` with a few omissions e.g. :code:`batch_sampler`.
-        Requires PyTorch to be installed.
+        """Convert the dataset to a PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`.
 
-        Parameters
-        ----------
-        batch_size
-            How many samples per batch to load.
-        shuffle
-            Set to True to have the data reshuffled at every epoch.
-        sampler
-            Defines the strategy to draw samples from the dataset. Can be any :py:class:`Iterable <typing.Iterable>` with :code:`__len__` implemented. If specified, shuffle must not be specified.
+        The parameters are the same as a :class:`DataLoader <torch.utils.data.DataLoader>`
+        with a few omissions e.g. :code:`batch_sampler`. Requires PyTorch to be installed.
 
-            .. important::
-                Do not provide a :class:`BatchSampler <torch.utils.data.BatchSampler>` here. GVL Datasets use multithreading when indexed with batches of indices to avoid the overhead of multi-processing.
-                To leverage this, GVL will automatically wrap the :code:`sampler` with a :class:`BatchSampler <torch.utils.data.BatchSampler>`
-                so that lists of indices are given to the GVL Dataset instead of one index at a time. See `this post <https://discuss.pytorch.org/t/dataloader-sample-by-slices-from-dataset/113005>`_
-                for more information.
-        num_workers
-            How many subprocesses to use for dataloading. :code:`0` means that the data will be loaded in the main process.
+        Args:
+            batch_size: How many samples per batch to load.
+            shuffle: Set to True to have the data reshuffled at every epoch.
+            sampler: Defines the strategy to draw samples from the dataset. Can be any :py:class:`Iterable <typing.Iterable>` with :code:`__len__` implemented. If specified, shuffle must not be specified.
 
-            .. tip::
-                For GenVarLoader, it is generally best to set this to 0 or 1 since almost everything in
-                GVL is multithreaded. However, if you are using a transform that is compute intensive and single threaded, there may
-                be a benefit to setting this > 1.
-        collate_fn
-            Merges a list of samples to form a mini-batch of Tensor(s).
-        pin_memory
-            If :code:`True`, the data loader will copy Tensors into device/CUDA pinned memory before returning them. If your data elements are a custom type, or your :code:`collate_fn` returns a batch that is a custom type, see the example below.
-        drop_last
-            Set to :code:`True` to drop the last incomplete batch, if the dataset size is not divisible by the batch size. If :code:`False` and the size of dataset is not divisible by the batch size, then the last batch will be smaller.
-        timeout
-            If positive, the timeout value for collecting a batch from workers. Should always be non-negative.
-        worker_init_fn
-            If not :code:`None`, this will be called on each worker subprocess with the worker id (an int in :code:`[0, num_workers - 1]`) as input, after seeding and before data loading.
-        multiprocessing_context
-            If :code:`None`, the default multiprocessing context of your operating system will be used.
-        generator
-            If not :code:`None`, this RNG will be used by RandomSampler to generate random indexes and multiprocessing to generate :code:`base_seed` for workers.
-        prefetch_factor
-            Number of batches loaded in advance by each worker. 2 means there will be a total of 2 * num_workers batches prefetched across all workers. (default value depends on the set value for num_workers. If value of num_workers=0 default is None. Otherwise, if value of num_workers > 0 default is 2).
-        persistent_workers
-            If :code:`True`, the data loader will not shut down the worker processes after a dataset has been consumed once. This allows to maintain the workers Dataset instances alive.
-        pin_memory_device
-            The device to :code:`pin_memory` to if :code:`pin_memory` is :code:`True`.
-        return_indices
-            Whether to append arrays of row and sample indices of the non-subset dataset to each batch.
-        transform
-            The transform to apply to each batch of data. The transform should take input matching the output of the dataset and can
-            return anything that can be converted to a PyTorch tensor. In combination with indices, this allows you to combine arbitrary
-            row- and sample-specific data with dataset output on-the-fly.
+                .. important::
+                    Do not provide a :class:`BatchSampler <torch.utils.data.BatchSampler>` here. GVL Datasets use multithreading when indexed with batches of indices to avoid the overhead of multi-processing.
+                    To leverage this, GVL will automatically wrap the :code:`sampler` with a :class:`BatchSampler <torch.utils.data.BatchSampler>`
+                    so that lists of indices are given to the GVL Dataset instead of one index at a time. See `this post <https://discuss.pytorch.org/t/dataloader-sample-by-slices-from-dataset/113005>`_
+                    for more information.
+            num_workers: How many subprocesses to use for dataloading. :code:`0` means that the data will be loaded in the main process.
 
-            .. note::
-                Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
-                dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
-        mode
-            Dataloading strategy. :code:`None` (default) uses the standard PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`
-            over a map-style dataset. :code:`"buffered"` and :code:`"double_buffered"` use a prefetching producer that fills an
-            in-memory buffer ahead of consumption to hide read latency; both are incompatible with :code:`num_workers > 0` since
-            the loader is itself the concurrency strategy. :code:`"double_buffered"` serializes chunks into two fixed-size
-            shared-memory slots, allowing a producer thread to fill one slot while the consumer drains the other.
-        buffer_bytes
-            Total byte budget for the prefetch buffer when :code:`mode` is :code:`"buffered"` or :code:`"double_buffered"`.
-            For :code:`"double_buffered"` this is split across two shared-memory slots (:code:`buffer_bytes / 2` each). Defaults to 2 GiB.
-        copy
-            Only used when :code:`mode="double_buffered"`. If :code:`True` (default), each batch owns its data. If :code:`False`,
-            batches are zero-copy views into shared memory and are only valid until the next batch is yielded.
-        heartbeat_seconds
-            Only used when :code:`mode="double_buffered"`. Seconds to wait per slot before checking that the producer is still alive.
+                .. tip::
+                    For GenVarLoader, it is generally best to set this to 0 or 1 since almost everything in
+                    GVL is multithreaded. However, if you are using a transform that is compute intensive and single threaded, there may
+                    be a benefit to setting this > 1.
+            collate_fn: Merges a list of samples to form a mini-batch of Tensor(s).
+            pin_memory: If :code:`True`, the data loader will copy Tensors into device/CUDA pinned memory before returning them. If your data elements are a custom type, or your :code:`collate_fn` returns a batch that is a custom type, see the example below.
+            drop_last: Set to :code:`True` to drop the last incomplete batch, if the dataset size is not divisible by the batch size. If :code:`False` and the size of dataset is not divisible by the batch size, then the last batch will be smaller.
+            timeout: If positive, the timeout value for collecting a batch from workers. Should always be non-negative.
+            worker_init_fn: If not :code:`None`, this will be called on each worker subprocess with the worker id (an int in :code:`[0, num_workers - 1]`) as input, after seeding and before data loading.
+            multiprocessing_context: If :code:`None`, the default multiprocessing context of your operating system will be used.
+            generator: If not :code:`None`, this RNG will be used by RandomSampler to generate random indexes and multiprocessing to generate :code:`base_seed` for workers.
+            prefetch_factor: Number of batches loaded in advance by each worker. 2 means there will be a total of 2 * num_workers batches prefetched across all workers. (default value depends on the set value for num_workers. If value of num_workers=0 default is None. Otherwise, if value of num_workers > 0 default is 2).
+            persistent_workers: If :code:`True`, the data loader will not shut down the worker processes after a dataset has been consumed once. This allows to maintain the workers Dataset instances alive.
+            pin_memory_device: The device to :code:`pin_memory` to if :code:`pin_memory` is :code:`True`.
+            return_indices: Whether to append arrays of row and sample indices of the non-subset dataset to each batch.
+            transform: The transform to apply to each batch of data. The transform should take input matching the output of the dataset and can
+                return anything that can be converted to a PyTorch tensor. In combination with indices, this allows you to combine arbitrary
+                row- and sample-specific data with dataset output on-the-fly.
+
+                .. note::
+                    Depending on how transforms are implemented, they can easily introduce a dataloading bottleneck. If you find
+                    dataloading is slow, it's often a good idea to try disabling your transform to see if it's impacting throughput.
+            mode: Dataloading strategy. :code:`None` (default) uses the standard PyTorch :class:`DataLoader <torch.utils.data.DataLoader>`
+                over a map-style dataset. :code:`"buffered"` and :code:`"double_buffered"` use a prefetching producer that fills an
+                in-memory buffer ahead of consumption to hide read latency; both are incompatible with :code:`num_workers > 0` since
+                the loader is itself the concurrency strategy. :code:`"double_buffered"` serializes chunks into two fixed-size
+                shared-memory slots, allowing a producer thread to fill one slot while the consumer drains the other.
+            buffer_bytes: Total byte budget for the prefetch buffer when :code:`mode` is :code:`"buffered"` or :code:`"double_buffered"`.
+                For :code:`"double_buffered"` this is split across two shared-memory slots (:code:`buffer_bytes / 2` each). Defaults to 2 GiB.
+            copy: Only used when :code:`mode="double_buffered"`. If :code:`True` (default), each batch owns its data. If :code:`False`,
+                batches are zero-copy views into shared memory and are only valid until the next batch is yielded.
+            heartbeat_seconds: Only used when :code:`mode="double_buffered"`. Seconds to wait per slot before checking that the producer is still alive.
         """
         if mode is not None:
             # Buffered modes operate directly on the Dataset, not on a TorchDataset wrapper,
@@ -1879,8 +1818,7 @@ def _lazy_load_custom_fields(
     haps: Haps,
     new_fields: dict[str, np.dtype],
 ) -> Haps:
-    """Memmap custom FORMAT fields (Number=G, stored as <name>.npy) into
-    ``haps.var_field_data`` for fields that were not loaded at open time.
+    """Memmap custom FORMAT fields (Number=G, stored as <name>.npy) into ``haps.var_field_data`` for fields that were not loaded at open time.
 
     ``new_fields`` maps field name → numpy dtype (already confirmed present in
     the SVAR metadata). Returns a new ``Haps`` with updated ``var_field_data``.

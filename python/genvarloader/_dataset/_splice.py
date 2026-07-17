@@ -58,20 +58,15 @@ def build_splice_plan(
 ) -> SplicePlan:
     """Build a splice plan from per-query lengths and splice-row boundaries.
 
-    Parameters
-    ----------
-    lengths
-        Shape ``(B, *inner_fixed)``. Per-query lengths in current ``(splice_row,
-        sample, splice_element)`` C-order, with any inner fixed axes (ploidy,
-        tracks) intact. ``E = prod(inner_fixed)`` is the inner flatten factor.
-    splice_row_offsets
-        Shape ``(n_rows * n_samples + 1,)``. Cumulative count of elements per
-        ``(splice_row, sample)`` pair — i.e. the ``offsets`` returned by
-        ``SpliceIndexer.parse_idx``.
-    n_samples
-        Number of samples in the outer ``(splice_row, sample)`` grid.
-    n_rows
-        Number of splice rows in the outer ``(splice_row, sample)`` grid.
+    Args:
+        lengths: Shape ``(B, *inner_fixed)``. Per-query lengths in current ``(splice_row,
+            sample, splice_element)`` C-order, with any inner fixed axes (ploidy,
+            tracks) intact. ``E = prod(inner_fixed)`` is the inner flatten factor.
+        splice_row_offsets: Shape ``(n_rows * n_samples + 1,)``. Cumulative count of elements per
+            ``(splice_row, sample)`` pair — i.e. the ``offsets`` returned by
+            ``SpliceIndexer.parse_idx``.
+        n_samples: Number of samples in the outer ``(splice_row, sample)`` grid.
+        n_rows: Number of splice rows in the outer ``(splice_row, sample)`` grid.
     """
     if lengths.ndim == 1:
         inner_fixed: tuple[int, ...] = ()
@@ -258,16 +253,11 @@ class SpliceMap:
     ) -> tuple[NDArray[np.intp], NDArray[np.int64], tuple[int, ...] | None, bool]:
         """Parse a row index into the inputs needed for a per-region fetch.
 
-        Returns
-        -------
-        flat_region_idxs
-            1-D region indices to feed the unspliced reader.
-        offsets
-            For ``np.add.reduceat``-style concat (len == n_selected_rows + 1).
-        out_reshape
-            Target shape for fancy/combo indexing, or ``None``.
-        squeeze
-            Whether to squeeze the row dim out (scalar index).
+        Returns:
+            flat_region_idxs: 1-D region indices to feed the unspliced reader.
+            offsets: For ``np.add.reduceat``-style concat (len == n_selected_rows + 1).
+            out_reshape: Target shape for fancy/combo indexing, or ``None``.
+            squeeze: Whether to squeeze the row dim out (scalar index).
         """
         out_reshape = None
         squeeze = False

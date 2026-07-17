@@ -31,12 +31,9 @@ class BigWigs(Reader):
     def __init__(self, name: str, paths: dict[str, str]) -> None:
         """Read data from bigWig files.
 
-        Parameters
-        ----------
-        name
-            Name of the reader, for example `'signal'`.
-        paths
-            Dictionary of sample names and paths to bigWig files for those samples.
+        Args:
+            name: Name of the reader, for example `'signal'`.
+            paths: Dictionary of sample names and paths to bigWig files for those samples.
         """
         self.name = name
         self.paths = paths
@@ -62,13 +59,10 @@ class BigWigs(Reader):
     def from_table(cls, name: str, table: str | Path | pl.DataFrame):
         """Read data from bigWig files.
 
-        Parameters
-        ----------
-        name
-            Name of the reader, for example `'signal'`.
-        table
-            Path to a table or a DataFrame containing sample names and paths to bigWig files for those samples.
-            It must have columns "sample" and "path".
+        Args:
+            name: Name of the reader, for example `'signal'`.
+            table: Path to a table or a DataFrame containing sample names and paths to bigWig files for those
+                samples. It must have columns "sample" and "path".
         """
         if isinstance(table, (str, Path)):
             table = Path(table)
@@ -98,22 +92,17 @@ class BigWigs(Reader):
         ends: ArrayLike,
         **kwargs,
     ) -> NDArray[np.float32]:
-        """Read data corresponding to given genomic coordinates. The output shape will
-        have length as the final dimension/axis i.e. (..., length).
+        """Read data corresponding to given genomic coordinates.
 
-        Parameters
-        ----------
-        contig
-            Name of the contig/chromosome.
-        starts : ArrayLike
-            Start coordinates, 0-based.
-        ends : ArrayLike
-            End coordinates, 0-based, exclusive.
-        sample
-            Name of the samples to read data from.
+        The output shape will have length as the final dimension/axis i.e. (..., length).
 
-        Returns
-        -------
+        Args:
+            contig: Name of the contig/chromosome.
+            starts (ArrayLike): Start coordinates, 0-based.
+            ends (ArrayLike): End coordinates, 0-based, exclusive.
+            **kwargs: `sample` specifies the name of the samples to read data from.
+
+        Returns:
             Shape: (samples length). Data corresponding to the given genomic coordinates and samples.
         """
         _contig = normalize_contig_name(contig, self.contigs)
@@ -155,19 +144,14 @@ class BigWigs(Reader):
     ) -> NDArray[np.int32]:
         """Count the number of intervals corresponding to given genomic coordinates.
 
-        Parameters
-        ----------
-        contig
-            Name of the contig/chromosome.
-        starts : ArrayLike
-            Start coordinates, 0-based.
-        ends : ArrayLike
-            End coordinates, 0-based, exclusive.
-        sample
-            Name of the samples to read data from.
+        Args:
+            contig: Name of the contig/chromosome.
+            starts (ArrayLike): Start coordinates, 0-based.
+            ends (ArrayLike): End coordinates, 0-based, exclusive.
+            sample: Name of the samples to read data from.
+            **kwargs: Additional keyword arguments (unused; present for interface compatibility).
 
-        Returns
-        -------
+        Returns:
             Shape: (regions, samples). Number of intervals that overlap with each region and sample.
         """
         _contig = normalize_contig_name(contig, self.contigs)
@@ -203,19 +187,16 @@ class BigWigs(Reader):
         sample: str | list[str] | None = None,
         **kwargs,
     ) -> RaggedIntervals:
-        """Read intervals corresponding to given genomic coordinates. The output data
-        will be a 2D Ragged array of :code:`struct{start, end, value}` with shape (regions, samples).
+        """Read intervals corresponding to given genomic coordinates.
 
-        Parameters
-        ----------
-        contig
-            Name of the contig/chromosome.
-        starts : ArrayLike
-            Start coordinates, 0-based.
-        ends : ArrayLike
-            End coordinates, 0-based, exclusive.
-        sample
-            Name of the samples to read data from.
+        The output data will be a 2D Ragged array of :code:`struct{start, end, value}` with shape (regions, samples).
+
+        Args:
+            contig: Name of the contig/chromosome.
+            starts (ArrayLike): Start coordinates, 0-based.
+            ends (ArrayLike): End coordinates, 0-based, exclusive.
+            sample: Name of the samples to read data from.
+            **kwargs: Additional keyword arguments (unused; present for interface compatibility).
         """
         _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:
@@ -254,24 +235,21 @@ class BigWigs(Reader):
         sample: str | list[str] | None = None,
         **kwargs,
     ) -> RaggedIntervals:
-        """This function is unsafe! Reads intervals corresponding to given genomic coordinates
-        using provided offsets. If the offsets are incorrect this function is undefined behavior.
-        To ensure offsets are correct, use the count_intervals function (see :meth:`intervals()`).
-        The output data will be a 2D Ragged array of :code:`struct{start, end, value}` with shape (regions, samples).
+        """This function is unsafe!
 
-        Parameters
-        ----------
-        contig
-            Name of the contig/chromosome.
-        starts : ArrayLike
-            Start coordinates, 0-based.
-        ends : ArrayLike
-            End coordinates, 0-based, exclusive.
-        offsets
-            Offsets corresponding to the returned interval data of shape (regions, samples). Can be
-            computed from the number of intervals per query, e.g. with the count_intervals function.
-        sample
-            Name of the samples to read data from.
+        Reads intervals corresponding to given genomic coordinates using provided offsets. If the offsets
+        are incorrect this function is undefined behavior. To ensure offsets are correct, use the
+        count_intervals function (see :meth:`intervals()`). The output data will be a 2D Ragged array of
+        :code:`struct{start, end, value}` with shape (regions, samples).
+
+        Args:
+            contig: Name of the contig/chromosome.
+            starts (ArrayLike): Start coordinates, 0-based.
+            ends (ArrayLike): End coordinates, 0-based, exclusive.
+            offsets: Offsets corresponding to the returned interval data of shape (regions, samples). Can be
+                computed from the number of intervals per query, e.g. with the count_intervals function.
+            sample: Name of the samples to read data from.
+            **kwargs: Additional keyword arguments (unused; present for interface compatibility).
         """
         _contig = normalize_contig_name(contig, self.contigs)
         if _contig is None:

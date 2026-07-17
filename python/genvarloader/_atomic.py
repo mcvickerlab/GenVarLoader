@@ -71,17 +71,14 @@ def atomic_dir(
     the temp dir is removed and the exception propagates; `dest` is never
     partially written.
 
-    Parameters
-    ----------
-    dest
-        Final destination directory.
-    overwrite
-        If False and `dest` already exists, raise `FileExistsError` up front. If
-        True, an existing `dest` is replaced via move-aside-then-rename.
-    lock
-        Acquire a best-effort `<dest>.lock` to avoid redundant concurrent builds.
-    timeout
-        Seconds to wait for the lock before logging and proceeding anyway.
+    Args:
+        dest: Final destination directory.
+        overwrite: If False and `dest` already exists, raise `FileExistsError` up
+            front. If True, an existing `dest` is replaced via
+            move-aside-then-rename.
+        lock: Acquire a best-effort `<dest>.lock` to avoid redundant concurrent
+            builds.
+        timeout: Seconds to wait for the lock before logging and proceeding anyway.
     """
     dest = Path(dest)
     if dest.exists() and not overwrite:

@@ -86,8 +86,7 @@ def resolve_source(gvlfa_dir: str | Path, meta: FastaCache) -> Path | None:
 
 
 def fingerprint(path: str | Path) -> Fingerprint:
-    """Cheap content fingerprint: blake2b of the first FINGERPRINT_WINDOW bytes,
-    plus the total file size (catches changes past the hashed window)."""
+    """Cheap content fingerprint: blake2b of the first FINGERPRINT_WINDOW bytes, plus the total file size (catches changes past the hashed window)."""
     path = Path(path)
     size = path.stat().st_size
     n = min(FINGERPRINT_WINDOW, size)
@@ -156,8 +155,7 @@ def build(source_fa: str | Path, gvlfa_dir: str | Path) -> FastaCache:
 
 
 def _ensure_built(source_fa: Path, gvlfa_dir: Path) -> FastaCache:
-    """Build the cache under a best-effort lock, double-checking inside the lock
-    that another job hasn't already published a fresh cache."""
+    """Build the cache under a best-effort lock, double-checking inside the lock that another job hasn't already published a fresh cache."""
     with atomic_dir(gvlfa_dir, overwrite=True) as tmp:
         if gvlfa_dir.exists():
             try:
@@ -250,8 +248,7 @@ def is_gvlfa(path: str | Path) -> bool:
 
 
 def ensure_cache(path: str | Path) -> tuple[FastaCache, Path]:
-    """Resolve a usable cache for `path` (a .fa or a .gvlfa), building, migrating,
-    or rebuilding as needed. Returns (metadata, path to sequence.bin)."""
+    """Resolve a usable cache for `path` (a .fa or a .gvlfa), building, migrating, or rebuilding as needed. Returns (metadata, path to sequence.bin)."""
     path = Path(path)
     if is_gvlfa(path):
         return _ensure_from_gvlfa(path)

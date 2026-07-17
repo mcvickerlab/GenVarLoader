@@ -655,8 +655,7 @@ class Svar2Haps(Haps[_H]):
         strategy_id: int,
         base_seed: int,
     ) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
-        """Haplotype-realign ONE track for a query block, returning a flat f32
-        buffer + offsets in global ``(b, P)`` C-order (row = ``q * P + p``).
+        """Haplotype-realign ONE track for a query block, returning a flat f32 buffer + offsets in global ``(b, P)`` C-order (row = ``q * P + p``).
 
         The two-step SVAR2 track path (there is no fused interval→realign kernel):
 
@@ -783,8 +782,7 @@ class Svar2Haps(Haps[_H]):
         keys: list[str],
         dtypes: list[np.dtype],
     ) -> list[NDArray]:
-        """View each raw ``uint8`` field buffer the decode kernel returned as its
-        store dtype.
+        """View each raw ``uint8`` field buffer the decode kernel returned as its store dtype.
 
         Guards that the kernel's reported itemsize agrees with the store
         manifest -- a store/kernel disagreement, not an internal invariant, so
@@ -805,18 +803,13 @@ class Svar2Haps(Haps[_H]):
     ) -> RaggedVariants:
         """Decode the per-query variant records (SoA) for a query block.
 
-        Parameters
-        ----------
-        idx
-            Flat ``(region, sample)`` query indices for the block.
-        regions
-            ``(n_regions, 3)`` array of ``(contig_id, start, end)``.
+        Args:
+            idx: Flat ``(region, sample)`` query indices for the block.
+            regions: ``(n_regions, 3)`` array of ``(contig_id, start, end)``.
 
-        Returns
-        -------
-        RaggedVariants
-            Per-query ragged variant records (position, indel length, ALT
-            bytes, and any requested INFO/FORMAT fields).
+        Returns:
+            RaggedVariants: Per-query ragged variant records (position, indel length, ALT
+                bytes, and any requested INFO/FORMAT fields).
         """
         regions = np.asarray(regions, np.int32)
         P = int(self.genotypes.shape[-2])
@@ -946,9 +939,9 @@ class Svar2Haps(Haps[_H]):
     def _reconstruct_variant_windows(
         self, idx: NDArray[np.integer], regions: NDArray[np.integer]
     ) -> _FlatVariantWindows:
-        """Variant-windows for svar2: decode variants per contig group, then run the
-        shared ``assemble_variant_buffers`` window kernel over the decoded arrays via
-        an identity gather. ``ref="allele"`` is blocked upstream, so ref is always a
+        """Variant-windows for svar2: decode variants per contig group, then run the shared ``assemble_variant_buffers`` window kernel over the decoded arrays via an identity gather.
+
+        ``ref="allele"`` is blocked upstream, so ref is always a
         reference-read window; ``alt`` follows ``window_opt.alt``.
         """
         assert self.window_opt is not None and self.token_lut is not None

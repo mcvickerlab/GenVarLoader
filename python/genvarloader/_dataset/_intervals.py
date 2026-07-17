@@ -58,21 +58,16 @@ def tracks_to_intervals(
     Includes 0-value intervals (no filtering on value == 0.0). Dispatches to the Rust backend. Read-only inputs
     are coerced to canonical dtypes so both backends receive byte-identical bytes.
 
-    Parameters
-    ----------
-    regions : NDArray[np.int32]
-        Shape = (n_queries, 3) Regions for each query (contig_idx, start, end).
-    tracks : NDArray[np.float32]
-        Shape = (total_track_len,) Ragged flat array of track values.
-    track_offsets : NDArray[np.int64]
-        Shape = (n_queries + 1,) Offsets into ragged track data.
+    Args:
+        regions (NDArray[np.int32]): Shape = (n_queries, 3) Regions for each query (contig_idx, start, end).
+        tracks (NDArray[np.float32]): Shape = (total_track_len,) Ragged flat array of track values.
+        track_offsets (NDArray[np.int64]): Shape = (n_queries + 1,) Offsets into ragged track data.
 
-    Returns
-    -------
-    all_starts : NDArray[np.int32]
-    all_ends : NDArray[np.int32]
-    all_values : NDArray[np.float32]
-    interval_offsets : NDArray[np.int64]
+    Returns:
+        all_starts (NDArray[np.int32]):
+        all_ends (NDArray[np.int32]):
+        all_values (NDArray[np.float32]):
+        interval_offsets (NDArray[np.int64]):
     """
     regions = np.ascontiguousarray(regions, dtype=np.int32)
     tracks = np.ascontiguousarray(tracks, dtype=np.float32)
