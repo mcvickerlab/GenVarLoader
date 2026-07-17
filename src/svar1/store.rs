@@ -4,6 +4,19 @@ use genoray_core::svar1_query::{Svar1Reader, find_ranges, var_ranges};
 use pyo3::exceptions::PyIOError;
 use pyo3::prelude::*;
 
+thread_local! {
+    static CSR_ENTRIES_TOUCHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test/observability hook: total CSR entries spanned by window reads on the current
+/// thread. The #275 throughput gate asserts this scales with the WINDOW, not the
+/// store — the pre-rewrite path inverted the whole contig CSR per batch. Mirrors
+/// genoray's `search::search_tree_build_count`.
+#[doc(hidden)]
+pub fn csr_entries_touched() -> usize {
+    CSR_ENTRIES_TOUCHED.with(|c| c.get())
+}
+
 /// Per-contig scalars. Three numbers — the big `v_starts`/`v_ends` arrays stay on the
 /// Python side and cross per call as zero-copy `PyReadonlyArray1` borrows, so nothing
 /// sample- or variant-scale is duplicated into Rust residency.
@@ -38,6 +51,19 @@ impl Svar1Store {
 
     pub fn reader(&self) -> &Svar1Reader {
         &self.reader
+    }
+
+    /// Zero-copy borrow of the sparse genotype variant-index array -- the
+    /// `geno_v_idxs` handed to the reconstruction kernel by
+    /// `reconstruct_haplotypes_svar1` (`src/ffi/mod.rs`). MUST stay a borrow of the
+    /// reader's mmap'd `variant_idxs`, never an owned copy: a per-window `.to_vec()`
+    /// here would silently reintroduce the sample-scale materialization the #275
+    /// rewrite exists to avoid. That regression is invisible to an RSS high-water-mark
+    /// test (the copy is a few KB -- far below `ru_maxrss`'s page-granularity noise
+    /// floor) but caught deterministically by `geno_v_idxs_borrows_the_mmap_not_a_copy`
+    /// below via pointer identity.
+    pub fn geno_v_idxs(&self) -> &[i32] {
+        self.reader.variant_idxs()
     }
 
     pub fn ploidy(&self) -> usize {
@@ -103,6 +129,15 @@ impl Svar1Store {
         let ranges = var_ranges(v_starts_c, v_ends_c, m.max_v_len, m.contig_start, regions);
         let b = find_ranges(&self.reader, &ranges, Some(samples));
 
+        // Observability: entries this window actually spans. See `csr_entries_touched`.
+        let spanned: usize = b
+            .starts
+            .iter()
+            .zip(&b.stops)
+            .map(|(s, e)| (e - s) as usize)
+            .sum();
+        CSR_ENTRIES_TOUCHED.with(|c| c.set(c.get() + spanned));
+
         // `find_ranges` emits C-order (region, sample, ploid), so batch row
         // bi = ri * n_samples + si and CSR row = bi * ploidy + p — an identity map.
         let ploidy = b.ploidy;
@@ -162,6 +197,30 @@ mod tests {
     fn open_missing_store_is_err() {
         let err = super::Svar1Store::open_meta("/no/such/svar", 2, 2);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn geno_v_idxs_borrows_the_mmap_not_a_copy() {
+        // The scale-guard defect this catches: `Svar1Store::geno_v_idxs()` (or the
+        // `reconstruct_haplotypes_svar1` call site that uses it) reintroducing an
+        // owned copy via `.to_vec()`. Pointer identity fails deterministically on
+        // that regression; an RSS high-water-mark test cannot -- the copy is a few
+        // KB, far below `ru_maxrss`'s page-granularity noise floor, so it never moves
+        // the measurement (see the deleted Python RSS test this replaces).
+        let tmp = tempfile::tempdir().unwrap();
+        write_raw::<i32>(tmp.path(), "variant_idxs.npy", &[0, 0, 1, 1]);
+        write_raw::<i64>(tmp.path(), "offsets.npy", &[0, 1, 1, 3, 4]);
+        let store = super::Svar1Store::open_meta(tmp.path().to_str().unwrap(), 2, 2).unwrap();
+
+        let a = store.geno_v_idxs();
+        let b = store.reader().variant_idxs();
+        assert_eq!(
+            a.as_ptr(),
+            b.as_ptr(),
+            "geno_v_idxs() must be the SAME allocation as reader().variant_idxs() \
+             (pointer-identical), not a value-equal copy"
+        );
+        assert_eq!(a.len(), b.len());
     }
 
     #[test]

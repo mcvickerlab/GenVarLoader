@@ -888,8 +888,11 @@ pub fn reconstruct_haplotypes_svar1<'py>(
             &samples_v,
         )?;
 
-        // ZERO COPY: the kernel's sparse index input IS the store's mmap.
-        let geno_v_idxs = store_ref.reader().variant_idxs();
+        // ZERO COPY: the kernel's sparse index input IS the store's mmap. Goes through
+        // `Svar1Store::geno_v_idxs()` (not `reader().variant_idxs()` inline) so the
+        // borrow contract has one call site that `src/svar1/store.rs`'s
+        // `geno_v_idxs_borrows_the_mmap_not_a_copy` unit test can pin down.
+        let geno_v_idxs = store_ref.geno_v_idxs();
         let geno_v_idxs_view = numpy::ndarray::ArrayView1::from(geno_v_idxs);
 
         let o_starts_arr = Array1::from_vec(w.o_starts);
@@ -959,6 +962,13 @@ pub fn reconstruct_haplotypes_svar1<'py>(
         result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     Ok((out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py)))
+}
+
+/// Test hook: CSR entries spanned by SVAR1 window reads on this thread. See
+/// `crate::svar1::store::csr_entries_touched`.
+#[pyfunction]
+pub fn svar1_csr_entries_touched() -> usize {
+    crate::svar1::store::csr_entries_touched()
 }
 
 /// Fused SVAR2 two-source haplotype reconstruction: merge each hap's `var_key` ⋈

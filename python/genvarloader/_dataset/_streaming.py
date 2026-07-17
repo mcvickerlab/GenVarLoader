@@ -48,9 +48,27 @@ class StreamingDataset:
     n_samples: int
     ploidy: int
     _reconstruct_window: Callable[[NDArray[np.intp], NDArray[np.intp]], object]
-    # Regions per read window. Window >> batch is the whole point: one Rust call per
-    # window amortizes the search + page faults across many batches. 64 is a
-    # placeholder default -- Task 4 measures and replaces it.
+    # Regions per read window. Window >> batch is the point: one Rust call per window
+    # amortizes the search + page faults across many batches.
+    #
+    # Default re-measured on a 2000-region/400kb-contig fixture (see
+    # docs/roadmaps/streaming-dataset.md, Plan 2 Task 4 -- NOT the 20-region pytest
+    # scale_fixture, which is too small to tell wr=64 and wr=256 apart: any
+    # window_regions >= 20 collapses that bed into a single window, so a sweep against
+    # it cannot show a knee past 20). Swept window_regions in {1, 4, 16, 64, 256, 1024}
+    # (best of 3 runs, 3 independent sessions in one sitting). entries_touched was
+    # EXACTLY flat (40453) across every setting in every session -- confirms I/O is
+    # windowing-invariant, as designed; wall-clock is secondary color only, never the
+    # gate. Wall-clock dropped sharply and monotonically from wr=1 through wr=64
+    # (session-avg best ~0.84s -> ~0.19s, ~4.5x); wr=256 and wr=1024 (still unsaturated
+    # at 8 and 2 windows for this fixture) kept improving but only another ~5-11%,
+    # on the same order as this shared node's run-to-run noise (a single setting's 3
+    # repeats can span up to ~2x -- see CLAUDE.md-adjacent perf-gate notes). This
+    # fixture does NOT resolve a hard knee above 64 -- the honest read is "steep early
+    # elbow at 64, everything past it is noise-level on this node." 64 is kept: it
+    # captures essentially all the measured gain, and a window is regions x ALL
+    # samples, so larger window_regions grows the per-call working set with no
+    # measured compensating benefit here.
     _window_regions: int = 64
 
     def __init__(
@@ -139,7 +157,17 @@ class StreamingDataset:
         object.__setattr__(self, "n_samples", int(n_samples))
         object.__setattr__(self, "ploidy", int(ploidy))
         object.__setattr__(self, "_reconstruct_window", _reconstruct_window)
-        object.__setattr__(self, "_window_regions", 64)
+        # Single source of truth: pull the default from the field declaration above
+        # instead of duplicating the literal here. `slots=True` means the class-level
+        # default is NOT auto-applied to instances (there is no class attribute to
+        # fall back on -- only `__dataclass_fields__` knows it), and this class defines
+        # its own `__init__` so the dataclass-generated one (which *would* apply it)
+        # never runs. Editing the field's default above now actually changes behavior.
+        object.__setattr__(
+            self,
+            "_window_regions",
+            type(self).__dataclass_fields__["_window_regions"].default,
+        )
 
     @property
     def shape(self) -> tuple[int, int]:

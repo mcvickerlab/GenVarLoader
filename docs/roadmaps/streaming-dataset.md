@@ -155,6 +155,85 @@ only** (no map-style random access).
     what produced both the per-batch contig walk and the apparent need for pairwise reads. Task 2
     fixes this: the window (`_window_regions`, default 64) is now the read granularity and a batch
     is a slice of it.
+  - ✅ **Task 4 (deterministic scale gate): `svar1_csr_entries_touched()` counter +
+    `tests/dataset/test_streaming_scale.py`.** A `thread_local!` `Cell<usize>` in
+    `src/svar1/store.rs` (mirrors genoray's `search::search_tree_build_count`) sums
+    `stop - start` over `read_window`'s `find_ranges` output on every call; exposed via
+    `svar1_csr_entries_touched()` (`src/ffi/mod.rs` + `src/lib.rs`). **The gate is this
+    counter, not wall-clock** — this node is too noisy for absolute timings (standing
+    perf-gate convention). New 200-variant x 20-sample, single-contig scale fixture
+    (`scale_fixture`) makes "touches the whole contig" vs "touches the window" differ by
+    orders of magnitude, which the 40bp toy fixtures could not observe.
+    - **Before (skeleton) — a reasoned argument, not a measured number:** the counter
+      didn't exist pre-rewrite, so there is no direct old-code measurement to quote.
+      Reasoned from the already-landed Task 2 description of what was deleted:
+      `Svar1RecordSource::new` inverted the whole contig CSR *per batch*, so
+      entries-touched *would have been* ≈100% of the store regardless of window —
+      presented here as the motivating argument for the gate, not as a measured
+      before/after pair.
+    - **After (Task 2 rewrite, measured directly):** total CSR entries in the
+      200-variant/20-sample scale store = 3978; a single narrow 1-region/100bp window
+      touches 146 (3.7%, gate asserts `< 25%`) — proportional to the window's
+      variants, not the store's.
+    - **Batch-size invariance confirmed:** `svar1_csr_entries_touched()` delta is
+      bit-identical across `batch_size` in `{1, 8, 64}` for the same window plan — a
+      batch is a slice of the window, never its own read.
+    - **Scale guard is a Rust unit test, not Python RSS:** the original `ru_maxrss`
+      guard was flake-prone *and* blind — a `.to_vec()` regression on `geno_v_idxs`
+      allocates only a few KB, far below `ru_maxrss`'s page-granularity high-water
+      mark, so it could never fail on the defect it named. Replaced with
+      `geno_v_idxs_borrows_the_mmap_not_a_copy` in `src/svar1/store.rs`, asserting
+      pointer identity between the slice `reconstruct_haplotypes_svar1` hands the
+      kernel and `Svar1Reader::variant_idxs()` — deterministic, fails immediately on
+      an owned copy.
+    - **`_window_regions` default — re-measured, correcting an invalid sweep:** the
+      first pass swept `{1, 4, 16, 64, 256}` against the 20-region pytest
+      `scale_fixture` and claimed wr=64 as "the knee" from wr=256 matching it exactly
+      — but the fixture is only 20 regions, so any `window_regions >= 20` collapses
+      the whole bed into **one window**; wr=64 and wr=256 were byte-for-byte the same
+      execution path, and the "no further improvement" observation was arithmetic,
+      not measurement. Re-swept `{1, 4, 16, 64, 256, 1024}` against a purpose-built
+      2000-region/400kb-contig fixture where wr=256 and wr=1024 are genuinely
+      unsaturated (8 and 2 windows respectively), best-of-3 per setting across 3
+      independent sessions. `entries_touched` was **exactly flat** (40453) in every
+      session at every setting — I/O is windowing-invariant, as designed. Wall-clock
+      (**secondary color only, never the gate**) dropped sharply and monotonically
+      from wr=1 through wr=64 (session-average best ≈0.84s → ≈0.19s, ~4.5x); wr=256
+      and wr=1024 kept improving but only another ~5–11%, on the same order as this
+      shared node's run-to-run noise (a single setting's 3 repeats can span up to
+      ~2x). Honest read: this fixture does not resolve a hard knee above wr=64 — the
+      steep early elbow is real and lands at 64, and anything past it is
+      noise-level on this node. Kept **`_window_regions = 64`**: it captures
+      essentially all the measured gain, and since a window is regions × *all*
+      samples, a larger `window_regions` grows the per-call working set with no
+      measured compensating benefit here — a pragmatic small default, not an invented
+      knee.
+    - **Dataclass default was inert — fixed:** `__init__` unconditionally
+      `object.__setattr__`'d `_window_regions` to a hardcoded `64`, so the field's
+      default (and its justification comment) never reached a constructed instance —
+      editing the field default silently did nothing. Fixed by pulling the default
+      from `type(self).__dataclass_fields__["_window_regions"].default` in `__init__`
+      instead of duplicating the literal, making the field declaration the single
+      source of truth.
+    - **Unrelated bug found and fixed en route — split into its own commit:**
+      `_Svar1Backend` indexed samples by the `.svar` store's native (VCF column)
+      order, but `gvl.write()` always lexicographically sorts sample names
+      (`_write.py`'s unconditional `samples.sort()`). The existing toy fixtures (≤3
+      single-digit sample names) never exposed this because sort order and native
+      order coincide there; the new 20-sample `"S0".."S19"` scale fixture does not
+      (`"S10" < "S2"` lexicographically) and `test_scale_parity_still_byte_identical`
+      caught it immediately. Fixed by sorting sample names at `_Svar1Backend`
+      construction and translating every public (sorted-order) `sample_idx` to the
+      store's physical column index (`_phys_sample_idx`) before it crosses into Rust
+      — output row order is unaffected, only which physical column each row reads.
+      This is a real, user-visible correctness fix, so it landed as its own
+      `fix(streaming):` commit rather than folded into the `test:` commit that found
+      it, so it gets a changelog entry.
+    - **Memory-scaling concern (reported, not addressed — out of scope for Task 4):** a
+      window is regions × **all samples**, so peak memory scales with cohort size and
+      `_window_regions` cannot bound it. Not independently re-measured here (the scale
+      fixture's 20 samples don't exercise this), consistent with the existing tracked
+      concern; flagging again for whoever picks up sample-dimension chunking.
 - ⬜ **VCF backend / PGEN backend** — _Plan 3/4_ —
   issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276)
 - ⬜ **Output-mode breadth + docs** — _Plan 5; docs folded in_ —
