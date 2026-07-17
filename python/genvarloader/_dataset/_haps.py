@@ -93,6 +93,46 @@ class ReconstructionRequest:
     """If set, reconstruct into a spliced layout."""
 
 
+def _canonicalize_variant_table(variants: pl.DataFrame) -> pl.DataFrame:
+    """Materialize ``ILEN`` if missing and collapse list-typed ``ALT``/``ILEN``
+    columns to scalar-per-row.
+
+    Shared prep used by both :meth:`_Variants.from_table` (an Arrow file on
+    disk) and the streaming SVAR1 backend (an in-memory ``SparseVar.index``
+    table), which are otherwise the two independent readers of a
+    POS/REF/ALT/ILEN variant table.
+    """
+    if variants.schema["ALT"] == pl.List(pl.Utf8):
+        ilen = ILEN
+    else:
+        ilen = pl.col("ALT").str.len_bytes().cast(pl.Int32) - pl.col(
+            "REF"
+        ).str.len_bytes().cast(pl.Int32)
+
+    if "ILEN" not in variants:
+        variants = variants.with_columns(ILEN=ilen)
+
+    is_list_type = [col for col in ("ALT", "ILEN") if variants[col].dtype == pl.List]
+    return variants.with_columns(pl.col(is_list_type).list.first())
+
+
+def _variant_arrays_from_table(
+    variants: pl.DataFrame, one_based: bool = True
+) -> tuple[NDArray[POS_TYPE], NDArray[np.int32], RaggedAlleles | None, RaggedAlleles]:
+    """POS/ILEN/REF/ALT -> (start, ilen, ref, alt) from an already-canonicalized
+    table (see :func:`_canonicalize_variant_table`)."""
+    ref = (
+        RaggedAlleles.from_polars(variants["REF"]) if "REF" in variants.schema else None
+    )
+
+    return (
+        variants["POS"].to_numpy() - int(one_based),
+        variants["ILEN"].to_numpy(),
+        ref,
+        RaggedAlleles.from_polars(variants["ALT"]),
+    )
+
+
 @dataclass(slots=True)
 class _Variants:
     path: Path
@@ -124,21 +164,7 @@ class _Variants:
         """
         path = Path(path).resolve()
         variants = pl.read_ipc(path, memory_map=False)
-
-        if variants.schema["ALT"] == pl.List(pl.Utf8):
-            ilen = ILEN
-        else:
-            ilen = pl.col("ALT").str.len_bytes().cast(pl.Int32) - pl.col(
-                "REF"
-            ).str.len_bytes().cast(pl.Int32)
-
-        if "ILEN" not in variants:
-            variants = variants.with_columns(ILEN=ilen)
-
-        is_list_type = [
-            col for col in ("ALT", "ILEN") if variants[col].dtype == pl.List
-        ]
-        variants = variants.with_columns(pl.col(is_list_type).list.first())
+        variants = _canonicalize_variant_table(variants)
 
         info = {
             k: variants[k].to_numpy()
@@ -148,20 +174,9 @@ class _Variants:
             and (info_fields is None or k in info_fields)
         }
 
-        ref = (
-            RaggedAlleles.from_polars(variants["REF"])
-            if "REF" in variants.schema
-            else None
-        )
+        start, ilen, ref, alt = _variant_arrays_from_table(variants, one_based)
 
-        return cls(
-            path,
-            variants["POS"].to_numpy() - int(one_based),
-            variants["ILEN"].to_numpy(),
-            ref,
-            RaggedAlleles.from_polars(variants["ALT"]),
-            info,
-        )
+        return cls(path, start, ilen, ref, alt, info)
 
     def __len__(self) -> int:
         return len(self.start)

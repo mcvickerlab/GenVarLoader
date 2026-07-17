@@ -170,3 +170,31 @@ win.fields["AF"]  # same field, alongside win.fields["start"]/["ilen"]
 
 See the `genvarloader` skill's `.svar2` `var_fields` section for the field-provenance and
 dummy-fill details.
+
+## Skipping `gvl.write()` entirely: `StreamingDataset`
+
+Everything above describes [`Dataset`](api.md#genvarloader.Dataset), which reads from an on-disk
+directory produced by [`gvl.write()`](api.md#genvarloader.write). [`gvl.StreamingDataset`](api.md#genvarloader.StreamingDataset)
+skips that step: it reconstructs haplotype batches directly from a live `.svar` (SparseVar) store,
+with no `gvl.write()` call and no `.gvl` directory on disk.
+
+```python
+sds = gvl.StreamingDataset(
+    "rois.bed", reference="ref.fa", variants="normed.svar"
+).with_seqs("haplotypes")
+
+for data, region_idxs, sample_idxs in sds.to_dataloader(batch_size=32):
+    ...  # data: Ragged[S1], shape (batch, ploidy, ~length)
+```
+
+Haplotype output is byte-identical to `gvl.write(...)` followed by `Dataset.open(...)[r, s]`
+(at `jitter=0`). It trades that write step for a slower per-epoch read, since every window
+re-reads the live store instead of hitting a pre-indexed dataset — prefer a written `Dataset`
+for repeated-epoch training, and `StreamingDataset` for one-shot/inference work or when you'd
+rather not pay for the write.
+
+`StreamingDataset` is currently more limited than `Dataset`: `.svar` variant sources only
+(VCF/PGEN/`.svar2` raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0`
+only, ragged output only, and **iterable-only** — `sds[r, s]` raises `TypeError`; use
+`sds.to_dataloader(...)`. See the `genvarloader` skill for the full list of what's not yet
+wired.

@@ -366,6 +366,34 @@ Preconditions (all raise `ValueError` at construction):
 
 Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (uses `haplotype_lengths`, `n_variants`, and allele offset tables) — no Zipf-style worst-case slack.
 
+## `gvl.StreamingDataset` — write-free streaming (SVAR1 only)
+
+`gvl.StreamingDataset(regions, reference=..., variants="x.svar")` iterates haplotype batches directly off a live `.svar` (SparseVar/SVAR1) store — **no `gvl.write()` step, no on-disk `.gvl` dataset**. Haplotype output is byte-identical to `gvl.write(...)` + `Dataset.open(...)[r, s]` at `jitter=0`.
+
+```python
+sds = gvl.StreamingDataset(
+    "rois.bed", reference="ref.fa", variants="normed.svar"
+).with_seqs("haplotypes")
+
+for data, region_idxs, sample_idxs in sds.to_dataloader(batch_size=32):
+    ...  # data: Ragged[S1], shape (batch, ploidy, ~length)
+```
+
+**Current scope (this plan) — everything else raises rather than silently mis-computing:**
+- Variant source: `.svar` (SparseVar/SVAR1) only. VCF, PGEN, and `.svar2` inputs raise `NotImplementedError`.
+- `with_seqs("haplotypes")` only — no `"reference"`/`"annotated"`/`"variants"` output modes.
+- `jitter=0` only (the default); non-zero raises `NotImplementedError`.
+- Ragged output only (no `with_len`/`with_output_format("flat")`).
+- **Iterable-only, no random access** — `sds[r, s]` and `sds.to_torch_dataset()` both raise `TypeError`. Use `sds.to_dataloader(...)`.
+- `to_dataloader(num_workers=0)` only — `num_workers > 0` raises `ValueError` (worker-process sharding is a later plan).
+- Same variant preconditions as `gvl.write`: normalized, bi-allelic, non-symbolic, non-breakend, left-aligned/atomized — **validated (raises `ValueError`), not fixed up**.
+
+**Iteration order:** region-major, batched so a single call never spans more than one contig (`_Svar1Backend.reconstruct_window` requires single-contig batches). `to_dataloader(..., return_indices=True)` (the default) yields `(data, region_idxs, sample_idxs)`; the indices are in the **caller's original BED-row order** (not sorted-storage order), matching `gvl.Dataset[r, s]` indexing.
+
+**Tradeoff vs a written dataset:** zero preprocessing and zero disk footprint, but slower per-epoch — each window re-reads the live `.svar` store rather than hitting a pre-indexed on-disk dataset. Prefer a written `gvl.Dataset` for repeated-epoch training; reach for `StreamingDataset` for one-shot/inference workloads or when you can't afford (or don't want) the `gvl.write()` step.
+
+Source: `python/genvarloader/_dataset/_streaming.py`.
+
 ## Other public surface (one-liners)
 
 - `gvl.Reference.from_path(fasta, contigs=None)` — wrap a FASTA (path to a `.fa`/`.fa.bgz`, or a `.gvlfa` cache dir). Builds/reuses a sibling `.gvlfa` cache directory (self-describing, fingerprint-validated; legacy `.fa.gvl` caches auto-migrate). The cache is built atomically (temp + `os.replace`) under a best-effort lock, so concurrent builders sharing one reference are safe; the cache **auto-rebuilds** from its source when stale or missing.
@@ -418,6 +446,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 | FAQ (`with_*` design, typing)         | `docs/source/faq.md`                                   |
 | Auto-generated reference              | `docs/source/api.md` → https://genvarloader.readthedocs.io |
 | `gvl.write` / `gvl.update` internals  | `python/genvarloader/_dataset/_write.py`               |
+| Write-free `StreamingDataset` internals | `python/genvarloader/_dataset/_streaming.py`         |
 | Track re-alignment internals          | `python/genvarloader/_dataset/_tracks.py`, `_reconstruct.py` |
 | Insertion fill internals              | `python/genvarloader/_dataset/_insertion_fill.py`      |
 | SVAR back-reference / migration       | `python/genvarloader/_dataset/_svar_link.py`           |
@@ -456,6 +485,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - `dummy_variant` padding applies to **both `"variants"` and `"variant-windows"`** outputs. Setting `dummy_variant=<DummyVariant>` and then indexing with any other kind (`"haplotypes"`, `"annotated"`, `"reference"`, or no seqs) raises `ValueError`. For token fields (`flank_tokens`, `ref_window`/`alt_window`, bare `ref`/`alt`), the dummy fill is all-`unknown_token` — the `DummyVariant.ref`/`.alt` bytes only set the dummy allele's byte-length, not the token value. `dummy_variant=False` with an unsupported output kind is silently ignored.
 - A non-`b"N"` `DummyVariant.alt` (or `.ref`) **is reverse-complemented** on negative-strand regions, exactly like a real variant allele. The default `b"N"` is rc-invariant; use it if you want a strand-neutral sentinel.
 - `unphased_union=True` + `with_seqs("haplotypes")` / `with_seqs("annotated")` raises — `unphased_union` only applies to `"variants"` / `"variant-windows"` output.
+- **`gvl.StreamingDataset` is iterable-only and `.svar`-only.** `sds[r, s]` and `sds.to_torch_dataset()` raise `TypeError` — use `sds.to_dataloader(...)`. VCF/PGEN/`.svar2` variant sources, non-`"haplotypes"` `with_seqs` kinds, `jitter != 0`, and `num_workers > 0` all raise `NotImplementedError`/`ValueError`. See "`gvl.StreamingDataset` — write-free streaming (SVAR1 only)" above.
 
 ## Maintaining this skill
 

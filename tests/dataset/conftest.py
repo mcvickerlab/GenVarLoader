@@ -2,12 +2,169 @@
 
 from __future__ import annotations
 
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+import polars as pl
 import pytest
 import pyBigWig
 
 import genvarloader as gvl
 
 SEQLEN = 20
+
+# 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6
+# (C>CAT), dense SNP@9 (G>C, carried by 3 haps), DEL@11 (GTA>G, ilen -2).
+# Mirrors the SVAR2-parity fixture in tests/dataset/test_svar2_dataset.py
+# (`_src`/`svar_fixture`) -- same VCF, reused here for the streaming SVAR1
+# window-read parity test (Task 4).
+_SVAR1_STREAM_REF = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"
+_SVAR1_STREAM_VCF = """\
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=40>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1
+chr1\t3\t.\tA\tG\t.\t.\t.\tGT\t1|0\t0|0
+chr1\t7\t.\tC\tCAT\t.\t.\t.\tGT\t0|1\t1|1
+chr1\t10\t.\tG\tC\t.\t.\t.\tGT\t1|1\t1|0
+chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1
+"""
+
+
+@dataclass(slots=True)
+class Svar1DatasetFixture:
+    """Matched inputs for the streaming SVAR1 window-read parity test: the
+    live `.svar` store + reference + 1-region bed to drive `_Svar1Backend`
+    directly, and an independently-written+opened `gvl.Dataset` over the same
+    store/bed/reference to compare against."""
+
+    svar_path: Path
+    reference_path: Path
+    contigs: list[str]
+    bed: pl.DataFrame
+    dataset: gvl.Dataset
+
+
+@pytest.fixture(scope="module")
+def svar1_dataset_fixture(tmp_path_factory) -> Svar1DatasetFixture:
+    from genoray import SparseVar, VCF
+
+    d = tmp_path_factory.mktemp("svar1_stream_src")
+    ref = d / "ref.fa"
+    ref.write_text(f">chr1\n{_SVAR1_STREAM_REF}\n")
+    subprocess.run(["samtools", "faidx", str(ref)], check=True)
+
+    vcf = d / "in.vcf"
+    vcf.write_text(_SVAR1_STREAM_VCF)
+    bcf = d / "in.bcf"
+    subprocess.run(["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True)
+    subprocess.run(["bcftools", "index", str(bcf)], check=True)
+
+    svar_path = tmp_path_factory.mktemp("svar1_stream_store") / "store.svar"
+    SparseVar.from_vcf(
+        svar_path, VCF(bcf), max_mem="1g", samples=["S0", "S1"], overwrite=True
+    )
+
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [40]})
+
+    out = tmp_path_factory.mktemp("svar1_stream_ds") / "d1.gvl"
+    gvl.write(out, bed, variants=SparseVar(svar_path), samples=None, overwrite=True)
+    dataset = gvl.Dataset.open(out, reference=ref)
+
+    return Svar1DatasetFixture(
+        svar_path=svar_path,
+        reference_path=ref,
+        contigs=["chr1"],
+        bed=bed,
+        dataset=dataset,
+    )
+
+
+# Two-contig reference + variants for the Task 5 multi-region/multi-contig
+# streaming parity test. chr1 reuses `_SVAR1_STREAM_REF`/its 4 variants
+# (SNP@3, INS@7, SNP@10, DEL@12); chr2 is a distinct 40bp reference with its
+# own SNP + insertion, matching the `_REF2`/`_VCF2` pattern in
+# `test_svar2_dataset.py`'s multicontig fixtures. Extended to 3 samples.
+_SVAR1_MC_REF2 = "TTGGCCAATTGGCCAATTACGTACGTTTGGCCAATTGGCC"
+_SVAR1_MC_VCF = """\
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=40>
+##contig=<ID=chr2,length=40>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1\tS2
+chr1\t3\t.\tA\tG\t.\t.\t.\tGT\t1|0\t0|0\t0|1
+chr1\t7\t.\tC\tCAT\t.\t.\t.\tGT\t0|1\t1|1\t1|0
+chr1\t10\t.\tG\tC\t.\t.\t.\tGT\t1|1\t1|0\t0|1
+chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1\t1|1
+chr2\t5\t.\tC\tT\t.\t.\t.\tGT\t1|0\t1|1\t0|1
+chr2\t9\t.\tT\tTGG\t.\t.\t.\tGT\t0|1\t1|0\t1|1
+chr2\t21\t.\tG\tA\t.\t.\t.\tGT\t1|1\t0|1\t1|0
+"""
+
+
+@dataclass(slots=True)
+class Svar1MultiContigFixture:
+    """Matched inputs for the Task 5 public `StreamingDataset` parity test:
+    an unsorted, interleaved-contig bed (>=2 contigs, >=10 regions, 3
+    samples) over a live `.svar` store + reference, plus the path to an
+    independently-written `gvl.Dataset` directory over the same bed/store to
+    compare against (opened lazily by the test via `gvl.Dataset.open`)."""
+
+    svar_path: Path
+    reference_path: Path
+    contigs: list[str]
+    bed: pl.DataFrame
+    dataset_path: Path
+
+
+@pytest.fixture(scope="module")
+def svar1_multicontig_fixture(tmp_path_factory) -> Svar1MultiContigFixture:
+    from genoray import SparseVar, VCF
+
+    d = tmp_path_factory.mktemp("svar1_mc_src")
+    ref = d / "ref.fa"
+    ref.write_text(f">chr1\n{_SVAR1_STREAM_REF}\n>chr2\n{_SVAR1_MC_REF2}\n")
+    subprocess.run(["samtools", "faidx", str(ref)], check=True)
+
+    vcf = d / "in.vcf"
+    vcf.write_text(_SVAR1_MC_VCF)
+    bcf = d / "in.bcf"
+    subprocess.run(["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True)
+    subprocess.run(["bcftools", "index", str(bcf)], check=True)
+
+    svar_path = tmp_path_factory.mktemp("svar1_mc_store") / "store.svar"
+    SparseVar.from_vcf(
+        svar_path,
+        VCF(bcf),
+        max_mem="1g",
+        samples=["S0", "S1", "S2"],
+        overwrite=True,
+    )
+
+    # 12 regions (6 per contig, 20bp sliding windows), UNSORTED / interleaved
+    # chrom order -- exercises the original-bed-row-order <-> sorted-storage
+    # translation on both the streaming and written-dataset sides.
+    starts = [0, 4, 8, 12, 16, 20]
+    rows = []
+    for i, s in enumerate(starts):
+        # alternate contigs per row so the bed is genuinely interleaved, not
+        # just "all of chr2 then all of chr1".
+        c1, c2 = ("chr2", "chr1") if i % 2 == 0 else ("chr1", "chr2")
+        rows.append({"chrom": c1, "chromStart": s, "chromEnd": s + 20})
+        rows.append({"chrom": c2, "chromStart": s, "chromEnd": s + 20})
+    bed = pl.DataFrame(rows)
+
+    out = tmp_path_factory.mktemp("svar1_mc_ds") / "d1.gvl"
+    gvl.write(out, bed, variants=SparseVar(svar_path), samples=None, overwrite=True)
+
+    return Svar1MultiContigFixture(
+        svar_path=svar_path,
+        reference_path=ref,
+        contigs=["chr1", "chr2"],
+        bed=bed,
+        dataset_path=out,
+    )
 
 
 @pytest.fixture(scope="session")
