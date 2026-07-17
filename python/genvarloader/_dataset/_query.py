@@ -208,7 +208,10 @@ def _getitem_unspliced(
 def _getitem_spliced(
     view: QueryView, idx: _QueryIdx, splice_idxer: SpliceIndexer
 ) -> tuple[
-    tuple[Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps, ...],
+    tuple[
+        Ragged[np.bytes_ | np.float32] | RaggedAnnotatedHaps | RaggedVariants,
+        ...,
+    ],
     bool,
     tuple[int, ...] | None,
 ]:
@@ -237,6 +240,20 @@ def _getitem_spliced(
     ) = splice_idxer.parse_idx(idx)
     r_idx, _ = np.unravel_index(ds_idx, view.idxer.full_shape)
     regions = view.full_regions[r_idx]
+
+    if isinstance(view.recon, Haps) and issubclass(view.recon.kind, RaggedVariants):
+        if view.flat_output:
+            raise ValueError("Spliced variants require output_format='ragged'.")
+        variants = _fetch_spliced_variants(
+            view=view,
+            ds_idx=ds_idx,
+            r_idx=r_idx,
+            regions=regions,
+            splice_row_offsets=offsets,
+            n_rows=n_rows_sel,
+            n_samples=n_samples_sel,
+        )
+        return (variants,), squeeze, out_reshape
 
     # Build the splice plan from per-query lengths produced by the active
     # reconstructor. The plan drives the kernel into writing pre-spliced
@@ -299,6 +316,103 @@ def _getitem_spliced(
     recon = tuple(_regroup(r, plan.group_offsets, plan.flat_out_shape) for r in recon)
 
     return recon, squeeze, out_reshape
+
+
+def _fetch_spliced_variants(
+    *,
+    view: QueryView,
+    ds_idx: NDArray[np.intp],
+    r_idx: NDArray[np.intp],
+    regions: NDArray[np.int32],
+    splice_row_offsets: NDArray[np.int64],
+    n_rows: int,
+    n_samples: int,
+) -> RaggedVariants:
+    """Decode exon records once, then regroup them into complete transcripts.
+
+    Variant counts are data-dependent, so unlike sequence output the splice plan
+    cannot be built before reconstruction.  The active ``Haps`` reconstructor
+    first decodes the whole query block (including its native Rust batching),
+    then this helper builds the plan from the returned per-exon/per-phase counts.
+    The final record buffers are rewrapped without copying scalar values.
+    """
+    raw = view.recon(
+        idx=ds_idx,
+        r_idx=r_idx,
+        regions=regions,
+        output_length="ragged",
+        jitter=0,
+        rng=view.rng,
+        deterministic=True,
+        splice_plan=None,
+        flat=False,
+        to_rc=None,
+    )
+    if isinstance(raw, tuple):
+        if len(raw) != 1:
+            raise NotImplementedError(
+                "Spliced variants cannot currently be combined with track output."
+            )
+        raw = raw[0]
+    if isinstance(raw, _FlatVariants):
+        raw = raw.to_ragged()
+    if not isinstance(raw, RaggedVariants):
+        raise TypeError(
+            "The variants reconstructor returned an unexpected output type: "
+            f"{type(raw).__name__}."
+        )
+
+    batch = len(ds_idx)
+    ploidy = raw.shape[-2]
+    assert isinstance(ploidy, int)
+    lengths = np.asarray(raw.start.lengths, np.int32).reshape(batch, ploidy)
+    plan = build_splice_plan(
+        lengths=lengths,
+        splice_row_offsets=splice_row_offsets,
+        n_samples=n_samples,
+        n_rows=n_rows,
+    )
+
+    flat = raw.reshape(batch * ploidy, None)
+    permuted = flat[plan.permutation].to_packed()
+    fields: dict[str, Ragged] = {}
+    for name in permuted.fields:
+        field = permuted[name].to_packed()
+        str_offsets = field._rl.str_offsets
+        fields[name] = Ragged.from_offsets(
+            field.data,
+            plan.flat_out_shape,
+            plan.group_offsets,
+            str_offsets=(
+                None if str_offsets is None else np.asarray(str_offsets, np.int64)
+            ),
+        )
+
+    alt = fields.pop("alt")
+    start = fields.pop("start")
+    ref = fields.pop("ref", None)
+    ilen = fields.pop("ilen", None)
+    dosage = fields.pop("dosage", None)
+    grouped = RaggedVariants(
+        alt=alt,
+        start=start,
+        ref=ref,
+        ilen=ilen,
+        dosage=dosage,
+        **fields,
+    )
+
+    if view.rc_neg and len(splice_row_offsets) > 1:
+        pair_lengths = np.diff(splice_row_offsets)
+        if (pair_lengths <= 0).any():
+            raise ValueError("Splice rows must contain at least one element.")
+        per_element_rc = regions[:, 3] == -1
+        pair_rc = per_element_rc[splice_row_offsets[:-1]]
+        if not np.array_equal(np.repeat(pair_rc, pair_lengths), per_element_rc):
+            raise ValueError("All elements of a splice row must use the same strand.")
+        grouped = grouped.rc_(pair_rc)
+
+    return grouped
 
 
 def build_recon_splice_plan(

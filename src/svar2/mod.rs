@@ -7,6 +7,7 @@ use std::ops::Range;
 
 use genoray_core::query::{dense_abs_row, unpack_vk_src, BatchResultSplit, FieldView};
 use ndarray::{Array2, ArrayView2};
+use rayon::prelude::*;
 use svar2_codec::{decode_key, DecodedKey};
 
 pub mod store;
@@ -328,6 +329,10 @@ pub fn decode_variants_from_split(
     on_disk_snp: &[Range<usize>],
     on_disk_indel: &[Range<usize>],
     orig_samples: &[usize],
+    region_starts: &[u32],
+    region_ends: &[u32],
+    filter_exonic: bool,
+    parallel: bool,
 ) -> (VariantsSoa, Vec<Vec<u8>>) {
     // Fused decode straight from the split gather result: NO `split_to_flat`
     // marshaling copy, and NO per-hap `merge_hap` Vec+sort. The three per-hap
@@ -345,23 +350,6 @@ pub fn decode_variants_from_split(
     let n_q = br.n_regions;
     let h_count = n_q * ploidy;
 
-    // Upper bound on total merged variants: every vk entry plus every dense
-    // present bit (over-reserving is harmless).
-    let vk_total = br.vk_off[h_count];
-    let dense_bits = br.dense_snp_present_off[h_count] + br.dense_indel_present_off[h_count];
-    let cap = vk_total + dense_bits;
-    let mut pos: Vec<i32> = Vec::with_capacity(cap);
-    let mut ilen: Vec<i32> = Vec::with_capacity(cap);
-    let mut alt_bytes: Vec<u8> = Vec::with_capacity(cap);
-    let mut str_off: Vec<i64> = Vec::with_capacity(cap + 1);
-    str_off.push(0);
-    let mut var_off: Vec<i64> = Vec::with_capacity(h_count + 1);
-    var_off.push(0);
-    let mut field_bufs: Vec<Vec<u8>> = fields
-        .iter()
-        .map(|f| Vec::with_capacity(cap * f.width))
-        .collect();
-
     // A `BatchResultSplit` without provenance (`gather_haps_readbound`, not
     // `_src`) leaves `vk_src` empty; indexing it below would panic with an
     // opaque out-of-bounds error instead of naming the real cause. Check once,
@@ -377,12 +365,46 @@ pub fn decode_variants_from_split(
              (vk_src must be populated 1:1 with vk)"
         );
     }
+    if filter_exonic {
+        assert_eq!(region_starts.len(), n_q, "one region start is required per query");
+        assert_eq!(region_ends.len(), n_q, "one region end is required per query");
+    }
 
-    let mut h = 0usize;
-    for q in 0..n_q {
-        let Range { start: ss, end: se } = br.dense_snp_range[q].clone();
-        let Range { start: is_, end: ie } = br.dense_indel_range[q].clone();
-        for _hap in 0..ploidy {
+    struct ChunkDecoded {
+        pos: Vec<i32>,
+        ilen: Vec<i32>,
+        alt_bytes: Vec<u8>,
+        str_off: Vec<i64>,
+        var_off: Vec<i64>,
+        field_bufs: Vec<Vec<u8>>,
+    }
+
+    let decode_chunk = |hap_range: Range<usize>| {
+        let cap: usize = hap_range
+            .clone()
+            .map(|h| {
+                let q = h / ploidy;
+                (br.vk_off[h + 1] - br.vk_off[h])
+                    + br.dense_snp_range[q].len()
+                    + br.dense_indel_range[q].len()
+            })
+            .sum();
+        let mut pos = Vec::with_capacity(cap);
+        let mut ilen = Vec::with_capacity(cap);
+        let mut alt_bytes = Vec::with_capacity(cap);
+        let mut str_off = Vec::with_capacity(cap + 1);
+        let mut var_off = Vec::with_capacity(hap_range.len() + 1);
+        str_off.push(0);
+        var_off.push(0);
+        let mut field_bufs: Vec<Vec<u8>> = fields
+            .iter()
+            .map(|f| Vec::with_capacity(cap * f.width))
+            .collect();
+
+        for h in hap_range {
+            let q = h / ploidy;
+            let Range { start: ss, end: se } = br.dense_snp_range[q].clone();
+            let Range { start: is_, end: ie } = br.dense_indel_range[q].clone();
             let vk_lo = br.vk_off[h];
             let vk_hi = br.vk_off[h + 1];
             let snp_base = br.dense_snp_present_off[h];
@@ -390,8 +412,7 @@ pub fn decode_variants_from_split(
 
             // 3-way merge, position-sorted. On equal positions the priority is
             // var_key < dense-snp < dense-indel, exactly the stable-sort tie
-            // order of the previous collect-then-sort `merge_hap` (var_key
-            // pushed first, then dense-snp, then dense-indel). Byte-identical.
+            // order of the previous collect-then-sort `merge_hap`.
             let mut i_vk = vk_lo;
             let mut i_sn = ss;
             let mut i_in = is_;
@@ -432,6 +453,13 @@ pub fn decode_variants_from_split(
                     out
                 };
                 let (il, alt) = decode_alt(key, lut_bytes, lut_off);
+                if filter_exonic {
+                    let start = p as i64;
+                    let end = start - il.min(0) + 1;
+                    if start < region_starts[q] as i64 || end > region_ends[q] as i64 {
+                        continue;
+                    }
+                }
                 pos.push(p as i32);
                 ilen.push(il as i32);
                 alt_bytes.extend_from_slice(&alt);
@@ -470,7 +498,84 @@ pub fn decode_variants_from_split(
                 }
             }
             var_off.push(pos.len() as i64);
-            h += 1;
+        }
+        ChunkDecoded {
+            pos,
+            ilen,
+            alt_bytes,
+            str_off,
+            var_off,
+            field_bufs,
+        }
+    };
+
+    // Bound task and buffer counts independently of cohort size.  Contiguous
+    // ranges plus IndexedParallelIterator::collect preserve hap order, so the
+    // final concatenation is byte-identical to serial query/ploidy traversal.
+    let decoded: Vec<ChunkDecoded> = if parallel && h_count > 1 {
+        let n_chunks = (rayon::current_num_threads() * 4).min(h_count);
+        let chunk_size = h_count.div_ceil(n_chunks);
+        let ranges: Vec<Range<usize>> = (0..h_count)
+            .step_by(chunk_size)
+            .map(|start| start..(start + chunk_size).min(h_count))
+            .collect();
+        ranges.into_par_iter().map(decode_chunk).collect()
+    } else {
+        let ChunkDecoded {
+            pos,
+            ilen,
+            alt_bytes,
+            str_off,
+            var_off,
+            field_bufs,
+        } = decode_chunk(0..h_count);
+        return (
+            VariantsSoa {
+                pos,
+                ilen,
+                alt_bytes,
+                str_off,
+                var_off,
+            },
+            field_bufs,
+        );
+    };
+
+    let total_variants: usize = decoded.iter().map(|h| h.pos.len()).sum();
+    let total_alt_bytes: usize = decoded.iter().map(|h| h.alt_bytes.len()).sum();
+    let mut pos = Vec::with_capacity(total_variants);
+    let mut ilen = Vec::with_capacity(total_variants);
+    let mut alt_bytes = Vec::with_capacity(total_alt_bytes);
+    let mut str_off = Vec::with_capacity(total_variants + 1);
+    let mut var_off = Vec::with_capacity(h_count + 1);
+    let mut field_bufs: Vec<Vec<u8>> = fields
+        .iter()
+        .map(|f| Vec::with_capacity(total_variants * f.width))
+        .collect();
+    str_off.push(0);
+    var_off.push(0);
+    for chunk in decoded {
+        let byte_base = alt_bytes.len() as i64;
+        let var_base = pos.len() as i64;
+        pos.extend_from_slice(&chunk.pos);
+        ilen.extend_from_slice(&chunk.ilen);
+        alt_bytes.extend_from_slice(&chunk.alt_bytes);
+        str_off.extend(
+            chunk
+                .str_off
+                .into_iter()
+                .skip(1)
+                .map(|o| byte_base + o),
+        );
+        var_off.extend(
+            chunk
+                .var_off
+                .into_iter()
+                .skip(1)
+                .map(|o| var_base + o),
+        );
+        for (dst, src) in field_bufs.iter_mut().zip(chunk.field_bufs) {
+            dst.extend_from_slice(&src);
         }
     }
 
@@ -797,7 +902,9 @@ mod tests {
             ..Default::default()
         };
 
-        let (soa, _bufs) = decode_variants_from_split(&br, &[], &[0], &[], &[], &[], &[]);
+        let (soa, _bufs) = decode_variants_from_split(
+            &br, &[], &[0], &[], &[], &[], &[], &[], &[], false, false,
+        );
 
         // Position-sorted: var_key SNP@5, dense/snp@8, dense/indel@12.
         assert_eq!(soa.var_off, vec![0, 3]);
@@ -806,6 +913,31 @@ mod tests {
         assert_eq!(soa.alt_bytes, b"TG".to_vec());
         // Pure-del ALT is empty -> the 3rd variant's [start, end) is [2, 2).
         assert_eq!(soa.str_off, vec![0, 1, 2, 2]);
+
+        let (parallel, _bufs) = decode_variants_from_split(
+            &br, &[], &[0], &[], &[], &[], &[], &[], &[], false, true,
+        );
+        assert_eq!(parallel.pos, soa.pos);
+        assert_eq!(parallel.ilen, soa.ilen);
+        assert_eq!(parallel.alt_bytes, soa.alt_bytes);
+        assert_eq!(parallel.str_off, soa.str_off);
+        assert_eq!(parallel.var_off, soa.var_off);
+
+        let (exonic, _bufs) = decode_variants_from_split(
+            &br,
+            &[],
+            &[0],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[0],
+            &[10],
+            true,
+            true,
+        );
+        assert_eq!(exonic.pos, vec![5, 8]);
+        assert_eq!(exonic.var_off, vec![0, 2]);
     }
 
     /// Exercises the two things the asm-inspection pass touched: (1) `q =
@@ -861,7 +993,9 @@ mod tests {
             ..Default::default()
         };
 
-        let (soa, _bufs) = decode_variants_from_split(&br, &[], &[0], &[], &[], &[], &[]);
+        let (soa, _bufs) = decode_variants_from_split(
+            &br, &[], &[0], &[], &[], &[], &[], &[], &[], false, false,
+        );
 
         // hap0 (q0): snp present [1,0,1] -> keeps pos10("A"),pos12("G");
         //   indel present [1,0] -> keeps pos13(ilen -2).
@@ -874,6 +1008,15 @@ mod tests {
         assert_eq!(soa.alt_bytes, b"AGCTAC".to_vec());
         assert_eq!(soa.str_off, vec![0, 1, 2, 2, 3, 3, 4, 5, 6]);
         assert_eq!(soa.var_off, vec![0, 3, 5, 7, 8]);
+
+        let (parallel, _bufs) = decode_variants_from_split(
+            &br, &[], &[0], &[], &[], &[], &[], &[], &[], false, true,
+        );
+        assert_eq!(parallel.pos, soa.pos);
+        assert_eq!(parallel.ilen, soa.ilen);
+        assert_eq!(parallel.alt_bytes, soa.alt_bytes);
+        assert_eq!(parallel.str_off, soa.str_off);
+        assert_eq!(parallel.var_off, soa.var_off);
     }
 
     /// Build 4 FieldViews over a store where each sub-stream's content is
@@ -970,6 +1113,10 @@ mod tests {
             &[3..4], // on_disk_snp: the dense-snp window really lives at rows 3..4 on disk
             &[4..5], // on_disk_indel: the dense-indel window really lives at rows 4..5 on disk
             &[0],    // orig_samples
+            &[],
+            &[],
+            false,
+            false,
         );
 
         // Position-sorted: var_key(10,15) before dense(20,25); snp before indel on ties (none here).
@@ -1056,6 +1203,10 @@ mod tests {
             &[3..4], // on_disk_snp
             &[0..0], // on_disk_indel
             &[2],    // orig_samples: this query's original cohort sample index is 2
+            &[],
+            &[],
+            false,
+            false,
         );
 
         assert_eq!(soa.pos, vec![10, 20]);
