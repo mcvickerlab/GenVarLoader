@@ -12,11 +12,13 @@
 //! Pattern cribbed from genoray's `orchestrator.rs`: named per-stage threads, shutdown
 //! by `Sender` drop, and join-everything-then-classify-panics (early-returning on a
 //! producer error would leave the consumer blocked on `recv()` forever). Both channels
-//! use `crossbeam_channel::bounded`, but the total buffer count is fixed at `n_slots`,
-//! so neither channel can ever actually fill to capacity — `bounded` and `unbounded`
-//! are behaviorally identical here. The real backpressure is the free-slot pool: the
-//! producer can't get more than `n_slots` windows ahead of the consumer because it has
-//! to receive a recycled slot back from `rx_free` before it can fill another.
+//! use `crossbeam_channel::bounded(n_slots)`, but only `n_slots` buffers exist in
+//! total (recycled between the two channels, never duplicated) — so no single
+//! channel's queue can ever exceed its own `n_slots` capacity, meaning **no `send` on
+//! either channel can ever block**; `bounded` and `unbounded` are behaviorally
+//! identical here. The real backpressure is the free-slot pool: the producer can't
+//! get more than `n_slots` windows ahead of the consumer because it has to receive a
+//! recycled slot back from `rx_free` before it can fill another.
 //!
 //! **Slot recycling is NET-NEW here** — genoray does *not* recycle (it allocates each
 //! chunk fresh and drops it). We return drained slots to the producer so memory is
@@ -153,6 +155,18 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Guards `std::panic::take_hook`/`set_hook` for the two tests below that
+    /// swap the global panic hook. That swap is process-global and NOT atomic
+    /// (take, then set is two separate calls), and cargo runs tests in parallel
+    /// threads of one process -- without serializing, one test's `take_hook()`
+    /// can observe the other's temporary silent hook as "the previous hook" and
+    /// restore *that* instead of the real original, permanently silencing panics
+    /// for the rest of the test binary. Diagnostics-only impact (a failing test
+    /// still reports FAILED, just without its panic message), but no reason to
+    /// leave it racy. A panicking test poisons the mutex; recover with
+    /// `into_inner()` rather than propagating the poison to the next test.
+    static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct CountingBackend {
         fills: AtomicUsize,
     }
@@ -265,6 +279,11 @@ mod tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
+        // Serialize with `producer_panic_surfaces_as_err_not_hang` -- see
+        // `PANIC_HOOK_LOCK`'s doc comment. `unwrap_or_else` recovers from
+        // poisoning (a previous panicking test) instead of propagating it.
+        let _guard = PANIC_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         // Suppress the panic's default backtrace/message noise on stderr -- we are
         // deliberately triggering this panic and asserting on the outcome, not
         // debugging it.
@@ -308,6 +327,10 @@ mod tests {
                 panic!("deliberate producer panic");
             }
         }
+
+        // Serialize with `consumer_panic_does_not_hang_producer` -- see
+        // `PANIC_HOOK_LOCK`'s doc comment.
+        let _guard = PANIC_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));

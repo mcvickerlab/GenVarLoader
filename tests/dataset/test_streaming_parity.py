@@ -49,13 +49,15 @@ def test_streaming_matches_written_all_cells(svar1_multicontig_fixture):
 
 
 def test_dataloader_len_matches_batches_yielded(svar1_multicontig_fixture):
-    """`len(dl)` must count contig-grouped batches, not `ceil(cells/batch_size)`.
+    """`len(dl)` must count window-batched batches, not `ceil(cells/batch_size)`.
 
-    `_plan` batches *within* each contig run, so every run's last batch may be
-    partial: with 2 contigs x 6 regions x 3 samples (= 2 runs of 18 cells) and
-    batch_size=4, the naive `ceil(36/4)=9` under-reports the 2*ceil(18/4)=10
-    batches actually yielded. `DataLoader.__len__` forwards to the wrapper, so
-    anything trusting `len(dl)` (progress bars, epoch accounting) would be wrong.
+    `_plan` batches *within* each window, so every window's last batch may be
+    partial. Here each contig run (6 regions x 3 samples = 18 cells) fits in a
+    single window (`_window_regions=64` >> 6 regions), so a window coincides with
+    a contig run: with 2 contigs and batch_size=4, the naive `ceil(36/4)=9`
+    under-reports the 2*ceil(18/4)=10 batches actually yielded. `DataLoader.__len__`
+    forwards to the wrapper, so anything trusting `len(dl)` (progress bars, epoch
+    accounting) would be wrong.
     """
     f = svar1_multicontig_fixture
     sds = gvl.StreamingDataset(

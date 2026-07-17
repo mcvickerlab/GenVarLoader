@@ -39,7 +39,6 @@ class StreamingDataset:
       ``test_streaming_scheduler.py`` and ``test_svar1_window.py``.
     """
 
-    _bed: pl.DataFrame
     # (n_regions, 4) sorted: (contig_idx, start, end, strand). Only cols 0-2 are
     # read here; `bed_to_regions` returns the 4th (strand) column.
     _regions: NDArray[np.int32]
@@ -51,24 +50,12 @@ class StreamingDataset:
     # Regions per read window. Window >> batch is the point: one Rust call per window
     # amortizes the search + page faults across many batches.
     #
-    # Default re-measured on a 2000-region/400kb-contig fixture (see
-    # docs/roadmaps/streaming-dataset.md, Plan 2 Task 4 -- NOT the 20-region pytest
-    # scale_fixture, which is too small to tell wr=64 and wr=256 apart: any
-    # window_regions >= 20 collapses that bed into a single window, so a sweep against
-    # it cannot show a knee past 20). Swept window_regions in {1, 4, 16, 64, 256, 1024}
-    # (best of 3 runs, 3 independent sessions in one sitting). entries_touched was
-    # EXACTLY flat (40453) across every setting in every session -- confirms I/O is
-    # windowing-invariant, as designed; wall-clock is secondary color only, never the
-    # gate. Wall-clock dropped sharply and monotonically from wr=1 through wr=64
-    # (session-avg best ~0.84s -> ~0.19s, ~4.5x); wr=256 and wr=1024 (still unsaturated
-    # at 8 and 2 windows for this fixture) kept improving but only another ~5-11%,
-    # on the same order as this shared node's run-to-run noise (a single setting's 3
-    # repeats can span up to ~2x -- see CLAUDE.md-adjacent perf-gate notes). This
-    # fixture does NOT resolve a hard knee above 64 -- the honest read is "steep early
-    # elbow at 64, everything past it is noise-level on this node." 64 is kept: it
-    # captures essentially all the measured gain, and a window is regions x ALL
-    # samples, so larger window_regions grows the per-call working set with no
-    # measured compensating benefit here.
+    # 64 is a pragmatic default, NOT a measured knee: a sweep (window_regions in
+    # {1, 4, 16, 64, 256, 1024}) showed wall-clock improving monotonically with fewer
+    # windows and flattening past ~64, with everything beyond that inside this shared
+    # node's run-to-run noise. entries_touched was exactly flat across every setting,
+    # confirming I/O is windowing-invariant, as designed. See
+    # docs/roadmaps/streaming-dataset.md (Plan 2 Task 4) for the full sweep narrative.
     _window_regions: int = 64
 
     def __init__(
@@ -150,7 +137,6 @@ class StreamingDataset:
         sorted_bed = sp.bed.sort(bed.with_row_index("_r"))
         order = sorted_bed["_r"].to_numpy().astype(np.intp)
         regs = bed_to_regions(sorted_bed.drop("_r"), ContigNormalizer(contigs))
-        object.__setattr__(self, "_bed", bed)
         object.__setattr__(self, "_regions", regs)
         object.__setattr__(self, "_sort_order", order)
         object.__setattr__(self, "contigs", list(contigs))
