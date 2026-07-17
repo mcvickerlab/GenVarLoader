@@ -78,14 +78,14 @@ Both are sparse columnar variant archives from [`genoray`](https://github.com/mc
 - **`.svar`** reconstructs by building an interval search tree over the queried window and a per-read dense union of the overlapping variants.
 - **`.svar2`** reconstructs via a **read-bound** path: `gvl.write` caches small per-`(region, sample, ploid)` variant-key ranges at write time, and `Dataset.__getitem__` gathers directly off that cache and calls all-Rust kernels — it builds **no interval search tree and no dense union per read**. `.svar2` stores are also typically smaller on disk than `.svar`, especially for large cohorts.
 
-`.svar2` is Phase-1 scope: a handful of combinations (`annotated` haplotypes, `min_af`/`max_af`, `VarWindowOpt(ref="allele")`, fixed-length haplotype-realigned tracks, splicing or exonic filtering with non-haplotype outputs, and `variants`/`variant-windows` output with jitter) aren't wired yet and raise `NotImplementedError` rather than silently mis-computing. Plain haplotype output supports splicing, `var_filter="exonic"`, and negative-strand reverse-complementation. `"variant-windows"` output, `unphased_union` (for both `"variants"` and `"variant-windows"`), and `var_fields`-selected store INFO/FORMAT fields (also for both, when the `.svar2` was written with them) are also supported. See the `genvarloader` skill's `.svar2` section or `docs/source/format.md` for the full list. Everything else — haplotypes, tracks, and variants/variant-windows at any supported jitter/output-length combination — is byte-identical between the two backends.
+`.svar2` is Phase-1 scope: a handful of combinations (`annotated` haplotypes, `min_af`/`max_af`, `VarWindowOpt(ref="allele")`, fixed-length haplotype-realigned tracks, spliced `variant-windows`, and `variants`/`variant-windows` output with jitter) aren't wired yet and raise `NotImplementedError` rather than silently mis-computing. Haplotype and `variants` output support splicing, `var_filter="exonic"`, and negative-strand reverse-complementation. `"variant-windows"` output, `unphased_union` (for both `"variants"` and `"variant-windows"`), and `var_fields`-selected store INFO/FORMAT fields (also for both, when the `.svar2` was written with them) are also supported. See the `genvarloader` skill's `.svar2` section or `docs/source/format.md` for the full list. Everything else — haplotypes, tracks, and variants/variant-windows at any supported jitter/output-length combination — is byte-identical between the two backends.
 
 One documented difference in raw output: for a pure deletion, `with_seqs("variants")` on a `.svar` dataset reports the VCF anchor base as ALT (e.g. `b"G"` for `GTA>G`), while a `.svar2` dataset reports the atomized empty ALT (`b""`) — a genoray `.svar2` format convention, not a bug. Reconstructed haplotypes are unaffected; only `RaggedVariants.alt` differs (and `FlatVariantWindows.alt`/`.alt_window` for `"variant-windows"`), and only for pure-deletion records. `ref_window` is byte-identical between the two backends.
 
 ## How can I get personalized protein/spliced RNA sequences?
 
 Write a dataset from an exon-level BED containing transcript and exon-order columns,
-then open it with `splice_info` and haplotype output. Use `var_filter="exonic"` to
+then open it with `splice_info`. Use `var_filter="exonic"` to
 drop variants whose reference span crosses an exon boundary:
 
 ```python
@@ -100,6 +100,11 @@ ds = gvl.Dataset.open(
 This works with `.svar` and `.svar2` variant sources. Negative-strand transcripts
 are reverse-complemented automatically when the BED includes `strand="-"`. See
 the [splicing guide](splicing.html) for BED construction and output shapes.
+
+Use `.with_seqs("variants")` on the same dataset to receive one complete
+`RaggedVariants` cell per `(transcript, sample, phase)`. GVL performs the exon
+queries, exonic filtering, decode, and transcript regrouping internally; callers
+do not need to iterate over or concatenate exons.
 
 <!-- Example of variable length regions
 
