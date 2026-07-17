@@ -180,7 +180,7 @@ with no `gvl.write()` call and no `.gvl` directory on disk.
 
 ```python
 sds = gvl.StreamingDataset(
-    "rois.bed", reference="ref.fa", variants="normed.svar"
+    "rois.bed", reference="ref.fa", variants="normed.svar", max_mem="512MB"
 ).with_seqs("haplotypes")
 
 for data, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
@@ -190,6 +190,15 @@ for data, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
 `to_iter` is the one iteration entry point; `to_torch_dataset()` and `to_dataloader()`
 are thin wrappers over it. There is no `__iter__` and no random access — `sds[r, s]`
 raises `TypeError`, because iteration order is fixed by the data layout.
+
+Peak memory is **independent of cohort size**. `max_mem` (default `"512MB"`, an int
+byte count or a size string like `"1g"`/`"2GiB"`) bounds the read-window's offsets
+buffer, which `StreamingDataset` derives into a region/sample chunking of the window
+so it never grows with the number of samples. Separately, `to_iter`'s `batch_size`
+bounds the per-batch haplotype *output* -- each window is read once, then generated
+one `batch_size` slice at a time, so output is never materialized for a whole window
+at once. Together, peak memory is bounded by `max_mem` (offsets) + `batch_size`
+(output), regardless of how many samples or regions the dataset has.
 
 Haplotype output is byte-identical to `gvl.write(...)` followed by `Dataset.open(...)[r, s]`
 (at `jitter=0`). It trades that write step for a slower per-epoch read, since every window

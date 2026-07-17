@@ -284,13 +284,54 @@ only** (no map-style random access).
       This is a real, user-visible correctness fix, so it landed as its own
       `fix(streaming):` commit rather than folded into the `test:` commit that found
       it, so it gets a changelog entry.
-    - **Memory-scaling concern — filed as issue
-      [#284](https://github.com/mcvickerlab/GenVarLoader/issues/284):** a window is
-      regions × **all samples**, so peak memory scales with cohort size and
-      `_window_regions` cannot bound it (no value ≥ 1 helps — the sample dimension is
-      never chunked). Not independently re-measured here (the scale fixture's 20
-      samples don't exercise this). Note #283 (engine wiring) doubles the resident
-      window count on top of this, so the two interact.
+    - ✅ **Memory-scaling concern — issue
+      [#284](https://github.com/mcvickerlab/GenVarLoader/issues/284) — RESOLVED.**
+      Originally: a window is regions × **all samples**, so peak memory scaled with
+      cohort size and `_window_regions` alone couldn't bound it (the sample
+      dimension was never chunked). Fixed by a 5-task plan (this branch,
+      `spec/streaming-svar1-engine-memory`):
+      - **Read/generate split:** `_Svar1Backend.read_window` (offsets only) is
+        separated from `_Svar1Backend.generate_batch` (haplotype output for a
+        `[lo:hi)` row slice). `StreamingDataset._iter_batches` reads a window's
+        offsets once, then calls `generate_batch` once per `batch_size` slice —
+        output is never materialized for a whole window.
+      - **`max_mem` byte budget:** `StreamingDataset(..., max_mem="512MB")` (int
+        bytes or a size string) is a new public constructor arg. `__init__` derives
+        `_window_samples`/`_window_regions`/`_max_mem_bytes` from it (chunking both
+        the region and the sample axis of the read window so the offsets buffer —
+        `window_regions * window_samples * ploidy * 16 B` — stays within budget
+        regardless of cohort size), keeping the pragmatic `region_target = 64`
+        read-amortization knee as a local constant when the budget allows it.
+      - **Per-batch generation:** `generate_batch(r_idx, s_idx, o_starts, o_stops,
+        lo, hi)` allocates output for exactly `hi - lo` rows — parity-verified
+        byte-identical against `gvl.write()` + `Dataset.open()[r, s]`
+        (`test_scale_parity_still_byte_identical`).
+      - **Deterministic cohort-scale gate (not `ru_maxrss`):**
+        `test_generate_batch_output_is_flat_in_cohort_size`
+        (`tests/dataset/test_streaming_scale.py`) proves a fixed-`batch_size=4`
+        call's output byte count is **identical** between a 50-sample and a
+        400-sample cohort (both produce the same non-zero byte count), while also
+        proving the read window covers the *whole* cohort each time
+        (`len(s_idx) == n_samples`) — so the flat output is evidence of per-batch
+        generation, not just a small window. An earlier `ru_maxrss`-based version of
+        this gate was replaced: it measured 0B at every cohort size up to 20000
+        samples because the tiny fixture's output never crossed a page boundary, so
+        it could not have failed on the #284 defect it named.
+      - **`region_target` re-confirmed (Task 5, this session):** swept
+        `window_regions ∈ {1, 4, 16, 64, 256}` against the Task 4 200-variant/
+        20-sample/4000bp scale fixture with a 20-region bed, best-of-3,
+        `batch_size=8`. Session-best wall-clock: wr=1 → 0.0140s, wr=4 → 0.0108s,
+        wr=16 → 0.0087s, wr=64 → 0.0090s, wr=256 → 0.0095s — a clear early elbow by
+        wr=16, then flat within this shared node's run-to-run noise (differences
+        among 16/64/256 are ≤10%, comparable to a single setting's rep-to-rep
+        spread). This 20-region bed also can't discriminate `window_regions ≥ 20`
+        (any value that large collapses to one window), so it's a confirmation, not
+        a re-derivation, of the prior 2000-region sweep that established wr=64 (see
+        Task 4 above). **Kept `region_target = 64`** — consistent with, not
+        contradicted by, this sweep.
+      - Follow-up #283 (engine wiring) still doubles the resident window count
+        (ping-pong buffering) on top of this; that interaction is unaffected by this
+        fix and remains next.
     - **Final whole-branch review fix wave, before opening the PR:** (1) `fix:`
       `_Svar1Backend.reconstruct_window` looked up `ref_c_idx` by re-searching
       `self._ref.c_map.contigs` for the STORE's contig name, but

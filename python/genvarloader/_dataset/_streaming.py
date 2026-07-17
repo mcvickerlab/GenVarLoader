@@ -67,6 +67,20 @@ class StreamingDataset:
     ``sample_idx`` means "index into :attr:`samples`" (lexicographically-sorted
     sample names, matching :func:`gvl.write`'s convention) -- NOT a variant store's
     native column order. See :attr:`samples`.
+
+    Parameters
+    ----------
+    max_mem
+        Approximate byte budget for the read-window's offsets buffer, i.e. the
+        ``o_start``/``o_stop`` CSR-index pair read per ``(region, sample, ploid)``
+        cell (``window_regions * window_samples * ploidy * 16`` bytes). Accepts an
+        ``int`` (bytes) or a size string like ``"512MB"``, ``"1g"``, ``"2GiB"``
+        (default ``"512MB"``). This budget only bounds the READ window -- the
+        separate GENERATION granularity is ``batch_size`` (a :meth:`to_iter`
+        argument), which bounds per-batch haplotype OUTPUT independently. Neither
+        term scales with cohort size, so peak memory is bounded by
+        ``max_mem`` (offsets) + ``batch_size`` (output), independent of the number
+        of samples in the dataset.
     """
 
     # (n_regions, 4) sorted: (contig_idx, start, end, strand). Only cols 0-2 are
