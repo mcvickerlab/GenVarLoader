@@ -337,10 +337,10 @@ class Svar2Haps(Haps[_H]):
                     "Spliced output is not supported for the 'variants' or "
                     "'variant-windows' sequence types."
                 )
-            if self.filter == "exonic":
+            if self.filter == "exonic" and issubclass(self.kind, _FlatVariantWindows):
                 raise NotImplementedError(
-                    "var_filter='exonic' is currently supported only for "
-                    "SVAR2 haplotype output."
+                    "var_filter='exonic' is not supported for SVAR2 "
+                    "variant-window output."
                 )
             # variants AND variant-windows decode variants; the read-bound decode
             # has NO right-clip, so max_jitter>0 / jitter>0 would over-include
@@ -838,6 +838,14 @@ class Svar2Haps(Haps[_H]):
         cat_fields: list[list[NDArray]] = []
         for ci, qsel in groups:
             gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
+            work_bytes = max(
+                len(qsel) * P * 64,
+                sum(
+                    int(np.maximum(0, ranges[:, 1] - ranges[:, 0]).sum())
+                    for ranges in gi[2:]
+                )
+                * 16,
+            )
             pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
                 decode_variants_from_svar2_readbound(
                     self.store,
@@ -850,6 +858,9 @@ class Svar2Haps(Haps[_H]):
                     gi[5],
                     P,
                     field_specs,
+                    np.ascontiguousarray(regions[qsel, 2], np.uint32),
+                    self.filter == "exonic",
+                    should_parallelize(work_bytes),
                 )
             )
             var_off = np.asarray(var_off, np.int64)
@@ -972,6 +983,14 @@ class Svar2Haps(Haps[_H]):
 
         for ci, qsel in groups:
             gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
+            work_bytes = max(
+                len(qsel) * P * 64,
+                sum(
+                    int(np.maximum(0, ranges[:, 1] - ranges[:, 0]).sum())
+                    for ranges in gi[2:]
+                )
+                * 16,
+            )
             pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
                 decode_variants_from_svar2_readbound(
                     self.store,
@@ -984,6 +1003,9 @@ class Svar2Haps(Haps[_H]):
                     gi[5],
                     P,
                     field_specs,
+                    np.ascontiguousarray(regions[qsel, 2], np.uint32),
+                    False,
+                    should_parallelize(work_bytes),
                 )
             )
             pos = np.asarray(pos, np.int32)

@@ -140,13 +140,15 @@ for `with_seqs("variant-windows")`: `ref_window` is byte-identical between the b
 A `.svar2`-backed dataset supports all four output modes (`haplotypes`, `variants`,
 `variant-windows`, and haplotype-realigned `tracks`), `unphased_union`, and
 `var_fields`-selected store INFO/FORMAT fields (on both `"variants"` and `"variant-windows"`).
-Plain haplotype output also supports splicing, `var_filter="exonic"`, and automatic
-reverse-complementation for negative-strand regions.
+Haplotype and `variants` output also support splicing, `var_filter="exonic"`, and
+automatic reverse-complementation for negative-strand regions. Spliced
+`RaggedVariants` are returned as complete `(transcript, sample, phase, ~variants)`
+cells.
 The following combinations are Phase-1 scope and raise `NotImplementedError` (or, for
 `extend_to_length`, at write time) instead of silently mis-computing:
 
-- Splicing with `variants`, `variant-windows`, or haplotype-realigned tracks.
-- `var_filter="exonic"` with non-haplotype output or haplotype-realigned tracks.
+- Splicing with `variant-windows` or haplotype-realigned tracks.
+- `var_filter="exonic"` with `variant-windows` or haplotype-realigned tracks.
 - `min_af` / `max_af` filtering (`.svar` only; see "Should I use `.svar` or `.svar2`" in the FAQ).
 - `annotated` haplotypes (`with_seqs("annotated")`).
 - `VarWindowOpt(ref="allele")` (bare-allele REF mode; REF alleles aren't stored in `.svar2`).

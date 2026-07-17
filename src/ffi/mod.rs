@@ -1701,6 +1701,9 @@ pub fn decode_variants_from_svar2_readbound<'py>(
     dense_indel_range: PyReadonlyArray2<i64>,
     ploidy: usize,
     fields: Vec<(String, String, String)>,
+    region_ends: PyReadonlyArray1<u32>,
+    filter_exonic: bool,
+    parallel: bool,
 ) -> PyResult<(
     Bound<'py, PyArray1<i32>>,
     Bound<'py, PyArray1<i32>>,
@@ -1720,6 +1723,7 @@ pub fn decode_variants_from_svar2_readbound<'py>(
     })?;
 
     let region_starts_v: Vec<u32> = region_starts.as_array().to_vec();
+    let region_ends_v: Vec<u32> = region_ends.as_array().to_vec();
     let orig_samples_v: Vec<usize> = orig_samples
         .as_array()
         .iter()
@@ -1800,6 +1804,10 @@ pub fn decode_variants_from_svar2_readbound<'py>(
             &dense_snp_range_v,
             &dense_indel_range_v,
             &orig_samples_v,
+            &region_starts_v,
+            &region_ends_v,
+            filter_exonic,
+            parallel,
         )
     });
 
