@@ -907,8 +907,8 @@ conversion/write paths.
 
 - 2026-07-16 (Phase 6a follow-up — SVAR2 spliced haplotype scatter-write; issue
   [#273](https://github.com/mcvickerlab/GenVarLoader/issues/273); branch
-  `worktree-spike+svar2-splice-profile`; PR: _not yet opened — controller opens after final
-  review_): SVAR2 spliced haplotype reads (added on top of Phase 6a by #272,
+  `worktree-spike+svar2-splice-profile`; PR
+  [#281](https://github.com/mcvickerlab/GenVarLoader/pull/281)): SVAR2 spliced haplotype reads (added on top of Phase 6a by #272,
   `feat(svar2): support spliced exonic haplotypes`) now write kernel output directly at each
   element's final spliced address instead of reconstructing in region order and re-ordering the
   output bytes in Python afterward — the same "permute metadata, not bytes" trick SVAR1's fused
