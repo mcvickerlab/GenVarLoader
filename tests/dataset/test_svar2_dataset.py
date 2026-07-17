@@ -197,6 +197,82 @@ def test_svar2_spliced_minus_strand_haplotypes_match_svar1(
     assert not np.array_equal(forward.data.view("u1"), reverse.data.view("u1"))
 
 
+def test_svar2_spliced_variants_match_exon_concatenation(
+    tmp_path, svar_fixture, svar2_fixture, _src
+):
+    """GVL returns complete transcript/sample/phase variant records per query."""
+    _bcf, ref = _src
+    splice_bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [0, 20, 5],
+            "chromEnd": [13, 40, 13],
+            "strand": ["+", "+", "+"],
+            "transcript_id": ["T1", "T1", "T2"],
+            "exon_number": [1, 2, 1],
+        }
+    )
+    _, ds2 = _open_pair(tmp_path, splice_bed, svar_fixture, svar2_fixture, ref)
+    unspliced = ds2.with_settings(var_filter="exonic").with_seqs("variants")[:, :]
+    spliced = ds2.with_settings(
+        splice_info=("transcript_id", "exon_number"), var_filter="exonic"
+    ).with_seqs("variants")[:, :]
+
+    assert spliced.shape == (2, 2, 2, None)
+
+    def _logical_row(field, transcript, sample, phase):
+        return np.asarray(field[transcript, sample, phase].to_packed().data).tolist()
+
+    for sample in range(2):
+        for phase in range(2):
+            for field_name in ("start", "ilen", "alt"):
+                spliced_field = getattr(spliced, field_name)
+                unspliced_field = getattr(unspliced, field_name)
+                assert _logical_row(spliced_field, 0, sample, phase) == (
+                    _logical_row(unspliced_field, 0, sample, phase)
+                    + _logical_row(unspliced_field, 1, sample, phase)
+                )
+                assert _logical_row(spliced_field, 1, sample, phase) == _logical_row(
+                    unspliced_field, 2, sample, phase
+                )
+
+
+def test_svar2_spliced_variants_dataloader_returns_complete_cells(
+    tmp_path, svar_fixture, svar2_fixture, _src
+):
+    """The ordinary written-dataset loader never exposes individual exons."""
+    pytest.importorskip("torch")
+    _bcf, ref = _src
+    splice_bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [0, 20, 5],
+            "chromEnd": [13, 40, 13],
+            "strand": ["+", "+", "+"],
+            "transcript_id": ["T1", "T1", "T2"],
+            "exon_number": [1, 2, 1],
+        }
+    )
+    _, ds2 = _open_pair(tmp_path, splice_bed, svar_fixture, svar2_fixture, ref)
+    ds2 = ds2.with_settings(
+        splice_info=("transcript_id", "exon_number"), var_filter="exonic"
+    ).with_seqs("variants")
+    batches = list(
+        ds2.to_dataloader(
+            batch_size=2,
+            shuffle=False,
+            num_workers=0,
+            return_indices=True,
+        )
+    )
+
+    assert sum(len(region_idxs) for _, region_idxs, _ in batches) == 4
+    for records, region_idxs, sample_idxs in batches:
+        assert isinstance(records, gvl.RaggedVariants)
+        assert records.shape[0] == len(region_idxs) == len(sample_idxs)
+        assert records.shape[1:] == (2, None)
+
+
 def test_svar2_exonic_filter_haplotypes_match_svar1(
     tmp_path, svar_fixture, svar2_fixture, _src
 ):
@@ -721,6 +797,65 @@ def test_svar2_haplotypes_match_svar1_multicontig(
 
     a = ds1.with_seqs("haplotypes")[:, :]
     b = ds2.with_seqs("haplotypes")[:, :]
+    assert np.array_equal(np.asarray(a.offsets), np.asarray(b.offsets)), (
+        f"offsets differ: svar1={np.asarray(a.offsets).tolist()} "
+        f"svar2={np.asarray(b.offsets).tolist()}"
+    )
+    assert np.array_equal(a.data.view("u1"), b.data.view("u1"))
+
+
+def test_svar2_spliced_haplotypes_match_svar1_multicontig(
+    tmp_path, svar_fixture2, svar2_fixture2, _src2
+):
+    """Spliced haplotypes byte-identical to SVAR1 when transcripts span TWO contigs.
+
+    Splice order is (splice_row, sample, ploid, element), but SVAR2 reconstructs
+    per contig group — so each group's rows land at destinations that are both
+    non-monotonic AND gapped: the chr2 group (Ta + Tc) is split into two blocks
+    with the chr1 group's (Tb) block sandwiched between them, because splice
+    order runs Ta -> Tb -> Tc. The Rust carve must tolerate destination gaps
+    (bytes owned by another call interleaved within a single contig group's
+    scatter), and that's only exercised with 3+ transcripts alternating contigs.
+    A single-contig fast path or a plain 2-transcript, 2-contig bed never
+    produces a gap — each contig's block stays contiguous, just reordered
+    relative to the other contig. Tb and Tc are both minus-strand, and Tc's
+    rows land in the gapped (chr2) group, so the RC pass (rc_bounded_rows_inplace)
+    is exercised on genuinely gapped destinations, not just scattered ones.
+    """
+    from genoray import SparseVar, SparseVar2
+
+    _bcf, ref = _src2
+    # 3 transcripts alternating contigs (Ta:chr2, Tb:chr1, Tc:chr2) so splice
+    # order (Ta -> Tb -> Tc) splits chr2's group (Ta ∪ Tc) around chr1's (Tb)
+    # block -> gapped destinations. Tb and Tc are minus-strand.
+    splice_bed = pl.DataFrame(
+        {
+            "chrom": ["chr2", "chr1", "chr2", "chr1", "chr2", "chr2"],
+            "chromStart": [0, 0, 20, 5, 5, 25],
+            "chromEnd": [13, 13, 40, 20, 18, 45],
+            "strand": ["+", "-", "+", "-", "-", "-"],
+            "transcript_id": ["Ta", "Tb", "Ta", "Tb", "Tc", "Tc"],
+            "exon_number": [1, 1, 2, 2, 1, 2],
+        }
+    )
+    d1 = tmp_path / "mcs1.gvl"
+    d2 = tmp_path / "mcs2.gvl"
+    gvl.write(
+        d1, splice_bed, variants=SparseVar(svar_fixture2), samples=None, overwrite=True
+    )
+    gvl.write(
+        d2,
+        splice_bed,
+        variants=SparseVar2(svar2_fixture2),
+        samples=None,
+        overwrite=True,
+    )
+    settings = {"splice_info": ("transcript_id", "exon_number"), "var_filter": "exonic"}
+    ds1 = gvl.Dataset.open(d1, reference=ref, **settings).with_seqs("haplotypes")
+    ds2 = gvl.Dataset.open(d2, reference=ref, **settings).with_seqs("haplotypes")
+
+    a = ds1[:, :]
+    b = ds2[:, :]
     assert np.array_equal(np.asarray(a.offsets), np.asarray(b.offsets)), (
         f"offsets differ: svar1={np.asarray(a.offsets).tolist()} "
         f"svar2={np.asarray(b.offsets).tolist()}"

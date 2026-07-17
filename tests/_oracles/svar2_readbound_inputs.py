@@ -341,6 +341,9 @@ def build_readbound_variants(
             dense_indel_range,
             P,
             [],
+            np.repeat(np.asarray([end for _, end in regions], np.uint32), S),
+            False,
+            False,
         )
     )
 
