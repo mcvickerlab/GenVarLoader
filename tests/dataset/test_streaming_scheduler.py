@@ -1,6 +1,6 @@
 import numpy as np
 import polars as pl
-from genvarloader._dataset._streaming import StreamingDataset
+from genvarloader._dataset._streaming import StreamingDataset, _parse_max_mem
 
 
 def _bed(rows):
@@ -74,6 +74,14 @@ def test_sort_order_is_duplicate_safe():
     flat_s = np.concatenate([b[2] for b in batches])
     cells = set(zip(flat_r.tolist(), flat_s.tolist()))
     assert cells == {(r, s) for r in range(n_regions) for s in range(n_samples)}
+
+
+def test_parse_max_mem_accepts_int_and_size_strings():
+    assert _parse_max_mem(2048) == 2048
+    assert _parse_max_mem("512MB") == 512 * 1024**2
+    assert _parse_max_mem("1g") == 1024**3
+    assert _parse_max_mem("2GiB") == 2 * 1024**3
+    assert _parse_max_mem("4096") == 4096
 
 
 def _injected_sds(n_regions, n_samples, ploidy=2, max_mem="512MB", contigs=("chr1",)):

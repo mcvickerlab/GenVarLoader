@@ -26,8 +26,20 @@ def _parse_max_mem(max_mem: str | int) -> int:
     if isinstance(max_mem, int):
         return int(max_mem)
     s = str(max_mem).strip().lower().replace("ib", "b")
-    units = {"b": 1, "kb": 1024, "mb": 1024**2, "gb": 1024**3, "tb": 1024**4}
-    for suffix in ("tb", "gb", "mb", "kb", "b"):
+    units = {
+        "b": 1,
+        "kb": 1024,
+        "mb": 1024**2,
+        "gb": 1024**3,
+        "tb": 1024**4,
+        "k": 1024,
+        "m": 1024**2,
+        "g": 1024**3,
+        "t": 1024**4,
+    }
+    # Multi-char suffixes first: "1tb" must match "tb", not fall through to bare "t"
+    # (checking "t" first would strip only the trailing "b" and leave "1t" behind).
+    for suffix in ("tb", "gb", "mb", "kb", "t", "g", "m", "k", "b"):
         if s.endswith(suffix):
             return int(float(s[: -len(suffix)]) * units[suffix])
     return int(float(s))  # bare number = bytes
