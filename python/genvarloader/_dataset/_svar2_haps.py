@@ -45,6 +45,7 @@ from ..genvarloader import (
     decode_variants_from_svar2_readbound,
     hap_diffs_from_svar2_readbound,
     reconstruct_haplotypes_from_svar2_readbound,
+    reconstruct_haplotypes_from_svar2_readbound_into,
     shift_and_realign_tracks_from_svar2_readbound,
 )
 from ._flat_variants import (
@@ -362,6 +363,17 @@ class Svar2Haps(Haps[_H]):
                 "svar2 datasets do not support with_seqs('annotated') yet."
             )
 
+        if splice_plan is not None:
+            return cast(
+                _H,
+                self._reconstruct_spliced(
+                    idx=idx,
+                    regions=np.asarray(regions, np.int32),
+                    splice_plan=splice_plan,
+                    to_rc=to_rc,
+                ),
+            )
+
         haps, *_ = self.get_haps_and_shifts(
             idx=idx,
             regions=regions,
@@ -373,25 +385,101 @@ class Svar2Haps(Haps[_H]):
             need_hap_lengths=False,
         )
 
-        if splice_plan is None and (to_rc is None or not bool(np.asarray(to_rc).any())):
+        if to_rc is None or not bool(np.asarray(to_rc).any()):
             return cast(_H, haps)
 
-        if splice_plan is None:
-            data = np.asarray(haps.data)
-            offsets = np.asarray(haps.offsets, np.int64)
-            shape = haps.shape
-        else:
-            data, offsets = _ragged_arange_gather(
-                np.asarray(haps.data),
-                np.asarray(haps.offsets, np.int64),
-                splice_plan.permutation,
-            )
-            shape = (len(splice_plan.permutation), None)
-
-        flat = _Flat.from_offsets(data, shape, offsets).view("S1")
-        if to_rc is not None and bool(np.asarray(to_rc).any()):
-            flat = flat.reverse_masked(np.asarray(to_rc, np.bool_), comp=_COMP)
+        flat = _Flat.from_offsets(
+            np.asarray(haps.data), haps.shape, np.asarray(haps.offsets, np.int64)
+        ).view("S1")
+        flat = flat.reverse_masked(np.asarray(to_rc, np.bool_), comp=_COMP)
         return cast(_H, flat)
+
+    def _reconstruct_spliced(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+        splice_plan: "SplicePlan",
+        to_rc: "NDArray[np.bool_] | None",
+    ) -> _Flat[np.bytes_]:
+        """Reconstruct spliced haplotypes directly into spliced layout (no re-order).
+
+        The splice plan already knows every element's final address, so instead of
+        reconstructing in region order and permuting the OUTPUT BYTES afterwards, we
+        permute the per-row METADATA (O(rows)) and let each contig group's kernel call
+        scatter straight into the shared buffer — the same trick SVAR1's fused spliced
+        entry uses (``reconstruct_haplotypes_spliced_fused``).
+
+        The plan's k-index (``k = query * E + e`` with ``E = ploidy`` for haplotypes,
+        see ``_splice.build_splice_plan``) is exactly the kernel's row index
+        ``k = q * P + p``, so ``plan.permutation`` indexes hap rows with no translation.
+
+        Callers reach this only via ``_getitem_spliced``, which asserts ``jitter == 0``
+        and ``deterministic`` — hence zero shifts.
+        """
+        assert self.store is not None
+        regions = np.asarray(regions, np.int32)
+        P = int(self.genotypes.shape[-2])
+        b = len(idx)
+        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
+        r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
+
+        perm = np.asarray(splice_plan.permutation, np.intp)
+        off = np.asarray(splice_plan.permuted_out_offsets, np.int64)
+        n_work = b * P
+        if len(perm) != n_work:
+            raise AssertionError(
+                f"splice permutation length {len(perm)} != n_queries*ploidy {n_work}"
+            )
+
+        # dest_rank[k] = position of kernel row k within the permuted (spliced) layout.
+        dest_rank = np.empty(n_work, np.intp)
+        dest_rank[perm] = np.arange(n_work, dtype=np.intp)
+        bounds_all = np.empty((n_work, 2), np.int64)
+        bounds_all[:, 0] = off[dest_rank]
+        bounds_all[:, 1] = off[dest_rank + 1]
+
+        # to_rc arrives in permuted order (_getitem_spliced builds it as
+        # to_rc_flat[plan.permutation]); the kernel wants it per row.
+        rc_all: NDArray[np.bool_] | None = None
+        if to_rc is not None and bool(np.asarray(to_rc).any()):
+            rc_all = np.empty(n_work, np.bool_)
+            rc_all[perm] = np.asarray(to_rc, np.bool_)
+
+        out = np.empty(int(off[-1]), np.uint8)
+        shifts_all = np.zeros((b, P), np.int32)
+        p_range = np.arange(P, dtype=np.intp)
+
+        for ci, qsel in self._contig_groups(regions[:, 0].astype(np.int64)):
+            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
+            ref_, ref_offsets = self._ref_for_contig(ci)
+            rows = (qsel[:, None] * P + p_range).ravel()
+            g_bounds = np.ascontiguousarray(bounds_all[rows], np.int64)
+            g_rc = (
+                None if rc_all is None else np.ascontiguousarray(rc_all[rows], np.bool_)
+            )
+            g_total = int((g_bounds[:, 1] - g_bounds[:, 0]).sum())
+            reconstruct_haplotypes_from_svar2_readbound_into(
+                out,
+                g_bounds,
+                self.store,
+                self.ds_contigs[ci],
+                gi[0],
+                gi[1],
+                gi[2],
+                gi[3],
+                gi[4],
+                gi[5],
+                gi[6],
+                np.ascontiguousarray(shifts_all[qsel], np.int32),
+                ref_,
+                ref_offsets,
+                np.uint8(self.reference.pad_char),  # type: ignore[union-attr]  # reference guaranteed for haplotypes
+                g_rc,
+                should_parallelize(g_total),
+                self.filter == "exonic",
+            )
+
+        return _Flat.from_offsets(out, (len(perm), None), off).view("S1")
 
     def haplotype_lengths_for_plan(
         self,
