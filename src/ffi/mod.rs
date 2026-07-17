@@ -62,6 +62,19 @@ fn require_contiguous_1d<T: numpy::Element>(
     })
 }
 
+/// Mutable-array counterpart of [`require_contiguous_1d`] — same rationale, for a
+/// `PyReadwriteArray1` that is consumed via `.as_slice_mut()` downstream. Kept as a
+/// separate function (rather than a generic over read/write) because `numpy`'s
+/// `PyReadonlyArray1`/`PyReadwriteArray1` don't share a trait for `.as_slice()`.
+fn require_contiguous_1d_mut<T: numpy::Element>(
+    arr: &mut PyReadwriteArray1<T>,
+    name: &str,
+) -> PyResult<()> {
+    arr.as_array_mut().as_slice_mut().map(|_| ()).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("`{name}` must be C-contiguous"))
+    })
+}
+
 /// Validate a caller-supplied `out_bounds` (scatter-write destinations) before it is
 /// handed to `reconstruct::reconstruct_haplotypes_from_svar2`, whose contract
 /// requires rows to be in-range, pairwise-disjoint `(start, end)` byte ranges within
@@ -100,8 +113,12 @@ fn check_disjoint_bounds_within(
         }
     }
 
+    // Tie-break on `(start, end)`, not `start` alone — see the matching comment on
+    // the carve's `order.sort_unstable_by_key` in `reconstruct::reconstruct_haplotypes_from_svar2`
+    // for why (a zero-length row shares its start with the following row in a
+    // gap-free layout) and why the two sweeps' key ordering must stay identical.
     let mut order: Vec<usize> = (0..out_bounds.nrows()).collect();
-    order.sort_unstable_by_key(|&k| out_bounds[[k, 0]]);
+    order.sort_unstable_by_key(|&k| (out_bounds[[k, 0]], out_bounds[[k, 1]]));
     let mut max_end: i64 = i64::MIN;
     let mut max_end_k: usize = usize::MAX;
     for &k in &order {
@@ -1247,6 +1264,13 @@ pub fn reconstruct_haplotypes_from_svar2_readbound_into<'py>(
             out_bounds.as_array().nrows()
         )));
     }
+
+    // `out` is consumed via `.as_slice_mut()` in the kernel's parallel carve
+    // (`reconstruct::reconstruct_haplotypes_from_svar2`) and in the RC pass
+    // (`crate::reverse::rc_bounded_rows_inplace`) below; a non-contiguous view (e.g.
+    // a strided `out[::2]`) would panic there instead of raising. Gate it here per
+    // this file's stated `.as_slice()`-consumer policy (see `require_contiguous_1d`).
+    require_contiguous_1d_mut(&mut out, "out")?;
 
     // `out_bounds` values come straight from Python (unlike every sibling entry's
     // Rust-computed offsets) — validate range + disjointness before `py.detach`, or
@@ -2734,6 +2758,32 @@ mod tests {
         let msg = super::check_disjoint_bounds_within(bounds.view(), 10).unwrap_err();
         assert!(msg.contains("pairwise disjoint"), "{msg}");
         assert!(msg.contains("row 1 = (4, 8)"), "{msg}");
+    }
+
+    /// Guard for Finding 1 (PR #273 review): sorting the overlap sweep by `start`
+    /// alone ties on equal starts, and `sort_unstable`'s tie-break follows original
+    /// row order. When a non-empty row sits at a lower row index than a zero-length
+    /// row sharing its start, the non-empty row is swept first, its end becomes
+    /// `max_end`, and the zero-length row then spuriously fails `s < max_end` even
+    /// though it writes zero bytes and cannot alias anything. Row order here
+    /// (non-empty row 0, zero-length row 1, both starting at 4) is the ordering that
+    /// reproduces the bug pre-fix.
+    #[test]
+    fn disjoint_bounds_accepts_zero_length_row_tied_with_nonempty_start() {
+        let bounds = ndarray::arr2(&[[4i64, 8], [4, 4]]);
+        assert!(super::check_disjoint_bounds_within(bounds.view(), 8).is_ok());
+    }
+
+    /// Guard for Finding 4 (PR #273 review): pins the "running max end, not just
+    /// previous row's end" property. Row 1 = [2, 4) is nested entirely inside row 0
+    /// = [0, 10), so a weaker check that only compares each row's start against the
+    /// PREVIOUS row's end (rather than the running max) would miss the overlap
+    /// between row 0 and row 2 = [6, 8).
+    #[test]
+    fn disjoint_bounds_rejects_nested_interval() {
+        let bounds = ndarray::arr2(&[[0i64, 10], [2, 4], [6, 8]]);
+        let msg = super::check_disjoint_bounds_within(bounds.view(), 10).unwrap_err();
+        assert!(msg.contains("pairwise disjoint"), "{msg}");
     }
 }
 

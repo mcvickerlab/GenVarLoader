@@ -589,8 +589,12 @@ pub fn reconstruct_haplotypes_from_sparse(
 /// 1.0's `reconstruct_haplotype[s]_from_sparse` are untouched by this function.
 ///
 /// # Parameters
-/// - `out` – flat output buffer, length = out_offsets[-1] (u8); written in place
-/// - `out_offsets` – shape (batch*ploidy + 1,) offsets into `out`
+/// - `out` – flat output buffer (u8); written in place at each row's `out_bounds`
+/// - `out_bounds` – shape (batch*ploidy, 2) as `[start, end)` byte ranges into `out`,
+///   one row per flat work index `k = query * ploidy + hap`; rows are pairwise
+///   disjoint but need not be contiguous or in row order (see
+///   [`bounds_from_offsets`] for the gap-free adapter, and the scatter-write FFI
+///   entry for the caller-supplied-destinations case)
 /// - `regions` – shape (batch, 3) as (contig_idx, start, end) i32
 /// - `shifts` – shape (batch, ploidy) i32
 /// - `vk_pos` / `vk_key` – this hap's `var_key` channel: position + uniform key (i32)
@@ -756,8 +760,19 @@ pub fn reconstruct_haplotypes_from_svar2(
         // interleaves this contig group's rows with other groups'), so carve in
         // ascending-start order rather than row order. The chain's cursor only
         // moves forward; gaps are bytes owned by another call and are skipped.
+        //
+        // Tie-break on `(start, end)`, not `start` alone: `sort_unstable` gives no
+        // guarantee for equal keys, and equal starts are exactly what a zero-length
+        // row produces in a gap-free layout (its bounds are `(off[j], off[j])`, same
+        // start as the following row `(off[j], off[j+1])`). If the tie happens to
+        // sort the non-empty row first, its end advances the cursor past the
+        // zero-length row's start, which then underflows `s - cursor` below. Sorting
+        // by `(start, end)` puts the zero-length row first deterministically,
+        // matching `check_disjoint_bounds_within` in `ffi/mod.rs`, whose overlap
+        // sweep MUST use the identical tie-break for the two to keep agreeing on
+        // which layouts are valid.
         let mut order: Vec<usize> = (0..n_work).collect();
-        order.sort_unstable_by_key(|&k| bounds[k].0);
+        order.sort_unstable_by_key(|&k| bounds[k]);
 
         let out_slice = out.as_slice_mut().unwrap();
         let mut out_chunks: Vec<(usize, &mut [u8])> = Vec::with_capacity(n_work);
@@ -1722,6 +1737,77 @@ mod tests {
                 out.as_slice().unwrap(),
                 b"ACGT--ACGT",
                 "parallel={parallel}: rows must land at their out_bounds, gap untouched"
+            );
+        }
+    }
+
+    /// Guard for Finding 1 (PR #273 review): a zero-length row sharing its `start`
+    /// with a non-empty row must carve correctly regardless of the two rows'
+    /// relative `k` (work-item) order. Sorting the carve order by `start` alone ties
+    /// on equal starts; `sort_unstable` breaks such ties by original position, so
+    /// when the NON-empty row happens to sit at a lower `k` than the zero-length row
+    /// sharing its start, the non-empty row is carved first, its end becomes the
+    /// running cursor, and the zero-length row then computes `s - cursor` with
+    /// `s == cursor`'s old value < the advanced cursor — an underflow panic in the
+    /// parallel `split_at_mut` chain (the serial path's `debug_assert!` would fire
+    /// identically in a debug build). Row order here is deliberately: k=0 non-empty
+    /// "ACGT" landing at [4, 8), k=1 zero-length region landing at [4, 4) — exactly
+    /// the ordering that reproduces the bug pre-fix (see the code review finding for
+    /// why the naive `[[X,X],[X,Y]]` ordering can pass "by luck").
+    #[test]
+    fn svar2_scatter_write_accepts_zero_length_row_tied_with_nonempty_start() {
+        for parallel in [false, true] {
+            let reference = b"ACGT";
+            let ref_ = arr1(reference.as_ref());
+            let ref_offsets = arr1(&[0i64, 4]);
+            // k=0: full-window query -> "ACGT" (non-empty, dest starts at 4).
+            // k=1: zero-width region (start == end) -> empty hap (dest is [4, 4),
+            // tied with k=0's start).
+            let regions = ndarray::arr2(&[[0i32, 0, 4], [0i32, 2, 2]]);
+            let shifts = ndarray::arr2(&[[0i32], [0i32]]);
+
+            let vk_pos = arr1::<i32>(&[]);
+            let vk_key = arr1::<i32>(&[]);
+            let vk_off = arr1(&[0i64, 0, 0]);
+            let dense_pos = arr1::<i32>(&[]);
+            let dense_key = arr1::<i32>(&[]);
+            let dense_range = ndarray::arr2(&[[0i32, 0], [0i32, 0]]);
+            let dense_present = arr1::<u8>(&[]);
+            let dense_present_off = arr1(&[0i64, 0, 0]);
+            let lut_bytes = arr1::<u8>(&[]);
+            let lut_off = arr1(&[0i64]);
+
+            let pad_char = b'N';
+            // Buffer: [gap 0..4 = another group's rows][k=0 "ACGT" @ 4..8][k=1 empty @ 4..4]
+            let mut out = Array1::<u8>::from_elem(8, b'-');
+            let out_bounds = ndarray::arr2(&[[4i64, 8], [4i64, 4]]);
+
+            super::reconstruct_haplotypes_from_svar2(
+                out.view_mut(),
+                out_bounds.view(),
+                regions.view(),
+                shifts.view(),
+                vk_pos.view(),
+                vk_key.view(),
+                vk_off.view(),
+                dense_pos.view(),
+                dense_key.view(),
+                dense_range.view(),
+                dense_present.view(),
+                dense_present_off.view(),
+                lut_bytes.view(),
+                lut_off.view(),
+                ref_.view(),
+                ref_offsets.view(),
+                pad_char,
+                parallel,
+                false,
+            );
+
+            assert_eq!(
+                out.as_slice().unwrap(),
+                b"----ACGT",
+                "parallel={parallel}: nonempty row must carve correctly with a tied zero-length row present"
             );
         }
     }

@@ -915,9 +915,13 @@ conversion/write paths.
   spliced kernel already uses. #272 first replaced a byte-level fancy-index re-order with a
   per-row slice + `np.concatenate` (189 ms → 23 ms on the chr22 165-transcript × 5-sample
   benchmark below); a follow-up spike (2026-07-16) profiled the remainder and found the
-  concatenate itself (`_ragged_arange_gather`) was **13.7 ms of the still-remaining 10.2 ms
-  svar2-vs-svar1 gap** — ~9× the memcpy floor for the same 13.2 MB, i.e. per-row numpy dispatch
-  overhead across 6600 rows, not bandwidth. #273 deletes that pass: the Rust core now takes
+  concatenate itself (`_ragged_arange_gather`) was **13.7 ms — bigger than the still-remaining
+  10.2 ms svar2-vs-svar1 gap it's a part of.** (Segment and total are each independent
+  minimums-over-reps on a noisy shared node, not a decomposition of one rep, so a sub-segment's
+  minimum can exceed the total's; the substantive point is that this one pass alone cost more
+  than the entire measured gap.) That's ~9× the memcpy floor for the same 13.2 MB, i.e. per-row
+  numpy dispatch overhead across 6600 rows, not bandwidth. #273 deletes that pass: the Rust core
+  now takes
   per-row `(start, end)` `out_bounds` instead of a gap-free offsets array (the parallel carve
   sorts by ascending start so it tolerates gaps from interleaved contig-group destinations), a
   new out-param FFI entry (`reconstruct_haplotypes_from_svar2_readbound_into`) scatters each
