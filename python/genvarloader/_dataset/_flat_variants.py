@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+import seqpro as sp
 from numpy.typing import NDArray
 
 from ..genvarloader import compact_keep_f32 as _compact_keep_f32_rust
@@ -251,13 +252,28 @@ class VarWindowOpt:
     independently: ``"window"`` emits the flanked, tokenized window (ref =
     ``[start-L, end+L)`` reference read; alt = ``flank5 . alt . flank3``), while
     ``"allele"`` emits the bare tokenized allele with no flanks.
+
+    ``token_alphabet`` accepts a ``str``, ``bytes``, or ``seqpro.NucleotideAlphabet``
+    (e.g. ``seqpro.alphabets.DNA``) and is normalized to ``bytes`` on construction;
+    each byte's position is its token id, so ordering is preserved verbatim.
     """
 
     flank_length: int
-    token_alphabet: bytes
+    token_alphabet: str | bytes | sp.NucleotideAlphabet
     unknown_token: int
     ref: Literal["window", "allele"] = "window"
     alt: Literal["window", "allele"] = "window"
+
+    def __post_init__(self) -> None:
+        # Normalize to the raw byte alphabet so downstream consumers (e.g.
+        # ``build_token_lut``) only ever see ``bytes``. Position in the byte
+        # string is the token id, so ordering is preserved verbatim.
+        alphabet = self.token_alphabet
+        if isinstance(alphabet, sp.NucleotideAlphabet):
+            alphabet = alphabet.alphabet.encode("ascii")
+        elif isinstance(alphabet, str):
+            alphabet = alphabet.encode("ascii")
+        object.__setattr__(self, "token_alphabet", alphabet)
 
 
 _WINDOW_FIELD_NAMES = ("ref_window", "alt_window", "ref", "alt")

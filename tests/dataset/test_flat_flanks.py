@@ -485,6 +485,32 @@ def test_flat_variant_windows_optional_fields():
     fvw.squeeze(0)
 
 
+def test_varwindowopt_alphabet_accepts_str_bytes_and_nucleotidealphabet():
+    import seqpro as sp
+    from genvarloader._dataset._flat_variants import VarWindowOpt
+
+    # bytes: passed through unchanged
+    from_bytes = VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
+    assert from_bytes.token_alphabet == b"ACGT"
+
+    # str: normalized to bytes
+    from_str = VarWindowOpt(flank_length=4, token_alphabet="ACGT", unknown_token=4)
+    assert from_str.token_alphabet == b"ACGT"
+
+    # sp.NucleotideAlphabet: normalized to its byte alphabet
+    from_alpha = VarWindowOpt(
+        flank_length=4, token_alphabet=sp.alphabets.DNA, unknown_token=4
+    )
+    assert from_alpha.token_alphabet == b"ACGT"
+
+    # all three build the same token LUT
+    lut_bytes, _ = build_token_lut(from_bytes.token_alphabet, from_bytes.unknown_token)
+    lut_str, _ = build_token_lut(from_str.token_alphabet, from_str.unknown_token)
+    lut_alpha, _ = build_token_lut(from_alpha.token_alphabet, from_alpha.unknown_token)
+    np.testing.assert_array_equal(lut_bytes, lut_str)
+    np.testing.assert_array_equal(lut_bytes, lut_alpha)
+
+
 def test_public_exports():
     import genvarloader as gvl
 
