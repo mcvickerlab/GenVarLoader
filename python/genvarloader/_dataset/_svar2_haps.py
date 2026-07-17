@@ -1085,13 +1085,13 @@ class Svar2Haps(Haps[_H]):
 
         ``reference.offsets`` is built in ``ds_contigs`` order (Reference.from_path
         was called with the dataset's contigs), so ``contig_idx`` indexes it
-        directly. Thin wrapper over :meth:`Reference.contig_slice` -- the shared
+        directly. Thin wrapper over :meth:`Reference._contig_slice` -- the shared
         convention every direct-store read backend should use (see also
         ``_Svar1Backend.reconstruct_window`` in ``_streaming.py``).
         """
         ref = self.reference
         assert ref is not None
-        return ref.contig_slice(contig_idx)
+        return ref._contig_slice(contig_idx)
 
     @staticmethod
     def _inverse_row_perm(

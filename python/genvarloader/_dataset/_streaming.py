@@ -546,9 +546,9 @@ class _Svar1Backend:
         # `Reference.from_path` normalizes contig names to the FASTA's naming style
         # (UCSC "chr1" vs Ensembl "1"), so a store using one style paired with a
         # FASTA in the other style made `contig_name` absent from
-        # `c_map.contigs`, raising `ValueError`. See `Reference.contig_slice`'s
+        # `c_map.contigs`, raising `ValueError`. See `Reference._contig_slice`'s
         # docstring and `Svar2Haps._ref_for_contig` for the shared convention.
-        ref_bytes, ref_offsets = self._ref.contig_slice(contig_idx)
+        ref_bytes, ref_offsets = self._ref._contig_slice(contig_idx)
 
         # `s_idx` is a PUBLIC index (sorted-name order, matching `gvl.Dataset`);
         # the store's genotype CSR is laid out in native (VCF column) order, so
