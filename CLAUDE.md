@@ -260,6 +260,15 @@ The auto-generated `docs/source/changelog.md` (built from commit messages via `c
 
 Any task that mentions "rust" (adding or porting Rust code, touching `src/`, or migrating numba/Python hot paths) **must** read `docs/roadmaps/rust-migration.md` before starting and update it as part of the work — tick completed tasks, record measurement results under the relevant checkpoint, and set the phase status marker (⬜/🚧/✅) + PR link. The roadmap is the source of truth for migration sequencing and the byte-identical parity contract.
 
+## Streaming dataset work
+
+All work on the write-free `StreamingDataset` effort (anything touching `python/genvarloader/_dataset/_streaming.py`, `src/stream/`, the SVAR1/SVAR2/VCF/PGEN `StreamBackend` path, or the double-buffer engine) is coordinated through the **StreamingDataset** GitHub Project (`mcvickerlab/GenVarLoader`). Before starting streaming work:
+
+- **Check the project board first** — it is the source of truth for what is in flight, sequencing (waves), and status. Don't start a piece of streaming work without a tracking issue on the board.
+- **File streaming issues with a `streaming:` title prefix and add them to the StreamingDataset project** (in addition to a `type:` label). Split-out and follow-up issues (e.g. deferred sub-tasks, bugs found in review) go on the board too, cross-linked to their parent.
+- **Target the long-lived `streaming` integration branch, not `main`.** Streaming PRs merge into `streaming` (keep the "Closes/relates to #…" references accurate and add the PR to the project). `streaming` accumulates the effort and merges into `main` as one integrated PR at milestone boundaries; periodically merge `main` into `streaming` to keep divergence small. This keeps `main`'s PR queue to a single streaming-facing PR instead of a deep stack.
+- `docs/roadmaps/streaming-dataset.md` holds the technical sequencing (plans/specs tables); the project board holds live status. Keep the two in sync — when a roadmap task splits or its status changes, reflect it on the board and vice versa.
+
 ## Development Notes
 
 - **Pixi environments**: Use `-e dev` for development, `-e docs` for documentation, `-e py310`/`py311`/`py312`/`py313` for Python version testing. Platform is linux-64.
