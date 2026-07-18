@@ -38,6 +38,18 @@ bytemuck = "1"
 rstest = "0.26.1"
 tempfile = "3"
 
+# `auto-initialize` only affects test/bench targets (dev-dependency feature
+# unification is per-target under the edition-2021 default resolver), so it does not
+# leak into the `extension-module` release build maturin produces. Needed by
+# `record_stream::pgen`'s tests, which construct a real `pgenlib.PgenReader` — outside
+# an extension module loaded by a running Python process, pyo3 has no interpreter to
+# attach to unless one is embedded here. Run with
+# `LD_LIBRARY_PATH=$PWD/.pixi/envs/dev/lib` so the test binary can dynamically load
+# libpython.
+[dev-dependencies.pyo3]
+version = "0.29"
+features = ["auto-initialize"]
+
 # Perf call-graph attribution only (`perf report --children`). Inherits release
 # codegen and adds line tables + frame pointers. NEVER the gate artifact — all
 # throughput/asm gate numbers come from the plain `--release` build.

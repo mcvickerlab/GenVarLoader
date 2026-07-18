@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod pgen;
 pub mod transpose;
 pub mod vcf;
 
