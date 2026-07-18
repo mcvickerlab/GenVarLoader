@@ -24,6 +24,7 @@ import polars as pl
 import pytest
 
 import genvarloader as gvl
+from genvarloader._dataset._streaming import _Svar1Backend
 
 # A store big enough that "touches the whole contig" and "touches the window" differ
 # by orders of magnitude. 200 variants x 20 samples, one contig.
@@ -225,8 +226,9 @@ def test_generate_batch_output_is_flat_in_cohort_size(tmp_path):
             "haplotypes"
         )
         backend = sds._backend
-        assert backend is not None, (
-            "test requires the real SVAR1 backend, not the whole-window test seam"
+        assert isinstance(backend, _Svar1Backend), (
+            "test requires the real SVAR1 backend, not _Svar2Backend or the "
+            "whole-window test seam"
         )
 
         r_idx, s_idx = next(iter(sds._plan()))

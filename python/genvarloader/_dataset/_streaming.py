@@ -4,7 +4,7 @@ import copy
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal, cast
 
 import numpy as np
 import polars as pl
@@ -110,7 +110,7 @@ class StreamingDataset:
     # The split read/generate backend (real SVAR1 path). When set, _iter_batches
     # generates per batch (output bounded by batch_size). The injected
     # `_reconstruct_window` remains a whole-window TEST seam used when `_backend` is None.
-    _backend: _Svar1Backend | None = None
+    _backend: "_Svar1Backend | _Svar2Backend | None" = None
     # INTERNAL/EXPERIMENTAL (issue #283) -- not a public `__init__` kwarg, set only via
     # `object.__setattr__`. Selects which prefetch drive `_iter_batches` uses when
     # `_backend is not None`:
@@ -185,10 +185,15 @@ class StreamingDataset:
                 _reconstruct_window = None
                 _backend_obj = backend
             elif p.is_dir() and p.suffix == ".svar2":
-                raise NotImplementedError(
-                    f"StreamingDataset does not support SVAR2 stores yet ({p}); "
-                    "this is a later plan. Use a SparseVar (.svar) store for now."
-                )
+                from genoray import SparseVar2
+
+                contigs = SparseVar2(str(p)).contigs
+                backend = _Svar2Backend(p, reference, contigs, regions)
+                n_samples = backend.n_samples
+                ploidy = backend.ploidy
+                samples = backend._sample_names
+                _reconstruct_window = None
+                _backend_obj = backend
             elif path_is_pgen(p):
                 raise NotImplementedError(
                     f"StreamingDataset does not support PGEN input yet ({p}); "
@@ -227,8 +232,11 @@ class StreamingDataset:
         object.__setattr__(self, "_samples", list(samples))
         object.__setattr__(self, "_backend", _backend_obj)
         # See the field's comment: internal/experimental, flipped only by the
-        # cold-cache A-vs-C harness via `object.__setattr__`.
-        object.__setattr__(self, "_prefetch_strategy", "engine")
+        # cold-cache A-vs-C harness via `object.__setattr__`. Backend-derived so a
+        # non-SVAR1 backend (e.g. `_Svar2Backend`, Phase 1: no engine/readahead
+        # support) can select its own drive without a hardcoded "engine" default.
+        _strat = getattr(_backend_obj, "_default_strategy", "engine")
+        object.__setattr__(self, "_prefetch_strategy", _strat)
         # Derive the read-window sizing from `max_mem`, NOT from the field defaults
         # above (those are just fallback literals for `__dataclass_fields__`; `slots=True`
         # means there's no class attribute to fall back on at runtime, and this class
@@ -242,9 +250,10 @@ class StreamingDataset:
         # window's offsets while the consumer generates batches from the CURRENT one --
         # so two windows' offsets can be resident at once; size the budget for that.
         n_slots = 2
-        cell_bytes = (
-            int(ploidy) * 16
-        )  # o_start + o_stop, i64 each, per (region,sample,ploid)
+        # o_start + o_stop, i64 each, per (region,sample,ploid) for SVAR1; a backend
+        # may declare a different per-cell resident-window cost (e.g. `_Svar2Backend`
+        # caches vk_snp_range + vk_indel_range pairs instead), so defer to it when set.
+        cell_bytes = getattr(_backend_obj, "_cell_bytes", int(ploidy) * 16)
         max_cells = max(1, max_mem_bytes // (cell_bytes * n_slots))
         window_samples = max(1, min(int(n_samples), max_cells))
         region_target = 64  # measured read-amortization knee; see roadmap Plan 2.
@@ -306,6 +315,14 @@ class StreamingDataset:
         """
         if self._backend is not None:
             if self._prefetch_strategy == "engine":
+                # Phase 1: "engine" is SVAR1-only (`_Svar2Backend._default_strategy`
+                # is "sync"). Narrow the union so the calls below resolve against
+                # `_Svar1Backend`'s signatures, not the (differently-shaped)
+                # `_Svar2Backend` ones -- see the `_backend` field's comment.
+                assert isinstance(self._backend, _Svar1Backend), (
+                    '"engine" prefetch strategy requires the SVAR1 backend'
+                )
+                backend = self._backend
                 # Build a COMPACT, region-scale plan ONCE and drive off THAT (never a
                 # second `list(self._plan())`). `_plan` always yields a CONTIGUOUS sample
                 # chunk `arange(s_lo, s_hi)`, so each window is captured losslessly by
@@ -332,7 +349,7 @@ class StreamingDataset:
                     )
                     for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
                 ]
-                engine = self._backend.build_engine(engine_jobs, batch_size)
+                engine = backend.build_engine(engine_jobs, batch_size)
                 del engine_jobs
                 for _contig_idx, r_idx, s_lo, s_hi in plan_jobs:
                     n_s = s_hi - s_lo
@@ -350,7 +367,7 @@ class StreamingDataset:
                         yield (
                             Ragged.from_offsets(
                                 np.asarray(data).view("S1"),
-                                (hi - lo, self._backend.ploidy, None),
+                                (hi - lo, backend.ploidy, None),
                                 np.asarray(offsets, np.int64),
                             ),
                             flat_r[lo:hi],
@@ -369,6 +386,13 @@ class StreamingDataset:
                 # pure page-warming no-op on output, so this is byte-identical to the
                 # "engine" branch above. See `test_streaming_matches_written_all_cells`'s
                 # "readahead" parity variant.
+                #
+                # Phase 1: "readahead" is SVAR1-only (see the "engine" branch's
+                # comment on the union narrowing).
+                assert isinstance(self._backend, _Svar1Backend), (
+                    '"readahead" prefetch strategy requires the SVAR1 backend'
+                )
+                backend = self._backend
                 from ..genvarloader import svar1_prefetch_runs
 
                 # Compact, region-scale plan (same treatment as the engine branch): hold
@@ -385,7 +409,7 @@ class StreamingDataset:
 
                 def _read(job: tuple[NDArray[np.intp], int, int]):
                     r_idx, s_lo, s_hi = job
-                    return self._backend.read_window(
+                    return backend.read_window(
                         r_idx, np.arange(s_lo, s_hi, dtype=np.intp)
                     )
 
@@ -397,7 +421,7 @@ class StreamingDataset:
                 for i, (r_idx, s_lo, s_hi) in enumerate(ra_jobs):
                     if i + 1 < len(ra_jobs):
                         nxt = _read(ra_jobs[i + 1])
-                        svar1_prefetch_runs(self._backend._store, nxt[0], nxt[1])
+                        svar1_prefetch_runs(backend._store, nxt[0], nxt[1])
                     else:
                         nxt = None
                     s_idx = np.arange(s_lo, s_hi, dtype=np.intp)
@@ -407,15 +431,37 @@ class StreamingDataset:
                     n_rows = len(flat_r)
                     for lo in range(0, n_rows, batch_size):
                         hi = min(lo + batch_size, n_rows)
-                        data = self._backend.generate_batch(
+                        data = backend.generate_batch(
                             r_idx, s_idx, cur[0], cur[1], lo, hi
                         )
                         yield data, flat_r[lo:hi], flat_s[lo:hi]
                     cur = nxt
+            elif self._prefetch_strategy == "sync":
+                # No engine, no prefetch: read each window's ranges, then generate
+                # per batch_size row slice. Output is (hi-lo)-bounded (issue #284).
+                # This is `_Svar2Backend`'s Phase 1 drive -- its window shape
+                # (`SparseVar2._find_ranges` bundle) doesn't fit the engine/readahead
+                # branches above, which are SVAR1-shaped (offsets CSR + Svar1Store).
+                # Narrow the union so calls below resolve against `_Svar2Backend`'s
+                # signatures (see the "engine" branch's comment).
+                assert isinstance(self._backend, _Svar2Backend), (
+                    '"sync" prefetch strategy requires the SVAR2 backend'
+                )
+                backend = self._backend
+                for r_idx, s_idx in self._plan():
+                    window = backend.read_window(r_idx, s_idx)
+                    n_s = len(s_idx)
+                    flat_r = np.repeat(self._sort_order[r_idx], n_s)
+                    flat_s = np.tile(s_idx, len(r_idx))
+                    n_rows = len(flat_r)
+                    for lo in range(0, n_rows, batch_size):
+                        hi = min(lo + batch_size, n_rows)
+                        data = backend.generate_batch(r_idx, s_idx, window, lo, hi)
+                        yield data, flat_r[lo:hi], flat_s[lo:hi]
             else:
                 raise ValueError(
                     f"StreamingDataset._prefetch_strategy={self._prefetch_strategy!r} "
-                    'is not recognized; expected "engine" or "readahead".'
+                    'is not recognized; expected "engine", "readahead", or "sync".'
                 )
         else:
             for r_idx, s_idx in self._plan():
@@ -614,6 +660,11 @@ class _Svar1Backend:
         )
         self.n_samples = len(self._sample_names)
         self.ploidy = sv.ploidy
+        # Additive (Phase 1 union type, see `StreamingDataset._backend`'s comment):
+        # `__init__` reads these via `getattr(..., default)`, so pre-existing
+        # instantiations of this class are unaffected either way.
+        self._cell_bytes = int(self.ploidy) * 16
+        self._default_strategy = "engine"
 
         self._ref = Reference.from_path(reference_path, self._contigs)
 
@@ -892,4 +943,175 @@ class _Svar1Backend:
         n_rows = hi - lo
         return Ragged.from_offsets(
             data.view("S1"), (n_rows, self.ploidy, None), np.asarray(offsets, np.int64)
+        )
+
+
+class _Svar2Backend:
+    """StreamingDataset backend for .svar2 stores. Mirrors _Svar1Backend, but per-
+    window variant ranges are computed LIVE via SparseVar2._find_ranges (the same
+    Rust-backed query gvl.write uses at write time, `_write.py:_write_from_svar2`)
+    instead of slicing an on-disk `_Svar2Cache`; the ranges feed the existing SVAR2
+    read-bound FFI (`reconstruct_haplotypes_from_svar2_readbound`). Phase 1:
+    synchronous only ("sync" `_iter_batches` strategy -- no engine, no readahead).
+    """
+
+    _default_strategy = "sync"
+
+    def __init__(
+        self,
+        svar2_path: str | Path,
+        reference_path: str | Path,
+        contigs: list[str],
+        bed: pl.DataFrame | str | Path,
+    ) -> None:
+        from genoray import SparseVar2
+
+        from ..genvarloader import Svar2Store
+        from ._reference import Reference
+
+        self._sv = SparseVar2(str(svar2_path))
+        # Same sorted-name convention `_Svar1Backend` uses: `gvl.write` always
+        # lexicographically sorts sample names, so `sample_idx` means "the i-th
+        # name in sorted order" -- not the store's native (VCF column) order.
+        native = list(self._sv.available_samples)
+        self._sample_names = sorted(native)
+        self.n_samples = len(self._sample_names)
+        self.ploidy = int(self._sv.ploidy)
+        # Resident window buffer holds vk_snp_range + vk_indel_range (i64 pairs) per
+        # (region, sample, ploid): 2 arrays x 2 i64 = 32 B/cell. STARTING ESTIMATE
+        # (validate in Task 4); gathered flat channels add bounded window-scale extra.
+        self._cell_bytes = self.ploidy * 32
+        self._contigs = list(contigs)
+        # `Svar2Store` opens one query-only reader per contig; sized by the STORE's
+        # full sample count (mirrors `Svar2Haps`'s construction at `_svar2_haps.py:271`),
+        # not this backend's (identical, since streaming never subsets samples).
+        self._store = Svar2Store(
+            str(svar2_path), self._sv.contigs, self._sv.n_samples, self.ploidy
+        )
+        self._ref = Reference.from_path(reference_path, self._contigs)
+        # Identical region-bounds derivation to _Svar1Backend (and StreamingDataset):
+        # r_idx from the plan indexes THIS sorted regions table. Reuse the same
+        # imports _Svar1Backend uses (bed_to_regions, ContigNormalizer, sp.bed).
+        bed_df = bed if isinstance(bed, pl.DataFrame) else sp.bed.read(bed)
+        self._regions = bed_to_regions(
+            sp.bed.sort(bed_df), ContigNormalizer(self._contigs)
+        )
+
+    def _contig_of(self, r_idx: NDArray[np.intp]) -> tuple[int, str]:
+        contig_idxs = self._regions[r_idx, 0]
+        contig_idx = int(contig_idxs[0])
+        if not np.all(contig_idxs == contig_idx):
+            raise ValueError("_Svar2Backend: window spans multiple contigs")
+        return contig_idx, self._contigs[contig_idx]
+
+    def read_window(
+        self, r_idx: NDArray[np.intp], s_idx: NDArray[np.intp]
+    ) -> dict[str, object]:
+        """Compute the window's live ranges via a single (region x sample) cartesian
+        `SparseVar2._find_ranges` call, reshaped exactly as `_write.py:1214-1220`
+        does at write time (`vk_*_range` row-major -> `(n_reg, n_s, P, 2)`;
+        `dense_*_range` -> `(n_reg, 2)`).
+
+        `_find_ranges`'s `samples=` selects (and reorders) by SAMPLE NAME, not by
+        physical/original column index (see `genoray/_svar2_batch.py:_sample_idxs`
+        and `_write.py:1214`'s own `samples=samples` call, which passes names too)
+        -- so this passes `self._sample_names[i]` for each `i` in `s_idx`, not the
+        physical index directly.
+        """
+        r_idx = np.asarray(r_idx, np.intp)
+        s_idx = np.asarray(s_idx, np.intp)
+        contig_idx, contig = self._contig_of(r_idx)
+        rb = self._regions[r_idx, 1:3]  # (n_reg, 2) int
+        starts = np.ascontiguousarray(rb[:, 0])
+        ends = np.ascontiguousarray(rb[:, 1])
+        names = [self._sample_names[i] for i in s_idx]
+        d = self._sv._find_ranges(contig, starts, ends, samples=names)
+        n_reg, n_s, P = len(r_idx), len(s_idx), self.ploidy
+        return {
+            "contig_idx": contig_idx,
+            "region_bounds": np.ascontiguousarray(rb, np.int32),  # (n_reg, 2)
+            # Physical store column per selected sample, in `s_idx` order -- the
+            # bundle's own `sample_cols` (not a separately-derived index map), so
+            # this is authoritative for whatever column `_find_ranges` actually
+            # queried.
+            "orig_samples": np.ascontiguousarray(d["sample_cols"], np.int64),  # (n_s,)
+            "vk_snp": np.asarray(d["vk_snp_range"], np.int64).reshape(n_reg, n_s, P, 2),
+            "vk_indel": np.asarray(d["vk_indel_range"], np.int64).reshape(
+                n_reg, n_s, P, 2
+            ),
+            "dense_snp": np.asarray(d["dense_snp_range"], np.int64).reshape(n_reg, 2),
+            "dense_indel": np.asarray(d["dense_indel_range"], np.int64).reshape(
+                n_reg, 2
+            ),
+        }
+
+    def generate_batch(
+        self,
+        r_idx: NDArray[np.intp],
+        s_idx: NDArray[np.intp],
+        window: dict[str, object],
+        lo: int,
+        hi: int,
+    ) -> Ragged:
+        """Reconstruct C-order (region, sample) rows [lo, hi) of the window. Output is
+        (hi-lo)-bounded (issue #284). Builds the same 7-arg tuple as
+        `_svar2_haps.py:_gather_inputs`, then calls the SVAR2 read-bound FFI.
+        """
+        from ..genvarloader import reconstruct_haplotypes_from_svar2_readbound
+
+        r_idx = np.asarray(r_idx, np.intp)
+        n_s = len(np.asarray(s_idx))
+        P = self.ploidy
+        contig_idx = cast(int, window["contig_idx"])
+        contig = self._contigs[contig_idx]
+        ref_, ref_offsets = self._ref._contig_slice(contig_idx)
+
+        rows = np.arange(lo, hi)
+        ri = rows // n_s  # region-in-window per row
+        si = rows % n_s  # sample-in-window per row
+        # Per-row FFI inputs (C-order (region, sample)), mirroring _gather_inputs:
+        region_bounds = np.ascontiguousarray(
+            cast("NDArray[np.int32]", window["region_bounds"])[ri], np.int32
+        )  # (m,2)
+        region_starts = np.ascontiguousarray(region_bounds[:, 0], np.uint32)  # (m,)
+        orig_samples = np.ascontiguousarray(
+            cast("NDArray[np.int64]", window["orig_samples"])[si], np.int64
+        )  # (m,)
+        vk_snp = np.ascontiguousarray(
+            cast("NDArray[np.int64]", window["vk_snp"])[ri, si].reshape(-1, 2),
+            np.int64,
+        )  # (m*P,2)
+        vk_indel = np.ascontiguousarray(
+            cast("NDArray[np.int64]", window["vk_indel"])[ri, si].reshape(-1, 2),
+            np.int64,
+        )
+        dense_snp = np.ascontiguousarray(
+            cast("NDArray[np.int64]", window["dense_snp"])[ri], np.int64
+        )  # (m,2)
+        dense_indel = np.ascontiguousarray(
+            cast("NDArray[np.int64]", window["dense_indel"])[ri], np.int64
+        )
+        m = hi - lo
+        shifts = np.zeros((m, P), np.int32)  # jitter out of scope (jitter=0)
+
+        data, offsets = reconstruct_haplotypes_from_svar2_readbound(
+            self._store,
+            contig,
+            region_starts,
+            orig_samples,
+            vk_snp,
+            vk_indel,
+            dense_snp,
+            dense_indel,
+            region_bounds,
+            shifts,
+            ref_,
+            ref_offsets,
+            np.uint8(self._ref.pad_char),
+            np.int64(-1),  # ragged output (no fixed output_length)
+            True,  # parallel
+            False,  # filter_exonic (splicing out of scope)
+        )
+        return Ragged.from_offsets(
+            np.asarray(data).view("S1"), (m, P, None), np.asarray(offsets, np.int64)
         )

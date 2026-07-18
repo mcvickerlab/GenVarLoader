@@ -168,6 +168,60 @@ def svar1_multicontig_fixture(tmp_path_factory) -> Svar1MultiContigFixture:
 
 
 @dataclass(slots=True)
+class Svar2MultiContigFixture:
+    """SVAR2 analog of `Svar1MultiContigFixture` (same bed/VCF/reference) for the
+    `_Svar2Backend` streaming parity test."""
+
+    svar2_path: Path
+    reference_path: Path
+    contigs: list[str]
+    bed: pl.DataFrame
+    dataset_path: Path
+
+
+@pytest.fixture(scope="module")
+def svar2_multicontig_fixture(tmp_path_factory) -> Svar2MultiContigFixture:
+    from genoray import SparseVar2
+
+    d = tmp_path_factory.mktemp("svar2_mc_src")
+    ref = d / "ref.fa"
+    ref.write_text(f">chr1\n{_SVAR1_STREAM_REF}\n>chr2\n{_SVAR1_MC_REF2}\n")
+    subprocess.run(["samtools", "faidx", str(ref)], check=True)
+
+    vcf = d / "in.vcf"
+    vcf.write_text(_SVAR1_MC_VCF)  # same multi-contig VCF the SVAR1 fixture uses
+    bcf = d / "in.bcf"
+    subprocess.run(["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True)
+    subprocess.run(["bcftools", "index", str(bcf)], check=True)
+
+    svar2_path = tmp_path_factory.mktemp("svar2_mc_store") / "store.svar2"
+    # `SparseVar2.from_vcf` takes `source` as a plain path (no `VCF(...)` wrapper,
+    # unlike SVAR1's `SparseVar.from_vcf`) and has no `samples=` subsetting kwarg --
+    # it always converts every sample in the VCF header. Requires either
+    # `reference=` (validates/left-aligns indels) or `no_reference=True`.
+    SparseVar2.from_vcf(svar2_path, bcf, reference=str(ref), overwrite=True)
+
+    starts = [0, 4, 8, 12, 16, 20]
+    rows = []
+    for i, s in enumerate(starts):
+        c1, c2 = ("chr2", "chr1") if i % 2 == 0 else ("chr1", "chr2")
+        rows.append({"chrom": c1, "chromStart": s, "chromEnd": s + 20})
+        rows.append({"chrom": c2, "chromStart": s, "chromEnd": s + 20})
+    bed = pl.DataFrame(rows)
+
+    out = tmp_path_factory.mktemp("svar2_mc_ds") / "d2.gvl"
+    gvl.write(out, bed, variants=SparseVar2(svar2_path), samples=None, overwrite=True)
+
+    return Svar2MultiContigFixture(
+        svar2_path=svar2_path,
+        reference_path=ref,
+        contigs=["chr1", "chr2"],
+        bed=bed,
+        dataset_path=out,
+    )
+
+
+@dataclass(slots=True)
 class Svar1MixedNamingFixture:
     """Regression fixture for the `ref_c_idx` contig-naming-style bug: the `.svar`
     store/VCF uses UCSC-style contig names (``chr1``) while one of the two
