@@ -177,12 +177,19 @@ Everything above describes [`Dataset`](api.md#genvarloader.Dataset), which reads
 directory produced by [`gvl.write()`](api.md#genvarloader.write). [`gvl.StreamingDataset`](api.md#genvarloader.StreamingDataset)
 skips that step: it reconstructs haplotype batches directly from a live variant source, with no
 `gvl.write()` call and no `.gvl` directory on disk. `variants=` accepts either a `.svar`
-(SparseVar/SVAR1) store or a VCF/BCF path (`.vcf`, `.vcf.gz`, `.bcf`; indexed, normalized the same
+(SparseVar/SVAR1) store or a VCF/BCF path (`.vcf`, `.vcf.gz`/`.vcf.bgz`, `.bcf`; indexed, normalized the same
 way `gvl.write` requires — see [write.md](write.md)); both read paths go through a shared Rust
 `RecordStreamEngine`, with VCF/BCF decoded window-by-window via genoray's Rust `VcfRecordSource →
 ChunkAssembler → DenseChunk` pipeline. **Streaming VCF/BCF makes htslib a hard runtime
 requirement** (statically linked into gvl's wheel via genoray's `conversion` feature; no separate
 install step).
+
+For the VCF/BCF path, that normalization requirement is **not enforced**: genoray's
+`ChunkAssembler` applies atomization (biallelic split) automatically on read, but does not
+perform left-alignment or REF/FASTA check-ref, and does not validate the input at all —
+un-normalized or non-left-aligned records are silently accepted (no error) and will break
+byte-identical parity. Pre-normalize with `bcftools norm` as described in [write.md](write.md)
+before streaming. The `.svar` path is unaffected — it reads from a store validated at build time.
 
 ```python
 sds = gvl.StreamingDataset(
