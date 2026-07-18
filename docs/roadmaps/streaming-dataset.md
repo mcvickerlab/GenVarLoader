@@ -76,7 +76,7 @@ only** (no map-style random access).
 | Plan | Scope | Status |
 |---|---|---|
 | `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — PR [#274](https://github.com/mcvickerlab/GenVarLoader/pull/274) |
-| `docs/superpowers/plans/2026-07-16-streaming-svar1-window-engine.md` | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275). Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Tasks 2-4 done; Task 5's generic `StreamBackend`/`run_windows` engine done, SVAR1 wiring split to follow-up issue [#283](https://github.com/mcvickerlab/GenVarLoader/issues/283) |
+| `docs/superpowers/plans/2026-07-16-streaming-svar1-window-engine.md` | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275). Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Tasks 2-4 done; Task 5's generic `StreamBackend`/`run_windows` engine done; SVAR1 wiring (issue [#283](https://github.com/mcvickerlab/GenVarLoader/issues/283)) done — 8a (Rust engine) + 8b (Python wiring, `to_iter()` now overlaps producer I/O with consumer generation) both landed; follow-up [#296](https://github.com/mcvickerlab/GenVarLoader/issues/296) for a throughput-gate observability gap |
 | _TBD (Plan 3/4)_ — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend | ⬜ |
 | _TBD (Plan 5)_ — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
 
@@ -195,6 +195,30 @@ only** (no map-style random access).
       split (offsets-only vs. fully-reconstructed) as its first step, since that
       decision shapes the GIL-crossing design. Cold-page-cache overlap measurement
       (the deferred Step 6) belongs to this follow-up, not to #275.
+    - ✅ **Task 8a (Rust engine): `Svar1StreamEngine` pyclass** — `src/ffi/stream_engine.rs`,
+      producer/consumer overlap copying `run_windows`'s discipline (2-slot ping-pong
+      `crossbeam_channel`, shutdown-by-`Sender`-drop, join-then-classify-panics), plus a
+      per-contig-reference deviation from the original design note (byte-parity
+      requirement for multi-contig plans — see the design note and task-8-report.md for
+      the reasoning). Commit `814df7db`.
+    - ✅ **Task 8b (Python wiring): `_streaming.py` drives the engine** — `_Svar1Backend`
+      now caches per-contig meta (`_contig_meta`) and the store path (`_svar_path`) at
+      construction, and gained `build_engine(jobs, batch_size)`; `_iter_batches`'s real
+      (`self._backend is not None`) branch materializes `plan = list(self._plan())`
+      once, builds one engine job per window from it (translating `s_idx` to physical
+      sample indices the same way `read_window` does), and drives `engine.next_batch()`
+      in lockstep with the SAME plan so job order and per-window batching can't diverge.
+      `n_slots` bumped 1→2 (ping-pong residency). Byte-identical parity holds
+      (`test_streaming_matches_written_all_cells`, `test_scale_parity_still_byte_identical`
+      both green). **Known gap, deliberately left unfixed (Python-only scope):** the
+      `#275` `svar1_csr_entries_touched()` throughput gate's `thread_local!` counter is
+      blind to the engine's background producer thread (increments happen on a thread
+      Python's main thread never reads from), failing
+      `test_entries_touched_scales_with_window_not_store` — filed as
+      [#296](https://github.com/mcvickerlab/GenVarLoader/issues/296) (Rust-side fix:
+      make the counter cross the thread boundary, e.g. a process-wide atomic).
+      Design note: `.superpowers/sdd/task-8b-design-note.md`; full report:
+      `.superpowers/sdd/task-8-report.md`.
   - ⚠️ **Inherited perf/scale debt from the walking skeleton — DELETED, not fixed, by Task 2.**
     All of it was downstream of the one wrong dependency above, so the rewrite removed it rather
     than optimizing it. (a) `Svar1RecordSource::new` was **O(all CSR entries)** — it eagerly
