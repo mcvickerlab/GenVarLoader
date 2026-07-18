@@ -421,9 +421,64 @@ only** (no map-style random access).
     `Dataset.open()[r,s]` (haplotypes-only, `jitter=0`). htslib (via genoray's `conversion`
     feature) is now a hard runtime requirement of the package. Docs updated (this task).
     Draft PR open into `streaming`, kept in draft pending the PGEN backend below.
-  - ⬜ **PGEN backend (PR 2, Tasks 10-14) not started.** Additive on PR 1's engine — a second
-    `WindowFiller` + Python backend, plus the benchmark harness. Lands on the same
-    `spec/276-vcf-pgen` branch, extending the same PR (not a second PR).
+  - 🚧 **PGEN backend (PR 2, Tasks 10-14).** Additive on PR 1's engine — a second
+    `WindowFiller` + Python backend. Lands on the same `spec/276-vcf-pgen` branch,
+    extending the same PR (not a second PR). Tasks 10-12 (PgenWindowFiller,
+    `_PgenBackend` wiring, table + end-to-end haplotype parity) done, byte-identical
+    to `gvl.write` first-try. Task 14 (docs + PR update) still ⬜.
+    - ✅ **Task 13 (benchmark harness): `benchmarking/streaming/{gen_fixtures.sh,
+      bench_streaming.py}` + `gen-bench-vcf`/`gen-bench-pgen` pixi tasks.** Infra
+      only — no perf claim shipped from this task (shared-node noise; see the
+      `gvl-rust-perf-gate-shared-node-noise` memory). Fixtures come from
+      `vcfixture bulk` (`cargo install vcfixture --features cli`, or
+      `VCFIXTURE_RS_DIR=/path/to/vcfixture-rs` to build+run from a checkout) →
+      BCF, converted to PGEN via `plink2 --bcf ... --make-pgen --allow-extra-chr
+      --output-chr chrM` (same convention `tests/dataset/conftest.py`'s PGEN
+      fixtures use, to keep `chr1`-style contig names instead of plink2's
+      default un-prefixed human coding). Generated fixtures are gitignored
+      (`benchmarking/streaming/.gitignore`).
+      - **Methodology (per the perf skill + this project's standing perf-gate
+        convention — read before trusting any number this harness prints):**
+        - **Not gated on absolute wall-clock.** `bench_streaming.py` prints
+          windows/s and items/s as secondary color (best/median-of-N,
+          `--repeats`) only; the load-bearing signals are DETERMINISTIC
+          counters — `n_windows`, `n_batches`, `n_rows` (asserted equal to
+          `shape[0]*shape[1]` for both strategies, not just "didn't crash"),
+          `bytes_emitted`, and `peak_rss_kb` (`resource.getrusage`).
+        - **Engine vs. a forced-synchronous baseline**, the same A-vs-C shape
+          Task 9's SVAR1 cold-cache harness used (`cold_cache_overlap.py`,
+          #283/#296) — but constructed differently, since VCF/PGEN have no
+          `read_window`/`generate_batch` split to drive by hand the way
+          SVAR1's Design C does. "Sync" rebuilds a single-window
+          `RecordStreamEngine` per plan step and fully drains it before the
+          next window's engine is built, so no window's decode can overlap
+          the previous window's consumption — no new Rust toggle needed.
+        - **VCF and PGEN measured in separate sweeps**, never averaged — PGEN's
+          decode is not GIL-free and has a different overlap characteristic
+          than VCF's.
+        - **Cold-page-cache overlap measured separately (`--cold`)**, same
+          unprivileged "never-faulted-by-this-process" caveat as
+          `cold_cache_overlap.py` (no `drop_caches` without root): copies the
+          run's fixture files into a fresh, never-read tmp dir before each
+          timed run, so producer-thread I/O overlap isn't conflated with an
+          already-warm page cache from a prior repeat.
+      - **Known PGEN limitation this benchmark is designed to surface (first
+        optimization target for a follow-up, not fixed here):**
+        `PgenWindowFiller` (`src/record_stream/pgen.rs`, "Coarse `var_start`"
+        doc section) always decodes a contig from its first variant and
+        re-scans the `.pvar` from byte 0 every window (no seek) — O(prefix)
+        decode + O(var_start) line-skip PER WINDOW, not amortized. Since
+        instrumenting the Rust decoder's actual re-scanned-variant count is
+        out of scope for a benchmark-harness task, `bench_streaming.py` prints
+        the analytically exact multiplier instead: `n_windows` IS the number
+        of times the whole contig prefix is re-decoded, and `pvar_variants` is
+        that prefix's size — their product is the repeated work VCF (tabix/
+        CSI-seekable) does not pay. Follow-up: narrow `var_start` with
+        `max_v_len` padding (or add `PvarReader` seek support in genoray), per
+        the module doc.
+      - **Smoke-validated**, not benchmarked at scale (this node is shared;
+        large sweeps are out of scope for this task) — see task-13-report.md
+        for the validation run and its printed counters.
 - ⬜ **Output-mode breadth + docs** — _Plan 5; docs folded in_ —
   issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277)
 

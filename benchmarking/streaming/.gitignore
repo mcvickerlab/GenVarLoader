@@ -1,0 +1,17 @@
+# Generated benchmark fixtures (vcfixture bulk + plink2 --make-pgen), the
+# synthetic reference bench_streaming.py derives from them, and plink2's
+# intermediate/log files -- large, regenerate locally via
+# `pixi run gen-bench-vcf` / `pixi run gen-bench-pgen` (see gen_fixtures.sh).
+# Never commit these.
+bench_*.bcf
+bench_*.bcf.csi
+bench_*.summary.json
+bench_*.pgen
+bench_*.pvar
+bench_*.pvar.gvi
+bench_*.psam
+bench_*.log
+bench_*.ref.fa
+bench_*.ref.fa.fai
+bench_*.ref.fa.gvlfa/
+bench_*-temporary.*

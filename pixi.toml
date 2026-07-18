@@ -177,6 +177,15 @@ memray-variants = { cmd = "memray run -fo tests/benchmarks/profiling/variants.me
 memray-bigwig-write = { cmd = "memray run -fo tests/benchmarks/profiling/bigwig_write.memray.bin tests/benchmarks/profiling/profile_bigwig_write.py --impl rust" }
 cargo-test = { cmd = "cargo test --release" }
 memray-write = { cmd = "memray run -fo tests/benchmarks/profiling/write.memray.bin tests/benchmarks/profiling/profile_write.py --op write" }
+# StreamingDataset VCF/PGEN benchmark fixtures (issue #276 Task 13). Requires
+# `vcfixture` (cargo install vcfixture --features cli) and `plink2` on PATH,
+# or VCFIXTURE_RS_DIR set to a vcfixture-rs checkout -- see
+# benchmarking/streaming/gen_fixtures.sh. Params via env vars, e.g.:
+#   N=1000 SIZE=50MB CONTIGS=chr1 pixi run gen-bench-vcf
+#   N=1000 pixi run gen-bench-pgen
+# Fixtures land in benchmarking/streaming/ and are gitignored (large; never commit).
+gen-bench-vcf = { cmd = "bash benchmarking/streaming/gen_fixtures.sh vcf" }
+gen-bench-pgen = { cmd = "bash benchmarking/streaming/gen_fixtures.sh pgen" }
 
 [feature.docs.tasks]
 i-kernel = "ipython kernel install --user --name 'gvl-docs' --display-name 'GVL Docs'"
