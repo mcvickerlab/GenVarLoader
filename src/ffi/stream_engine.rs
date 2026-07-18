@@ -35,10 +35,20 @@
 //! no data duplication. `Svar1Store` is `Send + Sync`, so the `Arc` crosses to the
 //! producer thread and `read_window`/`geno_v_idxs` run GIL-free.
 //!
-//! **Memory:** the engine owns only variant-/contig-scale arrays plus, per contig, its
-//! `v_starts_c`/`v_ends_c` and reference slice. The only sample-scale residency is the
-//! recycled per-window offsets in the ≤2 live `FilledWindow`s — the intended, budgeted
-//! (max_mem-bounded, `window_samples`-scale) allocation, never the full cohort.
+//! **Memory (cohort-independent job residency — issue #284 / final-review Finding 1).**
+//! The engine owns exactly ONE cohort-scale array: `phys_sample_idx` (the public→physical
+//! sample map, `O(n_samples)`, the same single copy PR 1 already keeps). Everything else is
+//! region-/contig-/variant-scale: the `jobs` vec carries per window only its `contig_idx`,
+//! its `regions` (`window_regions`-scale, ≤ `REGION_TARGET` ≈ 64) and a two-`usize` sample
+//! sub-range `(s_lo, s_hi)` — NOT a per-window copy of that window's physical samples. The
+//! producer builds the window's physical sample slice on the fly as a BORROW,
+//! `&phys_sample_idx[s_lo..s_hi]` (`_plan` always yields a contiguous `arange(s_lo, s_hi)`
+//! sample chunk, so the sub-range reconstructs it losslessly with zero new allocation). Thus
+//! total job metadata is `O(n_windows × window_regions)` (region-scale), never
+//! `O(n_windows × window_samples)` ≈ cohort × regions. The only sample-scale residency
+//! during iteration is the recycled per-window offsets in the ≤2 live `FilledWindow`s — the
+//! intended, budgeted (max_mem-bounded, `window_samples`-scale) allocation, never the full
+//! cohort.
 //!
 //! **Note — per-contig reference (deviation from the 8a design note).** The design note
 //! listed a single engine-level `ref_`/`ref_offsets`. That is wrong for a multi-contig
@@ -80,16 +90,21 @@ struct ContigData {
 }
 
 /// One pre-expanded window of the fixed traversal: `regions` (0-based half-open, on
-/// `contig_idx`) crossed with `phys_samples` (physical/native genotype-column indices).
-/// `phys_samples` is `window_samples`-scale (max_mem-bounded), NOT the full cohort.
+/// `contig_idx`) crossed with the contiguous physical-sample sub-range `[s_lo, s_hi)`.
+/// The job carries only the two `usize` bounds, NOT a per-window copy of the physical
+/// samples — the producer borrows `&phys_sample_idx[s_lo..s_hi]` from the engine's single
+/// cohort-scale map when it fills the window (`_plan` always yields a contiguous
+/// `arange(s_lo, s_hi)` sample chunk, so the bounds reconstruct it losslessly). This keeps
+/// job residency region-scale, never `O(n_windows × window_samples)`. See the module docs.
 struct WindowJob {
     contig_idx: usize,
     regions: Vec<(u32, u32)>,
-    phys_samples: Vec<usize>,
+    s_lo: usize,
+    s_hi: usize,
 }
 
 /// One recycled slot: the whole window's CSR offsets plus the `job_idx` that produced it
-/// (so the consumer can recover the window's regions/phys_samples/contig for generation).
+/// (so the consumer can recover the window's regions/sample-range/contig for generation).
 #[derive(Default)]
 struct FilledWindow {
     o_starts: Vec<i64>,
@@ -102,7 +117,7 @@ struct CurrentWindow {
     filled: FilledWindow,
     /// Next window row (region×sample, C-order) to generate from.
     next_row: usize,
-    /// Total window rows = `regions.len() * phys_samples.len()`.
+    /// Total window rows = `regions.len() * (s_hi - s_lo)`.
     n_batch_rows: usize,
 }
 
@@ -160,6 +175,10 @@ pub struct Svar1StreamEngine {
     store: Arc<Svar1Store>,
     contigs: Arc<Vec<ContigData>>,
     jobs: Arc<Vec<WindowJob>>,
+    /// The full public→physical sample map (`O(n_samples)`, ONE copy). Each job's
+    /// `[s_lo, s_hi)` slices into this; the producer borrows `&phys_sample_idx[s_lo..s_hi]`
+    /// per window — no per-window owned copy. Shared with the producer thread.
+    phys_sample_idx: Arc<Vec<usize>>,
     /// GLOBAL variant-scale tables (indexed by global variant id from `geno_v_idxs`).
     v_starts: Array1<i32>,
     ilens: Array1<i32>,
@@ -180,6 +199,7 @@ impl Svar1StreamEngine {
         mut store: Svar1Store,
         contigs: Vec<ContigData>,
         jobs: Vec<WindowJob>,
+        phys_sample_idx: Vec<usize>,
         v_starts: Array1<i32>,
         ilens: Array1<i32>,
         alt_alleles: Array1<u8>,
@@ -195,6 +215,7 @@ impl Svar1StreamEngine {
             store: Arc::new(store),
             contigs: Arc::new(contigs),
             jobs: Arc::new(jobs),
+            phys_sample_idx: Arc::new(phys_sample_idx),
             v_starts,
             ilens,
             alt_alleles,
@@ -233,6 +254,7 @@ impl Svar1StreamEngine {
         let store = Arc::clone(&self.store);
         let jobs = Arc::clone(&self.jobs);
         let contigs = Arc::clone(&self.contigs);
+        let phys_sample_idx = Arc::clone(&self.phys_sample_idx);
 
         let handle = std::thread::Builder::new()
             .name("gvl-svar1-stream-producer".into())
@@ -245,12 +267,15 @@ impl Svar1StreamEngine {
                     };
 
                     let c = &contigs[job.contig_idx];
+                    // Borrow this window's physical samples from the single cohort-scale
+                    // map — no per-window owned copy (see the module memory note).
+                    let phys = &phys_sample_idx[job.s_lo..job.s_hi];
                     let w = store.read_window(
                         &c.name,
                         &c.v_starts_c,
                         &c.v_ends_c,
                         &job.regions,
-                        &job.phys_samples,
+                        phys,
                     )?;
                     slot.o_starts = w.o_starts;
                     slot.o_stops = w.o_stops;
@@ -325,7 +350,7 @@ impl Svar1StreamEngine {
             match recv {
                 Ok(fw) => {
                     let job = &self.jobs[fw.job_idx];
-                    let n_batch_rows = job.regions.len() * job.phys_samples.len();
+                    let n_batch_rows = job.regions.len() * (job.s_hi - job.s_lo);
                     state.current = Some(CurrentWindow {
                         filled: fw,
                         next_row: 0,
@@ -375,7 +400,7 @@ impl Svar1StreamEngine {
         let filled = &state.current.as_ref().unwrap().filled;
         let job = &self.jobs[job_idx];
         let c = &self.contigs[job.contig_idx];
-        let n_samples = job.phys_samples.len();
+        let n_samples = job.s_hi - job.s_lo;
         let n_rows = row_hi - row_lo;
 
         // Per (region, sample) row bounds for rows [row_lo, row_hi), C-order
@@ -423,15 +448,17 @@ impl Svar1StreamEngine {
     ///
     /// Per-contig records are parallel arrays indexed by contig: `contig_names[i]`,
     /// `contig_starts[i]`, `n_locals[i]`, `max_v_lens[i]`, `v_starts_c[i]`, `v_ends_c[i]`,
-    /// `contig_ref_bytes[i]`. Per-job records are parallel arrays indexed by job:
-    /// `job_contig_idx[j]`, `job_region_starts[j]`, `job_region_ends[j]`,
-    /// `job_phys_samples[j]`.
+    /// `contig_ref_bytes[i]`. The full public→physical sample map `phys_sample_idx`
+    /// (length `n_samples`) crosses ONCE. Per-job records are parallel arrays indexed by
+    /// job: `job_contig_idx[j]`, `job_region_starts[j]`, `job_region_ends[j]`,
+    /// `job_s_lo[j]`, `job_s_hi[j]` — each job carries only its contiguous physical-sample
+    /// sub-range `[s_lo, s_hi)` into `phys_sample_idx`, NOT a per-window sample copy.
     #[new]
     #[pyo3(signature = (
         store_path, n_samples, ploidy,
         contig_names, contig_starts, n_locals, max_v_lens, v_starts_c, v_ends_c,
-        contig_ref_bytes,
-        job_contig_idx, job_region_starts, job_region_ends, job_phys_samples,
+        contig_ref_bytes, phys_sample_idx,
+        job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
         v_starts, ilens, alt_alleles, alt_offsets,
         pad_char, parallel, batch_size,
     ))]
@@ -447,10 +474,12 @@ impl Svar1StreamEngine {
         v_starts_c: Vec<Vec<u32>>,
         v_ends_c: Vec<Vec<u32>>,
         contig_ref_bytes: Vec<Vec<u8>>,
+        phys_sample_idx: Vec<usize>,
         job_contig_idx: Vec<usize>,
         job_region_starts: Vec<Vec<u32>>,
         job_region_ends: Vec<Vec<u32>>,
-        job_phys_samples: Vec<Vec<usize>>,
+        job_s_lo: Vec<usize>,
+        job_s_hi: Vec<usize>,
         v_starts: PyReadonlyArray1<i32>,
         ilens: PyReadonlyArray1<i32>,
         alt_alleles: PyReadonlyArray1<u8>,
@@ -490,11 +519,19 @@ impl Svar1StreamEngine {
             });
         }
 
+        if phys_sample_idx.len() != n_samples {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Svar1StreamEngine: phys_sample_idx has length {} but n_samples={n_samples}",
+                phys_sample_idx.len()
+            )));
+        }
+
         let n_jobs = job_contig_idx.len();
         if [
             job_region_starts.len(),
             job_region_ends.len(),
-            job_phys_samples.len(),
+            job_s_lo.len(),
+            job_s_hi.len(),
         ]
         .iter()
         .any(|&l| l != n_jobs)
@@ -512,11 +549,19 @@ impl Svar1StreamEngine {
                     "Svar1StreamEngine: job_region_starts and job_region_ends must match",
                 ));
             }
+            let (s_lo, s_hi) = (job_s_lo[j], job_s_hi[j]);
+            if s_lo > s_hi || s_hi > n_samples {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Svar1StreamEngine: job sample range [{s_lo}, {s_hi}) is invalid \
+                     for n_samples={n_samples}",
+                )));
+            }
             let regions: Vec<(u32, u32)> = starts.iter().zip(ends).map(|(&s, &e)| (s, e)).collect();
             jobs.push(WindowJob {
                 contig_idx: job_contig_idx[j],
                 regions,
-                phys_samples: job_phys_samples[j].clone(),
+                s_lo,
+                s_hi,
             });
         }
 
@@ -524,6 +569,7 @@ impl Svar1StreamEngine {
             store,
             contigs,
             jobs,
+            phys_sample_idx,
             v_starts.as_array().to_owned(),
             ilens.as_array().to_owned(),
             alt_alleles.as_array().to_owned(),
@@ -647,10 +693,12 @@ mod tests {
 
     fn build_engine(f: &Fixture, jobs: Vec<WindowJob>, batch_size: usize) -> Svar1StreamEngine {
         let store = Svar1Store::open_meta(&f.path, 2, 2).unwrap();
+        // Identity public→physical map for the 2-sample fixture; jobs slice it by range.
         Svar1StreamEngine::build(
             store,
             vec![chr1_contig(f)],
             jobs,
+            vec![0usize, 1],
             f.v_starts.clone(),
             f.ilens.clone(),
             f.alt_alleles.clone(),
@@ -672,12 +720,14 @@ mod tests {
             WindowJob {
                 contig_idx: 0,
                 regions: vec![(0, 30)],
-                phys_samples: vec![0, 1],
+                s_lo: 0,
+                s_hi: 2,
             },
             WindowJob {
                 contig_idx: 0,
                 regions: vec![(0, 15)],
-                phys_samples: vec![0, 1],
+                s_lo: 0,
+                s_hi: 2,
             },
         ];
         // batch_size larger than any window -> one batch per window.
@@ -717,12 +767,14 @@ mod tests {
             WindowJob {
                 contig_idx: 0,
                 regions: vec![(0, 30)],
-                phys_samples: vec![0, 1],
+                s_lo: 0,
+                s_hi: 2,
             },
             WindowJob {
                 contig_idx: 0,
                 regions: vec![(0, 30)],
-                phys_samples: vec![0, 1],
+                s_lo: 0,
+                s_hi: 2,
             },
         ];
         let engine = build_engine(&f, jobs, 1);
@@ -788,13 +840,15 @@ mod tests {
         let jobs = vec![WindowJob {
             contig_idx: 0,
             regions: vec![(0, 30)],
-            phys_samples: vec![0, 1],
+            s_lo: 0,
+            s_hi: 2,
         }];
         let store = Svar1Store::open_meta(&f.path, 2, 2).unwrap();
         let engine = Svar1StreamEngine::build(
             store,
             vec![bad_contig],
             jobs,
+            vec![0usize, 1],
             f.v_starts.clone(),
             f.ilens.clone(),
             f.alt_alleles.clone(),
@@ -843,7 +897,8 @@ mod tests {
         let jobs = vec![WindowJob {
             contig_idx: 5,
             regions: vec![(0, 30)],
-            phys_samples: vec![0, 1],
+            s_lo: 0,
+            s_hi: 2,
         }];
         let engine = build_engine(&f, jobs, 8);
 
@@ -917,12 +972,14 @@ mod tests {
             WindowJob {
                 contig_idx: 0,
                 regions: vec![(0, 20)],
-                phys_samples: vec![0],
+                s_lo: 0,
+                s_hi: 1,
             },
             WindowJob {
                 contig_idx: 1,
                 regions: vec![(0, 10)],
-                phys_samples: vec![0],
+                s_lo: 0,
+                s_hi: 1,
             },
         ];
 
@@ -931,6 +988,7 @@ mod tests {
             store,
             vec![chr1, chr2],
             jobs,
+            vec![0usize], // 1-sample store: identity map
             v_starts.clone(),
             ilens.clone(),
             alt_alleles.clone(),
@@ -1010,7 +1068,8 @@ mod tests {
             .map(|_| WindowJob {
                 contig_idx: 0,
                 regions: vec![(0, 30)],
-                phys_samples: vec![0, 1],
+                s_lo: 0,
+                s_hi: 2,
             })
             .collect();
         let engine = build_engine(&f, jobs, 1);
@@ -1021,5 +1080,56 @@ mod tests {
         );
         // `engine` drops here with the producer still live -> Drop must join, not hang.
         drop(engine);
+    }
+
+    /// Finding 1 guard: a job's `[s_lo, s_hi)` must slice the ENGINE'S single
+    /// `phys_sample_idx` map (borrowed per window), NOT be a per-window copy. With a
+    /// NON-identity map (samples swapped) a full-cohort window must reconstruct the
+    /// PHYSICAL samples `phys_sample_idx[0..2] = [1, 0]` in that order — i.e. it must
+    /// byte-equal a direct `read_window` fed `&[1, 0]` and DIFFER from one fed `&[0, 1]`.
+    /// If the engine ignored the map (or sliced the wrong thing) this would fail.
+    #[test]
+    fn svar1_stream_engine_slices_phys_samples_by_range() {
+        let f = fixture();
+        // The two fixture samples produce distinguishable haps (sample 0: hap0=[0],
+        // hap1=[]; sample 1: hap2=[0,1], hap3=[1]), so a swap changes the output.
+        let jobs = vec![WindowJob {
+            contig_idx: 0,
+            regions: vec![(0, 30)],
+            s_lo: 0,
+            s_hi: 2,
+        }];
+        let store = Svar1Store::open_meta(&f.path, 2, 2).unwrap();
+        let engine = Svar1StreamEngine::build(
+            store,
+            vec![chr1_contig(&f)],
+            jobs,
+            vec![1usize, 0], // swapped map: public 0 -> physical 1, public 1 -> physical 0
+            f.v_starts.clone(),
+            f.ilens.clone(),
+            f.alt_alleles.clone(),
+            f.alt_offsets.clone(),
+            b'N',
+            false,
+            1000,
+        );
+
+        let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
+        while let Some(r) = engine.next_batch_core() {
+            let (d, o) = r.expect("no producer error");
+            batches.push((d.to_vec(), o.to_vec()));
+        }
+        assert_eq!(batches.len(), 1, "one batch for the single full-cohort window");
+
+        let exp_swapped = expected_window(&f, &[(0, 30)], &[1, 0]);
+        let exp_identity = expected_window(&f, &[(0, 30)], &[0, 1]);
+        assert_ne!(
+            exp_swapped, exp_identity,
+            "sanity: swapping physical samples must change the output"
+        );
+        assert_eq!(
+            batches[0], exp_swapped,
+            "window must reconstruct phys_sample_idx[s_lo..s_hi] = [1, 0], not [0, 1]"
+        );
     }
 }

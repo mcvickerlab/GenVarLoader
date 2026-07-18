@@ -284,6 +284,11 @@ def main() -> None:
     )
 
     strategies = ["engine", "readahead"]
+    # FIXED per-strategy seed offset (Minor 2): `hash(strategy)` is randomized per
+    # process by PYTHONHASHSEED, so it made engine vs. readahead see differently-seeded
+    # stores run-to-run. A stable offset keeps each strategy's per-rep store
+    # deterministic while still differing between strategies.
+    strategy_seed_offset = {s: i * 50 for i, s in enumerate(strategies)}
     timings: dict[str, list[float]] = {s: [] for s in strategies}
     proxy_rows: list[tuple[float, float, float]] = []
 
@@ -297,7 +302,7 @@ def main() -> None:
                     args.n_variants,
                     args.n_samples,
                     args.contig_len,
-                    seed=args.seed + rep * 1000 + hash(strategy) % 100,
+                    seed=args.seed + rep * 1000 + strategy_seed_offset[strategy],
                 )
                 bed = _make_bed(args.n_regions, args.region_len, args.contig_len)
 

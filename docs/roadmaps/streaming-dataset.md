@@ -212,6 +212,21 @@ only** (no map-style random access).
       (`test_streaming_matches_written_all_cells`, `test_scale_parity_still_byte_identical`
       both green). Design note: `.superpowers/sdd/task-8b-design-note.md`; full report:
       `.superpowers/sdd/task-8-report.md`.
+    - ✅ **Final-review Finding 1 fixed in-branch — engine job residency is now genuinely
+      cohort-independent.** The first cut materialized `list(self._plan())` and one
+      `WindowJob { phys_samples: Vec<usize> }` per window: `O(n_windows × window_samples)`
+      ≈ cohort × regions sample-index metadata (~1–2 GB at 50k regions × 100k samples),
+      resident in three places and unbounded by `max_mem` — eroding #284's guarantee, and
+      the "cohort-independent" claim in `stream_engine.rs` was false. Because `_plan`
+      always yields a CONTIGUOUS `arange(s_lo, s_hi)` sample chunk, the engine now holds
+      the public→physical map (`phys_sample_idx`) ONCE (`O(n_samples)`) and each job
+      carries only `(contig_idx, regions, s_lo, s_hi)` (region-scale); the producer
+      borrows `&phys_sample_idx[s_lo..s_hi]` per window (zero-copy). Both drives
+      (`_iter_batches` engine + readahead) stopped materializing `list(self._plan())`,
+      building one compact region-scale plan instead. Total residency
+      `O(n_windows × window_regions) + O(n_samples)`, never `O(n_windows × n_samples)`.
+      Parity byte-identical under both strategies; 20× race-stable. Fix note:
+      `.superpowers/sdd/task-8-fix2-note.md`; report: `.superpowers/sdd/task-8-report.md`.
     - ✅ **[#296](https://github.com/mcvickerlab/GenVarLoader/issues/296) fixed
       (commit `b2c5af90`).** The `#275` `svar1_csr_entries_touched()` throughput gate's
       `thread_local!` counter was blind to the engine's background producer thread
