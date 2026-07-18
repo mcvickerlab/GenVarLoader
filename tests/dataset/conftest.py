@@ -337,3 +337,64 @@ def snap_dataset(source_bed, vcf_dir, reference, tmp_path_factory):
         max_jitter=2,
     )
     return gvl.Dataset.open(out, reference=reference)
+
+
+@dataclass(slots=True)
+class StreamingVcfFixture:
+    """VCF-source counterpart to `svar1_dataset_fixture` for the record-stream
+    engine (`RecordStreamEngine`, issue #276 tasks 5+). Reuses the two-sample/
+    two-variant VCF fixture Task 4 committed for the Rust `VcfWindowFiller`
+    tests (`tests/data/streaming/two_var_two_sample.vcf.gz` +
+    `src/record_stream/vcf.rs`'s `vcf_filler_decodes_window_to_local_table`),
+    so the Rust and Python suites exercise the SAME variant data: chr1
+    SNP@POS=11 (0-based 10, A>G) and DEL@POS=21 (0-based 20, ACGT>A,
+    ilen=-3), samples s1/s2, ploidy 2.
+
+    `chr1_ref_bytes` mirrors the 100 'A' bytes the Rust fixture uses (long
+    enough to cover both variants and a `[0, 100)` test region). `fasta` is a
+    matching FASTA (same 100bp of 'A', samtools-indexed) for callers that
+    want a real reference path (e.g. a future left-align opt-in); the Task 5
+    FFI-seam test itself passes `fasta_path=None`, matching `gvl.write`'s VCF
+    parity contract (no read-time left-align -- see `vcf.rs`'s module doc).
+    `regions` is a single-contig, single-region bed in the same
+    `{"chrom", "chromStart", "chromEnd"}` shape `gvl.write`/`StreamingDataset`
+    use, so Task 6 can reuse it directly.
+    """
+
+    vcf: Path
+    fasta: Path
+    chr1_ref_bytes: bytes
+    sample_names: list[str]
+    n_samples: int
+    ploidy: int
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def streaming_vcf_fixture(tmp_path_factory) -> StreamingVcfFixture:
+    vcf = (
+        Path(__file__).parent.parent
+        / "data"
+        / "streaming"
+        / "two_var_two_sample.vcf.gz"
+    )
+    chr1_ref_bytes = b"A" * 100
+
+    d = tmp_path_factory.mktemp("streaming_vcf_fasta")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{chr1_ref_bytes.decode()}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(chr1_ref_bytes)]}
+    )
+
+    return StreamingVcfFixture(
+        vcf=vcf,
+        fasta=fasta,
+        chr1_ref_bytes=chr1_ref_bytes,
+        sample_names=["s1", "s2"],
+        n_samples=2,
+        ploidy=2,
+        regions=regions,
+    )

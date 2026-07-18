@@ -29,8 +29,12 @@
 use std::sync::Arc;
 
 use ndarray::{Array1, Array2};
+use numpy::{IntoPyArray, PyArray1};
+use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
 
 use crate::ffi::stream_core::{EngineBackend, StreamEngineCore};
+use crate::record_stream::vcf::VcfWindowFiller;
 use crate::record_stream::DecodedWindow;
 
 /// Decode job `job`'s window (on `contig`) into `slot`, reusing its allocations. VCF/PGEN
@@ -186,10 +190,11 @@ impl EngineBackend for RecordBackend {
     }
 }
 
-/// Producer/consumer record-stream engine (issue #276 task 3b). See the module docs. No
-/// Python surface yet — `#[pyclass]`/`#[pymethods]`/a `#[new]` constructor and lib.rs
-/// registration land in Task 5, once a real `WindowFiller` (Task 4 VCF / Task 10 PGEN)
-/// exists to construct one from Python.
+/// Producer/consumer record-stream engine (issue #276 task 3b). Python surface (issue
+/// #276 task 5): `#[new]` builds a `VcfWindowFiller` for `source_kind="vcf"` (PGEN is a
+/// `PyNotImplementedError` stub until Task 10) and calls [`RecordStreamEngine::new_rs`];
+/// `next_batch` mirrors `Svar1StreamEngine`'s (`crate::ffi::stream_engine`) shape exactly.
+#[pyclass]
 pub struct RecordStreamEngine {
     core: StreamEngineCore<RecordBackend>,
 }
@@ -226,6 +231,141 @@ impl RecordStreamEngine {
     /// exhaustion/error/panic classification contract.
     pub fn next_batch_core(&self) -> Option<anyhow::Result<(Array1<u8>, Array1<i64>)>> {
         self.core.next_batch_core()
+    }
+}
+
+#[pymethods]
+impl RecordStreamEngine {
+    /// Construct the engine from Python. Per-contig records are parallel arrays indexed
+    /// by contig: `contig_names[i]`/`contig_ref_bytes[i]`. Per-job records are parallel
+    /// arrays indexed by job: `job_contig_idx[j]`, `job_region_starts[j]`,
+    /// `job_region_ends[j]`, `job_s_lo[j]`, `job_s_hi[j]` — mirrors `Svar1StreamEngine`'s
+    /// `#[new]` shape (`crate::ffi::stream_engine`) minus the SVAR1-only store/physical-
+    /// sample-map arguments (a record-stream job's `[s_lo, s_hi)` indexes straight into
+    /// `sample_names`, no public->physical indirection).
+    ///
+    /// `source_kind` selects the filler: `"vcf"` builds a [`VcfWindowFiller`] (`vcf_path`,
+    /// `fasta_path` — see that module's doc for the `fasta_path: None` parity default);
+    /// `"pgen"` is a stub (`PyNotImplementedError`) until Task 10 fills it in.
+    #[new]
+    #[pyo3(signature = (
+        source_kind, vcf_path, sample_names, ploidy,
+        contig_names, contig_ref_bytes,
+        job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
+        fasta_path, pad_char, parallel, batch_size,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        source_kind: &str,
+        vcf_path: String,
+        sample_names: Vec<String>,
+        ploidy: usize,
+        contig_names: Vec<String>,
+        contig_ref_bytes: Vec<Vec<u8>>,
+        job_contig_idx: Vec<usize>,
+        job_region_starts: Vec<Vec<u32>>,
+        job_region_ends: Vec<Vec<u32>>,
+        job_s_lo: Vec<usize>,
+        job_s_hi: Vec<usize>,
+        fasta_path: Option<String>,
+        pad_char: u8,
+        parallel: bool,
+        batch_size: usize,
+    ) -> PyResult<Self> {
+        let n_contigs = contig_names.len();
+        if contig_ref_bytes.len() != n_contigs {
+            return Err(PyValueError::new_err(
+                "RecordStreamEngine: contig_names and contig_ref_bytes must have the same length",
+            ));
+        }
+        let contigs: Vec<ContigRef> = contig_names
+            .into_iter()
+            .zip(contig_ref_bytes)
+            .map(|(name, ref_bytes)| ContigRef { name, ref_bytes })
+            .collect();
+
+        let n_jobs = job_contig_idx.len();
+        if [
+            job_region_starts.len(),
+            job_region_ends.len(),
+            job_s_lo.len(),
+            job_s_hi.len(),
+        ]
+        .iter()
+        .any(|&l| l != n_jobs)
+        {
+            return Err(PyValueError::new_err(
+                "RecordStreamEngine: per-job arrays must all have the same length",
+            ));
+        }
+        let n_samples = sample_names.len();
+        let mut jobs = Vec::with_capacity(n_jobs);
+        for j in 0..n_jobs {
+            let starts = &job_region_starts[j];
+            let ends = &job_region_ends[j];
+            if starts.len() != ends.len() {
+                return Err(PyValueError::new_err(
+                    "RecordStreamEngine: job_region_starts and job_region_ends must match",
+                ));
+            }
+            let (s_lo, s_hi) = (job_s_lo[j], job_s_hi[j]);
+            if s_lo > s_hi || s_hi > n_samples {
+                return Err(PyValueError::new_err(format!(
+                    "RecordStreamEngine: job sample range [{s_lo}, {s_hi}) is invalid \
+                     for n_samples={n_samples}",
+                )));
+            }
+            let regions: Vec<(u32, u32)> = starts.iter().zip(ends).map(|(&s, &e)| (s, e)).collect();
+            jobs.push(RecordJob {
+                contig_idx: job_contig_idx[j],
+                regions,
+                s_lo,
+                s_hi,
+            });
+        }
+
+        match source_kind {
+            "vcf" => {
+                let sample_refs: Vec<&str> = sample_names.iter().map(String::as_str).collect();
+                let filler =
+                    VcfWindowFiller::new(&vcf_path, &sample_refs, ploidy, fasta_path.as_deref())
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                Ok(Self::new_rs(
+                    Box::new(filler),
+                    contigs,
+                    jobs,
+                    n_samples,
+                    ploidy,
+                    pad_char,
+                    parallel,
+                    batch_size,
+                ))
+            }
+            "pgen" => Err(PyNotImplementedError::new_err(
+                "PGEN streaming not implemented yet (Task 10)",
+            )),
+            other => Err(PyValueError::new_err(format!(
+                "RecordStreamEngine: unknown source_kind {other:?} (expected \"vcf\" or \"pgen\")",
+            ))),
+        }
+    }
+
+    /// Return the next batch's `(data, offsets)`, or `None` when the plan is exhausted.
+    /// Identical shape to `Svar1StreamEngine::next_batch` (`crate::ffi::stream_engine`):
+    /// the GIL is released for the whole blocking body, reacquired only to marshal the
+    /// owned arrays into numpy.
+    fn next_batch<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<(Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>)>> {
+        let out = py.detach(|| self.next_batch_core());
+        match out {
+            None => Ok(None),
+            Some(Ok((data, offsets))) => {
+                Ok(Some((data.into_pyarray(py), offsets.into_pyarray(py))))
+            }
+            Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
+        }
     }
 }
 
