@@ -109,20 +109,23 @@ Example of SeqPro translate for RNA and AA -->
 
 ## Can I use gvl without writing a dataset first?
 
-Yes, for haplotype output from a `.svar` (SparseVar) variant source: [`gvl.StreamingDataset`](api.md#genvarloader.StreamingDataset) reconstructs haplotype batches directly from a live `.svar` store, with no [`gvl.write()`](api.md#genvarloader.write) call and no `.gvl` directory written to disk.
+Yes, for haplotype output: [`gvl.StreamingDataset`](api.md#genvarloader.StreamingDataset) reconstructs haplotype batches directly from a live variant source, with no [`gvl.write()`](api.md#genvarloader.write) call and no `.gvl` directory written to disk. `variants=` accepts either a `.svar` (SparseVar/SVAR1) store or a VCF/BCF path (`.vcf`, `.vcf.gz`, `.bcf`; indexed, same preprocessing requirements as `gvl.write` — see [write.md](write.md)) — both go through a shared Rust engine (`RecordStreamEngine`); VCF/BCF is decoded window-by-window via genoray's Rust `VcfRecordSource → ChunkAssembler → DenseChunk` pipeline.
 
 ```python
 sds = gvl.StreamingDataset(
     "rois.bed", reference="ref.fa", variants="normed.svar", max_mem="512MB"
 ).with_seqs("haplotypes")
+# or: variants="normed.vcf.gz" / "normed.bcf" -- reads VCF/BCF directly, no .svar needed
 
 for data, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
     ...
 ```
 
-Haplotype output is byte-identical to writing a dataset and indexing it (`gvl.write(...)` + `Dataset.open(...)[r, s]`, at `jitter=0`) — you're trading the write step for a slower per-epoch read, since `StreamingDataset` re-reads the live store on every window instead of hitting a pre-indexed on-disk dataset. It's a good fit for one-shot inference or when you can't afford (or don't want) the preprocessing step; for repeated-epoch training, a written [`Dataset`](api.md#genvarloader.Dataset) is still faster.
+Haplotype output is byte-identical to writing a dataset and indexing it (`gvl.write(...)` + `Dataset.open(...)[r, s]`, at `jitter=0`) — you're trading the write step for a slower per-epoch read, since `StreamingDataset` re-reads the live source on every window instead of hitting a pre-indexed on-disk dataset. It's a good fit for one-shot inference or when you can't afford (or don't want) the `gvl.write()` step; for repeated-epoch training, a written [`Dataset`](api.md#genvarloader.Dataset) is still faster.
 
-`StreamingDataset` is currently narrower than `Dataset`: `.svar` variant sources only (VCF, PGEN, and `.svar2` raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0` only, ragged output only, and it's **iterable-only** — `sds[r, s]` raises `TypeError` because iteration order is fixed by the data layout. `sds.to_iter(...)` is the one entry point; `to_torch_dataset()` and `to_dataloader()` are thin wrappers over it. Iteration is region-major, read one window at a time so each read stays within one contig; `to_iter(..., return_indices=True)` (the default) rides along `(region_idxs, sample_idxs)` in your original BED-row order. `sample_idxs` index into `sds.samples` (lexicographically-sorted sample names, matching `gvl.write()`), not the variant store's native column order. See the `genvarloader` skill for the full scope.
+**Streaming VCF/BCF requires htslib**, statically linked into gvl's wheel (genoray's `conversion` feature); no separate install step, but it means htslib is now a hard runtime requirement of the package, not just an internal detail of `gvl.write`'s own VCF ingestion.
+
+`StreamingDataset` is currently narrower than `Dataset`: `.svar` and VCF/BCF variant sources only (PGEN and `.svar2` raise `NotImplementedError`; PGEN is landing on the same branch/PR shortly), `with_seqs("haplotypes")` only, `jitter=0` only, ragged output only, and it's **iterable-only** — `sds[r, s]` raises `TypeError` because iteration order is fixed by the data layout. `sds.to_iter(...)` is the one entry point; `to_torch_dataset()` and `to_dataloader()` are thin wrappers over it. Iteration is region-major, read one window at a time so each read stays within one contig; `to_iter(..., return_indices=True)` (the default) rides along `(region_idxs, sample_idxs)` in your original BED-row order. `sample_idxs` index into `sds.samples` (lexicographically-sorted sample names, matching `gvl.write()`), not the variant source's native column order. See the `genvarloader` skill for the full scope.
 
 **Peak memory does not scale with cohort size.** The `max_mem` constructor argument (default `"512MB"`; an int byte count or a size string like `"1g"`/`"2GiB"`) bounds the read window's offsets buffer, which `StreamingDataset` chunks over regions and samples so it stays within budget regardless of how many samples the dataset has. Generation is separately bounded by `to_iter`'s `batch_size`: each window is read once, then reconstructed one `batch_size` slice at a time, so haplotype output is never materialized for a whole window at once. Peak memory is therefore `max_mem` (offsets) + `batch_size` (output) — neither term grows with cohort size.
 

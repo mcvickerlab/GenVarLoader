@@ -175,13 +175,20 @@ dummy-fill details.
 
 Everything above describes [`Dataset`](api.md#genvarloader.Dataset), which reads from an on-disk
 directory produced by [`gvl.write()`](api.md#genvarloader.write). [`gvl.StreamingDataset`](api.md#genvarloader.StreamingDataset)
-skips that step: it reconstructs haplotype batches directly from a live `.svar` (SparseVar) store,
-with no `gvl.write()` call and no `.gvl` directory on disk.
+skips that step: it reconstructs haplotype batches directly from a live variant source, with no
+`gvl.write()` call and no `.gvl` directory on disk. `variants=` accepts either a `.svar`
+(SparseVar/SVAR1) store or a VCF/BCF path (`.vcf`, `.vcf.gz`, `.bcf`; indexed, normalized the same
+way `gvl.write` requires — see [write.md](write.md)); both read paths go through a shared Rust
+`RecordStreamEngine`, with VCF/BCF decoded window-by-window via genoray's Rust `VcfRecordSource →
+ChunkAssembler → DenseChunk` pipeline. **Streaming VCF/BCF makes htslib a hard runtime
+requirement** (statically linked into gvl's wheel via genoray's `conversion` feature; no separate
+install step).
 
 ```python
 sds = gvl.StreamingDataset(
     "rois.bed", reference="ref.fa", variants="normed.svar", max_mem="512MB"
 ).with_seqs("haplotypes")
+# or: variants="normed.vcf.gz" / "normed.bcf" -- reads VCF/BCF directly, no .svar needed
 
 for data, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
     ...  # data: Ragged[S1], shape (batch, ploidy, ~length)
@@ -206,10 +213,10 @@ re-reads the live store instead of hitting a pre-indexed dataset — prefer a wr
 for repeated-epoch training, and `StreamingDataset` for one-shot/inference work or when you'd
 rather not pay for the write.
 
-`StreamingDataset` is currently more limited than `Dataset`: `.svar` variant sources only
-(VCF/PGEN/`.svar2` raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0`
-only, ragged output only, and **iterable-only** — `sds[r, s]` raises `TypeError`; use
-`sds.to_iter(...)` (or `to_dataloader(...)` for torch). `sample_idxs` index into
-`sds.samples` (lexicographically-sorted sample names, matching `gvl.write()`), not the
-variant store's native column order. See the `genvarloader` skill for the
+`StreamingDataset` is currently more limited than `Dataset`: `.svar` and VCF/BCF variant sources
+only (PGEN/`.svar2` raise `NotImplementedError`; PGEN is landing on the same branch/PR shortly),
+`with_seqs("haplotypes")` only, `jitter=0` only, ragged output only, and **iterable-only** —
+`sds[r, s]` raises `TypeError`; use `sds.to_iter(...)` (or `to_dataloader(...)` for torch).
+`sample_idxs` index into `sds.samples` (lexicographically-sorted sample names, matching
+`gvl.write()`), not the variant source's native column order. See the `genvarloader` skill for the
 full list of what's not yet wired.

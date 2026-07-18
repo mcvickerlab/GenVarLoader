@@ -78,7 +78,7 @@ only** (no map-style random access).
 |---|---|---|
 | `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — PR [#274](https://github.com/mcvickerlab/GenVarLoader/pull/274) |
 | `docs/superpowers/plans/2026-07-16-streaming-svar1-window-engine.md` | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275). Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Tasks 2-4 done; Task 5's generic `StreamBackend`/`run_windows` engine done; SVAR1 wiring (issue [#283](https://github.com/mcvickerlab/GenVarLoader/issues/283)) done — 8a (Rust engine) + 8b (Python wiring, `to_iter()` now overlaps producer I/O with consumer generation) both landed; cold-cache A-vs-C measured (producer-thread engine wins 1.46×, ships as default); [#296](https://github.com/mcvickerlab/GenVarLoader/issues/296) throughput-gate observability gap fixed (`b2c5af90`) |
-| `docs/superpowers/plans/2026-07-17-streaming-vcf-pgen-backends.md` — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend. Spec: `docs/superpowers/specs/2026-07-17-streaming-vcf-pgen-backends-design.md` | 🚧 Tasks 1-8 done (generic `generate_batch_core`/`DecodedWindow` transpose/`RecordStreamEngine` core/`VcfWindowFiller`/Python `#[new]`+`next_batch` FFI seam/`_VcfBackend` Python wiring/variant-table parity gate/end-to-end haplotype byte parity — Task 8's `tests/dataset/test_streaming_vcf_parity.py` proved every streamed haplotype byte-equals the written `Dataset` across single-region, multi-region (CSR expansion), and multi-contig (window-boundary) cases, byte-identical on first try, no src/ fix needed); Task 9 (docs) next |
+| `docs/superpowers/plans/2026-07-17-streaming-vcf-pgen-backends.md` — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend. Spec: `docs/superpowers/specs/2026-07-17-streaming-vcf-pgen-backends-design.md` | 🚧 **PR 1 (VCF backend, Tasks 1-9) done and open as a draft PR into `streaming`** — generic `generate_batch_core`/`DecodedWindow` transpose/`RecordStreamEngine` core/`VcfWindowFiller`/Python `#[new]`+`next_batch` FFI seam/`_VcfBackend` Python wiring/variant-table parity gate/end-to-end haplotype byte parity (Task 8's `tests/dataset/test_streaming_vcf_parity.py` proved every streamed haplotype byte-equals the written `Dataset` across single-region, multi-region (CSR expansion), and multi-contig (window-boundary) cases, byte-identical on first try, no src/ fix needed) + Task 9 docs gate. `gvl.StreamingDataset(variants="x.vcf[.gz]"\|"x.bcf")` is now public. **PR 2 (PGEN backend, Tasks 10-14) still ⬜ — lands on the same branch, extending the same PR, not a second PR.** |
 | _TBD (Plan 5)_ — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
 
 ## Tasks (spec A — corrected ordering)
@@ -412,8 +412,18 @@ only** (no map-style random access).
       2000-region sweep fixture it cited isn't committed), and stale
       "contig-grouped batches" test comments updated to say "window" (assertions
       unchanged). See PR [#282](https://github.com/mcvickerlab/GenVarLoader/pull/282).
-- ⬜ **VCF backend / PGEN backend** — _Plan 3/4_ —
+- 🚧 **VCF backend / PGEN backend** — _Plan 3/4_ —
   issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276)
+  - ✅ **VCF backend (PR 1, Tasks 1-9) done.** Shared `RecordStreamEngine` (generic
+    detached-producer/consumer engine core) + `DenseChunk`→`geno_v_idxs` transpose + VCF
+    streaming backend. `gvl.StreamingDataset(variants="x.vcf[.gz]"|"x.bcf")` reads VCF/BCF
+    directly and reaches byte-identical haplotype parity with `gvl.write()` +
+    `Dataset.open()[r,s]` (haplotypes-only, `jitter=0`). htslib (via genoray's `conversion`
+    feature) is now a hard runtime requirement of the package. Docs updated (this task).
+    Draft PR open into `streaming`, kept in draft pending the PGEN backend below.
+  - ⬜ **PGEN backend (PR 2, Tasks 10-14) not started.** Additive on PR 1's engine — a second
+    `WindowFiller` + Python backend, plus the benchmark harness. Lands on the same
+    `spec/276-vcf-pgen` branch, extending the same PR (not a second PR).
 - ⬜ **Output-mode breadth + docs** — _Plan 5; docs folded in_ —
   issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277)
 
