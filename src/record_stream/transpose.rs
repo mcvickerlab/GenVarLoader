@@ -8,7 +8,6 @@ pub struct DecodedWindow {
     pub alt_offsets: Vec<i64>,
     pub geno_v_idxs: Vec<i32>,
     pub geno_offsets: Vec<i64>,
-    pub job_idx: usize,
 }
 
 /// Fill `slot` (reusing its allocations) from a window's `DenseChunk`. The static table
