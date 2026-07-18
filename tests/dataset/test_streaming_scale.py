@@ -261,6 +261,112 @@ def test_generate_batch_output_is_flat_in_cohort_size(tmp_path):
     )
 
 
+def test_svar2_generate_batch_output_is_flat_in_cohort_size(tmp_path):
+    """SVAR2 #284 gate: a fixed-batch_size call's output bytes are identical between a
+    50- and a 400-sample cohort (per-batch generation), while the window covers the
+    whole cohort. Clone of the SVAR1 test above, SparseVar2 + .svar2.
+
+    `SparseVar2.from_vcf` (unlike SVAR1's `SparseVar.from_vcf`) takes `source` as a
+    plain path -- no `VCF(...)` wrapper -- and has no `samples=` subsetting kwarg; it
+    always converts every sample in the VCF header. It requires either `reference=` or
+    `no_reference=True`. This fixture is SNP-only with no out-of-scope records, so
+    `no_reference=True, skip_out_of_scope=True` (the pattern
+    `tests/benchmarks/data/build_svar2_stream_bulk.py` uses) avoids REF-vs-FASTA
+    validation entirely.
+    """
+    import subprocess
+
+    import numpy as np
+    import polars as pl
+    from genoray import SparseVar2
+
+    from genvarloader._dataset._streaming import _Svar2Backend
+
+    def build(n_samples: int):
+        d = tmp_path / f"n{n_samples}"
+        d.mkdir()
+        ref = d / "ref.fa"
+        rng = np.random.default_rng(1)
+        seq = "".join(rng.choice(list("ACGT"), 4000))
+        ref.write_text(f">chr1\n{seq}\n")
+        subprocess.run(["samtools", "faidx", str(ref)], check=True)
+        vcf = d / "in.vcf"
+        lines = [
+            "##fileformat=VCFv4.2",
+            "##contig=<ID=chr1,length=4000>",
+            '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t"
+            + "\t".join(f"S{i}" for i in range(n_samples)),
+        ]
+        pos = np.sort(rng.choice(np.arange(2, 3998), 200, replace=False))
+        for p in pos:
+            # SNP-only (REF=A/ALT=G, no indels): every haplotype's length equals the
+            # region's length regardless of genotype, so batch output bytes are
+            # deterministic across cohorts of different size.
+            gts = "\t".join(
+                f"{rng.integers(0, 2)}|{rng.integers(0, 2)}" for _ in range(n_samples)
+            )
+            lines.append(f"chr1\t{p}\t.\tA\tG\t.\t.\t.\tGT\t{gts}")
+        vcf.write_text("\n".join(lines) + "\n")
+        bcf = d / "in.bcf"
+        subprocess.run(
+            ["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True
+        )
+        subprocess.run(["bcftools", "index", str(bcf)], check=True)
+        svar2 = d / "store.svar2"
+        SparseVar2.from_vcf(
+            svar2, bcf, no_reference=True, skip_out_of_scope=True, overwrite=True
+        )
+        return svar2, ref
+
+    def batch_output_bytes(n_samples: int) -> int:
+        svar2, ref = build(n_samples)
+        bed = pl.DataFrame(
+            {
+                "chrom": ["chr1"] * 4,
+                "chromStart": [0, 100, 200, 300],
+                "chromEnd": [100, 200, 300, 400],
+            }
+        )
+        sds = gvl.StreamingDataset(bed, reference=ref, variants=svar2).with_seqs(
+            "haplotypes"
+        )
+        backend = sds._backend
+        assert isinstance(backend, _Svar2Backend), (
+            "test requires the real SVAR2 backend, not _Svar1Backend or the "
+            "whole-window test seam"
+        )
+
+        r_idx, s_idx = next(iter(sds._plan()))
+        # Under default max_mem the first (and only, at this fixture size) window
+        # covers the WHOLE cohort -- prove that, so a batch staying flat below is
+        # actually evidence of per-batch generation, not just a tiny window.
+        assert len(s_idx) == n_samples, (
+            f"expected the window to cover the whole cohort ({n_samples} samples), "
+            f"got {len(s_idx)} -- test no longer proves what it claims"
+        )
+
+        window = backend.read_window(r_idx, s_idx)  # SVAR2: opaque bundle
+        batch_size = 4
+        assert batch_size <= len(r_idx) * len(s_idx)
+        data = backend.generate_batch(r_idx, s_idx, window, 0, batch_size)
+        return int(data.data.nbytes)
+
+    bytes_50 = batch_output_bytes(50)
+    bytes_400 = batch_output_bytes(400)
+    print(f"[svar2 batch-output-gate] n=50 bytes={bytes_50} n=400 bytes={bytes_400}")
+
+    assert bytes_50 > 0, "counter is not wired (batch produced no output)"
+    # A whole-window regression (issue #284) would make generated output scale with
+    # len(s_idx) == n_samples; per-batch generation makes it depend only on
+    # batch_size, so 50 and 400 samples must produce EXACTLY the same batch output
+    # size (the fixture is SNP-only, so haplotype length == region length always).
+    assert bytes_400 == bytes_50, (
+        f"batch output bytes scaled with cohort size (50->{bytes_50}B, "
+        f"400->{bytes_400}B) -- whole-window output materialization has returned"
+    )
+
+
 def test_scale_parity_still_byte_identical(scale_fixture, tmp_path):
     """The scale fixture must ALSO satisfy the parity oracle -- a fast wrong answer
     is not progress."""
