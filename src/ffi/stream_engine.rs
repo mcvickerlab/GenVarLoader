@@ -1,39 +1,29 @@
 //! `Svar1StreamEngine` — the SVAR1 producer/consumer overlap engine (issue #283).
 //!
-//! **This is gvl's first production threading.** A background *producer* thread reads
-//! window N+1's CSR offsets (`Svar1Store::read_window`) and reads-through the runs it
-//! will hand off (`geno_v_idxs()[o_lo..o_hi]`), warming the shared OS page cache, while
-//! the *consumer* (`next_batch`, called from Python) generates batches from window N.
-//! What is overlapped is I/O latency, not decode — SVAR1's on-disk layout is already the
+//! A background *producer* thread reads window N+1's CSR offsets
+//! (`Svar1Store::read_window`) and reads-through the runs it will hand off
+//! (`geno_v_idxs()[o_lo..o_hi]`), warming the shared OS page cache, while the
+//! *consumer* (`next_batch`, called from Python) generates batches from window N. What
+//! is overlapped is I/O latency, not decode — SVAR1's on-disk layout is already the
 //! target representation, so the producer's job is to fault the exact pages ahead of the
 //! consumer (the OS page cache does not prefetch on an application's access pattern; a
 //! thread walking the fixed, `__getitem__`-free traversal does).
 //!
-//! **Why bespoke and not `crate::stream::run_windows`.** `run_windows` uses
-//! `std::thread::scope` + `spawn_scoped`, whose scope must complete within one function
-//! call. The engine's producer must instead outlive many separate `next_batch()` FFI
-//! calls, so it is a *detached* `std::thread::spawn` owning an `Arc<Svar1Store>`, the
-//! jobs, and the channel `Sender`s. The shutdown/panic discipline is copied EXACTLY from
-//! `run_windows` (read its doc comments — they explain WHY each ownership move matters):
+//! **The generic detached-thread producer/consumer machinery (channels, shutdown,
+//! panic-classification, slot recycling) lives in [`crate::ffi::stream_core`]** —
+//! [`Svar1StreamEngine`] is a thin pyclass wrapper around a
+//! `StreamEngineCore<Svar1Backend>`; [`Svar1Backend`] below implements the two
+//! SVAR1-specific divergence points (`fill`/`generate`) via the [`EngineBackend`] trait.
+//! Read `stream_core`'s module doc for the threading/shutdown rationale — it is
+//! load-bearing and shared verbatim with any future backend (e.g. a record-stream
+//! VCF/PGEN engine, issue #276 task 3b).
 //!
-//!   * two `crossbeam_channel::bounded(2)` channels — `filled` (producer→consumer) and
-//!     `free` (consumer→producer, slot recycling) — with `free` prefilled with 2 default
-//!     slots. Only 2 buffers exist in total, ping-ponging between the channels, so no
-//!     `send` can ever block and memory is capped at `2 * window_offsets` regardless of
-//!     plan length;
-//!   * **shutdown by dropping the producer's `Sender<FilledWindow>`** (the filled tx) when
-//!     the job loop ends — the consumer's `recv()` then observes channel close. The
-//!     consumer holds NO clone of the filled tx, so there is nothing to forget to drop;
-//!   * **join-then-classify**: on channel close the consumer JOINS the producer and only
-//!     then classifies its `anyhow::Result` (`Err(_)` join ⇒ producer panicked; `Ok(Err)`
-//!     ⇒ propagate; `Ok(Ok)` ⇒ clean end). The consumer NEVER early-returns with the
-//!     producer live and unjoined.
-//!
-//! **The engine opens its OWN `Arc<Svar1Store>`** from the store path (it does not
-//! Arc-share the Python-owned `Svar1Store` pyclass instance). Because it mmaps the same
-//! file, the producer's reads and the consumer's reads hit the same OS page-cache pages —
-//! no data duplication. `Svar1Store` is `Send + Sync`, so the `Arc` crosses to the
-//! producer thread and `read_window`/`geno_v_idxs` run GIL-free.
+//! **The engine opens its OWN `Svar1Store`** from the store path (it does not share the
+//! Python-owned `Svar1Store` pyclass instance). Because it mmaps the same file, the
+//! producer's reads and the consumer's reads hit the same OS page-cache pages — no data
+//! duplication. `Svar1Store` is `Send + Sync`, and the whole `Svar1Backend` (which owns
+//! it) is `Arc`'d by the core and cloned into the producer thread, so `read_window`/
+//! `geno_v_idxs` run GIL-free.
 //!
 //! **Memory (cohort-independent job residency — issue #284 / final-review Finding 1).**
 //! The engine owns exactly ONE cohort-scale array: `phys_sample_idx` (the public→physical
@@ -61,15 +51,14 @@
 //! `generate_batch_core`. Single-contig behavior is identical; multi-contig is now
 //! correct.
 
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+use std::sync::Arc;
 
-use crossbeam_channel::{bounded, Receiver, Sender};
 use ndarray::{Array1, Array2};
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
+use crate::ffi::stream_core::{EngineBackend, StreamEngineCore};
 use crate::svar1::store::Svar1Store;
 
 /// Per-contig data the engine needs to serve `read_window` and generation for jobs on
@@ -103,82 +92,27 @@ struct WindowJob {
     s_hi: usize,
 }
 
-/// One recycled slot: the whole window's CSR offsets plus the `job_idx` that produced it
-/// (so the consumer can recover the window's regions/sample-range/contig for generation).
+/// One recycled slot: the whole window's CSR offsets. Its owning job (and thus the
+/// contig/regions/sample-range needed to generate from it) is recovered by
+/// `StreamEngineCore` from the plan-order job counter — see `stream_core`'s job-ordering
+/// note — so the slot itself carries no `job_idx`.
 #[derive(Default)]
 struct FilledWindow {
     o_starts: Vec<i64>,
     o_stops: Vec<i64>,
-    job_idx: usize,
 }
 
-/// The window the consumer is currently draining, batch by batch.
-struct CurrentWindow {
-    filled: FilledWindow,
-    /// Next window row (region×sample, C-order) to generate from.
-    next_row: usize,
-    /// Total window rows = `regions.len() * (s_hi - s_lo)`.
-    n_batch_rows: usize,
-}
-
-/// Mutable engine state behind the pyclass's `Mutex` (the pyclass methods are `&self`).
-struct EngineState {
-    started: bool,
-    done: bool,
-    /// Recycle drained slots back to the producer. `None` until the producer is spawned.
-    tx_free: Option<Sender<FilledWindow>>,
-    /// Receive prefetched windows from the producer. `None` until spawned.
-    rx_filled: Option<Receiver<FilledWindow>>,
-    /// Producer handle — joined (and classified) exactly once, on channel close.
-    producer: Option<JoinHandle<anyhow::Result<()>>>,
-    current: Option<CurrentWindow>,
-}
-
-impl EngineState {
-    fn new() -> Self {
-        Self {
-            started: false,
-            done: false,
-            tx_free: None,
-            rx_filled: None,
-            producer: None,
-            current: None,
-        }
-    }
-}
-
-impl Drop for EngineState {
-    /// Deterministic teardown: if the engine is dropped mid-stream (producer still live),
-    /// join the producer instead of leaking a detached thread. Dropping the free `Sender`
-    /// and the filled `Receiver` FIRST closes both channels, so a producer blocked on
-    /// `rx_free.recv()` (no free slot) or `tx_filled.send()` (consumer gone) unblocks and
-    /// returns `Ok(())` — the join then completes promptly (bounded by at most one
-    /// in-flight `read_window`). Cannot double-join: the normal exhaustion / error / panic
-    /// paths already `take()` the handle in `next_batch_core`, leaving `producer == None`
-    /// here. There is no permanent-wedge risk even without this (channel close always
-    /// unblocks the producer); this just makes teardown synchronous so threads can't
-    /// transiently accumulate under create/drop churn.
-    fn drop(&mut self) {
-        self.tx_free = None;
-        self.rx_filled = None;
-        if let Some(h) = self.producer.take() {
-            let _ = h.join();
-        }
-    }
-}
-
-/// Producer/consumer SVAR1 streamer (issue #283). See the module docs for the design.
-#[pyclass]
-pub struct Svar1StreamEngine {
-    /// The engine's OWN store (Arc-shared with the producer thread; same mmap file, same
-    /// page cache — NOT the Python-owned pyclass instance).
-    store: Arc<Svar1Store>,
-    contigs: Arc<Vec<ContigData>>,
-    jobs: Arc<Vec<WindowJob>>,
+/// The SVAR1 [`EngineBackend`]: owns the engine's own store, the plan (jobs/contigs),
+/// the cohort-scale sample map, and the GLOBAL variant-scale tables. Wrapped in an
+/// `Arc` by `StreamEngineCore` and shared between the producer and consumer threads.
+struct Svar1Backend {
+    store: Svar1Store,
+    contigs: Vec<ContigData>,
+    jobs: Vec<WindowJob>,
     /// The full public→physical sample map (`O(n_samples)`, ONE copy). Each job's
-    /// `[s_lo, s_hi)` slices into this; the producer borrows `&phys_sample_idx[s_lo..s_hi]`
-    /// per window — no per-window owned copy. Shared with the producer thread.
-    phys_sample_idx: Arc<Vec<usize>>,
+    /// `[s_lo, s_hi)` slices into this; `fill` borrows `&phys_sample_idx[s_lo..s_hi]` per
+    /// window — no per-window owned copy.
+    phys_sample_idx: Vec<usize>,
     /// GLOBAL variant-scale tables (indexed by global variant id from `geno_v_idxs`).
     v_starts: Array1<i32>,
     ilens: Array1<i32>,
@@ -186,8 +120,99 @@ pub struct Svar1StreamEngine {
     alt_offsets: Array1<i64>,
     pad_char: u8,
     parallel: bool,
-    batch_size: usize,
-    state: Mutex<EngineState>,
+}
+
+impl EngineBackend for Svar1Backend {
+    type Slot = FilledWindow;
+
+    fn n_jobs(&self) -> usize {
+        self.jobs.len()
+    }
+
+    /// PRODUCER: read this window's CSR offsets and read-through prefetch the runs the
+    /// consumer will read (fault the EXACT pages into the shared page cache — shared
+    /// with the standalone `svar1_prefetch_runs` FFI entry, see
+    /// `crate::ffi::prefetch_runs_core`'s doc comment).
+    fn fill(&self, job_idx: usize, slot: &mut FilledWindow) -> anyhow::Result<()> {
+        let job = &self.jobs[job_idx];
+        let c = &self.contigs[job.contig_idx];
+        // Borrow this window's physical samples from the single cohort-scale map — no
+        // per-window owned copy (see the module memory note).
+        let phys = &self.phys_sample_idx[job.s_lo..job.s_hi];
+        let w = self
+            .store
+            .read_window(&c.name, &c.v_starts_c, &c.v_ends_c, &job.regions, phys)?;
+        slot.o_starts = w.o_starts;
+        slot.o_stops = w.o_stops;
+
+        let vidx = self.store.geno_v_idxs();
+        crate::ffi::prefetch_runs_core(vidx, &slot.o_starts, &slot.o_stops);
+        Ok(())
+    }
+
+    fn n_batch_rows(&self, job_idx: usize, _slot: &FilledWindow) -> usize {
+        let job = &self.jobs[job_idx];
+        job.regions.len() * (job.s_hi - job.s_lo)
+    }
+
+    /// CONSUMER: generate the `[row_lo, row_hi)` slice of this window's rows. Output is
+    /// `(row_hi-row_lo)`-bounded — never whole-window (issue #284). Delegates to the
+    /// shared [`crate::ffi::generate_batch_core`].
+    fn generate(
+        &self,
+        job_idx: usize,
+        slot: &FilledWindow,
+        row_lo: usize,
+        row_hi: usize,
+    ) -> anyhow::Result<(Array1<u8>, Array1<i64>)> {
+        let ploidy = self.store.ploidy();
+        let job = &self.jobs[job_idx];
+        let c = &self.contigs[job.contig_idx];
+        let n_samples = job.s_hi - job.s_lo;
+        let n_rows = row_hi - row_lo;
+
+        // Per (region, sample) row bounds for rows [row_lo, row_hi), C-order
+        // (region, sample): window row bi = ri*n_samples + si -> region regions[bi/n_s].
+        let mut rb = Array2::<i32>::zeros((n_rows, 2));
+        for (i, bi) in (row_lo..row_hi).enumerate() {
+            let ri = bi / n_samples;
+            let (s, e) = job.regions[ri];
+            rb[[i, 0]] = s as i32;
+            rb[[i, 1]] = e as i32;
+        }
+
+        // CSR rows for this batch slice: [row_lo*ploidy, row_hi*ploidy).
+        let o_lo = row_lo * ploidy;
+        let o_hi = row_hi * ploidy;
+        let o_starts_b = &slot.o_starts[o_lo..o_hi];
+        let o_stops_b = &slot.o_stops[o_lo..o_hi];
+
+        // This contig's reference slice (offsets [0, len]); see the module note.
+        let ref_offsets = Array1::from(vec![0i64, c.ref_bytes.len() as i64]);
+        let ref_view = ndarray::ArrayView1::from(c.ref_bytes.as_slice());
+
+        Ok(crate::ffi::generate_batch_core(
+            self.store.geno_v_idxs(),
+            ploidy,
+            o_starts_b,
+            o_stops_b,
+            rb.view(),
+            self.v_starts.view(),
+            self.ilens.view(),
+            self.alt_alleles.view(),
+            self.alt_offsets.view(),
+            ref_view,
+            ref_offsets.view(),
+            self.pad_char,
+            self.parallel,
+        ))
+    }
+}
+
+/// Producer/consumer SVAR1 streamer (issue #283). See the module docs for the design.
+#[pyclass]
+pub struct Svar1StreamEngine {
+    core: StreamEngineCore<Svar1Backend>,
 }
 
 impl Svar1StreamEngine {
@@ -211,233 +236,28 @@ impl Svar1StreamEngine {
         for c in &contigs {
             store.set_contig_meta_rs(&c.name, c.contig_start, c.n_local, c.max_v_len);
         }
-        Self {
-            store: Arc::new(store),
-            contigs: Arc::new(contigs),
-            jobs: Arc::new(jobs),
-            phys_sample_idx: Arc::new(phys_sample_idx),
+        let backend = Svar1Backend {
+            store,
+            contigs,
+            jobs,
+            phys_sample_idx,
             v_starts,
             ilens,
             alt_alleles,
             alt_offsets,
             pad_char,
             parallel,
-            batch_size: batch_size.max(1),
-            state: Mutex::new(EngineState::new()),
-        }
-    }
-
-    /// Spawn the detached producer thread (once). Prefills `free` with 2 default slots,
-    /// then the producer fills window after window, blocked only by the free-slot pool.
-    fn ensure_started(&self, state: &mut EngineState) -> anyhow::Result<()> {
-        if state.started {
-            return Ok(());
-        }
-        state.started = true;
-
-        // 2 slots (ping-pong). Only 2 buffers ever exist, recycled between the two
-        // channels, so no `send` can block; memory is capped regardless of plan length.
-        let n_slots = 2usize;
-        let (tx_filled, rx_filled) = bounded::<FilledWindow>(n_slots);
-        let (tx_free, rx_free) = bounded::<FilledWindow>(n_slots);
-        for _ in 0..n_slots {
-            tx_free
-                .send(FilledWindow::default())
-                .expect("prefill free slots (receiver just created, cannot be closed)");
-        }
-
-        // `tx_filled` and `rx_free` are MOVED into the producer — it is their sole owner.
-        // When the producer returns (all jobs done, a `read_window` error via `?`, or a
-        // `recv`/`send` seeing the consumer gone), `tx_filled` drops and the consumer's
-        // `rx_filled.recv()` observes close as soon as the channel drains. No clone of
-        // `tx_filled` is held anywhere else, so shutdown-by-drop is by construction.
-        let store = Arc::clone(&self.store);
-        let jobs = Arc::clone(&self.jobs);
-        let contigs = Arc::clone(&self.contigs);
-        let phys_sample_idx = Arc::clone(&self.phys_sample_idx);
-
-        let handle = std::thread::Builder::new()
-            .name("gvl-svar1-stream-producer".into())
-            .spawn(move || -> anyhow::Result<()> {
-                for (job_idx, job) in jobs.iter().enumerate() {
-                    // Recycle a drained slot. Err => consumer is gone (engine dropped);
-                    // stop quietly and let the consumer's own outcome stand.
-                    let Ok(mut slot) = rx_free.recv() else {
-                        return Ok(());
-                    };
-
-                    let c = &contigs[job.contig_idx];
-                    // Borrow this window's physical samples from the single cohort-scale
-                    // map — no per-window owned copy (see the module memory note).
-                    let phys = &phys_sample_idx[job.s_lo..job.s_hi];
-                    let w = store.read_window(
-                        &c.name,
-                        &c.v_starts_c,
-                        &c.v_ends_c,
-                        &job.regions,
-                        phys,
-                    )?;
-                    slot.o_starts = w.o_starts;
-                    slot.o_stops = w.o_stops;
-                    slot.job_idx = job_idx;
-
-                    // Read-through prefetch: fault the EXACT pages the consumer will read
-                    // into the shared page cache (shared with the standalone
-                    // `svar1_prefetch_runs` FFI entry — see `prefetch_runs_core`'s
-                    // doc comment, `src/ffi/mod.rs`). `o_starts`/`o_stops` are absolute
-                    // indices into the mmap.
-                    let vidx = store.geno_v_idxs();
-                    crate::ffi::prefetch_runs_core(vidx, &slot.o_starts, &slot.o_stops);
-
-                    if tx_filled.send(slot).is_err() {
-                        return Ok(()); // consumer gone
-                    }
-                }
-                Ok(())
-            })
-            .map_err(|e| anyhow::anyhow!("failed to spawn svar1 streaming producer: {e}"))?;
-
-        state.tx_free = Some(tx_free);
-        state.rx_filled = Some(rx_filled);
-        state.producer = Some(handle);
-        Ok(())
-    }
-
-    /// The consumer, GIL-free. Returns:
-    ///   * `Some(Ok((data, offsets)))` — the next batch;
-    ///   * `Some(Err(_))` — a producer error/panic (join-then-classified);
-    ///   * `None` — the plan is exhausted (clean, no hang).
-    ///
-    /// Drains the current window batch-by-batch; when a window is spent it is recycled to
-    /// the producer and the next prefetched window is `recv`'d. On channel close the
-    /// producer is joined and classified before returning.
-    fn next_batch_core(&self) -> Option<anyhow::Result<(Array1<u8>, Array1<i64>)>> {
-        // Recover from a poisoned lock rather than propagating panic-on-panic.
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-
-        if state.done {
-            return None;
-        }
-        if let Err(e) = self.ensure_started(&mut state) {
-            state.done = true;
-            return Some(Err(e));
-        }
-
-        loop {
-            // 1. If the current window has rows left, generate the next batch.
-            let has_rows = match state.current.as_ref() {
-                Some(cur) => cur.next_row < cur.n_batch_rows,
-                None => false,
-            };
-            if has_rows {
-                return Some(self.generate_from_current(&mut state));
-            }
-
-            // 2. Current window is spent (or absent): recycle it, then fetch the next.
-            if let Some(spent) = state.current.take() {
-                if let Some(tx) = state.tx_free.as_ref() {
-                    // Always recycle (Err only if the producer already exited) so the
-                    // producer can finish rather than block on rx_free.recv().
-                    let _ = tx.send(spent.filled);
-                }
-            }
-
-            let recv = state
-                .rx_filled
-                .as_ref()
-                .expect("rx_filled set by ensure_started")
-                .recv();
-            match recv {
-                Ok(fw) => {
-                    let job = &self.jobs[fw.job_idx];
-                    let n_batch_rows = job.regions.len() * (job.s_hi - job.s_lo);
-                    state.current = Some(CurrentWindow {
-                        filled: fw,
-                        next_row: 0,
-                        n_batch_rows,
-                    });
-                    // Loop back to generate from the newly received window.
-                }
-                Err(_) => {
-                    // Channel closed => producer finished. JOIN FIRST, classify AFTER —
-                    // never return with the producer live and unjoined.
-                    state.done = true;
-                    if let Some(h) = state.producer.take() {
-                        return match h.join() {
-                            Err(_) => Some(Err(anyhow::anyhow!(
-                                "svar1 streaming producer thread panicked"
-                            ))),
-                            Ok(Err(e)) => Some(Err(e)),
-                            Ok(Ok(())) => None,
-                        };
-                    }
-                    return None;
-                }
-            }
-        }
-    }
-
-    /// Generate the next `batch_size`-bounded slice of the current window's rows. Output
-    /// is `(hi-lo)`-bounded — never whole-window (issue #284). Delegates to the shared
-    /// [`crate::ffi::generate_batch_core`].
-    fn generate_from_current(
-        &self,
-        state: &mut EngineState,
-    ) -> anyhow::Result<(Array1<u8>, Array1<i64>)> {
-        let ploidy = self.store.ploidy();
-
-        // Advance the cursor first (mutable borrow), then reborrow immutably to read.
-        let (row_lo, row_hi, job_idx) = {
-            let cur = state
-                .current
-                .as_mut()
-                .expect("generate_from_current called with a live current window");
-            let row_lo = cur.next_row;
-            let row_hi = (row_lo + self.batch_size).min(cur.n_batch_rows);
-            cur.next_row = row_hi;
-            (row_lo, row_hi, cur.filled.job_idx)
         };
-        let filled = &state.current.as_ref().unwrap().filled;
-        let job = &self.jobs[job_idx];
-        let c = &self.contigs[job.contig_idx];
-        let n_samples = job.s_hi - job.s_lo;
-        let n_rows = row_hi - row_lo;
-
-        // Per (region, sample) row bounds for rows [row_lo, row_hi), C-order
-        // (region, sample): window row bi = ri*n_samples + si -> region regions[bi/n_s].
-        let mut rb = Array2::<i32>::zeros((n_rows, 2));
-        for (i, bi) in (row_lo..row_hi).enumerate() {
-            let ri = bi / n_samples;
-            let (s, e) = job.regions[ri];
-            rb[[i, 0]] = s as i32;
-            rb[[i, 1]] = e as i32;
+        Self {
+            core: StreamEngineCore::new(Arc::new(backend), batch_size),
         }
+    }
 
-        // CSR rows for this batch slice: [row_lo*ploidy, row_hi*ploidy).
-        let o_lo = row_lo * ploidy;
-        let o_hi = row_hi * ploidy;
-        let o_starts_b = &filled.o_starts[o_lo..o_hi];
-        let o_stops_b = &filled.o_stops[o_lo..o_hi];
-
-        // This contig's reference slice (offsets [0, len]); see the module note.
-        let ref_offsets = Array1::from(vec![0i64, c.ref_bytes.len() as i64]);
-        let ref_view = ndarray::ArrayView1::from(c.ref_bytes.as_slice());
-
-        Ok(crate::ffi::generate_batch_core(
-            self.store.geno_v_idxs(),
-            ploidy,
-            o_starts_b,
-            o_stops_b,
-            rb.view(),
-            self.v_starts.view(),
-            self.ilens.view(),
-            self.alt_alleles.view(),
-            self.alt_offsets.view(),
-            ref_view,
-            ref_offsets.view(),
-            self.pad_char,
-            self.parallel,
-        ))
+    /// Test-only accessor mirroring the pyclass's `next_batch`, minus the numpy
+    /// marshaling — used directly by the `#[cfg(test)]` module below.
+    #[cfg(test)]
+    fn next_batch_core(&self) -> Option<anyhow::Result<(Array1<u8>, Array1<i64>)>> {
+        self.core.next_batch_core()
     }
 }
 
@@ -589,7 +409,7 @@ impl Svar1StreamEngine {
         &self,
         py: Python<'py>,
     ) -> PyResult<Option<(Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>)>> {
-        let out = py.detach(|| self.next_batch_core());
+        let out = py.detach(|| self.core.next_batch_core());
         match out {
             None => Ok(None),
             Some(Ok((data, offsets))) => {
@@ -1122,7 +942,11 @@ mod tests {
             let (d, o) = r.expect("no producer error");
             batches.push((d.to_vec(), o.to_vec()));
         }
-        assert_eq!(batches.len(), 1, "one batch for the single full-cohort window");
+        assert_eq!(
+            batches.len(),
+            1,
+            "one batch for the single full-cohort window"
+        );
 
         let exp_swapped = expected_window(&f, &[(0, 30)], &[1, 0]);
         let exp_identity = expected_window(&f, &[(0, 30)], &[0, 1]);
