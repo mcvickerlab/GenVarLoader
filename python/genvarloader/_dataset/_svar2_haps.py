@@ -1175,7 +1175,7 @@ class Svar2Haps(Haps[_H]):
         was called with the dataset's contigs), so ``contig_idx`` indexes it
         directly. Thin wrapper over :meth:`Reference._contig_slice` -- the shared
         convention every direct-store read backend should use (see also
-        ``_Svar1Backend.reconstruct_window`` in ``_streaming.py``).
+        ``_Svar1Backend.read_window``/``.generate_batch`` in ``_streaming.py``).
         """
         ref = self.reference
         assert ref is not None

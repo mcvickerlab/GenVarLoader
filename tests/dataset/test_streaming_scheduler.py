@@ -1,6 +1,6 @@
 import numpy as np
 import polars as pl
-from genvarloader._dataset._streaming import StreamingDataset
+from genvarloader._dataset._streaming import StreamingDataset, _parse_max_mem
 
 
 def _bed(rows):
@@ -74,3 +74,77 @@ def test_sort_order_is_duplicate_safe():
     flat_s = np.concatenate([b[2] for b in batches])
     cells = set(zip(flat_r.tolist(), flat_s.tolist()))
     assert cells == {(r, s) for r in range(n_regions) for s in range(n_samples)}
+
+
+def test_parse_max_mem_accepts_int_and_size_strings():
+    assert _parse_max_mem(2048) == 2048
+    assert _parse_max_mem("512MB") == 512 * 1024**2
+    assert _parse_max_mem("1g") == 1024**3
+    assert _parse_max_mem("2GiB") == 2 * 1024**3
+    assert _parse_max_mem("4096") == 4096
+
+
+def _injected_sds(n_regions, n_samples, ploidy=2, max_mem="512MB", contigs=("chr1",)):
+    """Build a StreamingDataset via the injected-callback path (no store) with all
+    regions on one contig, so we can inspect the window plan in isolation."""
+    bed = pl.DataFrame(
+        {
+            "chrom": [contigs[0]] * n_regions,
+            "chromStart": list(range(0, 100 * n_regions, 100)),
+            "chromEnd": list(range(100, 100 * n_regions + 100, 100)),
+        }
+    )
+    return StreamingDataset(
+        bed,
+        contigs=list(contigs),
+        n_samples=n_samples,
+        ploidy=ploidy,
+        max_mem=max_mem,
+        _reconstruct_window=lambda r, s: None,
+    )
+
+
+def test_plan_chunks_samples_under_a_tight_budget():
+    # ploidy=2 -> cell_bytes=32. max_mem tiny (2 KB) -> max_cells small, so a
+    # 1000-sample cohort must be split into multiple sample chunks per region window.
+    sds = _injected_sds(n_regions=4, n_samples=1000, max_mem=2048)
+    windows = list(sds._plan())
+    sample_chunk_sizes = {len(s) for _, s in windows}
+    assert max(sample_chunk_sizes) < 1000, (
+        "samples must be chunked under a tight budget"
+    )
+    # Every (region, sample) cell appears exactly once across the plan.
+    seen = set()
+    for r_idx, s_idx in windows:
+        for r in r_idx.tolist():
+            for s in s_idx.tolist():
+                assert (r, s) not in seen
+                seen.add((r, s))
+    assert len(seen) == 4 * 1000
+
+
+def test_plan_keeps_all_samples_when_they_fit():
+    # Generous budget -> a small cohort stays as one sample chunk per window.
+    sds = _injected_sds(n_regions=4, n_samples=8, max_mem="512MB")
+    for _, s_idx in sds._plan():
+        assert len(s_idx) == 8, "all samples should fit in one chunk under a big budget"
+
+
+def test_plan_is_single_contig_per_window():
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr2"],
+            "chromStart": [0, 100, 0],
+            "chromEnd": [100, 200, 100],
+        }
+    )
+    sds = StreamingDataset(
+        bed,
+        contigs=["chr1", "chr2"],
+        n_samples=4,
+        ploidy=2,
+        _reconstruct_window=lambda r, s: None,
+    )
+    for r_idx, _ in sds._plan():
+        contigs = sds._regions[r_idx, 0]
+        assert len(set(contigs.tolist())) == 1

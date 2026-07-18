@@ -48,6 +48,26 @@ def test_streaming_matches_written_all_cells(svar1_multicontig_fixture):
     }
 
 
+def test_backend_read_then_generate_matches_whole_window(svar1_multicontig_fixture):
+    """read_window + per-batch generate must reproduce the same bytes a single
+    whole-window reconstruction would, for every batch slice."""
+    f = svar1_multicontig_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path
+    ).with_seqs("haplotypes")
+    written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path).with_seqs(
+        "haplotypes"
+    )
+
+    for data, r_idx, s_idx in sds.to_iter(batch_size=3):
+        for i in range(len(r_idx)):
+            expected = written[int(r_idx[i]), int(s_idx[i])]
+            for h in range(sds.ploidy):
+                np.testing.assert_array_equal(
+                    np.asarray(data[i][h]), np.asarray(expected[h])
+                )
+
+
 def test_dataloader_len_matches_batches_yielded(svar1_multicontig_fixture):
     """`len(dl)` must count window-batched batches, not `ceil(cells/batch_size)`.
 
@@ -146,7 +166,7 @@ def test_streamingdataset_is_public_and_documented():
 
 
 def test_streaming_handles_mixed_contig_naming_style(svar1_mixed_naming_fixture):
-    """Regression test (final-review Finding 1): `_Svar1Backend.reconstruct_window`
+    """Regression test (final-review Finding 1): `_Svar1Backend.generate_batch`
     used to look up `self._ref.c_map.contigs.index(contig_name)`, where
     `contig_name` is the STORE's (unnormalized) contig name. But `Reference.from_path`
     normalizes its `c_map` to the FASTA's own naming style (UCSC `chr1` vs Ensembl

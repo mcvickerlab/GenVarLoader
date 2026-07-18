@@ -55,7 +55,7 @@ impl Svar1Store {
 
     /// Zero-copy borrow of the sparse genotype variant-index array -- the
     /// `geno_v_idxs` handed to the reconstruction kernel by
-    /// `reconstruct_haplotypes_svar1` (`src/ffi/mod.rs`). MUST stay a borrow of the
+    /// `svar1_generate_batch` (`src/ffi/mod.rs`). MUST stay a borrow of the
     /// reader's mmap'd `variant_idxs`, never an owned copy: a per-window `.to_vec()`
     /// here would silently reintroduce the sample-scale materialization the #275
     /// rewrite exists to avoid. That regression is invisible to an RSS high-water-mark
@@ -140,19 +140,12 @@ impl Svar1Store {
 
         // `find_ranges` emits C-order (region, sample, ploid), so batch row
         // bi = ri * n_samples + si and CSR row = bi * ploidy + p — an identity map.
-        let ploidy = b.ploidy;
-        let batch = b.n_ranges * b.n_samples;
-        let mut geno_offset_idx = ndarray::Array2::<i64>::zeros((batch, ploidy));
-        for bi in 0..batch {
-            for p in 0..ploidy {
-                geno_offset_idx[[bi, p]] = (bi * ploidy + p) as i64;
-            }
-        }
+        // Callers rebuild this locally over their batch slice (see
+        // `svar1_generate_batch`); no need to materialize it window-scale here.
 
         Ok(super::Svar1Window {
             o_starts: b.starts,
             o_stops: b.stops,
-            geno_offset_idx,
         })
     }
 }
@@ -202,7 +195,7 @@ mod tests {
     #[test]
     fn geno_v_idxs_borrows_the_mmap_not_a_copy() {
         // The scale-guard defect this catches: `Svar1Store::geno_v_idxs()` (or the
-        // `reconstruct_haplotypes_svar1` call site that uses it) reintroducing an
+        // `svar1_generate_batch` call site that uses it) reintroducing an
         // owned copy via `.to_vec()`. Pointer identity fails deterministically on
         // that regression; an RSS high-water-mark test cannot -- the copy is a few
         // KB, far below `ru_maxrss`'s page-granularity noise floor, so it never moves
@@ -245,11 +238,7 @@ mod tests {
             .unwrap();
 
         // batch = 1 region * 2 samples = 2 rows; 2 rows * ploidy 2 = 4 CSR rows.
-        assert_eq!(w.geno_offset_idx.shape(), &[2, 2]);
         assert_eq!(w.o_starts.len(), 4);
-        // geno_offset_idx is the identity bi*ploidy + p
-        assert_eq!(w.geno_offset_idx[[0, 0]], 0);
-        assert_eq!(w.geno_offset_idx[[1, 1]], 3);
         // hap0 -> [0,1); hap1 -> [1,1) empty; hap2 -> [1,3); hap3 -> [3,4)
         assert_eq!(w.o_starts, vec![0, 1, 1, 3]);
         assert_eq!(w.o_stops, vec![1, 1, 3, 4]);
@@ -275,5 +264,22 @@ mod tests {
         for (s, e) in w.o_starts.iter().zip(&w.o_stops) {
             assert_eq!(s, e, "empty contig must give in-bounds zero-length rows");
         }
+    }
+
+    #[test]
+    fn read_window_offsets_are_absolute_and_row_major() {
+        // Same 4-hap fixture as read_window_is_cartesian_and_borrows_the_mmap.
+        let tmp = tempfile::tempdir().unwrap();
+        write_raw::<i32>(tmp.path(), "variant_idxs.npy", &[0, 0, 1, 1]);
+        write_raw::<i64>(tmp.path(), "offsets.npy", &[0, 1, 1, 3, 4]);
+        let mut store = super::Svar1Store::open_meta(tmp.path().to_str().unwrap(), 2, 2).unwrap();
+        store.set_contig_meta_rs("chr1", 0, 2, 1);
+        let w = store
+            .read_window("chr1", &[10, 20], &[11, 21], &[(0, 30)], &[0, 1])
+            .unwrap();
+        // A batch [lo=1, hi=2) (row 1 only) selects CSR rows [1*2 .. 2*2) = [2, 4):
+        // o_starts[2..4] = [1, 3], o_stops[2..4] = [3, 4]  -> hap2, hap3.
+        assert_eq!(&w.o_starts[2..4], &[1, 3]);
+        assert_eq!(&w.o_stops[2..4], &[3, 4]);
     }
 }

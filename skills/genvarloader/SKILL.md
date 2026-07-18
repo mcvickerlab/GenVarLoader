@@ -372,12 +372,25 @@ Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (use
 
 ```python
 sds = gvl.StreamingDataset(
-    "rois.bed", reference="ref.fa", variants="normed.svar"
+    "rois.bed", reference="ref.fa", variants="normed.svar", max_mem="512MB"
 ).with_seqs("haplotypes")
 
 for data, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
     ...  # data: Ragged[S1], shape (batch, ploidy, ~length)
 ```
+
+**Peak memory is cohort-independent, bounded by two separate knobs.** `max_mem`
+(constructor arg, default `"512MB"`; `int` bytes or a size string like `"1g"`/`"2GiB"`)
+bounds the READ window's offsets buffer (the `o_start`/`o_stop` CSR-index pair for
+every `(region, sample, ploid)` cell in the window) -- `StreamingDataset` derives a
+region/sample chunking of the window from it, so the buffer never grows with the
+number of samples. Independently, `to_iter`'s `batch_size` bounds the GENERATION
+granularity: the real SVAR1 backend (`_Svar1Backend`) reads a window's offsets once
+via `read_window`, then reconstructs haplotypes one `batch_size` slice at a time via
+`generate_batch` -- output is never materialized for a whole window at once (issue
+#284). Peak memory is therefore `max_mem` (offsets) + `batch_size` (output), neither
+of which scales with cohort size. `_window_regions`/`_window_samples` (derived from
+`max_mem`) and `_max_mem_bytes` are internal, not user-set directly.
 
 **Current scope (this plan) — everything else raises rather than silently mis-computing:**
 - Variant source: `.svar` (SparseVar/SVAR1) only. VCF, PGEN, and `.svar2` inputs raise `NotImplementedError`.
@@ -388,7 +401,7 @@ for data, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
 - `to_dataloader(num_workers=0)` only — `num_workers > 0` raises `ValueError` (worker-process sharding is a later plan).
 - Same variant preconditions as `gvl.write`: normalized, bi-allelic, non-symbolic, non-breakend, left-aligned/atomized — **validated (raises `ValueError`), not fixed up**.
 
-**Iteration order:** region-major, batched so a single call never spans more than one contig (`_Svar1Backend.reconstruct_window` requires single-contig batches). `to_iter(..., return_indices=True)` (the default) yields `(data, region_idxs, sample_idxs)`; the indices are in the **caller's original BED-row order** (not sorted-storage order), matching `gvl.Dataset[r, s]` indexing. `sample_idxs` index into `sds.samples` — lexicographically-sorted sample names (matching `gvl.write()`'s convention), **not** the variant store's native (e.g. VCF column) order.
+**Iteration order:** region-major, batched so a single call never spans more than one contig (`_Svar1Backend.read_window`, which computes offsets, and `.generate_batch`, which materializes output, both require single-contig batches). `to_iter(..., return_indices=True)` (the default) yields `(data, region_idxs, sample_idxs)`; the indices are in the **caller's original BED-row order** (not sorted-storage order), matching `gvl.Dataset[r, s]` indexing. `sample_idxs` index into `sds.samples` — lexicographically-sorted sample names (matching `gvl.write()`'s convention), **not** the variant store's native (e.g. VCF column) order.
 
 **Tradeoff vs a written dataset:** zero preprocessing and zero disk footprint, but slower per-epoch — each window re-reads the live `.svar` store rather than hitting a pre-indexed on-disk dataset. Prefer a written `gvl.Dataset` for repeated-epoch training; reach for `StreamingDataset` for one-shot/inference workloads or when you can't afford (or don't want) the `gvl.write()` step.
 
@@ -486,6 +499,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - A non-`b"N"` `DummyVariant.alt` (or `.ref`) **is reverse-complemented** on negative-strand regions, exactly like a real variant allele. The default `b"N"` is rc-invariant; use it if you want a strand-neutral sentinel.
 - `unphased_union=True` + `with_seqs("haplotypes")` / `with_seqs("annotated")` raises — `unphased_union` only applies to `"variants"` / `"variant-windows"` output.
 - **`gvl.StreamingDataset` is iterable-only and `.svar`-only.** `sds[r, s]` raises `TypeError` — use `sds.to_iter(...)` (or `to_dataloader(...)` for torch); there is no `__iter__`. VCF/PGEN/`.svar2` variant sources, non-`"haplotypes"` `with_seqs` kinds, `jitter != 0`, and `num_workers > 0` all raise `NotImplementedError`/`ValueError`. See "`gvl.StreamingDataset` — write-free streaming (SVAR1 only)" above.
+- **`gvl.StreamingDataset(max_mem=...)` bounds read-window memory, not generation.** `max_mem` (default `"512MB"`) only sizes the offsets buffer for the read window; the per-batch haplotype output is bounded separately by `to_iter`'s `batch_size`. Both are cohort-size-independent, but they are two different budgets, not one.
 
 ## Maintaining this skill
 

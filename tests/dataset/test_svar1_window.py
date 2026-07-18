@@ -1,6 +1,6 @@
 """Task 4: SVAR1 window read -> sparse arrays -> reconstruct haplotypes via the
-existing kernel. Parity test: `_Svar1Backend.reconstruct_window` (reading a
-live `.svar` store directly, no on-disk gvl dataset) must produce
+existing kernel. Parity test: `_Svar1Backend.read_window` + `generate_batch`
+(reading a live `.svar` store directly, no on-disk gvl dataset) must produce
 byte-identical haplotypes to an independently-written+opened `gvl.Dataset`
 over the same store/bed/reference.
 """
@@ -11,37 +11,36 @@ import numpy as np
 import polars as pl
 
 import genvarloader as gvl
-from genvarloader._dataset._streaming import StreamingDataset, _Svar1Backend
+from genvarloader._dataset._streaming import _Svar1Backend
 
 
-def _assert_streamed_matches_written(backend, bed, contigs, written) -> None:
-    """Drive one region's samples through the streaming backend and assert every
-    haplotype is byte-identical to the independently written `gvl.Dataset`.
+def _assert_streamed_matches_written(backend, written) -> None:
+    """Drive one region's samples directly through `read_window` + `generate_batch`
+    (a single whole-window call, `lo=0, hi=n_rows`) and assert every haplotype is
+    byte-identical to the independently written `gvl.Dataset`.
 
     Haplotypes are ragged (indels change per-hap length), so a single `(r, s)`
     selection is a jagged `(ploidy, ~len)` Ragged that cannot be densified via
     `.to_numpy()`. Compare each haplotype's bytes individually -- the same
     byte-identical parity contract `test_svar2_dataset.py` checks, one hap at a
     time. `Ragged[h]` yields a 1-D dense `S1` array for hap `h`.
+
+    The caller's `bed` is always a single-region frame, so the backend's sorted
+    region index and the caller's (only) row both equal 0 -- no `_sort_order`
+    translation is needed here (that lives in `StreamingDataset`, not
+    `_Svar1Backend`).
     """
-    sds = StreamingDataset(
-        bed,
-        contigs=contigs,
-        n_samples=backend.n_samples,
-        ploidy=backend.ploidy,
-        _reconstruct_window=backend.reconstruct_window,
-    )
+    r_idx = np.array([0], dtype=np.intp)
+    s_idx = np.arange(backend.n_samples, dtype=np.intp)
+    n_rows = len(r_idx) * len(s_idx)
 
-    batches = list(
-        sds.to_iter(batch_size=backend.n_samples)
-    )  # one region, all samples in one batch
-    assert len(batches) == 1
-    data, r_idx, s_idx = batches[0]
-    assert len(r_idx) == backend.n_samples
+    o_starts, o_stops = backend.read_window(r_idx, s_idx)
+    data = backend.generate_batch(r_idx, s_idx, o_starts, o_stops, 0, n_rows)
+    assert len(data) == backend.n_samples
 
-    for i, (r, s) in enumerate(zip(r_idx, s_idx)):
-        streamed = data[i]
-        expected = written[int(r), int(s)]
+    for s in range(backend.n_samples):
+        streamed = data[s]
+        expected = written[0, s]
         for h in range(backend.ploidy):
             np.testing.assert_array_equal(
                 np.asarray(streamed[h]), np.asarray(expected[h])
@@ -51,9 +50,7 @@ def _assert_streamed_matches_written(backend, bed, contigs, written) -> None:
 def test_single_region_all_samples_matches_written(svar1_dataset_fixture):
     f = svar1_dataset_fixture
     backend = _Svar1Backend(f.svar_path, f.reference_path, f.contigs, f.bed)
-    _assert_streamed_matches_written(
-        backend, f.bed, f.contigs, f.dataset.with_seqs("haplotypes")
-    )
+    _assert_streamed_matches_written(backend, f.dataset.with_seqs("haplotypes"))
 
 
 def test_subcontig_region_exercises_window_filter(svar1_dataset_fixture, tmp_path):
@@ -76,4 +73,4 @@ def test_subcontig_region_exercises_window_filter(svar1_dataset_fixture, tmp_pat
     written = gvl.Dataset.open(out, reference=f.reference_path).with_seqs("haplotypes")
 
     backend = _Svar1Backend(f.svar_path, f.reference_path, f.contigs, bed)
-    _assert_streamed_matches_written(backend, bed, f.contigs, written)
+    _assert_streamed_matches_written(backend, written)
