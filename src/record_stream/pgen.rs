@@ -41,10 +41,13 @@
 //! `pgenlib` already assumes when the argument is omitted — confirmed empirically
 //! (`pixi run -e dev python`, constructing `pgenlib.PgenReader(path, n_samples)` with no
 //! `allele_idx_offsets` and reading a biallelic `.pgen` back correctly). **Multiallelic
-//! PGEN is out of scope for v1** and will misdecode silently if fed in (no validation
-//! here checks `.pvar` ALT cardinality) — a caller must pre-split with
-//! `bcftools norm -m-` / `plink2 --make-pgen` from split input, same requirement
-//! `gvl.write` already documents.
+//! PGEN is out of scope for v1** and would misdecode silently if fed in with no
+//! validation — so `contig_var_ranges` (below), which already parses every `.pvar` row
+//! for its POS->range scan, also checks each row's ALT column for a comma
+//! (multiallelic) and errors out at `PgenWindowFiller::new` construction time, before
+//! any pgenlib decode. A caller must pre-split with `bcftools norm -m-` /
+//! `plink2 --make-pgen` from split input, same requirement `gvl.write` already
+//! documents.
 //!
 //! ## Sample subsetting (`change_sample_subset`)
 //!
@@ -177,7 +180,7 @@ fn contig_var_ranges(pvar_path: &str) -> anyhow::Result<HashMap<String, (usize, 
         std::fs::File::open(pvar_path).with_context(|| format!("opening pvar {pvar_path}"))?;
     let mut lines = std::io::BufReader::new(file).lines();
 
-    let chrom_col = loop {
+    let (chrom_col, pos_col, alt_col) = loop {
         let line = lines.next().with_context(|| {
             format!("{pvar_path}: reached EOF without a '#CHROM' header line")
         })??;
@@ -189,21 +192,39 @@ fn contig_var_ranges(pvar_path: &str) -> anyhow::Result<HashMap<String, (usize, 
             "{pvar_path}: expected a '#CHROM' header line, found '{line}'"
         );
         let cols: Vec<&str> = line.split('\t').collect();
-        let idx = cols
-            .iter()
-            .position(|c| *c == "#CHROM")
-            .context(format!("{pvar_path}: header is missing a '#CHROM' column"))?;
-        break idx;
+        let find = |name: &str| {
+            cols.iter()
+                .position(|c| *c == name)
+                .with_context(|| format!("{pvar_path}: header is missing a {name:?} column"))
+        };
+        break (find("#CHROM")?, find("POS")?, find("ALT")?);
     };
 
     let mut ranges: HashMap<String, (usize, usize)> = HashMap::new();
     for (vidx, line) in lines.enumerate() {
         let line = line.with_context(|| format!("reading pvar {pvar_path}"))?;
-        let chrom = line
-            .split('\t')
-            .nth(chrom_col)
-            .with_context(|| format!("{pvar_path}: variant {vidx} is missing its #CHROM field"))?
-            .to_string();
+        let fields: Vec<&str> = line.split('\t').collect();
+        let chrom = *fields
+            .get(chrom_col)
+            .with_context(|| format!("{pvar_path}: variant {vidx} is missing its #CHROM field"))?;
+        let pos = *fields
+            .get(pos_col)
+            .with_context(|| format!("{pvar_path}: variant {vidx} is missing its POS field"))?;
+        let alt = *fields
+            .get(alt_col)
+            .with_context(|| format!("{pvar_path}: variant {vidx} is missing its ALT field"))?;
+        // PgenWindowFiller omits pgenlib's `allele_idx_offsets`, which is only correct
+        // for biallelic PGEN (see the module doc's "pgenlib reader construction"
+        // section) -- a multiallelic ALT (comma-separated) would silently misdecode
+        // downstream with no error, so reject it loudly here, at construction, before
+        // any decode happens.
+        anyhow::ensure!(
+            !alt.contains(','),
+            "PgenWindowFiller: multiallelic variant at {chrom}:{pos} (ALT='{alt}'); PGEN \
+             streaming v1 requires biallelic (split) input -- run `bcftools norm -m -` / \
+             `plink2 --make-pgen` on split records first."
+        );
+        let chrom = chrom.to_string();
 
         match ranges.get_mut(&chrom) {
             Some((_, hi)) => {
@@ -406,6 +427,19 @@ mod tests {
             .to_string()
     }
 
+    /// `tests/data/streaming/multiallelic.pvar` is a hand-written, plain-text `.pvar`
+    /// with a single multiallelic row (`ALT='G,T'`). No sibling `.pgen`/`.psam` exists
+    /// (and none is needed): the multiallelic guard lives in `contig_var_ranges`, which
+    /// `PgenWindowFiller::new` runs *before* ever touching the `.pgen` file (see
+    /// `new`'s body), so construction must fail on the `.pvar` scan alone.
+    fn multiallelic_pgen_fixture_path() -> String {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/streaming/multiallelic.pgen")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
     /// Fixture: `tests/data/streaming/two_var_two_sample.{pgen,pvar,psam}`, generated
     /// from the VCF fixture `two_var_two_sample.vcf.gz` via:
     /// `plink2 --vcf two_var_two_sample.vcf.gz --make-pgen --allow-extra-chr \
@@ -519,6 +553,23 @@ mod tests {
         assert!(
             format!("{err:?}").contains("single-chunk invariant"),
             "expected the single-chunk guard to fire, got: {err:?}"
+        );
+    }
+
+    /// A multiallelic `.pvar` (ALT with a comma) must be rejected loudly at
+    /// construction, never silently misdecoded (see the module doc's "pgenlib reader
+    /// construction" section on why omitting `allele_idx_offsets` is unsafe for
+    /// multiallelic input).
+    #[test]
+    fn pgen_filler_rejects_multiallelic_pvar_at_construction() {
+        let err = match PgenWindowFiller::new(&multiallelic_pgen_fixture_path(), 2) {
+            Ok(_) => panic!("expected PgenWindowFiller::new to reject a multiallelic .pvar"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("multiallelic") && msg.contains("biallelic"),
+            "expected a multiallelic/biallelic error message, got: {msg}"
         );
     }
 }
