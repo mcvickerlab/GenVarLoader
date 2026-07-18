@@ -366,21 +366,24 @@ Preconditions (all raise `ValueError` at construction):
 
 Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (uses `haplotype_lengths`, `n_variants`, and allele offset tables) — no Zipf-style worst-case slack.
 
-## `gvl.StreamingDataset` — write-free streaming (SVAR1 + VCF/BCF; PGEN pending)
+## `gvl.StreamingDataset` — write-free streaming (SVAR1 + VCF/BCF + PGEN)
 
-`gvl.StreamingDataset(regions, reference=..., variants=...)` iterates haplotype batches directly off a live variant source — **no `gvl.write()` step, no on-disk `.gvl` dataset**. `variants=` accepts a `.svar` (SparseVar/SVAR1) store directory, or a VCF/BCF path (`.vcf`, `.vcf.gz`/`.vcf.bgz`, `.bcf`; indexed, same as `gvl.write`). Both read paths go through a shared Rust `RecordStreamEngine` (a generic detached-producer/consumer engine core); for VCF/BCF it decodes each window via genoray's Rust `VcfRecordSource → ChunkAssembler → DenseChunk` pipeline. Haplotype output is byte-identical to `gvl.write(...)` + `Dataset.open(...)[r, s]` at `jitter=0`.
+`gvl.StreamingDataset(regions, reference=..., variants=...)` iterates haplotype batches directly off a live variant source — **no `gvl.write()` step, no on-disk `.gvl` dataset**. `variants=` accepts a `.svar` (SparseVar/SVAR1) store directory, a VCF/BCF path (`.vcf`, `.vcf.gz`/`.vcf.bgz`, `.bcf`; indexed, same as `gvl.write`), or a PGEN file-set (`.pgen` + sibling `.pvar` + `.psam`, same trio `gvl.write` expects; pass the `.pgen` path or a bare plink2 prefix). All three read paths go through a shared Rust `RecordStreamEngine` (a generic detached-producer/consumer engine core); VCF/BCF decodes each window via genoray's Rust `VcfRecordSource → ChunkAssembler → DenseChunk` pipeline, PGEN via `PgenRecordSource → ChunkAssembler → DenseChunk` (same transpose downstream — `DenseChunk` is source-agnostic). Haplotype output is byte-identical to `gvl.write(...)` + `Dataset.open(...)[r, s]` at `jitter=0`, for all three backends.
 
 ```python
 sds = gvl.StreamingDataset(
     "rois.bed", reference="ref.fa", variants="normed.svar", max_mem="512MB"
 ).with_seqs("haplotypes")
-# or: variants="normed.vcf.gz" / "normed.bcf" -- same API, no on-disk .svar needed
+# or: variants="normed.vcf.gz" / "normed.bcf" -- reads VCF/BCF directly, no on-disk .svar needed
+# or: variants="normed.pgen" -- reads a plink2 file-set directly (biallelic only, see below)
 
 for data, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
     ...  # data: Ragged[S1], shape (batch, ploidy, ~length)
 ```
 
 **htslib is now a hard runtime requirement.** The VCF/BCF path links `genoray_core`'s `conversion` feature (rust-htslib/C htslib), which is statically linked into the published wheel — no separate install step for users, but it means gvl's wheel now always bundles htslib rather than only needing it for `gvl.write`'s own VCF ingestion. For the VCF/BCF streaming path, genoray's `ChunkAssembler` applies **atomization (biallelic split) automatically on read**, but does **not** perform left-alignment or REF/FASTA check-ref, and does **not** validate the input — un-normalized or non-left-aligned VCF/BCF records are silently accepted (no `ValueError`) and will break byte-identical parity. Pre-normalize upstream with the same preprocessing `gvl.write` requires (left-aligned, non-symbolic, non-breakend, indexed — see "Variant preprocessing requirements" above); byte-identical parity is only defined against those normalized inputs.
+
+**PGEN streaming is biallelic-only, and — unlike VCF/BCF — multiallelic input is rejected loudly, not silently mis-parity'd.** `PgenWindowFiller` omits pgenlib's `allele_idx_offsets` (only correct for biallelic PGEN); it scans the `.pvar` once at construction and raises immediately if any row's ALT column contains a comma (multiallelic), before any genotype decode: `"PgenWindowFiller: multiallelic variant at {chrom}:{pos} (ALT='{alt}'); PGEN streaming v1 requires biallelic (split) input -- run bcftools norm -m - / plink2 --make-pgen on split records first."` Produce a valid file-set with `bcftools norm -m - normed.vcf.gz | bcftools norm -f ref.fa -Ob -o normed.bcf` (same normalization `gvl.write` requires) then `plink2 --bcf normed.bcf --make-pgen --out normed`. PGEN is diploid-only by format (no on-disk ploidy field); a caller-supplied `ploidy != 2` for a PGEN source raises `RuntimeError` at engine construction rather than silently misindexing genotypes. Only plain-text `.pvar` is supported (`.pvar.zst` raises a clear error). Known v1 perf limitation (not a correctness issue): each window decodes its whole contig from the first variant (`var_start` is coarse, not narrowed to the window) — see the benchmark harness note below.
 
 **Peak memory is cohort-independent, bounded by two separate knobs.** `max_mem`
 (constructor arg, default `"512MB"`; `int` bytes or a size string like `"1g"`/`"2GiB"`)
@@ -396,13 +399,16 @@ of which scales with cohort size. `_window_regions`/`_window_samples` (derived f
 `max_mem`) and `_max_mem_bytes` are internal, not user-set directly.
 
 **Current scope (this plan) — everything else raises rather than silently mis-computing:**
-- Variant source: `.svar` (SparseVar/SVAR1) or VCF/BCF. PGEN and `.svar2` inputs raise `NotImplementedError` (PGEN support is landing on the same branch/PR).
+- Variant source: `.svar` (SparseVar/SVAR1), VCF/BCF, or PGEN (biallelic only). `.svar2` inputs raise `NotImplementedError`.
 - `with_seqs("haplotypes")` only — no `"reference"`/`"annotated"`/`"variants"` output modes.
 - `jitter=0` only (the default); non-zero raises `NotImplementedError`.
 - Ragged output only (no `with_len`/`with_output_format("flat")`).
 - **Iterable-only, no random access** — `sds[r, s]` raises `TypeError`. `to_iter(batch_size=...)` is the one entry point; `to_torch_dataset()` and `to_dataloader()` are thin wrappers over it. There is no `__iter__`.
 - `to_dataloader(num_workers=0)` only — `num_workers > 0` raises `ValueError` (worker-process sharding is a later plan).
-- Variant preconditions differ by backend: `.svar` inputs share `gvl.write`'s preconditions (normalized, bi-allelic, non-symbolic, non-breakend, left-aligned/atomized) and are **validated (raises `ValueError`)** at store-build time, not fixed up here. VCF/BCF inputs get **atomization applied automatically on read** (genoray `ChunkAssembler`), but **left-alignment and REF/check-ref are not performed and not validated** — bad VCF/BCF input is silently accepted (no error) and breaks parity instead of raising; pre-normalize upstream (see the htslib paragraph above).
+- Variant preconditions differ by backend — this is the one place PGEN is stricter than VCF/BCF, not looser:
+  - `.svar`: shares `gvl.write`'s preconditions (normalized, bi-allelic, non-symbolic, non-breakend, left-aligned/atomized) and is **validated (raises `ValueError`)** at store-build time, not fixed up here.
+  - VCF/BCF: **atomization applied automatically on read** (genoray `ChunkAssembler`), but **left-alignment and REF/check-ref are not performed and not validated** — bad input is silently accepted (no error) and breaks parity instead of raising; pre-normalize upstream (see the htslib paragraph above).
+  - PGEN: **multiallelic input is validated and rejected** (raises, at construction, before any decode — see the PGEN paragraph above), but like VCF/BCF, left-alignment is not independently re-checked at stream time; feed it a plink2 file-set converted from already-normalized (bcftools-norm'd, split) input.
 
 **Iteration order:** region-major, batched so a single call never spans more than one contig (`_Svar1Backend.read_window`, which computes offsets, and `.generate_batch`, which materializes output, both require single-contig batches). `to_iter(..., return_indices=True)` (the default) yields `(data, region_idxs, sample_idxs)`; the indices are in the **caller's original BED-row order** (not sorted-storage order), matching `gvl.Dataset[r, s]` indexing. `sample_idxs` index into `sds.samples` — lexicographically-sorted sample names (matching `gvl.write()`'s convention), **not** the variant store's native (e.g. VCF column) order.
 
@@ -501,7 +507,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - `dummy_variant` padding applies to **both `"variants"` and `"variant-windows"`** outputs. Setting `dummy_variant=<DummyVariant>` and then indexing with any other kind (`"haplotypes"`, `"annotated"`, `"reference"`, or no seqs) raises `ValueError`. For token fields (`flank_tokens`, `ref_window`/`alt_window`, bare `ref`/`alt`), the dummy fill is all-`unknown_token` — the `DummyVariant.ref`/`.alt` bytes only set the dummy allele's byte-length, not the token value. `dummy_variant=False` with an unsupported output kind is silently ignored.
 - A non-`b"N"` `DummyVariant.alt` (or `.ref`) **is reverse-complemented** on negative-strand regions, exactly like a real variant allele. The default `b"N"` is rc-invariant; use it if you want a strand-neutral sentinel.
 - `unphased_union=True` + `with_seqs("haplotypes")` / `with_seqs("annotated")` raises — `unphased_union` only applies to `"variants"` / `"variant-windows"` output.
-- **`gvl.StreamingDataset` is iterable-only.** `sds[r, s]` raises `TypeError` — use `sds.to_iter(...)` (or `to_dataloader(...)` for torch); there is no `__iter__`. `variants=` accepts `.svar` or VCF/BCF (`.vcf[.gz]`/`.bcf`); PGEN and `.svar2` variant sources, non-`"haplotypes"` `with_seqs` kinds, `jitter != 0`, and `num_workers > 0` all raise `NotImplementedError`/`ValueError`. See "`gvl.StreamingDataset` — write-free streaming (SVAR1 + VCF/BCF; PGEN pending)" above.
+- **`gvl.StreamingDataset` is iterable-only.** `sds[r, s]` raises `TypeError` — use `sds.to_iter(...)` (or `to_dataloader(...)` for torch); there is no `__iter__`. `variants=` accepts `.svar`, VCF/BCF (`.vcf[.gz]`/`.bcf`), or PGEN (`.pgen`, biallelic only — multiallelic raises at construction); `.svar2` variant sources, non-`"haplotypes"` `with_seqs` kinds, `jitter != 0`, and `num_workers > 0` all raise `NotImplementedError`/`ValueError`. See "`gvl.StreamingDataset` — write-free streaming (SVAR1 + VCF/BCF + PGEN)" above.
 - **`gvl.StreamingDataset(max_mem=...)` bounds read-window memory, not generation.** `max_mem` (default `"512MB"`) only sizes the offsets buffer for the read window; the per-batch haplotype output is bounded separately by `to_iter`'s `batch_size`. Both are cohort-size-independent, but they are two different budgets, not one.
 
 ## Maintaining this skill
