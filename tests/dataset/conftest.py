@@ -442,6 +442,19 @@ class VcfSnpInsDelMultiFixture:
       pos=109  GTAC>G  ilen=-3  (deletion)
       pos=149  A>G     ilen=0   (multiallelic split, atom 1)
       pos=149  A>T     ilen=0   (multiallelic split, atom 2)
+
+    Same-POS tie-break CAVEAT: the streamed decoder (Rust `ChunkAssembler`)
+    orders same-POS atoms via a `BinaryHeap` keyed on `(pos, seq)` --
+    lexicographic ALT order -- while the written oracle (`gvl.write`) preserves
+    genoray's `.gvi` file-row order (VCF file order). For the pos=149 pair
+    above, `A>G` sorts before `A>T` BOTH lexicographically and in file order,
+    so the two mechanisms agree COINCIDENTALLY. This is not a guarantee: if a
+    future edit reorders these split ALTs, or adds a same-POS triallelic site
+    where lexicographic order != file order, the two decoders would legitimately
+    tie-break differently and `test_streaming_vcf_parity.py` would fail for a
+    reason unrelated to any real decoder bug. Don't reorder/add same-POS atoms
+    here without re-checking that lexicographic and file order still coincide
+    (or updating the parity test to tolerate a permutation).
     """
 
     vcf: Path

@@ -17,6 +17,13 @@ same FFI-ready arrays the reconstruction kernels consume) for the SAME VCF.
 Not in scope here (Task 8): end-to-end haplotype byte parity. This test never
 reconstructs a haplotype -- it only compares the two decoders' POS/ILEN/ALT
 tables.
+
+CAVEAT (see `vcf_snp_ins_del_multi` fixture docstring in conftest.py for
+detail): the streamed and written decoders tie-break same-POS multiallelic
+atoms by DIFFERENT mechanisms (Rust `(pos, seq)` heap order vs. genoray
+`.gvi` file-row order) and only agree for this fixture's pos=149 split
+because lexicographic and file order happen to coincide -- not a general
+guarantee.
 """
 
 from __future__ import annotations
