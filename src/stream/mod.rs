@@ -35,12 +35,14 @@
 use crossbeam_channel::bounded;
 
 /// One window of the fixed cartesian traversal: regions `[r_lo, r_hi)` on `contig_idx`,
-/// crossed with every sample.
+/// crossed with samples `[s_lo, s_hi)`.
 #[derive(Clone, Debug)]
 pub struct WindowSpec {
     pub contig_idx: usize,
     pub r_lo: usize,
     pub r_hi: usize,
+    pub s_lo: usize,
+    pub s_hi: usize,
 }
 
 /// A source that can fill a window buffer. `Sync` because the producer thread borrows
@@ -190,8 +192,20 @@ mod tests {
 
     fn windows(n: usize) -> Vec<WindowSpec> {
         (0..n)
-            .map(|i| WindowSpec { contig_idx: 0, r_lo: i * 10, r_hi: i * 10 + 10 })
+            .map(|i| WindowSpec {
+                contig_idx: 0,
+                r_lo: i * 10,
+                r_hi: i * 10 + 10,
+                s_lo: 0,
+                s_hi: 1,
+            })
             .collect()
+    }
+
+    #[test]
+    fn window_spec_carries_sample_span() {
+        let w = WindowSpec { contig_idx: 0, r_lo: 0, r_hi: 10, s_lo: 5, s_hi: 12 };
+        assert_eq!(w.s_hi - w.s_lo, 7);
     }
 
     #[test]
