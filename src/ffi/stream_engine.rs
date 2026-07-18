@@ -132,6 +132,26 @@ impl EngineState {
     }
 }
 
+impl Drop for EngineState {
+    /// Deterministic teardown: if the engine is dropped mid-stream (producer still live),
+    /// join the producer instead of leaking a detached thread. Dropping the free `Sender`
+    /// and the filled `Receiver` FIRST closes both channels, so a producer blocked on
+    /// `rx_free.recv()` (no free slot) or `tx_filled.send()` (consumer gone) unblocks and
+    /// returns `Ok(())` — the join then completes promptly (bounded by at most one
+    /// in-flight `read_window`). Cannot double-join: the normal exhaustion / error / panic
+    /// paths already `take()` the handle in `next_batch_core`, leaving `producer == None`
+    /// here. There is no permanent-wedge risk even without this (channel close always
+    /// unblocks the producer); this just makes teardown synchronous so threads can't
+    /// transiently accumulate under create/drop churn.
+    fn drop(&mut self) {
+        self.tx_free = None;
+        self.rx_filled = None;
+        if let Some(h) = self.producer.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 /// Producer/consumer SVAR1 streamer (issue #283). See the module docs for the design.
 #[pyclass]
 pub struct Svar1StreamEngine {
@@ -741,5 +761,268 @@ mod tests {
         let engine = build_engine(&f, Vec::new(), 8);
         assert!(engine.next_batch_core().is_none());
         assert!(engine.next_batch_core().is_none());
+    }
+
+    /// Serializes the two tests that swap the process-global panic hook. See the identical
+    /// guard in `crate::stream`'s tests: `take_hook`/`set_hook` is not atomic, so without
+    /// serialization one test's temporary silent hook can be observed by another as "the
+    /// previous hook" and restored permanently. Diagnostics-only, but no reason to leave it
+    /// racy. A panicking test poisons the mutex; recover via `into_inner()`.
+    static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// I1 (error branch): a producer `read_window` error must surface through the
+    /// consumer's join-then-classify path as `Some(Err(_))` — NOT a clean/empty EOF and
+    /// NOT a hang. Mirrors `run_windows`' `FailingBackend` regression, adapted to the
+    /// engine. Here the contig is registered with `n_local=5` but its `v_starts_c` has
+    /// length 2, so `Svar1Store::read_window` bails (`... has n_local=5 but got v_starts=2`),
+    /// the producer returns `Err`, and the classify `Ok(Err(e))` branch fires.
+    #[test]
+    fn svar1_stream_engine_producer_error_surfaces_not_eof() {
+        let f = fixture();
+        let bad_contig = ContigData {
+            name: "chr1".into(),
+            contig_start: 0,
+            n_local: 5, // deliberately mismatched vs v_starts_c.len() == 2
+            max_v_len: 1,
+            v_starts_c: vec![10, 20],
+            v_ends_c: vec![11, 21],
+            ref_bytes: f.ref_bytes.clone(),
+        };
+        let jobs = vec![WindowJob {
+            contig_idx: 0,
+            regions: vec![(0, 30)],
+            phys_samples: vec![0, 1],
+        }];
+        let store = Svar1Store::open_meta(&f.path, 2, 2).unwrap();
+        let engine = Svar1StreamEngine::build(
+            store,
+            vec![bad_contig],
+            jobs,
+            f.v_starts.clone(),
+            f.ilens.clone(),
+            f.alt_alleles.clone(),
+            f.alt_offsets.clone(),
+            b'N',
+            false,
+            8,
+        );
+
+        match engine.next_batch_core() {
+            Some(Err(e)) => {
+                let msg = format!("{e:?}");
+                assert!(
+                    msg.contains("n_local"),
+                    "expected the read_window error to propagate, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("panicked"),
+                    "an fill() Err must classify as Ok(Err), NOT the panic branch: {msg}"
+                );
+            }
+            other => panic!(
+                "producer error must surface as Some(Err), not {:?}",
+                other.map(|r| r.is_ok())
+            ),
+        }
+        // After the error the engine is `done`: further pulls are clean None, never a hang.
+        assert!(engine.next_batch_core().is_none());
+        assert!(engine.next_batch_core().is_none());
+    }
+
+    /// I1 (panic branch): a producer PANIC must surface through join-then-classify as the
+    /// `Err(_)` ("producer thread panicked") branch — distinct from the `Ok(Err)` error
+    /// case above — and must not hang. Mirrors `run_windows`' `PanickingBackend`. The
+    /// panic is induced with a job whose `contig_idx` is out of range of the engine's
+    /// `contigs` vec, so the producer's `&contigs[job.contig_idx]` is a clean, fully
+    /// in-our-own-code `Vec` bounds-check panic (no dependence on genoray internals / no
+    /// corrupt store) that unwinds the producer thread and is caught by `.join() == Err`.
+    #[test]
+    fn svar1_stream_engine_producer_panic_surfaces_not_hang() {
+        // Serialize the global panic-hook swap; recover from a poisoned lock.
+        let _guard = PANIC_HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let f = fixture();
+        // Only contig index 0 exists; this job points at 5 -> producer panics on index.
+        let jobs = vec![WindowJob {
+            contig_idx: 5,
+            regions: vec![(0, 30)],
+            phys_samples: vec![0, 1],
+        }];
+        let engine = build_engine(&f, jobs, 8);
+
+        // Silence the deliberate producer-thread panic's backtrace on stderr.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = engine.next_batch_core();
+        std::panic::set_hook(prev_hook);
+
+        match outcome {
+            Some(Err(e)) => {
+                let msg = format!("{e:?}");
+                assert!(
+                    msg.contains("panicked"),
+                    "a producer panic must hit the join-classify panic branch, got: {msg}"
+                );
+            }
+            other => panic!(
+                "producer panic must surface as Some(Err(panicked)), not {:?}",
+                other.map(|r| r.is_ok())
+            ),
+        }
+        // `done` after the panic: further pulls are clean None, never a hang or re-join.
+        assert!(engine.next_batch_core().is_none());
+    }
+
+    /// I2: multi-contig per-contig reference. Two contigs with DISTINGUISHABLE references
+    /// (chr1 = all 'G', chr2 = all 'T'); a job on each. The chr2 window's output must be
+    /// reconstructed against chr2's ref slice, NOT chr1's (the bug a single engine-level
+    /// `ref_` would cause). An empty hap on chr2 yields pure chr2 ref bytes, making the ref
+    /// choice directly observable. Asserts the engine's chr2 batch equals a direct generate
+    /// with chr2's ref AND differs from the same generate fed chr1's ref.
+    #[test]
+    fn svar1_stream_engine_uses_per_contig_reference() {
+        // Store: 1 sample x ploidy 2 -> 2 haps. Global var 0 on chr1, global var 1 on chr2.
+        //   hap0 -> variant_idxs[0..1] = [0] (chr1 var);  hap1 -> [1..2] = [1] (chr2 var)
+        let tmp = tempfile::tempdir().unwrap();
+        write_raw::<i32>(tmp.path(), "variant_idxs.npy", &[0, 1]);
+        write_raw::<i64>(tmp.path(), "offsets.npy", &[0, 1, 2]);
+        let path = tmp.path().to_str().unwrap().to_string();
+
+        // Global variant tables: var0 @ chr1 pos10 alt 'A'; var1 @ chr2 pos5 alt 'C'.
+        let v_starts = Array1::from(vec![10i32, 5]);
+        let ilens = Array1::from(vec![0i32, 0]);
+        let alt_alleles = Array1::from(vec![b'A', b'C']);
+        let alt_offsets = Array1::from(vec![0i64, 1, 2]);
+        let chr1_ref = vec![b'G'; 20];
+        let chr2_ref = vec![b'T'; 20];
+
+        let chr1 = ContigData {
+            name: "chr1".into(),
+            contig_start: 0,
+            n_local: 1,
+            max_v_len: 1,
+            v_starts_c: vec![10],
+            v_ends_c: vec![11],
+            ref_bytes: chr1_ref.clone(),
+        };
+        let chr2 = ContigData {
+            name: "chr2".into(),
+            contig_start: 1, // chr2's first global variant id is 1
+            n_local: 1,
+            max_v_len: 1,
+            v_starts_c: vec![5],
+            v_ends_c: vec![6],
+            ref_bytes: chr2_ref.clone(),
+        };
+
+        // Jobs: window on chr1 (region [0,20)), then on chr2 (region [0,10)).
+        let jobs = vec![
+            WindowJob {
+                contig_idx: 0,
+                regions: vec![(0, 20)],
+                phys_samples: vec![0],
+            },
+            WindowJob {
+                contig_idx: 1,
+                regions: vec![(0, 10)],
+                phys_samples: vec![0],
+            },
+        ];
+
+        let store = Svar1Store::open_meta(&path, 1, 2).unwrap();
+        let engine = Svar1StreamEngine::build(
+            store,
+            vec![chr1, chr2],
+            jobs,
+            v_starts.clone(),
+            ilens.clone(),
+            alt_alleles.clone(),
+            alt_offsets.clone(),
+            b'N',
+            false,
+            1000,
+        );
+
+        let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
+        while let Some(r) = engine.next_batch_core() {
+            let (d, o) = r.expect("no producer error");
+            batches.push((d.to_vec(), o.to_vec()));
+        }
+        assert_eq!(batches.len(), 2, "one batch per window");
+
+        // Direct chr2-window generate with the CORRECT (chr2) ref, and with the WRONG
+        // (chr1) ref, on an independent store with both contigs registered.
+        let direct = |ref_bytes: &[u8]| -> (Vec<u8>, Vec<i64>) {
+            let mut s = Svar1Store::open_meta(&path, 1, 2).unwrap();
+            s.set_contig_meta_rs("chr1", 0, 1, 1);
+            s.set_contig_meta_rs("chr2", 1, 1, 1);
+            let w = s.read_window("chr2", &[5], &[6], &[(0, 10)], &[0]).unwrap();
+            // 1 region * 1 sample = 1 row; region bounds [0, 10).
+            let mut rb = Array2::<i32>::zeros((1, 2));
+            rb[[0, 0]] = 0;
+            rb[[0, 1]] = 10;
+            let ref_offsets = Array1::from(vec![0i64, ref_bytes.len() as i64]);
+            let (data, offs) = crate::ffi::generate_batch_core(
+                &s,
+                &w.o_starts,
+                &w.o_stops,
+                rb.view(),
+                v_starts.view(),
+                ilens.view(),
+                alt_alleles.view(),
+                alt_offsets.view(),
+                ndarray::ArrayView1::from(ref_bytes),
+                ref_offsets.view(),
+                b'N',
+                false,
+            );
+            (data.to_vec(), offs.to_vec())
+        };
+
+        let exp_correct = direct(&chr2_ref);
+        let exp_wrong = direct(&chr1_ref);
+        assert_ne!(
+            exp_correct, exp_wrong,
+            "sanity: chr1 vs chr2 ref must produce different output (else the test proves nothing)"
+        );
+        assert_eq!(
+            batches[1], exp_correct,
+            "chr2 window must reconstruct against chr2's ref slice"
+        );
+        assert_ne!(
+            batches[1], exp_wrong,
+            "chr2 window must NOT use chr1's ref (the single-engine-ref bug)"
+        );
+        // The chr2 empty hap (hap0, no chr2 variant) is pure chr2 ref ('T'), never 'G'.
+        assert!(
+            batches[1].0.contains(&b'T') && !batches[1].0.contains(&b'G'),
+            "chr2 output must contain chr2 ref bytes ('T') and none of chr1's ('G')"
+        );
+    }
+
+    /// M1: dropping the engine mid-stream (producer still live/blocked) must not hang and
+    /// must not leak the detached thread — `Drop for EngineState` closes the channels and
+    /// joins. A 4-window plan with `batch_size=1`: after pulling ONE row the producer has
+    /// filled the 2 prefill slots and is blocked on `rx_free.recv()` for a third; dropping
+    /// the engine here closes `free`, unblocking it. If the join wedged, this test (and the
+    /// 20x race loop) would hang.
+    #[test]
+    fn svar1_stream_engine_drop_midstream_joins_cleanly() {
+        let f = fixture();
+        let jobs = (0..4)
+            .map(|_| WindowJob {
+                contig_idx: 0,
+                regions: vec![(0, 30)],
+                phys_samples: vec![0, 1],
+            })
+            .collect();
+        let engine = build_engine(&f, jobs, 1);
+        let first = engine.next_batch_core();
+        assert!(
+            matches!(first, Some(Ok(_))),
+            "first pull must yield a batch"
+        );
+        // `engine` drops here with the producer still live -> Drop must join, not hang.
+        drop(engine);
     }
 }
