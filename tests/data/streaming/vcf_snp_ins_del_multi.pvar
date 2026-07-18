@@ -1,0 +1,9 @@
+##contig=<ID=chr1,length=250>
+##bcftools_viewVersion=1.23.1+htslib-1.23.1
+##bcftools_viewCommand=view -Oz -o /tmp/vcf_fixture_gen/vcf_snp_ins_del_multi.vcf.gz /tmp/vcf_fixture_gen/final.vcf; Date=Sat Jul 18 02:34:16 2026
+#CHROM	POS	ID	REF	ALT
+chr1	30	.	A	G
+chr1	70	.	C	CAT
+chr1	110	.	GTAC	G
+chr1	150	.	A	G
+chr1	150	.	A	T

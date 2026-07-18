@@ -660,3 +660,117 @@ def vcf_multi_contig(tmp_path_factory) -> VcfMultiContigFixture:
         sample_names=["s0", "s1", "s2"],
         regions=regions,
     )
+
+
+@dataclass(slots=True)
+class PgenSnpInsDelMultiFixture:
+    """PGEN-source counterpart to `vcf_snp_ins_del_multi`, for Task 12's PGEN
+    parity gates (issue #276). Points at the committed
+    `tests/data/streaming/vcf_snp_ins_del_multi.{pgen,pvar,psam}` fileset,
+    generated via:
+
+        plink2 --vcf tests/data/streaming/vcf_snp_ins_del_multi.vcf.gz \\
+               --make-pgen --allow-extra-chr --output-chr chrM \\
+               --out tests/data/streaming/vcf_snp_ins_del_multi
+
+    (same `--output-chr chrM` convention Task 10 used for
+    `two_var_two_sample.pgen`, needed to keep the `chr1` name rather than
+    plink2's default un-prefixed human-contig coding). The `.pvar` carries
+    the SAME 5 records (POS 30/70/110/150/150, same REF/ALT) as
+    `vcf_snp_ins_del_multi`'s VCF -- see that fixture's docstring for the
+    full variant table and the same-POS tie-break caveat, which applies
+    identically here since both decoders read the same already-split input.
+    SAME `_VCF_PARITY_REF` reference/contig/samples/regions as
+    `vcf_snp_ins_del_multi`, so `vcf_snp_ins_del_multi_regions` is reusable
+    unmodified for PGEN multi-region coverage.
+    """
+
+    pgen: Path
+    fasta: Path
+    contig: str
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def pgen_snp_ins_del_multi(tmp_path_factory) -> PgenSnpInsDelMultiFixture:
+    pgen = (
+        Path(__file__).parent.parent
+        / "data"
+        / "streaming"
+        / "vcf_snp_ins_del_multi.pgen"
+    )
+
+    d = tmp_path_factory.mktemp("pgen_snp_ins_del_multi_fasta")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{_VCF_PARITY_REF}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(_VCF_PARITY_REF)]}
+    )
+
+    return PgenSnpInsDelMultiFixture(
+        pgen=pgen,
+        fasta=fasta,
+        contig="chr1",
+        n_samples=3,
+        ploidy=2,
+        sample_names=["s0", "s1", "s2"],
+        regions=regions,
+    )
+
+
+@dataclass(slots=True)
+class PgenMultiContigFixture:
+    """PGEN-source counterpart to `vcf_multi_contig`, for Task 12's
+    multi-contig end-to-end PGEN parity coverage (issue #276). Converts that
+    fixture's VCF via `plink2 --make-pgen` into a fresh `tmp_path_factory`
+    dir at fixture time (no binary needs committing -- `vcf_multi_contig`'s
+    VCF is itself built inline, so re-deriving the PGEN alongside it keeps
+    the two fixtures' variant data trivially in sync). Same 2-contig SNP/
+    INS/DEL records, samples, and regions as `vcf_multi_contig`.
+    """
+
+    pgen: Path
+    fasta: Path
+    contigs: list[str]
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def pgen_multi_contig(
+    vcf_multi_contig: VcfMultiContigFixture, tmp_path_factory
+) -> PgenMultiContigFixture:
+    d = tmp_path_factory.mktemp("pgen_mc")
+    out_prefix = d / "mc"
+    subprocess.run(
+        [
+            "plink2",
+            "--vcf",
+            str(vcf_multi_contig.vcf),
+            "--make-pgen",
+            "--allow-extra-chr",
+            "--output-chr",
+            "chrM",
+            "--out",
+            str(out_prefix),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    return PgenMultiContigFixture(
+        pgen=out_prefix.with_suffix(".pgen"),
+        fasta=vcf_multi_contig.fasta,
+        contigs=vcf_multi_contig.contigs,
+        n_samples=vcf_multi_contig.n_samples,
+        ploidy=vcf_multi_contig.ploidy,
+        sample_names=vcf_multi_contig.sample_names,
+        regions=vcf_multi_contig.regions,
+    )
