@@ -398,3 +398,85 @@ def streaming_vcf_fixture(tmp_path_factory) -> StreamingVcfFixture:
         ploidy=2,
         regions=regions,
     )
+
+
+# 250bp reference for the Task 7 parity-gate fixture (issue #276). Built once via
+# vcfixture's `ReferenceBuilder(seed=7)` + explicit overrides at each variant locus
+# (anchor bases pinned to match the VCF's REF alleles, flank-guard bases pinned to
+# something other than the indel's trailing base to prevent `bcftools norm`
+# left-alignment from silently shifting a variant off its intended position) --
+# see `.superpowers/sdd/task-7-report.md` for the exact generation script. Stored as
+# a literal here (like `_SVAR1_STREAM_REF` above) so the fixture doesn't need a
+# checked-in FASTA binary; only the harder-to-regenerate VCF is committed.
+_VCF_PARITY_REF = (
+    "TGGTGTTAACCTTACTATACTCCCGCTCCAGGGTTTGGCTCATATGAACAAGTCTTTGCG"
+    "CCCATAAAGCTAGCCAGTGAGCTTAGTTGGAGCAAGGGGTGCGGAAGCGGTACTCCGTCG"
+    "CGCGGGTAGCCAACTACTTAAGACCTAGGATTCTGTTGCAGATTAGAACTTGGGACTCAA"
+    "GATTGCTGCCCTAAGCTATACTAGGCAGCTGCAGCGTCTGGTTTTACTCAGTGTGATCTT"
+    "TATGCTTGAG"
+)
+assert len(_VCF_PARITY_REF) == 250
+
+
+@dataclass(slots=True)
+class VcfSnpInsDelMultiFixture:
+    """Task 7 (issue #276) parity-gate fixture: a richer VCF than
+    `streaming_vcf_fixture` covering a SNP, an insertion (ILEN > 0), a deletion
+    (ILEN < 0), and a multiallelic site (2 ALTs, pre-split biallelic by
+    `bcftools norm -m -` since `gvl.write` rejects multi-allelic records) across
+    3 samples -- exercises ILEN's sign both ways plus the biallelic-split path
+    on the SAME position (both split atoms anchor at 0-based pos 149).
+
+    Committed under `tests/data/streaming/vcf_snp_ins_del_multi.vcf.gz` (+ `.tbi`)
+    already left-aligned/atomized/split via `bcftools norm -f <ref> -a
+    --atom-overlaps . -f <ref> -m -` against `_VCF_PARITY_REF`, so both the
+    written-dataset oracle (`gvl.write`, Python cyvcf2 decode) and the streamed
+    table (`RecordStreamEngine.debug_decode_window`, Rust `ChunkAssembler`
+    decode) read the identical already-normalized records -- the differential
+    test is checking that two INDEPENDENT decoders agree on an already-atomic
+    input, not asking either one to normalize anything.
+
+    Variants (0-based pos, REF>ALT, ilen):
+      pos=29   A>G     ilen=0   (SNP)
+      pos=69   C>CAT   ilen=+2  (insertion)
+      pos=109  GTAC>G  ilen=-3  (deletion)
+      pos=149  A>G     ilen=0   (multiallelic split, atom 1)
+      pos=149  A>T     ilen=0   (multiallelic split, atom 2)
+    """
+
+    vcf: Path
+    fasta: Path
+    contig: str
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def vcf_snp_ins_del_multi(tmp_path_factory) -> VcfSnpInsDelMultiFixture:
+    vcf = (
+        Path(__file__).parent.parent
+        / "data"
+        / "streaming"
+        / "vcf_snp_ins_del_multi.vcf.gz"
+    )
+
+    d = tmp_path_factory.mktemp("vcf_snp_ins_del_multi_fasta")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{_VCF_PARITY_REF}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(_VCF_PARITY_REF)]}
+    )
+
+    return VcfSnpInsDelMultiFixture(
+        vcf=vcf,
+        fasta=fasta,
+        contig="chr1",
+        n_samples=3,
+        ploidy=2,
+        sample_names=["s0", "s1", "s2"],
+        regions=regions,
+    )

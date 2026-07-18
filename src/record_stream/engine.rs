@@ -87,6 +87,21 @@ struct RecordBackend {
     parallel: bool,
 }
 
+impl RecordBackend {
+    /// Test-only accessor (issue #276 task 7): decode `job`'s window into a fresh scratch
+    /// `DecodedWindow` via the filler, bypassing the producer/consumer channel machinery
+    /// entirely — no genotype CSR generation, just the local static table. Backs
+    /// `RecordStreamEngine::debug_decode_window`, the parity gate that pins the streamed
+    /// window's local variant table against the written dataset's stored variant table for
+    /// the same VCF (see that pymethod's doc comment for why this exists).
+    fn debug_fill(&self, job: &RecordJob) -> anyhow::Result<DecodedWindow> {
+        let c = &self.contigs[job.contig_idx];
+        let mut slot = DecodedWindow::default();
+        self.filler.fill(job, c, &mut slot)?;
+        Ok(slot)
+    }
+}
+
 impl EngineBackend for RecordBackend {
     type Slot = DecodedWindow;
 
@@ -366,6 +381,55 @@ impl RecordStreamEngine {
             }
             Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
         }
+    }
+
+    /// **Test-only accessor** (issue #276 task 7 — the streaming-vs-write-path parity
+    /// gate). Runs exactly ONE `WindowFiller::fill` for the window described by
+    /// `(contig_idx, region_starts/region_ends, s_lo, s_hi)` into a scratch
+    /// `DecodedWindow` and returns its local static table `(v_starts, ilens,
+    /// alt_alleles, alt_offsets)` — NO genotype CSR generation/haplotype reconstruction,
+    /// unlike `next_batch`. This bypasses the producer/consumer plan entirely (the job
+    /// need not be part of the engine's constructed `jobs` list at all), so it can be
+    /// called ad hoc against any window for a quick table-only decode.
+    ///
+    /// Exists to pin the #1 streaming-vs-write-path risk at the cheapest layer, BEFORE
+    /// reconstruction: genoray's Rust `ChunkAssembler` (this engine's decoder) and
+    /// gvl.write's Python cyvcf2 + `dense2sparse` decoder are independent
+    /// implementations, and a divergence between them (e.g. in atomization/left-align/
+    /// check-ref handling) is far cheaper to catch here — a plain array comparison of
+    /// the variant table — than after it has propagated into an opaque haplotype
+    /// byte-diff. See `tests/dataset/test_streaming_vcf_parity.py`.
+    ///
+    /// Ships in the production build (not `#[cfg(test)]`) because it must be callable
+    /// from Python test code, but it is documented as test-only: no production code path
+    /// calls it — they only ever need `next_batch`'s CSR-woven output.
+    #[pyo3(signature = (contig_idx, region_starts, region_ends, s_lo, s_hi))]
+    #[allow(clippy::too_many_arguments)]
+    fn debug_decode_window(
+        &self,
+        contig_idx: usize,
+        region_starts: Vec<u32>,
+        region_ends: Vec<u32>,
+        s_lo: usize,
+        s_hi: usize,
+    ) -> PyResult<(Vec<i32>, Vec<i32>, Vec<u8>, Vec<i64>)> {
+        if region_starts.len() != region_ends.len() {
+            return Err(PyValueError::new_err(
+                "debug_decode_window: region_starts and region_ends must have the same length",
+            ));
+        }
+        let regions: Vec<(u32, u32)> = region_starts.into_iter().zip(region_ends).collect();
+        let job = RecordJob {
+            contig_idx,
+            regions,
+            s_lo,
+            s_hi,
+        };
+        let backend = Arc::clone(self.core.backend());
+        let slot = backend
+            .debug_fill(&job)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok((slot.v_starts, slot.ilens, slot.alt_alleles, slot.alt_offsets))
     }
 }
 

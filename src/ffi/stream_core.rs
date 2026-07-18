@@ -151,6 +151,15 @@ impl<B: EngineBackend> StreamEngineCore<B> {
         }
     }
 
+    /// Test/debug-only escape hatch: expose the shared backend handle directly, bypassing
+    /// the producer/consumer channel machinery entirely. Used by
+    /// `RecordStreamEngine::debug_decode_window` (issue #276 task 7) to run a single
+    /// `WindowFiller::fill` against a scratch slot for parity testing — production code
+    /// only ever drives the backend through `next_batch_core`.
+    pub(crate) fn backend(&self) -> &Arc<B> {
+        &self.backend
+    }
+
     /// Spawn the detached producer thread (once). Prefills `free` with 2 default slots,
     /// then the producer fills window after window, blocked only by the free-slot pool.
     fn ensure_started(&self, state: &mut EngineState<B::Slot>) -> anyhow::Result<()> {
