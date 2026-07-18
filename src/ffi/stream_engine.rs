@@ -424,7 +424,8 @@ impl Svar1StreamEngine {
         let ref_view = ndarray::ArrayView1::from(c.ref_bytes.as_slice());
 
         Ok(crate::ffi::generate_batch_core(
-            &self.store,
+            self.store.geno_v_idxs(),
+            ploidy,
             o_starts_b,
             o_stops_b,
             rb.view(),
@@ -675,7 +676,8 @@ mod tests {
         }
         let ref_offsets = Array1::from(vec![0i64, f.ref_bytes.len() as i64]);
         let (data, offs) = crate::ffi::generate_batch_core(
-            &store,
+            store.geno_v_idxs(),
+            store.ploidy(),
             &w.o_starts,
             &w.o_stops,
             rb.view(),
@@ -1018,7 +1020,8 @@ mod tests {
             rb[[0, 1]] = 10;
             let ref_offsets = Array1::from(vec![0i64, ref_bytes.len() as i64]);
             let (data, offs) = crate::ffi::generate_batch_core(
-                &s,
+                s.geno_v_idxs(),
+                s.ploidy(),
                 &w.o_starts,
                 &w.o_stops,
                 rb.view(),

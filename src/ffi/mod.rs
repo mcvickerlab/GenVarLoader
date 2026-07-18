@@ -978,7 +978,8 @@ pub fn svar1_prefetch_runs<'py>(
 /// caller / the store contract), so it returns the owned arrays directly.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_batch_core(
-    store: &crate::svar1::store::Svar1Store,
+    geno_v_idxs: &[i32],
+    ploidy: usize,
     o_starts_b: &[i64],
     o_stops_b: &[i64],
     region_bounds_b: ndarray::ArrayView2<i32>,
@@ -995,7 +996,6 @@ pub(crate) fn generate_batch_core(
     use crate::reconstruct;
 
     let batch = region_bounds_b.nrows();
-    let ploidy = store.ploidy();
     let n_work = batch * ploidy;
 
     // Per-row region bounds (already (region, sample)-expanded by the caller).
@@ -1018,8 +1018,7 @@ pub(crate) fn generate_batch_core(
     let o_starts_a = ndarray::ArrayView1::from(o_starts_b);
     let o_stops_a = ndarray::ArrayView1::from(o_stops_b);
 
-    // ZERO COPY: kernel sparse input IS the store's mmap (see geno_v_idxs contract).
-    let geno_v_idxs = store.geno_v_idxs();
+    // ZERO COPY: kernel sparse input IS the caller's mmap/buffer (see geno_v_idxs contract).
     let geno_v_idxs_view = numpy::ndarray::ArrayView1::from(geno_v_idxs);
 
     let q_starts_owned: Array1<i32> = regions_arr.column(1).to_owned();
@@ -1125,10 +1124,13 @@ pub fn svar1_generate_batch<'py>(
     let ref_offsets_a = ref_offsets.as_array();
 
     let store_ref: &crate::svar1::store::Svar1Store = &store;
+    let geno_v_idxs_s = store_ref.geno_v_idxs();
+    let ploidy = store_ref.ploidy();
 
     let (out_data, out_offsets_vec) = py.detach(move || {
         generate_batch_core(
-            store_ref,
+            geno_v_idxs_s,
+            ploidy,
             o_starts_s,
             o_stops_s,
             rb,
