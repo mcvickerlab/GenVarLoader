@@ -47,6 +47,20 @@ def test_record_stream_engine_vcf_yields_then_none(streaming_vcf_fixture):
     assert eng.next_batch() is None
 
 
+def test_streaming_dataset_accepts_vcf(streaming_vcf_fixture):
+    """Task 6: `StreamingDataset(variants=<vcf>)` constructs via `_VcfBackend`
+    instead of raising `NotImplementedError`. End-to-end read parity is
+    Task 8; this only proves construction + header metadata wiring."""
+    import genvarloader as gvl
+
+    f = streaming_vcf_fixture
+    sds = gvl.StreamingDataset(
+        f.regions, reference=str(f.fasta), variants=str(f.vcf)
+    ).with_seqs("haplotypes")
+    assert sds.n_samples == f.n_samples
+    assert sds.ploidy == 2
+
+
 def test_record_stream_engine_pgen_source_kind_not_implemented(streaming_vcf_fixture):
     """`source_kind="pgen"` is a deliberate stub until Task 10 fills in a PGEN
     `WindowFiller` -- must raise `NotImplementedError`, not silently build a
