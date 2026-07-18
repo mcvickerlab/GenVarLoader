@@ -108,12 +108,15 @@ impl EngineBackend for RecordBackend {
     /// `bi = ri*n_samples + si` -> `regions[bi/n_samples]`).
     ///
     /// **CSR-offset note.** SVAR1's `o_starts`/`o_stops` are absolute indices sliced out of
-    /// a whole-store mmap. `DecodedWindow`'s per-hap CSR is instead a single window-local
-    /// `geno_offsets` (length `n_haps + 1`): hap `h`'s run is
-    /// `geno_v_idxs[geno_offsets[h]..geno_offsets[h+1]]`. For haps `[o_lo, o_hi)` that's
-    /// `o_starts_b = geno_offsets[o_lo..o_hi]` and `o_stops_b = geno_offsets[o_lo+1..=o_hi]`
-    /// — both built here as owned `Vec<i64>` since `generate_batch_core` wants matching
-    /// start/stop slices, not one shared array.
+    /// a whole-store mmap AND are already region-expanded (`find_ranges` emits one pair per
+    /// (region, sample, ploid)). `DecodedWindow`'s per-hap CSR is instead a single
+    /// window-local `geno_offsets` (length `n_samples*ploidy + 1`, NO region dimension): hap
+    /// `h`'s run is `geno_v_idxs[geno_offsets[h]..geno_offsets[h+1]]`. That asymmetry is the
+    /// crux — a batch row `bi` maps to sample `si = bi % n_samples`, so for `regions.len() >
+    /// 1` we must REPLICATE sample `si`'s run across regions (the kernel clips it per-row via
+    /// `rb`), not flat-slice `geno_offsets[bi*ploidy..]` (which runs off the per-sample CSR).
+    /// `o_starts_b`/`o_stops_b` are built here as owned `Vec<i64>` since `generate_batch_core`
+    /// wants matching start/stop slices, not one shared array. See the assembly below.
     fn generate(
         &self,
         job_idx: usize,
@@ -135,11 +138,32 @@ impl EngineBackend for RecordBackend {
             rb[[i, 1]] = e as i32;
         }
 
-        // CSR rows for this batch slice: haps [row_lo*ploidy, row_hi*ploidy).
-        let o_lo = row_lo * self.ploidy;
-        let o_hi = row_hi * self.ploidy;
-        let o_starts_b: Vec<i64> = slot.geno_offsets[o_lo..o_hi].to_vec();
-        let o_stops_b: Vec<i64> = slot.geno_offsets[o_lo + 1..=o_hi].to_vec();
+        // CSR rows for this batch slice, expanded per (region, sample). `slot.geno_offsets`
+        // is a per-hap CSR over the window's `n_samples * ploidy` haps ONLY — it has NO
+        // region dimension (length `n_samples*ploidy + 1`), unlike SVAR1's `read_window`
+        // output which is ALREADY region-expanded (`find_ranges` emits one CSR-index pair
+        // per (region, sample, ploid)). So the naive `geno_offsets[row_lo*ploidy..]` slice
+        // is wrong for `regions.len() > 1`: row `bi` maps to sample `si = bi % n_samples`
+        // (region `ri = bi / n_samples`), and once `bi >= n_samples` (2nd+ region) the flat
+        // offset runs off the per-sample CSR — out of bounds, or the wrong sample's run.
+        //
+        // Every region of a given sample reuses that sample's SAME per-hap run; the kernel
+        // clips it to the per-row region bounds `rb` (upstream SNPs via `v_pos < ref_idx`,
+        // spanning DELs via the DEL-span branch, downstream variants via the out-buffer
+        // break). This is byte-identical to SVAR1: `find_ranges`' per-region narrowing is an
+        // overshoot-safe overlap window (`max_v_len`-padded), which the same kernel then
+        // clips. So expand the per-sample CSR across regions here, keeping the transpose
+        // region-agnostic: for each batch row's `ploidy` haps push sample `si`'s offset pair.
+        let mut o_starts_b: Vec<i64> = Vec::with_capacity(n_rows * self.ploidy);
+        let mut o_stops_b: Vec<i64> = Vec::with_capacity(n_rows * self.ploidy);
+        for bi in row_lo..row_hi {
+            let si = bi % n_samples;
+            for p in 0..self.ploidy {
+                let h = si * self.ploidy + p;
+                o_starts_b.push(slot.geno_offsets[h]);
+                o_stops_b.push(slot.geno_offsets[h + 1]);
+            }
+        }
 
         // This contig's reference slice (offsets [0, len]).
         let ref_offsets = Array1::from(vec![0i64, c.ref_bytes.len() as i64]);
@@ -229,6 +253,30 @@ mod tests {
             // every hap carries v0 only
             slot.geno_v_idxs = vec![0; n_haps];
             slot.geno_offsets = (0..=n_haps as i64).collect();
+            Ok(())
+        }
+    }
+
+    /// Filler with DISTINGUISHABLE per-sample runs, for the multi-region regression test.
+    /// 2 SNPs (v0 @pos5, v1 @pos15), 2 samples x ploidy 2 = 4 haps. Per-hap window-local
+    /// CSR (`geno_offsets=[0,1,1,2,4]`, `geno_v_idxs=[0,1,0,1]`):
+    ///   hap0(s0,p0)=[v0]  hap1(s0,p1)=[]  hap2(s1,p0)=[v1]  hap3(s1,p1)=[v0,v1]
+    /// The two samples carry different variants and the two SNPs sit in different regions,
+    /// so a wrong-sample read OR a missing region-clip both change the bytes.
+    struct MultiRegionFiller;
+    impl WindowFiller for MultiRegionFiller {
+        fn fill(
+            &self,
+            _job: &RecordJob,
+            _c: &ContigRef,
+            slot: &mut DecodedWindow,
+        ) -> anyhow::Result<()> {
+            slot.v_starts = vec![5, 15];
+            slot.ilens = vec![0, 0];
+            slot.alt_alleles = vec![b'A', b'C'];
+            slot.alt_offsets = vec![0, 1, 2];
+            slot.geno_v_idxs = vec![0, 1, 0, 1];
+            slot.geno_offsets = vec![0, 1, 1, 2, 4];
             Ok(())
         }
     }
@@ -402,6 +450,115 @@ mod tests {
             ),
         }
         // After the error the engine is `done`: further pulls are clean None, never a hang.
+        assert!(engine.next_batch_core().is_none());
+        assert!(engine.next_batch_core().is_none());
+    }
+
+    /// REGRESSION (critical): a job with `regions.len() >= 2` must expand the per-sample
+    /// window CSR across regions. The pre-fix `generate` flat-sliced
+    /// `geno_offsets[row_lo*ploidy..row_hi*ploidy]`, treating the per-hap CSR as if it were
+    /// region-expanded like SVAR1's `read_window` output; for the 2nd+ region's rows the
+    /// index ran off the per-sample CSR (length `n_samples*ploidy+1`) — an out-of-bounds
+    /// panic (or, where it fit, the WRONG sample's run). Only single-region jobs (where
+    /// `bi == si`) were accidentally correct, and both other tests here use those.
+    ///
+    /// Oracle is INDEPENDENT of `RecordBackend::generate`: it hand-expands the per-sample
+    /// CSR across regions (the expected `o_starts_b`/`o_stops_b` are written out as literals
+    /// below, NOT recomputed by the code under test) and calls `generate_batch_core`
+    /// directly. Row bi -> (region ri = bi/n_samples, sample si = bi%n_samples), C-order.
+    #[test]
+    fn record_stream_engine_expands_csr_per_region_and_sample() {
+        // 2 regions x 2 samples = 4 rows; regions chosen so the SNPs clip differently:
+        // v0@5 is in [0,10) only; v1@15 is in [10,20) only.
+        let regions = vec![(0u32, 10u32), (10u32, 20u32)];
+        let job = RecordJob {
+            contig_idx: 0,
+            regions: regions.clone(),
+            s_lo: 0,
+            s_hi: 2,
+        };
+        let c = chr1(); // 30 bp of 'T'
+        let ploidy = 2usize;
+        let n_samples = 2usize;
+        let n_rows = regions.len() * n_samples; // 4
+
+        // ---- Independent oracle -------------------------------------------------------
+        // Fill a scratch window with the SAME filler (its table is region-agnostic).
+        let mut slot = DecodedWindow::default();
+        MultiRegionFiller.fill(&job, &c, &mut slot).unwrap();
+
+        // Per-row region bounds (C-order region, sample): bi -> regions[bi/n_samples].
+        let mut rb = Array2::<i32>::zeros((n_rows, 2));
+        for bi in 0..n_rows {
+            let ri = bi / n_samples;
+            rb[[bi, 0]] = regions[ri].0 as i32;
+            rb[[bi, 1]] = regions[ri].1 as i32;
+        }
+
+        // HAND-EXPANDED per (region, sample) CSR, as literals — the expected mapping the
+        // fix must produce, computed by hand from geno_offsets=[0,1,1,2,4]:
+        //   bi0 (r0,s0): hap0->[0,1) hap1->[1,1)   bi1 (r0,s1): hap2->[1,2) hap3->[2,4)
+        //   bi2 (r1,s0): hap0->[0,1) hap1->[1,1)   bi3 (r1,s1): hap2->[1,2) hap3->[2,4)
+        let o_starts_b: Vec<i64> = vec![
+            0, 1, /*bi0*/ 1, 2, /*bi1*/ 0, 1, /*bi2*/ 1, 2, /*bi3*/
+        ];
+        let o_stops_b: Vec<i64> = vec![
+            1, 1, /*bi0*/ 2, 4, /*bi1*/ 1, 1, /*bi2*/ 2, 4, /*bi3*/
+        ];
+        let ref_offsets = Array1::from(vec![0i64, c.ref_bytes.len() as i64]);
+        let (exp_data, exp_offs) = crate::ffi::generate_batch_core(
+            &slot.geno_v_idxs,
+            ploidy,
+            &o_starts_b,
+            &o_stops_b,
+            rb.view(),
+            ndarray::ArrayView1::from(slot.v_starts.as_slice()),
+            ndarray::ArrayView1::from(slot.ilens.as_slice()),
+            ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
+            ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
+            ndarray::ArrayView1::from(c.ref_bytes.as_slice()),
+            ref_offsets.view(),
+            b'N',
+            false,
+        );
+        let expected = (exp_data.to_vec(), exp_offs.to_vec());
+
+        // Sanity: the oracle actually exercises region-dependent clipping — region [0,10)'s
+        // sample-0 hap0 applies v0 ('A'), region [10,20)'s does not (pure ref 'T'), so the
+        // window contains a variant byte and is not all-reference.
+        assert!(
+            expected.0.contains(&b'A') && expected.0.contains(&b'C'),
+            "oracle must apply both SNPs somewhere (else it proves nothing)"
+        );
+
+        // ---- Engine under test --------------------------------------------------------
+        let engine = RecordStreamEngine::new_rs(
+            Box::new(MultiRegionFiller),
+            vec![chr1()],
+            vec![job],
+            n_samples,
+            ploidy,
+            b'N',
+            false,
+            1000, // one batch for the whole 4-row window
+        );
+
+        let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
+        while let Some(r) = engine.next_batch_core() {
+            let (d, o) = r.expect("no producer error / no OOB panic");
+            batches.push((d.to_vec(), o.to_vec()));
+        }
+        assert_eq!(
+            batches.len(),
+            1,
+            "one batch for the single multi-region window"
+        );
+        assert_eq!(
+            batches[0], expected,
+            "multi-region window must expand the per-sample CSR across regions \
+             (region-replicated + kernel-clipped), byte-identical to the oracle"
+        );
+
         assert!(engine.next_batch_core().is_none());
         assert!(engine.next_batch_core().is_none());
     }
