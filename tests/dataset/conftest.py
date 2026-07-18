@@ -400,6 +400,54 @@ def streaming_vcf_fixture(tmp_path_factory) -> StreamingVcfFixture:
     )
 
 
+@dataclass(slots=True)
+class StreamingPgenFixture:
+    """PGEN-source counterpart to `streaming_vcf_fixture`, for the record-stream
+    engine's `_PgenBackend` (issue #276 task 11). Reuses the committed
+    `tests/data/streaming/two_var_two_sample.{pgen,pvar,psam}` fixture (Task
+    10's `PgenWindowFiller` tests, `src/record_stream/pgen.rs`), generated
+    from `two_var_two_sample.vcf.gz` via `plink2 --make-pgen` -- SAME
+    variants/samples/reference as `streaming_vcf_fixture` (chr1 SNP@POS=11
+    0-based 10, DEL@POS=21 0-based 20, samples s1/s2, ploidy 2), so the two
+    fixtures are drop-in interchangeable for cross-backend tests.
+    """
+
+    pgen: Path
+    fasta: Path
+    chr1_ref_bytes: bytes
+    sample_names: list[str]
+    n_samples: int
+    ploidy: int
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def streaming_pgen_fixture(tmp_path_factory) -> StreamingPgenFixture:
+    pgen = (
+        Path(__file__).parent.parent / "data" / "streaming" / "two_var_two_sample.pgen"
+    )
+    chr1_ref_bytes = b"A" * 100
+
+    d = tmp_path_factory.mktemp("streaming_pgen_fasta")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{chr1_ref_bytes.decode()}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(chr1_ref_bytes)]}
+    )
+
+    return StreamingPgenFixture(
+        pgen=pgen,
+        fasta=fasta,
+        chr1_ref_bytes=chr1_ref_bytes,
+        sample_names=["s1", "s2"],
+        n_samples=2,
+        ploidy=2,
+        regions=regions,
+    )
+
+
 # 250bp reference for the Task 7 parity-gate fixture (issue #276). Built once via
 # vcfixture's `ReferenceBuilder(seed=7)` + explicit overrides at each variant locus
 # (anchor bases pinned to match the VCF's REF alleles, flank-guard bases pinned to

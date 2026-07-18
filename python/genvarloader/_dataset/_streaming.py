@@ -54,9 +54,10 @@ class StreamingDataset:
     - Public API: ``StreamingDataset(regions, reference=..., variants=<path>)``.
       ``variants`` is classified by path suffix, mirroring :func:`gvl.write`'s
       classification (``_write.py``): a ``.svar`` directory (a genoray
-      ``SparseVar``/SVAR1 store) is supported in this plan; VCF, PGEN, and
-      ``.svar2`` (SVAR2) inputs raise :class:`NotImplementedError` (later
-      plans). Only ``jitter=0`` (the default) is supported in this plan.
+      ``SparseVar``/SVAR1 store), a VCF/BCF, and a PGEN file-set are all
+      supported; ``.svar2`` (SVAR2) input raises :class:`NotImplementedError`
+      (a later plan). Only ``jitter=0`` (the default) is supported in this
+      plan.
     - Internal/test-oriented: ``StreamingDataset(regions, contigs=..., n_samples=...,
       ploidy=..., _reconstruct_window=...)`` injects a reconstruction callback
       directly, bypassing variant-source classification. Used by
@@ -110,7 +111,7 @@ class StreamingDataset:
     # The split read/generate backend (real SVAR1 path). When set, _iter_batches
     # generates per batch (output bounded by batch_size). The injected
     # `_reconstruct_window` remains a whole-window TEST seam used when `_backend` is None.
-    _backend: _Svar1Backend | _VcfBackend | None = None
+    _backend: _Svar1Backend | _VcfBackend | _PgenBackend | None = None
     # INTERNAL/EXPERIMENTAL (issue #283) -- not a public `__init__` kwarg, set only via
     # `object.__setattr__`. Selects which prefetch drive `_iter_batches` uses when
     # `_backend is not None`:
@@ -190,10 +191,18 @@ class StreamingDataset:
                     "this is a later plan. Use a SparseVar (.svar) store for now."
                 )
             elif path_is_pgen(p):
-                raise NotImplementedError(
-                    f"StreamingDataset does not support PGEN input yet ({p}); "
-                    "this is a later plan. Use a SparseVar (.svar) store for now."
-                )
+                backend = _PgenBackend(p, reference, contigs, regions)
+                n_samples = backend.n_samples
+                ploidy = backend.ploidy
+                samples = backend._sample_names
+                contigs = backend._contigs
+                _reconstruct_window = None
+                _backend_obj = backend
+                # No `_prefetch_strategy` override needed here: `__init__`
+                # unconditionally sets it to "engine" below (same reasoning as
+                # the VCF branch just below) -- PGEN, like VCF, has no
+                # `read_window`/`generate_batch` split (SVAR1-only seam), so
+                # only "engine" is supported.
             elif path_is_vcf(p):
                 backend = _VcfBackend(p, reference, contigs, regions)
                 n_samples = backend.n_samples
@@ -1013,6 +1022,124 @@ class _VcfBackend:
             # reconstruction padding -- it is NOT the decode-time FASTA, and
             # passing its path here would enable left-alignment in the Rust
             # decoder and silently diverge from the write path.
+            None,
+            self._ref.pad_char,
+            True,
+            batch_size,
+        )
+
+
+class _PgenBackend:
+    """Streaming PGEN read backend: drives a `RecordStreamEngine` (issue #276
+    tasks 3b/11) directly over a live `.pgen`/`.pvar`/`.psam` file-set, with no
+    on-disk gvl dataset. Mirrors `_VcfBackend` exactly (same duck interface,
+    same "engine"-only prefetch restriction -- PGEN has no `read_window`/
+    `generate_batch` split either); the only differences are (a) header
+    metadata comes from `genoray.PGEN` instead of `genoray.VCF`, (b) ploidy is
+    always 2 (PGEN is diploid-only by format -- `genoray.PGEN.ploidy` is a
+    class attribute, not read from the file), and (c) `build_engine` passes
+    `source_kind="pgen"` and the resolved `.pgen` path.
+
+    Header metadata (sample names, contigs) is read once at construction from
+    `genoray.PGEN(path)`; per-region variant records are decoded
+    window-by-window by the Rust `PgenWindowFiller` inside the engine, not
+    read/cached here.
+    """
+
+    def __init__(
+        self,
+        pgen_path: str | Path,
+        reference_path: str | Path,
+        contigs: list[str] | None,
+        bed: pl.DataFrame | str | Path,
+    ) -> None:
+        from genoray import PGEN
+
+        from ._reference import Reference
+
+        pgen = PGEN(pgen_path)
+        # The resolved `.pgen` file path (`genoray.PGEN.__init__` appends the
+        # `.pgen` suffix if the caller passed a bare plink2 prefix) -- the Rust
+        # `PgenWindowFiller` derives its sibling `.pvar` via `with_extension`,
+        # which requires the literal `.pgen` path, not a suffix-less prefix.
+        self._pgen_path = str(pgen.geno_path)
+
+        # `gvl.write()` always lexicographically sorts sample names
+        # (`_write.py`'s unconditional `samples.sort()`), so `gvl.Dataset`'s
+        # sample index `s` means "the s-th name in sorted order" -- the same
+        # convention `_VcfBackend`/`_Svar1Backend` follow (see their `__init__`
+        # comments). `RecordStreamEngine` takes `sample_names` directly and
+        # looks samples up by name (same as the VCF filler), so there's no
+        # native-order/physical-index concern the way SVAR1's on-disk CSR has.
+        self._sample_names = sorted(pgen.available_samples)
+        self.n_samples = len(self._sample_names)
+        # PGEN is diploid-only by format (no ploidy field on disk) -- matches
+        # the Rust `PgenWindowFiller`'s hardwired `PGEN_PLOIDY = 2` (it takes
+        # no ploidy parameter at all; `genoray.PGEN.ploidy` is a class
+        # attribute, always 2, not read from the file either).
+        self.ploidy = pgen.ploidy
+
+        # `contigs` is `None` unless the caller passed an explicit `contigs=`
+        # to `StreamingDataset` -- unlike the `.svar` branch, which always
+        # derives `contigs` from the store before constructing its backend,
+        # the PGEN branch defers to `genoray.PGEN.contigs` (naturally sorted)
+        # when the caller didn't supply one, same as `_VcfBackend`.
+        self._contigs = list(contigs) if contigs is not None else list(pgen.contigs)
+
+        self._ref = Reference.from_path(reference_path, self._contigs)
+
+        # `bed` is accepted for interface symmetry with `_Svar1Backend.__init__`
+        # (the public ladder branch constructs every backend the same way) but
+        # unused here, same as `_VcfBackend`: `build_engine`'s `jobs` already
+        # carry each window's (contig_idx, region_starts, region_ends) directly
+        # from `StreamingDataset._plan`/`_regions`.
+        del bed
+
+    def build_engine(
+        self,
+        jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
+        batch_size: int,
+    ) -> object:
+        """Construct a `RecordStreamEngine("pgen", ...)` (Rust producer/consumer
+        engine, issue #276 tasks 3b/11) that decodes each window's variant
+        records straight from the `.pgen`/`.pvar`/`.psam` file-set. `jobs` is
+        one entry per WINDOW, `(contig_idx, region_starts, region_ends, s_lo,
+        s_hi)`, in the SAME order `_iter_batches` will drive `.next_batch()` --
+        mirrors `_VcfBackend.build_engine` exactly, minus the VCF-only
+        `vcf_path` naming (here it's the resolved `.pgen` path).
+        """
+        from ..genvarloader import RecordStreamEngine
+
+        contig_names = list(self._contigs)
+        contig_ref_bytes = [
+            self._ref._contig_slice(i)[0] for i in range(len(contig_names))
+        ]
+
+        job_contig_idx = [int(j[0]) for j in jobs]
+        job_region_starts = [np.ascontiguousarray(j[1], np.uint32) for j in jobs]
+        job_region_ends = [np.ascontiguousarray(j[2], np.uint32) for j in jobs]
+        job_s_lo = [int(j[3]) for j in jobs]
+        job_s_hi = [int(j[4]) for j in jobs]
+
+        return RecordStreamEngine(
+            "pgen",
+            self._pgen_path,
+            self._sample_names,
+            self.ploidy,
+            contig_names,
+            contig_ref_bytes,
+            job_contig_idx,
+            job_region_starts,
+            job_region_ends,
+            job_s_lo,
+            job_s_hi,
+            # `fasta_path=None` -- PARITY-CRITICAL, not a placeholder, for the
+            # same reason as `_VcfBackend.build_engine`: `gvl.write`'s PGEN
+            # path does no read-time reference/left-alignment, so the
+            # streaming decoder must not either (see
+            # `src/record_stream/pgen.rs`'s module doc, "Config parity with
+            # VCF" section). `self._ref` above is used ONLY to derive
+            # `contig_ref_bytes` for haplotype reconstruction padding.
             None,
             self._ref.pad_char,
             True,

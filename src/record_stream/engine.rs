@@ -30,10 +30,11 @@ use std::sync::Arc;
 
 use ndarray::{Array1, Array2};
 use numpy::{IntoPyArray, PyArray1};
-use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::ffi::stream_core::{EngineBackend, StreamEngineCore};
+use crate::record_stream::pgen::PgenWindowFiller;
 use crate::record_stream::vcf::VcfWindowFiller;
 use crate::record_stream::DecodedWindow;
 
@@ -206,8 +207,8 @@ impl EngineBackend for RecordBackend {
 }
 
 /// Producer/consumer record-stream engine (issue #276 task 3b). Python surface (issue
-/// #276 task 5): `#[new]` builds a `VcfWindowFiller` for `source_kind="vcf"` (PGEN is a
-/// `PyNotImplementedError` stub until Task 10) and calls [`RecordStreamEngine::new_rs`];
+/// #276 tasks 5/11): `#[new]` builds a `VcfWindowFiller` for `source_kind="vcf"` or a
+/// `PgenWindowFiller` for `source_kind="pgen"` and calls [`RecordStreamEngine::new_rs`];
 /// `next_batch` mirrors `Svar1StreamEngine`'s (`crate::ffi::stream_engine`) shape exactly.
 #[pyclass]
 pub struct RecordStreamEngine {
@@ -261,7 +262,11 @@ impl RecordStreamEngine {
     ///
     /// `source_kind` selects the filler: `"vcf"` builds a [`VcfWindowFiller`] (`vcf_path`,
     /// `fasta_path` — see that module's doc for the `fasta_path: None` parity default);
-    /// `"pgen"` is a stub (`PyNotImplementedError`) until Task 10 fills it in.
+    /// `"pgen"` builds a [`PgenWindowFiller`] over the SAME `vcf_path` param (it carries
+    /// the `.pgen` path for this source kind — the filler derives the sibling `.pvar`
+    /// itself, see `pgen.rs`'s doc), reusing `sample_names.len()` as the full on-disk
+    /// cohort size and requiring `ploidy == 2` (PGEN is diploid-only; the filler hardwires
+    /// `PGEN_PLOIDY` internally and has no ploidy parameter of its own).
     #[new]
     #[pyo3(signature = (
         source_kind, vcf_path, sample_names, ploidy,
@@ -356,9 +361,36 @@ impl RecordStreamEngine {
                     batch_size,
                 ))
             }
-            "pgen" => Err(PyNotImplementedError::new_err(
-                "PGEN streaming not implemented yet (Task 10)",
-            )),
+            "pgen" => {
+                // PGEN is diploid-only by format; `PgenWindowFiller` hardwires
+                // `PGEN_PLOIDY = 2` internally (it takes no ploidy parameter at all) and
+                // `RecordBackend::generate` above indexes the window's per-hap CSR as
+                // `si * self.ploidy + p` -- a caller-supplied `ploidy != 2` would silently
+                // desync that indexing from the filler's actual 2-hap-per-sample layout,
+                // so this is validated here rather than passed through unchecked.
+                if ploidy != 2 {
+                    return Err(PyValueError::new_err(format!(
+                        "RecordStreamEngine: source_kind=\"pgen\" requires ploidy=2 \
+                         (PGEN is diploid-only), got ploidy={ploidy}",
+                    )));
+                }
+                // `vcf_path` carries the `.pgen` path for this source kind (see the
+                // `#[new]` doc comment); `n_samples` (== `sample_names.len()`, already
+                // computed above) is the full on-disk cohort size `PgenWindowFiller::new`
+                // needs to construct the pgenlib reader.
+                let filler = PgenWindowFiller::new(&vcf_path, n_samples)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                Ok(Self::new_rs(
+                    Box::new(filler),
+                    contigs,
+                    jobs,
+                    n_samples,
+                    ploidy,
+                    pad_char,
+                    parallel,
+                    batch_size,
+                ))
+            }
             other => Err(PyValueError::new_err(format!(
                 "RecordStreamEngine: unknown source_kind {other:?} (expected \"vcf\" or \"pgen\")",
             ))),
@@ -429,7 +461,12 @@ impl RecordStreamEngine {
         let slot = backend
             .debug_fill(&job)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        Ok((slot.v_starts, slot.ilens, slot.alt_alleles, slot.alt_offsets))
+        Ok((
+            slot.v_starts,
+            slot.ilens,
+            slot.alt_alleles,
+            slot.alt_offsets,
+        ))
     }
 }
 
