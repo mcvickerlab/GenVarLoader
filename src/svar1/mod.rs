@@ -2,12 +2,12 @@ pub mod store;
 
 /// One window's sparse-genotype CSR geometry, produced by `Svar1Store::read_window`.
 ///
-/// **This is the degenerate case of the SVAR1-style window buffer: it holds only
-/// offsets.** SVAR1's on-disk layout is already hap-major sparse CSR of sorted global
-/// variant ids, so there is nothing to decode and no table to materialize —
-/// `geno_v_idxs` is borrowed straight from the `variant_idxs` mmap
-/// (`Svar1Reader::variant_idxs`) and handed to the kernel as-is. VCF/PGEN backends
-/// (#276) DO materialize an owned buffer; do not take this as their template.
+/// **The buffer itself holds only offsets.** SVAR1's on-disk layout is already
+/// hap-major sparse CSR of sorted global variant ids, so there is nothing to decode
+/// and no table to materialize — the variant ids these offsets index into live in the
+/// `variant_idxs` mmap (`Svar1Reader::variant_idxs`), reached via the shared OS page
+/// cache at generate time, and handed to the kernel as-is. VCF/PGEN backends (#276) DO
+/// materialize an owned buffer; do not take this as their template.
 ///
 /// A window is CARTESIAN: `n_regions x n_samples x ploidy`. `o_starts`/`o_stops` are
 /// `n_regions * n_samples * ploidy` long in C-order `(region, sample, ploid)` —
@@ -17,6 +17,21 @@ pub mod store;
 pub struct Svar1Window {
     pub o_starts: Vec<i64>,
     pub o_stops: Vec<i64>,
+}
+
+impl Default for Svar1Window {
+    fn default() -> Self {
+        Svar1Window { o_starts: Vec::new(), o_stops: Vec::new() }
+    }
+}
+
+#[cfg(test)]
+mod window_default_tests {
+    #[test]
+    fn svar1_window_default_is_empty() {
+        let w = super::Svar1Window::default();
+        assert!(w.o_starts.is_empty() && w.o_stops.is_empty());
+    }
 }
 
 #[cfg(test)]

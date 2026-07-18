@@ -4,17 +4,16 @@ use genoray_core::svar1_query::{Svar1Reader, find_ranges, var_ranges};
 use pyo3::exceptions::PyIOError;
 use pyo3::prelude::*;
 
-thread_local! {
-    static CSR_ENTRIES_TOUCHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
+static CSR_ENTRIES_TOUCHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Test/observability hook: total CSR entries spanned by window reads on the current
-/// thread. The #275 throughput gate asserts this scales with the WINDOW, not the
-/// store — the pre-rewrite path inverted the whole contig CSR per batch. Mirrors
-/// genoray's `search::search_tree_build_count`.
+/// Test/observability hook: total CSR entries spanned by window reads, process-wide
+/// (the streaming engine reads windows on a producer thread, not the caller's thread,
+/// so this must accumulate across threads to stay visible). The #275 throughput gate
+/// asserts this scales with the WINDOW, not the store — the pre-rewrite path inverted
+/// the whole contig CSR per batch. Mirrors genoray's `search::search_tree_build_count`.
 #[doc(hidden)]
 pub fn csr_entries_touched() -> usize {
-    CSR_ENTRIES_TOUCHED.with(|c| c.get())
+    CSR_ENTRIES_TOUCHED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Per-contig scalars. Three numbers — the big `v_starts`/`v_ends` arrays stay on the
@@ -136,7 +135,7 @@ impl Svar1Store {
             .zip(&b.stops)
             .map(|(s, e)| (e - s) as usize)
             .sum();
-        CSR_ENTRIES_TOUCHED.with(|c| c.set(c.get() + spanned));
+        CSR_ENTRIES_TOUCHED.fetch_add(spanned, std::sync::atomic::Ordering::Relaxed);
 
         // `find_ranges` emits C-order (region, sample, ploid), so batch row
         // bi = ri * n_samples + si and CSR row = bi * ploidy + p — an identity map.

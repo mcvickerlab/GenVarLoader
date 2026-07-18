@@ -10,7 +10,8 @@ scripts/
 .ruff_cache/
 .benchmarks/
 .custom_benchmarks/
-benchmarking/
+benchmarking/*
+!benchmarking/streaming/
 genvarloader*.tar.gz
 .nfs*
 commit_msg.txt

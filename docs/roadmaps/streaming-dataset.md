@@ -76,7 +76,7 @@ only** (no map-style random access).
 | Plan | Scope | Status |
 |---|---|---|
 | `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — PR [#274](https://github.com/mcvickerlab/GenVarLoader/pull/274) |
-| `docs/superpowers/plans/2026-07-16-streaming-svar1-window-engine.md` | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275). Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Tasks 2-4 done; Task 5's generic `StreamBackend`/`run_windows` engine done, SVAR1 wiring split to follow-up issue [#283](https://github.com/mcvickerlab/GenVarLoader/issues/283) |
+| `docs/superpowers/plans/2026-07-16-streaming-svar1-window-engine.md` | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275). Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Tasks 2-4 done; Task 5's generic `StreamBackend`/`run_windows` engine done; SVAR1 wiring (issue [#283](https://github.com/mcvickerlab/GenVarLoader/issues/283)) done — 8a (Rust engine) + 8b (Python wiring, `to_iter()` now overlaps producer I/O with consumer generation) both landed; cold-cache A-vs-C measured (producer-thread engine wins 1.46×, ships as default); [#296](https://github.com/mcvickerlab/GenVarLoader/issues/296) throughput-gate observability gap fixed (`b2c5af90`) |
 | _TBD (Plan 3/4)_ — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend | ⬜ |
 | _TBD (Plan 5)_ — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
 
@@ -195,6 +195,63 @@ only** (no map-style random access).
       split (offsets-only vs. fully-reconstructed) as its first step, since that
       decision shapes the GIL-crossing design. Cold-page-cache overlap measurement
       (the deferred Step 6) belongs to this follow-up, not to #275.
+    - ✅ **Task 8a (Rust engine): `Svar1StreamEngine` pyclass** — `src/ffi/stream_engine.rs`,
+      producer/consumer overlap copying `run_windows`'s discipline (2-slot ping-pong
+      `crossbeam_channel`, shutdown-by-`Sender`-drop, join-then-classify-panics), plus a
+      per-contig-reference deviation from the original design note (byte-parity
+      requirement for multi-contig plans — see the design note and task-8-report.md for
+      the reasoning). Commit `814df7db`.
+    - ✅ **Task 8b (Python wiring): `_streaming.py` drives the engine** — `_Svar1Backend`
+      now caches per-contig meta (`_contig_meta`) and the store path (`_svar_path`) at
+      construction, and gained `build_engine(jobs, batch_size)`; `_iter_batches`'s real
+      (`self._backend is not None`) branch materializes `plan = list(self._plan())`
+      once, builds one engine job per window from it (translating `s_idx` to physical
+      sample indices the same way `read_window` does), and drives `engine.next_batch()`
+      in lockstep with the SAME plan so job order and per-window batching can't diverge.
+      `n_slots` bumped 1→2 (ping-pong residency). Byte-identical parity holds
+      (`test_streaming_matches_written_all_cells`, `test_scale_parity_still_byte_identical`
+      both green). Design note: `.superpowers/sdd/task-8b-design-note.md`; full report:
+      `.superpowers/sdd/task-8-report.md`.
+    - ✅ **Final-review Finding 1 fixed in-branch — engine job residency is now genuinely
+      cohort-independent.** The first cut materialized `list(self._plan())` and one
+      `WindowJob { phys_samples: Vec<usize> }` per window: `O(n_windows × window_samples)`
+      ≈ cohort × regions sample-index metadata (~1–2 GB at 50k regions × 100k samples),
+      resident in three places and unbounded by `max_mem` — eroding #284's guarantee, and
+      the "cohort-independent" claim in `stream_engine.rs` was false. Because `_plan`
+      always yields a CONTIGUOUS `arange(s_lo, s_hi)` sample chunk, the engine now holds
+      the public→physical map (`phys_sample_idx`) ONCE (`O(n_samples)`) and each job
+      carries only `(contig_idx, regions, s_lo, s_hi)` (region-scale); the producer
+      borrows `&phys_sample_idx[s_lo..s_hi]` per window (zero-copy). Both drives
+      (`_iter_batches` engine + readahead) stopped materializing `list(self._plan())`,
+      building one compact region-scale plan instead. Total residency
+      `O(n_windows × window_regions) + O(n_samples)`, never `O(n_windows × n_samples)`.
+      Parity byte-identical under both strategies; 20× race-stable. Fix note:
+      `.superpowers/sdd/task-8-fix2-note.md`; report: `.superpowers/sdd/task-8-report.md`.
+    - ✅ **[#296](https://github.com/mcvickerlab/GenVarLoader/issues/296) fixed
+      (commit `b2c5af90`).** The `#275` `svar1_csr_entries_touched()` throughput gate's
+      `thread_local!` counter was blind to the engine's background producer thread
+      (`read_window` now runs there), which failed
+      `test_entries_touched_scales_with_window_not_store` **and** silently vacuum-passed
+      `test_entries_touched_is_flat_across_batch_size` (0 == 0 == 0). Made the counter a
+      process-wide `AtomicUsize`; both gates are meaningful again (146/3978 entries;
+      `[472, 472, 472]` flat across batch_size).
+    - ✅ **Task 9 (Design C + cold-cache A-vs-C measurement): SHIP DESIGN A.** Built
+      Design C (single-thread read-ahead-one-window read-through prefetch, `svar1_prefetch_runs`
+      FFI) behind an internal `_prefetch_strategy` toggle (`"engine"` default | `"readahead"`),
+      byte-identical parity under both. Cold-cache (fresh-store-per-run, no root) A-vs-C on
+      the shared node, best-of-3: **engine 0.286s vs readahead 0.417s — a 1.46× win for the
+      producer-thread engine**, with non-overlapping run ranges (engine [0.286–0.335],
+      readahead [0.417–0.432]) so it is well outside node noise. The readahead overlap proxy
+      shows why: the single-thread read-through call is ~0.001s and cannot hide I/O (the
+      fault cost is paid lazily inside `generate`), whereas the producer thread genuinely
+      overlaps window N+1's read with window N's generation. Per the spec's decision rule
+      (*A ≫ C ⇒ the producer thread pays for itself on I/O alone*), **Design A ships as the
+      SVAR1 default** (already wired). **#276 implication:** the thread is justified for SVAR1
+      I/O overlap directly (not merely reserved for #276), and it will additionally hide
+      #276's decode CPU, which `madvise`/read-through cannot. Design C + the harness
+      (`benchmarking/streaming/cold_cache_overlap.py`) are kept as off-by-default internal
+      experimental infrastructure for #276 re-measurement. Harness/design:
+      `.superpowers/sdd/task-9-design-note.md`; report: `.superpowers/sdd/task-9-report.md`.
   - ⚠️ **Inherited perf/scale debt from the walking skeleton — DELETED, not fixed, by Task 2.**
     All of it was downstream of the one wrong dependency above, so the rewrite removed it rather
     than optimizing it. (a) `Svar1RecordSource::new` was **O(all CSR entries)** — it eagerly

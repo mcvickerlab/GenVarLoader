@@ -9,6 +9,8 @@ use std::ops::Range;
 
 use crate::variants::windows::{assemble_variants_mode, assemble_windows_mode, VariantBufs};
 
+pub(crate) mod stream_engine;
+
 use crate::genotypes;
 use crate::intervals;
 use crate::reference;
@@ -907,11 +909,184 @@ pub fn svar1_read_window<'py>(
     Ok((o_starts.into_pyarray(py), o_stops.into_pyarray(py)))
 }
 
+/// Read-through prefetch: fault the EXACT pages a later `generate_batch` call will
+/// read, warming the shared OS page cache (and triggering kernel readahead of
+/// subsequent pages that overlaps with the caller's own CPU work). `o_starts`/
+/// `o_stops` are ABSOLUTE indices into `vidx` (the store's `variant_idxs` mmap,
+/// zero-copy — see `Svar1Store::geno_v_idxs`'s contract). `black_box` stops the
+/// compiler eliding the fold. Shared by the streaming engine's producer
+/// (`stream_engine.rs`) AND the standalone [`svar1_prefetch_runs`] FFI entry (Design
+/// C's single-thread read-ahead drive, issue #283) — ONE implementation (DRY).
+pub(crate) fn prefetch_runs_core(vidx: &[i32], o_starts: &[i64], o_stops: &[i64]) {
+    for (&lo, &hi) in o_starts.iter().zip(o_stops.iter()) {
+        let (lo, hi) = (lo as usize, hi as usize);
+        let _ = std::hint::black_box(vidx[lo..hi].iter().fold(0i64, |a, &x| a ^ x as i64));
+    }
+}
+
+/// Standalone read-through prefetch FFI (Design C, issue #283): the SAME read-through
+/// the engine's producer does (`prefetch_runs_core`, shared), exposed directly so a
+/// single-thread Python drive can prefetch the NEXT window's runs before generating
+/// the CURRENT one, overlapping kernel readahead with CPU-side generation without a
+/// background thread. `o_starts`/`o_stops` come from `svar1_read_window`. Runs inside
+/// `py.detach`; `store` is `PyRef<'py>`. No return value — this only warms pages.
+#[pyfunction]
+pub fn svar1_prefetch_runs<'py>(
+    py: Python<'py>,
+    store: PyRef<'py, crate::svar1::store::Svar1Store>,
+    o_starts: PyReadonlyArray1<i64>,
+    o_stops: PyReadonlyArray1<i64>,
+) -> PyResult<()> {
+    require_contiguous_1d(&o_starts, "o_starts")?;
+    require_contiguous_1d(&o_stops, "o_stops")?;
+
+    let o_starts_a = o_starts.as_array();
+    let o_stops_a = o_stops.as_array();
+    let o_starts_s: &[i64] = o_starts_a
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above");
+    let o_stops_s: &[i64] = o_stops_a
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above");
+
+    let store_ref: &crate::svar1::store::Svar1Store = &store;
+
+    py.detach(move || {
+        let vidx = store_ref.geno_v_idxs();
+        prefetch_runs_core(vidx, o_starts_s, o_stops_s);
+    });
+
+    Ok(())
+}
+
+/// GIL-free core that generates haplotypes for ONE batch of window rows. Shared by the
+/// [`svar1_generate_batch`] FFI entry AND the streaming engine's consumer
+/// ([`crate::ffi::stream_engine::Svar1StreamEngine`]) so there is ONE implementation
+/// (DRY). Both call it inside a GIL-released context — the FFI wraps it in `py.detach`,
+/// the engine calls it from `next_batch_core` (itself run under `py.detach`).
+///
+/// `o_starts_b`/`o_stops_b` are the CSR-row offsets for exactly this batch (length
+/// `n_rows * ploidy`, ABSOLUTE indices into `variant_idxs`); `region_bounds_b` is
+/// `(n_rows, 2)`, already expanded per (region, sample). Output is `n_rows`-bounded —
+/// the #284 fix. Sparse input IS the store's `variant_idxs` mmap (zero copy). `ref_` /
+/// `ref_offsets` are the ACTIVE contig's slice (`ref_offsets = [0, contig_len]`), since
+/// the per-row `regions` this builds carry `contig_idx = 0`. Ragged output only,
+/// jitter=0.
+///
+/// This function does not touch Python and takes no GIL token; callers own the
+/// `into_pyarray` marshaling. It is infallible (all inputs are pre-validated by the
+/// caller / the store contract), so it returns the owned arrays directly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_batch_core(
+    store: &crate::svar1::store::Svar1Store,
+    o_starts_b: &[i64],
+    o_stops_b: &[i64],
+    region_bounds_b: ndarray::ArrayView2<i32>,
+    v_starts: ndarray::ArrayView1<i32>,
+    ilens: ndarray::ArrayView1<i32>,
+    alt_alleles: ndarray::ArrayView1<u8>,
+    alt_offsets: ndarray::ArrayView1<i64>,
+    ref_: ndarray::ArrayView1<u8>,
+    ref_offsets: ndarray::ArrayView1<i64>,
+    pad_char: u8,
+    parallel: bool,
+) -> (Array1<u8>, Array1<i64>) {
+    use crate::genotypes;
+    use crate::reconstruct;
+
+    let batch = region_bounds_b.nrows();
+    let ploidy = store.ploidy();
+    let n_work = batch * ploidy;
+
+    // Per-row region bounds (already (region, sample)-expanded by the caller).
+    let mut regions_arr = Array2::<i32>::zeros((batch, 3));
+    for bi in 0..batch {
+        regions_arr[[bi, 1]] = region_bounds_b[[bi, 0]];
+        regions_arr[[bi, 2]] = region_bounds_b[[bi, 1]];
+    }
+    let shifts_arr = Array2::<i32>::zeros((batch, ploidy)); // jitter=0
+
+    // Local identity map over THIS batch's rows: batch row bi, hap p -> local CSR row
+    // bi*ploidy + p, indexing o_starts_b/o_stops_b (which are already the batch slice).
+    let mut geno_offset_idx = Array2::<i64>::zeros((batch, ploidy));
+    for bi in 0..batch {
+        for p in 0..ploidy {
+            geno_offset_idx[[bi, p]] = (bi * ploidy + p) as i64;
+        }
+    }
+
+    let o_starts_a = ndarray::ArrayView1::from(o_starts_b);
+    let o_stops_a = ndarray::ArrayView1::from(o_stops_b);
+
+    // ZERO COPY: kernel sparse input IS the store's mmap (see geno_v_idxs contract).
+    let geno_v_idxs = store.geno_v_idxs();
+    let geno_v_idxs_view = numpy::ndarray::ArrayView1::from(geno_v_idxs);
+
+    let q_starts_owned: Array1<i32> = regions_arr.column(1).to_owned();
+    let q_ends_owned: Array1<i32> = regions_arr.column(2).to_owned();
+    let diffs = genotypes::get_diffs_sparse(
+        geno_offset_idx.view(),
+        geno_v_idxs_view,
+        o_starts_a,
+        o_stops_a,
+        ilens,
+        None,
+        None,
+        Some(q_starts_owned.view()),
+        Some(q_ends_owned.view()),
+        Some(v_starts),
+        parallel,
+    );
+
+    let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
+    {
+        let mut acc: i64 = 0;
+        for k in 0..n_work {
+            let query = k / ploidy;
+            let hap = k % ploidy;
+            let ref_len = (regions_arr[[query, 2]] - regions_arr[[query, 1]]) as i64;
+            let diff = diffs[[query, hap]] as i64;
+            acc += (ref_len + diff).max(0);
+            out_offsets_vec[k + 1] = acc;
+        }
+    }
+
+    let total = out_offsets_vec[n_work] as usize;
+    let mut out_data: Array1<u8> = uninit_output(total);
+
+    reconstruct::reconstruct_haplotypes_from_sparse(
+        out_data.view_mut(),
+        out_offsets_vec.view(),
+        regions_arr.view(),
+        shifts_arr.view(),
+        geno_offset_idx.view(),
+        o_starts_a,
+        o_stops_a,
+        geno_v_idxs_view,
+        v_starts,
+        ilens,
+        alt_alleles,
+        alt_offsets,
+        ref_,
+        ref_offsets,
+        pad_char,
+        None, // keep
+        None, // keep_offsets
+        None, // annot_v_idxs
+        None, // annot_ref_pos
+        parallel,
+    );
+
+    (out_data, out_offsets_vec)
+}
+
 /// Generate haplotypes for ONE batch of window rows. `o_starts_b`/`o_stops_b` are the
 /// CSR-row offsets for exactly this batch (length `n_rows * ploidy`, ABSOLUTE indices
 /// into `variant_idxs`); `region_bounds_b` is `(n_rows, 2)`, already expanded per
 /// (region, sample). Output is `n_rows`-bounded — the #284 fix. `geno_v_idxs` is the
 /// shared `variant_idxs` mmap (zero copy). Ragged output only, jitter=0.
+///
+/// Thin FFI wrapper over [`generate_batch_core`] (which the streaming engine also uses).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn svar1_generate_batch<'py>(
@@ -929,37 +1104,19 @@ pub fn svar1_generate_batch<'py>(
     pad_char: u8,
     parallel: bool,
 ) -> PyResult<(Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>)> {
-    use crate::genotypes;
-    use crate::reconstruct;
-
     require_contiguous_1d(&ref_, "ref_")?;
     require_contiguous_1d(&o_starts_b, "o_starts_b")?;
     require_contiguous_1d(&o_stops_b, "o_stops_b")?;
 
+    let o_starts_arr = o_starts_b.as_array();
+    let o_stops_arr = o_stops_b.as_array();
+    let o_starts_s: &[i64] = o_starts_arr
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above");
+    let o_stops_s: &[i64] = o_stops_arr
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above");
     let rb = region_bounds_b.as_array();
-    let batch = rb.nrows();
-    let ploidy = store.ploidy();
-    let n_work = batch * ploidy;
-
-    // Per-row region bounds (already (region, sample)-expanded on the Python side).
-    let mut regions_arr = Array2::<i32>::zeros((batch, 3));
-    for bi in 0..batch {
-        regions_arr[[bi, 1]] = rb[[bi, 0]];
-        regions_arr[[bi, 2]] = rb[[bi, 1]];
-    }
-    let shifts_arr = Array2::<i32>::zeros((batch, ploidy)); // jitter=0
-
-    // Local identity map over THIS batch's rows: batch row bi, hap p -> local CSR row
-    // bi*ploidy + p, indexing o_starts_b/o_stops_b (which are already the batch slice).
-    let mut geno_offset_idx = Array2::<i64>::zeros((batch, ploidy));
-    for bi in 0..batch {
-        for p in 0..ploidy {
-            geno_offset_idx[[bi, p]] = (bi * ploidy + p) as i64;
-        }
-    }
-
-    let o_starts_a = o_starts_b.as_array();
-    let o_stops_a = o_stops_b.as_array();
     let v_starts_a = v_starts.as_array();
     let ilens_a = ilens.as_array();
     let alt_alleles_a = alt_alleles.as_array();
@@ -969,52 +1126,12 @@ pub fn svar1_generate_batch<'py>(
 
     let store_ref: &crate::svar1::store::Svar1Store = &store;
 
-    let result = py.detach(move || -> anyhow::Result<(Array1<u8>, Array1<i64>)> {
-        // ZERO COPY: kernel sparse input IS the store's mmap (see geno_v_idxs contract).
-        let geno_v_idxs = store_ref.geno_v_idxs();
-        let geno_v_idxs_view = numpy::ndarray::ArrayView1::from(geno_v_idxs);
-
-        let q_starts_owned: Array1<i32> = regions_arr.column(1).to_owned();
-        let q_ends_owned: Array1<i32> = regions_arr.column(2).to_owned();
-        let diffs = genotypes::get_diffs_sparse(
-            geno_offset_idx.view(),
-            geno_v_idxs_view,
-            o_starts_a,
-            o_stops_a,
-            ilens_a,
-            None,
-            None,
-            Some(q_starts_owned.view()),
-            Some(q_ends_owned.view()),
-            Some(v_starts_a),
-            parallel,
-        );
-
-        let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
-        {
-            let mut acc: i64 = 0;
-            for k in 0..n_work {
-                let query = k / ploidy;
-                let hap = k % ploidy;
-                let ref_len = (regions_arr[[query, 2]] - regions_arr[[query, 1]]) as i64;
-                let diff = diffs[[query, hap]] as i64;
-                acc += (ref_len + diff).max(0);
-                out_offsets_vec[k + 1] = acc;
-            }
-        }
-
-        let total = out_offsets_vec[n_work] as usize;
-        let mut out_data: Array1<u8> = uninit_output(total);
-
-        reconstruct::reconstruct_haplotypes_from_sparse(
-            out_data.view_mut(),
-            out_offsets_vec.view(),
-            regions_arr.view(),
-            shifts_arr.view(),
-            geno_offset_idx.view(),
-            o_starts_a,
-            o_stops_a,
-            geno_v_idxs_view,
+    let (out_data, out_offsets_vec) = py.detach(move || {
+        generate_batch_core(
+            store_ref,
+            o_starts_s,
+            o_stops_s,
+            rb,
             v_starts_a,
             ilens_a,
             alt_alleles_a,
@@ -1022,18 +1139,9 @@ pub fn svar1_generate_batch<'py>(
             ref_a,
             ref_offsets_a,
             pad_char,
-            None, // keep
-            None, // keep_offsets
-            None, // annot_v_idxs
-            None, // annot_ref_pos
             parallel,
-        );
-
-        Ok((out_data, out_offsets_vec))
+        )
     });
-
-    let (out_data, out_offsets_vec) =
-        result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     Ok((out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py)))
 }
 

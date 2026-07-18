@@ -111,6 +111,19 @@ class StreamingDataset:
     # generates per batch (output bounded by batch_size). The injected
     # `_reconstruct_window` remains a whole-window TEST seam used when `_backend` is None.
     _backend: _Svar1Backend | None = None
+    # INTERNAL/EXPERIMENTAL (issue #283) -- not a public `__init__` kwarg, set only via
+    # `object.__setattr__`. Selects which prefetch drive `_iter_batches` uses when
+    # `_backend is not None`:
+    #   - "engine" (default): the landed producer-thread `Svar1StreamEngine` (Design A).
+    #   - "readahead": a single-thread read-ahead-one-window drive (Design C) that reuses
+    #     the SAME `_Svar1Backend.read_window`/`generate_batch` calls the engine's
+    #     consumer makes, just prefetching the next window's pages inline before
+    #     generating the current one (no background thread). Output-identical to
+    #     "engine" -- prefetch only warms pages, never changes what is generated.
+    # This toggle exists ONLY for the cold-cache A-vs-C measurement
+    # (`benchmarking/streaming/cold_cache_overlap.py`); it will be removed once a winner
+    # is chosen (see docs/roadmaps/streaming-dataset.md).
+    _prefetch_strategy: str = "engine"
 
     def __init__(
         self,
@@ -213,6 +226,9 @@ class StreamingDataset:
         object.__setattr__(self, "_reconstruct_window", _reconstruct_window)
         object.__setattr__(self, "_samples", list(samples))
         object.__setattr__(self, "_backend", _backend_obj)
+        # See the field's comment: internal/experimental, flipped only by the
+        # cold-cache A-vs-C harness via `object.__setattr__`.
+        object.__setattr__(self, "_prefetch_strategy", "engine")
         # Derive the read-window sizing from `max_mem`, NOT from the field defaults
         # above (those are just fallback literals for `__dataclass_fields__`; `slots=True`
         # means there's no class attribute to fall back on at runtime, and this class
@@ -222,7 +238,10 @@ class StreamingDataset:
         # independent of cohort size, keeping whole sample sets when they fit and
         # holding regions at the measured amortization knee (REGION_TARGET=64).
         max_mem_bytes = _parse_max_mem(max_mem)
-        n_slots = 1  # PR 1 is single-window-resident; PR 2 (engine) sets 2 (ping-pong).
+        # The engine (#283) double-buffers windows -- the producer reads the NEXT
+        # window's offsets while the consumer generates batches from the CURRENT one --
+        # so two windows' offsets can be resident at once; size the budget for that.
+        n_slots = 2
         cell_bytes = (
             int(ploidy) * 16
         )  # o_start + o_stop, i64 each, per (region,sample,ploid)
@@ -279,25 +298,131 @@ class StreamingDataset:
         """Drive the plan; generate each window PER BATCH so output is batch-bounded.
 
         The window is the READ granularity; a batch is the GENERATION granularity. For
-        the real SVAR1 backend this reads a window's offsets once, then reconstructs
-        each batch_size slice separately (issue #284). The injected `_reconstruct_window`
-        path (tests) reconstructs the whole window and slices -- memory-unbounded, but
-        only ever used with tiny fixtures.
+        the real SVAR1 backend this drives a `Svar1StreamEngine` (#283) that overlaps
+        producer I/O (reading the next window) with consumer generation (reconstructing
+        the current one) -- output is still batch_size-bounded (issue #284). The
+        injected `_reconstruct_window` path (tests) reconstructs the whole window and
+        slices -- memory-unbounded, but only ever used with tiny fixtures.
         """
-        for r_idx, s_idx in self._plan():
-            n_s = len(s_idx)
-            flat_r = np.repeat(self._sort_order[r_idx], n_s)
-            flat_s = np.tile(s_idx, len(r_idx))
-            n_rows = len(flat_r)
-            if self._backend is not None:
-                o_starts, o_stops = self._backend.read_window(r_idx, s_idx)
-                for lo in range(0, n_rows, batch_size):
-                    hi = min(lo + batch_size, n_rows)
-                    data = self._backend.generate_batch(
-                        r_idx, s_idx, o_starts, o_stops, lo, hi
+        if self._backend is not None:
+            if self._prefetch_strategy == "engine":
+                # Build a COMPACT, region-scale plan ONCE and drive off THAT (never a
+                # second `list(self._plan())`). `_plan` always yields a CONTIGUOUS sample
+                # chunk `arange(s_lo, s_hi)`, so each window is captured losslessly by
+                # `(contig_idx, r_idx, s_lo, s_hi)` -- r_idx is `window_regions`-scale and
+                # (s_lo, s_hi) is two ints. Total residency is O(n_windows x window_regions)
+                # (region-scale), NEVER O(n_windows x n_samples): the engine holds the
+                # public->physical map ONCE and its producer slices it per window (issue
+                # #284 / final-review Finding 1).
+                plan_jobs: list[tuple[int, NDArray[np.intp], int, int]] = []
+                for r_idx, s_idx in self._plan():
+                    contig_idx = int(self._regions[r_idx[0], 0])
+                    plan_jobs.append(
+                        (contig_idx, r_idx, int(s_idx[0]), int(s_idx[-1]) + 1)
                     )
-                    yield data, flat_r[lo:hi], flat_s[lo:hi]
+                # Region bounds (u32) per window for the engine constructor; transient
+                # (dropped after `build_engine`), also region-scale.
+                engine_jobs = [
+                    (
+                        contig_idx,
+                        np.ascontiguousarray(self._regions[r_idx, 1], np.uint32),
+                        np.ascontiguousarray(self._regions[r_idx, 2], np.uint32),
+                        s_lo,
+                        s_hi,
+                    )
+                    for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
+                ]
+                engine = self._backend.build_engine(engine_jobs, batch_size)
+                del engine_jobs
+                for _contig_idx, r_idx, s_lo, s_hi in plan_jobs:
+                    n_s = s_hi - s_lo
+                    flat_r = np.repeat(self._sort_order[r_idx], n_s)
+                    flat_s = np.tile(np.arange(s_lo, s_hi, dtype=np.intp), len(r_idx))
+                    n_rows = len(flat_r)
+                    for lo in range(0, n_rows, batch_size):
+                        hi = min(lo + batch_size, n_rows)
+                        nxt = engine.next_batch()
+                        if nxt is None:
+                            raise RuntimeError(
+                                "Svar1StreamEngine exhausted before the plan did"
+                            )
+                        data, offsets = nxt
+                        yield (
+                            Ragged.from_offsets(
+                                np.asarray(data).view("S1"),
+                                (hi - lo, self._backend.ploidy, None),
+                                np.asarray(offsets, np.int64),
+                            ),
+                            flat_r[lo:hi],
+                            flat_s[lo:hi],
+                        )
+                # `-O`-safe (Minor 3): a bare `assert` is stripped under `python -O`,
+                # silently dropping this end-of-plan invariant.
+                if engine.next_batch() is not None:
+                    raise RuntimeError(
+                        "Svar1StreamEngine had extra batches beyond the plan"
+                    )
+            elif self._prefetch_strategy == "readahead":
+                # Design C (issue #283): single-thread read-ahead-one-window drive.
+                # Reuses the SAME `_Svar1Backend.read_window`/`generate_batch` calls
+                # the engine's consumer makes (Task 3, parity-green) -- prefetch is a
+                # pure page-warming no-op on output, so this is byte-identical to the
+                # "engine" branch above. See `test_streaming_matches_written_all_cells`'s
+                # "readahead" parity variant.
+                from ..genvarloader import svar1_prefetch_runs
+
+                # Compact, region-scale plan (same treatment as the engine branch): hold
+                # only `(r_idx, s_lo, s_hi)` per window, NOT the per-window `s_idx` arrays.
+                # `_plan` yields contiguous `arange(s_lo, s_hi)` chunks, so `s_idx` is
+                # reconstructed per window on demand (only ~2 windows live at once under
+                # the 1-ahead readahead) -- never O(n_windows x n_samples) resident.
+                ra_jobs: list[tuple[NDArray[np.intp], int, int]] = [
+                    (r_idx, int(s_idx[0]), int(s_idx[-1]) + 1)
+                    for r_idx, s_idx in self._plan()
+                ]
+                if not ra_jobs:
+                    return
+
+                def _read(job: tuple[NDArray[np.intp], int, int]):
+                    r_idx, s_lo, s_hi = job
+                    return self._backend.read_window(
+                        r_idx, np.arange(s_lo, s_hi, dtype=np.intp)
+                    )
+
+                # Read window 0's offsets up front; then for each window, prefetch the
+                # NEXT window's runs before generating the CURRENT one so kernel
+                # readahead of the next window's pages overlaps this window's
+                # generation.
+                cur = _read(ra_jobs[0])
+                for i, (r_idx, s_lo, s_hi) in enumerate(ra_jobs):
+                    if i + 1 < len(ra_jobs):
+                        nxt = _read(ra_jobs[i + 1])
+                        svar1_prefetch_runs(self._backend._store, nxt[0], nxt[1])
+                    else:
+                        nxt = None
+                    s_idx = np.arange(s_lo, s_hi, dtype=np.intp)
+                    n_s = len(s_idx)
+                    flat_r = np.repeat(self._sort_order[r_idx], n_s)
+                    flat_s = np.tile(s_idx, len(r_idx))
+                    n_rows = len(flat_r)
+                    for lo in range(0, n_rows, batch_size):
+                        hi = min(lo + batch_size, n_rows)
+                        data = self._backend.generate_batch(
+                            r_idx, s_idx, cur[0], cur[1], lo, hi
+                        )
+                        yield data, flat_r[lo:hi], flat_s[lo:hi]
+                    cur = nxt
             else:
+                raise ValueError(
+                    f"StreamingDataset._prefetch_strategy={self._prefetch_strategy!r} "
+                    'is not recognized; expected "engine" or "readahead".'
+                )
+        else:
+            for r_idx, s_idx in self._plan():
+                n_s = len(s_idx)
+                flat_r = np.repeat(self._sort_order[r_idx], n_s)
+                flat_s = np.tile(s_idx, len(r_idx))
+                n_rows = len(flat_r)
                 data = self._reconstruct_window(r_idx, s_idx)
                 for lo in range(0, n_rows, batch_size):
                     hi = min(lo + batch_size, n_rows)
@@ -518,6 +643,7 @@ class _Svar1Backend:
         self._alt_alleles = np.ascontiguousarray(alt.data.view(np.uint8), np.uint8)
         self._alt_offsets = np.ascontiguousarray(alt.offsets, np.int64)
 
+        self._svar_path = str(svar_path)
         self._store = Svar1Store(str(svar_path), self.n_samples, self.ploidy)
 
         # Per contig: register three scalars and cache the contig-local u32 arrays the
@@ -542,6 +668,10 @@ class _Svar1Backend:
         self._contig_arrays: dict[
             str, tuple[NDArray[np.uint32], NDArray[np.uint32]]
         ] = {}
+        # Parallel cache of the three scalars also passed to `set_contig_meta`, so
+        # `build_engine` (Step 2) can assemble the engine's per-contig arrays later
+        # without re-deriving them from the index table.
+        self._contig_meta: dict[str, tuple[int, int, int]] = {}
 
         for c in self._contigs:
             mask = chrom == c
@@ -552,6 +682,7 @@ class _Svar1Backend:
                     np.empty(0, np.uint32),
                     np.empty(0, np.uint32),
                 )
+                self._contig_meta[c] = (0, 0, 0)
                 continue
 
             first = int(np.argmax(mask))
@@ -587,6 +718,81 @@ class _Svar1Backend:
 
             self._store.set_contig_meta(c, contig_start, n_local, max_v_len)
             self._contig_arrays[c] = (vs_c, ve_c)
+            self._contig_meta[c] = (contig_start, n_local, max_v_len)
+
+    def build_engine(
+        self,
+        jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
+        batch_size: int,
+    ) -> object:
+        """Construct a `Svar1StreamEngine` (Rust producer/consumer engine, #283) that
+        overlaps window I/O with batch generation. `jobs` is one entry per WINDOW,
+        `(contig_idx, region_starts, region_ends, s_lo, s_hi)`, in the SAME order
+        `_iter_batches` will drive `.next_batch()`.
+
+        Cohort-independent job residency (issue #284 / final-review Finding 1): the
+        full public->physical sample map `self._phys_sample_idx` crosses ONCE (length
+        `n_samples`); each job carries only its contiguous physical-sample sub-range
+        `[s_lo, s_hi)` (two ints), NOT a per-window copy of that window's physical
+        samples. `_plan` always yields a contiguous `arange(s_lo, s_hi)` sample chunk,
+        so the engine's producer reconstructs the window's physical samples on the fly
+        as `phys_sample_idx[s_lo..s_hi]`. Total job metadata is region-scale
+        (`O(n_windows * window_regions)`), never `O(n_windows * n_samples)`.
+        """
+        from ..genvarloader import Svar1StreamEngine
+
+        contig_names = list(self._contigs)
+        contig_starts: list[int] = []
+        n_locals: list[int] = []
+        max_v_lens: list[int] = []
+        v_starts_c: list[NDArray[np.uint32]] = []
+        v_ends_c: list[NDArray[np.uint32]] = []
+        contig_ref_bytes: list[NDArray[np.uint8]] = []
+        for i, c in enumerate(contig_names):
+            cs, nl, mv = self._contig_meta[c]
+            vs_c, ve_c = self._contig_arrays[c]
+            contig_starts.append(cs)
+            n_locals.append(nl)
+            max_v_lens.append(mv)
+            v_starts_c.append(vs_c)
+            v_ends_c.append(ve_c)
+            ref_bytes_i, _ref_off = self._ref._contig_slice(i)
+            contig_ref_bytes.append(ref_bytes_i)
+
+        job_contig_idx = [int(j[0]) for j in jobs]
+        job_region_starts = [np.ascontiguousarray(j[1], np.uint32) for j in jobs]
+        job_region_ends = [np.ascontiguousarray(j[2], np.uint32) for j in jobs]
+        job_s_lo = [int(j[3]) for j in jobs]
+        job_s_hi = [int(j[4]) for j in jobs]
+        # The full public->physical sample map, crossed ONCE (n_samples-scale). Each
+        # job's (s_lo, s_hi) slices into this on the producer thread -- no per-window copy.
+        phys_sample_idx = self._phys_sample_idx.astype(np.int64, copy=False).tolist()
+
+        return Svar1StreamEngine(
+            self._svar_path,
+            self.n_samples,
+            self.ploidy,
+            contig_names,
+            contig_starts,
+            n_locals,
+            max_v_lens,
+            v_starts_c,
+            v_ends_c,
+            contig_ref_bytes,
+            phys_sample_idx,
+            job_contig_idx,
+            job_region_starts,
+            job_region_ends,
+            job_s_lo,
+            job_s_hi,
+            self._v_starts,
+            self._ilens,
+            self._alt_alleles,
+            self._alt_offsets,
+            self._ref.pad_char,
+            True,
+            batch_size,
+        )
 
     def read_window(
         self, r_idx: NDArray[np.intp], s_idx: NDArray[np.intp]
