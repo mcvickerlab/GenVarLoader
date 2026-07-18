@@ -56,16 +56,18 @@ store's index. Everything downstream of the range arrays
 
 ## The window buffer and read/generate split (key design decision)
 
-**Decision: gather on the producer thread into an owned, ping-pong-recycled window buffer that
-holds the flat `vk_*/dense_*/lut_*` channels.** The consumer runs sizing (`hap_diffs_svar2`) + the
-reconstruct kernel per `batch_size` **row slice**, so output stays per-batch bounded (#284).
+**Default design (to be confirmed by measurement, see "Performance" below): gather on the producer
+thread into an owned, ping-pong-recycled window buffer that holds the flat `vk_*/dense_*/lut_*`
+channels.** The consumer runs sizing (`hap_diffs_svar2`) + the reconstruct kernel per `batch_size`
+**row slice**, so output stays per-batch bounded (#284).
 
 Rationale:
 
-- The SVAR2 I/O is `gather_haps_readbound` — it page-faults the var_key/dense bytes for the
-  window's ranges. To overlap that I/O with reconstruction, the *gather* must run on the producer
-  thread. Gathering into an owned window buffer is the way to do that using **only the existing
-  query surface** (no new genoray API, no rev bump).
+- The SVAR2 window fill is `gather_haps_readbound` (page-faults the var_key/dense bytes for the
+  window's ranges) followed by `split_to_flat` (key-decode + merge). To overlap that work with the
+  consumer's reconstruction, the fill must run on the producer thread. Gathering into an owned
+  window buffer does that using **only the existing query surface** (no new genoray API, no rev
+  bump).
 - This is literally the roadmap's "SVAR2-style buffer (flat `vk_*/dense_*/lut_*` channels, keys
   decoded inline)": the buffer holds `split_to_flat`'s output.
 - **Contrast with SVAR1**, whose window buffer is just offsets and whose producer merely
@@ -73,6 +75,12 @@ Rationale:
   cheap byte-range prefetch helper on the query surface, so the SVAR1-shaped "ranges-only buffer +
   prefetch" is not available without a new genoray API. That variant is a possible later
   optimization if profiling shows the resident buffer matters; **out of scope now.**
+
+**This is a hypothesis, not a settled fact — it must clear the measurement gate in the Performance
+section before the engine ships.** The producer thread pays for itself only if the window fill
+actually overlaps the consumer; whether it does depends on the IO-vs-CPU bound (below), which is
+measured, not assumed. The synchronous path (phase 1 of the sequencing) is the fallback if the
+gate does not clear.
 
 **Memory (#284) holds:** the window-resident buffer is larger than SVAR1's (gathered channels, not
 offsets), but it is still `O(window)` and bounded by `max_mem`'s sample-axis chunking. The consumer
@@ -105,6 +113,66 @@ window-proportional amount on top of the range footprint that cannot be sized ex
 (entries per hap are data-dependent). Document this. The region/sample chunk knobs, the
 `region_target = 64` read-amortization default, and the two-slot ping-pong are unchanged from
 SVAR1.
+
+The `ploidy * 32 B` per-cell figure is a **starting estimate, not a measured constant** — the plan
+must validate it (measure actual resident bytes vs the derived window at a few cohort sizes) rather
+than ship the guess. `region_target = 64` is inherited from SVAR1's sweep and must be re-confirmed
+for SVAR2's heavier fill (its read-amortization knee may sit elsewhere), not assumed identical.
+
+## Performance: characterization & measurement plan
+
+Correctness parity is the hard gate; throughput is a secondary, **measured** dimension. Following
+the performant-py-rust discipline — every optimization is a hypothesis, a benchmark is the only
+thing that confirms it — the spec commits to the following rather than to asserted speedups.
+
+**Phase 0 — target & evidence.** There is no fixed latency budget; the target is *relative*,
+inherited from the roadmap: the streaming backend is expected to be slower per epoch than a written
+`Dataset` but avoid all preprocessing. The one performance decision this spec must make with
+evidence is **whether the producer-thread engine earns its complexity over the synchronous path**.
+Decision rule (copied from SVAR1's #283 Design-A-vs-C gate): ship the engine only if it measurably
+beats the synchronous/readahead path on a cold page cache, outside this shared node's run-to-run
+noise. Otherwise ship the synchronous path and stop.
+
+**Phase 1 — dimensions & bound.** Do not fabricate sizes; confirm the ranges against a real SVAR2
+cohort before the sweep.
+
+| dimension | typical | max | grows? | notes |
+|---|---|---|---|---|
+| n_samples (cohort) | 100s–1000s | 100k+ | **grows unbounded** | chunked by `max_mem` (sample axis); the memory-scaling axis |
+| n_regions / window | 64 (`region_target`) | user bed size | fixed knob | read-amortization granularity |
+| ploidy | 2 | small | fixed | multiplies hap count |
+| variants per window | data-dependent | high in dense regions | grows with window | drives gather + `split_to_flat` cost and buffer size |
+| var_key / dense entries per hap | data-dependent | — | — | the CPU cost of key-decode/merge |
+
+**The bound is the open question that picks the lever, and it must be measured, not assumed.** The
+window fill is a mix of IO (page-faulting var_key/dense bytes on a cold cache — `gather`) and CPU
+(key-decode + merge — `split_to_flat`). SVAR2's fill is **CPU-heavier than SVAR1's**, which had no
+decode at all. Consequences:
+
+- If fill is **IO-bound**, the producer thread (concurrency, overlap of window N+1's faults with
+  window N's reconstruct) is the right lever — the SVAR1 result carries over.
+- If fill is **CPU-bound**, a single producer thread caps overlap at ~2× and the better lever may
+  be **rayon *within* the gather/kernel** (data parallelism across samples — the reconstruct
+  kernel already exposes a `parallel` flag). The two are not mutually exclusive, but which
+  dominates decides where effort goes.
+
+The plan resolves this by **profiling the synchronous fill first** (`pyinstrument` on the Python
+driver / `samply` on the Rust fill) to split IO vs CPU time, *then* choosing/keeping the producer
+thread on evidence.
+
+**Phase 3/4 — harness (reuse, don't rebuild).** Reuse SVAR1's cold-cache overlap harness
+(`benchmarking/streaming/cold_cache_overlap.py`) parameterized for `.svar2`; the correctness oracle
+is the same byte-parity check as the functional tests (a faster variant that fails parity is a bug,
+not a speedup). Sweep the **sample axis** (the dominating, unbounded dimension) to confirm the
+memory model is flat (the #284 gate already does this deterministically) and that the engine's win,
+if any, holds across cohort sizes rather than at one hand-picked size. Record the baseline
+(synchronous path) number before wiring the engine.
+
+**Do not pre-optimize the reused kernel.** `gather_haps_readbound`, `split_to_flat`, and
+`reconstruct_haplotypes_from_svar2` are already-measured code from the rust migration (Phase 6a) —
+profile before touching any of them. The one genuinely net-new hot path is `Svar2Store.read_window`
+(live `find_ranges`); it is binary searches over the index and *should* be cheap, but that is a
+hypothesis to confirm with a profile, not an assumption to ship on.
 
 ## Python wiring + a small boy-scout refactor
 
@@ -150,9 +218,13 @@ Two phases within #278, **parity locked before threading**:
 
 1. **Synchronous path:** `Svar2Store.read_window` (live ranges) → `gather` → kernel, wired through
    the existing synchronous test-seam / `readahead` iteration branch, until byte-identical parity
-   holds across the multi-contig fixture.
-2. **Engine:** wire `Svar2StreamEngine` (producer/consumer overlap) and re-verify parity + the
-   scale gate.
+   holds across the multi-contig fixture. **This is also the perf baseline** — profile its fill to
+   split IO vs CPU (Performance, Phase 1) and record its cold-cache number.
+2. **Engine (gated on measurement):** wire `Svar2StreamEngine` (producer/consumer overlap) and
+   re-verify parity + the scale gate. Ship it as the default **only if** it clears the Phase-0
+   decision gate (cold-cache win over the synchronous path, outside node noise); otherwise keep it
+   off-by-default / behind the `_prefetch_strategy` toggle and ship the synchronous path, recording
+   the measured reason — mirroring how SVAR1 chose Design A over C on evidence.
 
 Parity — the whole effort's gate — lands before the concurrency surface, exactly as the SVAR1 work
 did (walking skeleton → engine).
