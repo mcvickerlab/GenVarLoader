@@ -257,15 +257,12 @@ impl Svar1StreamEngine {
                     slot.job_idx = job_idx;
 
                     // Read-through prefetch: fault the EXACT pages the consumer will read
-                    // into the shared page cache. `black_box` stops the compiler eliding
-                    // the fold. `o_starts`/`o_stops` are absolute indices into the mmap.
+                    // into the shared page cache (shared with the standalone
+                    // `svar1_prefetch_runs` FFI entry — see `prefetch_runs_core`'s
+                    // doc comment, `src/ffi/mod.rs`). `o_starts`/`o_stops` are absolute
+                    // indices into the mmap.
                     let vidx = store.geno_v_idxs();
-                    for (lo, hi) in slot.o_starts.iter().zip(slot.o_stops.iter()) {
-                        let (lo, hi) = (*lo as usize, *hi as usize);
-                        let _ = std::hint::black_box(
-                            vidx[lo..hi].iter().fold(0i64, |a, &x| a ^ x as i64),
-                        );
-                    }
+                    crate::ffi::prefetch_runs_core(vidx, &slot.o_starts, &slot.o_stops);
 
                     if tx_filled.send(slot).is_err() {
                         return Ok(()); // consumer gone

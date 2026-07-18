@@ -111,6 +111,19 @@ class StreamingDataset:
     # generates per batch (output bounded by batch_size). The injected
     # `_reconstruct_window` remains a whole-window TEST seam used when `_backend` is None.
     _backend: _Svar1Backend | None = None
+    # INTERNAL/EXPERIMENTAL (issue #283) -- not a public `__init__` kwarg, set only via
+    # `object.__setattr__`. Selects which prefetch drive `_iter_batches` uses when
+    # `_backend is not None`:
+    #   - "engine" (default): the landed producer-thread `Svar1StreamEngine` (Design A).
+    #   - "readahead": a single-thread read-ahead-one-window drive (Design C) that reuses
+    #     the SAME `_Svar1Backend.read_window`/`generate_batch` calls the engine's
+    #     consumer makes, just prefetching the next window's pages inline before
+    #     generating the current one (no background thread). Output-identical to
+    #     "engine" -- prefetch only warms pages, never changes what is generated.
+    # This toggle exists ONLY for the cold-cache A-vs-C measurement
+    # (`benchmarking/streaming/cold_cache_overlap.py`); it will be removed once a winner
+    # is chosen (see docs/roadmaps/streaming-dataset.md).
+    _prefetch_strategy: str = "engine"
 
     def __init__(
         self,
@@ -213,6 +226,9 @@ class StreamingDataset:
         object.__setattr__(self, "_reconstruct_window", _reconstruct_window)
         object.__setattr__(self, "_samples", list(samples))
         object.__setattr__(self, "_backend", _backend_obj)
+        # See the field's comment: internal/experimental, flipped only by the
+        # cold-cache A-vs-C harness via `object.__setattr__`.
+        object.__setattr__(self, "_prefetch_strategy", "engine")
         # Derive the read-window sizing from `max_mem`, NOT from the field defaults
         # above (those are just fallback literals for `__dataclass_fields__`; `slots=True`
         # means there's no class attribute to fall back on at runtime, and this class
@@ -289,45 +305,85 @@ class StreamingDataset:
         slices -- memory-unbounded, but only ever used with tiny fixtures.
         """
         if self._backend is not None:
-            # Materialize the plan ONCE and use it for BOTH the engine's job list and
-            # the drive loop below, so job order and per-window batching cannot diverge
-            # from what `_plan()` would yield if called twice.
-            plan = list(self._plan())
-            jobs = []
-            for r_idx, s_idx in plan:
-                contig_idx = int(self._regions[r_idx[0], 0])
-                region_bounds = self._regions[r_idx, 1:3]
-                starts = np.ascontiguousarray(region_bounds[:, 0], np.uint32)
-                ends = np.ascontiguousarray(region_bounds[:, 1], np.uint32)
-                phys = np.ascontiguousarray(
-                    self._backend._phys_sample_idx[s_idx], np.int64
+            if self._prefetch_strategy == "engine":
+                # Materialize the plan ONCE and use it for BOTH the engine's job list
+                # and the drive loop below, so job order and per-window batching cannot
+                # diverge from what `_plan()` would yield if called twice.
+                plan = list(self._plan())
+                jobs = []
+                for r_idx, s_idx in plan:
+                    contig_idx = int(self._regions[r_idx[0], 0])
+                    region_bounds = self._regions[r_idx, 1:3]
+                    starts = np.ascontiguousarray(region_bounds[:, 0], np.uint32)
+                    ends = np.ascontiguousarray(region_bounds[:, 1], np.uint32)
+                    phys = np.ascontiguousarray(
+                        self._backend._phys_sample_idx[s_idx], np.int64
+                    )
+                    jobs.append((contig_idx, starts, ends, phys))
+                engine = self._backend.build_engine(jobs, batch_size)
+                for r_idx, s_idx in plan:
+                    n_s = len(s_idx)
+                    flat_r = np.repeat(self._sort_order[r_idx], n_s)
+                    flat_s = np.tile(s_idx, len(r_idx))
+                    n_rows = len(flat_r)
+                    for lo in range(0, n_rows, batch_size):
+                        hi = min(lo + batch_size, n_rows)
+                        nxt = engine.next_batch()
+                        assert nxt is not None, (
+                            "Svar1StreamEngine exhausted before the plan did"
+                        )
+                        data, offsets = nxt
+                        yield (
+                            Ragged.from_offsets(
+                                np.asarray(data).view("S1"),
+                                (hi - lo, self._backend.ploidy, None),
+                                np.asarray(offsets, np.int64),
+                            ),
+                            flat_r[lo:hi],
+                            flat_s[lo:hi],
+                        )
+                assert engine.next_batch() is None, (
+                    "Svar1StreamEngine had extra batches beyond the plan"
                 )
-                jobs.append((contig_idx, starts, ends, phys))
-            engine = self._backend.build_engine(jobs, batch_size)
-            for r_idx, s_idx in plan:
-                n_s = len(s_idx)
-                flat_r = np.repeat(self._sort_order[r_idx], n_s)
-                flat_s = np.tile(s_idx, len(r_idx))
-                n_rows = len(flat_r)
-                for lo in range(0, n_rows, batch_size):
-                    hi = min(lo + batch_size, n_rows)
-                    nxt = engine.next_batch()
-                    assert nxt is not None, (
-                        "Svar1StreamEngine exhausted before the plan did"
-                    )
-                    data, offsets = nxt
-                    yield (
-                        Ragged.from_offsets(
-                            np.asarray(data).view("S1"),
-                            (hi - lo, self._backend.ploidy, None),
-                            np.asarray(offsets, np.int64),
-                        ),
-                        flat_r[lo:hi],
-                        flat_s[lo:hi],
-                    )
-            assert engine.next_batch() is None, (
-                "Svar1StreamEngine had extra batches beyond the plan"
-            )
+            elif self._prefetch_strategy == "readahead":
+                # Design C (issue #283): single-thread read-ahead-one-window drive.
+                # Reuses the SAME `_Svar1Backend.read_window`/`generate_batch` calls
+                # the engine's consumer makes (Task 3, parity-green) -- prefetch is a
+                # pure page-warming no-op on output, so this is byte-identical to the
+                # "engine" branch above. See `test_streaming_matches_written_all_cells`'s
+                # "readahead" parity variant.
+                from ..genvarloader import svar1_prefetch_runs
+
+                plan = list(self._plan())
+                if not plan:
+                    return
+                # Read window 0's offsets up front; then for each window, prefetch the
+                # NEXT window's runs before generating the CURRENT one so kernel
+                # readahead of the next window's pages overlaps this window's
+                # generation.
+                cur = self._backend.read_window(*plan[0])
+                for i, (r_idx, s_idx) in enumerate(plan):
+                    if i + 1 < len(plan):
+                        nxt = self._backend.read_window(*plan[i + 1])
+                        svar1_prefetch_runs(self._backend._store, nxt[0], nxt[1])
+                    else:
+                        nxt = None
+                    n_s = len(s_idx)
+                    flat_r = np.repeat(self._sort_order[r_idx], n_s)
+                    flat_s = np.tile(s_idx, len(r_idx))
+                    n_rows = len(flat_r)
+                    for lo in range(0, n_rows, batch_size):
+                        hi = min(lo + batch_size, n_rows)
+                        data = self._backend.generate_batch(
+                            r_idx, s_idx, cur[0], cur[1], lo, hi
+                        )
+                        yield data, flat_r[lo:hi], flat_s[lo:hi]
+                    cur = nxt
+            else:
+                raise ValueError(
+                    f"StreamingDataset._prefetch_strategy={self._prefetch_strategy!r} "
+                    'is not recognized; expected "engine" or "readahead".'
+                )
         else:
             for r_idx, s_idx in self._plan():
                 n_s = len(s_idx)

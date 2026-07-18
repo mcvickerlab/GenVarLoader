@@ -909,6 +909,56 @@ pub fn svar1_read_window<'py>(
     Ok((o_starts.into_pyarray(py), o_stops.into_pyarray(py)))
 }
 
+/// Read-through prefetch: fault the EXACT pages a later `generate_batch` call will
+/// read, warming the shared OS page cache (and triggering kernel readahead of
+/// subsequent pages that overlaps with the caller's own CPU work). `o_starts`/
+/// `o_stops` are ABSOLUTE indices into `vidx` (the store's `variant_idxs` mmap,
+/// zero-copy — see `Svar1Store::geno_v_idxs`'s contract). `black_box` stops the
+/// compiler eliding the fold. Shared by the streaming engine's producer
+/// (`stream_engine.rs`) AND the standalone [`svar1_prefetch_runs`] FFI entry (Design
+/// C's single-thread read-ahead drive, issue #283) — ONE implementation (DRY).
+pub(crate) fn prefetch_runs_core(vidx: &[i32], o_starts: &[i64], o_stops: &[i64]) {
+    for (&lo, &hi) in o_starts.iter().zip(o_stops.iter()) {
+        let (lo, hi) = (lo as usize, hi as usize);
+        let _ = std::hint::black_box(vidx[lo..hi].iter().fold(0i64, |a, &x| a ^ x as i64));
+    }
+}
+
+/// Standalone read-through prefetch FFI (Design C, issue #283): the SAME read-through
+/// the engine's producer does (`prefetch_runs_core`, shared), exposed directly so a
+/// single-thread Python drive can prefetch the NEXT window's runs before generating
+/// the CURRENT one, overlapping kernel readahead with CPU-side generation without a
+/// background thread. `o_starts`/`o_stops` come from `svar1_read_window`. Runs inside
+/// `py.detach`; `store` is `PyRef<'py>`. No return value — this only warms pages.
+#[pyfunction]
+pub fn svar1_prefetch_runs<'py>(
+    py: Python<'py>,
+    store: PyRef<'py, crate::svar1::store::Svar1Store>,
+    o_starts: PyReadonlyArray1<i64>,
+    o_stops: PyReadonlyArray1<i64>,
+) -> PyResult<()> {
+    require_contiguous_1d(&o_starts, "o_starts")?;
+    require_contiguous_1d(&o_stops, "o_stops")?;
+
+    let o_starts_a = o_starts.as_array();
+    let o_stops_a = o_stops.as_array();
+    let o_starts_s: &[i64] = o_starts_a
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above");
+    let o_stops_s: &[i64] = o_stops_a
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above");
+
+    let store_ref: &crate::svar1::store::Svar1Store = &store;
+
+    py.detach(move || {
+        let vidx = store_ref.geno_v_idxs();
+        prefetch_runs_core(vidx, o_starts_s, o_stops_s);
+    });
+
+    Ok(())
+}
+
 /// GIL-free core that generates haplotypes for ONE batch of window rows. Shared by the
 /// [`svar1_generate_batch`] FFI entry AND the streaming engine's consumer
 /// ([`crate::ffi::stream_engine::Svar1StreamEngine`]) so there is ONE implementation

@@ -20,11 +20,20 @@ import pytest
 import genvarloader as gvl
 
 
-def test_streaming_matches_written_all_cells(svar1_multicontig_fixture):
+@pytest.mark.parametrize("prefetch_strategy", ["engine", "readahead"])
+def test_streaming_matches_written_all_cells(
+    svar1_multicontig_fixture, prefetch_strategy
+):
+    """Byte-identical parity must hold under BOTH prefetch strategies (issue #283):
+    Design C ("readahead") reuses the exact same `read_window`/`generate_batch` calls
+    Design A ("engine") does, so prefetch is a pure page-warming no-op on output --
+    same assertions, same fixture, only the internal `_prefetch_strategy` toggle
+    differs."""
     f = svar1_multicontig_fixture
     sds = gvl.StreamingDataset(
         f.bed, reference=f.reference_path, variants=f.svar_path
     ).with_seqs("haplotypes")
+    object.__setattr__(sds, "_prefetch_strategy", prefetch_strategy)
     written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path).with_seqs(
         "haplotypes"
     )
