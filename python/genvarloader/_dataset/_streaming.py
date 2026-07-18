@@ -54,9 +54,10 @@ class StreamingDataset:
     - Public API: ``StreamingDataset(regions, reference=..., variants=<path>)``.
       ``variants`` is classified by path suffix, mirroring :func:`gvl.write`'s
       classification (``_write.py``): a ``.svar`` directory (a genoray
-      ``SparseVar``/SVAR1 store) is supported in this plan; VCF, PGEN, and
-      ``.svar2`` (SVAR2) inputs raise :class:`NotImplementedError` (later
-      plans). Only ``jitter=0`` (the default) is supported in this plan.
+      ``SparseVar``/SVAR1 store) or a ``.svar2`` directory (a genoray
+      ``SparseVar2``/SVAR2 store) is supported; VCF and PGEN inputs raise
+      :class:`NotImplementedError` (later plans). Only ``jitter=0`` (the
+      default) is supported.
     - Internal/test-oriented: ``StreamingDataset(regions, contigs=..., n_samples=...,
       ploidy=..., _reconstruct_window=...)`` injects a reconstruction callback
       directly, bypassing variant-source classification. Used by
