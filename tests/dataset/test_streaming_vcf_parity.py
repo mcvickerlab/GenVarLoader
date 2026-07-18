@@ -134,3 +134,113 @@ def test_vcf_streamed_variant_table_covers_all_variant_classes(vcf_snp_ins_del_m
     assert records.filter(pl.col("ilen") < 0).height == 1  # deletion
     # The multiallelic split: both atoms anchor at the same POS.
     assert records["pos"].value_counts().filter(pl.col("count") > 1).height == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 8 (issue #276): the end-to-end oracle. Task 7 (above) proves the
+# streamed variant TABLE byte-equals the written table for the same VCF -- so
+# if any test below fails, the divergence is NOT in decode; it is in the
+# transpose or the reconstruction arg-assembly (`RecordBackend::generate`,
+# `src/record_stream/engine.rs`), neither of which the table gate covers.
+# ---------------------------------------------------------------------------
+
+
+def _assert_cell_matches(streamed, expected, ploidy: int) -> None:
+    """Per-haplotype comparison (mirrors `test_streaming_parity.py`'s
+    pattern): haplotype lengths are ragged across cells (indels shift
+    length), so compare haplotype-by-haplotype rather than assuming a single
+    dense array shape."""
+    for h in range(ploidy):
+        np.testing.assert_array_equal(np.asarray(streamed[h]), np.asarray(expected[h]))
+
+
+def test_vcf_streaming_matches_written_all_cells(vcf_snp_ins_del_multi, tmp_path):
+    """Base oracle, mirroring `test_streaming_parity.py`'s
+    `test_streaming_matches_written_all_cells` shape for the VCF backend:
+    single region spanning the whole 250bp contig, 3 samples -> 3 cells.
+    `batch_size=2` still exercises a within-window batch boundary (2, then
+    1) even with only one region."""
+    f = vcf_snp_ins_del_multi
+    gvl.write(tmp_path / "ds", f.regions, variants=str(f.vcf))
+    written = gvl.Dataset.open(tmp_path / "ds", reference=f.fasta).with_seqs(
+        "haplotypes"
+    )
+    sds = gvl.StreamingDataset(
+        f.regions, reference=str(f.fasta), variants=str(f.vcf)
+    ).with_seqs("haplotypes")
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=2):
+        for k in range(len(r_idx)):
+            r, s = int(r_idx[k]), int(s_idx[k])
+            _assert_cell_matches(data[k], written[r, s], sds.ploidy)
+            seen.add((r, s))
+
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
+
+
+def test_vcf_streaming_matches_written_all_cells_multi_region(
+    vcf_snp_ins_del_multi, vcf_snp_ins_del_multi_regions, tmp_path
+):
+    """Multi-region coverage: `vcf_snp_ins_del_multi_regions` splits the same
+    VCF/FASTA's contig into 3 disjoint sub-regions (see its docstring in
+    conftest.py), so a single window's genotype CSR must be expanded
+    per-(region, sample) -- exactly the axis `RecordBackend::generate` had a
+    Critical bug on (Task 3b) that a single-region test cannot exercise.
+    3 regions x 3 samples = 9 cells; `batch_size=4` does NOT evenly divide 9
+    (4, 4, 1), covering the window/batch-boundary requirement simultaneously.
+    """
+    f = vcf_snp_ins_del_multi
+    regions = vcf_snp_ins_del_multi_regions
+    gvl.write(tmp_path / "ds", regions, variants=str(f.vcf))
+    written = gvl.Dataset.open(tmp_path / "ds", reference=f.fasta).with_seqs(
+        "haplotypes"
+    )
+    sds = gvl.StreamingDataset(
+        regions, reference=str(f.fasta), variants=str(f.vcf)
+    ).with_seqs("haplotypes")
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        for k in range(len(r_idx)):
+            r, s = int(r_idx[k]), int(s_idx[k])
+            _assert_cell_matches(data[k], written[r, s], sds.ploidy)
+            seen.add((r, s))
+
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
+
+
+def test_vcf_streaming_matches_written_all_cells_multi_contig(
+    vcf_multi_contig, tmp_path
+):
+    """Multi-contig coverage: `vcf_multi_contig` has 2 regions on `chr1` and 2
+    on `chr2` (distinct SNP/INS/DEL sets per contig); `_plan`'s window
+    traversal is per-contig-run (`_window_regions=64` default groups each
+    contig's 2 regions into one window), so this also exercises the
+    per-contig window boundary. 4 regions x 3 samples = 12 cells (6/contig);
+    `batch_size=5` does NOT evenly divide 6, giving a (5, 1) split within
+    each contig's window -- boundary coverage on both axes at once.
+    """
+    f = vcf_multi_contig
+    gvl.write(tmp_path / "ds", f.regions, variants=str(f.vcf))
+    written = gvl.Dataset.open(tmp_path / "ds", reference=f.fasta).with_seqs(
+        "haplotypes"
+    )
+    sds = gvl.StreamingDataset(
+        f.regions, reference=str(f.fasta), variants=str(f.vcf)
+    ).with_seqs("haplotypes")
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=5):
+        for k in range(len(r_idx)):
+            r, s = int(r_idx[k]), int(s_idx[k])
+            _assert_cell_matches(data[k], written[r, s], sds.ploidy)
+            seen.add((r, s))
+
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }

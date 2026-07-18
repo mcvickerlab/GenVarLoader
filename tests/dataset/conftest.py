@@ -493,3 +493,122 @@ def vcf_snp_ins_del_multi(tmp_path_factory) -> VcfSnpInsDelMultiFixture:
         sample_names=["s0", "s1", "s2"],
         regions=regions,
     )
+
+
+@pytest.fixture(scope="module")
+def vcf_snp_ins_del_multi_regions(
+    vcf_snp_ins_del_multi: VcfSnpInsDelMultiFixture,
+) -> pl.DataFrame:
+    """Task 8 (issue #276): a 3-region bed splitting `vcf_snp_ins_del_multi`'s
+    single 250bp contig into disjoint sub-windows, over the SAME committed VCF
+    + FASTA (no fixture regeneration needed -- `regions` is the only axis that
+    changes). This exercises `RecordBackend::generate`'s per-(region, sample)
+    CSR expansion (`src/record_stream/engine.rs`, the Critical bug fixed in
+    Task 3b) across >=2 regions in one window, which the single-region
+    `vcf_snp_ins_del_multi.regions` (reused unmodified by Task 7's table gate)
+    does not.
+
+    Region boundaries land clear of every variant's extent so no variant spans
+    a region edge:
+      region 0 [0, 90)    contains pos=29 (SNP) and pos=69 (INS, extent [69,70))
+      region 1 [90, 170)  contains pos=109 (DEL, extent [109,113)) and both
+                           pos=149 multiallelic-split atoms
+      region 2 [170, 250) no variants -- pure-reference region
+    """
+    contig = vcf_snp_ins_del_multi.contig
+    return pl.DataFrame(
+        {
+            "chrom": [contig, contig, contig],
+            "chromStart": [0, 90, 170],
+            "chromEnd": [90, 170, 250],
+        }
+    )
+
+
+# Task 8 (issue #276) multi-contig fixture: hand-authored (already-atomic,
+# already-left-of-any-ambiguity) SNP/INS/DEL records across TWO contigs, built
+# inline (bgzip+tabix at fixture time) rather than committed as a binary --
+# unlike `vcf_snp_ins_del_multi` (which needed `vcfixture` + `bcftools norm`
+# to produce a genuinely-multiallelic-then-split site), these records need no
+# normalization pass: neither `gvl.write`'s VCF read path nor the streaming
+# `VcfWindowFiller` left-aligns or REF-checks when `fasta_path=None` (see
+# `src/record_stream/vcf.rs`'s module doc), so a hand-written already-biallelic
+# VCF is read literally by both decoders -- same convention `_SVAR1_MC_VCF`
+# already uses for its inline (non-committed) multi-contig fixture.
+_VCF_MC_REF1 = (
+    "GACGGGATCTGCGGTACGCATAACTTTGCGTGAATCGATGATCTGCTGATATTCTATTATCCATTGAATG"
+    "CTTGGCCCCCCTGCAGTCATAATCGTCATAGTCAGTATGCTCCACTCATC"
+)
+assert len(_VCF_MC_REF1) == 120
+_VCF_MC_REF2 = (
+    "CAGTCCACGGCTGTCATGAGCTCAAACTTATGGCCAAATGAAACTCGTGCGTTAGAACAACTCTCCTATA"
+    "CACCTACTTGCACGAGCGGCCATCGACGGT"
+)
+assert len(_VCF_MC_REF2) == 100
+# chr1: SNP@0-based-20 (T>C), INS@0-based-50 (A>AGG, ilen+2), DEL@0-based-85
+# (GTCA>G, ilen-3). chr2: SNP@0-based-15 (A>G), SNP@0-based-70 (C>T). REF
+# alleles match `_VCF_MC_REF1`/`_VCF_MC_REF2` at each 0-based position exactly.
+_VCF_MC_VCF = """\
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=120>
+##contig=<ID=chr2,length=100>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts0\ts1\ts2
+chr1\t21\t.\tT\tC\t.\t.\t.\tGT\t1|0\t0|1\t0|0
+chr1\t51\t.\tA\tAGG\t.\t.\t.\tGT\t0|1\t1|1\t1|0
+chr1\t86\t.\tGTCA\tG\t.\t.\t.\tGT\t1|0\t0|1\t1|1
+chr2\t16\t.\tA\tG\t.\t.\t.\tGT\t0|1\t1|0\t1|1
+chr2\t71\t.\tC\tT\t.\t.\t.\tGT\t1|1\t0|1\t0|0
+"""
+
+
+@dataclass(slots=True)
+class VcfMultiContigFixture:
+    """Task 8 (issue #276) end-to-end parity fixture spanning two contigs, so
+    the streamed haplotype comparison exercises the engine's per-contig window
+    boundary (`_plan`'s contig-run splitting, `_streaming.py`) in addition to
+    the per-region CSR expansion `vcf_snp_ins_del_multi_regions` covers."""
+
+    vcf: Path
+    fasta: Path
+    contigs: list[str]
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def vcf_multi_contig(tmp_path_factory) -> VcfMultiContigFixture:
+    d = tmp_path_factory.mktemp("vcf_mc_src")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{_VCF_MC_REF1}\n>chr2\n{_VCF_MC_REF2}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    vcf_txt = d / "in.vcf"
+    vcf_txt.write_text(_VCF_MC_VCF)
+    vcf_gz = d / "in.vcf.gz"
+    with vcf_gz.open("wb") as fh:
+        subprocess.run(["bgzip", "-c", str(vcf_txt)], stdout=fh, check=True)
+    subprocess.run(["tabix", "-p", "vcf", str(vcf_gz)], check=True)
+
+    # 2 regions per contig (chr1: variants split SNP+INS in region 0, DEL in
+    # region 1; chr2: one SNP per region) -- contiguous per-contig row blocks,
+    # matching `_plan`'s `np.diff(contig_idxs)` run-detection requirement.
+    regions = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr2", "chr2"],
+            "chromStart": [0, 60, 0, 50],
+            "chromEnd": [60, 120, 50, 100],
+        }
+    )
+
+    return VcfMultiContigFixture(
+        vcf=vcf_gz,
+        fasta=fasta,
+        contigs=["chr1", "chr2"],
+        n_samples=3,
+        ploidy=2,
+        sample_names=["s0", "s1", "s2"],
+        regions=regions,
+    )
