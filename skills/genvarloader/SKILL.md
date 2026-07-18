@@ -366,9 +366,9 @@ Preconditions (all raise `ValueError` at construction):
 
 Footprint is computed exactly via `Dataset._output_bytes_per_instance(...)` (uses `haplotype_lengths`, `n_variants`, and allele offset tables) — no Zipf-style worst-case slack.
 
-## `gvl.StreamingDataset` — write-free streaming (SVAR1 only)
+## `gvl.StreamingDataset` — write-free streaming (SVAR1 and SVAR2)
 
-`gvl.StreamingDataset(regions, reference=..., variants="x.svar")` iterates haplotype batches directly off a live `.svar` (SparseVar/SVAR1) store — **no `gvl.write()` step, no on-disk `.gvl` dataset**. Haplotype output is byte-identical to `gvl.write(...)` + `Dataset.open(...)[r, s]` at `jitter=0`.
+`gvl.StreamingDataset(regions, reference=..., variants="x.svar")` iterates haplotype batches directly off a live `.svar` (SparseVar/SVAR1) or `.svar2` (SVAR2) store — **no `gvl.write()` step, no on-disk `.gvl` dataset**. Haplotype output is byte-identical to `gvl.write(...)` + `Dataset.open(...)[r, s]` at `jitter=0`.
 
 ```python
 sds = gvl.StreamingDataset(
@@ -393,7 +393,7 @@ of which scales with cohort size. `_window_regions`/`_window_samples` (derived f
 `max_mem`) and `_max_mem_bytes` are internal, not user-set directly.
 
 **Current scope (this plan) — everything else raises rather than silently mis-computing:**
-- Variant source: `.svar` (SparseVar/SVAR1) only. VCF, PGEN, and `.svar2` inputs raise `NotImplementedError`.
+- Variant source: `.svar` (SparseVar/SVAR1) and `.svar2` (SVAR2). VCF and PGEN inputs raise `NotImplementedError`.
 - `with_seqs("haplotypes")` only — no `"reference"`/`"annotated"`/`"variants"` output modes.
 - `jitter=0` only (the default); non-zero raises `NotImplementedError`.
 - Ragged output only (no `with_len`/`with_output_format("flat")`).
@@ -498,7 +498,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - `dummy_variant` padding applies to **both `"variants"` and `"variant-windows"`** outputs. Setting `dummy_variant=<DummyVariant>` and then indexing with any other kind (`"haplotypes"`, `"annotated"`, `"reference"`, or no seqs) raises `ValueError`. For token fields (`flank_tokens`, `ref_window`/`alt_window`, bare `ref`/`alt`), the dummy fill is all-`unknown_token` — the `DummyVariant.ref`/`.alt` bytes only set the dummy allele's byte-length, not the token value. `dummy_variant=False` with an unsupported output kind is silently ignored.
 - A non-`b"N"` `DummyVariant.alt` (or `.ref`) **is reverse-complemented** on negative-strand regions, exactly like a real variant allele. The default `b"N"` is rc-invariant; use it if you want a strand-neutral sentinel.
 - `unphased_union=True` + `with_seqs("haplotypes")` / `with_seqs("annotated")` raises — `unphased_union` only applies to `"variants"` / `"variant-windows"` output.
-- **`gvl.StreamingDataset` is iterable-only and `.svar`-only.** `sds[r, s]` raises `TypeError` — use `sds.to_iter(...)` (or `to_dataloader(...)` for torch); there is no `__iter__`. VCF/PGEN/`.svar2` variant sources, non-`"haplotypes"` `with_seqs` kinds, `jitter != 0`, and `num_workers > 0` all raise `NotImplementedError`/`ValueError`. See "`gvl.StreamingDataset` — write-free streaming (SVAR1 only)" above.
+- **`gvl.StreamingDataset` is iterable-only; supported variant sources are `.svar` and `.svar2`.** `sds[r, s]` raises `TypeError` — use `sds.to_iter(...)` (or `to_dataloader(...)` for torch); there is no `__iter__`. VCF/PGEN variant sources, non-`"haplotypes"` `with_seqs` kinds, `jitter != 0`, and `num_workers > 0` all raise `NotImplementedError`/`ValueError`. See "`gvl.StreamingDataset` — write-free streaming (SVAR1 and SVAR2)" above.
 - **`gvl.StreamingDataset(max_mem=...)` bounds read-window memory, not generation.** `max_mem` (default `"512MB"`) only sizes the offsets buffer for the read window; the per-batch haplotype output is bounded separately by `to_iter`'s `batch_size`. Both are cohort-size-independent, but they are two different budgets, not one.
 
 ## Maintaining this skill

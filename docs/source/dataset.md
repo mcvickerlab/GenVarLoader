@@ -206,8 +206,8 @@ re-reads the live store instead of hitting a pre-indexed dataset — prefer a wr
 for repeated-epoch training, and `StreamingDataset` for one-shot/inference work or when you'd
 rather not pay for the write.
 
-`StreamingDataset` is currently more limited than `Dataset`: `.svar` variant sources only
-(VCF/PGEN/`.svar2` raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0`
+`StreamingDataset` is currently more limited than `Dataset`: `.svar` and `.svar2` variant
+sources only (VCF/PGEN raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0`
 only, ragged output only, and **iterable-only** — `sds[r, s]` raises `TypeError`; use
 `sds.to_iter(...)` (or `to_dataloader(...)` for torch). `sample_idxs` index into
 `sds.samples` (lexicographically-sorted sample names, matching `gvl.write()`), not the

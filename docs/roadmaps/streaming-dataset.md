@@ -68,7 +68,7 @@ only** (no map-style random access).
 |---|---|---|
 | `docs/superpowers/specs/2026-07-15-streaming-dataset-vcf-pgen-svar1-design.md` | Shared framework + VCF/PGEN/SVAR1 backend | ✅ approved (⚠️ partly superseded — see below) |
 | `docs/superpowers/specs/2026-07-16-streaming-svar1-window-engine-design.md` | SVAR1 window reads (ungated genoray `svar1_query`) + double-buffer engine + `to_iter` surface. **Supersedes spec A**'s SVAR1-producer, decode-amortization, slot-recycling, release-gate, and `IterableDataset` claims. | ✅ approved — issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275), PR [#282](https://github.com/mcvickerlab/GenVarLoader/pull/282) |
-| _TBD_ — issue [#278](https://github.com/mcvickerlab/GenVarLoader/issues/278) | SVAR2 backend (SVAR2-style buffer + read-bound kernels) behind the framework | ⬜ |
+| `docs/superpowers/specs/2026-07-17-streaming-svar2-backend-design.md` | SVAR2 backend (SVAR2-style buffer + read-bound kernels) behind the framework | ✅ approved — issue [#278](https://github.com/mcvickerlab/GenVarLoader/issues/278) |
 | _TBD_ — issue [#279](https://github.com/mcvickerlab/GenVarLoader/issues/279) | Interval (BigWigs/Table) streaming + variant+interval mixed scheduler | ⬜ |
 
 ## Plans (spec A)
@@ -77,6 +77,7 @@ only** (no map-style random access).
 |---|---|---|
 | `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — PR [#274](https://github.com/mcvickerlab/GenVarLoader/pull/274) |
 | `docs/superpowers/plans/2026-07-16-streaming-svar1-window-engine.md` | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275). Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Tasks 2-4 done; Task 5's generic `StreamBackend`/`run_windows` engine done; SVAR1 wiring (issue [#283](https://github.com/mcvickerlab/GenVarLoader/issues/283)) done — 8a (Rust engine) + 8b (Python wiring, `to_iter()` now overlaps producer I/O with consumer generation) both landed; cold-cache A-vs-C measured (producer-thread engine wins 1.46×, ships as default); [#296](https://github.com/mcvickerlab/GenVarLoader/issues/296) throughput-gate observability gap fixed (`b2c5af90`) |
+| `docs/superpowers/plans/2026-07-17-streaming-svar2-backend.md` | SVAR2 backend, Phase 1 (parity: synchronous `Svar2Store` read + `.svar2` dispatch, byte-identical vs `gvl.write()`+`Dataset[r,s]`). Phase 2 (producer-thread engine, mirroring SVAR1's #275/#283) is deferred, decomposed only if the cold-cache measurement gate justifies it. | 🚧 Phase 1 done — issue [#278](https://github.com/mcvickerlab/GenVarLoader/issues/278) |
 | _TBD (Plan 3/4)_ — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend | ⬜ |
 | _TBD (Plan 5)_ — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
 
