@@ -4,6 +4,7 @@ pub mod genotypes;
 pub mod intervals;
 pub mod ragged;
 pub mod reconstruct;
+pub mod record_stream;
 pub mod reference;
 pub mod reverse;
 pub mod stream;
