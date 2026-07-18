@@ -12,9 +12,10 @@ Run:
 from __future__ import annotations
 
 import argparse
+import shutil
+import tempfile
 import time
 from pathlib import Path
-import tempfile
 
 import genvarloader as gvl
 
@@ -31,26 +32,37 @@ def _sweep(samples_list, records, repeats):
 
     for n in samples_list:
         best = float("inf")
-        for rep in range(repeats):
-            tmp = Path(tempfile.mkdtemp())  # fresh inode -> never-faulted
-            fx = build(tmp, n_samples=n, records=records, seed=1000 + rep)
-            sds = gvl.StreamingDataset(
-                fx.bed, reference=fx.reference, variants=fx.svar2_path
-            ).with_seqs("haplotypes")
-            t0 = time.perf_counter()
+        tmp = None
+        try:
+            for rep in range(repeats):
+                tmp = Path(tempfile.mkdtemp())  # fresh inode -> never-faulted
+                fx = build(tmp, n_samples=n, records=records, seed=1000 + rep)
+                sds = gvl.StreamingDataset(
+                    fx.bed, reference=fx.reference, variants=fx.svar2_path
+                ).with_seqs("haplotypes")
+                t0 = time.perf_counter()
+                for _ in sds.to_iter(batch_size=32):
+                    pass
+                best = min(best, time.perf_counter() - t0)
+                # Keep the LAST rep's store alive for the pyinstrument sweep below;
+                # earlier reps' stores are done being used, so clean them up now.
+                if rep < repeats - 1:
+                    shutil.rmtree(tmp, ignore_errors=True)
+            print(f"n_samples={n:>6}: synchronous best-of-{repeats} = {best:.3f}s")
+
+            # IO-vs-CPU split on the LAST rep's store, one sweep under pyinstrument.
+            prof = pyinstrument.Profiler()
+            prof.start()
             for _ in sds.to_iter(batch_size=32):
                 pass
-            best = min(best, time.perf_counter() - t0)
-        print(f"n_samples={n:>6}: synchronous best-of-{repeats} = {best:.3f}s")
-
-        # IO-vs-CPU split on the LAST rep's store, one sweep under pyinstrument.
-        prof = pyinstrument.Profiler()
-        prof.start()
-        for _ in sds.to_iter(batch_size=32):
-            pass
-        prof.stop()
-        print(prof.output_text(unicode=True, color=False))
-        print("  -> read `_find_ranges` (search) vs gather+kernel (fill) share above.")
+            prof.stop()
+            print(prof.output_text(unicode=True, color=False))
+            print(
+                "  -> read `_find_ranges` (search) vs gather+kernel (fill) share above."
+            )
+        finally:
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main() -> None:
