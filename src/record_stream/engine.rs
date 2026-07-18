@@ -263,10 +263,12 @@ impl RecordStreamEngine {
     /// `source_kind` selects the filler: `"vcf"` builds a [`VcfWindowFiller`] (`vcf_path`,
     /// `fasta_path` — see that module's doc for the `fasta_path: None` parity default);
     /// `"pgen"` builds a [`PgenWindowFiller`] over the SAME `vcf_path` param (it carries
-    /// the `.pgen` path for this source kind — the filler derives the sibling `.pvar`
-    /// itself, see `pgen.rs`'s doc), reusing `sample_names.len()` as the full on-disk
-    /// cohort size and requiring `ploidy == 2` (PGEN is diploid-only; the filler hardwires
-    /// `PGEN_PLOIDY` internally and has no ploidy parameter of its own).
+    /// the `.pgen` path for this source kind — the filler derives the sibling `.pvar` and
+    /// `.psam` itself, see `pgen.rs`'s doc), passing `sample_names` (the sorted-name
+    /// `sample_idx` order) so the filler can map it onto the physical `.psam` column order
+    /// and read the full on-disk cohort size from the `.psam`. Requires `ploidy == 2`
+    /// (PGEN is diploid-only; the filler hardwires `PGEN_PLOIDY` internally and has no
+    /// ploidy parameter of its own).
     #[new]
     #[pyo3(signature = (
         source_kind, vcf_path, sample_names, ploidy,
@@ -375,10 +377,12 @@ impl RecordStreamEngine {
                     )));
                 }
                 // `vcf_path` carries the `.pgen` path for this source kind (see the
-                // `#[new]` doc comment); `n_samples` (== `sample_names.len()`, already
-                // computed above) is the full on-disk cohort size `PgenWindowFiller::new`
-                // needs to construct the pgenlib reader.
-                let filler = PgenWindowFiller::new(&vcf_path, n_samples)
+                // `#[new]` doc comment); `sample_names` is the caller's sorted-name
+                // `sample_idx` order, which `PgenWindowFiller::new` maps onto the physical
+                // `.psam` column order (it reads the `.psam` for the full cohort size and
+                // the public->physical map -- see `pgen.rs`'s "Sample subsetting" section).
+                let sample_refs: Vec<&str> = sample_names.iter().map(String::as_str).collect();
+                let filler = PgenWindowFiller::new(&vcf_path, &sample_refs)
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
                 Ok(Self::new_rs(
                     Box::new(filler),

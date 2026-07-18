@@ -724,6 +724,65 @@ def pgen_snp_ins_del_multi(tmp_path_factory) -> PgenSnpInsDelMultiFixture:
 
 
 @dataclass(slots=True)
+class PgenUnsortedSamplesFixture:
+    """Regression fixture (issue #276 final-review blocker) for the PGEN
+    sample-ordering bug: a `.psam` whose physical sample order is NOT
+    lexicographically sorted. Points at the committed
+    `tests/data/streaming/unsorted_samples.{pgen,pvar,psam}` fileset,
+    generated via:
+
+        plink2 --vcf tests/data/streaming/unsorted_samples.vcf.gz \\
+               --make-pgen --allow-extra-chr --output-chr chrM \\
+               --out tests/data/streaming/unsorted_samples
+
+    The `.psam` physical order is `S10, S2, S1`; the public `sample_idx`
+    (lexicographically-sorted) order `gvl.write`/`gvl.Dataset` use is
+    `S1, S10, S2` (note `"S10" < "S2"` in string order). Each sample carries
+    exactly one distinct SNP (contig `chr1`, 60bp all-`A` ref):
+    S10→pos10 A>C, S2→pos30 A>G, S1→pos50 A>T. So streaming PGEN reading the
+    WRONG (physical) column for a public index changes the reconstructed
+    haplotypes -- the pre-fix bug this fixture proves fixed, and which every
+    prior PGEN fixture (pre-sorted `s0/s1/s2` names) could not catch.
+    """
+
+    pgen: Path
+    fasta: Path
+    contig: str
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def pgen_unsorted_samples(tmp_path_factory) -> PgenUnsortedSamplesFixture:
+    pgen = Path(__file__).parent.parent / "data" / "streaming" / "unsorted_samples.pgen"
+
+    d = tmp_path_factory.mktemp("pgen_unsorted_samples_fasta")
+    fasta = d / "ref.fa"
+    ref = "A" * 60
+    fasta.write_text(f">chr1\n{ref}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(ref)]}
+    )
+
+    return PgenUnsortedSamplesFixture(
+        pgen=pgen,
+        fasta=fasta,
+        contig="chr1",
+        n_samples=3,
+        # Public lexicographically-sorted order -- what gvl.Dataset[r, s] and
+        # the streamed backend both index by ("S10" < "S2" in string order).
+        # The .psam physical order is S10, S2, S1.
+        sample_names=["S1", "S10", "S2"],
+        ploidy=2,
+        regions=regions,
+    )
+
+
+@dataclass(slots=True)
 class PgenMultiContigFixture:
     """PGEN-source counterpart to `vcf_multi_contig`, for Task 12's
     multi-contig end-to-end PGEN parity coverage (issue #276). Converts that

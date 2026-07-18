@@ -1068,9 +1068,13 @@ class _PgenBackend:
         # (`_write.py`'s unconditional `samples.sort()`), so `gvl.Dataset`'s
         # sample index `s` means "the s-th name in sorted order" -- the same
         # convention `_VcfBackend`/`_Svar1Backend` follow (see their `__init__`
-        # comments). `RecordStreamEngine` takes `sample_names` directly and
-        # looks samples up by name (same as the VCF filler), so there's no
-        # native-order/physical-index concern the way SVAR1's on-disk CSR has.
+        # comments). `RecordStreamEngine` takes these sorted names directly and
+        # passes them to `PgenWindowFiller`, which reads the `.psam` and maps the
+        # sorted-name order onto the physical `.psam` column order (the `.psam`
+        # order plink2 preserves from the source VCF is arbitrary and need NOT be
+        # sorted) -- the same public->physical concern SVAR1's on-disk CSR has,
+        # handled Rust-side here (see `src/record_stream/pgen.rs`'s "Sample
+        # subsetting" section) rather than via a Python `_phys_sample_idx`.
         self._sample_names = sorted(pgen.available_samples)
         self.n_samples = len(self._sample_names)
         # PGEN is diploid-only by format (no ploidy field on disk) -- matches

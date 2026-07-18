@@ -174,6 +174,45 @@ def test_pgen_streaming_matches_written_all_cells_multi_region(
     }
 
 
+def test_pgen_streaming_matches_written_unsorted_samples(
+    pgen_unsorted_samples, tmp_path
+):
+    """REGRESSION (issue #276 final-review blocker): the ultimate proof for the
+    PGEN sample-ordering fix. `pgen_unsorted_samples`'s `.psam` physical order
+    is `S10, S2, S1`; the public `sample_idx` order `gvl.write`/`gvl.Dataset`
+    use is the lexicographically-sorted `S1, S10, S2` (`"S10" < "S2"`). Each
+    sample carries a distinct SNP, so a physical-vs-sorted column mix-up in
+    `PgenWindowFiller` yields the WRONG sample's haplotypes. This test FAILS
+    before the fix (streamed cell (r, s) != written cell (r, s)) and PASSES
+    after. Every prior PGEN fixture used pre-sorted `s0/s1/s2` names and so
+    could not catch the bug.
+    """
+    f = pgen_unsorted_samples
+    gvl.write(tmp_path / "ds", f.regions, variants=str(f.pgen))
+    written = gvl.Dataset.open(tmp_path / "ds", reference=f.fasta).with_seqs(
+        "haplotypes"
+    )
+    # Sanity: the written dataset's samples ARE in sorted-name order, and the
+    # .psam physical order is genuinely unsorted (else the test proves nothing).
+    assert list(written.samples) == ["S1", "S10", "S2"]
+
+    sds = gvl.StreamingDataset(
+        f.regions, reference=str(f.fasta), variants=str(f.pgen)
+    ).with_seqs("haplotypes")
+    assert list(sds.samples) == ["S1", "S10", "S2"]
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=2):
+        for k in range(len(r_idx)):
+            r, s = int(r_idx[k]), int(s_idx[k])
+            _assert_cell_matches(data[k], written[r, s], sds.ploidy)
+            seen.add((r, s))
+
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
+
+
 def test_pgen_streaming_matches_written_all_cells_multi_contig(
     pgen_multi_contig, tmp_path
 ):
