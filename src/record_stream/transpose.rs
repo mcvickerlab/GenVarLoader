@@ -57,22 +57,60 @@ pub fn fill_decoded_window(
     slot.alt_offsets
         .extend(chunk.alt_offsets.iter().map(|&o| o as i64));
 
-    slot.geno_v_idxs.clear();
+    // Word-level two-pass counting-sort transpose. Instead of calling get_bit once per
+    // (v,s,p) cell (V*S*P reads), walk the packed `words` in flat v-major order — this is
+    // sequential/cache-friendly and, since genotypes are sparse, skips whole empty words
+    // via `trailing_zeros`. Two passes over `words` (count per hap, then fill at per-hap
+    // cursors) replace the single hap-major cell scan.
+    let plane = n_samples * ploidy; // hap stride; hap = s*ploidy + p = flat % plane
+    let n_haps = plane;
+    let total_bits = n_var * plane;
+    let words = &chunk.genos.words;
+
+    // Pass 1: count set bits per hap (offsets[hap+1] holds the count, then prefix-sum).
     slot.geno_offsets.clear();
-    slot.geno_offsets.push(0);
-    // Hap-major: for each (sample, ploid) hap, scan variants in ascending column order
-    // and push any present variant's index. Ascending v => geno_v_idxs stay sorted per
-    // hap, matching the SVAR1 CSR contract the kernel expects.
-    for s in 0..n_samples {
-        for p in 0..ploidy {
-            for v in 0..n_var {
-                let flat_idx = v * n_samples * ploidy + s * ploidy + p;
-                WORD_READS.fetch_add(1, Ordering::Relaxed);
-                if chunk.genos.get_bit(flat_idx) {
-                    slot.geno_v_idxs.push(v as i32);
-                }
+    slot.geno_offsets.resize(n_haps + 1, 0);
+    for (w_idx, &word) in words.iter().enumerate() {
+        WORD_READS.fetch_add(1, Ordering::Relaxed);
+        let mut bits = word;
+        while bits != 0 {
+            let b = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let flat = w_idx * 64 + b;
+            if flat >= total_bits {
+                continue; // padding bit in the final word (genoray leaves these 0, defensive)
             }
-            slot.geno_offsets.push(slot.geno_v_idxs.len() as i64);
+            let hap = flat % plane;
+            slot.geno_offsets[hap + 1] += 1;
+        }
+    }
+    for h in 0..n_haps {
+        slot.geno_offsets[h + 1] += slot.geno_offsets[h];
+    }
+    let total = slot.geno_offsets[n_haps] as usize;
+
+    // Pass 2: fill geno_v_idxs at per-hap cursors. v is the slowest-varying flat axis,
+    // so iterating words in order yields ascending v per hap — the CSR contract.
+    slot.geno_v_idxs.clear();
+    slot.geno_v_idxs.resize(total, 0);
+    let mut cursor: Vec<usize> = slot.geno_offsets[..n_haps]
+        .iter()
+        .map(|&o| o as usize)
+        .collect();
+    for (w_idx, &word) in words.iter().enumerate() {
+        WORD_READS.fetch_add(1, Ordering::Relaxed);
+        let mut bits = word;
+        while bits != 0 {
+            let b = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let flat = w_idx * 64 + b;
+            if flat >= total_bits {
+                continue;
+            }
+            let v = flat / plane;
+            let hap = flat % plane;
+            slot.geno_v_idxs[cursor[hap]] = v as i32;
+            cursor[hap] += 1;
         }
     }
 }
@@ -183,7 +221,55 @@ mod tests {
         let chunk = dense_fixture(); // 2 var, 2 samples, ploidy 2
         let mut slot = DecodedWindow::default();
         fill_decoded_window(&chunk, 2, 2, &mut slot);
-        // Current (pre-rewrite) impl calls get_bit once per (v,s,p) cell = 2*2*2 = 8.
-        assert_eq!(word_reads(), 8);
+        // Metric changed from per-cell get_bit reads (V*S*P = 8) to per-word reads: the
+        // word-level two-pass transpose walks chunk.genos.words twice (count pass +
+        // fill pass), so the count is 2 * n_words. dense_fixture has 8 bits = 1 word.
+        assert_eq!(word_reads(), 2 * chunk.genos.words.len());
+    }
+
+    #[test]
+    fn word_transpose_matches_naive_on_sparse_grid() {
+        let _guard = FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (n_var, n_samples, ploidy) = (37usize, 11usize, 2usize);
+        let mut genos = BitGrid3::zeros(n_var, n_samples, ploidy);
+        // Deterministic sparse pattern (~5% density).
+        for v in 0..n_var {
+            for s in 0..n_samples {
+                for p in 0..ploidy {
+                    if (v * 7 + s * 3 + p) % 19 == 0 {
+                        genos.or_bit(v * n_samples * ploidy + s * ploidy + p, true);
+                    }
+                }
+            }
+        }
+        // Reference: the old hap-major scan.
+        let mut ref_idxs: Vec<i32> = Vec::new();
+        let mut ref_offsets: Vec<i64> = vec![0];
+        for s in 0..n_samples {
+            for p in 0..ploidy {
+                for v in 0..n_var {
+                    if genos.get_bit(v * n_samples * ploidy + s * ploidy + p) {
+                        ref_idxs.push(v as i32);
+                    }
+                }
+                ref_offsets.push(ref_idxs.len() as i64);
+            }
+        }
+        let chunk = DenseChunk {
+            chunk_id: 0,
+            pos: (0..n_var as u32).collect(),
+            ilens: vec![0; n_var],
+            alt: vec![b'A'; n_var],
+            alt_offsets: (0..=n_var as u32).collect(),
+            genos,
+            info_staged: Vec::new(),
+            format_staged: Vec::new(),
+        };
+        let mut slot = DecodedWindow::default();
+        fill_decoded_window(&chunk, n_samples, ploidy, &mut slot);
+        assert_eq!(slot.geno_offsets, ref_offsets);
+        assert_eq!(slot.geno_v_idxs, ref_idxs);
     }
 }

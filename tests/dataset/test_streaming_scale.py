@@ -311,6 +311,65 @@ def test_pgen_variants_decoded_scales_with_window_not_contig(
     )
 
 
+def test_transpose_word_reads_below_cell_count(
+    pgen_snp_ins_del_multi, vcf_snp_ins_del_multi_regions
+):
+    """Task 5 (issue #276) gate for the shared genotype transpose
+    (`fill_decoded_window` in `src/record_stream/transpose.rs`): the word-level
+    two-pass counting-sort rewrite must read `chunk.genos.words` a small,
+    fixed number of times per window (two passes: count + fill) rather than
+    calling `get_bit` once per (variant, sample, ploid) cell.
+
+    Drives a PGEN-backed `StreamingDataset` (the transpose counter only fires
+    on the VCF/PGEN record backends, not SVAR1) over the same multi-region bed
+    Task 4's `test_pgen_variants_decoded_scales_with_window_not_contig` uses,
+    so multiple windows exercise the transpose repeatedly. `pgen_variants_decoded`
+    (reset alongside `transpose_word_reads`) reports `Σ window (var_end - var_start)`
+    -- i.e. exactly `Σ window n_var`, the same per-window variant count
+    `fill_decoded_window` transposes -- so `decoded * n_samples * ploidy` is the
+    EXACT naive per-cell `get_bit` count the old hap-major scan would have done
+    across every window in this run; `transpose_word_reads()` must land far
+    below it.
+    """
+    from genvarloader.genvarloader import (
+        pgen_variants_decoded,
+        pgen_variants_decoded_reset,
+        transpose_word_reads,
+        transpose_word_reads_reset,
+    )
+
+    f = pgen_snp_ins_del_multi
+    regions = vcf_snp_ins_del_multi_regions
+    # Same max_mem as Task 4's test: forces >=2 windows so the gate isn't vacuous.
+    sds = gvl.StreamingDataset(
+        regions, reference=str(f.fasta), variants=str(f.pgen), max_mem=200
+    ).with_seqs("haplotypes")
+
+    n_windows = sum(1 for _ in sds._plan())
+    assert n_windows > 1, "test requires >=2 windows to be a meaningful gate"
+
+    pgen_variants_decoded_reset()
+    transpose_word_reads_reset()
+    for _ in sds.to_iter(batch_size=4):
+        pass
+    decoded = pgen_variants_decoded()
+    reads = transpose_word_reads()
+
+    naive_cell_reads = decoded * f.n_samples * f.ploidy
+    print(
+        f"[transpose-word-reads-gate] word_reads={reads} "
+        f"naive_cell_reads={naive_cell_reads} (decoded={decoded}, "
+        f"n_samples={f.n_samples}, ploidy={f.ploidy})"
+    )
+
+    assert reads > 0, "counter is not wired"
+    assert reads < naive_cell_reads, (
+        f"transpose did {reads} word reads >= the naive per-cell get_bit count "
+        f"{naive_cell_reads} -- word-level two-pass transpose regressed to a "
+        "per-cell scan"
+    )
+
+
 def test_scale_parity_still_byte_identical(scale_fixture, tmp_path):
     """The scale fixture must ALSO satisfy the parity oracle -- a fast wrong answer
     is not progress."""
