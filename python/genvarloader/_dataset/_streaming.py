@@ -1110,7 +1110,10 @@ class _Svar2Backend:
             ref_offsets,
             np.uint8(self._ref.pad_char),
             np.int64(-1),  # ragged output (no fixed output_length)
-            True,  # parallel
+            False,  # parallel: streaming per-batch reconstruct is tiny (~batch_size*ploidy
+            #        haplotypes); the 96-thread rayon fork/join costs more than it saves
+            #        here (measured 1.2-1.8x faster serial). The written-Dataset path
+            #        (_svar2_haps.py) keeps parallel=True (its getitem chunks are large).
             False,  # filter_exonic (splicing out of scope)
         )
         return Ragged.from_offsets(
