@@ -40,22 +40,33 @@ prior run of THIS script in the SAME session) are the only trustworthy
 comparison on this node -- do not compare an absolute number here against a
 number from a different session or a different, quieter machine.
 
-KNOWN PGEN LIMITATION THIS BENCHMARK IS DESIGNED TO SURFACE
--------------------------------------------------------------
-`PgenWindowFiller` (`src/record_stream/pgen.rs`) uses a COARSE per-contig
-`var_start`: a `.pvar` has no seek, so every window's fill re-scans the
-contig's variant prefix from record 0 (documented in that module's "Coarse
-`var_start`" doc section). This is O(prefix) decode + O(var_start) `.pvar`
-line-skip PER WINDOW, not amortized -- the more windows a sweep drives, the
-more repeated prefix work PGEN pays that VCF (tabix/CSI-seekable) does not.
-This harness cannot instrument the Rust decoder's actual re-scanned-variant
-count without new Rust code (out of scope for a benchmark harness), so it
-prints the analytically exact multiplier instead: `n_windows` IS the number
-of times the full contig prefix is re-decoded, and `pvar_variants` is the
-size of that prefix -- their PRODUCT is the wasted work. Compare it against
-VCF's number in the same run (VCF re-decodes only what a window's tabix
-query returns, independent of window count). Follow-up: narrow `var_start`
-with `max_v_len` padding (see the module doc).
+PGEN DECODE VOLUME (Task 4 narrowing landed -- measured via `pgen_variants_decoded`)
+-------------------------------------------------------------------------------------
+`PgenWindowFiller` (`src/record_stream/pgen.rs`) used to re-scan the WHOLE
+contig's variant prefix from record 0 on every window's fill (the old
+"coarse `var_start`" behavior). That has since been narrowed: each window now
+binary-searches a per-contig POS index built once (in `PgenWindowFiller::new`)
+to compute a tight `[var_start, var_end)` range, padded by the contig's max
+REF length so a spanning deletion upstream of the window is never dropped --
+see that module's "Narrowed `var_start`/`var_end`" doc section for the full
+correctness argument (over-inclusion is safe via `OverlapMode::Variant`;
+under-inclusion would be a bug, hence the pad).
+
+The deterministic gate for this is the Rust-side `pgen_variants_decoded`
+counter (`genvarloader.genvarloader.pgen_variants_decoded()`, reset via
+`pgen_variants_decoded_reset()`), exercised in
+`tests/dataset/test_streaming_scale.py`. This harness does not itself read
+that counter (it would need to import the extension module directly, out of
+scope for a benchmark harness) -- for reference, at N=10000
+(`--n-regions 200 --region-len 200`, 4 windows) it dropped from 400,032
+(= 4 x 100,008 pvar variants, the old coarse-prefix-per-window total, exactly
+`n_windows * pvar_variants`) to 98,583 (~1x total variant count -- each
+window now decodes close to only its own range). See
+`docs/roadmaps/streaming-optimization-baseline.md` (before) and
+`docs/roadmaps/streaming-dataset.md`'s "Optimization pass (#276) results"
+section (after) for the full measurement. The `n_windows`/`pvar_variants`
+print below is now a coarse cross-check only, not evidence of a whole-prefix
+re-decode.
 
 COMPARE-DATASET (optional, `--compare-dataset`)
 -------------------------------------------------
@@ -583,13 +594,14 @@ def bench_one(
         pvar_variants = _count_pvar_variants(pgen_path)
         any_result = next(iter(last_result.values()))
         print(
-            f"PGEN coarse-var_start indicator: n_windows={any_result.n_windows} x "
-            f"pvar_variants={pvar_variants} = {any_result.n_windows * pvar_variants} "
-            "contig-prefix decode-units re-paid across the sweep (each window "
-            "re-scans the WHOLE prefix from record 0 -- see "
-            "src/record_stream/pgen.rs's 'Coarse var_start' doc section and this "
-            "script's module docstring). VCF pays no equivalent per-window "
-            "re-scan (tabix/CSI-seekable)."
+            f"PGEN window plan: n_windows={any_result.n_windows}, "
+            f"pvar_variants={pvar_variants} (coarse worst case would be "
+            f"{any_result.n_windows * pvar_variants} decode-units; the shipped "
+            "narrowed var_start/var_end -- see src/record_stream/pgen.rs's "
+            "'Narrowed var_start/var_end' doc section and this script's module "
+            "docstring -- keeps actual decode close to pvar_variants, not the "
+            "product; genvarloader.genvarloader.pgen_variants_decoded() has the "
+            "exact measured count, not read by this harness)."
         )
 
 
@@ -598,8 +610,8 @@ def main() -> None:
         description=(
             "Cohort-size sweep for StreamingDataset's VCF/PGEN backends "
             "(engine vs. forced-synchronous baseline), issue #276 Task 13. "
-            "See the module docstring for methodology and the known PGEN "
-            "coarse-var_start limitation this is designed to surface."
+            "See the module docstring for methodology, the PGEN var_start "
+            "narrowing this pass shipped, and the --compare-dataset arm."
         ),
     )
     p.add_argument(
@@ -624,7 +636,7 @@ def main() -> None:
         choices=["vcf", "pgen", "both"],
         default="both",
         help="which backend(s) to sweep (measured in SEPARATE loops -- VCF's "
-        "tabix-seekable decode and PGEN's non-GIL-free, coarse-prefix decode "
+        "tabix-seekable decode and PGEN's non-GIL-free, window-narrowed decode "
         "have different overlap characteristics; never averaged together)",
     )
     p.add_argument(

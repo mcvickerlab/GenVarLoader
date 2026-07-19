@@ -81,7 +81,44 @@ only** (no map-style random access).
 | `docs/superpowers/plans/2026-07-16-streaming-svar1-window-engine.md` | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275). Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Tasks 2-4 done; Task 5's generic `StreamBackend`/`run_windows` engine done; SVAR1 wiring (issue [#283](https://github.com/mcvickerlab/GenVarLoader/issues/283)) done — 8a (Rust engine) + 8b (Python wiring, `to_iter()` now overlaps producer I/O with consumer generation) both landed; cold-cache A-vs-C measured (producer-thread engine wins 1.46×, ships as default); [#296](https://github.com/mcvickerlab/GenVarLoader/issues/296) throughput-gate observability gap fixed (`b2c5af90`) |
 | `docs/superpowers/plans/2026-07-17-streaming-vcf-pgen-backends.md` — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend. Spec: `docs/superpowers/specs/2026-07-17-streaming-vcf-pgen-backends-design.md` | ✅ **done — VCF + PGEN backends both landed, single draft PR [#299](https://github.com/mcvickerlab/GenVarLoader/pull/299) into `streaming`** (all 14 tasks). Shared `RecordStreamEngine` (generic detached-producer/consumer engine core) + `DenseChunk`→`geno_v_idxs` transpose + `VcfWindowFiller`/`PgenWindowFiller`. `gvl.StreamingDataset(variants="x.vcf[.gz]"\|"x.bcf"\|"x.pgen")` reads directly and reaches byte-identical haplotype parity with `gvl.write()` + `Dataset.open()[r,s]` (haplotypes-only, `jitter=0`) for both backends; PGEN is biallelic-only (multiallelic rejected loudly at construction). Includes a `vcfixture-bulk` cohort-size benchmark harness (Task 13). Docs updated (Task 14). Still in draft pending a final whole-branch review. |
 | _TBD (Plan 5)_ — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
-| `docs/superpowers/plans/2026-07-18-streaming-vcf-pgen-optimization.md` — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | Optimization pass. Spec: `docs/superpowers/specs/2026-07-18-streaming-vcf-pgen-optimization-design.md` | 🚧 Tasks 1-2 done (counters, `--compare-dataset` arm); **Task 3 (baseline + profile) done** — see `docs/roadmaps/streaming-optimization-baseline.md`; **Task 6 (reader reuse) decision: PROCEED**, driven by VCF's `VcfRecordSource::new` reader-reopen cost (~74.6% of producer `fill()` time at N=10k, dominated by an O(n_samples) `HeaderView::sample_id` string lookup redone per window) |
+| `docs/superpowers/plans/2026-07-18-streaming-vcf-pgen-optimization.md` — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | Optimization pass. Spec: `docs/superpowers/specs/2026-07-18-streaming-vcf-pgen-optimization-design.md` | ✅ **done (Tasks 1-7 all landed)** — counters (Task 1), `--compare-dataset` arm (Task 2), baseline + profile (Task 3, `docs/roadmaps/streaming-optimization-baseline.md`), PGEN `var_start`/`var_end` narrowing (Task 4), word-level transpose (Task 5), VCF sample-index reuse (Task 6), docs/gate (Task 7, see results below) |
+
+### Optimization pass (#276) results — Task 7 (2026-07-19)
+
+Final measured before/after for the optimization pass, N=10000, same fixture/region-plan as
+the Task-3 baseline (`--n-regions 200 --region-len 200 --batch-size 32`, `n_windows=4`).
+Before numbers from `docs/roadmaps/streaming-optimization-baseline.md` (captured after Tasks
+1-2, before any optimization edit); after numbers captured this task on current HEAD (Tasks
+1-6 landed), same session, `pixi run -e dev maturin develop --release` immediately before
+capture, via a standalone script mirroring the harness's own fixture helpers (not committed —
+tmp scratch, per the task's constraints).
+
+- **Streaming vs written `Dataset` (Task 3 baseline, N=10000):** streaming engine sweep
+  5.2-11.5s vs written-`Dataset` sweep 1.2-1.4s post-preprocessing; `Dataset` write
+  (preprocessing) itself costs 5.4-8.8s at this sweep scale — the whole point of
+  `StreamingDataset` is skipping that cost, at a per-epoch throughput trade. Peak RSS: engine
+  ~1.07M-1.35M KB (VCF), ~1.91M-2.0M KB (PGEN); sync/engine ratio 1.25-1.77x (engine's
+  producer/consumer overlap wins, colored per the noisy-shared-node convention, not a gate).
+- **`pgen_variants_decoded` (per-sweep total, 4 windows):** before 400,032 (= 4 × 100,008
+  pvar variants — every window re-decoded the whole contig prefix from record 0) → **after
+  98,583** (≈1x total variant count — each window now decodes only its own
+  `var_start`/`var_end` range). ~4.06x reduction.
+- **`transpose_word_reads` (per-sweep total):** before 17,140,000 (per-cell `get_bit`, =
+  V×S×ploidy) → **after 535,628** (word-level two-pass counting-sort transpose, = 2×n_words,
+  same counter redefined to a comparable word-reads unit in Task 5). ~32x reduction.
+- **`vcf_sample_resolutions` (per-sweep total, 4 windows):** before ~n_windows (one
+  O(n_samples) `HeaderView::sample_id` string lookup per window) → **after 1** (resolved once
+  per sweep, reused across windows via genoray `with_sample_indices`).
+
+**Cross-repo dependency:** this pass pins genoray branch `feat/vcf-sample-indices` (commit
+`adf7e22e2e706ddc6d429baef92a96aff9e852e2`, v3.2.1+) in `Cargo.toml` for `with_sample_indices`
+(Task 6). PR [#299](https://github.com/mcvickerlab/GenVarLoader/pull/299) (the VCF/PGEN
+backends draft PR into `streaming`) is gated on that genoray branch merging to genoray `main`
+before it can leave draft — an unpublished/unmerged genoray branch is never itself a blocker
+(bump the rev), but #299 specifically should not be finalized until this rev is stable.
+
+See `docs/superpowers/plans/2026-07-18-streaming-vcf-pgen-optimization.md` (full task list)
+and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for detail.
 
 ## Tasks (spec A — corrected ordering)
 
