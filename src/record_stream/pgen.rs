@@ -15,9 +15,11 @@
 //! `.pvar` text scanner genoray's PGEN source drives in lockstep) has no seek — it can
 //! only skip forward from byte 0. So before any window can be decoded, the filler needs
 //! a POS->variant-index mapping. `PgenWindowFiller::new` builds that mapping *once*, by
-//! scanning the whole `.pvar` for each contig's `[lo, hi)` variant-index range (see
-//! `contig_var_ranges` below) — deliberately coarse, not narrowed to the window. See
-//! "Coarse `var_start`" below for why narrowing is unsafe.
+//! scanning the whole `.pvar` for each contig's `[lo, hi)` variant-index range plus a
+//! POS index and max REF length (see `contig_var_ranges` below); `fill` then
+//! binary-searches that index per window instead of decoding the whole range every time.
+//! See "Narrowed `var_start`/`var_end`" below for the narrowing itself and why it's still
+//! safe.
 //!
 //! ## pgenlib reader construction (the `Py<PyAny>` handle)
 //!
@@ -119,32 +121,37 @@
 //! crate, a `genoray_core`-only dependency this crate does not otherwise need); wiring
 //! that up is a small, isolated follow-up if a `.zst` fixture is ever needed.
 //!
-//! ## Coarse `var_start`: correct, but a known v1 perf limitation
+//! ## Narrowed `var_start`/`var_end` (Task 4): correct AND close to the window
 //!
-//! `fill` always decodes a contig from its **first** variant (`var_start = ` the whole
-//! contig's `lo`), never narrowed to the window's own regions. This is required for
-//! correctness, not laziness: a spanning upstream deletion (POS before the window but
-//! whose extent reaches into it) must still be visible to `PgenRecordSource::next_record`
-//! (whose region filter uses `OverlapMode::Variant`/`extent_overlaps`, exactly like the
-//! VCF path — see that module's doc comment on why `Variant` overlap is required). Since
-//! `PgenRecordSource` walks strictly forward from `var_start` with no way to "look
-//! behind" once started, `var_start` must be low enough to have seen every variant that
-//! could possibly span into the window — and without a `max_v_len`-style padding bound
-//! (out of scope for v1, same caveat the VCF path's window construction carries), the
-//! only *safe* lower bound is the whole contig's start. `var_end` is similarly the whole
-//! contig's end; the `regions`/`OverlapMode::Variant`/region-exhaustion filter inside
-//! `PgenRecordSource::next_record` still narrows the *output* to exactly the window's
-//! overlapping variants, so this is correctness-preserving.
+//! `contig_var_ranges` retains, alongside each contig's `[lo, hi)` variant-index range, a
+//! sorted `Vec<u32>` of local-order 0-based POS and the contig's max REF length (the
+//! widest possible variant extent). `fill` binary-searches that POS vector to compute a
+//! narrow `[var_start, var_end)` instead of decoding the whole contig prefix:
 //!
-//! **This is a real, documented performance cost**, not silently swept under the rug:
-//! every window on a contig re-decodes (and region-filters) that contig from its start,
-//! and `PgenRecordSource::new` re-opens the `.pvar` from byte 0 every call (`PvarReader`
-//! has no seek), skipping `var_start` lines textually. For the small fixtures this repo
-//! tests against that's negligible; at chromosome scale with many windows per contig it
-//! is O(prefix) decode + O(var_start) `.pvar`-skip **per window**. Task 13's benchmark is
-//! expected to surface this; the fix (narrow `var_start` with `max_v_len` padding, and/or
-//! add a seek to genoray's `PvarReader` and bump the pinned `rev`) is deliberately
-//! deferred — v1 prioritizes correctness/parity with the VCF path over throughput.
+//! - `var_end` is the first variant at/after the window's `win_end` — later variants
+//!   can't overlap a window that ends before they start.
+//! - `var_start` is the first variant at/after `win_start - max_ref_len`. A spanning
+//!   upstream deletion (POS before the window but whose extent, `POS + ref_len`, reaches
+//!   into it) must still be visible to `PgenRecordSource::next_record` (whose region
+//!   filter uses `OverlapMode::Variant`/`extent_overlaps`, exactly like the VCF path — see
+//!   that module's doc comment on why `Variant` overlap is required). Since
+//!   `PgenRecordSource` walks strictly forward from `var_start` with no way to "look
+//!   behind" once started, the contig's max REF length is a safe, over-inclusive pad — no
+//!   variant's extent can exceed `POS + max_ref_len`, so no spanning variant is ever
+//!   skipped. Over-inclusion (decoding a few extra non-overlapping variants near the
+//!   boundary) is harmless: the `regions`/`OverlapMode::Variant`/region-exhaustion filter
+//!   inside `PgenRecordSource::next_record` still narrows the *output* to exactly the
+//!   window's overlapping variants. Under-inclusion would be a correctness bug, which is
+//!   why the pad uses the contig's max (not e.g. the nearest variant's own REF length).
+//!
+//! This drops decoded-variant count from `contig_prefix * n_windows` (v1's coarse bound)
+//! toward `Σ window variants` (see `VARIANTS_DECODED`'s doc comment) while keeping the
+//! same over-inclusive-safe/never-under-inclusive invariant the coarse version had.
+//! `PgenRecordSource::new` still re-opens the `.pvar` from byte 0 every call (`PvarReader`
+//! has no seek) and skips forward to `var_start` textually — narrowing `var_start` also
+//! shrinks that per-call skip. A `.pvar` seek (bumping the pinned genoray `rev`) remains a
+//! possible follow-up but is no longer required for the decoded-variant-count win this
+//! task targets.
 //!
 //! ## Config parity with VCF (and with `gvl.write`'s PGEN path)
 //!
@@ -199,16 +206,35 @@ const DEFAULT_CHUNK_SIZE: usize = 1 << 20;
 /// "Config parity" section.
 const PGEN_PLOIDY: usize = 2;
 
+/// Per-contig index built by a single `.pvar` scan: the variant-index range plus enough
+/// POS/REF information to narrow a window's `var_start`/`var_end` (Task 4) without
+/// re-scanning the file.
+struct ContigIndex {
+    /// `{contig -> [lo, hi)}` global variant-index range (same as the pre-Task-4 return
+    /// value).
+    ranges: HashMap<String, (usize, usize)>,
+    /// `{contig -> local-order 0-based POS}`, ascending (plink2 writes `.pvar`
+    /// position-sorted within a contig — asserted while building, see below).
+    pos: HashMap<String, Vec<u32>>,
+    /// `{contig -> max REF length seen}` — the safe over-inclusive pad `fill` subtracts
+    /// from a window's start before binary-searching `pos` (see the module doc's
+    /// "Narrowed `var_start`" section).
+    max_ref_len: HashMap<String, u32>,
+}
+
 /// Scan `pvar_path` once, tracking `#CHROM` alongside a running 0-based variant index,
-/// to build each contig's half-open `[lo, hi)` variant-index range. See the module doc's
-/// "Per-contig variant ranges" section for why this doesn't reuse genoray's private
-/// Python `_pvar_contig_ranges`.
+/// to build each contig's half-open `[lo, hi)` variant-index range (plus the POS index
+/// and max REF length Task 4 narrows windows with). See the module doc's "Per-contig
+/// variant ranges" section for why this doesn't reuse genoray's private Python
+/// `_pvar_contig_ranges`.
 ///
 /// Plain-text `.pvar` only; `.pvar.zst` is rejected (see module doc).
 ///
 /// Requires each contig's rows to be contiguous (plink2 always writes `.pvar` grouped by
-/// contig) — a non-contiguous file is an error, not a silently-wrong range.
-fn contig_var_ranges(pvar_path: &str) -> anyhow::Result<HashMap<String, (usize, usize)>> {
+/// contig) — a non-contiguous file is an error, not a silently-wrong range. POS must also
+/// be non-decreasing within a contig (plink2 writes `.pvar` position-sorted) — a
+/// non-sorted file is an error, not silently-wrong narrowing.
+fn contig_var_ranges(pvar_path: &str) -> anyhow::Result<ContigIndex> {
     use std::io::BufRead;
 
     ensure!(
@@ -221,7 +247,7 @@ fn contig_var_ranges(pvar_path: &str) -> anyhow::Result<HashMap<String, (usize, 
         std::fs::File::open(pvar_path).with_context(|| format!("opening pvar {pvar_path}"))?;
     let mut lines = std::io::BufReader::new(file).lines();
 
-    let (chrom_col, pos_col, alt_col) = loop {
+    let (chrom_col, pos_col, ref_col, alt_col) = loop {
         let line = lines.next().with_context(|| {
             format!("{pvar_path}: reached EOF without a '#CHROM' header line")
         })??;
@@ -238,10 +264,12 @@ fn contig_var_ranges(pvar_path: &str) -> anyhow::Result<HashMap<String, (usize, 
                 .position(|c| *c == name)
                 .with_context(|| format!("{pvar_path}: header is missing a {name:?} column"))
         };
-        break (find("#CHROM")?, find("POS")?, find("ALT")?);
+        break (find("#CHROM")?, find("POS")?, find("REF")?, find("ALT")?);
     };
 
     let mut ranges: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut pos_by_contig: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut max_ref_len: HashMap<String, u32> = HashMap::new();
     for (vidx, line) in lines.enumerate() {
         let line = line.with_context(|| format!("reading pvar {pvar_path}"))?;
         let fields: Vec<&str> = line.split('\t').collect();
@@ -251,6 +279,9 @@ fn contig_var_ranges(pvar_path: &str) -> anyhow::Result<HashMap<String, (usize, 
         let pos = *fields
             .get(pos_col)
             .with_context(|| format!("{pvar_path}: variant {vidx} is missing its POS field"))?;
+        let reference = *fields
+            .get(ref_col)
+            .with_context(|| format!("{pvar_path}: variant {vidx} is missing its REF field"))?;
         let alt = *fields
             .get(alt_col)
             .with_context(|| format!("{pvar_path}: variant {vidx} is missing its ALT field"))?;
@@ -265,6 +296,11 @@ fn contig_var_ranges(pvar_path: &str) -> anyhow::Result<HashMap<String, (usize, 
              streaming v1 requires biallelic (split) input -- run `bcftools norm -m -` / \
              `plink2 --make-pgen` on split records first."
         );
+        let pos0: u32 = pos
+            .parse::<u32>()
+            .with_context(|| format!("{pvar_path}: variant {vidx} has a non-numeric POS {pos:?}"))?
+            .checked_sub(1)
+            .with_context(|| format!("{pvar_path}: variant {vidx} has POS 0 (.pvar POS is 1-based)"))?;
         let chrom = chrom.to_string();
 
         match ranges.get_mut(&chrom) {
@@ -278,12 +314,29 @@ fn contig_var_ranges(pvar_path: &str) -> anyhow::Result<HashMap<String, (usize, 
                 *hi = vidx + 1;
             }
             None => {
-                ranges.insert(chrom, (vidx, vidx + 1));
+                ranges.insert(chrom.clone(), (vidx, vidx + 1));
             }
         }
+
+        let contig_pos = pos_by_contig.entry(chrom.clone()).or_default();
+        anyhow::ensure!(
+            contig_pos.last().is_none_or(|&last| last <= pos0),
+            "{pvar_path}: contig {chrom:?} is not POS-sorted (variant {vidx} has POS \
+             {pos} out of order); PGEN streaming's window narrowing requires a \
+             position-sorted .pvar, as plink2 always writes it"
+        );
+        contig_pos.push(pos0);
+
+        let ref_len = reference.len() as u32;
+        let e = max_ref_len.entry(chrom).or_insert(0);
+        *e = (*e).max(ref_len);
     }
 
-    Ok(ranges)
+    Ok(ContigIndex {
+        ranges,
+        pos: pos_by_contig,
+        max_ref_len,
+    })
 }
 
 /// Read a plink2 `.psam`'s sample-ID (IID) column, in physical (on-disk) order.
@@ -352,6 +405,11 @@ pub struct PgenWindowFiller {
     /// job's `[s_lo, s_hi)` indexes into.
     phys: Vec<usize>,
     contig_ranges: HashMap<String, (usize, usize)>,
+    /// `{contig -> local-order 0-based POS}`, ascending — Task 4's narrowing index (see
+    /// `ContigIndex`).
+    contig_pos: HashMap<String, Vec<u32>>,
+    /// `{contig -> max REF length}` — the safe over-inclusive pad `fill` narrows with.
+    contig_max_ref_len: HashMap<String, u32>,
     overlap: OverlapMode,
     chunk_size: usize,
 }
@@ -373,7 +431,11 @@ impl PgenWindowFiller {
         // Multiallelic guard runs FIRST, before the `.psam` read / reader construction, so
         // a multiallelic `.pvar` still fails at construction even when no `.psam`/`.pgen`
         // is present (see the multiallelic-fixture test).
-        let contig_ranges = contig_var_ranges(&pvar_path)?;
+        let ContigIndex {
+            ranges: contig_ranges,
+            pos: contig_pos,
+            max_ref_len: contig_max_ref_len,
+        } = contig_var_ranges(&pvar_path)?;
 
         // Build the public->physical sample map from the sibling `.psam`.
         let psam_path = std::path::Path::new(pgen_path)
@@ -421,6 +483,8 @@ impl PgenWindowFiller {
             pvar_path,
             phys,
             contig_ranges,
+            contig_pos,
+            contig_max_ref_len,
             overlap: OverlapMode::Variant,
             chunk_size: DEFAULT_CHUNK_SIZE,
         })
@@ -495,15 +559,38 @@ impl WindowFiller for PgenWindowFiller {
         // (see the module doc's "Sample subsetting" section).
         let sample_perm = Python::attach(|py| self.apply_sample_subset(py, job.s_lo, job.s_hi))?;
 
-        // Coarse per-contig range -- see the module doc's "Coarse var_start" section for
-        // why this is NOT narrowed to the window's own regions. A contig absent from the
-        // .pvar (no variants at all) falls back to an empty [0, 0) range, which decodes
-        // to the same all-zero-CSR empty window as a region with no variants (see below).
-        let (var_start, var_end) = self
+        // Narrowed per-contig range -- see the module doc's "Narrowed var_start" section.
+        // A contig absent from the .pvar (no variants at all) falls back to an empty
+        // [0, 0) range, which decodes to the same all-zero-CSR empty window as a region
+        // with no variants (see below).
+        let (contig_lo, contig_hi) = self
             .contig_ranges
             .get(&contig.name)
             .copied()
             .unwrap_or((0, 0));
+        let (var_start, var_end) = match self.contig_pos.get(&contig.name) {
+            Some(pos) if !pos.is_empty() => {
+                let win_start = job.regions.iter().map(|r| r.0).min().unwrap_or(0);
+                let win_end = job.regions.iter().map(|r| r.1).max().unwrap_or(0);
+                let pad = self
+                    .contig_max_ref_len
+                    .get(&contig.name)
+                    .copied()
+                    .unwrap_or(0);
+                // Lower bound: earliest variant whose extent (POS + ref_len) could reach
+                // win_start. POS + ref_len > win_start  ==>  POS > win_start - ref_len.
+                // Use the contig's max ref_len as a safe (over-inclusive) pad; the
+                // OverlapMode::Variant filter inside PgenRecordSource still narrows the
+                // OUTPUT exactly, so over-inclusion is harmless, under-inclusion is a bug.
+                let lo_pos = win_start.saturating_sub(pad);
+                let start_local = pos.partition_point(|&p| p < lo_pos);
+                // Upper bound: first variant starting at/after win_end can't overlap.
+                let end_local = pos.partition_point(|&p| p < win_end);
+                (contig_lo + start_local, contig_lo + end_local)
+            }
+            _ => (contig_lo, contig_hi),
+        };
+        debug_assert!(var_start >= contig_lo && var_end <= contig_hi);
         VARIANTS_DECODED.fetch_add(var_end.saturating_sub(var_start), Ordering::Relaxed);
 
         let reader = Python::attach(|py| self.reader.clone_ref(py));
@@ -875,5 +962,61 @@ mod tests {
         // The two_var fixture has one contig with 2 variants; coarse var_start decodes
         // the whole contig range [0, 2) = 2 variants.
         assert_eq!(variants_decoded(), 2);
+    }
+
+    fn snp_ins_del_multi_pgen_fixture_path() -> String {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/streaming/vcf_snp_ins_del_multi.pgen")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// A window over a late, narrow region must NOT decode the whole contig prefix.
+    /// `vcf_snp_ins_del_multi` has 5 variants spread across `chr1` (0-based POS 29, 69,
+    /// 109, 149, 149); a 1bp window near the contig start (regions `(0, 2)`) has no
+    /// variant whose extent could reach it (max REF len 4), so it must decode zero
+    /// variants, far fewer than the whole-contig window's 5.
+    #[test]
+    fn narrowed_var_range_decodes_fewer_than_whole_contig() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let pgen = snp_ins_del_multi_pgen_fixture_path();
+        // Derive the full-contig width via a whole-contig window.
+        let filler = PgenWindowFiller::new(&pgen, &["s1", "s2"]).unwrap();
+        let contig = ContigRef {
+            name: "chr1".into(),
+            ref_bytes: vec![b'A'; 100_000],
+        };
+
+        variants_decoded_reset();
+        let wide = RecordJob {
+            contig_idx: 0,
+            regions: vec![(0, 100_000)],
+            s_lo: 0,
+            s_hi: 2,
+        };
+        let mut slot = DecodedWindow::default();
+        filler.fill(&wide, &contig, &mut slot).unwrap();
+        let wide_decoded = variants_decoded();
+
+        variants_decoded_reset();
+        // A 1bp window near the contig start: must decode far fewer than the whole contig.
+        let narrow = RecordJob {
+            contig_idx: 0,
+            regions: vec![(0, 2)],
+            s_lo: 0,
+            s_hi: 2,
+        };
+        let mut slot2 = DecodedWindow::default();
+        filler.fill(&narrow, &contig, &mut slot2).unwrap();
+        let narrow_decoded = variants_decoded();
+
+        assert!(
+            narrow_decoded < wide_decoded,
+            "narrow window decoded {narrow_decoded}, whole-contig {wide_decoded} — \
+             var_start/var_end were not narrowed"
+        );
     }
 }

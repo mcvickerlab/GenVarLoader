@@ -259,6 +259,58 @@ def test_generate_batch_output_is_flat_in_cohort_size(tmp_path):
     )
 
 
+def test_pgen_variants_decoded_scales_with_window_not_contig(
+    pgen_snp_ins_del_multi, vcf_snp_ins_del_multi_regions
+):
+    """Task 4 (issue #276) gate for the PGEN backend's `PgenWindowFiller::fill`
+    narrowing (`src/record_stream/pgen.rs`): decoded-variant count must scale
+    with the WINDOW, not `n_windows * contig_prefix` (the pre-Task-4 coarse
+    worst case, where every window re-decoded the whole per-contig `.pvar`
+    prefix from its start).
+
+    Reuses `vcf_snp_ins_del_multi_regions` (the same 3-disjoint-region bed
+    Task 8's PGEN parity test splits `pgen_snp_ins_del_multi`'s single contig
+    into -- see conftest.py) with `max_mem` shrunk so `_plan` yields one window
+    PER REGION (`window_regions == 1`) instead of merging all 3 rows into a
+    single window. Forcing >=2 windows is what makes "decoded scales with the
+    window, not the contig" a meaningful assertion rather than a vacuous
+    single-window check.
+    """
+    from genvarloader.genvarloader import (
+        pgen_variants_decoded,
+        pgen_variants_decoded_reset,
+    )
+
+    f = pgen_snp_ins_del_multi
+    regions = vcf_snp_ins_del_multi_regions
+    # cell_bytes = ploidy(2) * 16 = 32; n_slots = 2 -> 64 B/cell-slot. max_mem=200
+    # gives max_cells = 200 // 64 = 3, so window_samples = min(3 samples, 3) = 3
+    # (whole cohort fits) and window_regions = min(64, 3 // 3) = 1 -- one window
+    # per bed row instead of all 3 merged.
+    sds = gvl.StreamingDataset(
+        regions, reference=str(f.fasta), variants=str(f.pgen), max_mem=200
+    ).with_seqs("haplotypes")
+
+    n_windows = sum(1 for _ in sds._plan())
+    assert n_windows > 1, "test requires >=2 windows to be a meaningful gate"
+
+    pvar_path = Path(f.pgen).with_suffix(".pvar")
+    with pvar_path.open() as fh:
+        pvar_variants = sum(1 for line in fh if not line.startswith("#"))
+
+    pgen_variants_decoded_reset()
+    for _ in sds.to_iter(batch_size=4):
+        pass
+    decoded = pgen_variants_decoded()
+
+    coarse_worst_case = n_windows * pvar_variants
+    assert decoded < coarse_worst_case, (
+        f"decoded {decoded} >= coarse worst case {coarse_worst_case} "
+        f"(n_windows={n_windows}, pvar_variants={pvar_variants}); "
+        "PgenWindowFiller's var_start/var_end narrowing regressed"
+    )
+
+
 def test_scale_parity_still_byte_identical(scale_fixture, tmp_path):
     """The scale fixture must ALSO satisfy the parity oracle -- a fast wrong answer
     is not progress."""
