@@ -14,4 +14,6 @@ bench_*.log
 bench_*.ref.fa
 bench_*.ref.fa.fai
 bench_*.ref.fa.gvlfa/
+bench_*.gvlfa.lock
+bench_*.gvi.zst
 bench_*-temporary.*
