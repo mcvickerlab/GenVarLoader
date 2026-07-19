@@ -162,6 +162,7 @@
 //! `fill`; neither wraps the `ChunkAssembler`/`PgenRecordSource` decode loop itself.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{ensure, Context};
 use numpy::IntoPyArray;
@@ -176,6 +177,19 @@ use genoray_core::types::{BitGrid3, DenseChunk};
 
 use crate::record_stream::engine::{ContigRef, RecordJob, WindowFiller};
 use crate::record_stream::{fill_decoded_window, DecodedWindow};
+
+/// Process-wide count of variants pgenlib is asked to decode across all windows
+/// (`var_end - var_start` per `fill`). With the coarse per-contig range this is
+/// `contig_prefix * n_windows`; Task 4's narrowing drops it toward `Σ window
+/// variants`. Deterministic; the PGEN perf gate.
+static VARIANTS_DECODED: AtomicUsize = AtomicUsize::new(0);
+
+pub fn variants_decoded() -> usize {
+    VARIANTS_DECODED.load(Ordering::Relaxed)
+}
+pub fn variants_decoded_reset() {
+    VARIANTS_DECODED.store(0, Ordering::Relaxed);
+}
 
 /// Upper bound on a single window's variant count. See `vcf.rs`'s "Single-chunk
 /// invariant" doc section — identical reasoning applies here.
@@ -490,6 +504,7 @@ impl WindowFiller for PgenWindowFiller {
             .get(&contig.name)
             .copied()
             .unwrap_or((0, 0));
+        VARIANTS_DECODED.fetch_add(var_end.saturating_sub(var_start), Ordering::Relaxed);
 
         let reader = Python::attach(|py| self.reader.clone_ref(py));
         let source = PgenRecordSource::new(
@@ -614,6 +629,9 @@ mod tests {
     /// plink2's default strips the `chr` prefix for recognized human contigs.)
     #[test]
     fn pgen_filler_matches_vcf_filler_on_shared_variants() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let vcf_filler = VcfWindowFiller::new(&vcf_fixture_path(), &["s1", "s2"], 2, None).unwrap();
         let pgen_filler = PgenWindowFiller::new(&pgen_fixture_path(), &["s1", "s2"]).unwrap();
 
@@ -646,6 +664,9 @@ mod tests {
     /// the full-cohort no-op path.
     #[test]
     fn pgen_filler_matches_vcf_filler_on_sample_subrange() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let vcf_filler = VcfWindowFiller::new(&vcf_fixture_path(), &["s1", "s2"], 2, None).unwrap();
         let pgen_filler = PgenWindowFiller::new(&pgen_fixture_path(), &["s1", "s2"]).unwrap();
 
@@ -681,6 +702,9 @@ mod tests {
     /// esp. the genotype CSR (`geno_v_idxs`/`geno_offsets`) where the ordering bug shows.
     #[test]
     fn pgen_filler_matches_vcf_filler_unsorted_psam() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Both fillers get the SAME sorted-name public order; VcfWindowFiller resolves by
         // name (correct oracle), PgenWindowFiller must reproduce it via the .psam map.
         // Sorted order is S1, S10, S2 (physical .psam order is S10, S2, S1).
@@ -725,6 +749,9 @@ mod tests {
     /// the un-sorter (`sample_perm`), not just the full-cohort path above.
     #[test]
     fn pgen_filler_matches_vcf_filler_unsorted_psam_subrange() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let public = ["S1", "S10", "S2"];
         let vcf_filler =
             VcfWindowFiller::new(&unsorted_vcf_fixture_path(), &public, 2, None).unwrap();
@@ -755,6 +782,9 @@ mod tests {
     /// VCF's (`vcf_filler_empty_window_is_all_zero_csr`).
     #[test]
     fn pgen_filler_empty_window_is_all_zero_csr() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let filler = PgenWindowFiller::new(&pgen_fixture_path(), &["s1", "s2"]).unwrap();
         let job = RecordJob {
             contig_idx: 0,
@@ -782,6 +812,9 @@ mod tests {
     /// `vcf_filler_errors_when_window_exceeds_chunk_size`).
     #[test]
     fn pgen_filler_errors_when_window_exceeds_chunk_size() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let filler = PgenWindowFiller::new(&pgen_fixture_path(), &["s1", "s2"])
             .unwrap()
             .with_chunk_size(1);
@@ -818,5 +851,29 @@ mod tests {
             msg.contains("multiallelic") && msg.contains("biallelic"),
             "expected a multiallelic/biallelic error message, got: {msg}"
         );
+    }
+
+    #[test]
+    fn variants_decoded_counter_tracks_range_width() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        variants_decoded_reset();
+        let filler = PgenWindowFiller::new(&pgen_fixture_path(), &["s1", "s2"]).unwrap();
+        let job = RecordJob {
+            contig_idx: 0,
+            regions: vec![(0, 100)],
+            s_lo: 0,
+            s_hi: 2,
+        };
+        let contig = ContigRef {
+            name: "chr1".into(),
+            ref_bytes: vec![b'A'; 100],
+        };
+        let mut slot = DecodedWindow::default();
+        filler.fill(&job, &contig, &mut slot).unwrap();
+        // The two_var fixture has one contig with 2 variants; coarse var_start decodes
+        // the whole contig range [0, 2) = 2 variants.
+        assert_eq!(variants_decoded(), 2);
     }
 }

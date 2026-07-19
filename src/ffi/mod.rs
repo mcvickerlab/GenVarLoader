@@ -1155,6 +1155,28 @@ pub fn svar1_csr_entries_touched() -> usize {
     crate::svar1::store::csr_entries_touched()
 }
 
+/// Deterministic transpose work counter — see `crate::record_stream::transpose::word_reads`.
+#[pyfunction]
+pub fn transpose_word_reads() -> usize {
+    crate::record_stream::transpose::word_reads()
+}
+
+#[pyfunction]
+pub fn transpose_word_reads_reset() {
+    crate::record_stream::transpose::word_reads_reset()
+}
+
+/// Deterministic PGEN decode-width counter — see `crate::record_stream::pgen::variants_decoded`.
+#[pyfunction]
+pub fn pgen_variants_decoded() -> usize {
+    crate::record_stream::pgen::variants_decoded()
+}
+
+#[pyfunction]
+pub fn pgen_variants_decoded_reset() {
+    crate::record_stream::pgen::variants_decoded_reset()
+}
+
 /// Fused SVAR2 two-source haplotype reconstruction: merge each hap's `var_key` ⋈
 /// `dense` channels and decode via `svar2-codec` inline (no materialized global
 /// variant table), sizing and allocating the output buffer in Rust — one FFI

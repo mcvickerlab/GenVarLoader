@@ -217,6 +217,9 @@ mod tests {
     /// haps). So hap0(s1p0)=[], hap1(s1p1)=[0], hap2(s2p0)=[1], hap3(s2p1)=[1].
     #[test]
     fn vcf_filler_decodes_window_to_local_table() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None).unwrap();
         let job = RecordJob {
             contig_idx: 0,
@@ -243,6 +246,9 @@ mod tests {
     /// offsets over `n_samples*ploidy` haps, no variants), not an error.
     #[test]
     fn vcf_filler_empty_window_is_all_zero_csr() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None).unwrap();
         let job = RecordJob {
             contig_idx: 0,
@@ -271,6 +277,9 @@ mod tests {
     /// other tests exercise.
     #[test]
     fn vcf_filler_honors_sample_subrange() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None).unwrap();
         // s_lo=1,s_hi=2 selects only s2.
         let job = RecordJob {
@@ -296,6 +305,9 @@ mod tests {
     /// variant count must fail loudly (an error), never silently truncate.
     #[test]
     fn vcf_filler_errors_when_window_exceeds_chunk_size() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None)
             .unwrap()
             .with_chunk_size(1);
