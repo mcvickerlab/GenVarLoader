@@ -1177,6 +1177,18 @@ pub fn pgen_variants_decoded_reset() {
     crate::record_stream::pgen::variants_decoded_reset()
 }
 
+/// Deterministic VCF sample-name-resolution counter — see
+/// `crate::record_stream::vcf::vcf_sample_resolutions`.
+#[pyfunction]
+pub fn vcf_sample_resolutions() -> usize {
+    crate::record_stream::vcf::vcf_sample_resolutions()
+}
+
+#[pyfunction]
+pub fn vcf_sample_resolutions_reset() {
+    crate::record_stream::vcf::vcf_sample_resolutions_reset()
+}
+
 /// Fused SVAR2 two-source haplotype reconstruction: merge each hap's `var_key` ⋈
 /// `dense` channels and decode via `svar2-codec` inline (no materialized global
 /// variant table), sizing and allocating the output buffer in Rust — one FFI

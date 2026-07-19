@@ -59,6 +59,8 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::transpose_word_reads_reset, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::pgen_variants_decoded, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::pgen_variants_decoded_reset, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::vcf_sample_resolutions, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::vcf_sample_resolutions_reset, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_from_svar2, m)?)?;
     m.add_function(wrap_pyfunction!(
         ffi::reconstruct_haplotypes_from_svar2_readbound,

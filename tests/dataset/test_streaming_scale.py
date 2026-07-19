@@ -397,3 +397,55 @@ def test_scale_parity_still_byte_identical(scale_fixture, tmp_path):
                 np.testing.assert_array_equal(
                     np.asarray(data[i][h]), np.asarray(expected[h])
                 )
+
+
+def test_vcf_sample_resolutions_scales_with_vcfs_not_windows(
+    vcf_snp_ins_del_multi, vcf_snp_ins_del_multi_regions
+):
+    """Task 6 phase C (issue #276) gate for `VcfWindowFiller` (`src/record_stream/vcf.rs`):
+    sample-NAME resolution (`VcfRecordSource::resolve_sample_indices`, an
+    O(k requested x n header samples) walk) must happen ONCE, at `VcfWindowFiller::new`
+    construction time -- not once per window. Before this change, `fill` re-resolved
+    sample indices by name on every call via `VcfRecordSource::new`; profiling showed
+    that walk was 74.6% of VCF producer time.
+
+    Reuses `vcf_snp_ins_del_multi` + `vcf_snp_ins_del_multi_regions` (the same
+    3-region bed Task 4's PGEN gate uses) with `max_mem` shrunk so `_plan` yields
+    one window PER REGION (`window_regions == 1`) instead of merging all 3 rows
+    into a single window -- forcing >=2 windows is what makes "resolutions stay
+    flat across windows" a meaningful assertion rather than a vacuous
+    single-window check.
+    """
+    from genvarloader.genvarloader import (
+        vcf_sample_resolutions,
+        vcf_sample_resolutions_reset,
+    )
+
+    f = vcf_snp_ins_del_multi
+    regions = vcf_snp_ins_del_multi_regions
+    # cell_bytes = ploidy(2) * 16 = 32; n_slots = 2 -> 64 B/cell-slot. max_mem=200
+    # gives max_cells = 200 // 64 = 3, so window_samples = min(3 samples, 3) = 3
+    # (whole cohort fits) and window_regions = min(64, 3 // 3) = 1 -- one window
+    # per bed row instead of all 3 merged.
+    sds = gvl.StreamingDataset(
+        regions, reference=str(f.fasta), variants=str(f.vcf), max_mem=200
+    ).with_seqs("haplotypes")
+
+    n_windows = sum(1 for _ in sds._plan())
+    assert n_windows > 1, "test requires >=2 windows to be a meaningful gate"
+
+    vcf_sample_resolutions_reset()
+    for _ in sds.to_iter(batch_size=4):
+        pass
+    resolutions = vcf_sample_resolutions()
+
+    print(
+        f"[vcf-sample-resolutions-gate] resolutions={resolutions} n_windows={n_windows}"
+    )
+
+    assert resolutions > 0, "counter is not wired"
+    assert resolutions < n_windows, (
+        f"sample-name resolutions ({resolutions}) did not stay below n_windows "
+        f"({n_windows}) -- VcfWindowFiller is re-resolving sample names per "
+        "window instead of reusing indices resolved once at construction"
+    )

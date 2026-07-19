@@ -47,6 +47,8 @@
 //! error (not a silent truncation) if it doesn't. This lets `fill` skip the
 //! `concat_dense`-across-chunks machinery the sketch anticipated.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use anyhow::ensure;
 
 use genoray_core::chunk_assembler::ChunkAssembler;
@@ -63,14 +65,37 @@ use crate::record_stream::{fill_decoded_window, DecodedWindow};
 /// "Single-chunk invariant" section.
 const DEFAULT_CHUNK_SIZE: usize = 1 << 20;
 
+/// Process-wide count of O(k×n_header) sample-NAME resolutions
+/// (`VcfRecordSource::resolve_sample_indices` calls) `VcfWindowFiller` performs.
+/// `new` calls this exactly once per filler (at construction); `fill` must NEVER
+/// bump it — `fill` reuses the indices resolved at construction time via
+/// `VcfRecordSource::with_sample_indices`, which is window-independent. This is
+/// the perf gate for issue #276 task 6 phase C (was: one name-resolution walk
+/// per window, `74.6%` of VCF producer time by profiling).
+static VCF_SAMPLE_RESOLUTIONS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn vcf_sample_resolutions() -> usize {
+    VCF_SAMPLE_RESOLUTIONS.load(Ordering::Relaxed)
+}
+pub fn vcf_sample_resolutions_reset() {
+    VCF_SAMPLE_RESOLUTIONS.store(0, Ordering::Relaxed);
+}
+
 /// Decodes one VCF window via genoray's record-stream pipeline. Holds only a
 /// path/strings/config (no file handles), so it is trivially `Send + Sync` —
 /// `fill` opens a fresh `VcfRecordSource` per call.
 pub struct VcfWindowFiller {
     vcf_path: String,
-    /// Full cohort sample names, in `s_lo`/`s_hi`-indexable order. A job's
-    /// `fill` call slices `[job.s_lo..job.s_hi]` out of this list.
-    samples: Vec<String>,
+    /// The full cohort's sample names, resolved ONCE at construction (via
+    /// `VcfRecordSource::resolve_sample_indices`) to their VCF header-column
+    /// indices, in `s_lo`/`s_hi`-indexable order matching the cohort's public
+    /// sample order. `fill` slices `[job.s_lo..job.s_hi]` out of this list and
+    /// passes the indices straight to `VcfRecordSource::with_sample_indices`,
+    /// skipping the O(k×n_header) name lookup `fill` used to perform every
+    /// window (issue #276 task 6 phase C: `74.6%` of VCF producer time by
+    /// profiling). No sample *names* are retained past construction — only
+    /// their resolved indices are needed downstream.
+    sample_indices: Vec<usize>,
     ploidy: usize,
     fasta_path: Option<String>,
     check_ref: CheckRef,
@@ -90,9 +115,11 @@ impl VcfWindowFiller {
         ploidy: usize,
         fasta_path: Option<&str>,
     ) -> anyhow::Result<Self> {
+        let sample_indices = VcfRecordSource::resolve_sample_indices(vcf_path, samples)?;
+        VCF_SAMPLE_RESOLUTIONS.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
             vcf_path: vcf_path.to_string(),
-            samples: samples.iter().map(|s| s.to_string()).collect(),
+            sample_indices,
             ploidy,
             fasta_path: fasta_path.map(str::to_string),
             check_ref: CheckRef::Exclude,
@@ -120,14 +147,13 @@ impl WindowFiller for VcfWindowFiller {
         contig: &ContigRef,
         slot: &mut DecodedWindow,
     ) -> anyhow::Result<()> {
-        let local_samples = &self.samples[job.s_lo..job.s_hi];
-        let sample_refs: Vec<&str> = local_samples.iter().map(String::as_str).collect();
-        let n_local_samples = sample_refs.len();
+        let sample_indices = self.sample_indices[job.s_lo..job.s_hi].to_vec();
+        let n_local_samples = sample_indices.len();
 
-        let source = VcfRecordSource::new(
+        let source = VcfRecordSource::with_sample_indices(
             &self.vcf_path,
             &contig.name,
-            &sample_refs,
+            sample_indices,
             self.htslib_threads,
             self.ploidy,
             &self.fields,
@@ -196,6 +222,50 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string()
+    }
+
+    /// `VCF_SAMPLE_RESOLUTIONS` must be bumped exactly once — at `new` — never
+    /// again across any number of `fill` calls (issue #276 task 6 phase C: the
+    /// per-window O(k×n_header) name lookup is hoisted out of `fill`).
+    #[test]
+    fn vcf_sample_resolutions_counter_is_construction_only() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        vcf_sample_resolutions_reset();
+        assert_eq!(vcf_sample_resolutions(), 0);
+
+        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None).unwrap();
+        assert_eq!(
+            vcf_sample_resolutions(),
+            1,
+            "sample-name resolution must happen exactly once, at construction"
+        );
+
+        let contig = ContigRef {
+            name: "chr1".into(),
+            ref_bytes: vec![b'A'; 100],
+        };
+        for regions in [
+            vec![(0, 100)],
+            vec![(0, 15)],
+            vec![(15, 100)],
+            vec![(500, 600)],
+        ] {
+            let job = RecordJob {
+                contig_idx: 0,
+                regions,
+                s_lo: 0,
+                s_hi: 2,
+            };
+            let mut slot = DecodedWindow::default();
+            filler.fill(&job, &contig, &mut slot).unwrap();
+            assert_eq!(
+                vcf_sample_resolutions(),
+                1,
+                "fill must NOT re-resolve sample names — it is window-independent"
+            );
+        }
     }
 
     /// Fixture: `tests/data/streaming/two_var_two_sample.vcf.gz` (+ `.tbi`), 2 samples
