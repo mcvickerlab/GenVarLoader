@@ -640,6 +640,8 @@ impl WindowFiller for PgenWindowFiller {
                     genos: BitGrid3::zeros(0, n_local_samples, PGEN_PLOIDY),
                     info_staged: Vec::new(),
                     format_staged: Vec::new(),
+                    carriers: None,
+                    format_by_carrier: None,
                 };
                 fill_decoded_window(&empty, n_local_samples, PGEN_PLOIDY, slot);
             }

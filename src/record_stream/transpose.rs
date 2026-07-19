@@ -137,6 +137,8 @@ mod tests {
             genos,
             info_staged: Vec::new(),
             format_staged: Vec::new(),
+            carriers: None,
+            format_by_carrier: None,
         }
     }
 
@@ -173,6 +175,8 @@ mod tests {
             genos,
             info_staged: vec![],
             format_staged: vec![],
+            carriers: None,
+            format_by_carrier: None,
         };
         let mut slot = DecodedWindow::default();
         fill_decoded_window(&chunk, 2, 2, &mut slot);
@@ -201,6 +205,8 @@ mod tests {
             genos,
             info_staged: Vec::new(),
             format_staged: Vec::new(),
+            carriers: None,
+            format_by_carrier: None,
         };
         let mut slot = DecodedWindow::default();
         fill_decoded_window(&chunk, 3, 2, &mut slot);
@@ -266,6 +272,8 @@ mod tests {
             genos,
             info_staged: Vec::new(),
             format_staged: Vec::new(),
+            carriers: None,
+            format_by_carrier: None,
         };
         let mut slot = DecodedWindow::default();
         fill_decoded_window(&chunk, n_samples, ploidy, &mut slot);
