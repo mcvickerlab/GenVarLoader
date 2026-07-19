@@ -32,3 +32,47 @@ def test_svar2_read_window_shapes(svar2_multicontig_fixture) -> None:
     assert np.asarray(dense_snp).size == n_reg * 2
     assert np.asarray(dense_indel).size == n_reg * 2
     assert np.asarray(sample_cols).size == n_s
+
+
+def test_svar2_read_window_matches_find_ranges(svar2_multicontig_fixture) -> None:
+    """The rewired Rust read_window is byte-identical to the Phase-1 name-based
+    SparseVar2._find_ranges path for the same window."""
+    import genvarloader as gvl
+
+    fx = svar2_multicontig_fixture
+    sds = gvl.StreamingDataset(
+        fx.bed, reference=fx.reference_path, variants=fx.svar2_path
+    ).with_seqs("haplotypes")
+    backend = sds._backend
+    assert backend is not None
+
+    # Reference (old) implementation: name-based _find_ranges, reshaped as Phase 1 did.
+    def old_read_window(r_idx, s_idx):
+        r_idx = np.asarray(r_idx, np.intp)
+        s_idx = np.asarray(s_idx, np.intp)
+        contig_idx, contig = backend._contig_of(r_idx)
+        rb = backend._regions[r_idx, 1:3]
+        starts = np.ascontiguousarray(rb[:, 0])
+        ends = np.ascontiguousarray(rb[:, 1])
+        names = [backend._sample_names[i] for i in s_idx]
+        d = backend._sv._find_ranges(contig, starts, ends, samples=names)
+        n_reg, n_s, P = len(r_idx), len(s_idx), backend.ploidy
+        return {
+            "orig_samples": np.ascontiguousarray(d["sample_cols"], np.int64),
+            "vk_snp": np.asarray(d["vk_snp_range"], np.int64).reshape(n_reg, n_s, P, 2),
+            "vk_indel": np.asarray(d["vk_indel_range"], np.int64).reshape(
+                n_reg, n_s, P, 2
+            ),
+            "dense_snp": np.asarray(d["dense_snp_range"], np.int64).reshape(n_reg, 2),
+            "dense_indel": np.asarray(d["dense_indel_range"], np.int64).reshape(
+                n_reg, 2
+            ),
+        }
+
+    for r_idx, s_idx in sds._plan():
+        new = backend.read_window(r_idx, s_idx)  # rewired (Rust) path
+        old = old_read_window(r_idx, s_idx)
+        for k in ("orig_samples", "vk_snp", "vk_indel", "dense_snp", "dense_indel"):
+            np.testing.assert_array_equal(
+                np.asarray(new[k]), old[k], err_msg=f"mismatch in {k}"
+            )
