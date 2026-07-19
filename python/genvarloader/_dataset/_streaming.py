@@ -1113,7 +1113,8 @@ class _Svar2Backend:
             False,  # parallel: streaming per-batch reconstruct is tiny (~batch_size*ploidy
             #        haplotypes); the 96-thread rayon fork/join costs more than it saves
             #        here (measured 1.2-1.8x faster serial). The written-Dataset path
-            #        (_svar2_haps.py) keeps parallel=True (its getitem chunks are large).
+            #        (_svar2_haps.py) instead gates on should_parallelize(), which
+            #        parallelizes for its typically-large getitem chunks.
             False,  # filter_exonic (splicing out of scope)
         )
         return Ragged.from_offsets(
