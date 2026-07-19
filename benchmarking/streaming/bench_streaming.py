@@ -80,7 +80,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -178,6 +178,62 @@ def _count_pvar_variants(pgen_path: Path) -> int:
     return int(out.stdout.strip() or "0")
 
 
+def _filtered_variants_for_dataset(kind: str, fixture_dir: Path, n: int) -> Path:
+    """`gvl.write` (via `_write.py`'s `_reject_unsupported_variants`) requires
+    bi-allelic, non-symbolic, non-breakend variants; `StreamingDataset` has no
+    such check and reads whatever the fixture contains. `vcfixture bulk`'s
+    `germline-1kgp` profile emits symbolic SVs (`<DEL>`/`<INS>`), so a raw
+    `gvl.write` call on the bench fixture raises `ValueError`. Derive a
+    filtered variant source ONCE (cached under `fixture_dir`, like
+    `_build_reference`) and use it for BOTH the StreamingDataset and the
+    written Dataset in the `--compare-dataset` arm, so the two sweeps see the
+    IDENTICAL variant set -- byte-identical parity requires the same input,
+    not just the same (region, sample) cells."""
+    filt_bcf = fixture_dir / f"bench_{n}.filtered.bcf"
+    if not filt_bcf.exists():
+        src_bcf = fixture_dir / f"bench_{n}.bcf"
+        subprocess.run(
+            [
+                "bcftools",
+                "view",
+                "-m2",
+                "-M2",
+                "-v",
+                "snps,indels",
+                "-Ob",
+                "-o",
+                str(filt_bcf),
+                str(src_bcf),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["bcftools", "index", str(filt_bcf)], check=True, capture_output=True
+        )
+    if kind == "vcf":
+        return filt_bcf
+
+    filt_pgen = fixture_dir / f"bench_{n}.filtered.pgen"
+    if not filt_pgen.exists():
+        subprocess.run(
+            [
+                "plink2",
+                "--bcf",
+                str(filt_bcf),
+                "--make-pgen",
+                "--allow-extra-chr",
+                "--output-chr",
+                "chrM",
+                "--out",
+                str(fixture_dir / f"bench_{n}.filtered"),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    return filt_pgen
+
+
 # --------------------------------------------------------------------------- #
 # Sweep drivers
 # --------------------------------------------------------------------------- #
@@ -258,6 +314,61 @@ def _drive_sync(sds: "gvl.StreamingDataset", batch_size: int) -> RunResult:
     elapsed = time.perf_counter() - t0
     peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return RunResult(elapsed, len(plan_jobs), n_batches, n_rows, n_bytes, peak_rss)
+
+
+def _drive_dataset(
+    sds: "gvl.StreamingDataset", fp: "FixturePaths", batch_size: int
+) -> tuple[RunResult, float, int]:
+    """Write a gvl.Dataset once from the SAME variants+reference+bed, then iterate
+    it over the identical region-major (region, sample) plan order the streaming
+    run uses (haplotypes-only, jitter=0). Returns (sweep RunResult, write_time_s,
+    dataset_bytes). Write cost is preprocessing, reported separately."""
+    del batch_size  # Dataset[r, s] access is not batched the way to_iter() is
+    ds_dir = Path(tempfile.mkdtemp(prefix="gvl_bench_ds_"))
+    try:
+        t_w = time.perf_counter()
+        gvl.write(
+            path=ds_dir / "ds",
+            bed=fp.bed,
+            variants=fp.variants,
+            max_jitter=0,
+            overwrite=True,
+        )
+        write_time = time.perf_counter() - t_w
+        ds_bytes = sum(
+            f.stat().st_size for f in (ds_dir / "ds").rglob("*") if f.is_file()
+        )
+
+        ds = gvl.Dataset.open(ds_dir / "ds", reference=fp.reference).with_seqs(
+            "haplotypes"
+        )
+
+        t0 = time.perf_counter()
+        n_batches = n_rows = n_bytes = 0
+        for r_idx, s_idx in sds._plan():
+            # `ds[r_idx, s_idx]` with two equal-shaped integer arrays is numpy
+            # "advanced" (fancy) indexing -- it pairs elements (zip-style) and
+            # raises a broadcast error whenever len(r_idx) != len(s_idx), which
+            # a real window plan always has (r_idx is the window's region
+            # chunk, s_idx the full sample axis). `np.ix_` builds the outer
+            # product instead, matching the FULL region-major (region, sample)
+            # block the plan cell represents (verified empirically: shape
+            # comes back as (len(r_idx), len(s_idx), ploidy, None)).
+            haps = ds[
+                np.ix_(r_idx, s_idx)
+            ]  # region-major outer product, same plan cells
+            n_batches += 1
+            n_rows += len(r_idx) * len(s_idx)
+            n_bytes += np.asarray(haps.data).nbytes
+        elapsed = time.perf_counter() - t0
+        peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return (
+            RunResult(elapsed, n_batches, n_batches, n_rows, n_bytes, peak_rss),
+            write_time,
+            ds_bytes,
+        )
+    finally:
+        shutil.rmtree(ds_dir, ignore_errors=True)
 
 
 _DRIVERS = {"engine": _drive_engine, "sync": _drive_sync}
@@ -344,6 +455,7 @@ def bench_one(
     region_len: int,
     ref_seed: int,
     cold: bool,
+    compare_dataset: bool,
 ) -> None:
     print(f"\n{'=' * 70}\n{kind.upper()} backend, N={n} samples\n{'=' * 70}")
 
@@ -380,6 +492,33 @@ def bench_one(
                 f"peak_rss_kb={result.peak_rss_kb}"
             )
 
+    if compare_dataset:
+        fp = _prepare_fixture(
+            kind, n, fixture_dir, n_regions, region_len, ref_seed, cold
+        )
+        try:
+            # gvl.write requires bi-allelic/non-symbolic/non-breakend variants;
+            # the bench fixture's germline-1kgp profile has symbolic SVs. Swap
+            # in a filtered variant source for BOTH the StreamingDataset and
+            # the written Dataset so the two sweeps stay byte-identical (see
+            # _filtered_variants_for_dataset).
+            fp_ds = replace(
+                fp, variants=_filtered_variants_for_dataset(kind, fixture_dir, n)
+            )
+            sds = gvl.StreamingDataset(
+                fp_ds.bed, reference=fp_ds.reference, variants=fp_ds.variants
+            ).with_seqs("haplotypes")
+            ds_result, write_time, ds_bytes = _drive_dataset(sds, fp_ds, batch_size)
+        finally:
+            if fp.workdir_to_cleanup is not None:
+                shutil.rmtree(fp.workdir_to_cleanup, ignore_errors=True)
+        last_result["dataset"] = ds_result
+        print(
+            f"[dataset] sweep {ds_result.elapsed_s:.3f}s  rows={ds_result.n_rows} "
+            f"bytes={ds_result.bytes_emitted} peak_rss_kb={ds_result.peak_rss_kb}  "
+            f"| preprocessing: write={write_time:.3f}s disk={ds_bytes} bytes"
+        )
+
     print("-" * 70)
     print(
         f"{'strategy':>8s}  {'windows/s (best)':>18s}  {'items/s (best)':>16s}  runs (s)"
@@ -394,6 +533,14 @@ def bench_one(
         print(
             f"{strategy:>8s}  {windows_per_s:18.1f}  {items_per_s:16.1f}  "
             f"[{runs_str}]  ({_fmt(vals)})"
+        )
+
+    emitted = {k: r.bytes_emitted for k, r in last_result.items()}
+    if len(set(emitted.values())) > 1:
+        raise RuntimeError(
+            f"{kind}: bytes_emitted diverged across drivers {emitted} — streaming "
+            "and written Dataset must be byte-identical; a driver is not exercising "
+            "the same cells"
         )
 
     if "engine" in timings and "sync" in timings:
@@ -462,6 +609,15 @@ def main() -> None:
         help="engine (shipped, cross-window overlap) vs. sync (forced, no "
         "overlap) -- see module docstring",
     )
+    p.add_argument(
+        "--compare-dataset",
+        action="store_true",
+        help="also write a gvl.Dataset once (write time + on-disk size reported "
+        "SEPARATELY as preprocessing cost) and time a full region-major "
+        "Dataset[r,s] sweep over the identical (region, sample) cells, for a "
+        "streaming-vs-written throughput comparison (byte-identical, so bytes_emitted "
+        "is cross-checked equal across drivers)",
+    )
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument(
         "--repeats",
@@ -518,6 +674,7 @@ def main() -> None:
                 args.region_len,
                 args.ref_seed,
                 args.cold,
+                args.compare_dataset,
             )
 
 
