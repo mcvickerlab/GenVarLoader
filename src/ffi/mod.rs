@@ -909,6 +909,76 @@ pub fn svar1_read_window<'py>(
     Ok((o_starts.into_pyarray(py), o_stops.into_pyarray(py)))
 }
 
+/// Compute a window's SVAR2 read-bound ranges in Rust (GIL released), replacing the
+/// Python `SparseVar2._find_ranges` call. `sample_idx` are PHYSICAL store columns
+/// (public sorted-name -> physical translation happens Python-side). Returns flat i64
+/// range arrays: vk_snp/vk_indel are `[start, stop, ...]` in (region, sample, ploid)
+/// C-order (len n_reg*n_s*P*2); dense_snp/dense_indel per region (len n_reg*2);
+/// sample_cols len n_s. No genoray rev bump: `find_ranges` is public at the pinned rev.
+#[pyfunction]
+pub fn svar2_read_window<'py>(
+    py: Python<'py>,
+    store: PyRef<'py, crate::svar2::store::Svar2Store>,
+    contig: &str,
+    starts: PyReadonlyArray1<u32>,
+    ends: PyReadonlyArray1<u32>,
+    sample_idx: PyReadonlyArray1<i64>,
+) -> PyResult<(
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+)> {
+    require_contiguous_1d(&starts, "starts")?;
+    require_contiguous_1d(&ends, "ends")?;
+
+    let starts_a = starts.as_array();
+    let ends_a = ends.as_array();
+    let regions_v: Vec<(u32, u32)> = starts_a
+        .iter()
+        .zip(ends_a.iter())
+        .map(|(&s, &e)| (s, e))
+        .collect();
+    let samples_v: Vec<usize> = sample_idx.as_array().iter().map(|&s| s as usize).collect();
+
+    let store_ref: &crate::svar2::store::Svar2Store = &store;
+
+    let result = py.detach(
+        move || -> anyhow::Result<(Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>)> {
+            let reader = store_ref
+                .reader(contig)
+                .ok_or_else(|| anyhow::anyhow!("no reader for contig {contig}"))?;
+            let rb = genoray_core::query::find_ranges(reader, &regions_v, Some(&samples_v));
+            let flat = |v: &[std::ops::Range<usize>]| -> Vec<i64> {
+                let mut out = Vec::with_capacity(v.len() * 2);
+                for r in v {
+                    out.push(r.start as i64);
+                    out.push(r.end as i64);
+                }
+                out
+            };
+            Ok((
+                flat(&rb.vk_snp_range),
+                flat(&rb.vk_indel_range),
+                flat(&rb.dense_snp_range),
+                flat(&rb.dense_indel_range),
+                rb.sample_cols.iter().map(|&c| c as i64).collect(),
+            ))
+        },
+    );
+
+    let (vk_snp, vk_indel, dense_snp, dense_indel, sample_cols) =
+        result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok((
+        Array1::from_vec(vk_snp).into_pyarray(py),
+        Array1::from_vec(vk_indel).into_pyarray(py),
+        Array1::from_vec(dense_snp).into_pyarray(py),
+        Array1::from_vec(dense_indel).into_pyarray(py),
+        Array1::from_vec(sample_cols).into_pyarray(py),
+    ))
+}
+
 /// Read-through prefetch: fault the EXACT pages a later `generate_batch` call will
 /// read, warming the shared OS page cache (and triggering kernel readahead of
 /// subsequent pages that overlaps with the caller's own CPU work). `o_starts`/
