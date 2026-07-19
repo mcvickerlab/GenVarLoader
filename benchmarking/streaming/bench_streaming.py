@@ -57,6 +57,17 @@ VCF's number in the same run (VCF re-decodes only what a window's tabix
 query returns, independent of window count). Follow-up: narrow `var_start`
 with `max_v_len` padding (see the module doc).
 
+COMPARE-DATASET (optional, `--compare-dataset`)
+-------------------------------------------------
+`gvl.write` rejects symbolic/breakend variants that `StreamingDataset` reads
+without complaint, and the bench fixture's `germline-1kgp` profile emits
+symbolic SVs. So `--compare-dataset` runs ALL drivers (engine, sync, AND the
+written-Dataset sweep) on a bcftools/plink2-filtered, symbolic-SV-free
+variant set for the whole `bench_one` invocation -- the numbers under
+`--compare-dataset` are on this common denominator, not the raw fixture, and
+the `bytes_emitted` cross-check at the end of `bench_one` is only meaningful
+because every driver saw the same input.
+
 COLD CACHE (optional, `--cold`)
 ---------------------------------
 Like `cold_cache_overlap.py`: unprivileged, so "cold" means "never-faulted by
@@ -185,10 +196,10 @@ def _filtered_variants_for_dataset(kind: str, fixture_dir: Path, n: int) -> Path
     `germline-1kgp` profile emits symbolic SVs (`<DEL>`/`<INS>`), so a raw
     `gvl.write` call on the bench fixture raises `ValueError`. Derive a
     filtered variant source ONCE (cached under `fixture_dir`, like
-    `_build_reference`) and use it for BOTH the StreamingDataset and the
-    written Dataset in the `--compare-dataset` arm, so the two sweeps see the
-    IDENTICAL variant set -- byte-identical parity requires the same input,
-    not just the same (region, sample) cells."""
+    `_build_reference`) and use it for EVERY driver in the `--compare-dataset`
+    arm -- engine, sync, AND dataset -- so all sweeps see the IDENTICAL
+    variant set -- byte-identical parity (and the `bytes_emitted` cross-check)
+    requires the same input, not just the same (region, sample) cells."""
     filt_bcf = fixture_dir / f"bench_{n}.filtered.bcf"
     if not filt_bcf.exists():
         src_bcf = fixture_dir / f"bench_{n}.bcf"
@@ -459,6 +470,24 @@ def bench_one(
 ) -> None:
     print(f"\n{'=' * 70}\n{kind.upper()} backend, N={n} samples\n{'=' * 70}")
 
+    # `--compare-dataset` needs EVERY driver (engine, sync, AND dataset) to
+    # consume the identical variant set, or the final bytes_emitted
+    # cross-check compares a filtered-input driver against unfiltered-input
+    # drivers -- a fairness violation that either spuriously raises or masks
+    # a genuine divergence depending on whether symbolic SVs happen to land
+    # in the sampled windows. Compute the filtered set ONCE, up front, before
+    # any driver runs, and substitute it into every driver's fixture below.
+    filtered_variants: Path | None = None
+    if compare_dataset:
+        filtered_variants = _filtered_variants_for_dataset(kind, fixture_dir, n)
+        print(
+            f"[compare-dataset] engine, sync, AND dataset will all read the "
+            f"symbolic-SV-filtered variant set ({filtered_variants.name}) -- "
+            "gvl.write rejects symbolic/breakend variants that StreamingDataset "
+            "reads without complaint, so this is the common denominator that "
+            "keeps the bytes_emitted cross-check apples-to-apples."
+        )
+
     timings: dict[str, list[float]] = {s: [] for s in strategies}
     last_result: dict[str, RunResult] = {}
     for rep in range(repeats):
@@ -466,6 +495,8 @@ def bench_one(
             fp = _prepare_fixture(
                 kind, n, fixture_dir, n_regions, region_len, ref_seed, cold
             )
+            if filtered_variants is not None:
+                fp = replace(fp, variants=filtered_variants)
             try:
                 sds = gvl.StreamingDataset(
                     fp.bed, reference=fp.reference, variants=fp.variants
@@ -493,18 +524,12 @@ def bench_one(
             )
 
     if compare_dataset:
+        assert filtered_variants is not None
         fp = _prepare_fixture(
             kind, n, fixture_dir, n_regions, region_len, ref_seed, cold
         )
+        fp_ds = replace(fp, variants=filtered_variants)
         try:
-            # gvl.write requires bi-allelic/non-symbolic/non-breakend variants;
-            # the bench fixture's germline-1kgp profile has symbolic SVs. Swap
-            # in a filtered variant source for BOTH the StreamingDataset and
-            # the written Dataset so the two sweeps stay byte-identical (see
-            # _filtered_variants_for_dataset).
-            fp_ds = replace(
-                fp, variants=_filtered_variants_for_dataset(kind, fixture_dir, n)
-            )
             sds = gvl.StreamingDataset(
                 fp_ds.bed, reference=fp_ds.reference, variants=fp_ds.variants
             ).with_seqs("haplotypes")
@@ -615,8 +640,11 @@ def main() -> None:
         help="also write a gvl.Dataset once (write time + on-disk size reported "
         "SEPARATELY as preprocessing cost) and time a full region-major "
         "Dataset[r,s] sweep over the identical (region, sample) cells, for a "
-        "streaming-vs-written throughput comparison (byte-identical, so bytes_emitted "
-        "is cross-checked equal across drivers)",
+        "streaming-vs-written throughput comparison. gvl.write rejects symbolic/"
+        "breakend variants, so in this mode ALL drivers (engine, sync, dataset) "
+        "read a bcftools/plink2-filtered variant set (bi-allelic snps/indels "
+        "only) instead of the raw fixture, keeping the bytes_emitted cross-check "
+        "apples-to-apples",
     )
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument(
