@@ -959,8 +959,9 @@ mod tests {
         };
         let mut slot = DecodedWindow::default();
         filler.fill(&job, &contig, &mut slot).unwrap();
-        // The two_var fixture has one contig with 2 variants; coarse var_start decodes
-        // the whole contig range [0, 2) = 2 variants.
+        // The two_var fixture has one contig with 2 variants; a whole-contig-covering
+        // window still decodes all of them even under Task 4's narrowing — [0, 100)
+        // spans both variants' extents, so var_start/var_end narrow to the same [0, 2).
         assert_eq!(variants_decoded(), 2);
     }
 
@@ -1017,6 +1018,63 @@ mod tests {
             narrow_decoded < wide_decoded,
             "narrow window decoded {narrow_decoded}, whole-contig {wide_decoded} — \
              var_start/var_end were not narrowed"
+        );
+    }
+
+    /// POSITIVE pad-coverage regression: the one scenario where the `max_ref_len` pad in
+    /// `fill`'s `var_start` computation is load-bearing — a window whose `win_start` lands
+    /// strictly INSIDE a spanning deletion's extent, but AFTER the deletion's own POS, so
+    /// the deletion would be silently dropped without the pad.
+    ///
+    /// `vcf_snp_ins_del_multi`'s variants (0-based POS): SNP@29, INS@69, DEL `GTAC>G`@109
+    /// (ref_len=4, extent `[109, 113)`), SNP@149, SNP@149. The contig's `max_ref_len` (the
+    /// pad) is therefore 4.
+    ///
+    /// Window `regions: [(111, 200)]` has `win_start = 111`: strictly inside the DEL's
+    /// extent `[109, 113)` but after its POS 109, so `OverlapMode::Variant` must still see
+    /// it once decoded. Tracing `fill`'s narrowing:
+    /// - `lo_pos = win_start.saturating_sub(pad) = 111 - 4 = 107`
+    /// - `start_local = pos.partition_point(|&p| p < 107)`: POS array is
+    ///   `[29, 69, 109, 149, 149]`; only 29 and 69 are `< 107`, so `start_local = 2` — the
+    ///   DEL@109 is INCLUDED.
+    /// - `end_local = pos.partition_point(|&p| p < 200) = 5` (all five POS are `< 200`).
+    /// - Narrowed range is `[2, 5)` = 3 variants: DEL@109 + the two SNPs@149.
+    ///
+    /// So `variants_decoded()` must be 3. WITHOUT the pad (i.e. `lo_pos = win_start = 111`
+    /// directly), `partition_point(|&p| p < 111)` would see `109 < 111` as true too, giving
+    /// `start_local = 3` and silently dropping the DEL — `variants_decoded()` would be 2
+    /// instead. This test therefore fails (2, not 3) if the pad is ever dropped or
+    /// mis-computed, which is exactly the under-inclusion correctness bug the module doc's
+    /// "Narrowed `var_start`/`var_end`" section warns about.
+    #[test]
+    fn pad_retains_deletion_spanning_into_window() {
+        let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let pgen = snp_ins_del_multi_pgen_fixture_path();
+        let filler = PgenWindowFiller::new(&pgen, &["s1", "s2"]).unwrap();
+        let contig = ContigRef {
+            name: "chr1".into(),
+            ref_bytes: vec![b'A'; 250],
+        };
+
+        variants_decoded_reset();
+        let job = RecordJob {
+            contig_idx: 0,
+            regions: vec![(111, 200)],
+            s_lo: 0,
+            s_hi: 2,
+        };
+        let mut slot = DecodedWindow::default();
+        filler.fill(&job, &contig, &mut slot).unwrap();
+
+        assert_eq!(
+            variants_decoded(),
+            3,
+            "win_start=111 is inside the DEL@109's extent [109,113); the pad \
+             (max_ref_len=4) must pull lo_pos back to 107 so start_local=2 retains the \
+             DEL — a decoded count of 2 here means the pad was dropped and the spanning \
+             deletion was silently excluded"
         );
     }
 }
